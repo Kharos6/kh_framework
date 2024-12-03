@@ -1,0 +1,35 @@
+name = "KH Framework"
+mainprefix = "x"
+prefix = "kh"
+author = "Kharos"
+
+[version]
+major = 1
+minor = 2
+patch = 3
+git_hash = 0
+
+[hemtt.build]
+optional_mod_folders = false
+
+[hemtt.release]
+archive = true
+
+[lints.sqf.command_case]
+severity = "Warning"
+
+[lints.sqf.banned_commands]
+options.ignore = [
+    "addPublicVariableEventHandler"
+]
+
+[lints.sqf.var_all_caps]
+enabled = false
+
+[hemtt.launch.default]
+workshop = [
+    "450814997",
+    "463939057",
+    "1779063631"
+]
+executable = "arma3_x64"

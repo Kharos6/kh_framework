@@ -1,0 +1,46 @@
+params ["_unit"];
+private _type = typeOf _unit;
+private _group = group _unit;
+private _side = side (group _unit);
+private _variableName = vehicleVarName _unit;
+private _name = name _unit;
+private _face = face _unit;
+private _speaker = speaker _unit;
+private _loadout = getUnitLoadout _unit;
+private _position = getPosATL _unit;
+private _rotation = [_unit] call KH_fnc_getRotation;
+private _vehicle = objectParent _unit;
+private _combatMode = combatBehaviour _group;
+private _skill = skill _unit;
+private _aimingAccuracy = _unit skill "aimingAccuracy";
+private _aimingShake = _unit skill "aimingShake";
+private _aimingSpeed = _unit skill "aimingSpeed";
+private _spotDistance = _unit skill "spotDistance";
+private _spotTime = _unit skill "spotTime";
+private _courage = _unit skill "courage";
+private _reloadSpeed = _unit skill "reloadSpeed";
+private _commanding = _unit skill "commanding";
+private _general = _unit skill "general";
+private _featureAutoTarget = _unit checkAIFeature "AUTOTARGET";
+private _featureMove = _unit checkAIFeature "MOVE";
+private _featureTarget = _unit checkAIFeature "TARGET";
+private _featureTeamSwitch = _unit checkAIFeature "TEAMSWITCH";
+private _featureWeaponAim = _unit checkAIFeature "WEAPONAIM";
+private _featureAnim = _unit checkAIFeature "ANIM";
+private _featureFsm = _unit checkAIFeature "FSM";
+private _featureAimingError = _unit checkAIFeature "AIMINGERROR";
+private _featureSuppression = _unit checkAIFeature "SUPPRESSION";
+private _featureCheckVisible = _unit checkAIFeature "CHECKVISIBLE";
+private _featureAutoCombat = _unit checkAIFeature "AUTOCOMBAT";
+private _featureCover = _unit checkAIFeature "COVER";
+private _featurePath = _unit checkAIFeature "PATH";
+private _featureMineDetection = _unit checkAIFeature "MINEDETECTION";
+private _featureLights = _unit checkAIFeature "LIGHTS";
+private _featureNvg = _unit checkAIFeature "NVG";
+private _featureRadioProtocol = _unit checkAIFeature "RADIOPROTOCOL";
+private _featureFireWeapon = _unit checkAIFeature "FIREWEAPON";
+private _unitTraits = getAllUnitTraits _unit;
+[_type, _group, _side, _variableName, _name, _face, _speaker, _loadout, _position, _rotation, _vehicle, _combatMode, _skill, 
+[_aimingAccuracy, _aimingShake, _aimingSpeed, _spotDistance, _spotTime, _courage, _reloadSpeed, _commanding, _general], 
+[_featureAutoTarget, _featureMove, _featureTarget, _featureTeamSwitch, _featureWeaponAim, _featureAnim, _featureFsm, _featureAimingError, 
+_featureSuppression, _featureCheckVisible, _featureAutoCombat, _featureCover, _featurePath, _featureMineDetection, _featureLights, _featureNvg, _featureRadioProtocol, _featureFireWeapon], _unitTraits];

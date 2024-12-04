@@ -132,7 +132,7 @@
 									};
 								} forEach allUsers;
 								
-								if ((((count KH_var_allPlayerUnits) == _initialPlayerCount)) || (CBA_missionTime > 60)) then {
+								if ((((count KH_var_allPlayerUnits) == _initialPlayerCount)) || (CBA_missionTime > 60) || !isMultiplayer) then {
 									KH_var_initialPlayerUnits = KH_var_allPlayerUnits;
 									publicVariable "KH_var_initialPlayerUnits";
 									KH_var_playersInitialized = true;

@@ -28,6 +28,7 @@ class CfgFunctions
 			class equipableObject {};
 			class execute {};
 			class fixUnconsciousAnimations {};
+			class fultonExtract {};
 			class generateSymbols {};
 			class getClients {};
 			class getDestinationTime {};

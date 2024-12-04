@@ -8,7 +8,7 @@ if (_function isEqualType "") then {
 };
 
 private _expression = [
-	"(missionNamespace getVariable ['", _handlerArguments, "', []]) params ['_args'];
+	"private _args = (missionNamespace getVariable ['", _handlerArguments, "', []]);
 	call ", _function, ";"
 ] joinString "";
 

@@ -37,15 +37,17 @@ params ["_units", "_position", "_rotation", ["_eject", true], ["_transition", 1]
 							(isNull (objectParent _unit));
 						}, 
 						{
+							params ["_unit", "_position", "_rotation"];
+
 							[
 								{
-									params ["_unit", "_heal", "_position", "_rotation"];
+									params ["_unit", "_position", "_rotation"];
 									[_unit, [_position, "ATL", false], [_rotation, false]] call KH_fnc_setTransforms;
 								}, 
-								[_unit, _heal, _position, _rotation]
+								[_unit, _position, _rotation]
 							] call CBA_fnc_execNextFrame;
 						}, 
-						[_unit, _heal, _position, _rotation],
+						[_unit, _position, _rotation],
 						15
 					] call CBA_fnc_waitUntilAndExecute;
 				}
@@ -101,15 +103,17 @@ params ["_units", "_position", "_rotation", ["_eject", true], ["_transition", 1]
 					(isNull (objectParent _unit));
 				}, 
 				{
+					params ["_unit", "_position", "_rotation"];
+					
 					[
 						{
-							params ["_unit", "_heal", "_position", "_rotation"];
+							params ["_unit", "_position", "_rotation"];
 							[_unit, [_position, "ATL", false], [_rotation, false]] call KH_fnc_setTransforms;
 						}, 
-						[_unit, _heal, _position, _rotation]
+						[_unit, _position, _rotation]
 					] call CBA_fnc_execNextFrame;
 				}, 
-				[_unit, _heal, _position, _rotation],
+				[_unit, _position, _rotation],
 				15
 			] call CBA_fnc_waitUntilAndExecute;
 		}

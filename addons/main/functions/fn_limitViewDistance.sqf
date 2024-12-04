@@ -24,7 +24,7 @@ if _state then {
 							};
 						};
 					},
-					0.1, 
+					0, 
 					[]
 				] call CBA_fnc_addPerFrameHandler;
 			},

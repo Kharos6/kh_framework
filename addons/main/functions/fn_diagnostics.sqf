@@ -53,7 +53,7 @@ if _state then {
 			[
 				[], 
 				{
-					addMissionEventhandler [
+					addMissionEventHandler [
 						"Draw3D",
 						{
 							if (KH_var_currentAdmin == clientOwner) then {
@@ -112,7 +112,7 @@ if _state then {
 									deleteMarkerLocal _x;
 								} forEach KH_var_diagnosticsMarkers;
 								
-								removeMissionEventhandler [_thisEvent, _thisEventHandler];
+								removeMissionEventHandler [_thisEvent, _thisEventHandler];
 							};
 						}
 					];

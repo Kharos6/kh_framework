@@ -88,13 +88,17 @@ else {
 	private _localArguments = [_unit, _object, _bone, _position, _rotation, _scale, _mass, _hideInVehicles, _toggleEquip, _exclusive, _event, _objectName];
 	[_event, [_unit, _object, true]] call CBA_fnc_globalEvent;
 
-	[
-		"KH_eve_playerRespawned", 
-		{
-			params ["_unit"];
-			_unit setVariable ["KH_var_carryingObject", false, true];
-		}
-	] call CBA_fnc_addEventHandler;
+	if (isNil "KH_var_equipableObjectRespawnReset") then {
+		KH_var_equipableObjectRespawnReset = true;
+
+		[
+			"KH_eve_playerRespawned", 
+			{
+				params ["_unit"];
+				_unit setVariable ["KH_var_carryingObject", false, true];
+			}
+		] call CBA_fnc_addEventHandler;		
+	};
 	
 	if _exclusive then {
 		_unit setVariable ["KH_var_carryingObject", true, true];

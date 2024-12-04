@@ -203,6 +203,7 @@ class Cfg3DEN
 		#include "\x\kh\addons\main\3den\at_dynamicDisguise.hpp"
 		#include "\x\kh\addons\main\3den\at_environmentAmbiance.hpp"
 		#include "\x\kh\addons\main\3den\at_equipableObject.hpp"
+		#include "\x\kh\addons\main\3den\at_fultonExtract.hpp"
 		#include "\x\kh\addons\main\3den\at_persistentPlayerLoadouts.hpp"
 		#include "\x\kh\addons\main\3den\at_persistentCargoInventories.hpp"
 		#include "\x\kh\addons\main\3den\at_recoverDisconnectedPlayers.hpp"
@@ -1008,16 +1009,16 @@ class Cfg3DEN
 						class KH_LimitViewDistance
 						{
 							displayName = "Limit View Distance";
-							tooltip = "Limits the maximum view distance to the set amount for all players. Will override custom view distance mods as well. Use <-1> for no view distance limit.";
+							tooltip = "Limits the maximum view distance to the set amount for all players. Will override custom view distance mods as well. Leave empty for no view distance limit.";
 							property = "KH_LimitViewDistance";
 							control = "Edit";
 							expression = 
 							"\
-								if ((_value != '-1') && !is3DEN && isServer) then {\
+								if ((_value != '') && !is3DEN && isServer) then {\
 									[true, parseNumber _value] call KH_fnc_limitViewDistance;\
 								};\
 							";
-							defaultValue = "'-1'";
+							defaultValue = "''";
 						};
 					};
 				};
@@ -1134,6 +1135,34 @@ class Cfg3DEN
 							};\
 						";
 						defaultValue = "[false, '', '[0, 0, 0]', '[0, 0, 0]', '1', '1', true, true, true, '', '']";
+					};
+				};
+			};
+			class KH_FultonExtract
+			{
+				displayName = "KH Fulton Extract";
+				collapsed = 1;
+				class Attributes
+				{
+					class KH_FultonExtractSubcategory
+					{
+						description = "Designate this object as a fulton extraction point, allowing players to interact with it in order to summon a balloon that can be picked up by the desired vehicle, after which anchored players will be roped into said vehicle.";
+						data = "AttributeSystemSubcategory";
+						control = "KH_SubcategoryNoHeader3";
+					};
+					class KH_FultonExtract 
+					{
+						property = "KH_FultonExtract";
+						control = "KH_FultonExtract";
+						expression = 
+						"\
+							_value params ['_toggle', '_vehicle', '_height', '_distance', '_maximumParticipants', '_duration', '_objectName'];\
+							if (_toggle && !is3DEN) then {\
+								[_this, missionNamespace getVariable [_vehicle, objNull], _height, parseNumber _distance, parseNumber _maximumParticipants, parseNumber _duration, _objectName] call KH_fnc_fultonExtract;\
+							};\
+						";
+						defaultValue = "[false, '', 100, '20', '10', '20', '', '100m']";
+						condition = "1 - objectControllable";
 					};
 				};
 			};

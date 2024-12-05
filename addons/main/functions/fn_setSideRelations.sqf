@@ -1,4 +1,4 @@
-params ["_side1", "_side2", "_allied"];
+params ["_side1", "_side2", ["_allied", true]];
 private _relationship = 0;
 
 if _allied then {

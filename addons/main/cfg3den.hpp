@@ -1158,7 +1158,14 @@ class Cfg3DEN
 						"\
 							_value params ['_toggle', '_vehicle', '_height', '_distance', '_maximumParticipants', '_duration', '_objectName'];\
 							if (_toggle && !is3DEN) then {\
-								[_this, missionNamespace getVariable [_vehicle, objNull], _height, parseNumber _distance, parseNumber _maximumParticipants, parseNumber _duration, _objectName] call KH_fnc_fultonExtract;\
+								[\
+									{\
+										(CBA_missionTime > 0);\
+									},\
+										call KH_fnc_fultonExtract;\
+									},\
+									[_this, missionNamespace getVariable [_vehicle, objNull], _height, parseNumber _distance, parseNumber _maximumParticipants, parseNumber _duration, _objectName]\
+								] call CBA_fnc_waitUntilAndExecute;\
 							};\
 						";
 						defaultValue = "[false, '', 100, '20', '10', '20', '', '100m']";

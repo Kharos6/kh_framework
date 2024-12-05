@@ -1,4 +1,4 @@
-params ["_state", "_group", "_loadout", "_transforms", "_vehicle"];
+params [["_state", true], ["_group", true], ["_loadout", true], ["_transforms", true], ["_vehicle", true]];
 
 KH_var_recoverDisconnectedPlayersGroup = _group;
 KH_var_recoverDisconnectedPlayersLoadout = _loadout;

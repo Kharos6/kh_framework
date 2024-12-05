@@ -1,4 +1,4 @@
-params ["_input", ["_stop", true]];
+params [["_input", userInputDisabled], ["_stop", true]];
 		
 if _input then {
 	if userInputDisabled then {

@@ -1,4 +1,4 @@
-params ["_state"];
+params [["_state", true]];
 
 if _state then {
     KH_var_fixUnconsciousAnimationsState = true;

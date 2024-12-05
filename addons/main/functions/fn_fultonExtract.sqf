@@ -1,4 +1,4 @@
-params ["_object", "_vehicle", ["_height", 100], ["_distance", 20], ["_maximumParticipants", 10], ["_duration", 20], ["_objectName", ""]];
+params ["_object", "_vehicle", "_height", "_distance", "_maximumParticipants", "_duration", ["_objectName", ""]];
 _height = _height min 100;
 private _fultonEvent = format ["KH_eve_%1", [0, 36, "ALPHANUMERIC"] call KH_fnc_generateSymbols];
 private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_fnc_atomicVariable;
@@ -363,3 +363,5 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 		] call CBA_fnc_waitAndExecute;
 	}
 ] call KH_fnc_addEventHandler;
+
+true;

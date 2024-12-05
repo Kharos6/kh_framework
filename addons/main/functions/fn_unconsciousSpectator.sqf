@@ -1,4 +1,4 @@
-params ["_state", ["_ace", true], ["_freeCamera", false], ["_playerCamera", true], ["_delay", 30]];
+params [["_state", true], ["_ace", true], ["_freeCamera", false], ["_playerCamera", true], ["_delay", 30]];
 KH_var_unconsciousSpectatorAce = _ace;
 publicVariable "KH_var_unconsciousSpectatorAce";
 

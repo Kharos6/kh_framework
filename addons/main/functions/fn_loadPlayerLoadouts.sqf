@@ -1,4 +1,4 @@
-params ["_loadouts", ["_respawnType", "NONE"]];
+params ["_loadouts", ["_respawnType", "INITIAL"]];
 
 KH_var_respawnLoadoutType = _respawnType;
 

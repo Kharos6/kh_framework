@@ -1,4 +1,4 @@
-params ["_entity", "_variableName", "_initialization", "_invert"];
+params ["_entity", "_variableName", ["_initialization", {}], ["_invert", false]];
 
 if (isNil "KH_var_conditionalPresenceVariables") then {
 	KH_var_conditionalPresenceVariables = [];

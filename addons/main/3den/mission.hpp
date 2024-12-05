@@ -509,87 +509,51 @@ class Mission
 					};
 				};
 			};
-			class KH_PersistentCargoInventories
+			class KH_Persistency
 			{
-				displayName = "KH Persistent Cargo Inventories";
+				displayName = "KH Persistency";
 				collapsed = 1;
 				class Attributes
 				{
-					class KH_PersistentCargoInventoriesSubcategory
+					class KH_PersistencySubcategory
 					{
-						description = "Maintain persistent cargo inventories using an identifier saved in <missionProfileNamespace>. They are assigned and saved based on object variable names, saved and loaded only if the object has a variable name and a valid assigned inventory. Saved when <KH_fnc_endMission> is executed.";
+						description = "Maintain persistency using an identifier saved in <missionProfileNamespace>. States are saved when <KH_fnc_endMission> is executed, and loaded when valid states are available.";
 						data = "AttributeSystemSubcategory";
-						control = "KH_SubcategoryNoHeader3";
+						control = "KH_SubcategoryNoHeader2";
 					};
-					class KH_PersistentCargoInventories 
+					class KH_Persistency 
 					{
-						property = "KH_PersistentCargoInventories";
-						control = "KH_PersistentCargoInventories";
+						property = "KH_Persistency";
+						control = "KH_Persistency";
 						expression = 
 						"\
-							_value params ['_toggle', '_identifier'];\
+							_value params ['_toggle', '_identifier', '_players', '_playerRespawnType', '_objects', '_world', '_variables'];\
 							if (_toggle && !is3DEN && isServer && (_identifier != '')) then {\
-								[_identifier] call KH_fnc_loadCargoInventories;\
+								private _parsedVariables = parseSimpleArray _variables;\
+								if (_world || (_variables isNotEqualTo [])) then {\
+									[_identifier, _world, _parsedVariables] call KH_fnc_loadMissionState;\
+								};\
+								if _players then {\
+									[_identifier, _playerRespawnType] call KH_fnc_loadPlayerLoadouts;\
+								};\
+								if _objects then {\
+									[_identifier] call KH_fnc_loadCargoInventories;\
+								};\
 								[\
 									['CBA'],\
 									'KH_eve_missionEnded',\
-									[_identifier],\
+									[_identifier, _players, _objects, _world, _parsedVariables],\
 									{\
-										_args params ['_identifier'];\
+										_args params ['_identifier', '_players', '_objects', '_world', '_parsedVariables'];\
+										[_identifier, _parsedVariables] call KH_fnc_saveMissionState;\
+										[_identifier, KH_var_allPlayerUnits] call KH_fnc_savePlayerLoadouts;\
 										[_identifier, entities [[], ['Man', 'Logic', 'Animal'], false, false]] call KH_fnc_saveCargoInventories;\
 										[_thisType, _thisId] call CBA_fnc_removeEventHandler;\
 									}\
 								] call KH_fnc_addEventHandler;\
 							};\
 						";
-						defaultValue = "[false, profileName]";
-					};
-				};
-			};
-			class KH_PersistentPlayerLoadouts
-			{
-				displayName = "KH Persistent Player Loadouts";
-				collapsed = 1;
-				class Attributes
-				{
-					class KH_PersistentPlayerLoadoutsSubcategory
-					{
-						description = "Maintain persistent player loadouts using an identifier saved in <missionProfileNamespace>. They are assigned based on player Steam IDs, and loaded if that player has a valid assigned loadout. Saved when <KH_fnc_endMission> is executed.";
-						data = "AttributeSystemSubcategory";
-						control = "KH_SubcategoryNoHeader3";
-					};
-					class KH_PersistentPlayerLoadouts 
-					{
-						property = "KH_PersistentPlayerLoadouts";
-						control = "KH_PersistentPlayerLoadouts";
-						expression = 
-						"\
-							_value params ['_toggle', '_identifier', '_respawnType'];\
-							if (_toggle && !is3DEN && isServer && (_identifier != '')) then {\
-								private _respawn = 'NONE';\
-								switch true do {\
-									case (_respawnType == 1): {\
-										_respawn = 'SAVED'\
-									};\
-									case (_respawnType == 2): {\
-										_respawn = 'INITIAL'\
-									};\
-								};\
-								[_identifier, _respawn] call KH_fnc_loadPlayerLoadouts;\
-								[\
-									['CBA'],\
-									'KH_eve_missionEnded',\
-									[_identifier],\
-									{\
-										_args params ['_identifier'];\
-										[_identifier, KH_var_allPlayerUnits] call KH_fnc_savePlayerLoadouts;\
-										[_thisType, _thisId] call CBA_fnc_removeEventHandler;\
-									},\
-									[_identifier]\
-								] call KH_fnc_addEventHandler;\
-							};\
-						";
-						defaultValue = "[false, profileName, 2]";
+						defaultValue = "[false, profileName, true, 2, true, true, '[]']";
 					};
 				};
 			};

@@ -27,22 +27,29 @@ if (isNil "KH_var_curatorsSet") then {
 					}, 
 					{
 						params ["_player", "_module"];
-						_player assignCurator _module;
 
-						if KH_var_curatorsHidden then {
-							_player hideObjectGlobal true;
-						};
+						[
+							{
+								params ["_player", "_module"];
+								_player assignCurator _module;
 
-						if KH_var_curatorDamageDisabled then {
-							[
-								[],
-								{
-									player allowDamage false;
-								},
-								_player,
-								"THIS_FRAME"
-							] call KH_fnc_execute;
-						};
+								if KH_var_curatorsHidden then {
+									_player hideObjectGlobal true;
+								};
+
+								if KH_var_curatorDamageDisabled then {
+									[
+										[],
+										{
+											player allowDamage false;
+										},
+										_player,
+										"THIS_FRAME"
+									] call KH_fnc_execute;
+								};
+							}, 
+							[_player, _module]
+						] call CBA_fnc_execNextFrame;
 					}, 
 					[_x, _module],
 					30
@@ -77,22 +84,29 @@ if (isNil "KH_var_curatorsSet") then {
 							}, 
 							{
 								params ["_player", "_module"];
-								_player assignCurator _module;
 
-								if KH_var_curatorsHidden then {
-									_player hideObjectGlobal true;
-								};
+								[
+									{
+										params ["_player", "_module"];
+										_player assignCurator _module;
 
-								if KH_var_curatorDamageDisabled then {
-									[
-										[],
-										{
-											player allowDamage false;
-										},
-										_player,
-										"THIS_FRAME"
-									] call KH_fnc_execute;
-								};
+										if KH_var_curatorsHidden then {
+											_player hideObjectGlobal true;
+										};
+
+										if KH_var_curatorDamageDisabled then {
+											[
+												[],
+												{
+													player allowDamage false;
+												},
+												_player,
+												"THIS_FRAME"
+											] call KH_fnc_execute;
+										};
+									}, 
+									[_player, _module]
+								] call CBA_fnc_execNextFrame;
 							}, 
 							[_player, _module],
 							30

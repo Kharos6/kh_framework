@@ -1,4 +1,4 @@
-params ["_units", "_position", "_rotation", ["_eject", true], ["_transition", 1], ["_heal", false], ["_freefallHeight", -1]];
+params ["_units", "_position", "_rotation", ["_eject", true], ["_transition", 1], ["_heal", false], ["_freefallHeight", -1], ["_initialization", {}]];
 
 {
 	if (_freefallHeight != 0) then {
@@ -27,7 +27,8 @@ params ["_units", "_position", "_rotation", ["_eject", true], ["_transition", 1]
 
 		[
 			{
-				params ["_unit", "_heal", "_position", "_rotation", "_eject"];
+				params ["_unit", "_heal", "_position", "_rotation", "_eject", "_initialization"];
+
 				if _eject then {
 					moveOut _x;
 
@@ -37,22 +38,24 @@ params ["_units", "_position", "_rotation", ["_eject", true], ["_transition", 1]
 							(isNull (objectParent _unit));
 						}, 
 						{
-							params ["_unit", "_position", "_rotation"];
+							params ["_unit", "_position", "_rotation", "_initialization"];
 
 							[
 								{
-									params ["_unit", "_position", "_rotation"];
+									params ["_unit", "_position", "_rotation", "_initialization"];
 									[_unit, [_position, "ATL", false], [_rotation, false]] call KH_fnc_setTransforms;
+									[_unit] call _initialization;
 								}, 
-								[_unit, _position, _rotation]
+								[_unit, _position, _rotation, _initialization]
 							] call CBA_fnc_execNextFrame;
 						}, 
-						[_unit, _position, _rotation],
+						[_unit, _position, _rotation, _initialization],
 						15
 					] call CBA_fnc_waitUntilAndExecute;
 				}
 				else {
 					[_unit, [_position, "ATL", false], [_rotation, false]] call KH_fnc_setTransforms;
+					[_unit] call _initialization;
 				};
 				
 				if (isPlayer _unit) then {
@@ -89,7 +92,7 @@ params ["_units", "_position", "_rotation", ["_eject", true], ["_transition", 1]
 					] call KH_fnc_execute;
 				};
 			},
-			[_x, _heal, _position, _rotation, _eject],
+			[_x, _heal, _position, _rotation, _eject, _initialization],
 			_transition
 		] call CBA_fnc_waitAndExecute;
 	}
@@ -103,22 +106,24 @@ params ["_units", "_position", "_rotation", ["_eject", true], ["_transition", 1]
 					(isNull (objectParent _unit));
 				}, 
 				{
-					params ["_unit", "_position", "_rotation"];
+					params ["_unit", "_position", "_rotation", "_initialization"];
 					
 					[
 						{
-							params ["_unit", "_position", "_rotation"];
+							params ["_unit", "_position", "_rotation", "_initialization"];
 							[_unit, [_position, "ATL", false], [_rotation, false]] call KH_fnc_setTransforms;
+							[_unit] call _initialization;
 						}, 
 						[_unit, _position, _rotation]
 					] call CBA_fnc_execNextFrame;
 				}, 
-				[_unit, _position, _rotation],
+				[_unit, _position, _rotation, _initialization],
 				15
 			] call CBA_fnc_waitUntilAndExecute;
 		}
 		else {
 			[_unit, [_position, "ATL", false], [_rotation, false]] call KH_fnc_setTransforms;
+			[_unit] call _initialization;
 		};
 		
 		if _heal then {

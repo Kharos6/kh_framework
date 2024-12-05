@@ -22,7 +22,7 @@ class KH_TransferToHeadlessClient: Title
 		class KH_HeadlessClientTitle: Title
 		{
 			text = "Headless Client";
-			tooltip = "Headless client to which this entity will be transferred.";
+			tooltip = "Variable name of the headless client to which this entity will be transferred.";
 			y = QUOTE(2 * CTRL_DEFAULT_H + 5 * CTRL_DEFAULT_Y);
 		};
 		class KH_HeadlessClient: ctrlEdit

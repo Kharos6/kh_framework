@@ -22,7 +22,7 @@ class KH_SetCameraTexture: Title
 		class KH_PositionEntityTitle: Title
 		{
 			text = "Position Entity";
-			tooltip = "Entity to which the camera will be attached.";
+			tooltip = "Variable name of the entity to which the camera will be attached.";
 			y = QUOTE(2 * CTRL_DEFAULT_H + 5 * CTRL_DEFAULT_Y);
 		};
 		class KH_PositionEntity: ctrlEdit
@@ -36,7 +36,7 @@ class KH_SetCameraTexture: Title
 		class KH_TargetEntityTitle: Title
 		{
 			text = "Target Entity";
-			tooltip = "Entity which the camera will look at.";
+			tooltip = "Variable name of the entity which the camera will look at.";
 			y = QUOTE(3 * CTRL_DEFAULT_H + 10 * CTRL_DEFAULT_Y);
 		};
 		class KH_TargetEntity: ctrlEdit
@@ -50,7 +50,7 @@ class KH_SetCameraTexture: Title
 		class KH_TextureTitle: Title
 		{
 			text = "Texture";
-			tooltip = "Texture to which the camera view will be applied.";
+			tooltip = "Texture index to which the camera view will be applied.";
 			y = QUOTE(4 * CTRL_DEFAULT_H + 15 * CTRL_DEFAULT_Y);
 		};
 		class KH_Texture: ctrlEdit

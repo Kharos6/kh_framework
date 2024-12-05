@@ -36,7 +36,7 @@ class KH_CameraSequence: Title
 		class KH_TargetEntitiesTitle: Title
 		{
 			text = "Target Entities";
-			tooltip = "Array of variable names of entities that the camera will track.";
+			tooltip = "Array of strings of variable names of entities that the camera will track.";
 			y = QUOTE(3 * CTRL_DEFAULT_H + 10 * CTRL_DEFAULT_Y);
 		};
 		class KH_TargetEntities: ctrlEdit

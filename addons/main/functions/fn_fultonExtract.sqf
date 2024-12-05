@@ -125,8 +125,8 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 				private _detachAction = [
 					_participant,
 					format ["Detach Self From Fulton %1", _objectName],
-					"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_loadVehicle_ca.paa",
-					"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_loadVehicle_ca.paa",
+					"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_unloadVehicle_ca.paa",
+					"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_unloadVehicle_ca.paa",
 					"(_this getVariable ['KH_var_fultonAttached', false])",
 					"(_caller getVariable ['KH_var_fultonAttached', false])",
 					{},
@@ -223,8 +223,8 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 								[
 									_x,
 									format ["Detach %1 From Fulton %2", name _x, _objectName],
-									"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_loadVehicle_ca.paa",
-									"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_loadVehicle_ca.paa",
+									"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_unloadVehicle_ca.paa",
+									"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_unloadVehicle_ca.paa",
 									"((_target getVariable ['KH_var_fultonAttached', false]) && (_target isNotEqualTo _this) && ((_this distance _target) < 4) && (alive _target))",
 									"((_target getVariable ['KH_var_fultonAttached', false]) && (_target isNotEqualTo _caller) && ((_caller distance _target) < 4) && (alive _target))",
 									{},

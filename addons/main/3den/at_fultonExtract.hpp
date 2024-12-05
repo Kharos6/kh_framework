@@ -22,7 +22,7 @@ class KH_FultonExtract: Title
 		class KH_VehicleTitle: Title
 		{
 			text = "Vehicle";
-			tooltip = "Vehicle designated as the fulton extraction vehicle.";
+			tooltip = "Variable name of the vehicle designated as the fulton extraction vehicle.";
 			y = QUOTE(2 * CTRL_DEFAULT_H + 5 * CTRL_DEFAULT_Y);
 		};
 		class KH_Vehicle: ctrlEdit

@@ -22,7 +22,7 @@ class KH_CaptureVehicleSequence: Title
 		class KH_VehicleTitle: Title
 		{
 			text = "Vehicle";
-			tooltip = "Vehicle that will be captured.";
+			tooltip = "Variable name of the vehicle that will be captured.";
 			y = QUOTE(2 * CTRL_DEFAULT_H + 5 * CTRL_DEFAULT_Y);
 		};
 		class KH_Vehicle: ctrlEdit

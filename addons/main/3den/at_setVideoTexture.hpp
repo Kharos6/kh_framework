@@ -1,4 +1,4 @@
-class KH_SetCurators: Title
+class KH_SetVideoTexture: Title
 {
 	attributeLoad = "[_this, _value] call KH_fnc_loadControlAttributes;";
 	attributeSave = "[_this] call KH_fnc_saveControlAttributes;";
@@ -19,13 +19,13 @@ class KH_SetCurators: Title
 			w = QUOTE(5 * GRID_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
-		class KH_CuratorsTitle: Title
+		class KH_VideoTitle: Title
 		{
-			text = "Curators";
-			tooltip = "Array of strings of Steam IDs whose owners will be set as curators of the curator module at the equivalent index in <Curator Modules>.";
+			text = "Video";
+			tooltip = "Path to the video file.";
 			y = QUOTE(2 * CTRL_DEFAULT_H + 5 * CTRL_DEFAULT_Y);
 		};
-		class KH_Curators: ctrlEdit
+		class KH_Video: ctrlEdit
 		{
 			idc = 101;
 			x = QUOTE(CTRL_DEFAULT_X);
@@ -33,13 +33,13 @@ class KH_SetCurators: Title
 			w = QUOTE(CTRL_DEFAULT_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
-		class KH_CuratorModulesTitle: Title
+		class KH_TextureTitle: Title
 		{
-			text = "Curator Modules";
-			tooltip = "Array of strings of variable names of curator modules that will be assigned to the owners of Steam IDs in <Curators>.";
+			text = "Texture";
+			tooltip = "Texture index to which the video will be applied.";
 			y = QUOTE(3 * CTRL_DEFAULT_H + 10 * CTRL_DEFAULT_Y);
 		};
-		class KH_CuratorModules: ctrlEdit
+		class KH_Texture: ctrlEdit
 		{
 			idc = 102;
 			x = QUOTE(CTRL_DEFAULT_X);
@@ -47,32 +47,32 @@ class KH_SetCurators: Title
 			w = QUOTE(CTRL_DEFAULT_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
-		class KH_HideTitle: Title
+		class KH_AudioTitle: Title
 		{
-			text = "Hide";
-			tooltip = "<true> hides all curators.";
+			text = "Audio";
+			tooltip = "Class name of audio to play alongside the video. Leave empty for no audio.";
 			y = QUOTE(4 * CTRL_DEFAULT_H + 15 * CTRL_DEFAULT_Y);
 		};
-		class KH_Hide: ctrlCheckbox
+		class KH_Audio: ctrlEdit
 		{
 			idc = 103;
 			x = QUOTE(CTRL_DEFAULT_X);
 			y = QUOTE(4 * CTRL_DEFAULT_H + 15 * CTRL_DEFAULT_Y);
-			w = QUOTE(5 * GRID_W);
+			w = QUOTE(CTRL_DEFAULT_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
-		class KH_DisableDamageTitle: Title
+		class KH_IntervalTitle: Title
 		{
-			text = "Disable Damage";
-			tooltip = "<true> prevents all curators from receiving damage.";
+			text = "Interval";
+			tooltip = "Interval at which the video and audio will restart.";
 			y = QUOTE(5 * CTRL_DEFAULT_H + 20 * CTRL_DEFAULT_Y);
 		};
-		class KH_DisableDamage: ctrlCheckbox
+		class KH_Interval: ctrlEdit
 		{
 			idc = 104;
 			x = QUOTE(CTRL_DEFAULT_X);
 			y = QUOTE(5 * CTRL_DEFAULT_H + 20 * CTRL_DEFAULT_Y);
-			w = QUOTE(5 * GRID_W);
+			w = QUOTE(CTRL_DEFAULT_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
 	};

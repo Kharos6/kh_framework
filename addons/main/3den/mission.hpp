@@ -366,10 +366,12 @@ class Mission
 									_parsedTargetEntities pushBack (missionNamespace getVariable [_x, objNull]);\
 								} forEach _targetEntities;\
 								[\
+									['CBA'],\
 									'KH_eve_playerLoaded',\
+									[_parsedPositionEntities, _parsedTargetEntities, parseSimpleArray _fovs, parseSimpleArray _commitTimes, parseSimpleArray _durations, parseSimpleArray _visionTypes, _cinematicBorders, _disableUserInput, _jip],\
 									{\
 										params ['_unit'];\
-										_thisArgs params ['_positionEntities', '_targetEntities', '_fovs', '_commitTimes', '_durations', '_visionTypes', '_cinematicBorders', '_disableUserInput', '_jip'];\
+										_args params ['_positionEntities', '_targetEntities', '_fovs', '_commitTimes', '_durations', '_visionTypes', '_cinematicBorders', '_disableUserInput', '_jip'];\
 										if _jip then {\
 											[[_positionEntities, _targetEntities, _fovs, _commitTimes, _durations, _visionTypes, _cinematicBorders, _disableUserInput], 'KH_fnc_cameraSequence', _unit, 'THIS_FRAME'] call KH_fnc_execute;\
 										}\
@@ -378,9 +380,8 @@ class Mission
 												[[_positionEntities, _targetEntities, _fovs, _commitTimes, _durations, _visionTypes, _cinematicBorders, _disableUserInput], 'KH_fnc_cameraSequence', _unit, 'THIS_FRAME'] call KH_fnc_execute;\
 											};\
 										};\
-									},\
-									[_parsedPositionEntities, _parsedTargetEntities, parseSimpleArray _fovs, parseSimpleArray _commitTimes, parseSimpleArray _durations, parseSimpleArray _visionTypes, _cinematicBorders, _disableUserInput, _jip]\
-								] call CBA_fnc_addEventHandlerArgs;\
+									}\
+								] call KH_fnc_addEventHandler;\
 							};\
 						";
 						defaultValue = "[false, '[]', '[]', '[]', '[]', '[]', '[]', false, false, false]";
@@ -530,13 +531,15 @@ class Mission
 							if (_toggle && !is3DEN && isServer && (_identifier != '')) then {\
 								[_identifier] call KH_fnc_loadCargoInventories;\
 								[\
+									['CBA'],\
 									'KH_eve_missionEnded',\
+									[_identifier],\
 									{\
-										_thisArgs call KH_fnc_saveCargoInventories;\
+										_args params ['_identifier'];\
+										[_identifier, entities [[], ['Man', 'Logic', 'Animal'], false, false]] call KH_fnc_saveCargoInventories;\
 										[_thisType, _thisId] call CBA_fnc_removeEventHandler;\
-									},\
-									[_identifier, (entities [[], ['Man', 'Logic', 'Animal'], false, false])]\
-								] call CBA_fnc_addEventHandlerArgs;\
+									}\
+								] call KH_fnc_addEventHandler;\
 							};\
 						";
 						defaultValue = "[false, profileName]";
@@ -574,13 +577,16 @@ class Mission
 								};\
 								[_identifier, _respawn] call KH_fnc_loadPlayerLoadouts;\
 								[\
+									['CBA'],\
 									'KH_eve_missionEnded',\
+									[_identifier],\
 									{\
-										_thisArgs call KH_fnc_savePlayerLoadouts;\
+										_args params ['_identifier'];\
+										[_identifier, KH_var_allPlayerUnits] call KH_fnc_savePlayerLoadouts;\
 										[_thisType, _thisId] call CBA_fnc_removeEventHandler;\
 									},\
-									[_identifier, KH_var_allPlayerUnits]\
-								] call CBA_fnc_addEventHandlerArgs;\
+									[_identifier]\
+								] call KH_fnc_addEventHandler;\
 							};\
 						";
 						defaultValue = "[false, profileName, 2]";

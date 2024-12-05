@@ -19,19 +19,20 @@ if _state then {
 					private _uid = _this select 3;
 					
 					[
-						"KH_eve_playerLoaded", 
+						["CBA"],
+						"KH_eve_playerLoaded",
+						[_attributes, _uid],
 						{
 							params ["_unit"];
-							_thisArgs params ["_attributes", "_oldUid"];
+							_args params ["_attributes", "_oldUid"];
 							private _newUid = getPlayerUID _unit;
 
 							if (_oldUid == _newUid) then {
 								[_unit, _attributes, KH_var_recoverDisconnectedPlayersGroup, false, true, KH_var_recoverDisconnectedPlayersLoadout, KH_var_recoverDisconnectedPlayersTransforms, KH_var_recoverDisconnectedPlayersTransforms, KH_var_recoverDisconnectedPlayersVehicle, true, true, false, true] call KH_fnc_setUnitAttributes;
 								[_thisType, _thisId] call CBA_fnc_removeEventHandler;
 							};
-						},
-						[_attributes, _uid]
-					] call CBA_fnc_addEventHandlerArgs;
+						}
+					] call KH_fnc_addEventHandler;
 				};
 			}
 		] call CBA_fnc_addEventHandler;

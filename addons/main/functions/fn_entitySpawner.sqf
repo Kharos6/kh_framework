@@ -3,13 +3,14 @@ private _id = [missionNamespace, "KH_var_entitySpawner", "ACTIVE", false] call K
 private _spawnerCount = format [missionNamespace, "KH_var_entitySpawnerCount", 0, false] call KH_fnc_atomicVariable;
 
 private _entityHandler = [
-	"KH_eve_spawnedEntityTerminated", 
+	["CBA"],
+	"KH_eve_spawnedEntityTerminated",
+	[_spawnerCount],
 	{
 		_args params ["_spawnerCount"];
 		missionNamespace setVariable [_spawnerCount, (missionNamespace getVariable [_spawnerCount, 0]) - 1];
-	}, 
-	[_spawnerCount]
-] call CBA_fnc_addEventHandlerArgs;
+	}
+] call KH_fnc_addEventHandler;
 
 [
 	{
@@ -273,7 +274,7 @@ private _entityHandler = [
 					}
 					else {
 						if !(_args select 12) then {
-							["KH_eve_spawnedEntityTerminated", _entityHandler] call CBA_fnc_removeEventHandler;
+							[_entityHandler] call KH_fnc_removeEventHandler;
 							[_handle] call CBA_fnc_removePerFrameHandler;
 						};
 					};
@@ -281,7 +282,7 @@ private _entityHandler = [
 
 				case (_idState == "TERMINATE"): {
 					private _entityHandler = _args select 10;
-					["KH_eve_spawnedEntityTerminated", _entityHandler] call CBA_fnc_removeEventHandler;
+					[_entityHandler] call KH_fnc_removeEventHandler;
 					[_handle] call CBA_fnc_removePerFrameHandler;
 				};		
 			};

@@ -145,14 +145,15 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 				] call BIS_fnc_holdActionAdd; 
 
 				[
-					"KH_eve_fultonDetached", 
+					["CBA"],
+					"KH_eve_fultonDetached",
+					[_detachAction],
 					{
-						_thisArgs params ["_detachAction"];
+						_args params ["_detachAction"];
 						[player, _detachAction] call BIS_fnc_holdActionRemove;
 						[_thisType, _thisId] call CBA_fnc_removeEventHandler;
-					}, 
-					[_detachAction]
-				] call CBA_fnc_addEventHandlerArgs;
+					}
+				] call KH_fnc_addEventHandler;
 			};
 		};
 

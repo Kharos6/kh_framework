@@ -13,10 +13,12 @@ if !(_variableName in KH_var_conditionalPresenceVariables) then {
 };
 
 [
+	["CBA"],
 	_variableName,
+	[_entity, _initialization, _invert],
 	{
 		params ["_state"];
-		_thisArgs params ["_entity", "_initialization", "_invert"];
+		_args params ["_entity", "_initialization", "_invert"];
 
 		if !_invert then {
 			if _state then {
@@ -48,8 +50,7 @@ if !(_variableName in KH_var_conditionalPresenceVariables) then {
 			_entity,
 			"THIS_FRAME"
 		] call KH_fnc_execute;
-	},
-	[_entity, _initialization, _invert]
-] call CBA_fnc_addEventHandlerArgs;
+	}
+] call KH_fnc_addEventHandler;
 
 true;

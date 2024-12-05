@@ -319,9 +319,11 @@ isNil {
 													};
 													
 													[
-														_joinType, 
+														["CBA"],
+														_joinType,
+														[_arguments, _function, _dependency, _id, _joinType],
 														{
-															_thisArgs params ["_arguments", "_function", "_dependency", "_id", "_joinType"];
+															_args params ["_arguments", "_function", "_dependency", "_id", "_joinType"];
 															private _joiningMachine = 999999;
 
 															if (_joinType == "KH_eve_playerLoaded") then {
@@ -444,9 +446,8 @@ isNil {
 																	};
 																};
 															};
-														}, 
-														[_arguments, _function, _dependency, _id, _joinType]
-													] call CBA_fnc_addEventHandlerArgs;
+														}
+													] call KH_fnc_addEventHandler;
 												}
 											]
 										] call CBA_fnc_serverEvent;
@@ -527,10 +528,12 @@ isNil {
 														params ["_arguments", "_function", "_targetObject", "_targetIndex", "_sendoffArguments", "_sendoffFunction", "_id"];
 
 														[
-															"KH_eve_localityChanged", 
+															["CBA"],
+															"KH_eve_localityChanged",
+															[_arguments, _function, _targetIndex, _sendoffArguments, _sendoffFunction, _id],
 															{
 																params ["_targetObject", "_isLocal"];
-																_thisArgs params ["_arguments", "_function", "_targetIndex", "_sendoffArguments", "_sendoffFunction", "_id"];
+																_args params ["_arguments", "_function", "_targetIndex", "_sendoffArguments", "_sendoffFunction", "_id"];
 																private _idState = _targetObject getVariable [_id, "ACTIVE"];
 
 																if !(_idState == "INACTIVE") then {
@@ -563,9 +566,8 @@ isNil {
 																		};
 																	};
 																};
-															}, 
-															[_arguments, _function, _targetIndex, _sendoffArguments, _sendoffFunction, _id]
-														] call CBA_fnc_addEventHandlerArgs;
+															}
+														] call KH_fnc_addEventHandler;
 
 														_targetObject addEventHandler [
 															"Local", 
@@ -587,9 +589,11 @@ isNil {
 															params ["_arguments", "_function", "_targetObject", "_targetIndex", "_sendoffArguments", "_sendoffFunction", "_id"];
 
 															[
-																"KH_eve_playerPreLoaded", 
+																["CBA"],
+																"KH_eve_playerPreLoadeed",
+																[_arguments, _function, _targetObject, _targetIndex, _sendoffArguments, _sendoffFunction, _id],
 																{
-																	_thisArgs params ["_arguments", "_function", "_targetObject", "_targetIndex", "_sendoffArguments", "_sendoffFunction", "_id"];
+																	_args params ["_arguments", "_function", "_targetObject", "_targetIndex", "_sendoffArguments", "_sendoffFunction", "_id"];
 																	params ["_joiningMachine"];
 
 																	[
@@ -600,10 +604,12 @@ isNil {
 																				params ["_arguments", "_function", "_targetObject", "_targetIndex", "_sendoffArguments", "_sendoffFunction", "_id"];
 
 																				[
-																					"KH_eve_localityChanged", 
+																					["CBA"],
+																					"KH_eve_localityChanged",
+																					[_arguments, _function, _targetIndex, _sendoffArguments, _sendoffFunction, _id],
 																					{
 																						params ["_targetObject", "isLocal"];
-																						_thisArgs params ["_arguments", "_function", "_targetIndex", "_sendoffArguments", "_sendoffFunction", "_id"];
+																						_args params ["_arguments", "_function", "_targetIndex", "_sendoffArguments", "_sendoffFunction", "_id"];
 																						private _idState = _targetObject getVariable [_id, "ACTIVE"];
 																						
 																						if !(_idState == "INACTIVE") then {
@@ -636,9 +642,8 @@ isNil {
 																								};
 																							};
 																						};
-																					}, 
-																					[_arguments, _function, _targetIndex, _sendoffArguments, _sendoffFunction, _id]
-																				] call CBA_fnc_addEventHandlerArgs;
+																					}
+																				] call KH_fnc_addEventHandler;
 
 																				_targetObject addEventHandler [
 																					"Local", 
@@ -651,9 +656,8 @@ isNil {
 																		],
 																		_joiningMachine
 																	] call CBA_fnc_ownerEvent;
-																}, 
-																[_arguments, _function, _targetObject, _targetIndex, _sendoffArguments, _sendoffFunction, _id]
-															] call CBA_fnc_addEventHandlerArgs;
+																}
+															] call KH_fnc_addEventHandler;
 														}
 													]
 												] call CBA_fnc_serverEvent;

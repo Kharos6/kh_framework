@@ -1,5 +1,6 @@
 params ["_entity", "_screenMultiplier", "_proximity", "_distance", "_conditionServer", "_conditionPlayer", "_trueFunction", ["_falseFunction", {}], ["_repeatable", false], ["_interval", 0.5], ["_shared", true]];
 private _id = format ["KH_var_%1", [0, 36, "ALPHANUMERIC"] call KH_fnc_generateSymbols];
+private _event = format ["KH_eve_%1", [0, 36, "ALPHANUMERIC"] call KH_fnc_generateSymbols];
 private _firstTrigger = [missionNamespace, "KH_var_visualTriggerFirst", false, false] call KH_fnc_atomicVariable;
 private _conditionVariable = [missionNamespace, "KH_var_visualTriggerCondition", false, false] call KH_fnc_atomicVariable;
 private _playerVariable = [missionNamespace, "KH_var_visualTriggerPlayerPrevious", false, false] call KH_fnc_atomicVariable;
@@ -7,24 +8,24 @@ private _entityVariable = [missionNamespace, "KH_var_visualTriggerEntityPrevious
 missionNamespace setVariable [_id, "ACTIVE", true];
 	
 [
-	[_entity, _distance, _conditionPlayer, _interval, _id], 
+	[_entity, _distance, _conditionPlayer, _interval, _id, _event], 
 	{
-		params ["_entity", "_distance", "_conditionPlayer", "_interval", "_id"];
+		params ["_entity", "_distance", "_conditionPlayer", "_interval", "_id", "_event"];
 		
 		[
 			{
-				private _id = _args select 3;
+				private _id = _args select 4;
 				private _idState = missionNamespace getVariable [_id, "ACTIVE"];
 
 				if (_idState != "INACTIVE") then {
 					switch true do {
 						case (_idState == "ACTIVE"): {
-							_args params ["_entity", "_distance", "_conditionPlayer"];
+							_args params ["_entity", "_distance", "_conditionPlayer", "_event"];
 
 							if ([] call _conditionPlayer) then {						
 								if !(isNil "_entity") then {
 									if (((player distance _entity) < _distance) && (alive player) && !(player getVariable ["KH_var_usingExternalCamera", false]) && !(player in ([["CURATORS"], true] call KH_fnc_getClients))) then {
-										["KH_eve_visualTrigger", [worldToScreen (ASLToAGL (getPosASL _entity)), player]] call CBA_fnc_serverEvent;
+										[_event, [worldToScreen (ASLToAGL (getPosASL _entity)), player]] call CBA_fnc_serverEvent;
 									};
 								}
 								else {
@@ -40,7 +41,7 @@ missionNamespace setVariable [_id, "ACTIVE", true];
 				};
 			},
 			_interval, 
-			[_entity, _distance, _conditionPlayer, _id]
+			[_entity, _distance, _conditionPlayer, _event, _id]
 		] call CBA_fnc_addPerFrameHandler;
 	},
 	["JIP", "PLAYERS", _entity, true, false],
@@ -48,16 +49,18 @@ missionNamespace setVariable [_id, "ACTIVE", true];
 ] call KH_fnc_execute;
 
 [
-	"KH_eve_visualTrigger", 
+	["CBA"],
+	_event,
+	[_entity, _screenMultiplier, _proximity, _conditionServer, _trueFunction, _falseFunction, _repeatable, _shared, _firstTrigger, _conditionVariable, _playerVariable, _entityVariable, _id],
 	{
-		private _id = _thisArgs select 12;
+		private _id = _args select 12;
 		private _idState = missionNamespace getVariable [_id, "ACTIVE"];
 		
 		if (_idState != "INACTIVE") then {
 			switch true do {
 				case (_idState == "ACTIVE"): {
 					params ["_screenPos", "_currentPlayer"];
-					_thisArgs params ["_entity", "_screenMultiplier", "_proximity", "_conditionServer", "_trueFunction", "_falseFunction", "_repeatable", "_shared", "_firstTrigger", "_conditionVariable", "_playerVariable", "_entityVariable"];
+					_args params ["_entity", "_screenMultiplier", "_proximity", "_conditionServer", "_trueFunction", "_falseFunction", "_repeatable", "_shared", "_firstTrigger", "_conditionVariable", "_playerVariable", "_entityVariable"];
 					
 					if ([] call _conditionServer) then {
 						if !(isNil "_entity") then {
@@ -155,8 +158,7 @@ missionNamespace setVariable [_id, "ACTIVE", true];
 				};		
 			};
 		};
-	},
-	[_entity, _screenMultiplier, _proximity, _conditionServer, _trueFunction, _falseFunction, _repeatable, _shared, _firstTrigger, _conditionVariable, _playerVariable, _entityVariable, _id]
-] call CBA_fnc_addEventHandlerArgs;
+	}
+] call KH_fnc_addEventHandler;
 
 ["PUBLIC_HANDLER", _id];

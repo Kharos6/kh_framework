@@ -125,13 +125,14 @@ if _state then {
 		[] call _adminFunction;
 
 		[
-			"KH_eve_adminChanged", 
+			["CBA"],
+			"KH_eve_adminChanged",
+			[_adminFunction],
 			{
-				_thisArgs params ["_adminFunction"];
+				_args params ["_adminFunction"];
 				[] call _adminFunction;
-			},
-			[_adminFunction]
-		] call CBA_fnc_addEventHandlerArgs;
+			}
+		] call KH_fnc_addEventHandler;
 		
 		[
 			{		

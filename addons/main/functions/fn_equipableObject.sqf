@@ -62,14 +62,15 @@ if (isNull _unit) then {
 				] call BIS_fnc_holdActionAdd;
 				
 				[
-					"KH_eve_equipableObjectUnequipped", 
+					["CBA"],
+					"KH_eve_equipableObjectUnequipped",
+					[_unequipAction],
 					{
-						private _unequipAction = _thisArgs select 0;
+						_args params ["_unequipAction"];
 						[player, _unequipAction] call BIS_fnc_holdActionRemove;
 						[_thisType, _thisId] call CBA_fnc_removeEventHandler;
-					}, 
-					[_unequipAction]
-				] call CBA_fnc_addEventHandlerArgs;
+					}
+				] call KH_fnc_addEventHandler;
 			},
 			{},
 			[_localArguments],
@@ -216,14 +217,15 @@ else {
 					] call BIS_fnc_holdActionAdd;
 					
 					[
-						"KH_eve_equipableObjectUnequipped", 
+						["CBA"],
+						"KH_eve_equipableObjectUnequipped",
+						[_unequipAction],
 						{
-							_thisArgs params ["_unequipAction"];
+							_args params ["_unequipAction"];
 							[player, _unequipAction] call BIS_fnc_holdActionRemove;
 							[_thisType, _thisId] call CBA_fnc_removeEventHandler;
-						}, 
-						[_unequipAction]
-					] call CBA_fnc_addEventHandlerArgs;
+						}
+					] call KH_fnc_addEventHandler;
 				},
 				{},
 				[_localArguments],

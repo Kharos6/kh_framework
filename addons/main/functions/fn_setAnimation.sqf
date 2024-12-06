@@ -182,91 +182,118 @@ if (_duration != 0) then {
 		[_unit, _target, _camera, _disableInput, _disableDamage, _setCaptive, _stopOnHit, _event, _resetPosition, _resetRotation, _attachObject, _cameraObject, _cameraTarget, _targetHitHandler, _unitHitHandler]
 	] call CBA_fnc_addPerFrameHandler;
 	
-	[
-		{
-			params ["_unit", "_target", "_camera", "_disableInput", "_disableDamage", "_setCaptive", "_stopOnHit", "_event", "_resetPosition", "_resetRotation", "_attachObject", "_cameraObject", "_cameraTarget", "_targetHitHandler", "_unitHitHandler", "_interruptCheck"];
-			
-			if (!(_unit getVariable ["KH_var_setAnimationUnitHit", false]) && !(_target getVariable ["KH_var_setAnimationUnitHit", false])) then {
-				[_interruptCheck] call CBA_fnc_removePerFrameHandler;
-				[_event, [_unit, _target, true]] call CBA_fnc_globalEvent;
+	private _endFunction = {
+		params ["_unit", "_target", "_camera", "_disableInput", "_disableDamage", "_setCaptive", "_stopOnHit", "_event", "_resetPosition", "_resetRotation", "_attachObject", "_cameraObject", "_cameraTarget", "_targetHitHandler", "_unitHitHandler", "_interruptCheck"];
+		
+		if (!(_unit getVariable ["KH_var_setAnimationUnitHit", false]) && !(_target getVariable ["KH_var_setAnimationUnitHit", false])) then {
+			[_interruptCheck] call CBA_fnc_removePerFrameHandler;
+			[_event, [_unit, _target, true]] call CBA_fnc_globalEvent;
 
-				if _disableDamage then {
-					[
-						[_unit],
-						{
-							params ["_unit"];
-							_unit allowDamage true;
-						},
-						_unit,
-						"THIS_FRAME"
-					] call KH_fnc_execute;
-				};
-				
-				if ((alive _unit) && _setCaptive) then {
-					[
-						[_unit],
-						{
-							params ["_unit"];
-							_unit setCaptive false;
-						},
-						_unit,
-						"THIS_FRAME"
-					] call KH_fnc_execute;
-				};
-				
-				if ((isPlayer _unit) && _disableInput) then {
-					[[true, false], "KH_fnc_toggleUserInput", _unit, "THIS_FRAME"] call KH_fnc_execute;
-				};
-				
-				detach _unit;
-
+			if _disableDamage then {
 				[
 					[_unit],
 					{
 						params ["_unit"];
-						_unit switchMove [""];
+						_unit allowDamage true;
 					},
-					"GLOBAL",
+					_unit,
 					"THIS_FRAME"
 				] call KH_fnc_execute;
+			};
+			
+			if ((alive _unit) && _setCaptive) then {
+				[
+					[_unit],
+					{
+						params ["_unit"];
+						_unit setCaptive false;
+					},
+					_unit,
+					"THIS_FRAME"
+				] call KH_fnc_execute;
+			};
+			
+			if ((isPlayer _unit) && _disableInput) then {
+				[[true, false], "KH_fnc_toggleUserInput", _unit, "THIS_FRAME"] call KH_fnc_execute;
+			};
+			
+			detach _unit;
 
-				[_unit, [_resetPosition, "ATL", false], [_resetRotation, false]] call KH_fnc_setTransforms;
-				deleteVehicle _attachObject;
-				
-				if _camera then {
-					deleteVehicle _cameraObject;
-					deleteVehicle _cameraTarget;
+			[
+				[_unit],
+				{
+					params ["_unit"];
+					_unit switchMove [""];
+				},
+				"GLOBAL",
+				"THIS_FRAME"
+			] call KH_fnc_execute;
+
+			[_unit, [_resetPosition, "ATL", false], [_resetRotation, false]] call KH_fnc_setTransforms;
+			deleteVehicle _attachObject;
+			
+			if _camera then {
+				deleteVehicle _cameraObject;
+				deleteVehicle _cameraTarget;
+			};
+			
+			if (!(isPlayer _unit) && (alive _unit)) then {
+				[
+					[_unit],
+					{
+						params ["_unit"];
+						_unit enableAI "ALL";
+					},
+					_unit,
+					"THIS_FRAME"
+				] call KH_fnc_execute;
+			};
+			
+			if _stopOnHit then {
+				if (_targetHitHandler != -1) then {
+					_target removeEventHandler ["Dammaged", _targetHitHandler];
 				};
 				
-				if (!(isPlayer _unit) && (alive _unit)) then {
-					[
-						[_unit],
-						{
-							params ["_unit"];
-							_unit enableAI "ALL";
-						},
-						_unit,
-						"THIS_FRAME"
-					] call KH_fnc_execute;
-				};
-				
-				if _stopOnHit then {
-					if (_targetHitHandler != -1) then {
-						_target removeEventHandler ["Dammaged", _targetHitHandler];
-					};
-					
-					if (_unitHitHandler != -1) then {
-						_unit removeEventHandler ["Dammaged", _unitHitHandler];
-					};
+				if (_unitHitHandler != -1) then {
+					_unit removeEventHandler ["Dammaged", _unitHitHandler];
 				};
 			};
+		};
 
-			_target setVariable ["KH_var_setAnimationUnitHit", false];
-			_unit setVariable ["KH_var_setAnimationUnitHit", false];
-		},	
-		[_unit, _target, _camera, _disableInput, _disableDamage, _setCaptive, _stopOnHit, _event, _resetPosition, _resetRotation, _attachObject, _cameraObject, _cameraTarget, _targetHitHandler, _unitHitHandler, _interruptCheck],
-		_duration
-	] call CBA_fnc_waitAndExecute;
+		_target setVariable ["KH_var_setAnimationUnitHit", false];
+		_unit setVariable ["KH_var_setAnimationUnitHit", false];
+	};
+
+	if (_duration != -1) then {
+		[
+			_endFunction,	
+			[_unit, _target, _camera, _disableInput, _disableDamage, _setCaptive, _stopOnHit, _event, _resetPosition, _resetRotation, _attachObject, _cameraObject, _cameraTarget, _targetHitHandler, _unitHitHandler, _interruptCheck],
+			_duration
+		] call CBA_fnc_waitAndExecute;
+	}
+	else {
+		[
+			["STANDARD", _unit, false],
+			"AnimDone",
+			[_unit, _target, _camera, _disableInput, _disableDamage, _setCaptive, _stopOnHit, _event, _resetPosition, _resetRotation, _attachObject, _cameraObject, _cameraTarget, _targetHitHandler, _unitHitHandler, _interruptCheck, _endFunction, _animation],
+			{
+				params ["_unit", "_animation"];
+				private _setAnimation = _args select 16;
+
+				if (_setAnimation isEqualType []) then {
+					_setAnimation = _setAnimation select 0;
+				};
+
+				if (_animation == _setAnimation) then {
+					private _function = _args select 17;
+					_args deleteAt 16;
+					_args deleteAt 17;
+					_args call _function;
+					_unit removeEventHandler [_thisEvent, _thisEventHandler];
+				};
+			}
+		] call KH_fnc_addEventHandler;
+	};
 }
 else {
 	[

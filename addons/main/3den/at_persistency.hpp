@@ -2,7 +2,7 @@ class KH_Persistency: Title
 {
 	attributeLoad = "(_this controlsGroupCtrl 103) lbAdd 'NONE'; (_this controlsGroupCtrl 103) lbAdd 'SAVED'; (_this controlsGroupCtrl 103) lbAdd 'INITIAL'; [_this, _value] call KH_fnc_loadControlAttributes;";
 	attributeSave = "[_this] call KH_fnc_saveControlAttributes;";
-	h = QUOTE(8 * CTRL_DEFAULT_H + 70 * pixelH);
+	h = QUOTE(10 * CTRL_DEFAULT_H + 70 * pixelH);
 	class Controls: Controls
 	{
 		class KH_ToggleTitle: Title
@@ -95,13 +95,13 @@ class KH_Persistency: Title
 			tooltip = "Array of strings of server <missionNamespace> variables to preserve upon saving, and define with the saved values upon load.";
 			y = QUOTE(7 * CTRL_DEFAULT_H + 30 * CTRL_DEFAULT_Y);
 		};
-		class KH_Variables: ctrlEdit
+		class KH_Variables: ctrlEditMulti
 		{
 			idc = 106;
 			x = QUOTE(CTRL_DEFAULT_X);
 			y = QUOTE(7 * CTRL_DEFAULT_H + 30 * CTRL_DEFAULT_Y);
 			w = QUOTE(CTRL_DEFAULT_W);
-			h = QUOTE(CTRL_DEFAULT_H);
+			h = QUOTE(CTRL_DEFAULT_H * 3);
 		};
 	};
 };

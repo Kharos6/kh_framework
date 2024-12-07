@@ -29,6 +29,30 @@ class Group
 					";
 					defaultValue = "'[]'";
 				};
+				class KH_IgnoredTargets
+				{
+					displayName = "Ignored Targets";
+					tooltip = "Define an array of strings of variable names of entities to be ignored as potential targets by the members of this group.";
+					property = "KH_IgnoredTargets";
+					control = "Edit";
+					expression = 
+					"\
+						if ((_value != '') && (_value != '[]') && !is3DEN) then {\
+							[\
+								{\
+									(CBA_missionTime > 0);\
+								},\
+									params ['_group', '_targets'];\
+									{\
+										_group ignoreTarget [missionNamespace getVariable [_x, objNull], true];\
+									} forEach (parseSimpleArray _targets);\
+								},\
+								[_this, _value]\
+							] call CBA_fnc_waitUntilAndExecute;\
+						};\
+					";
+					defaultValue = "'[]'";
+				};
 			};
 		};
 	};

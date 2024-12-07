@@ -108,6 +108,7 @@ class Object
 						};\
 					";
 					defaultValue = "[false, '', '[]', '[]', '', '', true, true, true, '', '']";
+					condition = "1 - objectControllable";
 				};
 			};
 		};
@@ -286,7 +287,7 @@ class Object
 												true\
 											] call BIS_fnc_holdActionAdd;\
 										},\
-										['JIP', 'PLAYERS', _entity, true, false],\
+										['JIP', 'PLAYERS', _entity, false, false],\
 										'THIS_FRAME'\
 									] call KH_fnc_execute;\
 								},\
@@ -401,6 +402,29 @@ class Object
 			collapsed = 1;
 			class Attributes
 			{
+				class KH_AnimationSpeed
+				{
+					displayName = "Animation Speed";
+					tooltip = "Sets the animation speed of this unit. Leave empty for no change.";
+					property = "KH_AnimationSpeed";
+					control = "Edit";
+					expression = 
+					"\
+						if ((_value != '') && !is3DEN) then {\
+							[\
+								[_this, parseNumber _value],\
+								{\
+									params ['_unit', '_speed'];\
+									_unit setAnimSpeedCoef _speed;\
+								},\
+								['JIP', 'PLAYERS', _this, false, false],\
+								'THIS_FRAME'\
+							] call KH_fnc_execute;\
+						};\
+					";
+					defaultValue = "''";
+					condition = "objectControllable";
+				};
 				class KH_ArrayBuilder
 				{
 					displayName = "Array Builder";

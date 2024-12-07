@@ -1,11 +1,9 @@
 params ["_position", "_distances"];
-private _positionAsl = [];
 
 if (_position isEqualType objNull) then {
-	_positionAsl = getPosASL _position;
-}
-else {
-	_positionAsl = _position;
+	if !(isNull _position) then {
+		_position = getPosASL _position;
+	};
 };
 
 private _positionAgl = ASLToAGL _positionAsl;

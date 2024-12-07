@@ -548,7 +548,7 @@ class Mission
 										[_identifier, _parsedVariables] call KH_fnc_saveMissionState;\
 										[_identifier, KH_var_allPlayerUnits] call KH_fnc_savePlayerLoadouts;\
 										[_identifier, entities [[], ['Man', 'Logic', 'Animal'], false, false]] call KH_fnc_saveCargoInventories;\
-										[_thisType, _thisId] call CBA_fnc_removeEventHandler;\
+										[_eventName, _localId] call CBA_fnc_removeEventHandler;\
 									}\
 								] call KH_fnc_addEventHandler;\
 							};\

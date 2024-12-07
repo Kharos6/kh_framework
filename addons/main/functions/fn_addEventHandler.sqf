@@ -1,7 +1,8 @@
 params ["_type", "_event", "_arguments", "_function"];
 private _handlerArguments = [missionNamespace, "KH_var_eventHandlerArguments", _arguments, false] call KH_fnc_atomicVariable;
+private _handlerId = [missionNamespace, "KH_var_eventHandlerId", -1, false] call KH_fnc_atomicVariable;
 private _persistentId = "";
-private _handlerId = -1;
+private _handler = -1;
 
 if (_function isEqualType "") then {
 	_function = missionNamespace getVariable [_function, {}];
@@ -9,6 +10,7 @@ if (_function isEqualType "") then {
 
 private _expression = [
 	"private _args = (missionNamespace getVariable ['", _handlerArguments, "', []]);
+	private _localId = (missionNamespace getVariable ['", _handlerId, "', -1]);
 	call ", _function, ";"
 ] joinString "";
 
@@ -17,7 +19,8 @@ private _eventType = _type select 0;
 switch true do {
 	case (_eventType == "STANDARD"): {
 		if !(_type select 2) then {
-			_handlerId = (_type select 1) addEventHandler [_event, compile _expression];
+			_handler = (_type select 1) addEventHandler [_event, compile _expression];
+			missionNamespace setVariable [_handlerId, _handler];
 		}
 		else {
 			_persistentId = format ["KH_var_%1", [0, 36, "ALPHANUMERIC"] call KH_fnc_generateSymbols];
@@ -34,7 +37,7 @@ switch true do {
 				"THIS_FRAME"
 			] call KH_fnc_execute;
 
-			_handlerId = [
+			_handler = [
 				[_type, _event, _arguments, _function, _persistentId], 
 				{
 					params ["_type", "_event", "_arguments", "_function", "_persistentId"];
@@ -65,51 +68,61 @@ switch true do {
 				],
 				"THIS_FRAME"
 			] call KH_fnc_execute;
+
+			missionNamespace setVariable [_handlerId, _handler];
 		};
 	};
 
 	case (_eventType == "MULTIPLAYER"): {
-		_handlerId = (_type select 1) addMPEventHandler [_event, compile _expression];
+		_handler = (_type select 1) addMPEventHandler [_event, compile _expression];
+		missionNamespace setVariable [_handlerId, _handler];
 	};
 
 	case (_eventType == "CONTROL"): {
-		_handlerId = (_type select 1) ctrlAddEventHandler [_event, compile _expression];
+		_handler = (_type select 1) ctrlAddEventHandler [_event, compile _expression];
+		missionNamespace setVariable [_handlerId, _handler];
 	};
 
 	case (_eventType == "DISPLAY"): {
-		_handlerId = (_type select 1) displayAddEventHandler [_event, compile _expression];
+		_handler = (_type select 1) displayAddEventHandler [_event, compile _expression];
+		missionNamespace setVariable [_handlerId, _handler];
 	};
 
 	case (_eventType == "PUBLIC_VARIABLE"): {
-		_handlerId = [missionNamespace, "KH_var_publicVariableEventHandler", true, false] call KH_fnc_atomicVariable;
+		_handler = [missionNamespace, "KH_var_publicVariableEventHandler", true, false] call KH_fnc_atomicVariable;
+		missionNamespace setVariable [_handlerId, _handler];
 
 		(_type select 1) addPublicVariableEventHandler (compile ([
-			"if (missionNamespace getVariable ['", _handlerId, "', true]) then {", 
+			"if (missionNamespace getVariable ['", _handler, "', true]) then {", 
 				_expression, 
 			"};"
 		] joinString ""));
 	};
 
 	case (_eventType == "MISSION"): {
-		_handlerId = addMissionEventHandler [_event, compile _expression];
+		_handler = addMissionEventHandler [_event, compile _expression];
+		missionNamespace setVariable [_handlerId, _handler];
 	};
 
 	case (_eventType == "USER_ACTION"): {
-		_handlerId = addUserActionEventHandler [_event, compile _expression];
+		_handler = addUserActionEventHandler [_event, compile _expression];
+		missionNamespace setVariable [_handlerId, _handler];
 	};
 
 	case (_eventType == "MUSIC"): {
-		_handlerId = addMusicEventHandler [_event, compile _expression];
+		_handler = addMusicEventHandler [_event, compile _expression];
+		missionNamespace setVariable [_handlerId, _handler];
 	};
 
 	case (_eventType == "CBA"): {
-		_handlerId = [_event, compile _expression] call CBA_fnc_addEventHandler;
+		_handler = [_event, compile _expression] call CBA_fnc_addEventHandler;
+		missionNamespace setVariable [_handlerId, _handler];
 	};
 };
 
-if (persistentId == "") then {
-	[_type, _event, _handlerId, clientOwner];
+if (_persistentId == "") then {
+	[_type, _event, _handler, clientOwner];
 }
 else {
-	[_handlerId, _persistentId];
+	[_handler, _persistentId];
 };

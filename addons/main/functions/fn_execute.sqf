@@ -346,7 +346,7 @@ isNil {
 																					};
 
 																					case (_idState == "TERMINATE"): {
-																						[_thisType, _thisId] call CBA_fnc_removeEventHandler;
+																						[_eventName, _localId] call CBA_fnc_removeEventHandler;
 																					};		
 																				};
 																			};
@@ -363,7 +363,7 @@ isNil {
 																					};
 
 																					case (_idState == "TERMINATE"): {
-																						[_thisType, _thisId] call CBA_fnc_removeEventHandler;
+																						[_eventName, _localId] call CBA_fnc_removeEventHandler;
 																					};		
 																				};
 																			};
@@ -385,7 +385,7 @@ isNil {
 																				};
 
 																				case (_idState == "TERMINATE"): {
-																					[_thisType, _thisId] call CBA_fnc_removeEventHandler;
+																					[_eventName, _localId] call CBA_fnc_removeEventHandler;
 																				};		
 																			};
 																		};
@@ -436,7 +436,7 @@ isNil {
 																				};
 
 																				case (_idState == "TERMINATE"): {
-																					[_thisType, _thisId] call CBA_fnc_removeEventHandler;
+																					[_eventName, _localId] call CBA_fnc_removeEventHandler;
 																				};		
 																			};
 																		};
@@ -562,7 +562,7 @@ isNil {
 																		};
 
 																		case (_idState == "TERMINATE"): {
-																			[_thisType, _thisId] call CBA_fnc_removeEventHandler;
+																			[_eventName, _localId] call CBA_fnc_removeEventHandler;
 																		};
 																	};
 																};
@@ -638,7 +638,7 @@ isNil {
 																								};
 
 																								case (_idState == "TERMINATE"): {
-																									[_thisType, _thisId] call CBA_fnc_removeEventHandler;
+																									[_eventName, _localId] call CBA_fnc_removeEventHandler;
 																								};
 																							};
 																						};

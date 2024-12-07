@@ -1,13 +1,9 @@
 params ["_entity", "_position", "_travelTime"];
-private _destination = [];
 
 if (_position isEqualType objNull) then {
 	if !(isNull _position) then {
-		_destination = getPosATL _position;
+		_position = getPosATL _position;
 	};
-}
-else {
-	_destination = _position;
 };
 
 private _direction = _destination vectorDiff (getPosATL _entity);

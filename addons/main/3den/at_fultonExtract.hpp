@@ -19,13 +19,13 @@ class KH_FultonExtract: Title
 			w = QUOTE(5 * GRID_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
-		class KH_VehicleTitle: Title
+		class KH_VehiclesTitle: Title
 		{
-			text = "Vehicle";
-			tooltip = "Variable name of the vehicle designated as the fulton extraction vehicle.";
+			text = "Vehicles";
+			tooltip = "Array of variable names of vehicles designated as a fulton extraction vehicle.";
 			y = QUOTE(2 * CTRL_DEFAULT_H + 5 * CTRL_DEFAULT_Y);
 		};
-		class KH_Vehicle: ctrlEdit
+		class KH_Vehicles: ctrlEdit
 		{
 			idc = 101;
 			x = QUOTE(CTRL_DEFAULT_X);

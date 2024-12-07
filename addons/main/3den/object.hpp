@@ -129,20 +129,24 @@ class Object
 					control = "KH_FultonExtract";
 					expression = 
 					"\
-						_value params ['_toggle', '_vehicle', '_height', '_distance', '_maximumParticipants', '_duration', '_objectName'];\
+						_value params ['_toggle', '_vehicles', '_height', '_distance', '_maximumParticipants', '_duration', '_objectName'];\
 						if (_toggle && !is3DEN) then {\
 							[\
 								{\
 									(CBA_missionTime > 0);\
 								},\
-									params ['_entity', '_vehicle', '_height', '_distance', '_maximumParticipants', '_duration', '_objectName'];\
-									[_entity, missionNamespace getVariable [_vehicle, objNull], _height, parseNumber _distance, parseNumber _maximumParticipants, parseNumber _duration, _objectName] call KH_fnc_fultonExtract;\
+									params ['_entity', '_vehicles', '_height', '_distance', '_maximumParticipants', '_duration', '_objectName'];\
+									private _parsedVehicles = [];\
+									{\
+										_parsedVehicles pushBack (missionNamespace getVariable [_x, objNull]);\
+									} forEach (parseSimpleArray _vehicles);\
+									[_entity, _parsedVehicles, _height, parseNumber _distance, parseNumber _maximumParticipants, parseNumber _duration, _objectName] call KH_fnc_fultonExtract;\
 								},\
-								[_this, _vehicle, _height, _distance, _maximumParticipants, _duration, _objectName]\
+								[_this, _vehicles, _height, _distance, _maximumParticipants, _duration, _objectName]\
 							] call CBA_fnc_waitUntilAndExecute;\
 						};\
 					";
-					defaultValue = "[false, '', 100, '', '', '', '', '100m']";
+					defaultValue = "[false, '[]', 100, '', '', '', '', '100m']";
 					condition = "1 - objectControllable";
 				};
 			};

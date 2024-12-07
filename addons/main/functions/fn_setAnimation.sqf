@@ -286,8 +286,7 @@ if (_duration != 0) then {
 
 				if (_animation == _setAnimation) then {
 					private _function = _args select 17;
-					_args deleteAt 16;
-					_args deleteAt 17;
+					_args deleteAt [16, 17];
 					_args call _function;
 					_unit removeEventHandler [_thisEvent, _thisEventHandler];
 				};

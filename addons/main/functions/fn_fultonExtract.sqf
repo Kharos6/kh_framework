@@ -45,8 +45,9 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 		private _fultonRemoteActions = [missionNamespace, "KH_var_fultonRemoteActions", false, false] call KH_fnc_atomicVariable;
 		private _fultonAnchor = createVehicle ["Land_Can_V2_F", _object, [], 0, "CAN_COLLIDE"];
 		_fultonAnchor allowDamage false;
+		_fultonAnchor hideObjectGlobal true;												
 		_fultonAnchor attachTo [_object, [0, 0, 0]];
-		private _fultonRope = ropeCreate [_mainFulton, [0, 0, 0], _fultonAnchor, [0, 0, 0], (_height + 3) min 100];
+		private _fultonRope = ropeCreate [_mainFulton, [0, 0, 0], _fultonAnchor, [0, 0, 0], _height];
 		_fultonRope allowDamage false;
 
 		private _fultonFunction = {
@@ -75,6 +76,17 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 					_currentParticipants pushBackUnique _participant;
 					missionNamespace setVariable [_currentFultonParticipants, _currentParticipants, true];
 					private _anchorEnd = createVehicle ["Land_Can_V2_F", _participant, [], 0, "CAN_COLLIDE"];
+
+					[
+						[_anchorEnd],
+						{
+							params ["_anchorEnd"];
+							_anchorEnd hideObjectGlobal true;
+						},
+						"SERVER",
+						"THIS_FRAME"
+					] call KH_fnc_execute;
+
 					_anchorEnd allowDamage false;
 					_anchorEnd attachTo [_participant, [0, 0, 0], "Spine3"];
 					private _rope = ropeCreate [_mainFulton, [0, 0, 0], _anchorEnd, [0, 0, 0], 100];
@@ -360,15 +372,7 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 															} 
 															else {
 																if ((animationState _unit) != "Para_Pilot") then {
-																	[
-																		[_unit],
-																		{
-																			params ["_unit"];
-																			_unit switchMove ["Para_Pilot"];
-																		},
-																		"GLOBAL",
-																		"THIS_FRAME"
-																	] call KH_fnc_execute;
+																	_unit switchMove ["Para_Pilot"];
 																};
 
 																private _unitPosition = getPosATL _unit;
@@ -376,7 +380,7 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 																private _vehicleRotation = [_vehicle, objNull] call KH_fnc_getRotation;
 																private _relativeRotation = [_unit, _vehicle] call KH_fnc_getRotation;
 																private _velocity = (_vehiclePosition vectorDiff _unitPosition) vectorMultiply (3 / _remainingTime);
-																[_unit, [-30, 0, (_relativeRotation select 2) + 180], false] call KH_fnc_setRotation;
+																[_unit, [-(_relativeRotation select 0) - 75, 0, (_relativeRotation select 2) + 180], false] call KH_fnc_setRotation;
 																_unit setVelocity _velocity;
 																_unit setAngularVelocity [0, 0, 0];
 															};

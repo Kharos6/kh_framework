@@ -58,7 +58,6 @@ switch true do {
 				[
 					"PERSISTENT", 
 					_entity, 
-					-1, 
 					[_entity, _persistentId], 
 					{
 						params ["_entity", "_persistentId"];

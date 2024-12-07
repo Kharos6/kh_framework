@@ -11,12 +11,12 @@ class Group
 				class KH_ArrayBuilder
 				{
 					displayName = "Array Builder";
-					tooltip = "Specify one or more strings of global variables that will be made into an array, made public, and contain this group and any other groups utilizing this function. In format ['globalVariable1', 'globalVariable2', 'globalVariable3']";
+					tooltip = "Specify an array of strings of global variables that will be made into an array, made public, and contain this group and any other groups utilizing this function. In format ['globalVariable1', 'globalVariable2', 'globalVariable3']";
 					property = "KH_ArrayBuilder";
 					control = "Edit";
 					expression = 
 					"\
-						if ((_value != '') && (_value != '[]')) then {\
+						if ((_value != '') && (_value != '[]') && !is3DEN) then {\
 							{\
 								private _originalValueArray = missionNamespace getVariable [_x, []];\
 								_originalValueArray pushBack _this;\
@@ -32,7 +32,7 @@ class Group
 				class KH_IgnoredTargets
 				{
 					displayName = "Ignored Targets";
-					tooltip = "Define an array of strings of variable names of entities to be ignored as potential targets by the members of this group.";
+					tooltip = "Specify an array of strings of variable names of entities to be ignored as potential targets by the members of this group.";
 					property = "KH_IgnoredTargets";
 					control = "Edit";
 					expression = 

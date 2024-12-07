@@ -152,6 +152,38 @@ class Object
 				};
 			};
 		};
+		class KH_SetAnimation
+		{
+			displayName = "KH Set Animation";
+			collapsed = 1;
+			class Attributes
+			{
+				class KH_SetAnimationSubcategory
+				{
+					description = "Plays the desired animation on this unit.";
+					data = "AttributeSystemSubcategory";
+					control = "KH_SubcategoryNoHeader1";
+				};
+				class KH_SetAnimation 
+				{
+					property = "KH_SetAnimation";
+					control = "KH_SetAnimation";
+					expression = 
+					"\
+						_value params ['_toggle', '_animation', '_duration', '_interruptable'];\
+						if (_toggle && !is3DEN) then {\
+							private _interruptType = 'NONE';\
+							if _interruptable then {\
+								_interruptType = 'GROUP';\
+							};\
+							[_this, [_animation], _this, _this, _this, _this, _this, parseNumber _duration, false, false, false, false, _interruptType, ''] call KH_fnc_setAnimation;\
+						};\
+					";
+					defaultValue = "[false, '', '', false]";
+					condition = "objectControllable";
+				};
+			};
+		};
 		class KH_SetCameraTexture
 		{
 			displayName = "KH Set Camera Texture";
@@ -428,7 +460,7 @@ class Object
 				class KH_ArrayBuilder
 				{
 					displayName = "Array Builder";
-					tooltip = "Specify one or more strings of global variables that will be made into an array, made public, and contain this entity and any other entities utilizing this function. In format ['globalVariable1', 'globalVariable2', 'globalVariable3']";
+					tooltip = "Specify an array of one or more strings of global variables that will be made into an array, made public, and contain this entity and any other entities utilizing this function. In format ['globalVariable1', 'globalVariable2', 'globalVariable3']";
 					property = "KH_ArrayBuilder";
 					control = "Edit";
 					expression = 
@@ -460,16 +492,38 @@ class Object
 					";
 					defaultValue = "''";
 				};
+				class KH_LockInventory
+				{
+					displayName = "Lock Inventory";
+					tooltip = "<true> locks the inventory of this entity, preventing the inventory from being accessible.";
+					property = "KH_LockInventory";
+					control = "Checkbox";
+					expression = 
+					"\
+						if (_value && !is3DEN) then {\
+							[\
+								[_this],\
+								{\
+									params ['_entity'];\
+									_entity lockInventory true;\
+								},\
+								['JIP', 'PLAYERS', _this, false, false],\
+								'THIS_FRAME'\
+							] call KH_fnc_execute;\
+						};\
+					";
+					defaultValue = "false";
+				};
 				class KH_SetRenegade
 				{
 					displayName = "Set Renegade";
-					tooltip = "Declares the unit as a renegade, causing units from its own and allied sides to attack it, but it will not attack them back.";
+					tooltip = "<true> declares the unit as a renegade, causing units from its own and allied sides to attack it, but it will not attack them back.";
 					property = "KH_SetRenegade";
 					control = "Checkbox";
 					expression = 
 					"\
 						if (_value && !is3DEN) then {\
-							_this addRating -9000;\
+							_this addRating -10000;\
 						};\
 					";
 					defaultValue = "false";

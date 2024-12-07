@@ -507,15 +507,129 @@ isNil {
 									};
 								};
 
+								case (_type == "CALLBACK"): {
+									private _callbackTarget = _target select 1;
+									private _callbackArguments = _target select 2;
+									private _callbackFunction = _target select 3;
+									private _id = format ["KH_eve_%1", [0, 36, "ALPHANUMERIC"] call KH_fnc_generateSymbols];
+
+									[
+										["CBA"],
+										_id,
+										[_arguments, _function],
+										{
+											_args params ["_arguments", "_function"];
+											private _argsCallback = [missionNamespace, "KH_var_eventHandlerArguments", _this, false] call KH_fnc_atomicVariable;
+
+											if (_function isEqualType "") then {
+												_function = (missionNamespace getVariable [_function, {}]);
+											};
+
+											private _expression = [
+												"private _argsCallback = (missionNamespace getVariable ['", _argsCallback, "', []]);
+												call ", _function, ";"
+											] joinString "";
+
+											_arguments call (compile _expression);
+
+											[_eventName, _localId] call CBA_fnc_removeEventHandler;
+										}
+									] call KH_fnc_addEventHandler;
+
+									private _callbackSendFunction = {
+										params ["_arguments", "_function", "_id", "_owner"];
+
+										if (_function isEqualType "") then {
+											[_id, [_arguments call (missionNamespace getVariable [_function, {}])], _owner] call CBA_fnc_ownerEvent;
+										}
+										else {
+											[_id, [_arguments call _function], _owner] call CBA_fnc_ownerEvent;
+										};
+									};
+
+									switch true do {
+										case (_callbackTarget isEqualType ""): {
+											case (_callbackTarget == "SERVER"): {
+												["KH_eve_executionServer", [[_callbackArguments, _callbackFunction, _id, clientOwner], _callbackSendFunction]] call CBA_fnc_serverEvent;
+												true;
+											};
+
+											case (_callbackTarget == "ADMIN"): {
+												if (KH_var_currentAdmin != 2) then {
+													["KH_eve_executionGlobal", [[_callbackArguments, _callbackFunction, _id, clientOwner], _callbackSendFunction], KH_var_currentAdmin] call CBA_fnc_ownerEvent;
+													true;
+												}
+												else {
+													false;
+												};
+											};
+
+											case ((parseNumber (_callbackTarget select [0, 1])) != 0): {
+												private _player = KH_var_allPlayerMachineUids get _callbackTarget;
+
+												if !(isNil "_player") then {
+													["KH_eve_executionGlobal", [[_callbackArguments, _callbackFunction, _id, clientOwner], _callbackSendFunction], _player] call CBA_fnc_ownerEvent;
+													true;
+												}
+												else {
+													false;
+												};
+											};
+
+											default {
+												private _unit = objNull;
+
+												{
+													if ((name _x) == _callbackTarget) then {
+														_unit = _x;
+														break;
+													};
+												} forEach ([["ALL"], true] call KH_fnc_getClients);
+												
+												if !(isNull _unit) then {
+													["KH_eve_executionGlobal", [[_callbackArguments, _callbackFunction, _id, clientOwner], _callbackSendFunction], _unit] call CBA_fnc_targetEvent;
+													true;
+												}
+												else {
+													false;
+												};
+											};
+										};
+
+										case (_callbackTarget isEqualType objNull): {
+											if !(isNull _callbackTarget) then {
+												["KH_eve_executionGlobal", [[_callbackArguments, _callbackFunction, _id, clientOwner], _callbackSendFunction], _callbackTarget] call CBA_fnc_targetEvent;
+												true;
+											}
+											else {
+												false;
+											};
+										};
+
+										case (_callbackTarget isEqualType 0): {
+											if (_callbackTarget in KH_var_allMachines) then {
+												["KH_eve_executionGlobal", [[_callbackArguments, _callbackFunction, _id, clientOwner], _callbackSendFunction], _callbackTarget] call CBA_fnc_ownerEvent;
+												true;
+											}
+											else {
+												false;
+											};
+										};
+										
+										default {
+											false;
+										};
+									};
+								};
+
 								case (_type == "PERSISTENT"): {
 									private _targetObject = _target select 1;
 
 									if (_targetObject isEqualType objNull) then {
 										if !(isNull _targetObject) then {
-											private _targetIndex = _target select 2;
-											private _sendoffArguments = _target select 3;
-											private _sendoffFunction = _target select 4;
-											private _jip = _target select 5;
+											private _sendoffArguments = _target select 2;
+											private _sendoffFunction = _target select 3;
+											private _jip = _target select 4;
 											private _id = format ["KH_var_%1", [0, 36, "ALPHANUMERIC"] call KH_fnc_generateSymbols];
 											_targetObject setVariable [_id, "ACTIVE", true];
 											["KH_eve_executionGlobal", [_arguments, _function], _targetObject] call CBA_fnc_targetEvent;
@@ -540,8 +654,6 @@ isNil {
 																	switch true do {
 																		case (_idState == "ACTIVE"): {
 																			if _isLocal then {
-																				_arguments insert [_targetIndex, [_targetObject]];
-
 																				if (_function isEqualType "") then {
 																					_arguments call (missionNamespace getVariable [_function, {}]);
 																				}
@@ -550,8 +662,6 @@ isNil {
 																				};
 																			}
 																			else {
-																				_sendoffArguments insert [_targetIndex, [_targetObject]];
-
 																				if (_sendoffFunction isEqualType "") then {
 																					_sendoffArguments call (missionNamespace getVariable [_sendoffFunction, {}]);
 																				}
@@ -616,8 +726,6 @@ isNil {
 																							switch true do {
 																								case (_idState == "ACTIVE"): {
 																									if _isLocal then {
-																										_arguments insert [_targetIndex, [_targetObject]];
-
 																										if (_function isEqualType "") then {
 																											_arguments call (missionNamespace getVariable [_function, {}]);
 																										}
@@ -626,8 +734,6 @@ isNil {
 																										};
 																									}
 																									else {
-																										_sendoffArguments insert [_targetIndex, [_targetObject]];
-
 																										if (_sendoffFunction isEqualType "") then {
 																											_sendoffArguments call (missionNamespace getVariable [_sendoffFunction, {}]);
 																										}

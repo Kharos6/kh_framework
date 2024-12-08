@@ -26,30 +26,21 @@ switch true do {
 			_persistentId = format ["KH_var_%1", [0, 36, "ALPHANUMERIC"] call KH_fnc_generateSymbols];
 			private _entity = _type select 1;
 
-			[
-				[_entity, _persistentId],
-				{
-					params ["_entity", "_persistentId"];
-					_entity setVariable [_persistentId, true, true];
-					missionNamespace setVariable [_persistentId, true, true];
-				},
-				"SERVER",
-				"THIS_FRAME"
-			] call KH_fnc_execute;
-
 			_handler = [
 				[_type, _event, _arguments, _function, _persistentId], 
 				{
 					params ["_type", "_event", "_arguments", "_function", "_persistentId"];
 					private _newType = [_type select 0, _type select 1, false];
-					private _persistentEntityId = [missionNamespace, "KH_var_persistentEventHandlerEntity", _entity, false] call KH_fnc_atomicVariable;
+					private _entity = _type select 1;
+					private _persistentEntity = [missionNamespace, "KH_var_persistentEventHandlerEntity", _entity, false] call KH_fnc_atomicVariable;
+					_entity setVariable [_persistentId, true];
 					
 					private _newFunction = compile ([
-						"if (((missionNamespace getVariable '", _persistentEntityId, "') getVariable ['", _persistentId, "', true]) && (missionNamespace getVariable ['", _persistentId, "', true])) then {
+						"if (((missionNamespace getVariable '", _persistentEntity, "') getVariable ['", _persistentId, "', true])) then {
 							call ", _function, ";
 						}
-						else {
-							removeEventHandler [_thisEvent, _thisEventHandler];
+						else { 
+							(missionNamespace getVariable '", _persistentEntity, "') removeEventHandler [_thisEvent, _thisEventHandler];
 						};"
 					] joinString "");
 
@@ -92,8 +83,8 @@ switch true do {
 		missionNamespace setVariable [_handlerId, _handler];
 
 		(_type select 1) addPublicVariableEventHandler (compile ([
-			"if (missionNamespace getVariable ['", _handler, "', true]) then {", 
-				_expression, 
+			"if (missionNamespace getVariable ['", _handler, "', true]) then { 
+				call ", _expression, 
 			"};"
 		] joinString ""));
 	};
@@ -123,5 +114,5 @@ if (_persistentId == "") then {
 	[_type, _event, _handler, clientOwner];
 }
 else {
-	[_handler, _persistentId];
+	[_handler, _type select 1, _persistentId];
 };

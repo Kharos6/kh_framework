@@ -136,6 +136,7 @@ class Object
 								{\
 									(CBA_missionTime > 0);\
 								},\
+								{\
 									params ['_entity', '_vehicles', '_height', '_distance', '_maximumParticipants', '_duration', '_objectName'];\
 									private _parsedVehicles = [];\
 									{\
@@ -208,6 +209,7 @@ class Object
 								{\
 									(CBA_missionTime > 0);\
 								},\
+								{\
 									params ['_entity', '_positionEntity', '_targetEntity', '_texture', '_renderTarget'];\
 									[[_entity, missionNamespace getVariable [_positionEntity, objNull], missionNamespace getVariable [_targetEntity, objNull], parseNumber _texture, _renderTarget + 1], 'KH_fnc_setCameraTexture', ['JIP', 'PLAYERS', _entity, true, false], 'THIS_FRAME'] call KH_fnc_execute;\
 								},\
@@ -292,6 +294,7 @@ class Object
 								{\
 									(CBA_missionTime > 0);\
 								},\
+								{\
 									params ['_entity', '_position', '_rotation', '_transition', '_heal', '_freefallHeight', '_initialization', '_name'];\
 									[\
 										[_entity, missionNamespace getVariable [_position, objNull], missionNamespace getVariable [_rotation, objNull], parseNumber _transition, _heal, parseNumber _freefallHeight, compile _initialization, _name],\

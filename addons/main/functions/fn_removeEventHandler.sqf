@@ -53,9 +53,9 @@ else {
 	[
 		_handler,
 		{
-			params ["_handlerId", "_persistentId"];
+			params ["_handlerId", "_entity", "_persistentId"];
 			[_handlerId, "TERMINATE"] call KH_fnc_manageHandler;
-			missionNamespace setVariable [_persistentId, false, true];
+			_entity setVariable [_persistentId, false, true];
 		},
 		"SERVER",
 		"THIS_FRAME"

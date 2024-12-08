@@ -81,7 +81,7 @@ if (isNil "KH_var_loadoutsSet") then {
 					};
 				}
 				else {
-					private _currentLoadout = getUnitLoadout _x;
+					private _currentLoadout = getUnitLoadout _player;
 					KH_var_initialPlayerLoadouts insert [[_uid, _currentLoadout]];
 				};
 			};

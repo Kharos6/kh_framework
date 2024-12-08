@@ -27,10 +27,10 @@ else {
 		private _backpack = "";
 		private _backpackItems = [];
 
-		if !(isNull (unitBackpack _unit)) then {
+		if !(isNull (unitBackpack _x)) then {
 			_backpackPresent = true;
-			_backpack = backpack _unit;
-			_backpackItems = backpackItems _unit;
+			_backpack = backpack _x;
+			_backpackItems = backpackItems _x;
 		};
 
 		[
@@ -52,9 +52,12 @@ else {
 				};
 
 				if _backpackPresent then {
-					_unit addEventHandler [
-						"SlotItemChanged", 
+					[
+						["STANDARD", _unit, false],
+						"SlotItemChanged",
+						[_backpack, _backpackItems],
 						{
+							_args params ["_backpack", "_backpackItems"];
 							private _unit = _this select 0;
 							private _slot = _this select 2;
 							private _assigned = _this select 3;
@@ -69,7 +72,7 @@ else {
 								_unit removeEventHandler [_thisEvent, _thisEventHandler];
 							};
 						}
-					];
+					] call KH_fnc_addEventHandler;
 				};
 			},
 			_x,

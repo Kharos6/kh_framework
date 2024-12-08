@@ -11,50 +11,46 @@ if (isNil "KH_var_curatorsSet") then {
 		private _uid = getPlayerUID _x;
 
 		if (_uid in KH_var_curators) then {
-			private _index = KH_var_curators find _uid;
-
-			if (_index != -1) then {
-				private _module = _modules select _index;
-				
-				if !(isNull (getAssignedCuratorUnit _module)) then {
-					unassignCurator _module;
-				};
-
-				[
-					{
-						private _module = _this select 1;
-						(isNull (getAssignedCuratorUnit _x));
-					}, 
-					{
-						params ["_player", "_module"];
-
-						[
-							{
-								params ["_player", "_module"];
-								_player assignCurator _module;
-
-								if KH_var_curatorsHidden then {
-									_player hideObjectGlobal true;
-								};
-
-								if KH_var_curatorDamageDisabled then {
-									[
-										[],
-										{
-											player allowDamage false;
-										},
-										_player,
-										"THIS_FRAME"
-									] call KH_fnc_execute;
-								};
-							}, 
-							[_player, _module]
-						] call CBA_fnc_execNextFrame;
-					}, 
-					[_x, _module],
-					30
-				] call CBA_fnc_waitUntilAndExecute;
+			private _module = _modules select (KH_var_curators find _uid);
+			
+			if !(isNull (getAssignedCuratorUnit _module)) then {
+				unassignCurator _module;
 			};
+
+			[
+				{
+					private _module = _this select 1;
+					(isNull (getAssignedCuratorUnit _module));
+				}, 
+				{
+					params ["_player", "_module"];
+
+					[
+						{
+							params ["_player", "_module"];
+							_player assignCurator _module;
+
+							if KH_var_curatorsHidden then {
+								_player hideObjectGlobal true;
+							};
+
+							if KH_var_curatorDamageDisabled then {
+								[
+									[],
+									{
+										player allowDamage false;
+									},
+									_player,
+									"THIS_FRAME"
+								] call KH_fnc_execute;
+							};
+						}, 
+						[_player, _module]
+					] call CBA_fnc_execNextFrame;
+				}, 
+				[_x, _module],
+				30
+			] call CBA_fnc_waitUntilAndExecute;
 		};
 	} forEach KH_var_allPlayerUnits;
 
@@ -68,50 +64,46 @@ if (isNil "KH_var_curatorsSet") then {
 				private _uid = getPlayerUID _player;
 
 				if (_uid in KH_var_curators) then {
-					private _index = KH_var_curators find _uid;
-					
-					if (_index != -1) then {
-						private _module = KH_var_curatorModules select _index;
+					private _module = KH_var_curatorModules select (KH_var_curators find _uid);
 
-						if !(isNull (getAssignedCuratorUnit _module)) then {
-							unassignCurator _module;
-						};
-
-						[
-							{
-								private _module = _this select 1;
-								(isNull (getAssignedCuratorUnit _x));
-							}, 
-							{
-								params ["_player", "_module"];
-
-								[
-									{
-										params ["_player", "_module"];
-										_player assignCurator _module;
-
-										if KH_var_curatorsHidden then {
-											_player hideObjectGlobal true;
-										};
-
-										if KH_var_curatorDamageDisabled then {
-											[
-												[],
-												{
-													player allowDamage false;
-												},
-												_player,
-												"THIS_FRAME"
-											] call KH_fnc_execute;
-										};
-									}, 
-									[_player, _module]
-								] call CBA_fnc_execNextFrame;
-							}, 
-							[_player, _module],
-							30
-						] call CBA_fnc_waitUntilAndExecute;
+					if !(isNull (getAssignedCuratorUnit _module)) then {
+						unassignCurator _module;
 					};
+
+					[
+						{
+							private _module = _this select 1;
+							(isNull (getAssignedCuratorUnit _module));
+						}, 
+						{
+							params ["_player", "_module"];
+
+							[
+								{
+									params ["_player", "_module"];
+									_player assignCurator _module;
+
+									if KH_var_curatorsHidden then {
+										_player hideObjectGlobal true;
+									};
+
+									if KH_var_curatorDamageDisabled then {
+										[
+											[],
+											{
+												player allowDamage false;
+											},
+											_player,
+											"THIS_FRAME"
+										] call KH_fnc_execute;
+									};
+								}, 
+								[_player, _module]
+							] call CBA_fnc_execNextFrame;
+						}, 
+						[_player, _module],
+						30
+					] call CBA_fnc_waitUntilAndExecute;
 				}
 				else {
 					{

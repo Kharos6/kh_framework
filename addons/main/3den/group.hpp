@@ -42,6 +42,7 @@ class Group
 								{\
 									(CBA_missionTime > 0);\
 								},\
+								{\
 									params ['_group', '_targets'];\
 									{\
 										_group ignoreTarget [missionNamespace getVariable [_x, objNull], true];\

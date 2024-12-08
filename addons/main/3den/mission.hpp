@@ -376,7 +376,7 @@ class Mission
 											[[_positionEntities, _targetEntities, _fovs, _commitTimes, _durations, _visionTypes, _cinematicBorders, _disableUserInput], 'KH_fnc_cameraSequence', _unit, 'THIS_FRAME'] call KH_fnc_execute;\
 										}\
 										else {\
-											if ((_unit in KH_var_initialPlayerUnits) && (!KH_var_playersInitialized || (CBA_missionTime < 60)) then {\
+											if ((_unit in KH_var_initialPlayerUnits) && !KH_var_playersInitialized || (CBA_missionTime < 60)) then {\
 												[[_positionEntities, _targetEntities, _fovs, _commitTimes, _durations, _visionTypes, _cinematicBorders, _disableUserInput], 'KH_fnc_cameraSequence', _unit, 'THIS_FRAME'] call KH_fnc_execute;\
 											};\
 										};\

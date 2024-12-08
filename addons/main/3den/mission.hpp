@@ -360,7 +360,15 @@ class Mission
 								private _parsedPositionEntities = [];\
 								private _parsedTargetEntities = [];\
 								{\
-									_parsedPositionEntities pushBack (missionNamespace getVariable [_x, objNull]);\
+									private _position = '';\
+									if (('[' in (_x select 0)) || (']' in (_x select 0))) then {\
+										_position = parseSimpleArray (_x select 0);\
+									}\
+									else {\
+										_position = missionNamespace getVariable [_x select 0, objNull];\
+									};\
+									private _attach = _x select 1;\
+									_parsedPositionEntities pushBack [_position, _attach];\
 								} forEach (parseSimpleArray _positionEntities);\
 								{\
 									_parsedTargetEntities pushBack (missionNamespace getVariable [_x, objNull]);\
@@ -410,7 +418,17 @@ class Mission
 							if (_toggle && !is3DEN && isServer && (_vehicle != '')) then {\
 								private _assignedVehicle = missionNamespace getVariable [_vehicle, objNull];\
 								if !(isNull _assignedVehicle) then {\
-									[_assignedVehicle, parseNumber _duration, parseNumber _framerate, _weaponFire, parseNumber _waitTime] spawn BIS_fnc_unitCapture;\
+									[\
+										{\
+											(CBA_missionTime > 0);\
+										},\
+										{\
+											params ['_vehicle', '_weaponFire', '_waitTime', '_duration', '_framerate'];\
+											[_vehicle, parseNumber _duration, parseNumber _framerate, _weaponFire, parseNumber _waitTime] spawn BIS_fnc_unitCapture;\
+										},\
+										[_assignedVehicle, _weaponFire, _waitTime, _duration, _framerate],\
+										30\
+									] call CBA_fnc_waitUntilAndExecute;\
 								};\
 							};\
 						";
@@ -440,7 +458,7 @@ class Mission
 							if (_toggle && !is3DEN && isServer) then {\
 								[\
 									{\
-										(time > 0);
+										(CBA_missionTime > 0);\
 									},\
 									{\
 										params ['_3dMode', '_ownership', '_scheduler'];\

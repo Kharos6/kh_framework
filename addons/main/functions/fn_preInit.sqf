@@ -131,15 +131,6 @@ if isServer then {
 			publicVariable "KH_var_allPlayerUnits";
 		}
 	] call CBA_fnc_addEventHandler;
-
-	[
-		"KH_eve_missionEnded", 
-		{
-			[] call KH_fnc_serverEndInit;
-			[[], KH_fnc_headlessEndInit, "HEADLESS", "THIS_FRAME"] call KH_fnc_execute;
-			[[], KH_fnc_playerEndInit, "PLAYERS", "THIS_FRAME"] call KH_fnc_execute;
-		}
-	] call CBA_fnc_addEventHandler;
 	
 	[
 		{

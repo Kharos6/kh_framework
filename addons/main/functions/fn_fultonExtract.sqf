@@ -41,6 +41,7 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 		_mainFulton allowDamage false;
 		private _fultonActive = [missionNamespace, "KH_var_fultonActive", false, true] call KH_fnc_atomicVariable;
 		private _currentFultonParticipants = [missionNamespace, "KH_var_currentFultonParticipants", [], true] call KH_fnc_atomicVariable;
+		private _fultonBox = [missionNamespace, "KH_var_fultonBox", _object, true] call KH_fnc_atomicVariable;
 		private _mainFultonVelocity = [missionNamespace, "KH_var_fultonExtractVelocity", 0.1, false] call KH_fnc_atomicVariable;
 		private _fultonRemoteActions = [missionNamespace, "KH_var_fultonRemoteActions", false, false] call KH_fnc_atomicVariable;
 		private _fultonAnchor = createVehicle ["Land_Can_V2_F", _object, [], 0, "CAN_COLLIDE"];
@@ -203,7 +204,7 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 
 		[
 			{
-				_args params ["_object", "_maximumParticipants", "_objectName", "_mainFulton", "_fultonActive", "_currentFultonParticipants", "_fultonFunction", "_fultonRemoteActions"];
+				_args params ["_object", "_maximumParticipants", "_objectName", "_mainFulton", "_fultonActive", "_currentFultonParticipants", "_fultonFunction", "_fultonRemoteActions", "_fultonBox"];
 				
 				if !(missionNamespace getVariable [_fultonActive, false]) then {
 					{
@@ -216,8 +217,8 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 									format ["Attach %1 To Fulton %2", name _x, _objectName],
 									"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_loadVehicle_ca.paa",
 									"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_loadVehicle_ca.paa",
-									["(((count (missionNamespace getVariable ['", _currentFultonParticipants, "', []])) <= ", _maximumParticipants, ") && !(_target getVariable ['KH_var_fultonAttached', false]) && ((_target distance ", _object, ") < 6) && (_target isNotEqualTo _this) && ((_this distance _target) < 4) && (alive _target))"] joinString "",
-									["(((count (missionNamespace getVariable ['", _currentFultonParticipants, "', []])) <= ", _maximumParticipants, ") && !(_target getVariable ['KH_var_fultonAttached', false]) && ((_target distance ", _object, ") < 6) && (_target isNotEqualTo _caller) && ((_caller distance _target) < 4) && (alive _target))"] joinString "",
+									["(((count (missionNamespace getVariable ['", _currentFultonParticipants, "', []])) <= ", _maximumParticipants, ") && !(_target getVariable ['KH_var_fultonAttached', false]) && ((_target distance (missionNamespace getVariable '", _fultonBox, "')) < 6) && (_target isNotEqualTo _this) && ((_this distance _target) < 4) && (alive _target))"] joinString "",
+									["(((count (missionNamespace getVariable ['", _currentFultonParticipants, "', []])) <= ", _maximumParticipants, ") && !(_target getVariable ['KH_var_fultonAttached', false]) && ((_target distance (missionNamespace getVariable '", _fultonBox, "')) < 6) && (_target isNotEqualTo _caller) && ((_caller distance _target) < 4) && (alive _target))"] joinString "",
 									{},
 									{},
 									{
@@ -274,7 +275,7 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 				};
 			},
 			1,
-			[_object, _maximumParticipants, _objectName, _mainFulton, _fultonActive, _currentFultonParticipants, _fultonFunction, _fultonRemoteActions]
+			[_object, _maximumParticipants, _objectName, _mainFulton, _fultonActive, _currentFultonParticipants, _fultonFunction, _fultonRemoteActions, _fultonBox]
 		] call CBA_fnc_addPerFrameHandler;
 
 		[

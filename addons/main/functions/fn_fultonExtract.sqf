@@ -100,16 +100,11 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 							private _mainFulton = _this select 2;
 							private _rope = _this select 5;
 
-							if ((isNil "_object") || (isNil "_mainFulton") || (isNil "_rope")) then {
+							if (!(isNull (objectParent _participant)) || !(_participant getVariable ["KH_var_fultonAttached", false]) || (isNull _object) || (isNull _mainFulton) || (isNull _rope) || !(alive _participant) || ((ropeAttachedObjects _mainFulton) isEqualTo [])) then {
 								true;
 							}
 							else {
-								if (!(isNull (objectParent _participant)) || !(_participant getVariable ["KH_var_fultonAttached", false]) || (isNull _object) || (isNull _mainFulton) || (isNull _rope) || !(alive _participant) || ((ropeAttachedObjects _mainFulton) isEqualTo [])) then {
-									true;
-								}
-								else {
-									false;
-								};
+								false;
 							};
 						}, 
 						{
@@ -286,129 +281,157 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 					{
 						_args params ["_object", "_vehicles", "_height", "_distance", "_duration", "_mainFulton", "_fultonActive", "_currentFultonParticipants", "_mainFultonVelocity", "_fultonAnchor", "_fultonRope"];
 						
-						if !(isNil "_mainFulton") then {
-							if !(isNull _mainFulton) then {
-								{
-									if ((_x distance _mainFulton) < _distance) then {
-										private _vehicle = _x;
-										
-										{
-											[
-												[_x, _vehicle, _duration],
-												{
-													params ["_unit", "_vehicle", "_duration"];
-													_unit setVariable ["KH_var_fultonAttached", false, true];
-													_unit allowDamage false;
-													_unit setUnitFreefallHeight 1000;
+						if !(isNull _mainFulton) then {
+							{
+								if ((_x distance _mainFulton) < _distance) then {
+									private _vehicle = _x;
+									
+									{
+										[
+											[_x, _vehicle, _duration],
+											{
+												params ["_unit", "_vehicle", "_duration"];
+												_unit setVariable ["KH_var_fultonAttached", false, true];
+												_unit allowDamage false;
+												_unit setUnitFreefallHeight 1000;
 
-													[
-														[_unit],
-														{
-															params ["_unit"];
-															_unit switchMove ["Para_Pilot"];
-														},
-														"GLOBAL",
-														"THIS_FRAME"
-													] call KH_fnc_execute;
+												[
+													[_unit],
+													{
+														params ["_unit"];
+														_unit switchMove ["Para_Pilot"];
+													},
+													"GLOBAL",
+													"THIS_FRAME"
+												] call KH_fnc_execute;
 
-													if (isPlayer _unit) then {
-														addCamShake [2, _duration * 2, 18];
-													};
+												if (isPlayer _unit) then {
+													addCamShake [2, _duration * 2, 18];
+												};
 
-													private _targetTime = CBA_missionTime + _duration;
+												private _targetTime = CBA_missionTime + _duration;
 
-													[
-														[_unit, _vehicle, _targetTime],
-														{
-															params ["_unit", "_vehicle", "_targetTime"];
+												[
+													[_unit, _vehicle, _targetTime],
+													{
+														params ["_unit", "_vehicle", "_targetTime"];
+
+														[
+															["MISSION"],
+															"Draw3D",
+															[_unit, _vehicle, _targetTime],
+															{
+																_args params ["_unit", "_vehicle", "_targetTime"];
+
+																if (!(CBA_missionTime >= _targetTime) && !((_unit distance _vehicle) < 30)) then {
+																	drawLine3D [
+																		_unit modelToWorld [0, 0, 0.5], 
+																		_vehicle modelToWorld [0, 0, 0], 
+																		[0.8, 0.6, 0.4, 1],
+																		15
+																	]
+																}
+																else {
+																	removeMissionEventHandler [_thisEvent, _thisEventHandler];
+																};
+															}
+														] call KH_fnc_addEventHandler;
+													},
+													"GLOBAL",
+													"THIS_FRAME"
+												] call KH_fnc_execute;
+
+												[
+													{
+														_args params ["_unit", "_vehicle", "_duration"];
+														private _remainingTime = _unit getVariable ["KH_var_fultonRemainingTime", _duration];
+														private _timeStep = diag_deltaTime;
+														_remainingTime = _remainingTime - _timeStep;
+														_unit setVariable ["KH_var_fultonRemainingTime", _remainingTime];
+
+														if ((_remainingTime <= 0) || ((_unit distance _vehicle) < 30)) then {
+															_unit switchMove [""];
 
 															[
-																["MISSION"],
-																"Draw3D",
-																[_unit, _vehicle, _targetTime],
 																{
-																	_args params ["_unit", "_vehicle", "_targetTime"];
+																	params ["_unit", "_vehicle"];
+																	_unit moveInAny _vehicle;
 
-																	if (!(CBA_missionTime >= _targetTime) && !((_unit distance _vehicle) < 30)) then {
-																		drawLine3D [
-																			_unit modelToWorld [0, 0, 0.5], 
-																			_vehicle modelToWorld [0, 0, 0], 
-																			[0.8, 0.6, 0.4, 1],
-																			15
-																		]
-																	}
-																	else {
-																		removeMissionEventHandler [_thisEvent, _thisEventHandler];
-																	};
-																}
-															] call KH_fnc_addEventHandler;
-														},
-														"GLOBAL",
-														"THIS_FRAME"
-													] call KH_fnc_execute;
+																	[
+																		{
+																			params ["_unit", "_vehicle"];
 
-													[
-														{
-															_args params ["_unit", "_vehicle", "_duration"];
-															private _remainingTime = _unit getVariable ["KH_var_fultonRemainingTime", _duration];
-															private _timeStep = diag_deltaTime;
-															_remainingTime = _remainingTime - _timeStep;
-															_unit setVariable ["KH_var_fultonRemainingTime", _remainingTime];
+																			if ((objectParent _unit) != _vehicle) then {
+																				_unit moveInAny _vehicle;
+																				private _timeout = CBA_missionTime + 15;
 
-															if ((_remainingTime <= 0) || ((_unit distance _vehicle) < 30)) then {
-																_unit switchMove [""];
+																				[
+																					{
+																						_args params ["_unit", "_vehicle", "_timeout"];
+																						private _finished = false;
 
-																[
-																	{
-																		params ["_unit", "_vehicle"];
-																		_unit moveInAny _vehicle;
-																		_unit allowDamage true;
-																		_unit setUnitFreefallHeight -1;
-																	}, 
-																	[_unit, _vehicle]
-																] call CBA_fnc_execNextFrame;
+																						if ((objectParent _unit) != _vehicle) then {
+																							_unit moveInAny _vehicle;
+																						}
+																						else {
+																							_finished = true;
+																							_unit allowDamage true;
+																							_unit setUnitFreefallHeight -1;
+																							[_handle] call CBA_fnc_removePerFrameHandler;
+																						};
 
-																_unit setVariable ["KH_var_fultonRemainingTime", nil];
-																[_handle] call CBA_fnc_removePerFrameHandler;
-															} 
-															else {
-																if ((animationState _unit) != "Para_Pilot") then {
-																	_unit switchMove ["Para_Pilot"];
-																};
+																						if ((CBA_missionTime > _timeout) && !_finished) then {
+																							_unit allowDamage true;
+																							_unit setUnitFreefallHeight -1;
+																							[_handle] call CBA_fnc_removePerFrameHandler;
+																						};
+																					},
+																					0,
+																					[_unit, _vehicle, _timeout]
+																				] call CBA_fnc_addPerFrameHandler;
+																			};
+																		}, 
+																		[_unit, _vehicle]
+																	] call CBA_fnc_execNextFrame;
+																}, 
+																[_unit, _vehicle]
+															] call CBA_fnc_execNextFrame;
 
-																private _unitPosition = getPosATL _unit;
-																private _vehiclePosition = getPosATL _vehicle;
-																private _vehicleRotation = [_vehicle, objNull] call KH_fnc_getRotation;
-																private _relativeRotation = [_unit, _vehicle] call KH_fnc_getRotation;
-																private _velocity = (_vehiclePosition vectorDiff _unitPosition) vectorMultiply (3 / _remainingTime);
-																[_unit, [-(_relativeRotation select 0) - 75, 0, (_relativeRotation select 2) + 180], false] call KH_fnc_setRotation;
-																_unit setVelocity _velocity;
-																_unit setAngularVelocity [0, 0, 0];
+															_unit setVariable ["KH_var_fultonRemainingTime", nil];
+															[_handle] call CBA_fnc_removePerFrameHandler;
+														} 
+														else {
+															if ((animationState _unit) != "Para_Pilot") then {
+																_unit switchMove ["Para_Pilot"];
 															};
-														},
-														0,
-														[_unit, _vehicle, _duration]
-													] call CBA_fnc_addPerFrameHandler;
-												},
-												_x,
-												"THIS_FRAME"
-											] call KH_fnc_execute;
-										} forEach (missionNamespace getVariable [_currentFultonParticipants, []]);
 
-										missionNamespace setVariable [_fultonActive, true, true];
-										ropeDestroy _fultonRope;
-										deleteVehicle _fultonAnchor;
-										deleteVehicle _mainFulton;
-										deleteVehicle _object;
-										[_handle] call CBA_fnc_removePerFrameHandler;
-									};
-								} forEach _vehicles;
-							}
-							else {
-								ropeDestroy _fultonRope;
-								deleteVehicle _fultonAnchor;
-								[_handle] call CBA_fnc_removePerFrameHandler;
-							};
+															private _unitPosition = getPosATL _unit;
+															private _vehiclePosition = getPosATL _vehicle;
+															private _vehicleRotation = [_vehicle, objNull] call KH_fnc_getRotation;
+															private _relativeRotation = [_unit, _vehicle] call KH_fnc_getRotation;
+															private _velocity = (_vehiclePosition vectorDiff _unitPosition) vectorMultiply (3 / _remainingTime);
+															[_unit, [-(_relativeRotation select 0) - 75, 0, (_relativeRotation select 2) + 180], false] call KH_fnc_setRotation;
+															_unit setVelocity _velocity;
+															_unit setAngularVelocity [0, 0, 0];
+														};
+													},
+													0,
+													[_unit, _vehicle, _duration]
+												] call CBA_fnc_addPerFrameHandler;
+											},
+											_x,
+											"THIS_FRAME"
+										] call KH_fnc_execute;
+									} forEach (missionNamespace getVariable [_currentFultonParticipants, []]);
+
+									missionNamespace setVariable [_fultonActive, true, true];
+									ropeDestroy _fultonRope;
+									deleteVehicle _fultonAnchor;
+									deleteVehicle _mainFulton;
+									deleteVehicle _object;
+									[_handle] call CBA_fnc_removePerFrameHandler;
+								};
+							} forEach _vehicles;
 						}
 						else {
 							ropeDestroy _fultonRope;

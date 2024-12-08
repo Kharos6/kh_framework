@@ -3,10 +3,8 @@ params ["_unit", "_attributes", ["_group", true], ["_variableName", false], ["_i
 if _group then {
 	private _savedGroup = _attributes select 1;
 
-	if !(isNil "_savedGroup") then {
-		if !(isNull _savedGroup) then {
-			[_unit] joinSilent _savedGroup;
-		};
+	if !(isNull _savedGroup) then {
+		[_unit] joinSilent _savedGroup;
 	};
 };
 
@@ -53,10 +51,8 @@ if _rotation then {
 if _vehicle then {
 	private _savedVehicle = _attributes select 10;
 
-	if !(isNil "_savedVehicle") then {
-		if !(isNull _savedVehicle) then {
-			_unit moveInAny _savedVehicle;
-		};
+	if !(isNull _savedVehicle) then {
+		_unit moveInAny _savedVehicle;
 	};
 };
 

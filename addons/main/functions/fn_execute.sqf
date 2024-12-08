@@ -375,7 +375,7 @@ isNil {
 																};
 
 																case (_dependency isEqualType objNull): {
-																	if !(isNil "_dependency") then {
+																	if !(isNull _dependency) then {
 																		private _idState = missionNamespace getVariable [_id, "ACTIVE"];
 
 																		if !(_idState == "INACTIVE") then {
@@ -413,15 +413,15 @@ isNil {
 																					if !(missionNamespace getVariable [_dependency, true]) then {
 																						_condition = false;
 																						break;
-																					}
+																					};
 																				};
 																			};
 
 																			case (_x isEqualType objNull): {
-																				if (isNil "_dependency") then {
+																				if (isNull _dependency) then {
 																					_condition = false;
 																					break;
-																				}
+																				};
 																			};
 																		};
 																	} forEach _dependency;
@@ -443,6 +443,24 @@ isNil {
 																	}
 																	else {
 																		missionNamespace setVariable [_id, "INACTIVE"];
+																	};
+																};
+
+																case (_dependency isEqualType true): {
+																	if _dependency then {
+																		private _idState = missionNamespace getVariable [_id, "ACTIVE"];
+
+																		if !(_idState == "INACTIVE") then {
+																			switch true do {
+																				case (_idState == "ACTIVE"): {
+																					["KH_eve_executionGlobal", [_arguments, _function], _joiningMachine] call CBA_fnc_ownerEvent;
+																				};
+
+																				case (_idState == "TERMINATE"): {
+																					[_eventName, _localId] call CBA_fnc_removeEventHandler;
+																				};		
+																			};
+																		};
 																	};
 																};
 															};

@@ -16,7 +16,7 @@ private _simpleObjects = [];
 				_simpleObject setVectorDirAndUp _vectorDirAndUp;
 				[_simpleObject] call _initialization;
 			},
-			["JIP", "GLOBAL", objNull, false, false],
+			["JIP", "GLOBAL", true, false, false],
 			"THIS_FRAME"
 		] call KH_fnc_execute;
 	}

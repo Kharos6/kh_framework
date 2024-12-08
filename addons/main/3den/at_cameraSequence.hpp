@@ -19,13 +19,13 @@ class KH_CameraSequence: Title
 			w = QUOTE(5 * GRID_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
-		class KH_PositionEntitiesTitle: Title
+		class KH_PositionsTitle: Title
 		{
-			text = "Position Entities";
-			tooltip = "Arrays that dictate the position of the camera, in format: [_object, _attach]. _object is the string of the variable name of the entity which the position of will be used for the camera. _attach is a boolean where <true> instantly attaches the camera to _object, and <false> transitions the camera to _object position.";
+			text = "Positions";
+			tooltip = "Array of arrays that dictate the position of the camera, in format: [_position, _attach]. _position is the string of either the variable name of the entity which the position of will be used for the camera, or an <AGL> position array in format: [x, y, z]. _attach is a boolean where <true> instantly attaches the camera to _position, and <false> transitions the camera to _position, only effective and necessary if _position is an entity.";
 			y = QUOTE(2 * CTRL_DEFAULT_H + 5 * CTRL_DEFAULT_Y);
 		};
-		class KH_PositionEntities: ctrlEdit
+		class KH_Positions: ctrlEdit
 		{
 			idc = 101;
 			x = QUOTE(CTRL_DEFAULT_X);
@@ -33,13 +33,13 @@ class KH_CameraSequence: Title
 			w = QUOTE(CTRL_DEFAULT_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
-		class KH_TargetEntitiesTitle: Title
+		class KH_TargetsTitle: Title
 		{
-			text = "Target Entities";
-			tooltip = "Array of strings of variable names of entities that the camera will track.";
+			text = "Targets";
+			tooltip = "Array of strings of either variable names of entities that the camera will track, or <AGL> position arrays in format [x, y, z].";
 			y = QUOTE(3 * CTRL_DEFAULT_H + 10 * CTRL_DEFAULT_Y);
 		};
-		class KH_TargetEntities: ctrlEdit
+		class KH_Targets: ctrlEdit
 		{
 			idc = 102;
 			x = QUOTE(CTRL_DEFAULT_X);
@@ -50,7 +50,7 @@ class KH_CameraSequence: Title
 		class KH_FOVsTitle: Title
 		{
 			text = "FOVs";
-			tooltip = "Array of scalars of FOV values of the camera, from 0.01 to 8.5.";
+			tooltip = "Array of scalars of FOV values of the camera, from 0.01 to 8.5. Default FOV is 0.75.";
 			y = QUOTE(4 * CTRL_DEFAULT_H + 15 * CTRL_DEFAULT_Y);
 		};
 		class KH_FOVs: ctrlEdit

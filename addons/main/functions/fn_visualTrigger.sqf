@@ -23,7 +23,7 @@ missionNamespace setVariable [_id, "ACTIVE", true];
 							_args params ["_entity", "_distance", "_conditionPlayer", "_event"];
 
 							if ([] call _conditionPlayer) then {						
-								if !(isNil "_entity") then {
+								if !(isNull _entity) then {
 									if (((player distance _entity) < _distance) && (alive player) && !(player getVariable ["KH_var_usingExternalCamera", false]) && !(player in ([["CURATORS"], true] call KH_fnc_getClients))) then {
 										[_event, [worldToScreen (ASLToAGL (getPosASL _entity)), player]] call CBA_fnc_serverEvent;
 									};
@@ -63,7 +63,7 @@ missionNamespace setVariable [_id, "ACTIVE", true];
 					_args params ["_entity", "_screenMultiplier", "_proximity", "_conditionServer", "_trueFunction", "_falseFunction", "_repeatable", "_shared", "_firstTrigger", "_conditionVariable", "_playerVariable", "_entityVariable"];
 					
 					if ([] call _conditionServer) then {
-						if !(isNil "_entity") then {
+						if !(isNull _entity) then {
 							private _conditionVariableId = format ["%1_%2", _conditionVariable, getPlayerUID _currentPlayer];
 												
 							if ((_currentPlayer distance _entity) < _proximity) then {

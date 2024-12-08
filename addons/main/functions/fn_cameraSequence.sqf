@@ -44,7 +44,10 @@ if (alive player) then {
 
 		if (_i != 0) then {
 			_duration = [_durations select [0, _i]] call KH_fnc_arraySum;
-		};	
+		}
+		else {
+			_duration = _duration + 0.01;
+		};
 
 		[
 			{

@@ -28,7 +28,7 @@ if _state then {
 					[]
 				] call CBA_fnc_addPerFrameHandler;
 			},
-			["JIP", "PLAYERS", objNull, false, false],
+			["JIP", "PLAYERS", true, false, false],
 			"THIS_FRAME"
 		] call KH_fnc_execute;
 	};

@@ -45,7 +45,7 @@ if _state then {
 					};
 				};
 			},
-			["JIP", "GLOBAL", objNull, true, false],
+			["JIP", "GLOBAL", true, false, false],
 			"THIS_FRAME"
 		] call KH_fnc_execute;
 
@@ -189,7 +189,7 @@ if _state then {
 					KH_var_currentAdmin publicVariableClient "KH_var_diagnosticsMarkers";
 					private _worldX = (worldSize * 0.0033);
 					private _worldY = (worldSize * 0.0065);
-					private _worldYInterval = (_worldY * 2.2);
+					private _worldYInterval = (_worldY * 2.6);
 					private _output = "";
 
 					if KH_var_diagnosticsScheduler then {

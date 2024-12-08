@@ -1,4 +1,4 @@
-params ["_state", ["_ace", true], ["_freeCamera", false], ["_playerCamera", true]];
+params [["_state", true], ["_ace", true], ["_freeCamera", false], ["_playerCamera", true]];
 KH_var_respawnSpectatorAce = _ace;
 publicVariable "KH_var_respawnSpectatorAce";
 

@@ -167,25 +167,22 @@ if isServer then {
 	];
 
 	addMissionEventHandler [
-		"EntityRespawned", 
+		"EntityRespawned",
 		{
 			params ["_newEntity", "_oldEntity"];
 
 			[
 				{
 					params ["_newEntity", "_oldEntity"];
-
-					if (isPlayer _newEntity) then {
-						["KH_eve_playerRespawned", [_newEntity, owner _newEntity, _oldEntity]] call CBA_fnc_globalEvent;
-						private _index = KH_var_allPlayerUnits find _oldEntity;
-						
-						if (_oldEntity in KH_var_allPlayerUnits) then {
-							KH_var_allPlayerUnits deleteAt (KH_var_allPlayerUnits find _oldEntity);
-						};
-
-						KH_var_allPlayerUnits pushBackUnique _newEntity;
-						publicVariable "KH_var_allPlayerUnits";
+					["KH_eve_playerRespawned", [_newEntity, owner _newEntity, _oldEntity]] call CBA_fnc_globalEvent;
+					private _index = KH_var_allPlayerUnits find _oldEntity;
+					
+					if (_oldEntity in KH_var_allPlayerUnits) then {
+						KH_var_allPlayerUnits deleteAt (KH_var_allPlayerUnits find _oldEntity);
 					};
+
+					KH_var_allPlayerUnits pushBackUnique _newEntity;
+					publicVariable "KH_var_allPlayerUnits";
 				}, 
 				[_newEntity, _oldEntity]
 			] call CBA_fnc_execNextFrame;

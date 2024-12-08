@@ -1,5 +1,5 @@
 params ["_identifier", ["_variables", []]];
-private _worldInfo = [date, overcast, fog, rain, wind, windDir];
+private _worldInfo = [date];
 private _stateEntries = [_worldInfo];
 
 [

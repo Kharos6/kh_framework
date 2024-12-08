@@ -552,7 +552,16 @@ class Mission
 									[_identifier, _world, _parsedVariables] call KH_fnc_loadMissionState;\
 								};\
 								if _players then {\
-									[_identifier, _playerRespawnType] call KH_fnc_loadPlayerLoadouts;\
+									private _respawnType = 'NONE';\
+									switch true do {\
+										case (_playerRespawnType == 1): {\
+											_respawnType = 'SAVED';\
+										};\
+										case (_playerRespawnType == 2): {\
+											_respawnType = 'INITIAL';\
+										};\
+									};\
+									[_identifier, _respawnType] call KH_fnc_loadPlayerLoadouts;\
 								};\
 								if _objects then {\
 									[_identifier] call KH_fnc_loadCargoInventories;\

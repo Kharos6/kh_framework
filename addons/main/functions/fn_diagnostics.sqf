@@ -1,4 +1,4 @@
-params ["_state", ["_3dMode", false], ["_ownership", false], ["_scheduler", false]];
+params [["_state", true], ["_3dMode", false], ["_ownership", false], ["_scheduler", false]];
 KH_var_diagnostics3dMode = _3dMode;
 publicVariable "KH_var_diagnostics3dMode";
 KH_var_diagnosticsOwnership = _ownership;

@@ -53,26 +53,45 @@ else {
 
 				if _backpackPresent then {
 					[
-						["STANDARD", _unit, false],
-						"SlotItemChanged",
-						[_backpack, _backpackItems],
 						{
-							_args params ["_backpack", "_backpackItems"];
-							private _unit = _this select 0;
-							private _slot = _this select 2;
-							private _assigned = _this select 3;
+							params ["_unit"];
+							(((backpack _unit) == "B_Parachute") || ((backpack _unit) == "ACE_NonSteerableParachute"));
+						}, 
+						{
+							params ["_unit", "_backpack", "_backpackItems"];
 
-							if ((_slot == 901) && !_assigned) then {
-								_unit addBackpack _backpack;
-
+							[
 								{
-									_unit addItemToBackpack _x;
-								} forEach _backpackItems;
+									params ["_unit", "_backpack", "_backpackItems"];
 
-								_unit removeEventHandler [_thisEvent, _thisEventHandler];
-							};
-						}
-					] call KH_fnc_addEventHandler;
+									[
+										["STANDARD", _unit, false],
+										"SlotItemChanged",
+										[_backpack, _backpackItems],
+										{
+											_args params ["_backpack", "_backpackItems"];
+											private _unit = _this select 0;
+											private _slot = _this select 2;
+											private _assigned = _this select 3;
+
+											if ((_slot == 901) && !_assigned) then {
+												_unit addBackpack _backpack;
+
+												{
+													_unit addItemToBackpack _x;
+												} forEach _backpackItems;
+
+												_unit removeEventHandler [_thisEvent, _thisEventHandler];
+											};
+										}
+									] call KH_fnc_addEventHandler;
+								}, 
+								[_unit, _backpack, _backpackItems]
+							] call CBA_fnc_execNextFrame;
+						}, 
+						[_unit, _backpack, _backpackItems],
+						30
+					] call CBA_fnc_waitUntilAndExecute;
 				};
 			},
 			_x,

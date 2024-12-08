@@ -361,10 +361,10 @@ class Mission
 								private _parsedTargetEntities = [];\
 								{\
 									_parsedPositionEntities pushBack (missionNamespace getVariable [_x, objNull]);\
-								} forEach _positionEntities;\
+								} forEach (parseSimpleArray _positionEntities);\
 								{\
 									_parsedTargetEntities pushBack (missionNamespace getVariable [_x, objNull]);\
-								} forEach _targetEntities;\
+								} forEach (parseSimpleArray _targetEntities);\
 								[\
 									['CBA'],\
 									'KH_eve_playerLoaded',\
@@ -530,7 +530,7 @@ class Mission
 							_value params ['_toggle', '_identifier', '_players', '_playerRespawnType', '_objects', '_world', '_variables'];\
 							if (_toggle && !is3DEN && isServer && (_identifier != '')) then {\
 								private _parsedVariables = parseSimpleArray _variables;\
-								if (_world || (_variables isNotEqualTo [])) then {\
+								if (_world || (_parsedVariables isNotEqualTo [])) then {\
 									[_identifier, _world, _parsedVariables] call KH_fnc_loadMissionState;\
 								};\
 								if _players then {\

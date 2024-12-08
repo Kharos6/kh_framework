@@ -1,4 +1,4 @@
-params ["_positionEntities", "_targetEntities", "_fovs", "_commitTimes", "_durations", "_visionTypes", ["_cinematicBorders", false], ["_disableUserInput", true]];
+params ["_positions", "_targets", "_fovs", "_commitTimes", "_durations", "_visionTypes", ["_cinematicBorders", false], ["_disableUserInput", true]];
 private _totalDuration = [_durations] call KH_fnc_arraySum;
 
 if (alive player) then {
@@ -33,10 +33,10 @@ if (alive player) then {
 		};
 	};
 
-	private _camera = "camera" camCreate ([(_positionEntities select 0) select 0, "AGL", []] call KH_fnc_getPosition);
+	private _camera = "camera" camCreate ([(_positions select 0) select 0, "AGL", []] call KH_fnc_getPosition);
 	_camera cameraEffect ["Internal", "BACK"];
 	showCinemaBorder _cinematicBorders;
-	private _cameraCount = (count _positionEntities) - 1;
+	private _cameraCount = (count _positions) - 1;
 	private _i = 0;
 	
 	for "_i" from 0 to _cameraCount do {
@@ -48,19 +48,25 @@ if (alive player) then {
 
 		[
 			{
-				params ["_positionEntities", "_targetEntities", "_fovs", "_commitTimes", "_visionTypes", "_camera", "_i"];
-				private _position = (_positionEntities select _i) select 0;
-				private _attach = (_positionEntities select _i) select 1;
+				params ["_positions", "_targets", "_fovs", "_commitTimes", "_visionTypes", "_camera", "_i"];
+				private _position = (_positions select _i) select 0;
 				private _visionType = _visionTypes select _i;
 
-				if _attach then {
-					_camera attachTo [_position, [0, 0, 0]];
+				if (_position isEqualType objNull) then {
+					private _attach = (_positions select _i) select 1;
+					
+					if _attach then {
+						_camera attachTo [_position, [0, 0, 0]];
+					}
+					else {
+						_camera camSetPos ([_position, "AGL", []] call KH_fnc_getPosition);
+					};
 				}
 				else {
-					_camera camSetPos ([_position, "AGL", []] call KH_fnc_getPosition);
+					_camera camSetPos _position;
 				};
 
-				_camera camSetTarget (_targetEntities select _i);
+				_camera camSetTarget (_targets select _i);
 				_camera camSetFov (_fovs select _i);
 				_camera camCommit (_commitTimes select _i);
 
@@ -79,7 +85,7 @@ if (alive player) then {
 					};
 				};
 			}, 
-			[_positionEntities, _targetEntities, _fovs, _commitTimes, _visionTypes, _camera, _i], 
+			[_positions, _targets, _fovs, _commitTimes, _visionTypes, _camera, _i], 
 			_duration
 		] call CBA_fnc_waitAndExecute;
 	};

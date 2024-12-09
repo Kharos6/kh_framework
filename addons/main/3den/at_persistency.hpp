@@ -78,7 +78,7 @@ class KH_Persistency: Title
 		class KH_WorldTitle: Title
 		{
 			text = "World";
-			tooltip = "<true> preserves the world state, such as time, date, and environmental conditions.";
+			tooltip = "<true> preserves the world state, such as the time and date.";
 			y = QUOTE(6 * CTRL_DEFAULT_H + 25 *CTRL_DEFAULT_Y);
 		};
 		class KH_World: ctrlCheckbox

@@ -247,7 +247,7 @@ class Object
 									params ['_entity', '_video', '_texture', '_audio', '_interval'];\
 									[\
 										{\
-											params ['_entity', '_video', '_texture', '_audio'];\
+											_args params ['_entity', '_video', '_texture', '_audio'];\
 											if (alive _entity) then {\
 												[_entity, _video, _texture, _audio] call KH_fnc_setVideoTexture;\
 											}\
@@ -494,6 +494,21 @@ class Object
 						};\
 					";
 					defaultValue = "''";
+				};
+				class KH_FreefallHeight
+				{
+					displayName = "Freefall Height";
+					tooltip = "Height above which this unit will enter freefall, in meters. Leave empty for no change from the default of 100 metres.";
+					property = "KH_FreefallHeight";
+					control = "Edit";
+					expression = 
+					"\
+						if ((_value != '') && !is3DEN) then {\
+							_this setUnitFreefallHeight (parseNumber _value);\
+						};\
+					";
+					defaultValue = "''";
+					condition = "objectControllable";
 				};
 				class KH_LockInventory
 				{

@@ -20,6 +20,7 @@ if _state then {
 				if !isDedicated then {
 					[
 						{
+							hint "tick diagnostics";
 							if KH_var_diagnosticsState then {
 								player setVariable ["KH_var_diagnosticsFramerate", diag_fps, 2];
 								
@@ -49,88 +50,88 @@ if _state then {
 			"THIS_FRAME"
 		] call KH_fnc_execute;
 
-		private _adminFunction = {
+		private _diagnosticFunction = {
+			params ["_curator"];
+
 			[
 				[], 
 				{
-					addMissionEventHandler [
+					if !(isNil "KH_var_diagnosticHandler") then {
+						removeMissionEventHandler ["Draw3D", KH_var_diagnosticHandler];
+					};
+
+					KH_var_diagnosticHandler = addMissionEventHandler [
 						"Draw3D",
 						{
-							if (KH_var_currentAdmin == clientOwner) then {
-								if KH_var_diagnosticsState then {
-									if KH_var_diagnostics3dMode then {		
-										{
-											_x params ["_output", "_color", "_unit"];
-											
-											if (isNull curatorCamera) then {
-												_output = format ["%1 - %2", name _unit, _output];
-											};
+							if KH_var_diagnosticsState then {
+								if KH_var_diagnostics3dMode then {		
+									{
+										_x params ["_output", "_color", "_unit"];
+										
+										if (isNull curatorCamera) then {
+											_output = format ["%1 - %2", name _unit, _output];
+										};
 
-											drawIcon3D
-											[
-												"",
-												_color,
-												_unit modelToWorld [0, 0, 0],
-												1,
-												2,
-												0,
-												_output,
-												2,
-												0.03,
-												"PuristaMedium",
-												"center",
-												true
-											];
-										} forEach (missionNamespace getVariable ["KH_var_diagnosticsInformation", []]);
-									};
-									
-									if KH_var_diagnosticsOwnership then {
-										{
-											_x params ["_output", "_unit"];
-
-											drawIcon3D
-											[
-												"",
-												[1, 1, 1, 0.66],
-												_unit modelToWorld [0, 0, 0],
-												1,
-												2,
-												0,
-												_output,
-												2,
-												0.03,
-												"PuristaMedium",
-												"center",
-												true
-											];
-										} forEach (missionNamespace getVariable ["KH_var_diagnosticsOwnershipInformation", []]);
-									};
+										drawIcon3D
+										[
+											"",
+											_color,
+											_unit modelToWorld [0, 0, 0],
+											1,
+											2,
+											0,
+											_output,
+											2,
+											0.03,
+											"PuristaMedium",
+											"center",
+											true
+										];
+									} forEach (missionNamespace getVariable ["KH_var_diagnosticsInformation", []]);
 								};
-							}
-							else {
-								{
-									deleteMarkerLocal _x;
-								} forEach KH_var_diagnosticsMarkers;
 								
-								removeMissionEventHandler [_thisEvent, _thisEventHandler];
+								if KH_var_diagnosticsOwnership then {
+									{
+										_x params ["_output", "_unit"];
+
+										drawIcon3D
+										[
+											"",
+											[1, 1, 1, 0.9],
+											_unit modelToWorld [0, 0, 0],
+											1,
+											2,
+											0,
+											_output,
+											2,
+											0.03,
+											"PuristaMedium",
+											"center",
+											true
+										];
+									} forEach (missionNamespace getVariable ["KH_var_diagnosticsOwnershipInformation", []]);
+								};
 							};
 						}
 					];
 				},
-				KH_var_currentAdmin,
+				_curator,
 				"THIS_FRAME"
 			] call KH_fnc_execute;
 		};
 
-		[] call _adminFunction;
+		{
+			[_x] call _diagnosticFunction;
+		} forEach KH_var_allCuratorMachines;
 
 		[
 			["CBA"],
-			"KH_eve_adminChanged",
-			[_adminFunction],
+			"KH_eve_curatorAssigned",
+			[_diagnosticFunction],
 			{
-				_args params ["_adminFunction"];
-				[] call _adminFunction;
+				_args params ["_diagnosticFunction"];
+				params ["_curator"];
+				[_curator] call _diagnosticFunction;
 			}
 		] call KH_fnc_addEventHandler;
 		
@@ -144,7 +145,7 @@ if _state then {
 							private _currentInformation = [];
 							private _framerate = floor (_x getVariable ["KH_var_diagnosticsFramerate", 1]);
 							private _output = format ["FPS: %1", _framerate];
-							private _color = [0, 1, 0, 0.66];
+							private _color = [0, 1, 0, 0.9];
 							private _unit = _x;
 							
 							switch true do {
@@ -167,7 +168,7 @@ if _state then {
 							_information pushBack _currentInformation;
 						} forEach KH_var_allPlayerUnits;
 
-						missionNamespace setVariable ["KH_var_diagnosticsInformation", _information, KH_var_currentAdmin];
+						missionNamespace setVariable ["KH_var_diagnosticsInformation", _information, KH_var_allCuratorMachines];
 					};
 
 					if KH_var_diagnosticsOwnership then {
@@ -182,14 +183,18 @@ if _state then {
 							_information pushBack _currentInformation;						
 						} forEach ([["ALL"], false, false] call KH_fnc_getUnits);
 
-						missionNamespace setVariable ["KH_var_diagnosticsOwnershipInformation", _information, KH_var_currentAdmin];
+						missionNamespace setVariable ["KH_var_diagnosticsOwnershipInformation", _information, KH_var_allCuratorMachines];
 					};
 
 					KH_var_diagnosticsMarkers = [];
-					KH_var_currentAdmin publicVariableClient "KH_var_diagnosticsMarkers";
+
+					{
+						_x publicVariableClient "KH_var_diagnosticsMarkers";
+					} forEach KH_var_allCuratorMachines;
+
 					private _worldX = (worldSize * 0.0033);
 					private _worldY = (worldSize * 0.0065);
-					private _worldYInterval = (_worldY * 2.6);
+					private _worldYInterval = (_worldY * 2.45);
 					private _output = "";
 
 					if KH_var_diagnosticsScheduler then {
@@ -201,7 +206,11 @@ if _state then {
 
 					private _markerName = "KH_mrk_diagnosticsId2";
 					KH_var_diagnosticsMarkers pushBackUnique _markerName;
-					KH_var_currentAdmin publicVariableClient "KH_var_diagnosticsMarkers";
+
+					{
+						_x publicVariableClient "KH_var_diagnosticsMarkers";
+					} forEach KH_var_allCuratorMachines;
+
 					KH_var_diagnosticsAllMarkers pushBackUnique _markerName;
 					private _markerColor = "ColorGreen";
 					
@@ -231,7 +240,7 @@ if _state then {
 							_markerName setMarkerTypeLocal "mil_dot";
 							_markerName setMarkerSizeLocal [0, 0];
 						},
-						KH_var_currentAdmin,
+						["TARGETS", KH_var_allCuratorMachines],
 						"THIS_FRAME"
 					] call KH_fnc_execute;
 					
@@ -258,7 +267,11 @@ if _state then {
 						
 						private _markerName = format ["KH_mrk_diagnosticsId%1", owner _x];
 						KH_var_diagnosticsMarkers pushBackUnique _markerName;
-						KH_var_currentAdmin publicVariableClient "KH_var_diagnosticsMarkers";
+
+						{
+							_x publicVariableClient "KH_var_diagnosticsMarkers";
+						} forEach KH_var_allCuratorMachines;
+
 						KH_var_diagnosticsAllMarkers pushBackUnique _markerName;
 						private _markerColor = "ColorGreen";
 						
@@ -288,7 +301,7 @@ if _state then {
 								_markerName setMarkerTypeLocal "mil_dot";
 								_markerName setMarkerSizeLocal [0, 0];
 							},
-							KH_var_currentAdmin,
+							["TARGETS", KH_var_allCuratorMachines],
 							"THIS_FRAME"
 						] call KH_fnc_execute;
 					} forEach ([["PLAYERS", "HEADLESS"], true] call KH_fnc_getClients);
@@ -305,7 +318,7 @@ if _state then {
 									params ["_marker"];
 									deleteMarkerLocal _marker;
 								},
-								KH_var_currentAdmin,
+								["TARGETS", KH_var_allCuratorMachines],
 								"THIS_FRAME"
 							] call KH_fnc_execute;
 						};
@@ -325,7 +338,7 @@ if _state then {
 								deleteMarkerLocal _x;
 							} forEach KH_var_diagnosticsMarkers;
 						},
-						KH_var_currentAdmin,
+						["TARGETS", KH_var_allCuratorMachines],
 						"THIS_FRAME"
 					] call KH_fnc_execute;
 				};

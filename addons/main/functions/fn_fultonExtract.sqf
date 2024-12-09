@@ -293,7 +293,7 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 												params ["_unit", "_vehicle", "_duration"];
 												_unit setVariable ["KH_var_fultonAttached", false, true];
 												_unit allowDamage false;
-												_unit setUnitFreefallHeight 1000;
+												_unit setUnitFreefallHeight 10000;
 
 												[
 													[_unit],

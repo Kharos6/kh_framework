@@ -444,7 +444,7 @@ class Mission
 				{
 					class KH_DiagnosticsSubcategory
 					{
-						description = "Displays diagnostic information of the server and all clients to the current admin.";
+						description = "Displays diagnostic information of the server and all clients to all curators assigned by the <Set Curators> attribute, or the <KH_fnc_setCurators> function.";
 						data = "AttributeSystemSubcategory";
 						control = "KH_SubcategoryNoHeader1";
 					};
@@ -456,17 +456,7 @@ class Mission
 						"\
 							_value params ['_toggle', '_3dMode', '_ownership', '_scheduler'];\
 							if (_toggle && !is3DEN && isServer) then {\
-								[\
-									{\
-										(CBA_missionTime > 0);\
-									},\
-									{\
-										params ['_3dMode', '_ownership', '_scheduler'];\
-										[true, _3dMode, _ownership, _scheduler] call KH_fnc_diagnostics;\
-									},\
-									[_3dMode, _ownership, _scheduler],\
-									30\
-								] call CBA_fnc_waitUntilAndExecute;\
+								[true, _3dMode, _ownership, _scheduler] call KH_fnc_diagnostics;\
 							};\
 						";
 						defaultValue = "[false, true, false, false]";

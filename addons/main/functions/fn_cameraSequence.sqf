@@ -1,11 +1,15 @@
 params ["_positions", "_targets", "_fovs", "_commitTimes", "_durations", "_visionTypes", ["_cinematicBorders", false], ["_disableUserInput", true]];
 private _totalDuration = [_durations] call KH_fnc_arraySum;
 
+if ((_durations select 0) == 0) then {
+	_durations set [0, 0.01];
+};
+
 if (alive player) then {
 	[[], true] call KH_fnc_closeInterface;
 
 	if _disableUserInput then {
-		[false, true] call KH_fnc_toggleUserInput;
+		[false, false] call KH_fnc_toggleUserInput;
 	};
 
 	private _playerParent = objectParent player;
@@ -44,9 +48,6 @@ if (alive player) then {
 
 		if (_i != 0) then {
 			_duration = [_durations select [0, _i]] call KH_fnc_arraySum;
-		}
-		else {
-			_duration = _duration + 0.01;
 		};
 
 		[
@@ -100,7 +101,7 @@ if (alive player) then {
 			camDestroy _camera;
 
 			if _disableUserInput then {
-				[true, true] call KH_fnc_toggleUserInput;
+				[true, false] call KH_fnc_toggleUserInput;
 			};
 		}, 
 		[_disableUserInput, _camera], 

@@ -88,7 +88,7 @@ isNil {
 							};
 
 							case ((parseNumber (_target select [0, 1])) != 0): {
-								private _player = KH_var_allPlayerMachineUids get _target;
+								private _player = KH_var_allPlayerUidMachines get _target;
 
 								if !(isNil _player) then {
 									["KH_eve_executionGlobal", [_arguments, _function], _player] call CBA_fnc_ownerEvent;
@@ -204,7 +204,7 @@ isNil {
 													};
 
 													case ((parseNumber (_x select [0, 1])) != 0): {
-														private _player = KH_var_allPlayerMachineUids get _x;
+														private _player = KH_var_allPlayerUidMachines get _x;
 
 														if !(isNil _player) then {
 															["KH_eve_executionGlobal", [_arguments, _function], _player] call CBA_fnc_ownerEvent;
@@ -583,7 +583,7 @@ isNil {
 											};
 
 											case ((parseNumber (_callbackTarget select [0, 1])) != 0): {
-												private _player = KH_var_allPlayerMachineUids get _callbackTarget;
+												private _player = KH_var_allPlayerUidMachines get _callbackTarget;
 
 												if !(isNil "_player") then {
 													["KH_eve_executionGlobal", [[_callbackArguments, _callbackFunction, _id, clientOwner], _callbackSendFunction], _player] call CBA_fnc_ownerEvent;

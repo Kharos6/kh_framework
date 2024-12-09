@@ -22,12 +22,14 @@ if isServer then {
 	publicVariable "KH_var_disconnectedPlayers";
 	KH_var_allMachines = [2];
 	publicVariable "KH_var_allMachines";
+	KH_var_allCuratorMachines = [];
+	publicVariable "KH_var_allCuratorMachines";
 	KH_var_allHeadlessMachines = [];
 	publicVariable "KH_var_allHeadlessMachines";
 	KH_var_allPlayerMachines = [];
 	publicVariable "KH_var_allPlayerMachines";
-	KH_var_allPlayerMachineUids = createHashMap;
-	publicVariable "KH_var_allPlayerMachineUids";
+	KH_var_allPlayerUidMachines = createHashMap;
+	publicVariable "KH_var_allPlayerUidMachines";
 	KH_var_allPlayerUnits = [];
 	publicVariable "KH_var_allPlayerUnits";
 	KH_var_allEntities = entities [[], ["Animal"], true, false];
@@ -72,8 +74,8 @@ if isServer then {
 			
 			{
 				if ((_x getUserInfo 1) == _machineId) then {
-					KH_var_allPlayerMachineUids insert [[_x getUserInfo 2, _machineId]];
-					publicVariable "KH_var_allPlayerMachineUids";
+					KH_var_allPlayerUidMachines insert [[_x getUserInfo 2, _machineId]];
+					publicVariable "KH_var_allPlayerUidMachines";
 					break;
 				};
 			} forEach allUsers;
@@ -205,45 +207,63 @@ if isServer then {
 			if (_entity in KH_var_allEntities) then {
 				KH_var_allEntities deleteAt (KH_var_allEntities find _entity);
 			};
+
+			if (_entity in KH_var_allPlayerUnits) then {
+				KH_var_allPlayerUnits deleteAt (KH_var_allPlayerUnits find _entity);
+				publicVariable "KH_var_allPlayerUnits";				
+			};
 		}
 	];
 
 	addMissionEventHandler [
 		"HandleDisconnect", 
 		{
-			params ["_unit", "_machineId", "_uid", "_name"];
-			["KH_eve_playerDisconnected", [_unit, [_unit] call KH_fnc_getUnitAttributes, _machineId, _uid, _name]] call CBA_fnc_globalEvent;
-			KH_var_disconnectedPlayers pushBackUnique _uid;
-			publicVariable "KH_var_disconnectedPlayers";
-			
-			if (_unit in KH_var_allPlayerUnits) then {
-				KH_var_allPlayerUnits deleteAt (KH_var_allPlayerUnits find _unit);
-				publicVariable "KH_var_allPlayerUnits";				
-			};
-					
-			if (_machineId in KH_var_allMachines) then {
-				KH_var_allMachines deleteAt (KH_var_allMachines find _machineId);
-				publicVariable "KH_var_allMachines";	
-			};
+			private _unit = _this select 0;
+			private _uid = _this select 2;
+			private _name = _this select 3;
+			private _machineId = KH_var_allPlayerUidMachines get _uid;
 
-			if (_machineId in KH_var_allHeadlessMachines) then {
-				KH_var_allHeadlessMachines deleteAt (KH_var_allHeadlessMachines find _machineId); 
-				publicVariable "KH_var_allHeadlessMachines";
-			}
-			else {
-				if (_machineId in KH_var_allPlayerMachines) then {
-					KH_var_allPlayerMachines deleteAt (KH_var_allPlayerMachines find _machineId);
-					publicVariable "KH_var_allPlayerMachines";
+			if !(isNil "_machineId") then {
+				["KH_eve_playerDisconnected", [_unit, [_unit] call KH_fnc_getUnitAttributes, _machineId, _uid, _name]] call CBA_fnc_globalEvent;
+				KH_var_disconnectedPlayers pushBackUnique _uid;
+				publicVariable "KH_var_disconnectedPlayers";
+				
+				if (_unit in KH_var_allPlayerUnits) then {
+					KH_var_allPlayerUnits deleteAt (KH_var_allPlayerUnits find _unit);
+					publicVariable "KH_var_allPlayerUnits";				
+				};
+						
+				if (_machineId in KH_var_allMachines) then {
+					KH_var_allMachines deleteAt (KH_var_allMachines find _machineId);
+					publicVariable "KH_var_allMachines";	
+				};
 
-					{
-						if (_y == _machineId) then {
-							KH_var_allPlayerMachineUids deleteAt _x;
-							publicVariable "KH_var_allPlayerMachineUids";
-							break;
-						};
-					} forEach KH_var_allPlayerMachineUids;
+				if (_machineId in KH_var_allCuratorMachines) then {
+					KH_var_allCuratorMachines deleteAt (KH_var_allCuratorMachines find _machineId);
+					publicVariable "KH_var_allCuratorMachines";	
+				};
+
+				if (_machineId in KH_var_allHeadlessMachines) then {
+					KH_var_allHeadlessMachines deleteAt (KH_var_allHeadlessMachines find _machineId); 
+					publicVariable "KH_var_allHeadlessMachines";
+				}
+				else {
+					if (_machineId in KH_var_allPlayerMachines) then {
+						KH_var_allPlayerMachines deleteAt (KH_var_allPlayerMachines find _machineId);
+						publicVariable "KH_var_allPlayerMachines";
+
+						{
+							if (_y == _machineId) then {
+								KH_var_allPlayerUidMachines deleteAt _x;
+								publicVariable "KH_var_allPlayerUidMachines";
+								break;
+							};
+						} forEach KH_var_allPlayerUidMachines;
+					};
 				};
 			};
+
+			nil;
 		}
 	];
 };

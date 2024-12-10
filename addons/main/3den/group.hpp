@@ -39,17 +39,16 @@ class Group
 					"\
 						if ((_value != '') && (_value != '[]') && !is3DEN) then {\
 							[\
+								['CBA'],\
+								'KH_eve_missionInitialized',\
+								[_this, _value],\
 								{\
-									(CBA_missionTime > 0);\
-								},\
-								{\
-									params ['_group', '_targets'];\
+									_args params ['_group', '_targets'];\
 									{\
 										_group ignoreTarget [missionNamespace getVariable [_x, objNull], true];\
 									} forEach (parseSimpleArray _targets);\
-								},\
-								[_this, _value]\
-							] call CBA_fnc_waitUntilAndExecute;\
+								}\
+							] call KH_fnc_addEventHandler;\
 						};\
 					";
 					defaultValue = "'[]'";

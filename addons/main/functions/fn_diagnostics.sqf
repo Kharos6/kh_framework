@@ -20,7 +20,6 @@ if _state then {
 				if !isDedicated then {
 					[
 						{
-							hint "tick diagnostics";
 							if KH_var_diagnosticsState then {
 								player setVariable ["KH_var_diagnosticsFramerate", diag_fps, 2];
 								

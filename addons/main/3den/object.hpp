@@ -133,19 +133,18 @@ class Object
 						_value params ['_toggle', '_vehicles', '_height', '_distance', '_maximumParticipants', '_duration', '_objectName'];\
 						if (_toggle && !is3DEN) then {\
 							[\
+								['CBA'],\
+								'KH_eve_missionInitialized',\
+								[_this, _vehicles, _height, _distance, _maximumParticipants, _duration, _objectName],\
 								{\
-									(CBA_missionTime > 0);\
-								},\
-								{\
-									params ['_entity', '_vehicles', '_height', '_distance', '_maximumParticipants', '_duration', '_objectName'];\
+									_args params ['_entity', '_vehicles', '_height', '_distance', '_maximumParticipants', '_duration', '_objectName'];\
 									private _parsedVehicles = [];\
 									{\
 										_parsedVehicles pushBack (missionNamespace getVariable [_x, objNull]);\
 									} forEach (parseSimpleArray _vehicles);\
 									[_entity, _parsedVehicles, _height, parseNumber _distance, parseNumber _maximumParticipants, parseNumber _duration, _objectName] call KH_fnc_fultonExtract;\
-								},\
-								[_this, _vehicles, _height, _distance, _maximumParticipants, _duration, _objectName]\
-							] call CBA_fnc_waitUntilAndExecute;\
+								}\
+							] call KH_fnc_addEventHandler;\
 						};\
 					";
 					defaultValue = "[false, '[]', 100, '', '', '', '', '100m']";
@@ -206,15 +205,14 @@ class Object
 						_value params ['_toggle', '_positionEntity', '_targetEntity', '_texture', '_renderTarget'];\
 						if (_toggle && !is3DEN) then {\
 							[\
+								['CBA'],\
+								'KH_eve_missionInitialized',\
+								[_this, _positionEntity, _targetEntity, _texture, _renderTarget],\
 								{\
-									(CBA_missionTime > 0);\
-								},\
-								{\
-									params ['_entity', '_positionEntity', '_targetEntity', '_texture', '_renderTarget'];\
+									_args params ['_entity', '_positionEntity', '_targetEntity', '_texture', '_renderTarget'];\
 									[[_entity, missionNamespace getVariable [_positionEntity, objNull], missionNamespace getVariable [_targetEntity, objNull], parseNumber _texture, _renderTarget + 1], 'KH_fnc_setCameraTexture', ['JIP', 'PLAYERS', _entity, true, false], 'THIS_FRAME'] call KH_fnc_execute;\
-								},\
-								[_this, _positionEntity, _targetEntity, _texture, _renderTarget]\
-							] call CBA_fnc_waitUntilAndExecute;\
+								}\
+							] call KH_fnc_addEventHandler;\
 						};\
 					";
 					defaultValue = "[false, '', '', '', 0]";
@@ -291,11 +289,11 @@ class Object
 						_value params ['_toggle', '_position', '_rotation', '_transition', '_heal', '_freefallHeight', '_initialization', '_name'];\
 						if (_toggle && !is3DEN) then {\
 							[\
+								['CBA'],\
+								'KH_eve_missionInitialized',\
+								[_this, _position, _rotation, _transition, _heal, _freefallHeight, _initialization, _name],\
 								{\
-									(CBA_missionTime > 0);\
-								},\
-								{\
-									params ['_entity', '_position', '_rotation', '_transition', '_heal', '_freefallHeight', '_initialization', '_name'];\
+									_args params ['_entity', '_position', '_rotation', '_transition', '_heal', '_freefallHeight', '_initialization', '_name'];\
 									[\
 										[_entity, missionNamespace getVariable [_position, objNull], missionNamespace getVariable [_rotation, objNull], parseNumber _transition, _heal, parseNumber _freefallHeight, compile _initialization, _name],\
 										{\
@@ -325,9 +323,8 @@ class Object
 										['JIP', 'PLAYERS', _entity, false, false],\
 										'THIS_FRAME'\
 									] call KH_fnc_execute;\
-								},\
-								[_this, _position, _rotation, _transition, _heal, _freefallHeight, _initialization, _name]\
-							] call CBA_fnc_waitUntilAndExecute;\
+								}\
+							] call KH_fnc_addEventHandler;\
 						};\
 					";
 					defaultValue = "[false, '', '', '', false, '', '', '']";

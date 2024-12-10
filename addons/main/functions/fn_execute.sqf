@@ -474,15 +474,14 @@ isNil {
 									if (CBA_missionTime > 0) then {
 										if !KH_var_playersInitialized then {
 											[
+												["CBA"],
+												"KH_eve_playersInitialized",
+												[_arguments, _function, _dependency, _unitRequired, _id],
 												{
-													KH_var_playersInitialized;
-												},
-												{
-													params ["_arguments", "_function", "_dependency", "_unitRequired", "_id"];
+													_args params ["_arguments", "_function", "_dependency", "_unitRequired", "_id"];
 													[_arguments, _function, _dependency, _unitRequired, _id] call _jipFunction;
-												},
-												[_arguments, _function, _dependency, _unitRequired, _id]
-											] call CBA_fnc_waitUntilAndExecute;
+												}
+											] call KH_fnc_addEventHandler;
 										}
 										else {
 											[_arguments, _function, _dependency, _unitRequired, _id] call _jipFunction;

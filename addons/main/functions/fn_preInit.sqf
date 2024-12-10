@@ -133,22 +133,6 @@ if isServer then {
 			publicVariable "KH_var_allPlayerUnits";
 		}
 	] call CBA_fnc_addEventHandler;
-	
-	[
-		{
-			KH_var_playersInitialized;
-		},
-		{
-			[
-				"KH_eve_playerLoaded",
-				{
-					private _machineId = _this select 1;
-					[[], KH_fnc_playerJipInit, _machineId, "THIS_FRAME"] call KH_fnc_execute;
-				}
-			] call CBA_fnc_addEventHandler;
-		}, 
-		[]
-	] call CBA_fnc_waitUntilAndExecute;
 
 	addMissionEventHandler [
 		"OnUserAdminStateChanged", 

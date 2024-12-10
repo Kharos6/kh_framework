@@ -1,5 +1,7 @@
 {	
-	if isServer then {	
+	if isServer then {
+		["KH_eve_missionInitialized", []] call CBA_fnc_globalEvent;	
+
 		if (KH_var_entityArrayBuilderArrays isNotEqualTo []) then {
 			{				
 				missionNamespace setVariable [_x, missionNamespace getVariable [_x, []], true];
@@ -137,6 +139,15 @@
 									publicVariable "KH_var_initialPlayerUnits";
 									KH_var_playersInitialized = true;
 									publicVariable "KH_var_playersInitialized";
+									["KH_eve_playersInitialized", []] call CBA_fnc_globalEvent;	
+
+									[
+										"KH_eve_playerLoaded",
+										{
+											private _machineId = _this select 1;
+											[[], KH_fnc_playerJipInit, _machineId, "THIS_FRAME"] call KH_fnc_execute;
+										}
+									] call CBA_fnc_addEventHandler;
 									
 									[] call KH_fnc_serverMissionInit;
 									[[], KH_fnc_headlessMissionInit, "HEADLESS", "THIS_FRAME"] call KH_fnc_execute;

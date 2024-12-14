@@ -1,5 +1,4 @@
 params [["_state", true], ["_group", true], ["_loadout", true], ["_transforms", true], ["_vehicle", true]];
-
 KH_var_recoverDisconnectedPlayersGroup = _group;
 KH_var_recoverDisconnectedPlayersLoadout = _loadout;
 KH_var_recoverDisconnectedPlayersTransforms = _transforms;
@@ -18,21 +17,23 @@ if _state then {
 					private _attributes = _this select 1;
 					private _uid = _this select 3;
 					
-					[
-						["CBA"],
-						"KH_eve_playerLoaded",
-						[_attributes, _uid],
-						{
-							params ["_unit"];
-							_args params ["_attributes", "_oldUid"];
-							private _newUid = getPlayerUID _unit;
+					if (_attributes isNotEqualTo []) then {
+						[
+							["CBA"],
+							"KH_eve_playerLoaded",
+							[_attributes, _uid],
+							{
+								params ["_unit"];
+								_args params ["_attributes", "_oldUid"];
+								private _newUid = getPlayerUID _unit;
 
-							if (_oldUid == _newUid) then {
-								[_unit, _attributes, KH_var_recoverDisconnectedPlayersGroup, false, true, KH_var_recoverDisconnectedPlayersLoadout, KH_var_recoverDisconnectedPlayersTransforms, KH_var_recoverDisconnectedPlayersTransforms, KH_var_recoverDisconnectedPlayersVehicle, true, true, false, true] call KH_fnc_setUnitAttributes;
-								[_eventName, _localId] call CBA_fnc_removeEventHandler;
-							};
-						}
-					] call KH_fnc_addEventHandler;
+								if (_oldUid == _newUid) then {
+									[_unit, _attributes, KH_var_recoverDisconnectedPlayersGroup, false, true, KH_var_recoverDisconnectedPlayersLoadout, KH_var_recoverDisconnectedPlayersTransforms, KH_var_recoverDisconnectedPlayersTransforms, KH_var_recoverDisconnectedPlayersVehicle, true, true, false, true] call KH_fnc_setUnitAttributes;
+									[_eventName, _localId] call CBA_fnc_removeEventHandler;
+								};
+							}
+						] call KH_fnc_addEventHandler;
+					};
 				};
 			}
 		] call CBA_fnc_addEventHandler;

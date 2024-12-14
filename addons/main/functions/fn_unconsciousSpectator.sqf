@@ -22,7 +22,7 @@ if _state then {
 			{				
 				if KH_var_unconsciousSpectatorState then {
 					{						
-						if ((_x getVariable ["ACE_isUnconscious", false]) || (lifeState _x == "INCAPACITATED")) then {
+						if ((_x getVariable ["ACE_isUnconscious", false]) || ((lifeState _x) == "INCAPACITATED")) then {
 							if !(_x getVariable ["KH_var_unconsciousSpectator", false]) then {
 								_x setVariable ["KH_var_unconsciousSpectator", true, true];
 
@@ -39,7 +39,7 @@ if _state then {
 									{
 										params ["_unit"];
 
-										if ((_unit getVariable ["ACE_isUnconscious", false]) || (lifeState _unit == "INCAPACITATED")) then {
+										if ((_unit getVariable ["ACE_isUnconscious", false]) || ((lifeState _unit) == "INCAPACITATED")) then {
 											[
 												[],
 												{

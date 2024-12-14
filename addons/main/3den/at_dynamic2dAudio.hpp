@@ -22,7 +22,7 @@ class KH_Dynamic2DAudio: Title
 		class KH_AudioTitle: Title
 		{
 			text = "Audio";
-			tooltip = "Array of strings of audio class names, randomly selected to play.";
+			tooltip = "Array of either strings of audio class names, or arrays containing the strings of audio class names, in format of the <playSound> command syntax. These are randomly selected to play.";
 			y = QUOTE(2 * CTRL_DEFAULT_H + 5 * CTRL_DEFAULT_Y);
 		};
 		class KH_Audio: ctrlEdit
@@ -36,7 +36,7 @@ class KH_Dynamic2DAudio: Title
 		class KH_ConditionTitle: Title
 		{
 			text = "Condition";
-			tooltip = "Unscheduled code, executed on the server, which must return <true> in order to play the audio. Checked every time the audio has a chance to play, individually for each player. Passed arguments available through <_this> are: [_player, _handlerId].";
+			tooltip = "Unscheduled code, executed on the server, which must return <true> in order to play the audio. Checked every time the audio has a chance to play, individually for each player. Passed arguments available through <_this> are: [_player, _handlerId, _selectedAudio].";
 			y = QUOTE(3 * CTRL_DEFAULT_H + 10 * CTRL_DEFAULT_Y);
 		};
 		class KH_Condition: ctrlEditMulti

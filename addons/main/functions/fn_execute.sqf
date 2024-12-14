@@ -659,8 +659,8 @@ isNil {
 														params ["_arguments", "_function", "_targetObject", "_targetIndex", "_sendoffArguments", "_sendoffFunction", "_id"];
 
 														[
-															["CBA"],
-															"KH_eve_localityChanged",
+															["STANDARD", _targetObject, false],
+															"Local",
 															[_arguments, _function, _targetIndex, _sendoffArguments, _sendoffFunction, _id],
 															{
 																params ["_targetObject", "_isLocal"];
@@ -695,14 +695,6 @@ isNil {
 																};
 															}
 														] call KH_fnc_addEventHandler;
-
-														_targetObject addEventHandler [
-															"Local", 
-															{
-																params ["_entity", "_isLocal"];
-																["KH_eve_localityChanged", [_entity, _isLocal]] call CBA_fnc_localEvent;
-															}
-														];
 													}
 												]
 											] call CBA_fnc_globalEvent;
@@ -731,8 +723,8 @@ isNil {
 																				params ["_arguments", "_function", "_targetObject", "_targetIndex", "_sendoffArguments", "_sendoffFunction", "_id"];
 
 																				[
-																					["CBA"],
-																					"KH_eve_localityChanged",
+																					["STANDARD", _targetObject, false],
+																					"Local",
 																					[_arguments, _function, _targetIndex, _sendoffArguments, _sendoffFunction, _id],
 																					{
 																						params ["_targetObject", "isLocal"];
@@ -767,14 +759,6 @@ isNil {
 																						};
 																					}
 																				] call KH_fnc_addEventHandler;
-
-																				_targetObject addEventHandler [
-																					"Local", 
-																					{
-																						params ["_entity", "_isLocal"];
-																						["KH_eve_localityChanged", [_entity, _isLocal]] call CBA_fnc_localEvent;
-																					}
-																				];
 																			}
 																		],
 																		_joiningMachine

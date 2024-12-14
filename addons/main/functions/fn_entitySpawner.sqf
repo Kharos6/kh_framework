@@ -1,6 +1,6 @@
 params ["_entityTypes", "_transforms", "_radius", "_amount", "_maximum", "_condition", "_initialization", "_placementMode", "_type", "_interval"];
 private _id = [missionNamespace, "KH_var_entitySpawner", "ACTIVE", false] call KH_fnc_atomicVariable;
-private _spawnerCount = format [missionNamespace, "KH_var_entitySpawnerCount", 0, false] call KH_fnc_atomicVariable;
+private _spawnerCount = [missionNamespace, "KH_var_entitySpawnerCount", 0, false] call KH_fnc_atomicVariable;
 
 private _entityHandler = [
 	["CBA"],
@@ -26,13 +26,23 @@ private _entityHandler = [
 						if ([_transforms, missionNamespace getVariable [_spawnerCount, 0]] call _condition) then {
 							private _spawnedEntities = [];
 							private _entityType = _type select 0;
+							private _i = 1;
 
 							switch true do {
 								case (_entityType == "UNIT"): {
 									private _side = _type select 1;
-									private _group = createGroup [_side, true];
+									private _shareGroup = _type select 2;
+									private _group = grpNull;
 
-									{
+									if _shareGroup then {
+										_group = createGroup [_side, true];
+									};
+
+									for "_i" from 1 to _amount do {
+										if !_shareGroup then {
+											_group = createGroup [_side, true];
+										};
+
 										private _chosenTransforms = selectRandom _transforms;
 										private _position = [];
 										private _rotation = [];
@@ -57,11 +67,11 @@ private _entityHandler = [
 										[_unit, _rotation, false] call KH_fnc_setRotation;
 										[_unit] call _initialization;
 										_spawnedEntities pushBack _unit;
-									} forEach _amount;
+									};
 								};
 
 								case (_entityType == "AGENT"): {
-									{
+									for "_i" from 1 to _amount do {
 										private _chosenTransforms = selectRandom _transforms;
 										private _position = [];
 										private _rotation = [];
@@ -86,11 +96,11 @@ private _entityHandler = [
 										[_agent, _rotation, false] call KH_fnc_setRotation;
 										[_agent] call _initialization;
 										_spawnedEntities pushBack _agent;
-									} forEach _amount;
+									};
 								};
 
 								case (_entityType == "OBJECT"): {
-									{
+									for "_i" from 1 to _amount do {
 										private _chosenTransforms = selectRandom _transforms;
 										private _position = [];
 										private _rotation = [];
@@ -115,11 +125,11 @@ private _entityHandler = [
 										[_object, _rotation, false] call KH_fnc_setRotation;
 										[_object] call _initialization;
 										_spawnedEntities pushBack _object;
-									} forEach _amount;
+									};
 								};
 
 								case (_entityType == "LOCAL_OBJECT"): {
-									{
+									for "_i" from 1 to _amount do {
 										private _chosenTransforms = selectRandom _transforms;
 										private _position = [];
 										private _rotation = [];
@@ -144,11 +154,11 @@ private _entityHandler = [
 										[_object, _rotation, false] call KH_fnc_setRotation;
 										[_object] call _initialization;
 										_spawnedEntities pushBack _object;
-									} forEach _amount;
+									};
 								};
 
 								case (_entityType == "SIMPLE_OBJECT"): {
-									{
+									for "_i" from 1 to _amount do {
 										private _chosenTransforms = selectRandom _transforms;
 										private _position = [];
 										private _rotation = [];
@@ -173,11 +183,11 @@ private _entityHandler = [
 										[_object, _rotation, false] call KH_fnc_setRotation;
 										[_object] call _initialization;
 										_spawnedEntities pushBack _object;
-									} forEach _amount;
+									};
 								};
 
 								case (_entityType == "LOCAL_SIMPLE_OBJECT"): {
-									{
+									for "_i" from 1 to _amount do {
 										private _chosenTransforms = selectRandom _transforms;
 										private _position = [];
 										private _rotation = [];
@@ -202,11 +212,11 @@ private _entityHandler = [
 										[_object, _rotation, false] call KH_fnc_setRotation;
 										[_object] call _initialization;
 										_spawnedEntities pushBack _object;
-									} forEach _amount;
+									};
 								};
 
 								case (_entityType == "VEHICLE"): {
-									{
+									for "_i" from 1 to _amount do {
 										private _chosenTransforms = selectRandom _transforms;
 										private _position = [];
 										private _rotation = [];
@@ -232,7 +242,7 @@ private _entityHandler = [
 										createVehicleCrew _vehicle;
 										[_vehicle] call _initialization;
 										_spawnedEntities pushBack _vehicle;
-									} forEach _amount;
+									};
 								};
 							};
 
@@ -270,6 +280,10 @@ private _entityHandler = [
 									}
 								];
 							} forEach _spawnedEntities;
+
+							{
+								_x addCuratorEditableObjects [_spawnedEntities, true];
+							} forEach allCurators;
 						};
 					}
 					else {
@@ -289,7 +303,7 @@ private _entityHandler = [
 		};
 	},
 	_interval,
-	[_entityTypes, _transforms, _radius, _maximum, _amount, _condition, _initialization, _placementMode, _type, _spawnerCount, _id, _entityHandler]
+	[_entityTypes, _transforms, _radius, _amount, _maximum, _condition, _initialization, _placementMode, _type, _spawnerCount, _id, _entityHandler]
 ] call CBA_fnc_addPerFrameHandler;
 
 ["PRIVATE_HANDLER", _id, clientOwner];

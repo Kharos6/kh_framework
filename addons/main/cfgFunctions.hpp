@@ -17,6 +17,7 @@ class CfgFunctions
 			class convertToAgent {};
 			class convertToSimpleObject {};
 			class diagnostics {};
+			class displaySubtitle {};
 			class dynamic2dAudio {};
 			class dynamic3dAudio {};
 			class dynamicDisguise {};
@@ -27,7 +28,6 @@ class CfgFunctions
 			class entitySpawner {};
 			class equipableObject {};
 			class execute {};
-			class fixUnconsciousAnimations {};
 			class fultonExtract {};
 			class generateSymbols {};
 			class getClients {};
@@ -62,6 +62,7 @@ class CfgFunctions
 			class setDestinationVelocity {};
 			class setGroupAttributes {};
 			class setOwnership {};
+			class setPerspective {};
 			class setPosition {};
 			class setRotation {};
 			class setSideRelations {};

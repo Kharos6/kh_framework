@@ -10,9 +10,9 @@ class Object
 			{
 				class KH_ConditionalPresenceSubcategory
 				{
-					description = "Specify a variable which, every time it is broadcasted to the server with <publicVariableServer> or <publicVariableClient>, changes the simulation and visibility of this entity. If <true>, the entity will become simulated and visible. If <false>, the entity will become unsimulated and invisible.";
+					description = "Specify a variable which, every time it is broadcasted to the server with <publicVariableServer>, changes the simulation and visibility of this entity. If <true>, the entity will become simulated and visible. If <false>, the entity will become unsimulated and invisible. The initial simulation and visibility state of the entity remains unchanged until the variable is broadcast for the first time.";
 					data = "AttributeSystemSubcategory";
-					control = "KH_SubcategoryNoHeader3";
+					control = "KH_SubcategoryNoHeader4";
 				};
 				class KH_ConditionalPresence 
 				{
@@ -487,7 +487,7 @@ class Object
 					expression = 
 					"\
 						if ((_value != '') && !is3DEN) then {\
-							[[_this], parseNumber _value] call KH_fnc_dynamicSimulation;\
+							KH_var_dynamicSimulationEntities pushBack [_this, parseNumber _value];
 						};\
 					";
 					defaultValue = "''";

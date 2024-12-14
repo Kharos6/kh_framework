@@ -13,6 +13,10 @@ if (isNil "KH_var_initialPlayerLoadouts") then {
 	KH_var_initialPlayerLoadouts = createHashMap;
 };
 
+if (isNil "KH_var_deathPlayerLoadouts") then {
+	KH_var_deathPlayerLoadouts = createHashMap;
+};
+
 {
 	private _uid = getPlayerUID _x;		
 	private _loadout = KH_var_savedLoadoutsMap get _uid;
@@ -39,17 +43,39 @@ if (isNil "KH_var_loadoutsSet") then {
 				private _uid = getPlayerUID _player;	
 				private _loadout = KH_var_savedLoadoutsMap get _uid;
 				private _initialLoadout = KH_var_initialPlayerLoadouts get _uid;
-				
+				private _deathLoadout = KH_var_deathPlayerLoadouts get _uid;
+
 				switch true do {
 					case (KH_var_respawnLoadoutType == "INITIAL"): {
 						if !(isNil "_initialLoadout") then {
 							_player setUnitLoadout _initialLoadout;
+						}
+						else {
+							if !(isNil "_deathLoadout") then {
+								_player setUnitLoadout _deathLoadout;
+							};
 						};
 					};
 
 					case (KH_var_respawnLoadoutType == "SAVED"): {
 						if !(isNil "_loadout") then {
 							_player setUnitLoadout _loadout;
+						}
+						else {
+							if !(isNil "_initialLoadout") then {
+								_player setUnitLoadout _initialLoadout;
+							}
+							else {
+								if !(isNil "_deathLoadout") then {
+									_player setUnitLoadout _deathLoadout;
+								};
+							};
+						};
+					};
+
+					case (KH_var_respawnLoadoutType == "DEATH"): {
+						if !(isNil "_deathLoadout") then {
+							_player setUnitLoadout _deathLoadout;
 						}
 						else {
 							if !(isNil "_initialLoadout") then {
@@ -84,6 +110,23 @@ if (isNil "KH_var_loadoutsSet") then {
 					private _currentLoadout = getUnitLoadout _player;
 					KH_var_initialPlayerLoadouts insert [[_uid, _currentLoadout]];
 				};
+			};
+		}
+	] call CBA_fnc_addEventHandler;
+
+	[
+		"KH_eve_playerKilled", 
+		{
+			params ["_player"];
+			private _uid = getPlayerUID _player;
+			private _loadout = getUnitLoadout _player;	
+			private _deathLoadout = KH_var_deathPlayerLoadouts get _uid;
+
+			if !(isNil "_deathLoadout") then {
+				KH_var_deathPlayerLoadouts set [_uid, _loadout];
+			}
+			else {
+				KH_var_deathPlayerLoadouts insert [[_uid, _loadout]];
 			};
 		}
 	] call CBA_fnc_addEventHandler;

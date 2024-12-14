@@ -22,7 +22,7 @@ class KH_setAnimation: Title
 		class KH_AnimationTitle: Title
 		{
 			text = "Animation";
-			tooltip = "Name of the animation to play on the unit.";
+			tooltip = "Either the name of the animation to play on the unit, or an array in format of the <switchMove> command syntax.";
 			y = QUOTE(2 * CTRL_DEFAULT_H + 5 * CTRL_DEFAULT_Y);
 		};
 		class KH_Animation: ctrlEdit

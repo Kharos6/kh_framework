@@ -197,6 +197,23 @@ class Mission
 						";
 						defaultValue = "''";
 					};
+					class KH_PlayerKilledInit
+					{
+						displayName = "Player Killed Init";
+						tooltip = "Unscheduled code to execute locally to each player upon death. Local player unit is the killed unit.";
+						property = "KH_PlayerKilledInit";
+						control = "EditMulti5";
+						expression = 
+						"\
+							if ((_value != '') && !is3DEN && isServer) then {\
+								KH_fnc_playerKilledInit = compile _value;\
+							}\
+							else {\
+								KH_fnc_playerKilledInit = {};\
+							};\
+						";
+						defaultValue = "''";
+					};
 					class KH_PlayerRespawnInit
 					{
 						displayName = "Player Respawn Init";
@@ -273,20 +290,6 @@ class Mission
 				collapsed = 1;
 				class Attributes
 				{
-					class KH_FixUnconsciousAnimations
-					{
-						displayName = "Fix Unconscious Animations";
-						tooltip = "Corrects the animation state of players who are registered as conscious, but remain stuck in an unconscious animation.";
-						property = "KH_FixUnconsciousAnimations";
-						control = "Checkbox";
-						expression = 
-						"\
-							if (_value && !is3DEN && isServer) then {\
-								[true] call KH_fnc_fixUnconsciousAnimations;\
-							};\
-						";
-						defaultValue = "false";
-					};
 					class KH_PublicFunctions
 					{
 						displayName = "Public Functions";
@@ -549,6 +552,9 @@ class Mission
 										};\
 										case (_playerRespawnType == 2): {\
 											_respawnType = 'INITIAL';\
+										};\
+										case (_playerRespawnType == 3): {\
+											_respawnType = 'DEATH';\
 										};\
 									};\
 									[_identifier, _respawnType] call KH_fnc_loadPlayerLoadouts;\

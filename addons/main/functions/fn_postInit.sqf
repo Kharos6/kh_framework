@@ -1,5 +1,115 @@
-{	
+isNil {
+	[
+		"KH_eve_executionGlobal", 
+		{
+			params ["_arguments", "_function"];
+
+			if (_function isEqualType "") then {
+				_arguments call (missionNamespace getVariable [_function, {}]);
+			}
+			else {
+				_arguments call _function;
+			};
+		}
+	] call CBA_fnc_addEventHandler;
+
 	if isServer then {
+		[
+			"KH_eve_executionServer", 
+			{
+				params ["_arguments", "_function"];
+
+				if (_function isEqualType "") then {
+					_arguments call (missionNamespace getVariable [_function, {}]);
+				}
+				else {
+					_arguments call _function;
+				};
+			}
+		] call CBA_fnc_addEventHandler;
+
+		[
+			"KH_eve_playerPreloadedInitial", 
+			{
+				params ["_machineId"];
+				KH_var_allMachines pushBackUnique _machineId;
+				publicVariable "KH_var_allMachines";
+				KH_var_allPlayerMachines pushBackUnique _machineId;
+				publicVariable "KH_var_allPlayerMachines";
+				private _uid = "";
+				
+				{
+					if ((_x getUserInfo 1) == _machineId) then {
+						_uid = _x getUserInfo 2;
+						KH_var_allPlayerUidMachines insert [[_uid, _machineId]];
+						publicVariable "KH_var_allPlayerUidMachines";
+						break;
+					};
+				} forEach allUsers;
+
+				if ((admin _machineId) != 0) then {
+					KH_var_currentAdmin = _machineId;
+					publicVariable "KH_var_currentAdmin";
+				};
+
+				["KH_eve_playerPreloaded", [clientOwner, _uid]] call CBA_fnc_globalEvent;
+				[[], KH_fnc_playerPreInit, _machineId, "THIS_FRAME"] call KH_fnc_execute;
+			}
+		] call CBA_fnc_addEventHandler;
+
+		[
+			"KH_eve_headlessPreloaded", 
+			{
+				params ["_machineId"];
+				KH_var_allMachines pushBackUnique _machineId;
+				publicVariable "KH_var_allMachines";
+				KH_var_allHeadlessMachines pushBackUnique _machineId;
+				publicVariable "KH_var_allHeadlessMachines";
+				[[], KH_fnc_headlessPreInit, "HEADLESS", "THIS_FRAME"] call KH_fnc_execute;
+			}
+		] call CBA_fnc_addEventHandler;
+		
+		[
+			"KH_eve_playerLoaded",
+			{
+				params ["_unit", "_machineId"];
+				KH_var_allPlayerUnits pushBackUnique _unit;
+				publicVariable "KH_var_allPlayerUnits";
+				[[], KH_fnc_playerPostInit, _machineId, "THIS_FRAME"] call KH_fnc_execute;
+			}
+		] call CBA_fnc_addEventHandler;
+
+		[
+			"KH_eve_playerRespawned", 
+			{
+				params ["_unit", "_machineId", "_corpse"];
+				[[_corpse], KH_fnc_playerRespawnInit, _machineId, "THIS_FRAME"] call KH_fnc_execute;
+			}
+		] call CBA_fnc_addEventHandler;
+
+		[
+			"KH_eve_playerKilled", 
+			{
+				params ["_unit", "_machineId"];
+				[[], KH_fnc_playerKilledInit, _machineId, "THIS_FRAME"] call KH_fnc_execute;
+			}
+		] call CBA_fnc_addEventHandler;
+		
+		[
+			"KH_eve_playerSwitched", 
+			{
+				params ["_newUnit", "_previousUnit", "_machineId"]:
+				[[_previousUnit], KH_fnc_playerSwitchInit, _machineId, "THIS_FRAME"] call KH_fnc_execute;
+				
+				if (_previousUnit in KH_var_allPlayerUnits) then {
+					KH_var_allPlayerUnits deleteAt (KH_var_allPlayerUnits find _previousUnit);
+				};
+
+				KH_var_allPlayerUnits pushBackUnique _newUnit;
+				publicVariable "KH_var_allPlayerUnits";
+			}
+		] call CBA_fnc_addEventHandler;
+
 		["KH_eve_missionInitialized", []] call CBA_fnc_globalEvent;	
 
 		if (KH_var_entityArrayBuilderArrays isNotEqualTo []) then {
@@ -45,6 +155,27 @@
 			} forEach KH_var_groupArrayBuilderArrays;
 		};
 
+		if (KH_var_dynamicSimulationEntities isNotEqualTo []) then {
+			KH_var_dynamicSimulationSets = createHashMap;
+
+			{
+				_x params ["_entity", "_distance"];
+				private _value = KH_var_dynamicSimulationSets get _distance;
+
+				if !(isNil "_value") then {
+					_value pushBack _entity;
+					KH_var_dynamicSimulationSets set [_distance, _value];
+				}
+				else {
+					KH_var_dynamicSimulationSets insert [[_distance, [_entity]]];
+				};
+			} forEach KH_var_dynamicSimulationEntities;
+
+			{
+				[_y, _x] call KH_fnc_dynamicSimulation;
+			} forEach KH_var_dynamicSimulationSets;
+		};
+
 		if (KH_var_headlessClientTransfers isNotEqualTo []) then {
 			{
 				private _headlessClient = _x;
@@ -66,7 +197,7 @@
 
 				[
 					{
-						((owner _headlessClient) in KH_var_allHeadlessMachines);
+						(((owner _headlessClient) in KH_var_allHeadlessMachines) && ((owner _headlessClient) != 2));
 					},
 					{
 						params ["_assignedEntities", "_assignedEntitiesRecreate", "_headlessClient"];
@@ -177,12 +308,40 @@
 	};
 
 	if hasInterface then {
-		["KH_eve_playerPreloaded", [clientOwner]] call CBA_fnc_globalEvent;
+		[
+			"KH_eve_executionPlayer", 
+			{
+				params ["_arguments", "_function"];
+
+				if (_function isEqualType "") then {
+					_arguments call (missionNamespace getVariable [_function, {}]);
+				}
+				else {
+					_arguments call _function;
+				};
+			}
+		] call CBA_fnc_addEventHandler;
+
+		["KH_eve_playerPreloadedInitial", [clientOwner]] call CBA_fnc_serverEvent;
 	};
 
 	if (!isServer && !hasInterface) then {
+		[
+			"KH_eve_executionHeadless",
+			{
+				params ["_arguments", "_function"];
+
+				if (_function isEqualType "") then {
+					_arguments call (missionNamespace getVariable [_function, {}]);
+				}
+				else {
+					_arguments call _function;
+				};
+			}
+		] call CBA_fnc_addEventHandler;
+
 		["KH_eve_headlessPreloaded", [clientOwner]] call CBA_fnc_globalEvent;
 	};
-} call CBA_fnc_directCall;
+};
 
 true;

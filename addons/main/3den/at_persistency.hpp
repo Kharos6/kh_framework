@@ -1,6 +1,6 @@
 class KH_Persistency: Title
 {
-	attributeLoad = "(_this controlsGroupCtrl 103) lbAdd 'NONE'; (_this controlsGroupCtrl 103) lbAdd 'SAVED'; (_this controlsGroupCtrl 103) lbAdd 'INITIAL'; [_this, _value] call KH_fnc_loadControlAttributes;";
+	attributeLoad = "(_this controlsGroupCtrl 103) lbAdd 'NONE'; (_this controlsGroupCtrl 103) lbAdd 'SAVED'; (_this controlsGroupCtrl 103) lbAdd 'INITIAL'; (_this controlsGroupCtrl 103) lbAdd 'DEATH'; [_this, _value] call KH_fnc_loadControlAttributes;";
 	attributeSave = "[_this] call KH_fnc_saveControlAttributes;";
 	h = QUOTE(10 * CTRL_DEFAULT_H + 70 * pixelH);
 	class Controls: Controls
@@ -50,7 +50,7 @@ class KH_Persistency: Title
 		class KH_PlayerRespawnTypeTitle: Title
 		{
 			text = "Player Respawn Type";
-			tooltip = "Loadout restoration type on player respawn. <NONE> results in the players getting the default loadout of their unit. <SAVED> results in the players getting the saved player loadout. If one does not exist, they get the loadout that they started with. <INITIAL> results in the players getting the loadout that they started with.";
+			tooltip = "Loadout restoration type on player respawn. <NONE> results in the players getting the default loadout of their unit. <SAVED> results in the players getting the saved player loadout. If one does not exist, they get the loadout that they started with. <INITIAL> results in the players getting the loadout that they started with. <DEATH> results in the players getting the loadout they had when they died.";
 			y = QUOTE(4 * CTRL_DEFAULT_H + 15 * CTRL_DEFAULT_Y);
 		};
 		class KH_PlayerRespawnType: ctrlCombo

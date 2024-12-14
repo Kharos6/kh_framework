@@ -194,18 +194,24 @@ isNil {
 						};
 					};
 				} forEach KH_var_headlessClientTransfers;
-
-				[
-					{
-						(((owner _headlessClient) in KH_var_allHeadlessMachines) && ((owner _headlessClient) != 2));
-					},
-					{
-						params ["_assignedEntities", "_assignedEntitiesRecreate", "_headlessClient"];
-						[_assignedEntities, owner _headlessClient, false, {}] call KH_fnc_setOwnership;
-						[_assignedEntitiesRecreate, owner _headlessClient, true, {}] call KH_fnc_setOwnership;
-					},
-					[_assignedEntities, _assignedEntitiesRecreate, _headlessClient]
-				] call CBA_fnc_waitUntilAndExecute;
+				if ((owner _headlessClient) == 2) then {
+					[
+						{
+							((owner _headlessClient) != 2);
+						},
+						{
+							params ["_assignedEntities", "_assignedEntitiesRecreate", "_headlessClient"];
+							[_assignedEntities, owner _headlessClient, false, {}] call KH_fnc_setOwnership;
+							[_assignedEntitiesRecreate, owner _headlessClient, true, {}] call KH_fnc_setOwnership;
+						},
+						[_assignedEntities, _assignedEntitiesRecreate, _headlessClient]
+					] call CBA_fnc_waitUntilAndExecute;
+				}
+				else {
+					params ["_assignedEntities", "_assignedEntitiesRecreate", "_headlessClient"];
+					[_assignedEntities, owner _headlessClient, false, {}] call KH_fnc_setOwnership;
+					[_assignedEntitiesRecreate, owner _headlessClient, true, {}] call KH_fnc_setOwnership;	
+				};
 			} forEach ([["HEADLESS"], true] call KH_fnc_getClients);
 		};
 

@@ -82,11 +82,29 @@ switch true do {
 		_handler = [missionNamespace, "KH_var_publicVariableEventHandler", true, false] call KH_fnc_atomicVariable;
 		missionNamespace setVariable [_handlerId, _handler];
 
-		(_type select 1) addPublicVariableEventHandler (compile ([
-			"if (missionNamespace getVariable ['", _handler, "', true]) then { 
-				call ", _expression, 
-			"};"
-		] joinString ""));
+		if KH_var_missionInitialized then {
+			(_type select 1) addPublicVariableEventHandler (compile ([
+				"if (missionNamespace getVariable ['", _handler, "', true]) then { 
+					call ", _expression, 
+				"};"
+			] joinString ""));
+		}
+		else {
+			[
+				["CBA"],
+				"KH_eve_missionInitialized",
+				[_type select 1, _expression, _handler],
+				{
+					_args params ["_variable", "_expression", "_handler"];
+
+					_variable addPublicVariableEventHandler (compile ([
+						"if (missionNamespace getVariable ['", _handler, "', true]) then { 
+							call ", _expression, 
+						"};"
+					] joinString ""));
+				}
+			] call KH_fnc_addEventHandler;
+		};
 	};
 
 	case (_eventType == "MISSION"): {

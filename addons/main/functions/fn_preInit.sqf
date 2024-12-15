@@ -1,3 +1,19 @@
+KH_var_missionInitialized = false;
+
+[
+	"KH_eve_executionGlobal", 
+	{
+		params ["_arguments", "_function"];
+
+		if (_function isEqualType "") then {
+			_arguments call (missionNamespace getVariable [_function, {}]);
+		}
+		else {
+			_arguments call _function;
+		};
+	}
+] call CBA_fnc_addEventHandler;
+
 if isServer then {
 	KH_var_logicGroup = createGroup [sideLogic, false];
 	KH_var_playersInitialized = false;
@@ -28,6 +44,102 @@ if isServer then {
 	KH_var_entityArrayBuilderArrays = [];
 	KH_var_groupArrayBuilderArrays = [];
 	KH_var_initialSideRelations = [];
+
+	[
+		"KH_eve_executionServer", 
+		{
+			params ["_arguments", "_function"];
+
+			if (_function isEqualType "") then {
+				_arguments call (missionNamespace getVariable [_function, {}]);
+			}
+			else {
+				_arguments call _function;
+			};
+		}
+	] call CBA_fnc_addEventHandler;
+
+	[
+		"KH_eve_playerPreloadedInitial", 
+		{
+			params ["_machineId"];
+			KH_var_allMachines pushBackUnique _machineId;
+			publicVariable "KH_var_allMachines";
+			KH_var_allPlayerMachines pushBackUnique _machineId;
+			publicVariable "KH_var_allPlayerMachines";
+			private _uid = "";
+			
+			{
+				if ((_x getUserInfo 1) == _machineId) then {
+					_uid = _x getUserInfo 2;
+					KH_var_allPlayerUidMachines insert [[_uid, _machineId]];
+					publicVariable "KH_var_allPlayerUidMachines";
+					break;
+				};
+			} forEach allUsers;
+
+			if ((admin _machineId) != 0) then {
+				KH_var_currentAdmin = _machineId;
+				publicVariable "KH_var_currentAdmin";
+			};
+
+			["KH_eve_playerPreloaded", [clientOwner, _uid]] call CBA_fnc_globalEvent;
+			[[], KH_fnc_playerPreInit, _machineId, "THIS_FRAME"] call KH_fnc_execute;
+		}
+	] call CBA_fnc_addEventHandler;
+
+	[
+		"KH_eve_headlessPreloaded", 
+		{
+			params ["_machineId"];
+			KH_var_allMachines pushBackUnique _machineId;
+			publicVariable "KH_var_allMachines";
+			KH_var_allHeadlessMachines pushBackUnique _machineId;
+			publicVariable "KH_var_allHeadlessMachines";
+			[[], KH_fnc_headlessPreInit, "HEADLESS", "THIS_FRAME"] call KH_fnc_execute;
+		}
+	] call CBA_fnc_addEventHandler;
+	
+	[
+		"KH_eve_playerLoaded",
+		{
+			params ["_unit", "_machineId"];
+			KH_var_allPlayerUnits pushBackUnique _unit;
+			publicVariable "KH_var_allPlayerUnits";
+			[[], KH_fnc_playerPostInit, _machineId, "THIS_FRAME"] call KH_fnc_execute;
+		}
+	] call CBA_fnc_addEventHandler;
+
+	[
+		"KH_eve_playerRespawned", 
+		{
+			params ["_unit", "_machineId", "_corpse"];
+			[[_corpse], KH_fnc_playerRespawnInit, _machineId, "THIS_FRAME"] call KH_fnc_execute;
+		}
+	] call CBA_fnc_addEventHandler;
+
+	[
+		"KH_eve_playerKilled", 
+		{
+			params ["_unit", "_machineId"];
+			[[], KH_fnc_playerKilledInit, _machineId, "THIS_FRAME"] call KH_fnc_execute;
+		}
+	] call CBA_fnc_addEventHandler;
+	
+	[
+		"KH_eve_playerSwitched", 
+		{
+			params ["_newUnit", "_previousUnit", "_machineId"]:
+			[[_previousUnit], KH_fnc_playerSwitchInit, _machineId, "THIS_FRAME"] call KH_fnc_execute;
+			
+			if (_previousUnit in KH_var_allPlayerUnits) then {
+				KH_var_allPlayerUnits deleteAt (KH_var_allPlayerUnits find _previousUnit);
+			};
+
+			KH_var_allPlayerUnits pushBackUnique _newUnit;
+			publicVariable "KH_var_allPlayerUnits";
+		}
+	] call CBA_fnc_addEventHandler;
 
 	{
 		if ((_x getUserInfo 8) != 0) then {
@@ -178,7 +290,21 @@ if isServer then {
 	];
 };
 
-if hasInterface then {	
+if hasInterface then {
+	[
+		"KH_eve_executionPlayer", 
+		{
+			params ["_arguments", "_function"];
+
+			if (_function isEqualType "") then {
+				_arguments call (missionNamespace getVariable [_function, {}]);
+			}
+			else {
+				_arguments call _function;
+			};
+		}
+	] call CBA_fnc_addEventHandler;
+	
 	addMissionEventHandler [
 		"PreloadFinished", 
 		{
@@ -218,6 +344,22 @@ if hasInterface then {
 			] call CBA_fnc_execNextFrame;
 		}
 	];
+};
+
+if (!isServer && !hasInterface) then {
+	[
+		"KH_eve_executionHeadless",
+		{
+			params ["_arguments", "_function"];
+
+			if (_function isEqualType "") then {
+				_arguments call (missionNamespace getVariable [_function, {}]);
+			}
+			else {
+				_arguments call _function;
+			};
+		}
+	] call CBA_fnc_addEventHandler;
 };
 
 true;

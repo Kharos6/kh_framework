@@ -1,17 +1,5 @@
 params ["_entity", "_variableName", ["_initialization", {}], ["_invert", false]];
 
-if (isNil "KH_var_conditionalPresenceVariables") then {
-	KH_var_conditionalPresenceVariables = [];
-};
-
-if !(_variableName in KH_var_conditionalPresenceVariables) then {
-	KH_var_conditionalPresenceVariables pushBack _variableName;
-
-	_variableName addPublicVariableEventHandler {
-		[_this select 0, [_this select 1]] call CBA_fnc_serverEvent;
-	};
-};
-
 [
 	["CBA"],
 	_variableName,

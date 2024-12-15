@@ -471,24 +471,37 @@ isNil {
 										] call CBA_fnc_serverEvent;
 									};
 
-									if (CBA_missionTime > 0) then {
-										if !KH_var_playersInitialized then {
-											[
-												["CBA"],
-												"KH_eve_playersInitialized",
-												[_arguments, _function, _dependency, _unitRequired, _id],
-												{
-													_args params ["_arguments", "_function", "_dependency", "_unitRequired", "_id"];
-													[_arguments, _function, _dependency, _unitRequired, _id] call _jipFunction;
-												}
-											] call KH_fnc_addEventHandler;
+									if !KH_var_missionInitialized then {
+										[
+											["CBA"],
+											"KH_eve_missionInitialized",
+											[_arguments, _function, _dependency, _unitRequired, _id],
+											{
+												_args params ["_arguments", "_function", "_dependency", "_unitRequired", "_id"];
+												[_arguments, _function, _dependency, _unitRequired, _id] call _jipFunction;
+											}
+										] call KH_fnc_addEventHandler;
+									}
+									else {
+										if (CBA_missionTime > 0) then {
+											if !KH_var_playersInitialized then {
+												[
+													["CBA"],
+													"KH_eve_playersInitialized",
+													[_arguments, _function, _dependency, _unitRequired, _id],
+													{
+														_args params ["_arguments", "_function", "_dependency", "_unitRequired", "_id"];
+														[_arguments, _function, _dependency, _unitRequired, _id] call _jipFunction;
+													}
+												] call KH_fnc_addEventHandler;
+											}
+											else {
+												[_arguments, _function, _dependency, _unitRequired, _id] call _jipFunction;
+											};
 										}
 										else {
 											[_arguments, _function, _dependency, _unitRequired, _id] call _jipFunction;
 										};
-									}
-									else {
-										[_arguments, _function, _dependency, _unitRequired, _id] call _jipFunction;
 									};
 									
 									switch true do {

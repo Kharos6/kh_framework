@@ -10,7 +10,7 @@ class Object
 			{
 				class KH_ConditionalPresenceSubcategory
 				{
-					description = "Specify a variable which, every time it is broadcasted to the server with <publicVariableServer>, changes the simulation and visibility of this entity. If <true>, the entity will become simulated and visible. If <false>, the entity will become unsimulated and invisible. The initial simulation and visibility state of the entity remains unchanged until the variable is broadcast for the first time.";
+					description = "Specify a CBA event which, every time it is broadcasted to the server, changes the simulation and visibility of this entity. If its argument is <true>, the entity will become simulated and visible. If its argument <false>, the entity will become unsimulated and invisible. The initial simulation and visibility state of the entity remains unchanged until the event is broadcast for the first time.";
 					data = "AttributeSystemSubcategory";
 					control = "KH_SubcategoryNoHeader4";
 				};
@@ -238,7 +238,7 @@ class Object
 					expression = 
 					"\
 						_value params ['_toggle', '_video', '_texture', '_audio', '_interval'];\
-						if (_toggle && !is3DEN) then {
+						if (_toggle && !is3DEN) then {\
 							[\
 								[_entity, _video, parseNumber _texture, _audio, parseNumber _interval],\
 								{\

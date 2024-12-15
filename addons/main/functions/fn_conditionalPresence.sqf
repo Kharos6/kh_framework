@@ -1,7 +1,7 @@
 params ["_entity", "_variableName", ["_initialization", {}], ["_invert", false]];
 
 [
-	["CBA"],
+	"CBA",
 	_variableName,
 	[_entity, _initialization, _invert],
 	{

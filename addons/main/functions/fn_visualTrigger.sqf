@@ -49,7 +49,7 @@ missionNamespace setVariable [_id, "ACTIVE", true];
 ] call KH_fnc_execute;
 
 [
-	["CBA"],
+	"CBA",
 	_event,
 	[_entity, _screenMultiplier, _proximity, _conditionServer, _trueFunction, _falseFunction, _repeatable, _shared, _firstTrigger, _conditionVariable, _playerVariable, _entityVariable, _id],
 	{

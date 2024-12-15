@@ -1,4 +1,4 @@
-KH_var_missionInitialized = false;
+KH_var_missionLoaded = false;
 
 [
 	"KH_eve_executionGlobal", 
@@ -62,7 +62,7 @@ if isServer then {
 	[
 		"KH_eve_playerPreloadedInitial", 
 		{
-			params ["_machineId"];
+			params ["_machineId", "_profileName", "_profileNameSteam"];
 			KH_var_allMachines pushBackUnique _machineId;
 			publicVariable "KH_var_allMachines";
 			KH_var_allPlayerMachines pushBackUnique _machineId;
@@ -83,7 +83,7 @@ if isServer then {
 				publicVariable "KH_var_currentAdmin";
 			};
 
-			["KH_eve_playerPreloaded", [clientOwner, _uid]] call CBA_fnc_globalEvent;
+			["KH_eve_playerPreloaded", [_machineId, _uid, _profileName, _profileNameSteam]] call CBA_fnc_globalEvent;
 			[[], KH_fnc_playerPreInit, _machineId, "THIS_FRAME"] call KH_fnc_execute;
 		}
 	] call CBA_fnc_addEventHandler;
@@ -129,7 +129,7 @@ if isServer then {
 	[
 		"KH_eve_playerSwitched", 
 		{
-			params ["_newUnit", "_previousUnit", "_machineId"]:
+			params ["_newUnit", "_machineId", "_previousUnit"];
 			[[_previousUnit], KH_fnc_playerSwitchInit, _machineId, "THIS_FRAME"] call KH_fnc_execute;
 			
 			if (_previousUnit in KH_var_allPlayerUnits) then {
@@ -246,7 +246,7 @@ if isServer then {
 					_attributes = [_unit] call KH_fnc_getUnitAttributes;
 				};
 
-				["KH_eve_playerDisconnected", [_unit, _attributes, _machineId, _uid, _name]] call CBA_fnc_globalEvent;
+				["KH_eve_playerDisconnected", [_unit, _machineId, _attributes, _uid, _name]] call CBA_fnc_globalEvent;
 				KH_var_disconnectedPlayers pushBackUnique _uid;
 				publicVariable "KH_var_disconnectedPlayers";
 				
@@ -318,7 +318,7 @@ if hasInterface then {
 					{						
 						[
 							{
-								["KH_eve_playerLoaded", [player, clientOwner, profileName, profileNameSteam]] call CBA_fnc_globalEvent;					
+								["KH_eve_playerLoaded", [player, clientOwner]] call CBA_fnc_globalEvent;					
 								missionNamespace setVariable ["KH_var_playerWaiting", false];
 							}, 
 							[]
@@ -338,7 +338,7 @@ if hasInterface then {
 			[
 				{
 					params ["_previousUnit", "_newUnit"];
-					["KH_eve_playerSwitched", [_newUnit, _previousUnit, clientOwner, profileName, profileNameSteam]] call CBA_fnc_globalEvent;
+					["KH_eve_playerSwitched", [_newUnit, clientOwner, _previousUnit]] call CBA_fnc_globalEvent;
 				}, 
 				[_previousUnit, _newUnit]
 			] call CBA_fnc_execNextFrame;

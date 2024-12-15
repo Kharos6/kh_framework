@@ -31,7 +31,7 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 ] call KH_fnc_execute;
 
 [
-	["CBA"],
+	"CBA",
 	_fultonEvent,
 	[_object, _vehicles, _height, _distance, _maximumParticipants, _duration, _objectName, _fultonId],
 	{
@@ -158,7 +158,7 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 				] call BIS_fnc_holdActionAdd; 
 
 				[
-					["CBA"],
+					"CBA",
 					"KH_eve_fultonDetached",
 					[_detachAction],
 					{
@@ -317,7 +317,7 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 														params ["_unit", "_vehicle", "_targetTime"];
 
 														[
-															["MISSION"],
+															"MISSION",
 															"Draw3D",
 															[_unit, _vehicle, _targetTime],
 															{

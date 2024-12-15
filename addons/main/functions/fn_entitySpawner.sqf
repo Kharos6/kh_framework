@@ -3,7 +3,7 @@ private _id = [missionNamespace, "KH_var_entitySpawner", "ACTIVE", false] call K
 private _spawnerCount = [missionNamespace, "KH_var_entitySpawnerCount", 0, false] call KH_fnc_atomicVariable;
 
 private _entityHandler = [
-	["CBA"],
+	"CBA",
 	"KH_eve_spawnedEntityTerminated",
 	[_spawnerCount],
 	{

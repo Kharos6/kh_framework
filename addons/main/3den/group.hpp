@@ -40,7 +40,7 @@ class Group
 						if ((_value != '') && (_value != '[]') && !is3DEN) then {\
 							[\
 								['CBA'],\
-								'KH_eve_missionInitialized',\
+								'KH_eve_missionLoaded',\
 								[_this, _value],\
 								{\
 									_args params ['_group', '_targets'];\

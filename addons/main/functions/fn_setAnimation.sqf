@@ -141,7 +141,7 @@ if (_duration != -1) then {
 
 	if (_interruptType != "NONE") then {
 		_interruptCheck = [
-			["CBA"],
+			"CBA",
 			_event,
 			[_unit, _target, _camera, _disableInput, _disableDamage, _setCaptive, _interruptType, _event, _resetPosition, _resetRotation, _attachObject, _cameraObject, _cameraTarget, _targetHitHandler, _unitHitHandler, _targetGroupHitHandler, _unitGroupHitHandler, _animationId],
 			{

@@ -12,7 +12,7 @@ private _curatorFunction = {
 		private _module = KH_var_curatorModules select (KH_var_curators find _uid);
 
 		if !((owner _player) in KH_var_allCuratorMachines) then {
-			["KH_eve_curatorAssigned", [owner _player]] call CBA_fnc_globalEvent;
+			["KH_eve_curatorAssigned", [_player, owner _player]] call CBA_fnc_globalEvent;
 		};
 
 		KH_var_allCuratorMachines pushBackUnique (owner _player);

@@ -134,7 +134,7 @@ class Object
 						if (_toggle && !is3DEN) then {\
 							[\
 								['CBA'],\
-								'KH_eve_missionInitialized',\
+								'KH_eve_missionLoaded',\
 								[_this, _vehicles, _height, _distance, _maximumParticipants, _duration, _objectName],\
 								{\
 									_args params ['_entity', '_vehicles', '_height', '_distance', '_maximumParticipants', '_duration', '_objectName'];\
@@ -149,6 +149,50 @@ class Object
 					";
 					defaultValue = "[false, '[]', 100, '', '', '', '', '100m']";
 					condition = "1 - objectControllable";
+				};
+			};
+		};
+		class KH_PersistentInit
+		{
+			displayName = "KH Persistent Init";
+			collapsed = 1;
+			class Attributes
+			{
+				class KH_PersistentInitSubcategory
+				{
+					description = "Execute code every time this entity changes locality, ideal for code that is dependent on locality.";
+					data = "AttributeSystemSubcategory";
+					control = "KH_SubcategoryNoHeader1";
+				};
+				class KH_PersistentInit 
+				{
+					property = "KH_PersistentInit";
+					control = "KH_PersistentInit";
+					expression = 
+					"\
+						_value params ['_toggle', '_localFunction', '_remoteFunction'];\
+						if (_toggle && !is3DEN) then {\
+							[\
+								[_this, compile _localFunction],\
+								{\
+									params ['_entity', '_localFunction'];\
+									[_entity] call _localFunction;\
+								},\
+								[\
+									'PERSISTENT',\
+									_this,\
+									[_this, compile _remoteFunction],\
+									{\
+										params ['_entity', '_remoteFunction'];\
+										[_entity] call _remoteFunction;\
+									},\
+									true\
+								],\
+								'THIS_FRAME'\
+							] call KH_fnc_execute;\	
+						};\
+					";
+					defaultValue = "[false, '', '']";
 				};
 			};
 		};
@@ -206,7 +250,7 @@ class Object
 						if (_toggle && !is3DEN) then {\
 							[\
 								['CBA'],\
-								'KH_eve_missionInitialized',\
+								'KH_eve_missionLoaded',\
 								[_this, _positionEntity, _targetEntity, _texture, _renderTarget],\
 								{\
 									_args params ['_entity', '_positionEntity', '_targetEntity', '_texture', '_renderTarget'];\
@@ -240,7 +284,7 @@ class Object
 						_value params ['_toggle', '_video', '_texture', '_audio', '_interval'];\
 						if (_toggle && !is3DEN) then {\
 							[\
-								[_entity, _video, parseNumber _texture, _audio, parseNumber _interval],\
+								[_this, _video, parseNumber _texture, _audio, parseNumber _interval],\
 								{\
 									params ['_entity', '_video', '_texture', '_audio', '_interval'];\
 									[\
@@ -259,7 +303,7 @@ class Object
 										[_entity, _video, _texture, _audio]\
 									] call CBA_fnc_addPerFrameHandler;\
 								},\
-								['JIP', 'PLAYERS', _entity, true, false],\
+								['JIP', 'PLAYERS', _this, true, false],\
 								'THIS_FRAME'\
 							] call KH_fnc_execute;\
 						};\
@@ -290,7 +334,7 @@ class Object
 						if (_toggle && !is3DEN) then {\
 							[\
 								['CBA'],\
-								'KH_eve_missionInitialized',\
+								'KH_eve_missionLoaded',\
 								[_this, _position, _rotation, _transition, _heal, _freefallHeight, _initialization, _name],\
 								{\
 									_args params ['_entity', '_position', '_rotation', '_transition', '_heal', '_freefallHeight', '_initialization', '_name'];\

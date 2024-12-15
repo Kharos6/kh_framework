@@ -62,7 +62,7 @@ if (isNull _unit) then {
 				] call BIS_fnc_holdActionAdd;
 				
 				[
-					["CBA"],
+					"CBA",
 					"KH_eve_equipableObjectUnequipped",
 					[_unequipAction],
 					{
@@ -217,7 +217,7 @@ else {
 					] call BIS_fnc_holdActionAdd;
 					
 					[
-						["CBA"],
+						"CBA",
 						"KH_eve_equipableObjectUnequipped",
 						[_unequipAction],
 						{

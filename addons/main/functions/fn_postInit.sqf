@@ -1,6 +1,6 @@
 isNil {
-	KH_var_missionInitialized = true;
-	["KH_eve_missionInitialized", []] call CBA_fnc_localEvent;
+	KH_var_missionLoaded = true;
+	["KH_eve_missionLoaded", []] call CBA_fnc_localEvent;
 
 	if isServer then {
 		if (KH_var_entityArrayBuilderArrays isNotEqualTo []) then {
@@ -206,7 +206,7 @@ isNil {
 	};
 
 	if hasInterface then {
-		["KH_eve_playerPreloadedInitial", [clientOwner]] call CBA_fnc_serverEvent;
+		["KH_eve_playerPreloadedInitial", [clientOwner, profileName, profileNameSteam]] call CBA_fnc_serverEvent;
 	};
 
 	if (!isServer && !hasInterface) then {

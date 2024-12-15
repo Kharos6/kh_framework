@@ -124,12 +124,12 @@ if _state then {
 		} forEach KH_var_allCuratorMachines;
 
 		[
-			["CBA"],
+			"CBA",
 			"KH_eve_curatorAssigned",
 			[_diagnosticFunction],
 			{
 				_args params ["_diagnosticFunction"];
-				params ["_curator"];
+				private _curator = _this select 1;
 				[_curator] call _diagnosticFunction;
 			}
 		] call KH_fnc_addEventHandler;

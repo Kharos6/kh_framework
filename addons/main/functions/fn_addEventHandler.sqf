@@ -3,6 +3,7 @@ private _handlerArguments = [missionNamespace, "KH_var_eventHandlerArguments", _
 private _handlerId = [missionNamespace, "KH_var_eventHandlerId", -1, false] call KH_fnc_atomicVariable;
 private _persistentId = "";
 private _handler = -1;
+private _eventType = "";
 
 if (_function isEqualType "") then {
 	_function = missionNamespace getVariable [_function, {}];
@@ -14,7 +15,12 @@ private _expression = [
 	call ", _function, ";"
 ] joinString "";
 
-private _eventType = _type select 0;
+if (_type isEqualType []) then {
+	_eventType = _type select 0;
+}
+else {
+	_eventType = _type;
+};
 
 switch true do {
 	case (_eventType == "STANDARD"): {
@@ -82,7 +88,7 @@ switch true do {
 		_handler = [missionNamespace, "KH_var_publicVariableEventHandler", true, false] call KH_fnc_atomicVariable;
 		missionNamespace setVariable [_handlerId, _handler];
 
-		if KH_var_missionInitialized then {
+		if KH_var_missionLoaded then {
 			(_type select 1) addPublicVariableEventHandler (compile ([
 				"if (missionNamespace getVariable ['", _handler, "', true]) then { 
 					call ", _expression, 
@@ -91,8 +97,8 @@ switch true do {
 		}
 		else {
 			[
-				["CBA"],
-				"KH_eve_missionInitialized",
+				"CBA",
+				"KH_eve_missionLoaded",
 				[_type select 1, _expression, _handler],
 				{
 					_args params ["_variable", "_expression", "_handler"];

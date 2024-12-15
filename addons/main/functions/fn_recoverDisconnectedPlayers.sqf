@@ -14,12 +14,12 @@ if _state then {
 			"KH_eve_playerDisconnected", 
 			{
 				if KH_var_recoverDisconnectedPlayers then {	
-					private _attributes = _this select 1;
+					private _attributes = _this select 2;
 					private _uid = _this select 3;
 					
 					if (_attributes isNotEqualTo []) then {
 						[
-							["CBA"],
+							"CBA",
 							"KH_eve_playerLoaded",
 							[_attributes, _uid],
 							{

@@ -319,7 +319,7 @@ isNil {
 													};
 													
 													[
-														["CBA"],
+														"CBA",
 														_joinType,
 														[_arguments, _function, _dependency, _id, _joinType],
 														{
@@ -471,10 +471,10 @@ isNil {
 										] call CBA_fnc_serverEvent;
 									};
 
-									if !KH_var_missionInitialized then {
+									if !KH_var_missionLoaded then {
 										[
-											["CBA"],
-											"KH_eve_missionInitialized",
+											"CBA",
+											"KH_eve_missionLoaded",
 											[_arguments, _function, _dependency, _unitRequired, _id],
 											{
 												_args params ["_arguments", "_function", "_dependency", "_unitRequired", "_id"];
@@ -486,7 +486,7 @@ isNil {
 										if (CBA_missionTime > 0) then {
 											if !KH_var_playersInitialized then {
 												[
-													["CBA"],
+													"CBA",
 													"KH_eve_playersInitialized",
 													[_arguments, _function, _dependency, _unitRequired, _id],
 													{
@@ -544,7 +544,7 @@ isNil {
 									private _id = format ["KH_eve_%1", [0, 36, "ALPHANUMERIC"] call KH_fnc_generateSymbols];
 
 									[
-										["CBA"],
+										"CBA",
 										_id,
 										[_arguments, _function],
 										{
@@ -696,7 +696,7 @@ isNil {
 																					_sendoffArguments call (missionNamespace getVariable [_sendoffFunction, {}]);
 																				}
 																				else {
-																					_sendoffArguments call _function;
+																					_sendoffArguments call _sendoffFunction;
 																				};
 																			};
 																		};
@@ -713,74 +713,109 @@ isNil {
 											] call CBA_fnc_globalEvent;
 
 											if _jip then {
-												[
-													"KH_eve_executionGlobal", 
+												private _jipFunction = {
 													[
-														[_arguments, _function, _targetObject, _targetIndex, _sendoffArguments, _sendoffFunction, _id], 
-														{
-															params ["_arguments", "_function", "_targetObject", "_targetIndex", "_sendoffArguments", "_sendoffFunction", "_id"];
+														"KH_eve_executionGlobal", 
+														[
+															[_arguments, _function, _targetObject, _targetIndex, _sendoffArguments, _sendoffFunction, _id], 
+															{
+																params ["_arguments", "_function", "_targetObject", "_targetIndex", "_sendoffArguments", "_sendoffFunction", "_id"];
 
-															[
-																["CBA"],
-																"KH_eve_playerPreLoadeed",
-																[_arguments, _function, _targetObject, _targetIndex, _sendoffArguments, _sendoffFunction, _id],
-																{
-																	_args params ["_arguments", "_function", "_targetObject", "_targetIndex", "_sendoffArguments", "_sendoffFunction", "_id"];
-																	params ["_joiningMachine"];
+																[
+																	"CBA",
+																	"KH_eve_playerPreLoaded",
+																	[_arguments, _function, _targetObject, _targetIndex, _sendoffArguments, _sendoffFunction, _id],
+																	{
+																		_args params ["_arguments", "_function", "_targetObject", "_targetIndex", "_sendoffArguments", "_sendoffFunction", "_id"];
+																		params ["_joiningMachine"];
 
-																	[
-																		"KH_eve_executionGlobal",
 																		[
-																			[_arguments, _function, _targetObject, _targetIndex, _sendoffArguments, _sendoffFunction, _id], 
-																			{
-																				params ["_arguments", "_function", "_targetObject", "_targetIndex", "_sendoffArguments", "_sendoffFunction", "_id"];
+																			"KH_eve_executionGlobal",
+																			[
+																				[_arguments, _function, _targetObject, _targetIndex, _sendoffArguments, _sendoffFunction, _id], 
+																				{
+																					params ["_arguments", "_function", "_targetObject", "_targetIndex", "_sendoffArguments", "_sendoffFunction", "_id"];
 
-																				[
-																					["STANDARD", _targetObject, false],
-																					"Local",
-																					[_arguments, _function, _targetIndex, _sendoffArguments, _sendoffFunction, _id],
-																					{
-																						params ["_targetObject", "isLocal"];
-																						_args params ["_arguments", "_function", "_targetIndex", "_sendoffArguments", "_sendoffFunction", "_id"];
-																						private _idState = _targetObject getVariable [_id, "ACTIVE"];
-																						
-																						if !(_idState == "INACTIVE") then {
-																							switch true do {
-																								case (_idState == "ACTIVE"): {
-																									if _isLocal then {
-																										if (_function isEqualType "") then {
-																											_arguments call (missionNamespace getVariable [_function, {}]);
+																					[
+																						["STANDARD", _targetObject, false],
+																						"Local",
+																						[_arguments, _function, _targetIndex, _sendoffArguments, _sendoffFunction, _id],
+																						{
+																							params ["_targetObject", "isLocal"];
+																							_args params ["_arguments", "_function", "_targetIndex", "_sendoffArguments", "_sendoffFunction", "_id"];
+																							private _idState = _targetObject getVariable [_id, "ACTIVE"];
+																							
+																							if !(_idState == "INACTIVE") then {
+																								switch true do {
+																									case (_idState == "ACTIVE"): {
+																										if _isLocal then {
+																											if (_function isEqualType "") then {
+																												_arguments call (missionNamespace getVariable [_function, {}]);
+																											}
+																											else {
+																												_arguments call _function;
+																											};
 																										}
 																										else {
-																											_arguments call _function;
-																										};
-																									}
-																									else {
-																										if (_sendoffFunction isEqualType "") then {
-																											_sendoffArguments call (missionNamespace getVariable [_sendoffFunction, {}]);
-																										}
-																										else {
-																											_sendoffArguments call _function;
+																											if (_sendoffFunction isEqualType "") then {
+																												_sendoffArguments call (missionNamespace getVariable [_sendoffFunction, {}]);
+																											}
+																											else {
+																												_sendoffArguments call _sendoffFunction;
+																											};
 																										};
 																									};
-																								};
 
-																								case (_idState == "TERMINATE"): {
-																									[_eventName, _localId] call CBA_fnc_removeEventHandler;
+																									case (_idState == "TERMINATE"): {
+																										[_eventName, _localId] call CBA_fnc_removeEventHandler;
+																									};
 																								};
 																							};
-																						};
-																					}
-																				] call KH_fnc_addEventHandler;
-																			}
-																		],
-																		_joiningMachine
-																	] call CBA_fnc_ownerEvent;
+																						}
+																					] call KH_fnc_addEventHandler;
+																				}
+																			],
+																			_joiningMachine
+																		] call CBA_fnc_ownerEvent;
+																	}
+																] call KH_fnc_addEventHandler;
+															}
+														]
+													] call CBA_fnc_serverEvent;
+												};
+
+												if !KH_var_missionLoaded then {
+													[
+														"CBA",
+														"KH_eve_missionLoaded",
+														[_arguments, _function, _targetObject, _targetIndex, _sendoffArguments, _sendoffFunction, _id],
+														{
+															_args params ["_arguments", "_function", "_targetObject", "_targetIndex", "_sendoffArguments", "_sendoffFunction", "_id"];
+															[_arguments, _function, _targetObject, _targetIndex, _sendoffArguments, _sendoffFunction, _id] call _jipFunction;
+														}
+													] call KH_fnc_addEventHandler;
+												}
+												else {
+													if (CBA_missionTime > 0) then {
+														if !KH_var_playersInitialized then {
+															[
+																"CBA",
+																"KH_eve_playersInitialized",
+																[_arguments, _function, _dependency, _unitRequired, _id],
+																{
+																	_args params ["_arguments", "_function", "_targetObject", "_targetIndex", "_sendoffArguments", "_sendoffFunction", "_id"];
+																	[_arguments, _function, _dependency, _unitRequired, _id] call _jipFunction;
 																}
 															] call KH_fnc_addEventHandler;
 														}
-													]
-												] call CBA_fnc_serverEvent;
+														else {
+															[_arguments, _function, _dependency, _unitRequired, _id] call _jipFunction;
+														};
+													}
+													else {
+														[_arguments, _function, _dependency, _unitRequired, _id] call _jipFunction;
+													};
+												};
 											};
 
 											["PERSISTENT_HANDLER", _id, _targetObject];

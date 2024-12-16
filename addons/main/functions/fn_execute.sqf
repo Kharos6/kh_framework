@@ -471,37 +471,24 @@ isNil {
 										] call CBA_fnc_serverEvent;
 									};
 
-									if !KH_var_missionLoaded then {
-										[
-											"CBA",
-											"KH_eve_missionLoaded",
-											[_arguments, _function, _dependency, _unitRequired, _id],
-											{
-												_args params ["_arguments", "_function", "_dependency", "_unitRequired", "_id"];
-												[_arguments, _function, _dependency, _unitRequired, _id] call _jipFunction;
-											}
-										] call KH_fnc_addEventHandler;
-									}
-									else {
-										if (CBA_missionTime > 0) then {
-											if !KH_var_playersInitialized then {
-												[
-													"CBA",
-													"KH_eve_playersInitialized",
-													[_arguments, _function, _dependency, _unitRequired, _id],
-													{
-														_args params ["_arguments", "_function", "_dependency", "_unitRequired", "_id"];
-														[_arguments, _function, _dependency, _unitRequired, _id] call _jipFunction;
-													}
-												] call KH_fnc_addEventHandler;
-											}
-											else {
-												[_arguments, _function, _dependency, _unitRequired, _id] call _jipFunction;
-											};
+									if (CBA_missionTime > 0) then {
+										if !KH_var_playersInitialized then {
+											[
+												"CBA",
+												"KH_eve_playersInitialized",
+												[_arguments, _function, _dependency, _unitRequired, _id],
+												{
+													_args params ["_arguments", "_function", "_dependency", "_unitRequired", "_id"];
+													[_arguments, _function, _dependency, _unitRequired, _id] call _jipFunction;
+												}
+											] call KH_fnc_addEventHandler;
 										}
 										else {
 											[_arguments, _function, _dependency, _unitRequired, _id] call _jipFunction;
 										};
+									}
+									else {
+										[_arguments, _function, _dependency, _unitRequired, _id] call _jipFunction;
 									};
 									
 									switch true do {
@@ -784,37 +771,24 @@ isNil {
 													] call CBA_fnc_serverEvent;
 												};
 
-												if !KH_var_missionLoaded then {
-													[
-														"CBA",
-														"KH_eve_missionLoaded",
-														[_arguments, _function, _targetObject, _targetIndex, _sendoffArguments, _sendoffFunction, _id],
-														{
-															_args params ["_arguments", "_function", "_targetObject", "_targetIndex", "_sendoffArguments", "_sendoffFunction", "_id"];
-															[_arguments, _function, _targetObject, _targetIndex, _sendoffArguments, _sendoffFunction, _id] call _jipFunction;
-														}
-													] call KH_fnc_addEventHandler;
-												}
-												else {
-													if (CBA_missionTime > 0) then {
-														if !KH_var_playersInitialized then {
-															[
-																"CBA",
-																"KH_eve_playersInitialized",
-																[_arguments, _function, _dependency, _unitRequired, _id],
-																{
-																	_args params ["_arguments", "_function", "_targetObject", "_targetIndex", "_sendoffArguments", "_sendoffFunction", "_id"];
-																	[_arguments, _function, _dependency, _unitRequired, _id] call _jipFunction;
-																}
-															] call KH_fnc_addEventHandler;
-														}
-														else {
-															[_arguments, _function, _dependency, _unitRequired, _id] call _jipFunction;
-														};
+												if (CBA_missionTime > 0) then {
+													if !KH_var_playersInitialized then {
+														[
+															"CBA",
+															"KH_eve_playersInitialized",
+															[_arguments, _function, _dependency, _unitRequired, _id],
+															{
+																_args params ["_arguments", "_function", "_targetObject", "_targetIndex", "_sendoffArguments", "_sendoffFunction", "_id"];
+																[_arguments, _function, _dependency, _unitRequired, _id] call _jipFunction;
+															}
+														] call KH_fnc_addEventHandler;
 													}
 													else {
 														[_arguments, _function, _dependency, _unitRequired, _id] call _jipFunction;
 													};
+												}
+												else {
+													[_arguments, _function, _dependency, _unitRequired, _id] call _jipFunction;
 												};
 											};
 
@@ -845,160 +819,179 @@ isNil {
 				};
 			};
 
-			switch true do {
-				case (_environment isEqualType ""): {
-					switch true do {
-						case (_environment == "THIS_FRAME"): {
-							[_arguments, _function, _target] call _subfunction;
-						};
+			private _callerFunction = {
+				params ["_arguments", "_function", "_target", "_environment"];
 
-						case (_environment == "NEXT_FRAME"): {
-							[
-								{
-									params ["_arguments", "_function", "_target", "_subfunction"];
-									[_arguments, _function, _target] call _subfunction;
-								}, 
-								[_arguments, _function, _target, _subfunction]
-							] call CBA_fnc_execNextFrame;
+				switch true do {
+					case (_environment isEqualType ""): {
+						switch true do {
+							case (_environment == "THIS_FRAME"): {
+								[_arguments, _function, _target] call _subfunction;
+							};
 
-							true;
-						};
+							case (_environment == "NEXT_FRAME"): {
+								[
+									{
+										params ["_arguments", "_function", "_target", "_subfunction"];
+										[_arguments, _function, _target] call _subfunction;
+									}, 
+									[_arguments, _function, _target, _subfunction]
+								] call CBA_fnc_execNextFrame;
 
-						default {
-							false;
+								true;
+							};
+
+							default {
+								false;
+							};
 						};
 					};
-				};
 
-				case (_environment isEqualType []): {
-					private _type = _environment select 0;
-					private _id = format ["KH_var_%1", [0, 36, "ALPHANUMERIC"] call KH_fnc_generateSymbols];
-					missionNamespace setVariable [_id, "ACTIVE"];
+					case (_environment isEqualType []): {
+						private _type = _environment select 0;
+						private _id = format ["KH_var_%1", [0, 36, "ALPHANUMERIC"] call KH_fnc_generateSymbols];
+						missionNamespace setVariable [_id, "ACTIVE"];
 
-					switch true do {
-						case (_type == "WAIT"): {
-							private _time = _environment select 1;
-							private _backupArguments = _environment select 2;
-							private _backupFunction = _environment select 3;
+						switch true do {
+							case (_type == "WAIT"): {
+								private _time = _environment select 1;
+								private _backupArguments = _environment select 2;
+								private _backupFunction = _environment select 3;
 
-							[
-								{
-									params ["_arguments", "_function", "_target", "_backupArguments", "_backupFunction", "_subfunction", "_id"];
-									private _idState = missionNamespace getVariable [_id, "ACTIVE"];
+								[
+									{
+										params ["_arguments", "_function", "_target", "_backupArguments", "_backupFunction", "_subfunction", "_id"];
+										private _idState = missionNamespace getVariable [_id, "ACTIVE"];
 
-									if (_idState != "TERMINATE") then {
+										if (_idState != "TERMINATE") then {
+											switch true do {
+												case (_idState == "ACTIVE"): {
+													[_arguments, _function, _target] call _subfunction;
+												};
+
+												case (_idState == "INACTIVE"): {
+													[_backupArguments, _backupFunction, _target] call _subfunction;
+												};
+											};
+										};
+									}, 
+									[_arguments, _function, _target, _backupArguments, _backupFunction, _subfunction, _id],
+									_time
+								] call CBA_fnc_waitAndExecute;
+
+								["PRIVATE_HANDLER", _id, clientOwner];
+							};
+
+							case (_type == "WAIT_UNTIL"): {
+								private _conditionCode = _environment select 1;
+								private _timeout = _environment select 2;
+								private _timeoutArguments = _environment select 3;
+								private _timeoutFunction = _environment select 4;
+
+								[
+									{
+										private _id = _this select 7;
+										private _idState = missionNamespace getVariable [_id, "ACTIVE"];
+
 										switch true do {
 											case (_idState == "ACTIVE"): {
-												[_arguments, _function, _target] call _subfunction;
+												private _conditionCode = _this select 3;
+												[] call _conditionCode;
 											};
 
 											case (_idState == "INACTIVE"): {
-												[_backupArguments, _backupFunction, _target] call _subfunction;
-											};
-										};
-									};
-								}, 
-								[_arguments, _function, _target, _backupArguments, _backupFunction, _subfunction, _id],
-								_time
-							] call CBA_fnc_waitAndExecute;
-
-							["PRIVATE_HANDLER", _id, clientOwner];
-						};
-
-						case (_type == "WAIT_UNTIL"): {
-							private _conditionCode = _environment select 1;
-							private _timeout = _environment select 2;
-							private _timeoutArguments = _environment select 3;
-							private _timeoutFunction = _environment select 4;
-
-							[
-								{
-									private _id = _this select 7;
-									private _idState = missionNamespace getVariable [_id, "ACTIVE"];
-
-									switch true do {
-										case (_idState == "ACTIVE"): {
-											private _conditionCode = _this select 3;
-											[] call _conditionCode;
-										};
-
-										case (_idState == "INACTIVE"): {
-											false;
-										};
-
-										case (_idState == "TERMINATE"): {
-											true;
-										};
-									};
-								}, 
-								{
-									private _id = _this select 7;
-									private _idState = missionNamespace getVariable [_id, "ACTIVE"];
-
-									if (_idState == "ACTIVE") then {
-										private _arguments = _this select 0;
-										private _function = _this select 1;
-										private _target = _this select 2;
-										private _subfunction = _this select 6;
-										[_arguments, _function, _target] call _subfunction;
-									};
-								}, 
-								[_arguments, _function, _target, _conditionCode, _timeoutArguments, _timeoutFunction, _subfunction, _id],
-								_timeout,
-								{
-									private _id = _this select 7;
-									private _idState = missionNamespace getVariable [_id, "ACTIVE"];
-
-									if (_idState == "ACTIVE") then {
-										private _timeoutArguments = _this select 4;
-										private _timeoutFunction = _this select 5;
-										private _target = _this select 3;
-										private _subfunction = _this select 6;
-										[_timeoutArguments, _timeoutFunction, _target] call _subfunction;
-									};
-								}
-							] call CBA_fnc_waitUntilAndExecute;
-
-							["PRIVATE_HANDLER", _id, clientOwner];
-						};
-
-						case (_type == "INTERVAL"): {
-							private _interval = _environment select 1;
-
-							[
-								{
-									private _id = _args select 4;
-									private _idState = missionNamespace getVariable [_id, "ACTIVE"];
-									
-									if !(_idState == "INACTIVE") then {
-										switch true do {
-											case (_idState == "ACTIVE"): {
-												_args params ["_arguments", "_function", "_target", "_subfunction"];
-												[_arguments, _function, _target] call _subfunction;	
+												false;
 											};
 
 											case (_idState == "TERMINATE"): {
-												[_handle] call CBA_fnc_removePerFrameHandler;
-											};		
+												true;
+											};
 										};
-									};
-								}, 
-								_interval, 
-								[_arguments, _function, _target, _subfunction, _id]
-							] call CBA_fnc_addPerFrameHandler;
+									}, 
+									{
+										private _id = _this select 7;
+										private _idState = missionNamespace getVariable [_id, "ACTIVE"];
 
-							["PRIVATE_HANDLER", _id, clientOwner];
-						};
+										if (_idState == "ACTIVE") then {
+											private _arguments = _this select 0;
+											private _function = _this select 1;
+											private _target = _this select 2;
+											private _subfunction = _this select 6;
+											[_arguments, _function, _target] call _subfunction;
+										};
+									}, 
+									[_arguments, _function, _target, _conditionCode, _timeoutArguments, _timeoutFunction, _subfunction, _id],
+									_timeout,
+									{
+										private _id = _this select 7;
+										private _idState = missionNamespace getVariable [_id, "ACTIVE"];
 
-						default {
-							false;
+										if (_idState == "ACTIVE") then {
+											private _timeoutArguments = _this select 4;
+											private _timeoutFunction = _this select 5;
+											private _target = _this select 3;
+											private _subfunction = _this select 6;
+											[_timeoutArguments, _timeoutFunction, _target] call _subfunction;
+										};
+									}
+								] call CBA_fnc_waitUntilAndExecute;
+
+								["PRIVATE_HANDLER", _id, clientOwner];
+							};
+
+							case (_type == "INTERVAL"): {
+								private _interval = _environment select 1;
+
+								[
+									{
+										private _id = _args select 4;
+										private _idState = missionNamespace getVariable [_id, "ACTIVE"];
+										
+										if !(_idState == "INACTIVE") then {
+											switch true do {
+												case (_idState == "ACTIVE"): {
+													_args params ["_arguments", "_function", "_target", "_subfunction"];
+													[_arguments, _function, _target] call _subfunction;	
+												};
+
+												case (_idState == "TERMINATE"): {
+													[_handle] call CBA_fnc_removePerFrameHandler;
+												};		
+											};
+										};
+									}, 
+									_interval, 
+									[_arguments, _function, _target, _subfunction, _id]
+								] call CBA_fnc_addPerFrameHandler;
+
+								["PRIVATE_HANDLER", _id, clientOwner];
+							};
+
+							default {
+								false;
+							};
 						};
 					};
-				};
 
-				default {
-					false;
+					default {
+						false;
+					};
 				};
+			};
+
+			if !KH_var_missionLoaded then {
+				[
+					"CBA",
+					"KH_eve_missionLoaded",
+					[_arguments, _function, _target, _environment],
+					{
+						_args params [_arguments, _function, _target, _environment] call _callerFunction;
+						[_arguments, _function, _target, _environment] call _callerFunction;
+					}
+				] call KH_fnc_addEventHandler;
+			}
+			else {
+				[_arguments, _function, _target, _environment] call _callerFunction;
 			};
 		}
 	) select 0;

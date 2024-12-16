@@ -49,7 +49,12 @@ class Object
 					"\
 						_value params ['_toggle', '_initialization'];\
 						if (_toggle && !is3DEN) then {\
-							[[_this], compile _initialization] call KH_fnc_convertToAgent;\
+							KH_var_postInitExecutions pushBack [\
+								[[_this], compile _initialization],\
+								{\
+									_this call KH_fnc_convertToAgent;\
+								}\
+							];\
 						};\
 					";
 					defaultValue = "[false, '']";
@@ -132,19 +137,17 @@ class Object
 					"\
 						_value params ['_toggle', '_vehicles', '_height', '_distance', '_maximumParticipants', '_duration', '_objectName'];\
 						if (_toggle && !is3DEN) then {\
-							[\
-								['CBA'],\
-								'KH_eve_missionLoaded',\
-								[_this, _vehicles, _height, _distance, _maximumParticipants, _duration, _objectName],\
+							KH_var_postInitExecutions pushBack [\
+								[_this, parseSimpleArray _vehicles, _height, parseNumber _distance, parseNumber _maximumParticipants, parseNumber _duration, _objectName],\
 								{\
-									_args params ['_entity', '_vehicles', '_height', '_distance', '_maximumParticipants', '_duration', '_objectName'];\
+									params ['_entity', '_vehicles', '_height', '_distance', '_maximumParticipants', '_duration', '_objectName'];\
 									private _parsedVehicles = [];\
 									{\
 										_parsedVehicles pushBack (missionNamespace getVariable [_x, objNull]);\
-									} forEach (parseSimpleArray _vehicles);\
-									[_entity, _parsedVehicles, _height, parseNumber _distance, parseNumber _maximumParticipants, parseNumber _duration, _objectName] call KH_fnc_fultonExtract;\
+									} forEach _vehicles;\
+									[_entity, _parsedVehicles, _height, _distance, _maximumParticipants, _duration, _objectName] call KH_fnc_fultonExtract;\
 								}\
-							] call KH_fnc_addEventHandler;\
+							];\
 						};\
 					";
 					defaultValue = "[false, '[]', 100, '', '', '', '', '100m']";
@@ -172,24 +175,30 @@ class Object
 					"\
 						_value params ['_toggle', '_localFunction', '_remoteFunction'];\
 						if (_toggle && !is3DEN) then {\
-							[\
-								[_this, compile _localFunction],\
+							KH_var_postInitExecutions pushBack [\
+								[_this, compile _localFunction, compile _remoteFunction],\
 								{\
-									params ['_entity', '_localFunction'];\
-									[_entity] call _localFunction;\
-								},\
-								[\
-									'PERSISTENT',\
-									_this,\
-									[_this, compile _remoteFunction],\
-									{\
-										params ['_entity', '_remoteFunction'];\
-										[_entity] call _remoteFunction;\
-									},\
-									true\
-								],\
-								'THIS_FRAME'\
-							] call KH_fnc_execute;\	
+									params ['_entity', '_localFunction', '_remoteFunction'];\
+									[\
+										[_entity, _localFunction],\
+										{\
+											params ['_entity', '_localFunction'];\
+											[_entity] call _localFunction;\
+										},\
+										[\
+											'PERSISTENT',\
+											_entity,\
+											[_entity, _remoteFunction],\
+											{\
+												params ['_entity', '_remoteFunction'];\
+												[_entity] call _remoteFunction;\
+											},\
+											true\
+										],\
+										'THIS_FRAME'\
+									] call KH_fnc_execute;\
+								}\
+							];\
 						};\
 					";
 					defaultValue = "[false, '', '']";
@@ -220,7 +229,12 @@ class Object
 							if _interruptable then {\
 								_interruptType = 'GROUP';\
 							};\
-							[_this, [_animation], _this, _this, _this, _this, _this, parseNumber _duration, false, false, false, false, _interruptType, ''] call KH_fnc_setAnimation;\
+							KH_var_postInitExecutions pushBack [\
+								[_this, _animation, _this, _this, _this, _this, _this, parseNumber _duration, false, false, false, false, _interruptType, ''],\
+								{\
+									_this call KH_fnc_setAnimation;\
+								}\
+							];\
 						};\
 					";
 					defaultValue = "[false, '', '', false]";
@@ -248,15 +262,13 @@ class Object
 					"\
 						_value params ['_toggle', '_positionEntity', '_targetEntity', '_texture', '_renderTarget'];\
 						if (_toggle && !is3DEN) then {\
-							[\
-								['CBA'],\
-								'KH_eve_missionLoaded',\
-								[_this, _positionEntity, _targetEntity, _texture, _renderTarget],\
+							KH_var_postInitExecutions pushBack [\
+								[_this, _positionEntity, _targetEntity, parseNumber _texture, _renderTarget + 1],\
 								{\
-									_args params ['_entity', '_positionEntity', '_targetEntity', '_texture', '_renderTarget'];\
-									[[_entity, missionNamespace getVariable [_positionEntity, objNull], missionNamespace getVariable [_targetEntity, objNull], parseNumber _texture, _renderTarget + 1], 'KH_fnc_setCameraTexture', ['JIP', 'PLAYERS', _entity, true, false], 'THIS_FRAME'] call KH_fnc_execute;\
+									params ['_entity', '_positionEntity', '_targetEntity', '_texture', '_renderTarget'];\
+									[[_entity, missionNamespace getVariable [_positionEntity, objNull], missionNamespace getVariable [_targetEntity, objNull], _texture, _renderTarget], 'KH_fnc_setCameraTexture', ['JIP', 'PLAYERS', _entity, true, false], 'THIS_FRAME'] call KH_fnc_execute;\
 								}\
-							] call KH_fnc_addEventHandler;\
+							];\
 						};\
 					";
 					defaultValue = "[false, '', '', '', 0]";
@@ -283,29 +295,35 @@ class Object
 					"\
 						_value params ['_toggle', '_video', '_texture', '_audio', '_interval'];\
 						if (_toggle && !is3DEN) then {\
-							[\
+							KH_var_postInitExecutions pushBack [\
 								[_this, _video, parseNumber _texture, _audio, parseNumber _interval],\
 								{\
 									params ['_entity', '_video', '_texture', '_audio', '_interval'];\
 									[\
+										_this,\
 										{\
-											_args params ['_entity', '_video', '_texture', '_audio'];\
-											if (alive _entity) then {\
-												[_entity, _video, _texture, _audio] call KH_fnc_setVideoTexture;\
-											}\
-											else {\
-												_entity say3D '';\
-												object setObjectTexture [_texture, '#(rgb,8,8,3)color(0,0,0,1)'];\
-												[_handle] call CBA_fnc_removePerFrameHandler;\
-											};\
+											params ['_entity', '_video', '_texture', '_audio', '_interval'];\
+											[\
+												{\
+													_args params ['_entity', '_video', '_texture', '_audio'];\
+													if (alive _entity) then {\
+														[_entity, _video, _texture, _audio] call KH_fnc_setVideoTexture;\
+													}\
+													else {\
+														_entity say3D '';\
+														object setObjectTexture [_texture, '#(rgb,8,8,3)color(0,0,0,1)'];\
+														[_handle] call CBA_fnc_removePerFrameHandler;\
+													};\
+												},\
+												_interval,\
+												[_entity, _video, _texture, _audio]\
+											] call CBA_fnc_addPerFrameHandler;\
 										},\
-										_interval,\
-										[_entity, _video, _texture, _audio]\
-									] call CBA_fnc_addPerFrameHandler;\
-								},\
-								['JIP', 'PLAYERS', _this, true, false],\
-								'THIS_FRAME'\
-							] call KH_fnc_execute;\
+										['JIP', 'PLAYERS', _entity, true, false],\
+										'THIS_FRAME'\
+									] call KH_fnc_execute;\
+								}\
+							];\
 						};\
 					";
 					defaultValue = "[false, '', '', '', '']";
@@ -332,14 +350,12 @@ class Object
 					"\
 						_value params ['_toggle', '_position', '_rotation', '_transition', '_heal', '_freefallHeight', '_initialization', '_name'];\
 						if (_toggle && !is3DEN) then {\
-							[\
-								['CBA'],\
-								'KH_eve_missionLoaded',\
-								[_this, _position, _rotation, _transition, _heal, _freefallHeight, _initialization, _name],\
+							KH_var_postInitExecutions pushBack [\
+								[_this, _position, _rotation, parseNumber _transition, _heal, parseNumber _freefallHeight, compile _initialization, _name],\
 								{\
-									_args params ['_entity', '_position', '_rotation', '_transition', '_heal', '_freefallHeight', '_initialization', '_name'];\
+									params ['_entity', '_position', '_rotation', '_transition', '_heal', '_freefallHeight', '_initialization', '_name'];\
 									[\
-										[_entity, missionNamespace getVariable [_position, objNull], missionNamespace getVariable [_rotation, objNull], parseNumber _transition, _heal, parseNumber _freefallHeight, compile _initialization, _name],\
+										[_entity, missionNamespace getVariable [_position, objNull], missionNamespace getVariable [_rotation, objNull], _transition, _heal, _freefallHeight, _initialization, _name],\
 										{\
 											params ['_entity', '_position', '_rotation', '_transition', '_heal', '_freefallHeight', '_initialization', '_name'];\
 											[\
@@ -368,7 +384,7 @@ class Object
 										'THIS_FRAME'\
 									] call KH_fnc_execute;\
 								}\
-							] call KH_fnc_addEventHandler;\
+							];\
 						};\
 					";
 					defaultValue = "[false, '', '', '', false, '', '', '']";
@@ -437,7 +453,13 @@ class Object
 					"\
 						_value params ['_toggle', '_movementData', '_firingData', '_disableDamage', '_endPosition'];\
 						if (_toggle && !is3DEN) then {\
-							[_this, _movementData, _firingData, _disableDamage, missionNamespace getVariable [_endPosition, objNull]] call KH_fnc_vehicleSequence;\
+							KH_var_postInitExecutions pushBack [\
+								[_this, _movementData, _firingData, _disableDamage, _endPosition],\
+								{\
+									params ['_entity', '_movementData', '_firingData', '_disableDamage', '_endPosition'];\
+									[_entity, _movementData, _firingData, _disableDamage, missionNamespace getVariable [_endPosition, objNull]] call KH_fnc_vehicleSequence;\
+								}\
+							];\
 						};\
 					";
 					defaultValue = "[false, '', '', false, '']";
@@ -465,7 +487,12 @@ class Object
 					"\
 						_value params ['_toggle', '_screenMultiplier', '_proximity', '_distance', '_conditionServer', '_conditionPlayer', '_trueFunction', '_falseFunction', '_repeatable', '_interval', '_shared'];\
 						if (_toggle && !is3DEN) then {\
-							[_this, _screenMultiplier, parseNumber _proximity, parseNumber _distance, compile _conditionServer, compile _conditionPlayer, compile _trueFunction, compile _falseFunction, _repeatable, parseNumber _interval, _shared] call KH_fnc_visualTrigger;\
+							KH_var_postInitExecutions pushBack [\
+								[_this, _screenMultiplier, parseNumber _proximity, parseNumber _distance, compile _conditionServer, compile _conditionPlayer, compile _trueFunction, compile _falseFunction, _repeatable, parseNumber _interval, _shared],\
+								{\
+									_this call KH_fnc_visualTrigger;\
+								}\
+							];\
 						};\
 					";
 					defaultValue = "[false, 1, '', '', 'true', 'true', '', '', false, '', true, '100%']";
@@ -487,15 +514,20 @@ class Object
 					expression = 
 					"\
 						if ((_value != '') && !is3DEN) then {\
-							[\
+							KH_var_postInitExecutions pushBack [\
 								[_this, parseNumber _value],\
 								{\
-									params ['_unit', '_speed'];\
-									_unit setAnimSpeedCoef _speed;\
-								},\
-								['JIP', 'PLAYERS', _this, false, false],\
-								'THIS_FRAME'\
-							] call KH_fnc_execute;\
+									[\
+										_this,\
+										{\
+											params ['_unit', '_speed'];\
+											_unit setAnimSpeedCoef _speed;\
+										},\
+										['JIP', 'PLAYERS', _this select 0, false, false],\
+										'THIS_FRAME'\
+									] call KH_fnc_execute;\
+								}\
+							];\
 						};\
 					";
 					defaultValue = "''";
@@ -560,15 +592,20 @@ class Object
 					expression = 
 					"\
 						if (_value && !is3DEN) then {\
-							[\
+							KH_var_postInitExecutions pushBack [\
 								[_this],\
 								{\
-									params ['_entity'];\
-									_entity lockInventory true;\
-								},\
-								['JIP', 'PLAYERS', _this, false, false],\
-								'THIS_FRAME'\
-							] call KH_fnc_execute;\
+									[\
+										_this,\
+										{\
+											params ['_entity'];\
+											_entity lockInventory true;\
+										},\
+										['JIP', 'PLAYERS', _this select 0, false, false],\
+										'THIS_FRAME'\
+									] call KH_fnc_execute;\
+								}\
+							];\
 						};\
 					";
 					defaultValue = "false";

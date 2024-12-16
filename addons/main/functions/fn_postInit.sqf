@@ -1,6 +1,8 @@
 isNil {
-	KH_var_missionLoaded = true;
-	["KH_eve_missionLoaded", []] call CBA_fnc_localEvent;
+	{
+		_x params ["_arguments", "_function"];
+		_arguments call _function;
+	} forEach KH_var_postInitExecutions;
 
 	if isServer then {
 		if (KH_var_entityArrayBuilderArrays isNotEqualTo []) then {

@@ -459,7 +459,12 @@ class Mission
 						"\
 							_value params ['_toggle', '_3dMode', '_ownership', '_scheduler'];\
 							if (_toggle && !is3DEN && isServer) then {\
-								[true, _3dMode, _ownership, _scheduler] call KH_fnc_diagnostics;\
+								KH_var_postInitExecutions pushBack [\
+									[true, _3dMode, _ownership, _scheduler],\
+									{\
+										_this call KH_fnc_diagnostics;\
+									}\
+								];\
 							};\
 						";
 						defaultValue = "[false, true, false, false]";
@@ -790,7 +795,12 @@ class Mission
 						expression = 
 						"\
 							if ((_value != '') && !is3DEN && isServer) then {\
-								[true, parseNumber _value] call KH_fnc_limitViewDistance;\
+								KH_var_postInitExecutions pushBack [\
+									[true, parseNumber _value],\
+									{\
+										_this call KH_fnc_limitViewDistance;\
+									}\
+								];\
 							};\
 						";
 						defaultValue = "''";

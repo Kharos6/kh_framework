@@ -38,17 +38,15 @@ class Group
 					expression = 
 					"\
 						if ((_value != '') && (_value != '[]') && !is3DEN) then {\
-							[\
-								['CBA'],\
-								'KH_eve_missionLoaded',\
-								[_this, _value],\
+							KH_var_postInitExecutions pushBack [\
+								[_this, parseSimpleArray _value],\
 								{\
-									_args params ['_group', '_targets'];\
+									params ['_group', '_targets'];\
 									{\
 										_group ignoreTarget [missionNamespace getVariable [_x, objNull], true];\
-									} forEach (parseSimpleArray _targets);\
+									} forEach _targets;\
 								}\
-							] call KH_fnc_addEventHandler;\
+							];\
 						};\
 					";
 					defaultValue = "'[]'";

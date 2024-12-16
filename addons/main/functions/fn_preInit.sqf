@@ -1,5 +1,3 @@
-KH_var_missionLoaded = false;
-
 [
 	"KH_eve_executionGlobal", 
 	{
@@ -13,6 +11,8 @@ KH_var_missionLoaded = false;
 		};
 	}
 ] call CBA_fnc_addEventHandler;
+
+KH_var_postInitExecutions = [];
 
 if isServer then {
 	KH_var_logicGroup = createGroup [sideLogic, false];

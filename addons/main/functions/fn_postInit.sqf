@@ -155,11 +155,11 @@ isNil {
 										{
 											KH_var_initialPlayerUnits = KH_var_allPlayerUnits;
 											publicVariable "KH_var_initialPlayerUnits";
-											KH_var_playersInitialized = true;
-											publicVariable "KH_var_playersInitialized";
-											["KH_eve_playersInitialized", KH_var_initialPlayerUnits] call CBA_fnc_globalEvent;												
-											[] call KH_fnc_serverPlayersInitializedInit;
-											[[], KH_fnc_playerPlayersInitializedInit, "PLAYERS", "THIS_FRAME"] call KH_fnc_execute;
+											KH_var_playersLoaded = true;
+											publicVariable "KH_var_playersLoaded";
+											["KH_var_playersLoaded", KH_var_initialPlayerUnits] call CBA_fnc_globalEvent;												
+											[] call KH_fnc_serverPlayersLoadedInit;
+											[[], KH_fnc_playerPlayersLoadedInit, "PLAYERS", "THIS_FRAME"] call KH_fnc_execute;
 
 											[
 												[], 

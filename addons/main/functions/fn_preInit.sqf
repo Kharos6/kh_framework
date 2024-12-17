@@ -16,8 +16,8 @@ KH_var_postInitExecutions = [];
 
 if isServer then {
 	KH_var_logicGroup = createGroup [sideLogic, false];
-	KH_var_playersInitialized = false;
-	publicVariable "KH_var_playersInitialized";
+	KH_var_playersLoaded = false;
+	publicVariable "KH_var_playersLoaded";
 	KH_var_currentAdmin = 2;
 	publicVariable "KH_var_currentAdmin";
 	KH_var_disconnectedPlayers = [];
@@ -82,7 +82,7 @@ if isServer then {
 				};
 			} forEach allUsers;
 			
-			if KH_var_playersInitialized then {
+			if KH_var_playersLoaded then {
 				[[_uid], KH_fnc_playerJipPreloadInit, _machineId, "THIS_FRAME"] call KH_fnc_execute;
 				KH_var_jipPlayerMachines pushBackUnique _machineId;
 				publicVariable "KH_var_jipPlayerMachines";
@@ -117,7 +117,7 @@ if isServer then {
 		{
 			params ["_unit", "_machineId"];
 
-			if KH_var_playersInitialized then {
+			if KH_var_playersLoaded then {
 				KH_var_jipPlayerUnits pushBackUnique _unit;
 				publicVariable "KH_var_jipPlayerUnits";
 				[[], KH_fnc_playerJipLoadInit, _machineId, "THIS_FRAME"] call KH_fnc_execute;

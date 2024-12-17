@@ -30,7 +30,7 @@ class Mission
 					class KH_ServerMissionStartInit
 					{
 						displayName = "Server: Mission Start Init";
-						tooltip = "Unscheduled code to execute on the server when the mission starts. Players are present, but their units are not yet available, so remote execution with <KH_fnc_execute> is not advised if it requires player units. <KH_fnc_execute> may be used with <'JIP'> with <_unitRequired> set to <true> to ensure proper execution if player units are required, but doing so during this stage will suspend the execution until all player units are available.";
+						tooltip = "Unscheduled code to execute on the server when the mission starts. Players are present, but their units may not yet be available. Remote execution with <KH_fnc_execute> at this stage may be used with <'JIP'> with <_unitRequired> set to <true> to ensure proper execution on player units.";
 						property = "KH_ServerMissionStartInit";
 						control = "EditMulti5";
 						expression = 
@@ -44,19 +44,19 @@ class Mission
 						";
 						defaultValue = "''";
 					};		
-					class KH_ServerPlayersInitializedInit
+					class KH_ServerPlayersLoadedInit
 					{
-						displayName = "Server: Players Initialized Init";
+						displayName = "Server: Players Loaded Init";
 						tooltip = "Unscheduled code to execute on the server once all player units have become available. All forms of remote execution with <KH_fnc_execute> are viable, both during and after this stage. While extremely unlikely, in the event that a player bugs out in some way, this stage will be suspended for a maximum of 60 seconds before it automatically triggers.";
-						property = "KH_ServerPlayersInitializedInit";
+						property = "KH_ServerPlayersLoadedInit";
 						control = "EditMulti5";
 						expression = 
 						"\
 							if ((_value != '') && !is3DEN && isServer) then {\
-								KH_fnc_serverPlayersInitializedInit = compile _value;\
+								KH_fnc_serverPlayersLoadedInit = compile _value;\
 							}\
 							else {\
-								KH_fnc_serverPlayersInitializedInit = {};\
+								KH_fnc_serverPlayersLoadedInit = {};\
 							};\
 						";
 						defaultValue = "''";
@@ -98,7 +98,7 @@ class Mission
 					class KH_HeadlessMissionStartInit
 					{
 						displayName = "Headless: Mission Start Init";
-						tooltip = "Unscheduled code to execute on headless clients when the mission starts. Players are present, but their units are not yet available, so remote execution with <KH_fnc_execute> is not advised if it requires player units. <KH_fnc_execute> may be used with <'JIP'> with <_unitRequired> set to <true> to ensure proper execution if player units are required, but doing so during this stage will suspend the execution until all player units are available.";
+						tooltip = "Unscheduled code to execute on headless clients when the mission starts. Players are present, but their units may not yet be available. Remote execution with <KH_fnc_execute> at this stage may be used with <'JIP'> with <_unitRequired> set to <true> to ensure proper execution on player units.";
 						property = "KH_HeadlessMissionStartInit";
 						control = "EditMulti5";
 						expression = 
@@ -149,7 +149,7 @@ class Mission
 					class KH_PlayerLoadInit
 					{
 						displayName = "Player: Load Init";
-						tooltip = "Unscheduled code to execute locally to each player that is present during the mission start, once their local player unit is available. This is the ideal stage to execute code that requires the local player unit. Other players are present, but their units may not yet be available, so remote execution with <KH_fnc_execute> is not advised if it requires other player units. <KH_fnc_execute> may be used with <'JIP'> with <_unitRequired> set to <true> to ensure proper execution if other player units are required, but doing so during this stage will suspend the execution until all other player units are available.";
+						tooltip = "Unscheduled code to execute locally to each player that is present during the mission start, once their local player unit is available. This is the ideal stage to execute code that requires the local player unit. Other players are present, but their units may not yet be available. Remote execution with <KH_fnc_execute> at this stage may be used with <'JIP'> with <_unitRequired> set to <true> to ensure proper execution on other player units.";
 						property = "KH_PlayerLoadInit";
 						control = "EditMulti5";
 						expression = 
@@ -163,19 +163,19 @@ class Mission
 						";
 						defaultValue = "''";
 					};
-					class KH_PlayerPlayersInitializedInit
+					class KH_PlayerPlayersLoadedInit
 					{
-						displayName = "Player: Players Initialized Init";
+						displayName = "Player: Players Loaded Init";
 						tooltip = "Unscheduled code to execute locally to each player once all other player units have become available. All forms of remote execution with <KH_fnc_execute> are viable, both during and after this stage. While extremely unlikely, in the event that a player bugs out in some way, this stage will be suspended for a maximum of 60 seconds before it automatically triggers.";
-						property = "KH_PlayerPlayersInitializedInit";
+						property = "KH_PlayerPlayersLoadedInit";
 						control = "EditMulti5";
 						expression = 
 						"\
 							if ((_value != '') && !is3DEN && isServer) then {\
-								KH_fnc_playerPlayersInitializedInit = compile _value;\
+								KH_fnc_playerPlayersLoadedInit = compile _value;\
 							}\
 							else {\
-								KH_fnc_playerPlayersInitializedInit = {};\
+								KH_fnc_playerPlayersLoadedInit = {};\
 							};\
 						";
 						defaultValue = "''";
@@ -387,7 +387,7 @@ class Mission
 											[[_positionEntities, _targetEntities, _fovs, _commitTimes, _durations, _visionTypes, _cinematicBorders, _disableUserInput], 'KH_fnc_cameraSequence', _unit, 'THIS_FRAME'] call KH_fnc_execute;\
 										}\
 										else {\
-											if !KH_var_playersInitialized then {\
+											if !KH_var_playersLoaded then {\
 												[[_positionEntities, _targetEntities, _fovs, _commitTimes, _durations, _visionTypes, _cinematicBorders, _disableUserInput], 'KH_fnc_cameraSequence', _unit, 'THIS_FRAME'] call KH_fnc_execute;\
 											};\
 										};\

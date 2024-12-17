@@ -36,6 +36,10 @@ if isServer then {
 	publicVariable "KH_var_allPlayerUnits";
 	KH_var_initialPlayerUnits = [];
 	publicVariable "KH_var_initialPlayerUnits";
+	KH_var_jipPlayerUnits = [];
+	publicVariable "KH_var_jipPlayerUnits";
+	KH_var_jipPlayerMachines = [];
+	publicVariable "KH_var_jipPlayerMachines";
 	KH_var_allEntities = entities [[], ["Animal"], true, false];
 	KH_var_allDeadEntities = (entities [[], ["Animal"], true, false]) select {!alive _x;};
 	KH_var_allTerrainObjects = nearestTerrainObjects [[worldSize / 2, worldSize / 2], [], worldSize * sqrt 2 / 2, false, true];
@@ -67,6 +71,16 @@ if isServer then {
 			publicVariable "KH_var_allMachines";
 			KH_var_allPlayerMachines pushBackUnique _machineId;
 			publicVariable "KH_var_allPlayerMachines";
+			
+			if KH_var_playersInitialized then {
+				[[], KH_fnc_playerJipPreloadInit, _machineId, "THIS_FRAME"] call KH_fnc_execute;
+				KH_var_jipPlayerMachines pushBackUnique _machineId;
+				publicVariable "KH_var_jipPlayerMachines";
+			}
+			else {
+				[[], KH_fnc_playerPreloadInit, _machineId, "THIS_FRAME"] call KH_fnc_execute;
+			};
+
 			private _uid = "";
 			
 			{
@@ -84,7 +98,6 @@ if isServer then {
 			};
 
 			["KH_eve_playerPreloaded", [_machineId, _uid, _profileName, _profileNameSteam]] call CBA_fnc_globalEvent;
-			[[], KH_fnc_playerPreInit, _machineId, "THIS_FRAME"] call KH_fnc_execute;
 		}
 	] call CBA_fnc_addEventHandler;
 
@@ -96,7 +109,7 @@ if isServer then {
 			publicVariable "KH_var_allMachines";
 			KH_var_allHeadlessMachines pushBackUnique _machineId;
 			publicVariable "KH_var_allHeadlessMachines";
-			[[], KH_fnc_headlessPreInit, "HEADLESS", "THIS_FRAME"] call KH_fnc_execute;
+			[[], KH_fnc_headlessLoadInit, _machineId, "THIS_FRAME"] call KH_fnc_execute;
 		}
 	] call CBA_fnc_addEventHandler;
 	
@@ -104,9 +117,17 @@ if isServer then {
 		"KH_eve_playerLoaded",
 		{
 			params ["_unit", "_machineId"];
-			KH_var_allPlayerUnits pushBackUnique _unit;
-			publicVariable "KH_var_allPlayerUnits";
-			[[], KH_fnc_playerPostInit, _machineId, "THIS_FRAME"] call KH_fnc_execute;
+
+			if KH_var_playersInitialized then {
+				KH_var_jipPlayerUnits pushBackUnique _unit;
+				publicVariable "KH_var_jipPlayerUnits";
+				[[], KH_fnc_playerJipLoadInit, _machineId, "THIS_FRAME"] call KH_fnc_execute;
+			}
+			else {
+				KH_var_allPlayerUnits pushBackUnique _unit;
+				publicVariable "KH_var_allPlayerUnits";
+				[[], KH_fnc_playerLoadInit, _machineId, "THIS_FRAME"] call KH_fnc_execute;
+			};
 		}
 	] call CBA_fnc_addEventHandler;
 
@@ -134,10 +155,21 @@ if isServer then {
 			
 			if (_previousUnit in KH_var_allPlayerUnits) then {
 				KH_var_allPlayerUnits deleteAt (KH_var_allPlayerUnits find _previousUnit);
+				KH_var_allPlayerUnits pushBackUnique _newUnit;
+				publicVariable "KH_var_allPlayerUnits";
 			};
 
-			KH_var_allPlayerUnits pushBackUnique _newUnit;
-			publicVariable "KH_var_allPlayerUnits";
+			if (_previousUnit in KH_var_jipPlayerUnits) then {
+				KH_var_jipPlayerUnits deleteAt (KH_var_jipPlayerUnits find _previousUnit);
+				KH_var_jipPlayerUnits pushBackUnique _newUnit;
+				publicVariable "KH_var_jipPlayerUnits";
+			};
+
+			if (_previousUnit in KH_var_initialPlayerUnits) then {
+				KH_var_initialPlayerUnits deleteAt (KH_var_initialPlayerUnits find _previousUnit);
+				KH_var_initialPlayerUnits pushBackUnique _newUnit;
+				publicVariable "KH_var_initialPlayerUnits";
+			};
 		}
 	] call CBA_fnc_addEventHandler;
 
@@ -180,10 +212,21 @@ if isServer then {
 					
 					if (_oldEntity in KH_var_allPlayerUnits) then {
 						KH_var_allPlayerUnits deleteAt (KH_var_allPlayerUnits find _oldEntity);
+						KH_var_allPlayerUnits pushBackUnique _newEntity;
+						publicVariable "KH_var_allPlayerUnits";
 					};
 
-					KH_var_allPlayerUnits pushBackUnique _newEntity;
-					publicVariable "KH_var_allPlayerUnits";
+					if (_oldEntity in KH_var_jipPlayerUnits) then {
+						KH_var_jipPlayerUnits deleteAt (KH_var_jipPlayerUnits find _oldEntity);
+						KH_var_jipPlayerUnits pushBackUnique _newEntity;
+						publicVariable "KH_var_jipPlayerUnits";
+					};
+
+					if (_oldEntity in KH_var_initialPlayerUnits) then {
+						KH_var_initialPlayerUnits deleteAt (KH_var_initialPlayerUnits find _oldEntity);
+						KH_var_initialPlayerUnits pushBackUnique _newEntity;
+						publicVariable "KH_var_initialPlayerUnits";
+					};
 				}, 
 				[_newEntity, _oldEntity]
 			] call CBA_fnc_execNextFrame;
@@ -216,17 +259,19 @@ if isServer then {
 		{
 			params ["_entity"];
 
-			if (_entity in KH_var_allEntities) then {
-				KH_var_allEntities deleteAt (KH_var_allEntities find _entity);
-			};
-
-			if (_entity in KH_var_allDeadEntities) then {
-				KH_var_allDeadEntities deleteAt (KH_var_allDeadEntities find _entity);
-			};
-
 			if (_entity in KH_var_allPlayerUnits) then {
 				KH_var_allPlayerUnits deleteAt (KH_var_allPlayerUnits find _entity);
 				publicVariable "KH_var_allPlayerUnits";				
+			};
+
+			if (_entity in KH_var_jipPlayerUnits) then {
+				KH_var_jipPlayerUnits deleteAt (KH_var_jipPlayerUnits find _entity);
+				publicVariable "KH_var_jipPlayerUnits";				
+			};
+
+			if (_entity in KH_var_initialPlayerUnits) then {
+				KH_var_initialPlayerUnits deleteAt (KH_var_initialPlayerUnits find _entity);
+				publicVariable "KH_var_initialPlayerUnits";				
 			};
 		}
 	];
@@ -253,6 +298,16 @@ if isServer then {
 				if (_unit in KH_var_allPlayerUnits) then {
 					KH_var_allPlayerUnits deleteAt (KH_var_allPlayerUnits find _unit);
 					publicVariable "KH_var_allPlayerUnits";				
+				};
+
+				if (_unit in KH_var_jipPlayerUnits) then {
+					KH_var_jipPlayerUnits deleteAt (KH_var_jipPlayerUnits find _unit);
+					publicVariable "KH_var_jipPlayerUnits";				
+				};
+
+				if (_unit in KH_var_initialPlayerUnits) then {
+					KH_var_initialPlayerUnits deleteAt (KH_var_initialPlayerUnits find _unit);
+					publicVariable "KH_var_initialPlayerUnits";				
 				};
 						
 				if (_machineId in KH_var_allMachines) then {
@@ -281,6 +336,11 @@ if isServer then {
 								break;
 							};
 						} forEach KH_var_allPlayerUidMachines;
+					};
+
+					if (_machineId in KH_var_jipPlayerMachines) then {
+						KH_var_jipPlayerMachines deleteAt (KH_var_jipPlayerMachines find _machineId);
+						publicVariable "KH_var_jipPlayerMachines";
 					};
 				};
 			};

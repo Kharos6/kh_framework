@@ -1,8 +1,8 @@
 params ["_endName", "_isVictory", ["_fadeType", true], ["_delay", 1], ["_nextMission", []]];
 _delay = _delay max 1;
-[] call KH_fnc_serverEndInit;
-[[], KH_fnc_headlessEndInit, "HEADLESS", "THIS_FRAME"] call KH_fnc_execute;
-[[], KH_fnc_playerEndInit, "PLAYERS", "THIS_FRAME"] call KH_fnc_execute;
+[] call KH_fnc_serverMissionEndInit;
+[[], KH_fnc_headlessMissionEndInit, "HEADLESS", "THIS_FRAME"] call KH_fnc_execute;
+[[], KH_fnc_playerMissionEndInit, "PLAYERS", "THIS_FRAME"] call KH_fnc_execute;
 ["KH_eve_missionEnded", [_isVictory, _nextMission]] call CBA_fnc_globalEvent;
 
 [

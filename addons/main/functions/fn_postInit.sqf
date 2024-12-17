@@ -1,45 +1,25 @@
 isNil {
-	{
-		_x params ["_arguments", "_function"];
-		_arguments call _function;
-	} forEach KH_var_postInitExecutions;
-
 	if isServer then {
 		if (KH_var_entityArrayBuilderArrays isNotEqualTo []) then {
 			{				
 				missionNamespace setVariable [_x, missionNamespace getVariable [_x, []], true];
-
-				addMissionEventHandler [
-					"EntityRespawned", 
-					{
-						params ["_newEntity", "_oldEntity"];
-						{
-							private _entityArray = missionNamespace getVariable [_x, []];
-
-							if (_oldEntity in _entityArray) then {
-								_entityArray deleteAt (_entityArray find _oldEntity);
-								_entityArray pushBackUnique _newEntity;
-								missionNamespace setVariable [_x, _entityArray, true];
-							};
-						} forEach KH_var_entityArrayBuilderArrays;
-					}
-				];
-
-				addMissionEventHandler [
-					"EntityDeleted", 
-					{
-						params ["_entity"];
-						{
-							private _entityArray = missionNamespace getVariable [_x, []];
-
-							if (_entity in _entityArray) then {
-								_entityArray deleteAt (_entityArray find _entity);
-								missionNamespace setVariable [_x, _entityArray, true];
-							};
-						} forEach KH_var_entityArrayBuilderArrays;
-					}
-				];
 			} forEach KH_var_entityArrayBuilderArrays;
+
+			addMissionEventHandler [
+				"EntityRespawned", 
+				{
+					params ["_newEntity", "_oldEntity"];
+					{
+						private _entityArray = missionNamespace getVariable [_x, []];
+
+						if (_oldEntity in _entityArray) then {
+							_entityArray deleteAt (_entityArray find _oldEntity);
+							_entityArray pushBackUnique _newEntity;
+							missionNamespace setVariable [_x, _entityArray, true];
+						};
+					} forEach KH_var_entityArrayBuilderArrays;
+				}
+			];
 		};
 
 		if (KH_var_groupArrayBuilderArrays isNotEqualTo []) then {
@@ -124,13 +104,18 @@ isNil {
 				[_x select 0, _x select 1, _x select 2] call _relationFunction;
 			} forEach KH_var_initialSideRelations;
 		};
+
+		{
+			_x params ["_arguments", "_function"];
+			_arguments call _function;
+		} forEach KH_var_postInitExecutions;
 	
-		[] call KH_fnc_serverPreInit;
+		[] call KH_fnc_serverMissionLoadInit;
 		
 		[
 			[], 
 			{
-				systemChat "KH FRAMEWORK PRE INIT COMPLETE";
+				systemChat "KH FRAMEWORK - MISSION INITIALIZED";
 			}, 
 			"GLOBAL",
 			"THIS_FRAME"
@@ -143,13 +128,13 @@ isNil {
 			{				
 				[
 					{				
-						[] call KH_fnc_serverPostInit;
-						[[], KH_fnc_headlessPostInit, "HEADLESS", "THIS_FRAME"] call KH_fnc_execute;
+						[] call KH_fnc_serverMissionStartInit;
+						[[], KH_fnc_headlessMissionStartInit, "HEADLESS", "THIS_FRAME"] call KH_fnc_execute;
 						
 						[
 							[], 
 							{
-								systemChat "KH FRAMEWORK POST INIT COMPLETE";
+								systemChat "KH FRAMEWORK - MISSION STARTED";
 							}, 
 							"GLOBAL",
 							"THIS_FRAME"
@@ -166,32 +151,27 @@ isNil {
 								} forEach allUsers;
 								
 								if ((((count KH_var_allPlayerUnits) == _initialPlayerCount)) || (CBA_missionTime > 60) || !isMultiplayer) then {
-									KH_var_initialPlayerUnits = KH_var_allPlayerUnits;
-									publicVariable "KH_var_initialPlayerUnits";
-									KH_var_playersInitialized = true;
-									publicVariable "KH_var_playersInitialized";
-									["KH_eve_playersInitialized", []] call CBA_fnc_globalEvent;	
-
 									[
-										"KH_eve_playerLoaded",
 										{
-											private _machineId = _this select 1;
-											[[], KH_fnc_playerJipInit, _machineId, "THIS_FRAME"] call KH_fnc_execute;
-										}
-									] call CBA_fnc_addEventHandler;
-									
-									[] call KH_fnc_serverMissionInit;
-									[[], KH_fnc_headlessMissionInit, "HEADLESS", "THIS_FRAME"] call KH_fnc_execute;
-									[[], KH_fnc_playerMissionInit, "PLAYERS", "THIS_FRAME"] call KH_fnc_execute;
+											KH_var_initialPlayerUnits = KH_var_allPlayerUnits;
+											publicVariable "KH_var_initialPlayerUnits";
+											KH_var_playersInitialized = true;
+											publicVariable "KH_var_playersInitialized";
+											["KH_eve_playersInitialized", KH_var_initialPlayerUnits] call CBA_fnc_globalEvent;												
+											[] call KH_fnc_serverPlayersInitializedInit;
+											[[], KH_fnc_playerPlayersInitializedInit, "PLAYERS", "THIS_FRAME"] call KH_fnc_execute;
 
-									[
-										[], 
-										{
-											systemChat "KH FRAMEWORK MISSION INIT COMPLETE";
-										}, 
-										"GLOBAL",
-										"THIS_FRAME"
-									] call KH_fnc_execute;
+											[
+												[], 
+												{
+													systemChat "KH FRAMEWORK - PLAYERS INITIALIZED";
+												}, 
+												"GLOBAL",
+												"THIS_FRAME"
+											] call KH_fnc_execute;
+										},
+										[]
+									] call CBA_fnc_execNextFrame;
 									
 									[_handle] call CBA_fnc_removePerFrameHandler;
 								};
@@ -206,12 +186,22 @@ isNil {
 			[]
 		] call CBA_fnc_waitUntilAndExecute;
 	};
-
+	
 	if hasInterface then {
+		{
+			_x params ["_arguments", "_function"];
+			_arguments call _function;
+		} forEach KH_var_postInitExecutions;
+
 		["KH_eve_playerPreloadedInitial", [clientOwner, profileName, profileNameSteam]] call CBA_fnc_serverEvent;
 	};
 
 	if (!isServer && !hasInterface) then {
+		{
+			_x params ["_arguments", "_function"];
+			_arguments call _function;
+		} forEach KH_var_postInitExecutions;
+
 		["KH_eve_headlessPreloaded", [clientOwner]] call CBA_fnc_globalEvent;
 	};
 };

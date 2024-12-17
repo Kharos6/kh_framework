@@ -10,197 +10,180 @@ class Mission
 				collapsed = 1;
 				class Attributes
 				{
-					class KH_ServerPreInit
+					class KH_ServerMissionLoadInit
 					{
-						displayName = "Server Pre Init";
-						tooltip = "Unscheduled code to execute on the server before the mission starts. Players and their units are not yet initialized or available, and remote execution will only work if <KH_fnc_execute> is used with <'JIP'>.";
-						property = "KH_ServerPreInit";
+						displayName = "Server: Mission Load Init";
+						tooltip = "Unscheduled code to execute on the server when the mission loads, before the mission starts. Players may not yet be present, and their units are not yet available. Remote execution with <KH_fnc_execute> will only reliably work if <'JIP'> is used.";
+						property = "KH_ServerMissionLoadInit";
 						control = "EditMulti5";
 						expression = 
 						"\
 							if ((_value != '') && !is3DEN && isServer) then {\
-								KH_fnc_serverPreInit = compile _value;\
+								KH_fnc_serverMissionLoadInit = compile _value;\
 							}\
 							else {\
-								KH_fnc_serverPreInit = {};\
+								KH_fnc_serverMissionLoadInit = {};\
 							};\
 						";
 						defaultValue = "''";
 					};
-					class KH_ServerPostInit
+					class KH_ServerMissionStartInit
 					{
-						displayName = "Server Post Init";
-						tooltip = "Unscheduled code to execute on the server after the mission starts. Players are initialized, but remote execution is not advised if it requires player units, as they may not yet be available. JIP handling in executions of <KH_fnc_execute> with <'JIP'> during this phase is delayed until the mission init phase begins.";
-						property = "KH_ServerPostInit";
+						displayName = "Server: Mission Start Init";
+						tooltip = "Unscheduled code to execute on the server when the mission starts. Players are present, but their units are not yet available, so remote execution with <KH_fnc_execute> is not advised if it requires player units. <KH_fnc_execute> may be used with <'JIP'> with <_unitRequired> set to <true> to ensure proper execution if player units are required, but doing so during this stage will suspend the execution until all player units are available.";
+						property = "KH_ServerMissionStartInit";
 						control = "EditMulti5";
 						expression = 
 						"\
 							if ((_value != '') && !is3DEN && isServer) then {\
-								KH_fnc_serverPostInit = compile _value;\
+								KH_fnc_serverMissionStartInit = compile _value;\
 							}\
 							else {\
-								KH_fnc_serverPostInit = {};\
+								KH_fnc_serverMissionStartInit = {};\
 							};\
 						";
 						defaultValue = "''";
 					};		
-					class KH_ServerMissionInit
+					class KH_ServerPlayersInitializedInit
 					{
-						displayName = "Server Mission Init";
-						tooltip = "Unscheduled code to execute on the server after the mission starts, and once all player units have become available. All forms of execution are viable. In the event of a bugged player, this phase can be suspended for a maximum of 60 seconds before it automatically triggers.";
-						property = "KH_ServerMissionInit";
+						displayName = "Server: Players Initialized Init";
+						tooltip = "Unscheduled code to execute on the server once all player units have become available. All forms of remote execution with <KH_fnc_execute> are viable, both during and after this stage. While extremely unlikely, in the event that a player bugs out in some way, this stage will be suspended for a maximum of 60 seconds before it automatically triggers.";
+						property = "KH_ServerPlayersInitializedInit";
 						control = "EditMulti5";
 						expression = 
 						"\
 							if ((_value != '') && !is3DEN && isServer) then {\
-								KH_fnc_serverMissionInit = compile _value;\
+								KH_fnc_serverPlayersInitializedInit = compile _value;\
 							}\
 							else {\
-								KH_fnc_serverMissionInit = {};\
+								KH_fnc_serverPlayersInitializedInit = {};\
 							};\
 						";
 						defaultValue = "''";
 					};
-					class KH_ServerEndInit
+					class KH_ServerMissionEndInit
 					{
-						displayName = "Server End Init";
+						displayName = "Server: Mission End Init";
 						tooltip = "Unscheduled code to execute on the server when <KH_fnc_endMission> is executed.";
-						property = "KH_ServerEndInit";
+						property = "KH_ServerMissionEndInit";
 						control = "EditMulti5";
 						expression = 
 						"\
 							if ((_value != '') && !is3DEN && isServer) then {\
-								KH_fnc_serverEndInit = compile _value;\
+								KH_fnc_serverMissionEndInit = compile _value;\
 							}\
 							else {\
-								KH_fnc_serverEndInit = {};\
+								KH_fnc_serverMissionEndInit = {};\
 							};\
 						";
 						defaultValue = "''";
 					};
-					class KH_HeadlessPreInit
+					class KH_HeadlessLoadInit
 					{
-						displayName = "Headless Pre Init";
-						tooltip = "Unscheduled code to execute on headless clients before the mission starts. Players and their units may not yet be initialized or available, and remote execution may only work if <KH_fnc_execute> is used with <'JIP'>.";
+						displayName = "Headless: Load Init";
+						tooltip = "Unscheduled code to execute on headless clients, both if they join while the mission is in progress, and before the mission starts if they are already present at that time. In case of execution prior to mission start, players may not yet be present, and their units are not yet available, and remote execution will only reliably work if <KH_fnc_execute> is used with <'JIP'>.";
 						property = "KH_HeadlessPreInit";
 						control = "EditMulti5";
 						expression = 
 						"\
 							if ((_value != '') && !is3DEN && isServer) then {\
-								KH_fnc_headlessPreInit = compile _value;\
+								KH_fnc_headlessLoadInit = compile _value;\
 							}\
 							else {\
-								KH_fnc_headlessPreInit = {};\
+								KH_fnc_headlessLoadInit = {};\
 							};\
 						";
 						defaultValue = "''";
 					};
-					class KH_HeadlessPostInit
+					class KH_HeadlessMissionStartInit
 					{
-						displayName = "Headless Post Init";
-						tooltip = "Unscheduled code to execute on headless clients after the mission starts. Players are initialized, but remote execution is not advised if it requires player units, as they may not yet be available. JIP handling in executions of <KH_fnc_execute> with <'JIP'> during this phase is delayed until the mission init phase begins.";
-						property = "KH_HeadlessPostInit";
+						displayName = "Headless: Mission Start Init";
+						tooltip = "Unscheduled code to execute on headless clients when the mission starts. Players are present, but their units are not yet available, so remote execution with <KH_fnc_execute> is not advised if it requires player units. <KH_fnc_execute> may be used with <'JIP'> with <_unitRequired> set to <true> to ensure proper execution if player units are required, but doing so during this stage will suspend the execution until all player units are available.";
+						property = "KH_HeadlessMissionStartInit";
 						control = "EditMulti5";
 						expression = 
 						"\
 							if ((_value != '') && !is3DEN && isServer) then {\
-								KH_fnc_headlessPostInit = compile _value;\
+								KH_fnc_headlessMissionStartInit = compile _value;\
 							}\
 							else {\
-								KH_fnc_headlessPostInit = {};\
-							};\
-						";
-						defaultValue = "''";
-					};		
-					class KH_HeadlessMissionInit
-					{
-						displayName = "Headless Mission Init";
-						tooltip = "Unscheduled code to execute on headless clients after the mission starts, and once all player units have become available. All forms of execution are viable. In the event of a bugged player, this phase can be suspended for a maximum of 60 seconds before it automatically triggers.";
-						property = "KH_HeadlessMissionInit";
-						control = "EditMulti5";
-						expression = 
-						"\
-							if ((_value != '') && !is3DEN && isServer) then {\
-								KH_fnc_headlessMissionInit = compile _value;\
-							}\
-							else {\
-								KH_fnc_headlessMissionInit = {};\
+								KH_fnc_headlessMissionStartInit = {};\
 							};\
 						";
 						defaultValue = "''";
 					};
-					class KH_HeadlessEndInit
+					class KH_HeadlessMissionEndInit
 					{
-						displayName = "Headless End Init";
+						displayName = "Headless: Mission End Init";
 						tooltip = "Unscheduled code to execute on headless clients when <KH_fnc_endMission> is executed.";
-						property = "KH_HeadlessEndInit";
+						property = "KH_HeadlessMissionEndInit";
 						control = "EditMulti5";
 						expression = 
 						"\
 							if ((_value != '') && !is3DEN && isServer) then {\
-								KH_fnc_headlessEndInit = compile _value;\
+								KH_fnc_headlessMissionEndInit = compile _value;\
 							}\
 							else {\
-								KH_fnc_headlessEndInit = {};\
+								KH_fnc_headlessMissionEndInit = {};\
 							};\
 						";
 						defaultValue = "''";
 					};
-					class KH_PlayerPreInit
+					class KH_PlayerPreloadInit
 					{
-						displayName = "Player Pre Init";
-						tooltip = "Unscheduled code to execute locally to each player before the mission starts. The local player unit is not yet available.";
-						property = "KH_PlayerPreInit";
+						displayName = "Player: Preload Init";
+						tooltip = "Unscheduled code to execute locally to each player that is present before the mission starts. The local player unit is not yet available. Other players may not yet be present, and their units are not yet available, so remote execution will only reliably work if <KH_fnc_execute> is used with <'JIP'>.";
+						property = "KH_PlayerPreloadInit";
 						control = "EditMulti5";
 						expression = 
 						"\
 							if ((_value != '') && !is3DEN && isServer) then {\
-								KH_fnc_playerPreInit = compile _value;\
+								KH_fnc_playerPreloadInit = compile _value;\
 							}\
 							else {\
-								KH_fnc_playerPreInit = {};\
+								KH_fnc_playerPreloadInit = {};\
 							};\
 						";
 						defaultValue = "''";
 					};
-					class KH_PlayerPostInit
+					class KH_PlayerLoadInit
 					{
-						displayName = "Player Post Init";
-						tooltip = "Unscheduled code to execute locally to each player after the mission starts. The local player unit is available, and this is the ideal phase to execute code that requires the local player unit. Other players are initialized, but remote execution is not advised if it requires player units, as they may not yet be initialized. JIP handling in executions of <KH_fnc_execute> with <'JIP'> during this phase is delayed until the mission init phase begins.";
-						property = "KH_PlayerPostInit";
+						displayName = "Player: Load Init";
+						tooltip = "Unscheduled code to execute locally to each player that is present during the mission start, once their local player unit is available. This is the ideal stage to execute code that requires the local player unit. Other players are present, but their units may not yet be available, so remote execution with <KH_fnc_execute> is not advised if it requires other player units. <KH_fnc_execute> may be used with <'JIP'> with <_unitRequired> set to <true> to ensure proper execution if other player units are required, but doing so during this stage will suspend the execution until all other player units are available.";
+						property = "KH_PlayerLoadInit";
 						control = "EditMulti5";
 						expression = 
 						"\
 							if ((_value != '') && !is3DEN && isServer) then {\
-								KH_fnc_playerPostInit = compile _value;\
+								KH_fnc_playerLoadInit = compile _value;\
 							}\
 							else {\
-								KH_fnc_playerPostInit = {};\
+								KH_fnc_playerLoadInit = {};\
 							};\
 						";
 						defaultValue = "''";
 					};
-					class KH_PlayerMissionInit
+					class KH_PlayerPlayersInitializedInit
 					{
-						displayName = "Player Mission Init";
-						tooltip = "Unscheduled code to execute locally to each player after the mission starts, and once all other player units have become available. All forms of execution are viable. In the event of a bugged player, this phase can be suspended for a maximum of 60 seconds before it automatically triggers.";
-						property = "KH_PlayerMissionInit";
+						displayName = "Player: Players Initialized Init";
+						tooltip = "Unscheduled code to execute locally to each player once all other player units have become available. All forms of remote execution with <KH_fnc_execute> are viable, both during and after this stage. While extremely unlikely, in the event that a player bugs out in some way, this stage will be suspended for a maximum of 60 seconds before it automatically triggers.";
+						property = "KH_PlayerPlayersInitializedInit";
 						control = "EditMulti5";
 						expression = 
 						"\
 							if ((_value != '') && !is3DEN && isServer) then {\
-								KH_fnc_playerMissionInit = compile _value;\
+								KH_fnc_playerPlayersInitializedInit = compile _value;\
 							}\
 							else {\
-								KH_fnc_playerMissionInit = {};\
+								KH_fnc_playerPlayersInitializedInit = {};\
 							};\
 						";
 						defaultValue = "''";
 					};
 					class KH_PlayerKilledInit
 					{
-						displayName = "Player Killed Init";
-						tooltip = "Unscheduled code to execute locally to each player upon death. Local player unit is the killed unit.";
+						displayName = "Player: Killed Init";
+						tooltip = "Unscheduled code to execute locally to each player upon their death. The local player unit is the killed unit.";
 						property = "KH_PlayerKilledInit";
 						control = "EditMulti5";
 						expression = 
@@ -216,8 +199,8 @@ class Mission
 					};
 					class KH_PlayerRespawnInit
 					{
-						displayName = "Player Respawn Init";
-						tooltip = "Unscheduled code to execute locally to each player after they respawn. Local player unit is now the respawned unit. Passed arguments available through <_this> are: [_corpse].";
+						displayName = "Player: Respawn Init";
+						tooltip = "Unscheduled code to execute locally to each player when they respawn. The local player unit is the respawned unit. Passed arguments available through <_this> are: [_corpse].";
 						property = "KH_PlayerRespawnInit";
 						control = "EditMulti5";
 						expression = 
@@ -233,8 +216,8 @@ class Mission
 					};
 					class KH_PlayerSwitchInit
 					{
-						displayName = "Player Switch Init";
-						tooltip = "Unscheduled code to execute locally to each player after they switch to another unit. Local player unit is now the switched unit. Passed arguments available through <_this> are: [_previousUnit].";
+						displayName = "Player: Switch Init";
+						tooltip = "Unscheduled code to execute locally to each player when they switch to another unit. The local player unit is the switched unit. Passed arguments available through <_this> are: [_previousUnit].";
 						property = "KH_PlayerSwitchInit";
 						control = "EditMulti5";
 						expression = 
@@ -248,36 +231,53 @@ class Mission
 						";
 						defaultValue = "''";
 					};
-					class KH_PlayerJIPInit
+					class KH_PlayerJIPPreloadInit
 					{
-						displayName = "Player JIP Init";
-						tooltip = "Unscheduled code to execute locally to each player that joins after all of the initial player units have become available.";
-						property = "KH_PlayerJIPInit";
+						displayName = "Player: JIP Preload Init";
+						tooltip = "Unscheduled code to execute locally to each player that joins while the mission is considered to be in progress, which is after the <Players Initialized Init> stage. The local player unit is not yet available.";
+						property = "KH_PlayerJIPPreloadInit";
 						control = "EditMulti5";
 						expression = 
 						"\
 							if ((_value != '') && !is3DEN && isServer) then {\
-								KH_fnc_playerJipInit = compile _value;\
+								KH_fnc_playerJipPreloadInit = compile _value;\
 							}\
 							else {\
-								KH_fnc_playerJipInit = {};\
+								KH_fnc_playerJipPreloadInit = {};\
 							};\
 						";
 						defaultValue = "''";
 					};
-					class KH_PlayerEndInit
+					class KH_PlayerJIPLoadInit
 					{
-						displayName = "Player End Init";
-						tooltip = "Unscheduled code to execute locally to each player before the mission ends when <KH_fnc_endMission> is executed.";
-						property = "KH_PlayerEndInit";
+						displayName = "Player: JIP Load Init";
+						tooltip = "Unscheduled code to execute locally to each player that joins while the mission is considered to be in progress, which is after the <Players Initialized Init> stage, once their local player unit is available.";
+						property = "KH_PlayerJIPLoadInit";
 						control = "EditMulti5";
 						expression = 
 						"\
 							if ((_value != '') && !is3DEN && isServer) then {\
-								KH_fnc_playerEndInit = compile _value;\
+								KH_fnc_playerJipLoadInit = compile _value;\
 							}\
 							else {\
-								KH_fnc_playerEndInit = {};\
+								KH_fnc_playerJipLoadInit = {};\
+							};\
+						";
+						defaultValue = "''";
+					};
+					class KH_PlayerMissionEndInit
+					{
+						displayName = "Player: Mission End Init";
+						tooltip = "Unscheduled code to execute locally to each player before the mission ends when <KH_fnc_endMission> is executed.";
+						property = "KH_PlayerMissionEndInit";
+						control = "EditMulti5";
+						expression = 
+						"\
+							if ((_value != '') && !is3DEN && isServer) then {\
+								KH_fnc_playerMissionEndInit = compile _value;\
+							}\
+							else {\
+								KH_fnc_playerMissionEndInit = {};\
 							};\
 						";
 						defaultValue = "''";
@@ -377,7 +377,7 @@ class Mission
 									_parsedTargetEntities pushBack (missionNamespace getVariable [_x, objNull]);\
 								} forEach (parseSimpleArray _targetEntities);\
 								[\
-									['CBA'],\
+									'CBA',\
 									'KH_eve_playerLoaded',\
 									[_parsedPositionEntities, _parsedTargetEntities, parseSimpleArray _fovs, parseSimpleArray _commitTimes, parseSimpleArray _durations, parseSimpleArray _visionTypes, _cinematicBorders, _disableUserInput, _jip],\
 									{\
@@ -387,7 +387,7 @@ class Mission
 											[[_positionEntities, _targetEntities, _fovs, _commitTimes, _durations, _visionTypes, _cinematicBorders, _disableUserInput], 'KH_fnc_cameraSequence', _unit, 'THIS_FRAME'] call KH_fnc_execute;\
 										}\
 										else {\
-											if ((_unit in KH_var_initialPlayerUnits) || !KH_var_playersInitialized || (CBA_missionTime < 60)) then {\
+											if !KH_var_playersInitialized then {\
 												[[_positionEntities, _targetEntities, _fovs, _commitTimes, _durations, _visionTypes, _cinematicBorders, _disableUserInput], 'KH_fnc_cameraSequence', _unit, 'THIS_FRAME'] call KH_fnc_execute;\
 											};\
 										};\
@@ -568,7 +568,7 @@ class Mission
 									[_identifier] call KH_fnc_loadCargoInventories;\
 								};\
 								[\
-									['CBA'],\
+									'CBA',\
 									'KH_eve_missionEnded',\
 									[_identifier, _players, _objects, _world, _parsedVariables],\
 									{\

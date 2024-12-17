@@ -71,16 +71,6 @@ if isServer then {
 			publicVariable "KH_var_allMachines";
 			KH_var_allPlayerMachines pushBackUnique _machineId;
 			publicVariable "KH_var_allPlayerMachines";
-			
-			if KH_var_playersInitialized then {
-				[[], KH_fnc_playerJipPreloadInit, _machineId, "THIS_FRAME"] call KH_fnc_execute;
-				KH_var_jipPlayerMachines pushBackUnique _machineId;
-				publicVariable "KH_var_jipPlayerMachines";
-			}
-			else {
-				[[], KH_fnc_playerPreloadInit, _machineId, "THIS_FRAME"] call KH_fnc_execute;
-			};
-
 			private _uid = "";
 			
 			{
@@ -91,6 +81,15 @@ if isServer then {
 					break;
 				};
 			} forEach allUsers;
+			
+			if KH_var_playersInitialized then {
+				[[_uid], KH_fnc_playerJipPreloadInit, _machineId, "THIS_FRAME"] call KH_fnc_execute;
+				KH_var_jipPlayerMachines pushBackUnique _machineId;
+				publicVariable "KH_var_jipPlayerMachines";
+			}
+			else {
+				[[_uid], KH_fnc_playerPreloadInit, _machineId, "THIS_FRAME"] call KH_fnc_execute;
+			};
 
 			if ((admin _machineId) != 0) then {
 				KH_var_currentAdmin = _machineId;

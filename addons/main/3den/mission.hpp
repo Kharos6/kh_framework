@@ -132,7 +132,7 @@ class Mission
 					class KH_PlayerPreloadInit
 					{
 						displayName = "Player: Preload Init";
-						tooltip = "Unscheduled code to execute locally to each player that is present before the mission starts. The local player unit is not yet available. Other players may not yet be present, and their units are not yet available, so remote execution will only reliably work if <KH_fnc_execute> is used with <'JIP'>.";
+						tooltip = "Unscheduled code to execute locally to each player that is present before the mission starts. The local player unit is not yet available. Other players may not yet be present, and their units are not yet available, so remote execution will only reliably work if <KH_fnc_execute> is used with <'JIP'>. Passed arguments available through <_this> are: [_uid].";
 						property = "KH_PlayerPreloadInit";
 						control = "EditMulti5";
 						expression = 
@@ -234,7 +234,7 @@ class Mission
 					class KH_PlayerJIPPreloadInit
 					{
 						displayName = "Player: JIP Preload Init";
-						tooltip = "Unscheduled code to execute locally to each player that joins while the mission is considered to be in progress, which is after the <Players Initialized Init> stage. The local player unit is not yet available.";
+						tooltip = "Unscheduled code to execute locally to each player that joins while the mission is considered to be in progress, which is after the <Players Initialized Init> stage. The local player unit is not yet available. Passed arguments available through <_this> are: [_uid].";
 						property = "KH_PlayerJIPPreloadInit";
 						control = "EditMulti5";
 						expression = 

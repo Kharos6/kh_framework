@@ -610,6 +610,32 @@ class Object
 					";
 					defaultValue = "false";
 				};
+				class KH_SetRandomLoadout
+				{
+					displayName = "Set Random Loadout";
+					tooltip = "Specify either an array of loadouts, or a global variable containing an array of loadouts, that will be selected from at random and applied to this unit.";
+					property = "KH_ArrayBuilder";
+					control = "Edit";
+					expression = 
+					"\
+						if ((_value != '') && (_value != '[]') && !is3DEN) then {\
+							KH_var_postInitExecutions pushBack [\
+								[_this, _value],\
+								{\
+									params ['_entity', '_loadouts'];\
+									if (('[' in (_x select 0)) || (']' in (_x select 0))) then {\
+										[[_entity], parseSimpleArray _loadouts] call KH_fnc_setRandomLoadout;\
+									}\
+									else {\
+										[[_entity], missionNamespace getVariable [_loadouts, []]] call KH_fnc_setRandomLoadout;\
+									};\
+								}\
+							];\
+						};\
+					";
+					defaultValue = "''";
+					condition = "objectControllable";
+				};
 				class KH_SetRenegade
 				{
 					displayName = "Set Renegade";

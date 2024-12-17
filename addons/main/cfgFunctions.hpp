@@ -64,6 +64,7 @@ class CfgFunctions
 			class setOwnership {};
 			class setPerspective {};
 			class setPosition {};
+			class setRandomLoadout {};
 			class setRotation {};
 			class setSideRelations {};
 			class setTransforms {};

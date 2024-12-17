@@ -39,27 +39,32 @@ private _unitAttributes = createHashMap;
 					deleteVehicle _previousUnit;
 					[_unit, _attributes, false, true, true, true, true, true, true, true, true, true, true] call KH_fnc_setUnitAttributes;
 					[_unit] call _initialization;
-					
 				},
 				_ownerId,
 				"THIS_FRAME"
 			] call KH_fnc_execute;
 		}
-		else {		
-			[
-				{
-					params ["_unit", "_ownerId"];
-					((owner _unit) == _ownerId);
-				},
-				{
-					private _unit = _this select 0;
-					private _attributes = _this select 2;
-					[_unit, _attributes, false, false, true, true, true, true, false, true, true, true, true] call KH_fnc_setUnitAttributes;
-					[_unit] call _initialization;
-				}, 
-				[_x, _ownerId, _attributes], 
-				30
-			] call CBA_fnc_waitUntilAndExecute;
+		else {
+			if ((owner _x) != _ownerId) then {
+				[
+					{
+						params ["_unit", "_ownerId"];
+						((owner _unit) == _ownerId);
+					},
+					{
+						private _unit = _this select 0;
+						private _attributes = _this select 2;
+						[_unit, _attributes, false, false, true, true, true, true, false, true, true, true, true] call KH_fnc_setUnitAttributes;
+						[_unit] call _initialization;
+					}, 
+					[_x, _ownerId, _attributes], 
+					30
+				] call CBA_fnc_waitUntilAndExecute;
+			}
+			else {
+				[_x, _attributes, false, false, true, true, true, true, false, true, true, true, true] call KH_fnc_setUnitAttributes;
+				[_x] call _initialization;
+			};
 		};
 	}
 	else {

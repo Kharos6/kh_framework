@@ -51,6 +51,26 @@ class Group
 					";
 					defaultValue = "'[]'";
 				};
+				class KH_ServerGroupInit
+				{
+					displayName = "Server Group Init";
+					tooltip = "Unscheduled code to execute on the server with this group passed as an argument. Passed arguments available through <_this> are: [_group].";
+					property = "KH_ServerGroupInit";
+					control = "EditMulti5";
+					expression = 
+					"\
+						if ((_value != '') && !is3DEN) then {\
+							KH_var_postInitExecutions pushBack [\
+								[_this, _value],\
+								{\
+									params ['_group', '_function'];\
+									[_group] call _function;\
+								}\
+							];\
+						};\
+					";
+					defaultValue = "''";
+				};
 			};
 		};
 	};

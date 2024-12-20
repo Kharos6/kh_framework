@@ -1,6 +1,31 @@
-params ["_state", "_uniforms", "_headgear", ["_setCaptive", false]];
-KH_var_disguiseSideUniforms = [_uniforms select 0, _uniforms select 1, _uniforms select 2];
-KH_var_disguiseSideHeadgear = [_headgear select 0, _headgear select 1, _headgear select 2];
+params ["_state", "_uniforms", "_vests", "_headgear", "_vehicles", ["_setCaptive", false]];
+
+if (isNil "KH_var_disguiseSideUniforms") then {
+	KH_var_disguiseSideUniforms = [[], [], []];
+};
+
+if (isNil "KH_var_disguiseSideVests") then {
+	KH_var_disguiseSideVests = [[], [], []];
+};
+
+if (isNil "KH_var_disguiseSideHeadgear") then {
+	KH_var_disguiseSideHeadgear = [[], [], []];
+};
+
+private _i = 0;
+
+for "_i" from 0 to 2 do {
+	private _uniformsArray = (KH_var_disguiseSideUniforms select _i);
+	_uniformsArray insert [-1, _uniforms select _i, true];
+	KH_var_disguiseSideUniforms set [_i, _uniformsArray];
+	private _vestsArray = (KH_var_disguiseSideVests select _i);
+	_vestsArray insert [-1, _headgear select _i, true];
+	KH_var_disguiseSideVests set [_i, _vestsArray];
+	private _headgearArray = (KH_var_disguiseSideHeadgear select _i);
+	_headgearArray insert [-1, _headgear select _i, true];
+	KH_var_disguiseSideHeadgear set [_i, _headgearArray];
+};
+
 KH_var_disguiseSetCaptive = _setCaptive;
 
 if _state then {
@@ -20,6 +45,7 @@ if _state then {
 						private _player = _x;
 						private _originalSide = _x getVariable ["KH_var_disguiseOriginalSide", side (group _player)];
 						private _uniformIndex = -1;
+						private _vestIndex = -1;
 						private _headgearIndex = -1;
 						private _currentSide = sideUnknown;
 
@@ -30,7 +56,19 @@ if _state then {
 							}
 						} forEach KH_var_disguiseSideUniforms;
 
-						if ((headgear _player) == "") then {
+						if (((vest _player) == "") || (KH_var_disguiseSideVests isEqualTo [[], [], []])) then {
+							_vestIndex = _uniformIndex;
+						}
+						else {
+							{
+								if ((vest _player) in _x) then {
+									_vestIndex = KH_var_disguiseSideVests find _x;
+									break;
+								}
+							} forEach KH_var_disguiseSideVests;
+						};
+
+						if (((headgear _player) == "") || (KH_var_disguiseSideHeadgear isEqualTo [[], [], []])) then {
 							_headgearIndex = _uniformIndex;
 						}
 						else {
@@ -42,7 +80,7 @@ if _state then {
 							} forEach KH_var_disguiseSideHeadgear;
 						};
 						
-						if (_uniformIndex == _headgearIndex) then {
+						if ((_uniformIndex == _headgearIndex) && (_uniformIndex == _vestIndex)) then {
 							switch true do {
 								case (_uniformIndex == 0): {
 									_currentSide = west;
@@ -75,7 +113,7 @@ if _state then {
 													private _instigatorVisible = false;
 													
 													{
-														if (!(isPlayer _x) && (alive _x) && ((side (group _x)) == (side (group _instigator))) && (([_instigator, "VIEW", objNull] checkVisibility [eyePos _instigator, eyePos _x]) > 0)) then {
+														if (!(isPlayer _x) && (alive _x) && ((side (group _x)) == (side (group _instigator))) && ((([_instigator, "VIEW", objectParent _instigator] checkVisibility [eyePos _instigator, eyePos _x]) > 0) || (([_instigator, "VIEW", objectParent _instigator] checkVisibility [(getPosASL _instigator) vectorAdd [0, 0, 1], eyePos _x]) > 0))) then {
 															_instigatorVisible = true;
 															break;
 														};

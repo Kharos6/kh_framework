@@ -513,7 +513,7 @@ class Mission
 				{
 					class KH_DynamicDisguiseSubcategory
 					{
-						description = "Activates a disguise system that dictates the side affiliation of players based on the uniform and headgear they are wearing.";
+						description = "Activates a disguise system that dictates the side affiliation of players based on the uniform and headgear they are wearing. Will work in conjunction with the Dynamic Disguise modules.";
 						data = "AttributeSystemSubcategory";
 						control = "KH_SubcategoryNoHeader2";
 					};
@@ -523,12 +523,12 @@ class Mission
 						control = "KH_DynamicDisguise";
 						expression = 
 						"\
-							_value params ['_toggle', '_bluforUniforms', '_bluforHeadgear', '_redforUniforms', '_redforHeadgear', '_greenforUniforms', '_greenforHeadgear', '_setCaptive'];\
+							_value params ['_toggle', '_bluforUniforms', '_bluforVests', '_bluforHeadgear', '_opforUniforms', '_opforVests', '_opforHeadgear', '_greenforUniforms', '_greenforVests', '_greenforHeadgear', '_setCaptive'];\
 							if (_toggle && !is3DEN && isServer) then {\
-								[true, [parseSimpleArray _bluforUniforms, parseSimpleArray _redforUniforms, parseSimpleArray _greenforUniforms], [parseSimpleArray _bluforHeadgear, parseSimpleArray _redforHeadgear, parseSimpleArray _greenforHeadgear], _setCaptive] call KH_fnc_dynamicDisguise;\
+								[true, [parseSimpleArray _bluforUniforms, parseSimpleArray _opforUniforms, parseSimpleArray _greenforUniforms], [parseSimpleArray _bluforVests, parseSimpleArray _opforVests, parseSimpleArray _greenforVests], [parseSimpleArray _bluforHeadgear, parseSimpleArray _opforHeadgear, parseSimpleArray _greenforHeadgear], _setCaptive] call KH_fnc_dynamicDisguise;\
 							};\
 						";
-						defaultValue = "[false, '[]', '[]', '[]', '[]', '[]', '[]', false]";
+						defaultValue = "[false, '[]', '[]', '[]', '[]', '[]', '[]', '[]', '[]', '[]', false]";
 					};
 				};
 			};

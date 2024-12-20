@@ -53,6 +53,7 @@ class CfgFunctions
 			class moduleAssignParachute {};
 			class moduleCameraSequence {};
 			class moduleDisplaySubtitle {};
+			class moduleDynamicDisguiseEquipment {};
 			class moduleEditTerrainObjects {};
 			class moduleEndMission {};
 			class moduleEntitySpawner {};

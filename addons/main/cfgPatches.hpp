@@ -11,6 +11,7 @@ class CfgPatches
 			"KH_ModuleAssignParachute",
 			"KH_ModuleCameraSequence",
 			"KH_ModuleDisplaySubtitle",
+			"KH_ModuleDynamicDisguiseEquipment",
 			"KH_ModuleEditTerrainObjects",
 			"KH_ModuleEndMission",
 			"KH_ModuleEntitySpawner",

@@ -33,6 +33,7 @@ class CfgVehicles
 	#include "\x\kh\addons\main\vehicles\modules\assignParachute.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\cameraSequence.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\displaySubtitle.hpp"
+	#include "\x\kh\addons\main\vehicles\modules\dynamicDisguiseEquipment.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\editTerrainObjects.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\endMission.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\entitySpawner.hpp"

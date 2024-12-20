@@ -24,12 +24,13 @@ class KH_ModuleDynamicDisguiseEquipment: Module_F
 			displayName = "Side";
 			tooltip = "Side with which the equipment of this unit will be affiliated.";
 			property = "KH_ModuleDynamicDisguiseEquipmentSide";
-			defaultValue = "0";
+			typeName = "STRING";
+			defaultValue = "'BLUFOR'";
 			class Values
 			{
-				class KH_West {name = "BLUFOR"; value = 0;};
-				class KH_East {name = "OPFOR"; value = 1;};
-				class KH_Resistance {name = "GREENFOR"; value = 2;};
+				class KH_West {name = "BLUFOR"; value = "BLUFOR";};
+				class KH_East {name = "OPFOR"; value = "OPFOR";};
+				class KH_Resistance {name = "GREENFOR"; value = "GREENFOR";};
 			};
 		};
 		class KH_ModuleDynamicDisguiseEquipmentUniforms: Checkbox

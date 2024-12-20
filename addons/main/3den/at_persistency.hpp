@@ -22,7 +22,7 @@ class KH_Persistency: Title
 		class KH_IdentifierTitle: Title
 		{
 			text = "Identifier";
-			tooltip = "Identifier from which to derive persistent states, and to which the persistent states will be saved when <KH_fnc_endMission> is executed.";
+			tooltip = "Identifier from which to derive persistent states, and to which the persistent states will be saved when the <KH_fnc_endMission> function, or <End Mission> module, is executed.";
 			y = QUOTE(2 * CTRL_DEFAULT_H + 5 * CTRL_DEFAULT_Y);
 		};
 		class KH_Identifier: ctrlEdit

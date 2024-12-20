@@ -30,7 +30,7 @@ params ["_units", "_position", "_rotation", ["_eject", true], ["_transition", 1]
 				params ["_unit", "_heal", "_position", "_rotation", "_eject", "_initialization"];
 
 				if _eject then {
-					moveOut _x;
+					moveOut _unit;
 
 					[
 						{

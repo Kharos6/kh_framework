@@ -64,7 +64,7 @@ class Mission
 					class KH_ServerMissionEndInit
 					{
 						displayName = "Server: Mission End Init";
-						tooltip = "Unscheduled code to execute on the server when <KH_fnc_endMission> is executed.";
+						tooltip = "Unscheduled code to execute on the server when the <KH_fnc_endMission> function, or <End Mission> module, is executed.";
 						property = "KH_ServerMissionEndInit";
 						control = "EditMulti5";
 						expression = 
@@ -115,7 +115,7 @@ class Mission
 					class KH_HeadlessMissionEndInit
 					{
 						displayName = "Headless: Mission End Init";
-						tooltip = "Unscheduled code to execute on headless clients when <KH_fnc_endMission> is executed.";
+						tooltip = "Unscheduled code to execute on headless clients when the the <KH_fnc_endMission> function, or <End Mission> module, function, or <End Mission> module, is executed.";
 						property = "KH_HeadlessMissionEndInit";
 						control = "EditMulti5";
 						expression = 
@@ -268,7 +268,7 @@ class Mission
 					class KH_PlayerMissionEndInit
 					{
 						displayName = "Player: Mission End Init";
-						tooltip = "Unscheduled code to execute locally to each player before the mission ends when <KH_fnc_endMission> is executed.";
+						tooltip = "Unscheduled code to execute locally to each player before the mission ends when the <KH_fnc_endMission> function, or <End Mission> module, is executed.";
 						property = "KH_PlayerMissionEndInit";
 						control = "EditMulti5";
 						expression = 
@@ -540,9 +540,9 @@ class Mission
 				{
 					class KH_PersistencySubcategory
 					{
-						description = "Maintain persistency using an identifier saved in <missionProfileNamespace>. States are saved when <KH_fnc_endMission> is executed, and loaded when valid states are available.";
+						description = "Maintain persistency using an identifier saved in <missionProfileNamespace>. States are saved when the <KH_fnc_endMission> function, or <End Mission> module, is executed, and loaded when valid states are available.";
 						data = "AttributeSystemSubcategory";
-						control = "KH_SubcategoryNoHeader2";
+						control = "KH_SubcategoryNoHeader3";
 					};
 					class KH_Persistency 
 					{

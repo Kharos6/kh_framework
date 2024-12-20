@@ -38,6 +38,7 @@ class KH_ModuleSetAnimation: Module_F
 			displayName = "Interrupt Type";
 			tooltip = "<'NONE'> prevents the animation from being interrupted until it is finished. <'UNIT'> interrupts the animation only if the unit is hit. <'GROUP'> interrupts the animation when the unit feels threatened, and the unit's group must be in <Safe> mode in order to maintain the animation.";
 			property = "KH_ModuleSetAnimationInterruptType";
+			typeName = "STRING";
 			defaultValue = "'NONE'";
 			class Values
 			{

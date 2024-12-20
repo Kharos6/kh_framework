@@ -31,12 +31,13 @@ class KH_ModulePlaySound2D: Module_F
 			displayName = "Attenuation Type";
 			tooltip = "<'NONE'> prevents the sound from being muffled by interiors or vehicles. <'ALLOWED'> allows the sound to be muffled by interiors or vehicles. <'SPEECH'> prevents filters from being applied to the sound, making the sound act like speech.";
 			property = "KH_ModulePlaySound2DAttenuationType";
-			defaultValue = "2";
+			typeName = "STRING";
+			defaultValue = "'2'";
 			class Values
 			{
-				class KH_None {name = "NONE"; value = 2;};
-				class KH_Allowed {name = "ALLOWED"; value = 0;};
-				class KH_Speech {name = "SPEECH"; value = 1;};
+				class KH_None {name = "NONE"; value = "2";};
+				class KH_Allowed {name = "ALLOWED"; value = "0";};
+				class KH_Speech {name = "SPEECH"; value = "1";};
 			};
 		};
 		class KH_ModulePlaySound2DStartTime: Edit

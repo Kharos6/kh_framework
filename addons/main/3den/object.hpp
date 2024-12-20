@@ -642,7 +642,7 @@ class Object
 				{
 					displayName = "Set Random Loadout";
 					tooltip = "Specify either an array of loadouts, or a global variable containing an array of loadouts, that will be selected from at random and applied to this unit.";
-					property = "KH_ArrayBuilder";
+					property = "KH_SetRandomLoadout";
 					control = "Edit";
 					expression = 
 					"\
@@ -659,6 +659,21 @@ class Object
 									};\
 								}\
 							];\
+						};\
+					";
+					defaultValue = "''";
+					condition = "objectControllable";
+				};
+				class KH_SetRecoilCoefficient
+				{
+					displayName = "Set Recoil Coefficient";
+					tooltip = "Set a number to represent the amount of recoil this unit will experience when firing weapons. Leave empty for no change.";
+					property = "KH_SetRecoilCoefficient";
+					control = "Edit";
+					expression = 
+					"\
+						if ((_value != '') && !is3DEN) then {\
+							_this setUnitRecoilCoefficient (parseNumber _value);
 						};\
 					";
 					defaultValue = "''";

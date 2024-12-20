@@ -7,7 +7,22 @@ class CfgPatches
 		units[] = 
 		{
 			"KH_HelperSquare",
-			"KH_HelperArrow"
+			"KH_HelperArrow",
+			"KH_ModuleAssignParachute",
+			"KH_ModuleCameraSequence",
+			"KH_ModuleDisplaySubtitle",
+			"KH_ModuleEditTerrainObjects",
+			"KH_ModuleEndMission",
+			"KH_ModuleEntitySpawner",
+			"KH_ModulePlayMusic",
+			"KH_ModulePlaySound2D",
+			"KH_ModulePlaySound3D",
+			"KH_ModuleSetAnimation",
+			"KH_ModuleSuspendMission",
+			"KH_ModuleTeleport",
+			"KH_ModuleVehicleSequence",
+			"KH_ZeusModuleArma",
+			"KH_ZeusModuleSuspendMission"
 		};
 		weapons[] = {};
 		requiredVersion = 1;

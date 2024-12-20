@@ -1,4 +1,6 @@
 isNil {
+	KH_var_missionLoaded = true;
+
 	if isServer then {
 		if (KH_var_entityArrayBuilderArrays isNotEqualTo []) then {
 			{				
@@ -48,6 +50,11 @@ isNil {
 				[_y, _x] call KH_fnc_dynamicSimulation;
 			} forEach KH_var_dynamicSimulationSets;
 		};
+
+		{
+			_x params ["_arguments", "_function"];
+			_arguments call _function;
+		} forEach KH_var_postInitExecutions;
 
 		if (KH_var_headlessClientTransfers isNotEqualTo []) then {
 			{
@@ -104,11 +111,6 @@ isNil {
 				[_x select 0, _x select 1, _x select 2] call _relationFunction;
 			} forEach KH_var_initialSideRelations;
 		};
-
-		{
-			_x params ["_arguments", "_function"];
-			_arguments call _function;
-		} forEach KH_var_postInitExecutions;
 	
 		[] call KH_fnc_serverMissionLoadInit;
 		

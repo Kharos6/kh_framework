@@ -1,4 +1,4 @@
-params ["_unit", "_animation", "_position", "_rotation", "_target", "_positionReset", "_rotationReset", "_duration", ["_camera", false], ["_disableInput", true], ["_disableDamage", true], ["_setCaptive", false], ["_interruptType", "UNIT"], ["_event", "KH_eve_scriptedAnimationFinished"]];
+params ["_unit", "_animation", "_position", "_rotation", "_target", "_positionReset", "_rotationReset", "_duration", ["_camera", false], ["_disableUserInput", true], ["_disableDamage", true], ["_setCaptive", false], ["_interruptType", "UNIT"], ["_event", "KH_eve_scriptedAnimationFinished"]];
 
 if (_duration != -1) then {
 	private _event = format ["KH_eve_%1", [0, 36, "ALPHANUMERIC"] call KH_fnc_generateSymbols];
@@ -21,15 +21,15 @@ if (_duration != -1) then {
 
 		[[[], true], "KH_fnc_closeInterface", _unit, "THIS_FRAME"] call KH_fnc_execute;
 		
-		if _disableInput then {
+		if _disableUserInput then {
 			[[false, false], "KH_fnc_toggleUserInput", _unit, "THIS_FRAME"] call KH_fnc_execute;
 		};
 
 		if _camera then {
 			_cameraObject = createVehicle ["KH_HelperSquare", _x, [], 0, "CAN_COLLIDE"];
-			_cameraObject attachTo [_unit, [-0.09, 0.01, 0.09], "Head", true];	
+			_cameraObject attachTo [_unit, [-0.12, 0, 0.15], "Head", true];	
 			_cameraTarget = createVehicle ["KH_HelperSquare", _x, [], 0, "CAN_COLLIDE"];
-			_cameraTarget attachTo [_unit, [-3, 15, 0], "Head", true];
+			_cameraTarget attachTo [_unit, [0, 15, 0], "Head", true];
 			[[[_cameraObject], [_cameraTarget], [0.75], [0], [_duration], [-1], false, false], "KH_fnc_cameraSequence", _unit, "THIS_FRAME"] call KH_fnc_execute;
 		};
 	};
@@ -71,6 +71,7 @@ if (_duration != -1) then {
 				"Dammaged",
 				[_event],
 				{
+					_args params ["_event"];
 					[_event, []] call CBA_fnc_serverEvent;
 				}
 			] call KH_fnc_addEventHandler;
@@ -80,6 +81,7 @@ if (_duration != -1) then {
 				"Dammaged",
 				[_event],
 				{
+					_args params ["_event"];
 					[_event, []] call CBA_fnc_serverEvent;
 				}
 			] call KH_fnc_addEventHandler;
@@ -143,9 +145,9 @@ if (_duration != -1) then {
 		_interruptCheck = [
 			"CBA",
 			_event,
-			[_unit, _target, _camera, _disableInput, _disableDamage, _setCaptive, _interruptType, _event, _resetPosition, _resetRotation, _attachObject, _cameraObject, _cameraTarget, _targetHitHandler, _unitHitHandler, _targetGroupHitHandler, _unitGroupHitHandler, _animationId],
+			[_unit, _target, _camera, _disableUserInput, _disableDamage, _setCaptive, _interruptType, _event, _resetPosition, _resetRotation, _attachObject, _cameraObject, _cameraTarget, _targetHitHandler, _unitHitHandler, _targetGroupHitHandler, _unitGroupHitHandler, _animationId],
 			{
-				_args params ["_unit", "_target", "_camera", "_disableInput", "_disableDamage", "_setCaptive", "_interruptType", "_event", "_resetPosition", "_resetRotation", "_attachObject", "_cameraObject", "_cameraTarget", "_targetHitHandler", "_unitHitHandler", "_targetGroupHitHandler", "_unitGroupHitHandler", "_animationId"];
+				_args params ["_unit", "_target", "_camera", "_disableUserInput", "_disableDamage", "_setCaptive", "_interruptType", "_event", "_resetPosition", "_resetRotation", "_attachObject", "_cameraObject", "_cameraTarget", "_targetHitHandler", "_unitHitHandler", "_targetGroupHitHandler", "_unitGroupHitHandler", "_animationId"];
 				missionNamespace setVariable [_animationId, true];
 				[_event, [_unit, _target, false]] call CBA_fnc_globalEvent;
 
@@ -173,7 +175,7 @@ if (_duration != -1) then {
 					] call KH_fnc_execute;
 				};
 				
-				if ((isPlayer _unit) && _disableInput) then {
+				if ((isPlayer _unit) && _disableUserInput) then {
 					[[true, false], "KH_fnc_toggleUserInput", _unit, "THIS_FRAME"] call KH_fnc_execute;
 				};
 				
@@ -233,7 +235,7 @@ if (_duration != -1) then {
 	if (_duration != 0) then {
 		[
 			{
-				params ["_unit", "_target", "_camera", "_disableInput", "_disableDamage", "_setCaptive", "_interruptType", "_event", "_resetPosition", "_resetRotation", "_attachObject", "_cameraObject", "_cameraTarget", "_targetHitHandler", "_unitHitHandler", "_targetGroupHitHandler", "_unitGroupHitHandler", "_interruptCheck", "_animationId"];
+				params ["_unit", "_target", "_camera", "_disableUserInput", "_disableDamage", "_setCaptive", "_interruptType", "_event", "_resetPosition", "_resetRotation", "_attachObject", "_cameraObject", "_cameraTarget", "_targetHitHandler", "_unitHitHandler", "_targetGroupHitHandler", "_unitGroupHitHandler", "_interruptCheck", "_animationId"];
 				
 				if !(missionNamespace getVariable [_animationId, false]) then {
 					if (_interruptCheck isNotEqualTo []) then {
@@ -266,7 +268,7 @@ if (_duration != -1) then {
 						] call KH_fnc_execute;
 					};
 					
-					if ((isPlayer _unit) && _disableInput) then {
+					if ((isPlayer _unit) && _disableUserInput) then {
 						[[true, false], "KH_fnc_toggleUserInput", _unit, "THIS_FRAME"] call KH_fnc_execute;
 					};
 					
@@ -319,7 +321,7 @@ if (_duration != -1) then {
 					};
 				};
 			},
-			[_unit, _target, _camera, _disableInput, _disableDamage, _setCaptive, _interruptType, _event, _resetPosition, _resetRotation, _attachObject, _cameraObject, _cameraTarget, _targetHitHandler, _unitHitHandler, _targetGroupHitHandler, _unitGroupHitHandler, _interruptCheck, _animationId],
+			[_unit, _target, _camera, _disableUserInput, _disableDamage, _setCaptive, _interruptType, _event, _resetPosition, _resetRotation, _attachObject, _cameraObject, _cameraTarget, _targetHitHandler, _unitHitHandler, _targetGroupHitHandler, _unitGroupHitHandler, _interruptCheck, _animationId],
 			_duration
 		] call CBA_fnc_waitAndExecute;
 	};

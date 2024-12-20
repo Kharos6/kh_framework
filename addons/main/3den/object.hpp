@@ -223,21 +223,29 @@ class Object
 					control = "KH_SetAnimation";
 					expression = 
 					"\
-						_value params ['_toggle', '_animation', '_duration', '_interruptable'];\
+						_value params ['_toggle', '_animation', '_duration', '_interruptType'];\
 						if (_toggle && !is3DEN) then {\
-							private _interruptType = 'NONE';\
-							if _interruptable then {\
-								_interruptType = 'GROUP';\
+							private _selectedInterruptType = 'NONE';\
+							switch true do {\
+								case (_interruptable == 1): {\
+									_selectedInterruptType = 'UNIT';\
+								};\
+								case (_interruptable == 2): {\
+									_selectedInterruptType = 'GROUP';\
+								};\
+							};\
+							if (('[' in _animation) || (']' in _animation)) then {\
+								_animation = parseSimpleArray _animation;\
 							};\
 							KH_var_postInitExecutions pushBack [\
-								[_this, _animation, _this, _this, _this, _this, _this, parseNumber _duration, false, false, false, false, _interruptType, ''],\
+								[_this, _animation, _this, _this, _this, _this, _this, parseNumber _duration, false, false, false, false, _selectedInterruptType, ''],\
 								{\
 									_this call KH_fnc_setAnimation;\
 								}\
 							];\
 						};\
 					";
-					defaultValue = "[false, '', '', false]";
+					defaultValue = "[false, '', '', 0]";
 					condition = "objectControllable";
 				};
 			};
@@ -441,7 +449,7 @@ class Object
 			{
 				class KH_VehicleSequenceSubcategory
 				{
-					description = "Play a vehicle sequence on this entity when the mission starts.";
+					description = "Play a vehicle sequence on this vehicle when the mission starts.";
 					data = "AttributeSystemSubcategory";
 					control = "KH_SubcategoryNoHeader1";
 				};
@@ -456,8 +464,8 @@ class Object
 							KH_var_postInitExecutions pushBack [\
 								[_this, _movementData, _firingData, _disableDamage, _endPosition],\
 								{\
-									params ['_entity', '_movementData', '_firingData', '_disableDamage', '_endPosition'];\
-									[_entity, _movementData, _firingData, _disableDamage, missionNamespace getVariable [_endPosition, objNull]] call KH_fnc_vehicleSequence;\
+									params ['_vehicle', '_movementData', '_firingData', '_disableDamage', '_endPosition'];\
+									[_vehicle, _movementData, _firingData, _disableDamage, missionNamespace getVariable [_endPosition, objNull]] call KH_fnc_vehicleSequence;\
 								}\
 							];\
 						};\
@@ -536,7 +544,7 @@ class Object
 				class KH_ArrayBuilder
 				{
 					displayName = "Array Builder";
-					tooltip = "Specify an array of one or more strings of global variables that will be made into an array, made public, and contain this entity and any other entities utilizing this function. In format ['globalVariable1', 'globalVariable2', 'globalVariable3']";
+					tooltip = "Specify an array of one or more strings of global variables that will be made into an array, made public, and contain this entity and any other entities utilizing this function. In format <['globalVariable1', 'globalVariable2', 'globalVariable3']>";
 					property = "KH_ArrayBuilder";
 					control = "Edit";
 					expression = 
@@ -586,14 +594,14 @@ class Object
 				class KH_ServerObjectInit
 				{
 					displayName = "Server Object Init";
-					tooltip = "Unscheduled code to execute on the server with this entity passed as an argument. Passed arguments available through <_this> are: [_entity].";
+					tooltip = "Unscheduled code to execute on the server with this entity passed as an argument. Passed arguments available through <_this> are: <[_entity (OBJECT)]>.";
 					property = "KH_ServerObjectInit";
 					control = "EditMulti5";
 					expression = 
 					"\
 						if ((_value != '') && !is3DEN) then {\
 							KH_var_postInitExecutions pushBack [\
-								[_this, _value],\
+								[_this, compile _value],\
 								{\
 									params ['_entity', '_function'];\
 									[_entity] call _function;\
@@ -643,7 +651,7 @@ class Object
 								[_this, _value],\
 								{\
 									params ['_entity', '_loadouts'];\
-									if (('[' in (_x select 0)) || (']' in (_x select 0))) then {\
+									if (('[' in _loadouts) || (']' in _loadouts)) then {\
 										[[_entity], parseSimpleArray _loadouts] call KH_fnc_setRandomLoadout;\
 									}\
 									else {\

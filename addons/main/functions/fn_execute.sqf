@@ -24,6 +24,8 @@ isNil {
 							{
 								["KH_eve_executionGlobal", [_arguments, _function], _x] call CBA_fnc_targetEvent;
 							} forEach ([[_target], true] call KH_fnc_getClients);
+
+							true;
 						}
 						else {
 							false;
@@ -75,6 +77,8 @@ isNil {
 										["KH_eve_executionGlobal", [_arguments, _function], _curatorUnit] call CBA_fnc_targetEvent;
 									};
 								} forEach allCurators;
+
+								true;
 							};
 
 							case (_target == "ADMIN"): {
@@ -282,6 +286,7 @@ isNil {
 									if (_group isEqualType grpNull) then {
 										if !(isNull _group) then {
 											["KH_eve_executionGlobal", [_arguments, _function], leader _group] call CBA_fnc_targetEvent;
+											true;
 										}
 										else {
 											false;

@@ -22,7 +22,7 @@ class KH_ConvertToAgent: Title
 		class KH_InitializationTitle: Title
 		{
 			text = "Initialization";
-			tooltip = "Unscheduled code to execute locally to the agent after it is created. Passed arguments available through <_this> are: [_agent].";
+			tooltip = "Unscheduled code to execute locally to the agent after it is created. Passed arguments available through <_this> are: <[_agent]>.";
 			y = QUOTE(2 * CTRL_DEFAULT_H + 5 * CTRL_DEFAULT_Y);
 		};
 		class KH_Initialization: ctrlEditMulti

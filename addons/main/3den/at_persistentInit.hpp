@@ -22,7 +22,7 @@ class KH_PersistentInit: Title
 		class KH_LocalFunctionTitle: Title
 		{
 			text = "Local Function";
-			tooltip = "Unscheduled code executed locally to the new owner of the entity. This code is also executed at the start of the mission. Passed arguments available through <_this> are: [_entity].";
+			tooltip = "Unscheduled code executed locally to the new owner of the entity. This code is also executed at the start of the mission. Passed arguments available through <_this> are: <[_entity (OBJECT)]>.";
 			y = QUOTE(2 * CTRL_DEFAULT_H + 5 * CTRL_DEFAULT_Y);
 		};
 		class KH_LocalFunction: ctrlEditMulti
@@ -36,7 +36,7 @@ class KH_PersistentInit: Title
 		class KH_RemoteFunctionTitle: Title
 		{
 			text = "Remote Function";
-			tooltip = "Unscheduled code executed locally to the previous owner of the entity. Passed arguments available through <_this> are: [_entity].";
+			tooltip = "Unscheduled code executed locally to the previous owner of the entity. Passed arguments available through <_this> are: <[_entity (OBJECT)]>.";
 			y = QUOTE(5 * CTRL_DEFAULT_H + 10 * CTRL_DEFAULT_Y);
 		};
 		class KH_RemoteFunction: ctrlEditMulti

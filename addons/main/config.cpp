@@ -1,6 +1,7 @@
 #include "\x\kh\addons\main\script_component.hpp"
 #include "\x\kh\addons\main\cfgPatches.hpp"
 #include "\x\kh\addons\main\cfgFunctions.hpp"
+#include "\x\kh\addons\main\resources.hpp"
 #include "\x\kh\addons\main\cfgEditorCategories.hpp"
 #include "\x\kh\addons\main\cfgEditorSubcategories.hpp"
 #include "\x\kh\addons\main\cfgFactionClasses.hpp"

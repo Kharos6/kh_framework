@@ -95,7 +95,7 @@ class KH_FultonExtract: Title
 		class KH_ObjectNameTitle: Title
 		{
 			text = "Object Name";
-			tooltip = "Name of the fulton object displayed in interaction prompts.";
+			tooltip = "Variable name of the fulton object displayed in interaction prompts.";
 			y = QUOTE(7 * CTRL_DEFAULT_H + 30 * CTRL_DEFAULT_Y);
 		};
 		class KH_ObjectName: ctrlEdit

@@ -36,7 +36,7 @@ class KH_EquipableObject: Title
 		class KH_PositionTitle: Title
 		{
 			text = "Position";
-			tooltip = "Relative position array, relative to the bone, where the object will be attached, in format: [x, y, z].";
+			tooltip = "Relative position array, relative to the bone, where the object will be attached, in format: <[x, y, z]>.";
 			y = QUOTE(3 * CTRL_DEFAULT_H + 10 * CTRL_DEFAULT_Y);
 		};
 		class KH_Position: ctrlEdit
@@ -50,7 +50,7 @@ class KH_EquipableObject: Title
 		class KH_RotationTitle: Title
 		{
 			text = "Rotation";
-			tooltip = "Radial rotation array, relative to the bone, at which the object will be attached, in format: [x, y, z].";
+			tooltip = "Radial rotation array, relative to the bone, at which the object will be attached, in format: <[x, y, z]>.";
 			y = QUOTE(4 * CTRL_DEFAULT_H + 15 * CTRL_DEFAULT_Y);
 		};
 		class KH_Rotation: ctrlEdit
@@ -134,7 +134,7 @@ class KH_EquipableObject: Title
 		class KH_EventTitle: Title
 		{
 			text = "Event";
-			tooltip = "Event to raise when this object is equipped and unequipped. Event 'KH_eve_objectEquipped' is used if empty. Passed arguments available through <_this> are: [_unit, _object, _isEquipped].";
+			tooltip = "Event to raise when this object is equipped and unequipped. Event <'KH_eve_objectEquipped'> is used if empty. Passed arguments available through <_this> are: <[_unit (OBJECT), _object (OBJECT), _isEquipped (BOOLEAN)]>.";
 			y = QUOTE(10 * CTRL_DEFAULT_H + 45 * CTRL_DEFAULT_Y);
 		};
 		class KH_Event: ctrlEdit

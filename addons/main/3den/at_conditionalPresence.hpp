@@ -36,7 +36,7 @@ class KH_ConditionalPresence: Title
 		class KH_InitializationTitle: Title
 		{
 			text = "Initialization";
-			tooltip = "Unscheduled code to execute locally to this entity when the variable state changes. Useful for adding velocity to vehicles in the air. Passed arguments available through <_this> are: [_entity, _variableState].";
+			tooltip = "Unscheduled code to execute locally to this entity when the variable state changes. Useful for adding velocity to vehicles in the air. Passed arguments available through <_this> are: <[_entity (OBJECT), _variableState (BOOLEAN)]>.";
 			y = QUOTE(3 * CTRL_DEFAULT_H + 10 * CTRL_DEFAULT_Y);
 		};
 		class KH_Initialization: ctrlEditMulti

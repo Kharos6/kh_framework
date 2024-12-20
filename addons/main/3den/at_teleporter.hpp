@@ -92,7 +92,7 @@ class KH_Teleporter: Title
 		class KH_InitializationTitle: Title
 		{
 			text = "Initialization";
-			tooltip = "Unscheduled code to execute locally to the player after they are teleported. Passed arguments available through <_this> are: [_player].";
+			tooltip = "Unscheduled code to execute locally to the player after they are teleported. Passed arguments available through <_this> are: <[_player (OBJECT)]>.";
 			y = QUOTE(7 * CTRL_DEFAULT_H + 30 * CTRL_DEFAULT_Y);
 		};
 		class KH_Initialization: ctrlEditMulti

@@ -1,3 +1,5 @@
+KH_var_missionLoaded = false;
+
 [
 	"KH_eve_executionGlobal", 
 	{

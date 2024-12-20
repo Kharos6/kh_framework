@@ -64,7 +64,7 @@ class KH_VehicleSequence: Title
 		class KH_EndPositionTitle: Title
 		{
 			text = "End Position";
-			tooltip = "Entity to act as the waypoint that this vehicle will move to after the sequence is finished.";
+			tooltip = "Variable name of the entity to act as the waypoint that this vehicle will move to after the sequence is finished. Can be empty for no end waypoint.";
 			y = QUOTE(5 * CTRL_DEFAULT_H + 20 * CTRL_DEFAULT_Y);
 		};
 		class KH_EndPosition: ctrlEdit

@@ -67,7 +67,7 @@ class KH_VisualTrigger: Title
 		class KH_ConditionServerTitle: Title
 		{
 			text = "Server Condition";
-			tooltip = "Unscheduled code, executed on the server, which must return <true> in order to allow the trigger to activate.";
+			tooltip = "Unscheduled code, executed on the server, which must return <true> in order to allow the trigger to activate. Passed arguments available through <_this> are: <[_entity (OBJECT), _triggerId (ARRAY)]>.";
 			y = QUOTE(5 * CTRL_DEFAULT_H + 20 * CTRL_DEFAULT_Y);
 		};
 		class KH_ConditionServer: ctrlEditMulti
@@ -81,7 +81,7 @@ class KH_VisualTrigger: Title
 		class KH_ConditionPlayerTitle: Title
 		{
 			text = "Player Condition";
-			tooltip = "Unscheduled code, executed locally to each player, which must return <true> in order to allow them to activate the trigger.";
+			tooltip = "Unscheduled code, executed locally to each player, which must return <true> in order to allow them to activate the trigger. Passed arguments available through <_this> are: <[_entity (OBJECT), _triggerId (ARRAY)]>.";
 			y = QUOTE(8 * CTRL_DEFAULT_H + 25 * CTRL_DEFAULT_Y);
 		};
 		class KH_ConditionPlayer: ctrlEditMulti
@@ -95,7 +95,7 @@ class KH_VisualTrigger: Title
 		class KH_TrueFunctionTitle: Title
 		{
 			text = "True Function";
-			tooltip = "Unscheduled code to execute on the server when the trigger is activated. Passed arguments available through <_this> are: [_player, _entity, _triggerId].";
+			tooltip = "Unscheduled code to execute on the server when the trigger is activated. Passed arguments available through <_this> are: <[_player (OBJECT), _entity (OBJECT), _handlerId (ARRAY)]>.";
 			y = QUOTE(11 * CTRL_DEFAULT_H + 30 * CTRL_DEFAULT_Y);
 		};
 		class KH_TrueFunction: ctrlEditMulti
@@ -109,7 +109,7 @@ class KH_VisualTrigger: Title
 		class KH_FalseFunctionTitle: Title
 		{
 			text = "False Function";
-			tooltip = "Unscheduled code to execute on the server when the trigger is deactivated. Passed arguments available through <_this> are: [_player, _entity, _triggerId].";
+			tooltip = "Unscheduled code to execute on the server when the trigger is deactivated. Passed arguments available through <_this> are: <[_player (OBJECT), _entity (OBJECT), _handlerId (ARRAY)]>.";
 			y = QUOTE(14 * CTRL_DEFAULT_H + 35 * CTRL_DEFAULT_Y);
 		};
 		class KH_FalseFunction: ctrlEditMulti

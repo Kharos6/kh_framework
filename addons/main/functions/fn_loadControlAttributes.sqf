@@ -25,7 +25,12 @@ for "_i" from 0 to _count do {
 		};
 		
 		case (_type == 7): {
-			_currentControl ctrlSetChecked (_value select _i);
+			private _j = 0;
+			private _count = (count (_value select _i)) - 1;
+
+			for "_j" from 0 to _count do {
+				_currentControl ctrlSetChecked [((_value select _i) select _j) select 0, ((_value select _i) select _j) select 1];
+			};
 		};
 		
 		case (_type == 12): {

@@ -11,7 +11,7 @@ class Group
 				class KH_ArrayBuilder
 				{
 					displayName = "Array Builder";
-					tooltip = "Specify an array of strings of global variables that will be made into an array, made public, and contain this group and any other groups utilizing this function. In format ['globalVariable1', 'globalVariable2', 'globalVariable3']";
+					tooltip = "Specify an array of strings of global variables that will be made into an array, made public, and contain this group and any other groups utilizing this function. In format <['globalVariable1', 'globalVariable2', 'globalVariable3']>";
 					property = "KH_ArrayBuilder";
 					control = "Edit";
 					expression = 
@@ -54,14 +54,14 @@ class Group
 				class KH_ServerGroupInit
 				{
 					displayName = "Server Group Init";
-					tooltip = "Unscheduled code to execute on the server with this group passed as an argument. Passed arguments available through <_this> are: [_group].";
+					tooltip = "Unscheduled code to execute on the server with this group passed as an argument. Passed arguments available through <_this> are: <[_group (GROUP)]>.";
 					property = "KH_ServerGroupInit";
 					control = "EditMulti5";
 					expression = 
 					"\
 						if ((_value != '') && !is3DEN) then {\
 							KH_var_postInitExecutions pushBack [\
-								[_this, _value],\
+								[_this, compile _value],\
 								{\
 									params ['_group', '_function'];\
 									[_group] call _function;\

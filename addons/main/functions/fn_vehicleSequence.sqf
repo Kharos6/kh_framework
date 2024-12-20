@@ -20,7 +20,6 @@ if _disableDamage then {
 
 private _driver = driver _vehicle;
 _vehicle engineOn true;
-
 private _movementSequence = [_vehicle, _movementData, [], _disableDamage] spawn BIS_fnc_UnitPlay;
 private _firingSequence = [_vehicle, _firingData, _disableDamage] spawn BIS_fnc_UnitPlayFiring;
 

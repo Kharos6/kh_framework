@@ -1,0 +1,2 @@
+params ["_display", "_config"];
+[_display, missionNamespace getVariable ["BIS_fnc_initCuratorAttributes_target", objNull]] call (missionNamespace getVariable [getText (configFile >> _config >> "function"), {}]);

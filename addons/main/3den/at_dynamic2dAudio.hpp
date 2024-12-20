@@ -36,7 +36,7 @@ class KH_Dynamic2DAudio: Title
 		class KH_ConditionTitle: Title
 		{
 			text = "Condition";
-			tooltip = "Unscheduled code, executed on the server, which must return <true> in order to play the audio. Checked every time the audio has a chance to play, individually for each player. Passed arguments available through <_this> are: [_player, _handlerId, _selectedAudio].";
+			tooltip = "Unscheduled code, executed on the server, which must return <true> in order to play the audio. Checked every time the audio has a chance to play, individually for each player. Passed arguments available through <_this> are: <[_player (OBJECT), _selectedAudio (ARRAY or STRING), _handlerId (ARRAY)]>.";
 			y = QUOTE(3 * CTRL_DEFAULT_H + 10 * CTRL_DEFAULT_Y);
 		};
 		class KH_Condition: ctrlEditMulti

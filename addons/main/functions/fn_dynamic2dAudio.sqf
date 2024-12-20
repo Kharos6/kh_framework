@@ -15,7 +15,7 @@ private _id = [missionNamespace, "KH_var_2dAudio", "ACTIVE", false] call KH_fnc_
 						private _selectedAudio = selectRandom _audio;
 
 						{
-							if ([_x, ["PRIVATE_HANDLER", _id, clientOwner], _selectedAudio] call _condition) then {
+							if ([_x, _selectedAudio, ["PRIVATE_HANDLER", _id, clientOwner]] call _condition) then {
 								[
 									[_selectedAudio],
 									{

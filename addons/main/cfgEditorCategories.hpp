@@ -4,4 +4,8 @@ class CfgEditorCategories
 	{
 		displayName = "KH Helpers";
 	};
+	class KH_Modules
+	{
+		displayName = "KH Modules";
+	};
 };

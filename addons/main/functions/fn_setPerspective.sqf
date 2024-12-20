@@ -10,13 +10,13 @@ if !(isNull KH_var_currentCameraPerspectiveCamera) then {
 };
 
 if (_unit != player) then {
-	_cameraObject = createVehicle ["KH_HelperSquare", _x, [], 0, "CAN_COLLIDE"];
-	_cameraObject attachTo [_unit, [-0.09, 0.01, 0.09], "Head", true];	
-	_cameraTarget = createVehicle ["KH_HelperSquare", _x, [], 0, "CAN_COLLIDE"];
-	_cameraTarget attachTo [_unit, [-3, 15, 0], "Head", true];
+	_cameraObject = createVehicle ["KH_HelperSquare", _unit, [], 0, "CAN_COLLIDE"];
+	_cameraObject attachTo [_unit, [-0.12, 0, 0.15], "Head", true];	
+	_cameraTarget = createVehicle ["KH_HelperSquare", _unit, [], 0, "CAN_COLLIDE"];
+	_cameraTarget attachTo [_unit, [0, 15, 0], "Head", true];
 	private _camera = "camera" camCreate [0, 0, 0];
 	_camera cameraEffect ["Internal", "BACK"];
-	_camera attachTo _cameraObject;
+	_camera attachTo [_cameraObject, [0, 0, 0]];
 	_camera camSetTarget _cameraTarget;
 	_camera camSetFov _fov;
 

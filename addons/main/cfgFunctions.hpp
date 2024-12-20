@@ -7,6 +7,7 @@ class CfgFunctions
 		{
 			file = "\x\kh\addons\main\functions";
 			class addEventHandler {};
+			class arma {};
 			class arraySum {};
 			class assignParachute {};
 			class atomicValue {};
@@ -45,9 +46,23 @@ class CfgFunctions
 			class limitViewDistance {};
 			class loadCargoInventories {};
 			class loadControlAttributes {};
+			class loadDisplay {};
 			class loadMissionState {};
 			class loadPlayerLoadouts {};
 			class manageHandler {};
+			class moduleAssignParachute {};
+			class moduleCameraSequence {};
+			class moduleDisplaySubtitle {};
+			class moduleEditTerrainObjects {};
+			class moduleEndMission {};
+			class moduleEntitySpawner {};
+			class modulePlayMusic {};
+			class modulePlaySound2d {};
+			class modulePlaySound3d {};
+			class moduleSetAnimation {};
+			class moduleSuspendMission {};
+			class moduleTeleport {};
+			class moduleVehicleSequence {};
 			class orbitObject {};
 			class removeEventHandler {};
 			class recoverDisconnectedPlayers {};
@@ -70,11 +85,14 @@ class CfgFunctions
 			class setTransforms {};
 			class setUnitAttributes {};
 			class setVideoTexture {};
+			class suspendMission {};
 			class teleport {};
 			class toggleUserInput {};
 			class vehicleSequence {};
 			class unconsciousSpectator {};
 			class visualTrigger {};
+			class zeusModuleArma {};
+			class zeusModuleSuspendMission {};
 			class preStart {preStart = 1;};
 			class preInit {preInit = 1;};
 			class postInit {postInit = 1;};

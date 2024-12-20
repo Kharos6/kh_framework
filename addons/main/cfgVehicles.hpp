@@ -30,4 +30,19 @@ class CfgVehicles
 		editorSubcategory = "KH_Invisible";
 		vehicleClass = "KH_Helpers";
 	};
+	#include "\x\kh\addons\main\vehicles\modules\assignParachute.hpp"
+	#include "\x\kh\addons\main\vehicles\modules\cameraSequence.hpp"
+	#include "\x\kh\addons\main\vehicles\modules\displaySubtitle.hpp"
+	#include "\x\kh\addons\main\vehicles\modules\editTerrainObjects.hpp"
+	#include "\x\kh\addons\main\vehicles\modules\endMission.hpp"
+	#include "\x\kh\addons\main\vehicles\modules\entitySpawner.hpp"
+	#include "\x\kh\addons\main\vehicles\modules\playMusic.hpp"
+	#include "\x\kh\addons\main\vehicles\modules\playSound2d.hpp"
+	#include "\x\kh\addons\main\vehicles\modules\playSound3d.hpp"
+	#include "\x\kh\addons\main\vehicles\modules\setAnimation.hpp"
+	#include "\x\kh\addons\main\vehicles\modules\suspendMission.hpp"
+	#include "\x\kh\addons\main\vehicles\modules\teleport.hpp"
+	#include "\x\kh\addons\main\vehicles\modules\vehicleSequence.hpp"
+	#include "\x\kh\addons\main\vehicles\modules\zeusArma.hpp"
+	#include "\x\kh\addons\main\vehicles\modules\zeusSuspendMission.hpp"
 };

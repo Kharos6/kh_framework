@@ -1,6 +1,6 @@
-class KH_setAnimation: Title
+class KH_SetAnimation: Title
 {
-	attributeLoad = "[_this, _value] call KH_fnc_loadControlAttributes;";
+	attributeLoad = "(_this controlsGroupCtrl 103) lbAdd 'NONE'; (_this controlsGroupCtrl 103) lbAdd 'UNIT'; (_this controlsGroupCtrl 103) lbAdd 'GROUP'; [_this, _value] call KH_fnc_loadControlAttributes;";
 	attributeSave = "[_this] call KH_fnc_saveControlAttributes;";
 	h = QUOTE(5 * CTRL_DEFAULT_H + 70 * pixelH);
 	class Controls: Controls
@@ -47,18 +47,18 @@ class KH_setAnimation: Title
 			w = QUOTE(CTRL_DEFAULT_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
-		class KH_InterruptableTitle: Title
+		class KH_InterruptTypeTitle: Title
 		{
-			text = "Interruptable";
-			tooltip = "<true> interrupts the animation when the unit feels threatened. If this is <true>, the unit's group must be in Safe mode in order to maintain the animation.";
+			text = "Interrupt Type";
+			tooltip = "<'NONE'> prevents the animation from being interrupted until it is finished. <'UNIT'> interrupts the animation only if the unit is hit. <'GROUP'> interrupts the animation when the unit feels threatened, and the unit's group must be in Safe mode in order to maintain the animation.";
 			y = QUOTE(4 * CTRL_DEFAULT_H + 15 * CTRL_DEFAULT_Y);
 		};
-		class KH_Interruptable: ctrlCheckbox
+		class KH_InterruptType: ctrlCombo
 		{
 			idc = 103;
 			x = QUOTE(CTRL_DEFAULT_X);
 			y = QUOTE(4 * CTRL_DEFAULT_H + 15 * CTRL_DEFAULT_Y);
-			w = QUOTE(5 * GRID_W);
+			w = QUOTE(CTRL_DEFAULT_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
 	};

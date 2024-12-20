@@ -1,4 +1,4 @@
-params ["_controlGroup"];
+params ["_controlGroup", ["_config", configNull]];
 private _controlsIDCSorted = [];
 private _attributes = [];
 
@@ -35,7 +35,15 @@ _controlsIDCSorted sort true;
 		};
 		
 		case (_type == 7): {
-			_returnValue = ctrlChecked _currentControl;
+			private _checkboxes = [];
+			private _i = 0;
+			private _amount = (count (getArray _config)) - 1;
+
+			for "_i" from 0 to _amount do {
+				_checkboxes pushBack [_i, (_currentControl ctrlChecked _i)];
+			};
+
+			_returnValue = _checkboxes;
 		};
 		
 		case (_type == 12): {

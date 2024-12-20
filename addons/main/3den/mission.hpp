@@ -132,7 +132,7 @@ class Mission
 					class KH_PlayerPreloadInit
 					{
 						displayName = "Player: Preload Init";
-						tooltip = "Unscheduled code to execute locally to each player that is present before the mission starts. The local player unit is not yet available. Other players may not yet be present, and their units are not yet available, so remote execution will only reliably work if <KH_fnc_execute> is used with <'JIP'>. Passed arguments available through <_this> are: [_uid].";
+						tooltip = "Unscheduled code to execute locally to each player that is present before the mission starts. The local player unit is not yet available. Other players may not yet be present, and their units are not yet available, so remote execution will only reliably work if <KH_fnc_execute> is used with <'JIP'>. Passed arguments available through <_this> are: <[_uid (STRING)]>.";
 						property = "KH_PlayerPreloadInit";
 						control = "EditMulti5";
 						expression = 
@@ -200,7 +200,7 @@ class Mission
 					class KH_PlayerRespawnInit
 					{
 						displayName = "Player: Respawn Init";
-						tooltip = "Unscheduled code to execute locally to each player when they respawn. The local player unit is the respawned unit. Passed arguments available through <_this> are: [_corpse].";
+						tooltip = "Unscheduled code to execute locally to each player when they respawn. The local player unit is the respawned unit. Passed arguments available through <_this> are: <[_corpse (OBJECT)]>.";
 						property = "KH_PlayerRespawnInit";
 						control = "EditMulti5";
 						expression = 
@@ -217,7 +217,7 @@ class Mission
 					class KH_PlayerSwitchInit
 					{
 						displayName = "Player: Switch Init";
-						tooltip = "Unscheduled code to execute locally to each player when they switch to another unit. The local player unit is the switched unit. Passed arguments available through <_this> are: [_previousUnit].";
+						tooltip = "Unscheduled code to execute locally to each player when they switch to another unit. The local player unit is the switched unit. Passed arguments available through <_this> are: <[_previousUnit (OBJECT)]>.";
 						property = "KH_PlayerSwitchInit";
 						control = "EditMulti5";
 						expression = 
@@ -234,7 +234,7 @@ class Mission
 					class KH_PlayerJIPPreloadInit
 					{
 						displayName = "Player: JIP Preload Init";
-						tooltip = "Unscheduled code to execute locally to each player that joins while the mission is considered to be in progress, which is after the <Players Initialized Init> stage. The local player unit is not yet available. Passed arguments available through <_this> are: [_uid].";
+						tooltip = "Unscheduled code to execute locally to each player that joins while the mission is considered to be in progress, which is after the <Players Initialized Init> stage. The local player unit is not yet available. Passed arguments available through <_this> are: <[_uid (STRING)]>.";
 						property = "KH_PlayerJIPPreloadInit";
 						control = "EditMulti5";
 						expression = 
@@ -293,7 +293,7 @@ class Mission
 					class KH_PublicFunctions
 					{
 						displayName = "Public Functions";
-						tooltip = "Set one or more mission functions, in form of strings of their name and file, to be made available to all clients, in format: [['name1', 'file1'], ['name2', 'file2'], ['name3', 'file3']].";
+						tooltip = "Set one or more mission functions, in form of strings of their name and file, to be made available to all clients, in format: <[['name1', 'file1'], ['name2', 'file2'], ['name3', 'file3']]>.";
 						property = "KH_PublicFunctions";
 						control = "EditMulti5";
 						expression = 
@@ -322,7 +322,7 @@ class Mission
 									},\
 									{\
 										params ['_text'];\
-										titleText [_text, 'BLACK IN', 999];\
+										titleText [_text, 'BLACK IN', 999999];\
 										[\
 											{\
 												params ['_text'];\
@@ -348,7 +348,7 @@ class Mission
 				{
 					class KH_CameraSequenceSubcategory
 					{
-						description = "Plays a sequence of camera shots for players present at the start of the mission, and optionally JIP players. The attributes of each camera are interpolated based on index value equivalents from the different arrays of attributes. For example, the third element in <Position Entities> will take effect on the same shot as the third element in <Target Entities>.";
+						description = "Plays a sequence of camera shots for players present at the start of the mission, and optionally JIP players. The attributes of each camera are interpolated based on index value equivalents from the different arrays of attributes. For example, the third element in <Positions> will take effect on the same shot as the third element in <Targets>.";
 						data = "AttributeSystemSubcategory";
 						control = "KH_SubcategoryNoHeader4";
 					};
@@ -358,37 +358,44 @@ class Mission
 						control = "KH_CameraSequence";
 						expression = 
 						"\
-							_value params ['_toggle', '_positionEntities', '_targetEntities', '_fovs', '_commitTimes', '_durations', '_visionTypes', '_cinematicBorders', '_disableUserInput', '_jip'];\
+							_value params ['_toggle', '_positions', '_targets', '_fovs', '_commitTimes', '_durations', '_visionTypes', '_cinematicBorders', '_disableUserInput', '_jip'];\
 							if (_toggle && !is3DEN && isServer) then {\
-								private _parsedPositionEntities = [];\
-								private _parsedTargetEntities = [];\
+								private _parsedPositions = [];\
+								private _parsedTargets = [];\
 								{\
 									private _position = '';\
-									if (('[' in (_x select 0)) || (']' in (_x select 0))) then {\
-										_position = parseSimpleArray (_x select 0);\
+									if ((_x select 0) isEqualType []) then {\
+										_position = _x select 0;\
 									}\
 									else {\
 										_position = missionNamespace getVariable [_x select 0, objNull];\
 									};\
 									private _attach = _x select 1;\
-									_parsedPositionEntities pushBack [_position, _attach];\
-								} forEach (parseSimpleArray _positionEntities);\
+									_parsedPositions pushBack [_position, _attach];\
+								} forEach (parseSimpleArray _positions);\
 								{\
-									_parsedTargetEntities pushBack (missionNamespace getVariable [_x, objNull]);\
-								} forEach (parseSimpleArray _targetEntities);\
+									private _target = '';\
+									if (_x isEqualType []) then {\
+										_target = _x;\
+									}\
+									else {\
+										_target = missionNamespace getVariable [_x, objNull];\
+									};\
+									_parsedTargets pushBack _target;\
+								} forEach (parseSimpleArray _targets);\
 								[\
 									'CBA',\
 									'KH_eve_playerLoaded',\
-									[_parsedPositionEntities, _parsedTargetEntities, parseSimpleArray _fovs, parseSimpleArray _commitTimes, parseSimpleArray _durations, parseSimpleArray _visionTypes, _cinematicBorders, _disableUserInput, _jip],\
+									[_parsedPositions, _parsedTargets, parseSimpleArray _fovs, parseSimpleArray _commitTimes, parseSimpleArray _durations, parseSimpleArray _visionTypes, _cinematicBorders, _disableUserInput, _jip],\
 									{\
 										params ['_unit'];\
-										_args params ['_positionEntities', '_targetEntities', '_fovs', '_commitTimes', '_durations', '_visionTypes', '_cinematicBorders', '_disableUserInput', '_jip'];\
+										_args params ['_positions', '_targets', '_fovs', '_commitTimes', '_durations', '_visionTypes', '_cinematicBorders', '_disableUserInput', '_jip'];\
 										if _jip then {\
-											[[_positionEntities, _targetEntities, _fovs, _commitTimes, _durations, _visionTypes, _cinematicBorders, _disableUserInput], 'KH_fnc_cameraSequence', _unit, 'THIS_FRAME'] call KH_fnc_execute;\
+											[[_positions, _targets, _fovs, _commitTimes, _durations, _visionTypes, _cinematicBorders, _disableUserInput], 'KH_fnc_cameraSequence', _unit, 'THIS_FRAME'] call KH_fnc_execute;\
 										}\
 										else {\
 											if !KH_var_playersLoaded then {\
-												[[_positionEntities, _targetEntities, _fovs, _commitTimes, _durations, _visionTypes, _cinematicBorders, _disableUserInput], 'KH_fnc_cameraSequence', _unit, 'THIS_FRAME'] call KH_fnc_execute;\
+												[[_positions, _targets, _fovs, _commitTimes, _durations, _visionTypes, _cinematicBorders, _disableUserInput], 'KH_fnc_cameraSequence', _unit, 'THIS_FRAME'] call KH_fnc_execute;\
 											};\
 										};\
 									}\

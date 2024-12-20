@@ -202,7 +202,7 @@ if _state then {
 								private _playerVisible = false;
 
 								{
-									if (!(isPlayer _x) && (alive _x) && (side (group _x) == _currentSide) && (([_player, "VIEW", objNull] checkVisibility [eyePos _player, eyePos _x]) > 0) && (_player getVariable ["KH_var_disguiseRecoveryChecker", false])) then {
+									if ((!(isPlayer _x) && (alive _x) && (side (group _x) == _currentSide) && ((([_player, "VIEW", objectParent _player] checkVisibility [eyePos _player, eyePos _x]) > 0) || (([_player, "VIEW", objectParent _player] checkVisibility [(getPosASL _player) vectorAdd [0, 0, 1], eyePos _x]) > 0))) || (_player getVariable ["KH_var_disguiseRecoveryChecker", false])) then {
 										_playerVisible = true;
 										break;
 									};

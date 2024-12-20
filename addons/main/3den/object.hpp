@@ -638,6 +638,21 @@ class Object
 					";
 					defaultValue = "false";
 				};
+				class KH_RecoilCoefficient
+				{
+					displayName = "Recoil Coefficient";
+					tooltip = "Set a number to represent the amount of recoil this unit will experience when firing weapons. Leave empty for no change.";
+					property = "KH_RecoilCoefficient";
+					control = "Edit";
+					expression = 
+					"\
+						if ((_value != '') && !is3DEN) then {\
+							_this setUnitRecoilCoefficient (parseNumber _value);\
+						};\
+					";
+					defaultValue = "''";
+					condition = "objectControllable";
+				};
 				class KH_SetRandomLoadout
 				{
 					displayName = "Set Random Loadout";
@@ -659,21 +674,6 @@ class Object
 									};\
 								}\
 							];\
-						};\
-					";
-					defaultValue = "''";
-					condition = "objectControllable";
-				};
-				class KH_SetRecoilCoefficient
-				{
-					displayName = "Set Recoil Coefficient";
-					tooltip = "Set a number to represent the amount of recoil this unit will experience when firing weapons. Leave empty for no change.";
-					property = "KH_SetRecoilCoefficient";
-					control = "Edit";
-					expression = 
-					"\
-						if ((_value != '') && !is3DEN) then {\
-							_this setUnitRecoilCoefficient (parseNumber _value);\
 						};\
 					";
 					defaultValue = "''";

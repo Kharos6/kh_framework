@@ -9,6 +9,7 @@ class CfgPatches
 			"KH_HelperSquare",
 			"KH_HelperArrow",
 			"KH_ModuleAssignParachute",
+			"KH_ModuleBreakDisguise",
 			"KH_ModuleCameraSequence",
 			"KH_ModuleDisplaySubtitle",
 			"KH_ModuleDynamicDisguiseEquipment",
@@ -23,6 +24,10 @@ class CfgPatches
 			"KH_ModuleTeleport",
 			"KH_ModuleVehicleSequence",
 			"KH_ZeusModuleArma",
+			"KH_ZeusModuleBreakDisguise",
+			"KH_ZeusModuleClearStagedExecutions",
+			"KH_ZeusModuleRagdollUnit",
+			"KH_ZeusModuleStageExecution",
 			"KH_ZeusModuleSuspendMission"
 		};
 		weapons[] = {};

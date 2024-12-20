@@ -38,7 +38,7 @@ class KH_ModulePlayMusic: Module_F
 	class ModuleDescription: ModuleDescription
 	{
 		description[] = {"Plays music for every synchronized player. Must be activated through a trigger or triggers. Can activate multiple times. Activated on the server."};
-		sync[] = {"AnyPlayer"};
+		sync[] = {"AnyPerson"};
 		position = 0;
 		direction = 0;
 		optional = 0;

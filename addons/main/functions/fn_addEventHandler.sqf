@@ -80,7 +80,7 @@ switch true do {
 	};
 
 	case (_eventType == "DISPLAY"): {
-		_handler = (_type select 1) displayAddEventHandler [_event, compile _expression];
+		_handler = (findDisplay (_type select 1)) displayAddEventHandler [_event, compile _expression];
 		missionNamespace setVariable [_handlerId, _handler];
 	};
 

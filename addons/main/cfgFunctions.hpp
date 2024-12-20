@@ -51,6 +51,7 @@ class CfgFunctions
 			class loadPlayerLoadouts {};
 			class manageHandler {};
 			class moduleAssignParachute {};
+			class moduleBreakDisguise {};
 			class moduleCameraSequence {};
 			class moduleDisplaySubtitle {};
 			class moduleDynamicDisguiseEquipment {};
@@ -93,6 +94,10 @@ class CfgFunctions
 			class unconsciousSpectator {};
 			class visualTrigger {};
 			class zeusModuleArma {};
+			class zeusModuleBreakDisguise {};
+			class zeusModuleClearStagedExecutions {};
+			class zeusModuleRagdollUnit {};
+			class zeusModuleStageExecution {};
 			class zeusModuleSuspendMission {};
 			class preStart {preStart = 1;};
 			class preInit {preInit = 1;};

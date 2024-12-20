@@ -4,7 +4,7 @@ isNil {
 	deleteVehicle _logic;
 
 	if !(_entity isKindOf "Man") then {
-		[_entity] call KH_fnc_arma;
+		_entity addForce [[0, 0, 1], [0, 0, 0], false];
 	};
 };
 

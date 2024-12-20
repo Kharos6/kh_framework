@@ -32,21 +32,25 @@ isNil {
 			_parsedTargets pushBack _target;
 		} forEach (parseSimpleArray (_logic getVariable ["KH_ModuleCameraSequenceTargets", "[]"]));
 
-		[
-			[
-				_parsedPositions, 
-				_parsedTargets, 
-				parseSimpleArray (_logic getVariable ["KH_ModuleCameraSequenceFOVs", "[]"]),
-				parseSimpleArray (_logic getVariable ["KH_ModuleCameraSequenceCommitTimes", "[]"]),
-				parseSimpleArray (_logic getVariable ["KH_ModuleCameraSequenceDurations", "[]"]),
-				parseSimpleArray (_logic getVariable ["KH_ModuleCameraSequenceVisionTypes", "[]"]), 
-				_logic getVariable ["KH_ModuleCameraSequenceCinematicBorders", false],
-				_logic getVariable ["KH_ModuleCameraSequenceDisableUserInput", false]
-			], 
-			'KH_fnc_cameraSequence', 
-			["TARGETS", _units], 
-			'THIS_FRAME'
-		] call KH_fnc_execute;
+		{
+			if (isPlayer _x) then {
+				[
+					[
+						_parsedPositions, 
+						_parsedTargets, 
+						parseSimpleArray (_logic getVariable ["KH_ModuleCameraSequenceFOVs", "[]"]),
+						parseSimpleArray (_logic getVariable ["KH_ModuleCameraSequenceCommitTimes", "[]"]),
+						parseSimpleArray (_logic getVariable ["KH_ModuleCameraSequenceDurations", "[]"]),
+						parseSimpleArray (_logic getVariable ["KH_ModuleCameraSequenceVisionTypes", "[]"]), 
+						_logic getVariable ["KH_ModuleCameraSequenceCinematicBorders", false],
+						_logic getVariable ["KH_ModuleCameraSequenceDisableUserInput", false]
+					], 
+					'KH_fnc_cameraSequence', 
+					_x, 
+					'THIS_FRAME'
+				] call KH_fnc_execute;
+			};
+		} forEach _units;
 	};
 };
 

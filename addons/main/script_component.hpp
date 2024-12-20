@@ -20,7 +20,10 @@
 class RscButtonMenuCancel;
 class RscButtonMenuOK;
 class RscCheckbox;
+class RscEdit;
+class RscEditMulti;
 class RscText;
+class RscTextMulti;
 class ctrlButton;
 class ctrlButtonCancel;
 class ctrlButtonClose;

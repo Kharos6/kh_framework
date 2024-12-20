@@ -66,7 +66,7 @@ class KH_ModulePlaySound3D: Module_F
 	class ModuleDescription: ModuleDescription
 	{
 		description[] = {"Plays 3D sound from the position of this module for every synchronized player. Must be activated through a trigger or triggers. Can activate multiple times. Activated on the server."};
-		sync[] = {"AnyPlayer"};
+		sync[] = {"AnyPerson"};
 		position = 1;
 		direction = 0;
 		optional = 0;

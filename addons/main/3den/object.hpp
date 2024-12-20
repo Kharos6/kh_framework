@@ -571,7 +571,7 @@ class Object
 					expression = 
 					"\
 						if ((_value != '') && !is3DEN) then {\
-							KH_var_dynamicSimulationEntities pushBack [_this, parseNumber _value];
+							KH_var_dynamicSimulationEntities pushBack [_this, parseNumber _value];\
 						};\
 					";
 					defaultValue = "''";
@@ -673,7 +673,7 @@ class Object
 					expression = 
 					"\
 						if ((_value != '') && !is3DEN) then {\
-							_this setUnitRecoilCoefficient (parseNumber _value);
+							_this setUnitRecoilCoefficient (parseNumber _value);\
 						};\
 					";
 					defaultValue = "''";

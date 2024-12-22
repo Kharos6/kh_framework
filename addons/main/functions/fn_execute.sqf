@@ -491,6 +491,27 @@ isNil {
 																	};
 																};
 
+																case (_dependency isEqualType {}): {
+																	if ([] call _dependency) then {
+																		private _idState = missionNamespace getVariable [_id, "ACTIVE"];
+
+																		if !(_idState == "INACTIVE") then {
+																			switch true do {
+																				case (_idState == "ACTIVE"): {
+																					["KH_eve_executionGlobal", [_arguments, _function], _joiningMachine] call CBA_fnc_ownerEvent;
+																				};
+
+																				case (_idState == "TERMINATE"): {
+																					[_eventName, _localId] call CBA_fnc_removeEventHandler;
+																				};		
+																			};
+																		};
+																	}
+																	else {
+																		missionNamespace setVariable [_id, "INACTIVE"];
+																	};
+																};
+
 																case (_dependency isEqualType []): {
 																	private _condition = true;
 																	

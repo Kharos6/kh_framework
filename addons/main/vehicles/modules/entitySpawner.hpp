@@ -10,7 +10,7 @@ class KH_ModuleEntitySpawner: Module_F
 	function = "KH_fnc_moduleEntitySpawner";
 	functionPriority = 1;
 	isGlobal = 0;
-	isTriggerActivated = 0;
+	isTriggerActivated = 1;
 	isDisposable = 1;
 	is3DEN = 0;
 	icon = "\a3\missions_f_curator\data\img\iconmptypesectorcontrol_ca.paa";
@@ -79,7 +79,7 @@ class KH_ModuleEntitySpawner: Module_F
 	};
 	class ModuleDescription: ModuleDescription
 	{
-		description[] = {"Periodically spawns entities at or around the synchronized entities. Does not need a trigger to activate. Can activate only once. Activated on the server."};
+		description[] = {"Periodically spawns entities at or around the synchronized entities. Must be activated through a trigger or triggers. Can activate only once. Activated on the server."};
 		sync[] = {"AnyStaticObject", "AnyVehicle", "AnyPerson"};
 		position = 0;
 		direction = 0;

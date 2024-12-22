@@ -54,14 +54,14 @@ class KH_ResourceStageExecution
         class KH_ButtonOK: RscButtonMenuOK 
         {
             x = QUOTE(RSC_POS_X(28.5));
-            y = QUOTE(RSC_POS_Y(27.5));
+            y = QUOTE(RSC_POS_Y(27.25));
             w = QUOTE(RSC_POS_W(5));
             h = QUOTE(RSC_POS_H(1));
         };
         class KH_ButtonCancel: RscButtonMenuCancel 
         {
             x = QUOTE(RSC_POS_X(6.5));
-            y = QUOTE(RSC_POS_Y(27.5));
+            y = QUOTE(RSC_POS_Y(27.25));
             w = QUOTE(RSC_POS_W(5));
             h = QUOTE(RSC_POS_H(1));
         };

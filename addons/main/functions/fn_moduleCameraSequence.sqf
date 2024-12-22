@@ -1,5 +1,5 @@
 isNil {
-	params [["_logic", objNull], ["_units", []], ["_activated", true]];
+	params [["_logic", objNull], ["_units", []], ["_activated", false]];
 
 	if _activated then {
 		private _parsedPositions = [];

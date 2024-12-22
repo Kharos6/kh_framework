@@ -22,7 +22,7 @@ class KH_FultonExtract: Title
 		class KH_VehiclesTitle: Title
 		{
 			text = "Vehicles";
-			tooltip = "Array of strings of variable names of vehicles designated as a fulton extraction vehicle.";
+			tooltip = "Array of strings of variable names of vehicles designated as a fulton extraction vehicle. Can be an empty array, in which case any vehicles of <'Plane'> type are considered as fulton extraction vehicles.";
 			y = QUOTE(2 * CTRL_DEFAULT_H + 5 * CTRL_DEFAULT_Y);
 		};
 		class KH_Vehicles: ctrlEdit

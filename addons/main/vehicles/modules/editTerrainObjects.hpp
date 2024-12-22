@@ -22,7 +22,7 @@ class KH_ModuleEditTerrainObjects: Module_F
 		class KH_ModuleEditTerrainObjectsObjects: Edit
 		{
 			displayName = "Objects";
-			tooltip = "Array of strings of class names of objects that will be edited.";
+			tooltip = "Array of strings of class names of objects that will be edited. Can be an empty array to edit all object types.";
 			property = "KH_ModuleEditTerrainObjectsObjects";
 			defaultValue = "'[]'";
 		};
@@ -82,10 +82,18 @@ class KH_ModuleEditTerrainObjects: Module_F
 			property = "KH_ModuleEditTerrainObjectsConvertToSimple";
 			defaultValue = "false";
 		};
+		class KH_ModuleEditTerrainObjectsInitialization: Edit
+		{
+			displayName = "Initialization";
+			tooltip = "Unscheduled code to execute on edited entities, executed on the server. Passed arguments available through <_this> are: <[_entity (OBJECT)]>";
+			property = "KH_ModuleEditTerrainObjectsInitialization";
+			defaultValue = "''";
+		};
 		class ModuleDescription: ModuleDescription {};
 	};
 	class ModuleDescription: ModuleDescription
 	{
 		description[] = {"Edits terrain objects around this module within the given radius. Must be activated through a trigger or triggers. Can activate only once. Activated on the server."};
+		position = 1;
 	};
 };

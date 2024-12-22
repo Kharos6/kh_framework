@@ -117,7 +117,7 @@ class Object
 							[[_this], parseSimpleArray _audio, compile _condition, parseNumber _interval, _chance] call KH_fnc_dynamic3dAudio;\
 						};\
 					";
-					defaultValue = "[false, '[]', 'true', '', 1, '100%']";
+					defaultValue = "[false, '[]', '', '', 1, '100%']";
 				};
 			};
 		};
@@ -535,7 +535,7 @@ class Object
 							];\
 						};\
 					";
-					defaultValue = "[false, 1, '', '', 'true', 'true', '', '', false, '', true, '100%']";
+					defaultValue = "[false, 1, '', '', '', '', '', '', false, '', true, '100%']";
 				};
 			};
 		};

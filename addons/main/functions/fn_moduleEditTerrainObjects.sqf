@@ -12,7 +12,8 @@ isNil {
 			_logic getVariable ["KH_ModuleEditTerrainObjectsEffects", false],
 			_logic getVariable ["KH_ModuleEditTerrainObjectsDynamicSimulation", false],
 			_logic getVariable ["KH_ModuleEditTerrainObjectsDisableDamage", false],
-			_logic getVariable ["KH_ModuleEditTerrainObjectsConvertToSimple", false]
+			_logic getVariable ["KH_ModuleEditTerrainObjectsConvertToSimple", false],
+			compile (_logic getVariable ["KH_ModuleEditTerrainObjectsInitialization", ""])
 		] call KH_fnc_editTerrainObjects;
 	};
 };

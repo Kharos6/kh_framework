@@ -79,7 +79,7 @@ class KH_ModuleCameraSequence: Module_F
 	};
 	class ModuleDescription: ModuleDescription
 	{
-		description[] = {"Plays a camera sequence for the synchronized players. The attributes of each camera are interpolated based on index value equivalents from the different arrays of attributes. For example, the third element in <Positions> will take effect on the same shot as the third element in <Targets>. Must be activated through a trigger or triggers. Can activate multiple times. Activated on the server."};
+		description[] = {"Plays a camera sequence for the synchronized players. The attributes of each camera are interpolated based on index value equivalents from the different arrays of attributes. Must be activated through a trigger or triggers. Can activate multiple times. Activated on the server."};
 		sync[] = {"AnyPerson"};
 		position = 0;
 		direction = 0;

@@ -282,6 +282,10 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 						_args params ["_object", "_vehicles", "_height", "_distance", "_duration", "_mainFulton", "_fultonActive", "_currentFultonParticipants", "_mainFultonVelocity", "_fultonAnchor", "_fultonRope"];
 						
 						if !(isNull _mainFulton) then {
+							if (_vehicles isEqualTo []) then {
+								_vehicles = _mainFulton nearEntities ["Plane", _distance + 100];
+							};
+
 							{
 								if ((_x distance _mainFulton) < _distance) then {
 									private _vehicle = _x;
@@ -430,6 +434,7 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 									deleteVehicle _mainFulton;
 									deleteVehicle _object;
 									[_handle] call CBA_fnc_removePerFrameHandler;
+									break;
 								};
 							} forEach _vehicles;
 						}

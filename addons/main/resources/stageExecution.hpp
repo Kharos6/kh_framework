@@ -39,7 +39,7 @@ class KH_ResourceStageExecution
         {
 			idc = 101;
             x = QUOTE(RSC_POS_X(6.5));
-            y = QUOTE(RSC_POS_Y(26.5));
+            y = QUOTE(RSC_POS_Y(26.25));
             w = QUOTE(RSC_POS_W(27));
             h = QUOTE(RSC_POS_W(1.5));
             colorBackground[] = {0, 0, 0, 1};

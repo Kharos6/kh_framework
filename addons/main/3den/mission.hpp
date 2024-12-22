@@ -501,7 +501,7 @@ class Mission
 								[parseSimpleArray _audio, compile _condition, parseNumber _interval, _chance] call KH_fnc_dynamic2dAudio;\
 							};\
 						";
-						defaultValue = "[false, '[]', 'true', '', 1, '100%']";
+						defaultValue = "[false, '[]', '', '', 1, '100%']";
 					};
 				};
 			};

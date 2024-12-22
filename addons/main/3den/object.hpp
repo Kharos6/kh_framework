@@ -2,6 +2,38 @@ class Object
 {
 	class AttributeCategories
 	{
+		class KH_AssignTerminal
+		{
+			displayName = "KH Assign Terminal";
+			collapsed = 1;
+			class Attributes
+			{
+				class KH_AssignTerminalSubcategory
+				{
+					description = "Assigns a terminal to this entity, allowing players to access it through an action.";
+					data = "AttributeSystemSubcategory";
+					control = "KH_SubcategoryNoHeader1";
+				};
+				class KH_AssignTerminal 
+				{
+					property = "KH_AssignTerminal";
+					control = "KH_AssignTerminal";
+					expression = 
+					"\
+						_value params ['_toggle', '_name', '_identifier', '_description', '_condition', '_function'];\
+						if (_toggle && !is3DEN) then {\
+							KH_var_postInitExecutions pushBack [\
+								[[_this], _name, _identifier, _description, compile _condition, compile _function],\
+								{\
+									_this call KH_fnc_assignTerminal;\
+								}\
+							];\
+						};\
+					";
+					defaultValue = "[false, '', '', '', '', '']";
+				};
+			};
+		};
 		class KH_ConditionalPresence
 		{
 			displayName = "KH Conditional Presence";

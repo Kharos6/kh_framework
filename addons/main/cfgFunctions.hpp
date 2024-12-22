@@ -10,6 +10,7 @@ class CfgFunctions
 			class arma {};
 			class arraySum {};
 			class assignParachute {};
+			class assignTerminal {};
 			class atomicValue {};
 			class atomicVariable {};
 			class cameraSequence {};		
@@ -65,6 +66,7 @@ class CfgFunctions
 			class moduleSuspendMission {};
 			class moduleTeleport {};
 			class moduleVehicleSequence {};
+			class openTerminal {};
 			class orbitObject {};
 			class removeEventHandler {};
 			class recoverDisconnectedPlayers {};

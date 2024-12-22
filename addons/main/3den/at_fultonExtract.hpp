@@ -22,7 +22,7 @@ class KH_FultonExtract: Title
 		class KH_VehiclesTitle: Title
 		{
 			text = "Vehicles";
-			tooltip = "Array of variable names of vehicles designated as a fulton extraction vehicle.";
+			tooltip = "Array of strings of variable names of vehicles designated as a fulton extraction vehicle.";
 			y = QUOTE(2 * CTRL_DEFAULT_H + 5 * CTRL_DEFAULT_Y);
 		};
 		class KH_Vehicles: ctrlEdit
@@ -53,7 +53,7 @@ class KH_FultonExtract: Title
 		class KH_DistanceTitle: Title
 		{
 			text = "Distance";
-			tooltip = "Distance from the balloon to <_vehicle> within which the fulton system will activate.";
+			tooltip = "Distance from the balloon to <Vehicle> within which the fulton system will activate.";
 			y = QUOTE(4 * CTRL_DEFAULT_H + 15 * CTRL_DEFAULT_Y);
 		};
 		class KH_Distance: ctrlEdit

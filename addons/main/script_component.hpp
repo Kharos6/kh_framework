@@ -17,6 +17,7 @@
 #define GUI_THEME_RGB_G "(profileNamespace getVariable ['GUI_BCG_RGB_G', 0.54])"
 #define GUI_THEME_RGB_B "(profileNamespace getVariable ['GUI_BCG_RGB_B', 0.21])"
 #define GUI_THEME_ALPHA "(profileNamespace getVariable ['GUI_BCG_RGB_A', 0.8])"
+class RscButton;
 class RscButtonMenuCancel;
 class RscButtonMenuOK;
 class RscCheckbox;

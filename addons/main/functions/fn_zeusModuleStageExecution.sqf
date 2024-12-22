@@ -8,9 +8,14 @@ isNil {
 		{
 			params ["_control"];
 			_args params ["_display", "_logic"];
+			private _displayType = 46;
+
+			if ((lbCurSel (_display displayCtrl 101)) == 0) then {
+				_displayType = 312;
+			};
 
 			private _handler = [
-				["DISPLAY", 46],
+				["DISPLAY", _displayType],
 				"KeyDown",
 				[compile (ctrlText (_display displayCtrl 100)), objectParent _logic],
 				{

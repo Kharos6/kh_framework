@@ -27,7 +27,7 @@ class KH_PersistentInit: Title
 		};
 		class KH_LocalFunction: ctrlEditMulti
 		{
-			idc = 104;
+			idc = 101;
 			x = QUOTE(CTRL_DEFAULT_X);
 			y = QUOTE(2 * CTRL_DEFAULT_H + 5 * CTRL_DEFAULT_Y);
 			w = QUOTE(CTRL_DEFAULT_W);
@@ -41,7 +41,7 @@ class KH_PersistentInit: Title
 		};
 		class KH_RemoteFunction: ctrlEditMulti
 		{
-			idc = 105;
+			idc = 102;
 			x = QUOTE(CTRL_DEFAULT_X);
 			y = QUOTE(5 * CTRL_DEFAULT_H + 10 * CTRL_DEFAULT_Y);
 			w = QUOTE(CTRL_DEFAULT_W);

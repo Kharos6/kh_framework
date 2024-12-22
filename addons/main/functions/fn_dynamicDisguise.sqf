@@ -144,7 +144,7 @@ if _state then {
 								
 								[
 									{
-										_args params ["_player"];
+										_args params ["_player", "_currentSide"];
 										private _instigatorVisible = false;
 										
 										if !(_player getVariable ["KH_var_disguiseDetected", false]) then {
@@ -153,11 +153,11 @@ if _state then {
 										}
 										else {
 											{
-												if (((side (group _x)) == _currentSide) && (([_player, "VIEW", objNull] checkVisibility [eyePos _player, eyePos _x]) > 0)) then {
+												if ((!(isPlayer _x) && (alive _x) && ((side (group _x)) == _currentSide)) && ((([_player, "VIEW", objectParent _player] checkVisibility [eyePos _player, eyePos _x]) > 0) || (([_player, "VIEW", objectParent _player] checkVisibility [(getPosASL _player) vectorAdd [0, 0, 1], eyePos _x]) > 0))) then {
 													_instigatorVisible = true;
 													break;
 												};
-											} forEach ([["REGULAR"], false, false] call KH_fnc_getUnits);
+											} forEach (_player nearEntities ["Man", 1000]);
 											
 											if !_instigatorVisible then {
 												_player setVariable ["KH_var_disguiseDetected", false];
@@ -167,7 +167,7 @@ if _state then {
 										};
 									},
 									60, 
-									[_player]
+									[_player, _currentSide]
 								] call CBA_fnc_addPerFrameHandler;
 							};
 						};
@@ -202,7 +202,7 @@ if _state then {
 								private _playerVisible = false;
 
 								{
-									if ((!(isPlayer _x) && (alive _x) && (side (group _x) == _currentSide) && ((([_player, "VIEW", objectParent _player] checkVisibility [eyePos _player, eyePos _x]) > 0) || (([_player, "VIEW", objectParent _player] checkVisibility [(getPosASL _player) vectorAdd [0, 0, 1], eyePos _x]) > 0))) || (_player getVariable ["KH_var_disguiseRecoveryChecker", false])) then {
+									if ((!(isPlayer _x) && (alive _x) && ((side (group _x)) == _currentSide) && ((([_player, "VIEW", objectParent _player] checkVisibility [eyePos _player, eyePos _x]) > 0) || (([_player, "VIEW", objectParent _player] checkVisibility [(getPosASL _player) vectorAdd [0, 0, 1], eyePos _x]) > 0))) || (_player getVariable ["KH_var_disguiseRecoveryChecker", false])) then {
 										_playerVisible = true;
 										break;
 									};

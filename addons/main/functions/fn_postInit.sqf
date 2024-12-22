@@ -51,11 +51,6 @@ isNil {
 			} forEach KH_var_dynamicSimulationSets;
 		};
 
-		{
-			_x params ["_arguments", "_function"];
-			_arguments call _function;
-		} forEach KH_var_postInitExecutions;
-
 		if (KH_var_headlessClientTransfers isNotEqualTo []) then {
 			{
 				private _headlessClient = _x;
@@ -190,22 +185,17 @@ isNil {
 	};
 	
 	if hasInterface then {
-		{
-			_x params ["_arguments", "_function"];
-			_arguments call _function;
-		} forEach KH_var_postInitExecutions;
-
 		["KH_eve_playerPreloadedInitial", [clientOwner, profileName, profileNameSteam]] call CBA_fnc_serverEvent;
 	};
 
 	if (!isServer && !hasInterface) then {
-		{
-			_x params ["_arguments", "_function"];
-			_arguments call _function;
-		} forEach KH_var_postInitExecutions;
-
 		["KH_eve_headlessPreloaded", [clientOwner]] call CBA_fnc_globalEvent;
 	};
+
+	{
+		_x params ["_arguments", "_function"];
+		_arguments call _function;
+	} forEach KH_var_postInitExecutions;
 };
 
 true;

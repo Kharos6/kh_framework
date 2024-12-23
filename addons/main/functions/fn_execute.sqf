@@ -6,7 +6,7 @@ isNil {
 			params ["_arguments", "_function", ["_target", "LOCAL"], ["_environment", "THIS_FRAME"]];
 
 			private _subfunction = {
-				params ["_arguments", "_function", "_target"];
+				params ["_arguments", "_function", "_target", ["_override", ""]];
 				
 				switch true do {
 					case (_target isEqualType objNull): {
@@ -304,13 +304,16 @@ isNil {
 									private _remote = _target select 4;
 									private _id = format ["KH_var_%1", [0, 36, "ALPHANUMERIC"] call KH_fnc_generateSymbols];
 
+									if (_override != "") then {
+										_id = _override;
+									};
+
 									[
 										"KH_eve_executionGlobal", 
 										[
 											[_arguments, _function, _exclusiveType, _dependency, _unitRequired, _remote, _id, clientOwner], 
 											{
 												params ["_arguments", "_function", "_exclusiveType", "_dependency", "_unitRequired", "_remote", "_id", "_originalOwner"];
-												missionNamespace setVariable [_id, "ACTIVE"];
 
 												switch true do {
 													case (_exclusiveType == "GLOBAL"): {
@@ -715,7 +718,11 @@ isNil {
 											private _sendoffFunction = _target select 3;
 											private _jip = _target select 4;
 											private _id = format ["KH_var_%1", [0, 36, "ALPHANUMERIC"] call KH_fnc_generateSymbols];
-											_targetObject setVariable [_id, "ACTIVE", true];
+
+											if (_override != "") then {
+												_id = _override;
+											};
+
 											["KH_eve_executionGlobal", [_arguments, _function], _targetObject] call CBA_fnc_targetEvent;
 
 											{
@@ -873,17 +880,74 @@ isNil {
 				case (_environment isEqualType ""): {
 					switch true do {
 						case (_environment == "THIS_FRAME"): {
-							[_arguments, _function, _target] call _subfunction;
+							if KH_var_missionLoaded then {
+								[_arguments, _function, _target] call _subfunction;
+							}
+							else {
+								private _return = true;
+								private _valid = true;
+
+								if (_target isEqualType []) then {
+									private _type = _target select 0;
+
+									if (_type isEqualType "") then {
+										switch true do {
+											case (_type == "TARGETS"): {
+												_return = [];
+											};
+
+											case (_type == "JIP"): {
+												_override = format ["KH_var_%1", [0, 36, "ALPHANUMERIC"] call KH_fnc_generateSymbols];
+												_return = _override;
+											};
+
+											case (_type == "PERSISTENT"): {
+												_override = format ["KH_var_%1", [0, 36, "ALPHANUMERIC"] call KH_fnc_generateSymbols];
+												_return = ["PERSISTENT_HANDLER", _override, _target select 1];
+											};
+										};
+									}
+									else {
+										_valid = false;
+									};
+								};
+								
+								if _valid then {
+									KH_var_postInitExecutions pushBack [[_arguments, _function, _target, _override], _subfunction];
+									_return;
+								}
+								else {
+									false;
+								};
+							};
 						};
 
 						case (_environment == "NEXT_FRAME"): {
-							[
-								{
-									params ["_arguments", "_function", "_target", "_subfunction"];
-									[_arguments, _function, _target] call _subfunction;
-								}, 
-								[_arguments, _function, _target, _subfunction]
-							] call CBA_fnc_execNextFrame;
+							if KH_var_missionLoaded then {
+								[
+									{
+										params ["_arguments", "_function", "_target", "_subfunction"];
+										[_arguments, _function, _target] call _subfunction;
+									}, 
+									[_arguments, _function, _target, _subfunction]
+								] call CBA_fnc_execNextFrame;
+							}
+							else {
+								KH_var_postInitExecutions pushBack [
+									[_arguments, _function, _target, _subfunction],
+									{
+										params ["_arguments", "_function", "_target", "_subfunction"];
+
+										[
+											{
+												params ["_arguments", "_function", "_target", "_subfunction"];
+												[_arguments, _function, _target] call _subfunction;
+											}, 
+											[_arguments, _function, _target, _subfunction]
+										] call CBA_fnc_execNextFrame;
+									}
+								];
+							};
 
 							true;
 						};
@@ -905,26 +969,57 @@ isNil {
 							private _backupArguments = _environment select 2;
 							private _backupFunction = _environment select 3;
 
-							[
-								{
-									params ["_arguments", "_function", "_target", "_backupArguments", "_backupFunction", "_subfunction", "_id"];
-									private _idState = missionNamespace getVariable [_id, "ACTIVE"];
+							if KH_var_missionLoaded then {
+								[
+									{
+										params ["_arguments", "_function", "_target", "_backupArguments", "_backupFunction", "_subfunction", "_id"];
+										private _idState = missionNamespace getVariable [_id, "ACTIVE"];
 
-									if (_idState != "TERMINATE") then {
-										switch true do {
-											case (_idState == "ACTIVE"): {
-												[_arguments, _function, _target] call _subfunction;
-											};
+										if (_idState != "TERMINATE") then {
+											switch true do {
+												case (_idState == "ACTIVE"): {
+													[_arguments, _function, _target] call _subfunction;
+												};
 
-											case (_idState == "INACTIVE"): {
-												[_backupArguments, _backupFunction, _target] call _subfunction;
+												case (_idState == "INACTIVE"): {
+													[_backupArguments, _backupFunction, _target] call _subfunction;
+												};
 											};
 										};
-									};
-								}, 
-								[_arguments, _function, _target, _backupArguments, _backupFunction, _subfunction, _id],
-								_time
-							] call CBA_fnc_waitAndExecute;
+									}, 
+									[_arguments, _function, _target, _backupArguments, _backupFunction, _subfunction, _id],
+									_time
+								] call CBA_fnc_waitAndExecute;
+							}
+							else {
+								KH_var_postInitExecutions pushBack [
+									[_arguments, _function, _target, _time, _backupArguments, _backupFunction, _subfunction, _id],
+									{
+										params ["_arguments", "_function", "_target", "_time", "_backupArguments", "_backupFunction", "_subfunction", "_id"];
+										
+										[
+											{
+												params ["_arguments", "_function", "_target", "_backupArguments", "_backupFunction", "_subfunction", "_id"];
+												private _idState = missionNamespace getVariable [_id, "ACTIVE"];
+
+												if (_idState != "TERMINATE") then {
+													switch true do {
+														case (_idState == "ACTIVE"): {
+															[_arguments, _function, _target] call _subfunction;
+														};
+
+														case (_idState == "INACTIVE"): {
+															[_backupArguments, _backupFunction, _target] call _subfunction;
+														};
+													};
+												};
+											}, 
+											[_arguments, _function, _target, _backupArguments, _backupFunction, _subfunction, _id],
+											_time
+										] call CBA_fnc_waitAndExecute;
+									}
+								];
+							};
 
 							["PRIVATE_HANDLER", _id, clientOwner];
 						};
@@ -935,53 +1030,111 @@ isNil {
 							private _timeoutArguments = _environment select 3;
 							private _timeoutFunction = _environment select 4;
 
-							[
-								{
-									private _id = _this select 7;
-									private _idState = missionNamespace getVariable [_id, "ACTIVE"];
+							if KH_var_missionLoaded then {
+								[
+									{
+										private _id = _this select 7;
+										private _idState = missionNamespace getVariable [_id, "ACTIVE"];
 
-									switch true do {
-										case (_idState == "ACTIVE"): {
-											private _conditionCode = _this select 3;
-											[] call _conditionCode;
+										switch true do {
+											case (_idState == "ACTIVE"): {
+												private _conditionCode = _this select 3;
+												[] call _conditionCode;
+											};
+
+											case (_idState == "INACTIVE"): {
+												false;
+											};
+
+											case (_idState == "TERMINATE"): {
+												true;
+											};
 										};
+									}, 
+									{
+										private _id = _this select 7;
+										private _idState = missionNamespace getVariable [_id, "ACTIVE"];
 
-										case (_idState == "INACTIVE"): {
-											false;
+										if (_idState == "ACTIVE") then {
+											private _arguments = _this select 0;
+											private _function = _this select 1;
+											private _target = _this select 2;
+											private _subfunction = _this select 6;
+											[_arguments, _function, _target] call _subfunction;
 										};
+									}, 
+									[_arguments, _function, _target, _conditionCode, _timeoutArguments, _timeoutFunction, _subfunction, _id],
+									_timeout,
+									{
+										private _id = _this select 7;
+										private _idState = missionNamespace getVariable [_id, "ACTIVE"];
 
-										case (_idState == "TERMINATE"): {
-											true;
+										if (_idState == "ACTIVE") then {
+											private _timeoutArguments = _this select 4;
+											private _timeoutFunction = _this select 5;
+											private _target = _this select 3;
+											private _subfunction = _this select 6;
+											[_timeoutArguments, _timeoutFunction, _target] call _subfunction;
 										};
-									};
-								}, 
-								{
-									private _id = _this select 7;
-									private _idState = missionNamespace getVariable [_id, "ACTIVE"];
+									}
+								] call CBA_fnc_waitUntilAndExecute;
+							}
+							else {
+								KH_var_postInitExecutions pushBack [
+									[_arguments, _function, _target, _conditionCode, _timeout, _timeoutArguments, _timeoutFunction, _subfunction, _id],
+									{
+										params ["_arguments", "_function", "_target", "_conditionCode", "_timeout", "_timeoutArguments", "_timeoutFunction", "_subfunction", "_id"];
 
-									if (_idState == "ACTIVE") then {
-										private _arguments = _this select 0;
-										private _function = _this select 1;
-										private _target = _this select 2;
-										private _subfunction = _this select 6;
-										[_arguments, _function, _target] call _subfunction;
-									};
-								}, 
-								[_arguments, _function, _target, _conditionCode, _timeoutArguments, _timeoutFunction, _subfunction, _id],
-								_timeout,
-								{
-									private _id = _this select 7;
-									private _idState = missionNamespace getVariable [_id, "ACTIVE"];
+										[
+											{
+												private _id = _this select 7;
+												private _idState = missionNamespace getVariable [_id, "ACTIVE"];
 
-									if (_idState == "ACTIVE") then {
-										private _timeoutArguments = _this select 4;
-										private _timeoutFunction = _this select 5;
-										private _target = _this select 3;
-										private _subfunction = _this select 6;
-										[_timeoutArguments, _timeoutFunction, _target] call _subfunction;
-									};
-								}
-							] call CBA_fnc_waitUntilAndExecute;
+												switch true do {
+													case (_idState == "ACTIVE"): {
+														private _conditionCode = _this select 3;
+														[] call _conditionCode;
+													};
+
+													case (_idState == "INACTIVE"): {
+														false;
+													};
+
+													case (_idState == "TERMINATE"): {
+														true;
+													};
+												};
+											}, 
+											{
+												private _id = _this select 7;
+												private _idState = missionNamespace getVariable [_id, "ACTIVE"];
+
+												if (_idState == "ACTIVE") then {
+													private _arguments = _this select 0;
+													private _function = _this select 1;
+													private _target = _this select 2;
+													private _subfunction = _this select 6;
+													[_arguments, _function, _target] call _subfunction;
+												};
+											}, 
+											[_arguments, _function, _target, _conditionCode, _timeoutArguments, _timeoutFunction, _subfunction, _id],
+											_timeout,
+											{
+												private _id = _this select 7;
+												private _idState = missionNamespace getVariable [_id, "ACTIVE"];
+
+												if (_idState == "ACTIVE") then {
+													private _timeoutArguments = _this select 4;
+													private _timeoutFunction = _this select 5;
+													private _target = _this select 3;
+													private _subfunction = _this select 6;
+													[_timeoutArguments, _timeoutFunction, _target] call _subfunction;
+												};
+											}
+										] call CBA_fnc_waitUntilAndExecute;
+									}
+								];
+							};
 
 							["PRIVATE_HANDLER", _id, clientOwner];
 						};
@@ -989,27 +1142,59 @@ isNil {
 						case (_type == "INTERVAL"): {
 							private _interval = _environment select 1;
 
-							[
-								{
-									private _id = _args select 4;
-									private _idState = missionNamespace getVariable [_id, "ACTIVE"];
-									
-									if !(_idState == "INACTIVE") then {
-										switch true do {
-											case (_idState == "ACTIVE"): {
-												_args params ["_arguments", "_function", "_target", "_subfunction"];
-												[_arguments, _function, _target] call _subfunction;	
-											};
+							if KH_var_missionLoaded then {
+								[
+									{
+										private _id = _args select 4;
+										private _idState = missionNamespace getVariable [_id, "ACTIVE"];
+										
+										if !(_idState == "INACTIVE") then {
+											switch true do {
+												case (_idState == "ACTIVE"): {
+													_args params ["_arguments", "_function", "_target", "_subfunction"];
+													[_arguments, _function, _target] call _subfunction;	
+												};
 
-											case (_idState == "TERMINATE"): {
-												[_handle] call CBA_fnc_removePerFrameHandler;
-											};		
+												case (_idState == "TERMINATE"): {
+													[_handle] call CBA_fnc_removePerFrameHandler;
+												};		
+											};
 										};
-									};
-								}, 
-								_interval, 
-								[_arguments, _function, _target, _subfunction, _id]
-							] call CBA_fnc_addPerFrameHandler;
+									}, 
+									_interval, 
+									[_arguments, _function, _target, _subfunction, _id]
+								] call CBA_fnc_addPerFrameHandler;
+							}
+							else {
+								KH_var_postInitExecutions pushBack [
+									[_arguments, _function, _target, _subfunction, _interval, _id],
+									{
+										params ["_arguments", "_function", "_target", "_subfunction", "_interval", "_id"];
+										
+										[
+											{
+												private _id = _args select 4;
+												private _idState = missionNamespace getVariable [_id, "ACTIVE"];
+												
+												if !(_idState == "INACTIVE") then {
+													switch true do {
+														case (_idState == "ACTIVE"): {
+															_args params ["_arguments", "_function", "_target", "_subfunction"];
+															[_arguments, _function, _target] call _subfunction;	
+														};
+
+														case (_idState == "TERMINATE"): {
+															[_handle] call CBA_fnc_removePerFrameHandler;
+														};		
+													};
+												};
+											}, 
+											_interval, 
+											[_arguments, _function, _target, _subfunction, _id]
+										] call CBA_fnc_addPerFrameHandler;
+									}
+								];
+							};
 
 							["PRIVATE_HANDLER", _id, clientOwner];
 						};

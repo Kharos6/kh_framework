@@ -720,7 +720,7 @@ class Object
 					expression = 
 					"\
 						if (_value && !is3DEN) then {\
-							_this addRating -10000;\
+							_this addRating -100000;\
 						};\
 					";
 					defaultValue = "false";

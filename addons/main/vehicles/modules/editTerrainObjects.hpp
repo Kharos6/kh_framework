@@ -2,9 +2,9 @@ class KH_ModuleEditTerrainObjects: Module_F
 {
 	scope = 2;
 	scopeCurator = 1;
-	canSetArea = 0;
-	canSetAreaHeight = 0;
-	canSetAreaShape = 0;
+	canSetArea = 1;
+	canSetAreaHeight = 1;
+	canSetAreaShape = 1;
 	displayName = "Edit Terrain Objects";
 	category = "KH_Modules";
 	function = "KH_fnc_moduleEditTerrainObjects";
@@ -17,21 +17,19 @@ class KH_ModuleEditTerrainObjects: Module_F
 	curatorInfoType = "";
 	curatorInfoTypeEmpty = "";
 	curatorCanAttach = 0;
+	class AttributeValues
+	{
+		size3[] = { 100, 100, -1 };
+		isRectangle = 0;
+	};
 	class Attributes: AttributesBase
 	{
-		class KH_ModuleEditTerrainObjectsObjects: Edit
+		class KH_ModuleEditTerrainObjectsTypes: Edit
 		{
 			displayName = "Objects";
 			tooltip = "Array of strings of class names of objects that will be edited. Can be an empty array to edit all object types.";
-			property = "KH_ModuleEditTerrainObjectsObjects";
+			property = "KH_ModuleEditTerrainObjectsTypes";
 			defaultValue = "'[]'";
-		};
-		class KH_ModuleEditTerrainObjectsRadius: Edit
-		{
-			displayName = "Radius";
-			tooltip = "Radius within which objects will be edited, in meters, calculated in 2D.";
-			property = "KH_ModuleEditTerrainObjectsRadius";
-			defaultValue = "''";
 		};
 		class KH_ModuleEditTerrainObjectsDamage: Edit
 		{
@@ -93,7 +91,8 @@ class KH_ModuleEditTerrainObjects: Module_F
 	};
 	class ModuleDescription: ModuleDescription
 	{
-		description[] = {"Edits terrain objects around this module within the given radius. Must be activated through a trigger or triggers. Can activate only once. Activated on the server."};
+		description[] = {"Edits terrain objects within this module's area. Must be activated through a trigger or triggers. Can activate only once. Activated on the server."};
 		position = 1;
+		direction = 1;
 	};
 };

@@ -79,7 +79,7 @@ class KH_ModuleEntitySpawner: Module_F
 	};
 	class ModuleDescription: ModuleDescription
 	{
-		description[] = {"Periodically spawns entities at or around the synchronized entities. Must be activated through a trigger or triggers. Can activate only once. Activated on the server."};
+		description[] = {"Periodically spawns entities at or around the synchronized entities. Can be exclusively activated through a trigger or triggers. Can activate only once. Activated on the server."};
 		sync[] = {"AnyStaticObject", "AnyVehicle", "AnyPerson"};
 		position = 0;
 		direction = 0;

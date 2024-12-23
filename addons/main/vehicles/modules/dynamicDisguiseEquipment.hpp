@@ -58,7 +58,7 @@ class KH_ModuleDynamicDisguiseEquipment: Module_F
 	};
 	class ModuleDescription: ModuleDescription
 	{
-		description[] = {"Takes the uniform or headgear, or both, from the synchronized units, and assigns them as affiliated with the desired side for the Dynamic Disguise system. Will work in conjunction with the Dynamic Disguise arrays from the Eden attribute. Does not need a trigger to activate. Can activate only once. Activated on the server."};
+		description[] = {"Takes the uniform or headgear, or both, from the synchronized units, and assigns them as affiliated with the desired side for the Dynamic Disguise system. Will work in conjunction with the Dynamic Disguise arrays from the Eden attribute. Activates without a trigger. Activated on the server."};
 		sync[] = {"AnyPerson"};
 		position = 0;
 		direction = 0;

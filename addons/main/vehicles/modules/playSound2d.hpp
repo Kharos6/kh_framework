@@ -51,7 +51,7 @@ class KH_ModulePlaySound2D: Module_F
 	};
 	class ModuleDescription: ModuleDescription
 	{
-		description[] = {"Plays 2D sound for every synchronized player. Must be activated through a trigger or triggers. Can activate multiple times. Activated on the server."};
+		description[] = {"Plays 2D sound for every synchronized player. Can be exclusively activated through a trigger or triggers. Can activate multiple times. Activated on the server."};
 		sync[] = {"AnyPerson"};
 		position = 0;
 		direction = 0;

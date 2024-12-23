@@ -51,7 +51,7 @@ class KH_ModuleVehicleSequence: Module_F
 	};
 	class ModuleDescription: ModuleDescription
 	{
-		description[] = {"Plays a vehicle sequence on the synchronized vehicle. Must be activated through a trigger or triggers. Can activate multiple times. Activated on the server."};
+		description[] = {"Plays a vehicle sequence on the synchronized vehicle. Can be exclusively activated through a trigger or triggers. Can activate multiple times. Activated on the server."};
 		sync[] = {"AnyVehicle"};
 		position = 0;
 		direction = 0;

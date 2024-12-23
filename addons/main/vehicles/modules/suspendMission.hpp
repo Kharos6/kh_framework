@@ -30,6 +30,6 @@ class KH_ModuleSuspendMission: Module_F
 	};
 	class ModuleDescription: ModuleDescription
 	{
-		description[] = {"Suspends or resumes the mission, depending on the state of Suspend, disabling simulation on all mission entities, and notifying the players about the suspension. Must be activated through a trigger or triggers. Can activate multiple times. Activated on the server."};
+		description[] = {"Suspends or resumes the mission, depending on the state of Suspend, disabling simulation on all mission entities, and notifying the players about the suspension. Can be exclusively activated through a trigger or triggers. Can activate multiple times. Activated on the server."};
 	};
 };

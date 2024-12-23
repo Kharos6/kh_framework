@@ -23,7 +23,7 @@ class KH_ModuleBreakDisguise: Module_F
 	};
 	class ModuleDescription: ModuleDescription
 	{
-		description[] = {"Breaks the disguise of synchronized players, designed for the Dynamic Disguise system. Must be activated through a trigger or triggers. Can activate multiple times. Activated on the server."};
+		description[] = {"Breaks the disguise of synchronized players, designed for the Dynamic Disguise system. Can be exclusively activated through a trigger or triggers. Can activate multiple times. Activated on the server."};
 		sync[] = {"AnyPerson"};
 		position = 0;
 		direction = 0;

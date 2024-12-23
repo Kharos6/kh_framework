@@ -37,7 +37,7 @@ class KH_ModuleAssignParachute: Module_F
 	};
 	class ModuleDescription: ModuleDescription
 	{
-		description[] = {"Assigns a parachute to the synchronized units. Must be activated through a trigger or triggers. Can activate multiple times. Activated on the server."};
+		description[] = {"Assigns a parachute to the synchronized units. Can be exclusively activated through a trigger or triggers. Can activate multiple times. Activated on the server."};
 		sync[] = {"AnyPerson"};
 		position = 0;
 		direction = 0;

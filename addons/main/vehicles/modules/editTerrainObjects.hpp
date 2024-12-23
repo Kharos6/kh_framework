@@ -91,7 +91,7 @@ class KH_ModuleEditTerrainObjects: Module_F
 	};
 	class ModuleDescription: ModuleDescription
 	{
-		description[] = {"Edits terrain objects within this module's area. Must be activated through a trigger or triggers. Can activate only once. Activated on the server."};
+		description[] = {"Edits terrain objects within this module's area. Can be exclusively activated through a trigger or triggers. Can activate only once. Activated on the server."};
 		position = 1;
 		direction = 1;
 	};

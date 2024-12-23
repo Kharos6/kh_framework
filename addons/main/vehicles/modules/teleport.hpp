@@ -58,7 +58,7 @@ class KH_ModuleTeleport: Module_F
 	};
 	class ModuleDescription: ModuleDescription
 	{
-		description[] = {"Teleports the synchronized entities to this module's position. Must be activated through a trigger or triggers. Can activate multiple times. Activated on the server."};
+		description[] = {"Teleports the synchronized entities to this module's position. Can be exclusively activated through a trigger or triggers. Can activate multiple times. Activated on the server."};
 		sync[] = {"Anything"};
 		position = 1;
 		direction = 1;

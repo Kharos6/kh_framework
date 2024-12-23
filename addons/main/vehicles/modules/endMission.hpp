@@ -58,6 +58,6 @@ class KH_ModuleEndMission: Module_F
 	};
 	class ModuleDescription: ModuleDescription
 	{
-		description[] = {"Ends the mission, saving the mission state if that was enabled, and optionally starting the next mission. Must be activated through a trigger or triggers. Can activate only once. Activated on the server."};
+		description[] = {"Ends the mission, saving the mission state if that was enabled, and optionally starting the next mission. Can be exclusively activated through a trigger or triggers. Can activate only once. Activated on the server."};
 	};
 };

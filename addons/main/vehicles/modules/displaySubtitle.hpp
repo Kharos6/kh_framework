@@ -44,7 +44,7 @@ class KH_ModuleDisplaySubtitle: Module_F
 	};
 	class ModuleDescription: ModuleDescription
 	{
-		description[] = {"Displays subtitles for every synchronized player. Must be activated through a trigger or triggers. Can activate multiple times. Activated on the server."};
+		description[] = {"Displays subtitles for every synchronized player. Can be exclusively activated through a trigger or triggers. Can activate multiple times. Activated on the server."};
 		sync[] = {"AnyPerson"};
 		position = 0;
 		direction = 0;

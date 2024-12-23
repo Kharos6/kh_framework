@@ -78,7 +78,7 @@ class KH_AssignTerminal: Title
 		class KH_FunctionTitle: Title
 		{
 			text = "Function";
-			tooltip = "Unscheduled code, executed on the server, which must return a string that will be added on the terminal's console. Passed arguments available through <_this> are: <[_command (STRING), _argument (STRING)]>. <_command> is the first text that a player can insert into the input field of the console, followed by a space and a dash <->, and then the <_argument>.";
+			tooltip = "Unscheduled code, executed on the server, which must return a string that will be added on the terminal's console. If no string is returned, nothing is provided to the console output. Passed arguments available through <_this> are: <[_command (STRING), _argument (STRING), _identifierOutput (STRING)]>. <_command> is the first text that a player can insert into the input field of the console, followed by a space and a dash <->, and then the <_argument>. The _command parameter will not include the space, and the <_argument> parameter will not include the dash <->. <_identifierOutput> dictates the text displayed on all terminals sharing the same Identifier, and can be used for extra control through the <KH_fnc_setPersistentDisplayText> function, which accepts the following arguments: <[_identifierOutput (STRING), _text (STRING), _overwrite (BOOLEAN)]>.";
 			y = QUOTE(10 * CTRL_DEFAULT_H + 25 * CTRL_DEFAULT_Y);
 		};
 		class KH_Function: ctrlEditMulti

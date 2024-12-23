@@ -1,7 +1,8 @@
 params ["_objects", "_name", "_identifier", "_description", "_condition", "_function"];
+private _identifierOutput = format ["KH_var_terminalOutput%1", _identifier];
+missionNamespace setVariable [_identifierOutput, "", true];
 _identifier = format ["KH_var_terminal%1Accessed", _identifier];
 missionNamespace setVariable [_identifier, false, true];
-private _identifierOutput = [missionNamespace, "KH_var_terminalOutput", "", true] call KH_fnc_atomicVariable;
 
 {
 	[
@@ -13,8 +14,8 @@ private _identifierOutput = [missionNamespace, "KH_var_terminalOutput", "", true
 			"((_this distance _target) < 4)",
 			["(!(missionNamespace getVariable ['", _identifier, "', false]) && ([] call ", _condition, ") && ((_caller distance _target) < 4))"] joinString "",
 			{
-				private _identifier = (_this select 3) select 0;
-				private _condition = (_this select 3) select 5;
+				private _identifier = (_this select 3) select 1;
+				private _condition = (_this select 3) select 6;
 
 				if (missionNamespace getVariable [_identifier, false]) then {
 					hint "Someone is already using a terminal with this identifier.";
@@ -26,7 +27,7 @@ private _identifierOutput = [missionNamespace, "KH_var_terminalOutput", "", true
 			},
 			{},
 			{
-				(_this select 3) params ["_identifier", "_identifierOutput", "_name", "_description", "_function"];
+				(_this select 3) params ["_entity", "_identifier", "_identifierOutput", "_name", "_description", "_function"];
 
 				[
 					[_identifier],
@@ -38,10 +39,10 @@ private _identifierOutput = [missionNamespace, "KH_var_terminalOutput", "", true
 					"THIS_FRAME"
 				] call KH_fnc_execute;
 
-				[_identifier, _identifierOutput, _name, _description, _function] call KH_fnc_openTerminal;
+				[_entity, _identifier, _identifierOutput, _name, _description, _function] call KH_fnc_openTerminal;
 			},
 			{},
-			[_identifier, _identifierOutput, _name, _description, _function, _condition],
+			[_x, _identifier, _identifierOutput, _name, _description, _function, _condition],
 			1,
 			0,
 			false,

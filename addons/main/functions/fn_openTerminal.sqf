@@ -2,37 +2,49 @@ params ["_entity", "_identifier", "_identifierOutput", "_name", "_description", 
 private _display = createDialog ["KH_ResourceTerminal", true];
 ctrlSetText [100, _name];
 ctrlSetText [101, _description];
-ctrlSetText [102, missionNamespace getVariable [_identifierOutput, "..."]];
-player setVariable ["KH_var_dialogActive", true, 2];
+ctrlSetText [102, missionNamespace getVariable [_identifierOutput, ctrlText 102]];
+player setVariable ["KH_var_dialogActive", true];
+
+[
+	{
+		_args params ["_identifier", "_identifierOutput"];
+
+		if !dialog then {
+			[_handle] call CBA_fnc_removePerFrameHandler;
+			player setVariable ["KH_var_dialogActive", false];
+		}
+		else {
+			ctrlSetText [102, missionNamespace getVariable [_identifierOutput, ctrlText 102]];
+		};
+	},
+	0, 
+	[_identifier, _identifierOutput]
+] call CBA_fnc_addPerFrameHandler;
 
 [
 	["CONTROL", _display displayCtrl 104],
 	"ButtonClick",
-	[_display, _identifierOutput, _function, _display],
+	[_identifierOutput, _function],
 	{
-		_args params ["_display", "_identifierOutput", "_function", "_display"];
+		_args params ["_identifierOutput", "_function"];
 		private _input = ctrlText 103;
 		private _command = _input select [0, (_input find "-") - 1];
 		private _argument = _input select [(_input find "-") + 1];
-		private _functionOutput = [_command, _argument] call _function;
-
-		if !(_functionOutput isEqualType "") then {
-			_functionOutput = "EXECUTION FAILED";
-		};
-
-		private _output = [missionNamespace getVariable [_identifierOutput, ctrlText 102], _functionOutput] joinString "\n";
 
 		[
-			[_output],
+			[_identifierOutput, _function, _command, _argument],
 			{
-				params ["_output"];
-				missionNamespace setVariable [_identifierOutput, _output, true];
+				params ["_identifierOutput", "_function", "_command", "_argument"];
+				private _functionOutput = [_command, _argument, _identifierOutput] call _function;
+
+				if (_functionOutput isEqualType "") then {
+					private _output = [missionNamespace getVariable [_identifierOutput, ""], _functionOutput] joinString "\n";
+					missionNamespace setVariable [_identifierOutput, _output, true];
+				};
 			},
 			"SERVER",
 			"THIS_FRAME"
 		] call KH_fnc_execute;
-
-		ctrlSetText [102, _output];
 	}
 ] call KH_fnc_addEventHandler;
 
@@ -54,32 +66,10 @@ player setVariable ["KH_var_dialogActive", true, 2];
 			"THIS_FRAME"
 		] call KH_fnc_execute;
 		
-		player setVariable ["KH_var_dialogActive", false, 2];
+		player setVariable ["KH_var_dialogActive", false];
 		_control ctrlRemoveEventHandler ["ButtonClick", _localId];
 	}
 ] call KH_fnc_addEventHandler;
-
-[
-	{
-		!dialog;
-	}, 
-	{
-		params ["_identifier"];
-
-		[
-			[_identifier],
-			{
-				params ["_identifier"];
-				missionNamespace setVariable [_identifier, false, true];
-			},
-			"SERVER",
-			"THIS_FRAME"
-		] call KH_fnc_execute;
-
-		player setVariable ["KH_var_dialogActive", false, 2];
-	}, 
-	[_identifier]
-] call CBA_fnc_waitUntilAndExecute;
 
 [
 	[player, _entity, _identifier],
@@ -89,7 +79,7 @@ player setVariable ["KH_var_dialogActive", true, 2];
 		[
 			{
 				params ["_player", "_entity", "_identifier"];
-				(!(alive _player) || !(alive _entity) || ((_entity distance _player) > 4) || (isNull _entity) || (isNull _player));
+				(!(alive _player) || !(alive _entity) || ((_entity distance _player) > 4) || (isNull _entity) || (isNull _player) || !(_player getVariable ["KH_var_dialogActive", false]));
 			}, 
 			{
 				private _player = _this select 0;
@@ -97,11 +87,9 @@ player setVariable ["KH_var_dialogActive", true, 2];
 				missionNamespace setVariable [_identifier, false, true];
 
 				[
-					[_player],
+					[],
 					{
-						params ["_player"];
-
-						if (_player getVariable ["KH_var_dialogActive", false]) then {
+						if (player getVariable ["KH_var_dialogActive", false]) then {
 							closeDialog 0;
 						};
 					},
@@ -109,7 +97,7 @@ player setVariable ["KH_var_dialogActive", true, 2];
 					"THIS_FRAME"
 				] call KH_fnc_execute;
 			}, 
-			[_player, _entity]
+			[_player, _entity, _identifier]
 		] call CBA_fnc_waitUntilAndExecute;
 	},
 	"SERVER",

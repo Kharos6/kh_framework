@@ -81,6 +81,7 @@ class CfgFunctions
 			class setDestinationVelocity {};
 			class setGroupAttributes {};
 			class setOwnership {};
+			class setPersistentDisplayText {};
 			class setPerspective {};
 			class setPosition {};
 			class setRandomLoadout {};

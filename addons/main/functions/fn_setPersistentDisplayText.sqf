@@ -6,7 +6,7 @@ if _overwrite then {
 	_output = missionNamespace getVariable [_identifierOutput, ""];
 }
 else {
-	_output = [missionNamespace getVariable [_identifierOutput, ""], _text] joinString "\n";
+	_output = [missionNamespace getVariable [_identifierOutput, ""], _text] joinString "";
 	missionNamespace setVariable [_identifierOutput, _output, true];
 };
 

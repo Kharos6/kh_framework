@@ -38,7 +38,7 @@ player setVariable ["KH_var_dialogActive", true];
 				private _functionOutput = [_command, _argument, _identifierOutput] call _function;
 
 				if (_functionOutput isEqualType "") then {
-					private _output = [missionNamespace getVariable [_identifierOutput, ""], _functionOutput] joinString "\n";
+					private _output = [missionNamespace getVariable [_identifierOutput, ""], _functionOutput] joinString "";
 					missionNamespace setVariable [_identifierOutput, _output, true];
 				};
 			},

@@ -284,6 +284,20 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 						if !(isNull _mainFulton) then {
 							if (_vehicles isEqualTo []) then {
 								_vehicles = _mainFulton nearEntities ["Plane", _distance + 100];
+							}
+							else {
+								private _vehiclesNull = true;
+
+								{
+									if !(isNull _x) then {
+										_vehiclesNull = false;
+										break;
+									};
+								} forEach _vehicles;
+
+								if _vehiclesNull then {
+									_vehicles = _mainFulton nearEntities ["Plane", _distance + 100];
+								};
 							};
 
 							{

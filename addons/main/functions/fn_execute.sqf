@@ -1025,21 +1025,23 @@ isNil {
 						};
 
 						case (_type == "WAIT_UNTIL"): {
-							private _conditionCode = _environment select 1;
-							private _timeout = _environment select 2;
-							private _timeoutArguments = _environment select 3;
-							private _timeoutFunction = _environment select 4;
+							private _conditionArguments = _environment select 1;
+							private _conditionFunction = _environment select 2;
+							private _timeout = _environment select 3;
+							private _timeoutArguments = _environment select 4;
+							private _timeoutFunction = _environment select 5;
 
 							if KH_var_missionLoaded then {
 								[
 									{
-										private _id = _this select 7;
+										private _id = _this select 8;
 										private _idState = missionNamespace getVariable [_id, "ACTIVE"];
 
 										switch true do {
 											case (_idState == "ACTIVE"): {
-												private _conditionCode = _this select 3;
-												[] call _conditionCode;
+												private _conditionArguments = _this select 3;
+												private _conditionFunction = _this select 4;
+												_conditionArguments call _conditionFunction;
 											};
 
 											case (_idState == "INACTIVE"): {
@@ -1052,28 +1054,28 @@ isNil {
 										};
 									}, 
 									{
-										private _id = _this select 7;
+										private _id = _this select 8;
 										private _idState = missionNamespace getVariable [_id, "ACTIVE"];
 
 										if (_idState == "ACTIVE") then {
 											private _arguments = _this select 0;
 											private _function = _this select 1;
 											private _target = _this select 2;
-											private _subfunction = _this select 6;
+											private _subfunction = _this select 7;
 											[_arguments, _function, _target] call _subfunction;
 										};
 									}, 
-									[_arguments, _function, _target, _conditionCode, _timeoutArguments, _timeoutFunction, _subfunction, _id],
+									[_arguments, _function, _target, _conditionArguments, _conditionFunction, _timeoutArguments, _timeoutFunction, _subfunction, _id],
 									_timeout,
 									{
-										private _id = _this select 7;
+										private _id = _this select 8;
 										private _idState = missionNamespace getVariable [_id, "ACTIVE"];
 
 										if (_idState == "ACTIVE") then {
-											private _timeoutArguments = _this select 4;
-											private _timeoutFunction = _this select 5;
+											private _timeoutArguments = _this select 5;
+											private _timeoutFunction = _this select 6;
 											private _target = _this select 3;
-											private _subfunction = _this select 6;
+											private _subfunction = _this select 7;
 											[_timeoutArguments, _timeoutFunction, _target] call _subfunction;
 										};
 									}
@@ -1081,19 +1083,20 @@ isNil {
 							}
 							else {
 								KH_var_postInitExecutions pushBack [
-									[_arguments, _function, _target, _conditionCode, _timeout, _timeoutArguments, _timeoutFunction, _subfunction, _id],
+									[_arguments, _function, _target, _conditionArguments, _conditionFunction, _timeout, _timeoutArguments, _timeoutFunction, _subfunction, _id],
 									{
-										params ["_arguments", "_function", "_target", "_conditionCode", "_timeout", "_timeoutArguments", "_timeoutFunction", "_subfunction", "_id"];
+										params ["_arguments", "_function", "_target", "_conditionArguments", "_conditionFunction", "_timeout", "_timeoutArguments", "_timeoutFunction", "_subfunction", "_id"];
 
 										[
 											{
-												private _id = _this select 7;
+												private _id = _this select 8;
 												private _idState = missionNamespace getVariable [_id, "ACTIVE"];
 
 												switch true do {
 													case (_idState == "ACTIVE"): {
-														private _conditionCode = _this select 3;
-														[] call _conditionCode;
+														private _conditionArguments = _this select 3;
+														private _conditionFunction = _this select 4;
+														_conditionArguments call _conditionFunction;
 													};
 
 													case (_idState == "INACTIVE"): {
@@ -1106,28 +1109,28 @@ isNil {
 												};
 											}, 
 											{
-												private _id = _this select 7;
+												private _id = _this select 8;
 												private _idState = missionNamespace getVariable [_id, "ACTIVE"];
 
 												if (_idState == "ACTIVE") then {
 													private _arguments = _this select 0;
 													private _function = _this select 1;
 													private _target = _this select 2;
-													private _subfunction = _this select 6;
+													private _subfunction = _this select 7;
 													[_arguments, _function, _target] call _subfunction;
 												};
 											}, 
-											[_arguments, _function, _target, _conditionCode, _timeoutArguments, _timeoutFunction, _subfunction, _id],
+											[_arguments, _function, _target, _conditionArguments, _conditionFunction, _timeoutArguments, _timeoutFunction, _subfunction, _id],
 											_timeout,
 											{
-												private _id = _this select 7;
+												private _id = _this select 8;
 												private _idState = missionNamespace getVariable [_id, "ACTIVE"];
 
 												if (_idState == "ACTIVE") then {
-													private _timeoutArguments = _this select 4;
-													private _timeoutFunction = _this select 5;
+													private _timeoutArguments = _this select 5;
+													private _timeoutFunction = _this select 6;
 													private _target = _this select 3;
-													private _subfunction = _this select 6;
+													private _subfunction = _this select 7;
 													[_timeoutArguments, _timeoutFunction, _target] call _subfunction;
 												};
 											}
@@ -1141,9 +1144,12 @@ isNil {
 
 						case (_type == "INTERVAL"): {
 							private _interval = _environment select 1;
+							private _timeout = _environment select 2;
+							private _timeoutArguments = _environment select 3;
+							private _timeoutFunction = _environment select 4;
 
 							if KH_var_missionLoaded then {
-								[
+								private _handler = [
 									{
 										private _id = _args select 4;
 										private _idState = missionNamespace getVariable [_id, "ACTIVE"];
@@ -1164,14 +1170,26 @@ isNil {
 									_interval, 
 									[_arguments, _function, _target, _subfunction, _id]
 								] call CBA_fnc_addPerFrameHandler;
+
+								if (_timeout != 0) then {
+									[
+										{
+											params ["_timeoutArguments", "_timeoutFunction", "_subfunction", "_handler"];
+											[_handler] call CBA_fnc_removePerFrameHandler;
+											[_timeoutArguments, _timeoutFunction, _target] call _subfunction;	
+										}, 
+										[_timeoutArguments, _timeoutFunction, _subfunction, _handler], 
+										_timeout
+									] call CBA_fnc_waitAndExecute;
+								};
 							}
 							else {
 								KH_var_postInitExecutions pushBack [
-									[_arguments, _function, _target, _subfunction, _interval, _id],
+									[_arguments, _function, _target, _timeout, _timeoutArguments, _timeoutFunction, _subfunction, _interval, _id],
 									{
-										params ["_arguments", "_function", "_target", "_subfunction", "_interval", "_id"];
+										params ["_arguments", "_function", "_target", "_timeout", "_timeoutArguments", "_timeoutFunction", "_subfunction", "_interval", "_id"];
 										
-										[
+										private _handler = [
 											{
 												private _id = _args select 4;
 												private _idState = missionNamespace getVariable [_id, "ACTIVE"];
@@ -1192,6 +1210,18 @@ isNil {
 											_interval, 
 											[_arguments, _function, _target, _subfunction, _id]
 										] call CBA_fnc_addPerFrameHandler;
+
+										if (_timeout != 0) then {
+											[
+												{
+													params ["_timeoutArguments", "_timeoutFunction", "_subfunction", "_handler"];
+													[_handler] call CBA_fnc_removePerFrameHandler;
+													[_timeoutArguments, _timeoutFunction, _target] call _subfunction;	
+												}, 
+												[_timeoutArguments, _timeoutFunction, _subfunction, _handler], 
+												_timeout
+											] call CBA_fnc_waitAndExecute;
+										};
 									}
 								];
 							};

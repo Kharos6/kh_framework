@@ -729,17 +729,17 @@ isNil {
 												[
 													"KH_eve_executionGlobal",
 													[
-														[_arguments, _function, _targetObject, _targetIndex, _sendoffArguments, _sendoffFunction, _id], 
+														[_arguments, _function, _targetObject, _sendoffArguments, _sendoffFunction, _id], 
 														{
-															params ["_arguments", "_function", "_targetObject", "_targetIndex", "_sendoffArguments", "_sendoffFunction", "_id"];
+															params ["_arguments", "_function", "_targetObject", "_sendoffArguments", "_sendoffFunction", "_id"];
 
 															[
 																["STANDARD", _targetObject, false],
 																"Local",
-																[_arguments, _function, _targetIndex, _sendoffArguments, _sendoffFunction, _id],
+																[_arguments, _function, _sendoffArguments, _sendoffFunction, _id],
 																{
 																	params ["_targetObject", "_isLocal"];
-																	_args params ["_arguments", "_function", "_targetIndex", "_sendoffArguments", "_sendoffFunction", "_id"];
+																	_args params ["_arguments", "_function", "_sendoffArguments", "_sendoffFunction", "_id"];
 																	private _idState = _targetObject getVariable [_id, "ACTIVE"];
 
 																	if !(_idState == "INACTIVE") then {
@@ -780,33 +780,33 @@ isNil {
 												[
 													"KH_eve_executionGlobal", 
 													[
-														[_arguments, _function, _targetObject, _targetIndex, _sendoffArguments, _sendoffFunction, _id], 
+														[_arguments, _function, _targetObject, _sendoffArguments, _sendoffFunction, _id], 
 														{
-															params ["_arguments", "_function", "_targetObject", "_targetIndex", "_sendoffArguments", "_sendoffFunction", "_id"];
+															params ["_arguments", "_function", "_targetObject", "_sendoffArguments", "_sendoffFunction", "_id"];
 
 															{
 																[
 																	"CBA",
 																	_x,
-																	[_arguments, _function, _targetObject, _targetIndex, _sendoffArguments, _sendoffFunction, _id],
+																	[_arguments, _function, _targetObject, _sendoffArguments, _sendoffFunction, _id],
 																	{
-																		_args params ["_arguments", "_function", "_targetObject", "_targetIndex", "_sendoffArguments", "_sendoffFunction", "_id"];
+																		_args params ["_arguments", "_function", "_targetObject", "_sendoffArguments", "_sendoffFunction", "_id"];
 																		params ["_joiningMachine"];
 
 																		[
 																			"KH_eve_executionGlobal",
 																			[
-																				[_arguments, _function, _targetObject, _targetIndex, _sendoffArguments, _sendoffFunction, _id], 
+																				[_arguments, _function, _targetObject, _sendoffArguments, _sendoffFunction, _id], 
 																				{
-																					params ["_arguments", "_function", "_targetObject", "_targetIndex", "_sendoffArguments", "_sendoffFunction", "_id"];
+																					params ["_arguments", "_function", "_targetObject", "_sendoffArguments", "_sendoffFunction", "_id"];
 
 																					[
 																						["STANDARD", _targetObject, false],
 																						"Local",
-																						[_arguments, _function, _targetIndex, _sendoffArguments, _sendoffFunction, _id],
+																						[_arguments, _function, _sendoffArguments, _sendoffFunction, _id],
 																						{
 																							params ["_targetObject", "_isLocal"];
-																							_args params ["_arguments", "_function", "_targetIndex", "_sendoffArguments", "_sendoffFunction", "_id"];
+																							_args params ["_arguments", "_function", "_sendoffArguments", "_sendoffFunction", "_id"];
 																							private _idState = _targetObject getVariable [_id, "ACTIVE"];
 																							
 																							if !(_idState == "INACTIVE") then {

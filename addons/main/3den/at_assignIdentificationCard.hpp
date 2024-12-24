@@ -36,7 +36,7 @@ class KH_AssignIdentificationCard: Title
 		class KH_GenderTitle: Title
 		{
 			text = "Gender";
-			tooltip = "Gender.";
+			tooltip = "Gender. Can be left empty to default to 'Male'.";
 			y = QUOTE(3 * CTRL_DEFAULT_H + 10 * CTRL_DEFAULT_Y);
 		};
 		class KH_Gender: ctrlEdit
@@ -50,7 +50,7 @@ class KH_AssignIdentificationCard: Title
 		class KH_RaceTitle: Title
 		{
 			text = "Race";
-			tooltip = "Race.";
+			tooltip = "Race. Can be left empty to derive the race from the unit's face, though may not work for all faces.";
 			y = QUOTE(4 * CTRL_DEFAULT_H + 15 * CTRL_DEFAULT_Y);
 		};
 		class KH_Race: ctrlEdit
@@ -64,7 +64,7 @@ class KH_AssignIdentificationCard: Title
 		class KH_DateOfBirthTitle: Title
 		{
 			text = "Date of Birth";
-			tooltip = "Date of birth.";
+			tooltip = "Date of birth. Can be left empty to assign a random date of birth, within the margins of the current date.";
 			y = QUOTE(5 * CTRL_DEFAULT_H + 20 * CTRL_DEFAULT_Y);
 		};
 		class KH_DateOfBirth: ctrlEdit
@@ -78,7 +78,7 @@ class KH_AssignIdentificationCard: Title
 		class KH_ProfessionTitle: Title
 		{
 			text = "Profession";
-			tooltip = "Profession.";
+			tooltip = "Profession. Can be left empty to assign a random profession.";
 			y = QUOTE(6 * CTRL_DEFAULT_H + 25 * CTRL_DEFAULT_Y);
 		};
 		class KH_Profession: ctrlEdit
@@ -92,7 +92,7 @@ class KH_AssignIdentificationCard: Title
 		class KH_NationalityTitle: Title
 		{
 			text = "Nationality";
-			tooltip = "Unscheduled code, executed on the server, which must return a string that will be added on the terminal's console. If no string is returned, nothing is provided to the console output. Passed arguments available through <_this> are: <[_command (STRING), _argument (STRING), _identifierOutput (STRING)]>. <_command> is the first text that a player can insert into the input field of the console, followed by a space and a dash <->, and then the <_argument>. The <_command> parameter will not include the space, and the <_argument> parameter will not include the dash <->. <_identifierOutput> dictates the text displayed on all terminals sharing the same Identifier, and can be used for extra control through the <KH_fnc_setPersistentDisplayText> function, which accepts the following arguments: <[_identifierOutput (STRING), _text (STRING), _overwrite (BOOLEAN)]>. Line breaks in text can be added by including a backslash followed by the letter <n>. The terminal output itself can be accessed by external scripts as a <missionNamespace> variable <'KH_var_terminalOutput%1'>, where %1 is the desired identifier.";
+			tooltip = "Nationality. Can be left empty to assign a random nationality.";
 			y = QUOTE(7 * CTRL_DEFAULT_H + 30 * CTRL_DEFAULT_Y);
 		};
 		class KH_Nationality: ctrlEdit
@@ -106,7 +106,7 @@ class KH_AssignIdentificationCard: Title
 		class KH_CardNumberTitle: Title
 		{
 			text = "Card Number";
-			tooltip = "Card number.";
+			tooltip = "Card number. Can be left empty to assign a random ID number.";
 			y = QUOTE(8 * CTRL_DEFAULT_H + 35 * CTRL_DEFAULT_Y);
 		};
 		class KH_CardNumber: ctrlEdit
@@ -120,7 +120,7 @@ class KH_AssignIdentificationCard: Title
 		class KH_DateOfIssueTitle: Title
 		{
 			text = "Date of Issue";
-			tooltip = "Date of issue.";
+			tooltip = "Date of issue. Can be left empty to assign a random date of issue, within the margins of the current date and the date of birth.";
 			y = QUOTE(9 * CTRL_DEFAULT_H + 40 * CTRL_DEFAULT_Y);
 		};
 		class KH_DateOfIssue: ctrlEdit
@@ -134,7 +134,7 @@ class KH_AssignIdentificationCard: Title
 		class KH_DateOfExpiryTitle: Title
 		{
 			text = "Date of Expiry";
-			tooltip = "Date of expiry.";
+			tooltip = "Date of expiry. Can be left empty to assign a random date of issue, within the margins of the date of issue.";
 			y = QUOTE(10 * CTRL_DEFAULT_H + 45 * CTRL_DEFAULT_Y);
 		};
 		class KH_DateOfExpiry: ctrlEdit

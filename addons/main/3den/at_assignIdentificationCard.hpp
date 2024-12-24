@@ -36,7 +36,7 @@ class KH_AssignIdentificationCard: Title
 		class KH_GenderTitle: Title
 		{
 			text = "Gender";
-			tooltip = "Gender. Can be left empty to default to 'Male'.";
+			tooltip = "Gender. Can be left empty to default to <'Male'>.";
 			y = QUOTE(3 * CTRL_DEFAULT_H + 10 * CTRL_DEFAULT_Y);
 		};
 		class KH_Gender: ctrlEdit
@@ -50,7 +50,7 @@ class KH_AssignIdentificationCard: Title
 		class KH_RaceTitle: Title
 		{
 			text = "Race";
-			tooltip = "Race. Can be left empty to derive the race from the unit's face, though may not work for all faces.";
+			tooltip = "Race. Can be left empty to derive the race from the unit's face, though may not work for all faces. Defaults to <'Caucasian'> if the unit's face cannot be identified.";
 			y = QUOTE(4 * CTRL_DEFAULT_H + 15 * CTRL_DEFAULT_Y);
 		};
 		class KH_Race: ctrlEdit

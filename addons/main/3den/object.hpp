@@ -649,6 +649,37 @@ class Object
 					defaultValue = "''";
 					condition = "objectControllable";
 				};
+				class KH_PlayerObjectInit
+				{
+					displayName = "Player Object Init";
+					tooltip = "Unscheduled code to execute locally to the player who loads into the mission as this unit, once the unit becomes valid. Only works if this unit is playable. The local <player> variable is valid as this unit.";
+					property = "KH_PlayerObjectInit";
+					control = "EditMulti5";
+					expression = 
+					"\
+						if ((_value != '') && !is3DEN) then {\
+							KH_var_postInitExecutions pushBack [\
+								[_this, compile _value],\
+								{\
+									params ['_entity', '_function'];\
+									[\
+										'CBA',\
+										'KH_eve_playerLoaded',\
+										[_entity, _function],\
+										{\
+											_args params ['_entity', '_function'];\
+											if (player == _entity) then {\
+												[] call _function;\
+											};\
+										}\
+									] call KH_fnc_addEventHandler;\
+								}\
+							];\
+						};\
+					";
+					defaultValue = "''";
+					condition = "objectControllable";
+				};
 				class KH_ServerObjectInit
 				{
 					displayName = "Server Object Init";

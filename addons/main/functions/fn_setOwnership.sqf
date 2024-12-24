@@ -45,25 +45,26 @@ private _unitAttributes = createHashMap;
 			] call KH_fnc_execute;
 		}
 		else {
-			if ((owner _x) != _ownerId) then {
-				[
-					{
-						params ["_unit", "_ownerId"];
-						((owner _unit) == _ownerId);
-					},
-					{
-						params ["_unit", "_ownerId", "_attributes"];
-						[_unit, _attributes, false, false, true, true, true, true, false, true, true, true, true] call KH_fnc_setUnitAttributes;
-						[[_unit], _init, _ownerId, "THIS_FRAME"] call KH_fnc_execute;
-					}, 
-					[_x, _ownerId, _attributes], 
-					30
-				] call CBA_fnc_waitUntilAndExecute;
-			}
-			else {
-				[_x, _attributes, false, false, true, true, true, true, false, true, true, true, true] call KH_fnc_setUnitAttributes;
-				[[_x], _init, _ownerId, "THIS_FRAME"] call KH_fnc_execute;
-			};
+			[
+				{
+					params ["_unit", "_ownerId", "_attributes"];
+
+					[
+						{
+							params ["_unit", "_ownerId"];
+							((owner _unit) == _ownerId);
+						},
+						{
+							params ["_unit", "_ownerId", "_attributes"];
+							[_unit, _attributes, false, false, true, true, true, true, false, true, true, true, true] call KH_fnc_setUnitAttributes;
+							[[_unit], _init, _ownerId, "THIS_FRAME"] call KH_fnc_execute;
+						}, 
+						[_unit, _ownerId, _attributes], 
+						30
+					] call CBA_fnc_waitUntilAndExecute;
+				}, 
+				[_x, _ownerId, _attributes]
+			] call CBA_fnc_execNextFrame;
 		};
 	}
 	else {

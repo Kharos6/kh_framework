@@ -80,11 +80,11 @@ class KH_ModuleEditTerrainObjects: Module_F
 			property = "KH_ModuleEditTerrainObjectsConvertToSimple";
 			defaultValue = "false";
 		};
-		class KH_ModuleEditTerrainObjectsInitialization: Edit
+		class KH_ModuleEditTerrainObjectsInit: Edit
 		{
-			displayName = "Initialization";
+			displayName = "Init";
 			tooltip = "Unscheduled code to execute on edited entities, executed on the server. Passed arguments available through <_this> are: <[_entity (OBJECT)]>";
-			property = "KH_ModuleEditTerrainObjectsInitialization";
+			property = "KH_ModuleEditTerrainObjectsInit";
 			defaultValue = "''";
 		};
 		class ModuleDescription: ModuleDescription {};

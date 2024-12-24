@@ -19,13 +19,13 @@ class KH_ConvertToAgent: Title
 			w = QUOTE(5 * GRID_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
-		class KH_InitializationTitle: Title
+		class KH_InitTitle: Title
 		{
-			text = "Initialization";
+			text = "Init";
 			tooltip = "Unscheduled code to execute locally to the agent after it is created. Passed arguments available through <_this> are: <[_agent]>.";
 			y = QUOTE(2 * CTRL_DEFAULT_H + 5 * CTRL_DEFAULT_Y);
 		};
-		class KH_Initialization: ctrlEditMulti
+		class KH_Init: ctrlEditMulti
 		{
 			idc = 101;
 			x = QUOTE(CTRL_DEFAULT_X);

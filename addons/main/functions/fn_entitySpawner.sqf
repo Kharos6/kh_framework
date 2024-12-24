@@ -1,4 +1,4 @@
-params ["_entityTypes", "_transforms", "_radiuses", "_amount", "_maximum", "_condition", "_initialization", "_type", "_interval"];
+params ["_entityTypes", "_transforms", "_radiuses", "_amount", "_maximum", "_condition", "_init", "_type", "_interval"];
 private _id = [missionNamespace, "KH_var_entitySpawner", "ACTIVE", false] call KH_fnc_atomicVariable;
 private _spawnerCount = [missionNamespace, "KH_var_entitySpawnerCount", 0, false] call KH_fnc_atomicVariable;
 
@@ -20,7 +20,7 @@ private _entityHandler = [
 		if (_idState != "INACTIVE") then {
 			switch true do {
 				case (_idState == "ACTIVE"): {
-					_args params ["_entityTypes", "_transforms", "_radiuseses", "_amount", "_maximum", "_condition", "_initialization", "_type", "_spawnerCount"];
+					_args params ["_entityTypes", "_transforms", "_radiuseses", "_amount", "_maximum", "_condition", "_init", "_type", "_spawnerCount"];
 
 					if ((missionNamespace getVariable [_spawnerCount, 0]) <= _maximum) then {
 						if ([_transforms, missionNamespace getVariable [_spawnerCount, 0], ["PRIVATE_HANDLER", _id, clientOwner]] call _condition) then {
@@ -66,7 +66,7 @@ private _entityHandler = [
 										_position vectorAdd [random (_chosenRadius select 0), random (_chosenRadius select 1), random (_chosenRadius select 2)];
 										private _unit = _group createUnit [selectRandom _entityTypes, _position, [], 0, _placementMode];
 										[_unit, _rotation, false] call KH_fnc_setRotation;
-										[_unit, _chosenTransforms, _position] call _initialization;
+										[_unit, _chosenTransforms, _position] call _init;
 										_spawnedEntities pushBack _unit;
 									};
 								};
@@ -97,7 +97,7 @@ private _entityHandler = [
 										_position vectorAdd [random (_chosenRadius select 0), random (_chosenRadius select 1), random (_chosenRadius select 2)];
 										private _agent = createAgent [selectRandom _entityTypes, _position, [], 0, _placementMode];
 										[_agent, _rotation, false] call KH_fnc_setRotation;
-										[_agent, _chosenTransforms, _position] call _initialization;
+										[_agent, _chosenTransforms, _position] call _init;
 										_spawnedEntities pushBack _agent;
 									};
 								};
@@ -137,7 +137,7 @@ private _entityHandler = [
 										};
 
 										[_object, _rotation, false] call KH_fnc_setRotation;
-										[_object, _chosenTransforms, _position] call _initialization;
+										[_object, _chosenTransforms, _position] call _init;
 										_spawnedEntities pushBack _object;
 									};
 								};
@@ -168,7 +168,7 @@ private _entityHandler = [
 										_position vectorAdd [random (_chosenRadius select 0), random (_chosenRadius select 1), random (_chosenRadius select 2)];
 										private _object = createSimpleObject [selectRandom _entityTypes, _position, _local];
 										[_object, _rotation, false] call KH_fnc_setRotation;
-										[_object, _chosenTransforms, _position] call _initialization;
+										[_object, _chosenTransforms, _position] call _init;
 										_spawnedEntities pushBack _object;
 									};
 								};
@@ -200,7 +200,7 @@ private _entityHandler = [
 										private _vehicle = createVehicle [selectRandom _entityTypes, _position, [], 0, _placementMode];
 										[_vehicle, _rotation, false] call KH_fnc_setRotation;
 										createVehicleCrew _vehicle;
-										[_vehicle, _chosenTransforms, _position] call _initialization;
+										[_vehicle, _chosenTransforms, _position] call _init;
 										_spawnedEntities pushBack _vehicle;
 									};
 								};
@@ -263,7 +263,7 @@ private _entityHandler = [
 		};
 	},
 	_interval,
-	[_entityTypes, _transforms, _radiuses, _amount, _maximum, _condition, _initialization, _type, _spawnerCount, _id, _entityHandler]
+	[_entityTypes, _transforms, _radiuses, _amount, _maximum, _condition, _init, _type, _spawnerCount, _id, _entityHandler]
 ] call CBA_fnc_addPerFrameHandler;
 
 ["PRIVATE_HANDLER", _id, clientOwner];

@@ -52,9 +52,9 @@ class Object
 					control = "KH_ConditionalPresence";
 					expression = 
 					"\
-						_value params ['_toggle', '_variableName', '_initialization', '_invert'];\
+						_value params ['_toggle', '_variableName', '_init', '_invert'];\
 						if (_toggle && !is3DEN && (_variableName != '')) then {\
-							[_this, _variableName, compile _initialization, _invert] call KH_fnc_conditionalPresence;\
+							[_this, _variableName, compile _init, _invert] call KH_fnc_conditionalPresence;\
 						};\
 					";
 					defaultValue = "[false, '', '', false]";
@@ -69,7 +69,7 @@ class Object
 			{
 				class KH_ConvertToAgentSubcategory
 				{
-					description = "Converts this unit to an agent upon mission start. Most Eden attributes will be lost, but can be replicated using the Initialization field.";
+					description = "Converts this unit to an agent upon mission start. Most Eden attributes will be lost, but can be replicated using the Init field.";
 					data = "AttributeSystemSubcategory";
 					control = "KH_SubcategoryNoHeader2";
 				};
@@ -79,10 +79,10 @@ class Object
 					control = "KH_ConvertToAgent";
 					expression = 
 					"\
-						_value params ['_toggle', '_initialization'];\
+						_value params ['_toggle', '_init'];\
 						if (_toggle && !is3DEN) then {\
 							KH_var_postInitExecutions pushBack [\
-								[[_this], compile _initialization],\
+								[[_this], compile _init],\
 								{\
 									_this call KH_fnc_convertToAgent;\
 								}\
@@ -388,16 +388,16 @@ class Object
 					control = "KH_Teleporter";
 					expression = 
 					"\
-						_value params ['_toggle', '_position', '_rotation', '_transition', '_heal', '_freefallHeight', '_initialization', '_name'];\
+						_value params ['_toggle', '_position', '_rotation', '_transition', '_heal', '_freefallHeight', '_init', '_name'];\
 						if (_toggle && !is3DEN) then {\
 							KH_var_postInitExecutions pushBack [\
-								[_this, _position, _rotation, parseNumber _transition, _heal, parseNumber _freefallHeight, compile _initialization, _name],\
+								[_this, _position, _rotation, parseNumber _transition, _heal, parseNumber _freefallHeight, compile _init, _name],\
 								{\
-									params ['_entity', '_position', '_rotation', '_transition', '_heal', '_freefallHeight', '_initialization', '_name'];\
+									params ['_entity', '_position', '_rotation', '_transition', '_heal', '_freefallHeight', '_init', '_name'];\
 									[\
-										[_entity, missionNamespace getVariable [_position, objNull], missionNamespace getVariable [_rotation, objNull], _transition, _heal, _freefallHeight, _initialization, _name],\
+										[_entity, missionNamespace getVariable [_position, objNull], missionNamespace getVariable [_rotation, objNull], _transition, _heal, _freefallHeight, _init, _name],\
 										{\
-											params ['_entity', '_position', '_rotation', '_transition', '_heal', '_freefallHeight', '_initialization', '_name'];\
+											params ['_entity', '_position', '_rotation', '_transition', '_heal', '_freefallHeight', '_init', '_name'];\
 											[\
 												_object,\
 												_name,\
@@ -408,11 +408,11 @@ class Object
 												{},\
 												{},\
 												{\
-													(_this select 3) params ['_entity', '_position', '_rotation', '_transition', '_heal', '_freefallHeight', '_initialization'];\
-													[[player], _position, _rotation, false, _transition, _heal, _freefallHeight, _initialization] call KH_fnc_teleport;\
+													(_this select 3) params ['_entity', '_position', '_rotation', '_transition', '_heal', '_freefallHeight', '_init'];\
+													[[player], _position, _rotation, false, _transition, _heal, _freefallHeight, _init] call KH_fnc_teleport;\
 												},\
 												{},\
-												[_entity, _position, _rotation, _transition, _heal, _freefallHeight, _initialization],\
+												[_entity, _position, _rotation, _transition, _heal, _freefallHeight, _init],\
 												1,\
 												0,\
 												false,\
@@ -449,21 +449,20 @@ class Object
 					control = "KH_TransferToHeadlessClient";
 					expression = 
 					"\
-						_value params ['_toggle', '_owner', '_recreate', '_initialization'];\
+						_value params ['_toggle', '_owner', '_recreate', '_init'];\
 						if (_toggle && !is3DEN) then {\
 							KH_var_headlessClientTransfers pushBack [_this, _owner, _recreate];\
-							if (_initialization != '') then {\
+							if (_init != '') then {\
 								[\
 									{\
-										params ['_unit', '_owner'];\
-										((owner _unit) == (owner _owner));\
+										params ['_unit'];\
+										((owner _unit) != 2);\
 									},\
 									{\
-										private _unit = _this select 0;\
-										private _initialization = _this select 2;\
-										[_unit] call _initialization;\
+										params ['_unit', '_owner', '_init'];\
+										[[_unit], _init, owner (missionNamespace getVariable [_owner, objNull]), 'THIS_FRAME'] call KH_fnc_execute;\
 									},\
-									[_this, _owner, compile _initialization],\
+									[_this, _owner, compile _init],\
 									30\
 								] call CBA_fnc_waitUntilAndExecute;\
 							};\

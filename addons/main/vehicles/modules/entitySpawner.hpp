@@ -54,11 +54,11 @@ class KH_ModuleEntitySpawner: Module_F
 			property = "KH_ModuleEntitySpawnerCondition";
 			defaultValue = "''";
 		};
-		class KH_ModuleEntitySpawnerInitialization: Edit
+		class KH_ModuleEntitySpawnerInit: Edit
 		{
-			displayName = "Initialization";
+			displayName = "Init";
 			tooltip = "Unscheduled code to execute on the server for each entity that spawns. Passed arguments available through <_this> are: <[_entity (OBJECT), _chosenTransforms (ARRAY), _position (ARRAY)]>.";
-			property = "KH_ModuleEntitySpawnerInitialization";
+			property = "KH_ModuleEntitySpawnerInit";
 			defaultValue = "''";
 		};
 		class KH_ModuleEntitySpawnerType: Edit

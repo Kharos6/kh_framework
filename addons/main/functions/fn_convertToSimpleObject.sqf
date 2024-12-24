@@ -1,4 +1,4 @@
-params ["_objects", ["_local", true], ["_initialization", {}]];
+params ["_objects", ["_local", true], ["_init", {}]];
 private _simpleObjects = [];
 
 {
@@ -9,12 +9,12 @@ private _simpleObjects = [];
 
 	if _local then {
 		[
-			[_initialization, _position, _vectorDirAndUp, _currentObject], 
+			[_init, _position, _vectorDirAndUp, _currentObject], 
 			{
-				params ["_initialization", "_position", "_vectorDirAndUp", "_currentObject"];	
+				params ["_init", "_position", "_vectorDirAndUp", "_currentObject"];	
 				private _simpleObject = createSimpleObject [_currentObject, _position, true];
 				_simpleObject setVectorDirAndUp _vectorDirAndUp;
-				[_simpleObject] call _initialization;
+				[_simpleObject] call _init;
 			},
 			["JIP", "GLOBAL", true, false, false],
 			"THIS_FRAME"
@@ -24,7 +24,7 @@ private _simpleObjects = [];
 		private _simpleObject = createSimpleObject [_currentObject, _position, false];
 		_simpleObject setVectorDirAndUp _vectorDirAndUp;
 		_simpleObjects pushBack _simpleObject;
-		[_simpleObject] call _initialization;
+		[_simpleObject] call _init;
 	};
 } forEach _objects;
 

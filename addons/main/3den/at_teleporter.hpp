@@ -89,13 +89,13 @@ class KH_Teleporter: Title
 			w = QUOTE(CTRL_DEFAULT_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
-		class KH_InitializationTitle: Title
+		class KH_InitTitle: Title
 		{
-			text = "Initialization";
+			text = "Init";
 			tooltip = "Unscheduled code to execute locally to the player after they are teleported. Passed arguments available through <_this> are: <[_player (OBJECT)]>.";
 			y = QUOTE(7 * CTRL_DEFAULT_H + 30 * CTRL_DEFAULT_Y);
 		};
-		class KH_Initialization: ctrlEditMulti
+		class KH_Init: ctrlEditMulti
 		{
 			idc = 106;
 			x = QUOTE(CTRL_DEFAULT_X);

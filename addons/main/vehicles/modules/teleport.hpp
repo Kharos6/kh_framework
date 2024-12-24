@@ -47,11 +47,11 @@ class KH_ModuleTeleport: Module_F
 			property = "KH_ModuleTeleportFreefallHeight";
 			defaultValue = "''";
 		};
-		class KH_ModuleTeleportInitialization: Edit
+		class KH_ModuleTeleportInit: Edit
 		{
-			displayName = "Initialization";
+			displayName = "Init";
 			tooltip = "Unscheduled code to execute locally to the entity after it is teleported. Passed arguments available through <_this> are: <[_entity (OBJECT)]>.";
-			property = "KH_ModuleTeleportInitialization";
+			property = "KH_ModuleTeleportInit";
 			defaultValue = "''";
 		};
 		class ModuleDescription: ModuleDescription {};

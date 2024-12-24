@@ -1,12 +1,12 @@
-params ["_entity", "_variableName", ["_initialization", {}], ["_invert", false]];
+params ["_entity", "_variableName", ["_init", {}], ["_invert", false]];
 
 [
 	"CBA",
 	_variableName,
-	[_entity, _initialization, _invert],
+	[_entity, _init, _invert],
 	{
 		params ["_state"];
-		_args params ["_entity", "_initialization", "_invert"];
+		_args params ["_entity", "_init", "_invert"];
 
 		if !_invert then {
 			if _state then {
@@ -30,10 +30,10 @@ params ["_entity", "_variableName", ["_initialization", {}], ["_invert", false]]
 		};
 		
 		[
-			[_entity, _state, _initialization],
+			[_entity, _state, _init],
 			{
-				params ["_entity", "_state", "_initialization"];
-				[_entity, _state] call _initialization;
+				params ["_entity", "_state", "_init"];
+				[_entity, _state] call _init;
 			},
 			_entity,
 			"THIS_FRAME"

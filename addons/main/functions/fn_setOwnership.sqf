@@ -1,4 +1,4 @@
-params ["_entities", "_owner", ["_recreate", false], ["_initialization", {}]];
+params ["_entities", "_owner", ["_recreate", false], ["_init", {}]];
 private _ownerId = 2;
 
 if (_owner isEqualType 0) then {
@@ -30,15 +30,15 @@ private _unitAttributes = createHashMap;
 		
 		if _recreate then {
 			[
-				[_x, _initialization, _attributes], 
+				[_x, _init, _attributes], 
 				{
-					params ["_unit", "_initialization", "_attributes"];
+					params ["_unit", "_init", "_attributes"];
 					private _previousUnit = _unit;
 					_unit = (_attributes select 1) createUnit [_attributes select 0, _previousUnit, [], 0, "CAN_COLLIDE"];
 					[_unit] joinSilent (_attributes select 1);
 					deleteVehicle _previousUnit;
 					[_unit, _attributes, false, true, true, true, true, true, true, true, true, true, true] call KH_fnc_setUnitAttributes;
-					[_unit] call _initialization;
+					[_unit] call _init;
 				},
 				_ownerId,
 				"THIS_FRAME"
@@ -54,7 +54,7 @@ private _unitAttributes = createHashMap;
 					{
 						params ["_unit", "_ownerId", "_attributes"];
 						[_unit, _attributes, false, false, true, true, true, true, false, true, true, true, true] call KH_fnc_setUnitAttributes;
-						[[_unit], _initialization, _ownerId, "THIS_FRAME"] call KH_fnc_execute;
+						[[_unit], _init, _ownerId, "THIS_FRAME"] call KH_fnc_execute;
 					}, 
 					[_x, _ownerId, _attributes], 
 					30
@@ -62,7 +62,7 @@ private _unitAttributes = createHashMap;
 			}
 			else {
 				[_x, _attributes, false, false, true, true, true, true, false, true, true, true, true] call KH_fnc_setUnitAttributes;
-				[[_x], _initialization, _ownerId, "THIS_FRAME"] call KH_fnc_execute;
+				[[_x], _init, _ownerId, "THIS_FRAME"] call KH_fnc_execute;
 			};
 		};
 	}

@@ -1,4 +1,4 @@
-params ["_units", ["_initialization", {}]];
+params ["_units", ["_init", {}]];
 private _agents = [];
 
 {
@@ -7,7 +7,7 @@ private _agents = [];
 	deleteVehicle _x;
 	[_unit, _attributes, false, true, true, true, true, true, true, false, false, false, true] call KH_fnc_setUnitAttributes;
 	_agents pushBack _currentAgent;
-	[_currentAgent] call _initialization;
+	[_currentAgent] call _init;
 } forEach _units;
 
 _agents;

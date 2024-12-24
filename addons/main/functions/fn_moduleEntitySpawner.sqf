@@ -23,7 +23,7 @@ isNil {
 			parseNumber (_logic getVariable ["KH_ModuleEntitySpawnerAmount", "0"]),
 			parseNumber (_logic getVariable ["KH_ModuleEntitySpawnerMaximum", "0"]),
 			compile (_logic getVariable ["KH_ModuleEntitySpawnerCondition", ""]),
-			compile (_logic getVariable ["KH_ModuleEntitySpawnerInitialization", ""]),
+			compile (_logic getVariable ["KH_ModuleEntitySpawnerInit", ""]),
 			parseSimpleArray (_logic getVariable ["KH_ModuleEntitySpawnerType", "[]"]),
 			parseNumber (_logic getVariable ["KH_ModuleEntitySpawnerInterval", "0"])
 		] call KH_fnc_entitySpawner;

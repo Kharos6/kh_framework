@@ -9,6 +9,7 @@ class CfgFunctions
 			class addEventHandler {};
 			class arma {};
 			class arraySum {};
+			class assignIdentificationCard {};
 			class assignParachute {};
 			class assignTerminal {};
 			class atomicValue {};
@@ -66,6 +67,7 @@ class CfgFunctions
 			class moduleSuspendMission {};
 			class moduleTeleport {};
 			class moduleVehicleSequence {};
+			class openIdentificationCard {};
 			class openTerminal {};
 			class orbitObject {};
 			class removeEventHandler {};

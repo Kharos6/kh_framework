@@ -2,6 +2,39 @@ class Object
 {
 	class AttributeCategories
 	{
+		class KH_AssignIdentificationCard
+		{
+			displayName = "KH Assign Identification Card";
+			collapsed = 1;
+			class Attributes
+			{
+				class KH_AssignIdentificationCardSubcategory
+				{
+					description = "Assign an identification card to this unit, which can be used to verify the identity of the unit for missions where that is relevant.";
+					data = "AttributeSystemSubcategory";
+					control = "KH_SubcategoryNoHeader2";
+				};
+				class KH_AssignIdentificationCard 
+				{
+					property = "KH_AssignIdentificationCard";
+					control = "KH_AssignIdentificationCard";
+					expression = 
+					"\
+						_value params ['_toggle', '_name', '_gender', '_dateOfBirth', '_profession', '_nationality', '_cardNumber', '_dateOfIssue', '_dateOfExpiry'];\
+						if (_toggle && !is3DEN) then {\
+							KH_var_postInitExecutions pushBack [\
+								[_this, _name, _gender, _dateOfBirth, _profession, _nationality, _cardNumber, _dateOfIssue, _dateOfExpiry],\
+								{\
+									_this call KH_fnc_assignIdentificationCard;\
+								}\
+							];\
+						};\
+					";
+					defaultValue = "[false, '', '', '', '', '', '', '', '']";
+					condition = "objectControllable";
+				};
+			};
+		};
 		class KH_AssignTerminal
 		{
 			displayName = "KH Assign Terminal";
@@ -141,7 +174,12 @@ class Object
 					"\
 						_value params ['_toggle', '_bone', '_position', '_rotation', '_scale', '_mass', '_hideInVehicles', '_toggleEquip', '_exclusive', '_event', '_objectName'];\
 						if (_toggle && !is3DEN) then {\
-							[objNull, _this, _bone, parseSimpleArray _position, parseSimpleArray _rotation, parseNumber _scale, parseNumber _mass, _hideInVehicles, _toggleEquip, _exclusive, _event, _objectName] call KH_fnc_equipableObject;\
+							KH_var_postInitExecutions pushBack [\
+								[objNull, _this, _bone, parseSimpleArray _position, parseSimpleArray _rotation, parseNumber _scale, parseNumber _mass, _hideInVehicles, _toggleEquip, _exclusive, _event, _objectName],\
+								{\
+									_this call KH_fnc_equipableObject;\
+								}\
+							];\
 						};\
 					";
 					defaultValue = "[false, '', '[]', '[]', '', '', true, true, true, '', '']";

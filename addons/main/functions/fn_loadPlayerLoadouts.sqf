@@ -1,5 +1,4 @@
 params ["_loadouts", ["_respawnType", "INITIAL"]];
-
 KH_var_respawnLoadoutType = _respawnType;
 
 if (_loadouts isEqualType []) then {

@@ -191,6 +191,7 @@ class Attributes
 			};
 		};
 	};
+	#include "\x\kh\addons\main\3den\at_assignIdentificationCard.hpp"
 	#include "\x\kh\addons\main\3den\at_assignTerminal.hpp"
 	#include "\x\kh\addons\main\3den\at_cameraSequence.hpp"
 	#include "\x\kh\addons\main\3den\at_captureVehicleSequence.hpp"

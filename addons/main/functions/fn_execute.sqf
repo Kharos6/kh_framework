@@ -964,6 +964,66 @@ isNil {
 					missionNamespace setVariable [_id, "ACTIVE"];
 
 					switch true do {
+						case (_type == "AFTER_N_FRAMES"): {
+							private _frames = _environment select 1;
+							private _backupArguments = _environment select 2;
+							private _backupFunction = _environment select 3;
+
+							if KH_var_missionLoaded then {
+								[
+									{
+										params ["_arguments", "_function", "_target", "_backupArguments", "_backupFunction", "_subfunction", "_id"];
+										private _idState = missionNamespace getVariable [_id, "ACTIVE"];
+
+										if (_idState != "TERMINATE") then {
+											switch true do {
+												case (_idState == "ACTIVE"): {
+													[_arguments, _function, _target] call _subfunction;
+												};
+
+												case (_idState == "INACTIVE"): {
+													[_backupArguments, _backupFunction, _target] call _subfunction;
+												};
+											};
+										};
+									}, 
+									[_arguments, _function, _target, _backupArguments, _backupFunction, _subfunction, _id],
+									_frames
+								] call CBA_fnc_execAfterNFrames;
+							}
+							else {
+								KH_var_postInitExecutions pushBack [
+									[_arguments, _function, _target, _frames, _backupArguments, _backupFunction, _subfunction, _id],
+									{
+										params ["_arguments", "_function", "_target", "_frames", "_backupArguments", "_backupFunction", "_subfunction", "_id"];
+
+										[
+											{
+												params ["_arguments", "_function", "_target", "_backupArguments", "_backupFunction", "_subfunction", "_id"];
+												private _idState = missionNamespace getVariable [_id, "ACTIVE"];
+
+												if (_idState != "TERMINATE") then {
+													switch true do {
+														case (_idState == "ACTIVE"): {
+															[_arguments, _function, _target] call _subfunction;
+														};
+
+														case (_idState == "INACTIVE"): {
+															[_backupArguments, _backupFunction, _target] call _subfunction;
+														};
+													};
+												};
+											}, 
+											[_arguments, _function, _target, _backupArguments, _backupFunction, _subfunction, _id],
+											_frames
+										] call CBA_fnc_execAfterNFrames;
+									}
+								];
+							};
+
+							["PRIVATE_HANDLER", _id, clientOwner];
+						};
+
 						case (_type == "WAIT"): {
 							private _time = _environment select 1;
 							private _backupArguments = _environment select 2;
@@ -1144,21 +1204,26 @@ isNil {
 
 						case (_type == "INTERVAL"): {
 							private _interval = _environment select 1;
-							private _timeout = _environment select 2;
-							private _timeoutArguments = _environment select 3;
-							private _timeoutFunction = _environment select 4;
+							private _conditonArguments = _environment select 2;
+							private _conditionFunction  = _environment select 3;
+							private _timeout = _environment select 4;
+							private _timeoutArguments = _environment select 5;
+							private _timeoutFunction = _environment select 6;
 
 							if KH_var_missionLoaded then {
 								private _handler = [
 									{
-										private _id = _args select 4;
+										private _id = _args select 6;
 										private _idState = missionNamespace getVariable [_id, "ACTIVE"];
 										
 										if !(_idState == "INACTIVE") then {
 											switch true do {
 												case (_idState == "ACTIVE"): {
-													_args params ["_arguments", "_function", "_target", "_subfunction"];
-													[_arguments, _function, _target] call _subfunction;	
+													_args params ["_arguments", "_function", "_target", "_conditionArguments", "_conditionFunction", "_subfunction"];
+
+													if (_conditionArguments call _conditionFunction) then {
+														[_arguments, _function, _target] call _subfunction;
+													};
 												};
 
 												case (_idState == "TERMINATE"): {
@@ -1168,7 +1233,7 @@ isNil {
 										};
 									}, 
 									_interval, 
-									[_arguments, _function, _target, _subfunction, _id]
+									[_arguments, _function, _target, _conditionArguments, _conditionFunction, _subfunction, _id]
 								] call CBA_fnc_addPerFrameHandler;
 
 								if (_timeout != 0) then {
@@ -1185,20 +1250,23 @@ isNil {
 							}
 							else {
 								KH_var_postInitExecutions pushBack [
-									[_arguments, _function, _target, _timeout, _timeoutArguments, _timeoutFunction, _subfunction, _interval, _id],
+									[_arguments, _function, _target, _conditionArguments, _conditionFunction, _timeout, _timeoutArguments, _timeoutFunction, _subfunction, _interval, _id],
 									{
-										params ["_arguments", "_function", "_target", "_timeout", "_timeoutArguments", "_timeoutFunction", "_subfunction", "_interval", "_id"];
+										params ["_arguments", "_function", "_target", "_conditionArguments", "_conditionFunction", "_timeout", "_timeoutArguments", "_timeoutFunction", "_subfunction", "_interval", "_id"];
 										
 										private _handler = [
 											{
-												private _id = _args select 4;
+												private _id = _args select 6;
 												private _idState = missionNamespace getVariable [_id, "ACTIVE"];
 												
 												if !(_idState == "INACTIVE") then {
 													switch true do {
 														case (_idState == "ACTIVE"): {
-															_args params ["_arguments", "_function", "_target", "_subfunction"];
-															[_arguments, _function, _target] call _subfunction;	
+															_args params ["_arguments", "_function", "_target", "_conditionArguments", "_conditionFunction", "_subfunction"];
+
+															if (_conditionArguments call _conditionFunction) then {
+																[_arguments, _function, _target] call _subfunction;
+															};
 														};
 
 														case (_idState == "TERMINATE"): {
@@ -1208,7 +1276,7 @@ isNil {
 												};
 											}, 
 											_interval, 
-											[_arguments, _function, _target, _subfunction, _id]
+											[_arguments, _function, _target, _conditionArguments, _conditionFunction, _subfunction, _id]
 										] call CBA_fnc_addPerFrameHandler;
 
 										if (_timeout != 0) then {

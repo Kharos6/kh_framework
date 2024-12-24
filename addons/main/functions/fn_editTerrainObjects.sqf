@@ -86,7 +86,13 @@ if (_damage != 0) then {
 				[_x, _damage, _dynamicSimulation, _disableDamage, _convertSimple, _init, _currentMissionObjects, _editedObjects, _ruinPosition] call _processObjects;
 			}
 			else {
-				private _damageValue = random _damage;
+				private _processedDamage = _damage;
+
+				if (_damage == 1) then {
+					_processedDamage = 1.1;
+				};
+
+				private _damageValue = (random _processedDamage) min 1;
 				_x setDamage [_damageValue, _effects];
 				[_x, _damageValue, _dynamicSimulation, _disableDamage, _convertSimple, _init, _currentMissionObjects, _editedObjects, _ruinPosition] call _processObjects;
 			};
@@ -104,7 +110,13 @@ if (_damage != 0) then {
 					[_x, _damage, _dynamicSimulation, _disableDamage, _convertSimple, _init, _currentMissionObjects, _editedObjects, _ruinPosition] call _processObjects;
 				}
 				else {
-					private _damageValue = random _damage;
+					private _processedDamage = _damage;
+
+					if (_damage == 1) then {
+						_processedDamage = 1.1;
+					};
+
+					private _damageValue = (random _processedDamage) min 1;
 					_x setDamage [_damageValue, _effects];
 					[_x, _damageValue, _dynamicSimulation, _disableDamage, _convertSimple, _init, _currentMissionObjects, _editedObjects, _ruinPosition] call _processObjects;
 				};

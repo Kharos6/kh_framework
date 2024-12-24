@@ -435,7 +435,14 @@ isNil {
 															switch true do {
 																case (_dependency isEqualType ""): {
 																	if ((parseNumber (_dependency select [0, 1])) != 0) then {
-																		private _uid = _this select 3;
+																		private _uid = "";
+
+																		if _joinType == "KH_eve_playerLoaded" then {
+																			_uid = getPlayerUID (_this select 0); 
+																		}
+																		else {
+																			_uid = _this select 1;
+																		};
 
 																		if (_dependency == _uid) then {
 																			if !(_idState == "INACTIVE") then {
@@ -521,16 +528,23 @@ isNil {
 																	{
 																		switch true do {
 																			case (_x isEqualType ""): {
-																				if ((parseNumber (_dependency select [0, 1])) != 0) then {
-																					private _uid = _this select 3;
+																				if ((parseNumber (_x select [0, 1])) != 0) then {
+																					private _uid = "";
 
-																					if (_dependency != _uid) then {
+																					if _joinType == "KH_eve_playerLoaded" then {
+																						_uid = getPlayerUID (_this select 0); 
+																					}
+																					else {
+																						_uid = _this select 1;
+																					};
+
+																					if (_x != _uid) then {
 																						_condition = false;
 																						break;
 																					};
 																				}
 																				else {
-																					if !(missionNamespace getVariable [_dependency, true]) then {
+																					if !(missionNamespace getVariable [_x, true]) then {
 																						_condition = false;
 																						break;
 																					};
@@ -538,7 +552,14 @@ isNil {
 																			};
 
 																			case (_x isEqualType objNull): {
-																				if (isNull _dependency) then {
+																				if (isNull _x) then {
+																					_condition = false;
+																					break;
+																				};
+																			};
+
+																			case (_x isEqualType {}): {
+																				if !([] call _x) then {
 																					_condition = false;
 																					break;
 																				};

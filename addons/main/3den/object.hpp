@@ -453,18 +453,7 @@ class Object
 						if (_toggle && !is3DEN) then {\
 							KH_var_headlessClientTransfers pushBack [_this, _owner, _recreate];\
 							if (_init != '') then {\
-								[\
-									{\
-										params ['_unit'];\
-										((owner _unit) != 2);\
-									},\
-									{\
-										params ['_unit', '_owner', '_init'];\
-										[[_unit], _init, owner (missionNamespace getVariable [_owner, objNull]), 'THIS_FRAME'] call KH_fnc_execute;\
-									},\
-									[_this, _owner, compile _init],\
-									30\
-								] call CBA_fnc_waitUntilAndExecute;\
+								_this setVariable ['KH_var_headlessClientTransferInit', compile _init];\
 							};\
 						};\
 					";

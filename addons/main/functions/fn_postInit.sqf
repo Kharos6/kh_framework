@@ -88,6 +88,21 @@ isNil {
 					[_assignedEntities, owner _headlessClient, false, {}] call KH_fnc_setOwnership;
 					[_assignedEntitiesRecreate, owner _headlessClient, true, {}] call KH_fnc_setOwnership;	
 				};
+
+				{
+					[
+						{
+							params ["_unit", "_ownerId"];
+							((owner _unit) == _ownerId);
+						},
+						{
+							params ["_unit", "_ownerId"];
+							[[_unit], _unit getVariable ["KH_var_headlessClientTransferInit", {}], _ownerId, "THIS_FRAME"] call KH_fnc_execute;
+						}, 
+						[_x, owner _headlessClient], 
+						30
+					] call CBA_fnc_waitUntilAndExecute;
+				} forEach (_assignedEntities + _assignedEntitiesRecreate);
 			} forEach ([["HEADLESS"], true] call KH_fnc_getClients);
 		};
 

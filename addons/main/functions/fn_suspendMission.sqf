@@ -59,3 +59,5 @@ else {
 		"THIS_FRAME"
 	] call KH_fnc_execute;
 };
+
+true;

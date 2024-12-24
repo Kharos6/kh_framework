@@ -9,3 +9,5 @@ params ["_vehicle"];
 	_vehicle,
 	"THIS_FRAME"
 ] call KH_fnc_execute;
+
+true;

@@ -26,7 +26,7 @@ private _processObjects = {
 					private _currentEditedObjects = missionNamespace getVariable [_editedObjects, []];
 
 					{
-						if !(_x in _currentEditedObjects) then {
+						if (!(_x in _currentEditedObjects) && !(isSimpleObject _x)) then {
 							private _dynamicSimulation = _this select 2;
 							private _disableDamage = _this select 3;
 							private _convertSimple = _this select 4;

@@ -22,7 +22,7 @@ class KH_ResourceIdentificationCard
             x = QUOTE(RSC_POS_X(9.5));
             y = QUOTE(RSC_POS_Y(6));
             w = QUOTE(RSC_POS_W(21));
-            h = QUOTE(RSC_POS_W(11));
+            h = QUOTE(RSC_POS_W(12));
             colorBackground[] = {0, 0, 0, 0.9};
         };
         class KH_Name: RscText
@@ -41,7 +41,7 @@ class KH_ResourceIdentificationCard
             w = QUOTE(RSC_POS_W(21));
             h = QUOTE(RSC_POS_W(1));
         };
-        class KH_DateOfBirth: RscText
+        class KH_Race: RscText
         {
             idc = 103;
             x = QUOTE(RSC_POS_X(9.5));
@@ -49,7 +49,7 @@ class KH_ResourceIdentificationCard
             w = QUOTE(RSC_POS_W(21));
             h = QUOTE(RSC_POS_W(1));
         };
-        class KH_Profession: RscText
+        class KH_DateOfBirth: RscText
         {
             idc = 104;
             x = QUOTE(RSC_POS_X(9.5));
@@ -57,7 +57,7 @@ class KH_ResourceIdentificationCard
             w = QUOTE(RSC_POS_W(21));
             h = QUOTE(RSC_POS_W(1));
         };
-        class KH_Nationality: RscText
+        class KH_Profession: RscText
         {
             idc = 105;
             x = QUOTE(RSC_POS_X(9.5));
@@ -65,7 +65,7 @@ class KH_ResourceIdentificationCard
             w = QUOTE(RSC_POS_W(21));
             h = QUOTE(RSC_POS_W(1));
         };
-        class KH_CardNumber: RscText
+        class KH_Nationality: RscText
         {
             idc = 106;
             x = QUOTE(RSC_POS_X(9.5));
@@ -73,7 +73,7 @@ class KH_ResourceIdentificationCard
             w = QUOTE(RSC_POS_W(21));
             h = QUOTE(RSC_POS_W(1));
         };
-        class KH_DateOfIssue: RscText
+        class KH_CardNumber: RscText
         {
             idc = 107;
             x = QUOTE(RSC_POS_X(9.5));
@@ -81,7 +81,7 @@ class KH_ResourceIdentificationCard
             w = QUOTE(RSC_POS_W(21));
             h = QUOTE(RSC_POS_W(1));
         };
-        class KH_DateOfExpiry: RscText
+        class KH_DateOfIssue: RscText
         {
             idc = 108;
             x = QUOTE(RSC_POS_X(9.5));
@@ -89,11 +89,19 @@ class KH_ResourceIdentificationCard
             w = QUOTE(RSC_POS_W(21));
             h = QUOTE(RSC_POS_W(1));
         };
+        class KH_DateOfExpiry: RscText
+        {
+            idc = 109;
+            x = QUOTE(RSC_POS_X(9.5));
+            y = QUOTE(RSC_POS_Y(14));
+            w = QUOTE(RSC_POS_W(21));
+            h = QUOTE(RSC_POS_W(1));
+        };
         class KH_ButtonClose: RscButtonMenuCancel 
         {
 			text = "CLOSE";
             x = QUOTE(RSC_POS_X(9.5));
-            y = QUOTE(RSC_POS_Y(14.25));
+            y = QUOTE(RSC_POS_Y(15));
             w = QUOTE(RSC_POS_W(5));
             h = QUOTE(RSC_POS_H(1));
         };

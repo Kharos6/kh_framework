@@ -1,8 +1,9 @@
-params ["_name", "_gender", "_dateOfBirth", "_profession", "_nationality", "_cardNumber", "_dateOfIssue", "_dateOfExpiry"];
+params ["_name", "_gender", "_race", "_dateOfBirth", "_profession", "_nationality", "_cardNumber", "_dateOfIssue", "_dateOfExpiry"];
 
 private _information = [
 	format ["Name: %1", _name],
 	format ["Gender: %1", _gender],
+	format ["Race: %1", _race],
 	format ["Date Of Birth: %1", _dateOfBirth],
 	format ["Profession: %1", _profession],
 	format ["Nationality: %1", _nationality],

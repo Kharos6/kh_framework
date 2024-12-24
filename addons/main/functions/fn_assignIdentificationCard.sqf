@@ -1,10 +1,10 @@
-params ["_unit", "_name", "_gender", "_dateOfBirth", "_profession", "_nationality", "_cardNumber", "_dateOfIssue", "_dateOfExpiry"];
+params ["_unit", "_name", "_gender", "_race", "_dateOfBirth", "_profession", "_nationality", "_cardNumber", "_dateOfIssue", "_dateOfExpiry"];
 
 if (_name == "") then {
 	_name = name _unit;
 };
 
-_unit setVariable ["KH_var_identificationCardInformation", [_name, _gender, _dateOfBirth, _profession, _nationality, _cardNumber, _dateOfIssue, _dateOfExpiry], true];
+_unit setVariable ["KH_var_identificationCardInformation", [_name, _gender, _race, _dateOfBirth, _profession, _nationality, _cardNumber, _dateOfIssue, _dateOfExpiry], true];
 
 [
 	[_unit],
@@ -50,7 +50,7 @@ _unit setVariable ["KH_var_identificationCardInformation", [_name, _gender, _dat
 			];
 		};
 	},
-	["JIP", "PLAYERS", _unit, false, false], 
+	["JIP", "PLAYERS", _unit, true, false], 
 	"THIS_FRAME"
 ] call KH_fnc_execute;
 

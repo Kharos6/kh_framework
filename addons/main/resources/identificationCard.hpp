@@ -65,7 +65,7 @@ class KH_ResourceIdentificationCard
             w = QUOTE(RSC_POS_W(21));
             h = QUOTE(RSC_POS_W(1));
         };
-        class KH_Nationality: RscText
+        class KH_Ethnos: RscText
         {
             idc = 106;
             x = QUOTE(RSC_POS_X(9.5));

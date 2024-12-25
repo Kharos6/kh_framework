@@ -1,4 +1,66 @@
-params ["_unit", "_name", "_gender", "_race", "_dateOfBirth", "_profession", "_nationality", "_cardNumber", "_dateOfIssue", "_dateOfExpiry"];
+params ["_unit", "_name", "_gender", "_race", "_dateOfBirth", "_profession", "_ethnos", "_cardNumber", "_dateOfIssue", "_dateOfExpiry"];
+
+if (isNil "KH_var_assignIdentificationCardSet") then {
+	KH_var_assignIdentificationCardSet = true;
+
+	[
+		"KH_eve_playerRespawned",
+		{
+			private _newEntity = _this select 0;
+			private _oldEntity = _this select 2;
+
+			if !(isNil {_oldEntity getVariable 'KH_var_identificationCardInformation'}) then {
+				[
+					[_newEntity],
+					{
+						params ["_newEntity"];
+
+						if (_newEntity != player) then {
+							_newEntity addAction [
+								"View Identification Card",
+								{
+									params ["_target"];
+									(_target getVariable ["KH_var_identificationCardInformation", []]) call KH_fnc_openIdentificationCard;
+								},
+								nil,
+								1.5,
+								false,
+								true,
+								"",
+								"true",
+								4,
+								false,
+								"",
+								""
+							];
+						}
+						else {
+							_newEntity addAction [
+								"View Own Identification Card",
+								{
+									params ["_target"];
+									(_target getVariable ["KH_var_identificationCardInformation", []]) call KH_fnc_openIdentificationCard;
+								},
+								nil,
+								1.5,
+								false,
+								true,
+								"",
+								"true",
+								4,
+								false,
+								"",
+								""
+							];
+						};
+					},
+					["JIP", "PLAYERS", _newEntity, true, false], 
+					"THIS_FRAME"
+				] call KH_fnc_execute;
+			};
+		}
+	] call CBA_fnc_addEventHandler;
+};
 
 if (_name == "") then {
 	_name = name _unit;
@@ -165,8 +227,8 @@ if (_profession == "") then {
 	];
 };
 
-if (_nationality == "") then {
-	_nationality = selectRandom [
+if (_ethnos == "") then {
+	_ethnos = selectRandom [
 		"Afghan",
 		"Albanian",
 		"Algerian",
@@ -397,7 +459,7 @@ if (_dateOfExpiry == "") then {
 	_dateOfExpiry = format ["%1%2", _dateOfIssue select [0, 6], _year];
 };
 
-_unit setVariable ["KH_var_identificationCardInformation", [_name, _gender, _race, _dateOfBirth, _profession, _nationality, _cardNumber, _dateOfIssue, _dateOfExpiry], true];
+_unit setVariable ["KH_var_identificationCardInformation", [_name, _gender, _race, _dateOfBirth, _profession, _ethnos, _cardNumber, _dateOfIssue, _dateOfExpiry], true];
 
 [
 	[_unit],

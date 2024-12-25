@@ -89,13 +89,13 @@ class KH_AssignIdentificationCard: Title
 			w = QUOTE(CTRL_DEFAULT_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
-		class KH_NationalityTitle: Title
+		class KH_EthnosTitle: Title
 		{
-			text = "Nationality";
-			tooltip = "Nationality. Can be left empty to assign a random nationality.";
+			text = "Ethnos";
+			tooltip = "Nationality or cultural group. Can be left empty to assign a random nationality.";
 			y = QUOTE(7 * CTRL_DEFAULT_H + 30 * CTRL_DEFAULT_Y);
 		};
-		class KH_Nationality: ctrlEdit
+		class KH_Ethnos: ctrlEdit
 		{
 			idc = 106;
 			x = QUOTE(CTRL_DEFAULT_X);

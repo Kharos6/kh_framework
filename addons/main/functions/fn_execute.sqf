@@ -459,7 +459,7 @@ isNil {
 																		};
 																	}
 																	else {
-																		if (missionNamespace getVariable [_dependency, true]) then {
+																		if (missionNamespace getVariable [_dependency, false]) then {
 																			private _idState = missionNamespace getVariable [_id, "ACTIVE"];
 
 																			if !(_idState == "INACTIVE") then {
@@ -473,9 +473,6 @@ isNil {
 																					};		
 																				};
 																			};
-																		}
-																		else {
-																			missionNamespace setVariable [_id, "INACTIVE"];
 																		};
 																	};
 																};
@@ -495,9 +492,6 @@ isNil {
 																				};		
 																			};
 																		};
-																	}
-																	else {
-																		missionNamespace setVariable [_id, "INACTIVE"];
 																	};
 																};
 
@@ -516,9 +510,6 @@ isNil {
 																				};		
 																			};
 																		};
-																	}
-																	else {
-																		missionNamespace setVariable [_id, "INACTIVE"];
 																	};
 																};
 
@@ -544,7 +535,7 @@ isNil {
 																					};
 																				}
 																				else {
-																					if !(missionNamespace getVariable [_x, true]) then {
+																					if !(missionNamespace getVariable [_x, false]) then {
 																						_condition = false;
 																						break;
 																					};
@@ -581,9 +572,6 @@ isNil {
 																				};		
 																			};
 																		};
-																	}
-																	else {
-																		missionNamespace setVariable [_id, "INACTIVE"];
 																	};
 																};
 
@@ -932,7 +920,7 @@ isNil {
 										_valid = false;
 									};
 								};
-								
+
 								if _valid then {
 									KH_var_postInitExecutions pushBack [[_arguments, _function, _target, _override], _subfunction];
 									_return;

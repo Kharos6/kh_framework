@@ -20,10 +20,10 @@ class Object
 					control = "KH_AssignIdentificationCard";
 					expression = 
 					"\
-						_value params ['_toggle', '_name', '_gender', '_race', '_dateOfBirth', '_profession', '_nationality', '_cardNumber', '_dateOfIssue', '_dateOfExpiry'];\
+						_value params ['_toggle', '_name', '_gender', '_race', '_dateOfBirth', '_profession', '_ethnos', '_cardNumber', '_dateOfIssue', '_dateOfExpiry'];\
 						if (_toggle && !is3DEN) then {\
 							KH_var_postInitExecutions pushBack [\
-								[_this, _name, _gender, _race, _dateOfBirth, _profession, _nationality, _cardNumber, _dateOfIssue, _dateOfExpiry],\
+								[_this, _name, _gender, _race, _dateOfBirth, _profession, _ethnos, _cardNumber, _dateOfIssue, _dateOfExpiry],\
 								{\
 									_this call KH_fnc_assignIdentificationCard;\
 								}\

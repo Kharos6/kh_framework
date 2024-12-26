@@ -7,6 +7,7 @@ class CfgFunctions
 		{
 			file = "\x\kh\addons\main\functions";
 			class addEventHandler {};
+			class addRemoteInteractionEntry {};
 			class addSelfInteractionEntry {};
 			class arma {};
 			class arraySum {};
@@ -70,6 +71,7 @@ class CfgFunctions
 			class moduleTeleport {};
 			class moduleVehicleSequence {};
 			class openIdentificationCard {};
+			class openRemoteInteractionMenu {};
 			class openSelfInteractionMenu {};
 			class openTerminal {};
 			class orbitObject {};

@@ -16,7 +16,7 @@ isNil {
 
 			private _handler = [
 				["DISPLAY", _displayType],
-				"KeyDown",
+				"KeyUp",
 				[compile (ctrlText (_display displayCtrl 100)), objectParent _logic],
 				{
 					params ["_display", "_key"];
@@ -34,7 +34,7 @@ isNil {
 							"THIS_FRAME"
 						] call KH_fnc_execute;
 
-						_display displayRemoveEventHandler ["KeyDown", _localId];
+						_display displayRemoveEventHandler ["KeyUp", _localId];
 					};
 				}
 			] call KH_fnc_addEventHandler;

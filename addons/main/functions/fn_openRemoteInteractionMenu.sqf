@@ -1,29 +1,31 @@
-private _display = (findDisplay 46) createDisplay "KH_ResourceSelfInteractionMenu";
-KH_var_validSelfInteractionEntries = [];
-KH_var_validSelfInteractionOptions = [];
-private _list = player getVariable ["KH_var_selfInteractionList", []]; 
+params ["_entity"];
+private _display = (findDisplay 46) createDisplay "KH_ResourceRemoteInteractionMenu";
+KH_var_validRemoteInteractionEntries = [];
+KH_var_validRemoteInteractionOptions = [];
+private _list = _entity getVariable ["KH_var_remoteInteractionList", []]; 
 private _count = (count _list) - 1;
 private _i = 0;
 private _mainControl = _display displayCtrl 100;
+(_display displayCtrl 101) ctrlSetText (format ["%1 INTERACTION MENU", name _entity]);
 
 for "_i" from 0 to _count do {
 	(_list select _i) params ["_name", "_condition", "_options"];
 
 	if ([] call _condition) then {
-		KH_var_validSelfInteractionEntries pushBack (_list select _i);
-		KH_var_validSelfInteractionOptions pushBack _options;
+		KH_var_validRemoteInteractionEntries pushBack (_list select _i);
+		KH_var_validRemoteInteractionOptions pushBack _options;
 		_mainControl lbAdd _name;
 	};
 };
 
 [
 	{
-		_args params ["_display"];
+		_args params ["_entity", "_display"];
 
 		if !(isNull _display) then {
 			private _currentEntries = [];
 			private _currentOptions = [];
-			private _list = player getVariable ["KH_var_selfInteractionList", []]; 
+			private _list = _entity getVariable ["KH_var_remoteInteractionList", []]; 
 			private _count = (count _list) - 1;
 			private _i = 0;
 			private _mainControl = _display displayCtrl 100;
@@ -37,9 +39,9 @@ for "_i" from 0 to _count do {
 				};
 			};
 
-			if (_currentEntries isNotEqualTo KH_var_validSelfInteractionEntries) then {
-				KH_var_validSelfInteractionEntries = _currentEntries;
-				KH_var_validSelfInteractionOptions = _currentOptions;
+			if (_currentEntries isNotEqualTo KH_var_validRemoteInteractionEntries) then {
+				KH_var_validRemoteInteractionEntries = _currentEntries;
+				KH_var_validRemoteInteractionOptions = _currentOptions;
 				lbClear _mainControl;
 
 				{
@@ -52,7 +54,7 @@ for "_i" from 0 to _count do {
 		};
 	},
 	0, 
-	[_display]
+	[_entity, _display]
 ] call CBA_fnc_addPerFrameHandler;
 
 [
@@ -64,7 +66,7 @@ for "_i" from 0 to _count do {
 		private _positionX = ((ctrlPosition _mainControl) select 0) + 0.64;
 		private _positionY = (ctrlPosition _mainControl) select 1;
 		private _selection = lbCurSel _mainControl;
-		[_display, _positionX, _positionY, KH_var_validSelfInteractionOptions select _selection] call KH_fnc_contextMenu;
+		[_display, _positionX, _positionY, KH_var_validRemoteInteractionOptions select _selection] call KH_fnc_contextMenu;
 	}
 ] call KH_fnc_addEventHandler;
 
@@ -80,7 +82,7 @@ for "_i" from 0 to _count do {
 			private _positionX = ((ctrlPosition _mainControl) select 0) + 0.64;
 			private _positionY = (ctrlPosition _mainControl) select 1;
 			private _selection = lbCurSel _mainControl;
-			[_display, _positionX, _positionY, KH_var_validSelfInteractionOptions select _selection] call KH_fnc_contextMenu;
+			[_display, _positionX, _positionY, KH_var_validRemoteInteractionOptions select _selection] call KH_fnc_contextMenu;
 		};
 	}
 ] call KH_fnc_addEventHandler;

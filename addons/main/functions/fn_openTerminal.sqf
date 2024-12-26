@@ -103,3 +103,5 @@ player setVariable ["KH_var_dialogActive", true];
 	"SERVER",
 	"THIS_FRAME"
 ] call KH_fnc_execute;
+
+_display;

@@ -352,6 +352,8 @@ if isServer then {
 };
 
 if hasInterface then {
+	KH_var_selfInteractionMenuOpen = false;
+
 	[
 		"KH_eve_executionPlayer", 
 		{
@@ -381,6 +383,29 @@ if hasInterface then {
 							{
 								["KH_eve_playerLoaded", [player, clientOwner]] call CBA_fnc_globalEvent;					
 								missionNamespace setVariable ["KH_var_playerWaiting", false];
+
+								(findDisplay 46) displayAddEventHandler [
+									"KeyDown", 
+									{
+										private _key = _this select 1;
+
+										if ((_key isEqualTo 0xDC) && !dialog && !KH_var_selfInteractionMenuOpen) then {
+											KH_var_selfInteractionMenuOpen = true;
+											private _display = [] call KH_fnc_openSelfInteractionMenu;
+
+											[
+												{
+													params ["_display"];
+													(isNull _display);
+												},
+												{
+													KH_var_selfInteractionMenuOpen = false;
+												}, 
+												[_display]
+											] call CBA_fnc_waitUntilAndExecute;
+										};
+									}
+								];
 							}, 
 							[]
 						] call CBA_fnc_execNextFrame;

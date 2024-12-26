@@ -7,6 +7,7 @@ class CfgFunctions
 		{
 			file = "\x\kh\addons\main\functions";
 			class addEventHandler {};
+			class addSelfInteractionEntry {};
 			class arma {};
 			class arraySum {};
 			class assignIdentificationCard {};
@@ -17,6 +18,7 @@ class CfgFunctions
 			class cameraSequence {};		
 			class closeInterface {};
 			class conditionalPresence {};
+			class contextMenu {};
 			class convertToAgent {};
 			class convertToSimpleObject {};
 			class diagnostics {};
@@ -68,6 +70,7 @@ class CfgFunctions
 			class moduleTeleport {};
 			class moduleVehicleSequence {};
 			class openIdentificationCard {};
+			class openSelfInteractionMenu {};
 			class openTerminal {};
 			class orbitObject {};
 			class removeEventHandler {};

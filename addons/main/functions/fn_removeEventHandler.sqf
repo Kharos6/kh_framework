@@ -21,7 +21,7 @@ if ((count _handler) > 2) then {
 				};
 
 				case (_eventType == "DISPLAY"): {
-					(findDisplay _target) displayRemoveEventHandler [_event, _handlerId];
+					_target displayRemoveEventHandler [_event, _handlerId];
 				};
 
 				case (_eventType == "PUBLIC_VARIABLE"): {

@@ -8,10 +8,10 @@ isNil {
 		{
 			params ["_control"];
 			_args params ["_display", "_logic"];
-			private _displayType = 46;
+			private _displayType = findDisplay 46;
 
 			if ((lbCurSel (_display displayCtrl 101)) == 0) then {
-				_displayType = 312;
+				_displayType = findDisplay 312;
 			};
 
 			private _handler = [

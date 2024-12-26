@@ -64,8 +64,11 @@ for "_i" from 0 to _count do {
 		_args params ["_display", "_mainControl"];
 		private _positionX = ((ctrlPosition _mainControl) select 0) + 0.64;
 		private _positionY = (ctrlPosition _mainControl) select 1;
-		private _selection = lbCurSel _mainControl;
-		[_display, _positionX, _positionY, KH_var_validSelfInteractionOptions select _selection] call KH_fnc_contextMenu;
+
+		if (lbSize _mainControl != 0) then {
+			private _selection = lbCurSel _mainControl;
+			[_display, _positionX, _positionY, KH_var_validSelfInteractionOptions select _selection] call KH_fnc_contextMenu;
+		};
 	}
 ] call KH_fnc_addEventHandler;
 
@@ -80,8 +83,11 @@ for "_i" from 0 to _count do {
 		if ((_key isEqualTo 0xD0) || (_key isEqualTo 0xC8) || (_key isEqualTo 0x1C)) then {
 			private _positionX = ((ctrlPosition _mainControl) select 0) + 0.64;
 			private _positionY = (ctrlPosition _mainControl) select 1;
-			private _selection = lbCurSel _mainControl;
-			[_display, _positionX, _positionY, KH_var_validSelfInteractionOptions select _selection] call KH_fnc_contextMenu;
+
+			if (lbSize _mainControl != 0) then {
+				private _selection = lbCurSel _mainControl;
+				[_display, _positionX, _positionY, KH_var_validSelfInteractionOptions select _selection] call KH_fnc_contextMenu;
+			};
 		};
 	}
 ] call KH_fnc_addEventHandler;

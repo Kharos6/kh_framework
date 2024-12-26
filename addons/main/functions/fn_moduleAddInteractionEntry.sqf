@@ -5,7 +5,15 @@ isNil {
 		private _remote = _logic getVariable ["KH_ModuleAddInteractionEntryRemote", false];
 		private _name = _logic getVariable ["KH_ModuleAddInteractionEntryName", ""];
 		private _condition = compile (_logic getVariable ["KH_ModuleAddInteractionEntryCondition", ""]);
-		private _options = parseSimpleArray (_logic getVariable ["KH_ModuleAddInteractionEntryOptions", "[]"]);
+		private _options = _logic getVariable ["KH_ModuleAddInteractionEntryOptions", "[]"];
+
+		if (("[" in _options) || ("]" in _options)) then {
+			_options = parseSimpleArray _options;
+		}
+		else {
+			_options = missionNamespace getVariable [_options, []];
+		};
+
 		private _parsedOptions = [];
 		
 		{

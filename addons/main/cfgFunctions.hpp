@@ -55,6 +55,7 @@ class CfgFunctions
 			class loadMissionState {};
 			class loadPlayerLoadouts {};
 			class manageHandler {};
+			class moduleAddInteractionEntry {};
 			class moduleAssignParachute {};
 			class moduleBreakDisguise {};
 			class moduleCameraSequence {};

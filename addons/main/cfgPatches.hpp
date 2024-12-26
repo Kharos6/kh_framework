@@ -8,6 +8,7 @@ class CfgPatches
 		{
 			"KH_HelperSquare",
 			"KH_HelperArrow",
+			"KH_ModuleAddInteractionEntry",
 			"KH_ModuleAssignParachute",
 			"KH_ModuleBreakDisguise",
 			"KH_ModuleCameraSequence",

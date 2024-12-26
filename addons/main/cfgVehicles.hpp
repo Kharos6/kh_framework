@@ -30,6 +30,7 @@ class CfgVehicles
 		editorSubcategory = "KH_Invisible";
 		vehicleClass = "KH_Helpers";
 	};
+	#include "\x\kh\addons\main\vehicles\modules\addInteractionEntry.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\assignParachute.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\breakDisguise.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\cameraSequence.hpp"

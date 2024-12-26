@@ -1,4 +1,5 @@
 private _display = (findDisplay 46) createDisplay "KH_ResourceSelfInteractionMenu";
+KH_var_currentInteractionTarget = player;
 KH_var_validSelfInteractionEntries = [];
 KH_var_validSelfInteractionOptions = [];
 private _list = player getVariable ["KH_var_selfInteractionList", []]; 

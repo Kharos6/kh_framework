@@ -1,5 +1,6 @@
 params ["_entity"];
 private _display = (findDisplay 46) createDisplay "KH_ResourceRemoteInteractionMenu";
+KH_var_currentInteractionTarget = _entity;
 KH_var_validRemoteInteractionEntries = [];
 KH_var_validRemoteInteractionOptions = [];
 private _list = _entity getVariable ["KH_var_remoteInteractionList", []]; 
@@ -11,7 +12,7 @@ private _mainControl = _display displayCtrl 100;
 for "_i" from 0 to _count do {
 	(_list select _i) params ["_name", "_condition", "_options"];
 
-	if ([] call _condition) then {
+	if ([_entity] call _condition) then {
 		KH_var_validRemoteInteractionEntries pushBack (_list select _i);
 		KH_var_validRemoteInteractionOptions pushBack _options;
 		_mainControl lbAdd _name;
@@ -33,7 +34,7 @@ for "_i" from 0 to _count do {
 			for "_i" from 0 to _count do {
 				(_list select _i) params ["_name", "_condition", "_options"];
 
-				if ([] call _condition) then {
+				if ([_entity] call _condition) then {
 					_currentEntries pushBack (_list select _i);
 					_currentOptions pushBack _options;
 				};

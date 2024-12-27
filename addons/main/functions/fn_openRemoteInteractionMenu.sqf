@@ -60,37 +60,14 @@ for "_i" from 0 to _count do {
 
 [
 	["CONTROL", _mainControl],
-	"MouseButtonClick",
+	"LBSelChanged",
 	[_display, _mainControl],
 	{
 		_args params ["_display", "_mainControl"];
 		private _positionX = ((ctrlPosition _mainControl) select 0) + 0.64;
 		private _positionY = (ctrlPosition _mainControl) select 1;
-
-		if (lbSize _mainControl != 0) then {
-			private _selection = lbCurSel _mainControl;
-			[_display, _positionX, _positionY, KH_var_validRemoteInteractionOptions select _selection] call KH_fnc_contextMenu;
-		};
-	}
-] call KH_fnc_addEventHandler;
-
-[
-	["CONTROL", _mainControl],
-	"KeyUp",
-	[_display, _mainControl],
-	{
-		_args params ["_display", "_mainControl"];
-		private _key = _this select 1;
-
-		if ((_key isEqualTo 0xD0) || (_key isEqualTo 0xC8) || (_key isEqualTo 0x1C)) then {
-			private _positionX = ((ctrlPosition _mainControl) select 0) + 0.64;
-			private _positionY = (ctrlPosition _mainControl) select 1;
-
-			if (lbSize _mainControl != 0) then {
-				private _selection = lbCurSel _mainControl;
-				[_display, _positionX, _positionY, KH_var_validRemoteInteractionOptions select _selection] call KH_fnc_contextMenu;
-			};
-		};
+		private _selection = lbCurSel _mainControl;
+		[_display, _positionX, _positionY, KH_var_validRemoteInteractionOptions select _selection] call KH_fnc_contextMenu;
 	}
 ] call KH_fnc_addEventHandler;
 

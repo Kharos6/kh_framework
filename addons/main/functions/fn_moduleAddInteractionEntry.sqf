@@ -17,7 +17,7 @@ isNil {
 		private _parsedOptions = [];
 		
 		{
-			_parsedOptions pushBack [_x select 0, [], compile (_x select 1)];
+			_parsedOptions pushBack [_x select 0, compile (_x select 1), [], compile (_x select 2)];
 		} forEach _options;
 
 		[

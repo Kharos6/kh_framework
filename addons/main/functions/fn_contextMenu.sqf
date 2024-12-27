@@ -5,27 +5,33 @@ if !KH_var_contextMenuOpen then {
 	private _controls = [];
 
 	{
-		_x params ["_name", "_arguments", "_function"];
-		private _control = _display ctrlCreate ["RscButton", -1, controlNull];
-		_controls pushBack _control;
+		_x params ["_name", "_condition", "_arguments", "_function"];
 
-		if ((count _controls) > 1) then {
-			_positionY = ((ctrlPosition (_controls select ((_controls find _control) - 1))) select 1) + 0.045;
+		if ([] call _condition) then {
+			private _control = _display ctrlCreate ["RscButton", -1, controlNull];
+			_controls pushBack _control;
+
+			if ((count _controls) > 1) then {
+				_positionY = ((ctrlPosition (_controls select ((_controls find _control) - 1))) select 1) + 0.042;
+			};
+
+			_control ctrlSetPosition [_positionX, _positionY, 0.45, 0.04];
+			_control ctrlSetText _name;
+			_control ctrlCommit 0;
+
+			[
+				["CONTROL", _control],
+				"ButtonClick",
+				[_display, _condition, _arguments, _function],
+				{
+					_args params ["_display", "_condition", "_arguments", "_function"];
+
+					if ([] call _condition) then {
+						_arguments call _function;
+					};
+				}
+			] call KH_fnc_addEventHandler;
 		};
-
-		_control ctrlSetPosition [_positionX, _positionY];
-		_control ctrlSetText _name;
-		_control ctrlCommit 0;
-
-		[
-			["CONTROL", _control],
-			"ButtonClick",
-			[_display, _arguments, _function],
-			{
-				_args params ["_display", "_arguments", "_function"];
-				_arguments call _function;
-			}
-		] call KH_fnc_addEventHandler;
 	} forEach _options;
 
 	[
@@ -46,20 +52,17 @@ if !KH_var_contextMenuOpen then {
 
 	[
 		["DISPLAY", _display],
-		"KeyUp",
+		"KeyDown",
 		[_controls],
 		{
 			_args params ["_controls"];
-			private _key = _this select 1;
-
-			if ((_key isEqualTo 0xD0) || (_key isEqualTo 0xC8)) then {
-				{
-					ctrlDelete _x;
-				} forEach _controls;
-				
-				KH_var_contextMenuOpen = false;
-				_display displayRemoveEventHandler ["KeyUp", _localId];
-			};
+			
+			{
+				ctrlDelete _x;
+			} forEach _controls;
+			
+			KH_var_contextMenuOpen = false;
+			_display displayRemoveEventHandler ["KeyDown", _localId];
 		}
 	] call KH_fnc_addEventHandler;
 

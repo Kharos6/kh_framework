@@ -414,8 +414,9 @@ if hasInterface then {
 									"KeyUp", 
 									{
 										private _key = _this select 1;
+										private _alt = _this select 4;
 
-										if ((_key isEqualTo 0xDC) && !dialog && !KH_var_remoteInteractionMenuOpen && !KH_var_selfInteractionMenuOpen) then {
+										if ((_key isEqualTo 0xDC) && !dialog && !KH_var_remoteInteractionMenuOpen && !_alt && !KH_var_selfInteractionMenuOpen) then {
 											private _object = cursorObject;
 
 											if ((_object distance player) < 4) then {

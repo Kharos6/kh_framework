@@ -43,7 +43,7 @@ class KH_ModuleAddInteractionEntry: Module_F
 		class KH_ModuleAddInteractionEntryOptions: Edit
 		{
 			displayName = "Options";
-			tooltip = "Array of arrays dictating the possible options available for this interaction entry through a context menu, in format: <[_name (STRING), _function (STRING)]>, or a <missionNamespace> variable containing the same. If <Remote> is <true>, variable 'KH_var_currentInteractionTarget' can be used to retrieve the entity being interacted with.";
+			tooltip = "Array of arrays dictating the possible options available for this interaction entry through a context menu, in format: <[_name (STRING), _condition (STRING), _function (STRING)]>, or a <missionNamespace> variable containing the same. If <Remote> is <true>, variable <'KH_var_currentInteractionTarget'> can be used in <_condition> and <_function> to retrieve the entity being interacted with.";
 			property = "KH_ModuleAddInteractionEntryOptions";
 			defaultValue = "[]";
 		};

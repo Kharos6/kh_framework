@@ -392,52 +392,51 @@ if hasInterface then {
 										private _key = _this select 1;
 										private _alt = _this select 4;
 
-										if ((_key isEqualTo 0xDC) && !dialog && !KH_var_selfInteractionMenuOpen && _alt && !KH_var_remoteInteractionMenuOpen) then {
-											KH_var_selfInteractionMenuOpen = true;
-											private _display = [] call KH_fnc_openSelfInteractionMenu;
-
-											[
-												{
-													params ["_display"];
-													(isNull _display);
-												},
-												{
-													KH_var_selfInteractionMenuOpen = false;
-												}, 
-												[_display]
-											] call CBA_fnc_waitUntilAndExecute;
-										};
-									}
-								];
-
-								(findDisplay 46) displayAddEventHandler [
-									"KeyUp", 
-									{
-										private _key = _this select 1;
-										private _alt = _this select 4;
-
-										if ((_key isEqualTo 0xDC) && !dialog && !KH_var_remoteInteractionMenuOpen && !_alt && !KH_var_selfInteractionMenuOpen) then {
-											private _object = cursorObject;
-
-											if ((_object distance player) < 4) then {
-												KH_var_remoteInteractionMenuOpen = true;
-												private _display = [_object] call KH_fnc_openRemoteInteractionMenu;
+										switch true do {
+											case ((_key isEqualTo 0xDC) && !dialog && !KH_var_selfInteractionMenuOpen && _alt && !KH_var_remoteInteractionMenuOpen): {
+												KH_var_selfInteractionMenuOpen = true;
+												private _display = [] call KH_fnc_openSelfInteractionMenu;
 
 												[
 													{
-														params ["_display", "_object"];
-														((isNull _display) || ((_object distance player) > 4));
+														params ["_display"];
+														((isNull _display) || !(alive player) || (player getVariable ["ACE_isUnconscious", false]) || ((lifeState player) == "INCAPACITATED"));
 													},
 													{
 														params ["_display"];
-														KH_var_remoteInteractionMenuOpen = false;
+														KH_var_selfInteractionMenuOpen = false;
 
 														if !(isNull _display) then {
 															_display closeDisplay 2;
 														};
 													}, 
-													[_display, _object]
+													[_display]
 												] call CBA_fnc_waitUntilAndExecute;
+											};
+
+											case ((_key isEqualTo 0xDC) && !dialog && !KH_var_remoteInteractionMenuOpen && !_alt && !KH_var_selfInteractionMenuOpen): {
+												private _object = cursorObject;
+
+												if ((_object distance player) < 4) then {
+													KH_var_remoteInteractionMenuOpen = true;
+													private _display = [_object] call KH_fnc_openRemoteInteractionMenu;
+
+													[
+														{
+															params ["_display", "_object"];
+															((isNull _display) || ((_object distance player) > 4) || !(alive player) || (player getVariable ["ACE_isUnconscious", false]) || ((lifeState player) == "INCAPACITATED"));
+														},
+														{
+															params ["_display"];
+															KH_var_remoteInteractionMenuOpen = false;
+
+															if !(isNull _display) then {
+																_display closeDisplay 2;
+															};
+														}, 
+														[_display, _object]
+													] call CBA_fnc_waitUntilAndExecute;
+												};
 											};
 										};
 									}

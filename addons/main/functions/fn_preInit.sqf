@@ -353,8 +353,7 @@ if isServer then {
 
 if hasInterface then {
 	KH_var_contextMenuOpen = false;
-	KH_var_selfInteractionMenuOpen = false;
-	KH_var_remoteInteractionMenuOpen = false;
+	KH_var_interactionMenuOpen = false;
 
 	[
 		"KH_eve_executionPlayer", 
@@ -393,8 +392,8 @@ if hasInterface then {
 										private _alt = _this select 4;
 
 										switch true do {
-											case ((_key isEqualTo 0xDC) && !dialog && !KH_var_selfInteractionMenuOpen && _alt && !KH_var_remoteInteractionMenuOpen): {
-												KH_var_selfInteractionMenuOpen = true;
+											case ((_key isEqualTo 0xDC) && !dialog && _alt && !KH_var_interactionMenuOpen && (alive player)): {
+												KH_var_interactionMenuOpen = true;
 												private _display = [] call KH_fnc_openSelfInteractionMenu;
 
 												[
@@ -404,7 +403,7 @@ if hasInterface then {
 													},
 													{
 														params ["_display"];
-														KH_var_selfInteractionMenuOpen = false;
+														KH_var_interactionMenuOpen = false;
 
 														if !(isNull _display) then {
 															_display closeDisplay 2;
@@ -414,11 +413,11 @@ if hasInterface then {
 												] call CBA_fnc_waitUntilAndExecute;
 											};
 
-											case ((_key isEqualTo 0xDC) && !dialog && !KH_var_remoteInteractionMenuOpen && !_alt && !KH_var_selfInteractionMenuOpen): {
+											case ((_key isEqualTo 0xDC) && !dialog && !_alt && !KH_var_interactionMenuOpen && (alive player)): {
 												private _object = cursorObject;
 
 												if ((_object distance player) < 4) then {
-													KH_var_remoteInteractionMenuOpen = true;
+													KH_var_interactionMenuOpen = true;
 													private _display = [_object] call KH_fnc_openRemoteInteractionMenu;
 
 													[
@@ -428,7 +427,7 @@ if hasInterface then {
 														},
 														{
 															params ["_display"];
-															KH_var_remoteInteractionMenuOpen = false;
+															KH_var_interactionMenuOpen = false;
 
 															if !(isNull _display) then {
 																_display closeDisplay 2;

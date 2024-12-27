@@ -8,12 +8,13 @@ private _i = 0;
 private _mainControl = _display displayCtrl 100;
 
 for "_i" from 0 to _count do {
-	(_list select _i) params ["_name", "_condition", "_options"];
+	(_list select _i) params ["_name", "_tooltip", "_condition", "_options"];
 
 	if ([] call _condition) then {
 		KH_var_validSelfInteractionEntries pushBack (_list select _i);
 		KH_var_validSelfInteractionOptions pushBack _options;
-		_mainControl lbAdd _name;
+		private _index = _mainControl lbAdd _name;
+		_mainControl lbSetTooltip [_index, _tooltip];
 	};
 };
 
@@ -30,7 +31,7 @@ for "_i" from 0 to _count do {
 			private _mainControl = _display displayCtrl 100;
 
 			for "_i" from 0 to _count do {
-				(_list select _i) params ["_name", "_condition", "_options"];
+				(_list select _i) params ["_name", "_tooltip", "_condition", "_options"];
 
 				if ([] call _condition) then {
 					_currentEntries pushBack (_list select _i);
@@ -44,7 +45,8 @@ for "_i" from 0 to _count do {
 				lbClear _mainControl;
 
 				{
-					_mainControl lbAdd (_x select 0);
+					private _index = _mainControl lbAdd (_x select 0);
+					_mainControl lbSetTooltip [_index, _x select 1];
 				} forEach _currentEntries;
 			};
 		}

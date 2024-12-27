@@ -5,7 +5,7 @@ if !KH_var_contextMenuOpen then {
 	private _controls = [];
 
 	{
-		_x params ["_name", "_condition", "_arguments", "_function"];
+		_x params ["_name", "_tooltip", "_condition", "_arguments", "_function"];
 
 		if ([] call _condition) then {
 			private _control = _display ctrlCreate ["RscButton", -1, controlNull];
@@ -17,6 +17,7 @@ if !KH_var_contextMenuOpen then {
 
 			_control ctrlSetPosition [_positionX, _positionY, 0.45, 0.04];
 			_control ctrlSetText _name;
+			_control ctrlSetTooltip _tooltip;
 			_control ctrlCommit 0;
 
 			[

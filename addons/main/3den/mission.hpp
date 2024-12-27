@@ -301,7 +301,7 @@ class Mission
 							if ((_value != '') && (_value != '[]') && !is3DEN && isServer) then {\
 								private _functions = createHashMapFromArray (parseSimpleArray _value);\
 								{\
-									uiNamespace setVariable [_x, (compile (preprocessFileLineNumbers _y)), true];\
+									missionNamespace setVariable [_x, (compile (preprocessFileLineNumbers _y)), true];\
 								} forEach _functions;\
 							};\
 						";

@@ -2,7 +2,7 @@ isNil {
 	params [["_logic", objNull], ["_units", []], ["_activated", true]];
 
 	if _activated then {
-		private _side = (_logic getVariable ["KH_ModuleDynamicDisguiseEquipmentSide", 0]);
+		private _side = _logic getVariable ["KH_ModuleDynamicDisguiseEquipmentSide", "BLUFOR"];
 		private _uniforms = [];
 		private _vests = [];
 		private _headgear = [];

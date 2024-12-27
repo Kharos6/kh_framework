@@ -8,7 +8,7 @@ isNil {
 					[
 						[
 							_logic getVariable ["KH_ModulePlaySound2DSound", ""], 
-							_logic getVariable ["KH_ModulePlaySound2DAttenuationType", 0], 
+							parseNumber (_logic getVariable ["KH_ModulePlaySound2DAttenuationType", "0"]), 
 							parseNumber (_logic getVariable ["KH_ModulePlaySound2DStartTime", "0"])
 						]
 					],

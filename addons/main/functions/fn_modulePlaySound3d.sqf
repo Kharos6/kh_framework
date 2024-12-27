@@ -11,7 +11,7 @@ isNil {
 							_logic getVariable ["KH_ModulePlaySound3DSound", ""], 
 							parseNumber (_logic getVariable ["KH_ModulePlaySound3DDistance", "0"]),
 							parseNumber (_logic getVariable ["KH_ModulePlaySound3DPitch", "1"]),
-							_logic getVariable ["KH_ModulePlaySound3DAttenuationType", 0],
+							parseNumber (_logic getVariable ["KH_ModulePlaySound3DAttenuationType", "0"]),
 							0,
 							_logic getVariable ["KH_ModulePlaySound3DSimulateSpeed", false]
 						]

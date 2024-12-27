@@ -22,14 +22,61 @@ player setVariable ["KH_var_dialogActive", true];
 ] call CBA_fnc_addPerFrameHandler;
 
 [
+	["DISPLAY", _display],
+	"KeyUp",
+	[_identifierOutput, _function],
+	{
+		private _key = _this select 1;
+
+		if (_key isEqualTo 0x1C) then {
+			_args params ["_identifierOutput", "_function"];
+			private _input = ctrlText 103;
+			private _command = "";
+			private _argument = "";
+
+			if ("-" in _input) then {
+				_command = _input select [0, (_input find "-") - 1];
+				_argument = _input select [(_input find "-") + 1];
+			}
+			else {
+				_command = _input;
+			};
+
+			[
+				[_identifierOutput, _function, _command, _argument],
+				{
+					params ["_identifierOutput", "_function", "_command", "_argument"];
+					private _functionOutput = [_command, _argument, _identifierOutput] call _function;
+
+					if (_functionOutput isEqualType "") then {
+						private _output = [missionNamespace getVariable [_identifierOutput, ""], _functionOutput] joinString "";
+						missionNamespace setVariable [_identifierOutput, _output, true];
+					};
+				},
+				"SERVER",
+				"THIS_FRAME"
+			] call KH_fnc_execute;
+		};
+	}
+] call KH_fnc_addEventHandler;
+
+[
 	["CONTROL", _display displayCtrl 104],
 	"ButtonClick",
 	[_identifierOutput, _function],
 	{
 		_args params ["_identifierOutput", "_function"];
 		private _input = ctrlText 103;
-		private _command = _input select [0, (_input find "-") - 1];
-		private _argument = _input select [(_input find "-") + 1];
+		private _command = "";
+		private _argument = "";
+
+		if ("-" in _input) then {
+			_command = _input select [0, (_input find "-") - 1];
+			_argument = _input select [(_input find "-") + 1];
+		}
+		else {
+			_command = _input;
+		};
 
 		[
 			[_identifierOutput, _function, _command, _argument],

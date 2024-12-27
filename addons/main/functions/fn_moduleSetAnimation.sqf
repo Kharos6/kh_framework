@@ -22,7 +22,7 @@ isNil {
 				false,
 				false,
 				false,
-				_logic getVariable ["KH_ModuleSetAnimationInterruptType", ""],
+				_logic getVariable ["KH_ModuleSetAnimationInterruptType", "NONE"],
 				""
 			] call KH_fnc_setAnimation;
 		} forEach _units;

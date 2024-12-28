@@ -3,7 +3,7 @@ private _display = createDialog ["KH_ResourceTerminal", true];
 ctrlSetText [100, _name];
 ctrlSetText [101, _description];
 ctrlSetText [102, missionNamespace getVariable [_identifierOutput, ctrlText 102]];
-player setVariable ["KH_var_dialogActive", true];
+player setVariable ["KH_var_dialogActive", true, [2, clientOwner]];
 
 [
 	{
@@ -11,7 +11,7 @@ player setVariable ["KH_var_dialogActive", true];
 
 		if !dialog then {
 			[_handle] call CBA_fnc_removePerFrameHandler;
-			player setVariable ["KH_var_dialogActive", false];
+			player setVariable ["KH_var_dialogActive", false, [2, clientOwner]];
 		}
 		else {
 			ctrlSetText [102, missionNamespace getVariable [_identifierOutput, ctrlText 102]];
@@ -117,7 +117,7 @@ player setVariable ["KH_var_dialogActive", true];
 			"THIS_FRAME"
 		] call KH_fnc_execute;
 		
-		player setVariable ["KH_var_dialogActive", false];
+		player setVariable ["KH_var_dialogActive", false, [2, clientOwner]];
 		_control ctrlRemoveEventHandler ["ButtonClick", _localId];
 	}
 ] call KH_fnc_addEventHandler;

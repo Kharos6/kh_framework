@@ -64,6 +64,7 @@ if !KH_var_contextMenuOpen then {
 			
 			KH_var_contextMenuOpen = false;
 			_display displayRemoveEventHandler ["KeyDown", _localId];
+			nil;
 		}
 	] call KH_fnc_addEventHandler;
 

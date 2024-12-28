@@ -93,6 +93,8 @@ for "_i" from 0 to _count do {
 		if (_key isEqualTo 0xDC) then {
 			_display closeDisplay 2;
 		};
+
+		nil;
 	}
 ] call KH_fnc_addEventHandler;
 

@@ -36,6 +36,8 @@ isNil {
 
 						_display displayRemoveEventHandler ["KeyUp", _localId];
 					};
+
+					nil;
 				}
 			] call KH_fnc_addEventHandler;
 

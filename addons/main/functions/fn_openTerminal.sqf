@@ -59,6 +59,8 @@ player setVariable ["KH_var_dialogActive", true, [2, clientOwner]];
 
 			ctrlSetText [103, ""];
 		};
+
+		nil;
 	}
 ] call KH_fnc_addEventHandler;
 

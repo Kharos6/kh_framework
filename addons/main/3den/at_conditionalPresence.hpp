@@ -19,13 +19,13 @@ class KH_ConditionalPresence: Title
 			w = QUOTE(5 * GRID_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
-		class KH_VariableNameTitle: Title
+		class KH_EventNameTitle: Title
 		{
-			text = "Variable Name";
-			tooltip = "Variable to dictate the presence of this entity.";
+			text = "Event Name";
+			tooltip = "Event that dictates the presence of this entity.";
 			y = QUOTE(2 * CTRL_DEFAULT_H + 5 * CTRL_DEFAULT_Y);
 		};
-		class KH_VariableName: ctrlEdit
+		class KH_EventName: ctrlEdit
 		{
 			idc = 101;
 			x = QUOTE(CTRL_DEFAULT_X);

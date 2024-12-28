@@ -7,7 +7,16 @@ private _list = _entity getVariable ["KH_var_remoteInteractionList", []];
 private _count = (count _list) - 1;
 private _i = 0;
 private _mainControl = _display displayCtrl 100;
-(_display displayCtrl 101) ctrlSetText (format ["%1 INTERACTION MENU", name _entity]);
+private _entityName = "";
+
+if (_entity isKindOf "Man") then {
+	_entityName = name _entity;
+}
+else {
+	_entityName = typeOf _entity;
+};
+
+(_display displayCtrl 101) ctrlSetText (format ["%1 INTERACTION MENU", _entityName]);
 
 for "_i" from 0 to _count do {
 	(_list select _i) params ["_name", "_tooltip", "_condition", "_options"];

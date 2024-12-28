@@ -59,7 +59,7 @@ class KH_ResourceTerminal
             idc = 103;
             font = "EtelkaMonospacePro";
             x = QUOTE(RSC_POS_X(6.5));
-            y = QUOTE(RSC_POS_Y(26.15));
+            y = QUOTE(RSC_POS_Y(26.2));
             w = QUOTE(RSC_POS_W(27));
             h = QUOTE(RSC_POS_W(1.5));
             colorBackground[] = {0, 0, 0, 0.9};
@@ -69,7 +69,7 @@ class KH_ResourceTerminal
             idc = 104;
 			text = "EXECUTE";
             x = QUOTE(RSC_POS_X(28.5));
-            y = QUOTE(RSC_POS_Y(27.25));
+            y = QUOTE(RSC_POS_Y(27.3));
             w = QUOTE(RSC_POS_W(5));
             h = QUOTE(RSC_POS_H(1));
         };
@@ -77,7 +77,7 @@ class KH_ResourceTerminal
         {
 			text = "EXIT";
             x = QUOTE(RSC_POS_X(6.5));
-            y = QUOTE(RSC_POS_Y(27.25));
+            y = QUOTE(RSC_POS_Y(27.3));
             w = QUOTE(RSC_POS_W(5));
             h = QUOTE(RSC_POS_H(1));
         };

@@ -56,6 +56,8 @@ player setVariable ["KH_var_dialogActive", true];
 				"SERVER",
 				"THIS_FRAME"
 			] call KH_fnc_execute;
+
+			ctrlSetText [103, ""];
 		};
 	}
 ] call KH_fnc_addEventHandler;
@@ -92,6 +94,8 @@ player setVariable ["KH_var_dialogActive", true];
 			"SERVER",
 			"THIS_FRAME"
 		] call KH_fnc_execute;
+
+		ctrlSetText [103, ""];
 	}
 ] call KH_fnc_addEventHandler;
 

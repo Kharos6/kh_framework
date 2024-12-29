@@ -28,7 +28,7 @@ class KH_ResourceStageExecution
         {
 			idc = 100;
 			font = "EtelkaMonospacePro";
-			tooltip = "Unscheduled code to execute on the server when the <INSERT> key is pressed while in the desired display type.\nPassed arguments available through <_this> are: <[_moduleAttachedObject (OBJECT)]>.\n<'CURATOR'> executes the code while in Curator view. <'UNIT'> executes the code while controlling a unit.";
+			tooltip = "Unscheduled code to execute locally when the <INSERT> key is pressed while in the desired display type.\nPassed arguments available through <_this> are: <[_moduleAttachedObject (OBJECT)]>.\n<'CURATOR'> executes the code while in Curator view. <'UNIT'> executes the code while controlling a unit.";
             x = QUOTE(RSC_POS_X(6.5));
             y = QUOTE(RSC_POS_Y(6));
             w = QUOTE(RSC_POS_W(27));
@@ -54,14 +54,14 @@ class KH_ResourceStageExecution
         class KH_ButtonOK: RscButtonMenuOK 
         {
             x = QUOTE(RSC_POS_X(28.5));
-            y = QUOTE(RSC_POS_Y(27.25));
+            y = QUOTE(RSC_POS_Y(27.35));
             w = QUOTE(RSC_POS_W(5));
             h = QUOTE(RSC_POS_H(1));
         };
         class KH_ButtonCancel: RscButtonMenuCancel 
         {
             x = QUOTE(RSC_POS_X(6.5));
-            y = QUOTE(RSC_POS_Y(27.25));
+            y = QUOTE(RSC_POS_Y(27.35));
             w = QUOTE(RSC_POS_W(5));
             h = QUOTE(RSC_POS_H(1));
         };

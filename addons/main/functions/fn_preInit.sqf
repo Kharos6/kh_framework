@@ -125,10 +125,11 @@ if isServer then {
 				[[], KH_fnc_playerJipLoadInit, _machineId, "THIS_FRAME"] call KH_fnc_execute;
 			}
 			else {
-				KH_var_allPlayerUnits pushBackUnique _unit;
-				publicVariable "KH_var_allPlayerUnits";
 				[[], KH_fnc_playerLoadInit, _machineId, "THIS_FRAME"] call KH_fnc_execute;
 			};
+
+			KH_var_allPlayerUnits pushBackUnique _unit;
+			publicVariable "KH_var_allPlayerUnits";
 		}
 	] call CBA_fnc_addEventHandler;
 

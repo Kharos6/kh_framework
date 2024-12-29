@@ -23,17 +23,7 @@ isNil {
 
 					if (_key isEqualTo 0xD2) then {
 						_args params ["_function", "_entity"];
-
-						[
-							[_function, _entity],
-							{
-								params ["_function", "_entity"];
-								[_entity] call _function;
-							},
-							"SERVER",
-							"THIS_FRAME"
-						] call KH_fnc_execute;
-
+						[_entity] call _function;
 						_display displayRemoveEventHandler ["KeyUp", _localId];
 					};
 

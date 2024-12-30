@@ -30,8 +30,12 @@ if isServer then {
 	publicVariable "KH_var_allCuratorMachines";
 	KH_var_allHeadlessMachines = [];
 	publicVariable "KH_var_allHeadlessMachines";
+	KH_var_allHeadlessIdMachines = createHashMap;
+	publicVariable "KH_var_allHeadlessIdMachines";
 	KH_var_allPlayerMachines = [];
 	publicVariable "KH_var_allPlayerMachines";
+	KH_var_allPlayerIdMachines = createHashMap;
+	publicVariable "KH_var_allPlayerIdMachines";
 	KH_var_allPlayerUidMachines = createHashMap;
 	publicVariable "KH_var_allPlayerUidMachines";
 	KH_var_allPlayerUnits = [];
@@ -80,6 +84,8 @@ if isServer then {
 					_uid = _x getUserInfo 2;
 					KH_var_allPlayerUidMachines insert [[_uid, _machineId]];
 					publicVariable "KH_var_allPlayerUidMachines";
+					KH_var_allPlayerIdMachines insert [[_x getUserInfo 0, _machineId]];
+					publicVariable "KH_var_allPlayerIdMachines";
 					break;
 				};
 			} forEach allUsers;
@@ -110,6 +116,15 @@ if isServer then {
 			publicVariable "KH_var_allMachines";
 			KH_var_allHeadlessMachines pushBackUnique _machineId;
 			publicVariable "KH_var_allHeadlessMachines";
+
+			{
+				if ((_x getUserInfo 1) == _machineId) then {
+					KH_var_allHeadlessIdMachines insert [[_x getUserInfo 0, _machineId]];
+					publicVariable "KH_var_allHeadlessIdMachines";
+					break;
+				};
+			} forEach allUsers;
+
 			[[], KH_fnc_headlessLoadInit, _machineId, "THIS_FRAME"] call KH_fnc_execute;
 		}
 	] call CBA_fnc_addEventHandler;
@@ -281,9 +296,7 @@ if isServer then {
 	addMissionEventHandler [
 		"HandleDisconnect", 
 		{
-			private _unit = _this select 0;
-			private _uid = _this select 2;
-			private _name = _this select 3;
+			params ["_unit", "_id", "_uid", "_name"];
 			private _machineId = KH_var_allPlayerUidMachines get _uid;
 
 			if !(isNil "_machineId") then {
@@ -322,28 +335,53 @@ if isServer then {
 					publicVariable "KH_var_allCuratorMachines";	
 				};
 
-				if (_machineId in KH_var_allHeadlessMachines) then {
-					KH_var_allHeadlessMachines deleteAt (KH_var_allHeadlessMachines find _machineId); 
-					publicVariable "KH_var_allHeadlessMachines";
-				}
-				else {
-					if (_machineId in KH_var_allPlayerMachines) then {
-						KH_var_allPlayerMachines deleteAt (KH_var_allPlayerMachines find _machineId);
-						publicVariable "KH_var_allPlayerMachines";
+				if (_machineId in KH_var_allPlayerMachines) then {
+					KH_var_allPlayerMachines deleteAt (KH_var_allPlayerMachines find _machineId);
+					publicVariable "KH_var_allPlayerMachines";
+				};
 
-						{
-							if (_y == _machineId) then {
-								KH_var_allPlayerUidMachines deleteAt _x;
-								publicVariable "KH_var_allPlayerUidMachines";
-								break;
-							};
-						} forEach KH_var_allPlayerUidMachines;
+				if (_machineId in KH_var_jipPlayerMachines) then {
+					KH_var_jipPlayerMachines deleteAt (KH_var_jipPlayerMachines find _machineId);
+					publicVariable "KH_var_jipPlayerMachines";
+				};
+
+				{
+					if (_y == _machineId) then {
+						KH_var_allPlayerUidMachines deleteAt _x;
+						publicVariable "KH_var_allPlayerUidMachines";
+						break;
+					};
+				} forEach KH_var_allPlayerUidMachines;
+
+				{
+					if (_y == _machineId) then {
+						KH_var_allPlayerIdMachines deleteAt _x;
+						publicVariable "KH_var_allPlayerIdMachines";
+						break;
+					};
+				} forEach KH_var_allPlayerIdMachines;
+			}
+			else {
+				private _machineId = KH_var_allHeadlessIdMachines get _id;
+
+				if !(isNil "_machineId") then {
+					if (_machineId in KH_var_allMachines) then {
+						KH_var_allMachines deleteAt (KH_var_allMachines find _machineId);
+						publicVariable "KH_var_allMachines";	
 					};
 
-					if (_machineId in KH_var_jipPlayerMachines) then {
-						KH_var_jipPlayerMachines deleteAt (KH_var_jipPlayerMachines find _machineId);
-						publicVariable "KH_var_jipPlayerMachines";
+					if (_machineId in KH_var_allHeadlessMachines) then {
+						KH_var_allHeadlessMachines deleteAt (KH_var_allHeadlessMachines find _machineId); 
+						publicVariable "KH_var_allHeadlessMachines";
 					};
+
+					{
+						if (_y == _machineId) then {
+							KH_var_allHeadlessIdMachines deleteAt _x;
+							publicVariable "KH_var_allHeadlessIdMachines";
+							break;
+						};
+					} forEach KH_var_allHeadlessIdMachines;
 				};
 			};
 

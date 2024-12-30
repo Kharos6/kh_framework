@@ -132,7 +132,7 @@ class Mission
 					class KH_PlayerPreloadInit
 					{
 						displayName = "Player: Preload Init";
-						tooltip = "Unscheduled code to execute locally to each player that is present before the mission starts. The local player unit is not yet available. Other players may not yet be present, and their units are not yet available, so remote execution will only reliably work if <KH_fnc_execute> is used with <'JIP'>. Passed arguments available through <_this> are: <[_uid (STRING)]>.";
+						tooltip = "Unscheduled code to execute locally to each player that is present before the mission starts. The local player unit is not yet available. This stage will not trigger for players that join while the mission is considered to be in progress, which is after the <Players Loaded Init> stage. Other players may not yet be present, and their units are not yet available, so remote execution will only reliably work if <KH_fnc_execute> is used with <'JIP'>. Passed arguments available through <_this> are: <[_uid (STRING)]>.";
 						property = "KH_PlayerPreloadInit";
 						control = "EditMulti5";
 						expression = 
@@ -149,7 +149,7 @@ class Mission
 					class KH_PlayerLoadInit
 					{
 						displayName = "Player: Load Init";
-						tooltip = "Unscheduled code to execute locally to each player that is present during the mission start, once their local player unit is available. This is the ideal stage to execute code that requires the local player unit. Other players are present, but their units may not yet be available. Remote execution with <KH_fnc_execute> at this stage may be used with <'JIP'> with <_unitRequired> set to <true> to ensure proper execution on other player units.";
+						tooltip = "Unscheduled code to execute locally to each player that is present during the mission start, once their local player unit is available. This stage will not trigger for players that join while the mission is considered to be in progress, which is after the <Players Loaded Init> stage. This is the ideal stage to execute code that requires the local player unit. Other players are present, but their units may not yet be available. Remote execution with <KH_fnc_execute> at this stage may be used with <'JIP'> with <_unitRequired> set to <true> to ensure proper execution on other player units.";
 						property = "KH_PlayerLoadInit";
 						control = "EditMulti5";
 						expression = 
@@ -234,7 +234,7 @@ class Mission
 					class KH_PlayerJIPPreloadInit
 					{
 						displayName = "Player: JIP Preload Init";
-						tooltip = "Unscheduled code to execute locally to each player that joins while the mission is considered to be in progress, which is after the <Players Initialized Init> stage. The local player unit is not yet available. Passed arguments available through <_this> are: <[_uid (STRING)]>.";
+						tooltip = "Unscheduled code to execute locally to each player that joins while the mission is considered to be in progress, which is after the <Players Loaded Init> stage. The local player unit is not yet available. Passed arguments available through <_this> are: <[_uid (STRING)]>.";
 						property = "KH_PlayerJIPPreloadInit";
 						control = "EditMulti5";
 						expression = 
@@ -251,7 +251,7 @@ class Mission
 					class KH_PlayerJIPLoadInit
 					{
 						displayName = "Player: JIP Load Init";
-						tooltip = "Unscheduled code to execute locally to each player that joins while the mission is considered to be in progress, which is after the <Players Initialized Init> stage, once their local player unit is available.";
+						tooltip = "Unscheduled code to execute locally to each player that joins while the mission is considered to be in progress, which is after the <Players Loaded Init> stage, once their local player unit is available. This is the ideal stage to execute code that requires the local player unit.";
 						property = "KH_PlayerJIPLoadInit";
 						control = "EditMulti5";
 						expression = 

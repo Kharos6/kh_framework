@@ -146,7 +146,7 @@ isNil {
 		[
 			[], 
 			{
-				systemChat "KH FRAMEWORK - MISSION INITIALIZED";
+				systemChat "KH FRAMEWORK - MISSION LOADED";
 			}, 
 			"GLOBAL",
 			"THIS_FRAME"
@@ -195,7 +195,7 @@ isNil {
 											[
 												[], 
 												{
-													systemChat "KH FRAMEWORK - PLAYERS INITIALIZED";
+													systemChat "KH FRAMEWORK - PLAYERS LOADED";
 												}, 
 												"GLOBAL",
 												"THIS_FRAME"

@@ -8,6 +8,7 @@ KH_var_missionSuspended = _state;
 publicVariable "KH_var_missionSuspended";
 
 if _state then {
+	KH_var_preSuspendTimeMultiplier = timeMultiplier;
 	private _curators = [];
 
 	{
@@ -44,7 +45,11 @@ else {
 		_x enableSimulationGlobal true;
 	} forEach (KH_var_allEntities - _curators);
 
-	setTimeMultiplier 1;
+	if (isNil "KH_var_preSuspendTimeMultiplier") then {
+		KH_var_preSuspendTimeMultiplier = timeMultiplier;
+	};
+
+	setTimeMultiplier KH_var_preSuspendTimeMultiplier;
 
 	[
 		[_curators],

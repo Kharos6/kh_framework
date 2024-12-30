@@ -14,7 +14,7 @@ if (_duration != -1) then {
 	private _attachObject = KH_var_logicGroup createUnit ["Logic", [0, 0, 0], [], 0, "CAN_COLLIDE"];
 	[_attachObject, [_position, "ATL", false], [_rotation, false]] call KH_fnc_setTransforms;
 
-	if ((isPlayer _unit) || (isPlayer _target)) then {
+	if (isPlayer _unit) then {
 		if (_interruptType == "GROUP") then {
 			_interruptType = "UNIT";
 		};

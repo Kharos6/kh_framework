@@ -608,6 +608,8 @@ class Object
 					expression = 
 					"\
 						if ((_value != '') && (_value != '[]') && !is3DEN) then {\
+							private _array = parseSimpleArray _value;\
+							_this setVariable ['KH_var_assignedEntityArrayBuilderArrays', _array];\
 							{\
 								private _originalValueArray = missionNamespace getVariable [_x, []];\
 								_originalValueArray pushBack _this;\
@@ -615,7 +617,7 @@ class Object
 								private _originalArrayArray = missionNamespace getVariable ['KH_var_entityArrayBuilderArrays', []];\
 								_originalArrayArray pushBackUnique _x;\
 								missionNamespace setVariable ['KH_var_entityArrayBuilderArrays', _originalArrayArray];\
-							} forEach (parseSimpleArray _value);\
+							} forEach _array;\
 						};\
 					";
 					defaultValue = "'[]'";

@@ -290,6 +290,54 @@ class Mission
 				collapsed = 1;
 				class Attributes
 				{
+					class KH_PersistentPlayerSynchronizer
+					{
+						displayName = "Persistent Player Synchronizer";
+						tooltip = "A hash map of entries where the key is a string of the variable name of an entity, and the value is either an array of strings of variable names of players, or a string of the name of a <missionNamespace> variable that is an array containing the players, which are to be synchronized to the key entity. Ideal for making sure modules are synchronized to respawning or JIP players, as well as initial players at the start of the mission. This value can also be the name of a hash map stored in <missionNamespace> containing the same elements. For example: <[['module1', ['player1', 'player2', 'player3']], ['module1', 'players123']]>.";
+						property = "KH_PersistentPlayerSynchronizer";
+						control = "EditMulti5";
+						expression = 
+						"\
+							if ((_value != '') && (_value != '[]') && !is3DEN && isServer) then {\
+								KH_var_postInitExecutions pushBack [\
+									[_value],\
+									{\
+										params ['_value'];\
+										{\
+											[\
+												'CBA',\
+												_x,\
+												[_value],\
+												{\
+													params ['_unit'];\
+													_args params ['_value'];\
+													[\
+														{\
+															params ['_unit', '_value'];\
+															{\
+																if (_y isEqualType []) then {\
+																	private _parsedEntities = [];\
+																	{\
+																		_parsedEntities pushBack (missionNamespace getVariable [_x, objNull]);\
+																	} forEach _y;\
+																	(missionNamespace getVariable [_x, objNull]) synchronizeObjectsAdd _parsedEntities;\
+																}\
+																else {\
+																	(missionNamespace getVariable [_x, objNull]) synchronizeObjectsAdd (missionNamespace getVariable [_y, []]);\
+																};\
+															} forEach (createHashMapFromArray (parseSimpleArray _value));\
+														},\
+														[_unit, _value]\
+													] call CBA_fnc_execNextFrame;\
+												}\
+											] call KH_fnc_addEventHandler;\
+										} forEach ['KH_eve_playerLoaded', 'KH_eve_playerRespawned'];\
+									}\
+								];\
+							};\
+						";
+						defaultValue = "'[]'";
+					};
 					class KH_PublicFunctions
 					{
 						displayName = "Public Functions";

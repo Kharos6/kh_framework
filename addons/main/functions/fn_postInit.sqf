@@ -22,6 +22,25 @@ isNil {
 					} forEach KH_var_entityArrayBuilderArrays;
 				}
 			];
+
+			[
+				"KH_eve_playerLoaded", 
+				{
+					params ["_player"];
+					private _arrayBuilderArray = _player getVariable ["KH_var_assignedEntityArrayBuilderArrays", []];
+
+					if (_arrayBuilderArray isNotEqualTo []) then {
+						{
+							private _entityArray = missionNamespace getVariable [_x, []];
+
+							if !(_player in _entityArray) then {
+								_entityArray pushBackUnique _player;
+								missionNamespace setVariable [_x, _entityArray, true];
+							};
+						} forEach _arrayBuilderArray;
+					};
+				}
+			] call CBA_fnc_addEventHandler;
 		};
 
 		if (KH_var_groupArrayBuilderArrays isNotEqualTo []) then {

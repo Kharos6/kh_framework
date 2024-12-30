@@ -396,6 +396,9 @@ class Mission
 										else {\
 											if !KH_var_playersLoaded then {\
 												[[_positions, _targets, _fovs, _commitTimes, _durations, _visionTypes, _cinematicBorders, _disableUserInput], 'KH_fnc_cameraSequence', _unit, 'THIS_FRAME'] call KH_fnc_execute;\
+											}\
+											else {\
+												[_eventName, _localId] call CBA_fnc_removeEventHandler;\
 											};\
 										};\
 									}\

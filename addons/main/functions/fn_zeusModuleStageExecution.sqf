@@ -16,7 +16,7 @@ isNil {
 
 			private _handler = [
 				["DISPLAY", _displayType],
-				"KeyUp",
+				"KeyDown",
 				[compile (ctrlText (_display displayCtrl 100)), objectParent _logic],
 				{
 					params ["_display", "_key"];
@@ -24,7 +24,7 @@ isNil {
 					if (_key isEqualTo 0xD2) then {
 						_args params ["_function", "_entity"];
 						[_entity] call _function;
-						_display displayRemoveEventHandler ["KeyUp", _localId];
+						_display displayRemoveEventHandler ["KeyDown", _localId];
 					};
 
 					nil;

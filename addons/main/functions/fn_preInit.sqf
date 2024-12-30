@@ -387,7 +387,7 @@ if hasInterface then {
 								missionNamespace setVariable ["KH_var_playerWaiting", false];
 
 								(findDisplay 46) displayAddEventHandler [
-									"KeyUp", 
+									"KeyDown", 
 									{
 										private _key = _this select 1;
 										private _alt = _this select 4;
@@ -415,7 +415,14 @@ if hasInterface then {
 											};
 
 											case ((_key isEqualTo 0xDC) && !dialog && !_alt && !KH_var_interactionMenuOpen && (alive player)): {
-												private _object = cursorObject;
+												private _object = objNull;
+
+												if !(isNull cursorObject) then {
+													_object = cursorObject;
+												}
+												else {
+													_object = cursorTarget;
+												};
 
 												if ((_object distance player) < 4) then {
 													KH_var_interactionMenuOpen = true;

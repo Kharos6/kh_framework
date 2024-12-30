@@ -84,7 +84,7 @@ for "_i" from 0 to _count do {
 
 [
 	["DISPLAY", _display],
-	"KeyUp",
+	"KeyDown",
 	[_display],
 	{
 		_args params ["_display"];

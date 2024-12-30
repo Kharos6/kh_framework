@@ -23,7 +23,7 @@ player setVariable ["KH_var_dialogActive", true, [2, clientOwner]];
 
 [
 	["DISPLAY", _display],
-	"KeyUp",
+	"KeyDown",
 	[_identifierOutput, _function],
 	{
 		private _key = _this select 1;

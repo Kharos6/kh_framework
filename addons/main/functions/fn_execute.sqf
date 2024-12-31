@@ -3,7 +3,7 @@ private "_return";
 isNil {
 	_return = (
 		[_x] apply {
-			params ["_arguments", "_function", ["_target", "LOCAL"], ["_environment", "THIS_FRAME"]];
+			params ["_arguments", "_function", ["_target", "SERVER"], ["_environment", "THIS_FRAME"]];
 
 			private _subfunction = {
 				params ["_arguments", "_function", "_target", ["_override", ""]];

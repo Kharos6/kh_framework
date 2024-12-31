@@ -64,6 +64,14 @@ isNil {
 								true;
 							};
 
+							case (_target == "PLAYER_UNITS"): {
+								{
+									["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
+								} forEach KH_var_allPlayerUnits;
+
+								true;
+							};
+
 							case (_target == "HEADLESS"): {
 								["KH_eve_executionHeadless", [_arguments, _function]] call CBA_fnc_globalEvent;
 								true;
@@ -91,15 +99,28 @@ isNil {
 								};
 							};
 
-							case ((parseNumber (_target select [0, 1])) != 0): {
-								private _player = KH_var_allPlayerUidMachines get _target;
+							case (((parseNumber (_target select [0, 1])) != 0) && ([_target] call {params ["_target"]; private _condition = true; {if ((name _x) == _target) then {_condition = false; break;};} forEach KH_var_allPlayerUnits; _condition;})): {
+								if ((count _target) == 17) then {
+									private _player = KH_var_allPlayerUidMachines get _target;
 
-								if !(isNil _player) then {
-									["KH_eve_executionGlobal", [_arguments, _function], _player] call CBA_fnc_ownerEvent;
-									true;
+									if !(isNil "_player") then {
+										["KH_eve_executionGlobal", [_arguments, _function], _player] call CBA_fnc_ownerEvent;
+										true;
+									}
+									else {
+										false;
+									};
 								}
 								else {
-									false;
+									private _player = KH_var_allPlayerIdMachines get _target;
+
+									if !(isNil "_player") then {
+										["KH_eve_executionGlobal", [_arguments, _function], _player] call CBA_fnc_ownerEvent;
+										true;
+									}
+									else {
+										false;
+									};
 								};
 							};
 
@@ -121,7 +142,7 @@ isNil {
 										_unitPresent = true;
 										break;
 									};
-								} forEach ([["ALL"], true] call KH_fnc_getClients);
+								} forEach KH_var_allPlayerUnits;
 								
 								_unitPresent;
 							};
@@ -184,6 +205,12 @@ isNil {
 														["KH_eve_executionPlayer", [_arguments, _function]] call CBA_fnc_globalEvent;
 													};
 
+													case (_x == "PLAYER_UNITS"): {
+														{
+															["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
+														} forEach KH_var_allPlayerUnits;
+													};
+
 													case (_x == "HEADLESS"): {
 														["KH_eve_executionHeadless", [_arguments, _function]] call CBA_fnc_globalEvent;
 													};
@@ -207,14 +234,26 @@ isNil {
 														};
 													};
 
-													case ((parseNumber (_x select [0, 1])) != 0): {
-														private _player = KH_var_allPlayerUidMachines get _x;
+													case (((parseNumber (_x select [0, 1])) != 0) && ([_x] call {params ["_target"]; private _condition = true; {if ((name _x) == _target) then {_condition = false; break;};} forEach KH_var_allPlayerUnits; _condition;})): {
+														if ((count _target) == 17) then {
+															private _player = KH_var_allPlayerUidMachines get _x;
 
-														if !(isNil _player) then {
-															["KH_eve_executionGlobal", [_arguments, _function], _player] call CBA_fnc_ownerEvent;
+															if !(isNil "_player") then {
+																["KH_eve_executionGlobal", [_arguments, _function], _player] call CBA_fnc_ownerEvent;
+															}
+															else {
+																_failures pushBack _x;
+															};
 														}
 														else {
-															_failures pushBack _x;
+															private _player = KH_var_allPlayerIdMachines get _x;
+
+															if !(isNil "_player") then {
+																["KH_eve_executionGlobal", [_arguments, _function], _player] call CBA_fnc_ownerEvent;
+															}
+															else {
+																_failures pushBack _x;
+															};
 														};
 													};
 
@@ -237,7 +276,7 @@ isNil {
 																_unitPresent = true;
 																break;
 															};
-														} forEach ([["ALL"], true] call KH_fnc_getClients);
+														} forEach KH_var_allPlayerUnits;
 														
 														if !_unitPresent then {
 															_failures pushBack _x;
@@ -269,6 +308,26 @@ isNil {
 											true;
 										};
 
+										case (_exclusiveType == "PLAYER_UNITS"): {
+											{
+												["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
+											} forEach (KH_var_allPlayerUnits - [player]);
+
+											true;
+										};
+
+										case (_target == "CURATORS"): {
+											{
+												private _curatorUnit = getAssignedCuratorUnit _x;
+
+												if !(isNull _curatorUnit) then {
+													["KH_eve_executionGlobal", [_arguments, _function], _curatorUnit] call CBA_fnc_targetEvent;
+												};
+											} forEach (allCurators - ([getAssignedCuratorLogic player]));
+
+											true;
+										};
+
 										case (_exclusiveType == "HEADLESS"): {
 											["KH_eve_executionHeadless", [_arguments, _function]] call CBA_fnc_remoteEvent;
 											true;
@@ -285,7 +344,17 @@ isNil {
 
 									if (_group isEqualType grpNull) then {
 										if !(isNull _group) then {
-											["KH_eve_executionGlobal", [_arguments, _function], leader _group] call CBA_fnc_targetEvent;
+											[
+												"KH_eve_executionGlobal", 
+												[
+													[_arguments, _function, _group],
+													{
+														params ["_arguments", "_function", "_group"];
+														["KH_eve_executionGlobal", [_arguments, _function], groupOwner _group] call CBA_fnc_ownerEvent;
+													}
+												]
+											] call CBA_fnc_serverEvent;
+
 											true;
 										}
 										else {
@@ -297,15 +366,40 @@ isNil {
 									};
 								};
 
+								case (_type == "PLAYER_VARIABLE"): {
+									private _variable = _target select 1;
+									private _expectedValue = _target select 2;
+									private _failures = [];
+									
+									{
+										if !(isNil {_x getVariable _variable}) then {
+											if ((_x getVariable _variable) isEqualTo _expectedValue) then {
+												["KH_eve_executionGlobal", [_arguments, _function], _x] call CBA_fnc_targetEvent;
+											}
+											else {
+												_failures pushBack _x;
+											};
+										}
+										else {
+											_failures pushBack _x;
+										};
+									} forEach KH_var_allPlayerUnits;
+
+									_failures;
+								};
+
 								case (_type == "JIP"): {
 									private _exclusiveType = _target select 1;
 									private _dependency = _target select 2;
 									private _unitRequired = _target select 3;
 									private _remote = _target select 4;
-									private _id = format ["KH_var_%1", [0, 36, "ALPHANUMERIC"] call KH_fnc_generateSymbols];
+									private _id = "";
 
 									if (_override != "") then {
 										_id = _override;
+									}
+									else {
+										_id = format ["KH_var_%1", [0, 36, "ALPHANUMERIC"] call KH_fnc_generateSymbols];
 									};
 
 									[
@@ -376,7 +470,7 @@ isNil {
 															}
 															else {
 																{
-																	["KH_eve_executionGlobal", [_arguments, _function], _x] call CBA_fnc_targetEvent;
+																	["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
 																} forEach KH_var_allPlayerUnits;
 															};
 														}
@@ -384,15 +478,28 @@ isNil {
 															if !_unitRequired then {
 																{
 																	["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_ownerEvent;
-																} forEach KH_var_allPlayerMachines;
+																} forEach (KH_var_allPlayerMachines - [_originalOwner]);
 															}
 															else {
 																{
 																	if ((owner _x) != _originalOwner) then {
-																		["KH_eve_executionGlobal", [_arguments, _function], _x] call CBA_fnc_targetEvent;
+																		["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
 																	};
 																} forEach KH_var_allPlayerUnits;
 															};
+														};
+													};
+
+													case (_exclusiveType == "HEADLESS"): {
+														if !_remote then {
+															{
+																["KH_eve_executionHeadless", [_arguments, _function], _x] call CBA_fnc_ownerEvent;
+															} forEach KH_var_allHeadlessMachines;
+														}
+														else {
+															{
+																["KH_eve_executionHeadless", [_arguments, _function], _x] call CBA_fnc_ownerEvent;
+															} forEach (KH_var_allHeadlessMachines - [_originalOwner]);
 														};
 													};
 												};
@@ -400,19 +507,33 @@ isNil {
 												private _joinType = [];
 												
 												if _unitRequired then {
-													if (_exclusiveType == "GLOBAL") then {
-														_joinType = ["KH_eve_playerLoaded", "KH_eve_headlessPreloaded"];
-													}
-													else {
-														_joinType = ["KH_eve_playerLoaded"];
+													switch true do {
+														case ((_exclusiveType == "GLOBAL") || (_exclusiveType == "JIP_GLOBAL")): {
+															_joinType = ["KH_eve_playerLoaded", "KH_eve_headlessPreloaded"];
+														};
+
+														case ((_exclusiveType == "PLAYERS") || (_exclusiveType == "JIP_PLAYERS")): {
+															_joinType = ["KH_eve_playerLoaded"];
+														};
+
+														case ((_exclusiveType == "HEADLESS") || (_exclusiveType == "JIP_HEADLESS")): {
+															_joinType = ["KH_eve_headlessPreloaded"];
+														};
 													};
 												}
 												else {
-													if (_exclusiveType == "GLOBAL") then {
-														_joinType = ["KH_eve_playerPreloadedInitial", "KH_eve_headlessPreloaded"];
-													}
-													else {
-														_joinType = ["KH_eve_playerPreloadedInitial"];
+													switch true do {
+														case ((_exclusiveType == "GLOBAL") || (_exclusiveType == "JIP_GLOBAL")): {
+															_joinType = ["KH_eve_playerPreloadedInitial", "KH_eve_headlessPreloaded"];
+														};
+
+														case ((_exclusiveType == "PLAYERS") || (_exclusiveType == "JIP_PLAYERS")): {
+															_joinType = ["KH_eve_playerPreloadedInitial"];
+														};
+
+														case ((_exclusiveType == "HEADLESS") || (_exclusiveType == "JIP_HEADLESS")): {
+															_joinType = ["KH_eve_headlessPreloaded"];
+														};
 													};
 												};
 												
@@ -660,35 +781,43 @@ isNil {
 												};
 											};
 
-											case ((parseNumber (_callbackTarget select [0, 1])) != 0): {
-												private _player = KH_var_allPlayerUidMachines get _callbackTarget;
+											case (((parseNumber (_callbackTarget select [0, 1])) != 0) && ([_callbackTarget] call {params ["_target"]; private _condition = true; {if ((name _x) == _target) then {_condition = false; break;};} forEach KH_var_allPlayerUnits; _condition;})): {
+												if ((count _target) == 17) then {
+													private _player = KH_var_allPlayerUidMachines get _callbackTarget;
 
-												if !(isNil "_player") then {
-													["KH_eve_executionGlobal", [[_callbackArguments, _callbackFunction, _id, clientOwner], _callbackSendFunction], _player] call CBA_fnc_ownerEvent;
-													true;
+													if !(isNil "_player") then {
+														["KH_eve_executionGlobal", [[_callbackArguments, _callbackFunction, _id, clientOwner], _callbackSendFunction], _player] call CBA_fnc_ownerEvent;
+														true;
+													}
+													else {
+														false;
+													};
 												}
 												else {
-													false;
+													private _player = KH_var_allPlayerIdMachines get _callbackTarget;
+
+													if !(isNil "_player") then {
+														["KH_eve_executionGlobal", [[_callbackArguments, _callbackFunction, _id, clientOwner], _callbackSendFunction], _player] call CBA_fnc_ownerEvent;
+														true;
+													}
+													else {
+														false;
+													};
 												};
 											};
 
 											default {
-												private _unit = objNull;
+												private _unitPresent = false;
 
 												{
 													if ((name _x) == _callbackTarget) then {
-														_unit = _x;
+														["KH_eve_executionGlobal", [[_callbackArguments, _callbackFunction, _id, clientOwner], _callbackSendFunction], _x] call CBA_fnc_targetEvent;
+														_unitPresent = true;
 														break;
 													};
-												} forEach ([["ALL"], true] call KH_fnc_getClients);
+												} forEach KH_var_allPlayerUnits;
 												
-												if !(isNull _unit) then {
-													["KH_eve_executionGlobal", [[_callbackArguments, _callbackFunction, _id, clientOwner], _callbackSendFunction], _unit] call CBA_fnc_targetEvent;
-													true;
-												}
-												else {
-													false;
-												};
+												_unitPresent;
 											};
 										};
 
@@ -726,10 +855,13 @@ isNil {
 											private _sendoffArguments = _target select 2;
 											private _sendoffFunction = _target select 3;
 											private _jip = _target select 4;
-											private _id = format ["KH_var_%1", [0, 36, "ALPHANUMERIC"] call KH_fnc_generateSymbols];
+											private _id = "";
 
 											if (_override != "") then {
 												_id = _override;
+											}
+											else {
+												_id = format ["KH_var_%1", [0, 36, "ALPHANUMERIC"] call KH_fnc_generateSymbols];
 											};
 
 											["KH_eve_executionGlobal", [_arguments, _function], _targetObject] call CBA_fnc_targetEvent;
@@ -902,6 +1034,10 @@ isNil {
 									if (_type isEqualType "") then {
 										switch true do {
 											case (_type == "TARGETS"): {
+												_return = [];
+											};
+
+											case (_type == "PLAYER_VARIABLE"): {
 												_return = [];
 											};
 

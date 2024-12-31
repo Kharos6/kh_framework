@@ -2,6 +2,7 @@ params ["_type", "_event", "_arguments", "_function"];
 private _handlerArguments = [missionNamespace, "KH_var_eventHandlerArguments", _arguments, false] call KH_fnc_atomicVariable;
 private _handlerId = [missionNamespace, "KH_var_eventHandlerId", -1, false] call KH_fnc_atomicVariable;
 private _persistentId = "";
+private _persistentEntityId = "";
 private _handler = -1;
 private _eventType = "";
 
@@ -30,35 +31,50 @@ switch true do {
 		}
 		else {
 			_persistentId = format ["KH_var_%1", [0, 36, "ALPHANUMERIC"] call KH_fnc_generateSymbols];
-			private _entity = _type select 1;
+			_persistentEntityId = format ["KH_var_%1", [0, 36, "ALPHANUMERIC"] call KH_fnc_generateSymbols];
+			_persistentEntity = format ["KH_var_%1", [0, 36, "ALPHANUMERIC"] call KH_fnc_generateSymbols];
+
+			[
+				[_persistentEntity],
+				{
+					params ["_persistentEntity"];
+					missionNamespace setVariable [_persistentEntity, _this select 1, true];
+				},
+				"SERVER",
+				"THIS_FRAME"
+			] call KH_fnc_execute;
 
 			_handler = [
-				[_type, _event, _arguments, _function, _persistentId], 
+				[_type, _event, _arguments, _function, _persistentId, _persistentEntityId, _persistentEntity], 
 				{
-					params ["_type", "_event", "_arguments", "_function", "_persistentId"];
-					private _newType = [_type select 0, _type select 1, false];
-					private _entity = _type select 1;
-					private _persistentEntity = [missionNamespace, "KH_var_persistentEventHandlerEntity", _entity, false] call KH_fnc_atomicVariable;
-					_entity setVariable [_persistentId, true];
-					
+					params ["_type", "_event", "_arguments", "_function", "_persistentId", "_persistentEntityId", "_persistentEntity"];
+					missionNamespace setVariable [_persistentEntityId, true];
+					_type set [2, false];
+
 					private _newFunction = compile ([
-						"if (((missionNamespace getVariable '", _persistentEntity, "') getVariable ['", _persistentId, "', true])) then {
+						"if (missionNamespace getVariable ['", _persistentEntityId, "', true]) then {
 							call ", _function, ";
 						}
-						else { 
-							(missionNamespace getVariable '", _persistentEntity, "') removeEventHandler [_thisEvent, _thisEventHandler];
+						else {
+							(missionNamespace getVariable ['", _persistentEntity, "', objNull]) removeEventHandler [_thisEvent, _thisEventHandler];
 						};"
 					] joinString "");
 
-					[_newType, _event, _arguments, _newFunction] call KH_fnc_addEventHandler;
+					private _eventId = [_type, _event, _arguments, _newFunction] call KH_fnc_addEventHandler;
+					missionNamespace setVariable [_persistentId, _eventId];
 				},
 				[
 					"PERSISTENT", 
-					_entity, 
-					[_entity, _persistentId], 
+					_type select 1, 
+					[_persistentId, _persistentEntityId], 
 					{
-						params ["_entity", "_persistentId"];
-						_entity setVariable [_persistentId, false];
+						params ["_persistentId", "_persistentEntityId"];
+						private _eventId = missionNamespace getVariable [_persistentId, []];
+						missionNamespace setVariable [_persistentEntityId, false];
+
+						if (_eventId isNotEqualTo []) then {
+							[_eventId] call KH_fnc_removeEventHandler;
+						};
 					}, 
 					true
 				],
@@ -120,5 +136,5 @@ if (_persistentId == "") then {
 	[_type, _event, _handler, clientOwner];
 }
 else {
-	[_handler, _type select 1, _persistentId];
+	[_handler, _persistentEntityId];
 };

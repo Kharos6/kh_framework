@@ -17,6 +17,7 @@ Tool package designed to facilitate the creation of missions and addons. Contain
 
 - While the large majority of the functionality exposed in the form of Eden attributes has been thoroughly tested, there is still a chance that some bugs flew under the radar. Reporting these issues is greatly appreciated.
 - Due to multiplayer being the primary focus of this mod, testing missions in multiplayer mode is ideal, as singleplayer will misbehave in some circumstances. This may be changed in the future to allow for singleplayer mission creation, but is not a priority right now.
+- Updates will be pushed based on volume or necessity. If major issues are found, an update will be pushed out to fix those issues as soon as possible. Otherwise, updates will be pushed out only when enough additions have been made to the mod to warrant an update.
 
 <h1 align="center">
   DISCLAIMER

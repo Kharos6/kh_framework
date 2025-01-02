@@ -442,7 +442,7 @@ isNil {
 															}
 															else {
 																{
-																	((owner _x) != _originalOwner) then {
+																	if ((owner _x) != _originalOwner) then {
 																		["KH_eve_executionGlobal", [_arguments, _function], _x] call CBA_fnc_targetEvent;
 																	};
 																} forEach KH_var_allPlayerUnits;

@@ -51,7 +51,7 @@ class KH_ModuleEndMission: Module_F
 		{
 			displayName = "Next Mission";
 			tooltip = "An array containing the string of the server password, if any, and the string of the name of the next mission, in format <[_password (STRING), _nextMission (STRING)]>. Can be an empty array in case of no subsequent mission. If this value is empty, or an empty array, it will be ignored. If this value is used, all other values are ignored, and the next mission will start immediately after <Delay> seconds.";
-			property = "KH_ModuleEndMissionDelay";
+			property = "KH_ModuleEndMissionNextMission";
 			defaultValue = "'[]'";
 		};
 		class ModuleDescription: ModuleDescription {};

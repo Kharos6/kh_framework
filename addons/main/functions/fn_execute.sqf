@@ -952,7 +952,7 @@ isNil {
 													private _player = KH_var_allPlayerUidMachines get _callbackTarget;
 
 													if !(isNil "_player") then {
-														["KH_eve_executionPlayer", [_arguments, _function], _player] call CBA_fnc_ownerEvent;
+														["KH_eve_executionPlayer", [[_callbackArguments, _callbackFunction, _id, clientOwner], _callbackSendFunction], _player] call CBA_fnc_ownerEvent;
 														true;
 													}
 													else {
@@ -963,14 +963,14 @@ isNil {
 													private _player = KH_var_allPlayerIdMachines get _callbackTarget;
 
 													if !(isNil "_player") then {
-														["KH_eve_executionPlayer", [_arguments, _function], _player] call CBA_fnc_ownerEvent;
+														["KH_eve_executionPlayer", [[_callbackArguments, _callbackFunction, _id, clientOwner], _callbackSendFunction], _player] call CBA_fnc_ownerEvent;
 														true;
 													}
 													else {
 														private _client = KH_var_allHeadlessIdMachines get _callbackTarget;
 
 														if !(isNil "_client") then {
-															["KH_eve_executionHeadless", [_arguments, _function], _client] call CBA_fnc_ownerEvent;
+															["KH_eve_executionHeadless", [[_callbackArguments, _callbackFunction, _id, clientOwner], _callbackSendFunction], _client] call CBA_fnc_ownerEvent;
 															true;
 														}
 														else {

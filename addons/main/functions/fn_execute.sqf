@@ -3,7 +3,7 @@ private "_return";
 isNil {
 	_return = (
 		[_x] apply {
-			params ["_arguments", "_function", ["_target", "SERVER"], ["_environment", "THIS_FRAME"]];
+			params ["_arguments", "_function", ["_target", "GLOBAL"], ["_environment", "THIS_FRAME"]];
 
 			private _subfunction = {
 				params ["_arguments", "_function", "_target", ["_override", ""]];
@@ -377,19 +377,6 @@ isNil {
 														};
 													};
 
-													case (_targetType == "PLAYER_VARIABLE"): {
-														private _variable = _currentTarget select 1;
-														private _expectedValue = _currentTarget select 2;
-														
-														{
-															if !(isNil {_x getVariable _variable}) then {
-																if ((_x getVariable _variable) isEqualTo _expectedValue) then {
-																	["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
-																};
-															};
-														} forEach KH_var_allPlayerUnits;
-													};
-
 													case (_targetType == "PLAYER_ROLE"): {
 														private _role = _currentTarget select 1;
 														private _expectedRole = _currentTarget select 2;
@@ -403,7 +390,7 @@ isNil {
 
 													case (_targetType == "AREA_PLAYERS"): {
 														private _area = _currentTarget select 1;
-														private _invert = _currentTarget select 2;
+														private _invert = _currentTarget param [2, false];
 														
 														{
 															if _invert then {
@@ -506,21 +493,6 @@ isNil {
 									};
 								};
 
-								case (_type == "PLAYER_VARIABLE"): {
-									private _variable = _target select 1;
-									private _expectedValue = _target select 2;
-									
-									{
-										if !(isNil {_x getVariable _variable}) then {
-											if ((_x getVariable _variable) isEqualTo _expectedValue) then {
-												["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
-											};
-										};
-									} forEach KH_var_allPlayerUnits;
-
-									true;
-								};
-
 								case (_type == "PLAYER_ROLE"): {
 									private _role = _target select 1;
 									private _expectedRole = _target select 2;
@@ -536,7 +508,7 @@ isNil {
 
 								case (_type == "AREA_PLAYERS"): {
 									private _area = _target select 1;
-									private _invert = _target select 2;
+									private _invert = _target param [2, false];
 									
 									{
 										if _invert then {
@@ -892,8 +864,8 @@ isNil {
 
 								case (_type == "CALLBACK"): {
 									private _callbackTarget = _target select 1;
-									private _callbackArguments = _target param [2, []];
-									private _callbackFunction = _target param [3, {}];
+									private _callbackArguments = _target select 2;
+									private _callbackFunction = _target select 3;
 									private _id = format ["KH_eve_%1", [0, 36, "ALPHANUMERIC"] call KH_fnc_generateSymbols];
 
 									[
@@ -902,7 +874,7 @@ isNil {
 										[_arguments, _function],
 										{
 											_args params ["_arguments", "_function"];
-											private _argsCallback = [missionNamespace, "KH_var_eventHandlerArguments", _this, false] call KH_fnc_atomicVariable;
+											private _argsCallback = [missionNamespace, "KH_var_callbackHandlerArguments", _this, false] call KH_fnc_atomicVariable;
 
 											if (_function isEqualType "") then {
 												_function = (missionNamespace getVariable [_function, {}]);

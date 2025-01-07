@@ -1,6 +1,6 @@
 class KH_Dynamic3DAudio: Title
 {
-	attributeLoad = "[_this controlsGroupCtrl 104, _this controlsGroupCtrl 105, '%'] call BIS_fnc_initSliderValue; [_this controlsGroupCtrl 104, _this controlsGroupCtrl 105, '%', _value select 4] call BIS_fnc_initSliderValue; [_this, _value] call KH_fnc_loadControlAttributes;";
+	attributeLoad = "[_this controlsGroupCtrl 105, _this controlsGroupCtrl 106, '%'] call BIS_fnc_initSliderValue; [_this controlsGroupCtrl 105, _this controlsGroupCtrl 106, '%', _value select 5] call BIS_fnc_initSliderValue; [_this, _value] call KH_fnc_loadControlAttributes;";
 	attributeSave = "[_this] call KH_fnc_saveControlAttributes;";
 	h = QUOTE(8 * CTRL_DEFAULT_H + 70 * pixelH);
 	class Controls: Controls
@@ -61,17 +61,31 @@ class KH_Dynamic3DAudio: Title
 			w = QUOTE(CTRL_DEFAULT_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
-		class KH_ChanceTitle: Title
+		class KH_RandomDelayTitle: Title
 		{
-			text = "Chance";
-			tooltip = "Chance that the audio will play at each interval.";
+			text = "Random Delay";
+			tooltip = "An amount of seconds, from <0> to desired amount, that will be picked at random, which will determine a delay after which the sound will play on each interval. Set to <0> for no delay.";
 			y = QUOTE(7 * CTRL_DEFAULT_H + 20 * CTRL_DEFAULT_Y);
 		};
-		class KH_Chance: ctrlXSliderH
+		class KH_RandomDelay: ctrlEdit
 		{
 			idc = 104;
 			x = QUOTE(CTRL_DEFAULT_X);
 			y = QUOTE(7 * CTRL_DEFAULT_H + 20 * CTRL_DEFAULT_Y);
+			w = QUOTE(CTRL_DEFAULT_W);
+			h = QUOTE(CTRL_DEFAULT_H);
+		};
+		class KH_ChanceTitle: Title
+		{
+			text = "Chance";
+			tooltip = "Chance that the audio will play at each interval.";
+			y = QUOTE(8 * CTRL_DEFAULT_H + 25 * CTRL_DEFAULT_Y);
+		};
+		class KH_Chance: ctrlXSliderH
+		{
+			idc = 105;
+			x = QUOTE(CTRL_DEFAULT_X);
+			y = QUOTE(8 * CTRL_DEFAULT_H + 25 * CTRL_DEFAULT_Y);
 			w = QUOTE(CTRL_DEFAULT_W * 0.85);
 			h = QUOTE(CTRL_DEFAULT_H);
         	sliderRange[] = {0, 1};
@@ -80,9 +94,9 @@ class KH_Dynamic3DAudio: Title
 		};
 		class KH_ChanceEdit: ctrlEdit
 		{
-			idc = 105;
+			idc = 106;
 			x = QUOTE(CTRL_DEFAULT_X * 2.455);
-			y = QUOTE(7 * CTRL_DEFAULT_H + 20 * CTRL_DEFAULT_Y);
+			y = QUOTE(8 * CTRL_DEFAULT_H + 25 * CTRL_DEFAULT_Y);
 			w = QUOTE(CTRL_DEFAULT_W * 0.15);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};

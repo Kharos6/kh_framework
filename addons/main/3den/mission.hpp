@@ -825,7 +825,18 @@ class Mission
 						"\
 							_value params ['_toggle', '_ambientLife', '_ambientSounds', '_windCoefficient'];\
 							if (_toggle && !is3DEN) then {\
-								enableEnvironment [_ambientLife, _ambientSounds, _windCoefficient];\
+								KH_var_postInitExecutions pushBack [\
+									[_ambientLife, _ambientSounds, _windCoefficient],\
+									{\
+										[\
+											{\
+												enableEnvironment _this;\
+											},\
+											_this,\
+											1\
+										] call CBA_fnc_waitAndExecute;\
+									}\
+								];\
 							};\
 						";
 						defaultValue = "[false, true, true, 1, '100%']";

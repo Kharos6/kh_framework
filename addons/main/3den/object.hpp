@@ -145,12 +145,12 @@ class Object
 					control = "KH_Dynamic3DAudio";
 					expression = 
 					"\
-						_value params ['_toggle', '_audio', '_condition', '_interval', '_chance'];\
+						_value params ['_toggle', '_audio', '_condition', '_interval', '_randomDelay', '_chance'];\
 						if (_toggle && !is3DEN) then {\
-							[[_this], parseSimpleArray _audio, compile _condition, parseNumber _interval, _chance] call KH_fnc_dynamic3dAudio;\
+							[[_this], parseSimpleArray _audio, compile _condition, parseNumber _interval, parseNumber _randomDelay, _chance] call KH_fnc_dynamic3dAudio;\
 						};\
 					";
-					defaultValue = "[false, '[]', '', '', 1, '100%']";
+					defaultValue = "[false, '[]', '', '', '', 1, '100%']";
 				};
 			};
 		};

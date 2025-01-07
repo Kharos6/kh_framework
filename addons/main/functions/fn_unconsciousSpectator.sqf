@@ -11,6 +11,7 @@ publicVariable "KH_var_unconsciousSpectatorFreeCamera";
 KH_var_unconsciousSpectatorPlayerCamera = _playerCamera;
 publicVariable "KH_var_unconsciousSpectatorPlayerCamera";
 KH_var_unconsciousSpectatorPlayerDelay = _delay;
+publicVariable "KH_var_unconsciousSpectatorPlayerDelay";
 
 if _state then {
 	KH_var_unconsciousSpectatorState = true;

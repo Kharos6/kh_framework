@@ -22,4 +22,4 @@ for "_i" from 0 to _count do {
 	_idcOffset = _idcOffset + 1;
 };
 
-true;
+_display;

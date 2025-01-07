@@ -49,6 +49,7 @@ class CfgVehicles
 	#include "\x\kh\addons\main\vehicles\modules\zeusArma.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\zeusBreakDisguise.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\zeusClearStagedExecutions.hpp"
+	#include "\x\kh\addons\main\vehicles\modules\zeusEndMission.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\zeusRagdollUnit.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\zeusStageExecution.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\zeusSuspendMission.hpp"

@@ -22,7 +22,7 @@ class KH_ModuleEndMission: Module_F
 		class KH_ModuleEndMissionEndName: Edit
 		{
 			displayName = "End Name";
-			tooltip = "End name from <configFile >> 'CfgDebriefing'>";
+			tooltip = "End name from <configFile >> 'CfgDebriefing'>.";
 			property = "KH_ModuleEndMissionEndName";
 			defaultValue = "''";
 		};

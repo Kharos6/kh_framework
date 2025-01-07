@@ -107,6 +107,7 @@ class CfgFunctions
 			class zeusModuleArma {};
 			class zeusModuleBreakDisguise {};
 			class zeusModuleClearStagedExecutions {};
+			class zeusModuleEndMission {};
 			class zeusModuleRagdollUnit {};
 			class zeusModuleStageExecution {};
 			class zeusModuleSuspendMission {};

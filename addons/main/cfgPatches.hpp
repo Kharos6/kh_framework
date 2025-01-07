@@ -27,6 +27,7 @@ class CfgPatches
 			"KH_ZeusModuleArma",
 			"KH_ZeusModuleBreakDisguise",
 			"KH_ZeusModuleClearStagedExecutions",
+			"KH_ZeusModuleEndMission",
 			"KH_ZeusModuleRagdollUnit",
 			"KH_ZeusModuleStageExecution",
 			"KH_ZeusModuleSuspendMission"

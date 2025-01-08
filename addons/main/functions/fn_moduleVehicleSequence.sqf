@@ -10,7 +10,7 @@ isNil {
 				missionNamespace getVariable [_logic getVariable ["KH_ModuleVehicleSequenceEndPosition", ""], objNull]
 			],
 			"KH_fnc_vehicleSequence",
-			["TARGETS", _units],
+			["TARGETS", _units, false, false],
 			"THIS_FRAME"
 		] call KH_fnc_execute;
 	};

@@ -43,16 +43,16 @@ class KH_ResourceEndMission
             h = QUOTE(RSC_POS_W(1.25));
             colorBackground[] = {0, 0, 0, 1};
         };
-        class KH_IsVictoryTitle: RscText
+        class KH_VictoryTitle: RscText
         {
-			text = "Is Victory";
+			text = "Victory";
             tooltip = "<true> considers the end a victory.";
             x = QUOTE(RSC_POS_X(6.5));
             y = QUOTE(RSC_POS_Y(7));
             w = QUOTE(RSC_POS_W(6));
             h = QUOTE(RSC_POS_W(1.25));
         };
-        class KH_IsVictory: ctrlCheckbox
+        class KH_Victory: ctrlCheckbox
         {
 			idc = 101;
             x = QUOTE(RSC_POS_X(11.5));

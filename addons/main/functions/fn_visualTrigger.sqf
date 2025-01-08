@@ -5,7 +5,6 @@ private _firstTrigger = [missionNamespace, "KH_var_visualTriggerFirst", false, f
 private _conditionVariable = [missionNamespace, "KH_var_visualTriggerCondition", false, false] call KH_fnc_atomicVariable;
 private _playerVariable = [missionNamespace, "KH_var_visualTriggerPlayerPrevious", false, false] call KH_fnc_atomicVariable;
 private _entityVariable = [missionNamespace, "KH_var_visualTriggerEntityPrevious", false, false] call KH_fnc_atomicVariable;
-missionNamespace setVariable [_id, "ACTIVE", true];
 	
 [
 	[_entity, _distance, _conditionPlayer, _interval, _id, _event], 

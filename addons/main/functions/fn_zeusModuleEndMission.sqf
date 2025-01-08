@@ -8,17 +8,9 @@ isNil {
 		{
 			params ["_control"];
 			_args params ["_display", "_logic"];
-			private _fadeType = 1;
-			
-			if ("true" in (ctrlText (_display displayCtrl 102))) then {
-				_fadeType = true;
-			}
-			else {
-				_fadeType = parseNumber (ctrlText (_display displayCtrl 102));
-			};
 
 			[
-				[ctrlText (_display displayCtrl 100), ctrlChecked (_display displayCtrl 101), _fadeType, parseNumber (ctrlText (_display displayCtrl 103)), parseSimpleArray (ctrlText (_display displayCtrl 104))],
+				[ctrlText (_display displayCtrl 100), ctrlChecked (_display displayCtrl 101), parseNumber (ctrlText (_display displayCtrl 102)), parseNumber (ctrlText (_display displayCtrl 103)), parseSimpleArray (ctrlText (_display displayCtrl 104))],
 				"KH_fnc_endMission",
 				"SERVER",
 				"THIS_FRAME"

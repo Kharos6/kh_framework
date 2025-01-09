@@ -1,10 +1,9 @@
-params ["_entities", "_trigger"];
-private _triggerList = list _trigger;
+params ["_entities", "_area"];
 private _entitiesPresent = [];
 private _entitiesAbsent = [];
 
 {
-	if (_x in _triggerList) then {
+	if (_x inArea _area) then {
 		_entitiesPresent pushBack _x;
 	}
 	else {

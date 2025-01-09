@@ -39,12 +39,12 @@ class CfgFunctions
 			class getClients {};
 			class getDestinationTime {};
 			class getDestinationVelocity {};
+			class getEntityAreaPresence {};
 			class getGroupAttributes {};
 			class getNearestSurface {};
 			class getPosition {};
 			class getRotation {};
 			class getTransforms {};
-			class getTriggerPresence {};
 			class getUnitAttributes {};
 			class getUnits {};
 			class getVariableName {};

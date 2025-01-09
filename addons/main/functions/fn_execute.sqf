@@ -104,7 +104,7 @@ isNil {
 					};
 
 					case (_target isEqualType sideUnknown): {
-						["KH_eve_executionGlobal", [_arguments, _function], [[_target], true] call KH_fnc_getClients] call CBA_fnc_targetEvent;
+						["KH_eve_executionPlayer", [_arguments, _function], [[_target], true] call KH_fnc_getClients] call CBA_fnc_targetEvent;
 						true;
 					};
 
@@ -149,7 +149,7 @@ isNil {
 								true;
 							};
 
-							case (_target == "CURATOR_PLAYERS"): {
+							case (_target == "CURATORS"): {
 								{
 									private _curatorUnit = getAssignedCuratorUnit _x;
 
@@ -246,11 +246,21 @@ isNil {
 						switch true do {
 							case (_type == "GROUP_PLAYERS"): {
 								private _group = _target select 1;
+								private _invert = _target param [2, false];
 
 								if !(isNull _group) then {
 									{
-										["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
-									} forEach ([[_group], true] call KH_fnc_getClients);
+										if !_invert then {
+											if ((group _x) == _group) then {
+												["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
+											};
+										}
+										else {
+											if ((group _x) != _group) then {
+												["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
+											};
+										};
+									} forEach KH_var_allPlayerUnits;
 
 									true;
 								}
@@ -261,10 +271,18 @@ isNil {
 
 							case (_type == "PLAYER_ROLE"): {
 								private _role = _target select 1;
+								private _invert = _target param [2, false];
 								
 								{
-									if ((roleDescription _x) == _role) then {
-										["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
+									if !_invert then {
+										if ((roleDescription _x) == _role) then {
+											["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
+										};
+									}
+									else {
+										if ((roleDescription _x) != _role) then {
+											["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
+										};
 									};
 								} forEach KH_var_allPlayerUnits;
 
@@ -295,8 +313,6 @@ isNil {
 								private _conditionArguments = _target select 1;
 								private _conditionFunction = _target select 2;
 								private _exclusiveType = _target param [3, "GLOBAL"];
-								private _backupArguments = _target param [4, []];
-								private _backupFunction = _target param [5, {}];
 								private _eventType = "";
 
 								switch true do {
@@ -331,16 +347,9 @@ isNil {
 											if (_conditionFunction isEqualType "") then {
 												_conditionFunction = missionNamespace getVariable [_conditionFunction, {}];
 											};
-
-											if (_backupFunction isEqualType "") then {
-												_backupFunction = missionNamespace getVariable [_backupFunction, {}];
-											};
 											
 											if (_conditionArguments call _conditionFunction) then {
 												_arguments call _function;
-											}
-											else {
-												_backupArguments call _backupFunction;
 											};
 										}
 									]
@@ -369,7 +378,7 @@ isNil {
 												} forEach (KH_var_allPlayerUnits - [player]);
 											};
 
-											case (_target == "CURATOR_PLAYERS"): {
+											case (_exclusiveType == "CURATORS"): {
 												{
 													private _curatorUnit = getAssignedCuratorUnit _x;
 
@@ -393,11 +402,21 @@ isNil {
 										switch true do {
 											case (_targetType == "GROUP_PLAYERS"): {
 												private _group = _exclusiveType select 1;
+												private _invert = _exclusiveType param [2, false];
 
 												if !(isNull _group) then {
 													{
-														["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
-													} forEach (([[_group], true] call KH_fnc_getClients) - [player]);
+														if !_invert then {
+															if ((group _x) == _group) then {
+																["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
+															};
+														}
+														else {
+															if ((group _x) != _group) then {
+																["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
+															};
+														};
+													} forEach (KH_var_allPlayerUnits - [player]);
 
 													true;
 												}
@@ -406,19 +425,27 @@ isNil {
 												};
 											};
 
-											case (_type == "PLAYER_ROLE"): {
-												private _role = _target select 1;
+											case (_targetType == "PLAYER_ROLE"): {
+												private _role = _exclusiveType select 1;
+												private _invert = _exclusiveType param [2, false];
 												
 												{
-													if ((roleDescription _x) == _role) then {
-														["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
+													if !_invert then {
+														if ((roleDescription _x) == _role) then {
+															["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
+														};
+													}
+													else {
+														if ((roleDescription _x) != _role) then {
+															["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
+														};
 													};
 												} forEach (KH_var_allPlayerUnits - [player]);
 
 												true;
 											};
 
-											case (_type == "AREA_PLAYERS"): {
+											case (_targetType == "AREA_PLAYERS"): {
 												private _area = _exclusiveType select 1;
 												private _invert = _exclusiveType param [2, false];
 												
@@ -438,12 +465,10 @@ isNil {
 												true;
 											};
 
-											case (_type == "CLIENT_CONDITION"): {
-												private _conditionArguments = _target select 1;
-												private _conditionFunction = _target select 2;
-												private _exclusiveType = _target param [3, "GLOBAL"];
-												private _backupArguments = _target param [4, []];
-												private _backupFunction = _target param [5, {}];
+											case (_targetType == "CLIENT_CONDITION"): {
+												private _conditionArguments = _exclusiveType select 1;
+												private _conditionFunction = _exclusiveType select 2;
+												private _exclusiveType = _exclusiveType param [3, "GLOBAL"];
 												private _eventType = "";
 
 												switch true do {
@@ -478,16 +503,9 @@ isNil {
 															if (_conditionFunction isEqualType "") then {
 																_conditionFunction = missionNamespace getVariable [_conditionFunction, {}];
 															};
-
-															if (_backupFunction isEqualType "") then {
-																_backupFunction = missionNamespace getVariable [_backupFunction, {}];
-															};
 															
 															if (_conditionArguments call _conditionFunction) then {
 																_arguments call _function;
-															}
-															else {
-																_backupArguments call _backupFunction;
 															};
 														}
 													]
@@ -604,7 +622,7 @@ isNil {
 																} forEach KH_var_allHeadlessMachines;
 															};
 
-															case (_x == "CURATOR_PLAYERS"): {
+															case (_x == "CURATORS"): {
 																{
 																	private _curatorUnit = getAssignedCuratorUnit _x;
 
@@ -690,28 +708,46 @@ isNil {
 														switch true do {
 															case (_targetType == "GROUP_PLAYERS"): {
 																private _group = _currentTarget select 1;
+																private _invert = _currentTarget param [2, false];
 															
-																if (_group isEqualType grpNull) then {
-																	if !(isNull _group) then {
-																		{
-																			if !((owner _x) in _exclusiveList) then {
-																				["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
-																				_exclusiveList pushBack (owner _x);
+																if !(isNull _group) then {
+																	{
+																		if !((owner _x) in _exclusiveList) then {
+																			if !_invert then {
+																				if ((group _x) == _group) then {
+																					["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
+																				};
+																			}
+																			else {
+																				if ((group _x) != _group) then {
+																					["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
+																				};
 																			};
-																		} forEach ([[_group], true] call KH_fnc_getClients);
-																	};
+
+																			_exclusiveList pushBack (owner _x);
+																		};
+																	} forEach KH_var_allPlayerUnits;
 																};
 															};
 
 															case (_targetType == "PLAYER_ROLE"): {
 																private _role = _currentTarget select 1;
+																private _invert = _currentTarget param [2, false];
 																
 																{
 																	if !((owner _x) in _exclusiveList) then {
-																		if ((roleDescription _x) == _role) then {
-																			["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
-																			_exclusiveList pushBack (owner _x);
+																		if !_invert then {
+																			if ((roleDescription _x) == _role) then {
+																				["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
+																			};
+																		}
+																		else {
+																			if ((roleDescription _x) != _role) then {
+																				["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
+																			};
 																		};
+
+																		_exclusiveList pushBack (owner _x);
 																	};
 																} forEach KH_var_allPlayerUnits;
 															};

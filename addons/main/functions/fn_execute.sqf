@@ -1512,6 +1512,10 @@ isNil {
 										if (_idState != "TERMINATE") then {
 											switch true do {
 												case (_idState == "ACTIVE"): {
+													if (_conditionFunction isEqualType "") then {
+														_conditionFunction = missionNamespace getVariable [_conditionFunction, {}];
+													};
+													
 													if (_conditionArguments call _conditionFunction) then {
 														[_arguments, _function, _target, _override] call _subfunction;
 													}
@@ -1562,6 +1566,10 @@ isNil {
 										if (_idState != "TERMINATE") then {
 											switch true do {
 												case (_idState == "ACTIVE"): {
+													if (_conditionFunction isEqualType "") then {
+														_conditionFunction = missionNamespace getVariable [_conditionFunction, {}];
+													};
+
 													if (_conditionArguments call _conditionFunction) then {
 														[_arguments, _function, _target, _override] call _subfunction;
 													}
@@ -1613,6 +1621,11 @@ isNil {
 											case (_idState == "ACTIVE"): {
 												private _conditionArguments = _this select 3;
 												private _conditionFunction = _this select 4;
+
+												if (_conditionFunction isEqualType "") then {
+													_conditionFunction = missionNamespace getVariable [_conditionFunction, {}];
+												};
+
 												_conditionArguments call _conditionFunction;
 											};
 
@@ -1689,7 +1702,10 @@ isNil {
 												case (_idState == "ACTIVE"): {
 													_args params ["_arguments", "_function", "_target", "_conditionArguments", "_conditionFunction", "_timeoutOnConditionFailure", "_timeoutArguments", "_timeoutFunction", "_subfunction", "_override"];
 													
-													systemChat format ["%1, %2", _conditionArguments, _conditionFunction];
+													if (_conditionFunction isEqualType "") then {
+														_conditionFunction = missionNamespace getVariable [_conditionFunction, {}];
+													};
+													
 													if (_conditionArguments call _conditionFunction) then {
 														[_arguments, _function, _target, _override] call _subfunction;
 													}
@@ -1715,7 +1731,7 @@ isNil {
 								if (_timeout != 0) then {
 									[
 										{
-											params ["_timeoutArguments", "_timeoutFunction", "_subfunction", "_override", "_handler", "_id"];
+											params ["_target", "_timeoutArguments", "_timeoutFunction", "_subfunction", "_override", "_handler", "_id"];
 											private _idState = missionNamespace getVariable [_id, "ACTIVE"];
 											
 											if !(_idState == "TERMINATE") then {
@@ -1723,7 +1739,7 @@ isNil {
 												[_timeoutArguments, _timeoutFunction, _target, _override] call _subfunction;
 											};
 										}, 
-										[_timeoutArguments, _timeoutFunction, _subfunction, _override, _handler, _id], 
+										[_target, _timeoutArguments, _timeoutFunction, _subfunction, _override, _handler, _id], 
 										_timeout
 									] call CBA_fnc_waitAndExecute;
 								};

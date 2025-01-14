@@ -828,13 +828,7 @@ class Mission
 								KH_var_postInitExecutions pushBack [\
 									[_ambientLife, _ambientSounds, _windCoefficient],\
 									{\
-										[\
-											{\
-												enableEnvironment _this;\
-											},\
-											_this,\
-											1\
-										] call CBA_fnc_waitAndExecute;\
+										enableEnvironment _this;\
 									}\
 								];\
 							};\

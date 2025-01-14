@@ -18,7 +18,28 @@ isNil {
 							if !(isNull _target) then {
 								if (local _target) then {
 									if (_function isEqualType "") then {
-										_arguments call (missionNamespace getVariable [_function, {}]);
+										private _parsedFunction = missionNamespace getVariable [_function, {}];
+
+										if (_parsedFunction isEqualTo {}) then {
+											switch true do {
+												case ((count _arguments) == 0): {
+													[] call (compile ([_function] joinString ""));
+												};
+
+												case ((count _arguments) == 1): {
+													private _unaryArgument = [missionNamespace, "KH_var_unaryArgument", _arguments select 0, false] call KH_fnc_atomicVariable;
+													[] call (compile ([_function, " (missionNamespace getVariable '", _unaryArgument, "');"] joinString ""));
+												};
+
+												case ((count _arguments) == 2): {
+													private _binaryArguments = [missionNamespace, "KH_var_binaryArguments", _arguments, false] call KH_fnc_atomicVariable;
+													[] call (compile (["((missionNamespace getVariable '", _binaryArguments, "') select 0) ", _function, " ((missionNamespace getVariable '", _binaryArguments, "') select 1);"] joinString ""));
+												};
+											};
+										}
+										else {
+											_arguments call _parsedFunction;
+										};
 									}
 									else {
 										_arguments call _function;
@@ -39,7 +60,28 @@ isNil {
 							if !(isNull _target) then {
 								if (local (agent _target)) then {
 									if (_function isEqualType "") then {
-										_arguments call (missionNamespace getVariable [_function, {}]);
+										private _parsedFunction = missionNamespace getVariable [_function, {}];
+
+										if (_parsedFunction isEqualTo {}) then {
+											switch true do {
+												case ((count _arguments) == 0): {
+													[] call (compile ([_function] joinString ""));
+												};
+
+												case ((count _arguments) == 1): {
+													private _unaryArgument = [missionNamespace, "KH_var_unaryArgument", _arguments select 0, false] call KH_fnc_atomicVariable;
+													[] call (compile ([_function, " (missionNamespace getVariable '", _unaryArgument, "');"] joinString ""));
+												};
+
+												case ((count _arguments) == 2): {
+													private _binaryArguments = [missionNamespace, "KH_var_binaryArguments", _arguments, false] call KH_fnc_atomicVariable;
+													[] call (compile (["((missionNamespace getVariable '", _binaryArguments, "') select 0) ", _function, " ((missionNamespace getVariable '", _binaryArguments, "') select 1);"] joinString ""));
+												};
+											};
+										}
+										else {
+											_arguments call _parsedFunction;
+										};
 									}
 									else {
 										_arguments call _function;
@@ -60,7 +102,28 @@ isNil {
 							if !(isNull _target) then {
 								if (local _target) then {
 									if (_function isEqualType "") then {
-										_arguments call (missionNamespace getVariable [_function, {}]);
+										private _parsedFunction = missionNamespace getVariable [_function, {}];
+
+										if (_parsedFunction isEqualTo {}) then {
+											switch true do {
+												case ((count _arguments) == 0): {
+													[] call (compile ([_function] joinString ""));
+												};
+
+												case ((count _arguments) == 1): {
+													private _unaryArgument = [missionNamespace, "KH_var_unaryArgument", _arguments select 0, false] call KH_fnc_atomicVariable;
+													[] call (compile ([_function, " (missionNamespace getVariable '", _unaryArgument, "');"] joinString ""));
+												};
+
+												case ((count _arguments) == 2): {
+													private _binaryArguments = [missionNamespace, "KH_var_binaryArguments", _arguments, false] call KH_fnc_atomicVariable;
+													[] call (compile (["((missionNamespace getVariable '", _binaryArguments, "') select 0) ", _function, " ((missionNamespace getVariable '", _binaryArguments, "') select 1);"] joinString ""));
+												};
+											};
+										}
+										else {
+											_arguments call _parsedFunction;
+										};
 									}
 									else {
 										_arguments call _function;
@@ -89,7 +152,28 @@ isNil {
 						case (_target isEqualType 0): {
 							if (_target == clientOwner) then {
 								if (_function isEqualType "") then {
-									_arguments call (missionNamespace getVariable [_function, {}]);
+									private _parsedFunction = missionNamespace getVariable [_function, {}];
+
+									if (_parsedFunction isEqualTo {}) then {
+										switch true do {
+											case ((count _arguments) == 0): {
+												[] call (compile ([_function] joinString ""));
+											};
+
+											case ((count _arguments) == 1): {
+												private _unaryArgument = [missionNamespace, "KH_var_unaryArgument", _arguments select 0, false] call KH_fnc_atomicVariable;
+												[] call (compile ([_function, " (missionNamespace getVariable '", _unaryArgument, "');"] joinString ""));
+											};
+
+											case ((count _arguments) == 2): {
+												private _binaryArguments = [missionNamespace, "KH_var_binaryArguments", _arguments, false] call KH_fnc_atomicVariable;
+												[] call (compile (["((missionNamespace getVariable '", _binaryArguments, "') select 0) ", _function, " ((missionNamespace getVariable '", _binaryArguments, "') select 1);"] joinString ""));
+											};
+										};
+									}
+									else {
+										_arguments call _parsedFunction;
+									};
 								}
 								else {
 									_arguments call _function;
@@ -112,7 +196,28 @@ isNil {
 
 									if (_invertedTarget == clientOwner) then {
 										if (_function isEqualType "") then {
-											_arguments call (missionNamespace getVariable [_function, {}]);
+											private _parsedFunction = missionNamespace getVariable [_function, {}];
+
+											if (_parsedFunction isEqualTo {}) then {
+												switch true do {
+													case ((count _arguments) == 0): {
+														[] call (compile ([_function] joinString ""));
+													};
+
+													case ((count _arguments) == 1): {
+														private _unaryArgument = [missionNamespace, "KH_var_unaryArgument", _arguments select 0, false] call KH_fnc_atomicVariable;
+														[] call (compile ([_function, " (missionNamespace getVariable '", _unaryArgument, "');"] joinString ""));
+													};
+
+													case ((count _arguments) == 2): {
+														private _binaryArguments = [missionNamespace, "KH_var_binaryArguments", _arguments, false] call KH_fnc_atomicVariable;
+														[] call (compile (["((missionNamespace getVariable '", _binaryArguments, "') select 0) ", _function, " ((missionNamespace getVariable '", _binaryArguments, "') select 1);"] joinString ""));
+													};
+												};
+											}
+											else {
+												_arguments call _parsedFunction;
+											};
 										}
 										else {
 											_arguments call _function;
@@ -122,14 +227,9 @@ isNil {
 									}
 									else {
 										if (_invertedTarget in KH_var_allMachines) then {
-											[
-												"KH_eve_executionGlobal", 
-												[
-													["KH_eve_executionGlobal", [_arguments, _function]], 
-													"CBA_fnc_remoteEvent"
-												], 
-												_invertedTarget
-											] call CBA_fnc_ownerEvent;
+											{
+												["KH_eve_executionGlobal", [_arguments, _function], _x] call CBA_fnc_ownerEvent;
+											} forEach (KH_var_allMachines - [_invertedTarget]);
 
 											true;
 										}
@@ -151,7 +251,28 @@ isNil {
 								case (_target == "SERVER"): {
 									if isServer then {
 										if (_function isEqualType "") then {
-											_arguments call (missionNamespace getVariable [_function, {}]);
+											private _parsedFunction = missionNamespace getVariable [_function, {}];
+
+											if (_parsedFunction isEqualTo {}) then {
+												switch true do {
+													case ((count _arguments) == 0): {
+														[] call (compile ([_function] joinString ""));
+													};
+
+													case ((count _arguments) == 1): {
+														private _unaryArgument = [missionNamespace, "KH_var_unaryArgument", _arguments select 0, false] call KH_fnc_atomicVariable;
+														[] call (compile ([_function, " (missionNamespace getVariable '", _unaryArgument, "');"] joinString ""));
+													};
+
+													case ((count _arguments) == 2): {
+														private _binaryArguments = [missionNamespace, "KH_var_binaryArguments", _arguments, false] call KH_fnc_atomicVariable;
+														[] call (compile (["((missionNamespace getVariable '", _binaryArguments, "') select 0) ", _function, " ((missionNamespace getVariable '", _binaryArguments, "') select 1);"] joinString ""));
+													};
+												};
+											}
+											else {
+												_arguments call _parsedFunction;
+											};
 										}
 										else {
 											_arguments call _function;
@@ -203,7 +324,28 @@ isNil {
 									if (KH_var_currentAdmin != 2) then {
 										if (KH_var_currentAdmin == clientOwner) then {
 											if (_function isEqualType "") then {
-												_arguments call (missionNamespace getVariable [_function, {}]);
+												private _parsedFunction = missionNamespace getVariable [_function, {}];
+
+												if (_parsedFunction isEqualTo {}) then {
+													switch true do {
+														case ((count _arguments) == 0): {
+															[] call (compile ([_function] joinString ""));
+														};
+
+														case ((count _arguments) == 1): {
+															private _unaryArgument = [missionNamespace, "KH_var_unaryArgument", _arguments select 0, false] call KH_fnc_atomicVariable;
+															[] call (compile ([_function, " (missionNamespace getVariable '", _unaryArgument, "');"] joinString ""));
+														};
+
+														case ((count _arguments) == 2): {
+															private _binaryArguments = [missionNamespace, "KH_var_binaryArguments", _arguments, false] call KH_fnc_atomicVariable;
+															[] call (compile (["((missionNamespace getVariable '", _binaryArguments, "') select 0) ", _function, " ((missionNamespace getVariable '", _binaryArguments, "') select 1);"] joinString ""));
+														};
+													};
+												}
+												else {
+													_arguments call _parsedFunction;
+												};
 											}
 											else {
 												_arguments call _function;
@@ -221,41 +363,152 @@ isNil {
 								};
 
 								case (((parseNumber (_target select [0, 1])) != 0) && ([_target] call {params ["_target"]; private _condition = true; {if ((name _x) == _target) then {_condition = false; break;};} forEach KH_var_allPlayerUnits; _condition;})): {
-									if ((count _target) == 17) then {
-										private _player = KH_var_allPlayerUidMachines get _target;
+									if !(":" in _target) then {
+										if ((count _target) == 17) then {
+											private _player = KH_var_allPlayerUidMachines get _target;
 
-										if !(isNil "_player") then {
-											["KH_eve_executionPlayer", [_arguments, _function], _player] call CBA_fnc_ownerEvent;
-											true;
-										}
-										else {
-											false;
-										};
-									}
-									else {
-										private _player = KH_var_allPlayerIdMachines get _target;
-
-										if !(isNil "_player") then {
-											["KH_eve_executionPlayer", [_arguments, _function], _player] call CBA_fnc_ownerEvent;
-											true;
-										}
-										else {
-											private _client = KH_var_allHeadlessIdMachines get _target;
-
-											if !(isNil "_client") then {
-												["KH_eve_executionHeadless", [_arguments, _function], _client] call CBA_fnc_ownerEvent;
+											if !(isNil "_player") then {
+												["KH_eve_executionPlayer", [_arguments, _function], _player] call CBA_fnc_ownerEvent;
 												true;
 											}
 											else {
 												false;
 											};
+										}
+										else {
+											private _player = KH_var_allPlayerIdMachines get _target;
+
+											if !(isNil "_player") then {
+												["KH_eve_executionPlayer", [_arguments, _function], _player] call CBA_fnc_ownerEvent;
+												true;
+											}
+											else {
+												private _client = KH_var_allHeadlessIdMachines get _target;
+
+												if !(isNil "_client") then {
+													["KH_eve_executionHeadless", [_arguments, _function], _client] call CBA_fnc_ownerEvent;
+													true;
+												}
+												else {
+													false;
+												};
+											};
+										};
+									}
+									else {
+										if !(isNull (objectFromNetId _target)) then {
+											if (local (objectFromNetId _target)) then {
+												if (_function isEqualType "") then {
+													private _parsedFunction = missionNamespace getVariable [_function, {}];
+
+													if (_parsedFunction isEqualTo {}) then {
+														switch true do {
+															case ((count _arguments) == 0): {
+																[] call (compile ([_function] joinString ""));
+															};
+
+															case ((count _arguments) == 1): {
+																private _unaryArgument = [missionNamespace, "KH_var_unaryArgument", _arguments select 0, false] call KH_fnc_atomicVariable;
+																[] call (compile ([_function, " (missionNamespace getVariable '", _unaryArgument, "');"] joinString ""));
+															};
+
+															case ((count _arguments) == 2): {
+																private _binaryArguments = [missionNamespace, "KH_var_binaryArguments", _arguments, false] call KH_fnc_atomicVariable;
+																[] call (compile (["((missionNamespace getVariable '", _binaryArguments, "') select 0) ", _function, " ((missionNamespace getVariable '", _binaryArguments, "') select 1);"] joinString ""));
+															};
+														};
+													}
+													else {
+														_arguments call _parsedFunction;
+													};
+												}
+												else {
+													_arguments call _function;
+												};
+											}
+											else {
+												["KH_eve_executionGlobal", [_arguments, _function], objectFromNetId _target] call CBA_fnc_targetEvent;
+											};
+
+											true;
+										}
+										else {
+											if !(isNull (groupFromNetId _target)) then {
+												if (local (groupFromNetId _target)) then {
+													if (_function isEqualType "") then {
+														private _parsedFunction = missionNamespace getVariable [_function, {}];
+
+														if (_parsedFunction isEqualTo {}) then {
+															switch true do {
+																case ((count _arguments) == 0): {
+																	[] call (compile ([_function] joinString ""));
+																};
+
+																case ((count _arguments) == 1): {
+																	private _unaryArgument = [missionNamespace, "KH_var_unaryArgument", _arguments select 0, false] call KH_fnc_atomicVariable;
+																	[] call (compile ([_function, " (missionNamespace getVariable '", _unaryArgument, "');"] joinString ""));
+																};
+
+																case ((count _arguments) == 2): {
+																	private _binaryArguments = [missionNamespace, "KH_var_binaryArguments", _arguments, false] call KH_fnc_atomicVariable;
+																	[] call (compile (["((missionNamespace getVariable '", _binaryArguments, "') select 0) ", _function, " ((missionNamespace getVariable '", _binaryArguments, "') select 1);"] joinString ""));
+																};
+															};
+														}
+														else {
+															_arguments call _parsedFunction;
+														};
+													}
+													else {
+														_arguments call _function;
+													};
+												}
+												else {
+													[
+														"KH_eve_executionServer", 
+														[
+															[_arguments, _function, _target],
+															{
+																params ["_arguments", "_function", "_target"];
+																["KH_eve_executionGlobal", [_arguments, _function], groupOwner (groupFromNetId _target)] call CBA_fnc_ownerEvent;
+															}
+														]
+													] call CBA_fnc_serverEvent;
+												};
+
+												true;
+											}
+											else {
+												false;
+											};											
 										};
 									};
 								};
 
 								case (_target == "LOCAL"): {
 									if (_function isEqualType "") then {
-										_arguments call (missionNamespace getVariable [_function, {}]);
+										private _parsedFunction = missionNamespace getVariable [_function, {}];
+
+										if (_parsedFunction isEqualTo {}) then {
+											switch true do {
+												case ((count _arguments) == 0): {
+													[] call (compile ([_function] joinString ""));
+												};
+
+												case ((count _arguments) == 1): {
+													private _unaryArgument = [missionNamespace, "KH_var_unaryArgument", _arguments select 0, false] call KH_fnc_atomicVariable;
+													[] call (compile ([_function, " (missionNamespace getVariable '", _unaryArgument, "');"] joinString ""));
+												};
+
+												case ((count _arguments) == 2): {
+													private _binaryArguments = [missionNamespace, "KH_var_binaryArguments", _arguments, false] call KH_fnc_atomicVariable;
+													[] call (compile (["((missionNamespace getVariable '", _binaryArguments, "') select 0) ", _function, " ((missionNamespace getVariable '", _binaryArguments, "') select 1);"] joinString ""));
+												};
+											};
+										}
+										else {
+											_arguments call _parsedFunction;
+										};
 									}
 									else {
 										_arguments call _function;
@@ -374,20 +627,42 @@ isNil {
 									[
 										_eventType, 
 										[
-											[_arguments, _function, _conditionArguments, _conditionFunction, _backupArguments, _backupFunction], 
+											[_arguments, _function, _conditionArguments, _conditionFunction], 
 											{
-												params ["_arguments", "_function", "_conditionArguments", "_conditionFunction", "_backupArguments", "_backupFunction"];
-
-												if (_function isEqualType "") then {
-													_function = missionNamespace getVariable [_function, {}];
-												};
+												params ["_arguments", "_function", "_conditionArguments", "_conditionFunction"];
 
 												if (_conditionFunction isEqualType "") then {
 													_conditionFunction = missionNamespace getVariable [_conditionFunction, {}];
 												};
 												
 												if (_conditionArguments call _conditionFunction) then {
-													_arguments call _function;
+													if (_function isEqualType "") then {
+														private _parsedFunction = missionNamespace getVariable [_function, {}];
+
+														if (_parsedFunction isEqualTo {}) then {
+															switch true do {
+																case ((count _arguments) == 0): {
+																	[] call (compile ([_function] joinString ""));
+																};
+
+																case ((count _arguments) == 1): {
+																	private _unaryArgument = [missionNamespace, "KH_var_unaryArgument", _arguments select 0, false] call KH_fnc_atomicVariable;
+																	[] call (compile ([_function, " (missionNamespace getVariable '", _unaryArgument, "');"] joinString ""));
+																};
+
+																case ((count _arguments) == 2): {
+																	private _binaryArguments = [missionNamespace, "KH_var_binaryArguments", _arguments, false] call KH_fnc_atomicVariable;
+																	[] call (compile (["((missionNamespace getVariable '", _binaryArguments, "') select 0) ", _function, " ((missionNamespace getVariable '", _binaryArguments, "') select 1);"] joinString ""));
+																};
+															};
+														}
+														else {
+															_arguments call _parsedFunction;
+														};
+													}
+													else {
+														_arguments call _function;
+													};
 												};
 											}
 										]
@@ -511,7 +786,7 @@ isNil {
 														if (!(isNull _curatorUnit) && (isPlayer _curatorUnit)) then {
 															["KH_eve_executionPlayer", [_arguments, _function], _curatorUnit] call CBA_fnc_targetEvent;
 														};
-													} forEach (allCurators - ([getAssignedCuratorLogic player]));
+													} forEach (allCurators - [getAssignedCuratorLogic player]);
 												};
 
 												case (_exclusiveType == "HEADLESS"): {
@@ -622,16 +897,38 @@ isNil {
 															{
 																params ["_arguments", "_function", "_conditionArguments", "_conditionFunction", "_backupArguments", "_backupFunction"];
 
-																if (_function isEqualType "") then {
-																	_function = missionNamespace getVariable [_function, {}];
-																};
-
 																if (_conditionFunction isEqualType "") then {
 																	_conditionFunction = missionNamespace getVariable [_conditionFunction, {}];
 																};
 																
 																if (_conditionArguments call _conditionFunction) then {
-																	_arguments call _function;
+																	if (_function isEqualType "") then {
+																		private _parsedFunction = missionNamespace getVariable [_function, {}];
+
+																		if (_parsedFunction isEqualTo {}) then {
+																			switch true do {
+																				case ((count _arguments) == 0): {
+																					[] call (compile ([_function] joinString ""));
+																				};
+
+																				case ((count _arguments) == 1): {
+																					private _unaryArgument = [missionNamespace, "KH_var_unaryArgument", _arguments select 0, false] call KH_fnc_atomicVariable;
+																					[] call (compile ([_function, " (missionNamespace getVariable '", _unaryArgument, "');"] joinString ""));
+																				};
+
+																				case ((count _arguments) == 2): {
+																					private _binaryArguments = [missionNamespace, "KH_var_binaryArguments", _arguments, false] call KH_fnc_atomicVariable;
+																					[] call (compile (["((missionNamespace getVariable '", _binaryArguments, "') select 0) ", _function, " ((missionNamespace getVariable '", _binaryArguments, "') select 1);"] joinString ""));
+																				};
+																			};
+																		}
+																		else {
+																			_arguments call _parsedFunction;
+																		};
+																	}
+																	else {
+																		_arguments call _function;
+																	};
 																};
 															}
 														]
@@ -711,7 +1008,28 @@ isNil {
 																case (_x == "SERVER"): {
 																	if !(2 in _exclusiveList) then {
 																		if (_function isEqualType "") then {
-																			_arguments call (missionNamespace getVariable [_function, {}]);
+																			private _parsedFunction = missionNamespace getVariable [_function, {}];
+
+																			if (_parsedFunction isEqualTo {}) then {
+																				switch true do {
+																					case ((count _arguments) == 0): {
+																						[] call (compile ([_function] joinString ""));
+																					};
+
+																					case ((count _arguments) == 1): {
+																						private _unaryArgument = [missionNamespace, "KH_var_unaryArgument", _arguments select 0, false] call KH_fnc_atomicVariable;
+																						[] call (compile ([_function, " (missionNamespace getVariable '", _unaryArgument, "');"] joinString ""));
+																					};
+
+																					case ((count _arguments) == 2): {
+																						private _binaryArguments = [missionNamespace, "KH_var_binaryArguments", _arguments, false] call KH_fnc_atomicVariable;
+																						[] call (compile (["((missionNamespace getVariable '", _binaryArguments, "') select 0) ", _function, " ((missionNamespace getVariable '", _binaryArguments, "') select 1);"] joinString ""));
+																					};
+																				};
+																			}
+																			else {
+																				_arguments call _parsedFunction;
+																			};
 																		}
 																		else {
 																			_arguments call _function;
@@ -771,34 +1089,58 @@ isNil {
 																};
 
 																case (((parseNumber (_x select [0, 1])) != 0) && ([_x] call {params ["_target"]; private _condition = true; {if ((name _x) == _target) then {_condition = false; break;};} forEach KH_var_allPlayerUnits; _condition;})): {
-																	if ((count _x) == 17) then {
-																		private _player = KH_var_allPlayerUidMachines get _x;
+																	if !(":" in _x) then {
+																		if ((count _x) == 17) then {
+																			private _player = KH_var_allPlayerUidMachines get _x;
 
-																		if !(isNil "_player") then {
-																			if !(_player in _exclusiveList) then {
-																				["KH_eve_executionPlayer", [_arguments, _function], _player] call CBA_fnc_ownerEvent;
-																				_exclusiveList pushBack _player;
+																			if !(isNil "_player") then {
+																				if !(_player in _exclusiveList) then {
+																					["KH_eve_executionPlayer", [_arguments, _function], _player] call CBA_fnc_ownerEvent;
+																					_exclusiveList pushBack _player;
+																				};
+																			};
+																		}
+																		else {
+																			private _player = KH_var_allPlayerIdMachines get _x;
+
+																			if !(isNil "_player") then {
+																				if !(_player in _exclusiveList) then {
+																					["KH_eve_executionPlayer", [_arguments, _function], _player] call CBA_fnc_ownerEvent;
+																					_exclusiveList pushBack _player;
+																				};
+																			}
+																			else {
+																				private _client = KH_var_allHeadlessIdMachines get _x;
+
+																				if !(isNil "_client") then {
+																					if !(_client in _exclusiveList) then {
+																						["KH_eve_executionHeadless", [_arguments, _function], _client] call CBA_fnc_ownerEvent;
+																						_exclusiveList pushBack _client;
+																					};
+																				};
 																			};
 																		};
 																	}
 																	else {
-																		private _player = KH_var_allPlayerIdMachines get _x;
-
-																		if !(isNil "_player") then {
-																			if !(_player in _exclusiveList) then {
-																				["KH_eve_executionPlayer", [_arguments, _function], _player] call CBA_fnc_ownerEvent;
-																				_exclusiveList pushBack _player;
-																			};
+																		if !(isNull (objectFromNetId _x)) then {
+																			["KH_eve_executionGlobal", [_arguments, _function], objectFromNetId _x] call CBA_fnc_targetEvent;
+																			_exclusiveList pushBack (owner (objectFromNetId _x));
 																		}
 																		else {
-																			private _client = KH_var_allHeadlessIdMachines get _x;
+																			if !(isNull (groupFromNetId _x)) then {
+																				[
+																					"KH_eve_executionServer", 
+																					[
+																						[_arguments, _function, _x],
+																						{
+																							params ["_arguments", "_function", "_target"];
+																							["KH_eve_executionGlobal", [_arguments, _function], groupOwner (groupFromNetId _target)] call CBA_fnc_ownerEvent;
+																						}
+																					]
+																				] call CBA_fnc_serverEvent;
 
-																			if !(isNil "_client") then {
-																				if !(_client in _exclusiveList) then {
-																					["KH_eve_executionHeadless", [_arguments, _function], _client] call CBA_fnc_ownerEvent;
-																					_exclusiveList pushBack _client;
-																				};
-																			};
+																				_exclusiveList pushBack (groupOwner (groupFromNetId _x));
+																			};											
 																		};
 																	};
 																};
@@ -915,21 +1257,31 @@ isNil {
 									private _dependency = _target param [2, true];
 									private _unitRequired = _target param [3, true];
 									private _remote = _target param [4, false];
+									private _overrideId = _target param [5, ""];
 									private _id = "";
+									private _jipOverrideParams = "";
+									private _jipOverrideId = "";
 
-									if (_override != "") then {
-										_id = _override;
+									if (_overrideId != "") then {
+										_id = _overrideId;
+										_jipOverrideParams = format ["KH_var_jipOverrideParams%1", _overrideId];
+										_jipOverrideId = format ["KH_var_jipOverrideId%1", _overrideId];
 									}
 									else {
-										_id = format ["KH_var_%1", [0, 36, "ALPHANUMERIC"] call KH_fnc_generateSymbols];
+										if (_override != "") then {
+											_id = _override;
+										}
+										else {
+											_id = format ["KH_var_%1", [0, 36, "ALPHANUMERIC"] call KH_fnc_generateSymbols];
+										};
 									};
 
 									[
 										"KH_eve_executionServer", 
 										[
-											[_arguments, _function, _exclusiveType, _dependency, _unitRequired, _remote, _id, clientOwner], 
+											[_arguments, _function, _exclusiveType, _dependency, _unitRequired, _remote, _id, _jipOverrideParams, _jipOverrideId, clientOwner], 
 											{
-												params ["_arguments", "_function", "_exclusiveType", "_dependency", "_unitRequired", "_remote", "_id", "_originalOwner"];
+												params ["_arguments", "_function", "_exclusiveType", "_dependency", "_unitRequired", "_remote", "_id", "_jipOverrideParams", "_jipOverrideId", "_originalOwner"];
 
 												switch true do {
 													case (_exclusiveType == "GLOBAL"): {
@@ -1058,36 +1410,118 @@ isNil {
 														};
 													};
 												};
+
+												if (_jipOverrideId == "") then {
+													_jipOverrideId = [missionNamespace, "KH_var_jipOverrideIdDefault", false, false] call KH_fnc_atomicVariable;
+												};
 												
-												{
-													[
-														"CBA",
-														_x,
-														[_arguments, _function, _dependency, _id, _x],
-														{
-															_args params ["_arguments", "_function", "_dependency", "_id", "_joinType"];
-															private _joiningMachine = 999999;
+												if !(missionNamespace getVariable [_jipOverrideId, false]) then {
+													{
+														[
+															"CBA",
+															_x,
+															[_arguments, _function, _dependency, _id, _jipOverrideParams, _x],
+															{
+																_args params ["_arguments", "_function", "_dependency", "_id", "_jipOverrideParams", "_joinType"];
+																private _joiningMachine = 999999;
 
-															if (_joinType == "KH_eve_playerLoaded") then {
-																_joiningMachine = _this select 1;
-															}
-															else {
-																_joiningMachine = _this select 0;
-															};
-															
-															switch true do {
-																case (_dependency isEqualType ""): {
-																	if ((parseNumber (_dependency select [0, 1])) != 0) then {
-																		private _uid = "";
+																if (_joinType == "KH_eve_playerLoaded") then {
+																	_joiningMachine = _this select 1;
+																}
+																else {
+																	_joiningMachine = _this select 0;
+																};
 
-																		if _joinType == "KH_eve_playerLoaded" then {
-																			_uid = getPlayerUID (_this select 0); 
+																if (_jipOverrideParams != "") then {
+																	_arguments = (missionNamespace getVariable [_jipOverrideParams, []]) select 0;
+																	_function = (missionNamespace getVariable [_jipOverrideParams, {}]) select 1;
+																	_dependency = (missionNamespace getVariable [_jipOverrideParams, true]) select 2;
+																};
+																
+																switch true do {
+																	case (_dependency isEqualType ""): {
+																		if ((parseNumber (_dependency select [0, 1])) != 0) then {
+																			private _uid = "";
+
+																			if _joinType == "KH_eve_playerLoaded" then {
+																				_uid = getPlayerUID (_this select 0); 
+																			}
+																			else {
+																				_uid = _this select 1;
+																			};
+
+																			if (_dependency == _uid) then {
+																				if !(_idState == "INACTIVE") then {
+																					switch true do {
+																						case (_idState == "ACTIVE"): {
+																							["KH_eve_executionGlobal", [_arguments, _function], _joiningMachine] call CBA_fnc_ownerEvent;
+																						};
+
+																						case (_idState == "TERMINATE"): {
+																							[_eventName, _localId] call CBA_fnc_removeEventHandler;
+																						};		
+																					};
+																				};
+																			}
+																			else {
+																				if (":" in _dependency) then {
+																					if (!(isNull (objectFromNetId _dependency)) || !(isNull (groupFromNetId _dependency))) then {
+																						if !(_idState == "INACTIVE") then {
+																							switch true do {
+																								case (_idState == "ACTIVE"): {
+																									["KH_eve_executionGlobal", [_arguments, _function], _joiningMachine] call CBA_fnc_ownerEvent;
+																								};
+
+																								case (_idState == "TERMINATE"): {
+																									[_eventName, _localId] call CBA_fnc_removeEventHandler;
+																								};		
+																							};
+																						};
+																					};
+																				}
+																				else {
+																					private _player = KH_var_allPlayerIdMachines get _x;
+																					private _client = KH_var_allHeadlessIdMachines get _x;
+
+																					if (!(isNil "_player") || !(isNil "_client")) then {
+																						if !(_idState == "INACTIVE") then {
+																							switch true do {
+																								case (_idState == "ACTIVE"): {
+																									["KH_eve_executionGlobal", [_arguments, _function], _joiningMachine] call CBA_fnc_ownerEvent;
+																								};
+
+																								case (_idState == "TERMINATE"): {
+																									[_eventName, _localId] call CBA_fnc_removeEventHandler;
+																								};		
+																							};
+																						};
+																					};
+																				};
+																			};
 																		}
 																		else {
-																			_uid = _this select 1;
-																		};
+																			if (missionNamespace getVariable [_dependency, false]) then {
+																				private _idState = missionNamespace getVariable [_id, "ACTIVE"];
 
-																		if (_dependency == _uid) then {
+																				if !(_idState == "INACTIVE") then {
+																					switch true do {
+																						case (_idState == "ACTIVE"): {
+																							["KH_eve_executionGlobal", [_arguments, _function], _joiningMachine] call CBA_fnc_ownerEvent;
+																						};
+
+																						case (_idState == "TERMINATE"): {
+																							[_eventName, _localId] call CBA_fnc_removeEventHandler;
+																						};		
+																					};
+																				};
+																			};
+																		};
+																	};
+
+																	case ((_dependency isEqualType objNull) || (_dependency isEqualType teamMemberNull) || (_dependency isEqualType grpNull)): {
+																		if !(isNull _dependency) then {
+																			private _idState = missionNamespace getVariable [_id, "ACTIVE"];
+
 																			if !(_idState == "INACTIVE") then {
 																				switch true do {
 																					case (_idState == "ACTIVE"): {
@@ -1100,9 +1534,128 @@ isNil {
 																				};
 																			};
 																		};
-																	}
-																	else {
-																		if (missionNamespace getVariable [_dependency, false]) then {
+																	};
+
+																	case (_dependency isEqualType 0): {
+																		if (_dependency in KH_var_allMachines) then {
+																			private _idState = missionNamespace getVariable [_id, "ACTIVE"];
+
+																			if !(_idState == "INACTIVE") then {
+																				switch true do {
+																					case (_idState == "ACTIVE"): {
+																						["KH_eve_executionGlobal", [_arguments, _function], _joiningMachine] call CBA_fnc_ownerEvent;
+																					};
+
+																					case (_idState == "TERMINATE"): {
+																						[_eventName, _localId] call CBA_fnc_removeEventHandler;
+																					};		
+																				};
+																			};
+																		};
+																	};
+
+																	case (_dependency isEqualType {}): {
+																		if ([] call _dependency) then {
+																			private _idState = missionNamespace getVariable [_id, "ACTIVE"];
+
+																			if !(_idState == "INACTIVE") then {
+																				switch true do {
+																					case (_idState == "ACTIVE"): {
+																						["KH_eve_executionGlobal", [_arguments, _function], _joiningMachine] call CBA_fnc_ownerEvent;
+																					};
+
+																					case (_idState == "TERMINATE"): {
+																						[_eventName, _localId] call CBA_fnc_removeEventHandler;
+																					};		
+																				};
+																			};
+																		};
+																	};
+
+																	case (_dependency isEqualType []): {
+																		private _condition = true;
+																		
+																		{
+																			switch true do {
+																				case (_x isEqualType ""): {
+																					if ((parseNumber (_x select [0, 1])) != 0) then {
+																						private _uid = "";
+
+																						if _joinType == "KH_eve_playerLoaded" then {
+																							_uid = getPlayerUID (_this select 0); 
+																						}
+																						else {
+																							_uid = _this select 1;
+																						};
+
+																						if (_x != _uid) then {
+																							if (":" in _x) then {
+																								if ((isNull (objectFromNetId _x)) && (isNull (groupFromNetId _x))) then {
+																									_condition = false;
+																									break;
+																								};
+																							}
+																							else {
+																								private _player = KH_var_allPlayerIdMachines get _x;
+																								private _client = KH_var_allHeadlessIdMachines get _x;
+
+																								if ((isNil "_player") && (isNil "_client")) then {
+																									_condition = false;
+																									break;
+																								};
+																							};
+																						};
+																					}
+																					else {
+																						if !(missionNamespace getVariable [_x, false]) then {
+																							_condition = false;
+																							break;
+																						};
+																					};
+																				};
+
+																				case ((_x isEqualType objNull) || (_x isEqualType teamMemberNull) || (_x isEqualType grpNull)): {
+																					if (isNull _x) then {
+																						_condition = false;
+																						break;
+																					};
+																				};
+
+																				case (_x isEqualType 0): {
+																					if !(_x in KH_var_allMachines) then {
+																						_condition = false;
+																						break;
+																					};
+																				};
+
+																				case (_x isEqualType {}): {
+																					if !([] call _x) then {
+																						_condition = false;
+																						break;
+																					};
+																				};
+																			};
+																		} forEach _dependency;
+
+																		if _condition then {
+																			private _idState = missionNamespace getVariable [_id, "ACTIVE"];
+																			
+																			if !(_idState == "INACTIVE") then {
+																				switch true do {
+																					case (_idState == "ACTIVE"): {
+																						["KH_eve_executionGlobal", [_arguments, _function], _joiningMachine] call CBA_fnc_ownerEvent;
+																					};
+
+																					case (_idState == "TERMINATE"): {
+																						[_eventName, _localId] call CBA_fnc_removeEventHandler;
+																					};		
+																				};
+																			};
+																		};
+																	};
+
+																	case (_dependency isEqualType true): {
+																		if _dependency then {
 																			private _idState = missionNamespace getVariable [_id, "ACTIVE"];
 
 																			if !(_idState == "INACTIVE") then {
@@ -1119,126 +1672,16 @@ isNil {
 																		};
 																	};
 																};
+															}
+														] call KH_fnc_addEventHandler;
+													} forEach _joinType;
+												};
 
-																case (_dependency isEqualType objNull): {
-																	if !(isNull _dependency) then {
-																		private _idState = missionNamespace getVariable [_id, "ACTIVE"];
+												missionNamespace setVariable [_jipOverrideId, true];
 
-																		if !(_idState == "INACTIVE") then {
-																			switch true do {
-																				case (_idState == "ACTIVE"): {
-																					["KH_eve_executionGlobal", [_arguments, _function], _joiningMachine] call CBA_fnc_ownerEvent;
-																				};
-
-																				case (_idState == "TERMINATE"): {
-																					[_eventName, _localId] call CBA_fnc_removeEventHandler;
-																				};		
-																			};
-																		};
-																	};
-																};
-
-																case (_dependency isEqualType {}): {
-																	if ([] call _dependency) then {
-																		private _idState = missionNamespace getVariable [_id, "ACTIVE"];
-
-																		if !(_idState == "INACTIVE") then {
-																			switch true do {
-																				case (_idState == "ACTIVE"): {
-																					["KH_eve_executionGlobal", [_arguments, _function], _joiningMachine] call CBA_fnc_ownerEvent;
-																				};
-
-																				case (_idState == "TERMINATE"): {
-																					[_eventName, _localId] call CBA_fnc_removeEventHandler;
-																				};		
-																			};
-																		};
-																	};
-																};
-
-																case (_dependency isEqualType []): {
-																	private _condition = true;
-																	
-																	{
-																		switch true do {
-																			case (_x isEqualType ""): {
-																				if ((parseNumber (_x select [0, 1])) != 0) then {
-																					private _uid = "";
-
-																					if _joinType == "KH_eve_playerLoaded" then {
-																						_uid = getPlayerUID (_this select 0); 
-																					}
-																					else {
-																						_uid = _this select 1;
-																					};
-
-																					if (_x != _uid) then {
-																						_condition = false;
-																						break;
-																					};
-																				}
-																				else {
-																					if !(missionNamespace getVariable [_x, false]) then {
-																						_condition = false;
-																						break;
-																					};
-																				};
-																			};
-
-																			case (_x isEqualType objNull): {
-																				if (isNull _x) then {
-																					_condition = false;
-																					break;
-																				};
-																			};
-
-																			case (_x isEqualType {}): {
-																				if !([] call _x) then {
-																					_condition = false;
-																					break;
-																				};
-																			};
-																		};
-																	} forEach _dependency;
-
-																	if _condition then {
-																		private _idState = missionNamespace getVariable [_id, "ACTIVE"];
-																		
-																		if !(_idState == "INACTIVE") then {
-																			switch true do {
-																				case (_idState == "ACTIVE"): {
-																					["KH_eve_executionGlobal", [_arguments, _function], _joiningMachine] call CBA_fnc_ownerEvent;
-																				};
-
-																				case (_idState == "TERMINATE"): {
-																					[_eventName, _localId] call CBA_fnc_removeEventHandler;
-																				};		
-																			};
-																		};
-																	};
-																};
-
-																case (_dependency isEqualType true): {
-																	if _dependency then {
-																		private _idState = missionNamespace getVariable [_id, "ACTIVE"];
-
-																		if !(_idState == "INACTIVE") then {
-																			switch true do {
-																				case (_idState == "ACTIVE"): {
-																					["KH_eve_executionGlobal", [_arguments, _function], _joiningMachine] call CBA_fnc_ownerEvent;
-																				};
-
-																				case (_idState == "TERMINATE"): {
-																					[_eventName, _localId] call CBA_fnc_removeEventHandler;
-																				};		
-																			};
-																		};
-																	};
-																};
-															};
-														}
-													] call KH_fnc_addEventHandler;
-												} forEach _joinType;
+												if (_jipOverrideParams != "") then {
+													missionNamespace setVariable [_jipOverrideParams, [_arguments, _function, _dependency]];
+												};
 											}
 										]
 									] call CBA_fnc_serverEvent;
@@ -1270,7 +1713,6 @@ isNil {
 											] joinString "";
 
 											_arguments call (compile _expression);
-
 											[_eventName, _localId] call CBA_fnc_removeEventHandler;
 										}
 									] call KH_fnc_addEventHandler;
@@ -1279,7 +1721,28 @@ isNil {
 										params ["_arguments", "_function", "_id", "_owner"];
 
 										if (_function isEqualType "") then {
-											[_id, [_arguments call (missionNamespace getVariable [_function, {}])], _owner] call CBA_fnc_ownerEvent;
+											private _parsedFunction = missionNamespace getVariable [_function, {}];
+
+											if (_parsedFunction isEqualTo {}) then {
+												switch true do {
+													case ((count _arguments) == 0): {
+														[_id, [[] call (compile ([_function] joinString ""))], _owner] call CBA_fnc_ownerEvent;
+													};
+
+													case ((count _arguments) == 1): {
+														private _unaryArgument = [missionNamespace, "KH_var_unaryArgument", _arguments select 0, false] call KH_fnc_atomicVariable;
+														[_id, [[] call (compile ([_function, " (missionNamespace getVariable '", _unaryArgument, "');"] joinString ""))], _owner] call CBA_fnc_ownerEvent;
+													};
+
+													case ((count _arguments) == 2): {
+														private _binaryArguments = [missionNamespace, "KH_var_binaryArguments", _arguments, false] call KH_fnc_atomicVariable;
+														[_id, [[] call (compile (["((missionNamespace getVariable '", _binaryArguments, "') select 0) ", _function, " ((missionNamespace getVariable '", _binaryArguments, "') select 1);"] joinString ""))], _owner] call CBA_fnc_ownerEvent;
+													};
+												};
+											}
+											else {
+												[_id, [_arguments call _parsedFunction], _owner] call CBA_fnc_ownerEvent;
+											};
 										}
 										else {
 											[_id, [_arguments call _function], _owner] call CBA_fnc_ownerEvent;
@@ -1304,34 +1767,61 @@ isNil {
 											};
 
 											case (((parseNumber (_callbackTarget select [0, 1])) != 0) && ([_callbackTarget] call {params ["_target"]; private _condition = true; {if ((name _x) == _target) then {_condition = false; break;};} forEach KH_var_allPlayerUnits; _condition;})): {
-												if ((count _callbackTarget) == 17) then {
-													private _player = KH_var_allPlayerUidMachines get _callbackTarget;
+												if !(":" in _callbackTarget) then {
+													if ((count _callbackTarget) == 17) then {
+														private _player = KH_var_allPlayerUidMachines get _callbackTarget;
 
-													if !(isNil "_player") then {
-														["KH_eve_executionPlayer", [[_callbackArguments, _callbackFunction, _id, clientOwner], _callbackSendFunction], _player] call CBA_fnc_ownerEvent;
-														true;
-													}
-													else {
-														false;
-													};
-												}
-												else {
-													private _player = KH_var_allPlayerIdMachines get _callbackTarget;
-
-													if !(isNil "_player") then {
-														["KH_eve_executionPlayer", [[_callbackArguments, _callbackFunction, _id, clientOwner], _callbackSendFunction], _player] call CBA_fnc_ownerEvent;
-														true;
-													}
-													else {
-														private _client = KH_var_allHeadlessIdMachines get _callbackTarget;
-
-														if !(isNil "_client") then {
-															["KH_eve_executionHeadless", [[_callbackArguments, _callbackFunction, _id, clientOwner], _callbackSendFunction], _client] call CBA_fnc_ownerEvent;
+														if !(isNil "_player") then {
+															["KH_eve_executionPlayer", [[_callbackArguments, _callbackFunction, _id, clientOwner], _callbackSendFunction], _player] call CBA_fnc_ownerEvent;
 															true;
 														}
 														else {
 															false;
 														};
+													}
+													else {
+														private _player = KH_var_allPlayerIdMachines get _callbackTarget;
+
+														if !(isNil "_player") then {
+															["KH_eve_executionPlayer", [[_callbackArguments, _callbackFunction, _id, clientOwner], _callbackSendFunction], _player] call CBA_fnc_ownerEvent;
+															true;
+														}
+														else {
+															private _client = KH_var_allHeadlessIdMachines get _callbackTarget;
+
+															if !(isNil "_client") then {
+																["KH_eve_executionHeadless", [[_callbackArguments, _callbackFunction, _id, clientOwner], _callbackSendFunction], _client] call CBA_fnc_ownerEvent;
+																true;
+															}
+															else {
+																false;
+															};
+														};
+													};
+												}
+												else {
+													if !(isNull (objectFromNetId _callbackTarget)) then {
+														["KH_eve_executionGlobal", [[_callbackArguments, _callbackFunction, _id, clientOwner], _callbackSendFunction], objectFromNetId _callbackTarget] call CBA_fnc_targetEvent;
+														true;
+													}
+													else {
+														if !(isNull (groupFromNetId _callbackTarget)) then {
+															[
+																"KH_eve_executionServer", 
+																[
+																	[_callbackArguments, _callbackFunction, _callbackTarget, clientOwner],
+																	{
+																		params ["_callbackArguments", "_callbackFunction", "_callbackTarget", "_clientOwner"];
+																		["KH_eve_executionGlobal", [[_callbackArguments, _callbackFunction, _id, _clientOwner], _callbackSendFunction], groupOwner (groupFromNetId _callbackTarget)] call CBA_fnc_ownerEvent;
+																	}
+																]
+															] call CBA_fnc_serverEvent;
+
+															true;
+														}
+														else {
+															false;
+														};											
 													};
 												};
 											};
@@ -1424,7 +1914,28 @@ isNil {
 															case (_idState == "ACTIVE"): {
 																if _isLocal then {
 																	if (_function isEqualType "") then {
-																		_arguments call (missionNamespace getVariable [_function, {}]);
+																		private _parsedFunction = missionNamespace getVariable [_function, {}];
+
+																		if (_parsedFunction isEqualTo {}) then {
+																			switch true do {
+																				case ((count _arguments) == 0): {
+																					[] call (compile ([_function] joinString ""));
+																				};
+
+																				case ((count _arguments) == 1): {
+																					private _unaryArgument = [missionNamespace, "KH_var_unaryArgument", _arguments select 0, false] call KH_fnc_atomicVariable;
+																					[] call (compile ([_function, " (missionNamespace getVariable '", _unaryArgument, "');"] joinString ""));
+																				};
+
+																				case ((count _arguments) == 2): {
+																					private _binaryArguments = [missionNamespace, "KH_var_binaryArguments", _arguments, false] call KH_fnc_atomicVariable;
+																					[] call (compile (["((missionNamespace getVariable '", _binaryArguments, "') select 0) ", _function, " ((missionNamespace getVariable '", _binaryArguments, "') select 1);"] joinString ""));
+																				};
+																			};
+																		}
+																		else {
+																			_arguments call _parsedFunction;
+																		};
 																	}
 																	else {
 																		_arguments call _function;
@@ -1432,7 +1943,28 @@ isNil {
 																}
 																else {
 																	if (_sendoffFunction isEqualType "") then {
-																		_sendoffArguments call (missionNamespace getVariable [_sendoffFunction, {}]);
+																		private _parsedFunction = missionNamespace getVariable [_sendoffFunction, {}];
+
+																		if (_parsedFunction isEqualTo {}) then {
+																			switch true do {
+																				case ((count _sendoffArguments) == 0): {
+																					[] call (compile ([_sendoffFunction] joinString ""));
+																				};
+
+																				case ((count _sendoffArguments) == 1): {
+																					private _unaryArgument = [missionNamespace, "KH_var_unaryArgument", _sendoffArguments select 0, false] call KH_fnc_atomicVariable;
+																					[] call (compile ([_sendoffFunction, " (missionNamespace getVariable '", _unaryArgument, "');"] joinString ""));
+																				};
+
+																				case ((count _sendoffArguments) == 2): {
+																					private _binaryArguments = [missionNamespace, "KH_var_binaryArguments", _sendoffArguments, false] call KH_fnc_atomicVariable;
+																					[] call (compile (["((missionNamespace getVariable '", _binaryArguments, "') select 0) ", _sendoffFunction, " ((missionNamespace getVariable '", _binaryArguments, "') select 1);"] joinString ""));
+																				};
+																			};
+																		}
+																		else {
+																			_sendoffArguments call _parsedFunction;
+																		};
 																	}
 																	else {
 																		_sendoffArguments call _sendoffFunction;
@@ -1531,7 +2063,28 @@ isNil {
 									}
 									else {
 										if (_function isEqualType "") then {
-											_arguments call (missionNamespace getVariable [_function, {}]);
+											private _parsedFunction = missionNamespace getVariable [_function, {}];
+
+											if (_parsedFunction isEqualTo {}) then {
+												switch true do {
+													case ((count _arguments) == 0): {
+														[] call (compile ([_function] joinString ""));
+													};
+
+													case ((count _arguments) == 1): {
+														private _unaryArgument = [missionNamespace, "KH_var_unaryArgument", _arguments select 0, false] call KH_fnc_atomicVariable;
+														[] call (compile ([_function, " (missionNamespace getVariable '", _unaryArgument, "');"] joinString ""));
+													};
+
+													case ((count _arguments) == 2): {
+														private _binaryArguments = [missionNamespace, "KH_var_binaryArguments", _arguments, false] call KH_fnc_atomicVariable;
+														[] call (compile (["((missionNamespace getVariable '", _binaryArguments, "') select 0) ", _function, " ((missionNamespace getVariable '", _binaryArguments, "') select 1);"] joinString ""));
+													};
+												};
+											}
+											else {
+												_arguments call _parsedFunction;
+											};
 										}
 										else {
 											_arguments call _function;

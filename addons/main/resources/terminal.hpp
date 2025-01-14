@@ -62,6 +62,7 @@ class KH_ResourceTerminal
             y = QUOTE(RSC_POS_Y(26.2));
             w = QUOTE(RSC_POS_W(27));
             h = QUOTE(RSC_POS_W(1.5));
+            deletable = 1;
             colorBackground[] = {0, 0, 0, 0.9};
         };
         class KH_ButtonExecute: RscButton 

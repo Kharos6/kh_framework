@@ -188,7 +188,7 @@ isNil {
 											publicVariable "KH_var_initialPlayerUnits";
 											KH_var_playersLoaded = true;
 											publicVariable "KH_var_playersLoaded";
-											["KH_var_playersLoaded", KH_var_initialPlayerUnits] call CBA_fnc_globalEvent;												
+											["KH_eve_playersLoaded", KH_var_initialPlayerUnits] call CBA_fnc_globalEvent;												
 											[] call KH_fnc_serverPlayersLoadedInit;
 											[[], KH_fnc_playerPlayersLoadedInit, "PLAYERS", "THIS_FRAME"] call KH_fnc_execute;
 

@@ -36,7 +36,7 @@ class KH_ModuleDisplaySubtitle: Module_F
 		class KH_ModuleDisplaySubtitleDuration: Edit
 		{
 			displayName = "Duration";
-			tooltip = "Duration of the subtitle.";
+			tooltip = "Duration of the subtitle. Can be <0> to calculate length based on average speech speed and word count.";
 			property = "KH_ModuleDisplaySubtitleDuration";
 			defaultValue = "''";
 		};

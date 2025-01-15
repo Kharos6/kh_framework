@@ -195,34 +195,7 @@ isNil {
 									private _invertedTarget = abs _target;
 
 									if (_invertedTarget == clientOwner) then {
-										if (_function isEqualType "") then {
-											private _parsedFunction = missionNamespace getVariable [_function, {}];
-
-											if (_parsedFunction isEqualTo {}) then {
-												switch true do {
-													case ((count _arguments) == 0): {
-														[] call (compile ([_function] joinString ""));
-													};
-
-													case ((count _arguments) == 1): {
-														private _unaryArgument = [missionNamespace, "KH_var_unaryArgument", _arguments select 0, false] call KH_fnc_atomicVariable;
-														[] call (compile ([_function, " (missionNamespace getVariable '", _unaryArgument, "');"] joinString ""));
-													};
-
-													case ((count _arguments) == 2): {
-														private _binaryArguments = [missionNamespace, "KH_var_binaryArguments", _arguments, false] call KH_fnc_atomicVariable;
-														[] call (compile (["((missionNamespace getVariable '", _binaryArguments, "') select 0) ", _function, " ((missionNamespace getVariable '", _binaryArguments, "') select 1);"] joinString ""));
-													};
-												};
-											}
-											else {
-												_arguments call _parsedFunction;
-											};
-										}
-										else {
-											_arguments call _function;
-										};
-
+										["KH_eve_executionGlobal", [_arguments, _function]] call CBA_fnc_remoteEvent;
 										true;
 									}
 									else {
@@ -600,7 +573,7 @@ isNil {
 									true;
 								};
 
-								case (_type == "REMOTE_CONDITION"): {
+								case (_type == "CONDITION"): {
 									private _conditionArguments = _target select 1;
 									private _conditionFunction = _target select 2;
 									private _exclusiveType = _target param [3, "GLOBAL"];
@@ -866,7 +839,7 @@ isNil {
 													true;
 												};
 
-												case (_targetType == "REMOTE_CONDITION"): {
+												case (_targetType == "CONDITION"): {
 													private _conditionArguments = _exclusiveType select 1;
 													private _conditionFunction = _exclusiveType select 2;
 													private _exclusiveType = _exclusiveType param [3, "GLOBAL"];

@@ -12,38 +12,44 @@ isNil {
 
 				private _subfunction = {
 					params ["_arguments", "_function", "_target", "_override"];
+
+					private _functionProcessor = {
+						params ["_arguments", "_function"];
+
+						if (_function isEqualType "") then {
+							private _parsedFunction = missionNamespace getVariable [_function, {}];
+
+							if (_parsedFunction isEqualTo {}) then {
+								switch true do {
+									case ((count _arguments) == 0): {
+										[] call (compile ([_function] joinString ""));
+									};
+
+									case ((count _arguments) == 1): {
+										private _unaryArgument = [missionNamespace, "KH_var_unaryArgument", _arguments select 0, false] call KH_fnc_atomicVariable;
+										[] call (compile ([_function, " (missionNamespace getVariable '", _unaryArgument, "');"] joinString ""));
+									};
+
+									case ((count _arguments) == 2): {
+										private _binaryArguments = [missionNamespace, "KH_var_binaryArguments", _arguments, false] call KH_fnc_atomicVariable;
+										[] call (compile (["((missionNamespace getVariable '", _binaryArguments, "') select 0) ", _function, " ((missionNamespace getVariable '", _binaryArguments, "') select 1);"] joinString ""));
+									};
+								};
+							}
+							else {
+								_arguments call _parsedFunction;
+							};
+						}
+						else {
+							_arguments call _function;
+						};
+					};
 					
 					switch true do {
 						case (_target isEqualType objNull): {
 							if !(isNull _target) then {
 								if (local _target) then {
-									if (_function isEqualType "") then {
-										private _parsedFunction = missionNamespace getVariable [_function, {}];
-
-										if (_parsedFunction isEqualTo {}) then {
-											switch true do {
-												case ((count _arguments) == 0): {
-													[] call (compile ([_function] joinString ""));
-												};
-
-												case ((count _arguments) == 1): {
-													private _unaryArgument = [missionNamespace, "KH_var_unaryArgument", _arguments select 0, false] call KH_fnc_atomicVariable;
-													[] call (compile ([_function, " (missionNamespace getVariable '", _unaryArgument, "');"] joinString ""));
-												};
-
-												case ((count _arguments) == 2): {
-													private _binaryArguments = [missionNamespace, "KH_var_binaryArguments", _arguments, false] call KH_fnc_atomicVariable;
-													[] call (compile (["((missionNamespace getVariable '", _binaryArguments, "') select 0) ", _function, " ((missionNamespace getVariable '", _binaryArguments, "') select 1);"] joinString ""));
-												};
-											};
-										}
-										else {
-											_arguments call _parsedFunction;
-										};
-									}
-									else {
-										_arguments call _function;
-									};
+									[_arguments, _function] call _functionProcessor;
 								}
 								else {
 									["KH_eve_executionGlobal", [_arguments, _function], _target] call CBA_fnc_targetEvent;
@@ -59,33 +65,7 @@ isNil {
 						case (_target isEqualType teamMemberNull): {
 							if !(isNull _target) then {
 								if (local (agent _target)) then {
-									if (_function isEqualType "") then {
-										private _parsedFunction = missionNamespace getVariable [_function, {}];
-
-										if (_parsedFunction isEqualTo {}) then {
-											switch true do {
-												case ((count _arguments) == 0): {
-													[] call (compile ([_function] joinString ""));
-												};
-
-												case ((count _arguments) == 1): {
-													private _unaryArgument = [missionNamespace, "KH_var_unaryArgument", _arguments select 0, false] call KH_fnc_atomicVariable;
-													[] call (compile ([_function, " (missionNamespace getVariable '", _unaryArgument, "');"] joinString ""));
-												};
-
-												case ((count _arguments) == 2): {
-													private _binaryArguments = [missionNamespace, "KH_var_binaryArguments", _arguments, false] call KH_fnc_atomicVariable;
-													[] call (compile (["((missionNamespace getVariable '", _binaryArguments, "') select 0) ", _function, " ((missionNamespace getVariable '", _binaryArguments, "') select 1);"] joinString ""));
-												};
-											};
-										}
-										else {
-											_arguments call _parsedFunction;
-										};
-									}
-									else {
-										_arguments call _function;
-									};
+									[_arguments, _function] call _functionProcessor;
 								}
 								else {
 									["KH_eve_executionGlobal", [_arguments, _function], agent _target] call CBA_fnc_targetEvent;
@@ -101,33 +81,7 @@ isNil {
 						case (_target isEqualType grpNull): {
 							if !(isNull _target) then {
 								if (local _target) then {
-									if (_function isEqualType "") then {
-										private _parsedFunction = missionNamespace getVariable [_function, {}];
-
-										if (_parsedFunction isEqualTo {}) then {
-											switch true do {
-												case ((count _arguments) == 0): {
-													[] call (compile ([_function] joinString ""));
-												};
-
-												case ((count _arguments) == 1): {
-													private _unaryArgument = [missionNamespace, "KH_var_unaryArgument", _arguments select 0, false] call KH_fnc_atomicVariable;
-													[] call (compile ([_function, " (missionNamespace getVariable '", _unaryArgument, "');"] joinString ""));
-												};
-
-												case ((count _arguments) == 2): {
-													private _binaryArguments = [missionNamespace, "KH_var_binaryArguments", _arguments, false] call KH_fnc_atomicVariable;
-													[] call (compile (["((missionNamespace getVariable '", _binaryArguments, "') select 0) ", _function, " ((missionNamespace getVariable '", _binaryArguments, "') select 1);"] joinString ""));
-												};
-											};
-										}
-										else {
-											_arguments call _parsedFunction;
-										};
-									}
-									else {
-										_arguments call _function;
-									};
+									[_arguments, _function] call _functionProcessor;
 								}
 								else {
 									[
@@ -151,34 +105,7 @@ isNil {
 						
 						case (_target isEqualType 0): {
 							if (_target == clientOwner) then {
-								if (_function isEqualType "") then {
-									private _parsedFunction = missionNamespace getVariable [_function, {}];
-
-									if (_parsedFunction isEqualTo {}) then {
-										switch true do {
-											case ((count _arguments) == 0): {
-												[] call (compile ([_function] joinString ""));
-											};
-
-											case ((count _arguments) == 1): {
-												private _unaryArgument = [missionNamespace, "KH_var_unaryArgument", _arguments select 0, false] call KH_fnc_atomicVariable;
-												[] call (compile ([_function, " (missionNamespace getVariable '", _unaryArgument, "');"] joinString ""));
-											};
-
-											case ((count _arguments) == 2): {
-												private _binaryArguments = [missionNamespace, "KH_var_binaryArguments", _arguments, false] call KH_fnc_atomicVariable;
-												[] call (compile (["((missionNamespace getVariable '", _binaryArguments, "') select 0) ", _function, " ((missionNamespace getVariable '", _binaryArguments, "') select 1);"] joinString ""));
-											};
-										};
-									}
-									else {
-										_arguments call _parsedFunction;
-									};
-								}
-								else {
-									_arguments call _function;
-								};
-
+								[_arguments, _function] call _functionProcessor;
 								true;
 							}
 							else {
@@ -223,33 +150,7 @@ isNil {
 							switch true do {
 								case (_target == "SERVER"): {
 									if isServer then {
-										if (_function isEqualType "") then {
-											private _parsedFunction = missionNamespace getVariable [_function, {}];
-
-											if (_parsedFunction isEqualTo {}) then {
-												switch true do {
-													case ((count _arguments) == 0): {
-														[] call (compile ([_function] joinString ""));
-													};
-
-													case ((count _arguments) == 1): {
-														private _unaryArgument = [missionNamespace, "KH_var_unaryArgument", _arguments select 0, false] call KH_fnc_atomicVariable;
-														[] call (compile ([_function, " (missionNamespace getVariable '", _unaryArgument, "');"] joinString ""));
-													};
-
-													case ((count _arguments) == 2): {
-														private _binaryArguments = [missionNamespace, "KH_var_binaryArguments", _arguments, false] call KH_fnc_atomicVariable;
-														[] call (compile (["((missionNamespace getVariable '", _binaryArguments, "') select 0) ", _function, " ((missionNamespace getVariable '", _binaryArguments, "') select 1);"] joinString ""));
-													};
-												};
-											}
-											else {
-												_arguments call _parsedFunction;
-											};
-										}
-										else {
-											_arguments call _function;
-										};
+										[_arguments, _function] call _functionProcessor;
 									}
 									else {
 										["KH_eve_executionServer", [_arguments, _function]] call CBA_fnc_serverEvent;
@@ -296,33 +197,7 @@ isNil {
 								case (_target == "ADMIN"): {
 									if (KH_var_currentAdmin != 2) then {
 										if (KH_var_currentAdmin == clientOwner) then {
-											if (_function isEqualType "") then {
-												private _parsedFunction = missionNamespace getVariable [_function, {}];
-
-												if (_parsedFunction isEqualTo {}) then {
-													switch true do {
-														case ((count _arguments) == 0): {
-															[] call (compile ([_function] joinString ""));
-														};
-
-														case ((count _arguments) == 1): {
-															private _unaryArgument = [missionNamespace, "KH_var_unaryArgument", _arguments select 0, false] call KH_fnc_atomicVariable;
-															[] call (compile ([_function, " (missionNamespace getVariable '", _unaryArgument, "');"] joinString ""));
-														};
-
-														case ((count _arguments) == 2): {
-															private _binaryArguments = [missionNamespace, "KH_var_binaryArguments", _arguments, false] call KH_fnc_atomicVariable;
-															[] call (compile (["((missionNamespace getVariable '", _binaryArguments, "') select 0) ", _function, " ((missionNamespace getVariable '", _binaryArguments, "') select 1);"] joinString ""));
-														};
-													};
-												}
-												else {
-													_arguments call _parsedFunction;
-												};
-											}
-											else {
-												_arguments call _function;
-											};
+											[_arguments, _function] call _functionProcessor;
 										}
 										else {
 											["KH_eve_executionPlayer", [_arguments, _function], KH_var_currentAdmin] call CBA_fnc_ownerEvent;
@@ -371,33 +246,7 @@ isNil {
 									else {
 										if !(isNull (objectFromNetId _target)) then {
 											if (local (objectFromNetId _target)) then {
-												if (_function isEqualType "") then {
-													private _parsedFunction = missionNamespace getVariable [_function, {}];
-
-													if (_parsedFunction isEqualTo {}) then {
-														switch true do {
-															case ((count _arguments) == 0): {
-																[] call (compile ([_function] joinString ""));
-															};
-
-															case ((count _arguments) == 1): {
-																private _unaryArgument = [missionNamespace, "KH_var_unaryArgument", _arguments select 0, false] call KH_fnc_atomicVariable;
-																[] call (compile ([_function, " (missionNamespace getVariable '", _unaryArgument, "');"] joinString ""));
-															};
-
-															case ((count _arguments) == 2): {
-																private _binaryArguments = [missionNamespace, "KH_var_binaryArguments", _arguments, false] call KH_fnc_atomicVariable;
-																[] call (compile (["((missionNamespace getVariable '", _binaryArguments, "') select 0) ", _function, " ((missionNamespace getVariable '", _binaryArguments, "') select 1);"] joinString ""));
-															};
-														};
-													}
-													else {
-														_arguments call _parsedFunction;
-													};
-												}
-												else {
-													_arguments call _function;
-												};
+												[_arguments, _function] call _functionProcessor;
 											}
 											else {
 												["KH_eve_executionGlobal", [_arguments, _function], objectFromNetId _target] call CBA_fnc_targetEvent;
@@ -408,33 +257,7 @@ isNil {
 										else {
 											if !(isNull (groupFromNetId _target)) then {
 												if (local (groupFromNetId _target)) then {
-													if (_function isEqualType "") then {
-														private _parsedFunction = missionNamespace getVariable [_function, {}];
-
-														if (_parsedFunction isEqualTo {}) then {
-															switch true do {
-																case ((count _arguments) == 0): {
-																	[] call (compile ([_function] joinString ""));
-																};
-
-																case ((count _arguments) == 1): {
-																	private _unaryArgument = [missionNamespace, "KH_var_unaryArgument", _arguments select 0, false] call KH_fnc_atomicVariable;
-																	[] call (compile ([_function, " (missionNamespace getVariable '", _unaryArgument, "');"] joinString ""));
-																};
-
-																case ((count _arguments) == 2): {
-																	private _binaryArguments = [missionNamespace, "KH_var_binaryArguments", _arguments, false] call KH_fnc_atomicVariable;
-																	[] call (compile (["((missionNamespace getVariable '", _binaryArguments, "') select 0) ", _function, " ((missionNamespace getVariable '", _binaryArguments, "') select 1);"] joinString ""));
-																};
-															};
-														}
-														else {
-															_arguments call _parsedFunction;
-														};
-													}
-													else {
-														_arguments call _function;
-													};
+													[_arguments, _function] call _functionProcessor;
 												}
 												else {
 													[
@@ -459,33 +282,7 @@ isNil {
 								};
 
 								case (_target == "LOCAL"): {
-									if (_function isEqualType "") then {
-										private _parsedFunction = missionNamespace getVariable [_function, {}];
-
-										if (_parsedFunction isEqualTo {}) then {
-											switch true do {
-												case ((count _arguments) == 0): {
-													[] call (compile ([_function] joinString ""));
-												};
-
-												case ((count _arguments) == 1): {
-													private _unaryArgument = [missionNamespace, "KH_var_unaryArgument", _arguments select 0, false] call KH_fnc_atomicVariable;
-													[] call (compile ([_function, " (missionNamespace getVariable '", _unaryArgument, "');"] joinString ""));
-												};
-
-												case ((count _arguments) == 2): {
-													private _binaryArguments = [missionNamespace, "KH_var_binaryArguments", _arguments, false] call KH_fnc_atomicVariable;
-													[] call (compile (["((missionNamespace getVariable '", _binaryArguments, "') select 0) ", _function, " ((missionNamespace getVariable '", _binaryArguments, "') select 1);"] joinString ""));
-												};
-											};
-										}
-										else {
-											_arguments call _parsedFunction;
-										};
-									}
-									else {
-										_arguments call _function;
-									};
+									[_arguments, _function] call _functionProcessor;
 								};
 								
 								default {
@@ -600,42 +397,16 @@ isNil {
 									[
 										_eventType, 
 										[
-											[_arguments, _function, _conditionArguments, _conditionFunction], 
+											[_arguments, _function, _conditionArguments, _conditionFunction, _functionProcessor], 
 											{
-												params ["_arguments", "_function", "_conditionArguments", "_conditionFunction"];
+												params ["_arguments", "_function", "_conditionArguments", "_conditionFunction", "_functionProcessor"];
 
 												if (_conditionFunction isEqualType "") then {
 													_conditionFunction = missionNamespace getVariable [_conditionFunction, {}];
 												};
 												
 												if (_conditionArguments call _conditionFunction) then {
-													if (_function isEqualType "") then {
-														private _parsedFunction = missionNamespace getVariable [_function, {}];
-
-														if (_parsedFunction isEqualTo {}) then {
-															switch true do {
-																case ((count _arguments) == 0): {
-																	[] call (compile ([_function] joinString ""));
-																};
-
-																case ((count _arguments) == 1): {
-																	private _unaryArgument = [missionNamespace, "KH_var_unaryArgument", _arguments select 0, false] call KH_fnc_atomicVariable;
-																	[] call (compile ([_function, " (missionNamespace getVariable '", _unaryArgument, "');"] joinString ""));
-																};
-
-																case ((count _arguments) == 2): {
-																	private _binaryArguments = [missionNamespace, "KH_var_binaryArguments", _arguments, false] call KH_fnc_atomicVariable;
-																	[] call (compile (["((missionNamespace getVariable '", _binaryArguments, "') select 0) ", _function, " ((missionNamespace getVariable '", _binaryArguments, "') select 1);"] joinString ""));
-																};
-															};
-														}
-														else {
-															_arguments call _parsedFunction;
-														};
-													}
-													else {
-														_arguments call _function;
-													};
+													[_arguments, _function] call _functionProcessor;
 												};
 											}
 										]
@@ -866,42 +637,16 @@ isNil {
 													[
 														_eventType, 
 														[
-															[_arguments, _function, _conditionArguments, _conditionFunction, _backupArguments, _backupFunction], 
+															[_arguments, _function, _conditionArguments, _conditionFunction, _functionProcessor], 
 															{
-																params ["_arguments", "_function", "_conditionArguments", "_conditionFunction", "_backupArguments", "_backupFunction"];
+																params ["_arguments", "_function", "_conditionArguments", "_conditionFunction", "_functionProcessor"];
 
 																if (_conditionFunction isEqualType "") then {
 																	_conditionFunction = missionNamespace getVariable [_conditionFunction, {}];
 																};
 																
 																if (_conditionArguments call _conditionFunction) then {
-																	if (_function isEqualType "") then {
-																		private _parsedFunction = missionNamespace getVariable [_function, {}];
-
-																		if (_parsedFunction isEqualTo {}) then {
-																			switch true do {
-																				case ((count _arguments) == 0): {
-																					[] call (compile ([_function] joinString ""));
-																				};
-
-																				case ((count _arguments) == 1): {
-																					private _unaryArgument = [missionNamespace, "KH_var_unaryArgument", _arguments select 0, false] call KH_fnc_atomicVariable;
-																					[] call (compile ([_function, " (missionNamespace getVariable '", _unaryArgument, "');"] joinString ""));
-																				};
-
-																				case ((count _arguments) == 2): {
-																					private _binaryArguments = [missionNamespace, "KH_var_binaryArguments", _arguments, false] call KH_fnc_atomicVariable;
-																					[] call (compile (["((missionNamespace getVariable '", _binaryArguments, "') select 0) ", _function, " ((missionNamespace getVariable '", _binaryArguments, "') select 1);"] joinString ""));
-																				};
-																			};
-																		}
-																		else {
-																			_arguments call _parsedFunction;
-																		};
-																	}
-																	else {
-																		_arguments call _function;
-																	};
+																	[_arguments, _function] call _functionProcessor;
 																};
 															}
 														]
@@ -920,9 +665,9 @@ isNil {
 									[
 										"KH_eve_executionServer", 
 										[
-											[_arguments, _function, _targets, clientOwner],
+											[_arguments, _function, _targets, _functionProcessor, clientOwner],
 											{
-												params ["_arguments", "_function", "_targets", "_caller"];
+												params ["_arguments", "_function", "_targets", "_functionProcessor", "_caller"];
 												private _exclusiveList = [];
 
 												{
@@ -980,34 +725,7 @@ isNil {
 															switch true do {
 																case (_x == "SERVER"): {
 																	if !(2 in _exclusiveList) then {
-																		if (_function isEqualType "") then {
-																			private _parsedFunction = missionNamespace getVariable [_function, {}];
-
-																			if (_parsedFunction isEqualTo {}) then {
-																				switch true do {
-																					case ((count _arguments) == 0): {
-																						[] call (compile ([_function] joinString ""));
-																					};
-
-																					case ((count _arguments) == 1): {
-																						private _unaryArgument = [missionNamespace, "KH_var_unaryArgument", _arguments select 0, false] call KH_fnc_atomicVariable;
-																						[] call (compile ([_function, " (missionNamespace getVariable '", _unaryArgument, "');"] joinString ""));
-																					};
-
-																					case ((count _arguments) == 2): {
-																						private _binaryArguments = [missionNamespace, "KH_var_binaryArguments", _arguments, false] call KH_fnc_atomicVariable;
-																						[] call (compile (["((missionNamespace getVariable '", _binaryArguments, "') select 0) ", _function, " ((missionNamespace getVariable '", _binaryArguments, "') select 1);"] joinString ""));
-																					};
-																				};
-																			}
-																			else {
-																				_arguments call _parsedFunction;
-																			};
-																		}
-																		else {
-																			_arguments call _function;
-																		};
-																		
+																		[_arguments, _function] call _functionProcessor;
 																		_exclusiveList pushBack 2;
 																	};
 																};
@@ -1871,77 +1589,25 @@ isNil {
 
 									if !(isNull _targetObject) then {
 										private _persistencyFunction = {
-											params ["_arguments", "_function", "_targetObject", "_sendoffArguments", "_sendoffFunction", "_id"];
+											params ["_arguments", "_function", "_targetObject", "_sendoffArguments", "_sendoffFunction", "_functionProcessor", "_id"];
 
 											[
 												["STANDARD", _targetObject, false],
 												"Local",
-												[_arguments, _function, _sendoffArguments, _sendoffFunction, _id],
+												[_arguments, _function, _sendoffArguments, _sendoffFunction, _functionProcessor, _id],
 												{
 													params ["_targetObject", "_isLocal"];
-													_args params ["_arguments", "_function", "_sendoffArguments", "_sendoffFunction", "_id"];
+													_args params ["_arguments", "_function", "_sendoffArguments", "_sendoffFunction", "_functionProcessor", "_id"];
 													private _idState = _targetObject getVariable [_id, "ACTIVE"];
 
 													if !(_idState == "INACTIVE") then {
 														switch true do {
 															case (_idState == "ACTIVE"): {
 																if _isLocal then {
-																	if (_function isEqualType "") then {
-																		private _parsedFunction = missionNamespace getVariable [_function, {}];
-
-																		if (_parsedFunction isEqualTo {}) then {
-																			switch true do {
-																				case ((count _arguments) == 0): {
-																					[] call (compile ([_function] joinString ""));
-																				};
-
-																				case ((count _arguments) == 1): {
-																					private _unaryArgument = [missionNamespace, "KH_var_unaryArgument", _arguments select 0, false] call KH_fnc_atomicVariable;
-																					[] call (compile ([_function, " (missionNamespace getVariable '", _unaryArgument, "');"] joinString ""));
-																				};
-
-																				case ((count _arguments) == 2): {
-																					private _binaryArguments = [missionNamespace, "KH_var_binaryArguments", _arguments, false] call KH_fnc_atomicVariable;
-																					[] call (compile (["((missionNamespace getVariable '", _binaryArguments, "') select 0) ", _function, " ((missionNamespace getVariable '", _binaryArguments, "') select 1);"] joinString ""));
-																				};
-																			};
-																		}
-																		else {
-																			_arguments call _parsedFunction;
-																		};
-																	}
-																	else {
-																		_arguments call _function;
-																	};
+																	[_arguments, _function] call _functionProcessor;
 																}
 																else {
-																	if (_sendoffFunction isEqualType "") then {
-																		private _parsedFunction = missionNamespace getVariable [_sendoffFunction, {}];
-
-																		if (_parsedFunction isEqualTo {}) then {
-																			switch true do {
-																				case ((count _sendoffArguments) == 0): {
-																					[] call (compile ([_sendoffFunction] joinString ""));
-																				};
-
-																				case ((count _sendoffArguments) == 1): {
-																					private _unaryArgument = [missionNamespace, "KH_var_unaryArgument", _sendoffArguments select 0, false] call KH_fnc_atomicVariable;
-																					[] call (compile ([_sendoffFunction, " (missionNamespace getVariable '", _unaryArgument, "');"] joinString ""));
-																				};
-
-																				case ((count _sendoffArguments) == 2): {
-																					private _binaryArguments = [missionNamespace, "KH_var_binaryArguments", _sendoffArguments, false] call KH_fnc_atomicVariable;
-																					[] call (compile (["((missionNamespace getVariable '", _binaryArguments, "') select 0) ", _sendoffFunction, " ((missionNamespace getVariable '", _binaryArguments, "') select 1);"] joinString ""));
-																				};
-																			};
-																		}
-																		else {
-																			_sendoffArguments call _parsedFunction;
-																		};
-																	}
-																	else {
-																		_sendoffArguments call _sendoffFunction;
-																	};
+																	[_sendoffArguments, _sendoffFunction] call _functionProcessor;
 																};
 															};
 
@@ -1972,7 +1638,7 @@ isNil {
 											[
 												"KH_eve_executionGlobal",
 												[
-													[_arguments, _function, _targetObject, _sendoffArguments, _sendoffFunction, _id], 
+													[_arguments, _function, _targetObject, _sendoffArguments, _sendoffFunction, _functionProcessor, _id], 
 													_persistencyFunction
 												],
 												_x
@@ -1983,23 +1649,23 @@ isNil {
 											[
 												"KH_eve_executionServer", 
 												[
-													[_arguments, _function, _persistencyFunction, _targetObject, _sendoffArguments, _sendoffFunction, _id], 
+													[_arguments, _function, _persistencyFunction, _targetObject, _sendoffArguments, _sendoffFunction, _functionProcessor, _id], 
 													{
-														params ["_arguments", "_function", "_persistencyFunction", "_targetObject", "_sendoffArguments", "_sendoffFunction", "_id"];
+														params ["_arguments", "_function", "_persistencyFunction", "_targetObject", "_sendoffArguments", "_sendoffFunction", "_functionProcessor", "_id"];
 
 														{
 															[
 																"CBA",
 																_x,
-																[_arguments, _function, _persistencyFunction, _targetObject, _sendoffArguments, _sendoffFunction, _id],
+																[_arguments, _function, _persistencyFunction, _targetObject, _sendoffArguments, _sendoffFunction, _functionProcessor, _id],
 																{
-																	_args params ["_arguments", "_function", "_persistencyFunction", "_targetObject", "_sendoffArguments", "_sendoffFunction", "_id"];
+																	_args params ["_arguments", "_function", "_persistencyFunction", "_targetObject", "_sendoffArguments", "_sendoffFunction", "_functionProcessor", "_id"];
 																	params ["_joiningMachine"];
 
 																	[
 																		"KH_eve_executionGlobal",
 																		[
-																			[_arguments, _function, _targetObject, _sendoffArguments, _sendoffFunction, _id], 
+																			[_arguments, _function, _targetObject, _sendoffArguments, _sendoffFunction, _functionProcessor, _id], 
 																			_persistencyFunction
 																		],
 																		_joiningMachine
@@ -2035,33 +1701,7 @@ isNil {
 										["KH_eve_executionHeadless", [_arguments, _function]] call CBA_fnc_globalEvent;
 									}
 									else {
-										if (_function isEqualType "") then {
-											private _parsedFunction = missionNamespace getVariable [_function, {}];
-
-											if (_parsedFunction isEqualTo {}) then {
-												switch true do {
-													case ((count _arguments) == 0): {
-														[] call (compile ([_function] joinString ""));
-													};
-
-													case ((count _arguments) == 1): {
-														private _unaryArgument = [missionNamespace, "KH_var_unaryArgument", _arguments select 0, false] call KH_fnc_atomicVariable;
-														[] call (compile ([_function, " (missionNamespace getVariable '", _unaryArgument, "');"] joinString ""));
-													};
-
-													case ((count _arguments) == 2): {
-														private _binaryArguments = [missionNamespace, "KH_var_binaryArguments", _arguments, false] call KH_fnc_atomicVariable;
-														[] call (compile (["((missionNamespace getVariable '", _binaryArguments, "') select 0) ", _function, " ((missionNamespace getVariable '", _binaryArguments, "') select 1);"] joinString ""));
-													};
-												};
-											}
-											else {
-												_arguments call _parsedFunction;
-											};
-										}
-										else {
-											_arguments call _function;
-										};
+										[_arguments, _function] call _functionProcessor;
 									};
 								};
 							}

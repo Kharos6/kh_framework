@@ -45,7 +45,7 @@ if _state then {
 					};
 				};
 			},
-			["JIP", "GLOBAL", true, false, false],
+			["JIP", "GLOBAL", true, false, false, ""],
 			"THIS_FRAME"
 		] call KH_fnc_execute;
 

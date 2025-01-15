@@ -41,7 +41,7 @@ isNil {
 										[
 											[_x, _name, _tooltip, _condition, _options],
 											"KH_fnc_addRemoteInteractionEntry",
-											["JIP", "PLAYERS", _x, false, true],
+											["JIP", "PLAYERS", _x, false, true, ""],
 											"THIS_FRAME"
 										] call KH_fnc_execute;
 									}

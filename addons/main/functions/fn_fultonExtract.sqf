@@ -26,7 +26,7 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 		true
 	],
 	"BIS_fnc_holdActionAdd", 
-	["JIP", "PLAYERS", _object, false, false], 
+	["JIP", "PLAYERS", _object, false, false, ""], 
 	"THIS_FRAME"
 ] call KH_fnc_execute;
 
@@ -193,7 +193,7 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 				true
 			],
 			"BIS_fnc_holdActionAdd", 
-			["JIP", "PLAYERS", _object, false, false], 
+			["JIP", "PLAYERS", _object, false, false, ""], 
 			"THIS_FRAME"
 		] call KH_fnc_execute;
 
@@ -229,7 +229,7 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 									true
 								],
 								"BIS_fnc_holdActionAdd", 
-								["JIP", "PLAYERS", _x, false, false], 
+								["JIP", "PLAYERS", _x, false, false, ""], 
 								"THIS_FRAME"
 							] call KH_fnc_execute;
 
@@ -259,7 +259,7 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 									true
 								],
 								"BIS_fnc_holdActionAdd", 
-								["JIP", "PLAYERS", _x, false, false], 
+								["JIP", "PLAYERS", _x, false, false, ""], 
 								"THIS_FRAME"
 							] call KH_fnc_execute;
 						};

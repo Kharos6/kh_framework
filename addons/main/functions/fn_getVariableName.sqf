@@ -11,7 +11,7 @@ if (_variableName == "") then {
 			params ["_entity", "_variableName"];
 			_entity setVehicleVarName _variableName;
 		},
-		["JIP", "GLOBAL", _entity, false, true],
+		["JIP", "GLOBAL", _entity, false, true, ""],
 		"THIS_FRAME"
 	] call KH_fnc_execute;
 };

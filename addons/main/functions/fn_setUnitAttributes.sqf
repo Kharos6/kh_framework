@@ -16,7 +16,7 @@ if _variableName then {
 				params ["_unit", "_attributes"];
 				_unit setVehicleVarName (_attributes select 3);
 			},
-			["JIP", "GLOBAL", _unit, false, false],
+			["JIP", "GLOBAL", _unit, false, false, ""],
 			"THIS_FRAME"
 		] call KH_fnc_execute;
 	};
@@ -31,7 +31,7 @@ if _identity then {
 			_unit setFace (_attributes select 5);
 			_unit setSpeaker (_attributes select 6);
 		},
-		["JIP", "GLOBAL", _unit, false, false],
+		["JIP", "GLOBAL", _unit, false, false, ""],
 		"THIS_FRAME"
 	] call KH_fnc_execute;
 };

@@ -333,7 +333,7 @@ else {
 			params ["_unit", "_animation"];
 			_unit switchMove _animation;
 		},
-		["JIP", "GLOBAL", _unit, false, false],
+		["JIP", "GLOBAL", _unit, false, false, ""],
 		"THIS_FRAME"
 	] call KH_fnc_execute;
 

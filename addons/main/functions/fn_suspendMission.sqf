@@ -30,7 +30,7 @@ if _state then {
 				titleText ["MISSION SUSPENDED - PLEASE WAIT", "BLACK IN", 999999];
 			};
 		},
-		["JIP", "PLAYERS", "KH_var_missionSuspended", true, true],
+		["JIP", "PLAYERS", "KH_var_missionSuspended", true, true, ""],
 		"THIS_FRAME"
 	] call KH_fnc_execute;
 }

@@ -81,7 +81,7 @@ if (isNull _unit) then {
 			true
 		],
 		"BIS_fnc_holdActionAdd", 
-		["JIP", "PLAYERS", _object, false, false], 
+		["JIP", "PLAYERS", _object, false, false, ""], 
 		"THIS_FRAME"
 	] call KH_fnc_execute;
 }
@@ -159,7 +159,7 @@ else {
 				false
 			],
 			"BIS_fnc_holdActionAdd", 
-			["JIP", "PLAYERS", _object, false, false], 
+			["JIP", "PLAYERS", _object, false, false, ""], 
 			"THIS_FRAME"
 		] call KH_fnc_execute;
 		
@@ -236,7 +236,7 @@ else {
 				false
 			],
 			"BIS_fnc_holdActionAdd", 
-			["JIP", "PLAYERS", _object, false, false], 
+			["JIP", "PLAYERS", _object, false, false, ""], 
 			"THIS_FRAME"
 		] call KH_fnc_execute;
 		
@@ -251,7 +251,7 @@ else {
 				_object setObjectScale _scale;
 				_object setMass _mass;
 			},
-			["JIP", "GLOBAL", _object, false, false], 
+			["JIP", "GLOBAL", _object, false, false, ""], 
 			"THIS_FRAME"
 		] call KH_fnc_execute;
 		

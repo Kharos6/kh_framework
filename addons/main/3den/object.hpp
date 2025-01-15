@@ -344,7 +344,7 @@ class Object
 								[_this, _positionEntity, _targetEntity, parseNumber _texture, _renderTarget + 1],\
 								{\
 									params ['_entity', '_positionEntity', '_targetEntity', '_texture', '_renderTarget'];\
-									[[_entity, missionNamespace getVariable [_positionEntity, objNull], missionNamespace getVariable [_targetEntity, objNull], _texture, _renderTarget], 'KH_fnc_setCameraTexture', ['JIP', 'PLAYERS', _entity, true, false], 'THIS_FRAME'] call KH_fnc_execute;\
+									[[_entity, missionNamespace getVariable [_positionEntity, objNull], missionNamespace getVariable [_targetEntity, objNull], _texture, _renderTarget], 'KH_fnc_setCameraTexture', ['JIP', 'PLAYERS', _entity, true, false, ''], 'THIS_FRAME'] call KH_fnc_execute;\
 								}\
 							];\
 						};\
@@ -397,7 +397,7 @@ class Object
 												[_entity, _video, _texture, _audio]\
 											] call CBA_fnc_addPerFrameHandler;\
 										},\
-										['JIP', 'PLAYERS', _entity, true, false],\
+										['JIP', 'PLAYERS', _entity, true, false, ''],\
 										'THIS_FRAME'\
 									] call KH_fnc_execute;\
 								}\
@@ -458,7 +458,7 @@ class Object
 												true\
 											] call BIS_fnc_holdActionAdd;\
 										},\
-										['JIP', 'PLAYERS', _entity, false, false],\
+										['JIP', 'PLAYERS', _entity, false, false, ''],\
 										'THIS_FRAME'\
 									] call KH_fnc_execute;\
 								}\
@@ -589,7 +589,7 @@ class Object
 											params ['_unit', '_speed'];\
 											_unit setAnimSpeedCoef _speed;\
 										},\
-										['JIP', 'PLAYERS', _this select 0, false, false],\
+										['JIP', 'PLAYERS', _this select 0, false, false, ''],\
 										'THIS_FRAME'\
 									] call KH_fnc_execute;\
 								}\
@@ -720,7 +720,7 @@ class Object
 											params ['_entity'];\
 											_entity lockInventory true;\
 										},\
-										['JIP', 'PLAYERS', _this select 0, false, false],\
+										['JIP', 'PLAYERS', _this select 0, false, false, ''],\
 										'THIS_FRAME'\
 									] call KH_fnc_execute;\
 								}\

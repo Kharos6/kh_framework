@@ -52,7 +52,7 @@ missionNamespace setVariable [_identifier, false, true];
 			true
 		],
 		"BIS_fnc_holdActionAdd",
-		["JIP", "PLAYERS", _x, false, false], 
+		["JIP", "PLAYERS", _x, false, false, ""], 
 		"THIS_FRAME"
 	] call KH_fnc_execute;
 
@@ -79,7 +79,7 @@ missionNamespace setVariable [_identifier, false, true];
 			true
 		],
 		"BIS_fnc_holdActionAdd",
-		["JIP", "PLAYERS", _x, false, false], 
+		["JIP", "PLAYERS", _x, false, false, ""], 
 		"THIS_FRAME"
 	] call KH_fnc_execute;
 } forEach _objects;

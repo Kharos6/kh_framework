@@ -8,7 +8,7 @@ private _functionProcessor = {
 			private _functionName = format ["M_fnc_%1", (_function select [0, (_function find ".sqf") - 1]) regexReplace ["[\\/]", "_"]];
 
 			if ((missionNamespace getVariable [_functionName, {}]) isEqualTo {}) then {
-				missionNamespace setVariable [_functionName, compile _function];
+				missionNamespace setVariable [_functionName, compile (preprocessFileLineNumbers _function)];
 			};
 
 			_arguments call (missionNamespace getVariable [_functionName, {}]);
@@ -47,7 +47,8 @@ private _functionProcessor = {
 KH_var_postInitExecutions = [];
 
 if isServer then {
-	KH_var_logicGroup = createGroup [sideLogic, false];
+	KH_var_missionStarted = false;
+	publicVariable "KH_var_missionStarted";
 	KH_var_playersLoaded = false;
 	publicVariable "KH_var_playersLoaded";
 	KH_var_currentAdmin = 2;
@@ -76,6 +77,8 @@ if isServer then {
 	publicVariable "KH_var_jipPlayerUnits";
 	KH_var_jipPlayerMachines = [];
 	publicVariable "KH_var_jipPlayerMachines";
+	KH_var_logicGroup = createGroup [sideLogic, false];
+	publicVariable "KH_var_logicGroup";
 	KH_var_allEntities = entities [[], ["Animal"], true, false];
 	KH_var_allDeadEntities = (entities [[], ["Animal"], true, false]) select {!alive _x;};
 	KH_var_allTerrainObjects = nearestTerrainObjects [[worldSize / 2, worldSize / 2], [], worldSize * sqrt 2 / 2, false, true];
@@ -432,10 +435,12 @@ if hasInterface then {
 									"KeyDown", 
 									{
 										private _key = _this select 1;
+										private _shift = _this select 2;
+										private _ctrl = _this select 3;
 										private _alt = _this select 4;
 
 										switch true do {
-											case ((_key isEqualTo 0xDC) && !dialog && _alt && !KH_var_interactionMenuOpen && (alive player)): {
+											case ((_key isEqualTo 0xDC) && !dialog && _alt && !_ctrl && !KH_var_interactionMenuOpen && (alive player)): {
 												KH_var_interactionMenuOpen = true;
 												private _display = [] call KH_fnc_openSelfInteractionMenu;
 
@@ -456,7 +461,7 @@ if hasInterface then {
 												] call CBA_fnc_waitUntilAndExecute;
 											};
 
-											case ((_key isEqualTo 0xDC) && !dialog && !_alt && !KH_var_interactionMenuOpen && (alive player)): {
+											case ((_key isEqualTo 0xDC) && !dialog && !_alt && !_ctrl && !KH_var_interactionMenuOpen && (alive player)): {
 												private _object = objNull;
 
 												if !(isNull cursorObject) then {
@@ -469,6 +474,59 @@ if hasInterface then {
 												if ((_object distance player) < 4) then {
 													KH_var_interactionMenuOpen = true;
 													private _display = [_object] call KH_fnc_openRemoteInteractionMenu;
+
+													[
+														{
+															params ["_display", "_object"];
+															((isNull _display) || ((_object distance player) > 4) || !(alive player) || (player getVariable ["ACE_isUnconscious", false]) || ((lifeState player) == "INCAPACITATED"));
+														},
+														{
+															params ["_display"];
+															KH_var_interactionMenuOpen = false;
+
+															if !(isNull _display) then {
+																_display closeDisplay 2;
+															};
+														}, 
+														[_display, _object]
+													] call CBA_fnc_waitUntilAndExecute;
+												};
+											};
+
+											case ((_key isEqualTo 0xDC) && !dialog && _ctrl && _alt && !KH_var_interactionMenuOpen && (alive player)): {
+												KH_var_interactionMenuOpen = true;
+												private _display = [player] call KH_fnc_openSimulatedInventory;
+
+												[
+													{
+														params ["_display"];
+														((isNull _display) || !(alive player) || (player getVariable ["ACE_isUnconscious", false]) || ((lifeState player) == "INCAPACITATED"));
+													},
+													{
+														params ["_display"];
+														KH_var_interactionMenuOpen = false;
+
+														if !(isNull _display) then {
+															_display closeDisplay 2;
+														};
+													}, 
+													[_display]
+												] call CBA_fnc_waitUntilAndExecute;
+											};
+
+											case ((_key isEqualTo 0xDC) && !dialog && _ctrl && !_alt && !KH_var_interactionMenuOpen && (alive player)): {
+												private _object = objNull;
+
+												if !(isNull cursorObject) then {
+													_object = cursorObject;
+												}
+												else {
+													_object = cursorTarget;
+												};
+
+												if ((_object distance player) < 4) then {
+													KH_var_interactionMenuOpen = true;
+													private _display = [_object] call KH_fnc_openSimulatedInventory;
 
 													[
 														{

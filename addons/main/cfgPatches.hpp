@@ -17,6 +17,7 @@ class CfgPatches
 			"KH_ModuleEditTerrainObjects",
 			"KH_ModuleEndMission",
 			"KH_ModuleEntitySpawner",
+			"KH_ModuleManageSimulatedInventory",
 			"KH_ModulePlayMusic",
 			"KH_ModulePlaySound2D",
 			"KH_ModulePlaySound3D",

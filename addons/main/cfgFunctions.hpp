@@ -44,6 +44,7 @@ class CfgFunctions
 			class getNearestSurface {};
 			class getPosition {};
 			class getRotation {};
+			class getSimulatedInventoryItemCount {};
 			class getTransforms {};
 			class getUnitAttributes {};
 			class getUnits {};
@@ -55,6 +56,7 @@ class CfgFunctions
 			class loadMissionState {};
 			class loadPlayerLoadouts {};
 			class manageHandler {};
+			class manageSimulatedInventory {};
 			class moduleAddInteractionEntry {};
 			class moduleAssignParachute {};
 			class moduleBreakDisguise {};
@@ -64,6 +66,7 @@ class CfgFunctions
 			class moduleEditTerrainObjects {};
 			class moduleEndMission {};
 			class moduleEntitySpawner {};
+			class moduleManageSimulatedInventory {};
 			class modulePlayMusic {};
 			class modulePlaySound2d {};
 			class modulePlaySound3d {};
@@ -74,6 +77,7 @@ class CfgFunctions
 			class openIdentificationCard {};
 			class openRemoteInteractionMenu {};
 			class openSelfInteractionMenu {};
+			class openSimulatedInventory {};
 			class openTerminal {};
 			class orbitObject {};
 			class removeEventHandler {};
@@ -97,6 +101,7 @@ class CfgFunctions
 			class setSideRelations {};
 			class setTransforms {};
 			class setUnitAttributes {};
+			class setVariableName {};
 			class setVideoTexture {};
 			class suspendMission {};
 			class teleport {};

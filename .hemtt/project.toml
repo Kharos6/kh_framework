@@ -22,6 +22,14 @@ severity = "Warning"
 options.ignore = [
     "addPublicVariableEventHandler"
 ]
+options.banned = [
+    "execVM",
+    "and",
+    "or",
+    "not",
+    "remoteExec",
+    "remoteExecCall"
+]
 
 [lints.sqf.var_all_caps]
 enabled = false
@@ -32,4 +40,5 @@ workshop = [
     "463939057",
     "1779063631"
 ]
+
 executable = "arma3_x64"

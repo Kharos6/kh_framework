@@ -39,6 +39,7 @@ class CfgVehicles
 	#include "\x\kh\addons\main\vehicles\modules\editTerrainObjects.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\endMission.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\entitySpawner.hpp"
+	#include "\x\kh\addons\main\vehicles\modules\manageSimulatedInventory.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\playMusic.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\playSound2d.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\playSound3d.hpp"

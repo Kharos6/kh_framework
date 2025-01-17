@@ -161,6 +161,9 @@ isNil {
 					{				
 						[] call KH_fnc_serverMissionStartInit;
 						[[], KH_fnc_headlessMissionStartInit, "HEADLESS", "THIS_FRAME"] call KH_fnc_execute;
+						["KH_eve_missionStarted", []] call CBA_fnc_globalEvent;
+						KH_var_missionStarted = true;
+						publicVariable "KH_var_missionStarted";
 						
 						[
 							[], 

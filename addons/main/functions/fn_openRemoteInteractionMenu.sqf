@@ -16,7 +16,7 @@ else {
 	_entityName = typeOf _entity;
 };
 
-(_display displayCtrl 101) ctrlSetText (format ["%1 INTERACTION MENU", _entityName]);
+(_display displayCtrl 101) ctrlSetText (format ["%1 INTERACTION MENU", toUpper _entityName]);
 
 for "_i" from 0 to _count do {
 	(_list select _i) params ["_name", "_tooltip", "_condition", "_options"];

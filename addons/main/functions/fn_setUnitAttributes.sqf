@@ -10,15 +10,7 @@ if _group then {
 
 if _variableName then {
 	if ((_attributes select 3) != "") then {
-		[
-			[_unit, _attributes],
-			{
-				params ["_unit", "_attributes"];
-				_unit setVehicleVarName (_attributes select 3);
-			},
-			["JIP", "GLOBAL", _unit, false, false, ""],
-			"THIS_FRAME"
-		] call KH_fnc_execute;
+		[_unit, (_attributes select 3)] call KH_fnc_setEntityVariableName;
 	};
 };
 

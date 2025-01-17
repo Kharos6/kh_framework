@@ -1,6 +1,6 @@
 params ["_entity", "_identifier", "_identifierOutput", "_identifierInput", "_name", "_description", "_function", "_observerMode"];
 private _display = createDialog ["KH_ResourceTerminal", true];
-ctrlSetText [100, _name];
+ctrlSetText [100, toUpper _name];
 ctrlSetText [101, _description];
 ctrlSetText [102, missionNamespace getVariable [_identifierOutput, ctrlText 102]];
 ctrlSetText [103, missionNamespace getVariable [_identifierInput, ctrlText 103]];

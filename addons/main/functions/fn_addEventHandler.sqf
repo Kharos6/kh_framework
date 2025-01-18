@@ -30,9 +30,9 @@ switch true do {
 			missionNamespace setVariable [_handlerId, _handler];
 		}
 		else {
-			_persistentId = format ["KH_var_%1", [0, 36, "ALPHANUMERIC"] call KH_fnc_generateSymbols];
-			_persistentEntityId = format ["KH_var_%1", [0, 36, "ALPHANUMERIC"] call KH_fnc_generateSymbols];
-			_persistentEntity = format ["KH_var_%1", [0, 36, "ALPHANUMERIC"] call KH_fnc_generateSymbols];
+			_persistentId = [] call KH_fnc_generateUid;
+			_persistentEntityId = [] call KH_fnc_generateUid;
+			_persistentEntity = [] call KH_fnc_generateUid;
 
 			[
 				[_persistentEntity],

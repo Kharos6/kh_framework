@@ -36,10 +36,12 @@ class CfgFunctions
 			class execute {};
 			class fultonExtract {};
 			class generateSymbols {};
+			class generateUid {};
 			class getClients {};
 			class getDestinationTime {};
 			class getDestinationVelocity {};
 			class getEntityAreaPresence {};
+			class getEntityVariableName {};
 			class getGroupAttributes {};
 			class getNearestSurface {};
 			class getPosition {};
@@ -48,7 +50,6 @@ class CfgFunctions
 			class getTransforms {};
 			class getUnitAttributes {};
 			class getUnits {};
-			class getVariableName {};
 			class limitViewDistance {};
 			class loadCargoInventories {};
 			class loadControlAttributes {};
@@ -91,6 +92,7 @@ class CfgFunctions
 			class setCameraTexture {};
 			class setCurators {};
 			class setDestinationVelocity {};
+			class setEntityVariableName {};
 			class setGroupAttributes {};
 			class setOwnership {};
 			class setPersistentDisplayText {};
@@ -101,7 +103,6 @@ class CfgFunctions
 			class setSideRelations {};
 			class setTransforms {};
 			class setUnitAttributes {};
-			class setVariableName {};
 			class setVideoTexture {};
 			class suspendMission {};
 			class teleport {};

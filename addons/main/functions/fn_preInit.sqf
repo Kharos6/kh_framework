@@ -1,40 +1,55 @@
 KH_var_missionLoaded = false;
+KH_var_compiledExpressions = createHashMap;
 
 private _functionProcessor = {
 	params ["_arguments", "_function"];
 
 	if (_function isEqualType "") then {
-		if (".sqf" in _function) then {
-			private _functionName = format ["M_fnc_%1", (_function select [0, (_function find ".sqf") - 1]) regexReplace ["[\\/]", "_"]];
+		if !(" " in _function) then {
+			if (".sqf" in _function) then {
+				private _functionName = format ["M_fnc_%1", (_function select [0, (_function find ".sqf") - 1]) regexReplace ["[\\/]", "_"]];
 
-			if ((missionNamespace getVariable [_functionName, {}]) isEqualTo {}) then {
-				missionNamespace setVariable [_functionName, compile (preprocessFileLineNumbers _function)];
-			};
-
-			_arguments call (missionNamespace getVariable [_functionName, {}]);
-		}
-		else {
-			private _parsedFunction = missionNamespace getVariable [_function, {}];
-
-			if (_parsedFunction isEqualTo {}) then {
-				switch true do {
-					case ((count _arguments) == 0): {
-						[] call (compile ([_function] joinString ""));
-					};
-
-					case ((count _arguments) == 1): {
-						private _unaryArgument = [missionNamespace, "KH_var_unaryArgument", _arguments select 0, false] call KH_fnc_atomicVariable;
-						[] call (compile ([_function, " (missionNamespace getVariable '", _unaryArgument, "');"] joinString ""));
-					};
-
-					case ((count _arguments) == 2): {
-						private _binaryArguments = [missionNamespace, "KH_var_binaryArguments", _arguments, false] call KH_fnc_atomicVariable;
-						[] call (compile (["((missionNamespace getVariable '", _binaryArguments, "') select 0) ", _function, " ((missionNamespace getVariable '", _binaryArguments, "') select 1);"] joinString ""));
-					};
+				if ((missionNamespace getVariable [_functionName, {}]) isEqualTo {}) then {
+					missionNamespace setVariable [_functionName, compile (preprocessFileLineNumbers _function)];
 				};
+
+				_arguments call (missionNamespace getVariable [_functionName, {}]);
 			}
 			else {
-				_arguments call _parsedFunction;
+				private _parsedFunction = missionNamespace getVariable [_function, {}];
+
+				if (_parsedFunction isEqualTo {}) then {
+					switch true do {
+						case ((count _arguments) == 0): {
+							[] call (compile ([_function] joinString ""));
+						};
+
+						case ((count _arguments) == 1): {
+							private _unaryArgument = [missionNamespace, "KH_var_unaryArgument", _arguments select 0, false] call KH_fnc_atomicVariable;
+							[] call (compile ([_function, " (missionNamespace getVariable '", _unaryArgument, "');"] joinString ""));
+						};
+
+						case ((count _arguments) == 2): {
+							private _binaryArguments = [missionNamespace, "KH_var_binaryArguments", _arguments, false] call KH_fnc_atomicVariable;
+							[] call (compile (["((missionNamespace getVariable '", _binaryArguments, "') select 0) ", _function, " ((missionNamespace getVariable '", _binaryArguments, "') select 1);"] joinString ""));
+						};
+					};
+				}
+				else {
+					_arguments call _parsedFunction;
+				};
+			};
+		}
+		else {
+			private _storedFunction = KH_var_compiledExpressions get (hashValue _function);
+
+			if (isNil "_storedFunction") then {
+				private _compiledFunction = compile _function;
+				KH_var_compiledExpressions insert [[hashValue _function, _compiledFunction]];
+				_arguments call _compiledFunction;
+			}
+			else {
+				_arguments call _storedFunction;
 			};
 		};
 	}
@@ -79,6 +94,7 @@ if isServer then {
 	publicVariable "KH_var_jipPlayerMachines";
 	KH_var_logicGroup = createGroup [sideLogic, false];
 	publicVariable "KH_var_logicGroup";
+	KH_var_jipEventHandlers = createHashMap;
 	KH_var_allEntities = entities [[], ["Animal"], true, false];
 	KH_var_allDeadEntities = (entities [[], ["Animal"], true, false]) select {!alive _x;};
 	KH_var_allTerrainObjects = nearestTerrainObjects [[worldSize / 2, worldSize / 2], [], worldSize * sqrt 2 / 2, false, true];

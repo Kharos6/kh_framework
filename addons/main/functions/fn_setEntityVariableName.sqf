@@ -2,7 +2,7 @@ params ["_entity", ["_name", ""]];
 private _variableName = "";
 
 if (_name == "") then {
-	_variableName = format ["KH_var_%1", [0, 36, "ALPHANUMERIC"] call KH_fnc_generateSymbols];
+	_variableName = [] call KH_fnc_generateUid;
 }
 else {
 	_variableName = _name;

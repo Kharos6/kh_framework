@@ -1162,147 +1162,14 @@ isNil {
 																private _function = (missionNamespace getVariable [_jipOverrideParams, {}]) select 1;
 																private _dependency = (missionNamespace getVariable [_jipOverrideParams, true]) select 2;
 																
-																switch true do {
-																	case (_dependency isEqualType ""): {
-																		if ((parseNumber (_dependency select [0, 1])) != 0) then {
-																			private _uid = "";
+																if !(_idState == "INACTIVE") then {
+																	switch true do {
+																		case (_idState == "ACTIVE"): {
+																			private _condition = true;
 
-																			if _joinType == "KH_eve_playerLoaded" then {
-																				_uid = getPlayerUID (_this select 0); 
-																			}
-																			else {
-																				_uid = _this select 1;
-																			};
-
-																			if (_dependency == _uid) then {
-																				if !(_idState == "INACTIVE") then {
-																					switch true do {
-																						case (_idState == "ACTIVE"): {
-																							["KH_eve_executionGlobal", [_arguments, _function], _joiningMachine] call CBA_fnc_ownerEvent;
-																						};
-
-																						case (_idState == "TERMINATE"): {
-																							[_eventName, _localId] call CBA_fnc_removeEventHandler;
-																						};		
-																					};
-																				};
-																			}
-																			else {
-																				if (":" in _dependency) then {
-																					if (!(isNull (objectFromNetId _dependency)) || !(isNull (groupFromNetId _dependency))) then {
-																						if !(_idState == "INACTIVE") then {
-																							switch true do {
-																								case (_idState == "ACTIVE"): {
-																									["KH_eve_executionGlobal", [_arguments, _function], _joiningMachine] call CBA_fnc_ownerEvent;
-																								};
-
-																								case (_idState == "TERMINATE"): {
-																									[_eventName, _localId] call CBA_fnc_removeEventHandler;
-																								};		
-																							};
-																						};
-																					};
-																				}
-																				else {
-																					private _player = KH_var_allPlayerIdMachines get _x;
-																					private _client = KH_var_allHeadlessIdMachines get _x;
-
-																					if (!(isNil "_player") || !(isNil "_client")) then {
-																						if !(_idState == "INACTIVE") then {
-																							switch true do {
-																								case (_idState == "ACTIVE"): {
-																									["KH_eve_executionGlobal", [_arguments, _function], _joiningMachine] call CBA_fnc_ownerEvent;
-																								};
-
-																								case (_idState == "TERMINATE"): {
-																									[_eventName, _localId] call CBA_fnc_removeEventHandler;
-																								};		
-																							};
-																						};
-																					};
-																				};
-																			};
-																		}
-																		else {
-																			if (missionNamespace getVariable [_dependency, false]) then {
-																				private _idState = missionNamespace getVariable [_id, "ACTIVE"];
-
-																				if !(_idState == "INACTIVE") then {
-																					switch true do {
-																						case (_idState == "ACTIVE"): {
-																							["KH_eve_executionGlobal", [_arguments, _function], _joiningMachine] call CBA_fnc_ownerEvent;
-																						};
-
-																						case (_idState == "TERMINATE"): {
-																							[_eventName, _localId] call CBA_fnc_removeEventHandler;
-																						};		
-																					};
-																				};
-																			};
-																		};
-																	};
-
-																	case ((_dependency isEqualType objNull) || (_dependency isEqualType teamMemberNull) || (_dependency isEqualType grpNull)): {
-																		if !(isNull _dependency) then {
-																			private _idState = missionNamespace getVariable [_id, "ACTIVE"];
-
-																			if !(_idState == "INACTIVE") then {
-																				switch true do {
-																					case (_idState == "ACTIVE"): {
-																						["KH_eve_executionGlobal", [_arguments, _function], _joiningMachine] call CBA_fnc_ownerEvent;
-																					};
-
-																					case (_idState == "TERMINATE"): {
-																						[_eventName, _localId] call CBA_fnc_removeEventHandler;
-																					};		
-																				};
-																			};
-																		};
-																	};
-
-																	case (_dependency isEqualType 0): {
-																		if (_dependency in KH_var_allMachines) then {
-																			private _idState = missionNamespace getVariable [_id, "ACTIVE"];
-
-																			if !(_idState == "INACTIVE") then {
-																				switch true do {
-																					case (_idState == "ACTIVE"): {
-																						["KH_eve_executionGlobal", [_arguments, _function], _joiningMachine] call CBA_fnc_ownerEvent;
-																					};
-
-																					case (_idState == "TERMINATE"): {
-																						[_eventName, _localId] call CBA_fnc_removeEventHandler;
-																					};		
-																				};
-																			};
-																		};
-																	};
-
-																	case (_dependency isEqualType {}): {
-																		if ([] call _dependency) then {
-																			private _idState = missionNamespace getVariable [_id, "ACTIVE"];
-
-																			if !(_idState == "INACTIVE") then {
-																				switch true do {
-																					case (_idState == "ACTIVE"): {
-																						["KH_eve_executionGlobal", [_arguments, _function], _joiningMachine] call CBA_fnc_ownerEvent;
-																					};
-
-																					case (_idState == "TERMINATE"): {
-																						[_eventName, _localId] call CBA_fnc_removeEventHandler;
-																					};		
-																				};
-																			};
-																		};
-																	};
-
-																	case (_dependency isEqualType []): {
-																		private _condition = true;
-																		
-																		{
 																			switch true do {
-																				case (_x isEqualType ""): {
-																					if ((parseNumber (_x select [0, 1])) != 0) then {
+																				case (_dependency isEqualType ""): {
+																					if ((parseNumber (_dependency select [0, 1])) != 0) then {
 																						private _uid = "";
 
 																						if _joinType == "KH_eve_playerLoaded" then {
@@ -1312,11 +1179,10 @@ isNil {
 																							_uid = _this select 1;
 																						};
 
-																						if (_x != _uid) then {
-																							if (":" in _x) then {
-																								if ((isNull (objectFromNetId _x)) && (isNull (groupFromNetId _x))) then {
+																						if (_dependency != _uid) then {
+																							if (":" in _dependency) then {
+																								if ((isNull (objectFromNetId _dependency)) && (isNull (groupFromNetId _dependency))) then {
 																									_condition = false;
-																									break;
 																								};
 																							}
 																							else {
@@ -1325,75 +1191,114 @@ isNil {
 
 																								if ((isNil "_player") && (isNil "_client")) then {
 																									_condition = false;
-																									break;
 																								};
 																							};
 																						};
 																					}
 																					else {
-																						if !(missionNamespace getVariable [_x, false]) then {
+																						if !(missionNamespace getVariable [_dependency, false]) then {
 																							_condition = false;
-																							break;
 																						};
 																					};
 																				};
 
-																				case ((_x isEqualType objNull) || (_x isEqualType teamMemberNull) || (_x isEqualType grpNull)): {
-																					if (isNull _x) then {
+																				case ((_dependency isEqualType objNull) || (_dependency isEqualType teamMemberNull) || (_dependency isEqualType grpNull)): {
+																					if (isNull _dependency) then {
 																						_condition = false;
-																						break;
 																					};
 																				};
 
-																				case (_x isEqualType 0): {
-																					if !(_x in KH_var_allMachines) then {
+																				case (_dependency isEqualType 0): {
+																					if !(_dependency in KH_var_allMachines) then {
 																						_condition = false;
-																						break;
 																					};
 																				};
 
-																				case (_x isEqualType {}): {
-																					if !([] call _x) then {
+																				case (_dependency isEqualType {}): {
+																					if !([] call _dependency) then {
 																						_condition = false;
-																						break;
+																					};
+																				};
+
+																				case (_dependency isEqualType []): {																					
+																					{
+																						switch true do {
+																							case (_x isEqualType ""): {
+																								if ((parseNumber (_x select [0, 1])) != 0) then {
+																									private _uid = "";
+
+																									if _joinType == "KH_eve_playerLoaded" then {
+																										_uid = getPlayerUID (_this select 0); 
+																									}
+																									else {
+																										_uid = _this select 1;
+																									};
+
+																									if (_x != _uid) then {
+																										if (":" in _x) then {
+																											if ((isNull (objectFromNetId _x)) && (isNull (groupFromNetId _x))) then {
+																												_condition = false;
+																												break;
+																											};
+																										}
+																										else {
+																											private _player = KH_var_allPlayerIdMachines get _x;
+																											private _client = KH_var_allHeadlessIdMachines get _x;
+
+																											if ((isNil "_player") && (isNil "_client")) then {
+																												_condition = false;
+																												break;
+																											};
+																										};
+																									};
+																								}
+																								else {
+																									if !(missionNamespace getVariable [_x, false]) then {
+																										_condition = false;
+																										break;
+																									};
+																								};
+																							};
+
+																							case ((_x isEqualType objNull) || (_x isEqualType teamMemberNull) || (_x isEqualType grpNull)): {
+																								if (isNull _x) then {
+																									_condition = false;
+																									break;
+																								};
+																							};
+
+																							case (_x isEqualType 0): {
+																								if !(_x in KH_var_allMachines) then {
+																									_condition = false;
+																									break;
+																								};
+																							};
+
+																							case (_x isEqualType {}): {
+																								if !([] call _x) then {
+																									_condition = false;
+																									break;
+																								};
+																							};
+																						};
+																					} forEach _dependency;
+																				};
+
+																				case (_dependency isEqualType true): {
+																					if !_dependency then {
+																						_condition = false;
 																					};
 																				};
 																			};
-																		} forEach _dependency;
 
-																		if _condition then {
-																			private _idState = missionNamespace getVariable [_id, "ACTIVE"];
-																			
-																			if !(_idState == "INACTIVE") then {
-																				switch true do {
-																					case (_idState == "ACTIVE"): {
-																						["KH_eve_executionGlobal", [_arguments, _function], _joiningMachine] call CBA_fnc_ownerEvent;
-																					};
-
-																					case (_idState == "TERMINATE"): {
-																						[_eventName, _localId] call CBA_fnc_removeEventHandler;
-																					};		
-																				};
+																			if _condition then {
+																				["KH_eve_executionGlobal", [_arguments, _function], _joiningMachine] call CBA_fnc_ownerEvent;
 																			};
 																		};
-																	};
 
-																	case (_dependency isEqualType true): {
-																		if _dependency then {
-																			private _idState = missionNamespace getVariable [_id, "ACTIVE"];
-
-																			if !(_idState == "INACTIVE") then {
-																				switch true do {
-																					case (_idState == "ACTIVE"): {
-																						["KH_eve_executionGlobal", [_arguments, _function], _joiningMachine] call CBA_fnc_ownerEvent;
-																					};
-
-																					case (_idState == "TERMINATE"): {
-																						[_eventName, _localId] call CBA_fnc_removeEventHandler;
-																					};		
-																				};
-																			};
-																		};
+																		case (_idState == "TERMINATE"): {
+																			[_eventName, _localId] call CBA_fnc_removeEventHandler;
+																		};		
 																	};
 																};
 															}
@@ -1784,6 +1689,33 @@ isNil {
 					};
 				};
 
+				private _processOverride = {
+					params ["_target", "_override", "_result"];
+					private _type = _target select 0;
+
+					switch true do {
+						case (_type == "JIP"): {
+							private _overrideId = _target param [5, ""];
+
+							if (_overrideId != "") then {
+								_override = _overrideId;
+							}
+							else {
+								_override = [] call KH_fnc_generateUid;
+							};
+
+							_result = ["JIP_HANDLER", _override];
+						};
+
+						case (_type == "PERSISTENT"): {
+							_override = [] call KH_fnc_generateUid;
+							_result = ["PERSISTENT_HANDLER", _override, _target select 1];
+						};
+					};
+
+					[_override, _result];
+				};
+
 				switch true do {
 					case (_environment isEqualType ""): {
 						switch true do {
@@ -1797,27 +1729,9 @@ isNil {
 									private _result = true;
 
 									if (_target isEqualType []) then {
-										private _type = _target select 0;
-
-										switch true do {
-											case (_type == "JIP"): {
-												private _overrideId = _target param [5, ""];
-
-												if (_overrideId != "") then {
-													_override = _overrideId;
-												}
-												else {
-													_override = [] call KH_fnc_generateUid;
-												};
-
-												_result = ["JIP_HANDLER", _override];
-											};
-
-											case (_type == "PERSISTENT"): {
-												_override = [] call KH_fnc_generateUid;
-												_result = ["PERSISTENT_HANDLER", _override, _target select 1];
-											};
-										};
+										private _overrideResult = [_target, _override, _result] call _processOverride;
+										_override = _overrideResult select 0;
+										_result = _overrideResult select 1;
 									};
 
 									KH_var_postInitExecutions pushBack [[_arguments, _function, _target, _override], _subfunction];
@@ -1830,27 +1744,9 @@ isNil {
 								private _override = "";
 								
 								if (_target isEqualType []) then {
-									private _type = _target select 0;
-
-									switch true do {
-										case (_type == "JIP"): {
-											private _overrideId = _target param [5, ""];
-
-											if (_overrideId != "") then {
-												_override = _overrideId;
-											}
-											else {
-												_override = [] call KH_fnc_generateUid;
-											};
-
-											_result = ["JIP_HANDLER", _override];
-										};
-
-										case (_type == "PERSISTENT"): {
-											_override = [] call KH_fnc_generateUid;
-											_result = ["PERSISTENT_HANDLER", _override, _target select 1];
-										};
-									};
+									private _overrideResult = [_target, _override, _result] call _processOverride;
+									_override = _overrideResult select 0;
+									_result = _overrideResult select 1;
 								};
 
 								private _callerFunction = {
@@ -1889,27 +1785,9 @@ isNil {
 						private _override = "";
 						
 						if (_target isEqualType []) then {
-							private _type = _target select 0;
-
-							switch true do {
-								case (_type == "JIP"): {
-									private _overrideId = _target param [5, ""];
-
-									if (_overrideId != "") then {
-										_override = _overrideId;
-									}
-									else {
-										_override = [] call KH_fnc_generateUid;
-									};
-
-									_result = ["JIP_HANDLER", _override];
-								};
-
-								case (_type == "PERSISTENT"): {
-									_override = [] call KH_fnc_generateUid;
-									_result = ["PERSISTENT_HANDLER", _override, _target select 1];
-								};
-							};
+							private _overrideResult = [_target, _override, _result] call _processOverride;
+							_override = _overrideResult select 0;
+							_result = _overrideResult select 1;
 						};
 
 						private _callerFunction = {
@@ -1942,27 +1820,9 @@ isNil {
 						private _override = "";
 						
 						if (_target isEqualType []) then {
-							private _type = _target select 0;
-
-							switch true do {
-								case (_type == "JIP"): {
-									private _overrideId = _target param [5, ""];
-
-									if (_overrideId != "") then {
-										_override = _overrideId;
-									}
-									else {
-										_override = [] call KH_fnc_generateUid;
-									};
-
-									_result = ["JIP_HANDLER", _override];
-								};
-
-								case (_type == "PERSISTENT"): {
-									_override = [] call KH_fnc_generateUid;
-									_result = ["PERSISTENT_HANDLER", _override, _target select 1];
-								};
-							};
+							private _overrideResult = [_target, _override, _result] call _processOverride;
+							_override = _overrideResult select 0;
+							_result = _overrideResult select 1;
 						};
 
 						private _type = _environment select 0;
@@ -2298,6 +2158,7 @@ isNil {
 								private _results = [];
 								private _newExecutions = [] call KH_fnc_generateUid;
 								private _newExecutionEvent = [] call KH_fnc_generateUid;
+								private _sequenceArguments = [] call KH_fnc_generateUid;
 
 								{
 									private _currentOverride = "";
@@ -2353,7 +2214,7 @@ isNil {
 								} forEach _executions;
 
 								private _callerFunction = {
-									params ["_arguments", "_function", "_target", "_environment", "_executions", "_id", "_overrides", "_newExecutions", "_newExecutionEvent", "_suspendInFrames"];
+									params ["_arguments", "_function", "_target", "_environment", "_executions", "_id", "_overrides", "_newExecutions", "_newExecutionEvent", "_suspendInFrames", "_sequenceArguments"];
 									private _timeSuspensions = [0];
 									private _conditionSuspensions = [[[], {true;}, true, -1, [], {}, _target, _environment, [] call KH_fnc_generateUid]];
 									
@@ -2381,6 +2242,7 @@ isNil {
 													case (_idState == "ACTIVE"): {
 														private _conditionSuspensions = _this select 6;
 														private _conditionId = _this select 7;
+														private _sequenceArguments = _this select 13;
 
 														if ((_conditionSuspensions select -1) select 2) then {												
 															{
@@ -2390,7 +2252,12 @@ isNil {
 																	_conditionFunction = missionNamespace getVariable [_conditionFunction, {}];
 																};
 
-																if !(_conditionArguments call _conditionFunction) then {
+																private _expression = [
+																	"private _args = (missionNamespace getVariable ['", _sequenceArguments, "', []]);
+																	call ", _conditionFunction, ";"
+																] joinString "";
+
+																if !(_conditionArguments call (compile _expression)) then {
 																	if !(_x in (missionNamespace getVariable [_conditionId, []])) then {
 																		_condition = false;
 																		break;
@@ -2412,7 +2279,12 @@ isNil {
 																_conditionFunction = missionNamespace getVariable [_conditionFunction, {}];
 															};
 
-															if !(_conditionArguments call _conditionFunction) then {
+															private _expression = [
+																"private _args = (missionNamespace getVariable ['", _sequenceArguments, "', []]);
+																call ", _conditionFunction, ";"
+															] joinString "";
+
+															if !(_conditionArguments call (compile _expression)) then {
 																_condition = false;
 															};
 														};
@@ -2440,21 +2312,28 @@ isNil {
 												private _overrides = _this select 9;
 												private _newExecutions = _this select 10;
 												private _newExecutionEvent = _this select 11;
+												private _sequenceArguments = _this select 13;
+
+												private _expression = [
+													"private _args = (missionNamespace getVariable ['", _sequenceArguments, "', []]);
+													private _sequenceResult = call ", _currentFunction, ";
+													missionNamespace setVariable ['", _sequenceArguments, "', _sequenceResult];"
+												] joinString "";
 												
 												if (_idState == "ACTIVE") then {
 													if (_currentEnvironment isEqualTo _environment) then {
-														[_currentArguments, _currentFunction, _currentTarget, _overrides select ((count _conditionSuspensions) - 2)] call _subfunction;
+														[_currentArguments, compile _expression, _currentTarget, _overrides select ((count _conditionSuspensions) - 2)] call _subfunction;
 													}
 													else {
 														private _currentExecutions = missionNamespace getVariable [_newExecutions, []];
-														private _newExecution = [_currentArguments, _currentFunction, _currentTarget, _currentEnvironment] call KH_fnc_execute;
+														private _newExecution = [_currentArguments, compile _expression, _currentTarget, _currentEnvironment] call KH_fnc_execute;
 														_currentExecutions pushBack _newExecution;
 														missionNamespace setVariable [_newExecutions, _currentExecutions];
-														[_newExecutionEvent, [_newExecution, _currentExecutions]] call CBA_fnc_localEvent;
+														[_newExecutionEvent, [_newExecution, _currentExecutions, missionNamespace getVariable [_sequenceArguments, []]]] call CBA_fnc_localEvent;
 													};
 												};
 											}, 
-											[_currentArguments, _currentFunction, _currentTarget, _currentEnvironment, _environment, _subfunction, _conditionSuspensions, _conditionId, _id, _overrides, _newExecutions, _newExecutionEvent, _currentExecutionId],
+											[_currentArguments, _currentFunction, _currentTarget, _currentEnvironment, _environment, _subfunction, _conditionSuspensions, _conditionId, _id, _overrides, _newExecutions, _newExecutionEvent, _currentExecutionId, _sequenceArguments],
 											(_conditionSuspensions select -1) select 3,
 											{
 												private _id = _this select 8;
@@ -2466,24 +2345,31 @@ isNil {
 													private _overrides = _this select 9;
 													private _newExecutions = _this select 10;
 													private _newExecutionEvent = _this select 11;
+													private _sequenceArguments = _this select 13;
 													private _timeoutArguments = ((_this select 6) select -1) select 4;
 													private _timeoutFunction = ((_this select 6) select -1) select 5;
 													private _timeoutTarget = ((_this select 6) select -1) select 6;
 													private _timeoutEnvironment = ((_this select 6) select -1) select 7;
+
+													private _expression = [
+														"private _args = (missionNamespace getVariable ['", _sequenceArguments, "', []]);
+														private _sequenceResult = call ", _timeoutFunction, ";
+														missionNamespace setVariable ['", _sequenceArguments, "', _sequenceResult];"
+													] joinString "";
 													
 													if (_timeoutFunction isEqualType "") then {
 														_timeoutFunction = missionNamespace getVariable [_timeoutFunction, {}];
 													};
 
 													if (_timeoutEnvironment isEqualTo _environment) then {
-														[_currentArguments, _currentFunction, _currentTarget, _overrides select ((count _conditionSuspensions) - 2)] call _subfunction;
+														[_timeoutArguments, compile _expression, _timeoutTarget, _overrides select ((count _conditionSuspensions) - 2)] call _subfunction;
 													}
 													else {
 														private _currentExecutions = missionNamespace getVariable [_newExecutions, []];
-														private _newExecution = [_timeoutArguments, _timeoutFunction, _timeoutTarget, _timeoutEnvironment] call KH_fnc_execute;
+														private _newExecution = [_timeoutArguments, compile _expression, _timeoutTarget, _timeoutEnvironment] call KH_fnc_execute;
 														_currentExecutions pushBack _newExecution;
 														missionNamespace setVariable [_newExecutions, _currentExecutions];
-														[_newExecutionEvent, [_newExecution, _currentExecutions]] call CBA_fnc_localEvent;
+														[_newExecutionEvent, [_newExecution, _currentExecutions, missionNamespace getVariable [_sequenceArguments, []]]] call CBA_fnc_localEvent;
 													};
 												};
 											}
@@ -2513,16 +2399,16 @@ isNil {
 								};
 
 								if KH_var_missionLoaded then {
-									[_arguments, _function, _target, "THIS_FRAME", _executions, _id, _overrides, _newExecutions, _newExecutionEvent, _suspendInFrames] call _callerFunction;
+									[_arguments, _function, _target, "THIS_FRAME", _executions, _id, _overrides, _newExecutions, _newExecutionEvent, _suspendInFrames, _sequenceArguments] call _callerFunction;
 								}
 								else {
 									KH_var_postInitExecutions pushBack [
-										[_arguments, _function, _target, "THIS_FRAME", _executions, _id, _overrides, _newExecutions, _newExecutionEvent, _suspendInFrames],
+										[_arguments, _function, _target, "THIS_FRAME", _executions, _id, _overrides, _newExecutions, _newExecutionEvent, _suspendInFrames, _sequenceArguments],
 										_callerFunction
 									];
 								};
 
-								[["PRIVATE_HANDLER", _id, clientOwner], _results, _newExecutions, _newExecutionEvent];
+								[["PRIVATE_HANDLER", _id, clientOwner], _results, _newExecutions, _newExecutionEvent, _sequenceArguments];
 							};
 
 							default {

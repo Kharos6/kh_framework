@@ -381,21 +381,33 @@ if isServer then {
 					publicVariable "KH_var_jipPlayerMachines";
 				};
 
+				private _deletion = "";
+
 				{
 					if (_y == _machineId) then {
-						KH_var_allPlayerUidMachines deleteAt _x;
-						publicVariable "KH_var_allPlayerUidMachines";
+						_deletion = _x;
 						break;
 					};
 				} forEach KH_var_allPlayerUidMachines;
 
+				if (_deletion != "") then {
+					KH_var_allPlayerUidMachines deleteAt _deletion;
+					publicVariable "KH_var_allPlayerUidMachines";
+				};
+
+				_deletion = "";
+
 				{
 					if (_y == _machineId) then {
-						KH_var_allPlayerIdMachines deleteAt _x;
-						publicVariable "KH_var_allPlayerIdMachines";
+						_deletion = _x;
 						break;
 					};
 				} forEach KH_var_allPlayerIdMachines;
+
+				if (_deletion != "") then {
+					KH_var_allPlayerIdMachines deleteAt _deletion;
+					publicVariable "KH_var_allPlayerIdMachines";
+				};
 			}
 			else {
 				private _machineId = KH_var_allHeadlessIdMachines get _id;
@@ -411,13 +423,19 @@ if isServer then {
 						publicVariable "KH_var_allHeadlessMachines";
 					};
 
+					private _deletion = "";
+
 					{
 						if (_y == _machineId) then {
-							KH_var_allHeadlessIdMachines deleteAt _x;
-							publicVariable "KH_var_allHeadlessIdMachines";
+							_deletion = _x;
 							break;
 						};
 					} forEach KH_var_allHeadlessIdMachines;
+
+					if (_deletion != "") then {
+						KH_var_allHeadlessIdMachines deleteAt _deletion;
+						publicVariable "KH_var_allHeadlessIdMachines";
+					};
 				};
 			};
 

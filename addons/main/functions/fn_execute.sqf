@@ -2056,6 +2056,10 @@ isNil {
 								private _timeoutFunction = _environment param [5, {}];
 								private _timeoutTarget = _environment param [6, _target];
 
+								if (_timeout isEqualType "") then {
+									_timeout = ((parseNumber _timeout) - CBA_missionTime) max 0;
+								};
+
 								if KH_var_missionLoaded then {
 									[_arguments, _function, _target, _conditionArguments, _conditionFunction, _timeout, _timeoutArguments, _timeoutFunction, _timeoutTarget, _subfunction, _override, _id] call _callerFunction;
 								}
@@ -2112,7 +2116,7 @@ isNil {
 									if (_timeout != 0) then {
 										[
 											{
-												params ["_target", "_timeoutArguments", "_timeoutFunction", "_timeoutTarget", "_subfunction", "_override", "_handler", "_id"];
+												params ["_timeoutArguments", "_timeoutFunction", "_timeoutTarget", "_subfunction", "_override", "_handler", "_id"];
 												private _idState = missionNamespace getVariable [_id, "ACTIVE"];
 												
 												if !(_idState == "TERMINATE") then {
@@ -2123,7 +2127,7 @@ isNil {
 													};
 												};
 											}, 
-											[_target, _timeoutArguments, _timeoutFunction, _timeoutTarget, _subfunction, _override, _handler, _id], 
+											[_timeoutArguments, _timeoutFunction, _timeoutTarget, _subfunction, _override, _handler, _id], 
 											_timeout
 										] call CBA_fnc_waitAndExecute;
 									};
@@ -2138,6 +2142,10 @@ isNil {
 								private _timeoutFunction = _environment param [7, {}];
 								private _timeoutTarget = _environment param [8, _target];
 
+								if (_timeout isEqualType "") then {
+									_timeout = ((parseNumber _timeout) - CBA_missionTime) max 0;
+								};
+								
 								if KH_var_missionLoaded then {
 									[_arguments, _function, _target, _conditionArguments, _conditionFunction, _timeout, _timeoutOnConditionFailure, _timeoutArguments, _timeoutFunction, _timeoutTarget, _subfunction, _override, _interval, _id] call _callerFunction;
 								}
@@ -2217,6 +2225,62 @@ isNil {
 									params ["_arguments", "_function", "_target", "_environment", "_executions", "_id", "_overrides", "_newExecutions", "_newExecutionEvent", "_suspendInFrames", "_sequenceArguments"];
 									private _timeSuspensions = [0];
 									private _conditionSuspensions = [[[], {true;}, true, -1, [], {}, _target, _environment, [] call KH_fnc_generateUid]];
+
+									private _functionProcessor = {
+										params ["_arguments", "_function"];
+
+										if (_function isEqualType "") then {
+											if (" " in _function) then {
+												private _storedFunction = KH_var_compiledExpressions get (hashValue _function);
+
+												if (isNil "_storedFunction") then {
+													private _compiledFunction = compile _function;
+													KH_var_compiledExpressions insert [[hashValue _function, _compiledFunction]];
+													_function;
+												}
+												else {
+													_storedFunction;
+												};
+											}
+											else {
+												if (".sqf" in _function) then {
+													private _functionName = format ["M_fnc_%1", (_function select [0, (_function find ".sqf") - 1]) regexReplace ["[\\/]", "_"]];
+
+													if ((missionNamespace getVariable [_functionName, {}]) isEqualTo {}) then {
+														missionNamespace setVariable [_functionName, compile (preprocessFileLineNumbers _function)];
+													};
+
+													missionNamespace getVariable [_functionName, {}];
+												}
+												else {
+													private _parsedFunction = missionNamespace getVariable [_function, {}];
+
+													if (_parsedFunction isEqualTo {}) then {
+														switch true do {
+															case ((count _arguments) == 0): {
+																_parsedFunction = (compile ([_function] joinString ""));
+															};
+
+															case ((count _arguments) == 1): {
+																private _unaryArgument = [missionNamespace, "KH_var_unaryArgument", _arguments select 0, false] call KH_fnc_atomicVariable;
+																_parsedFunction = (compile ([_function, " (missionNamespace getVariable '", _unaryArgument, "');"] joinString ""));
+															};
+
+															case ((count _arguments) == 2): {
+																private _binaryArguments = [missionNamespace, "KH_var_binaryArguments", _arguments, false] call KH_fnc_atomicVariable;
+																_parsedFunction = (compile (["((missionNamespace getVariable '", _binaryArguments, "') select 0) ", _function, " ((missionNamespace getVariable '", _binaryArguments, "') select 1);"] joinString ""));
+															};
+														};
+													};
+
+													_parsedFunction;
+												};
+											};
+										}
+										else {
+											_function;
+										};
+									};
 									
 									{
 										(_x select 0) params [["_delay", 0], ["_conditionArguments", []], ["_conditionFunction", {true;}], ["_timeout", -1], ["_timeoutArguments", []], ["_timeoutFunction", {}], ["_timeoutTarget", _target], ["_timeoutEnvironment", _environment]];
@@ -2309,18 +2373,21 @@ isNil {
 												params ["_currentArguments", "_currentFunction", "_currentTarget", "_currentEnvironment", "_environment", "_subfunction", "_conditionSuspensions"];
 												private _id = _this select 8;
 												private _idState = missionNamespace getVariable [_id, "ACTIVE"];
-												private _overrides = _this select 9;
-												private _newExecutions = _this select 10;
-												private _newExecutionEvent = _this select 11;
-												private _sequenceArguments = _this select 13;
 
-												private _expression = [
-													"private _args = (missionNamespace getVariable ['", _sequenceArguments, "', []]);
-													private _sequenceResult = call ", _currentFunction, ";
-													missionNamespace setVariable ['", _sequenceArguments, "', _sequenceResult];"
-												] joinString "";
-												
 												if (_idState == "ACTIVE") then {
+													private _overrides = _this select 9;
+													private _newExecutions = _this select 10;
+													private _newExecutionEvent = _this select 11;
+													private _sequenceArguments = _this select 13;
+													private _functionProcessor = _this select 14;
+													_currentFunction = [_currentArguments, _currentFunction] call _functionProcessor;
+
+													private _expression = [
+														"private _args = (missionNamespace getVariable ['", _sequenceArguments, "', []]);
+														private _sequenceResult = call ", _currentFunction, ";
+														missionNamespace setVariable ['", _sequenceArguments, "', _sequenceResult];"
+													] joinString "";
+												
 													if (_currentEnvironment isEqualTo _environment) then {
 														[_currentArguments, compile _expression, _currentTarget, _overrides select ((count _conditionSuspensions) - 2)] call _subfunction;
 													}
@@ -2333,7 +2400,7 @@ isNil {
 													};
 												};
 											}, 
-											[_currentArguments, _currentFunction, _currentTarget, _currentEnvironment, _environment, _subfunction, _conditionSuspensions, _conditionId, _id, _overrides, _newExecutions, _newExecutionEvent, _currentExecutionId, _sequenceArguments],
+											[_currentArguments, _currentFunction, _currentTarget, _currentEnvironment, _environment, _subfunction, _conditionSuspensions, _conditionId, _id, _overrides, _newExecutions, _newExecutionEvent, _currentExecutionId, _sequenceArguments, _functionProcessor],
 											(_conditionSuspensions select -1) select 3,
 											{
 												private _id = _this select 8;
@@ -2346,20 +2413,18 @@ isNil {
 													private _newExecutions = _this select 10;
 													private _newExecutionEvent = _this select 11;
 													private _sequenceArguments = _this select 13;
+													private _functionProcessor = _this select 14;
 													private _timeoutArguments = ((_this select 6) select -1) select 4;
 													private _timeoutFunction = ((_this select 6) select -1) select 5;
 													private _timeoutTarget = ((_this select 6) select -1) select 6;
 													private _timeoutEnvironment = ((_this select 6) select -1) select 7;
+													_timeoutFunction = [_timeoutArguments, _timeoutFunction] call _functionProcessor;
 
 													private _expression = [
 														"private _args = (missionNamespace getVariable ['", _sequenceArguments, "', []]);
 														private _sequenceResult = call ", _timeoutFunction, ";
 														missionNamespace setVariable ['", _sequenceArguments, "', _sequenceResult];"
 													] joinString "";
-													
-													if (_timeoutFunction isEqualType "") then {
-														_timeoutFunction = missionNamespace getVariable [_timeoutFunction, {}];
-													};
 
 													if (_timeoutEnvironment isEqualTo _environment) then {
 														[_timeoutArguments, compile _expression, _timeoutTarget, _overrides select ((count _conditionSuspensions) - 2)] call _subfunction;

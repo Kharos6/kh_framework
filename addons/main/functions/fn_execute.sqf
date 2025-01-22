@@ -1200,9 +1200,9 @@ isNil {
 															{
 																[_x] call KH_fnc_removeEventHandler;
 															} forEach _oldHandlers;
-														};
 
-														KH_var_jipEventHandlers deleteAt _id;
+															KH_var_jipEventHandlers deleteAt _id;
+														};
 													};
 													
 													if !(missionNamespace getVariable [_jipOverrideId, false]) then {

@@ -41,7 +41,21 @@ if ((count _handler) > 2) then {
 				};
 
 				case (_eventType == "CBA"): {
-					[_event, _handlerId] call CBA_fnc_removeEventHandler;
+					private _currentStack = missionNamespace getVariable [_event, []];
+					private _currentId = _handlerId select 1;
+					private _deletion = -1;
+
+					{
+						if ((_x select 1) == _currentId) then {
+							_deletion = _forEachIndex;
+							break;
+						};
+					} forEach _currentStack;
+
+					if (_deletion != -1) then {
+						_currentStack deleteAt _deletion;
+						missionNamespace setVariable [_event, _currentStack];
+					};
 				};
 			};
 		},

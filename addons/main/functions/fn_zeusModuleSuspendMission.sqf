@@ -20,7 +20,8 @@ isNil {
 				"THIS_FRAME"
 			] call KH_fnc_execute;
 
-			_control ctrlRemoveEventHandler ["ButtonClick", _localId];
+			[_localId] call KH_fnc_removeEventHandler;
+			nil;
 		}
 	] call KH_fnc_addEventHandler;
 
@@ -32,7 +33,8 @@ isNil {
 			params ["_control"];
 			_args params ["_logic"];
 			deleteVehicle _logic;
-			_control ctrlRemoveEventHandler ["ButtonClick", _localId];
+			[_localId] call KH_fnc_removeEventHandler;
+			nil;
 		}
 	] call KH_fnc_addEventHandler;
 };

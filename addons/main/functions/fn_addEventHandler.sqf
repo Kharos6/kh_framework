@@ -1,18 +1,20 @@
 params ["_type", "_event", "_arguments", "_function"];
-private _handlerArguments = [missionNamespace, "KH_var_eventHandlerArguments", _arguments, false] call KH_fnc_atomicVariable;
-private _handlerId = [missionNamespace, "KH_var_eventHandlerId", -1, false] call KH_fnc_atomicVariable;
+private _handlerArguments = [] call KH_fnc_generateUid;
+missionNamespace setVariable [_handlerArguments, _arguments];
+private _handlerId = [] call KH_fnc_generateUid;
+missionNamespace setVariable [_handlerId, -1];
+private _eventName = [] call KH_fnc_generateUid;
+missionNamespace setVariable [_eventName, _event];
 private _persistentId = "";
 private _persistentEntityId = "";
 private _handler = -1;
 private _eventType = "";
-
-if (_function isEqualType "") then {
-	_function = missionNamespace getVariable [_function, {}];
-};
+_function = [_arguments, [_function] call KH_fnc_parseFunction] call KH_fnc_getParsedFunction;
 
 private _expression = [
-	"private _args = (missionNamespace getVariable ['", _handlerArguments, "', []]);
-	private _localId = (missionNamespace getVariable ['", _handlerId, "', -1]);
+	"private _args = missionNamespace getVariable ['", _handlerArguments, "', []];
+	private _eventName = missionNamespace getVariable ['", _eventName, "', ''];
+	private _localId = missionNamespace getVariable ['", _handlerId, "', []];
 	call ", _function, ";"
 ] joinString "";
 
@@ -27,7 +29,6 @@ switch true do {
 	case (_eventType == "STANDARD"): {
 		if !(_type select 2) then {
 			_handler = (_type select 1) addEventHandler [_event, compile _expression];
-			missionNamespace setVariable [_handlerId, _handler];
 		}
 		else {
 			_persistentId = [] call KH_fnc_generateUid;
@@ -80,29 +81,23 @@ switch true do {
 				],
 				"THIS_FRAME"
 			] call KH_fnc_execute;
-
-			missionNamespace setVariable [_handlerId, _handler];
 		};
 	};
 
 	case (_eventType == "MULTIPLAYER"): {
 		_handler = (_type select 1) addMPEventHandler [_event, compile _expression];
-		missionNamespace setVariable [_handlerId, _handler];
 	};
 
 	case (_eventType == "CONTROL"): {
 		_handler = (_type select 1) ctrlAddEventHandler [_event, compile _expression];
-		missionNamespace setVariable [_handlerId, _handler];
 	};
 
 	case (_eventType == "DISPLAY"): {
 		_handler = (_type select 1) displayAddEventHandler [_event, compile _expression];
-		missionNamespace setVariable [_handlerId, _handler];
 	};
 
 	case (_eventType == "PUBLIC_VARIABLE"): {
 		_handler = [missionNamespace, "KH_var_publicVariableEventHandler", true, false] call KH_fnc_atomicVariable;
-		missionNamespace setVariable [_handlerId, _handler];
 
 		(_type select 1) addPublicVariableEventHandler (compile ([
 			"if (missionNamespace getVariable ['", _handler, "', true]) then { 
@@ -113,28 +108,46 @@ switch true do {
 
 	case (_eventType == "MISSION"): {
 		_handler = addMissionEventHandler [_event, compile _expression];
-		missionNamespace setVariable [_handlerId, _handler];
 	};
 
 	case (_eventType == "USER_ACTION"): {
 		_handler = addUserActionEventHandler [_event, compile _expression];
-		missionNamespace setVariable [_handlerId, _handler];
 	};
 
 	case (_eventType == "MUSIC"): {
 		_handler = addMusicEventHandler [_event, compile _expression];
-		missionNamespace setVariable [_handlerId, _handler];
 	};
 
 	case (_eventType == "CBA"): {
-		_handler = [_event, compile _expression] call CBA_fnc_addEventHandler;
-		missionNamespace setVariable [_handlerId, _handler];
+		private _handlerStackId = format ["KH_var_cbaEventHandlerStackEvent%1", _event];
+
+		if !(_handlerStackId in KH_var_cbaEventHandlerStack) then {
+			KH_var_cbaEventHandlerStack pushBack _handlerStackId;
+
+			[
+				_event, 
+				{
+					{
+						_x params ["_function"];
+						call _function;
+					} forEach (missionNamespace getVariable [format ["KH_var_cbaEventHandlerStackEvent%1", _eventName], []]);
+				}
+			] call CBA_fnc_addEventHandler;
+		};
+
+		_handler = [compile _expression, [] call KH_fnc_generateUid];
+		private _currentStack = missionNamespace getVariable [_handlerStackId, []];
+		_currentStack pushBack _handler;
+		missionNamespace setVariable [_handlerStackId, _currentStack];
+		_event = _handlerStackId;
 	};
 };
 
 if (_persistentId == "") then {
+	missionNamespace setVariable [_handlerId, [_type, _event, _handler, clientOwner]];
 	[_type, _event, _handler, clientOwner];
 }
 else {
+	missionNamespace setVariable [_handlerId, [_handler, _persistentEntityId]];
 	[_handler, _persistentEntityId];
 };

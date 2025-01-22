@@ -12,72 +12,16 @@ isNil {
 
 				private _subfunction = {
 					params ["_arguments", "_function", "_target", "_override"];
-
-					private _functionProcessor = {
-						params ["_arguments", "_function"];
-
-						if (_function isEqualType "") then {
-							if !(" " in _function) then {
-								if (".sqf" in _function) then {
-									private _functionName = format ["M_fnc_%1", (_function select [0, (_function find ".sqf") - 1]) regexReplace ["[\\/]", "_"]];
-
-									if ((missionNamespace getVariable [_functionName, {}]) isEqualTo {}) then {
-										missionNamespace setVariable [_functionName, compile (preprocessFileLineNumbers _function)];
-									};
-
-									_arguments call (missionNamespace getVariable [_functionName, {}]);
-								}
-								else {
-									private _parsedFunction = missionNamespace getVariable [_function, {}];
-
-									if (_parsedFunction isEqualTo {}) then {
-										switch true do {
-											case ((count _arguments) == 0): {
-												[] call (compile ([_function] joinString ""));
-											};
-
-											case ((count _arguments) == 1): {
-												private _unaryArgument = [missionNamespace, "KH_var_unaryArgument", _arguments select 0, false] call KH_fnc_atomicVariable;
-												[] call (compile ([_function, " (missionNamespace getVariable '", _unaryArgument, "');"] joinString ""));
-											};
-
-											case ((count _arguments) == 2): {
-												private _binaryArguments = [missionNamespace, "KH_var_binaryArguments", _arguments, false] call KH_fnc_atomicVariable;
-												[] call (compile (["((missionNamespace getVariable '", _binaryArguments, "') select 0) ", _function, " ((missionNamespace getVariable '", _binaryArguments, "') select 1);"] joinString ""));
-											};
-										};
-									}
-									else {
-										_arguments call _parsedFunction;
-									};
-								};
-							}
-							else {
-								private _storedFunction = KH_var_compiledExpressions get (hashValue _function);
-
-								if (isNil "_storedFunction") then {
-									private _compiledFunction = compile _function;
-									KH_var_compiledExpressions insert [[hashValue _function, _compiledFunction]];
-									_arguments call _compiledFunction;
-								}
-								else {
-									_arguments call _storedFunction;
-								};
-							};
-						}
-						else {
-							_arguments call _function;
-						};
-					};
+					_function = [_function] call KH_fnc_parseFunction;
 					
 					switch true do {
 						case (_target isEqualType objNull): {
 							if !(isNull _target) then {
 								if (local _target) then {
-									[_arguments, _function] call _functionProcessor;
+									[_arguments, _function, clientOwner] call KH_fnc_callParsedFunction;
 								}
 								else {
-									["KH_eve_executionGlobal", [_arguments, _function], _target] call CBA_fnc_targetEvent;
+									["KH_eve_executionGlobal", [_arguments, _function, clientOwner], _target] call CBA_fnc_targetEvent;
 								};
 
 								true;
@@ -90,10 +34,10 @@ isNil {
 						case (_target isEqualType teamMemberNull): {
 							if !(isNull _target) then {
 								if (local (agent _target)) then {
-									[_arguments, _function] call _functionProcessor;
+									[_arguments, _function, clientOwner] call KH_fnc_callParsedFunction;
 								}
 								else {
-									["KH_eve_executionGlobal", [_arguments, _function], agent _target] call CBA_fnc_targetEvent;
+									["KH_eve_executionGlobal", [_arguments, _function, clientOwner], agent _target] call CBA_fnc_targetEvent;
 								};
 
 								true;
@@ -106,17 +50,20 @@ isNil {
 						case (_target isEqualType grpNull): {
 							if !(isNull _target) then {
 								if (local _target) then {
-									[_arguments, _function] call _functionProcessor;
+									[_arguments, _function, clientOwner] call KH_fnc_callParsedFunction;
 								}
 								else {
 									[
 										"KH_eve_executionServer", 
 										[
-											[_arguments, _function, _target],
-											{
-												params ["_arguments", "_function", "_target"];
-												["KH_eve_executionGlobal", [_arguments, _function], groupOwner _target] call CBA_fnc_ownerEvent;
-											}
+											[_arguments, _function, _target, clientOwner],
+											[
+												{
+													params ["_arguments", "_function", "_target", "_clientOwner"];
+													["KH_eve_executionGlobal", [_arguments, _function, _clientOwner], groupOwner _target] call CBA_fnc_ownerEvent;
+												} 
+											] call KH_fnc_parseFunction,
+											clientOwner
 										]
 									] call CBA_fnc_serverEvent;
 								};
@@ -130,13 +77,13 @@ isNil {
 						
 						case (_target isEqualType 0): {
 							if (_target == clientOwner) then {
-								[_arguments, _function] call _functionProcessor;
+								[_arguments, _function, clientOwner] call KH_fnc_callParsedFunction;
 								true;
 							}
 							else {
 								if !(_target < 0) then {
 									if (_target in KH_var_allMachines) then {
-										["KH_eve_executionGlobal", [_arguments, _function], _target] call CBA_fnc_ownerEvent;
+										["KH_eve_executionGlobal", [_arguments, _function, clientOwner], _target] call CBA_fnc_ownerEvent;
 										true;
 									}
 									else {
@@ -147,13 +94,13 @@ isNil {
 									private _invertedTarget = abs _target;
 
 									if (_invertedTarget == clientOwner) then {
-										["KH_eve_executionGlobal", [_arguments, _function]] call CBA_fnc_remoteEvent;
+										["KH_eve_executionGlobal", [_arguments, _function, clientOwner]] call CBA_fnc_remoteEvent;
 										true;
 									}
 									else {
 										if (_invertedTarget in KH_var_allMachines) then {
 											{
-												["KH_eve_executionGlobal", [_arguments, _function], _x] call CBA_fnc_ownerEvent;
+												["KH_eve_executionGlobal", [_arguments, _function, clientOwner], _x] call CBA_fnc_ownerEvent;
 											} forEach (KH_var_allMachines - [_invertedTarget]);
 
 											true;
@@ -167,7 +114,7 @@ isNil {
 						};
 
 						case (_target isEqualType sideUnknown): {
-							["KH_eve_executionPlayer", [_arguments, _function], [[_target], true] call KH_fnc_getClients] call CBA_fnc_targetEvent;
+							["KH_eve_executionPlayer", [_arguments, _function, clientOwner], [[_target], true] call KH_fnc_getClients] call CBA_fnc_targetEvent;
 							true;
 						};
 
@@ -175,35 +122,35 @@ isNil {
 							switch true do {
 								case (_target == "SERVER"): {
 									if isServer then {
-										[_arguments, _function] call _functionProcessor;
+										[_arguments, _function, clientOwner] call KH_fnc_callParsedFunction;
 									}
 									else {
-										["KH_eve_executionServer", [_arguments, _function]] call CBA_fnc_serverEvent;
+										["KH_eve_executionServer", [_arguments, _function, clientOwner]] call CBA_fnc_serverEvent;
 									};
 
 									true;
 								};
 
 								case (_target == "GLOBAL"): {
-									["KH_eve_executionGlobal", [_arguments, _function]] call CBA_fnc_globalEvent;
+									["KH_eve_executionGlobal", [_arguments, _function, clientOwner]] call CBA_fnc_globalEvent;
 									true;
 								};
 
 								case (_target == "PLAYERS"): {
-									["KH_eve_executionPlayer", [_arguments, _function]] call CBA_fnc_globalEvent;
+									["KH_eve_executionPlayer", [_arguments, _function, clientOwner]] call CBA_fnc_globalEvent;
 									true;
 								};
 
 								case (_target == "PLAYER_UNITS"): {
 									{
-										["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
+										["KH_eve_executionPlayer", [_arguments, _function, clientOwner], _x] call CBA_fnc_targetEvent;
 									} forEach KH_var_allPlayerUnits;
 
 									true;
 								};
 
 								case (_target == "HEADLESS"): {
-									["KH_eve_executionHeadless", [_arguments, _function]] call CBA_fnc_globalEvent;
+									["KH_eve_executionHeadless", [_arguments, _function, clientOwner]] call CBA_fnc_globalEvent;
 									true;
 								};
 
@@ -212,7 +159,7 @@ isNil {
 										private _curatorUnit = getAssignedCuratorUnit _x;
 
 										if (!(isNull _curatorUnit) && (isPlayer _curatorUnit)) then {
-											["KH_eve_executionPlayer", [_arguments, _function], _curatorUnit] call CBA_fnc_targetEvent;
+											["KH_eve_executionPlayer", [_arguments, _function, clientOwner], _curatorUnit] call CBA_fnc_targetEvent;
 										};
 									} forEach allCurators;
 
@@ -222,10 +169,10 @@ isNil {
 								case (_target == "ADMIN"): {
 									if (KH_var_currentAdmin != 2) then {
 										if (KH_var_currentAdmin == clientOwner) then {
-											[_arguments, _function] call _functionProcessor;
+											[_arguments, _function, clientOwner] call KH_fnc_callParsedFunction;
 										}
 										else {
-											["KH_eve_executionPlayer", [_arguments, _function], KH_var_currentAdmin] call CBA_fnc_ownerEvent;
+											["KH_eve_executionPlayer", [_arguments, _function, clientOwner], KH_var_currentAdmin] call CBA_fnc_ownerEvent;
 										};
 
 										true;
@@ -240,21 +187,21 @@ isNil {
 										private _player = KH_var_allPlayerUidMachines get _target;
 
 										if !(isNil "_player") then {
-											["KH_eve_executionPlayer", [_arguments, _function], _player] call CBA_fnc_ownerEvent;
+											["KH_eve_executionPlayer", [_arguments, _function, clientOwner], _player] call CBA_fnc_ownerEvent;
 											true;
 										}
 										else {
 											_player = KH_var_allPlayerIdMachines get _target;
 
 											if !(isNil "_player") then {
-												["KH_eve_executionPlayer", [_arguments, _function], _player] call CBA_fnc_ownerEvent;
+												["KH_eve_executionPlayer", [_arguments, _function, clientOwner], _player] call CBA_fnc_ownerEvent;
 												true;
 											}
 											else {
 												private _client = KH_var_allHeadlessIdMachines get _target;
 
 												if !(isNil "_client") then {
-													["KH_eve_executionHeadless", [_arguments, _function], _client] call CBA_fnc_ownerEvent;
+													["KH_eve_executionHeadless", [_arguments, _function, clientOwner], _client] call CBA_fnc_ownerEvent;
 													true;
 												}
 												else {
@@ -266,10 +213,10 @@ isNil {
 									else {
 										if !(isNull (objectFromNetId _target)) then {
 											if (local (objectFromNetId _target)) then {
-												[_arguments, _function] call _functionProcessor;
+												[_arguments, _function, clientOwner] call KH_fnc_callParsedFunction;
 											}
 											else {
-												["KH_eve_executionGlobal", [_arguments, _function], objectFromNetId _target] call CBA_fnc_targetEvent;
+												["KH_eve_executionGlobal", [_arguments, _function, clientOwner], objectFromNetId _target] call CBA_fnc_targetEvent;
 											};
 
 											true;
@@ -277,17 +224,20 @@ isNil {
 										else {
 											if !(isNull (groupFromNetId _target)) then {
 												if (local (groupFromNetId _target)) then {
-													[_arguments, _function] call _functionProcessor;
+													[_arguments, _function, clientOwner] call KH_fnc_callParsedFunction;
 												}
 												else {
 													[
 														"KH_eve_executionServer", 
 														[
-															[_arguments, _function, _target],
-															{
-																params ["_arguments", "_function", "_target"];
-																["KH_eve_executionGlobal", [_arguments, _function], groupOwner (groupFromNetId _target)] call CBA_fnc_ownerEvent;
-															}
+															[_arguments, _function, _target, clientOwner],
+															[
+																{
+																	params ["_arguments", "_function", "_target", "_clientOwner"];
+																	["KH_eve_executionGlobal", [_arguments, _function, _clientOwner], groupOwner (groupFromNetId _target)] call CBA_fnc_ownerEvent;
+																} 
+															] call KH_fnc_parseFunction,
+															clientOwner
 														]
 													] call CBA_fnc_serverEvent;
 												};
@@ -302,15 +252,15 @@ isNil {
 								};
 
 								case (_target == "LOCAL"): {
-									[_arguments, _function] call _functionProcessor;
+									[_arguments, _function, clientOwner] call KH_fnc_callParsedFunction;
 								};
-								
+
 								default {
 									private _unitPresent = false;
 
 									{
 										if ((name _x) == _target) then {
-											["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
+											["KH_eve_executionPlayer", [_arguments, _function, clientOwner], _x] call CBA_fnc_targetEvent;
 											_unitPresent = true;
 											break;
 										};
@@ -333,12 +283,12 @@ isNil {
 										{
 											if !_invert then {
 												if ((group _x) == _group) then {
-													["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
+													["KH_eve_executionPlayer", [_arguments, _function, clientOwner], _x] call CBA_fnc_targetEvent;
 												};
 											}
 											else {
 												if ((group _x) != _group) then {
-													["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
+													["KH_eve_executionPlayer", [_arguments, _function, clientOwner], _x] call CBA_fnc_targetEvent;
 												};
 											};
 										} forEach KH_var_allPlayerUnits;
@@ -357,12 +307,12 @@ isNil {
 									{
 										if !_invert then {
 											if ((roleDescription _x) == _role) then {
-												["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
+												["KH_eve_executionPlayer", [_arguments, _function, clientOwner], _x] call CBA_fnc_targetEvent;
 											};
 										}
 										else {
 											if ((roleDescription _x) != _role) then {
-												["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
+												["KH_eve_executionPlayer", [_arguments, _function, clientOwner], _x] call CBA_fnc_targetEvent;
 											};
 										};
 									} forEach KH_var_allPlayerUnits;
@@ -377,12 +327,12 @@ isNil {
 									{
 										if _invert then {
 											if !(_x inArea _area) then {
-												["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
+												["KH_eve_executionPlayer", [_arguments, _function, clientOwner], _x] call CBA_fnc_targetEvent;
 											};
 										}
 										else {
 											if (_x inArea _area) then {
-												["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
+												["KH_eve_executionPlayer", [_arguments, _function, clientOwner], _x] call CBA_fnc_targetEvent;
 											};
 										};
 									} forEach KH_var_allPlayerUnits;
@@ -417,18 +367,18 @@ isNil {
 									[
 										_eventType, 
 										[
-											[_arguments, _function, _conditionArguments, _conditionFunction, _functionProcessor], 
-											{
-												params ["_arguments", "_function", "_conditionArguments", "_conditionFunction", "_functionProcessor"];
-
-												if (_conditionFunction isEqualType "") then {
-													_conditionFunction = missionNamespace getVariable [_conditionFunction, {}];
-												};
-												
-												if (_conditionArguments call _conditionFunction) then {
-													[_arguments, _function] call _functionProcessor;
-												};
-											}
+											[_arguments, _function, _conditionArguments, _conditionFunction, clientOwner],
+											[
+												{
+													params ["_arguments", "_function", "_conditionArguments", "_conditionFunction", "_clientOwner"];
+													_conditionFunction = [_conditionFunction] call KH_fnc_parseFunction;
+													
+													if ([_conditionArguments, _conditionFunction, clientOwner] call KH_fnc_callParsedFunction) then {
+														[_arguments, _function, _clientOwner] call KH_fnc_callParsedFunction;
+													};
+												}
+										 	] call KH_fnc_parseFunction,
+											clientOwner
 										]
 									] call CBA_fnc_globalEvent;
 
@@ -443,13 +393,13 @@ isNil {
 									private _machines = [];
 
 									private _callbackHandler = [
-										"CBA",
+										"PUBLIC_VARIABLE",
 										_id,
 										[_framerates],
 										{
 											_args params ["_framerates"];
 											private _framerateList = missionNamespace getVariable [_framerates, createHashMap];
-											_framerateList insert [_this];
+											_framerateList insert [_this select 1];
 											missionNamespace setVariable [_framerates, _framerateList];
 										}
 									] call KH_fnc_addEventHandler;
@@ -465,22 +415,26 @@ isNil {
 										[
 											"KH_eve_executionGlobal", 
 											[
-												[_id, clientOwner], 
-												{
-													params ["_id", "_clientOwner"];
-													private _framerate = 0;
+												[_id, clientOwner],
+												[
+													{
+														params ["_id", "_clientOwner"];
+														private _framerate = 0;
 
-													if !hasInterface then {
-														if (diag_fpsMin > 45) then {
-															_framerate = 999999;
+														if !hasInterface then {
+															if (diag_fpsMin > 45) then {
+																_framerate = 999999;
+															};
+														}
+														else {
+															_framerate = diag_fpsMin;
 														};
-													}
-													else {
-														_framerate = diag_fpsMin;
-													};
 
-													[_id, [_framerate, clientOwner], _clientOwner] call CBA_fnc_ownerEvent;
-												}
+														missionNamespace setVariable [_id, [_framerate, clientOwner]];
+														_clientOwner publicVariableClient _id;
+													}
+											 	] call KH_fnc_parseFunction,
+												clientOwner
 											], 
 											_x
 										] call CBA_fnc_ownerEvent;
@@ -504,7 +458,7 @@ isNil {
 											_chosenMachine = _framerateList get (selectMax _parsedFramerates);
 										};
 
-										["KH_eve_executionGlobal", [_arguments, _function], _chosenMachine] call CBA_fnc_ownerEvent;
+										["KH_eve_executionGlobal", [_arguments, _function, clientOwner], _chosenMachine] call CBA_fnc_ownerEvent;
 										[_callbackHandler] call KH_fnc_removeEventHandler;
 									};
 
@@ -523,6 +477,42 @@ isNil {
 									true;
 								};
 
+								case (_type == "MATCHING_MACHINES"): {
+									private _invert = _target param [1, false];
+
+									if !_invert then {
+										if hasInterface then {
+											["KH_eve_executionPlayer", [_arguments, _function, clientOwner]] call CBA_fnc_globalEvent;
+										}
+										else {
+											if !isServer then {
+												["KH_eve_executionHeadless", [_arguments, _function, clientOwner]] call CBA_fnc_globalEvent;
+											}
+											else {
+												[_arguments, _function, clientOwner] call KH_fnc_callParsedFunction;
+											};
+										};
+									}
+									else {
+										if !hasInterface then {
+											if !isServer then {
+												["KH_eve_executionPlayer", [_arguments, _function, clientOwner]] call CBA_fnc_globalEvent;
+												["KH_eve_executionServer", [_arguments, _function, clientOwner]] call CBA_fnc_serverEvent;
+											}
+											else {
+												["KH_eve_executionPlayer", [_arguments, _function, clientOwner]] call CBA_fnc_globalEvent;
+												["KH_eve_executionHeadless", [_arguments, _function, clientOwner]] call CBA_fnc_globalEvent;
+											};
+										}
+										else {
+											["KH_eve_executionServer", [_arguments, _function, clientOwner]] call CBA_fnc_serverEvent;
+											["KH_eve_executionHeadless", [_arguments, _function, clientOwner]] call CBA_fnc_globalEvent;
+										};
+									};
+									
+									true;
+								};
+
 								case (_type == "REMOTE"): {
 									private _exclusiveType = _target param [1, "GLOBAL"];
 									
@@ -530,16 +520,16 @@ isNil {
 										case (_exclusiveType isEqualType ""): {
 											switch true do {
 												case (_exclusiveType == "GLOBAL"): {
-													["KH_eve_executionGlobal", [_arguments, _function]] call CBA_fnc_remoteEvent;
+													["KH_eve_executionGlobal", [_arguments, _function, clientOwner]] call CBA_fnc_remoteEvent;
 												};
 
 												case (_exclusiveType == "PLAYERS"): {
-													["KH_eve_executionPlayer", [_arguments, _function]] call CBA_fnc_remoteEvent;
+													["KH_eve_executionPlayer", [_arguments, _function, clientOwner]] call CBA_fnc_remoteEvent;
 												};
 
 												case (_exclusiveType == "PLAYER_UNITS"): {
 													{
-														["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
+														["KH_eve_executionPlayer", [_arguments, _function, clientOwner], _x] call CBA_fnc_targetEvent;
 													} forEach (KH_var_allPlayerUnits - [player]);
 												};
 
@@ -548,13 +538,13 @@ isNil {
 														private _curatorUnit = getAssignedCuratorUnit _x;
 
 														if (!(isNull _curatorUnit) && (isPlayer _curatorUnit)) then {
-															["KH_eve_executionPlayer", [_arguments, _function], _curatorUnit] call CBA_fnc_targetEvent;
+															["KH_eve_executionPlayer", [_arguments, _function, clientOwner], _curatorUnit] call CBA_fnc_targetEvent;
 														};
 													} forEach (allCurators - [getAssignedCuratorLogic player]);
 												};
 
 												case (_exclusiveType == "HEADLESS"): {
-													["KH_eve_executionHeadless", [_arguments, _function]] call CBA_fnc_remoteEvent;
+													["KH_eve_executionHeadless", [_arguments, _function, clientOwner]] call CBA_fnc_remoteEvent;
 												};
 											};
 
@@ -573,12 +563,12 @@ isNil {
 														{
 															if !_invert then {
 																if ((group _x) == _group) then {
-																	["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
+																	["KH_eve_executionPlayer", [_arguments, _function, clientOwner], _x] call CBA_fnc_targetEvent;
 																};
 															}
 															else {
 																if ((group _x) != _group) then {
-																	["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
+																	["KH_eve_executionPlayer", [_arguments, _function, clientOwner], _x] call CBA_fnc_targetEvent;
 																};
 															};
 														} forEach (KH_var_allPlayerUnits - [player]);
@@ -597,12 +587,12 @@ isNil {
 													{
 														if !_invert then {
 															if ((roleDescription _x) == _role) then {
-																["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
+																["KH_eve_executionPlayer", [_arguments, _function, clientOwner], _x] call CBA_fnc_targetEvent;
 															};
 														}
 														else {
 															if ((roleDescription _x) != _role) then {
-																["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
+																["KH_eve_executionPlayer", [_arguments, _function, clientOwner], _x] call CBA_fnc_targetEvent;
 															};
 														};
 													} forEach (KH_var_allPlayerUnits - [player]);
@@ -617,12 +607,12 @@ isNil {
 													{
 														if _invert then {
 															if !(_x inArea _area) then {
-																["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
+																["KH_eve_executionPlayer", [_arguments, _function, clientOwner], _x] call CBA_fnc_targetEvent;
 															};
 														}
 														else {
 															if (_x inArea _area) then {
-																["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
+																["KH_eve_executionPlayer", [_arguments, _function, clientOwner], _x] call CBA_fnc_targetEvent;
 															};
 														};
 													} forEach (KH_var_allPlayerUnits - [player]);
@@ -657,22 +647,59 @@ isNil {
 													[
 														_eventType, 
 														[
-															[_arguments, _function, _conditionArguments, _conditionFunction, _functionProcessor], 
-															{
-																params ["_arguments", "_function", "_conditionArguments", "_conditionFunction", "_functionProcessor"];
-
-																if (_conditionFunction isEqualType "") then {
-																	_conditionFunction = missionNamespace getVariable [_conditionFunction, {}];
-																};
-																
-																if (_conditionArguments call _conditionFunction) then {
-																	[_arguments, _function] call _functionProcessor;
-																};
-															}
+															[_arguments, _function, _conditionArguments, _conditionFunction, clientOwner], 
+															[
+																{
+																	params ["_arguments", "_function", "_conditionArguments", "_conditionFunction", "_clientOwner"];
+																	_conditionFunction = [_conditionFunction] call KH_fnc_parseFunction;
+																	
+																	if ([_conditionArguments, _conditionFunction, clientOwner] call KH_fnc_callParsedFunction) then {
+																		[_arguments, _function, _clientOwner] call KH_fnc_callParsedFunction;
+																	};
+																}
+															] call KH_fnc_parseFunction,
+															clientOwner
 														]
 													] call CBA_fnc_remoteEvent;
 
 													true;
+												};
+
+												case (_targetType == "MATCHING_MACHINES"): {
+													private _invert = _exclusiveType param [1, false];
+
+													if !_invert then {
+														if hasInterface then {
+															["KH_eve_executionPlayer", [_arguments, _function, clientOwner]] call CBA_fnc_remoteEvent;
+														}
+														else {
+															if !isServer then {
+																["KH_eve_executionHeadless", [_arguments, _function, clientOwner]] call CBA_fnc_remoteEvent;
+															};
+														};
+													}
+													else {
+														if !hasInterface then {
+															if !isServer then {
+																["KH_eve_executionPlayer", [_arguments, _function, clientOwner]] call CBA_fnc_globalEvent;
+																["KH_eve_executionServer", [_arguments, _function, clientOwner]] call CBA_fnc_serverEvent;
+															}
+															else {
+																["KH_eve_executionPlayer", [_arguments, _function, clientOwner]] call CBA_fnc_globalEvent;
+																["KH_eve_executionHeadless", [_arguments, _function, clientOwner]] call CBA_fnc_globalEvent;
+															};
+														}
+														else {
+															["KH_eve_executionServer", [_arguments, _function, clientOwner]] call CBA_fnc_serverEvent;
+															["KH_eve_executionHeadless", [_arguments, _function, clientOwner]] call CBA_fnc_globalEvent;
+														};
+													};
+
+													true;
+												};
+
+												default {
+													false;
 												};
 											};											
 										};
@@ -683,221 +710,235 @@ isNil {
 									private _targets = _target select 1;
 
 									[
-										"KH_eve_executionServer", 
+										"KH_eve_executionServer",
 										[
-											[_arguments, _function, _targets, _functionProcessor, clientOwner],
-											{
-												params ["_arguments", "_function", "_targets", "_functionProcessor", "_caller"];
-												private _exclusiveList = [];
-
+											[_arguments, _function, _targets, clientOwner, isServer, hasInterface],
+											[
 												{
-													switch true do {
-														case (_x isEqualType objNull): {
-															if !(isNull _x) then {
-																if !((owner _x) in _exclusiveList) then {
-																	["KH_eve_executionGlobal", [_arguments, _function], _x] call CBA_fnc_targetEvent;
-																	_exclusiveList pushBack (owner _x);
-																};
-															};
-														};
+													params ["_arguments", "_function", "_targets", "_caller", "_isServer", "_hasInterface"];
+													private _exclusiveList = [];
 
-														case (_x isEqualType teamMemberNull): {
-															if !(isNull _x) then {
-																private _agent = agent _x;
-
-																if !((owner _agent) in _exclusiveList) then {
-																	["KH_eve_executionGlobal", [_arguments, _function], _agent] call CBA_fnc_targetEvent;
-																	_exclusiveList pushBack (owner _agent);
-																};
-															};
-														};
-
-														case (_x isEqualType grpNull): {															
-															if !(isNull _x) then {
-																if !((groupOwner _x) in _exclusiveList) then {
-																	["KH_eve_executionGlobal", [_arguments, _function], groupOwner _x] call CBA_fnc_ownerEvent;
-																	_exclusiveList pushBack (groupOwner _x);
-																};
-															};
-														};
-														
-														case (_x isEqualType 0): {
-															if (_x in KH_var_allMachines) then {
-																if !(_x in _exclusiveList) then {
-																	["KH_eve_executionGlobal", [_arguments, _function], _x] call CBA_fnc_ownerEvent;
-																	_exclusiveList pushBack _x;
-																};
-															};
-														};
-
-														case (_x isEqualType sideUnknown): {
-															private _side = _x;
-
-															{
-																if !((owner _x) in _exclusiveList) then {
-																	["KH_eve_executionGlobal", [_arguments, _function], _x] call CBA_fnc_targetEvent;
-																	_exclusiveList pushBack (owner _x);
-																};
-															} forEach ([[_side], true] call KH_fnc_getClients);
-														};
-														
-														case (_x isEqualType ""): {
-															switch true do {
-																case (_x == "SERVER"): {
-																	if !(2 in _exclusiveList) then {
-																		[_arguments, _function] call _functionProcessor;
-																		_exclusiveList pushBack 2;
+													{
+														switch true do {
+															case (_x isEqualType objNull): {
+																if !(isNull _x) then {
+																	if !((owner _x) in _exclusiveList) then {
+																		["KH_eve_executionGlobal", [_arguments, _function, _caller], _x] call CBA_fnc_targetEvent;
+																		_exclusiveList pushBack (owner _x);
 																	};
 																};
+															};
 
-																case (_x == "PLAYERS"): {
-																	{
-																		if !(_x in _exclusiveList) then {
-																			["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_ownerEvent;
-																			_exclusiveList pushBack _x;
-																		};
-																	} forEach KH_var_allPlayerMachines;
-																};
+															case (_x isEqualType teamMemberNull): {
+																if !(isNull _x) then {
+																	private _agent = agent _x;
 
-																case (_x == "PLAYER_UNITS"): {
-																	{
-																		if !((owner _x) in _exclusiveList) then {
-																			["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
-																			_exclusiveList pushBack (owner _x);
-																		};
-																	} forEach KH_var_allPlayerUnits;
-																};
-
-																case (_x == "HEADLESS"): {
-																	{
-																		if !(_x in _exclusiveList) then {
-																			["KH_eve_executionHeadless", [_arguments, _function], _x] call CBA_fnc_ownerEvent;
-																			_exclusiveList pushBack _x;
-																		};
-																	} forEach KH_var_allHeadlessMachines;
-																};
-
-																case (_x == "CURATORS"): {
-																	{
-																		private _curatorUnit = getAssignedCuratorUnit _x;
-
-																		if (!(isNull _curatorUnit) && (isPlayer _curatorUnit)) then {
-																			if !((owner _curatorUnit) in _exclusiveList) then {
-																				["KH_eve_executionPlayer", [_arguments, _function], _curatorUnit] call CBA_fnc_targetEvent;
-																				_exclusiveList pushBack (owner _curatorUnit);
-																			};
-																		};
-																	} forEach allCurators;
-																};
-
-																case (_x == "ADMIN"): {
-																	if (KH_var_currentAdmin != 2) then {
-																		if !(KH_var_currentAdmin in _exclusiveList) then {
-																			["KH_eve_executionPlayer", [_arguments, _function], KH_var_currentAdmin] call CBA_fnc_ownerEvent;
-																			_exclusiveList pushBack KH_var_currentAdmin;
-																		};
+																	if !((owner _agent) in _exclusiveList) then {
+																		["KH_eve_executionGlobal", [_arguments, _function, _caller], _agent] call CBA_fnc_targetEvent;
+																		_exclusiveList pushBack (owner _agent);
 																	};
 																};
+															};
 
-																case (((parseNumber (_x select [0, 1])) != 0) && ([_x] call {params ["_target"]; private _condition = true; {if ((name _x) == _target) then {_condition = false; break;};} forEach KH_var_allPlayerUnits; _condition;})): {
-																	if !(":" in _x) then {
-																		private _player = KH_var_allPlayerUidMachines get _x;
+															case (_x isEqualType grpNull): {															
+																if !(isNull _x) then {
+																	if !((groupOwner _x) in _exclusiveList) then {
+																		["KH_eve_executionGlobal", [_arguments, _function, _caller], groupOwner _x] call CBA_fnc_ownerEvent;
+																		_exclusiveList pushBack (groupOwner _x);
+																	};
+																};
+															};
+															
+															case (_x isEqualType 0): {
+																if (_x in KH_var_allMachines) then {
+																	if !(_x in _exclusiveList) then {
+																		["KH_eve_executionGlobal", [_arguments, _function, _caller], _x] call CBA_fnc_ownerEvent;
+																		_exclusiveList pushBack _x;
+																	};
+																};
+															};
 
-																		if !(isNil "_player") then {
-																			if !(_player in _exclusiveList) then {
-																				["KH_eve_executionPlayer", [_arguments, _function], _player] call CBA_fnc_ownerEvent;
-																				_exclusiveList pushBack _player;
+															case (_x isEqualType sideUnknown): {
+																private _side = _x;
+
+																{
+																	if !((owner _x) in _exclusiveList) then {
+																		["KH_eve_executionGlobal", [_arguments, _function, _caller], _x] call CBA_fnc_targetEvent;
+																		_exclusiveList pushBack (owner _x);
+																	};
+																} forEach ([[_side], true] call KH_fnc_getClients);
+															};
+															
+															case (_x isEqualType ""): {
+																switch true do {
+																	case (_x == "SERVER"): {
+																		if !(2 in _exclusiveList) then {
+																			[_arguments, _function, _caller] call KH_fnc_callParsedFunction;
+																			_exclusiveList pushBack 2;
+																		};
+																	};
+
+																	case (_x == "PLAYERS"): {
+																		{
+																			if !(_x in _exclusiveList) then {
+																				["KH_eve_executionPlayer", [_arguments, _function, _caller], _x] call CBA_fnc_ownerEvent;
+																				_exclusiveList pushBack _x;
 																			};
-																		}
-																		else {
-																			_player = KH_var_allPlayerIdMachines get _x;
+																		} forEach KH_var_allPlayerMachines;
+																	};
+
+																	case (_x == "PLAYER_UNITS"): {
+																		{
+																			if !((owner _x) in _exclusiveList) then {
+																				["KH_eve_executionPlayer", [_arguments, _function, _caller], _x] call CBA_fnc_targetEvent;
+																				_exclusiveList pushBack (owner _x);
+																			};
+																		} forEach KH_var_allPlayerUnits;
+																	};
+
+																	case (_x == "HEADLESS"): {
+																		{
+																			if !(_x in _exclusiveList) then {
+																				["KH_eve_executionHeadless", [_arguments, _function, _caller], _x] call CBA_fnc_ownerEvent;
+																				_exclusiveList pushBack _x;
+																			};
+																		} forEach KH_var_allHeadlessMachines;
+																	};
+
+																	case (_x == "CURATORS"): {
+																		{
+																			private _curatorUnit = getAssignedCuratorUnit _x;
+
+																			if (!(isNull _curatorUnit) && (isPlayer _curatorUnit)) then {
+																				if !((owner _curatorUnit) in _exclusiveList) then {
+																					["KH_eve_executionPlayer", [_arguments, _function, _caller], _curatorUnit] call CBA_fnc_targetEvent;
+																					_exclusiveList pushBack (owner _curatorUnit);
+																				};
+																			};
+																		} forEach allCurators;
+																	};
+
+																	case (_x == "ADMIN"): {
+																		if (KH_var_currentAdmin != 2) then {
+																			if !(KH_var_currentAdmin in _exclusiveList) then {
+																				["KH_eve_executionPlayer", [_arguments, _function, _caller], KH_var_currentAdmin] call CBA_fnc_ownerEvent;
+																				_exclusiveList pushBack KH_var_currentAdmin;
+																			};
+																		};
+																	};
+
+																	case (((parseNumber (_x select [0, 1])) != 0) && ([_x] call {params ["_target"]; private _condition = true; {if ((name _x) == _target) then {_condition = false; break;};} forEach KH_var_allPlayerUnits; _condition;})): {
+																		if !(":" in _x) then {
+																			private _player = KH_var_allPlayerUidMachines get _x;
 
 																			if !(isNil "_player") then {
 																				if !(_player in _exclusiveList) then {
-																					["KH_eve_executionPlayer", [_arguments, _function], _player] call CBA_fnc_ownerEvent;
+																					["KH_eve_executionPlayer", [_arguments, _function, _caller], _player] call CBA_fnc_ownerEvent;
 																					_exclusiveList pushBack _player;
 																				};
 																			}
 																			else {
-																				private _client = KH_var_allHeadlessIdMachines get _x;
+																				_player = KH_var_allPlayerIdMachines get _x;
 
-																				if !(isNil "_client") then {
-																					if !(_client in _exclusiveList) then {
-																						["KH_eve_executionHeadless", [_arguments, _function], _client] call CBA_fnc_ownerEvent;
-																						_exclusiveList pushBack _client;
-																					};
-																				};
-																			};
-																		};
-																	}
-																	else {
-																		if !(isNull (objectFromNetId _x)) then {
-																			["KH_eve_executionGlobal", [_arguments, _function], objectFromNetId _x] call CBA_fnc_targetEvent;
-																			_exclusiveList pushBack (owner (objectFromNetId _x));
-																		}
-																		else {
-																			if !(isNull (groupFromNetId _x)) then {
-																				[
-																					"KH_eve_executionServer", 
-																					[
-																						[_arguments, _function, _x],
-																						{
-																							params ["_arguments", "_function", "_target"];
-																							["KH_eve_executionGlobal", [_arguments, _function], groupOwner (groupFromNetId _target)] call CBA_fnc_ownerEvent;
-																						}
-																					]
-																				] call CBA_fnc_serverEvent;
-
-																				_exclusiveList pushBack (groupOwner (groupFromNetId _x));
-																			};											
-																		};
-																	};
-																};
-
-																case (_x == "LOCAL"): {
-																	if !(_caller in _exclusiveList) then {
-																		["KH_eve_executionGlobal", [_arguments, _function], _caller] call CBA_fnc_ownerEvent;
-																		_exclusiveList pushBack _caller;
-																	};
-																};
-
-																default {
-																	private _currentTarget = _x;
-
-																	{
-																		if ((name _x) == _currentTarget) then {
-																			if !((owner _x) in _exclusiveList) then {
-																				["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
-																				_exclusiveList pushBack (owner _x);
-																			};
-
-																			break;
-																		};
-																	} forEach KH_var_allPlayerUnits;
-																};
-															};
-														};
-
-														case (_x isEqualType []): {
-															private _currentTarget = _x;
-															private _targetType = _currentTarget select 0;
-
-															switch true do {
-																case (_targetType == "GROUP_PLAYERS"): {
-																	private _group = _currentTarget select 1;
-																	private _invert = _currentTarget param [2, false];
-																
-																	if !(isNull _group) then {
-																		{
-																			if !((owner _x) in _exclusiveList) then {
-																				if !_invert then {
-																					if ((group _x) == _group) then {
-																						["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
+																				if !(isNil "_player") then {
+																					if !(_player in _exclusiveList) then {
+																						["KH_eve_executionPlayer", [_arguments, _function, _caller], _player] call CBA_fnc_ownerEvent;
+																						_exclusiveList pushBack _player;
 																					};
 																				}
 																				else {
-																					if ((group _x) != _group) then {
-																						["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
+																					private _client = KH_var_allHeadlessIdMachines get _x;
+
+																					if !(isNil "_client") then {
+																						if !(_client in _exclusiveList) then {
+																							["KH_eve_executionHeadless", [_arguments, _function, _caller], _client] call CBA_fnc_ownerEvent;
+																							_exclusiveList pushBack _client;
+																						};
+																					};
+																				};
+																			};
+																		}
+																		else {
+																			if !(isNull (objectFromNetId _x)) then {
+																				["KH_eve_executionGlobal", [_arguments, _function, _caller], objectFromNetId _x] call CBA_fnc_targetEvent;
+																				_exclusiveList pushBack (owner (objectFromNetId _x));
+																			}
+																			else {
+																				if !(isNull (groupFromNetId _x)) then {
+																					["KH_eve_executionGlobal", [_arguments, _function, _caller], groupOwner (groupFromNetId _target)] call CBA_fnc_ownerEvent;
+																					_exclusiveList pushBack (groupOwner (groupFromNetId _x));
+																				};											
+																			};
+																		};
+																	};
+
+																	case (_x == "LOCAL"): {
+																		if !(_caller in _exclusiveList) then {
+																			["KH_eve_executionGlobal", [_arguments, _function, _caller], _caller] call CBA_fnc_ownerEvent;
+																			_exclusiveList pushBack _caller;
+																		};
+																	};
+
+																	default {
+																		private _currentTarget = _x;
+
+																		{
+																			if ((name _x) == _currentTarget) then {
+																				if !((owner _x) in _exclusiveList) then {
+																					["KH_eve_executionPlayer", [_arguments, _function, _caller], _x] call CBA_fnc_targetEvent;
+																					_exclusiveList pushBack (owner _x);
+																				};
+
+																				break;
+																			};
+																		} forEach KH_var_allPlayerUnits;
+																	};
+																};
+															};
+
+															case (_x isEqualType []): {
+																private _currentTarget = _x;
+																private _targetType = _currentTarget select 0;
+
+																switch true do {
+																	case (_targetType == "GROUP_PLAYERS"): {
+																		private _group = _currentTarget select 1;
+																		private _invert = _currentTarget param [2, false];
+																	
+																		if !(isNull _group) then {
+																			{
+																				if !((owner _x) in _exclusiveList) then {
+																					if !_invert then {
+																						if ((group _x) == _group) then {
+																							["KH_eve_executionPlayer", [_arguments, _function, _caller], _x] call CBA_fnc_targetEvent;
+																						};
+																					}
+																					else {
+																						if ((group _x) != _group) then {
+																							["KH_eve_executionPlayer", [_arguments, _function, _caller], _x] call CBA_fnc_targetEvent;
+																						};
+																					};
+
+																					_exclusiveList pushBack (owner _x);
+																				};
+																			} forEach KH_var_allPlayerUnits;
+																		};
+																	};
+
+																	case (_targetType == "PLAYER_ROLE"): {
+																		private _role = _currentTarget select 1;
+																		private _invert = _currentTarget param [2, false];
+																		
+																		{
+																			if !((owner _x) in _exclusiveList) then {
+																				if !_invert then {
+																					if ((roleDescription _x) == _role) then {
+																						["KH_eve_executionPlayer", [_arguments, _function, _caller], _x] call CBA_fnc_targetEvent;
+																					};
+																				}
+																				else {
+																					if ((roleDescription _x) != _role) then {
+																						["KH_eve_executionPlayer", [_arguments, _function, _caller], _x] call CBA_fnc_targetEvent;
 																					};
 																				};
 
@@ -905,56 +946,82 @@ isNil {
 																			};
 																		} forEach KH_var_allPlayerUnits;
 																	};
-																};
 
-																case (_targetType == "PLAYER_ROLE"): {
-																	private _role = _currentTarget select 1;
-																	private _invert = _currentTarget param [2, false];
-																	
-																	{
-																		if !((owner _x) in _exclusiveList) then {
-																			if !_invert then {
-																				if ((roleDescription _x) == _role) then {
-																					["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
+																	case (_targetType == "AREA_PLAYERS"): {
+																		private _area = _currentTarget select 1;
+																		private _invert = _currentTarget param [2, false];
+																		
+																		{
+																			if !((owner _x) in _exclusiveList) then {
+																				if _invert then {
+																					if !(_x inArea _area) then {
+																						["KH_eve_executionPlayer", [_arguments, _function, _caller], _x] call CBA_fnc_targetEvent;
+																						_exclusiveList pushBack (owner _x);
+																					};
+																				}
+																				else {
+																					if (_x inArea _area) then {
+																						["KH_eve_executionPlayer", [_arguments, _function, _caller], _x] call CBA_fnc_targetEvent;
+																						_exclusiveList pushBack (owner _x);
+																					};
+																				};
+																			};
+																		} forEach KH_var_allPlayerUnits;
+																	};
+
+																	case (_targetType == "MATCHING_MACHINES"): {
+																		private _invert = _currentTarget param [1, false];
+
+																		if !_invert then {
+																			if _hasInterface then {
+																				{
+																					["KH_eve_executionGlobal", [_arguments, _function, _caller], _x] call CBA_fnc_ownerEvent;
+																					_exclusiveList pushBack _x;
+																				} forEach KH_var_allPlayerMachines;
+																			}
+																			else {
+																				if !_isServer then {
+																					{
+																						["KH_eve_executionGlobal", [_arguments, _function, _caller], _x] call CBA_fnc_ownerEvent;
+																						_exclusiveList pushBack _x;
+																					} forEach KH_var_allHeadlessMachines;
+																				}
+																				else {
+																					[_arguments, _function, _caller] call KH_fnc_callParsedFunction;
+																					_exclusiveList pushBack 2;
+																				};
+																			};
+																		}
+																		else {
+																			if !_hasInterface then {
+																				if !_isServer then {
+																					{
+																						["KH_eve_executionGlobal", [_arguments, _function, _caller], _x] call CBA_fnc_ownerEvent;
+																						_exclusiveList pushBack _x;
+																					} forEach (KH_var_allPlayerMachines + [2]);
+																				}
+																				else {
+																					{
+																						["KH_eve_executionGlobal", [_arguments, _function, _caller], _x] call CBA_fnc_ownerEvent;
+																						_exclusiveList pushBack _x;
+																					} forEach (KH_var_allPlayerMachines + KH_var_allHeadlessMachines);
 																				};
 																			}
 																			else {
-																				if ((roleDescription _x) != _role) then {
-																					["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
-																				};
-																			};
-
-																			_exclusiveList pushBack (owner _x);
-																		};
-																	} forEach KH_var_allPlayerUnits;
-																};
-
-																case (_targetType == "AREA_PLAYERS"): {
-																	private _area = _currentTarget select 1;
-																	private _invert = _currentTarget param [2, false];
-																	
-																	{
-																		if !((owner _x) in _exclusiveList) then {
-																			if _invert then {
-																				if !(_x inArea _area) then {
-																					["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
-																					_exclusiveList pushBack (owner _x);
-																				};
-																			}
-																			else {
-																				if (_x inArea _area) then {
-																					["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
-																					_exclusiveList pushBack (owner _x);
-																				};
+																				{
+																					["KH_eve_executionGlobal", [_arguments, _function, _caller], _x] call CBA_fnc_ownerEvent;
+																					_exclusiveList pushBack _x;
+																				} forEach (KH_var_allHeadlessMachines + [2]);
 																			};
 																		};
-																	} forEach KH_var_allPlayerUnits;
+																	};
 																};
 															};
 														};
-													};
-												} forEach _targets;
-											}
+													} forEach _targets;
+												}
+										 	] call KH_fnc_parseFunction,
+											clientOwner
 										]
 									] call CBA_fnc_serverEvent;
 
@@ -988,330 +1055,333 @@ isNil {
 									_jipOverrideIdType = format ["KH_var_jipOverrideIdType%1", _id];
 
 									[
-										"KH_eve_executionServer", 
+										"KH_eve_executionServer",
 										[
-											[_arguments, _function, _exclusiveType, _dependency, _unitRequired, _remote, _id, _jipOverrideParams, _jipOverrideId, _jipOverrideIdType, clientOwner], 
-											{
-												params ["_arguments", "_function", "_exclusiveType", "_dependency", "_unitRequired", "_remote", "_id", "_jipOverrideParams", "_jipOverrideId", "_jipOverrideIdType", "_originalOwner"];
+											[_arguments, _function, _exclusiveType, _dependency, _unitRequired, _remote, _id, _jipOverrideParams, _jipOverrideId, _jipOverrideIdType, clientOwner],
+											[
+												{
+													params ["_arguments", "_function", "_exclusiveType", "_dependency", "_unitRequired", "_remote", "_id", "_jipOverrideParams", "_jipOverrideId", "_jipOverrideIdType", "_originalOwner"];
 
-												switch true do {
-													case (_exclusiveType == "GLOBAL"): {
-														if !_remote then {
-															if !_unitRequired then {
-																{
-																	["KH_eve_executionGlobal", [_arguments, _function], _x] call CBA_fnc_ownerEvent;
-																} forEach KH_var_allMachines;
-															}
-															else {
-																{
-																	["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
-																} forEach KH_var_allPlayerUnits;
-																
-																if isDedicated then {
+													switch true do {
+														case (_exclusiveType == "GLOBAL"): {
+															if !_remote then {
+																if !_unitRequired then {
 																	{
-																		["KH_eve_executionGlobal", [_arguments, _function], _x] call CBA_fnc_ownerEvent;
-																	} forEach ([2] + KH_var_allHeadlessMachines);
+																		["KH_eve_executionGlobal", [_arguments, _function, _originalOwner], _x] call CBA_fnc_ownerEvent;
+																	} forEach KH_var_allMachines;
 																}
 																else {
 																	{
-																		["KH_eve_executionHeadless", [_arguments, _function], _x] call CBA_fnc_ownerEvent;
-																	} forEach KH_var_allHeadlessMachines;
+																		["KH_eve_executionPlayer", [_arguments, _function, _originalOwner], _x] call CBA_fnc_targetEvent;
+																	} forEach KH_var_allPlayerUnits;
+																	
+																	if isDedicated then {
+																		{
+																			["KH_eve_executionGlobal", [_arguments, _function, _originalOwner], _x] call CBA_fnc_ownerEvent;
+																		} forEach ([2] + KH_var_allHeadlessMachines);
+																	}
+																	else {
+																		{
+																			["KH_eve_executionHeadless", [_arguments, _function, _originalOwner], _x] call CBA_fnc_ownerEvent;
+																		} forEach KH_var_allHeadlessMachines;
+																	};
 																};
-															};
-														}
-														else {
-															if !_unitRequired then {
-																{
-																	["KH_eve_executionGlobal", [_arguments, _function], _x] call CBA_fnc_ownerEvent;
-																} forEach (KH_var_allMachines - [_originalOwner]);
 															}
 															else {
-																{
-																	if ((owner _x) != _originalOwner) then {
-																		["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
-																	};
-																} forEach KH_var_allPlayerUnits;
-
-																if isDedicated then {
+																if !_unitRequired then {
 																	{
-																		["KH_eve_executionGlobal", [_arguments, _function], _x] call CBA_fnc_ownerEvent;
-																	} forEach (([2] + KH_var_allHeadlessMachines) - [_originalOwner]);
+																		["KH_eve_executionGlobal", [_arguments, _function, _originalOwner], _x] call CBA_fnc_ownerEvent;
+																	} forEach (KH_var_allMachines - [_originalOwner]);
 																}
 																else {
 																	{
-																		["KH_eve_executionHeadless", [_arguments, _function], _x] call CBA_fnc_ownerEvent;
-																	} forEach (KH_var_allHeadlessMachines - [_originalOwner]);
+																		if ((owner _x) != _originalOwner) then {
+																			["KH_eve_executionPlayer", [_arguments, _function, _originalOwner], _x] call CBA_fnc_targetEvent;
+																		};
+																	} forEach KH_var_allPlayerUnits;
+
+																	if isDedicated then {
+																		{
+																			["KH_eve_executionGlobal", [_arguments, _function, _originalOwner], _x] call CBA_fnc_ownerEvent;
+																		} forEach (([2] + KH_var_allHeadlessMachines) - [_originalOwner]);
+																	}
+																	else {
+																		{
+																			["KH_eve_executionHeadless", [_arguments, _function, _originalOwner], _x] call CBA_fnc_ownerEvent;
+																		} forEach (KH_var_allHeadlessMachines - [_originalOwner]);
+																	};
 																};
 															};
 														};
-													};
 
-													case (_exclusiveType == "PLAYERS"): {
-														if !_remote then {
-															if !_unitRequired then {
+														case (_exclusiveType == "PLAYERS"): {
+															if !_remote then {
+																if !_unitRequired then {
+																	{
+																		["KH_eve_executionPlayer", [_arguments, _function, _originalOwner], _x] call CBA_fnc_ownerEvent;
+																	} forEach KH_var_allPlayerMachines;
+																}
+																else {
+																	{
+																		["KH_eve_executionPlayer", [_arguments, _function, _originalOwner], _x] call CBA_fnc_targetEvent;
+																	} forEach KH_var_allPlayerUnits;
+																};
+															}
+															else {
+																if !_unitRequired then {
+																	{
+																		["KH_eve_executionPlayer", [_arguments, _function, _originalOwner], _x] call CBA_fnc_ownerEvent;
+																	} forEach (KH_var_allPlayerMachines - [_originalOwner]);
+																}
+																else {
+																	{
+																		if ((owner _x) != _originalOwner) then {
+																			["KH_eve_executionPlayer", [_arguments, _function, _originalOwner], _x] call CBA_fnc_targetEvent;
+																		};
+																	} forEach KH_var_allPlayerUnits;
+																};
+															};
+														};
+
+														case (_exclusiveType == "HEADLESS"): {
+															if !_remote then {
 																{
-																	["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_ownerEvent;
-																} forEach KH_var_allPlayerMachines;
+																	["KH_eve_executionHeadless", [_arguments, _function, _originalOwner], _x] call CBA_fnc_ownerEvent;
+																} forEach KH_var_allHeadlessMachines;
 															}
 															else {
 																{
-																	["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
-																} forEach KH_var_allPlayerUnits;
-															};
-														}
-														else {
-															if !_unitRequired then {
-																{
-																	["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_ownerEvent;
-																} forEach (KH_var_allPlayerMachines - [_originalOwner]);
-															}
-															else {
-																{
-																	if ((owner _x) != _originalOwner) then {
-																		["KH_eve_executionPlayer", [_arguments, _function], _x] call CBA_fnc_targetEvent;
-																	};
-																} forEach KH_var_allPlayerUnits;
+																	["KH_eve_executionHeadless", [_arguments, _function, _originalOwner], _x] call CBA_fnc_ownerEvent;
+																} forEach (KH_var_allHeadlessMachines - [_originalOwner]);
 															};
 														};
 													};
 
-													case (_exclusiveType == "HEADLESS"): {
-														if !_remote then {
+													private _joinType = [];
+													
+													if _unitRequired then {
+														switch true do {
+															case ((_exclusiveType == "GLOBAL") || (_exclusiveType == "JIP_GLOBAL")): {
+																_joinType = ["KH_eve_playerLoaded", "KH_eve_headlessPreloaded"];
+															};
+
+															case ((_exclusiveType == "PLAYERS") || (_exclusiveType == "JIP_PLAYERS")): {
+																_joinType = ["KH_eve_playerLoaded"];
+															};
+
+															case ((_exclusiveType == "HEADLESS") || (_exclusiveType == "JIP_HEADLESS")): {
+																_joinType = ["KH_eve_headlessPreloaded"];
+															};
+														};
+													}
+													else {
+														switch true do {
+															case ((_exclusiveType == "GLOBAL") || (_exclusiveType == "JIP_GLOBAL")): {
+																_joinType = ["KH_eve_playerPreloadedInitial", "KH_eve_headlessPreloaded"];
+															};
+
+															case ((_exclusiveType == "PLAYERS") || (_exclusiveType == "JIP_PLAYERS")): {
+																_joinType = ["KH_eve_playerPreloadedInitial"];
+															};
+
+															case ((_exclusiveType == "HEADLESS") || (_exclusiveType == "JIP_HEADLESS")): {
+																_joinType = ["KH_eve_headlessPreloaded"];
+															};
+														};
+													};
+
+													missionNamespace setVariable [_jipOverrideParams, [_arguments, _function, _dependency]];
+
+													if ((missionNamespace getVariable [_jipOverrideIdType, []]) isNotEqualTo [_exclusiveType, _unitRequired]) then {
+														missionNamespace setVariable [_jipOverrideId, false];
+														private _oldHandlers = KH_var_jipEventHandlers get _id;
+
+														if !(isNil "_oldHandlers") then {
 															{
-																["KH_eve_executionHeadless", [_arguments, _function], _x] call CBA_fnc_ownerEvent;
-															} forEach KH_var_allHeadlessMachines;
-														}
-														else {
-															{
-																["KH_eve_executionHeadless", [_arguments, _function], _x] call CBA_fnc_ownerEvent;
-															} forEach (KH_var_allHeadlessMachines - [_originalOwner]);
+																[_x] call KH_fnc_removeEventHandler;
+															} forEach _oldHandlers;
 														};
+
+														KH_var_jipEventHandlers deleteAt _id;
 													};
-												};
+													
+													if !(missionNamespace getVariable [_jipOverrideId, false]) then {
+														missionNamespace setVariable [_jipOverrideIdType, [_exclusiveType, _unitRequired]];
+														private _currentHandlers = [];
 
-												private _joinType = [];
-												
-												if _unitRequired then {
-													switch true do {
-														case ((_exclusiveType == "GLOBAL") || (_exclusiveType == "JIP_GLOBAL")): {
-															_joinType = ["KH_eve_playerLoaded", "KH_eve_headlessPreloaded"];
-														};
-
-														case ((_exclusiveType == "PLAYERS") || (_exclusiveType == "JIP_PLAYERS")): {
-															_joinType = ["KH_eve_playerLoaded"];
-														};
-
-														case ((_exclusiveType == "HEADLESS") || (_exclusiveType == "JIP_HEADLESS")): {
-															_joinType = ["KH_eve_headlessPreloaded"];
-														};
-													};
-												}
-												else {
-													switch true do {
-														case ((_exclusiveType == "GLOBAL") || (_exclusiveType == "JIP_GLOBAL")): {
-															_joinType = ["KH_eve_playerPreloadedInitial", "KH_eve_headlessPreloaded"];
-														};
-
-														case ((_exclusiveType == "PLAYERS") || (_exclusiveType == "JIP_PLAYERS")): {
-															_joinType = ["KH_eve_playerPreloadedInitial"];
-														};
-
-														case ((_exclusiveType == "HEADLESS") || (_exclusiveType == "JIP_HEADLESS")): {
-															_joinType = ["KH_eve_headlessPreloaded"];
-														};
-													};
-												};
-
-												missionNamespace setVariable [_jipOverrideParams, [_arguments, _function, _dependency]];
-
-												if ((missionNamespace getVariable [_jipOverrideIdType, []]) isNotEqualTo [_exclusiveType, _unitRequired]) then {
-													missionNamespace setVariable [_jipOverrideId, false];
-													private _oldHandlers = KH_var_jipEventHandlers get _id;
-
-													if !(isNil "_oldHandlers") then {
 														{
-															[_x] call KH_fnc_removeEventHandler;
-														} forEach _oldHandlers;
-													};
+															private _currentHandler = [
+																"CBA",
+																_x,
+																[_id, _jipOverrideParams, _x],
+																{
+																	_args params ["_id", "_jipOverrideParams", "_joinType"];
+																	private _idState = missionNamespace getVariable [_id, "ACTIVE"];
+																	private _joiningMachine = 999999;
 
-													KH_var_jipEventHandlers deleteAt _id;
-												};
-												
-												if !(missionNamespace getVariable [_jipOverrideId, false]) then {
-													missionNamespace setVariable [_jipOverrideIdType, [_exclusiveType, _unitRequired]];
-													private _currentHandlers = [];
+																	if (_joinType == "KH_eve_playerLoaded") then {
+																		_joiningMachine = _this select 1;
+																	}
+																	else {
+																		_joiningMachine = _this select 0;
+																	};
 
-													{
-														private _currentHandler = [
-															"CBA",
-															_x,
-															[_id, _jipOverrideParams, _x],
-															{
-																_args params ["_id", "_jipOverrideParams", "_joinType"];
-																private _idState = missionNamespace getVariable [_id, "ACTIVE"];
-																private _joiningMachine = 999999;
+																	private _arguments = (missionNamespace getVariable [_jipOverrideParams, []]) select 0;
+																	private _function = (missionNamespace getVariable [_jipOverrideParams, {}]) select 1;
+																	private _dependency = (missionNamespace getVariable [_jipOverrideParams, true]) select 2;
+																	
+																	if !(_idState == "INACTIVE") then {
+																		switch true do {
+																			case (_idState == "ACTIVE"): {
+																				private _condition = true;
 
-																if (_joinType == "KH_eve_playerLoaded") then {
-																	_joiningMachine = _this select 1;
-																}
-																else {
-																	_joiningMachine = _this select 0;
-																};
+																				switch true do {
+																					case (_dependency isEqualType ""): {
+																						if ((parseNumber (_dependency select [0, 1])) != 0) then {
+																							private _uid = "";
 
-																private _arguments = (missionNamespace getVariable [_jipOverrideParams, []]) select 0;
-																private _function = (missionNamespace getVariable [_jipOverrideParams, {}]) select 1;
-																private _dependency = (missionNamespace getVariable [_jipOverrideParams, true]) select 2;
-																
-																if !(_idState == "INACTIVE") then {
-																	switch true do {
-																		case (_idState == "ACTIVE"): {
-																			private _condition = true;
-
-																			switch true do {
-																				case (_dependency isEqualType ""): {
-																					if ((parseNumber (_dependency select [0, 1])) != 0) then {
-																						private _uid = "";
-
-																						if _joinType == "KH_eve_playerLoaded" then {
-																							_uid = getPlayerUID (_this select 0); 
-																						}
-																						else {
-																							_uid = _this select 1;
-																						};
-
-																						if (_dependency != _uid) then {
-																							if (":" in _dependency) then {
-																								if ((isNull (objectFromNetId _dependency)) && (isNull (groupFromNetId _dependency))) then {
-																									_condition = false;
-																								};
+																							if _joinType == "KH_eve_playerLoaded" then {
+																								_uid = getPlayerUID (_this select 0); 
 																							}
 																							else {
-																								private _player = KH_var_allPlayerIdMachines get _x;
-																								private _client = KH_var_allHeadlessIdMachines get _x;
-
-																								if ((isNil "_player") && (isNil "_client")) then {
-																									_condition = false;
-																								};
+																								_uid = _this select 1;
 																							};
-																						};
-																					}
-																					else {
-																						if !(missionNamespace getVariable [_dependency, false]) then {
-																							_condition = false;
-																						};
-																					};
-																				};
 
-																				case ((_dependency isEqualType objNull) || (_dependency isEqualType teamMemberNull) || (_dependency isEqualType grpNull)): {
-																					if (isNull _dependency) then {
-																						_condition = false;
-																					};
-																				};
-
-																				case (_dependency isEqualType 0): {
-																					if !(_dependency in KH_var_allMachines) then {
-																						_condition = false;
-																					};
-																				};
-
-																				case (_dependency isEqualType {}): {
-																					if !([] call _dependency) then {
-																						_condition = false;
-																					};
-																				};
-
-																				case (_dependency isEqualType []): {																					
-																					{
-																						switch true do {
-																							case (_x isEqualType ""): {
-																								if ((parseNumber (_x select [0, 1])) != 0) then {
-																									private _uid = "";
-
-																									if _joinType == "KH_eve_playerLoaded" then {
-																										_uid = getPlayerUID (_this select 0); 
-																									}
-																									else {
-																										_uid = _this select 1;
-																									};
-
-																									if (_x != _uid) then {
-																										if (":" in _x) then {
-																											if ((isNull (objectFromNetId _x)) && (isNull (groupFromNetId _x))) then {
-																												_condition = false;
-																												break;
-																											};
-																										}
-																										else {
-																											private _player = KH_var_allPlayerIdMachines get _x;
-																											private _client = KH_var_allHeadlessIdMachines get _x;
-
-																											if ((isNil "_player") && (isNil "_client")) then {
-																												_condition = false;
-																												break;
-																											};
-																										};
+																							if (_dependency != _uid) then {
+																								if (":" in _dependency) then {
+																									if ((isNull (objectFromNetId _dependency)) && (isNull (groupFromNetId _dependency))) then {
+																										_condition = false;
 																									};
 																								}
 																								else {
-																									if !(missionNamespace getVariable [_x, false]) then {
+																									private _player = KH_var_allPlayerIdMachines get _x;
+																									private _client = KH_var_allHeadlessIdMachines get _x;
+
+																									if ((isNil "_player") && (isNil "_client")) then {
+																										_condition = false;
+																									};
+																								};
+																							};
+																						}
+																						else {
+																							if !(missionNamespace getVariable [_dependency, false]) then {
+																								_condition = false;
+																							};
+																						};
+																					};
+
+																					case ((_dependency isEqualType objNull) || (_dependency isEqualType teamMemberNull) || (_dependency isEqualType grpNull)): {
+																						if (isNull _dependency) then {
+																							_condition = false;
+																						};
+																					};
+
+																					case (_dependency isEqualType 0): {
+																						if !(_dependency in KH_var_allMachines) then {
+																							_condition = false;
+																						};
+																					};
+
+																					case (_dependency isEqualType {}): {
+																						if !([] call _dependency) then {
+																							_condition = false;
+																						};
+																					};
+
+																					case (_dependency isEqualType []): {																					
+																						{
+																							switch true do {
+																								case (_x isEqualType ""): {
+																									if ((parseNumber (_x select [0, 1])) != 0) then {
+																										private _uid = "";
+
+																										if _joinType == "KH_eve_playerLoaded" then {
+																											_uid = getPlayerUID (_this select 0); 
+																										}
+																										else {
+																											_uid = _this select 1;
+																										};
+
+																										if (_x != _uid) then {
+																											if (":" in _x) then {
+																												if ((isNull (objectFromNetId _x)) && (isNull (groupFromNetId _x))) then {
+																													_condition = false;
+																													break;
+																												};
+																											}
+																											else {
+																												private _player = KH_var_allPlayerIdMachines get _x;
+																												private _client = KH_var_allHeadlessIdMachines get _x;
+
+																												if ((isNil "_player") && (isNil "_client")) then {
+																													_condition = false;
+																													break;
+																												};
+																											};
+																										};
+																									}
+																									else {
+																										if !(missionNamespace getVariable [_x, false]) then {
+																											_condition = false;
+																											break;
+																										};
+																									};
+																								};
+
+																								case ((_x isEqualType objNull) || (_x isEqualType teamMemberNull) || (_x isEqualType grpNull)): {
+																									if (isNull _x) then {
+																										_condition = false;
+																										break;
+																									};
+																								};
+
+																								case (_x isEqualType 0): {
+																									if !(_x in KH_var_allMachines) then {
+																										_condition = false;
+																										break;
+																									};
+																								};
+
+																								case (_x isEqualType {}): {
+																									if !([] call _x) then {
 																										_condition = false;
 																										break;
 																									};
 																								};
 																							};
+																						} forEach _dependency;
+																					};
 
-																							case ((_x isEqualType objNull) || (_x isEqualType teamMemberNull) || (_x isEqualType grpNull)): {
-																								if (isNull _x) then {
-																									_condition = false;
-																									break;
-																								};
-																							};
-
-																							case (_x isEqualType 0): {
-																								if !(_x in KH_var_allMachines) then {
-																									_condition = false;
-																									break;
-																								};
-																							};
-
-																							case (_x isEqualType {}): {
-																								if !([] call _x) then {
-																									_condition = false;
-																									break;
-																								};
-																							};
+																					case (_dependency isEqualType true): {
+																						if !_dependency then {
+																							_condition = false;
 																						};
-																					} forEach _dependency;
-																				};
-
-																				case (_dependency isEqualType true): {
-																					if !_dependency then {
-																						_condition = false;
 																					};
 																				};
+
+																				if _condition then {
+																					["KH_eve_executionGlobal", [_arguments, _function, _originalOwner], _joiningMachine] call CBA_fnc_ownerEvent;
+																				};
 																			};
 
-																			if _condition then {
-																				["KH_eve_executionGlobal", [_arguments, _function], _joiningMachine] call CBA_fnc_ownerEvent;
-																			};
+																			case (_idState == "TERMINATE"): {
+																				[_localId] call KH_fnc_removeEventHandler;
+																			};		
 																		};
-
-																		case (_idState == "TERMINATE"): {
-																			[_eventName, _localId] call CBA_fnc_removeEventHandler;
-																		};		
 																	};
-																};
-															}
-														] call KH_fnc_addEventHandler;
+																}
+															] call KH_fnc_addEventHandler;
 
-														_currentHandlers pushBack _currentHandler;
-													} forEach _joinType;
+															_currentHandlers pushBack _currentHandler;
+														} forEach _joinType;
 
-													KH_var_jipEventHandlers set [_id, _currentHandlers, false];
-												};
+														KH_var_jipEventHandlers set [_id, _currentHandlers, false];
+													};
 
-												missionNamespace setVariable [_jipOverrideId, true];
-											}
+													missionNamespace setVariable [_jipOverrideId, true];
+												} 
+											] call KH_fnc_parseFunction,
+											clientOwner
 										]
 									] call CBA_fnc_serverEvent;
 
@@ -1325,94 +1395,43 @@ isNil {
 									private _id = [] call KH_fnc_generateUid;
 
 									[
-										"CBA",
+										"PUBLIC_VARIABLE",
 										_id,
 										[_arguments, _function],
 										{
 											_args params ["_arguments", "_function"];
-											private _argsCallback = [missionNamespace, "KH_var_callbackHandlerArguments", _this, false] call KH_fnc_atomicVariable;
-
-											if (_function isEqualType "") then {
-												_function = (missionNamespace getVariable [_function, {}]);
-											};
+											private _argsCallback = [] call KH_fnc_generateUid;
+											missionNamespace setVariable [_argsCallback, _this select 1];
 
 											private _expression = [
 												"private _argsCallback = (missionNamespace getVariable ['", _argsCallback, "', []]);
-												call ", _function, ";"
+												call ", [_arguments, _function] call KH_fnc_getParsedFunction, ";"
 											] joinString "";
 
 											_arguments call (compile _expression);
-											[_eventName, _localId] call CBA_fnc_removeEventHandler;
+											[_localId] call KH_fnc_removeEventHandler;
 										}
 									] call KH_fnc_addEventHandler;
 
-									private _callbackSendFunction = {
-										params ["_arguments", "_function", "_id", "_owner"];
-
-										if (_function isEqualType "") then {
-											if !(" " in _function) then {
-												if (".sqf" in _function) then {
-													private _functionName = format ["M_fnc_%1", (_function select [0, (_function find ".sqf") - 1]) regexReplace ["[\\/]", "_"]];
-
-													if ((missionNamespace getVariable [_functionName, {}]) isEqualTo {}) then {
-														missionNamespace setVariable [_functionName, compile (preprocessFileLineNumbers _function)];
-													};
-
-													[_id, [_arguments call (missionNamespace getVariable [_functionName, {}])], _owner] call CBA_fnc_ownerEvent;
-												}
-												else {
-													private _parsedFunction = missionNamespace getVariable [_function, {}];
-
-													if (_parsedFunction isEqualTo {}) then {
-														switch true do {
-															case ((count _arguments) == 0): {
-																[_id, [[] call (compile ([_function] joinString ""))], _owner] call CBA_fnc_ownerEvent;
-															};
-
-															case ((count _arguments) == 1): {
-																private _unaryArgument = [missionNamespace, "KH_var_unaryArgument", _arguments select 0, false] call KH_fnc_atomicVariable;
-																[_id, [[] call (compile ([_function, " (missionNamespace getVariable '", _unaryArgument, "');"] joinString ""))], _owner] call CBA_fnc_ownerEvent;
-															};
-
-															case ((count _arguments) == 2): {
-																private _binaryArguments = [missionNamespace, "KH_var_binaryArguments", _arguments, false] call KH_fnc_atomicVariable;
-																[_id, [[] call (compile (["((missionNamespace getVariable '", _binaryArguments, "') select 0) ", _function, " ((missionNamespace getVariable '", _binaryArguments, "') select 1);"] joinString ""))], _owner] call CBA_fnc_ownerEvent;
-															};
-														};
-													}
-													else {
-														[_id, [_arguments call _parsedFunction], _owner] call CBA_fnc_ownerEvent;
-													};
-												};
-											}
-											else {
-												private _storedFunction = KH_var_compiledExpressions get (hashValue _function);
-
-												if (isNil "_storedFunction") then {
-													private _compiledFunction = compile _function;
-													KH_var_compiledExpressions insert [[hashValue _function, _compiledFunction]];
-													[_id, [_arguments call _compiledFunction], _owner] call CBA_fnc_ownerEvent;
-												}
-												else {
-													[_id, [_arguments call _storedFunction], _owner] call CBA_fnc_ownerEvent;
-												};
-											};
+									private _callbackSendFunction = [
+										{
+											params ["_callbackArguments", "_callbackFunction", "_id", "_owner"];
+											_callbackFunction = [_callbackFunction] call KH_fnc_parseFunction;
+											missionNamespace setVariable [_id, [_callbackArguments, _callbackFunction, clientOwner] call KH_fnc_callParsedFunction];
+											_owner publicVariableClient _id;
 										}
-										else {
-											[_id, [_arguments call _function], _owner] call CBA_fnc_ownerEvent;
-										};
-									};
+									] call KH_fnc_parseFunction;
 
 									switch true do {
 										case (_callbackTarget isEqualType ""): {
 											case (_callbackTarget == "SERVER"): {
-												["KH_eve_executionServer", [[_callbackArguments, _callbackFunction, _id, clientOwner], _callbackSendFunction]] call CBA_fnc_serverEvent;
+												["KH_eve_executionServer", [[_callbackArguments, _callbackFunction, _id, clientOwner], _callbackSendFunction, clientOwner]] call CBA_fnc_serverEvent;
 												true;
 											};
 
 											case (_callbackTarget == "ADMIN"): {
 												if (KH_var_currentAdmin != 2) then {
-													["KH_eve_executionPlayer", [[_callbackArguments, _callbackFunction, _id, clientOwner], _callbackSendFunction], KH_var_currentAdmin] call CBA_fnc_ownerEvent;
+													["KH_eve_executionPlayer", [[_callbackArguments, _callbackFunction, _id, clientOwner], _callbackSendFunction, clientOwner], KH_var_currentAdmin] call CBA_fnc_ownerEvent;
 													true;
 												}
 												else {
@@ -1425,21 +1444,21 @@ isNil {
 													private _player = KH_var_allPlayerUidMachines get _callbackTarget;
 
 													if !(isNil "_player") then {
-														["KH_eve_executionPlayer", [[_callbackArguments, _callbackFunction, _id, clientOwner], _callbackSendFunction], _player] call CBA_fnc_ownerEvent;
+														["KH_eve_executionPlayer", [[_callbackArguments, _callbackFunction, _id, clientOwner], _callbackSendFunction, clientOwner], _player] call CBA_fnc_ownerEvent;
 														true;
 													}
 													else {
 														_player = KH_var_allPlayerIdMachines get _callbackTarget;
 
 														if !(isNil "_player") then {
-															["KH_eve_executionPlayer", [[_callbackArguments, _callbackFunction, _id, clientOwner], _callbackSendFunction], _player] call CBA_fnc_ownerEvent;
+															["KH_eve_executionPlayer", [[_callbackArguments, _callbackFunction, _id, clientOwner], _callbackSendFunction, clientOwner], _player] call CBA_fnc_ownerEvent;
 															true;
 														}
 														else {
 															private _client = KH_var_allHeadlessIdMachines get _callbackTarget;
 
 															if !(isNil "_client") then {
-																["KH_eve_executionHeadless", [[_callbackArguments, _callbackFunction, _id, clientOwner], _callbackSendFunction], _client] call CBA_fnc_ownerEvent;
+																["KH_eve_executionHeadless", [[_callbackArguments, _callbackFunction, _id, clientOwner], _callbackSendFunction, clientOwner], _client] call CBA_fnc_ownerEvent;
 																true;
 															}
 															else {
@@ -1450,7 +1469,7 @@ isNil {
 												}
 												else {
 													if !(isNull (objectFromNetId _callbackTarget)) then {
-														["KH_eve_executionGlobal", [[_callbackArguments, _callbackFunction, _id, clientOwner], _callbackSendFunction], objectFromNetId _callbackTarget] call CBA_fnc_targetEvent;
+														["KH_eve_executionGlobal", [[_callbackArguments, _callbackFunction, _id, clientOwner], _callbackSendFunction, clientOwner], objectFromNetId _callbackTarget] call CBA_fnc_targetEvent;
 														true;
 													}
 													else {
@@ -1458,11 +1477,14 @@ isNil {
 															[
 																"KH_eve_executionServer", 
 																[
-																	[_callbackArguments, _callbackFunction, _callbackTarget, clientOwner],
-																	{
-																		params ["_callbackArguments", "_callbackFunction", "_callbackTarget", "_clientOwner"];
-																		["KH_eve_executionGlobal", [[_callbackArguments, _callbackFunction, _id, _clientOwner], _callbackSendFunction], groupOwner (groupFromNetId _callbackTarget)] call CBA_fnc_ownerEvent;
-																	}
+																	[_callbackArguments, _callbackFunction, _callbackTarget, _callbackSendFunction, _id, clientOwner],
+																	[
+																		{
+																			params ["_callbackArguments", "_callbackFunction", "_callbackTarget", "_callbackSendFunction", "_id", "_clientOwner"];
+																			["KH_eve_executionGlobal", [[_callbackArguments, _callbackFunction, _id, _clientOwner], _callbackSendFunction, _clientOwner], groupOwner (groupFromNetId _callbackTarget)] call CBA_fnc_ownerEvent;
+																		}
+																 	] call KH_fnc_parseFunction,
+																	clientOwner
 																]
 															] call CBA_fnc_serverEvent;
 
@@ -1480,7 +1502,7 @@ isNil {
 
 												{
 													if ((name _x) == _callbackTarget) then {
-														["KH_eve_executionPlayer", [[_callbackArguments, _callbackFunction, _id, clientOwner], _callbackSendFunction], _x] call CBA_fnc_targetEvent;
+														["KH_eve_executionPlayer", [[_callbackArguments, _callbackFunction, _id, clientOwner], _callbackSendFunction, clientOwner], _x] call CBA_fnc_targetEvent;
 														_unitPresent = true;
 														break;
 													};
@@ -1492,7 +1514,7 @@ isNil {
 
 										case (_callbackTarget isEqualType objNull): {
 											if !(isNull _callbackTarget) then {
-												["KH_eve_executionGlobal", [[_callbackArguments, _callbackFunction, _id, clientOwner], _callbackSendFunction], _callbackTarget] call CBA_fnc_targetEvent;
+												["KH_eve_executionGlobal", [[_callbackArguments, _callbackFunction, _id, clientOwner], _callbackSendFunction, clientOwner], _callbackTarget] call CBA_fnc_targetEvent;
 												true;
 											}
 											else {
@@ -1506,10 +1528,13 @@ isNil {
 													"KH_eve_executionServer", 
 													[
 														[_callbackArguments, _callbackFunction, _callbackTarget, _callbackSendFunction, _id, clientOwner],
-														{
-															params ["_callbackArguments", "_callbackFunction", "_callbackTarget", "_callbackSendFunction", "_id", "_clientOwner"];
-															["KH_eve_executionGlobal", [[_callbackArguments, _callbackFunction, _id, _clientOwner], _callbackSendFunction], groupOwner _callbackTarget] call CBA_fnc_ownerEvent;
-														}
+														[
+															{
+																params ["_callbackArguments", "_callbackFunction", "_callbackTarget", "_callbackSendFunction", "_id", "_clientOwner"];
+																["KH_eve_executionGlobal", [[_callbackArguments, _callbackFunction, _id, _clientOwner], _callbackSendFunction, _clientOwner], groupOwner _callbackTarget] call CBA_fnc_ownerEvent;
+															}
+													 	] call KH_fnc_parseFunction,
+														clientOwner
 													]
 												] call CBA_fnc_serverEvent;
 												
@@ -1522,7 +1547,7 @@ isNil {
 
 										case (_callbackTarget isEqualType teamMemberNull): {
 											if !(isNull _callbackTarget) then {
-												["KH_eve_executionGlobal", [[_callbackArguments, _callbackFunction, _id, clientOwner], _callbackSendFunction], agent _callbackTarget] call CBA_fnc_targetEvent;
+												["KH_eve_executionGlobal", [[_callbackArguments, _callbackFunction, _id, clientOwner], _callbackSendFunction, clientOwner], agent _callbackTarget] call CBA_fnc_targetEvent;
 												true;
 											}
 											else {
@@ -1532,7 +1557,7 @@ isNil {
 
 										case (_callbackTarget isEqualType 0): {
 											if (_callbackTarget in KH_var_allMachines) then {
-												["KH_eve_executionGlobal", [[_callbackArguments, _callbackFunction, _id, clientOwner], _callbackSendFunction], _callbackTarget] call CBA_fnc_ownerEvent;
+												["KH_eve_executionGlobal", [[_callbackArguments, _callbackFunction, _id, clientOwner], _callbackSendFunction, clientOwner], _callbackTarget] call CBA_fnc_ownerEvent;
 												true;
 											}
 											else {
@@ -1546,42 +1571,45 @@ isNil {
 									private _targetObject = _target select 1;
 
 									if !(isNull _targetObject) then {
-										private _persistencyFunction = {
-											params ["_arguments", "_function", "_targetObject", "_sendoffArguments", "_sendoffFunction", "_functionProcessor", "_id"];
+										private _persistencyFunction = [
+											{
+												params ["_arguments", "_function", "_targetObject", "_sendoffArguments", "_sendoffFunction", "_originalOwner", "_id"];
 
-											[
-												["STANDARD", _targetObject, false],
-												"Local",
-												[_arguments, _function, _sendoffArguments, _sendoffFunction, _functionProcessor, _id],
-												{
-													params ["_targetObject", "_isLocal"];
-													_args params ["_arguments", "_function", "_sendoffArguments", "_sendoffFunction", "_functionProcessor", "_id"];
-													private _idState = _targetObject getVariable [_id, "ACTIVE"];
+												[
+													["STANDARD", _targetObject, false],
+													"Local",
+													[_arguments, _function, _sendoffArguments, _sendoffFunction, _originalOwner, _id],
+													{
+														params ["_targetObject", "_isLocal"];
+														_args params ["_arguments", "_function", "_sendoffArguments", "_sendoffFunction", "_originalOwner", "_id"];
+														private _idState = _targetObject getVariable [_id, "ACTIVE"];
 
-													if !(_idState == "INACTIVE") then {
-														switch true do {
-															case (_idState == "ACTIVE"): {
-																if _isLocal then {
-																	[_arguments, _function] call _functionProcessor;
-																}
-																else {
-																	[_sendoffArguments, _sendoffFunction] call _functionProcessor;
+														if !(_idState == "INACTIVE") then {
+															switch true do {
+																case (_idState == "ACTIVE"): {
+																	if _isLocal then {
+																		[_arguments, _function, _originalOwner] call KH_fnc_callParsedFunction;
+																	}
+																	else {
+																		[_sendoffArguments, _sendoffFunction, _originalOwner] call KH_fnc_callParsedFunction;
+																	};
+																};
+
+																case (_idState == "TERMINATE"): {
+																	[_localId] call KH_fnc_removeEventHandler;
 																};
 															};
-
-															case (_idState == "TERMINATE"): {
-																[_eventName, _localId] call CBA_fnc_removeEventHandler;
-															};
 														};
-													};
-												}
-											] call KH_fnc_addEventHandler;
-										};
+													}
+												] call KH_fnc_addEventHandler;
+											}
+										] call KH_fnc_parseFunction;
 
 										private _sendoffArguments = _target param [2, []];
 										private _sendoffFunction = _target param [3, {}];
 										private _jip = _target param [4, true];
 										private _id = "";
+										_sendoffFunction = [_sendoffFunction] call KH_fnc_parseFunction;
 
 										if (_override != "") then {
 											_id = _override;
@@ -1590,14 +1618,15 @@ isNil {
 											_id = [] call KH_fnc_generateUid;
 										};
 
-										["KH_eve_executionGlobal", [_arguments, _function], _targetObject] call CBA_fnc_targetEvent;
+										["KH_eve_executionGlobal", [_arguments, _function, clientOwner], _targetObject] call CBA_fnc_targetEvent;
 
 										{
 											[
 												"KH_eve_executionGlobal",
 												[
-													[_arguments, _function, _targetObject, _sendoffArguments, _sendoffFunction, _functionProcessor, _id], 
-													_persistencyFunction
+													[_arguments, _function, _targetObject, _sendoffArguments, _sendoffFunction, clientOwner, _id], 
+													_persistencyFunction,
+													clientOwner
 												],
 												_x
 											] call CBA_fnc_ownerEvent;
@@ -1607,31 +1636,35 @@ isNil {
 											[
 												"KH_eve_executionServer", 
 												[
-													[_arguments, _function, _persistencyFunction, _targetObject, _sendoffArguments, _sendoffFunction, _functionProcessor, _id], 
-													{
-														params ["_arguments", "_function", "_persistencyFunction", "_targetObject", "_sendoffArguments", "_sendoffFunction", "_functionProcessor", "_id"];
-
+													[_arguments, _function, _persistencyFunction, _targetObject, _sendoffArguments, _sendoffFunction, clientOwner, _id], 
+													[
 														{
-															[
-																"CBA",
-																_x,
-																[_arguments, _function, _persistencyFunction, _targetObject, _sendoffArguments, _sendoffFunction, _functionProcessor, _id],
-																{
-																	_args params ["_arguments", "_function", "_persistencyFunction", "_targetObject", "_sendoffArguments", "_sendoffFunction", "_functionProcessor", "_id"];
-																	params ["_joiningMachine"];
+															params ["_arguments", "_function", "_persistencyFunction", "_targetObject", "_sendoffArguments", "_sendoffFunction", "_originalOwner", "_id"];
 
-																	[
-																		"KH_eve_executionGlobal",
+															{
+																[
+																	"CBA",
+																	_x,
+																	[_arguments, _function, _persistencyFunction, _targetObject, _sendoffArguments, _sendoffFunction, _originalOwner, _id],
+																	{
+																		_args params ["_arguments", "_function", "_persistencyFunction", "_targetObject", "_sendoffArguments", "_sendoffFunction", "_originalOwner", "_id"];
+																		params ["_joiningMachine"];
+
 																		[
-																			[_arguments, _function, _targetObject, _sendoffArguments, _sendoffFunction, _functionProcessor, _id], 
-																			_persistencyFunction
-																		],
-																		_joiningMachine
-																	] call CBA_fnc_ownerEvent;
-																}
-															] call KH_fnc_addEventHandler;
-														} forEach ["KH_eve_playerPreloadedInitial", "KH_eve_headlessPreloaded"];
-													}
+																			"KH_eve_executionGlobal",
+																			[
+																				[_arguments, _function, _targetObject, _sendoffArguments, _sendoffFunction, _originalOwner, _id], 
+																				_persistencyFunction,
+																				_originalOwner
+																			],
+																			_joiningMachine
+																		] call CBA_fnc_ownerEvent;
+																	}
+																] call KH_fnc_addEventHandler;
+															} forEach ["KH_eve_playerPreloadedInitial", "KH_eve_headlessPreloaded"];
+														}
+												 	] call KH_fnc_parseFunction,
+													clientOwner
 												]
 											] call CBA_fnc_serverEvent;
 										};
@@ -1647,40 +1680,6 @@ isNil {
 									false;
 								};
 							};
-						};
-
-						case (_target isEqualType true): {
-							if _target then {
-								if hasInterface then {
-									["KH_eve_executionPlayer", [_arguments, _function]] call CBA_fnc_globalEvent;
-								}
-								else {
-									if !isServer then {
-										["KH_eve_executionHeadless", [_arguments, _function]] call CBA_fnc_globalEvent;
-									}
-									else {
-										[_arguments, _function] call _functionProcessor;
-									};
-								};
-							}
-							else {
-								if !hasInterface then {
-									if !isServer then {
-										["KH_eve_executionPlayer", [_arguments, _function]] call CBA_fnc_globalEvent;
-										["KH_eve_executionServer", [_arguments, _function]] call CBA_fnc_serverEvent;
-									}
-									else {
-										["KH_eve_executionPlayer", [_arguments, _function]] call CBA_fnc_globalEvent;
-										["KH_eve_executionHeadless", [_arguments, _function]] call CBA_fnc_globalEvent;
-									};
-								}
-								else {
-									["KH_eve_executionServer", [_arguments, _function]] call CBA_fnc_serverEvent;
-									["KH_eve_executionHeadless", [_arguments, _function]] call CBA_fnc_globalEvent;
-								};
-							};
-							
-							true;
 						};
 
 						default {
@@ -1749,7 +1748,7 @@ isNil {
 									_result = _overrideResult select 1;
 								};
 
-								private _callerFunction = {
+								private _environmentCaller = {
 									params ["_arguments", "_function", "_target", "_subfunction", "_override"];
 
 									[
@@ -1762,12 +1761,12 @@ isNil {
 								};
 
 								if KH_var_missionLoaded then {
-									[_arguments, _function, _target, _subfunction, _override] call _callerFunction;
+									[_arguments, _function, _target, _subfunction, _override] call _environmentCaller;
 								}
 								else {
 									KH_var_postInitExecutions pushBack [
 										[_arguments, _function, _target, _subfunction, _override],
-										_callerFunction
+										_environmentCaller
 									];
 								};
 
@@ -1790,7 +1789,7 @@ isNil {
 							_result = _overrideResult select 1;
 						};
 
-						private _callerFunction = {
+						private _environmentCaller = {
 							params ["_arguments", "_function", "_target", "_override", "_subfunction", "_executionCount"];
 							private _i = 1;
 							private _results = [];
@@ -1803,16 +1802,16 @@ isNil {
 						};
 
 						if KH_var_missionLoaded then {
-							_result = [_arguments, _function, _target, _override, _subfunction, _environment] call _callerFunction;
+							[[_arguments, _function, _target, _override, _subfunction] call _environmentCaller, _result];
 						}
 						else {
 							KH_var_postInitExecutions pushBack [
-								[_arguments, _function, _target, _override, _subfunction, _environment],
-								_callerFunction
+								[_arguments, _function, _target, _override, _subfunction],
+								_environmentCaller
 							];
-						};
 
-						_result;
+							[[], _result];
+						};
 					};
 
 					case (_environment isEqualType []): {
@@ -1830,7 +1829,7 @@ isNil {
 
 						switch true do {
 							case (_type == "AFTER_N_FRAMES"): {
-								private _callerFunction = {
+								private _environmentCaller = {
 									params ["_arguments", "_function", "_target", "_frames", "_conditionArguments", "_conditionFunction", "_backupArguments", "_backupFunction", "_backupTarget", "_subfunction", "_override", "_id"];
 
 									[
@@ -1840,11 +1839,7 @@ isNil {
 
 											if (_idState != "TERMINATE") then {
 												switch true do {
-													case (_idState == "ACTIVE"): {
-														if (_conditionFunction isEqualType "") then {
-															_conditionFunction = missionNamespace getVariable [_conditionFunction, {}];
-														};
-														
+													case (_idState == "ACTIVE"): {																												
 														if (_conditionArguments call _conditionFunction) then {
 															[_arguments, _function, _target, _override] call _subfunction;
 														}
@@ -1892,14 +1887,15 @@ isNil {
 								private _backupArguments = _environment param [4, []];
 								private _backupFunction = _environment param [5, {}];
 								private _backupTarget = _environment param [6, _target];
+								_conditionFunction = [_conditionArguments, [_conditionFunction] call KH_fnc_parseFunction] call KH_fnc_getParsedFunction;
 
 								if KH_var_missionLoaded then {
-									[_arguments, _function, _target, _frames, _conditionArguments, _conditionFunction, _backupArguments, _backupFunction, _backupTarget, _subfunction, _override, _id] call _callerFunction;
+									[_arguments, _function, _target, _frames, _conditionArguments, _conditionFunction, _backupArguments, _backupFunction, _backupTarget, _subfunction, _override, _id] call _environmentCaller;
 								}
 								else {
 									KH_var_postInitExecutions pushBack [
 										[_arguments, _function, _target, _frames, _conditionArguments, _conditionFunction, _backupArguments, _backupFunction, _backupTarget, _subfunction, _override, _id],
-										_callerFunction
+										_environmentCaller
 									];
 								};
 
@@ -1907,7 +1903,7 @@ isNil {
 							};
 
 							case (_type == "WAIT"): {
-								private _callerFunction = {
+								private _environmentCaller = {
 									params ["_arguments", "_function", "_target", "_time", "_conditionArguments", "_conditionFunction", "_backupArguments", "_backupFunction", "_backupTarget", "_subfunction", "_override", "_id"];
 
 									[
@@ -1918,10 +1914,6 @@ isNil {
 											if (_idState != "TERMINATE") then {
 												switch true do {
 													case (_idState == "ACTIVE"): {
-														if (_conditionFunction isEqualType "") then {
-															_conditionFunction = missionNamespace getVariable [_conditionFunction, {}];
-														};
-
 														if (_conditionArguments call _conditionFunction) then {
 															[_arguments, _function, _target, _override] call _subfunction;
 														}
@@ -1974,14 +1966,15 @@ isNil {
 								private _backupArguments = _environment param [4, []];
 								private _backupFunction = _environment param [5, {}];
 								private _backupTarget = _environment param [6, _target];
+								_conditionFunction = [_conditionArguments, [_conditionFunction] call KH_fnc_parseFunction] call KH_fnc_getParsedFunction;
 
 								if KH_var_missionLoaded then {
-									[_arguments, _function, _target, _time, _conditionArguments, _conditionFunction, _backupArguments, _backupFunction, _backupTarget, _subfunction, _override, _id] call _callerFunction;
+									[_arguments, _function, _target, _time, _conditionArguments, _conditionFunction, _backupArguments, _backupFunction, _backupTarget, _subfunction, _override, _id] call _environmentCaller;
 								}
 								else {
 									KH_var_postInitExecutions pushBack [
 										[_arguments, _function, _target, _time, _conditionArguments, _conditionFunction, _backupArguments, _backupFunction, _backupTarget, _subfunction, _override, _id],
-										_callerFunction
+										_environmentCaller
 									];
 								};
 
@@ -1989,7 +1982,7 @@ isNil {
 							};
 
 							case (_type == "WAIT_UNTIL"): {
-								private _callerFunction = {
+								private _environmentCaller = {
 									params ["_arguments", "_function", "_target", "_conditionArguments", "_conditionFunction", "_timeout", "_timeoutArguments", "_timeoutFunction", "_timeoutTarget", "_subfunction", "_override", "_id"];
 
 									[
@@ -2001,11 +1994,6 @@ isNil {
 												case (_idState == "ACTIVE"): {
 													private _conditionArguments = _this select 3;
 													private _conditionFunction = _this select 4;
-
-													if (_conditionFunction isEqualType "") then {
-														_conditionFunction = missionNamespace getVariable [_conditionFunction, {}];
-													};
-
 													_conditionArguments call _conditionFunction;
 												};
 
@@ -2055,18 +2043,19 @@ isNil {
 								private _timeoutArguments = _environment param [4, []];
 								private _timeoutFunction = _environment param [5, {}];
 								private _timeoutTarget = _environment param [6, _target];
+								_conditionFunction = [_conditionArguments, [_conditionFunction] call KH_fnc_parseFunction] call KH_fnc_getParsedFunction;
 
 								if (_timeout isEqualType "") then {
 									_timeout = ((parseNumber _timeout) - CBA_missionTime) max 0;
 								};
 
 								if KH_var_missionLoaded then {
-									[_arguments, _function, _target, _conditionArguments, _conditionFunction, _timeout, _timeoutArguments, _timeoutFunction, _timeoutTarget, _subfunction, _override, _id] call _callerFunction;
+									[_arguments, _function, _target, _conditionArguments, _conditionFunction, _timeout, _timeoutArguments, _timeoutFunction, _timeoutTarget, _subfunction, _override, _id] call _environmentCaller;
 								}
 								else {
 									KH_var_postInitExecutions pushBack [
 										[_arguments, _function, _target, _conditionArguments, _conditionFunction, _timeout, _timeoutArguments, _timeoutFunction, _timeoutTarget, _subfunction, _override, _id],
-										_callerFunction
+										_environmentCaller
 									];
 								};
 
@@ -2074,7 +2063,7 @@ isNil {
 							};
 
 							case (_type == "INTERVAL"): {
-								private _callerFunction = {
+								private _environmentCaller = {
 									params ["_arguments", "_function", "_target", "_conditionArguments", "_conditionFunction", "_timeout", "_timeoutOnConditionFailure", "_timeoutArguments", "_timeoutFunction", "_timeoutTarget", "_subfunction", "_override", "_interval", "_id"];
 
 									private _handler = [
@@ -2086,10 +2075,6 @@ isNil {
 												switch true do {
 													case (_idState == "ACTIVE"): {
 														_args params ["_arguments", "_function", "_target", "_conditionArguments", "_conditionFunction", "_timeoutOnConditionFailure", "_timeoutArguments", "_timeoutFunction", "_timeoutTarget", "_subfunction", "_override"];
-														
-														if (_conditionFunction isEqualType "") then {
-															_conditionFunction = missionNamespace getVariable [_conditionFunction, {}];
-														};
 														
 														if (_conditionArguments call _conditionFunction) then {
 															[_arguments, _function, _target, _override] call _subfunction;
@@ -2141,18 +2126,19 @@ isNil {
 								private _timeoutArguments = _environment param [6, []];
 								private _timeoutFunction = _environment param [7, {}];
 								private _timeoutTarget = _environment param [8, _target];
+								_conditionFunction = [_conditionArguments, [_conditionFunction] call KH_fnc_parseFunction] call KH_fnc_getParsedFunction;
 
 								if (_timeout isEqualType "") then {
 									_timeout = ((parseNumber _timeout) - CBA_missionTime) max 0;
 								};
 								
 								if KH_var_missionLoaded then {
-									[_arguments, _function, _target, _conditionArguments, _conditionFunction, _timeout, _timeoutOnConditionFailure, _timeoutArguments, _timeoutFunction, _timeoutTarget, _subfunction, _override, _interval, _id] call _callerFunction;
+									[_arguments, _function, _target, _conditionArguments, _conditionFunction, _timeout, _timeoutOnConditionFailure, _timeoutArguments, _timeoutFunction, _timeoutTarget, _subfunction, _override, _interval, _id] call _environmentCaller;
 								}
 								else {
 									KH_var_postInitExecutions pushBack [
 										[_arguments, _function, _target, _conditionArguments, _conditionFunction, _timeout, _timeoutOnConditionFailure, _timeoutArguments, _timeoutFunction, _timeoutTarget, _subfunction, _override, _interval, _id],
-										_callerFunction
+										_environmentCaller
 									];
 								};
 
@@ -2221,66 +2207,10 @@ isNil {
 									_results pushBack _currentResult;
 								} forEach _executions;
 
-								private _callerFunction = {
+								private _environmentCaller = {
 									params ["_arguments", "_function", "_target", "_environment", "_executions", "_id", "_overrides", "_newExecutions", "_newExecutionEvent", "_suspendInFrames", "_sequenceArguments"];
 									private _timeSuspensions = [0];
 									private _conditionSuspensions = [[[], {true;}, true, -1, [], {}, _target, _environment, [] call KH_fnc_generateUid]];
-
-									private _functionProcessor = {
-										params ["_arguments", "_function"];
-
-										if (_function isEqualType "") then {
-											if (" " in _function) then {
-												private _storedFunction = KH_var_compiledExpressions get (hashValue _function);
-
-												if (isNil "_storedFunction") then {
-													private _compiledFunction = compile _function;
-													KH_var_compiledExpressions insert [[hashValue _function, _compiledFunction]];
-													_function;
-												}
-												else {
-													_storedFunction;
-												};
-											}
-											else {
-												if (".sqf" in _function) then {
-													private _functionName = format ["M_fnc_%1", (_function select [0, (_function find ".sqf") - 1]) regexReplace ["[\\/]", "_"]];
-
-													if ((missionNamespace getVariable [_functionName, {}]) isEqualTo {}) then {
-														missionNamespace setVariable [_functionName, compile (preprocessFileLineNumbers _function)];
-													};
-
-													missionNamespace getVariable [_functionName, {}];
-												}
-												else {
-													private _parsedFunction = missionNamespace getVariable [_function, {}];
-
-													if (_parsedFunction isEqualTo {}) then {
-														switch true do {
-															case ((count _arguments) == 0): {
-																_parsedFunction = (compile ([_function] joinString ""));
-															};
-
-															case ((count _arguments) == 1): {
-																private _unaryArgument = [missionNamespace, "KH_var_unaryArgument", _arguments select 0, false] call KH_fnc_atomicVariable;
-																_parsedFunction = (compile ([_function, " (missionNamespace getVariable '", _unaryArgument, "');"] joinString ""));
-															};
-
-															case ((count _arguments) == 2): {
-																private _binaryArguments = [missionNamespace, "KH_var_binaryArguments", _arguments, false] call KH_fnc_atomicVariable;
-																_parsedFunction = (compile (["((missionNamespace getVariable '", _binaryArguments, "') select 0) ", _function, " ((missionNamespace getVariable '", _binaryArguments, "') select 1);"] joinString ""));
-															};
-														};
-													};
-
-													_parsedFunction;
-												};
-											};
-										}
-										else {
-											_function;
-										};
-									};
 									
 									{
 										(_x select 0) params [["_delay", 0], ["_conditionArguments", []], ["_conditionFunction", {true;}], ["_timeout", -1], ["_timeoutArguments", []], ["_timeoutFunction", {}], ["_timeoutTarget", _target], ["_timeoutEnvironment", _environment]];
@@ -2291,7 +2221,7 @@ isNil {
 										};
 
 										_timeSuspensions pushBack _delay;
-										_conditionSuspensions pushBack [_conditionArguments, _conditionFunction, _evaluatePrevious, _timeout, _timeoutArguments, _timeoutFunction, _timeoutTarget, _timeoutEnvironment, [] call KH_fnc_generateUid];
+										_conditionSuspensions pushBack [_conditionArguments, [_conditionArguments, [_conditionFunction] call KH_fnc_parseFunction] call KH_fnc_getParsedFunction, _evaluatePrevious, _timeout, _timeoutArguments, _timeoutFunction, _timeoutTarget, _timeoutEnvironment, [] call KH_fnc_generateUid];
 										private _currentExecutionId = [] call KH_fnc_generateUid;
 										private _conditionId = [] call KH_fnc_generateUid;
 
@@ -2312,12 +2242,8 @@ isNil {
 															{
 																_x params ["_conditionArguments", "_conditionFunction"];
 
-																if (_conditionFunction isEqualType "") then {
-																	_conditionFunction = missionNamespace getVariable [_conditionFunction, {}];
-																};
-
 																private _expression = [
-																	"private _args = (missionNamespace getVariable ['", _sequenceArguments, "', []]);
+																	"private _args = missionNamespace getVariable ['", _sequenceArguments, "', []];
 																	call ", _conditionFunction, ";"
 																] joinString "";
 
@@ -2339,12 +2265,8 @@ isNil {
 														else {
 															(_conditionSuspensions select -1) params ["_conditionArguments", "_conditionFunction"];
 
-															if (_conditionFunction isEqualType "") then {
-																_conditionFunction = missionNamespace getVariable [_conditionFunction, {}];
-															};
-
 															private _expression = [
-																"private _args = (missionNamespace getVariable ['", _sequenceArguments, "', []]);
+																"private _args = missionNamespace getVariable ['", _sequenceArguments, "', []];
 																call ", _conditionFunction, ";"
 															] joinString "";
 
@@ -2379,11 +2301,10 @@ isNil {
 													private _newExecutions = _this select 10;
 													private _newExecutionEvent = _this select 11;
 													private _sequenceArguments = _this select 13;
-													private _functionProcessor = _this select 14;
-													_currentFunction = [_currentArguments, _currentFunction] call _functionProcessor;
+													_currentFunction = [_currentArguments, [_currentFunction] call KH_fnc_parseFunction] call KH_fnc_getParsedFunction;
 
 													private _expression = [
-														"private _args = (missionNamespace getVariable ['", _sequenceArguments, "', []]);
+														"private _args = missionNamespace getVariable ['", _sequenceArguments, "', []];
 														private _sequenceResult = call ", _currentFunction, ";
 														missionNamespace setVariable ['", _sequenceArguments, "', _sequenceResult];"
 													] joinString "";
@@ -2400,7 +2321,7 @@ isNil {
 													};
 												};
 											}, 
-											[_currentArguments, _currentFunction, _currentTarget, _currentEnvironment, _environment, _subfunction, _conditionSuspensions, _conditionId, _id, _overrides, _newExecutions, _newExecutionEvent, _currentExecutionId, _sequenceArguments, _functionProcessor],
+											[_currentArguments, _currentFunction, _currentTarget, _currentEnvironment, _environment, _subfunction, _conditionSuspensions, _conditionId, _id, _overrides, _newExecutions, _newExecutionEvent, _currentExecutionId, _sequenceArguments],
 											(_conditionSuspensions select -1) select 3,
 											{
 												private _id = _this select 8;
@@ -2413,15 +2334,14 @@ isNil {
 													private _newExecutions = _this select 10;
 													private _newExecutionEvent = _this select 11;
 													private _sequenceArguments = _this select 13;
-													private _functionProcessor = _this select 14;
 													private _timeoutArguments = ((_this select 6) select -1) select 4;
 													private _timeoutFunction = ((_this select 6) select -1) select 5;
 													private _timeoutTarget = ((_this select 6) select -1) select 6;
 													private _timeoutEnvironment = ((_this select 6) select -1) select 7;
-													_timeoutFunction = [_timeoutArguments, _timeoutFunction] call _functionProcessor;
+													_timeoutFunction = [_timeoutArguments, [_timeoutFunction] call KH_fnc_parseFunction] call KH_fnc_getParsedFunction;
 
 													private _expression = [
-														"private _args = (missionNamespace getVariable ['", _sequenceArguments, "', []]);
+														"private _args = missionNamespace getVariable ['", _sequenceArguments, "', []];
 														private _sequenceResult = call ", _timeoutFunction, ";
 														missionNamespace setVariable ['", _sequenceArguments, "', _sequenceResult];"
 													] joinString "";
@@ -2464,12 +2384,12 @@ isNil {
 								};
 
 								if KH_var_missionLoaded then {
-									[_arguments, _function, _target, "THIS_FRAME", _executions, _id, _overrides, _newExecutions, _newExecutionEvent, _suspendInFrames, _sequenceArguments] call _callerFunction;
+									[_arguments, _function, _target, "THIS_FRAME", _executions, _id, _overrides, _newExecutions, _newExecutionEvent, _suspendInFrames, _sequenceArguments] call _environmentCaller;
 								}
 								else {
 									KH_var_postInitExecutions pushBack [
 										[_arguments, _function, _target, "THIS_FRAME", _executions, _id, _overrides, _newExecutions, _newExecutionEvent, _suspendInFrames, _sequenceArguments],
-										_callerFunction
+										_environmentCaller
 									];
 								};
 

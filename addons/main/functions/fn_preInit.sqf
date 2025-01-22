@@ -1,65 +1,8 @@
 KH_var_missionLoaded = false;
-KH_var_compiledExpressions = createHashMap;
-
-private _functionProcessor = {
-	params ["_arguments", "_function"];
-
-	if (_function isEqualType "") then {
-		if !(" " in _function) then {
-			if (".sqf" in _function) then {
-				private _functionName = format ["M_fnc_%1", (_function select [0, (_function find ".sqf") - 1]) regexReplace ["[\\/]", "_"]];
-
-				if ((missionNamespace getVariable [_functionName, {}]) isEqualTo {}) then {
-					missionNamespace setVariable [_functionName, compile (preprocessFileLineNumbers _function)];
-				};
-
-				_arguments call (missionNamespace getVariable [_functionName, {}]);
-			}
-			else {
-				private _parsedFunction = missionNamespace getVariable [_function, {}];
-
-				if (_parsedFunction isEqualTo {}) then {
-					switch true do {
-						case ((count _arguments) == 0): {
-							[] call (compile ([_function] joinString ""));
-						};
-
-						case ((count _arguments) == 1): {
-							private _unaryArgument = [missionNamespace, "KH_var_unaryArgument", _arguments select 0, false] call KH_fnc_atomicVariable;
-							[] call (compile ([_function, " (missionNamespace getVariable '", _unaryArgument, "');"] joinString ""));
-						};
-
-						case ((count _arguments) == 2): {
-							private _binaryArguments = [missionNamespace, "KH_var_binaryArguments", _arguments, false] call KH_fnc_atomicVariable;
-							[] call (compile (["((missionNamespace getVariable '", _binaryArguments, "') select 0) ", _function, " ((missionNamespace getVariable '", _binaryArguments, "') select 1);"] joinString ""));
-						};
-					};
-				}
-				else {
-					_arguments call _parsedFunction;
-				};
-			};
-		}
-		else {
-			private _storedFunction = KH_var_compiledExpressions get (hashValue _function);
-
-			if (isNil "_storedFunction") then {
-				private _compiledFunction = compile _function;
-				KH_var_compiledExpressions insert [[hashValue _function, _compiledFunction]];
-				_arguments call _compiledFunction;
-			}
-			else {
-				_arguments call _storedFunction;
-			};
-		};
-	}
-	else {
-		_arguments call _function;
-	};
-};
-
-["KH_eve_executionGlobal", _functionProcessor] call CBA_fnc_addEventHandler;
+KH_var_cachedFunctions = createHashMap;
 KH_var_postInitExecutions = [];
+KH_var_cbaEventHandlerStack = [];
+["KH_eve_executionGlobal", KH_fnc_callParsedFunction] call CBA_fnc_addEventHandler;
 
 if isServer then {
 	KH_var_missionStarted = false;
@@ -103,7 +46,7 @@ if isServer then {
 	KH_var_entityArrayBuilderArrays = [];
 	KH_var_groupArrayBuilderArrays = [];
 	KH_var_initialSideRelations = [];
-	["KH_eve_executionServer", _functionProcessor] call CBA_fnc_addEventHandler;
+	["KH_eve_executionServer", KH_fnc_callParsedFunction] call CBA_fnc_addEventHandler;
 
 	[
 		"KH_eve_playerPreloadedInitial", 
@@ -447,7 +390,7 @@ if isServer then {
 if hasInterface then {
 	KH_var_contextMenuOpen = false;
 	KH_var_interactionMenuOpen = false;
-	["KH_eve_executionPlayer", _functionProcessor] call CBA_fnc_addEventHandler;
+	["KH_eve_executionPlayer", KH_fnc_callParsedFunction] call CBA_fnc_addEventHandler;
 	
 	addMissionEventHandler [
 		"PreloadFinished", 
@@ -611,7 +554,7 @@ if hasInterface then {
 };
 
 if (!isServer && !hasInterface) then {
-	["KH_eve_executionHeadless", _functionProcessor] call CBA_fnc_addEventHandler;
+	["KH_eve_executionHeadless", KH_fnc_callParsedFunction] call CBA_fnc_addEventHandler;
 };
 
 true;

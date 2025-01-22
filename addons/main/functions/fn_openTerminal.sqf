@@ -111,6 +111,7 @@ if !_observerMode then {
 			] call KH_fnc_execute;
 
 			ctrlSetText [103, ""];
+			nil;
 		}
 	] call KH_fnc_addEventHandler;
 
@@ -133,7 +134,8 @@ if !_observerMode then {
 			] call KH_fnc_execute;
 			
 			player setVariable ["KH_var_dialogActive", false, [2, clientOwner]];
-			_control ctrlRemoveEventHandler ["ButtonClick", _localId];
+			[_localId] call KH_fnc_removeEventHandler;
+			nil;
 		}
 	] call KH_fnc_addEventHandler;
 

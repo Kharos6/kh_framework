@@ -16,6 +16,7 @@ class CfgFunctions
 			class assignTerminal {};
 			class atomicValue {};
 			class atomicVariable {};
+			class callParsedFunction {};
 			class cameraSequence {};		
 			class closeInterface {};
 			class conditionalPresence {};
@@ -44,6 +45,7 @@ class CfgFunctions
 			class getEntityVariableName {};
 			class getGroupAttributes {};
 			class getNearestSurface {};
+			class getParsedFunction {};
 			class getPosition {};
 			class getRotation {};
 			class getSimulatedInventoryItemCount {};
@@ -81,6 +83,7 @@ class CfgFunctions
 			class openSimulatedInventory {};
 			class openTerminal {};
 			class orbitObject {};
+			class parseFunction {};
 			class removeEventHandler {};
 			class recoverDisconnectedPlayers {};
 			class respawnSpectator {};

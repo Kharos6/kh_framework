@@ -68,7 +68,7 @@ if (isNull _unit) then {
 					{
 						_args params ["_unequipAction"];
 						[player, _unequipAction] call BIS_fnc_holdActionRemove;
-						[_eventName, _localId] call CBA_fnc_removeEventHandler;
+						[_localId] call KH_fnc_removeEventHandler;
 					}
 				] call KH_fnc_addEventHandler;
 			},
@@ -223,7 +223,7 @@ else {
 						{
 							_args params ["_unequipAction"];
 							[player, _unequipAction] call BIS_fnc_holdActionRemove;
-							[_eventName, _localId] call CBA_fnc_removeEventHandler;
+							[_localId] call KH_fnc_removeEventHandler;
 						}
 					] call KH_fnc_addEventHandler;
 				},

@@ -147,13 +147,13 @@ private _entityVariable = [missionNamespace, "KH_var_visualTriggerEntityPrevious
 							_currentPlayer setVariable [_playerVariable, _condition];
 						}
 						else {
-							[_eventName, _localId] call CBA_fnc_removeEventHandler;
+							[_localId] call KH_fnc_removeEventHandler;
 						};
 					};
 				};
 
 				case (_idState == "TERMINATE"): {
-					[_eventName, _localId] call CBA_fnc_removeEventHandler;
+					[_localId] call KH_fnc_removeEventHandler;
 				};		
 			};
 		};

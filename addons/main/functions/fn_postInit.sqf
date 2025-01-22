@@ -143,14 +143,7 @@ isNil {
 	
 		[] call KH_fnc_serverMissionLoadInit;
 		
-		[
-			[], 
-			{
-				systemChat "KH FRAMEWORK - MISSION LOADED";
-			}, 
-			"GLOBAL",
-			"THIS_FRAME"
-		] call KH_fnc_execute;
+		[["KH FRAMEWORK - MISSION LOADED"], "systemChat", "GLOBAL", "THIS_FRAME"] call KH_fnc_execute;
 
 		[
 			{
@@ -164,15 +157,7 @@ isNil {
 						["KH_eve_missionStarted", []] call CBA_fnc_globalEvent;
 						KH_var_missionStarted = true;
 						publicVariable "KH_var_missionStarted";
-						
-						[
-							[], 
-							{
-								systemChat "KH FRAMEWORK - MISSION STARTED";
-							}, 
-							"GLOBAL",
-							"THIS_FRAME"
-						] call KH_fnc_execute;
+						[["KH FRAMEWORK - MISSION STARTED"], "systemChat", "GLOBAL", "THIS_FRAME"] call KH_fnc_execute;
 						
 						[
 							{
@@ -194,15 +179,7 @@ isNil {
 											["KH_eve_playersLoaded", KH_var_initialPlayerUnits] call CBA_fnc_globalEvent;												
 											[] call KH_fnc_serverPlayersLoadedInit;
 											[[], KH_fnc_playerPlayersLoadedInit, "PLAYERS", "THIS_FRAME"] call KH_fnc_execute;
-
-											[
-												[], 
-												{
-													systemChat "KH FRAMEWORK - PLAYERS LOADED";
-												}, 
-												"GLOBAL",
-												"THIS_FRAME"
-											] call KH_fnc_execute;
+											[["KH FRAMEWORK - PLAYERS LOADED"], "systemChat", "GLOBAL", "THIS_FRAME"] call KH_fnc_execute;
 										},
 										[]
 									] call CBA_fnc_execNextFrame;

@@ -227,7 +227,7 @@ if (_duration != -1) then {
 					[_unitGroupHitHandler] call KH_fnc_removeEventHandler;
 				};
 				
-				[_eventName, _localId] call CBA_fnc_removeEventHandler;
+				[_localId] call KH_fnc_removeEventHandler;
 			}
 		] call KH_fnc_addEventHandler;
 	};

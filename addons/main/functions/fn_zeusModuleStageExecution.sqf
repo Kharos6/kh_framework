@@ -24,7 +24,7 @@ isNil {
 					if (_key isEqualTo 0xD2) then {
 						_args params ["_function", "_entity"];
 						[_entity] call _function;
-						_display displayRemoveEventHandler ["KeyDown", _localId];
+						[_localId] call KH_fnc_removeEventHandler;
 					};
 
 					nil;
@@ -37,7 +37,8 @@ isNil {
 
 			KH_var_stagedExecutions pushBack _handler;
 			deleteVehicle _logic;
-			_control ctrlRemoveEventHandler ["ButtonClick", _localId];
+			[_localId] call KH_fnc_removeEventHandler;
+			nil;
 		}
 	] call KH_fnc_addEventHandler;
 
@@ -49,7 +50,8 @@ isNil {
 			params ["_control"];
 			_args params ["_logic"];
 			deleteVehicle _logic;
-			_control ctrlRemoveEventHandler ["ButtonClick", _localId];
+			[_localId] call KH_fnc_removeEventHandler;
+			nil;
 		}
 	] call KH_fnc_addEventHandler;
 };

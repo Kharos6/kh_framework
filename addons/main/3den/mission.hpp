@@ -446,7 +446,7 @@ class Mission
 												[[_positions, _targets, _fovs, _commitTimes, _durations, _visionTypes, _cinematicBorders, _disableUserInput], 'KH_fnc_cameraSequence', _unit, 'THIS_FRAME'] call KH_fnc_execute;\
 											}\
 											else {\
-												[_eventName, _localId] call CBA_fnc_removeEventHandler;\
+												[_localId] call KH_fnc_removeEventHandler;\
 											};\
 										};\
 									}\
@@ -634,7 +634,7 @@ class Mission
 										[_identifier, _parsedVariables] call KH_fnc_saveMissionState;\
 										[_identifier, KH_var_allPlayerUnits] call KH_fnc_savePlayerLoadouts;\
 										[_identifier, entities [[], ['Man', 'Logic', 'Animal'], false, false]] call KH_fnc_saveCargoInventories;\
-										[_eventName, _localId] call CBA_fnc_removeEventHandler;\
+										[_localId] call KH_fnc_removeEventHandler;\
 									}\
 								] call KH_fnc_addEventHandler;\
 							};\

@@ -56,6 +56,8 @@ if !KH_var_contextMenuOpen then {
 									if ([] call _condition) then {
 										_arguments call _function;
 									};
+
+									nil;
 								}
 							] call KH_fnc_addEventHandler;
 
@@ -87,7 +89,8 @@ if !KH_var_contextMenuOpen then {
 			} forEach KH_var_contextMenuControls;
 			
 			KH_var_contextMenuOpen = false;
-			_display displayRemoveEventHandler ["MouseButtonUp", _localId];
+			[_localId] call KH_fnc_removeEventHandler;
+			nil;
 		}
 	] call KH_fnc_addEventHandler;
 
@@ -103,7 +106,7 @@ if !KH_var_contextMenuOpen then {
 			} forEach KH_var_contextMenuControls;
 			
 			KH_var_contextMenuOpen = false;
-			_display displayRemoveEventHandler ["KeyDown", _localId];
+			[_localId] call KH_fnc_removeEventHandler;
 			nil;
 		}
 	] call KH_fnc_addEventHandler;

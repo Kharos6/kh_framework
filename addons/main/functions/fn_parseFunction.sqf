@@ -26,15 +26,7 @@ if _parse then {
 		KH_var_cachedFunctions set [_hashValue, _compiledFunction, false];
 
 		if !isServer then {
-			[
-				[_hashValue, _compiledFunction], 
-				{
-					params ["_hashValue", "_compiledFunction"];
-					KH_var_cachedFunctions set [_hashValue, _compiledFunction, false];
-				},
-				"SERVER",
-				"THIS_FRAME"
-			] call KH_fnc_execute;
+			[[_function], "KH_fnc_parseFunction", "SERVER", "THIS_FRAME"] call KH_fnc_execute;
 		};
 	};
 

@@ -33,7 +33,7 @@ if (isNil "_storedFunction") then {
 								params ["_function"];
 								private _storedFunction = KH_var_cachedFunctions get _function;
 								
-								if !(isNil _storedFunction) then {
+								if !(isNil "_storedFunction") then {
 									[_storedFunction];
 								}
 								else {
@@ -53,7 +53,7 @@ if (isNil "_storedFunction") then {
 					params ["_function"];
 					private _storedFunction = KH_var_cachedFunctions get _function;
 					
-					if !(isNil _storedFunction) then {
+					if !(isNil "_storedFunction") then {
 						[_storedFunction];
 					}
 					else {

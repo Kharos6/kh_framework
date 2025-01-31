@@ -11,12 +11,12 @@ private _handler = -1;
 private _eventType = "";
 _function = [_arguments, [_function] call KH_fnc_parseFunction] call KH_fnc_getParsedFunction;
 
-private _expression = [
+private _expression = compile ([
 	"private _args = missionNamespace getVariable ['", _handlerArguments, "', []];
 	private _eventName = missionNamespace getVariable ['", _eventName, "', ''];
 	private _localId = missionNamespace getVariable ['", _handlerId, "', []];
 	call ", _function, ";"
-] joinString "";
+] joinString "");
 
 if (_type isEqualType []) then {
 	_eventType = _type select 0;
@@ -28,7 +28,7 @@ else {
 switch true do {
 	case (_eventType == "STANDARD"): {
 		if !(_type select 2) then {
-			_handler = (_type select 1) addEventHandler [_event, compile _expression];
+			_handler = (_type select 1) addEventHandler [_event, _expression];
 		}
 		else {
 			_persistentId = [] call KH_fnc_generateUid;
@@ -85,37 +85,37 @@ switch true do {
 	};
 
 	case (_eventType == "MULTIPLAYER"): {
-		_handler = (_type select 1) addMPEventHandler [_event, compile _expression];
+		_handler = (_type select 1) addMPEventHandler [_event, _expression];
 	};
 
 	case (_eventType == "CONTROL"): {
-		_handler = (_type select 1) ctrlAddEventHandler [_event, compile _expression];
+		_handler = (_type select 1) ctrlAddEventHandler [_event, _expression];
 	};
 
 	case (_eventType == "DISPLAY"): {
-		_handler = (_type select 1) displayAddEventHandler [_event, compile _expression];
+		_handler = (_type select 1) displayAddEventHandler [_event, _expression];
 	};
 
 	case (_eventType == "PUBLIC_VARIABLE"): {
 		_handler = [missionNamespace, "KH_var_publicVariableEventHandler", true, false] call KH_fnc_atomicVariable;
 
-		(_type select 1) addPublicVariableEventHandler (compile ([
-			"if (missionNamespace getVariable ['", _handler, "', true]) then { 
-				call ", _expression, 
+		_event addPublicVariableEventHandler (compile ([
+			"if (missionNamespace getVariable ['", _handler, "', true]) then {
+				call ", _expression,
 			"};"
 		] joinString ""));
 	};
 
 	case (_eventType == "MISSION"): {
-		_handler = addMissionEventHandler [_event, compile _expression];
+		_handler = addMissionEventHandler [_event, _expression];
 	};
 
 	case (_eventType == "USER_ACTION"): {
-		_handler = addUserActionEventHandler [_event, compile _expression];
+		_handler = addUserActionEventHandler [_event, _expression];
 	};
 
 	case (_eventType == "MUSIC"): {
-		_handler = addMusicEventHandler [_event, compile _expression];
+		_handler = addMusicEventHandler [_event, _expression];
 	};
 
 	case (_eventType == "CBA"): {
@@ -135,7 +135,7 @@ switch true do {
 			] call CBA_fnc_addEventHandler;
 		};
 
-		_handler = [compile _expression, [] call KH_fnc_generateUid];
+		_handler = [_expression, [] call KH_fnc_generateUid];
 		private _currentStack = missionNamespace getVariable [_handlerStackId, []];
 		_currentStack pushBack _handler;
 		missionNamespace setVariable [_handlerStackId, _currentStack];

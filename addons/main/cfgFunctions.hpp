@@ -16,6 +16,7 @@ class CfgFunctions
 			class assignTerminal {};
 			class atomicValue {};
 			class atomicVariable {};
+			class callback {};
 			class callParsedFunction {};
 			class cameraSequence {};		
 			class closeInterface {};

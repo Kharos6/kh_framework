@@ -437,7 +437,7 @@ class Object
 										{\
 											params ['_entity', '_position', '_rotation', '_transition', '_heal', '_freefallHeight', '_init', '_name'];\
 											[\
-												_object,\
+												_entity,\
 												_name,\
 												'\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_loadVehicle_ca.paa',\
 												'\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_loadVehicle_ca.paa',\

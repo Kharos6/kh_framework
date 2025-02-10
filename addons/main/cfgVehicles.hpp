@@ -1,6 +1,7 @@
 class CfgVehicles
 {
-	class Module_F
+	class Logic;
+	class Module_F: Logic
 	{
 		class AttributesBase
 		{
@@ -12,7 +13,16 @@ class CfgVehicles
 			class ModuleDescription;
 			class Units;
 		};
-		class ModuleDescription;
+		class ModuleDescription 
+		{
+			class AnyBrain;
+			class AnyPerson;
+			class AnyPlayer;
+			class AnyStaticObject;
+			class Anything;
+			class AnyVehicle;
+			class EmptyDetector;
+		};
 	};
 	class Land_HelipadEmpty_F;
 	class KH_HelperArrow: Land_HelipadEmpty_F

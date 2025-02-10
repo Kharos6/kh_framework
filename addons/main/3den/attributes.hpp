@@ -1,7 +1,7 @@
 class Attributes
 {
 	class Default;
-	class Title
+	class Title: Default
 	{
 		class Controls
 		{

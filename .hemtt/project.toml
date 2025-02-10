@@ -37,7 +37,6 @@ enabled = false
 [hemtt.launch.default]
 workshop = [
     "450814997",
-    "463939057",
     "1779063631"
 ]
 

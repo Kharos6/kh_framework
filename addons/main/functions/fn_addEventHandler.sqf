@@ -96,6 +96,21 @@ switch true do {
 		_handler = (_type select 1) displayAddEventHandler [_event, _expression];
 	};
 
+	case (_eventType == "CLASS"): {
+		[
+			_type select 1,
+			_event, 
+			compile ([
+				"if (missionNamespace getVariable ['", _handler, "', true]) then {
+					call ", _expression,
+				"};"
+			] joinString ""),
+			_type select 2,
+			_type select 3,
+			_type select 4
+		] call CBA_fnc_addClassEventHandler;
+	};
+
 	case (_eventType == "PUBLIC_VARIABLE"): {
 		_handler = [missionNamespace, "KH_var_publicVariableEventHandler", true, false] call KH_fnc_atomicVariable;
 

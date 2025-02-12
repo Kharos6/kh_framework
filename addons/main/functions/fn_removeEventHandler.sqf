@@ -24,7 +24,7 @@ if ((count _handler) > 2) then {
 					_target displayRemoveEventHandler [_event, _handlerId];
 				};
 
-				case (_eventType == "PUBLIC_VARIABLE"): {
+				case ((_eventType == "PUBLIC_VARIABLE") || (_eventType == "CLASS")): {
 					missionNamespace setVariable [_handlerId, false];
 				};
 

@@ -2,8 +2,8 @@ params [["_types", ["REGULAR", "PLAYABLE"]], ["_players", true], ["_dead", false
 private _units = [];
 
 {
-	switch true do {
-		case (_x isEqualType grpNull): {
+	switch (typeName _x) do {
+		case "GROUP": {
 			private _group = _x;
 			
 			{
@@ -37,7 +37,7 @@ private _units = [];
 			};		
 		};
 		
-		case (_x isEqualType sideUnknown): {
+		case "SIDE": {
 			private _side = _x;
 			
 			{
@@ -98,9 +98,9 @@ private _units = [];
 			} forEach agents;
 		};
 
-		case (_x isEqualType ""): {
-			switch true do {
-				case (_x == "PLAYABLE"): {
+		case "STRING": {
+			switch _x do {
+				case "PLAYABLE": {
 					{
 						if _players then {
 							_units pushBackUnique _x;
@@ -123,7 +123,7 @@ private _units = [];
 					};
 				};
 
-				case (_x == "REGULAR"): {
+				case "REGULAR": {
 					{
 						if _players then {
 							if ((isPlayer _x) || (!(isPlayer _x) && !(_x in playableUnits))) then {
@@ -153,7 +153,7 @@ private _units = [];
 					};
 				};
 
-				case (_x == "AGENTS"): {
+				case "AGENTS": {
 					{
 						if !((agent _x) isKindOf "Animal") then {
 							if _dead then {
@@ -182,7 +182,7 @@ private _units = [];
 					} forEach agents;
 				};
 
-				case (_x == "ALL"): {
+				case "ALL": {
 					{
 						if !((agent _x) isKindOf "Animal") then {
 							if _dead then {

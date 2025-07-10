@@ -6,9 +6,9 @@ private _id = [missionNamespace, "KH_var_3dAudio", "ACTIVE", false] call KH_fnc_
 		private _id = _args select 5;
 		private _idState = missionNamespace getVariable [_id, "ACTIVE"];
 
-		if (_idState != "INACTIVE") then {
-			switch true do {
-				case (_idState == "ACTIVE"): {
+		if (_idState isNotEqualTo "INACTIVE") then {
+			switch _idState do {
+				case "ACTIVE": {
 					_args params ["_emitters", "_audio", "_condition", "_randomDelay", "_chance"];
 
 					{
@@ -56,7 +56,7 @@ private _id = [missionNamespace, "KH_var_3dAudio", "ACTIVE", false] call KH_fnc_
 					} forEach _emitters;
 				};
 
-				case (_idState == "TERMINATE"): {
+				case "TERMINATE": {
 					[_handle] call CBA_fnc_removePerFrameHandler;
 				};		
 			};

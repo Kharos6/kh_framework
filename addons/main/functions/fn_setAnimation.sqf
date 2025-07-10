@@ -34,8 +34,8 @@ if (_duration != -1) then {
 		};
 	};
 
-	switch true do {
-		case (_interruptType == "GROUP"): {
+	switch _interruptType do {
+		case "GROUP": {
 			_targetGroupHitHandler = [
 				["STANDARD", group _target, false],
 				"CombatModeChanged",
@@ -65,7 +65,7 @@ if (_duration != -1) then {
 			] call KH_fnc_addEventHandler;
 		};
 
-		case (_interruptType == "UNIT"): {
+		case "UNIT": {
 			_targetHitHandler = [
 				["STANDARD", _target, false],
 				"Dammaged",
@@ -87,7 +87,7 @@ if (_duration != -1) then {
 			] call KH_fnc_addEventHandler;
 		};
 
-		case (_interruptType == "NONE"): {
+		case "NONE": {
 			if !(isPlayer _unit) then {
 				[
 					[_unit],

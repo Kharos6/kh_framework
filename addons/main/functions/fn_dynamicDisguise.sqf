@@ -81,16 +81,16 @@ if _state then {
 						};
 						
 						if ((_uniformIndex == _headgearIndex) && (_uniformIndex == _vestIndex)) then {
-							switch true do {
-								case (_uniformIndex == 0): {
+							switch _uniformIndex do {
+								case 0: {
 									_currentSide = west;
 								};
 
-								case (_uniformIndex == 1): {
+								case 1: {
 									_currentSide = east;
 								};
 							
-								case (_uniformIndex == 2): {
+								case 2: {
 									_currentSide = resistance;
 								};
 							};

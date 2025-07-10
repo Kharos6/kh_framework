@@ -2,8 +2,8 @@ params [["_types", ["PLAYERS"]], ["_dead", true]];
 private _clients = [];
 
 {
-	switch true do {
-		case (_x isEqualType sideUnknown): {
+	switch (typeName _x) do {
+		case "SIDE": {
 			private _side = _x;
 
 			{
@@ -27,7 +27,7 @@ private _clients = [];
 			};
 		};
 
-		case (_x isEqualType grpNull): {
+		case "GROUP": {
 			private _group = _x;
 
 			{
@@ -51,9 +51,9 @@ private _clients = [];
 			};
 		};
 
-		case (_x isEqualType ""): {
-			switch true do {
-				case (_x == "CURATORS"): {
+		case "STRING": {
+			switch _x do {
+				case "CURATORS": {
 					{
 						private _curatorUnit = getAssignedCuratorUnit _x;
 
@@ -63,7 +63,7 @@ private _clients = [];
 					} forEach allCurators;
 				};
 
-				case (_x == "HEADLESS"): {
+				case "HEADLESS": {
 					{
 						if (isPlayer _x) then {
 							_clients pushBackUnique _x;
@@ -71,7 +71,7 @@ private _clients = [];
 					} forEach (entities [["HeadlessClient_F"], [], true, true]);
 				};
 
-				case (_x == "VIRTUAL_SPECTATORS"): {
+				case "VIRTUAL_SPECTATORS": {
 					{
 						if (isPlayer _x) then {
 							_clients pushBackUnique _x;
@@ -79,7 +79,7 @@ private _clients = [];
 					} forEach (entities [["VirtualSpectator_F"], [], true, true]);
 				};
 
-				case (_x == "ACE_SPECTATORS"): {
+				case "ACE_SPECTATORS": {
 					{
 						if (isPlayer _x) then {
 							_clients pushBackUnique _x;
@@ -87,7 +87,7 @@ private _clients = [];
 					} forEach (entities [["ace_spectator_virtual"], [], true, true]);
 				};
 
-				case (_x == "PLAYERS"): {
+				case "PLAYERS": {
 					{
 						if _dead then {
 							_clients pushBackUnique _x;
@@ -100,7 +100,7 @@ private _clients = [];
 					} forEach KH_var_allPlayerUnits;
 				};
 
-				case (_x == "ALL"): {
+				case "ALL": {
 					{
 						if (isPlayer _x) then {
 							_clients pushBackUnique _x;

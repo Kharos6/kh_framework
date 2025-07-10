@@ -132,7 +132,7 @@ class Mission
 					class KH_PlayerPreloadInit
 					{
 						displayName = "Player: Preload Init";
-						tooltip = "Unscheduled code to execute locally to each player that is present before the mission starts. The local player unit is not yet available. This stage will not trigger for players that join while the mission is considered to be in progress, which is after the <Players Loaded Init> stage. Other players may not yet be present, and their units are not yet available, so remote execution will only reliably work if <KH_fnc_execute> is used with <'JIP'>. Passed arguments available through <_this> are: <[_uid (STRING)]>.";
+						tooltip = "Unscheduled code to execute locally to each player that is present before the mission starts. The local player unit is not yet available. This stage will not trigger for players that join while the mission is considered to be in progress, which is after the <Players Loaded Init> stage. Other players may not yet be present, and their units are not yet available, so remote execution will only reliably work if <KH_fnc_execute> is used with <'JIP'>.";
 						property = "KH_PlayerPreloadInit";
 						control = "EditMulti5";
 						expression = 
@@ -234,7 +234,7 @@ class Mission
 					class KH_PlayerJIPPreloadInit
 					{
 						displayName = "Player: JIP Preload Init";
-						tooltip = "Unscheduled code to execute locally to each player that joins while the mission is considered to be in progress, which is after the <Players Loaded Init> stage. The local player unit is not yet available. Passed arguments available through <_this> are: <[_uid (STRING)]>.";
+						tooltip = "Unscheduled code to execute locally to each player that joins while the mission is considered to be in progress, which is after the <Players Loaded Init> stage. The local player unit is not yet available.";
 						property = "KH_PlayerJIPPreloadInit";
 						control = "EditMulti5";
 						expression = 
@@ -609,14 +609,14 @@ class Mission
 								};\
 								if _players then {\
 									private _respawnType = 'NONE';\
-									switch true do {\
-										case (_playerRespawnType == 1): {\
+									switch _playerRespawnType do {\
+										case 1: {\
 											_respawnType = 'SAVED';\
 										};\
-										case (_playerRespawnType == 2): {\
+										case 2: {\
 											_respawnType = 'INITIAL';\
 										};\
-										case (_playerRespawnType == 3): {\
+										case 3: {\
 											_respawnType = 'DEATH';\
 										};\
 									};\

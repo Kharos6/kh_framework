@@ -25,8 +25,8 @@ else {
 	_eventType = _type;
 };
 
-switch true do {
-	case (_eventType == "STANDARD"): {
+switch _eventType do {
+	case "STANDARD": {
 		if !(_type select 2) then {
 			_handler = (_type select 1) addEventHandler [_event, _expression];
 		}
@@ -84,19 +84,19 @@ switch true do {
 		};
 	};
 
-	case (_eventType == "MULTIPLAYER"): {
+	case "MULTIPLAYER": {
 		_handler = (_type select 1) addMPEventHandler [_event, _expression];
 	};
 
-	case (_eventType == "CONTROL"): {
+	case "CONTROL": {
 		_handler = (_type select 1) ctrlAddEventHandler [_event, _expression];
 	};
 
-	case (_eventType == "DISPLAY"): {
+	case "DISPLAY": {
 		_handler = (_type select 1) displayAddEventHandler [_event, _expression];
 	};
 
-	case (_eventType == "CLASS"): {
+	case "CLASS": {
 		[
 			_type select 1,
 			_event, 
@@ -111,7 +111,7 @@ switch true do {
 		] call CBA_fnc_addClassEventHandler;
 	};
 
-	case (_eventType == "PUBLIC_VARIABLE"): {
+	case "PUBLIC_VARIABLE": {
 		_handler = [missionNamespace, "KH_var_publicVariableEventHandler", true, false] call KH_fnc_atomicVariable;
 
 		_event addPublicVariableEventHandler (compile ([
@@ -121,19 +121,19 @@ switch true do {
 		] joinString ""));
 	};
 
-	case (_eventType == "MISSION"): {
+	case "MISSION": {
 		_handler = addMissionEventHandler [_event, _expression];
 	};
 
-	case (_eventType == "USER_ACTION"): {
+	case "USER_ACTION": {
 		_handler = addUserActionEventHandler [_event, _expression];
 	};
 
-	case (_eventType == "MUSIC"): {
+	case "MUSIC": {
 		_handler = addMusicEventHandler [_event, _expression];
 	};
 
-	case (_eventType == "CBA"): {
+	case "CBA": {
 		private _handlerStackId = format ["KH_var_cbaEventHandlerStackEvent%1", _event];
 
 		if !(_handlerStackId in KH_var_cbaEventHandlerStack) then {

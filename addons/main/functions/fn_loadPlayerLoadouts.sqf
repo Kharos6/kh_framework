@@ -44,8 +44,8 @@ if (isNil "KH_var_loadoutsSet") then {
 				private _initialLoadout = KH_var_initialPlayerLoadouts get _uid;
 				private _deathLoadout = KH_var_deathPlayerLoadouts get _uid;
 
-				switch true do {
-					case (KH_var_respawnLoadoutType == "INITIAL"): {
+				switch KH_var_respawnLoadoutType do {
+					case "INITIAL": {
 						if !(isNil "_initialLoadout") then {
 							_player setUnitLoadout _initialLoadout;
 						}
@@ -56,7 +56,7 @@ if (isNil "KH_var_loadoutsSet") then {
 						};
 					};
 
-					case (KH_var_respawnLoadoutType == "SAVED"): {
+					case "SAVED": {
 						if !(isNil "_loadout") then {
 							_player setUnitLoadout _loadout;
 						}
@@ -72,7 +72,7 @@ if (isNil "KH_var_loadoutsSet") then {
 						};
 					};
 
-					case (KH_var_respawnLoadoutType == "DEATH"): {
+					case "DEATH": {
 						if !(isNil "_deathLoadout") then {
 							_player setUnitLoadout _deathLoadout;
 						}

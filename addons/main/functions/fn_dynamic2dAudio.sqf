@@ -6,9 +6,9 @@ private _id = [missionNamespace, "KH_var_2dAudio", "ACTIVE", false] call KH_fnc_
 		private _id = _args select 3;
 		private _idState = missionNamespace getVariable [_id, "ACTIVE"];
 
-		if (_idState != "INACTIVE") then {
-			switch true do {
-				case (_idState == "ACTIVE"): {
+		if (_idState isNotEqualTo "INACTIVE") then {
+			switch _idState do {
+				case "ACTIVE": {
 					_args params ["_audio", "_condition", "_chance"];
 					
 					if ((random 1) <= _chance) then {
@@ -30,7 +30,7 @@ private _id = [missionNamespace, "KH_var_2dAudio", "ACTIVE", false] call KH_fnc_
 					};
 				};
 
-				case (_idState == "TERMINATE"): {
+				case "TERMINATE": {
 					[_handle] call CBA_fnc_removePerFrameHandler;
 				};		
 			};

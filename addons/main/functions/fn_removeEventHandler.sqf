@@ -7,40 +7,44 @@ if ((count _handler) > 2) then {
 			params ["_type", "_event", "_handlerId"];
 			_type params ["_eventType", "_target"];
 
-			switch true do {
-				case (_eventType == "STANDARD"): {
+			switch _eventType do {
+				case "STANDARD": {
 					_target removeEventHandler [_event, _handlerId];
 				};
 
-				case (_eventType == "MULTIPLAYER"): {
+				case "MULTIPLAYER": {
 					_target removeMPEventHandler [_event, _handlerId];
 				};
 
-				case (_eventType == "CONTROL"): {
+				case "CONTROL": {
 					_target ctrlRemoveEventHandler [_event, _handlerId];
 				};
 
-				case (_eventType == "DISPLAY"): {
+				case "DISPLAY": {
 					_target displayRemoveEventHandler [_event, _handlerId];
 				};
 
-				case ((_eventType == "PUBLIC_VARIABLE") || (_eventType == "CLASS")): {
+				case "PUBLIC_VARIABLE": {
 					missionNamespace setVariable [_handlerId, false];
 				};
 
-				case (_eventType == "MISSION"): {
+				case "CLASS": {
+					missionNamespace setVariable [_handlerId, false];
+				};
+
+				case "MISSION": {
 					removeMissionEventHandler [_event, _handlerId];
 				};
 
-				case (_eventType == "USER_ACTION"): {
+				case "USER_ACTION": {
 					removeUserActionEventHandler [_event, _handlerId];
 				};
 
-				case (_eventType == "MUSIC"): {
+				case "MUSIC": {
 					removeMusicEventHandler [_event, _handlerId];
 				};
 
-				case (_eventType == "CBA"): {
+				case "CBA": {
 					private _currentStack = missionNamespace getVariable [_event, []];
 					private _currentId = _handlerId select 1;
 					private _deletion = -1;

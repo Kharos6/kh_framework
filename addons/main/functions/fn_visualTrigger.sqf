@@ -16,9 +16,9 @@ private _entityVariable = [missionNamespace, "KH_var_visualTriggerEntityPrevious
 				private _id = _args select 4;
 				private _idState = missionNamespace getVariable [_id, "ACTIVE"];
 
-				if (_idState != "INACTIVE") then {
-					switch true do {
-						case (_idState == "ACTIVE"): {
+				if (_idState isNotEqualTo "INACTIVE") then {
+					switch _idState do {
+						case "ACTIVE": {
 							_args params ["_entity", "_distance", "_conditionPlayer", "_event"];
 
 							if ([_entity, ["PUBLIC_HANDLER", _id]] call _conditionPlayer) then {						
@@ -33,7 +33,7 @@ private _entityVariable = [missionNamespace, "KH_var_visualTriggerEntityPrevious
 							};
 						};
 
-						case (_idState == "TERMINATE"): {
+						case "TERMINATE": {
 							[_handle] call CBA_fnc_removePerFrameHandler;
 						};		
 					};
@@ -55,9 +55,9 @@ private _entityVariable = [missionNamespace, "KH_var_visualTriggerEntityPrevious
 		private _id = _args select 12;
 		private _idState = missionNamespace getVariable [_id, "ACTIVE"];
 		
-		if (_idState != "INACTIVE") then {
-			switch true do {
-				case (_idState == "ACTIVE"): {
+		if (_idState isNotEqualTo "INACTIVE") then {
+			switch _idState do {
+				case "ACTIVE": {
 					params ["_screenPos", "_currentPlayer"];
 					_args params ["_entity", "_screenMultiplier", "_proximity", "_conditionServer", "_trueFunction", "_falseFunction", "_repeatable", "_shared", "_firstTrigger", "_conditionVariable", "_playerVariable", "_entityVariable"];
 					
@@ -152,7 +152,7 @@ private _entityVariable = [missionNamespace, "KH_var_visualTriggerEntityPrevious
 					};
 				};
 
-				case (_idState == "TERMINATE"): {
+				case "TERMINATE": {
 					[_localId] call KH_fnc_removeEventHandler;
 				};		
 			};

@@ -296,11 +296,11 @@ class Object
 						_value params ['_toggle', '_animation', '_duration', '_interruptType'];\
 						if (_toggle && !is3DEN) then {\
 							private _selectedInterruptType = 'NONE';\
-							switch true do {\
-								case (_interruptable == 1): {\
+							switch _interruptable do {\
+								case 1: {\
 									_selectedInterruptType = 'UNIT';\
 								};\
-								case (_interruptable == 2): {\
+								case 2: {\
 									_selectedInterruptType = 'GROUP';\
 								};\
 							};\

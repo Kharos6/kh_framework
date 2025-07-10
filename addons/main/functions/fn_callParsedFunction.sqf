@@ -70,18 +70,18 @@ if (isNil "_storedFunction") then {
 		private _parsedFunction = missionNamespace getVariable [_function, {}];
 
 		if (_parsedFunction isEqualTo {}) then {
-			switch true do {
-				case ((count _arguments) == 0): {
+			switch (count _arguments) do {
+				case 0: {
 					[] call (compile ([_function] joinString ""));
 				};
 
-				case ((count _arguments) == 1): {
+				case 1: {
 					private _unaryArgument = [] call KH_fnc_generateUid;
 					missionNamespace setVariable [_unaryArgument, _arguments select 0];
 					[] call (compile ([_function, " (missionNamespace getVariable '", _unaryArgument, "');"] joinString ""));
 				};
 
-				case ((count _arguments) == 2): {
+				case 2: {
 					private _binaryArguments = [] call KH_fnc_generateUid;
 					missionNamespace setVariable [_binaryArguments, _arguments];
 					[] call (compile (["((missionNamespace getVariable '", _binaryArguments, "') select 0) ", _function, " ((missionNamespace getVariable '", _binaryArguments, "') select 1);"] joinString ""));

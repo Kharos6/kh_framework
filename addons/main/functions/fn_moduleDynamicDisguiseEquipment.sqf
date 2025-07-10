@@ -37,8 +37,8 @@ isNil {
 			} forEach _units;
 		};
 
-		switch true do {
-			case (_side == "BLUFOR"): {
+		switch _side do {
+			case "BLUFOR": {
 				private _uniformsArray = (KH_var_disguiseSideUniforms select 0);
 				_uniformsArray insert [-1, _uniforms, true];
 				KH_var_disguiseSideUniforms set [0, _uniformsArray];
@@ -50,7 +50,7 @@ isNil {
 				KH_var_disguiseSideHeadgear set [0, _headgearArray];
 			};
 
-			case (_side == "OPFOR"): {
+			case "OPFOR": {
 				private _uniformsArray = (KH_var_disguiseSideUniforms select 1);
 				_uniformsArray insert [-1, _uniforms, true];
 				KH_var_disguiseSideUniforms set [1, _uniformsArray];
@@ -62,7 +62,7 @@ isNil {
 				KH_var_disguiseSideHeadgear set [1, _headgearArray];
 			};
 
-			case (_side == "GREENFOR"): {
+			case "GREENFOR": {
 				private _uniformsArray = (KH_var_disguiseSideUniforms select 2);
 				_uniformsArray insert [-1, _uniforms, true];
 				KH_var_disguiseSideUniforms set [2, _uniformsArray];

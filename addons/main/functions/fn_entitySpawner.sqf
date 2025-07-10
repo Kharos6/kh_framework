@@ -17,9 +17,9 @@ private _entityHandler = [
 		private _id = _args select 10;
 		private _idState = missionNamespace getVariable [_id, "ACTIVE"];
 
-		if (_idState != "INACTIVE") then {
-			switch true do {
-				case (_idState == "ACTIVE"): {
+		if (_idState isNotEqualTo "INACTIVE") then {
+			switch _idState do {
+				case "ACTIVE": {
 					_args params ["_entityTypes", "_transforms", "_radiuseses", "_amount", "_maximum", "_condition", "_init", "_type", "_spawnerCount"];
 
 					if ((missionNamespace getVariable [_spawnerCount, 0]) <= _maximum) then {
@@ -28,8 +28,8 @@ private _entityHandler = [
 							private _entityType = _type select 0;
 							private _i = 1;
 
-							switch true do {
-								case (_entityType == "UNIT"): {
+							switch _entityType do {
+								case "UNIT": {
 									private _placementMode = _type select 1;
 									private _side = _type select 2;
 									private _shareGroup = _type select 3;
@@ -71,7 +71,7 @@ private _entityHandler = [
 									};
 								};
 
-								case (_entityType == "AGENT"): {
+								case "AGENT": {
 									private _placementMode = _type select 1;
 
 									for "_i" from 1 to _amount do {
@@ -102,7 +102,7 @@ private _entityHandler = [
 									};
 								};
 
-								case (_entityType == "OBJECT"): {
+								case "OBJECT": {
 									private _placementMode = _type select 1;
 									private _local = _type select 2;
 
@@ -142,7 +142,7 @@ private _entityHandler = [
 									};
 								};
 
-								case (_entityType == "SIMPLE_OBJECT"): {
+								case "SIMPLE_OBJECT": {
 									private _local = _type select 1;
 
 									for "_i" from 1 to _amount do {
@@ -173,7 +173,7 @@ private _entityHandler = [
 									};
 								};
 
-								case (_entityType == "VEHICLE"): {
+								case "VEHICLE": {
 									private _placementMode = _type select 1;
 
 									for "_i" from 1 to _amount do {
@@ -254,7 +254,7 @@ private _entityHandler = [
 					};
 				};
 
-				case (_idState == "TERMINATE"): {
+				case "TERMINATE": {
 					private _entityHandler = _args select 10;
 					[_entityHandler] call KH_fnc_removeEventHandler;
 					[_handle] call CBA_fnc_removePerFrameHandler;

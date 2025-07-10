@@ -6,11 +6,11 @@ private _id = [missionNamespace, "KH_var_dynamicSimulation", "ACTIVE", false] ca
 		private _id = _args select 2;
 		private _idState = missionNamespace getVariable [_id, "ACTIVE"];
 
-		if (idState != "INACTIVE") then {
+		if (idState isNotEqualTo "INACTIVE") then {
 			private _entities = _args select 1;
 
-			switch true do {
-				case (_idState == "ACTIVE"): {
+			switch _idState do {
+				case "ACTIVE": {
 					private _distance = _args select 0;
 					
 					{
@@ -40,7 +40,7 @@ private _id = [missionNamespace, "KH_var_dynamicSimulation", "ACTIVE", false] ca
 					} forEach _entities;
 				};
 
-				case (_idState == "TERMINATE"): {
+				case "TERMINATE": {
 					{
 						if !(simulationEnabled _x) then {
 							_x enableSimulationGlobal true;

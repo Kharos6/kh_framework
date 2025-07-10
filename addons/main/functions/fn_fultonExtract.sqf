@@ -343,8 +343,8 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 
 																if (!(CBA_missionTime >= _targetTime) && !((_unit distance _vehicle) < 30)) then {
 																	drawLine3D [
-																		_unit modelToWorld [0, 0, 0.5], 
-																		_vehicle modelToWorld [0, 0, 0], 
+																		_unit modelToWorldVisual [0, 0, 0.5], 
+																		_vehicle modelToWorldVisual [0, 0, 0], 
 																		[0.8, 0.6, 0.4, 1],
 																		15
 																	]

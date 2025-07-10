@@ -1,7 +1,7 @@
 params ["_entity", "_rotation", ["_relative", false]];
 
-switch true do {
-	case (_rotation isEqualType []): {
+switch (typeName _rotation) do {
+	case "ARRAY": {
 		private _aroundX = (360 - (_rotation select 0)) - 360;
 		private _aroundY = (360 - (_rotation select 1)) - 360;
 		private _aroundZ = (360 - (_rotation select 2)) - 360;
@@ -59,7 +59,7 @@ switch true do {
 		true;
 	};
 
-	case (_rotation isEqualType objNull): {
+	case "OBJECT": {
 		private _entityRotation = [_rotation, objNull] call KH_fnc_getRotation;
 		private _aroundX = (360 - (_entityRotation select 0)) - 360;
 		private _aroundY = (360 - (_entityRotation select 1)) - 360;

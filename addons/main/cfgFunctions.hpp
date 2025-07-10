@@ -16,6 +16,7 @@ class CfgFunctions
 			class assignTerminal {};
 			class atomicValue {};
 			class atomicVariable {};
+			class calculateKhDataSlices {};
 			class callback {};
 			class callParsedFunction {};
 			class cameraSequence {};		
@@ -24,6 +25,7 @@ class CfgFunctions
 			class contextMenu {};
 			class convertToAgent {};
 			class convertToSimpleObject {};
+			class dataCollection {};
 			class diagnostics {};
 			class displaySubtitle {};
 			class dynamic2dAudio {};
@@ -53,6 +55,8 @@ class CfgFunctions
 			class getTransforms {};
 			class getUnitAttributes {};
 			class getUnits {};
+			class getVariable {};
+			class intersectGrid {};
 			class limitViewDistance {};
 			class loadCargoInventories {};
 			class loadControlAttributes {};
@@ -85,6 +89,7 @@ class CfgFunctions
 			class openTerminal {};
 			class orbitObject {};
 			class parseFunction {};
+			class readKhData {};
 			class removeEventHandler {};
 			class recoverDisconnectedPlayers {};
 			class respawnSpectator {};
@@ -107,6 +112,7 @@ class CfgFunctions
 			class setSideRelations {};
 			class setTransforms {};
 			class setUnitAttributes {};
+			class setVariable {};
 			class setVideoTexture {};
 			class suspendMission {};
 			class teleport {};
@@ -114,6 +120,7 @@ class CfgFunctions
 			class vehicleSequence {};
 			class unconsciousSpectator {};
 			class visualTrigger {};
+			class writeKhData {};
 			class zeusModuleArma {};
 			class zeusModuleBreakDisguise {};
 			class zeusModuleClearStagedExecutions {};

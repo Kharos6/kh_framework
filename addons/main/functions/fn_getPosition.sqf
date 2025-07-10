@@ -1,7 +1,7 @@
 params ["_entity", ["_positionType", "AEL"], ["_relativePosition", []]];
 
-switch true do {
-	case (_positionType == "ATL"): {
+switch _positionType do {
+	case "ATL": {
 		if (_relativePosition isEqualTo []) then {
 			getPosATL _entity;
 		}
@@ -15,7 +15,7 @@ switch true do {
 		};
 	};
 
-	case (_positionType == "ASL"): {
+	case "ASL": {
 		if (_relativePosition isEqualTo []) then {
 			getPosASL _entity;
 		}
@@ -29,7 +29,7 @@ switch true do {
 		};
 	};
 
-	case (_positionType == "ASLW"): {
+	case "ASLW": {
 		if (_relativePosition isEqualTo []) then {
 			getPosASLW _entity;
 		}
@@ -43,7 +43,7 @@ switch true do {
 		};
 	};
 
-	case (_positionType == "AEL"): {
+	case "AEL": {
 		if (surfaceIsWater (getPosWorld _entity)) then {
 			if (_relativePosition isEqualTo []) then {
 				getPosASL _entity;
@@ -72,7 +72,7 @@ switch true do {
 		};
 	};
 
-	case (_positionType == "AGL"): {
+	case "AGL": {
 		if (surfaceIsWater (getPosWorld _entity)) then {
 			if (_relativePosition isEqualTo []) then {
 				getPosASLW _entity;
@@ -101,7 +101,7 @@ switch true do {
 		};
 	};
 
-	case (_positionType == "AGLS"): {
+	case "AGLS": {
 		if (_relativePosition isEqualTo []) then {
 			getPos _entity;
 		}
@@ -115,7 +115,7 @@ switch true do {
 		};
 	};
 
-	case (_positionType == "WORLD"): {
+	case "WORLD": {
 		if (_relativePosition isEqualTo []) then {
 			getPosWorld _entity;
 		}

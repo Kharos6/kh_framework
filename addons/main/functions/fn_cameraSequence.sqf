@@ -74,17 +74,17 @@ if (alive player) then {
 				_camera camSetFov (_fovs select _i);
 				_camera camCommit (_commitTimes select _i);
 
-				switch true do {
-					case (_visionType == -2): {
+				switch _visionType do {
+					case -2: {
 						camUseNVG true;
 					};
 
-					case (_visionType == -1): {
+					case -1: {
 						false setCamUseTI 0;
 						camUseNVG false;
 					};
 
-					case (_visionType >= 0): {
+					default {
 						true setCamUseTI _visionType;
 					};
 				};

@@ -1,3 +1,4 @@
+KH_var_player = objNull;
 KH_var_missionLoaded = false;
 KH_var_cachedFunctions = createHashMap;
 KH_var_postInitExecutions = [];
@@ -65,17 +66,29 @@ if isServer then {
 					publicVariable "KH_var_allPlayerUidMachines";
 					KH_var_allPlayerIdMachines insert [[_x getUserInfo 0, _machineId]];
 					publicVariable "KH_var_allPlayerIdMachines";
+
+					[
+						[_uid], 
+						{
+							params ["_uid"];
+							profileNamespace setVariable ["KH_var_steamId", _uid];
+							missionNamespace setVariable ["KH_var_steamId", _uid];
+						}, 
+						_machineId, 
+						"THIS_FRAME"
+					] call KH_fnc_execute;
+
 					break;
 				};
 			} forEach allUsers;
 			
 			if KH_var_playersLoaded then {
-				[[_uid], KH_fnc_playerJipPreloadInit, _machineId, "THIS_FRAME"] call KH_fnc_execute;
+				[[], KH_fnc_playerJipPreloadInit, _machineId, "THIS_FRAME"] call KH_fnc_execute;
 				KH_var_jipPlayerMachines pushBackUnique _machineId;
 				publicVariable "KH_var_jipPlayerMachines";
 			}
 			else {
-				[[_uid], KH_fnc_playerPreloadInit, _machineId, "THIS_FRAME"] call KH_fnc_execute;
+				[[], KH_fnc_playerPreloadInit, _machineId, "THIS_FRAME"] call KH_fnc_execute;
 			};
 
 			if ((admin _machineId) != 0) then {
@@ -391,7 +404,16 @@ if hasInterface then {
 	KH_var_contextMenuOpen = false;
 	KH_var_interactionMenuOpen = false;
 	["KH_eve_executionPlayer", KH_fnc_callParsedFunction] call CBA_fnc_addEventHandler;
-	
+
+	[
+		"unit", 
+		{
+			params ["_unit"];
+			KH_var_player = _unit;
+		},
+		true
+	] call CBA_fnc_addPlayerEventHandler;
+
 	addMissionEventHandler [
 		"PreloadFinished", 
 		{

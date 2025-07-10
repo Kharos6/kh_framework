@@ -75,7 +75,7 @@ if _state then {
 										[
 											"",
 											_color,
-											_unit modelToWorld [0, 0, 0],
+											_unit modelToWorldVisual [0, 0, 0],
 											1,
 											2,
 											0,
@@ -97,7 +97,7 @@ if _state then {
 										[
 											"",
 											[1, 1, 1, 0.9],
-											_unit modelToWorld [0, 0, 0],
+											_unit modelToWorldVisual [0, 0, 0],
 											1,
 											2,
 											0,

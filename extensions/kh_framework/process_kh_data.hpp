@@ -114,7 +114,49 @@ static inline int kh_find_variable(kh_variable_t* variables, int count, const ch
     return -1;
 }
 
-/* Read binary file and load all variables - improved error handling */
+/* Validate file integrity before reading */
+static int kh_validate_file_integrity(const char* file_path, long file_size) {
+    if (!file_path || file_size < 0) return 0;
+    
+    /* File must be at least large enough for header */
+    if (file_size < (long)sizeof(kh_file_header_t)) return 0;
+    
+    /* File shouldn't be larger than our maximum limit */
+    if (file_size > MAX_TOTAL_KHDATA_SIZE_BYTES) return 0;
+    
+    FILE* file;
+    kh_file_header_t header;
+    int result = 1;
+    
+    if (fopen_s(&file, file_path, "rb") != 0) return 0;
+    
+    /* Read header for basic validation */
+    if (fread(&header, sizeof(kh_file_header_t), 1, file) != 1) {
+        result = 0;
+    } else {
+        /* Validate magic number and version */
+        if (header.magic != KHDATA_MAGIC || header.version != KHDATA_VERSION) {
+            result = 0;
+        }
+        
+        /* Check if variable count is reasonable */
+        if (header.variable_count > 10000) {
+            result = 0;
+        }
+        
+        /* Rough estimate: each variable needs at least 12 bytes (3 lengths + some data) */
+        long minimum_required_size = (long)sizeof(kh_file_header_t) + 
+                                   (long)header.variable_count * 12;
+        if (file_size < minimum_required_size) {
+            result = 0;
+        }
+    }
+    
+    fclose(file);
+    return result;
+}
+
+/* Read binary file and load all variables - improved error handling and corruption detection */
 int kh_read_binary_file(const char* file_path, kh_variable_t** variables, int* count) {
     if (!file_path || !variables || !count) return 0;
     
@@ -124,9 +166,16 @@ int kh_read_binary_file(const char* file_path, kh_variable_t** variables, int* c
     unsigned int name_len, value_len, type_len;
     char* type_str = NULL;
     int success = 1;
+    long file_size, bytes_read = 0;
     
     *variables = NULL;
     *count = 0;
+    
+    /* Get file size and validate integrity first */
+    file_size = kh_get_file_size(file_path);
+    if (!kh_validate_file_integrity(file_path, file_size)) {
+        return 0;
+    }
     
     if (fopen_s(&file, file_path, "rb") != 0) {
         return 0;
@@ -137,6 +186,7 @@ int kh_read_binary_file(const char* file_path, kh_variable_t** variables, int* c
         fclose(file);
         return 0;
     }
+    bytes_read += sizeof(kh_file_header_t);
     
     if (header.magic != KHDATA_MAGIC || header.version != KHDATA_VERSION) {
         fclose(file);
@@ -161,10 +211,23 @@ int kh_read_binary_file(const char* file_path, kh_variable_t** variables, int* c
         return 0;
     }
     
-    /* Read variables */
+    /* Read variables with corruption detection */
     for (i = 0; i < (int)header.variable_count && success; i++) {
+        /* Check if we're about to read beyond file */
+        if (bytes_read + sizeof(unsigned int) > file_size) {
+            success = 0;
+            break;
+        }
+        
         /* Read name */
         if (fread(&name_len, sizeof(unsigned int), 1, file) != 1 || name_len > 1024) {
+            success = 0;
+            break;
+        }
+        bytes_read += sizeof(unsigned int);
+        
+        /* Check bounds for name data */
+        if (bytes_read + name_len > file_size) {
             success = 0;
             break;
         }
@@ -180,9 +243,23 @@ int kh_read_binary_file(const char* file_path, kh_variable_t** variables, int* c
             break;
         }
         (*variables)[i].name[name_len] = '\0';
+        bytes_read += name_len;
+        
+        /* Check bounds for type length */
+        if (bytes_read + sizeof(unsigned int) > file_size) {
+            success = 0;
+            break;
+        }
         
         /* Read type */
         if (fread(&type_len, sizeof(unsigned int), 1, file) != 1 || type_len >= 64) {
+            success = 0;
+            break;
+        }
+        bytes_read += sizeof(unsigned int);
+        
+        /* Check bounds for type data */
+        if (bytes_read + type_len > file_size) {
             success = 0;
             break;
         }
@@ -201,25 +278,43 @@ int kh_read_binary_file(const char* file_path, kh_variable_t** variables, int* c
         (*variables)[i].type = kh_get_type_from_string(type_str);
         free(type_str);
         type_str = NULL;
+        bytes_read += type_len;
+        
+        /* Check bounds for value length */
+        if (bytes_read + sizeof(unsigned int) > file_size) {
+            success = 0;
+            break;
+        }
         
         /* Read value */
         if (fread(&value_len, sizeof(unsigned int), 1, file) != 1 || value_len > MAX_TOTAL_KHDATA_SIZE_BYTES) {
             success = 0;
             break;
         }
-        
+        bytes_read += sizeof(unsigned int);
+
         (*variables)[i].value = (char*)malloc(value_len + 1);
         if (!(*variables)[i].value) {
             success = 0;
             break;
         }
-        
-        if (fread((*variables)[i].value, value_len, 1, file) != 1) {
-            success = 0;
-            break;
+
+        /* Only read value data if there is any */
+        if (value_len > 0) {
+            /* Check bounds for value data */
+            if (bytes_read + value_len > file_size) {
+                success = 0;
+                break;
+            }
+            
+            if (fread((*variables)[i].value, value_len, 1, file) != 1) {
+                success = 0;
+                break;
+            }
+            bytes_read += value_len;
         }
+
         (*variables)[i].value[value_len] = '\0';
-        
         (*count)++;
     }
     
@@ -288,10 +383,17 @@ static int kh_write_binary_file(const char* file_path, kh_variable_t* variables,
         
         /* Write value */
         value_len = (unsigned int)strlen(variables[i].value);
-        if (fwrite(&value_len, sizeof(unsigned int), 1, file) != 1 ||
-            fwrite(variables[i].value, value_len, 1, file) != 1) {
+        if (fwrite(&value_len, sizeof(unsigned int), 1, file) != 1) {
             success = 0;
             break;
+        }
+
+        /* Only write value data if there is any */
+        if (value_len > 0) {
+            if (fwrite(variables[i].value, value_len, 1, file) != 1) {
+                success = 0;
+                break;
+            }
         }
     }
     

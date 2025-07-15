@@ -9,9 +9,6 @@
 #include <ctype.h>
 #include <math.h>
 
-/* Constants */
-#define MAX_VECTOR_ARGS 4
-
 /* Data structures */
 typedef struct {
     double x, y, z;
@@ -328,70 +325,70 @@ static int kh_parse_vector3(const char* input, vector3_t* result) {
     if (!input || !result) return 0;
     
     const char* ptr = input;
-    double values[4]; /* Allocate space for 4 to detect over-parsing */
+    double values[3]; /* Only need space for the 3 we want */
     int value_count = 0;
     
     /* Skip whitespace and opening bracket */
     while (*ptr && (isspace(*ptr) || *ptr == '[')) ptr++;
     
-    /* Parse up to 4 numbers to detect if there are too many */
-    while (*ptr && value_count < 4) {
+    /* Parse all available numbers */
+    while (*ptr) {
         char* end_ptr;
-        values[value_count] = strtod(ptr, &end_ptr);
+        double value = strtod(ptr, &end_ptr);
         
         if (end_ptr == ptr) break; /* No number found */
         
+        /* Store only the first 3 values */
+        if (value_count < 3) {
+            values[value_count] = value;
+        }
         value_count++;
-        ptr = end_ptr;
         
+        ptr = end_ptr;
         /* Skip comma and whitespace */
         while (*ptr && (isspace(*ptr) || *ptr == ',')) ptr++;
     }
     
     /* Check for exactly 3 values */
     if (value_count == 3) {
-        /* Verify no more numbers exist */
-        while (*ptr && (isspace(*ptr) || *ptr == ',' || *ptr == ']')) ptr++;
-        if (*ptr != '\0') {
-            /* Check if there's another number */
-            char* end_ptr;
-            strtod(ptr, &end_ptr);
-            if (end_ptr != ptr) return 0; /* Found additional number */
-        }
-        
         result->x = values[0];
         result->y = values[1];
         result->z = values[2];
         return 1;
     }
     
-    return 0;
+    return 0; /* Wrong number of values */
 }
 
 static int kh_parse_quaternion(const char* input, quaternion_t* result) {
     if (!input || !result) return 0;
     
     const char* ptr = input;
-    double values[4];
+    double values[4]; /* Only need space for the 4 we want */
     int value_count = 0;
     
     /* Skip whitespace and opening bracket */
     while (*ptr && (isspace(*ptr) || *ptr == '[')) ptr++;
     
-    /* Parse up to 4 numbers */
-    while (*ptr && value_count < 4) {
+    /* Parse all available numbers */
+    while (*ptr) {
         char* end_ptr;
-        values[value_count] = strtod(ptr, &end_ptr);
+        double value = strtod(ptr, &end_ptr);
         
-        if (end_ptr == ptr) break;
+        if (end_ptr == ptr) break; /* No number found */
         
+        /* Store only the first 4 values */
+        if (value_count < 4) {
+            values[value_count] = value;
+        }
         value_count++;
-        ptr = end_ptr;
         
+        ptr = end_ptr;
         /* Skip comma and whitespace */
         while (*ptr && (isspace(*ptr) || *ptr == ',')) ptr++;
     }
     
+    /* Check for exactly 4 values */
     if (value_count == 4) {
         result->w = values[0];
         result->x = values[1];
@@ -400,33 +397,38 @@ static int kh_parse_quaternion(const char* input, quaternion_t* result) {
         return 1;
     }
     
-    return 0;
+    return 0; /* Wrong number of values */
 }
 
 static int kh_parse_euler(const char* input, euler_t* result) {
     if (!input || !result) return 0;
     
     const char* ptr = input;
-    double values[3];
+    double values[3]; /* Only need space for the 3 we want */
     int value_count = 0;
     
     /* Skip whitespace and opening bracket */
     while (*ptr && (isspace(*ptr) || *ptr == '[')) ptr++;
     
-    /* Parse up to 3 numbers */
-    while (*ptr && value_count < 3) {
+    /* Parse all available numbers */
+    while (*ptr) {
         char* end_ptr;
-        values[value_count] = strtod(ptr, &end_ptr);
+        double value = strtod(ptr, &end_ptr);
         
-        if (end_ptr == ptr) break;
+        if (end_ptr == ptr) break; /* No number found */
         
+        /* Store only the first 3 values */
+        if (value_count < 3) {
+            values[value_count] = value;
+        }
         value_count++;
-        ptr = end_ptr;
         
+        ptr = end_ptr;
         /* Skip comma and whitespace */
         while (*ptr && (isspace(*ptr) || *ptr == ',')) ptr++;
     }
     
+    /* Check for exactly 3 values */
     if (value_count == 3) {
         result->pitch = values[0];
         result->yaw = values[1];
@@ -434,7 +436,7 @@ static int kh_parse_euler(const char* input, euler_t* result) {
         return 1;
     }
     
-    return 0;
+    return 0; /* Wrong number of values */
 }
 
 static inline double kh_parse_scalar(const char* input) {

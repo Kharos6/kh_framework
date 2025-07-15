@@ -8,7 +8,7 @@ typedef struct kh_variable_s kh_variable_t;
 extern int kh_read_binary_file(const char* file_path, kh_variable_t** variables, int* count);
 extern void kh_free_variables(kh_variable_t* variables, int count);
 extern int kh_find_variable(kh_variable_t* variables, int count, const char* name);
-extern const char* kh_get_string_from_type(int type);
+extern const char* kh_get_string_from_type(kh_data_type_t type);
 
 /* Calculate the formatted size of a variable's output - optimized */
 static long kh_get_variable_formatted_size(const char* filename, const char* variable_name) {

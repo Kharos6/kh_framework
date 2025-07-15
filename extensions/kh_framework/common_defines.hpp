@@ -19,22 +19,18 @@
 #define KH_ERROR_PREFIX "KH_ERROR: "
 #define MATH_PI 3.141592653589793
 #define VECTOR_EPSILON 1e-9
-#define MAX_VECTOR_COMPONENTS 4
-#define MAX_EXPR_LENGTH 4096  /* Increased for dynamic allocation */
-#define MAX_TOKEN_LENGTH 128
-#define MAX_FUNCTION_NAME 64
 
 /* Forward declarations */
 typedef struct kh_variable_s kh_variable_t;
 
-/* Thread-safe random number generator state */
+/* Thread-local random number generator state */
 typedef struct {
     unsigned int seed;
     int initialized;
 } kh_rng_state_t;
 
-/* Global RNG state with thread safety */
-static kh_rng_state_t g_rng_state = {0, 0};
+/* Thread-local RNG state to avoid race conditions */
+static __declspec(thread) kh_rng_state_t tls_rng_state = {0, 0};
 
 /* Parse boolean string (removes quotes, case-insensitive) */
 static inline int kh_parse_boolean(const char* bool_str) {
@@ -157,19 +153,19 @@ static inline void kh_set_error(char* output, int output_size, const char* messa
 
 /* Thread-safe random number initialization */
 static inline void kh_init_random(void) {
-    if (!g_rng_state.initialized) {
-        g_rng_state.seed = (unsigned int)time(NULL) ^ (unsigned int)GetTickCount();
+    if (!tls_rng_state.initialized) {
+        tls_rng_state.seed = (unsigned int)time(NULL) ^ (unsigned int)GetTickCount() ^ (unsigned int)GetCurrentThreadId();
         /* Ensure seed is never zero */
-        if (g_rng_state.seed == 0) g_rng_state.seed = 1;
-        g_rng_state.initialized = 1;
+        if (tls_rng_state.seed == 0) tls_rng_state.seed = 1;
+        tls_rng_state.initialized = 1;
     }
 }
 
 /* Fast random number generator using LCG */
 static inline unsigned int kh_fast_rand(void) {
     kh_init_random();
-    g_rng_state.seed = g_rng_state.seed * 1103515245U + 12345U;
-    return g_rng_state.seed;
+    tls_rng_state.seed = tls_rng_state.seed * 1103515245U + 12345U;
+    return tls_rng_state.seed;
 }
 
 /* Get the user's Documents\Arma 3 folder path */

@@ -1,14 +1,18 @@
 #include <windows.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 
 /* Include all module headers in dependency order */
+#include "rv_extension_utils.hpp"
 #include "common_defines.hpp"
 #include "process_kh_data.hpp"
 #include "slice_data.hpp"
 #include "generate_random_string.hpp"
 #include "math_operations.hpp"
 #include "vector_operations.hpp"
+
+__declspec(dllexport) uint64_t RVExtensionFeatureFlags = RVFeature_ContextNoDefaultCall;
 
 /* Function name lookup table for performance optimization */
 typedef struct {
@@ -100,7 +104,7 @@ static inline int kh_validate_basic_inputs(char* output, int output_size, const 
 }
 
 /* Main extension function for ARMA 3 callExtension interface - enhanced */
-__declspec(dllexport) int RVExtensionArgs(char *output, int output_size, const char *function, const char **argv, int argc) {
+__declspec(dllexport) int RVExtensionArgs(char *output, unsigned int output_size, const char *function, const char **argv, unsigned int argc) {
     /* Enhanced input validation */
     if (!kh_validate_basic_inputs(output, output_size, function, argv, argc)) {
         return 1;
@@ -167,7 +171,7 @@ __declspec(dllexport) int RVExtensionArgs(char *output, int output_size, const c
 }
 
 /* Alternative entry point for simple string-based calls (optional) - enhanced */
-__declspec(dllexport) void RVExtension(char *output, int output_size, const char *function) {
+__declspec(dllexport) void RVExtension(char *output, unsigned int output_size, const char *function) {
     /* Enhanced validation for legacy interface */
     if (!output || output_size <= 0) {
         return; /* Cannot provide error feedback without valid output buffer */
@@ -181,6 +185,12 @@ __declspec(dllexport) void RVExtension(char *output, int output_size, const char
     /* Convert to RVExtensionArgs format with no arguments */
     const char* empty_argv[1] = {NULL};
     RVExtensionArgs(output, output_size, function, empty_argv, 0);
+}
+
+/* DLL Version Info */
+__declspec(dllexport) void RVExtensionVersion(char *output, unsigned int output_size) {
+    if (!output || output_size <= 0) return;
+    _snprintf_s(output, (size_t)output_size, _TRUNCATE, "KH Framework 1.0");
 }
 
 /* DLL entry point - required for Windows DLLs */

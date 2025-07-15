@@ -9,6 +9,8 @@
 /* Constants for expression parser */
 #define MAX_FUNCTION_ARGS 3
 #define INITIAL_TOKEN_SIZE 64  /* Initial size for dynamic token allocation */
+#define MAX_RECURSION_DEPTH 50 /* Maximum recursion depth to prevent stack overflow */
+#define MAX_PARSE_OPERATIONS 10000 /* Maximum operations to prevent infinite loops */
 
 /* Token types for expression parser */
 typedef enum {
@@ -48,6 +50,8 @@ typedef struct {
     token_t current_token;
     char* error_msg;
     int error_msg_capacity;
+    int recursion_depth;     /* Track recursion depth */
+    int operation_count;     /* Track number of operations */
 } parser_context_t;
 
 /* Safe mathematical function implementations */
@@ -157,6 +161,23 @@ static const math_function_t KH_ALLOWED_MATH_FUNCTIONS[] = {
 
 static const int KH_MATH_FUNCTION_COUNT = sizeof(KH_ALLOWED_MATH_FUNCTIONS) / sizeof(math_function_t);
 
+/* Check safety limits to prevent crashes */
+static inline int kh_check_parser_limits(parser_context_t* ctx) {
+    if (!ctx) return 0;
+    
+    if (ctx->recursion_depth >= MAX_RECURSION_DEPTH) {
+        kh_set_parser_error(ctx, "MAXIMUM RECURSION DEPTH EXCEEDED");
+        return 0;
+    }
+    
+    if (ctx->operation_count >= MAX_PARSE_OPERATIONS) {
+        kh_set_parser_error(ctx, "MAXIMUM OPERATIONS EXCEEDED");
+        return 0;
+    }
+    
+    return 1;
+}
+
 /* Initialize token with dynamic allocation */
 static inline int kh_init_token(token_t* token) {
     if (!token) return 0;
@@ -239,6 +260,8 @@ static inline int kh_init_parser_context(parser_context_t* ctx, const char* expr
     ctx->length = (int)strlen(expr);
     ctx->error_msg_capacity = 512;
     ctx->error_msg = (char*)malloc((size_t)ctx->error_msg_capacity);
+    ctx->recursion_depth = 0;
+    ctx->operation_count = 0;
     
     if (!ctx->error_msg) return 0;
     
@@ -447,6 +470,14 @@ static inline const math_function_t* kh_find_math_function(const char* name) {
 static void kh_get_next_token(parser_context_t* ctx) {
     if (!ctx || !ctx->current_token.value) return;
     
+    /* Check limits before proceeding */
+    if (!kh_check_parser_limits(ctx)) {
+        ctx->current_token.type = TOKEN_ERROR;
+        return;
+    }
+    
+    ctx->operation_count++;
+    
     kh_skip_whitespace(ctx);
     
     if (ctx->pos >= ctx->length) {
@@ -566,6 +597,8 @@ static double kh_parse_function_call(parser_context_t* ctx, const char* func_nam
 static double kh_parse_function_call(parser_context_t* ctx, const char* func_name) {
     if (!ctx || !func_name) return 0.0;
     
+    if (!kh_check_parser_limits(ctx)) return 0.0;
+    
     const math_function_t* func = kh_find_math_function(func_name);
     double* args = NULL;
     int arg_count = 0;
@@ -639,6 +672,8 @@ static double kh_parse_function_call(parser_context_t* ctx, const char* func_nam
 static double kh_parse_primary(parser_context_t* ctx) {
     if (!ctx) return 0.0;
     
+    if (!kh_check_parser_limits(ctx)) return 0.0;
+    
     if (ctx->current_token.type == TOKEN_NUMBER) {
         double value = ctx->current_token.number;
         kh_get_next_token(ctx);
@@ -680,26 +715,39 @@ static double kh_parse_primary(parser_context_t* ctx) {
 static double kh_parse_unary(parser_context_t* ctx) {
     if (!ctx) return 0.0;
     
+    if (!kh_check_parser_limits(ctx)) return 0.0;
+    ctx->recursion_depth++;
+    
+    double result = 0.0;
+    
     if (ctx->current_token.type == TOKEN_OPERATOR) {
         if (strcmp(ctx->current_token.value, "-") == 0) {
             kh_get_next_token(ctx);
-            return -kh_parse_unary(ctx);
+            result = -kh_parse_unary(ctx);
         } else if (strcmp(ctx->current_token.value, "+") == 0) {
             kh_get_next_token(ctx);
-            return kh_parse_unary(ctx);
+            result = kh_parse_unary(ctx);
         } else if (strcmp(ctx->current_token.value, "!") == 0) {
             kh_get_next_token(ctx);
             double value = kh_parse_unary(ctx);
-            return (value == 0.0) ? 1.0 : 0.0;
+            result = (value == 0.0) ? 1.0 : 0.0;
+        } else {
+            result = kh_parse_primary(ctx);
         }
+    } else {
+        result = kh_parse_primary(ctx);
     }
     
-    return kh_parse_primary(ctx);
+    ctx->recursion_depth--;
+    return result;
 }
 
 /* Parse multiplicative expressions (*, /, %) */
 static double kh_parse_multiplicative(parser_context_t* ctx) {
     if (!ctx) return 0.0;
+    
+    if (!kh_check_parser_limits(ctx)) return 0.0;
+    ctx->recursion_depth++;
     
     double left = kh_parse_unary(ctx);
     
@@ -714,6 +762,7 @@ static double kh_parse_multiplicative(parser_context_t* ctx) {
             double right = kh_parse_unary(ctx);
             if (right == 0.0) {
                 _snprintf_s(ctx->error_msg, 512, _TRUNCATE, "DIVISION BY ZERO");
+                ctx->recursion_depth--;
                 return 0.0;
             }
             left /= right;
@@ -722,6 +771,7 @@ static double kh_parse_multiplicative(parser_context_t* ctx) {
             double right = kh_parse_unary(ctx);
             if (right == 0.0) {
                 _snprintf_s(ctx->error_msg, 512, _TRUNCATE, "MODULO BY ZERO");
+                ctx->recursion_depth--;
                 return 0.0;
             }
             left = fmod(left, right);
@@ -730,12 +780,16 @@ static double kh_parse_multiplicative(parser_context_t* ctx) {
         }
     }
     
+    ctx->recursion_depth--;
     return left;
 }
 
 /* Parse additive expressions (+, -) */
 static double kh_parse_additive(parser_context_t* ctx) {
     if (!ctx) return 0.0;
+    
+    if (!kh_check_parser_limits(ctx)) return 0.0;
+    ctx->recursion_depth++;
     
     double left = kh_parse_multiplicative(ctx);
     
@@ -753,12 +807,16 @@ static double kh_parse_additive(parser_context_t* ctx) {
         }
     }
     
+    ctx->recursion_depth--;
     return left;
 }
 
 /* Parse relational expressions (<, >, <=, >=) */
 static double kh_parse_relational(parser_context_t* ctx) {
     if (!ctx) return 0.0;
+    
+    if (!kh_check_parser_limits(ctx)) return 0.0;
+    ctx->recursion_depth++;
     
     double left = kh_parse_additive(ctx);
     
@@ -780,12 +838,16 @@ static double kh_parse_relational(parser_context_t* ctx) {
         }
     }
     
+    ctx->recursion_depth--;
     return left;
 }
 
 /* Parse equality expressions (==, !=) */
 static double kh_parse_equality(parser_context_t* ctx) {
     if (!ctx) return 0.0;
+    
+    if (!kh_check_parser_limits(ctx)) return 0.0;
+    ctx->recursion_depth++;
     
     double left = kh_parse_relational(ctx);
     
@@ -803,12 +865,16 @@ static double kh_parse_equality(parser_context_t* ctx) {
         }
     }
     
+    ctx->recursion_depth--;
     return left;
 }
 
 /* Parse logical AND expressions (&&) */
 static double kh_parse_logical_and(parser_context_t* ctx) {
     if (!ctx) return 0.0;
+    
+    if (!kh_check_parser_limits(ctx)) return 0.0;
+    ctx->recursion_depth++;
     
     double left = kh_parse_equality(ctx);
     
@@ -819,12 +885,16 @@ static double kh_parse_logical_and(parser_context_t* ctx) {
         left = (left != 0.0 && right != 0.0) ? 1.0 : 0.0;
     }
     
+    ctx->recursion_depth--;
     return left;
 }
 
 /* Parse logical OR expressions (||) */
 static double kh_parse_logical_or(parser_context_t* ctx) {
     if (!ctx) return 0.0;
+    
+    if (!kh_check_parser_limits(ctx)) return 0.0;
+    ctx->recursion_depth++;
     
     double left = kh_parse_logical_and(ctx);
     
@@ -835,6 +905,7 @@ static double kh_parse_logical_or(parser_context_t* ctx) {
         left = (left != 0.0 || right != 0.0) ? 1.0 : 0.0;
     }
     
+    ctx->recursion_depth--;
     return left;
 }
 

@@ -1,5 +1,5 @@
 @echo off
-echo Building 64-bit kh_framework DLL...
+echo Building 64-bit kh_framework DLL (Cleaned Version)...
 
 REM Setup Visual Studio 2019 x64 Native Tools environment
 echo Setting up Visual Studio 2019 x64 environment...
@@ -74,34 +74,44 @@ exit /b 1
 echo Visual Studio environment configured successfully.
 echo.
 
+REM Create output directory if it doesn't exist
+echo Creating output directory...
+if not exist "output_x64" mkdir output_x64
+
 REM Clean up previous build artifacts
 echo Cleaning previous build files...
-if exist kh_framework_x64.dll del kh_framework_x64.dll
-if exist *.obj del *.obj
-if exist *.lib del *.lib
-if exist *.exp del *.exp
-if exist *.pdb del *.pdb
+if exist output_x64\kh_framework_x64.dll del output_x64\kh_framework_x64.dll
+if exist output_x64\*.obj del output_x64\*.obj
+if exist output_x64\*.lib del output_x64\*.lib
+if exist output_x64\*.exp del output_x64\*.exp
+if exist output_x64\*.pdb del output_x64\*.pdb
 
-REM Build the DLL
-echo Compiling kh_framework_x64.dll...
-cl /LD /O2 /Ox /Ot /GL /MT /TC kh_framework.cpp /Fe:kh_framework_x64.dll /link /MACHINE:X64 /OPT:REF /OPT:ICF /LTCG shell32.lib ole32.lib user32.lib advapi32.lib
+REM Build the DLL with all output going to the output directory
+echo Compiling kh_framework_x64.dll (Cleaned Version)...
+cl /LD /O2 /Ox /Ot /GL /MT /TC kh_framework.cpp ^
+   /Fe:output_x64\kh_framework_x64.dll ^
+   /Fo:output_x64\ ^
+   /Fd:output_x64\kh_framework_x64.pdb ^
+   /link /MACHINE:X64 /OPT:REF /OPT:ICF /LTCG ^
+   /IMPLIB:output_x64\kh_framework_x64.lib ^
+   shell32.lib ole32.lib user32.lib advapi32.lib
 
 REM Check if build was successful
-if exist kh_framework_x64.dll (
+if exist output_x64\kh_framework_x64.dll (
     echo.
     echo ================================
     echo BUILD SUCCESS!
     echo ================================
-    dir kh_framework_x64.dll | find "kh_framework_x64.dll"
+    dir output_x64\kh_framework_x64.dll | find "kh_framework_x64.dll"
     echo.
-    echo DLL built successfully and ready for use in Arma 3.
+    echo Cleaned KH Framework DLL built successfully!
+    echo Output location: output_x64\kh_framework_x64.dll
 ) else (
     echo.
     echo ================================
     echo BUILD FAILED!
     echo ================================
     echo Check the compiler output above for errors.
-    echo Make sure all .hpp files are in the same directory.
 )
 
 echo.

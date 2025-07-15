@@ -1,3 +1,7 @@
 *.exe
+*.dll
+*.lib
+*.obj
+*.exp
 .hemttout
 releases/

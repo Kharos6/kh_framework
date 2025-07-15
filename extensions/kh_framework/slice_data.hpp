@@ -1,103 +1,116 @@
 #ifndef SLICE_DATA_HPP
 #define SLICE_DATA_HPP
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include "common_defines.hpp"
 
-#define SLICE_SIZE 8192  /* 8KB per slice to stay under Arma's byte limit */
+/* Forward declaration to avoid circular dependency */
+typedef struct kh_variable_s kh_variable_t;
+extern int kh_read_binary_file(const char* file_path, kh_variable_t** variables, int* count);
+extern void kh_free_variables(kh_variable_t* variables, int count);
+extern int kh_find_variable(kh_variable_t* variables, int count, const char* name);
+extern const char* kh_get_string_from_type(int type);
 
-/* Get the total size of a variable's formatted output */
-static long get_variable_formatted_size(const char* filename, const char* variable_name) {
-    char file_path[1024];
-    char* clean_var_name;
-    char* clean_filename;
+/* Calculate the formatted size of a variable's output - optimized */
+static long kh_get_variable_formatted_size(const char* filename, const char* variable_name) {
+    if (!filename || !variable_name) return -1;
+    
+    char file_path[MAX_PATH_LENGTH];
+    char* clean_var_name = NULL;
+    char* clean_filename = NULL;
     kh_variable_t* variables = NULL;
     int variable_count = 0;
     int var_index;
-    int i;
     long total_size = 0;
     
-    /* Get full file path */
-    if (!get_khdata_file_path(filename, file_path, sizeof(file_path))) {
-        return -1;
-    }
-    
-    /* Clean variable name and filename for comparison */
+    /* Allocate memory for cleaned strings */
     clean_var_name = (char*)malloc(strlen(variable_name) + 1);
     clean_filename = (char*)malloc(strlen(filename) + 1);
+    
     if (!clean_var_name || !clean_filename) {
-        if (clean_var_name) free(clean_var_name);
-        if (clean_filename) free(clean_filename);
+        free(clean_var_name);
+        free(clean_filename);
         return -1;
     }
     
-    clean_variable_name(variable_name, clean_var_name, strlen(variable_name) + 1);
-    clean_variable_name(filename, clean_filename, strlen(filename) + 1);
-    
-    /* Read binary file */
-    if (!read_binary_file(file_path, &variables, &variable_count)) {
+    if (!kh_get_khdata_file_path(filename, file_path, sizeof(file_path))) {
         free(clean_var_name);
         free(clean_filename);
-        return -1; /* File not found or corrupted */
+        return -1;
     }
     
-    /* Check if variable name equals filename (special case: return size of all variable names array) */
-    if (strcasecmp_custom(clean_var_name, clean_filename) == 0) {
-        /* Calculate size of variable names array */
-        total_size = 2; /* For opening and closing brackets */
-        
-        for (i = 0; i < variable_count; i++) {
-            if (i > 0) {
-                total_size += 2; /* For ", " */
-            }
-            total_size += strlen(variables[i].name) + 2; /* For quotes around name */
-        }
-        
-        free_variables(variables, variable_count);
+    kh_clean_string(variable_name, clean_var_name, (int)strlen(variable_name) + 1);
+    kh_clean_string(filename, clean_filename, (int)strlen(filename) + 1);
+    
+    if (!kh_read_binary_file(file_path, &variables, &variable_count)) {
         free(clean_var_name);
         free(clean_filename);
+        return -1;
+    }
+    
+    /* Special case: variable name equals filename (return size of all variable names array) */
+    if (kh_strcasecmp(clean_var_name, clean_filename) == 0) {
+        total_size = 2; /* Opening and closing brackets */
+        
+        for (int i = 0; i < variable_count; i++) {
+            if (i > 0) {
+                total_size += 2; /* ", " separator */
+            }
+            if (variables[i].name) {
+                total_size += (long)strlen(variables[i].name) + 2; /* Name with quotes */
+            }
+        }
+        
+        free(clean_var_name);
+        free(clean_filename);
+        kh_free_variables(variables, variable_count);
         return total_size;
     }
     
-    /* Find the specific variable */
-    var_index = find_variable(variables, variable_count, clean_var_name);
+    /* Find specific variable using external function to avoid code duplication */
+    var_index = kh_find_variable(variables, variable_count, clean_var_name);
     if (var_index == -1) {
-        free_variables(variables, variable_count);
         free(clean_var_name);
         free(clean_filename);
-        return -1; /* Variable not found */
+        kh_free_variables(variables, variable_count);
+        return -1;
     }
     
     /* Calculate size of formatted output ["TYPE", value] */
-    const char* type_str = get_string_from_type(variables[var_index].type);
-    total_size = strlen(type_str) + strlen(variables[var_index].value) + 6; /* ["", ] */
+    const char* type_str = kh_get_string_from_type(variables[var_index].type);
+    if (type_str && variables[var_index].value) {
+        total_size = (long)strlen(type_str) + (long)strlen(variables[var_index].value) + 6; /* ["", ] formatting */
+    }
     
-    free_variables(variables, variable_count);
     free(clean_var_name);
     free(clean_filename);
+    kh_free_variables(variables, variable_count);
     return total_size;
 }
 
-/* Calculate how many slices a variable would need */
-static int calculate_slice_count(const char* filename, const char* variable_name, char* output, int output_size) {
-    long data_size = get_variable_formatted_size(filename, variable_name);
-    int slice_count;
+/* Calculate how many slices a variable would need - optimized */
+static int kh_calculate_slice_count(const char* filename, const char* variable_name, char* output, int output_size) {
+    /* Validate inputs */
+    if (!kh_validate_non_empty_string(filename, "FILENAME", output, output_size) ||
+        !kh_validate_non_empty_string(variable_name, "VARIABLE NAME", output, output_size)) {
+        return 1;
+    }
+    
+    long data_size = kh_get_variable_formatted_size(filename, variable_name);
     
     if (data_size < 0) {
-        strcpy_s(output, output_size, "KH_ERROR: VARIABLE NOT FOUND");
+        kh_set_error(output, output_size, "VARIABLE NOT FOUND");
         return 1;
     }
     
     if (data_size == 0) {
-        strcpy_s(output, output_size, "1"); /* Empty data still needs 1 slice */
+        strcpy_s(output, (size_t)output_size, "1"); /* Empty data still needs 1 slice */
         return 0;
     }
     
-    /* Calculate number of slices needed */
-    slice_count = (int)((data_size + SLICE_SIZE - 1) / SLICE_SIZE); /* Ceiling division */
+    /* Calculate number of slices needed (ceiling division) */
+    int slice_count = (int)((data_size + SLICE_SIZE - 1) / SLICE_SIZE);
     
-    sprintf_s(output, output_size, "%d", slice_count);
+    _snprintf_s(output, (size_t)output_size, _TRUNCATE, "%d", slice_count);
     return 0;
 }
 

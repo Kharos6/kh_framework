@@ -1,76 +1,39 @@
 #ifndef GENERATE_RANDOM_STRING_HPP
 #define GENERATE_RANDOM_STRING_HPP
 
-#include <time.h>
+#include "common_defines.hpp"
 
-/* Character sets */
-static const char NUMBERS[] = "0123456789";
-static const char LETTERS[] = "abcdefghijklmnopqrstuvwxyz";
-static const char SYMBOLS[] = "!@#$%^&*()_+-=[]{}|;:,.<>?/~`\\";
+/* Character sets for random string generation */
+static const char KH_CHARSET_NUMBERS[] = "0123456789";
+static const char KH_CHARSET_LETTERS[] = "abcdefghijklmnopqrstuvwxyz";
+static const char KH_CHARSET_SYMBOLS[] = "!@#$%^&*()_+-=[]{}|;:,.<>?/~`\\";
 
-/* (LCG - Linear Congruential Generator) */
-static unsigned int rng_seed = 0;
+/* Character set information structure for better performance */
+typedef struct {
+    const char* charset;
+    int length;
+} charset_info_t;
 
-/* Initialize seed once */
-static void init_random(void) {
-    if (rng_seed == 0) {
-        rng_seed = (unsigned int)time(NULL) ^ (unsigned int)GetTickCount();
-    }
-}
+static const charset_info_t KH_CHARSET_INFO[] = {
+    {KH_CHARSET_NUMBERS, sizeof(KH_CHARSET_NUMBERS) - 1},
+    {KH_CHARSET_LETTERS, sizeof(KH_CHARSET_LETTERS) - 1},
+    {KH_CHARSET_SYMBOLS, sizeof(KH_CHARSET_SYMBOLS) - 1}
+};
 
-/* Fast random number generator */
-static inline unsigned int fast_rand(void) {
-    rng_seed = rng_seed * 1103515245 + 12345;
-    return rng_seed;
-}
-
-/* Helper function to compare strings, ignoring surrounding quotes */
-static int string_equals_ignore_quotes(const char* str1, const char* str2) {
-    const char* start = str1;
-    const char* end = str1 + strlen(str1) - 1;
+/* Build character set based on boolean flags [numbers, letters, symbols] - optimized */
+static int kh_build_charset(char** charset, const char **argv, int argc) {
+    if (!charset || !argv) return 0;
     
-    /* Skip opening quote if present */
-    if (*start == '"') {
-        start++;
-    }
-    
-    /* Skip closing quote if present */
-    if (end >= start && *end == '"') {
-        end--;
-    }
-    
-    /* Calculate length without quotes */
-    int len = (int)(end - start + 1);
-    int str2_len = strlen(str2);
-    
-    /* Compare lengths first */
-    if (len != str2_len) {
-        return 0;
-    }
-    
-    /* Compare strings */
-    return strncmp(start, str2, len) == 0;
-}
-
-/* Build character set based on type arguments */
-static int build_charset(char** charset, const char **argv, int argc, int start_index) {
-    int charset_len = 0;
-    int i, j;
     int include_numbers = 0;
     int include_letters = 0;
     int include_symbols = 0;
-    int total_size;
+    int total_size = 0;
+    int charset_len = 0;
     
-    /* Check what types are requested */
-    for (i = start_index; i < argc; i++) {
-        if (string_equals_ignore_quotes(argv[i], "NUMBERS")) {
-            include_numbers = 1;
-        } else if (string_equals_ignore_quotes(argv[i], "LETTERS")) {
-            include_letters = 1;
-        } else if (string_equals_ignore_quotes(argv[i], "SYMBOLS")) {
-            include_symbols = 1;
-        }
-    }
+    /* Parse boolean flags from arguments */
+    if (argc >= 2) include_numbers = kh_parse_boolean(argv[1]);
+    if (argc >= 3) include_letters = kh_parse_boolean(argv[2]);
+    if (argc >= 4) include_symbols = kh_parse_boolean(argv[3]);
     
     /* If no types specified, default to numbers and letters */
     if (!include_numbers && !include_letters && !include_symbols) {
@@ -78,95 +41,110 @@ static int build_charset(char** charset, const char **argv, int argc, int start_
         include_letters = 1;
     }
     
-    /* Calculate total size needed */
-    total_size = 0;
-    if (include_numbers) total_size += strlen(NUMBERS);
-    if (include_letters) total_size += strlen(LETTERS);
-    if (include_symbols) total_size += strlen(SYMBOLS);
+    /* Calculate total size needed using pre-calculated lengths */
+    if (include_numbers) total_size += KH_CHARSET_INFO[0].length;
+    if (include_letters) total_size += KH_CHARSET_INFO[1].length;
+    if (include_symbols) total_size += KH_CHARSET_INFO[2].length;
+    
+    if (total_size == 0) return 0;
     
     /* Allocate charset buffer */
-    *charset = (char*)malloc(total_size + 1);
+    *charset = (char*)malloc((size_t)total_size + 1);
     if (!*charset) {
-        return 0; /* Memory allocation failed */
+        return 0;
     }
     
-    /* Build the character set */
-    charset_len = 0;
+    /* Build the character set efficiently using memcpy */
     if (include_numbers) {
-        for (j = 0; NUMBERS[j] != '\0'; j++) {
-            (*charset)[charset_len++] = NUMBERS[j];
-        }
+        memcpy(*charset + charset_len, KH_CHARSET_INFO[0].charset, KH_CHARSET_INFO[0].length);
+        charset_len += KH_CHARSET_INFO[0].length;
     }
     
     if (include_letters) {
-        for (j = 0; LETTERS[j] != '\0'; j++) {
-            (*charset)[charset_len++] = LETTERS[j];
-        }
+        memcpy(*charset + charset_len, KH_CHARSET_INFO[1].charset, KH_CHARSET_INFO[1].length);
+        charset_len += KH_CHARSET_INFO[1].length;
     }
     
     if (include_symbols) {
-        for (j = 0; SYMBOLS[j] != '\0'; j++) {
-            (*charset)[charset_len++] = SYMBOLS[j];
-        }
+        memcpy(*charset + charset_len, KH_CHARSET_INFO[2].charset, KH_CHARSET_INFO[2].length);
+        charset_len += KH_CHARSET_INFO[2].length;
     }
     
     (*charset)[charset_len] = '\0';
     return charset_len;
 }
 
-/* Function to generate random string with custom charset */
-static void generate_string(char* buffer, int length, const char* charset, int charset_size) {
+/* Generate random string using specified character set - optimized */
+static inline void kh_generate_random_string(char* buffer, int length, const char* charset, int charset_size) {
+    if (!buffer || length <= 0 || !charset || charset_size <= 0) return;
+    
     int i;
     for (i = 0; i < length; i++) {
-        buffer[i] = charset[fast_rand() % charset_size];
+        buffer[i] = charset[kh_fast_rand() % charset_size];
     }
+    buffer[length] = '\0';
 }
 
-/* Process random string generation request */
-static int process_random_string_generation(char *output, int outputSize, const char **argv, int argc) {
-    int length;
-    char* charset;
-    int charset_size;
-    
-    init_random();
-    
-    if (argc < 1) {
-        strcpy_s(output, outputSize, "KH_ERROR: NO ARGUMENTS");
+/* Process random string generation request - enhanced error handling */
+static int kh_process_random_string_generation(char *output, int output_size, const char **argv, int argc) {
+    if (!output || output_size <= 0 || !argv || argc < 1) {
+        if (output && output_size > 0) {
+            kh_set_error(output, output_size, "INVALID PARAMETERS");
+        }
         return 1;
     }
     
+    int length;
+    char* charset = NULL;
+    int charset_size;
+    int result = 1;
+    
+    kh_init_random();
+
     length = atoi(argv[0]);
     
     if (length <= 0) {
-        strcpy_s(output, outputSize, "KH_ERROR: INVALID LENGTH");
+        kh_set_error(output, output_size, "INVALID LENGTH - MUST BE POSITIVE INTEGER");
+        return 1;
+    }
+
+    if (length > SLICE_SIZE) {
+        kh_set_error(output, output_size, "LENGTH TOO LARGE FOR OUTPUT BUFFER");
         return 1;
     }
     
-    if (length >= outputSize) {
-        strcpy_s(output, outputSize, "KH_ERROR: LENGTH TOO LARGE");
+    /* Check if output buffer can hold the result */
+    if (length >= output_size) {
+        kh_set_error(output, output_size, "OUTPUT BUFFER TOO SMALL");
         return 1;
     }
     
-    /* Build character set based on type arguments */
-    charset_size = build_charset(&charset, argv, argc, 1);
+    /* Build character set based on boolean flags */
+    charset_size = kh_build_charset(&charset, argv, argc);
     
-    /* If no character types specified, use default */
-    if (charset_size == 0) {
-        charset = (char*)malloc(strlen(NUMBERS) + strlen(LETTERS) + 1);
+    /* Fallback to default charset if build failed */
+    if (charset_size == 0 || !charset) {
+        const int numbers_len = KH_CHARSET_INFO[0].length;
+        const int letters_len = KH_CHARSET_INFO[1].length;
+        
+        charset = (char*)malloc((size_t)(numbers_len + letters_len + 1));
         if (!charset) {
-            strcpy_s(output, outputSize, "KH_ERROR: MEMORY ALLOCATION FAILED");
+            kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
             return 1;
         }
-        strcpy_s(charset, strlen(NUMBERS) + strlen(LETTERS) + 1, NUMBERS);
-        strcat_s(charset, strlen(NUMBERS) + strlen(LETTERS) + 1, LETTERS);
-        charset_size = strlen(charset);
+        
+        memcpy(charset, KH_CHARSET_INFO[0].charset, numbers_len);
+        memcpy(charset + numbers_len, KH_CHARSET_INFO[1].charset, letters_len);
+        charset_size = numbers_len + letters_len;
+        charset[charset_size] = '\0';
     }
     
-    generate_string(output, length, charset, charset_size);
-    output[length] = '\0';
+    /* Generate the random string */
+    kh_generate_random_string(output, length, charset, charset_size);
+    result = 0;
     
     free(charset);
-    return 0;
+    return result;
 }
 
 #endif /* GENERATE_RANDOM_STRING_HPP */

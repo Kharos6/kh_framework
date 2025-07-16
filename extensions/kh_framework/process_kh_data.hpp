@@ -620,19 +620,23 @@ static int kh_validate_file_integrity(const char* file_path, long file_size) {
 int kh_read_binary_file(const char* file_path, kh_variable_t** variables, int* count) {
     if (!file_path || !variables || !count) return 0;
     
-    FILE* file;
+    FILE* file = NULL;
     kh_file_header_t header;
-    int i;
-    unsigned int name_len, value_len, type_len;
-    char* type_str = NULL;
-    int success = 1;
-    long file_size, bytes_read = 0;
+    kh_variable_t* temp_variables = NULL;
+    int success = 0;
+    long file_size = 0;
+    long bytes_read = 0;
     
     *variables = NULL;
     *count = 0;
     
-    /* Get file size and validate integrity first */
+    /* Get and validate file size */
     file_size = kh_get_file_size(file_path);
+    if (file_size <= 0 || file_size > MAX_TOTAL_KHDATA_SIZE_BYTES) {
+        return 0;
+    }
+    
+    /* Validate file integrity */
     if (!kh_validate_file_integrity(file_path, file_size)) {
         return 0;
     }
@@ -653,158 +657,184 @@ int kh_read_binary_file(const char* file_path, kh_variable_t** variables, int* c
         return 0;
     }
     
+    /* Validate variable count */
+    if (header.variable_count > 10000 || 
+        (header.variable_count > 0 && bytes_read >= file_size)) {
+        fclose(file);
+        return 0;
+    }
+    
     if (header.variable_count == 0) {
         fclose(file);
         return 1; /* Empty file is valid */
     }
     
-    /* Security check: prevent excessive memory allocation */
-    if (header.variable_count > 10000) {
-        fclose(file);
-        return 0;
-    }
-    
     /* Allocate variables array */
-    *variables = (kh_variable_t*)calloc(header.variable_count, sizeof(kh_variable_t));
-    if (!*variables) {
+    temp_variables = (kh_variable_t*)calloc(header.variable_count, sizeof(kh_variable_t));
+    if (!temp_variables) {
         fclose(file);
         return 0;
     }
     
-    /* Read variables with corruption detection */
-    for (i = 0; i < (int)header.variable_count && success; i++) {
-        /* Check if we're about to read beyond file */
-        if (bytes_read + sizeof(unsigned int) > file_size) {
-            success = 0;
-            break;
-        }
+    /* Read variables with comprehensive bounds checking */
+    for (unsigned int i = 0; i < header.variable_count; i++) {
+        unsigned int name_len, value_len, type_len;
+        char* type_str = NULL;
         
-        /* Read name */
-        if (fread(&name_len, sizeof(unsigned int), 1, file) != 1 || name_len > 1024) {
-            success = 0;
-            break;
+        /* Read name length with bounds checking */
+        if (bytes_read + sizeof(unsigned int) > file_size || 
+            fread(&name_len, sizeof(unsigned int), 1, file) != 1 || 
+            name_len == 0 || name_len > 1024) {
+            goto cleanup_failure;
         }
         bytes_read += sizeof(unsigned int);
         
         /* Check bounds for name data */
         if (bytes_read + name_len > file_size) {
-            success = 0;
-            break;
+            goto cleanup_failure;
         }
         
-        (*variables)[i].name = (char*)malloc(name_len + 1);
-        if (!(*variables)[i].name) {
-            success = 0;
-            break;
+        /* Allocate and read name */
+        temp_variables[i].name = (char*)malloc(name_len + 1);
+        if (!temp_variables[i].name || 
+            fread(temp_variables[i].name, name_len, 1, file) != 1) {
+            goto cleanup_failure;
         }
-        
-        if (fread((*variables)[i].name, name_len, 1, file) != 1) {
-            success = 0;
-            break;
-        }
-        (*variables)[i].name[name_len] = '\0';
+        temp_variables[i].name[name_len] = '\0';
         bytes_read += name_len;
         
-        /* Check bounds for type length */
-        if (bytes_read + sizeof(unsigned int) > file_size) {
-            success = 0;
-            break;
+        /* Validate name contains only printable characters */
+        for (unsigned int j = 0; j < name_len; j++) {
+            if (temp_variables[i].name[j] < 32 || temp_variables[i].name[j] == 127) {
+                goto cleanup_failure;
+            }
         }
         
-        /* Read type */
-        if (fread(&type_len, sizeof(unsigned int), 1, file) != 1 || type_len >= 64) {
-            success = 0;
-            break;
+        /* Read type length with bounds checking */
+        if (bytes_read + sizeof(unsigned int) > file_size || 
+            fread(&type_len, sizeof(unsigned int), 1, file) != 1 || 
+            type_len == 0 || type_len >= 64) {
+            goto cleanup_failure;
         }
         bytes_read += sizeof(unsigned int);
         
         /* Check bounds for type data */
         if (bytes_read + type_len > file_size) {
-            success = 0;
-            break;
+            goto cleanup_failure;
         }
         
+        /* Allocate and read type */
         type_str = (char*)malloc(type_len + 1);
-        if (!type_str) {
-            success = 0;
-            break;
-        }
-        
-        if (fread(type_str, type_len, 1, file) != 1) {
+        if (!type_str || fread(type_str, type_len, 1, file) != 1) {
             free(type_str);
-            success = 0;
-            break;
+            goto cleanup_failure;
         }
         type_str[type_len] = '\0';
-        (*variables)[i].type = kh_get_type_from_string(type_str);
-        free(type_str);
-        type_str = NULL;
         bytes_read += type_len;
         
-        /* Check bounds for value length */
-        if (bytes_read + sizeof(unsigned int) > file_size) {
-            success = 0;
-            break;
+        /* Validate and convert type */
+        temp_variables[i].type = kh_get_type_from_string(type_str);
+        free(type_str);
+        type_str = NULL;
+        
+        if (temp_variables[i].type == KH_TYPE_UNKNOWN) {
+            goto cleanup_failure;
         }
         
-        /* Read value */
-        if (fread(&value_len, sizeof(unsigned int), 1, file) != 1 || value_len > MAX_TOTAL_KHDATA_SIZE_BYTES) {
-            success = 0;
-            break;
+        /* Read value length with bounds checking */
+        if (bytes_read + sizeof(unsigned int) > file_size || 
+            fread(&value_len, sizeof(unsigned int), 1, file) != 1 || 
+            value_len > MAX_TOTAL_KHDATA_SIZE_BYTES) {
+            goto cleanup_failure;
         }
         bytes_read += sizeof(unsigned int);
-
-        (*variables)[i].value = (char*)malloc(value_len + 1);
-        if (!(*variables)[i].value) {
-            success = 0;
-            break;
+        
+        /* Allocate value buffer */
+        temp_variables[i].value = (char*)malloc(value_len + 1);
+        if (!temp_variables[i].value) {
+            goto cleanup_failure;
         }
-
-        /* Only read value data if there is any */
+        
+        /* Read value data if present */
         if (value_len > 0) {
-            /* Check bounds for value data */
-            if (bytes_read + value_len > file_size) {
-                success = 0;
-                break;
-            }
-            
-            if (fread((*variables)[i].value, value_len, 1, file) != 1) {
-                success = 0;
-                break;
+            if (bytes_read + value_len > file_size || 
+                fread(temp_variables[i].value, value_len, 1, file) != 1) {
+                goto cleanup_failure;
             }
             bytes_read += value_len;
         }
-
-        (*variables)[i].value[value_len] = '\0';
+        
+        temp_variables[i].value[value_len] = '\0';
         (*count)++;
     }
     
+    /* Success */
+    *variables = temp_variables;
+    success = 1;
+    temp_variables = NULL;
+    
+cleanup_failure:
     fclose(file);
     
-    /* Cleanup on failure */
-    if (!success) {
-        if (type_str) free(type_str);
-        kh_free_variables(*variables, *count);
+    if (!success && temp_variables) {
+        kh_free_variables(temp_variables, *count);
         *variables = NULL;
         *count = 0;
-        return 0;
     }
     
-    return 1;
+    return success;
 }
 
 /* Write binary file with all variables - improved error handling */
 static int kh_write_binary_file(const char* file_path, kh_variable_t* variables, int count) {
-    if (!file_path || (!variables && count > 0)) return 0;
+    if (!file_path || (!variables && count > 0) || count < 0) return 0;
     
-    FILE* file;
+    FILE* file = NULL;
     kh_file_header_t header;
-    int i;
-    unsigned int name_len, value_len, type_len;
-    const char* type_str;
-    int success = 1;
+    int success = 0;
+    char* temp_file_path = NULL;
     
-    if (fopen_s(&file, file_path, "wb") != 0) {
+    /* Validate input data before writing */
+    for (int i = 0; i < count; i++) {
+        if (!variables[i].name || !variables[i].value) {
+            return 0;
+        }
+        
+        /* Validate lengths */
+        size_t name_len = strlen(variables[i].name);
+        size_t value_len = strlen(variables[i].value);
+        
+        if (name_len == 0 || name_len > 1024 || value_len > MAX_TOTAL_KHDATA_SIZE_BYTES) {
+            return 0;
+        }
+        
+        /* Validate type */
+        if (variables[i].type == KH_TYPE_UNKNOWN) {
+            return 0;
+        }
+        
+        /* Validate name contains only safe characters */
+        for (size_t j = 0; j < name_len; j++) {
+            if (variables[i].name[j] < 32 || variables[i].name[j] == 127) {
+                return 0;
+            }
+        }
+    }
+    
+    /* Create temporary file path for atomic write */
+    size_t path_len = strlen(file_path);
+    temp_file_path = (char*)malloc(path_len + 10);
+    if (!temp_file_path) return 0;
+    
+    if (strcpy_s(temp_file_path, path_len + 10, file_path) != 0 ||
+        strcat_s(temp_file_path, path_len + 10, ".tmp") != 0) {
+        free(temp_file_path);
+        return 0;
+    }
+    
+    /* Open temporary file for writing */
+    if (fopen_s(&file, temp_file_path, "wb") != 0) {
+        free(temp_file_path);
         return 0;
     }
     
@@ -815,51 +845,68 @@ static int kh_write_binary_file(const char* file_path, kh_variable_t* variables,
     
     if (fwrite(&header, sizeof(kh_file_header_t), 1, file) != 1) {
         fclose(file);
+        DeleteFileA(temp_file_path);
+        free(temp_file_path);
         return 0;
     }
     
     /* Write variables */
-    for (i = 0; i < count && success; i++) {
-        if (!variables[i].name || !variables[i].value) {
-            success = 0;
-            break;
-        }
+    for (int i = 0; i < count; i++) {
+        unsigned int name_len = (unsigned int)strlen(variables[i].name);
+        unsigned int value_len = (unsigned int)strlen(variables[i].value);
+        const char* type_str = kh_get_string_from_type(variables[i].type);
+        unsigned int type_len = (unsigned int)strlen(type_str);
         
         /* Write name */
-        name_len = (unsigned int)strlen(variables[i].name);
         if (fwrite(&name_len, sizeof(unsigned int), 1, file) != 1 ||
             fwrite(variables[i].name, name_len, 1, file) != 1) {
-            success = 0;
-            break;
+            goto write_failure;
         }
         
         /* Write type */
-        type_str = kh_get_string_from_type(variables[i].type);
-        type_len = (unsigned int)strlen(type_str);
         if (fwrite(&type_len, sizeof(unsigned int), 1, file) != 1 ||
             fwrite(type_str, type_len, 1, file) != 1) {
-            success = 0;
-            break;
+            goto write_failure;
         }
         
         /* Write value */
-        value_len = (unsigned int)strlen(variables[i].value);
         if (fwrite(&value_len, sizeof(unsigned int), 1, file) != 1) {
-            success = 0;
-            break;
+            goto write_failure;
         }
-
-        /* Only write value data if there is any */
+        
         if (value_len > 0) {
             if (fwrite(variables[i].value, value_len, 1, file) != 1) {
-                success = 0;
-                break;
+                goto write_failure;
             }
         }
     }
     
+    /* Flush and close file */
+    if (fflush(file) != 0) {
+        goto write_failure;
+    }
     fclose(file);
+    
+    /* Atomic replace: move temp file to final location */
+    if (DeleteFileA(file_path) || GetLastError() == ERROR_FILE_NOT_FOUND) {
+        if (MoveFileA(temp_file_path, file_path)) {
+            success = 1;
+        }
+    }
+    
+    /* Cleanup temp file if move failed */
+    if (!success) {
+        DeleteFileA(temp_file_path);
+    }
+    
+    free(temp_file_path);
     return success;
+    
+write_failure:
+    fclose(file);
+    DeleteFileA(temp_file_path);
+    free(temp_file_path);
+    return 0;
 }
 
 /* Format variable for output as ["TYPE", value] */
@@ -873,7 +920,16 @@ static int kh_format_variable_output(kh_data_type_t type, const char* value, cha
         case KH_TYPE_TEXT:
         case KH_TYPE_CODE:
             return (_snprintf_s(output, (size_t)output_size, _TRUNCATE, "[\"%s\", \"%s\"]", type_str, value) >= 0);
+        case KH_TYPE_BOOL: {
+            /* Normalize boolean values to canonical string representation */
+            const char* normalized_value;
             
+            /* Parse the stored boolean value */
+            int bool_val = kh_parse_boolean(value);
+            normalized_value = bool_val ? "true" : "false";
+            
+            return (_snprintf_s(output, (size_t)output_size, _TRUNCATE, "[\"%s\", %s]", type_str, normalized_value) >= 0);
+        } 
         default:
             return (_snprintf_s(output, (size_t)output_size, _TRUNCATE, "[\"%s\", %s]", type_str, value) >= 0);
     }
@@ -883,29 +939,55 @@ static int kh_format_variable_output(kh_data_type_t type, const char* value, cha
 static int kh_parse_hashmap_entry(const char* input, char** key, char** value) {
     if (!input || !key || !value) return 0;
     
-    const char* ptr = input;
-    const char* bracket_start;
-    const char* comma_pos;
-    const char* bracket_end;
-    int key_len, value_len;
-    
     *key = NULL;
     *value = NULL;
     
+    const char* ptr = input;
+    int bracket_count = 0;
+    int input_len = (int)strlen(input);
+    
+    /* Input length validation */
+    if (input_len < 3) return 0; /* Minimum: [,] */
+    if (input_len > MAX_HASHMAP_INPUT_SIZE) return 0; /* 32MB maximum */
+    
     /* Skip whitespace and find opening bracket */
     while (*ptr && (*ptr == ' ' || *ptr == '\t' || *ptr == '\n' || *ptr == '\r')) ptr++;
-    
     if (*ptr != '[') return 0;
     
-    bracket_start = ptr + 1;
-    comma_pos = strchr(bracket_start, ',');
-    if (!comma_pos) return 0;
+    const char* bracket_start = ptr + 1;
+    ptr = bracket_start;
     
-    bracket_end = strrchr(comma_pos, ']');
-    if (!bracket_end) return 0;
+    /* Find comma while tracking bracket depth - with bounds checking */
+    const char* comma_pos = NULL;
+    const char* bracket_end = NULL;
+    int found_comma = 0;
     
-    /* Extract and clean key */
-    key_len = (int)(comma_pos - bracket_start);
+    while (*ptr && (ptr - input) < input_len) {
+        if (*ptr == '[') {
+            bracket_count++;
+        } else if (*ptr == ']') {
+            bracket_count--;
+            if (bracket_count < 0) {
+                bracket_end = ptr;
+                break;
+            }
+        } else if (*ptr == ',' && bracket_count == 0 && !found_comma) {
+            comma_pos = ptr;
+            found_comma = 1;
+        }
+        ptr++;
+    }
+    
+    /* Validation: Must have found comma and closing bracket */
+    if (!found_comma || !bracket_end || bracket_count != -1) {
+        return 0;
+    }
+    
+    /* Extract key with bounds checking */
+    size_t key_len = (size_t)(comma_pos - bracket_start);
+    if (key_len == 0 || key_len > MAX_HASHMAP_KEY_SIZE) return 0; /* Reasonable key length limit */
+    
+    /* Trim whitespace from key */
     while (key_len > 0 && (bracket_start[key_len-1] == ' ' || bracket_start[key_len-1] == '\t')) {
         key_len--;
     }
@@ -922,21 +1004,33 @@ static int kh_parse_hashmap_entry(const char* input, char** key, char** value) {
     if (key_len >= 2 && (*key)[0] == '"' && (*key)[key_len-1] == '"') {
         memmove(*key, *key + 1, (size_t)(key_len - 2));
         (*key)[key_len - 2] = '\0';
+        key_len -= 2;
     }
     
-    /* Extract and clean value */
+    /* Validate key contains only safe characters */
+    for (int i = 0; i < key_len; i++) {
+        char c = (*key)[i];
+        if (c < 32 || c == 127) {
+            free(*key);
+            *key = NULL;
+            return 0;
+        }
+    }
+    
+    /* Extract value with bounds checking */
     const char* value_start = comma_pos + 1;
     while (*value_start && (*value_start == ' ' || *value_start == '\t')) value_start++;
     
-    value_len = (int)(bracket_end - value_start);
-    while (value_len > 0 && (value_start[value_len-1] == ' ' || value_start[value_len-1] == '\t')) {
-        value_len--;
-    }
-    
-    if (value_len <= 0) {
+    size_t value_len = (size_t)(bracket_end - value_start);
+    if (value_len > MAX_HASHMAP_VALUE_SIZE) { /* Reasonable value length limit */
         free(*key);
         *key = NULL;
         return 0;
+    }
+    
+    /* Trim whitespace from value */
+    while (value_len > 0 && (value_start[value_len-1] == ' ' || value_start[value_len-1] == '\t')) {
+        value_len--;
     }
     
     *value = (char*)malloc((size_t)value_len + 1);
@@ -946,33 +1040,34 @@ static int kh_parse_hashmap_entry(const char* input, char** key, char** value) {
         return 0;
     }
     
-    memcpy(*value, value_start, (size_t)value_len);
+    if (value_len > 0) {
+        memcpy(*value, value_start, (size_t)value_len);
+    }
     (*value)[value_len] = '\0';
     
     return 1;
 }
 
-/* Parse a full hashmap and extract all entries - improved with dynamic allocation */
+/* Enhanced full hashmap parsing with depth limits and validation (no size limits) */
 static int kh_parse_full_hashmap(const char* input, char*** entries, int max_entries) {
-    if (!input || !entries) return 0;
+    if (!input || !entries || max_entries <= 0 || max_entries > 1024) return 0;
     
     const char* ptr = input;
     int entry_count = 0;
     int bracket_depth = 0;
+    int max_depth = 32; /* Reasonable nesting limit */
     const char* entry_start = NULL;
+    int input_len = (int)strlen(input);
+    
+    /* Input validation */
+    if (input_len < 2 || input_len > MAX_HASHMAP_INPUT_SIZE) return 0; /* Max input size limit */
     
     /* Allocate array of string pointers */
-    *entries = (char**)malloc((size_t)max_entries * sizeof(char*));
+    *entries = (char**)calloc((size_t)max_entries, sizeof(char*));
     if (!*entries) return 0;
-
-    /* Initialize all pointers to NULL for safe cleanup */
-    for (int i = 0; i < max_entries; i++) {
-        (*entries)[i] = NULL;
-    }
     
     /* Skip whitespace and find opening bracket */
     while (*ptr && (*ptr == ' ' || *ptr == '\t' || *ptr == '\n' || *ptr == '\r')) ptr++;
-    
     if (*ptr != '[') {
         free(*entries);
         *entries = NULL;
@@ -980,136 +1075,216 @@ static int kh_parse_full_hashmap(const char* input, char*** entries, int max_ent
     }
     ptr++; /* Skip opening bracket */
     
-    while (*ptr && entry_count < max_entries) {
+    while (*ptr && entry_count < max_entries && (ptr - input) < input_len) {
         if (*ptr == '[') {
             if (bracket_depth == 0) {
                 entry_start = ptr;
             }
             bracket_depth++;
+            
+            if (bracket_depth > max_depth) {
+                /* Cleanup on excessive nesting */
+                for (int i = 0; i < entry_count; i++) {
+                    free((*entries)[i]);
+                }
+                free(*entries);
+                *entries = NULL;
+                return 0;
+            }
         } else if (*ptr == ']') {
             bracket_depth--;
             if (bracket_depth == 0 && entry_start) {
                 /* Found complete entry */
-                int entry_len = (int)(ptr - entry_start + 1);
-                (*entries)[entry_count] = (char*)malloc((size_t)entry_len + 1);
-                if ((*entries)[entry_count]) {
+                size_t entry_len = (size_t)(ptr - entry_start + 1);
+                
+                if (entry_len > 0 && entry_len <= MAX_HASHMAP_ENTRY_SIZE) { /* Reasonable entry size limit */
+                    (*entries)[entry_count] = (char*)malloc((size_t)entry_len + 1);
+                    if (!(*entries)[entry_count]) {
+                        /* Cleanup on allocation failure */
+                        for (int i = 0; i < entry_count; i++) {
+                            free((*entries)[i]);
+                        }
+                        free(*entries);
+                        *entries = NULL;
+                        return 0;
+                    }
+                    
                     memcpy((*entries)[entry_count], entry_start, (size_t)entry_len);
                     (*entries)[entry_count][entry_len] = '\0';
                     entry_count++;
-                } else {
-                    /* Allocation failed - cleanup and return */
-                    for (int i = 0; i < entry_count; i++) {
-                        free((*entries)[i]);
-                    }
-                    free(*entries);
-                    *entries = NULL;
-                    return 0;
                 }
+                entry_start = NULL;
+            } else if (bracket_depth < 0) {
+                /* Mismatched brackets - cleanup */
+                for (int i = 0; i < entry_count; i++) {
+                    free((*entries)[i]);
+                }
+                free(*entries);
+                *entries = NULL;
+                return 0;
             }
         }
         ptr++;
     }
     
+    /* Final validation */
+    if (bracket_depth != -1) {
+        /* Unbalanced brackets - cleanup */
+        for (int i = 0; i < entry_count; i++) {
+            free((*entries)[i]);
+        }
+        free(*entries);
+        *entries = NULL;
+        return 0;
+    }
+    
     return entry_count;
 }
 
-/* Enhanced hashmap merging with better memory management */
+/* Enhanced hashmap merging with comprehensive validation (no size limits) */
 static int kh_merge_hashmap(const char* existing_hashmap, const char* new_entry, char* result, int result_size) {
     if (!existing_hashmap || !new_entry || !result || result_size <= 0) return 0;
     
+    /* Size validation */
+    int existing_len = (int)strlen(existing_hashmap);
+    int new_entry_len = (int)strlen(new_entry);
+    
+    if (existing_len <= 0 || existing_len > MAX_HASHMAP_INPUT_SIZE || new_entry_len <= 0 || new_entry_len > MAX_HASHMAP_INPUT_SIZE) {
+        return 0;
+    }
+    
+    /* Pre-validate existing hashmap format */
+    if (!kh_validate_hashmap_format(existing_hashmap)) {
+        return 0;
+    }
+    
     char** entries = NULL;
-    int entry_count;
+    int entry_count = 0;
     char* key = NULL;
     char* value = NULL;
-    char* formatted_entry = NULL;
+    char* temp_result = NULL;
     int ret = 0;
+    
+    /* Allocate temporary result buffer with safety margin */
+    size_t temp_size = (size_t)(existing_len + new_entry_len + HASHMAP_SAFETY_MARGIN);
+    temp_result = (char*)malloc(temp_size);
+    if (!temp_result) return 0;
+    
+    /* Initialize with existing hashmap */
+    if (strcpy_s(temp_result, temp_size, existing_hashmap) != 0) {
+        free(temp_result);
+        return 0;
+    }
     
     /* Try to parse as full hashmap first */
     entry_count = kh_parse_full_hashmap(new_entry, &entries, 16);
     
     if (entry_count > 0) {
         /* Process each entry */
-        size_t temp_size = (size_t)result_size * 2; /* Allocate more space for temp processing */
-        char* temp_result = (char*)malloc(temp_size);
-        if (!temp_result) goto cleanup;
-        
-        strcpy_s(temp_result, temp_size, existing_hashmap);
-        
         for (int i = 0; i < entry_count; i++) {
             if (kh_parse_hashmap_entry(entries[i], &key, &value)) {
-                /* Format the new entry */
-                size_t formatted_len = strlen(key) + strlen(value) + 10;
-                formatted_entry = (char*)malloc(formatted_len);
+                /* Calculate required space for formatted entry */
+                size_t key_len = key ? strlen(key) : 0;
+                size_t value_len = value ? strlen(value) : 0;
+                size_t formatted_len = key_len + value_len + 20; /* Extra space for formatting */
+                
+                char* formatted_entry = (char*)malloc(formatted_len);
                 if (!formatted_entry) {
-                    // Free current iteration's allocations before goto
                     free(key);
                     free(value);
-                    key = NULL;
-                    value = NULL;
                     goto cleanup;
                 }
                 
-                _snprintf_s(formatted_entry, formatted_len, _TRUNCATE, "[\"%s\", %s]", key, value);
+                if (_snprintf_s(formatted_entry, formatted_len, _TRUNCATE, "[\"%s\", %s]", 
+                               key ? key : "", value ? value : "") < 0) {
+                    free(formatted_entry);
+                    free(key);
+                    free(value);
+                    goto cleanup;
+                }
+                
+                /* Check if we have enough space in temp_result */
+                size_t current_len = strlen(temp_result);
+                size_t required_len = current_len + strlen(formatted_entry) + 10;
+                
+                if (required_len >= temp_size) {
+                    free(formatted_entry);
+                    free(key);
+                    free(value);
+                    goto cleanup;
+                }
                 
                 /* Add to temp_result */
                 const char* trimmed = temp_result;
                 while (*trimmed && (*trimmed == ' ' || *trimmed == '\t')) trimmed++;
                 
                 if (strlen(trimmed) <= 2 || (strlen(trimmed) == 3 && strcmp(trimmed, "[ ]") == 0)) {
-                    _snprintf_s(temp_result, temp_size, _TRUNCATE, "[%s]", formatted_entry);
+                    if (_snprintf_s(temp_result, temp_size, _TRUNCATE, "[%s]", formatted_entry) < 0) {
+                        free(formatted_entry);
+                        free(key);
+                        free(value);
+                        goto cleanup;
+                    }
                 } else {
-                    size_t existing_len = strlen(temp_result);
-                    if (existing_len > 0 && temp_result[existing_len-1] == ']') {
-                        _snprintf_s(temp_result, temp_size, _TRUNCATE, "%.*s, %s]", (int)(existing_len - 1), temp_result, formatted_entry);
+                    if (current_len > 0 && temp_result[current_len-1] == ']') {
+                        if (_snprintf_s(temp_result, temp_size, _TRUNCATE, "%.*s, %s]", 
+                                       (int)(current_len - 1), temp_result, formatted_entry) < 0) {
+                            free(formatted_entry);
+                            free(key);
+                            free(value);
+                            goto cleanup;
+                        }
                     }
                 }
                 
+                free(formatted_entry);
                 free(key);
                 free(value);
-                free(formatted_entry);
                 key = NULL;
                 value = NULL;
-                formatted_entry = NULL;
             }
         }
         
-        /* Copy result back */
+        /* Copy result back with bounds checking */
         if (strlen(temp_result) < (size_t)result_size) {
-            strcpy_s(result, (size_t)result_size, temp_result);
-            ret = 1;
+            if (strcpy_s(result, (size_t)result_size, temp_result) == 0) {
+                ret = 1;
+            }
         }
-        
-        free(temp_result);
     } else {
         /* Fall back to single entry parsing */
         if (kh_parse_hashmap_entry(new_entry, &key, &value)) {
-            size_t formatted_len = strlen(key) + strlen(value) + 10;
-            formatted_entry = (char*)malloc(formatted_len);
-            if (!formatted_entry) {
-                // Free current allocations before goto
-                free(key);
-                free(value);
-                key = NULL;
-                value = NULL;
-                goto cleanup;
-            }
+            size_t key_len = key ? strlen(key) : 0;
+            size_t value_len = value ? strlen(value) : 0;
+            size_t formatted_len = key_len + value_len + 20;
             
-            _snprintf_s(formatted_entry, formatted_len, _TRUNCATE, "[\"%s\", %s]", key, value);
-            
-            /* Check if existing hashmap is empty */
-            const char* trimmed = existing_hashmap;
-            while (*trimmed && (*trimmed == ' ' || *trimmed == '\t')) trimmed++;
-            
-            if (strlen(trimmed) <= 2 || (strlen(trimmed) == 3 && strcmp(trimmed, "[ ]") == 0)) {
-                _snprintf_s(result, (size_t)result_size, _TRUNCATE, "[%s]", formatted_entry);
-            } else {
-                size_t existing_len = strlen(existing_hashmap);
-                if (existing_len > 0 && existing_hashmap[existing_len-1] == ']') {
-                    _snprintf_s(result, (size_t)result_size, _TRUNCATE, "%.*s, %s]", (int)(existing_len - 1), existing_hashmap, formatted_entry);
+            char* formatted_entry = (char*)malloc(formatted_len);
+            if (formatted_entry) {
+                if (_snprintf_s(formatted_entry, formatted_len, _TRUNCATE, "[\"%s\", %s]", 
+                               key ? key : "", value ? value : "") >= 0) {
+                    
+                    const char* trimmed = existing_hashmap;
+                    while (*trimmed && (*trimmed == ' ' || *trimmed == '\t')) trimmed++;
+                    
+                    if (strlen(trimmed) <= 2 || (strlen(trimmed) == 3 && strcmp(trimmed, "[ ]") == 0)) {
+                        if (strlen(formatted_entry) + 2 < (size_t)result_size) {
+                            if (_snprintf_s(result, (size_t)result_size, _TRUNCATE, "[%s]", formatted_entry) >= 0) {
+                                ret = 1;
+                            }
+                        }
+                    } else {
+                        size_t existing_len = strlen(existing_hashmap);
+                        if (existing_len + strlen(formatted_entry) + 10 < (size_t)result_size && 
+                            existing_len > 0 && existing_hashmap[existing_len-1] == ']') {
+                            if (_snprintf_s(result, (size_t)result_size, _TRUNCATE, "%.*s, %s]", 
+                                           (int)(existing_len - 1), existing_hashmap, formatted_entry) >= 0) {
+                                ret = 1;
+                            }
+                        }
+                    }
                 }
+                free(formatted_entry);
             }
-            
-            ret = 1;
         }
     }
 
@@ -1123,7 +1298,7 @@ cleanup:
     }
     free(key);
     free(value);
-    free(formatted_entry);
+    free(temp_result);
     return ret;
 }
 
@@ -1279,17 +1454,21 @@ static int kh_read_khdata_variable_slice(const char* filename, const char* varia
         }
         strcat_s(result_str, result_size, "]");
         
-        /* Handle slicing */
+        /* Handle UTF-8 aware slicing */
         if (slice_index >= 0) {
-            long data_size = (long)strlen(result_str);
-            long slice_start = (long)slice_index * SLICE_SIZE;
-            long slice_end = slice_start + SLICE_SIZE;
+            int data_len = (int)strlen(result_str);
+            int slice_start = slice_index * SLICE_SIZE;
+            int slice_end = slice_start + SLICE_SIZE;
             
-            if (slice_start >= data_size) {
+            if (slice_start >= data_len) {
                 kh_set_error(output, output_size, "SLICE INDEX OUT OF RANGE");
             } else {
-                if (slice_end > data_size) slice_end = data_size;
-                long slice_length = slice_end - slice_start;
+                if (slice_end > data_len) slice_end = data_len;
+                
+                /* Ensure we don't break UTF-8 characters */
+                slice_end = kh_utf8_safe_slice_end(result_str, data_len, slice_end);
+                
+                int slice_length = slice_end - slice_start;
                 if (slice_length >= output_size) slice_length = output_size - 1;
                 
                 memcpy(output, result_str + slice_start, (size_t)slice_length);
@@ -1329,17 +1508,21 @@ static int kh_read_khdata_variable_slice(const char* filename, const char* varia
         goto cleanup;
     }
     
-    /* Handle slicing */
+    /* Handle UTF-8 aware slicing */
     if (slice_index >= 0) {
-        long data_size = (long)strlen(formatted_output);
-        long slice_start = (long)slice_index * SLICE_SIZE;
-        long slice_end = slice_start + SLICE_SIZE;
+        int data_len = (int)strlen(formatted_output);
+        int slice_start = slice_index * SLICE_SIZE;
+        int slice_end = slice_start + SLICE_SIZE;
         
-        if (slice_start >= data_size) {
+        if (slice_start >= data_len) {
             kh_set_error(output, output_size, "SLICE INDEX OUT OF RANGE");
         } else {
-            if (slice_end > data_size) slice_end = data_size;
-            long slice_length = slice_end - slice_start;
+            if (slice_end > data_len) slice_end = data_len;
+            
+            /* Ensure we don't break UTF-8 characters */
+            slice_end = kh_utf8_safe_slice_end(formatted_output, data_len, slice_end);
+            
+            int slice_length = slice_end - slice_start;
             if (slice_length >= output_size) slice_length = output_size - 1;
             
             memcpy(output, formatted_output + slice_start, (size_t)slice_length);
@@ -1508,23 +1691,66 @@ static int kh_write_khdata_variable(const char* filename, const char* variable_n
         return 1;
     }
     
+    /* Enhanced path validation */
     if (!kh_get_khdata_file_path(filename, file_path, sizeof(file_path))) {
-        kh_set_error(output, output_size, "INVALID PATH");
+        kh_set_error(output, output_size, "INVALID PATH OR FILENAME");
         return 1;
     }
     
-    /* Allocate memory for cleaned strings */
-    clean_var_name = (char*)malloc(strlen(variable_name) + 1);
-    clean_value = (char*)malloc(strlen(value) + 1);
-    combined_value = (char*)malloc(strlen(value) * 2 + 1024); /* Extra space for combination */
+    /* Allocate memory for cleaned strings - account for UTF-8 expansion */
+    size_t var_name_len = strlen(variable_name) + 1;
+    size_t value_len = strlen(value) + 1;
+    
+    clean_var_name = (char*)malloc(var_name_len);
+    clean_value = (char*)malloc(value_len);
+    combined_value = (char*)malloc(value_len * 2 + 1024); /* Extra space for UTF-8 and combination */
     
     if (!clean_var_name || !clean_value || !combined_value) {
         kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
         goto cleanup;
     }
     
-    kh_clean_string(variable_name, clean_var_name, (int)strlen(variable_name) + 1);
-    kh_clean_string(value, clean_value, (int)strlen(value) + 1);
+    kh_clean_string(variable_name, clean_var_name, (int)var_name_len);
+    kh_clean_string(value, clean_value, (int)value_len);
+
+    /* Validate UTF-8 in cleaned strings */
+    if (!kh_validate_utf8_string(clean_var_name, (int)strlen(clean_var_name))) {
+        kh_set_error(output, output_size, "INVALID UTF-8 IN VARIABLE NAME");
+        goto cleanup;
+    }
+    
+    if (!kh_validate_utf8_string(clean_value, (int)strlen(clean_value))) {
+        kh_set_error(output, output_size, "INVALID UTF-8 IN VALUE");
+        goto cleanup;
+    }
+
+    /* Variable name security check */
+    if (!kh_validate_variable_name(clean_var_name)) {
+        kh_set_error(output, output_size, "INVALID VARIABLE NAME - ONLY ALPHANUMERIC AND UNDERSCORE ALLOWED");
+        goto cleanup;
+    }
+    
+    /* Value format validation based on data type */
+    if (!kh_validate_value_format((int)data_type, clean_value)) {
+        switch (data_type) {
+            case KH_TYPE_SCALAR:
+                kh_set_error(output, output_size, "INVALID SCALAR VALUE - MUST BE A VALID NUMBER");
+                break;
+            case KH_TYPE_ARRAY:
+                kh_set_error(output, output_size, "INVALID ARRAY FORMAT - CHECK BRACKET MATCHING");
+                break;
+            case KH_TYPE_HASHMAP:
+                kh_set_error(output, output_size, "INVALID HASHMAP FORMAT - CHECK BRACKET MATCHING AND STRUCTURE");
+                break;
+            case KH_TYPE_BOOL:
+                kh_set_error(output, output_size, "INVALID BOOLEAN VALUE - MUST BE true/false/1/0");
+                break;
+            default:
+                kh_set_error(output, output_size, "INVALID VALUE FORMAT FOR TYPE");
+                break;
+        }
+        goto cleanup;
+    }
 
     /* Allow empty strings for certain data types */
     if (strlen(clean_value) == 0 && data_type != KH_TYPE_STRING && data_type != KH_TYPE_TEXT && data_type != KH_TYPE_CODE) {
@@ -1556,7 +1782,7 @@ static int kh_write_khdata_variable(const char* filename, const char* variable_n
 
         /* Combine with existing value */
         if (!kh_combine_values(data_type, variables[var_index].value, clean_value, 
-                             overwrite_flag, combined_value, (int)strlen(value) * 2 + 1024)) {
+                             overwrite_flag, combined_value, (int)(value_len * 2 + 1024))) {
             kh_set_error(output, output_size, "VALUE COMBINATION FAILED");
             goto cleanup;
         }
@@ -1592,13 +1818,13 @@ static int kh_write_khdata_variable(const char* filename, const char* variable_n
             free(variables[var_index].value);
         }
         
-        size_t value_len = strlen(clean_value) + 1;
-        variables[var_index].value = (char*)malloc(value_len);
+        size_t clean_value_len = strlen(clean_value) + 1;
+        variables[var_index].value = (char*)malloc(clean_value_len);
         if (!variables[var_index].value) {
             kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
             goto cleanup;
         }
-        strcpy_s(variables[var_index].value, value_len, clean_value);
+        strcpy_s(variables[var_index].value, clean_value_len, clean_value);
         variables[var_index].type = data_type;
     }
     

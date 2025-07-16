@@ -13,6 +13,11 @@
 #define MAX_PATH_LENGTH 512
 #define MAX_TOTAL_KHDATA_SIZE_BYTES (1024LL * 1024LL * 1024LL)  /* 1GB total limit */
 #define MAX_KHDATA_FILES 128                                      /* Maximum .khdata files allowed */
+#define MAX_HASHMAP_INPUT_SIZE (32 * 1024 * 1024)      /* 32MB */
+#define MAX_HASHMAP_KEY_SIZE (8 * 1024)                /* 8KB */
+#define MAX_HASHMAP_VALUE_SIZE (32 * 1024 * 1024)      /* 32MB */
+#define MAX_HASHMAP_ENTRY_SIZE (32 * 1024 * 1024)      /* 32MB */
+#define HASHMAP_SAFETY_MARGIN (1024 * 1024)            /* 1MB */
 #define SLICE_SIZE 8192                                          /* 8KB per slice */
 #define KHDATA_MAGIC 0x5444484B                                  /* "KHDT" in little endian */
 #define KHDATA_VERSION 1
@@ -53,6 +58,77 @@ static inline int kh_parse_boolean(const char* bool_str) {
     
     /* Check for true values */
     return (strcmp(clean_bool, "true") == 0 || strcmp(clean_bool, "1") == 0) ? 1 : 0;
+}
+
+/* UTF-8 utility functions */
+static inline int kh_utf8_byte_length(unsigned char first_byte) {
+    if (first_byte < 0x80) return 1;
+    if ((first_byte & 0xE0) == 0xC0) return 2;
+    if ((first_byte & 0xF0) == 0xE0) return 3;
+    if ((first_byte & 0xF8) == 0xF0) return 4;
+    return 0; /* Invalid UTF-8 */
+}
+
+static inline int kh_is_valid_utf8_continuation(unsigned char byte) {
+    return (byte & 0xC0) == 0x80;
+}
+
+static inline int kh_validate_utf8_sequence(const char* str, int pos, int len) {
+    if (pos >= len) return 0;
+    
+    unsigned char first = (unsigned char)str[pos];
+    int char_len = kh_utf8_byte_length(first);
+    
+    if (char_len == 0 || pos + char_len > len) return 0;
+    
+    /* Check continuation bytes */
+    for (int i = 1; i < char_len; i++) {
+        if (!kh_is_valid_utf8_continuation((unsigned char)str[pos + i])) {
+            return 0;
+        }
+    }
+    
+    return char_len;
+}
+
+static inline int kh_validate_utf8_string(const char* str, int byte_len) {
+    if (!str) return 0;
+    
+    int pos = 0;
+    while (pos < byte_len) {
+        int char_len = kh_validate_utf8_sequence(str, pos, byte_len);
+        if (char_len == 0) return 0;
+        pos += char_len;
+    }
+    
+    return 1;
+}
+
+static inline int kh_utf8_safe_slice_end(const char* str, int byte_len, int target_end) {
+    if (!str || target_end <= 0) return 0;
+    if (target_end >= byte_len) return byte_len;
+    
+    /* Find the start of the UTF-8 character that contains or follows target_end */
+    int pos = target_end;
+    
+    /* If we're in the middle of a UTF-8 sequence, back up to the start */
+    while (pos > 0 && ((unsigned char)str[pos] & 0xC0) == 0x80) {
+        pos--;
+    }
+    
+    /* Validate this is a proper UTF-8 character start */
+    int char_len = kh_validate_utf8_sequence(str, pos, byte_len);
+    if (char_len == 0) {
+        /* Invalid UTF-8, fall back to target_end */
+        return target_end;
+    }
+    
+    /* If this character would extend beyond target_end, end before it */
+    if (pos + char_len > target_end) {
+        return pos;
+    }
+    
+    return target_end;
 }
 
 /* Cleanup near zero values */
@@ -119,6 +195,20 @@ static inline void kh_clean_string(const char* input, char* output, int output_s
     if (len > 0) {
         memcpy(output, start, (size_t)len);
         output[len] = '\0';
+        
+        /* Validate UTF-8 and adjust length if needed */
+        if (!kh_validate_utf8_string(output, len)) {
+            /* Find the last valid UTF-8 character position */
+            int safe_len = 0;
+            int pos = 0;
+            while (pos < len) {
+                int char_len = kh_validate_utf8_sequence(output, pos, len);
+                if (char_len == 0) break;
+                pos += char_len;
+                safe_len = pos;
+            }
+            output[safe_len] = '\0';
+        }
     } else {
         output[0] = '\0';
     }
@@ -143,6 +233,248 @@ static inline int kh_validate_non_empty_string(const char* input, const char* fi
     
     free(clean_input);
     return result;
+}
+
+/* Validate filename for security - prevent path traversal and enforce .khdata extension */
+static inline int kh_validate_filename(const char* filename) {
+    if (!filename) return 0;
+    
+    const char* ptr = filename;
+    int has_extension = 0;
+    int filename_len = (int)strlen(filename);
+    
+    /* Check for empty filename */
+    if (filename_len == 0) return 0;
+    
+    /* Check each character */
+    while (*ptr) {
+        char c = *ptr;
+        
+        /* Reject path separators and dangerous characters */
+        if (c == '\\' || c == '/' || c == ':' || c == '*' || c == '?' || 
+            c == '"' || c == '<' || c == '>' || c == '|' || c == '\0') {
+            return 0;
+        }
+        
+        /* Reject control characters */
+        if (c < 32 || c == 127) {
+            return 0;
+        }
+        
+        /* Reject leading/trailing dots or spaces */
+        if ((ptr == filename || *(ptr + 1) == '\0') && (c == '.' || c == ' ')) {
+            return 0;
+        }
+        
+        ptr++;
+    }
+    
+    /* Check for .khdata extension or allow it to be added later */
+    if (filename_len >= 7) {
+        if (strcmp(filename + filename_len - 7, ".khdata") == 0) {
+            has_extension = 1;
+        }
+    }
+    
+    /* Filename is valid - extension will be added if not present */
+    return 1;
+}
+
+/* Validate variable name - only alphanumeric and underscore allowed */
+static inline int kh_validate_variable_name(const char* name) {
+    if (!name || strlen(name) == 0) return 0;
+    
+    const char* ptr = name;
+    
+    /* First character must be letter or underscore */
+    if (!(((*ptr >= 'a' && *ptr <= 'z') || (*ptr >= 'A' && *ptr <= 'Z') || *ptr == '_'))) {
+        return 0;
+    }
+    
+    /* Rest can be alphanumeric or underscore */
+    ptr++;
+    while (*ptr) {
+        if (!((*ptr >= 'a' && *ptr <= 'z') || (*ptr >= 'A' && *ptr <= 'Z') || 
+              (*ptr >= '0' && *ptr <= '9') || *ptr == '_')) {
+            return 0;
+        }
+        ptr++;
+    }
+    
+    return 1;
+}
+
+/* Validate scalar value - must be a valid number */
+static inline int kh_validate_scalar_value(const char* value) {
+    if (!value || strlen(value) == 0) return 0;
+    
+    char* end_ptr;
+    const char* start = value;
+    
+    /* Skip leading whitespace */
+    while (*start && (*start == ' ' || *start == '\t')) start++;
+    
+    /* Check if it's a valid number */
+    strtod(start, &end_ptr);
+    
+    /* Skip trailing whitespace */
+    while (*end_ptr && (*end_ptr == ' ' || *end_ptr == '\t')) end_ptr++;
+    
+    /* Must consume the entire string (after trimming whitespace) */
+    return (*end_ptr == '\0' && end_ptr != start);
+}
+
+/* Validate boolean value - must be true/false/1/0 */
+static inline int kh_validate_bool_value(const char* value) {
+    if (!value) return 0;
+    
+    char* clean_value = (char*)malloc(strlen(value) + 1);
+    if (!clean_value) return 0;
+    
+    kh_clean_string(value, clean_value, (int)strlen(value) + 1);
+    
+    /* Convert to lowercase for comparison */
+    char* ptr = clean_value;
+    while (*ptr) {
+        if (*ptr >= 'A' && *ptr <= 'Z') {
+            *ptr = *ptr + 32;
+        }
+        ptr++;
+    }
+    
+    int result = (strcmp(clean_value, "true") == 0 || strcmp(clean_value, "false") == 0 ||
+                  strcmp(clean_value, "1") == 0 || strcmp(clean_value, "0") == 0);
+    
+    free(clean_value);
+    return result;
+}
+
+/* Validate array format - check bracket matching and basic structure */
+static inline int kh_validate_array_format(const char* value) {
+    if (!value) return 0;
+    
+    const char* ptr = value;
+    int bracket_count = 0;
+    int square_bracket_count = 0;
+    int has_opening_bracket = 0;
+    int has_content = 0;
+    
+    /* Skip leading whitespace */
+    while (*ptr && (*ptr == ' ' || *ptr == '\t' || *ptr == '\n' || *ptr == '\r')) ptr++;
+    
+    /* Must start with opening bracket */
+    if (*ptr != '[') return 0;
+    
+    /* Check bracket matching and basic structure */
+    while (*ptr) {
+        if (*ptr == '[') {
+            square_bracket_count++;
+            if (!has_opening_bracket) has_opening_bracket = 1;
+        } else if (*ptr == ']') {
+            square_bracket_count--;
+            if (square_bracket_count < 0) return 0; /* Mismatched brackets */
+        } else if (*ptr == '(' || *ptr == '{') {
+            bracket_count++;
+        } else if (*ptr == ')' || *ptr == '}') {
+            bracket_count--;
+            if (bracket_count < 0) return 0; /* Mismatched brackets */
+        } else if (*ptr != ' ' && *ptr != '\t' && *ptr != '\n' && *ptr != '\r' && *ptr != ',') {
+            has_content = 1;
+        }
+        ptr++;
+    }
+    
+    /* Must have balanced brackets and proper structure */
+    return (square_bracket_count == 0 && bracket_count == 0 && has_opening_bracket);
+}
+
+/* Validate hashmap format - check bracket matching and key-value pair structure */
+static inline int kh_validate_hashmap_format(const char* value) {
+    if (!value) return 0;
+    
+    const char* ptr = value;
+    int bracket_count = 0;
+    int square_bracket_count = 0;
+    int paren_count = 0;
+    int brace_count = 0;
+    int has_opening_bracket = 0;
+    
+    /* Skip leading whitespace */
+    while (*ptr && (*ptr == ' ' || *ptr == '\t' || *ptr == '\n' || *ptr == '\r')) ptr++;
+    
+    /* Must start with opening bracket */
+    if (*ptr != '[') return 0;
+    
+    /* Check bracket matching */
+    while (*ptr) {
+        switch (*ptr) {
+            case '[':
+                square_bracket_count++;
+                if (square_bracket_count == 1) has_opening_bracket = 1;
+                break;
+            case ']':
+                square_bracket_count--;
+                if (square_bracket_count < 0) return 0;
+                break;
+            case '(':
+                paren_count++;
+                break;
+            case ')':
+                paren_count--;
+                if (paren_count < 0) return 0;
+                break;
+            case '{':
+                brace_count++;
+                break;
+            case '}':
+                brace_count--;
+                if (brace_count < 0) return 0;
+                break;
+        }
+        ptr++;
+    }
+    
+    /* All brackets must be balanced */
+    return (square_bracket_count == 0 && paren_count == 0 && brace_count == 0 && has_opening_bracket);
+}
+
+/* Main value format validation dispatcher */
+static inline int kh_validate_value_format(int data_type, const char* value) {
+    if (!value) return 0;
+    
+    /* Forward declaration for type constants - these should match process_kh_data.hpp */
+    typedef enum {
+        KH_TYPE_ARRAY = 0,
+        KH_TYPE_STRING = 1,
+        KH_TYPE_SCALAR = 2,
+        KH_TYPE_HASHMAP = 3,
+        KH_TYPE_BOOL = 4,
+        KH_TYPE_CODE = 5,
+        KH_TYPE_TEXT = 6
+    } kh_data_type_local_t;
+    
+    switch ((kh_data_type_local_t)data_type) {
+        case KH_TYPE_SCALAR:
+            return kh_validate_scalar_value(value);
+            
+        case KH_TYPE_ARRAY:
+            return kh_validate_array_format(value);
+            
+        case KH_TYPE_HASHMAP:
+            return kh_validate_hashmap_format(value);
+            
+        case KH_TYPE_BOOL:
+            return kh_validate_bool_value(value);
+            
+        case KH_TYPE_STRING:
+        case KH_TYPE_TEXT:
+        case KH_TYPE_CODE:
+            /* These types accept any string content */
+            return 1;
+            
+        default:
+            return 0; /* Unknown type */
+    }
 }
 
 /* Set standardized error message */
@@ -234,7 +566,7 @@ static inline int kh_count_khdata_files(void) {
     return file_count;
 }
 
-/* Get full path to a .khdata file */
+/* Get full path to a .khdata file with enhanced security validation */
 static inline int kh_get_khdata_file_path(const char* filename, char* full_path, int path_size) {
     if (!filename || !full_path || path_size <= 0) return 0;
     
@@ -258,6 +590,12 @@ static inline int kh_get_khdata_file_path(const char* filename, char* full_path,
     /* Clean filename - remove quotes */
     kh_clean_string(filename, clean_filename, filename_len + 1);
     int clean_len = (int)strlen(clean_filename);
+    
+    /* Validate filename for security - prevent path traversal */
+    if (!kh_validate_filename(clean_filename)) {
+        free(clean_filename);
+        return 0;
+    }
     
     /* Add .khdata extension if not present */
     if (clean_len < 7 || strcmp(clean_filename + clean_len - 7, ".khdata") != 0) {

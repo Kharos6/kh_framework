@@ -505,17 +505,33 @@ static inline int kh_get_arma3_documents_path(char* path, int path_size) {
     if (!path || path_size <= 0) return 0;
     
     char documents_path[MAX_PATH];
+    char arma3_path[MAX_PATH];
+    char framework_path[MAX_PATH];
     
     if (SHGetFolderPathA(NULL, CSIDL_MYDOCUMENTS, NULL, SHGFP_TYPE_CURRENT, documents_path) != S_OK) {
         return 0;
     }
     
-    if (_snprintf_s(path, (size_t)path_size, _TRUNCATE, "%s\\Arma 3", documents_path) < 0) {
+    /* Build Documents\Arma 3 path */
+    if (_snprintf_s(arma3_path, sizeof(arma3_path), _TRUNCATE, "%s\\Arma 3", documents_path) < 0) {
         return 0;
     }
     
-    /* Create directory if it doesn't exist */
-    CreateDirectoryA(path, NULL);
+    /* Build Documents\Arma 3\kh_framework path */
+    if (_snprintf_s(framework_path, sizeof(framework_path), _TRUNCATE, "%s\\kh_framework", arma3_path) < 0) {
+        return 0;
+    }
+    
+    /* Build final Documents\Arma 3\kh_framework\kh_data path */
+    if (_snprintf_s(path, (size_t)path_size, _TRUNCATE, "%s\\kh_data", framework_path) < 0) {
+        return 0;
+    }
+    
+    /* Create directories if they don't exist (nested creation) */
+    CreateDirectoryA(arma3_path, NULL);      /* Create Arma 3 folder */
+    CreateDirectoryA(framework_path, NULL);   /* Create kh_framework folder */
+    CreateDirectoryA(path, NULL);             /* Create kh_data folder */
+    
     return 1;
 }
 

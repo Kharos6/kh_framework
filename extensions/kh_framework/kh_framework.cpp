@@ -10,6 +10,8 @@
 #include "generate_random_string.hpp"
 #include "math_operations.hpp"
 #include "vector_operations.hpp"
+#include "string_operations.hpp"
+#include "crypto_operations.hpp"
 
 __declspec(dllexport) uint64_t RVExtensionFeatureFlags = RVFeature_ContextNoDefaultCall;
 
@@ -24,12 +26,14 @@ typedef struct {
 static const function_info_t FUNCTION_TABLE[] = {
     {"GenerateRandomString", 1, 4, 'G'},
     {"SliceData", 2, 2, 'S'},
+    {"StringOperation", 2, 2, 'S'},
     {"ReadKHData", 2, 3, 'R'},
     {"WriteKHData", 4, 5, 'W'},
     {"MathOperation", 1, 1, 'M'},
     {"VectorOperation", 1, 4, 'V'},
     {"UnbinarizeKHData", 1, 1, 'U'},
-    {"BinarizeKHData", 1, 1, 'B'}
+    {"BinarizeKHData", 1, 1, 'B'},
+    {"CryptoOperation", 2, 2, 'C'}
 };
 
 static const int FUNCTION_COUNT = sizeof(FUNCTION_TABLE) / sizeof(function_info_t);
@@ -120,15 +124,24 @@ __declspec(dllexport) int RVExtensionArgs(char *output, unsigned int output_size
     char first_char = function[0];
     
     switch (first_char) {
+        case 'C': /* CryptoOperation */
+            if (strcmp(function, "CryptoOperation") == 0) {
+                return kh_process_crypto_operation(output, output_size, argv, argc);
+            }
+            break;
+
         case 'G': /* GenerateRandomString */
             if (strcmp(function, "GenerateRandomString") == 0) {
                 return kh_process_random_string_generation(output, output_size, argv, argc);
             }
             break;
             
-        case 'S': /* SliceData */
+        case 'S': /* SliceData and StringOperation */
             if (strcmp(function, "SliceData") == 0) {
                 return kh_calculate_slice_count(argv[0], argv[1], output, output_size);
+            }
+            if (strcmp(function, "StringOperation") == 0) {
+                return kh_process_string_operation(output, output_size, argv, argc);
             }
             break;
             
@@ -232,7 +245,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             
         case DLL_PROCESS_DETACH:
             /* DLL is being unloaded from the process */
-            /* Any cleanup code would go here if needed */
+            /* Clean up string operations tables */
+            kh_cleanup_string_operations();
             break;
     }
     

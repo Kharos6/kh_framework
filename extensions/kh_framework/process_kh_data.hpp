@@ -22,12 +22,33 @@ struct kh_variable_s {
     char* value;
 };
 
-/* Binary file header structure */
+/* Hash table entry for indexed access - properly aligned */
+#pragma pack(push, 4)
 typedef struct {
-    unsigned int magic;
-    unsigned int version;
-    unsigned int variable_count;
+    uint32_t name_hash;      /* Hash of variable name */
+    uint32_t data_offset;    /* Offset to variable data in file */
+    uint32_t reserved;       /* Reserved for future use/alignment */
+} kh_hash_entry_t;
+#pragma pack(pop)
+
+/* Binary file header structure - enhanced for indexed format with alignment */
+#pragma pack(push, 4)
+typedef struct {
+    unsigned int magic;              /* Magic number */
+    unsigned int version;            /* Format version */
+    unsigned int variable_count;     /* Number of variables */
+    unsigned int hash_table_size;    /* Size of hash table (0 for old format) */
+    unsigned int data_section_offset; /* Offset to data section */
+    unsigned int reserved1;          /* Reserved for alignment */
+    unsigned int reserved2;          /* Reserved for future use */
+    unsigned int reserved3;          /* Reserved for future use */
 } kh_file_header_t;
+#pragma pack(pop)
+
+/* Hash table constants */
+#define KH_HASH_TABLE_MIN_SIZE 16
+#define KH_HASH_TABLE_LOAD_FACTOR 0.75
+#define KH_HASH_EMPTY 0                 /* Empty hash table entry marker */
 
 /* Type string lookup table for better performance */
 typedef struct {
@@ -46,6 +67,106 @@ static const kh_type_mapping_t KH_TYPE_MAPPINGS[] = {
 };
 
 static const int KH_TYPE_MAPPING_COUNT = sizeof(KH_TYPE_MAPPINGS) / sizeof(kh_type_mapping_t);
+
+/* Hash function for variable names - case insensitive */
+static inline uint32_t kh_hash_variable_name(const char* name) {
+    if (!name) return KH_HASH_EMPTY;
+    
+    /* FNV-1a constants for 32-bit */
+    uint32_t hash = 2166136261U;  /* FNV offset basis */
+    const uint32_t fnv_prime = 16777619U;  /* FNV prime */
+    
+    const char* ptr = name;
+    
+    while (*ptr) {
+        /* Convert to lowercase for case-insensitive hashing */
+        char c = *ptr;
+        if (c >= 'A' && c <= 'Z') {
+            c += 32;
+        }
+        
+        /* FNV-1a: hash = (hash XOR byte) * prime */
+        hash ^= (uint32_t)c;
+        hash *= fnv_prime;
+        
+        ptr++;
+    }
+    
+    /* Ensure hash is never 0 (reserved for empty entries) */
+    return (hash == KH_HASH_EMPTY) ? 1 : hash;
+}
+
+/* Calculate optimal hash table size */
+static inline uint32_t kh_calculate_hash_table_size(uint32_t variable_count) {
+    /* Use next power of 2 that gives load factor <= 0.75 */
+    uint32_t min_size = (uint32_t)((double)variable_count / KH_HASH_TABLE_LOAD_FACTOR);
+    uint32_t size = KH_HASH_TABLE_MIN_SIZE;
+    
+    while (size < min_size) {
+        size <<= 1;
+    }
+    
+    return size;
+}
+
+/* Hash table lookup with linear probing - consistent collision resolution */
+static inline uint32_t kh_hash_table_find(kh_hash_entry_t* hash_table, uint32_t hash_table_size, 
+                                          uint32_t name_hash, int* found) {
+    if (!hash_table || hash_table_size == 0 || name_hash == KH_HASH_EMPTY) {
+        if (found) *found = 0;
+        return 0;
+    }
+    
+    uint32_t index = name_hash % hash_table_size;
+    uint32_t original_index = index;
+    
+    do {
+        if (hash_table[index].name_hash == KH_HASH_EMPTY) {
+            /* Empty slot found - not in table */
+            if (found) *found = 0;
+            return index; /* Return empty slot for insertion */
+        }
+        
+        if (hash_table[index].name_hash == name_hash) {
+            /* Found matching hash */
+            if (found) *found = 1;
+            return index;
+        }
+        
+        /* Linear probe to next slot */
+        index = (index + 1) % hash_table_size;
+        
+    } while (index != original_index);
+    
+    /* Table is full */
+    if (found) *found = 0;
+    return 0;
+}
+
+/* Hash table insertion with linear probing */
+static inline int kh_hash_table_insert(kh_hash_entry_t* hash_table, uint32_t hash_table_size,
+                                       uint32_t name_hash, uint32_t data_offset) {
+    if (!hash_table || hash_table_size == 0 || name_hash == KH_HASH_EMPTY) return 0;
+    
+    int found = 0;
+    uint32_t index = kh_hash_table_find(hash_table, hash_table_size, name_hash, &found);
+    
+    if (found) {
+        /* Update existing entry */
+        hash_table[index].data_offset = data_offset;
+        return 1;
+    }
+    
+    /* Insert new entry if slot is available */
+    if (hash_table[index].name_hash == KH_HASH_EMPTY) {
+        hash_table[index].name_hash = name_hash;
+        hash_table[index].data_offset = data_offset;
+        hash_table[index].reserved = 0;
+        return 1;
+    }
+    
+    return 0; /* Table full */
+}
 
 /* Convert type string to enum - optimized lookup */
 static inline kh_data_type_t kh_get_type_from_string(const char* type_str) {
@@ -101,9 +222,9 @@ void kh_free_variables(kh_variable_t* variables, int count) {
     }
 }
 
-/* Check if file is already in binary format */
-static int kh_is_file_binary(const char* file_path) {
-    if (!file_path) return 0;
+/* Check if file is in binary format and get version */
+static int kh_get_file_format_version(const char* file_path, uint32_t* version) {
+    if (!file_path || !version) return 0;
     
     FILE* file;
     kh_file_header_t header;
@@ -115,14 +236,21 @@ static int kh_is_file_binary(const char* file_path) {
     
     /* Try to read header */
     if (fread(&header, sizeof(kh_file_header_t), 1, file) == 1) {
-        /* Check magic number and version */
-        if (header.magic == KHDATA_MAGIC && header.version == KHDATA_VERSION) {
+        /* Check magic number */
+        if (header.magic == KHDATA_MAGIC && header.version >= 1) {
+            *version = header.version;
             result = 1;
         }
     }
     
     fclose(file);
     return result;
+}
+
+/* Check if file is already in binary format */
+static int kh_is_file_binary(const char* file_path) {
+    uint32_t version;
+    return kh_get_file_format_version(file_path, &version);
 }
 
 /* Parse a single line from text format: variable_name=TYPE:value */
@@ -561,7 +689,30 @@ cleanup:
     return result;
 }
 
-/* Find variable by name (case-insensitive) - optimized with early exit */
+/* Enhanced find variable with hash table lookup - consistent linear probing */
+static inline int kh_find_variable_indexed(kh_variable_t* variables, int count, const char* name,
+                                          kh_hash_entry_t* hash_table, uint32_t hash_table_size) {
+    if (!variables || !name || count <= 0 || !hash_table || hash_table_size == 0) {
+        return kh_find_variable(variables, count, name); /* Fallback to linear search */
+    }
+    
+    uint32_t name_hash = kh_hash_variable_name(name);
+    int found = 0;
+    uint32_t index = kh_hash_table_find(hash_table, hash_table_size, name_hash, &found);
+    
+    if (found) {
+        /* Hash found, verify the actual name matches */
+        uint32_t var_index = hash_table[index].data_offset;
+        if (var_index < (uint32_t)count && variables[var_index].name &&
+            kh_strcasecmp(variables[var_index].name, name) == 0) {
+            return (int)var_index;
+        }
+    }
+    
+    return -1; /* Not found */
+}
+
+/* Find variable by name (case-insensitive) - linear search fallback */
 static inline int kh_find_variable(kh_variable_t* variables, int count, const char* name) {
     if (!variables || !name || count <= 0) return -1;
     
@@ -595,7 +746,7 @@ static int kh_validate_file_integrity(const char* file_path, long file_size) {
         result = 0;
     } else {
         /* Validate magic number and version */
-        if (header.magic != KHDATA_MAGIC || header.version != KHDATA_VERSION) {
+        if (header.magic != KHDATA_MAGIC || header.version < 1 || header.version > 2) {
             result = 0;
         }
         
@@ -604,11 +755,14 @@ static int kh_validate_file_integrity(const char* file_path, long file_size) {
             result = 0;
         }
         
-        /* Rough estimate: each variable needs at least 12 bytes (3 lengths + some data) */
-        long minimum_required_size = (long)sizeof(kh_file_header_t) + 
-                                   (long)header.variable_count * 12;
-        if (file_size < minimum_required_size) {
-            result = 0;
+        /* For version 2, validate hash table size */
+        if (header.version >= 2) {
+            if (header.hash_table_size > 0 && header.hash_table_size < KH_HASH_TABLE_MIN_SIZE) {
+                result = 0;
+            }
+            if (header.data_section_offset >= (uint32_t)file_size) {
+                result = 0;
+            }
         }
     }
     
@@ -616,16 +770,18 @@ static int kh_validate_file_integrity(const char* file_path, long file_size) {
     return result;
 }
 
-/* Read binary file and load all variables - improved error handling and corruption detection */
+/* Read binary file with hash table support - enhanced for indexed format */
 int kh_read_binary_file(const char* file_path, kh_variable_t** variables, int* count) {
     if (!file_path || !variables || !count) return 0;
     
     FILE* file = NULL;
     kh_file_header_t header;
     kh_variable_t* temp_variables = NULL;
+    kh_hash_entry_t* hash_table = NULL;
     int success = 0;
     long file_size = 0;
     long bytes_read = 0;
+    uint32_t format_version = 1;
     
     *variables = NULL;
     *count = 0;
@@ -652,10 +808,12 @@ int kh_read_binary_file(const char* file_path, kh_variable_t** variables, int* c
     }
     bytes_read += sizeof(kh_file_header_t);
     
-    if (header.magic != KHDATA_MAGIC || header.version != KHDATA_VERSION) {
+    if (header.magic != KHDATA_MAGIC || header.version < 1 || header.version > 2) {
         fclose(file);
         return 0;
     }
+    
+    format_version = header.version;
     
     /* Validate variable count */
     if (header.variable_count > 10000 || 
@@ -669,9 +827,34 @@ int kh_read_binary_file(const char* file_path, kh_variable_t** variables, int* c
         return 1; /* Empty file is valid */
     }
     
+    /* For version 2, read hash table */
+    if (format_version >= 2 && header.hash_table_size > 0) {
+        hash_table = (kh_hash_entry_t*)calloc(header.hash_table_size, sizeof(kh_hash_entry_t));
+        if (!hash_table) {
+            fclose(file);
+            return 0;
+        }
+        
+        if (fread(hash_table, sizeof(kh_hash_entry_t), header.hash_table_size, file) != header.hash_table_size) {
+            free(hash_table);
+            fclose(file);
+            return 0;
+        }
+        bytes_read += header.hash_table_size * sizeof(kh_hash_entry_t);
+        
+        /* Seek to data section */
+        if (fseek(file, header.data_section_offset, SEEK_SET) != 0) {
+            free(hash_table);
+            fclose(file);
+            return 0;
+        }
+        bytes_read = header.data_section_offset;
+    }
+    
     /* Allocate variables array */
     temp_variables = (kh_variable_t*)calloc(header.variable_count, sizeof(kh_variable_t));
     if (!temp_variables) {
+        free(hash_table);
         fclose(file);
         return 0;
     }
@@ -775,6 +958,7 @@ int kh_read_binary_file(const char* file_path, kh_variable_t** variables, int* c
     
 cleanup_failure:
     fclose(file);
+    free(hash_table);
     
     if (!success && temp_variables) {
         kh_free_variables(temp_variables, *count);
@@ -785,14 +969,17 @@ cleanup_failure:
     return success;
 }
 
-/* Write binary file with all variables - improved error handling */
+/* Write binary file with hash table indexing - enhanced for indexed format */
 static int kh_write_binary_file(const char* file_path, kh_variable_t* variables, int count) {
     if (!file_path || (!variables && count > 0) || count < 0) return 0;
     
     FILE* file = NULL;
     kh_file_header_t header;
+    kh_hash_entry_t* hash_table = NULL;
     int success = 0;
     char* temp_file_path = NULL;
+    uint32_t hash_table_size = 0;
+    uint32_t data_section_offset = 0;
     
     /* Validate input data before writing */
     for (int i = 0; i < count; i++) {
@@ -821,33 +1008,84 @@ static int kh_write_binary_file(const char* file_path, kh_variable_t* variables,
         }
     }
     
+    /* Create hash table for indexed access */
+    if (count > 0) {
+        hash_table_size = kh_calculate_hash_table_size(count);
+        hash_table = (kh_hash_entry_t*)calloc(hash_table_size, sizeof(kh_hash_entry_t));
+        if (!hash_table) return 0;
+        
+        /* Build hash table using consistent linear probing */
+        for (int i = 0; i < count; i++) {
+            uint32_t name_hash = kh_hash_variable_name(variables[i].name);
+            if (!kh_hash_table_insert(hash_table, hash_table_size, name_hash, i)) {
+                /* Hash table insertion failed - should not happen with proper sizing */
+                free(hash_table);
+                return 0;
+            }
+        }
+    }
+    
+    /* Calculate data section offset with proper alignment */
+    data_section_offset = sizeof(kh_file_header_t) + (hash_table_size * sizeof(kh_hash_entry_t));
+    /* Align to 8-byte boundary for better performance */
+    data_section_offset = (data_section_offset + 7) & ~7;
+    
     /* Create temporary file path for atomic write */
     size_t path_len = strlen(file_path);
     temp_file_path = (char*)malloc(path_len + 10);
-    if (!temp_file_path) return 0;
+    if (!temp_file_path) {
+        free(hash_table);
+        return 0;
+    }
     
     if (strcpy_s(temp_file_path, path_len + 10, file_path) != 0 ||
         strcat_s(temp_file_path, path_len + 10, ".tmp") != 0) {
+        free(hash_table);
         free(temp_file_path);
         return 0;
     }
     
     /* Open temporary file for writing */
     if (fopen_s(&file, temp_file_path, "wb") != 0) {
+        free(hash_table);
         free(temp_file_path);
         return 0;
     }
     
-    /* Write header */
+    /* Write header with version 2 (indexed format) */
+    memset(&header, 0, sizeof(header)); /* Clear reserved fields */
     header.magic = KHDATA_MAGIC;
-    header.version = KHDATA_VERSION;
+    header.version = 2; /* Use version 2 for indexed format */
     header.variable_count = (unsigned int)count;
+    header.hash_table_size = hash_table_size;
+    header.data_section_offset = data_section_offset;
     
     if (fwrite(&header, sizeof(kh_file_header_t), 1, file) != 1) {
         fclose(file);
         DeleteFileA(temp_file_path);
+        free(hash_table);
         free(temp_file_path);
         return 0;
+    }
+    
+    /* Write hash table */
+    if (hash_table_size > 0) {
+        if (fwrite(hash_table, sizeof(kh_hash_entry_t), hash_table_size, file) != hash_table_size) {
+            goto write_failure;
+        }
+    }
+    
+    /* Pad to data section alignment */
+    long current_pos = ftell(file);
+    if (current_pos < 0) {
+        goto write_failure;
+    }
+    
+    while ((uint32_t)current_pos < data_section_offset) {
+        if (fputc(0, file) == EOF) {
+            goto write_failure;
+        }
+        current_pos++;
     }
     
     /* Write variables */
@@ -899,12 +1137,14 @@ static int kh_write_binary_file(const char* file_path, kh_variable_t* variables,
         DeleteFileA(temp_file_path);
     }
     
+    free(hash_table);
     free(temp_file_path);
     return success;
     
 write_failure:
     fclose(file);
     DeleteFileA(temp_file_path);
+    free(hash_table);
     free(temp_file_path);
     return 0;
 }
@@ -1488,7 +1728,7 @@ static int kh_read_khdata_variable_slice(const char* filename, const char* varia
         goto cleanup;
     }
     
-    /* Find specific variable */
+    /* Find specific variable - uses linear search (hash table is internal to file reading) */
     var_index = kh_find_variable(variables, variable_count, clean_var_name);
     if (var_index == -1) {
         kh_set_error(output, output_size, "VARIABLE NOT FOUND");
@@ -1828,7 +2068,7 @@ static int kh_write_khdata_variable(const char* filename, const char* variable_n
         variables[var_index].type = data_type;
     }
     
-    /* Write file */
+    /* Write file with new indexed format */
     if (!kh_write_binary_file(file_path, variables, variable_count)) {
         kh_set_error(output, output_size, "FAILED TO WRITE FILE");
         goto cleanup;

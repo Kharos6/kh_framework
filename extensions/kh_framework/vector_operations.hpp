@@ -576,17 +576,18 @@ static int kh_process_vector_operation(char* output, int output_size, const char
         return 1;
     }
     
+    // Initialize all pointers to NULL
     char* clean_func = NULL;
     char** clean_args = NULL;
-    const vector_function_t* func;
-    int i;
+    const vector_function_t* func = NULL;
     int result = 1;
+    int allocated_args = 0; // Track how many args were successfully allocated
     
-    /* Allocate memory for cleaned function name and arguments */
+    // Allocate with immediate error check and cleanup
     clean_func = (char*)malloc(strlen(argv[0]) + 1);
     if (!clean_func) {
         kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
-        return 1;
+        goto cleanup; // Use goto instead of direct return
     }
     
     kh_clean_string(argv[0], clean_func, (int)strlen(argv[0]) + 1);
@@ -596,34 +597,34 @@ static int kh_process_vector_operation(char* output, int output_size, const char
         goto cleanup;
     }
     
-    /* Find function in whitelist */
     func = kh_find_vector_function(clean_func);
     if (!func) {
         _snprintf_s(output, (size_t)output_size, _TRUNCATE, KH_ERROR_PREFIX "UNKNOWN VECTOR FUNCTION '%s'", clean_func);
         goto cleanup;
     }
     
-    /* Check argument count */
     if (argc - 1 != func->arg_count) {
         _snprintf_s(output, (size_t)output_size, _TRUNCATE, KH_ERROR_PREFIX "FUNCTION '%s' EXPECTS %d ARGUMENTS, GOT %d", 
                  clean_func, func->arg_count, argc - 1);
         goto cleanup;
     }
     
-    /* Allocate and clean arguments */
+    // Allocate arguments array with proper tracking
     if (argc > 1) {
-        clean_args = (char**)calloc((size_t)(argc - 1), sizeof(char*)); // Use calloc to initialize to NULL
+        clean_args = (char**)calloc((size_t)(argc - 1), sizeof(char*));
         if (!clean_args) {
             kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
             goto cleanup;
         }
         
-        for (i = 1; i < argc; i++) {
+        // Allocate individual strings with failure tracking
+        for (int i = 1; i < argc; i++) {
             clean_args[i - 1] = (char*)malloc(strlen(argv[i]) + 1);
             if (!clean_args[i - 1]) {
                 kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
-                goto cleanup; // Now safe because unallocated pointers are NULL
+                goto cleanup; // allocated_args tracks how many were successful
             }
+            allocated_args++; // Increment only after successful allocation
             kh_clean_string(argv[i], clean_args[i - 1], (int)strlen(argv[i]) + 1);
         }
     }
@@ -806,8 +807,9 @@ static int kh_process_vector_operation(char* output, int output_size, const char
 cleanup:
     free(clean_func);
     if (clean_args) {
-        for (i = 1; i < argc; i++) {
-            free(clean_args[i - 1]);
+        // ✅ Only free the successfully allocated arguments
+        for (int j = 0; j < allocated_args; j++) {
+            free(clean_args[j]);
         }
         free(clean_args);
     }

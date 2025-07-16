@@ -31,6 +31,7 @@ typedef struct {
     int value_capacity;  /* Current allocated capacity for value */
     double number;
     int pos;
+    int allocation_failed;
 } token_t;
 
 /* Mathematical function definition */
@@ -52,6 +53,7 @@ typedef struct {
     int error_msg_capacity;
     int recursion_depth;     /* Track recursion depth */
     int operation_count;     /* Track number of operations */
+    int allocation_failed;
 } parser_context_t;
 
 /* Safe mathematical function implementations */
@@ -165,6 +167,12 @@ static const int KH_MATH_FUNCTION_COUNT = sizeof(KH_ALLOWED_MATH_FUNCTIONS) / si
 static inline int kh_check_parser_limits(parser_context_t* ctx) {
     if (!ctx) return 0;
     
+    // Check for allocation failures first
+    if (ctx->allocation_failed || ctx->current_token.allocation_failed) {
+        kh_set_parser_error(ctx, "MEMORY ALLOCATION FAILED DURING PARSING");
+        return 0;
+    }
+    
     if (ctx->recursion_depth >= MAX_RECURSION_DEPTH) {
         kh_set_parser_error(ctx, "MAXIMUM RECURSION DEPTH EXCEEDED");
         return 0;
@@ -182,30 +190,47 @@ static inline int kh_check_parser_limits(parser_context_t* ctx) {
 static inline int kh_init_token(token_t* token) {
     if (!token) return 0;
     
+    // Initialize all fields first
+    memset(token, 0, sizeof(token_t));
+    
     token->value = (char*)malloc(INITIAL_TOKEN_SIZE);
-    if (!token->value) return 0;
+    if (!token->value) {
+        token->allocation_failed = 1;
+        return 0;
+    }
     
     token->value_capacity = INITIAL_TOKEN_SIZE;
     token->value[0] = '\0';
     token->type = TOKEN_END;
     token->number = 0.0;
     token->pos = 0;
+    token->allocation_failed = 0;
     return 1;
 }
 
 /* Resize token value buffer if needed */
 static inline int kh_resize_token_value(token_t* token, int required_size) {
-    if (!token || required_size <= 0) return 0;
+    if (!token || required_size <= 0 || token->allocation_failed) return 0;
     
     if (required_size <= token->value_capacity) return 1;
     
     int new_capacity = token->value_capacity;
     while (new_capacity < required_size) {
         new_capacity *= 2;
+        // Prevent integer overflow
+        if (new_capacity < token->value_capacity) {
+            token->allocation_failed = 1;
+            return 0;
+        }
     }
     
+    // Attempt realloc with fallback
     char* new_value = (char*)realloc(token->value, (size_t)new_capacity);
-    if (!new_value) return 0;
+    if (!new_value) {
+        // Don't modify original on failure
+        token->allocation_failed = 1;
+        return 0;
+    }
     
     token->value = new_value;
     token->value_capacity = new_capacity;
@@ -255,41 +280,63 @@ static inline void kh_free_token(token_t* token) {
 static inline int kh_init_parser_context(parser_context_t* ctx, const char* expr) {
     if (!ctx || !expr) return 0;
     
+    // Initialize everything to safe defaults first
+    memset(ctx, 0, sizeof(parser_context_t));
+    
     ctx->expr = expr;
-    ctx->pos = 0;
     ctx->length = (int)strlen(expr);
     ctx->error_msg_capacity = 512;
+    
+    // Allocate error message buffer
     ctx->error_msg = (char*)malloc((size_t)ctx->error_msg_capacity);
-    ctx->recursion_depth = 0;
-    ctx->operation_count = 0;
-    
-    if (!ctx->error_msg) return 0;
-    
+    if (!ctx->error_msg) {
+        ctx->allocation_failed = 1;
+        return 0;
+    }
     ctx->error_msg[0] = '\0';
     
-    return kh_init_token(&ctx->current_token);
+    // Initialize token with proper error checking
+    if (!kh_init_token(&ctx->current_token)) {
+        free(ctx->error_msg);
+        ctx->error_msg = NULL;
+        ctx->allocation_failed = 1;
+        return 0;
+    }
+    
+    return 1;
 }
 
 /* Set error message with automatic resizing */
 static inline int kh_set_parser_error(parser_context_t* ctx, const char* format, ...) {
-    if (!ctx || !format) return 0;
+    if (!ctx || !format || ctx->allocation_failed) return 0;
     
     va_list args;
     va_start(args, format);
     
-    /* Calculate required size */
     int required_size = _vscprintf(format, args) + 1;
     va_end(args);
     
-    /* Resize error buffer if needed */
+    // Handle allocation failure gracefully
     if (required_size > ctx->error_msg_capacity) {
         int new_capacity = ctx->error_msg_capacity;
-        while (new_capacity < required_size) {
+        while (new_capacity < required_size && new_capacity > 0) {
             new_capacity *= 2;
         }
         
+        if (new_capacity <= 0) { // Integer overflow check
+            ctx->allocation_failed = 1;
+            return 0;
+        }
+        
         char* new_error_msg = (char*)realloc(ctx->error_msg, (size_t)new_capacity);
-        if (!new_error_msg) return 0;
+        if (!new_error_msg) {
+            // Fall back to existing buffer with truncation
+            ctx->allocation_failed = 1;
+            va_start(args, format);
+            _vsnprintf_s(ctx->error_msg, (size_t)ctx->error_msg_capacity, _TRUNCATE, format, args);
+            va_end(args);
+            return 0;
+        }
         
         ctx->error_msg = new_error_msg;
         ctx->error_msg_capacity = new_capacity;
@@ -306,8 +353,12 @@ static inline int kh_set_parser_error(parser_context_t* ctx, const char* format,
 static inline void kh_free_parser_context(parser_context_t* ctx) {
     if (ctx) {
         kh_free_token(&ctx->current_token);
-        free(ctx->error_msg);
-        ctx->error_msg = NULL;
+        if (ctx->error_msg) {
+            free(ctx->error_msg);
+            ctx->error_msg = NULL;
+        }
+        // Reset allocation failure flag
+        ctx->allocation_failed = 0;
     }
 }
 

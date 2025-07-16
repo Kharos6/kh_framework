@@ -101,6 +101,466 @@ void kh_free_variables(kh_variable_t* variables, int count) {
     }
 }
 
+/* Check if file is already in binary format */
+static int kh_is_file_binary(const char* file_path) {
+    if (!file_path) return 0;
+    
+    FILE* file;
+    kh_file_header_t header;
+    int result = 0;
+    
+    if (fopen_s(&file, file_path, "rb") != 0) {
+        return 0; /* File doesn't exist or can't be opened */
+    }
+    
+    /* Try to read header */
+    if (fread(&header, sizeof(kh_file_header_t), 1, file) == 1) {
+        /* Check magic number and version */
+        if (header.magic == KHDATA_MAGIC && header.version == KHDATA_VERSION) {
+            result = 1;
+        }
+    }
+    
+    fclose(file);
+    return result;
+}
+
+/* Parse a single line from text format: variable_name=TYPE:value */
+static int kh_parse_text_line(const char* line, char** name, kh_data_type_t* type, char** value) {
+    if (!line || !name || !type || !value) return 0;
+    
+    *name = NULL;
+    *value = NULL;
+    *type = KH_TYPE_UNKNOWN;
+    
+    /* Skip empty lines and comments */
+    const char* ptr = line;
+    while (*ptr && (*ptr == ' ' || *ptr == '\t')) ptr++;
+    if (*ptr == '\0' || *ptr == '#' || *ptr == '\n' || *ptr == '\r') {
+        return 0; /* Empty line or comment */
+    }
+    
+    /* Find the equals sign */
+    const char* equals_pos = strchr(ptr, '=');
+    if (!equals_pos) return 0;
+    
+    /* Find the colon that separates type from value */
+    const char* colon_pos = strchr(equals_pos + 1, ':');
+    if (!colon_pos) return 0;
+    
+    /* Extract variable name */
+    int name_len = (int)(equals_pos - ptr);
+    while (name_len > 0 && (ptr[name_len-1] == ' ' || ptr[name_len-1] == '\t')) {
+        name_len--; /* Trim trailing whitespace */
+    }
+    
+    if (name_len <= 0) return 0;
+    
+    *name = (char*)malloc((size_t)name_len + 1);
+    if (!*name) return 0;
+    
+    memcpy(*name, ptr, (size_t)name_len);
+    (*name)[name_len] = '\0';
+    
+    /* Extract type */
+    const char* type_start = equals_pos + 1;
+    while (*type_start && (*type_start == ' ' || *type_start == '\t')) type_start++;
+    
+    int type_len = (int)(colon_pos - type_start);
+    while (type_len > 0 && (type_start[type_len-1] == ' ' || type_start[type_len-1] == '\t')) {
+        type_len--; /* Trim trailing whitespace */
+    }
+    
+    if (type_len <= 0) {
+        free(*name);
+        *name = NULL;
+        return 0;
+    }
+    
+    char* type_str = (char*)malloc((size_t)type_len + 1);
+    if (!type_str) {
+        free(*name);
+        *name = NULL;
+        return 0;
+    }
+    
+    memcpy(type_str, type_start, (size_t)type_len);
+    type_str[type_len] = '\0';
+    
+    *type = kh_get_type_from_string(type_str);
+    free(type_str);
+    
+    if (*type == KH_TYPE_UNKNOWN) {
+        free(*name);
+        *name = NULL;
+        return 0;
+    }
+    
+    /* Extract value */
+    const char* value_start = colon_pos + 1;
+    while (*value_start && (*value_start == ' ' || *value_start == '\t')) value_start++;
+    
+    /* Calculate value length, trimming trailing whitespace and newlines */
+    int value_len = (int)strlen(value_start);
+    while (value_len > 0 && (value_start[value_len-1] == ' ' || value_start[value_len-1] == '\t' || 
+                            value_start[value_len-1] == '\n' || value_start[value_len-1] == '\r')) {
+        value_len--;
+    }
+    
+    *value = (char*)malloc((size_t)value_len + 1);
+    if (!*value) {
+        free(*name);
+        *name = NULL;
+        return 0;
+    }
+    
+    if (value_len > 0) {
+        memcpy(*value, value_start, (size_t)value_len);
+    }
+    (*value)[value_len] = '\0';
+    
+    return 1;
+}
+
+/* Read text format file and convert to variables array */
+static int kh_read_text_file(const char* file_path, kh_variable_t** variables, int* count) {
+    if (!file_path || !variables || !count) return 0;
+    
+    FILE* file;
+    char* line_buffer = NULL;
+    int buffer_size = 1024;
+    kh_variable_t* temp_variables = NULL;
+    int temp_count = 0;
+    int temp_capacity = 16;
+    int success = 1;
+    
+    *variables = NULL;
+    *count = 0;
+    
+    if (fopen_s(&file, file_path, "r") != 0) {
+        return 0;
+    }
+    
+    /* Allocate initial arrays */
+    line_buffer = (char*)malloc((size_t)buffer_size);
+    temp_variables = (kh_variable_t*)calloc((size_t)temp_capacity, sizeof(kh_variable_t));
+    
+    if (!line_buffer || !temp_variables) {
+        success = 0;
+        goto cleanup;
+    }
+    
+    /* Read line by line */
+    while (fgets(line_buffer, buffer_size, file)) {
+        /* Resize line buffer if needed */
+        while (strlen(line_buffer) == (size_t)buffer_size - 1 && line_buffer[buffer_size - 2] != '\n') {
+            buffer_size *= 2;
+            char* new_buffer = (char*)realloc(line_buffer, (size_t)buffer_size);
+            if (!new_buffer) {
+                success = 0;
+                goto cleanup;
+            }
+            line_buffer = new_buffer;
+            
+            /* Continue reading the rest of the line */
+            if (!fgets(line_buffer + strlen(line_buffer), buffer_size - (int)strlen(line_buffer), file)) {
+                break;
+            }
+        }
+        
+        char* name = NULL;
+        kh_data_type_t type;
+        char* value = NULL;
+        
+        if (kh_parse_text_line(line_buffer, &name, &type, &value)) {
+            /* Resize variables array if needed */
+            if (temp_count >= temp_capacity) {
+                temp_capacity *= 2;
+                kh_variable_t* new_variables = (kh_variable_t*)realloc(temp_variables, 
+                                                (size_t)temp_capacity * sizeof(kh_variable_t));
+                if (!new_variables) {
+                    free(name);
+                    free(value);
+                    success = 0;
+                    goto cleanup;
+                }
+                temp_variables = new_variables;
+                
+                /* Initialize new memory to zero */
+                memset(&temp_variables[temp_count], 0, 
+                       (size_t)(temp_capacity - temp_count) * sizeof(kh_variable_t));
+            }
+            
+            /* Store the variable */
+            temp_variables[temp_count].name = name;
+            temp_variables[temp_count].type = type;
+            temp_variables[temp_count].value = value;
+            temp_count++;
+        }
+    }
+    
+    /* Success - transfer ownership */
+    *variables = temp_variables;
+    *count = temp_count;
+    temp_variables = NULL; /* Prevent cleanup */
+
+cleanup:
+    fclose(file);
+    free(line_buffer);
+    
+    if (!success && temp_variables) {
+        /* Free partially allocated variables on failure */
+        for (int i = 0; i < temp_count; i++) {
+            free(temp_variables[i].name);
+            free(temp_variables[i].value);
+        }
+        free(temp_variables);
+    }
+    
+    return success;
+}
+
+/* Write variables array to text format file */
+static int kh_write_text_file(const char* file_path, kh_variable_t* variables, int count) {
+    if (!file_path || (!variables && count > 0)) return 0;
+    
+    FILE* file;
+    int success = 1;
+    
+    if (fopen_s(&file, file_path, "w") != 0) {
+        return 0;
+    }
+    
+    /* Write header comment */
+    fprintf(file, "# Unbinarized KHDATA\n");
+    fprintf(file, "# Format: variable_name=TYPE:value\n");
+    fprintf(file, "# Allowed Types:\n     # BOOL:true\n     # SCALAR:0\n     # ARRAY:[element1, element2, element3]\n     # HASHMAP:[[key, value]]\n     # STRING:string\n     # TEXT:text\n     # CODE:code\n\n");
+    
+    /* Write variables */
+    for (int i = 0; i < count; i++) {
+        if (!variables[i].name || !variables[i].value) {
+            success = 0;
+            break;
+        }
+        
+        const char* type_str = kh_get_string_from_type(variables[i].type);
+        
+        if (fprintf(file, "%s=%s:%s\n", 
+                   variables[i].name, type_str, variables[i].value) < 0) {
+            success = 0;
+            break;
+        }
+    }
+    
+    fclose(file);
+    return success;
+}
+
+/* Convert text format file to binary format */
+static int kh_convert_text_to_binary(const char* file_path) {
+    if (!file_path) return 0;
+    
+    kh_variable_t* variables = NULL;
+    int variable_count = 0;
+    char* temp_file_path = NULL;
+    int result = 0;
+    
+    /* Read text format */
+    if (!kh_read_text_file(file_path, &variables, &variable_count)) {
+        return 0;
+    }
+    
+    /* Create temporary file path */
+    size_t path_len = strlen(file_path);
+    temp_file_path = (char*)malloc(path_len + 10); /* +10 for ".tmp" + null */
+    if (!temp_file_path) {
+        goto cleanup;
+    }
+    
+    strcpy_s(temp_file_path, path_len + 10, file_path);
+    strcat_s(temp_file_path, path_len + 10, ".tmp");
+    
+    /* Write binary format to temporary file */
+    if (!kh_write_binary_file(temp_file_path, variables, variable_count)) {
+        goto cleanup;
+    }
+    
+    /* Replace original file with temporary file */
+    if (DeleteFileA(file_path) && MoveFileA(temp_file_path, file_path)) {
+        result = 1;
+    } else {
+        DeleteFileA(temp_file_path); /* Clean up temp file if move failed */
+    }
+
+cleanup:
+    kh_free_variables(variables, variable_count);
+    free(temp_file_path);
+    return result;
+}
+
+/* Convert binary format file to text format */
+static int kh_convert_binary_to_text(const char* file_path) {
+    if (!file_path) return 0;
+    
+    kh_variable_t* variables = NULL;
+    int variable_count = 0;
+    char* temp_file_path = NULL;
+    int result = 0;
+    
+    /* Read binary format */
+    if (!kh_read_binary_file(file_path, &variables, &variable_count)) {
+        return 0;
+    }
+    
+    /* Create temporary file path */
+    size_t path_len = strlen(file_path);
+    temp_file_path = (char*)malloc(path_len + 10); /* +10 for ".tmp" + null */
+    if (!temp_file_path) {
+        goto cleanup;
+    }
+    
+    strcpy_s(temp_file_path, path_len + 10, file_path);
+    strcat_s(temp_file_path, path_len + 10, ".tmp");
+    
+    /* Write text format to temporary file */
+    if (!kh_write_text_file(temp_file_path, variables, variable_count)) {
+        goto cleanup;
+    }
+    
+    /* Replace original file with temporary file */
+    if (DeleteFileA(file_path) && MoveFileA(temp_file_path, file_path)) {
+        result = 1;
+    } else {
+        DeleteFileA(temp_file_path); /* Clean up temp file if move failed */
+    }
+
+cleanup:
+    kh_free_variables(variables, variable_count);
+    free(temp_file_path);
+    return result;
+}
+
+/* Ensure file is in binary format before reading/writing */
+static int kh_ensure_binary_format(const char* file_path) {
+    if (!file_path) return 0;
+    
+    /* Check if file exists */
+    DWORD file_attributes = GetFileAttributesA(file_path);
+    if (file_attributes == INVALID_FILE_ATTRIBUTES) {
+        return 1; /* File doesn't exist, no conversion needed */
+    }
+    
+    /* Check if already binary */
+    if (kh_is_file_binary(file_path)) {
+        return 1; /* Already binary */
+    }
+    
+    /* Convert to binary */
+    return kh_convert_text_to_binary(file_path);
+}
+
+/* Main UnbinarizeKHData function - convert binary to text format */
+static int kh_unbinarize_khdata(const char* filename, char* output, int output_size) {
+    if (!kh_validate_non_empty_string(filename, "FILENAME", output, output_size)) {
+        return 1;
+    }
+    
+    char file_path[MAX_PATH_LENGTH];
+    char* clean_filename = NULL;
+    int result = 1;
+    
+    clean_filename = (char*)malloc(strlen(filename) + 1);
+    if (!clean_filename) {
+        kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
+        return 1;
+    }
+    
+    kh_clean_string(filename, clean_filename, (int)strlen(filename) + 1);
+    
+    if (!kh_get_khdata_file_path(clean_filename, file_path, sizeof(file_path))) {
+        kh_set_error(output, output_size, "INVALID PATH");
+        goto cleanup;
+    }
+    
+    /* Check if file exists */
+    DWORD file_attributes = GetFileAttributesA(file_path);
+    if (file_attributes == INVALID_FILE_ATTRIBUTES) {
+        kh_set_error(output, output_size, "FILE NOT FOUND");
+        goto cleanup;
+    }
+    
+    /* Check if already in text format */
+    if (!kh_is_file_binary(file_path)) {
+        strcpy_s(output, (size_t)output_size, "ALREADY_TEXT_FORMAT");
+        result = 0;
+        goto cleanup;
+    }
+    
+    /* Convert binary to text */
+    if (!kh_convert_binary_to_text(file_path)) {
+        kh_set_error(output, output_size, "CONVERSION_FAILED");
+        goto cleanup;
+    }
+    
+    strcpy_s(output, (size_t)output_size, "SUCCESS");
+    result = 0;
+
+cleanup:
+    free(clean_filename);
+    return result;
+}
+
+/* Main BinarizeKHData function - convert text to binary format */
+static int kh_binarize_khdata(const char* filename, char* output, int output_size) {
+    if (!kh_validate_non_empty_string(filename, "FILENAME", output, output_size)) {
+        return 1;
+    }
+    
+    char file_path[MAX_PATH_LENGTH];
+    char* clean_filename = NULL;
+    int result = 1;
+    
+    clean_filename = (char*)malloc(strlen(filename) + 1);
+    if (!clean_filename) {
+        kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
+        return 1;
+    }
+    
+    kh_clean_string(filename, clean_filename, (int)strlen(filename) + 1);
+    
+    if (!kh_get_khdata_file_path(clean_filename, file_path, sizeof(file_path))) {
+        kh_set_error(output, output_size, "INVALID PATH");
+        goto cleanup;
+    }
+    
+    /* Check if file exists */
+    DWORD file_attributes = GetFileAttributesA(file_path);
+    if (file_attributes == INVALID_FILE_ATTRIBUTES) {
+        kh_set_error(output, output_size, "FILE NOT FOUND");
+        goto cleanup;
+    }
+    
+    /* Check if already in binary format */
+    if (kh_is_file_binary(file_path)) {
+        strcpy_s(output, (size_t)output_size, "ALREADY_BINARY_FORMAT");
+        result = 0;
+        goto cleanup;
+    }
+    
+    /* Convert text to binary */
+    if (!kh_convert_text_to_binary(file_path)) {
+        kh_set_error(output, output_size, "CONVERSION_FAILED");
+        goto cleanup;
+    }
+    
+    strcpy_s(output, (size_t)output_size, "SUCCESS");
+    result = 0;
+
+cleanup:
+    free(clean_filename);
+    return result;
+}
+
 /* Find variable by name (case-insensitive) - optimized with early exit */
 static inline int kh_find_variable(kh_variable_t* variables, int count, const char* name) {
     if (!variables || !name || count <= 0) return -1;
@@ -271,6 +731,7 @@ int kh_read_binary_file(const char* file_path, kh_variable_t** variables, int* c
         }
         
         if (fread(type_str, type_len, 1, file) != 1) {
+            free(type_str);
             success = 0;
             break;
         }
@@ -503,6 +964,11 @@ static int kh_parse_full_hashmap(const char* input, char*** entries, int max_ent
     /* Allocate array of string pointers */
     *entries = (char**)malloc((size_t)max_entries * sizeof(char*));
     if (!*entries) return 0;
+
+    /* Initialize all pointers to NULL for safe cleanup */
+    for (int i = 0; i < max_entries; i++) {
+        (*entries)[i] = NULL;
+    }
     
     /* Skip whitespace and find opening bracket */
     while (*ptr && (*ptr == ' ' || *ptr == '\t' || *ptr == '\n' || *ptr == '\r')) ptr++;
@@ -530,8 +996,15 @@ static int kh_parse_full_hashmap(const char* input, char*** entries, int max_ent
                     memcpy((*entries)[entry_count], entry_start, (size_t)entry_len);
                     (*entries)[entry_count][entry_len] = '\0';
                     entry_count++;
+                } else {
+                    /* Allocation failed - cleanup and return */
+                    for (int i = 0; i < entry_count; i++) {
+                        free((*entries)[i]);
+                    }
+                    free(*entries);
+                    *entries = NULL;
+                    return 0;
                 }
-                entry_start = NULL;
             }
         }
         ptr++;
@@ -567,7 +1040,14 @@ static int kh_merge_hashmap(const char* existing_hashmap, const char* new_entry,
                 /* Format the new entry */
                 size_t formatted_len = strlen(key) + strlen(value) + 10;
                 formatted_entry = (char*)malloc(formatted_len);
-                if (!formatted_entry) goto cleanup;
+                if (!formatted_entry) {
+                    // Free current iteration's allocations before goto
+                    free(key);
+                    free(value);
+                    key = NULL;
+                    value = NULL;
+                    goto cleanup;
+                }
                 
                 _snprintf_s(formatted_entry, formatted_len, _TRUNCATE, "[\"%s\", %s]", key, value);
                 
@@ -605,7 +1085,14 @@ static int kh_merge_hashmap(const char* existing_hashmap, const char* new_entry,
         if (kh_parse_hashmap_entry(new_entry, &key, &value)) {
             size_t formatted_len = strlen(key) + strlen(value) + 10;
             formatted_entry = (char*)malloc(formatted_len);
-            if (!formatted_entry) goto cleanup;
+            if (!formatted_entry) {
+                // Free current allocations before goto
+                free(key);
+                free(value);
+                key = NULL;
+                value = NULL;
+                goto cleanup;
+            }
             
             _snprintf_s(formatted_entry, formatted_len, _TRUNCATE, "[\"%s\", %s]", key, value);
             
@@ -763,6 +1250,12 @@ static int kh_read_khdata_variable_slice(const char* filename, const char* varia
     kh_clean_string(variable_name, clean_var_name, (int)strlen(variable_name) + 1);
     kh_clean_string(filename, clean_filename, (int)strlen(filename) + 1);
     
+    /* Ensure file is in binary format before reading */
+    if (!kh_ensure_binary_format(file_path)) {
+        kh_set_error(output, output_size, "FAILED TO CONVERT TO BINARY FORMAT");
+        goto cleanup;
+    }
+    
     if (!kh_read_binary_file(file_path, &variables, &variable_count)) {
         kh_set_error(output, output_size, "FILE NOT FOUND OR CORRUPTED");
         goto cleanup;
@@ -870,6 +1363,117 @@ cleanup:
     return result;
 }
 
+/* Calculate the formatted size of a variable's output - optimized */
+static long kh_get_variable_formatted_size(const char* filename, const char* variable_name) {
+    if (!filename || !variable_name) return -1;
+    
+    char file_path[MAX_PATH_LENGTH];
+    char* clean_var_name = NULL;
+    char* clean_filename = NULL;
+    kh_variable_t* variables = NULL;
+    int variable_count = 0;
+    int var_index;
+    long total_size = 0;
+    
+    /* Allocate memory for cleaned strings */
+    clean_var_name = (char*)malloc(strlen(variable_name) + 1);
+    clean_filename = (char*)malloc(strlen(filename) + 1);
+    
+    if (!clean_var_name || !clean_filename) {
+        free(clean_var_name);
+        free(clean_filename);
+        return -1;
+    }
+    
+    if (!kh_get_khdata_file_path(filename, file_path, sizeof(file_path))) {
+        free(clean_var_name);
+        free(clean_filename);
+        return -1;
+    }
+    
+    kh_clean_string(variable_name, clean_var_name, (int)strlen(variable_name) + 1);
+    kh_clean_string(filename, clean_filename, (int)strlen(filename) + 1);
+    
+    /* Ensure file is in binary format before reading */
+    if (!kh_ensure_binary_format(file_path)) {
+        free(clean_var_name);
+        free(clean_filename);
+        return -1;
+    }
+    
+    if (!kh_read_binary_file(file_path, &variables, &variable_count)) {
+        free(clean_var_name);
+        free(clean_filename);
+        return -1;
+    }
+    
+    /* Special case: variable name equals filename (return size of all variable names array) */
+    if (kh_strcasecmp(clean_var_name, clean_filename) == 0) {
+        total_size = 2; /* Opening and closing brackets */
+        
+        for (int i = 0; i < variable_count; i++) {
+            if (i > 0) {
+                total_size += 2; /* ", " separator */
+            }
+            if (variables[i].name) {
+                total_size += (long)strlen(variables[i].name) + 2; /* Name with quotes */
+            }
+        }
+        
+        free(clean_var_name);
+        free(clean_filename);
+        kh_free_variables(variables, variable_count);
+        return total_size;
+    }
+    
+    /* Find specific variable using external function to avoid code duplication */
+    var_index = kh_find_variable(variables, variable_count, clean_var_name);
+    if (var_index == -1) {
+        free(clean_var_name);
+        free(clean_filename);
+        kh_free_variables(variables, variable_count);
+        return -1;
+    }
+    
+    /* Calculate size of formatted output ["TYPE", value] */
+    const char* type_str = kh_get_string_from_type(variables[var_index].type);
+    if (type_str && variables[var_index].value) {
+        total_size = (long)strlen(type_str) + (long)strlen(variables[var_index].value) + 6; /* ["", ] formatting */
+    }
+    
+    free(clean_var_name);
+    free(clean_filename);
+    kh_free_variables(variables, variable_count);
+    return total_size;
+}
+
+/* Calculate how many slices a variable would need - optimized */
+static int kh_calculate_slice_count(const char* filename, const char* variable_name, char* output, int output_size) {
+    /* Validate inputs */
+    if (!kh_validate_non_empty_string(filename, "FILENAME", output, output_size) ||
+        !kh_validate_non_empty_string(variable_name, "VARIABLE NAME", output, output_size)) {
+        return 1;
+    }
+    
+    long data_size = kh_get_variable_formatted_size(filename, variable_name);
+    
+    if (data_size < 0) {
+        kh_set_error(output, output_size, "VARIABLE NOT FOUND OR CONVERSION FAILED");
+        return 1;
+    }
+    
+    if (data_size == 0) {
+        strcpy_s(output, (size_t)output_size, "1"); /* Empty data still needs 1 slice */
+        return 0;
+    }
+    
+    /* Calculate number of slices needed (ceiling division) */
+    int slice_count = (int)((data_size + SLICE_SIZE - 1) / SLICE_SIZE);
+    
+    _snprintf_s(output, (size_t)output_size, _TRUNCATE, "%d", slice_count);
+    return 0;
+}
+
 /* Enhanced write function with better memory management */
 static int kh_write_khdata_variable(const char* filename, const char* variable_name, const char* value, 
                                   const char* type_str, const char* overwrite_str, char* output, int output_size) {
@@ -928,6 +1532,12 @@ static int kh_write_khdata_variable(const char* filename, const char* variable_n
         goto cleanup;
     }
     
+    /* Ensure file is in binary format before reading */
+    if (!kh_ensure_binary_format(file_path)) {
+        kh_set_error(output, output_size, "FAILED TO CONVERT TO BINARY FORMAT");
+        goto cleanup;
+    }
+    
     /* Read existing file */
     if (!kh_read_binary_file(file_path, &variables, &variable_count)) {
         variable_count = 0;
@@ -938,6 +1548,12 @@ static int kh_write_khdata_variable(const char* filename, const char* variable_n
     var_index = kh_find_variable(variables, variable_count, clean_var_name);
     
     if (var_index != -1 && !overwrite_flag) {
+        /* Check for type mismatch */
+        if (variables[var_index].type != data_type) {
+            kh_set_error(output, output_size, "TYPE MISMATCH - USE OVERWRITE TO CHANGE TYPE");
+            goto cleanup;
+        }
+
         /* Combine with existing value */
         if (!kh_combine_values(data_type, variables[var_index].value, clean_value, 
                              overwrite_flag, combined_value, (int)strlen(value) * 2 + 1024)) {

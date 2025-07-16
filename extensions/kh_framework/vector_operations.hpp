@@ -612,7 +612,7 @@ static int kh_process_vector_operation(char* output, int output_size, const char
     
     /* Allocate and clean arguments */
     if (argc > 1) {
-        clean_args = (char**)malloc((size_t)(argc - 1) * sizeof(char*));
+        clean_args = (char**)calloc((size_t)(argc - 1), sizeof(char*)); // Use calloc to initialize to NULL
         if (!clean_args) {
             kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
             goto cleanup;
@@ -622,7 +622,7 @@ static int kh_process_vector_operation(char* output, int output_size, const char
             clean_args[i - 1] = (char*)malloc(strlen(argv[i]) + 1);
             if (!clean_args[i - 1]) {
                 kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
-                goto cleanup;
+                goto cleanup; // Now safe because unallocated pointers are NULL
             }
             kh_clean_string(argv[i], clean_args[i - 1], (int)strlen(argv[i]) + 1);
         }

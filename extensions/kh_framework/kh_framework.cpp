@@ -7,7 +7,6 @@
 #include "rv_extension_utils.hpp"
 #include "common_defines.hpp"
 #include "process_kh_data.hpp"
-#include "slice_data.hpp"
 #include "generate_random_string.hpp"
 #include "math_operations.hpp"
 #include "vector_operations.hpp"
@@ -28,7 +27,9 @@ static const function_info_t FUNCTION_TABLE[] = {
     {"ReadKHData", 2, 3, 'R'},
     {"WriteKHData", 4, 5, 'W'},
     {"MathOperation", 1, 1, 'M'},
-    {"VectorOperation", 1, 4, 'V'}
+    {"VectorOperation", 1, 4, 'V'},
+    {"UnbinarizeKHData", 1, 1, 'U'},
+    {"BinarizeKHData", 1, 1, 'B'}
 };
 
 static const int FUNCTION_COUNT = sizeof(FUNCTION_TABLE) / sizeof(function_info_t);
@@ -156,6 +157,18 @@ __declspec(dllexport) int RVExtensionArgs(char *output, unsigned int output_size
         case 'V': /* VectorOperation */
             if (strcmp(function, "VectorOperation") == 0) {
                 return kh_process_vector_operation(output, output_size, argv, argc);
+            }
+            break;
+            
+        case 'U': /* UnbinarizeKHData */
+            if (strcmp(function, "UnbinarizeKHData") == 0) {
+                return kh_unbinarize_khdata(argv[0], output, output_size);
+            }
+            break;
+            
+        case 'B': /* BinarizeKHData */
+            if (strcmp(function, "BinarizeKHData") == 0) {
+                return kh_binarize_khdata(argv[0], output, output_size);
             }
             break;
             

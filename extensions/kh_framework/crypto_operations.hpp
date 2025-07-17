@@ -420,7 +420,7 @@ static int kh_process_crypto_operation(char* output, int output_size, const char
     if (!output || output_size <= 0 || !argv || argc != 2) {
         if (output && output_size > 0) {
             if (argc != 2) {
-                kh_set_error(output, output_size, "CRYPTO OPERATION REQUIRES EXACTLY 2 ARGUMENTS: TYPE AND DATA");
+                kh_set_error(output, output_size, "CRYPTO OPERATION REQUIRES 2 ARGUMENTS");
             } else {
                 kh_set_error(output, output_size, "INVALID PARAMETERS");
             }

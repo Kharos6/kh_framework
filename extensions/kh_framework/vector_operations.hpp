@@ -26,6 +26,12 @@ typedef struct {
     double pitch, yaw, roll;  /* Euler angles in degrees */
 } euler_t;
 
+/* New structure for vectorDirAndUp */
+typedef struct {
+    vector3_t dir;  /* vectorDir - forward direction */
+    vector3_t up;   /* vectorUp - up direction */
+} dir_up_t;
+
 /* Vector function types for dispatch table */
 typedef enum {
     VEC_FUNC_V3_TO_SCALAR,    /* Vector3 -> Scalar */
@@ -39,6 +45,10 @@ typedef enum {
     VEC_FUNC_QUAT_TO_QUAT,    /* Quaternion -> Quaternion */
     VEC_FUNC_QUATQUAT_TO_QUAT,/* Quaternion, Quaternion -> Quaternion */
     VEC_FUNC_V3QUAT_TO_V3,    /* Vector3, Quaternion -> Vector3 */
+    VEC_FUNC_QUAT_TO_DIRUP,   /* Quaternion -> DirUp */
+    VEC_FUNC_EULER_TO_DIRUP,  /* Euler -> DirUp */
+    VEC_FUNC_DIRUP_TO_QUAT,   /* DirUp -> Quaternion */
+    VEC_FUNC_DIRUP_TO_EULER,  /* DirUp -> Euler */
     VEC_FUNC_SPECIAL          /* Special handling required */
 } vector_func_type_t;
 
@@ -320,6 +330,89 @@ static inline quaternion_t kh_quat_slerp(quaternion_t a, quaternion_t b, double 
     return kh_quat_normalize(result);
 }
 
+/* Convert quaternion to vectorDirAndUp */
+static inline dir_up_t kh_quat_to_dir_up(quaternion_t q) {
+    q = kh_quat_normalize(q);
+    
+    dir_up_t result;
+    
+    /* Default forward direction is [0,1,0] (Y-axis) */
+    vector3_t forward = {0.0, 1.0, 0.0};
+    /* Default up direction is [0,0,1] (Z-axis) */
+    vector3_t up = {0.0, 0.0, 1.0};
+    
+    /* Rotate the default directions by the quaternion */
+    result.dir = kh_quat_rotate_vector(forward, q);
+    result.up = kh_quat_rotate_vector(up, q);
+    
+    return result;
+}
+
+/* Convert euler angles to vectorDirAndUp */
+static inline dir_up_t kh_euler_to_dir_up(euler_t euler) {
+    quaternion_t q = kh_euler_to_quaternion(euler);
+    return kh_quat_to_dir_up(q);
+}
+
+/* Convert vectorDirAndUp to quaternion */
+static inline quaternion_t kh_dir_up_to_quat(dir_up_t dir_up) {
+    /* Normalize the input vectors */
+    vector3_t dir = kh_vec3_normalize(dir_up.dir);
+    vector3_t up = kh_vec3_normalize(dir_up.up);
+    
+    /* Calculate right vector using cross product */
+    vector3_t right = kh_vec3_cross(dir, up);
+    right = kh_vec3_normalize(right);
+    
+    /* Recalculate up to ensure orthogonality */
+    up = kh_vec3_cross(right, dir);
+    up = kh_vec3_normalize(up);
+    
+    /* Build rotation matrix */
+    /* Matrix layout: right=X, dir=Y, up=Z */
+    double m00 = right.x, m01 = dir.x, m02 = up.x;
+    double m10 = right.y, m11 = dir.y, m12 = up.y;
+    double m20 = right.z, m21 = dir.z, m22 = up.z;
+    
+    /* Convert rotation matrix to quaternion */
+    double trace = m00 + m11 + m22;
+    quaternion_t q;
+    
+    if (trace > 0.0) {
+        double s = sqrt(trace + 1.0) * 2.0; /* s = 4 * qw */
+        q.w = 0.25 * s;
+        q.x = (m21 - m12) / s;
+        q.y = (m02 - m20) / s;
+        q.z = (m10 - m01) / s;
+    } else if (m00 > m11 && m00 > m22) {
+        double s = sqrt(1.0 + m00 - m11 - m22) * 2.0; /* s = 4 * qx */
+        q.w = (m21 - m12) / s;
+        q.x = 0.25 * s;
+        q.y = (m01 + m10) / s;
+        q.z = (m02 + m20) / s;
+    } else if (m11 > m22) {
+        double s = sqrt(1.0 + m11 - m00 - m22) * 2.0; /* s = 4 * qy */
+        q.w = (m02 - m20) / s;
+        q.x = (m01 + m10) / s;
+        q.y = 0.25 * s;
+        q.z = (m12 + m21) / s;
+    } else {
+        double s = sqrt(1.0 + m22 - m00 - m11) * 2.0; /* s = 4 * qz */
+        q.w = (m10 - m01) / s;
+        q.x = (m02 + m20) / s;
+        q.y = (m12 + m21) / s;
+        q.z = 0.25 * s;
+    }
+    
+    return kh_quat_normalize(q);
+}
+
+/* Convert vectorDirAndUp to euler angles */
+static inline euler_t kh_dir_up_to_euler(dir_up_t dir_up) {
+    quaternion_t q = kh_dir_up_to_quat(dir_up);
+    return kh_quaternion_to_euler(q);
+}
+
 /* Enhanced input parsing functions with better error handling */
 static int kh_parse_vector3(const char* input, vector3_t* result) {
     if (!input || !result) return 0;
@@ -358,6 +451,88 @@ static int kh_parse_vector3(const char* input, vector3_t* result) {
     }
     
     return 0; /* Wrong number of values */
+}
+
+/* NEW: Parse vectorDirAndUp format like [[0,1,0],[0,0,1]] */
+static int kh_parse_dir_up(const char* input, dir_up_t* result) {
+    if (!input || !result) return 0;
+    
+    const char* ptr = input;
+    int bracket_depth = 0;
+    int vector_count = 0;
+    const char* vector_starts[2] = {NULL, NULL};
+    const char* vector_ends[2] = {NULL, NULL};
+    
+    /* Skip initial whitespace */
+    while (*ptr && isspace(*ptr)) ptr++;
+    
+    /* Must start with opening bracket */
+    if (*ptr != '[') return 0;
+    ptr++;
+    bracket_depth = 1;
+    
+    /* Find the two vector components */
+    while (*ptr && bracket_depth > 0 && vector_count < 2) {
+        /* Skip whitespace */
+        while (*ptr && isspace(*ptr)) ptr++;
+        
+        if (*ptr == '[') {
+            /* Found start of a vector */
+            vector_starts[vector_count] = ptr;
+            bracket_depth++;
+            ptr++;
+            
+            /* Find the end of this vector */
+            while (*ptr && bracket_depth > 1) {
+                if (*ptr == '[') {
+                    bracket_depth++;
+                } else if (*ptr == ']') {
+                    bracket_depth--;
+                    if (bracket_depth == 1) {
+                        vector_ends[vector_count] = ptr + 1; /* Include the closing bracket */
+                        vector_count++;
+                    }
+                }
+                ptr++;
+            }
+        } else if (*ptr == ']') {
+            bracket_depth--;
+            ptr++;
+        } else if (*ptr == ',') {
+            ptr++;
+        } else {
+            ptr++;
+        }
+    }
+    
+    /* Must have found exactly 2 vectors */
+    if (vector_count != 2) return 0;
+    
+    /* Parse each vector */
+    char* dir_str = (char*)malloc((size_t)(vector_ends[0] - vector_starts[0] + 1));
+    char* up_str = (char*)malloc((size_t)(vector_ends[1] - vector_starts[1] + 1));
+    
+    if (!dir_str || !up_str) {
+        free(dir_str);
+        free(up_str);
+        return 0;
+    }
+    
+    /* Copy vector strings */
+    memcpy(dir_str, vector_starts[0], (size_t)(vector_ends[0] - vector_starts[0]));
+    dir_str[vector_ends[0] - vector_starts[0]] = '\0';
+    
+    memcpy(up_str, vector_starts[1], (size_t)(vector_ends[1] - vector_starts[1]));
+    up_str[vector_ends[1] - vector_starts[1]] = '\0';
+    
+    /* Parse the vectors */
+    int dir_ok = kh_parse_vector3(dir_str, &result->dir);
+    int up_ok = kh_parse_vector3(up_str, &result->up);
+    
+    free(dir_str);
+    free(up_str);
+    
+    return (dir_ok && up_ok) ? 1 : 0;
 }
 
 static int kh_parse_quaternion(const char* input, quaternion_t* result) {
@@ -451,6 +626,15 @@ static inline void kh_format_vector3(vector3_t v, char* output, int output_size)
     _snprintf_s(output, (size_t)output_size, _TRUNCATE, "[%.6g,%.6g,%.6g]", v.x, v.y, v.z);
 }
 
+/* NEW: Format vectorDirAndUp as [[x,y,z],[x,y,z]] */
+static inline void kh_format_dir_up(dir_up_t dir_up, char* output, int output_size) {
+    if (!output || output_size <= 0) return;
+    _snprintf_s(output, (size_t)output_size, _TRUNCATE, 
+                "[[%.6g,%.6g,%.6g],[%.6g,%.6g,%.6g]]", 
+                dir_up.dir.x, dir_up.dir.y, dir_up.dir.z,
+                dir_up.up.x, dir_up.up.y, dir_up.up.z);
+}
+
 static inline void kh_format_quaternion(quaternion_t q, char* output, int output_size) {
     if (!output || output_size <= 0) return;
     _snprintf_s(output, (size_t)output_size, _TRUNCATE, "[%.6g,%.6g,%.6g,%.6g]", q.w, q.x, q.y, q.z);
@@ -496,6 +680,12 @@ static inline quaternion_t kh_quat_slerp_impl(quaternion_t a, quaternion_t b, do
 
 static inline vector3_t kh_quat_rotate_impl(vector3_t v, quaternion_t q) { return kh_quat_rotate_vector(v, q); }
 
+/* NEW: VectorDirAndUp implementation functions */
+static inline dir_up_t kh_quat_to_dir_up_impl(quaternion_t q) { return kh_quat_to_dir_up(q); }
+static inline dir_up_t kh_euler_to_dir_up_impl(euler_t e) { return kh_euler_to_dir_up(e); }
+static inline quaternion_t kh_dir_up_to_quat_impl(dir_up_t du) { return kh_dir_up_to_quat(du); }
+static inline euler_t kh_dir_up_to_euler_impl(dir_up_t du) { return kh_dir_up_to_euler(du); }
+
 /* Whitelist of allowed vector functions - SECURITY CRITICAL */
 static const vector_function_t KH_ALLOWED_VECTOR_FUNCTIONS[] = {
     /* Vector3 to Scalar operations */
@@ -534,6 +724,16 @@ static const vector_function_t KH_ALLOWED_VECTOR_FUNCTIONS[] = {
     /* Quaternion to Euler conversion */
     {"quattoeuler", VEC_FUNC_QUAT_TO_EULER, 1, (void*)kh_quat_to_euler_impl, "Convert quaternion to Euler angles"},
     {"quat2euler", VEC_FUNC_QUAT_TO_EULER, 1, (void*)kh_quat_to_euler_impl, "Convert quaternion to Euler angles (alias)"},
+    
+    /* NEW: VectorDirAndUp conversions */
+    {"quattodirup", VEC_FUNC_QUAT_TO_DIRUP, 1, (void*)kh_quat_to_dir_up_impl, "Convert quaternion to vectorDirAndUp"},
+    {"quat2dirup", VEC_FUNC_QUAT_TO_DIRUP, 1, (void*)kh_quat_to_dir_up_impl, "Convert quaternion to vectorDirAndUp (alias)"},
+    {"eulertodirup", VEC_FUNC_EULER_TO_DIRUP, 1, (void*)kh_euler_to_dir_up_impl, "Convert Euler angles to vectorDirAndUp"},
+    {"euler2dirup", VEC_FUNC_EULER_TO_DIRUP, 1, (void*)kh_euler_to_dir_up_impl, "Convert Euler angles to vectorDirAndUp (alias)"},
+    {"diruptoquat", VEC_FUNC_DIRUP_TO_QUAT, 1, (void*)kh_dir_up_to_quat_impl, "Convert vectorDirAndUp to quaternion"},
+    {"dirup2quat", VEC_FUNC_DIRUP_TO_QUAT, 1, (void*)kh_dir_up_to_quat_impl, "Convert vectorDirAndUp to quaternion (alias)"},
+    {"diruptoeuler", VEC_FUNC_DIRUP_TO_EULER, 1, (void*)kh_dir_up_to_euler_impl, "Convert vectorDirAndUp to Euler angles"},
+    {"dirup2euler", VEC_FUNC_DIRUP_TO_EULER, 1, (void*)kh_dir_up_to_euler_impl, "Convert vectorDirAndUp to Euler angles (alias)"},
     
     /* Quaternion operations */
     {"qnorm", VEC_FUNC_QUAT_TO_QUAT, 1, (void*)kh_quat_normalize_impl, "Normalize quaternion"},
@@ -779,6 +979,59 @@ static int kh_process_vector_operation(char* output, int output_size, const char
             break;
         }
         
+        /* NEW: VectorDirAndUp conversion cases */
+        case VEC_FUNC_QUAT_TO_DIRUP: {
+            quaternion_t q;
+            if (!kh_parse_quaternion(clean_args[0], &q)) {
+                kh_set_error(output, output_size, "INVALID QUATERNION FORMAT");
+                goto cleanup;
+            }
+            dir_up_t (*f)(quaternion_t) = (dir_up_t (*)(quaternion_t))func->func_ptr;
+            dir_up_t res = f(q);
+            kh_format_dir_up(res, output, output_size);
+            result = 0;
+            break;
+        }
+        
+        case VEC_FUNC_EULER_TO_DIRUP: {
+            euler_t e;
+            if (!kh_parse_euler(clean_args[0], &e)) {
+                kh_set_error(output, output_size, "INVALID EULER FORMAT");
+                goto cleanup;
+            }
+            dir_up_t (*f)(euler_t) = (dir_up_t (*)(euler_t))func->func_ptr;
+            dir_up_t res = f(e);
+            kh_format_dir_up(res, output, output_size);
+            result = 0;
+            break;
+        }
+        
+        case VEC_FUNC_DIRUP_TO_QUAT: {
+            dir_up_t du;
+            if (!kh_parse_dir_up(clean_args[0], &du)) {
+                kh_set_error(output, output_size, "INVALID VECTORDIRANDUP FORMAT");
+                goto cleanup;
+            }
+            quaternion_t (*f)(dir_up_t) = (quaternion_t (*)(dir_up_t))func->func_ptr;
+            quaternion_t res = f(du);
+            kh_format_quaternion(res, output, output_size);
+            result = 0;
+            break;
+        }
+        
+        case VEC_FUNC_DIRUP_TO_EULER: {
+            dir_up_t du;
+            if (!kh_parse_dir_up(clean_args[0], &du)) {
+                kh_set_error(output, output_size, "INVALID VECTORDIRANDUP FORMAT");
+                goto cleanup;
+            }
+            euler_t (*f)(dir_up_t) = (euler_t (*)(dir_up_t))func->func_ptr;
+            euler_t res = f(du);
+            kh_format_euler(res, output, output_size);
+            result = 0;
+            break;
+        }
+        
         case VEC_FUNC_SPECIAL: {
             /* Handle special cases like qslerp */
             if (strcmp(clean_func, "qslerp") == 0) {
@@ -807,7 +1060,7 @@ static int kh_process_vector_operation(char* output, int output_size, const char
 cleanup:
     free(clean_func);
     if (clean_args) {
-        // ✅ Only free the successfully allocated arguments
+        // Only free the successfully allocated arguments
         for (int j = 0; j < allocated_args; j++) {
             free(clean_args[j]);
         }

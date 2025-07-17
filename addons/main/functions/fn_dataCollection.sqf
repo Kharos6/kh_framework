@@ -16,7 +16,7 @@ if _state then {
 			}
 		];
 
-		_x setVariable ["KH_var_dataCollectionId", [] call KH_fnc_generateUid];
+		_x setVariable ["KH_var_dataCollectionId", call KH_fnc_generateUid];
 	} forEach KH_var_allEntities;
 
 	KH_var_dataCollectionHandler = [

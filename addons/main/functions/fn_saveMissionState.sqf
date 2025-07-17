@@ -1,6 +1,5 @@
 params ["_identifier", ["_variables", []]];
-private _worldInfo = [date];
-private _stateEntries = [_worldInfo];
+private _stateEntries = [[date]];
 
 [
 	[_identifier, _stateEntries, _variables], 

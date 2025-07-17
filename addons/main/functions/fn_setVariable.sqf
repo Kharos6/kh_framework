@@ -23,8 +23,8 @@ if (_scope isEqualType "") then {
 					getPlayerUID _name;
 				}
 				else {
-					if ((vehicleVarName _name) == "") then {
-						if ((roleDescription _name) == "") then {
+					if ((vehicleVarName _name) isEqualTo "") then {
+						if ((roleDescription _name) isEqualTo "") then {
 							"";
 						}
 						else {
@@ -44,8 +44,8 @@ if (_scope isEqualType "") then {
 					getPlayerUID _entity;
 				}
 				else {
-					if ((vehicleVarName _entity) == "") then {
-						if ((roleDescription _entity) == "") then {
+					if ((vehicleVarName _entity) isEqualTo "") then {
+						if ((roleDescription _entity) isEqualTo "") then {
 							"";
 						}
 						else {
@@ -75,7 +75,7 @@ if (_scope isEqualType "") then {
 			};
 		};
 
-		if (_parsedName == "") then {
+		if (_parsedName isEqualTo "") then {
 			_continue = false;
 		}
 		else {

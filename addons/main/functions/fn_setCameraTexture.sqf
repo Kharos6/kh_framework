@@ -2,6 +2,7 @@ params ["_screen", "_positionEntity", "_targetEntity", "_texture", "_renderTarge
 private _camera = "camera" camCreate [0, 0, 0];
 _camera attachTo [_positionEntity, [0, 0, 0]];
 _camera camSetTarget _targetEntity;
+_renderTarget = (_renderTarget min 8) max 1;
 
 switch _renderTarget do {
 	case 1: {

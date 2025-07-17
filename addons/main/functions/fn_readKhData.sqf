@@ -1,4 +1,9 @@
-params ["_file", "_variable", ["_defaultValue", nil]];
+params [["_file", "", [""]], ["_variable", "", [""]], ["_defaultValue", nil]];
+
+if ((_file isEqualTo "") || (_variable isEqualTo "")) exitWith {
+	false;
+};
+
 private _slices = (parseNumber (("kh_framework" callExtension ["SliceData", [_this select 0, _this select 1]]) select 0)) - 1;
 private _output = [];
 
@@ -6,42 +11,28 @@ for "_i" from 0 to _slices do {
 	_output pushBack (("kh_framework" callExtension ["ReadKHData", [_file, _variable, _i]]) select 0);
 };
 
-_output joinString "";
+private _parsedOutput = _output joinString "";
 
-if ("KH_ERROR: " in _output) exitWith {
+if ("KH_ERROR: " in _parsedOutput) exitWith {
 	_defaultValue;
 };
 
-private _output = parseSimpleArray _output;
+_output = parseSimpleArray _parsedOutput;
 
 switch (_output select 0) do {
-	case "ARRAY": {
-		parseSimpleArray (_output select 1);
-	};
-
-	case "STRING": {
-		_output select 1;
-	};
-
+	case "ARRAY";
+	case "STRING";
+	case "BOOL";
 	case "SCALAR": {
-		parseNumber (_output select 1);
-	};
-
-	case "HASHMAP": {
-		createHashMapFromArray (parseSimpleArray (_output select 1));
-	};
-
-	case "BOOL": {
-		if ((_output select 1) isEqualTo "true") then {
-			true;
-		}
-		else {
-			false;
-		};
+		_output select 1;
 	};
 
 	case "CODE": {
 		compile (_output select 1);
+	};
+
+	case "HASHMAP": {
+		createHashMapFromArray (_output select 1);
 	};
 
 	case "TEXT": {

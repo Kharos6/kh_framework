@@ -1,11 +1,107 @@
-KH_var_player = objNull;
+KH_var_currentPlayerUnit = objNull;
 KH_var_missionLoaded = false;
 KH_var_cachedFunctions = createHashMap;
 KH_var_postInitExecutions = [];
 KH_var_cbaEventHandlerStack = [];
+
+KH_var_remoteExecCommandsMode = if (isNumber (missionConfigFile >> "CfgRemoteExec" >> "Commands" >> "mode")) then {
+	getNumber (missionConfigFile >> "CfgRemoteExec" >> "Commands" >> "mode");
+}
+else {
+	getNumber (configFile >> "CfgRemoteExec" >> "Commands" >> "mode");
+};
+
+KH_var_remoteExecFunctionsMode = if (isNumber (missionConfigFile >> "CfgRemoteExec" >> "Functions" >> "mode")) then {
+	getNumber (missionConfigFile >> "CfgRemoteExec" >> "Functions" >> "mode");
+}
+else {
+	getNumber (configFile >> "CfgRemoteExec" >> "Functions" >> "mode");
+};
+
+KH_var_remoteExecCommandsWhitelist = createHashMap;
+KH_var_remoteExecFunctionsWhitelist = createHashMap;
+KH_var_remoteExecCommandsJipWhitelist = createHashMap;
+KH_var_remoteExecFunctionsJipWhitelist = createHashMap;
+
+if (KH_var_remoteExecCommandsMode == 1) then {
+	{
+		if (isNumber (_x >> "allowedTargets")) then {
+			if ((getNumber (_x >> "allowedTargets")) != 0) then {
+				KH_var_remoteExecCommandsWhitelist set [toLower (configName _x), true];
+			};
+		};
+
+		if (isNumber (_x >> "jip")) then {
+			if ((getNumber (_x >> "jip")) != 0) then {
+				KH_var_remoteExecCommandsJipWhitelist set [toLower (configName _x), true];
+			};
+		};
+	} forEach ("true" configClasses (missionConfigFile >> "CfgRemoteExec" >> "Commands"));
+
+	{
+		if (isNumber (_x >> "allowedTargets")) then {
+			if ((getNumber (_x >> "allowedTargets")) != 0) then {
+				KH_var_remoteExecCommandsWhitelist set [toLower (configName _x), true, true];
+			};
+		};
+
+		if (isNumber (_x >> "jip")) then {
+			if ((getNumber (_x >> "jip")) != 0) then {
+				KH_var_remoteExecCommandsJipWhitelist set [toLower (configName _x), true, true];
+			};
+		};
+	} forEach ("true" configClasses (configFile >> "CfgRemoteExec" >> "Commands"));
+};
+
+if (KH_var_remoteExecFunctionsMode == 1) then {
+	{
+		if (isNumber (_x >> "allowedTargets")) then {
+			if ((getNumber (_x >> "allowedTargets")) != 0) then {
+				KH_var_remoteExecCommandsWhitelist set [toLower (configName _x), true];
+			};
+		};
+
+		if (isNumber (_x >> "jip")) then {
+			if ((getNumber (_x >> "jip")) != 0) then {
+				KH_var_remoteExecCommandsJipWhitelist set [toLower (configName _x), true];
+			};
+		};
+	} forEach ("true" configClasses (missionConfigFile >> "CfgRemoteExec" >> "Functions"));
+
+	{
+		if (isNumber (_x >> "allowedTargets")) then {
+			if ((getNumber (_x >> "allowedTargets")) != 0) then {
+				KH_var_remoteExecFunctionsWhitelist set [toLower (configName _x), true, true];
+			};
+		};
+
+		if (isNumber (_x >> "jip")) then {
+			if ((getNumber (_x >> "jip")) != 0) then {
+				KH_var_remoteExecFunctionsJipWhitelist set [toLower (configName _x), true, true];
+			};
+		};
+	} forEach ("true" configClasses (configFile >> "CfgRemoteExec" >> "Functions"));
+};
+
 ["KH_eve_executionGlobal", KH_fnc_callParsedFunction] call CBA_fnc_addEventHandler;
 
 if isServer then {
+	KH_fnc_serverMissionStartInit = {};
+	KH_fnc_serverMissionLoadInit = {};
+	KH_fnc_serverPlayersLoadedInit = {};
+	KH_fnc_serverMissionEndInit = {};
+	KH_fnc_playerPlayersLoadedInit = {};
+	KH_fnc_playerPreloadInit = {};
+	KH_fnc_playerJipPreloadInit = {};
+	KH_fnc_playerLoadInit = {};
+	KH_fnc_playerJipLoadInit = {};
+	KH_fnc_playerKilledInit = {};
+	KH_fnc_playerSwitchInit = {};
+	KH_fnc_playerRespawnInit = {};
+	KH_fnc_playerMissionEndInit = {};
+	KH_fnc_headlessMissionStartInit = {};
+	KH_fnc_headlessLoadInit = {};
+	KH_fnc_headlessMissionEndInit = {};
 	KH_var_missionStarted = false;
 	publicVariable "KH_var_missionStarted";
 	KH_var_playersLoaded = false;
@@ -86,6 +182,7 @@ if isServer then {
 				[[], KH_fnc_playerJipPreloadInit, _machineId, "THIS_FRAME"] call KH_fnc_execute;
 				KH_var_jipPlayerMachines pushBackUnique _machineId;
 				publicVariable "KH_var_jipPlayerMachines";
+				missionNamespace setVariable ["KH_var_isJip", true, _machineId];
 			}
 			else {
 				[[], KH_fnc_playerPreloadInit, _machineId, "THIS_FRAME"] call KH_fnc_execute;
@@ -401,6 +498,7 @@ if isServer then {
 };
 
 if hasInterface then {
+	KH_var_isJip = false;
 	KH_var_contextMenuOpen = false;
 	KH_var_interactionMenuOpen = false;
 	["KH_eve_executionPlayer", KH_fnc_callParsedFunction] call CBA_fnc_addEventHandler;
@@ -409,7 +507,7 @@ if hasInterface then {
 		"unit", 
 		{
 			params ["_unit"];
-			KH_var_player = _unit;
+			KH_var_currentPlayerUnit = _unit;
 		},
 		true
 	] call CBA_fnc_addPlayerEventHandler;
@@ -576,6 +674,7 @@ if hasInterface then {
 };
 
 if (!isServer && !hasInterface) then {
+	KH_var_isJip = false;
 	["KH_eve_executionHeadless", KH_fnc_callParsedFunction] call CBA_fnc_addEventHandler;
 };
 

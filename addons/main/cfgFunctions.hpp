@@ -16,7 +16,6 @@ class CfgFunctions
 			class assignTerminal {};
 			class atomicValue {};
 			class atomicVariable {};
-			class calculateKhDataSlices {};
 			class callback {};
 			class callParsedFunction {};
 			class cameraSequence {};		
@@ -39,7 +38,7 @@ class CfgFunctions
 			class equipableObject {};
 			class execute {};
 			class fultonExtract {};
-			class generateSymbols {};
+			class generateRandomString {};
 			class generateUid {};
 			class getClients {};
 			class getDestinationTime {};
@@ -64,7 +63,9 @@ class CfgFunctions
 			class loadMissionState {};
 			class loadPlayerLoadouts {};
 			class manageHandler {};
+			class manageKhData {};
 			class manageSimulatedInventory {};
+			class mathOperation {};
 			class moduleAddInteractionEntry {};
 			class moduleAssignParachute {};
 			class moduleBreakDisguise {};
@@ -89,6 +90,7 @@ class CfgFunctions
 			class openTerminal {};
 			class orbitObject {};
 			class parseFunction {};
+			class postProcess {};
 			class readKhData {};
 			class removeEventHandler {};
 			class recoverDisconnectedPlayers {};
@@ -114,11 +116,15 @@ class CfgFunctions
 			class setUnitAttributes {};
 			class setVariable {};
 			class setVideoTexture {};
+			class sliceKhData {};
 			class suspendMission {};
 			class teleport {};
+			class testExtension {};
+			class testFunction {};
 			class toggleUserInput {};
 			class vehicleSequence {};
 			class unconsciousSpectator {};
+			class vectorOperation {};
 			class visualTrigger {};
 			class writeKhData {};
 			class zeusModuleArma {};

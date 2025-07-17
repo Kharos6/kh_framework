@@ -1,14 +1,13 @@
 params ["_type", "_event", "_arguments", "_function"];
-private _handlerArguments = [] call KH_fnc_generateUid;
+private _handlerArguments = call KH_fnc_generateUid;
 missionNamespace setVariable [_handlerArguments, _arguments];
-private _handlerId = [] call KH_fnc_generateUid;
+private _handlerId = call KH_fnc_generateUid;
 missionNamespace setVariable [_handlerId, -1];
-private _eventName = [] call KH_fnc_generateUid;
+private _eventName = call KH_fnc_generateUid;
 missionNamespace setVariable [_eventName, _event];
 private _persistentId = "";
 private _persistentEntityId = "";
 private _handler = -1;
-private _eventType = "";
 _function = [_arguments, [_function] call KH_fnc_parseFunction] call KH_fnc_getParsedFunction;
 
 private _expression = compile ([
@@ -18,11 +17,11 @@ private _expression = compile ([
 	call ", _function, ";"
 ] joinString "");
 
-if (_type isEqualType []) then {
-	_eventType = _type select 0;
+private _eventType = if (_type isEqualType []) then {
+	_type select 0;
 }
 else {
-	_eventType = _type;
+	_type;
 };
 
 switch _eventType do {
@@ -31,9 +30,9 @@ switch _eventType do {
 			_handler = (_type select 1) addEventHandler [_event, _expression];
 		}
 		else {
-			_persistentId = [] call KH_fnc_generateUid;
-			_persistentEntityId = [] call KH_fnc_generateUid;
-			_persistentEntity = [] call KH_fnc_generateUid;
+			_persistentId = call KH_fnc_generateUid;
+			_persistentEntityId = call KH_fnc_generateUid;
+			private _persistentEntity = call KH_fnc_generateUid;
 
 			[
 				[_persistentEntity],
@@ -112,7 +111,8 @@ switch _eventType do {
 	};
 
 	case "PUBLIC_VARIABLE": {
-		_handler = [missionNamespace, "KH_var_publicVariableEventHandler", true, false] call KH_fnc_atomicVariable;
+		_handler = call KH_fnc_generateUid;
+		missionNamespace setVariable [_handler, true];
 
 		_event addPublicVariableEventHandler (compile ([
 			"if (missionNamespace getVariable ['", _handler, "', true]) then {
@@ -134,7 +134,7 @@ switch _eventType do {
 	};
 
 	case "CBA": {
-		private _handlerStackId = format ["KH_var_cbaEventHandlerStackEvent%1", _event];
+		private _handlerStackId = ["KH_var_cbaEventHandlerStackEvent", _event] joinString "";
 
 		if !(_handlerStackId in KH_var_cbaEventHandlerStack) then {
 			KH_var_cbaEventHandlerStack pushBack _handlerStackId;
@@ -145,20 +145,36 @@ switch _eventType do {
 					{
 						_x params ["_function"];
 						call _function;
-					} forEach (missionNamespace getVariable [format ["KH_var_cbaEventHandlerStackEvent%1", _eventName], []]);
+					} forEach (missionNamespace getVariable [["KH_var_cbaEventHandlerStackEvent", _eventName] joinString "", []]);
 				}
 			] call CBA_fnc_addEventHandler;
 		};
 
-		_handler = [_expression, [] call KH_fnc_generateUid];
+		_handler = [_expression, call KH_fnc_generateUid];
 		private _currentStack = missionNamespace getVariable [_handlerStackId, []];
 		_currentStack pushBack _handler;
 		missionNamespace setVariable [_handlerStackId, _currentStack];
 		_event = _handlerStackId;
 	};
+
+	case "BIS_SCRIPTED": {
+		_handler = [
+			_type select 1,
+			_event, 
+			compile ([
+				"if (missionNamespace getVariable ['", _handler, "', true]) then {
+					call ", _expression,
+				"};"
+			] joinString "")
+		] call BIS_fnc_addScriptedEventHandler;
+	};
 };
 
-if (_persistentId == "") then {
+if (_persistentId isEqualTo "") then {
+	if !(_type isEqualType []) then {
+		_type = [_type];
+	};
+	
 	missionNamespace setVariable [_handlerId, [_type, _event, _handler, clientOwner]];
 	[_type, _event, _handler, clientOwner];
 }

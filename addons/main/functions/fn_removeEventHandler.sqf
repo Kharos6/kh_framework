@@ -1,8 +1,10 @@
 params ["_handler"];
 
 if ((count _handler) > 2) then {
+	_handler params ["_type", "_event", "_handlerId", "_owner"];
+	
 	[
-		[_handler select 0, _handler select 1, _handler select 2],
+		[_type, _event, _handlerId],
 		{
 			params ["_type", "_event", "_handlerId"];
 			_type params ["_eventType", "_target"];
@@ -44,6 +46,10 @@ if ((count _handler) > 2) then {
 					removeMusicEventHandler [_event, _handlerId];
 				};
 
+				case "BIS_SCRIPTED": {
+					[_target, _event, _handlerId] call BIS_fnc_removeScriptedEventHandler;
+				};
+
 				case "CBA": {
 					private _currentStack = missionNamespace getVariable [_event, []];
 					private _currentId = _handlerId select 1;
@@ -63,7 +69,7 @@ if ((count _handler) > 2) then {
 				};
 			};
 		},
-		_handler select 3,
+		_owner,
 		"THIS_FRAME"
 	] call KH_fnc_execute;
 }

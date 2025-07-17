@@ -1,0 +1,1 @@
+params ["_template", "duration", "_fadeIn", "_fadeOut", "_overwrite"];

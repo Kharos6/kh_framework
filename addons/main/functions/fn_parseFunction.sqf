@@ -7,30 +7,32 @@ if (_function isEqualType "") then {
 	};
 };
 
-if _parse then {
-	private _hashValue = format ["KH_fnc_cachedFunction%1", hashValue _function];
-	private _storedFunction = KH_var_cachedFunctions get _hashValue;
-
-	if (isNil "_storedFunction") then {
-		private _compiledFunction = _function;
-
-		if (_function isEqualType "") then {
-			if (".sqf" in _function) then {
-				_compiledFunction = compile (preprocessFileLineNumbers _function);
-			}
-			else {
-				_compiledFunction = compile _function;
-			};
-		};
-
-		KH_var_cachedFunctions set [_hashValue, _compiledFunction, false];
-
-		if !isServer then {
-			[[_function], "KH_fnc_parseFunction", "SERVER", "THIS_FRAME"] call KH_fnc_execute;
-		};
-	};
-
-	_function = _hashValue;
+if !_parse exitWith {
+	_function;
 };
 
-_function;
+private _hashValue = format ["KH_fnc_cachedFunction_%1", hashValue _function];
+
+if (isNil {KH_var_cachedFunctions get _hashValue}) then {
+	KH_var_cachedFunctions set [
+		_hashValue, 
+		if (_function isEqualType "") then {
+			if (".sqf" in _function) then {
+				compile (preprocessFileLineNumbers _function);
+			}
+			else {
+				compile _function;
+			};
+		}
+		else {
+			_function;
+		}, 
+		false
+	];
+
+	if !isServer then {
+		[[_function], "KH_fnc_parseFunction", "SERVER", "THIS_FRAME"] call KH_fnc_execute;
+	};
+};
+
+_hashValue;

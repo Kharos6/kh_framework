@@ -2,7 +2,7 @@ params ["_entity", ["_name", ""]];
 private _variableName = "";
 
 if (_name == "") then {
-	_variableName = [] call KH_fnc_generateUid;
+	_variableName = call KH_fnc_generateUid;
 }
 else {
 	_variableName = _name;

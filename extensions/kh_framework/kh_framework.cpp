@@ -26,7 +26,7 @@ typedef struct {
 static const function_info_t FUNCTION_TABLE[] = {
     {"GenerateRandomString", 1, 4, 'G'},
     {"SliceData", 2, 2, 'S'},
-    {"StringOperation", 2, 2, 'S'},
+    {"StringOperation", 2, 4, 'S'},
     {"ReadKHData", 2, 3, 'R'},
     {"WriteKHData", 4, 5, 'W'},
     {"MathOperation", 1, 1, 'M'},

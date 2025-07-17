@@ -428,7 +428,7 @@ if (_ethnos == "") then {
 };
 
 if (_cardNumber == "") then {
-	_cardNumber = [12, true, false, false] call KH_fnc_generateSymbols;
+	_cardNumber = [12, true, false, false] call KH_fnc_generateRandomString;
 };
 
 if (_dateOfIssue == "") then {

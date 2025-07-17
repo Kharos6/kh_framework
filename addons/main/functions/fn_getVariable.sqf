@@ -20,8 +20,8 @@ if (_target isEqualTo []) exitWith {
 						getPlayerUID _name;
 					}
 					else {
-						if ((vehicleVarName _name) == "") then {
-							if ((roleDescription _name) == "") then {
+						if ((vehicleVarName _name) isEqualTo "") then {
+							if ((roleDescription _name) isEqualTo "") then {
 								"";
 							}
 							else {
@@ -41,8 +41,8 @@ if (_target isEqualTo []) exitWith {
 						getPlayerUID _entity;
 					}
 					else {
-						if ((vehicleVarName _entity) == "") then {
-							if ((roleDescription _entity) == "") then {
+						if ((vehicleVarName _entity) isEqualTo "") then {
+							if ((roleDescription _entity) isEqualTo "") then {
 								"";
 							}
 							else {
@@ -72,7 +72,7 @@ if (_target isEqualTo []) exitWith {
 				};
 			};
 
-			if (_parsedName != "") then {
+			if (_parsedName isNotEqualTo "") then {
 				[_namespace, _parsedName, _defaultValue] call KH_fnc_readKhData;
 			}
 			else {

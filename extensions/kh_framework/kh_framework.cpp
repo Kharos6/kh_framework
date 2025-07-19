@@ -1,7 +1,14 @@
 #include <windows.h>
+#include <wincrypt.h>
+#include <shlobj.h>
+#include <stdio.h>
+#include <time.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#include <ctype.h>
+#include <math.h>
+#include <stdarg.h>
 
 /* Include all module headers in dependency order */
 #include "rv_extension_utils.hpp"
@@ -12,6 +19,7 @@
 #include "vector_operations.hpp"
 #include "string_operations.hpp"
 #include "crypto_operations.hpp"
+#include "array_operations.hpp"
 
 __declspec(dllexport) uint64_t RVExtensionFeatureFlags = RVFeature_ContextNoDefaultCall;
 
@@ -24,6 +32,7 @@ typedef struct {
 } function_info_t;
 
 static const function_info_t FUNCTION_TABLE[] = {
+    {"ArrayOperation", 1, 4, 'A'},
     {"GenerateRandomString", 1, 4, 'G'},
     {"SliceData", 2, 2, 'S'},
     {"StringOperation", 2, 4, 'S'},
@@ -124,6 +133,12 @@ __declspec(dllexport) int RVExtensionArgs(char *output, unsigned int output_size
     char first_char = function[0];
     
     switch (first_char) {
+        case 'A': /* ArrayOperation */
+            if (strcmp(function, "ArrayOperation") == 0) {
+                return kh_process_array_operation(output, output_size, argv, argc);
+            }
+            break;
+
         case 'C': /* CryptoOperation */
             if (strcmp(function, "CryptoOperation") == 0) {
                 return kh_process_crypto_operation(output, output_size, argv, argc);

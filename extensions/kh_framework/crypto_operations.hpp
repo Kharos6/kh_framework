@@ -1,23 +1,6 @@
 #ifndef CRYPTO_OPERATIONS_HPP
 #define CRYPTO_OPERATIONS_HPP
 
-#include "common_defines.hpp"
-#include <windows.h>
-#include <wincrypt.h>
-
-/* Crypto algorithm constants */
-#define KH_CRYPTO_MAX_INPUT_SIZE (64 * 1024 * 1024)  /* 64MB max input */
-#define KH_CRYPTO_MAX_OUTPUT_SIZE 8192                /* Max hex output size */
-
-/* FNV-1a constants */
-#define KH_FNV1A_32_OFFSET_BASIS 0x811c9dc5U
-#define KH_FNV1A_32_PRIME 0x01000193U
-#define KH_FNV1A_64_OFFSET_BASIS 0xcbf29ce484222325ULL
-#define KH_FNV1A_64_PRIME 0x100000001b3ULL
-
-/* CRC32 polynomial */
-#define KH_CRC32_POLYNOMIAL 0xEDB88320U
-
 /* Crypto function definition */
 typedef struct {
     const char* name;
@@ -78,9 +61,15 @@ static inline int kh_crypto_windows_hash(const char* input, char* output, int ou
         return 0;
     }
     
-    /* Acquire cryptographic context */
-    if (!CryptAcquireContextA(&hProv, NULL, NULL, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT)) {
-        goto cleanup;
+    /* FIXED: Try different provider types for better compatibility */
+    if (!CryptAcquireContextA(&hProv, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT)) {
+        if (!CryptAcquireContextA(&hProv, NULL, NULL, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT)) {
+            if (!CryptAcquireContextA(&hProv, NULL, MS_ENH_RSA_AES_PROV_A, PROV_RSA_AES, CRYPT_VERIFYCONTEXT)) {
+                if (!CryptAcquireContextA(&hProv, NULL, MS_ENHANCED_PROV_A, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT)) {
+                    return 0;
+                }
+            }
+        }
     }
     
     /* Create hash object */
@@ -97,6 +86,16 @@ static inline int kh_crypto_windows_hash(const char* input, char* output, int ou
     DWORD hash_size = 0;
     DWORD size_size = sizeof(DWORD);
     if (!CryptGetHashParam(hHash, HP_HASHSIZE, (BYTE*)&hash_size, &size_size, 0)) {
+        goto cleanup;
+    }
+    
+    /* Validate hash size */
+    if (hash_size == 0 || hash_size > 64) {
+        goto cleanup;
+    }
+    
+    /* Check output buffer size */
+    if ((int)(hash_size * 2 + 1) > output_size) {
         goto cleanup;
     }
     

@@ -1,16 +1,8 @@
 #ifndef COMMON_DEFINES_HPP
 #define COMMON_DEFINES_HPP
 
-#include <windows.h>
-#include <shlobj.h>
-#include <stdio.h>
-#include <string.h>
-#include <stdlib.h>
-#include <time.h>
-#include <math.h>
-
 /* Constants */
-#define MAX_PATH_LENGTH 512
+#define MAX_FILE_PATH_LENGTH 512
 #define MAX_TOTAL_KHDATA_SIZE_BYTES (1024LL * 1024LL * 1024LL)  /* 1GB total limit */
 #define MAX_KHDATA_FILES 128                                      /* Maximum .khdata files allowed */
 #define MAX_HASHMAP_INPUT_SIZE (32 * 1024 * 1024)      /* 32MB */
@@ -18,6 +10,32 @@
 #define MAX_HASHMAP_VALUE_SIZE (32 * 1024 * 1024)      /* 32MB */
 #define MAX_HASHMAP_ENTRY_SIZE (32 * 1024 * 1024)      /* 32MB */
 #define HASHMAP_SAFETY_MARGIN (1024 * 1024)            /* 1MB */
+#define KH_ARRAY_MAX_ELEMENTS 10000               /* Maximum elements per array */
+#define KH_ARRAY_MAX_DEPTH 32                     /* Maximum nesting depth */
+#define KH_ARRAY_MAX_INPUT_SIZE (32 * 1024 * 1024) /* 32MB max input */
+#define KH_ARRAY_PARSE_OPERATIONS_LIMIT 50000     /* Prevent infinite parsing loops */
+#define KH_HASH_TABLE_MIN_SIZE 16
+#define KH_HASH_TABLE_LOAD_FACTOR 0.75
+#define KH_HASH_EMPTY 0                 /* Empty hash table entry marker */
+#define KH_STRING_ENCODE_MAGIC 0x4B48          /* "KH" in little endian */
+#define KH_STRING_MAX_INPUT_SIZE (32 * 1024 * 1024) /* 32MB max input */
+#define KH_STRING_ESCAPE_CHAR 0xFF             /* Escape character for unmapped chars */
+#define KH_STRING_RLE_CHAR 0xFE                /* Run-length encoding marker */
+#define KH_STRING_TABLE_SIZE 256               /* Size of encoding table */
+#define KH_STRING_MIN_RLE_COUNT 3              /* Minimum count for RLE */
+#define KH_STRING_MAX_SPLIT_PARTS 1024         /* Maximum parts for string splitting */
+#define KH_STRING_MAX_REPLACE_COUNT 10000      /* Maximum replacements to prevent infinite loops */
+#define KH_CRYPTO_MAX_INPUT_SIZE (32 * 1024 * 1024)  /* 32MB max input */
+#define KH_CRYPTO_MAX_OUTPUT_SIZE 8192                /* Max hex output size */
+#define KH_FNV1A_32_OFFSET_BASIS 0x811c9dc5U
+#define KH_FNV1A_32_PRIME 0x01000193U
+#define KH_FNV1A_64_OFFSET_BASIS 0xcbf29ce484222325ULL
+#define KH_FNV1A_64_PRIME 0x100000001b3ULL
+#define KH_CRC32_POLYNOMIAL 0xEDB88320U
+#define MAX_MATH_FUNCTION_ARGS 3
+#define INITIAL_MATH_TOKEN_SIZE 64  /* Initial size for dynamic token allocation */
+#define MAX_MATH_RECURSION_DEPTH 50 /* Maximum recursion depth to prevent stack overflow */
+#define MAX_MATH_PARSE_OPERATIONS 10000 /* Maximum operations to prevent infinite loops */
 #define SLICE_SIZE 8192                                          /* 8KB per slice */
 #define KHDATA_MAGIC 0x5444484B                                  /* "KHDT" in little endian */
 #define KHDATA_VERSION 1
@@ -555,8 +573,8 @@ static inline long kh_get_file_size(const char* file_path) {
 
 /* Count existing .khdata files in Arma 3 documents folder */
 static inline int kh_count_khdata_files(void) {
-    char arma3_path[MAX_PATH_LENGTH];
-    char search_pattern[MAX_PATH_LENGTH];
+    char arma3_path[MAX_FILE_PATH_LENGTH];
+    char search_pattern[MAX_FILE_PATH_LENGTH];
     WIN32_FIND_DATAA find_data;
     HANDLE find_handle;
     int file_count = 0;
@@ -586,7 +604,7 @@ static inline int kh_count_khdata_files(void) {
 static inline int kh_get_khdata_file_path(const char* filename, char* full_path, int path_size) {
     if (!filename || !full_path || path_size <= 0) return 0;
     
-    char arma3_path[MAX_PATH_LENGTH];
+    char arma3_path[MAX_FILE_PATH_LENGTH];
     char* clean_filename = NULL;
     int filename_len = (int)strlen(filename);
     int result = 0;
@@ -595,7 +613,7 @@ static inline int kh_get_khdata_file_path(const char* filename, char* full_path,
         return 0;
     }
     
-    if (filename_len >= MAX_PATH_LENGTH - 8) {
+    if (filename_len >= MAX_FILE_PATH_LENGTH - 8) {
         return 0; /* Filename too long */
     }
     
@@ -629,7 +647,7 @@ static inline int kh_get_khdata_file_path(const char* filename, char* full_path,
 static inline int kh_check_file_limit(const char* filename, char* error_output, int error_size) {
     if (!filename || !error_output || error_size <= 0) return 0;
     
-    char file_path[MAX_PATH_LENGTH];
+    char file_path[MAX_FILE_PATH_LENGTH];
     int current_count = kh_count_khdata_files();
     
     if (current_count < 0) {

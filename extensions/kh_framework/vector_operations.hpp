@@ -1,14 +1,6 @@
 #ifndef VECTOR_OPERATIONS_HPP
 #define VECTOR_OPERATIONS_HPP
 
-/* This file depends on common_defines.hpp being included first */
-#ifndef COMMON_DEFINES_HPP
-#error "vector_operations.hpp requires common_defines.hpp to be included first"
-#endif
-
-#include <ctype.h>
-#include <math.h>
-
 /* Data structures */
 typedef struct {
     double x, y, z;

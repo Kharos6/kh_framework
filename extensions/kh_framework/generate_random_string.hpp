@@ -1,8 +1,6 @@
 #ifndef GENERATE_RANDOM_STRING_HPP
 #define GENERATE_RANDOM_STRING_HPP
 
-#include "common_defines.hpp"
-
 /* Character sets for random string generation */
 static const char KH_CHARSET_NUMBERS[] = "0123456789";
 static const char KH_CHARSET_LETTERS[] = "abcdefghijklmnopqrstuvwxyz";

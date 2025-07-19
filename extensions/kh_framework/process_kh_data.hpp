@@ -1,8 +1,6 @@
 #ifndef PROCESS_KH_DATA_HPP
 #define PROCESS_KH_DATA_HPP
 
-#include "common_defines.hpp"
-
 /* Data type enumeration */
 typedef enum {
     KH_TYPE_ARRAY = 0,
@@ -44,11 +42,6 @@ typedef struct {
     unsigned int reserved3;          /* Reserved for future use */
 } kh_file_header_t;
 #pragma pack(pop)
-
-/* Hash table constants */
-#define KH_HASH_TABLE_MIN_SIZE 16
-#define KH_HASH_TABLE_LOAD_FACTOR 0.75
-#define KH_HASH_EMPTY 0                 /* Empty hash table entry marker */
 
 /* Type string lookup table for better performance */
 typedef struct {
@@ -593,7 +586,7 @@ static int kh_unbinarize_khdata(const char* filename, char* output, int output_s
         return 1;
     }
     
-    char file_path[MAX_PATH_LENGTH];
+    char file_path[MAX_FILE_PATH_LENGTH];
     char* clean_filename = NULL;
     int result = 1;
     
@@ -644,7 +637,7 @@ static int kh_binarize_khdata(const char* filename, char* output, int output_siz
         return 1;
     }
     
-    char file_path[MAX_PATH_LENGTH];
+    char file_path[MAX_FILE_PATH_LENGTH];
     char* clean_filename = NULL;
     int result = 1;
     
@@ -1631,7 +1624,7 @@ static int kh_read_khdata_variable_slice(const char* filename, const char* varia
         return 1;
     }
     
-    char file_path[MAX_PATH_LENGTH];
+    char file_path[MAX_FILE_PATH_LENGTH];
     char* clean_var_name = NULL;
     char* clean_filename = NULL;
     kh_variable_t* variables = NULL;
@@ -1790,7 +1783,7 @@ cleanup:
 static long kh_get_variable_formatted_size(const char* filename, const char* variable_name) {
     if (!filename || !variable_name) return -1;
     
-    char file_path[MAX_PATH_LENGTH];
+    char file_path[MAX_FILE_PATH_LENGTH];
     char* clean_var_name = NULL;
     char* clean_filename = NULL;
     kh_variable_t* variables = NULL;
@@ -1905,7 +1898,7 @@ static int kh_write_khdata_variable(const char* filename, const char* variable_n
         return 1;
     }
     
-    char file_path[MAX_PATH_LENGTH];
+    char file_path[MAX_FILE_PATH_LENGTH];
     char* clean_var_name = NULL;
     char* clean_value = NULL;
     char* combined_value = NULL;

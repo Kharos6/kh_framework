@@ -1,17 +1,6 @@
 #ifndef MATH_OPERATIONS_HPP
 #define MATH_OPERATIONS_HPP
 
-#include "common_defines.hpp"
-#include <ctype.h>
-#include <math.h>
-#include <stdarg.h>
-
-/* Constants for expression parser */
-#define MAX_FUNCTION_ARGS 3
-#define INITIAL_TOKEN_SIZE 64  /* Initial size for dynamic token allocation */
-#define MAX_RECURSION_DEPTH 50 /* Maximum recursion depth to prevent stack overflow */
-#define MAX_PARSE_OPERATIONS 10000 /* Maximum operations to prevent infinite loops */
-
 /* Token types for expression parser */
 typedef enum {
     TOKEN_NUMBER,
@@ -173,12 +162,12 @@ static inline int kh_check_parser_limits(parser_context_t* ctx) {
         return 0;
     }
     
-    if (ctx->recursion_depth >= MAX_RECURSION_DEPTH) {
+    if (ctx->recursion_depth >= MAX_MATH_RECURSION_DEPTH) {
         kh_set_parser_error(ctx, "MAXIMUM RECURSION DEPTH EXCEEDED");
         return 0;
     }
     
-    if (ctx->operation_count >= MAX_PARSE_OPERATIONS) {
+    if (ctx->operation_count >= MAX_MATH_PARSE_OPERATIONS) {
         kh_set_parser_error(ctx, "MAXIMUM OPERATIONS EXCEEDED");
         return 0;
     }
@@ -193,13 +182,13 @@ static inline int kh_init_token(token_t* token) {
     // Initialize all fields first
     memset(token, 0, sizeof(token_t));
     
-    token->value = (char*)malloc(INITIAL_TOKEN_SIZE);
+    token->value = (char*)malloc(INITIAL_MATH_TOKEN_SIZE);
     if (!token->value) {
         token->allocation_failed = 1;
         return 0;
     }
     
-    token->value_capacity = INITIAL_TOKEN_SIZE;
+    token->value_capacity = INITIAL_MATH_TOKEN_SIZE;
     token->value[0] = '\0';
     token->type = TOKEN_END;
     token->number = 0.0;
@@ -379,6 +368,7 @@ static int kh_read_number(parser_context_t* ctx, double* number) {
     
     int num_pos = 0;
     int has_dot = 0;
+    int has_e = 0;  // Track scientific notation
     int capacity = initial_capacity;
     
     while (ctx->pos < ctx->length) {
@@ -398,10 +388,30 @@ static int kh_read_number(parser_context_t* ctx, double* number) {
         if (isdigit(c)) {
             num_str[num_pos++] = c;
             ctx->pos++;
-        } else if (c == '.' && !has_dot) {
+        } else if (c == '.' && !has_dot && !has_e) {
             has_dot = 1;
             num_str[num_pos++] = c;
             ctx->pos++;
+        } else if ((c == 'e' || c == 'E') && !has_e && num_pos > 0) {
+            /* Scientific notation support */
+            has_e = 1;
+            num_str[num_pos++] = c;
+            ctx->pos++;
+            
+            /* Check for optional + or - after e/E */
+            if (ctx->pos < ctx->length && (ctx->expr[ctx->pos] == '+' || ctx->expr[ctx->pos] == '-')) {
+                if (num_pos >= capacity - 1) {
+                    capacity *= 2;
+                    char* new_str = (char*)realloc(num_str, (size_t)capacity);
+                    if (!new_str) {
+                        free(num_str);
+                        return 0;
+                    }
+                    num_str = new_str;
+                }
+                num_str[num_pos++] = ctx->expr[ctx->pos];
+                ctx->pos++;
+            }
         } else {
             break;
         }
@@ -661,7 +671,7 @@ static double kh_parse_function_call(parser_context_t* ctx, const char* func_nam
     }
     
     /* Allocate memory for arguments */
-    args = (double*)malloc(MAX_FUNCTION_ARGS * sizeof(double));
+    args = (double*)malloc(MAX_MATH_FUNCTION_ARGS * sizeof(double));
     if (!args) {
         kh_set_parser_error(ctx, "MEMORY ALLOCATION FAILED");
         return 0.0;
@@ -680,9 +690,9 @@ static double kh_parse_function_call(parser_context_t* ctx, const char* func_nam
     if (ctx->current_token.type != TOKEN_RPAREN) {
         args[arg_count++] = kh_parse_expression(ctx);
         
-        while (ctx->current_token.type == TOKEN_COMMA && arg_count < MAX_FUNCTION_ARGS) {
+        while (ctx->current_token.type == TOKEN_COMMA && arg_count < MAX_MATH_FUNCTION_ARGS) {
             kh_get_next_token(ctx); /* consume ',' */
-            if (arg_count < MAX_FUNCTION_ARGS) {
+            if (arg_count < MAX_MATH_FUNCTION_ARGS) {
                 args[arg_count++] = kh_parse_expression(ctx);
             }
         }

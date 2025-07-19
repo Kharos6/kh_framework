@@ -1,20 +1,6 @@
 #ifndef STRING_OPERATIONS_HPP
 #define STRING_OPERATIONS_HPP
 
-#include "common_defines.hpp"
-#include <stdint.h>
-#include <ctype.h>
-
-/* Constants for string operations */
-#define KH_STRING_ENCODE_MAGIC 0x4B48          /* "KH" in little endian */
-#define KH_STRING_MAX_INPUT_SIZE (64 * 1024 * 1024) /* 64MB max input */
-#define KH_STRING_ESCAPE_CHAR 0xFF             /* Escape character for unmapped chars */
-#define KH_STRING_RLE_CHAR 0xFE                /* Run-length encoding marker */
-#define KH_STRING_TABLE_SIZE 256               /* Size of encoding table */
-#define KH_STRING_MIN_RLE_COUNT 3              /* Minimum count for RLE */
-#define KH_STRING_MAX_SPLIT_PARTS 1024         /* Maximum parts for string splitting */
-#define KH_STRING_MAX_REPLACE_COUNT 10000      /* Maximum replacements to prevent infinite loops */
-
 /* String operation function types */
 typedef enum {
     KH_STRING_FUNC_BOOL,          /* String -> Boolean */
@@ -856,6 +842,9 @@ static inline int kh_string_utf8_length(const char* input) {
 static inline int kh_string_split(const char* input, const char* delimiter, int index, char* output, int output_size) {
     if (!input || !delimiter || !output || output_size <= 0 || index < 0) return 0;
     
+    /* Check for empty delimiter */
+    if (strlen(delimiter) == 0) return 0;
+    
     char* input_copy = NULL;
     char** parts = NULL;
     int part_count = 0;
@@ -884,8 +873,13 @@ static inline int kh_string_split(const char* input, const char* delimiter, int 
         token = strtok_s(NULL, delimiter, &context);
     }
     
-    /* Return the requested part */
-    if (index < part_count) {
+    /* Handle index out of bounds gracefully */
+    if (index >= part_count) {
+        /* Index out of bounds - return empty string */
+        output[0] = '\0';
+        result = 1;
+    } else {
+        /* Return the requested part */
         size_t part_len = strlen(parts[index]);
         if (part_len < (size_t)output_size) {
             strcpy_s(output, (size_t)output_size, parts[index]);
@@ -1004,7 +998,14 @@ static inline int kh_string_replace(const char* input, const char* search, const
     int replace_len = (int)strlen(replace);
     int input_len = (int)strlen(input);
     
-    if (search_len == 0) return 0;
+    /* Handle empty search string - just copy input to output */
+    if (search_len == 0) {
+        if (input_len < output_size) {
+            strcpy_s(output, (size_t)output_size, input);
+            return 1;
+        }
+        return 0;
+    }
     
     const char* current = input;
     int output_pos = 0;
@@ -1026,13 +1027,14 @@ static inline int kh_string_replace(const char* input, const char* search, const
             }
             
             /* Copy replacement text */
-            if (output_pos + replace_len >= output_size - 1) {
-                replace_len = output_size - 1 - output_pos;
+            int actual_replace_len = replace_len;
+            if (output_pos + actual_replace_len >= output_size - 1) {
+                actual_replace_len = output_size - 1 - output_pos;
             }
             
-            if (replace_len > 0) {
-                memcpy(output + output_pos, replace, (size_t)replace_len);
-                output_pos += replace_len;
+            if (actual_replace_len > 0) {
+                memcpy(output + output_pos, replace, (size_t)actual_replace_len);
+                output_pos += actual_replace_len;
             }
             
             current = found + search_len;

@@ -1779,6 +1779,192 @@ cleanup:
     return result;
 }
 
+/* Delete entire KHData file */
+static int kh_delete_khdata_file(const char* filename, char* output, int output_size) {
+    if (!kh_validate_non_empty_string(filename, "FILENAME", output, output_size)) {
+        return 1;
+    }
+    
+    char file_path[MAX_FILE_PATH_LENGTH];
+    char* clean_filename = NULL;
+    int result = 1;
+    
+    clean_filename = (char*)malloc(strlen(filename) + 1);
+    if (!clean_filename) {
+        kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
+        return 1;
+    }
+    
+    kh_clean_string(filename, clean_filename, (int)strlen(filename) + 1);
+    
+    if (!kh_get_khdata_file_path(clean_filename, file_path, sizeof(file_path))) {
+        kh_set_error(output, output_size, "INVALID PATH");
+        goto cleanup;
+    }
+    
+    /* Check if file exists */
+    DWORD file_attributes = GetFileAttributesA(file_path);
+    if (file_attributes == INVALID_FILE_ATTRIBUTES) {
+        kh_set_error(output, output_size, "FILE NOT FOUND");
+        goto cleanup;
+    }
+    
+    /* Attempt to delete the file */
+    if (DeleteFileA(file_path)) {
+        strcpy_s(output, (size_t)output_size, "SUCCESS");
+        result = 0;
+    } else {
+        DWORD error = GetLastError();
+        switch (error) {
+            case ERROR_ACCESS_DENIED:
+                kh_set_error(output, output_size, "ACCESS DENIED - FILE MAY BE IN USE");
+                break;
+            case ERROR_SHARING_VIOLATION:
+                kh_set_error(output, output_size, "FILE IS IN USE BY ANOTHER PROCESS");
+                break;
+            default:
+                kh_set_error(output, output_size, "FAILED TO DELETE FILE");
+                break;
+        }
+    }
+
+cleanup:
+    free(clean_filename);
+    return result;
+}
+
+/* Delete specific variable from KHData file */
+static int kh_delete_khdata_variable(const char* filename, const char* variable_name, char* output, int output_size) {
+    if (!kh_validate_non_empty_string(filename, "FILENAME", output, output_size) ||
+        !kh_validate_non_empty_string(variable_name, "VARIABLE NAME", output, output_size)) {
+        return 1;
+    }
+    
+    char file_path[MAX_FILE_PATH_LENGTH];
+    char* clean_filename = NULL;
+    char* clean_var_name = NULL;
+    kh_variable_t* variables = NULL;
+    kh_variable_t* new_variables = NULL;
+    int variable_count = 0;
+    int var_index;
+    int result = 1;
+    
+    /* Allocate memory for cleaned strings */
+    clean_filename = (char*)malloc(strlen(filename) + 1);
+    clean_var_name = (char*)malloc(strlen(variable_name) + 1);
+    
+    if (!clean_filename || !clean_var_name) {
+        kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
+        goto cleanup;
+    }
+    
+    kh_clean_string(filename, clean_filename, (int)strlen(filename) + 1);
+    kh_clean_string(variable_name, clean_var_name, (int)strlen(variable_name) + 1);
+    
+    if (!kh_get_khdata_file_path(clean_filename, file_path, sizeof(file_path))) {
+        kh_set_error(output, output_size, "INVALID PATH");
+        goto cleanup;
+    }
+    
+    /* Check if file exists */
+    DWORD file_attributes = GetFileAttributesA(file_path);
+    if (file_attributes == INVALID_FILE_ATTRIBUTES) {
+        kh_set_error(output, output_size, "FILE NOT FOUND");
+        goto cleanup;
+    }
+    
+    /* Ensure file is in binary format before reading */
+    if (!kh_ensure_binary_format(file_path)) {
+        kh_set_error(output, output_size, "FAILED TO CONVERT TO BINARY FORMAT");
+        goto cleanup;
+    }
+    
+    /* Read existing file */
+    if (!kh_read_binary_file(file_path, &variables, &variable_count)) {
+        kh_set_error(output, output_size, "FAILED TO READ FILE");
+        goto cleanup;
+    }
+    
+    /* Handle empty file */
+    if (variable_count == 0) {
+        kh_set_error(output, output_size, "FILE IS EMPTY");
+        goto cleanup;
+    }
+    
+    /* Find variable to delete */
+    var_index = kh_find_variable(variables, variable_count, clean_var_name);
+    if (var_index == -1) {
+        kh_set_error(output, output_size, "VARIABLE NOT FOUND");
+        goto cleanup;
+    }
+    
+    /* If this is the only variable, delete the entire file */
+    if (variable_count == 1) {
+        if (DeleteFileA(file_path)) {
+            strcpy_s(output, (size_t)output_size, "SUCCESS");
+            result = 0;
+        } else {
+            kh_set_error(output, output_size, "FAILED TO DELETE FILE");
+        }
+        goto cleanup;
+    }
+    
+    /* Create new array without the target variable */
+    new_variables = (kh_variable_t*)calloc((size_t)(variable_count - 1), sizeof(kh_variable_t));
+    if (!new_variables) {
+        kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
+        goto cleanup;
+    }
+    
+    /* Copy all variables except the one to delete */
+    int new_index = 0;
+    for (int i = 0; i < variable_count; i++) {
+        if (i != var_index) {
+            /* Allocate and copy name */
+            size_t name_len = strlen(variables[i].name) + 1;
+            new_variables[new_index].name = (char*)malloc(name_len);
+            if (!new_variables[new_index].name) {
+                kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
+                goto cleanup;
+            }
+            strcpy_s(new_variables[new_index].name, name_len, variables[i].name);
+            
+            /* Allocate and copy value */
+            size_t value_len = strlen(variables[i].value) + 1;
+            new_variables[new_index].value = (char*)malloc(value_len);
+            if (!new_variables[new_index].value) {
+                free(new_variables[new_index].name);
+                kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
+                goto cleanup;
+            }
+            strcpy_s(new_variables[new_index].value, value_len, variables[i].value);
+            
+            /* Copy type */
+            new_variables[new_index].type = variables[i].type;
+            
+            new_index++;
+        }
+    }
+    
+    /* Write updated file */
+    if (!kh_write_binary_file(file_path, new_variables, variable_count - 1)) {
+        kh_set_error(output, output_size, "FAILED TO WRITE UPDATED FILE");
+        goto cleanup;
+    }
+    
+    strcpy_s(output, (size_t)output_size, "SUCCESS");
+    result = 0;
+
+cleanup:
+    free(clean_filename);
+    free(clean_var_name);
+    kh_free_variables(variables, variable_count);
+    if (new_variables) {
+        kh_free_variables(new_variables, variable_count - 1);
+    }
+    return result;
+}
+
 /* Calculate the formatted size of a variable's output - optimized */
 static long kh_get_variable_formatted_size(const char* filename, const char* variable_name) {
     if (!filename || !variable_name) return -1;

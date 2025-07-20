@@ -34,7 +34,7 @@ typedef struct {
 static const function_info_t FUNCTION_TABLE[] = {
     {"ArrayOperation", 1, 4, 'A'},
     {"GenerateRandomString", 1, 4, 'G'},
-    {"SliceData", 2, 2, 'S'},
+    {"SliceKHData", 2, 2, 'S'},
     {"StringOperation", 2, 4, 'S'},
     {"ReadKHData", 2, 3, 'R'},
     {"WriteKHData", 4, 5, 'W'},
@@ -42,7 +42,9 @@ static const function_info_t FUNCTION_TABLE[] = {
     {"VectorOperation", 1, 4, 'V'},
     {"UnbinarizeKHData", 1, 1, 'U'},
     {"BinarizeKHData", 1, 1, 'B'},
-    {"CryptoOperation", 2, 2, 'C'}
+    {"CryptoOperation", 2, 2, 'C'},
+    {"DeleteKHDataFile", 1, 1, 'D'},
+    {"DeleteKHDataVariable", 2, 2, 'D'}
 };
 
 static const int FUNCTION_COUNT = sizeof(FUNCTION_TABLE) / sizeof(function_info_t);
@@ -145,14 +147,23 @@ __declspec(dllexport) int RVExtensionArgs(char *output, unsigned int output_size
             }
             break;
 
+        case 'D': /* DeleteKHDataFile and DeleteKHDataVariable */
+            if (strcmp(function, "DeleteKHDataFile") == 0) {
+                return kh_delete_khdata_file(argv[0], output, output_size);
+            }
+            if (strcmp(function, "DeleteKHDataVariable") == 0) {
+                return kh_delete_khdata_variable(argv[0], argv[1], output, output_size);
+            }
+            break;
+
         case 'G': /* GenerateRandomString */
             if (strcmp(function, "GenerateRandomString") == 0) {
                 return kh_process_random_string_generation(output, output_size, argv, argc);
             }
             break;
             
-        case 'S': /* SliceData and StringOperation */
-            if (strcmp(function, "SliceData") == 0) {
+        case 'S': /* SliceKHData and StringOperation */
+            if (strcmp(function, "SliceKHData") == 0) {
                 return kh_calculate_slice_count(argv[0], argv[1], output, output_size);
             }
             if (strcmp(function, "StringOperation") == 0) {

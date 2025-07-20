@@ -11,15 +11,15 @@
 #include <stdarg.h>
 
 /* Include all module headers in dependency order */
-#include "rv_extension_utils.hpp"
-#include "common_defines.hpp"
-#include "process_kh_data.hpp"
-#include "generate_random_string.hpp"
-#include "math_operations.hpp"
-#include "vector_operations.hpp"
-#include "string_operations.hpp"
-#include "crypto_operations.hpp"
-#include "array_operations.hpp"
+#include "rv_extension_utils.h"
+#include "common_defines.h"
+#include "process_kh_data.h"
+#include "generate_random_string.h"
+#include "math_operations.h"
+#include "vector_operations.h"
+#include "string_operations.h"
+#include "crypto_operations.h"
+#include "array_operations.h"
 
 __declspec(dllexport) uint64_t RVExtensionFeatureFlags = RVFeature_ContextNoDefaultCall;
 

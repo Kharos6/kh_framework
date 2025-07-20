@@ -3,7 +3,7 @@
 
 /* Array element data structure */
 typedef struct {
-    int type;           /* KH_TYPE_* from common_defines.hpp */
+    int type;           /* KH_TYPE_* from common_defines.h */
     char* value;        /* String representation of the value */
     size_t value_len;   /* Length of value string */
     double number;      /* Cached numeric value for SCALAR types */
@@ -39,7 +39,7 @@ typedef struct {
     const char* description;
 } array_function_t;
 
-/* Forward declarations for KH_TYPE constants from process_kh_data.hpp */
+/* Forward declarations for KH_TYPE constants from process_kh_data.h */
 typedef enum {
     KH_TYPE_ARRAY_LOCAL = 0,
     KH_TYPE_STRING_LOCAL = 1,

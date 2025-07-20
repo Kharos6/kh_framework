@@ -461,7 +461,7 @@ static inline int kh_validate_hashmap_format(const char* value) {
 static inline int kh_validate_value_format(int data_type, const char* value) {
     if (!value) return 0;
     
-    /* Forward declaration for type constants - these should match process_kh_data.hpp */
+    /* Forward declaration for type constants - these should match process_kh_data.h */
     typedef enum {
         KH_TYPE_ARRAY = 0,
         KH_TYPE_STRING = 1,

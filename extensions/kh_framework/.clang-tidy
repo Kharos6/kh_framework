@@ -1,0 +1,51 @@
+Checks: >
+  *,
+  -altera-*,
+  -fuchsia-*,
+  -llvmlibc-*,
+  -zircon-*,
+  -android-*,
+  -linuxkernel-*,
+  -darwin-*,
+  -objc-*,
+  -google-*,
+  -hicpp-*,
+  -readability-magic-numbers,
+  -cppcoreguidelines-avoid-magic-numbers,
+  -readability-function-cognitive-complexity,
+  -readability-identifier-length,
+  -cppcoreguidelines-avoid-non-const-global-variables,
+  -cppcoreguidelines-interfaces-global-init,
+  -modernize-*,
+  -bugprone-easily-swappable-parameters,
+  -misc-non-private-member-variables-in-classes,
+  -clang-analyzer-security.insecureAPI.strcpy,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,
+  -cert-err33-c,
+  -concurrency-mt-unsafe,
+  -readability-function-size,
+  -cppcoreguidelines-avoid-c-arrays,
+  -readability-isolate-declaration,
+  -bugprone-reserved-identifier,
+  -cert-dcl37-c,
+  -cert-dcl51-cpp,
+  -microsoft-*,
+  -clang-diagnostic-microsoft-*,
+  -readability-non-const-parameter,
+  -cppcoreguidelines-non-private-member-variables-in-classes
+
+WarningsAsErrors: ''
+HeaderFilterRegex: '.*\.(h|hpp)$'
+FormatStyle: 'file'
+
+CheckOptions:
+  - key: readability-identifier-naming.VariableCase
+    value: lower_case
+  - key: readability-identifier-naming.FunctionCase  
+    value: lower_case
+  - key: readability-identifier-naming.MacroCase
+    value: UPPER_CASE
+  - key: readability-identifier-naming.EnumConstantCase
+    value: UPPER_CASE
+  - key: misc-non-private-member-variables-in-classes.IgnoreClassesWithAllMemberVariablesBeingPublic
+    value: true

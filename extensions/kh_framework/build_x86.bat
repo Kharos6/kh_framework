@@ -88,7 +88,7 @@ if exist output_x86\*.pdb del output_x86\*.pdb
 
 REM Build the DLL with all output going to the output directory
 echo Compiling kh_framework.dll (Cleaned Version) for 32-bit...
-cl /LD /O2 /Ox /Ot /GL /MT /TC kh_framework.cpp ^
+cl /LD /O2 /Ox /Ot /GL /MT /TC kh_framework.c ^
    /Fe:output_x86\kh_framework.dll ^
    /Fo:output_x86\ ^
    /Fd:output_x86\kh_framework.pdb ^

@@ -203,20 +203,57 @@ static inline int kh_resize_token_value(token_t* token, int required_size) {
     
     if (required_size <= token->value_capacity) return 1;
     
-    int new_capacity = token->value_capacity;
-    while (new_capacity < required_size) {
-        new_capacity *= 2;
-        // Prevent integer overflow
-        if (new_capacity < token->value_capacity) {
-            token->allocation_failed = 1;
-            return 0;
-        }
+    /* Define reasonable maximum size to prevent excessive allocations */
+    const int MAX_TOKEN_SIZE = 1024 * 1024; /* 1MB per token maximum */
+    
+    if (required_size > MAX_TOKEN_SIZE) {
+        token->allocation_failed = 1;
+        return 0;
     }
     
-    // Attempt realloc with fallback
+    int new_capacity = token->value_capacity;
+    
+    /* Double capacity until we can accommodate required size */
+    while (new_capacity < required_size) {
+        /* Comprehensive overflow checks */
+        if (new_capacity > MAX_TOKEN_SIZE / 2) {
+            /* Next doubling would exceed maximum */
+            if (required_size <= MAX_TOKEN_SIZE) {
+                new_capacity = MAX_TOKEN_SIZE;
+                break;
+            } else {
+                token->allocation_failed = 1;
+                return 0;
+            }
+        }
+        
+        int next_capacity = new_capacity * 2;
+        
+        /* Check for integer overflow in multiplication */
+        if (next_capacity < new_capacity || next_capacity < 0) {
+            /* Integer overflow detected */
+            if (required_size <= MAX_TOKEN_SIZE) {
+                new_capacity = MAX_TOKEN_SIZE;
+                break;
+            } else {
+                token->allocation_failed = 1;
+                return 0;
+            }
+        }
+        
+        new_capacity = next_capacity;
+    }
+    
+    /* Verify final capacity is reasonable */
+    if (new_capacity < required_size || new_capacity > MAX_TOKEN_SIZE || new_capacity < 0) {
+        token->allocation_failed = 1;
+        return 0;
+    }
+    
+    /* Attempt realloc with fallback on failure */
     char* new_value = (char*)realloc(token->value, (size_t)new_capacity);
     if (!new_value) {
-        // Don't modify original on failure
+        /* Don't modify original on failure */
         token->allocation_failed = 1;
         return 0;
     }
@@ -276,10 +313,11 @@ static inline int kh_init_parser_context(parser_context_t* ctx, const char* expr
     ctx->length = (int)strlen(expr);
     ctx->error_msg_capacity = 512;
     
-    // Allocate error message buffer
+    // Allocate error message buffer with minimum guaranteed space
     ctx->error_msg = (char*)malloc((size_t)ctx->error_msg_capacity);
     if (!ctx->error_msg) {
         ctx->allocation_failed = 1;
+        ctx->error_msg_capacity = 0;
         return 0;
     }
     ctx->error_msg[0] = '\0';
@@ -288,6 +326,17 @@ static inline int kh_init_parser_context(parser_context_t* ctx, const char* expr
     if (!kh_init_token(&ctx->current_token)) {
         free(ctx->error_msg);
         ctx->error_msg = NULL;
+        ctx->error_msg_capacity = 0;
+        ctx->allocation_failed = 1;
+        return 0;
+    }
+    
+    /* If token initialization failed, clean up and return failure */
+    if (ctx->current_token.allocation_failed) {
+        free(ctx->error_msg);
+        ctx->error_msg = NULL;
+        ctx->error_msg_capacity = 0;
+        kh_free_token(&ctx->current_token);
         ctx->allocation_failed = 1;
         return 0;
     }
@@ -295,35 +344,75 @@ static inline int kh_init_parser_context(parser_context_t* ctx, const char* expr
     return 1;
 }
 
-/* Set error message with automatic resizing */
+/* Set error message with automatic resizing - FIXED to use kh_set_parser_error consistently */
 static inline int kh_set_parser_error(parser_context_t* ctx, const char* format, ...) {
-    if (!ctx || !format || ctx->allocation_failed) return 0;
+    if (!ctx || !format) return 0;
+    
+    /* If allocation already failed, try to use existing buffer */
+    if (ctx->allocation_failed && ctx->error_msg && ctx->error_msg_capacity > 0) {
+        va_list args;
+        va_start(args, format);
+        
+        /* Try to fit error message in existing buffer */
+        int prefix_len = (int)strlen(KH_ERROR_PREFIX);
+        if (ctx->error_msg_capacity > prefix_len + 10) { /* Ensure minimum space */
+            strcpy_s(ctx->error_msg, (size_t)ctx->error_msg_capacity, KH_ERROR_PREFIX);
+            _vsnprintf_s(ctx->error_msg + prefix_len, 
+                         (size_t)(ctx->error_msg_capacity - prefix_len), 
+                         _TRUNCATE, format, args);
+        } else {
+            /* Fallback to minimal error message */
+            kh_set_parser_error(ctx, "MEMORY ERROR");
+        }
+        va_end(args);
+        return 1;
+    }
     
     va_list args;
     va_start(args, format);
     
-    int required_size = _vscprintf(format, args) + 1;
+    /* Calculate required size for the formatted message (without prefix) */
+    int message_size = _vscprintf(format, args) + 1;
     va_end(args);
     
-    // Handle allocation failure gracefully
+    /* Add space for KH_ERROR_PREFIX */
+    int prefix_len = (int)strlen(KH_ERROR_PREFIX);
+    int required_size = prefix_len + message_size;
+    
+    /* Handle allocation failure gracefully */
     if (required_size > ctx->error_msg_capacity) {
         int new_capacity = ctx->error_msg_capacity;
         while (new_capacity < required_size && new_capacity > 0) {
             new_capacity *= 2;
         }
         
-        if (new_capacity <= 0) { // Integer overflow check
+        if (new_capacity <= 0) { /* Integer overflow check */
             ctx->allocation_failed = 1;
+            /* Ensure we have some error message */
+            if (ctx->error_msg && ctx->error_msg_capacity > 20) {
+                kh_set_parser_error(ctx, "MEMORY ERROR");
+            }
             return 0;
         }
         
         char* new_error_msg = (char*)realloc(ctx->error_msg, (size_t)new_capacity);
         if (!new_error_msg) {
-            // Fall back to existing buffer with truncation
+            /* Fall back to existing buffer with truncation */
             ctx->allocation_failed = 1;
-            va_start(args, format);
-            _vsnprintf_s(ctx->error_msg, (size_t)ctx->error_msg_capacity, _TRUNCATE, format, args);
-            va_end(args);
+            
+            /* ALWAYS ensure some error message is set */
+            if (ctx->error_msg && ctx->error_msg_capacity > 0) {
+                va_start(args, format);
+                int available_space = ctx->error_msg_capacity - prefix_len;
+                if (available_space > 10) {
+                    strcpy_s(ctx->error_msg, (size_t)ctx->error_msg_capacity, KH_ERROR_PREFIX);
+                    _vsnprintf_s(ctx->error_msg + prefix_len, (size_t)available_space, _TRUNCATE, format, args);
+                } else {
+                    /* Not enough space even for prefix, use minimal error */
+                    kh_set_parser_error(ctx, "MEMORY ERROR");
+                }
+                va_end(args);
+            }
             return 0;
         }
         
@@ -331,8 +420,22 @@ static inline int kh_set_parser_error(parser_context_t* ctx, const char* format,
         ctx->error_msg_capacity = new_capacity;
     }
     
+    /* Write the prefix first */
+    if (strcpy_s(ctx->error_msg, (size_t)ctx->error_msg_capacity, KH_ERROR_PREFIX) != 0) {
+        /* strcpy_s failed, set minimal error */
+        ctx->error_msg[0] = 'E';
+        ctx->error_msg[1] = '\0';
+        return 0;
+    }
+    
+    /* Append the formatted message after the prefix */
     va_start(args, format);
-    _vsnprintf_s(ctx->error_msg, (size_t)ctx->error_msg_capacity, _TRUNCATE, format, args);
+    if (_vsnprintf_s(ctx->error_msg + prefix_len, 
+                     (size_t)(ctx->error_msg_capacity - prefix_len), 
+                     _TRUNCATE, format, args) < 0) {
+        /* Formatting failed, but we still have the prefix */
+        strcat_s(ctx->error_msg, (size_t)ctx->error_msg_capacity, "FORMATTING ERROR");
+    }
     va_end(args);
     
     return 1;
@@ -722,7 +825,8 @@ static double kh_parse_function_call(parser_context_t* ctx, const char* func_nam
         case 3: result = func->func_ptr_3(args[0], args[1], args[2]); break;
         default:
             kh_set_parser_error(ctx, "INVALID ARGUMENT COUNT FOR FUNCTION '%s'", func_name);
-            break;
+            free(args);  /* FIX: Added missing free() */
+            return 0.0;
     }
     
     free(args);
@@ -744,7 +848,7 @@ static double kh_parse_primary(parser_context_t* ctx) {
     if (ctx->current_token.type == TOKEN_FUNCTION) {
         char* func_name = (char*)malloc(strlen(ctx->current_token.value) + 1);
         if (!func_name) {
-            _snprintf_s(ctx->error_msg, 512, _TRUNCATE, "MEMORY ALLOCATION FAILED");
+            kh_set_parser_error(ctx, "MEMORY ALLOCATION FAILED");
             return 0.0;
         }
         
@@ -760,7 +864,7 @@ static double kh_parse_primary(parser_context_t* ctx) {
         double value = kh_parse_expression(ctx);
         
         if (ctx->current_token.type != TOKEN_RPAREN) {
-            _snprintf_s(ctx->error_msg, 512, _TRUNCATE, "EXPECTED ')' AT POSITION %d", ctx->pos);
+            kh_set_parser_error(ctx, "EXPECTED ')' AT POSITION %d", ctx->pos);
             return 0.0;
         }
         
@@ -768,7 +872,7 @@ static double kh_parse_primary(parser_context_t* ctx) {
         return value;
     }
     
-    _snprintf_s(ctx->error_msg, 512, _TRUNCATE, "EXPECTED NUMBER, FUNCTION, OR '(' AT POSITION %d", ctx->pos);
+    kh_set_parser_error(ctx, "EXPECTED NUMBER, FUNCTION, OR '(' AT POSITION %d", ctx->pos);
     return 0.0;
 }
 
@@ -822,7 +926,7 @@ static double kh_parse_multiplicative(parser_context_t* ctx) {
             kh_get_next_token(ctx);
             double right = kh_parse_unary(ctx);
             if (right == 0.0) {
-                _snprintf_s(ctx->error_msg, 512, _TRUNCATE, "DIVISION BY ZERO");
+                kh_set_parser_error(ctx, "DIVISION BY ZERO");
                 ctx->recursion_depth--;
                 return 0.0;
             }
@@ -831,7 +935,7 @@ static double kh_parse_multiplicative(parser_context_t* ctx) {
             kh_get_next_token(ctx);
             double right = kh_parse_unary(ctx);
             if (right == 0.0) {
-                _snprintf_s(ctx->error_msg, 512, _TRUNCATE, "MODULO BY ZERO");
+                kh_set_parser_error(ctx, "MODULO BY ZERO");
                 ctx->recursion_depth--;
                 return 0.0;
             }
@@ -1026,19 +1130,48 @@ static int kh_process_math_operation(char* output, int output_size, const char**
     kh_get_next_token(&ctx);
     
     if (ctx.current_token.type == TOKEN_ERROR) {
-        kh_set_error(output, output_size, ctx.error_msg);
+        /* Ensure we have an error message */
+        if (ctx.error_msg && strlen(ctx.error_msg) > 0) {
+            strcpy_s(output, (size_t)output_size, ctx.error_msg);
+        } else {
+            kh_set_error(output, output_size, "TOKEN PARSING ERROR");
+        }
         goto cleanup;
     }
     
     result = kh_parse_expression(&ctx);
     
-    if (strlen(ctx.error_msg) > 0) {
-        kh_set_error(output, output_size, ctx.error_msg);
+    /* Check for parsing errors */
+    if (ctx.error_msg && strlen(ctx.error_msg) > 0) {
+        strcpy_s(output, (size_t)output_size, ctx.error_msg);
+        goto cleanup;
+    }
+    
+    /* Check for allocation failures */
+    if (ctx.allocation_failed || ctx.current_token.allocation_failed) {
+        kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED DURING PARSING");
         goto cleanup;
     }
     
     if (ctx.current_token.type != TOKEN_END) {
-        kh_set_error(output, output_size, "UNEXPECTED TOKEN AT END OF EXPRESSION");
+        /* Try to set parser error, but have fallback */
+        kh_set_parser_error(&ctx, "UNEXPECTED TOKEN AT END OF EXPRESSION");
+        if (ctx.error_msg && strlen(ctx.error_msg) > 0) {
+            strcpy_s(output, (size_t)output_size, ctx.error_msg);
+        } else {
+            kh_set_error(output, output_size, "UNEXPECTED TOKEN AT END OF EXPRESSION");
+        }
+        goto cleanup;
+    }
+    
+    /* Check for mathematical errors (NaN, infinity) */
+    if (isnan(result)) {
+        kh_set_error(output, output_size, "RESULT IS NOT A NUMBER (NaN)");
+        goto cleanup;
+    }
+    
+    if (isinf(result)) {
+        kh_set_error(output, output_size, "RESULT IS INFINITE");
         goto cleanup;
     }
     
@@ -1048,7 +1181,10 @@ static int kh_process_math_operation(char* output, int output_size, const char**
     } else if (result == 1.0 && kh_is_boolean_expression(clean_expr)) {
         strcpy_s(output, (size_t)output_size, "true");
     } else {
-        _snprintf_s(output, (size_t)output_size, _TRUNCATE, "%.6g", result);
+        if (_snprintf_s(output, (size_t)output_size, _TRUNCATE, "%.6g", result) < 0) {
+            kh_set_error(output, output_size, "RESULT FORMATTING FAILED");
+            goto cleanup;
+        }
     }
     
     ret = 0;

@@ -51,22 +51,42 @@ static const int FUNCTION_COUNT = sizeof(FUNCTION_TABLE) / sizeof(function_info_
 
 /* Fast function lookup and validation - optimized with hash-like first character check */
 static inline int kh_validate_function_call(const char* function, int argc, char* error_output, int error_size) {
-    if (!function || !error_output || error_size <= 0) {
-        if (error_output && error_size > 0) {
-            kh_set_error(error_output, error_size, "NULL FUNCTION NAME OR OUTPUT BUFFER");
-        }
+    if (!error_output || error_size <= 0) {
+        return 0; /* Cannot report errors without valid output buffer */
+    }
+    
+    /* Initialize output buffer */
+    error_output[0] = '\0';
+    
+    if (!function) {
+        kh_set_error(error_output, error_size, "NULL FUNCTION NAME");
+        return 0;
+    }
+    
+    /* Check for empty function name */
+    if (strlen(function) == 0) {
+        kh_set_error(error_output, error_size, "EMPTY FUNCTION NAME");
+        return 0;
+    }
+    
+    /* Check for excessively long function name (potential buffer overflow) */
+    if (strlen(function) > 256) {
+        kh_set_error(error_output, error_size, "FUNCTION NAME TOO LONG");
         return 0;
     }
     
     char first_char = function[0];
     int i;
+    int function_found = 0;
     
     /* Fast first-character filtering */
     for (i = 0; i < FUNCTION_COUNT; i++) {
         if (FUNCTION_TABLE[i].first_char == first_char && 
             strcmp(FUNCTION_TABLE[i].name, function) == 0) {
             
-            /* Check argument count */
+            function_found = 1;
+            
+            /* Check minimum argument count */
             if (argc < FUNCTION_TABLE[i].min_args) {
                 _snprintf_s(error_output, (size_t)error_size, _TRUNCATE, 
                            KH_ERROR_PREFIX "FUNCTION '%s' REQUIRES AT LEAST %d ARGUMENTS, GOT %d",
@@ -74,6 +94,7 @@ static inline int kh_validate_function_call(const char* function, int argc, char
                 return 0;
             }
             
+            /* Check maximum argument count */
             if (FUNCTION_TABLE[i].max_args != -1 && argc > FUNCTION_TABLE[i].max_args) {
                 _snprintf_s(error_output, (size_t)error_size, _TRUNCATE,
                            KH_ERROR_PREFIX "FUNCTION '%s' ACCEPTS AT MOST %d ARGUMENTS, GOT %d",
@@ -81,11 +102,25 @@ static inline int kh_validate_function_call(const char* function, int argc, char
                 return 0;
             }
             
+            /* Check for unreasonable argument count (potential attack) */
+            if (argc > 100) {
+                kh_set_error(error_output, error_size, "TOO MANY ARGUMENTS");
+                return 0;
+            }
+            
             return 1; /* Function found and arguments valid */
         }
     }
     
-    kh_set_error(error_output, error_size, "UNKNOWN FUNCTION");
+    /* Function not found - provide helpful error message */
+    if (!function_found) {
+        _snprintf_s(error_output, (size_t)error_size, _TRUNCATE,
+                   KH_ERROR_PREFIX "UNKNOWN FUNCTION '%s'", function);
+        return 0;
+    }
+    
+    /* This should never be reached */
+    kh_set_error(error_output, error_size, "FUNCTION VALIDATION FAILED");
     return 0;
 }
 
@@ -245,7 +280,7 @@ __declspec(dllexport) void RVExtensionVersion(char *output, unsigned int output_
     _snprintf_s(output, (size_t)output_size, _TRUNCATE, "KH Framework 1.0");
 }
 
-/* DLL entry point - required for Windows DLLs */
+/* DLL entry point - required for Windows DLLs - Enhanced with Memory Manager */
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
     /* Suppress unused parameter warnings */
     UNREFERENCED_PARAMETER(hModule);
@@ -257,6 +292,13 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             /* DLL is being loaded into a process */
             /* Initialize random seed here to avoid repeated initialization */
             kh_init_random();
+            
+            /* Initialize memory manager and load all .khdata files */
+            if (!kh_init_memory_manager()) {
+                /* Memory manager initialization failed - this is not fatal */
+                /* The system will fall back to disk-based operations */
+                /* Could log this error in a real system */
+            }
             break;
             
         case DLL_THREAD_ATTACH:
@@ -271,6 +313,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             
         case DLL_PROCESS_DETACH:
             /* DLL is being unloaded from the process */
+            /* Clean up memory manager - save all dirty files and free memory */
+            kh_cleanup_memory_manager();
+            
             /* Clean up string operations tables */
             kh_cleanup_string_operations();
             break;

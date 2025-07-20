@@ -1235,6 +1235,7 @@ static inline int kh_process_string_operation(char* output, int output_size, con
     char** clean_args = NULL;
     const kh_string_function_t* func;
     int result = 1;
+    int allocated_args = 0; // Track successfully allocated arguments
     
     clean_operation = (char*)malloc(strlen(argv[0]) + 1);
     if (!clean_operation) {
@@ -1244,34 +1245,40 @@ static inline int kh_process_string_operation(char* output, int output_size, con
     
     kh_clean_string(argv[0], clean_operation, (int)strlen(argv[0]) + 1);
     
-    /* Find function in whitelist */
+    if (strlen(clean_operation) == 0) {
+        kh_set_error(output, output_size, "EMPTY FUNCTION NAME");
+        goto cleanup;
+    }
+    
     func = kh_find_string_function(clean_operation);
     if (!func) {
         _snprintf_s(output, (size_t)output_size, _TRUNCATE, KH_ERROR_PREFIX "UNKNOWN STRING FUNCTION '%s'", clean_operation);
         goto cleanup;
     }
     
-    /* Check argument count */
     if (argc - 1 != func->arg_count) {
         _snprintf_s(output, (size_t)output_size, _TRUNCATE, KH_ERROR_PREFIX "FUNCTION '%s' EXPECTS %d ARGUMENTS, GOT %d", 
                  clean_operation, func->arg_count, argc - 1);
         goto cleanup;
     }
     
-    /* Clean arguments */
-    clean_args = (char**)calloc((size_t)(argc - 1), sizeof(char*));
-    if (!clean_args) {
-        kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
-        goto cleanup;
-    }
-    
-    for (int i = 1; i < argc; i++) {
-        clean_args[i - 1] = (char*)malloc(strlen(argv[i]) + 1);
-        if (!clean_args[i - 1]) {
+    /* Clean arguments with proper tracking */
+    if (argc > 1) {
+        clean_args = (char**)calloc((size_t)(argc - 1), sizeof(char*));
+        if (!clean_args) {
             kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
             goto cleanup;
         }
-        kh_clean_string(argv[i], clean_args[i - 1], (int)strlen(argv[i]) + 1);
+        
+        for (int i = 1; i < argc; i++) {
+            clean_args[i - 1] = (char*)malloc(strlen(argv[i]) + 1);
+            if (!clean_args[i - 1]) {
+                kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
+                goto cleanup;
+            }
+            allocated_args++; // Increment only after successful allocation
+            kh_clean_string(argv[i], clean_args[i - 1], (int)strlen(argv[i]) + 1);
+        }
     }
     
     /* Execute function based on type */
@@ -1344,8 +1351,9 @@ static inline int kh_process_string_operation(char* output, int output_size, con
 cleanup:
     free(clean_operation);
     if (clean_args) {
-        for (int i = 0; i < argc - 1; i++) {
-            free(clean_args[i]);
+        // Only free the successfully allocated arguments
+        for (int j = 0; j < allocated_args; j++) {
+            free(clean_args[j]);
         }
         free(clean_args);
     }

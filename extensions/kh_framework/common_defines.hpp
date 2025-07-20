@@ -15,7 +15,7 @@
 #define KH_ARRAY_MAX_INPUT_SIZE (32 * 1024 * 1024) /* 32MB max input */
 #define KH_ARRAY_PARSE_OPERATIONS_LIMIT 50000     /* Prevent infinite parsing loops */
 #define KH_HASH_TABLE_MIN_SIZE 16
-#define KH_HASH_TABLE_LOAD_FACTOR 0.75
+#define KH_HASH_TABLE_LOAD_FACTOR 0.5
 #define KH_HASH_EMPTY 0                 /* Empty hash table entry marker */
 #define KH_STRING_ENCODE_MAGIC 0x4B48          /* "KH" in little endian */
 #define KH_STRING_MAX_INPUT_SIZE (32 * 1024 * 1024) /* 32MB max input */
@@ -203,8 +203,9 @@ static inline void kh_clean_string(const char* input, char* output, int output_s
         end--;
     }
     
-    /* Calculate length without quotes */
+    /* Calculate length without quotes - add safety check */
     len = (int)(end - start + 1);
+    if (len < 0) len = 0; /* Safety check for edge cases */
     if (len >= output_size) {
         len = output_size - 1;
     }

@@ -26,8 +26,20 @@ typedef struct {
     uint32_t name_hash;      /* Hash of variable name */
     uint32_t data_offset;    /* Offset to variable data in file */
     uint32_t reserved;       /* Reserved for future use/alignment */
+    uint8_t deleted;         /* Tombstone for Robin Hood hashing */
+    uint8_t distance;        /* Distance from ideal position (Robin Hood) */
+    uint16_t padding;        /* Alignment padding */
 } kh_hash_entry_t;
 #pragma pack(pop)
+
+/* Hash table info structure to pass around hash table data */
+typedef struct {
+    kh_hash_entry_t* entries;
+    uint32_t size;
+    uint32_t used_count;     /* Number of used entries */
+    uint32_t deleted_count;  /* Number of deleted entries */
+    int needs_rebuild;       /* Flag to indicate if rebuild is needed */
+} kh_hash_table_info_t;
 
 /* Binary file header structure - enhanced for indexed format with alignment */
 #pragma pack(push, 4)
@@ -42,6 +54,29 @@ typedef struct {
     unsigned int reserved3;          /* Reserved for future use */
 } kh_file_header_t;
 #pragma pack(pop)
+
+/* In-memory file representation */
+typedef struct {
+    char* filename;  /* Just the filename without path */
+    char* full_path; /* Full path to the file */
+    kh_variable_t* variables;
+    int variable_count;
+    kh_hash_table_info_t hash_info;
+    int dirty;  /* Flag to track if file needs saving */
+    int capacity; /* Current allocated capacity for variables */
+} khdata_file_t;
+
+/* Memory manager for all .khdata files */
+typedef struct {
+    khdata_file_t* files;
+    int file_count;
+    int file_capacity;
+    int initialized;
+    char base_path[MAX_FILE_PATH_LENGTH]; /* Base path to kh_data folder */
+} khdata_memory_manager_t;
+
+/* Global memory manager instance */
+static khdata_memory_manager_t g_memory_manager = {0};
 
 /* Type string lookup table for better performance */
 typedef struct {
@@ -91,74 +126,162 @@ static inline uint32_t kh_hash_variable_name(const char* name) {
 
 /* Calculate optimal hash table size */
 static inline uint32_t kh_calculate_hash_table_size(uint32_t variable_count) {
+    /* Check for potential overflow in load factor calculation */
+    if (variable_count > UINT32_MAX / 2) {
+        return KH_HASH_TABLE_MIN_SIZE; /* Fallback to minimum size */
+    }
+    
     /* Use next power of 2 that gives load factor <= 0.75 */
     uint32_t min_size = (uint32_t)((double)variable_count / KH_HASH_TABLE_LOAD_FACTOR);
     uint32_t size = KH_HASH_TABLE_MIN_SIZE;
     
-    while (size < min_size) {
+    /* Ensure we don't overflow when doubling */
+    while (size < min_size && size <= UINT32_MAX / 2) {
         size <<= 1;
+    }
+    
+    /* Final bounds check */
+    if (size < KH_HASH_TABLE_MIN_SIZE) {
+        size = KH_HASH_TABLE_MIN_SIZE;
     }
     
     return size;
 }
 
-/* Hash table lookup with linear probing - consistent collision resolution */
-static inline uint32_t kh_hash_table_find(kh_hash_entry_t* hash_table, uint32_t hash_table_size, 
-                                          uint32_t name_hash, int* found) {
+/* Robin Hood hashing with quadratic probing fallback - eliminates clustering */
+static inline uint32_t kh_hash_table_find_robin_hood(kh_hash_entry_t* hash_table, uint32_t hash_table_size, 
+                                                      uint32_t name_hash, int* found) {
     if (!hash_table || hash_table_size == 0 || name_hash == KH_HASH_EMPTY) {
         if (found) *found = 0;
         return 0;
     }
     
     uint32_t index = name_hash % hash_table_size;
+    uint32_t distance = 0;
     uint32_t original_index = index;
     
     do {
-        if (hash_table[index].name_hash == KH_HASH_EMPTY) {
-            /* Empty slot found - not in table */
+        kh_hash_entry_t* entry = &hash_table[index];
+        
+        if (entry->name_hash == KH_HASH_EMPTY && !entry->deleted) {
             if (found) *found = 0;
-            return index; /* Return empty slot for insertion */
+            return index;
         }
         
-        if (hash_table[index].name_hash == name_hash) {
-            /* Found matching hash */
+        if (!entry->deleted && entry->name_hash == name_hash) {
             if (found) *found = 1;
             return index;
         }
         
-        /* Linear probe to next slot */
-        index = (index + 1) % hash_table_size;
+        if (!entry->deleted && entry->distance < distance) {
+            if (found) *found = 0;
+            return index;
+        }
         
-    } while (index != original_index);
+        distance++;
+        
+        /* FIX: Prevent integer overflow in quadratic probing */
+        if (distance > 65535) break; /* Reasonable upper limit */
+        
+        uint64_t next_offset = (uint64_t)distance * distance;
+        if (next_offset > hash_table_size) {
+            /* Linear probing fallback when quadratic would overflow */
+            index = (original_index + distance) % hash_table_size;
+        } else {
+            index = (original_index + (uint32_t)next_offset) % hash_table_size;
+        }
+        
+        if (distance >= hash_table_size) break; /* Prevent infinite loops */
+        
+    } while (1);
     
-    /* Table is full */
     if (found) *found = 0;
     return 0;
 }
 
-/* Hash table insertion with linear probing */
-static inline int kh_hash_table_insert(kh_hash_entry_t* hash_table, uint32_t hash_table_size,
-                                       uint32_t name_hash, uint32_t data_offset) {
+/* Robin Hood hash table insertion - more efficient than linear probing */
+static inline int kh_hash_table_insert_robin_hood(kh_hash_entry_t* hash_table, uint32_t hash_table_size,
+                                                   uint32_t name_hash, uint32_t data_offset) {
     if (!hash_table || hash_table_size == 0 || name_hash == KH_HASH_EMPTY) return 0;
     
-    int found = 0;
-    uint32_t index = kh_hash_table_find(hash_table, hash_table_size, name_hash, &found);
+    uint32_t index = name_hash % hash_table_size;
+    uint32_t distance = 0;
+    uint32_t original_index = index;
     
-    if (found) {
+    /* Current entry to insert */
+    kh_hash_entry_t new_entry = {name_hash, data_offset, 0, 0, 0, 0};
+    
+    while (distance < hash_table_size) {
+        kh_hash_entry_t* entry = &hash_table[index];
+        
+        /* Empty slot or deleted slot */
+        if (entry->name_hash == KH_HASH_EMPTY || entry->deleted) {
+            *entry = new_entry;
+            entry->distance = (uint8_t)distance;
+            return 1;
+        }
+        
         /* Update existing entry */
-        hash_table[index].data_offset = data_offset;
-        return 1;
-    }
-    
-    /* Insert new entry if slot is available */
-    if (hash_table[index].name_hash == KH_HASH_EMPTY) {
-        hash_table[index].name_hash = name_hash;
-        hash_table[index].data_offset = data_offset;
-        hash_table[index].reserved = 0;
-        return 1;
+        if (entry->name_hash == name_hash) {
+            entry->data_offset = data_offset;
+            return 1;
+        }
+        
+        /* Robin Hood: if new entry is further from home, swap */
+        if (distance > entry->distance) {
+            kh_hash_entry_t temp = *entry;
+            *entry = new_entry;
+            entry->distance = (uint8_t)distance;
+            
+            /* Continue inserting the displaced entry */
+            new_entry = temp;
+            distance = temp.distance;
+        }
+        
+        /* Move to next position with quadratic probing */
+        distance++;
+        index = (original_index + distance * distance) % hash_table_size;
     }
     
     return 0; /* Table full */
+}
+
+/* Enhanced hash table deletion with tombstoning */
+static inline int kh_hash_table_delete(kh_hash_entry_t* hash_table, uint32_t hash_table_size, uint32_t name_hash) {
+    if (!hash_table || hash_table_size == 0 || name_hash == KH_HASH_EMPTY) return 0;
+    
+    int found = 0;
+    uint32_t index = kh_hash_table_find_robin_hood(hash_table, hash_table_size, name_hash, &found);
+    
+    if (found) {
+        hash_table[index].deleted = 1;
+        hash_table[index].name_hash = KH_HASH_EMPTY;
+        hash_table[index].data_offset = 0;
+        return 1;
+    }
+    
+    return 0;
+}
+
+/* Check if hash table needs rebuilding */
+static inline int kh_should_rebuild_hash_table(kh_hash_table_info_t* hash_info, int variable_count) {
+    if (!hash_info || !hash_info->entries) return 1;
+    
+    /* Rebuild if load factor too high */
+    double load_factor = (double)(hash_info->used_count + hash_info->deleted_count) / hash_info->size;
+    if (load_factor > 0.8) return 1;
+    
+    /* Rebuild if too many deletions */
+    if (hash_info->deleted_count > hash_info->used_count / 2) return 1;
+    
+    /* Rebuild if size mismatch */
+    uint32_t optimal_size = kh_calculate_hash_table_size(variable_count);
+    if (hash_info->size < optimal_size / 2 || hash_info->size > optimal_size * 2) return 1;
+    
+    /* Rebuild if explicitly flagged */
+    if (hash_info->needs_rebuild) return 1;
+    
+    return 0;
 }
 
 /* Convert type string to enum - optimized lookup */
@@ -213,6 +336,124 @@ void kh_free_variables(kh_variable_t* variables, int count) {
         }
         free(variables);
     }
+}
+
+/* Free hash table info structure */
+static inline void kh_free_hash_table_info(kh_hash_table_info_t* hash_info) {
+    if (hash_info) {
+        free(hash_info->entries);
+        hash_info->entries = NULL;
+        hash_info->size = 0;
+        hash_info->used_count = 0;
+        hash_info->deleted_count = 0;
+        hash_info->needs_rebuild = 0;
+    }
+}
+
+/* Free a single khdata file structure */
+static inline void kh_free_khdata_file(khdata_file_t* file) {
+    if (!file) return;
+    
+    free(file->filename);
+    free(file->full_path);
+    kh_free_variables(file->variables, file->variable_count);
+    kh_free_hash_table_info(&file->hash_info);
+    
+    memset(file, 0, sizeof(khdata_file_t));
+}
+
+/* Optimized hash table rebuild - only when necessary */
+static inline int kh_rebuild_hash_table(khdata_file_t* file) {
+    if (!file || file->variable_count <= 0) return 1;
+    
+    /* Check if rebuild is actually needed */
+    if (!kh_should_rebuild_hash_table(&file->hash_info, file->variable_count)) {
+        return 1; /* No rebuild needed */
+    }
+    
+    /* Free existing hash table */
+    kh_free_hash_table_info(&file->hash_info);
+    
+    /* Calculate new hash table size */
+    uint32_t hash_table_size = kh_calculate_hash_table_size(file->variable_count);
+    
+    /* Allocate new hash table */
+    file->hash_info.entries = (kh_hash_entry_t*)calloc(hash_table_size, sizeof(kh_hash_entry_t));
+    if (!file->hash_info.entries) return 0;
+    
+    file->hash_info.size = hash_table_size;
+    file->hash_info.used_count = 0;
+    file->hash_info.deleted_count = 0;
+    file->hash_info.needs_rebuild = 0;
+    
+    /* Rebuild hash table using Robin Hood hashing */
+    for (int i = 0; i < file->variable_count; i++) {
+        if (file->variables[i].name) {
+            uint32_t name_hash = kh_hash_variable_name(file->variables[i].name);
+            if (!kh_hash_table_insert_robin_hood(file->hash_info.entries, hash_table_size, name_hash, i)) {
+                kh_free_hash_table_info(&file->hash_info);
+                return 0;
+            }
+            file->hash_info.used_count++;
+        }
+    }
+    
+    return 1;
+}
+
+/* Smart hash table update - add single entry without full rebuild */
+static inline int kh_hash_table_add_entry(kh_hash_table_info_t* hash_info, const char* name, int var_index) {
+    if (!hash_info || !name || var_index < 0) return 0;
+    
+    /* Check if we need to rebuild first */
+    if (kh_should_rebuild_hash_table(hash_info, hash_info->used_count + 1)) {
+        hash_info->needs_rebuild = 1;
+        return 0; /* Signal that rebuild is needed */
+    }
+    
+    uint32_t name_hash = kh_hash_variable_name(name);
+    if (kh_hash_table_insert_robin_hood(hash_info->entries, hash_info->size, name_hash, var_index)) {
+        hash_info->used_count++;
+        return 1;
+    }
+    
+    /* Insertion failed, mark for rebuild */
+    hash_info->needs_rebuild = 1;
+    return 0;
+}
+
+/* Smart hash table removal - mark deleted without full rebuild */
+static inline int kh_hash_table_remove_entry(kh_hash_table_info_t* hash_info, const char* name) {
+    if (!hash_info || !name) return 0;
+    
+    uint32_t name_hash = kh_hash_variable_name(name);
+    if (kh_hash_table_delete(hash_info->entries, hash_info->size, name_hash)) {
+        hash_info->used_count--;
+        hash_info->deleted_count++;
+        
+        /* Check if we have too many deletions */
+        if (hash_info->deleted_count > hash_info->used_count / 2) {
+            hash_info->needs_rebuild = 1;
+        }
+        
+        return 1;
+    }
+    
+    return 0;
+}
+
+/* Find file in memory by filename */
+static inline khdata_file_t* kh_find_file_in_memory(const char* filename) {
+    if (!filename || !g_memory_manager.initialized) return NULL;
+    
+    for (int i = 0; i < g_memory_manager.file_count; i++) {
+        if (g_memory_manager.files[i].filename && 
+            kh_strcasecmp(g_memory_manager.files[i].filename, filename) == 0) {
+            return &g_memory_manager.files[i];
+        }
+    }
+    
+    return NULL;
 }
 
 /* Check if file is in binary format and get version */
@@ -477,247 +718,6 @@ static int kh_write_text_file(const char* file_path, kh_variable_t* variables, i
     return success;
 }
 
-/* Convert text format file to binary format */
-static int kh_convert_text_to_binary(const char* file_path) {
-    if (!file_path) return 0;
-    
-    kh_variable_t* variables = NULL;
-    int variable_count = 0;
-    char* temp_file_path = NULL;
-    int result = 0;
-    
-    /* Read text format */
-    if (!kh_read_text_file(file_path, &variables, &variable_count)) {
-        return 0;
-    }
-    
-    /* Create temporary file path */
-    size_t path_len = strlen(file_path);
-    temp_file_path = (char*)malloc(path_len + 10); /* +10 for ".tmp" + null */
-    if (!temp_file_path) {
-        goto cleanup;
-    }
-    
-    strcpy_s(temp_file_path, path_len + 10, file_path);
-    strcat_s(temp_file_path, path_len + 10, ".tmp");
-    
-    /* Write binary format to temporary file */
-    if (!kh_write_binary_file(temp_file_path, variables, variable_count)) {
-        goto cleanup;
-    }
-    
-    /* Replace original file with temporary file */
-    if (DeleteFileA(file_path) && MoveFileA(temp_file_path, file_path)) {
-        result = 1;
-    } else {
-        DeleteFileA(temp_file_path); /* Clean up temp file if move failed */
-    }
-
-cleanup:
-    kh_free_variables(variables, variable_count);
-    free(temp_file_path);
-    return result;
-}
-
-/* Convert binary format file to text format */
-static int kh_convert_binary_to_text(const char* file_path) {
-    if (!file_path) return 0;
-    
-    kh_variable_t* variables = NULL;
-    int variable_count = 0;
-    char* temp_file_path = NULL;
-    int result = 0;
-    
-    /* Read binary format */
-    if (!kh_read_binary_file(file_path, &variables, &variable_count)) {
-        return 0;
-    }
-    
-    /* Create temporary file path */
-    size_t path_len = strlen(file_path);
-    temp_file_path = (char*)malloc(path_len + 10); /* +10 for ".tmp" + null */
-    if (!temp_file_path) {
-        goto cleanup;
-    }
-    
-    strcpy_s(temp_file_path, path_len + 10, file_path);
-    strcat_s(temp_file_path, path_len + 10, ".tmp");
-    
-    /* Write text format to temporary file */
-    if (!kh_write_text_file(temp_file_path, variables, variable_count)) {
-        goto cleanup;
-    }
-    
-    /* Replace original file with temporary file */
-    if (DeleteFileA(file_path) && MoveFileA(temp_file_path, file_path)) {
-        result = 1;
-    } else {
-        DeleteFileA(temp_file_path); /* Clean up temp file if move failed */
-    }
-
-cleanup:
-    kh_free_variables(variables, variable_count);
-    free(temp_file_path);
-    return result;
-}
-
-/* Ensure file is in binary format before reading/writing */
-static int kh_ensure_binary_format(const char* file_path) {
-    if (!file_path) return 0;
-    
-    /* Check if file exists */
-    DWORD file_attributes = GetFileAttributesA(file_path);
-    if (file_attributes == INVALID_FILE_ATTRIBUTES) {
-        return 1; /* File doesn't exist, no conversion needed */
-    }
-    
-    /* Check if already binary */
-    if (kh_is_file_binary(file_path)) {
-        return 1; /* Already binary */
-    }
-    
-    /* Convert to binary */
-    return kh_convert_text_to_binary(file_path);
-}
-
-/* Main UnbinarizeKHData function - convert binary to text format */
-static int kh_unbinarize_khdata(const char* filename, char* output, int output_size) {
-    if (!kh_validate_non_empty_string(filename, "FILENAME", output, output_size)) {
-        return 1;
-    }
-    
-    char file_path[MAX_FILE_PATH_LENGTH];
-    char* clean_filename = NULL;
-    int result = 1;
-    
-    clean_filename = (char*)malloc(strlen(filename) + 1);
-    if (!clean_filename) {
-        kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
-        return 1;
-    }
-    
-    kh_clean_string(filename, clean_filename, (int)strlen(filename) + 1);
-    
-    if (!kh_get_khdata_file_path(clean_filename, file_path, sizeof(file_path))) {
-        kh_set_error(output, output_size, "INVALID PATH");
-        goto cleanup;
-    }
-    
-    /* Check if file exists */
-    DWORD file_attributes = GetFileAttributesA(file_path);
-    if (file_attributes == INVALID_FILE_ATTRIBUTES) {
-        kh_set_error(output, output_size, "FILE NOT FOUND");
-        goto cleanup;
-    }
-    
-    /* Check if already in text format */
-    if (!kh_is_file_binary(file_path)) {
-        strcpy_s(output, (size_t)output_size, "ALREADY_TEXT_FORMAT");
-        result = 0;
-        goto cleanup;
-    }
-    
-    /* Convert binary to text */
-    if (!kh_convert_binary_to_text(file_path)) {
-        kh_set_error(output, output_size, "CONVERSION_FAILED");
-        goto cleanup;
-    }
-    
-    strcpy_s(output, (size_t)output_size, "SUCCESS");
-    result = 0;
-
-cleanup:
-    free(clean_filename);
-    return result;
-}
-
-/* Main BinarizeKHData function - convert text to binary format */
-static int kh_binarize_khdata(const char* filename, char* output, int output_size) {
-    if (!kh_validate_non_empty_string(filename, "FILENAME", output, output_size)) {
-        return 1;
-    }
-    
-    char file_path[MAX_FILE_PATH_LENGTH];
-    char* clean_filename = NULL;
-    int result = 1;
-    
-    clean_filename = (char*)malloc(strlen(filename) + 1);
-    if (!clean_filename) {
-        kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
-        return 1;
-    }
-    
-    kh_clean_string(filename, clean_filename, (int)strlen(filename) + 1);
-    
-    if (!kh_get_khdata_file_path(clean_filename, file_path, sizeof(file_path))) {
-        kh_set_error(output, output_size, "INVALID PATH");
-        goto cleanup;
-    }
-    
-    /* Check if file exists */
-    DWORD file_attributes = GetFileAttributesA(file_path);
-    if (file_attributes == INVALID_FILE_ATTRIBUTES) {
-        kh_set_error(output, output_size, "FILE NOT FOUND");
-        goto cleanup;
-    }
-    
-    /* Check if already in binary format */
-    if (kh_is_file_binary(file_path)) {
-        strcpy_s(output, (size_t)output_size, "ALREADY_BINARY_FORMAT");
-        result = 0;
-        goto cleanup;
-    }
-    
-    /* Convert text to binary */
-    if (!kh_convert_text_to_binary(file_path)) {
-        kh_set_error(output, output_size, "CONVERSION_FAILED");
-        goto cleanup;
-    }
-    
-    strcpy_s(output, (size_t)output_size, "SUCCESS");
-    result = 0;
-
-cleanup:
-    free(clean_filename);
-    return result;
-}
-
-/* Enhanced find variable with hash table lookup - consistent linear probing */
-static inline int kh_find_variable_indexed(kh_variable_t* variables, int count, const char* name,
-                                          kh_hash_entry_t* hash_table, uint32_t hash_table_size) {
-    if (!variables || !name || count <= 0 || !hash_table || hash_table_size == 0) {
-        return kh_find_variable(variables, count, name); /* Fallback to linear search */
-    }
-    
-    uint32_t name_hash = kh_hash_variable_name(name);
-    int found = 0;
-    uint32_t index = kh_hash_table_find(hash_table, hash_table_size, name_hash, &found);
-    
-    if (found) {
-        /* Hash found, verify the actual name matches */
-        uint32_t var_index = hash_table[index].data_offset;
-        if (var_index < (uint32_t)count && variables[var_index].name &&
-            kh_strcasecmp(variables[var_index].name, name) == 0) {
-            return (int)var_index;
-        }
-    }
-    
-    return -1; /* Not found */
-}
-
-/* Find variable by name (case-insensitive) - linear search fallback */
-static inline int kh_find_variable(kh_variable_t* variables, int count, const char* name) {
-    if (!variables || !name || count <= 0) return -1;
-    
-    int i;
-    for (i = 0; i < count; i++) {
-        if (variables[i].name && kh_strcasecmp(variables[i].name, name) == 0) {
-            return i;
-        }
-    }
-    return -1;
-}
-
 /* Validate file integrity before reading */
 static int kh_validate_file_integrity(const char* file_path, long file_size) {
     if (!file_path || file_size < 0) return 0;
@@ -763,14 +763,13 @@ static int kh_validate_file_integrity(const char* file_path, long file_size) {
     return result;
 }
 
-/* Read binary file with hash table support - enhanced for indexed format */
-int kh_read_binary_file(const char* file_path, kh_variable_t** variables, int* count) {
+/* Read binary file with hash table support - returns hash table info */
+int kh_read_binary_file_with_hash(const char* file_path, kh_variable_t** variables, int* count, kh_hash_table_info_t* hash_info) {
     if (!file_path || !variables || !count) return 0;
     
     FILE* file = NULL;
     kh_file_header_t header;
     kh_variable_t* temp_variables = NULL;
-    kh_hash_entry_t* hash_table = NULL;
     int success = 0;
     long file_size = 0;
     long bytes_read = 0;
@@ -778,6 +777,13 @@ int kh_read_binary_file(const char* file_path, kh_variable_t** variables, int* c
     
     *variables = NULL;
     *count = 0;
+    if (hash_info) {
+        hash_info->entries = NULL;
+        hash_info->size = 0;
+        hash_info->used_count = 0;
+        hash_info->deleted_count = 0;
+        hash_info->needs_rebuild = 0;
+    }
     
     /* Get and validate file size */
     file_size = kh_get_file_size(file_path);
@@ -821,23 +827,35 @@ int kh_read_binary_file(const char* file_path, kh_variable_t** variables, int* c
     }
     
     /* For version 2, read hash table */
-    if (format_version >= 2 && header.hash_table_size > 0) {
-        hash_table = (kh_hash_entry_t*)calloc(header.hash_table_size, sizeof(kh_hash_entry_t));
-        if (!hash_table) {
+    if (format_version >= 2 && header.hash_table_size > 0 && hash_info) {
+        hash_info->entries = (kh_hash_entry_t*)calloc(header.hash_table_size, sizeof(kh_hash_entry_t));
+        if (!hash_info->entries) {
             fclose(file);
             return 0;
         }
+        hash_info->size = header.hash_table_size;
         
-        if (fread(hash_table, sizeof(kh_hash_entry_t), header.hash_table_size, file) != header.hash_table_size) {
-            free(hash_table);
+        if (fread(hash_info->entries, sizeof(kh_hash_entry_t), header.hash_table_size, file) != header.hash_table_size) {
+            kh_free_hash_table_info(hash_info);
             fclose(file);
             return 0;
         }
         bytes_read += header.hash_table_size * sizeof(kh_hash_entry_t);
         
+        /* Count used and deleted entries */
+        for (uint32_t i = 0; i < header.hash_table_size; i++) {
+            if (hash_info->entries[i].name_hash != KH_HASH_EMPTY) {
+                if (hash_info->entries[i].deleted) {
+                    hash_info->deleted_count++;
+                } else {
+                    hash_info->used_count++;
+                }
+            }
+        }
+        
         /* Seek to data section */
         if (fseek(file, header.data_section_offset, SEEK_SET) != 0) {
-            free(hash_table);
+            kh_free_hash_table_info(hash_info);
             fclose(file);
             return 0;
         }
@@ -847,7 +865,7 @@ int kh_read_binary_file(const char* file_path, kh_variable_t** variables, int* c
     /* Allocate variables array */
     temp_variables = (kh_variable_t*)calloc(header.variable_count, sizeof(kh_variable_t));
     if (!temp_variables) {
-        free(hash_table);
+        if (hash_info) kh_free_hash_table_info(hash_info);
         fclose(file);
         return 0;
     }
@@ -951,10 +969,14 @@ int kh_read_binary_file(const char* file_path, kh_variable_t** variables, int* c
     
 cleanup_failure:
     fclose(file);
-    free(hash_table);
     
-    if (!success && temp_variables) {
-        kh_free_variables(temp_variables, *count);
+    if (!success) {
+        if (temp_variables) {
+            kh_free_variables(temp_variables, *count);
+        }
+        if (hash_info) {
+            kh_free_hash_table_info(hash_info);
+        }
         *variables = NULL;
         *count = 0;
     }
@@ -1007,10 +1029,10 @@ static int kh_write_binary_file(const char* file_path, kh_variable_t* variables,
         hash_table = (kh_hash_entry_t*)calloc(hash_table_size, sizeof(kh_hash_entry_t));
         if (!hash_table) return 0;
         
-        /* Build hash table using consistent linear probing */
+        /* Build hash table using Robin Hood hashing */
         for (int i = 0; i < count; i++) {
             uint32_t name_hash = kh_hash_variable_name(variables[i].name);
-            if (!kh_hash_table_insert(hash_table, hash_table_size, name_hash, i)) {
+            if (!kh_hash_table_insert_robin_hood(hash_table, hash_table_size, name_hash, i)) {
                 /* Hash table insertion failed - should not happen with proper sizing */
                 free(hash_table);
                 return 0;
@@ -1140,6 +1162,543 @@ write_failure:
     free(hash_table);
     free(temp_file_path);
     return 0;
+}
+
+/* Load a single file from disk into memory */
+static int kh_load_file_into_memory(const char* filename) {
+    if (!filename || !g_memory_manager.initialized) return 0;
+    
+    char full_path[MAX_FILE_PATH_LENGTH];
+    khdata_file_t* file_slot = NULL;
+    
+    /* Get full path */
+    if (!kh_get_khdata_file_path(filename, full_path, sizeof(full_path))) {
+        return 0;
+    }
+    
+    /* Check if file exists */
+    if (GetFileAttributesA(full_path) == INVALID_FILE_ATTRIBUTES) {
+        return 0; /* File doesn't exist */
+    }
+    
+    /* Check if already loaded */
+    file_slot = kh_find_file_in_memory(filename);
+    if (file_slot) {
+        return 1; /* Already loaded */
+    }
+    
+    /* Find empty slot or resize array */
+    for (int i = 0; i < g_memory_manager.file_count; i++) {
+        if (!g_memory_manager.files[i].filename) {
+            file_slot = &g_memory_manager.files[i];
+            break;
+        }
+    }
+    
+    if (!file_slot) {
+        /* Need to resize array */
+        if (g_memory_manager.file_count >= g_memory_manager.file_capacity) {
+            int new_capacity = g_memory_manager.file_capacity * 2;
+            if (new_capacity < 16) new_capacity = 16;
+            
+            khdata_file_t* new_files = (khdata_file_t*)realloc(g_memory_manager.files, 
+                                                               new_capacity * sizeof(khdata_file_t));
+            if (!new_files) return 0;
+            
+            /* Initialize new slots */
+            memset(&new_files[g_memory_manager.file_capacity], 0, 
+                   (new_capacity - g_memory_manager.file_capacity) * sizeof(khdata_file_t));
+            
+            g_memory_manager.files = new_files;
+            g_memory_manager.file_capacity = new_capacity;
+        }
+        
+        file_slot = &g_memory_manager.files[g_memory_manager.file_count++];
+    }
+    
+    /* Initialize file slot */
+    memset(file_slot, 0, sizeof(khdata_file_t));
+    
+    /* Convert to binary format if needed */
+    if (!kh_is_file_binary(full_path)) {
+        /* Read as text and convert */
+        kh_variable_t* temp_variables = NULL;
+        int temp_count = 0;
+        
+        if (!kh_read_text_file(full_path, &temp_variables, &temp_count)) {
+            return 0;
+        }
+        
+        /* Write as binary */
+        if (!kh_write_binary_file(full_path, temp_variables, temp_count)) {
+            kh_free_variables(temp_variables, temp_count);
+            return 0;
+        }
+        
+        kh_free_variables(temp_variables, temp_count);
+    }
+    
+    /* Read binary file */
+    if (!kh_read_binary_file_with_hash(full_path, &file_slot->variables, 
+                                       &file_slot->variable_count, &file_slot->hash_info)) {
+        return 0;
+    }
+    
+    /* Store filename and path */
+    file_slot->filename = (char*)malloc(strlen(filename) + 1);
+    file_slot->full_path = (char*)malloc(strlen(full_path) + 1);
+    
+    if (!file_slot->filename || !file_slot->full_path) {
+        kh_free_khdata_file(file_slot);
+        return 0;
+    }
+    
+    strcpy_s(file_slot->filename, strlen(filename) + 1, filename);
+    strcpy_s(file_slot->full_path, strlen(full_path) + 1, full_path);
+    
+    file_slot->capacity = file_slot->variable_count;
+    file_slot->dirty = 0;
+    
+    return 1;
+}
+
+/* Save a file from memory to disk */
+static int kh_save_file_from_memory(khdata_file_t* file) {
+    if (!file || !file->filename || !file->full_path || !file->dirty) {
+        return 1; /* Nothing to save or not dirty */
+    }
+    
+    /* Write to disk */
+    if (!kh_write_binary_file(file->full_path, file->variables, file->variable_count)) {
+        return 0;
+    }
+    
+    file->dirty = 0;
+    return 1;
+}
+
+/* Add new file to memory */
+static khdata_file_t* kh_add_file_to_memory(const char* filename) {
+    if (!filename || !g_memory_manager.initialized) return NULL;
+    
+    char full_path[MAX_FILE_PATH_LENGTH];
+    khdata_file_t* file_slot = NULL;
+    
+    /* Get full path */
+    if (!kh_get_khdata_file_path(filename, full_path, sizeof(full_path))) {
+        return NULL;
+    }
+    
+    /* Check if already exists */
+    file_slot = kh_find_file_in_memory(filename);
+    if (file_slot) {
+        return file_slot;
+    }
+    
+    /* Find empty slot or resize array */
+    for (int i = 0; i < g_memory_manager.file_count; i++) {
+        if (!g_memory_manager.files[i].filename) {
+            file_slot = &g_memory_manager.files[i];
+            break;
+        }
+    }
+    
+    if (!file_slot) {
+        /* Need to resize array */
+        if (g_memory_manager.file_count >= g_memory_manager.file_capacity) {
+            int new_capacity = g_memory_manager.file_capacity * 2;
+            if (new_capacity < 16) new_capacity = 16;
+            
+            khdata_file_t* new_files = (khdata_file_t*)realloc(g_memory_manager.files, 
+                                                               new_capacity * sizeof(khdata_file_t));
+            if (!new_files) return NULL;
+            
+            /* Initialize new slots */
+            memset(&new_files[g_memory_manager.file_capacity], 0, 
+                   (new_capacity - g_memory_manager.file_capacity) * sizeof(khdata_file_t));
+            
+            g_memory_manager.files = new_files;
+            g_memory_manager.file_capacity = new_capacity;
+        }
+        
+        file_slot = &g_memory_manager.files[g_memory_manager.file_count++];
+    }
+    
+    /* Initialize new file */
+    memset(file_slot, 0, sizeof(khdata_file_t));
+    
+    file_slot->filename = (char*)malloc(strlen(filename) + 1);
+    file_slot->full_path = (char*)malloc(strlen(full_path) + 1);
+    
+    if (!file_slot->filename || !file_slot->full_path) {
+        kh_free_khdata_file(file_slot);
+        return NULL;
+    }
+    
+    strcpy_s(file_slot->filename, strlen(filename) + 1, filename);
+    strcpy_s(file_slot->full_path, strlen(full_path) + 1, full_path);
+    
+    file_slot->capacity = 16; /* Initial capacity */
+    file_slot->variables = (kh_variable_t*)calloc(file_slot->capacity, sizeof(kh_variable_t));
+    if (!file_slot->variables) {
+        kh_free_khdata_file(file_slot);
+        return NULL;
+    }
+    
+    file_slot->dirty = 1;
+    
+    return file_slot;
+}
+
+/* Remove file from memory */
+static int kh_remove_file_from_memory(const char* filename) {
+    if (!filename || !g_memory_manager.initialized) return 0;
+    
+    for (int i = 0; i < g_memory_manager.file_count; i++) {
+        if (g_memory_manager.files[i].filename && 
+            kh_strcasecmp(g_memory_manager.files[i].filename, filename) == 0) {
+            
+            /* Save if dirty before removing */
+            if (g_memory_manager.files[i].dirty) {
+                kh_save_file_from_memory(&g_memory_manager.files[i]);
+            }
+            
+            kh_free_khdata_file(&g_memory_manager.files[i]);
+            return 1;
+        }
+    }
+    
+    return 0;
+}
+
+/* Initialize memory manager and load all existing files */
+static int kh_init_memory_manager(void) {
+    static volatile long initialization_in_progress = 0;
+    
+    /* Atomic check and set */
+    if (InterlockedCompareExchange(&initialization_in_progress, 1, 0) != 0) {
+        /* Another thread is initializing, wait for completion */
+        while (!g_memory_manager.initialized && initialization_in_progress) {
+            Sleep(1);
+        }
+        return g_memory_manager.initialized ? 1 : 0;
+    }
+    
+    /* We got the lock, check if already initialized */
+    if (g_memory_manager.initialized) {
+        InterlockedExchange(&initialization_in_progress, 0);
+        return 1;
+    }
+    
+    WIN32_FIND_DATAA find_data;
+    HANDLE find_handle;
+    char search_pattern[MAX_FILE_PATH_LENGTH];
+    
+    /* Get base path */
+    if (!kh_get_arma3_documents_path(g_memory_manager.base_path, sizeof(g_memory_manager.base_path))) {
+        InterlockedExchange(&initialization_in_progress, 0);
+        return 0;
+    }
+    
+    /* Initialize memory manager */
+    g_memory_manager.file_capacity = 16;
+    g_memory_manager.files = (khdata_file_t*)calloc(g_memory_manager.file_capacity, sizeof(khdata_file_t));
+    if (!g_memory_manager.files) {
+        InterlockedExchange(&initialization_in_progress, 0);
+        return 0;
+    }
+    
+    g_memory_manager.file_count = 0;
+    g_memory_manager.initialized = 1;
+    
+    /* Find all .khdata files */
+    _snprintf_s(search_pattern, sizeof(search_pattern), _TRUNCATE, "%s\\*.khdata", g_memory_manager.base_path);
+    
+    find_handle = FindFirstFileA(search_pattern, &find_data);
+    if (find_handle == INVALID_HANDLE_VALUE) {
+        InterlockedExchange(&initialization_in_progress, 0);
+        return 1; /* No files found, but initialization successful */
+    }
+    
+    do {
+        if (!(find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+            /* Load this file into memory */
+            char* filename = find_data.cFileName;
+            
+            /* Remove .khdata extension for internal storage */
+            int filename_len = (int)strlen(filename);
+            if (filename_len > 7 && strcmp(filename + filename_len - 7, ".khdata") == 0) {
+                filename[filename_len - 7] = '\0';
+            }
+            
+            kh_load_file_into_memory(filename);
+            
+            /* Restore extension */
+            if (filename_len > 7) {
+                filename[filename_len - 7] = '.';
+            }
+        }
+    } while (FindNextFileA(find_handle, &find_data));
+    
+    FindClose(find_handle);
+    InterlockedExchange(&initialization_in_progress, 0);
+    return 1;
+}
+
+/* Cleanup memory manager and save all dirty files */
+static void kh_cleanup_memory_manager(void) {
+    if (!g_memory_manager.initialized) return;
+    
+    /* Save all dirty files */
+    for (int i = 0; i < g_memory_manager.file_count; i++) {
+        if (g_memory_manager.files[i].dirty) {
+            kh_save_file_from_memory(&g_memory_manager.files[i]);
+        }
+        kh_free_khdata_file(&g_memory_manager.files[i]);
+    }
+    
+    free(g_memory_manager.files);
+    memset(&g_memory_manager, 0, sizeof(g_memory_manager));
+}
+
+/* Convert text format file to binary format */
+static int kh_convert_text_to_binary(const char* file_path) {
+    if (!file_path) return 0;
+    
+    kh_variable_t* variables = NULL;
+    int variable_count = 0;
+    char* temp_file_path = NULL;
+    int result = 0;
+    
+    /* Read text format */
+    if (!kh_read_text_file(file_path, &variables, &variable_count)) {
+        return 0;
+    }
+    
+    /* Create temporary file path */
+    size_t path_len = strlen(file_path);
+    temp_file_path = (char*)malloc(path_len + 10); /* +10 for ".tmp" + null */
+    if (!temp_file_path) {
+        goto cleanup;
+    }
+    
+    strcpy_s(temp_file_path, path_len + 10, file_path);
+    strcat_s(temp_file_path, path_len + 10, ".tmp");
+    
+    /* Write binary format to temporary file */
+    if (!kh_write_binary_file(temp_file_path, variables, variable_count)) {
+        goto cleanup;
+    }
+    
+    /* Replace original file with temporary file */
+    if (DeleteFileA(file_path) && MoveFileA(temp_file_path, file_path)) {
+        result = 1;
+    } else {
+        DeleteFileA(temp_file_path); /* Clean up temp file if move failed */
+    }
+
+cleanup:
+    kh_free_variables(variables, variable_count);
+    free(temp_file_path);
+    return result;
+}
+
+/* Convert binary format file to text format */
+static int kh_convert_binary_to_text(const char* file_path) {
+    if (!file_path) return 0;
+    
+    kh_variable_t* variables = NULL;
+    int variable_count = 0;
+    kh_hash_table_info_t hash_info = {0};
+    char* temp_file_path = NULL;
+    int result = 0;
+    
+    /* Read binary format */
+    if (!kh_read_binary_file_with_hash(file_path, &variables, &variable_count, &hash_info)) {
+        return 0;
+    }
+    
+    /* Create temporary file path */
+    size_t path_len = strlen(file_path);
+    temp_file_path = (char*)malloc(path_len + 10); /* +10 for ".tmp" + null */
+    if (!temp_file_path) {
+        goto cleanup;
+    }
+    
+    strcpy_s(temp_file_path, path_len + 10, file_path);
+    strcat_s(temp_file_path, path_len + 10, ".tmp");
+    
+    /* Write text format to temporary file */
+    if (!kh_write_text_file(temp_file_path, variables, variable_count)) {
+        goto cleanup;
+    }
+    
+    /* Replace original file with temporary file */
+    if (DeleteFileA(file_path) && MoveFileA(temp_file_path, file_path)) {
+        result = 1;
+    } else {
+        DeleteFileA(temp_file_path); /* Clean up temp file if move failed */
+    }
+
+cleanup:
+    kh_free_variables(variables, variable_count);
+    kh_free_hash_table_info(&hash_info);
+    free(temp_file_path);
+    return result;
+}
+
+/* Main UnbinarizeKHData function - convert binary to text format */
+static int kh_unbinarize_khdata(const char* filename, char* output, int output_size) {
+    if (!kh_validate_non_empty_string(filename, "FILENAME", output, output_size)) {
+        return 1;
+    }
+    
+    char file_path[MAX_FILE_PATH_LENGTH];
+    char* clean_filename = NULL;
+    int result = 1;
+    
+    clean_filename = (char*)malloc(strlen(filename) + 1);
+    if (!clean_filename) {
+        kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
+        return 1;
+    }
+    
+    kh_clean_string(filename, clean_filename, (int)strlen(filename) + 1);
+    
+    if (!kh_get_khdata_file_path(clean_filename, file_path, sizeof(file_path))) {
+        kh_set_error(output, output_size, "INVALID PATH");
+        goto cleanup;
+    }
+    
+    /* Check if file exists */
+    DWORD file_attributes = GetFileAttributesA(file_path);
+    if (file_attributes == INVALID_FILE_ATTRIBUTES) {
+        kh_set_error(output, output_size, "FILE NOT FOUND");
+        goto cleanup;
+    }
+    
+    /* Check if already in text format */
+    if (!kh_is_file_binary(file_path)) {
+        strcpy_s(output, (size_t)output_size, "ALREADY_TEXT_FORMAT");
+        result = 0;
+        goto cleanup;
+    }
+    
+    /* Convert binary to text */
+    if (!kh_convert_binary_to_text(file_path)) {
+        kh_set_error(output, output_size, "CONVERSION_FAILED");
+        goto cleanup;
+    }
+    
+    /* Remove from memory if loaded (will be reloaded as text format next time) */
+    kh_remove_file_from_memory(clean_filename);
+    
+    strcpy_s(output, (size_t)output_size, "SUCCESS");
+    result = 0;
+
+cleanup:
+    free(clean_filename);
+    return result;
+}
+
+/* Main BinarizeKHData function - convert text to binary format */
+static int kh_binarize_khdata(const char* filename, char* output, int output_size) {
+    if (!kh_validate_non_empty_string(filename, "FILENAME", output, output_size)) {
+        return 1;
+    }
+    
+    char file_path[MAX_FILE_PATH_LENGTH];
+    char* clean_filename = NULL;
+    int result = 1;
+    
+    clean_filename = (char*)malloc(strlen(filename) + 1);
+    if (!clean_filename) {
+        kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
+        return 1;
+    }
+    
+    kh_clean_string(filename, clean_filename, (int)strlen(filename) + 1);
+    
+    if (!kh_get_khdata_file_path(clean_filename, file_path, sizeof(file_path))) {
+        kh_set_error(output, output_size, "INVALID PATH");
+        goto cleanup;
+    }
+    
+    /* Check if file exists */
+    DWORD file_attributes = GetFileAttributesA(file_path);
+    if (file_attributes == INVALID_FILE_ATTRIBUTES) {
+        kh_set_error(output, output_size, "FILE NOT FOUND");
+        goto cleanup;
+    }
+    
+    /* Check if already in binary format */
+    if (kh_is_file_binary(file_path)) {
+        strcpy_s(output, (size_t)output_size, "ALREADY_BINARY_FORMAT");
+        result = 0;
+        goto cleanup;
+    }
+    
+    /* Convert text to binary */
+    if (!kh_convert_text_to_binary(file_path)) {
+        kh_set_error(output, output_size, "CONVERSION_FAILED");
+        goto cleanup;
+    }
+    
+    /* Remove from memory if loaded (will be reloaded as binary format next time) */
+    kh_remove_file_from_memory(clean_filename);
+    
+    strcpy_s(output, (size_t)output_size, "SUCCESS");
+    result = 0;
+
+cleanup:
+    free(clean_filename);
+    return result;
+}
+
+/* Enhanced find variable with hash table lookup - using Robin Hood hashing */
+static inline int kh_find_variable_indexed(kh_variable_t* variables, int count, const char* name,
+                                          kh_hash_entry_t* hash_table, uint32_t hash_table_size) {
+    if (!variables || !name || count <= 0 || !hash_table || hash_table_size == 0) {
+        return kh_find_variable(variables, count, name); /* Fallback to linear search */
+    }
+    
+    uint32_t name_hash = kh_hash_variable_name(name);
+    int found = 0;
+    uint32_t index = kh_hash_table_find_robin_hood(hash_table, hash_table_size, name_hash, &found);
+    
+    if (found) {
+        /* Hash found, verify the actual name matches */
+        uint32_t var_index = hash_table[index].data_offset;
+        if (var_index < (uint32_t)count && variables[var_index].name &&
+            kh_strcasecmp(variables[var_index].name, name) == 0) {
+            return (int)var_index;
+        }
+    }
+    
+    return -1; /* Not found */
+}
+
+/* Find variable by name (case-insensitive) - linear search fallback */
+static inline int kh_find_variable(kh_variable_t* variables, int count, const char* name) {
+    if (!variables || !name || count <= 0) return -1;
+    
+    int i;
+    for (i = 0; i < count; i++) {
+        if (variables[i].name && kh_strcasecmp(variables[i].name, name) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/* Helper function to find variable using hash table if available */
+static inline int kh_find_variable_optimal(kh_variable_t* variables, int count, const char* name,
+                                           kh_hash_table_info_t* hash_info) {
+    if (hash_info && hash_info->entries && hash_info->size > 0) {
+        return kh_find_variable_indexed(variables, count, name, hash_info->entries, hash_info->size);
+    } else {
+        return kh_find_variable(variables, count, name);
+    }
 }
 
 /* Format variable for output as ["TYPE", value] */
@@ -1617,18 +2176,16 @@ cleanup:
     return ret;
 }
 
-/* Enhanced read function with better error handling and memory management */
+/* Read from memory instead of disk */
 static int kh_read_khdata_variable_slice(const char* filename, const char* variable_name, const char* slice_index_str, char* output, int output_size) {
     if (!kh_validate_non_empty_string(filename, "FILENAME", output, output_size) ||
         !kh_validate_non_empty_string(variable_name, "VARIABLE NAME", output, output_size)) {
         return 1;
     }
     
-    char file_path[MAX_FILE_PATH_LENGTH];
     char* clean_var_name = NULL;
     char* clean_filename = NULL;
-    kh_variable_t* variables = NULL;
-    int variable_count = 0;
+    khdata_file_t* file = NULL;
     int var_index;
     int slice_index = -1;
     char* formatted_output = NULL;
@@ -1650,28 +2207,25 @@ static int kh_read_khdata_variable_slice(const char* filename, const char* varia
         }
     }
     
-    if (!kh_get_khdata_file_path(filename, file_path, sizeof(file_path))) {
-        kh_set_error(output, output_size, "INVALID PATH");
-        goto cleanup;
-    }
-    
     kh_clean_string(variable_name, clean_var_name, (int)strlen(variable_name) + 1);
     kh_clean_string(filename, clean_filename, (int)strlen(filename) + 1);
     
-    /* Ensure file is in binary format before reading */
-    if (!kh_ensure_binary_format(file_path)) {
-        kh_set_error(output, output_size, "FAILED TO CONVERT TO BINARY FORMAT");
+    /* Load file into memory if not already loaded */
+    if (!kh_load_file_into_memory(clean_filename)) {
+        kh_set_error(output, output_size, "FILE NOT FOUND OR LOAD FAILED");
         goto cleanup;
     }
     
-    if (!kh_read_binary_file(file_path, &variables, &variable_count)) {
-        kh_set_error(output, output_size, "FILE NOT FOUND OR CORRUPTED");
+    /* Find file in memory */
+    file = kh_find_file_in_memory(clean_filename);
+    if (!file) {
+        kh_set_error(output, output_size, "FILE NOT FOUND IN MEMORY");
         goto cleanup;
     }
     
     /* Special case: return all variable names if var_name == filename */
     if (kh_strcasecmp(clean_var_name, clean_filename) == 0) {
-        size_t result_size = (size_t)variable_count * 256 + 100;
+        size_t result_size = (size_t)file->variable_count * 256 + 100;
         char* result_str = (char*)malloc(result_size);
         if (!result_str) {
             kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
@@ -1679,10 +2233,10 @@ static int kh_read_khdata_variable_slice(const char* filename, const char* varia
         }
         
         strcpy_s(result_str, result_size, "[");
-        for (int i = 0; i < variable_count; i++) {
+        for (int i = 0; i < file->variable_count; i++) {
             if (i > 0) strcat_s(result_str, result_size, ", ");
             strcat_s(result_str, result_size, "\"");
-            strcat_s(result_str, result_size, variables[i].name);
+            strcat_s(result_str, result_size, file->variables[i].name);
             strcat_s(result_str, result_size, "\"");
         }
         strcat_s(result_str, result_size, "]");
@@ -1721,22 +2275,22 @@ static int kh_read_khdata_variable_slice(const char* filename, const char* varia
         goto cleanup;
     }
     
-    /* Find specific variable - uses linear search (hash table is internal to file reading) */
-    var_index = kh_find_variable(variables, variable_count, clean_var_name);
+    /* Find specific variable */
+    var_index = kh_find_variable_optimal(file->variables, file->variable_count, clean_var_name, &file->hash_info);
     if (var_index == -1) {
         kh_set_error(output, output_size, "VARIABLE NOT FOUND");
         goto cleanup;
     }
     
     /* Format output */
-    size_t formatted_len = strlen(variables[var_index].value) + 50;
+    size_t formatted_len = strlen(file->variables[var_index].value) + 50;
     formatted_output = (char*)malloc(formatted_len);
     if (!formatted_output) {
         kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
         goto cleanup;
     }
     
-    if (!kh_format_variable_output(variables[var_index].type, variables[var_index].value, formatted_output, (int)formatted_len)) {
+    if (!kh_format_variable_output(file->variables[var_index].type, file->variables[var_index].value, formatted_output, (int)formatted_len)) {
         kh_set_error(output, output_size, "OUTPUT FORMATTING FAILED");
         goto cleanup;
     }
@@ -1775,11 +2329,10 @@ cleanup:
     free(clean_var_name);
     free(clean_filename);
     free(formatted_output);
-    kh_free_variables(variables, variable_count);
     return result;
 }
 
-/* Delete entire KHData file */
+/* Delete entire KHData file from memory and disk */
 static int kh_delete_khdata_file(const char* filename, char* output, int output_size) {
     if (!kh_validate_non_empty_string(filename, "FILENAME", output, output_size)) {
         return 1;
@@ -1802,14 +2355,17 @@ static int kh_delete_khdata_file(const char* filename, char* output, int output_
         goto cleanup;
     }
     
-    /* Check if file exists */
+    /* Remove from memory first */
+    kh_remove_file_from_memory(clean_filename);
+    
+    /* Check if file exists on disk */
     DWORD file_attributes = GetFileAttributesA(file_path);
     if (file_attributes == INVALID_FILE_ATTRIBUTES) {
         kh_set_error(output, output_size, "FILE NOT FOUND");
         goto cleanup;
     }
     
-    /* Attempt to delete the file */
+    /* Attempt to delete the file from disk */
     if (DeleteFileA(file_path)) {
         strcpy_s(output, (size_t)output_size, "SUCCESS");
         result = 0;
@@ -1833,19 +2389,16 @@ cleanup:
     return result;
 }
 
-/* Delete specific variable from KHData file */
+/* Delete specific variable from KHData file in memory and sync to disk */
 static int kh_delete_khdata_variable(const char* filename, const char* variable_name, char* output, int output_size) {
     if (!kh_validate_non_empty_string(filename, "FILENAME", output, output_size) ||
         !kh_validate_non_empty_string(variable_name, "VARIABLE NAME", output, output_size)) {
         return 1;
     }
     
-    char file_path[MAX_FILE_PATH_LENGTH];
     char* clean_filename = NULL;
     char* clean_var_name = NULL;
-    kh_variable_t* variables = NULL;
-    kh_variable_t* new_variables = NULL;
-    int variable_count = 0;
+    khdata_file_t* file = NULL;
     int var_index;
     int result = 1;
     
@@ -1861,46 +2414,37 @@ static int kh_delete_khdata_variable(const char* filename, const char* variable_
     kh_clean_string(filename, clean_filename, (int)strlen(filename) + 1);
     kh_clean_string(variable_name, clean_var_name, (int)strlen(variable_name) + 1);
     
-    if (!kh_get_khdata_file_path(clean_filename, file_path, sizeof(file_path))) {
-        kh_set_error(output, output_size, "INVALID PATH");
+    /* Load file into memory if not already loaded */
+    if (!kh_load_file_into_memory(clean_filename)) {
+        kh_set_error(output, output_size, "FILE NOT FOUND OR LOAD FAILED");
         goto cleanup;
     }
     
-    /* Check if file exists */
-    DWORD file_attributes = GetFileAttributesA(file_path);
-    if (file_attributes == INVALID_FILE_ATTRIBUTES) {
-        kh_set_error(output, output_size, "FILE NOT FOUND");
-        goto cleanup;
-    }
-    
-    /* Ensure file is in binary format before reading */
-    if (!kh_ensure_binary_format(file_path)) {
-        kh_set_error(output, output_size, "FAILED TO CONVERT TO BINARY FORMAT");
-        goto cleanup;
-    }
-    
-    /* Read existing file */
-    if (!kh_read_binary_file(file_path, &variables, &variable_count)) {
-        kh_set_error(output, output_size, "FAILED TO READ FILE");
+    /* Find file in memory */
+    file = kh_find_file_in_memory(clean_filename);
+    if (!file) {
+        kh_set_error(output, output_size, "FILE NOT FOUND IN MEMORY");
         goto cleanup;
     }
     
     /* Handle empty file */
-    if (variable_count == 0) {
+    if (file->variable_count == 0) {
         kh_set_error(output, output_size, "FILE IS EMPTY");
         goto cleanup;
     }
     
     /* Find variable to delete */
-    var_index = kh_find_variable(variables, variable_count, clean_var_name);
+    var_index = kh_find_variable_optimal(file->variables, file->variable_count, clean_var_name, &file->hash_info);
     if (var_index == -1) {
         kh_set_error(output, output_size, "VARIABLE NOT FOUND");
         goto cleanup;
     }
     
     /* If this is the only variable, delete the entire file */
-    if (variable_count == 1) {
-        if (DeleteFileA(file_path)) {
+    if (file->variable_count == 1) {
+        /* Remove from memory and delete from disk */
+        kh_remove_file_from_memory(clean_filename);
+        if (DeleteFileA(file->full_path)) {
             strcpy_s(output, (size_t)output_size, "SUCCESS");
             result = 0;
         } else {
@@ -1909,46 +2453,44 @@ static int kh_delete_khdata_variable(const char* filename, const char* variable_
         goto cleanup;
     }
     
-    /* Create new array without the target variable */
-    new_variables = (kh_variable_t*)calloc((size_t)(variable_count - 1), sizeof(kh_variable_t));
-    if (!new_variables) {
-        kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
-        goto cleanup;
+    /* Remove from hash table first */
+    kh_hash_table_remove_entry(&file->hash_info, clean_var_name);
+    
+    /* Free the variable to be deleted */
+    free(file->variables[var_index].name);
+    free(file->variables[var_index].value);
+    
+    /* Shift remaining variables down */
+    for (int i = var_index; i < file->variable_count - 1; i++) {
+        file->variables[i] = file->variables[i + 1];
     }
     
-    /* Copy all variables except the one to delete */
-    int new_index = 0;
-    for (int i = 0; i < variable_count; i++) {
-        if (i != var_index) {
-            /* Allocate and copy name */
-            size_t name_len = strlen(variables[i].name) + 1;
-            new_variables[new_index].name = (char*)malloc(name_len);
-            if (!new_variables[new_index].name) {
-                kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
-                goto cleanup;
+    /* Clear the last variable */
+    memset(&file->variables[file->variable_count - 1], 0, sizeof(kh_variable_t));
+    file->variable_count--;
+    
+    /* Update hash table indices for shifted variables */
+    for (int i = 0; i < file->hash_info.size; i++) {
+        if (file->hash_info.entries[i].name_hash != KH_HASH_EMPTY && 
+            !file->hash_info.entries[i].deleted) {
+            if (file->hash_info.entries[i].data_offset > (uint32_t)var_index) {
+                file->hash_info.entries[i].data_offset--;
             }
-            strcpy_s(new_variables[new_index].name, name_len, variables[i].name);
-            
-            /* Allocate and copy value */
-            size_t value_len = strlen(variables[i].value) + 1;
-            new_variables[new_index].value = (char*)malloc(value_len);
-            if (!new_variables[new_index].value) {
-                free(new_variables[new_index].name);
-                kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
-                goto cleanup;
-            }
-            strcpy_s(new_variables[new_index].value, value_len, variables[i].value);
-            
-            /* Copy type */
-            new_variables[new_index].type = variables[i].type;
-            
-            new_index++;
         }
     }
     
-    /* Write updated file */
-    if (!kh_write_binary_file(file_path, new_variables, variable_count - 1)) {
-        kh_set_error(output, output_size, "FAILED TO WRITE UPDATED FILE");
+    /* Only rebuild hash table if necessary */
+    if (kh_should_rebuild_hash_table(&file->hash_info, file->variable_count)) {
+        if (!kh_rebuild_hash_table(file)) {
+            kh_set_error(output, output_size, "FAILED TO REBUILD HASH TABLE");
+            goto cleanup;
+        }
+    }
+    
+    /* Mark as dirty and save */
+    file->dirty = 1;
+    if (!kh_save_file_from_memory(file)) {
+        kh_set_error(output, output_size, "FAILED TO SAVE FILE");
         goto cleanup;
     }
     
@@ -1958,22 +2500,16 @@ static int kh_delete_khdata_variable(const char* filename, const char* variable_
 cleanup:
     free(clean_filename);
     free(clean_var_name);
-    kh_free_variables(variables, variable_count);
-    if (new_variables) {
-        kh_free_variables(new_variables, variable_count - 1);
-    }
     return result;
 }
 
-/* Calculate the formatted size of a variable's output - optimized */
+/* Calculate the formatted size of a variable's output from memory */
 static long kh_get_variable_formatted_size(const char* filename, const char* variable_name) {
     if (!filename || !variable_name) return -1;
     
-    char file_path[MAX_FILE_PATH_LENGTH];
     char* clean_var_name = NULL;
     char* clean_filename = NULL;
-    kh_variable_t* variables = NULL;
-    int variable_count = 0;
+    khdata_file_t* file = NULL;
     int var_index;
     long total_size = 0;
     
@@ -1987,23 +2523,19 @@ static long kh_get_variable_formatted_size(const char* filename, const char* var
         return -1;
     }
     
-    if (!kh_get_khdata_file_path(filename, file_path, sizeof(file_path))) {
-        free(clean_var_name);
-        free(clean_filename);
-        return -1;
-    }
-    
     kh_clean_string(variable_name, clean_var_name, (int)strlen(variable_name) + 1);
     kh_clean_string(filename, clean_filename, (int)strlen(filename) + 1);
     
-    /* Ensure file is in binary format before reading */
-    if (!kh_ensure_binary_format(file_path)) {
+    /* Load file into memory if not already loaded */
+    if (!kh_load_file_into_memory(clean_filename)) {
         free(clean_var_name);
         free(clean_filename);
         return -1;
     }
     
-    if (!kh_read_binary_file(file_path, &variables, &variable_count)) {
+    /* Find file in memory */
+    file = kh_find_file_in_memory(clean_filename);
+    if (!file) {
         free(clean_var_name);
         free(clean_filename);
         return -1;
@@ -2013,39 +2545,36 @@ static long kh_get_variable_formatted_size(const char* filename, const char* var
     if (kh_strcasecmp(clean_var_name, clean_filename) == 0) {
         total_size = 2; /* Opening and closing brackets */
         
-        for (int i = 0; i < variable_count; i++) {
+        for (int i = 0; i < file->variable_count; i++) {
             if (i > 0) {
                 total_size += 2; /* ", " separator */
             }
-            if (variables[i].name) {
-                total_size += (long)strlen(variables[i].name) + 2; /* Name with quotes */
+            if (file->variables[i].name) {
+                total_size += (long)strlen(file->variables[i].name) + 2; /* Name with quotes */
             }
         }
         
         free(clean_var_name);
         free(clean_filename);
-        kh_free_variables(variables, variable_count);
         return total_size;
     }
     
-    /* Find specific variable using external function to avoid code duplication */
-    var_index = kh_find_variable(variables, variable_count, clean_var_name);
+    /* Find specific variable */
+    var_index = kh_find_variable_optimal(file->variables, file->variable_count, clean_var_name, &file->hash_info);
     if (var_index == -1) {
         free(clean_var_name);
         free(clean_filename);
-        kh_free_variables(variables, variable_count);
         return -1;
     }
     
     /* Calculate size of formatted output ["TYPE", value] */
-    const char* type_str = kh_get_string_from_type(variables[var_index].type);
-    if (type_str && variables[var_index].value) {
-        total_size = (long)strlen(type_str) + (long)strlen(variables[var_index].value) + 6; /* ["", ] formatting */
+    const char* type_str = kh_get_string_from_type(file->variables[var_index].type);
+    if (type_str && file->variables[var_index].value) {
+        total_size = (long)strlen(type_str) + (long)strlen(file->variables[var_index].value) + 6; /* ["", ] formatting */
     }
     
     free(clean_var_name);
     free(clean_filename);
-    kh_free_variables(variables, variable_count);
     return total_size;
 }
 
@@ -2076,7 +2605,7 @@ static int kh_calculate_slice_count(const char* filename, const char* variable_n
     return 0;
 }
 
-/* Enhanced write function with better memory management */
+/* Write to memory and sync to disk with optimized hash table management */
 static int kh_write_khdata_variable(const char* filename, const char* variable_name, const char* value, 
                                   const char* type_str, const char* overwrite_str, char* output, int output_size) {
     if (!kh_validate_non_empty_string(filename, "FILENAME", output, output_size) ||
@@ -2084,13 +2613,12 @@ static int kh_write_khdata_variable(const char* filename, const char* variable_n
         return 1;
     }
     
-    char file_path[MAX_FILE_PATH_LENGTH];
     char* clean_var_name = NULL;
     char* clean_value = NULL;
     char* combined_value = NULL;
+    char* clean_filename = NULL;
     kh_data_type_t data_type;
-    kh_variable_t* variables = NULL;
-    int variable_count = 0;
+    khdata_file_t* file = NULL;
     int var_index;
     int overwrite_flag;
     int result = 1;
@@ -2110,27 +2638,24 @@ static int kh_write_khdata_variable(const char* filename, const char* variable_n
         return 1;
     }
     
-    /* Enhanced path validation */
-    if (!kh_get_khdata_file_path(filename, file_path, sizeof(file_path))) {
-        kh_set_error(output, output_size, "INVALID PATH OR FILENAME");
-        return 1;
-    }
-    
     /* Allocate memory for cleaned strings - account for UTF-8 expansion */
     size_t var_name_len = strlen(variable_name) + 1;
     size_t value_len = strlen(value) + 1;
+    size_t filename_len = strlen(filename) + 1;
     
     clean_var_name = (char*)malloc(var_name_len);
     clean_value = (char*)malloc(value_len);
+    clean_filename = (char*)malloc(filename_len);
     combined_value = (char*)malloc(value_len * 2 + 1024); /* Extra space for UTF-8 and combination */
     
-    if (!clean_var_name || !clean_value || !combined_value) {
+    if (!clean_var_name || !clean_value || !clean_filename || !combined_value) {
         kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
         goto cleanup;
     }
     
     kh_clean_string(variable_name, clean_var_name, (int)var_name_len);
     kh_clean_string(value, clean_value, (int)value_len);
+    kh_clean_string(filename, clean_filename, (int)filename_len);
 
     /* Validate UTF-8 in cleaned strings */
     if (!kh_validate_utf8_string(clean_var_name, (int)strlen(clean_var_name))) {
@@ -2177,79 +2702,121 @@ static int kh_write_khdata_variable(const char* filename, const char* variable_n
         goto cleanup;
     }
     
-    /* Ensure file is in binary format before reading */
-    if (!kh_ensure_binary_format(file_path)) {
-        kh_set_error(output, output_size, "FAILED TO CONVERT TO BINARY FORMAT");
+    /* Load file into memory if not already loaded, or create new one */
+    file = kh_find_file_in_memory(clean_filename);
+    if (!file) {
+        /* Try to load from disk */
+        if (!kh_load_file_into_memory(clean_filename)) {
+            /* File doesn't exist, create new one */
+            file = kh_add_file_to_memory(clean_filename);
+            if (!file) {
+                kh_set_error(output, output_size, "FAILED TO CREATE FILE IN MEMORY");
+                goto cleanup;
+            }
+        } else {
+            file = kh_find_file_in_memory(clean_filename);
+        }
+    }
+    
+    if (!file) {
+        kh_set_error(output, output_size, "FILE NOT FOUND IN MEMORY");
         goto cleanup;
     }
     
-    /* Read existing file */
-    if (!kh_read_binary_file(file_path, &variables, &variable_count)) {
-        variable_count = 0;
-        variables = NULL;
-    }
-    
     /* Find existing variable */
-    var_index = kh_find_variable(variables, variable_count, clean_var_name);
+    var_index = kh_find_variable_optimal(file->variables, file->variable_count, clean_var_name, &file->hash_info);
     
     if (var_index != -1 && !overwrite_flag) {
         /* Check for type mismatch */
-        if (variables[var_index].type != data_type) {
+        if (file->variables[var_index].type != data_type) {
             kh_set_error(output, output_size, "TYPE MISMATCH - USE OVERWRITE TO CHANGE TYPE");
             goto cleanup;
         }
 
         /* Combine with existing value */
-        if (!kh_combine_values(data_type, variables[var_index].value, clean_value, 
+        if (!kh_combine_values(data_type, file->variables[var_index].value, clean_value, 
                              overwrite_flag, combined_value, (int)(value_len * 2 + 1024))) {
             kh_set_error(output, output_size, "VALUE COMBINATION FAILED");
             goto cleanup;
         }
         
         /* Update existing variable */
-        free(variables[var_index].value);
+        free(file->variables[var_index].value);
         size_t combined_len = strlen(combined_value) + 1;
-        variables[var_index].value = (char*)malloc(combined_len);
-        if (!variables[var_index].value) {
+        file->variables[var_index].value = (char*)malloc(combined_len);
+        if (!file->variables[var_index].value) {
             kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
             goto cleanup;
         }
-        strcpy_s(variables[var_index].value, combined_len, combined_value);
-        variables[var_index].type = data_type;
+        strcpy_s(file->variables[var_index].value, combined_len, combined_value);
+        file->variables[var_index].type = data_type;
     } else {
         /* Add new variable or replace existing */
         if (var_index == -1) {
-            variables = (kh_variable_t*)realloc(variables, (size_t)(variable_count + 1) * sizeof(kh_variable_t));
-            if (!variables) {
-                kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
-                goto cleanup;
+            /* Need to add new variable */
+            if (file->variable_count >= file->capacity) {
+                /* Resize variables array */
+                int new_capacity = file->capacity * 2;
+                if (new_capacity < 16) new_capacity = 16;
+                
+                kh_variable_t* new_variables = (kh_variable_t*)realloc(file->variables, 
+                                                                      new_capacity * sizeof(kh_variable_t));
+                if (!new_variables) {
+                    kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
+                    goto cleanup;
+                }
+                
+                /* Initialize new slots */
+                memset(&new_variables[file->capacity], 0, 
+                       (new_capacity - file->capacity) * sizeof(kh_variable_t));
+                
+                file->variables = new_variables;
+                file->capacity = new_capacity;
             }
-            var_index = variable_count++;
+            
+            var_index = file->variable_count++;
             
             size_t name_len = strlen(clean_var_name) + 1;
-            variables[var_index].name = (char*)malloc(name_len);
-            if (!variables[var_index].name) {
+            file->variables[var_index].name = (char*)malloc(name_len);
+            if (!file->variables[var_index].name) {
+                file->variable_count--; /* Rollback */
                 kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
                 goto cleanup;
             }
-            strcpy_s(variables[var_index].name, name_len, clean_var_name);
+            strcpy_s(file->variables[var_index].name, name_len, clean_var_name);
+            
+            /* Try to add to hash table without rebuilding */
+            if (!kh_hash_table_add_entry(&file->hash_info, clean_var_name, var_index)) {
+                /* Hash table needs rebuilding - will be done later if needed */
+                file->hash_info.needs_rebuild = 1;
+            }
         } else {
-            free(variables[var_index].value);
+            /* Replace existing */
+            free(file->variables[var_index].value);
         }
         
         size_t clean_value_len = strlen(clean_value) + 1;
-        variables[var_index].value = (char*)malloc(clean_value_len);
-        if (!variables[var_index].value) {
+        file->variables[var_index].value = (char*)malloc(clean_value_len);
+        if (!file->variables[var_index].value) {
             kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
             goto cleanup;
         }
-        strcpy_s(variables[var_index].value, clean_value_len, clean_value);
-        variables[var_index].type = data_type;
+        strcpy_s(file->variables[var_index].value, clean_value_len, clean_value);
+        file->variables[var_index].type = data_type;
     }
     
-    /* Write file with new indexed format */
-    if (!kh_write_binary_file(file_path, variables, variable_count)) {
-        kh_set_error(output, output_size, "FAILED TO WRITE FILE");
+    /* Only rebuild hash table if necessary */
+    if (kh_should_rebuild_hash_table(&file->hash_info, file->variable_count)) {
+        if (!kh_rebuild_hash_table(file)) {
+            kh_set_error(output, output_size, "FAILED TO REBUILD HASH TABLE");
+            goto cleanup;
+        }
+    }
+    
+    /* Mark as dirty and save */
+    file->dirty = 1;
+    if (!kh_save_file_from_memory(file)) {
+        kh_set_error(output, output_size, "FAILED TO SAVE FILE");
         goto cleanup;
     }
     
@@ -2259,8 +2826,8 @@ static int kh_write_khdata_variable(const char* filename, const char* variable_n
 cleanup:
     free(clean_var_name);
     free(clean_value);
+    free(clean_filename);
     free(combined_value);
-    kh_free_variables(variables, variable_count);
     return result;
 }
 

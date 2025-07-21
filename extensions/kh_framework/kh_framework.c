@@ -19,6 +19,7 @@
 #include "process_kh_data.h"
 #include "string_operations.h"
 #include "vector_operations.h"
+#include "lua_integration.h"
 
 __declspec(dllexport) uint64_t RVExtensionFeatureFlags = RVFeature_ContextNoDefaultCall;
 
@@ -43,7 +44,9 @@ static const function_info_t FUNCTION_TABLE[] = {
     {"BinarizeKHData", 1, 1, 'B'},
     {"CryptoOperation", 2, 2, 'C'},
     {"DeleteKHDataFile", 1, 1, 'D'},
-    {"DeleteKHDataVariable", 2, 2, 'D'}
+    {"DeleteKHDataVariable", 2, 2, 'D'},
+    {"LuaOperation", 2, 2, 'L'},
+    {"LuaCompile", 1, 1, 'L'}
 };
 
 static const int FUNCTION_COUNT = sizeof(FUNCTION_TABLE) / sizeof(function_info_t);
@@ -196,7 +199,15 @@ __declspec(dllexport) int RVExtensionArgs(char *output, unsigned int output_size
                 function_result = kh_process_random_string_generation(output, output_size, argv, argc);
             }
             break;
-            
+
+        case 'L': /* LuaOperation */
+            if (strcmp(function, "LuaOperation") == 0) {
+                function_result = kh_process_lua_operation(output, output_size, argv, argc);
+            } else if (strcmp(function, "LuaCompile") == 0) {
+                function_result = kh_process_lua_compile_operation(output, output_size, argv, argc);
+            }
+            break;
+
         case 'S': /* SliceKHData and StringOperation */
             if (strcmp(function, "SliceKHData") == 0) {
                 function_result = kh_calculate_slice_count(argv[0], argv[1], output, output_size);
@@ -323,6 +334,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             /* DLL is being unloaded from the process */
             /* Clean up memory manager - save all dirty files and free memory */
             kh_cleanup_memory_manager();
+
+            /* Clean up LUA states */
+            kh_cleanup_lua_states();
             
             /* Clean up string operations tables */
             kh_cleanup_string_operations();

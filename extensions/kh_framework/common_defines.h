@@ -51,6 +51,13 @@
 #define VECTOR_EPSILON 1e-9
 #define KH_MAX_FRAGMENTATION_RATIO 0.3  /* Compact when 30% fragmented */
 #define KH_MIN_COMPACTION_INTERVAL 60  /* Minimum 1 minute between compactions */
+#define LUA_STATE_POOL_SIZE 8                    /* Pool of reusable Lua states */
+#define LUA_BYTECODE_CACHE_SIZE 1024             /* Bytecode cache entries */
+#define LUA_STRING_CACHE_SIZE 512                /* Cached string results */
+#define LUA_MEMORY_POOL_SIZE (64 * 1024 * 1024)  /* 64MB memory pool */
+#define LUA_HASH_BUFFER_SIZE 32                  /* SHA-256 hash size */
+#define LUA_MAX_SIMPLE_ARGS 16                   /* Fast path argument limit */
+#define LUA_STACK_BUFFER_SIZE 8192               /* Stack-allocated buffer size */
 
 /* Forward declarations */
 typedef struct kh_variable_s kh_variable_t;

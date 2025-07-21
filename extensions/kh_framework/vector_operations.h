@@ -1,6 +1,19 @@
 #ifndef VECTOR_OPERATIONS_HPP
 #define VECTOR_OPERATIONS_HPP
 
+#include "common_defines.h"
+#include <ctype.h>
+#include <math.h>
+#include <shlobj.h>
+#include <stdarg.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <wincrypt.h>
+#include <windows.h>
+
 /* Data structures */
 typedef struct {
     double x, y, z;
@@ -489,8 +502,6 @@ static int kh_parse_dir_up(const char* input, dir_up_t* result) {
             }
         } else if (*ptr == ']') {
             bracket_depth--;
-            ptr++;
-        } else if (*ptr == ',') {
             ptr++;
         } else {
             ptr++;

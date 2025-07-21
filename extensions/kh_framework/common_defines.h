@@ -1,15 +1,23 @@
 #ifndef COMMON_DEFINES_HPP
 #define COMMON_DEFINES_HPP
 
+#include <ctype.h>
+#include <math.h>
+#include <shlobj.h>
+#include <stdarg.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <wincrypt.h>
+#include <windows.h>
+
 /* Constants */
+#define KH_MAX_OUTPUT_SIZE (8192 * 1024)
 #define MAX_FILE_PATH_LENGTH 512
 #define MAX_TOTAL_KHDATA_SIZE_BYTES (1024LL * 1024LL * 1024LL)  /* 1GB total limit */
-#define MAX_KHDATA_FILES 128                                      /* Maximum .khdata files allowed */
-#define MAX_HASHMAP_INPUT_SIZE (32 * 1024 * 1024)      /* 32MB */
-#define MAX_HASHMAP_KEY_SIZE (8 * 1024)                /* 8KB */
-#define MAX_HASHMAP_VALUE_SIZE (32 * 1024 * 1024)      /* 32MB */
-#define MAX_HASHMAP_ENTRY_SIZE (32 * 1024 * 1024)      /* 32MB */
-#define HASHMAP_SAFETY_MARGIN (1024 * 1024)            /* 1MB */
+#define MAX_KHDATA_FILES 1024                                      /* Maximum .khdata files allowed */
 #define KH_ARRAY_MAX_ELEMENTS 10000               /* Maximum elements per array */
 #define KH_ARRAY_MAX_DEPTH 32                     /* Maximum nesting depth */
 #define KH_ARRAY_MAX_INPUT_SIZE (32 * 1024 * 1024) /* 32MB max input */
@@ -26,7 +34,6 @@
 #define KH_STRING_MAX_SPLIT_PARTS 1024         /* Maximum parts for string splitting */
 #define KH_STRING_MAX_REPLACE_COUNT 10000      /* Maximum replacements to prevent infinite loops */
 #define KH_CRYPTO_MAX_INPUT_SIZE (32 * 1024 * 1024)  /* 32MB max input */
-#define KH_CRYPTO_MAX_OUTPUT_SIZE 8192                /* Max hex output size */
 #define KH_FNV1A_32_OFFSET_BASIS 0x811c9dc5U
 #define KH_FNV1A_32_PRIME 0x01000193U
 #define KH_FNV1A_64_OFFSET_BASIS 0xcbf29ce484222325ULL
@@ -417,6 +424,9 @@ static inline int kh_validate_hashmap_format(const char* value) {
     int paren_count = 0;
     int brace_count = 0;
     int has_opening_bracket = 0;
+    size_t input_len = strlen(value);
+
+    if (input_len == 0) return 0;
     
     /* Skip leading whitespace */
     while (*ptr && (*ptr == ' ' || *ptr == '\t' || *ptr == '\n' || *ptr == '\r')) ptr++;
@@ -425,7 +435,7 @@ static inline int kh_validate_hashmap_format(const char* value) {
     if (*ptr != '[') return 0;
     
     /* Check bracket matching */
-    while (*ptr) {
+    while (*ptr && (size_t)(ptr - value) < input_len) {
         switch (*ptr) {
             case '[':
                 square_bracket_count++;
@@ -500,6 +510,22 @@ static inline int kh_validate_value_format(int data_type, const char* value) {
 static inline void kh_set_error(char* output, int output_size, const char* message) {
     if (!output || output_size <= 0 || !message) return;
     _snprintf_s(output, (size_t)output_size, _TRUNCATE, KH_ERROR_PREFIX "%s", message);
+}
+
+/* Check and enforce the global output limit */
+static inline int kh_enforce_output_limit(char* output, int output_size) {
+    if (!output || output_size <= 0) return 0;
+    
+    size_t actual_length = strlen(output);
+    
+    /* Check if output exceeds the global limit */
+    if (actual_length > KH_MAX_OUTPUT_SIZE) {
+        /* Replace output with error message */
+        kh_set_error(output, output_size, "OUTPUT EXCEEDS LIMIT");
+        return 1;  /* Indicate limit exceeded */
+    }
+    
+    return 0;  /* Output is within limits */
 }
 
 /* Thread-safe random number initialization */

@@ -1,6 +1,19 @@
 #ifndef STRING_OPERATIONS_HPP
 #define STRING_OPERATIONS_HPP
 
+#include "common_defines.h"
+#include <ctype.h>
+#include <math.h>
+#include <shlobj.h>
+#include <stdarg.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <wincrypt.h>
+#include <windows.h>
+
 /* String operation function types */
 typedef enum {
     KH_STRING_FUNC_BOOL,          /* String -> Boolean */
@@ -1164,16 +1177,31 @@ static inline int kh_string_count_wrapper(const char* input, const char* search,
 static inline int kh_string_split_wrapper(const char* input, const char* delimiter, const char* index_str, char* output, int output_size) {
     if (!input || !delimiter || !index_str || !output || output_size <= 0) return 0;
     
-    int index = atoi(index_str);
-    return kh_string_split(input, delimiter, index, output, output_size);
+    char* endptr;
+    long temp_index = strtol(index_str, &endptr, 10);
+    
+    /* Validate conversion */
+    if (endptr == index_str || *endptr != '\0' || temp_index < 0 || temp_index > INT_MAX) {
+        return 0;
+    }
+    
+    return kh_string_split(input, delimiter, (int)temp_index, output, output_size);
 }
 
 static inline int kh_string_substring_wrapper(const char* input, const char* start_str, const char* length_str, char* output, int output_size) {
     if (!input || !start_str || !length_str || !output || output_size <= 0) return 0;
     
-    int start = atoi(start_str);
-    int length = atoi(length_str);
-    return kh_string_substring(input, start, length, output, output_size);
+    char* endptr1, *endptr2;
+    long temp_start = strtol(start_str, &endptr1, 10);
+    long temp_length = strtol(length_str, &endptr2, 10);
+    
+    /* Validate conversions */
+    if (endptr1 == start_str || *endptr1 != '\0' || temp_start < 0 || temp_start > INT_MAX ||
+        endptr2 == length_str || *endptr2 != '\0' || temp_length < 0 || temp_length > INT_MAX) {
+        return 0;
+    }
+    
+    return kh_string_substring(input, (int)temp_start, (int)temp_length, output, output_size);
 }
 
 /* Whitelist of allowed string functions - SECURITY CRITICAL */

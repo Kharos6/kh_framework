@@ -1,6 +1,20 @@
 #ifndef ARRAY_OPERATIONS_HPP
 #define ARRAY_OPERATIONS_HPP
 
+#include "common_defines.h"
+#include <ctype.h>
+#include <math.h>
+#include <shlobj.h>
+#include <stdarg.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <wincrypt.h>
+#include <windows.h>
+
+
 /* Array element data structure */
 typedef struct {
     int type;           /* KH_TYPE_* from common_defines.h */
@@ -48,6 +62,8 @@ typedef enum {
     KH_TYPE_BOOL_LOCAL = 4,
     KH_TYPE_UNKNOWN_LOCAL = -1
 } kh_data_type_local_t;
+
+double strtod(const char* str, char** endptr);
 
 /* Initialize dynamic array */
 static inline int kh_init_dynamic_array(dynamic_array_t* arr, int initial_capacity) {
@@ -146,7 +162,13 @@ static inline int kh_add_array_element(dynamic_array_t* arr, int type, const cha
     
     /* Cache numeric value for scalars */
     if (type == KH_TYPE_SCALAR_LOCAL) {
-        elem->number = atof(value);
+        char* endptr;
+        elem->number = strtod(value, &endptr);
+        
+        // Validate conversion was successful
+        if (endptr == value || *endptr != '\0') {
+            elem->number = 0.0;  // Default for invalid numbers
+        }
     }
     
     elem->is_valid = 1;

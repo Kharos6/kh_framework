@@ -1,6 +1,19 @@
 #ifndef RV_EXTENSION_UTILS_H
 #define RV_EXTENSION_UTILS_H
 
+#include "common_defines.h"
+#include <ctype.h>
+#include <math.h>
+#include <shlobj.h>
+#include <stdarg.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <wincrypt.h>
+#include <windows.h>
+
 /* bitset */
 typedef enum {
     RVFeature_ContextArgumentsVoidPtr = 1,      /* 1 << 0 */

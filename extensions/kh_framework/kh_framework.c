@@ -1,25 +1,24 @@
-#include <windows.h>
-#include <wincrypt.h>
-#include <shlobj.h>
-#include <stdio.h>
-#include <time.h>
-#include <stdlib.h>
-#include <stdint.h>
-#include <string.h>
-#include <ctype.h>
 #include <math.h>
+#include <shlobj.h>
 #include <stdarg.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <wincrypt.h>
+#include <windows.h>
 
 /* Include all module headers in dependency order */
 #include "rv_extension_utils.h"
+#include "array_operations.h"
 #include "common_defines.h"
-#include "process_kh_data.h"
+#include "crypto_operations.h"
 #include "generate_random_string.h"
 #include "math_operations.h"
-#include "vector_operations.h"
+#include "process_kh_data.h"
 #include "string_operations.h"
-#include "crypto_operations.h"
-#include "array_operations.h"
+#include "vector_operations.h"
 
 __declspec(dllexport) uint64_t RVExtensionFeatureFlags = RVFeature_ContextNoDefaultCall;
 
@@ -156,6 +155,8 @@ static inline int kh_validate_basic_inputs(char* output, int output_size, const 
 
 /* Main extension function for ARMA 3 callExtension interface - enhanced */
 __declspec(dllexport) int RVExtensionArgs(char *output, unsigned int output_size, const char *function, const char **argv, unsigned int argc) {
+    int function_result = 1;  /* Default to error */
+    
     /* Enhanced input validation */
     if (!kh_validate_basic_inputs(output, output_size, function, argv, argc)) {
         return 1;
@@ -172,37 +173,35 @@ __declspec(dllexport) int RVExtensionArgs(char *output, unsigned int output_size
     switch (first_char) {
         case 'A': /* ArrayOperation */
             if (strcmp(function, "ArrayOperation") == 0) {
-                return kh_process_array_operation(output, output_size, argv, argc);
+                function_result = kh_process_array_operation(output, output_size, argv, argc);
             }
             break;
 
         case 'C': /* CryptoOperation */
             if (strcmp(function, "CryptoOperation") == 0) {
-                return kh_process_crypto_operation(output, output_size, argv, argc);
+                function_result = kh_process_crypto_operation(output, output_size, argv, argc);
             }
             break;
 
         case 'D': /* DeleteKHDataFile and DeleteKHDataVariable */
             if (strcmp(function, "DeleteKHDataFile") == 0) {
-                return kh_delete_khdata_file(argv[0], output, output_size);
-            }
-            if (strcmp(function, "DeleteKHDataVariable") == 0) {
-                return kh_delete_khdata_variable(argv[0], argv[1], output, output_size);
+                function_result = kh_delete_khdata_file(argv[0], output, output_size);
+            } else if (strcmp(function, "DeleteKHDataVariable") == 0) {
+                function_result = kh_delete_khdata_variable(argv[0], argv[1], output, output_size);
             }
             break;
 
         case 'G': /* GenerateRandomString */
             if (strcmp(function, "GenerateRandomString") == 0) {
-                return kh_process_random_string_generation(output, output_size, argv, argc);
+                function_result = kh_process_random_string_generation(output, output_size, argv, argc);
             }
             break;
             
         case 'S': /* SliceKHData and StringOperation */
             if (strcmp(function, "SliceKHData") == 0) {
-                return kh_calculate_slice_count(argv[0], argv[1], output, output_size);
-            }
-            if (strcmp(function, "StringOperation") == 0) {
-                return kh_process_string_operation(output, output_size, argv, argc);
+                function_result = kh_calculate_slice_count(argv[0], argv[1], output, output_size);
+            } else if (strcmp(function, "StringOperation") == 0) {
+                function_result = kh_process_string_operation(output, output_size, argv, argc);
             }
             break;
             
@@ -210,7 +209,7 @@ __declspec(dllexport) int RVExtensionArgs(char *output, unsigned int output_size
             if (strcmp(function, "ReadKHData") == 0) {
                 /* Check if slice index is provided (3rd argument) */
                 const char* slice_index = (argc >= 3) ? argv[2] : NULL;
-                return kh_read_khdata_variable_slice(argv[0], argv[1], slice_index, output, output_size);
+                function_result = kh_read_khdata_variable_slice(argv[0], argv[1], slice_index, output, output_size);
             }
             break;
             
@@ -218,31 +217,31 @@ __declspec(dllexport) int RVExtensionArgs(char *output, unsigned int output_size
             if (strcmp(function, "WriteKHData") == 0) {
                 /* 5th argument (overwrite flag) is optional, defaults to true */
                 const char* overwrite_flag = (argc >= 5) ? argv[4] : "true";
-                return kh_write_khdata_variable(argv[0], argv[1], argv[2], argv[3], overwrite_flag, output, output_size);
+                function_result = kh_write_khdata_variable(argv[0], argv[1], argv[2], argv[3], overwrite_flag, output, output_size);
             }
             break;
             
         case 'M': /* MathOperation */
             if (strcmp(function, "MathOperation") == 0) {
-                return kh_process_math_operation(output, output_size, argv, argc);
+                function_result = kh_process_math_operation(output, output_size, argv, argc);
             }
             break;
             
         case 'V': /* VectorOperation */
             if (strcmp(function, "VectorOperation") == 0) {
-                return kh_process_vector_operation(output, output_size, argv, argc);
+                function_result = kh_process_vector_operation(output, output_size, argv, argc);
             }
             break;
             
         case 'U': /* UnbinarizeKHData */
             if (strcmp(function, "UnbinarizeKHData") == 0) {
-                return kh_unbinarize_khdata(argv[0], output, output_size);
+                function_result = kh_unbinarize_khdata(argv[0], output, output_size);
             }
             break;
             
         case 'B': /* BinarizeKHData */
             if (strcmp(function, "BinarizeKHData") == 0) {
-                return kh_binarize_khdata(argv[0], output, output_size);
+                function_result = kh_binarize_khdata(argv[0], output, output_size);
             }
             break;
             
@@ -252,9 +251,22 @@ __declspec(dllexport) int RVExtensionArgs(char *output, unsigned int output_size
             return 1;
     }
     
-    /* This should never be reached due to validation */
-    kh_set_error(output, output_size, "FUNCTION DISPATCH FAILED");
-    return 1;
+    /* If function executed successfully (returned 0), check output limit */
+    if (function_result == 0) {
+        /* Enforce the global 8192KB output limit */
+        if (kh_enforce_output_limit(output, output_size)) {
+            /* Output exceeded limit and was replaced with error message */
+            return 1;
+        }
+        /* Output is within limits, return success */
+        return 0;
+    }
+    
+    /* Function failed, but still check if error message itself exceeds limit (unlikely but safe) */
+    kh_enforce_output_limit(output, output_size);
+    
+    /* Return the original function result */
+    return function_result;
 }
 
 /* Alternative entry point for simple string-based calls (optional) - enhanced */
@@ -302,10 +314,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             break;
             
         case DLL_THREAD_ATTACH:
-            /* A new thread is being created in the process */
-            /* No thread-specific initialization needed */
-            break;
-            
         case DLL_THREAD_DETACH:
             /* A thread is exiting cleanly */
             /* No thread-specific cleanup needed */

@@ -1,6 +1,19 @@
 #ifndef GENERATE_RANDOM_STRING_HPP
 #define GENERATE_RANDOM_STRING_HPP
 
+#include "common_defines.h"
+#include <ctype.h>
+#include <math.h>
+#include <shlobj.h>
+#include <stdarg.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <wincrypt.h>
+#include <windows.h>
+
 /* Character sets for random string generation */
 static const char KH_CHARSET_NUMBERS[] = "0123456789";
 static const char KH_CHARSET_LETTERS[] = "abcdefghijklmnopqrstuvwxyz";
@@ -99,15 +112,17 @@ static int kh_process_random_string_generation(char *output, int output_size, co
     
     kh_init_random();
 
-    length = atoi(argv[0]);
+    char* endptr;
+    long temp_length = strtol(argv[0], &endptr, 10);
+
+    // Validate conversion and range
+    if (endptr == argv[0] || *endptr != '\0' || temp_length < 0 || temp_length > INT_MAX) {
+        kh_set_error(output, output_size, "INVALID INTEGER");
+        return 1;
+    }
     
     if (length <= 0) {
         kh_set_error(output, output_size, "INVALID LENGTH - MUST BE POSITIVE INTEGER");
-        return 1;
-    }
-
-    if (length > SLICE_SIZE) {
-        kh_set_error(output, output_size, "LENGTH TOO LARGE FOR OUTPUT BUFFER");
         return 1;
     }
     
@@ -125,14 +140,14 @@ static int kh_process_random_string_generation(char *output, int output_size, co
         const int numbers_len = KH_CHARSET_INFO[0].length;
         const int letters_len = KH_CHARSET_INFO[1].length;
         
-        charset = (char*)malloc((size_t)(numbers_len + letters_len + 1));
+        charset = (char*)malloc((size_t)numbers_len + (size_t)letters_len + 1);
         if (!charset) {
             kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
             return 1;
         }
         
-        memcpy(charset, KH_CHARSET_INFO[0].charset, numbers_len);
-        memcpy(charset + numbers_len, KH_CHARSET_INFO[1].charset, letters_len);
+        memcpy(charset, KH_CHARSET_INFO[0].charset, (size_t)numbers_len);
+        memcpy(charset + numbers_len, KH_CHARSET_INFO[1].charset, (size_t)letters_len);
         charset_size = numbers_len + letters_len;
         charset[charset_size] = '\0';
     }

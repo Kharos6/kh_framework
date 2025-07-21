@@ -1,6 +1,19 @@
 #ifndef PROCESS_KH_DATA_HPP
 #define PROCESS_KH_DATA_HPP
 
+#include "common_defines.h"
+#include <ctype.h>
+#include <math.h>
+#include <shlobj.h>
+#include <stdarg.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <wincrypt.h>
+#include <windows.h>
+
 /* Data type enumeration */
 typedef enum {
     KH_TYPE_ARRAY = 0,
@@ -327,7 +340,7 @@ static inline const char* kh_get_string_from_type(kh_data_type_t type) {
 }
 
 /* Free variables array */
-void kh_free_variables(kh_variable_t* variables, int count) {
+static inline void kh_free_variables(kh_variable_t* variables, int count) {
     int i;
     if (variables) {
         for (i = 0; i < count; i++) {
@@ -764,7 +777,7 @@ static int kh_validate_file_integrity(const char* file_path, long file_size) {
 }
 
 /* Read binary file with hash table support - returns hash table info */
-int kh_read_binary_file_with_hash(const char* file_path, kh_variable_t** variables, int* count, kh_hash_table_info_t* hash_info) {
+static int kh_read_binary_file_with_hash(const char* file_path, kh_variable_t** variables, int* count, kh_hash_table_info_t* hash_info) {
     if (!file_path || !variables || !count) return 0;
     
     FILE* file = NULL;
@@ -1265,10 +1278,15 @@ static int kh_load_file_into_memory(const char* filename) {
 /* Save a file from memory to disk */
 static int kh_save_file_from_memory(khdata_file_t* file) {
     if (!file || !file->filename || !file->full_path || !file->dirty) {
-        return 1; /* Nothing to save or not dirty */
+        return 1;
     }
     
-    /* Write to disk */
+    // NEW: Ensure directory exists before saving
+    char dir_path[MAX_FILE_PATH_LENGTH];
+    if (kh_get_arma3_documents_path(dir_path, sizeof(dir_path))) {
+        CreateDirectoryA(dir_path, NULL); // Recreate if deleted
+    }
+    
     if (!kh_write_binary_file(file->full_path, file->variables, file->variable_count)) {
         return 0;
     }
@@ -1655,6 +1673,19 @@ cleanup:
     return result;
 }
 
+/* Find variable by name (case-insensitive) - linear search fallback */
+static inline int kh_find_variable(kh_variable_t* variables, int count, const char* name) {
+    if (!variables || !name || count <= 0) return -1;
+    
+    int i;
+    for (i = 0; i < count; i++) {
+        if (variables[i].name && kh_strcasecmp(variables[i].name, name) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
 /* Enhanced find variable with hash table lookup - using Robin Hood hashing */
 static inline int kh_find_variable_indexed(kh_variable_t* variables, int count, const char* name,
                                           kh_hash_entry_t* hash_table, uint32_t hash_table_size) {
@@ -1676,19 +1707,6 @@ static inline int kh_find_variable_indexed(kh_variable_t* variables, int count, 
     }
     
     return -1; /* Not found */
-}
-
-/* Find variable by name (case-insensitive) - linear search fallback */
-static inline int kh_find_variable(kh_variable_t* variables, int count, const char* name) {
-    if (!variables || !name || count <= 0) return -1;
-    
-    int i;
-    for (i = 0; i < count; i++) {
-        if (variables[i].name && kh_strcasecmp(variables[i].name, name) == 0) {
-            return i;
-        }
-    }
-    return -1;
 }
 
 /* Helper function to find variable using hash table if available */
@@ -1736,11 +1754,10 @@ static int kh_parse_hashmap_entry(const char* input, char** key, char** value) {
     
     const char* ptr = input;
     int bracket_count = 0;
-    int input_len = (int)strlen(input);
+    size_t input_len = strlen(input);
     
-    /* Input length validation */
-    if (input_len < 3) return 0; /* Minimum: [,] */
-    if (input_len > MAX_HASHMAP_INPUT_SIZE) return 0; /* 32MB maximum */
+    /* Basic input validation */
+    if (input_len == 0) return 0;
     
     /* Skip whitespace and find opening bracket */
     while (*ptr && (*ptr == ' ' || *ptr == '\t' || *ptr == '\n' || *ptr == '\r')) ptr++;
@@ -1749,12 +1766,12 @@ static int kh_parse_hashmap_entry(const char* input, char** key, char** value) {
     const char* bracket_start = ptr + 1;
     ptr = bracket_start;
     
-    /* Find comma while tracking bracket depth - with bounds checking */
+    /* Find comma while tracking bracket depth */
     const char* comma_pos = NULL;
     const char* bracket_end = NULL;
     int found_comma = 0;
     
-    while (*ptr && (ptr - input) < input_len) {
+    while (*ptr && (size_t)(ptr - input) < input_len) {
         if (*ptr == '[') {
             bracket_count++;
         } else if (*ptr == ']') {
@@ -1775,32 +1792,32 @@ static int kh_parse_hashmap_entry(const char* input, char** key, char** value) {
         return 0;
     }
     
-    /* Extract key with bounds checking */
+    /* Extract key - dynamically sized */
     size_t key_len = (size_t)(comma_pos - bracket_start);
-    if (key_len == 0 || key_len > MAX_HASHMAP_KEY_SIZE) return 0; /* Reasonable key length limit */
+    if (key_len == 0) return 0;
     
     /* Trim whitespace from key */
     while (key_len > 0 && (bracket_start[key_len-1] == ' ' || bracket_start[key_len-1] == '\t')) {
         key_len--;
     }
     
-    if (key_len <= 0) return 0;
+    if (key_len == 0) return 0;
     
-    *key = (char*)malloc((size_t)key_len + 1);
+    *key = (char*)malloc(key_len + 1);
     if (!*key) return 0;
     
-    memcpy(*key, bracket_start, (size_t)key_len);
+    memcpy(*key, bracket_start, key_len);
     (*key)[key_len] = '\0';
     
     /* Remove quotes from key if present */
     if (key_len >= 2 && (*key)[0] == '"' && (*key)[key_len-1] == '"') {
-        memmove(*key, *key + 1, (size_t)(key_len - 2));
+        memmove(*key, *key + 1, key_len - 2);
         (*key)[key_len - 2] = '\0';
         key_len -= 2;
     }
     
     /* Validate key contains only safe characters */
-    for (int i = 0; i < key_len; i++) {
+    for (size_t i = 0; i < key_len; i++) {
         char c = (*key)[i];
         if (c < 32 || c == 127) {
             free(*key);
@@ -1809,23 +1826,18 @@ static int kh_parse_hashmap_entry(const char* input, char** key, char** value) {
         }
     }
     
-    /* Extract value with bounds checking */
+    /* Extract value - dynamically sized */
     const char* value_start = comma_pos + 1;
     while (*value_start && (*value_start == ' ' || *value_start == '\t')) value_start++;
     
     size_t value_len = (size_t)(bracket_end - value_start);
-    if (value_len > MAX_HASHMAP_VALUE_SIZE) { /* Reasonable value length limit */
-        free(*key);
-        *key = NULL;
-        return 0;
-    }
     
     /* Trim whitespace from value */
     while (value_len > 0 && (value_start[value_len-1] == ' ' || value_start[value_len-1] == '\t')) {
         value_len--;
     }
     
-    *value = (char*)malloc((size_t)value_len + 1);
+    *value = (char*)malloc(value_len + 1);
     if (!*value) {
         free(*key);
         *key = NULL;
@@ -1833,7 +1845,7 @@ static int kh_parse_hashmap_entry(const char* input, char** key, char** value) {
     }
     
     if (value_len > 0) {
-        memcpy(*value, value_start, (size_t)value_len);
+        memcpy(*value, value_start, value_len);
     }
     (*value)[value_len] = '\0';
     
@@ -1842,17 +1854,17 @@ static int kh_parse_hashmap_entry(const char* input, char** key, char** value) {
 
 /* Enhanced full hashmap parsing with depth limits and validation (no size limits) */
 static int kh_parse_full_hashmap(const char* input, char*** entries, int max_entries) {
-    if (!input || !entries || max_entries <= 0 || max_entries > 1024) return 0;
+    if (!input || !entries || max_entries <= 0 || max_entries > 10000) return 0;
     
     const char* ptr = input;
     int entry_count = 0;
     int bracket_depth = 0;
-    int max_depth = 32; /* Reasonable nesting limit */
+    int max_depth = 64; /* Reasonable nesting limit increased */
     const char* entry_start = NULL;
-    int input_len = (int)strlen(input);
+    size_t input_len = strlen(input);
     
     /* Input validation */
-    if (input_len < 2 || input_len > MAX_HASHMAP_INPUT_SIZE) return 0; /* Max input size limit */
+    if (input_len == 0) return 0;
     
     /* Allocate array of string pointers */
     *entries = (char**)calloc((size_t)max_entries, sizeof(char*));
@@ -1867,7 +1879,7 @@ static int kh_parse_full_hashmap(const char* input, char*** entries, int max_ent
     }
     ptr++; /* Skip opening bracket */
     
-    while (*ptr && entry_count < max_entries && (ptr - input) < input_len) {
+    while (*ptr && entry_count < max_entries && (size_t)(ptr - input) < input_len) {
         if (*ptr == '[') {
             if (bracket_depth == 0) {
                 entry_start = ptr;
@@ -1889,22 +1901,22 @@ static int kh_parse_full_hashmap(const char* input, char*** entries, int max_ent
                 /* Found complete entry */
                 size_t entry_len = (size_t)(ptr - entry_start + 1);
                 
-                if (entry_len > 0 && entry_len <= MAX_HASHMAP_ENTRY_SIZE) { /* Reasonable entry size limit */
-                    (*entries)[entry_count] = (char*)malloc((size_t)entry_len + 1);
-                    if (!(*entries)[entry_count]) {
-                        /* Cleanup on allocation failure */
-                        for (int i = 0; i < entry_count; i++) {
-                            free((*entries)[i]);
-                        }
-                        free(*entries);
-                        *entries = NULL;
-                        return 0;
+                /* Allocate based on actual size needed */
+                (*entries)[entry_count] = (char*)malloc(entry_len + 1);
+                if (!(*entries)[entry_count]) {
+                    /* Cleanup on allocation failure */
+                    for (int i = 0; i < entry_count; i++) {
+                        free((*entries)[i]);
                     }
-                    
-                    memcpy((*entries)[entry_count], entry_start, (size_t)entry_len);
-                    (*entries)[entry_count][entry_len] = '\0';
-                    entry_count++;
+                    free(*entries);
+                    *entries = NULL;
+                    return 0;
                 }
+                
+                memcpy((*entries)[entry_count], entry_start, entry_len);
+                (*entries)[entry_count][entry_len] = '\0';
+                entry_count++;
+                
                 entry_start = NULL;
             } else if (bracket_depth < 0) {
                 /* Mismatched brackets - cleanup */
@@ -1938,10 +1950,10 @@ static int kh_merge_hashmap(const char* existing_hashmap, const char* new_entry,
     if (!existing_hashmap || !new_entry || !result || result_size <= 0) return 0;
     
     /* Size validation */
-    int existing_len = (int)strlen(existing_hashmap);
-    int new_entry_len = (int)strlen(new_entry);
+    size_t existing_len = strlen(existing_hashmap);
+    size_t new_entry_len = strlen(new_entry);
     
-    if (existing_len <= 0 || existing_len > MAX_HASHMAP_INPUT_SIZE || new_entry_len <= 0 || new_entry_len > MAX_HASHMAP_INPUT_SIZE) {
+    if (existing_len == 0 || new_entry_len == 0) {
         return 0;
     }
     
@@ -1957,8 +1969,14 @@ static int kh_merge_hashmap(const char* existing_hashmap, const char* new_entry,
     char* temp_result = NULL;
     int ret = 0;
     
-    /* Allocate temporary result buffer with safety margin */
-    size_t temp_size = (size_t)(existing_len + new_entry_len + HASHMAP_SAFETY_MARGIN);
+    /* Allocate temporary result buffer dynamically based on content size */
+    size_t temp_size = existing_len + new_entry_len + 1024; /* Small safety margin */
+    
+    /* Check for overflow */
+    if (temp_size < existing_len || temp_size < new_entry_len) {
+        return 0; /* Overflow detected */
+    }
+    
     temp_result = (char*)malloc(temp_size);
     if (!temp_result) return 0;
     
@@ -1999,11 +2017,19 @@ static int kh_merge_hashmap(const char* existing_hashmap, const char* new_entry,
                 size_t current_len = strlen(temp_result);
                 size_t required_len = current_len + strlen(formatted_entry) + 10;
                 
+                /* Dynamically resize if needed */
                 if (required_len >= temp_size) {
-                    free(formatted_entry);
-                    free(key);
-                    free(value);
-                    goto cleanup;
+                    size_t new_temp_size = required_len + 1024;
+                    
+                    char* new_temp_result = (char*)realloc(temp_result, new_temp_size);
+                    if (!new_temp_result) {
+                        free(formatted_entry);
+                        free(key);
+                        free(value);
+                        goto cleanup;
+                    }
+                    temp_result = new_temp_result;
+                    temp_size = new_temp_size;
                 }
                 
                 /* Add to temp_result */
@@ -2065,11 +2091,11 @@ static int kh_merge_hashmap(const char* existing_hashmap, const char* new_entry,
                             }
                         }
                     } else {
-                        size_t existing_len = strlen(existing_hashmap);
-                        if (existing_len + strlen(formatted_entry) + 10 < (size_t)result_size && 
-                            existing_len > 0 && existing_hashmap[existing_len-1] == ']') {
+                        size_t existing_len_local = strlen(existing_hashmap);
+                        if (existing_len_local + strlen(formatted_entry) + 10 < (size_t)result_size && 
+                            existing_len_local > 0 && existing_hashmap[existing_len_local-1] == ']') {
                             if (_snprintf_s(result, (size_t)result_size, _TRUNCATE, "%.*s, %s]", 
-                                           (int)(existing_len - 1), existing_hashmap, formatted_entry) >= 0) {
+                                           (int)(existing_len_local - 1), existing_hashmap, formatted_entry) >= 0) {
                                 ret = 1;
                             }
                         }
@@ -2133,9 +2159,21 @@ static int kh_combine_values(kh_data_type_t type, const char* existing_value, co
             if (overwrite_flag) {
                 strcpy_s(result, (size_t)result_size, clean_new);
             } else {
-                double existing_num = atof(clean_existing);
-                double new_num = atof(clean_new);
-                _snprintf_s(result, (size_t)result_size, _TRUNCATE, "%.6g", existing_num + new_num);
+                /* Use strtod with error checking */
+                char* endptr1, *endptr2;
+                double existing_num = strtod(clean_existing, &endptr1);
+                double new_num = strtod(clean_new, &endptr2);
+                
+                /* Only add if both conversions were successful */
+                if (endptr1 != clean_existing && *endptr1 == '\0' &&
+                    endptr2 != clean_new && *endptr2 == '\0') {
+                    _snprintf_s(result, (size_t)result_size, _TRUNCATE, "%.6g", existing_num + new_num);
+                } else {
+                    /* If conversion failed, treat as string concatenation */
+                    if (strlen(clean_existing) + strlen(clean_new) < (size_t)result_size) {
+                        _snprintf_s(result, (size_t)result_size, _TRUNCATE, "%s%s", clean_existing, clean_new);
+                    }
+                }
             }
             ret = 1;
             break;
@@ -2200,11 +2238,16 @@ static int kh_read_khdata_variable_slice(const char* filename, const char* varia
     }
     
     if (slice_index_str && strlen(slice_index_str) > 0) {
-        slice_index = atoi(slice_index_str);
-        if (slice_index < 0) {
+        char* endptr;
+        long temp_slice_index = strtol(slice_index_str, &endptr, 10);
+        
+        /* Validate conversion and range */
+        if (endptr == slice_index_str || *endptr != '\0' || temp_slice_index < 0 || temp_slice_index > INT_MAX) {
             kh_set_error(output, output_size, "INVALID SLICE INDEX");
             goto cleanup;
         }
+        
+        slice_index = (int)temp_slice_index;
     }
     
     kh_clean_string(variable_name, clean_var_name, (int)strlen(variable_name) + 1);

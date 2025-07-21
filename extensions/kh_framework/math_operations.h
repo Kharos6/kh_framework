@@ -1,6 +1,19 @@
 #ifndef MATH_OPERATIONS_HPP
 #define MATH_OPERATIONS_HPP
 
+#include "common_defines.h"
+#include <ctype.h>
+#include <math.h>
+#include <shlobj.h>
+#include <stdarg.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <wincrypt.h>
+#include <windows.h>
+
 /* Token types for expression parser */
 typedef enum {
     TOKEN_NUMBER,
@@ -151,6 +164,103 @@ static const math_function_t KH_ALLOWED_MATH_FUNCTIONS[] = {
 };
 
 static const int KH_MATH_FUNCTION_COUNT = sizeof(KH_ALLOWED_MATH_FUNCTIONS) / sizeof(math_function_t);
+
+/* Set error message with automatic resizing - FIXED to use kh_set_parser_error consistently */
+static inline int kh_set_parser_error(parser_context_t* ctx, const char* format, ...) {
+    if (!ctx || !format) return 0;
+    
+    /* If allocation already failed, try to use existing buffer */
+    if (ctx->allocation_failed && ctx->error_msg && ctx->error_msg_capacity > 0) {
+        va_list args;
+        va_start(args, format);
+        
+        /* Try to fit error message in existing buffer */
+        int prefix_len = (int)strlen(KH_ERROR_PREFIX);
+        if (ctx->error_msg_capacity > prefix_len + 10) { /* Ensure minimum space */
+            strcpy_s(ctx->error_msg, (size_t)ctx->error_msg_capacity, KH_ERROR_PREFIX);
+            _vsnprintf_s(ctx->error_msg + prefix_len, 
+                         (size_t)(ctx->error_msg_capacity - prefix_len), 
+                         _TRUNCATE, format, args);
+        } else {
+            /* Fallback to minimal error message */
+            kh_set_parser_error(ctx, "MEMORY ERROR");
+        }
+        va_end(args);
+        return 1;
+    }
+    
+    va_list args;
+    va_start(args, format);
+    
+    /* Calculate required size for the formatted message (without prefix) */
+    int message_size = _vscprintf(format, args) + 1;
+    va_end(args);
+    
+    /* Add space for KH_ERROR_PREFIX */
+    int prefix_len = (int)strlen(KH_ERROR_PREFIX);
+    int required_size = prefix_len + message_size;
+    
+    /* Handle allocation failure gracefully */
+    if (required_size > ctx->error_msg_capacity) {
+        int new_capacity = ctx->error_msg_capacity;
+        while (new_capacity < required_size && new_capacity > 0) {
+            new_capacity *= 2;
+        }
+        
+        if (new_capacity <= 0) { /* Integer overflow check */
+            ctx->allocation_failed = 1;
+            /* Ensure we have some error message */
+            if (ctx->error_msg && ctx->error_msg_capacity > 20) {
+                kh_set_parser_error(ctx, "MEMORY ERROR");
+            }
+            return 0;
+        }
+        
+        char* new_error_msg = (char*)realloc(ctx->error_msg, (size_t)new_capacity);
+        if (!new_error_msg) {
+            /* Fall back to existing buffer with truncation */
+            ctx->allocation_failed = 1;
+            
+            /* ALWAYS ensure some error message is set */
+            if (ctx->error_msg && ctx->error_msg_capacity > 0) {
+                va_start(args, format);
+                int available_space = ctx->error_msg_capacity - prefix_len;
+                if (available_space > 10) {
+                    strcpy_s(ctx->error_msg, (size_t)ctx->error_msg_capacity, KH_ERROR_PREFIX);
+                    _vsnprintf_s(ctx->error_msg + prefix_len, (size_t)available_space, _TRUNCATE, format, args);
+                } else {
+                    /* Not enough space even for prefix, use minimal error */
+                    kh_set_parser_error(ctx, "MEMORY ERROR");
+                }
+                va_end(args);
+            }
+            return 0;
+        }
+        
+        ctx->error_msg = new_error_msg;
+        ctx->error_msg_capacity = new_capacity;
+    }
+    
+    /* Write the prefix first */
+    if (strcpy_s(ctx->error_msg, (size_t)ctx->error_msg_capacity, KH_ERROR_PREFIX) != 0) {
+        /* strcpy_s failed, set minimal error */
+        ctx->error_msg[0] = 'E';
+        ctx->error_msg[1] = '\0';
+        return 0;
+    }
+    
+    /* Append the formatted message after the prefix */
+    va_start(args, format);
+    if (_vsnprintf_s(ctx->error_msg + prefix_len, 
+                     (size_t)(ctx->error_msg_capacity - prefix_len), 
+                     _TRUNCATE, format, args) < 0) {
+        /* Formatting failed, but we still have the prefix */
+        strcat_s(ctx->error_msg, (size_t)ctx->error_msg_capacity, "FORMATTING ERROR");
+    }
+    va_end(args);
+    
+    return 1;
+}
 
 /* Check safety limits to prevent crashes */
 static inline int kh_check_parser_limits(parser_context_t* ctx) {
@@ -344,103 +454,6 @@ static inline int kh_init_parser_context(parser_context_t* ctx, const char* expr
     return 1;
 }
 
-/* Set error message with automatic resizing - FIXED to use kh_set_parser_error consistently */
-static inline int kh_set_parser_error(parser_context_t* ctx, const char* format, ...) {
-    if (!ctx || !format) return 0;
-    
-    /* If allocation already failed, try to use existing buffer */
-    if (ctx->allocation_failed && ctx->error_msg && ctx->error_msg_capacity > 0) {
-        va_list args;
-        va_start(args, format);
-        
-        /* Try to fit error message in existing buffer */
-        int prefix_len = (int)strlen(KH_ERROR_PREFIX);
-        if (ctx->error_msg_capacity > prefix_len + 10) { /* Ensure minimum space */
-            strcpy_s(ctx->error_msg, (size_t)ctx->error_msg_capacity, KH_ERROR_PREFIX);
-            _vsnprintf_s(ctx->error_msg + prefix_len, 
-                         (size_t)(ctx->error_msg_capacity - prefix_len), 
-                         _TRUNCATE, format, args);
-        } else {
-            /* Fallback to minimal error message */
-            kh_set_parser_error(ctx, "MEMORY ERROR");
-        }
-        va_end(args);
-        return 1;
-    }
-    
-    va_list args;
-    va_start(args, format);
-    
-    /* Calculate required size for the formatted message (without prefix) */
-    int message_size = _vscprintf(format, args) + 1;
-    va_end(args);
-    
-    /* Add space for KH_ERROR_PREFIX */
-    int prefix_len = (int)strlen(KH_ERROR_PREFIX);
-    int required_size = prefix_len + message_size;
-    
-    /* Handle allocation failure gracefully */
-    if (required_size > ctx->error_msg_capacity) {
-        int new_capacity = ctx->error_msg_capacity;
-        while (new_capacity < required_size && new_capacity > 0) {
-            new_capacity *= 2;
-        }
-        
-        if (new_capacity <= 0) { /* Integer overflow check */
-            ctx->allocation_failed = 1;
-            /* Ensure we have some error message */
-            if (ctx->error_msg && ctx->error_msg_capacity > 20) {
-                kh_set_parser_error(ctx, "MEMORY ERROR");
-            }
-            return 0;
-        }
-        
-        char* new_error_msg = (char*)realloc(ctx->error_msg, (size_t)new_capacity);
-        if (!new_error_msg) {
-            /* Fall back to existing buffer with truncation */
-            ctx->allocation_failed = 1;
-            
-            /* ALWAYS ensure some error message is set */
-            if (ctx->error_msg && ctx->error_msg_capacity > 0) {
-                va_start(args, format);
-                int available_space = ctx->error_msg_capacity - prefix_len;
-                if (available_space > 10) {
-                    strcpy_s(ctx->error_msg, (size_t)ctx->error_msg_capacity, KH_ERROR_PREFIX);
-                    _vsnprintf_s(ctx->error_msg + prefix_len, (size_t)available_space, _TRUNCATE, format, args);
-                } else {
-                    /* Not enough space even for prefix, use minimal error */
-                    kh_set_parser_error(ctx, "MEMORY ERROR");
-                }
-                va_end(args);
-            }
-            return 0;
-        }
-        
-        ctx->error_msg = new_error_msg;
-        ctx->error_msg_capacity = new_capacity;
-    }
-    
-    /* Write the prefix first */
-    if (strcpy_s(ctx->error_msg, (size_t)ctx->error_msg_capacity, KH_ERROR_PREFIX) != 0) {
-        /* strcpy_s failed, set minimal error */
-        ctx->error_msg[0] = 'E';
-        ctx->error_msg[1] = '\0';
-        return 0;
-    }
-    
-    /* Append the formatted message after the prefix */
-    va_start(args, format);
-    if (_vsnprintf_s(ctx->error_msg + prefix_len, 
-                     (size_t)(ctx->error_msg_capacity - prefix_len), 
-                     _TRUNCATE, format, args) < 0) {
-        /* Formatting failed, but we still have the prefix */
-        strcat_s(ctx->error_msg, (size_t)ctx->error_msg_capacity, "FORMATTING ERROR");
-    }
-    va_end(args);
-    
-    return 1;
-}
-
 /* Free parser context resources */
 static inline void kh_free_parser_context(parser_context_t* ctx) {
     if (ctx) {
@@ -523,8 +536,12 @@ static int kh_read_number(parser_context_t* ctx, double* number) {
     int result = 0;
     if (num_pos > 0) {
         num_str[num_pos] = '\0';
-        *number = atof(num_str);
-        result = 1;
+        char* endptr;
+        *number = strtod(num_str, &endptr);
+        /* Validate conversion was successful */
+        if (endptr != num_str && *endptr == '\0') {
+            result = 1;
+        }
     }
     
     free(num_str);

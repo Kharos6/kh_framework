@@ -708,7 +708,7 @@ static int kh_write_text_file(const char* file_path, kh_variable_t* variables, i
     
     /* Write header comment */
     fprintf(file, "# Unbinarized KHDATA\n");
-    fprintf(file, "# Format: variable_name=TYPE:value\n");
+    fprintf(file, "# Format: variable_name=type:value\n");
     fprintf(file, "# Allowed Types:\n     # BOOL:true\n     # SCALAR:0\n     # ARRAY:[element1, element2, element3]\n     # HASHMAP:[[key, value]]\n     # STRING:string\n     # TEXT:text\n     # CODE:code\n\n");
     
     /* Write variables */

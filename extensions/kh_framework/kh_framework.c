@@ -277,7 +277,7 @@ __declspec(dllexport) void RVExtension(char *output, unsigned int output_size, c
     }
     
     if (!function) {
-        kh_set_error(output, output_size, "NULL FUNCTION NAME IN LEGACY CALL");
+        kh_set_error(output, output_size, "NULL FUNCTION NAME");
         return;
     }
     

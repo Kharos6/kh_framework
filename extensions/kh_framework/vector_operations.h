@@ -20,10 +20,6 @@ typedef struct {
 } vector3_t;
 
 typedef struct {
-    double x, y;
-} vector2_t;
-
-typedef struct {
     double w, x, y, z;  /* w is scalar component, x,y,z are vector components */
 } quaternion_t;
 

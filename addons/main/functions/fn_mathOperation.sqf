@@ -1,13 +1,14 @@
 params [["_formula", "", [""]]];
-private _result = if ((_file isEqualTo "") || (_variable isEqualTo "")) then {
-	false;
-}
-else {
-	("kh_framework" callExtension ["MathOperation", _this]) select 0;
+
+if (_formula isEqualTo "") exitWith {
+	nil;
 };
 
-if ("KH_ERROR: " in _result) exitWith {
-	false;
+("kh_framework" callExtension ["MathOperation", _formula]) params ["_result", "_returnCode"];
+
+if ([_returnCode] call KH_fnc_parseBoolean) exitWith {
+	diag_log (text ([_result, " | EXTENSION = kh_framework | FUNCTION = MathOperation | ARGUMENTS = ", _formula] joinString ""));
+	nil;
 };
 
 switch _result do {

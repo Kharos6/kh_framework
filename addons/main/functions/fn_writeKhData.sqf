@@ -1,7 +1,7 @@
 params [["_file", "", [""]], ["_variable", "", [""]], ["_value", nil], ["_type", nil, [""]], ["_overwrite", true, [true]]];
 
 if ((_file isEqualTo "") || (_variable isEqualTo "") || (isNil "_value")) exitWith {
-	false;
+	nil;
 };
 
 if (isNil "_type") then {
@@ -18,13 +18,15 @@ if (
 	(_type isNotEqualTo "TEXT")) ||
 	((_type isEqualTo "CODE") && ((([_value] joinString "") select [0, 1]) isEqualTo "{"))
    ) exitWith {
-	false;
+	diag_log (text (["KH_ERROR: BAD DATA TYPE", " | EXTENSION = kh_framework | FUNCTION = WriteKHData | ARGUMENTS = ", _this] joinString ""));
+	nil;
 };
 
-private _result = ("kh_framework" callExtension ["WriteKHData", _this]) select 0;
+("kh_framework" callExtension ["WriteKHData", _this]) params ["_result", "_returnCode"];
 
-if ("KH_ERROR: " in _result) then {
-	false;
+if ([_returnCode] call KH_fnc_parseBoolean) then {
+	diag_log (text ([_result, " | EXTENSION = kh_framework | FUNCTION = WriteKHData | ARGUMENTS = ", _this] joinString ""));
+	nil;
 }
 else {
 	true;

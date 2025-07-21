@@ -11,7 +11,7 @@ else {
 };
 
 private _performance = (diag_codePerformance [{_extension callExtension _feature}]) select 0;
-private _result = (_extension callExtension _feature) select 0;
+(_extension callExtension _feature) params ["_result", "_returnCode", "_errorCode"];
 
 private _parsedExpectedResult = if (_expectedResult isEqualType "") then {
 	_expectedResult;
@@ -21,10 +21,10 @@ else {
 };
 
 private _match = if (_result isEqualTo _parsedExpectedResult) then {
-	true;
+	"true";
 }
 else {
-	false;
+	"false";
 };
 
 if (!_logOnlyMismatch || (_logOnlyMismatch && !_match)) then {
@@ -33,7 +33,11 @@ if (!_logOnlyMismatch || (_logOnlyMismatch && !_match)) then {
 			"EXTENSION TEST: NAME = ",
 			_extension,
 			" | MATCH = ",
-			str _match,
+			_match,
+			" | RETURN CODE = ",
+			_returnCode,
+			" | ERROR CODE = ",
+			_errorCode,
 			" | FUNCTION = ",
 			_function,
 			" | PERFORMANCE = ",
@@ -53,10 +57,12 @@ if (!_logOnlyMismatch || (_logOnlyMismatch && !_match)) then {
 		diag_log (text (["      FUNCTION = ", _function] joinString ""));
 		diag_log (text (["      RESULT (STRING) = ", _result] joinString ""));
 		diag_log (text (["      EXPECTED RESULT (STRING) = ", _parsedExpectedResult] joinString ""));
-		diag_log (text (["      MATCH = ", str _match] joinString ""));
-		diag_log (text (["      PERFORMANCE = ", _performance] joinString ""));
+		diag_log (text (["      RETURN CODE = ", _returnCode] joinString ""));
+		diag_log (text (["      ERROR CODE = ", _errorCode] joinString ""));
+		diag_log (text (["      MATCH = ", _match] joinString ""));
+		diag_log (text (["      PERFORMANCE = ", _performance, "MS"] joinString ""));
 		diag_log (text "|EXTENSION TEST END|");
 	};
 };
 
-[_match, _performance, _result, _parsedExpectedResult];
+[_match, _performance, _result, _parsedExpectedResult, _returnCode, _errorCode];

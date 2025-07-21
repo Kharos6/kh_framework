@@ -15,10 +15,10 @@ else {
 };
 
 private _match = if (_result isEqualTo _expectedResult) then {
-	true;
+	"true";
 }
 else {
-	false;
+	"false";
 };
 
 if (!_logOnlyMismatch || (_logOnlyMismatch && !_match)) then {
@@ -27,7 +27,7 @@ if (!_logOnlyMismatch || (_logOnlyMismatch && !_match)) then {
 			"FUNCTION TEST: NAME = ",
 			_functionName,
 			" | MATCH = ",
-			str _match,
+			_match,
 			" | PERFORMANCE = ",
 			_performance,
 			"MS | ARGUMENTS = ",
@@ -46,8 +46,8 @@ if (!_logOnlyMismatch || (_logOnlyMismatch && !_match)) then {
 		diag_log (text (["      ARGUMENTS = ", _arguments] joinString ""));
 		diag_log (text (["      RESULT ", ["(", typeName _result, ") = "] joinString "", _result] joinString ""));
 		diag_log (text (["      EXPECTED RESULT ", ["(", typeName _expectedResult, ") = "] joinString "", _expectedResult] joinString ""));
-		diag_log (text (["      MATCH = ", str _match] joinString ""));
-		diag_log (text (["      PERFORMANCE = ", _performance] joinString ""));
+		diag_log (text (["      MATCH = ", _match] joinString ""));
+		diag_log (text (["      PERFORMANCE = ", _performance, "MS"] joinString ""));
 		diag_log (text "|FUNCTION TEST END|");
 	};
 };

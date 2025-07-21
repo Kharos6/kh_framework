@@ -1,14 +1,14 @@
 params [["_file", "", [""]], ["_variable", "", [""]]];
 
 if ((_file isEqualTo "") || (_variable isEqualTo "")) exitWith {
-	false;
+	nil;
 };
 
-private _result = ("kh_framework" callExtension ["SliceData", _this]) select 0;
+("kh_framework" callExtension ["SliceKHData", _this]) params ["_result", "_returnCode"];
 
-if ("KH_ERROR: " in _result) then {
-	false;
-}
-else {
-	parseNumber _result;
+if ([_returnCode] call KH_fnc_parseBoolean) exitWith {
+	diag_log (text ([_result, " | EXTENSION = kh_framework | FUNCTION = SliceKHData | ARGUMENTS = ", _this] joinString ""));
+	nil;
 };
+
+parseNumber _result;

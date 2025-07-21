@@ -7,4 +7,4 @@ else {
     uiNamespace setVariable ["KH_var_aceLoaded", false];
 };
 
-true;
+nil;

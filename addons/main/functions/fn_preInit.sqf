@@ -498,6 +498,164 @@ if isServer then {
 };
 
 if hasInterface then {
+	[
+		"KH Framework", 
+		"KH_openInteractionMenu", 
+		"Open Interaction Menu", 
+		{
+			KH_var_interactionMenuOpen = true;
+			private _display = [] call KH_fnc_openSelfInteractionMenu;
+
+			[
+				{
+					params ["_display"];
+					((isNull _display) || !(alive player) || (player getVariable ["ACE_isUnconscious", false]) || ((lifeState player) == "INCAPACITATED"));
+				},
+				{
+					params ["_display"];
+					KH_var_interactionMenuOpen = false;
+
+					if !(isNull _display) then {
+						_display closeDisplay 2;
+					};
+				}, 
+				[_display]
+			] call CBA_fnc_waitUntilAndExecute;
+		}, 
+		{}, 
+		[
+			0xDC, 
+			[
+				false, 
+				false, 
+				true
+			]
+		]
+	] call CBA_fnc_addKeybind;
+
+	[
+		"KH Framework", 
+		"KH_openRemoteInteractionMenu", 
+		"Open Remote Interaction Menu", 
+		{
+			private _object = if !(isNull cursorObject) then {
+				cursorObject;
+			}
+			else {
+				cursorTarget;
+			};
+
+			if ((_object distance player) < 4) then {
+				KH_var_interactionMenuOpen = true;
+				private _display = [_object] call KH_fnc_openRemoteInteractionMenu;
+
+				[
+					{
+						params ["_display", "_object"];
+						((isNull _display) || ((_object distance player) > 4) || !(alive player) || (player getVariable ["ACE_isUnconscious", false]) || ((lifeState player) == "INCAPACITATED"));
+					},
+					{
+						params ["_display"];
+						KH_var_interactionMenuOpen = false;
+
+						if !(isNull _display) then {
+							_display closeDisplay 2;
+						};
+					}, 
+					[_display, _object]
+				] call CBA_fnc_waitUntilAndExecute;
+			};
+		}, 
+		{}, 
+		[
+			0xDC, 
+			[
+				false, 
+				false, 
+				false
+			]
+		]
+	] call CBA_fnc_addKeybind;
+
+	[
+		"KH Framework", 
+		"KH_openVirtualInventory", 
+		"Open Virtual Inventory", 
+		{
+			KH_var_interactionMenuOpen = true;
+			private _display = [player] call KH_fnc_openSimulatedInventory;
+
+			[
+				{
+					params ["_display"];
+					((isNull _display) || !(alive player) || (player getVariable ["ACE_isUnconscious", false]) || ((lifeState player) == "INCAPACITATED"));
+				},
+				{
+					params ["_display"];
+					KH_var_interactionMenuOpen = false;
+
+					if !(isNull _display) then {
+						_display closeDisplay 2;
+					};
+				}, 
+				[_display]
+			] call CBA_fnc_waitUntilAndExecute;
+		}, 
+		{}, 
+		[
+			0xDC, 
+			[
+				false, 
+				true, 
+				true
+			]
+		]
+	] call CBA_fnc_addKeybind;
+
+	[
+		"KH Framework", 
+		"KH_openRemoteVirtualInventory", 
+		"Open Remote Virtual Inventory", 
+		{
+			private _object = if !(isNull cursorObject) then {
+				cursorObject;
+			}
+			else {
+				cursorTarget;
+			};
+
+			if ((_object distance player) < 4) then {
+				KH_var_interactionMenuOpen = true;
+				private _display = [_object] call KH_fnc_openSimulatedInventory;
+
+				[
+					{
+						params ["_display", "_object"];
+						((isNull _display) || ((_object distance player) > 4) || !(alive player) || (player getVariable ["ACE_isUnconscious", false]) || ((lifeState player) == "INCAPACITATED"));
+					},
+					{
+						params ["_display"];
+						KH_var_interactionMenuOpen = false;
+
+						if !(isNull _display) then {
+							_display closeDisplay 2;
+						};
+					}, 
+					[_display, _object]
+				] call CBA_fnc_waitUntilAndExecute;
+			};
+		}, 
+		{}, 
+		[
+			0xDC, 
+			[
+				false, 
+				true, 
+				false
+			]
+		]
+	] call CBA_fnc_addKeybind;
+
 	KH_var_isJip = false;
 	KH_var_contextMenuOpen = false;
 	KH_var_interactionMenuOpen = false;
@@ -522,134 +680,9 @@ if hasInterface then {
 					{				
 						(!(isNull player) && (alive player));
 					}, 
-					{						
-						[
-							{
-								["KH_eve_playerLoaded", [player, clientOwner]] call CBA_fnc_globalEvent;					
-								missionNamespace setVariable ["KH_var_playerWaiting", false];
-
-								(findDisplay 46) displayAddEventHandler [
-									"KeyDown", 
-									{
-										private _key = _this select 1;
-										private _shift = _this select 2;
-										private _ctrl = _this select 3;
-										private _alt = _this select 4;
-
-										switch true do {
-											case ((_key isEqualTo 0xDC) && !dialog && _alt && !_ctrl && !KH_var_interactionMenuOpen && (alive player)): {
-												KH_var_interactionMenuOpen = true;
-												private _display = [] call KH_fnc_openSelfInteractionMenu;
-
-												[
-													{
-														params ["_display"];
-														((isNull _display) || !(alive player) || (player getVariable ["ACE_isUnconscious", false]) || ((lifeState player) == "INCAPACITATED"));
-													},
-													{
-														params ["_display"];
-														KH_var_interactionMenuOpen = false;
-
-														if !(isNull _display) then {
-															_display closeDisplay 2;
-														};
-													}, 
-													[_display]
-												] call CBA_fnc_waitUntilAndExecute;
-											};
-
-											case ((_key isEqualTo 0xDC) && !dialog && !_alt && !_ctrl && !KH_var_interactionMenuOpen && (alive player)): {
-												private _object = objNull;
-
-												if !(isNull cursorObject) then {
-													_object = cursorObject;
-												}
-												else {
-													_object = cursorTarget;
-												};
-
-												if ((_object distance player) < 4) then {
-													KH_var_interactionMenuOpen = true;
-													private _display = [_object] call KH_fnc_openRemoteInteractionMenu;
-
-													[
-														{
-															params ["_display", "_object"];
-															((isNull _display) || ((_object distance player) > 4) || !(alive player) || (player getVariable ["ACE_isUnconscious", false]) || ((lifeState player) == "INCAPACITATED"));
-														},
-														{
-															params ["_display"];
-															KH_var_interactionMenuOpen = false;
-
-															if !(isNull _display) then {
-																_display closeDisplay 2;
-															};
-														}, 
-														[_display, _object]
-													] call CBA_fnc_waitUntilAndExecute;
-												};
-											};
-
-											case ((_key isEqualTo 0xDC) && !dialog && _ctrl && _alt && !KH_var_interactionMenuOpen && (alive player)): {
-												KH_var_interactionMenuOpen = true;
-												private _display = [player] call KH_fnc_openSimulatedInventory;
-
-												[
-													{
-														params ["_display"];
-														((isNull _display) || !(alive player) || (player getVariable ["ACE_isUnconscious", false]) || ((lifeState player) == "INCAPACITATED"));
-													},
-													{
-														params ["_display"];
-														KH_var_interactionMenuOpen = false;
-
-														if !(isNull _display) then {
-															_display closeDisplay 2;
-														};
-													}, 
-													[_display]
-												] call CBA_fnc_waitUntilAndExecute;
-											};
-
-											case ((_key isEqualTo 0xDC) && !dialog && _ctrl && !_alt && !KH_var_interactionMenuOpen && (alive player)): {
-												private _object = objNull;
-
-												if !(isNull cursorObject) then {
-													_object = cursorObject;
-												}
-												else {
-													_object = cursorTarget;
-												};
-
-												if ((_object distance player) < 4) then {
-													KH_var_interactionMenuOpen = true;
-													private _display = [_object] call KH_fnc_openSimulatedInventory;
-
-													[
-														{
-															params ["_display", "_object"];
-															((isNull _display) || ((_object distance player) > 4) || !(alive player) || (player getVariable ["ACE_isUnconscious", false]) || ((lifeState player) == "INCAPACITATED"));
-														},
-														{
-															params ["_display"];
-															KH_var_interactionMenuOpen = false;
-
-															if !(isNull _display) then {
-																_display closeDisplay 2;
-															};
-														}, 
-														[_display, _object]
-													] call CBA_fnc_waitUntilAndExecute;
-												};
-											};
-										};
-
-										nil;
-									}
-								];
-							}, 
-							[]
-						] call CBA_fnc_execNextFrame;
+					{
+						["KH_eve_playerLoaded", [player, clientOwner]] call CBA_fnc_globalEvent;					
+						missionNamespace setVariable ["KH_var_playerWaiting", false];
 					},
 					[]
 				] call CBA_fnc_waitUntilAndExecute;
@@ -678,4 +711,4 @@ if (!isServer && !hasInterface) then {
 	["KH_eve_executionHeadless", KH_fnc_callParsedFunction] call CBA_fnc_addEventHandler;
 };
 
-true;
+nil;

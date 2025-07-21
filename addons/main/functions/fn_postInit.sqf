@@ -149,50 +149,45 @@ isNil {
 			{
 				(CBA_missionTime > 0);
 			},
-			{				
+			{							
+				[] call KH_fnc_serverMissionStartInit;
+				[[], KH_fnc_headlessMissionStartInit, "HEADLESS", "THIS_FRAME"] call KH_fnc_execute;
+				["KH_eve_missionStarted", []] call CBA_fnc_globalEvent;
+				KH_var_missionStarted = true;
+				publicVariable "KH_var_missionStarted";
+				[["KH FRAMEWORK - MISSION STARTED"], "systemChat", "GLOBAL", "THIS_FRAME"] call KH_fnc_execute;
+				
 				[
-					{				
-						[] call KH_fnc_serverMissionStartInit;
-						[[], KH_fnc_headlessMissionStartInit, "HEADLESS", "THIS_FRAME"] call KH_fnc_execute;
-						["KH_eve_missionStarted", []] call CBA_fnc_globalEvent;
-						KH_var_missionStarted = true;
-						publicVariable "KH_var_missionStarted";
-						[["KH FRAMEWORK - MISSION STARTED"], "systemChat", "GLOBAL", "THIS_FRAME"] call KH_fnc_execute;
-						
-						[
-							{
-								private _initialPlayerCount = 0;
+					{
+						private _initialPlayerCount = 0;
 
+						{
+							if (!(_x getUserInfo 7) && ((_x getUserInfo 6) > 8)) then {
+								_initialPlayerCount = _initialPlayerCount + 1;
+							};
+						} forEach allUsers;
+						
+						if ((((count KH_var_allPlayerUnits) == _initialPlayerCount)) || (CBA_missionTime > 60) || !isMultiplayer) then {
+							[
 								{
-									if (!(_x getUserInfo 7) && ((_x getUserInfo 6) > 8)) then {
-										_initialPlayerCount = _initialPlayerCount + 1;
-									};
-								} forEach allUsers;
-								
-								if ((((count KH_var_allPlayerUnits) == _initialPlayerCount)) || (CBA_missionTime > 60) || !isMultiplayer) then {
-									[
-										{
-											KH_var_initialPlayerUnits = KH_var_allPlayerUnits;
-											publicVariable "KH_var_initialPlayerUnits";
-											KH_var_playersLoaded = true;
-											publicVariable "KH_var_playersLoaded";
-											["KH_eve_playersLoaded", KH_var_initialPlayerUnits] call CBA_fnc_globalEvent;												
-											[] call KH_fnc_serverPlayersLoadedInit;
-											[[], KH_fnc_playerPlayersLoadedInit, "PLAYERS", "THIS_FRAME"] call KH_fnc_execute;
-											[["KH FRAMEWORK - PLAYERS LOADED"], "systemChat", "GLOBAL", "THIS_FRAME"] call KH_fnc_execute;
-										},
-										[]
-									] call CBA_fnc_execNextFrame;
-									
-									[_handle] call CBA_fnc_removePerFrameHandler;
-								};
-							}, 
-							0, 
-							[]
-						] call CBA_fnc_addPerFrameHandler;
+									KH_var_initialPlayerUnits = KH_var_allPlayerUnits;
+									publicVariable "KH_var_initialPlayerUnits";
+									KH_var_playersLoaded = true;
+									publicVariable "KH_var_playersLoaded";
+									["KH_eve_playersLoaded", KH_var_initialPlayerUnits] call CBA_fnc_globalEvent;												
+									[] call KH_fnc_serverPlayersLoadedInit;
+									[[], KH_fnc_playerPlayersLoadedInit, "PLAYERS", "THIS_FRAME"] call KH_fnc_execute;
+									[["KH FRAMEWORK - PLAYERS LOADED"], "systemChat", "GLOBAL", "THIS_FRAME"] call KH_fnc_execute;
+								},
+								[]
+							] call CBA_fnc_execNextFrame;
+							
+							[_handle] call CBA_fnc_removePerFrameHandler;
+						};
 					}, 
+					0, 
 					[]
-				] call CBA_fnc_execNextFrame;
+				] call CBA_fnc_addPerFrameHandler;
 			},
 			[]
 		] call CBA_fnc_waitUntilAndExecute;
@@ -212,4 +207,4 @@ isNil {
 	} forEach KH_var_postInitExecutions;
 };
 
-true;
+nil;

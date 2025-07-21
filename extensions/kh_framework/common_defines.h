@@ -14,7 +14,7 @@
 #include <windows.h>
 
 /* Constants */
-#define KH_MAX_OUTPUT_SIZE (8192 * 1024)
+#define KH_MAX_OUTPUT_SIZE 8192
 #define MAX_FILE_PATH_LENGTH 512
 #define MAX_TOTAL_KHDATA_SIZE_BYTES (1024LL * 1024LL * 1024LL)  /* 1GB total limit */
 #define MAX_KHDATA_FILES 1024                                      /* Maximum .khdata files allowed */
@@ -49,6 +49,8 @@
 #define KH_ERROR_PREFIX "KH_ERROR: "
 #define MATH_PI 3.141592653589793
 #define VECTOR_EPSILON 1e-9
+#define KH_MAX_FRAGMENTATION_RATIO 0.3  /* Compact when 30% fragmented */
+#define KH_MIN_COMPACTION_INTERVAL 60  /* Minimum 1 minute between compactions */
 
 /* Forward declarations */
 typedef struct kh_variable_s kh_variable_t;

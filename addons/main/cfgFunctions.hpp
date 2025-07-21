@@ -10,12 +10,14 @@ class CfgFunctions
 			class addRemoteInteractionEntry {};
 			class addSelfInteractionEntry {};
 			class arma {};
+			class arrayOperation {};
 			class arraySum {};
 			class assignIdentificationCard {};
 			class assignParachute {};
 			class assignTerminal {};
 			class atomicValue {};
 			class atomicVariable {};
+			class binarizeKhData {};
 			class callback {};
 			class callParsedFunction {};
 			class cameraSequence {};		
@@ -24,7 +26,10 @@ class CfgFunctions
 			class contextMenu {};
 			class convertToAgent {};
 			class convertToSimpleObject {};
+			class cryptoOperation {};
 			class dataCollection {};
+			class deleteKhDataFile {};
+			class deleteKhDataVariable {};
 			class diagnostics {};
 			class displaySubtitle {};
 			class dynamic2dAudio {};
@@ -63,7 +68,6 @@ class CfgFunctions
 			class loadMissionState {};
 			class loadPlayerLoadouts {};
 			class manageHandler {};
-			class manageKhData {};
 			class manageSimulatedInventory {};
 			class mathOperation {};
 			class moduleAddInteractionEntry {};
@@ -89,6 +93,7 @@ class CfgFunctions
 			class openSimulatedInventory {};
 			class openTerminal {};
 			class orbitObject {};
+			class parseBoolean {};
 			class parseFunction {};
 			class postProcess {};
 			class readKhData {};
@@ -122,6 +127,7 @@ class CfgFunctions
 			class testExtension {};
 			class testFunction {};
 			class toggleUserInput {};
+			class unbinarizeKhData {};
 			class vehicleSequence {};
 			class unconsciousSpectator {};
 			class vectorOperation {};

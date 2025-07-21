@@ -120,6 +120,8 @@ static int kh_process_random_string_generation(char *output, int output_size, co
         kh_set_error(output, output_size, "INVALID INTEGER");
         return 1;
     }
+
+    length = (int)temp_length;
     
     if (length <= 0) {
         kh_set_error(output, output_size, "INVALID LENGTH - MUST BE POSITIVE INTEGER");

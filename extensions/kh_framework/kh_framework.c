@@ -46,7 +46,10 @@ static const function_info_t FUNCTION_TABLE[] = {
     {"DeleteKHDataFile", 1, 1, 'D'},
     {"DeleteKHDataVariable", 2, 2, 'D'},
     {"LuaOperation", 2, 2, 'L'},
-    {"LuaCompile", 1, 1, 'L'}
+    {"LuaCompile", 1, 1, 'L'},
+    {"LuaSetVariable", 3, 3, 'L'},
+    {"LuaGetVariable", 1, 1, 'L'},
+    {"LuaDeleteVariable", 1, 1, 'L'}
 };
 
 static const int FUNCTION_COUNT = sizeof(FUNCTION_TABLE) / sizeof(function_info_t);
@@ -200,11 +203,17 @@ __declspec(dllexport) int RVExtensionArgs(char *output, unsigned int output_size
             }
             break;
 
-        case 'L': /* LuaOperation */
+        case 'L': /* Lua operations */
             if (strcmp(function, "LuaOperation") == 0) {
                 function_result = kh_process_lua_operation(output, output_size, argv, argc);
             } else if (strcmp(function, "LuaCompile") == 0) {
                 function_result = kh_process_lua_compile_operation(output, output_size, argv, argc);
+            } else if (strcmp(function, "LuaSetVariable") == 0) {
+                function_result = kh_process_lua_set_variable_operation(output, output_size, argv, argc);
+            } else if (strcmp(function, "LuaGetVariable") == 0) {
+                function_result = kh_process_lua_get_variable_operation(output, output_size, argv, argc);
+            } else if (strcmp(function, "LuaDeleteVariable") == 0) {
+                function_result = kh_process_lua_delete_variable_operation(output, output_size, argv, argc);
             }
             break;
 

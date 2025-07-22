@@ -14,7 +14,6 @@
 #include <wincrypt.h>
 #include <windows.h>
 
-
 /* Array element data structure */
 typedef struct {
     int type;           /* KH_TYPE_* from common_defines.h */

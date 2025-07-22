@@ -47,7 +47,7 @@ static const function_info_t FUNCTION_TABLE[] = {
     {"DeleteKHDataVariable", 2, 2, 'D'},
     {"LuaOperation", 2, 2, 'L'},
     {"LuaCompile", 1, 1, 'L'},
-    {"LuaSetVariable", 3, 3, 'L'},
+    {"LuaSetVariable", 3, 4, 'L'},
     {"LuaGetVariable", 1, 1, 'L'},
     {"LuaDeleteVariable", 1, 1, 'L'}
 };

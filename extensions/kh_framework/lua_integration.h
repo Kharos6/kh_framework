@@ -45,6 +45,77 @@ static inline uint64_t lua_hash_fnv1a(const void* data, size_t len) {
     return hash;
 }
 
+/* Hash function for variable names - case insensitive (same as process_kh_data.h) */
+static inline uint32_t lua_hash_variable_name(const char* name) {
+    if (!name) return LUA_VAR_HASH_EMPTY;
+    
+    /* FNV-1a constants for 32-bit */
+    uint32_t hash = 2166136261U;  /* FNV offset basis */
+    const uint32_t fnv_prime = 16777619U;  /* FNV prime */
+    
+    const char* ptr = name;
+    
+    while (*ptr) {
+        /* Convert to lowercase for case-insensitive hashing */
+        char c = *ptr;
+        if (c >= 'A' && c <= 'Z') {
+            c += 32;
+        }
+        
+        /* FNV-1a: hash = (hash XOR byte) * prime */
+        hash ^= (uint32_t)c;
+        hash *= fnv_prime;
+        
+        ptr++;
+    }
+    
+    /* Ensure hash is never 0 (reserved for empty entries) */
+    return (hash == LUA_VAR_HASH_EMPTY) ? 1 : hash;
+}
+
+/* Calculate optimal hash table size */
+static inline uint32_t lua_calculate_hash_table_size(uint32_t variable_count) {
+    /* Check for potential overflow in load factor calculation */
+    if (variable_count > UINT32_MAX / 2) {
+        return LUA_VAR_HASH_TABLE_MIN_SIZE; /* Fallback to minimum size */
+    }
+    
+    /* Use next power of 2 that gives load factor <= 0.75 */
+    uint32_t min_size = (uint32_t)((double)variable_count / LUA_VAR_HASH_TABLE_LOAD_FACTOR);
+    uint32_t size = LUA_VAR_HASH_TABLE_MIN_SIZE;
+    
+    /* Ensure we don't overflow when doubling */
+    while (size < min_size && size <= UINT32_MAX / 2) {
+        size <<= 1;
+    }
+    
+    /* Final bounds check */
+    if (size < LUA_VAR_HASH_TABLE_MIN_SIZE) {
+        size = LUA_VAR_HASH_TABLE_MIN_SIZE;
+    }
+    
+    return size;
+}
+
+/* Hash table entry for Lua variables */
+typedef struct {
+    uint32_t name_hash;      /* Hash of variable name */
+    uint32_t var_index;      /* Index into variables array */
+    uint32_t reserved;       /* Reserved for future use */
+    uint8_t deleted;         /* Tombstone for Robin Hood hashing */
+    uint8_t distance;        /* Distance from ideal position (Robin Hood) */
+    uint16_t padding;        /* Alignment padding */
+} lua_var_hash_entry_t;
+
+/* Hash table info structure */
+typedef struct {
+    lua_var_hash_entry_t* entries;
+    uint32_t size;
+    uint32_t used_count;     /* Number of used entries */
+    uint32_t deleted_count;  /* Number of deleted entries */
+    int needs_rebuild;       /* Flag to indicate if rebuild is needed */
+} lua_var_hash_table_t;
+
 /* Simplified bytecode cache entry - removed deletion tracking and size limits */
 typedef struct bytecode_cache_entry_s {
     uint64_t code_hash;                  
@@ -105,8 +176,16 @@ typedef struct lua_variable_s {
     char* original_value;  /* Original Arma format value */
     char* type;           /* Variable type string */
     int lua_type;         /* Converted Lua type for fast reference */
-    struct lua_variable_s* next;
 } lua_variable_t;
+
+/* Hash table-based variable storage */
+typedef struct {
+    lua_variable_t* variables;    /* Array of variables */
+    uint32_t variable_count;      /* Current number of variables */
+    uint32_t variable_capacity;   /* Allocated capacity */
+    lua_var_hash_table_t hash_table; /* Hash table for fast lookup */
+    int initialized;              /* Whether storage is initialized */
+} lua_variable_storage_t;
 
 /* Global optimization caches - single-threaded, so no locking needed */
 static lua_persistent_state_t g_lua_states[LUA_STATE_POOL_SIZE] = {0};
@@ -117,8 +196,208 @@ static string_cache_entry_t* g_string_cache[LUA_STRING_CACHE_SIZE] = {0};
 
 static lua_memory_pool_t g_memory_pool = {0};
 
-/* Global persistent Lua variables storage */
-static lua_variable_t* g_lua_variables = NULL;
+/* Global persistent Lua variables storage with hash table */
+static lua_variable_storage_t g_lua_variable_storage = {0};
+
+/* Robin Hood hashing with quadratic probing fallback (same as process_kh_data.h) */
+static inline uint32_t lua_hash_table_find_robin_hood(lua_var_hash_entry_t* hash_table, uint32_t hash_table_size, 
+                                                      uint32_t name_hash, int* found) {
+    if (!hash_table || hash_table_size == 0 || name_hash == LUA_VAR_HASH_EMPTY) {
+        if (found) *found = 0;
+        return 0;
+    }
+    
+    uint32_t index = name_hash % hash_table_size;
+    uint32_t distance = 0;
+    uint32_t original_index = index;
+    
+    do {
+        lua_var_hash_entry_t* entry = &hash_table[index];
+        
+        if (entry->name_hash == LUA_VAR_HASH_EMPTY && !entry->deleted) {
+            if (found) *found = 0;
+            return index;
+        }
+        
+        if (!entry->deleted && entry->name_hash == name_hash) {
+            if (found) *found = 1;
+            return index;
+        }
+        
+        if (!entry->deleted && entry->distance < distance) {
+            if (found) *found = 0;
+            return index;
+        }
+        
+        distance++;
+        
+        /* Prevent integer overflow in quadratic probing */
+        if (distance > 65535) break; /* Reasonable upper limit */
+        
+        uint64_t next_offset = (uint64_t)distance * distance;
+        if (next_offset > hash_table_size) {
+            /* Linear probing fallback when quadratic would overflow */
+            index = (original_index + distance) % hash_table_size;
+        } else {
+            index = (original_index + (uint32_t)next_offset) % hash_table_size;
+        }
+        
+        if (distance >= hash_table_size) break; /* Prevent infinite loops */
+        
+    } while (1);
+    
+    if (found) *found = 0;
+    return 0;
+}
+
+/* Robin Hood hash table insertion (same as process_kh_data.h) */
+static inline int lua_hash_table_insert_robin_hood(lua_var_hash_entry_t* hash_table, uint32_t hash_table_size,
+                                                   uint32_t name_hash, uint32_t var_index) {
+    if (!hash_table || hash_table_size == 0 || name_hash == LUA_VAR_HASH_EMPTY) return 0;
+    
+    uint32_t index = name_hash % hash_table_size;
+    uint32_t distance = 0;
+    uint32_t original_index = index;
+    
+    /* Current entry to insert */
+    lua_var_hash_entry_t new_entry = {name_hash, var_index, 0, 0, 0, 0};
+    
+    while (distance < hash_table_size) {
+        lua_var_hash_entry_t* entry = &hash_table[index];
+        
+        /* Empty slot or deleted slot */
+        if (entry->name_hash == LUA_VAR_HASH_EMPTY || entry->deleted) {
+            *entry = new_entry;
+            entry->distance = (uint8_t)distance;
+            return 1;
+        }
+        
+        /* Update existing entry */
+        if (entry->name_hash == name_hash) {
+            entry->var_index = var_index;
+            return 1;
+        }
+        
+        /* Robin Hood: if new entry is further from home, swap */
+        if (distance > entry->distance) {
+            lua_var_hash_entry_t temp = *entry;
+            *entry = new_entry;
+            entry->distance = (uint8_t)distance;
+            
+            /* Continue inserting the displaced entry */
+            new_entry = temp;
+            distance = temp.distance;
+        }
+        
+        /* Move to next position with quadratic probing */
+        distance++;
+        index = (original_index + distance * distance) % hash_table_size;
+    }
+    
+    return 0; /* Table full */
+}
+
+/* Enhanced hash table deletion with tombstoning */
+static inline int lua_hash_table_delete(lua_var_hash_entry_t* hash_table, uint32_t hash_table_size, uint32_t name_hash) {
+    if (!hash_table || hash_table_size == 0 || name_hash == LUA_VAR_HASH_EMPTY) return 0;
+    
+    int found = 0;
+    uint32_t index = lua_hash_table_find_robin_hood(hash_table, hash_table_size, name_hash, &found);
+    
+    if (found) {
+        hash_table[index].deleted = 1;
+        hash_table[index].name_hash = LUA_VAR_HASH_EMPTY;
+        hash_table[index].var_index = 0;
+        return 1;
+    }
+    
+    return 0;
+}
+
+/* Initialize variable storage with hash table */
+static int lua_init_variable_storage(void) {
+    if (g_lua_variable_storage.initialized) return 1;
+    
+    g_lua_variable_storage.variable_capacity = 16;
+    g_lua_variable_storage.variables = (lua_variable_t*)calloc(g_lua_variable_storage.variable_capacity, 
+                                                               sizeof(lua_variable_t));
+    if (!g_lua_variable_storage.variables) return 0;
+    
+    g_lua_variable_storage.hash_table.size = LUA_VAR_HASH_TABLE_MIN_SIZE;
+    g_lua_variable_storage.hash_table.entries = (lua_var_hash_entry_t*)calloc(g_lua_variable_storage.hash_table.size, 
+                                                                              sizeof(lua_var_hash_entry_t));
+    if (!g_lua_variable_storage.hash_table.entries) {
+        free(g_lua_variable_storage.variables);
+        return 0;
+    }
+    
+    g_lua_variable_storage.variable_count = 0;
+    g_lua_variable_storage.hash_table.used_count = 0;
+    g_lua_variable_storage.hash_table.deleted_count = 0;
+    g_lua_variable_storage.hash_table.needs_rebuild = 0;
+    g_lua_variable_storage.initialized = 1;
+    
+    return 1;
+}
+
+/* Rebuild hash table when needed */
+static int lua_rebuild_variable_hash_table(void) {
+    if (!g_lua_variable_storage.initialized) return 0;
+    
+    /* Calculate new size */
+    uint32_t new_size = lua_calculate_hash_table_size(g_lua_variable_storage.variable_count);
+    
+    /* Allocate new hash table */
+    lua_var_hash_entry_t* new_entries = (lua_var_hash_entry_t*)calloc(new_size, sizeof(lua_var_hash_entry_t));
+    if (!new_entries) return 0;
+    
+    /* Free old hash table */
+    free(g_lua_variable_storage.hash_table.entries);
+    
+    /* Set new hash table */
+    g_lua_variable_storage.hash_table.entries = new_entries;
+    g_lua_variable_storage.hash_table.size = new_size;
+    g_lua_variable_storage.hash_table.used_count = 0;
+    g_lua_variable_storage.hash_table.deleted_count = 0;
+    g_lua_variable_storage.hash_table.needs_rebuild = 0;
+    
+    /* Rebuild hash table */
+    for (uint32_t i = 0; i < g_lua_variable_storage.variable_count; i++) {
+        if (g_lua_variable_storage.variables[i].name) {
+            uint32_t name_hash = lua_hash_variable_name(g_lua_variable_storage.variables[i].name);
+            if (!lua_hash_table_insert_robin_hood(g_lua_variable_storage.hash_table.entries, 
+                                                 g_lua_variable_storage.hash_table.size, name_hash, i)) {
+                return 0;
+            }
+            g_lua_variable_storage.hash_table.used_count++;
+        }
+    }
+    
+    return 1;
+}
+
+/* Check if hash table needs rebuilding */
+static int lua_hash_table_needs_rebuild(void) {
+    if (!g_lua_variable_storage.initialized) return 1;
+    
+    lua_var_hash_table_t* hash_table = &g_lua_variable_storage.hash_table;
+    
+    /* Rebuild if load factor too high */
+    double load_factor = (double)(hash_table->used_count + hash_table->deleted_count) / hash_table->size;
+    if (load_factor > 0.8) return 1;
+    
+    /* Rebuild if too many deletions */
+    if (hash_table->deleted_count > hash_table->used_count / 2) return 1;
+    
+    /* Rebuild if size mismatch */
+    uint32_t optimal_size = lua_calculate_hash_table_size(g_lua_variable_storage.variable_count);
+    if (hash_table->size < optimal_size / 2 || hash_table->size > optimal_size * 2) return 1;
+    
+    /* Rebuild if explicitly flagged */
+    if (hash_table->needs_rebuild) return 1;
+    
+    return 0;
+}
 
 /* Enhanced memory pool initialization with better error handling */
 static int lua_init_memory_pool(void) {
@@ -141,23 +420,158 @@ static int lua_init_memory_pool(void) {
 
 /* Persistent Lua variable management functions */
 
-/* Find a stored Lua variable by name */
+/* Find a stored Lua variable by name using hash table */
 static lua_variable_t* lua_find_variable(const char* name) {
-    if (!name) return NULL;
+    if (!name || !g_lua_variable_storage.initialized) return NULL;
     
-    lua_variable_t* var = g_lua_variables;
-    while (var) {
-        if (var->name && strcmp(var->name, name) == 0) {
-            return var;
+    uint32_t name_hash = lua_hash_variable_name(name);
+    int found = 0;
+    uint32_t index = lua_hash_table_find_robin_hood(g_lua_variable_storage.hash_table.entries,
+                                                   g_lua_variable_storage.hash_table.size, 
+                                                   name_hash, &found);
+    
+    if (found && !g_lua_variable_storage.hash_table.entries[index].deleted) {
+        uint32_t var_index = g_lua_variable_storage.hash_table.entries[index].var_index;
+        if (var_index < g_lua_variable_storage.variable_count) {
+            lua_variable_t* var = &g_lua_variable_storage.variables[var_index];
+            if (var->name && strcmp(var->name, name) == 0) {
+                return var;
+            }
         }
-        var = var->next;
     }
+    
     return NULL;
 }
 
-/* Set a persistent Lua variable */
-static int lua_set_variable(const char* name, const char* value, const char* type) {
+/* Enhanced value combination for Lua variables (same logic as kh_combine_values) */
+static int lua_combine_variable_values(int var_type, const char* existing_value, const char* new_value, 
+                                      int overwrite_flag, char** result_value) {
+    if (!existing_value || !new_value || !result_value) return 0;
+    
+    size_t existing_len = strlen(existing_value);
+    size_t new_len = strlen(new_value);
+    size_t result_size = existing_len + new_len + 1024; /* Extra space for formatting */
+    
+    char* clean_existing = (char*)malloc(existing_len + 1);
+    char* clean_new = (char*)malloc(new_len + 1);
+    char* temp_result = (char*)malloc(result_size);
+    
+    if (!clean_existing || !clean_new || !temp_result) {
+        free(clean_existing);
+        free(clean_new);
+        free(temp_result);
+        return 0;
+    }
+    
+    kh_clean_string(existing_value, clean_existing, (int)existing_len + 1);
+    kh_clean_string(new_value, clean_new, (int)new_len + 1);
+    
+    int success = 0;
+    
+    switch (var_type) {
+        case 4: /* BOOL */
+            if (overwrite_flag) {
+                strcpy_s(temp_result, result_size, clean_new);
+            } else {
+                /* Toggle boolean */
+                int current_value = kh_parse_boolean(clean_existing);
+                strcpy_s(temp_result, result_size, current_value ? "false" : "true");
+            }
+            success = 1;
+            break;
+            
+        case 3: /* HASHMAP */
+            if (overwrite_flag) {
+                strcpy_s(temp_result, result_size, clean_new);
+                success = 1;
+            } else {
+                /* For simplicity, use string concatenation for hashmaps in Lua context */
+                /* Full hashmap merging would require implementing the merge logic here */
+                if (strlen(clean_existing) + strlen(clean_new) + 10 < result_size) {
+                    _snprintf_s(temp_result, result_size, _TRUNCATE, "%s%s", clean_existing, clean_new);
+                    success = 1;
+                }
+            }
+            break;
+            
+        case 2: /* SCALAR */
+            if (overwrite_flag) {
+                strcpy_s(temp_result, result_size, clean_new);
+            } else {
+                /* Add numbers together */
+                char* endptr1, *endptr2;
+                double existing_num = strtod(clean_existing, &endptr1);
+                double new_num = strtod(clean_new, &endptr2);
+                
+                if (endptr1 != clean_existing && *endptr1 == '\0' &&
+                    endptr2 != clean_new && *endptr2 == '\0') {
+                    _snprintf_s(temp_result, result_size, _TRUNCATE, "%.6g", existing_num + new_num);
+                } else {
+                    /* String concatenation fallback */
+                    if (strlen(clean_existing) + strlen(clean_new) < result_size) {
+                        _snprintf_s(temp_result, result_size, _TRUNCATE, "%s%s", clean_existing, clean_new);
+                    }
+                }
+            }
+            success = 1;
+            break;
+            
+        case 0: /* ARRAY */
+            if (overwrite_flag) {
+                strcpy_s(temp_result, result_size, clean_new);
+            } else {
+                /* Concatenate arrays */
+                size_t existing_clean_len = strlen(clean_existing);
+                size_t new_clean_len = strlen(clean_new);
+                
+                if (existing_clean_len >= 2 && new_clean_len >= 2) {
+                    if (existing_clean_len == 2 || (existing_clean_len == 3 && clean_existing[1] == ' ')) {
+                        strcpy_s(temp_result, result_size, clean_new);
+                    } else if (existing_clean_len + new_clean_len < result_size) {
+                        _snprintf_s(temp_result, result_size, _TRUNCATE, "%.*s,%s", 
+                                   (int)(existing_clean_len - 1), clean_existing, clean_new + 1);
+                    }
+                }
+            }
+            success = 1;
+            break;
+            
+        default: /* STRING, TEXT, CODE */
+            if (overwrite_flag) {
+                strcpy_s(temp_result, result_size, clean_new);
+            } else {
+                /* String concatenation */
+                if (strlen(clean_existing) + strlen(clean_new) < result_size) {
+                    _snprintf_s(temp_result, result_size, _TRUNCATE, "%s%s", clean_existing, clean_new);
+                }
+            }
+            success = 1;
+            break;
+    }
+    
+    if (success) {
+        size_t final_len = strlen(temp_result);
+        *result_value = (char*)malloc(final_len + 1);
+        if (*result_value) {
+            strcpy_s(*result_value, final_len + 1, temp_result);
+        } else {
+            success = 0;
+        }
+    }
+    
+    free(clean_existing);
+    free(clean_new);
+    free(temp_result);
+    
+    return success;
+}
+
+/* FIXED: Set a persistent Lua variable with proper memory leak prevention, hash table and overwrite support */
+static int lua_set_variable(const char* name, const char* value, const char* type, int overwrite_flag) {
     if (!name || !value || !type) return 0;
+    
+    /* Initialize storage if needed */
+    if (!lua_init_variable_storage()) return 0;
     
     /* Validate variable name */
     if (!kh_validate_variable_name(name)) return 0;
@@ -171,83 +585,193 @@ static int lua_set_variable(const char* name, const char* value, const char* typ
     else if (strcmp(type, "BOOL") == 0) var_type = 4;
     else return 0; /* Invalid type */
     
-    /* Remove existing variable with same name */
-    lua_delete_variable(name);
+    /* Find existing variable */
+    lua_variable_t* existing_var = lua_find_variable(name);
+    if (existing_var) {
+        /* Handle overwrite vs combine */
+        char* final_value = NULL;
+        
+        if (overwrite_flag) {
+            /* Simple overwrite */
+            size_t value_len = strlen(value);
+            final_value = (char*)malloc(value_len + 1);
+            if (final_value) {
+                strcpy_s(final_value, value_len + 1, value);
+            }
+        } else {
+            /* Type must match for combining */
+            if (existing_var->lua_type != var_type) {
+                return 0; /* Type mismatch */
+            }
+            
+            /* Combine values */
+            if (!lua_combine_variable_values(var_type, existing_var->original_value, value, 
+                                           overwrite_flag, &final_value)) {
+                return 0;
+            }
+        }
+        
+        if (!final_value) return 0;
+        
+        /* Update type if overwriting */
+        char* new_type = NULL;
+        if (overwrite_flag) {
+            size_t type_len = strlen(type);
+            new_type = (char*)malloc(type_len + 1);
+            if (!new_type) {
+                free(final_value);
+                return 0;
+            }
+            strcpy_s(new_type, type_len + 1, type);
+        }
+        
+        /* Replace old values */
+        free(existing_var->original_value);
+        existing_var->original_value = final_value;
+        
+        if (overwrite_flag) {
+            free(existing_var->type);
+            existing_var->type = new_type;
+            existing_var->lua_type = var_type;
+        }
+        
+        return 1;
+    }
     
-    /* Create new variable */
-    lua_variable_t* new_var = (lua_variable_t*)malloc(sizeof(lua_variable_t));
-    if (!new_var) return 0;
+    /* Add new variable */
     
-    memset(new_var, 0, sizeof(lua_variable_t));
+    /* Expand variables array if needed */
+    if (g_lua_variable_storage.variable_count >= g_lua_variable_storage.variable_capacity) {
+        uint32_t new_capacity = g_lua_variable_storage.variable_capacity * 2;
+        lua_variable_t* new_variables = (lua_variable_t*)realloc(g_lua_variable_storage.variables,
+                                                                new_capacity * sizeof(lua_variable_t));
+        if (!new_variables) return 0;
+        
+        /* Initialize new memory */
+        memset(&new_variables[g_lua_variable_storage.variable_capacity], 0,
+               (new_capacity - g_lua_variable_storage.variable_capacity) * sizeof(lua_variable_t));
+        
+        g_lua_variable_storage.variables = new_variables;
+        g_lua_variable_storage.variable_capacity = new_capacity;
+    }
     
-    /* Allocate and copy name */
+    /* FIXED: Allocate all memory first, then assign to avoid partial leaks */
     size_t name_len = strlen(name);
-    new_var->name = (char*)malloc(name_len + 1);
-    if (!new_var->name) {
-        free(new_var);
-        return 0;
-    }
-    strcpy_s(new_var->name, name_len + 1, name);
-    
-    /* Allocate and copy value */
     size_t value_len = strlen(value);
-    new_var->original_value = (char*)malloc(value_len + 1);
-    if (!new_var->original_value) {
-        free(new_var->name);
-        free(new_var);
-        return 0;
-    }
-    strcpy_s(new_var->original_value, value_len + 1, value);
-    
-    /* Allocate and copy type */
     size_t type_len = strlen(type);
-    new_var->type = (char*)malloc(type_len + 1);
-    if (!new_var->type) {
-        free(new_var->name);
-        free(new_var->original_value);
-        free(new_var);
+    
+    char* name_copy = (char*)malloc(name_len + 1);
+    char* value_copy = (char*)malloc(value_len + 1);
+    char* type_copy = (char*)malloc(type_len + 1);
+    
+    /* Check all allocations before proceeding */
+    if (!name_copy || !value_copy || !type_copy) {
+        /* Free any successful allocations */
+        free(name_copy);
+        free(value_copy);
+        free(type_copy);
         return 0;
     }
-    strcpy_s(new_var->type, type_len + 1, type);
     
-    new_var->lua_type = var_type;
+    /* Copy strings */
+    strcpy_s(name_copy, name_len + 1, name);
+    strcpy_s(value_copy, value_len + 1, value);
+    strcpy_s(type_copy, type_len + 1, type);
     
-    /* Add to front of linked list */
-    new_var->next = g_lua_variables;
-    g_lua_variables = new_var;
+    /* Add to variables array */
+    uint32_t var_index = g_lua_variable_storage.variable_count;
+    g_lua_variable_storage.variables[var_index].name = name_copy;
+    g_lua_variable_storage.variables[var_index].original_value = value_copy;
+    g_lua_variable_storage.variables[var_index].type = type_copy;
+    g_lua_variable_storage.variables[var_index].lua_type = var_type;
+    g_lua_variable_storage.variable_count++;
+    
+    /* Add to hash table */
+    if (lua_hash_table_needs_rebuild()) {
+        if (!lua_rebuild_variable_hash_table()) {
+            /* Rollback on hash table failure */
+            g_lua_variable_storage.variable_count--;
+            free(name_copy);
+            free(value_copy);
+            free(type_copy);
+            memset(&g_lua_variable_storage.variables[var_index], 0, sizeof(lua_variable_t));
+            return 0;
+        }
+    } else {
+        uint32_t name_hash = lua_hash_variable_name(name);
+        if (!lua_hash_table_insert_robin_hood(g_lua_variable_storage.hash_table.entries,
+                                             g_lua_variable_storage.hash_table.size, 
+                                             name_hash, var_index)) {
+            /* Mark for rebuild on failure */
+            g_lua_variable_storage.hash_table.needs_rebuild = 1;
+        } else {
+            g_lua_variable_storage.hash_table.used_count++;
+        }
+    }
     
     return 1;
 }
 
-/* Delete a persistent Lua variable */
+/* Delete a persistent Lua variable using hash table */
 static int lua_delete_variable(const char* name) {
-    if (!name) return 0;
+    if (!name || !g_lua_variable_storage.initialized) return 0;
     
-    lua_variable_t* prev = NULL;
-    lua_variable_t* current = g_lua_variables;
+    uint32_t name_hash = lua_hash_variable_name(name);
+    int found = 0;
+    uint32_t hash_index = lua_hash_table_find_robin_hood(g_lua_variable_storage.hash_table.entries,
+                                                        g_lua_variable_storage.hash_table.size, 
+                                                        name_hash, &found);
     
-    while (current) {
-        if (current->name && strcmp(current->name, name) == 0) {
-            /* Remove from linked list */
-            if (prev) {
-                prev->next = current->next;
-            } else {
-                g_lua_variables = current->next;
-            }
-            
-            /* Free memory */
-            free(current->name);
-            free(current->original_value);
-            free(current->type);
-            free(current);
-            
-            return 1;
-        }
-        prev = current;
-        current = current->next;
+    if (!found || g_lua_variable_storage.hash_table.entries[hash_index].deleted) {
+        return 0; /* Not found */
     }
     
-    return 0; /* Variable not found */
+    uint32_t var_index = g_lua_variable_storage.hash_table.entries[hash_index].var_index;
+    if (var_index >= g_lua_variable_storage.variable_count) {
+        return 0; /* Invalid index */
+    }
+    
+    lua_variable_t* var = &g_lua_variable_storage.variables[var_index];
+    if (!var->name || strcmp(var->name, name) != 0) {
+        return 0; /* Name mismatch */
+    }
+    
+    /* Free memory */
+    free(var->name);
+    free(var->original_value);
+    free(var->type);
+    
+    /* Remove from hash table */
+    lua_hash_table_delete(g_lua_variable_storage.hash_table.entries,
+                         g_lua_variable_storage.hash_table.size, name_hash);
+    g_lua_variable_storage.hash_table.used_count--;
+    g_lua_variable_storage.hash_table.deleted_count++;
+    
+    /* Shift array elements */
+    for (uint32_t i = var_index; i < g_lua_variable_storage.variable_count - 1; i++) {
+        g_lua_variable_storage.variables[i] = g_lua_variable_storage.variables[i + 1];
+    }
+    
+    /* Clear last element */
+    memset(&g_lua_variable_storage.variables[g_lua_variable_storage.variable_count - 1], 0, sizeof(lua_variable_t));
+    g_lua_variable_storage.variable_count--;
+    
+    /* Update hash table indices after array shift */
+    for (uint32_t i = 0; i < g_lua_variable_storage.hash_table.size; i++) {
+        if (g_lua_variable_storage.hash_table.entries[i].name_hash != LUA_VAR_HASH_EMPTY && 
+            !g_lua_variable_storage.hash_table.entries[i].deleted) {
+            if (g_lua_variable_storage.hash_table.entries[i].var_index > var_index) {
+                g_lua_variable_storage.hash_table.entries[i].var_index--;
+            }
+        }
+    }
+    
+    /* Check if rebuild needed */
+    if (lua_hash_table_needs_rebuild()) {
+        g_lua_variable_storage.hash_table.needs_rebuild = 1;
+    }
+    
+    return 1;
 }
 
 /* Convert and inject a variable into a Lua state */
@@ -312,17 +836,15 @@ static int lua_inject_variable(lua_State* L, lua_variable_t* var) {
 
 /* Inject all stored variables into a Lua state */
 static void lua_inject_all_variables(lua_State* L) {
-    if (!L) return;
+    if (!L || !g_lua_variable_storage.initialized) return;
     
-    lua_variable_t* var = g_lua_variables;
-    while (var) {
-        lua_inject_variable(L, var);
-        var = var->next;
+    for (uint32_t i = 0; i < g_lua_variable_storage.variable_count; i++) {
+        lua_inject_variable(L, &g_lua_variable_storage.variables[i]);
     }
 }
 
-/* Get variable value in Arma format */
-static int lua_get_variable_value(const char* name, char* output, int output_size) {
+/* FIXED: Get variable value and type in Arma format [type, value] */
+static int lua_get_variable_value_and_type(const char* name, char* output, int output_size) {
     if (!name || !output || output_size <= 0) return 0;
     
     lua_variable_t* var = lua_find_variable(name);
@@ -345,45 +867,261 @@ static int lua_get_variable_value(const char* name, char* output, int output_siz
     /* Get the variable from Lua */
     lua_getglobal(L, name);
     
+    char* temp_buffer = (char*)malloc(output_size);
+    if (!temp_buffer) {
+        lua_settop(L, initial_stack_top);
+        lua_release_optimized_state(state);
+        kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
+        return 0;
+    }
+    
     if (!lua_isnil(L, -1)) {
-        /* Format the result */
-        if (lua_format_result_optimized(L, output, output_size)) {
-            result = 1;
+        /* Format the current value from Lua state */
+        if (lua_format_result_optimized(L, temp_buffer, output_size - 20)) { /* Reserve space for type */
+            /* Format as [type, value] */
+            if (_snprintf_s(output, output_size, _TRUNCATE, "[\"%s\",%s]", 
+                          var->type, temp_buffer) >= 0) {
+                result = 1;
+            } else {
+                kh_set_error(output, output_size, "OUTPUT BUFFER TOO SMALL");
+            }
         } else {
             kh_set_error(output, output_size, "RESULT FORMAT FAILED");
         }
     } else {
-        /* Variable not found in Lua state, return original value */
-        if (strlen(var->original_value) < (size_t)output_size) {
-            strcpy_s(output, output_size, var->original_value);
+        /* Variable not found in Lua state, return original value with type */
+        if (_snprintf_s(output, output_size, _TRUNCATE, "[\"%s\",\"%s\"]", 
+                      var->type, var->original_value) >= 0) {
             result = 1;
         } else {
-            kh_set_error(output, output_size, "VALUE TOO LARGE");
+            kh_set_error(output, output_size, "OUTPUT BUFFER TOO SMALL");
         }
     }
     
-    /* Clean up stack */
+    /* Clean up */
+    free(temp_buffer);
     lua_settop(L, initial_stack_top);
     lua_release_optimized_state(state);
     
     return result;
 }
 
-/* Enhanced LuaSetVariable operation - Set persistent Lua variable */
+/* Get variable value for Lua-callable function (returns just the value, not type) */
+static int lua_get_variable_value_for_lua(const char* name, lua_State* L) {
+    if (!name || !L) return 0;
+    
+    lua_variable_t* var = lua_find_variable(name);
+    if (!var) {
+        lua_pushnil(L);
+        return 1;
+    }
+    
+    /* Get the current value from the calling Lua state */
+    lua_getglobal(L, name);
+    
+    /* If not found in current state, inject the stored value */
+    if (lua_isnil(L, -1)) {
+        lua_pop(L, 1); /* Remove nil */
+        if (!lua_inject_variable(L, var)) {
+            lua_pushnil(L);
+        } else {
+            lua_getglobal(L, name);
+        }
+    }
+    
+    return 1;
+}
+
+/* Lua-callable function: GetPersistentVariable(name) - returns just the value */
+static int lua_c_get_persistent_variable(lua_State* L) {
+    /* Check argument count */
+    int argc = lua_gettop(L);
+    if (argc != 1) {
+        lua_pushnil(L);
+        return 1;
+    }
+    
+    /* Get argument */
+    const char* name = lua_tostring(L, 1);
+    if (!name) {
+        lua_pushnil(L);
+        return 1;
+    }
+    
+    /* Clean the name */
+    size_t name_len = strlen(name);
+    char* clean_name = (char*)malloc(name_len + 1);
+    if (!clean_name) {
+        lua_pushnil(L);
+        return 1;
+    }
+    
+    kh_clean_string(name, clean_name, (int)name_len + 1);
+    
+    /* Validate and get */
+    int success = 0;
+    if (strlen(clean_name) > 0 && kh_validate_variable_name(clean_name)) {
+        success = lua_get_variable_value_for_lua(clean_name, L);
+    }
+    
+    free(clean_name);
+    
+    if (!success) {
+        lua_pushnil(L);
+    }
+    
+    return 1;
+}
+
+/* Lua-callable function: SetPersistentVariable(name, value, type, overwrite) */
+static int lua_c_set_persistent_variable(lua_State* L) {
+    if (!lua_checkstack(L, 1)) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+    
+    /* Check argument count */
+    int argc = lua_gettop(L);
+    if (argc < 3 || argc > 4) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+    
+    /* Get arguments */
+    const char* name = lua_tostring(L, 1);
+    const char* value = lua_tostring(L, 2);
+    const char* type = lua_tostring(L, 3);
+    
+    /* Get overwrite flag (defaults to true) */
+    int overwrite_flag = 1; /* Default to true */
+    if (argc >= 4 && !lua_isnil(L, 4)) {
+        if (lua_isboolean(L, 4)) {
+            overwrite_flag = lua_toboolean(L, 4);
+        } else if (lua_isstring(L, 4)) {
+            const char* overwrite_str = lua_tostring(L, 4);
+            if (overwrite_str) {
+                overwrite_flag = kh_parse_boolean(overwrite_str);
+            }
+        }
+    }
+    
+    if (!name || !value || !type) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+    
+    /* Validate and clean inputs */
+    size_t name_len = strlen(name);
+    size_t type_len = strlen(type);
+    
+    char* clean_name = (char*)malloc(name_len + 1);
+    char* clean_type = (char*)malloc(type_len + 1);
+    
+    if (!clean_name || !clean_type) {
+        free(clean_name);
+        free(clean_type);
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+    
+    kh_clean_string(name, clean_name, (int)name_len + 1);
+    kh_clean_string(type, clean_type, (int)type_len + 1);
+    
+    /* Convert type to uppercase for consistency */
+    for (size_t i = 0; i < strlen(clean_type); i++) {
+        if (clean_type[i] >= 'a' && clean_type[i] <= 'z') {
+            clean_type[i] = clean_type[i] - 32;
+        }
+    }
+    
+    /* Validate inputs */
+    int success = 0;
+    if (strlen(clean_name) > 0 && kh_validate_variable_name(clean_name)) {
+        /* Validate type */
+        int type_code = -1;
+        if (strcmp(clean_type, "ARRAY") == 0) type_code = 0;
+        else if (strcmp(clean_type, "STRING") == 0) type_code = 1;
+        else if (strcmp(clean_type, "SCALAR") == 0) type_code = 2;
+        else if (strcmp(clean_type, "HASHMAP") == 0) type_code = 3;
+        else if (strcmp(clean_type, "BOOL") == 0) type_code = 4;
+        
+        if (type_code >= 0 && kh_validate_value_format(type_code, value)) {
+            /* Set the variable */
+            success = lua_set_variable(clean_name, value, clean_type, overwrite_flag);
+        }
+    }
+    
+    free(clean_name);
+    free(clean_type);
+    
+    lua_pushboolean(L, success);
+    return 1;
+}
+
+/* Lua-callable function: DeletePersistentVariable(name) */
+static int lua_c_delete_persistent_variable(lua_State* L) {
+    if (!lua_checkstack(L, 1)) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+    
+    /* Check argument count */
+    int argc = lua_gettop(L);
+    if (argc != 1) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+    
+    /* Get argument */
+    const char* name = lua_tostring(L, 1);
+    if (!name) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+    
+    /* Clean the name */
+    size_t name_len = strlen(name);
+    char* clean_name = (char*)malloc(name_len + 1);
+    if (!clean_name) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+    
+    kh_clean_string(name, clean_name, (int)name_len + 1);
+    
+    /* Validate and delete */
+    int success = 0;
+    if (strlen(clean_name) > 0 && kh_validate_variable_name(clean_name)) {
+        success = lua_delete_variable(clean_name);
+    }
+    
+    free(clean_name);
+    
+    lua_pushboolean(L, success);
+    return 1;
+}
+
+/* FIXED: Enhanced LuaSetVariable operation - Set persistent Lua variable with overwrite support */
 static int kh_process_lua_set_variable_operation(char* output, int output_size, 
                                                 const char** argv, int argc) {
     if (!output || output_size <= 0) return 1;
     
     output[0] = '\0';
     
-    if (argc < 3 || !argv || !argv[0] || !argv[1] || !argv[2]) {
-        kh_set_error(output, output_size, "REQUIRES 3 ARGUMENTS: [NAME, VALUE, TYPE]");
+    if (argc < 3 || argc > 4 || !argv || !argv[0] || !argv[1] || !argv[2]) {
+        kh_set_error(output, output_size, "REQUIRES 3-4 ARGUMENTS: [NAME, VALUE, TYPE, OVERWRITE]");
         return 1;
     }
     
     const char* name = argv[0];
     const char* value = argv[1];
     const char* type = argv[2];
+    
+    /* Parse overwrite flag (defaults to true) */
+    int overwrite_flag = 1; /* Default to true */
+    if (argc >= 4 && argv[3]) {
+        overwrite_flag = kh_parse_boolean(argv[3]);
+    }
     
     /* Clean the name */
     size_t name_len = strlen(name);
@@ -452,7 +1190,7 @@ static int kh_process_lua_set_variable_operation(char* output, int output_size,
     }
     
     /* Set the variable */
-    if (lua_set_variable(clean_name, value, clean_type)) {
+    if (lua_set_variable(clean_name, value, clean_type, overwrite_flag)) {
         _snprintf_s(output, output_size, _TRUNCATE, "[\"SUCCESS\"]");
         free(clean_name);
         free(clean_type);
@@ -465,7 +1203,7 @@ static int kh_process_lua_set_variable_operation(char* output, int output_size,
     }
 }
 
-/* Enhanced LuaGetVariable operation - Get persistent Lua variable */
+/* FIXED: Enhanced LuaGetVariable operation - Get persistent Lua variable with type */
 static int kh_process_lua_get_variable_operation(char* output, int output_size, 
                                                 const char** argv, int argc) {
     if (!output || output_size <= 0) return 1;
@@ -502,8 +1240,8 @@ static int kh_process_lua_get_variable_operation(char* output, int output_size,
         return 1;
     }
     
-    /* Get the variable value */
-    int result = lua_get_variable_value(clean_name, output, output_size);
+    /* Get the variable value and type */
+    int result = lua_get_variable_value_and_type(clean_name, output, output_size);
     
     free(clean_name);
     return result ? 0 : 1;
@@ -787,17 +1525,16 @@ static int lua_capture_initial_globals(lua_State* L, lua_initial_state_t* initia
         return 0;
     }
     
-    /* FIXED: Allocate both arrays - names and success tracking */
-    initial_state->initial_globals = (char**)malloc(count * sizeof(char*));
-    initial_state->allocation_success = (int*)malloc(count * sizeof(int));
-    if (!initial_state->initial_globals || !initial_state->allocation_success) {
+    /* FIXED: Allocate both arrays - use single allocation to avoid partial allocation failures */
+    size_t total_size = (count * sizeof(char*)) + (count * sizeof(int));
+    void* memory_block = malloc(total_size);
+    if (!memory_block) {
         lua_pop(L, 1);
-        free(initial_state->initial_globals);
-        free(initial_state->allocation_success);
-        initial_state->initial_globals = NULL;
-        initial_state->allocation_success = NULL;
         return 0;
     }
+    
+    initial_state->initial_globals = (char**)memory_block;
+    initial_state->allocation_success = (int*)((char*)memory_block + (count * sizeof(char*)));
     
     /* Initialize success tracking array */
     memset(initial_state->allocation_success, 0, count * sizeof(int));
@@ -890,7 +1627,7 @@ static void lua_restore_initial_globals(lua_State* L, lua_initial_state_t* initi
     lua_pop(L, 3); /* Remove to_remove, initial_set, and global_table */
 }
 
-/* Enhanced Lua state initialization with better error handling */
+/* FIXED: Enhanced Lua state initialization with Lua-callable functions registration */
 static int lua_init_turbo_state(lua_State* L) {
     if (!L) return 0;
     
@@ -956,6 +1693,16 @@ static int lua_init_turbo_state(lua_State* L) {
     /* Secure print function */
     lua_pushcfunction(L, lua_secure_print_fast);
     lua_setglobal(L, "print");
+    
+    /* FIXED: Register custom persistent variable functions */
+    lua_pushcfunction(L, lua_c_get_persistent_variable);
+    lua_setglobal(L, "GetPersistentVariable");
+    
+    lua_pushcfunction(L, lua_c_set_persistent_variable);
+    lua_setglobal(L, "SetPersistentVariable");
+    
+    lua_pushcfunction(L, lua_c_delete_persistent_variable);
+    lua_setglobal(L, "DeletePersistentVariable");
     
     return 1;
 }
@@ -1080,8 +1827,8 @@ static void lua_release_optimized_state(lua_persistent_state_t* state) {
                     }
                 }
             }
+            /* FIXED: Free the combined allocation block */
             free(state->initial_state.initial_globals);
-            free(state->initial_state.allocation_success);
             state->initial_state.initial_globals = NULL;
             state->initial_state.allocation_success = NULL;
             state->initial_state.global_count = 0;
@@ -2072,17 +2819,17 @@ static int kh_process_lua_compile_operation(char* output, int output_size,
 
 /* FIXED: Cleanup function with proper memory management */
 static void kh_cleanup_lua_states(void) {
-    /* Clean up persistent Lua variables first */
-    lua_variable_t* var = g_lua_variables;
-    while (var) {
-        lua_variable_t* next = var->next;
-        free(var->name);
-        free(var->original_value);
-        free(var->type);
-        free(var);
-        var = next;
+    /* Clean up persistent Lua variables with hash table */
+    if (g_lua_variable_storage.initialized) {
+        for (uint32_t i = 0; i < g_lua_variable_storage.variable_count; i++) {
+            free(g_lua_variable_storage.variables[i].name);
+            free(g_lua_variable_storage.variables[i].original_value);
+            free(g_lua_variable_storage.variables[i].type);
+        }
+        free(g_lua_variable_storage.variables);
+        free(g_lua_variable_storage.hash_table.entries);
+        memset(&g_lua_variable_storage, 0, sizeof(g_lua_variable_storage));
     }
-    g_lua_variables = NULL;
     
     /* Clean up bytecode cache - safe to clean since we're shutting down */
     for (int i = 0; i < LUA_BYTECODE_CACHE_SIZE; i++) {
@@ -2119,8 +2866,10 @@ static void kh_cleanup_lua_states(void) {
                         }
                     }
                 }
+                /* FIXED: Free the combined allocation block */
                 free(g_lua_states[i].initial_state.initial_globals);
-                free(g_lua_states[i].initial_state.allocation_success);
+                g_lua_states[i].initial_state.initial_globals = NULL;
+                g_lua_states[i].initial_state.allocation_success = NULL;
             }
             
             lua_close(g_lua_states[i].L);

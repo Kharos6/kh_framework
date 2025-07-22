@@ -1736,16 +1736,23 @@ static int kh_execute_lua_optimized(const char* arguments, const char* code,
         return 1;
     }
     
-    /* Get input lengths - NO SIZE LIMITS */
+    /* Get input lengths */
     size_t args_len = strlen(arguments);
     size_t code_len = strlen(code);
     
-    /* Create combined hash for result caching - DYNAMIC ALLOCATION */
-    size_t combined_size = args_len + code_len + 2; /* +2 for separator and null terminator */
-    char* combined_input = (char*)malloc(combined_size);
-    if (!combined_input) {
-        kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
-        return 1;
+    /* Create combined hash for result caching - STACK/POOL ALLOCATION */
+    size_t combined_size = args_len + code_len + 2;
+    char stack_combined[2048];
+    char* combined_input = NULL;
+
+    if (combined_size <= sizeof(stack_combined)) {
+        combined_input = stack_combined;
+    } else {
+        combined_input = (char*)lua_pool_alloc(combined_size);
+        if (!combined_input) {
+            kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
+            return 1;
+        }
     }
     
     int combined_len = _snprintf_s(combined_input, combined_size, _TRUNCATE, 
@@ -1759,17 +1766,30 @@ static int kh_execute_lua_optimized(const char* arguments, const char* code,
         char* cached_result = lua_find_cached_result(combined_hash);
         if (cached_result) {
             strncpy_s(output, output_size, cached_result, _TRUNCATE);
-            free(combined_input);
+            /* Cleanup - check if allocations need freeing */
+            if (combined_input != stack_combined && !lua_is_pool_allocation(combined_input)) {
+                free(combined_input);
+            }
             return 0;
         }
     }
     
-    /* Clean the code string - DYNAMIC ALLOCATION */
-    char* clean_code = (char*)malloc(code_len + 1);
-    if (!clean_code) {
-        free(combined_input);
-        kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
-        return 1;
+    /* Clean the code string - STACK/POOL ALLOCATION */
+    char stack_code[1024];
+    char* clean_code = NULL;
+
+    if (code_len + 1 <= sizeof(stack_code)) {
+        clean_code = stack_code;
+    } else {
+        clean_code = (char*)lua_pool_alloc(code_len + 1);
+        if (!clean_code) {
+            /* Cleanup - check if allocations need freeing */
+            if (combined_input != stack_combined && !lua_is_pool_allocation(combined_input)) {
+                free(combined_input);
+            }
+            kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
+            return 1;
+        }
     }
     
     kh_clean_string(code, clean_code, (int)code_len + 1);
@@ -1783,8 +1803,13 @@ static int kh_execute_lua_optimized(const char* arguments, const char* code,
     /* Get optimized Lua state */
     lua_persistent_state_t* state = lua_get_optimized_state();
     if (!state) {
-        free(combined_input);
-        free(clean_code);
+        /* Cleanup - check if allocations need freeing */
+        if (combined_input != stack_combined && !lua_is_pool_allocation(combined_input)) {
+            free(combined_input);
+        }
+        if (clean_code != stack_code && !lua_is_pool_allocation(clean_code)) {
+            free(clean_code);
+        }
         kh_set_error(output, output_size, "NO AVAILABLE LUA STATE");
         return 1;
     }
@@ -1802,8 +1827,13 @@ static int kh_execute_lua_optimized(const char* arguments, const char* code,
         if (cached_bytecode) lua_release_cached_bytecode(cached_bytecode);
         lua_settop(L, initial_stack_top);
         lua_release_optimized_state(state);
-        free(combined_input);
-        free(clean_code);
+        /* Cleanup - check if allocations need freeing */
+        if (combined_input != stack_combined && !lua_is_pool_allocation(combined_input)) {
+            free(combined_input);
+        }
+        if (clean_code != stack_code && !lua_is_pool_allocation(clean_code)) {
+            free(clean_code);
+        }
         kh_set_error(output, output_size, "ARGUMENT PARSING FAILED");
         return 1;
     }
@@ -1890,8 +1920,13 @@ static int kh_execute_lua_optimized(const char* arguments, const char* code,
     
     /* Cleanup */
     lua_release_optimized_state(state);
-    free(combined_input);
-    free(clean_code);
+    /* Cleanup - check if allocations need freeing */
+    if (combined_input != stack_combined && !lua_is_pool_allocation(combined_input)) {
+        free(combined_input);
+    }
+    if (clean_code != stack_code && !lua_is_pool_allocation(clean_code)) {
+        free(clean_code);
+    }
     
     return result;
 }
@@ -1931,11 +1966,18 @@ static int kh_process_lua_compile_operation(char* output, int output_size,
         return 1;
     }
     
-    /* Clean the code string - DYNAMIC ALLOCATION, NO SIZE LIMIT */
-    char* clean_code = (char*)malloc(code_len + 1);
-    if (!clean_code) {
-        kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
-        return 1;
+    /* Clean the code string - STACK/POOL ALLOCATION */
+    char stack_code[1024];
+    char* clean_code = NULL;
+
+    if (code_len + 1 <= sizeof(stack_code)) {
+        clean_code = stack_code;
+    } else {
+        clean_code = (char*)lua_pool_alloc(code_len + 1);
+        if (!clean_code) {
+            kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
+            return 1;
+        }
     }
     
     kh_clean_string(code, clean_code, (int)code_len + 1);
@@ -1949,14 +1991,20 @@ static int kh_process_lua_compile_operation(char* output, int output_size,
         /* Release the reference properly */
         lua_release_cached_bytecode(existing);
         _snprintf_s(output, output_size, _TRUNCATE, "[\"ALREADY_CACHED\"]");
-        free(clean_code);
+        /* Cleanup - check if allocations need freeing */
+        if (clean_code != stack_code && !lua_is_pool_allocation(clean_code)) {
+            free(clean_code);
+        }
         return 0;
     }
     
     /* Get a Lua state for compilation */
     lua_persistent_state_t* state = lua_get_optimized_state();
     if (!state) {
-        free(clean_code);
+        /* Cleanup - check if allocations need freeing */
+        if (clean_code != stack_code && !lua_is_pool_allocation(clean_code)) {
+            free(clean_code);
+        }
         kh_set_error(output, output_size, "NO AVAILABLE LUA STATE");
         return 1;
     }
@@ -2014,7 +2062,10 @@ static int kh_process_lua_compile_operation(char* output, int output_size,
     
     /* Cleanup */
     lua_release_optimized_state(state);
-    free(clean_code);
+    /* Cleanup - check if allocations need freeing */
+    if (clean_code != stack_code && !lua_is_pool_allocation(clean_code)) {
+        free(clean_code);
+    }
     
     return result;
 }

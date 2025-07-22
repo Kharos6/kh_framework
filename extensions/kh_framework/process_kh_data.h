@@ -2477,19 +2477,27 @@ static int kh_combine_values(kh_data_type_t type, const char* existing_value, co
     switch (type) {
         case KH_TYPE_BOOL:
             if (overwrite_flag) {
-                strcpy_s(result, (size_t)result_size, clean_new);
+                if (strlen(clean_new) < (size_t)result_size) {
+                    strcpy_s(result, (size_t)result_size, clean_new);
+                    ret = 1;
+                }
             } else {
                 /* Toggle boolean */
                 int current_value = kh_parse_boolean(clean_existing);
-                strcpy_s(result, (size_t)result_size, current_value ? "false" : "true");
+                const char* toggle_result = current_value ? "false" : "true";
+                if (strlen(toggle_result) < (size_t)result_size) {
+                    strcpy_s(result, (size_t)result_size, toggle_result);
+                    ret = 1;
+                }
             }
-            ret = 1;
             break;
             
         case KH_TYPE_HASHMAP:
             if (overwrite_flag) {
-                strcpy_s(result, (size_t)result_size, clean_new);
-                ret = 1;
+                if (strlen(clean_new) < (size_t)result_size) {
+                    strcpy_s(result, (size_t)result_size, clean_new);
+                    ret = 1;
+                }
             } else {
                 ret = kh_merge_hashmap(clean_existing, clean_new, result, result_size);
             }
@@ -2497,7 +2505,10 @@ static int kh_combine_values(kh_data_type_t type, const char* existing_value, co
             
         case KH_TYPE_SCALAR:
             if (overwrite_flag) {
-                strcpy_s(result, (size_t)result_size, clean_new);
+                if (strlen(clean_new) < (size_t)result_size) {
+                    strcpy_s(result, (size_t)result_size, clean_new);
+                    ret = 1;
+                }
             } else {
                 /* Use strtod with error checking */
                 char* endptr1, *endptr2;
@@ -2507,44 +2518,99 @@ static int kh_combine_values(kh_data_type_t type, const char* existing_value, co
                 /* Only add if both conversions were successful */
                 if (endptr1 != clean_existing && *endptr1 == '\0' &&
                     endptr2 != clean_new && *endptr2 == '\0') {
-                    _snprintf_s(result, (size_t)result_size, _TRUNCATE, "%.6g", existing_num + new_num);
+                    char num_result[64];
+                    int num_len = _snprintf_s(num_result, sizeof(num_result), _TRUNCATE, "%.6g", existing_num + new_num);
+                    if (num_len > 0 && num_len < result_size) {
+                        strcpy_s(result, (size_t)result_size, num_result);
+                        ret = 1;
+                    }
                 } else {
                     /* If conversion failed, treat as string concatenation */
-                    if (strlen(clean_existing) + strlen(clean_new) < (size_t)result_size) {
+                    size_t total_len = strlen(clean_existing) + strlen(clean_new);
+                    if (total_len < (size_t)result_size) {
                         _snprintf_s(result, (size_t)result_size, _TRUNCATE, "%s%s", clean_existing, clean_new);
+                        ret = 1;
                     }
                 }
             }
-            ret = 1;
             break;
             
         case KH_TYPE_ARRAY:
             if (overwrite_flag) {
-                strcpy_s(result, (size_t)result_size, clean_new);
+                if (strlen(clean_new) < (size_t)result_size) {
+                    strcpy_s(result, (size_t)result_size, clean_new);
+                    ret = 1;
+                }
             } else {
+                /* FIXED: Enhanced array concatenation with proper empty array handling */
                 size_t existing_len = strlen(clean_existing);
                 size_t new_len = strlen(clean_new);
                 
-                if (existing_len >= 2 && new_len >= 2) {
-                    if (existing_len == 2 || (existing_len == 3 && clean_existing[1] == ' ')) {
-                        strcpy_s(result, (size_t)result_size, clean_new);
-                    } else if (existing_len + new_len < (size_t)result_size) {
-                        _snprintf_s(result, (size_t)result_size, _TRUNCATE, "%.*s,%s", (int)(existing_len - 1), clean_existing, clean_new + 1);
+                /* Validate both arrays have minimum structure and proper format */
+                if (existing_len >= 2 && new_len >= 2 &&
+                    clean_existing[0] == '[' && clean_existing[existing_len-1] == ']' &&
+                    clean_new[0] == '[' && clean_new[new_len-1] == ']') {
+                    
+                    /* Check if existing array is empty [] or [ ] */
+                    int existing_is_empty = (existing_len == 2) || 
+                                          (existing_len == 3 && clean_existing[1] == ' ');
+                    
+                    /* Check if new array is empty [] or [ ] */
+                    int new_is_empty = (new_len == 2) || 
+                                     (new_len == 3 && clean_new[1] == ' ');
+                    
+                    if (existing_is_empty && new_is_empty) {
+                        /* Both empty, result is empty array */
+                        if (result_size > 2) {
+                            strcpy_s(result, (size_t)result_size, "[]");
+                            ret = 1;
+                        }
+                    } else if (existing_is_empty) {
+                        /* Existing is empty, use new array */
+                        if (new_len < (size_t)result_size) {
+                            strcpy_s(result, (size_t)result_size, clean_new);
+                            ret = 1;
+                        }
+                    } else if (new_is_empty) {
+                        /* New is empty, use existing array */
+                        if (existing_len < (size_t)result_size) {
+                            strcpy_s(result, (size_t)result_size, clean_existing);
+                            ret = 1;
+                        }
+                    } else {
+                        /* Both have content, concatenate properly */
+                        /* Calculate actual needed space: existing_len + new_len - 1 (remove one ']' and one '[') + 1 (comma) */
+                        size_t needed_space = existing_len + new_len - 1;
+                        if (needed_space < (size_t)result_size) {
+                            _snprintf_s(result, (size_t)result_size, _TRUNCATE, "%.*s,%s", 
+                                       (int)(existing_len - 1), clean_existing, clean_new + 1);
+                            ret = 1;
+                        }
+                    }
+                } else {
+                    /* Invalid array format, fallback to string concatenation if space allows */
+                    size_t total_len = existing_len + new_len;
+                    if (total_len < (size_t)result_size) {
+                        _snprintf_s(result, (size_t)result_size, _TRUNCATE, "%s%s", clean_existing, clean_new);
+                        ret = 1;
                     }
                 }
             }
-            ret = 1;
             break;
             
         default:
             if (overwrite_flag) {
-                strcpy_s(result, (size_t)result_size, clean_new);
+                if (strlen(clean_new) < (size_t)result_size) {
+                    strcpy_s(result, (size_t)result_size, clean_new);
+                    ret = 1;
+                }
             } else {
-                if (strlen(clean_existing) + strlen(clean_new) < (size_t)result_size) {
+                size_t total_len = strlen(clean_existing) + strlen(clean_new);
+                if (total_len < (size_t)result_size) {
                     _snprintf_s(result, (size_t)result_size, _TRUNCATE, "%s%s", clean_existing, clean_new);
+                    ret = 1;
                 }
             }
-            ret = 1;
             break;
     }
 

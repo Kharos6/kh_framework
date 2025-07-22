@@ -60,7 +60,7 @@
 #define LUA_STACK_SAFETY_MARGIN 10        /* Safety margin for Lua stack */
 #define LUA_POOL_ALIGNMENT 16             /* Memory alignment for performance */
 #define LUA_VAR_HASH_TABLE_MIN_SIZE 16
-#define LUA_VAR_HASH_TABLE_LOAD_FACTOR 0.75
+#define LUA_VAR_HASH_TABLE_LOAD_FACTOR 0.5
 #define LUA_VAR_HASH_EMPTY 0
 
 /* Forward declarations */

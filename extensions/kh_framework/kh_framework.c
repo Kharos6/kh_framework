@@ -50,8 +50,8 @@ static const function_info_t FUNCTION_TABLE[] = {
     {"LuaSetVariable", 3, 4, 'L'},
     {"LuaGetVariable", 1, 1, 'L'},
     {"LuaDeleteVariable", 1, 1, 'L'},
-    {"LuaClearVariables", 0, 0, 'L'},  /* NEW: Clear all persistent variables */
-    {"LuaClearFunctions", 0, 0, 'L'}   /* NEW: Clear all cached functions/bytecode */
+    {"LuaClearVariables", 0, 0, 'L'},
+    {"LuaClearFunctions", 0, 0, 'L'}
 };
 
 static const int FUNCTION_COUNT = sizeof(FUNCTION_TABLE) / sizeof(function_info_t);

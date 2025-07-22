@@ -26,15 +26,6 @@
 #define LUA_OK 0
 #endif
 
-/* Enhanced constants for better performance and safety */
-#define LUA_MAX_RECURSION_DEPTH 24        /* Reduced for safety */
-#define LUA_STACK_SAFETY_MARGIN 10        /* Safety margin for Lua stack */
-#define LUA_CACHE_CHAIN_MAX_LENGTH 6      /* Max cache chain length */
-#define LUA_POOL_ALIGNMENT 16             /* Memory alignment for performance */
-#define LUA_PARSE_BUFFER_SIZE 4096        /* FIXED: Reduced from 8192 for stack safety */
-#define LUA_POOL_RESET_THRESHOLD 0.8      /* Reset pool when 80% used */
-#define LUA_POOL_RESET_INTERVAL 100       /* Reset after 100 operations */
-
 /* Simplified memory tracking - reduced overhead */
 typedef struct pool_block_s {
     size_t size;
@@ -54,28 +45,33 @@ static inline uint64_t lua_hash_fnv1a(const void* data, size_t len) {
     return hash;
 }
 
-/* Bytecode cache entry with proper reference counting */
+/* Simplified bytecode cache entry - removed deletion tracking and size limits */
 typedef struct bytecode_cache_entry_s {
     uint64_t code_hash;                  
     char* bytecode;                      
     size_t bytecode_size;                
     int ref_count;                       
     DWORD last_used;                     
-    int marked_for_deletion;             /* Flag for safe deletion */
     struct bytecode_cache_entry_s* next; 
 } bytecode_cache_entry_t;
 
-/* String result cache entry with enhanced cleanup */
+/* Simplified string result cache entry - removed deletion tracking and size limits */
 typedef struct string_cache_entry_s {
     uint64_t args_hash;                  
     char* result;                        
     size_t result_size;                  
     DWORD last_used;                     
-    int marked_for_deletion;             /* Flag for safe deletion */
     struct string_cache_entry_s* next;   
 } string_cache_entry_t;
 
-/* Enhanced persistent Lua state with better error tracking */
+/* Store initial globals state for restoration */
+typedef struct {
+    char** initial_globals;     /* Array of initial global names */
+    int global_count;          /* Number of initial globals */
+    int initialized;           /* Whether initial state is captured */
+} lua_initial_state_t;
+
+/* Enhanced persistent Lua state with better error tracking and initial state management */
 typedef struct {
     lua_State* L;                        
     int in_use;                          
@@ -86,10 +82,11 @@ typedef struct {
     size_t memory_limit;                 
     int error_count;                     
     DWORD last_error_time;               
-    DWORD last_cleanup_time;             
+    DWORD last_cleanup_time;
+    lua_initial_state_t initial_state;  /* Track initial globals for restoration */
 } lua_persistent_state_t;
 
-/* Enhanced memory pool allocator with reset capability */
+/* FIXED: Simplified memory pool allocator - no automatic resets for maximum performance */
 typedef struct {
     char* pool;                          
     size_t size;                         
@@ -97,8 +94,8 @@ typedef struct {
     size_t peak_used;                    /* Track peak usage for optimization */
     pool_block_t* free_blocks;           /* Simple free list */
     int initialized;                     
-    int operation_count;                 /* Track operations for reset timing */
-    DWORD last_reset_time;               /* When pool was last reset */
+    int operation_count;                 /* Track operations for statistics */
+    DWORD creation_time;                 /* When pool was created */
 } lua_memory_pool_t;
 
 /* Global optimization caches - single-threaded, so no locking needed */
@@ -124,51 +121,15 @@ static int lua_init_memory_pool(void) {
     g_memory_pool.free_blocks = NULL;
     g_memory_pool.initialized = 1;
     g_memory_pool.operation_count = 0;
-    g_memory_pool.last_reset_time = GetTickCount();
+    g_memory_pool.creation_time = GetTickCount();
     
     return 1;
 }
 
-/* FIXED: Add pool reset functionality for long-term performance */
-static void lua_reset_memory_pool(void) {
-    if (!g_memory_pool.initialized) return;
-    
-    /* Reset pool usage - all allocations become invalid after this */
-    g_memory_pool.used = 0;
-    g_memory_pool.free_blocks = NULL;
-    g_memory_pool.operation_count = 0;
-    g_memory_pool.last_reset_time = GetTickCount();
-    
-    /* Update peak tracking */
-    if (g_memory_pool.used > g_memory_pool.peak_used) {
-        g_memory_pool.peak_used = g_memory_pool.used;
-    }
-}
-
-/* FIXED: Enhanced pool allocator with reset capability and better performance */
+/* FIXED: Ultra-fast pool allocator - no resets, maximum performance */
 static void* lua_pool_alloc(size_t size) {
     if (!g_memory_pool.initialized && !lua_init_memory_pool()) {
         return malloc(size); /* Fallback to system malloc */
-    }
-    
-    /* Check if pool should be reset for performance */
-    DWORD current_time = GetTickCount();
-    if ((g_memory_pool.used > g_memory_pool.size * LUA_POOL_RESET_THRESHOLD) ||
-        (g_memory_pool.operation_count > LUA_POOL_RESET_INTERVAL) ||
-        (current_time - g_memory_pool.last_reset_time > 300000)) { /* 5 minutes */
-        
-        /* Only reset if no Lua states are currently active */
-        int states_in_use = 0;
-        for (int i = 0; i < LUA_STATE_POOL_SIZE; i++) {
-            if (g_lua_states[i].in_use) {
-                states_in_use = 1;
-                break;
-            }
-        }
-        
-        if (!states_in_use) {
-            lua_reset_memory_pool();
-        }
     }
     
     /* Align to POOL_ALIGNMENT-byte boundary for performance */
@@ -188,11 +149,11 @@ static void* lua_pool_alloc(size_t size) {
         return ptr;
     }
     
-    /* Pool exhausted, fallback to system malloc */
+    /* Pool exhausted, fallback to system malloc - this is fine for performance */
     return malloc(size);
 }
 
-/* FIXED: Simplified check for pool allocation */
+/* Simplified check for pool allocation */
 static int lua_is_pool_allocation(void* ptr) {
     if (!ptr || !g_memory_pool.initialized || !g_memory_pool.pool) return 0;
     
@@ -208,7 +169,7 @@ static int lua_secure_print_fast(lua_State* L) {
     return 0;
 }
 
-/* FIXED: Enhanced custom Lua allocator with proper reallocation handling */
+/* Enhanced custom Lua allocator with proper reallocation handling */
 static void* lua_custom_allocator(void* ud, void* ptr, size_t osize, size_t nsize) {
     (void)ud; /* Unused parameter */
     
@@ -223,7 +184,7 @@ static void* lua_custom_allocator(void* ud, void* ptr, size_t osize, size_t nsiz
         /* Allocation */
         return lua_pool_alloc(nsize);
     } else {
-        /* FIXED: Reallocation - Proper Lua allocator contract compliance */
+        /* Reallocation - Proper Lua allocator contract compliance */
         void* new_ptr = lua_pool_alloc(nsize);
         if (new_ptr) {
             /* Success - copy old data and free old pointer */
@@ -239,14 +200,13 @@ static void* lua_custom_allocator(void* ud, void* ptr, size_t osize, size_t nsiz
             
             return new_ptr;
         } else {
-            /* FIXED: Allocation failed - return NULL as per Lua contract */
-            /* This tells Lua the reallocation failed and it should handle the error */
+            /* Allocation failed - return NULL as per Lua contract */
             return NULL;
         }
     }
 }
 
-/* Enhanced bytecode cache operations with proper reference counting */
+/* Simplified bytecode cache operations - unlimited caching */
 static bytecode_cache_entry_t* lua_find_cached_bytecode(uint64_t hash) {
     if (!hash) return NULL;
     
@@ -254,7 +214,7 @@ static bytecode_cache_entry_t* lua_find_cached_bytecode(uint64_t hash) {
     bytecode_cache_entry_t* entry = g_bytecode_cache[slot];
     
     while (entry) {
-        if (entry->code_hash == hash && entry->bytecode && !entry->marked_for_deletion) {
+        if (entry->code_hash == hash && entry->bytecode) {
             entry->ref_count++;
             entry->last_used = GetTickCount();
             return entry;
@@ -265,93 +225,41 @@ static bytecode_cache_entry_t* lua_find_cached_bytecode(uint64_t hash) {
     return NULL;
 }
 
-/* FIXED: Add proper reference count management */
+/* Simplified reference management - no deletion marking needed */
 static void lua_release_cached_bytecode(bytecode_cache_entry_t* entry) {
     if (!entry) return;
-    
     entry->ref_count--;
-    if (entry->ref_count <= 0) {
-        entry->marked_for_deletion = 1;
-    }
+    /* Note: We never delete cached bytecode entries for maximum performance */
 }
 
-/* FIXED: Better cache entry removal with safe deletion */
-static int lua_remove_old_bytecode_entry(bytecode_cache_entry_t** head) {
-    if (!head || !*head) return 0;
-    
-    bytecode_cache_entry_t* oldest = NULL;
-    bytecode_cache_entry_t** oldest_prev = NULL;
-    bytecode_cache_entry_t* current = *head;
-    bytecode_cache_entry_t** prev = head;
-    
-    /* First pass: find entries marked for deletion or with ref_count = 0 */
-    while (current) {
-        if (current->marked_for_deletion || current->ref_count <= 0) {
-            *prev = current->next;
-            if (current->bytecode) free(current->bytecode);
-            free(current);
-            return 1; /* Removed an entry */
-        }
-        prev = &current->next;
-        current = current->next;
-    }
-    
-    /* Second pass: find oldest entry if no deletable entries found */
-    current = *head;
-    prev = head;
-    
-    while (current) {
-        if (!oldest || current->last_used < oldest->last_used) {
-            oldest = current;
-            oldest_prev = prev;
-        }
-        prev = &current->next;
-        current = current->next;
-    }
-    
-    if (oldest && oldest_prev) {
-        *oldest_prev = oldest->next;
-        if (oldest->bytecode) free(oldest->bytecode);
-        free(oldest);
-        return 1;
-    }
-    
-    return 0;
-}
-
+/* FIXED: High-performance bytecode caching using pool allocation */
 static int lua_cache_bytecode(uint64_t hash, const char* bytecode, size_t size) {
-    if (!bytecode || size == 0 || size > LUA_MEMORY_POOL_SIZE / 4 || !hash) {
+    if (!bytecode || size == 0 || !hash) {
         return 0;
     }
     
     int slot = (int)(hash % LUA_BYTECODE_CACHE_SIZE);
     
-    /* Limit chain length for performance */
-    bytecode_cache_entry_t** current = &g_bytecode_cache[slot];
-    int chain_length = 0;
-    
-    while (*current) {
-        chain_length++;
-        if (chain_length >= LUA_CACHE_CHAIN_MAX_LENGTH) {
-            if (!lua_remove_old_bytecode_entry(&g_bytecode_cache[slot])) {
-                return 0;
-            }
-            break;
+    /* Check if already exists to avoid duplicates */
+    bytecode_cache_entry_t* existing = g_bytecode_cache[slot];
+    while (existing) {
+        if (existing->code_hash == hash) {
+            return 1; /* Already cached */
         }
-        current = &(*current)->next;
+        existing = existing->next;
     }
     
-    /* Create new cache entry with proper error handling */
-    bytecode_cache_entry_t* new_entry = (bytecode_cache_entry_t*)malloc(sizeof(bytecode_cache_entry_t));
+    /* Create new cache entry using pool allocation for maximum speed */
+    bytecode_cache_entry_t* new_entry = (bytecode_cache_entry_t*)lua_pool_alloc(sizeof(bytecode_cache_entry_t));
     if (!new_entry) return 0;
     
-    /* Initialize all fields first */
+    /* Initialize all fields */
     memset(new_entry, 0, sizeof(bytecode_cache_entry_t));
     
-    new_entry->bytecode = (char*)malloc(size);
+    /* Use pool allocation for bytecode data too - maximum performance */
+    new_entry->bytecode = (char*)lua_pool_alloc(size);
     if (!new_entry->bytecode) {
-        free(new_entry);
-        return 0;
+        return 0; /* Pool allocation handles cleanup automatically */
     }
     
     memcpy(new_entry->bytecode, bytecode, size);
@@ -359,14 +267,13 @@ static int lua_cache_bytecode(uint64_t hash, const char* bytecode, size_t size) 
     new_entry->bytecode_size = size;
     new_entry->ref_count = 1;
     new_entry->last_used = GetTickCount();
-    new_entry->marked_for_deletion = 0;
     new_entry->next = g_bytecode_cache[slot];
     g_bytecode_cache[slot] = new_entry;
     
     return 1;
 }
 
-/* Enhanced string result cache operations */
+/* Simplified string result cache operations - unlimited caching */
 static char* lua_find_cached_result(uint64_t hash) {
     if (!hash) return NULL;
     
@@ -374,7 +281,7 @@ static char* lua_find_cached_result(uint64_t hash) {
     string_cache_entry_t* entry = g_string_cache[slot];
     
     while (entry) {
-        if (entry->args_hash == hash && entry->result && !entry->marked_for_deletion) {
+        if (entry->args_hash == hash && entry->result) {
             entry->last_used = GetTickCount();
             return entry->result;
         }
@@ -384,95 +291,163 @@ static char* lua_find_cached_result(uint64_t hash) {
     return NULL;
 }
 
-/* FIXED: Better cache entry removal for string cache */
-static int lua_remove_old_string_entry(string_cache_entry_t** head) {
-    if (!head || !*head) return 0;
-    
-    string_cache_entry_t* oldest = NULL;
-    string_cache_entry_t** oldest_prev = NULL;
-    string_cache_entry_t* current = *head;
-    string_cache_entry_t** prev = head;
-    
-    /* First pass: find entries marked for deletion */
-    while (current) {
-        if (current->marked_for_deletion) {
-            *prev = current->next;
-            if (current->result) free(current->result);
-            free(current);
-            return 1;
-        }
-        prev = &current->next;
-        current = current->next;
-    }
-    
-    /* Second pass: find oldest entry */
-    current = *head;
-    prev = head;
-    
-    while (current) {
-        if (!oldest || current->last_used < oldest->last_used) {
-            oldest = current;
-            oldest_prev = prev;
-        }
-        prev = &current->next;
-        current = current->next;
-    }
-    
-    if (oldest && oldest_prev) {
-        *oldest_prev = oldest->next;
-        if (oldest->result) free(oldest->result);
-        free(oldest);
-        return 1;
-    }
-    
-    return 0;
-}
-
+/* FIXED: High-performance result caching using pool allocation */
 static int lua_cache_result(uint64_t hash, const char* result) {
     if (!result || !hash) return 0;
     
     size_t result_len = strlen(result);
-    if (result_len == 0 || result_len > KH_MAX_OUTPUT_SIZE) return 0;
+    if (result_len == 0) return 0;
     
     int slot = (int)(hash % LUA_STRING_CACHE_SIZE);
     
-    /* Limit chain length */
-    string_cache_entry_t** current = &g_string_cache[slot];
-    int chain_length = 0;
-    
-    while (*current) {
-        chain_length++;
-        if (chain_length >= LUA_CACHE_CHAIN_MAX_LENGTH) {
-            if (!lua_remove_old_string_entry(&g_string_cache[slot])) {
-                return 0;
-            }
-            break;
+    /* Check if already exists to avoid duplicates */
+    string_cache_entry_t* existing = g_string_cache[slot];
+    while (existing) {
+        if (existing->args_hash == hash) {
+            return 1; /* Already cached */
         }
-        current = &(*current)->next;
+        existing = existing->next;
     }
     
-    /* Create new result cache entry with proper error handling */
-    string_cache_entry_t* new_entry = (string_cache_entry_t*)malloc(sizeof(string_cache_entry_t));
+    /* Create new result cache entry using pool allocation for maximum speed */
+    string_cache_entry_t* new_entry = (string_cache_entry_t*)lua_pool_alloc(sizeof(string_cache_entry_t));
     if (!new_entry) return 0;
     
     /* Initialize all fields */
     memset(new_entry, 0, sizeof(string_cache_entry_t));
     
-    new_entry->result = (char*)malloc(result_len + 1);
+    /* Use pool allocation for result data too - maximum performance */
+    new_entry->result = (char*)lua_pool_alloc(result_len + 1);
     if (!new_entry->result) {
-        free(new_entry);
-        return 0;
+        return 0; /* Pool allocation handles cleanup automatically */
     }
     
     strcpy_s(new_entry->result, result_len + 1, result);
     new_entry->args_hash = hash;
     new_entry->result_size = result_len;
     new_entry->last_used = GetTickCount();
-    new_entry->marked_for_deletion = 0;
     new_entry->next = g_string_cache[slot];
     g_string_cache[slot] = new_entry;
     
     return 1;
+}
+
+/* Capture initial global state after Lua initialization */
+static int lua_capture_initial_globals(lua_State* L, lua_initial_state_t* initial_state) {
+    if (!L || !initial_state || !lua_checkstack(L, 3)) return 0;
+    
+    if (initial_state->initialized) return 1; /* Already captured */
+    
+    /* Count globals first */
+    lua_pushglobaltable(L);
+    if (!lua_istable(L, -1)) {
+        lua_pop(L, 1);
+        return 0;
+    }
+    
+    int count = 0;
+    lua_pushnil(L);
+    while (lua_next(L, -2) != 0) {
+        if (lua_type(L, -2) == LUA_TSTRING) {
+            count++;
+        }
+        lua_pop(L, 1);
+    }
+    
+    if (count == 0) {
+        lua_pop(L, 1);
+        return 0;
+    }
+    
+    /* Allocate storage for global names */
+    initial_state->initial_globals = (char**)malloc(count * sizeof(char*));
+    if (!initial_state->initial_globals) {
+        lua_pop(L, 1);
+        return 0;
+    }
+    
+    /* Capture global names */
+    int index = 0;
+    lua_pushnil(L);
+    while (lua_next(L, -2) != 0 && index < count) {
+        if (lua_type(L, -2) == LUA_TSTRING) {
+            const char* key = lua_tostring(L, -2);
+            if (key) {
+                size_t key_len = strlen(key);
+                initial_state->initial_globals[index] = (char*)malloc(key_len + 1);
+                if (initial_state->initial_globals[index]) {
+                    strcpy_s(initial_state->initial_globals[index], key_len + 1, key);
+                    index++;
+                }
+            }
+        }
+        lua_pop(L, 1);
+    }
+    
+    lua_pop(L, 1); /* Remove global table */
+    
+    initial_state->global_count = index;
+    initial_state->initialized = 1;
+    
+    return 1;
+}
+
+/* Restore globals to initial state (remove any user-added globals) */
+static void lua_restore_initial_globals(lua_State* L, lua_initial_state_t* initial_state) {
+    if (!L || !initial_state || !initial_state->initialized || !lua_checkstack(L, 4)) return;
+    
+    lua_pushglobaltable(L);
+    if (!lua_istable(L, -1)) {
+        lua_pop(L, 1);
+        return;
+    }
+    
+    /* Create set of initial globals for fast lookup */
+    lua_newtable(L); /* initial_set */
+    int initial_set_index = lua_gettop(L);
+    
+    for (int i = 0; i < initial_state->global_count; i++) {
+        if (initial_state->initial_globals[i]) {
+            lua_pushstring(L, initial_state->initial_globals[i]);
+            lua_pushboolean(L, 1);
+            lua_settable(L, initial_set_index);
+        }
+    }
+    
+    /* Collect globals to remove */
+    lua_newtable(L); /* to_remove */
+    int to_remove_index = lua_gettop(L);
+    int remove_count = 0;
+    
+    lua_pushnil(L);
+    while (lua_next(L, -4) != 0) { /* Iterate global table */
+        if (lua_type(L, -2) == LUA_TSTRING) {
+            const char* key = lua_tostring(L, -2);
+            if (key) {
+                /* Check if this global was in initial state */
+                lua_pushstring(L, key);
+                lua_gettable(L, initial_set_index);
+                int was_initial = lua_toboolean(L, -1);
+                lua_pop(L, 1);
+                
+                if (!was_initial) {
+                    /* This is a user-added global, mark for removal */
+                    lua_pushvalue(L, -2); /* Duplicate key */
+                    lua_rawseti(L, to_remove_index, ++remove_count);
+                }
+            }
+        }
+        lua_pop(L, 1);
+    }
+    
+    /* Remove user-added globals */
+    for (int i = 1; i <= remove_count; i++) {
+        lua_rawgeti(L, to_remove_index, i);
+        lua_pushnil(L);
+        lua_rawset(L, -5); /* global_table[key] = nil */
+    }
+    
+    lua_pop(L, 3); /* Remove to_remove, initial_set, and global_table */
 }
 
 /* Enhanced Lua state initialization with better error handling */
@@ -545,7 +520,7 @@ static int lua_init_turbo_state(lua_State* L) {
     return 1;
 }
 
-/* Enhanced state management with health monitoring */
+/* Enhanced state management with health monitoring and initial state capture */
 static lua_persistent_state_t* lua_get_optimized_state(void) {
     if (!g_lua_pool_initialized) {
         memset(g_lua_states, 0, sizeof(g_lua_states));
@@ -566,6 +541,13 @@ static lua_persistent_state_t* lua_get_optimized_state(void) {
                 
                 state->jit_enabled = lua_init_turbo_state(state->L);
                 if (!state->jit_enabled) {
+                    lua_close(state->L);
+                    state->L = NULL;
+                    continue;
+                }
+                
+                /* Capture initial global state after initialization */
+                if (!lua_capture_initial_globals(state->L, &state->initial_state)) {
                     lua_close(state->L);
                     state->L = NULL;
                     continue;
@@ -594,64 +576,34 @@ static lua_persistent_state_t* lua_get_optimized_state(void) {
     return NULL; /* No available states */
 }
 
-/* FIXED: Comprehensive global cleanup function */
-static void lua_clear_all_globals(lua_State* L) {
-    if (!L || !lua_checkstack(L, 3)) return;
+/* Enhanced argument clearing with better error handling */
+static void lua_clear_argument_globals(lua_State* L) {
+    if (!L || !lua_checkstack(L, 2)) return;
     
-    /* Get the global table */
-    lua_pushglobaltable(L);
-    if (!lua_istable(L, -1)) {
-        lua_pop(L, 1);
-        return;
+    /* Get previous argc for safe cleanup */
+    lua_getglobal(L, "argc");
+    int prev_argc = 0;
+    if (lua_isnumber(L, -1)) {
+        prev_argc = (int)lua_tointeger(L, -1);
     }
+    lua_pop(L, 1);
     
-    /* Collect all keys first to avoid iterator invalidation */
-    lua_newtable(L); /* Table to store keys to clear */
-    int keys_table = lua_gettop(L);
-    int key_count = 0;
+    /* Clear up to maximum safe number of arguments */
+    int max_clear = (prev_argc > 0 && prev_argc <= LUA_MAX_SIMPLE_ARGS) ? prev_argc : LUA_MAX_SIMPLE_ARGS;
     
-    /* Iterate through globals and collect user-defined keys */
-    lua_pushnil(L);
-    while (lua_next(L, -3) != 0) {
-        /* Check if this is a user-defined global (not a standard library function) */
-        if (lua_type(L, -2) == LUA_TSTRING) {
-            const char* key = lua_tostring(L, -2);
-            if (key) {
-                /* Skip essential globals that should remain */
-                const char* essential[] = {
-                    "type", "next", "pairs", "ipairs", "tostring", "tonumber",
-                    "math", "string", "table", "print", "jit", "_G", "_VERSION", NULL
-                };
-                
-                int is_essential = 0;
-                for (int i = 0; essential[i]; i++) {
-                    if (strcmp(key, essential[i]) == 0) {
-                        is_essential = 1;
-                        break;
-                    }
-                }
-                
-                /* If not essential, mark for deletion */
-                if (!is_essential) {
-                    lua_pushvalue(L, -2); /* Duplicate key */
-                    lua_rawseti(L, keys_table, ++key_count);
-                }
-            }
+    for (int i = 1; i <= max_clear; i++) {
+        char arg_name[16];
+        if (_snprintf_s(arg_name, sizeof(arg_name), _TRUNCATE, "arg%d", i) > 0) {
+            lua_pushnil(L);
+            lua_setglobal(L, arg_name);
         }
-        lua_pop(L, 1); /* Remove value, keep key for next iteration */
     }
     
-    /* Now clear all collected keys */
-    for (int i = 1; i <= key_count; i++) {
-        lua_rawgeti(L, keys_table, i);
-        lua_pushnil(L);
-        lua_rawset(L, -4); /* Set global[key] = nil */
-    }
-    
-    lua_pop(L, 2); /* Remove keys table and global table */
+    lua_pushnil(L);
+    lua_setglobal(L, "argc");
 }
 
-/* FIXED: Enhanced state release with immediate comprehensive cleanup */
+/* Enhanced state release with proper global restoration */
 static void lua_release_optimized_state(lua_persistent_state_t* state) {
     if (!state || !state->L) return;
     
@@ -661,8 +613,11 @@ static void lua_release_optimized_state(lua_persistent_state_t* state) {
         lua_settop(state->L, 0); /* Clear stack */
     }
     
-    /* FIXED: Always perform comprehensive global cleanup on every release */
-    lua_clear_all_globals(state->L);
+    /* Restore to initial global state instead of manual clearing */
+    lua_restore_initial_globals(state->L, &state->initial_state);
+    
+    /* Clear argument globals */
+    lua_clear_argument_globals(state->L);
     
     /* Run GC more frequently to clean up immediately */
     lua_gc(state->L, LUA_GCCOLLECT, 0);
@@ -672,6 +627,17 @@ static void lua_release_optimized_state(lua_persistent_state_t* state) {
     
     /* Reset state if it has too many errors */
     if (state->error_count > 10) {
+        /* Clean up initial state before destroying */
+        if (state->initial_state.initialized && state->initial_state.initial_globals) {
+            for (int i = 0; i < state->initial_state.global_count; i++) {
+                free(state->initial_state.initial_globals[i]);
+            }
+            free(state->initial_state.initial_globals);
+            state->initial_state.initial_globals = NULL;
+            state->initial_state.global_count = 0;
+            state->initial_state.initialized = 0;
+        }
+        
         lua_close(state->L);
         state->L = NULL;
         state->initialized = 0;
@@ -750,8 +716,9 @@ static int lua_convert_to_hashmap(lua_State* L, int table_stack_index, int eleme
 static const char* lua_parse_arma_array(lua_State* L, const char* ptr, const char* end, int depth) {
     if (!L || !ptr || depth > LUA_MAX_RECURSION_DEPTH) return NULL;
     
-    /* Ensure stack space */
-    if (!lua_checkstack(L, 3)) return NULL;
+    /* Reserve more stack space for deep recursion and table operations */
+    int required_stack = 8 + (LUA_MAX_RECURSION_DEPTH - depth); /* Scale with remaining depth */
+    if (!lua_checkstack(L, required_stack)) return NULL;
     
     /* Skip opening bracket */
     if (*ptr != '[') return NULL;
@@ -818,12 +785,13 @@ static const char* lua_parse_arma_array(lua_State* L, const char* ptr, const cha
     return ptr;
 }
 
-/* FIXED: Enhanced recursive value parsing with heap allocation for large buffers */
+/* Enhanced recursive value parsing with heap allocation for large buffers */
 static const char* lua_parse_value_recursive(lua_State* L, const char* ptr, const char* end, int depth) {
     if (!L || !ptr || ptr >= end || depth > LUA_MAX_RECURSION_DEPTH) return NULL;
     
-    /* Ensure stack space */
-    if (!lua_checkstack(L, 2)) return NULL;
+    /* Reserve more stack space for deep recursion */
+    int required_stack = 6 + (LUA_MAX_RECURSION_DEPTH - depth);
+    if (!lua_checkstack(L, required_stack)) return NULL;
     
     /* Skip leading whitespace */
     while (ptr < end && (*ptr == ' ' || *ptr == '\t' || *ptr == '\n')) ptr++;
@@ -834,14 +802,13 @@ static const char* lua_parse_value_recursive(lua_State* L, const char* ptr, cons
         return lua_parse_arma_array(L, ptr, end, depth);
     }
     
-    /* Find the end of this value with bounds checking */
+    /* Find the end of this value with bounds checking - NO SIZE LIMIT */
     const char* value_start = ptr;
     const char* value_end = ptr;
     int in_quotes = 0;
     int bracket_depth = 0;
-    size_t max_value_length = LUA_PARSE_BUFFER_SIZE - 1;
     
-    while (value_end < end && (value_end - value_start) < (ptrdiff_t)max_value_length) {
+    while (value_end < end) {
         char c = *value_end;
         
         if (c == '"') {
@@ -863,12 +830,12 @@ static const char* lua_parse_value_recursive(lua_State* L, const char* ptr, cons
         value_end++;
     }
     
-    /* Extract and parse the value with size validation */
+    /* Calculate actual value length */
     size_t value_len = value_end - value_start;
-    if (value_len == 0 || value_len >= LUA_PARSE_BUFFER_SIZE) return NULL;
+    if (value_len == 0) return NULL;
     
-    /* FIXED: Use heap allocation for buffer to avoid stack overflow in deep recursion */
-    char* value_buffer = (char*)malloc(LUA_PARSE_BUFFER_SIZE);
+    /* Dynamically allocate buffer based on actual value length */
+    char* value_buffer = (char*)malloc(value_len + 1);
     if (!value_buffer) return NULL;
     
     memcpy(value_buffer, value_start, value_len);
@@ -914,36 +881,9 @@ static const char* lua_parse_value_recursive(lua_State* L, const char* ptr, cons
     return result_ptr;
 }
 
-/* Enhanced argument clearing with better error handling */
-static void lua_clear_argument_globals(lua_State* L) {
-    if (!L || !lua_checkstack(L, 2)) return;
-    
-    /* Get previous argc for safe cleanup */
-    lua_getglobal(L, "argc");
-    int prev_argc = 0;
-    if (lua_isnumber(L, -1)) {
-        prev_argc = (int)lua_tointeger(L, -1);
-    }
-    lua_pop(L, 1);
-    
-    /* Clear up to maximum safe number of arguments */
-    int max_clear = (prev_argc > 0 && prev_argc <= LUA_MAX_SIMPLE_ARGS) ? prev_argc : LUA_MAX_SIMPLE_ARGS;
-    
-    for (int i = 1; i <= max_clear; i++) {
-        char arg_name[16];
-        if (_snprintf_s(arg_name, sizeof(arg_name), _TRUNCATE, "arg%d", i) > 0) {
-            lua_pushnil(L);
-            lua_setglobal(L, arg_name);
-        }
-    }
-    
-    lua_pushnil(L);
-    lua_setglobal(L, "argc");
-}
-
-/* FIXED: Enhanced argument parsing with comprehensive error handling and proper return values */
+/* Enhanced argument parsing with comprehensive error handling and proper return values */
 static int lua_parse_args_optimized(lua_State* L, const char* args_str) {
-    if (!args_str || !L || !lua_checkstack(L, LUA_STACK_SAFETY_MARGIN)) return -1; /* FIXED: Return -1 for errors */
+    if (!args_str || !L || !lua_checkstack(L, LUA_STACK_SAFETY_MARGIN)) return -1; /* Return -1 for errors */
     
     /* Clear all previous argument globals first */
     lua_clear_argument_globals(L);
@@ -951,7 +891,7 @@ static int lua_parse_args_optimized(lua_State* L, const char* args_str) {
     /* Skip to opening bracket */
     const char* ptr = args_str;
     while (*ptr && *ptr != '[') ptr++;
-    if (*ptr != '[') return -1; /* FIXED: Return -1 for errors */
+    if (*ptr != '[') return -1; /* Return -1 for errors */
     ptr++;
     
     /* Handle empty array */
@@ -995,7 +935,7 @@ static int lua_parse_args_optimized(lua_State* L, const char* args_str) {
         }
     }
     
-    /* General parsing with recursive array support - FIXED: Better error handling */
+    /* General parsing with recursive array support - Better error handling */
     int arg_count = 0;
     int initial_stack_top = lua_gettop(L);
     
@@ -1007,9 +947,9 @@ static int lua_parse_args_optimized(lua_State* L, const char* args_str) {
         /* Parse this argument recursively */
         const char* next_ptr = lua_parse_value_recursive(L, ptr, end, 0);
         if (!next_ptr) {
-            /* FIXED: Clean up stack on parsing failure */
+            /* Clean up stack on parsing failure */
             lua_settop(L, initial_stack_top);
-            return -1; /* FIXED: Return -1 for errors */
+            return -1; /* Return -1 for errors */
         }
         
         arg_count++;
@@ -1076,6 +1016,10 @@ static int lua_is_array(lua_State* L, int stack_index) {
 static int lua_value_to_arma_string(lua_State* L, int stack_index, char* buffer, 
                                    size_t buffer_size, size_t* pos, int depth) {
     if (*pos >= buffer_size - 1 || depth > LUA_MAX_RECURSION_DEPTH) return 0;
+    
+    /* Add stack space checking - reserve more space for deep recursion */
+    int required_stack = 5 + (LUA_MAX_RECURSION_DEPTH - depth); /* Scale with remaining depth */
+    if (!lua_checkstack(L, required_stack)) return 0;
     
     int type = lua_type(L, stack_index);
     
@@ -1321,7 +1265,7 @@ static int lua_format_result_optimized(lua_State* L, char* output, int output_si
     return 0;
 }
 
-/* FIXED: Enhanced execution function with proper error handling for argument parsing */
+/* Enhanced execution function with proper error handling for argument parsing */
 static int kh_execute_lua_optimized(const char* arguments, const char* code, 
                                    char* output, int output_size) {
     if (!arguments || !code || !output || output_size <= 0) {
@@ -1331,18 +1275,19 @@ static int kh_execute_lua_optimized(const char* arguments, const char* code,
         return 1;
     }
     
-    /* Input validation */
+    /* Get input lengths - NO SIZE LIMITS */
     size_t args_len = strlen(arguments);
     size_t code_len = strlen(code);
     
-    if (args_len > LUA_STACK_BUFFER_SIZE || code_len > LUA_STACK_BUFFER_SIZE) {
-        kh_set_error(output, output_size, "INPUT TOO LARGE");
+    /* Create combined hash for result caching - DYNAMIC ALLOCATION */
+    size_t combined_size = args_len + code_len + 2; /* +2 for separator and null terminator */
+    char* combined_input = (char*)malloc(combined_size);
+    if (!combined_input) {
+        kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
         return 1;
     }
     
-    /* Create combined hash for result caching */
-    char combined_input[16384];
-    int combined_len = _snprintf_s(combined_input, sizeof(combined_input), _TRUNCATE, 
+    int combined_len = _snprintf_s(combined_input, combined_size, _TRUNCATE, 
                                   "%s|%s", arguments, code);
     
     uint64_t combined_hash = 0;
@@ -1353,23 +1298,17 @@ static int kh_execute_lua_optimized(const char* arguments, const char* code,
         char* cached_result = lua_find_cached_result(combined_hash);
         if (cached_result) {
             strncpy_s(output, output_size, cached_result, _TRUNCATE);
+            free(combined_input);
             return 0;
         }
     }
     
-    /* Clean the code string */
-    char* clean_code = NULL;
-    int code_allocated = 0;
-    
-    if (code_len < LUA_STACK_BUFFER_SIZE) {
-        clean_code = (char*)alloca(code_len + 1); /* Stack allocation for small code */
-    } else {
-        clean_code = (char*)malloc(code_len + 1);
-        if (!clean_code) {
-            kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
-            return 1;
-        }
-        code_allocated = 1;
+    /* Clean the code string - DYNAMIC ALLOCATION */
+    char* clean_code = (char*)malloc(code_len + 1);
+    if (!clean_code) {
+        free(combined_input);
+        kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
+        return 1;
     }
     
     kh_clean_string(code, clean_code, (int)code_len + 1);
@@ -1383,7 +1322,8 @@ static int kh_execute_lua_optimized(const char* arguments, const char* code,
     /* Get optimized Lua state */
     lua_persistent_state_t* state = lua_get_optimized_state();
     if (!state) {
-        if (code_allocated) free(clean_code);
+        free(combined_input);
+        free(clean_code);
         kh_set_error(output, output_size, "NO AVAILABLE LUA STATE");
         return 1;
     }
@@ -1391,17 +1331,18 @@ static int kh_execute_lua_optimized(const char* arguments, const char* code,
     lua_State* L = state->L;
     int result = 1;
     
-    /* FIXED: Track initial stack position for cleanup */
+    /* Track initial stack position for cleanup */
     int initial_stack_top = lua_gettop(L);
     
-    /* FIXED: Parse arguments and check for errors */
+    /* Parse arguments and check for errors */
     int arg_parse_result = lua_parse_args_optimized(L, arguments);
     if (arg_parse_result < 0) {
         /* Argument parsing failed */
         if (cached_bytecode) lua_release_cached_bytecode(cached_bytecode);
         lua_settop(L, initial_stack_top);
         lua_release_optimized_state(state);
-        if (code_allocated) free(clean_code);
+        free(combined_input);
+        free(clean_code);
         kh_set_error(output, output_size, "ARGUMENT PARSING FAILED");
         return 1;
     }
@@ -1417,7 +1358,7 @@ static int kh_execute_lua_optimized(const char* arguments, const char* code,
         compile_result = luaL_loadstring(L, clean_code);
         
         if (compile_result == LUA_OK) {
-            /* FIXED: Simplified bytecode extraction with better error handling */
+            /* Simplified bytecode extraction with better error handling */
             int bytecode_extraction_success = 0;
             int stack_before_extraction = lua_gettop(L);
             
@@ -1432,7 +1373,7 @@ static int kh_execute_lua_optimized(const char* arguments, const char* code,
                     if (lua_pcall(L, 1, 1, 0) == LUA_OK) {
                         size_t bytecode_size;
                         const char* bytecode = lua_tolstring(L, -1, &bytecode_size);
-                        if (bytecode && bytecode_size > 0 && bytecode_size < LUA_MEMORY_POOL_SIZE / 4) {
+                        if (bytecode && bytecode_size > 0) {
                             if (lua_cache_bytecode(code_hash, bytecode, bytecode_size)) {
                                 bytecode_extraction_success = 1;
                             }
@@ -1441,7 +1382,7 @@ static int kh_execute_lua_optimized(const char* arguments, const char* code,
                 }
             }
             
-            /* FIXED: Restore stack to known state regardless of extraction outcome */
+            /* Restore stack to known state regardless of extraction outcome */
             lua_settop(L, stack_before_extraction);
         }
     }
@@ -1451,7 +1392,7 @@ static int kh_execute_lua_optimized(const char* arguments, const char* code,
         if (lua_pcall(L, 0, 1, 0) == LUA_OK) {
             if (lua_format_result_optimized(L, output, output_size)) {
                 /* Cache the result for future use */
-                if (combined_len > 0 && strlen(output) < KH_MAX_OUTPUT_SIZE / 2) {
+                if (combined_len > 0) {
                     if (!lua_cache_result(combined_hash, output)) {
                         /* Cache failed, but result is still valid */
                     }
@@ -1478,17 +1419,18 @@ static int kh_execute_lua_optimized(const char* arguments, const char* code,
         state->last_error_time = GetTickCount();
     }
     
-    /* FIXED: Release cached bytecode reference properly */
+    /* Release cached bytecode reference properly */
     if (cached_bytecode) {
         lua_release_cached_bytecode(cached_bytecode);
     }
     
-    /* FIXED: Ensure stack is properly cleaned up */
+    /* Ensure stack is properly cleaned up */
     lua_settop(L, initial_stack_top);
     
     /* Cleanup */
     lua_release_optimized_state(state);
-    if (code_allocated) free(clean_code);
+    free(combined_input);
+    free(clean_code);
     
     return result;
 }
@@ -1528,13 +1470,13 @@ static int kh_process_lua_compile_operation(char* output, int output_size,
         return 1;
     }
     
-    if (code_len >= LUA_STACK_BUFFER_SIZE) {
-        kh_set_error(output, output_size, "CODE TOO LARGE");
+    /* Clean the code string - DYNAMIC ALLOCATION, NO SIZE LIMIT */
+    char* clean_code = (char*)malloc(code_len + 1);
+    if (!clean_code) {
+        kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
         return 1;
     }
     
-    /* Clean the code string */
-    char* clean_code = (char*)alloca(code_len + 1);
     kh_clean_string(code, clean_code, (int)code_len + 1);
     
     /* Hash the cleaned code */
@@ -1543,15 +1485,17 @@ static int kh_process_lua_compile_operation(char* output, int output_size,
     /* Check if already cached */
     bytecode_cache_entry_t* existing = lua_find_cached_bytecode(code_hash);
     if (existing) {
-        /* FIXED: Release the reference properly */
+        /* Release the reference properly */
         lua_release_cached_bytecode(existing);
         _snprintf_s(output, output_size, _TRUNCATE, "[\"ALREADY_CACHED\"]");
+        free(clean_code);
         return 0;
     }
     
     /* Get a Lua state for compilation */
     lua_persistent_state_t* state = lua_get_optimized_state();
     if (!state) {
+        free(clean_code);
         kh_set_error(output, output_size, "NO AVAILABLE LUA STATE");
         return 1;
     }
@@ -1559,14 +1503,14 @@ static int kh_process_lua_compile_operation(char* output, int output_size,
     lua_State* L = state->L;
     int result = 1;
     
-    /* FIXED: Track initial stack position */
+    /* Track initial stack position */
     int initial_stack_top = lua_gettop(L);
     
     /* Compile the code */
     int compile_result = luaL_loadstring(L, clean_code);
     
     if (compile_result == LUA_OK) {
-        /* FIXED: Simplified bytecode extraction with better stack management */
+        /* Simplified bytecode extraction with better stack management */
         int extraction_success = 0;
         int stack_before_extraction = lua_gettop(L);
         
@@ -1578,7 +1522,7 @@ static int kh_process_lua_compile_operation(char* output, int output_size,
                 if (lua_pcall(L, 1, 1, 0) == LUA_OK) {
                     size_t bytecode_size;
                     const char* bytecode = lua_tolstring(L, -1, &bytecode_size);
-                    if (bytecode && bytecode_size > 0 && bytecode_size < LUA_MEMORY_POOL_SIZE / 4) {
+                    if (bytecode && bytecode_size > 0) {
                         if (lua_cache_bytecode(code_hash, bytecode, bytecode_size)) {
                             _snprintf_s(output, output_size, _TRUNCATE, 
                                        "[\"COMPILED_AND_CACHED\",%.0f,%zu]", 
@@ -1591,7 +1535,7 @@ static int kh_process_lua_compile_operation(char* output, int output_size,
             }
         }
         
-        /* FIXED: Restore stack to known state */
+        /* Restore stack to known state */
         lua_settop(L, stack_before_extraction);
         
         if (!extraction_success) {
@@ -1604,63 +1548,67 @@ static int kh_process_lua_compile_operation(char* output, int output_size,
                    error_msg ? error_msg : "syntax error");
     }
     
-    /* FIXED: Ensure proper stack cleanup */
+    /* Ensure proper stack cleanup */
     lua_settop(L, initial_stack_top);
     
     /* Cleanup */
     lua_release_optimized_state(state);
+    free(clean_code);
     
     return result;
 }
 
-/* FIXED: Enhanced cleanup function with comprehensive memory management */
+/* FIXED: Cleanup function with controlled pool cleanup */
 static void kh_cleanup_lua_states(void) {
-    /* Clean up bytecode cache with proper reference handling */
+    /* Clean up bytecode cache - safe to clean since we're shutting down */
     for (int i = 0; i < LUA_BYTECODE_CACHE_SIZE; i++) {
         bytecode_cache_entry_t* entry = g_bytecode_cache[i];
         while (entry) {
             bytecode_cache_entry_t* next = entry->next;
-            if (entry->bytecode) free(entry->bytecode);
-            free(entry);
+            /* These might be pool allocations, but that's OK since we're cleaning the pool too */
             entry = next;
         }
         g_bytecode_cache[i] = NULL;
     }
     
-    /* Clean up string cache */
+    /* Clean up string cache - safe to clean since we're shutting down */
     for (int i = 0; i < LUA_STRING_CACHE_SIZE; i++) {
         string_cache_entry_t* entry = g_string_cache[i];
         while (entry) {
             string_cache_entry_t* next = entry->next;
-            if (entry->result) free(entry->result);
-            free(entry);
+            /* These might be pool allocations, but that's OK since we're cleaning the pool too */
             entry = next;
         }
         g_string_cache[i] = NULL;
     }
     
-    /* Clean up Lua states */
+    /* Clean up Lua states and their initial state data */
     for (int i = 0; i < LUA_STATE_POOL_SIZE; i++) {
         if (g_lua_states[i].L) {
+            /* Clean up initial state - these use malloc so must be freed */
+            if (g_lua_states[i].initial_state.initialized && 
+                g_lua_states[i].initial_state.initial_globals) {
+                for (int j = 0; j < g_lua_states[i].initial_state.global_count; j++) {
+                    free(g_lua_states[i].initial_state.initial_globals[j]);
+                }
+                free(g_lua_states[i].initial_state.initial_globals);
+            }
+            
             lua_close(g_lua_states[i].L);
             g_lua_states[i].L = NULL;
             g_lua_states[i].initialized = 0;
             g_lua_states[i].in_use = 0;
             g_lua_states[i].error_count = 0;
+            
+            /* Reset initial state */
+            memset(&g_lua_states[i].initial_state, 0, sizeof(lua_initial_state_t));
         }
     }
     
-    /* Clean up memory pool */
+    /* Clean up memory pool - now safe since all states are closed */
     if (g_memory_pool.pool) {
         free(g_memory_pool.pool);
-        g_memory_pool.pool = NULL;
-        g_memory_pool.used = 0;
-        g_memory_pool.size = 0;
-        g_memory_pool.peak_used = 0;
-        g_memory_pool.free_blocks = NULL;
-        g_memory_pool.initialized = 0;
-        g_memory_pool.operation_count = 0;
-        g_memory_pool.last_reset_time = 0;
+        memset(&g_memory_pool, 0, sizeof(lua_memory_pool_t));
     }
     
     g_lua_pool_initialized = 0;

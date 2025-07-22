@@ -55,9 +55,10 @@
 #define LUA_BYTECODE_CACHE_SIZE 1024             /* Bytecode cache entries */
 #define LUA_STRING_CACHE_SIZE 512                /* Cached string results */
 #define LUA_MEMORY_POOL_SIZE (64 * 1024 * 1024)  /* 64MB memory pool */
-#define LUA_HASH_BUFFER_SIZE 32                  /* SHA-256 hash size */
 #define LUA_MAX_SIMPLE_ARGS 16                   /* Fast path argument limit */
-#define LUA_STACK_BUFFER_SIZE 8192               /* Stack-allocated buffer size */
+#define LUA_MAX_RECURSION_DEPTH 24        /* Reduced for safety */
+#define LUA_STACK_SAFETY_MARGIN 10        /* Safety margin for Lua stack */
+#define LUA_POOL_ALIGNMENT 16             /* Memory alignment for performance */
 
 /* Forward declarations */
 typedef struct kh_variable_s kh_variable_t;

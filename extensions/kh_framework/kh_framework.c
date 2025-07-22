@@ -49,7 +49,9 @@ static const function_info_t FUNCTION_TABLE[] = {
     {"LuaCompile", 1, 1, 'L'},
     {"LuaSetVariable", 3, 4, 'L'},
     {"LuaGetVariable", 1, 1, 'L'},
-    {"LuaDeleteVariable", 1, 1, 'L'}
+    {"LuaDeleteVariable", 1, 1, 'L'},
+    {"LuaClearVariables", 0, 0, 'L'},  /* NEW: Clear all persistent variables */
+    {"LuaClearFunctions", 0, 0, 'L'}   /* NEW: Clear all cached functions/bytecode */
 };
 
 static const int FUNCTION_COUNT = sizeof(FUNCTION_TABLE) / sizeof(function_info_t);
@@ -203,7 +205,7 @@ __declspec(dllexport) int RVExtensionArgs(char *output, unsigned int output_size
             }
             break;
 
-        case 'L': /* Lua operations */
+        case 'L': /* Lua operations - UPDATED with new functions */
             if (strcmp(function, "LuaOperation") == 0) {
                 function_result = kh_process_lua_operation(output, output_size, argv, argc);
             } else if (strcmp(function, "LuaCompile") == 0) {
@@ -214,6 +216,12 @@ __declspec(dllexport) int RVExtensionArgs(char *output, unsigned int output_size
                 function_result = kh_process_lua_get_variable_operation(output, output_size, argv, argc);
             } else if (strcmp(function, "LuaDeleteVariable") == 0) {
                 function_result = kh_process_lua_delete_variable_operation(output, output_size, argv, argc);
+            } else if (strcmp(function, "LuaClearVariables") == 0) {
+                /* NEW: Clear all persistent Lua variables */
+                function_result = kh_process_lua_clear_variables_operation(output, output_size, argv, argc);
+            } else if (strcmp(function, "LuaClearFunctions") == 0) {
+                /* NEW: Clear all cached Lua functions/bytecode */
+                function_result = kh_process_lua_clear_functions_operation(output, output_size, argv, argc);
             }
             break;
 

@@ -67,6 +67,13 @@ class CfgFunctions
 			class loadDisplay {};
 			class loadMissionState {};
 			class loadPlayerLoadouts {};
+			class luaClearFunctions {};
+			class luaClearVariables {};
+			class luaCompile {};
+			class luaDeleteVariable {};
+			class luaGetVariable {};
+			class luaOperation {};
+			class luaSetVariable {};
 			class manageHandler {};
 			class manageSimulatedInventory {};
 			class mathOperation {};

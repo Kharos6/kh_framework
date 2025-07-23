@@ -62,8 +62,6 @@ typedef enum {
     KH_TYPE_UNKNOWN_LOCAL = -1
 } kh_data_type_local_t;
 
-double strtod(const char* str, char** endptr);
-
 /* Initialize dynamic array */
 static inline int kh_init_dynamic_array(dynamic_array_t* arr, int initial_capacity) {
     if (!arr || initial_capacity <= 0) return 0;

@@ -120,6 +120,14 @@ static inline double kh_math_max(double a, double b) {
     return (a > b) ? a : b;
 }
 
+static inline double kh_floor(double x) {
+    return floor(x);
+}
+
+static inline double kh_ceil(double x) {
+    return ceil(x);
+}
+
 static inline double kh_math_clamp(double value, double min_val, double max_val) {
     if (value < min_val) return min_val;
     if (value > max_val) return max_val;
@@ -145,8 +153,8 @@ static const math_function_t KH_ALLOWED_MATH_FUNCTIONS[] = {
     {"log", 1, kh_safe_log, NULL, NULL},
     {"log10", 1, kh_safe_log10, NULL, NULL},
     {"exp", 1, exp, NULL, NULL},
-    {"floor", 1, floor, NULL, NULL},
-    {"ceil", 1, ceil, NULL, NULL},
+    {"floor", 1, kh_floor, NULL, NULL},
+    {"ceil", 1, kh_ceil, NULL, NULL},
     {"round", 1, round, NULL, NULL},
     {"trunc", 1, trunc, NULL, NULL},
     {"deg", 1, kh_radians_to_degrees, NULL, NULL},

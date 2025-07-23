@@ -1,10 +1,15 @@
 params ["_function"];
-private _parse = true;
 
-if (_function isEqualType "") then {
+private _parse = if (_function isEqualType "") then {
 	if (!(" " in _function) && !(".sqf" in _function)) then {
-		_parse = false;
+		false;
+	}
+	else {
+		true;
 	};
+}
+else {
+	true;
 };
 
 if !_parse exitWith {

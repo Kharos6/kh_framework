@@ -1,6 +1,6 @@
-params [["_value", true, ["", 0, true]]];
+params [["_value", false, ["", 0, true]]];
 
-private _result = switch _value do {
+switch _value do {
 	case true: {
 		true;
 	};

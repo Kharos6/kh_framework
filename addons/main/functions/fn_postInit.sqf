@@ -142,6 +142,10 @@ isNil {
 		};
 	
 		[] call KH_fnc_serverMissionLoadInit;
+
+		{
+			[[isServer, hasInterface], _x] call KH_fnc_luaOperation;
+		} forEach KH_var_loadInitLuaExecutions;
 		
 		[["KH FRAMEWORK - MISSION LOADED"], "systemChat", "GLOBAL", "THIS_FRAME"] call KH_fnc_execute;
 
@@ -199,12 +203,20 @@ isNil {
 
 	if (!isServer && !hasInterface) then {
 		["KH_eve_headlessPreloaded", [clientOwner]] call CBA_fnc_globalEvent;
+
+		{
+			[[isServer, hasInterface], _x] call KH_fnc_luaOperation;
+		} forEach KH_var_loadInitLuaExecutions;
 	};
 
 	{
 		_x params ["_arguments", "_function"];
 		_arguments call _function;
 	} forEach KH_var_postInitExecutions;
+
+	{
+		[[isServer, hasInterface], _x] call KH_fnc_luaOperation;
+	} forEach KH_var_postInitLuaExecutions;
 };
 
 nil;

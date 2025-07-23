@@ -1,8 +1,84 @@
 KH_var_currentPlayerUnit = objNull;
 KH_var_missionLoaded = false;
 KH_var_cachedFunctions = createHashMap;
+KH_var_cachedLuaFunctions = createHashMap;
+KH_var_cachedLuaEntities = createHashMap;
 KH_var_postInitExecutions = [];
+KH_var_preInitLuaExecutions = [];
+KH_var_postInitLuaExecutions = [];
+KH_var_loadInitLuaExecutions = [];
 KH_var_cbaEventHandlerStack = [];
+KH_var_isJip = false;
+call KH_fnc_luaClearVariables;
+call KH_fnc_luaClearFunctions;
+
+{
+    private _config = _x;
+    private _prefix = getText (_config >> "prefix");
+
+    {
+        private _function = if (isText (_x >> "path")) then {
+            preprocessFile ([(getText (_x >> "path")), "\", configName _x, ".lua"] joinString "");
+        }
+        else {
+            preprocessFile ([(getText (_config >> "path")), "\", configName _x, ".lua"] joinString "");
+        };
+
+        ("kh_framework" callExtension ["LuaCompile", [_function]]) params ["_result", "_returnCode"];
+
+        if ([_returnCode] call KH_fnc_parseBoolean) then {
+            diag_log (text ([_result, " | EXTENSION = kh_framework | FUNCTION = LuaCompile | ARGUMENTS = ", [_function]] joinString ""));
+            nil;
+        }
+        else {
+            KH_var_cachedLuaFunctions set [[_prefix, "lua", configName _x] joinString "_", _function];
+        };
+
+		if (isNumber (_x >> "preInit")) then {
+			if ((getNumber (_x >> "preInit")) == 1) then {
+        		KH_var_preInitLuaExecutions pushBack _function;
+			};
+        };
+
+		if (isNumber (_x >> "postInit")) then {
+			if ((getNumber (_x >> "postInit")) == 1) then {
+        		KH_var_postInitLuaExecutions pushBack _function;
+			};
+        };
+
+		if (isNumber (_x >> "loadInit")) then {
+			if ((getNumber (_x >> "loadInit")) == 1) then {
+        		KH_var_loadInitLuaExecutions pushBack _function;
+			};
+        };
+    } forEach ("true" configClasses _config);
+} forEach ("true" configClasses (missionConfigFile >> "CfgLuaFunctions"));
+
+{
+    private _config = _x;
+    private _prefix = getText (_config >> "prefix");
+
+    {
+        private _function = if (isText (_x >> "path")) then {
+            preprocessFile ([(getText (_x >> "path")), "\", configName _x, ".lua"] joinString "");
+        }
+        else {
+            preprocessFile ([(getText (_config >> "path")), "\", configName _x, ".lua"] joinString "");
+        };
+
+        ("kh_framework" callExtension ["LuaCompile", [_function]]) params ["_result", "_returnCode"];
+
+        if ([_returnCode] call KH_fnc_parseBoolean) then {
+            diag_log (text ([_result, " | EXTENSION = kh_framework | FUNCTION = LuaCompile | ARGUMENTS = ", [_function]] joinString ""));
+            nil;
+        }
+        else {
+            _cachedLuaFunctions set [[_prefix, "fnc", configName _x] joinString "_", _function];
+        };
+    } forEach ("true" configClasses _config);
+} forEach ("true" configClasses (configFile >> "CfgLuaFunctions"));
+
+uiNamespace setVariable ["KH_var_cachedLuaFunctions", KH_var_cachedLuaFunctions];
 
 KH_var_remoteExecCommandsMode = if (isNumber (missionConfigFile >> "CfgRemoteExec" >> "Commands" >> "mode")) then {
 	getNumber (missionConfigFile >> "CfgRemoteExec" >> "Commands" >> "mode");
@@ -36,7 +112,7 @@ if (KH_var_remoteExecCommandsMode == 1) then {
 				KH_var_remoteExecCommandsJipWhitelist set [toLower (configName _x), true];
 			};
 		};
-	} forEach ("true" configClasses (missionConfigFile >> "CfgRemoteExec" >> "Commands"));
+	} forEach ("true" configClasses (configFile >> "CfgRemoteExec" >> "Commands"));
 
 	{
 		if (isNumber (_x >> "allowedTargets")) then {
@@ -50,7 +126,7 @@ if (KH_var_remoteExecCommandsMode == 1) then {
 				KH_var_remoteExecCommandsJipWhitelist set [toLower (configName _x), true, true];
 			};
 		};
-	} forEach ("true" configClasses (configFile >> "CfgRemoteExec" >> "Commands"));
+	} forEach ("true" configClasses (missionConfigFile >> "CfgRemoteExec" >> "Commands"));
 };
 
 if (KH_var_remoteExecFunctionsMode == 1) then {
@@ -66,7 +142,7 @@ if (KH_var_remoteExecFunctionsMode == 1) then {
 				KH_var_remoteExecCommandsJipWhitelist set [toLower (configName _x), true];
 			};
 		};
-	} forEach ("true" configClasses (missionConfigFile >> "CfgRemoteExec" >> "Functions"));
+	} forEach ("true" configClasses (configFile >> "CfgRemoteExec" >> "Functions"));
 
 	{
 		if (isNumber (_x >> "allowedTargets")) then {
@@ -80,10 +156,42 @@ if (KH_var_remoteExecFunctionsMode == 1) then {
 				KH_var_remoteExecFunctionsJipWhitelist set [toLower (configName _x), true, true];
 			};
 		};
-	} forEach ("true" configClasses (configFile >> "CfgRemoteExec" >> "Functions"));
+	} forEach ("true" configClasses (missionConfigFile >> "CfgRemoteExec" >> "Functions"));
 };
 
+addMissionEventHandler [
+	"ExtensionCallback",
+	{
+		params ["_name", "_function", "_data"];
+
+		if (_name isEqualTo "kh_framework") then {
+			private _args = parseSimpleArray _data;
+			private _parsedArgs = [];
+
+			{
+				if (_x isEqualType "") then {
+					if ("KH_var_cachedLuaEntity_" in _x) then {
+						_parsedArgs pushBack (KH_var_cachedLuaEntities get _x);
+					}
+					else {
+						_parsedArgs pushBack _x;
+					};
+				}
+				else {
+					_parsedArgs pushBack _x;
+				};
+			} forEach _args;
+
+			[_parsedArgs, [_function] call KH_fnc_parseFunction, clientOwner] call KH_fnc_callParsedFunction;
+		};
+	}
+];
+
 ["KH_eve_executionGlobal", KH_fnc_callParsedFunction] call CBA_fnc_addEventHandler;
+
+{
+	[[isServer, hasInterface], _x] call KH_fnc_luaOperation;
+} forEach KH_var_preInitLuaExecutions;
 
 if isServer then {
 	KH_fnc_serverMissionStartInit = {};
@@ -656,7 +764,6 @@ if hasInterface then {
 		]
 	] call CBA_fnc_addKeybind;
 
-	KH_var_isJip = false;
 	KH_var_contextMenuOpen = false;
 	KH_var_interactionMenuOpen = false;
 	["KH_eve_executionPlayer", KH_fnc_callParsedFunction] call CBA_fnc_addEventHandler;
@@ -681,8 +788,12 @@ if hasInterface then {
 						(!(isNull player) && (alive player));
 					}, 
 					{
-						["KH_eve_playerLoaded", [player, clientOwner]] call CBA_fnc_globalEvent;					
+						["KH_eve_playerLoaded", [player, clientOwner]] call CBA_fnc_globalEvent;				
 						missionNamespace setVariable ["KH_var_playerWaiting", false];
+
+						{
+							[[isServer, hasInterface], _x] call KH_fnc_luaOperation;
+						} forEach KH_var_loadInitLuaExecutions;
 					},
 					[]
 				] call CBA_fnc_waitUntilAndExecute;
@@ -707,7 +818,6 @@ if hasInterface then {
 };
 
 if (!isServer && !hasInterface) then {
-	KH_var_isJip = false;
 	["KH_eve_executionHeadless", KH_fnc_callParsedFunction] call CBA_fnc_addEventHandler;
 };
 

@@ -51,13 +51,14 @@
 #define VECTOR_EPSILON 1e-9
 #define KH_MAX_FRAGMENTATION_RATIO 0.3  /* Compact when 30% fragmented */
 #define KH_MIN_COMPACTION_INTERVAL 60  /* Minimum 1 minute between compactions */
-#define LUA_STATE_POOL_SIZE 8                    /* Pool of reusable Lua states */
+#define LUA_STATE_POOL_SIZE 16                    /* Pool of reusable Lua states */
+#define LUA_STATE_KEEP_ALIVE_TIME 300000 /* Keep states alive for 5 minutes */
+#define LUA_MAX_CODE_HASHES_PER_STATE 100
 #define LUA_BYTECODE_CACHE_SIZE 1024             /* Bytecode cache entries */
 #define LUA_MEMORY_POOL_SIZE (128 * 1024 * 1024)  /* 64MB memory pool */
 #define LUA_MAX_SIMPLE_ARGS 64                   /* Fast path argument limit */
 #define LUA_MAX_RECURSION_DEPTH 24        /* Reduced for safety */
 #define LUA_STACK_SAFETY_MARGIN 10        /* Safety margin for Lua stack */
-#define LUA_POOL_ALIGNMENT 16             /* Memory alignment for performance */
 #define LUA_VAR_HASH_TABLE_MIN_SIZE 16
 #define LUA_VAR_HASH_TABLE_LOAD_FACTOR 0.5
 #define LUA_VAR_HASH_EMPTY 0

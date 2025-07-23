@@ -126,15 +126,6 @@ typedef struct bytecode_cache_entry_s {
     struct bytecode_cache_entry_s* next; 
 } bytecode_cache_entry_t;
 
-/* Simplified string result cache entry - removed deletion tracking and size limits */
-typedef struct string_cache_entry_s {
-    uint64_t args_hash;                  
-    char* result;                        
-    size_t result_size;                  
-    DWORD last_used;                     
-    struct string_cache_entry_s* next;   
-} string_cache_entry_t;
-
 /* Store initial globals state for restoration - FIXED: Track allocation success */
 typedef struct {
     char** initial_globals;     /* Array of initial global names */
@@ -187,12 +178,33 @@ typedef struct {
     int initialized;              /* Whether storage is initialized */
 } lua_variable_storage_t;
 
+/* Enhanced pool allocator that tracks allocation type */
+typedef struct {
+    void* ptr;
+    int is_malloc_fallback;
+} pool_alloc_result_t;
+
+/* Staged call structure for ArmaStageCall functionality */
+typedef struct {
+    char* arguments;  /* Arma format argument array string */
+    char* function;   /* Function name string */
+} staged_call_t;
+
+typedef struct {
+    staged_call_t* calls;
+    int count;
+    int capacity;
+    int initialized;
+} staged_calls_storage_t;
+
+/* Global staged calls storage */
+static staged_calls_storage_t g_staged_calls = {0};
+
 /* Global optimization caches - single-threaded, so no locking needed */
 static lua_persistent_state_t g_lua_states[LUA_STATE_POOL_SIZE] = {0};
 static int g_lua_pool_initialized = 0;
 
 static bytecode_cache_entry_t* g_bytecode_cache[LUA_BYTECODE_CACHE_SIZE] = {0};
-static string_cache_entry_t* g_string_cache[LUA_STRING_CACHE_SIZE] = {0};
 
 static lua_memory_pool_t g_memory_pool = {0};
 
@@ -419,6 +431,46 @@ static int lua_init_memory_pool(void) {
     g_memory_pool.creation_time = GetTickCount();
     
     return 1;
+}
+
+static pool_alloc_result_t lua_pool_alloc_tracked(size_t size) {
+    pool_alloc_result_t result = {NULL, 0};
+    
+    if (!g_memory_pool.initialized && !lua_init_memory_pool()) {
+        result.ptr = malloc(size);
+        result.is_malloc_fallback = 1;
+        return result;
+    }
+    
+    /* Align to POOL_ALIGNMENT-byte boundary for performance */
+    size = (size + LUA_POOL_ALIGNMENT - 1) & ~(LUA_POOL_ALIGNMENT - 1);
+    
+    /* Try to allocate from pool first */
+    if (g_memory_pool.used + size <= g_memory_pool.size) {
+        result.ptr = g_memory_pool.pool + g_memory_pool.used;
+        g_memory_pool.used += size;
+        g_memory_pool.operation_count++;
+        
+        /* Update peak usage tracking */
+        if (g_memory_pool.used > g_memory_pool.peak_used) {
+            g_memory_pool.peak_used = g_memory_pool.used;
+        }
+        
+        result.is_malloc_fallback = 0;
+        return result;
+    }
+    
+    /* Pool exhausted, fallback to system malloc */
+    result.ptr = malloc(size);
+    result.is_malloc_fallback = 1;
+    return result;
+}
+
+static void lua_safe_free_tracked(void* ptr, int is_malloc_fallback) {
+    if (ptr && is_malloc_fallback) {
+        free(ptr);
+    }
+    /* Pool allocations are not individually freed */
 }
 
 /* Persistent Lua variable management functions */
@@ -690,7 +742,7 @@ static int lua_set_variable(const char* name, const char* value, const char* typ
         g_lua_variable_storage.variable_capacity = new_capacity;
     }
     
-    /* FIXED: Allocate all memory first, then assign to avoid partial leaks */
+    /* FIXED: Allocate all memory first with comprehensive error handling */
     size_t name_len = strlen(name);
     size_t value_len = strlen(value);
     size_t type_len = strlen(type);
@@ -726,31 +778,31 @@ static int lua_set_variable(const char* name, const char* value, const char* typ
     
     /* Add to variables array */
     uint32_t var_index = g_lua_variable_storage.variable_count;
+    
+    /* FIXED: Add to hash table BEFORE updating the array to maintain consistency */
+    uint32_t name_hash = lua_hash_variable_name(name);
+    if (!lua_hash_table_insert_robin_hood(g_lua_variable_storage.hash_table.entries,
+                                         g_lua_variable_storage.hash_table.size, 
+                                         name_hash, var_index)) {
+        /* Hash table insertion failed - free allocated memory */
+        free(name_copy);
+        free(value_copy);
+        free(type_copy);
+        return 0;
+    }
+    
+    /* Now it's safe to update the array since hash table succeeded */
     g_lua_variable_storage.variables[var_index].name = name_copy;
     g_lua_variable_storage.variables[var_index].original_value = value_copy;
     g_lua_variable_storage.variables[var_index].type = type_copy;
     g_lua_variable_storage.variables[var_index].lua_type = var_type;
     g_lua_variable_storage.variable_count++;
-    
-    /* Add to hash table - now that we've already rebuilt if necessary */
-    uint32_t name_hash = lua_hash_variable_name(name);
-    if (!lua_hash_table_insert_robin_hood(g_lua_variable_storage.hash_table.entries,
-                                         g_lua_variable_storage.hash_table.size, 
-                                         name_hash, var_index)) {
-        /* Hash table insertion failed - rollback the variable addition */
-        g_lua_variable_storage.variable_count--;
-        free(name_copy);
-        free(value_copy);
-        free(type_copy);
-        memset(&g_lua_variable_storage.variables[var_index], 0, sizeof(lua_variable_t));
-        return 0;
-    }
-    
     g_lua_variable_storage.hash_table.used_count++;
+    
     return 1;
 }
 
-/* Forward declaration for recursive parsing with depth limiting */
+/* Forward declarations */
 static const char* lua_parse_value_recursive(lua_State* L, const char* ptr, const char* end, int depth);
 static void lua_release_optimized_state(lua_persistent_state_t* state);
 static lua_persistent_state_t* lua_get_optimized_state(void);
@@ -793,30 +845,35 @@ static int lua_delete_variable(const char* name) {
     free(var->original_value);
     free(var->type);
     
-    /* Remove from hash table */
+    /* Remove from hash table first */
     lua_hash_table_delete(g_lua_variable_storage.hash_table.entries,
                          g_lua_variable_storage.hash_table.size, name_hash);
     g_lua_variable_storage.hash_table.used_count--;
     g_lua_variable_storage.hash_table.deleted_count++;
     
-    /* Shift array elements */
-    for (uint32_t i = var_index; i < g_lua_variable_storage.variable_count - 1; i++) {
-        g_lua_variable_storage.variables[i] = g_lua_variable_storage.variables[i + 1];
-    }
+    /* FIXED: Use swap-with-last instead of shifting to avoid O(n) operations */
+    uint32_t last_index = g_lua_variable_storage.variable_count - 1;
     
-    /* Clear last element */
-    memset(&g_lua_variable_storage.variables[g_lua_variable_storage.variable_count - 1], 0, sizeof(lua_variable_t));
-    g_lua_variable_storage.variable_count--;
-    
-    /* Update hash table indices after array shift */
-    for (uint32_t i = 0; i < g_lua_variable_storage.hash_table.size; i++) {
-        if (g_lua_variable_storage.hash_table.entries[i].name_hash != LUA_VAR_HASH_EMPTY && 
-            !g_lua_variable_storage.hash_table.entries[i].deleted) {
-            if (g_lua_variable_storage.hash_table.entries[i].var_index > var_index) {
-                g_lua_variable_storage.hash_table.entries[i].var_index--;
+    if (var_index != last_index) {
+        /* Move last element to deleted position */
+        g_lua_variable_storage.variables[var_index] = g_lua_variable_storage.variables[last_index];
+        
+        /* Update hash table entry for the moved variable */
+        if (g_lua_variable_storage.variables[var_index].name) {
+            uint32_t moved_name_hash = lua_hash_variable_name(g_lua_variable_storage.variables[var_index].name);
+            int moved_found = 0;
+            uint32_t moved_hash_index = lua_hash_table_find_robin_hood(g_lua_variable_storage.hash_table.entries,
+                                                                      g_lua_variable_storage.hash_table.size, 
+                                                                      moved_name_hash, &moved_found);
+            if (moved_found && !g_lua_variable_storage.hash_table.entries[moved_hash_index].deleted) {
+                g_lua_variable_storage.hash_table.entries[moved_hash_index].var_index = var_index;
             }
         }
     }
+    
+    /* Clear last element */
+    memset(&g_lua_variable_storage.variables[last_index], 0, sizeof(lua_variable_t));
+    g_lua_variable_storage.variable_count--;
     
     /* Check if rebuild needed */
     if (lua_hash_table_needs_rebuild()) {
@@ -1170,36 +1227,45 @@ static int kh_process_lua_clear_variables_operation(char* output, int output_siz
     uint32_t cleared_count = 0;
     size_t memory_freed = 0;
     
-    /* Clear all persistent variables and track freed memory */
-    if (g_lua_variable_storage.initialized) {
+    /* FIXED: Clear all persistent variables with proper validation */
+    if (g_lua_variable_storage.initialized && g_lua_variable_storage.variables) {
         cleared_count = g_lua_variable_storage.variable_count;
         
         /* Free all variable data and calculate freed memory */
         for (uint32_t i = 0; i < g_lua_variable_storage.variable_count; i++) {
-            if (g_lua_variable_storage.variables[i].name) {
-                memory_freed += strlen(g_lua_variable_storage.variables[i].name) + 1;
-                free(g_lua_variable_storage.variables[i].name);
-                g_lua_variable_storage.variables[i].name = NULL;
+            lua_variable_t* var = &g_lua_variable_storage.variables[i];
+            if (var->name) {
+                memory_freed += strlen(var->name) + 1;
+                free(var->name);
+                var->name = NULL;
             }
-            if (g_lua_variable_storage.variables[i].original_value) {
-                memory_freed += strlen(g_lua_variable_storage.variables[i].original_value) + 1;
-                free(g_lua_variable_storage.variables[i].original_value);
-                g_lua_variable_storage.variables[i].original_value = NULL;
+            if (var->original_value) {
+                memory_freed += strlen(var->original_value) + 1;
+                free(var->original_value);
+                var->original_value = NULL;
             }
-            if (g_lua_variable_storage.variables[i].type) {
-                memory_freed += strlen(g_lua_variable_storage.variables[i].type) + 1;
-                free(g_lua_variable_storage.variables[i].type);
-                g_lua_variable_storage.variables[i].type = NULL;
+            if (var->type) {
+                memory_freed += strlen(var->type) + 1;
+                free(var->type);
+                var->type = NULL;
             }
+            var->lua_type = 0;
         }
         
         /* Reset counters */
         g_lua_variable_storage.variable_count = 0;
         
-        /* Clear and reset hash table efficiently */
-        if (g_lua_variable_storage.hash_table.entries) {
-            memset(g_lua_variable_storage.hash_table.entries, 0, 
-                   g_lua_variable_storage.hash_table.size * sizeof(lua_var_hash_entry_t));
+        /* FIXED: Clear and reset hash table safely */
+        if (g_lua_variable_storage.hash_table.entries && g_lua_variable_storage.hash_table.size > 0) {
+            /* Zero out all hash table entries */
+            for (uint32_t i = 0; i < g_lua_variable_storage.hash_table.size; i++) {
+                g_lua_variable_storage.hash_table.entries[i].name_hash = LUA_VAR_HASH_EMPTY;
+                g_lua_variable_storage.hash_table.entries[i].var_index = 0;
+                g_lua_variable_storage.hash_table.entries[i].deleted = 0;
+                g_lua_variable_storage.hash_table.entries[i].distance = 0;
+                g_lua_variable_storage.hash_table.entries[i].reserved = 0;
+                g_lua_variable_storage.hash_table.entries[i].padding = 0;
+            }
         }
         g_lua_variable_storage.hash_table.used_count = 0;
         g_lua_variable_storage.hash_table.deleted_count = 0;
@@ -1223,26 +1289,47 @@ static int kh_process_lua_clear_functions_operation(char* output, int output_siz
     }
     
     int bytecode_cleared = 0;
-    int string_cleared = 0;
     size_t pool_memory_freed = 0;
     
-    /* Count and clear bytecode cache entries - optimized with single loop */
+    /* FIXED: Properly clear bytecode cache entries with tracked memory management */
     for (int i = 0; i < LUA_BYTECODE_CACHE_SIZE; i++) {
-        if (g_bytecode_cache[i] != NULL) {
+        bytecode_cache_entry_t* entry = g_bytecode_cache[i];
+        while (entry) {
+            bytecode_cache_entry_t* next = entry->next;
             bytecode_cleared++;
+            
+            /* Free bytecode if it's system malloc (fallback allocation) */
+            if (entry->bytecode) {
+                /* Check if this looks like a pool address by examining the pointer range */
+                uintptr_t pool_start = (uintptr_t)g_memory_pool.pool;
+                uintptr_t pool_end = pool_start + g_memory_pool.size;
+                uintptr_t ptr_addr = (uintptr_t)entry->bytecode;
+                
+                /* If pointer is outside pool range, it's a malloc allocation */
+                if (g_memory_pool.pool == NULL || ptr_addr < pool_start || ptr_addr >= pool_end) {
+                    free(entry->bytecode);
+                }
+            }
+            
+            /* Free entry if it's outside pool range */
+            if (g_memory_pool.pool != NULL) {
+                uintptr_t pool_start = (uintptr_t)g_memory_pool.pool;
+                uintptr_t pool_end = pool_start + g_memory_pool.size;
+                uintptr_t entry_addr = (uintptr_t)entry;
+                
+                /* If entry is outside pool range, it's a malloc allocation */
+                if (entry_addr < pool_start || entry_addr >= pool_end) {
+                    free(entry);
+                }
+            } else {
+                /* Pool not initialized, assume malloc allocation */
+                free(entry);
+            }
+            
+            entry = next;
         }
+        g_bytecode_cache[i] = NULL;
     }
-    
-    /* Count and clear string result cache entries - optimized with single loop */
-    for (int i = 0; i < LUA_STRING_CACHE_SIZE; i++) {
-        if (g_string_cache[i] != NULL) {
-            string_cleared++;
-        }
-    }
-    
-    /* Clear caches efficiently with memset */
-    memset(g_bytecode_cache, 0, sizeof(g_bytecode_cache));
-    memset(g_string_cache, 0, sizeof(g_string_cache));
     
     /* Reset memory pool to beginning (this effectively "frees" all pool allocations) */
     if (g_memory_pool.initialized) {
@@ -1252,8 +1339,8 @@ static int kh_process_lua_clear_functions_operation(char* output, int output_siz
         /* Keep peak_used and creation_time for monitoring/debugging */
     }
     
-    _snprintf_s(output, output_size, _TRUNCATE, "[\"SUCCESS\",%d,%d,%zu]", 
-               bytecode_cleared, string_cleared, pool_memory_freed);
+    _snprintf_s(output, output_size, _TRUNCATE, "[\"SUCCESS\",%d,%zu]", 
+               bytecode_cleared, pool_memory_freed);
     return 0;
 }
 
@@ -1479,20 +1566,6 @@ static void* lua_pool_alloc(size_t size) {
     return malloc(size);
 }
 
-/* Simplified check for pool allocation */
-static int lua_is_pool_allocation(void* ptr) {
-    if (!ptr || !g_memory_pool.initialized || !g_memory_pool.pool) return 0;
-    
-    /* Check if pointer is within pool bounds AND pool is actually initialized */
-    if (g_memory_pool.size == 0) return 0;
-    
-    uintptr_t pool_start = (uintptr_t)g_memory_pool.pool;
-    uintptr_t pool_end = pool_start + g_memory_pool.size;
-    uintptr_t ptr_addr = (uintptr_t)ptr;
-    
-    return (ptr_addr >= pool_start && ptr_addr < pool_end) ? 1 : 0;
-}
-
 /* Enhanced print function for security */
 static int lua_secure_print_fast(lua_State* L) {
     /* Consume all arguments but produce no output for security */
@@ -1507,16 +1580,28 @@ static void* lua_custom_allocator(void* ud, void* ptr, size_t osize, size_t nsiz
     
     if (nsize == 0) {
         /* Free operation */
-        if (ptr && !lua_is_pool_allocation(ptr)) {
-            free(ptr); /* Only free system malloc allocations */
+        if (ptr) {
+            /* Check if pointer is within pool bounds */
+            int is_pool_ptr = 0;
+            if (g_memory_pool.initialized && g_memory_pool.pool && g_memory_pool.size > 0) {
+                uintptr_t pool_start = (uintptr_t)g_memory_pool.pool;
+                uintptr_t pool_end = pool_start + g_memory_pool.size;
+                uintptr_t ptr_addr = (uintptr_t)ptr;
+                is_pool_ptr = (ptr_addr >= pool_start && ptr_addr < pool_end);
+            }
+            
+            /* Only free system malloc allocations */
+            if (!is_pool_ptr) {
+                free(ptr);
+            }
         }
         /* Pool allocations are not individually freed */
         return NULL;
     } else if (ptr == NULL) {
-        /* Allocation */
+        /* Allocation - use simple pool allocation */
         return lua_pool_alloc(nsize);
     } else {
-        /* Reallocation - Fixed logic for proper data copying */
+        /* Reallocation - Fixed logic with proper pointer range checking */
         void* new_ptr = lua_pool_alloc(nsize);
         if (new_ptr && osize > 0) {
             /* Copy the smaller of old size or new size */
@@ -1524,14 +1609,30 @@ static void* lua_custom_allocator(void* ud, void* ptr, size_t osize, size_t nsiz
             memcpy(new_ptr, ptr, copy_size);
             
             /* Free old pointer if not from pool */
-            if (!lua_is_pool_allocation(ptr)) {
+            int is_old_pool_ptr = 0;
+            if (g_memory_pool.initialized && g_memory_pool.pool && g_memory_pool.size > 0) {
+                uintptr_t pool_start = (uintptr_t)g_memory_pool.pool;
+                uintptr_t pool_end = pool_start + g_memory_pool.size;
+                uintptr_t ptr_addr = (uintptr_t)ptr;
+                is_old_pool_ptr = (ptr_addr >= pool_start && ptr_addr < pool_end);
+            }
+            
+            if (!is_old_pool_ptr) {
                 free(ptr);
             }
             
             return new_ptr;
         } else if (new_ptr) {
             /* New allocation successful but no old data to copy */
-            if (!lua_is_pool_allocation(ptr)) {
+            int is_old_pool_ptr = 0;
+            if (g_memory_pool.initialized && g_memory_pool.pool && g_memory_pool.size > 0) {
+                uintptr_t pool_start = (uintptr_t)g_memory_pool.pool;
+                uintptr_t pool_end = pool_start + g_memory_pool.size;
+                uintptr_t ptr_addr = (uintptr_t)ptr;
+                is_old_pool_ptr = (ptr_addr >= pool_start && ptr_addr < pool_end);
+            }
+            
+            if (!is_old_pool_ptr) {
                 free(ptr);
             }
             return new_ptr;
@@ -1604,63 +1705,6 @@ static int lua_cache_bytecode(uint64_t hash, const char* bytecode, size_t size) 
     new_entry->last_used = GetTickCount();
     new_entry->next = g_bytecode_cache[slot];
     g_bytecode_cache[slot] = new_entry;
-    
-    return 1;
-}
-
-/* Simplified string result cache operations - unlimited caching */
-static char* lua_find_cached_result(uint64_t hash) {
-    if (!hash) return NULL;
-    
-    int slot = (int)(hash % LUA_STRING_CACHE_SIZE);
-    string_cache_entry_t* entry = g_string_cache[slot];
-    
-    while (entry) {
-        if (entry->args_hash == hash && entry->result) {
-            entry->last_used = GetTickCount();
-            return entry->result;
-        }
-        entry = entry->next;
-    }
-    
-    return NULL;
-}
-
-/* FIXED: High-performance result caching using pool allocation with proper error handling */
-static int lua_cache_result(uint64_t hash, const char* result) {
-    if (!result || !hash) return 0;
-    
-    size_t result_len = strlen(result);
-    if (result_len == 0) return 0;
-    
-    int slot = (int)(hash % LUA_STRING_CACHE_SIZE);
-    
-    /* Check if already exists to avoid duplicates */
-    string_cache_entry_t* existing = g_string_cache[slot];
-    while (existing) {
-        if (existing->args_hash == hash) {
-            return 1; /* Already cached */
-        }
-        existing = existing->next;
-    }
-    
-    /* FIXED: Allocate result first, then entry to avoid waste on failure */
-    char* cached_result = (char*)lua_pool_alloc(result_len + 1);
-    if (!cached_result) return 0;
-    
-    string_cache_entry_t* new_entry = (string_cache_entry_t*)lua_pool_alloc(sizeof(string_cache_entry_t));
-    if (!new_entry) return 0; /* Result already allocated but can't be freed - acceptable in pool system */
-    
-    /* Initialize all fields */
-    memset(new_entry, 0, sizeof(string_cache_entry_t));
-    
-    strcpy_s(cached_result, result_len + 1, result);
-    new_entry->result = cached_result;
-    new_entry->args_hash = hash;
-    new_entry->result_size = result_len;
-    new_entry->last_used = GetTickCount();
-    new_entry->next = g_string_cache[slot];
-    g_string_cache[slot] = new_entry;
     
     return 1;
 }
@@ -1738,7 +1782,235 @@ static int lua_setup_lazy_variable_injection(lua_State* L) {
     return 1;
 }
 
-/* FIXED: Enhanced Lua state initialization with Lua-callable functions registration */
+/* Initialize staged calls storage */
+static int lua_init_staged_calls_storage(void) {
+    if (g_staged_calls.initialized) return 1;
+    
+    g_staged_calls.capacity = 16;
+    g_staged_calls.calls = (staged_call_t*)calloc(g_staged_calls.capacity, sizeof(staged_call_t));
+    if (!g_staged_calls.calls) return 0;
+    
+    g_staged_calls.count = 0;
+    g_staged_calls.initialized = 1;
+    return 1;
+}
+
+/* Add a staged call with comprehensive error handling */
+static int lua_add_staged_call(const char* arguments, const char* function) {
+    if (!arguments || !function) return 0;
+    
+    /* Validate input lengths to prevent excessive memory usage */
+    size_t args_len = strlen(arguments);
+    size_t func_len = strlen(function);
+    
+    if (args_len == 0 || func_len == 0 || args_len > 32767 || func_len > 1023) {
+        return 0; /* Invalid input lengths */
+    }
+    
+    if (!lua_init_staged_calls_storage()) return 0;
+    
+    /* Prevent excessive staging (DoS protection) */
+    if (g_staged_calls.count >= 1000) return 0;
+    
+    /* Expand capacity if needed */
+    if (g_staged_calls.count >= g_staged_calls.capacity) {
+        /* Check for potential overflow */
+        if (g_staged_calls.capacity > INT_MAX / 2) return 0;
+        
+        int new_capacity = g_staged_calls.capacity * 2;
+        staged_call_t* new_calls = (staged_call_t*)realloc(g_staged_calls.calls, 
+                                                           new_capacity * sizeof(staged_call_t));
+        if (!new_calls) return 0;
+        
+        /* Initialize new memory */
+        memset(&new_calls[g_staged_calls.capacity], 0, 
+               (new_capacity - g_staged_calls.capacity) * sizeof(staged_call_t));
+        
+        g_staged_calls.calls = new_calls;
+        g_staged_calls.capacity = new_capacity;
+    }
+    
+    /* Allocate and copy strings - check both allocations before proceeding */
+    char* args_copy = (char*)malloc(args_len + 1);
+    char* func_copy = (char*)malloc(func_len + 1);
+    
+    if (!args_copy || !func_copy) {
+        free(args_copy);
+        free(func_copy);
+        return 0;
+    }
+    
+    strcpy_s(args_copy, args_len + 1, arguments);
+    strcpy_s(func_copy, func_len + 1, function);
+    
+    /* Store the staged call */
+    g_staged_calls.calls[g_staged_calls.count].arguments = args_copy;
+    g_staged_calls.calls[g_staged_calls.count].function = func_copy;
+    g_staged_calls.count++;
+    
+    return 1;
+}
+
+/* Clear all staged calls and free memory */
+static void lua_clear_staged_calls(void) {
+    if (!g_staged_calls.calls) return;
+    
+    for (int i = 0; i < g_staged_calls.count; i++) {
+        free(g_staged_calls.calls[i].arguments);
+        free(g_staged_calls.calls[i].function);
+        g_staged_calls.calls[i].arguments = NULL;
+        g_staged_calls.calls[i].function = NULL;
+    }
+    
+    g_staged_calls.count = 0;
+}
+
+/* Clean up staged calls storage completely */
+static void lua_cleanup_staged_calls_storage(void) {
+    lua_clear_staged_calls();
+    
+    if (g_staged_calls.calls) {
+        free(g_staged_calls.calls);
+        g_staged_calls.calls = NULL;
+    }
+    
+    g_staged_calls.capacity = 0;
+    g_staged_calls.initialized = 0;
+}
+
+/* Lua C function: ArmaStageCall(call_data) - Stage a call for later execution */
+static int lua_c_arma_stage_call(lua_State* L) {
+    /* Ensure adequate stack space */
+    if (!lua_checkstack(L, 6)) {
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "STACK OVERFLOW");
+        return 2;
+    }
+    
+    /* Validate argument count */
+    int argc = lua_gettop(L);
+    if (argc != 1) {
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "REQUIRES 1 ARGUMENT: {arguments, function}");
+        return 2;
+    }
+    
+    /* Validate argument is a table */
+    if (!lua_istable(L, 1)) {
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "ARGUMENT MUST BE AN ARRAY");
+        return 2;
+    }
+    
+    /* Track initial stack for cleanup */
+    int initial_stack = lua_gettop(L);
+    
+    /* Check that table has exactly 2 elements */
+    lua_rawgeti(L, 1, 1); /* arguments */
+    lua_rawgeti(L, 1, 2); /* function */
+    lua_rawgeti(L, 1, 3); /* should be nil */
+    
+    /* Validate structure: must have exactly 2 elements */
+    if (lua_isnil(L, -3) || lua_isnil(L, -2) || !lua_isnil(L, -1)) {
+        lua_settop(L, initial_stack);
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "ARRAY MUST HAVE EXACTLY 2 ELEMENTS: {arguments, function}");
+        return 2;
+    }
+    
+    lua_pop(L, 1); /* Remove the nil check result */
+    
+    /* Function must be string */
+    if (!lua_isstring(L, -1)) {
+        lua_settop(L, initial_stack);
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "FUNCTION PARAMETER MUST BE A STRING");
+        return 2;
+    }
+    
+    const char* function = lua_tostring(L, -1);
+    if (!function || strlen(function) == 0) {
+        lua_settop(L, initial_stack);
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "FUNCTION PARAMETER CANNOT BE EMPTY");
+        return 2;
+    }
+    
+    /* Clean the function string - use tracked allocation */
+    size_t function_len = strlen(function);
+    pool_alloc_result_t func_alloc = lua_pool_alloc_tracked(function_len + 1);
+    char* clean_function = (char*)func_alloc.ptr;
+    
+    if (!clean_function) {
+        lua_settop(L, initial_stack);
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "MEMORY ALLOCATION FAILED FOR FUNCTION STRING");
+        return 2;
+    }
+    
+    kh_clean_string(function, clean_function, (int)function_len + 1);
+    
+    /* Validate cleaned function */
+    if (strlen(clean_function) == 0) {
+        lua_settop(L, initial_stack);
+        lua_safe_free_tracked(clean_function, func_alloc.is_malloc_fallback);
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "FUNCTION PARAMETER CANNOT BE EMPTY AFTER CLEANING");
+        return 2;
+    }
+    
+    /* Convert arguments to Arma string format - use tracked allocation */
+    pool_alloc_result_t args_alloc = lua_pool_alloc_tracked(KH_MAX_OUTPUT_SIZE);
+    char* args_buffer = (char*)args_alloc.ptr;
+    
+    if (!args_buffer) {
+        lua_settop(L, initial_stack);
+        lua_safe_free_tracked(clean_function, func_alloc.is_malloc_fallback);
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "MEMORY ALLOCATION FAILED FOR ARGUMENTS BUFFER");
+        return 2;
+    }
+    
+    /* Convert arguments (at stack position -2) to string format */
+    if (!arma_convert_lua_data_to_string(L, -2, args_buffer, KH_MAX_OUTPUT_SIZE)) {
+        lua_settop(L, initial_stack);
+        lua_safe_free_tracked(clean_function, func_alloc.is_malloc_fallback);
+        lua_safe_free_tracked(args_buffer, args_alloc.is_malloc_fallback);
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "FAILED TO CONVERT ARGUMENTS TO ARMA FORMAT");
+        return 2;
+    }
+    
+    /* Validate converted arguments */
+    if (strlen(args_buffer) == 0) {
+        lua_settop(L, initial_stack);
+        lua_safe_free_tracked(clean_function, func_alloc.is_malloc_fallback);
+        lua_safe_free_tracked(args_buffer, args_alloc.is_malloc_fallback);
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "CONVERTED ARGUMENTS CANNOT BE EMPTY");
+        return 2;
+    }
+    
+    /* Add to staged calls */
+    if (!lua_add_staged_call(args_buffer, clean_function)) {
+        lua_settop(L, initial_stack);
+        lua_safe_free_tracked(clean_function, func_alloc.is_malloc_fallback);
+        lua_safe_free_tracked(args_buffer, args_alloc.is_malloc_fallback);
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "FAILED TO STAGE CALL - MEMORY EXHAUSTION OR TOO MANY STAGED CALLS");
+        return 2;
+    }
+    
+    /* Successful staging - restore stack and cleanup */
+    lua_settop(L, initial_stack);
+    lua_safe_free_tracked(clean_function, func_alloc.is_malloc_fallback);
+    lua_safe_free_tracked(args_buffer, args_alloc.is_malloc_fallback);
+    
+    /* Return success without values to stack (ArmaStageCall returns nothing) */
+    return 0;
+}
+
+/* Enhanced Lua state initialization with Lua-callable functions registration */
 static int lua_init_turbo_state(lua_State* L) {
     if (!L) return 0;
     
@@ -1878,6 +2150,10 @@ static int lua_init_turbo_state(lua_State* L) {
     lua_pushcfunction(L, lua_c_arma_call);
     lua_setglobal(L, "ArmaCall");
     
+    /* NEW: Register ArmaStageCall function */
+    lua_pushcfunction(L, lua_c_arma_stage_call);
+    lua_setglobal(L, "ArmaStageCall");
+    
     return 1;
 }
 
@@ -1942,18 +2218,8 @@ static lua_persistent_state_t* lua_get_optimized_state(void) {
 static void lua_clear_argument_globals(lua_State* L) {
     if (!L || !lua_checkstack(L, 2)) return;
     
-    /* Get previous argc for safe cleanup */
-    lua_getglobal(L, "argc");
-    int prev_argc = 0;
-    if (lua_isnumber(L, -1)) {
-        prev_argc = (int)lua_tointeger(L, -1);
-    }
-    lua_pop(L, 1);
-    
-    /* Clear up to maximum safe number of arguments */
-    int max_clear = (prev_argc > 0 && prev_argc <= LUA_MAX_SIMPLE_ARGS) ? prev_argc : LUA_MAX_SIMPLE_ARGS;
-    
-    for (int i = 1; i <= max_clear; i++) {
+    /* Always clear the maximum number of arguments to ensure no leftovers */
+    for (int i = 1; i <= LUA_MAX_SIMPLE_ARGS; i++) {
         char arg_name[16];
         if (_snprintf_s(arg_name, sizeof(arg_name), _TRUNCATE, "arg%d", i) > 0) {
             lua_pushnil(L);
@@ -1961,6 +2227,7 @@ static void lua_clear_argument_globals(lua_State* L) {
         }
     }
     
+    /* Clear argc */
     lua_pushnil(L);
     lua_setglobal(L, "argc");
 }
@@ -2463,10 +2730,10 @@ static int lua_value_to_arma_string(lua_State* L, int stack_index, char* buffer,
             
             size_t str_len = strlen(str);
             
-            /* FIXED: More precise bounds checking for string escaping */
-            size_t max_escaped_len = str_len * 2 + 2; /* Worst case: all quotes doubled plus outer quotes */
-            if (*pos + max_escaped_len >= buffer_size) {
-                /* Carefully fit what we can with proper bounds checking */
+            /* Enhanced bounds checking for string escaping */
+            size_t worst_case_len = str_len * 2 + 2; /* Worst case: all quotes doubled plus outer quotes */
+            if (*pos + worst_case_len >= buffer_size) {
+                /* Try to fit truncated string safely */
                 size_t remaining = buffer_size - *pos;
                 if (remaining < 3) return 0; /* Not enough space for even "" */
                 
@@ -2479,11 +2746,11 @@ static int lua_value_to_arma_string(lua_State* L, int stack_index, char* buffer,
                         buffer[(*pos)++] = '"';
                         buffer[(*pos)++] = '"';
                         remaining -= 2;
-                    } else if (str[i] != '"') {
+                    } else if (str[i] != '"' && remaining > 1) {
                         buffer[(*pos)++] = str[i];
                         remaining--;
                     } else {
-                        break; /* Not enough space for escaped quote */
+                        break; /* Not enough space */
                     }
                     i++;
                 }
@@ -2646,57 +2913,220 @@ static int lua_table_to_arma_recursive(lua_State* L, int stack_index, char* buff
 
 /* Enhanced result formatting with comprehensive error handling */
 static int lua_format_result_optimized(lua_State* L, char* output, int output_size) {
-    if (!L || !output || output_size <= 3) return 0;
+    if (!L || !output || output_size <= 10) return 0; /* Need space for [[], []] minimum */
     
-    if (!lua_checkstack(L, 2)) return 0;
+    if (!lua_checkstack(L, 3)) return 0;
     
-    /* Always start with opening bracket */
+    /* New format: [[result], [staged_calls]] */
     output[0] = '[';
     size_t pos = 1;
     
+    /* First element: [result] */
+    if (pos + 1 >= (size_t)output_size) {
+        strcpy_s(output, output_size, "[[nil], []]");
+        lua_clear_staged_calls();
+        return 1;
+    }
+    output[pos++] = '[';
+    
     int top = lua_gettop(L);
-    if (top == 0) {
-        /* No results, output [nil] */
-        if (pos + 4 < (size_t)output_size) {
-            strcpy_s(output + pos, output_size - pos, "nil]");
-            return 1;
-        }
-        return 0;
-    }
     
-    /* Store initial stack state for recovery */
-    int initial_top = top;
+    /* Calculate space needed for staged calls structure with overflow protection */
+    size_t staged_calls_space_needed = 2; /* [] minimum for empty staged calls */
     
-    /* Handle the top result with proper error recovery */
-    if (!lua_value_to_arma_string(L, -1, output, output_size, &pos, 0)) {
-        /* Ensure stack is restored on conversion failure */
-        lua_settop(L, initial_top);
+    /* Pre-calculate space needed for all staged calls with overflow checking */
+    for (int i = 0; i < g_staged_calls.count; i++) {
+        size_t current_call_space = 0;
         
-        /* Fallback for conversion failure */
-        const char* fallback = "nil";
-        size_t fallback_len = strlen(fallback);
-        if (pos + fallback_len + 1 < (size_t)output_size) {
-            memcpy(output + pos, fallback, fallback_len);
-            pos += fallback_len;
-        } else {
-            /* Even fallback doesn't fit, return minimal valid response */
-            strcpy_s(output, output_size, "[nil]");
+        if (i > 0) current_call_space += 1; /* comma separator */
+        current_call_space += 1; /* opening [ */
+        
+        size_t args_len = strlen(g_staged_calls.calls[i].arguments);
+        size_t func_len = strlen(g_staged_calls.calls[i].function);
+        
+        /* Check for overflow in individual components */
+        if (args_len > SIZE_MAX - current_call_space - 10) {
+            /* Space calculation would overflow, use fallback */
+            strcpy_s(output, output_size, "[[nil], []]");
+            lua_clear_staged_calls();
             return 1;
         }
+        
+        current_call_space += args_len;
+        current_call_space += 1; /* comma separator */
+        current_call_space += 2; /* opening and closing quotes for function */
+        
+        /* Calculate space needed for escaped function name with overflow protection */
+        size_t escaped_func_space = 0;
+        for (size_t j = 0; j < func_len; j++) {
+            if (g_staged_calls.calls[i].function[j] == '"') {
+                escaped_func_space += 2; /* escaped quote */
+            } else {
+                escaped_func_space += 1; /* regular char */
+            }
+            
+            /* Check for overflow in escaping calculation */
+            if (escaped_func_space > SIZE_MAX - current_call_space - 10) {
+                strcpy_s(output, output_size, "[[nil], []]");
+                lua_clear_staged_calls();
+                return 1;
+            }
+        }
+        
+        current_call_space += escaped_func_space;
+        current_call_space += 1; /* closing ] */
+        
+        /* Check for overflow in total space calculation */
+        if (staged_calls_space_needed > SIZE_MAX - current_call_space) {
+            strcpy_s(output, output_size, "[[nil], []]");
+            lua_clear_staged_calls();
+            return 1;
+        }
+        
+        staged_calls_space_needed += current_call_space;
     }
     
-    /* Close the array */
-    if (pos < (size_t)output_size) {
-        output[pos] = ']';
-        output[pos + 1] = '\0';
+    /* Reserve space for structure: ],[ and final ] */
+    size_t structure_overhead = 4;
+    size_t total_suffix_space = staged_calls_space_needed + structure_overhead;
+    
+    /* Check for overflow in total calculation */
+    if (staged_calls_space_needed > SIZE_MAX - structure_overhead) {
+        strcpy_s(output, output_size, "[[nil], []]");
+        lua_clear_staged_calls();
         return 1;
     }
     
-    /* Buffer too small for closing bracket */
-    if (output_size > 0) {
-        output[output_size - 1] = '\0'; /* Ensure null termination */
+    /* Calculate space available for result */
+    size_t max_result_space = (output_size > total_suffix_space + pos) ? 
+                             (output_size - total_suffix_space) : pos + 10; /* minimal fallback */
+    
+    if (top == 0) {
+        /* No results, output nil */
+        const char* nil_result = "nil";
+        size_t nil_len = strlen(nil_result);
+        if (pos + nil_len < max_result_space) {
+            memcpy(output + pos, nil_result, nil_len);
+            pos += nil_len;
+        } else {
+            /* Can't fit nil, use fallback */
+            strcpy_s(output, output_size, "[[nil], []]");
+            lua_clear_staged_calls();
+            return 1;
+        }
+    } else {
+        /* Handle the top result with calculated space */
+        size_t pos_before_result = pos;
+        if (!lua_value_to_arma_string(L, -1, output, (int)max_result_space, &pos, 0)) {
+            /* Result conversion failed or didn't fit, use fallback */
+            pos = pos_before_result;
+            const char* fallback = "nil";
+            size_t fallback_len = strlen(fallback);
+            if (pos + fallback_len < max_result_space) {
+                memcpy(output + pos, fallback, fallback_len);
+                pos += fallback_len;
+            } else {
+                /* Even fallback doesn't fit */
+                strcpy_s(output, output_size, "[[nil], []]");
+                lua_clear_staged_calls();
+                return 1;
+            }
+        }
     }
-    return 0;
+    
+    /* Close first element: ] */
+    if (pos + 1 >= (size_t)output_size) {
+        strcpy_s(output, output_size, "[[nil], []]");
+        lua_clear_staged_calls();
+        return 1;
+    }
+    output[pos++] = ']';
+    
+    /* Add comma separator */
+    if (pos + 1 >= (size_t)output_size) {
+        strcpy_s(output, output_size, "[[nil], []]");
+        lua_clear_staged_calls();
+        return 1;
+    }
+    output[pos++] = ',';
+    
+    /* Second element: [staged_calls] */
+    if (pos + 1 >= (size_t)output_size) {
+        strcpy_s(output, output_size, "[[nil], []]");
+        lua_clear_staged_calls();
+        return 1;
+    }
+    output[pos++] = '[';
+    
+    /* Check if we have enough space for all staged calls */
+    if (pos + staged_calls_space_needed + 1 > (size_t)output_size) {
+        /* Not enough space for staged calls, just close empty */
+        if (pos + 1 < (size_t)output_size) {
+            output[pos++] = ']';
+            if (pos + 1 < (size_t)output_size) {
+                output[pos++] = ']';
+                output[pos] = '\0';
+            } else {
+                output[output_size - 1] = '\0';
+            }
+        } else {
+            output[output_size - 1] = '\0';
+        }
+        lua_clear_staged_calls();
+        return 1;
+    }
+    
+    /* Add staged calls - now we know we have enough space */
+    for (int i = 0; i < g_staged_calls.count; i++) {
+        if (i > 0) {
+            output[pos++] = ',';
+        }
+        
+        /* Start staged call array */
+        output[pos++] = '[';
+        
+        /* Add arguments */
+        size_t args_len = strlen(g_staged_calls.calls[i].arguments);
+        memcpy(output + pos, g_staged_calls.calls[i].arguments, args_len);
+        pos += args_len;
+        
+        /* Add comma separator */
+        output[pos++] = ',';
+        
+        /* Add function as quoted string */
+        output[pos++] = '"';
+        
+        /* Add function with quote escaping - we know we have space */
+        const char* func_str = g_staged_calls.calls[i].function;
+        size_t func_len = strlen(func_str);
+        
+        for (size_t j = 0; j < func_len; j++) {
+            if (func_str[j] == '"') {
+                output[pos++] = '"';
+                output[pos++] = '"';
+            } else {
+                output[pos++] = func_str[j];
+            }
+        }
+        
+        /* Close function quote */
+        output[pos++] = '"';
+        
+        /* Close staged call array */
+        output[pos++] = ']';
+    }
+    
+    /* Close staged calls array */
+    output[pos++] = ']';
+    
+    /* Close main array */
+    output[pos++] = ']';
+    output[pos] = '\0';
+    
+    /* Clear staged calls after successful formatting */
+    lua_clear_staged_calls();
+    
+    return 1;
 }
 
 /* Enhanced execution function with proper error handling for argument parsing */
@@ -2710,62 +3140,25 @@ static int kh_execute_lua_optimized(const char* arguments, const char* code,
     }
     
     /* Get input lengths */
-    size_t args_len = strlen(arguments);
     size_t code_len = strlen(code);
     
-    /* Create combined hash for result caching - STACK/POOL ALLOCATION */
-    size_t combined_size = args_len + code_len + 2;
-    char stack_combined[2048];
-    char* combined_input = NULL;
-
-    if (combined_size <= sizeof(stack_combined)) {
-        combined_input = stack_combined;
-    } else {
-        combined_input = (char*)lua_pool_alloc(combined_size);
-        if (!combined_input) {
-            kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
-            return 1;
-        }
-    }
+    /* Clean the code string - use tracked allocation with safer size calculation */
+    pool_alloc_result_t code_alloc = lua_pool_alloc_tracked(code_len + 1);
+    char* clean_code = (char*)code_alloc.ptr;
     
-    int combined_len = _snprintf_s(combined_input, combined_size, _TRUNCATE, 
-                                  "%s|%s", arguments, code);
-    
-    uint64_t combined_hash = 0;
-    if (combined_len > 0) {
-        combined_hash = lua_hash_fnv1a(combined_input, combined_len);
-        
-        /* Check result cache first */
-        char* cached_result = lua_find_cached_result(combined_hash);
-        if (cached_result) {
-            strncpy_s(output, output_size, cached_result, _TRUNCATE);
-            /* Cleanup - check if allocations need freeing */
-            if (combined_input != stack_combined && !lua_is_pool_allocation(combined_input)) {
-                free(combined_input);
-            }
-            return 0;
-        }
-    }
-    
-    /* Clean the code string - STACK/POOL ALLOCATION */
-    char stack_code[1024];
-    char* clean_code = NULL;
-
-    if (code_len + 1 <= sizeof(stack_code)) {
-        clean_code = stack_code;
-    } else {
-        clean_code = (char*)lua_pool_alloc(code_len + 1);
-        if (!clean_code) {
-            /* Cleanup - check if allocations need freeing */
-            if (combined_input != stack_combined && !lua_is_pool_allocation(combined_input)) {
-                free(combined_input);
-            }
-            kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
-            return 1;
-        }
+    if (!clean_code) {
+        kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED FOR CODE");
+        return 1;
     }
     
     kh_clean_string(code, clean_code, (int)code_len + 1);
+    
+    /* Validate cleaned code is not empty */
+    if (strlen(clean_code) == 0) {
+        lua_safe_free_tracked(clean_code, code_alloc.is_malloc_fallback);
+        kh_set_error(output, output_size, "CODE CANNOT BE EMPTY AFTER CLEANING");
+        return 1;
+    }
     
     /* Hash the cleaned code for bytecode caching */
     uint64_t code_hash = lua_hash_fnv1a(clean_code, strlen(clean_code));
@@ -2776,13 +3169,7 @@ static int kh_execute_lua_optimized(const char* arguments, const char* code,
     /* Get optimized Lua state */
     lua_persistent_state_t* state = lua_get_optimized_state();
     if (!state) {
-        /* Cleanup - check if allocations need freeing */
-        if (combined_input != stack_combined && !lua_is_pool_allocation(combined_input)) {
-            free(combined_input);
-        }
-        if (clean_code != stack_code && !lua_is_pool_allocation(clean_code)) {
-            free(clean_code);
-        }
+        lua_safe_free_tracked(clean_code, code_alloc.is_malloc_fallback);
         kh_set_error(output, output_size, "NO AVAILABLE LUA STATE");
         return 1;
     }
@@ -2800,13 +3187,7 @@ static int kh_execute_lua_optimized(const char* arguments, const char* code,
         if (cached_bytecode) lua_release_cached_bytecode(cached_bytecode);
         lua_settop(L, initial_stack_top);
         lua_release_optimized_state(state);
-        /* Cleanup - check if allocations need freeing */
-        if (combined_input != stack_combined && !lua_is_pool_allocation(combined_input)) {
-            free(combined_input);
-        }
-        if (clean_code != stack_code && !lua_is_pool_allocation(clean_code)) {
-            free(clean_code);
-        }
+        lua_safe_free_tracked(clean_code, code_alloc.is_malloc_fallback);
         kh_set_error(output, output_size, "ARGUMENT PARSING FAILED");
         return 1;
     }
@@ -2823,7 +3204,6 @@ static int kh_execute_lua_optimized(const char* arguments, const char* code,
         
         if (compile_result == LUA_OK) {
             /* Simplified bytecode extraction with better error handling */
-            int bytecode_extraction_success = 0;
             int stack_before_extraction = lua_gettop(L);
             
             /* Try to extract bytecode for caching */
@@ -2838,9 +3218,7 @@ static int kh_execute_lua_optimized(const char* arguments, const char* code,
                         size_t bytecode_size;
                         const char* bytecode = lua_tolstring(L, -1, &bytecode_size);
                         if (bytecode && bytecode_size > 0) {
-                            if (lua_cache_bytecode(code_hash, bytecode, bytecode_size)) {
-                                bytecode_extraction_success = 1;
-                            }
+                            lua_cache_bytecode(code_hash, bytecode, bytecode_size);
                         }
                     }
                 }
@@ -2855,12 +3233,6 @@ static int kh_execute_lua_optimized(const char* arguments, const char* code,
         /* Execute with error handling */
         if (lua_pcall(L, 0, 1, 0) == LUA_OK) {
             if (lua_format_result_optimized(L, output, output_size)) {
-                /* Cache the result for future use */
-                if (combined_len > 0) {
-                    if (!lua_cache_result(combined_hash, output)) {
-                        /* Cache failed, but result is still valid */
-                    }
-                }
                 result = 0; /* Success */
             } else {
                 kh_set_error(output, output_size, "RESULT FORMAT FAILED");
@@ -2893,13 +3265,7 @@ static int kh_execute_lua_optimized(const char* arguments, const char* code,
     
     /* Cleanup */
     lua_release_optimized_state(state);
-    /* Cleanup - check if allocations need freeing */
-    if (combined_input != stack_combined && !lua_is_pool_allocation(combined_input)) {
-        free(combined_input);
-    }
-    if (clean_code != stack_code && !lua_is_pool_allocation(clean_code)) {
-        free(clean_code);
-    }
+    lua_safe_free_tracked(clean_code, code_alloc.is_malloc_fallback);
     
     return result;
 }
@@ -2939,21 +3305,23 @@ static int kh_process_lua_compile_operation(char* output, int output_size,
         return 1;
     }
     
-    /* Clean the code string - STACK/POOL ALLOCATION */
-    char stack_code[1024];
-    char* clean_code = NULL;
-
-    if (code_len + 1 <= sizeof(stack_code)) {
-        clean_code = stack_code;
-    } else {
-        clean_code = (char*)lua_pool_alloc(code_len + 1);
-        if (!clean_code) {
-            kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
-            return 1;
-        }
+    /* Clean the code string - use tracked allocation */
+    pool_alloc_result_t code_alloc = lua_pool_alloc_tracked(code_len + 1);
+    char* clean_code = (char*)code_alloc.ptr;
+    
+    if (!clean_code) {
+        kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
+        return 1;
     }
     
     kh_clean_string(code, clean_code, (int)code_len + 1);
+    
+    /* Validate cleaned code is not empty */
+    if (strlen(clean_code) == 0) {
+        lua_safe_free_tracked(clean_code, code_alloc.is_malloc_fallback);
+        kh_set_error(output, output_size, "CODE CANNOT BE EMPTY AFTER CLEANING");
+        return 1;
+    }
     
     /* Hash the cleaned code */
     uint64_t code_hash = lua_hash_fnv1a(clean_code, strlen(clean_code));
@@ -2964,20 +3332,14 @@ static int kh_process_lua_compile_operation(char* output, int output_size,
         /* Release the reference properly */
         lua_release_cached_bytecode(existing);
         _snprintf_s(output, output_size, _TRUNCATE, "[\"ALREADY_CACHED\"]");
-        /* Cleanup - check if allocations need freeing */
-        if (clean_code != stack_code && !lua_is_pool_allocation(clean_code)) {
-            free(clean_code);
-        }
+        lua_safe_free_tracked(clean_code, code_alloc.is_malloc_fallback);
         return 0;
     }
     
     /* Get a Lua state for compilation */
     lua_persistent_state_t* state = lua_get_optimized_state();
     if (!state) {
-        /* Cleanup - check if allocations need freeing */
-        if (clean_code != stack_code && !lua_is_pool_allocation(clean_code)) {
-            free(clean_code);
-        }
+        lua_safe_free_tracked(clean_code, code_alloc.is_malloc_fallback);
         kh_set_error(output, output_size, "NO AVAILABLE LUA STATE");
         return 1;
     }
@@ -3035,10 +3397,7 @@ static int kh_process_lua_compile_operation(char* output, int output_size,
     
     /* Cleanup */
     lua_release_optimized_state(state);
-    /* Cleanup - check if allocations need freeing */
-    if (clean_code != stack_code && !lua_is_pool_allocation(clean_code)) {
-        free(clean_code);
-    }
+    lua_safe_free_tracked(clean_code, code_alloc.is_malloc_fallback);
     
     return result;
 }
@@ -3161,48 +3520,47 @@ static int lua_c_arma_call(lua_State* L) {
     }
     
     const char* function = lua_tostring(L, 2);
-    if (!function || strlen(function) == 0) {
+    if (!function) {
         lua_pushboolean(L, 0);
         lua_pushstring(L, "FUNCTION CANNOT BE EMPTY");
         return 2;
     }
     
-    /* Clean the function string - STACK/POOL ALLOCATION */
+    /* Cache string length to avoid multiple strlen calls */
     size_t function_len = strlen(function);
-    char stack_function[256];
-    char* clean_function = NULL;
+    if (function_len == 0) {
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "FUNCTION CANNOT BE EMPTY");
+        return 2;
+    }
     
-    if (function_len + 1 <= sizeof(stack_function)) {
-        clean_function = stack_function;
-    } else {
-        clean_function = (char*)lua_pool_alloc(function_len + 1);
-        if (!clean_function) {
-            lua_pushboolean(L, 0);
-            lua_pushstring(L, "MEMORY ALLOCATION FAILED");
-            return 2;
-        }
+    /* Clean the function string - use tracked allocation */
+    pool_alloc_result_t func_alloc = lua_pool_alloc_tracked(function_len + 1);
+    char* clean_function = (char*)func_alloc.ptr;
+    
+    if (!clean_function) {
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "MEMORY ALLOCATION FAILED FOR FUNCTION");
+        return 2;
     }
     
     kh_clean_string(function, clean_function, (int)function_len + 1);
     
-    /* Validate cleaned function */
-    if (strlen(clean_function) == 0) {
-        /* Cleanup - check if allocation needs freeing */
-        if (clean_function != stack_function && !lua_is_pool_allocation(clean_function)) {
-            free(clean_function);
-        }
+    /* Cache cleaned string length to avoid strlen call */
+    size_t clean_function_len = strlen(clean_function);
+    if (clean_function_len == 0) {
+        lua_safe_free_tracked(clean_function, func_alloc.is_malloc_fallback);
         lua_pushboolean(L, 0);
         lua_pushstring(L, "FUNCTION CANNOT BE EMPTY AFTER CLEANING");
         return 2;
     }
     
-    /* Convert data to Arma format - POOL ALLOCATION for performance */
-    char* data_buffer = (char*)lua_pool_alloc(KH_MAX_OUTPUT_SIZE);
+    /* Convert data to Arma format - use tracked allocation */
+    pool_alloc_result_t data_alloc = lua_pool_alloc_tracked(KH_MAX_OUTPUT_SIZE);
+    char* data_buffer = (char*)data_alloc.ptr;
+    
     if (!data_buffer) {
-        /* Cleanup - check if allocation needs freeing */
-        if (clean_function != stack_function && !lua_is_pool_allocation(clean_function)) {
-            free(clean_function);
-        }
+        lua_safe_free_tracked(clean_function, func_alloc.is_malloc_fallback);
         lua_pushboolean(L, 0);
         lua_pushstring(L, "DATA BUFFER ALLOCATION FAILED");
         return 2;
@@ -3210,11 +3568,8 @@ static int lua_c_arma_call(lua_State* L) {
     
     /* Convert the first argument (data) to Arma array format */
     if (!arma_convert_lua_data_to_string(L, 1, data_buffer, KH_MAX_OUTPUT_SIZE)) {
-        /* Cleanup - data_buffer is pool allocated, no explicit free needed */
-        /* Cleanup - check if allocation needs freeing */
-        if (clean_function != stack_function && !lua_is_pool_allocation(clean_function)) {
-            free(clean_function);
-        }
+        lua_safe_free_tracked(data_buffer, data_alloc.is_malloc_fallback);
+        lua_safe_free_tracked(clean_function, func_alloc.is_malloc_fallback);
         lua_pushboolean(L, 0);
         lua_pushstring(L, "DATA CONVERSION FAILED");
         return 2;
@@ -3223,10 +3578,8 @@ static int lua_c_arma_call(lua_State* L) {
     /* Validate converted data length */
     size_t data_len = strlen(data_buffer);
     if (data_len == 0) {
-        /* Cleanup - check if allocation needs freeing */
-        if (clean_function != stack_function && !lua_is_pool_allocation(clean_function)) {
-            free(clean_function);
-        }
+        lua_safe_free_tracked(data_buffer, data_alloc.is_malloc_fallback);
+        lua_safe_free_tracked(clean_function, func_alloc.is_malloc_fallback);
         lua_pushboolean(L, 0);
         lua_pushstring(L, "CONVERTED DATA IS EMPTY");
         return 2;
@@ -3237,11 +3590,9 @@ static int lua_c_arma_call(lua_State* L) {
     int callback_success = arma_callback_safe_call(data_buffer, clean_function, 
                                                   error_buffer, sizeof(error_buffer));
     
-    /* Cleanup function buffer - check if allocation needs freeing */
-    if (clean_function != stack_function && !lua_is_pool_allocation(clean_function)) {
-        free(clean_function);
-    }
-    /* data_buffer cleanup not needed - pool allocated */
+    /* Cleanup all tracked allocations */
+    lua_safe_free_tracked(data_buffer, data_alloc.is_malloc_fallback);
+    lua_safe_free_tracked(clean_function, func_alloc.is_malloc_fallback);
     
     /* Return results to Lua */
     if (callback_success) {
@@ -3269,41 +3620,51 @@ static void kh_cleanup_lua_states(void) {
         memset(&g_lua_variable_storage, 0, sizeof(g_lua_variable_storage));
     }
     
-    /* FIXED: Clean up bytecode cache with proper memory management */
+    /* Clean up staged calls storage */
+    lua_cleanup_staged_calls_storage();
+    
+    /* FIXED: Clean up bytecode cache with tracked memory management */
     for (int i = 0; i < LUA_BYTECODE_CACHE_SIZE; i++) {
         bytecode_cache_entry_t* entry = g_bytecode_cache[i];
         while (entry) {
             bytecode_cache_entry_t* next = entry->next;
-            /* Free system malloc allocations that fell back when pool was full */
-            if (entry->bytecode && !lua_is_pool_allocation(entry->bytecode)) {
+            
+            /* Free bytecode if it's system malloc (fallback allocation) */
+            if (entry->bytecode && g_memory_pool.pool != NULL) {
+                uintptr_t pool_start = (uintptr_t)g_memory_pool.pool;
+                uintptr_t pool_end = pool_start + g_memory_pool.size;
+                uintptr_t ptr_addr = (uintptr_t)entry->bytecode;
+                
+                /* If pointer is outside pool range, it's a malloc allocation */
+                if (ptr_addr < pool_start || ptr_addr >= pool_end) {
+                    free(entry->bytecode);
+                }
+            } else if (entry->bytecode && g_memory_pool.pool == NULL) {
+                /* Pool not initialized, assume malloc allocation */
                 free(entry->bytecode);
             }
-            if (!lua_is_pool_allocation(entry)) {
+            
+            /* Free entry if it's outside pool range */
+            if (g_memory_pool.pool != NULL) {
+                uintptr_t pool_start = (uintptr_t)g_memory_pool.pool;
+                uintptr_t pool_end = pool_start + g_memory_pool.size;
+                uintptr_t entry_addr = (uintptr_t)entry;
+                
+                /* If entry is outside pool range, it's a malloc allocation */
+                if (entry_addr < pool_start || entry_addr >= pool_end) {
+                    free(entry);
+                }
+            } else {
+                /* Pool not initialized, assume malloc allocation */
                 free(entry);
             }
+            
             entry = next;
         }
         g_bytecode_cache[i] = NULL;
     }
     
-    /* FIXED: Clean up string cache with proper memory management */
-    for (int i = 0; i < LUA_STRING_CACHE_SIZE; i++) {
-        string_cache_entry_t* entry = g_string_cache[i];
-        while (entry) {
-            string_cache_entry_t* next = entry->next;
-            /* Free system malloc allocations that fell back when pool was full */
-            if (entry->result && !lua_is_pool_allocation(entry->result)) {
-                free(entry->result);
-            }
-            if (!lua_is_pool_allocation(entry)) {
-                free(entry);
-            }
-            entry = next;
-        }
-        g_string_cache[i] = NULL;
-    }
-    
-    /* Clean up Lua states and their initial state data properly */
+    /* Clean up Lua states */
     for (int i = 0; i < LUA_STATE_POOL_SIZE; i++) {
         if (g_lua_states[i].L) {
             /* Clean up initial state with proper pointer checking */

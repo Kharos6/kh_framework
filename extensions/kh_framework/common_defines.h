@@ -53,9 +53,8 @@
 #define KH_MIN_COMPACTION_INTERVAL 60  /* Minimum 1 minute between compactions */
 #define LUA_STATE_POOL_SIZE 8                    /* Pool of reusable Lua states */
 #define LUA_BYTECODE_CACHE_SIZE 1024             /* Bytecode cache entries */
-#define LUA_STRING_CACHE_SIZE 512                /* Cached string results */
 #define LUA_MEMORY_POOL_SIZE (128 * 1024 * 1024)  /* 64MB memory pool */
-#define LUA_MAX_SIMPLE_ARGS 16                   /* Fast path argument limit */
+#define LUA_MAX_SIMPLE_ARGS 64                   /* Fast path argument limit */
 #define LUA_MAX_RECURSION_DEPTH 24        /* Reduced for safety */
 #define LUA_STACK_SAFETY_MARGIN 10        /* Safety margin for Lua stack */
 #define LUA_POOL_ALIGNMENT 16             /* Memory alignment for performance */

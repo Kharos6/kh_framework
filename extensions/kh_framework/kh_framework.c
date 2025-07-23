@@ -50,8 +50,7 @@ static const function_info_t FUNCTION_TABLE[] = {
     {"LuaSetVariable", 3, 4, 'L'},
     {"LuaGetVariable", 1, 1, 'L'},
     {"LuaDeleteVariable", 1, 1, 'L'},
-    {"LuaClearVariables", 0, 0, 'L'},
-    {"LuaClearFunctions", 0, 0, 'L'}
+    {"LuaClearVariables", 0, 0, 'L'}
 };
 
 static const int FUNCTION_COUNT = sizeof(FUNCTION_TABLE) / sizeof(function_info_t);
@@ -220,9 +219,6 @@ __declspec(dllexport) int RVExtensionArgs(char *output, unsigned int output_size
             } else if (strcmp(function, "LuaClearVariables") == 0) {
                 /* NEW: Clear all persistent Lua variables */
                 function_result = kh_process_lua_clear_variables_operation(output, output_size, argv, argc);
-            } else if (strcmp(function, "LuaClearFunctions") == 0) {
-                /* NEW: Clear all cached Lua functions/bytecode */
-                function_result = kh_process_lua_clear_functions_operation(output, output_size, argv, argc);
             }
             break;
 

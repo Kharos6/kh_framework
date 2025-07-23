@@ -190,8 +190,16 @@ static inline int kh_set_parser_error(parser_context_t* ctx, const char* format,
                          (size_t)(ctx->error_msg_capacity - prefix_len), 
                          _TRUNCATE, format, args);
         } else {
-            /* Fallback to minimal error message */
-            kh_set_parser_error(ctx, "MEMORY ERROR");
+            /* Fallback to minimal error message - maintain KH_ERROR: format */
+            if (ctx->error_msg_capacity >= 21) { /* "KH_ERROR: MEMORY ERR" */
+                strcpy_s(ctx->error_msg, (size_t)ctx->error_msg_capacity, "KH_ERROR: MEMORY ERR");
+            } else if (ctx->error_msg_capacity >= 15) { /* "KH_ERROR: ERR" */
+                strcpy_s(ctx->error_msg, (size_t)ctx->error_msg_capacity, "KH_ERROR: ERR");
+            } else if (ctx->error_msg_capacity >= 11) { /* "KH_ERROR: " */
+                strcpy_s(ctx->error_msg, (size_t)ctx->error_msg_capacity, "KH_ERROR: ");
+            } else if (ctx->error_msg_capacity >= 1) {
+                ctx->error_msg[0] = '\0'; /* Empty string as last resort */
+            }
         }
         va_end(args);
         return 1;
@@ -217,9 +225,15 @@ static inline int kh_set_parser_error(parser_context_t* ctx, const char* format,
         
         if (new_capacity <= 0) { /* Integer overflow check */
             ctx->allocation_failed = 1;
-            /* Ensure we have some error message */
-            if (ctx->error_msg && ctx->error_msg_capacity > 20) {
-                kh_set_parser_error(ctx, "MEMORY ERROR");
+            /* Ensure we have some error message with proper format */
+            if (ctx->error_msg && ctx->error_msg_capacity >= 21) {
+                strcpy_s(ctx->error_msg, (size_t)ctx->error_msg_capacity, "KH_ERROR: MEMORY ERR");
+            } else if (ctx->error_msg && ctx->error_msg_capacity >= 15) {
+                strcpy_s(ctx->error_msg, (size_t)ctx->error_msg_capacity, "KH_ERROR: ERR");
+            } else if (ctx->error_msg && ctx->error_msg_capacity >= 11) {
+                strcpy_s(ctx->error_msg, (size_t)ctx->error_msg_capacity, "KH_ERROR: ");
+            } else if (ctx->error_msg && ctx->error_msg_capacity >= 1) {
+                ctx->error_msg[0] = '\0';
             }
             return 0;
         }
@@ -237,8 +251,16 @@ static inline int kh_set_parser_error(parser_context_t* ctx, const char* format,
                     strcpy_s(ctx->error_msg, (size_t)ctx->error_msg_capacity, KH_ERROR_PREFIX);
                     _vsnprintf_s(ctx->error_msg + prefix_len, (size_t)available_space, _TRUNCATE, format, args);
                 } else {
-                    /* Not enough space even for prefix, use minimal error */
-                    kh_set_parser_error(ctx, "MEMORY ERROR");
+                    /* Not enough space even for prefix, use minimal error with proper format */
+                    if (ctx->error_msg_capacity >= 21) {
+                        strcpy_s(ctx->error_msg, (size_t)ctx->error_msg_capacity, "KH_ERROR: MEMORY ERR");
+                    } else if (ctx->error_msg_capacity >= 15) {
+                        strcpy_s(ctx->error_msg, (size_t)ctx->error_msg_capacity, "KH_ERROR: ERR");
+                    } else if (ctx->error_msg_capacity >= 11) {
+                        strcpy_s(ctx->error_msg, (size_t)ctx->error_msg_capacity, "KH_ERROR: ");
+                    } else if (ctx->error_msg_capacity >= 1) {
+                        ctx->error_msg[0] = '\0';
+                    }
                 }
                 va_end(args);
             }
@@ -251,9 +273,14 @@ static inline int kh_set_parser_error(parser_context_t* ctx, const char* format,
     
     /* Write the prefix first */
     if (strcpy_s(ctx->error_msg, (size_t)ctx->error_msg_capacity, KH_ERROR_PREFIX) != 0) {
-        /* strcpy_s failed, set minimal error */
-        ctx->error_msg[0] = 'E';
-        ctx->error_msg[1] = '\0';
+        /* strcpy_s failed, set minimal error with proper format */
+        if (ctx->error_msg_capacity >= 15) {
+            strcpy_s(ctx->error_msg, (size_t)ctx->error_msg_capacity, "KH_ERROR: ERR");
+        } else if (ctx->error_msg_capacity >= 11) {
+            strcpy_s(ctx->error_msg, (size_t)ctx->error_msg_capacity, "KH_ERROR: ");
+        } else if (ctx->error_msg_capacity >= 1) {
+            ctx->error_msg[0] = '\0';
+        }
         return 0;
     }
     

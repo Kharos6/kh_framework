@@ -26,12 +26,6 @@
 #define LUA_OK 0
 #endif
 
-/* Simplified memory tracking - reduced overhead */
-typedef struct pool_block_s {
-    size_t size;
-    struct pool_block_s* next;
-} pool_block_t;
-
 /* High-performance FNV-1a hash implementation - consistent with crypto_operations.h */
 static inline uint64_t lua_hash_fnv1a(const void* data, size_t len) {
     const uint8_t* bytes = (const uint8_t*)data;
@@ -116,14 +110,6 @@ typedef struct {
     int needs_rebuild;       /* Flag to indicate if rebuild is needed */
 } lua_var_hash_table_t;
 
-/* Store initial globals state for restoration - FIXED: Track allocation success */
-typedef struct {
-    char** initial_globals;     /* Array of initial global names */
-    int* allocation_success;    /* Track which allocations succeeded */
-    int global_count;          /* Number of initial globals */
-    int initialized;           /* Whether initial state is captured */
-} lua_initial_state_t;
-
 /* Enhanced persistent Lua state with better error tracking and initial state management */
 typedef struct {
     lua_State* L;                        
@@ -138,8 +124,7 @@ typedef struct {
     DWORD creation_time;
     int error_count;                     
     DWORD last_error_time;               
-    DWORD last_cleanup_time;
-    lua_initial_state_t initial_state;  
+    DWORD last_cleanup_time; 
 } lua_persistent_state_t;
 
 /* Structure to hold persistent Lua variables accessible across all states */
@@ -158,12 +143,6 @@ typedef struct {
     lua_var_hash_table_t hash_table; /* Hash table for fast lookup */
     int initialized;              /* Whether storage is initialized */
 } lua_variable_storage_t;
-
-/* Enhanced pool allocator that tracks allocation type */
-typedef struct {
-    void* ptr;
-    int is_malloc_fallback;
-} pool_alloc_result_t;
 
 /* Staged call structure for ArmaStageCall functionality */
 typedef struct {
@@ -1192,48 +1171,6 @@ static int kh_process_lua_clear_variables_operation(char* output, int output_siz
     return 0;
 }
 
-/* NEW: LuaClearFunctions operation - Clear all cached functions */
-static int kh_process_lua_clear_functions_operation(char* output, int output_size, 
-                                                   const char** argv, int argc) {
-    if (!output || output_size <= 0) return 1;
-    
-    output[0] = '\0';
-    
-    if (argc != 0) {
-        kh_set_error(output, output_size, "REQUIRES 0 ARGUMENTS");
-        return 1;
-    }
-    
-    int states_reset = 0;
-    
-    /* Reset all Lua states to clear JIT compilations */
-    for (int i = 0; i < LUA_STATE_POOL_SIZE; i++) {
-        lua_persistent_state_t* state = &g_lua_states[i];
-        if (state->initialized && state->L && !state->in_use) {
-            /* Close and reinitialize state to clear JIT cache */
-            if (state->initial_state.initialized) {
-                if (state->initial_state.initial_globals && 
-                    state->initial_state.allocation_success) {
-                    for (int j = 0; j < state->initial_state.global_count; j++) {
-                        if (state->initial_state.allocation_success[j]) {
-                            free(state->initial_state.initial_globals[j]);
-                        }
-                    }
-                }
-                free(state->initial_state.initial_globals);
-            }
-            
-            free(state->code_hashes);
-            lua_close(state->L);
-            memset(state, 0, sizeof(lua_persistent_state_t));
-            states_reset++;
-        }
-    }
-    
-    _snprintf_s(output, output_size, _TRUNCATE, "[\"SUCCESS\",%d]", states_reset);
-    return 0;
-}
-
 /* FIXED: Enhanced LuaSetVariable operation - Set persistent Lua variable with overwrite support */
 static int kh_process_lua_set_variable_operation(char* output, int output_size, 
                                                 const char** argv, int argc) {
@@ -1475,11 +1412,7 @@ static int lua_variable_change_handler(lua_State* L) {
     const char* var_name = lua_tostring(L, 2);
     
     /* Perform the actual assignment first */
-    lua_rawset(L, 1);
-    
-    /* Note: We could mark variables as dirty here for persistence,
-       but that would require additional implementation */
-    
+    lua_rawset(L, 1);    
     return 0;
 }
 
@@ -1778,12 +1711,12 @@ static int lua_init_turbo_state(lua_State* L) {
             lua_pushstring(L, "callunroll=5");     /* Call unrolling */
             
             /* Increase memory limits for complex traces */
-            lua_pushstring(L, "maxmcode=1024");    /* More machine code memory */
-            lua_pushstring(L, "maxtrace=2000");    /* More traces */
-            lua_pushstring(L, "maxrecord=8000");   /* Longer traces */
-            lua_pushstring(L, "maxirconst=2000");  /* More constants */
-            lua_pushstring(L, "maxside=200");      /* More side exits */
-            lua_pushstring(L, "maxsnap=1000");     /* More snapshots */
+            lua_pushstring(L, "maxmcode=8192");    /* More machine code memory */
+            lua_pushstring(L, "maxtrace=6000");    /* More traces */
+            lua_pushstring(L, "maxrecord=12000");   /* Longer traces */
+            lua_pushstring(L, "maxirconst=3000");  /* More constants */
+            lua_pushstring(L, "maxside=300");      /* More side exits */
+            lua_pushstring(L, "maxsnap=1500");     /* More snapshots */
             
             if (lua_pcall(L, 13, 0, 0) != LUA_OK) {
                 lua_pop(L, 2);
@@ -1807,6 +1740,8 @@ static int lua_init_turbo_state(lua_State* L) {
             lua_pushstring(L, "+sink");     /* Allocation/store sinking */
             lua_pushstring(L, "+fuse");     /* Fusion of operands into instructions */
             lua_pushstring(L, "+fold");     /* Constant folding */
+            lua_pushstring(L, "+phielim");  /* PHI elimination */
+            lua_pushstring(L, "+split");    /* Split optimizations */
             
             if (lua_pcall(L, 10, 0, 0) != LUA_OK) {
                 lua_pop(L, 1); /* Continue on optimization failure */
@@ -1966,7 +1901,26 @@ static lua_persistent_state_t* lua_get_optimized_state_with_affinity(uint64_t co
         
         return selected_state;
     }
-    
+
+    int available_states = 0;
+    for (int i = 0; i < LUA_STATE_POOL_SIZE; i++) {
+        if (!g_lua_states[i].in_use) available_states++;
+    }
+
+    /* If pool pressure is high, aggressively clean old states */
+    if (available_states < LUA_STATE_POOL_SIZE / 4) { /* Less than 25% available */
+        DWORD aggressive_timeout = 1000; /* 1 second under pressure */
+        for (int i = 0; i < LUA_STATE_POOL_SIZE; i++) {
+            lua_persistent_state_t* state = &g_lua_states[i];
+            if (!state->in_use && state->L && 
+                (current_time - state->last_used_time) > aggressive_timeout) {
+                lua_close(state->L);
+                free(state->code_hashes);
+                memset(state, 0, sizeof(lua_persistent_state_t));
+            }
+        }
+    }
+
     return NULL;
 }
 
@@ -1993,6 +1947,8 @@ static void lua_release_optimized_state(lua_persistent_state_t* state) {
     if (!state || !state->L) return;
     
     DWORD current_time = GetTickCount();
+    DWORD time_since_last_use = current_time - state->last_used_time;
+    DWORD state_age = current_time - state->creation_time;
     
     /* Clear stack but preserve global state and JIT compilations */
     int stack_top = lua_gettop(state->L);
@@ -2006,20 +1962,26 @@ static void lua_release_optimized_state(lua_persistent_state_t* state) {
     /* Increment execution count for tracking JIT warmup */
     state->execution_count++;
     
-    /* Only do garbage collection periodically to preserve JIT data */
-    DWORD time_since_cleanup = current_time - state->last_cleanup_time;
-    if (time_since_cleanup > 60000) { /* Only GC every minute */
-        lua_gc(state->L, LUA_GCCOLLECT, 0);
-        state->last_cleanup_time = current_time;
+    /* Adaptive cleanup based on usage patterns */
+    int should_reset = 0;
+    
+    /* Always reset on excessive errors */
+    if (state->error_count > 20 || state_age > 600000 || (state->execution_count > 1 && time_since_last_use > 120000) || (state->execution_count == 1 && time_since_last_use > 30000) || (state->execution_count < 5 && time_since_last_use > 60000)) {
+        should_reset = 1;
     }
     
-    /* Reset state if it has too many errors or is very old */
-    DWORD state_age = current_time - state->creation_time;
-    if (state->error_count > 20 || state_age > 3600000) { /* 1 hour max age */
+    if (should_reset) {
         lua_close(state->L);
         free(state->code_hashes);
         memset(state, 0, sizeof(lua_persistent_state_t));
         return;
+    }
+    
+    /* Periodic garbage collection for active states */
+    DWORD time_since_cleanup = current_time - state->last_cleanup_time;
+    if (time_since_cleanup > 60000) { /* GC every minute for active states */
+        lua_gc(state->L, LUA_GCCOLLECT, 0);
+        state->last_cleanup_time = current_time;
     }
     
     state->in_use = 0;
@@ -3057,73 +3019,6 @@ static int kh_process_lua_operation(char* output, int output_size,
     return kh_execute_lua_optimized(argv[0], argv[1], output, output_size);
 }
 
-/* Enhanced compile operation with better error handling */
-static int kh_process_lua_compile_operation(char* output, int output_size, 
-                                          const char** argv, int argc) {
-    if (!output || output_size <= 0) return 1;
-    
-    output[0] = '\0';
-    
-    if (argc < 1 || !argv || !argv[0]) {
-        kh_set_error(output, output_size, "REQUIRES 1 ARGUMENT: [CODE]");
-        return 1;
-    }
-    
-    const char* code = argv[0];
-    size_t code_len = strlen(code);
-    
-    if (code_len == 0) {
-        kh_set_error(output, output_size, "CODE CANNOT BE EMPTY");
-        return 1;
-    }
-    
-    char* clean_code = (char*)malloc(code_len + 1);
-    if (!clean_code) {
-        kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
-        return 1;
-    }
-    
-    kh_clean_string(code, clean_code, (int)code_len + 1);
-    
-    if (strlen(clean_code) == 0) {
-        free(clean_code);
-        kh_set_error(output, output_size, "CODE CANNOT BE EMPTY AFTER CLEANING");
-        return 1;
-    }
-    
-    /* Get a state for syntax validation */
-    uint64_t code_hash = lua_hash_fnv1a(clean_code, strlen(clean_code));
-    lua_persistent_state_t* state = lua_get_optimized_state_with_affinity(code_hash);
-    if (!state) {
-        free(clean_code);
-        kh_set_error(output, output_size, "NO AVAILABLE LUA STATE");
-        return 1;
-    }
-    
-    lua_State* L = state->L;
-    int result = 1;
-    int initial_stack_top = lua_gettop(L);
-    
-    /* Just check syntax - LuaJIT will handle compilation internally */
-    int compile_result = luaL_loadstring(L, clean_code);
-    
-    if (compile_result == LUA_OK) {
-        _snprintf_s(output, output_size, _TRUNCATE, "[\"SYNTAX_VALID\"]");
-        result = 0;
-    } else {
-        const char* error_msg = lua_tostring(L, -1);
-        _snprintf_s(output, output_size, _TRUNCATE, 
-                   KH_ERROR_PREFIX "SYNTAX: %s", 
-                   error_msg ? error_msg : "syntax error");
-    }
-    
-    lua_settop(L, initial_stack_top);
-    lua_release_optimized_state(state);
-    free(clean_code);
-    
-    return result;
-}
-
 /* High-performance Lua data to Arma string conversion with enhanced error handling */
 static int arma_convert_lua_data_to_string(lua_State* L, int stack_index, char* output, int output_size) {
     if (!L || !output || output_size <= 3) return 0;
@@ -3208,6 +3103,101 @@ static int arma_callback_safe_call(const char* data, const char* function, char*
     }
     
     return 0;
+}
+
+/* Enhanced LuaCompile operation - Validate Lua code syntax without execution */
+static int kh_process_lua_compile_operation(char* output, int output_size, 
+                                           const char** argv, int argc) {
+    if (!output || output_size <= 0) return 1;
+    
+    output[0] = '\0';
+    
+    if (argc != 1 || !argv || !argv[0]) {
+        kh_set_error(output, output_size, "REQUIRES 1 ARGUMENT: [CODE]");
+        return 1;
+    }
+    
+    const char* code = argv[0];
+    size_t code_len = strlen(code);
+    
+    if (code_len == 0) {
+        kh_set_error(output, output_size, "CODE CANNOT BE EMPTY");
+        return 1;
+    }
+    
+    /* Prevent excessively large code strings to avoid memory issues */
+    if (code_len > KH_MAX_OUTPUT_SIZE * 4) { /* 32KB limit */
+        kh_set_error(output, output_size, "CODE TOO LARGE");
+        return 1;
+    }
+    
+    /* Clean the code string (remove surrounding quotes) */
+    char* clean_code = (char*)malloc(code_len + 1);
+    if (!clean_code) {
+        kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
+        return 1;
+    }
+    
+    kh_clean_string(code, clean_code, (int)code_len + 1);
+    
+    if (strlen(clean_code) == 0) {
+        free(clean_code);
+        kh_set_error(output, output_size, "CODE CANNOT BE EMPTY AFTER CLEANING");
+        return 1;
+    }
+    
+    /* Get a Lua state for compilation - no code hash since we don't execute */
+    lua_persistent_state_t* state = lua_get_optimized_state_with_affinity(0);
+    if (!state) {
+        free(clean_code);
+        kh_set_error(output, output_size, "NO AVAILABLE LUA STATE");
+        return 1;
+    }
+    
+    lua_State* L = state->L;
+    int result = 1; /* Default to error */
+    int initial_stack_top = lua_gettop(L);
+    
+    /* Attempt to compile the code without executing it */
+    int compile_result = luaL_loadstring(L, clean_code);
+    
+    if (compile_result == LUA_OK) {
+        /* Compilation successful - code has valid syntax */
+        _snprintf_s(output, output_size, _TRUNCATE, "[\"SUCCESS\"]");
+        result = 0;
+    } else {
+        /* Compilation failed - extract and format error message */
+        const char* error_msg = lua_tostring(L, -1);
+        if (error_msg && strlen(error_msg) > 0) {
+            /* Truncate error message if too long to prevent buffer overflow */
+            char truncated_error[512];
+            size_t error_len = strlen(error_msg);
+            if (error_len >= sizeof(truncated_error)) {
+                memcpy(truncated_error, error_msg, sizeof(truncated_error) - 4);
+                strcpy_s(truncated_error + sizeof(truncated_error) - 4, 4, "...");
+            } else {
+                strcpy_s(truncated_error, sizeof(truncated_error), error_msg);
+            }
+            
+            _snprintf_s(output, output_size, _TRUNCATE, 
+                       KH_ERROR_PREFIX "COMPILATION: %s", truncated_error);
+        } else {
+            kh_set_error(output, output_size, "COMPILATION: SYNTAX ERROR");
+        }
+        
+        /* Update state error tracking */
+        state->error_count++;
+        state->last_error_time = GetTickCount();
+    }
+    
+    /* Ensure stack is properly cleaned up */
+    lua_settop(L, initial_stack_top);
+    
+    /* Release state and cleanup memory */
+    lua_release_optimized_state(state);
+    free(clean_code);
+    
+    return result;
 }
 
 /* Lua C function: ArmaCall(data, function) - High-performance implementation */
@@ -3346,19 +3336,6 @@ static void kh_cleanup_lua_states(void) {
     /* Clean up Lua states */
     for (int i = 0; i < LUA_STATE_POOL_SIZE; i++) {
         if (g_lua_states[i].L) {
-            /* Clean up initial state tracking */
-            if (g_lua_states[i].initial_state.initialized) {
-                if (g_lua_states[i].initial_state.initial_globals && 
-                    g_lua_states[i].initial_state.allocation_success) {
-                    for (int j = 0; j < g_lua_states[i].initial_state.global_count; j++) {
-                        if (g_lua_states[i].initial_state.allocation_success[j]) {
-                            free(g_lua_states[i].initial_state.initial_globals[j]);
-                        }
-                    }
-                }
-                free(g_lua_states[i].initial_state.initial_globals);
-            }
-            
             /* Clean up code hash tracking */
             free(g_lua_states[i].code_hashes);
             

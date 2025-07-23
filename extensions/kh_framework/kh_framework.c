@@ -55,6 +55,7 @@ static const function_info_t FUNCTION_TABLE[] = {
 };
 
 static const int FUNCTION_COUNT = sizeof(FUNCTION_TABLE) / sizeof(function_info_t);
+static int(*g_extension_callback)(char const*, char const*, char const*) = NULL;
 
 /* Fast function lookup and validation - optimized with hash-like first character check */
 static inline int kh_validate_function_call(const char* function, int argc, char* error_output, int error_size) {
@@ -312,6 +313,18 @@ __declspec(dllexport) void RVExtension(char *output, unsigned int output_size, c
     /* Convert to RVExtensionArgs format with no arguments */
     const char* empty_argv[1] = {NULL};
     RVExtensionArgs(output, output_size, function, empty_argv, 0);
+}
+
+/* Callback functionality */
+__declspec(dllexport) void RVExtensionRegisterCallback(int(*callback)(char const*, char const*, char const*)) {
+    if (callback) {
+        g_extension_callback = callback;
+        /* Set the callback in Lua integration system */
+        lua_set_arma_callback(callback);
+        
+        /* Initialize callback name - you can customize this */
+        strncpy_s(g_extension_name, sizeof(g_extension_name), "kh_framework", _TRUNCATE);
+    }
 }
 
 /* DLL Version Info */

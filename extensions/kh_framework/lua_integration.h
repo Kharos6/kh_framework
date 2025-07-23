@@ -198,6 +198,9 @@ static lua_memory_pool_t g_memory_pool = {0};
 
 /* Global persistent Lua variables storage with hash table */
 static lua_variable_storage_t g_lua_variable_storage = {0};
+static int(*g_arma_callback)(char const *name, char const *function, char const *data) = NULL;
+static int g_callback_initialized = 0;
+static char g_extension_name[64] = "kh_framework"; /* Default extension name for callbacks */
 
 /* Robin Hood hashing with quadratic probing fallback (same as process_kh_data.h) */
 static inline uint32_t lua_hash_table_find_robin_hood(lua_var_hash_entry_t* hash_table, uint32_t hash_table_size, 
@@ -752,6 +755,14 @@ static const char* lua_parse_value_recursive(lua_State* L, const char* ptr, cons
 static void lua_release_optimized_state(lua_persistent_state_t* state);
 static lua_persistent_state_t* lua_get_optimized_state(void);
 static int lua_format_result_optimized(lua_State* L, char* output, int output_size);
+static int lua_c_arma_call(lua_State* L);
+static int arma_callback_safe_call(const char* data, const char* function, char* error_output, int error_size);
+static int arma_convert_lua_data_to_string(lua_State* L, int stack_index, char* output, int output_size);
+
+static void lua_set_arma_callback(int(*callback)(char const*, char const*, char const*)) {
+    g_arma_callback = callback;
+    g_callback_initialized = (callback != NULL) ? 1 : 0;
+}
 
 /* Delete a persistent Lua variable using hash table */
 static int lua_delete_variable(const char* name) {
@@ -1732,7 +1743,7 @@ static int lua_init_turbo_state(lua_State* L) {
     if (!L) return 0;
     
     /* Ensure we have enough stack space for operations */
-    if (!lua_checkstack(L, LUA_STACK_SAFETY_MARGIN + 15)) return 0; /* Extra space for JIT config */
+    if (!lua_checkstack(L, LUA_STACK_SAFETY_MARGIN + 20)) return 0; /* Extra space for JIT config */
     
     /* Load only essential libraries for maximum performance */
     luaopen_base(L);
@@ -1760,24 +1771,28 @@ static int lua_init_turbo_state(lua_State* L) {
         lua_getfield(L, -1, "config");
         if (lua_isfunction(L, -1)) {
             /* Aggressive compilation thresholds */
-            lua_pushstring(L, "hotloop=1");        /* Compile after just 1 hot loop iteration */
+            lua_pushstring(L, "hotloop=1");        /* Compile after 1 hot loop iteration */
             lua_pushstring(L, "hotexit=1");        /* Compile side exits after 1 iteration */
             lua_pushstring(L, "tryside=1");        /* Start side trace compilation immediately */
+            lua_pushstring(L, "instunroll=8");     /* Aggressive instruction unrolling */
+            lua_pushstring(L, "loopunroll=8");     /* Aggressive loop unrolling */
             
-            /* Increased limits for complex code */
-            lua_pushstring(L, "maxmcode=256");     /* 256KB machine code cache (4x default) */
-            lua_pushstring(L, "maxirconst=2000");  /* 2000 IR constants (2x default) */
-            lua_pushstring(L, "maxtrace=4000");    /* 4000 traces (4x default) */
-            lua_pushstring(L, "maxrecord=8000");   /* 8000 IR instructions per trace (2x default) */
-            lua_pushstring(L, "maxside=200");      /* 200 side traces per root trace (4x default) */
-            lua_pushstring(L, "maxsnap=1000");     /* 1000 snapshots per trace (2x default) */
+            /* MASSIVE memory allocation for maximum cache performance */
+            lua_pushstring(L, "maxmcode=1024");    /* 1MB machine code cache (16x default) */
+            lua_pushstring(L, "sizemcode=1024");   /* 1MB machine code area size */
+            lua_pushstring(L, "mincmcode=256");    /* Minimum 256KB machine code area */
             
-            /* Optimize for numerical computation */
-            lua_pushstring(L, "sizemcode=256");    /* Machine code area size */
-            lua_pushstring(L, "maxmcode=256");     /* Maximum machine code size */
+            /* Enormous limits for complex code - no restrictions */
+            lua_pushstring(L, "maxirconst=8000");  /* 8000 IR constants (8x default) */
+            lua_pushstring(L, "maxtrace=16000");   /* 16000 traces (16x default) */
+            lua_pushstring(L, "maxrecord=32000");  /* 32000 IR instructions per trace (8x default) */
+            lua_pushstring(L, "maxside=1000");     /* 1000 side traces per root trace (20x default) */
+            lua_pushstring(L, "maxsnap=4000");     /* 4000 snapshots per trace (8x default) */
             
-            /* Memory optimization */
-            lua_pushstring(L, "mincmcode=64");     /* Minimum machine code area */
+            /* Advanced optimization parameters */
+            lua_pushstring(L, "recunroll=4");      /* Aggressive recording unrolling */
+            lua_pushstring(L, "callunroll=3");     /* Aggressive call unrolling */
+            lua_pushstring(L, "sizemem=128");      /* Larger memory for trace recording */
             
             if (lua_pcall(L, 12, 0, 0) != LUA_OK) {
                 lua_pop(L, 2); /* Pop error and jit table */
@@ -1800,6 +1815,8 @@ static int lua_init_turbo_state(lua_State* L) {
             lua_pushstring(L, "+abc");      /* Array bounds check elimination */
             lua_pushstring(L, "+sink");     /* Allocation/store sinking */
             lua_pushstring(L, "+fuse");     /* Fusion of operands into instructions */
+            lua_pushstring(L, "+fold");     /* Constant folding */
+            lua_pushstring(L, "+cse");      /* More aggressive CSE */
             
             if (lua_pcall(L, 9, 0, 0) != LUA_OK) {
                 /* Optimization failed, but continue - not critical */
@@ -1857,6 +1874,9 @@ static int lua_init_turbo_state(lua_State* L) {
     
     lua_pushcfunction(L, lua_c_delete_persistent_variable);
     lua_setglobal(L, "DeletePersistentVariable");
+
+    lua_pushcfunction(L, lua_c_arma_call);
+    lua_setglobal(L, "ArmaCall");
     
     return 1;
 }
@@ -3021,6 +3041,218 @@ static int kh_process_lua_compile_operation(char* output, int output_size,
     }
     
     return result;
+}
+
+/* High-performance Lua data to Arma string conversion with enhanced error handling */
+static int arma_convert_lua_data_to_string(lua_State* L, int stack_index, char* output, int output_size) {
+    if (!L || !output || output_size <= 3) return 0;
+    
+    if (!lua_checkstack(L, 3)) return 0;
+    
+    /* Normalize to absolute stack index */
+    int abs_index = (stack_index > 0) ? stack_index : lua_gettop(L) + 1 + stack_index;
+    
+    /* Validate that we have a table/array */
+    if (!lua_istable(L, abs_index)) {
+        /* Single value - wrap in array format */
+        output[0] = '[';
+        size_t pos = 1;
+        
+        if (lua_value_to_arma_string(L, abs_index, output, output_size, &pos, 0)) {
+            if (pos < (size_t)output_size) {
+                output[pos] = ']';
+                output[pos + 1] = '\0';
+                return 1;
+            }
+        }
+        return 0;
+    }
+    
+    /* Convert table using existing optimized function */
+    size_t pos = 0;
+    return lua_table_to_arma_recursive(L, abs_index, output, output_size, &pos, 0);
+}
+
+/* Safe callback wrapper with retry logic and comprehensive error handling */
+static int arma_callback_safe_call(const char* data, const char* function, char* error_output, int error_size) {
+    if (!g_callback_initialized || !g_arma_callback) {
+        if (error_output && error_size > 0) {
+            kh_set_error(error_output, error_size, "CALLBACK NOT INITIALIZED");
+        }
+        return 0;
+    }
+    
+    if (!data || !function) {
+        if (error_output && error_size > 0) {
+            kh_set_error(error_output, error_size, "NULL DATA OR FUNCTION");
+        }
+        return 0;
+    }
+    
+    /* Validate data and function lengths to prevent buffer overflows */
+    size_t data_len = strlen(data);
+    size_t function_len = strlen(function);
+    
+    if (data_len == 0) {
+        if (error_output && error_size > 0) {
+            kh_set_error(error_output, error_size, "EMPTY DATA");
+        }
+        return 0;
+    }
+    
+    if (function_len == 0) {
+        if (error_output && error_size > 0) {
+            kh_set_error(error_output, error_size, "EMPTY FUNCTION");
+        }
+        return 0;
+    }
+    
+    if (data_len > 32767 || function_len > 1023) { /* Reasonable limits for Arma */
+        if (error_output && error_size > 0) {
+            kh_set_error(error_output, error_size, "DATA OR FUNCTION TOO LARGE");
+        }
+        return 0;
+    }
+    
+    int last_result = g_arma_callback(g_extension_name, function, data);
+
+    if (last_result >= 0) {
+        /* Success */
+        return 1;
+    } else if (last_result == -1) {
+        /* Buffer full - fail immediately, let Lua handle retry logic */
+        if (error_output && error_size > 0) {
+            kh_set_error(error_output, error_size, "CALLBACK BUFFER FULL");
+        }
+    }
+    
+    return 0;
+}
+
+/* Lua C function: ArmaCall(data, function) - High-performance implementation */
+static int lua_c_arma_call(lua_State* L) {
+    /* Ensure adequate stack space for error handling */
+    if (!lua_checkstack(L, 5)) {
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "STACK OVERFLOW");
+        return 2;
+    }
+    
+    /* Validate argument count */
+    int argc = lua_gettop(L);
+    if (argc != 2) {
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "REQUIRES 2 ARGUMENTS: ArmaCall(data, function)");
+        return 2;
+    }
+    
+    /* Validate callback initialization */
+    if (!g_callback_initialized || !g_arma_callback) {
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "ARMA CALLBACK NOT AVAILABLE");
+        return 2;
+    }
+    
+    /* Get function argument (must be string) */
+    if (!lua_isstring(L, 2)) {
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "FUNCTION MUST BE A STRING");
+        return 2;
+    }
+    
+    const char* function = lua_tostring(L, 2);
+    if (!function || strlen(function) == 0) {
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "FUNCTION CANNOT BE EMPTY");
+        return 2;
+    }
+    
+    /* Clean the function string - STACK/POOL ALLOCATION */
+    size_t function_len = strlen(function);
+    char stack_function[256];
+    char* clean_function = NULL;
+    
+    if (function_len + 1 <= sizeof(stack_function)) {
+        clean_function = stack_function;
+    } else {
+        clean_function = (char*)lua_pool_alloc(function_len + 1);
+        if (!clean_function) {
+            lua_pushboolean(L, 0);
+            lua_pushstring(L, "MEMORY ALLOCATION FAILED");
+            return 2;
+        }
+    }
+    
+    kh_clean_string(function, clean_function, (int)function_len + 1);
+    
+    /* Validate cleaned function */
+    if (strlen(clean_function) == 0) {
+        /* Cleanup - check if allocation needs freeing */
+        if (clean_function != stack_function && !lua_is_pool_allocation(clean_function)) {
+            free(clean_function);
+        }
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "FUNCTION CANNOT BE EMPTY AFTER CLEANING");
+        return 2;
+    }
+    
+    /* Convert data to Arma format - POOL ALLOCATION for performance */
+    char* data_buffer = (char*)lua_pool_alloc(KH_MAX_OUTPUT_SIZE);
+    if (!data_buffer) {
+        /* Cleanup - check if allocation needs freeing */
+        if (clean_function != stack_function && !lua_is_pool_allocation(clean_function)) {
+            free(clean_function);
+        }
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "DATA BUFFER ALLOCATION FAILED");
+        return 2;
+    }
+    
+    /* Convert the first argument (data) to Arma array format */
+    if (!arma_convert_lua_data_to_string(L, 1, data_buffer, KH_MAX_OUTPUT_SIZE)) {
+        /* Cleanup - data_buffer is pool allocated, no explicit free needed */
+        /* Cleanup - check if allocation needs freeing */
+        if (clean_function != stack_function && !lua_is_pool_allocation(clean_function)) {
+            free(clean_function);
+        }
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "DATA CONVERSION FAILED");
+        return 2;
+    }
+    
+    /* Validate converted data length */
+    size_t data_len = strlen(data_buffer);
+    if (data_len == 0) {
+        /* Cleanup - check if allocation needs freeing */
+        if (clean_function != stack_function && !lua_is_pool_allocation(clean_function)) {
+            free(clean_function);
+        }
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "CONVERTED DATA IS EMPTY");
+        return 2;
+    }
+    
+    /* Perform the callback with comprehensive error handling */
+    char error_buffer[512];
+    int callback_success = arma_callback_safe_call(data_buffer, clean_function, 
+                                                  error_buffer, sizeof(error_buffer));
+    
+    /* Cleanup function buffer - check if allocation needs freeing */
+    if (clean_function != stack_function && !lua_is_pool_allocation(clean_function)) {
+        free(clean_function);
+    }
+    /* data_buffer cleanup not needed - pool allocated */
+    
+    /* Return results to Lua */
+    if (callback_success) {
+        lua_pushboolean(L, 1);
+        lua_pushstring(L, "SUCCESS");
+        return 2;
+    } else {
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, error_buffer[0] ? error_buffer : "UNKNOWN CALLBACK ERROR");
+        return 2;
+    }
 }
 
 /* FIXED: Cleanup function with proper memory management */

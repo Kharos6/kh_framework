@@ -253,7 +253,19 @@ static inline int kh_hash_table_insert_robin_hood(kh_hash_entry_t* hash_table, u
         
         /* Move to next position with quadratic probing */
         distance++;
-        index = (original_index + distance * distance) % hash_table_size;
+        
+        /* Prevent integer overflow in quadratic probing - match find function */
+        if (distance > 65535) break; /* Reasonable upper limit */
+        
+        uint64_t next_offset = (uint64_t)distance * distance;
+        if (next_offset > hash_table_size) {
+            /* Linear probing fallback when quadratic would overflow */
+            index = (original_index + distance) % hash_table_size;
+        } else {
+            index = (original_index + (uint32_t)next_offset) % hash_table_size;
+        }
+        
+        if (distance >= hash_table_size) break; /* Prevent infinite loops */
     }
     
     return 0; /* Table full */

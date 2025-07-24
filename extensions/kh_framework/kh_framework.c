@@ -50,7 +50,8 @@ static const function_info_t FUNCTION_TABLE[] = {
     {"LuaSetVariable", 3, 4, 'L'},
     {"LuaGetVariable", 1, 1, 'L'},
     {"LuaDeleteVariable", 1, 1, 'L'},
-    {"LuaClearVariables", 0, 0, 'L'}
+    {"LuaClearVariables", 0, 0, 'L'},
+    {"LuaResetState", 0, 0, 'L'}
 };
 
 static const int FUNCTION_COUNT = sizeof(FUNCTION_TABLE) / sizeof(function_info_t);
@@ -106,12 +107,6 @@ static inline int kh_validate_function_call(const char* function, int argc, char
                 _snprintf_s(error_output, (size_t)error_size, _TRUNCATE,
                            KH_ERROR_PREFIX "FUNCTION '%s' ACCEPTS AT MOST %d ARGUMENTS, GOT %d",
                            function, FUNCTION_TABLE[i].max_args, argc);
-                return 0;
-            }
-            
-            /* Check for unreasonable argument count (potential attack) */
-            if (argc > 100) {
-                kh_set_error(error_output, error_size, "TOO MANY ARGUMENTS");
                 return 0;
             }
             
@@ -219,6 +214,8 @@ __declspec(dllexport) int RVExtensionArgs(char *output, unsigned int output_size
             } else if (strcmp(function, "LuaClearVariables") == 0) {
                 /* NEW: Clear all persistent Lua variables */
                 function_result = kh_process_lua_clear_variables_operation(output, output_size, argv, argc);
+            } else if (strcmp(function, "LuaResetState") == 0) {
+                function_result = kh_process_lua_reset_state_operation(output, output_size, argv, argc);
             }
             break;
 

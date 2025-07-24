@@ -110,22 +110,18 @@ typedef struct {
     int needs_rebuild;       /* Flag to indicate if rebuild is needed */
 } lua_var_hash_table_t;
 
-/* Enhanced persistent Lua state with better error tracking and initial state management */
+/* Simplified single Lua state structure */
 typedef struct {
-    lua_State* L;                        
-    int in_use;                          
-    int initialized;                     
-    int jit_enabled;                     
-    uint64_t* code_hashes;              /* Track executed code for JIT affinity */
-    int code_hash_count;
-    int code_hash_capacity;
-    int execution_count;                /* Track how much code has run in this state */
-    DWORD last_used_time;               /* Keep states alive longer for JIT benefit */
+    lua_State* L;
+    int initialized;
+    int jit_enabled;
+    int error_count;
     DWORD creation_time;
-    int error_count;                     
-    DWORD last_error_time;               
-    DWORD last_cleanup_time; 
-} lua_persistent_state_t;
+} lua_single_state_t;
+
+/* Single global Lua state - replaces the pool */
+static lua_single_state_t g_lua_state = {NULL, 0, 0, 0, 0};
+static int g_lua_initialized = 0;
 
 /* Structure to hold persistent Lua variables accessible across all states */
 typedef struct lua_variable_s {
@@ -143,26 +139,6 @@ typedef struct {
     lua_var_hash_table_t hash_table; /* Hash table for fast lookup */
     int initialized;              /* Whether storage is initialized */
 } lua_variable_storage_t;
-
-/* Staged call structure for ArmaStageCall functionality */
-typedef struct {
-    char* arguments;  /* Arma format argument array string */
-    char* function;   /* Function name string */
-} staged_call_t;
-
-typedef struct {
-    staged_call_t* calls;
-    int count;
-    int capacity;
-    int initialized;
-} staged_calls_storage_t;
-
-/* Global staged calls storage */
-static staged_calls_storage_t g_staged_calls = {0};
-
-/* Global optimization caches - single-threaded, so no locking needed */
-static lua_persistent_state_t g_lua_states[LUA_STATE_POOL_SIZE] = {0};
-static int g_lua_pool_initialized = 0;
 
 /* Global persistent Lua variables storage with hash table */
 static lua_variable_storage_t g_lua_variable_storage = {0};
@@ -260,9 +236,21 @@ static inline int lua_hash_table_insert_robin_hood(lua_var_hash_entry_t* hash_ta
             distance = temp.distance;
         }
         
-        /* Move to next position with quadratic probing */
+        /* Move to next position with consistent quadratic probing */
         distance++;
-        index = (original_index + distance * distance) % hash_table_size;
+        
+        /* Prevent integer overflow in quadratic probing - match find function */
+        if (distance > 65535) break; /* Reasonable upper limit */
+        
+        uint64_t next_offset = (uint64_t)distance * distance;
+        if (next_offset > hash_table_size) {
+            /* Linear probing fallback when quadratic would overflow */
+            index = (original_index + distance) % hash_table_size;
+        } else {
+            index = (original_index + (uint32_t)next_offset) % hash_table_size;
+        }
+        
+        if (distance >= hash_table_size) break; /* Prevent infinite loops */
     }
     
     return 0; /* Table full */
@@ -322,27 +310,27 @@ static int lua_rebuild_variable_hash_table(void) {
     lua_var_hash_entry_t* new_entries = (lua_var_hash_entry_t*)calloc(new_size, sizeof(lua_var_hash_entry_t));
     if (!new_entries) return 0;
     
-    /* Free old hash table */
-    free(g_lua_variable_storage.hash_table.entries);
-    
-    /* Set new hash table */
-    g_lua_variable_storage.hash_table.entries = new_entries;
-    g_lua_variable_storage.hash_table.size = new_size;
-    g_lua_variable_storage.hash_table.used_count = 0;
-    g_lua_variable_storage.hash_table.deleted_count = 0;
-    g_lua_variable_storage.hash_table.needs_rebuild = 0;
-    
-    /* Rebuild hash table */
+    /* Rebuild hash table entries in the new table first */
+    uint32_t new_used_count = 0;
     for (uint32_t i = 0; i < g_lua_variable_storage.variable_count; i++) {
         if (g_lua_variable_storage.variables[i].name) {
             uint32_t name_hash = lua_hash_variable_name(g_lua_variable_storage.variables[i].name);
-            if (!lua_hash_table_insert_robin_hood(g_lua_variable_storage.hash_table.entries, 
-                                                 g_lua_variable_storage.hash_table.size, name_hash, i)) {
+            if (!lua_hash_table_insert_robin_hood(new_entries, new_size, name_hash, i)) {
+                /* Rebuild failed - free the new table and keep the old one */
+                free(new_entries);
                 return 0;
             }
-            g_lua_variable_storage.hash_table.used_count++;
+            new_used_count++;
         }
     }
+    
+    /* Only now that we're sure rebuild succeeded, replace the old table */
+    free(g_lua_variable_storage.hash_table.entries);
+    g_lua_variable_storage.hash_table.entries = new_entries;
+    g_lua_variable_storage.hash_table.size = new_size;
+    g_lua_variable_storage.hash_table.used_count = new_used_count;
+    g_lua_variable_storage.hash_table.deleted_count = 0;
+    g_lua_variable_storage.hash_table.needs_rebuild = 0;
     
     return 1;
 }
@@ -548,6 +536,15 @@ static int lua_combine_variable_values(int var_type, const char* existing_value,
     return success;
 }
 
+/* Forward declarations */
+static const char* lua_parse_value_recursive(lua_State* L, const char* ptr, const char* end, int depth);
+static int lua_format_result_optimized(lua_State* L, char* output, int output_size);
+static int lua_c_arma_callback(lua_State* L);
+static int arma_callback_safe_call(const char* data, const char* function, char* error_output, int error_size);
+static int arma_convert_lua_data_to_string(lua_State* L, int stack_index, char* output, int output_size);
+static lua_single_state_t* lua_get_single_state(void);
+static int lua_inject_variable(lua_State* L, lua_variable_t* var);
+
 /* FIXED: Set a persistent Lua variable with proper memory leak prevention, hash table and overwrite support */
 static int lua_set_variable(const char* name, const char* value, const char* type, int overwrite_flag) {
     if (!name || !value || !type) return 0;
@@ -617,6 +614,12 @@ static int lua_set_variable(const char* name, const char* value, const char* typ
             existing_var->lua_type = var_type;
         }
         
+        /* IMMEDIATE INJECTION: Inject into current Lua state */
+        lua_single_state_t* state = lua_get_single_state();
+        if (state && state->L && state->initialized) {
+            lua_inject_variable(state->L, existing_var);
+        }
+        
         return 1;
     }
     
@@ -637,7 +640,7 @@ static int lua_set_variable(const char* name, const char* value, const char* typ
         g_lua_variable_storage.variable_capacity = new_capacity;
     }
     
-    /* FIXED: Allocate all memory first with comprehensive error handling */
+    /* Allocate all memory first with comprehensive error handling */
     size_t name_len = strlen(name);
     size_t value_len = strlen(value);
     size_t type_len = strlen(type);
@@ -674,7 +677,7 @@ static int lua_set_variable(const char* name, const char* value, const char* typ
     /* Add to variables array */
     uint32_t var_index = g_lua_variable_storage.variable_count;
     
-    /* FIXED: Add to hash table BEFORE updating the array to maintain consistency */
+    /* Add to hash table BEFORE updating the array to maintain consistency */
     uint32_t name_hash = lua_hash_variable_name(name);
     if (!lua_hash_table_insert_robin_hood(g_lua_variable_storage.hash_table.entries,
                                          g_lua_variable_storage.hash_table.size, 
@@ -694,17 +697,14 @@ static int lua_set_variable(const char* name, const char* value, const char* typ
     g_lua_variable_storage.variable_count++;
     g_lua_variable_storage.hash_table.used_count++;
     
+    /* IMMEDIATE INJECTION: Inject new variable into current Lua state */
+    lua_single_state_t* state = lua_get_single_state();
+    if (state && state->L && state->initialized) {
+        lua_inject_variable(state->L, &g_lua_variable_storage.variables[var_index]);
+    }
+    
     return 1;
 }
-
-/* Forward declarations */
-static const char* lua_parse_value_recursive(lua_State* L, const char* ptr, const char* end, int depth);
-static void lua_release_optimized_state(lua_persistent_state_t* state);
-static lua_persistent_state_t* lua_get_optimized_state_with_affinity(uint64_t code_hash);
-static int lua_format_result_optimized(lua_State* L, char* output, int output_size);
-static int lua_c_arma_callback(lua_State* L);
-static int arma_callback_safe_call(const char* data, const char* function, char* error_output, int error_size);
-static int arma_convert_lua_data_to_string(lua_State* L, int stack_index, char* output, int output_size);
 
 static void lua_set_arma_callback(int(*callback)(char const*, char const*, char const*)) {
     g_arma_callback = callback;
@@ -735,18 +735,27 @@ static int lua_delete_variable(const char* name) {
         return 0; /* Name mismatch */
     }
     
+    /* IMMEDIATE REMOVAL: Remove from current Lua state first */
+    lua_single_state_t* state = lua_get_single_state();
+    if (state && state->L && state->initialized) {
+        if (lua_checkstack(state->L, 2)) {
+            lua_pushnil(state->L);
+            lua_setglobal(state->L, name);
+        }
+    }
+    
     /* Free memory */
     free(var->name);
     free(var->original_value);
     free(var->type);
     
-    /* Remove from hash table first */
+    /* Remove from hash table */
     lua_hash_table_delete(g_lua_variable_storage.hash_table.entries,
                          g_lua_variable_storage.hash_table.size, name_hash);
     g_lua_variable_storage.hash_table.used_count--;
     g_lua_variable_storage.hash_table.deleted_count++;
     
-    /* FIXED: Use swap-with-last instead of shifting to avoid O(n) operations */
+    /* Use swap-with-last instead of shifting to avoid O(n) operations */
     uint32_t last_index = g_lua_variable_storage.variable_count - 1;
     
     if (var_index != last_index) {
@@ -849,6 +858,23 @@ static int lua_inject_variable(lua_State* L, lua_variable_t* var) {
     return 0;
 }
 
+/* Enhanced immediate variable injection - replaces lazy loading */
+static int lua_inject_all_variables(lua_State* L) {
+    if (!L || !g_lua_variable_storage.initialized) return 1;
+    
+    if (!lua_checkstack(L, 5)) return 0;
+    
+    /* Inject all stored variables immediately */
+    for (uint32_t i = 0; i < g_lua_variable_storage.variable_count; i++) {
+        lua_variable_t* var = &g_lua_variable_storage.variables[i];
+        if (var && var->name) {
+            lua_inject_variable(L, var);
+        }
+    }
+    
+    return 1;
+}
+
 /* FIXED: Get variable value and type in Arma format [type, value] */
 static int lua_get_variable_value_and_type(const char* name, char* output, int output_size) {
     if (!name || !output || output_size <= 0) return 0;
@@ -860,8 +886,8 @@ static int lua_get_variable_value_and_type(const char* name, char* output, int o
     }
     
     /* Get a Lua state to retrieve the current value */
-    lua_persistent_state_t* state = lua_get_optimized_state_with_affinity(0);
-    if (!state) {
+    lua_single_state_t* state = lua_get_single_state();
+    if (!state || !state->L || !state->initialized) {
         kh_set_error(output, output_size, "NO AVAILABLE LUA STATE");
         return 0;
     }
@@ -870,13 +896,17 @@ static int lua_get_variable_value_and_type(const char* name, char* output, int o
     int result = 0;
     int initial_stack_top = lua_gettop(L);
     
-    /* Get the variable from Lua */
+    if (!lua_checkstack(L, 3)) {
+        kh_set_error(output, output_size, "LUA STACK OVERFLOW");
+        return 0;
+    }
+    
+    /* Get the variable from Lua state */
     lua_getglobal(L, name);
     
     char* temp_buffer = (char*)malloc(output_size);
     if (!temp_buffer) {
         lua_settop(L, initial_stack_top);
-        lua_release_optimized_state(state);
         kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
         return 0;
     }
@@ -895,7 +925,7 @@ static int lua_get_variable_value_and_type(const char* name, char* output, int o
             kh_set_error(output, output_size, "RESULT FORMAT FAILED");
         }
     } else {
-        /* Variable not found in Lua state, return original value with type */
+        /* Variable not in Lua state, return stored value with type */
         if (_snprintf_s(output, output_size, _TRUNCATE, "[\"%s\",\"%s\"]", 
                       var->type, var->original_value) >= 0) {
             result = 1;
@@ -907,7 +937,6 @@ static int lua_get_variable_value_and_type(const char* name, char* output, int o
     /* Clean up */
     free(temp_buffer);
     lua_settop(L, initial_stack_top);
-    lua_release_optimized_state(state);
     
     return result;
 }
@@ -981,16 +1010,20 @@ static int lua_c_get_persistent_variable(lua_State* L) {
 
 /* Lua-callable function: SetPersistentVariable(name, value, type, overwrite) */
 static int lua_c_set_persistent_variable(lua_State* L) {
-    if (!lua_checkstack(L, 1)) {
-        lua_pushboolean(L, 0);
+    /* Check argument count first before any stack operations */
+    int argc = lua_gettop(L);
+    if (argc < 3 || argc > 4) {
+        /* Only push if we have space, otherwise just return */
+        if (lua_checkstack(L, 1)) {
+            lua_pushboolean(L, 0);
+        }
         return 1;
     }
     
-    /* Check argument count */
-    int argc = lua_gettop(L);
-    if (argc < 3 || argc > 4) {
-        lua_pushboolean(L, 0);
-        return 1;
+    /* Now check if we have adequate stack space for all operations */
+    if (!lua_checkstack(L, 2)) {
+        /* Can't safely push anything, just return */
+        return 0;
     }
     
     /* Get arguments */
@@ -1066,16 +1099,18 @@ static int lua_c_set_persistent_variable(lua_State* L) {
 
 /* Lua-callable function: DeletePersistentVariable(name) */
 static int lua_c_delete_persistent_variable(lua_State* L) {
-    if (!lua_checkstack(L, 1)) {
-        lua_pushboolean(L, 0);
+    /* Check argument count first */
+    int argc = lua_gettop(L);
+    if (argc != 1) {
+        if (lua_checkstack(L, 1)) {
+            lua_pushboolean(L, 0);
+        }
         return 1;
     }
     
-    /* Check argument count */
-    int argc = lua_gettop(L);
-    if (argc != 1) {
-        lua_pushboolean(L, 0);
-        return 1;
+    /* Check stack space for operations */
+    if (!lua_checkstack(L, 1)) {
+        return 0;
     }
     
     /* Get argument */
@@ -1122,7 +1157,20 @@ static int kh_process_lua_clear_variables_operation(char* output, int output_siz
     uint32_t cleared_count = 0;
     size_t memory_freed = 0;
     
-    /* FIXED: Clear all persistent variables with proper validation */
+    /* IMMEDIATE CLEANUP: Clear variables from Lua state first */
+    lua_single_state_t* state = lua_get_single_state();
+    if (state && state->L && state->initialized && lua_checkstack(state->L, 2)) {
+        /* Clear each variable from Lua state */
+        for (uint32_t i = 0; i < g_lua_variable_storage.variable_count; i++) {
+            lua_variable_t* var = &g_lua_variable_storage.variables[i];
+            if (var && var->name) {
+                lua_pushnil(state->L);
+                lua_setglobal(state->L, var->name);
+            }
+        }
+    }
+    
+    /* Clear all persistent variables with proper memory management */
     if (g_lua_variable_storage.initialized && g_lua_variable_storage.variables) {
         cleared_count = g_lua_variable_storage.variable_count;
         
@@ -1150,17 +1198,10 @@ static int kh_process_lua_clear_variables_operation(char* output, int output_siz
         /* Reset counters */
         g_lua_variable_storage.variable_count = 0;
         
-        /* FIXED: Clear and reset hash table safely */
+        /* Clear and reset hash table safely */
         if (g_lua_variable_storage.hash_table.entries && g_lua_variable_storage.hash_table.size > 0) {
-            /* Zero out all hash table entries */
-            for (uint32_t i = 0; i < g_lua_variable_storage.hash_table.size; i++) {
-                g_lua_variable_storage.hash_table.entries[i].name_hash = LUA_VAR_HASH_EMPTY;
-                g_lua_variable_storage.hash_table.entries[i].var_index = 0;
-                g_lua_variable_storage.hash_table.entries[i].deleted = 0;
-                g_lua_variable_storage.hash_table.entries[i].distance = 0;
-                g_lua_variable_storage.hash_table.entries[i].reserved = 0;
-                g_lua_variable_storage.hash_table.entries[i].padding = 0;
-            }
+            memset(g_lua_variable_storage.hash_table.entries, 0, 
+                   g_lua_variable_storage.hash_table.size * sizeof(lua_var_hash_entry_t));
         }
         g_lua_variable_storage.hash_table.used_count = 0;
         g_lua_variable_storage.hash_table.deleted_count = 0;
@@ -1187,14 +1228,17 @@ static int kh_process_lua_set_variable_operation(char* output, int output_size,
     const char* value = argv[1];
     const char* type = argv[2];
     
+    /* Cache string lengths once */
+    size_t name_len = strlen(name);
+    size_t type_len = strlen(type);
+    
     /* Parse overwrite flag (defaults to true) */
-    int overwrite_flag = 1; /* Default to true */
+    int overwrite_flag = 1;
     if (argc >= 4 && argv[3]) {
         overwrite_flag = kh_parse_boolean(argv[3]);
     }
     
     /* Clean the name */
-    size_t name_len = strlen(name);
     char* clean_name = (char*)malloc(name_len + 1);
     if (!clean_name) {
         kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
@@ -1203,8 +1247,10 @@ static int kh_process_lua_set_variable_operation(char* output, int output_size,
     
     kh_clean_string(name, clean_name, (int)name_len + 1);
     
+    /* Cache cleaned name length */
+    size_t clean_name_len = strlen(clean_name);
+    
     /* Clean the type */
-    size_t type_len = strlen(type);
     char* clean_type = (char*)malloc(type_len + 1);
     if (!clean_type) {
         free(clean_name);
@@ -1215,14 +1261,14 @@ static int kh_process_lua_set_variable_operation(char* output, int output_size,
     kh_clean_string(type, clean_type, (int)type_len + 1);
     
     /* Convert type to uppercase for consistency */
-    for (size_t i = 0; i < strlen(clean_type); i++) {
+    for (size_t i = 0; clean_type[i]; i++) {
         if (clean_type[i] >= 'a' && clean_type[i] <= 'z') {
             clean_type[i] = clean_type[i] - 32;
         }
     }
     
     /* Validate inputs */
-    if (strlen(clean_name) == 0) {
+    if (clean_name_len == 0) {
         free(clean_name);
         free(clean_type);
         kh_set_error(output, output_size, "VARIABLE NAME CANNOT BE EMPTY");
@@ -1374,276 +1420,12 @@ static int lua_secure_print_fast(lua_State* L) {
     return 0;
 }
 
-/* Called when Lua tries to access a non-existent global variable */
-static int lua_lazy_variable_handler(lua_State* L) {
-    if (!lua_checkstack(L, 2)) {
-        lua_pushnil(L);
-        return 1;
-    }
-    
-    /* Get the variable name being requested */
-    const char* var_name = lua_tostring(L, 2);
-    if (!var_name) {
-        lua_pushnil(L);
-        return 1;
-    }
-    
-    /* Check if this variable exists in persistent storage */
-    lua_variable_t* var = lua_find_variable(var_name);
-    if (var) {
-        /* Variable exists - inject it and return its value */
-        if (lua_inject_variable(L, var)) {
-            /* Get the newly injected variable */
-            lua_getglobal(L, var_name);
-            return 1;
-        }
-    }
-    
-    /* Variable doesn't exist or injection failed */
-    lua_pushnil(L);
-    return 1;
-}
-
-/* Called when Lua assigns to a global variable */
-static int lua_variable_change_handler(lua_State* L) {
-    if (!lua_checkstack(L, 3)) return 0;
-    
-    /* Get the variable name being assigned */
-    const char* var_name = lua_tostring(L, 2);
-    
-    /* Perform the actual assignment first */
-    lua_rawset(L, 1);    
-    return 0;
-}
-
-/* NEW: Setup lazy variable injection instead of eager injection */
-static int lua_setup_lazy_variable_injection(lua_State* L) {
-    if (!L || !lua_checkstack(L, 5)) return 0;
-    
-    /* Get the global table */
-    lua_pushvalue(L, LUA_GLOBALSINDEX);
-    
-    /* Create metatable for globals */
-    lua_newtable(L);
-    
-    /* Set __index metamethod */
-    lua_pushstring(L, "__index");
-    lua_pushcfunction(L, lua_lazy_variable_handler);
-    lua_settable(L, -3);
-    
-    /* Set __newindex metamethod to track variable changes */
-    lua_pushstring(L, "__newindex");
-    lua_pushcfunction(L, lua_variable_change_handler);
-    lua_settable(L, -3);
-    
-    /* Apply metatable to globals */
-    lua_setmetatable(L, -2);
-    lua_pop(L, 1); /* Remove globals table */
-    
-    return 1;
-}
-
-/* Initialize staged calls storage */
-static int lua_init_staged_calls_storage(void) {
-    if (g_staged_calls.initialized) return 1;
-    
-    g_staged_calls.capacity = 16;
-    g_staged_calls.calls = (staged_call_t*)calloc(g_staged_calls.capacity, sizeof(staged_call_t));
-    if (!g_staged_calls.calls) return 0;
-    
-    g_staged_calls.count = 0;
-    g_staged_calls.initialized = 1;
-    return 1;
-}
-
-/* Add a staged call with comprehensive error handling */
-static int lua_add_staged_call(const char* arguments, const char* function) {
-    if (!arguments || !function) return 0;
-    
-    /* Validate input lengths to prevent excessive memory usage */
-    size_t args_len = strlen(arguments);
-    size_t func_len = strlen(function);
-    
-    if (args_len == 0 || func_len == 0 || args_len > 32767 || func_len > 1023) {
-        return 0; /* Invalid input lengths */
-    }
-    
-    if (!lua_init_staged_calls_storage()) return 0;
-    
-    /* Prevent excessive staging (DoS protection) */
-    if (g_staged_calls.count >= 1000) return 0;
-    
-    /* Expand capacity if needed */
-    if (g_staged_calls.count >= g_staged_calls.capacity) {
-        /* Check for potential overflow */
-        if (g_staged_calls.capacity > INT_MAX / 2) return 0;
-        
-        int new_capacity = g_staged_calls.capacity * 2;
-        staged_call_t* new_calls = (staged_call_t*)realloc(g_staged_calls.calls, 
-                                                           new_capacity * sizeof(staged_call_t));
-        if (!new_calls) return 0;
-        
-        /* Initialize new memory */
-        memset(&new_calls[g_staged_calls.capacity], 0, 
-               (new_capacity - g_staged_calls.capacity) * sizeof(staged_call_t));
-        
-        g_staged_calls.calls = new_calls;
-        g_staged_calls.capacity = new_capacity;
-    }
-    
-    /* Allocate and copy strings - check both allocations before proceeding */
-    char* args_copy = (char*)malloc(args_len + 1);
-    char* func_copy = (char*)malloc(func_len + 1);
-    
-    if (!args_copy || !func_copy) {
-        free(args_copy);
-        free(func_copy);
-        return 0;
-    }
-    
-    strcpy_s(args_copy, args_len + 1, arguments);
-    strcpy_s(func_copy, func_len + 1, function);
-    
-    /* Store the staged call */
-    g_staged_calls.calls[g_staged_calls.count].arguments = args_copy;
-    g_staged_calls.calls[g_staged_calls.count].function = func_copy;
-    g_staged_calls.count++;
-    
-    return 1;
-}
-
-/* Clear all staged calls and free memory */
-static void lua_clear_staged_calls(void) {
-    if (!g_staged_calls.calls) return;
-    
-    for (int i = 0; i < g_staged_calls.count; i++) {
-        free(g_staged_calls.calls[i].arguments);
-        free(g_staged_calls.calls[i].function);
-        g_staged_calls.calls[i].arguments = NULL;
-        g_staged_calls.calls[i].function = NULL;
-    }
-    
-    g_staged_calls.count = 0;
-}
-
-/* Clean up staged calls storage completely */
-static void lua_cleanup_staged_calls_storage(void) {
-    lua_clear_staged_calls();
-    
-    if (g_staged_calls.calls) {
-        free(g_staged_calls.calls);
-        g_staged_calls.calls = NULL;
-    }
-    
-    g_staged_calls.capacity = 0;
-    g_staged_calls.initialized = 0;
-}
-
-/* Lua C function: ArmaStageCall(call_data) - Stage a call for later execution */
-static int lua_c_arma_stage_call(lua_State* L) {
-    /* Ensure adequate stack space */
-    if (!lua_checkstack(L, 6)) {
-        lua_pushboolean(L, 0);
-        lua_pushstring(L, "STACK OVERFLOW");
-        return 2;
-    }
-    
-    /* Track initial stack for cleanup */
-    int initial_stack = lua_gettop(L);
-    
-    /* Validate argument count - NOW EXPECTS 2 SEPARATE ARGUMENTS */
-    int argc = lua_gettop(L);
-    if (argc != 2) {
-        lua_settop(L, initial_stack);
-        lua_pushboolean(L, 0);
-        lua_pushstring(L, "REQUIRES 2 ARGUMENTS: ArmaStageCall(arguments, function)");
-        return 2;
-    }
-    
-    /* Function must be string (second argument) */
-    if (!lua_isstring(L, 2)) {
-        lua_settop(L, initial_stack);
-        lua_pushboolean(L, 0);
-        lua_pushstring(L, "FUNCTION PARAMETER MUST BE A STRING");
-        return 2;
-    }
-    
-    const char* function = lua_tostring(L, 2);
-    if (!function || strlen(function) == 0) {
-        lua_settop(L, initial_stack);
-        lua_pushboolean(L, 0);
-        lua_pushstring(L, "FUNCTION PARAMETER CANNOT BE EMPTY");
-        return 2;
-    }
-    
-    /* Clean the function string */
-    size_t function_len = strlen(function);
-    char* clean_function = (char*)malloc(function_len + 1);
-    
-    if (!clean_function) {
-        lua_settop(L, initial_stack);
-        lua_pushboolean(L, 0);
-        lua_pushstring(L, "MEMORY ALLOCATION FAILED FOR FUNCTION STRING");
-        return 2;
-    }
-    
-    kh_clean_string(function, clean_function, (int)function_len + 1);
-    
-    /* Validate cleaned function */
-    if (strlen(clean_function) == 0) {
-        lua_settop(L, initial_stack);
-        free(clean_function);
-        lua_pushboolean(L, 0);
-        lua_pushstring(L, "FUNCTION PARAMETER CANNOT BE EMPTY AFTER CLEANING");
-        return 2;
-    }
-    
-    /* Convert arguments to Arma string format (first argument) */
-    char* args_buffer = (char*)malloc(KH_MAX_OUTPUT_SIZE);
-    
-    if (!args_buffer) {
-        lua_settop(L, initial_stack);
-        free(clean_function);
-        lua_pushboolean(L, 0);
-        lua_pushstring(L, "MEMORY ALLOCATION FAILED FOR ARGUMENTS BUFFER");
-        return 2;
-    }
-    
-    /* Convert arguments (at stack position 1) to string format */
-    if (!arma_convert_lua_data_to_string(L, 1, args_buffer, KH_MAX_OUTPUT_SIZE)) {
-        lua_settop(L, initial_stack);
-        free(clean_function);
-        free(args_buffer);
-        lua_pushboolean(L, 0);
-        lua_pushstring(L, "FAILED TO CONVERT ARGUMENTS TO ARMA FORMAT");
-        return 2;
-    }
-    
-    /* Add to staged calls */
-    if (!lua_add_staged_call(args_buffer, clean_function)) {
-        lua_settop(L, initial_stack);
-        free(clean_function);
-        free(args_buffer);
-        lua_pushboolean(L, 0);
-        lua_pushstring(L, "FAILED TO STAGE CALL - MEMORY EXHAUSTION OR TOO MANY STAGED CALLS");
-        return 2;
-    }
-    
-    /* Successful staging - restore stack and cleanup */
-    lua_settop(L, initial_stack);
-    free(clean_function);
-    free(args_buffer);
-    
-    /* Return success without values to stack (ArmaStageCall returns nothing) */
-    return 0;
-}
-
 /* Enhanced Lua state initialization with Lua-callable functions registration */
 static int lua_init_turbo_state(lua_State* L) {
     if (!L) return 0;
     
-    /* Ensure we have enough stack space */
-    if (!lua_checkstack(L, LUA_STACK_SAFETY_MARGIN + 20)) return 0;
+    /* Only reserve what we actually need for this function */
+    if (!lua_checkstack(L, 8)) return 0;
     
     /* Load essential libraries */
     luaopen_base(L);
@@ -1651,7 +1433,7 @@ static int lua_init_turbo_state(lua_State* L) {
     luaopen_string(L);   
     luaopen_table(L);
     luaopen_jit(L);
-    luaopen_bit(L);      // BitOp library (if available)
+    luaopen_bit(L);
     
     /* Configure LuaJIT for maximum performance and stability */
     lua_getglobal(L, "jit");
@@ -1667,25 +1449,17 @@ static int lua_init_turbo_state(lua_State* L) {
             lua_pop(L, 1);
         }
         
-        /* Aggressive JIT optimization for repeated code execution */
+        /* Aggressive JIT optimization - more compact setup */
         lua_getfield(L, -1, "opt");
         if (lua_isfunction(L, -1)) {
             lua_pushstring(L, "start");
-            /* Very aggressive compilation thresholds for repeated execution */
-            lua_pushstring(L, "hotloop=10");       /* Compile loops after 10 iterations */
-            lua_pushstring(L, "hotexit=5");        /* Compile side exits after 5 */
-            lua_pushstring(L, "tryside=2");        /* Try side trace recording after 2 */
-            lua_pushstring(L, "instunroll=4");     /* Instruction unrolling */
-            lua_pushstring(L, "loopunroll=20");    /* Aggressive loop unrolling */
-            lua_pushstring(L, "recunroll=4");      /* Recursive unrolling */
-            lua_pushstring(L, "callunroll=5");     /* Call unrolling */
             
             /* Increase memory limits for complex traces */
-            lua_pushstring(L, "maxmcode=8192");    /* More machine code memory */
+            lua_pushstring(L, "maxmcode=65536");    /* More machine code memory */
             lua_pushstring(L, "maxtrace=2000");    /* More traces */
-            lua_pushstring(L, "maxrecord=8000");   /* Longer traces */
-            lua_pushstring(L, "maxirconst=2000");  /* More constants */
-            lua_pushstring(L, "maxside=300");      /* More side exits */
+            lua_pushstring(L, "maxrecord=6000");   /* Longer traces */
+            lua_pushstring(L, "maxirconst=1000");  /* More constants */
+            lua_pushstring(L, "maxside=200");      /* More side exits */
             lua_pushstring(L, "maxsnap=1000");     /* More snapshots */
             
             if (lua_pcall(L, 13, 0, 0) != LUA_OK) {
@@ -1709,9 +1483,8 @@ static int lua_init_turbo_state(lua_State* L) {
             lua_pushstring(L, "+abc");      /* Array bounds check elimination */
             lua_pushstring(L, "+sink");     /* Allocation/store sinking */
             lua_pushstring(L, "+fuse");     /* Fusion of operands into instructions */
-            lua_pushstring(L, "+fold");     /* Constant folding */
             
-            if (lua_pcall(L, 10, 0, 0) != LUA_OK) {
+            if (lua_pcall(L, 12, 0, 0) != LUA_OK) {
                 lua_pop(L, 1); /* Continue on optimization failure */
             }
         } else {
@@ -1723,7 +1496,7 @@ static int lua_init_turbo_state(lua_State* L) {
         lua_pop(L, 1);
     }
     
-    /* Remove dangerous globals for security */
+    /* Remove dangerous globals for security - batch operations */
     const char* dangerous[] = {
         "dofile", "loadfile", "load", "require", "module", 
         "getfenv", "setfenv", "io", "os", "debug", "package", 
@@ -1753,143 +1526,102 @@ static int lua_init_turbo_state(lua_State* L) {
     lua_pushcfunction(L, lua_c_arma_callback);
     lua_setglobal(L, "ArmaCallback");
     
-    lua_pushcfunction(L, lua_c_arma_stage_call);
-    lua_setglobal(L, "ArmaStageCall");
+    /* IMMEDIATE INJECTION: Inject all stored variables into new Lua state */
+    lua_inject_all_variables(L);
     
     return 1;
 }
 
-/* Enhanced state management with health monitoring and initial state capture */
-static lua_persistent_state_t* lua_get_optimized_state_with_affinity(uint64_t code_hash) {
-    if (!g_lua_pool_initialized) {
-        memset(g_lua_states, 0, sizeof(g_lua_states));
-        g_lua_pool_initialized = 1;
+/* Simplified state getter - creates or returns the single state */
+static lua_single_state_t* lua_get_single_state(void) {
+    if (!g_lua_initialized) {
+        memset(&g_lua_state, 0, sizeof(g_lua_state));
+        g_lua_initialized = 1;
     }
     
-    DWORD current_time = GetTickCount();
-    lua_persistent_state_t* best_state = NULL;
-    lua_persistent_state_t* affinity_state = NULL;
-    int best_score = -1;
-    
-    /* First pass: look for states with code affinity and available states */
-    for (int i = 0; i < LUA_STATE_POOL_SIZE; i++) {
-        lua_persistent_state_t* state = &g_lua_states[i];
-        
-        if (state->in_use) continue;
-        
-        /* Check if state has run this code before (JIT affinity) */
-        if (state->initialized && state->code_hashes && code_hash != 0) {
-            for (int j = 0; j < state->code_hash_count; j++) {
-                if (state->code_hashes[j] == code_hash) {
-                    /* Perfect match - this state has JIT compiled this code */
-                    affinity_state = state;
-                    break;
-                }
-            }
+    /* If not initialized or state is NULL, create new state */
+    if (!g_lua_state.initialized || !g_lua_state.L) {
+        /* Clean up any existing state first */
+        if (g_lua_state.L) {
+            lua_close(g_lua_state.L);
         }
         
-        if (affinity_state) break; /* Found perfect match */
-        
-        /* Calculate state quality score */
-        int score = 0;
-        if (state->initialized && state->L) {
-            score += 100; /* Prefer initialized states */
-            score += state->execution_count; /* Prefer warmed up states */
-            score -= state->error_count * 10; /* Avoid error-prone states */
-            
-            /* Prefer recently used states (JIT data still hot) */
-            DWORD age = current_time - state->last_used_time;
-            if (age < 30000) score += 50; /* Used in last 30 seconds */
-            else if (age < 120000) score += 25; /* Used in last 2 minutes */
+        g_lua_state.L = luaL_newstate();
+        if (!g_lua_state.L) {
+            g_lua_state.initialized = 0;
+            return NULL;
         }
         
-        if (score > best_score) {
-            best_score = score;
-            best_state = state;
+        g_lua_state.jit_enabled = lua_init_turbo_state(g_lua_state.L);
+        if (!g_lua_state.jit_enabled) {
+            lua_close(g_lua_state.L);
+            g_lua_state.L = NULL;
+            g_lua_state.initialized = 0;
+            return NULL;
         }
+        
+        g_lua_state.initialized = 1;
+        g_lua_state.error_count = 0;
+        g_lua_state.creation_time = GetTickCount();
     }
     
-    /* Use affinity state if found, otherwise use best available */
-    lua_persistent_state_t* selected_state = affinity_state ? affinity_state : best_state;
-    
-    if (selected_state) {
-        if (!selected_state->initialized) {
-            /* Initialize new state using standard Lua state creation */
-            selected_state->L = luaL_newstate();
-            if (!selected_state->L) return NULL;
-            
-            selected_state->jit_enabled = lua_init_turbo_state(selected_state->L);
-            if (!selected_state->jit_enabled) {
-                lua_close(selected_state->L);
-                selected_state->L = NULL;
-                return NULL;
-            }
-            
-            /* Setup lazy variable injection */
-            if (!lua_setup_lazy_variable_injection(selected_state->L)) {
-                lua_close(selected_state->L);
-                selected_state->L = NULL;
-                return NULL;
-            }
-            
-            /* Initialize code hash tracking */
-            selected_state->code_hash_capacity = LUA_MAX_CODE_HASHES_PER_STATE;
-            selected_state->code_hashes = (uint64_t*)calloc(selected_state->code_hash_capacity, sizeof(uint64_t));
-            if (!selected_state->code_hashes) {
-                lua_close(selected_state->L);
-                selected_state->L = NULL;
-                return NULL;
-            }
-            
-            selected_state->initialized = 1;
-            selected_state->error_count = 0;
-            selected_state->execution_count = 0;
-            selected_state->code_hash_count = 0;
-            selected_state->creation_time = current_time;
-            selected_state->last_cleanup_time = current_time;
-        }
-        
-        selected_state->in_use = 1;
-        selected_state->last_used_time = current_time;
-        
-        /* Track this code hash for future affinity */
-        if (code_hash != 0 && selected_state->code_hashes) {
-            int found = 0;
-            for (int i = 0; i < selected_state->code_hash_count; i++) {
-                if (selected_state->code_hashes[i] == code_hash) {
-                    found = 1;
-                    break;
-                }
-            }
-            
-            if (!found && selected_state->code_hash_count < selected_state->code_hash_capacity) {
-                selected_state->code_hashes[selected_state->code_hash_count++] = code_hash;
-            }
-        }
-        
-        return selected_state;
-    }
+    return &g_lua_state;
+}
 
-    int available_states = 0;
-    for (int i = 0; i < LUA_STATE_POOL_SIZE; i++) {
-        if (!g_lua_states[i].in_use) available_states++;
+/* Reset the Lua state completely */
+static void lua_reset_single_state(void) {
+    if (g_lua_state.L) {
+        lua_close(g_lua_state.L);
     }
+    memset(&g_lua_state, 0, sizeof(g_lua_state));
+    /* g_lua_initialized remains 1 so we don't re-initialize the system */
+}
 
-    /* If pool pressure is high, aggressively clean old states */
-    if (available_states < LUA_STATE_POOL_SIZE / 4) { /* Less than 25% available */
-        DWORD aggressive_timeout = 1000; /* 1 second under pressure */
-        for (int i = 0; i < LUA_STATE_POOL_SIZE; i++) {
-            lua_persistent_state_t* state = &g_lua_states[i];
-            if (!state->in_use && state->L && 
-                (current_time - state->last_used_time) > aggressive_timeout) {
-                lua_close(state->L);
-                free(state->code_hashes);
-                memset(state, 0, sizeof(lua_persistent_state_t));
-            }
+/* LuaResetState operation - Reset the single Lua state */
+static int kh_process_lua_reset_state_operation(char* output, int output_size, 
+                                               const char** argv, int argc) {
+    if (!output || output_size <= 0) return 1;
+    
+    output[0] = '\0';
+    
+    if (argc != 0) {
+        kh_set_error(output, output_size, "REQUIRES 0 ARGUMENTS");
+        return 1;
+    }
+    
+    /* Reset the state */
+    lua_reset_single_state();
+    
+    /* Get the new state and inject all variables immediately */
+    lua_single_state_t* state = lua_get_single_state();
+    if (state && state->L && state->initialized) {
+        /* Variables are automatically injected in lua_init_turbo_state */
+    }
+    
+    _snprintf_s(output, output_size, _TRUNCATE, "[\"SUCCESS\"]");
+    return 0;
+}
+
+/* Cleanup function with single state management */
+static void kh_cleanup_lua_states(void) {
+    /* Clean up persistent Lua variables */
+    if (g_lua_variable_storage.initialized) {
+        for (uint32_t i = 0; i < g_lua_variable_storage.variable_count; i++) {
+            free(g_lua_variable_storage.variables[i].name);
+            free(g_lua_variable_storage.variables[i].original_value);
+            free(g_lua_variable_storage.variables[i].type);
         }
+        free(g_lua_variable_storage.variables);
+        free(g_lua_variable_storage.hash_table.entries);
+        memset(&g_lua_variable_storage, 0, sizeof(g_lua_variable_storage));
     }
-
-    return NULL;
+    
+    /* Clean up single Lua state */
+    if (g_lua_state.L) {
+        lua_close(g_lua_state.L);
+    }
+    memset(&g_lua_state, 0, sizeof(g_lua_state));
+    g_lua_initialized = 0;
 }
 
 /* Enhanced argument clearing with better error handling */
@@ -1908,51 +1640,6 @@ static void lua_clear_argument_globals(lua_State* L) {
     /* Clear argc */
     lua_pushnil(L);
     lua_setglobal(L, "argc");
-}
-
-/* Enhanced state release with proper global restoration */
-static void lua_release_optimized_state(lua_persistent_state_t* state) {
-    if (!state || !state->L) return;
-    
-    DWORD current_time = GetTickCount();
-    DWORD time_since_last_use = current_time - state->last_used_time;
-    DWORD state_age = current_time - state->creation_time;
-    
-    /* Clear stack but preserve global state and JIT compilations */
-    int stack_top = lua_gettop(state->L);
-    if (stack_top > 0) {
-        lua_settop(state->L, 0);
-    }
-    
-    /* Clear argument globals but preserve other globals */
-    lua_clear_argument_globals(state->L);
-    
-    /* Increment execution count for tracking JIT warmup */
-    state->execution_count++;
-    
-    /* Adaptive cleanup based on usage patterns */
-    int should_reset = 0;
-    
-    /* Always reset on excessive errors */
-    if (state->error_count > 20 || state_age > 600000 || (state->execution_count > 1 && time_since_last_use > 120000) || (state->execution_count == 1 && time_since_last_use > 30000) || (state->execution_count < 5 && time_since_last_use > 60000)) {
-        should_reset = 1;
-    }
-    
-    if (should_reset) {
-        lua_close(state->L);
-        free(state->code_hashes);
-        memset(state, 0, sizeof(lua_persistent_state_t));
-        return;
-    }
-    
-    /* Periodic garbage collection for active states */
-    DWORD time_since_cleanup = current_time - state->last_cleanup_time;
-    if (time_since_cleanup > 60000) { /* GC every minute for active states */
-        lua_gc(state->L, LUA_GCCOLLECT, 0);
-        state->last_cleanup_time = current_time;
-    }
-    
-    state->in_use = 0;
 }
 
 /* Enhanced depth-limited array validation */
@@ -2021,9 +1708,8 @@ static int lua_convert_to_hashmap(lua_State* L, int table_stack_index, int eleme
 static const char* lua_parse_arma_array(lua_State* L, const char* ptr, const char* end, int depth) {
     if (!L || !ptr || depth > LUA_MAX_RECURSION_DEPTH) return NULL;
     
-    /* FIXED: More precise stack space calculation */
-    int required_stack = 6 + (depth < 10 ? 2 : 1); /* Less aggressive stack reservation */
-    if (!lua_checkstack(L, required_stack)) return NULL;
+    /* Reserve stack space based on expected usage */
+    if (!lua_checkstack(L, 5)) return NULL;
     
     /* Skip opening bracket */
     if (*ptr != '[') return NULL;
@@ -2033,6 +1719,7 @@ static const char* lua_parse_arma_array(lua_State* L, const char* ptr, const cha
     lua_newtable(L);
     int table_index = lua_gettop(L);
     int element_count = 0;
+    int parse_operations = 0;
     
     /* Skip whitespace */
     while (ptr < end && (*ptr == ' ' || *ptr == '\t' || *ptr == '\n')) ptr++;
@@ -2042,18 +1729,21 @@ static const char* lua_parse_arma_array(lua_State* L, const char* ptr, const cha
         return ptr + 1;
     }
     
-    /* Parse array elements with limits */
-    int max_elements = (depth > 10) ? 100 : 1000; /* Limit elements at deeper levels */
-    
-    while (ptr < end && *ptr != ']' && element_count < max_elements) {
+    /* Parse array elements - removed arbitrary element limit, use parse operations limit instead */
+    while (ptr < end && *ptr != ']' && parse_operations < KH_ARRAY_PARSE_OPERATIONS_LIMIT) {
         /* Skip whitespace and commas */
-        while (ptr < end && (*ptr == ' ' || *ptr == '\t' || *ptr == '\n' || *ptr == ',')) ptr++;
-        if (ptr >= end || *ptr == ']') break;
+        while (ptr < end && (*ptr == ' ' || *ptr == '\t' || *ptr == '\n' || *ptr == ',')) {
+            ptr++;
+            parse_operations++;
+            if (parse_operations >= KH_ARRAY_PARSE_OPERATIONS_LIMIT) break;
+        }
+        if (ptr >= end || *ptr == ']' || parse_operations >= KH_ARRAY_PARSE_OPERATIONS_LIMIT) break;
         
         /* Parse the value recursively */
         const char* next_ptr = lua_parse_value_recursive(L, ptr, end, depth + 1);
         if (!next_ptr) {
-            lua_pop(L, 1); /* Remove the table */
+            /* Ensure stack is restored on parsing failure */
+            lua_settop(L, table_index - 1);
             return NULL;
         }
         
@@ -2061,23 +1751,41 @@ static const char* lua_parse_arma_array(lua_State* L, const char* ptr, const cha
         element_count++;
         lua_rawseti(L, table_index, element_count);
         ptr = next_ptr;
+        parse_operations++;
     }
     
     /* Skip closing bracket */
     if (ptr < end && *ptr == ']') {
         ptr++;
+    } else {
+        /* Missing closing bracket or hit parse operations limit */
+        lua_settop(L, table_index - 1);
+        return NULL;
     }
     
-    /* Check if this should be converted to a hashmap */
-    if (element_count > 0 && element_count <= 100) { /* Limit hashmap conversion */
+    /* Check if this should be converted to a hashmap - optimize for common cases */
+    if (element_count > 0) {
         int is_hashmap = 1;
         
-        for (int i = 1; i <= element_count && is_hashmap; i++) {
+        /* Quick check first few elements */
+        int check_limit = (element_count < 5) ? element_count : 5;
+        for (int i = 1; i <= check_limit && is_hashmap; i++) {
             lua_rawgeti(L, table_index, i);
             if (!lua_is_key_value_pair(L, -1)) {
                 is_hashmap = 0;
             }
             lua_pop(L, 1);
+        }
+        
+        if (is_hashmap && element_count > 5) {
+            /* Check remaining elements if needed */
+            for (int i = 6; i <= element_count && is_hashmap; i++) {
+                lua_rawgeti(L, table_index, i);
+                if (!lua_is_key_value_pair(L, -1)) {
+                    is_hashmap = 0;
+                }
+                lua_pop(L, 1);
+            }
         }
         
         if (is_hashmap) {
@@ -2094,9 +1802,8 @@ static const char* lua_parse_arma_array(lua_State* L, const char* ptr, const cha
 static const char* lua_parse_value_recursive(lua_State* L, const char* ptr, const char* end, int depth) {
     if (!L || !ptr || ptr >= end || depth > LUA_MAX_RECURSION_DEPTH) return NULL;
     
-    /* FIXED: More precise stack space calculation */
-    int required_stack = 4 + (depth < 10 ? 2 : 1); /* Less aggressive stack reservation */
-    if (!lua_checkstack(L, required_stack)) return NULL;
+    /* Reserve minimal stack space based on operation type */
+    if (!lua_checkstack(L, 3)) return NULL;
     
     /* Skip leading whitespace */
     while (ptr < end && (*ptr == ' ' || *ptr == '\t' || *ptr == '\n')) ptr++;
@@ -2107,13 +1814,16 @@ static const char* lua_parse_value_recursive(lua_State* L, const char* ptr, cons
         return lua_parse_arma_array(L, ptr, end, depth);
     }
     
-    /* Find the end of this value with bounds checking */
+    /* Find the end of this value with optimized bounds checking */
     const char* value_start = ptr;
     const char* value_end = ptr;
     int in_quotes = 0;
     int bracket_depth = 0;
     
-    while (value_end < end) {
+    /* Pre-calculate end position to avoid repeated bounds checks */
+    const char* max_end = end;
+    
+    while (value_end < max_end) {
         char c = *value_end;
         
         if (c == '"') {
@@ -2136,43 +1846,53 @@ static const char* lua_parse_value_recursive(lua_State* L, const char* ptr, cons
     }
     
     /* Calculate actual value length */
-    size_t value_len = value_end - value_start;
+    size_t value_len = (size_t)(value_end - value_start);
     if (value_len == 0) return NULL;
     
-    /* FIXED: Use stack buffer for small strings, heap for large ones */
-    char stack_buffer[1024];
+    /* FIXED: Consistent buffer management with standard 8KB threshold */
+    char stack_buffer[8192]; /* Consistent with other functions */
     char* value_buffer = NULL;
+    int allocated = 0;
     
     if (value_len < sizeof(stack_buffer)) {
         value_buffer = stack_buffer;
     } else {
         value_buffer = (char*)malloc(value_len + 1);
         if (!value_buffer) return NULL;
+        allocated = 1;
     }
     
     memcpy(value_buffer, value_start, value_len);
     value_buffer[value_len] = '\0';
     
-    /* Trim whitespace safely */
+    /* Optimized trimming - work on the buffer directly */
     char* trimmed = value_buffer;
-    while (*trimmed && (*trimmed == ' ' || *trimmed == '\t' || *trimmed == '\n')) trimmed++;
+    char* trim_end = value_buffer + value_len - 1;
     
-    size_t trimmed_len = strlen(trimmed);
-    if (trimmed_len > 0) {
-        char* trim_end = trimmed + trimmed_len - 1;
-        while (trim_end > trimmed && (*trim_end == ' ' || *trim_end == '\t' || *trim_end == '\n')) {
-            *trim_end-- = '\0';
-        }
+    /* Trim leading whitespace */
+    while (trimmed <= trim_end && (*trimmed == ' ' || *trimmed == '\t' || *trimmed == '\n')) trimmed++;
+    
+    /* Trim trailing whitespace */
+    while (trim_end >= trimmed && (*trim_end == ' ' || *trim_end == '\t' || *trim_end == '\n')) {
+        *trim_end-- = '\0';
+    }
+    
+    if (trimmed > trim_end) {
+        /* Empty after trimming */
+        if (allocated) free(value_buffer);
+        return NULL;
     }
     
     const char* result_ptr = value_end;
     
-    /* Parse the value based on its content */
-    if (strcmp(trimmed, "true") == 0) {
+    /* Optimized value parsing with fewer string comparisons */
+    size_t trimmed_len = (size_t)(trim_end - trimmed + 1);
+    
+    if (trimmed_len == 4 && memcmp(trimmed, "true", 4) == 0) {
         lua_pushboolean(L, 1);
-    } else if (strcmp(trimmed, "false") == 0) {
+    } else if (trimmed_len == 5 && memcmp(trimmed, "false", 5) == 0) {
         lua_pushboolean(L, 0);
-    } else if (strcmp(trimmed, "nil") == 0) {
+    } else if (trimmed_len == 3 && memcmp(trimmed, "nil", 3) == 0) {
         lua_pushnil(L);
     } else if (trimmed_len >= 2 && trimmed[0] == '"' && trimmed[trimmed_len-1] == '"') {
         /* String literal - remove quotes */
@@ -2189,133 +1909,107 @@ static const char* lua_parse_value_recursive(lua_State* L, const char* ptr, cons
         }
     }
     
-    /* Free heap buffer if used */
-    if (value_buffer != stack_buffer) {
-        free(value_buffer);
-    }
+    /* Cleanup */
+    if (allocated) free(value_buffer);
     
     return result_ptr;
 }
 
 /* Enhanced argument parsing with comprehensive error handling and proper return values */
 static int lua_parse_args_optimized(lua_State* L, const char* args_str) {
-    if (!args_str || !L || !lua_checkstack(L, LUA_STACK_SAFETY_MARGIN)) return -1;
+    if (!args_str || !L) return -1;
     
-    /* Clear all previous argument globals first */
-    lua_clear_argument_globals(L);
-    
-    /* Skip to opening bracket */
-    const char* ptr = args_str;
-    while (*ptr && *ptr != '[') ptr++;
-    if (*ptr != '[') {
-        lua_pushinteger(L, 0);
-        lua_setglobal(L, "argc");
-        return 0; /* Changed from -1 to 0 for empty args */
-    }
-    ptr++;
-    
-    /* Handle empty array */
-    const char* end = args_str + strlen(args_str);
-    while (ptr < end && (*ptr == ' ' || *ptr == '\t' || *ptr == '\n')) ptr++;
-    if (ptr < end && *ptr == ']') {
+    /* Cache string length to avoid multiple strlen calls */
+    size_t args_len = strlen(args_str);
+    if (args_len == 0) {
         lua_pushinteger(L, 0);
         lua_setglobal(L, "argc");
         return 0;
     }
     
-    /* Ultra-fast single number detection */
-    if (ptr < end && (isdigit(*ptr) || *ptr == '-' || *ptr == '+')) {
-        const char* num_start = ptr;
-        const char* num_end = ptr;
-        
-        if (*num_end == '-' || *num_end == '+') num_end++;
-        while (num_end < end && (isdigit(*num_end) || *num_end == '.')) num_end++;
-        
-        const char* check = num_end;
-        while (check < end && (*check == ' ' || *check == '\t' || *check == '\n')) check++;
-        if (check < end && *check == ']' && num_end > num_start) {
-            char num_buffer[32];
-            int len = (int)(num_end - num_start);
-            if (len < sizeof(num_buffer)) {
-                memcpy(num_buffer, num_start, len);
-                num_buffer[len] = '\0';
-                
-                char* endptr;
-                double num = strtod(num_buffer, &endptr);
-                if (*endptr == '\0' && !isnan(num) && !isinf(num)) {
-                    if (!lua_checkstack(L, 2)) {
-                        lua_pushinteger(L, 0);
-                        lua_setglobal(L, "argc");
-                        return -1;
-                    }
-                    
-                    lua_pushnumber(L, num);
-                    lua_setglobal(L, "arg1");
-                    
-                    lua_pushinteger(L, 1);
-                    lua_setglobal(L, "argc");
-                    
-                    return 1;
-                }
-            }
-        }
+    /* Fast empty array check */
+    const char* ptr = args_str;
+    while (*ptr && (*ptr == ' ' || *ptr == '\t' || *ptr == '\n')) ptr++;
+    if (!*ptr) {
+        lua_pushinteger(L, 0);
+        lua_setglobal(L, "argc");
+        return 0;
     }
     
-    /* General parsing with recursive array support */
+    /* Find array start */
+    while (*ptr && *ptr != '[') ptr++;
+    if (*ptr != '[') {
+        lua_pushinteger(L, 0);
+        lua_setglobal(L, "argc");
+        return 0;
+    }
+    ptr++;
+    
+    /* Skip whitespace after opening bracket */
+    while (*ptr && (*ptr == ' ' || *ptr == '\t' || *ptr == '\n')) ptr++;
+    if (*ptr == ']') {
+        lua_pushinteger(L, 0);
+        lua_setglobal(L, "argc");
+        return 0;
+    }
+    
+    /* Ultra-fast single number path with improved bounds checking */
+    if (isdigit(*ptr) || *ptr == '-' || *ptr == '+' || *ptr == '.') {
+        char num_buf[32];
+        int buf_pos = 0;
+        const char* num_start = ptr;
+        
+        /* Copy number characters with bounds checking */
+        while (*ptr && buf_pos < 31 && 
+               (isdigit(*ptr) || *ptr == '.' || *ptr == '-' || *ptr == '+' || 
+                *ptr == 'e' || *ptr == 'E')) {
+            num_buf[buf_pos++] = *ptr++;
+        }
+        num_buf[buf_pos] = '\0';
+        
+        /* Check if this is the only element */
+        while (*ptr && (*ptr == ' ' || *ptr == '\t' || *ptr == '\n')) ptr++;
+        if (*ptr == ']') {
+            char* endptr;
+            double num = strtod(num_buf, &endptr);
+            if (*endptr == '\0' && !isnan(num) && !isinf(num)) {
+                /* Reserve minimal stack for single number */
+                if (!lua_checkstack(L, 2)) return -1;
+                
+                lua_pushnumber(L, num);
+                lua_setglobal(L, "arg1");
+                lua_pushinteger(L, 1);
+                lua_setglobal(L, "argc");
+                return 1;
+            }
+        }
+        ptr = num_start; /* Reset for general parsing */
+    }
+    
+    /* General parsing - reserve stack for maximum expected arguments */
+    if (!lua_checkstack(L, LUA_MAX_SIMPLE_ARGS + 5)) return -1;
+    
+    const char* end = args_str + args_len;
     int arg_count = 0;
-    int initial_stack_top = lua_gettop(L);
     
     while (ptr < end && *ptr != ']' && arg_count < LUA_MAX_SIMPLE_ARGS) {
-        /* Skip separators and whitespace */
+        /* Skip separators */
         while (ptr < end && (*ptr == ' ' || *ptr == '\t' || *ptr == '\n' || *ptr == ',')) ptr++;
         if (ptr >= end || *ptr == ']') break;
         
-        /* Ensure stack space before parsing */
-        if (!lua_checkstack(L, 5)) {
-            /* Clean up any globals we set before the failure */
-            lua_clear_argument_globals(L);
-            lua_pushinteger(L, 0);
-            lua_setglobal(L, "argc");
-            lua_settop(L, initial_stack_top);
-            return -1;
-        }
-        
-        /* Parse this argument recursively */
+        /* Parse argument */
         const char* next_ptr = lua_parse_value_recursive(L, ptr, end, 0);
-        if (!next_ptr) {
-            /* Clean up any globals we set before the failure */
-            lua_clear_argument_globals(L);
-            lua_pushinteger(L, 0);
-            lua_setglobal(L, "argc");
-            lua_settop(L, initial_stack_top);
-            return -1;
-        }
+        if (!next_ptr) break;
         
         arg_count++;
-        
-        /* Set as global variable argN */
-        char arg_name[16];
-        if (_snprintf_s(arg_name, sizeof(arg_name), _TRUNCATE, "arg%d", arg_count) <= 0) {
-            /* If naming failed, clean up what we've set so far */
-            lua_pop(L, 1); /* Remove the value from stack */
-            lua_clear_argument_globals(L);
-            lua_pushinteger(L, 0);
-            lua_setglobal(L, "argc");
-            lua_settop(L, initial_stack_top);
-            return -1;
-        }
-        
-        lua_setglobal(L, arg_name);
         ptr = next_ptr;
     }
     
-    /* Set argc global variable */
-    if (!lua_checkstack(L, 2)) {
-        lua_clear_argument_globals(L);
-        lua_pushinteger(L, 0);
-        lua_setglobal(L, "argc");
-        lua_settop(L, initial_stack_top);
-        return -1;
+    /* Set globals in reverse order (stack is in reverse) */
+    for (int i = arg_count; i >= 1; i--) {
+        char arg_name[8];
+        _snprintf_s(arg_name, sizeof(arg_name), _TRUNCATE, "arg%d", i);
+        lua_setglobal(L, arg_name);
     }
     
     lua_pushinteger(L, arg_count);
@@ -2497,7 +2191,6 @@ static int lua_value_to_arma_string(lua_State* L, int stack_index, char* buffer,
     return 0;
 }
 
-/* Enhanced table to Arma conversion with comprehensive error handling */
 /* Enhanced table to Arma conversion with comprehensive error handling and proper stack management */
 static int lua_table_to_arma_recursive(lua_State* L, int stack_index, char* buffer, 
                                       size_t buffer_size, size_t* pos, int depth) {
@@ -2615,230 +2308,37 @@ static int lua_table_to_arma_recursive(lua_State* L, int stack_index, char* buff
 
 /* Enhanced result formatting with comprehensive error handling */
 static int lua_format_result_optimized(lua_State* L, char* output, int output_size) {
-    if (!L || !output || output_size <= 10) return 0;
+    if (!L || !output || output_size <= 3) return 0;
     
-    if (!lua_checkstack(L, 3)) return 0;
+    if (!lua_checkstack(L, 2)) return 0;
     
-    /* New format: [[result], [staged_calls]] */
+    /* Simple format: just return the result value */
     size_t pos = 0;
-    size_t remaining = (size_t)output_size - 1; /* Reserve space for null terminator */
-    
-    /* Start main array */
-    if (remaining < 1) {
-        output[0] = '\0';
-        lua_clear_staged_calls();
-        return 0;
-    }
-    output[pos++] = '[';
-    remaining--;
-    
-    /* First element: [result] */
-    if (remaining < 1) {
-        output[0] = '\0';
-        lua_clear_staged_calls();
-        return 0;
-    }
-    output[pos++] = '[';
-    remaining--;
-    
-    int top = lua_gettop(L);
-    
-    /* FIXED: More accurate space estimation for staged calls */
-    size_t min_staged_space = 10; /* Minimum: ],[]] */
-    size_t estimated_staged_space = min_staged_space;
-    
-    /* Calculate actual space needed for staged calls */
-    for (int i = 0; i < g_staged_calls.count && i < 50; i++) {
-        if (!g_staged_calls.calls[i].arguments || !g_staged_calls.calls[i].function) continue;
-        
-        size_t args_len = strlen(g_staged_calls.calls[i].arguments);
-        size_t func_len = strlen(g_staged_calls.calls[i].function);
-        
-        /* More accurate estimate: [args,"func"], with proper quote escaping overhead */
-        size_t quote_overhead = 0;
-        const char* func_str = g_staged_calls.calls[i].function;
-        for (size_t j = 0; j < func_len; j++) {
-            if (func_str[j] == '"') quote_overhead++;
-        }
-        
-        /* Accurate calculation: [ + args + , + " + func_escaped + " + ] + comma_if_not_first */
-        size_t call_estimate = 1 + args_len + 1 + 1 + func_len + quote_overhead + 1 + 1;
-        if (i > 0) call_estimate += 1; /* Comma separator */
-        
-        if (estimated_staged_space > SIZE_MAX - call_estimate || 
-            estimated_staged_space + call_estimate > remaining) {
-            break; /* Prevent overflow and respect remaining space */
-        }
-        
-        estimated_staged_space += call_estimate;
-    }
-    
-    /* Reserve space for staged calls, but don't let it dominate the buffer */
-    size_t max_staged_space = remaining / 2; /* At most half the remaining space */
-    if (estimated_staged_space > max_staged_space) {
-        estimated_staged_space = max_staged_space;
-    }
-    
-    size_t space_for_result = remaining - estimated_staged_space;
+    size_t output_limit = (size_t)output_size;
     
     /* Handle result */
+    int top = lua_gettop(L);
     if (top == 0) {
-        /* No results, output nil */
-        if (space_for_result >= 3) {
+        if (pos + 3 >= output_limit) return 0;
+        memcpy(output + pos, "nil", 3);
+        pos += 3;
+    } else {
+        /* Convert the top stack value to string */
+        if (!lua_value_to_arma_string(L, -1, output, output_limit, &pos, 0)) {
+            /* Fallback to nil on conversion failure */
+            pos = 0;
+            if (pos + 3 >= output_limit) return 0;
             memcpy(output + pos, "nil", 3);
             pos += 3;
-            remaining -= 3;
-        } else {
-            output[pos] = '\0';
-            lua_clear_staged_calls();
-            return 0;
         }
+    }
+    
+    /* Null terminate */
+    if (pos < output_limit) {
+        output[pos] = '\0';
     } else {
-        /* Convert the top result */
-        size_t pos_before_result = pos;
-        size_t remaining_before_result = remaining;
-        
-        if (!lua_value_to_arma_string(L, -1, output, (int)(pos + space_for_result), &pos, 0)) {
-            /* Result conversion failed, use fallback */
-            pos = pos_before_result;
-            remaining = remaining_before_result;
-            
-            if (remaining >= 3) {
-                memcpy(output + pos, "nil", 3);
-                pos += 3;
-                remaining -= 3;
-            } else {
-                output[pos] = '\0';
-                lua_clear_staged_calls();
-                return 0;
-            }
-        } else {
-            /* Update remaining space based on actual usage */
-            remaining = remaining_before_result - (pos - pos_before_result);
-        }
+        output[output_limit - 1] = '\0';
     }
-    
-    /* Close result element */
-    if (remaining < 1) {
-        output[pos] = '\0';
-        lua_clear_staged_calls();
-        return 0;
-    }
-    output[pos++] = ']';
-    remaining--;
-    
-    /* Add comma separator */
-    if (remaining < 1) {
-        output[pos] = '\0';
-        lua_clear_staged_calls();
-        return 0;
-    }
-    output[pos++] = ',';
-    remaining--;
-    
-    /* Start staged calls array */
-    if (remaining < 1) {
-        output[pos] = '\0';
-        lua_clear_staged_calls();
-        return 0;
-    }
-    output[pos++] = '[';
-    remaining--;
-    
-    /* Add staged calls with accurate space tracking */
-    int calls_added = 0;
-    for (int i = 0; i < g_staged_calls.count && remaining > 10; i++) {
-        if (!g_staged_calls.calls[i].arguments || !g_staged_calls.calls[i].function) continue;
-        
-        size_t args_len = strlen(g_staged_calls.calls[i].arguments);
-        size_t func_len = strlen(g_staged_calls.calls[i].function);
-        
-        /* Calculate exact space needed including quote escaping */
-        size_t quote_overhead = 0;
-        const char* func_str = g_staged_calls.calls[i].function;
-        for (size_t j = 0; j < func_len; j++) {
-            if (func_str[j] == '"') quote_overhead++;
-        }
-        
-        size_t needed_space = 1 + args_len + 1 + 1 + func_len + quote_overhead + 1 + 1; /* [args,"func"] */
-        if (calls_added > 0) needed_space += 1; /* Comma separator */
-        
-        if (needed_space > remaining) break; /* Not enough space */
-        
-        /* Add comma if not first call */
-        if (calls_added > 0) {
-            output[pos++] = ',';
-            remaining--;
-        }
-        
-        /* Start call array */
-        output[pos++] = '[';
-        remaining--;
-        
-        /* Add arguments directly */
-        if (args_len <= remaining) {
-            memcpy(output + pos, g_staged_calls.calls[i].arguments, args_len);
-            pos += args_len;
-            remaining -= args_len;
-        } else {
-            break; /* Not enough space */
-        }
-        
-        /* Add comma separator */
-        if (remaining < 1) break;
-        output[pos++] = ',';
-        remaining--;
-        
-        /* Add function with quote escaping */
-        if (remaining < 1) break;
-        output[pos++] = '"';
-        remaining--;
-        
-        for (size_t j = 0; j < func_len && remaining > 1; j++) {
-            if (func_str[j] == '"') {
-                if (remaining < 3) break; /* Need space for "" + closing quote */
-                output[pos++] = '"';
-                output[pos++] = '"';
-                remaining -= 2;
-            } else {
-                output[pos++] = func_str[j];
-                remaining--;
-            }
-        }
-        
-        /* Close function quote */
-        if (remaining < 1) break;
-        output[pos++] = '"';
-        remaining--;
-        
-        /* Close call array */
-        if (remaining < 1) break;
-        output[pos++] = ']';
-        remaining--;
-        
-        calls_added++;
-    }
-    
-    /* Close staged calls array */
-    if (remaining < 1) {
-        output[pos] = '\0';
-        lua_clear_staged_calls();
-        return 0;
-    }
-    output[pos++] = ']';
-    remaining--;
-    
-    /* Close main array */
-    if (remaining < 1) {
-        output[pos] = '\0';
-        lua_clear_staged_calls();
-        return 0;
-    }
-    output[pos++] = ']';
-    output[pos] = '\0';
-    
-    /* Clear staged calls after successful formatting */
-    lua_clear_staged_calls();
     
     return 1;
 }
@@ -2853,6 +2353,7 @@ static int kh_execute_lua_optimized(const char* arguments, const char* code,
         return 1;
     }
     
+    /* Cache string lengths to avoid multiple strlen calls */
     size_t code_len = strlen(code);
     size_t args_len = strlen(arguments);
     
@@ -2861,100 +2362,137 @@ static int kh_execute_lua_optimized(const char* arguments, const char* code,
         return 1;
     }
     
-    /* Clean the code string */
-    char* clean_code = (char*)malloc(code_len + 1);
-    if (!clean_code) {
-        kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
-        return 1;
+    /* Adaptive buffer management */
+    char* clean_code = NULL;
+    int allocated = 0;
+    
+    const size_t stack_threshold = 8192;
+    char stack_buffer[8192];
+    
+    if (code_len < stack_threshold) {
+        clean_code = stack_buffer;
+    } else {
+        clean_code = (char*)malloc(code_len + 1);
+        if (!clean_code) {
+            kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
+            return 1;
+        }
+        allocated = 1;
     }
     
     kh_clean_string(code, clean_code, (int)code_len + 1);
     
-    if (strlen(clean_code) == 0) {
-        free(clean_code);
+    size_t clean_code_len = strlen(clean_code);
+    if (clean_code_len == 0) {
+        if (allocated) free(clean_code);
         kh_set_error(output, output_size, "CODE CANNOT BE EMPTY AFTER CLEANING");
         return 1;
     }
     
-    /* Hash the code for state affinity */
-    uint64_t code_hash = lua_hash_fnv1a(clean_code, strlen(clean_code));
-    
-    /* Get state with JIT affinity */
-    lua_persistent_state_t* state = lua_get_optimized_state_with_affinity(code_hash);
-    if (!state) {
-        free(clean_code);
-        kh_set_error(output, output_size, "NO AVAILABLE LUA STATE");
+    /* Get the single state */
+    lua_single_state_t* state = lua_get_single_state();
+    if (!state || !state->L) {
+        if (allocated) free(clean_code);
+        kh_set_error(output, output_size, "FAILED TO INITIALIZE LUA STATE");
         return 1;
     }
     
     lua_State* L = state->L;
     int result = 1;
     int initial_stack_top = lua_gettop(L);
+    int had_error = 0;
     
-    /* Fast argument parsing check */
-    int has_args = 0;
-    const char* args_check = arguments;
-    while (*args_check && (*args_check == ' ' || *args_check == '\t' || *args_check == '\n')) args_check++;
-    if (*args_check == '[') {
-        args_check++;
+    /* Always clear argument globals first */
+    lua_clear_argument_globals(L);
+    
+    /* Parse arguments if provided */
+    if (args_len > 0) {
+        const char* args_check = arguments;
         while (*args_check && (*args_check == ' ' || *args_check == '\t' || *args_check == '\n')) args_check++;
-        if (*args_check != ']') has_args = 1;
-    } else {
-        has_args = 1;
-    }
-    
-    /* Parse arguments only if needed */
-    if (has_args) {
-        int arg_parse_result = lua_parse_args_optimized(L, arguments);
-        if (arg_parse_result < 0) {
-            lua_settop(L, initial_stack_top);
-            lua_release_optimized_state(state);
-            free(clean_code);
-            kh_set_error(output, output_size, "ARGUMENT PARSING FAILED");
-            return 1;
+        
+        if (*args_check == '[') {
+            args_check++;
+            while (*args_check && (*args_check == ' ' || *args_check == '\t' || *args_check == '\n')) args_check++;
+            if (*args_check != ']') {
+                int parsed_arg_count = lua_parse_args_optimized(L, arguments);
+                if (parsed_arg_count < 0) {
+                    lua_settop(L, initial_stack_top);
+                    if (allocated) free(clean_code);
+                    kh_set_error(output, output_size, "ARGUMENT PARSING FAILED");
+                    /* Reset state on argument parsing error */
+                    lua_reset_single_state();
+                    return 1;
+                }
+            } else {
+                lua_pushinteger(L, 0);
+                lua_setglobal(L, "argc");
+            }
+        } else {
+            lua_pushinteger(L, 0);
+            lua_setglobal(L, "argc");
         }
     } else {
-        /* Set argc to 0 for consistency */
         lua_pushinteger(L, 0);
         lua_setglobal(L, "argc");
     }
     
-    /* Direct compilation and execution - let LuaJIT handle caching internally */
-    int compile_result = luaL_loadstring(L, clean_code);
-    
-    if (compile_result == LUA_OK) {
-        /* Execute with error handling */
+    /* Compile the code */
+    if (luaL_loadstring(L, clean_code) == LUA_OK) {
+        /* Execute the code */
         if (lua_pcall(L, 0, 1, 0) == LUA_OK) {
+            /* Success - format result */
             if (lua_format_result_optimized(L, output, output_size)) {
                 result = 0; /* Success */
             } else {
                 kh_set_error(output, output_size, "RESULT FORMAT FAILED");
-                state->error_count++;
+                had_error = 1;
             }
         } else {
+            /* Execution error - use kh_set_error for consistency */
             const char* error_msg = lua_tostring(L, -1);
-            _snprintf_s(output, output_size, _TRUNCATE, 
-                       KH_ERROR_PREFIX "EXECUTION: %s", 
-                       error_msg ? error_msg : "unknown error");
-            state->error_count++;
-            state->last_error_time = GetTickCount();
+            if (error_msg && strlen(error_msg) > 0) {
+                /* Create a formatted error message with size limit */
+                char formatted_error[1024];
+                int format_result = _snprintf_s(formatted_error, sizeof(formatted_error), _TRUNCATE, 
+                                               "EXECUTION: %s", error_msg);
+                if (format_result > 0) {
+                    kh_set_error(output, output_size, formatted_error);
+                } else {
+                    kh_set_error(output, output_size, "EXECUTION: ERROR MESSAGE TOO LONG");
+                }
+            } else {
+                kh_set_error(output, output_size, "EXECUTION: UNKNOWN ERROR");
+            }
+            had_error = 1;
         }
     } else {
+        /* Compilation error - use kh_set_error for consistency */
         const char* error_msg = lua_tostring(L, -1);
-        _snprintf_s(output, output_size, _TRUNCATE, 
-                   KH_ERROR_PREFIX "COMPILATION: %s", 
-                   error_msg ? error_msg : "syntax error");
-        state->error_count++;
-        state->last_error_time = GetTickCount();
+        if (error_msg && strlen(error_msg) > 0) {
+            /* Create a formatted error message with size limit */
+            char formatted_error[1024];
+            int format_result = _snprintf_s(formatted_error, sizeof(formatted_error), _TRUNCATE, 
+                                           "COMPILATION: %s", error_msg);
+            if (format_result > 0) {
+                kh_set_error(output, output_size, formatted_error);
+            } else {
+                kh_set_error(output, output_size, "COMPILATION: ERROR MESSAGE TOO LONG");
+            }
+        } else {
+            kh_set_error(output, output_size, "COMPILATION: SYNTAX ERROR");
+        }
+        had_error = 1;
     }
     
-    /* Ensure stack is properly cleaned up */
+    /* Cleanup stack */
     lua_settop(L, initial_stack_top);
     
-    /* Release state */
-    lua_release_optimized_state(state);
-    free(clean_code);
+    /* Reset state on any error to prevent corruption */
+    if (had_error) {
+        lua_reset_single_state();
+    }
     
+    if (allocated) free(clean_code);
     return result;
 }
 
@@ -3037,13 +2575,6 @@ static int arma_callback_safe_call(const char* data, const char* function, char*
         return 0;
     }
     
-    if (data_len > 32767 || function_len > 1023) { /* Reasonable limits for Arma */
-        if (error_output && error_size > 0) {
-            kh_set_error(error_output, error_size, "DATA OR FUNCTION TOO LARGE");
-        }
-        return 0;
-    }
-    
     int last_result = g_arma_callback(g_extension_name, function, data);
 
     if (last_result >= 0) {
@@ -3079,12 +2610,6 @@ static int kh_process_lua_compile_operation(char* output, int output_size,
         return 1;
     }
     
-    /* Prevent excessively large code strings to avoid memory issues */
-    if (code_len > KH_MAX_OUTPUT_SIZE * 4) { /* 32KB limit */
-        kh_set_error(output, output_size, "CODE TOO LARGE");
-        return 1;
-    }
-    
     /* Clean the code string (remove surrounding quotes) */
     char* clean_code = (char*)malloc(code_len + 1);
     if (!clean_code) {
@@ -3100,11 +2625,11 @@ static int kh_process_lua_compile_operation(char* output, int output_size,
         return 1;
     }
     
-    /* Get a Lua state for compilation - no code hash since we don't execute */
-    lua_persistent_state_t* state = lua_get_optimized_state_with_affinity(0);
-    if (!state) {
+    /* Get the single Lua state for compilation */
+    lua_single_state_t* state = lua_get_single_state();
+    if (!state || !state->L) {
         free(clean_code);
-        kh_set_error(output, output_size, "NO AVAILABLE LUA STATE");
+        kh_set_error(output, output_size, "FAILED TO INITIALIZE LUA STATE");
         return 1;
     }
     
@@ -3120,35 +2645,27 @@ static int kh_process_lua_compile_operation(char* output, int output_size,
         _snprintf_s(output, output_size, _TRUNCATE, "[\"SUCCESS\"]");
         result = 0;
     } else {
-        /* Compilation failed - extract and format error message */
+        /* Compilation failed - use kh_set_error for consistency */
         const char* error_msg = lua_tostring(L, -1);
         if (error_msg && strlen(error_msg) > 0) {
-            /* Truncate error message if too long to prevent buffer overflow */
-            char truncated_error[512];
-            size_t error_len = strlen(error_msg);
-            if (error_len >= sizeof(truncated_error)) {
-                memcpy(truncated_error, error_msg, sizeof(truncated_error) - 4);
-                strcpy_s(truncated_error + sizeof(truncated_error) - 4, 4, "...");
+            /* Create a formatted error message with size limit */
+            char formatted_error[1024];
+            int format_result = _snprintf_s(formatted_error, sizeof(formatted_error), _TRUNCATE, 
+                                           "COMPILATION: %s", error_msg);
+            if (format_result > 0) {
+                kh_set_error(output, output_size, formatted_error);
             } else {
-                strcpy_s(truncated_error, sizeof(truncated_error), error_msg);
+                kh_set_error(output, output_size, "COMPILATION: ERROR MESSAGE TOO LONG");
             }
-            
-            _snprintf_s(output, output_size, _TRUNCATE, 
-                       KH_ERROR_PREFIX "COMPILATION: %s", truncated_error);
         } else {
             kh_set_error(output, output_size, "COMPILATION: SYNTAX ERROR");
         }
-        
-        /* Update state error tracking */
-        state->error_count++;
-        state->last_error_time = GetTickCount();
     }
     
     /* Ensure stack is properly cleaned up */
     lua_settop(L, initial_stack_top);
     
-    /* Release state and cleanup memory */
-    lua_release_optimized_state(state);
+    /* Cleanup memory */
     free(clean_code);
     
     return result;
@@ -3156,26 +2673,29 @@ static int kh_process_lua_compile_operation(char* output, int output_size,
 
 /* Lua C function: ArmaCallback(data, function) - High-performance implementation */
 static int lua_c_arma_callback(lua_State* L) {
-    /* Ensure adequate stack space for error handling */
-    if (!lua_checkstack(L, 5)) {
-        lua_pushboolean(L, 0);
-        lua_pushstring(L, "STACK OVERFLOW");
-        return 2;
-    }
-    
-    /* Validate argument count */
+    /* Validate argument count first */
     int argc = lua_gettop(L);
     if (argc != 2) {
-        lua_pushboolean(L, 0);
-        lua_pushstring(L, "REQUIRES 2 ARGUMENTS: ArmaCallback(data, function)");
-        return 2;
+        if (lua_checkstack(L, 2)) {
+            lua_pushboolean(L, 0);
+            lua_pushstring(L, "REQUIRES 2 ARGUMENTS: ArmaCallback(data, function)");
+        }
+        return argc < 2 ? argc : 2;
     }
     
     /* Validate callback initialization */
     if (!g_callback_initialized || !g_arma_callback) {
-        lua_pushboolean(L, 0);
-        lua_pushstring(L, "ARMA CALLBACK NOT AVAILABLE");
+        if (lua_checkstack(L, 2)) {
+            lua_pushboolean(L, 0);
+            lua_pushstring(L, "ARMA CALLBACK NOT AVAILABLE");
+        }
         return 2;
+    }
+    
+    /* Check adequate stack space for all operations */
+    if (!lua_checkstack(L, 5)) {
+        /* Cannot safely continue without adequate stack space */
+        return 0;
     }
     
     /* Get function argument (must be string) */
@@ -3268,40 +2788,6 @@ static int lua_c_arma_callback(lua_State* L) {
         lua_pushstring(L, error_buffer[0] ? error_buffer : "UNKNOWN CALLBACK ERROR");
         return 2;
     }
-}
-
-/* FIXED: Cleanup function with proper memory management */
-static void kh_cleanup_lua_states(void) {
-    /* Clean up persistent Lua variables */
-    if (g_lua_variable_storage.initialized) {
-        for (uint32_t i = 0; i < g_lua_variable_storage.variable_count; i++) {
-            free(g_lua_variable_storage.variables[i].name);
-            free(g_lua_variable_storage.variables[i].original_value);
-            free(g_lua_variable_storage.variables[i].type);
-        }
-        free(g_lua_variable_storage.variables);
-        free(g_lua_variable_storage.hash_table.entries);
-        memset(&g_lua_variable_storage, 0, sizeof(g_lua_variable_storage));
-    }
-    
-    /* Clean up staged calls */
-    lua_cleanup_staged_calls_storage();
-    
-    /* Clean up Lua states */
-    for (int i = 0; i < LUA_STATE_POOL_SIZE; i++) {
-        if (g_lua_states[i].L) {
-            /* Clean up code hash tracking */
-            free(g_lua_states[i].code_hashes);
-            
-            /* Close Lua state */
-            lua_close(g_lua_states[i].L);
-        }
-        
-        /* Clear the entire state structure */
-        memset(&g_lua_states[i], 0, sizeof(lua_persistent_state_t));
-    }
-    
-    g_lua_pool_initialized = 0;
 }
 
 #endif /* LUA_INTEGRATION_H */

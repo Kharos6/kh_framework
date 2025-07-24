@@ -42,7 +42,7 @@
 #define KH_CRC32_POLYNOMIAL 0xEDB88320U
 #define MAX_MATH_FUNCTION_ARGS 3
 #define INITIAL_MATH_TOKEN_SIZE 64  /* Initial size for dynamic token allocation */
-#define MAX_MATH_RECURSION_DEPTH 50 /* Maximum recursion depth to prevent stack overflow */
+#define MAX_MATH_RECURSION_DEPTH 32 /* Maximum recursion depth to prevent stack overflow */
 #define MAX_MATH_PARSE_OPERATIONS 10000 /* Maximum operations to prevent infinite loops */
 #define SLICE_SIZE 8192                                          /* 8KB per slice */
 #define KHDATA_MAGIC 0x5444484B                                  /* "KHDT" in little endian */
@@ -52,11 +52,8 @@
 #define VECTOR_EPSILON 1e-9
 #define KH_MAX_FRAGMENTATION_RATIO 0.3  /* Compact when 30% fragmented */
 #define KH_MIN_COMPACTION_INTERVAL 60  /* Minimum 1 minute between compactions */
-#define LUA_STATE_POOL_SIZE 128                    /* Pool of reusable Lua states */
-#define LUA_MAX_CODE_HASHES_PER_STATE 100
-#define LUA_MAX_SIMPLE_ARGS 64                   /* Fast path argument limit */
-#define LUA_MAX_RECURSION_DEPTH 24        /* Reduced for safety */
-#define LUA_STACK_SAFETY_MARGIN 10        /* Safety margin for Lua stack */
+#define LUA_MAX_SIMPLE_ARGS 128                   /* Fast path argument limit */
+#define LUA_MAX_RECURSION_DEPTH 32        /* Reduced for safety */
 #define LUA_VAR_HASH_TABLE_MIN_SIZE 16
 #define LUA_VAR_HASH_TABLE_LOAD_FACTOR 0.5
 #define LUA_VAR_HASH_EMPTY 0

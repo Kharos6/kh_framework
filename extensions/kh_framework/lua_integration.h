@@ -168,7 +168,7 @@ static int g_lua_pool_initialized = 0;
 static lua_variable_storage_t g_lua_variable_storage = {0};
 static int(*g_arma_callback)(char const *name, char const *function, char const *data) = NULL;
 static int g_callback_initialized = 0;
-static char g_extension_name[64] = "kh_framework"; /* Default extension name for callbacks */
+static char g_extension_name[64] = EXTENSION_NAME; /* Default extension name for callbacks */
 
 /* Robin Hood hashing with quadratic probing fallback (same as process_kh_data.h) */
 static inline uint32_t lua_hash_table_find_robin_hood(lua_var_hash_entry_t* hash_table, uint32_t hash_table_size, 
@@ -702,7 +702,7 @@ static const char* lua_parse_value_recursive(lua_State* L, const char* ptr, cons
 static void lua_release_optimized_state(lua_persistent_state_t* state);
 static lua_persistent_state_t* lua_get_optimized_state_with_affinity(uint64_t code_hash);
 static int lua_format_result_optimized(lua_State* L, char* output, int output_size);
-static int lua_c_arma_call(lua_State* L);
+static int lua_c_arma_callback(lua_State* L);
 static int arma_callback_safe_call(const char* data, const char* function, char* error_output, int error_size);
 static int arma_convert_lua_data_to_string(lua_State* L, int stack_index, char* output, int output_size);
 
@@ -1548,48 +1548,27 @@ static int lua_c_arma_stage_call(lua_State* L) {
         return 2;
     }
     
-    /* Validate argument count */
-    int argc = lua_gettop(L);
-    if (argc != 1) {
-        lua_pushboolean(L, 0);
-        lua_pushstring(L, "REQUIRES 1 ARGUMENT: {arguments, function}");
-        return 2;
-    }
-    
-    /* Validate argument is a table */
-    if (!lua_istable(L, 1)) {
-        lua_pushboolean(L, 0);
-        lua_pushstring(L, "ARGUMENT MUST BE AN ARRAY");
-        return 2;
-    }
-    
     /* Track initial stack for cleanup */
     int initial_stack = lua_gettop(L);
     
-    /* Check that table has exactly 2 elements */
-    lua_rawgeti(L, 1, 1); /* arguments */
-    lua_rawgeti(L, 1, 2); /* function */
-    lua_rawgeti(L, 1, 3); /* should be nil */
-    
-    /* Validate structure: must have exactly 2 elements */
-    if (lua_isnil(L, -3) || lua_isnil(L, -2) || !lua_isnil(L, -1)) {
+    /* Validate argument count - NOW EXPECTS 2 SEPARATE ARGUMENTS */
+    int argc = lua_gettop(L);
+    if (argc != 2) {
         lua_settop(L, initial_stack);
         lua_pushboolean(L, 0);
-        lua_pushstring(L, "ARRAY MUST HAVE EXACTLY 2 ELEMENTS: {arguments, function}");
+        lua_pushstring(L, "REQUIRES 2 ARGUMENTS: ArmaStageCall(arguments, function)");
         return 2;
     }
     
-    lua_pop(L, 1); /* Remove the nil check result */
-    
-    /* Function must be string */
-    if (!lua_isstring(L, -1)) {
+    /* Function must be string (second argument) */
+    if (!lua_isstring(L, 2)) {
         lua_settop(L, initial_stack);
         lua_pushboolean(L, 0);
         lua_pushstring(L, "FUNCTION PARAMETER MUST BE A STRING");
         return 2;
     }
     
-    const char* function = lua_tostring(L, -1);
+    const char* function = lua_tostring(L, 2);
     if (!function || strlen(function) == 0) {
         lua_settop(L, initial_stack);
         lua_pushboolean(L, 0);
@@ -1597,7 +1576,7 @@ static int lua_c_arma_stage_call(lua_State* L) {
         return 2;
     }
     
-    /* Clean the function string - use standard allocation */
+    /* Clean the function string */
     size_t function_len = strlen(function);
     char* clean_function = (char*)malloc(function_len + 1);
     
@@ -1619,7 +1598,7 @@ static int lua_c_arma_stage_call(lua_State* L) {
         return 2;
     }
     
-    /* Convert arguments to Arma string format - use standard allocation */
+    /* Convert arguments to Arma string format (first argument) */
     char* args_buffer = (char*)malloc(KH_MAX_OUTPUT_SIZE);
     
     if (!args_buffer) {
@@ -1630,23 +1609,13 @@ static int lua_c_arma_stage_call(lua_State* L) {
         return 2;
     }
     
-    /* Convert arguments (at stack position -2) to string format */
-    if (!arma_convert_lua_data_to_string(L, -2, args_buffer, KH_MAX_OUTPUT_SIZE)) {
+    /* Convert arguments (at stack position 1) to string format */
+    if (!arma_convert_lua_data_to_string(L, 1, args_buffer, KH_MAX_OUTPUT_SIZE)) {
         lua_settop(L, initial_stack);
         free(clean_function);
         free(args_buffer);
         lua_pushboolean(L, 0);
         lua_pushstring(L, "FAILED TO CONVERT ARGUMENTS TO ARMA FORMAT");
-        return 2;
-    }
-    
-    /* Validate converted arguments */
-    if (strlen(args_buffer) == 0) {
-        lua_settop(L, initial_stack);
-        free(clean_function);
-        free(args_buffer);
-        lua_pushboolean(L, 0);
-        lua_pushstring(L, "CONVERTED ARGUMENTS CANNOT BE EMPTY");
         return 2;
     }
     
@@ -1682,6 +1651,7 @@ static int lua_init_turbo_state(lua_State* L) {
     luaopen_string(L);   
     luaopen_table(L);
     luaopen_jit(L);
+    luaopen_bit(L);      // BitOp library (if available)
     
     /* Configure LuaJIT for maximum performance and stability */
     lua_getglobal(L, "jit");
@@ -1712,11 +1682,11 @@ static int lua_init_turbo_state(lua_State* L) {
             
             /* Increase memory limits for complex traces */
             lua_pushstring(L, "maxmcode=8192");    /* More machine code memory */
-            lua_pushstring(L, "maxtrace=6000");    /* More traces */
-            lua_pushstring(L, "maxrecord=12000");   /* Longer traces */
-            lua_pushstring(L, "maxirconst=3000");  /* More constants */
+            lua_pushstring(L, "maxtrace=2000");    /* More traces */
+            lua_pushstring(L, "maxrecord=8000");   /* Longer traces */
+            lua_pushstring(L, "maxirconst=2000");  /* More constants */
             lua_pushstring(L, "maxside=300");      /* More side exits */
-            lua_pushstring(L, "maxsnap=1500");     /* More snapshots */
+            lua_pushstring(L, "maxsnap=1000");     /* More snapshots */
             
             if (lua_pcall(L, 13, 0, 0) != LUA_OK) {
                 lua_pop(L, 2);
@@ -1740,8 +1710,6 @@ static int lua_init_turbo_state(lua_State* L) {
             lua_pushstring(L, "+sink");     /* Allocation/store sinking */
             lua_pushstring(L, "+fuse");     /* Fusion of operands into instructions */
             lua_pushstring(L, "+fold");     /* Constant folding */
-            lua_pushstring(L, "+phielim");  /* PHI elimination */
-            lua_pushstring(L, "+split");    /* Split optimizations */
             
             if (lua_pcall(L, 10, 0, 0) != LUA_OK) {
                 lua_pop(L, 1); /* Continue on optimization failure */
@@ -1782,8 +1750,8 @@ static int lua_init_turbo_state(lua_State* L) {
     lua_pushcfunction(L, lua_c_delete_persistent_variable);
     lua_setglobal(L, "DeletePersistentVariable");
 
-    lua_pushcfunction(L, lua_c_arma_call);
-    lua_setglobal(L, "ArmaCall");
+    lua_pushcfunction(L, lua_c_arma_callback);
+    lua_setglobal(L, "ArmaCallback");
     
     lua_pushcfunction(L, lua_c_arma_stage_call);
     lua_setglobal(L, "ArmaStageCall");
@@ -2239,7 +2207,11 @@ static int lua_parse_args_optimized(lua_State* L, const char* args_str) {
     /* Skip to opening bracket */
     const char* ptr = args_str;
     while (*ptr && *ptr != '[') ptr++;
-    if (*ptr != '[') return -1;
+    if (*ptr != '[') {
+        lua_pushinteger(L, 0);
+        lua_setglobal(L, "argc");
+        return 0; /* Changed from -1 to 0 for empty args */
+    }
     ptr++;
     
     /* Handle empty array */
@@ -2272,7 +2244,7 @@ static int lua_parse_args_optimized(lua_State* L, const char* args_str) {
                 double num = strtod(num_buffer, &endptr);
                 if (*endptr == '\0' && !isnan(num) && !isinf(num)) {
                     if (!lua_checkstack(L, 2)) {
-                        lua_pushnil(L);
+                        lua_pushinteger(L, 0);
                         lua_setglobal(L, "argc");
                         return -1;
                     }
@@ -2289,7 +2261,7 @@ static int lua_parse_args_optimized(lua_State* L, const char* args_str) {
         }
     }
     
-    /* General parsing with recursive array support - Better error handling */
+    /* General parsing with recursive array support */
     int arg_count = 0;
     int initial_stack_top = lua_gettop(L);
     
@@ -2301,14 +2273,8 @@ static int lua_parse_args_optimized(lua_State* L, const char* args_str) {
         /* Ensure stack space before parsing */
         if (!lua_checkstack(L, 5)) {
             /* Clean up any globals we set before the failure */
-            for (int cleanup_i = 1; cleanup_i <= arg_count; cleanup_i++) {
-                char cleanup_name[16];
-                if (_snprintf_s(cleanup_name, sizeof(cleanup_name), _TRUNCATE, "arg%d", cleanup_i) > 0) {
-                    lua_pushnil(L);
-                    lua_setglobal(L, cleanup_name);
-                }
-            }
-            lua_pushnil(L);
+            lua_clear_argument_globals(L);
+            lua_pushinteger(L, 0);
             lua_setglobal(L, "argc");
             lua_settop(L, initial_stack_top);
             return -1;
@@ -2318,17 +2284,9 @@ static int lua_parse_args_optimized(lua_State* L, const char* args_str) {
         const char* next_ptr = lua_parse_value_recursive(L, ptr, end, 0);
         if (!next_ptr) {
             /* Clean up any globals we set before the failure */
-            for (int cleanup_i = 1; cleanup_i <= arg_count; cleanup_i++) {
-                char cleanup_name[16];
-                if (_snprintf_s(cleanup_name, sizeof(cleanup_name), _TRUNCATE, "arg%d", cleanup_i) > 0) {
-                    lua_pushnil(L);
-                    lua_setglobal(L, cleanup_name);
-                }
-            }
-            lua_pushnil(L);
+            lua_clear_argument_globals(L);
+            lua_pushinteger(L, 0);
             lua_setglobal(L, "argc");
-            
-            /* Clean up stack on parsing failure */
             lua_settop(L, initial_stack_top);
             return -1;
         }
@@ -2337,41 +2295,25 @@ static int lua_parse_args_optimized(lua_State* L, const char* args_str) {
         
         /* Set as global variable argN */
         char arg_name[16];
-        if (_snprintf_s(arg_name, sizeof(arg_name), _TRUNCATE, "arg%d", arg_count) > 0) {
-            lua_setglobal(L, arg_name);
-        } else {
+        if (_snprintf_s(arg_name, sizeof(arg_name), _TRUNCATE, "arg%d", arg_count) <= 0) {
             /* If naming failed, clean up what we've set so far */
             lua_pop(L, 1); /* Remove the value from stack */
-            arg_count--; /* Don't count this failed argument */
-            
-            /* Clean up any globals we set before this failure */
-            for (int cleanup_i = 1; cleanup_i <= arg_count; cleanup_i++) {
-                char cleanup_name[16];
-                if (_snprintf_s(cleanup_name, sizeof(cleanup_name), _TRUNCATE, "arg%d", cleanup_i) > 0) {
-                    lua_pushnil(L);
-                    lua_setglobal(L, cleanup_name);
-                }
-            }
-            lua_pushnil(L);
+            lua_clear_argument_globals(L);
+            lua_pushinteger(L, 0);
             lua_setglobal(L, "argc");
-            
             lua_settop(L, initial_stack_top);
             return -1;
         }
         
+        lua_setglobal(L, arg_name);
         ptr = next_ptr;
     }
     
     /* Set argc global variable */
     if (!lua_checkstack(L, 2)) {
-        /* Clean up on final failure */
-        for (int cleanup_i = 1; cleanup_i <= arg_count; cleanup_i++) {
-            char cleanup_name[16];
-            if (_snprintf_s(cleanup_name, sizeof(cleanup_name), _TRUNCATE, "arg%d", cleanup_i) > 0) {
-                lua_pushnil(L);
-                lua_setglobal(L, cleanup_name);
-            }
-        }
+        lua_clear_argument_globals(L);
+        lua_pushinteger(L, 0);
+        lua_setglobal(L, "argc");
         lua_settop(L, initial_stack_top);
         return -1;
     }
@@ -2673,213 +2615,225 @@ static int lua_table_to_arma_recursive(lua_State* L, int stack_index, char* buff
 
 /* Enhanced result formatting with comprehensive error handling */
 static int lua_format_result_optimized(lua_State* L, char* output, int output_size) {
-    if (!L || !output || output_size <= 10) return 0; /* Need space for [[], []] minimum */
+    if (!L || !output || output_size <= 10) return 0;
     
     if (!lua_checkstack(L, 3)) return 0;
     
     /* New format: [[result], [staged_calls]] */
-    output[0] = '[';
-    size_t pos = 1;
+    size_t pos = 0;
+    size_t remaining = (size_t)output_size - 1; /* Reserve space for null terminator */
     
-    /* First element: [result] */
-    if (pos + 1 >= (size_t)output_size) {
-        strcpy_s(output, output_size, "[[nil], []]");
+    /* Start main array */
+    if (remaining < 1) {
+        output[0] = '\0';
         lua_clear_staged_calls();
-        return 1;
+        return 0;
     }
     output[pos++] = '[';
+    remaining--;
+    
+    /* First element: [result] */
+    if (remaining < 1) {
+        output[0] = '\0';
+        lua_clear_staged_calls();
+        return 0;
+    }
+    output[pos++] = '[';
+    remaining--;
     
     int top = lua_gettop(L);
     
-    /* Calculate space needed for staged calls structure with overflow protection */
-    size_t staged_calls_space_needed = 2; /* [] minimum for empty staged calls */
+    /* FIXED: More accurate space estimation for staged calls */
+    size_t min_staged_space = 10; /* Minimum: ],[]] */
+    size_t estimated_staged_space = min_staged_space;
     
-    /* Pre-calculate space needed for all staged calls with overflow checking */
-    for (int i = 0; i < g_staged_calls.count; i++) {
-        size_t current_call_space = 0;
-        
-        if (i > 0) current_call_space += 1; /* comma separator */
-        current_call_space += 1; /* opening [ */
+    /* Calculate actual space needed for staged calls */
+    for (int i = 0; i < g_staged_calls.count && i < 50; i++) {
+        if (!g_staged_calls.calls[i].arguments || !g_staged_calls.calls[i].function) continue;
         
         size_t args_len = strlen(g_staged_calls.calls[i].arguments);
         size_t func_len = strlen(g_staged_calls.calls[i].function);
         
-        /* Check for overflow in individual components */
-        if (args_len > SIZE_MAX - current_call_space - 10) {
-            /* Space calculation would overflow, use fallback */
-            strcpy_s(output, output_size, "[[nil], []]");
-            lua_clear_staged_calls();
-            return 1;
-        }
-        
-        current_call_space += args_len;
-        current_call_space += 1; /* comma separator */
-        current_call_space += 2; /* opening and closing quotes for function */
-        
-        /* Calculate space needed for escaped function name with overflow protection */
-        size_t escaped_func_space = 0;
+        /* More accurate estimate: [args,"func"], with proper quote escaping overhead */
+        size_t quote_overhead = 0;
+        const char* func_str = g_staged_calls.calls[i].function;
         for (size_t j = 0; j < func_len; j++) {
-            if (g_staged_calls.calls[i].function[j] == '"') {
-                escaped_func_space += 2; /* escaped quote */
-            } else {
-                escaped_func_space += 1; /* regular char */
-            }
-            
-            /* Check for overflow in escaping calculation */
-            if (escaped_func_space > SIZE_MAX - current_call_space - 10) {
-                strcpy_s(output, output_size, "[[nil], []]");
-                lua_clear_staged_calls();
-                return 1;
-            }
+            if (func_str[j] == '"') quote_overhead++;
         }
         
-        current_call_space += escaped_func_space;
-        current_call_space += 1; /* closing ] */
+        /* Accurate calculation: [ + args + , + " + func_escaped + " + ] + comma_if_not_first */
+        size_t call_estimate = 1 + args_len + 1 + 1 + func_len + quote_overhead + 1 + 1;
+        if (i > 0) call_estimate += 1; /* Comma separator */
         
-        /* Check for overflow in total space calculation */
-        if (staged_calls_space_needed > SIZE_MAX - current_call_space) {
-            strcpy_s(output, output_size, "[[nil], []]");
-            lua_clear_staged_calls();
-            return 1;
+        if (estimated_staged_space > SIZE_MAX - call_estimate || 
+            estimated_staged_space + call_estimate > remaining) {
+            break; /* Prevent overflow and respect remaining space */
         }
         
-        staged_calls_space_needed += current_call_space;
+        estimated_staged_space += call_estimate;
     }
     
-    /* Reserve space for structure: ],[ and final ] */
-    size_t structure_overhead = 4;
-    size_t total_suffix_space = staged_calls_space_needed + structure_overhead;
-    
-    /* Check for overflow in total calculation */
-    if (staged_calls_space_needed > SIZE_MAX - structure_overhead) {
-        strcpy_s(output, output_size, "[[nil], []]");
-        lua_clear_staged_calls();
-        return 1;
+    /* Reserve space for staged calls, but don't let it dominate the buffer */
+    size_t max_staged_space = remaining / 2; /* At most half the remaining space */
+    if (estimated_staged_space > max_staged_space) {
+        estimated_staged_space = max_staged_space;
     }
     
-    /* Calculate space available for result */
-    size_t max_result_space = (output_size > total_suffix_space + pos) ? 
-                             (output_size - total_suffix_space) : pos + 10; /* minimal fallback */
+    size_t space_for_result = remaining - estimated_staged_space;
     
+    /* Handle result */
     if (top == 0) {
         /* No results, output nil */
-        const char* nil_result = "nil";
-        size_t nil_len = strlen(nil_result);
-        if (pos + nil_len < max_result_space) {
-            memcpy(output + pos, nil_result, nil_len);
-            pos += nil_len;
+        if (space_for_result >= 3) {
+            memcpy(output + pos, "nil", 3);
+            pos += 3;
+            remaining -= 3;
         } else {
-            /* Can't fit nil, use fallback */
-            strcpy_s(output, output_size, "[[nil], []]");
+            output[pos] = '\0';
             lua_clear_staged_calls();
-            return 1;
+            return 0;
         }
     } else {
-        /* Handle the top result with calculated space */
+        /* Convert the top result */
         size_t pos_before_result = pos;
-        if (!lua_value_to_arma_string(L, -1, output, (int)max_result_space, &pos, 0)) {
-            /* Result conversion failed or didn't fit, use fallback */
+        size_t remaining_before_result = remaining;
+        
+        if (!lua_value_to_arma_string(L, -1, output, (int)(pos + space_for_result), &pos, 0)) {
+            /* Result conversion failed, use fallback */
             pos = pos_before_result;
-            const char* fallback = "nil";
-            size_t fallback_len = strlen(fallback);
-            if (pos + fallback_len < max_result_space) {
-                memcpy(output + pos, fallback, fallback_len);
-                pos += fallback_len;
+            remaining = remaining_before_result;
+            
+            if (remaining >= 3) {
+                memcpy(output + pos, "nil", 3);
+                pos += 3;
+                remaining -= 3;
             } else {
-                /* Even fallback doesn't fit */
-                strcpy_s(output, output_size, "[[nil], []]");
-                lua_clear_staged_calls();
-                return 1;
-            }
-        }
-    }
-    
-    /* Close first element: ] */
-    if (pos + 1 >= (size_t)output_size) {
-        strcpy_s(output, output_size, "[[nil], []]");
-        lua_clear_staged_calls();
-        return 1;
-    }
-    output[pos++] = ']';
-    
-    /* Add comma separator */
-    if (pos + 1 >= (size_t)output_size) {
-        strcpy_s(output, output_size, "[[nil], []]");
-        lua_clear_staged_calls();
-        return 1;
-    }
-    output[pos++] = ',';
-    
-    /* Second element: [staged_calls] */
-    if (pos + 1 >= (size_t)output_size) {
-        strcpy_s(output, output_size, "[[nil], []]");
-        lua_clear_staged_calls();
-        return 1;
-    }
-    output[pos++] = '[';
-    
-    /* Check if we have enough space for all staged calls */
-    if (pos + staged_calls_space_needed + 1 > (size_t)output_size) {
-        /* Not enough space for staged calls, just close empty */
-        if (pos + 1 < (size_t)output_size) {
-            output[pos++] = ']';
-            if (pos + 1 < (size_t)output_size) {
-                output[pos++] = ']';
                 output[pos] = '\0';
-            } else {
-                output[output_size - 1] = '\0';
+                lua_clear_staged_calls();
+                return 0;
             }
         } else {
-            output[output_size - 1] = '\0';
+            /* Update remaining space based on actual usage */
+            remaining = remaining_before_result - (pos - pos_before_result);
         }
-        lua_clear_staged_calls();
-        return 1;
     }
     
-    /* Add staged calls - now we know we have enough space */
-    for (int i = 0; i < g_staged_calls.count; i++) {
-        if (i > 0) {
-            output[pos++] = ',';
+    /* Close result element */
+    if (remaining < 1) {
+        output[pos] = '\0';
+        lua_clear_staged_calls();
+        return 0;
+    }
+    output[pos++] = ']';
+    remaining--;
+    
+    /* Add comma separator */
+    if (remaining < 1) {
+        output[pos] = '\0';
+        lua_clear_staged_calls();
+        return 0;
+    }
+    output[pos++] = ',';
+    remaining--;
+    
+    /* Start staged calls array */
+    if (remaining < 1) {
+        output[pos] = '\0';
+        lua_clear_staged_calls();
+        return 0;
+    }
+    output[pos++] = '[';
+    remaining--;
+    
+    /* Add staged calls with accurate space tracking */
+    int calls_added = 0;
+    for (int i = 0; i < g_staged_calls.count && remaining > 10; i++) {
+        if (!g_staged_calls.calls[i].arguments || !g_staged_calls.calls[i].function) continue;
+        
+        size_t args_len = strlen(g_staged_calls.calls[i].arguments);
+        size_t func_len = strlen(g_staged_calls.calls[i].function);
+        
+        /* Calculate exact space needed including quote escaping */
+        size_t quote_overhead = 0;
+        const char* func_str = g_staged_calls.calls[i].function;
+        for (size_t j = 0; j < func_len; j++) {
+            if (func_str[j] == '"') quote_overhead++;
         }
         
-        /* Start staged call array */
-        output[pos++] = '[';
+        size_t needed_space = 1 + args_len + 1 + 1 + func_len + quote_overhead + 1 + 1; /* [args,"func"] */
+        if (calls_added > 0) needed_space += 1; /* Comma separator */
         
-        /* Add arguments */
-        size_t args_len = strlen(g_staged_calls.calls[i].arguments);
-        memcpy(output + pos, g_staged_calls.calls[i].arguments, args_len);
-        pos += args_len;
+        if (needed_space > remaining) break; /* Not enough space */
+        
+        /* Add comma if not first call */
+        if (calls_added > 0) {
+            output[pos++] = ',';
+            remaining--;
+        }
+        
+        /* Start call array */
+        output[pos++] = '[';
+        remaining--;
+        
+        /* Add arguments directly */
+        if (args_len <= remaining) {
+            memcpy(output + pos, g_staged_calls.calls[i].arguments, args_len);
+            pos += args_len;
+            remaining -= args_len;
+        } else {
+            break; /* Not enough space */
+        }
         
         /* Add comma separator */
+        if (remaining < 1) break;
         output[pos++] = ',';
+        remaining--;
         
-        /* Add function as quoted string */
+        /* Add function with quote escaping */
+        if (remaining < 1) break;
         output[pos++] = '"';
+        remaining--;
         
-        /* Add function with quote escaping - we know we have space */
-        const char* func_str = g_staged_calls.calls[i].function;
-        size_t func_len = strlen(func_str);
-        
-        for (size_t j = 0; j < func_len; j++) {
+        for (size_t j = 0; j < func_len && remaining > 1; j++) {
             if (func_str[j] == '"') {
+                if (remaining < 3) break; /* Need space for "" + closing quote */
                 output[pos++] = '"';
                 output[pos++] = '"';
+                remaining -= 2;
             } else {
                 output[pos++] = func_str[j];
+                remaining--;
             }
         }
         
         /* Close function quote */
+        if (remaining < 1) break;
         output[pos++] = '"';
+        remaining--;
         
-        /* Close staged call array */
+        /* Close call array */
+        if (remaining < 1) break;
         output[pos++] = ']';
+        remaining--;
+        
+        calls_added++;
     }
     
     /* Close staged calls array */
+    if (remaining < 1) {
+        output[pos] = '\0';
+        lua_clear_staged_calls();
+        return 0;
+    }
     output[pos++] = ']';
+    remaining--;
     
     /* Close main array */
+    if (remaining < 1) {
+        output[pos] = '\0';
+        lua_clear_staged_calls();
+        return 0;
+    }
     output[pos++] = ']';
     output[pos] = '\0';
     
@@ -3200,8 +3154,8 @@ static int kh_process_lua_compile_operation(char* output, int output_size,
     return result;
 }
 
-/* Lua C function: ArmaCall(data, function) - High-performance implementation */
-static int lua_c_arma_call(lua_State* L) {
+/* Lua C function: ArmaCallback(data, function) - High-performance implementation */
+static int lua_c_arma_callback(lua_State* L) {
     /* Ensure adequate stack space for error handling */
     if (!lua_checkstack(L, 5)) {
         lua_pushboolean(L, 0);
@@ -3213,7 +3167,7 @@ static int lua_c_arma_call(lua_State* L) {
     int argc = lua_gettop(L);
     if (argc != 2) {
         lua_pushboolean(L, 0);
-        lua_pushstring(L, "REQUIRES 2 ARGUMENTS: ArmaCall(data, function)");
+        lua_pushstring(L, "REQUIRES 2 ARGUMENTS: ArmaCallback(data, function)");
         return 2;
     }
     

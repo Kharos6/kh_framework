@@ -278,7 +278,7 @@ __declspec(dllexport) int RVExtensionArgs(char *output, unsigned int output_size
     
     /* If function executed successfully (returned 0), check output limit */
     if (function_result == 0) {
-        /* Enforce the global 8192KB output limit */
+        /* Enforce the global 8KB output limit */
         if (kh_enforce_output_limit(output, output_size)) {
             /* Output exceeded limit and was replaced with error message */
             return 1;
@@ -346,14 +346,11 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             if (!kh_init_memory_manager()) {
                 /* Memory manager initialization failed - this is not fatal */
                 /* The system will fall back to disk-based operations */
-                /* Could log this error in a real system */
             }
             break;
             
         case DLL_THREAD_ATTACH:
         case DLL_THREAD_DETACH:
-            /* A thread is exiting cleanly */
-            /* No thread-specific cleanup needed */
             break;
             
         case DLL_PROCESS_DETACH:

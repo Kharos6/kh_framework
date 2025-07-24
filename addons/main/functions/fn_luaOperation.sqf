@@ -54,5 +54,28 @@ if ([_returnCode] call KH_fnc_parseBoolean) then {
 	nil;
 }
 else {
-	_result;
+	_result params ["_value", "_executions"];
+
+	{
+		private _args = parseSimpleArray (_x select 0);
+		private _parsedArgs = [];
+
+		{
+			if (_x isEqualType "") then {
+				if ("KH_var_cachedLuaEntity_" in _x) then {
+					_parsedArgs pushBack (KH_var_cachedLuaEntities get _x);
+				}
+				else {
+					_parsedArgs pushBack _x;
+				};
+			}
+			else {
+				_parsedArgs pushBack _x;
+			};
+		} forEach _args;
+
+		[_parsedArgs, [_x select 1] call KH_fnc_parseFunction, clientOwner] call KH_fnc_callParsedFunction;
+	} forEach (parseSimpleArray _executions);
+
+	_value;
 };

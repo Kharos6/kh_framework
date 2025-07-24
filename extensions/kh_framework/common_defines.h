@@ -14,6 +14,7 @@
 #include <windows.h>
 
 /* Constants */
+#define EXTENSION_NAME "kh_framework"
 #define KH_MAX_OUTPUT_SIZE 8192
 #define MAX_FILE_PATH_LENGTH 512
 #define MAX_TOTAL_KHDATA_SIZE_BYTES (1024LL * 1024LL * 1024LL)  /* 1GB total limit */

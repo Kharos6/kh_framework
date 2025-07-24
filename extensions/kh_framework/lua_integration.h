@@ -140,6 +140,24 @@ typedef struct {
     int initialized;              /* Whether storage is initialized */
 } lua_variable_storage_t;
 
+/* Structure to hold persistent Lua functions */
+typedef struct lua_function_s {
+    char* name;           /* Function name */
+    char* code;           /* Original function code */
+} lua_function_t;
+
+/* Function storage with hash table for fast lookup */
+typedef struct {
+    lua_function_t* functions;        /* Array of functions */
+    uint32_t function_count;          /* Current number of functions */
+    uint32_t function_capacity;       /* Allocated capacity */
+    lua_var_hash_table_t hash_table;  /* Hash table for fast lookup */
+    int initialized;                  /* Whether storage is initialized */
+} lua_function_storage_t;
+
+/* Global persistent Lua functions storage */
+static lua_function_storage_t g_lua_function_storage = {0};
+
 /* Global persistent Lua variables storage with hash table */
 static lua_variable_storage_t g_lua_variable_storage = {0};
 static int(*g_arma_callback)(char const *name, char const *function, char const *data) = NULL;
@@ -335,7 +353,42 @@ static int lua_rebuild_variable_hash_table(void) {
     return 1;
 }
 
-/* Check if hash table needs rebuilding */
+/* Rebuild function hash table when needed */
+static int lua_rebuild_function_hash_table(void) {
+    if (!g_lua_function_storage.initialized) return 0;
+    
+    /* Calculate new size */
+    uint32_t new_size = lua_calculate_hash_table_size(g_lua_function_storage.function_count);
+    
+    /* Allocate new hash table */
+    lua_var_hash_entry_t* new_entries = (lua_var_hash_entry_t*)calloc(new_size, sizeof(lua_var_hash_entry_t));
+    if (!new_entries) return 0;
+    
+    /* Rebuild hash table entries in the new table first */
+    uint32_t new_used_count = 0;
+    for (uint32_t i = 0; i < g_lua_function_storage.function_count; i++) {
+        if (g_lua_function_storage.functions[i].name) {
+            uint32_t name_hash = lua_hash_variable_name(g_lua_function_storage.functions[i].name);
+            if (!lua_hash_table_insert_robin_hood(new_entries, new_size, name_hash, i)) {
+                /* Rebuild failed - free the new table and keep the old one */
+                free(new_entries);
+                return 0;
+            }
+            new_used_count++;
+        }
+    }
+    
+    /* Only now that we're sure rebuild succeeded, replace the old table */
+    free(g_lua_function_storage.hash_table.entries);
+    g_lua_function_storage.hash_table.entries = new_entries;
+    g_lua_function_storage.hash_table.size = new_size;
+    g_lua_function_storage.hash_table.used_count = new_used_count;
+    g_lua_function_storage.hash_table.deleted_count = 0;
+    g_lua_function_storage.hash_table.needs_rebuild = 0;
+    
+    return 1;
+}
+
 static int lua_hash_table_needs_rebuild(void) {
     if (!g_lua_variable_storage.initialized) return 1;
     
@@ -357,6 +410,30 @@ static int lua_hash_table_needs_rebuild(void) {
     
     return 0;
 }
+
+/* Check if hash table needs rebuilding */
+static int lua_function_hash_table_needs_rebuild(void) {
+    if (!g_lua_function_storage.initialized) return 1;
+    
+    lua_var_hash_table_t* hash_table = &g_lua_function_storage.hash_table;
+    
+    /* Rebuild if load factor too high */
+    double load_factor = (double)(hash_table->used_count + hash_table->deleted_count) / hash_table->size;
+    if (load_factor > 0.5) return 1;
+    
+    /* Rebuild if too many deletions */
+    if (hash_table->deleted_count > hash_table->used_count / 2) return 1;
+    
+    /* Rebuild if size mismatch */
+    uint32_t optimal_size = lua_calculate_hash_table_size(g_lua_function_storage.function_count);
+    if (hash_table->size < optimal_size / 2 || hash_table->size > optimal_size * 2) return 1;
+    
+    /* Rebuild if explicitly flagged */
+    if (hash_table->needs_rebuild) return 1;
+    
+    return 0;
+}
+
 
 /* Find a stored Lua variable by name using hash table */
 static lua_variable_t* lua_find_variable(const char* name) {
@@ -543,7 +620,303 @@ static int lua_c_arma_callback(lua_State* L);
 static int arma_callback_safe_call(const char* data, const char* function, char* error_output, int error_size);
 static int arma_convert_lua_data_to_string(lua_State* L, int stack_index, char* output, int output_size);
 static lua_single_state_t* lua_get_single_state(void);
+static int lua_inject_function(lua_State* L, lua_function_t* func);
 static int lua_inject_variable(lua_State* L, lua_variable_t* var);
+
+/* Initialize function storage with hash table */
+static int lua_init_function_storage(void) {
+    if (g_lua_function_storage.initialized) return 1;
+    
+    g_lua_function_storage.function_capacity = 16;
+    g_lua_function_storage.functions = (lua_function_t*)calloc(g_lua_function_storage.function_capacity, 
+                                                               sizeof(lua_function_t));
+    if (!g_lua_function_storage.functions) return 0;
+    
+    g_lua_function_storage.hash_table.size = LUA_VAR_HASH_TABLE_MIN_SIZE;
+    g_lua_function_storage.hash_table.entries = (lua_var_hash_entry_t*)calloc(g_lua_function_storage.hash_table.size, 
+                                                                              sizeof(lua_var_hash_entry_t));
+    if (!g_lua_function_storage.hash_table.entries) {
+        free(g_lua_function_storage.functions);
+        return 0;
+    }
+    
+    g_lua_function_storage.function_count = 0;
+    g_lua_function_storage.hash_table.used_count = 0;
+    g_lua_function_storage.hash_table.deleted_count = 0;
+    g_lua_function_storage.hash_table.needs_rebuild = 0;
+    g_lua_function_storage.initialized = 1;
+    
+    return 1;
+}
+
+/* Find a stored Lua function by name using hash table */
+static lua_function_t* lua_find_function(const char* name) {
+    if (!name || !g_lua_function_storage.initialized) return NULL;
+    
+    uint32_t name_hash = lua_hash_variable_name(name);
+    int found = 0;
+    uint32_t index = lua_hash_table_find_robin_hood(g_lua_function_storage.hash_table.entries,
+                                                   g_lua_function_storage.hash_table.size, 
+                                                   name_hash, &found);
+    
+    if (found && !g_lua_function_storage.hash_table.entries[index].deleted) {
+        uint32_t func_index = g_lua_function_storage.hash_table.entries[index].var_index;
+        if (func_index < g_lua_function_storage.function_count) {
+            lua_function_t* func = &g_lua_function_storage.functions[func_index];
+            if (func->name && strcmp(func->name, name) == 0) {
+                return func;
+            }
+        }
+    }
+    
+    return NULL;
+}
+
+/* Set a persistent Lua function with proper memory management */
+static int lua_set_function(const char* name, const char* code) {
+    if (!name || !code) return 0;
+    
+    /* Initialize storage if needed */
+    if (!lua_init_function_storage()) return 0;
+    
+    /* Validate function name */
+    if (!kh_validate_variable_name(name)) return 0;
+    
+    /* Find existing function */
+    lua_function_t* existing_func = lua_find_function(name);
+    if (existing_func) {
+        /* Update existing function */
+        char* new_code = (char*)malloc(strlen(code) + 1);
+        if (!new_code) return 0;
+        
+        strcpy_s(new_code, strlen(code) + 1, code);
+        
+        /* Replace old code */
+        free(existing_func->code);
+        existing_func->code = new_code;
+        
+        /* IMMEDIATE INJECTION: Inject into current Lua state */
+        lua_single_state_t* state = lua_get_single_state();
+        if (state && state->L && state->initialized) {
+            lua_inject_function(state->L, existing_func);
+        }
+        
+        return 1;
+    }
+    
+    /* Add new function */
+    
+    /* Expand functions array if needed */
+    if (g_lua_function_storage.function_count >= g_lua_function_storage.function_capacity) {
+        uint32_t new_capacity = g_lua_function_storage.function_capacity * 2;
+        lua_function_t* new_functions = (lua_function_t*)realloc(g_lua_function_storage.functions,
+                                                                new_capacity * sizeof(lua_function_t));
+        if (!new_functions) return 0;
+        
+        /* Initialize new memory */
+        memset(&new_functions[g_lua_function_storage.function_capacity], 0,
+               (new_capacity - g_lua_function_storage.function_capacity) * sizeof(lua_function_t));
+        
+        g_lua_function_storage.functions = new_functions;
+        g_lua_function_storage.function_capacity = new_capacity;
+    }
+    
+    /* Allocate all memory first */
+    size_t name_len = strlen(name);
+    size_t code_len = strlen(code);
+    
+    char* name_copy = (char*)malloc(name_len + 1);
+    char* code_copy = (char*)malloc(code_len + 1);
+    
+    if (!name_copy || !code_copy) {
+        free(name_copy);
+        free(code_copy);
+        return 0;
+    }
+    
+    strcpy_s(name_copy, name_len + 1, name);
+    strcpy_s(code_copy, code_len + 1, code);
+    
+    /* Rebuild hash table if needed BEFORE adding the function */
+    if (lua_function_hash_table_needs_rebuild()) {
+        if (!lua_rebuild_function_hash_table()) {
+            free(name_copy);
+            free(code_copy);
+            return 0;
+        }
+    }
+    
+    /* Add to functions array */
+    uint32_t func_index = g_lua_function_storage.function_count;
+    
+    /* Add to hash table BEFORE updating the array to maintain consistency */
+    uint32_t name_hash = lua_hash_variable_name(name);
+    if (!lua_hash_table_insert_robin_hood(g_lua_function_storage.hash_table.entries,
+                                         g_lua_function_storage.hash_table.size, 
+                                         name_hash, func_index)) {
+        /* Hash table insertion failed - free allocated memory */
+        free(name_copy);
+        free(code_copy);
+        return 0;
+    }
+    
+    /* Now it's safe to update the array since hash table succeeded */
+    g_lua_function_storage.functions[func_index].name = name_copy;
+    g_lua_function_storage.functions[func_index].code = code_copy;
+    g_lua_function_storage.function_count++;
+    g_lua_function_storage.hash_table.used_count++;
+    
+    /* IMMEDIATE INJECTION: Inject new function into current Lua state */
+    lua_single_state_t* state = lua_get_single_state();
+    if (state && state->L && state->initialized) {
+        lua_inject_function(state->L, &g_lua_function_storage.functions[func_index]);
+    }
+    
+    return 1;
+}
+
+/* Delete a persistent Lua function */
+static int lua_delete_function(const char* name) {
+    if (!name || !g_lua_function_storage.initialized) return 0;
+    
+    uint32_t name_hash = lua_hash_variable_name(name);
+    int found = 0;
+    uint32_t hash_index = lua_hash_table_find_robin_hood(g_lua_function_storage.hash_table.entries,
+                                                        g_lua_function_storage.hash_table.size, 
+                                                        name_hash, &found);
+    
+    if (!found || g_lua_function_storage.hash_table.entries[hash_index].deleted) {
+        return 0;
+    }
+    
+    uint32_t func_index = g_lua_function_storage.hash_table.entries[hash_index].var_index;
+    if (func_index >= g_lua_function_storage.function_count) {
+        return 0;
+    }
+    
+    lua_function_t* func = &g_lua_function_storage.functions[func_index];
+    if (!func->name || strcmp(func->name, name) != 0) {
+        return 0;
+    }
+    
+    /* IMMEDIATE REMOVAL: Remove from current Lua state first */
+    lua_single_state_t* state = lua_get_single_state();
+    if (state && state->L && state->initialized) {
+        if (lua_checkstack(state->L, 2)) {
+            lua_pushnil(state->L);
+            lua_setglobal(state->L, name);
+        }
+    }
+    
+    /* Free memory */
+    free(func->name);
+    free(func->code);
+    
+    /* Remove from hash table */
+    lua_hash_table_delete(g_lua_function_storage.hash_table.entries,
+                         g_lua_function_storage.hash_table.size, name_hash);
+    g_lua_function_storage.hash_table.used_count--;
+    g_lua_function_storage.hash_table.deleted_count++;
+    
+    /* Use swap-with-last */
+    uint32_t last_index = g_lua_function_storage.function_count - 1;
+    
+    if (func_index != last_index) {
+        g_lua_function_storage.functions[func_index] = g_lua_function_storage.functions[last_index];
+        
+        /* Update hash table entry for moved function */
+        if (g_lua_function_storage.functions[func_index].name) {
+            uint32_t moved_name_hash = lua_hash_variable_name(g_lua_function_storage.functions[func_index].name);
+            int moved_found = 0;
+            uint32_t moved_hash_index = lua_hash_table_find_robin_hood(g_lua_function_storage.hash_table.entries,
+                                                                      g_lua_function_storage.hash_table.size, 
+                                                                      moved_name_hash, &moved_found);
+            if (moved_found && !g_lua_function_storage.hash_table.entries[moved_hash_index].deleted) {
+                g_lua_function_storage.hash_table.entries[moved_hash_index].var_index = func_index;
+            }
+        }
+    }
+    
+    /* Clear last element */
+    memset(&g_lua_function_storage.functions[last_index], 0, sizeof(lua_function_t));
+    g_lua_function_storage.function_count--;
+    
+    /* Check if rebuild needed */
+    if (lua_function_hash_table_needs_rebuild()) {
+        g_lua_function_storage.hash_table.needs_rebuild = 1;
+    }
+    
+    return 1;
+}
+
+/* Inject a single function into Lua state with JIT optimization */
+static int lua_inject_function(lua_State* L, lua_function_t* func) {
+    if (!L || !func || !func->name || !func->code) return 0;
+    
+    if (!lua_checkstack(L, 5)) return 0;
+    
+    int initial_stack_top = lua_gettop(L);
+    
+    /* Create function code with wrapper */
+    size_t code_len = strlen(func->code);
+    size_t name_len = strlen(func->name);
+    size_t wrapper_len = code_len + name_len + 64; /* Extra space for wrapper */
+    
+    char* wrapper_code = (char*)malloc(wrapper_len);
+    if (!wrapper_code) return 0;
+    
+    /* Wrap user code in function definition */
+    int result = _snprintf_s(wrapper_code, wrapper_len, _TRUNCATE, 
+                            "function %s()\n%s\nend", func->name, func->code);
+    
+    if (result < 0) {
+        free(wrapper_code);
+        return 0;
+    }
+    
+    /* Compile and execute the function definition */
+    if (luaL_loadstring(L, wrapper_code) == LUA_OK) {
+        if (lua_pcall(L, 0, 0, 0) == LUA_OK) {
+            /* Function is now defined, try to trigger JIT optimization */
+            lua_getglobal(L, func->name);
+            if (lua_isfunction(L, -1)) {
+                /* Call function with no arguments to trigger JIT (ignore any errors) */
+                if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
+                    /* Clear any error from the stack */
+                    lua_pop(L, 1);
+                }
+            } else {
+                lua_pop(L, 1); /* Remove non-function value */
+            }
+            
+            free(wrapper_code);
+            lua_settop(L, initial_stack_top);
+            return 1;
+        }
+    }
+    
+    /* Cleanup on failure */
+    free(wrapper_code);
+    lua_settop(L, initial_stack_top);
+    return 0;
+}
+
+/* Inject all stored functions into Lua state */
+static int lua_inject_all_functions(lua_State* L) {
+    if (!L || !g_lua_function_storage.initialized) return 1;
+    
+    if (!lua_checkstack(L, 5)) return 0;
+    
+    /* Inject all stored functions */
+    for (uint32_t i = 0; i < g_lua_function_storage.function_count; i++) {
+        lua_function_t* func = &g_lua_function_storage.functions[i];
+        if (func && func->name) {
+            lua_inject_function(L, func);
+        }
+    }
+    
+    return 1;
+}
 
 /* FIXED: Set a persistent Lua variable with proper memory leak prevention, hash table and overwrite support */
 static int lua_set_variable(const char* name, const char* value, const char* type, int overwrite_flag) {
@@ -1455,7 +1828,7 @@ static int lua_init_turbo_state(lua_State* L) {
             lua_pushstring(L, "start");
             
             /* Increase memory limits for complex traces */
-            lua_pushstring(L, "maxmcode=65536");    /* More machine code memory */
+            lua_pushstring(L, "maxmcode=8192");    /* More machine code memory */
             lua_pushstring(L, "maxtrace=2000");    /* More traces */
             lua_pushstring(L, "maxrecord=6000");   /* Longer traces */
             lua_pushstring(L, "maxirconst=1000");  /* More constants */
@@ -1526,8 +1899,9 @@ static int lua_init_turbo_state(lua_State* L) {
     lua_pushcfunction(L, lua_c_arma_callback);
     lua_setglobal(L, "ArmaCallback");
     
-    /* IMMEDIATE INJECTION: Inject all stored variables into new Lua state */
+    /* IMMEDIATE INJECTION: Inject all stored variables and functions into new Lua state */
     lua_inject_all_variables(L);
+    lua_inject_all_functions(L);
     
     return 1;
 }
@@ -1614,6 +1988,17 @@ static void kh_cleanup_lua_states(void) {
         free(g_lua_variable_storage.variables);
         free(g_lua_variable_storage.hash_table.entries);
         memset(&g_lua_variable_storage, 0, sizeof(g_lua_variable_storage));
+    }
+    
+    /* Clean up persistent Lua functions */
+    if (g_lua_function_storage.initialized) {
+        for (uint32_t i = 0; i < g_lua_function_storage.function_count; i++) {
+            free(g_lua_function_storage.functions[i].name);
+            free(g_lua_function_storage.functions[i].code);
+        }
+        free(g_lua_function_storage.functions);
+        free(g_lua_function_storage.hash_table.entries);
+        memset(&g_lua_function_storage, 0, sizeof(g_lua_function_storage));
     }
     
     /* Clean up single Lua state */
@@ -1999,7 +2384,13 @@ static int lua_parse_args_optimized(lua_State* L, const char* args_str) {
         
         /* Parse argument */
         const char* next_ptr = lua_parse_value_recursive(L, ptr, end, 0);
-        if (!next_ptr) break;
+        if (!next_ptr) {
+            /* Clean up stack on parsing failure */
+            lua_settop(L, lua_gettop(L) - arg_count);
+            lua_pushinteger(L, 0);
+            lua_setglobal(L, "argc");
+            return -1;
+        }
         
         arg_count++;
         ptr = next_ptr;
@@ -2312,32 +2703,49 @@ static int lua_format_result_optimized(lua_State* L, char* output, int output_si
     
     if (!lua_checkstack(L, 2)) return 0;
     
-    /* Simple format: just return the result value */
-    size_t pos = 0;
-    size_t output_limit = (size_t)output_size;
-    
     /* Handle result */
     int top = lua_gettop(L);
     if (top == 0) {
-        if (pos + 3 >= output_limit) return 0;
-        memcpy(output + pos, "nil", 3);
-        pos += 3;
+        /* No return value, treat as nil */
+        if (output_size > 3) {
+            memcpy(output, "nil", 3);
+            output[3] = '\0';
+            return 1;
+        }
+        return 0;
     } else {
+        /* Check if the return value is explicitly nil - immediate optimization */
+        if (lua_isnil(L, -1)) {
+            /* Skip all processing and immediately return "nil" */
+            if (output_size > 3) {
+                memcpy(output, "nil", 3);
+                output[3] = '\0';
+                return 1;
+            }
+            return 0;
+        }
+        
+        /* Not nil, proceed with full conversion */
+        size_t pos = 0;
+        size_t output_limit = (size_t)output_size;
+        
         /* Convert the top stack value to string */
         if (!lua_value_to_arma_string(L, -1, output, output_limit, &pos, 0)) {
             /* Fallback to nil on conversion failure */
-            pos = 0;
-            if (pos + 3 >= output_limit) return 0;
-            memcpy(output + pos, "nil", 3);
-            pos += 3;
+            if (output_size > 3) {
+                memcpy(output, "nil", 3);
+                output[3] = '\0';
+                return 1;
+            }
+            return 0;
         }
-    }
-    
-    /* Null terminate */
-    if (pos < output_limit) {
-        output[pos] = '\0';
-    } else {
-        output[output_limit - 1] = '\0';
+        
+        /* Null terminate */
+        if (pos < output_limit) {
+            output[pos] = '\0';
+        } else {
+            output[output_limit - 1] = '\0';
+        }
     }
     
     return 1;
@@ -2597,12 +3005,14 @@ static int kh_process_lua_compile_operation(char* output, int output_size,
     
     output[0] = '\0';
     
-    if (argc != 1 || !argv || !argv[0]) {
-        kh_set_error(output, output_size, "REQUIRES 1 ARGUMENT: [CODE]");
+    if (argc < 1 || argc > 2 || !argv || !argv[0]) {
+        kh_set_error(output, output_size, "REQUIRES 1-2 ARGUMENTS: [CODE] or [CODE, FUNCTION_NAME]");
         return 1;
     }
     
     const char* code = argv[0];
+    const char* function_name = (argc >= 2) ? argv[1] : NULL;
+    
     size_t code_len = strlen(code);
     
     if (code_len == 0) {
@@ -2610,7 +3020,7 @@ static int kh_process_lua_compile_operation(char* output, int output_size,
         return 1;
     }
     
-    /* Clean the code string (remove surrounding quotes) */
+    /* Clean the code */
     char* clean_code = (char*)malloc(code_len + 1);
     if (!clean_code) {
         kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
@@ -2625,10 +3035,40 @@ static int kh_process_lua_compile_operation(char* output, int output_size,
         return 1;
     }
     
-    /* Get the single Lua state for compilation */
+    /* Clean and validate function name if provided */
+    char* clean_name = NULL;
+    if (function_name && strlen(function_name) > 0) {
+        size_t name_len = strlen(function_name);
+        clean_name = (char*)malloc(name_len + 1);
+        if (!clean_name) {
+            free(clean_code);
+            kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
+            return 1;
+        }
+        
+        kh_clean_string(function_name, clean_name, (int)name_len + 1);
+        
+        if (strlen(clean_name) == 0) {
+            free(clean_code);
+            free(clean_name);
+            kh_set_error(output, output_size, "FUNCTION NAME CANNOT BE EMPTY AFTER CLEANING");
+            return 1;
+        }
+        
+        /* Validate function name */
+        if (!kh_validate_variable_name(clean_name)) {
+            free(clean_code);
+            free(clean_name);
+            kh_set_error(output, output_size, "INVALID FUNCTION NAME");
+            return 1;
+        }
+    }
+    
+    /* Get the single Lua state for compilation testing */
     lua_single_state_t* state = lua_get_single_state();
     if (!state || !state->L) {
         free(clean_code);
+        free(clean_name);
         kh_set_error(output, output_size, "FAILED TO INITIALIZE LUA STATE");
         return 1;
     }
@@ -2637,29 +3077,171 @@ static int kh_process_lua_compile_operation(char* output, int output_size,
     int result = 1; /* Default to error */
     int initial_stack_top = lua_gettop(L);
     
-    /* Attempt to compile the code without executing it */
-    int compile_result = luaL_loadstring(L, clean_code);
-    
-    if (compile_result == LUA_OK) {
-        /* Compilation successful - code has valid syntax */
-        _snprintf_s(output, output_size, _TRUNCATE, "[\"SUCCESS\"]");
-        result = 0;
-    } else {
-        /* Compilation failed - use kh_set_error for consistency */
-        const char* error_msg = lua_tostring(L, -1);
-        if (error_msg && strlen(error_msg) > 0) {
-            /* Create a formatted error message with size limit */
-            char formatted_error[1024];
-            int format_result = _snprintf_s(formatted_error, sizeof(formatted_error), _TRUNCATE, 
-                                           "COMPILATION: %s", error_msg);
-            if (format_result > 0) {
-                kh_set_error(output, output_size, formatted_error);
+    if (clean_name) {
+        /* Named function - compile, test, and store persistently */
+        size_t wrapper_len = strlen(clean_code) + strlen(clean_name) + 64;
+        char* test_wrapper = (char*)malloc(wrapper_len);
+        
+        if (!test_wrapper) {
+            free(clean_code);
+            free(clean_name);
+            kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
+            return 1;
+        }
+        
+        int wrapper_result = _snprintf_s(test_wrapper, wrapper_len, _TRUNCATE, 
+                                        "function %s()\n%s\nend", clean_name, clean_code);
+        
+        if (wrapper_result < 0) {
+            free(clean_code);
+            free(clean_name);
+            free(test_wrapper);
+            kh_set_error(output, output_size, "FUNCTION WRAPPER CREATION FAILED");
+            return 1;
+        }
+        
+        /* Test compilation */
+        int compile_result = luaL_loadstring(L, test_wrapper);
+        
+        if (compile_result == LUA_OK) {
+            /* Execute the function definition for testing */
+            if (lua_pcall(L, 0, 0, 0) == LUA_OK) {
+                /* Test if function was created successfully */
+                lua_getglobal(L, clean_name);
+                if (lua_isfunction(L, -1)) {
+                    /* Try to call function for JIT optimization (ignore errors) */
+                    if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
+                        lua_pop(L, 1); /* Remove error from stack */
+                    }
+                    
+                    /* Function compiled successfully, store it persistently */
+                    if (lua_set_function(clean_name, clean_code)) {
+                        _snprintf_s(output, output_size, _TRUNCATE, "[\"SUCCESS\",\"STORED\"]");
+                        result = 0;
+                    } else {
+                        kh_set_error(output, output_size, "FAILED TO STORE FUNCTION");
+                    }
+                } else {
+                    kh_set_error(output, output_size, "FUNCTION CREATION FAILED");
+                    lua_pop(L, 1); /* Remove non-function value from stack */
+                }
             } else {
-                kh_set_error(output, output_size, "COMPILATION: ERROR MESSAGE TOO LONG");
+                /* Execution failed */
+                const char* error_msg = lua_tostring(L, -1);
+                if (error_msg && strlen(error_msg) > 0) {
+                    char formatted_error[1024];
+                    int format_result = _snprintf_s(formatted_error, sizeof(formatted_error), _TRUNCATE, 
+                                                   "EXECUTION: %s", error_msg);
+                    if (format_result > 0) {
+                        kh_set_error(output, output_size, formatted_error);
+                    } else {
+                        kh_set_error(output, output_size, "EXECUTION: ERROR MESSAGE TOO LONG");
+                    }
+                } else {
+                    kh_set_error(output, output_size, "EXECUTION: UNKNOWN ERROR");
+                }
             }
         } else {
-            kh_set_error(output, output_size, "COMPILATION: SYNTAX ERROR");
+            /* Compilation failed */
+            const char* error_msg = lua_tostring(L, -1);
+            if (error_msg && strlen(error_msg) > 0) {
+                char formatted_error[1024];
+                int format_result = _snprintf_s(formatted_error, sizeof(formatted_error), _TRUNCATE, 
+                                               "COMPILATION: %s", error_msg);
+                if (format_result > 0) {
+                    kh_set_error(output, output_size, formatted_error);
+                } else {
+                    kh_set_error(output, output_size, "COMPILATION: ERROR MESSAGE TOO LONG");
+                }
+            } else {
+                kh_set_error(output, output_size, "COMPILATION: SYNTAX ERROR");
+            }
         }
+        
+        free(test_wrapper);
+    } else {
+        /* Anonymous function - syntax check and JIT optimization only, no storage */
+        
+        /* Create temporary function wrapper for testing */
+        char temp_name[] = "__temp_syntax_check__";
+        size_t wrapper_len = strlen(clean_code) + sizeof(temp_name) + 64;
+        char* test_wrapper = (char*)malloc(wrapper_len);
+        
+        if (!test_wrapper) {
+            free(clean_code);
+            kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
+            return 1;
+        }
+        
+        int wrapper_result = _snprintf_s(test_wrapper, wrapper_len, _TRUNCATE, 
+                                        "function %s()\n%s\nend", temp_name, clean_code);
+        
+        if (wrapper_result < 0) {
+            free(clean_code);
+            free(test_wrapper);
+            kh_set_error(output, output_size, "FUNCTION WRAPPER CREATION FAILED");
+            return 1;
+        }
+        
+        /* Test compilation */
+        int compile_result = luaL_loadstring(L, test_wrapper);
+        
+        if (compile_result == LUA_OK) {
+            /* Execute the function definition for testing */
+            if (lua_pcall(L, 0, 0, 0) == LUA_OK) {
+                /* Test if function was created successfully */
+                lua_getglobal(L, temp_name);
+                if (lua_isfunction(L, -1)) {
+                    /* Try to call function for JIT optimization (ignore errors) */
+                    if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
+                        lua_pop(L, 1); /* Remove error from stack */
+                    }
+                    
+                    /* Clean up temporary function */
+                    lua_pushnil(L);
+                    lua_setglobal(L, temp_name);
+                    
+                    /* Syntax check passed */
+                    _snprintf_s(output, output_size, _TRUNCATE, "[\"SUCCESS\",\"SYNTAX_VALID\"]");
+                    result = 0;
+                } else {
+                    kh_set_error(output, output_size, "FUNCTION CREATION FAILED");
+                    lua_pop(L, 1); /* Remove non-function value from stack */
+                }
+            } else {
+                /* Execution failed */
+                const char* error_msg = lua_tostring(L, -1);
+                if (error_msg && strlen(error_msg) > 0) {
+                    char formatted_error[1024];
+                    int format_result = _snprintf_s(formatted_error, sizeof(formatted_error), _TRUNCATE, 
+                                                   "EXECUTION: %s", error_msg);
+                    if (format_result > 0) {
+                        kh_set_error(output, output_size, formatted_error);
+                    } else {
+                        kh_set_error(output, output_size, "EXECUTION: ERROR MESSAGE TOO LONG");
+                    }
+                } else {
+                    kh_set_error(output, output_size, "EXECUTION: UNKNOWN ERROR");
+                }
+            }
+        } else {
+            /* Compilation failed */
+            const char* error_msg = lua_tostring(L, -1);
+            if (error_msg && strlen(error_msg) > 0) {
+                char formatted_error[1024];
+                int format_result = _snprintf_s(formatted_error, sizeof(formatted_error), _TRUNCATE, 
+                                               "COMPILATION: %s", error_msg);
+                if (format_result > 0) {
+                    kh_set_error(output, output_size, formatted_error);
+                } else {
+                    kh_set_error(output, output_size, "COMPILATION: ERROR MESSAGE TOO LONG");
+                }
+            } else {
+                kh_set_error(output, output_size, "COMPILATION: SYNTAX ERROR");
+            }
+        }
+        
+        free(test_wrapper);
     }
     
     /* Ensure stack is properly cleaned up */
@@ -2667,6 +3249,7 @@ static int kh_process_lua_compile_operation(char* output, int output_size,
     
     /* Cleanup memory */
     free(clean_code);
+    free(clean_name);
     
     return result;
 }
@@ -2678,7 +3261,7 @@ static int lua_c_arma_callback(lua_State* L) {
     if (argc != 2) {
         if (lua_checkstack(L, 2)) {
             lua_pushboolean(L, 0);
-            lua_pushstring(L, "REQUIRES 2 ARGUMENTS: ArmaCallback(data, function)");
+            lua_pushstring(L, KH_ERROR_PREFIX "REQUIRES 2 ARGUMENTS: ArmaCallback(data, function)");
         }
         return argc < 2 ? argc : 2;
     }
@@ -2687,7 +3270,7 @@ static int lua_c_arma_callback(lua_State* L) {
     if (!g_callback_initialized || !g_arma_callback) {
         if (lua_checkstack(L, 2)) {
             lua_pushboolean(L, 0);
-            lua_pushstring(L, "ARMA CALLBACK NOT AVAILABLE");
+            lua_pushstring(L, KH_ERROR_PREFIX "ARMA CALLBACK NOT AVAILABLE");
         }
         return 2;
     }
@@ -2701,14 +3284,14 @@ static int lua_c_arma_callback(lua_State* L) {
     /* Get function argument (must be string) */
     if (!lua_isstring(L, 2)) {
         lua_pushboolean(L, 0);
-        lua_pushstring(L, "FUNCTION MUST BE A STRING");
+        lua_pushstring(L, KH_ERROR_PREFIX "FUNCTION MUST BE A STRING");
         return 2;
     }
     
     const char* function = lua_tostring(L, 2);
     if (!function) {
         lua_pushboolean(L, 0);
-        lua_pushstring(L, "FUNCTION CANNOT BE EMPTY");
+        lua_pushstring(L, KH_ERROR_PREFIX "FUNCTION CANNOT BE EMPTY");
         return 2;
     }
     
@@ -2716,7 +3299,7 @@ static int lua_c_arma_callback(lua_State* L) {
     size_t function_len = strlen(function);
     if (function_len == 0) {
         lua_pushboolean(L, 0);
-        lua_pushstring(L, "FUNCTION CANNOT BE EMPTY");
+        lua_pushstring(L, KH_ERROR_PREFIX "FUNCTION CANNOT BE EMPTY");
         return 2;
     }
     
@@ -2725,7 +3308,7 @@ static int lua_c_arma_callback(lua_State* L) {
     
     if (!clean_function) {
         lua_pushboolean(L, 0);
-        lua_pushstring(L, "MEMORY ALLOCATION FAILED FOR FUNCTION");
+        lua_pushstring(L, KH_ERROR_PREFIX "MEMORY ALLOCATION FAILED FOR FUNCTION");
         return 2;
     }
     
@@ -2736,7 +3319,7 @@ static int lua_c_arma_callback(lua_State* L) {
     if (clean_function_len == 0) {
         free(clean_function);
         lua_pushboolean(L, 0);
-        lua_pushstring(L, "FUNCTION CANNOT BE EMPTY AFTER CLEANING");
+        lua_pushstring(L, KH_ERROR_PREFIX "FUNCTION CANNOT BE EMPTY AFTER CLEANING");
         return 2;
     }
     
@@ -2746,7 +3329,7 @@ static int lua_c_arma_callback(lua_State* L) {
     if (!data_buffer) {
         free(clean_function);
         lua_pushboolean(L, 0);
-        lua_pushstring(L, "DATA BUFFER ALLOCATION FAILED");
+        lua_pushstring(L, KH_ERROR_PREFIX "DATA BUFFER ALLOCATION FAILED");
         return 2;
     }
     
@@ -2755,7 +3338,7 @@ static int lua_c_arma_callback(lua_State* L) {
         free(data_buffer);
         free(clean_function);
         lua_pushboolean(L, 0);
-        lua_pushstring(L, "DATA CONVERSION FAILED");
+        lua_pushstring(L, KH_ERROR_PREFIX "DATA CONVERSION FAILED");
         return 2;
     }
     
@@ -2765,7 +3348,7 @@ static int lua_c_arma_callback(lua_State* L) {
         free(data_buffer);
         free(clean_function);
         lua_pushboolean(L, 0);
-        lua_pushstring(L, "CONVERTED DATA IS EMPTY");
+        lua_pushstring(L, KH_ERROR_PREFIX "CONVERTED DATA IS EMPTY");
         return 2;
     }
     
@@ -2785,7 +3368,15 @@ static int lua_c_arma_callback(lua_State* L) {
         return 2;
     } else {
         lua_pushboolean(L, 0);
-        lua_pushstring(L, error_buffer[0] ? error_buffer : "UNKNOWN CALLBACK ERROR");
+        /* Ensure error has proper prefix */
+        char prefixed_error[600];
+        if (error_buffer[0] && strncmp(error_buffer, KH_ERROR_PREFIX, strlen(KH_ERROR_PREFIX)) != 0) {
+            _snprintf_s(prefixed_error, sizeof(prefixed_error), _TRUNCATE, 
+                       KH_ERROR_PREFIX "%s", error_buffer);
+            lua_pushstring(L, prefixed_error);
+        } else {
+            lua_pushstring(L, error_buffer[0] ? error_buffer : KH_ERROR_PREFIX "UNKNOWN CALLBACK ERROR");
+        }
         return 2;
     }
 }

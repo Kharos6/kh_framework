@@ -1,32 +1,16 @@
-params [["_value", false, ["", 0, true]]];
+params ["_value"];
+
+if (isNil "_value") exitWith {
+	false;
+};
 
 switch _value do {
-	case true: {
-		true;
-	};
-
 	case false: {
 		false;
-	};
-	
-	case "TRUE": {
-		true;
 	};
 
 	case "FALSE": {
 		false;
-	};
-
-	case "True": {
-		true;
-	};
-
-	case "False": {
-		false;
-	};
-
-	case "true": {
-		true;
 	};
 
 	case "false": {
@@ -37,19 +21,11 @@ switch _value do {
 		false;
 	};
 
-	case 1: {
-		true;
-	};
-
 	case "0": {
 		false;
 	};
 
-	case "1": {
-		true;
-	};
-
 	default {
-		false;
+		true;
 	};
 };

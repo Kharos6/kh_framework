@@ -1,11 +1,10 @@
 params ["_entity", ["_name", ""]];
-private _variableName = "";
 
-if (_name == "") then {
-	_variableName = call KH_fnc_generateUid;
+private _variableName = if (_name isEqualTo "") then {
+	call KH_fnc_generateUid;
 }
 else {
-	_variableName = _name;
+	_name;
 };
 
 _entity setVehicleVarName _variableName;

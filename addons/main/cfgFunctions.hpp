@@ -67,12 +67,13 @@ class CfgFunctions
 			class loadDisplay {};
 			class loadMissionState {};
 			class loadPlayerLoadouts {};
-			class luaClearFunctions {};
+			class log {};
 			class luaClearVariables {};
 			class luaCompile {};
 			class luaDeleteVariable {};
 			class luaGetVariable {};
 			class luaOperation {};
+			class luaResetState {};
 			class luaSetVariable {};
 			class manageHandler {};
 			class manageSimulatedInventory {};
@@ -133,6 +134,7 @@ class CfgFunctions
 			class teleport {};
 			class testExtension {};
 			class testFunction {};
+			class testLua {};
 			class toggleUserInput {};
 			class unbinarizeKhData {};
 			class vehicleSequence {};

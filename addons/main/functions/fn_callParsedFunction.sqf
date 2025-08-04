@@ -1,4 +1,4 @@
-params ["_arguments", "_function", ["_caller", clientOwner]];
+params ["_arguments", ["_function", "", [""]]];
 private _storedFunction = KH_var_cachedFunctions get _function;
 
 if !(isNil "_storedFunction") exitWith {
@@ -6,13 +6,15 @@ if !(isNil "_storedFunction") exitWith {
 };
 
 if ("KH_fnc_cachedFunction_" in _function) then {
+	private _caller = param [2, clientOwner, [0]];
+
 	[
 		[_arguments, _function, _caller],
 		{
 			params ["_arguments", "_function", "_caller"];
 			_argsCallback params ["_storedFunction"];
 
-			if (_storedFunction isNotEqualTo {}) then { 
+			if (_storedFunction isNotEqualTo {}) then {
 				KH_var_cachedFunctions set [_function, _storedFunction, false];
 				_arguments call _storedFunction;
 			}
@@ -67,12 +69,12 @@ if ("KH_fnc_cachedFunction_" in _function) then {
 		"THIS_FRAME"
 	] call KH_fnc_execute;
 
-	true;
+	nil;
 }
 else {
-	private _parsedFunction = missionNamespace getVariable [_function, {}];
+	private _parsedFunction = missionNamespace getVariable _function;
 
-	if (_parsedFunction isNotEqualTo {}) exitWith {
+	if !(isNil "_parsedFunction") exitWith {
 		_arguments call _parsedFunction;
 	};
 
@@ -94,7 +96,7 @@ else {
 		};
 
 		default {
-			false;
+			nil;
 		};
 	};
 };

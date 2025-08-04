@@ -1,9 +1,10 @@
 params ["_entity", ["_generateIfEmpty", true]];
-private _variableName = vehicleVarName _entity;
 
-if ((_variableName == "") && _generateIfEmpty) then {
-	_variableName = call KH_fnc_generateUid;
-	[_entity, _variableName] call KH_fnc_setEntityVariableName;
+if ((vehicleVarName _entity) isEqualTo "") then {
+	if _generateIfEmpty then {
+		[_entity, call KH_fnc_generateUid] call KH_fnc_setEntityVariableName;
+	};
+}
+else {
+	vehicleVarName _entity;
 };
-
-_variableName;

@@ -10,7 +10,14 @@ else {
 	_feature;
 };
 
-private _performance = (diag_codePerformance [{_extension callExtension _feature}]) select 0;
+private _performance = (diag_codePerformance [
+	{
+		params ["_extension", "_feature"];
+		_extension callExtension _feature;
+	},
+	[_feature, _extension]
+]) select 0;
+
 (_extension callExtension _feature) params ["_result", "_returnCode", "_errorCode"];
 
 private _parsedExpectedResult = if (_expectedResult isEqualType "") then {
@@ -27,7 +34,7 @@ else {
 	"false";
 };
 
-if (!_logOnlyMismatch || (_logOnlyMismatch && !_match)) then {
+if (!_logOnlyMismatch || (_logOnlyMismatch && (_match isEqualTo "false"))) then {
 	if _simpleFormat then {
 		diag_log (text ([
 			"EXTENSION TEST: NAME = ",

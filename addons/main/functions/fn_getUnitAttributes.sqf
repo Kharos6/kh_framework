@@ -1,46 +1,101 @@
 params ["_unit"];
-private _type = typeOf _unit;
-private _group = group _unit;
-private _side = side (group _unit);
-private _variableName = vehicleVarName _unit;
-private _name = name _unit;
-private _face = face _unit;
-private _speaker = speaker _unit;
-private _loadout = getUnitLoadout _unit;
-private _position = getPosATL _unit;
-private _rotation = [_unit] call KH_fnc_getRotation;
-private _vehicle = objectParent _unit;
-private _combatMode = combatBehaviour _group;
-private _skill = skill _unit;
-private _aimingAccuracy = _unit skill "aimingAccuracy";
-private _aimingShake = _unit skill "aimingShake";
-private _aimingSpeed = _unit skill "aimingSpeed";
-private _spotDistance = _unit skill "spotDistance";
-private _spotTime = _unit skill "spotTime";
-private _courage = _unit skill "courage";
-private _reloadSpeed = _unit skill "reloadSpeed";
-private _commanding = _unit skill "commanding";
-private _general = _unit skill "general";
-private _featureAutoTarget = _unit checkAIFeature "AUTOTARGET";
-private _featureMove = _unit checkAIFeature "MOVE";
-private _featureTarget = _unit checkAIFeature "TARGET";
-private _featureTeamSwitch = _unit checkAIFeature "TEAMSWITCH";
-private _featureWeaponAim = _unit checkAIFeature "WEAPONAIM";
-private _featureAnim = _unit checkAIFeature "ANIM";
-private _featureFsm = _unit checkAIFeature "FSM";
-private _featureAimingError = _unit checkAIFeature "AIMINGERROR";
-private _featureSuppression = _unit checkAIFeature "SUPPRESSION";
-private _featureCheckVisible = _unit checkAIFeature "CHECKVISIBLE";
-private _featureAutoCombat = _unit checkAIFeature "AUTOCOMBAT";
-private _featureCover = _unit checkAIFeature "COVER";
-private _featurePath = _unit checkAIFeature "PATH";
-private _featureMineDetection = _unit checkAIFeature "MINEDETECTION";
-private _featureLights = _unit checkAIFeature "LIGHTS";
-private _featureNvg = _unit checkAIFeature "NVG";
-private _featureRadioProtocol = _unit checkAIFeature "RADIOPROTOCOL";
-private _featureFireWeapon = _unit checkAIFeature "FIREWEAPON";
-private _unitTraits = getAllUnitTraits _unit;
-[_type, _group, _side, _variableName, _name, _face, _speaker, _loadout, _position, _rotation, _vehicle, _combatMode, _skill, 
-[_aimingAccuracy, _aimingShake, _aimingSpeed, _spotDistance, _spotTime, _courage, _reloadSpeed, _commanding, _general], 
-[_featureAutoTarget, _featureMove, _featureTarget, _featureTeamSwitch, _featureWeaponAim, _featureAnim, _featureFsm, _featureAimingError, 
-_featureSuppression, _featureCheckVisible, _featureAutoCombat, _featureCover, _featurePath, _featureMineDetection, _featureLights, _featureNvg, _featureRadioProtocol, _featureFireWeapon], _unitTraits];
+
+[
+	hashValue _unit,
+	[
+		typeOf _unit,
+		group _unit,
+		vehicleVarName _unit,
+		simulationEnabled _unit,
+		dynamicSimulationEnabled _unit,
+		isObjectHidden _unit,
+		name _unit,
+		face _unit,
+		speaker _unit,
+		pitch _unit,
+		nameSound _unit,
+		animationState _unit,
+		gestureState _unit,
+		getUnitMovesInfo _unit,
+		rank _unit,
+		rating _unit,
+		stance _unit,
+		unitPos _unit,
+		pose _unit,
+		isForcedWalk _unit,
+		isTouchingGround _unit,
+		((eyePos _unit) select 2) < 0,
+		isSwitchingWeapon _unit,
+		getUnitFreefallInfo _unit,
+		getAnimSpeedCoef _unit,
+		currentWeapon _unit,
+		currentWeaponMode _unit,
+		isWeaponDeployed _unit,
+		currentMagazine _unit,
+		currentThrowable _unit,
+		currentVisionMode _unit,
+		teamMember _unit,
+		isAgent (teamMember _unit),
+		formationLeader _unit,
+		formLeader _unit,
+		registeredTasks (teamMember _unit),
+		currentTasks (teamMember _unit),
+		captive _unit,
+		getUnitLoadout _unit,
+		getPosATL _unit,
+		vectorDir _unit,
+		vectorUp _unit,
+		velocityModelSpace _unit,
+		objectParent _unit,
+		attachedTo _unit,
+		attachedObjects _unit,
+		damage _unit,
+		getAllHitPointsDamage _unit,
+		getBleedingRemaining _unit,
+		getOxygenRemaining _unit,
+		isDamageAllowed _unit,
+		incapacitatedState _unit,
+		lifeState _unit,
+		unitRecoilCoefficient _unit,
+		collisionDisabledWith _unit,
+		unitCombatMode _unit,
+		[
+			skill _unit,
+			_unit skill "aimingAccuracy",
+			_unit skill "aimingShake",
+			_unit skill "aimingSpeed",
+			_unit skill "spotDistance",
+			_unit skill "spotTime",
+			_unit skill "courage",
+			_unit skill "reloadSpeed",
+			_unit skill "commanding",
+			_unit skill "general"
+		],
+		[
+			_unit checkAIFeature "AUTOTARGET",
+			_unit checkAIFeature "MOVE",
+			_unit checkAIFeature "TARGET",
+			_unit checkAIFeature "TEAMSWITCH",
+			_unit checkAIFeature "WEAPONAIM",
+			_unit checkAIFeature "ANIM",
+			_unit checkAIFeature "FSM",
+			_unit checkAIFeature "AIMINGERROR",
+			_unit checkAIFeature "SUPPRESSION",
+			_unit checkAIFeature "CHECKVISIBLE",
+			_unit checkAIFeature "AUTOCOMBAT",
+			_unit checkAIFeature "COVER",
+			_unit checkAIFeature "PATH",
+			_unit checkAIFeature "MINEDETECTION",
+			_unit checkAIFeature "LIGHTS",
+			_unit checkAIFeature "NVG",
+			_unit checkAIFeature "RADIOPROTOCOL",
+			_unit checkAIFeature "FIREWEAPON"
+		],
+		getAllUnitTraits _unit,
+		getEntityInfo _unit,
+		synchronizedObjects _unit,
+		_unit targetsQuery [objNull, sideUnknown, "", [], 0],
+		allVariables _unit,
+		_unit getVariable ["KH_var_initExecutions", []]
+	]
+];

@@ -1,4 +1,4 @@
-params ["_function"];
+params [["_function", {}, ["", {}]]];
 
 private _parse = if (_function isEqualType "") then {
 	if (!(" " in _function) && !(".sqf" in _function)) then {
@@ -22,8 +22,8 @@ if (isNil {KH_var_cachedFunctions get _hashValue}) then {
 	KH_var_cachedFunctions set [
 		_hashValue, 
 		if (_function isEqualType "") then {
-			if (".sqf" in _function) then {
-				compile (preprocessFileLineNumbers _function);
+			if ((".sqf" in _function) && !(" " in _function)) then {
+				compileScript [_function, false, ""];
 			}
 			else {
 				compile _function;

@@ -1,16 +1,24 @@
 KH_var_currentPlayerUnit = objNull;
 KH_var_missionLoaded = false;
+KH_var_isJip = false;
 KH_var_cachedFunctions = createHashMap;
 KH_var_cachedLuaFunctions = createHashMap;
 KH_var_cachedLuaEntities = createHashMap;
+KH_var_remoteExecCommandsBlacklist = createHashMap;
+KH_var_remoteExecFunctionsBlacklist = createHashMap;
+KH_var_remoteExecCommandsJipBlacklist = createHashMap;
+KH_var_remoteExecFunctionsJipBlacklist = createHashMap;
+KH_var_cbaEventHandlerStack = createHashMap;
+KH_var_cbaPlayerEventHandlerStack = createHashMap;
+KH_var_uiEventHandlerStack = createHashMap;
+KH_var_temporalExecutionStack = [];
+KH_var_temporalExecutionStackDeletions = [];
 KH_var_postInitExecutions = [];
 KH_var_preInitLuaExecutions = [];
 KH_var_postInitLuaExecutions = [];
 KH_var_loadInitLuaExecutions = [];
-KH_var_cbaEventHandlerStack = [];
-KH_var_isJip = false;
 call KH_fnc_luaClearVariables;
-call KH_fnc_luaClearFunctions;
+call KH_fnc_luaResetState;
 
 {
     private _config = _x;
@@ -24,15 +32,59 @@ call KH_fnc_luaClearFunctions;
             preprocessFile ([(getText (_config >> "path")), "\", configName _x, ".lua"] joinString "");
         };
 
-        ("kh_framework" callExtension ["LuaCompile", [_function]]) params ["_result", "_returnCode"];
-
-        if ([_returnCode] call KH_fnc_parseBoolean) then {
-            diag_log (text ([_result, " | EXTENSION = kh_framework | FUNCTION = LuaCompile | ARGUMENTS = ", [_function]] joinString ""));
-            nil;
+        private _name = if (isText (_x >> "name")) then {
+            getText (_x >> "name");
         }
         else {
-            KH_var_cachedLuaFunctions set [[_prefix, "lua", configName _x] joinString "_", _function];
+           	[_prefix, "lua", configName _x] joinString "_";
         };
+
+        if (isNil {[_function, _name] call KH_fnc_luaCompile}) then {
+			continue;
+		};
+
+		if (isNumber (_x >> "preInit")) then {
+			if ((getNumber (_x >> "preInit")) == 1) then {
+        		KH_var_preInitLuaExecutions pushBack _function;
+			};
+        };
+
+		if (isNumber (_x >> "postInit")) then {
+			if ((getNumber (_x >> "postInit")) == 1) then {
+        		KH_var_postInitLuaExecutions pushBack _function;
+			};
+        };
+
+		if (isNumber (_x >> "loadInit")) then {
+			if ((getNumber (_x >> "loadInit")) == 1) then {
+        		KH_var_loadInitLuaExecutions pushBack _function;
+			};
+        };
+    } forEach ("true" configClasses _config);
+} forEach ("true" configClasses (configFile >> "CfgLuaFunctions"));
+
+{
+    private _config = _x;
+    private _prefix = getText (_config >> "prefix");
+
+    {
+        private _function = if (isText (_x >> "path")) then {
+            preprocessFile ([(getText (_x >> "path")), "\", configName _x, ".lua"] joinString "");
+        }
+        else {
+            preprocessFile ([(getText (_config >> "path")), "\", configName _x, ".lua"] joinString "");
+        };
+
+        private _name = if (isText (_x >> "name")) then {
+            getText (_x >> "name");
+        }
+        else {
+           	[_prefix, "lua", configName _x] joinString "_";
+        };
+
+        if (isNil {[_function, _name] call KH_fnc_luaCompile}) then {
+			continue;
+		};
 
 		if (isNumber (_x >> "preInit")) then {
 			if ((getNumber (_x >> "preInit")) == 1) then {
@@ -54,30 +106,6 @@ call KH_fnc_luaClearFunctions;
     } forEach ("true" configClasses _config);
 } forEach ("true" configClasses (missionConfigFile >> "CfgLuaFunctions"));
 
-{
-    private _config = _x;
-    private _prefix = getText (_config >> "prefix");
-
-    {
-        private _function = if (isText (_x >> "path")) then {
-            preprocessFile ([(getText (_x >> "path")), "\", configName _x, ".lua"] joinString "");
-        }
-        else {
-            preprocessFile ([(getText (_config >> "path")), "\", configName _x, ".lua"] joinString "");
-        };
-
-        ("kh_framework" callExtension ["LuaCompile", [_function]]) params ["_result", "_returnCode"];
-
-        if ([_returnCode] call KH_fnc_parseBoolean) then {
-            diag_log (text ([_result, " | EXTENSION = kh_framework | FUNCTION = LuaCompile | ARGUMENTS = ", [_function]] joinString ""));
-            nil;
-        }
-        else {
-            _cachedLuaFunctions set [[_prefix, "fnc", configName _x] joinString "_", _function];
-        };
-    } forEach ("true" configClasses _config);
-} forEach ("true" configClasses (configFile >> "CfgLuaFunctions"));
-
 uiNamespace setVariable ["KH_var_cachedLuaFunctions", KH_var_cachedLuaFunctions];
 
 KH_var_remoteExecCommandsMode = if (isNumber (missionConfigFile >> "CfgRemoteExec" >> "Commands" >> "mode")) then {
@@ -94,22 +122,31 @@ else {
 	getNumber (configFile >> "CfgRemoteExec" >> "Functions" >> "mode");
 };
 
-KH_var_remoteExecCommandsWhitelist = createHashMap;
-KH_var_remoteExecFunctionsWhitelist = createHashMap;
-KH_var_remoteExecCommandsJipWhitelist = createHashMap;
-KH_var_remoteExecFunctionsJipWhitelist = createHashMap;
+KH_var_remoteExecCommandsJipMode = if (isNumber (missionConfigFile >> "CfgRemoteExec" >> "Commands" >> "jip")) then {
+	getNumber (missionConfigFile >> "CfgRemoteExec" >> "Commands" >> "mode");
+}
+else {
+	getNumber (configFile >> "CfgRemoteExec" >> "Commands" >> "mode");
+};
+
+KH_var_remoteExecFunctionsJipMode = if (isNumber (missionConfigFile >> "CfgRemoteExec" >> "Functions" >> "jip")) then {
+	getNumber (missionConfigFile >> "CfgRemoteExec" >> "Functions" >> "mode");
+}
+else {
+	getNumber (configFile >> "CfgRemoteExec" >> "Functions" >> "mode");
+};
 
 if (KH_var_remoteExecCommandsMode == 1) then {
 	{
 		if (isNumber (_x >> "allowedTargets")) then {
 			if ((getNumber (_x >> "allowedTargets")) != 0) then {
-				KH_var_remoteExecCommandsWhitelist set [toLower (configName _x), true];
+				KH_var_remoteExecCommandspBlacklist set [toLower (configName _x), true];
 			};
 		};
 
 		if (isNumber (_x >> "jip")) then {
-			if ((getNumber (_x >> "jip")) != 0) then {
-				KH_var_remoteExecCommandsJipWhitelist set [toLower (configName _x), true];
+			if ((getNumber (_x >> "jip")) == 0) then {
+				KH_var_remoteExecCommandsJipBlacklist set [toLower (configName _x), true];
 			};
 		};
 	} forEach ("true" configClasses (configFile >> "CfgRemoteExec" >> "Commands"));
@@ -117,13 +154,13 @@ if (KH_var_remoteExecCommandsMode == 1) then {
 	{
 		if (isNumber (_x >> "allowedTargets")) then {
 			if ((getNumber (_x >> "allowedTargets")) != 0) then {
-				KH_var_remoteExecCommandsWhitelist set [toLower (configName _x), true, true];
+				KH_var_remoteExecCommandspBlacklist set [toLower (configName _x), true, true];
 			};
 		};
 
 		if (isNumber (_x >> "jip")) then {
-			if ((getNumber (_x >> "jip")) != 0) then {
-				KH_var_remoteExecCommandsJipWhitelist set [toLower (configName _x), true, true];
+			if ((getNumber (_x >> "jip")) == 0) then {
+				KH_var_remoteExecCommandsJippBlacklist set [toLower (configName _x), true, true];
 			};
 		};
 	} forEach ("true" configClasses (missionConfigFile >> "CfgRemoteExec" >> "Commands"));
@@ -133,13 +170,13 @@ if (KH_var_remoteExecFunctionsMode == 1) then {
 	{
 		if (isNumber (_x >> "allowedTargets")) then {
 			if ((getNumber (_x >> "allowedTargets")) != 0) then {
-				KH_var_remoteExecCommandsWhitelist set [toLower (configName _x), true];
+				KH_var_remoteExecCommandsBlacklist set [toLower (configName _x), true];
 			};
 		};
 
 		if (isNumber (_x >> "jip")) then {
-			if ((getNumber (_x >> "jip")) != 0) then {
-				KH_var_remoteExecCommandsJipWhitelist set [toLower (configName _x), true];
+			if ((getNumber (_x >> "jip")) == 0) then {
+				KH_var_remoteExecCommandsJipBlacklist set [toLower (configName _x), true];
 			};
 		};
 	} forEach ("true" configClasses (configFile >> "CfgRemoteExec" >> "Functions"));
@@ -147,13 +184,13 @@ if (KH_var_remoteExecFunctionsMode == 1) then {
 	{
 		if (isNumber (_x >> "allowedTargets")) then {
 			if ((getNumber (_x >> "allowedTargets")) != 0) then {
-				KH_var_remoteExecFunctionsWhitelist set [toLower (configName _x), true, true];
+				KH_var_remoteExecFunctionsBlacklist set [toLower (configName _x), true, true];
 			};
 		};
 
 		if (isNumber (_x >> "jip")) then {
-			if ((getNumber (_x >> "jip")) != 0) then {
-				KH_var_remoteExecFunctionsJipWhitelist set [toLower (configName _x), true, true];
+			if ((getNumber (_x >> "jip")) == 0) then {
+				KH_var_remoteExecFunctionsJipBlacklist set [toLower (configName _x), true, true];
 			};
 		};
 	} forEach ("true" configClasses (missionConfigFile >> "CfgRemoteExec" >> "Functions"));
@@ -192,6 +229,58 @@ addMissionEventHandler [
 {
 	[[isServer, hasInterface], _x] call KH_fnc_luaOperation;
 } forEach KH_var_preInitLuaExecutions;
+
+addMissionEventHandler [
+	"EachFrame", 
+	{
+		if (KH_var_temporalExecutionStackDeletions isNotEqualTo []) then {
+			{
+				if ((_x select 5) in KH_var_temporalExecutionStackDeletions) then {
+					KH_var_temporalExecutionStackDeletions set [KH_var_temporalExecutionStackDeletions find (_x select 5), _forEachIndex];
+				};
+			} forEach KH_var_temporalExecutionStack;
+
+			{
+				if (_x isEqualType 0) then {
+					KH_var_temporalExecutionStack deleteAt _x;
+				};
+			} forEach KH_var_temporalExecutionStackDeletions;
+		};
+
+		{
+			_x params ["_args", "_function", "_delay", "_delta", "_totalDelta", "_handle"];
+
+			if (_delay >= 0) then {
+				if (diag_tickTime > _delta) then {
+					_totalDelta = if (_totalDelta == -1) then {
+						diag_deltaTime;
+					}
+					else {
+						_x set [4, systemTime joinString ""];
+						[[systemTime joinString "", " - ", _totalDelta] joinString ""] call KH_fnc_mathOperation;
+					};
+
+					_args call _function;
+					_x set [3, _delta + _delay];
+				};
+			}
+			else {
+				if (diag_frameNo > _delta) then {
+					_totalDelta = if (_totalDelta == -1) then {
+						diag_deltaTime;
+					}
+					else {
+						_x set [4, systemTime joinString ""];
+						[[systemTime joinString "", " - ", _totalDelta] joinString ""] call KH_fnc_mathOperation;
+					};
+
+					_args call _function;
+					_x set [3, _delta + (abs _delay)];
+				};
+			};
+		} forEach KH_var_temporalExecutionStack;
+	}
+];
 
 if isServer then {
 	KH_fnc_serverMissionStartInit = {};

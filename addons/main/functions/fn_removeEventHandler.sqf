@@ -26,10 +26,7 @@ if ((count _handler) > 2) then {
 					_target displayRemoveEventHandler [_event, _handlerId];
 				};
 
-				case "PUBLIC_VARIABLE": {
-					missionNamespace setVariable [_handlerId, false];
-				};
-
+				case "PUBLIC_VARIABLE";
 				case "CLASS": {
 					missionNamespace setVariable [_handlerId, false];
 				};
@@ -50,21 +47,63 @@ if ((count _handler) > 2) then {
 					[_target, _event, _handlerId] call BIS_fnc_removeScriptedEventHandler;
 				};
 
-				case "CBA": {
-					private _currentStack = missionNamespace getVariable [_event, []];
-					private _currentId = _handlerId select 1;
-					private _deletion = -1;
+				case "TEMPORAL": {
+					KH_var_temporalExecutionStackDeletions pushBackUnique _handlerId;
+				};
+
+				case "IN_GAME_UI": {
+					private _currentStack = KH_var_uiEventHandlerStack get _event;
+					private _currentId = _handlerId select 0;
+					private "_deletion";
 
 					{
-						if ((_x select 1) == _currentId) then {
-							_deletion = _forEachIndex;
+						if ((_x select 0) isEqualTo _currentId) then {
+							_deletion = _x;
 							break;
 						};
 					} forEach _currentStack;
 
-					if (_deletion != -1) then {
-						_currentStack deleteAt _deletion;
-						missionNamespace setVariable [_event, _currentStack];
+					if (!isNil "_deletion") then {
+						_currentStack deleteAt (_currentStack find _deletion);
+					};
+
+					if (_currentStack isEqualTo []) then {
+						inGameUISetEventHandler [_event, ""];
+						KH_var_uiEventHandlerStack deleteAt _event;
+					};
+				};
+
+				case "PLAYER": {
+					private _currentStack = KH_var_cbaPlayerEventHandlerStack get _event;
+					private _currentId = _handlerId select 0;
+					private "_deletion";
+
+					{
+						if ((_x select 0) isEqualTo _currentId) then {
+							_deletion = _x;
+							break;
+						};
+					} forEach _currentStack;
+
+					if (!isNil "_deletion") then {
+						_currentStack deleteAt (_currentStack find _deletion);
+					};
+				};
+
+				case "CBA": {
+					private _currentStack = KH_var_cbaEventHandlerStack get _event;
+					private _currentId = _handlerId select 0;
+					private "_deletion";
+
+					{
+						if ((_x select 0) isEqualTo _currentId) then {
+							_deletion = _x;
+							break;
+						};
+					} forEach _currentStack;
+
+					if (!isNil "_deletion") then {
+						_currentStack deleteAt (_currentStack find _deletion);
 					};
 				};
 			};
@@ -74,6 +113,8 @@ if ((count _handler) > 2) then {
 	] call KH_fnc_execute;
 }
 else {
+	missionNamespace setVariable [_persistentEntityId, false];
+
 	[
 		_handler,
 		{

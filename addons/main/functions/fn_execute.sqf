@@ -4,21 +4,19 @@ if canSuspend exitWith {
 
 	if !(isNil "_return") then {
 		_return;
-	}
-	else {
-		false;
 	};
 };
 
-params ["_arguments", ["_function", nil, [{}, ""]], ["_target", nil, [[], objNull, teamMemberNull, grpNull, 0, sideUnknown, ""]], ["_environment", "THIS_FRAME", [[], "", 0]]];
+params ["_arguments", ["_function", {}, [{}, ""]], ["_target", "LOCAL", [[], objNull, teamMemberNull, grpNull, 0, sideUnknown, ""]], ["_environment", "THIS_FRAME", [[], "", 0]]];
 
-if ((isNil "_function") || (isNil "_target") || (isNil "_environment")) exitWith {	
-	false;
-};
+_function = [_function] call KH_fnc_parseFunction;
 
 private _subfunction = {
 	params ["_arguments", "_function", "_target", "_override"];
-	_function = [_function] call KH_fnc_parseFunction;
+
+	if (_target isEqualTo "LOCAL") exitWith {
+		[_arguments, _function, clientOwner] call KH_fnc_callParsedFunction;
+	};
 	
 	switch (typeName _target) do {
 		case "OBJECT": {
@@ -28,9 +26,8 @@ private _subfunction = {
 				}
 				else {
 					["KH_eve_executionGlobal", [_arguments, _function, clientOwner], _target] call CBA_fnc_targetEvent;
+					true;
 				};
-
-				true;
 			}
 			else {
 				false;
@@ -44,9 +41,8 @@ private _subfunction = {
 				}
 				else {
 					["KH_eve_executionGlobal", [_arguments, _function, clientOwner], agent _target] call CBA_fnc_targetEvent;
+					true;
 				};
-
-				true;
 			}
 			else {
 				false;
@@ -72,9 +68,9 @@ private _subfunction = {
 							clientOwner
 						]
 					] call CBA_fnc_serverEvent;
-				};
 
-				true;
+					true;
+				};
 			}
 			else {
 				false;
@@ -84,7 +80,6 @@ private _subfunction = {
 		case "SCALAR": {
 			if (_target == clientOwner) then {
 				[_arguments, _function, clientOwner] call KH_fnc_callParsedFunction;
-				true;
 			}
 			else {
 				if !(_target < 0) then {
@@ -97,17 +92,17 @@ private _subfunction = {
 					};
 				}
 				else {
-					private _invertedTarget = abs _target;
+					_target = abs _target;
 
-					if (_invertedTarget == clientOwner) then {
+					if (_target == clientOwner) then {
 						["KH_eve_executionGlobal", [_arguments, _function, clientOwner]] call CBA_fnc_remoteEvent;
 						true;
 					}
 					else {
-						if (_invertedTarget in KH_var_allMachines) then {
+						if (_target in KH_var_allMachines) then {
 							{
 								["KH_eve_executionGlobal", [_arguments, _function, clientOwner], _x] call CBA_fnc_ownerEvent;
-							} forEach (KH_var_allMachines - [_invertedTarget]);
+							} forEach (KH_var_allMachines - [_target]);
 
 							true;
 						}
@@ -132,9 +127,8 @@ private _subfunction = {
 					}
 					else {
 						["KH_eve_executionServer", [_arguments, _function, clientOwner]] call CBA_fnc_serverEvent;
+						true;
 					};
-
-					true;
 				};
 
 				case "GLOBAL": {
@@ -179,9 +173,8 @@ private _subfunction = {
 						}
 						else {
 							["KH_eve_executionPlayer", [_arguments, _function, clientOwner], KH_var_currentAdmin] call CBA_fnc_ownerEvent;
+							true;
 						};
-
-						true;
 					}
 					else {
 						false;
@@ -228,9 +221,8 @@ private _subfunction = {
 								}
 								else {
 									["KH_eve_executionGlobal", [_arguments, _function, clientOwner], objectFromNetId _target] call CBA_fnc_targetEvent;
+									true;
 								};
-
-								true;
 							}
 							else {
 								if !(isNull (groupFromNetId _target)) then {
@@ -251,9 +243,9 @@ private _subfunction = {
 												clientOwner
 											]
 										] call CBA_fnc_serverEvent;
-									};
 
-									true;
+										true;
+									};
 								}
 								else {
 									false;
@@ -348,8 +340,8 @@ private _subfunction = {
 				};
 
 				case "CONDITION": {
-					private _conditionArguments = _target select 1;
-					private _conditionFunction = _target select 2;
+					private _conditionArguments = _target param [1, []];
+					private _conditionFunction = _target param [2, {true;}];
 					private _exclusiveType = _target param [3, "GLOBAL"];
 					private _eventType = "";
 
@@ -627,8 +619,8 @@ private _subfunction = {
 								};
 
 								case "CONDITION": {
-									private _conditionArguments = _exclusiveType select 1;
-									private _conditionFunction = _exclusiveType select 2;
+									private _conditionArguments = _exclusiveType param [1, []];
+									private _conditionFunction = _exclusiveType param [2, {true;}];
 									private _exclusiveType = _exclusiveType param [3, "GLOBAL"];
 									private _eventType = "";
 
@@ -1429,7 +1421,7 @@ private _subfunction = {
 										} forEach _joinType;
 
 										missionNamespace setVariable [_jipOverrideId, true];
-										KH_var_jipEventHandlers set [_id, _currentHandlers, false];
+										KH_var_jipEventHandlers set [_id, _currentHandlers];
 									};
 								} 
 							] call KH_fnc_parseFunction,
@@ -1933,6 +1925,7 @@ switch (typeName _environment) do {
 				private _backupFunction = _environment param [5, {}];
 				private _backupTarget = _environment param [6, _target];
 				_conditionFunction = [_conditionArguments, [_conditionFunction] call KH_fnc_parseFunction] call KH_fnc_getParsedFunction;
+				_backupFunction = [_backupFunction] call KH_fnc_parseFunction;
 
 				if KH_var_missionLoaded then {
 					[_arguments, _function, _target, _frames, _conditionArguments, _conditionFunction, _backupArguments, _backupFunction, _backupTarget, _subfunction, _override, _id] call _environmentCaller;
@@ -2012,6 +2005,7 @@ switch (typeName _environment) do {
 				private _backupFunction = _environment param [5, {}];
 				private _backupTarget = _environment param [6, _target];
 				_conditionFunction = [_conditionArguments, [_conditionFunction] call KH_fnc_parseFunction] call KH_fnc_getParsedFunction;
+				_backupFunction = [_backupFunction] call KH_fnc_parseFunction;
 
 				if KH_var_missionLoaded then {
 					[_arguments, _function, _target, _time, _conditionArguments, _conditionFunction, _backupArguments, _backupFunction, _backupTarget, _subfunction, _override, _id] call _environmentCaller;
@@ -2082,13 +2076,14 @@ switch (typeName _environment) do {
 					] call CBA_fnc_waitUntilAndExecute;
 				};
 
-				private _conditionArguments = _environment select 1;
-				private _conditionFunction = _environment select 2;
+				private _conditionArguments = _environment param [1, []];
+				private _conditionFunction = _environment param [2, {true;}];
 				private _timeout = _environment param [3, -1];
 				private _timeoutArguments = _environment param [4, []];
 				private _timeoutFunction = _environment param [5, {}];
 				private _timeoutTarget = _environment param [6, _target];
 				_conditionFunction = [_conditionArguments, [_conditionFunction] call KH_fnc_parseFunction] call KH_fnc_getParsedFunction;
+				_timeoutFunction = [_timeoutFunction] call KH_fnc_parseFunction;
 
 				if (_timeout isEqualType "") then {
 					_timeout = ((parseNumber _timeout) - CBA_missionTime) max 0;
@@ -2109,9 +2104,23 @@ switch (typeName _environment) do {
 
 			case "INTERVAL": {
 				private _environmentCaller = {
-					params ["_arguments", "_function", "_target", "_conditionArguments", "_conditionFunction", "_timeout", "_timeoutOnConditionFailure", "_timeoutArguments", "_timeoutFunction", "_timeoutTarget", "_subfunction", "_override", "_interval", "_id"];
+					params ["_arguments", "_function", "_target", "_conditionArguments", "_conditionFunction", "_timeout", "_timeoutOnConditionFailure", "_timeoutArguments", "_timeoutFunction", "_timeoutTarget", "_subfunction", "_override", "_interval", "_simpleDelta", "_id"];
+					private _args = _arguments;
+					private _handle = _handler;
+					private _totalDelta = 0;
 
-					private _handler = [
+					if (_conditionArguments call _conditionFunction) then {
+						[_arguments, _function, _target, _override] call _subfunction;
+					}
+					else {
+						if _timeoutOnConditionFailure then {
+							[_timeoutArguments, _timeoutFunction, _timeoutTarget, _override] call _subfunction;
+							KH_var_temporalExecutionStackDeletions pushBackUnique _handler;
+						};
+					};
+
+					KH_var_temporalExecutionStack pushBack [
+						[_arguments, _function, _target, _conditionArguments, _conditionFunction, _timeoutOnConditionFailure, _timeoutArguments, _timeoutFunction, _timeoutTarget, _subfunction, _override, _id],
 						{
 							private _id = _args select 11;
 							private _idState = missionNamespace getVariable [_id, "ACTIVE"];
@@ -2127,62 +2136,75 @@ switch (typeName _environment) do {
 										else {
 											if _timeoutOnConditionFailure then {
 												[_timeoutArguments, _timeoutFunction, _timeoutTarget, _override] call _subfunction;
-												missionNamespace setVariable [_id, "TERMINATE"];
-												[_handle] call CBA_fnc_removePerFrameHandler;
+												KH_var_temporalExecutionStackDeletions pushBackUnique _id;
 											};
 										};
 									};
 
 									case "TERMINATE": {
-										[_handle] call CBA_fnc_removePerFrameHandler;
+										KH_var_temporalExecutionStackDeletions pushBackUnique _id;
 									};		
 								};
 							};
 						}, 
 						_interval, 
-						[_arguments, _function, _target, _conditionArguments, _conditionFunction, _timeoutOnConditionFailure, _timeoutArguments, _timeoutFunction, _timeoutTarget, _subfunction, _override, _id]
-					] call CBA_fnc_addPerFrameHandler;
+						if (_interval >= 0) then {
+							diag_tickTime;
+						}
+						else {
+							diag_frameNo;
+						},
+						if _simpleDelta then {
+							-1;
+						}
+						else {
+							systemTime joinString "";
+						},
+						_id
+					];
 
 					if (_timeout != 0) then {
 						[
 							{
-								params ["_timeoutArguments", "_timeoutFunction", "_timeoutTarget", "_subfunction", "_override", "_handler", "_id"];
+								params ["_timeoutArguments", "_timeoutFunction", "_timeoutTarget", "_subfunction", "_override", "_id"];
 								private _idState = missionNamespace getVariable [_id, "ACTIVE"];
 								
 								if (_idState isNotEqualTo "TERMINATE") then {
-									[_handler] call CBA_fnc_removePerFrameHandler;
+									KH_var_temporalExecutionStackDeletions pushBackUnique _id;
 									
 									if (_idState isEqualTo "ACTIVE") then {
 										[_timeoutArguments, _timeoutFunction, _timeoutTarget, _override] call _subfunction;
 									};
 								};
 							}, 
-							[_timeoutArguments, _timeoutFunction, _timeoutTarget, _subfunction, _override, _handler, _id], 
+							[_timeoutArguments, _timeoutFunction, _timeoutTarget, _subfunction, _override, _id], 
 							_timeout
 						] call CBA_fnc_waitAndExecute;
 					};
 				};
 
-				private _interval = _environment select 1;
-				private _conditionArguments = _environment param [2, []];
-				private _conditionFunction = _environment param [3, {true;}];
-				private _timeout = _environment param [4, 0];
-				private _timeoutOnConditionFailure = _environment param [5, false];
-				private _timeoutArguments = _environment param [6, []];
-				private _timeoutFunction = _environment param [7, {}];
-				private _timeoutTarget = _environment param [8, _target];
+				private _interval = _environment param [1, 0];
+				private _simpleDelta = _type param [2, true, [true]];
+				private _conditionArguments = _environment param [3, []];
+				private _conditionFunction = _environment param [4, {true;}];
+				private _timeout = _environment param [5, 0];
+				private _timeoutOnConditionFailure = _environment param [6, false];
+				private _timeoutArguments = _environment param [7, []];
+				private _timeoutFunction = _environment param [8, {}];
+				private _timeoutTarget = _environment param [9, _target];
 				_conditionFunction = [_conditionArguments, [_conditionFunction] call KH_fnc_parseFunction] call KH_fnc_getParsedFunction;
+				_timeoutFunction = [_timeoutFunction] call KH_fnc_parseFunction;
 
 				if (_timeout isEqualType "") then {
 					_timeout = ((parseNumber _timeout) - CBA_missionTime) max 0;
 				};
 				
 				if KH_var_missionLoaded then {
-					[_arguments, _function, _target, _conditionArguments, _conditionFunction, _timeout, _timeoutOnConditionFailure, _timeoutArguments, _timeoutFunction, _timeoutTarget, _subfunction, _override, _interval, _id] call _environmentCaller;
+					[_arguments, _function, _target, _conditionArguments, _conditionFunction, _timeout, _timeoutOnConditionFailure, _timeoutArguments, _timeoutFunction, _timeoutTarget, _subfunction, _override, _interval, _simpleDelta, _id] call _environmentCaller;
 				}
 				else {
 					KH_var_postInitExecutions pushBack [
-						[_arguments, _function, _target, _conditionArguments, _conditionFunction, _timeout, _timeoutOnConditionFailure, _timeoutArguments, _timeoutFunction, _timeoutTarget, _subfunction, _override, _interval, _id],
+						[_arguments, _function, _target, _conditionArguments, _conditionFunction, _timeout, _timeoutOnConditionFailure, _timeoutArguments, _timeoutFunction, _timeoutTarget, _subfunction, _override, _interval, _simpleDelta, _id],
 						_environmentCaller
 					];
 				};
@@ -2439,6 +2461,116 @@ switch (typeName _environment) do {
 				};
 
 				[["PRIVATE_HANDLER", _id, clientOwner], _results, _newExecutions, _newExecutionEvent, _sequenceArguments];
+			};
+
+			case "FORCE": {
+				private _environmentCaller = {
+					params ["_arguments", "_function", "_target", "_conditionArguments", "_conditionFunction", "_timeout", "_successArguments", "_successFunction", "_successTarget", "_timeoutArguments", "_timeoutFunction", "_timeoutTarget", "_subfunction", "_override", "_id"];
+					[_arguments, _function, _target, _override] call _subfunction;
+
+					[
+						{
+							params ["_arguments", "_function", "_target", "_conditionArguments", "_conditionFunction", "_timeout", "_successArguments", "_successFunction", "_successTarget", "_timeoutArguments", "_timeoutFunction", "_timeoutTarget", "_subfunction", "_override", "_id"];
+							
+							if (_conditionArguments call _conditionFunction) exitWith {
+								[successArguments, _successFunction, _successTarget, _override] call _subfunction;
+							};
+							
+							[
+								{
+									private _id = _this select 13;
+									private _idState = missionNamespace getVariable [_id, "ACTIVE"];
+									private _state = false;
+
+									switch _idState do {
+										case "ACTIVE": {
+											private _arguments = _this select 0;
+											private _function = _this select 1;
+											private _target = _this select 2;
+											private _subfunction = _this select 11;
+											private _override = _this select 12;
+											private _conditionArguments = _this select 3;
+											private _conditionFunction = _this select 4;
+											_state = _conditionArguments call _conditionFunction;
+
+											if !_state then {
+												[_arguments, _function, _target, _override] call _subfunction;
+											};
+										};
+
+										case "INACTIVE": {
+											_state = false;
+										};
+
+										case "TERMINATE": {
+											_state = true;
+										};
+									};
+
+									_state;
+								}, 
+								{
+									private _id = _this select 13;
+									private _idState = missionNamespace getVariable [_id, "ACTIVE"];
+
+									if (_idState isEqualTo "ACTIVE") then {
+										private _successArguments = _this select 5;
+										private _successfunction = _this select 6;
+										private _successTarget = _this select 7;
+										private _subfunction = _this select 11;
+										private _override = _this select 12;
+										[_successArguments, _successfunction, _successTarget, _override] call _subfunction;
+									};
+								}, 
+								[_arguments, _function, _target, _conditionArguments, _conditionFunction, _successArguments, _successFunction, _successTarget, _timeoutArguments, _timeoutFunction, _timeoutTarget, _subfunction, _override, _id],
+								_timeout,
+								{
+									private _id = _this select 13;
+									private _idState = missionNamespace getVariable [_id, "ACTIVE"];
+
+									if (_idState isEqualTo "ACTIVE") then {
+										private _timeoutArguments = _this select 8;
+										private _timeoutFunction = _this select 9;
+										private _timeoutTarget = _this select 10;
+										private _subfunction = _this select 11;
+										private _override = _this select 12;
+										[_timeoutArguments, _timeoutFunction, _timeoutTarget, _override] call _subfunction;
+									};
+								}
+							] call CBA_fnc_waitUntilAndExecute;
+						}, 
+						_this
+					] call CBA_fnc_execNextFrame;
+				};
+
+				private _conditionArguments = _environment param [1, []];
+				private _conditionFunction = _environment param [2, {true;}];
+				private _timeout = _environment param [3, -1];
+				private _successArguments = _environment param [4, []];
+				private _successFunction = _environment param [5, {}];
+				private _successTarget = _environment param [6, _target];
+				private _timeoutArguments = _environment param [7, []];
+				private _timeoutFunction = _environment param [8, {}];
+				private _timeoutTarget = _environment param [9, _target];
+				_conditionFunction = [_conditionArguments, [_conditionFunction] call KH_fnc_parseFunction] call KH_fnc_getParsedFunction;
+				_successFunction = [_successFunction] call KH_fnc_parseFunction;
+				_timeoutFunction = [_timeoutFunction] call KH_fnc_parseFunction;
+
+				if (_timeout isEqualType "") then {
+					_timeout = ((parseNumber _timeout) - CBA_missionTime) max 0;
+				};
+
+				if KH_var_missionLoaded then {
+					[_arguments, _function, _target, _conditionArguments, _conditionFunction, _timeout, _successArguments, _successFunction, _successTarget, _timeoutArguments, _timeoutFunction, _timeoutTarget, _subfunction, _override, _id] call _environmentCaller;
+				}
+				else {
+					KH_var_postInitExecutions pushBack [
+						[_arguments, _function, _target, _conditionArguments, _conditionFunction, _timeout, _successArguments, _successFunction, _successTarget, _timeoutArguments, _timeoutFunction, _timeoutTarget, _subfunction, _override, _id],
+						_environmentCaller
+					];
+				};
+
+				[["PRIVATE_HANDLER", _id, clientOwner], _result];
 			};
 
 			default {

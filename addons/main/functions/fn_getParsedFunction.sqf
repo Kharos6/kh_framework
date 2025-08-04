@@ -1,11 +1,11 @@
-params ["_arguments", "_function"];
+params ["_arguments", ["_function", "", [""]]];
 private _storedFunction = KH_var_cachedFunctions get _function;
 
 if !(isNil "_storedFunction") exitWith {
 	_storedFunction;
 };
 
-if ((missionNamespace getVariable [_function, {}]) isEqualTo {}) then {
+if (isNil {missionNamespace getVariable _function}) then {
 	switch (count _arguments) do {
 		case 0: {
 			compile ([_function] joinString "");

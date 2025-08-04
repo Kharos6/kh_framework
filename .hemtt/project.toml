@@ -22,14 +22,6 @@ severity = "Warning"
 options.ignore = [
     "addPublicVariableEventHandler"
 ]
-options.banned = [
-    "execVM",
-    "and",
-    "or",
-    "not",
-    "remoteExec",
-    "remoteExecCall"
-]
 
 [lints.sqf.var_all_caps]
 enabled = false

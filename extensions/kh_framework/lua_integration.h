@@ -1805,8 +1805,8 @@ static int lua_init_turbo_state(lua_State* L) {
     luaopen_math(L);     
     luaopen_string(L);   
     luaopen_table(L);
-    luaopen_jit(L);
     luaopen_bit(L);
+    luaopen_jit(L);
     
     /* Configure LuaJIT for maximum performance and stability */
     lua_getglobal(L, "jit");
@@ -1817,48 +1817,6 @@ static int lua_init_turbo_state(lua_State* L) {
             if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
                 lua_pop(L, 2);
                 return 0;
-            }
-        } else {
-            lua_pop(L, 1);
-        }
-        
-        /* Aggressive JIT optimization - more compact setup */
-        lua_getfield(L, -1, "opt");
-        if (lua_isfunction(L, -1)) {
-            lua_pushstring(L, "start");
-            
-            /* Increase memory limits for complex traces */
-            lua_pushstring(L, "maxmcode=8192");    /* More machine code memory */
-            lua_pushstring(L, "maxtrace=2000");    /* More traces */
-            lua_pushstring(L, "maxrecord=6000");   /* Longer traces */
-            lua_pushstring(L, "maxirconst=1000");  /* More constants */
-            lua_pushstring(L, "maxside=200");      /* More side exits */
-            lua_pushstring(L, "maxsnap=1000");     /* More snapshots */
-            
-            if (lua_pcall(L, 13, 0, 0) != LUA_OK) {
-                lua_pop(L, 2);
-                return 0;
-            }
-        } else {
-            lua_pop(L, 1);
-        }
-        
-        /* Enable all JIT optimizations explicitly */
-        lua_getfield(L, -1, "opt");
-        if (lua_isfunction(L, -1)) {
-            /* Enable comprehensive optimizations */
-            lua_pushstring(L, "+cse");      /* Common subexpression elimination */
-            lua_pushstring(L, "+dce");      /* Dead code elimination */
-            lua_pushstring(L, "+fwd");      /* Load/store forwarding */
-            lua_pushstring(L, "+dse");      /* Dead store elimination */
-            lua_pushstring(L, "+narrow");   /* Narrowing of number operations */
-            lua_pushstring(L, "+loop");     /* Loop optimizations */
-            lua_pushstring(L, "+abc");      /* Array bounds check elimination */
-            lua_pushstring(L, "+sink");     /* Allocation/store sinking */
-            lua_pushstring(L, "+fuse");     /* Fusion of operands into instructions */
-            
-            if (lua_pcall(L, 12, 0, 0) != LUA_OK) {
-                lua_pop(L, 1); /* Continue on optimization failure */
             }
         } else {
             lua_pop(L, 1);
@@ -1877,31 +1835,29 @@ static int lua_init_turbo_state(lua_State* L) {
         "pcall", "xpcall", NULL
     };
     
+    /* Use single stack operation for all nil assignments */
+    lua_pushnil(L);
     for (int i = 0; dangerous[i]; i++) {
-        lua_pushnil(L);
+        lua_pushvalue(L, -1);  /* Duplicate nil */
         lua_setglobal(L, dangerous[i]);
     }
+    lua_pop(L, 1);  /* Remove original nil */
     
-    /* Secure print function */
-    lua_pushcfunction(L, lua_secure_print_fast);
-    lua_setglobal(L, "print");
+    /* Register functions in batch */
+    const struct luaL_Reg kh_functions[] = {
+        {"GetPersistentVariable", lua_c_get_persistent_variable},
+        {"SetPersistentVariable", lua_c_set_persistent_variable},
+        {"DeletePersistentVariable", lua_c_delete_persistent_variable},
+        {"ArmaCallback", lua_c_arma_callback},
+        {"print", lua_secure_print_fast},
+        {NULL, NULL}
+    };
     
-    /* Register custom functions */
-    lua_pushcfunction(L, lua_c_get_persistent_variable);
-    lua_setglobal(L, "GetPersistentVariable");
-    
-    lua_pushcfunction(L, lua_c_set_persistent_variable);
-    lua_setglobal(L, "SetPersistentVariable");
-    
-    lua_pushcfunction(L, lua_c_delete_persistent_variable);
-    lua_setglobal(L, "DeletePersistentVariable");
-
-    lua_pushcfunction(L, lua_c_arma_callback);
-    lua_setglobal(L, "ArmaCallback");
-    
-    /* IMMEDIATE INJECTION: Inject all stored variables and functions into new Lua state */
-    lua_inject_all_variables(L);
-    lua_inject_all_functions(L);
+    /* Register all functions at once */
+    for (const struct luaL_Reg* func = kh_functions; func->name; func++) {
+        lua_pushcfunction(L, func->func);
+        lua_setglobal(L, func->name);
+    }
     
     return 1;
 }

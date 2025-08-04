@@ -21,7 +21,7 @@ else {
 	"false";
 };
 
-if (!_logOnlyMismatch || (_logOnlyMismatch && !_match)) then {
+if (!_logOnlyMismatch || (_logOnlyMismatch && (_match isEqualTo "false"))) then {
 	if _simpleFormat then {
 		diag_log (text ([
 			"FUNCTION TEST: NAME = ",

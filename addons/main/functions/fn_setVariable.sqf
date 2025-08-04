@@ -1,4 +1,15 @@
-params ["_namespace", "_name", "_value", ["_scope", "LOCAL"], ["_writeType", "OVERWRITE"]];
+params [
+	["_namespace", missionNamespace, ["", missionNamespace, objNull, grpNull, teamMemberNull, locationNull, taskNull, controlNull, displayNull]], 
+	["_name", nil], 
+	["_value", nil], 
+	["_scope", "LOCAL", [[], objNull, teamMemberNull, grpNull, 0, sideUnknown, ""]], 
+	["_writeType", "OVERWRITE", [""]]
+];
+
+if (isNil _name) exitWith {
+	nil;
+};
+
 private _handler = [];
 
 if (_namespace isEqualType []) exitWith {
@@ -20,7 +31,7 @@ if (_scope isEqualType "") then {
 		_parsedName = switch (typeName _name) do {
 			case "OBJECT": {
 				if (isPlayer _name) then {
-					getPlayerUID _name;
+					["player_", getPlayerUID _name] joinString "";
 				}
 				else {
 					if ((vehicleVarName _name) isEqualTo "") then {
@@ -86,7 +97,9 @@ if (_scope isEqualType "") then {
 		_parsedName = _name;
 	};
 
-	if !_continue exitWith {};
+	if !_continue exitWith {
+		nil;
+	};
 
 	switch _scope do {
 		case "LOCAL": {

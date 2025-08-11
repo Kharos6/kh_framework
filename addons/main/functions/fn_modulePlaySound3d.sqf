@@ -21,7 +21,7 @@ isNil {
 						_logic say3D _sound;
 					},
 					_x,
-					"THIS_FRAME"
+					true
 				] call KH_fnc_execute;
 			};
 		} forEach _units;

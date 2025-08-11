@@ -16,7 +16,7 @@ private _velocity = [(_direction select 0) / _travelTime, (_direction select 1) 
 		_entity setVelocity _velocity;
 	},
 	_entity,
-	"THIS_FRAME"
+	true
 ] call KH_fnc_execute;
 
 _velocity;

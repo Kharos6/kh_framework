@@ -16,7 +16,7 @@ isNil {
 						playMusic _music;
 					},
 					_x,
-					"THIS_FRAME"
+					true
 				] call KH_fnc_execute;
 			};
 		} forEach _units;

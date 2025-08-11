@@ -43,8 +43,9 @@ private _entityVariable = [missionNamespace, "KH_var_visualTriggerEntityPrevious
 			[_entity, _distance, _conditionPlayer, _event, _id]
 		] call CBA_fnc_addPerFrameHandler;
 	},
-	["JIP", "PLAYERS", _entity, true, false, ""],
-	"THIS_FRAME"
+	"PLAYERS",
+	true,
+	["JIP", _entity, true, ""]
 ] call KH_fnc_execute;
 
 [

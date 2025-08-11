@@ -42,7 +42,7 @@ isNil {
 											[_x, _name, _tooltip, _condition, _options],
 											"KH_fnc_addRemoteInteractionEntry",
 											["JIP", "PLAYERS", _x, false, true, ""],
-											"THIS_FRAME"
+											true
 										] call KH_fnc_execute;
 									}
 									else {
@@ -62,7 +62,7 @@ isNil {
 				] call KH_fnc_addEventHandler;
 			},
 			"LOCAL",
-			"THIS_FRAME"
+			true
 		] call KH_fnc_execute;
 	};
 };

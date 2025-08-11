@@ -136,6 +136,7 @@ class CfgFunctions
 			class testFunction {};
 			class testLua {};
 			class toggleUserInput {};
+			class triggerCbaEvent {};
 			class unbinarizeKhData {};
 			class vehicleSequence {};
 			class unconsciousSpectator {};

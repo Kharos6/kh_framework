@@ -43,7 +43,7 @@ if _waypoints then {
 			} forEach _waypointHash;
 		},
 		"SERVER",
-		"THIS_FRAME"
+		true
 	] call KH_fnc_execute;
 };
 

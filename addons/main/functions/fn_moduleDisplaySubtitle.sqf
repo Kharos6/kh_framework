@@ -12,7 +12,7 @@ isNil {
 					],
 					"KH_fnc_displaySubtitle",
 					_x,
-					"THIS_FRAME"
+					true
 				] call KH_fnc_execute;
 			};
 		} forEach _units;

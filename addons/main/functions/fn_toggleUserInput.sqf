@@ -13,7 +13,8 @@ if _input then {
 						_unit switchMove [""];
 					},
 					"GLOBAL",
-					"THIS_FRAME"
+					true,
+					false
 				] call KH_fnc_execute;
 			};
 		};
@@ -32,7 +33,8 @@ else {
 						_unit switchMove [""];
 					},
 					"GLOBAL",
-					"THIS_FRAME"
+					true,
+					false
 				] call KH_fnc_execute;
 			};
 		};

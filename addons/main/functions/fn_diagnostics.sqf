@@ -46,7 +46,7 @@ if _state then {
 				};
 			},
 			["JIP", "GLOBAL", true, false, false, ""],
-			"THIS_FRAME"
+			true
 		] call KH_fnc_execute;
 
 		private _diagnosticFunction = {
@@ -115,7 +115,7 @@ if _state then {
 					];
 				},
 				_curator,
-				"THIS_FRAME"
+				true
 			] call KH_fnc_execute;
 		};
 
@@ -239,8 +239,8 @@ if _state then {
 							_markerName setMarkerTypeLocal "mil_dot";
 							_markerName setMarkerSizeLocal [0, 0];
 						},
-						["TARGETS", KH_var_allCuratorMachines],
-						"THIS_FRAME"
+						KH_var_allCuratorMachines,
+						true
 					] call KH_fnc_execute;
 					
 					{
@@ -300,8 +300,8 @@ if _state then {
 								_markerName setMarkerTypeLocal "mil_dot";
 								_markerName setMarkerSizeLocal [0, 0];
 							},
-							["TARGETS", KH_var_allCuratorMachines],
-							"THIS_FRAME"
+							KH_var_allCuratorMachines,
+							true
 						] call KH_fnc_execute;
 					} forEach ([["PLAYERS", "HEADLESS"], true] call KH_fnc_getClients);
 					
@@ -317,8 +317,8 @@ if _state then {
 									params ["_marker"];
 									deleteMarkerLocal _marker;
 								},
-								["TARGETS", KH_var_allCuratorMachines],
-								"THIS_FRAME"
+								KH_var_allCuratorMachines,
+								true
 							] call KH_fnc_execute;
 						};
 					} forEach KH_var_diagnosticsAllMarkers;
@@ -337,8 +337,8 @@ if _state then {
 								deleteMarkerLocal _x;
 							} forEach KH_var_diagnosticsMarkers;
 						},
-						["TARGETS", KH_var_allCuratorMachines],
-						"THIS_FRAME"
+						KH_var_allCuratorMachines,
+						true
 					] call KH_fnc_execute;
 				};
 			},

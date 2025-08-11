@@ -27,7 +27,7 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 	],
 	"BIS_fnc_holdActionAdd", 
 	["JIP", "PLAYERS", _object, false, false, ""], 
-	"THIS_FRAME"
+	true
 ] call KH_fnc_execute;
 
 [
@@ -85,7 +85,7 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 							_anchorEnd hideObjectGlobal true;
 						},
 						"SERVER",
-						"THIS_FRAME"
+						true
 					] call KH_fnc_execute;
 
 					_anchorEnd allowDamage false;
@@ -131,7 +131,7 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 					] call CBA_fnc_waitUntilAndExecute;
 				},
 				"SERVER",
-				"THIS_FRAME"
+				true
 			] call KH_fnc_execute;
 
 			if (isPlayer _participant) then {
@@ -194,7 +194,7 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 			],
 			"BIS_fnc_holdActionAdd", 
 			["JIP", "PLAYERS", _object, false, false, ""], 
-			"THIS_FRAME"
+			true
 		] call KH_fnc_execute;
 
 		[
@@ -230,7 +230,7 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 								],
 								"BIS_fnc_holdActionAdd", 
 								["JIP", "PLAYERS", _x, false, false, ""], 
-								"THIS_FRAME"
+								true
 							] call KH_fnc_execute;
 
 							[
@@ -260,7 +260,7 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 								],
 								"BIS_fnc_holdActionAdd", 
 								["JIP", "PLAYERS", _x, false, false, ""], 
-								"THIS_FRAME"
+								true
 							] call KH_fnc_execute;
 						};
 					} forEach (_object nearEntities ["Man", 15]);
@@ -320,7 +320,7 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 														_unit switchMove ["Para_Pilot"];
 													},
 													"GLOBAL",
-													"THIS_FRAME"
+													true
 												] call KH_fnc_execute;
 
 												if (isPlayer _unit) then {
@@ -356,7 +356,7 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 														] call KH_fnc_addEventHandler;
 													},
 													"GLOBAL",
-													"THIS_FRAME"
+													true
 												] call KH_fnc_execute;
 
 												[
@@ -438,7 +438,7 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 												] call CBA_fnc_addPerFrameHandler;
 											},
 											_x,
-											"THIS_FRAME"
+											true
 										] call KH_fnc_execute;
 									} forEach (missionNamespace getVariable [_currentFultonParticipants, []]);
 

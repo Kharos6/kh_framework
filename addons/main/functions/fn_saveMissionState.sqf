@@ -14,7 +14,7 @@ private _stateEntries = [[date]];
 		};
 	},
 	"GLOBAL",
-	"THIS_FRAME"
+	true
 ] call KH_fnc_execute;
 
 _stateEntries;

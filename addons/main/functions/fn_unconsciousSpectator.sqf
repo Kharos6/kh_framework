@@ -33,7 +33,8 @@ if _state then {
 										systemChat (format ["You will enter spectator mode if you remain unconscious for %1 seconds.", KH_var_unconsciousSpectatorPlayerDelay]);
 									},
 									_x,
-									"THIS_FRAME"								
+									true,
+									false							
 								] call KH_fnc_execute;
 
 								[
@@ -126,7 +127,8 @@ if _state then {
 													systemChat "Press the <ESC> key to exit spectator mode, or wait until you become conscious.";
 												},
 												_unit,
-												"THIS_FRAME"
+												true,
+												false
 											] call KH_fnc_execute;
 										}
 										else {

@@ -43,7 +43,7 @@ isNil {
 													_object enableDynamicSimulation true;
 												},
 												["JIP", "GLOBAL", _x, false, false, ""],
-												"THIS_FRAME"
+												true
 											] call KH_fnc_execute;					
 										};
 										
@@ -55,7 +55,7 @@ isNil {
 													_object allowDamage false;
 												},
 												_x,
-												"THIS_FRAME"
+												true
 											] call KH_fnc_execute;
 										};
 										
@@ -122,7 +122,7 @@ isNil {
 								_object enableDynamicSimulation true;
 							},
 							["JIP", "GLOBAL", _object, false, false, ""],
-							"THIS_FRAME"
+							true
 						] call KH_fnc_execute;
 					};
 
@@ -133,7 +133,7 @@ isNil {
 								_object allowDamage false;
 							},
 							_object,
-							"THIS_FRAME"
+							true
 						] call KH_fnc_execute;
 					};
 					

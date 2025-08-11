@@ -46,7 +46,8 @@ private _firingSequence = [_vehicle, _firingData, _disableDamage] spawn BIS_fnc_
 					_driver doMove _endPosition;
 				},
 				_driver,
-				"THIS_FRAME"
+				true,
+				false
 			] call KH_fnc_execute;
 		};
 	}, 

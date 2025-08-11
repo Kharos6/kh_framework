@@ -42,7 +42,7 @@ private _processObjects = {
 										_object enableDynamicSimulation true;
 									},
 									["JIP", "GLOBAL", _x, false, false, ""],
-									"THIS_FRAME"
+									true
 								] call KH_fnc_execute;					
 							};
 							
@@ -54,7 +54,7 @@ private _processObjects = {
 										_object allowDamage false;
 									},
 									_x,
-									"THIS_FRAME"
+									true
 								] call KH_fnc_execute;
 							};
 							
@@ -133,7 +133,7 @@ else {
 					_object enableDynamicSimulation true;
 				},
 				["JIP", "GLOBAL", _object, false, false, ""],
-				"THIS_FRAME"
+				true
 			] call KH_fnc_execute;
 		};
 
@@ -144,7 +144,7 @@ else {
 					_object allowDamage false;
 				},
 				_object,
-				"THIS_FRAME"
+				true
 			] call KH_fnc_execute;
 		};
 		

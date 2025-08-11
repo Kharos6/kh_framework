@@ -30,7 +30,7 @@ private _id = [missionNamespace, "KH_var_3dAudio", "ACTIVE", false] call KH_fnc_
 														_emitter say3D _selectedAudio;
 													},
 													_player,
-													"THIS_FRAME"
+													true
 												] call KH_fnc_execute;
 											};
 										}, 
@@ -47,7 +47,7 @@ private _id = [missionNamespace, "KH_var_3dAudio", "ACTIVE", false] call KH_fnc_
 												_emitter say3D _selectedAudio;
 											},
 											_x,
-											"THIS_FRAME"
+											true
 										] call KH_fnc_execute;
 									};
 								};

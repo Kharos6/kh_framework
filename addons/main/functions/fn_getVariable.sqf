@@ -104,7 +104,7 @@ _target params ["_targetMachine", "_arguments", "_function"];
 			[[_namespace, _name, _defaultValue, []] call KH_fnc_getVariable];
 		}
 	],
-	"THIS_FRAME"
+	true
 ] call KH_fnc_execute;
 
 true;

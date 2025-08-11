@@ -26,7 +26,7 @@ if !_observerMode then {
 						missionNamespace setVariable [_identifierInput, _input, true];
 					},
 					"SERVER",
-					"THIS_FRAME"
+					true
 				] call KH_fnc_execute;
 			};
 		},
@@ -67,7 +67,7 @@ if !_observerMode then {
 						};
 					},
 					"SERVER",
-					"THIS_FRAME"
+					true
 				] call KH_fnc_execute;
 
 				ctrlSetText [103, ""];
@@ -107,7 +107,7 @@ if !_observerMode then {
 					};
 				},
 				"SERVER",
-				"THIS_FRAME"
+				true
 			] call KH_fnc_execute;
 
 			ctrlSetText [103, ""];
@@ -130,7 +130,7 @@ if !_observerMode then {
 					missionNamespace setVariable [_identifier, false, true];
 				},
 				"SERVER",
-				"THIS_FRAME"
+				true
 			] call KH_fnc_execute;
 			
 			player setVariable ["KH_var_dialogActive", false, [2, clientOwner]];
@@ -162,14 +162,14 @@ if !_observerMode then {
 							};
 						},
 						_player,
-						"THIS_FRAME"
+						true
 					] call KH_fnc_execute;
 				}, 
 				[_player, _entity, _identifier]
 			] call CBA_fnc_waitUntilAndExecute;
 		},
 		"SERVER",
-		"THIS_FRAME"
+		true
 	] call KH_fnc_execute;
 }
 else {

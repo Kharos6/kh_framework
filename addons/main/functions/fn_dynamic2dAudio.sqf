@@ -23,7 +23,7 @@ private _id = [missionNamespace, "KH_var_2dAudio", "ACTIVE", false] call KH_fnc_
 										playSound _selectedAudio;
 									},
 									_x,
-									"THIS_FRAME"
+									true
 								] call KH_fnc_execute;
 							};
 						} forEach KH_var_allPlayerUnits;

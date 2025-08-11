@@ -116,7 +116,7 @@ isNil {
 						},
 						{
 							params ["_unit", "_ownerId"];
-							[[_unit], _unit getVariable ["KH_var_headlessClientTransferInit", {}], _ownerId, "THIS_FRAME"] call KH_fnc_execute;
+							[[_unit], _unit getVariable ["KH_var_headlessClientTransferInit", {}], _ownerId, true] call KH_fnc_execute;
 						}, 
 						[_x, owner _headlessClient], 
 						30
@@ -147,7 +147,7 @@ isNil {
 			[[isServer, hasInterface], _x] call KH_fnc_luaOperation;
 		} forEach KH_var_loadInitLuaExecutions;
 		
-		[["KH FRAMEWORK - MISSION LOADED"], "systemChat", "GLOBAL", "THIS_FRAME"] call KH_fnc_execute;
+		[["KH FRAMEWORK - MISSION LOADED"], "systemChat", "GLOBAL", true] call KH_fnc_execute;
 
 		[
 			{
@@ -155,11 +155,11 @@ isNil {
 			},
 			{							
 				[] call KH_fnc_serverMissionStartInit;
-				[[], KH_fnc_headlessMissionStartInit, "HEADLESS", "THIS_FRAME"] call KH_fnc_execute;
+				[[], KH_fnc_headlessMissionStartInit, "HEADLESS", true] call KH_fnc_execute;
 				["KH_eve_missionStarted", []] call CBA_fnc_globalEvent;
 				KH_var_missionStarted = true;
 				publicVariable "KH_var_missionStarted";
-				[["KH FRAMEWORK - MISSION STARTED"], "systemChat", "GLOBAL", "THIS_FRAME"] call KH_fnc_execute;
+				[["KH FRAMEWORK - MISSION STARTED"], "systemChat", "GLOBAL", true] call KH_fnc_execute;
 				
 				[
 					{
@@ -180,8 +180,8 @@ isNil {
 									publicVariable "KH_var_playersLoaded";
 									["KH_eve_playersLoaded", KH_var_initialPlayerUnits] call CBA_fnc_globalEvent;												
 									[] call KH_fnc_serverPlayersLoadedInit;
-									[[], KH_fnc_playerPlayersLoadedInit, "PLAYERS", "THIS_FRAME"] call KH_fnc_execute;
-									[["KH FRAMEWORK - PLAYERS LOADED"], "systemChat", "GLOBAL", "THIS_FRAME"] call KH_fnc_execute;
+									[[], KH_fnc_playerPlayersLoadedInit, "PLAYERS", true] call KH_fnc_execute;
+									[["KH FRAMEWORK - PLAYERS LOADED"], "systemChat", "GLOBAL", true] call KH_fnc_execute;
 								},
 								[]
 							] call CBA_fnc_execNextFrame;

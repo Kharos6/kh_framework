@@ -21,7 +21,7 @@ _loadoutEntries append _previousEntriesArray;
 		[format ["KH_var_savedPlayerLoadouts_%1", _identifier], _loadoutEntries] call KH_fnc_editMissionProfileNamespace;
 	},
 	"GLOBAL",
-	"THIS_FRAME"
+	true
 ] call KH_fnc_execute;
 
 _loadoutEntries;

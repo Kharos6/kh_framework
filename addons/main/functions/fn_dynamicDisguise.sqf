@@ -182,7 +182,7 @@ if _state then {
 										systemChat "Someone saw me. I am no longer disguised.";
 									},
 									_player,
-									"THIS_FRAME"
+									true
 								] call KH_fnc_execute;
 								
 								if KH_var_disguiseSetCaptive then {
@@ -192,7 +192,7 @@ if _state then {
 											player setCaptive false;
 										},
 										_player,
-										"THIS_FRAME"
+										true
 									] call KH_fnc_execute;
 								};
 							};
@@ -218,7 +218,7 @@ if _state then {
 											systemChat (format ["No one saw me. I am now disguised as the %1 side.", _currentSide]);
 										},
 										_player,
-										"THIS_FRAME"
+										true
 									] call KH_fnc_execute;
 									
 									if KH_var_disguiseSetCaptive then {
@@ -228,7 +228,7 @@ if _state then {
 												player setCaptive true;
 											},
 											_player,
-											"THIS_FRAME"
+											true
 										] call KH_fnc_execute;
 									};
 								};

@@ -17,7 +17,7 @@ private _simpleObjects = [];
 				[_simpleObject] call _init;
 			},
 			["JIP", "GLOBAL", true, false, false, ""],
-			"THIS_FRAME"
+			true
 		] call KH_fnc_execute;
 	}
 	else {

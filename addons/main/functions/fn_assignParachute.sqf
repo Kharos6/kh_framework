@@ -69,7 +69,7 @@ else {
 										params ["_unit", "_backpack", "_backpackItems"];
 
 										[
-											["STANDARD", _unit, false],
+											["STANDARD", _unit, "LOCAL"],
 											"SlotItemChanged",
 											[_backpack, _backpackItems],
 											{
@@ -100,7 +100,7 @@ else {
 				};
 			},
 			_x,
-			"THIS_FRAME"
+			true
 		] call KH_fnc_execute;
 	} forEach _units;
 

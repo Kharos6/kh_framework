@@ -31,7 +31,5 @@ params ["_id", "_state"];
 		};
 	},
 	"SERVER",
-	"THIS_FRAME"
+	true
 ] call KH_fnc_execute;
-
-true;

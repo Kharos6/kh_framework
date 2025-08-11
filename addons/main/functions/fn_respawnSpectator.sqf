@@ -88,7 +88,7 @@ if _state then {
 							systemChat "Press the <ESC> key to exit spectator mode.";
 						},
 						_unit,
-						"THIS_FRAME"
+						true
 					] call KH_fnc_execute;
 				};
 			}

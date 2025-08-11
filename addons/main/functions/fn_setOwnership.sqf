@@ -41,7 +41,7 @@ private _unitAttributes = createHashMap;
 					[_unit] call _init;
 				},
 				_ownerId,
-				"THIS_FRAME"
+				true
 			] call KH_fnc_execute;
 		}
 		else {
@@ -57,7 +57,7 @@ private _unitAttributes = createHashMap;
 						{
 							params ["_unit", "_ownerId", "_attributes"];
 							[_unit, _attributes, false, false, true, true, true, true, false, true, true, true, true] call KH_fnc_setUnitAttributes;
-							[[_unit], _init, _ownerId, "THIS_FRAME"] call KH_fnc_execute;
+							[[_unit], _init, _ownerId, true] call KH_fnc_execute;
 						}, 
 						[_unit, _ownerId, _attributes], 
 						30

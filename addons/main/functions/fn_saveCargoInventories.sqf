@@ -104,7 +104,7 @@ private _cargoEntries = [];
 		[format ["KH_var_savedCargoInventories_%1", _identifier], _cargoEntries] call KH_fnc_editMissionProfileNamespace;
 	},
 	"GLOBAL",
-	"THIS_FRAME"
+	true
 ] call KH_fnc_execute;
 
 _cargoEntries;

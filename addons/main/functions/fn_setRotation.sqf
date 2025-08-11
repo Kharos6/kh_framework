@@ -53,7 +53,7 @@ switch (typeName _rotation) do {
 				_entity setVectorDirAndUp [_dir, _up];
 			},
 			_entity,
-			"THIS_FRAME"
+			true
 		] call KH_fnc_execute;
 
 		true;
@@ -112,7 +112,7 @@ switch (typeName _rotation) do {
 				_entity setVectorDirAndUp [_dir, _up];
 			},
 			_entity,
-			"THIS_FRAME"
+			true
 		] call KH_fnc_execute;
 
 		true;

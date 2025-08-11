@@ -16,10 +16,10 @@ if !_parse exitWith {
 	_function;
 };
 
-private _hashValue = format ["KH_fnc_cachedFunction_%1", hashValue _function];
+private _hashValue = hashValue _function;
 
-if (isNil {KH_var_cachedFunctions get _hashValue}) then {
-	KH_var_cachedFunctions set [
+if (isNil {missionNamespace getVariable _hashValue;}) then {
+	missionNamespace setVariable [
 		_hashValue, 
 		if (_function isEqualType "") then {
 			if ((".sqf" in _function) && !(" " in _function)) then {
@@ -32,12 +32,13 @@ if (isNil {KH_var_cachedFunctions get _hashValue}) then {
 		else {
 			_function;
 		}, 
-		false
+		if !isServer then {
+			[clientOwner, 2];
+		}
+		else {
+			false;
+		}
 	];
-
-	if !isServer then {
-		[[_function], "KH_fnc_parseFunction", "SERVER", "THIS_FRAME"] call KH_fnc_execute;
-	};
 };
 
 _hashValue;

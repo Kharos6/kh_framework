@@ -24,11 +24,11 @@ missionNamespace setVariable [_variableName, _entity];
 				_entity setVehicleVarName _variableName;
 			},
 			["JIP", "GLOBAL", _entity, false, true, ""],
-			"THIS_FRAME"
+			true
 		] call KH_fnc_execute;
 	},
 	"SERVER",
-	"THIS_FRAME"
+	true
 ] call KH_fnc_execute;
 
 _variableName;

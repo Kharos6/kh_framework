@@ -19,10 +19,10 @@ if (_duration != -1) then {
 			_interruptType = "UNIT";
 		};
 
-		[[[], true], "KH_fnc_closeInterface", _unit, "THIS_FRAME"] call KH_fnc_execute;
+		[[[], true], "KH_fnc_closeInterface", _unit, true] call KH_fnc_execute;
 		
 		if _disableUserInput then {
-			[[false, false], "KH_fnc_toggleUserInput", _unit, "THIS_FRAME"] call KH_fnc_execute;
+			[[false, false], "KH_fnc_toggleUserInput", _unit, true] call KH_fnc_execute;
 		};
 
 		if _camera then {
@@ -30,14 +30,14 @@ if (_duration != -1) then {
 			_cameraObject attachTo [_unit, [-0.12, 0, 0.15], "Head", true];	
 			_cameraTarget = createVehicle ["KH_HelperSquare", _x, [], 0, "CAN_COLLIDE"];
 			_cameraTarget attachTo [_unit, [0, 15, 0], "Head", true];
-			[[[_cameraObject], [_cameraTarget], [0.75], [0], [_duration], [-1], false, false], "KH_fnc_cameraSequence", _unit, "THIS_FRAME"] call KH_fnc_execute;
+			[[[_cameraObject], [_cameraTarget], [0.75], [0], [_duration], [-1], false, false], "KH_fnc_cameraSequence", _unit, true] call KH_fnc_execute;
 		};
 	};
 
 	switch _interruptType do {
 		case "GROUP": {
 			_targetGroupHitHandler = [
-				["STANDARD", group _target, false],
+				["STANDARD", group _target, "LOCAL"],
 				"CombatModeChanged",
 				[_event],
 				{
@@ -51,7 +51,7 @@ if (_duration != -1) then {
 			] call KH_fnc_addEventHandler;
 
 			_unitGroupHitHandler = [
-				["STANDARD", group _unit, false],
+				["STANDARD", group _unit, "LOCAL"],
 				"CombatModeChanged",
 				[_event],
 				{
@@ -67,7 +67,7 @@ if (_duration != -1) then {
 
 		case "UNIT": {
 			_targetHitHandler = [
-				["STANDARD", _target, false],
+				["STANDARD", _target, "LOCAL"],
 				"Dammaged",
 				[_event],
 				{
@@ -77,7 +77,7 @@ if (_duration != -1) then {
 			] call KH_fnc_addEventHandler;
 
 			_unitHitHandler = [
-				["STANDARD", _unit, false],
+				["STANDARD", _unit, "LOCAL"],
 				"Dammaged",
 				[_event],
 				{
@@ -96,7 +96,7 @@ if (_duration != -1) then {
 						_unit disableAI "ALL";
 					},
 					_unit,
-					"THIS_FRAME"
+					true
 				] call KH_fnc_execute;
 			};
 		};
@@ -110,7 +110,7 @@ if (_duration != -1) then {
 				_unit allowDamage false;
 			},
 			_unit,
-			"THIS_FRAME"
+			true
 		] call KH_fnc_execute;
 	};
 
@@ -122,7 +122,7 @@ if (_duration != -1) then {
 				_unit setCaptive true;
 			},
 			_unit,
-			"THIS_FRAME"
+			true
 		] call KH_fnc_execute;
 	};
 
@@ -136,7 +136,7 @@ if (_duration != -1) then {
 			_unit switchMove _animation;
 		},
 		"GLOBAL",
-		"THIS_FRAME"
+		true
 	] call KH_fnc_execute;
 	
 	private _interruptCheck = [];
@@ -159,7 +159,7 @@ if (_duration != -1) then {
 							_unit allowDamage true;
 						},
 						_unit,
-						"THIS_FRAME"
+						true
 					] call KH_fnc_execute;
 				};
 				
@@ -171,12 +171,12 @@ if (_duration != -1) then {
 							_unit setCaptive false;
 						},
 						_unit,
-						"THIS_FRAME"
+						true
 					] call KH_fnc_execute;
 				};
 				
 				if ((isPlayer _unit) && _disableUserInput) then {
-					[[true, false], "KH_fnc_toggleUserInput", _unit, "THIS_FRAME"] call KH_fnc_execute;
+					[[true, false], "KH_fnc_toggleUserInput", _unit, true] call KH_fnc_execute;
 				};
 				
 				detach _unit;
@@ -188,7 +188,7 @@ if (_duration != -1) then {
 						_unit switchMove [""];
 					},
 					"GLOBAL",
-					"THIS_FRAME"
+					true
 				] call KH_fnc_execute;
 
 				[_unit, [_resetPosition, "ATL", false], [_resetRotation, false]] call KH_fnc_setTransforms;
@@ -207,7 +207,7 @@ if (_duration != -1) then {
 							_unit enableAI "ALL";
 						},
 						_unit,
-						"THIS_FRAME"
+						true
 					] call KH_fnc_execute;
 				};
 				
@@ -252,7 +252,7 @@ if (_duration != -1) then {
 								_unit allowDamage true;
 							},
 							_unit,
-							"THIS_FRAME"
+							true
 						] call KH_fnc_execute;
 					};
 					
@@ -264,12 +264,12 @@ if (_duration != -1) then {
 								_unit setCaptive false;
 							},
 							_unit,
-							"THIS_FRAME"
+							true
 						] call KH_fnc_execute;
 					};
 					
 					if ((isPlayer _unit) && _disableUserInput) then {
-						[[true, false], "KH_fnc_toggleUserInput", _unit, "THIS_FRAME"] call KH_fnc_execute;
+						[[true, false], "KH_fnc_toggleUserInput", _unit, true] call KH_fnc_execute;
 					};
 					
 					detach _unit;
@@ -281,7 +281,7 @@ if (_duration != -1) then {
 							_unit switchMove [""];
 						},
 						"GLOBAL",
-						"THIS_FRAME"
+						true
 					] call KH_fnc_execute;
 
 					[_unit, [_resetPosition, "ATL", false], [_resetRotation, false]] call KH_fnc_setTransforms;
@@ -300,7 +300,7 @@ if (_duration != -1) then {
 								_unit enableAI "ALL";
 							},
 							_unit,
-							"THIS_FRAME"
+							true
 						] call KH_fnc_execute;
 					};
 					
@@ -334,7 +334,7 @@ else {
 			_unit switchMove _animation;
 		},
 		["JIP", "GLOBAL", _unit, false, false, ""],
-		"THIS_FRAME"
+		true
 	] call KH_fnc_execute;
 
 	_unit enableSimulationGlobal false;

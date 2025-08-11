@@ -48,68 +48,28 @@ if ((count _handler) > 2) then {
 				};
 
 				case "TEMPORAL": {
-					KH_var_temporalExecutionStackDeletions pushBackUnique _handlerId;
+					["KH_var_temporalExecutionStackMonitor", [_handlerId, true, false]] call CBA_fnc_localEvent;
+				};
+
+				case "DRAW_UI": {
+					["KH_var_drawUiExecutionStackMonitor", [_handlerId, false]] call CBA_fnc_localEvent;
 				};
 
 				case "IN_GAME_UI": {
-					private _currentStack = KH_var_uiEventHandlerStack get _event;
-					private _currentId = _handlerId select 0;
-					private "_deletion";
-
-					{
-						if ((_x select 0) isEqualTo _currentId) then {
-							_deletion = _x;
-							break;
-						};
-					} forEach _currentStack;
-
-					if (!isNil "_deletion") then {
-						_currentStack deleteAt (_currentStack find _deletion);
-					};
-
-					if (_currentStack isEqualTo []) then {
-						inGameUISetEventHandler [_event, ""];
-						KH_var_uiEventHandlerStack deleteAt _event;
-					};
+					KH_var_inGameUiEventHandlerStackDeletions pushBackUnique (_handlerId select 0);
 				};
 
 				case "PLAYER": {
-					private _currentStack = KH_var_cbaPlayerEventHandlerStack get _event;
-					private _currentId = _handlerId select 0;
-					private "_deletion";
-
-					{
-						if ((_x select 0) isEqualTo _currentId) then {
-							_deletion = _x;
-							break;
-						};
-					} forEach _currentStack;
-
-					if (!isNil "_deletion") then {
-						_currentStack deleteAt (_currentStack find _deletion);
-					};
+					KH_var_cbaPlayerEventHandlerStackDeletions pushBackUnique (_handlerId select 0);
 				};
 
 				case "CBA": {
-					private _currentStack = KH_var_cbaEventHandlerStack get _event;
-					private _currentId = _handlerId select 0;
-					private "_deletion";
-
-					{
-						if ((_x select 0) isEqualTo _currentId) then {
-							_deletion = _x;
-							break;
-						};
-					} forEach _currentStack;
-
-					if (!isNil "_deletion") then {
-						_currentStack deleteAt (_currentStack find _deletion);
-					};
+					KH_var_cbaEventHandlerStackDeletions pushBackUnique (_handlerId select 0);
 				};
 			};
 		},
 		_owner,
-		"THIS_FRAME"
+		true
 	] call KH_fnc_execute;
 }
 else {
@@ -123,7 +83,7 @@ else {
 			[_handlerId, "TERMINATE"] call KH_fnc_manageHandler;
 		},
 		"SERVER",
-		"THIS_FRAME"
+		true
 	] call KH_fnc_execute;
 };
 

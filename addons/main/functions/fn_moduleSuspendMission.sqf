@@ -9,7 +9,7 @@ isNil {
 				[_state] call KH_fnc_suspendMission;
 			},
 			"SERVER",
-			"THIS_FRAME"
+			true
 		] call KH_fnc_execute;
 	};
 };

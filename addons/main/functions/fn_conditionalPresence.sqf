@@ -36,7 +36,7 @@ params ["_entity", "_variableName", ["_init", {}], ["_invert", false]];
 				[_entity, _state] call _init;
 			},
 			_entity,
-			"THIS_FRAME"
+			true
 		] call KH_fnc_execute;
 	}
 ] call KH_fnc_addEventHandler;

@@ -17,7 +17,8 @@ isNil {
 					deleteVehicle _logic;
 				},
 				"SERVER",
-				"THIS_FRAME"
+				true,
+				false
 			] call KH_fnc_execute;
 
 			[_localId] call KH_fnc_removeEventHandler;

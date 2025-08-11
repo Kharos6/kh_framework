@@ -50,7 +50,7 @@ private _curatorFunction = {
 								player allowDamage false;
 							},
 							_player,
-							"THIS_FRAME"
+							true
 						] call KH_fnc_execute;
 					};
 

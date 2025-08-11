@@ -24,7 +24,7 @@ if _identity then {
 			_unit setSpeaker (_attributes select 6);
 		},
 		["JIP", "GLOBAL", _unit, false, false, ""],
-		"THIS_FRAME"
+		true
 	] call KH_fnc_execute;
 };
 
@@ -56,7 +56,7 @@ if _behaviour then {
 			(group _unit) setBehaviourStrong (_attributes select 11);
 		},
 		_unit,
-		"THIS_FRAME"
+		true
 	] call KH_fnc_execute;
 };
 
@@ -78,7 +78,7 @@ if _skill then {
 			_unit setSkill ["general", _skills select 8];
 		},
 		_unit,
-		"THIS_FRAME"
+		true
 	] call KH_fnc_execute;
 };
 
@@ -108,7 +108,7 @@ if _AI then {
 			_unit enableAIFeature ["FIREWEAPON", _features select 17];
 		},
 		_unit,
-		"THIS_FRAME"
+		true
 	] call KH_fnc_execute;
 };
 
@@ -126,7 +126,7 @@ if _unitTraits then {
 			};
 		},
 		_unit,
-		"THIS_FRAME"
+		true
 	] call KH_fnc_execute;
 };
 

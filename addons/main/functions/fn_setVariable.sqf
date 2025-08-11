@@ -2,13 +2,9 @@ params [
 	["_namespace", missionNamespace, ["", missionNamespace, objNull, grpNull, teamMemberNull, locationNull, taskNull, controlNull, displayNull]], 
 	["_name", nil], 
 	["_value", nil], 
-	["_scope", "LOCAL", [[], objNull, teamMemberNull, grpNull, 0, sideUnknown, ""]], 
+	["_scope", "LOCAL", [true, 0, "", [], objNull, teamMemberNull, grpNull, sideUnknown]], 
 	["_writeType", "OVERWRITE", [""]]
 ];
-
-if (isNil _name) exitWith {
-	nil;
-};
 
 private _handler = [];
 
@@ -302,7 +298,12 @@ if (_scope isEqualType "") then {
 				};
 			}
 			else {
-				_parsedValue = _value;
+				if (_writeType isEqualTo "NIL") then {
+					_continue = false;
+				}
+				else {
+					_parsedValue = _value;
+				};
 			};
 
 			if _continue then {
@@ -378,12 +379,12 @@ if (_scope isEqualType "") then {
 																			};										
 																		},
 																		_target,
-																		"THIS_FRAME"
+																		true
 																	] call KH_fnc_execute;
 																};
 															},
 															_oldOwner,
-															"THIS_FRAME"
+															true
 														] call KH_fnc_execute;
 													}
 													else {
@@ -401,13 +402,13 @@ if (_scope isEqualType "") then {
 																};						
 															},
 															_newOwner,
-															"THIS_FRAME"
+															true
 														] call KH_fnc_execute;
 													};
 												};										
 											},
 											"SERVER",
-											"THIS_FRAME"
+											true
 										] call KH_fnc_execute;
 									};
 								},
@@ -418,14 +419,14 @@ if (_scope isEqualType "") then {
 									{},
 									true
 								],
-								"THIS_FRAME"
+								true
 							] call KH_fnc_execute;
 
 							_entity setVariable [format ["KH_var_persistentPublicVariableState%1", _parsedName], true, true];
 						};
 					},
 					"SERVER",
-					"THIS_FRAME"
+					true
 				] call KH_fnc_execute;
 			};
 		};
@@ -436,7 +437,7 @@ if (_scope isEqualType "") then {
 					[_namespace, _parsedName, _value, "LOCAL", _writeType],
 					"KH_fnc_setVariable",
 					["JIP", _scope select [4], true, false, false, format ["%1_%2", _namespace, _parsedName]],
-					"THIS_FRAME"
+					true
 				] call KH_fnc_execute;
 			}
 			else {
@@ -444,18 +445,124 @@ if (_scope isEqualType "") then {
 					[_namespace, _parsedName, _value, "LOCAL", _writeType],
 					"KH_fnc_setVariable",
 					_scope,
-					"THIS_FRAME"
+					true
 				] call KH_fnc_execute;
 			};
 		};
 	};
 }
 else {
+	if (!(_namespace isEqualType "") && ((_scope isEqualTo true) || (_scope isEqualTo "LOCAL"))) exitWith {
+		private _oldValue = _namespace getVariable _name;
+
+		if !(isNil "_oldValue") then {
+			_parsedValue = switch _writeType do {
+				case "OVERWRITE": {
+					_value;
+				};
+
+				case "ADD": {
+					_oldValue + _value;
+				};
+
+				case "SUBTRACT": {
+					_oldValue - _value;
+				};
+
+				case "MULTIPLY": {
+					_oldValue * _value;
+				};
+
+				case "DIVIDE": {
+					_oldValue / _value;
+				};
+
+				case "RAISE": {
+					_oldValue ^ _value;
+				};
+
+				case "REMAINDER": {
+					_oldValue % _value;
+				};
+
+				case "INTERSECT": {
+					_oldValue arrayIntersect _value;
+				};
+
+				case "APPEND": {
+					_oldValue append _value;
+					_oldValue;
+				};
+
+				case "PUSHBACK": {
+					_oldValue pushBack _value;
+					_oldValue;
+				};
+
+				case "PUSHBACK_UNIQUE": {
+					_oldValue pushBackUnique _value;
+					_oldValue;
+				};
+
+				case "SET": {
+					_oldValue set [_value select 0, _value select 1, false];
+					_oldValue;
+				};
+
+				case "SET_UNIQUE": {
+					_oldValue set [_value select 0, _value select 1, true];
+					_oldValue;
+				};
+
+				case "INSERT": {
+					_oldValue insert [_value select 0, _value select 1, false];
+					_oldValue;
+				};
+
+				case "INSERT_UNIQUE": {
+					_oldValue insert [_value select 0, _value select 1, true];
+					_oldValue;
+				};
+
+				case "MERGE_OVERWRITE": {
+					_oldValue merge [_value, true];
+					_oldValue;
+				};
+
+				case "MERGE": {
+					_oldValue merge [_value, false];
+					_oldValue;
+				};
+			};
+		}
+		else {
+			_parsedValue = _value;
+		};
+
+		_namespace setVariable [_name, _parsedValue];
+
+		if (_scope isEqualTo true) then {
+			[
+				[_namespace, _name, _parsedValue],
+				{
+					params ["_namespace", "_name", "_parsedValue"];
+					_namespace setVariable [_name, _parsedValue, true];
+				},
+				"SERVER",
+				true,
+				false
+			] call KH_fnc_execute;
+		};
+
+		_handler;
+	};
+
 	[
 		[_namespace, _name, _value, "LOCAL", _writeType],
 		"KH_fnc_setVariable",
 		_scope,
-		"THIS_FRAME"
+		true,
+		false
 	] call KH_fnc_execute;
 };
 

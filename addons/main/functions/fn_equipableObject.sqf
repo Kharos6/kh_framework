@@ -34,7 +34,7 @@ if (isNull _unit) then {
 				private _event = _localArguments select 9;
 				private _objectName = _localArguments select 10;
 				_target setVariable ["KH_var_previouslyEquipped", true, true];
-				[[_caller, _target, _bone, _position, _rotation, _scale, _mass, _hideInVehicles, _toggleEquip, _exclusive, _event, _objectName], "KH_fnc_equipableObject", "SERVER", "THIS_FRAME"] call KH_fnc_execute;
+				[[_caller, _target, _bone, _position, _rotation, _scale, _mass, _hideInVehicles, _toggleEquip, _exclusive, _event, _objectName], "KH_fnc_equipableObject", "SERVER", true] call KH_fnc_execute;
 
 				private _unequipAction = [
 					_caller,
@@ -82,7 +82,7 @@ if (isNull _unit) then {
 		],
 		"BIS_fnc_holdActionAdd", 
 		["JIP", "PLAYERS", _object, false, false, ""], 
-		"THIS_FRAME"
+		true
 	] call KH_fnc_execute;
 }
 else {
@@ -160,7 +160,7 @@ else {
 			],
 			"BIS_fnc_holdActionAdd", 
 			["JIP", "PLAYERS", _object, false, false, ""], 
-			"THIS_FRAME"
+			true
 		] call KH_fnc_execute;
 		
 		[
@@ -189,7 +189,7 @@ else {
 					private _exclusive = _localArguments select 9;
 					private _event = _localArguments select 10;
 					private _objectName = _localArguments select 11;
-					[[_caller, _target, _bone, _position, _rotation, _scale, _mass, _hideInVehicles, _toggleEquip, _exclusive, _event, _objectName], "KH_fnc_equipableObject", "SERVER", "THIS_FRAME"] call KH_fnc_execute;
+					[[_caller, _target, _bone, _position, _rotation, _scale, _mass, _hideInVehicles, _toggleEquip, _exclusive, _event, _objectName], "KH_fnc_equipableObject", "SERVER", true] call KH_fnc_execute;
 
 					private _unequipAction = [
 						_caller,
@@ -237,7 +237,7 @@ else {
 			],
 			"BIS_fnc_holdActionAdd", 
 			["JIP", "PLAYERS", _object, false, false, ""], 
-			"THIS_FRAME"
+			true
 		] call KH_fnc_execute;
 		
 		if _exclusive then {
@@ -252,7 +252,7 @@ else {
 				_object setMass _mass;
 			},
 			["JIP", "GLOBAL", _object, false, false, ""], 
-			"THIS_FRAME"
+			true
 		] call KH_fnc_execute;
 		
 		if _hideInVehicles then {			

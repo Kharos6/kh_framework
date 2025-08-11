@@ -28,7 +28,7 @@ else {
 			else {
 				["JIP", "GLOBAL", _jip, false, false, ["sha256", [_jip] joinString ""] call KH_fnc_cryptoOperation];
 			},
-			"THIS_FRAME"
+			true
 		] call KH_fnc_execute;
 	};
 

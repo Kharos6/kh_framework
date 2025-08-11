@@ -11,7 +11,8 @@ isNil {
 				_entity addForce [[0, 0, 1], [0, 0, 0], false];
 			},
 			_entity,
-			"THIS_FRAME"
+			true,
+			false
 		] call KH_fnc_execute;
 	};
 };

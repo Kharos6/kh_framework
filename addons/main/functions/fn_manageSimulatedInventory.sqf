@@ -40,7 +40,7 @@ private _previousInventory = _entity getVariable ["KH_var_simulatedInventoryItem
 		_entity setVariable ["KH_var_simulatedInventoryItems", _currentInventory, true];
 	},
 	"SERVER",
-	"THIS_FRAME"
+	true
 ] call KH_fnc_execute;
 
 _previousInventory;

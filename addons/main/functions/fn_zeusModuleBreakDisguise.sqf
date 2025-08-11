@@ -12,7 +12,8 @@ isNil {
 				_player setVariable ["KH_var_disguiseDetected", true];
 			},
 			"SERVER",
-			"THIS_FRAME"
+			true,
+			false
 		] call KH_fnc_execute;
 	};
 };

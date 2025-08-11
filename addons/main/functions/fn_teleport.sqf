@@ -9,7 +9,8 @@ params ["_units", "_position", "_rotation", ["_eject", true], ["_transition", 1]
 				_unit setUnitFreefallHeight _freefallHeight;
 			},
 			_x,
-			"THIS_FRAME"
+			true,
+			false
 		] call KH_fnc_execute;
 	};
 
@@ -21,7 +22,8 @@ params ["_units", "_position", "_rotation", ["_eject", true], ["_transition", 1]
 					titleText [" ", "BLACK OUT", 1];
 				},
 				_x,
-				"THIS_FRAME"
+				true,
+				false
 			] call KH_fnc_execute;
 		};
 
@@ -44,7 +46,7 @@ params ["_units", "_position", "_rotation", ["_eject", true], ["_transition", 1]
 								{
 									params ["_unit", "_position", "_rotation", "_init"];
 									[_unit, [_position, "ATL", false], [_rotation, false]] call KH_fnc_setTransforms;
-									[[_unit], _init, _unit, "THIS_FRAME"] call KH_fnc_execute;
+									[[_unit], _init, _unit, true, false] call KH_fnc_execute;
 								}, 
 								[_unit, _position, _rotation, _init]
 							] call CBA_fnc_execNextFrame;
@@ -55,7 +57,7 @@ params ["_units", "_position", "_rotation", ["_eject", true], ["_transition", 1]
 				}
 				else {
 					[_unit, [_position, "ATL", false], [_rotation, false]] call KH_fnc_setTransforms;
-					[[_unit], _init, _unit, "THIS_FRAME"] call KH_fnc_execute;
+					[[_unit], _init, _unit, true, false] call KH_fnc_execute;
 				};
 				
 				if (isPlayer _unit) then {
@@ -65,7 +67,8 @@ params ["_units", "_position", "_rotation", ["_eject", true], ["_transition", 1]
 							titleText [" ", "BLACK IN", 1];
 						},
 						_unit,
-						"THIS_FRAME"
+						true,
+						false
 					] call KH_fnc_execute;
 				};
 
@@ -88,7 +91,8 @@ params ["_units", "_position", "_rotation", ["_eject", true], ["_transition", 1]
 							};
 						},
 						_unit,
-						"THIS_FRAME"
+						true,
+						false
 					] call KH_fnc_execute;
 				};
 			},
@@ -112,7 +116,7 @@ params ["_units", "_position", "_rotation", ["_eject", true], ["_transition", 1]
 						{
 							params ["_unit", "_position", "_rotation", "_init"];
 							[_unit, [_position, "ATL", false], [_rotation, false]] call KH_fnc_setTransforms;
-							[[_unit], _init, _unit, "THIS_FRAME"] call KH_fnc_execute;
+							[[_unit], _init, _unit, true, false] call KH_fnc_execute;
 						}, 
 						[_unit, _position, _rotation]
 					] call CBA_fnc_execNextFrame;
@@ -123,7 +127,7 @@ params ["_units", "_position", "_rotation", ["_eject", true], ["_transition", 1]
 		}
 		else {
 			[_x, [_position, "ATL", false], [_rotation, false]] call KH_fnc_setTransforms;
-			[[_x], _init, _x, "THIS_FRAME"] call KH_fnc_execute;
+			[[_x], _init, _x, true, false] call KH_fnc_execute;
 		};
 		
 		if _heal then {
@@ -145,7 +149,8 @@ params ["_units", "_position", "_rotation", ["_eject", true], ["_transition", 1]
 					};
 				},
 				_x,
-				"THIS_FRAME"
+				true,
+				false
 			] call KH_fnc_execute;
 		};
 	};

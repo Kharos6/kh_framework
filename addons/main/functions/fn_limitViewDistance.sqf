@@ -29,7 +29,7 @@ if _state then {
 				] call CBA_fnc_addPerFrameHandler;
 			},
 			["JIP", "PLAYERS", true, false, false, ""],
-			"THIS_FRAME"
+			true
 		] call KH_fnc_execute;
 	};
 }

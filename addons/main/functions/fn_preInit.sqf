@@ -1,7 +1,17 @@
+if (isNil "KH_var_missionLoaded") then {
+	KH_var_missionLoaded = false;
+};
+
+if (isNil "KH_var_dedicatedServer") then {
+	KH_var_dedicatedServer = false;
+};
+
+if (isNil "KH_var_isJip") then {
+	KH_var_isJip = false;
+};
+
 KH_var_currentPlayerUnit = objNull;
-KH_var_missionLoaded = false;
-KH_var_isJip = false;
-KH_var_cachedFunctions = createHashMap;
+KH_var_cachedJipHandlers = createHashMap;
 KH_var_cachedLuaFunctions = createHashMap;
 KH_var_cachedLuaEntities = createHashMap;
 KH_var_remoteExecCommandsBlacklist = createHashMap;
@@ -10,9 +20,21 @@ KH_var_remoteExecCommandsJipBlacklist = createHashMap;
 KH_var_remoteExecFunctionsJipBlacklist = createHashMap;
 KH_var_cbaEventHandlerStack = createHashMap;
 KH_var_cbaPlayerEventHandlerStack = createHashMap;
-KH_var_uiEventHandlerStack = createHashMap;
+KH_var_inGameUiEventHandlerStack = createHashMap;
+KH_var_temporalExecutionStackMonitor = createHashMap;
+KH_var_drawUiExecutionStackMonitor = createHashMap;
+KH_var_cbaEventHandlerStackDeletions = [];
+KH_var_cbaPlayerEventHandlerStackDeletions = [];
+KH_var_inGameUiEventHandlerStackDeletions = [];
 KH_var_temporalExecutionStack = [];
+KH_var_drawUi2dExecutionStack = [];
+KH_var_drawUi3dExecutionStack = [];
+KH_var_temporalExecutionStackAdditions = [];
+KH_var_drawUi2dExecutionStackAdditions = [];
+KH_var_drawUi3dExecutionStackAdditions = [];
 KH_var_temporalExecutionStackDeletions = [];
+KH_var_drawUi2dExecutionStackDeletions = [];
+KH_var_drawUi3dExecutionStackDeletions = [];
 KH_var_postInitExecutions = [];
 KH_var_preInitLuaExecutions = [];
 KH_var_postInitLuaExecutions = [];
@@ -224,7 +246,7 @@ addMissionEventHandler [
 	}
 ];
 
-["KH_eve_executionGlobal", KH_fnc_callParsedFunction] call CBA_fnc_addEventHandler;
+["KH_eve_execution", KH_fnc_callParsedFunction] call CBA_fnc_addEventHandler;
 
 {
 	[[isServer, hasInterface], _x] call KH_fnc_luaOperation;
@@ -235,38 +257,58 @@ addMissionEventHandler [
 	{
 		if (KH_var_temporalExecutionStackDeletions isNotEqualTo []) then {
 			{
-				if ((_x select 5) in KH_var_temporalExecutionStackDeletions) then {
-					KH_var_temporalExecutionStackDeletions set [KH_var_temporalExecutionStackDeletions find (_x select 5), _forEachIndex];
+				if ((_x select 6) in KH_var_temporalExecutionStackDeletions) then {
+					KH_var_temporalExecutionStackDeletions set [KH_var_temporalExecutionStackDeletions find (_x select 6), _forEachIndex];
 				};
 			} forEach KH_var_temporalExecutionStack;
 
-			{
-				if (_x isEqualType 0) then {
-					KH_var_temporalExecutionStack deleteAt _x;
-				};
-			} forEach KH_var_temporalExecutionStackDeletions;
+			KH_var_temporalExecutionStack deleteAt (KH_var_temporalExecutionStackDeletions select {_x isEqualType 0;});
+			KH_var_temporalExecutionStackDeletions = [];
+		};
+
+		if (KH_var_temporalExecutionStackAdditions isNotEqualTo []) then {
+			KH_var_temporalExecutionStack append KH_var_temporalExecutionStackAdditions;
 		};
 
 		{
-			_x params ["_args", "_function", "_delay", "_delta", "_totalDelta", "_handle"];
+			_x params ["_args", "_function", "_delay", "_delta", "_totalDelta", "_localId", "_eventName"];
+
+			if (_eventName in KH_var_temporalExecutionStackDeletions) then {
+				continue;
+			};
 
 			if (_delay >= 0) then {
-				if (diag_tickTime > _delta) then {
-					_totalDelta = if (_totalDelta == -1) then {
-						diag_deltaTime;
-					}
-					else {
-						_x set [4, systemTime joinString ""];
-						[[systemTime joinString "", " - ", _totalDelta] joinString ""] call KH_fnc_mathOperation;
-					};
+				if (_delay isEqualTo 9) then {
+					if (diag_tickTime > _delta) then {
+						_totalDelta = if (_totalDelta isEqualTo -1) then {
+							diag_deltaTime;
+						}
+						else {
+							_x set [4, systemTime joinString ""];
+							[[systemTime joinString "", " - ", _totalDelta] joinString ""] call KH_fnc_mathOperation;
+						};
 
-					_args call _function;
-					_x set [3, _delta + _delay];
+						_args call _function;
+					};
+				}
+				else {
+					if (diag_tickTime >= _delta) then {
+						_totalDelta = if (_totalDelta isEqualTo -1) then {
+							diag_deltaTime;
+						}
+						else {
+							_x set [4, systemTime joinString ""];
+							[[systemTime joinString "", " - ", _totalDelta] joinString ""] call KH_fnc_mathOperation;
+						};
+
+						_args call _function;
+						_x set [3, _delta + _delay];
+					};
 				};
 			}
 			else {
-				if (diag_frameNo > _delta) then {
-					_totalDelta = if (_totalDelta == -1) then {
+				if (diag_frameNo >= _delta) then {
+					_totalDelta = if (_totalDelta isEqualTo -1) then {
 						diag_deltaTime;
 					}
 					else {
@@ -281,6 +323,61 @@ addMissionEventHandler [
 		} forEach KH_var_temporalExecutionStack;
 	}
 ];
+
+[
+	"KH_eve_temporalExecutionStackHandler", 
+	{
+		params ["_handler", "_deleteHandler", "_overrideTimeoutOnDeletion"];
+		private _currentHandler = KH_var_temporalExecutionStackMonitor get _handler;
+		if (isNil "_currentHandler") exitWith {};
+		_currentHandler params ["_timeoutArguments", "_timeoutFunction", "_handlerTickCounter", "_timeout", "_timeoutPriority", "_timeoutOnDeletion"];
+
+		if _deleteHandler exitWith {
+			if !(_handler in KH_var_temporalExecutionStackDeletions) then {
+
+				KH_var_temporalExecutionStackDeletions insert [
+					if _timeoutPriority then {
+						0;
+					}
+					else {
+						-1;
+					}, 
+					[_handler]
+				];
+
+				if (_timeoutOnDeletion || _overrideTimeoutOnDeletion) then {
+					_timeoutArguments call _timeoutFunction;
+				};
+			};
+
+			missionNamespace setVariable [_handlerTickCounter, nil];
+			KH_var_temporalExecutionStackMonitor deleteAt _handler;
+		};
+
+		if ((missionNamespace getVariable [_handlerTickCounter, 1]) >= _timeout) then {
+			if !(_handler in KH_var_temporalExecutionStackDeletions) then {
+
+				KH_var_temporalExecutionStackDeletions insert [
+					if _timeoutPriority then {
+						0;
+					}
+					else {
+						-1;
+					}, 
+					[_handler]
+				];
+
+				_timeoutArguments call _timeoutFunction;
+			};
+
+			missionNamespace setVariable [_handlerTickCounter, nil];
+			KH_var_temporalExecutionStackMonitor deleteAt _handler;
+		}
+		else {
+			missionNamespace setVariable [_handlerTickCounter, (missionNamespace getVariable [_handlerTickCounter, 1]) + 1];
+		};
+	}
+] call CBA_fnc_addEventHandler;
 
 if isServer then {
 	KH_fnc_serverMissionStartInit = {};
@@ -340,7 +437,223 @@ if isServer then {
 	KH_var_entityArrayBuilderArrays = [];
 	KH_var_groupArrayBuilderArrays = [];
 	KH_var_initialSideRelations = [];
-	["KH_eve_executionServer", KH_fnc_callParsedFunction] call CBA_fnc_addEventHandler;
+
+	[
+		"KH_eve_jipSetup",
+		{
+			params ["_name", "_arguments", "_dependency", "_unitRequired", "_id", "_eventOwner"];
+			private _currentHandler = KH_var_cachedJipHandlers get _id;
+			private _continue = true;
+
+			if !(isNil "_currentHandler") then {
+				if ((_currentHandler select 4) isEqualTo _unitRequired) then {
+					KH_var_cachedJipHandlers set [_id, [["JIP_HANDLER", _id], _name, _arguments, _dependency, _unitRequired, _currentHandler select 5]];
+					_continue = false;
+				}
+				else {
+					{
+						[_x] call KH_fnc_removeEventHandler;
+					} forEach (_currentHandler select 5);
+				};
+			};
+
+			if !_continue exitWith {};
+			private _jipHandlers = [];
+			KH_var_cachedJipHandlers set [_id, [["JIP_HANDLER", _id], _name, _arguments, _dependency, _unitRequired, _jipHandlers]];
+			
+			private _joinType = if _unitRequired then {
+				["KH_eve_playerLoaded", "KH_eve_headlessPreloaded"];
+			}
+			else {
+				["KH_eve_playerPreloadedInitial", "KH_eve_headlessPreloaded"];
+			};
+
+			{
+				private _jipHandler = [
+					"CBA",
+					_x,
+					[_id, _x],
+					{
+						_args params ["_id", "_joinType"];
+						private _idState = missionNamespace getVariable [_id, "ACTIVE"];
+						
+						if (_idState isNotEqualTo "INACTIVE") then {
+							switch _idState do {
+								case "ACTIVE": {
+									private _currentHandler = KH_var_cachedJipHandlers get _id;
+									private _dependency = _currentHandler param [4];
+									private _condition = true;
+
+									private _joiningMachine = if (_joinType isEqualTo "KH_eve_playerLoaded") then {
+										_this select 1;
+									}
+									else {
+										_this select 0;
+									};
+
+									switch (typeName _dependency) do {
+										case "BOOL": {
+											if !_dependency then {
+												_condition = false;
+											};
+										};
+
+										case "SCALAR": {
+											if !(_dependency in KH_var_allMachines) then {
+												_condition = false;
+											};
+										};
+
+										case "OBJECT": {
+											if (isNull _dependency) then {
+												_condition = false;
+											};
+										};
+
+										case "TEAM_MEMBER": {
+											if (isNull _dependency) then {
+												_condition = false;
+											};
+										};
+
+										case "GROUP": {
+											if (isNull _dependency) then {
+												_condition = false;
+											};
+										};
+
+										case "STRING": {
+											if ((parseNumber (_dependency select [0, 1])) isNotEqualTo 0) then {
+												private _uid = if (_joinType isEqualTo "KH_eve_playerLoaded") then {
+													getPlayerUID (_this select 0); 
+												}
+												else {
+													_this select 1;
+												};
+
+												if (_dependency isNotEqualTo _uid) then {
+													if (":" in _dependency) then {
+														if ((isNull (objectFromNetId _dependency)) && (isNull (groupFromNetId _dependency))) then {
+															_condition = false;
+														};
+													}
+													else {
+														private _player = KH_var_allPlayerIdMachines get _x;
+														private _client = KH_var_allHeadlessIdMachines get _x;
+
+														if ((isNil "_player") && (isNil "_client")) then {
+															_condition = false;
+														};
+													};
+												};
+											}
+											else {
+												if !(missionNamespace getVariable [_dependency, false]) then {
+													_condition = false;
+												};
+											};
+										};
+
+										case "ARRAY": {																					
+											{
+												switch (typeName _x) do {
+													case "SCALAR": {
+														if !(_x in KH_var_allMachines) then {
+															_condition = false;
+															break;
+														};
+													};
+
+													case "OBJECT": {
+														if (isNull _x) then {
+															_condition = false;
+															break;
+														};
+													};
+
+													case "TEAM_MEMBER": {
+														if (isNull _x) then {
+															_condition = false;
+															break;
+														};
+													};
+
+													case "GROUP": {
+														if (isNull _x) then {
+															_condition = false;
+															break;
+														};
+													};
+
+													case "STRING": {
+														if ((parseNumber (_x select [0, 1])) isNotEqualTo 0) then {
+															private _uid = if (_joinType isEqualTo "KH_eve_playerLoaded") then {
+																getPlayerUID (_this select 0); 
+															}
+															else {
+																_this select 1;
+															};
+
+															if (_x isNotEqualTo _uid) then {
+																if (":" in _x) then {
+																	if ((isNull (objectFromNetId _x)) && (isNull (groupFromNetId _x))) then {
+																		_condition = false;
+																		break;
+																	};
+																}
+																else {
+																	private _player = KH_var_allPlayerIdMachines get _x;
+																	private _client = KH_var_allHeadlessIdMachines get _x;
+
+																	if ((isNil "_player") && (isNil "_client")) then {
+																		_condition = false;
+																		break;
+																	};
+																};
+															};
+														}
+														else {
+															if !(missionNamespace getVariable [_x, false]) then {
+																_condition = false;
+																break;
+															};
+														};
+													};
+
+													case "CODE": {
+														if !(call _x) then {
+															_condition = false;
+															break;
+														};
+													};
+												};
+											} forEach _dependency;
+										};
+
+										case "CODE": {
+											if !(call _dependency) then {
+												_condition = false;
+											};
+										};
+									};
+
+									if _condition then {
+										[_currentHandler param [1], _currentHandler param [2], _joiningMachine] call CBA_fnc_ownerEvent;
+									};
+								};
+
+								case "TERMINATE": {
+									[_localId] call KH_fnc_removeEventHandler;
+								};		
+							};
+						};
+					}
+				] call KH_fnc_addEventHandler;
+
+				_jipHandlers pushBack _jipHandler;
+			} forEach _joinType;
+		}
+	] call CBA_fnc_addEventHandler;
 
 	[
 		"KH_eve_playerPreloadedInitial", 
@@ -361,14 +674,15 @@ if isServer then {
 					publicVariable "KH_var_allPlayerIdMachines";
 
 					[
-						[_uid], 
+						[_uid, _x getUserInfo 0], 
 						{
-							params ["_uid"];
-							profileNamespace setVariable ["KH_var_steamId", _uid];
+							params ["_uid", "_directPlayId"];
 							missionNamespace setVariable ["KH_var_steamId", _uid];
+							missionNamespace setVariable ["KH_var_directPlayId", _directPlayId];
+							missionNamespace setVariable ["KH_initComplete", true];
 						}, 
 						_machineId, 
-						"THIS_FRAME"
+						true
 					] call KH_fnc_execute;
 
 					break;
@@ -376,13 +690,13 @@ if isServer then {
 			} forEach allUsers;
 			
 			if KH_var_playersLoaded then {
-				[[], KH_fnc_playerJipPreloadInit, _machineId, "THIS_FRAME"] call KH_fnc_execute;
+				[[], KH_fnc_playerJipPreloadInit, _machineId, true] call KH_fnc_execute;
 				KH_var_jipPlayerMachines pushBackUnique _machineId;
 				publicVariable "KH_var_jipPlayerMachines";
 				missionNamespace setVariable ["KH_var_isJip", true, _machineId];
 			}
 			else {
-				[[], KH_fnc_playerPreloadInit, _machineId, "THIS_FRAME"] call KH_fnc_execute;
+				[[], KH_fnc_playerPreloadInit, _machineId, true] call KH_fnc_execute;
 			};
 
 			if ((admin _machineId) != 0) then {
@@ -406,12 +720,13 @@ if isServer then {
 			{
 				if ((_x getUserInfo 1) == _machineId) then {
 					KH_var_allHeadlessIdMachines insert [[_x getUserInfo 0, _machineId]];
+					missionNamespace setVariable ["KH_initComplete", true, _machineId];
 					publicVariable "KH_var_allHeadlessIdMachines";
 					break;
 				};
 			} forEach allUsers;
 
-			[[], KH_fnc_headlessLoadInit, _machineId, "THIS_FRAME"] call KH_fnc_execute;
+			[[], KH_fnc_headlessLoadInit, _machineId, true] call KH_fnc_execute;
 		}
 	] call CBA_fnc_addEventHandler;
 	
@@ -423,10 +738,10 @@ if isServer then {
 			if KH_var_playersLoaded then {
 				KH_var_jipPlayerUnits pushBackUnique _unit;
 				publicVariable "KH_var_jipPlayerUnits";
-				[[], KH_fnc_playerJipLoadInit, _machineId, "THIS_FRAME"] call KH_fnc_execute;
+				[[], KH_fnc_playerJipLoadInit, _machineId, true] call KH_fnc_execute;
 			}
 			else {
-				[[], KH_fnc_playerLoadInit, _machineId, "THIS_FRAME"] call KH_fnc_execute;
+				[[], KH_fnc_playerLoadInit, _machineId, true] call KH_fnc_execute;
 			};
 
 			KH_var_allPlayerUnits pushBackUnique _unit;
@@ -438,7 +753,7 @@ if isServer then {
 		"KH_eve_playerRespawned", 
 		{
 			params ["_unit", "_machineId", "_corpse"];
-			[[_corpse], KH_fnc_playerRespawnInit, _machineId, "THIS_FRAME"] call KH_fnc_execute;
+			[[_corpse], KH_fnc_playerRespawnInit, _machineId, true] call KH_fnc_execute;
 		}
 	] call CBA_fnc_addEventHandler;
 
@@ -446,7 +761,7 @@ if isServer then {
 		"KH_eve_playerKilled", 
 		{
 			params ["_unit", "_machineId"];
-			[[], KH_fnc_playerKilledInit, _machineId, "THIS_FRAME"] call KH_fnc_execute;
+			[[], KH_fnc_playerKilledInit, _machineId, true] call KH_fnc_execute;
 		}
 	] call CBA_fnc_addEventHandler;
 	
@@ -454,7 +769,7 @@ if isServer then {
 		"KH_eve_playerSwitched", 
 		{
 			params ["_newUnit", "_machineId", "_previousUnit"];
-			[[_previousUnit], KH_fnc_playerSwitchInit, _machineId, "THIS_FRAME"] call KH_fnc_execute;
+			[[_previousUnit], KH_fnc_playerSwitchInit, _machineId, true] call KH_fnc_execute;
 			
 			if (_previousUnit in KH_var_allPlayerUnits) then {
 				KH_var_allPlayerUnits deleteAt (KH_var_allPlayerUnits find _previousUnit);
@@ -855,7 +1170,6 @@ if hasInterface then {
 
 	KH_var_contextMenuOpen = false;
 	KH_var_interactionMenuOpen = false;
-	["KH_eve_executionPlayer", KH_fnc_callParsedFunction] call CBA_fnc_addEventHandler;
 
 	[
 		"unit", 
@@ -904,10 +1218,86 @@ if hasInterface then {
 			] call CBA_fnc_execNextFrame;
 		}
 	];
-};
 
-if (!isServer && !hasInterface) then {
-	["KH_eve_executionHeadless", KH_fnc_callParsedFunction] call CBA_fnc_addEventHandler;
+	addMissionEventHandler [
+		"Draw2D", 
+		{
+			if (KH_var_drawUi2dExecutionStackDeletions isNotEqualTo []) then {
+				{
+					if ((_x select 3) in KH_var_drawUi2dExecutionStackDeletions) then {
+						KH_var_drawUi2dExecutionStackDeletions set [KH_var_drawUi2dExecutionStackDeletions find (_x select 3), _forEachIndex];
+					};
+				} forEach KH_var_drawUi2dExecutionStack;
+
+				KH_var_drawUi2dExecutionStack deleteAt (KH_var_drawUi2dExecutionStackDeletions select {_x isEqualType 0;});
+				KH_var_drawUi2dExecutionStackDeletions = [];
+			};
+
+			if (KH_var_drawUi2dExecutionStackAdditions isNotEqualTo []) then {
+				KH_var_drawUi2dExecutionStack append KH_var_drawUi2dExecutionStackAdditions;
+			};
+
+			{
+				_x params ["_args", "_function", "_localId", "_eventName"];
+				_args call _function;
+			} forEach KH_var_drawUi2dExecutionStack;
+		}
+	];
+
+	addMissionEventHandler [
+		"Draw3D", 
+		{
+			if (KH_var_drawUi3dExecutionStackDeletions isNotEqualTo []) then {
+				{
+					if ((_x select 3) in KH_var_drawUi3dExecutionStackDeletions) then {
+						KH_var_drawUi3dExecutionStackDeletions set [KH_var_drawUi3dExecutionStackDeletions find (_x select 3), _forEachIndex];
+					};
+				} forEach KH_var_drawUi3dExecutionStack;
+
+				KH_var_drawUi3dExecutionStack deleteAt (KH_var_drawUi3dExecutionStackDeletions select {_x isEqualType 0;});
+				KH_var_drawUi3dExecutionStackDeletions = [];
+			};
+
+			if (KH_var_drawUi3dExecutionStackAdditions isNotEqualTo []) then {
+				KH_var_drawUi3dExecutionStack append KH_var_drawUi3dExecutionStackAdditions;
+			};
+
+			{
+				_x params ["_args", "_function", "_localId", "_eventName"];
+				_args call _function;
+			} forEach KH_var_drawUi3dExecutionStack;
+		}
+	];
+
+	[
+		"KH_eve_drawUiExecutionStackHandler", 
+		{
+			params ["_handler", "_overrideTimeoutOnDeletion"];
+			private _currentHandler = KH_var_drawUiExecutionStackMonitor get _handler;
+			if (isNil "_currentHandler") exitWith {};
+			_currentHandler params ["_event", "_timeoutArguments", "_timeoutFunction", "_timeoutOnDeletion"];
+
+			private _deletionType = switch _event do {
+				case "2D": {
+					KH_var_drawUi2dExecutionStackDeletions;
+				};
+
+				case "3D": {
+					KH_var_drawUi3dExecutionStackDeletions;
+				};
+			};
+
+			if !(_handler in _deletionType) then {
+				_deletionType insert [0, [_handler]];
+
+				if (_timeoutOnDeletion || _overrideTimeoutOnDeletion) then {
+					_timeoutArguments call _timeoutFunction;
+				};
+			};
+
+			KH_var_drawUiExecutionStackMonitor deleteAt _handler;
+		}
+	] call CBA_fnc_addEventHandler;
 };
 
 nil;

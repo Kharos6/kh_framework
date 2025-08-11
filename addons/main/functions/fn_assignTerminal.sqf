@@ -38,7 +38,7 @@ missionNamespace setVariable [_identifier, false, true];
 						missionNamespace setVariable [_identifier, true, true];
 					},
 					"SERVER",
-					"THIS_FRAME"
+					true
 				] call KH_fnc_execute;
 
 				[_entity, _identifier, _identifierOutput, _identifierInput, _name, _description, _function, false] call KH_fnc_openTerminal;
@@ -53,7 +53,7 @@ missionNamespace setVariable [_identifier, false, true];
 		],
 		"BIS_fnc_holdActionAdd",
 		["JIP", "PLAYERS", _x, false, false, ""], 
-		"THIS_FRAME"
+		true
 	] call KH_fnc_execute;
 
 	[
@@ -80,7 +80,7 @@ missionNamespace setVariable [_identifier, false, true];
 		],
 		"BIS_fnc_holdActionAdd",
 		["JIP", "PLAYERS", _x, false, false, ""], 
-		"THIS_FRAME"
+		true
 	] call KH_fnc_execute;
 } forEach _objects;
 

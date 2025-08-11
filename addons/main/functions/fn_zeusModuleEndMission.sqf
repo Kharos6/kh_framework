@@ -13,7 +13,8 @@ isNil {
 				[ctrlText (_display displayCtrl 100), ctrlChecked (_display displayCtrl 101), parseNumber (ctrlText (_display displayCtrl 102)), parseNumber (ctrlText (_display displayCtrl 103)), parseSimpleArray (ctrlText (_display displayCtrl 104))],
 				"KH_fnc_endMission",
 				"SERVER",
-				"THIS_FRAME"
+				true,
+				false
 			] call KH_fnc_execute;
 
 			deleteVehicle _logic;

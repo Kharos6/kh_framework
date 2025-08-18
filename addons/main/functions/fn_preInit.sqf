@@ -271,7 +271,7 @@ addMissionEventHandler [
 		};
 
 		{
-			_x params ["_args", "_function", "_delay", "_delta", "_totalDelta", "_localId", "_eventName"];
+			_x params ["_args", "_function", "_delay", "_delta", "_totalDelta", "_localId", "_eventName", "_previousReturn"];
 
 			if (_eventName in KH_var_temporalExecutionStackDeletions) then {
 				continue;
@@ -288,7 +288,7 @@ addMissionEventHandler [
 							[[systemTime joinString "", " - ", _totalDelta] joinString ""] call KH_fnc_mathOperation;
 						};
 
-						_args call _function;
+						_x set [7, _args call _function];
 					};
 				}
 				else {
@@ -301,7 +301,7 @@ addMissionEventHandler [
 							[[systemTime joinString "", " - ", _totalDelta] joinString ""] call KH_fnc_mathOperation;
 						};
 
-						_args call _function;
+						_x set [7, _args call _function];
 						_x set [3, _delta + _delay];
 					};
 				};
@@ -316,7 +316,7 @@ addMissionEventHandler [
 						[[systemTime joinString "", " - ", _totalDelta] joinString ""] call KH_fnc_mathOperation;
 					};
 
-					_args call _function;
+					_x set [7, _args call _function];
 					_x set [3, _delta + (abs _delay)];
 				};
 			};
@@ -481,7 +481,8 @@ if isServer then {
 							switch _idState do {
 								case "ACTIVE": {
 									private _currentHandler = KH_var_cachedJipHandlers get _id;
-									private _dependency = _currentHandler param [4];
+									if (isNil "_currentHandler") exitWith {};
+									private _dependency = _currentHandler param [3];
 									private _condition = true;
 
 									private _joiningMachine = if (_joinType isEqualTo "KH_eve_playerLoaded") then {
@@ -643,6 +644,7 @@ if isServer then {
 								};
 
 								case "TERMINATE": {
+									KH_var_cachedJipHandlers deleteAt _id;
 									[_localId] call KH_fnc_removeEventHandler;
 								};		
 							};
@@ -1238,8 +1240,8 @@ if hasInterface then {
 			};
 
 			{
-				_x params ["_args", "_function", "_localId", "_eventName"];
-				_args call _function;
+				_x params ["_args", "_function", "_localId", "_eventName", "_previousReturn"];
+				_x set [4, _args call _function];
 			} forEach KH_var_drawUi2dExecutionStack;
 		}
 	];
@@ -1263,8 +1265,8 @@ if hasInterface then {
 			};
 
 			{
-				_x params ["_args", "_function", "_localId", "_eventName"];
-				_args call _function;
+				_x params ["_args", "_function", "_localId", "_eventName", "_previousReturn"];
+				_x set [4, _args call _function];
 			} forEach KH_var_drawUi3dExecutionStack;
 		}
 	];

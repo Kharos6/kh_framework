@@ -99,13 +99,7 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 							private _participant = _this select 1;
 							private _mainFulton = _this select 2;
 							private _rope = _this select 5;
-
-							if (!(isNull (objectParent _participant)) || !(_participant getVariable ["KH_var_fultonAttached", false]) || (isNull _object) || (isNull _mainFulton) || (isNull _rope) || !(alive _participant) || ((ropeAttachedObjects _mainFulton) isEqualTo [])) then {
-								true;
-							}
-							else {
-								false;
-							};
+							(!(isNull (objectParent _participant)) || !(_participant getVariable ["KH_var_fultonAttached", false]) || (isNull _object) || (isNull _mainFulton) || (isNull _rope) || !(alive _participant) || ((ropeAttachedObjects _mainFulton) isEqualTo []));
 						}, 
 						{
 							private _participant = _this select 1;

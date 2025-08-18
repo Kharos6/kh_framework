@@ -36,10 +36,10 @@ else {
 		"WARNING: remoteExecCall failed due to CfgRemoteExec blacklist: ", 
 		_function,
 		if _useKhExecuteOnFailure then {
-			" | Used KH_fnc_execute instead."
+			" | Used KH_fnc_execute instead.";
 		}
 		else {
-			""
+			"";
 		}
 	] joinString ""));
 };

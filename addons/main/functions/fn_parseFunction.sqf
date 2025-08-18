@@ -1,12 +1,7 @@
-params [["_function", {}, ["", {}]]];
+params [["_function", {}, ["", {}]], ["_makePublic", false, [true]]];
 
 private _parse = if (_function isEqualType "") then {
-	if (!(" " in _function) && !(".sqf" in _function)) then {
-		false;
-	}
-	else {
-		true;
-	};
+	((" " in _function) || (".sqf" in _function));
 }
 else {
 	true;
@@ -31,12 +26,17 @@ if (isNil {missionNamespace getVariable _hashValue;}) then {
 		}
 		else {
 			_function;
-		}, 
-		if !isServer then {
-			[clientOwner, 2];
+		},
+		if _makePublic then {
+			true;
 		}
 		else {
-			false;
+			if !isServer then {
+				[clientOwner, 2];
+			}
+			else {
+				false;
+			};
 		}
 	];
 };

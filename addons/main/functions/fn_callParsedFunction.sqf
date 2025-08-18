@@ -13,7 +13,7 @@ private _caller = param [2, 2, [0]];
 		params ["_arguments", "_function", "_caller"];
 		_argsCallback params ["_storedFunction"];
 
-		if (_storedFunction isNotEqualTo {}) exitWith {
+		if !(isNil "_storedFunction") exitWith {
 			missionNamespace setVariable [_function, _storedFunction];
 			_arguments call _storedFunction;
 		};
@@ -24,7 +24,7 @@ private _caller = param [2, 2, [0]];
 				params ["_arguments", "_function"];
 				_argsCallback params ["_storedFunction"];
 
-				if (_storedFunction isNotEqualTo {}) then { 
+				if !(isNil "_storedFunction") then { 
 					missionNamespace setVariable [_function, _storedFunction];
 					_arguments call _storedFunction;
 				};
@@ -41,7 +41,7 @@ private _caller = param [2, 2, [0]];
 						[_storedFunction];
 					}
 					else {
-						[{}];
+						[nil];
 					};											
 				}
 			],
@@ -61,7 +61,7 @@ private _caller = param [2, 2, [0]];
 				[_storedFunction];
 			}
 			else {
-				[{}];
+				[nil];
 			};											
 		}
 	],

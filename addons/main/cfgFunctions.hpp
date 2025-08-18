@@ -18,7 +18,6 @@ class CfgFunctions
 			class atomicValue {};
 			class atomicVariable {};
 			class binarizeKhData {};
-			class callback {};
 			class callParsedFunction {};
 			class cameraSequence {};		
 			class closeInterface {};
@@ -107,6 +106,7 @@ class CfgFunctions
 			class readKhData {};
 			class removeEventHandler {};
 			class recoverDisconnectedPlayers {};
+			class registerCallback {};
 			class respawnSpectator {};
 			class saveCargoInventories {};
 			class saveControlAttributes {};

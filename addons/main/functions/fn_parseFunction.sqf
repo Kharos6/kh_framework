@@ -1,4 +1,4 @@
-params [["_function", {}, ["", {}]], ["_makePublic", false, [true]]];
+params [["_function", {}, ["", {}]], ["_public", false, [true]]];
 
 private _parse = if (_function isEqualType "") then {
 	((" " in _function) || (".sqf" in _function));
@@ -14,31 +14,25 @@ if !_parse exitWith {
 private _hashValue = hashValue _function;
 
 if (isNil {missionNamespace getVariable _hashValue;}) then {
-	missionNamespace setVariable [
-		_hashValue, 
-		if (_function isEqualType "") then {
-			if ((".sqf" in _function) && !(" " in _function)) then {
-				compileScript [_function, false, ""];
-			}
-			else {
-				compile _function;
-			};
+	if (_function isEqualType "") then {
+		if ((".sqf" in _function) && !(" " in _function)) then {
+			_function = compileScript [_function, false, ""];
 		}
 		else {
-			_function;
-		},
-		if _makePublic then {
-			true;
-		}
-		else {
-			if !isServer then {
-				[clientOwner, 2];
-			}
-			else {
-				false;
-			};
-		}
-	];
+			_function = compile _function;
+		};
+	};
+
+	if _public then {
+		missionNamespace setVariable [_hashValue, _function, true];
+	}
+	else {
+		missionNamespace setVariable [_hashValue, _function];
+
+		if !isServer then {
+			missionNamespace setVariable [_hashValue, _function, 2];
+		};
+	};
 };
 
 _hashValue;

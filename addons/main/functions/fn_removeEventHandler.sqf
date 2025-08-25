@@ -1,4 +1,4 @@
-params ["_handler"];
+params [["_handler", [], [[]]]];
 
 if ((count _handler) > 2) then {
 	_handler params ["_type", "_event", "_handlerId", "_owner"];
@@ -60,7 +60,7 @@ if ((count _handler) > 2) then {
 				};
 
 				case "PLAYER": {
-					KH_var_cbaPlayerEventHandlerStackDeletions pushBackUnique (_handlerId select 0);
+					KH_var_playerEventHandlerStackDeletions pushBackUnique (_handlerId select 0);
 				};
 
 				case "CBA": {
@@ -69,22 +69,11 @@ if ((count _handler) > 2) then {
 			};
 		},
 		_owner,
-		true
+		true,
+		false
 	] call KH_fnc_execute;
 }
 else {
-	missionNamespace setVariable [_persistentEntityId, false];
-
-	[
-		_handler,
-		{
-			params ["_handlerId", "_persistentEntityId"];
-			missionNamespace setVariable [_persistentEntityId, false, true];
-			[_handlerId, "TERMINATE"] call KH_fnc_manageHandler;
-		},
-		"SERVER",
-		true
-	] call KH_fnc_execute;
+	missionNamespace setVariable [_persistentEntityId, false, true];
+	[_handlerId, "TERMINATE"] call KH_fnc_manageHandler;
 };
-
-true;

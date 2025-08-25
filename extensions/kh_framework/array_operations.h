@@ -993,28 +993,28 @@ static inline int kh_array_equals_wrapper(const char* input1, const char* input2
 /* Whitelist of allowed array functions - SECURITY CRITICAL */
 static const array_function_t KH_ALLOWED_ARRAY_FUNCTIONS[] = {
     /* Array to Scalar operations */
-    {"alength", ARRAY_FUNC_ARRAY_TO_SCALAR, 1, (void*)kh_array_length_wrapper, "Get array length"},
-    {"asize", ARRAY_FUNC_ARRAY_TO_SCALAR, 1, (void*)kh_array_length_wrapper, "Get array size (alias)"},
-    {"asum", ARRAY_FUNC_ARRAY_TO_SCALAR, 1, (void*)kh_array_sum_wrapper, "Sum all numeric elements"},
-    {"aaverage", ARRAY_FUNC_ARRAY_TO_SCALAR, 1, (void*)kh_array_average_wrapper, "Average of numeric elements"},
-    {"amean", ARRAY_FUNC_ARRAY_TO_SCALAR, 1, (void*)kh_array_average_wrapper, "Mean of numeric elements (alias)"},
-    {"amin", ARRAY_FUNC_ARRAY_TO_SCALAR, 1, (void*)kh_array_min_wrapper, "Minimum of numeric elements"},
-    {"amax", ARRAY_FUNC_ARRAY_TO_SCALAR, 1, (void*)kh_array_max_wrapper, "Maximum of numeric elements"},
+    {"length", ARRAY_FUNC_ARRAY_TO_SCALAR, 1, (void*)kh_array_length_wrapper, "Get array length"},
+    {"size", ARRAY_FUNC_ARRAY_TO_SCALAR, 1, (void*)kh_array_length_wrapper, "Get array size (alias)"},
+    {"sum", ARRAY_FUNC_ARRAY_TO_SCALAR, 1, (void*)kh_array_sum_wrapper, "Sum all numeric elements"},
+    {"average", ARRAY_FUNC_ARRAY_TO_SCALAR, 1, (void*)kh_array_average_wrapper, "Average of numeric elements"},
+    {"mean", ARRAY_FUNC_ARRAY_TO_SCALAR, 1, (void*)kh_array_average_wrapper, "Mean of numeric elements (alias)"},
+    {"min", ARRAY_FUNC_ARRAY_TO_SCALAR, 1, (void*)kh_array_min_wrapper, "Minimum of numeric elements"},
+    {"max", ARRAY_FUNC_ARRAY_TO_SCALAR, 1, (void*)kh_array_max_wrapper, "Maximum of numeric elements"},
     
     /* Array to Boolean operations */
-    {"aisempty", ARRAY_FUNC_ARRAY_TO_BOOL, 1, (void*)kh_array_is_empty_wrapper, "Check if array is empty"},
-    {"aequals", ARRAY_FUNC_ARRAYARRAY_TO_BOOL, 2, (void*)kh_array_equals_wrapper, "Check if arrays are equal"},
-    {"acontains", ARRAY_FUNC_ARRAYVALUE_TO_ARRAY, 2, (void*)kh_array_contains_impl, "Check if array contains value"},
+    {"isempty", ARRAY_FUNC_ARRAY_TO_BOOL, 1, (void*)kh_array_is_empty_wrapper, "Check if array is empty"},
+    {"equals", ARRAY_FUNC_ARRAYARRAY_TO_BOOL, 2, (void*)kh_array_equals_wrapper, "Check if arrays are equal"},
+    {"contains", ARRAY_FUNC_ARRAYVALUE_TO_ARRAY, 2, (void*)kh_array_contains_impl, "Check if array contains value"},
     
     /* Array to String operations */
-    {"atypes", ARRAY_FUNC_ARRAY_TO_STRING, 1, (void*)kh_array_types_impl, "Get types summary of array elements"},
+    {"types", ARRAY_FUNC_ARRAY_TO_STRING, 1, (void*)kh_array_types_impl, "Get types summary of array elements"},
     
     /* Array to Array operations */
-    {"areverse", ARRAY_FUNC_ARRAY_TO_ARRAY, 1, (void*)kh_array_reverse_impl, "Reverse array elements"},
+    {"reverse", ARRAY_FUNC_ARRAY_TO_ARRAY, 1, (void*)kh_array_reverse_impl, "Reverse array elements"},
     
     /* Array, Array to Array operations */
-    {"aintersect", ARRAY_FUNC_ARRAYARRAY_TO_ARRAY, 2, (void*)kh_array_intersect_impl, "Get intersection of two arrays"},
-    {"aunion", ARRAY_FUNC_ARRAYARRAY_TO_ARRAY, 2, (void*)kh_array_union_impl, "Get union of two arrays"}
+    {"intersect", ARRAY_FUNC_ARRAYARRAY_TO_ARRAY, 2, (void*)kh_array_intersect_impl, "Get intersection of two arrays"},
+    {"union", ARRAY_FUNC_ARRAYARRAY_TO_ARRAY, 2, (void*)kh_array_union_impl, "Get union of two arrays"}
 };
 
 static const int KH_ARRAY_FUNCTION_COUNT = sizeof(KH_ALLOWED_ARRAY_FUNCTIONS) / sizeof(array_function_t);

@@ -1,9 +1,4 @@
-params [["_formula", [], [[]]]];
-
-if (_formula isEqualTo []) exitWith {
-	nil;
-};
-
+params [["_method", "", [""]], ["_array", [], [[]]]];
 ("kh_framework" callExtension ["ArrayOperation", _this]) params ["_result", "_returnCode"];
 
 if ([_returnCode] call KH_fnc_parseBoolean) exitWith {

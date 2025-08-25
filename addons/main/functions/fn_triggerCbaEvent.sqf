@@ -1,24 +1,24 @@
-params [["_name", "", [""]], "_arguments", ["_target", true, [true, 0, "", [], {}, objNull, teamMemberNull, grpNull, sideUnknown, locationNull]], ["_jip", false, [true, []]]];
-private "_result";
+params [["_event", "", [""]], "_arguments", ["_target", true, [true, 0, "", [], {}, objNull, teamMemberNull, grpNull, sideUnknown, locationNull]], ["_jip", false, [true, []]]];
+private "_return";
 
 switch (typeName _target) do {
     case "BOOL": {
         if _target then {
-            _result = [_name, _arguments] call CBA_fnc_localEvent;
+            _return = [_event, _arguments] call CBA_fnc_localEvent;
         };
     };
 
     case "SCALAR": {
         if (_target isEqualTo clientOwner) then {
-            _result = [_name, _arguments] call CBA_fnc_localEvent;
+            _return = [_event, _arguments] call CBA_fnc_localEvent;
         }
         else {
             if (_target >= 0) then {
-                [_name, _arguments, _target] call CBA_fnc_ownerEvent;
+                [_event, _arguments, _target] call CBA_fnc_ownerEvent;
             }
             else {
                 {
-                    [_name, _arguments, _x] call CBA_fnc_ownerEvent;
+                    [_event, _arguments, _x] call CBA_fnc_ownerEvent;
                 } forEach (KH_var_allMachines - [abs _target]);
             };
         };
@@ -26,19 +26,19 @@ switch (typeName _target) do {
 
     case "OBJECT": {
         if (local _target) then {
-            _result = [_name, _arguments] call CBA_fnc_localEvent;
+            _return = [_event, _arguments] call CBA_fnc_localEvent;
         }
         else {
-            [_name, _arguments, _target] call CBA_fnc_targetEvent;
+            [_event, _arguments, _target] call CBA_fnc_targetEvent;
         };
     };
 
     case "TEAM_MEMBER": {
         if (local (agent _target)) then {
-            _result = [_name, _arguments] call CBA_fnc_localEvent;
+            _return = [_event, _arguments] call CBA_fnc_localEvent;
         }
         else {
-            [_name, _arguments, (agent _target)] call CBA_fnc_targetEvent;
+            [_event, _arguments, agent _target] call CBA_fnc_targetEvent;
         };
     };
 
@@ -46,17 +46,17 @@ switch (typeName _target) do {
         private _playerUnits = KH_var_allPlayerUnits select {(group _x) isEqualTo _target;};
 
         if (((local _target) && (_playerUnits isEqualTo [])) || ((local _target) && (player in _playerUnits) && ((count _playerUnits) <= 1))) then {
-            _result = [_name, _arguments] call CBA_fnc_localEvent;
+            _return = [_event, _arguments] call CBA_fnc_localEvent;
         }
         else {
             if (_playerUnits isEqualTo []) then {
-                [_name, _arguments, _target] call CBA_fnc_targetEvent;
+                [_event, _arguments, _target] call CBA_fnc_targetEvent;
             }   
             else {
                 [
-                    [_name, _arguments, _target],
+                    [_event, _arguments, _target],
                     {
-                        params ["_name", "_arguments", "_target"];
+                        params ["_event", "_arguments", "_target"];
                         private _targets = [];
 
                         {
@@ -64,7 +64,7 @@ switch (typeName _target) do {
                         } forEach (units _target);
 
                         {
-                            [_name, _arguments, _x] call CBA_fnc_ownerEvent;
+                            [_event, _arguments, _x] call CBA_fnc_ownerEvent;
                         } forEach _targets;
                     },
                     "SERVER",
@@ -76,58 +76,54 @@ switch (typeName _target) do {
     };
 
     case "SIDE": {
-        [_name, _arguments, KH_var_allPlayerUnits select {(side (group _x)) isEqualTo _target;}] call CBA_fnc_targetEvent;
+        [_event, _arguments, KH_var_allPlayerUnits select {(side (group _x)) isEqualTo _target;}] call CBA_fnc_targetEvent;
     };
 
     case "STRING": {
         switch _target do {
             case "LOCAL": {
-                _result = [_name, _arguments] call CBA_fnc_localEvent;
+                _return = [_event, _arguments] call CBA_fnc_localEvent;
             };
             
             case "SERVER": {
                 if isServer then {
-                    _result = [_name, _arguments] call CBA_fnc_localEvent;
+                    _return = [_event, _arguments] call CBA_fnc_localEvent;
                 }
                 else {
-                    [_name, _arguments] call CBA_fnc_serverEvent;
+                    [_event, _arguments] call CBA_fnc_serverEvent;
                 };
             };
 
             case "GLOBAL": {
-                [_name, _arguments] call CBA_fnc_globalEvent;
+                [_event, _arguments] call CBA_fnc_globalEvent;
             };
 
             case "REMOTE": {
-                [_name, _arguments] call CBA_fnc_remoteEvent;
+                [_event, _arguments] call CBA_fnc_remoteEvent;
             };
 
             case "PLAYERS": {
                 {
-                    [
-                        _name, 
-                        _arguments, 
-                        _x
-                    ] call CBA_fnc_ownerEvent;
+                    [_event, _arguments, _x] call CBA_fnc_ownerEvent;
                 } forEach KH_var_allPlayerMachines;
             };
 
             case "ADMIN": {
-                if (KH_var_currentAdmin isEqualTo clientOwner) then {
-                    _result = [_name, _arguments] call CBA_fnc_localEvent;
+                if (KH_var_adminMachine isEqualTo clientOwner) then {
+                    _return = [_event, _arguments] call CBA_fnc_localEvent;
                 }
                 else {
-                    [_name, _arguments, KH_var_currentAdmin] call CBA_fnc_ownerEvent;
+                    [_event, _arguments, KH_var_adminMachine] call CBA_fnc_ownerEvent;
                 };
             };
 
             case "CURATORS": {
-                [_name, _arguments, KH_var_allPlayerUnits select {!(isNull (getAssignedCuratorLogic _x));}] call CBA_fnc_targetEvent;
+                [_event, _arguments, KH_var_allPlayerUnits select {!(isNull (getAssignedCuratorLogic _x));}] call CBA_fnc_targetEvent;
             };
 
             case "HEADLESS": {
                 {
-                    [_name, _arguments, _x] call CBA_fnc_ownerEvent;
+                    [_event, _arguments, _x] call CBA_fnc_ownerEvent;
                 } forEach KH_var_allHeadlessMachines;
             };
 
@@ -138,10 +134,10 @@ switch (typeName _target) do {
 
                         if !(isNil "_client") then {
                             if (_client isEqualTo clientOwner) then {
-                                _result = [_name, _arguments] call CBA_fnc_localEvent;
+                                _return = [_event, _arguments] call CBA_fnc_localEvent;
                             }
                             else {
-                                [_name, _arguments, _client] call CBA_fnc_ownerEvent;
+                                [_event, _arguments, _client] call CBA_fnc_ownerEvent;
                             };
                         }
                         else {
@@ -149,10 +145,10 @@ switch (typeName _target) do {
 
                             if !(isNil "_client") then {
                                 if (_client isEqualTo clientOwner) then {
-                                    _result = [_name, _arguments] call CBA_fnc_localEvent;
+                                    _return = [_event, _arguments] call CBA_fnc_localEvent;
                                 }
                                 else {
-                                    [_name, _arguments, _client] call CBA_fnc_ownerEvent;
+                                    [_event, _arguments, _client] call CBA_fnc_ownerEvent;
                                 };
                             }
                             else {
@@ -160,17 +156,17 @@ switch (typeName _target) do {
 
                                 if !(isNil "_client") then {
                                     if (_client isEqualTo clientOwner) then {
-                                        _result = [_name, _arguments] call CBA_fnc_localEvent;
+                                        _return = [_event, _arguments] call CBA_fnc_localEvent;
                                     }
                                     else {
-                                        [_name, _arguments, _client] call CBA_fnc_ownerEvent;
+                                        [_event, _arguments, _client] call CBA_fnc_ownerEvent;
                                     };
                                 }
                                 else {
                                     private _playerTargets = KH_var_allPlayerUnits select {(((name _x) isEqualTo _target) || ((roleDescription _x) isEqualTo _target));};
 
                                     if (_playerTargets isNotEqualTo []) then {
-                                        [_name, _arguments, _playerTargets] call CBA_fnc_targetEvent;
+                                        [_event, _arguments, _playerTargets] call CBA_fnc_targetEvent;
                                     }
                                     else {
                                         private _groupTargets = allGroups select {(groupId _x) isEqualTo _target;};
@@ -181,17 +177,17 @@ switch (typeName _target) do {
                                                 private _playerUnits = KH_var_allPlayerUnits select {(group _x) isEqualTo _target;};
 
                                                 if (((local _target) && (_playerUnits isEqualTo [])) || ((local _target) && (player in _playerUnits) && ((count _playerUnits) <= 1))) then {
-                                                    _result = [_name, _arguments] call CBA_fnc_localEvent;
+                                                    _return = [_event, _arguments] call CBA_fnc_localEvent;
                                                 }
                                                 else {
                                                     if (_playerUnits isEqualTo []) then {
-                                                        [_name, _arguments, _target] call CBA_fnc_targetEvent;
+                                                        [_event, _arguments, _target] call CBA_fnc_targetEvent;
                                                     }   
                                                     else {
                                                         [
-                                                            [_name, _arguments, _target],
+                                                            [_event, _arguments, _target],
                                                             {
-                                                                params ["_name", "_arguments", "_target"];
+                                                                params ["_event", "_arguments", "_target"];
                                                                 private _targets = [];
 
                                                                 {
@@ -199,7 +195,7 @@ switch (typeName _target) do {
                                                                 } forEach (units _target);
 
                                                                 {
-                                                                    [_name, _arguments, _x] call CBA_fnc_ownerEvent;
+                                                                    [_event, _arguments, _x] call CBA_fnc_ownerEvent;
                                                                 } forEach _targets;
                                                             },
                                                             "SERVER",
@@ -212,7 +208,7 @@ switch (typeName _target) do {
                                         }
                                         else {
                                             if (_target in allMapMarkers) then {
-                                                [_name, _arguments, KH_var_allPlayerUnits select {_x inArea _target;}] call CBA_fnc_targetEvent;
+                                                [_event, _arguments, KH_var_allPlayerUnits select {_x inArea _target;}] call CBA_fnc_targetEvent;
                                             };
                                         };
                                     };
@@ -223,10 +219,10 @@ switch (typeName _target) do {
                     else {
                         if !(isNull (objectFromNetId _target)) then {
                             if (local (objectFromNetId _target)) then {
-                                _result = [_name, _arguments] call CBA_fnc_localEvent;
+                                _return = [_event, _arguments] call CBA_fnc_localEvent;
                             }
                             else {
-                                [_name, _arguments, objectFromNetId _target] call CBA_fnc_targetEvent;
+                                [_event, _arguments, objectFromNetId _target] call CBA_fnc_targetEvent;
                             };
                         }
                         else {
@@ -235,17 +231,17 @@ switch (typeName _target) do {
                                 private _playerUnits = KH_var_allPlayerUnits select {(group _x) isEqualTo _target;};
 
                                 if (((local _target) && (_playerUnits isEqualTo [])) || ((local _target) && (player in _playerUnits) && ((count _playerUnits) <= 1))) then {
-                                    _result = [_name, _arguments] call CBA_fnc_localEvent;
+                                    _return = [_event, _arguments] call CBA_fnc_localEvent;
                                 }
                                 else {
                                     if (_playerUnits isEqualTo []) then {
-                                        [_name, _arguments, _target] call CBA_fnc_targetEvent;
+                                        [_event, _arguments, _target] call CBA_fnc_targetEvent;
                                     }   
                                     else {
                                         [
-                                            [_name, _arguments, _target],
+                                            [_event, _arguments, _target],
                                             {
-                                                params ["_name", "_arguments", "_target"];
+                                                params ["_event", "_arguments", "_target"];
                                                 private _targets = [];
 
                                                 {
@@ -253,7 +249,7 @@ switch (typeName _target) do {
                                                 } forEach (units _target);
 
                                                 {
-                                                    [_name, _arguments, _x] call CBA_fnc_ownerEvent;
+                                                    [_event, _arguments, _x] call CBA_fnc_ownerEvent;
                                                 } forEach _targets;
                                             },
                                             "SERVER",
@@ -267,7 +263,7 @@ switch (typeName _target) do {
                                 private _playerTargets = KH_var_allPlayerUnits select {(((name _x) isEqualTo _target) || ((roleDescription _x) isEqualTo _target));};
 
                                 if (_playerTargets isNotEqualTo []) then {
-                                    [_name, _arguments, _playerTargets] call CBA_fnc_targetEvent;
+                                    [_event, _arguments, _playerTargets] call CBA_fnc_targetEvent;
                                 }
                                 else {
                                     private _groupTargets = allGroups select {(groupId _x) isEqualTo _target;};
@@ -278,17 +274,17 @@ switch (typeName _target) do {
                                             private _playerUnits = KH_var_allPlayerUnits select {(group _x) isEqualTo _target;};
 
                                             if (((local _target) && (_playerUnits isEqualTo [])) || ((local _target) && (player in _playerUnits) && ((count _playerUnits) <= 1))) then {
-                                                _result = [_name, _arguments] call CBA_fnc_localEvent;
+                                                _return = [_event, _arguments] call CBA_fnc_localEvent;
                                             }
                                             else {
                                                 if (_playerUnits isEqualTo []) then {
-                                                    [_name, _arguments, _target] call CBA_fnc_targetEvent;
+                                                    [_event, _arguments, _target] call CBA_fnc_targetEvent;
                                                 }   
                                                 else {
                                                     [
-                                                        [_name, _arguments, _target],
+                                                        [_event, _arguments, _target],
                                                         {
-                                                            params ["_name", "_arguments", "_target"];
+                                                            params ["_event", "_arguments", "_target"];
                                                             private _targets = [];
 
                                                             {
@@ -296,7 +292,7 @@ switch (typeName _target) do {
                                                             } forEach (units _target);
 
                                                             {
-                                                                [_name, _arguments, _x] call CBA_fnc_ownerEvent;
+                                                                [_event, _arguments, _x] call CBA_fnc_ownerEvent;
                                                             } forEach _targets;
                                                         },
                                                         "SERVER",
@@ -309,7 +305,7 @@ switch (typeName _target) do {
                                     }
                                     else {
                                         if (_target in allMapMarkers) then {
-                                            [_name, _arguments, KH_var_allPlayerUnits select {_x inArea _target;}] call CBA_fnc_targetEvent;
+                                            [_event, _arguments, KH_var_allPlayerUnits select {_x inArea _target;}] call CBA_fnc_targetEvent;
                                         };
                                     };
                                 };
@@ -321,7 +317,7 @@ switch (typeName _target) do {
                     private _playerTargets = KH_var_allPlayerUnits select {(((name _x) isEqualTo _target) || ((roleDescription _x) isEqualTo _target));};
 
                     if (_playerTargets isNotEqualTo []) then {
-                        [_name, _arguments, _playerTargets] call CBA_fnc_targetEvent;
+                        [_event, _arguments, _playerTargets] call CBA_fnc_targetEvent;
                     }
                     else {
                         private _groupTargets = allGroups select {(groupId _x) isEqualTo _target;};
@@ -332,17 +328,17 @@ switch (typeName _target) do {
                                 private _playerUnits = KH_var_allPlayerUnits select {(group _x) isEqualTo _target;};
 
                                 if (((local _target) && (_playerUnits isEqualTo [])) || ((local _target) && (player in _playerUnits) && ((count _playerUnits) <= 1))) then {
-                                    _result = [_name, _arguments] call CBA_fnc_localEvent;
+                                    _return = [_event, _arguments] call CBA_fnc_localEvent;
                                 }
                                 else {
                                     if (_playerUnits isEqualTo []) then {
-                                        [_name, _arguments, _target] call CBA_fnc_targetEvent;
+                                        [_event, _arguments, _target] call CBA_fnc_targetEvent;
                                     }   
                                     else {
                                         [
-                                            [_name, _arguments, _target],
+                                            [_event, _arguments, _target],
                                             {
-                                                params ["_name", "_arguments", "_target"];
+                                                params ["_event", "_arguments", "_target"];
                                                 private _targets = [];
 
                                                 {
@@ -350,7 +346,7 @@ switch (typeName _target) do {
                                                 } forEach (units _target);
 
                                                 {
-                                                    [_name, _arguments, _x] call CBA_fnc_ownerEvent;
+                                                    [_event, _arguments, _x] call CBA_fnc_ownerEvent;
                                                 } forEach _targets;
                                             },
                                             "SERVER",
@@ -363,7 +359,7 @@ switch (typeName _target) do {
                         }
                         else {
                             if (_target in allMapMarkers) then {
-                                [_name, _arguments, KH_var_allPlayerUnits select {_x inArea _target;}] call CBA_fnc_targetEvent;
+                                [_event, _arguments, KH_var_allPlayerUnits select {_x inArea _target;}] call CBA_fnc_targetEvent;
                             };
                         };
                     };
@@ -374,9 +370,9 @@ switch (typeName _target) do {
 
     case "ARRAY": {
         [
-            [_name, _arguments, flatten _target, clientOwner],
+            [_event, _arguments, flatten _target, clientOwner],
             {
-                params ["_name", "_arguments", "_targets", "_eventOwner"];
+                params ["_event", "_arguments", "_targets", "_eventOwner"];
                 private _parsedTargets = [];
 
                 {
@@ -434,7 +430,7 @@ switch (typeName _target) do {
                                 };
 
                                 case "ADMIN": {
-                                    _parsedTargets pushBackUnique KH_var_currentAdmin;
+                                    _parsedTargets pushBackUnique KH_var_adminMachine;
                                 };
 
                                 case "CURATORS": {
@@ -561,38 +557,36 @@ switch (typeName _target) do {
                         };
 
                         case "CODE": {
-                            {
+                            [
+                                [_event, _arguments, _parsedTargets],
+                                {
+                                    params ["_event", "_arguments", "_parsedTargets"];
+                                    _argsCallback params ["_eventReceiver"];
+
+                                    if !(isNil "_eventReceiver") then {
+                                        if !(_eventReceiver in _parsedTargets) then {
+                                            _parsedTargets pushBackUnique _eventReceiver;
+                                            [_event, _arguments, _eventReceiver] call CBA_fnc_ownerEvent;
+                                        };
+                                    };                                      
+                                },
+                                KH_var_allMachines,
+                                true,
                                 [
-                                    [_name, _arguments, _parsedTargets],
+                                    "CALLBACK",
+                                    [_arguments, _target],
                                     {
-                                        params ["_name", "_arguments", "_parsedTargets"];
-                                        _argsCallback params ["_eventReceiver"];
+                                        params ["_arguments", "_function"];
 
-                                        if !(isNil "_eventReceiver") then {
-                                            if !(_eventReceiver in _parsedTargets) then {
-                                                _parsedTargets pushBackUnique _eventReceiver;
-                                                [_name, _arguments, _eventReceiver] call CBA_fnc_ownerEvent;
-                                            };
-                                        };                                      
-                                    },
-                                    _x,
-                                    true,
-                                    [
-                                        "CALLBACK",
-                                        [_arguments, _target],
-                                        {
-                                            params ["_arguments", "_function"];
-
-                                            if (_arguments call _function) then {
-                                                [clientOwner];
-                                            }
-                                            else {
-                                                [];
-                                            };						
+                                        if (_arguments call _function) then {
+                                            [clientOwner];
                                         }
-                                    ]
-                                ] call KH_fnc_execute;
-                            } forEach KH_var_allMachines;
+                                        else {
+                                            [];
+                                        };						
+                                    }
+                                ]
+                            ] call KH_fnc_execute;
                         };
 
                         case "LOCATION": {
@@ -602,7 +596,7 @@ switch (typeName _target) do {
                 } forEach _targets;
 
                 {
-                    [_name, _arguments, _x] call CBA_fnc_ownerEvent;
+                    [_event, _arguments, _x] call CBA_fnc_ownerEvent;
                 } forEach _parsedTargets;
             },
             "SERVER",
@@ -613,12 +607,12 @@ switch (typeName _target) do {
 
     case "CODE": {
         [
-            [_name, _arguments, _target],
+            [_event, _arguments, _target],
             {
-                params ["_name", "_arguments", "_target"];
+                params ["_event", "_arguments", "_function"];
 
-                if (_arguments call _target) then {
-                    [_name, _arguments] call CBA_fnc_localEvent;
+                if (_arguments call _function) then {
+                    [_event, _arguments] call CBA_fnc_localEvent;
                 };
             },
             "GLOBAL",
@@ -628,36 +622,32 @@ switch (typeName _target) do {
     };
 
     case "LOCATION": {
-        [_name, _arguments, KH_var_allPlayerUnits select {_x inArea _target;}] call CBA_fnc_targetEvent;
+        [_event, _arguments, KH_var_allPlayerUnits select {_x inArea _target;}] call CBA_fnc_targetEvent;
     };
 };
 
 if (_jip isNotEqualTo false) then {
     if (_jip isEqualTo true) then {
-        private _id = call KH_fnc_generateUid;
-        ["KH_eve_jipSetup", [_name, _arguments, true, false, _id, clientOwner]] call CBA_fnc_serverEvent;
-        ["JIP_HANDLER", _id];
+        private _jipId = call KH_fnc_generateUid;
+        ["KH_eve_jipSetup", [_event, _arguments, true, false, _jipId]] call CBA_fnc_serverEvent;
+        _return = [missionNamespace, _jipId, 2];
     }
     else {
         _jip params [
             ["_dependency", true, [true, 0, "", [], {}, objNull, teamMemberNull, grpNull]], 
             ["_unitRequired", false, [true]], 
-            ["_idOverride", "", [""]]
+            ["_jipId", "", [""]]
         ];
 
-        private _id = if (_idOverride isEqualTo "") then {
-            call KH_fnc_generateUid;
-        }
-        else {
-            _idOverride;
+        if (_jipId isEqualTo "") then {
+            _jipId = call KH_fnc_generateUid;
         };
 
-        ["KH_eve_jipSetup", [_name, _arguments, _dependency, _unitRequired, _id, clientOwner]] call CBA_fnc_serverEvent;
-        ["JIP_HANDLER", _id];
+        ["KH_eve_jipSetup", [_event, _arguments, _dependency, _unitRequired, _jipId]] call CBA_fnc_serverEvent;
+        _return = [missionNamespace, _jipId, 2];
     };
-}
-else {
-    if !(isNil "_result") then {
-        _result;
-    };
+};
+
+if !(isNil "_return") then {
+    _return;
 };

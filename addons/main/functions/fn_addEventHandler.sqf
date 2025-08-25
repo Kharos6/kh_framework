@@ -1,32 +1,31 @@
 params [["_type", "", ["", []]], ["_event", "", ["", 0]], "_arguments", ["_function", {}, ["", {}]]];
-private _handlerArguments = call KH_fnc_generateUid;
-missionNamespace setVariable [_handlerArguments, _arguments];
+private _argumentsId = call KH_fnc_generateUid;
+missionNamespace setVariable [_argumentsId, _arguments];
+private _eventNameId = call KH_fnc_generateUid;
+missionNamespace setVariable [_eventNameId, _event];
 private _handlerId = call KH_fnc_generateUid;
-missionNamespace setVariable [_handlerId, -1];
-private _eventName = call KH_fnc_generateUid;
-missionNamespace setVariable [_eventName, _event];
-private _previousReturn = call KH_fnc_generateUid;
+private _previousReturnId = call KH_fnc_generateUid;
 private "_persistentEventId";
-private "_persistentEntityId";
+private "_persistencyId";
 private "_handler";
 private "_eventType";
 private "_expression";
 
 if (_type isEqualType []) then {
-	_eventType = _type select 0;
+	_eventType = _type param [0, "", [""]];
 
 	if (_eventType isEqualTo "STANDARD") then {
-		private _scopeType = _type select 2;
+		private _scopeType = _type param [2, true, [true, ""]];
 
 		if ((_scopeType isNotEqualTo "REMOTE") && (_scopeType isNotEqualTo "PERSISTENT")) then {
 			_function = [_function, false] call KH_fnc_parseFunction;
 
 			_expression = compile ([
-				"private _args = missionNamespace getVariable '", _handlerArguments, "';
-				private _eventName = missionNamespace getVariable '", _eventName, "';
+				"private _args = missionNamespace getVariable '", _argumentsId, "';
+				private _eventName = missionNamespace getVariable '", _eventNameId, "';
 				private _localId = missionNamespace getVariable '", _handlerId, "';
-				private _previousReturn = missionNamespace getVariable '", _previousReturn, "';
-				missionNamespace setVariable ['", _previousReturn, "', call (missionNamespace getVariable '", _function, "')];"
+				private _previousReturn = missionNamespace getVariable '", _previousReturnId, "';
+				missionNamespace setVariable ['", _previousReturnId, "', call (missionNamespace getVariable '", _function, "')];"
 			] joinString "");
 		}
 		else {
@@ -36,13 +35,13 @@ if (_type isEqualType []) then {
 	else {
 		_function = [_function, false] call KH_fnc_parseFunction;
 
-		if (_eventType isNotEqualTo "TEMPORAL") then {
+		if ((_eventType isNotEqualTo "TEMPORAL") && (_eventType isNotEqualTo "DRAW_UI")) then {
 			_expression = compile ([
-				"private _args = missionNamespace getVariable '", _handlerArguments, "';
-				private _eventName = missionNamespace getVariable '", _eventName, "';
+				"private _args = missionNamespace getVariable '", _argumentsId, "';
+				private _eventName = missionNamespace getVariable '", _eventNameId, "';
 				private _localId = missionNamespace getVariable '", _handlerId, "';
-				private _previousReturn = missionNamespace getVariable '", _previousReturn, "';
-				missionNamespace setVariable ['", _previousReturn, "', call (missionNamespace getVariable '", _function, "')];"
+				private _previousReturn = missionNamespace getVariable '", _previousReturnId, "';
+				missionNamespace setVariable ['", _previousReturnId, "', call (missionNamespace getVariable '", _function, "')];"
 			] joinString "");
 		};
 	};
@@ -52,50 +51,34 @@ else {
 	_eventType = _type;
 
 	_expression = compile ([
-		"private _args = missionNamespace getVariable '", _handlerArguments, "';
-		private _eventName = missionNamespace getVariable '", _eventName, "';
+		"private _args = missionNamespace getVariable '", _argumentsId, "';
+		private _eventName = missionNamespace getVariable '", _eventNameId, "';
 		private _localId = missionNamespace getVariable '", _handlerId, "';
-		private _previousReturn = missionNamespace getVariable '", _previousReturn, "';
-		missionNamespace setVariable ['", _previousReturn, "', call (missionNamespace getVariable '", _function, "')];"
+		private _previousReturn = missionNamespace getVariable '", _previousReturnId, "';
+		missionNamespace setVariable ['", _previousReturnId, "', call (missionNamespace getVariable '", _function, "')];"
 	] joinString "");
 };
 
 switch _eventType do {
 	case "STANDARD": {
-		private _entity = _type param [1, objNull, ["", objNull, teamMemberNull, grpNull]];
-		private _scopeType = _type param [2, "LOCAL", [""]];
+		private _entity = _type param [1, objNull, [objNull, teamMemberNull, grpNull]];
+		private _scopeType = _type param [2, true, [true, ""]];
 
-		switch (typeName _entity) do {
-			case "STRING": {
-				_entity = missionNamespace getVariable _entity;
-			};
-
-			case "TEAM_MEMBER": {
-				_entity = agent _entity;
-			};
+		if (_entity isEqualType teamMemberNull) then {
+			_entity = agent _entity;
 		};
 
 		switch _scopeType do {
+			case true;
 			case "LOCAL": {
 				_handler = _entity addEventHandler [_event, _expression];
 			};
 
 			case "REMOTE": {
 				_persistentEventId = call KH_fnc_generateUid;
-				_persistentEntityId = call KH_fnc_generateUid;
-				private _persistentEntity = call KH_fnc_generateUid;
-				missionNamespace setVariable [_persistentEntity, _entity];
-
-				[
-					[_persistentEntity, _entity],
-					{
-						params ["_persistentEntity", "_entity"];
-						missionNamespace setVariable [_persistentEntity, _entity, true];
-					},
-					"SERVER",
-					true
-				] call KH_fnc_execute;
-
+				_persistencyId = call KH_fnc_generateUid;
+				private _persistentEntityId = call KH_fnc_generateUid;
+				missionNamespace setVariable [_persistentEntityId, _entity, true];
 				private _remoteEventId = call KH_fnc_generateUid;
 				private _entityOwnerId = call KH_fnc_generateUid;
 
@@ -103,15 +86,18 @@ switch _eventType do {
 					_remoteEventId, 
 					compile ([
 						"private _entityOwner = missionNamespace getVariable '", _entityOwnerId, "';
-						call ", _expression, ";"
+						private _args = missionNamespace getVariable '", _argumentsId, "';
+						private _eventName = missionNamespace getVariable '", _eventNameId, "';
+						private _previousReturn = missionNamespace getVariable '", _previousReturnId, "';
+						missionNamespace setVariable ['", _previousReturnId, "', call (missionNamespace getVariable '", _function, "')];"
 					] joinString "")
 				] call CBA_fnc_addEventHandler;
 
 				_handler = [
-					[_entity, _event, _persistentEventId, _persistentEntityId, _persistentEntity, _entityOwnerId, clientOwner], 
+					[_entity, _event, _persistentEventId, _persistencyId, _persistentEntityId, _entityOwnerId, clientOwner], 
 					{
-						params ["_entity", "_event", "_persistentEventId", "_persistentEntityId", "_persistentEntity", "_entityOwnerId", "_eventOwner"];
-						missionNamespace setVariable [_persistentEntityId, true];
+						params ["_entity", "_event", "_persistentEventId", "_persistencyId", "_persistentEntityId", "_entityOwnerId", "_eventOwner"];
+						missionNamespace setVariable [_persistencyId, true];
 						missionNamespace setVariable [_entityOwnerId, clientOwner, _eventOwner];
 
 						missionNamespace setVariable [
@@ -119,184 +105,98 @@ switch _eventType do {
 							_entity addEventHandler [
 								_event, 
 								compile ([
-									"if (missionNamespace getVariable '", _persistentEntityId, "') then {
+									"if (missionNamespace getVariable '", _persistencyId, "') then {
 										['", _remoteEventId, "', _this, ", _eventOwner, "] call CBA_fnc_ownerEvent;
 									}
 									else {
-										(missionNamespace getVariable ['", _persistentEntity, "', objNull]) removeEventHandler [_thisEvent, _thisEventHandler];
+										(missionNamespace getVariable ['", _persistentEntityId, "', objNull]) removeEventHandler [_thisEvent, _thisEventHandler];
 									};"
 								] joinString "")
 							]
 						];
 					},
+					_entity,
+					true,
 					[
-						"PERSISTENT", 
-						_entity, 
-						[_entity, _persistentEventId, _persistentEntityId], 
+						"PERSISTENT",
+						[_entity, _persistentEventId, _persistencyId], 
 						{
-							params ["_entity", "_persistentEventId", "_persistentEntityId"];
-							missionNamespace setVariable [_persistentEntityId, false];
+							params ["_entity", "_persistentEventId", "_persistencyId"];
+							missionNamespace setVariable [_persistencyId, false];
 							_entity removeEventHandler (missionNamespace getVariable [_persistentEventId, []]);
-						}, 
-						true
-					],
-					true
+						},
+						""
+					]
 				] call KH_fnc_execute;
 			};
 			
 			case "PERSISTENT": {
 				_persistentEventId = call KH_fnc_generateUid;
-				_persistentEntityId = call KH_fnc_generateUid;
-				private _persistentEntity = call KH_fnc_generateUid;
-				missionNamespace setVariable [_persistentEntity, _entity];
-
-				[
-					[_persistentEntity, _entity],
-					{
-						params ["_persistentEntity", "_entity"];
-						missionNamespace setVariable [_persistentEntity, _entity, true];
-					},
-					"SERVER",
-					true
-				] call KH_fnc_execute;
+				_persistencyId = call KH_fnc_generateUid;
+				private _persistentEntityId = call KH_fnc_generateUid;
+				missionNamespace setVariable [_persistentEntityId, _entity, true];
 
 				_handler = [
-					[_entity, _event, _arguments, _function, _handlerArguments, _eventName, _handlerId, _previousReturn, _persistentEventId, _persistentEntityId, _persistentEntity], 
+					[_entity, _event, _arguments, _function, _argumentsId, _eventNameId, _handlerId, _previousReturnId, _persistentEventId, _persistencyId, _persistentEntityId], 
 					{
-						params ["_entity", "_event", "_arguments", "_function", "_handlerArguments", "_eventName", "_handlerId", "_previousReturn", "_persistentEventId", "_persistentEntityId", "_persistentEntity"];
-						missionNamespace setVariable [_persistentEntityId, true];
-						missionNamespace setVariable [_handlerArguments, _arguments];
-						missionNamespace setVariable [_eventName, _event];
+						params ["_entity", "_event", "_arguments", "_function", "_argumentsId", "_eventNameId", "_handlerId", "_previousReturnId", "_persistentEventId", "_persistencyId", "_persistentEntityId"];
+						missionNamespace setVariable [_persistencyId, true];
+						missionNamespace setVariable [_argumentsId, _arguments];
+						missionNamespace setVariable [_eventNameId, _event];
 						
 						missionNamespace setVariable [
 							_persistentEventId,
 							_entity addEventHandler [
 								_event, 
 								compile ([
-									"if (missionNamespace getVariable '", _persistentEntityId, "') then {
-										private _args = missionNamespace getVariable '", _handlerArguments, "';
-										private _eventName = missionNamespace getVariable '", _eventName, "';
-										private _previousReturn = missionNamespace getVariable '", _previousReturn, "';
-										missionNamespace setVariable ['", _previousReturn, "', call (missionNamespace getVariable '", _function, "')];
+									"if (missionNamespace getVariable '", _persistencyId, "') then {
+										private _args = missionNamespace getVariable '", _argumentsId, "';
+										private _eventName = missionNamespace getVariable '", _eventNameId, "';
+										private _previousReturn = missionNamespace getVariable '", _previousReturnId, "';
+										missionNamespace setVariable ['", _previousReturnId, "', call (missionNamespace getVariable '", _function, "')];
 									}
 									else {
-										(missionNamespace getVariable ['", _persistentEntity, "', objNull]) removeEventHandler [_thisEvent, _thisEventHandler];
+										(missionNamespace getVariable ['", _persistentEntityId, "', objNull]) removeEventHandler [_thisEvent, _thisEventHandler];
 									};"
 								] joinString "")
 							]
 						];
 					},
+					_entity,
+					true,
 					[
-						"PERSISTENT", 
-						_entity, 
-						[_entity, _persistentEventId, _persistentEntityId], 
+						"PERSISTENT",
+						[_entity, _persistentEventId, _persistencyId], 
 						{
-							params ["_entity", "_persistentEventId", "_persistentEntityId"];
-							missionNamespace setVariable [_persistentEntityId, false];
+							params ["_entity", "_persistentEventId", "_persistencyId"];
+							missionNamespace setVariable [_persistencyId, false];
 							_entity removeEventHandler (missionNamespace getVariable [_persistentEventId, []]);
-						}, 
-						true
-					],
-					true
+						},
+						""
+					]
 				] call KH_fnc_execute;
 			};
 		};
 	};
 
 	case "MULTIPLAYER": {
-		private _entity = _type param [1, objNull, ["", objNull, teamMemberNull]];
+		private _entity = _type param [1, objNull, [objNull, teamMemberNull]];
 
-		switch (typeName _entity) do {
-			case "STRING": {
-				_entity = missionNamespace getVariable _entity;
-			};
-
-			case "TEAM_MEMBER": {
-				_entity = agent _entity;
-			};
+		if (_entity isEqualType teamMemberNull) then {
+			_entity = agent _entity;
 		};
 
 		_handler = _entity addMPEventHandler [_event, _expression];
 	};
 
 	case "CONTROL": {
-		_handler = (_type select 1) ctrlAddEventHandler [_event, _expression];
+		private _control = _type param [1, controlNull, [controlNull]];
+		_handler = _control ctrlAddEventHandler [_event, _expression];
 	};
 
 	case "DISPLAY": {
-		_handler = (_type select 1) displayAddEventHandler [_event, _expression];
-	};
-
-	case "CLASS": {
-		private _entity = _type param [1, objNull, ["", objNull, teamMemberNull]];
-
-		switch (typeName _entity) do {
-			case "OBJECT": {
-				_entity = typeOf _entity;
-			};
-
-			case "TEAM_MEMBER": {
-				_entity = typeOf (agent _entity);
-			};
-		};
-
-		_handler = call KH_fnc_generateUid;
-
-		[
-			_type select 1,
-			_event, 
-			compile ([
-				"if (missionNamespace getVariable ['", _handler, "', true]) then {
-					call ", _expression,
-				"};"
-			] joinString ""),
-			_type select 2,
-			_type select 3,
-			_type select 4
-		] call CBA_fnc_addClassEventHandler;
-	};
-
-	case "PLAYER": {
-		private _currentStack = KH_var_cbaPlayerEventHandlerStack get _event;
-
-		if (isNil "_currentStack") then {
-			KH_var_cbaPlayerEventHandlerStack set [_event, []];
-			_currentStack = KH_var_cbaPlayerEventHandlerStack get _event;
-
-			[
-				_event,
-				compile ([
-					"private _handlerStack = (missionNamespace getVariable 'KH_var_cbaPlayerEventHandlerStack') get '", _event, "';
-					private _handlerStackDeletions = missionNamespace getVariable 'KH_var_cbaPlayerEventHandlerStackDeletions';
-					
-					if (_handlerStackDeletions isNotEqualTo []) then {
-						{
-							if ((_x select 0) in _handlerStackDeletions) then {
-								_handlerStackDeletions set [_handlerStack find (_x select 0), _forEachIndex];
-							};
-						} forEach _handlerStack;
-
-						{
-							if (_x isEqualType 0) then {
-								_handlerStack deleteAt _x;
-							};
-						} forEach _handlerStackDeletions;
-
-						_handlerStackDeletions = [];
-					};
-
-					{
-						if !((_x select 0) in _handlerStackDeletions) then {
-							call (_x select 1);
-						};
-					} forEach _handlerStack;"
-				] joinString ""),
-				_type select 1
-			] call CBA_fnc_addPlayerEventHandler;
-		};
-
-		_handler = [call KH_fnc_generateUid, _expression];
-		_currentStack pushBack _handler;
+		private _display = _type param [1, displayNull, [displayNull]];
+		_handler = _display displayAddEventHandler [_event, _expression];
 	};
 
 	case "PUBLIC_VARIABLE": {
@@ -308,6 +208,39 @@ switch _eventType do {
 				call ", _expression,
 			"};"
 		] joinString ""));
+	};
+
+	case "CLASS": {
+		private _class = _type param [1, objNull, ["", objNull, teamMemberNull]];
+		private _allowInheritance = _type param [2, true, [true]];
+		private _excludedClasses = _type param [3, [], [[]]];
+		private _applyRetroactively = _type param [4, true, [true]];
+
+		switch (typeName _class) do {
+			case "OBJECT": {
+				_class = typeOf _class;
+			};
+
+			case "TEAM_MEMBER": {
+				_class = typeOf (agent _class);
+			};
+		};
+
+		_handler = call KH_fnc_generateUid;
+		missionNamespace setVariable [_handler, true];
+
+		[
+			_class,
+			_event, 
+			compile ([
+				"if (missionNamespace getVariable '", _handler, "') then {
+					call ", _expression,
+				"};"
+			] joinString ""),
+			_allowInheritance,
+			_excludedClasses,
+			_applyRetroactively
+		] call CBA_fnc_addClassEventHandler;
 	};
 
 	case "MISSION": {
@@ -323,27 +256,29 @@ switch _eventType do {
 	};
 
 	case "BIS_SCRIPTED": {
-		_handler = [_type select 1, _event, _expression] call BIS_fnc_addScriptedEventHandler;
+		private _namespace = _type param [1, objNull, [true, objNull, teamMemberNull, grpNull, locationNull, displayNull, controlNull, missionNamespace]];
+
+		if (_namespace isEqualType teamMemberNull) then {
+			_namespace = agent _namespace;
+		};
+
+		_handler = [_namespace, _event, _expression] call BIS_fnc_addScriptedEventHandler;
 	};
 
 	case "TEMPORAL": {
 		private _immediate = _type param [1, true, [true]];
-		private _conditionArguments = _type param [2, nil];
+		private _conditionArguments = _type param [2];
 		private _conditionFunction = _type param [3, {}, ["", {}]];
-		private _timeoutRules = _type param [4, [0, false, false, false], ["", []]];
-		private _timeoutArguments = _type param [5, []];
+		private _timeoutRules = _type param [4, [0, false, false, false], [true, 0, "", []]];
+		private _timeoutArguments = _type param [5];
 		private _timeoutFunction = _type param [6, {}, ["", {}]];
-		private _simpleDelta = _type param [7, true, [true]];
-		private _handlerConditionArguments = call KH_fnc_generateUid;
-		private _handlerTickCounter = call KH_fnc_generateUid;
+		private _verboseDelta = _type param [7, false, [true]];
+		private _conditionArgumentsId = call KH_fnc_generateUid;
+		private _handlerTickCounterId = call KH_fnc_generateUid;
 		private _countConditionFailure = false;
 		private _iterationCount = false;
-
-		if !(_timeoutFunction isEqualType {}) then {
-			_timeoutFunction = [[_timeoutFunction] call KH_fnc_parseFunction] call KH_fnc_getParsedFunction;
-		};
-
-		missionNamespace setVariable [_handlerConditionArguments, _conditionArguments];
+		_timeoutFunction = [_timeoutFunction, false] call KH_fnc_parseFunction;
+		missionNamespace setVariable [_conditionArgumentsId, _conditionArguments];
 		_handler = call KH_fnc_generateUid;
 
 		switch (typeName _timeoutRules) do {
@@ -373,8 +308,8 @@ switch _eventType do {
 				_countConditionFailure = _timeout param [1, false, [true]];
 				_timeout = (_timeout select 0) max 1;
 				_iterationCount = true;
-				_handlerTickCounter = call KH_fnc_generateUid;
-				missionNamespace setVariable [_handlerTickCounter, 1];
+				_handlerTickCounterId = call KH_fnc_generateUid;
+				missionNamespace setVariable [_handlerTickCounterId, 1];
 			};
 		};
 
@@ -382,18 +317,18 @@ switch _eventType do {
 			_handler, 
 			[
 				_timeoutArguments, 
-				if (_timeoutFunction isNotEqualTo {}) then {
+				if ((missionNamespace getVariable _timeoutFunction) isNotEqualTo {}) then {
 					compile ([
-						"private _args = missionNamespace getVariable ['", _handlerArguments, "', []];
-						private _eventName = missionNamespace getVariable ['", _eventName, "', ''];
-						private _localId = missionNamespace getVariable ['", _handlerId, "', []];
-						call ", _timeoutFunction, ";"
-					] joinString "")
+						"private _args = missionNamespace getVariable '", _argumentsId, "';
+						private _eventName = missionNamespace getVariable '", _eventNameId, "';
+						private _localId = missionNamespace getVariable '", _handlerId, "';
+						call (missionNamespace getVariable '", _timeoutFunction, "');"
+					] joinString "");
 				}
 				else {
 					{};
 				}, 
-				_handlerTickCounter, 
+				_handlerTickCounterId, 
 				_timeout, 
 				_timeoutPriority, 
 				_timeoutOnDeletion
@@ -401,7 +336,7 @@ switch _eventType do {
 		];
 
 		private _continue = true;
-		private _previousReturn = nil;
+		private "_previousReturn";
 
 		if _immediate then {
 			private _args = _arguments;
@@ -411,27 +346,25 @@ switch _eventType do {
 
 			if ((_conditionFunction isEqualTo {}) || (_conditionFunction isEqualTo "")) then {						
 				if _iterationCount then {
-					_previousReturn = _arguments call _function;
+					_previousReturn = _arguments call (missionNamespace getVariable _function);
 					["KH_eve_temporalExecutionStackHandler", [_handler, false, false]] call CBA_fnc_localEvent;
 
-					if (_timeout == 1) then {
+					if (_timeout isEqualTo 1) then {
 						_continue = false;
 					};
 				}
 				else {
-					_previousReturn = _arguments call _function;
+					_previousReturn = _arguments call (missionNamespace getVariable _function);
 				};
 			}
 			else {
-				if !(_conditionFunction isEqualType {}) then {
-					_conditionFunction = [[_conditionFunction] call KH_fnc_parseFunction] call KH_fnc_getParsedFunction;
-				};
+				_conditionFunction = [_conditionFunction, false] call KH_fnc_parseFunction;
 				
 				if _iterationCount then {
 					if _countConditionFailure then {
 						if _timeoutOnConditionFailure then {
-							if (_conditionArguments call _conditionFunction) then {
-								_previousReturn = _arguments call _function;
+							if (_conditionArguments call (missionNamespace getVariable _conditionFunction)) then {
+								_previousReturn = _arguments call (missionNamespace getVariable _function);
 								["KH_eve_temporalExecutionStackHandler", [_handler, false, false]] call CBA_fnc_localEvent;
 							}
 							else {
@@ -439,8 +372,8 @@ switch _eventType do {
 							};
 						}
 						else {
-							if (_conditionArguments call _conditionFunction) then {
-								_previousReturn = _arguments call _function;
+							if (_conditionArguments call (missionNamespace getVariable _conditionFunction)) then {
+								_previousReturn = _arguments call (missionNamespace getVariable _function);
 								["KH_eve_temporalExecutionStackHandler", [_handler, false, false]] call CBA_fnc_localEvent;
 							}
 							else {
@@ -448,17 +381,17 @@ switch _eventType do {
 							};
 						};
 
-						if (_timeout == 1) then {
+						if (_timeout isEqualTo 1) then {
 							_continue = false;
 						};
 					}
 					else {
 						if _timeoutOnConditionFailure then {
-							if (_conditionArguments call _conditionFunction) then {
-								_previousReturn = _arguments call _function;
+							if (_conditionArguments call (missionNamespace getVariable _conditionFunction)) then {
+								_previousReturn = _arguments call (missionNamespace getVariable _function);
 								["KH_eve_temporalExecutionStackHandler", [_handler, false, false]] call CBA_fnc_localEvent;
 
-								if (_timeout == 1) then {
+								if (_timeout isEqualTo 1) then {
 									_continue = false;
 								};
 							}
@@ -467,11 +400,11 @@ switch _eventType do {
 							};
 						}
 						else {
-							if (_conditionArguments call _conditionFunction) then {
-								_previousReturn = _arguments call _function;
+							if (_conditionArguments call (missionNamespace getVariable _conditionFunction)) then {
+								_previousReturn = _arguments call (missionNamespace getVariable _function);
 								["KH_eve_temporalExecutionStackHandler", [_handler, false, false]] call CBA_fnc_localEvent;
 
-								if (_timeout == 1) then {
+								if (_timeout isEqualTo 1) then {
 									_continue = false;
 								};
 							};
@@ -480,16 +413,16 @@ switch _eventType do {
 				}
 				else {
 					if _timeoutOnConditionFailure then {
-						if (_conditionArguments call _conditionFunction) then {
-							_previousReturn = _arguments call _function;
+						if (_conditionArguments call (missionNamespace getVariable _conditionFunction)) then {
+							_previousReturn = _arguments call (missionNamespace getVariable _function);
 						}
 						else {
 							["KH_eve_temporalExecutionStackHandler", [_handler, true, true]] call CBA_fnc_localEvent;
 						};
 					}
 					else {
-						if (_conditionArguments call _conditionFunction) then {
-							_previousReturn = _arguments call _function;
+						if (_conditionArguments call (missionNamespace getVariable _conditionFunction)) then {
+							_previousReturn = _arguments call (missionNamespace getVariable _function);
 						};
 					};
 				};
@@ -511,7 +444,7 @@ switch _eventType do {
 					if ((_conditionFunction isEqualTo {}) || (_conditionFunction isEqualTo "")) then {						
 						if _iterationCount then {
 							compile ([
-								"call ", _function, ";
+								"call (missionNamespace getVariable '", _function, "');
 								['KH_eve_temporalExecutionStackHandler', ['", _handler, "', false, false]] call CBA_fnc_localEvent;"
 							] joinString "");
 						}
@@ -519,17 +452,13 @@ switch _eventType do {
 							_function;
 						};
 					}
-					else {
-						if !(_conditionFunction isEqualType {}) then {
-							_conditionFunction = [[_conditionFunction] call KH_fnc_parseFunction] call KH_fnc_getParsedFunction;
-						};
-						
+					else {						
 						if _iterationCount then {
 							if _countConditionFailure then {
 								if _timeoutOnConditionFailure then {
 									compile ([
-										"if ((missionNamespace getVariable ['", _handlerConditionArguments, "', []]) call ", _conditionFunction, ") then {
-											call ", _function, ";
+										"if ((missionNamespace getVariable '", _conditionArgumentsId, "') call (missionNamespace getVariable '", _conditionFunction, "')) then {
+											call (missionNamespace getVariable '", _function, "');
 											['KH_eve_temporalExecutionStackHandler', ['", _handler, "', false, false]] call CBA_fnc_localEvent;
 										}
 										else {
@@ -539,8 +468,8 @@ switch _eventType do {
 								}
 								else {
 									compile ([
-										"if ((missionNamespace getVariable ['", _handlerConditionArguments, "', []]) call ", _conditionFunction, ") then {
-											call ", _function, ";
+										"if ((missionNamespace getVariable '", _conditionArgumentsId, "') call (missionNamespace getVariable '", _conditionFunction, "')) then {
+											call (missionNamespace getVariable '", _function, "');
 											['KH_eve_temporalExecutionStackHandler', ['", _handler, "', false, false]] call CBA_fnc_localEvent;
 										}
 										else {
@@ -552,8 +481,8 @@ switch _eventType do {
 							else {
 								if _timeoutOnConditionFailure then {
 									compile ([
-										"if ((missionNamespace getVariable ['", _handlerConditionArguments, "', []]) call ", _conditionFunction, ") then {
-											call ", _function, ";
+										"if ((missionNamespace getVariable '", _conditionArgumentsId, "') call (missionNamespace getVariable '", _conditionFunction, "')) then {
+											call (missionNamespace getVariable '", _function, "');
 											['KH_eve_temporalExecutionStackHandler', ['", _handler, "', false, false]] call CBA_fnc_localEvent;
 										}
 										else {
@@ -563,8 +492,8 @@ switch _eventType do {
 								}
 								else {
 									compile ([
-										"if ((missionNamespace getVariable ['", _handlerConditionArguments, "', []]) call ", _conditionFunction, ") then {
-											call ", _function, ";
+										"if ((missionNamespace getVariable '", _conditionArgumentsId, "') call (missionNamespace getVariable '", _conditionFunction, "')) then {
+											call (missionNamespace getVariable '", _function, "');
 											['KH_eve_temporalExecutionStackHandler', ['", _handler, "', false, false]] call CBA_fnc_localEvent;
 										};"
 									] joinString "");
@@ -574,8 +503,8 @@ switch _eventType do {
 						else {
 							if _timeoutOnConditionFailure then {
 								compile ([
-									"if ((missionNamespace getVariable ['", _handlerConditionArguments, "', []]) call ", _conditionFunction, ") then {
-										call ", _function, ";
+									"if ((missionNamespace getVariable '", _conditionArgumentsId, "') call (missionNamespace getVariable '", _conditionFunction, "')) then {
+										call (missionNamespace getVariable '", _function, "');
 									}
 									else {
 										['KH_eve_temporalExecutionStackHandler', ['", _handler, "', true, true]] call CBA_fnc_localEvent;
@@ -584,8 +513,8 @@ switch _eventType do {
 							}
 							else {
 								compile ([
-									"if ((missionNamespace getVariable ['", _handlerConditionArguments, "', []]) call ", _conditionFunction, ") then {
-										call ", _function, ";
+									"if ((missionNamespace getVariable '", _conditionArgumentsId, "') call (missionNamespace getVariable '", _conditionFunction, "')) then {
+										call (missionNamespace getVariable '", _function, "');
 									};"
 								] joinString "");
 							};
@@ -598,11 +527,11 @@ switch _eventType do {
 					else {
 						diag_frameNo + (abs _event);
 					},
-					if _simpleDelta then {
-						-1;
+					if _verboseDelta then {
+						systemTime joinString "";
 					}
 					else {
-						systemTime joinString "";
+						-1;
 					},
 					[_type, _event, _handler, clientOwner],
 					_handler,
@@ -611,7 +540,7 @@ switch _eventType do {
 			]
 		];
 
-		if (!_iterationCount && (_timeout != 0)) then {
+		if (!_iterationCount && (_timeout isNotEqualTo 0)) then {
 			[
 				[
 					"TEMPORAL",
@@ -621,12 +550,12 @@ switch _eventType do {
 					[[1, false], !_timeoutPriority, false, false],
 					[],
 					{},
-					true
+					false
 				],
 				_timeout,
 				[_handler],
 				{
-					_args params ["_handler"];
+					params ["_handler"];
 					["KH_eve_temporalExecutionStackHandler", [_handler, true, true]] call CBA_fnc_localEvent;
 				}
 			] call KH_fnc_addEventHandler;
@@ -634,18 +563,14 @@ switch _eventType do {
 	};
 
 	case "DRAW_UI": {
-		private _conditionArguments = _type param [1, []];
+		private _conditionArguments = _type param [1];
 		private _conditionFunction = _type param [2, {}, ["", {}]];
 		private _timeoutRules = _type param [3, [0, false, false], [[]]];
-		private _timeoutArguments = _type param [4, []];
+		private _timeoutArguments = _type param [4];
 		private _timeoutFunction = _type param [5, {}, ["", {}]];
-		private _handlerConditionArguments = call KH_fnc_generateUid;
-
-		if !(_timeoutFunction isEqualType {}) then {
-			_timeoutFunction = [[_timeoutFunction] call KH_fnc_parseFunction] call KH_fnc_getParsedFunction;
-		};
-
-		missionNamespace setVariable [_handlerConditionArguments, _conditionArguments];
+		private _conditionArgumentsId = call KH_fnc_generateUid;
+		_timeoutFunction = [_timeoutFunction, false] call KH_fnc_parseFunction;
+		missionNamespace setVariable [_conditionArgumentsId, _conditionArguments];
 		_handler = call KH_fnc_generateUid;
 
 		if ((_timeoutRules isEqualType 0) || (_timeoutRules isEqualType "")) then {
@@ -672,17 +597,15 @@ switch _eventType do {
 			[
 				_arguments,
 				if ((_conditionFunction isEqualTo {}) || (_conditionFunction isEqualTo "")) then {						
-					_function;
+					missionNamespace getVariable _function;
 				}
 				else {
-					if !(_conditionFunction isEqualType {}) then {
-						_conditionFunction = [[_conditionFunction] call KH_fnc_parseFunction] call KH_fnc_getParsedFunction;
-					};
+					_conditionFunction = [_conditionFunction, false] call KH_fnc_parseFunction;
 					
 					if _timeoutOnConditionFailure then {
 						compile ([
-							"if ((missionNamespace getVariable ['", _handlerConditionArguments, "', []]) call ", _conditionFunction, ") then {
-								call ", _function, ";
+							"if ((missionNamespace getVariable '", _conditionArgumentsId, "') call (missionNamespace getVariable '", _conditionFunction, "')) then {
+								call (missionNamespace getVariable '", _function, "');
 							}
 							else {
 								['KH_eve_drawUiExecutionStackHandler', ['", _handler, "', true]] call CBA_fnc_localEvent;
@@ -691,8 +614,8 @@ switch _eventType do {
 					}
 					else {
 						compile ([
-							"if ((missionNamespace getVariable ['", _handlerConditionArguments, "', []]) call ", _conditionFunction, ") then {
-								call ", _function, ";
+							"if ((missionNamespace getVariable '", _conditionArgumentsId, "') call (missionNamespace getVariable '", _conditionFunction, "')) then {
+								call (missionNamespace getVariable '", _function, "');
 							};"
 						] joinString "");
 					};
@@ -708,13 +631,13 @@ switch _eventType do {
 			[
 				_event, 
 				_timeoutArguments,
-				if (_timeoutFunction isNotEqualTo {}) then {
+				if ((missionNamespace getVariable _timeoutFunction) isNotEqualTo {}) then {
 					compile ([
-						"private _args = missionNamespace getVariable ['", _handlerArguments, "', []];
-						private _eventName = missionNamespace getVariable ['", _eventName, "', ''];
-						private _localId = missionNamespace getVariable ['", _handlerId, "', []];
-						call ", _timeoutFunction, ";"
-					] joinString "")
+						"private _args = missionNamespace getVariable '", _argumentsId, "';
+						private _eventName = missionNamespace getVariable '", _eventNameId, "';
+						private _localId = missionNamespace getVariable '", _handlerId, "';
+						call (missionNamespace getVariable '", _timeoutFunction, "');"
+					] joinString "");
 				}
 				else {
 					{};
@@ -723,7 +646,7 @@ switch _eventType do {
 			]
 		];
 
-		if (_timeout != 0) then {
+		if (_timeout isNotEqualTo 0) then {
 			[
 				[
 					"TEMPORAL",
@@ -733,12 +656,12 @@ switch _eventType do {
 					[[1, false], false, false, false],
 					[],
 					{},
-					true
+					false
 				],
 				_timeout,
 				[_handler],
 				{
-					_args params ["_handler"];
+					params ["_handler"];
 					["KH_eve_drawUiExecutionStackHandler", [_handler, true]] call CBA_fnc_localEvent;
 				}
 			] call KH_fnc_addEventHandler;
@@ -754,7 +677,7 @@ switch _eventType do {
 
 			inGameUISetEventHandler [
 				_event,
-				compile ([
+				[
 					"private _handlerStack = (missionNamespace getVariable 'KH_var_inGameUiEventHandlerStack') get '", _event, "';
 					private _handlerStackDeletions = missionNamespace getVariable 'KH_var_inGameUiEventHandlerStackDeletions';
 					
@@ -765,17 +688,12 @@ switch _eventType do {
 							};
 						} forEach _handlerStack;
 
-						{
-							if (_x isEqualType 0) then {
-								_handlerStack deleteAt _x;
-							};
-						} forEach _handlerStackDeletions;
-
+						_handlerStack deleteAt (_handlerStackDeletions select {_x isEqualType 0});
 						_handlerStackDeletions = [];
 					};
 
 					if (_handlerStack isEqualTo []) exitWith {
-						inGameUISetEventHandler [_event, ""];
+						inGameUISetEventHandler ['", _event, "', ''];
 						_handlerStack deleteAt ", _event, ";
 					};
 
@@ -784,8 +702,46 @@ switch _eventType do {
 							call (_x select 1);
 						};
 					} forEach _handlerStack;"
-				] joinString "")
+				] joinString ""
 			];
+		};
+
+		_handler = [call KH_fnc_generateUid, _expression];
+		_currentStack pushBack _handler;
+	};
+
+	case "PLAYER": {
+		private _currentStack = KH_var_playerEventHandlerStack get _event;
+
+		if (isNil "_currentStack") then {
+			KH_var_playerEventHandlerStack set [_event, []];
+			_currentStack = KH_var_playerEventHandlerStack get _event;
+
+			[
+				_event,
+				compile ([
+					"private _handlerStack = (missionNamespace getVariable 'KH_var_playerEventHandlerStack') get '", _event, "';
+					private _handlerStackDeletions = missionNamespace getVariable 'KH_var_playerEventHandlerStackDeletions';
+					
+					if (_handlerStackDeletions isNotEqualTo []) then {
+						{
+							if ((_x select 0) in _handlerStackDeletions) then {
+								_handlerStackDeletions set [_handlerStack find (_x select 0), _forEachIndex];
+							};
+						} forEach _handlerStack;
+
+						_handlerStack deleteAt (_handlerStackDeletions select {_x isEqualType 0});
+						_handlerStackDeletions = [];
+					};
+
+					{
+						if !((_x select 0) in _handlerStackDeletions) then {
+							call (_x select 1);
+						};
+					} forEach _handlerStack;"
+				] joinString ""),
+				_type select 1
+			] call CBA_fnc_addPlayerEventHandler;
 		};
 
 		_handler = [call KH_fnc_generateUid, _expression];
@@ -812,12 +768,7 @@ switch _eventType do {
 							};
 						} forEach _handlerStack;
 
-						{
-							if (_x isEqualType 0) then {
-								_handlerStack deleteAt _x;
-							};
-						} forEach _handlerStackDeletions;
-
+						_handlerStack deleteAt (_handlerStackDeletions select {_x isEqualType 0});
 						_handlerStackDeletions = [];
 					};
 
@@ -839,22 +790,11 @@ if (isNil "_persistentEventId") then {
 	if !(_type isEqualType []) then {
 		_type = [_type];
 	};
-	
+
 	missionNamespace setVariable [_handlerId, [_type, _event, _handler, clientOwner]];
 	[_type, _event, _handler, clientOwner];
 }
 else {
-	missionNamespace setVariable [_handlerId, [_handler, _persistentEntityId]];
-
-	[
-		[_handlerId, _handler, _persistentEntityId],
-		{
-			params ["_handlerId", "_handler", "_persistentEntityId"];
-			missionNamespace setVariable [_handlerId, [_handler, _persistentEntityId], true];
-		},
-		"SERVER",
-		true
-	] call KH_fnc_execute;
-	
-	[_handler, _persistentEntityId];
+	missionNamespace setVariable [_handlerId, [_handler, _persistencyId], true];	
+	[_handler, _persistencyId];
 };

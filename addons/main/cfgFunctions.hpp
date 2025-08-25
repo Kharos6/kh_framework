@@ -26,7 +26,7 @@ class CfgFunctions
 			class convertToAgent {};
 			class convertToSimpleObject {};
 			class cryptoOperation {};
-			class dataCollection {};
+			class deleteArrayElements {};
 			class deleteKhDataFile {};
 			class deleteKhDataVariable {};
 			class diagnostics {};
@@ -51,7 +51,6 @@ class CfgFunctions
 			class getEntityVariableName {};
 			class getGroupAttributes {};
 			class getNearestSurface {};
-			class getParsedFunction {};
 			class getPosition {};
 			class getRotation {};
 			class getSimulatedInventoryItemCount {};
@@ -102,11 +101,13 @@ class CfgFunctions
 			class orbitObject {};
 			class parseBoolean {};
 			class parseFunction {};
+			class postInit {postInit = 1;};
 			class postProcess {};
+			class preInit {preInit = 1;};
+			class preStart {preStart = 1;};
 			class readKhData {};
 			class removeEventHandler {};
 			class recoverDisconnectedPlayers {};
-			class registerCallback {};
 			class respawnSpectator {};
 			class saveCargoInventories {};
 			class saveControlAttributes {};
@@ -150,9 +151,6 @@ class CfgFunctions
 			class zeusModuleRagdollUnit {};
 			class zeusModuleStageExecution {};
 			class zeusModuleSuspendMission {};
-			class preStart {preStart = 1;};
-			class preInit {preInit = 1;};
-			class postInit {postInit = 1;};
 		};
 	};
 };

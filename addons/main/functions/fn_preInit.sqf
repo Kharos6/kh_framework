@@ -1,16 +1,10 @@
-if (isNil "KH_var_missionLoaded") then {
-	KH_var_missionLoaded = false;
-};
-
-if (isNil "KH_var_dedicatedServer") then {
-	KH_var_dedicatedServer = false;
-};
-
-if (isNil "KH_var_isJip") then {
-	KH_var_isJip = false;
-};
-
-KH_var_currentPlayerUnit = objNull;
+KH_var_gameSessionId = uiNamespace getVariable "KH_var_gameSessionId";
+KH_var_missionSessionId = call KH_fnc_generateUid;
+uiNamespace setVariable ["KH_var_missionSessionId", KH_var_missionSessionId];
+KH_var_aceLoaded = uiNamespace getVariable "KH_var_aceLoaded";
+KH_var_missionLoaded = false;
+KH_var_jip = false;
+KH_var_playerUnit = objNull;
 KH_var_cachedJipHandlers = createHashMap;
 KH_var_cachedLuaFunctions = createHashMap;
 KH_var_cachedLuaEntities = createHashMap;
@@ -19,12 +13,12 @@ KH_var_remoteExecFunctionsBlacklist = createHashMap;
 KH_var_remoteExecCommandsJipBlacklist = createHashMap;
 KH_var_remoteExecFunctionsJipBlacklist = createHashMap;
 KH_var_cbaEventHandlerStack = createHashMap;
-KH_var_cbaPlayerEventHandlerStack = createHashMap;
+KH_var_playerEventHandlerStack = createHashMap;
 KH_var_inGameUiEventHandlerStack = createHashMap;
 KH_var_temporalExecutionStackMonitor = createHashMap;
 KH_var_drawUiExecutionStackMonitor = createHashMap;
 KH_var_cbaEventHandlerStackDeletions = [];
-KH_var_cbaPlayerEventHandlerStackDeletions = [];
+KH_var_playerEventHandlerStackDeletions = [];
 KH_var_inGameUiEventHandlerStackDeletions = [];
 KH_var_temporalExecutionStack = [];
 KH_var_drawUi2dExecutionStack = [];
@@ -61,24 +55,24 @@ call KH_fnc_luaResetState;
            	[_prefix, "lua", configName _x] joinString "_";
         };
 
-        if (isNil {[_function, _name] call KH_fnc_luaCompile}) then {
+        if (isNil {[_function, _name] call KH_fnc_luaCompile;}) then {
 			continue;
 		};
 
 		if (isNumber (_x >> "preInit")) then {
-			if ((getNumber (_x >> "preInit")) == 1) then {
+			if ((getNumber (_x >> "preInit")) isEqualTo 1) then {
         		KH_var_preInitLuaExecutions pushBack _function;
 			};
         };
 
 		if (isNumber (_x >> "postInit")) then {
-			if ((getNumber (_x >> "postInit")) == 1) then {
+			if ((getNumber (_x >> "postInit")) isEqualTo 1) then {
         		KH_var_postInitLuaExecutions pushBack _function;
 			};
         };
 
 		if (isNumber (_x >> "loadInit")) then {
-			if ((getNumber (_x >> "loadInit")) == 1) then {
+			if ((getNumber (_x >> "loadInit")) isEqualTo 1) then {
         		KH_var_loadInitLuaExecutions pushBack _function;
 			};
         };
@@ -104,24 +98,24 @@ call KH_fnc_luaResetState;
            	[_prefix, "lua", configName _x] joinString "_";
         };
 
-        if (isNil {[_function, _name] call KH_fnc_luaCompile}) then {
+        if (isNil {[_function, _name] call KH_fnc_luaCompile;}) then {
 			continue;
 		};
 
 		if (isNumber (_x >> "preInit")) then {
-			if ((getNumber (_x >> "preInit")) == 1) then {
+			if ((getNumber (_x >> "preInit")) isEqualTo 1) then {
         		KH_var_preInitLuaExecutions pushBack _function;
 			};
         };
 
 		if (isNumber (_x >> "postInit")) then {
-			if ((getNumber (_x >> "postInit")) == 1) then {
+			if ((getNumber (_x >> "postInit")) isEqualTo 1) then {
         		KH_var_postInitLuaExecutions pushBack _function;
 			};
         };
 
 		if (isNumber (_x >> "loadInit")) then {
-			if ((getNumber (_x >> "loadInit")) == 1) then {
+			if ((getNumber (_x >> "loadInit")) isEqualTo 1) then {
         		KH_var_loadInitLuaExecutions pushBack _function;
 			};
         };
@@ -158,16 +152,16 @@ else {
 	getNumber (configFile >> "CfgRemoteExec" >> "Functions" >> "mode");
 };
 
-if (KH_var_remoteExecCommandsMode == 1) then {
+if (KH_var_remoteExecCommandsMode isEqualTo 1) then {
 	{
 		if (isNumber (_x >> "allowedTargets")) then {
-			if ((getNumber (_x >> "allowedTargets")) != 0) then {
+			if ((getNumber (_x >> "allowedTargets")) isNotEqualTo 0) then {
 				KH_var_remoteExecCommandspBlacklist set [toLower (configName _x), true];
 			};
 		};
 
 		if (isNumber (_x >> "jip")) then {
-			if ((getNumber (_x >> "jip")) == 0) then {
+			if ((getNumber (_x >> "jip")) isEqualTo 0) then {
 				KH_var_remoteExecCommandsJipBlacklist set [toLower (configName _x), true];
 			};
 		};
@@ -175,29 +169,29 @@ if (KH_var_remoteExecCommandsMode == 1) then {
 
 	{
 		if (isNumber (_x >> "allowedTargets")) then {
-			if ((getNumber (_x >> "allowedTargets")) != 0) then {
+			if ((getNumber (_x >> "allowedTargets")) isNotEqualTo 0) then {
 				KH_var_remoteExecCommandspBlacklist set [toLower (configName _x), true, true];
 			};
 		};
 
 		if (isNumber (_x >> "jip")) then {
-			if ((getNumber (_x >> "jip")) == 0) then {
+			if ((getNumber (_x >> "jip")) isEqualTo 0) then {
 				KH_var_remoteExecCommandsJippBlacklist set [toLower (configName _x), true, true];
 			};
 		};
 	} forEach ("true" configClasses (missionConfigFile >> "CfgRemoteExec" >> "Commands"));
 };
 
-if (KH_var_remoteExecFunctionsMode == 1) then {
+if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 	{
 		if (isNumber (_x >> "allowedTargets")) then {
-			if ((getNumber (_x >> "allowedTargets")) != 0) then {
+			if ((getNumber (_x >> "allowedTargets")) isNotEqualTo 0) then {
 				KH_var_remoteExecCommandsBlacklist set [toLower (configName _x), true];
 			};
 		};
 
 		if (isNumber (_x >> "jip")) then {
-			if ((getNumber (_x >> "jip")) == 0) then {
+			if ((getNumber (_x >> "jip")) isEqualTo 0) then {
 				KH_var_remoteExecCommandsJipBlacklist set [toLower (configName _x), true];
 			};
 		};
@@ -205,13 +199,13 @@ if (KH_var_remoteExecFunctionsMode == 1) then {
 
 	{
 		if (isNumber (_x >> "allowedTargets")) then {
-			if ((getNumber (_x >> "allowedTargets")) != 0) then {
+			if ((getNumber (_x >> "allowedTargets")) isNotEqualTo 0) then {
 				KH_var_remoteExecFunctionsBlacklist set [toLower (configName _x), true, true];
 			};
 		};
 
 		if (isNumber (_x >> "jip")) then {
-			if ((getNumber (_x >> "jip")) == 0) then {
+			if ((getNumber (_x >> "jip")) isEqualTo 0) then {
 				KH_var_remoteExecFunctionsJipBlacklist set [toLower (configName _x), true, true];
 			};
 		};
@@ -248,6 +242,14 @@ addMissionEventHandler [
 
 ["KH_eve_execution", KH_fnc_callParsedFunction] call CBA_fnc_addEventHandler;
 
+[
+	"KH_eve_registerCallback", 
+	{
+		params ["_arguments", ["_function", "", [""]], ["_caller", 2, [0]], ["_id", "", [""]]];
+		missionNamespace setVariable [_id, [_arguments, _function, _caller] call KH_fnc_callParsedFunction, _caller];		
+	}
+] call CBA_fnc_addEventHandler;
+
 {
 	[[isServer, hasInterface], _x] call KH_fnc_luaOperation;
 } forEach KH_var_preInitLuaExecutions;
@@ -278,7 +280,7 @@ addMissionEventHandler [
 			};
 
 			if (_delay >= 0) then {
-				if (_delay isEqualTo 9) then {
+				if (_delay isEqualTo 0) then {
 					if (diag_tickTime > _delta) then {
 						_totalDelta = if (_totalDelta isEqualTo -1) then {
 							diag_deltaTime;
@@ -400,8 +402,8 @@ if isServer then {
 	publicVariable "KH_var_missionStarted";
 	KH_var_playersLoaded = false;
 	publicVariable "KH_var_playersLoaded";
-	KH_var_currentAdmin = 2;
-	publicVariable "KH_var_currentAdmin";
+	KH_var_adminMachine = 2;
+	publicVariable "KH_var_adminMachine";
 	KH_var_disconnectedPlayers = [];
 	publicVariable "KH_var_disconnectedPlayers";
 	KH_var_allMachines = [2];
@@ -422,6 +424,8 @@ if isServer then {
 	publicVariable "KH_var_allPlayerUnits";
 	KH_var_initialPlayerUnits = [];
 	publicVariable "KH_var_initialPlayerUnits";
+	KH_var_initialPlayerMachines = [];
+	publicVariable "KH_var_initialPlayerMachines";
 	KH_var_jipPlayerUnits = [];
 	publicVariable "KH_var_jipPlayerUnits";
 	KH_var_jipPlayerMachines = [];
@@ -441,13 +445,14 @@ if isServer then {
 	[
 		"KH_eve_jipSetup",
 		{
-			params ["_name", "_arguments", "_dependency", "_unitRequired", "_id", "_eventOwner"];
-			private _currentHandler = KH_var_cachedJipHandlers get _id;
+			params ["_name", "_arguments", "_dependency", "_unitRequired", "_jipId"];
+			missionNamespace setVariable [_jipId, "ACTIVE"];
+			private _currentHandler = KH_var_cachedJipHandlers get _jipId;
 			private _continue = true;
 
 			if !(isNil "_currentHandler") then {
 				if ((_currentHandler select 4) isEqualTo _unitRequired) then {
-					KH_var_cachedJipHandlers set [_id, [["JIP_HANDLER", _id], _name, _arguments, _dependency, _unitRequired, _currentHandler select 5]];
+					KH_var_cachedJipHandlers set [_jipId, [["JIP_HANDLER", _jipId], _name, _arguments, _dependency, _unitRequired, _currentHandler select 5]];
 					_continue = false;
 				}
 				else {
@@ -459,7 +464,7 @@ if isServer then {
 
 			if !_continue exitWith {};
 			private _jipHandlers = [];
-			KH_var_cachedJipHandlers set [_id, [["JIP_HANDLER", _id], _name, _arguments, _dependency, _unitRequired, _jipHandlers]];
+			KH_var_cachedJipHandlers set [_jipId, [["JIP_HANDLER", _jipId], _name, _arguments, _dependency, _unitRequired, _jipHandlers]];
 			
 			private _joinType = if _unitRequired then {
 				["KH_eve_playerLoaded", "KH_eve_headlessPreloaded"];
@@ -472,182 +477,179 @@ if isServer then {
 				private _jipHandler = [
 					"CBA",
 					_x,
-					[_id, _x],
+					[_jipId, _x],
 					{
-						_args params ["_id", "_joinType"];
-						private _idState = missionNamespace getVariable [_id, "ACTIVE"];
+						_args params ["_jipId", "_joinType"];
+						private _jipState = missionNamespace getVariable _jipId;
 						
-						if (_idState isNotEqualTo "INACTIVE") then {
-							switch _idState do {
-								case "ACTIVE": {
-									private _currentHandler = KH_var_cachedJipHandlers get _id;
-									if (isNil "_currentHandler") exitWith {};
-									private _dependency = _currentHandler param [3];
-									private _condition = true;
+						if (_jipState isNotEqualTo "TERMINATE") then {
+							if (_jipState isEqualTo "ACTIVE") then {
+								private _currentHandler = KH_var_cachedJipHandlers get _jipId;
+								if (isNil "_currentHandler") exitWith {};
+								private _dependency = _currentHandler select 3;
+								private _condition = true;
 
-									private _joiningMachine = if (_joinType isEqualTo "KH_eve_playerLoaded") then {
-										_this select 1;
-									}
-									else {
-										_this select 0;
+								private _joiningMachine = if (_joinType isEqualTo "KH_eve_playerLoaded") then {
+									_this select 1;
+								}
+								else {
+									_this select 0;
+								};
+
+								switch (typeName _dependency) do {
+									case "BOOL": {
+										if !_dependency then {
+											_condition = false;
+										};
 									};
 
-									switch (typeName _dependency) do {
-										case "BOOL": {
-											if !_dependency then {
-												_condition = false;
-											};
+									case "SCALAR": {
+										if !(_dependency in KH_var_allMachines) then {
+											_condition = false;
 										};
+									};
 
-										case "SCALAR": {
-											if !(_dependency in KH_var_allMachines) then {
-												_condition = false;
-											};
+									case "OBJECT": {
+										if (isNull _dependency) then {
+											_condition = false;
 										};
+									};
 
-										case "OBJECT": {
-											if (isNull _dependency) then {
-												_condition = false;
-											};
+									case "TEAM_MEMBER": {
+										if (isNull _dependency) then {
+											_condition = false;
 										};
+									};
 
-										case "TEAM_MEMBER": {
-											if (isNull _dependency) then {
-												_condition = false;
-											};
+									case "GROUP": {
+										if (isNull _dependency) then {
+											_condition = false;
 										};
+									};
 
-										case "GROUP": {
-											if (isNull _dependency) then {
-												_condition = false;
+									case "STRING": {
+										if ((parseNumber (_dependency select [0, 1])) isNotEqualTo 0) then {
+											private _uid = if (_joinType isEqualTo "KH_eve_playerLoaded") then {
+												getPlayerUID (_this select 0); 
+											}
+											else {
+												_this select 1;
 											};
-										};
 
-										case "STRING": {
-											if ((parseNumber (_dependency select [0, 1])) isNotEqualTo 0) then {
-												private _uid = if (_joinType isEqualTo "KH_eve_playerLoaded") then {
-													getPlayerUID (_this select 0); 
+											if (_dependency isNotEqualTo _uid) then {
+												if (":" in _dependency) then {
+													if ((isNull (objectFromNetId _dependency)) && (isNull (groupFromNetId _dependency))) then {
+														_condition = false;
+													};
 												}
 												else {
-													_this select 1;
+													private _player = KH_var_allPlayerIdMachines get _x;
+													private _headlessClient = KH_var_allHeadlessIdMachines get _x;
+
+													if ((isNil "_player") && (isNil "_headlessClient")) then {
+														_condition = false;
+													};
+												};
+											};
+										}
+										else {
+											if !(missionNamespace getVariable [_dependency, false]) then {
+												_condition = false;
+											};
+										};
+									};
+
+									case "ARRAY": {																					
+										{
+											switch (typeName _x) do {
+												case "SCALAR": {
+													if !(_x in KH_var_allMachines) then {
+														_condition = false;
+														break;
+													};
 												};
 
-												if (_dependency isNotEqualTo _uid) then {
-													if (":" in _dependency) then {
-														if ((isNull (objectFromNetId _dependency)) && (isNull (groupFromNetId _dependency))) then {
-															_condition = false;
+												case "OBJECT": {
+													if (isNull _x) then {
+														_condition = false;
+														break;
+													};
+												};
+
+												case "TEAM_MEMBER": {
+													if (isNull _x) then {
+														_condition = false;
+														break;
+													};
+												};
+
+												case "GROUP": {
+													if (isNull _x) then {
+														_condition = false;
+														break;
+													};
+												};
+
+												case "STRING": {
+													if ((parseNumber (_x select [0, 1])) isNotEqualTo 0) then {
+														private _uid = if (_joinType isEqualTo "KH_eve_playerLoaded") then {
+															getPlayerUID (_this select 0); 
+														}
+														else {
+															_this select 1;
+														};
+
+														if (_x isNotEqualTo _uid) then {
+															if (":" in _x) then {
+																if ((isNull (objectFromNetId _x)) && (isNull (groupFromNetId _x))) then {
+																	_condition = false;
+																	break;
+																};
+															}
+															else {
+																private _player = KH_var_allPlayerIdMachines get _x;
+																private _headlessClient = KH_var_allHeadlessIdMachines get _x;
+
+																if ((isNil "_player") && (isNil "_headlessClient")) then {
+																	_condition = false;
+																	break;
+																};
+															};
 														};
 													}
 													else {
-														private _player = KH_var_allPlayerIdMachines get _x;
-														private _client = KH_var_allHeadlessIdMachines get _x;
-
-														if ((isNil "_player") && (isNil "_client")) then {
+														if !(missionNamespace getVariable [_x, false]) then {
 															_condition = false;
+															break;
 														};
 													};
 												};
-											}
-											else {
-												if !(missionNamespace getVariable [_dependency, false]) then {
-													_condition = false;
+
+												case "CODE": {
+													if !(call _x) then {
+														_condition = false;
+														break;
+													};
 												};
 											};
-										};
-
-										case "ARRAY": {																					
-											{
-												switch (typeName _x) do {
-													case "SCALAR": {
-														if !(_x in KH_var_allMachines) then {
-															_condition = false;
-															break;
-														};
-													};
-
-													case "OBJECT": {
-														if (isNull _x) then {
-															_condition = false;
-															break;
-														};
-													};
-
-													case "TEAM_MEMBER": {
-														if (isNull _x) then {
-															_condition = false;
-															break;
-														};
-													};
-
-													case "GROUP": {
-														if (isNull _x) then {
-															_condition = false;
-															break;
-														};
-													};
-
-													case "STRING": {
-														if ((parseNumber (_x select [0, 1])) isNotEqualTo 0) then {
-															private _uid = if (_joinType isEqualTo "KH_eve_playerLoaded") then {
-																getPlayerUID (_this select 0); 
-															}
-															else {
-																_this select 1;
-															};
-
-															if (_x isNotEqualTo _uid) then {
-																if (":" in _x) then {
-																	if ((isNull (objectFromNetId _x)) && (isNull (groupFromNetId _x))) then {
-																		_condition = false;
-																		break;
-																	};
-																}
-																else {
-																	private _player = KH_var_allPlayerIdMachines get _x;
-																	private _client = KH_var_allHeadlessIdMachines get _x;
-
-																	if ((isNil "_player") && (isNil "_client")) then {
-																		_condition = false;
-																		break;
-																	};
-																};
-															};
-														}
-														else {
-															if !(missionNamespace getVariable [_x, false]) then {
-																_condition = false;
-																break;
-															};
-														};
-													};
-
-													case "CODE": {
-														if !(call _x) then {
-															_condition = false;
-															break;
-														};
-													};
-												};
-											} forEach _dependency;
-										};
-
-										case "CODE": {
-											if !(call _dependency) then {
-												_condition = false;
-											};
-										};
+										} forEach _dependency;
 									};
 
-									if _condition then {
-										[_currentHandler param [1], _currentHandler param [2], _joiningMachine] call CBA_fnc_ownerEvent;
+									case "CODE": {
+										if !(call _dependency) then {
+											_condition = false;
+										};
 									};
 								};
 
-								case "TERMINATE": {
-									KH_var_cachedJipHandlers deleteAt _id;
-									[_localId] call KH_fnc_removeEventHandler;
-								};		
+								if _condition then {
+									[_currentHandler select 1, _currentHandler select 2, _joiningMachine] call CBA_fnc_ownerEvent;
+								};
 							};
+						}
+						else {
+							KH_var_cachedJipHandlers deleteAt _jipId;
+							[_localId] call KH_fnc_removeEventHandler;
 						};
 					}
 				] call KH_fnc_addEventHandler;
@@ -695,15 +697,15 @@ if isServer then {
 				[[], KH_fnc_playerJipPreloadInit, _machineId, true] call KH_fnc_execute;
 				KH_var_jipPlayerMachines pushBackUnique _machineId;
 				publicVariable "KH_var_jipPlayerMachines";
-				missionNamespace setVariable ["KH_var_isJip", true, _machineId];
+				missionNamespace setVariable ["KH_var_jip", true, _machineId];
 			}
 			else {
 				[[], KH_fnc_playerPreloadInit, _machineId, true] call KH_fnc_execute;
 			};
 
 			if ((admin _machineId) != 0) then {
-				KH_var_currentAdmin = _machineId;
-				publicVariable "KH_var_currentAdmin";
+				KH_var_adminMachine = _machineId;
+				publicVariable "KH_var_adminMachine";
 			};
 
 			["KH_eve_playerPreloaded", [_machineId, _uid, _profileName, _profileNameSteam]] call CBA_fnc_globalEvent;
@@ -795,8 +797,8 @@ if isServer then {
 
 	{
 		if ((_x getUserInfo 8) != 0) then {
-			KH_var_currentAdmin = _x getUserInfo 1;
-			publicVariable "KH_var_currentAdmin";
+			KH_var_adminMachine = _x getUserInfo 1;
+			publicVariable "KH_var_adminMachine";
 			break;
 		};
 	} forEach allUsers;
@@ -808,13 +810,13 @@ if isServer then {
 			private _machineId = _networkId getUserInfo 1;
 			
 			if (_loggedIn || _votedIn) then {
-				KH_var_currentAdmin = _machineId;
+				KH_var_adminMachine = _machineId;
 			}
 			else {
-				KH_var_currentAdmin = 2;
+				KH_var_adminMachine = 2;
 			};
 
-			publicVariable "KH_var_currentAdmin";
+			publicVariable "KH_var_adminMachine";
 			["KH_eve_adminChanged", [_machineId, _loggedIn, _votedIn]] call CBA_fnc_globalEvent;
 		}
 	];
@@ -1012,6 +1014,9 @@ if isServer then {
 };
 
 if hasInterface then {
+	KH_var_contextMenuOpen = false;
+	KH_var_interactionMenuOpen = false;
+
 	[
 		"KH Framework", 
 		"KH_openInteractionMenu", 
@@ -1037,14 +1042,7 @@ if hasInterface then {
 			] call CBA_fnc_waitUntilAndExecute;
 		}, 
 		{}, 
-		[
-			0xDC, 
-			[
-				false, 
-				false, 
-				true
-			]
-		]
+		[0xDC, [false, false, true]]
 	] call CBA_fnc_addKeybind;
 
 	[
@@ -1081,14 +1079,7 @@ if hasInterface then {
 			};
 		}, 
 		{}, 
-		[
-			0xDC, 
-			[
-				false, 
-				false, 
-				false
-			]
-		]
+		[0xDC, [false, false, false]]
 	] call CBA_fnc_addKeybind;
 
 	[
@@ -1116,14 +1107,7 @@ if hasInterface then {
 			] call CBA_fnc_waitUntilAndExecute;
 		}, 
 		{}, 
-		[
-			0xDC, 
-			[
-				false, 
-				true, 
-				true
-			]
-		]
+		[0xDC, [false, true, true]]
 	] call CBA_fnc_addKeybind;
 
 	[
@@ -1160,24 +1144,14 @@ if hasInterface then {
 			};
 		}, 
 		{}, 
-		[
-			0xDC, 
-			[
-				false, 
-				true, 
-				false
-			]
-		]
+		[0xDC, [false, true, false]]
 	] call CBA_fnc_addKeybind;
-
-	KH_var_contextMenuOpen = false;
-	KH_var_interactionMenuOpen = false;
 
 	[
 		"unit", 
 		{
 			params ["_unit"];
-			KH_var_currentPlayerUnit = _unit;
+			KH_var_playerUnit = _unit;
 		},
 		true
 	] call CBA_fnc_addPlayerEventHandler;

@@ -1,11 +1,9 @@
-params ["_arguments", ["_function", "", [""]]];
+params ["_arguments", ["_function", "", [""]], ["_caller", 2, [0]]];
 private _storedFunction = missionNamespace getVariable _function;
 
 if !(isNil "_storedFunction") exitWith {
 	_arguments call _storedFunction;
 };
-
-private _caller = param [2, 2, [0]];
 
 [
 	[_arguments, _function, _caller],
@@ -17,7 +15,9 @@ private _caller = param [2, 2, [0]];
 			missionNamespace setVariable [_function, _storedFunction];
 			_arguments call _storedFunction;
 		};
-
+		
+		if ((_caller isEqualTo 2) || (_caller isEqualTo clientOwner)) exitWith {};
+		
 		[
 			[_arguments, _function],
 			{
@@ -26,12 +26,18 @@ private _caller = param [2, 2, [0]];
 
 				if !(isNil "_storedFunction") then { 
 					missionNamespace setVariable [_function, _storedFunction];
+
+					if !isServer then {
+						missionNamespace setVariable [_function, _storedFunction, 2];
+					};
+
 					_arguments call _storedFunction;
 				};
 			},
+			_caller,
+			true,
 			[
-				"CALLBACK", 
-				_caller, 
+				"CALLBACK",
 				[_function],
 				{
 					params ["_function"];
@@ -41,17 +47,16 @@ private _caller = param [2, 2, [0]];
 						[_storedFunction];
 					}
 					else {
-						[nil];
+						[];
 					};											
 				}
-			],
-			true,
-			false
+			]
 		] call KH_fnc_execute;
 	},
+	"SERVER",
+	true,
 	[
-		"CALLBACK", 
-		"SERVER", 
+		"CALLBACK",
 		[_function],
 		{
 			params ["_function"];
@@ -61,10 +66,8 @@ private _caller = param [2, 2, [0]];
 				[_storedFunction];
 			}
 			else {
-				[nil];
+				[];
 			};											
 		}
-	],
-	true,
-	false
+	]
 ] call KH_fnc_execute;

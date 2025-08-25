@@ -1,6 +1,6 @@
 local function factorial(n)
     if n <= 1 then
-        return 1 
+        return 1
     end
 
     return n * factorial(n - 1)
@@ -8,7 +8,7 @@ end
 
 local function fibonacci(n)
     if n <= 1 then
-        return n 
+        return n
     end
 
     return fibonacci(n - 1) + fibonacci(n - 2)
@@ -326,4 +326,4 @@ local final_validation = {
 
 results[98] = final_validation
 results[99] = jit
-return {results, true, 1, 'string', {1, 2, 3}, {key1 = true, key2 = 2, key3 = 'value', key4 = {'A', 'B', 'C'}, key5 = {keyA = true, keyB = false}}}
+return {results, true, 1, 'string', {1, 2, 3}, {key1 = true, key2 = 2, key3 = 'value', key4 = {'A', 'B', 'C'}, key5 = {keyA = true, keyB = false}, key6 = nil}, nil}

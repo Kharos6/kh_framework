@@ -9,15 +9,15 @@ switch _value do {
 		false;
 	};
 
+	case 0: {
+		false;
+	};
+
 	case "FALSE": {
 		false;
 	};
 
 	case "false": {
-		false;
-	};
-
-	case 0: {
 		false;
 	};
 

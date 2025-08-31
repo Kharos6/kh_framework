@@ -158,7 +158,7 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 					{
 						_args params ["_detachAction"];
 						[player, _detachAction] call BIS_fnc_holdActionRemove;
-						[_localId] call KH_fnc_removeEventHandler;
+						[_eventId] call KH_fnc_removeEventHandler;
 					}
 				] call KH_fnc_addEventHandler;
 			};
@@ -335,7 +335,7 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 															{
 																_args params ["_unit", "_vehicle", "_targetTime"];
 
-																if (!(CBA_missionTime >= _targetTime) && !((_unit distance _vehicle) < 30)) then {
+																if ((CBA_missionTime < _targetTime) && ((_unit distance _vehicle) >= 30)) then {
 																	drawLine3D [
 																		_unit modelToWorldVisual [0, 0, 0.5], 
 																		_vehicle modelToWorldVisual [0, 0, 0], 

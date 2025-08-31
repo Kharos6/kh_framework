@@ -2,99 +2,45 @@ params [
 	["_namespace", missionNamespace, ["", missionNamespace, objNull, teamMemberNull, grpNull, locationNull, taskNull, controlNull, displayNull]], 
 	"_name", 
 	"_defaultValue", 
-	["_target", false, [true, []]]
+	["_target", [], [[]]]
 ];
 
-if (_target isEqualTo false) exitWith {
+if (_target isEqualTo []) then {
 	if (_namespace isEqualType "") then {
-		_name = switch (typeName _name) do {
-			case "OBJECT": {
-				if (isPlayer _name) then {
-					getPlayerUID _name;
-				}
-				else {
-					if ((vehicleVarName _name) isEqualTo "") then {
-						if ((roleDescription _name) isEqualTo "") then {
-							"";
-						}
-						else {
-							roleDescription _name;
-						};
-					}
-					else {
-						vehicleVarName _name;
-					};
-				};
-			};
+		_name = (["", _name] call KH_fnc_serializeValue) param [1];
 
-			case "TEAM_MEMBER": {
-				private _entity = agent _name;
-
-				if (isPlayer _entity) then {
-					getPlayerUID _entity;
-				}
-				else {
-					if ((vehicleVarName _entity) isEqualTo "") then {
-						if ((roleDescription _entity) isEqualTo "") then {
-							"";
-						}
-						else {
-							roleDescription _entity;
-						};
-					}
-					else {
-						vehicleVarName _entity;
-					};
-				};
-			};
-
-			case "GROUP": {
-				groupId _name;
-			};
-
-			case "LOCATION": {
-				name _name;
-			};
-			
-			case "STRING": {
-				_name;
-			};
-
-			default {
-				str _name;
-			};
-		};
-
-		if (_name isNotEqualTo "") then {
-			[_namespace, _name, _defaultValue] call KH_fnc_readKhData;
+		private _value = if (_namespace isEqualTo "LUA") then {
+			([_name] call KH_fnc_luaGetVariable) call KH_fnc_parseValue;
 		}
 		else {
-			_defaultValue;
+			([_namespace, _name] call KH_fnc_readKhData) call KH_fnc_parseValue;
 		};
+
+		[_value, _defaultValue] select (isNil "_value");
 	}
 	else {
 		_namespace getVariable [_name, _defaultValue];
 	};
-};
+}
+else {
+	_target params [
+		["_callbackTarget", true, [true, 0, "", [], {}, objNull, teamMemberNull, grpNull, sideUnknown, locationNull]],
+		"_arguments", 
+		["_function", {}, ["", {}]]
+	];
 
-_target params [
-	["_callbackTarget", true, [true, 0, "", [], {}, objNull, teamMemberNull, grpNull, sideUnknown, locationNull]],
-	"_arguments", 
-	["_function", {}, ["", {}]]
-];
-
-[
-	_arguments,
-	_function,
-	_callbackTarget,
-	true,
 	[
-		"CALLBACK",
+		_arguments,
+		_function,
 		_callbackTarget,
-		[_namespace, _name, _defaultValue],
-		{
-			params ["_namespace", "_name", "_defaultValue"];
-			[[_namespace, _name, _defaultValue, false] call KH_fnc_getVariable];
-		}
-	]
-] call KH_fnc_execute;
+		true,
+		[
+			"CALLBACK",
+			[_namespace, _name, _defaultValue],
+			{
+				params ["_namespace", "_name", "_defaultValue"];
+				[[_namespace, _name, _defaultValue, []] call KH_fnc_getVariable];
+			}
+		]
+	] call KH_fnc_execute;
+};

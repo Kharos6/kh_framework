@@ -1,10 +1,7 @@
 if canSuspend exitWith {
 	private "_return";
 	isNil {_return = ([_x] apply KH_fnc_execute) select 0;};
-
-	if !(isNil "_return") then {
-		_return;
-	};
+	_return;
 };
 
 params [
@@ -30,7 +27,7 @@ private _subfunction = {
 			"KH_eve_execution", 
 			[
 				_arguments, 
-				[compile ([_special, " call ['", _function, "', missionNamespace getVariable '", _argumentsId, "'];"] joinString "")] call KH_fnc_parseFunction, 
+				[compile ([_special, " call ['", _function, "', missionNamespace getVariable '", _argumentsId, "'];"] joinString ""), false] call KH_fnc_parseFunction, 
 				clientOwner
 			], 
 			_target, 
@@ -81,20 +78,30 @@ private _subfunction = {
 					_args params ["_arguments", "_function"];
 					private _argsCallback = param [1];
 					_arguments call (missionNamespace getVariable _function);
-					[_localId] call KH_fnc_removeEventHandler;
+					[_eventId] call KH_fnc_removeEventHandler;
 				}
 			] call KH_fnc_addEventHandler;
 
-			["KH_eve_registerCallback", [_callbackArguments, [_callbackFunction, false] call KH_fnc_parseFunction, clientOwner, _callbackId], _target, false] call KH_fnc_triggerCbaEvent;
+			[
+				"KH_eve_registerCallback", 
+				[_callbackArguments, [_callbackFunction, false] call KH_fnc_parseFunction, clientOwner, _callbackId], 
+				_target, 
+				false
+			] call KH_fnc_triggerCbaEvent;
 		};
 
 		case "PERSISTENT": {
-			private _sendoffArguments = _special param [1];
-			private _sendoffFunction = _special param [2, {}, ["", {}]];
-			private _persistencyId = _special param [3, "", [""]];
+			private _immediate = _special param [1, true, [true]];
+			private _sendoffArguments = _special param [2];
+			private _sendoffFunction = _special param [3, {}, ["", {}]];
+			private _persistentExecutionId = _special param [4, "", [""]];
 
-			if (_persistencyId isNotEqualTo "") then {
-				_persistencyId;
+			if (_target isEqualType teamMemberNull) then {
+				_target = agent _target;
+			};
+
+			if (_persistentExecutionId isNotEqualTo "") then {
+				_persistentExecutionId;
 			}
 			else {
 				if (_specialIdOverride isNotEqualTo "") then {
@@ -105,58 +112,18 @@ private _subfunction = {
 				};
 			};
 
-			_target setVariable [_persistencyId, "ACTIVE", true];
-			private _persistencyEventId = [hashValue _target, _persistencyId] joinString "";
-			private _continue = true;
-
-			if !(isNil {missionNamespace getVariable _persistencyEventId;}) then {
-				_continue = false;
-			};
-
-			missionNamespace setVariable [_persistencyEventId, [_arguments, _function, _sendoffArguments, [_sendoffFunction, false] call KH_fnc_parseFunction, clientOwner], true];	
-			["KH_eve_execution", [_arguments, _function, clientOwner], _target, false] call KH_fnc_triggerCbaEvent;
-			
-			if !_continue exitWith {
-				[_target, _persistencyId, true];
+			if _immediate then {
+				["KH_eve_execution", [_arguments, _function, clientOwner], _target, false] call KH_fnc_triggerCbaEvent;
 			};
 
 			[
-				"KH_eve_execution",
-				[
-					[
-						["STANDARD", _target, "LOCAL"],
-						"Local",
-						[_persistencyId, _persistencyEventId],
-						{
-							params ["_entity", "_local"];
-							_args params ["_persistencyId", "_persistencyEventId"];
-							private _persistencyState = _entity getVariable _persistencyId;
-
-							if (_persistencyState isNotEqualTo "TERMINATE") then {
-								if (_persistencyState isEqualTo "ACTIVE") then {
-									(missionNamespace getVariable _persistencyEventId) params ["_arguments", "_function", "_sendoffArguments", "_sendoffFunction", "_caller"];
-									
-									if _local then {
-										[_arguments, _function, _caller] call KH_fnc_callParsedFunction;
-									}
-									else {
-										[_sendoffArguments, _sendoffFunction, _caller] call KH_fnc_callParsedFunction;
-									};
-								};
-							}
-							else {
-								[_localId] call KH_fnc_removeEventHandler;
-							};
-						}
-					], 
-					"KH_fnc_addEventHandler", 
-					clientOwner
-				],
-				"GLOBAL",
-				[_target, false, _persistencyId]
+				"KH_eve_persistentExecutionSetup", 
+				[_arguments, _function, _target, _sendoffArguments, [_sendoffFunction, false] call KH_fnc_parseFunction, _persistentExecutionId, clientOwner], 
+				"SERVER", 
+				false
 			] call KH_fnc_triggerCbaEvent;
 
-			[_target, _persistencyId, true];
+			[_target, _persistentExecutionId, true];
 		};
 	};
 };
@@ -172,12 +139,12 @@ if (_environment isEqualType true) exitWith {
 };
 
 private _environmentId = call KH_fnc_generateUid;
-missionNamespace setVariable [_environmentId, "ACTIVE"];
+missionNamespace setVariable [_environmentId, true];
 private _environmentType = _environment param [0, "", [""]];
 
 switch _environmentType do {
 	case "TEMPORAL": {
-		private _interval = _environment param [1, 0, [0, ""]];
+		private _interval = _environment param [1, 0, [0]];
 		private _immediate = _environment param [2, true, [true]];
 		private _conditionArguments = _environment param [3];
 		private _conditionFunction = _environment param [4, {true;}, ["", {}]];
@@ -206,7 +173,7 @@ switch _environmentType do {
 				};
 
 				case "PERSISTENT": {
-					private _specialId = _special param [3, "", [""]];
+					private _specialId = _special param [4, "", [""]];
 
 					if (_specialId isNotEqualTo "") then {
 						_specialIdOverride = _specialId;
@@ -222,40 +189,42 @@ switch _environmentType do {
 
 		[
 			[
-				"TEMPORAL",
-				_immediate,
-				[_conditionArguments, missionNamespace getVariable ([_conditionFunction, false] call KH_fnc_parseFunction), _environmentId],
-				{
-					params ["_conditionArguments", "_conditionFunction", "_environmentId"];
-					private _environmentState = missionNamespace getVariable _environmentId;
+				missionNamespace, 
+				_environmentId, 
+				clientOwner,
+				[
+					[
+						"TEMPORAL",
+						_immediate,
+						[_conditionArguments, missionNamespace getVariable ([_conditionFunction, false] call KH_fnc_parseFunction), _environmentId],
+						{
+							params ["_conditionArguments", "_conditionFunction", "_environmentId"];
+							private _handlerId = [[missionNamespace, _environmentId, clientOwner, _eventId]];
 
-					if (_environmentState isNotEqualTo "TERMINATE") then {
-						if (_environmentState isEqualTo "ACTIVE") then {																											
-							_conditionArguments call _conditionFunction;
-						}
-						else {
-							false;
-						};
+							if (missionNamespace getVariable _environmentId) then {																											
+								_conditionArguments call _conditionFunction;
+							}
+							else {
+								[_handlerId] call KH_fnc_removeHandler;
+								false;
+							};
+						},
+						_timeoutRules,
+						_timeoutArguments,
+						_timeoutFunction,
+						_verboseDelta
+					],
+					_interval,
+					[_arguments, [_function, false] call KH_fnc_parseFunction, _target, _special, _subfunction, _specialIdOverride, _environmentId],
+					{
+						params ["_arguments", "_function", "_target", "_special", "_subfunction", "_specialIdOverride", "_environmentId"];
+						private _handlerId = [[missionNamespace, _environmentId, clientOwner, _eventId]];													
+						[_arguments, _function, _target, _special, _specialIdOverride] call _subfunction;
 					}
-					else {
-						[_localId] call KH_fnc_removeEventHandler;
-						false;
-					};
-				},
-				_timeoutRules,
-				_timeoutArguments,
-				_timeoutFunction,
-				_verboseDelta
-			],
-			_interval,
-			[_arguments, [_function, false] call KH_fnc_parseFunction, _target, _special, _subfunction, _specialIdOverride],
-			{
-				params ["_arguments", "_function", "_target", "_special", "_subfunction", "_specialIdOverride"];																
-				[_arguments, _function, _target, _special, _specialIdOverride] call _subfunction;
-			}
-		] call KH_fnc_addEventHandler;
-
-		[[missionNamespace, _environmentId, clientOwner], _return];
+				] call KH_fnc_addEventHandler
+			], 
+			_return
+		];
 	};
 
 	case "SEQUENCE": {
@@ -313,7 +282,7 @@ switch _environmentType do {
 					};
 
 					case "PERSISTENT": {
-						private _currentSpecialId = _currentSpecial param [3, "", [""]];
+						private _currentSpecialId = _currentSpecial param [4, "", [""]];
 						
 						if (_currentSpecialId isNotEqualTo "") then {
 							_currentSpecialIdOverride = _currentSpecialId;
@@ -342,55 +311,59 @@ switch _environmentType do {
 				_currentSpecialIdOverride
 			];
 		};
-
+		
 		[
 			[
-				"TEMPORAL",
-				true,
-				[0, _parsedExecutionRules, _environmentId],
-				{
-					params ["_currentIndex", "_parsedExecutionRules", "_environmentId"];
-					private _delay = (_parsedExecutionRules select 0) select _currentIndex;
-					private _conditionArguments = (_parsedExecutionRules select 1) select _currentIndex;
-					private _conditionFunction = (_parsedExecutionRules select 2) select _currentIndex;
-					private _environmentState = missionNamespace getVariable _environmentId;
-					private _state = false;
+				missionNamespace, 
+				_environmentId,
+				clientOwner,
+				[
+					[
+						"TEMPORAL",
+						true,
+						[0, _parsedExecutionRules, _environmentId],
+						{
+							params ["_currentIndex", "_parsedExecutionRules", "_environmentId"];
+							private _delay = (_parsedExecutionRules select 0) select _currentIndex;
+							private _conditionArguments = (_parsedExecutionRules select 1) select _currentIndex;
+							private _conditionFunction = (_parsedExecutionRules select 2) select _currentIndex;
+							private _handlerId = [[missionNamespace, _environmentId, clientOwner, _eventId]];
+							private _state = false;
 
-					if (_environmentState isNotEqualTo "TERMINATE") then {
-						if (_environmentState isEqualTo "ACTIVE") then {
-							if (diag_tickTime > _delay) then {
-								if (_conditionArguments call _conditionFunction) then {
-									_state = true;
-									_this set [0, _currentIndex + 1];
+							if (missionNamespace getVariable _environmentId) then {
+								if (diag_tickTime > _delay) then {
+									if (_conditionArguments call _conditionFunction) then {
+										_state = true;
+										_this set [0, _currentIndex + 1];
+									};
 								};
+							}
+							else {
+								[_handlerId] call KH_fnc_removeHandler;
 							};
+
+							_state;
+						},
+						[_timeout, false, false, _timeoutOnDeletion],
+						_timeoutArguments,
+						_timeoutFunction,
+						false
+					],
+					0,
+					[0, _executions, _subfunction, _environmentId],
+					{
+						params ["_currentIndex", "_executions", "_subfunction", "_environmentId"];
+						private _handlerId = [[missionNamespace, _environmentId, clientOwner, _eventId]];
+						(_executions select _currentIndex) call _subfunction;
+						_this set [0, _currentIndex + 1];
+						
+						if ((_this select 0) > ((count _executions) - 1)) then {
+							[_handlerId] call KH_fnc_removeHandler;
 						};
 					}
-					else {
-						[_localId] call KH_fnc_removeEventHandler;
-						_state = false;
-					};
-
-					_state;
-				},
-				[_timeout, false, false, _timeoutOnDeletion],
-				_timeoutArguments,
-				_timeoutFunction,
-				false
-			],
-			0,
-			[0, _executions, _subfunction],
-			{
-				params ["_currentIndex", "_executions", "_subfunction"];
-				(_executions select _currentIndex) call _subfunction;
-				_this set [0, _currentIndex + 1];
-				
-				if ((_this select 0) > ((count _executions) - 1)) then {
-					[_localId] call KH_fnc_removeEventHandler;
-				};
-			}
-		] call KH_fnc_addEventHandler;
-		
-		[[missionNamespace, _environmentId, clientOwner], _return];
+				] call KH_fnc_addEventHandler
+			], 
+			_return
+		];
 	};
 };

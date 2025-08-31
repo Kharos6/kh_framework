@@ -372,7 +372,7 @@ switch (typeName _target) do {
         [
             [_event, _arguments, flatten _target, clientOwner],
             {
-                params ["_event", "_arguments", "_targets", "_eventOwner"];
+                params ["_event", "_arguments", "_targets", "_caller"];
                 private _parsedTargets = [];
 
                 {
@@ -381,7 +381,7 @@ switch (typeName _target) do {
                     switch (typeName _target) do {
                         case "BOOL": {
                             if _target then {
-                                _parsedTargets pushBackUnique _eventOwner;
+                                _parsedTargets pushBackUnique _caller;
                             };
                         };
 
@@ -410,7 +410,7 @@ switch (typeName _target) do {
                         case "STRING": {
                             switch _target do {
                                 case "LOCAL": {
-                                    _parsedTargets pushBackUnique _eventOwner;
+                                    _parsedTargets pushBackUnique _caller;
                                 };
 
                                 case "SERVER": {
@@ -422,7 +422,7 @@ switch (typeName _target) do {
                                 };
 
                                 case "REMOTE": {
-                                    _parsedTargets insert [-1, KH_var_allMachines - [_eventOwner], true];
+                                    _parsedTargets insert [-1, KH_var_allMachines - [_caller], true];
                                 };
 
                                 case "PLAYERS": {
@@ -648,6 +648,4 @@ if (_jip isNotEqualTo false) then {
     };
 };
 
-if !(isNil "_return") then {
-    _return;
-};
+_return;

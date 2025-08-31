@@ -89,7 +89,7 @@ if !KH_var_contextMenuOpen then {
 			} forEach KH_var_contextMenuControls;
 			
 			KH_var_contextMenuOpen = false;
-			[_localId] call KH_fnc_removeEventHandler;
+			[_eventId] call KH_fnc_removeEventHandler;
 			nil;
 		}
 	] call KH_fnc_addEventHandler;
@@ -106,7 +106,7 @@ if !KH_var_contextMenuOpen then {
 			} forEach KH_var_contextMenuControls;
 			
 			KH_var_contextMenuOpen = false;
-			[_localId] call KH_fnc_removeEventHandler;
+			[_eventId] call KH_fnc_removeEventHandler;
 			nil;
 		}
 	] call KH_fnc_addEventHandler;

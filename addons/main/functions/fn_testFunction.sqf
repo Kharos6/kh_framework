@@ -14,14 +14,9 @@ else {
 	_arguments call _function;
 };
 
-private _match = if (_result isEqualTo _expectedResult) then {
-	"true";
-}
-else {
-	"false";
-};
+private _match = _result isEqualTo _expectedResult;
 
-if (!_logOnlyMismatch || (_logOnlyMismatch && (_match isEqualTo "false"))) then {
+if (!_logOnlyMismatch || (_logOnlyMismatch && !_match)) then {
 	if _simpleFormat then {
 		diag_log (text ([
 			"FUNCTION TEST: NAME = ",

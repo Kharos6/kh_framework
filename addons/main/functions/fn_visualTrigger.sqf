@@ -148,13 +148,13 @@ private _entityVariable = [missionNamespace, "KH_var_visualTriggerEntityPrevious
 							_currentPlayer setVariable [_playerVariable, _condition];
 						}
 						else {
-							[_localId] call KH_fnc_removeEventHandler;
+							[_eventId] call KH_fnc_removeEventHandler;
 						};
 					};
 				};
 
 				case "TERMINATE": {
-					[_localId] call KH_fnc_removeEventHandler;
+					[_eventId] call KH_fnc_removeEventHandler;
 				};		
 			};
 		};

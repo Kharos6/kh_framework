@@ -76,7 +76,7 @@ if _state then {
 
 														[
 															{
-																(!(player getVariable ["ACE_isUnconscious", false]) && !((lifeState player) == "INCAPACITATED"));
+																!((player getVariable ["ACE_isUnconscious", false]) && ((lifeState player) == "INCAPACITATED"));
 															}, 
 															{
 																[false, false, false] call ace_spectator_fnc_setSpectator;
@@ -89,7 +89,7 @@ if _state then {
 
 														[
 															{
-																(!(isNull (findDisplay 49)) || (!(player getVariable ["ACE_isUnconscious", false]) && !((lifeState player) == "INCAPACITATED")));
+																!((isNull (findDisplay 49)) || ((player getVariable ["ACE_isUnconscious", false]) && ((lifeState player) == "INCAPACITATED")));
 															}, 
 															{
 																["Terminate", [player]] call BIS_fnc_EGSpectator;
@@ -113,7 +113,7 @@ if _state then {
 
 															[
 																{
-																	(!(player getVariable ["ACE_isUnconscious", false]) && !((lifeState player) == "INCAPACITATED"));
+																	!((player getVariable ["ACE_isUnconscious", false]) && ((lifeState player) == "INCAPACITATED"));
 																}, 
 																{
 																	player setVariable ["KH_var_unconsciousSpectator", false, true];

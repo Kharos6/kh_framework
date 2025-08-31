@@ -2,8 +2,4 @@
 
 if ([_returnCode] call KH_fnc_parseBoolean) then {
 	diag_log (text ([_result, " | EXTENSION = kh_framework | FUNCTION = LuaClearVariables | ARGUMENTS = ", []] joinString ""));
-	nil;
-}
-else {
-	true;
 };

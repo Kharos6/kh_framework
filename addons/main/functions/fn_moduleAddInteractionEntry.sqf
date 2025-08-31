@@ -56,7 +56,7 @@ isNil {
 								[_name, _tooltip, _condition, _options] call KH_fnc_addSelfInteractionEntry;
 							};
 
-							[_localId] call KH_fnc_removeEventHandler;
+							[_eventId] call KH_fnc_removeEventHandler;
 						};
 					}
 				] call KH_fnc_addEventHandler;

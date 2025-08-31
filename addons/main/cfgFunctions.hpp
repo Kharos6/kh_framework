@@ -18,6 +18,7 @@ class CfgFunctions
 			class atomicValue {};
 			class atomicVariable {};
 			class binarizeKhData {};
+			class callExtension {};
 			class callParsedFunction {};
 			class cameraSequence {};		
 			class closeInterface {};
@@ -73,7 +74,6 @@ class CfgFunctions
 			class luaOperation {};
 			class luaResetState {};
 			class luaSetVariable {};
-			class manageHandler {};
 			class manageSimulatedInventory {};
 			class mathOperation {};
 			class moduleAddInteractionEntry {};
@@ -93,6 +93,7 @@ class CfgFunctions
 			class moduleSuspendMission {};
 			class moduleTeleport {};
 			class moduleVehicleSequence {};
+			class nestedArrayOperation {};
 			class openIdentificationCard {};
 			class openRemoteInteractionMenu {};
 			class openSelfInteractionMenu {};
@@ -101,12 +102,13 @@ class CfgFunctions
 			class orbitObject {};
 			class parseBoolean {};
 			class parseFunction {};
+			class parseValue {};
 			class postInit {postInit = 1;};
-			class postProcess {};
 			class preInit {preInit = 1;};
 			class preStart {preStart = 1;};
 			class readKhData {};
 			class removeEventHandler {};
+			class removeHandler {};
 			class recoverDisconnectedPlayers {};
 			class respawnSpectator {};
 			class saveCargoInventories {};

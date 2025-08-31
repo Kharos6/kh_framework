@@ -27,14 +27,9 @@ else {
 	[_expectedResult] joinString "";
 };
 
-private _match = if (_result isEqualTo _parsedExpectedResult) then {
-	"true";
-}
-else {
-	"false";
-};
+private _match = _result isEqualTo _expectedResult;
 
-if (!_logOnlyMismatch || (_logOnlyMismatch && (_match isEqualTo "false"))) then {
+if (!_logOnlyMismatch || (_logOnlyMismatch && !_match)) then {
 	if _simpleFormat then {
 		diag_log (text ([
 			"EXTENSION TEST: NAME = ",

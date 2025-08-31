@@ -29,7 +29,7 @@ if _state then {
 
 								if (_oldUid == _newUid) then {
 									[_unit, _attributes, KH_var_recoverDisconnectedPlayersGroup, false, true, KH_var_recoverDisconnectedPlayersLoadout, KH_var_recoverDisconnectedPlayersTransforms, KH_var_recoverDisconnectedPlayersTransforms, KH_var_recoverDisconnectedPlayersVehicle, true, true, false, true] call KH_fnc_setUnitAttributes;
-									[_localId] call KH_fnc_removeEventHandler;
+									[_eventId] call KH_fnc_removeEventHandler;
 								};
 							}
 						] call KH_fnc_addEventHandler;

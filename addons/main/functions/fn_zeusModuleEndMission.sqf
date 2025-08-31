@@ -18,7 +18,7 @@ isNil {
 			] call KH_fnc_execute;
 
 			deleteVehicle _logic;
-			[_localId] call KH_fnc_removeEventHandler;
+			[_eventId] call KH_fnc_removeEventHandler;
 			nil;
 		}
 	] call KH_fnc_addEventHandler;
@@ -31,7 +31,7 @@ isNil {
 			params ["_control"];
 			_args params ["_logic"];
 			deleteVehicle _logic;
-			[_localId] call KH_fnc_removeEventHandler;
+			[_eventId] call KH_fnc_removeEventHandler;
 			nil;
 		}
 	] call KH_fnc_addEventHandler;

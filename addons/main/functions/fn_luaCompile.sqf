@@ -1,12 +1,5 @@
 params [["_function", "", [""]], ["_name", "", [""]]];
-
-if (_function isEqualTo "") exitWith {
-	nil;
-};
-
-if !(isNil {KH_var_cachedLuaFunctions get _name}) exitWith {
-	true;
-};
+if !(isNil {KH_var_cachedLuaFunctions get _name}) exitWith {};
 
 if (".lua" in _function) then {
 	_function = preprocessFile _function;
@@ -16,10 +9,9 @@ if (".lua" in _function) then {
 
 if ([_returnCode] call KH_fnc_parseBoolean) then {
 	diag_log (text ([_result, " | EXTENSION = kh_framework | FUNCTION = LuaCompile | ARGUMENTS = ", _this] joinString ""));
-	nil;
 }
 else {
 	missionNamespace setVariable [_name, _function];
 	KH_var_cachedLuaFunctions set [_name, _function];
-	true;
+	nil;
 };

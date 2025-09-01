@@ -32,11 +32,10 @@ if (_entity isEqualType objNull) then {
 }
 else {
 	if (_name isEqualTo "") then {
-		_name = groupId _entity;
+		_name = hashValue _entity;
 	};
 
 	missionNamespace setVariable [_name, _entity, true];
-	_entity setGroupIdGlobal [_name];
 };
 
 _name;

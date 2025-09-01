@@ -1,58 +1,22 @@
-params [["_parsingType", "", ["", missionNamespace]], ["_value", "", [""]]];
+params [["_parsingType", "", [""]], "_value"];
 
 switch _parsingType do {
-    case "BOOL": {
-        if (_value isEqualType "") then {
-            [_value, false] call KH_fnc_parseBoolean;
-        }
-        else {
-            _value;
-        };
-    };
-
-    case "SCALAR": {
-        if (_value isEqualType 0) then {
-            _value;
-        }
-        else {
-            parseNumber _value;
-        };
-    };
-
+    case "BOOL";
+    case "SCALAR";
     case "STRING": {
-        if (_value isEqualType "") then {
-            _value;
-        }
-        else {
-            str _value;
-        };
+        _value;
     };
 
     case "TEXT": {
-        if (_value isEqualType (text _value)) then {
-            _value;
-        }
-        else {
-            text (str _value);
-        };
+        text _value;
     };
 
     case "ARRAY": {
-        if (_value isEqualType "") then {
-            parseSimpleArray _value;
-        }
-        else {
-            _value;
-        };
+        _value;
     };
 
     case "HASHMAP": {
-        if (_value isEqualType "") then {
-            createHashMapFromArray (parseSimpleArray _value);
-        }
-        else {
-            createHashMapFromArray _value;
-        };
+        createHashMapFromArray _value;
     };
 
     case "CODE": {
@@ -60,11 +24,11 @@ switch _parsingType do {
     };
 
     case "OBJECT";
-    case "GROUP";
     case "TEAM_MEMBER";
-    case "MARKER";
-    case "LOCATION": {
-        [_value, _parsingType] call KH_fnc_getEntityByIdentifier;
+    case "GROUP";
+    case "LOCATION";
+    case "MARKER": {
+        [_parsingType, _value] call KH_fnc_getEntityByIdentifier;
     };
 
     case "NAMESPACE": {
@@ -91,6 +55,10 @@ switch _parsingType do {
 
             case "parsingNamespace": {
                 parsingNamespace;
+            };
+
+            default {
+                nil;
             };
         };
     };
@@ -148,39 +116,33 @@ switch _parsingType do {
             case "sideLogic": {
                 sideLogic;
             };
+
+            default {
+                nil;
+            };
         };
     };
 
-    case "LOCATION": {
-       ((nearestLocations [[worldSize / 2, worldSize / 2], [], worldSize * sqrt 2 / 2]) select {((_value isEqualTo (name _x)) || (_value isEqualTo (className _x)))}) param [0];
-    };
-
-    case missionNamespace;
     case "MISSION_NAMESPACE_REFERENCE": {
         missionNamespace getVariable _value;
     };
 
-    case missionProfileNamespace;
     case "MISSION_PROFILE_NAMESPACE_REFERENCE": {
         missionProfileNamespace getVariable _value;
     };
 
-    case profileNamespace;
     case "PROFILE_NAMESPACE_REFERENCE": {
         profileNamespace getVariable _value;
     };
 
-    case uiNamespace;
     case "UI_NAMESPACE_REFERENCE": {
         uiNamespace getVariable _value;
     };
 
-    case serverNamespace;
     case "SERVER_NAMESPACE_REFERENCE": {
         serverNamespace getVariable _value;
     };
     
-    case parsingNamespace;
     case "PARSING_NAMESPACE_REFERENCE": {
         parsingNamespace getVariable _value;
     };
@@ -193,19 +155,19 @@ switch _parsingType do {
         [_value] call KH_fnc_luaGetVariable;
     };
 
+    case "MISSION_CONFIG";
+    case "CONFIG": {
+        call (compile _value);
+    };
+
     case "TYPED_ARRAY": {
         [
-            if (_value isEqualType "") then {
-                parseSimpleArray _value;
-            }
-            else {
-                _value;
-            },
+            _value,
             [],
             {
                 _args params ["_array"];
 
-                if ((_forEachIndex isEqualTo 0) || ((_forEachIndex % 2) isEqualTo 0)) then {
+                if ((_forEachIndex % 2) isEqualTo 0) then {
                     [_x, _array select (_forEachIndex + 1)] call KH_fnc_parseValue;
                 };
             },
@@ -217,17 +179,12 @@ switch _parsingType do {
 
     case "TYPED_HASHMAP": {
         [
-            if (_value isEqualType "") then {
-                createHashMapFromArray (parseSimpleArray _value);
-            }
-            else {
-                _value;
-            },
+            createHashMapFromArray _value,
             [],
             {
                 _args params ["_array"];
 
-                if ((_forEachIndex isEqualTo 0) || ((_forEachIndex % 2) isEqualTo 0)) then {
+                if ((_forEachIndex % 2) isEqualTo 0) then {
                     [_x, _array select (_forEachIndex + 1)] call KH_fnc_parseValue;
                 };
             },
@@ -235,5 +192,9 @@ switch _parsingType do {
             [],
             ""
         ] call KH_fnc_nestedArrayOperation;
+    };
+
+    default {
+        nil;
     };
 };

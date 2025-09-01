@@ -1,4 +1,4 @@
-params [["_identifier", "", [""]], ["_type", objNull, ["", objNull, teamMemberNull, grpNull, locationNull]]];
+params [["_type", objNull, ["", objNull, teamMemberNull, grpNull, locationNull]], ["_identifier", "", [""]]];
 private _entity = missionNamespace getVariable _identifier;
 
 if (isNil "_entity") then {
@@ -58,13 +58,11 @@ if (isNil "_entity") then {
         case "MARKER": {
             private _allMapMarkers = allMapMarkers;
             private _index = _allMapMarkers findIf {_identifier isEqualTo _x;};
-            
-            if (_index isNotEqualTo -1) then {
-                _allMapMarkers select _index;
-            }
-            else {
-                "";
-            };
+            [_identifier, ""] select (_index isEqualTo -1);
+        };
+
+        default {
+            nil;
         };
     };
 };

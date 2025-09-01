@@ -33,7 +33,7 @@ if (_entity isEqualType objNull) then {
 	};
 }
 else {
-	_variableName = groupId _entity;
+	_variableName = hashValue _entity;
 
 	if (isNil {missionNamespace getVariable _variableName;}) then {
 		if (_generateIfEmpty isEqualTo true) then {

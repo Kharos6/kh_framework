@@ -1,4 +1,4 @@
-params [["_extension", "", [""]], ["_arguments", nil, [[]]], ["_function", "", [""]], ["_resultParsing", false, [true, "", missionNamespace]]];
+params [["_extension", "", [""]], ["_arguments", nil, [[]]], ["_function", "", [""]], ["_resultParsing", false, [true, ""]]];
 
 (_extension callExtension (
     if (isNil "_arguments") then {

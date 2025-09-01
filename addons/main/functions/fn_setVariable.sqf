@@ -88,6 +88,10 @@ if (!(isNil "_oldValue") && !(isNil "_value")) then {
 			};
 		};
 
+		case "FLIP": {
+			!_oldValue;
+		};
+
 		case "ADD": {
 			_oldValue + _value;
 		};

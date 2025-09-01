@@ -1,4 +1,4 @@
-params ["_arguments", ["_function", {}, ["", {}]], ["_expectedResult", true], ["_functionName", "TEMPORARY", [""]], ["_logOnlyMismatch", true, [true]], ["_simpleFormat", true, [true]]];
+params ["_arguments", ["_function", {}, ["", {}]], "_expectedResult", ["_functionName", "TEMPORARY", [""]], ["_logOnlyMismatch", true, [true]], ["_verboseFormat", true, [true]]];
 private _performance = 0;
 
 private _result = if (_function isEqualType "") then {

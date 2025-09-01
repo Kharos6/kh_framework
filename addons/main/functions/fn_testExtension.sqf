@@ -1,4 +1,4 @@
-params [["_feature", [], ["", []]], ["_extension", "", [""]], ["_expectedResult", ""], ["_logOnlyMismatch", true, [true]], ["_simpleFormat", true, [true]]];
+params [["_feature", [], ["", []]], ["_extension", "", [""]], "_expectedResult", ["_logOnlyMismatch", true, [true]], ["_verboseFormat", true, [true]]];
 private "_arguments";
 
 private _function = if (_feature isEqualType []) then {

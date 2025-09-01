@@ -1,11 +1,23 @@
-params ["_arguments", ["_function", "", [""]], ["_target", 0, [0, objNull, teamMemberNull, grpNull, "", sideUnknown, []]], ["_jip", false, [true, "", objNull, grpNull]], ["_allowBlacklisted", true, [true]]];
+params [
+	"_arguments", 
+	["_function", "", [""]], 
+	["_target", 0, [0, objNull, teamMemberNull, grpNull, "", sideUnknown, []]], 
+	["_jip", false, [true, "", objNull, grpNull]], 
+	["_allowBlacklisted", true, [true]],
+	["_unscheduled", true, [true]]
+];
 
 if (_target isEqualType teamMemberNull) then {
 	_target = agent _target;
 };
 
 if isServer exitWith {
-	_arguments remoteExecCall [_function, _target, _jip];
+	if _unscheduled then {
+		_arguments remoteExecCall [_function, _target, _jip];
+	}
+	else {
+		_arguments remoteExec [_function, _target, _jip];
+	};
 };
 
 if (
@@ -23,10 +35,15 @@ if (
 	 (_jip isEqualTo false)
 	)
    ) then {
-	_arguments remoteExecCall [_function, _target, _jip];
+	if _unscheduled then {
+		_arguments remoteExecCall [_function, _target, _jip];
+	}
+	else {
+		_arguments remoteExec [_function, _target, _jip];
+	};
 }
 else {
 	if _allowBlacklisted then {
-		["KH_eve_execution", [_this, "KH_fnc_remoteExecCall", clientOwner]] call CBA_fnc_serverEvent;
+		["KH_eve_execution", [_this, "KH_fnc_remoteExec", clientOwner]] call CBA_fnc_serverEvent;
 	};
 };

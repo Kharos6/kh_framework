@@ -6,7 +6,6 @@ KH_var_missionLoaded = false;
 KH_var_jip = false;
 KH_var_playerUnit = objNull;
 KH_var_cachedLuaFunctions = createHashMap;
-KH_var_cachedLuaEntities = createHashMap;
 KH_var_remoteExecCommandsBlacklist = createHashMap;
 KH_var_remoteExecFunctionsBlacklist = createHashMap;
 KH_var_remoteExecCommandsJipBlacklist = createHashMap;
@@ -34,6 +33,7 @@ KH_var_postInitLuaExecutions = [];
 KH_var_loadInitLuaExecutions = [];
 call KH_fnc_luaClearVariables;
 call KH_fnc_luaResetState;
+["KH_eve_execution", KH_fnc_callParsedFunction] call CBA_fnc_addEventHandler;
 
 {
     private _config = _x;
@@ -217,35 +217,18 @@ addMissionEventHandler [
 		params ["_name", "_function", "_data"];
 
 		if (_name isEqualTo "kh_framework") then {
-			private _args = parseSimpleArray _data;
-			private _parsedArgs = [];
-
-			{
-				if (_x isEqualType "") then {
-					if ("KH_var_cachedLuaEntity_" in _x) then {
-						_parsedArgs pushBack (KH_var_cachedLuaEntities get _x);
-					}
-					else {
-						_parsedArgs pushBack _x;
-					};
-				}
-				else {
-					_parsedArgs pushBack _x;
-				};
-			} forEach _args;
-
-			[_parsedArgs, [_function, false] call KH_fnc_parseFunction, clientOwner] call KH_fnc_callParsedFunction;
+			[_data call KH_fnc_parseValue, [_function, false] call KH_fnc_parseFunction, clientOwner, true] call KH_fnc_callParsedFunction;
 		};
+
+		nil;
 	}
 ];
-
-["KH_eve_execution", KH_fnc_callParsedFunction] call CBA_fnc_addEventHandler;
 
 [
 	"KH_eve_registerCallback", 
 	{
-		params ["_arguments", ["_function", "", [""]], ["_caller", 2, [0]], ["_id", "", [""]]];
-		missionNamespace setVariable [_id, [_arguments, _function, _caller] call KH_fnc_callParsedFunction, _caller];		
+		params ["_arguments", ["_function", "", [""]], ["_caller", 2, [0]], ["_unscheduled", true, [true]], ["_callbackId", "", [""]]];
+		missionNamespace setVariable [_callbackId, [_arguments, _function, _caller, _unscheduled] call KH_fnc_callParsedFunction, _caller];		
 	}
 ] call CBA_fnc_addEventHandler;
 
@@ -478,152 +461,151 @@ if isServer then {
 					{
 						params ["_joiningMachine", "_uid"];
 						_args params ["_jipId", "_joinType"];
-						
-						if (missionNamespace getVariable _jipId) then {
-							private _currentHandler = KH_var_jipHandlers get _jipId;
-							if (isNil "_currentHandler") exitWith {};
-							private _dependency = _currentHandler select 3;
-							private _condition = true;
 
-							switch (typeName _dependency) do {
-								case "BOOL": {
-									if !_dependency then {
+						if !(missionNamespace getVariable _jipId) exitWith {
+							KH_var_jipHandlers deleteAt _jipId;
+							[_eventId] call KH_fnc_removeEventHandler;
+						};
+
+						private _currentHandler = KH_var_jipHandlers get _jipId;
+						if (isNil "_currentHandler") exitWith {};
+						private _dependency = _currentHandler select 3;
+						private _condition = true;
+
+						switch (typeName _dependency) do {
+							case "BOOL": {
+								if !_dependency then {
+									_condition = false;
+								};
+							};
+
+							case "SCALAR": {
+								if !(_dependency in KH_var_allMachines) then {
+									_condition = false;
+								};
+							};
+
+							case "OBJECT": {
+								if (isNull _dependency) then {
+									_condition = false;
+								};
+							};
+
+							case "TEAM_MEMBER": {
+								if (isNull _dependency) then {
+									_condition = false;
+								};
+							};
+
+							case "GROUP": {
+								if (isNull _dependency) then {
+									_condition = false;
+								};
+							};
+
+							case "STRING": {
+								if ((parseNumber (_dependency select [0, 1])) isNotEqualTo 0) then {
+									if (_dependency isNotEqualTo _uid) then {
+										if (":" in _dependency) then {
+											if ((isNull (objectFromNetId _dependency)) && (isNull (groupFromNetId _dependency))) then {
+												_condition = false;
+											};
+										}
+										else {
+											private _player = KH_var_allPlayerIdMachines get _x;
+											private _headlessClient = KH_var_allHeadlessIdMachines get _x;
+
+											if ((isNil "_player") && (isNil "_headlessClient")) then {
+												_condition = false;
+											};
+										};
+									};
+								}
+								else {
+									if !(missionNamespace getVariable [_dependency, false]) then {
 										_condition = false;
 									};
 								};
+							};
 
-								case "SCALAR": {
-									if !(_dependency in KH_var_allMachines) then {
-										_condition = false;
-									};
-								};
+							case "ARRAY": {																					
+								{
+									switch (typeName _x) do {
+										case "SCALAR": {
+											if !(_x in KH_var_allMachines) then {
+												_condition = false;
+												break;
+											};
+										};
 
-								case "OBJECT": {
-									if (isNull _dependency) then {
-										_condition = false;
-									};
-								};
+										case "OBJECT": {
+											if (isNull _x) then {
+												_condition = false;
+												break;
+											};
+										};
 
-								case "TEAM_MEMBER": {
-									if (isNull _dependency) then {
-										_condition = false;
-									};
-								};
+										case "TEAM_MEMBER": {
+											if (isNull _x) then {
+												_condition = false;
+												break;
+											};
+										};
 
-								case "GROUP": {
-									if (isNull _dependency) then {
-										_condition = false;
-									};
-								};
+										case "GROUP": {
+											if (isNull _x) then {
+												_condition = false;
+												break;
+											};
+										};
 
-								case "STRING": {
-									if ((parseNumber (_dependency select [0, 1])) isNotEqualTo 0) then {
-										if (_dependency isNotEqualTo _uid) then {
-											if (":" in _dependency) then {
-												if ((isNull (objectFromNetId _dependency)) && (isNull (groupFromNetId _dependency))) then {
-													_condition = false;
+										case "STRING": {
+											if ((parseNumber (_x select [0, 1])) isNotEqualTo 0) then {
+												if (_x isNotEqualTo _uid) then {
+													if (":" in _x) then {
+														if ((isNull (objectFromNetId _x)) && (isNull (groupFromNetId _x))) then {
+															_condition = false;
+															break;
+														};
+													}
+													else {
+														private _player = KH_var_allPlayerIdMachines get _x;
+														private _headlessClient = KH_var_allHeadlessIdMachines get _x;
+
+														if ((isNil "_player") && (isNil "_headlessClient")) then {
+															_condition = false;
+															break;
+														};
+													};
 												};
 											}
 											else {
-												private _player = KH_var_allPlayerIdMachines get _x;
-												private _headlessClient = KH_var_allHeadlessIdMachines get _x;
-
-												if ((isNil "_player") && (isNil "_headlessClient")) then {
+												if !(missionNamespace getVariable [_x, false]) then {
 													_condition = false;
+													break;
 												};
 											};
 										};
-									}
-									else {
-										if !(missionNamespace getVariable [_dependency, false]) then {
-											_condition = false;
+
+										case "CODE": {
+											if !(call _x) then {
+												_condition = false;
+												break;
+											};
 										};
 									};
-								};
-
-								case "ARRAY": {																					
-									{
-										switch (typeName _x) do {
-											case "SCALAR": {
-												if !(_x in KH_var_allMachines) then {
-													_condition = false;
-													break;
-												};
-											};
-
-											case "OBJECT": {
-												if (isNull _x) then {
-													_condition = false;
-													break;
-												};
-											};
-
-											case "TEAM_MEMBER": {
-												if (isNull _x) then {
-													_condition = false;
-													break;
-												};
-											};
-
-											case "GROUP": {
-												if (isNull _x) then {
-													_condition = false;
-													break;
-												};
-											};
-
-											case "STRING": {
-												if ((parseNumber (_x select [0, 1])) isNotEqualTo 0) then {
-													if (_x isNotEqualTo _uid) then {
-														if (":" in _x) then {
-															if ((isNull (objectFromNetId _x)) && (isNull (groupFromNetId _x))) then {
-																_condition = false;
-																break;
-															};
-														}
-														else {
-															private _player = KH_var_allPlayerIdMachines get _x;
-															private _headlessClient = KH_var_allHeadlessIdMachines get _x;
-
-															if ((isNil "_player") && (isNil "_headlessClient")) then {
-																_condition = false;
-																break;
-															};
-														};
-													};
-												}
-												else {
-													if !(missionNamespace getVariable [_x, false]) then {
-														_condition = false;
-														break;
-													};
-												};
-											};
-
-											case "CODE": {
-												if !(call _x) then {
-													_condition = false;
-													break;
-												};
-											};
-										};
-									} forEach _dependency;
-								};
-
-								case "CODE": {
-									if !(call _dependency) then {
-										_condition = false;
-									};
-								};
+								} forEach _dependency;
 							};
 
-							if _condition then {
-								[_currentHandler select 1, _currentHandler select 2, _joiningMachine] call CBA_fnc_ownerEvent;
+							case "CODE": {
+								if !(call _dependency) then {
+									_condition = false;
+								};
 							};
-						}
-						else {
-							KH_var_jipHandlers deleteAt _jipId;
-							[_eventId] call KH_fnc_removeEventHandler;
+						};
+
+						if _condition then {
+							[_currentHandler select 1, _currentHandler select 2, _joiningMachine] call CBA_fnc_ownerEvent;
 						};
 					}
 				] call KH_fnc_addEventHandler;
@@ -636,7 +618,7 @@ if isServer then {
 	[
 		"KH_eve_persistentExecutionSetup",
 		{
-			params ["_arguments", "_function", "_target", "_sendoffArguments", "_sendoffFunction", "_persistentExecutionId", "_caller"];
+			params ["_arguments", "_function", "_target", "_sendoffArguments", "_sendoffFunction", "_caller", "_unscheduled", "_persistentExecutionId"];
 			_target setVariable [_persistentExecutionId, true, true];
 			private _persistentEventId = [hashValue _target, _persistentExecutionId] joinString "";
 
@@ -653,13 +635,13 @@ if isServer then {
 								_args params ["_persistentExecutionId", "_persistentEventId"];
 
 								if (_entity getVariable _persistentExecutionId) then {
-									(missionNamespace getVariable _persistentEventId) params ["_arguments", "_function", "_sendoffArguments", "_sendoffFunction", "_caller"];
+									(missionNamespace getVariable _persistentEventId) params ["_arguments", "_function", "_sendoffArguments", "_sendoffFunction", "_caller", "_unscheduled"];
 									
 									if _local then {
-										[_arguments, _function, _caller] call KH_fnc_callParsedFunction;
+										[_arguments, _function, _caller, _unscheduled] call KH_fnc_callParsedFunction;
 									}
 									else {
-										[_sendoffArguments, _sendoffFunction, _caller] call KH_fnc_callParsedFunction;
+										[_sendoffArguments, _sendoffFunction, _caller, _unscheduled] call KH_fnc_callParsedFunction;
 									};
 								};
 							}
@@ -672,7 +654,7 @@ if isServer then {
 				] call KH_fnc_triggerCbaEvent;
 			};
 
-			missionNamespace setVariable [_persistentEventId, [_arguments, _function, _sendoffArguments, _sendoffFunction, _caller], true];
+			missionNamespace setVariable [_persistentEventId, [_arguments, _function, _sendoffArguments, _sendoffFunction, _caller, _unscheduled], true];
 		}
 	] call CBA_fnc_addEventHandler;
 

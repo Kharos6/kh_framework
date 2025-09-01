@@ -13,10 +13,10 @@ params [
 ];
 
 private _subfunction = {
-	params ["_arguments", "_function", "_target", "_special", "_specialIdOverride"];
+	params ["_arguments", "_function", "_target", "_special", "_specialIdOverride", "_unscheduled"];
 
 	if (_special isEqualTo false) exitWith {
-		["KH_eve_execution", [_arguments, _function, clientOwner], _target, false] call KH_fnc_triggerCbaEvent;
+		["KH_eve_execution", [_arguments, _function, clientOwner, _unscheduled], _target, false] call KH_fnc_triggerCbaEvent;
 	};
 
 	if (_special isEqualType createHashMap) exitWith {
@@ -28,7 +28,8 @@ private _subfunction = {
 			[
 				_arguments, 
 				[compile ([_special, " call ['", _function, "', missionNamespace getVariable '", _argumentsId, "'];"] joinString ""), false] call KH_fnc_parseFunction, 
-				clientOwner
+				clientOwner, 
+				true
 			], 
 			_target, 
 			false
@@ -45,7 +46,7 @@ private _subfunction = {
 
 			[
 				"KH_eve_execution", 
-				[_arguments, _function, clientOwner], 
+				[_arguments, _function, clientOwner, _unscheduled],
 				_target, 
 				[
 					_dependency, 
@@ -73,18 +74,25 @@ private _subfunction = {
 			[
 				"PUBLIC_VARIABLE",
 				_callbackId,
-				[_arguments, _function],
+				[_arguments, _function, _unscheduled],
 				{
-					_args params ["_arguments", "_function"];
+					_args params ["_arguments", "_function", "_unscheduled"];
 					private _argsCallback = param [1];
-					_arguments call (missionNamespace getVariable _function);
+
+					if _unscheduled then {
+						_arguments call (missionNamespace getVariable _function);
+					}
+					else {
+						_arguments spawn (missionNamespace getVariable _function);
+					};
+
 					[_eventId] call KH_fnc_removeEventHandler;
 				}
 			] call KH_fnc_addEventHandler;
 
 			[
 				"KH_eve_registerCallback", 
-				[_callbackArguments, [_callbackFunction, false] call KH_fnc_parseFunction, clientOwner, _callbackId], 
+				[_callbackArguments, [_callbackFunction, false] call KH_fnc_parseFunction, clientOwner, _unscheduled, _callbackId], 
 				_target, 
 				false
 			] call KH_fnc_triggerCbaEvent;
@@ -113,17 +121,21 @@ private _subfunction = {
 			};
 
 			if _immediate then {
-				["KH_eve_execution", [_arguments, _function, clientOwner], _target, false] call KH_fnc_triggerCbaEvent;
+				["KH_eve_execution", [_arguments, _function, clientOwner, _unscheduled], _target, false] call KH_fnc_triggerCbaEvent;
 			};
 
 			[
 				"KH_eve_persistentExecutionSetup", 
-				[_arguments, _function, _target, _sendoffArguments, [_sendoffFunction, false] call KH_fnc_parseFunction, _persistentExecutionId, clientOwner], 
+				[_arguments, _function, _target, _sendoffArguments, [_sendoffFunction, false] call KH_fnc_parseFunction, clientOwner, _unscheduled, _persistentExecutionId], 
 				"SERVER", 
 				false
 			] call KH_fnc_triggerCbaEvent;
 
 			[_target, _persistentExecutionId, true];
+		};
+
+		default {
+			nil;
 		};
 	};
 };
@@ -133,14 +145,12 @@ if (_special isEqualTo true) then {
 };
 
 if (_environment isEqualType true) exitWith {
-	if _environment then {	
-		[_arguments, [_function, false] call KH_fnc_parseFunction, _target, _special, ""] call _subfunction;
-	};
+	[_arguments, [_function, false] call KH_fnc_parseFunction, _target, _special, "", _environment] call _subfunction;
 };
 
+private _environmentType = _environment param [0, "", [""]];
 private _environmentId = call KH_fnc_generateUid;
 missionNamespace setVariable [_environmentId, true];
-private _environmentType = _environment param [0, "", [""]];
 
 switch _environmentType do {
 	case "TEMPORAL": {
@@ -152,6 +162,7 @@ switch _environmentType do {
 		private _timeoutArguments = _environment param [6];
 		private _timeoutFunction = _environment param [7, {}, ["", {}]];
 		private _verboseDelta = _environment param [8, false, [true]];
+		private _unscheduled = _environment param [9, true, [true]];
 		private _specialIdOverride = "";
 		private "_return";
 		
@@ -215,11 +226,11 @@ switch _environmentType do {
 						_verboseDelta
 					],
 					_interval,
-					[_arguments, [_function, false] call KH_fnc_parseFunction, _target, _special, _subfunction, _specialIdOverride, _environmentId],
+					[_arguments, [_function, false] call KH_fnc_parseFunction, _target, _special, _subfunction, _specialIdOverride, _environmentId, _unscheduled],
 					{
-						params ["_arguments", "_function", "_target", "_special", "_subfunction", "_specialIdOverride", "_environmentId"];
+						params ["_arguments", "_function", "_target", "_special", "_subfunction", "_specialIdOverride", "_environmentId", "_unscheduled"];
 						private _handlerId = [[missionNamespace, _environmentId, clientOwner, _eventId]];													
-						[_arguments, _function, _target, _special, _specialIdOverride] call _subfunction;
+						[_arguments, _function, _target, _special, _specialIdOverride, _unscheduled] call _subfunction;
 					}
 				] call KH_fnc_addEventHandler
 			], 
@@ -235,6 +246,7 @@ switch _environmentType do {
 		private _timeoutOnDeletion = _environment param [5, false, [true]];
 		private _timeoutArguments = _environment param [6];
 		private _timeoutFunction = _environment param [7, {}, ["", {}]];
+		private _unscheduled = _environment param [8, true, [true]];
 		private _i = 0;
 		private _parsedExecutionRules = [[], [], []];
 		private _executions = [];
@@ -308,7 +320,8 @@ switch _environmentType do {
 				[_currentFunction, false] call KH_fnc_parseFunction, 
 				_currentTarget, 
 				_currentSpecial, 
-				_currentSpecialIdOverride
+				_currentSpecialIdOverride,
+				_unscheduled
 			];
 		};
 		
@@ -365,5 +378,9 @@ switch _environmentType do {
 			], 
 			_return
 		];
+	};
+
+	default {
+		nil;
 	};
 };

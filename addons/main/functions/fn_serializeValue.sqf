@@ -1,19 +1,16 @@
-params [["_type", "", ["", missionNamespace]], "_value"];
+params [["_type", "", [""]], "_value"];
 
 if (_type isEqualTo "") then {
     _type = typeName _value;
 };
 
 private _return = switch _type do {
-    case "STRING";
-    case "MARKER";
-    case "TEXT": {
-        _value;
-    };
-
     case "BOOL";
-    case "SCALAR": {
-        str _value;
+    case "SCALAR";
+    case "STRING";
+    case "TEXT";
+    case "MARKER": {
+        _value;
     };
 
     case "ARRAY": {
@@ -39,7 +36,7 @@ private _return = switch _type do {
             ["TYPED_ARRAY", _value] call KH_fnc_serializeValue;
         }
         else {
-            str _value;
+            _value;
         };
     };
 
@@ -66,7 +63,7 @@ private _return = switch _type do {
             ["TYPED_HASHMAP", _value] call KH_fnc_serializeValue;
         }
         else {
-            str (toArray _value);
+            toArray _value;
         };
     };
 
@@ -75,9 +72,11 @@ private _return = switch _type do {
     };
 
     case "OBJECT";
-    case "GROUP";
-    case "TEAM_MEMBER": {
-        [_value, true] call KH_fnc_getEntityVariableName;
+    case "TEAM_MEMBER";
+    case "GROUP": {
+        if !(isNull _value) then {
+            [_value, true] call KH_fnc_getEntityVariableName;
+        };
     };
 
     case "NAMESPACE": {
@@ -104,6 +103,10 @@ private _return = switch _type do {
 
             case parsingNamespace: {
                 "parsingNamespace";
+            };
+
+            default {
+                nil;
             };
         };
     };
@@ -161,39 +164,39 @@ private _return = switch _type do {
             case sideLogic: {
                 "sideLogic";
             };
+
+            default {
+                nil;
+            };
         };
     };
 
     case "LOCATION": {
-        name _value;
+        if !(isNull _value) then {
+            name _value;
+        };
     };
 
-    case missionNamespace;
     case "MISSION_NAMESPACE_REFERENCE": {
         ["", missionNamespace getVariable _value] call KH_fnc_serializeValue;
     };
 
-    case missionProfileNamespace;
     case "MISSION_PROFILE_NAMESPACE_REFERENCE": {
         ["", missionProfileNamespace getVariable _value] call KH_fnc_serializeValue;
     };
     
-    case profileNamespace;
     case "PROFILE_NAMESPACE_REFERENCE": {
         ["", profileNamespace getVariable _value] call KH_fnc_serializeValue;
     };
 
-    case uiNamespace;
     case "UI_NAMESPACE_REFERENCE": {
         ["", uiNamespace getVariable _value] call KH_fnc_serializeValue;
     };
 
-    case serverNamespace;
     case "SERVER_NAMESPACE_REFERENCE": {
         ["", serverNamespace getVariable _value] call KH_fnc_serializeValue;
     };
 
-    case parsingNamespace;
     case "PARSING_NAMESPACE_REFERENCE": {
         ["", parsingNamespace getVariable _value] call KH_fnc_serializeValue;
     };
@@ -205,6 +208,32 @@ private _return = switch _type do {
     case "LUA_NAMESPACE_REFERENCE": {
         [_value] call KH_fnc_luaGetVariable;
     };
+    
+    case "MISSION_CONFIG": {
+        if !(isNull _value) then {
+            private _hierarchy = configHierarchy _value;
+            private _path = [];
+
+            {   
+                _path pushBack (_x regexFind [".*/([^/]*)"]);
+            } forEach ((configHierarchy _value) select [1]);
+
+            ["missionConfigFile", " >> '", _path joinString "' >> '", "'"] joinString "";
+        };
+    };
+
+    case "CONFIG": {
+        if !(isNull _value) then {
+            private _hierarchy = configHierarchy _value;
+            private _path = [];
+
+            {   
+                _path pushBack (_x regexFind [".*/([^/]*)"]);
+            } forEach ((configHierarchy _value) select [1]);
+
+            ["configFile", " >> '", _path joinString "' >> '", "'"] joinString "";
+        };
+    };
 
     case "TYPED_ARRAY";
     case "TYPED_HASHMAP": {
@@ -214,8 +243,8 @@ private _return = switch _type do {
             {
                 _args params ["_array"];
 
-                if ((_forEachIndex isEqualTo 0) || ((_forEachIndex % 2) isEqualTo 0)) then {
-                    [_array select (_forEachIndex + 1), _array select (_forEachIndex + 1)] call KH_fnc_serializeValue;
+                if ((_forEachIndex % 2) isEqualTo 0) then {
+                    [_x, _array select (_forEachIndex + 1)] call KH_fnc_serializeValue;
                 };
             },
             true,

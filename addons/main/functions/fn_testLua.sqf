@@ -1,4 +1,4 @@
-params ["_arguments", ["_function", "", [""]], ["_expectedResult", true], ["_functionName", "TEMPORARY", [""]], ["_stateType", "WARM", [""]], ["_logOnlyMismatch", true, [true]], ["_simpleFormat", true, [true]]];
+params ["_arguments", ["_function", "", [""]], "_expectedResult", ["_functionName", "TEMPORARY", [""]], ["_stateType", "WARM", [""]], ["_logOnlyMismatch", true, [true]], ["_verboseFormat", true, [true]]];
 private _performance = 0;
 
 switch _stateType do {

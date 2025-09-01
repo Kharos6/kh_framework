@@ -33,6 +33,18 @@ if (isNil {missionNamespace getVariable _hashValue;}) then {
 			missionNamespace setVariable [_hashValue, _function, 2];
 		};
 	};
+}
+else {
+	if _public then {
+		if ((".sqf" in _function) && !(" " in _function)) then {
+			_function = compileScript [_function, false, ""];
+		}
+		else {
+			_function = compile _function;
+		};
+
+		missionNamespace setVariable [_hashValue, _function, true];
+	};
 };
 
 _hashValue;

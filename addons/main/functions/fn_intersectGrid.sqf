@@ -13,7 +13,7 @@ params [
 	["_verboseRays", false, [true]]
 ];
 
-private _object = objNull;
+private "_object";
 private _temporaryObject = false;
 
 if ((_position select 0) isEqualType objNull) then {
@@ -92,8 +92,8 @@ switch _type do {
 
 		for "_secondaryAxisIteration" from -_secondaryAxis to _secondaryAxis step _step do {
 			for "_tertiaryAxisIteration" from -_tertiaryAxis to _tertiaryAxis step _step do {
-				private _currentPositionStart = [0, 0, 0];
-				private _currentPositionEnd = [0, 0, 0];
+				private _currentPositionStart = [];
+				private _currentPositionEnd = [];
 				_currentPositionStart set [_primaryAxisIndex, _primaryAxis];
 				_currentPositionStart set [_secondaryAxisIndex, _secondaryAxisIteration];
 				_currentPositionStart set [_tertiaryAxisIndex, _tertiaryAxisIteration];
@@ -101,7 +101,7 @@ switch _type do {
 				_currentPositionEnd set [_secondaryAxisIndex, _secondaryAxisIteration];
 				_currentPositionEnd set [_tertiaryAxisIndex, _tertiaryAxisIteration];
 
-				if !(isNull _object) then {
+				if !(isNil "_object") then {
 					private _relativeOffsetStart = _object modelToWorldWorld _currentPositionStart;
 					_currentPositionStart = _relativeOffsetStart vectorAdd (_relativeOffsetStart vectorDiff _position);
 					private _relativeOffsetEnd = _object modelToWorldWorld _currentPositionEnd;
@@ -130,8 +130,8 @@ switch _type do {
 				_secondaryAxisIteration = _secondaryAxis * (cos _phi) * (cos _theta);
 				_tertiaryAxisIteration = _tertiaryAxis * (cos _phi) * (sin _theta);
 				_primaryAxisIteration = _primaryAxis * (sin _phi);
-				private _currentPositionStart = [0, 0, 0];
-				private _currentPositionEnd = [0, 0, 0];
+				private _currentPositionStart = [];
+				private _currentPositionEnd = [];
 				_currentPositionStart set [_secondaryAxisIndex, _secondaryAxisIteration];
 				_currentPositionStart set [_tertiaryAxisIndex, _tertiaryAxisIteration];
 				_currentPositionStart set [_primaryAxisIndex, _primaryAxisIteration];
@@ -139,7 +139,7 @@ switch _type do {
 				_currentPositionEnd set [_tertiaryAxisIndex, -_tertiaryAxisIteration];
 				_currentPositionEnd set [_primaryAxisIndex, -_primaryAxisIteration];
 				
-				if !(isNull _object) then {
+				if !(isNil "_object") then {
 					private _relativeOffsetStart = _object modelToWorldWorld _currentPositionStart;
 					_currentPositionStart = _relativeOffsetStart vectorAdd (_relativeOffsetStart vectorDiff _position);
 					private _relativeOffsetEnd = _object modelToWorldWorld _currentPositionEnd;
@@ -168,8 +168,8 @@ switch _type do {
 				_secondaryAxisIteration = _secondaryAxis * (cos _theta);
 				_tertiaryAxisIteration = _tertiaryAxis * (sin _theta);
 				_primaryAxisIteration = -_currentHeight;
-				private _currentPositionStart = [0, 0, 0];
-				private _currentPositionEnd = [0, 0, 0];
+				private _currentPositionStart = [];
+				private _currentPositionEnd = [];
 				_currentPositionStart set [_secondaryAxisIndex, _secondaryAxisIteration];
 				_currentPositionStart set [_tertiaryAxisIndex, _tertiaryAxisIteration];
 				_currentPositionStart set [_primaryAxisIndex, _primaryAxisIteration];
@@ -177,7 +177,7 @@ switch _type do {
 				_currentPositionEnd set [_tertiaryAxisIndex, -_tertiaryAxisIteration];
 				_currentPositionEnd set [_primaryAxisIndex, _primaryAxisIteration];
 				
-				if !(isNull _object) then {
+				if !(isNil "_object") then {
 					private _relativeOffsetStart = _object modelToWorldWorld _currentPositionStart;
 					_currentPositionStart = _relativeOffsetStart vectorAdd (_relativeOffsetStart vectorDiff _position);
 					private _relativeOffsetEnd = _object modelToWorldWorld _currentPositionEnd;
@@ -223,8 +223,8 @@ switch _type do {
 
 					_surfaceSecondary = _maxSecondaryRadius * _currentRadiusScale * (cos _theta);
 					_surfaceTertiary = _maxTertiaryRadius * _currentRadiusScale * (sin _theta);
-					private _currentPositionStart = [0, 0, 0];
-					private _currentPositionEnd = [0, 0, 0];
+					private _currentPositionStart = [];
+					private _currentPositionEnd = [];
 					_currentPositionStart set [_secondaryAxisIndex, 0];
 					_currentPositionStart set [_tertiaryAxisIndex, 0];
 					_currentPositionStart set [_primaryAxisIndex, 0];
@@ -232,7 +232,7 @@ switch _type do {
 					_currentPositionEnd set [_tertiaryAxisIndex, _surfaceTertiary];
 					_currentPositionEnd set [_primaryAxisIndex, _currentHeight];
 					
-					if !(isNull _object) then {
+					if !(isNil "_object") then {
 						private _relativeOffsetStart = _object modelToWorldWorld _currentPositionStart;
 						_currentPositionStart = _relativeOffsetStart vectorAdd (_relativeOffsetStart vectorDiff _position);
 						private _relativeOffsetEnd = _object modelToWorldWorld _currentPositionEnd;

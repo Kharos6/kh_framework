@@ -1,4 +1,4 @@
-params [["_parsingType", "", [""]], "_value"];
+params [["_parsingType", "", [""]], ["_value", nil, [true, 0, "", []]]];
 
 switch _parsingType do {
     case "BOOL";

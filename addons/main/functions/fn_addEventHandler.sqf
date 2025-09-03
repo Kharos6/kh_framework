@@ -61,12 +61,8 @@ else {
 
 switch _eventType do {
 	case "STANDARD": {
-		private _entity = _type param [1, objNull, [objNull, teamMemberNull, grpNull]];
+		private _entity = _type param [1, objNull, [objNull, grpNull]];
 		private _scopeType = _type param [2, true, [true, ""]];
-
-		if (_entity isEqualType teamMemberNull) then {
-			_entity = agent _entity;
-		};
 
 		switch _scopeType do {
 			case true;
@@ -182,12 +178,7 @@ switch _eventType do {
 	};
 
 	case "MULTIPLAYER": {
-		private _entity = _type param [1, objNull, [objNull, teamMemberNull]];
-
-		if (_entity isEqualType teamMemberNull) then {
-			_entity = agent _entity;
-		};
-
+		private _entity = _type param [1, objNull, [objNull]];
 		_handler = _entity addMPEventHandler [_event, _expression];
 	};
 
@@ -213,19 +204,13 @@ switch _eventType do {
 	};
 
 	case "CLASS": {
-		private _class = _type param [1, objNull, ["", objNull, teamMemberNull]];
+		private _class = _type param [1, objNull, ["", objNull]];
 		private _allowInheritance = _type param [2, true, [true]];
 		private _excludedClasses = _type param [3, [], [[]]];
 		private _applyRetroactively = _type param [4, true, [true]];
 
-		switch (typeName _class) do {
-			case "OBJECT": {
-				_class = typeOf _class;
-			};
-
-			case "TEAM_MEMBER": {
-				_class = typeOf (agent _class);
-			};
+		if (_class isEqualType objNull) then {
+			_class = typeOf _class;
 		};
 
 		_handler = call KH_fnc_generateUid;
@@ -258,12 +243,7 @@ switch _eventType do {
 	};
 
 	case "BIS_SCRIPTED": {
-		private _namespace = _type param [1, objNull, [true, objNull, teamMemberNull, grpNull, locationNull, displayNull, controlNull, missionNamespace]];
-
-		if (_namespace isEqualType teamMemberNull) then {
-			_namespace = agent _namespace;
-		};
-
+		private _namespace = _type param [1, objNull, [true, objNull, grpNull, locationNull, displayNull, controlNull, missionNamespace]];
 		_handler = [_namespace, _event, _expression] call BIS_fnc_addScriptedEventHandler;
 	};
 
@@ -277,7 +257,7 @@ switch _eventType do {
 		private _verboseDelta = _type param [7, false, [true]];
 		private _conditionArgumentsId = call KH_fnc_generateUid;
 		private _handlerTickCounterId = call KH_fnc_generateUid;
-		private _countConditionFailure = false;
+		private "_countConditionFailure";
 		private _iterationCount = false;
 		_timeoutFunction = [_timeoutFunction, false] call KH_fnc_parseFunction;
 		missionNamespace setVariable [_conditionArgumentsId, _conditionArguments];
@@ -299,16 +279,29 @@ switch _eventType do {
 			};
 		};
 
-		_timeoutRules params [["_timeout", 0, [0, "", []]], ["_timeoutPriority", false, [true]], ["_timeoutOnConditionFailure", false, [true]], ["_timeoutOnDeletion", false, [true]]];
+		_timeoutRules params [["_timeout", 0, [true, 0, "", []]], ["_timeoutPriority", false, [true]], ["_timeoutOnConditionFailure", false, [true]], ["_timeoutOnDeletion", false, [true]]];
 
 		switch (typeName _timeout) do {
+			case "BOOL": {
+				if _timeout then {
+					_timeout = 1;
+					_iterationCount = true;
+					_countConditionFailure = false;
+					_handlerTickCounterId = call KH_fnc_generateUid;
+					missionNamespace setVariable [_handlerTickCounterId, 1];
+				}
+				else {
+					0;
+				};
+			};
+
 			case "STRING": {
 				_timeout = ((parseNumber _timeout) - CBA_missionTime) max 0;
 			};
 
 			case "ARRAY": {
-				_countConditionFailure = _timeout param [1, false, [true]];
 				_timeout = (_timeout select 0) max 1;
+				_countConditionFailure = _timeout param [1, false, [true]];
 				_iterationCount = true;
 				_handlerTickCounterId = call KH_fnc_generateUid;
 				missionNamespace setVariable [_handlerTickCounterId, 1];
@@ -345,6 +338,7 @@ switch _eventType do {
 			private _totalDelta = 0;
 			private _eventId = [_type, _event, _handler, clientOwner];
 			private _eventName = _handler;
+			private _executionTime = CBA_missionTime;
 
 			if ((_conditionFunction isEqualTo {}) || (_conditionFunction isEqualTo "")) then {						
 				if _iterationCount then {
@@ -526,7 +520,7 @@ switch _eventType do {
 					},
 					_event,
 					if (_event isEqualTo 0) then {
-						0;
+						diag_frameNo + 1;
 					}
 					else {
 						if (_event > 0) then {
@@ -544,7 +538,8 @@ switch _eventType do {
 					},
 					[_type, _event, _handler, clientOwner],
 					_handler,
-					_previousReturn
+					_previousReturn,
+					CBA_missionTime
 				]
 			]
 		];
@@ -556,7 +551,7 @@ switch _eventType do {
 					false,
 					[],
 					{},
-					[[1, false], !_timeoutPriority, false, false],
+					[true, !_timeoutPriority, false, false],
 					[],
 					{},
 					false
@@ -631,7 +626,8 @@ switch _eventType do {
 				},
 				[_type, _event, _handler, clientOwner],
 				_handler,
-				nil
+				nil,
+				CBA_missionTime
 			]
 		];
 
@@ -662,7 +658,7 @@ switch _eventType do {
 					false,
 					[],
 					{},
-					[[1, false], false, false, false],
+					[true, false, false, false],
 					[],
 					{},
 					false

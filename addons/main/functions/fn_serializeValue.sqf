@@ -1,10 +1,14 @@
-params [["_type", "", [""]], "_value"];
+params [["_type", "", [""]], ["_value", nil, [true, 0, "", text "", [], createHashMap, {}, objNull, teamMemberNull, grpNull, sideUnknown, missionNamespace, locationNull, configNull]]];
+
+if (isNil "_value") exitWith {
+    ["NIL", nil];
+};
 
 if (_type isEqualTo "") then {
     _type = typeName _value;
 };
 
-private _return = switch _type do {
+_value = switch _type do {
     case "BOOL";
     case "SCALAR";
     case "STRING";
@@ -258,9 +262,9 @@ private _return = switch _type do {
     };
 };
 
-if (isNil "_return") then {
+if (isNil "_value") then {
     ["NIL", nil];
 }
 else {
-    [_type, _return];
+    [_type, _value];
 };

@@ -1,4 +1,4 @@
-params [["_type", objNull, ["", objNull, teamMemberNull, grpNull, locationNull]], ["_identifier", "", [""]]];
+params [["_type", objNull, ["", objNull, grpNull, locationNull]], ["_identifier", "", [""]]];
 private _entity = missionNamespace getVariable _identifier;
 
 if (isNil "_entity") then {
@@ -13,18 +13,6 @@ if (isNil "_entity") then {
             
             if (_index isNotEqualTo -1) then {
                 _allUnits select _index;
-            }
-            else {
-                objNull;
-            };
-        };
-
-        case "TEAM_MEMBER": {
-            private _allAgents = agents;
-            private _index = _allAgents findIf {((_identifier isEqualTo (vehicleVarName (agent _x))) || (_identifier isEqualTo (hashValue (agent _x))));};
-            
-            if (_index isNotEqualTo -1) then {
-                _allAgents select _index;
             }
             else {
                 objNull;

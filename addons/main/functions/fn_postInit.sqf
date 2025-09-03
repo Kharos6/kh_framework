@@ -126,39 +126,28 @@ isNil {
 		};
 
 		if (KH_var_initialSideRelations isNotEqualTo []) then {
-			private _relationFunction = {
-				params ["_side1", "_side2", "_value"];
-				if _value then {
-					_side1 setFriend [_side2, 1];
-				}
-				else {
-					_side1 setFriend [_side2, 0];
-				};
-			};
-
 			{
-				[_x select 0, _x select 1, _x select 2] call _relationFunction;
+				[_x select 0, _x select 1, _x select 2] call KH_fnc_setSideRelations;
 			} forEach KH_var_initialSideRelations;
 		};
-	
-		[] call KH_fnc_serverMissionLoadInit;
 
 		{
 			[[isServer, hasInterface], _x] call KH_fnc_luaOperation;
 		} forEach KH_var_loadInitLuaExecutions;
-		
-		[[], {systemChat "KH FRAMEWORK - MISSION LOADED"}, "GLOBAL", true, false] call KH_fnc_execute;
+
+		[] call KH_fnc_serverMissionLoadInit;		
+		[[], {systemChat "KH FRAMEWORK - MISSION LOADED";}, "GLOBAL", true, false] call KH_fnc_execute;
 
 		[
 			{
 				(CBA_missionTime > 0);
 			},
-			{							
-				[] call KH_fnc_serverMissionStartInit;
-				[[], KH_fnc_headlessMissionStartInit, "HEADLESS", true] call KH_fnc_execute;
-				["KH_eve_missionStarted", []] call CBA_fnc_globalEvent;
+			{
 				KH_var_missionStarted = true;
 				publicVariable "KH_var_missionStarted";
+				[] call KH_fnc_serverMissionStartInit;
+				[[], "KH_fnc_playerMissionStartInit", "PLAYERS", true, false] call KH_fnc_execute;
+				[[], "KH_fnc_headlessMissionStartInit", "HEADLESS", true, false] call KH_fnc_execute;
 				[[], {systemChat "KH FRAMEWORK - MISSION STARTED"}, "GLOBAL", true, false] call KH_fnc_execute;
 				
 				[
@@ -171,21 +160,14 @@ isNil {
 							};
 						} forEach allUsers;
 						
-						if ((((count KH_var_allPlayerUnits) == _initialPlayerCount)) || (CBA_missionTime > 60) || !isMultiplayer) then {
-							[
-								{
-									KH_var_initialPlayerUnits = KH_var_allPlayerUnits;
-									publicVariable "KH_var_initialPlayerUnits";
-									KH_var_playersLoaded = true;
-									publicVariable "KH_var_playersLoaded";
-									["KH_eve_playersLoaded", KH_var_initialPlayerUnits] call CBA_fnc_globalEvent;												
-									[] call KH_fnc_serverPlayersLoadedInit;
-									[[], KH_fnc_playerPlayersLoadedInit, "PLAYERS", true] call KH_fnc_execute;
-									[[], {systemChat "KH FRAMEWORK - PLAYERS LOADED"}, "GLOBAL", true, false] call KH_fnc_execute;
-								},
-								[]
-							] call CBA_fnc_execNextFrame;
-							
+						if ((((count KH_var_allPlayerUnits) isEqualTo _initialPlayerCount)) || (CBA_missionTime > 60) || !isMultiplayer) then {
+							KH_var_initialPlayerUnits = +KH_var_allPlayerUnits;
+							publicVariable "KH_var_initialPlayerUnits";
+							KH_var_playersLoaded = true;
+							publicVariable "KH_var_playersLoaded";
+							["KH_eve_playersLoaded", KH_var_initialPlayerUnits] call CBA_fnc_globalEvent;												
+							[] call KH_fnc_serverPlayersLoadedInit;
+							[[], {systemChat "KH FRAMEWORK - PLAYERS LOADED";}, "GLOBAL", true, false] call KH_fnc_execute;
 							[_handle] call CBA_fnc_removePerFrameHandler;
 						};
 					}, 
@@ -198,11 +180,11 @@ isNil {
 	};
 	
 	if hasInterface then {
-		["KH_eve_playerPreloadedInitial", [clientOwner, profileName, profileNameSteam]] call CBA_fnc_serverEvent;
+		["KH_eve_playerPreloadedInitial", [clientOwner]] call CBA_fnc_serverEvent;
 	};
 
 	if (!isServer && !hasInterface) then {
-		["KH_eve_headlessPreloaded", [clientOwner]] call CBA_fnc_globalEvent;
+		["KH_eve_headlessPreloadedInitial", [clientOwner]] call CBA_fnc_serverEvent;
 
 		{
 			[[isServer, hasInterface], _x] call KH_fnc_luaOperation;

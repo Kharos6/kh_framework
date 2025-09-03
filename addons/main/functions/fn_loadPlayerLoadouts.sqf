@@ -95,7 +95,7 @@ if (isNil "KH_var_loadoutsSet") then {
 			private _loadout = KH_var_savedLoadoutsMap get _uid;
 			private _initialLoadout = KH_var_initialPlayerLoadouts get _uid;
 			
-			if !(_uid in KH_var_disconnectedPlayers) then {	
+			if !(_uid in KH_var_disconnectedPlayerUids) then {	
 				if !(isNil "_loadout") then {
 					_player setUnitLoadout _loadout;
 				};

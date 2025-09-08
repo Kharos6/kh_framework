@@ -1,13 +1,19 @@
 params [["_handler", [], [[]]]];
 
-if ((count _handler) <= 2) exitWith {
-	_handler params [["_handlerId", [], [[]]], ["_persistentExecutionId", "", [""]]];
+if ((count _handler) <= 3) exitWith {
+	_handler params [["_handlerId", [], [[]]], ["_persistentExecutionId", "", [""]], ["_eventOwner", nil, [0]]];
 	missionNamespace setVariable [_persistentExecutionId, false, true];
 	[_handlerId] call KH_fnc_removeHandler;
-	["KH_eve_eventHandlerRemoved", [_handler]] call CBA_fnc_globalEvent;
+
+	if (isNil "_eventOwner") then {
+		["KH_eve_eventHandlerRemoved", [_handler]] call CBA_fnc_globalEvent;
+	}
+	else {
+		["KH_eve_eventHandlerRemoved", [_handler], _eventOwner] call CBA_fnc_ownerEvent;
+	};
 };
 
-_handler params [["_type", [], [[]]], ["_event", "", [0, ""]], ["_handlerId", 0, [0, "", []]], ["_owner", 2, [0]]];
+_handler params [["_type", [], [[]]], ["_event", "", [0, ""]], ["_handlerId", 0, [0, "", []]], ["_eventOwner", 2, [0]]];
 
 [
 	[_type, _event, _handlerId],
@@ -66,17 +72,17 @@ _handler params [["_type", [], [[]]], ["_event", "", [0, ""]], ["_handlerId", 0,
 			};
 
 			case "PLAYER": {
-				KH_var_playerEventHandlerStackDeletions pushBackUnique (_handlerId select 0);
+				[_event, _handlerId] call CBA_fnc_removePlayerEventHandler;
 			};
 
 			case "CBA": {
-				KH_var_cbaEventHandlerStackDeletions pushBackUnique (_handlerId select 0);
+				[_event, _handlerId] call CBA_fnc_removeEventHandler;
 			};
 		};
 
 		["KH_eve_eventHandlerRemoved", [_handler]] call CBA_fnc_localEvent;
 	},
-	_owner,
+	_eventOwner,
 	true,
 	false
 ] call KH_fnc_execute;

@@ -72,7 +72,7 @@ private _subfunction = {
 			private _callbackId = call KH_fnc_generateUid;
 
 			[
-				"PUBLIC_VARIABLE",
+				"CBA",
 				_callbackId,
 				[_arguments, _function, _unscheduled],
 				{

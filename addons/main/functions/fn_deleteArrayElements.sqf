@@ -1,15 +1,33 @@
-params [["_array", [], [[]]], ["_condition", {}, [{}]]];
+params [["_array", [], [[]]], ["_condition", {}, [[], {}]]];
 private _deletions = [];
-private _breaker = false;
 
-{
-    if _breaker then {
-        break;
-    };
+if (_condition isEqualType []) then {
+    {
+        private _index = _array find _x;
 
-    if ([_x] call _condition) then {
-        _deletions pushBack _forEachIndex;
-    };
-} forEach _array;
+        if (_index isNotEqualTo -1) then {
+            _deletions pushBack _index;
+        };
+    } forEach _condition;
+}
+else {
+    private _breaker = false;
 
-_array deleteAt _deletions;
+    {
+        if _breaker then {
+            break;
+        };
+
+        if (call _condition) then {
+            _deletions pushBack _forEachIndex;
+        };
+    } forEach _array;
+};
+
+if (_deletions isNotEqualTo []) then {
+    _array deleteAt _deletions;
+    true;
+}
+else {
+    false;
+};

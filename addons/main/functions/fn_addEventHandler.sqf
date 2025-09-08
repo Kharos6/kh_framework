@@ -8,6 +8,7 @@ private _previousReturnId = call KH_fnc_generateUid;
 private "_persistentEventId";
 private "_persistentExecutionId";
 private "_handler";
+private "_remoteHandler";
 private "_eventType";
 private "_expression";
 
@@ -29,7 +30,7 @@ if (_type isEqualType []) then {
 			] joinString "");
 		}
 		else {
-			_function = [_function, true] call KH_fnc_parseFunction;
+			_function = [_function, _scopeType isEqualTo "PERSISTENT"] call KH_fnc_parseFunction;
 		};
 	}
 	else {
@@ -78,16 +79,34 @@ switch _eventType do {
 				private _remoteEventId = call KH_fnc_generateUid;
 				private _entityOwnerId = call KH_fnc_generateUid;
 
+				_remoteHandler = [
+					"CBA",
+					_remoteEventId,
+					[_entityOwnerId, _argumentsId, _eventNameId, _function],
+					{
+						private _arguments = param [1];
+						_args params ["_entityOwnerId", "_argumentsId", "_eventNameId", "_function"];
+						private _entityOwner = missionNamespace getVariable _entityOwnerId;
+						private _args = missionNamespace getVariable _argumentsId;
+						private _eventName = missionNamespace getVariable _eventNameId;
+						_arguments call (missionNamespace getVariable _function);
+					}
+				] call KH_fnc_addEventHandler;
+
 				[
-					_remoteEventId, 
-					compile ([
-						"private _entityOwner = missionNamespace getVariable '", _entityOwnerId, "';
-						private _args = missionNamespace getVariable '", _argumentsId, "';
-						private _eventName = missionNamespace getVariable '", _eventNameId, "';
-						private _previousReturn = missionNamespace getVariable '", _previousReturnId, "';
-						missionNamespace setVariable ['", _previousReturnId, "', call (missionNamespace getVariable '", _function, "')];"
-					] joinString "")
-				] call CBA_fnc_addEventHandler;
+					"CBA",
+					"KH_eve_eventHandlerRemoved",
+					[_remoteHandler, _persistentExecutionId],
+					{
+						params ["_handler"];
+						_args params ["_remoteHandler", "_persistentExecutionId"];
+
+						if ((_handler select 1) isEqualTo _persistentExecutionId) then {
+							[_remoteHandler] call KH_fnc_removeEventHandler;
+							[_eventId] call KH_fnc_removeEventHandler;
+						};
+					}
+				] call KH_fnc_addEventHandler;
 
 				_handler = [
 					[_entity, _event, _persistentEventId, _persistentExecutionId, _persistentEntityId, _entityOwnerId, clientOwner], 
@@ -257,8 +276,8 @@ switch _eventType do {
 		private _verboseDelta = _type param [7, false, [true]];
 		private _conditionArgumentsId = call KH_fnc_generateUid;
 		private _handlerTickCounterId = call KH_fnc_generateUid;
-		private "_countConditionFailure";
 		private _iterationCount = false;
+		private "_countConditionFailure";
 		_timeoutFunction = [_timeoutFunction, false] call KH_fnc_parseFunction;
 		missionNamespace setVariable [_conditionArgumentsId, _conditionArguments];
 		_handler = call KH_fnc_generateUid;
@@ -445,7 +464,7 @@ switch _eventType do {
 							] joinString "");
 						}
 						else {
-							_function;
+							missionNamespace getVariable _function;
 						};
 					}
 					else {
@@ -569,7 +588,7 @@ switch _eventType do {
 	case "DRAW_UI": {
 		private _conditionArguments = _type param [1];
 		private _conditionFunction = _type param [2, {}, ["", {}]];
-		private _timeoutRules = _type param [3, [0, false, false], [[]]];
+		private _timeoutRules = _type param [3, [0, false, false], [0, "", []]];
 		private _timeoutArguments = _type param [4];
 		private _timeoutFunction = _type param [5, {}, ["", {}]];
 		private _conditionArgumentsId = call KH_fnc_generateUid;
@@ -598,37 +617,35 @@ switch _eventType do {
 		};
 
 		_drawType pushBack [
-			[
-				_arguments,
-				if ((_conditionFunction isEqualTo {}) || (_conditionFunction isEqualTo "")) then {						
-					missionNamespace getVariable _function;
+			_arguments,
+			if ((_conditionFunction isEqualTo {}) || (_conditionFunction isEqualTo "")) then {						
+				missionNamespace getVariable _function;
+			}
+			else {
+				_conditionFunction = [_conditionFunction, false] call KH_fnc_parseFunction;
+				
+				if _timeoutOnConditionFailure then {
+					compile ([
+						"if ((missionNamespace getVariable '", _conditionArgumentsId, "') call (missionNamespace getVariable '", _conditionFunction, "')) then {
+							call (missionNamespace getVariable '", _function, "');
+						}
+						else {
+							['KH_eve_drawUiExecutionStackHandler', ['", _handler, "', true]] call CBA_fnc_localEvent;
+						};"
+					] joinString "");
 				}
 				else {
-					_conditionFunction = [_conditionFunction, false] call KH_fnc_parseFunction;
-					
-					if _timeoutOnConditionFailure then {
-						compile ([
-							"if ((missionNamespace getVariable '", _conditionArgumentsId, "') call (missionNamespace getVariable '", _conditionFunction, "')) then {
-								call (missionNamespace getVariable '", _function, "');
-							}
-							else {
-								['KH_eve_drawUiExecutionStackHandler', ['", _handler, "', true]] call CBA_fnc_localEvent;
-							};"
-						] joinString "");
-					}
-					else {
-						compile ([
-							"if ((missionNamespace getVariable '", _conditionArgumentsId, "') call (missionNamespace getVariable '", _conditionFunction, "')) then {
-								call (missionNamespace getVariable '", _function, "');
-							};"
-						] joinString "");
-					};
-				},
-				[_type, _event, _handler, clientOwner],
-				_handler,
-				nil,
-				CBA_missionTime
-			]
+					compile ([
+						"if ((missionNamespace getVariable '", _conditionArgumentsId, "') call (missionNamespace getVariable '", _conditionFunction, "')) then {
+							call (missionNamespace getVariable '", _function, "');
+						};"
+					] joinString "");
+				};
+			},
+			[_type, _event, _handler, clientOwner],
+			_handler,
+			nil,
+			CBA_missionTime
 		];
 
 		KH_var_drawUiExecutionStackMonitor set [
@@ -717,78 +734,11 @@ switch _eventType do {
 	};
 
 	case "PLAYER": {
-		private _currentStack = KH_var_playerEventHandlerStack get _event;
-
-		if (isNil "_currentStack") then {
-			KH_var_playerEventHandlerStack set [_event, []];
-			_currentStack = KH_var_playerEventHandlerStack get _event;
-
-			[
-				_event,
-				compile ([
-					"private _handlerStack = (missionNamespace getVariable 'KH_var_playerEventHandlerStack') get '", _event, "';
-					private _handlerStackDeletions = missionNamespace getVariable 'KH_var_playerEventHandlerStackDeletions';
-					
-					if (_handlerStackDeletions isNotEqualTo []) then {
-						{
-							if ((_x select 0) in _handlerStackDeletions) then {
-								_handlerStackDeletions set [_handlerStack find (_x select 0), _forEachIndex];
-							};
-						} forEach _handlerStack;
-
-						_handlerStack deleteAt (_handlerStackDeletions select {_x isEqualType 0;});
-						_handlerStackDeletions resize 0;
-					};
-
-					{
-						if !((_x select 0) in _handlerStackDeletions) then {
-							call (_x select 1);
-						};
-					} forEach _handlerStack;"
-				] joinString ""),
-				_type select 1
-			] call CBA_fnc_addPlayerEventHandler;
-		};
-
-		_handler = [call KH_fnc_generateUid, _expression];
-		_currentStack pushBack _handler;
+		_handler = [_event, _expression] call CBA_fnc_addPlayerEventHandler;
 	};
 
 	case "CBA": {
-		private _currentStack = KH_var_cbaEventHandlerStack get _event;
-
-		if (isNil "_currentStack") then {
-			KH_var_cbaEventHandlerStack set [_event, []];
-			_currentStack = KH_var_cbaEventHandlerStack get _event;
-
-			[
-				_event,
-				compile ([
-					"private _handlerStack = (missionNamespace getVariable 'KH_var_cbaEventHandlerStack') get '", _event, "';
-					private _handlerStackDeletions = missionNamespace getVariable 'KH_var_cbaEventHandlerStackDeletions';
-					
-					if (_handlerStackDeletions isNotEqualTo []) then {
-						{
-							if ((_x select 0) in _handlerStackDeletions) then {
-								_handlerStackDeletions set [_handlerStack find (_x select 0), _forEachIndex];
-							};
-						} forEach _handlerStack;
-
-						_handlerStack deleteAt (_handlerStackDeletions select {_x isEqualType 0;});
-						_handlerStackDeletions resize 0;
-					};
-
-					{
-						if !((_x select 0) in _handlerStackDeletions) then {
-							call (_x select 1);
-						};
-					} forEach _handlerStack;"
-				] joinString "")
-			] call CBA_fnc_addEventHandler;
-		};
-
-		_handler = [call KH_fnc_generateUid, _expression];
-		_currentStack pushBack _handler;
+		_handler = [_event, _expression] call CBA_fnc_addEventHandler;
 	};
 };
 
@@ -802,7 +752,13 @@ if (isNil "_persistentEventId") then {
 	[_type, _event, _handler, clientOwner];
 }
 else {
-	missionNamespace setVariable [_handlerId, [_handler, _persistentExecutionId], true];
-	["KH_eve_eventHandlerAdded", [[_handler, _persistentExecutionId]]] call CBA_fnc_globalEvent;
-	[_handler, _persistentExecutionId];
+	private "_eventOwner";
+	
+	if !(isNil "_remoteHandler") then {
+		_eventOwner = clientOwner;
+	};
+
+	missionNamespace setVariable [_handlerId, [_handler, _persistentExecutionId, _eventOwner], true];
+	["KH_eve_eventHandlerAdded", [[_handler, _persistentExecutionId, _eventOwner]]] call CBA_fnc_globalEvent;
+	[_handler, _persistentExecutionId, _eventOwner];
 };

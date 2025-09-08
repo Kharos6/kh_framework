@@ -1,4 +1,4 @@
-params [["_input", userInputDisabled], ["_stop", true]];
+params [["_input", userInputDisabled, [true]], ["_stop", true, [true]]];
 		
 if _input then {
 	if userInputDisabled then {
@@ -40,5 +40,3 @@ else {
 		};
 	};
 };
-
-true;

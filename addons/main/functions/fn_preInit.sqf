@@ -10,13 +10,9 @@ KH_var_remoteExecCommandsBlacklist = createHashMap;
 KH_var_remoteExecFunctionsBlacklist = createHashMap;
 KH_var_remoteExecCommandsJipBlacklist = createHashMap;
 KH_var_remoteExecFunctionsJipBlacklist = createHashMap;
-KH_var_cbaEventHandlerStack = createHashMap;
-KH_var_playerEventHandlerStack = createHashMap;
 KH_var_inGameUiEventHandlerStack = createHashMap;
 KH_var_temporalExecutionStackMonitor = createHashMap;
 KH_var_drawUiExecutionStackMonitor = createHashMap;
-KH_var_cbaEventHandlerStackDeletions = [];
-KH_var_playerEventHandlerStackDeletions = [];
 KH_var_inGameUiEventHandlerStackDeletions = [];
 KH_var_temporalExecutionStack = [];
 KH_var_drawUi2dExecutionStack = [];
@@ -155,13 +151,13 @@ if (KH_var_remoteExecCommandsMode isEqualTo 1) then {
 	{
 		if (isNumber (_x >> "allowedTargets")) then {
 			if ((getNumber (_x >> "allowedTargets")) isNotEqualTo 0) then {
-				KH_var_remoteExecCommandspBlacklist set [toLower (configName _x), true];
+				KH_var_remoteExecCommandspBlacklist set [toLowerANSI (configName _x), true];
 			};
 		};
 
 		if (isNumber (_x >> "jip")) then {
 			if ((getNumber (_x >> "jip")) isEqualTo 0) then {
-				KH_var_remoteExecCommandsJipBlacklist set [toLower (configName _x), true];
+				KH_var_remoteExecCommandsJipBlacklist set [toLowerANSI (configName _x), true];
 			};
 		};
 	} forEach ("true" configClasses (configFile >> "CfgRemoteExec" >> "Commands"));
@@ -169,13 +165,13 @@ if (KH_var_remoteExecCommandsMode isEqualTo 1) then {
 	{
 		if (isNumber (_x >> "allowedTargets")) then {
 			if ((getNumber (_x >> "allowedTargets")) isNotEqualTo 0) then {
-				KH_var_remoteExecCommandspBlacklist set [toLower (configName _x), true, true];
+				KH_var_remoteExecCommandspBlacklist set [toLowerANSI (configName _x), true, true];
 			};
 		};
 
 		if (isNumber (_x >> "jip")) then {
 			if ((getNumber (_x >> "jip")) isEqualTo 0) then {
-				KH_var_remoteExecCommandsJippBlacklist set [toLower (configName _x), true, true];
+				KH_var_remoteExecCommandsJippBlacklist set [toLowerANSI (configName _x), true, true];
 			};
 		};
 	} forEach ("true" configClasses (missionConfigFile >> "CfgRemoteExec" >> "Commands"));
@@ -185,13 +181,13 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 	{
 		if (isNumber (_x >> "allowedTargets")) then {
 			if ((getNumber (_x >> "allowedTargets")) isNotEqualTo 0) then {
-				KH_var_remoteExecCommandsBlacklist set [toLower (configName _x), true];
+				KH_var_remoteExecCommandsBlacklist set [toLowerANSI (configName _x), true];
 			};
 		};
 
 		if (isNumber (_x >> "jip")) then {
 			if ((getNumber (_x >> "jip")) isEqualTo 0) then {
-				KH_var_remoteExecCommandsJipBlacklist set [toLower (configName _x), true];
+				KH_var_remoteExecCommandsJipBlacklist set [toLowerANSI (configName _x), true];
 			};
 		};
 	} forEach ("true" configClasses (configFile >> "CfgRemoteExec" >> "Functions"));
@@ -199,13 +195,13 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 	{
 		if (isNumber (_x >> "allowedTargets")) then {
 			if ((getNumber (_x >> "allowedTargets")) isNotEqualTo 0) then {
-				KH_var_remoteExecFunctionsBlacklist set [toLower (configName _x), true, true];
+				KH_var_remoteExecFunctionsBlacklist set [toLowerANSI (configName _x), true, true];
 			};
 		};
 
 		if (isNumber (_x >> "jip")) then {
 			if ((getNumber (_x >> "jip")) isEqualTo 0) then {
-				KH_var_remoteExecFunctionsJipBlacklist set [toLower (configName _x), true, true];
+				KH_var_remoteExecFunctionsJipBlacklist set [toLowerANSI (configName _x), true, true];
 			};
 		};
 	} forEach ("true" configClasses (missionConfigFile >> "CfgRemoteExec" >> "Functions"));
@@ -226,7 +222,7 @@ addMissionEventHandler [
 	"KH_eve_registerCallback", 
 	{
 		params ["_arguments", ["_function", "", [""]], ["_caller", 2, [0]], ["_unscheduled", true, [true]], ["_callbackId", "", [""]]];
-		missionNamespace setVariable [_callbackId, [_arguments, _function, _caller, _unscheduled] call KH_fnc_callParsedFunction, _caller];		
+		[_callbackId, [_arguments, _function, _caller, _unscheduled] call KH_fnc_callParsedFunction, _caller] call CBA_fnc_ownerEvent;		
 	}
 ] call CBA_fnc_addEventHandler;
 
@@ -385,12 +381,15 @@ if isServer then {
 	KH_var_jipHandlers = createHashMap;
 	KH_var_allEntities = entities [[], ["Animal"], true, false];
 	KH_var_allDeadEntities = (entities [[], ["Animal"], true, false]) select {!(alive _x);};
-	KH_var_allTerrainObjects = nearestTerrainObjects [[worldSize / 2, worldSize / 2], [], worldSize * sqrt 2 / 2, false, true];
 	KH_var_headlessClientTransfers = [];
 	KH_var_dynamicSimulationEntities = [];
 	KH_var_entityArrayBuilderArrays = [];
 	KH_var_groupArrayBuilderArrays = [];
 	KH_var_initialSideRelations = [];
+	KH_fnc_serverMissionLoadInit = {};
+	KH_fnc_serverMissionStartInit = {};
+	KH_fnc_serverPlayersLoadedInit = {};
+	KH_fnc_serverMissionEndInit = {};
 
 	{
 		if ((_x getUserInfo 8) isNotEqualTo 0) then {
@@ -406,22 +405,18 @@ if isServer then {
 			params ["_name", "_arguments", "_dependency", "_unitRequired", "_jipId"];
 			missionNamespace setVariable [_jipId, true];
 			private _currentHandler = KH_var_jipHandlers get _jipId;
+			private _continue = true;
 
-			private _continue = if !(isNil "_currentHandler") then {
+			if !(isNil "_currentHandler") then {
 				if ((_currentHandler select 4) isEqualTo _unitRequired) then {
 					KH_var_jipHandlers set [_jipId, [["JIP_HANDLER", _jipId], _name, _arguments, _dependency, _unitRequired, []]];
-					false;
+					_continue = false;
 				}
 				else {
 					{
 						[_x] call KH_fnc_removeEventHandler;
 					} forEach (_currentHandler select 5);
-
-					true;
 				};
-			}
-			else {
-				true;
 			};
 
 			if !_continue exitWith {};
@@ -429,10 +424,10 @@ if isServer then {
 			KH_var_jipHandlers set [_jipId, [["JIP_HANDLER", _jipId], _name, _arguments, _dependency, _unitRequired, _jipHandlers]];
 			
 			private _joinType = if _unitRequired then {
-				["KH_eve_playerLoaded", "KH_eve_headlessPreloaded"];
+				["KH_eve_playerLoaded", "KH_eve_headlessLoaded"];
 			}
 			else {
-				["KH_eve_playerPreloaded", "KH_eve_headlessPreloaded"];
+				["KH_eve_playerPreloaded", "KH_eve_headlessLoaded"];
 			};
 
 			{
@@ -679,7 +674,7 @@ if isServer then {
 	] call CBA_fnc_addEventHandler;
 
 	[
-		"KH_eve_headlessPreloaded", 
+		"KH_eve_headlessLoadedInitial", 
 		{
 			params ["_machineId"];
 			KH_var_allMachines pushBackUnique _machineId;
@@ -695,7 +690,7 @@ if isServer then {
 				};
 			} forEach allUsers;
 
-			["KH_eve_headlessPreloaded", [_machineId]] call CBA_fnc_globalEvent;
+			["KH_eve_headlessLoaded", [_machineId]] call CBA_fnc_globalEvent;
 		}
 	] call CBA_fnc_addEventHandler;
 	
@@ -718,24 +713,15 @@ if isServer then {
 		"KH_eve_playerSwitched", 
 		{
 			params ["_machineId", "_previousUnit", "_newUnit"];
-			
-			if (_previousUnit in KH_var_allPlayerUnits) then {
-				KH_var_allPlayerUnits deleteAt (KH_var_allPlayerUnits find _previousUnit);
-				KH_var_allPlayerUnits pushBackUnique _newUnit;
-				publicVariable "KH_var_allPlayerUnits";
-			};
 
-			if (_previousUnit in KH_var_jipPlayerUnits) then {
-				KH_var_jipPlayerUnits deleteAt (KH_var_jipPlayerUnits find _previousUnit);
-				KH_var_jipPlayerUnits pushBackUnique _newUnit;
-				publicVariable "KH_var_jipPlayerUnits";
-			};
+			{
+				private _units = missionNamespace getVariable _x;
 
-			if (_previousUnit in KH_var_initialPlayerUnits) then {
-				KH_var_initialPlayerUnits deleteAt (KH_var_initialPlayerUnits find _previousUnit);
-				KH_var_initialPlayerUnits pushBackUnique _newUnit;
-				publicVariable "KH_var_initialPlayerUnits";
-			};
+				if ([_units, [_previousUnit]] call KH_fnc_deleteArrayElements) then {
+					_units pushBackUnique _newUnit;
+					publicVariable _x;
+				};
+			} forEach ["KH_var_allPlayerUnits", "KH_var_jipPlayerUnits", "KH_var_initialPlayerUnits"];
 		}
 	] call CBA_fnc_addEventHandler;
 
@@ -765,6 +751,7 @@ if isServer then {
 			KH_var_allDeadEntities pushBackUnique _entity;
 
 			if (isPlayer _entity) then {
+				[[], "KH_fnc_playerKilledInit", _newEntity, true, false] call KH_fnc_execute;
 				["KH_eve_playerKilled", [owner _entity, _entity, _killer, _instigator]] call CBA_fnc_globalEvent;
 			};
 		}
@@ -786,25 +773,17 @@ if isServer then {
 				true,
 				true
 			] call KH_fnc_execute;
-			
-			if (_oldEntity in KH_var_allPlayerUnits) then {
-				KH_var_allPlayerUnits deleteAt (KH_var_allPlayerUnits find _oldEntity);
-				KH_var_allPlayerUnits pushBackUnique _newEntity;
-				publicVariable "KH_var_allPlayerUnits";
-			};
 
-			if (_oldEntity in KH_var_jipPlayerUnits) then {
-				KH_var_jipPlayerUnits deleteAt (KH_var_jipPlayerUnits find _oldEntity);
-				KH_var_jipPlayerUnits pushBackUnique _newEntity;
-				publicVariable "KH_var_jipPlayerUnits";
-			};
+			{
+				private _units = missionNamespace getVariable _x;
 
-			if (_oldEntity in KH_var_initialPlayerUnits) then {
-				KH_var_initialPlayerUnits deleteAt (KH_var_initialPlayerUnits find _oldEntity);
-				KH_var_initialPlayerUnits pushBackUnique _newEntity;
-				publicVariable "KH_var_initialPlayerUnits";
-			};
+				if ([_units, [_oldEntity]] call KH_fnc_deleteArrayElements) then {
+					_units pushBackUnique _newEntity;
+					publicVariable _x;
+				};
+			} forEach ["KH_var_allPlayerUnits", "KH_var_jipPlayerUnits", "KH_var_initialPlayerUnits"];
 
+			[[_oldEntity], "KH_fnc_playerRespawnInit", _newEntity, true, false] call KH_fnc_execute;
 			["KH_eve_playerRespawned", [owner _newEntity, _newEntity, _oldEntity]] call CBA_fnc_globalEvent;
 		}
 	];
@@ -813,29 +792,12 @@ if isServer then {
 		"EntityDeleted", 
 		{
 			params ["_entity"];
-
-			if (_entity in KH_var_allPlayerUnits) then {
-				KH_var_allPlayerUnits deleteAt (KH_var_allPlayerUnits find _entity);
-				publicVariable "KH_var_allPlayerUnits";				
-			};
-
-			if (_entity in KH_var_jipPlayerUnits) then {
-				KH_var_jipPlayerUnits deleteAt (KH_var_jipPlayerUnits find _entity);
-				publicVariable "KH_var_jipPlayerUnits";				
-			};
-
-			if (_entity in KH_var_initialPlayerUnits) then {
-				KH_var_initialPlayerUnits deleteAt (KH_var_initialPlayerUnits find _entity);
-				publicVariable "KH_var_initialPlayerUnits";				
-			};
-
-			if (_entity in KH_var_allEntities) then {
-				KH_var_allEntities deleteAt (KH_var_allEntities find _entity);			
-			};
-
-			if (_entity in KH_var_allDeadEntities) then {
-				KH_var_allDeadEntities deleteAt (KH_var_allDeadEntities find _entity);			
-			};
+			
+			{
+				if ([missionNamespace getVariable _x, [_entity]] call KH_fnc_deleteArrayElements) then {
+					publicVariable _x;
+				};
+			} forEach ["KH_var_allPlayerUnits", "KH_var_jipPlayerUnits", "KH_var_initialPlayerUnits", "KH_var_allEntities", "KH_var_allDeadEntities"];
 		}
 	];
 
@@ -854,41 +816,28 @@ if isServer then {
 
 				KH_var_disconnectedPlayerUids pushBackUnique _uid;
 				publicVariable "KH_var_disconnectedPlayerUids";
-				
-				if (_unit in KH_var_allPlayerUnits) then {
-					KH_var_allPlayerUnits deleteAt (KH_var_allPlayerUnits find _unit);
-					publicVariable "KH_var_allPlayerUnits";				
-				};
 
-				if (_unit in KH_var_jipPlayerUnits) then {
-					KH_var_jipPlayerUnits deleteAt (KH_var_jipPlayerUnits find _unit);
-					publicVariable "KH_var_jipPlayerUnits";				
-				};
+				{
+					if ([missionNamespace getVariable _x, [_unit]] call KH_fnc_deleteArrayElements) then {
+						publicVariable _x;
+					};
+				} forEach [
+					"KH_var_allPlayerUnits", 
+					"KH_var_jipPlayerUnits", 
+					"KH_var_initialPlayerUnits"
+				];
 
-				if (_unit in KH_var_initialPlayerUnits) then {
-					KH_var_initialPlayerUnits deleteAt (KH_var_initialPlayerUnits find _unit);
-					publicVariable "KH_var_initialPlayerUnits";				
-				};
-						
-				if (_machineId in KH_var_allMachines) then {
-					KH_var_allMachines deleteAt (KH_var_allMachines find _machineId);
-					publicVariable "KH_var_allMachines";	
-				};
-
-				if (_machineId in KH_var_allCuratorMachines) then {
-					KH_var_allCuratorMachines deleteAt (KH_var_allCuratorMachines find _machineId);
-					publicVariable "KH_var_allCuratorMachines";	
-				};
-
-				if (_machineId in KH_var_allPlayerMachines) then {
-					KH_var_allPlayerMachines deleteAt (KH_var_allPlayerMachines find _machineId);
-					publicVariable "KH_var_allPlayerMachines";
-				};
-
-				if (_machineId in KH_var_jipPlayerMachines) then {
-					KH_var_jipPlayerMachines deleteAt (KH_var_jipPlayerMachines find _machineId);
-					publicVariable "KH_var_jipPlayerMachines";
-				};
+				{
+					if ([missionNamespace getVariable _x, [_machineId]] call KH_fnc_deleteArrayElements) then {
+						publicVariable _x;
+					};
+				} forEach [
+					"KH_var_allMachines", 
+					"KH_var_allCuratorMachines", 
+					"KH_var_allPlayerMachines", 
+					"KH_var_jipPlayerMachines",
+					"KH_var_initialPlayerMachines"
+				];
 
 				KH_var_allPlayerUidMachines deleteAt _uid;
 				publicVariable "KH_var_allPlayerUidMachines";
@@ -900,15 +849,14 @@ if isServer then {
 				private _machineId = KH_var_allHeadlessIdMachines get _id;
 
 				if !(isNil "_machineId") then {
-					if (_machineId in KH_var_allMachines) then {
-						KH_var_allMachines deleteAt (KH_var_allMachines find _machineId);
-						publicVariable "KH_var_allMachines";	
-					};
-
-					if (_machineId in KH_var_allHeadlessMachines) then {
-						KH_var_allHeadlessMachines deleteAt (KH_var_allHeadlessMachines find _machineId); 
-						publicVariable "KH_var_allHeadlessMachines";
-					};
+					{
+						if ([missionNamespace getVariable _x, [_machineId]] call KH_fnc_deleteArrayElements) then {
+							publicVariable _x;
+						};
+					} forEach [
+						"KH_var_allMachines", 
+						"KH_var_allHeadlessMachines"
+					];
 
 					KH_var_allHeadlessIdMachines deleteAt _id;
 					publicVariable "KH_var_allHeadlessIdMachines";
@@ -921,36 +869,47 @@ if isServer then {
 if hasInterface then {
 	KH_var_contextMenuOpen = false;
 	KH_var_interactionMenuOpen = false;
-	KH_var_viewTargetSurfaceDistance = 0;
-	KH_var_viewTarget = objNull;
+	KH_var_cameraType = "CAMERA";
+	KH_var_viewTargetCheckFrame = 0;
+	KH_var_weaponTargetCheckFrame = 0;
+	KH_var_allAddedDisplays = [];
+	KH_fnc_playerMissionLoadInit = {};
+	KH_fnc_playerMissionStartInit = {};
+	KH_fnc_playerLoadInit = {};
+	KH_fnc_playerPlayersLoadedInit = {};
+	KH_fnc_playerKilledInit = {};
+	KH_fnc_playerRespawnInit = {};
+	KH_fnc_playerSwitchInit = {};
+	KH_fnc_playerMissionEndInit = {};
 
 	addMissionEventHandler [
-		"EachFrame", 
+		"PlayerViewChanged", 
 		{
-			if (!visibleMap && (alive KH_var_playerUnit)) then {
-				private _eyePosition = eyePos KH_var_playerUnit;
-
-				private _viewTarget = (lineIntersectsSurfaces [
-					_eyePosition, 
-					_eyePosition vectorAdd ((eyeDirection KH_var_playerUnit) vectorMultiply 10000), 
-					KH_var_playerUnit,
-					objNull, 
-					true, 
-					1, 
-					"VIEW", 
-					"FIRE", 
-					true
-				]) param [0, []];
-
-				private _viewTargetSurface = _viewTarget param [0, _eyePosition];
-				private _viewTargetObject = _viewTarget param [3, objNull];
-				KH_var_viewTargetSurfaceDistance = _eyePosition distance _viewTargetSurface;
-				KH_var_viewTargetDistance = (getPosASL KH_var_playerUnit) distance (getPosASL _viewTargetObject);
-				KH_var_viewTarget = _viewTargetObject;
+			KH_var_cameraType = if !(isNull curatorCamera) then {
+				"ZEUS";
 			}
 			else {
-				KH_var_viewTargetSurfaceDistance = 0;
-				KH_var_viewTarget = objNull;
+				if !(isNull focusOn) then {
+					if (focusOn isNotEqualTo player) then {
+						if !(isNull cameraOn) then {
+							["REMOTE_VEHICLE_", cameraView] joinString "";
+						}
+						else {
+							["REMOTE_", cameraView] joinString "";
+						};
+					}
+					else {
+						if !(isNull cameraOn) then {
+							["VEHICLE_", cameraView] joinString "";
+						}
+						else {
+							cameraView;
+						};
+					};
+				}
+				else {
+					"CAMERA";
+				};
 			};
 		}
 	];
@@ -961,13 +920,10 @@ if hasInterface then {
 		"Open Interaction Menu", 
 		{
 			KH_var_interactionMenuOpen = true;
-			private _display = [] call KH_fnc_openSelfInteractionMenu;
+			private _display = call KH_fnc_openSelfInteractionMenu;
 
 			[
-				{
-					params ["_display"];
-					((isNull _display) || !(alive player) || (player getVariable ["ACE_isUnconscious", false]) || ((lifeState player) isEqualTo "INCAPACITATED"));
-				},
+				[_display],
 				{
 					params ["_display"];
 					KH_var_interactionMenuOpen = false;
@@ -975,9 +931,21 @@ if hasInterface then {
 					if !(isNull _display) then {
 						_display closeDisplay 2;
 					};
-				}, 
-				[_display]
-			] call CBA_fnc_waitUntilAndExecute;
+				},
+				true,
+				{
+					params ["_display"];
+
+					(
+						(isNull _display) ||
+						(_currentUnit isNotEqualTo KH_var_playerUnit) ||
+						!(alive KH_var_playerUnit) || 
+						(KH_var_playerUnit getVariable ["ACE_isUnconscious", false]) || 
+						((lifeState KH_var_playerUnit) isEqualTo "INCAPACITATED")
+					);
+				},
+				false
+			] call KH_fnc_execute;
 		}, 
 		{}, 
 		[0xDC, [false, false, true]]
@@ -988,33 +956,39 @@ if hasInterface then {
 		"KH_openRemoteInteractionMenu", 
 		"Open Remote Interaction Menu", 
 		{
-			private _object = if !(isNull cursorObject) then {
-				cursorObject;
-			}
-			else {
-				cursorTarget;
-			};
+			private _viewTarget = call KH_fnc_getViewTarget;
+			private _surfaceDistance = _viewTarget select 0;
+			if (_surfaceDistance > 3) exitWith {};
+			private _object = createVehicleLocal ["KH_HelperSquare", ASLToAGL (_viewTarget select 3), [], 0, "CAN_COLLIDE"]; 
+			KH_var_interactionMenuOpen = true;
+			private _display = [_object] call KH_fnc_openRemoteInteractionMenu;
+			private _currentUnit = KH_var_playerUnit;
 
-			if ((_object distance player) < 4) then {
-				KH_var_interactionMenuOpen = true;
-				private _display = [_object] call KH_fnc_openRemoteInteractionMenu;
+			[
+				[_display, _object, _currentUnit],
+				{
+					params ["_display"];
+					KH_var_interactionMenuOpen = false;
 
-				[
-					{
-						params ["_display", "_object"];
-						((isNull _display) || ((_object distance player) > 4) || !(alive player) || (player getVariable ["ACE_isUnconscious", false]) || ((lifeState player) == "INCAPACITATED"));
-					},
-					{
-						params ["_display"];
-						KH_var_interactionMenuOpen = false;
+					if !(isNull _display) then {
+						_display closeDisplay 2;
+					};
+				},
+				true,
+				{
+					params ["_display", "_object", "_currentUnit"];
 
-						if !(isNull _display) then {
-							_display closeDisplay 2;
-						};
-					}, 
-					[_display, _object]
-				] call CBA_fnc_waitUntilAndExecute;
-			};
+					(
+						(isNull _display) ||
+						(_currentUnit isNotEqualTo KH_var_playerUnit) ||
+						((_object distance KH_var_playerUnit) > 3) || 
+						!(alive KH_var_playerUnit) || 
+						(KH_var_playerUnit getVariable ["ACE_isUnconscious", false]) || 
+						((lifeState KH_var_playerUnit) isEqualTo "INCAPACITATED")
+					);
+				},
+				false
+			] call KH_fnc_execute;
 		}, 
 		{}, 
 		[0xDC, [false, false, false]]
@@ -1026,13 +1000,10 @@ if hasInterface then {
 		"Open Virtual Inventory", 
 		{
 			KH_var_interactionMenuOpen = true;
-			private _display = [player] call KH_fnc_openSimulatedInventory;
+			private _display = [KH_var_playerUnit] call KH_fnc_openSimulatedInventory;
 
 			[
-				{
-					params ["_display"];
-					((isNull _display) || !(alive player) || (player getVariable ["ACE_isUnconscious", false]) || ((lifeState player) == "INCAPACITATED"));
-				},
+				[_display],
 				{
 					params ["_display"];
 					KH_var_interactionMenuOpen = false;
@@ -1040,9 +1011,21 @@ if hasInterface then {
 					if !(isNull _display) then {
 						_display closeDisplay 2;
 					};
-				}, 
-				[_display]
-			] call CBA_fnc_waitUntilAndExecute;
+				},
+				true,
+				{
+					params ["_display"];
+
+					(
+						(isNull _display) ||
+						(_currentUnit isNotEqualTo KH_var_playerUnit) ||
+						!(alive KH_var_playerUnit) || 
+						(KH_var_playerUnit getVariable ["ACE_isUnconscious", false]) || 
+						((lifeState KH_var_playerUnit) isEqualTo "INCAPACITATED")
+					);
+				},
+				false
+			] call KH_fnc_execute;
 		}, 
 		{}, 
 		[0xDC, [false, true, true]]
@@ -1053,33 +1036,39 @@ if hasInterface then {
 		"KH_openRemoteVirtualInventory", 
 		"Open Remote Virtual Inventory", 
 		{
-			private _object = if !(isNull cursorObject) then {
-				cursorObject;
-			}
-			else {
-				cursorTarget;
-			};
+			private _viewTarget = call KH_fnc_getViewTarget;
+			private _surfaceDistance = _viewTarget select 0;
+			if (_surfaceDistance > 3) exitWith {};
+			private _object = createVehicleLocal ["KH_HelperSquare", ASLToAGL (_viewTarget select 3), [], 0, "CAN_COLLIDE"]; 
+			KH_var_interactionMenuOpen = true;
+			private _display = [_object] call KH_fnc_openSimulatedInventory;
+			private _currentUnit = KH_var_playerUnit;
 
-			if ((_object distance player) < 4) then {
-				KH_var_interactionMenuOpen = true;
-				private _display = [_object] call KH_fnc_openSimulatedInventory;
+			[
+				[_display, _object, _currentUnit],
+				{
+					params ["_display"];
+					KH_var_interactionMenuOpen = false;
 
-				[
-					{
-						params ["_display", "_object"];
-						((isNull _display) || ((_object distance player) > 4) || !(alive player) || (player getVariable ["ACE_isUnconscious", false]) || ((lifeState player) == "INCAPACITATED"));
-					},
-					{
-						params ["_display"];
-						KH_var_interactionMenuOpen = false;
+					if !(isNull _display) then {
+						_display closeDisplay 2;
+					};
+				},
+				true,
+				{
+					params ["_display", "_object", "_currentUnit"];
 
-						if !(isNull _display) then {
-							_display closeDisplay 2;
-						};
-					}, 
-					[_display, _object]
-				] call CBA_fnc_waitUntilAndExecute;
-			};
+					(
+						(isNull _display) ||
+						(_currentUnit isNotEqualTo KH_var_playerUnit) ||
+						((_object distance KH_var_playerUnit) > 3) || 
+						!(alive KH_var_playerUnit) || 
+						(KH_var_playerUnit getVariable ["ACE_isUnconscious", false]) || 
+						((lifeState KH_var_playerUnit) isEqualTo "INCAPACITATED")
+					);
+				},
+				false
+			] call KH_fnc_execute;
 		}, 
 		{}, 
 		[0xDC, [false, true, false]]
@@ -1091,12 +1080,7 @@ if hasInterface then {
 		"Toggle Diagnostics",
 		{
 			if (KH_var_adminMachine isEqualTo clientOwner) then {
-				if !KH_var_diagnosticsState then {
-					[true, true, true, true] call KH_fnc_diagnostics;
-				}
-				else {
-					[false, false, false, false] call KH_fnc_diagnostics;
-				};
+				[!KH_var_diagnosticsState] call KH_fnc_diagnostics;
 			};
 		}, 
 		{}, 
@@ -1119,10 +1103,9 @@ if hasInterface then {
 				missionNamespace setVariable ["KH_var_playerWaiting", true];
 
 				[
-					{				
-						(!(isNull player) && (alive player));
-					}, 
+					[],
 					{
+						call KH_fnc_playerLoadInit;
 						["KH_eve_playerLoaded", [clientOwner, getPlayerUID player, player, [player, true] call KH_fnc_getEntityVariableName]] call CBA_fnc_globalEvent;				
 						missionNamespace setVariable ["KH_var_playerWaiting", false];
 
@@ -1130,8 +1113,10 @@ if hasInterface then {
 							[[isServer, hasInterface], _x] call KH_fnc_luaOperation;
 						} forEach KH_var_loadInitLuaExecutions;
 					},
-					[]
-				] call CBA_fnc_waitUntilAndExecute;
+					true,
+					{(!(isNull player) && (alive player));},
+					false
+				] call KH_fnc_execute;
 			};
 		}
 	];
@@ -1140,14 +1125,8 @@ if hasInterface then {
 		"TeamSwitch", 
 		{
 			params ["_previousUnit", "_newUnit"];
-
-			[
-				{
-					params ["_previousUnit", "_newUnit"];
-					["KH_eve_playerSwitched", [clientOwner, _previousUnit, _newUnit]] call CBA_fnc_globalEvent;
-				}, 
-				[_previousUnit, _newUnit]
-			] call CBA_fnc_execNextFrame;
+			[_previousUnit] call KH_fnc_playerSwitchInit;
+			["KH_eve_playerSwitched", [clientOwner, _previousUnit, _newUnit]] call CBA_fnc_globalEvent;
 		}
 	];
 
@@ -1232,6 +1211,13 @@ if hasInterface then {
 			KH_var_drawUiExecutionStackMonitor deleteAt _handler;
 		}
 	] call CBA_fnc_addEventHandler;
+};
+
+if (!isServer && !hasInterface) then {
+	KH_fnc_headlessMissionLoadInit = {};
+	KH_fnc_headlessMissionStartInit = {};
+	KH_fnc_headlessPlayersLoadedInit = {};
+	KH_fnc_headlessMissionEndInit = {};
 };
 
 nil;

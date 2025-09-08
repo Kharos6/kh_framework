@@ -70,16 +70,16 @@ class Mission
 						defaultValue = "''";
 						validate = "expression";
 					};
-					class KH_HeadlessLoadInit
+					class KH_HeadlessMissionLoadInit
 					{
-						displayName = "Headless: Load Init";
+						displayName = "Headless: Mission Load Init";
 						tooltip = "Unscheduled code to execute locally to each headless client when they load into the mission. Players may not yet be present, and their units may not yet be available.";
-						property = "KH_HeadlessLoadInit";
+						property = "KH_HeadlessMissionLoadInit";
 						control = "EditCodeMulti5";
 						expression = 
 						"\
 							if ((_value isNotEqualTo '') && !is3DEN && !isServer && !hasInterface) then {\
-								KH_fnc_headlessLoadInit = compile _value;\
+								KH_fnc_headlessMissionLoadInit = compile _value;\
 							};\
 						";
 						defaultValue = "''";
@@ -129,16 +129,16 @@ class Mission
 						";
 						defaultValue = "''";
 					};
-					class KH_PlayerPreloadInit
+					class KH_PlayerMissionLoadInit
 					{
-						displayName = "Player: Preload Init";
+						displayName = "Player: Mission Load Init";
 						tooltip = "Unscheduled code to execute locally to each player when they load into the mission. The local player unit is not yet available. Players may not yet be present, and their units may not yet be available.";
-						property = "KH_PlayerPreloadInit";
+						property = "KH_PlayerMissionLoadInit";
 						control = "EditCodeMulti5";
 						expression = 
 						"\
 							if ((_value isNotEqualTo '') && !is3DEN && hasInterface) then {\
-								KH_fnc_playerPreloadInit = compile _value;\
+								KH_fnc_playerMissionLoadInit = compile _value;\
 							};\
 						";
 						defaultValue = "''";
@@ -147,7 +147,7 @@ class Mission
 					class KH_PlayerMissionStartInit
 					{
 						displayName = "Player: Mission Start Init";
-						tooltip = "Unscheduled code to execute locally to each player when the mission starts. The local unit may not yet be available. Players are present, but their units may not yet be available.";
+						tooltip = "Unscheduled code to execute locally to each player when the mission starts. The local player unit may not yet be available. Players are present, but their units may not yet be available.";
 						property = "KH_PlayerMissionStartInit";
 						control = "EditCodeMulti5";
 						expression = 

@@ -9,31 +9,16 @@
 #define CTRL_DEFAULT_Y (pixelH)
 #define CTRL_DEFAULT_X (ATTRIBUTE_TITLE_W * GRID_W)
 #define CTRL_DEFAULT_W (82 * GRID_W)
-#define RSC_POS_X(N) ((N) * GUI_GRID_W + GUI_GRID_CENTER_X)
-#define RSC_POS_Y(N) ((N) * GUI_GRID_H + GUI_GRID_CENTER_Y)
-#define RSC_POS_W(N) ((N) * GUI_GRID_W)
-#define RSC_POS_H(N) ((N) * GUI_GRID_H)
+#define RSC_POS_X(N) (safeZoneX + safeZoneW * ((N) * 0.01))
+#define RSC_POS_Y(N) (safeZoneY + safeZoneH * ((N) * 0.01))
+#define RSC_POS_W(N) ((((safeZoneW / safeZoneH) * safeZoneH) * ((N) * 0.01)) + 0.00015)
+#define RSC_POS_H(N) ((((safeZoneH / safeZoneW) * safeZoneW) * ((N) * 0.01)) + 0.00015)
+#define RSC_POS_H_SQUARE(N) (((((safeZoneH / safeZoneW) * safeZoneW) * (safeZoneW / safeZoneH) * safeZoneW / safeZoneH) * ((N) * 0.01)) + 0.00015)
+#define RSC_TEXT_SIZE(N) (((safeZoneH / safeZoneW) * safeZoneW) * ((N) * 0.01))
 #define GUI_THEME_RGB_R "(profileNamespace getVariable ['GUI_BCG_RGB_R', 0.13])"
 #define GUI_THEME_RGB_G "(profileNamespace getVariable ['GUI_BCG_RGB_G', 0.54])"
 #define GUI_THEME_RGB_B "(profileNamespace getVariable ['GUI_BCG_RGB_B', 0.21])"
 #define GUI_THEME_ALPHA "(profileNamespace getVariable ['GUI_BCG_RGB_A', 0.8])"
-class RscButton;
-class RscButtonMenuCancel;
-class RscButtonMenuOK;
-class RscCheckbox;
-class RscCombo;
-class RscEdit;
-class RscEditMulti;
-class RscListBox;
-class RscListBoxKeys;
-class RscListBoxMulti;
-class RscListNBox;
-class RscSlider;
-class RscStructuredText;
-class RscText;
-class RscTextMulti;
-class RscTree;
-class RscTreeMulti;
 class ctrlButton;
 class ctrlButtonCancel;
 class ctrlButtonClose;

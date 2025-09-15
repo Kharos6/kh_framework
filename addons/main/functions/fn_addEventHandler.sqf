@@ -1,4 +1,4 @@
-params [["_type", "", ["", []]], ["_event", "", [0, ""]], "_arguments", ["_function", {}, ["", {}]]];
+params [["_type", "", ["", []]], ["_event", "", [true, 0, ""]], "_arguments", ["_function", {}, ["", {}]]];
 private _argumentsId = call KH_fnc_generateUid;
 missionNamespace setVariable [_argumentsId, _arguments];
 private _eventNameId = call KH_fnc_generateUid;
@@ -71,6 +71,39 @@ switch _eventType do {
 				_handler = _entity addEventHandler [_event, _expression];
 			};
 
+			case "CURRENT_LOCAL": {
+				_handler = _entity addEventHandler [_event, _expression];
+
+				[
+					[
+						["STANDARD", _entity, "LOCAL"],
+						"Local",
+						[_event, _handler, clientOwner],
+						{
+							params ["_entity"];
+							_args params ["_event", "_handler", "_eventOwner"];
+
+							[
+								[_entity, _event, _handler],
+								{
+									params ["_entity", "_event", "_handler"];
+									_entity removeEventHandler [_event, _handler];
+								},
+								_eventOwner,
+								true,
+								false
+							] call KH_fnc_execute;
+
+							_entity removeEventHandler [_thisEvent, _thisEventHandler];
+						}
+					],
+					"KH_fnc_addEventHandler",
+					_entity,
+					true,
+					false
+				] call KH_fnc_execute;
+			};
+
 			case "REMOTE": {
 				_persistentEventId = call KH_fnc_generateUid;
 				_persistentExecutionId = call KH_fnc_generateUid;
@@ -102,8 +135,8 @@ switch _eventType do {
 						_args params ["_remoteHandler", "_persistentExecutionId"];
 
 						if ((_handler select 1) isEqualTo _persistentExecutionId) then {
-							[_remoteHandler] call KH_fnc_removeEventHandler;
-							[_eventId] call KH_fnc_removeEventHandler;
+							[_remoteHandler select 1, _remoteHandler select 2] call CBA_fnc_removeEventHandler;
+							["KH_eve_eventHandlerRemoved", _eventId select 2] call CBA_fnc_removeEventHandler;
 						};
 					}
 				] call KH_fnc_addEventHandler;
@@ -344,7 +377,6 @@ switch _eventType do {
 				}, 
 				_handlerTickCounterId, 
 				_timeout, 
-				_timeoutPriority, 
 				_timeoutOnDeletion
 			]
 		];
@@ -358,6 +390,7 @@ switch _eventType do {
 			private _eventId = [_type, _event, _handler, clientOwner];
 			private _eventName = _handler;
 			private _executionTime = CBA_missionTime;
+			private _executionCount = 0;
 
 			if ((_conditionFunction isEqualTo {}) || (_conditionFunction isEqualTo "")) then {						
 				if _iterationCount then {
@@ -447,12 +480,7 @@ switch _eventType do {
 		if !_continue exitWith {};
 
 		KH_var_temporalExecutionStackAdditions insert [
-			if _timeoutPriority then {
-				-1;
-			}
-			else {
-				0;
-			},
+			[0, -1] select _timeoutPriority,
 			[
 				[
 					_arguments,
@@ -558,30 +586,44 @@ switch _eventType do {
 					[_type, _event, _handler, clientOwner],
 					_handler,
 					_previousReturn,
-					CBA_missionTime
+					CBA_missionTime,
+					[0, 1] select _immediate
 				]
 			]
 		];
 
 		if (!_iterationCount && (_timeout isNotEqualTo 0)) then {
-			[
+			private _timeoutId = call KH_fnc_generateUid;
+
+			KH_var_temporalExecutionStackAdditions insert [
+				[-1, 0] select _timeoutPriority,
 				[
-					"TEMPORAL",
-					false,
-					[],
-					{},
-					[true, !_timeoutPriority, false, false],
-					[],
-					{},
-					false
-				],
-				_timeout,
-				[_handler],
-				{
-					params ["_handler"];
-					["KH_eve_temporalExecutionStackHandler", [_handler, true, true]] call CBA_fnc_localEvent;
-				}
-			] call KH_fnc_addEventHandler;
+					[_handler],
+					{
+						params ["_handler"];
+						["KH_eve_temporalExecutionStackHandler", [_handler, true, true]] call CBA_fnc_localEvent;
+						KH_var_temporalExecutionStackDeletions pushBackUnique _eventId;
+					},
+					_timeout,
+					if (_timeout isEqualTo 0) then {
+						diag_frameNo + 1;
+					}
+					else {
+						if (_timeout > 0) then {
+							diag_tickTime + _timeout;
+						}
+						else {
+							diag_frameNo + (abs _timeout);
+						};
+					},
+					-1,
+					_timeoutId,
+					_timeoutId,
+					nil,
+					CBA_missionTime,
+					0
+				]
+			];
 		};
 	};
 
@@ -606,15 +648,7 @@ switch _eventType do {
 			_timeout = ((parseNumber _timeout) - CBA_missionTime) max 0;
 		};
 
-		private _drawType = switch _event do {
-			case "2D": {
-				KH_var_drawUi2dExecutionStackAdditions;
-			};
-
-			case "3D": {
-				KH_var_drawUi3dExecutionStackAdditions;
-			};
-		};
+		private _drawType = [KH_var_drawUi2dExecutionStackAdditions, KH_var_drawUi3dExecutionStackAdditions] select _event;
 
 		_drawType pushBack [
 			_arguments,
@@ -669,24 +703,32 @@ switch _eventType do {
 		];
 
 		if (_timeout isNotEqualTo 0) then {
-			[
-				[
-					"TEMPORAL",
-					false,
-					[],
-					{},
-					[true, false, false, false],
-					[],
-					{},
-					false
-				],
-				_timeout,
+			private _timeoutId = call KH_fnc_generateUid;
+
+			_drawType pushBack [
 				[_handler],
 				{
 					params ["_handler"];
 					["KH_eve_drawUiExecutionStackHandler", [_handler, true]] call CBA_fnc_localEvent;
+				},
+				_timeout,
+				if (_timeout isEqualTo 0) then {
+					diag_frameNo + 1;
 				}
-			] call KH_fnc_addEventHandler;
+				else {
+					if (_timeout > 0) then {
+						diag_tickTime + _timeout;
+					}
+					else {
+						diag_frameNo + (abs _timeout);
+					};
+				},
+				-1,
+				_timeoutId,
+				_timeoutId,
+				nil,
+				CBA_missionTime
+			]
 		};
 	};
 
@@ -742,11 +784,11 @@ switch _eventType do {
 	};
 };
 
-if (isNil "_persistentEventId") then {
-	if !(_type isEqualType []) then {
-		_type = [_type];
-	};
+if !(_type isEqualType []) then {
+	_type = [_type];
+};
 
+if (isNil "_persistentEventId") then {
 	missionNamespace setVariable [_handlerId, [_type, _event, _handler, clientOwner]];
 	["KH_eve_eventHandlerAdded", [[_type, _event, _handler, clientOwner]]] call CBA_fnc_localEvent;
 	[_type, _event, _handler, clientOwner];
@@ -758,7 +800,7 @@ else {
 		_eventOwner = clientOwner;
 	};
 
-	missionNamespace setVariable [_handlerId, [_handler, _persistentExecutionId, _eventOwner], true];
-	["KH_eve_eventHandlerAdded", [[_handler, _persistentExecutionId, _eventOwner]]] call CBA_fnc_globalEvent;
-	[_handler, _persistentExecutionId, _eventOwner];
+	missionNamespace setVariable [_handlerId, [_type, _event, _handler, _persistentExecutionId, _eventOwner], true];
+	["KH_eve_eventHandlerAdded", [[_type, _event, _handler, _persistentExecutionId, _eventOwner]]] call CBA_fnc_globalEvent;
+	[_type, _event, _handler, _persistentExecutionId, _eventOwner];
 };

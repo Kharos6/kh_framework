@@ -1,7 +1,7 @@
 params [["_handler", [], [[]]]];
 
-if ((count _handler) <= 3) exitWith {
-	_handler params [["_handlerId", [], [[]]], ["_persistentExecutionId", "", [""]], ["_eventOwner", nil, [0]]];
+if ((count _handler) isEqualTo 5) exitWith {
+	_handler params [["_type", [], [[]]], ["_event", "", [""]], ["_handlerId", [], [[]]], ["_persistentExecutionId", "", [""]], ["_eventOwner", nil, [0]]];
 	missionNamespace setVariable [_persistentExecutionId, false, true];
 	[_handlerId] call KH_fnc_removeHandler;
 
@@ -13,7 +13,7 @@ if ((count _handler) <= 3) exitWith {
 	};
 };
 
-_handler params [["_type", [], [[]]], ["_event", "", [0, ""]], ["_handlerId", 0, [0, "", []]], ["_eventOwner", 2, [0]]];
+_handler params [["_type", [], [[]]], ["_event", "", [true, 0, ""]], ["_handlerId", 0, [0, "", []]], ["_eventOwner", 2, [0]]];
 
 [
 	[_type, _event, _handlerId],

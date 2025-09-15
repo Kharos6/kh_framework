@@ -1,64 +1,47 @@
-params ["_unit"];
+params [["_unit", objNull, [objNull]]];
 
 [
-	hashValue _unit,
+	KH_var_serverMissionSessionId,
+	[_unit, true] call KH_fnc_getEntityVariableName,
+	_unit getVariable ["KH_var_generatedVariableName", false],
+	typeOf _unit,
+	isAgent (teamMember _unit),
 	[
-		typeOf _unit,
-		group _unit,
-		vehicleVarName _unit,
 		simulationEnabled _unit,
 		dynamicSimulationEnabled _unit,
+		canTriggerDynamicSimulation _unit,
 		isObjectHidden _unit,
+		isDamageAllowed _unit,
 		name _unit,
 		face _unit,
 		speaker _unit,
 		pitch _unit,
 		nameSound _unit,
-		animationState _unit,
-		gestureState _unit,
-		getUnitMovesInfo _unit,
 		rank _unit,
+		[_unit] call BIS_fnc_getUnitInsignia,
 		rating _unit,
-		stance _unit,
 		unitPos _unit,
-		pose _unit,
 		isForcedWalk _unit,
-		isTouchingGround _unit,
-		((eyePos _unit) select 2) < 0,
-		isSwitchingWeapon _unit,
+		getForcedSpeed _unit,
+		captive _unit,
 		getUnitFreefallInfo _unit,
 		getAnimSpeedCoef _unit,
-		currentWeapon _unit,
-		currentWeaponMode _unit,
-		isWeaponDeployed _unit,
-		currentMagazine _unit,
-		currentThrowable _unit,
-		currentVisionMode _unit,
-		teamMember _unit,
-		isAgent (teamMember _unit),
-		formationLeader _unit,
-		formLeader _unit,
-		registeredTasks (teamMember _unit),
-		currentTasks (teamMember _unit),
-		captive _unit,
+		getCustomAimCoef _unit,
 		getUnitLoadout _unit,
+		getAllUnitTraits _unit,
+		weaponState _unit,
+		currentThrowable _unit,
 		getPosATL _unit,
 		vectorDir _unit,
 		vectorUp _unit,
 		velocityModelSpace _unit,
-		objectParent _unit,
-		attachedTo _unit,
-		attachedObjects _unit,
 		damage _unit,
 		getAllHitPointsDamage _unit,
 		getBleedingRemaining _unit,
 		getOxygenRemaining _unit,
-		isDamageAllowed _unit,
-		incapacitatedState _unit,
 		lifeState _unit,
-		unitRecoilCoefficient _unit,
-		collisionDisabledWith _unit,
 		unitCombatMode _unit,
+		behaviour _unit,
 		[
 			skill _unit,
 			_unit skill "aimingAccuracy",
@@ -91,11 +74,39 @@ params ["_unit"];
 			_unit checkAIFeature "RADIOPROTOCOL",
 			_unit checkAIFeature "FIREWEAPON"
 		],
-		getAllUnitTraits _unit,
-		getEntityInfo _unit,
-		synchronizedObjects _unit,
-		_unit targetsQuery [objNull, sideUnknown, "", [], 0],
-		allVariables _unit,
-		_unit getVariable ["KH_var_initExecutions", []]
+		groupId (group _unit),
+		assignedTeam _unit,
+		call {
+			private _vehicleSlot = [_unit] call KH_fnc_getUnitVehicleSlot;
+			
+			if (_vehicleSlot isNotEqualTo []) then {
+				_vehicleSlot set [0, [_vehicleSlot select 0, true] call KH_fnc_getEntityVariableName];
+				_vehicleSlot;
+			}
+			else {
+				[];
+			};
+		},
+		[(collisionDisabledWith _unit) select 0, true] call KH_fnc_getEntityVariableName,
+		call {
+			private _entities = [];
+
+			{
+				_x params ["_accuracy", "_target", "_targetSide", "_targetType", "_targetPosition", "_targetAge"];
+				_entities pushBack [_accuracy, [_target, true] call KH_fnc_getEntityVariableName, _targetSide, _targetType, _targetPosition, _targetAge];
+			} forEach (_unit targetsQuery [objNull, sideUnknown, "", [], 0]);	
+
+			_entities;			
+		},
+		call {
+			private _allVariables = [];
+
+			{
+				_x params [["_name", "", [""]], "_value", ["_public", false, [true]]];
+				_allVariables pushBack [_name, ["", _value] call KH_fnc_serializeValue, _public];
+			} forEach (_unit getVariable ["KH_var_persistentVariables", []]);
+
+			_allVariables;
+		}
 	]
 ];

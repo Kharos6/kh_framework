@@ -55,7 +55,7 @@ switch _type do {
             if _typeObject then {
                 [
                     ["DRAW_UI", _conditionArguments, _conditionFunction, _duration, [], {}],
-                    "3D",
+                    true,
                     [_start, _end, _color, _width],
                     {
                         _args params ["_start", "_end", "_color", "_width"];
@@ -85,7 +85,7 @@ switch _type do {
             else {
                 [
                     ["DRAW_UI", _conditionArguments, _conditionFunction, _duration, [], {}],
-                    "3D",
+                    true,
                     [_start, _end, _color, _width],
                     {
                         drawLine3D _args;
@@ -156,7 +156,7 @@ switch _type do {
             if _typeObject then {
                 [
                     ["DRAW_UI", [], {}, _duration, [], {}],
-                    "3D",
+                    true,
                     [_start, _end, _beamColor, _dotColor, _dotSize, _beamThickness, _beamMaxLength, _ir],
                     {
                         _args params ["_start", "_end", "_beamColor", "_dotColor", "_dotSize", "_beamThickness", "_beamMaxLength", "_ir"];
@@ -199,7 +199,7 @@ switch _type do {
 
                 [
                     ["DRAW_UI", [], {}, _duration, [], {}],
-                    "3D",
+                    true,
                     [_start, _end, _beamColor, _dotColor, _dotSize, _beamThickness, _beamMaxLength, _ir],
                     {
                         drawLaser _args;
@@ -251,7 +251,7 @@ switch _type do {
             if _typeObject then {
                 [
                     ["DRAW_UI", _conditionArguments, _conditionFunction, _duration, [], {}],
-                    "3D",
+                    true,
                     [_texture, _color, _position, _width, _height, _angle, _text, _shadow, _textSize, _font, _textAlign, _drawSideArrows, _offsetX, _offsetY],
                     {
                         _args params ["_texture", "_color", "_position", "_width", "_height", "_angle", "_text", "_shadow", "_textSize", "_font", "_textAlign", "_drawSideArrows", "_offsetX", "_offsetY"];
@@ -273,7 +273,7 @@ switch _type do {
             else {
                 [
                     ["DRAW_UI", _conditionArguments, _conditionFunction, _duration, [], {}],
-                    "3D",
+                    true,
                     [_texture, _color, _position, _width, _height, _angle, _text, _shadow, _textSize, _font, _textAlign, _drawSideArrows, _offsetX, _offsetY],
                     {
                         if (!_drawSideArrows && ((worldToScreen _position) isEqualTo [])) exitWith {};

@@ -4,6 +4,10 @@ if (isNil "_value") exitWith {
     ["NIL", nil];
 };
 
+if ((_type isNotEqualTo "") && (_value isEqualType "")) exitWith {
+    [_type, _value];
+};
+
 if (_type isEqualTo "") then {
     _type = typeName _value;
 };

@@ -6,41 +6,6 @@ isNil {
 			{				
 				missionNamespace setVariable [_x, missionNamespace getVariable [_x, []], true];
 			} forEach KH_var_entityArrayBuilderArrays;
-
-			addMissionEventHandler [
-				"EntityRespawned", 
-				{
-					params ["_newEntity", "_oldEntity"];
-					{
-						private _entityArray = missionNamespace getVariable [_x, []];
-
-						if (_oldEntity in _entityArray) then {
-							_entityArray deleteAt (_entityArray find _oldEntity);
-							_entityArray pushBackUnique _newEntity;
-							missionNamespace setVariable [_x, _entityArray, true];
-						};
-					} forEach KH_var_entityArrayBuilderArrays;
-				}
-			];
-
-			[
-				"KH_eve_playerLoaded", 
-				{
-					params ["_player"];
-					private _arrayBuilderArray = _player getVariable ["KH_var_assignedEntityArrayBuilderArrays", []];
-
-					if (_arrayBuilderArray isNotEqualTo []) then {
-						{
-							private _entityArray = missionNamespace getVariable [_x, []];
-
-							if !(_player in _entityArray) then {
-								_entityArray pushBackUnique _player;
-								missionNamespace setVariable [_x, _entityArray, true];
-							};
-						} forEach _arrayBuilderArray;
-					};
-				}
-			] call CBA_fnc_addEventHandler;
 		};
 
 		if (KH_var_groupArrayBuilderArrays isNotEqualTo []) then {
@@ -49,93 +14,18 @@ isNil {
 			} forEach KH_var_groupArrayBuilderArrays;
 		};
 
-		if (KH_var_dynamicSimulationEntities isNotEqualTo []) then {
-			KH_var_dynamicSimulationSets = createHashMap;
-
-			{
-				_x params ["_entity", "_distance"];
-				private _value = KH_var_dynamicSimulationSets get _distance;
-
-				if !(isNil "_value") then {
-					_value pushBack _entity;
-					KH_var_dynamicSimulationSets set [_distance, _value];
-				}
-				else {
-					KH_var_dynamicSimulationSets insert [[_distance, [_entity]]];
-				};
-			} forEach KH_var_dynamicSimulationEntities;
-
-			{
-				[_y, _x] call KH_fnc_dynamicSimulation;
-			} forEach KH_var_dynamicSimulationSets;
-		};
-
-		if (KH_var_headlessClientTransfers isNotEqualTo []) then {
-			{
-				private _headlessClient = _x;
-				private _assignedEntities = [];
-				private _assignedEntitiesRecreate = [];
-
-				{
-					if ((vehicleVarName _headlessClient) in _x) then {
-						private _recreate = _x select 2;
-
-						if !_recreate then {
-							_assignedEntities pushBack (_x select 0);
-						}
-						else {
-							_assignedEntitiesRecreate pushBack (_x select 0);
-						};
-					};
-				} forEach KH_var_headlessClientTransfers;
-				
-				if ((owner _headlessClient) == 2) then {
-					[
-						{
-							((owner _headlessClient) != 2);
-						},
-						{
-							params ["_assignedEntities", "_assignedEntitiesRecreate", "_headlessClient"];
-							[_assignedEntities, owner _headlessClient, false, {}] call KH_fnc_setOwnership;
-							[_assignedEntitiesRecreate, owner _headlessClient, true, {}] call KH_fnc_setOwnership;
-						},
-						[_assignedEntities, _assignedEntitiesRecreate, _headlessClient]
-					] call CBA_fnc_waitUntilAndExecute;
-				}
-				else {
-					params ["_assignedEntities", "_assignedEntitiesRecreate", "_headlessClient"];
-					[_assignedEntities, owner _headlessClient, false, {}] call KH_fnc_setOwnership;
-					[_assignedEntitiesRecreate, owner _headlessClient, true, {}] call KH_fnc_setOwnership;	
-				};
-
-				{
-					[
-						{
-							params ["_unit", "_ownerId"];
-							((owner _unit) == _ownerId);
-						},
-						{
-							params ["_unit", "_ownerId"];
-							[[_unit], _unit getVariable ["KH_var_headlessClientTransferInit", {}], _ownerId, true] call KH_fnc_execute;
-						}, 
-						[_x, owner _headlessClient], 
-						30
-					] call CBA_fnc_waitUntilAndExecute;
-				} forEach (_assignedEntities + _assignedEntitiesRecreate);
-			} forEach ([["HEADLESS"], true] call KH_fnc_getClients);
-		};
-
 		if (KH_var_initialSideRelations isNotEqualTo []) then {
 			{
-				[_x select 0, _x select 1, _x select 2] call KH_fnc_setSideRelations;
+				_x call KH_fnc_setSideRelations;
 			} forEach KH_var_initialSideRelations;
 		};
+
+		call KH_fnc_serverMissionLoadInit;
 
 		{
 			[[isServer, hasInterface], _x] call KH_fnc_luaOperation;
 		} forEach KH_var_loadInitLuaExecutions;
 
-		call KH_fnc_serverMissionLoadInit;		
 		[[], {systemChat "KH FRAMEWORK - MISSION LOADED";}, "GLOBAL", true, false] call KH_fnc_execute;
 
 		[
@@ -160,6 +50,7 @@ isNil {
 						call KH_fnc_serverPlayersLoadedInit;
 						[[], "KH_fnc_playerPlayersLoadedInit", "PLAYERS", true, false] call KH_fnc_execute;
 						[[], "KH_fnc_headlessPlayersLoadedInit", "HEADLESS", true, false] call KH_fnc_execute;
+						["KH_eve_playersLoaded", []] call CBA_fnc_globalEvent;
 						[[], {systemChat "KH FRAMEWORK - PLAYERS LOADED";}, "GLOBAL", true, false] call KH_fnc_execute;
 					},
 					true,
@@ -181,21 +72,22 @@ isNil {
 			{time > 0;},
 			false
 		] call KH_fnc_execute;
+	}
+	else {
+		if KH_var_missionStarted then {
+			KH_var_jip = true;
+		};
 	};
 	
 	if hasInterface then {
 		"KH_var_khDisplayLayer" cutRsc ["KH_ResourceKHDisplay", "PLAIN", -1, true, true];
 		call KH_fnc_playerMissionLoadInit;
-		["KH_eve_playerPreloadedInitial", [clientOwner]] call CBA_fnc_serverEvent;
+		["KH_eve_playerMissionPreloaded", [clientOwner]] call CBA_fnc_serverEvent;
 	};
 
 	if (!isServer && !hasInterface) then {
 		call KH_fnc_headlessMissionLoadInit;
-		["KH_eve_headlessLoadedInitial", [clientOwner]] call CBA_fnc_serverEvent;
-
-		{
-			[[isServer, hasInterface], _x] call KH_fnc_luaOperation;
-		} forEach KH_var_loadInitLuaExecutions;
+		["KH_eve_headlessMissionPreloaded", [clientOwner]] call CBA_fnc_serverEvent;
 	};
 
 	{
@@ -205,25 +97,19 @@ isNil {
 			_arguments call _function;
 		}
 		else {
+			_arguments = [_delay, _arguments, _function];
+
 			[
-				_arguments, 
-				_function, 
+				_arguments,
+				{
+					(_this select [1]) params ["_arguments", "_function"];
+					_arguments call _function;
+				}, 
 				true, 
-				[
-					"TEMPORAL",
-					0,
-					true,
-					[_delay],
-					{
-						params ["_delay"];
-						time > _delay;
-					},
-					true,
-					[],
-					{},
-					false,
-					true
-				], 
+				{
+					params ["_delay"];
+					time > _delay;
+				}, 
 				false
 			] call KH_fnc_execute;
 		};

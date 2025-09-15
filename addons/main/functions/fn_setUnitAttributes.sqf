@@ -1,133 +1,322 @@
-params ["_unit", "_attributes", ["_group", true], ["_variableName", false], ["_identity", true], ["_loadout", true], ["_position", true], ["_rotation", true], ["_vehicle", true], ["_behavior", true], ["_skill", true], ["_AI", true], ["_unitTraits", true]];
+params [["_unit", objNull, [objNull]], ["_attributes", [], [[]]], ["_overrideAttributes", [], [[]]], ["_respectAgent", true, [true]]];
+(_attributes select [3]) params ["_type", "_agent", "_savedAttributes"];
 
-if _group then {
-	private _savedGroup = _attributes select 1;
-
-	if !(isNull _savedGroup) then {
-		[_unit] joinSilent _savedGroup;
+if _respectAgent then {
+	if _agent then {
+		if !(isAgent (teamMember _unit)) then {
+			deleteVehicle _unit;
+			_unit = createAgent [_type, [0, 0, 0], [], 0, "CAN_COLLIDE"];
+		};
+	}
+	else {
+		if (isAgent (teamMember _unit)) then {
+			private _group = createGroup [side _unit, true];
+			deleteVehicle _unit;
+			_unit = _group createUnit [_type, [0, 0, 0], [], 0, "CAN_COLLIDE"];
+		};
 	};
 };
 
-if _variableName then {
-	if ((_attributes select 3) != "") then {
-		[_unit, (_attributes select 3)] call KH_fnc_setEntityVariableName;
-	};
+if (_overrideAttributes isNotEqualTo []) then {
+	private _currentAttributes = ([_unit] call KH_fnc_getUnitAttributes) select 3;
+
+	{
+		if (_x isEqualType 0) then {
+			_savedAttributes set [_x, _currentAttributes select _x];
+		}
+		else {
+			_x params [["_index", 0, [0]], "_value"];
+			_savedAttributes set [_index, _value];
+		};
+	} forEach _overrideAttributes;
 };
 
-if _identity then {
+_savedAttributes params [
+	"_simulation",
+	"_dynamicSimulation",
+	"_triggerDynamicSimulation",
+	"_hidden",
+	"_damageAllowed",
+	"_name",
+	"_face",
+	"_speaker",
+	"_pitch",
+	"_nameSound",
+	"_rank",
+	"_insignia",
+	"_rating",
+	"_unitPos",
+	"_forcedWalk",
+	"_forcedSpeed",
+	"_captive",
+	"_unitFreefallInfo",
+	"_animSpeedCoef",
+	"_customAimCoef",
+	"_loadout",
+	"_traits",
+	"_weaponState",
+	"_currentThrowable",
+	"_position",
+	"_vectorDir",
+	"_vectorUp",
+	"_velocityModelSpace",
+	"_damage",
+	"_hitPointsDamage",
+	"_bleedingRemaining",
+	"_oxygenRemaining",
+	"_lifeState",
+	"_combatMode",
+	"_behaviour",
+	"_skill",
+	"_aiFeatures",
+	"_group",
+	"_assignedTeam",
+	"_vehicle",
+	"_collisionDisabledWith",
+	"_targets",
+	"_variables"
+];
+
+[
 	[
-		[_unit, _attributes],
-		{
-			params ["_unit", "_attributes"];
-			_unit setIdentity (_attributes select 4);
-			_unit setFace (_attributes select 5);
-			_unit setSpeaker (_attributes select 6);
-		},
-		["JIP", "GLOBAL", _unit, false, false, ""],
-		true
-	] call KH_fnc_execute;
-};
+        _unit,
+		_simulation,
+        _hidden,
+        _rank,
+		_insignia,
+        _loadout,
+        _position,
+		_group,
+		_assignedTeam
+	], 
+	{
+		params [
+			"_unit",
+			"_simulation",
+			"_hidden",
+			"_rank",
+			"_insignia",
+			"_loadout",
+			"_position",
+			"_group",
+			"_assignedTeam"
+		];
 
-if _loadout then {
-	_unit setUnitLoadout (_attributes select 7);
-};
+		_unit enableSimulationGlobal _simulation;
+		_unit hideObjectGlobal _hidden;
+		_unit setUnitRank _rank;
+		[_unit, _insignia] call BIS_fnc_setUnitInsignia;
+		_unit setUnitLoadout _loadout;
+		_unit setPosATL _position;
+		_group = ["GROUP", _group] call KH_fnc_getEntityByIdentifier;
 
-if _position then {
-	_unit setPosATL (_attributes select 8);
-};
+		if !(isNull _group) then {
+			_unit joinSilent _group;
+		};
 
-if _rotation then {
-	[_unit, _attributes select 9, false] call KH_fnc_setRotation;
-};
+		_unit assignTeam _assignedTeam;
+	}, 
+	"SERVER", 
+	true, 
+	false
+] call KH_fnc_execute;
 
-if _vehicle then {
-	private _savedVehicle = _attributes select 10;
-
-	if !(isNull _savedVehicle) then {
-		_unit moveInAny _savedVehicle;
-	};
-};
-
-if _behaviour then {
+[
 	[
-		[_unit, _attributes],
-		{
-			params ["_unit", "_attributes"];
-			(group _unit) setBehaviourStrong (_attributes select 11);
-		},
 		_unit,
-		true
-	] call KH_fnc_execute;
-};
+		_damageAllowed,
+		_rating,
+		_unitPos,
+		_forcedWalk,
+		_forcedSpeed,
+		_captive,
+		_unitFreefallInfo,
+		_traits,
+		_weaponState,
+		_currentThrowable,
+		_vectorDir,
+		_vectorUp,
+		_velocityModelSpace,
+		_damage,
+		_hitPointsDamage,
+		_bleedingRemaining,
+		_oxygenRemaining,
+		_lifeState,
+		_combatMode,
+		_behaviour,
+		_skill,
+		_aiFeatures,
+		_vehicle,
+		_collisionDisabledWith,
+		_targets,
+		_variables
+	], 
+	{
+		params [
+			"_unit",
+			"_damageAllowed",
+			"_rating",
+			"_unitPos",
+			"_forcedWalk",
+			"_forcedSpeed",
+			"_captive",
+			"_unitFreefallInfo",
+			"_traits",
+			"_weaponState",
+			"_currentThrowable",
+			"_vectorDir",
+			"_vectorUp",
+			"_velocityModelSpace",
+			"_damage",
+			"_hitPointsDamage",
+			"_bleedingRemaining",
+			"_oxygenRemaining",
+			"_lifeState",
+			"_combatMode",
+			"_behaviour",
+			"_skill",
+			"_aiFeatures",
+			"_vehicle",
+			"_collisionDisabledWith",
+			"_targets",
+			"_variables"
+		];
 
-if _skill then {
-	[
-		[_unit, _attributes],
+		_unit allowDamage _damageAllowed;
+		[_unit, _rating] call KH_fnc_setRating;
+		_unit setUnitPos _unitPos;
+		_unit forceWalk _forcedWalk;
+		_unit forceSpeed _forcedSpeed;
+		_unit setCaptive _captive;
+		_unit setUnitFreefallHeight (_unitFreefallInfo select 2);
+		
 		{
-			params ["_unit", "_attributes"];
-			_unit setSkill (_attributes select 12);
-			private _skills = _attributes select 13;
-			_unit setSkill ["aimingAccuracy", _skills select 0];
-			_unit setSkill ["aimingShake", _skills select 1];
-			_unit setSkill ["aimingSpeed", _skills select 2];
-			_unit setSkill ["spotDistance", _skills select 3];
-			_unit setSkill ["spotTime", _skills select 4];
-			_unit setSkill ["courage", _skills select 5];
-			_unit setSkill ["reloadSpeed", _skills select 6];
-			_unit setSkill ["commanding", _skills select 7];
-			_unit setSkill ["general", _skills select 8];
-		},
-		_unit,
-		true
-	] call KH_fnc_execute;
-};
+			_X params ["_name", "_value"];
+			_unit setUnitTrait [_name, _value];
+		} forEach _traits;
 
-if _AI then {
-	[
-		[_unit, _attributes],
+		_weaponState params ["_weapon", "_muzzle", "_firemode"];
+		_unit selectWeapon [_weapon, _muzzle, _fireMode];
+		_unit selectThrowable (_currentThrowable select 1);
+		_unit setVectorDirAndUp [_vectorDir, _vectorUp];
+		_unit setVelocityModelSpace _velocityModelSpace;
+		_unit setDamage _damage;
+		private _i = 0;
+		private _hitPointNames = _hitPointsDamage select 0;
+		private _hitPointValues = _hitPointsDamage select 2;
+
+		for "_i" from 0 to ((count _hitPointNames) - 1) do {
+			_unit setHitPointDamage [_hitPointNames select _i, _hitPointValues select _i];
+		};
+
+		_unit setBleedingRemaining _bleedingRemaining;
+		_unit setOxygenRemaining _oxygenRemaining;
+
+		if ((_lifeState isEqualTo "INCAPACITATED") || (_lifeState isEqualTo "UNCONSCIOUS")) then {
+			_unit setUnconscious true;
+		};
+
+		_unit setUnitCombatMode _combatMode;
+		_unit setBehaviourStrong _behaviour;
+		_unit setSkill (_skill select 0);
+		_unit setSkill ["aimingAccuracy", _skill select 1];
+		_unit setSkill ["aimingShake", _skill select 2];
+		_unit setSkill ["aimingSpeed", _skill select 3];
+		_unit setSkill ["spotDistance", _skill select 4];
+		_unit setSkill ["spotTime", _skill select 5];
+		_unit setSkill ["courage", _skill select 6];
+		_unit setSkill ["reloadSpeed", _skill select 7];
+		_unit setSkill ["commanding", _skill select 8];
+		_unit setSkill ["general", _skill select 9];
+		_unit enableAIFeature ["AUTOTARGET", _aiFeatures select 0];
+		_unit enableAIFeature ["MOVE", _aiFeatures select 1];
+		_unit enableAIFeature ["TARGET", _aiFeatures select 2];
+		_unit enableAIFeature ["TEAMSWITCH", _aiFeatures select 3];
+		_unit enableAIFeature ["WEAPONAIM", _aiFeatures select 4];
+		_unit enableAIFeature ["ANIM", _aiFeatures select 5];
+		_unit enableAIFeature ["FSM", _aiFeatures select 6];
+		_unit enableAIFeature ["AIMINGERROR", _aiFeatures select 7];
+		_unit enableAIFeature ["SUPPRESSION", _aiFeatures select 8];
+		_unit enableAIFeature ["CHECKVISIBLE", _aiFeatures select 9];
+		_unit enableAIFeature ["AUTOCOMBAT", _aiFeatures select 10];
+		_unit enableAIFeature ["COVER", _aiFeatures select 11];
+		_unit enableAIFeature ["PATH", _aiFeatures select 12];
+		_unit enableAIFeature ["MINEDETECTION", _aiFeatures select 13];
+		_unit enableAIFeature ["LIGHTS", _aiFeatures select 14];
+		_unit enableAIFeature ["NVG", _aiFeatures select 15];
+		_unit enableAIFeature ["RADIOPROTOCOL", _aiFeatures select 16];
+		_unit enableAIFeature ["FIREWEAPON", _aiFeatures select 17];
+
+		if (_vehicle isNotEqualTo []) then {
+			_vehicle set [0, ["OBJECT", _vehicle] call KH_fnc_getEntityByIdentifier];
+			[_unit, _vehicle] call KH_fnc_setUnitVehicleSlot;
+		};
+
+		private _collisionEntity = ["OBJECT", _collisionDisabledWith] call KH_fnc_getEntityByIdentifier;
+
+		if !(isNull _collisionEntity) then {
+			_unit disableCollisionWith _collisionEntity;
+		};
+
 		{
-			params ["_unit", "_attributes"];
-			private _features = _attributes select 14;
-			_unit enableAIFeature ["AUTOTARGET", _features select 0];
-			_unit enableAIFeature ["MOVE", _features select 1];
-			_unit enableAIFeature ["TARGET", _features select 2];
-			_unit enableAIFeature ["TEAMSWITCH", _features select 3];
-			_unit enableAIFeature ["WEAPONAIM", _features select 4];
-			_unit enableAIFeature ["ANIM", _features select 5];
-			_unit enableAIFeature ["FSM", _features select 6];
-			_unit enableAIFeature ["AIMINGERROR", _features select 7];
-			_unit enableAIFeature ["SUPPRESSION", _features select 8];
-			_unit enableAIFeature ["CHECKVISIBLE", _features select 9];
-			_unit enableAIFeature ["AUTOCOMBAT", _features select 10];
-			_unit enableAIFeature ["COVER", _features select 11];
-			_unit enableAIFeature ["PATH", _features select 12];
-			_unit enableAIFeature ["MINEDETECTION", _features select 13];
-			_unit enableAIFeature ["LIGHTS", _features select 14];
-			_unit enableAIFeature ["NVG", _features select 15];
-			_unit enableAIFeature ["RADIOPROTOCOL", _features select 16];
-			_unit enableAIFeature ["FIREWEAPON", _features select 17];
-		},
-		_unit,
-		true
-	] call KH_fnc_execute;
-};
+			_x params ["_accuracy", "_target"];
+			_target = ["OBJECT", _target] call KH_fnc_getEntityByIdentifier;
 
-if _unitTraits then {
-	[
-		[_unit, _attributes],
-		{
-			params ["_unit", "_attributes"];
-			private _traits = _attributes select 15;
-			private _traitCount = (count _traits) -1;
-			private _i = 0;
-
-			for "_i" from 0 to _traitCount do {	
-				_unit setUnitTrait [(_traits select _i) select 0, (_traits select _i) select 1];
+			if !(isNull _target) then {
+				_unit reveal [_target, _accuracy];
 			};
-		},
-		_unit,
-		true
-	] call KH_fnc_execute;
-};
+		} forEach _targets;
 
-true;
+		{
+			_x params ["_name", "_value", "_public"];
+			_unit setVariable [_name, _value call KH_fnc_parseValue, _public];
+		} forEach _variables;
+	}, 
+	_unit, 
+	true, 
+	false
+] call KH_fnc_execute;
+
+[
+	[
+		_unit,
+		_dynamicSimulation,
+		_triggerDynamicSimulation,
+		_name,
+		_face,
+		_speaker,
+		_pitch,
+		_nameSound,
+		_animSpeedCoef,
+		_customAimCoef
+	], 
+	{
+		params [
+			"_unit",
+			"_dynamicSimulation",
+			"_triggerDynamicSimulation",
+			"_name",
+			"_face",
+			"_speaker",
+			"_pitch",
+			"_nameSound",
+			"_animSpeedCoef",
+			"_customAimCoef"
+		];
+
+		_unit enableDynamicSimulation _dynamicSimulation;
+		_unit triggerDynamicSimulation _triggerDynamicSimulation;
+		_unit setName _name;
+		_unit setFace _face;
+		_unit setSpeaker _speaker;
+		_unit setPitch _pitch;
+		_unit setNameSound _nameSound;
+		_unit setAnimSpeedCoef _animSpeedCoef;
+		_unit setCustomAimCoef _customAimCoef;
+	}, 
+	"GLOBAL", 
+	true, 
+	["JIP", _unit, false, ["KH_var_savedUnitAttributes_", [_unit, true] call KH_fnc_getEntityVariableName] joinString ""]
+] call KH_fnc_execute;
+
+_unit;

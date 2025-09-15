@@ -490,7 +490,7 @@ class Object
 						_value params ['_toggle', '_owner', '_recreate', '_init'];\
 						if (_toggle && !is3DEN) then {\
 							KH_var_headlessClientTransfers pushBack [_this, _owner, _recreate];\
-							if (_init != '') then {\
+							if (_init isNotEqualTo '') then {\
 								_this setVariable ['KH_var_headlessClientTransferInit', compile _init];\
 							};\
 						};\
@@ -602,7 +602,7 @@ class Object
 				class KH_ArrayBuilder
 				{
 					displayName = "Array Builder";
-					tooltip = "Specify an array of one or more strings of global variables that will be made into an array, made public, and contain this entity and any other entities utilizing this function. In format <['globalVariable1', 'globalVariable2', 'globalVariable3']>";
+					tooltip = "Specify an array of one or more strings of global variables that will be made into an array, made public, and contain this entity and any other entities utilizing this function. In format ['globalVariable1', 'globalVariable2', 'globalVariable3']";
 					property = "KH_ArrayBuilder";
 					control = "Edit";
 					expression = 
@@ -610,31 +610,17 @@ class Object
 						if ((_value != '') && (_value != '[]') && !is3DEN) then {\
 							private _array = parseSimpleArray _value;\
 							_this setVariable ['KH_var_assignedEntityArrayBuilderArrays', _array];\
+							private _originalArrayBuilderArray = missionNamespace getVariable ['KH_var_entityArrayBuilderArrays', []];\
 							{\
 								private _originalValueArray = missionNamespace getVariable [_x, []];\
 								_originalValueArray pushBack _this;\
 								missionNamespace setVariable [_x, _originalValueArray];\
-								private _originalArrayArray = missionNamespace getVariable ['KH_var_entityArrayBuilderArrays', []];\
-								_originalArrayArray pushBackUnique _x;\
-								missionNamespace setVariable ['KH_var_entityArrayBuilderArrays', _originalArrayArray];\
+								_originalArrayBuilderArray pushBackUnique _x;\
+								missionNamespace setVariable ['KH_var_entityArrayBuilderArrays', _originalArrayBuilderArray];\
 							} forEach _array;\
 						};\
 					";
 					defaultValue = "'[]'";
-				};
-				class KH_DynamicSimulation
-				{
-					displayName = "Dynamic Simulation";
-					tooltip = "Checks the targeted entity's distance to each player, and toggles its simulation based on the set distance, turning it on if a player is within it, and turning it off is a player is outside of it. Leave empty to disable it. This function is intended to allow additional distance flexibility alongside the standard Dynamic Simulation system.";
-					property = "KH_DynamicSimulation";
-					control = "Edit";
-					expression = 
-					"\
-						if ((_value != '') && !is3DEN) then {\
-							KH_var_dynamicSimulationEntities pushBack [_this, parseNumber _value];\
-						};\
-					";
-					defaultValue = "''";
 				};
 				class KH_FreefallHeight
 				{

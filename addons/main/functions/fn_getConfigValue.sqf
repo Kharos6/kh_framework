@@ -1,4 +1,4 @@
-params ["_type", "", [""], ["_config", "", ["", [], {}, objNull, configNull]]];
+params [["_type", "", [""]], ["_config", "", ["", [], {}, objNull, configNull]]];
 
 if !(_config isEqualType configNull) then {
     _config = switch (typeName _config) do {

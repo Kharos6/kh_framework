@@ -10,10 +10,14 @@ if (_entity isEqualType objNull) then {
 
 		if (_variableName isEqualTo "") then {
 			_name = hashValue _entity;
+			_entity setVariable ["KH_var_generatedVariableName", true, true];
 		}
 		else {
 			_name = _variableName;
 		};
+	}
+	else {
+		_entity setVariable ["KH_var_generatedVariableName", false, true];
 	};
 
 	missionNamespace setVariable [_name, _entity, true];
@@ -33,6 +37,10 @@ if (_entity isEqualType objNull) then {
 else {
 	if (_name isEqualTo "") then {
 		_name = hashValue _entity;
+		_entity setVariable ["KH_var_generatedVariableName", true, true];
+	}
+	else {
+		_entity setVariable ["KH_var_generatedVariableName", false, true];
 	};
 
 	missionNamespace setVariable [_name, _entity, true];

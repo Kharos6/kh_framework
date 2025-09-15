@@ -100,6 +100,21 @@ class Mission
 						defaultValue = "''";
 						validate = "expression";
 					};
+					class KH_HeadlessLoadInit
+					{
+						displayName = "Headless: Load Init";
+						tooltip = "Unscheduled code to execute locally to each headless client when their local logic unit becomes available. Players are present, but their units may not yet be available.";
+						property = "KH_HeadlessLoadInit";
+						control = "EditCodeMulti5";
+						expression = 
+						"\
+							if ((_value isNotEqualTo '') && !is3DEN && !isServer && !hasInterface) then {\
+								KH_fnc_headlessLoadInit = compile _value;\
+							};\
+						";
+						defaultValue = "''";
+						validate = "expression";
+					};
 					class KH_HeadlessPlayersLoadedInit
 					{
 						displayName = "Headless: Players Loaded Init";
@@ -192,7 +207,7 @@ class Mission
 					class KH_PlayerKilledInit
 					{
 						displayName = "Player: Killed Init";
-						tooltip = "Unscheduled code to execute locally to each player when they die. The local player unit is the killed unit.";
+						tooltip = "Unscheduled code to execute locally to each player when they die. The local player unit is the killed unit. Passed arguments available through _this are: [_killer (OBJECT), _instigator (OBJECT)].";
 						property = "KH_PlayerKilledInit";
 						control = "EditCodeMulti5";
 						expression = 

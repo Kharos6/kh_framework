@@ -203,7 +203,8 @@ private _specialParser = {
 switch (typeName _environmentType) do {
 	case "SCALAR": {
 		private _immediate = _environment param [1, true, [true]];
-		private _unscheduled = _environment param [2, true, [true]];
+		private _timeout = _environment param [2, 0, [0]];
+		private _unscheduled = _environment param [3, true, [true]];
 		([_special, _target] call _specialParser) params ["_return", "_specialIdOverride"];
 		_function = [_function, false] call KH_fnc_parseFunction;
 		private "_previousReturn";
@@ -212,6 +213,7 @@ switch (typeName _environmentType) do {
 			private _handlerId = [missionNamespace, _environmentId, clientOwner];
 			private _totalDelta = 0;
 			private _executionTime = CBA_missionTime;
+			private _executionCount = 0;
 			_previousReturn = [_arguments, _function, _target, _special, _specialIdOverride, _unscheduled] call _subfunction;
 		};
 
@@ -221,7 +223,7 @@ switch (typeName _environmentType) do {
 				params ["_arguments", "_function", "_target", "_special", "_subfunction", "_specialIdOverride", "_unscheduled", "_environmentId"];
 
 				if !(missionNamespace getVariable _environmentId) exitWith {																											
-					KH_var_temporalExecutionStackDeletions pushBackUnique _environmentId;
+					KH_var_temporalExecutionStackDeletions pushBackUnique _eventId;
 				};
 
 				private _handlerId = [missionNamespace, _environmentId, clientOwner];													
@@ -243,17 +245,50 @@ switch (typeName _environmentType) do {
 			_environmentId,
 			_environmentId,
 			_previousReturn,
-			CBA_missionTime
+			CBA_missionTime,
+			[0, 1] select _immediate
 		];
+
+		if (_timeout isNotEqualTo 0) then {
+			private _timeoutId = call KH_fnc_generateUid;
+
+			KH_var_temporalExecutionStackAdditions pushBack [
+				[_environmentId],
+				{
+					params ["_environmentId"];
+					KH_var_temporalExecutionStackDeletions pushBackUnique _environmentId;
+					KH_var_temporalExecutionStackDeletions pushBackUnique _eventId;
+				},
+				_timeout,
+				if (_timeout isEqualTo 0) then {
+					diag_frameNo + 1;
+				}
+				else {
+					if (_timeout > 0) then {
+						diag_tickTime + _timeout;
+					}
+					else {
+						diag_frameNo + (abs _timeout);
+					};
+				},
+				-1,
+				_timeoutId,
+				_timeoutId,
+				nil,
+				CBA_missionTime,
+				0
+			];
+		};
 
 		[[missionNamespace, _environmentId, clientOwner], _return];
 	};
 
 	case "CODE": {
 		private _immediate = _environment param [1, true, [true]];
-		private _interval = _environment param [2, 0, [0]];
-		private _fireOnce = _environment param [3, true, [true]];
-		private _unscheduled = _environment param [4, true, [true]];
+		private _timeout = _environment param [2, 0, [0]];
+		private _interval = _environment param [3, 0, [0]];
+		private _fireOnce = _environment param [4, true, [true]];
+		private _unscheduled = _environment param [5, true, [true]];
 		([_special, _target] call _specialParser) params ["_return", "_specialIdOverride"];
 		_function = [_function, false] call KH_fnc_parseFunction;
 		_environmentType = missionNamespace getVariable ([_environmentType, false] call KH_fnc_parseFunction);
@@ -261,7 +296,9 @@ switch (typeName _environmentType) do {
 
 		if _immediate then {
 			private _handlerId = [missionNamespace, _environmentId, clientOwner];
+			private _totalDelta = 0;
 			private _executionTime = CBA_missionTime;
+			private _executionCount = 0;
 
 			if (_arguments call _environmentType) then {
 				[_arguments, _function, _target, _special, _specialIdOverride, _unscheduled] call _subfunction;
@@ -282,7 +319,7 @@ switch (typeName _environmentType) do {
 				params ["_arguments", "_function", "_target", "_special", "_subfunction", "_specialIdOverride", "_unscheduled", "_environmentId", "_environmentType", "_fireOnce"];
 
 				if !(missionNamespace getVariable _environmentId) exitWith {																											
-					KH_var_temporalExecutionStackDeletions pushBackUnique _environmentId;
+					KH_var_temporalExecutionStackDeletions pushBackUnique _eventId;
 				};
 
 				if (_arguments call _environmentType) then {
@@ -290,7 +327,7 @@ switch (typeName _environmentType) do {
 					[_arguments, _function, _target, _special, _specialIdOverride, _unscheduled] call _subfunction;
 
 					if _fireOnce then {
-						KH_var_temporalExecutionStackDeletions pushBackUnique _environmentId;
+						KH_var_temporalExecutionStackDeletions pushBackUnique _eventId;
 					};
 				};
 			},
@@ -310,8 +347,40 @@ switch (typeName _environmentType) do {
 			_environmentId,
 			_environmentId,
 			_previousReturn,
-			CBA_missionTime
+			CBA_missionTime,
+			[0, 1] select _immediate
 		];
+
+		if (_timeout isNotEqualTo 0) then {
+			private _timeoutId = call KH_fnc_generateUid;
+			
+			KH_var_temporalExecutionStackAdditions pushBack [
+				[_environmentId],
+				{
+					params ["_environmentId"];
+					KH_var_temporalExecutionStackDeletions pushBackUnique _environmentId;
+					KH_var_temporalExecutionStackDeletions pushBackUnique _eventId;
+				},
+				_timeout,
+				if (_timeout isEqualTo 0) then {
+					diag_frameNo + 1;
+				}
+				else {
+					if (_timeout > 0) then {
+						diag_tickTime + _timeout;
+					}
+					else {
+						diag_frameNo + (abs _timeout);
+					};
+				},
+				-1,
+				_timeoutId,
+				_timeoutId,
+				nil,
+				CBA_missionTime,
+				0
+			];
+		};
 
 		[[missionNamespace, _environmentId, clientOwner], _return];
 	};
@@ -328,11 +397,11 @@ switch (typeName _environmentType) do {
 					params ["_arguments", "_function", "_target", "_special", "_subfunction", "_specialIdOverride", "_unscheduled", "_environmentId"];
 
 					if !(missionNamespace getVariable _environmentId) exitWith {																											
-						KH_var_temporalExecutionStackDeletions pushBackUnique _environmentId;
+						KH_var_temporalExecutionStackDeletions pushBackUnique _eventId;
 					};
 													
 					[_arguments, _function, _target, _special, _specialIdOverride, _unscheduled] call _subfunction;
-					KH_var_temporalExecutionStackDeletions pushBackUnique _environmentId;
+					KH_var_temporalExecutionStackDeletions pushBackUnique _eventId;
 				},
 				_environmentType,
 				if (_environmentType > 0) then {
@@ -345,7 +414,8 @@ switch (typeName _environmentType) do {
 				_environmentId,
 				_environmentId,
 				nil,
-				CBA_missionTime
+				CBA_missionTime,
+				0
 			];
 
 			[[missionNamespace, _environmentId, clientOwner], _return];
@@ -376,7 +446,7 @@ switch (typeName _environmentType) do {
 									[_conditionArguments, missionNamespace getVariable ([_conditionFunction, false] call KH_fnc_parseFunction), _environmentId],
 									{
 										params ["_conditionArguments", "_conditionFunction", "_environmentId"];
-										private _handlerId = [[missionNamespace, _environmentId, clientOwner, _eventId]];
+										private _handlerId = [missionNamespace, _environmentId, clientOwner, _eventId];
 
 										if (missionNamespace getVariable _environmentId) then {																											
 											_conditionArguments call _conditionFunction;
@@ -395,7 +465,7 @@ switch (typeName _environmentType) do {
 								[_arguments, [_function, false] call KH_fnc_parseFunction, _target, _special, _subfunction, _specialIdOverride, _unscheduled, _environmentId],
 								{
 									params ["_arguments", "_function", "_target", "_special", "_subfunction", "_specialIdOverride", "_unscheduled", "_environmentId"];
-									private _handlerId = [[missionNamespace, _environmentId, clientOwner, _eventId]];													
+									private _handlerId = [missionNamespace, _environmentId, clientOwner, _eventId];													
 									[_arguments, _function, _target, _special, _specialIdOverride, _unscheduled] call _subfunction;
 								}
 							] call KH_fnc_addEventHandler
@@ -469,7 +539,7 @@ switch (typeName _environmentType) do {
 										private _delay = (_parsedExecutionRules select 0) select _currentIndex;
 										private _conditionArguments = (_parsedExecutionRules select 1) select _currentIndex;
 										private _conditionFunction = (_parsedExecutionRules select 2) select _currentIndex;
-										private _handlerId = [[missionNamespace, _environmentId, clientOwner, _eventId]];
+										private _handlerId = [missionNamespace, _environmentId, clientOwner, _eventId];
 										private _state = false;
 
 										if (missionNamespace getVariable _environmentId) then {
@@ -495,7 +565,7 @@ switch (typeName _environmentType) do {
 								[0, _executions, _subfunction, _environmentId],
 								{
 									params ["_currentIndex", "_executions", "_subfunction", "_environmentId"];
-									private _handlerId = [[missionNamespace, _environmentId, clientOwner, _eventId]];
+									private _handlerId = [missionNamespace, _environmentId, clientOwner, _eventId];
 									(_executions select _currentIndex) call _subfunction;
 									_this set [0, _currentIndex + 1];
 									

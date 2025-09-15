@@ -21,7 +21,7 @@ private _currentWeaponSelection = switch _type do {
 private _weaponPosition = ASLToAGL (eyePos _unit);
 
 {
-    private _currentPosition = _unit modelToWorldVisual (_unit selectionPosition _x);
+    private _currentPosition = _unit modelToWorld (_unit selectionPosition _x);
 
     if (_currentPosition isNotEqualTo [0, 0, 0]) then {
         _weaponPosition = _currentPosition;

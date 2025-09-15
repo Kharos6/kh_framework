@@ -1,8 +1,24 @@
 params [["_parsingType", "", [""]], ["_value", nil, [true, 0, "", []]]];
 
 switch _parsingType do {
-    case "BOOL";
-    case "SCALAR";
+    case "BOOL": {
+        if (_value isEqualType "") then {
+            [_value, false] call KH_fnc_parseBoolean;
+        }
+        else {
+            _value;
+        };
+    };
+
+    case "SCALAR": {
+        if (_value isEqualType "") then {
+            parseNumber _value;
+        }
+        else {
+            _value;
+        };
+    };
+
     case "STRING": {
         _value;
     };
@@ -12,11 +28,21 @@ switch _parsingType do {
     };
 
     case "ARRAY": {
-        _value;
+        if (_value isEqualType "") then {
+            parseSimpleArray _value;
+        }
+        else {
+            _value;
+        };
     };
 
     case "HASHMAP": {
-        createHashMapFromArray _value;
+        if (_value isEqualType "") then {
+            createHashMapFromArray (parseSimpleArray _value);
+        }
+        else {
+            _value;
+        };
     };
 
     case "CODE": {
@@ -162,7 +188,12 @@ switch _parsingType do {
 
     case "TYPED_ARRAY": {
         [
-            _value,
+            if (_value isEqualType "") then {
+                parseSimpleArray _value;
+            }
+            else {
+                _value;
+            },
             [],
             {
                 _args params ["_array"];
@@ -179,7 +210,12 @@ switch _parsingType do {
 
     case "TYPED_HASHMAP": {
         [
-            createHashMapFromArray _value,
+            if (_value isEqualType "") then {
+                createHashMapFromArray (parseSimpleArray _value);
+            }
+            else {
+                createHashMapFromArray _value;
+            },
             [],
             {
                 _args params ["_array"];

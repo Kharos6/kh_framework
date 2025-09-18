@@ -21,6 +21,48 @@ typedef struct {
     const char* description;
 } crypto_function_t;
 
+static struct {
+    HCRYPTPROV hProv;
+    int initialized;
+} g_crypto_cache = {0, 0};
+
+/* Initialize crypto provider cache */
+static inline int kh_init_crypto_provider(void) {
+    if (g_crypto_cache.initialized) return 1;
+    
+    /* Try providers in order of preference */
+    if (CryptAcquireContextA(&g_crypto_cache.hProv, NULL, MS_ENH_RSA_AES_PROV_A, PROV_RSA_AES, CRYPT_VERIFYCONTEXT)) {
+        g_crypto_cache.initialized = 1;
+        return 1;
+    }
+    
+    if (CryptAcquireContextA(&g_crypto_cache.hProv, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT)) {
+        g_crypto_cache.initialized = 1;
+        return 1;
+    }
+    
+    if (CryptAcquireContextA(&g_crypto_cache.hProv, NULL, MS_ENHANCED_PROV_A, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT)) {
+        g_crypto_cache.initialized = 1;
+        return 1;
+    }
+    
+    if (CryptAcquireContextA(&g_crypto_cache.hProv, NULL, NULL, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT)) {
+        g_crypto_cache.initialized = 1;
+        return 1;
+    }
+    
+    return 0;
+}
+
+/* Cleanup crypto provider cache */
+static inline void kh_cleanup_crypto_provider(void) {
+    if (g_crypto_cache.initialized && g_crypto_cache.hProv) {
+        CryptReleaseContext(g_crypto_cache.hProv, 0);
+        g_crypto_cache.hProv = 0;
+        g_crypto_cache.initialized = 0;
+    }
+}
+
 /* CRC32 lookup table - generated once and reused */
 static uint32_t crc32_table[256];
 static int crc32_table_initialized = 0;
@@ -63,31 +105,32 @@ static inline int kh_bytes_to_hex(const unsigned char* bytes, int byte_count, ch
 static inline int kh_crypto_windows_hash(const char* input, char* output, int output_size, ALG_ID algorithm) {
     if (!input || !output || output_size <= 0) return 0;
     
-    HCRYPTPROV hProv = 0;
     HCRYPTHASH hHash = 0;
     unsigned char* hash_buffer = NULL;
     int result = 0;
     
     /* Get input length */
     size_t input_len = strlen(input);
-    if (input_len > KH_CRYPTO_MAX_INPUT_SIZE) {
-        return 0;
-    }
     
-    /* FIXED: Try different provider types for better compatibility */
-    if (!CryptAcquireContextA(&hProv, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT)) {
-        if (!CryptAcquireContextA(&hProv, NULL, NULL, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT)) {
-            if (!CryptAcquireContextA(&hProv, NULL, MS_ENH_RSA_AES_PROV_A, PROV_RSA_AES, CRYPT_VERIFYCONTEXT)) {
-                if (!CryptAcquireContextA(&hProv, NULL, MS_ENHANCED_PROV_A, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT)) {
-                    return 0;
-                }
-            }
+    /* Use cached provider */
+    if (!g_crypto_cache.initialized) {
+        if (!kh_init_crypto_provider()) {
+            return 0;
         }
     }
     
-    /* Create hash object */
-    if (!CryptCreateHash(hProv, algorithm, 0, 0, &hHash)) {
-        goto cleanup;
+    /* Create hash object with cached provider */
+    if (!CryptCreateHash(g_crypto_cache.hProv, algorithm, 0, 0, &hHash)) {
+        /* Provider might be stale, try to reinitialize once */
+        g_crypto_cache.initialized = 0;
+        if (!kh_init_crypto_provider()) {
+            return 0;
+        }
+        
+        /* Try again with new provider */
+        if (!CryptCreateHash(g_crypto_cache.hProv, algorithm, 0, 0, &hHash)) {
+            return 0;
+        }
     }
     
     /* Hash the data */
@@ -133,7 +176,7 @@ static inline int kh_crypto_windows_hash(const char* input, char* output, int ou
 cleanup:
     free(hash_buffer);
     if (hHash) CryptDestroyHash(hHash);
-    if (hProv) CryptReleaseContext(hProv, 0);
+    /* Don't release the cached provider */
     return result;
 }
 
@@ -162,8 +205,6 @@ static int kh_crypto_fnv1a_32(const char* input, char* output, int output_size) 
     if (!input || !output || output_size <= 0) return 0;
     
     size_t input_len = strlen(input);
-    if (input_len > KH_CRYPTO_MAX_INPUT_SIZE) return 0;
-    
     uint32_t hash = KH_FNV1A_32_OFFSET_BASIS;
     
     for (size_t i = 0; i < input_len; i++) {
@@ -185,9 +226,7 @@ static int kh_crypto_fnv1a_32(const char* input, char* output, int output_size) 
 static int kh_crypto_fnv1a_64(const char* input, char* output, int output_size) {
     if (!input || !output || output_size <= 0) return 0;
     
-    size_t input_len = strlen(input);
-    if (input_len > KH_CRYPTO_MAX_INPUT_SIZE) return 0;
-    
+    size_t input_len = strlen(input);    
     uint64_t hash = KH_FNV1A_64_OFFSET_BASIS;
     
     for (size_t i = 0; i < input_len; i++) {
@@ -209,8 +248,6 @@ static int kh_crypto_crc32(const char* input, char* output, int output_size) {
     if (!input || !output || output_size <= 0) return 0;
     
     size_t input_len = strlen(input);
-    if (input_len > KH_CRYPTO_MAX_INPUT_SIZE) return 0;
-    
     kh_init_crc32_table();
     
     uint32_t crc = 0xFFFFFFFFU;
@@ -237,8 +274,7 @@ static int kh_crypto_xxhash32(const char* input, char* output, int output_size) 
     if (!input || !output || output_size <= 0) return 0;
     
     size_t input_len = strlen(input);
-    if (input_len > KH_CRYPTO_MAX_INPUT_SIZE) return 0;
-    
+
     /* xxHash constants */
     const uint32_t PRIME32_1 = 0x9E3779B1U;
     const uint32_t PRIME32_2 = 0x85EBCA77U;
@@ -259,11 +295,12 @@ static int kh_crypto_xxhash32(const char* input, char* output, int output_size) 
         uint32_t v4 = seed - PRIME32_1;
         
         do {
-            /* Process 16 bytes at a time */
-            uint32_t k1 = *(uint32_t*)data; data += 4;
-            uint32_t k2 = *(uint32_t*)data; data += 4;
-            uint32_t k3 = *(uint32_t*)data; data += 4;
-            uint32_t k4 = *(uint32_t*)data; data += 4;
+            /* Read 32-bit values safely without alignment issues */
+            uint32_t k1, k2, k3, k4;
+            memcpy(&k1, data, 4); data += 4;
+            memcpy(&k2, data, 4); data += 4;
+            memcpy(&k3, data, 4); data += 4;
+            memcpy(&k4, data, 4); data += 4;
             
             v1 = ((v1 + k1 * PRIME32_2) << 13) | ((v1 + k1 * PRIME32_2) >> 19);
             v1 *= PRIME32_1;
@@ -285,7 +322,8 @@ static int kh_crypto_xxhash32(const char* input, char* output, int output_size) 
     
     /* Process remaining bytes */
     while (data + 4 <= end) {
-        uint32_t k1 = *(uint32_t*)data;
+        uint32_t k1;
+        memcpy(&k1, data, 4);
         k1 *= PRIME32_3;
         k1 = (k1 << 17) | (k1 >> 15);
         k1 *= PRIME32_4;
@@ -326,8 +364,6 @@ static int kh_crypto_adler32(const char* input, char* output, int output_size) {
     if (!input || !output || output_size <= 0) return 0;
     
     size_t input_len = strlen(input);
-    if (input_len > KH_CRYPTO_MAX_INPUT_SIZE) return 0;
-    
     uint32_t a = 1, b = 0;
     const uint32_t MOD_ADLER = 65521;
     
@@ -353,8 +389,6 @@ static int kh_crypto_djb2(const char* input, char* output, int output_size) {
     if (!input || !output || output_size <= 0) return 0;
     
     size_t input_len = strlen(input);
-    if (input_len > KH_CRYPTO_MAX_INPUT_SIZE) return 0;
-    
     uint32_t hash = 5381;
     
     for (size_t i = 0; i < input_len; i++) {
@@ -376,8 +410,6 @@ static int kh_crypto_sdbm(const char* input, char* output, int output_size) {
     if (!input || !output || output_size <= 0) return 0;
     
     size_t input_len = strlen(input);
-    if (input_len > KH_CRYPTO_MAX_INPUT_SIZE) return 0;
-    
     uint32_t hash = 0;
     
     for (size_t i = 0; i < input_len; i++) {
@@ -394,7 +426,7 @@ static int kh_crypto_sdbm(const char* input, char* output, int output_size) {
     return kh_bytes_to_hex(hash_bytes, 4, output, output_size);
 }
 
-/* Whitelist of allowed crypto functions - SECURITY CRITICAL */
+/* Whitelist of allowed crypto functions */
 static const crypto_function_t KH_ALLOWED_CRYPTO_FUNCTIONS[] = {
     /* Standard cryptographic hashes */
     {"md5", kh_crypto_md5, "MD5 hash (128-bit)"},
@@ -414,20 +446,82 @@ static const crypto_function_t KH_ALLOWED_CRYPTO_FUNCTIONS[] = {
 
 static const int KH_CRYPTO_FUNCTION_COUNT = sizeof(KH_ALLOWED_CRYPTO_FUNCTIONS) / sizeof(crypto_function_t);
 
-/* Find crypto function in whitelist - SECURITY CRITICAL */
+typedef struct {
+    uint32_t hash;
+    const crypto_function_t* func;
+} crypto_hash_entry_t;
+
+static crypto_hash_entry_t g_crypto_hash_table[KH_CRYPTO_HASH_SIZE];
+static int g_crypto_hash_initialized = 0;
+
+/* Initialize crypto hash table */
+static inline void kh_init_crypto_hash_table(void) {
+    if (g_crypto_hash_initialized) return;
+    
+    memset(g_crypto_hash_table, 0, sizeof(g_crypto_hash_table));
+    
+    for (int i = 0; i < KH_CRYPTO_FUNCTION_COUNT; i++) {
+        /* Hash lowercase name */
+        char lower_name[32];
+        const char* src = KH_ALLOWED_CRYPTO_FUNCTIONS[i].name;
+        int j = 0;
+        while (src[j] && j < 31) {
+            lower_name[j] = (src[j] >= 'A' && src[j] <= 'Z') ? src[j] + 32 : src[j];
+            j++;
+        }
+        lower_name[j] = '\0';
+        
+        uint32_t hash = kh_hash_name_case_insensitive(lower_name);
+        uint32_t index = hash & (KH_CRYPTO_HASH_SIZE - 1);
+        
+        /* Linear probing for collisions */
+        while (g_crypto_hash_table[index].hash != 0) {
+            index = (index + 1) & (KH_CRYPTO_HASH_SIZE - 1);
+        }
+        
+        g_crypto_hash_table[index].hash = hash;
+        g_crypto_hash_table[index].func = &KH_ALLOWED_CRYPTO_FUNCTIONS[i];
+    }
+    
+    g_crypto_hash_initialized = 1;
+}
+
+/* Find crypto function in whitelist */
 static inline const crypto_function_t* kh_find_crypto_function(const char* name) {
     if (!name) return NULL;
     
-    int i;
-    for (i = 0; i < KH_CRYPTO_FUNCTION_COUNT; i++) {
-        if (kh_strcasecmp(KH_ALLOWED_CRYPTO_FUNCTIONS[i].name, name) == 0) {
-            return &KH_ALLOWED_CRYPTO_FUNCTIONS[i];
-        }
+    /* Convert to lowercase for comparison */
+    char lower_name[32];
+    int i = 0;
+    while (name[i] && i < 31) {
+        lower_name[i] = (name[i] >= 'A' && name[i] <= 'Z') ? name[i] + 32 : name[i];
+        i++;
     }
+    lower_name[i] = '\0';
+    
+    /* Hash lookup */
+    uint32_t hash = kh_hash_name_case_insensitive(lower_name);
+    uint32_t index = hash & (KH_CRYPTO_HASH_SIZE - 1);
+    
+    /* Linear probe to find match */
+    for (int probe = 0; probe < KH_CRYPTO_HASH_SIZE; probe++) {
+        if (g_crypto_hash_table[index].hash == 0) {
+            break; /* Empty slot, not found */
+        }
+        if (g_crypto_hash_table[index].hash == hash) {
+            /* Verify name matches */
+            const char* func_name = g_crypto_hash_table[index].func->name;
+            if (strcmp(func_name, lower_name) == 0) {
+                return g_crypto_hash_table[index].func;
+            }
+        }
+        index = (index + 1) & (KH_CRYPTO_HASH_SIZE - 1);
+    }
+    
     return NULL;
 }
 
-/* Main crypto operation processing function - enhanced with better memory management */
+/* Main crypto operation processing function */
 static int kh_process_crypto_operation(char* output, int output_size, const char** argv, int argc) {
     if (!output || output_size <= 0 || !argv || argc != 2) {
         if (output && output_size > 0) {
@@ -461,11 +555,6 @@ static int kh_process_crypto_operation(char* output, int output_size, const char
     /* Validate inputs */
     if (strlen(clean_type) == 0) {
         kh_set_error(output, output_size, "EMPTY CRYPTO TYPE");
-        goto cleanup;
-    }
-    
-    if (strlen(clean_data) > KH_CRYPTO_MAX_INPUT_SIZE) {
-        kh_set_error(output, output_size, "INPUT DATA TOO LARGE");
         goto cleanup;
     }
     

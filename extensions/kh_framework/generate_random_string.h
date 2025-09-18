@@ -31,7 +31,7 @@ static const charset_info_t KH_CHARSET_INFO[] = {
     {KH_CHARSET_SYMBOLS, sizeof(KH_CHARSET_SYMBOLS) - 1}
 };
 
-/* Build character set based on boolean flags [numbers, letters, symbols] - optimized */
+/* Build character set based on boolean flags [numbers, letters, symbols] */
 static int kh_build_charset(char** charset, const char **argv, int argc) {
     if (!charset || !argv) return 0;
     
@@ -42,14 +42,15 @@ static int kh_build_charset(char** charset, const char **argv, int argc) {
     int charset_len = 0;
     
     /* Parse boolean flags from arguments */
-    if (argc >= 2) include_numbers = kh_parse_boolean(argv[1]);
-    if (argc >= 3) include_letters = kh_parse_boolean(argv[2]);
-    if (argc >= 4) include_symbols = kh_parse_boolean(argv[3]);
+    if (argc >= 2) include_numbers = kh_validate_bool_value(argv[1]);
+    if (argc >= 3) include_letters = kh_validate_bool_value(argv[2]);
+    if (argc >= 4) include_symbols = kh_validate_bool_value(argv[3]);
     
-    /* If no types specified, default to numbers and letters */
+    /* If no types specified, default to all */
     if (!include_numbers && !include_letters && !include_symbols) {
         include_numbers = 1;
         include_letters = 1;
+        include_symbols = 1;
     }
     
     /* Calculate total size needed using pre-calculated lengths */
@@ -85,7 +86,7 @@ static int kh_build_charset(char** charset, const char **argv, int argc) {
     return charset_len;
 }
 
-/* Generate random string using specified character set - optimized */
+/* Generate random string using specified character set */
 static inline void kh_generate_random_string(char* buffer, int length, const char* charset, int charset_size) {
     if (!buffer || length <= 0 || !charset || charset_size <= 0) return;
     
@@ -96,7 +97,7 @@ static inline void kh_generate_random_string(char* buffer, int length, const cha
     buffer[length] = '\0';
 }
 
-/* Process random string generation request - enhanced error handling */
+/* Process random string generation request */
 static int kh_process_random_string_generation(char *output, int output_size, const char **argv, int argc) {
     if (!output || output_size <= 0 || !argv || argc < 1) {
         if (output && output_size > 0) {
@@ -112,19 +113,47 @@ static int kh_process_random_string_generation(char *output, int output_size, co
     
     kh_init_random();
 
-    char* endptr;
-    long temp_length = strtol(argv[0], &endptr, 10);
-
-    // Validate conversion and range
-    if (endptr == argv[0] || *endptr != '\0' || temp_length < 0 || temp_length > INT_MAX) {
-        kh_set_error(output, output_size, "INVALID INTEGER");
+    /* Validate and parse length with proper bounds checking */
+    const char* length_str = argv[0];
+    if (!length_str || *length_str == '\0') {
+        kh_set_error(output, output_size, "EMPTY LENGTH PARAMETER");
         return 1;
     }
-
-    length = (int)temp_length;
     
-    if (length <= 0) {
-        kh_set_error(output, output_size, "INVALID LENGTH - MUST BE POSITIVE INTEGER");
+    /* Skip whitespace */
+    while (*length_str == ' ' || *length_str == '\t') length_str++;
+    
+    /* Check for negative */
+    int is_negative = 0;
+    if (*length_str == '-') {
+        is_negative = 1;
+        length_str++;
+    }
+    
+    /* Parse digits manually to avoid overflow */
+    length = 0;
+    while (*length_str >= '0' && *length_str <= '9') {
+        int digit = *length_str - '0';
+        
+        /* Check for overflow before multiplying */
+        if (length > (INT_MAX - digit) / 10) {
+            kh_set_error(output, output_size, "LENGTH TOO LARGE");
+            return 1;
+        }
+        
+        length = length * 10 + digit;
+        length_str++;
+    }
+    
+    /* Check for trailing garbage */
+    while (*length_str == ' ' || *length_str == '\t') length_str++;
+    if (*length_str != '\0') {
+        kh_set_error(output, output_size, "INVALID LENGTH FORMAT");
+        return 1;
+    }
+    
+    if (is_negative || length <= 0) {
+        kh_set_error(output, output_size, "LENGTH MUST BE POSITIVE");
         return 1;
     }
     

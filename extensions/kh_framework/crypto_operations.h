@@ -112,25 +112,9 @@ static inline int kh_crypto_windows_hash(const char* input, char* output, int ou
     /* Get input length */
     size_t input_len = strlen(input);
     
-    /* Use cached provider */
-    if (!g_crypto_cache.initialized) {
-        if (!kh_init_crypto_provider()) {
-            return 0;
-        }
-    }
-    
     /* Create hash object with cached provider */
     if (!CryptCreateHash(g_crypto_cache.hProv, algorithm, 0, 0, &hHash)) {
-        /* Provider might be stale, try to reinitialize once */
-        g_crypto_cache.initialized = 0;
-        if (!kh_init_crypto_provider()) {
-            return 0;
-        }
-        
-        /* Try again with new provider */
-        if (!CryptCreateHash(g_crypto_cache.hProv, algorithm, 0, 0, &hHash)) {
-            return 0;
-        }
+        return 0;
     }
     
     /* Hash the data */
@@ -247,9 +231,7 @@ static int kh_crypto_fnv1a_64(const char* input, char* output, int output_size) 
 static int kh_crypto_crc32(const char* input, char* output, int output_size) {
     if (!input || !output || output_size <= 0) return 0;
     
-    size_t input_len = strlen(input);
-    kh_init_crc32_table();
-    
+    size_t input_len = strlen(input);    
     uint32_t crc = 0xFFFFFFFFU;
     
     for (size_t i = 0; i < input_len; i++) {

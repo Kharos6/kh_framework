@@ -110,8 +110,6 @@ static int kh_process_random_string_generation(char *output, int output_size, co
     char* charset = NULL;
     int charset_size;
     int result = 1;
-    
-    kh_init_random();
 
     /* Validate and parse length with proper bounds checking */
     const char* length_str = argv[0];
@@ -135,8 +133,8 @@ static int kh_process_random_string_generation(char *output, int output_size, co
     while (*length_str >= '0' && *length_str <= '9') {
         int digit = *length_str - '0';
         
-        /* Check for overflow before multiplying */
-        if (length > (INT_MAX - digit) / 10) {
+        /* Check for overflow BEFORE multiplying */
+        if (length > INT_MAX / 10 || (length == INT_MAX / 10 && digit > INT_MAX % 10)) {
             kh_set_error(output, output_size, "LENGTH TOO LARGE");
             return 1;
         }

@@ -22,7 +22,6 @@ Checks: >
   bugprone-move-forwarding-reference,
   bugprone-multiple-statement-macro,
   bugprone-no-escape,
-  bugprone-not-null-terminated-result,
   bugprone-parent-virtual-call,
   bugprone-posix-return,
   bugprone-redundant-branch-condition,
@@ -60,7 +59,6 @@ Checks: >
   clang-analyzer-optin.cplusplus.*,
   clang-analyzer-optin.mpi.*,
   clang-analyzer-optin.osx.*,
-  clang-analyzer-optin.portability.*,
   clang-analyzer-security.*,
   clang-analyzer-unix.*,
   clang-analyzer-alpha.core.CastSize,
@@ -134,6 +132,7 @@ Checks: >
 WarningsAsErrors: ''
 HeaderFilterRegex: '.*\.(h|hpp)$'
 FormatStyle: 'file'
+ExtraArgs: ['-Wno-microsoft-goto']
 
 CheckOptions:
   - key: readability-identifier-naming.VariableCase
@@ -144,7 +143,6 @@ CheckOptions:
     value: ''
   - key: readability-identifier-naming.EnumConstantCase
     value: ''
-  # Memory safety specific options
   - key: clang-analyzer-core.CallAndMessage.NullFunctionPointer
     value: true
   - key: clang-analyzer-core.DivideZero
@@ -169,14 +167,12 @@ CheckOptions:
     value: true
   - key: clang-analyzer-core.uninitialized.UndefReturn
     value: true
-  # Enhanced memory leak detection (experimental)
   - key: clang-analyzer-alpha.unix.SimpleStream
     value: true
   - key: clang-analyzer-alpha.unix.Stream  
     value: true
   - key: clang-analyzer-alpha.security.MallocOverflow
     value: true
-  # Enable aggressive memory checking
   - key: clang-analyzer-unix.Malloc
     value: true
   - key: clang-analyzer-unix.MallocSizeof

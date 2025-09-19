@@ -27,21 +27,22 @@ typedef struct {
 
 static const function_info_t FUNCTION_TABLE[] = {
     {"GenerateRandomString", 1, 4},
-    {"SliceKHData", 2, 2},
-    {"ReadKHData", 2, 3},
+    {"ReadKHData", 2, 2},
     {"WriteKHData", 3, 3},
     {"UnbinarizeKHData", 1, 1},
     {"BinarizeKHData", 1, 1},
     {"CryptoOperation", 2, 2},
     {"DeleteKHDataFile", 1, 1},
     {"DeleteKHDataVariable", 2, 2},
+    {"FlushKHData", 0, 0},
     {"LuaOperation", 2, 2},
     {"LuaCompile", 1, 2},
     {"LuaSetVariable", 2, 2},
     {"LuaGetVariable", 1, 1},
     {"LuaDeleteVariable", 1, 1},
     {"LuaClearVariables", 0, 0},
-    {"LuaResetState", 0, 0}
+    {"LuaResetState", 0, 0},
+    {"SliceExtensionReturn", 1, 1}
 };
 
 static const int FUNCTION_COUNT = sizeof(FUNCTION_TABLE) / sizeof(function_info_t);
@@ -140,7 +141,7 @@ static inline int kh_validate_function_call(const char* function, int argc, char
     return 0;
 }
 
-/* Enhanced input validation */
+/* Input validation */
 static inline int kh_validate_basic_inputs(char* output, int output_size, const char* function, const char** argv, int argc) {
     if (!output) return 0;
     
@@ -170,9 +171,39 @@ static inline int kh_validate_basic_inputs(char* output, int output_size, const 
     return 1;
 }
 
+/* Process SliceExtensionReturn operation */
+static int kh_process_slice_extension_return(char* output, int output_size, 
+                                            const char** argv, int argc) {
+    if (!output || output_size <= 0) return 1;
+    
+    output[0] = '\0';
+    
+    if (argc != 1 || !argv || !argv[0]) {
+        kh_set_error(output, output_size, "REQUIRES 1 ARGUMENT: [SLICE_INDEX]");
+        return 1;
+    }
+    
+    /* Parse slice index */
+    char* endptr;
+    long slice_index = strtol(argv[0], &endptr, 10);
+    
+    if (endptr == argv[0] || *endptr != '\0' || slice_index < 0) {
+        kh_set_error(output, output_size, "INVALID SLICE INDEX");
+        return 1;
+    }
+    
+    /* Get the slice */
+    if (!kh_get_extension_return_slice((int)slice_index, output, output_size)) {
+        return 1;
+    }
+    
+    return 0;
+}
+
 /* Main extension function for callExtension interface */
 __declspec(dllexport) int RVExtensionArgs(char *output, unsigned int output_size, const char *function, const char **argv, unsigned int argc) {
     int function_result = 1;  /* Default to error */
+    int is_slice_operation = 0;
     
     /* Input validation */
     if (!kh_validate_basic_inputs(output, output_size, function, argv, argc)) {
@@ -182,6 +213,11 @@ __declspec(dllexport) int RVExtensionArgs(char *output, unsigned int output_size
     /* Validate function call */
     if (!kh_validate_function_call(function, argc, output, output_size)) {
         return 1;
+    }
+
+    /* Check if this is a slice operation BEFORE validation clears anything */
+    if (strcmp(function, "SliceExtensionReturn") == 0) {
+        is_slice_operation = 1;
     }
     
     /* Direct dispatch using strcmp - function is already validated */
@@ -207,17 +243,18 @@ __declspec(dllexport) int RVExtensionArgs(char *output, unsigned int output_size
         function_result = kh_process_lua_clear_variables_operation(output, output_size, argv, argc);
     } else if (strcmp(function, "LuaResetState") == 0) {
         function_result = kh_process_lua_reset_state_operation(output, output_size, argv, argc);
-    } else if (strcmp(function, "SliceKHData") == 0) {
-        function_result = kh_calculate_slice_count(argv[0], argv[1], output, output_size);
     } else if (strcmp(function, "ReadKHData") == 0) {
-        const char* slice_index = (argc >= 3) ? argv[2] : NULL;
-        function_result = kh_read_khdata_variable_slice(argv[0], argv[1], slice_index, output, output_size);
+        function_result = kh_read_khdata_variable(argv[0], argv[1], output, output_size);
     } else if (strcmp(function, "WriteKHData") == 0) {
         function_result = kh_write_khdata_variable(argv[0], argv[1], argv[2], output, output_size);
     } else if (strcmp(function, "UnbinarizeKHData") == 0) {
         function_result = kh_unbinarize_khdata(argv[0], output, output_size);
     } else if (strcmp(function, "BinarizeKHData") == 0) {
         function_result = kh_binarize_khdata(argv[0], output, output_size);
+    } else if (strcmp(function, "FlushKHData") == 0) {
+        function_result = kh_flush_khdata(output, output_size);
+    } else if (strcmp(function, "SliceExtensionReturn") == 0) {
+        function_result = kh_process_slice_extension_return(output, output_size, argv, argc);
     } else {
         /* This should never happen due to validation, but just in case */
         kh_set_error(output, output_size, "UNKNOWN FUNCTION");
@@ -226,13 +263,13 @@ __declspec(dllexport) int RVExtensionArgs(char *output, unsigned int output_size
     
     /* If function executed successfully (returned 0), check output limit */
     if (function_result == 0) {
-        if (kh_enforce_output_limit(output, output_size)) {
+        if (kh_enforce_output_limit(output, output_size, is_slice_operation)) {
             return 1;
         }
         return 0;
     }
     
-    kh_enforce_output_limit(output, output_size);
+    kh_enforce_output_limit(output, output_size, is_slice_operation);
     return function_result;
 }
 
@@ -273,6 +310,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             kh_init_func_hash_table();
             lua_init_variable_storage();
             lua_init_function_storage();
+            kh_init_crypto_provider();
+            kh_init_crc32_table();
             kh_init_memory_manager();
             break;
             
@@ -281,6 +320,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             break;
             
         case DLL_PROCESS_DETACH:
+            kh_free_extension_return_storage();
             kh_cleanup_memory_manager();
             kh_cleanup_lua_states();
             kh_cleanup_crypto_provider();

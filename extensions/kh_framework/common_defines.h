@@ -18,6 +18,7 @@
 #define KH_MAX_OUTPUT_SIZE 8192
 #define MAX_FILE_PATH_LENGTH 512
 #define MAX_TOTAL_KHDATA_SIZE_BYTES (1024LL * 1024LL * 1024LL)   /* 1GB total limit */
+#define MAX_KHDATA_FILE_AUTOSAVE_THRESHOLD (1024 * 1024)         /* 1MB total limit */
 #define MAX_KHDATA_FILES 1024                                    /* Maximum .khdata files allowed */
 #define KH_HASH_TABLE_MIN_SIZE 16
 #define KH_HASH_EMPTY 0                                          /* Empty hash table entry marker */
@@ -26,15 +27,19 @@
 #define KH_FNV1A_64_OFFSET_BASIS 0xcbf29ce484222325ULL
 #define KH_FNV1A_64_PRIME 0x100000001b3ULL
 #define KH_CRC32_POLYNOMIAL 0xEDB88320U
-#define SLICE_SIZE 8192                                          /* 8KB per slice */
 #define KHDATA_MAGIC 0x5444484B                                  /* "KHDT" in little endian */
 #define KHDATA_VERSION 1
 #define KH_ERROR_PREFIX "KH_ERROR: "
-#define LUA_MAX_SIMPLE_ARGS 128
 #define LUA_VAR_HASH_TABLE_MIN_SIZE 16
 #define KH_TYPE_HASH_SIZE 64
 #define KH_CRYPTO_HASH_SIZE 64
 #define KH_FUNC_HASH_SIZE 64
+
+/* Set standardized error message */
+static inline void kh_set_error(char* output, int output_size, const char* message) {
+    if (!output || output_size <= 0 || !message) return;
+    _snprintf_s(output, (size_t)output_size, _TRUNCATE, KH_ERROR_PREFIX "%s", message);
+}
 
 /* Data type enumeration - Complete list for KHData */
 typedef enum {
@@ -107,7 +112,7 @@ static const kh_type_mapping_t KH_TYPE_MAPPINGS[] = {
 static const int KH_TYPE_MAPPING_COUNT = sizeof(KH_TYPE_MAPPINGS) / sizeof(kh_type_mapping_t);
 typedef struct kh_variable_s kh_variable_t;
 
-/* Thread-local random number generator state */
+/* Random number generator state */
 static struct {
     unsigned int seed;
     int initialized;
@@ -194,35 +199,13 @@ static inline int kh_utf8_safe_slice_end(const char* str, int byte_len, int targ
 /* Case-insensitive string comparison */
 static inline int kh_strcasecmp(const char* str1, const char* str2) {
     if (!str1 || !str2) return (str1 == str2) ? 0 : (str1 ? 1 : -1);
-    
-    int i;
-    char c1, c2;
-    
-    for (i = 0; str1[i] != '\0' && str2[i] != '\0'; i++) {
-        c1 = str1[i];
-        c2 = str2[i];
-        
-        /* Convert to lowercase */
-        if (c1 >= 'A' && c1 <= 'Z') c1 += 32;
-        if (c2 >= 'A' && c2 <= 'Z') c2 += 32;
-        
-        if (c1 != c2) {
-            return (c1 < c2) ? -1 : 1;
-        }
-    }
-    
-    /* Check if one string is longer */
-    if (str1[i] != '\0') return 1;
-    if (str2[i] != '\0') return -1;
-    
-    return 0;
+    return _stricmp(str1, str2);
 }
 
 /* Remove surrounding quotes from string */
 static inline void kh_clean_string(const char* input, char* output, int output_size) {
     if (!output || output_size <= 0) return;
     
-    /* Handle special case where output_size is 1 */
     if (output_size == 1) {
         output[0] = '\0';
         return;
@@ -252,32 +235,123 @@ static inline void kh_clean_string(const char* input, char* output, int output_s
     len = (int)(end - start + 1);
     if (len < 0) len = 0;
     
-    /* Ensure we don't overflow output buffer */
+    /* Find safe UTF-8 boundary BEFORE copying */
     if (len >= output_size) {
-        len = output_size - 1;
+        len = kh_utf8_safe_slice_end(start, len, output_size - 1);
     }
     
-    /* Copy the clean string */
+    /* Validate UTF-8 BEFORE copying */
+    if (len > 0 && !kh_validate_utf8_string(start, len)) {
+        /* Find last valid UTF-8 position */
+        int safe_len = 0;
+        int pos = 0;
+        while (pos < len) {
+            int char_len = kh_validate_utf8_sequence(start, pos, len);
+            if (char_len == 0) break;
+            pos += char_len;
+            safe_len = pos;
+        }
+        len = safe_len;
+    }
+    
+    /* Now copy the validated, properly bounded string */
     if (len > 0) {
         memcpy(output, start, (size_t)len);
-        output[len] = '\0';
-        
-        /* Validate UTF-8 and adjust length if needed */
-        if (!kh_validate_utf8_string(output, len)) {
-            /* Find the last valid UTF-8 character position */
-            int safe_len = 0;
-            int pos = 0;
-            while (pos < len) {
-                int char_len = kh_validate_utf8_sequence(output, pos, len);
-                if (char_len == 0) break;
-                pos += char_len;
-                safe_len = pos;
-            }
-            output[safe_len] = '\0';
-        }
-    } else {
-        output[0] = '\0';
     }
+    output[len] = '\0';
+}
+
+/* Global extension return storage for slicing large results */
+typedef struct {
+    char* data;           /* Full return data */
+    size_t data_size;     /* Size of data */
+    int slice_count;      /* Number of slices needed */
+    DWORD timestamp;      /* When this was stored */
+    int initialized;      /* Whether storage is initialized */
+} extension_return_storage_t;
+
+static extension_return_storage_t g_extension_return_storage = {0};
+
+/* Free the stored extension return */
+static inline void kh_free_extension_return_storage(void) {
+    if (g_extension_return_storage.data) {
+        free(g_extension_return_storage.data);
+        g_extension_return_storage.data = NULL;
+    }
+    g_extension_return_storage.data_size = 0;
+    g_extension_return_storage.slice_count = 0;
+    g_extension_return_storage.timestamp = 0;
+    g_extension_return_storage.initialized = 0;
+}
+
+/* Store a new extension return for slicing */
+static inline int kh_store_extension_return(const char* data, size_t data_size) {
+    if (!data || data_size == 0) return 0;
+    
+    /* Free any existing stored return */
+    kh_free_extension_return_storage();
+    
+    /* Allocate new storage */
+    g_extension_return_storage.data = (char*)malloc(data_size + 1);
+    if (!g_extension_return_storage.data) return 0;
+    
+    /* Copy the data */
+    memcpy(g_extension_return_storage.data, data, data_size);
+    g_extension_return_storage.data[data_size] = '\0';
+    g_extension_return_storage.data_size = data_size;
+    
+    /* Calculate slice count */
+    g_extension_return_storage.slice_count = (int)((data_size + KH_MAX_OUTPUT_SIZE - 1) / KH_MAX_OUTPUT_SIZE);
+    g_extension_return_storage.timestamp = GetTickCount();
+    g_extension_return_storage.initialized = 1;
+    
+    return g_extension_return_storage.slice_count;
+}
+
+/* Get a specific slice of the stored extension return */
+static inline int kh_get_extension_return_slice(int slice_index, char* output, int output_size) {
+    if (!output || output_size <= 0) return 0;
+    
+    output[0] = '\0';
+    
+    /* Check if we have stored data */
+    if (!g_extension_return_storage.initialized || !g_extension_return_storage.data) {
+        kh_set_error(output, output_size, "NO STORED EXTENSION RETURN");
+        return 0;
+    }
+    
+    /* Validate slice index */
+    if (slice_index < 0 || slice_index >= g_extension_return_storage.slice_count) {
+        kh_set_error(output, output_size, "SLICE INDEX OUT OF RANGE");
+        return 0;
+    }
+    
+    /* Calculate slice boundaries */
+    size_t slice_start = (size_t)slice_index * KH_MAX_OUTPUT_SIZE;
+    size_t slice_end = slice_start + KH_MAX_OUTPUT_SIZE;
+    
+    if (slice_end > g_extension_return_storage.data_size) {
+        slice_end = g_extension_return_storage.data_size;
+    }
+    
+    /* Ensure we don't break UTF-8 characters */
+    slice_end = kh_utf8_safe_slice_end(g_extension_return_storage.data, 
+                                       g_extension_return_storage.data_size, 
+                                       (int)slice_end);
+    
+    /* Calculate actual slice length */
+    size_t slice_length = slice_end - slice_start;
+    if (slice_length >= (size_t)output_size) {
+        slice_length = (size_t)output_size - 1;
+    }
+    
+    /* Copy the slice to output */
+    if (slice_length > 0) {
+        memcpy(output, g_extension_return_storage.data + slice_start, slice_length);
+    }
+    output[slice_length] = '\0';
+    
+    return 1;
 }
 
 /* Generic hash entry structure for Robin Hood hashing */
@@ -925,12 +999,15 @@ static int kh_parse_type_value_array(const char* input, char** type_str, char** 
         char quote = *ptr;
         ptr++;
         while (*ptr) {
-            if (*ptr == '\\' && *(ptr+1)) {
-                ptr += 2; /* Skip escaped character and the character after it */
-            } else if (*ptr == quote) {
-                type_end = ptr + 1;
-                ptr++;
-                break;
+            if (*ptr == quote) {
+                /* Check for doubled quotes */
+                if (*(ptr+1) == quote) {
+                    ptr += 2; /* Skip both quotes */
+                } else {
+                    type_end = ptr + 1;
+                    ptr++;
+                    break;
+                }
             } else {
                 ptr++;
             }
@@ -973,11 +1050,17 @@ static int kh_parse_type_value_array(const char* input, char** type_str, char** 
                 }
             }
         } else {
-            if (*ptr == '\\' && *(ptr+1)) {
-                ptr++; /* Skip next character */
-            } else if (*ptr == string_quote) {
-                in_string = 0;
+            /* Inside string - only handle doubled quotes */
+            if (*ptr == string_quote) {
+                /* Check for doubled quote */
+                if (*(ptr+1) == string_quote) {
+                    ptr++; /* Skip second quote, continue in string */
+                } else {
+                    /* End of string */
+                    in_string = 0;
+                }
             }
+            /* NO backslash escape handling - treat backslashes as literal */
         }
         ptr++;
     }
@@ -996,28 +1079,22 @@ static int kh_parse_type_value_array(const char* input, char** type_str, char** 
     *type_str = (char*)malloc(type_len + 1);
     if (!*type_str) return 0;
     
-    /* Copy type, handling escaped characters */
+    /* Copy type, handling doubled quotes only */
     size_t out_pos = 0;
+    char type_quote = *type_start;
     for (size_t i = 0; i < type_len; i++) {
-        if (type_content_start[i] == '\\' && i + 1 < type_len) {
-            /* Handle escape sequences */
-            i++;
-            switch (type_content_start[i]) {
-                case 'n': (*type_str)[out_pos++] = '\n'; break;
-                case 't': (*type_str)[out_pos++] = '\t'; break;
-                case 'r': (*type_str)[out_pos++] = '\r'; break;
-                case '\\': (*type_str)[out_pos++] = '\\'; break;
-                case '"': (*type_str)[out_pos++] = '"'; break;
-                case '\'': (*type_str)[out_pos++] = '\''; break;
-                default: (*type_str)[out_pos++] = type_content_start[i]; break;
-            }
+        if (type_content_start[i] == type_quote && 
+            i + 1 < type_len && type_content_start[i+1] == type_quote) {
+            /* Doubled quote */
+            (*type_str)[out_pos++] = type_quote;
+            i++; /* Skip second quote */
         } else {
             (*type_str)[out_pos++] = type_content_start[i];
         }
     }
     (*type_str)[out_pos] = '\0';
     
-    /* Allocate and copy value string */
+    /* Allocate and copy value string as-is */
     size_t value_len = value_end - value_start;
     *value_str = (char*)malloc(value_len + 1);
     if (!*value_str) {
@@ -1115,20 +1192,12 @@ static inline int kh_count_array_elements(const char* array_str) {
                 has_content = 1;
             }
         } else {
-            /* Inside quotes */
-            if (c == '\\' && *(ptr + 1)) {
-                /* Skip escaped character */
-                ptr++;
-            } else if (c == quote_char) {
-                /* Check if this quote is escaped */
-                int escape_count = 0;
-                const char* check_ptr = ptr - 1;
-                while (check_ptr >= array_str && *check_ptr == '\\') {
-                    escape_count++;
-                    check_ptr--;
-                }
-                /* If even number of backslashes (including 0), the quote is not escaped */
-                if (escape_count % 2 == 0) {
+            /* Inside quotes - only handle doubled quotes */
+            if (c == quote_char) {
+                /* Check for doubled quote */
+                if (*(ptr + 1) == quote_char) {
+                    ptr++; /* Skip second quote, stay in string */
+                } else {
                     in_quotes = 0;
                     quote_char = 0;
                 }
@@ -1190,9 +1259,7 @@ static int kh_validate_typed_array(const char* value) {
                     elem_bracket_depth--;
                 }
             } else {
-                if (*ptr == '\\' && *(ptr + 1)) {
-                    ptr++; /* Skip escaped character */
-                } else if (*ptr == string_quote) {
+                if (*ptr == string_quote) {
                     in_string = 0;
                 }
             }
@@ -1303,12 +1370,14 @@ static int kh_validate_typed_hashmap(const char* value) {
                     pair_bracket_depth--;
                 }
             } else {
-                /* Check bounds before accessing ptr-1 */
-                if (*ptr == string_quote && (ptr == pair_start + 1 || *(ptr - 1) != '\\')) {
-                    in_string = 0;
-                } else if (*ptr == '\\' && *(ptr + 1)) {
-                    /* Skip escaped character */
-                    ptr++;
+                /* Only handle doubled quotes, NO backslash escapes */
+                if (*ptr == string_quote) {
+                    /* Check for doubled quote */
+                    if (*(ptr + 1) == string_quote) {
+                        ptr++; /* Skip second quote, stay in string */
+                    } else {
+                        in_string = 0;
+                    }
                 }
             }
             ptr++;
@@ -1353,12 +1422,13 @@ static int kh_validate_typed_hashmap(const char* value) {
                         key_bracket_depth--;
                     }
                 } else {
-                    /* Fixed: Check bounds before accessing p-1 */
-                    if (*p == string_quote && (p == key_start + 1 || *(p - 1) != '\\')) {
-                        in_string = 0;
-                    } else if (*p == '\\' && *(p + 1)) {
-                        /* Skip escaped character */
-                        p++;
+                    /* Only handle doubled quotes */
+                    if (*p == string_quote) {
+                        if (*(p + 1) == string_quote) {
+                            p++; /* Skip second quote, stay in string */
+                        } else {
+                            in_string = 0;
+                        }
                     }
                 }
                 p++;
@@ -1402,7 +1472,7 @@ static int kh_validate_typed_hashmap(const char* value) {
         if (*p == ',') p++;
         while (*p && isspace(*p)) p++;
         
-        /* Find and validate value [type, value] */
+        /* Find and validate value [type, value] - similar pattern */
         if (*p == '[') {
             const char* val_start = p;
             int val_bracket_depth = 1;
@@ -1420,12 +1490,13 @@ static int kh_validate_typed_hashmap(const char* value) {
                         val_bracket_depth--;
                     }
                 } else {
-                    /* Fixed: Check bounds before accessing p-1 */
-                    if (*p == string_quote && (p == val_start + 1 || *(p - 1) != '\\')) {
-                        in_string = 0;
-                    } else if (*p == '\\' && *(p + 1)) {
-                        /* Skip escaped character */
-                        p++;
+                    /* Only handle doubled quotes */
+                    if (*p == string_quote) {
+                        if (*(p + 1) == string_quote) {
+                            p++; /* Skip second quote, stay in string */
+                        } else {
+                            in_string = 0;
+                        }
                     }
                 }
                 p++;
@@ -1598,29 +1669,37 @@ static int kh_normalize_side_value(const char* input, char* output, int output_s
     return 0;
 }
 
-/* Set standardized error message */
-static inline void kh_set_error(char* output, int output_size, const char* message) {
-    if (!output || output_size <= 0 || !message) return;
-    _snprintf_s(output, (size_t)output_size, _TRUNCATE, KH_ERROR_PREFIX "%s", message);
-}
-
 /* Check and enforce the global output limit */
-static inline int kh_enforce_output_limit(char* output, int output_size) {
+static inline int kh_enforce_output_limit(char* output, int output_size, int is_slice_operation) {
     if (!output || output_size <= 0) return 0;
+
+    if (!is_slice_operation) {
+        kh_free_extension_return_storage();
+    }
     
     size_t actual_length = strlen(output);
     
     /* Check if output exceeds the global limit */
     if (actual_length > KH_MAX_OUTPUT_SIZE) {
-        /* Replace output with error message */
-        kh_set_error(output, output_size, "OUTPUT EXCEEDS LIMIT");
-        return 1;  /* Indicate limit exceeded */
+        /* Store the full output for slicing */
+        int slice_count = kh_store_extension_return(output, actual_length);
+        
+        if (slice_count > 0) {
+            /* Replace output with slice count */
+            _snprintf_s(output, (size_t)output_size, _TRUNCATE, "!SLICES: %d", slice_count);
+            return 0;  /* Success with slicing */
+        } else {
+            /* Storage failed, return error */
+            kh_set_error(output, output_size, "FAILED TO STORE LARGE OUTPUT");
+            return 1;  /* Error */
+        }
     }
     
-    return 0;  /* Output is within limits */
+    /* Output is within limits, no slicing needed */
+    return 0;
 }
 
-/* Thread-safe random number initialization */
+/* Random number initialization */
 static inline void kh_init_random(void) {
     if (!g_rng_state.initialized) {
         g_rng_state.seed = (unsigned int)time(NULL) ^ (unsigned int)GetTickCount();

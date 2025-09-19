@@ -1,39 +1,5 @@
-#ifndef COMMON_DEFINES_HPP
-#define COMMON_DEFINES_HPP
-
-#include <ctype.h>
-#include <math.h>
-#include <shlobj.h>
-#include <stdarg.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <time.h>
-#include <wincrypt.h>
-#include <windows.h>
-
-/* Constants */
-#define EXTENSION_NAME "kh_framework"
-#define KH_MAX_OUTPUT_SIZE 8192
-#define MAX_FILE_PATH_LENGTH 512
-#define MAX_TOTAL_KHDATA_SIZE_BYTES (1024LL * 1024LL * 1024LL)   /* 1GB total limit */
-#define MAX_KHDATA_FILE_AUTOSAVE_THRESHOLD (1024 * 1024)         /* 1MB total limit */
-#define MAX_KHDATA_FILES 1024                                    /* Maximum .khdata files allowed */
-#define KH_HASH_TABLE_MIN_SIZE 16
-#define KH_HASH_EMPTY 0                                          /* Empty hash table entry marker */
-#define KH_FNV1A_32_OFFSET_BASIS 0x811c9dc5U
-#define KH_FNV1A_32_PRIME 0x01000193U
-#define KH_FNV1A_64_OFFSET_BASIS 0xcbf29ce484222325ULL
-#define KH_FNV1A_64_PRIME 0x100000001b3ULL
-#define KH_CRC32_POLYNOMIAL 0xEDB88320U
-#define KHDATA_MAGIC 0x5444484B                                  /* "KHDT" in little endian */
-#define KHDATA_VERSION 1
-#define KH_ERROR_PREFIX "KH_ERROR: "
-#define LUA_VAR_HASH_TABLE_MIN_SIZE 16
-#define KH_TYPE_HASH_SIZE 64
-#define KH_CRYPTO_HASH_SIZE 64
-#define KH_FUNC_HASH_SIZE 64
+#ifndef FRAMEWORK_H
+#define FRAMEWORK_H
 
 /* Set standardized error message */
 static inline void kh_set_error(char* output, int output_size, const char* message) {
@@ -114,9 +80,9 @@ typedef struct kh_variable_s kh_variable_t;
 
 /* Random number generator state */
 static struct {
-    unsigned int seed;
+    HCRYPTPROV hProv;
     int initialized;
-} g_rng_state = {0, 0};
+} g_secure_rng_state = {0, 0};
 
 /* UTF-8 utility functions */
 static inline int kh_utf8_byte_length(unsigned char first_byte) {
@@ -146,6 +112,40 @@ static inline int kh_validate_utf8_sequence(const char* str, int pos, int len) {
         }
     }
     
+    /* Check for overlong encodings and invalid codepoints */
+    if (char_len == 2) {
+        /* 2-byte sequence must encode values >= 0x80 */
+        unsigned char b1 = (unsigned char)str[pos];
+        unsigned char b2 = (unsigned char)str[pos + 1];
+        uint32_t codepoint = ((b1 & 0x1F) << 6) | (b2 & 0x3F);
+        if (codepoint < 0x80) return 0; /* Overlong encoding */
+    } else if (char_len == 3) {
+        /* 3-byte sequence must encode values >= 0x800 */
+        unsigned char b1 = (unsigned char)str[pos];
+        unsigned char b2 = (unsigned char)str[pos + 1];
+        unsigned char b3 = (unsigned char)str[pos + 2];
+        uint32_t codepoint = ((b1 & 0x0F) << 12) | ((b2 & 0x3F) << 6) | (b3 & 0x3F);
+        if (codepoint < 0x800) return 0; /* Overlong encoding */
+        
+        /* Check for surrogate pairs (0xD800-0xDFFF) which are invalid in UTF-8 */
+        if (codepoint >= 0xD800 && codepoint <= 0xDFFF) return 0;
+    } else if (char_len == 4) {
+        /* 4-byte sequence must encode values >= 0x10000 */
+        unsigned char b1 = (unsigned char)str[pos];
+        unsigned char b2 = (unsigned char)str[pos + 1];
+        unsigned char b3 = (unsigned char)str[pos + 2];
+        unsigned char b4 = (unsigned char)str[pos + 3];
+        uint32_t codepoint = ((b1 & 0x07) << 18) | ((b2 & 0x3F) << 12) | 
+                            ((b3 & 0x3F) << 6) | (b4 & 0x3F);
+        if (codepoint < 0x10000) return 0; /* Overlong encoding */
+        
+        /* Check for values beyond Unicode range */
+        if (codepoint > 0x10FFFF) return 0;
+        
+        /* Check for surrogate pairs in 4-byte sequences (redundant but explicit) */
+        if (codepoint >= 0xD800 && codepoint <= 0xDFFF) return 0;
+    }
+    
     return char_len;
 }
 
@@ -169,14 +169,27 @@ static inline int kh_utf8_safe_slice_end(const char* str, int byte_len, int targ
     /* Find the start of the UTF-8 character that contains or follows target_end */
     int pos = target_end;
     int backtrack_count = 0;
-    const int max_backtrack = 4; /* Maximum UTF-8 sequence length */
+    const int max_backtrack = 3; /* Maximum continuation bytes in valid UTF-8 */
     
-    /* If we're in the middle of a UTF-8 sequence, back up to the start */
-    while (pos > 0 && ((unsigned char)str[pos] & 0xC0) == 0x80) {
+    /* Back up through continuation bytes to find character start */
+    while (pos > 0 && backtrack_count < max_backtrack) {
+        unsigned char byte = (unsigned char)str[pos];
+        
+        /* If this is not a continuation byte, we found a character start */
+        if ((byte & 0xC0) != 0x80) {
+            break;
+        }
+        
         pos--;
         backtrack_count++;
-        if (backtrack_count >= max_backtrack) {
-            /* Invalid UTF-8 sequence, use target_end */
+    }
+    
+    /* If we backed up max_backtrack bytes and still in continuation bytes,
+       this is invalid UTF-8. Use original target_end */
+    if (backtrack_count >= max_backtrack && pos > 0) {
+        unsigned char byte = (unsigned char)str[pos];
+        if ((byte & 0xC0) == 0x80) {
+            /* Still a continuation byte - invalid sequence */
             return target_end;
         }
     }
@@ -184,15 +197,16 @@ static inline int kh_utf8_safe_slice_end(const char* str, int byte_len, int targ
     /* Validate this is a proper UTF-8 character start */
     int char_len = kh_validate_utf8_sequence(str, pos, byte_len);
     if (char_len == 0) {
-        /* Invalid UTF-8, fall back to target_end */
+        /* Invalid UTF-8, use target_end */
         return target_end;
     }
     
-    /* If this character would extend beyond target_end, end before it */
+    /* If this character extends beyond target_end, end before it */
     if (pos + char_len > target_end) {
         return pos;
     }
     
+    /* Character fits within target_end */
     return target_end;
 }
 
@@ -219,42 +233,48 @@ static inline void kh_clean_string(const char* input, char* output, int output_s
     const char* start = input;
     int input_len = (int)strlen(input);
     const char* end = input + input_len - 1;
-    int len;
     
-    /* Skip opening quote if present (both single and double quotes) */
-    if (input_len > 0 && (*start == '"' || *start == '\'')) {
-        start++;
-    }
-    
-    /* Skip closing quote if present (both single and double quotes) */
-    if (end >= start && (*end == '"' || *end == '\'')) {
-        end--;
+    /* Check for matching quotes at start and end */
+    if (input_len >= 2) {
+        char opening_quote = *start;
+        char closing_quote = *end;
+        
+        /* Only remove quotes if they match */
+        if ((opening_quote == '"' && closing_quote == '"') ||
+            (opening_quote == '\'' && closing_quote == '\'')) {
+            start++;
+            end--;
+        }
     }
     
     /* Calculate length without quotes */
-    len = (int)(end - start + 1);
+    int len = (int)(end - start + 1);
     if (len < 0) len = 0;
     
-    /* Find safe UTF-8 boundary BEFORE copying */
-    if (len >= output_size) {
-        len = kh_utf8_safe_slice_end(start, len, output_size - 1);
-    }
-    
-    /* Validate UTF-8 BEFORE copying */
-    if (len > 0 && !kh_validate_utf8_string(start, len)) {
-        /* Find last valid UTF-8 position */
-        int safe_len = 0;
+    /* Validate UTF-8 FIRST to determine actual valid length */
+    if (len > 0) {
+        /* Find last valid UTF-8 position within the calculated length */
+        int valid_len = 0;
         int pos = 0;
         while (pos < len) {
             int char_len = kh_validate_utf8_sequence(start, pos, len);
-            if (char_len == 0) break;
+            if (char_len == 0) {
+                /* Invalid UTF-8 encountered, stop here */
+                break;
+            }
             pos += char_len;
-            safe_len = pos;
+            valid_len = pos;
         }
-        len = safe_len;
+        len = valid_len;
     }
     
-    /* Now copy the validated, properly bounded string */
+    /* Now ensure the valid length fits in output buffer */
+    if (len >= output_size) {
+        /* Find safe UTF-8 boundary within output buffer limit */
+        len = kh_utf8_safe_slice_end(start, len, output_size - 1);
+    }
+    
+    /* Copy the validated, properly bounded string */
     if (len > 0) {
         memcpy(output, start, (size_t)len);
     }
@@ -320,15 +340,27 @@ static inline int kh_get_extension_return_slice(int slice_index, char* output, i
         return 0;
     }
     
-    /* Validate slice index */
+    /* Validate slice index BEFORE multiplication to prevent overflow */
     if (slice_index < 0 || slice_index >= g_extension_return_storage.slice_count) {
         kh_set_error(output, output_size, "SLICE INDEX OUT OF RANGE");
         return 0;
     }
     
-    /* Calculate slice boundaries */
+    /* Additional safety check to prevent overflow */
+    if (slice_index > (INT_MAX / KH_MAX_OUTPUT_SIZE)) {
+        kh_set_error(output, output_size, "SLICE INDEX TOO LARGE");
+        return 0;
+    }
+    
+    /* Now safe to calculate slice boundaries */
     size_t slice_start = (size_t)slice_index * KH_MAX_OUTPUT_SIZE;
     size_t slice_end = slice_start + KH_MAX_OUTPUT_SIZE;
+    
+    /* Redundant check but good for defense in depth */
+    if (slice_start >= g_extension_return_storage.data_size) {
+        kh_set_error(output, output_size, "SLICE START BEYOND DATA");
+        return 0;
+    }
     
     if (slice_end > g_extension_return_storage.data_size) {
         slice_end = g_extension_return_storage.data_size;
@@ -360,8 +392,8 @@ typedef struct {
     uint32_t data_index;     
     uint32_t reserved;       
     uint8_t deleted;         
-    uint8_t distance;        
-    uint16_t padding;        
+    uint16_t distance;
+    uint8_t padding;
 } kh_generic_hash_entry_t;
 
 /* Generic hash table info */
@@ -400,7 +432,7 @@ static inline uint32_t kh_calculate_optimal_hash_size(uint32_t count) {
         return 16;
     }
     
-    uint32_t min_size = (uint32_t)((double)count / 0.5);
+    uint32_t min_size = (uint32_t)((double)count / 0.7);
     uint32_t size = 16;
     
     while (size < min_size && size <= UINT32_MAX / 2) {
@@ -408,6 +440,10 @@ static inline uint32_t kh_calculate_optimal_hash_size(uint32_t count) {
     }
     
     if (size < 16) size = 16;
+    
+    /* FIX: Ensure size doesn't exceed uint16_t distance tracking limit */
+    if (size > 65535) size = 65536;  /* Cap at exactly 2^16 */
+    
     return size;
 }
 
@@ -424,8 +460,10 @@ static inline uint32_t kh_generic_hash_find(kh_generic_hash_entry_t* hash_table,
     uint32_t distance = 0;
     uint32_t original_index = index;
     uint32_t first_deleted = UINT32_MAX;
+    uint32_t max_distance = hash_table_size; /* Maximum probe distance */
     
-    do {
+    /* Limit probe distance to prevent infinite loops and excessive searching */
+    while (distance < max_distance && distance <= 65535) {
         kh_generic_hash_entry_t* entry = &hash_table[index];
         
         /* Track first deleted slot for potential reuse */
@@ -454,21 +492,27 @@ static inline uint32_t kh_generic_hash_find(kh_generic_hash_entry_t* hash_table,
         }
         
         distance++;
-        if (distance > 65535) break;
         
+        /* Use quadratic probing for better distribution */
         uint64_t next_offset = (uint64_t)distance * distance;
         if (next_offset > hash_table_size) {
+            /* Fall back to linear probing when quadratic offset is too large */
             index = (original_index + distance) % hash_table_size;
         } else {
             index = (original_index + (uint32_t)next_offset) % hash_table_size;
         }
-        
-        if (distance >= hash_table_size) break;
-        
-    } while (1);
+    }
     
-    if (found) *found = 0;
-    return (first_deleted != UINT32_MAX) ? first_deleted : 0;
+    /* Search exhausted - this indicates a problem with the hash table */
+    if (found) *found = -1; /* Special value to indicate search failure */
+    
+    /* Return first deleted slot if available, otherwise signal error */
+    if (first_deleted != UINT32_MAX) {
+        return first_deleted;
+    }
+    
+    /* Hash table is in a bad state - needs rebuild */
+    return UINT32_MAX; /* Special sentinel value */
 }
 
 /* Generic Robin Hood insert */
@@ -488,7 +532,7 @@ static inline int kh_generic_hash_insert(kh_generic_hash_entry_t* hash_table,
         
         if (entry->name_hash == 0 || entry->deleted) {
             *entry = new_entry;
-            entry->distance = (uint8_t)distance;
+            entry->distance = (uint16_t)distance;  /* Safe cast now */
             return 1;
         }
         
@@ -500,13 +544,13 @@ static inline int kh_generic_hash_insert(kh_generic_hash_entry_t* hash_table,
         if (distance > entry->distance) {
             kh_generic_hash_entry_t temp = *entry;
             *entry = new_entry;
-            entry->distance = (uint8_t)distance;
+            entry->distance = (uint16_t)distance;  /* Safe cast now */
             new_entry = temp;
             distance = temp.distance;
         }
         
         distance++;
-        if (distance > 65535) break;
+        if (distance > 65535) break;  /* Consistent with uint16_t max */
         
         uint64_t next_offset = (uint64_t)distance * distance;
         if (next_offset > hash_table_size) {
@@ -514,8 +558,6 @@ static inline int kh_generic_hash_insert(kh_generic_hash_entry_t* hash_table,
         } else {
             index = (original_index + (uint32_t)next_offset) % hash_table_size;
         }
-        
-        if (distance >= hash_table_size) break;
     }
     
     return 0;
@@ -545,7 +587,7 @@ static inline int kh_generic_hash_needs_rebuild(kh_generic_hash_table_t* hash_in
     if (!hash_info || !hash_info->entries) return 1;
     
     double load_factor = (double)(hash_info->used_count + hash_info->deleted_count) / hash_info->size;
-    if (load_factor > 0.9) return 1;
+    if (load_factor > 0.75) return 1;
     
     /* Only rebuild if deletions are very high */
     if (hash_info->deleted_count > hash_info->used_count) return 1;
@@ -732,7 +774,7 @@ static inline int kh_validate_hashmap_format(const char* value) {
 }
 
 /* Validate namespace value */
-static inline int kh_validate_namespace_value(const char* value) {
+static int kh_validate_namespace_value(const char* value) {
     if (!value) return 0;
     
     char* clean_value = (char*)malloc(strlen(value) + 1);
@@ -1699,20 +1741,82 @@ static inline int kh_enforce_output_limit(char* output, int output_size, int is_
     return 0;
 }
 
-/* Random number initialization */
+/* Process SliceExtensionReturn operation */
+static int kh_process_slice_extension_return(char* output, int output_size, 
+                                            const char** argv, int argc) {
+    if (!output || output_size <= 0) return 1;
+    
+    output[0] = '\0';
+    
+    if (argc != 1) {
+        kh_set_error(output, output_size, "REQUIRES 1 ARGUMENT: [SLICE_INDEX]");
+        return 1;
+    }
+    
+    /* Parse slice index */
+    char* endptr;
+    long slice_index = strtol(argv[0], &endptr, 10);
+    
+    if (endptr == argv[0] || *endptr != '\0' || slice_index < 0) {
+        kh_set_error(output, output_size, "INVALID SLICE INDEX");
+        return 1;
+    }
+    
+    /* Get the slice */
+    if (!kh_get_extension_return_slice((int)slice_index, output, output_size)) {
+        return 1;
+    }
+    
+    return 0;
+}
+
+/* Initialize secure random number generator */
 static inline void kh_init_random(void) {
-    if (!g_rng_state.initialized) {
-        g_rng_state.seed = (unsigned int)time(NULL) ^ (unsigned int)GetTickCount();
-        /* Ensure seed is never zero */
-        if (g_rng_state.seed == 0) g_rng_state.seed = 1;
-        g_rng_state.initialized = 1;
+    if (!g_secure_rng_state.initialized) {
+        if (CryptAcquireContext(&g_secure_rng_state.hProv, NULL, NULL, 
+                                PROV_RSA_FULL, CRYPT_VERIFYCONTEXT)) {
+            g_secure_rng_state.initialized = 1;
+        } else {
+            /* Fallback to less secure but still better than LCG */
+            g_secure_rng_state.hProv = 0;
+            g_secure_rng_state.initialized = 1;
+        }
     }
 }
 
 /* Fast random number generator using LCG */
 static inline unsigned int kh_fast_rand(void) {
-    g_rng_state.seed = g_rng_state.seed * 1103515245U + 12345U;
-    return g_rng_state.seed;
+    unsigned int result = 0;
+    
+    if (g_secure_rng_state.initialized && g_secure_rng_state.hProv) {
+        /* Use CryptoAPI for secure random */
+        CryptGenRandom(g_secure_rng_state.hProv, sizeof(result), (BYTE*)&result);
+    } else {
+        /* Fallback using multiple entropy sources */
+        LARGE_INTEGER counter;
+        QueryPerformanceCounter(&counter);
+        
+        result = (unsigned int)(counter.QuadPart ^ GetTickCount() ^ 
+                               (uintptr_t)&result ^ GetCurrentThreadId());
+        
+        /* Mix using a better algorithm than simple LCG */
+        result ^= result >> 16;
+        result *= 0x85ebca6b;
+        result ^= result >> 13;
+        result *= 0xc2b2ae35;
+        result ^= result >> 16;
+    }
+    
+    return result;
 }
 
-#endif /* COMMON_DEFINES_HPP */
+/* Cleanup RNG on DLL unload */
+static inline void kh_cleanup_random(void) {
+    if (g_secure_rng_state.initialized && g_secure_rng_state.hProv) {
+        CryptReleaseContext(g_secure_rng_state.hProv, 0);
+        g_secure_rng_state.hProv = 0;
+        g_secure_rng_state.initialized = 0;
+    }
+}
+
+#endif /* FRAMEWORK_H */

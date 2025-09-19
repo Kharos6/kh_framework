@@ -1,18 +1,5 @@
-#ifndef CRYPTO_OPERATIONS_HPP
-#define CRYPTO_OPERATIONS_HPP
-
-#include "common_defines.h"
-#include <ctype.h>
-#include <math.h>
-#include <shlobj.h>
-#include <stdarg.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <time.h>
-#include <wincrypt.h>
-#include <windows.h>
+#ifndef CRYPTO_OPERATIONS_H
+#define CRYPTO_OPERATIONS_H
 
 /* Crypto function definition */
 typedef struct {
@@ -563,4 +550,4 @@ cleanup:
     return result;
 }
 
-#endif /* CRYPTO_OPERATIONS_HPP */
+#endif /* CRYPTO_OPERATIONS_H */

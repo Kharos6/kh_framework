@@ -15,6 +15,7 @@
       "/wd4101",
       "/wd4189",
       "/I.",
+      "/Wno-microsoft-goto",
       "kh_framework.c"
     ],
     "file": "kh_framework.c"

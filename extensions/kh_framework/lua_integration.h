@@ -1,23 +1,6 @@
 #ifndef LUA_INTEGRATION_H
 #define LUA_INTEGRATION_H
 
-#include "common_defines.h"
-#include "process_kh_data.h"
-#include <ctype.h>
-#include <math.h>
-#include <stdarg.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <time.h>
-#include <windows.h>
-
-/* LuaJIT includes */
-#include "luajit/include/lua.h"
-#include "luajit/include/lualib.h"
-#include "luajit/include/lauxlib.h"
-
 /* Compatibility fixes for different LuaJIT versions */
 #ifndef lua_rawlen
 #define lua_rawlen(L,i) lua_objlen(L,i)
@@ -123,18 +106,50 @@ static int lua_rebuild_variable_hash_table(void) {
     
     /* Calculate new size */
     uint32_t new_size = kh_calculate_optimal_hash_size(g_lua_variable_storage.variable_count);
+    uint32_t old_size = g_lua_variable_storage.hash_table.size;
     
-    /* Allocate new hash table */
-    kh_generic_hash_entry_t* new_entries = (kh_generic_hash_entry_t*)calloc(new_size, sizeof(kh_generic_hash_entry_t));
+    /* If shrinking and new size is at least 1/4 of old, reuse existing memory */
+    if (new_size <= old_size && new_size >= old_size / 4) {
+        /* Clear existing entries */
+        memset(g_lua_variable_storage.hash_table.entries, 0, 
+               old_size * sizeof(kh_generic_hash_entry_t));
+        
+        /* Reinsert all variables into same memory */
+        uint32_t new_used_count = 0;
+        for (uint32_t i = 0; i < g_lua_variable_storage.variable_count; i++) {
+            if (g_lua_variable_storage.variables[i].name) {
+                uint32_t name_hash = kh_hash_name_case_insensitive(
+                    g_lua_variable_storage.variables[i].name);
+                if (!kh_generic_hash_insert(g_lua_variable_storage.hash_table.entries, 
+                                           old_size, name_hash, i)) {
+                    /* Insertion failed - fall back to full rebuild */
+                    break;
+                }
+                new_used_count++;
+            }
+        }
+        
+        if (new_used_count == g_lua_variable_storage.variable_count) {
+            /* Successfully reused existing memory */
+            g_lua_variable_storage.hash_table.used_count = new_used_count;
+            g_lua_variable_storage.hash_table.deleted_count = 0;
+            g_lua_variable_storage.hash_table.needs_rebuild = 0;
+            return 1;
+        }
+    }
+    
+    /* Need to allocate new table (growing or significant shrinking) */
+    kh_generic_hash_entry_t* new_entries = (kh_generic_hash_entry_t*)calloc(
+        new_size, sizeof(kh_generic_hash_entry_t));
     if (!new_entries) return 0;
     
-    /* Rebuild hash table entries in the new table first */
+    /* Rebuild hash table entries in the new table */
     uint32_t new_used_count = 0;
     for (uint32_t i = 0; i < g_lua_variable_storage.variable_count; i++) {
         if (g_lua_variable_storage.variables[i].name) {
-            uint32_t name_hash = kh_hash_name_case_insensitive(g_lua_variable_storage.variables[i].name);
+            uint32_t name_hash = kh_hash_name_case_insensitive(
+                g_lua_variable_storage.variables[i].name);
             if (!kh_generic_hash_insert(new_entries, new_size, name_hash, i)) {
-                /* Rebuild failed - free the new table and keep the old one */
                 free(new_entries);
                 return 0;
             }
@@ -142,7 +157,7 @@ static int lua_rebuild_variable_hash_table(void) {
         }
     }
     
-    /* Only now that we're sure rebuild succeeded, replace the old table */
+    /* Replace old table */
     free(g_lua_variable_storage.hash_table.entries);
     g_lua_variable_storage.hash_table.entries = new_entries;
     g_lua_variable_storage.hash_table.size = new_size;
@@ -450,6 +465,41 @@ static int lua_inject_function(lua_State* L, lua_function_t* func) {
     
     if (!lua_checkstack(L, 5)) return 0;
     
+    /* VALIDATE FUNCTION NAME for Lua syntax safety */
+    const char* name_ptr = func->name;
+    
+    /* First character must be letter or underscore */
+    if (!(((*name_ptr >= 'a' && *name_ptr <= 'z') || 
+           (*name_ptr >= 'A' && *name_ptr <= 'Z') || 
+           *name_ptr == '_'))) {
+        return 0; /* Invalid function name */
+    }
+    
+    /* Rest must be alphanumeric or underscore */
+    name_ptr++;
+    while (*name_ptr) {
+        if (!((*name_ptr >= 'a' && *name_ptr <= 'z') || 
+              (*name_ptr >= 'A' && *name_ptr <= 'Z') || 
+              (*name_ptr >= '0' && *name_ptr <= '9') || 
+              *name_ptr == '_')) {
+            return 0; /* Invalid character in function name */
+        }
+        name_ptr++;
+    }
+    
+    /* Check against Lua reserved words */
+    const char* reserved[] = {
+        "and", "break", "do", "else", "elseif", "end", "false", "for",
+        "function", "if", "in", "local", "nil", "not", "or", "repeat",
+        "return", "then", "true", "until", "while", NULL
+    };
+    
+    for (int i = 0; reserved[i]; i++) {
+        if (strcmp(func->name, reserved[i]) == 0) {
+            return 0; /* Reserved word cannot be function name */
+        }
+    }
+    
     int initial_stack_top = lua_gettop(L);
     
     /* Create function code with wrapper that accepts varargs */
@@ -461,6 +511,7 @@ static int lua_inject_function(lua_State* L, lua_function_t* func) {
     if (!wrapper_code) return 0;
     
     /* Wrap user code in function definition with varargs */
+    /* Name is now guaranteed safe for Lua syntax */
     int result = _snprintf_s(wrapper_code, wrapper_len, _TRUNCATE, 
                             "function %s(...)\n%s\nend", func->name, func->code);
     
@@ -626,15 +677,17 @@ static int lua_set_variable(const char* name, const char* type_value_array) {
     strcpy_s(value_copy, value_len + 1, value_str);
     strcpy_s(type_copy, type_len + 1, type_str);
     
+    /* Free the parsed strings early since we have copies */
+    free(type_str);
+    free(value_str);
+    
     /* Rebuild hash table if needed BEFORE adding the variable */
-    if (kh_generic_hash_needs_rebuild(&g_lua_variable_storage.hash_table, g_lua_variable_storage.variable_count)) {
+    if (kh_generic_hash_needs_rebuild(&g_lua_variable_storage.hash_table, g_lua_variable_storage.variable_count + 1)) {
         if (!lua_rebuild_variable_hash_table()) {
             /* Free allocated memory on hash table failure */
             free(name_copy);
             free(value_copy);
             free(type_copy);
-            free(type_str);
-            free(value_str);
             return 0;
         }
     }
@@ -651,8 +704,6 @@ static int lua_set_variable(const char* name, const char* type_value_array) {
         free(name_copy);
         free(value_copy);
         free(type_copy);
-        free(type_str);
-        free(value_str);
         return 0;
     }
     
@@ -670,8 +721,6 @@ static int lua_set_variable(const char* name, const char* type_value_array) {
         lua_inject_variable(state->L, &g_lua_variable_storage.variables[data_index]);
     }
     
-    free(type_str);
-    free(value_str);
     return 1;
 }
 
@@ -1262,22 +1311,23 @@ static int lua_c_delete_persistent_variable(lua_State* L) {
     /* Check argument count first */
     int argc = lua_gettop(L);
     if (argc != 1) {
-        if (lua_checkstack(L, 1)) {
-            lua_pushboolean(L, 0);
-        }
-        return 1;
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "REQUIRES 1 ARGUMENT");
+        return 2;  /* Return 2 values: success flag and error message */
     }
     
     /* Check stack space for operations */
-    if (!lua_checkstack(L, 1)) {
-        return 0;
+    if (!lua_checkstack(L, 2)) {
+        /* Critical error - use Lua error mechanism */
+        return luaL_error(L, "Stack overflow");
     }
     
     /* Get argument */
     const char* name = lua_tostring(L, 1);
     if (!name) {
         lua_pushboolean(L, 0);
-        return 1;
+        lua_pushstring(L, "INVALID ARGUMENT TYPE");
+        return 2;
     }
     
     /* Clean the name */
@@ -1285,7 +1335,8 @@ static int lua_c_delete_persistent_variable(lua_State* L) {
     char* clean_name = (char*)malloc(name_len + 1);
     if (!clean_name) {
         lua_pushboolean(L, 0);
-        return 1;
+        lua_pushstring(L, "MEMORY ALLOCATION FAILED");
+        return 2;
     }
     
     kh_clean_string(name, clean_name, (int)name_len + 1);
@@ -1299,7 +1350,11 @@ static int lua_c_delete_persistent_variable(lua_State* L) {
     free(clean_name);
     
     lua_pushboolean(L, success);
-    return 1;
+    if (!success) {
+        lua_pushstring(L, "VARIABLE NOT FOUND OR INVALID NAME");
+        return 2;
+    }
+    return 1;  /* Only success flag when successful */
 }
 
 /* Lua-callable function: WriteKHData(filename, variable_name, type_value_array) */
@@ -1668,7 +1723,7 @@ static int kh_process_lua_set_variable_operation(char* output, int output_size,
     
     output[0] = '\0';
     
-    if (argc != 2 || !argv || !argv[0] || !argv[1]) {
+    if (argc != 2) {
         kh_set_error(output, output_size, "REQUIRES 2 ARGUMENTS: [NAME, TYPE_VALUE_ARRAY]");
         return 1;
     }
@@ -1716,7 +1771,7 @@ static int kh_process_lua_get_variable_operation(char* output, int output_size,
     
     output[0] = '\0';
     
-    if (argc < 1 || !argv || !argv[0]) {
+    if (argc < 1) {
         kh_set_error(output, output_size, "REQUIRES 1 ARGUMENT: [NAME]");
         return 1;
     }
@@ -1760,7 +1815,7 @@ static int kh_process_lua_delete_variable_operation(char* output, int output_siz
     
     output[0] = '\0';
     
-    if (argc < 1 || !argv || !argv[0]) {
+    if (argc < 1) {
         kh_set_error(output, output_size, "REQUIRES 1 ARGUMENT: [NAME]");
         return 1;
     }
@@ -2301,8 +2356,8 @@ static int lua_parse_args_to_stack(lua_State* L, const char* args_str) {
         while (ptr < end && (*ptr == ' ' || *ptr == '\t' || *ptr == '\n' || *ptr == ',')) ptr++;
         if (ptr >= end || *ptr == ']') break;
 
-        /* Dynamically ensure we have stack space for next argument */
-        if (arg_count % 10 == 0) {
+        /* Ensure we have stack space BEFORE processing next argument */
+        if (arg_count > 0 && arg_count % 10 == 0) {
             if (!lua_checkstack(L, 10)) {
                 lua_settop(L, stack_base);
                 return -1;
@@ -3095,14 +3150,24 @@ static int kh_execute_lua(const char* arguments, const char* code,
         
         /* Process the string, skipping outer quotes and un-escaping doubled quotes */
         size_t out_pos = 0;
-        for (size_t i = 1; i < code_len - 1; i++) {
-            if (code[i] == quote_char && i + 1 < code_len - 1 && code[i + 1] == quote_char) {
-                /* Found doubled quote - convert to single */
-                actual_code[out_pos++] = quote_char;
-                i++; /* Skip the second quote */
+        size_t i = 1;  /* Start after opening quote */
+        
+        while (i < code_len - 1) {  /* Stop before closing quote */
+            if (code[i] == quote_char) {
+                /* Check if this is a doubled quote */
+                if (i + 1 < code_len - 1 && code[i + 1] == quote_char) {
+                    /* Found doubled quote - convert to single */
+                    actual_code[out_pos++] = quote_char;
+                    i += 2;  /* Skip both quotes */
+                } else {
+                    /* Single quote in the middle - this is malformed, but copy it */
+                    actual_code[out_pos++] = code[i];
+                    i++;
+                }
             } else {
                 /* Regular character */
                 actual_code[out_pos++] = code[i];
+                i++;
             }
         }
         actual_code[out_pos] = '\0';
@@ -3283,7 +3348,7 @@ static int kh_process_lua_operation(char* output, int output_size,
     
     output[0] = '\0';
     
-    if (argc < 2 || !argv || !argv[0] || !argv[1]) {
+    if (argc < 2) {
         kh_set_error(output, output_size, "REQUIRES 2 ARGUMENTS: [ARGUMENTS, CODE]");
         return 1;
     }
@@ -3298,7 +3363,7 @@ static int kh_process_lua_compile_operation(char* output, int output_size,
     
     output[0] = '\0';
     
-    if (argc < 1 || argc > 2 || !argv || !argv[0]) {
+    if (argc < 1) {
         kh_set_error(output, output_size, "REQUIRES 1-2 ARGUMENTS: [CODE] or [CODE, FUNCTION_NAME]");
         return 1;
     }

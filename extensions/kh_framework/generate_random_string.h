@@ -1,18 +1,5 @@
-#ifndef GENERATE_RANDOM_STRING_HPP
-#define GENERATE_RANDOM_STRING_HPP
-
-#include "common_defines.h"
-#include <ctype.h>
-#include <math.h>
-#include <shlobj.h>
-#include <stdarg.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <time.h>
-#include <wincrypt.h>
-#include <windows.h>
+#ifndef GENERATE_RANDOM_STRING_H
+#define GENERATE_RANDOM_STRING_H
 
 /* Character sets for random string generation */
 static const char KH_CHARSET_NUMBERS[] = "0123456789";
@@ -155,8 +142,8 @@ static int kh_process_random_string_generation(char *output, int output_size, co
         return 1;
     }
     
-    /* Check if output buffer can hold the result */
-    if (length >= output_size) {
+    /* Check if output buffer can hold the result INCLUDING null terminator */
+    if (length >= output_size - 1) {
         kh_set_error(output, output_size, "OUTPUT BUFFER TOO SMALL");
         return 1;
     }
@@ -189,4 +176,4 @@ static int kh_process_random_string_generation(char *output, int output_size, co
     return result;
 }
 
-#endif /* GENERATE_RANDOM_STRING_HPP */
+#endif /* GENERATE_RANDOM_STRING_H */

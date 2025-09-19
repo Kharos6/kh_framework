@@ -1,48 +1,70 @@
-#include <math.h>
-#include <shlobj.h>
-#include <stdarg.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <time.h>
-#include <wincrypt.h>
-#include <windows.h>
-
+#include "common_declarations.h"
+#include "framework.h"
 #include "rv_extension_utils.h"
-#include "common_defines.h"
+#include "process_kh_data.h"
 #include "crypto_operations.h"
 #include "generate_random_string.h"
-#include "process_kh_data.h"
 #include "lua_integration.h"
 
-__declspec(dllexport) uint64_t RVExtensionFeatureFlags = RVFeature_ContextNoDefaultCall;
+__declspec(dllexport) uint64_t RVExtensionFeatureFlags = RVFeature_ContextNoDefaultCall | RVFeature_ArgumentNoEscapeString;
 
-/* Function name lookup table for performance optimization */
+/* Function name lookup table */
+typedef int (*kh_function_handler)(char* output, int output_size, const char** argv, int argc);
+
 typedef struct {
     const char* name;
     int min_args;
     int max_args;
+    kh_function_handler handler;
 } function_info_t;
 
+/* Direct function handlers - no wrappers needed */
+static int kh_handle_read_khdata(char* output, int output_size, const char** argv, int argc) {
+    return kh_read_khdata_variable(argv[0], argv[1], output, output_size);
+}
+
+static int kh_handle_write_khdata(char* output, int output_size, const char** argv, int argc) {
+    return kh_write_khdata_variable(argv[0], argv[1], argv[2], output, output_size);
+}
+
+static int kh_handle_unbinarize_khdata(char* output, int output_size, const char** argv, int argc) {
+    return kh_unbinarize_khdata(argv[0], output, output_size);
+}
+
+static int kh_handle_binarize_khdata(char* output, int output_size, const char** argv, int argc) {
+    return kh_binarize_khdata(argv[0], output, output_size);
+}
+
+static int kh_handle_delete_khdata_file(char* output, int output_size, const char** argv, int argc) {
+    return kh_delete_khdata_file(argv[0], output, output_size);
+}
+
+static int kh_handle_delete_khdata_variable(char* output, int output_size, const char** argv, int argc) {
+    return kh_delete_khdata_variable(argv[0], argv[1], output, output_size);
+}
+
+static int kh_handle_flush_khdata(char* output, int output_size, const char** argv, int argc) {
+    return kh_flush_khdata(output, output_size);
+}
+
 static const function_info_t FUNCTION_TABLE[] = {
-    {"GenerateRandomString", 1, 4},
-    {"ReadKHData", 2, 2},
-    {"WriteKHData", 3, 3},
-    {"UnbinarizeKHData", 1, 1},
-    {"BinarizeKHData", 1, 1},
-    {"CryptoOperation", 2, 2},
-    {"DeleteKHDataFile", 1, 1},
-    {"DeleteKHDataVariable", 2, 2},
-    {"FlushKHData", 0, 0},
-    {"LuaOperation", 2, 2},
-    {"LuaCompile", 1, 2},
-    {"LuaSetVariable", 2, 2},
-    {"LuaGetVariable", 1, 1},
-    {"LuaDeleteVariable", 1, 1},
-    {"LuaClearVariables", 0, 0},
-    {"LuaResetState", 0, 0},
-    {"SliceExtensionReturn", 1, 1}
+    {"GenerateRandomString", 1, 4, kh_process_random_string_generation},
+    {"ReadKHData", 2, 2, kh_handle_read_khdata},
+    {"WriteKHData", 3, 3, kh_handle_write_khdata},
+    {"UnbinarizeKHData", 1, 1, kh_handle_unbinarize_khdata},
+    {"BinarizeKHData", 1, 1, kh_handle_binarize_khdata},
+    {"CryptoOperation", 2, 2, kh_process_crypto_operation},
+    {"DeleteKHDataFile", 1, 1, kh_handle_delete_khdata_file},
+    {"DeleteKHDataVariable", 2, 2, kh_handle_delete_khdata_variable},
+    {"FlushKHData", 0, 0, kh_handle_flush_khdata},
+    {"LuaOperation", 2, 2, kh_process_lua_operation},
+    {"LuaCompile", 1, 2, kh_process_lua_compile_operation},
+    {"LuaSetVariable", 2, 2, kh_process_lua_set_variable_operation},
+    {"LuaGetVariable", 1, 1, kh_process_lua_get_variable_operation},
+    {"LuaDeleteVariable", 1, 1, kh_process_lua_delete_variable_operation},
+    {"LuaClearVariables", 0, 0, kh_process_lua_clear_variables_operation},
+    {"LuaResetState", 0, 0, kh_process_lua_reset_state_operation},
+    {"SliceExtensionReturn", 1, 1, kh_process_slice_extension_return}
 };
 
 static const int FUNCTION_COUNT = sizeof(FUNCTION_TABLE) / sizeof(function_info_t);
@@ -110,7 +132,7 @@ static inline int kh_validate_function_call(const char* function, int argc, char
             break; /* Empty slot, not found */
         }
         if (g_func_hash_table[index].hash == hash && 
-            strcmp(g_func_hash_table[index].func_info->name, function) == 0) {
+            kh_strcasecmp(g_func_hash_table[index].func_info->name, function) == 0) {
             
             const function_info_t* func_info = g_func_hash_table[index].func_info;
             
@@ -171,106 +193,58 @@ static inline int kh_validate_basic_inputs(char* output, int output_size, const 
     return 1;
 }
 
-/* Process SliceExtensionReturn operation */
-static int kh_process_slice_extension_return(char* output, int output_size, 
-                                            const char** argv, int argc) {
-    if (!output || output_size <= 0) return 1;
-    
-    output[0] = '\0';
-    
-    if (argc != 1 || !argv || !argv[0]) {
-        kh_set_error(output, output_size, "REQUIRES 1 ARGUMENT: [SLICE_INDEX]");
-        return 1;
-    }
-    
-    /* Parse slice index */
-    char* endptr;
-    long slice_index = strtol(argv[0], &endptr, 10);
-    
-    if (endptr == argv[0] || *endptr != '\0' || slice_index < 0) {
-        kh_set_error(output, output_size, "INVALID SLICE INDEX");
-        return 1;
-    }
-    
-    /* Get the slice */
-    if (!kh_get_extension_return_slice((int)slice_index, output, output_size)) {
-        return 1;
-    }
-    
-    return 0;
-}
-
 /* Main extension function for callExtension interface */
-__declspec(dllexport) int RVExtensionArgs(char *output, unsigned int output_size, const char *function, const char **argv, unsigned int argc) {
-    int function_result = 1;  /* Default to error */
-    int is_slice_operation = 0;
-    
+__declspec(dllexport) int RVExtensionArgs(char *output, unsigned int output_size, const char *function, const char **argv, unsigned int argc) {    
     /* Input validation */
     if (!kh_validate_basic_inputs(output, output_size, function, argv, argc)) {
-        return 1;
+        return 1; /* Error */
     }
     
     /* Validate function call */
     if (!kh_validate_function_call(function, argc, output, output_size)) {
-        return 1;
+        return 1; /* Error */
     }
 
-    /* Check if this is a slice operation BEFORE validation clears anything */
-    if (strcmp(function, "SliceExtensionReturn") == 0) {
-        is_slice_operation = 1;
+    /* Check if this is a slice operation using case-insensitive comparison */
+    int is_slice_operation = (kh_strcasecmp(function, "SliceExtensionReturn") == 0) ? 1 : 0;
+    
+    /* Direct dispatch using function pointer from hash table */
+    uint32_t hash = kh_hash_name_case_insensitive(function);
+    uint32_t index = hash & (KH_FUNC_HASH_SIZE - 1);
+    const function_info_t* func_info = NULL;
+    int probe_count = 0;
+    
+    /* Find function in hash table with loop protection */
+    while (probe_count < KH_FUNC_HASH_SIZE) {
+        if (g_func_hash_table[index].hash == 0) {
+            break; /* Empty slot, not found */
+        }
+        if (g_func_hash_table[index].hash == hash && 
+            kh_strcasecmp(g_func_hash_table[index].func_info->name, function) == 0) {
+            func_info = g_func_hash_table[index].func_info;
+            break;
+        }
+        index = (index + 1) & (KH_FUNC_HASH_SIZE - 1);
+        probe_count++;
     }
     
-    /* Direct dispatch using strcmp - function is already validated */
-    if (strcmp(function, "CryptoOperation") == 0) {
-        function_result = kh_process_crypto_operation(output, output_size, argv, argc);
-    } else if (strcmp(function, "DeleteKHDataFile") == 0) {
-        function_result = kh_delete_khdata_file(argv[0], output, output_size);
-    } else if (strcmp(function, "DeleteKHDataVariable") == 0) {
-        function_result = kh_delete_khdata_variable(argv[0], argv[1], output, output_size);
-    } else if (strcmp(function, "GenerateRandomString") == 0) {
-        function_result = kh_process_random_string_generation(output, output_size, argv, argc);
-    } else if (strcmp(function, "LuaOperation") == 0) {
-        function_result = kh_process_lua_operation(output, output_size, argv, argc);
-    } else if (strcmp(function, "LuaCompile") == 0) {
-        function_result = kh_process_lua_compile_operation(output, output_size, argv, argc);
-    } else if (strcmp(function, "LuaSetVariable") == 0) {
-        function_result = kh_process_lua_set_variable_operation(output, output_size, argv, argc);
-    } else if (strcmp(function, "LuaGetVariable") == 0) {
-        function_result = kh_process_lua_get_variable_operation(output, output_size, argv, argc);
-    } else if (strcmp(function, "LuaDeleteVariable") == 0) {
-        function_result = kh_process_lua_delete_variable_operation(output, output_size, argv, argc);
-    } else if (strcmp(function, "LuaClearVariables") == 0) {
-        function_result = kh_process_lua_clear_variables_operation(output, output_size, argv, argc);
-    } else if (strcmp(function, "LuaResetState") == 0) {
-        function_result = kh_process_lua_reset_state_operation(output, output_size, argv, argc);
-    } else if (strcmp(function, "ReadKHData") == 0) {
-        function_result = kh_read_khdata_variable(argv[0], argv[1], output, output_size);
-    } else if (strcmp(function, "WriteKHData") == 0) {
-        function_result = kh_write_khdata_variable(argv[0], argv[1], argv[2], output, output_size);
-    } else if (strcmp(function, "UnbinarizeKHData") == 0) {
-        function_result = kh_unbinarize_khdata(argv[0], output, output_size);
-    } else if (strcmp(function, "BinarizeKHData") == 0) {
-        function_result = kh_binarize_khdata(argv[0], output, output_size);
-    } else if (strcmp(function, "FlushKHData") == 0) {
-        function_result = kh_flush_khdata(output, output_size);
-    } else if (strcmp(function, "SliceExtensionReturn") == 0) {
-        function_result = kh_process_slice_extension_return(output, output_size, argv, argc);
+    if (func_info && func_info->handler) {
+        /* Execute function handler - returns 0 for success */
+        int result = func_info->handler(output, output_size, argv, argc);
+        
+        /* Check output limit */
+        if (result == 0) {
+            if (kh_enforce_output_limit(output, output_size, is_slice_operation) != 0) {
+                return 1; /* Error */
+            }
+        }
+        
+        return result;
     } else {
         /* This should never happen due to validation, but just in case */
-        kh_set_error(output, output_size, "UNKNOWN FUNCTION");
-        return 1;
+        kh_set_error(output, output_size, "FUNCTION HANDLER NOT FOUND");
+        return 1; /* Error */
     }
-    
-    /* If function executed successfully (returned 0), check output limit */
-    if (function_result == 0) {
-        if (kh_enforce_output_limit(output, output_size, is_slice_operation)) {
-            return 1;
-        }
-        return 0;
-    }
-    
-    kh_enforce_output_limit(output, output_size, is_slice_operation);
-    return function_result;
 }
 
 /* Alternative entry point for simple function calls */
@@ -304,6 +278,28 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
     /* Perform any necessary initialization/cleanup based on reason */
     switch (ul_reason_for_call) {
         case DLL_PROCESS_ATTACH:
+            /* Reset ALL static variables to ensure clean state */
+            g_func_hash_initialized = 0;
+            g_type_hash_initialized = 0;
+            g_crypto_hash_initialized = 0;
+            g_lua_initialized = 0;
+            crc32_table_initialized = 0;
+            
+            /* Clear static structures */
+            memset(&g_lua_state, 0, sizeof(g_lua_state));
+            memset(&g_memory_manager, 0, sizeof(g_memory_manager));
+            memset(&g_extension_return_storage, 0, sizeof(g_extension_return_storage));
+            memset(&g_lua_variable_storage, 0, sizeof(g_lua_variable_storage));
+            memset(&g_lua_function_storage, 0, sizeof(g_lua_function_storage));
+            memset(&g_secure_rng_state, 0, sizeof(g_secure_rng_state));
+            memset(&g_crypto_cache, 0, sizeof(g_crypto_cache));
+            
+            /* Clear hash tables */
+            memset(g_func_hash_table, 0, sizeof(g_func_hash_table));
+            memset(g_type_hash_table, 0, sizeof(g_type_hash_table));
+            memset(g_crypto_hash_table, 0, sizeof(g_crypto_hash_table));
+            
+            /* Now initialize everything fresh */
             kh_init_random();
             kh_init_type_hash_table();
             kh_init_crypto_hash_table();
@@ -320,7 +316,14 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             break;
             
         case DLL_PROCESS_DETACH:
+            if (lpReserved != NULL) {
+                /* Process is terminating - skip complex cleanup to avoid deadlocks */
+                /* The OS will reclaim all memory and handles automatically */
+                break;
+            }
+
             kh_free_extension_return_storage();
+            kh_cleanup_random();
             kh_cleanup_memory_manager();
             kh_cleanup_lua_states();
             kh_cleanup_crypto_provider();

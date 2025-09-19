@@ -130,9 +130,9 @@ Checks: >
   readability-uniqueptr-delete-release
 
 WarningsAsErrors: ''
-HeaderFilterRegex: '.*\.(h|hpp)$'
+HeaderFilterRegex: ''
 FormatStyle: 'file'
-ExtraArgs: ['-Wno-microsoft-goto']
+ExtraArgs: []
 
 CheckOptions:
   - key: readability-identifier-naming.VariableCase

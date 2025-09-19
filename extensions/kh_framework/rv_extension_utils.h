@@ -1,19 +1,6 @@
 #ifndef RV_EXTENSION_UTILS_H
 #define RV_EXTENSION_UTILS_H
 
-#include "common_defines.h"
-#include <ctype.h>
-#include <math.h>
-#include <shlobj.h>
-#include <stdarg.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <time.h>
-#include <wincrypt.h>
-#include <windows.h>
-
 /* bitset */
 typedef enum {
     RVFeature_ContextArgumentsVoidPtr = 1,      /* 1 << 0 */
@@ -125,14 +112,6 @@ struct RVExtensionGraphicsLockGuard {
 #ifdef _WIN32
 #define DLLEXPORT __declspec (dllexport)
 #define CALL_CONVENTION __stdcall
-#else /* Linux */
-#if __GNUC__ >= 4
-#define DLLEXPORT __attribute__ ((visibility ("default")))
-#else
-#define DLLEXPORT __attribute__((dllexport))
-#endif
-
-#define CALL_CONVENTION
 #endif
 
 typedef int (CALL_CONVENTION *RVExtensionCallbackProc)(const char* name, const char* function, const char* data);
@@ -157,14 +136,7 @@ DLLEXPORT int CALL_CONVENTION RVExtensionRequestUI(const char* uiClass, struct C
 
 /*--- Finds a game exported function by its name */
 static inline const void* FindRVFunction(const char* name) {
-#ifdef _WIN32
     return (void*)GetProcAddress(GetModuleHandle(NULL), name);
-#else /* Linux */
-    void* armaHandle = dlopen(NULL, RTLD_LAZY | RTLD_NOLOAD);
-    void* result = dlsym(armaHandle, name);
-    dlclose(armaHandle);
-    return result;
-#endif
 }
 
 #endif /* RV_EXTENSION_UTILS_H */

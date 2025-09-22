@@ -58,24 +58,6 @@ static sol::object convert_game_value_to_lua(const intercept::types::game_value&
     }
 }
 
-// Wrapper for SQF functions that take no arguments and return a value
-static sol::object sqf_nular_wrapper(Func func) {
-    intercept::types::game_value result = func();
-    return convert_game_value_to_lua(result);
-}
-
-// Wrapper for SQF functions that take one argument
-static sol::object sqf_unary_wrapper(Func func, , const std::string& arg) {
-    intercept::types::game_value result = func(arg);
-    return convert_game_value_to_lua(result);
-}
-
-// Wrapper for SQF functions that take two arguments (binary)
-static sol::object sqf_binary_wrapper(const std::string& left_arg, Func func, const std::string& right_arg) {
-    intercept::types::game_value result = func(left_arg, right_arg);
-    return convert_game_value_to_lua(result);
-}
-
 // Initialize Lua state
 static void initialize_lua_state() {
     std::lock_guard<std::mutex> lock(g_lua_mutex);
@@ -98,22 +80,14 @@ static void initialize_lua_state() {
         auto sqf_table = g_lua_state->create_named_table("sqf");
         
         // Functions that don't return values
-        sqf_table["diag_log"] = [](const std::string& arg) {
-            return sqf_unary_wrapper(intercept::sqf::diag_log, arg);
-        };
-
-        sqf_table["get_variable"] = [](const std::string& arg1, const std::string& arg2) -> sol::object {
-            return sqf_binary_wrapper(arg1, intercept::sqf::get_variable, arg2);
-        };
-
-        sqf_table["delete_queued_lua_execution"] = [](const std::string& code_str) -> sol::object {
-            intercept::types::game_value result = intercept::sqf::get_variable(intercept::sqf::mission_namespace(), "KH_var_queuedLuaExecutions");
-            intercept::sqf::delete_at(result, intercept::sqf::find(result, code_str));
+        sqf_table["diag_log"] = [](const std::string& string) {
+            intercept::sqf::diag_log(string);
             return sol::nil;
         };
 
-        sqf_table["get_queued_lua_execution"] = []() -> sol::object {
-            return sqf_binary_wrapper(intercept::sqf::mission_namespace(), intercept::sqf::get_variable, "KH_var_queuedLuaExecutions");
+        sqf_table["call"] = [](const std::string& string) -> sol::object {
+            intercept::types::game_value result = intercept::sqf::call2(intercept::sqf::compile(string));
+            return convert_game_value_to_lua(result);
         };
     }
 }
@@ -123,16 +97,13 @@ static void execute_lua() {
     std::lock_guard<std::mutex> lock(g_lua_mutex);
 
     std::string lua_code = R"(
-        local code_array = sqf.get_queued_lua_execution()
+        local code_array = sqf.call(
+            "missionNamespace getVariable ['KH_var_queuedLuaExecutions', []];"
+        )
 
         for i, code_str in ipairs(code_array) do
             pcall(load(code_str))
-            sqf.delete_queued_lua_execution(code_str)
         end
-    )";
-
-    std::string lua_code = R"(
-        sqf.diag_log("=== Lua Test 1: Basic SQF Call ===")
     )";
     
     auto result = g_lua_state->safe_script(lua_code);
@@ -140,6 +111,28 @@ static void execute_lua() {
         sol::error err = result;
         intercept::sqf::diag_log("Lua error: " + std::string(err.what()));
     }
+}
+
+static void execute_lua_code(const std::string& code, const intercept::types::game_value& data) {
+    std::lock_guard<std::mutex> lock(g_lua_mutex);
+    
+    if (!g_lua_state) {
+        intercept::sqf::diag_log("Error: Lua state not initialized");
+        return;
+    }
+    
+    // Convert data to Lua object and set it as a global variable
+    (*g_lua_state)["_signal_data"] = convert_game_value_to_lua(data);
+    
+    // Execute the Lua code
+    auto result = g_lua_state->safe_script(code);
+    if (!result.valid()) {
+        sol::error err = result;
+        intercept::sqf::diag_log("Lua execution error: " + std::string(err.what()));
+    }
+    
+    // Clear the signal data after execution
+    (*g_lua_state)["_signal_data"] = sol::nil;
 }
 
 // Intercept API implementation
@@ -177,7 +170,42 @@ void intercept::on_frame() {
 }
 
 void intercept::on_signal(std::string& signal_name_, intercept::types::game_value& value_) {
-    // Handle signals
+    // Handle different signal types
+    if (signal_name_ == "execute") {
+        // Direct code execution
+        // value_ should be a string containing Lua code
+        if (value_.type_enum() == intercept::types::game_data_type::STRING) {
+            std::string code = static_cast<std::string>(value_);
+            execute_lua_code(code, intercept::types::game_value());
+        } else {
+            intercept::sqf::diag_log("Error: 'execute' signal expects string data");
+        }
+    }
+    else if (signal_name_ == "execute_with_data") {
+        // Code execution with data
+        // value_ should be an array: [code, data]
+        if (value_.type_enum() == intercept::types::game_data_type::ARRAY) {
+            auto& array = value_.to_array();
+            if (array.size() >= 2 && array[0].type_enum() == intercept::types::game_data_type::STRING) {
+                std::string code = static_cast<std::string>(array[0]);
+                execute_lua_code(code, array[1]);
+            }
+        }
+    }
+    else if (signal_name_ == "process_queue") {
+        // Process a queue of Lua code
+        process_lua_queue(value_);
+    }
+    else if (signal_name_ == "reset") {
+        // Reset the Lua state
+        std::lock_guard<std::mutex> lock(g_lua_mutex);
+        g_lua_state.reset();
+        initialize_lua_state();
+        intercept::sqf::diag_log("Lua state reset");
+    }
+    else {
+        intercept::sqf::diag_log("Unknown signal: " + signal_name_);
+    }
 }
 
 // DLL entry point

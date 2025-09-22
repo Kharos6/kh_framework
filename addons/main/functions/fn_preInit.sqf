@@ -6,6 +6,7 @@ KH_var_missionLoaded = false;
 KH_var_jip = false;
 KH_var_playerUnit = objNull;
 KH_var_cachedLuaFunctions = createHashMap;
+KH_var_queuedLuaExecutions = [];
 KH_var_remoteExecCommandsBlacklist = createHashMap;
 KH_var_remoteExecFunctionsBlacklist = createHashMap;
 KH_var_remoteExecCommandsJipBlacklist = createHashMap;
@@ -185,17 +186,6 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 };
 
 addMissionEventHandler [
-	"ExtensionCallback",
-	{
-		params ["_name", "_function", "_data"];
-
-		if (_name isEqualTo "kh_framework") then {
-			[_data call KH_fnc_parseValue, [_function, false] call KH_fnc_parseFunction, clientOwner, true] call KH_fnc_callParsedFunction;
-		};
-	}
-];
-
-addMissionEventHandler [
 	"EachFrame", 
 	{
 		if (KH_var_temporalExecutionStackAdditions isNotEqualTo []) then {
@@ -228,7 +218,7 @@ addMissionEventHandler [
 					}
 					else {
 						_x set [4, systemTime joinString ""];
-						[[systemTime joinString "", " - ", _totalDelta] joinString ""] call KH_fnc_mathOperation;
+						[[systemTime joinString "", _totalDelta], "local input1, input2 = ... return(input1 - input2)"] call KH_fnc_luaOperation;
 					};
 
 					_x set [7, _args call _function];
@@ -243,7 +233,7 @@ addMissionEventHandler [
 					}
 					else {
 						_x set [4, systemTime joinString ""];
-						[[systemTime joinString "", " - ", _totalDelta] joinString ""] call KH_fnc_mathOperation;
+						[[systemTime joinString "", _totalDelta], "local input1, input2 = ... return(input1 - input2)"] call KH_fnc_luaOperation;
 					};
 
 					_x set [7, _args call _function];
@@ -315,6 +305,8 @@ if isServer then {
 	publicVariable "KH_var_adminMachine";
 	KH_var_allMachines = [2];
 	publicVariable "KH_var_allMachines";
+	KH_var_allIdMachines = createHashMap;
+	publicVariable "KH_var_allIdMachines";
 	KH_var_allCuratorMachines = [];
 	publicVariable "KH_var_allCuratorMachines";
 	KH_var_allHeadlessMachines = [];
@@ -452,7 +444,7 @@ if isServer then {
 											};
 										}
 										else {
-											if (isNil {KH_var_allPlayerIdMachines get _x;}) then {
+											if (isNil {KH_var_allIdMachines get _x;}) then {
 												_condition = false;
 											};
 										};
@@ -506,7 +498,7 @@ if isServer then {
 														};
 													}
 													else {
-														if (isNil {KH_var_allPlayerIdMachines get _x;}) then {
+														if (isNil {KH_var_allIdMachines get _x;}) then {
 															_condition = false;
 															break;
 														};
@@ -609,6 +601,8 @@ if isServer then {
 					publicVariable "KH_var_allPlayerUidMachines";
 					KH_var_allPlayerIdMachines set [_id, _machineId];
 					publicVariable "KH_var_allPlayerIdMachines";
+					KH_var_allIdMachines set [_id, _machineId];
+					publicVariable "KH_var_allIdMachines";
 					missionNamespace setVariable ["KH_var_steamId", _uid, _machineId];
 					missionNamespace setVariable ["KH_var_directPlayId", _directPlayId, _machineId];
 					break;
@@ -642,6 +636,8 @@ if isServer then {
 			{
 				if ((_x getUserInfo 1) isEqualTo _machineId) then {
 					_id = _x getUserInfo 0;
+					KH_var_allIdMachines set [_id, _machineId];
+					publicVariable "KH_var_allIdMachines";
 					KH_var_allHeadlessIdMachines set [_id, _machineId];
 					publicVariable "KH_var_allHeadlessIdMachines";
 					break;
@@ -776,6 +772,10 @@ if isServer then {
 		{
 			params ["_entity"];
 			KH_var_allEntities pushBackUnique _entity;
+
+			if (alive _entity) then {
+				KH_var_allLivingEntities pushBackUnique _entity;
+			};
 		}
 	];
 
@@ -830,7 +830,11 @@ if isServer then {
 				if ([missionNamespace getVariable _x, [_entity]] call KH_fnc_deleteArrayElements) then {
 					publicVariable _x;
 				};
-			} forEach ["KH_var_allPlayerUnits", "KH_var_jipPlayerUnits", "KH_var_initialPlayerUnits", "KH_var_allHeadlessUnits", "KH_var_allEntities", "KH_var_allLivingEntities", "KH_var_allDeadEntities"];
+			} forEach ["KH_var_allPlayerUnits", "KH_var_jipPlayerUnits", "KH_var_initialPlayerUnits", "KH_var_allHeadlessUnits"];
+
+			{
+				[missionNamespace getVariable _x, [_entity]] call KH_fnc_deleteArrayElements;
+			} forEach ["KH_var_allEntities", "KH_var_allLivingEntities", "KH_var_allDeadEntities"];
 		}
 	];
 
@@ -872,6 +876,8 @@ if isServer then {
 					"KH_var_initialPlayerMachines"
 				];
 
+				KH_var_allIdMachines deleteAt _id;
+				publicVariable "KH_var_allIdMachines";
 				KH_var_allPlayerUidMachines deleteAt _uid;
 				publicVariable "KH_var_allPlayerUidMachines";
 				KH_var_allPlayerIdMachines deleteAt _id;
@@ -897,6 +903,8 @@ if isServer then {
 						"KH_var_allHeadlessMachines"
 					];
 
+					KH_var_allIdMachines deleteAt _id;
+					publicVariable "KH_var_allIdMachines";
 					KH_var_allHeadlessIdMachines deleteAt _id;
 					publicVariable "KH_var_allHeadlessIdMachines";
 				};
@@ -924,38 +932,6 @@ if hasInterface then {
 	KH_fnc_playerRespawnInit = {};
 	KH_fnc_playerSwitchInit = {};
 	KH_fnc_playerMissionEndInit = {};
-
-	addMissionEventHandler [
-		"PlayerViewChanged", 
-		{
-			KH_var_cameraType = if !(isNull curatorCamera) then {
-				"ZEUS";
-			}
-			else {
-				if !(isNull focusOn) then {
-					if (focusOn isNotEqualTo player) then {
-						if !(isNull cameraOn) then {
-							["REMOTE_VEHICLE_", cameraView] joinString "";
-						}
-						else {
-							["REMOTE_", cameraView] joinString "";
-						};
-					}
-					else {
-						if !(isNull cameraOn) then {
-							["VEHICLE_", cameraView] joinString "";
-						}
-						else {
-							cameraView;
-						};
-					};
-				}
-				else {
-					"CAMERA";
-				};
-			};
-		}
-	];
 
 	[
 		"KH Framework", 

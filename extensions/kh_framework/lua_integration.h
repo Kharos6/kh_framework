@@ -235,6 +235,10 @@ static int lua_inject_variable(lua_State* L, lua_variable_t* var);
 static int lua_table_to_arma_recursive(lua_State* L, int stack_index, char** buffer, 
                                               size_t* buffer_size, size_t* pos, int depth);
 static int lua_is_array(lua_State* L, int stack_index);
+static int kh_process_lua_clear_variables_operation(char* output, int output_size, 
+                                                   const char** argv, int argc);
+static int kh_process_lua_compile_operation(char* output, int output_size, 
+                                           const char** argv, int argc);
 
 /* Initialize function storage with hash table */
 static int lua_init_function_storage(void) {
@@ -1646,6 +1650,274 @@ static int lua_c_delete_khdata_file(lua_State* L) {
     return 2;
 }
 
+/* Lua-callable function: CryptoOperation(type, data) */
+static int lua_c_crypto_operation(lua_State* L) {
+    int argc = lua_gettop(L);
+    if (argc != 2) {
+        if (lua_checkstack(L, 1)) {
+            lua_pushnil(L);
+            lua_pushstring(L, "REQUIRES 2 ARGUMENTS");
+        }
+        return 2;
+    }
+    
+    if (!lua_checkstack(L, 2)) {
+        return 0;
+    }
+    
+    const char* type = lua_tostring(L, 1);
+    const char* data = lua_tostring(L, 2);
+    
+    if (!type || !data) {
+        lua_pushnil(L);
+        lua_pushstring(L, "INVALID PARAMETERS");
+        return 2;
+    }
+    
+    /* Allocate output buffer */
+    char output[1024];
+    output[0] = '\0';
+    
+    /* Call the existing crypto operation */
+    const char* argv[2] = {type, data};
+    int result = kh_process_crypto_operation(output, sizeof(output), argv, 2);
+    
+    if (result == 0) {
+        /* Success */
+        lua_pushstring(L, output);
+        lua_pushnil(L);
+    } else {
+        /* Error */
+        lua_pushnil(L);
+        lua_pushstring(L, output);
+    }
+    
+    return 2;
+}
+
+/* Lua-callable function: BinarizeKHData(filename) */
+static int lua_c_binarize_khdata(lua_State* L) {
+    int argc = lua_gettop(L);
+    if (argc != 1) {
+        if (lua_checkstack(L, 1)) {
+            lua_pushboolean(L, 0);
+            lua_pushstring(L, "REQUIRES 1 ARGUMENT");
+        }
+        return 2;
+    }
+    
+    if (!lua_checkstack(L, 2)) {
+        return 0;
+    }
+    
+    const char* filename = lua_tostring(L, 1);
+    
+    if (!filename) {
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "INVALID PARAMETER");
+        return 2;
+    }
+    
+    /* Allocate output buffer */
+    char output[1024];
+    output[0] = '\0';
+    
+    /* Call the existing binarize function */
+    int result = kh_binarize_khdata(filename, output, sizeof(output));
+    
+    if (result == 0) {
+        /* Success */
+        lua_pushboolean(L, 1);
+        lua_pushstring(L, output);
+    } else {
+        /* Error */
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, output);
+    }
+    
+    return 2;
+}
+
+/* Lua-callable function: UnbinarizeKHData(filename) */
+static int lua_c_unbinarize_khdata(lua_State* L) {
+    int argc = lua_gettop(L);
+    if (argc != 1) {
+        if (lua_checkstack(L, 1)) {
+            lua_pushboolean(L, 0);
+            lua_pushstring(L, "REQUIRES 1 ARGUMENT");
+        }
+        return 2;
+    }
+    
+    if (!lua_checkstack(L, 2)) {
+        return 0;
+    }
+    
+    const char* filename = lua_tostring(L, 1);
+    
+    if (!filename) {
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "INVALID PARAMETER");
+        return 2;
+    }
+    
+    /* Allocate output buffer */
+    char output[1024];
+    output[0] = '\0';
+    
+    /* Call the existing unbinarize function */
+    int result = kh_unbinarize_khdata(filename, output, sizeof(output));
+    
+    if (result == 0) {
+        /* Success */
+        lua_pushboolean(L, 1);
+        lua_pushstring(L, output);
+    } else {
+        /* Error */
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, output);
+    }
+    
+    return 2;
+}
+
+/* Lua-callable function: GenerateRandomString(length, include_numbers, include_letters, include_symbols) */
+static int lua_c_generate_random_string(lua_State* L) {
+    int argc = lua_gettop(L);
+    if (argc < 1 || argc > 4) {
+        if (lua_checkstack(L, 1)) {
+            lua_pushnil(L);
+            lua_pushstring(L, "REQUIRES 1-4 ARGUMENTS");
+        }
+        return 2;
+    }
+    
+    if (!lua_checkstack(L, 2)) {
+        return 0;
+    }
+    
+    /* Get length */
+    if (!lua_isnumber(L, 1)) {
+        lua_pushnil(L);
+        lua_pushstring(L, "LENGTH MUST BE A NUMBER");
+        return 2;
+    }
+    
+    int length = (int)lua_tointeger(L, 1);
+    if (length <= 0 || length > KH_MAX_OUTPUT_SIZE - 1) {
+        lua_pushnil(L);
+        lua_pushstring(L, "INVALID LENGTH");
+        return 2;
+    }
+    
+    /* Get boolean flags with defaults */
+    const char* argv[4];
+    char length_str[32];
+    
+    _snprintf_s(length_str, sizeof(length_str), _TRUNCATE, "%d", length);
+    argv[0] = length_str;
+    
+    /* Default to all character types if not specified */
+    argv[1] = (argc >= 2 && lua_isboolean(L, 2)) ? (lua_toboolean(L, 2) ? "true" : "false") : "true";
+    argv[2] = (argc >= 3 && lua_isboolean(L, 3)) ? (lua_toboolean(L, 3) ? "true" : "false") : "true";
+    argv[3] = (argc >= 4 && lua_isboolean(L, 4)) ? (lua_toboolean(L, 4) ? "true" : "false") : "true";
+    
+    /* Allocate output buffer */
+    char* output = (char*)malloc(length + 2);
+    if (!output) {
+        lua_pushnil(L);
+        lua_pushstring(L, "MEMORY ALLOCATION FAILED");
+        return 2;
+    }
+    
+    /* Call the existing function */
+    int result = kh_process_random_string_generation(output, length + 1, argv, 4);
+    
+    if (result == 0) {
+        /* Success */
+        lua_pushstring(L, output);
+        lua_pushnil(L);
+    } else {
+        /* Error */
+        lua_pushnil(L);
+        lua_pushstring(L, output);
+    }
+    
+    free(output);
+    return 2;
+}
+
+/* Lua-callable function: ClearLuaVariables() - alias for compatibility */
+static int lua_c_clear_lua_variables(lua_State* L) {
+    char output[256];
+    output[0] = '\0';
+    
+    int result = kh_process_lua_clear_variables_operation(output, sizeof(output), NULL, 0);
+    
+    if (!lua_checkstack(L, 2)) {
+        return 0;
+    }
+    
+    if (result == 0) {
+        /* Parse the output to extract counts */
+        unsigned int cleared_count = 0;
+        size_t memory_freed = 0;
+        if (sscanf(output, "[\"SUCCESS\",%u,%zu]", &cleared_count, &memory_freed) == 2) {
+            lua_pushboolean(L, 1);
+            lua_pushinteger(L, cleared_count);
+            lua_pushinteger(L, (lua_Integer)memory_freed);
+            return 3;
+        }
+        lua_pushboolean(L, 1);
+        return 1;
+    } else {
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, output);
+        return 2;
+    }
+}
+
+/* Lua-callable function: CompileFunction(code, function_name) */
+static int lua_c_compile_function(lua_State* L) {
+    int argc = lua_gettop(L);
+    if (argc < 1 || argc > 2) {
+        if (lua_checkstack(L, 1)) {
+            lua_pushboolean(L, 0);
+            lua_pushstring(L, "REQUIRES 1-2 ARGUMENTS");
+        }
+        return 2;
+    }
+    
+    const char* code = lua_tostring(L, 1);
+    const char* function_name = (argc >= 2) ? lua_tostring(L, 2) : NULL;
+    
+    if (!code) {
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "INVALID CODE");
+        return 2;
+    }
+    
+    /* Prepare arguments for the compile operation */
+    const char* argv[2];
+    argv[0] = code;
+    argv[1] = function_name;
+    
+    char output[1024];
+    output[0] = '\0';
+    
+    int result = kh_process_lua_compile_operation(output, sizeof(output), argv, argc);
+    
+    if (result == 0) {
+        lua_pushboolean(L, 1);
+        lua_pushstring(L, output);
+    } else {
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, output);
+    }
+    
+    return 2;
+}
+
 /* LuaClearVariables operation - Clear all persistent Lua variables */
 static int kh_process_lua_clear_variables_operation(char* output, int output_size, 
                                                    const char** argv, int argc) {
@@ -1926,6 +2198,13 @@ static int lua_init_turbo_state(lua_State* L) {
         {"DeleteKHDataVariable", lua_c_delete_khdata_variable},
         {"DeleteKHDataFile", lua_c_delete_khdata_file},
         {"FlushKHData", lua_c_flush_khdata},
+        {"CryptoOperation", lua_c_crypto_operation},
+        {"BinarizeKHData", lua_c_binarize_khdata},
+        {"UnbinarizeKHData", lua_c_unbinarize_khdata},
+        {"GenerateRandomString", lua_c_generate_random_string},
+        {"ClearLuaVariables", lua_c_clear_lua_variables},
+        {"LuaClearVariables", lua_c_clear_lua_variables},
+        {"CompileFunction", lua_c_compile_function},
         {"print", lua_secure_print_fast},
         {NULL, NULL}
     };
@@ -2875,17 +3154,6 @@ static char* lua_format_result_from_position(lua_State* L, int start_pos, int co
         return output;
     }
     
-    /* Ensure space for opening bracket */
-    if (output_size < 2) {
-        output_size = 256;
-        char* new_output = (char*)realloc(output, output_size);
-        if (!new_output) {
-            free(output);
-            return NULL;
-        }
-        output = new_output;
-    }
-    
     /* Start with opening bracket */
     output[pos++] = '[';
     
@@ -2907,202 +3175,11 @@ static char* lua_format_result_from_position(lua_State* L, int start_pos, int co
             output[pos++] = ',';
         }
         
-        /* Ensure space for [type, value] structure */
-        if (pos + 20 >= output_size) {
-            output_size *= 2;
-            char* new_output = (char*)realloc(output, output_size);
-            if (!new_output) {
-                free(output);
-                return NULL;
-            }
-            output = new_output;
+        /* Add value directly without type wrapping */
+        if (!lua_value_to_arma_string(L, stack_index, &output, &output_size, &pos, 0)) {
+            free(output);
+            return NULL;
         }
-        
-        /* Start [type, value] pair */
-        output[pos++] = '[';
-        
-        /* Determine type and add type string */
-        int lua_type_val = lua_type(L, stack_index);
-        const char* type_str = NULL;
-        
-        switch (lua_type_val) {
-            case LUA_TNIL:
-                type_str = "\"NIL\"";
-                break;
-            case LUA_TBOOLEAN:
-                type_str = "\"BOOL\"";
-                break;
-            case LUA_TNUMBER:
-                type_str = "\"SCALAR\"";
-                break;
-            case LUA_TSTRING:
-                type_str = "\"STRING\"";
-                break;
-            case LUA_TTABLE:
-                if (lua_is_array(L, stack_index)) {
-                    type_str = "\"ARRAY\"";
-                } else {
-                    type_str = "\"HASHMAP\"";
-                }
-                break;
-            default:
-                type_str = "\"UNKNOWN\"";
-                break;
-        }
-        
-        /* Add type string */
-        size_t type_len = strlen(type_str);
-        
-        /* Ensure space for type string and comma */
-        if (pos + type_len + 2 >= output_size) {
-            output_size = output_size * 2 + type_len + 100;
-            char* new_output = (char*)realloc(output, output_size);
-            if (!new_output) {
-                free(output);
-                return NULL;
-            }
-            output = new_output;
-        }
-        
-        memcpy(output + pos, type_str, type_len);
-        pos += type_len;
-        output[pos++] = ',';
-        
-        /* Add value based on type */
-        switch (lua_type_val) {
-            case LUA_TNIL:
-                if (pos + 4 >= output_size) {
-                    output_size *= 2;
-                    char* new_output = (char*)realloc(output, output_size);
-                    if (!new_output) {
-                        free(output);
-                        return NULL;
-                    }
-                    output = new_output;
-                }
-                memcpy(output + pos, "nil", 3);
-                pos += 3;
-                break;
-                
-            case LUA_TBOOLEAN: {
-                const char* bool_str = lua_toboolean(L, stack_index) ? "true" : "false";
-                size_t bool_len = strlen(bool_str);
-                if (pos + bool_len + 1 >= output_size) {
-                    output_size = output_size * 2 + bool_len + 10;
-                    char* new_output = (char*)realloc(output, output_size);
-                    if (!new_output) {
-                        free(output);
-                        return NULL;
-                    }
-                    output = new_output;
-                }
-                memcpy(output + pos, bool_str, bool_len);
-                pos += bool_len;
-                break;
-            }
-                
-            case LUA_TNUMBER: {
-                double num = lua_tonumber(L, stack_index);
-                char num_buffer[64];
-                int num_len;
-                
-                if (isnan(num) || isinf(num)) {
-                    num_buffer[0] = '0';
-                    num_len = 1;
-                } else if (num == floor(num) && num >= -2147483648.0 && num <= 2147483647.0) {
-                    num_len = _snprintf_s(num_buffer, sizeof(num_buffer), _TRUNCATE, "%.0f", num);
-                } else {
-                    num_len = _snprintf_s(num_buffer, sizeof(num_buffer), _TRUNCATE, "%.15g", num);
-                }
-                
-                if (num_len > 0) {
-                    if (pos + num_len + 1 >= output_size) {
-                        output_size = output_size * 2 + num_len + 10;
-                        char* new_output = (char*)realloc(output, output_size);
-                        if (!new_output) {
-                            free(output);
-                            return NULL;
-                        }
-                        output = new_output;
-                    }
-                    memcpy(output + pos, num_buffer, num_len);
-                    pos += num_len;
-                }
-                break;
-            }
-                
-            case LUA_TSTRING: {
-                const char* str = lua_tostring(L, stack_index);
-                if (str) {
-                    size_t str_len = strlen(str);
-                    /* Need space for quotes and potential doubling of all quotes */
-                    size_t max_needed = str_len * 2 + 3;
-                    
-                    if (pos + max_needed >= output_size) {
-                        output_size = output_size * 2 + max_needed;
-                        char* new_output = (char*)realloc(output, output_size);
-                        if (!new_output) {
-                            free(output);
-                            return NULL;
-                        }
-                        output = new_output;
-                    }
-                    
-                    output[pos++] = '"';
-                    
-                    /* Escape quotes in string */
-                    for (size_t j = 0; j < str_len; j++) {
-                        if (str[j] == '"') {
-                            output[pos++] = '"';
-                            output[pos++] = '"';
-                        } else {
-                            output[pos++] = str[j];
-                        }
-                    }
-                    
-                    output[pos++] = '"';
-                }
-                break;
-            }
-                
-            case LUA_TTABLE: {
-                /* Convert table to string representation using dynamic allocation */
-                if (!lua_table_to_arma_recursive(L, stack_index, &output, &output_size, &pos, 0)) {
-                    free(output);
-                    return NULL;
-                }
-                break;
-            }
-                
-            default:
-                /* Add "unknown" */
-                const char* unknown_str = "\"unknown\"";
-                size_t unknown_len = strlen(unknown_str);
-                if (pos + unknown_len + 1 >= output_size) {
-                    output_size = output_size * 2 + unknown_len + 10;
-                    char* new_output = (char*)realloc(output, output_size);
-                    if (!new_output) {
-                        free(output);
-                        return NULL;
-                    }
-                    output = new_output;
-                }
-                memcpy(output + pos, unknown_str, unknown_len);
-                pos += unknown_len;
-                break;
-        }
-        
-        /* Close [type, value] pair */
-        if (pos + 2 >= output_size) {
-            output_size *= 2;
-            char* new_output = (char*)realloc(output, output_size);
-            if (!new_output) {
-                free(output);
-                return NULL;
-            }
-            output = new_output;
-        }
-        output[pos++] = ']';
     }
     
     /* Close main array */
@@ -3477,7 +3554,7 @@ static int kh_process_lua_compile_operation(char* output, int output_size,
             }
             
             int wrapper_result = _snprintf_s(test_wrapper, wrapper_len, _TRUNCATE, 
-                                            "function %s()\n%s\nend", clean_name, actual_code);
+                                            "function %s(...)\n%s\nend", clean_name, actual_code);
             
             if (wrapper_result < 0) {
                 free(clean_name);

@@ -4,6 +4,7 @@ class CfgLuaFunctions
 	{
 		prefix = "KH";
 		path = "\x\kh\addons\main\lua";
-		class testLua {};
+		class arraySum {};
+		class testLua {preInit = 1;};
 	};
 };

@@ -23,7 +23,8 @@ class CfgPatches
 		requiredVersion = 1;
 		requiredAddons[] = 
 		{
-			"cba_main"
+			"cba_main",
+			"Intercept_Core"
 		};
 		skipWhenMissingDependencies = 1;
 	};

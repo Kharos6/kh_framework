@@ -108,7 +108,7 @@ if exist output_x64\*.pdb del output_x64\*.pdb
 
 REM Build the DLL with LuaJIT linked
 echo Compiling kh_framework_x64.dll with LuaJIT...
-cl /LD /O2 /Ox /Ot /GL /MD /TC ^
+cl /LD /O2 /Ox /Ot /GL /MT /TC ^
    /DLUAJIT_ENABLE_LUA52COMPAT ^
    /Iluajit\include ^
    kh_framework.c ^

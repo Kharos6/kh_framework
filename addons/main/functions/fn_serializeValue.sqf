@@ -26,7 +26,6 @@ _value = switch _type do {
 
         [
             _value,
-            [],
             {
                 if !(isNil "_x") then {
                     if !(_x isEqualTypeAny [true, 0, ""]) then {
@@ -53,7 +52,6 @@ _value = switch _type do {
 
         [
             _value,
-            [],
             {
                 if !(isNil "_x") then {
                     if !(_x isEqualTypeAny [true, 0, ""]) then {
@@ -247,10 +245,7 @@ _value = switch _type do {
     case "TYPED_HASHMAP": {
         [
             _value,
-            [],
             {
-                _args params ["_array"];
-
                 if ((_forEachIndex % 2) isEqualTo 0) then {
                     [_x, _array select (_forEachIndex + 1)] call KH_fnc_serializeValue;
                 };

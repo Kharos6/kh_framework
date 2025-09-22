@@ -18,6 +18,11 @@ if !_verboseFormat then {
 				true,
 				false
 			] call KH_fnc_execute;
+
+			diag_log (text ([_header, _message] joinString ""));
+		}
+		else {
+			diag_log (text ([_header, _message] joinString ""));
 		};
 	};
 }
@@ -47,6 +52,19 @@ else {
 				true,
 				false
 			] call KH_fnc_execute;
+
+			diag_log (text _header);
+			
+			{
+				diag_log (text (["   ", _x] joinString ""));
+			} forEach _message;
+		}
+		else {
+			diag_log (text _header);
+			
+			{
+				diag_log (text (["   ", _x] joinString ""));
+			} forEach _message;
 		};
 	};
 };

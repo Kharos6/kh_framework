@@ -27,9 +27,21 @@ params [["_unit", objNull, [objNull]]];
 		getUnitFreefallInfo _unit,
 		getAnimSpeedCoef _unit,
 		getCustomAimCoef _unit,
+		getSuppression _unit,
 		getUnitLoadout _unit,
 		getAllUnitTraits _unit,
 		weaponState _unit,
+		call {
+			private _zeroing = [];
+
+			{
+				private _weapon = _x select 2;
+				private _muzzle = _x select 3;
+				_zeroing pushBack [_weapon, _muzzle, _unit currentZeroing [_weapon, _muzzle]];
+			} forEach (_unit weaponsInfo ["", false]);
+
+			_zeroing;			
+		},
 		currentThrowable _unit,
 		getPosATL _unit,
 		vectorDir _unit,

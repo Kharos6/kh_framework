@@ -12,4 +12,5 @@
 #include "\x\kh\addons\main\cfgRespawnTemplates.hpp"
 #include "\x\kh\addons\main\cfgVehicleClasses.hpp"
 #include "\x\kh\addons\main\cfgVehicles.hpp"
+#include "\x\kh\addons\main\intercept.hpp"
 #include "\x\kh\addons\main\resources.hpp"

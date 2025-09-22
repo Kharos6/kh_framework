@@ -194,10 +194,7 @@ switch _parsingType do {
             else {
                 _value;
             },
-            [],
             {
-                _args params ["_array"];
-
                 if ((_forEachIndex % 2) isEqualTo 0) then {
                     [_x, _array select (_forEachIndex + 1)] call KH_fnc_parseValue;
                 };
@@ -216,10 +213,7 @@ switch _parsingType do {
             else {
                 createHashMapFromArray _value;
             },
-            [],
             {
-                _args params ["_array"];
-
                 if ((_forEachIndex % 2) isEqualTo 0) then {
                     [_x, _array select (_forEachIndex + 1)] call KH_fnc_parseValue;
                 };

@@ -1,3 +1,10 @@
+local inputBoolean, inputNumber, inputString, inputArray, inputHashMap, inputNil = ...
+if inputBoolean == nil then inputBoolean = false end
+inputNumber = inputNumber or 0
+inputString = inputString or ""
+inputArray = inputArray or {}
+inputHashMap = inputHashMap or {}
+
 local function factorial(n)
     if n <= 1 then
         return 1
@@ -41,22 +48,22 @@ results[11] = 1.23e10
 results[12] = 1.23e-10
 results[13] = math.huge
 results[14] = -math.huge
-results[15] = ''
-results[16] = 'hello'
-results[17] = 'world'
-results[18] = 'Hello, World!'
-results[19] = 'Line1\nLine2\tTabbed'
-results[20] = 'Special chars: !@#$%^&*()'
-results[21] = 'Unicode: αβγδε'
-results[22] = string.rep('x', 100)
-results[23] = 'hello' .. '_' .. 'world'
-results[24] = string.upper('lowercase')
-results[25] = string.lower('UPPERCASE')
-results[26] = string.sub('substring', 4, 6)
-results[27] = string.len('length test')
-results[28] = string.reverse('reverse')
+results[15] = ""
+results[16] = "hello"
+results[17] = "world"
+results[18] = "Hello, World!"
+results[19] = "Line1\nLine2\tTabbed"
+results[20] = "Special chars: !@#$%^&*()"
+results[21] = "Unicode: αβγδε"
+results[22] = string.rep("x", 100)
+results[23] = "hello" .. "_" .. "world"
+results[24] = string.upper("lowercase")
+results[25] = string.lower("UPPERCASE")
+results[26] = string.sub("substring", 4, 6)
+results[27] = string.len("length test")
+results[28] = string.reverse("reverse")
 results[29] = tostring(12345)
-results[30] = tonumber('67890')
+results[30] = tonumber("67890")
 results[31] = 10 + 5
 results[32] = 20 - 8
 results[33] = 6 * 7
@@ -87,14 +94,14 @@ results[57] = {}
 results[58] = {1}
 results[59] = {1, 2, 3}
 results[60] = {1, 2, 3, 4, 5}
-results[61] = {'a', 'b', 'c'}
+results[61] = {"a", "b", "c"}
 results[62] = {true, false, nil}
-results[63] = {1, 'two', 3.0, true, nil}
+results[63] = {1, "two", 3.0, true, nil}
 results[64] = {nested = {value = 42}}
 results[65] = {{1, 2}, {3, 4}}
 results[66] = {x = 10, y = 20, z = 30}
-results[67] = {name = 'test', value = 123, active = true}
-results[68] = {[1] = 'first', [2] = 'second', key = 'value'}
+results[67] = {name = "test", value = 123, active = true}
+results[68] = {[1] = "first", [2] = "second", key = "value"}
 
 local temp_array = {}
 
@@ -146,10 +153,10 @@ results[79] = prime_count
 
 local mixed_operations = {
     math.floor(math.random() * 1000),
-    string.format('%.2f', 3.14159),
-    (#'test string'),
+    string.format("%.2f", 3.14159),
+    (#"test string"),
     type(42),
-    type('string'),
+    type("string"),
     type(true),
     type({}),
     type(nil)
@@ -158,22 +165,22 @@ local mixed_operations = {
 results[80] = mixed_operations
 
 if 5 > 3 then
-    results[81] = 'condition true'
+    results[81] = "condition true"
 else
-    results[81] = 'condition false'
+    results[81] = "condition false"
 end
 
 local switch_test = 2
 local switch_result
 
 if switch_test == 1 then
-    switch_result = 'one'
+    switch_result = "one"
 elseif switch_test == 2 then
-    switch_result = 'two'
+    switch_result = "two"
 elseif switch_test == 3 then
-    switch_result = 'three'
+    switch_result = "three"
 else
-    switch_result = 'other'
+    switch_result = "other"
 end
 
 results[82] = switch_result
@@ -189,14 +196,14 @@ end
 
 results[83] = nested_loop_result
 
-local string_array = {'apple', 'banana', 'cherry', 'date'}
-local concatenated = ''
+local string_array = {"apple", "banana", "cherry", "date"}
+local concatenated = ""
 
 for k, v in ipairs(string_array) do
     concatenated = concatenated .. v
 
     if k < #string_array then
-        concatenated = concatenated .. ', '
+        concatenated = concatenated .. ", "
     end
 end
 
@@ -215,27 +222,27 @@ end
 
 results[85] = keys
 results[86] = values
-results[87] = string.match('abc123def', '%d+')
-results[88] = string.gsub('hello world', 'world', 'lua')
-results[89] = string.find('testing', 'st')
+results[87] = string.match("abc123def", "%d+")
+results[88] = string.gsub("hello world", "world", "lua")
+results[89] = string.find("testing", "st")
 
 local complex_table = {
     metadata = {
-        version = '1.0',
-        author = 'test',
+        version = "1.0",
+        author = "test",
         created = 1234567890
     },
 
     data = {
-        {id = 1, name = 'item1', value = 100},
-        {id = 2, name = 'item2', value = 200},
-        {id = 3, name = 'item3', value = 300}
+        {id = 1, name = "item1", value = 100},
+        {id = 2, name = "item2", value = 200},
+        {id = 3, name = "item3", value = 300}
     },
 
     settings = {
         enabled = true,
         threshold = 0.75,
-        options = {'opt1', 'opt2', 'opt3'}
+        options = {"opt1", "opt2", "opt3"}
     }
 }
 
@@ -254,9 +261,9 @@ end
 results[91] = matrix
 
 local type_conversion_tests = {
-    tonumber('123'),
-    tonumber('3.14'),
-    tonumber('invalid'),
+    tonumber("123"),
+    tonumber("3.14"),
+    tonumber("invalid"),
     tostring(456),
     tostring(true),
     tostring(nil)
@@ -275,7 +282,7 @@ results[93] = boundary_tests
 
 local empty_containers = {
     {},
-    '',
+    "",
     0,
     false,
     nil
@@ -311,7 +318,7 @@ for i = 1, 100 do
         index = i,
         square = i * i,
         cube = i * i * i,
-        text = 'item_' .. tostring(i)
+        text = "item_" .. tostring(i)
     }
 end
 
@@ -325,5 +332,16 @@ local final_validation = {
 }
 
 results[98] = final_validation
-results[99] = jit
-return {results, true, 1, 'string', {1, 2, 3}, {key1 = true, key2 = 2, key3 = 'value', key4 = {'A', 'B', 'C'}, key5 = {keyA = true, keyB = false}, key6 = nil}, nil}
+
+results[99] = {
+    inputBoolean,
+    inputNumber,
+    inputString,
+    inputArray,
+    inputHashMap,
+    inputNil
+}
+
+results[100] = jit
+
+return {results, true, 1, "string", {1, 2, 3}, {key1 = true, key2 = 2, key3 = "value", key4 = {"A", "B", "C"}, key5 = {keyA = true, keyB = false}, key6 = nil}, nil}

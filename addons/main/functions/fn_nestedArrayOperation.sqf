@@ -1,4 +1,4 @@
-params [["_array", [], [[], createHashMap]], "_arguments", ["_function", {}, [{}]], ["_layer", 0, [0]], ["_evaluateKeyValueArrays", false, [true]], ["_returnArray", [], [[]]], ["_breaker", "", [""]]];
+params [["_array", [], [[], createHashMap]], ["_function", {}, [{}]], ["_layer", 0, [0]], ["_evaluateKeyValueArrays", false, [true]], ["_returnArray", [], [[]]], ["_breaker", "", [""]]];
 
 if (_breaker isEqualTo "") then {
     _breaker = call KH_fnc_generateUid;
@@ -28,24 +28,24 @@ else {
             if ((count _x) isEqualTo 2) then {
                 if (((_x select 0) isEqualType []) && ((_x select 1) isEqualType [])) then {
                     _returnArray pushBack [];
-                    [_x, _arguments, _function, _layer + 1, _evaluateKeyValueArrays, _returnArray select -1, _breaker] call KH_fnc_nestedArrayOperation;
+                    [_x, _function, _layer + 1, _evaluateKeyValueArrays, _returnArray select -1, _breaker] call KH_fnc_nestedArrayOperation;
                 }
                 else {
-                    _returnArray pushBack (_arguments call _function);
+                    _returnArray pushBack (call _function);
                 };
             }
             else {
                 _returnArray pushBack [];
-                [_x, _arguments, _function, _layer + 1, _evaluateKeyValueArrays, _returnArray select -1, _breaker] call KH_fnc_nestedArrayOperation;
+                [_x, _function, _layer + 1, _evaluateKeyValueArrays, _returnArray select -1, _breaker] call KH_fnc_nestedArrayOperation;
             };
         }
         else {
             _returnArray pushBack [];
-            [_x, _arguments, _function, _layer + 1, _evaluateKeyValueArrays, _returnArray select -1, _breaker] call KH_fnc_nestedArrayOperation;
+            [_x, _function, _layer + 1, _evaluateKeyValueArrays, _returnArray select -1, _breaker] call KH_fnc_nestedArrayOperation;
         };
     }
     else {
-        _returnArray pushBack (_arguments call _function);
+        _returnArray pushBack (call _function);
     };
 } forEach _array;
 

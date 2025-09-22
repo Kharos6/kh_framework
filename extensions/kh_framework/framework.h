@@ -1301,8 +1301,14 @@ static int kh_validate_typed_array(const char* value) {
                     elem_bracket_depth--;
                 }
             } else {
+                /* Handle doubled quotes properly */
                 if (*ptr == string_quote) {
-                    in_string = 0;
+                    /* Check for doubled quote */
+                    if (*(ptr + 1) == string_quote) {
+                        ptr++; /* Skip second quote, stay in string */
+                    } else {
+                        in_string = 0;
+                    }
                 }
             }
             ptr++;

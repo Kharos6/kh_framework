@@ -1,2 +1,7 @@
-params [["_hashType", "", [""]], ["_string", "", [""]]];
-["kh_framework", _this, "CryptoOperation", false] call KH_fnc_callExtension;
+params [["_hashType", "", [""]], "_value"];
+
+if !(_value isEqualType "") then {
+    _value = (["", _value] call KH_fnc_serializeValue) select 1;
+};
+
+["kh_framework", [_hashType, _value], "CryptoOperation", false] call KH_fnc_callExtension;

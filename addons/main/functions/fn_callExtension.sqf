@@ -9,7 +9,7 @@ params [["_extension", "", [""]], ["_arguments", nil, [[]]], ["_function", "", [
     }
 )) params ["_result", "_returnCode", "_errorCode"];
 
-if ((_returnCode isEqualTo 1) || (_errorCode isEqualTo 1)) exitWith {
+if !(assert ((_returnCode isEqualTo 0) && (_errorCode isEqualTo 0))) exitWith {
     [
         "EXTENSION EXECUTION FAILURE:",
         [
@@ -24,7 +24,11 @@ if ((_returnCode isEqualTo 1) || (_errorCode isEqualTo 1)) exitWith {
         true
     ] call KH_fnc_log;
 
-    _result;
+    nil;
+};
+
+if ((_result select [0, 9]) isEqualTo "!SLICES:") then {
+    _result = [_result select [9]] call KH_fnc_sliceExtensionReturn;
 };
 
 if (_resultParsing isEqualTo false) exitWith {

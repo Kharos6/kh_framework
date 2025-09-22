@@ -52,9 +52,11 @@ _savedAttributes params [
 	"_unitFreefallInfo",
 	"_animSpeedCoef",
 	"_customAimCoef",
+	"_suppression",
 	"_loadout",
 	"_traits",
 	"_weaponState",
+	"_currentZeroing",
 	"_currentThrowable",
 	"_position",
 	"_vectorDir",
@@ -131,8 +133,10 @@ _savedAttributes params [
 		_forcedSpeed,
 		_captive,
 		_unitFreefallInfo,
+		_suppression,
 		_traits,
 		_weaponState,
+		_currentZeroing,
 		_currentThrowable,
 		_vectorDir,
 		_vectorUp,
@@ -161,8 +165,10 @@ _savedAttributes params [
 			"_forcedSpeed",
 			"_captive",
 			"_unitFreefallInfo",
+			"_suppression",
 			"_traits",
 			"_weaponState",
+			"_currentZeroing",
 			"_currentThrowable",
 			"_vectorDir",
 			"_vectorUp",
@@ -189,6 +195,7 @@ _savedAttributes params [
 		_unit forceSpeed _forcedSpeed;
 		_unit setCaptive _captive;
 		_unit setUnitFreefallHeight (_unitFreefallInfo select 2);
+		_unit setSuppression _suppression;
 		
 		{
 			_X params ["_name", "_value"];
@@ -197,6 +204,11 @@ _savedAttributes params [
 
 		_weaponState params ["_weapon", "_muzzle", "_firemode"];
 		_unit selectWeapon [_weapon, _muzzle, _fireMode];
+
+		{
+			_unit setWeaponZeroing _x;
+		} forEach _currentZeroing;
+
 		_unit selectThrowable (_currentThrowable select 1);
 		_unit setVectorDirAndUp [_vectorDir, _vectorUp];
 		_unit setVelocityModelSpace _velocityModelSpace;

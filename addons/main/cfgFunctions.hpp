@@ -10,7 +10,6 @@ class CfgFunctions
 			class addRemoteInteractionEntry {};
 			class addSelfInteractionEntry {};
 			class arma {};
-			class arrayOperation {};
 			class assignIdentificationCard {};
 			class assignParachute {};
 			class assignTerminal {};
@@ -41,6 +40,7 @@ class CfgFunctions
 			class entitySpawner {};
 			class equipableObject {};
 			class execute {};
+			class flushKhData {};
 			class fultonExtract {};
 			class generateRandomString {};
 			class generateUid {};
@@ -80,12 +80,12 @@ class CfgFunctions
 			class luaClearVariables {};
 			class luaCompile {};
 			class luaDeleteVariable {};
+			class luaExecution {};
 			class luaGetVariable {};
 			class luaOperation {};
 			class luaResetState {};
 			class luaSetVariable {};
 			class manageSimulatedInventory {};
-			class mathOperation {};
 			class moduleCameraSequence {};
 			class moduleDynamicDisguiseEquipment {};
 			class moduleEditTerrainObjects {};
@@ -143,7 +143,7 @@ class CfgFunctions
 			class setVariable {};
 			class setVehicleLoadout {};
 			class setVideoTexture {};
-			class sliceKhData {};
+			class sliceExtensionReturn {};
 			class suspendMission {};
 			class teleport {};
 			class testExtension {};
@@ -153,7 +153,6 @@ class CfgFunctions
 			class triggerCbaEvent {};
 			class unbinarizeKhData {};
 			class unconsciousSpectator {};
-			class vectorOperation {};
 			class vehicleSequence {};
 			class visualTrigger {};
 			class writeKhData {};

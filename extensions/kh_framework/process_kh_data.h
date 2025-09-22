@@ -86,29 +86,39 @@ static inline int kh_rebuild_hash_table(khdata_file_t* file) {
         return 1;
     }
     
-    kh_free_hash_table_info(&file->hash_info);
+    /* Save old hash table info */
+    kh_generic_hash_table_t old_hash_info = file->hash_info;
     
     uint32_t hash_table_size = kh_calculate_optimal_hash_size(file->variable_count);
     
     file->hash_info.entries = (kh_generic_hash_entry_t*)calloc(hash_table_size, sizeof(kh_generic_hash_entry_t));
-    if (!file->hash_info.entries) return 0;
+    if (!file->hash_info.entries) {
+        /* Restore old hash table on allocation failure */
+        file->hash_info = old_hash_info;
+        return 0;
+    }
     
     file->hash_info.size = hash_table_size;
     file->hash_info.used_count = 0;
     file->hash_info.deleted_count = 0;
     file->hash_info.needs_rebuild = 0;
     
+    /* Rebuild the hash table */
     for (int i = 0; i < file->variable_count; i++) {
         if (file->variables[i].name) {
             uint32_t name_hash = kh_hash_name_case_insensitive(file->variables[i].name);
             if (!kh_generic_hash_insert(file->hash_info.entries, hash_table_size, name_hash, i)) {
-                kh_free_hash_table_info(&file->hash_info);
+                /* Rebuild failed - restore old hash table */
+                free(file->hash_info.entries);
+                file->hash_info = old_hash_info;
                 return 0;
             }
             file->hash_info.used_count++;
         }
     }
     
+    /* Success - free old hash table */
+    free(old_hash_info.entries);
     return 1;
 }
 

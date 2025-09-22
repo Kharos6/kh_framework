@@ -109,34 +109,4 @@ struct RVExtensionGraphicsLockGuard {
 };
 #endif
 
-#ifdef _WIN32
-#define DLLEXPORT __declspec (dllexport)
-#define CALL_CONVENTION __stdcall
-#endif
-
-typedef int (CALL_CONVENTION *RVExtensionCallbackProc)(const char* name, const char* function, const char* data);
-typedef void (CALL_CONVENTION *RVExtensionRequestContextProc)(void);
-typedef void (CALL_CONVENTION *RVGetProjectionViewTransformProc)(struct ProjectionViewTransform* pvTransform);
-
-#ifdef _D3D11_CONSTANTS /* Only available with d3d11.h header */
-typedef struct RVExtensionGraphicsLockGuard* (CALL_CONVENTION *RVExtensionGLockProc)(void);
-typedef void (CALL_CONVENTION *RVExtensionGSetWHkProc)(int (CALL_CONVENTION *newHook)(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam));
-#endif
-
-/*--- Called by Engine on extension load */
-DLLEXPORT void CALL_CONVENTION RVExtensionVersion(char* output, unsigned int outputSize);
-/*--- STRING callExtension STRING */
-DLLEXPORT void CALL_CONVENTION RVExtension(char* output, unsigned int outputSize, const char* function);
-/*--- STRING callExtension ARRAY */
-DLLEXPORT int CALL_CONVENTION RVExtensionArgs(char* output, unsigned int outputSize, const char* function, const char** argv, unsigned int argc);
-/*--- Called by Engine on extension load to pass RVExtensionCallbackProc to it */
-DLLEXPORT void CALL_CONVENTION RVExtensionRegisterCallback(RVExtensionCallbackProc callbackProc);
-/*--- Request creation of UI element */
-DLLEXPORT int CALL_CONVENTION RVExtensionRequestUI(const char* uiClass, struct CExtensionControlInterface* interfaceStruct);
-
-/*--- Finds a game exported function by its name */
-static inline const void* FindRVFunction(const char* name) {
-    return (void*)GetProcAddress(GetModuleHandle(NULL), name);
-}
-
 #endif /* RV_EXTENSION_UTILS_H */

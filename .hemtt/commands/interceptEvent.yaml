@@ -1,18 +1,18 @@
 name: interceptEvent
 description: TODO.
 syntax:
-- call: !Binary ["", []]
+- call: !Binary [player, player]
   ret:
     - Boolean
     - TODO.
   params:
   - name: arg1
     description: TODO.
-    type: String
+    type: Object
   - name: arg2
     description: TODO.
-    type: Array
+    type: Object
 argument_loc: Local
 effect_loc: Local
 examples:
-- <sqf>arg1 interceptEvent arg2</sqf>
+- <sqf>object interceptEvent object</sqf>

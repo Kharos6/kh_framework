@@ -1,18 +1,18 @@
 name: interceptSignal
 description: TODO.
 syntax:
-- call: !Binary [[], []]
+- call: !Binary [player, player]
   ret:
     - Boolean
     - TODO.
   params:
   - name: arg1
     description: TODO.
-    type: Array
+    type: Object
   - name: arg2
     description: TODO.
-    type: Array
+    type: Object
 argument_loc: Local
 effect_loc: Local
 examples:
-- <sqf>array interceptSignal array</sqf>
+- <sqf>object interceptSignal object</sqf>

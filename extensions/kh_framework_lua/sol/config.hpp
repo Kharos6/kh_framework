@@ -27,7 +27,7 @@
 #ifndef SOL_SINGLE_CONFIG_HPP
 #define SOL_SINGLE_CONFIG_HPP
 
-#define SOL_USE_LUAJIT 1
+#define SOL_LUAJIT 1
 
 // beginning of sol/config.hpp
 

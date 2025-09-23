@@ -1,5 +1,5 @@
 @echo off
-echo Building 64-bit kh_framework DLL with LuaJIT (Simplified)...
+echo Building 64-bit kh_framework DLL...
 
 REM Setup Visual Studio 2019 x64 Native Tools environment
 echo Setting up Visual Studio 2019 x64 environment...
@@ -74,26 +74,6 @@ exit /b 1
 echo Visual Studio environment configured successfully.
 echo.
 
-REM Check for LuaJIT files
-echo Checking for LuaJIT files...
-if not exist "luajit\include\lua.h" (
-    echo ERROR: LuaJIT header files not found!
-    echo Please ensure LuaJIT headers are in: luajit\include\
-    echo Expected files:
-    echo   luajit\include\lua.h
-    echo   luajit\include\lualib.h
-    echo   luajit\include\lauxlib.h
-    pause
-    exit /b 1
-)
-
-if not exist "luajit\lib\lua51.lib" (
-    echo ERROR: LuaJIT library not found!
-    echo Please ensure LuaJIT library is at: luajit\lib\lua51.lib
-    pause
-    exit /b 1
-)
-
 REM Create output directory if it doesn't exist
 echo Creating output directory...
 if not exist "output_x64" mkdir output_x64
@@ -107,17 +87,14 @@ if exist output_x64\*.exp del output_x64\*.exp
 if exist output_x64\*.pdb del output_x64\*.pdb
 
 REM Build the DLL with LuaJIT linked
-echo Compiling kh_framework_x64.dll with LuaJIT...
+echo Compiling kh_framework_x64.dll
 cl /LD /O2 /Ox /Ot /GL /MT /TC ^
-   /DLUAJIT_ENABLE_LUA52COMPAT ^
-   /Iluajit\include ^
    kh_framework.c ^
    /Fe:output_x64\kh_framework_x64.dll ^
    /Fo:output_x64\ ^
    /Fd:output_x64\kh_framework_x64.pdb ^
    /link /MACHINE:X64 /OPT:REF /OPT:ICF /LTCG ^
    /IMPLIB:output_x64\kh_framework_x64.lib ^
-   /LIBPATH:luajit\lib lua51.lib ^
    shell32.lib ole32.lib user32.lib advapi32.lib
 
 REM Check if build was successful
@@ -128,12 +105,6 @@ if exist output_x64\kh_framework_x64.dll (
     echo ================================
     dir output_x64\kh_framework_x64.dll | find "kh_framework_x64.dll"
     echo.
-    echo KH Framework DLL with LuaJIT built successfully!
-    echo Output location: output_x64\kh_framework_x64.dll
-    echo.
-    echo IMPORTANT: You will need lua51.dll in the same directory as your DLL at runtime!
-    echo Copy lua51.dll to your Arma 3 directory or where kh_framework_x64.dll is used.
-    echo.
     echo File size:
     for %%I in (output_x64\kh_framework_x64.dll) do echo %%~zI bytes
 ) else (
@@ -142,10 +113,6 @@ if exist output_x64\kh_framework_x64.dll (
     echo BUILD FAILED!
     echo ================================
     echo Check the compiler output above for errors.
-    echo Common issues:
-    echo - Missing LuaJIT header files in luajit\include\
-    echo - Missing lua51.lib in luajit\lib\
-    echo - Linker errors due to missing dependencies
 )
 
 echo.

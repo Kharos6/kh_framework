@@ -1927,15 +1927,36 @@ static int kh_read_khdata_variable(const char* filename, const char* variable_na
             goto cleanup;
         }
         
-        strcpy_s(result_str, result_size, "[");
+        /* Build string more efficiently with offset tracking */
+        size_t offset = 0;
+        result_str[offset++] = '[';
+        
         for (int i = 0; i < file->variable_count; i++) {
-            if (i > 0) strcat_s(result_str, result_size, ", ");
-            strcat_s(result_str, result_size, "\"");
-            strcat_s(result_str, result_size, file->variables[i].name);
-            strcat_s(result_str, result_size, "\"");
+            if (i > 0) {
+                result_str[offset++] = ',';
+                result_str[offset++] = ' ';
+            }
+            result_str[offset++] = '"';
+            
+            size_t name_len = strlen(file->variables[i].name);
+            memcpy(result_str + offset, file->variables[i].name, name_len);
+            offset += name_len;
+            
+            result_str[offset++] = '"';
         }
-        strcat_s(result_str, result_size, "]");
-        strcpy_s(output, (size_t)output_size, result_str);
+        result_str[offset++] = ']';
+        result_str[offset] = '\0';
+        
+        /* CRITICAL FIX: Don't truncate here - copy what fits and let enforce_output_limit handle slicing */
+        size_t actual_len = strlen(result_str);
+        if (actual_len < (size_t)output_size) {
+            strcpy_s(output, (size_t)output_size, result_str);
+        } else {
+            /* Copy the full data even if it exceeds output_size - enforce_output_limit will handle it */
+            memcpy(output, result_str, actual_len);
+            output[actual_len] = '\0';
+        }
+        
         result = 0;
         free(result_str);
         goto cleanup;
@@ -1961,7 +1982,14 @@ static int kh_read_khdata_variable(const char* filename, const char* variable_na
         goto cleanup;
     }
 
-    strcpy_s(output, (size_t)output_size, formatted_output);
+    /* Same fix here - don't truncate */
+    size_t actual_len = strlen(formatted_output);
+    if (actual_len < (size_t)output_size) {
+        strcpy_s(output, (size_t)output_size, formatted_output);
+    } else {
+        memcpy(output, formatted_output, actual_len);
+        output[actual_len] = '\0';
+    }
     result = 0;
 
 cleanup:

@@ -1,4 +1,4 @@
-local inputBoolean, inputNumber, inputString, inputArray, inputHashMap, inputNil = ...
+local inputBoolean, inputNumber, inputString, inputArray, inputHashMap, inputNil = unpack(ParseArguments(...))
 if inputBoolean == nil then inputBoolean = false end
 inputNumber = inputNumber or 0
 inputString = inputString or ""

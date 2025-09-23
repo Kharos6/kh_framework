@@ -9,7 +9,7 @@ if (!(" " in _function) && (".lua" in _function)) then {
 	_function = preprocessFile _function;
 };
 
-if !(isNil {["kh_framework", _this, "LuaCompile", false] call KH_fnc_callExtension;}) then {
+if !(isNil {["kh_framework", ["CompileLua", [_function, _name, true]], "CommunicateLuaFramework", false] call KH_fnc_callExtension;}) then {
 	KH_var_cachedLuaFunctions set [_name, _function];
 	nil;
 };

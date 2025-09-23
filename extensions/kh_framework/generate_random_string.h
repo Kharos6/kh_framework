@@ -28,16 +28,28 @@ static int kh_build_charset(char** charset, const char **argv, int argc) {
     int total_size = 0;
     int charset_len = 0;
     
-    /* Parse boolean flags from arguments */
-    if (argc >= 2) include_numbers = kh_validate_bool_value(argv[1]);
-    if (argc >= 3) include_letters = kh_validate_bool_value(argv[2]);
-    if (argc >= 4) include_symbols = kh_validate_bool_value(argv[3]);
+    /* Parse boolean flags from arguments - only if enough args provided */
+    if (argc >= 2) {
+        include_numbers = kh_validate_bool_value(argv[1]);
+    }
+    if (argc >= 3) {
+        include_letters = kh_validate_bool_value(argv[2]);
+    }
+    if (argc >= 4) {
+        include_symbols = kh_validate_bool_value(argv[3]);
+    }
     
-    /* If no types specified, default to all */
-    if (!include_numbers && !include_letters && !include_symbols) {
+    /* If only 1 arg (length), default to numbers and letters only */
+    if (argc == 1) {
         include_numbers = 1;
         include_letters = 1;
-        include_symbols = 1;
+        include_symbols = 0;
+    }
+    
+    /* If all explicitly set to false, default to numbers and letters */
+    if (argc >= 2 && !include_numbers && !include_letters && !include_symbols) {
+        include_numbers = 1;
+        include_letters = 1;
     }
     
     /* Calculate total size needed using pre-calculated lengths */

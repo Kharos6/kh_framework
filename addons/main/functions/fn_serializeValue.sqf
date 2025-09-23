@@ -34,7 +34,7 @@ _value = switch _type do {
                     };
                 };
             },
-            false,
+            0,
             [],
             ""
         ] call KH_fnc_nestedArrayOperation;
@@ -60,7 +60,7 @@ _value = switch _type do {
                     };
                 };
             },
-            false,
+            0,
             [],
             ""
         ] call KH_fnc_nestedArrayOperation;
@@ -246,11 +246,9 @@ _value = switch _type do {
         [
             _value,
             {
-                if ((_forEachIndex % 2) isEqualTo 0) then {
-                    [_x, _array select (_forEachIndex + 1)] call KH_fnc_serializeValue;
-                };
+                _x call KH_fnc_serializeValue;
             },
-            true,
+            0,
             [],
             ""
         ] call KH_fnc_nestedArrayOperation;

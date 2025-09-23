@@ -683,8 +683,7 @@ static inline int kh_validate_bool_value(const char* value) {
         ptr++;
     }
     
-    int result = (strcmp(clean_value, "true") == 0 || strcmp(clean_value, "false") == 0 ||
-                  strcmp(clean_value, "1") == 0 || strcmp(clean_value, "0") == 0);
+    int result = (strcmp(clean_value, "true") == 0 || strcmp(clean_value, "1") == 0) ? 1 : 0;
     
     free(clean_value);
     return result;
@@ -1743,7 +1742,11 @@ static inline int kh_enforce_output_limit(char* output, int output_size, int is_
         }
     }
     
-    /* Output is within limits, no slicing needed */
+    /* Output is within limits, ensure it's properly null-terminated within buffer */
+    if (actual_length >= (size_t)output_size) {
+        output[output_size - 1] = '\0';
+    }
+    
     return 0;
 }
 

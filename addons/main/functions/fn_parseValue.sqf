@@ -194,15 +194,8 @@ switch _parsingType do {
             else {
                 _value;
             },
-            {
-                if ((_forEachIndex % 2) isEqualTo 0) then {
-                    [_x, _array select (_forEachIndex + 1)] call KH_fnc_parseValue;
-                };
-            },
-            true,
-            [],
-            ""
-        ] call KH_fnc_nestedArrayOperation;
+            []
+        ] call KH_fnc_parseNestedTypedArray;
     };
 
     case "TYPED_HASHMAP": {
@@ -213,15 +206,8 @@ switch _parsingType do {
             else {
                 createHashMapFromArray _value;
             },
-            {
-                if ((_forEachIndex % 2) isEqualTo 0) then {
-                    [_x, _array select (_forEachIndex + 1)] call KH_fnc_parseValue;
-                };
-            },
-            true,
-            [],
-            ""
-        ] call KH_fnc_nestedArrayOperation;
+            []
+        ] call KH_fnc_parseNestedTypedArray;
     };
 
     default {

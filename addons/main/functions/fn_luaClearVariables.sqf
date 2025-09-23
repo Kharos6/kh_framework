@@ -1,1 +1,0 @@
-["kh_framework", nil, "LuaClearVariables", false] call KH_fnc_callExtension;

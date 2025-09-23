@@ -13,10 +13,6 @@
 #include <wincrypt.h>
 #include <windows.h>
 
-#include "luajit/include/lua.h"
-#include "luajit/include/lualib.h"
-#include "luajit/include/lauxlib.h"
-
 #define EXTENSION_NAME "kh_framework"
 #define KH_MAX_OUTPUT_SIZE 8192
 #define MAX_FILE_PATH_LENGTH 255
@@ -31,9 +27,7 @@
 #define KH_FNV1A_64_PRIME 0x100000001b3ULL
 #define KH_CRC32_POLYNOMIAL 0xEDB88320U
 #define KHDATA_MAGIC 0x5444484B                                  /* "KHDT" in little endian */
-#define KHDATA_VERSION 1
 #define KH_ERROR_PREFIX "KH_ERROR: "
-#define LUA_VAR_HASH_TABLE_MIN_SIZE 16
 #define KH_TYPE_HASH_SIZE 64
 #define KH_CRYPTO_HASH_SIZE 64
 #define KH_FUNC_HASH_SIZE 64

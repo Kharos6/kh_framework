@@ -77,14 +77,8 @@ class CfgFunctions
 			class loadMissionState {};
 			class loadPlayerLoadouts {};
 			class log {};
-			class luaClearVariables {};
 			class luaCompile {};
-			class luaDeleteVariable {};
-			class luaExecution {};
-			class luaGetVariable {};
-			class luaOperation {};
-			class luaResetState {};
-			class luaSetVariable {};
+			class luaExecute {};
 			class manageSimulatedInventory {};
 			class moduleCameraSequence {};
 			class moduleDynamicDisguiseEquipment {};
@@ -100,6 +94,7 @@ class CfgFunctions
 			class orbitObject {};
 			class parseBoolean {};
 			class parseFunction {};
+			class parseNestedTypedArray {};
 			class parseNormalizedScreenTransforms {};
 			class parseValue {};
 			class postInit {postInit = 1;};

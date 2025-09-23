@@ -18,144 +18,6 @@ typedef struct {
     kh_function_handler handler;
 } function_info_t;
 
-/* Lua framework communication */
-typedef const char* (*KHLuaFrameworkInterface_t)(const char* function, const char* parameters);
-static HMODULE g_lua_framework_module = NULL;
-static KHLuaFrameworkInterface_t g_lua_interface = NULL;
-
-/* Initialize Lua framework communication */
-static void kh_init_lua_framework_communication(void) {
-    if (g_lua_framework_module) return; /* Already initialized */
-    
-    /* Try to load the Lua framework DLL */
-    g_lua_framework_module = GetModuleHandle("kh_framework_lua_x64.dll");
-    if (!g_lua_framework_module) {
-        g_lua_framework_module = GetModuleHandle("kh_framework_lua_x64");
-    }
-    if (!g_lua_framework_module) {
-        g_lua_framework_module = GetModuleHandle("kh_framework_lua.dll");
-    }
-    if (!g_lua_framework_module) {
-        g_lua_framework_module = GetModuleHandle("kh_framework_lua");
-    }
-    
-    if (g_lua_framework_module) {
-        g_lua_interface = (KHLuaFrameworkInterface_t)GetProcAddress(
-            g_lua_framework_module, "KHLuaFrameworkInterface");
-    }
-}
-
-/* Parse and validate parameters for Lua communication */
-static char* kh_parse_lua_parameters(const char* params_str) {
-    if (!params_str) return NULL;
-    
-    size_t len = strlen(params_str);
-    char* result = (char*)malloc(len + 3); /* Extra space for brackets if needed */
-    if (!result) return NULL;
-    
-    const char* ptr = params_str;
-    char* out = result;
-    
-    /* Skip leading whitespace */
-    while (*ptr && (*ptr == ' ' || *ptr == '\t' || *ptr == '\n' || *ptr == '\r')) ptr++;
-    
-    /* Ensure it starts with bracket */
-    if (*ptr != '[') {
-        *out++ = '[';
-    }
-    
-    /* Copy the content */
-    int bracket_depth = 0;
-    int in_string = 0;
-    char string_quote = 0;
-    
-    while (*ptr) {
-        if (!in_string) {
-            if (*ptr == '"' || *ptr == '\'') {
-                in_string = 1;
-                string_quote = *ptr;
-            } else if (*ptr == '[') {
-                bracket_depth++;
-            } else if (*ptr == ']') {
-                bracket_depth--;
-            }
-        } else {
-            if (*ptr == string_quote) {
-                /* Check for doubled quote */
-                if (*(ptr + 1) == string_quote) {
-                    *out++ = *ptr;
-                    *out++ = *(ptr + 1);
-                    ptr++;
-                    ptr++;
-                    continue;
-                } else {
-                    in_string = 0;
-                }
-            }
-        }
-        *out++ = *ptr++;
-    }
-    
-    /* Ensure it ends with bracket */
-    if (bracket_depth > 0) {
-        *out++ = ']';
-    }
-    
-    *out = '\0';
-    return result;
-}
-
-/* Handle communication with Lua framework */
-static int kh_handle_communicate_lua_framework(char* output, int output_size, const char** argv, int argc) {
-    if (!output || output_size <= 0) return 1;
-    
-    output[0] = '\0';
-    
-    /* Ensure Lua framework is available */
-    if (!g_lua_interface) {
-        kh_init_lua_framework_communication();
-        if (!g_lua_interface) {
-            kh_set_error(output, output_size, "LUA FRAMEWORK NOT AVAILABLE");
-            return 1;
-        }
-    }
-    
-    /* Parse function name */
-    char* clean_function = (char*)malloc(strlen(argv[0]) + 1);
-    if (!clean_function) {
-        kh_set_error(output, output_size, "MEMORY ALLOCATION FAILED");
-        return 1;
-    }
-    kh_clean_string(argv[0], clean_function, (int)strlen(argv[0]) + 1);
-    
-    /* Parse parameters */
-    char* parameters = kh_parse_lua_parameters(argv[1]);
-    if (!parameters) {
-        free(clean_function);
-        kh_set_error(output, output_size, "FAILED TO PARSE PARAMETERS");
-        return 1;
-    }
-    
-    /* Call the Lua framework */
-    const char* result = g_lua_interface(clean_function, parameters);
-    
-    if (result) {
-        strncpy_s(output, (size_t)output_size, result, _TRUNCATE);
-    } else {
-        kh_set_error(output, output_size, "LUA FRAMEWORK RETURNED NULL");
-    }
-    
-    free(clean_function);
-    free(parameters);
-    
-    /* Check if result indicates an error */
-    if (strncmp(output, "ERROR:", 6) == 0) {
-        return 1;
-    }
-    
-    return 0;
-}
-
 /* Direct function handlers - no wrappers needed */
 static int kh_handle_read_khdata(char* output, int output_size, const char** argv, int argc) {
     return kh_read_khdata_variable(argv[0], argv[1], output, output_size);
@@ -195,13 +57,6 @@ static const function_info_t FUNCTION_TABLE[] = {
     {"DeleteKHDataFile", 1, 1, kh_handle_delete_khdata_file},
     {"DeleteKHDataVariable", 2, 2, kh_handle_delete_khdata_variable},
     {"FlushKHData", 0, 0, kh_handle_flush_khdata},
-    {"LuaOperation", 2, 2, kh_process_lua_operation},
-    {"LuaCompile", 1, 2, kh_process_lua_compile_operation},
-    {"LuaSetVariable", 2, 2, kh_process_lua_set_variable_operation},
-    {"LuaGetVariable", 1, 1, kh_process_lua_get_variable_operation},
-    {"LuaDeleteVariable", 1, 1, kh_process_lua_delete_variable_operation},
-    {"LuaClearVariables", 0, 0, kh_process_lua_clear_variables_operation},
-    {"LuaResetState", 0, 0, kh_process_lua_reset_state_operation},
     {"CommunicateLuaFramework", 2, 2, kh_handle_communicate_lua_framework},
     {"SliceExtensionReturn", 1, 1, kh_process_slice_extension_return}
 };
@@ -421,15 +276,11 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             g_func_hash_initialized = 0;
             g_type_hash_initialized = 0;
             g_crypto_hash_initialized = 0;
-            g_lua_initialized = 0;
             crc32_table_initialized = 0;
             
             /* Clear static structures */
-            memset(&g_lua_state, 0, sizeof(g_lua_state));
             memset(&g_memory_manager, 0, sizeof(g_memory_manager));
             memset(&g_extension_return_storage, 0, sizeof(g_extension_return_storage));
-            memset(&g_lua_variable_storage, 0, sizeof(g_lua_variable_storage));
-            memset(&g_lua_function_storage, 0, sizeof(g_lua_function_storage));
             memset(&g_secure_rng_state, 0, sizeof(g_secure_rng_state));
             memset(&g_crypto_cache, 0, sizeof(g_crypto_cache));
             
@@ -443,8 +294,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             kh_init_type_hash_table();
             kh_init_crypto_hash_table();
             kh_init_func_hash_table();
-            lua_init_variable_storage();
-            lua_init_function_storage();
             kh_init_crypto_provider();
             kh_init_crc32_table();
             kh_init_memory_manager();
@@ -465,7 +314,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             kh_free_extension_return_storage();
             kh_cleanup_random();
             kh_cleanup_memory_manager();
-            kh_cleanup_lua_states();
             kh_cleanup_crypto_provider();
             break;
     }

@@ -1,4 +1,4 @@
-params [["_array", [], [[], createHashMap]], ["_function", {}, [{}]], ["_layer", 0, [0]], ["_evaluateKeyValueArrays", false, [true]], ["_returnArray", [], [[]]], ["_breaker", "", [""]]];
+params [["_array", [], [[], createHashMap]], ["_function", {}, [{}]], ["_layer", 0, [0]], ["_returnArray", [], [[]]], ["_breaker", "", [""]]];
 
 if (_breaker isEqualTo "") then {
     _breaker = call KH_fnc_generateUid;
@@ -24,25 +24,8 @@ else {
     };
 
     if (_x isEqualType []) then {
-        if _evaluateKeyValueArrays then {
-            if ((count _x) isEqualTo 2) then {
-                if (((_x select 0) isEqualType []) && ((_x select 1) isEqualType [])) then {
-                    _returnArray pushBack [];
-                    [_x, _function, _layer + 1, _evaluateKeyValueArrays, _returnArray select -1, _breaker] call KH_fnc_nestedArrayOperation;
-                }
-                else {
-                    _returnArray pushBack (call _function);
-                };
-            }
-            else {
-                _returnArray pushBack [];
-                [_x, _function, _layer + 1, _evaluateKeyValueArrays, _returnArray select -1, _breaker] call KH_fnc_nestedArrayOperation;
-            };
-        }
-        else {
-            _returnArray pushBack [];
-            [_x, _function, _layer + 1, _evaluateKeyValueArrays, _returnArray select -1, _breaker] call KH_fnc_nestedArrayOperation;
-        };
+        _returnArray pushBack [];
+        [_x, _function, _layer + 1, _returnArray select -1, _breaker] call KH_fnc_nestedArrayOperation;
     }
     else {
         _returnArray pushBack (call _function);

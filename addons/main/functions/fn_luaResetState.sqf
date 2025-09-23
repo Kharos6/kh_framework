@@ -1,1 +1,0 @@
-["kh_framework", nil, "LuaResetState", false] call KH_fnc_callExtension;

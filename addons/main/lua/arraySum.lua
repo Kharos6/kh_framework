@@ -1,17 +1,18 @@
-local inputArray = ...
-inputArray = inputArray or {}
+local array = ParseArguments(...)
 local accumulator = 0
 
-local function sumAllNumbers(table)    
+local function sumAllNumbers(table)
+    local result = 0
+
     for _i, value in pairs(table) do
         if type(value) == "number" then
-            accumulator = accumulator + value
+            result = result + value
         elseif type(value) == "table" then
-            accumulator = sumAllNumbers(value)
+            result = sumAllNumbers(value)
         end
     end
     
-    return accumulator
+    return result
 end
 
-return sumAllNumbers(inputArray)
+return sumAllNumbers(array)

@@ -786,7 +786,7 @@ if isServer then {
 			KH_var_allDeadEntities pushBackUnique _entity;
 
 			if (_entity in KH_var_allLivingEntities) then {
-				_entity deleteAt (KH_var_allLivingEntities find _entity);
+				KH_var_allLivingEntities deleteAt (KH_var_allLivingEntities find _entity);
 			};
 		}
 	];

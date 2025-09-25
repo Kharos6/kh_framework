@@ -13,6 +13,7 @@
 #include <cstring>
 #include <algorithm>
 #include <memory>
+#include <functional>
 #include "containers.hpp"
 
 #pragma push_macro("min")
@@ -39,6 +40,8 @@ namespace intercept {
         class game_value;
         using game_value_parameter = const game_value&;
         class game_data_array;
+        class game_data_hashmap;
+        
         class internal_object;
         class game_data;
         class game_state;
@@ -72,8 +75,33 @@ namespace intercept {
             TASK,
             DIARY_RECORD,
             LOCATION,
+            HASHMAP,
             end
         };
+
+        // using template here because game_value is not defined
+        template<class Type>
+        struct game_data_hashmap_pair {
+            using key_type = const Type&;
+            using value_type = Type;
+            Type key{};
+            Type value{};
+            key_type get_map_key() const { return key; }
+            game_data_hashmap_pair() = default;
+            game_data_hashmap_pair(const Type& k_, const Type& v_) : key(k_), value(v_) {}
+        };
+        template<class Type>
+        struct game_data_hashmap_traits {
+            using key_type = const Type&;
+
+            static uint64_t hash_key(key_type key) noexcept {
+                return key.data->get_hash();
+            }
+            static bool compare_keys(key_type k1, key_type k2) noexcept {
+                return k1.is_equalto_with_nil(k2);
+            }
+        };
+        using rv_hashmap = internal_hashmap<game_data_hashmap_pair<game_value>, auto_array<game_data_hashmap_pair<game_value>>, game_data_hashmap_traits<game_value>>;
 
         [[deprecated("use game_data_type")]] typedef game_data_type GameDataType;
 
@@ -317,7 +345,7 @@ namespace intercept {
 #ifdef __linux__
             script_type_info(r_string name, createFunc cf, r_string localizedName, r_string readableName) : _name(std::move(name)), _createFunction(cf), _localizedName(std::move(localizedName)), _readableName(std::move(readableName)), _javaFunc("none") {}
 #else
-            script_type_info(r_string name, createFunc cf, r_string localizedName, r_string readableName, r_string description, r_string category, r_string typeName) : _name(std::move(name)), _createFunction(cf), _localizedName(std::move(localizedName)), _readableName(std::move(readableName)), _description(std::move(description)), _category(std::move(category)), _typeName(std::move(typeName)), _javaFunc("none") {}
+            script_type_info(r_string name, createFunc cf, r_string localizedName, r_string readableName, r_string description, r_string category, r_string typeName) : _name(std::move(name)), _createFunction(cf), _localizedName(std::move(localizedName)), _readableName(std::move(readableName)), _description(std::move(description)), _category(std::move(category)), _typeName(std::move(typeName)) {}
 #endif
             r_string _name;  // SCALAR
             createFunc _createFunction{nullptr};
@@ -328,7 +356,8 @@ namespace intercept {
             r_string _category;     //Default
             r_string _typeName;     //float/NativeObject
 #endif
-            r_string _javaFunc;  //Lcom/bistudio/JNIScripting/NativeObject;
+            //r_string _javaFunc;  //Lcom/bistudio/JNIScripting/NativeObject;
+            uint64_t _bitmask;
         };
 
         struct compound_value_pair {
@@ -339,7 +368,7 @@ namespace intercept {
         struct compound_script_type_info : public auto_array<const script_type_info*>, public dummy_vtable_class {
         public:
             compound_script_type_info(const auto_array<const script_type_info*>& types) {
-                resize(types.size());
+                reserve(types.size());
                 insert(begin(), types.begin(), types.end());
             }
             void set_vtable(uintptr_t v) noexcept { *reinterpret_cast<uintptr_t*>(this) = v; }
@@ -353,29 +382,35 @@ namespace intercept {
             sqf_script_type(const script_type_info* type) noexcept {
                 single_type = type;
                 set_vtable(type_def);
+                update_bitmask();
             }
             //#TODO use type_def instead
             sqf_script_type(uintptr_t vt, const script_type_info* st, compound_script_type_info* ct) noexcept : single_type(st), compound_type(ct) {
                 set_vtable(vt);
+                update_bitmask();
             }
             void set_vtable(uintptr_t v) noexcept { *reinterpret_cast<uintptr_t*>(this) = v; }
             uintptr_t get_vtable() const noexcept { return *reinterpret_cast<const uintptr_t*>(this); }
-            sqf_script_type(sqf_script_type&& other) noexcept : single_type(other.single_type), compound_type(other.compound_type) {
+            sqf_script_type(sqf_script_type&& other) noexcept : single_type(other.single_type), compound_type(other.compound_type), bitmask(other.bitmask) {
                 set_vtable(other.get_vtable());
+                update_bitmask();
             }
-            sqf_script_type(const sqf_script_type& other) noexcept : single_type(other.single_type), compound_type(other.compound_type) {
+            sqf_script_type(const sqf_script_type& other) noexcept : single_type(other.single_type), compound_type(other.compound_type), bitmask(other.bitmask) {
                 set_vtable(other.get_vtable());
             }
             sqf_script_type& operator=(const sqf_script_type& other) noexcept {
                 single_type = other.single_type;
                 compound_type = other.compound_type;
+                bitmask = other.bitmask;
                 set_vtable(other.get_vtable());
                 return *this;
             }
             const script_type_info* single_type{nullptr};
             compound_script_type_info* compound_type{nullptr};
+            uint64_t bitmask;
             value_types type() const;
             r_string type_str() const;
+            void update_bitmask();
             bool operator==(const sqf_script_type& other) const noexcept {
                 return single_type == other.single_type && compound_type == other.compound_type;
             }
@@ -387,7 +422,18 @@ namespace intercept {
         struct unary_operator : _refcount_vtable_dummy {
             unary_function* procedure_addr;
             sqf_script_type return_type;
+
+        private:
             sqf_script_type arg_type;
+
+        public:
+            unary_operator() {
+                arg_type.set_vtable(sqf_script_type::type_def);
+            }
+
+            sqf_script_type& get_arg_type() {
+                return arg_type;
+            }
         };
 
         struct unary_entry {
@@ -399,8 +445,23 @@ namespace intercept {
         struct binary_operator : _refcount_vtable_dummy {
             binary_function* procedure_addr;
             sqf_script_type return_type;
+
+        private:
             sqf_script_type arg1_type;
             sqf_script_type arg2_type;
+
+        public:
+            binary_operator() {
+                arg1_type.set_vtable(sqf_script_type::type_def);
+                arg2_type.set_vtable(sqf_script_type::type_def);
+            }
+            sqf_script_type& get_arg1_type() {
+                return arg1_type;
+            }
+
+            sqf_script_type& get_arg2_type() {
+                return arg2_type;
+            }
         };
 
         struct binary_entry {
@@ -439,6 +500,10 @@ namespace intercept {
                 return serialization_return::unknown_error;
             }
         };
+
+        struct sourcedocposref : public sourcedocpos, refcount {};
+
+
 
         class vm_context;
         class game_variable;
@@ -481,8 +546,10 @@ namespace intercept {
 
         protected:
             virtual void set_readonly(bool) {}  //No clue what this does...
+        public:
             virtual bool get_readonly() const { return false; }
             virtual bool get_final() const { return false; }
+        protected:
             virtual void set_final(bool) {}  //Only on GameDataCode AFAIK
         public:
             virtual r_string to_string() const { return r_string(); }
@@ -494,6 +561,7 @@ namespace intercept {
             virtual void placeholder() const {}
             virtual bool can_serialize() { return false; }
 
+        private:
             int IaddRef() override { return add_ref(); }
             int Irelease() override { return release(); }
 
@@ -506,6 +574,8 @@ namespace intercept {
 
                 return serialization_return::no_error;
             }
+            virtual uint64_t get_hash() const { return 0; }
+
             static game_data* createFromSerialized(param_archive& ar);
 
         protected:
@@ -550,13 +620,18 @@ namespace intercept {
                 copy(copy_);
             }
 
+// Clang says optimize pragma can only be used at file scope
+#ifndef  __clang__
 #pragma optimize("ts", on)
+#endif  // ! __clang__
             game_value(game_value&& move_) noexcept {
                 set_vtable(__vptr_def);  //Whatever vtable move_ has.. if it's different then it's wrong
                 data = nullptr;
                 data.swap(move_.data);
             }
+#ifndef __clang__
 #pragma optimize("", on)
+#endif  // ! __clang__
 
             //Conversions
             game_value(game_data* val_) noexcept {
@@ -574,6 +649,8 @@ namespace intercept {
             game_value(const std::vector<game_value>& list_);
             game_value(const std::initializer_list<game_value>& list_);
             game_value(auto_array<game_value>&& array_);
+            game_value(rv_hashmap&& hashmap_);
+            game_value(const rv_hashmap& hashmap_);
             template <class Type>
             game_value(const auto_array<Type>& array_) : game_value(auto_array<game_value>(array_.begin(), array_.end())) {
                 static_assert(std::is_convertible<Type, game_value>::value);
@@ -614,6 +691,7 @@ namespace intercept {
             * @throws game_value_conversion_error {if game_value is not an array}
             */
             auto_array<game_value>& to_array() const;
+            rv_hashmap& to_hashmap() const;
 
             /**
             * @brief tries to convert the game_value to an array if possible and return the element at given index.
@@ -641,8 +719,11 @@ namespace intercept {
 
             bool operator==(const game_value& other) const;
             bool operator!=(const game_value& other) const;
+            bool is_equalto_with_nil(const game_value& other) const;
 
-            size_t hash() const;
+            uint64_t get_hash() const;
+            [[deprecated("Use get_hash instead")]] uint64_t hash() const { return this->get_hash(); }
+
             //set's this game_value to null
             void clear() { data = nullptr; }
 
@@ -681,15 +762,21 @@ namespace intercept {
             uintptr_t get_vtable() const noexcept {
                 return *reinterpret_cast<const uintptr_t*>(this);
             }
+
+#ifndef __clang__
 #pragma optimize("ts", on)
+#endif  // ! __clang__
             void set_vtable(uintptr_t vt) noexcept {
                 *reinterpret_cast<uintptr_t*>(this) = vt;
             }
+#ifndef __clang__
 #pragma optimize("", on)
+#endif  // ! __clang__
         };
 
         class game_value_static : public game_value {
         public:
+            game_value_static() : game_value() {}
             ~game_value_static();
             game_value_static(const game_value& copy) : game_value(copy) {}
             game_value_static(game_value&& move) : game_value(move) {}
@@ -759,103 +846,6 @@ namespace intercept {
             }
         };
 
-
-        class game_instruction;
-
-        class vm_context : public serialize_class {
-        public:
-            class IDebugScope {  //ArmaDebugEngine
-            public:
-                virtual ~IDebugScope() {}
-                virtual const char* getName() const = 0;
-                virtual int varCount() const = 0;
-                virtual int getVariables(const IDebugVariable** storage, int count) const = 0;
-                virtual __internal::I_debug_value::RefType EvaluateExpression(const char* code, unsigned int rad) = 0;
-                virtual void getSourceDocPosition(char* file, int fileSize, int& line) = 0;
-                virtual IDebugScope* getParent() = 0;
-            };
-
-            //ArmaDebugEngine. Usual Intercept users won't need this and shouldn't use this
-            class callstack_item : public intercept::types::refcount, public IDebugScope {
-            public:
-                callstack_item* _parent;
-                game_var_space _varSpace;
-
-                int _stackEndAtStart;
-                int _stackEnd;
-                r_string _scopeName;
-
-                virtual game_instruction* next(int& d1, const game_state* s) { return nullptr; };
-                virtual bool someEH(void* state) { return false; }
-                virtual bool someEH2(void* state) { return false; };
-
-                virtual r_string get_type() const = 0;
-
-                virtual serialization_return serialize(param_archive& ar) { return serialization_return::no_error; }
-
-                virtual void on_before_exec() {}
-            };
-
-
-            auto add_callstack_item(ref<callstack_item> newItem) {
-                return callstack.emplace_back(newItem);
-            }
-
-            void throw_script_exception(game_value value) {
-                exception_state = true;
-                exception_value = std::move(value);
-            }
-
-            bool is_scheduled() const {
-                return scheduled;
-            }
-
-            bool is_serialization_enabled() const {
-                return serialenabled;
-            }
-
-            void disable_serialization() {
-                serialenabled = false;
-            }
-
-            const sourcedocpos& get_current_position() {
-                return sdocpos;
-            }
-
-
-
-            auto_array<ref<callstack_item>, rv_allocator_local<ref<callstack_item>, 64>> callstack;  //#TODO check size on x64
-            bool serialenabled;                                                                      //disableSerialization -> true, 0x228
-            void* dummyu;                                                                            //VMContextBattlEyeMonitor : VMContextCallback
-
-            //const bool is_ui_context; //no touchy
-            auto_array<game_value, rv_allocator_local<game_value, 32>> scriptStack;
-
-            sourcedoc sdoc;
-
-            sourcedocpos sdocpos;  //last instruction pos
-
-            r_string name;  //profiler might like this
-
-            //breakOut
-            r_string breakscopename;
-            //throw
-            game_value exception_value;  //0x4B0
-            //breakOut
-            game_value breakvalue;
-        private:
-            uint32_t d[3];
-            bool dumm;
-            bool dumm2;             //undefined variables allowed?
-            const bool scheduled;   //canSuspend 0x4D6
-            bool local;
-            bool doNil; //undefined variable will be set to nil (unscheduled). If this is false it will throw error
-            //throw
-            bool exception_state;   //0x4D9
-            bool break_;            //0x4DA
-            bool breakout;
-        };
-
 #pragma region GameData Types
 
         class game_data_number : public game_data {
@@ -872,9 +862,6 @@ namespace intercept {
             static void* operator new(std::size_t sz_);
             static void operator delete(void* ptr_, std::size_t sz_);
             float number;
-            size_t hash() const {
-                return __internal::pairhash(type_def, number);
-            }
             //protected:
             //    static thread_local game_data_pool<game_data_number> _data_pool;
         };
@@ -893,9 +880,29 @@ namespace intercept {
             static void* operator new(std::size_t sz_);
             static void operator delete(void* ptr_, std::size_t sz_);
             bool val;
-            size_t hash() const { return __internal::pairhash(type_def, val); }
             //protected:
             //    static thread_local game_data_pool<game_data_bool> _data_pool;
+        };
+
+        class game_data_hashmap : public game_data {
+        public:
+            static uintptr_t type_def;
+            static uintptr_t data_type_def;
+            static rv_pool_allocator* pool_alloc_base;    
+
+            game_data_hashmap();
+            game_data_hashmap(rv_hashmap&& init_);
+            game_data_hashmap(const game_data_hashmap& copy_);
+            game_data_hashmap(const rv_hashmap& copy_);
+            game_data_hashmap(game_data_hashmap&& move_) noexcept;
+            game_data_hashmap& operator=(const game_data_hashmap& copy_);
+            game_data_hashmap& operator=(game_data_hashmap&& move_) noexcept;
+            ~game_data_hashmap();
+
+            static void* operator new(std::size_t sz_);
+            static void operator delete(void* ptr_, std::size_t sz_);
+        
+            rv_hashmap data;
         };
 
         class game_data_array : public game_data {
@@ -914,8 +921,7 @@ namespace intercept {
             game_data_array& operator=(game_data_array&& move_) noexcept;
             ~game_data_array();
             auto_array<game_value> data;
-            auto length() const { return data.count(); }
-            size_t hash() const { return __internal::pairhash(type_def, data.hash()); }
+            auto length() const { return data.size(); }
             static void* operator new(std::size_t sz_);
             static void operator delete(void* ptr_, std::size_t sz_);
         };
@@ -934,7 +940,6 @@ namespace intercept {
             game_data_string& operator=(game_data_string&& move_) noexcept;
             ~game_data_string();
             r_string raw_string;
-            size_t hash() const { return __internal::pairhash(type_def, raw_string); }
             static void* operator new(std::size_t sz_);
             static void operator delete(void* ptr_, std::size_t sz_);
             //protected:
@@ -949,7 +954,6 @@ namespace intercept {
                 *reinterpret_cast<uintptr_t*>(this) = type_def;
                 *reinterpret_cast<uintptr_t*>(static_cast<I_debug_value*>(this)) = data_type_def;
             }
-            size_t hash() const { return __internal::pairhash(type_def, group); }
             void* group{};
         };
 
@@ -961,9 +965,28 @@ namespace intercept {
                 *reinterpret_cast<uintptr_t*>(this) = type_def;
                 *reinterpret_cast<uintptr_t*>(static_cast<I_debug_value*>(this)) = data_type_def;
             }
-            size_t hash() const { return __internal::pairhash(type_def, config); }
-            void* config{};
-            auto_array<r_string> path;
+
+            struct config_internal;
+            struct entry_internal {
+                void* _vtbl1;
+                config_internal* _unk;
+                void* _vtbl2;
+            };
+
+            struct config_internal {
+                uint32_t _unk;
+                uint32_t _unk2;
+                entry_internal* _entry;
+                //void* _unk3;
+                //r_string _entryName; // It is here, but probably unreliable?
+            };
+
+            bool is_null() const {
+                return config == nullptr || config->_entry == nullptr;
+            }
+
+            config_internal* config {};
+            //auto_array<r_string> path;
         };
 
         class game_data_control : public game_data {
@@ -974,7 +997,6 @@ namespace intercept {
                 *reinterpret_cast<uintptr_t*>(this) = type_def;
                 *reinterpret_cast<uintptr_t*>(static_cast<I_debug_value*>(this)) = data_type_def;
             }
-            size_t hash() const { return __internal::pairhash(type_def, control); }
             void* control{};
         };
 
@@ -986,7 +1008,6 @@ namespace intercept {
                 *reinterpret_cast<uintptr_t*>(this) = type_def;
                 *reinterpret_cast<uintptr_t*>(static_cast<I_debug_value*>(this)) = data_type_def;
             }
-            size_t hash() const { return __internal::pairhash(type_def, display); }
             void* display{};
         };
 
@@ -998,7 +1019,6 @@ namespace intercept {
                 *reinterpret_cast<uintptr_t*>(this) = type_def;
                 *reinterpret_cast<uintptr_t*>(static_cast<I_debug_value*>(this)) = data_type_def;
             }
-            size_t hash() const { return __internal::pairhash(type_def, location); }
             void* location{};
         };
 
@@ -1010,7 +1030,6 @@ namespace intercept {
                 *reinterpret_cast<uintptr_t*>(this) = type_def;
                 *reinterpret_cast<uintptr_t*>(static_cast<I_debug_value*>(this)) = data_type_def;
             }
-            size_t hash() const { return __internal::pairhash(type_def, script); }
             void* script{};
         };
 
@@ -1022,7 +1041,6 @@ namespace intercept {
                 *reinterpret_cast<uintptr_t*>(this) = type_def;
                 *reinterpret_cast<uintptr_t*>(static_cast<I_debug_value*>(this)) = data_type_def;
             }
-            size_t hash() const { return __internal::pairhash(type_def, side); }
             void* side{};
         };
 
@@ -1034,7 +1052,6 @@ namespace intercept {
                 *reinterpret_cast<uintptr_t*>(this) = type_def;
                 *reinterpret_cast<uintptr_t*>(static_cast<I_debug_value*>(this)) = data_type_def;
             }
-            size_t hash() const { return __internal::pairhash(type_def, rv_text); }
             void* rv_text{};
         };
 
@@ -1046,7 +1063,6 @@ namespace intercept {
                 *reinterpret_cast<uintptr_t*>(this) = type_def;
                 *reinterpret_cast<uintptr_t*>(static_cast<I_debug_value*>(this)) = data_type_def;
             }
-            size_t hash() const { return __internal::pairhash(type_def, team); }
             void* team{};
         };
 
@@ -1058,7 +1074,6 @@ namespace intercept {
                 *reinterpret_cast<uintptr_t*>(this) = type_def;
                 *reinterpret_cast<uintptr_t*>(static_cast<I_debug_value*>(this)) = data_type_def;
             }
-            size_t hash() const { return __internal::pairhash(type_def, 0); }  //#TODO proper hashing
 
             map_string_to_class<game_variable, auto_array<game_variable>> _variables;
             r_string _name;
@@ -1073,12 +1088,12 @@ namespace intercept {
                 *reinterpret_cast<uintptr_t*>(this) = type_def;
                 *reinterpret_cast<uintptr_t*>(static_cast<I_debug_value*>(this)) = data_type_def;
             }
-            static size_t hash() { return 0x1337; }
+            static uint64_t hash() { return 0xCBF29CE484222325; } //64bit FNV-1 offset basis
         };
 
         class game_instruction : public refcount {
         public:
-            sourcedocpos sdp;
+            ref<sourcedocposref> sdp;
 
             virtual bool exec(game_state& state, vm_context& t) = 0;
             virtual int stack_size(void* t) const = 0;
@@ -1103,12 +1118,11 @@ namespace intercept {
                 *reinterpret_cast<uintptr_t*>(this) = type_def;
                 *reinterpret_cast<uintptr_t*>(static_cast<I_debug_value*>(this)) = data_type_def;
             }
-            size_t hash() const { return __internal::pairhash(type_def, code_string); }
             static void* operator new(std::size_t sz_);
             static void operator delete(void* ptr_, std::size_t sz_);
             r_string code_string;
             auto_array<ref<game_instruction>> instructions;
-            bool is_final;
+            [[deprecated("This is wrong, use get_final() virtual method")]] bool is_final;
         };
 
         class game_data_object : public game_data {
@@ -1119,7 +1133,6 @@ namespace intercept {
                 *reinterpret_cast<uintptr_t*>(this) = type_def;
                 *reinterpret_cast<uintptr_t*>(static_cast<I_debug_value*>(this)) = data_type_def;
             }
-            size_t hash() const { return __internal::pairhash(type_def, reinterpret_cast<uintptr_t>(object ? object->object : object)); }
             struct visualState {
                 //will be false if you called stuff on nullObj
                 bool valid{false};
@@ -1254,14 +1267,179 @@ namespace intercept {
 
 #pragma endregion
 
+
+        class vm_context : public serialize_class {
+        public:
+            enum execution {
+                continueEx,   // continue ???
+                continueEx2,  // continue with the next instruction ??? don't know why there is two execution controls
+                done,         // done
+                interrupt     // execution is suspended
+            };
+
+            class IDebugScope {  //ArmaDebugEngine
+            public:
+                virtual ~IDebugScope() {}
+                virtual const char* getName() const = 0;
+                virtual int varCount() const = 0;
+                virtual int getVariables(const IDebugVariable** storage, int count) const = 0;
+                virtual __internal::I_debug_value::RefType EvaluateExpression(const char* code, unsigned int rad) = 0;
+                virtual void getSourceDocPosition(char* file, int fileSize, int& line) = 0;
+                virtual IDebugScope* getParent() = 0;
+            };
+
+            //ArmaDebugEngine. Usual Intercept users won't need this and shouldn't use this
+            class callstack_item : public intercept::types::refcount, public IDebugScope {
+            public:
+                callstack_item* _parent;
+                game_var_space _varSpace;
+
+                int _stackEndAtStart;
+                int _stackEnd;
+                r_string _scopeName;
+
+                virtual game_instruction* next(int& d1, const game_state* s) { return nullptr; };
+                virtual bool someEH(void* state) { return false; }
+                virtual bool someEH2(void* state) { return false; };
+
+                virtual r_string get_type() const = 0;
+
+                virtual serialization_return serialize(param_archive& ar) { return serialization_return::no_error; }
+
+                virtual void on_before_exec() {}
+            };
+
+            // "code" abstraction, useful for placing on callstack as an item, once again, Usual Intercept users won't need this and shouldn't use this
+            class callstack_item_data : public callstack_item {
+            private:
+                void* operator new(std::size_t sz_);
+                void operator delete(void* ptr_, std::size_t sz_);
+            public:
+                ref<game_data_code> _code;
+                //actual var space of the scope itself
+                game_var_space _dataVarSpace;
+                int _programCounter{};
+                callstack_item_data(){}
+                callstack_item_data(game_data_code* code, callstack_item* parent, game_var_space varSpace, int stackPos, const game_state* gs);
+
+                virtual game_instruction* next(int& d1, const game_state* s) {
+                    const auto_array<ref<game_instruction>> &instructions = _code.get()->instructions;
+                    if (_programCounter >= instructions.size()) {
+                        d1 = execution::done;
+                        return nullptr;
+                    } else {
+                        d1 = execution::continueEx;
+                        return instructions[_programCounter++];
+                    }
+                }
+
+                virtual bool someEH(void* state) {
+                    return false;
+                }
+                virtual bool someEH2(void* state) {
+                    return false;
+                }
+
+                virtual r_string get_type() const {
+                    return r_string();
+                }
+
+                virtual serialization_return serialize(param_archive& ar) {
+                    return serialization_return::no_error;
+                }
+
+                virtual void on_before_exec() {}
+
+                virtual const char* getName() const {
+                    return "Frame";
+                };
+                virtual int varCount() const {
+                    return 1;
+                }
+                virtual int getVariables(const IDebugVariable** storage, int count) const {
+                    return 1;
+                }
+                /**
+                 * @brief EvaluateExpression doesn't work, it will throw an exception if called
+                */
+                virtual __internal::I_debug_value::RefType EvaluateExpression(const char* code, unsigned int rad) {
+                    throw std::bad_function_call();
+                    return game_value(1).data.get();
+                }
+                virtual void getSourceDocPosition(char* file, int fileSize, int& line) {
+                    file[0] = 0;
+                    line = 0;
+                }
+                virtual IDebugScope* getParent() {
+                    return _parent;
+                }
+            };
+
+            auto add_callstack_item(ref<callstack_item> newItem) {
+                return callstack.emplace_back(newItem);
+            }
+
+            void throw_script_exception(game_value value) {
+                exception_state = true;
+                exception_value = std::move(value);
+            }
+
+            bool is_scheduled() const {
+                return scheduled;
+            }
+
+            bool is_serialization_enabled() const {
+                return serialenabled;
+            }
+
+            void disable_serialization() {
+                serialenabled = false;
+            }
+
+            const sourcedocpos& get_current_position() {
+                return *sdocpos;
+            }
+
+
+
+            auto_array<ref<callstack_item>, rv_allocator_local<ref<callstack_item>, 64>> callstack;  //#TODO check size on x64
+            bool serialenabled;                                                                      //disableSerialization -> true, 0x228
+            void* dummyu;                                                                            //VMContextBattlEyeMonitor : VMContextCallback
+
+            //const bool is_ui_context; //no touchy
+            auto_array<game_value, rv_allocator_local<game_value, 32>> scriptStack;
+
+            sourcedoc sdoc;
+
+            ref<sourcedocposref> sdocpos;  //last instruction pos
+
+            r_string name;  //profiler might like this
+
+            //breakOut
+            r_string breakscopename;
+            //throw
+            game_value exception_value;  //0x4B0
+            //breakOut
+            game_value breakvalue;
+        private:
+            uint32_t d[3];
+            bool dumm;
+            bool dumm2;             //undefined variables allowed?
+            const bool scheduled;   //canSuspend 0x4D6
+            bool local;
+            bool doNil; //undefined variable will be set to nil (unscheduled). If this is false it will throw error
+            //throw
+            bool exception_state;   //0x4D9
+            bool break_;            //0x4DA
+            bool breakout;
+        };
+
         class game_state {
             friend class game_data;
             friend class ::intercept::loader;
             friend class ::intercept::sqf_functions;
         public:
 
-
-            
             class game_evaluator : public refcount {  //refcounted
             public:
                 game_evaluator(game_var_space* var = nullptr) {
@@ -1394,7 +1572,7 @@ namespace intercept {
                 eval->_errorType = type;
                 eval->_errorMessage = message;
                 if (current_context)
-                    eval->_errorPosition = current_context->sdocpos;
+                    eval->_errorPosition = *current_context->sdocpos;
             }
 
             /**
@@ -1451,10 +1629,7 @@ namespace intercept {
                 return _scriptNulars;
             }
 
-
-
-
-        private:
+        protected:
             types::auto_array<const types::script_type_info*> _scriptTypes;
 
             using game_functions = intercept::__internal::game_functions;
@@ -1584,7 +1759,7 @@ namespace std {
     template <>
     struct hash<intercept::types::game_value> {
         size_t operator()(const intercept::types::game_value& x) const {
-            return x.hash();
+            return x.get_hash();
         }
     };
 }  // namespace std

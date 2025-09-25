@@ -2,6 +2,7 @@
 #include <string>
 #include <memory>
 #include <unordered_map>
+#include <chrono>
 
 #include "intercept/include/intercept.hpp"
 #include "intercept/include/client/sqf/sqf.hpp"
@@ -16,14 +17,13 @@ using namespace intercept;
 
 static types::registered_sqf_function _execute_lua_sqf_command;
 static types::registered_sqf_function _compile_lua_sqf_command;
-static sol::protected_function cached_lua_init;
-static sol::protected_function cached_lua_frame_update;  
-static sol::protected_function cached_lua_deinit;
 static std::unique_ptr<sol::state> g_lua_state;
 
 // Userdata wrapper for game_value to preserve native Arma types
 struct GameValueWrapper {
     game_value value;
+    static constexpr const char* TYPE_IDENTIFIER = "GameValueWrapper";
+    
     GameValueWrapper() = default;
     GameValueWrapper(const game_value& v) : value(v) {}
     GameValueWrapper(game_value&& v) : value(std::move(v)) {}
@@ -49,6 +49,7 @@ struct GameValueWrapper {
             case types::game_data_type::NetObject: return "[NETOBJECT]";
             case types::game_data_type::SUBGROUP: return "[SUBGROUP]";
             case types::game_data_type::TARGET: return "[TARGET]";
+            case types::game_data_type::HASHMAP: return "[HASHMAP]";
             default: return value.data ? static_cast<std::string>(value.data->to_string()) : "nil";
         }
     }
@@ -83,9 +84,13 @@ struct GameValueWrapper {
             case types::game_data_type::NetObject: return "NETOBJECT";
             case types::game_data_type::SUBGROUP: return "SUBGROUP";
             case types::game_data_type::TARGET: return "TARGET";
+            case types::game_data_type::HASHMAP: return "HASHMAP";
             default: return "UNKNOWN";
         }
     }
+    
+    // Identification method
+    bool is_game_value() const { return true; }
 };
 
 struct LuaCallCache {
@@ -96,12 +101,9 @@ struct LuaCallCache {
 
 static std::unordered_map<std::string, LuaCallCache> g_call_cache;
 static std::unordered_map<size_t, sol::protected_function> g_code_cache;
-static constexpr size_t MAX_CACHE_SIZE = 128;
+static constexpr size_t MAX_CACHE_SIZE = 1024;
 
 class Lua_Compilation {
-private:
-    static std::unordered_map<std::string, sol::protected_function> s_cpp_function_registry;
-    
 public:
     struct CompileResult {
         bool success;
@@ -112,10 +114,7 @@ public:
             : success(s), error_message(err), function(func) {}
     };
     
-    static CompileResult lua_compile(const std::string& lua_code, 
-                                   const std::string& cpp_name = "", 
-                                   const std::string& lua_name = "") {
-        // Validate input
+    static CompileResult lua_compile(const std::string& lua_code, const std::string& lua_name = "") {
         if (lua_code.empty()) {
             return CompileResult(false, "Empty Lua code provided");
         }
@@ -133,14 +132,7 @@ public:
             // Get the compiled function
             sol::protected_function compiled_func = load_result;
             
-            // Register in C++ registry if cpp_name is provided
-            if (!cpp_name.empty()) {
-                if (s_cpp_function_registry.find(cpp_name) == s_cpp_function_registry.end()) {
-                    s_cpp_function_registry[cpp_name] = compiled_func;
-                }
-            }
-            
-            // Register in Lua global namespace if lua_name is provided
+            // Register in Lua global namespace
             if (!lua_name.empty()) {
                 (*g_lua_state)[lua_name] = compiled_func;
             }
@@ -154,12 +146,6 @@ public:
         }
     }
     
-    // Get Lua code by c++ reference
-    static sol::protected_function get_cpp_function(const std::string& cpp_name) {
-        auto it = s_cpp_function_registry.find(cpp_name);
-        return (it != s_cpp_function_registry.end()) ? it->second : sol::protected_function{};
-    }
-    
     // Get Lua code by Lua reference
     static sol::protected_function get_lua_function(const std::string& lua_name) {
         try {
@@ -167,11 +153,6 @@ public:
         } catch (...) {
             return sol::protected_function{};
         }
-    }
-
-    // Check if Lua function exists in c++
-    static bool has_cpp_function(const std::string& cpp_name) {
-        return s_cpp_function_registry.find(cpp_name) != s_cpp_function_registry.end();
     }
     
     // Check if Lua function exists in Lua
@@ -185,16 +166,10 @@ public:
     }
 
     static void reset_compilation_state() {
-        s_cpp_function_registry.clear();
-        g_call_cache.clear(); // Clear the call cache
+        g_call_cache.clear();
         g_code_cache.clear();
-        cached_lua_init = sol::protected_function{};
-        cached_lua_frame_update = sol::protected_function{};
-        cached_lua_deinit = sol::protected_function{};
     }
 };
-
-std::unordered_map<std::string, sol::protected_function> Lua_Compilation::s_cpp_function_registry;
 
 // Convert game_value to Lua object
 static sol::object convert_game_value_to_lua(const game_value& value) {
@@ -219,6 +194,23 @@ static sol::object convert_game_value_to_lua(const game_value& value) {
                 lua_table[i + 1] = convert_game_value_to_lua(array[i]);
             }
 
+            return sol::make_object(lua, lua_table);
+        }
+
+        case types::game_data_type::HASHMAP: {
+            sol::table lua_table = lua.create_table();
+            auto& hashmap = value.to_hashmap();
+            
+            // Convert directly to native Lua table format
+            for (auto& pair : hashmap) {
+                sol::object lua_key = convert_game_value_to_lua(pair.key);
+                sol::object lua_value = convert_game_value_to_lua(pair.value);
+                
+                // Set the key-value pair in the Lua table
+                // This works for all key types that Lua supports
+                lua_table[lua_key] = lua_value;
+            }
+            
             return sol::make_object(lua, lua_table);
         }
 
@@ -264,13 +256,97 @@ static game_value convert_lua_to_game_value(const sol::object& obj) {
         return game_value(obj.as<std::string>());
     } else if (obj.get_type() == sol::type::table) {
         sol::table tbl = obj;
-        auto_array<game_value> arr;
+        bool is_array = true;
+        bool has_non_integer_keys = false;
+        size_t max_index = 0;
+        size_t non_nil_count = 0;
+        
+        // First pass: analyze the table structure
+        for (auto& pair : tbl) {
+            non_nil_count++;
+            sol::object key = pair.first;
+            
+            if (key.get_type() == sol::type::number) {
+                double key_num = key.as<double>();
+                
+                // Check if it's a positive integer
+                if (key_num > 0 && key_num == std::floor(key_num)) {
+                    size_t idx = static_cast<size_t>(key_num);
 
-        for (size_t i = 1; i <= tbl.size(); i++) {
-            arr.push_back(convert_lua_to_game_value(tbl[i]));
+                    if (idx > max_index) {
+                        max_index = idx;
+                    }
+                } else {
+                    // Non-positive or non-integer numeric key
+                    is_array = false;
+                    has_non_integer_keys = true;
+                    break;
+                }
+            } else {
+                // Non-numeric key (string, etc.)
+                is_array = false;
+                has_non_integer_keys = true;
+                break;
+            }
         }
-
-        return game_value(std::move(arr));
+        
+        // Empty tables are arrays
+        if (non_nil_count == 0) {
+            is_array = true;
+            max_index = 0;
+        }
+        
+        // Additional heuristic: if we have string keys, it's definitely a hashmap
+        // But if we only have positive integer keys (even with gaps), treat it as an array
+        
+        if (is_array && max_index > 0) {
+            // Convert as array, including nil values for gaps
+            auto_array<game_value> arr;
+            arr.reserve(max_index);
+            
+            for (size_t i = 1; i <= max_index; i++) {
+                sol::object elem = tbl[i];
+                arr.push_back(convert_lua_to_game_value(elem));
+            }
+            
+            return game_value(std::move(arr));
+        } else if (!is_array || has_non_integer_keys) {
+            // Convert native Lua table to hashmap
+            auto_array<game_value> kv_array;
+            
+            for (auto& pair : tbl) {
+                auto_array<game_value> kv_pair;
+                
+                // Convert the key properly
+                sol::object key = pair.first;
+                game_value key_value;
+                
+                // Handle different key types
+                if (key.get_type() == sol::type::string) {
+                    key_value = game_value(key.as<std::string>());
+                } else if (key.get_type() == sol::type::number) {
+                    key_value = game_value(key.as<float>());
+                } else if (key.get_type() == sol::type::boolean) {
+                    key_value = game_value(key.as<bool>());
+                } else {
+                    // For other types, try generic conversion
+                    key_value = convert_lua_to_game_value(key);
+                }
+                
+                kv_pair.push_back(key_value);
+                kv_pair.push_back(convert_lua_to_game_value(pair.second));
+                kv_array.push_back(game_value(std::move(kv_pair)));
+            }
+            
+            if (!kv_array.empty()) {
+                return sqf::call2(sqf::compile("createHashMapFromArray _this"), game_value(std::move(kv_array)));
+            } else {
+                return sqf::call2(sqf::compile("createHashMap"));
+            }
+        } else {
+            // Shouldn't reach here, but just in case
+            return game_value(auto_array<game_value>());
+        }
     } else if (obj.get_type() == sol::type::userdata) {
         // Try to extract GameValueWrapper
         sol::optional<GameValueWrapper> wrapper = obj.as<sol::optional<GameValueWrapper>>();
@@ -281,6 +357,256 @@ static game_value convert_lua_to_game_value(const sol::object& obj) {
     }
     
     return game_value();
+}
+
+// C++ implementations of Lua utility functions
+namespace lua_functions {
+    static int lua_init() {
+        (*g_lua_state)["GameFrame"] = 0;
+        return 0;
+    }
+    
+    static int lua_frame_update() {
+        int frame = (*g_lua_state)["GameFrame"].get_or(0);
+        (*g_lua_state)["GameFrame"] = frame + 1;
+        return 0;
+    }
+    
+    static int lua_deinit() {
+        (*g_lua_state)["GameFrame"] = 0;
+        return 0;
+    }
+
+    // Get system time in seconds with millisecond precision
+    static double get_system_time() {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()
+        ).count() / 1000.0;
+    }
+    
+    // Get formatted date/time string
+    static std::string get_date_time() {
+        auto now = std::chrono::system_clock::now();
+        auto time_t = std::chrono::system_clock::to_time_t(now);
+        char buffer[100];
+        std::strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", std::localtime(&time_t));
+        return std::string(buffer);
+    }
+
+    // Get high-resolution timestamp in seconds (for delta calculations)
+    static double get_timestamp() {
+        auto now = std::chrono::high_resolution_clock::now();
+        auto duration = now.time_since_epoch();
+        auto microseconds = std::chrono::duration_cast<std::chrono::microseconds>(duration).count();
+        return microseconds / 1000000.0;  // Convert to seconds
+    }
+
+    // Get system time in seconds with millisecond precision
+    static double get_time_ms() {
+        LARGE_INTEGER frequency, counter;
+        QueryPerformanceFrequency(&frequency);
+        QueryPerformanceCounter(&counter);
+        return (counter.QuadPart * 1000.0) / frequency.QuadPart;
+    }
+    
+    // Profile code execution
+    static sol::object profile_code(sol::variadic_args args) {
+        sol::state& lua = *g_lua_state;
+        
+        if (args.size() < 2) {
+            return sol::make_object(lua, "ERROR: Not enough arguments");
+        }
+        
+        sol::object params = args[0];
+        sol::object code_obj = args[1];
+        sol::object count_obj = args.size() > 2 ? args[2] : sol::make_object(lua, 1);
+        
+        // Validate code parameter
+        if (code_obj.get_type() != sol::type::string) {
+            return sol::make_object(lua, "ERROR: code must be a string");
+        }
+        
+        std::string code = code_obj.as<std::string>();
+        int count = count_obj.get_type() == sol::type::number ? count_obj.as<int>() : 1;
+        
+        if (count < 1) {
+            return sol::make_object(lua, "ERROR: execution count must be at least 1");
+        }
+        
+        sol::protected_function compiled;
+        
+        // Check if it's a function name or code to compile
+        if (code.find(' ') == std::string::npos && 
+            code.find('\t') == std::string::npos && 
+            code.find('\n') == std::string::npos) {
+            
+            // It's a function name
+            sol::object func = lua[code];
+
+            if (func.get_type() != sol::type::function) {
+                return sol::make_object(lua, "ERROR: Function '" + code + "' not found or is not a function");
+            }
+            compiled = func;
+        } else {
+            // Compile the code
+            std::string full_code = "return function(...) " + code + " end";
+            sol::load_result load_res = lua.load(full_code);
+            
+            if (!load_res.valid()) {
+                sol::error err = load_res;
+                return sol::make_object(lua, "ERROR: Failed to compile code: " + std::string(err.what()));
+            }
+            
+            sol::protected_function factory = load_res;
+            auto factory_result = factory();
+
+            if (!factory_result.valid()) {
+                sol::error err = factory_result;
+                return sol::make_object(lua, "ERROR: Failed to create function: " + std::string(err.what()));
+            }
+
+            compiled = factory_result;
+        }
+        
+        // Prepare arguments
+        std::vector<sol::object> func_args;
+
+        if (params.get_type() == sol::type::table) {
+            sol::table tbl = params;
+
+            for (size_t i = 1; i <= tbl.size(); i++) {
+                func_args.push_back(tbl[i]);
+            }
+        } else if (params.get_type() != sol::type::nil) {
+            func_args.push_back(params);
+        }
+        
+        // Warm up if count > 10
+        if (count > 10) {
+            for (int i = 0; i < 3; i++) {
+                if (func_args.empty()) {
+                    compiled();
+                } else {
+                    compiled(sol::as_args(func_args));
+                }
+            }
+        }
+        
+        // Get timer function
+        sol::function get_time = lua["_kh_get_time_ms"];
+
+        if (!get_time.valid()) {
+            return sol::make_object(lua, "ERROR: High precision timer not available");
+        }
+        
+        // Profile execution
+        double start_time = get_time();
+        
+        for (int i = 0; i < count; i++) {
+            if (func_args.empty()) {
+                compiled();
+            } else {
+                compiled(sol::as_args(func_args));
+            }
+        }
+        
+        double end_time = get_time();
+        double total_time = end_time - start_time;
+        double average_time = total_time / count;
+        char buffer[256];
+
+        snprintf(buffer, sizeof(buffer), "Count %d\nTotal: %.6f\nAverage: %.6f", 
+                 count, total_time, average_time);
+        
+        return sol::make_object(lua, std::string(buffer));
+    }
+
+    // Get the data type of a value
+    static std::string get_data_type(sol::object input) {
+        if (input.get_type() == sol::type::nil) {
+            return "NOTHING";
+        }
+        
+        sol::type lua_type = input.get_type();
+        
+        switch (lua_type) {
+            case sol::type::boolean:
+                return "BOOL";
+            case sol::type::number:
+                return "SCALAR";
+            case sol::type::string:
+                return "STRING";
+            case sol::type::table:
+                return "ARRAY";
+            case sol::type::userdata: {
+                // Check if it's a GameValueWrapper
+                sol::optional<GameValueWrapper> wrapper = input.as<sol::optional<GameValueWrapper>>();
+                
+                if (wrapper) {
+                    return wrapper->type_name();
+                }
+
+                return "USERDATA";
+            }
+            default:
+                return "UNKNOWN";
+        }
+    }
+
+    /*
+    Execute in Sqf Namespace
+
+    local result = with_sqf(function(x, y)
+        diag_log("Test: " .. tostring(x))  -- sqf function without prefix
+        local p = player()  -- works without sqf.
+        return x + y
+    end, 10, 20)
+    */
+    static sol::object with_sqf(sol::protected_function func, sol::variadic_args args) {
+        sol::state& lua = *g_lua_state;
+        sol::table env = lua.create_table();
+        sol::table meta = lua.create_table();
+        
+        // __index function that checks sqf first, then _G
+        meta["__index"] = [&lua](sol::table t, sol::object key) -> sol::object {
+            // First check sqf table
+            sol::table sqf_table = lua["sqf"];
+            sol::object sqf_result = sqf_table[key];
+            
+            if (sqf_result.valid() && sqf_result.get_type() != sol::type::nil) {
+                return sqf_result;
+            }
+            
+            // Fall back to global namespace
+            return lua.globals()[key];
+        };
+        
+        // __newindex delegates to _G
+        meta["__newindex"] = lua.globals();
+        env[sol::metatable_key] = meta;
+        
+        // Set the function's environment using raw Lua API
+        lua_State* L = lua.lua_state();
+        func.push(L);
+        env.push(L);
+        lua_setfenv(L, -2);
+        lua_pop(L, 1);
+        
+        // Convert args to vector for easier handling
+        std::vector<sol::object> arg_vec;
+        arg_vec.reserve(args.size());
+
+        for (auto arg : args) {
+            arg_vec.push_back(arg);
+        }
+        
+        // Call the function with the new environment
+        if (arg_vec.empty()) {
+            return func();
+        } else {
+            return func(sol::as_args(arg_vec));
+        }
+    }
 }
 
 // Initialize Lua state
@@ -305,300 +631,263 @@ static void initialize_lua_state() {
             sol::meta_function::to_string, &GameValueWrapper::to_string,
             sol::meta_function::equal_to, &GameValueWrapper::equals,
             "value", &GameValueWrapper::value,
-            "type_name", &GameValueWrapper::type_name
+            "type_name", &GameValueWrapper::type_name,
+            "is_game_value", &GameValueWrapper::is_game_value
         );
+        
+        // Register variables in Lua global namespace
+        (*g_lua_state)["GameFrame"] = 0;
 
-        Lua_Compilation::lua_compile(
-            R"(
-                KHLUA_Var_Frame = 0
-            )", "lua_init", ""
-        );
-
-        Lua_Compilation::lua_compile(
-            R"(
-                KHLUA_Var_Frame = KHLUA_Var_Frame + 1
-            )", "lua_frame_update", ""
-        );
-
-        Lua_Compilation::lua_compile(
-            R"(
-                KHLUA_Var_Frame = 0
-            )", "lua_deinit", ""
-        );
-
-        Lua_Compilation::lua_compile(
-            R"(
-                local params, code, count = ...
-
-                if type(code) ~= "string" then
-                    return "ERROR: code must be a string"
-                end
-                
-                count = tonumber(count) or 1
-                if count < 1 then
-                    return "ERROR: execution count must be at least 1"
-                end
-                
-                local compiled
-
-                if not string.find(code, " ") and not string.find(code, "\t") and not string.find(code, "\n") then
-                    compiled = _G[code]
-                    if type(compiled) ~= "function" then
-                        return "ERROR: Function '" .. code .. "' not found or is not a function"
-                    end
-                else
-                    local func, err = load("return function(...) " .. code .. " end")
-
-                    if not func then
-                        return "ERROR: Failed to compile code: " .. tostring(err)
-                    end
-
-                    compiled = func()
-                end
-
-                local args = {}
-
-                if type(params) == "table" then
-                    args = params
-                elseif params ~= nil then
-                    args = {params}
-                end
-
-                local getTime = _G._kh_get_time_ms
-
-                if not getTime then
-                    return "ERROR: High precision timer not available"
-                end
-                
-                if count > 10 then
-                    for i = 1, 3 do
-                        compiled(unpack(args))
-                    end
-                end
-                
-                local start_time = getTime()
-                
-                for i = 1, count do
-                    compiled(unpack(args))
-                end
-                
-                local end_time = getTime()
-                local total_time = end_time - start_time
-                local average_time = total_time / count
-
-                local result = string.format("Count %d\nTotal: %.6f\nAverage: %.6f", 
-                    count, total_time, average_time)
-
-                return result
-            )", "", "KHLUA_Fnc_ProfileCode"
-        );
-
-        Lua_Compilation::lua_compile(
-            R"(
-                local inputTable = ...
-
-                if type(inputTable) ~= "table" then
-                    return {}
-                end
-                
-                local result = {}
-                local index = 1
-                
-                for key, value in pairs(inputTable) do
-                    result[index] = {key, value}
-                    index = index + 1
-                end
-                
-                return result
-            )", "", "KHLUA_Fnc_TableToPairs"
-        );
-
-        Lua_Compilation::lua_compile(
-            R"(
-                local inputTable = ...
-
-                if type(inputTable) ~= "table" then
-                    return {}
-                end
-                
-                local result = {}
-                
-                for i = 1, #inputTable do
-                    local pair = inputTable[i]
-                    if type(pair) == "table" and #pair >= 2 then
-                        result[pair[1]] = pair[2]
-                    end
-                end
-                
-                return result
-            )", "", "KHLUA_Fnc_PairsToTable"
-        );
-
-        Lua_Compilation::lua_compile(
-            R"(
-                local inputTable = ...
-
-                if type(inputTable) ~= "table" then
-                    return {}
-                end
-                
-                local result = {}
-                local index = 1
-                
-                for key, _ in pairs(inputTable) do
-                    result[index] = key
-                    index = index + 1
-                end
-                
-                return result
-            )", "", "KHLUA_Fnc_TableKeys"
-        );
-
-        Lua_Compilation::lua_compile(
-            R"(
-                local inputTable = ...
-
-                if type(inputTable) ~= "table" then
-                    return {}
-                end
-                
-                local result = {}
-                local index = 1
-                
-                for _, value in pairs(inputTable) do
-                    result[index] = value
-                    index = index + 1
-                end
-                
-                return result
-            )", "", "KHLUA_Fnc_TableValues"
-        );
-
-        Lua_Compilation::lua_compile(
-            R"(
-                local inputTable = ...
-
-                if type(inputTable) ~= "table" then
-                    return false
-                end
-                
-                local count = 0
-                
-                for _ in pairs(inputTable) do
-                    count = count + 1
-                end
-                
-                for i = 1, count do
-                    if inputTable[i] == nil then
-                        return false
-                    end
-                end
-                
-                return true
-            )", "", "KHLUA_Fnc_IsArray"
-        );
-
-        Lua_Compilation::lua_compile(
-            R"(
-                local inputValue = ...
-
-                if inputValue == nil then
-                    return "NOTHING"
-                end
-                
-                local lua_type = type(inputValue)
-                
-                if lua_type == "boolean" then
-                    return "BOOL"
-                elseif lua_type == "number" then
-                    return "SCALAR"
-                elseif lua_type == "string" then
-                    return "STRING"
-                elseif lua_type == "table" then
-                    return "ARRAY"
-                elseif lua_type == "userdata" then
-                    local mt = getmetatable(inputValue)
-
-                    if mt and mt.__name == "GameValue" then
-                        return inputValue:type_name()
-                    else
-                        return "USERDATA"
-                    end
-                else
-                    return "UNKNOWN"
-                end
-            )", "", "KHLUA_Fnc_GetDataType"
-        );
-
-        (*g_lua_state)["_kh_get_time_ms"] = []() -> double {
-            LARGE_INTEGER frequency, counter;
-            QueryPerformanceFrequency(&frequency);
-            QueryPerformanceCounter(&counter);
-            return (counter.QuadPart * 1000.0) / frequency.QuadPart;
-        };
-
-        cached_lua_init = Lua_Compilation::get_cpp_function("lua_init");
-        cached_lua_frame_update = Lua_Compilation::get_cpp_function("lua_frame_update");
-        cached_lua_deinit = Lua_Compilation::get_cpp_function("lua_deinit");
+        // Register all utility functions in Lua global namespace
+        (*g_lua_state)["GetSystemTime"] = lua_functions::get_system_time;
+        (*g_lua_state)["GetDateTime"] = lua_functions::get_date_time;
+        (*g_lua_state)["GetTimestamp"] = lua_functions::get_timestamp;
+        (*g_lua_state)["GetTimeMs"] = lua_functions::get_time_ms;
+        (*g_lua_state)["ProfileCode"] = lua_functions::profile_code;
+        (*g_lua_state)["GetDataType"] = lua_functions::get_data_type;
+        (*g_lua_state)["with_sqf"] = lua_functions::with_sqf;
         
         // Create sqf table for SQF functions, limited commands
         auto sqf_table = g_lua_state->create_named_table("sqf");
-        
-        sqf_table["diag_log"] = [](const std::string& string) {
-            sqf::diag_log(string);
+        sol::table sqf_metatable = g_lua_state->create_table();
+
+        sqf_metatable["__index"] = [](sol::table table, std::string key) -> sol::object {
+            // First check if the key exists in the table
+            sol::object existing = table.raw_get<sol::object>(key);
+
+            if (existing.valid() && existing != sol::nil) {
+                return existing;
+            }
+            
+            // Create a lambda that will call sqf.command with the captured key
+            sol::state_view lua(table.lua_state());
+            
+            auto command_func = [key](sol::variadic_args args) -> sol::object {
+                sol::state_view lua(args.lua_state());
+                sol::table sqf = lua["sqf"];
+                sol::function command = sqf["command"];
+                
+                if (args.size() == 0) {
+                    // Nullary command
+                    return command(key);
+                } else if (args.size() == 1) {
+                    // Unary command
+                    return command(key, args[0]);
+                } else if (args.size() == 2) {
+                    // Binary command
+                    return command(key, args[0], args[1]);
+                } else {
+                    // Too many arguments
+                    return sol::make_object(lua, "ERROR: SQF commands only support 0-2 arguments");
+                }
+            };
+            
+            // Return the function wrapped as a Lua object
+            return sol::make_object(lua, command_func);
+        };
+
+        // Apply the metatable to the sqf table
+        sqf_table[sol::metatable_key] = sqf_metatable;
+
+        sqf_table["command"] = [](sol::variadic_args args) -> sol::object {
+            if (args[0].get_type() != sol::type::string) {
+                return sol::nil;
+            }
+
+            if (args.size() == 1) {
+                return convert_game_value_to_lua(sqf::call2(sqf::compile(args[0].as<std::string>())));
+            } else if (args.size() == 2) {
+                return convert_game_value_to_lua(sqf::call2(sqf::compile(args[0].as<std::string>() + " _this"), convert_lua_to_game_value(args[1])));
+            } else if (args.size() == 3) {
+                // Compile the binary command pattern and call with the array
+                return convert_game_value_to_lua(sqf::call2(
+                    sqf::compile("(_this#0) " + args[0].as<std::string>() + " (_this#1)"), 
+                    game_value({convert_lua_to_game_value(args[1]), convert_lua_to_game_value(args[2])})
+                ));
+            }
+
+            return sol::nil;
+        };
+
+        sqf_table["diag_fps"] = []() -> float {
+            return sqf::diag_fps();
+        };
+
+        sqf_table["diag_fpsMin"] = []() -> float {
+            return sqf::diag_fpsmin();
+        };
+
+        sqf_table["diag_frameNo"] = []() -> float {
+            return sqf::diag_frameno();
+        };
+
+        sqf_table["diag_tickTime"] = []() -> float {
+            return sqf::diag_ticktime();
+        };
+
+        sqf_table["diag_captureFrame"] = [](float frame) -> sol::object {
+            sqf::diag_capture_frame(frame);
+            return sol::nil;
+        };
+
+        sqf_table["diag_captureFrameToFile"] = [](float frame) -> sol::object {
+            sqf::diag_capture_frame_to_file(frame);
+            return sol::nil;
+        };
+
+        sqf_table["diag_captureSlowFrame"] = [](sqf_string_const_ref section, float threshold) -> sol::object {
+            sqf::diag_capture_slow_frame(section, threshold);
+            return sol::nil;
+        };
+
+        sqf_table["diag_log"] = [](sqf_string_const_ref text) -> sol::object {
+            sqf::diag_log(text);
+            return sol::nil;
+        };
+
+        sqf_table["diag_logSlowFrame"] = [](sqf_string_const_ref section, float threshold) -> sol::object {
+            sqf::diag_log_slow_frame(section, threshold);
             return sol::nil;
         };
 
         sqf_table["call"] = [](sol::variadic_args args) -> sol::object {
-            if (args.size() == 1) {
-                std::string code = args[0];
-                return convert_game_value_to_lua(sqf::call2(sqf::compile(code)));
-            } else if (args.size() == 2) {
-                std::string code = args[0];
-                sol::object arg = args[1];
-                game_value gv_arg = convert_lua_to_game_value(arg);
-                return convert_game_value_to_lua(sqf::call2(sqf::compile(code), gv_arg));
+            if (args[0].get_type() != sol::type::string) {
+                return sol::nil;
             }
 
-            return sol::make_object(*g_lua_state, sol::nil);
+            if (args.size() == 1) {
+                return convert_game_value_to_lua(sqf::call2(sqf::compile(args[0].as<std::string>())));
+            } else if (args.size() == 2) {
+                return convert_game_value_to_lua(sqf::call2(sqf::compile(args[0].as<std::string>()), convert_lua_to_game_value(args[1])));
+            }
+            
+            return sol::nil;
         };
 
-        sqf_table["command"] = [](sol::variadic_args args) -> sol::object {
-            if (args.size() == 1) {
-                std::string command = args[0];
-                return convert_game_value_to_lua(sqf::call2(sqf::compile(command)));
-            } else if (args.size() == 2) {
-                std::string command = args[0];
-                sol::object arg = args[1];
-                game_value gv_arg = convert_lua_to_game_value(arg);
-                return convert_game_value_to_lua(sqf::call2(sqf::compile(command + " _this"), gv_arg));
-            } else if (args.size() == 3) {
-                std::string command = args[0];
-                sol::object arg1 = args[1];
-                sol::object arg2 = args[2];
-                
-                // Convert both arguments to game_value
-                game_value gv_arg1 = convert_lua_to_game_value(arg1);
-                game_value gv_arg2 = convert_lua_to_game_value(arg2);
-                
-                // Create an array containing both arguments
-                auto_array<game_value> arr;
-                arr.push_back(gv_arg1);
-                arr.push_back(gv_arg2);
-                game_value args_array(std::move(arr));
-                
-                // Compile the binary command pattern and call with the array
-                return convert_game_value_to_lua(sqf::call2(
-                    sqf::compile("(_this select 0) " + command + " (_this select 1)"), 
-                    args_array
-                ));
+        sqf_table["isNil"] = [](sol::object input) -> bool {
+            if (input.get_type() != sol::type::userdata) {
+                return false;
+            } else {
+                return sqf::is_nil(convert_lua_to_game_value(input));
             }
 
-            return sol::make_object(*g_lua_state, sol::nil);
+            return true;
         };
 
-        sqf_table["time"] = []() -> sol::object {
-            return convert_game_value_to_lua(sqf::time());
+        sqf_table["isNull"] = [](sol::object input) -> bool {
+            game_value gv = convert_lua_to_game_value(input);
+            return gv.is_null();
+        };
+        
+        sqf_table["publicVariable"] = [](sqf_string_const_ref var_name) -> sol::object {
+            sqf::public_variable(var_name);
+            return sol::nil;
+        };
+
+        sqf_table["publicVariableServer"] = [](sqf_string_const_ref var_name) -> sol::object {
+            sqf::public_variable_server(var_name);
+            return sol::nil;
+        };
+
+        sqf_table["publicVariableClient"] = [](float client_id, sqf_string_const_ref var_name) -> sol::object {
+            sqf::public_variable_client(client_id, var_name);
+            return sol::nil;
+        };
+
+        sqf_table["clientOwner"] = []() -> float {
+            return sqf::client_owner();
+        };
+
+        sqf_table["isServer"] = []() -> bool {
+            return sqf::is_server();
+        };
+
+        sqf_table["hasInterface"] = []() -> bool {
+            return sqf::has_interface();
+        };
+
+        sqf_table["currentNamespace"] = []() -> sol::object {
+            return convert_game_value_to_lua(sqf::current_namespace());
+        };
+
+        sqf_table["missionNamespace"] = []() -> sol::object {
+            return convert_game_value_to_lua(sqf::mission_namespace());
+        };
+
+        sqf_table["profileNamespace"] = []() -> sol::object {
+            return convert_game_value_to_lua(sqf::profile_namespace());
+        };
+
+        sqf_table["uiNamespace"] = []() -> sol::object {
+            return convert_game_value_to_lua(sqf::ui_namespace());
+        };
+
+        sqf_table["parsingNamespace"] = []() -> sol::object {
+            return convert_game_value_to_lua(sqf::parsing_namespace());
+        };
+
+        sqf_table["missionName"] = []() -> std::string {
+            return static_cast<std::string>(sqf::mission_name());
+        };
+
+        sqf_table["profileName"] = []() -> std::string {
+            return static_cast<std::string>(sqf::profile_name());
+        };
+
+        sqf_table["profileNameSteam"] = []() -> std::string {
+            return static_cast<std::string>(sqf::profile_namesteam());
+        };
+
+        sqf_table["blufor"] = []() -> sol::object {
+            return convert_game_value_to_lua(sqf::blufor());
+        };
+
+        sqf_table["west"] = []() -> sol::object {
+            return convert_game_value_to_lua(sqf::west());
+        };
+
+        sqf_table["opfor"] = []() -> sol::object {
+            return convert_game_value_to_lua(sqf::opfor());
+        };
+
+        sqf_table["east"] = []() -> sol::object {
+            return convert_game_value_to_lua(sqf::east());
+        };
+
+        sqf_table["resistance"] = []() -> sol::object {
+            return convert_game_value_to_lua(sqf::resistance());
+        };
+
+        sqf_table["independent"] = []() -> sol::object {
+            return convert_game_value_to_lua(sqf::independent());
+        };
+
+        sqf_table["civilian"] = []() -> sol::object {
+            return convert_game_value_to_lua(sqf::civilian());
+        };
+
+        sqf_table["sideLogic"] = []() -> sol::object {
+            return convert_game_value_to_lua(sqf::side_logic());
+        };
+
+        sqf_table["sideUnknown"] = []() -> sol::object {
+            return convert_game_value_to_lua(sqf::side_unknown());
+        };
+
+        sqf_table["sideEnemy"] = []() -> sol::object {
+            return convert_game_value_to_lua(sqf::side_enemy());
+        };
+
+        sqf_table["sideFriendly"] = []() -> sol::object {
+            return convert_game_value_to_lua(sqf::side_friendly());
+        };
+
+        sqf_table["sideAmbientLife"] = []() -> sol::object {
+            return convert_game_value_to_lua(sqf::side_ambient_life());
+        };
+
+        sqf_table["sideEmpty"] = []() -> sol::object {
+            return convert_game_value_to_lua(sqf::side_empty());
         };
     }
 }
@@ -628,7 +917,6 @@ static game_value execute_lua_sqf(game_value_parameter args, game_value_paramete
             if (cache_it != g_call_cache.end()) {
                 func = cache_it->second.func;
             } else {
-                // Get function from Lua global namespace
                 func = (*g_lua_state)[code_str];
 
                 if (!func.valid()) {
@@ -637,7 +925,7 @@ static game_value execute_lua_sqf(game_value_parameter args, game_value_paramete
 
                 // Cache it for future use
                 if (g_call_cache.size() >= MAX_CACHE_SIZE) {
-                    g_call_cache.erase(g_call_cache.begin());
+                    g_call_cache.clear();
                 }
                 
                 g_call_cache[code_str] = {code_str, func, true};
@@ -693,18 +981,11 @@ static game_value execute_lua_sqf(game_value_parameter args, game_value_paramete
                 }
                 
                 compiled_code = factory_result;
-                
-                // Cache the compiled code
-                if (g_code_cache.size() >= MAX_CACHE_SIZE) {
-                    g_code_cache.erase(g_code_cache.begin());
-                }
-
                 g_code_cache[code_hash] = compiled_code;
             }
             
             // Execute with arguments
             if (args.type_enum() == types::game_data_type::ARRAY) {
-                // Unpack array arguments
                 auto& arr = args.to_array();
                 std::vector<sol::object> arg_vec;
                 arg_vec.reserve(arr.size());
@@ -768,16 +1049,13 @@ static game_value compile_lua_sqf(game_value_parameter name, game_value_paramete
             return game_value("ERROR: Function name cannot be empty");
         }
         
-        // Compile using the existing compilation system
-        auto result = Lua_Compilation::lua_compile(lua_code, "", lua_name);
+        auto result = Lua_Compilation::lua_compile(lua_code, lua_name);
         
-        if (result.success) {            
-            // Also update our caches if the function was compiled
+        if (result.success) {
             if (!lua_name.empty() && result.function.valid()) {
                 // Update call cache
                 if (g_call_cache.size() >= MAX_CACHE_SIZE) {
-                    // Remove oldest entry if cache is full
-                    g_call_cache.erase(g_call_cache.begin());
+                    g_call_cache.clear();
                 }
                 g_call_cache[lua_name] = {lua_name, result.function, true};
             }
@@ -802,6 +1080,7 @@ int intercept::api_version() {
 
 void intercept::pre_start() {
     initialize_lua_state();
+    (*g_lua_state)["MissionActive"] = false;
 
     _execute_lua_sqf_command = intercept::client::host::register_sqf_command(
         "luaExecute",
@@ -825,7 +1104,13 @@ void intercept::pre_start() {
 }
 
 void intercept::pre_init() {
-    cached_lua_init();    
+    (*g_lua_state)["MissionActive"] = true;
+
+    if (sqf::is_server() || !sqf::has_interface()) {
+        g_lua_state->open_libraries(sol::lib::ffi);
+    }
+
+    lua_functions::lua_init();
     sqf::diag_log("KH Framework Lua - Pre-init Complete");
 }
 
@@ -834,11 +1119,12 @@ void intercept::post_init() {
 }
 
 void intercept::on_frame() {
-    cached_lua_frame_update();
+    lua_functions::lua_frame_update();
 }
 
 void intercept::mission_ended() {
-    cached_lua_deinit();
+    (*g_lua_state)["MissionActive"] = false;
+    lua_functions::lua_deinit();
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {

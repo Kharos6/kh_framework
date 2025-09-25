@@ -48,7 +48,7 @@ call KH_fnc_luaResetState;
             getText (_x >> "name");
         }
         else {
-           	[_prefix, "lua", configName _x] joinString "_";
+           	[_prefix, "Fnc", configName _x] joinString "_";
         };
 
         _name luaCompile _function;
@@ -79,17 +79,24 @@ call KH_fnc_luaResetState;
 
     {
         private _function = if (isText (_x >> "path")) then {
-            preprocessFile ([(getText (_x >> "path")), "\", configName _x, ".lua"] joinString "");
+			private _path = getText (_x >> "path");
+
+			if (_path isEqualTo "") then {
+				preprocessFile ([(getText (_x >> "path")), configName _x, ".lua"] joinString "");
+			}
+			else {
+            	preprocessFile ([(getText (_x >> "path")), "\", configName _x, ".lua"] joinString "");
+			};
         }
         else {
-            preprocessFile ([(getText (_config >> "path")), "\", configName _x, ".lua"] joinString "");
+            preprocessFile ([(getText (_config >> "path")), configName _x, ".lua"] joinString "");
         };
 
         private _name = if (isText (_x >> "name")) then {
             getText (_x >> "name");
         }
         else {
-           	[_prefix, "lua", configName _x] joinString "_";
+           	[_prefix, "Fnc", configName _x] joinString "_";
         };
 
 		_name luaCompile _function;

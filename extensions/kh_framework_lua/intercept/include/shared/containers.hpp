@@ -70,12 +70,12 @@ namespace intercept::types {
 
         static void destroy_deallocate(Type* _Ptr) {
             destroy(_Ptr);
-            return __internal::rv_allocator_deallocate_generic(_Ptr);
+            deallocate(_Ptr);
         }
 
         static void destroy_deallocate(Type* _Ptr, size_t size_) {
             destroy(_Ptr, size_);
-            return __internal::rv_allocator_deallocate_generic(_Ptr);
+            deallocate(_Ptr, size_);
         }
 
         //This only allocates the memory! This will not be initialized to 0 and the allocated object will not have it's constructor called!
@@ -121,15 +121,15 @@ namespace intercept::types {
     };
 
     class rv_pool_allocator {
-    #ifndef __GNUC__
+#ifndef __GNUC__
         //It is required, but GCC doesn't care about unused members and ignores the attribute, and thus warns about a ignored attribute
-        [[maybe_unused]] 
-    #endif
-        #ifdef _WIN64
+        [[maybe_unused]]
+#endif
+#ifdef _WIN64
         char pad_0x0000[0x48];  //0x0000
-        #else
+#else
         char pad_0x0000[0x24];  //0x0000
-        #endif
+#endif
     public:
         const char* _allocName;
 
@@ -151,9 +151,9 @@ namespace intercept::types {
         static const size_t buffersize_bytes = (Count * sizeof(Type));
         //Raw size in count of buffer_type elements
         static const size_t buffersize_count = (buffersize_bytes + sizeof(buffer_type) - 1) / sizeof(buffer_type);
-        #ifndef __linux__
+#ifndef __linux__
         int dummy{0};
-        #endif
+#endif
         buffer_type buf[buffersize_count]{0};
         bool has_data{false};
 
@@ -200,29 +200,54 @@ namespace intercept::types {
 #pragma endregion
 
 #pragma region Refcounting
-
+    /**
+     * @brief Referencing counting base class
+     * This class keeps tracks of references for objects that we want to.
+     * <a href="https://en.wikipedia.org/wiki/Reference_counting"> Reference counting </a>
+     */
     class refcount_base {
     public:
         constexpr refcount_base() noexcept : _refcount(0) {}
         constexpr refcount_base(const refcount_base&) noexcept : _refcount(0) {}
         constexpr void operator=(const refcount_base&) const noexcept {}
 
-        constexpr int add_ref() const noexcept {
+        /**
+         * @brief Increments the reference counter
+         */
+        int add_ref() const noexcept {
             return ++_refcount;
         }
-        constexpr int dec_ref() const noexcept {
+        /**
+         * @brief Decrements the reference counter
+         */
+        int dec_ref() const noexcept {
             return --_refcount;
         }
-        constexpr int ref_count() const noexcept {
+        /**
+         * @brief Returns the reference count
+         */
+        int ref_count() const noexcept {
             return _refcount;
         }
+        /**
+         * @brief reference counter
+         * mutable due to const/constexpr functions
+         */
         mutable int _refcount;
     };
 
-    //refcount has to be the first element in a class. Use refcount_vtable instead if refcount is preceded by a vtable
+    /**
+     * @brief Referencing counting class, inherits from refcount_base.
+     * refcount has to be the first element in a class. Use _refcount_vtable_dummy instead if refcount is preceded by a vtable
+     * <a href="https://en.wikipedia.org/wiki/Reference_counting"> Reference counting </a>
+     */
     class refcount : public refcount_base {
     public:
         virtual ~refcount() = default;
+
+        /**
+         * @brief decrement reference count and delete object if refcount is zero
+         */
         int release() const {
             const auto rcount = dec_ref();
             if (rcount == 0) {
@@ -232,15 +257,29 @@ namespace intercept::types {
             }
             return rcount;
         }
+
+        /**
+         * @brief deletes object
+         */
         void destruct() const noexcept {
             delete const_cast<refcount*>(this);
         }
+        /**
+         * @brief  customization point for destruct
+         */
         virtual void lastRefDeleted() const { destruct(); }
 
     private:
         virtual int __dummy_refcount_func() const noexcept { return 0; }
     };
+
+
     class game_value_static;
+    /**
+     * @brief Reference counting class template.
+     * Type must inherit from refcount_base
+     * <a href="https://en.wikipedia.org/wiki/Reference_counting"> Reference counting </a>
+     */
     template <class Type>
     class ref {
         friend class game_value_static;  //Overrides _ref to nullptr in destructor when Arma is exiting
@@ -253,12 +292,20 @@ namespace intercept::types {
         constexpr ref() noexcept = default;
         ~ref() { free(); }
 
-        //Construct from Pointer
+        /**
+         * @brief Construct from Pointer
+         * @param other_ generic type pointer to construct from
+         */
         constexpr ref(Type* other_) noexcept {
             if (other_) other_->add_ref();
             _ref = other_;
         }
-        //Copy from pointer
+
+        /**
+         * @brief Assignment operator
+         * @param source_ generic type pointer to object to store
+         * @return object to store
+         */
         ref& operator=(Type* source_) noexcept {
             Type* old = _ref;
             if (source_) source_->add_ref();
@@ -267,13 +314,21 @@ namespace intercept::types {
             return *this;
         }
 
-        //Construct from reference
+        /**
+         * @brief copy constructor
+         * @param source_ref_  reference to copy from
+         */
         constexpr ref(const ref& source_ref_) noexcept {
             Type* source = source_ref_._ref;
             if (source) source->add_ref();
             _ref = source;
         }
-        //Copy from reference.
+
+        /**
+         * @brief Assignment operator
+         * @param other_ reference to object to store
+         * @return object to store
+         */
         ref& operator=(const ref& other_) {
             Type* source = other_._ref;
             Type* old = _ref;
@@ -283,7 +338,10 @@ namespace intercept::types {
             return *this;
         }
 
-        //Construct from reference and convert
+        /**
+         * @brief Construct from reference and convert
+         * @param source_ref_ reference to construct from and convert
+         */
         template <typename T>
         constexpr ref(const ref<T>& source_ref_) noexcept {
             static_assert(std::is_constructible_v<Type*, T*> || std::is_base_of_v<T, Type>, "Cannot convert intercept::types::ref to incompatible type");
@@ -291,7 +349,11 @@ namespace intercept::types {
             if (source) source->add_ref();
             _ref = static_cast<Type*>(source);
         }
-        //Copy from reference.
+
+        /**
+         * @brief Copy from reference and convert
+         * @param other_ reference to copy from and convert
+         */
         template <class T>
         ref& operator=(const ref<T>& other_) {
             static_assert(std::is_constructible_v<Type*, T*> || std::is_base_of_v<T, Type>, "Cannot convert intercept::types::ref to incompatible type");
@@ -303,12 +365,25 @@ namespace intercept::types {
             return *this;
         }
 
+        /**
+         * @brief Swap references
+         * @param other_ reference to swap with
+         */
         void swap(ref& other_) noexcept {
             auto temp = other_._ref;
             other_._ref = _ref;
             _ref = temp;
         }
+
+        /**
+         * @brief check if ref is null
+         * @return bool
+         */
         constexpr bool is_null() const noexcept { return _ref == nullptr; }
+        
+        /**
+         * @brief free reference and set to null
+         */
         void free() noexcept {
             if (!_ref) return;
             _ref->release();
@@ -317,11 +392,20 @@ namespace intercept::types {
         //This returns a pointer to the underlying object. Use with caution!
 
         [[deprecated]] constexpr Type* getRef() const noexcept { return _ref; }
-        ///This returns a pointer to the underlying object. Use with caution!
+
+        /**
+         * @brief get pointer.  Use with caution!
+         * @return pointer to the underlying object
+         */
         constexpr Type* get() const noexcept { return _ref; }
         constexpr Type* operator->() const noexcept { return _ref; }
         operator Type*() const noexcept { return _ref; }
         bool operator!=(const ref<Type>& other_) const noexcept { return _ref != other_._ref; }
+
+        /**
+         * @brief get reference count
+         * @return reference count
+         */
         size_t ref_count() const noexcept { return _ref ? _ref->ref_count() : 0; }
     };
 
@@ -607,9 +691,9 @@ namespace intercept::types {
         Type& front() noexcept { return _data; }
         const Type& front() const noexcept { return _data; }
         iterator begin() noexcept { return iterator(&_data); }
-        iterator end() noexcept { return iterator((&_data) + _size - 1); }
+        iterator end() noexcept { return iterator((&_data) + _size); }
         const_iterator cbegin() const noexcept { return const_iterator(&_data); }
-        const_iterator cend() const noexcept { return const_iterator((&_data) + _size - 1); }
+        const_iterator cend() const noexcept { return const_iterator((&_data) + _size); }
 
         const Type& operator[](const size_t index_) const {
             return *(cbegin() + index_);
@@ -642,20 +726,22 @@ namespace intercept::types {
             return buffer;
         }
         static compact_array* create(const compact_array& other) {
-            const size_t size = other.size();
-            auto* buffer = reinterpret_cast<compact_array*>(Allocator::allocate(size));
-            new (buffer) compact_array(size);
+            const size_t sizeElements = other.size();
+            const size_t sizeBytes = sizeof(compact_array) + sizeof(Type) * (sizeElements - 1);
+            auto* buffer = reinterpret_cast<compact_array*>(Allocator::allocate(sizeBytes));
+            new (buffer) compact_array(sizeElements);
             std::copy(other.data(), other.data() + other.size(), buffer->data());
             return buffer;
         }
 
         template <class _InIt>
         static compact_array* create(_InIt beg, _InIt end) {
-            const size_t size = sizeof(compact_array) + sizeof(Type) * (std::distance(beg, end) - 1);
-            auto* buffer = reinterpret_cast<compact_array*>(Allocator::allocate(size));
-            std::memset(buffer, 0, size);
+            const size_t sizeElements = (std::distance(beg, end));
+            const size_t sizeBytes = sizeof(compact_array) + sizeof(Type) * (sizeElements - 1);
+            auto* buffer = reinterpret_cast<compact_array*>(Allocator::allocate(sizeBytes));
+            std::memset(buffer, 0, sizeBytes);
 #pragma warning(suppress : 26409)  //don't use new/delete
-            new (buffer) compact_array(size);
+            new (buffer) compact_array(sizeElements);
 
             size_t index = 0;
             for (auto& i = beg; i < end; ++i) {
@@ -782,8 +868,10 @@ namespace intercept::types {
             if (other_.length() > _ref->size()) return false;  //There is more data than we can even have
 
             return std::equal(other_.cbegin(), other_.cend(),
-                              _ref->cbegin(), _ref->cend(),
-                [](unsigned char l, unsigned char r) { return l == r || tolower(l) == tolower(r); });
+                              begin(), end(),
+                              [](unsigned char l, unsigned char r) {
+                                  return l == r || tolower(l) == tolower(r);
+                              });
         }
 
         ///== is case insensitive just like scripting
@@ -815,7 +903,7 @@ namespace intercept::types {
         }
 
         bool operator<(const r_string& other_) const {
-            if (empty()) return false; 
+            if (empty()) return false;
             return strcmp(data(), other_.data()) < 0;
         }
 
@@ -841,14 +929,14 @@ namespace intercept::types {
         }
 
         bool compare_case_sensitive(std::string_view other_) const {
-            if (length()  != other_.length()) return false;
-            return !std::equal(_ref->cbegin(), _ref->cend(),
+            if (length() != other_.length()) return false;
+            return !std::equal(begin(), end(),
                                other_.cbegin(), [](unsigned char l, unsigned char r) { return l == r; });
         }
 
         bool compare_case_insensitive(std::string_view other_) const {
             if (length() != other_.length()) return false;
-            return !std::equal(_ref->cbegin(), _ref->cend(),
+            return !std::equal(begin(), end(),
                                other_.cbegin(), [](unsigned char l, unsigned char r) { return ::tolower(l) == ::tolower(r); });
         }
 
@@ -866,8 +954,8 @@ namespace intercept::types {
         }
 
         size_t find(std::string_view substring_, const size_t start_ = 0) const {
-            if (_ref == nullptr || length() == 0) return -1;
-            auto res = std::search(begin(), end(), substring_.begin(), substring_.end());
+            if (_ref == nullptr || length() == 0 || start_ > length()) return -1;
+            auto res = std::search(begin() + start_, end(), substring_.begin(), substring_.end());
             if (res == end()) return -1;
             return std::distance(begin(), res);
         }
@@ -931,8 +1019,9 @@ namespace intercept::types {
         }
         ///Be careful! This returns nullptr on empty string
         compact_array<char>::const_iterator end() const noexcept {
+            //#TODO could use sentinel here, would spare us the strlen call.
             if (_ref)
-                return _ref->end();
+                return _ref->begin() + length();  //Cannot use compact array end, as that is the whole buffer including null chars or end garbage
             return {};
         }
         char front() const noexcept {
@@ -1145,17 +1234,18 @@ namespace intercept::types {
             move_._n = 0;
         }
         Type& get(const size_t i_) {
-            if (i_ > count()) throw std::out_of_range("rv_array access out of range");
+            if (i_ > size()) throw std::out_of_range("rv_array access out of range");
             return _data[i_];
         }
         const Type& get(const size_t i_) const {
-            if (i_ > count()) throw std::out_of_range("rv_array access out of range");
+            if (i_ > size()) throw std::out_of_range("rv_array access out of range");
             return _data[i_];
         }
         Type& operator[](const size_t i_) { return get(i_); }
         const Type& operator[](const size_t i_) const { return get(i_); }
-        Type* data() { return _data; }
-        constexpr size_t count() const noexcept { return static_cast<size_t>(_n); }
+        Type* data() noexcept { return _data; }
+        const Type* data() const noexcept { return _data; }
+        [[deprecated("Use size() instead")]] constexpr size_t count() const noexcept { return static_cast<size_t>(_n); }
         constexpr size_t size() const noexcept { return static_cast<size_t>(_n); }
 
         iterator begin() {
@@ -1179,26 +1269,26 @@ namespace intercept::types {
         Type& front() { return get(0); }
         Type& back() { return get(_n - 1); }
 
-        bool is_empty() const { return _n == 0; }
-        bool empty() const { return _n == 0; }
+        bool is_empty() const noexcept { return _n == 0; }
+        bool empty() const noexcept { return _n == 0; }
 
         template <class Func>
         void for_each(const Func& f_) const {
-            for (size_t i = 0; i < count(); i++) {
+            for (size_t i = 0; i < size(); i++) {
                 f_(get(i));
             }
         }
 
         template <class Func>
         void for_each_backwards(const Func& f_) const {  //This returns if Func returns true
-            for (size_t i = count() - 1; i >= 0; i--) {
+            for (size_t i = size() - 1; i >= 0; i--) {
                 if (f_(get(i))) return;
             }
         }
 
         template <class Func>
         void for_each(const Func& f_) {
-            for (size_t i = 0; i < count(); i++) {
+            for (size_t i = 0; i < size(); i++) {
                 f_(get(i));
             }
         }
@@ -1215,7 +1305,7 @@ namespace intercept::types {
         }
     };
 
-    template <class Type, class Allocator = rv_allocator<Type>, size_t growthFactor = 32>
+    template <class Type, class Allocator = rv_allocator<Type>, size_t maxGrowth = 128>
     class
 #ifdef _MSC_VER
         __declspec(empty_bases)
@@ -1235,36 +1325,34 @@ namespace intercept::types {
         void reallocate(size_t size_) {
             if (_maxItems == size_) return;
 
-            if (base::_n > static_cast<int>(size_)) {
-                resize(size_);
-                return;  //resize calls reallocate and reallocates... Ugly.. I know
-            }
             Type* newData = nullptr;
             if (base::_data && size_ > 0 && ((newData = try_realloc(base::_data, size_)))) {
-                //if (size > _maxItems)//Don't null out new stuff if there is no new stuff
-                //    std::fill(reinterpret_cast<uint32_t*>(&newData[_maxItems]), reinterpret_cast<uint32_t*>(&newData[size]), 0);
                 _maxItems = static_cast<int>(size_);
                 base::_data = newData;
                 return;
             }
             newData = Allocator::create_uninitialized_array(size_);
-            //memset(newData, 0, size * sizeof(Type));
-            if (base::_data) {
+            if (base::_data && newData != base::_data) {
+                if (base::_n) {
+                    // ! Technically this is only legal for trivially copyable types
+                    // see: https://en.cppreference.com/w/cpp/string/byte/memcpy
 #ifdef __GNUC__
-                memmove(newData, base::_data, base::_n * sizeof(Type));
+                    memcpy(newData, base::_data, base::_n * sizeof(Type));
 #else
-                //std::uninitialized_move(begin(), end(), newData); //This might be cleaner. But still causes a move construct call where memmove just moves bytes.
-                memmove_s(newData, size_ * sizeof(Type), base::_data, base::_n * sizeof(Type));
+                    memcpy_s(newData, size_ * sizeof(Type), base::_data, base::_n * sizeof(Type));
 #endif
+                }
                 Allocator::deallocate(base::_data);
             }
             base::_data = newData;
             _maxItems = static_cast<int>(size_);
         }
-
+        // Doubles the capacity, or increases it by a maxGrowth limit
+        // Also makes sure at least n_ new elements are available
         void grow(const size_t n_) {
 #undef max
-            reallocate(_maxItems + std::max(n_, growthFactor));
+#undef min
+            reallocate(_maxItems + std::max(n_, std::min(static_cast<size_t>(_maxItems), maxGrowth)));
         }
 
     public:
@@ -1289,16 +1377,16 @@ namespace intercept::types {
             move_._maxItems = 0;
         }
         ~auto_array() {
-            if (base::_data == nullptr) return;
-            resize(0);
+            clear(true);
         }
         /**
         * @brief Reduces capacity to minimum required to store current content
         */
         void shrink_to_fit() {
-            resize(base::_n);
+            reallocate(base::_n);
         }
         auto_array& operator=(auto_array&& move_) noexcept {
+            clear(true);
             base::_n = move_._n;
             _maxItems = move_._maxItems;
             base::_data = move_._data;
@@ -1309,39 +1397,43 @@ namespace intercept::types {
         }
 
         auto_array& operator=(const auto_array& copy_) {
+            clear();
             if (copy_._n) {
-                clear();
                 insert(base::end(), copy_.begin(), copy_.end());
             }
             return *this;
         }
 
         /**
-        * @brief Makes sure the capacity is exactly _n. Destructs and deallocates all elements past n_
+        * @brief Makes sure the size is exactly _n. Destructs all elements past n_
         */
         void resize(const size_t n_) {
             if (static_cast<int>(n_) < base::_n) {
                 for (int i = static_cast<int>(n_); i < base::_n; i++) {
                     (*this)[i].~Type();
                 }
-                base::_n = static_cast<int>(n_);
             }
-            if (n_ == 0 && base::_data) {
-                Allocator::deallocate(rv_array<Type>::_data);
-                rv_array<Type>::_data = nullptr;
-                return;
+            reserve(n_);
+            if (n_ > base::_n) {  //adding elements, need to default init
+                for (size_t i = base::_n; i < n_; ++i) {
+#pragma warning(suppress : 26409)
+                    ::new (base::_data + i) Type();
+                }
             }
-            reallocate(n_);
+            base::_n = static_cast<int>(n_);
         }
-        
+
         /**
         * @brief Makes sure the capacity is big enough to contain res_ elements
         * @param res_ new minimum buffer size
         */
         void reserve(const size_t res_) {
-            if (_maxItems < static_cast<int>(res_)) {
-                grow(res_ - _maxItems);
-            }
+            if (static_cast<int>(res_) > _maxItems) // only increase capacity
+                reallocate(res_);
+        }
+
+        uint32_t capacity() const noexcept {
+            return static_cast<uint32_t>(_maxItems);
         }
 
         /**
@@ -1408,9 +1500,8 @@ namespace intercept::types {
         //    memmove_s(&(*this)[index], (base::_n - index) * sizeof(Type), &(*this)[index + 1], (base::_n - index - 1) * sizeof(Type));
         //}
         void erase(const_iterator element_) {
-            if (element_ < base::begin() || element_ > base::end()) throw std::runtime_error("Invalid Iterator");
+            if (element_ < base::begin() || element_ >= base::end()) throw std::runtime_error("Invalid Iterator");
             const size_t index = std::distance(base::cbegin(), element_);
-            if (static_cast<int>(index) > base::_n) return;
             auto&& item = (*this)[index];
             item.~Type();
 #ifdef __GNUC__
@@ -1433,9 +1524,9 @@ namespace intercept::types {
             }
             if (last_ != end()) {
 #ifdef __GNUC__
-                memmove(&(*this)[firstIndex], &(*this)[lastIndex + 1], (base::_n - lastIndex - 1) * sizeof(Type));
+                memmove(&(*this)[firstIndex], &(*this)[lastIndex], (base::_n - lastIndex) * sizeof(Type));
 #else
-                memmove_s(&(*this)[firstIndex], (base::_n - firstIndex) * sizeof(Type), &(*this)[lastIndex + 1], (base::_n - lastIndex - 1) * sizeof(Type));
+                memmove_s(&(*this)[firstIndex], (base::_n - firstIndex) * sizeof(Type), &(*this)[lastIndex], (base::_n - lastIndex) * sizeof(Type));
 #endif
             }
             base::_n -= range;
@@ -1458,7 +1549,7 @@ namespace intercept::types {
             if (_where < base::begin() || _where > base::end()) throw std::runtime_error("Invalid Iterator");  //WTF?!
             const size_t insertOffset = std::distance(base::begin(), _where);
             const size_t previousEnd = static_cast<size_t>(base::_n);
-            const size_t oldSize = base::count();
+            const size_t oldSize = base::size();
             reserve(oldSize + 1);
 
             //emplace_back(_value);
@@ -1477,13 +1568,13 @@ namespace intercept::types {
         * @param _last end of the range
         * @return A iterator pointing to the first inserted value
         */
-        template <class _InIt>//This is sooo not threadsafe!
+        template <class _InIt>  //This is sooo not threadsafe!
         iterator insert(iterator _where, _InIt _first, _InIt _last) {
             if (_first == _last) return _where;                                                                //Boogie!
             if (_where < base::begin() || _where > base::end()) throw std::runtime_error("Invalid Iterator");  //WTF?!
             const size_t insertOffset = std::distance(base::begin(), _where);
             const size_t previousEnd = static_cast<size_t>(base::_n);
-            const size_t oldSize = base::count();
+            const size_t oldSize = base::size();
             const size_t insertedSize = std::distance(_first, _last);
             reserve(oldSize + insertedSize);
 
@@ -1511,11 +1602,17 @@ namespace intercept::types {
             return insert(where_, values_.begin(), values_.end());
         }
 
-        void clear() {
-            if (base::_data)
-                Allocator::deallocate(rv_array<Type>::_data);
+        void clear(bool dealloc_ = false) {
+            if (dealloc_) {
+                if (base::_data)
+                    Allocator::destroy_deallocate(base::_data, base::_n);
+                base::_data = nullptr;
+                _maxItems = 0;
+            } else {
+                if (base::_data)
+                    Allocator::destroy(base::_data, base::_n);
+            }
             base::_n = 0;
-            _maxItems = 0;
         }
 
         bool operator==(rv_array<Type> other_) {
@@ -1650,6 +1747,7 @@ namespace intercept::types {
             return strcmp(k1, k2) == 0;
         }
         */
+        using key_type = std::string_view;
         static unsigned int hash_key(std::string_view key) noexcept {
             return rv_map_hash_string_case_sensitive(key);
         }
@@ -1689,7 +1787,7 @@ namespace intercept::types {
     template <class Type, class Container, class Traits = map_string_to_class_trait>
     class map_string_to_class {
     protected:
-        Container* _table;
+        Container* _table = nullptr;
         int _tableCount{0};
         int _count{0};
         static Type _null_entry;
@@ -1703,7 +1801,7 @@ namespace intercept::types {
                 return _map->_table ? static_cast<size_t>(_map->_tableCount) : 0u;
             }
             void get_next() {
-                while (_table < number_of_tables() && _item >= _map->_table[_table].count()) {
+                while (_table < number_of_tables() && _item >= _map->_table[_table].size()) {
                     _table++;
                     _item = 0;
                 }
@@ -1765,13 +1863,51 @@ namespace intercept::types {
         }
 
         map_string_to_class() {}
+        ~map_string_to_class() {
+            clear(true);
+        }
+        map_string_to_class(const map_string_to_class& copy_) {
+            *this = copy_;
+        }
+        map_string_to_class(map_string_to_class&& move_) noexcept {
+            *this = std::move(move_);
+        }
+        map_string_to_class& operator=(const map_string_to_class& copy_) {
+            //#TODO most of this work can just be skipped if we check copy_.empty()
+            auto oldTableCount = _tableCount;
+            _tableCount = copy_._tableCount;
+            _count = copy_._count;
+            auto newTable = rv_allocator<Container>::create_array(_tableCount);
+            if (copy_._table) // If we had a table, copy over the values
+                for (auto i = 0; i < _tableCount; i++) {
+                    auto& container = copy_._table[i];
+                    for (Type& item : container) {
+                        auto hashedKey = hash_key(item.get_map_key());
+                        newTable[hashedKey].emplace(newTable[hashedKey].end(), item);
+                    }
+                }
+            std::swap(_table, newTable);
+            if (newTable) // is now old table, may have been nullptr
+                rv_allocator<Container>::destroy_deallocate(newTable, oldTableCount);
+            return *this;
+        }
+        map_string_to_class& operator=(map_string_to_class&& move_) noexcept {
+            clear(true);
+            _table = move_._table;
+            _tableCount = move_._tableCount;
+            _count = move_._count;
+            move_._table = nullptr;
+            move_._count = 0;
+            move_._tableCount = 0;
+            return *this;
+        }
 
         template <class Func>
         void for_each(Func func_) const {
             if (!_table || !_count) return;
             for (int i = 0; i < _tableCount; i++) {
                 const Container& container = _table[i];
-                for (int j = 0; j < container.count(); j++) {
+                for (int j = 0; j < container.size(); j++) {
                     func_(container[j]);
                 }
             }
@@ -1782,16 +1918,16 @@ namespace intercept::types {
             if (!_table || !_count) return;
             for (int i = _tableCount - 1; i >= 0; i--) {
                 const Container& container = _table[i];
-                for (int j = container.count() - 1; j >= 0; j--) {
+                for (int j = container.size() - 1; j >= 0; j--) {
                     func_(container[j]);
                 }
             }
         }
 
-        const Type& get(std::string_view key_) const {
+        const Type& get(typename Traits::key_type key_) const {
             if (!_table || !_count) return _null_entry;
             const int hashed_key = hash_key(key_);
-            for (size_t i = 0; i < _table[hashed_key].count(); i++) {
+            for (size_t i = 0; i < _table[hashed_key].size(); i++) {
                 const Type& item = _table[hashed_key][i];
                 if (Traits::compare_keys(item.get_map_key(), key_))
                     return item;
@@ -1799,22 +1935,22 @@ namespace intercept::types {
             return _null_entry;
         }
 
-        Container* get_table_for_key(std::string_view key_) {
+        Container* get_table_for_key(typename Traits::key_type key_) {
             if (!_table || !_count) return nullptr;
             const int hashed_key = hash_key(key_);
             return &_table[hashed_key];
         }
 
-        const Container* get_table_for_key(std::string_view key_) const {
+        const Container* get_table_for_key(typename Traits::key_type key_) const {
             if (!_table || !_count) return nullptr;
             const int hashed_key = hash_key(key_);
             return &_table[hashed_key];
         }
 
-        Type& get(std::string_view key_) {
+        Type& get(typename Traits::key_type key_) {
             if (!_table || !_count) return _null_entry;
             const int hashed_key = hash_key(key_);
-            for (size_t i = 0; i < _table[hashed_key].count(); i++) {
+            for (size_t i = 0; i < _table[hashed_key].size(); i++) {
                 Type& item = _table[hashed_key][i];
                 if (Traits::compare_keys(item.get_map_key(), key_))
                     return item;
@@ -1824,27 +1960,31 @@ namespace intercept::types {
 
         static bool is_null(const Type& value_) { return &value_ == &_null_entry; }
 
-        bool has_key(std::string_view key_) const {
+        bool has_key(typename Traits::key_type key_) const {
             return !is_null(get(key_));
         }
 
-        int count() const { return _count; }
+        [[deprecated("Use size() instead")]] int count() const { return _count; }
+        int size() const { return _count; }
 
         //ArmaDebugEngine
         void rebuild(int tableSize) {
             auto oldTableCount = _tableCount;
             _tableCount = tableSize;
             auto newTable = rv_allocator<Container>::create_array(tableSize);
-            for (auto i = 0; i < _tableCount; i++) {
-                auto& container = newTable[i];
-                for (Type& item : container) {
-                    auto hashedKey = hash_key(item.get_map_key());
-                    auto it = newTable[hashedKey].emplace(newTable[hashedKey].end(), Type());
-                    *it = std::move(item);
+            _count = 0;  // redo count in case tableSize < oldTableCount
+            if (_table) // If we had a previous table, copy over old values
+                for (auto i = 0; i < oldTableCount; i++) {
+                    auto& container = _table[i];
+                    for (Type& item : container) {
+                        auto hashedKey = hash_key(item.get_map_key());
+                        newTable[hashedKey].emplace(newTable[hashedKey].end(), std::move(item));
+                    }
+                    _count += static_cast<int>(container.size());
                 }
-            }
             std::swap(_table, newTable);
-            rv_allocator<Container>::destroy_deallocate(newTable, oldTableCount);
+            if (newTable) // is now old table, may have been nullptr
+                rv_allocator<Container>::destroy_deallocate(newTable, oldTableCount);
         }
 
         Type& insert(const Type& value) {
@@ -1855,6 +1995,12 @@ namespace intercept::types {
                 return old;
             }
 
+            //#TODO refactor this and the full check into a "ensure space" method
+            if (!_table) {
+                // Not initialized yet
+                rebuild(std::max(1, _tableCount));
+            }
+
             //Are we full?
             if (_count + 1 > (16 * _tableCount)) {
                 int tableSize = _tableCount + 1;
@@ -1863,6 +2009,7 @@ namespace intercept::types {
                 } while (_count + 1 > (16 * (tableSize - 1)));
                 rebuild(tableSize - 1);
             }
+
             auto hashedkey = hash_key(key);
             auto& x = *(_table[hashedkey].emplace_back(value));
             _count++;
@@ -1878,6 +2025,11 @@ namespace intercept::types {
                 return old;
             }
 
+            if (!_table) {
+                // Not initialized yet
+                rebuild(std::max(1, _tableCount));
+            }
+
             //Are we full?
             if (_count + 1 > (16 * _tableCount)) {
                 int tableSize = _tableCount + 1;
@@ -1887,23 +2039,19 @@ namespace intercept::types {
                 rebuild(tableSize - 1);
             }
 
-            if (!_table) {
-                _table = rv_allocator<Container>::create_array(_tableCount);
-            }
-
             auto hashedkey = hash_key(key);
             auto& x = *(_table[hashedkey].emplace_back(std::move(value)));
             _count++;
             return x;
         }
 
-        bool remove(std::string_view key) {
+        bool remove(typename Traits::key_type key) {
             if (_count <= 0) return false;
 
             int hashedKey = hash_key(key);
-            for (size_t i = 0; i < _table[hashedKey].size(); i++) {
+            for (size_t i = 0; i < _table[hashedKey].size(); ++i) {
                 Type& item = _table[hashedKey][i];
-                if (Traits::compare_keys(item.get_map_key(), key) == 0) {
+                if (Traits::compare_keys(item.get_map_key(), key)) {
                     _table[hashedKey].erase(_table[hashedKey].begin() + i);
                     _count--;
                     return true;
@@ -1913,12 +2061,44 @@ namespace intercept::types {
         }
 
         //Is empty?
-        bool empty() {
+        bool empty() const {
             return (!_table || !_count);
         }
 
+        void reserve(int newCount_) {
+            int newTableCount_ = newCount_ / 16;
+            if (newTableCount_ > _tableCount) {
+                rebuild(newTableCount_);
+            }
+            for (auto i = 0; i < _tableCount; ++i) {
+                auto& container = _table[i];
+                container.reserve(16);
+            }
+        }
+
+        void clear(bool reclaim_memory_ = false) {
+            if (reclaim_memory_) {
+                if (_table)
+                    rv_allocator<Container>::destroy_deallocate(_table, _tableCount);
+                _tableCount = 0;
+                _count = 0;
+                _table = nullptr;
+                return;
+            }
+
+            for (auto i = 0; i < _tableCount; i++) {
+                auto& container = _table[i];
+                container.clear();
+            }
+            _count = 0;
+        }
+
+        const Container* GetTablePtrRaw() const noexcept {
+            return _table;
+        }
+
     protected:
-        int hash_key(std::string_view key_) const {
+        int hash_key(typename Traits::key_type key_) const {
             return Traits::hash_key(key_) % _tableCount;
         }
     };
@@ -1926,8 +2106,65 @@ namespace intercept::types {
     template <class Type, class Container, class Traits>
     Type map_string_to_class<Type, Container, Traits>::_null_entry;
 
+    template <class Type, class Container, class Traits>
+    class internal_hashmap : public map_string_to_class<Type, Container, Traits> {
+        using base = map_string_to_class<Type, Container, Traits>;
+
+    public:
+        typename Type::value_type& operator[](typename Type::key_type key_) {
+            auto& temp = base::get(key_);
+            if (base::is_null(temp)) {
+                return base::insert(Type(key_, Type::value_type())).value;
+            }
+            return temp.value;
+        }
+        const typename Type::value_type& operator[](typename Type::key_type key_) const {
+            return base::at(key_);
+        }
+        typename Type::value_type& at(typename Type::key_type key_) {
+            auto& temp = base::get(key_);
+            if (base::is_null(temp)) {
+                throw std::out_of_range("Invalid key");
+            }
+            return temp.value;
+        }
+        const typename Type::value_type& at(typename Type::key_type key_) const {
+            auto& temp = base::get(key_);
+            if (base::is_null(temp)) {
+                throw std::out_of_range("Invalid key");
+            }
+            return temp.value;
+        }
+
+        template <class... Args>
+        Type& emplace(Args&&... args_) {
+            return base::insert(Type(std::forward<Args>(args_)...));
+        }
+
+        Type* find(typename Type::key_type key_) {
+            auto& temp = base::get(key_);
+            if (base::is_null(temp))
+                return nullptr;
+            return &temp;
+        }
+        const Type* find(typename Type::key_type key_) const {
+            auto& temp = base::get(key_);
+            if (base::is_null(temp))
+                return nullptr;
+            return &temp;
+        }
+
+        bool contains(typename Type::key_type key_) const {
+            return base::has_key(key_);
+        }
+
+        ~internal_hashmap() {
+            base::clear(true);
+        }
+    };
+
 #pragma endregion
-}
+}  // namespace intercept::types
 
 #pragma pop_macro("min")
 #pragma pop_macro("max")

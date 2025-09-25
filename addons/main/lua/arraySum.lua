@@ -1,4 +1,4 @@
-local array = ParseArguments(...)
+local array = ...
 local accumulator = 0
 
 local function sumAllNumbers(table)

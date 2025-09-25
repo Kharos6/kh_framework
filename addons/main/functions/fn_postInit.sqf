@@ -23,7 +23,7 @@ isNil {
 		call KH_fnc_serverMissionLoadInit;
 
 		{
-			[[isServer, hasInterface], _x] call KH_fnc_luaOperation;
+			[isServer, hasInterface] luaExecute _x;
 		} forEach KH_var_loadInitLuaExecutions;
 
 		[[], {systemChat "KH FRAMEWORK - MISSION LOADED";}, "GLOBAL", true, false] call KH_fnc_execute;
@@ -116,7 +116,7 @@ isNil {
 	} forEach KH_var_postInitExecutions;
 
 	{
-		[[isServer, hasInterface], _x] call KH_fnc_luaOperation;
+		[isServer, hasInterface] luaExecute _x;
 	} forEach KH_var_postInitLuaExecutions;
 };
 

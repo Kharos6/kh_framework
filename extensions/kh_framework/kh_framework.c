@@ -4,7 +4,6 @@
 #include "process_kh_data.h"
 #include "crypto_operations.h"
 #include "generate_random_string.h"
-#include "lua_integration.h"
 
 __declspec(dllexport) uint64_t RVExtensionFeatureFlags = RVFeature_ContextNoDefaultCall | RVFeature_ArgumentNoEscapeString;
 
@@ -57,7 +56,6 @@ static const function_info_t FUNCTION_TABLE[] = {
     {"DeleteKHDataFile", 1, 1, kh_handle_delete_khdata_file},
     {"DeleteKHDataVariable", 2, 2, kh_handle_delete_khdata_variable},
     {"FlushKHData", 0, 0, kh_handle_flush_khdata},
-    {"CommunicateLuaFramework", 2, 2, kh_handle_communicate_lua_framework},
     {"SliceExtensionReturn", 1, 1, kh_process_slice_extension_return}
 };
 
@@ -297,7 +295,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             kh_init_crypto_provider();
             kh_init_crc32_table();
             kh_init_memory_manager();
-            kh_init_lua_framework_communication();
             break;
             
         case DLL_THREAD_ATTACH:

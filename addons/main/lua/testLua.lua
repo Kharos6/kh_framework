@@ -1,9 +1,4 @@
-local inputBoolean, inputNumber, inputString, inputArray, inputHashMap, inputNil = unpack(ParseArguments(...))
-if inputBoolean == nil then inputBoolean = false end
-inputNumber = inputNumber or 0
-inputString = inputString or ""
-inputArray = inputArray or {}
-inputHashMap = inputHashMap or {}
+local input1, input2, input3 = ...
 
 local function factorial(n)
     if n <= 1 then
@@ -332,16 +327,6 @@ local final_validation = {
 }
 
 results[98] = final_validation
+results[99] = jit
 
-results[99] = {
-    inputBoolean,
-    inputNumber,
-    inputString,
-    inputArray,
-    inputHashMap,
-    inputNil
-}
-
-results[100] = jit
-
-return {results, true, 1, "string", {1, 2, 3}, {key1 = true, key2 = 2, key3 = "value", key4 = {"A", "B", "C"}, key5 = {keyA = true, keyB = false}, key6 = nil}, nil}
+return {input1, input2, input3, results, true, 1, "string", {1, 2, 3}, {key1 = true, key2 = 2, key3 = "value", key4 = {"A", "B", "C"}, key5 = {keyA = true, keyB = false}, key6 = nil}, nil}

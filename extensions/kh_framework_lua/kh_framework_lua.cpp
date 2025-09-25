@@ -8,49 +8,22 @@
 #include "intercept/include/client/pointers.hpp"
 #include "sol/sol.hpp"
 
-// UTF-8 helper functions
-static size_t utf8_char_len(unsigned char c) {
-    if (c < 0x80) return 1;
-    else if ((c & 0xE0) == 0xC0) return 2;
-    else if ((c & 0xF0) == 0xE0) return 3;
-    else if ((c & 0xF8) == 0xF0) return 4;
-    return 1; // Invalid, treat as single byte
-}
+#pragma optimize("t", on)
+#pragma inline_recursion(on)
+#pragma inline_depth(255)
 
-static bool is_utf8_continuation(unsigned char c) {
-    return (c & 0xC0) == 0x80;
-}
+using namespace intercept;
 
-// UTF-8 safe substring that won't break multi-byte characters
-static std::string utf8_safe_substr(const std::string& str, size_t start, size_t length) {
-    if (start >= str.length()) return "";
-    
-    // Find actual start position (skip to next character boundary if needed)
-    while (start > 0 && is_utf8_continuation(str[start])) {
-        start--;
-    }
-    
-    // Find safe end position
-    size_t end = std::min(start + length, str.length());
-    while (end < str.length() && is_utf8_continuation(str[end])) {
-        end++;
-    }
-    
-    return str.substr(start, end - start);
-}
-
+static types::registered_sqf_function _execute_lua_sqf_command;
+static types::registered_sqf_function _compile_lua_sqf_command;
 static sol::protected_function cached_lua_init;
 static sol::protected_function cached_lua_frame_update;  
 static sol::protected_function cached_lua_deinit;
-
-// Global Lua state and globals
 static std::unique_ptr<sol::state> g_lua_state;
-static int g_frame_counter = 0;
 
 // Userdata wrapper for game_value to preserve native Arma types
 struct GameValueWrapper {
     game_value value;
-    
     GameValueWrapper() = default;
     GameValueWrapper(const game_value& v) : value(v) {}
     GameValueWrapper(game_value&& v) : value(std::move(v)) {}
@@ -59,42 +32,71 @@ struct GameValueWrapper {
         if (value.is_nil()) return "nil";
         
         switch (value.type_enum()) {
-            case intercept::types::game_data_type::OBJECT:
-                return "[OBJECT]";
-            case intercept::types::game_data_type::GROUP:
-                return "[GROUP]";
-            case intercept::types::game_data_type::NAMESPACE:
-                return "[NAMESPACE]";
-            case intercept::types::game_data_type::CONFIG:
-                return "[CONFIG]";
-            case intercept::types::game_data_type::CONTROL:
-                return "[CONTROL]";
-            case intercept::types::game_data_type::DISPLAY:
-                return "[DISPLAY]";
-            case intercept::types::game_data_type::LOCATION:
-                return "[LOCATION]";
-            case intercept::types::game_data_type::SCRIPT:
-                return "[SCRIPT]";
-            case intercept::types::game_data_type::SIDE:
-                return "[SIDE]";
-            case intercept::types::game_data_type::TEXT:
-                return "[TEXT]";
-            case intercept::types::game_data_type::TEAM_MEMBER:
-                return "[TEAM_MEMBER]";
-            case intercept::types::game_data_type::CODE:
-                return "[CODE]";
-            case intercept::types::game_data_type::TASK:
-                return "[TASK]";
-            default:
-                // Explicitly convert r_string to std::string
-                return value.data ? static_cast<std::string>(value.data->to_string()) : "nil";
+            case types::game_data_type::OBJECT: return "[OBJECT]";
+            case types::game_data_type::GROUP: return "[GROUP]";
+            case types::game_data_type::NAMESPACE: return "[NAMESPACE]";
+            case types::game_data_type::CONFIG: return "[CONFIG]";
+            case types::game_data_type::CONTROL: return "[CONTROL]";
+            case types::game_data_type::DISPLAY: return "[DISPLAY]";
+            case types::game_data_type::LOCATION: return "[LOCATION]";
+            case types::game_data_type::SCRIPT: return "[SCRIPT]";
+            case types::game_data_type::SIDE: return "[SIDE]";
+            case types::game_data_type::TEXT: return "[TEXT]";
+            case types::game_data_type::TEAM_MEMBER: return "[TEAM_MEMBER]";
+            case types::game_data_type::CODE: return "[CODE]";
+            case types::game_data_type::TASK: return "[TASK]";
+            case types::game_data_type::DIARY_RECORD: return "[DIARY_RECORD]";
+            case types::game_data_type::NetObject: return "[NETOBJECT]";
+            case types::game_data_type::SUBGROUP: return "[SUBGROUP]";
+            case types::game_data_type::TARGET: return "[TARGET]";
+            default: return value.data ? static_cast<std::string>(value.data->to_string()) : "nil";
         }
     }
     
     bool equals(const GameValueWrapper& other) const {
         return value == other.value;
     }
+
+    // Method to get the type name
+    std::string type_name() const {
+        switch (value.type_enum()) {
+            case types::game_data_type::NOTHING: return "NOTHING";
+            case types::game_data_type::ANY: return "ANY";
+            case types::game_data_type::SCALAR: return "SCALAR";
+            case types::game_data_type::BOOL: return "BOOL";
+            case types::game_data_type::ARRAY: return "ARRAY";
+            case types::game_data_type::STRING: return "STRING";
+            case types::game_data_type::OBJECT: return "OBJECT";
+            case types::game_data_type::GROUP: return "GROUP";
+            case types::game_data_type::NAMESPACE: return "NAMESPACE";
+            case types::game_data_type::CONFIG: return "CONFIG";
+            case types::game_data_type::CONTROL: return "CONTROL";
+            case types::game_data_type::DISPLAY: return "DISPLAY";
+            case types::game_data_type::LOCATION: return "LOCATION";
+            case types::game_data_type::SCRIPT: return "SCRIPT";
+            case types::game_data_type::SIDE: return "SIDE";
+            case types::game_data_type::TEXT: return "TEXT";
+            case types::game_data_type::TEAM_MEMBER: return "TEAM_MEMBER";
+            case types::game_data_type::CODE: return "CODE";
+            case types::game_data_type::TASK: return "TASK";
+            case types::game_data_type::DIARY_RECORD: return "DIARY_RECORD";
+            case types::game_data_type::NetObject: return "NETOBJECT";
+            case types::game_data_type::SUBGROUP: return "SUBGROUP";
+            case types::game_data_type::TARGET: return "TARGET";
+            default: return "UNKNOWN";
+        }
+    }
 };
+
+struct LuaCallCache {
+    std::string function_name;
+    sol::protected_function func;
+    bool is_valid;
+};
+
+static std::unordered_map<std::string, LuaCallCache> g_call_cache;
+static std::unordered_map<size_t, sol::protected_function> g_code_cache;
+static constexpr size_t MAX_CACHE_SIZE = 128;
 
 class Lua_Compilation {
 private:
@@ -105,67 +107,19 @@ public:
         bool success;
         std::string error_message;
         sol::protected_function function;
-        bool was_skipped; // Indicates if compilation was skipped due to existing function
         
-        CompileResult(bool s, const std::string& err, sol::protected_function func = {}, bool skipped = false) 
-            : success(s), error_message(err), function(func), was_skipped(skipped) {}
+        CompileResult(bool s, const std::string& err, sol::protected_function func = {}) 
+            : success(s), error_message(err), function(func) {}
     };
     
     static CompileResult lua_compile(const std::string& lua_code, 
                                    const std::string& cpp_name = "", 
-                                   const std::string& lua_name = "",
-                                   bool allow_overwrite = false) {
-
+                                   const std::string& lua_name = "") {
         // Validate input
         if (lua_code.empty()) {
             return CompileResult(false, "Empty Lua code provided");
         }
-        
-        // Check for existing functions if overwrite is not allowed
-        if (!allow_overwrite) {
-            bool cpp_exists = false;
-            bool lua_exists = false;
-            
-            // Check C++ registry
-            if (!cpp_name.empty()) {
-                cpp_exists = (s_cpp_function_registry.find(cpp_name) != s_cpp_function_registry.end());
-            }
-            
-            // Check Lua globals
-            if (!lua_name.empty()) {
-                try {
-                    auto lua_global = (*g_lua_state)[lua_name];
-                    lua_exists = (lua_global.get_type() == sol::type::function);
-                } catch (...) {
-                    lua_exists = false; // Global doesn't exist or isn't accessible
-                }
-            }
-            
-            // If both names are specified and both exist, skip completely
-            if (!cpp_name.empty() && !lua_name.empty() && cpp_exists && lua_exists) {
-                auto existing_func = s_cpp_function_registry[cpp_name];
-                return CompileResult(true, "Functions already exist", existing_func, true);
-            }
-            
-            // If only C++ name specified and exists, return existing
-            if (!cpp_name.empty() && lua_name.empty() && cpp_exists) {
-                auto existing_func = s_cpp_function_registry[cpp_name];
-                return CompileResult(true, "C++ function already exists", existing_func, true);
-            }
-            
-            // If only Lua name specified and exists, try to get it
-            if (cpp_name.empty() && !lua_name.empty() && lua_exists) {
-                try {
-                    sol::protected_function existing_func = (*g_lua_state)[lua_name];
-                    return CompileResult(true, "Lua function already exists", existing_func, true);
-                } catch (...) {
-                    // Fall through to compilation if we can't retrieve the function
-                }
-            }
-            
-            // If we reach here, at least one registration target is new, so continue with compilation
-        }
-        
+
         try {
             // Compile the Lua code
             sol::load_result load_result = g_lua_state->load(lua_code);
@@ -181,30 +135,17 @@ public:
             
             // Register in C++ registry if cpp_name is provided
             if (!cpp_name.empty()) {
-                if (allow_overwrite || s_cpp_function_registry.find(cpp_name) == s_cpp_function_registry.end()) {
+                if (s_cpp_function_registry.find(cpp_name) == s_cpp_function_registry.end()) {
                     s_cpp_function_registry[cpp_name] = compiled_func;
                 }
             }
             
             // Register in Lua global namespace if lua_name is provided
             if (!lua_name.empty()) {
-                if (allow_overwrite) {
-                    (*g_lua_state)[lua_name] = compiled_func;
-                } else {
-                    // Only set if it doesn't exist or isn't a function
-                    try {
-                        auto existing = (*g_lua_state)[lua_name];
-                        if (existing.get_type() != sol::type::function) {
-                            (*g_lua_state)[lua_name] = compiled_func;
-                        }
-                    } catch (...) {
-                        // Doesn't exist, safe to set
-                        (*g_lua_state)[lua_name] = compiled_func;
-                    }
-                }
+                (*g_lua_state)[lua_name] = compiled_func;
             }
             
-            return CompileResult(true, "Success", compiled_func, false);
+            return CompileResult(true, "Success", compiled_func);
             
         } catch (const sol::error& e) {
             return CompileResult(false, "Compilation failed: " + std::string(e.what()));
@@ -243,9 +184,10 @@ public:
         }
     }
 
-    // Call this whenever resetting g_lua_state
     static void reset_compilation_state() {
         s_cpp_function_registry.clear();
+        g_call_cache.clear(); // Clear the call cache
+        g_code_cache.clear();
         cached_lua_init = sol::protected_function{};
         cached_lua_frame_update = sol::protected_function{};
         cached_lua_deinit = sol::protected_function{};
@@ -254,52 +196,54 @@ public:
 
 std::unordered_map<std::string, sol::protected_function> Lua_Compilation::s_cpp_function_registry;
 
-// Convert Intercept game_value to Lua object
+// Convert game_value to Lua object
 static sol::object convert_game_value_to_lua(const game_value& value) {
     sol::state& lua = *g_lua_state;
     
     switch (value.type_enum()) {
-        case intercept::types::game_data_type::BOOL:
+        case types::game_data_type::BOOL:
             return sol::make_object(lua, static_cast<bool>(value));
 
-        case intercept::types::game_data_type::SCALAR:
+        case types::game_data_type::SCALAR:
             return sol::make_object(lua, static_cast<float>(value));
             
-        case intercept::types::game_data_type::STRING:
+        case types::game_data_type::STRING:
             return sol::make_object(lua, static_cast<std::string>(value));
             
-        case intercept::types::game_data_type::ARRAY: {
+        case types::game_data_type::ARRAY: {
             sol::table lua_table = lua.create_table();
             auto& array = value.to_array();
+
             for (size_t i = 0; i < array.size(); ++i) {
                 // Recursively convert array elements
                 lua_table[i + 1] = convert_game_value_to_lua(array[i]);
             }
+
             return sol::make_object(lua, lua_table);
         }
-        
-        case intercept::types::game_data_type::NOTHING:
-        case intercept::types::game_data_type::ANY:
+
+        case types::game_data_type::NOTHING:
+        case types::game_data_type::ANY:
             return sol::make_object(lua, sol::nil);
             
         // Native Arma types - wrap in userdata
-        case intercept::types::game_data_type::OBJECT:
-        case intercept::types::game_data_type::GROUP:
-        case intercept::types::game_data_type::NAMESPACE:
-        case intercept::types::game_data_type::CONFIG:
-        case intercept::types::game_data_type::CONTROL:
-        case intercept::types::game_data_type::DISPLAY:
-        case intercept::types::game_data_type::LOCATION:
-        case intercept::types::game_data_type::SCRIPT:
-        case intercept::types::game_data_type::SIDE:
-        case intercept::types::game_data_type::TEXT:
-        case intercept::types::game_data_type::TEAM_MEMBER:
-        case intercept::types::game_data_type::CODE:
-        case intercept::types::game_data_type::TASK:
-        case intercept::types::game_data_type::DIARY_RECORD:
-        case intercept::types::game_data_type::NetObject:
-        case intercept::types::game_data_type::SUBGROUP:
-        case intercept::types::game_data_type::TARGET:
+        case types::game_data_type::OBJECT:
+        case types::game_data_type::GROUP:
+        case types::game_data_type::NAMESPACE:
+        case types::game_data_type::CONFIG:
+        case types::game_data_type::CONTROL:
+        case types::game_data_type::DISPLAY:
+        case types::game_data_type::LOCATION:
+        case types::game_data_type::SCRIPT:
+        case types::game_data_type::SIDE:
+        case types::game_data_type::TEXT:
+        case types::game_data_type::TEAM_MEMBER:
+        case types::game_data_type::CODE:
+        case types::game_data_type::TASK:
+        case types::game_data_type::DIARY_RECORD:
+        case types::game_data_type::NetObject:
+        case types::game_data_type::SUBGROUP:
+        case types::game_data_type::TARGET:
             return sol::make_object(lua, GameValueWrapper(value));
             
         default:
@@ -321,13 +265,16 @@ static game_value convert_lua_to_game_value(const sol::object& obj) {
     } else if (obj.get_type() == sol::type::table) {
         sol::table tbl = obj;
         auto_array<game_value> arr;
+
         for (size_t i = 1; i <= tbl.size(); i++) {
             arr.push_back(convert_lua_to_game_value(tbl[i]));
         }
+
         return game_value(std::move(arr));
     } else if (obj.get_type() == sol::type::userdata) {
         // Try to extract GameValueWrapper
         sol::optional<GameValueWrapper> wrapper = obj.as<sol::optional<GameValueWrapper>>();
+
         if (wrapper) {
             return wrapper->value;
         }
@@ -338,7 +285,6 @@ static game_value convert_lua_to_game_value(const sol::object& obj) {
 
 // Initialize Lua state
 static void initialize_lua_state() {
-    
     if (!g_lua_state) {
         g_lua_state = std::make_unique<sol::state>();
         
@@ -348,6 +294,8 @@ static void initialize_lua_state() {
             sol::lib::math,
             sol::lib::table,
             sol::lib::bit32,
+            sol::lib::coroutine,
+            sol::lib::utf8,
             sol::lib::jit
         );
 
@@ -356,108 +304,238 @@ static void initialize_lua_state() {
             sol::constructors<GameValueWrapper(), GameValueWrapper(const game_value&)>(),
             sol::meta_function::to_string, &GameValueWrapper::to_string,
             sol::meta_function::equal_to, &GameValueWrapper::equals,
-            "value", &GameValueWrapper::value
+            "value", &GameValueWrapper::value,
+            "type_name", &GameValueWrapper::type_name
         );
 
         Lua_Compilation::lua_compile(
             R"(
-                G_Frame = 0
-            )", "lua_init", "", true
+                KHLUA_Var_Frame = 0
+            )", "lua_init", ""
         );
 
         Lua_Compilation::lua_compile(
             R"(
-                G_Frame = G_Frame + 1
-            )", "lua_frame_update", "", true
+                KHLUA_Var_Frame = KHLUA_Var_Frame + 1
+            )", "lua_frame_update", ""
         );
 
         Lua_Compilation::lua_compile(
             R"(
-                G_Frame = 0
-            )", "lua_deinit", "", true
+                KHLUA_Var_Frame = 0
+            )", "lua_deinit", ""
         );
-        
+
         Lua_Compilation::lua_compile(
             R"(
-                local inputArray = {...}
-                
-                local function ParseArgumentsTable(array)
-                    local result = {}
-                    
-                    for i, value in ipairs(array) do
-                        if type(value) == "table" and #value == 2 then
-                            result[i] = sqf.call("_this call KH_fnc_parseValue", value)
-                        end
-                    end
-                    
-                    return result
+                local params, code, count = ...
+
+                if type(code) ~= "string" then
+                    return "ERROR: code must be a string"
                 end
                 
-                return ParseArgumentsTable(inputArray)
-            )", "", "ParseArguments", true
+                count = tonumber(count) or 1
+                if count < 1 then
+                    return "ERROR: execution count must be at least 1"
+                end
+                
+                local compiled
+
+                if not string.find(code, " ") and not string.find(code, "\t") and not string.find(code, "\n") then
+                    compiled = _G[code]
+                    if type(compiled) ~= "function" then
+                        return "ERROR: Function '" .. code .. "' not found or is not a function"
+                    end
+                else
+                    local func, err = load("return function(...) " .. code .. " end")
+
+                    if not func then
+                        return "ERROR: Failed to compile code: " .. tostring(err)
+                    end
+
+                    compiled = func()
+                end
+
+                local args = {}
+
+                if type(params) == "table" then
+                    args = params
+                elseif params ~= nil then
+                    args = {params}
+                end
+
+                local getTime = _G._kh_get_time_ms
+
+                if not getTime then
+                    return "ERROR: High precision timer not available"
+                end
+                
+                if count > 10 then
+                    for i = 1, 3 do
+                        compiled(unpack(args))
+                    end
+                end
+                
+                local start_time = getTime()
+                
+                for i = 1, count do
+                    compiled(unpack(args))
+                end
+                
+                local end_time = getTime()
+                local total_time = end_time - start_time
+                local average_time = total_time / count
+
+                local result = string.format("Count %d\nTotal: %.6f\nAverage: %.6f", 
+                    count, total_time, average_time)
+
+                return result
+            )", "", "KHLUA_Fnc_ProfileCode"
         );
 
         Lua_Compilation::lua_compile(
             R"(
-                local inputArray = ...
+                local inputTable = ...
+
+                if type(inputTable) ~= "table" then
+                    return {}
+                end
                 
-                local function ConvertLuaToGameValue(value)
-                    if type(value) == "table" then
-                        local converted = {}
-                        local isArray = true
-                        local maxIndex = 0
-                        
-                        for k, v in pairs(value) do
-                            if type(k) ~= "number" or k ~= math.floor(k) or k < 1 then
-                                isArray = false
-                                break
-                            end
+                local result = {}
+                local index = 1
+                
+                for key, value in pairs(inputTable) do
+                    result[index] = {key, value}
+                    index = index + 1
+                end
+                
+                return result
+            )", "", "KHLUA_Fnc_TableToPairs"
+        );
 
-                            if k > maxIndex then maxIndex = k end
-                        end
-                        
-                        if isArray and maxIndex > 0 then
+        Lua_Compilation::lua_compile(
+            R"(
+                local inputTable = ...
 
-                            for i = 1, maxIndex do
-                                if value[i] ~= nil then
-                                    converted[i] = ConvertLuaToGameValue(value[i])
-                                else
-                                    converted[i] = nil
-                                end
-                            end
-                        else
-                            for k, v in pairs(value) do
-                                table.insert(converted, {ConvertLuaToGameValue(k), ConvertLuaToGameValue(v)})
-                            end
-                        end
-                        
-                        return converted
-                    elseif value == nil then
-                        return nil
+                if type(inputTable) ~= "table" then
+                    return {}
+                end
+                
+                local result = {}
+                
+                for i = 1, #inputTable do
+                    local pair = inputTable[i]
+                    if type(pair) == "table" and #pair >= 2 then
+                        result[pair[1]] = pair[2]
+                    end
+                end
+                
+                return result
+            )", "", "KHLUA_Fnc_PairsToTable"
+        );
+
+        Lua_Compilation::lua_compile(
+            R"(
+                local inputTable = ...
+
+                if type(inputTable) ~= "table" then
+                    return {}
+                end
+                
+                local result = {}
+                local index = 1
+                
+                for key, _ in pairs(inputTable) do
+                    result[index] = key
+                    index = index + 1
+                end
+                
+                return result
+            )", "", "KHLUA_Fnc_TableKeys"
+        );
+
+        Lua_Compilation::lua_compile(
+            R"(
+                local inputTable = ...
+
+                if type(inputTable) ~= "table" then
+                    return {}
+                end
+                
+                local result = {}
+                local index = 1
+                
+                for _, value in pairs(inputTable) do
+                    result[index] = value
+                    index = index + 1
+                end
+                
+                return result
+            )", "", "KHLUA_Fnc_TableValues"
+        );
+
+        Lua_Compilation::lua_compile(
+            R"(
+                local inputTable = ...
+
+                if type(inputTable) ~= "table" then
+                    return false
+                end
+                
+                local count = 0
+                
+                for _ in pairs(inputTable) do
+                    count = count + 1
+                end
+                
+                for i = 1, count do
+                    if inputTable[i] == nil then
+                        return false
+                    end
+                end
+                
+                return true
+            )", "", "KHLUA_Fnc_IsArray"
+        );
+
+        Lua_Compilation::lua_compile(
+            R"(
+                local inputValue = ...
+
+                if inputValue == nil then
+                    return "NOTHING"
+                end
+                
+                local lua_type = type(inputValue)
+                
+                if lua_type == "boolean" then
+                    return "BOOL"
+                elseif lua_type == "number" then
+                    return "SCALAR"
+                elseif lua_type == "string" then
+                    return "STRING"
+                elseif lua_type == "table" then
+                    return "ARRAY"
+                elseif lua_type == "userdata" then
+                    local mt = getmetatable(inputValue)
+
+                    if mt and mt.__name == "GameValue" then
+                        return inputValue:type_name()
                     else
-                        return value
+                        return "USERDATA"
                     end
+                else
+                    return "UNKNOWN"
                 end
-                
-                local function SerializeReturnTable(value)
-                    if type(value) == "table" then
-                        local result = {}
-
-                        for i, v in ipairs(value) do
-                            local converted = ConvertLuaToGameValue(v)
-                            result[i] = sqf.call("['', _this] call KH_fnc_serializeValue", converted)
-                        end
-
-                        return result
-                    else
-                        local converted = ConvertLuaToGameValue(value)
-                        return sqf.call("['', _this] call KH_fnc_serializeValue", converted)
-                    end
-                end
-                
-                return SerializeReturnTable(inputArray)
-            )", "", "SerializeReturn", true
+            )", "", "KHLUA_Fnc_GetDataType"
         );
+
+        (*g_lua_state)["_kh_get_time_ms"] = []() -> double {
+            LARGE_INTEGER frequency, counter;
+            QueryPerformanceFrequency(&frequency);
+            QueryPerformanceCounter(&counter);
+            return (counter.QuadPart * 1000.0) / frequency.QuadPart;
+        };
 
         cached_lua_init = Lua_Compilation::get_cpp_function("lua_init");
         cached_lua_frame_update = Lua_Compilation::get_cpp_function("lua_frame_update");
@@ -467,620 +545,254 @@ static void initialize_lua_state() {
         auto sqf_table = g_lua_state->create_named_table("sqf");
         
         sqf_table["diag_log"] = [](const std::string& string) {
-            intercept::sqf::diag_log(string);
+            sqf::diag_log(string);
             return sol::nil;
         };
 
         sqf_table["call"] = [](sol::variadic_args args) -> sol::object {
             if (args.size() == 1) {
-                // Simple call with just code
                 std::string code = args[0];
-                return convert_game_value_to_lua(intercept::sqf::call2(intercept::sqf::compile(code)));
+                return convert_game_value_to_lua(sqf::call2(sqf::compile(code)));
             } else if (args.size() == 2) {
-                // Call with code and arguments
                 std::string code = args[0];
                 sol::object arg = args[1];
                 game_value gv_arg = convert_lua_to_game_value(arg);
-                return convert_game_value_to_lua(intercept::sqf::call2(intercept::sqf::compile(code), gv_arg));
+                return convert_game_value_to_lua(sqf::call2(sqf::compile(code), gv_arg));
             }
+
             return sol::make_object(*g_lua_state, sol::nil);
         };
-        
-        // Add more SQF functions that work with native types
-        sqf_table["player"] = []() -> sol::object {
-            return convert_game_value_to_lua(intercept::sqf::player());
+
+        sqf_table["command"] = [](sol::variadic_args args) -> sol::object {
+            if (args.size() == 1) {
+                std::string command = args[0];
+                return convert_game_value_to_lua(sqf::call2(sqf::compile(command)));
+            } else if (args.size() == 2) {
+                std::string command = args[0];
+                sol::object arg = args[1];
+                game_value gv_arg = convert_lua_to_game_value(arg);
+                return convert_game_value_to_lua(sqf::call2(sqf::compile(command + " _this"), gv_arg));
+            } else if (args.size() == 3) {
+                std::string command = args[0];
+                sol::object arg1 = args[1];
+                sol::object arg2 = args[2];
+                
+                // Convert both arguments to game_value
+                game_value gv_arg1 = convert_lua_to_game_value(arg1);
+                game_value gv_arg2 = convert_lua_to_game_value(arg2);
+                
+                // Create an array containing both arguments
+                auto_array<game_value> arr;
+                arr.push_back(gv_arg1);
+                arr.push_back(gv_arg2);
+                game_value args_array(std::move(arr));
+                
+                // Compile the binary command pattern and call with the array
+                return convert_game_value_to_lua(sqf::call2(
+                    sqf::compile("(_this select 0) " + command + " (_this select 1)"), 
+                    args_array
+                ));
+            }
+
+            return sol::make_object(*g_lua_state, sol::nil);
+        };
+
+        sqf_table["time"] = []() -> sol::object {
+            return convert_game_value_to_lua(sqf::time());
         };
     }
 }
 
-// Helper function to parse array string and convert to Lua objects
-static sol::table parse_parameters_to_lua(const std::string& params_str) {
-    sol::state& lua = *g_lua_state;
-    sol::table result = lua.create_table();
-    
-    if (params_str.empty() || params_str == "[]") {
-        return result;
-    }
-    
-    // First try to parse as game_value if it's not a plain array string
-    // This handles cases where we're passing native types directly
+// Native SQF command implementation for execution
+static game_value execute_lua_sqf(game_value_parameter args, game_value_parameter code_or_function) {    
     try {
-        game_value parsed = intercept::sqf::call2(intercept::sqf::compile("_this"), game_value(params_str));
-        if (!parsed.is_nil() && parsed.type_enum() == intercept::types::game_data_type::ARRAY) {
-            auto& array = parsed.to_array();
-            for (size_t i = 0; i < array.size(); ++i) {
-                result[i + 1] = convert_game_value_to_lua(array[i]);
-            }
-            return result;
-        }
-    } catch (...) {
-        // Fall back to string parsing
-    }
-    
-    // Original string parsing logic for backwards compatibility
-    const char* ptr = params_str.c_str();
-    int table_index = 1;
-    
-    // [Rest of the original parsing logic stays the same...]
-    // Skip opening bracket
-    while (*ptr && (*ptr == ' ' || *ptr == '\t' || *ptr == '\n' || *ptr == '\r')) ptr++;
-    if (*ptr != '[') return result;
-    ptr++;
-    
-    std::string current_value;
-    int bracket_depth = 1;
-    bool in_string = false;
-    char string_quote = 0;
-    
-    while (*ptr && bracket_depth > 0) {
-        if (!in_string) {
-            if (*ptr == '"' || *ptr == '\'') {
-                in_string = true;
-                string_quote = *ptr;
-                current_value += *ptr;
-            } else if (*ptr == '[') {
-                bracket_depth++;
-                current_value += *ptr;
-            } else if (*ptr == ']') {
-                bracket_depth--;
-                if (bracket_depth == 0) {
-                    // End of array, process last value if any
-                    if (!current_value.empty()) {
-                        // Trim whitespace
-                        size_t start = current_value.find_first_not_of(" \t\n\r");
-                        size_t end = current_value.find_last_not_of(" \t\n\r");
-                        if (start != std::string::npos) {
-                            current_value = current_value.substr(start, end - start + 1);
-                        }
-                        
-                        // Parse value type
-                        if (current_value[0] == '"' || current_value[0] == '\'') {
-                            // String - remove quotes with UTF-8 safety
-                            char quote = current_value[0];
-                            std::string str_val;
-                            size_t i = 1;
-                            while (i < current_value.length() - 1) {
-                                unsigned char c = current_value[i];
-                                
-                                if (c == quote && i + 1 < current_value.length() - 1 && 
-                                    current_value[i + 1] == quote) {
-                                    str_val += quote;
-                                    i += 2;
-                                } else if (c < 0x80) {
-                                    str_val += c;
-                                    i++;
-                                } else {
-                                    // UTF-8 multi-byte character
-                                    size_t char_len = utf8_char_len(c);
-                                    if (i + char_len <= current_value.length() - 1) {
-                                        str_val.append(current_value, i, char_len);
-                                    }
-                                    i += char_len;
-                                }
-                            }
-                            result[table_index++] = str_val;
-                        } else if (current_value == "true" || current_value == "false") {
-                            result[table_index++] = (current_value == "true");
-                        } else if (current_value == "nil" || current_value == "null") {
-                            result[table_index++] = sol::nil;
-                        } else if (current_value[0] == '[') {
-                            // Nested array - recursively parse
-                            result[table_index++] = parse_parameters_to_lua(current_value);
-                        } else {
-                            // Try to parse as number
-                            char* endptr;
-                            double num_val = strtod(current_value.c_str(), &endptr);
-                            if (*endptr == '\0') {
-                                result[table_index++] = num_val;
-                            } else {
-                                // Fallback to string
-                                result[table_index++] = current_value;
-                            }
-                        }
-                    }
-                    break;
-                }
-                current_value += *ptr;
-            } else if (*ptr == ',' && bracket_depth == 1) {
-                // Element separator - process current value same as above
-                if (!current_value.empty()) {
-                    size_t start = current_value.find_first_not_of(" \t\n\r");
-                    size_t end = current_value.find_last_not_of(" \t\n\r");
-                    if (start != std::string::npos) {
-                        current_value = current_value.substr(start, end - start + 1);
-                    }
-                    
-                    if (current_value[0] == '"' || current_value[0] == '\'') {
-                        char quote = current_value[0];
-                        std::string str_val;
-                        for (size_t i = 1; i < current_value.length() - 1; i++) {
-                            if (current_value[i] == quote && i + 1 < current_value.length() - 1 && 
-                                current_value[i + 1] == quote) {
-                                str_val += quote;
-                                i++;
-                            } else {
-                                str_val += current_value[i];
-                            }
-                        }
-                        result[table_index++] = str_val;
-                    } else if (current_value == "true" || current_value == "false") {
-                        result[table_index++] = (current_value == "true");
-                    } else if (current_value == "nil" || current_value == "null") {
-                        result[table_index++] = sol::nil;
-                    } else if (current_value[0] == '[') {
-                        result[table_index++] = parse_parameters_to_lua(current_value);
-                    } else {
-                        char* endptr;
-                        double num_val = strtod(current_value.c_str(), &endptr);
-                        if (*endptr == '\0') {
-                            result[table_index++] = num_val;
-                        } else {
-                            result[table_index++] = current_value;
-                        }
-                    }
-                }
-                current_value.clear();
-            } else {
-                current_value += *ptr;
-            }
-        } else {
-            if (*ptr == string_quote) {
-                if (*(ptr + 1) == string_quote) {
-                    current_value += *ptr;
-                    current_value += *(ptr + 1);
-                    ptr++;
-                } else {
-                    in_string = false;
-                    current_value += *ptr;
-                }
-            } else {
-                current_value += *ptr;
-            }
-        }
-        ptr++;
-    }
-    
-    return result;
-}
+        std::string code_str = static_cast<std::string>(code_or_function);
+        sol::object lua_args = sol::nil;
 
-// Helper to serialize Lua table to Arma array format
-static std::string serialize_lua_value(const sol::object& obj, bool is_root = true) {
-    if (obj.get_type() == sol::type::nil) {
-        return "nil";
-    } else if (obj.get_type() == sol::type::boolean) {
-        return obj.as<bool>() ? "true" : "false";
-    } else if (obj.get_type() == sol::type::number) {
-        double val = obj.as<double>();
-        // Check if it's an integer
-        if (val == std::floor(val)) {
-            return std::to_string(static_cast<long long>(val));
-        }
-        return std::to_string(val);
-    } else if (obj.get_type() == sol::type::string) {
-        std::string str = obj.as<std::string>();
-        
-        // If this is the root level (direct return), don't add quotes
-        if (is_root) {
-            return str; // Return as-is, preserving UTF-8
+        if (!args.is_nil()) {
+            lua_args = convert_game_value_to_lua(args);
         }
         
-        // Inside arrays/tables, we need quotes for Arma to parse correctly
-        std::string escaped;
-        escaped += '"';
-        
-        // UTF-8 aware quote escaping
-        size_t i = 0;
-        while (i < str.length()) {
-            unsigned char c = str[i];
-            
-            if (c == '"') {
-                escaped += "\"\"";  // Double quotes for Arma escaping
-                i++;
-            } else if (c < 0x80) {
-                // ASCII character
-                escaped += c;
-                i++;
-            } else {
-                // UTF-8 multi-byte character - copy entire sequence
-                size_t char_len = utf8_char_len(c);
-                if (i + char_len <= str.length()) {
-                    escaped.append(str, i, char_len);
-                }
-                i += char_len;
-            }
-        }
-        
-        escaped += '"';
-        return escaped;
-    } else if (obj.get_type() == sol::type::table) {
-        sol::table tbl = obj.as<sol::table>();
-        
-        // Get the actual size using sol's size() method
-        size_t tbl_size = tbl.size();
-        
-        // Check if it's an array (has sequential numeric indices from 1 to size)
-        bool is_array = tbl_size > 0;
-        if (is_array) {
-            for (size_t i = 1; i <= tbl_size; i++) {
-                sol::object elem = tbl[i];
-                if (elem.get_type() == sol::type::nil) {
-                    is_array = false;
-                    break;
-                }
-            }
-        }
-        
-        // If it's not an array but has elements, it's a hashmap
-        if (!is_array && tbl_size == 0) {
-            // Check if table has any non-array elements
-            size_t actual_count = 0;
-            for (auto& pair : tbl) {
-                actual_count++;
-            }
-            if (actual_count == 0) {
-                return "[]";  // Empty table
-            }
-        }
-        
-        std::string result = "[";
-        
-        if (is_array) {
-            // Serialize as array
-            bool first = true;
-            for (size_t i = 1; i <= tbl_size; i++) {
-                if (!first) result += ", ";
-                result += serialize_lua_value(tbl[i], false);  // false = not root level
-                first = false;
-            }
-        } else {
-            // Serialize as hashmap (key-value pairs)
-            bool first = true;
-            for (auto& pair : tbl) {
-                if (!first) result += ", ";
-                result += "[";
-                result += serialize_lua_value(pair.first, false);
-                result += ", ";
-                result += serialize_lua_value(pair.second, false);
-                result += "]";
-                first = false;
-            }
-        }
-        
-        result += "]";
-        return result;
-    } else if (obj.get_type() == sol::type::userdata) {
-        // Check for GameValueWrapper
-        sol::optional<GameValueWrapper> wrapper = obj.as<sol::optional<GameValueWrapper>>();
-        if (wrapper) {
-            return wrapper->to_string();
-        }
-        return "[nil]";
-    } else {
-        return "[nil]";
-    }
-}
-
-// Execute Lua code or function
-static std::string execute_lua(const std::string& code_or_function, const std::string& parameters) {
-    if (!g_lua_state) {
-        return "ERROR: Lua state not initialized";
-    }
-    
-    try {
-        sol::table args = parse_parameters_to_lua(parameters);
-        
-        // Check if it's code (contains space/tab) or function name
-        bool is_code = (code_or_function.find(' ') != std::string::npos || 
-                       code_or_function.find('\t') != std::string::npos ||
-                       code_or_function.find('\n') != std::string::npos);
+        // Check if it's a function call or code execution
+        bool is_function = code_str.find(' ') == std::string::npos && 
+                          code_str.find('\t') == std::string::npos &&
+                          code_str.find('\n') == std::string::npos;
         
         sol::protected_function_result result;
         
-        if (is_code) {
-            // Execute as code with arguments
-            std::string wrapped_code = "return (function(...) " + code_or_function + " end)(";
+        if (is_function) {
+            // Try to get the function from cache or global namespace
+            auto cache_it = g_call_cache.find(code_str);
+            sol::protected_function func;
             
-            // Build argument list
-            bool first = true;
-            for (size_t i = 1; i <= args.size(); i++) {
-                if (!first) wrapped_code += ", ";
-                wrapped_code += "select(" + std::to_string(i) + ", ...)";
-                first = false;
-            }
-            wrapped_code += ")";
-            
-            // Create argument passing function
-            auto exec_func = [&args]() -> sol::variadic_results {
-                sol::variadic_results results;
-                for (size_t i = 1; i <= args.size(); i++) {
-                    results.push_back(args[i]);
+            if (cache_it != g_call_cache.end()) {
+                func = cache_it->second.func;
+            } else {
+                // Get function from Lua global namespace
+                func = (*g_lua_state)[code_str];
+
+                if (!func.valid()) {
+                    return game_value("ERROR: Function '" + code_str + "' not found");
                 }
-                return results;
-            };
+
+                // Cache it for future use
+                if (g_call_cache.size() >= MAX_CACHE_SIZE) {
+                    g_call_cache.erase(g_call_cache.begin());
+                }
+                
+                g_call_cache[code_str] = {code_str, func, true};
+            }
             
-            (*g_lua_state)["_kh_temp_args"] = exec_func;
-            
-            // Rewrite to use the temp args
-            wrapped_code = "return (function(...) " + code_or_function + " end)(_kh_temp_args())";
-            
-            result = g_lua_state->safe_script(wrapped_code, sol::script_pass_on_error);
-            
-            (*g_lua_state)["_kh_temp_args"] = sol::nil;
+            // Call the function with arguments
+            if (args.type_enum() == types::game_data_type::ARRAY) {
+                // If args is an array, unpack it
+                auto& arr = args.to_array();
+                std::vector<sol::object> arg_vec;
+                arg_vec.reserve(arr.size());
+
+                for (size_t i = 0; i < arr.size(); i++) {
+                    arg_vec.push_back(convert_game_value_to_lua(arr[i]));
+                }
+
+                if (arg_vec.empty()) {
+                    result = func();
+                } else {
+                    result = func(sol::as_args(arg_vec));
+                }
+            } else if (args.is_nil()) {
+                // No arguments
+                result = func();
+            } else {
+                // Single argument
+                result = func(lua_args);
+            }
         } else {
-            // Execute as function
-            if (!Lua_Compilation::has_lua_function(code_or_function)) {
-                return "ERROR: Function '" + code_or_function + "' not found";
+            // Execute code with arguments in scope
+            size_t code_hash = std::hash<std::string>{}(code_str);
+            auto code_it = g_code_cache.find(code_hash);
+            sol::protected_function compiled_code;
+            
+            if (code_it != g_code_cache.end()) {
+                compiled_code = code_it->second;
+            } else {
+                // Compile the code
+                std::string full_code = "return function(...) " + code_str + " end";
+                sol::load_result load_res = g_lua_state->load(full_code);
+
+                if (!load_res.valid()) {
+                    sol::error err = load_res;
+                    return game_value("ERROR: " + std::string(err.what()));
+                }
+                
+                sol::protected_function factory = load_res;
+                auto factory_result = factory();
+
+                if (!factory_result.valid()) {
+                    sol::error err = factory_result;
+                    return game_value("ERROR: Failed to create function: " + std::string(err.what()));
+                }
+                
+                compiled_code = factory_result;
+                
+                // Cache the compiled code
+                if (g_code_cache.size() >= MAX_CACHE_SIZE) {
+                    g_code_cache.erase(g_code_cache.begin());
+                }
+
+                g_code_cache[code_hash] = compiled_code;
             }
             
-            sol::protected_function func = Lua_Compilation::get_lua_function(code_or_function);
-            if (!func.valid()) {
-                return "ERROR: Failed to get function '" + code_or_function + "'";
+            // Execute with arguments
+            if (args.type_enum() == types::game_data_type::ARRAY) {
+                // Unpack array arguments
+                auto& arr = args.to_array();
+                std::vector<sol::object> arg_vec;
+                arg_vec.reserve(arr.size());
+
+                for (size_t i = 0; i < arr.size(); i++) {
+                    arg_vec.push_back(convert_game_value_to_lua(arr[i]));
+                }
+
+                if (arg_vec.empty()) {
+                    result = compiled_code();
+                } else {
+                    result = compiled_code(sol::as_args(arg_vec));
+                }
+            } else if (args.is_nil()) {
+                result = compiled_code();
+            } else {
+                result = compiled_code(lua_args);
             }
-            
-            // Call with unpacked arguments
-            std::vector<sol::object> arg_vec;
-            for (size_t i = 1; i <= args.size(); i++) {
-                arg_vec.push_back(args[i]);
-            }
-            
-            result = func(sol::as_args(arg_vec));
         }
         
+        // Check for errors
         if (!result.valid()) {
             sol::error err = result;
-            return "ERROR: " + std::string(err.what());
+            return game_value("ERROR: " + std::string(err.what()));
         }
         
-        // Extract the first return value from the result
+        // Convert return value(s) to game_value
         if (result.return_count() == 0) {
-            return "nil";
+            return game_value();  // nil
         } else if (result.return_count() == 1) {
-            // Single return value
-            sol::object return_value = result;
-            return serialize_lua_value(return_value, true);  // true = root level
+            return convert_lua_to_game_value(result.get<sol::object>());
         } else {
-            // Multiple return values - wrap in array
-            std::string multi_result = "[";
-            bool first = true;
+            // Multiple return values - return as array
+            auto_array<game_value> returns;
+            returns.reserve(result.return_count());
+
             for (size_t i = 0; i < result.return_count(); i++) {
-                if (!first) multi_result += ", ";
-                sol::object val = result[i];
-                multi_result += serialize_lua_value(val, false);  // false = inside array
-                first = false;
+                returns.push_back(convert_lua_to_game_value(result[i]));
             }
-            multi_result += "]";
-            return multi_result;
+
+            return game_value(std::move(returns));
         }
         
+    } catch (const sol::error& e) {
+        return game_value("ERROR: Lua error - " + std::string(e.what()));
     } catch (const std::exception& e) {
-        return "ERROR: " + std::string(e.what());
+        return game_value("ERROR: " + std::string(e.what()));
+    } catch (...) {
+        return game_value("ERROR: Unknown error occurred");
     }
 }
 
-// Compile Lua code
-static std::string compile_lua(const std::string& code, const std::string& lua_name, bool overwrite) {
-    if (!g_lua_state) {
-        return "ERROR: Lua state not initialized";
-    }
-    
-    if (lua_name.empty()) {
-        return "ERROR: Lua name cannot be empty";
-    }
-    
-    auto result = Lua_Compilation::lua_compile(code, "", lua_name, overwrite);
-    
-    if (result.success) {
-        if (result.was_skipped) {
-            return "SKIPPED: Function already exists";
+// Native SQF command implementation for compileLua
+static game_value compile_lua_sqf(game_value_parameter name, game_value_parameter code) {    
+    try {
+        std::string lua_code = static_cast<std::string>(code);
+        std::string lua_name = static_cast<std::string>(name);
+        
+        // Validate the Lua name
+        if (lua_name.empty()) {
+            return game_value("ERROR: Function name cannot be empty");
+        }
+        
+        // Compile using the existing compilation system
+        auto result = Lua_Compilation::lua_compile(lua_code, "", lua_name);
+        
+        if (result.success) {            
+            // Also update our caches if the function was compiled
+            if (!lua_name.empty() && result.function.valid()) {
+                // Update call cache
+                if (g_call_cache.size() >= MAX_CACHE_SIZE) {
+                    // Remove oldest entry if cache is full
+                    g_call_cache.erase(g_call_cache.begin());
+                }
+                g_call_cache[lua_name] = {lua_name, result.function, true};
+            }
+            
+            return game_value(true);
         } else {
-            return "SUCCESS";
-        }
-    } else {
-        return "ERROR: " + result.error_message;
-    }
-}
-
-// External C interface for kh_framework.c
-extern "C" {
-    __declspec(dllexport) const char* KHLuaFrameworkInterface(const char* function, const char* parameters) {
-        static std::string result_buffer;
-        
-        if (!function || !parameters) {
-            result_buffer = "ERROR: Invalid arguments";
-            return result_buffer.c_str();
+            return game_value("ERROR: " + result.error_message);
         }
         
-        std::string func_name(function);
-        std::string params(parameters);
-        
-        // Parse the parameters array to extract individual arguments
-        std::vector<std::string> args;
-        const char* ptr = params.c_str();
-        
-        // Skip whitespace and opening bracket
-        while (*ptr && (*ptr == ' ' || *ptr == '\t' || *ptr == '\n' || *ptr == '\r')) ptr++;
-        if (*ptr != '[') {
-            result_buffer = "ERROR: Parameters must be an array";
-            return result_buffer.c_str();
-        }
-        ptr++;
-        
-        std::string current_arg;
-        int bracket_depth = 1;
-        bool in_string = false;
-        char string_quote = 0;
-        
-        while (*ptr && bracket_depth > 0) {
-            if (!in_string) {
-                if (*ptr == '"' || *ptr == '\'') {
-                    in_string = true;
-                    string_quote = *ptr;
-                    current_arg += *ptr;
-                } else if (*ptr == '[') {
-                    bracket_depth++;
-                    current_arg += *ptr;
-                } else if (*ptr == ']') {
-                    bracket_depth--;
-                    if (bracket_depth == 0) {
-                        if (!current_arg.empty()) {
-                            args.push_back(current_arg);
-                        }
-                        break;
-                    }
-                    current_arg += *ptr;
-                } else if (*ptr == ',' && bracket_depth == 1) {
-                    if (!current_arg.empty()) {
-                        // Trim whitespace
-                        size_t start = current_arg.find_first_not_of(" \t\n\r");
-                        size_t end = current_arg.find_last_not_of(" \t\n\r");
-                        if (start != std::string::npos) {
-                            current_arg = current_arg.substr(start, end - start + 1);
-                        }
-                        args.push_back(current_arg);
-                    }
-                    current_arg.clear();
-                } else {
-                    current_arg += *ptr;
-                }
-            } else {
-                if (*ptr == string_quote) {
-                    if (*(ptr + 1) == string_quote) {
-                        current_arg += *ptr;
-                        current_arg += *(ptr + 1);
-                        ptr++;
-                    } else {
-                        in_string = false;
-                        current_arg += *ptr;
-                    }
-                } else {
-                    current_arg += *ptr;
-                }
-            }
-            ptr++;
-        }
-        
-        // Process the function call
-        if (func_name == "ExecuteLua") {
-            if (args.size() != 2) {
-                result_buffer = "ERROR: ExecuteLua requires exactly 2 arguments (code/function and parameters array)";
-                return result_buffer.c_str();
-            }
-            
-            // Extract and clean the code/function argument
-            std::string code_or_func = args[0];
-            
-            // Handle Arma's quote escaping - UTF-8 safe
-            if (code_or_func.length() >= 2 && 
-                ((code_or_func[0] == '"' && code_or_func[code_or_func.length()-1] == '"') ||
-                (code_or_func[0] == '\'' && code_or_func[code_or_func.length()-1] == '\''))) {
-                char quote = code_or_func[0];
-                std::string cleaned;
-                
-                // Skip opening quote and process until closing quote
-                size_t i = 1;
-                while (i < code_or_func.length() - 1) {
-                    unsigned char c = code_or_func[i];
-                    
-                    if (c == quote && i + 1 < code_or_func.length() - 1 && 
-                        code_or_func[i + 1] == quote) {
-                        // Doubled quote - add single quote
-                        cleaned += quote;
-                        i += 2; // Skip both quotes
-                    } else if (c < 0x80) {
-                        // ASCII character
-                        cleaned += c;
-                        i++;
-                    } else {
-                        // UTF-8 multi-byte character
-                        size_t char_len = utf8_char_len(c);
-                        if (i + char_len <= code_or_func.length() - 1) {
-                            cleaned.append(code_or_func, i, char_len);
-                        }
-                        i += char_len;
-                    }
-                }
-                code_or_func = cleaned;
-            }
-            
-            // The second argument is already the parameters array
-            std::string exec_params = args[1];
-            
-            result_buffer = execute_lua(code_or_func, exec_params);
-        } else if (func_name == "CompileLua") {
-            if (args.size() != 3) {
-                result_buffer = "ERROR: CompileLua requires exactly 3 arguments";
-                return result_buffer.c_str();
-            }
-            
-            // Extract arguments
-            std::string code = args[0];
-            std::string lua_name = args[1];
-            std::string overwrite_str = args[2];
-            
-            // Handle quote escaping for code
-            if ((code[0] == '"' && code[code.length()-1] == '"') ||
-                (code[0] == '\'' && code[code.length()-1] == '\'')) {
-                char quote = code[0];
-                std::string cleaned;
-                
-                for (size_t i = 1; i < code.length() - 1; i++) {
-                    if (code[i] == quote && i + 1 < code.length() - 1 && 
-                        code[i + 1] == quote) {
-                        cleaned += quote;
-                        i++;
-                    } else {
-                        cleaned += code[i];
-                    }
-                }
-                code = cleaned;
-            }
-            
-            // Handle quote escaping for lua_name
-            if ((lua_name[0] == '"' && lua_name[lua_name.length()-1] == '"') ||
-                (lua_name[0] == '\'' && lua_name[lua_name.length()-1] == '\'')) {
-                char quote = lua_name[0];
-                std::string cleaned;
-                
-                for (size_t i = 1; i < lua_name.length() - 1; i++) {
-                    if (lua_name[i] == quote && i + 1 < lua_name.length() - 1 && 
-                        lua_name[i + 1] == quote) {
-                        cleaned += quote;
-                        i++;
-                    } else {
-                        cleaned += lua_name[i];
-                    }
-                }
-                lua_name = cleaned;
-            }
-            
-            bool overwrite = (overwrite_str == "true" || overwrite_str == "1");
-            
-            result_buffer = compile_lua(code, lua_name, overwrite);
-        } else {
-            result_buffer = "ERROR: Unknown function '" + func_name + "'";
-        }
-        
-        return result_buffer.c_str();
+    } catch (const sol::error& e) {
+        return game_value("ERROR: Lua compilation error - " + std::string(e.what()));
+    } catch (const std::exception& e) {
+        return game_value("ERROR: " + std::string(e.what()));
+    } catch (...) {
+        return game_value("ERROR: Unknown error during compilation");
     }
 }
 
@@ -1090,26 +802,42 @@ int intercept::api_version() {
 
 void intercept::pre_start() {
     initialize_lua_state();
-    intercept::sqf::diag_log("KH Framework Lua - Pre-start Complete");
+
+    _execute_lua_sqf_command = intercept::client::host::register_sqf_command(
+        "luaExecute",
+        "Execute Lua code or function.",
+        userFunctionWrapper<execute_lua_sqf>,
+        types::game_data_type::ANY,     // Return type - can be any type
+        types::game_data_type::ANY,     // Left argument - parameters (any type)
+        types::game_data_type::STRING   // Right argument - code/function name
+    );
+
+    _compile_lua_sqf_command = intercept::client::host::register_sqf_command(
+        "luaCompile",
+        "Compile Lua code and register it as a named function",
+        userFunctionWrapper<compile_lua_sqf>,
+        types::game_data_type::ANY,     // Return type - true on success, error string on failure
+        types::game_data_type::STRING,  // Left argument - name
+        types::game_data_type::STRING   // Right argument - Lua code
+    );
+
+    sqf::diag_log("KH Framework Lua - Pre-start Complete");
 }
 
 void intercept::pre_init() {
-    g_frame_counter = 0;
-    cached_lua_init();
-    intercept::sqf::diag_log("KH Framework Lua - Pre-init Complete");
+    cached_lua_init();    
+    sqf::diag_log("KH Framework Lua - Pre-init Complete");
 }
 
 void intercept::post_init() {
-    intercept::sqf::diag_log("KH Framework Lua - Post-init Complete");
+    sqf::diag_log("KH Framework Lua - Post-init Complete");
 }
 
 void intercept::on_frame() {
-    g_frame_counter++;
     cached_lua_frame_update();
 }
 
 void intercept::mission_ended() {
-    g_frame_counter = 0;
     cached_lua_deinit();
 }
 

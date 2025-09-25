@@ -51,9 +51,7 @@ call KH_fnc_luaResetState;
            	[_prefix, "lua", configName _x] joinString "_";
         };
 
-        if (isNil {[_function, _name] call KH_fnc_luaCompile;}) then {
-			continue;
-		};
+        _name luaCompile _function;
 
 		if (isNumber (_x >> "preInit")) then {
 			if ((getNumber (_x >> "preInit")) isEqualTo 1) then {
@@ -94,9 +92,7 @@ call KH_fnc_luaResetState;
            	[_prefix, "lua", configName _x] joinString "_";
         };
 
-        if (isNil {[_function, _name] call KH_fnc_luaCompile;}) then {
-			continue;
-		};
+		_name luaCompile _function;
 
 		if (isNumber (_x >> "preInit")) then {
 			if ((getNumber (_x >> "preInit")) isEqualTo 1) then {
@@ -1166,7 +1162,7 @@ if hasInterface then {
 			] call KH_fnc_addEventHandler;
 
 			{
-				[[isServer, hasInterface], _x] call KH_fnc_luaOperation;
+				[isServer, hasInterface] luaExecute _x;
 			} forEach KH_var_loadInitLuaExecutions;
 		},
 		true,
@@ -1315,7 +1311,7 @@ if (!isServer && !hasInterface) then {
 			["KH_eve_headlessLoaded", [clientOwner, getPlayerID player, player, [player, true] call KH_fnc_getEntityVariableName]] call CBA_fnc_globalEvent;				
 
 			{
-				[[isServer, hasInterface], _x] call KH_fnc_luaOperation;
+				[isServer, hasInterface] luaExecute _x;
 			} forEach KH_var_loadInitLuaExecutions;
 		},
 		true,
@@ -1325,7 +1321,7 @@ if (!isServer && !hasInterface) then {
 };
 
 {
-	[[isServer, hasInterface], _x] call KH_fnc_luaOperation;
+	[isServer, hasInterface] luaExecute _x;
 } forEach KH_var_preInitLuaExecutions;
 
 nil;

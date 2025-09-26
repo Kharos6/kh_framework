@@ -27,7 +27,9 @@
 #ifndef SOL_SINGLE_CONFIG_HPP
 #define SOL_SINGLE_CONFIG_HPP
 
+#define SOL_LUA_VERSION 501
 #define SOL_LUAJIT 1
+#define SOL_LUAJIT_FFI_DISABLED 1
 
 // beginning of sol/config.hpp
 

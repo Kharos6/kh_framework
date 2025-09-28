@@ -28,6 +28,7 @@ KH_var_postInitExecutions = [];
 KH_var_preInitLuaExecutions = [];
 KH_var_postInitLuaExecutions = [];
 KH_var_loadInitLuaExecutions = [];
+KH_var_temporalStaticLuaExecutionStack = [];
 call KH_fnc_luaClearVariables;
 call KH_fnc_luaResetState;
 ["KH_eve_execution", KH_fnc_callParsedFunction] call CBA_fnc_addEventHandler;
@@ -35,14 +36,23 @@ call KH_fnc_luaResetState;
 {
     private _config = _x;
     private _prefix = getText (_config >> "prefix");
+    private _basePath = (getText (_config >> "path")) regexReplace ["(/)", "\\"];
 
     {
-        private _function = if (isText (_x >> "path")) then {
-            preprocessFile ([(getText (_x >> "path")), "\", configName _x, ".lua"] joinString "");
-        }
-        else {
-            preprocessFile ([(getText (_config >> "path")), "\", configName _x, ".lua"] joinString "");
-        };
+        private _pathUsed = isText (_x >> "path");
+
+        private _function = preprocessFile ([
+            _basePath,
+            ["", "\"] select (_basePath isNotEqualTo ""),
+            if _pathUsed then {
+                (getText (_x >> "path")) regexReplace ["(/)", "\\"];
+            }
+            else {
+                "";
+            }, 
+            configName _x, 
+            ".lua"
+        ] joinString "");
 
         private _name = if (isText (_x >> "name")) then {
             getText (_x >> "name");
@@ -70,53 +80,25 @@ call KH_fnc_luaResetState;
         		KH_var_loadInitLuaExecutions pushBack _function;
 			};
         };
-    } forEach ("true" configClasses _config);
-} forEach ("true" configClasses (configFile >> "CfgLuaFunctions"));
 
-{
-    private _config = _x;
-    private _prefix = getText (_config >> "prefix");
+		if (isNumber (_x >> "temporal")) then {
+            private _time = getNumber (_x >> "temporal");
 
-    {
-        private _function = if (isText (_x >> "path")) then {
-			private _path = getText (_x >> "path");
-
-			if (_path isEqualTo "") then {
-				preprocessFile ([(getText (_x >> "path")), configName _x, ".lua"] joinString "");
-			}
-			else {
-            	preprocessFile ([(getText (_x >> "path")), "\", configName _x, ".lua"] joinString "");
-			};
-        }
-        else {
-            preprocessFile ([(getText (_config >> "path")), configName _x, ".lua"] joinString "");
-        };
-
-        private _name = if (isText (_x >> "name")) then {
-            getText (_x >> "name");
-        }
-        else {
-           	[_prefix, "Fnc", configName _x] joinString "_";
-        };
-
-		_name luaCompile _function;
-
-		if (isNumber (_x >> "preInit")) then {
-			if ((getNumber (_x >> "preInit")) isEqualTo 1) then {
-        		KH_var_preInitLuaExecutions pushBack _function;
-			};
-        };
-
-		if (isNumber (_x >> "postInit")) then {
-			if ((getNumber (_x >> "postInit")) isEqualTo 1) then {
-        		KH_var_postInitLuaExecutions pushBack _function;
-			};
-        };
-
-		if (isNumber (_x >> "loadInit")) then {
-			if ((getNumber (_x >> "loadInit")) isEqualTo 1) then {
-        		KH_var_loadInitLuaExecutions pushBack _function;
-			};
+        	KH_var_temporalStaticLuaExecutionStack pushBack [
+                _time, 
+                _function,
+                if (_time isEqualTo 0) then {
+                    diag_frameNo + 1;
+                }
+                else {
+                    if (_time > 0) then {
+                        diag_tickTime + _time;
+                    }
+                    else {
+                        diag_frameNo + (abs _time);
+                    };
+                }
+            ];
         };
     } forEach ("true" configClasses _config);
 } forEach ("true" configClasses (missionConfigFile >> "CfgLuaFunctions"));
@@ -221,7 +203,7 @@ addMissionEventHandler [
 					}
 					else {
 						_x set [4, systemTime joinString ""];
-						[[systemTime joinString "", _totalDelta], "local input1, input2 = ... return(input1 - input2)"] call KH_fnc_luaOperation;
+						[systemTime joinString "", _totalDelta] luaExecute "local input1, input2 = ... return(input1 - input2)";
 					};
 
 					_x set [7, _args call _function];
@@ -236,7 +218,7 @@ addMissionEventHandler [
 					}
 					else {
 						_x set [4, systemTime joinString ""];
-						[[systemTime joinString "", _totalDelta], "local input1, input2 = ... return(input1 - input2)"] call KH_fnc_luaOperation;
+						[systemTime joinString "", _totalDelta] luaExecute "local input1, input2 = ... return(input1 - input2)";
 					};
 
 					_x set [7, _args call _function];
@@ -245,6 +227,25 @@ addMissionEventHandler [
 				};
 			};
 		} forEach KH_var_temporalExecutionStack;
+
+		if (KH_var_temporalStaticLuaExecutionStack isNotEqualTo []) then {
+			{
+				_x params ["_delay", "_function", "_delta"];
+
+				if (_delay > 0) then {
+					if (diag_tickTime >= _delta) then {
+						[] luaExecute _function;
+						_x set [2, _delta + _delay];
+					};
+				}
+				else {
+					if (diag_frameNo >= _delta) then {
+						[] luaExecute _function;
+						_x set [2, _delta + (abs _delay)];
+					};
+				};
+			} forEach KH_var_temporalStaticLuaExecutionStack;
+		};
 	}
 ];
 

@@ -77,6 +77,7 @@ class CfgFunctions
 			class loadMissionState {};
 			class loadPlayerLoadouts {};
 			class log {};
+			class luaRecompile {};
 			class manageSimulatedInventory {};
 			class moduleCameraSequence {};
 			class moduleDynamicDisguiseEquipment {};

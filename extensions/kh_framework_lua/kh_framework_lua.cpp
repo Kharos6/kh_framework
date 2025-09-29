@@ -40,6 +40,7 @@ static bool get_machine_is_server() {
 }
 
 using namespace intercept;
+using namespace intercept::types;
 constexpr uint32_t KHDATA_MAGIC = 0x5444484B; // "KHDT"
 constexpr uint32_t KHDATA_VERSION = 1;
 
@@ -94,6 +95,21 @@ public:
 CryptoProvider CryptoProvider::instance;
 
 class CryptoGenerator {
+private:
+    // Pre-computed lookup table for hex conversion
+    static constexpr char hex_chars[] = "0123456789abcdef";
+    
+    // Inline hex conversion for maximum speed
+    template<typename T>
+    
+    static inline void append_hex(std::string& result, T value) {
+        for (size_t i = 0; i < sizeof(T); i++) {
+            uint8_t byte = (value >> (i * 8)) & 0xFF;
+            result.push_back(hex_chars[byte >> 4]);
+            result.push_back(hex_chars[byte & 0x0F]);
+        }
+    }
+
 public:
     static std::string bytes_to_hex(const std::vector<uint8_t>& bytes) {
         std::stringstream ss;
@@ -168,71 +184,92 @@ public:
 
     static std::string fnv1a_32(const std::string& input) {
         uint32_t hash = 0x811c9dc5u;
+        const uint8_t* data = reinterpret_cast<const uint8_t*>(input.data());
+        const uint8_t* end = data + input.size();
+   
+        while (data + 4 <= end) {
+            hash ^= data[0];
+            hash *= 0x01000193u;
+            hash ^= data[1];
+            hash *= 0x01000193u;
+            hash ^= data[2];
+            hash *= 0x01000193u;
+            hash ^= data[3];
+            hash *= 0x01000193u;
+            data += 4;
+        }
 
-        for (char c : input) {
-            hash ^= static_cast<uint32_t>(static_cast<uint8_t>(c));
+        // Handle remaining bytes
+        while (data != end) {
+            hash ^= *data++;
             hash *= 0x01000193u;
         }
-
-        std::vector<uint8_t> bytes(4);
-
-        for (int i = 0; i < 4; i++) {
-            bytes[i] = (hash >> (i * 8)) & 0xFF;
-        }
-
-        return bytes_to_hex(bytes);
+        
+        std::string result;
+        result.reserve(8);
+        append_hex(result, hash);
+        return result;
     }
 
     static std::string fnv1a_64(const std::string& input) {
         uint64_t hash = 0xcbf29ce484222325ull;
-
-        for (char c : input) {
-            hash ^= static_cast<uint64_t>(static_cast<uint8_t>(c));
+        const uint8_t* data = reinterpret_cast<const uint8_t*>(input.data());
+        const uint8_t* end = data + input.size();
+        
+        while (data + 8 <= end) {
+            uint64_t chunk;
+            memcpy(&chunk, data, 8);
+            hash ^= chunk;
             hash *= 0x100000001b3ull;
+            data += 8;
         }
-
-        std::vector<uint8_t> bytes(8);
-
-        for (int i = 0; i < 8; i++) {
-            bytes[i] = (hash >> (i * 8)) & 0xFF;
-        }
-
-        return bytes_to_hex(bytes);
+        
+        std::string result;
+        result.reserve(16);
+        append_hex(result, hash);
+        return result;
     }
 
     static std::string crc32(const std::string& input) {
-        static bool table_initialized = false;
+        // Static table initialization without nested function
         static uint32_t crc_table[256];
+        static bool table_initialized = false;
         
         if (!table_initialized) {
             for (uint32_t i = 0; i < 256; i++) {
                 uint32_t crc = i;
-
                 for (int j = 0; j < 8; j++) {
                     crc = (crc & 1) ? ((crc >> 1) ^ 0xEDB88320u) : (crc >> 1);
                 }
-
                 crc_table[i] = crc;
             }
-
             table_initialized = true;
         }
         
         uint32_t crc = 0xFFFFFFFFu;
-        for (char c : input) {
-            uint8_t byte = static_cast<uint8_t>(c);
-            crc = crc_table[(crc ^ byte) & 0xFF] ^ (crc >> 8);
+        const uint8_t* data = reinterpret_cast<const uint8_t*>(input.data());
+        const uint8_t* end = data + input.size();
+        
+        // Process 4 bytes at a time for better performance on longer strings
+        while (data + 4 <= end) {
+            crc = crc_table[(crc ^ data[0]) & 0xFF] ^ (crc >> 8);
+            crc = crc_table[(crc ^ data[1]) & 0xFF] ^ (crc >> 8);
+            crc = crc_table[(crc ^ data[2]) & 0xFF] ^ (crc >> 8);
+            crc = crc_table[(crc ^ data[3]) & 0xFF] ^ (crc >> 8);
+            data += 4;
         }
-
+        
+        // Handle remaining bytes
+        while (data != end) {
+            crc = crc_table[(crc ^ *data++) & 0xFF] ^ (crc >> 8);
+        }
+        
         crc ^= 0xFFFFFFFFu;
         
-        std::vector<uint8_t> bytes(4);
-
-        for (int i = 0; i < 4; i++) {
-            bytes[i] = (crc >> (i * 8)) & 0xFF;
-        }
-
-        return bytes_to_hex(bytes);
+        std::string result;
+        result.reserve(8);
+        append_hex(result, crc);
+        return result;
     }
 
     static std::string xxhash32(const std::string& input) {
@@ -241,44 +278,53 @@ public:
         const uint32_t PRIME32_3 = 0xC2B2AE3Du;
         const uint32_t PRIME32_4 = 0x27D4EB2Fu;
         const uint32_t PRIME32_5 = 0x165667B1u;
-        const uint8_t* data = reinterpret_cast<const uint8_t*>(input.c_str());
+        const uint8_t* data = reinterpret_cast<const uint8_t*>(input.data());
         size_t len = input.length();
+        const uint8_t* end = data + len;
         uint32_t seed = 0;
         uint32_t hash;
         
         if (len >= 16) {
-            const uint8_t* limit = data + len - 16;
+            const uint8_t* limit = end - 16;
             uint32_t v1 = seed + PRIME32_1 + PRIME32_2;
             uint32_t v2 = seed + PRIME32_2;
-            uint32_t v3 = seed + 0;
+            uint32_t v3 = seed;
             uint32_t v4 = seed - PRIME32_1;
             
             do {
+                // Process 16 bytes at a time (4x4 bytes)
                 uint32_t k1, k2, k3, k4;
-                memcpy(&k1, data, 4); data += 4;
-                memcpy(&k2, data, 4); data += 4;
-                memcpy(&k3, data, 4); data += 4;
-                memcpy(&k4, data, 4); data += 4;
-                v1 = ((v1 + k1 * PRIME32_2) << 13) | ((v1 + k1 * PRIME32_2) >> 19);
-                v1 *= PRIME32_1;
-                v2 = ((v2 + k2 * PRIME32_2) << 13) | ((v2 + k2 * PRIME32_2) >> 19);
-                v2 *= PRIME32_1;
-                v3 = ((v3 + k3 * PRIME32_2) << 13) | ((v3 + k3 * PRIME32_2) >> 19);
-                v3 *= PRIME32_1;
-                v4 = ((v4 + k4 * PRIME32_2) << 13) | ((v4 + k4 * PRIME32_2) >> 19);
-                v4 *= PRIME32_1;
+                memcpy(&k1, data, 4);
+                memcpy(&k2, data + 4, 4);
+                memcpy(&k3, data + 8, 4);
+                memcpy(&k4, data + 12, 4);
+                
+                v1 += k1 * PRIME32_2;
+                v1 = ((v1 << 13) | (v1 >> 19)) * PRIME32_1;
+                
+                v2 += k2 * PRIME32_2;
+                v2 = ((v2 << 13) | (v2 >> 19)) * PRIME32_1;
+                
+                v3 += k3 * PRIME32_2;
+                v3 = ((v3 << 13) | (v3 >> 19)) * PRIME32_1;
+                
+                v4 += k4 * PRIME32_2;
+                v4 = ((v4 << 13) | (v4 >> 19)) * PRIME32_1;
+                
+                data += 16;
             } while (data <= limit);
             
-            hash = ((v1 << 1) | (v1 >> 31)) + ((v2 << 7) | (v2 >> 25)) + 
-                ((v3 << 12) | (v3 >> 20)) + ((v4 << 18) | (v4 >> 14));
+            hash = ((v1 << 1) | (v1 >> 31)) + 
+                ((v2 << 7) | (v2 >> 25)) + 
+                ((v3 << 12) | (v3 >> 20)) + 
+                ((v4 << 18) | (v4 >> 14));
         } else {
             hash = seed + PRIME32_5;
         }
         
         hash += static_cast<uint32_t>(len);
         
-        const uint8_t* end = reinterpret_cast<const uint8_t*>(input.c_str()) + len;
-
+        // Process remaining 4-byte chunks
         while (data + 4 <= end) {
             uint32_t k1;
             memcpy(&k1, data, 4);
@@ -290,14 +336,14 @@ public:
             data += 4;
         }
         
+        // Process remaining bytes
         while (data < end) {
-            uint32_t k1 = *data;
+            uint32_t k1 = *data++;
             k1 *= PRIME32_5;
             k1 = (k1 << 11) | (k1 >> 21);
             k1 *= PRIME32_1;
             hash ^= k1;
             hash = ((hash << 15) | (hash >> 17)) * PRIME32_2 + PRIME32_3;
-            data++;
         }
         
         hash ^= hash >> 16;
@@ -306,64 +352,109 @@ public:
         hash *= PRIME32_3;
         hash ^= hash >> 16;
         
-        std::vector<uint8_t> bytes(4);
-
-        for (int i = 0; i < 4; i++) {
-            bytes[i] = (hash >> (i * 8)) & 0xFF;
-        }
-
-        return bytes_to_hex(bytes);
+        std::string result;
+        result.reserve(8);
+        append_hex(result, hash);
+        return result;
     }
 
     static std::string adler32(const std::string& input) {
-        uint32_t a = 1, b = 0;
+        // Use larger modulo operations less frequently for better performance
         const uint32_t MOD_ADLER = 65521;
+        const size_t NMAX = 5552; // Largest n such that 255n(n+1)/2 + (n+1)(BASE-1) <= 2^32-1
         
-        for (char c : input) {
-            a = (a + static_cast<uint8_t>(c)) % MOD_ADLER;
-            b = (b + a) % MOD_ADLER;
+        uint32_t a = 1, b = 0;
+        const uint8_t* data = reinterpret_cast<const uint8_t*>(input.data());
+        size_t len = input.length();
+        
+        while (len > 0) {
+            size_t k = len < NMAX ? len : NMAX;
+            len -= k;
+            
+            // Unroll loop for better performance
+            while (k >= 16) {
+                a += data[0]; b += a;
+                a += data[1]; b += a;
+                a += data[2]; b += a;
+                a += data[3]; b += a;
+                a += data[4]; b += a;
+                a += data[5]; b += a;
+                a += data[6]; b += a;
+                a += data[7]; b += a;
+                a += data[8]; b += a;
+                a += data[9]; b += a;
+                a += data[10]; b += a;
+                a += data[11]; b += a;
+                a += data[12]; b += a;
+                a += data[13]; b += a;
+                a += data[14]; b += a;
+                a += data[15]; b += a;
+                data += 16;
+                k -= 16;
+            }
+            
+            while (k-- > 0) {
+                a += *data++;
+                b += a;
+            }
+            
+            a %= MOD_ADLER;
+            b %= MOD_ADLER;
         }
         
         uint32_t checksum = (b << 16) | a;
-        std::vector<uint8_t> bytes(4);
-
-        for (int i = 0; i < 4; i++) {
-            bytes[i] = (checksum >> (i * 8)) & 0xFF;
-        }
-
-        return bytes_to_hex(bytes);
+        std::string result;
+        result.reserve(8);
+        append_hex(result, checksum);
+        return result;
     }
 
     static std::string djb2(const std::string& input) {
         uint32_t hash = 5381;
-
-        for (char c : input) {
-            hash = ((hash << 5) + hash) + static_cast<uint8_t>(c);
+        const uint8_t* data = reinterpret_cast<const uint8_t*>(input.data());
+        const uint8_t* end = data + input.size();
+        
+        // Unroll loop for better performance
+        while (data + 4 <= end) {
+            hash = ((hash << 5) + hash) + data[0];
+            hash = ((hash << 5) + hash) + data[1];
+            hash = ((hash << 5) + hash) + data[2];
+            hash = ((hash << 5) + hash) + data[3];
+            data += 4;
         }
         
-        std::vector<uint8_t> bytes(4);
-
-        for (int i = 0; i < 4; i++) {
-            bytes[i] = (hash >> (i * 8)) & 0xFF;
+        while (data != end) {
+            hash = ((hash << 5) + hash) + *data++;
         }
-
-        return bytes_to_hex(bytes);
+        
+        std::string result;
+        result.reserve(8);
+        append_hex(result, hash);
+        return result;
     }
 
     static std::string sdbm(const std::string& input) {
         uint32_t hash = 0;
-
-        for (char c : input) {
-            hash = static_cast<uint8_t>(c) + (hash << 6) + (hash << 16) - hash;
+        const uint8_t* data = reinterpret_cast<const uint8_t*>(input.data());
+        const uint8_t* end = data + input.size();
+        
+        // The SDBM algorithm with loop unrolling
+        while (data + 4 <= end) {
+            hash = data[0] + (hash << 6) + (hash << 16) - hash;
+            hash = data[1] + (hash << 6) + (hash << 16) - hash;
+            hash = data[2] + (hash << 6) + (hash << 16) - hash;
+            hash = data[3] + (hash << 6) + (hash << 16) - hash;
+            data += 4;
         }
         
-        std::vector<uint8_t> bytes(4);
-
-        for (int i = 0; i < 4; i++) {
-            bytes[i] = (hash >> (i * 8)) & 0xFF;
+        while (data != end) {
+            hash = *data++ + (hash << 6) + (hash << 16) - hash;
         }
         
-        return bytes_to_hex(bytes);
+        std::string result;
+        result.reserve(8);
+        append_hex(result, hash);
+        return result;
     }
 };
 
@@ -695,7 +786,7 @@ private:
                 }
                 case game_data_type::GROUP: {
                     // Store group ID
-                    serialized = static_cast<std::string>(sqf::group_id(value));
+                    serialized = static_cast<std::string>(sqf::group_id(static_cast<group>(value)));
                     break;
                 }
                 case game_data_type::OBJECT: {
@@ -707,7 +798,7 @@ private:
                             std::string obj_str = static_cast<std::string>(value.data->to_string());
 
                             if (!obj_str.empty()) {
-                                serialized = "OBJ_HASH_" + CryptoGenerator::fnv1a_64(obj_str);
+                                serialized = "OBJ_HASH_" + value.get_hash();
                             } else {
                                 serialized = "OBJ_HASH_NULL";
                             }
@@ -715,6 +806,7 @@ private:
                             serialized = "OBJ_HASH_INVALID";
                         }
                     }
+                    
                     break;
                 }
                 default:
@@ -837,7 +929,7 @@ private:
                     auto all_groups = sqf::all_groups();
 
                     for (const auto& grp : all_groups) {
-                        if (static_cast<std::string>(sqf::group_id(grp)) == serialized) {
+                        if (static_cast<std::string>(sqf::group_id(static_cast<group>(grp))) == serialized) {
                             return grp;
                         }
                     }
@@ -1398,8 +1490,8 @@ public:
                 } else if (value.type_enum() == game_data_type::SIDE) {
                     size += sizeof(uint32_t) + 15;  // "west", "east", etc
                 } else if (value.type_enum() == game_data_type::GROUP) {
-                    std::string group_id = static_cast<std::string>(sqf::group_id(value));
-                    size += sizeof(uint32_t) + group_id.length();
+                    std::string group_id_str = static_cast<std::string>(sqf::group_id(static_cast<group>(value)));
+                    size += sizeof(uint32_t) + group_id_str.length();
                 } else if (value.type_enum() == game_data_type::OBJECT) {
                     std::string var_name = static_cast<std::string>(sqf::vehicle_var_name(value));
                     if (var_name.empty()) {
@@ -1559,16 +1651,16 @@ public:
     }
 };
 
-static types::registered_sqf_function _execute_lua_sqf_command;
-static types::registered_sqf_function _compile_lua_sqf_command;
-static types::registered_sqf_function _crypto_hash_sqf_command;
-static types::registered_sqf_function _generate_random_string_sqf_command;
-static types::registered_sqf_function _generate_uid_sqf_command;
-static types::registered_sqf_function _write_khdata_sqf_command;
-static types::registered_sqf_function _read_khdata_sqf_command;
-static types::registered_sqf_function _flush_khdata_sqf_command;
-static types::registered_sqf_function _delete_khdata_file_sqf_command;
-static types::registered_sqf_function _get_terrain_matrix_sqf_command;
+static registered_sqf_function _execute_lua_sqf_command;
+static registered_sqf_function _compile_lua_sqf_command;
+static registered_sqf_function _crypto_hash_sqf_command;
+static registered_sqf_function _generate_random_string_sqf_command;
+static registered_sqf_function _generate_uid_sqf_command;
+static registered_sqf_function _write_khdata_sqf_command;
+static registered_sqf_function _read_khdata_sqf_command;
+static registered_sqf_function _flush_khdata_sqf_command;
+static registered_sqf_function _delete_khdata_file_sqf_command;
+static registered_sqf_function _get_terrain_matrix_sqf_command;
 static std::vector<std::vector<float>> g_terrain_matrix;
 static float g_terrain_grid_width = 0.0f;
 static int g_terrain_grid_size = 0;
@@ -1587,24 +1679,24 @@ struct GameValueWrapper {
         if (value.is_nil()) return "nil";
         
         switch (value.type_enum()) {
-            case types::game_data_type::OBJECT: return "[OBJECT]";
-            case types::game_data_type::GROUP: return "[GROUP]";
-            case types::game_data_type::NAMESPACE: return "[NAMESPACE]";
-            case types::game_data_type::CONFIG: return "[CONFIG]";
-            case types::game_data_type::CONTROL: return "[CONTROL]";
-            case types::game_data_type::DISPLAY: return "[DISPLAY]";
-            case types::game_data_type::LOCATION: return "[LOCATION]";
-            case types::game_data_type::SCRIPT: return "[SCRIPT]";
-            case types::game_data_type::SIDE: return "[SIDE]";
-            case types::game_data_type::TEXT: return "[TEXT]";
-            case types::game_data_type::TEAM_MEMBER: return "[TEAM_MEMBER]";
-            case types::game_data_type::CODE: return "[CODE]";
-            case types::game_data_type::TASK: return "[TASK]";
-            case types::game_data_type::DIARY_RECORD: return "[DIARY_RECORD]";
-            case types::game_data_type::NetObject: return "[NETOBJECT]";
-            case types::game_data_type::SUBGROUP: return "[SUBGROUP]";
-            case types::game_data_type::TARGET: return "[TARGET]";
-            case types::game_data_type::HASHMAP: return "[HASHMAP]";
+            case game_data_type::OBJECT: return "[OBJECT]";
+            case game_data_type::GROUP: return "[GROUP]";
+            case game_data_type::NAMESPACE: return "[NAMESPACE]";
+            case game_data_type::CONFIG: return "[CONFIG]";
+            case game_data_type::CONTROL: return "[CONTROL]";
+            case game_data_type::DISPLAY: return "[DISPLAY]";
+            case game_data_type::LOCATION: return "[LOCATION]";
+            case game_data_type::SCRIPT: return "[SCRIPT]";
+            case game_data_type::SIDE: return "[SIDE]";
+            case game_data_type::TEXT: return "[TEXT]";
+            case game_data_type::TEAM_MEMBER: return "[TEAM_MEMBER]";
+            case game_data_type::CODE: return "[CODE]";
+            case game_data_type::TASK: return "[TASK]";
+            case game_data_type::DIARY_RECORD: return "[DIARY_RECORD]";
+            case game_data_type::NetObject: return "[NETOBJECT]";
+            case game_data_type::SUBGROUP: return "[SUBGROUP]";
+            case game_data_type::TARGET: return "[TARGET]";
+            case game_data_type::HASHMAP: return "[HASHMAP]";
             default: return value.data ? static_cast<std::string>(value.data->to_string()) : "nil";
         }
     }
@@ -1616,30 +1708,30 @@ struct GameValueWrapper {
     // Method to get the type name
     std::string type_name() const {
         switch (value.type_enum()) {
-            case types::game_data_type::NOTHING: return "NOTHING";
-            case types::game_data_type::ANY: return "ANY";
-            case types::game_data_type::SCALAR: return "SCALAR";
-            case types::game_data_type::BOOL: return "BOOL";
-            case types::game_data_type::ARRAY: return "ARRAY";
-            case types::game_data_type::STRING: return "STRING";
-            case types::game_data_type::OBJECT: return "OBJECT";
-            case types::game_data_type::GROUP: return "GROUP";
-            case types::game_data_type::NAMESPACE: return "NAMESPACE";
-            case types::game_data_type::CONFIG: return "CONFIG";
-            case types::game_data_type::CONTROL: return "CONTROL";
-            case types::game_data_type::DISPLAY: return "DISPLAY";
-            case types::game_data_type::LOCATION: return "LOCATION";
-            case types::game_data_type::SCRIPT: return "SCRIPT";
-            case types::game_data_type::SIDE: return "SIDE";
-            case types::game_data_type::TEXT: return "TEXT";
-            case types::game_data_type::TEAM_MEMBER: return "TEAM_MEMBER";
-            case types::game_data_type::CODE: return "CODE";
-            case types::game_data_type::TASK: return "TASK";
-            case types::game_data_type::DIARY_RECORD: return "DIARY_RECORD";
-            case types::game_data_type::NetObject: return "NETOBJECT";
-            case types::game_data_type::SUBGROUP: return "SUBGROUP";
-            case types::game_data_type::TARGET: return "TARGET";
-            case types::game_data_type::HASHMAP: return "HASHMAP";
+            case game_data_type::NOTHING: return "NOTHING";
+            case game_data_type::ANY: return "ANY";
+            case game_data_type::SCALAR: return "SCALAR";
+            case game_data_type::BOOL: return "BOOL";
+            case game_data_type::ARRAY: return "ARRAY";
+            case game_data_type::STRING: return "STRING";
+            case game_data_type::OBJECT: return "OBJECT";
+            case game_data_type::GROUP: return "GROUP";
+            case game_data_type::NAMESPACE: return "NAMESPACE";
+            case game_data_type::CONFIG: return "CONFIG";
+            case game_data_type::CONTROL: return "CONTROL";
+            case game_data_type::DISPLAY: return "DISPLAY";
+            case game_data_type::LOCATION: return "LOCATION";
+            case game_data_type::SCRIPT: return "SCRIPT";
+            case game_data_type::SIDE: return "SIDE";
+            case game_data_type::TEXT: return "TEXT";
+            case game_data_type::TEAM_MEMBER: return "TEAM_MEMBER";
+            case game_data_type::CODE: return "CODE";
+            case game_data_type::TASK: return "TASK";
+            case game_data_type::DIARY_RECORD: return "DIARY_RECORD";
+            case game_data_type::NetObject: return "NETOBJECT";
+            case game_data_type::SUBGROUP: return "SUBGROUP";
+            case game_data_type::TARGET: return "TARGET";
+            case game_data_type::HASHMAP: return "HASHMAP";
             default: return "UNKNOWN";
         }
     }
@@ -1656,6 +1748,9 @@ struct LuaCallCache {
 
 static std::unordered_map<std::string, LuaCallCache> g_call_cache;
 static std::unordered_map<size_t, sol::protected_function> g_code_cache;
+static std::unordered_map<size_t, game_value> g_sqf_compiled_cache;
+static std::unordered_map<std::string, game_value> g_sqf_function_cache;
+static std::unordered_map<std::string, game_value> g_sqf_command_cache;
 
 class LuaStackGuard {
     lua_State* L;
@@ -1838,66 +1933,265 @@ static sol::object convert_game_value_to_lua(const game_value& value) {
     sol::state& lua = *g_lua_state;
     
     switch (value.type_enum()) {
-        case types::game_data_type::BOOL:
+        case game_data_type::BOOL:
             return sol::make_object(lua, static_cast<bool>(value));
 
-        case types::game_data_type::SCALAR:
+        case game_data_type::SCALAR:
             return sol::make_object(lua, static_cast<float>(value));
             
-        case types::game_data_type::STRING:
+        case game_data_type::STRING:
             return sol::make_object(lua, static_cast<std::string>(value));
             
-        case types::game_data_type::ARRAY: {
-            sol::table lua_table = lua.create_table();
+        case game_data_type::ARRAY: {
             auto& array = value.to_array();
+            
+            if (array.empty()) {
+                return sol::make_object(lua, lua.create_table());
+            }
+            
+            // Check first element type
+            game_data_type first_type = array[0].type_enum();
+            bool is_homogeneous = true;
+            
+            // Quick scan for homogeneity
+            for (size_t i = 1; i < array.size(); ++i) {
+                if (array[i].type_enum() != first_type) {
+                    is_homogeneous = false;
+                    break;
+                }
+            }
+            
+            if (is_homogeneous) {
+                sol::table lua_table = lua.create_table(array.size(), 0);
+                
+                switch (first_type) {
+                    case game_data_type::SCALAR: {
+                        // Fast path for numbers
+                        for (size_t i = 0; i < array.size(); ++i) {
+                            lua_table.raw_set(i + 1, static_cast<float>(array[i]));
+                        }
+
+                        return sol::make_object(lua, lua_table);
+                    }
+                    
+                    case game_data_type::BOOL: {
+                        // Fast path for booleans
+                        for (size_t i = 0; i < array.size(); ++i) {
+                            lua_table.raw_set(i + 1, static_cast<bool>(array[i]));
+                        }
+
+                        return sol::make_object(lua, lua_table);
+                    }
+                    
+                    case game_data_type::STRING: {
+                        // Fast path for strings
+                        for (size_t i = 0; i < array.size(); ++i) {
+                            lua_table.raw_set(i + 1, static_cast<std::string>(array[i]));
+                        }
+
+                        return sol::make_object(lua, lua_table);
+                    }
+                    
+                    case game_data_type::OBJECT: {
+                        // Fast path for objects - wrap all at once
+                        for (size_t i = 0; i < array.size(); ++i) {
+                            lua_table.raw_set(i + 1, GameValueWrapper(array[i]));
+                        }
+
+                        return sol::make_object(lua, lua_table);
+                    }
+                    
+                    case game_data_type::GROUP: {
+                        // Fast path for groups
+                        for (size_t i = 0; i < array.size(); ++i) {
+                            lua_table.raw_set(i + 1, GameValueWrapper(array[i]));
+                        }
+
+                        return sol::make_object(lua, lua_table);
+                    }
+                    
+                    case game_data_type::SIDE: {
+                        // Fast path for sides
+                        for (size_t i = 0; i < array.size(); ++i) {
+                            lua_table.raw_set(i + 1, GameValueWrapper(array[i]));
+                        }
+
+                        return sol::make_object(lua, lua_table);
+                    }
+                    
+                    case game_data_type::NOTHING:
+                    case game_data_type::ANY: {
+                        // Array of nil values
+                        for (size_t i = 0; i < array.size(); ++i) {
+                            lua_table.raw_set(i + 1, sol::nil);
+                        }
+
+                        return sol::make_object(lua, lua_table);
+                    }
+                    
+                    // Check for homogeneous nested arrays (e.g., array of positions)
+                    case game_data_type::ARRAY: {
+                        // Check if all nested arrays are same size and type
+                        size_t nested_size = array[0].size();
+                        bool same_size = true;
+                        
+                        for (size_t i = 1; i < array.size(); ++i) {
+                            if (array[i].size() != nested_size) {
+                                same_size = false;
+                                break;
+                            }
+                        }
+                        
+                        if (same_size && nested_size == 2) {
+                            // Likely array of 2D positions
+                            bool all_numbers = true;
+
+                            for (const auto& elem : array) {
+                                auto& sub = elem.to_array();
+
+                                if (sub[0].type_enum() != game_data_type::SCALAR ||
+                                    sub[1].type_enum() != game_data_type::SCALAR) {
+                                    all_numbers = false;
+                                    break;
+                                }
+                            }
+                            
+                            if (all_numbers) {
+                                for (size_t i = 0; i < array.size(); ++i) {
+                                    sol::table pos = lua.create_table(2, 0);
+                                    auto& sub = array[i].to_array();
+                                    pos.raw_set(1, static_cast<float>(sub[0]));
+                                    pos.raw_set(2, static_cast<float>(sub[1]));
+                                    lua_table.raw_set(i + 1, pos);
+                                }
+
+                                return sol::make_object(lua, lua_table);
+                            }
+                        } else if (same_size && nested_size == 3) {
+                            // Likely array of 3D positions
+                            bool all_numbers = true;
+                            for (const auto& elem : array) {
+                                auto& sub = elem.to_array();
+
+                                if (sub[0].type_enum() != game_data_type::SCALAR ||
+                                    sub[1].type_enum() != game_data_type::SCALAR ||
+                                    sub[2].type_enum() != game_data_type::SCALAR) {
+                                    all_numbers = false;
+                                    break;
+                                }
+                            }
+                            
+                            if (all_numbers) {
+                                for (size_t i = 0; i < array.size(); ++i) {
+                                    sol::table pos = lua.create_table(3, 0);
+                                    auto& sub = array[i].to_array();
+                                    pos.raw_set(1, static_cast<float>(sub[0]));
+                                    pos.raw_set(2, static_cast<float>(sub[1]));
+                                    pos.raw_set(3, static_cast<float>(sub[2]));
+                                    lua_table.raw_set(i + 1, pos);
+                                }
+
+                                return sol::make_object(lua, lua_table);
+                            }
+                        }
+                        
+                        // Fall through to default recursive conversion
+                        break;
+                    }
+                    
+                    default:
+                        // Fall through to recursive conversion
+                        break;
+                }
+            }
+            
+            // Default recursive conversion for heterogeneous or complex arrays
+            sol::table lua_table = lua.create_table(array.size(), 0);
 
             for (size_t i = 0; i < array.size(); ++i) {
-                // Recursively convert array elements
                 lua_table[i + 1] = convert_game_value_to_lua(array[i]);
             }
 
             return sol::make_object(lua, lua_table);
         }
 
-        case types::game_data_type::HASHMAP: {
-            sol::table lua_table = lua.create_table();
+        case game_data_type::HASHMAP: {
             auto& hashmap = value.to_hashmap();
             
-            // Convert directly to native Lua table format
+            // Check if all values are same type for optimization
+            if (hashmap.count() > 0) {
+                game_data_type value_type = game_data_type::NOTHING;
+                bool homogeneous_values = true;
+                
+                for (auto& pair : hashmap) {
+                    if (value_type == game_data_type::NOTHING) {
+                        value_type = pair.value.type_enum();
+                    } else if (pair.value.type_enum() != value_type) {
+                        homogeneous_values = false;
+                        break;
+                    }
+                }
+                
+                if (homogeneous_values && value_type == game_data_type::SCALAR) {
+                    // Fast path for number-valued hashmaps
+                    sol::table lua_table = lua.create_table(0, hashmap.count());
+
+                    for (auto& pair : hashmap) {
+                        // Keys still need conversion, but values can be fast
+                        sol::object lua_key = convert_game_value_to_lua(pair.key);
+                        lua_table.raw_set(lua_key, static_cast<float>(pair.value));
+                    }
+
+                    return sol::make_object(lua, lua_table);
+                }
+                
+                if (homogeneous_values && value_type == game_data_type::STRING) {
+                    // Fast path for string-valued hashmaps
+                    sol::table lua_table = lua.create_table(0, hashmap.count());
+
+                    for (auto& pair : hashmap) {
+                        sol::object lua_key = convert_game_value_to_lua(pair.key);
+                        lua_table.raw_set(lua_key, static_cast<std::string>(pair.value));
+                    }
+                    
+                    return sol::make_object(lua, lua_table);
+                }
+            }
+            
+            // Default conversion
+            sol::table lua_table = lua.create_table(0, hashmap.count());
+            
             for (auto& pair : hashmap) {
                 sol::object lua_key = convert_game_value_to_lua(pair.key);
                 sol::object lua_value = convert_game_value_to_lua(pair.value);
-                
-                // Set the key-value pair in the Lua table
-                // This works for all key types that Lua supports
                 lua_table[lua_key] = lua_value;
             }
             
             return sol::make_object(lua, lua_table);
         }
 
-        case types::game_data_type::NOTHING:
-        case types::game_data_type::ANY:
+        case game_data_type::NOTHING:
+        case game_data_type::ANY:
             return sol::make_object(lua, sol::nil);
             
         // Native Arma types - wrap in userdata
-        case types::game_data_type::OBJECT:
-        case types::game_data_type::GROUP:
-        case types::game_data_type::NAMESPACE:
-        case types::game_data_type::CONFIG:
-        case types::game_data_type::CONTROL:
-        case types::game_data_type::DISPLAY:
-        case types::game_data_type::LOCATION:
-        case types::game_data_type::SCRIPT:
-        case types::game_data_type::SIDE:
-        case types::game_data_type::TEXT:
-        case types::game_data_type::TEAM_MEMBER:
-        case types::game_data_type::CODE:
-        case types::game_data_type::TASK:
-        case types::game_data_type::DIARY_RECORD:
-        case types::game_data_type::NetObject:
-        case types::game_data_type::SUBGROUP:
-        case types::game_data_type::TARGET:
+        case game_data_type::OBJECT:
+        case game_data_type::GROUP:
+        case game_data_type::NAMESPACE:
+        case game_data_type::CONFIG:
+        case game_data_type::CONTROL:
+        case game_data_type::DISPLAY:
+        case game_data_type::LOCATION:
+        case game_data_type::SCRIPT:
+        case game_data_type::SIDE:
+        case game_data_type::TEXT:
+        case game_data_type::TEAM_MEMBER:
+        case game_data_type::CODE:
+        case game_data_type::TASK:
+        case game_data_type::DIARY_RECORD:
+        case game_data_type::NetObject:
+        case game_data_type::SUBGROUP:
+        case game_data_type::TARGET:
             return sol::make_object(lua, GameValueWrapper(value));
             
         default:
@@ -1942,6 +2236,7 @@ static game_value convert_lua_to_game_value(const sol::object& obj) {
         *   sqf.someCommand(myCustomObject)
         */
         sol::optional<sol::table> metatable = tbl[sol::metatable_key];
+        
         if (metatable) {
             sol::optional<sol::function> to_sqf = (*metatable)["__toSQF"];
 
@@ -2111,7 +2406,7 @@ namespace lua_functions {
         
         if (args.size() < 2) {
             ErrorHandling::report_error("Not enough arguments");
-            return sol::make_object(lua, "Not enough arguments");
+            return sol::nil;
         }
         
         sol::object params = args[0];
@@ -2121,7 +2416,7 @@ namespace lua_functions {
         // Validate code parameter
         if (code_obj.get_type() != sol::type::string) {
             ErrorHandling::report_error("Code must be a string");
-            return sol::make_object(lua, "Code must be a string");
+            return sol::nil;
         }
         
         std::string code = code_obj.as<std::string>();
@@ -2129,7 +2424,7 @@ namespace lua_functions {
         
         if (count < 1) {
             ErrorHandling::report_error("Execution count must be at least 1");
-            return sol::make_object(lua, "Execution count must be at least 1");
+            return sol::nil;
         }
         
         sol::protected_function compiled;
@@ -2144,7 +2439,7 @@ namespace lua_functions {
 
             if (func.get_type() != sol::type::function) {
                 ErrorHandling::report_error("Function '" + code + "' not found or is not a function");
-                return sol::make_object(lua, "Function '" + code + "' not found or is not a function");
+                return sol::nil;
             }
             compiled = func;
         } else {
@@ -2155,7 +2450,7 @@ namespace lua_functions {
             if (!load_res.valid()) {
                 sol::error err = load_res;
                 ErrorHandling::report_error("Failed to compile code: " + std::string(err.what()));
-                return sol::make_object(lua, "Failed to compile code: " + std::string(err.what()));
+                return sol::nil;
             }
             
             sol::protected_function factory = load_res;
@@ -2164,7 +2459,7 @@ namespace lua_functions {
             if (!factory_result.valid()) {
                 sol::error err = factory_result;
                 ErrorHandling::report_error("Failed to create function: " + std::string(err.what()));
-                return sol::make_object(lua, "Failed to create function: " + std::string(err.what()));
+                return sol::nil;
             }
 
             compiled = factory_result;
@@ -2199,7 +2494,7 @@ namespace lua_functions {
 
         if (!get_time.valid()) {
             ErrorHandling::report_error("High precision timer not available");
-            return sol::make_object(lua, "High precision timer not available");
+            return sol::nil;
         }
         
         // Profile execution
@@ -2257,7 +2552,7 @@ namespace lua_functions {
     }
 
     /*
-    Execute in Sqf Namespace
+    Execute in sqf Namespace
 
     local result = with_sqf(function(x, y)
         diag_log("Test: " .. tostring(x))  -- sqf function without prefix
@@ -2354,18 +2649,36 @@ namespace lua_functions {
         try {            
             // Handle parameters
             if (params.get_type() == sol::type::nil) {
-                return convert_game_value_to_lua(sqf::call2(sqf::compile("call " + function_name)));
+                auto cache_it = g_sqf_function_cache.find("call " + function_name);
+                game_value compiled;
+
+                if (cache_it != g_sqf_function_cache.end()) {
+                    compiled = cache_it->second;
+                } else {
+                    compiled = sqf::compile("call " + function_name);
+                    g_sqf_function_cache["call " + function_name] = compiled;
+                }
+
+                return convert_game_value_to_lua(sqf::call2(compiled));
             } else {
-                return convert_game_value_to_lua(sqf::call2(sqf::compile("_this call " + function_name), convert_lua_to_game_value(params)));
+                auto cache_it = g_sqf_function_cache.find("_this call " + function_name);
+                game_value compiled;
+
+                if (cache_it != g_sqf_function_cache.end()) {
+                    compiled = cache_it->second;
+                } else {
+                    compiled = sqf::compile("_this call " + function_name);
+                    g_sqf_function_cache["_this call " + function_name] = compiled;
+                }
+
+                return convert_game_value_to_lua(sqf::call2(compiled, convert_lua_to_game_value(params)));
             }
         } catch (const std::exception& e) {
-            sol::state_view lua(params.lua_state());
             ErrorHandling::report_error(std::string(e.what()));
-            return sol::make_object(lua, std::string(e.what()));
+            return sol::nil;
         } catch (...) {
-            sol::state_view lua(params.lua_state());
             ErrorHandling::report_error("Unknown error in SQF_FunctionCall");
-            return sol::make_object(lua, "Unknown error in SQF_FunctionCall");
+            return sol::nil;
         }
     }
 }
@@ -2692,8 +3005,8 @@ static void initialize_lua_state() {
         (*g_lua_state)["GetTimeMs"] = lua_functions::get_time_ms;
         (*g_lua_state)["ProfileCode"] = lua_functions::profile_code;
         (*g_lua_state)["GetDataType"] = lua_functions::get_data_type;
-        (*g_lua_state)["with_sqf"] = lua_functions::with_sqf;
         (*g_lua_state)["SQF_FunctionCall"] = lua_functions::sqf_function_call;
+        (*g_lua_state)["with_sqf"] = lua_functions::with_sqf;
 
         // This lets you get and set sqf variables using SQF_VAR.someVariable
         sol::table sqf_var = g_lua_state->create_table();
@@ -2716,19 +3029,49 @@ static void initialize_lua_state() {
 
         auto command_handler = [](std::string cmd, sol::variadic_args args) -> sol::object {
             if (args.size() == 0) {
-                return convert_game_value_to_lua(sqf::call2(sqf::compile(cmd)));
+                auto cache_it = g_sqf_command_cache.find(cmd);
+                game_value compiled;
+                
+                if (cache_it != g_sqf_command_cache.end()) {
+                    compiled = cache_it->second;
+                } else {
+                    compiled = sqf::compile(cmd);
+                    g_sqf_command_cache[cmd] = compiled;
+                }
+
+                return convert_game_value_to_lua(sqf::call2(compiled));
             } else if (args.size() == 1) {
-                return convert_game_value_to_lua(sqf::call2(sqf::compile(cmd + " _this"), convert_lua_to_game_value(args[0])));
+                std::string key = cmd + " _this";
+                auto cache_it = g_sqf_command_cache.find(key);
+                game_value compiled;
+
+                if (cache_it != g_sqf_command_cache.end()) {
+                    compiled = cache_it->second;
+                } else {
+                    compiled = sqf::compile(key);
+                    g_sqf_command_cache[key] = compiled;
+                }
+
+                return convert_game_value_to_lua(sqf::call2(compiled, convert_lua_to_game_value(args[0])));
             } else if (args.size() == 2) {
-                // Compile the binary command pattern and call with the array
+                std::string key = "(_this#0) " + cmd + " (_this#1)";
+                auto cache_it = g_sqf_command_cache.find(key);
+                game_value compiled;
+
+                if (cache_it != g_sqf_command_cache.end()) {
+                    compiled = cache_it->second;
+                } else {
+                    compiled = sqf::compile(key);
+                    g_sqf_command_cache[key] = compiled;
+                }
+
                 return convert_game_value_to_lua(sqf::call2(
-                    sqf::compile("(_this#0) " + cmd + " (_this#1)"), 
+                    compiled, 
                     game_value({convert_lua_to_game_value(args[0]), convert_lua_to_game_value(args[1])})
                 ));
             } else {
-                sol::state_view lua(args.lua_state());
-                ErrorHandling::report_error("SQF commands only support 0-2 arguments (no argument, right argument, or left and right argument)");
-                return sol::make_object(lua, "SQF commands only support 0-2 arguments (no argument, right argument, or left and right argument)");
+                ErrorHandling::report_error("SQF commands only support 0-2 arguments");
+                return sol::nil;
             }
         };
 
@@ -2801,13 +3144,28 @@ static void initialize_lua_state() {
 
         sqf_table["call"] = [](sol::variadic_args args) -> sol::object {
             if (args[0].get_type() != sol::type::string) {
+                ErrorHandling::report_error("Code must be string");
                 return sol::nil;
             }
 
+            std::string code = args[0].as<std::string>();
+            size_t code_hash = std::hash<std::string>{}(code);
+            
+            // Check cache for compiled code
+            game_value compiled;
+            auto cache_it = g_sqf_compiled_cache.find(code_hash);
+            
+            if (cache_it != g_sqf_compiled_cache.end()) {
+                compiled = cache_it->second;
+            } else {
+                compiled = sqf::compile(code);
+                g_sqf_compiled_cache[code_hash] = compiled;
+            }
+
             if (args.size() == 1) {
-                return convert_game_value_to_lua(sqf::call2(sqf::compile(args[0].as<std::string>())));
+                return convert_game_value_to_lua(sqf::call2(compiled));
             } else if (args.size() == 2) {
-                return convert_game_value_to_lua(sqf::call2(sqf::compile(args[0].as<std::string>()), convert_lua_to_game_value(args[1])));
+                return convert_game_value_to_lua(sqf::call2(compiled, convert_lua_to_game_value(args[1])));
             }
             
             return sol::nil;
@@ -2854,6 +3212,10 @@ static void initialize_lua_state() {
 
         sqf_table["isServer"] = []() -> bool {
             return sqf::is_server();
+        };
+
+        sqf_table["isDedicated"] = []() -> bool {
+            return sqf::is_dedicated();
         };
 
         sqf_table["hasInterface"] = []() -> bool {
@@ -2974,7 +3336,7 @@ static game_value execute_lua_sqf(game_value_parameter args, game_value_paramete
                 g_call_cache[code_str] = {code_str, func, true};
             }
             
-            if (args.type_enum() == types::game_data_type::ARRAY) {
+            if (args.type_enum() == game_data_type::ARRAY) {
                 // If args is an array, unpack it
                 auto& arr = args.to_array();
                 std::vector<sol::object> arg_vec;
@@ -3025,7 +3387,7 @@ static game_value execute_lua_sqf(game_value_parameter args, game_value_paramete
                 g_code_cache[code_hash] = compiled_code;
             }
             
-            if (args.type_enum() == types::game_data_type::ARRAY) {
+            if (args.type_enum() == game_data_type::ARRAY) {
                 // If args is an array, unpack it
                 auto& arr = args.to_array();
                 std::vector<sol::object> arg_vec;
@@ -3167,7 +3529,7 @@ static game_value generate_random_string_sqf(game_value_parameter options, game_
         bool use_symbols = true;
         
         // Parse options if provided (expects array of 3 bools)
-        if (options.type_enum() == types::game_data_type::ARRAY) {
+        if (options.type_enum() == game_data_type::ARRAY) {
             auto& arr = options.to_array();
             
             // Default to false for each element if array is provided
@@ -3218,7 +3580,7 @@ static game_value generate_uid_sqf() {
 
 static game_value write_khdata_sqf(game_value_parameter params, game_value_parameter value) {
     try {
-        if (params.type_enum() != types::game_data_type::ARRAY || params.size() < 2) {
+        if (params.type_enum() != game_data_type::ARRAY || params.size() < 2) {
             ErrorHandling::report_error("Expected [filename, variable_name]");
             return game_value();
         }
@@ -3402,43 +3764,43 @@ void intercept::pre_start() {
         "luaExecute",
         "Execute Lua code or function.",
         userFunctionWrapper<execute_lua_sqf>,
-        types::game_data_type::ANY,     // Return type - can be any type
-        types::game_data_type::ANY,     // Left argument - parameters (any type)
-        types::game_data_type::STRING   // Right argument - code/function name
+        game_data_type::ANY,     // Return type - can be any type
+        game_data_type::ANY,     // Left argument - parameters (any type)
+        game_data_type::STRING   // Right argument - code/function name
     );
 
     _compile_lua_sqf_command = intercept::client::host::register_sqf_command(
         "luaCompile",
         "Compile Lua code and register it as a named function",
         userFunctionWrapper<compile_lua_sqf>,
-        types::game_data_type::NOTHING,     // Return type
-        types::game_data_type::STRING,  // Left argument - name
-        types::game_data_type::STRING   // Right argument - Lua code
+        game_data_type::NOTHING,     // Return type
+        game_data_type::STRING,  // Left argument - name
+        game_data_type::STRING   // Right argument - Lua code
     );
 
     _crypto_hash_sqf_command = intercept::client::host::register_sqf_command(
         "cryptoHash",
         "Compute cryptographic hash of input string",
         userFunctionWrapper<crypto_hash_sqf>,
-        types::game_data_type::STRING,   // Return type
-        types::game_data_type::STRING,   // Left argument - hash type
-        types::game_data_type::STRING    // Right argument - input string
+        game_data_type::STRING,   // Return type
+        game_data_type::STRING,   // Left argument - hash type
+        game_data_type::STRING    // Right argument - input string
     );
 
     _generate_random_string_sqf_command = intercept::client::host::register_sqf_command(
         "generateRandomString", 
         "Generate random string with specified length and character sets",
         userFunctionWrapper<generate_random_string_sqf>,
-        types::game_data_type::STRING,   // Return type
-        types::game_data_type::ARRAY,   // Right argument - options [numbers, letters, symbols]
-        types::game_data_type::SCALAR     // Left argument - length
+        game_data_type::STRING,   // Return type
+        game_data_type::ARRAY,   // Right argument - options [numbers, letters, symbols]
+        game_data_type::SCALAR     // Left argument - length
     );
 
     _generate_uid_sqf_command = intercept::client::host::register_sqf_command(
         "generateUid",
         "Generate a 16-character unique identifier",
         userFunctionWrapper<generate_uid_sqf>,
-        types::game_data_type::STRING   // Return type - no arguments needed
+        game_data_type::STRING   // Return type - no arguments needed
     );
 
     KHDataManager::instance().initialize();
@@ -3448,40 +3810,40 @@ void intercept::pre_start() {
         "writeKhData",
         "Write variable to KHData file",
         userFunctionWrapper<write_khdata_sqf>,
-        types::game_data_type::NOTHING,     // Return type
-        types::game_data_type::ARRAY,      // Left argument - [filename, variable_name]
-        types::game_data_type::ANY         // Right argument - value (nil to delete)
+        game_data_type::NOTHING,     // Return type
+        game_data_type::ARRAY,      // Left argument - [filename, variable_name]
+        game_data_type::ANY         // Right argument - value (nil to delete)
     );
 
     _read_khdata_sqf_command = intercept::client::host::register_sqf_command(
         "readKhData",
         "Read variable from KHData file",
         userFunctionWrapper<read_khdata_sqf>,
-        types::game_data_type::ANY,        // Return type
-        types::game_data_type::STRING,     // Left argument - filename
-        types::game_data_type::STRING      // Right argument - variable_name
+        game_data_type::ANY,        // Return type
+        game_data_type::STRING,     // Left argument - filename
+        game_data_type::STRING      // Right argument - variable_name
     );
 
     _flush_khdata_sqf_command = intercept::client::host::register_sqf_command(
         "flushKhData",
         "Flush all dirty KHData files to disk",
         userFunctionWrapper<flush_khdata_sqf>,
-        types::game_data_type::NOTHING      // Return type
+        game_data_type::NOTHING      // Return type
     );
 
     _delete_khdata_file_sqf_command = intercept::client::host::register_sqf_command(
         "deleteKhDataFile",
         "Delete KHData file",
         userFunctionWrapper<delete_khdata_file_sqf>,
-        types::game_data_type::NOTHING,     // Return type
-        types::game_data_type::STRING      // Argument - filename
+        game_data_type::NOTHING,     // Return type
+        game_data_type::STRING      // Argument - filename
     );
 
     _get_terrain_matrix_sqf_command = intercept::client::host::register_sqf_command(
         "getTerrainMatrix",
         "Get the pre-calculated terrain height matrix",
         userFunctionWrapper<get_terrain_matrix_sqf>,
-        types::game_data_type::ARRAY      // Return type
+        game_data_type::ARRAY      // Return type
     );
 
     sqf::diag_log("KH Framework Lua - Pre-start Complete");

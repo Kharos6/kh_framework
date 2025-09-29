@@ -1,4 +1,4 @@
-﻿/*!
+/*!
 @file
 @author Verox (verox.averre@gmail.com)
 @author Nou (korewananda@gmail.com)
@@ -37,10 +37,14 @@ namespace intercept {
         void set_marker_text_local(sqf_string_const_ref marker_, sqf_string_const_ref text_);
         void set_marker_shape(sqf_string_const_ref marker_, sqf_string_const_ref shape_);
         void set_marker_shape_local(sqf_string_const_ref marker_, sqf_string_const_ref shape_);
-        void set_marker_pos(sqf_string_const_ref marker_, const vector3 &pos_);
-        void set_marker_pos_local(sqf_string_const_ref marker_, const vector3 &pos_);
+
         void set_marker_pos(sqf_string_const_ref marker_, const vector2 &pos_);
+        void set_marker_pos(sqf_string_const_ref marker_, const vector3 &pos_);
+        void set_marker_pos(sqf_string_const_ref marker_, const object& target_);
+        void set_marker_pos_local(sqf_string_const_ref marker_, const vector3 &pos_);
         void set_marker_pos_local(sqf_string_const_ref marker_, const vector2 &pos_);
+        void set_marker_pos_local(sqf_string_const_ref marker_, const object& target_);
+
         void set_marker_brush(sqf_string_const_ref marker_, sqf_string_const_ref brush_);
         void set_marker_brush_local(sqf_string_const_ref marker_, sqf_string_const_ref brush_);
         void set_marker_color(sqf_string_const_ref marker_, sqf_string_const_ref color_);
@@ -61,6 +65,7 @@ namespace intercept {
         sqf_return_string get_marker_color(sqf_string_const_ref value_);
         sqf_return_string get_marker_type(sqf_string_const_ref value_);
         vector3 get_marker_pos(sqf_string_const_ref value_);
+        vector3 get_marker_pos(sqf_string_const_ref marker_name_, bool preserveElevation);
         vector2 get_marker_size(sqf_string_const_ref value_);
 
         std::vector<marker> all_map_markers();
@@ -125,6 +130,16 @@ namespace intercept {
         void draw_link(const control &map_, std::variant<std::reference_wrapper<const vector2>, std::reference_wrapper<const vector3>, std::reference_wrapper<const object>> from_, std::variant<std::reference_wrapper<const vector2>, std::reference_wrapper<const vector3>, std::reference_wrapper<const object>> to_, sqf_string_const_ref param_type_, sqf_string_const_ref line_type_, rv_color &color_);
         void draw_location(const control &map_, const location &location_);
         void draw_polygon(const control &map_, const std::vector<vector3> &polygon_, const rv_color &color_);
-
+        void disable_map_indicators(bool disableFriendly_, bool disableEnemy_, bool disableMines_, bool disablePing_);
+        sqf_return_string get_player_id(const object &player_);
+        sqf_return_string marker_channel(sqf_string_const_ref marker_);
+        std::vector<float> marker_polyline(sqf_string_const_ref marker_);
+        void set_marker_polyline(sqf_string_const_ref marker_, const std::vector<float> &polyline_);
+        void set_marker_polyline_local(sqf_string_const_ref marker_, const std::vector<float> &polyline_);
+        void set_marker_shadow(sqf_string_const_ref marker_, bool shadow_);
+        void set_marker_shadow_local(sqf_string_const_ref marker_, bool shadow_);
+        bool marker_shadow(sqf_string_const_ref marker_);
+        float marker_draw_priority(sqf_string_const_ref marker_);
+        void set_marker_draw_priority(sqf_string_const_ref marker_, float priority_);
     }  // namespace sqf
 }  // namespace intercept

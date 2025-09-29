@@ -1,4 +1,4 @@
-﻿/*!
+/*!
 @file
 @author Verox (verox.averre@gmail.com)
 @author Nou (korewananda@gmail.com)
@@ -54,6 +54,7 @@ namespace intercept {
         };
         rv_eden_mouse_over get_eden_mouse_over();
         void collect_eden_history(const code &code_);
+        void collect_eden_history(sqf_string_const_ref text_, sqf_string_const_ref tooltip_, sqf_string_const_ref icon_, const code &code_);
         float get_eden_entity_id(const object &entity_);
         float get_eden_entity_id(const group &entity_);
         float get_eden_entity_id(const vector3 &entity_);
@@ -91,11 +92,13 @@ namespace intercept {
         using eden_entity = game_value;
         bool remove_3den_connection(sqf_string_const_ref type_, eden_entity from_, eden_entity to_);
         //#undocumented
-        void clear_3den_attribute(const game_value &unknown_, sqf_string_const_ref attribute_);
+        bool clear_3den_attribute(const game_value &unknown_, sqf_string_const_ref attribute_);
         eden_entity create_3den_entity(const group &group_, sqf_string_const_ref mode_, sqf_string_const_ref class_, const vector3 &position_, bool is_empty = false);
         //Not fully implemented
         std::vector<game_value> get_3den_attribute(std::variant<std::reference_wrapper<const object>, std::reference_wrapper<const group>, sqf_string_const_ref_wrapper, std::reference_wrapper<float>> entity_, sqf_string_const_ref attribute_);
+        std::vector<game_value> get_3den_attributes(const object& obj_, sqf_string_const_ref category_);
         game_value get_3den_mission_attribute(sqf_string_const_ref section_, sqf_string_const_ref class_);
+        game_value get_3den_mission_attributes(sqf_string_const_ref section_, sqf_string_const_ref category_);
 
         bool set_3den_mission_attribute(sqf_string_const_ref section_, sqf_string_const_ref attribute_class_, game_value _attribute_value);
 
@@ -110,5 +113,14 @@ namespace intercept {
         void set_3den_logic_type(const std::vector<object> &objects_, sqf_string_const_ref class_name_);
         sqf_return_string_list get_mission_layer_entities(sqf_string_const_ref layername_);
 
+        int get_3den_layer(const object &obj_);
+        object get_3den_parent(const object &obj_);
+
+        void ignore_3den_history(const code &code_);
+        bool load_3den_scenario(sqf_string_const_ref scenario_or_world_);
+
+        bool save_3den_preferences();
+
+        void set_3den_attached_cursor_entity(const rv_hashmap& values_);
     }  // namespace sqf
 }  // namespace intercept

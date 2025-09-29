@@ -407,8 +407,23 @@ namespace intercept {
         @sa https://community.bistudio.com/wiki/waypointSpeed
         */
         waypoint::speed waypoint_speed(waypoint &wp_);
-        // TODO waypoint_statements needs struct for return value
-        // TODO waypoint_timeout needs struct for return value
+
+        struct rv_waypoint_statements {
+            sqf_return_string condition;
+            sqf_return_string statement;
+            explicit rv_waypoint_statements(const game_value &gv_)
+                : condition(gv_[0]), statement(gv_[1])
+            {}
+        };
+
+        struct rv_waypoint_timeout {
+            float min, mid, max;
+            explicit rv_waypoint_timeout(const game_value &gv_)
+                : min(gv_[0]), mid(gv_[1]), max(gv_[2]) {}
+        };
+
+        rv_waypoint_statements waypoint_statements(const waypoint &wp_);
+        rv_waypoint_timeout waypoint_timeout(const waypoint &wp_);
 
         /*!
         @brief Gets the waypoint type.
@@ -430,6 +445,27 @@ namespace intercept {
 
         @sa https://community.bistudio.com/wiki/waypointVisible
         */
+
+        struct rv_trigger_activation {
+            sqf_string activated_by;
+            sqf_string activation_type;
+            bool repeating;
+            explicit rv_trigger_activation(const game_value &gv_)
+                : activated_by(gv_[0]),
+                  activation_type(gv_[1]),
+                  repeating(gv_[2]) {}
+        };
+
+        struct rv_trigger_statements {
+            sqf_string condition;
+            sqf_string on_activation;
+            sqf_string on_deactivation;
+            explicit rv_trigger_statements(const game_value &gv_)
+                : condition(gv_[0]),
+                  on_activation(gv_[1]),
+                  on_deactivation(gv_[2]) {}
+        };
+
         bool waypoint_visible(waypoint &wp_);
 
         std::vector<waypoint> synchronized_waypoints(waypoint &wp_);
@@ -542,5 +578,13 @@ namespace intercept {
         void set_title_effect(const object &trigger_, sqf_string_const_ref type_, sqf_string_const_ref effect_, sqf_string_const_ref text_);
         void set_title_effect(const group &group_, int index_, sqf_string_const_ref type_, sqf_string_const_ref effect_, sqf_string_const_ref text_);
 
+        vector3 custom_waypoint_position();
+
+        void set_trigger_interval(const object &trigger_, float interval_);
+        void set_waypoint_loiter_altitude(waypoint wp_, float alt_);
+        rv_trigger_activation trigger_activation(const object &trigger_);
+        float trigger_interval(const object &trigger_);
+        rv_trigger_statements trigger_statements(const object &trigger_);
+        float waypoint_loiter_altitude(const waypoint &wp_);
     }  // namespace sqf
 }  // namespace intercept

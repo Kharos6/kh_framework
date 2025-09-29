@@ -20,7 +20,7 @@
         ] joinString "");
 
         private _name = if (isText (_x >> "name")) then {
-            getText (_x >> "name");
+            [_prefix, "Fnc", getText (_x >> "name")] joinString "_";
         }
         else {
            	[_prefix, "Fnc", configName _x] joinString "_";
@@ -96,7 +96,7 @@
         ] joinString "");
 
         private _name = if (isText (_x >> "name")) then {
-            getText (_x >> "name");
+            [_prefix, "Fnc", getText (_x >> "name")] joinString "_";
         }
         else {
            	[_prefix, "Fnc", configName _x] joinString "_";

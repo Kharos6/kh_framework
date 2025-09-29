@@ -1,4 +1,4 @@
-﻿/*!
+/*!
 @file
 @author Verox (verox.averre@gmail.com)
 @author Nou (korewananda@gmail.com)
@@ -21,8 +21,8 @@ namespace intercept {
     namespace sqf {
 
         struct rv_artillery_computer_settings {
-            std::string name;
-            std::string ammo;
+            sqf_string name;
+            sqf_string ammo;
             int mode;  //#TODO investigate what this actually is
 
             rv_artillery_computer_settings(const game_value &rv_game_value_)
@@ -31,21 +31,21 @@ namespace intercept {
                   mode(rv_game_value_[2]) {}
         };
         struct rv_credit {
-            std::string library_name;
-            std::string credits;
+            sqf_string library_name;
+            sqf_string credits;
 
             rv_credit(const game_value &rv_game_value_)
                 : library_name(rv_game_value_[0]),
                   credits(rv_game_value_[1]) {}
         };
         struct rv_product_version {
-            std::string name;
-            std::string name_short;
+            sqf_string name;
+            sqf_string name_short;
             float version;
             float build;
-            std::string branch;
+            sqf_string branch;
             bool mods;
-            std::string platform;
+            sqf_string platform;
 
             rv_product_version(const game_value &rv_game_value_)
                 : name(rv_game_value_[0]),
@@ -56,6 +56,17 @@ namespace intercept {
                   mods(rv_game_value_[5]),
                   platform(rv_game_value_[6]) {}
         };
+        struct rv_graph_value_par {
+            float graph_min_x;
+            float graph_min_y;
+            float graph_max_x;
+            float graph_max_y;
+            float valueCount;
+            float randomOffset;
+        };
+
+
+
         //simulation
         //NULAR -- https://github.com/intercept/intercept/issues/13
         bool can_trigger_dynamic_simulation(const object &unit_);
@@ -152,7 +163,9 @@ namespace intercept {
         void play_scripted_mission(sqf_string_const_ref world_, const code &command_, const config &config_);
         void play_scripted_mission(sqf_string_const_ref world_, const code &command_, const config &config_, bool ignore_child_window_);
         float difficulty_option(sqf_string_const_ref optionname_);
+        auto_array<game_value> difficulty_option(const auto_array<game_value> &arr_);
         void enable_weapon_disassembly(bool enable_);
+        bool weapon_disassembly_enabled(const object &player_or_wpn_);
         object create_site(sqf_string_const_ref type_, const vector3 &pos_);
         bool save_identity(const object &value0_, sqf_string_const_ref value1_);
 
@@ -177,6 +190,7 @@ namespace intercept {
         //3D stuff
         void draw_line_3d(const vector3 &pos1_, const vector3 &pos2_, const rv_color &color_);
         void draw_icon_3d(sqf_string_const_ref texture_, const rv_color &color_, const vector3 &pos_agl_, float width_, float height_, float angle_, sqf_string_const_ref text_ = "", float shadow_ = 1.0f, float text_size_ = 1.0f, sqf_string_const_ref font_ = "TahomaB", sqf_string_const_ref text_align_ = "center", bool draw_offscreen_ = false);
+        void draw_laser(const vector3 &pos_asl_, const vector3 &dir_, const rv_color &beam_color_, const rv_color &dot_color_, float dot_size_, float beam_thickness_, float max_beam_length_ = -1, bool is_IR = true);
 
         /* potential namespace: particles */
         void set_particle_params(const object &particle_source_, const rv_particle_array &particle_array_);
@@ -197,8 +211,17 @@ namespace intercept {
         void reveal_mine(const side &value0_, const object &value1_);
         bool mine_detected_by(const object &value0_, const side &value1_);
         void add_score_side(const side &value0_, float value1_);
-        void airport_side(int id_);
-        void airport_side(const object &target_);
+        side airport_side(int id_);
+        side airport_side(const object &target_);
         float score_side(const side &value_);
+
+        //From contact DLC
+        std::vector<float> decay_graph_values(const std::vector<float>& lower_bound_values_, const std::vector<float>& graph_values_, float coef_);
+        //#TODO not actually sure what this returns
+        game_value get_graph_values(const rv_graph_value_par& graph_val_par, const std::vector<float>& xy_);
+
+
+        std::vector<float> get_person_used_dlcs(const object &unit_);
+
     }  // namespace sqf
 }  // namespace intercept

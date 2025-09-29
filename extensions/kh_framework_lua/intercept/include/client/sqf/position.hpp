@@ -57,6 +57,7 @@ namespace intercept {
         vector3 get_pos(const vector3 &pos_, float distance_, float heading_);
         vector3 get_rel_pos(const object &obj_, float distance_, float heading_);
         vector3 get_rel_pos(const vector3 &pos_, float distance_, float heading_);
+        vector3 get_rel_pos(const object &parent_, const object &attached_obj_);
         float get_rel_dir(const object &obj_, const object &pos_);
         float get_rel_dir(const object &obj_, const vector3 &pos_);
 
@@ -65,7 +66,8 @@ namespace intercept {
 
         void set_pos_world(const object &object_, const vector3 &position_);
         vector3 get_pos_world(const object &unit_);
-        float get_terrain_height_asl(vector3 position_);
+        float get_terrain_height_asl(const vector3 &position_);
+        float get_terrain_height_asl(const vector2 &position_);
 
         vector3 world_to_model(const object &object_, const vector3 &position_);
         vector3 world_to_model_visual(const object &object_, const vector3 &position_);
@@ -73,30 +75,82 @@ namespace intercept {
         vector3 velocity_model_space(const object &obj_);
         vector3 vector_up_visual(const object &obj_);
         vector3 vector_up(const object &obj_);
+        vector3 vector_side_visual(const object &obj_);
+        vector3 vector_side(const object &obj_);
 
         vector3 model_to_world_visual(const object &model_, const vector3 &model_pos_);
 
         std::optional<vector2> world_to_screen(const vector3 &pos_agl_);
+        std::optional<vector2> world_to_screen(const object &cam_, const vector3 &pos_agl_);
 
         void set_vector_dir(const object &obj_, const vector3 &vec_);
         void set_velocity(const object &obj_, const vector3 &vel_);
+        void set_angular_velocity(const object& obj_, const vector3& vel_);
+        void set_angular_velocity_model_space(const object& obj_, const vector3& vel_);
         vector3 velocity(const object &obj_);
+        vector3 angular_velocity(const object &obj_);
+        vector3 angular_velocity_model_space(const object &obj_);
         float direction(const object &value_);
 
         vector3 vector_dir(const object &obj_);
         vector3 vector_dir_visual(const object &obj_);
-        vector3 selection_positon(const object &obj_, sqf_string_const_ref selection_name_);
+
+        struct rv_selection_params {
+            object obj;
+            r_string selection_name;
+            float lod_index;
+            bool is_visual{true};
+        };
+        
+        vector3 selection_position(const object &obj_, sqf_string_const_ref selection_name_);
+        vector3 selection_position(const object &obj_, sqf_string_const_ref selection_name_, sqf_string_const_ref lod_);
+        vector3 selection_position(const object &obj_, sqf_string_const_ref selection_name_, rv_selection_lods lod_);
+        vector3 selection_position(const object &obj_, sqf_string_const_ref selection_name_, float lod_res_);
+        vector3 selection_position(const object &obj_, sqf_string_const_ref selection_name_, float lod_index_, bool is_visual_);
+
+        vector3 selection_position_avg(const object &obj_, sqf_string_const_ref selection_name_, sqf_string_const_ref lod_);
+        vector3 selection_position_avg(const object &obj_, sqf_string_const_ref selection_name_, rv_selection_lods lod_);
+        vector3 selection_position_avg(const object &obj_, sqf_string_const_ref selection_name_, float lod_res_);
+        vector3 selection_position_avg(const object &obj_, sqf_string_const_ref selection_name_, float lod_index_, bool is_visual_);
+
+        std::pair<vector3, vector3> selection_vector_dir_and_up(const object &obj_, sqf_string_const_ref selection_name_, rv_selection_lods lod_);
+        std::pair<vector3, vector3> selection_vector_dir_and_up(const object &obj_, sqf_string_const_ref selection_name_, float lod_index_);
 
         struct rv_bounding_box {
             vector3 min;
             vector3 max;
+            float bounding_radius;
+            explicit rv_bounding_box(const game_value &gv_) : min(gv_[0]),
+                                                              max(gv_[1]),
+                                                              bounding_radius(gv_[2]) {}
+
         };
 
         rv_bounding_box bounding_box(const object &model_);
         rv_bounding_box bounding_box_real(const object &model_);
+        rv_bounding_box bounding_box_real(const object &model_, sqf_string_const_ref lod_);
+        rv_bounding_box bounding_box_real(const object &model_, float lod_res_);
+
+        rv_bounding_box selection_position_bb(const object &obj_, sqf_string_const_ref selection_name_, sqf_string_const_ref lod_);
+        rv_bounding_box selection_position_bb(const object &obj_, sqf_string_const_ref selection_name_, rv_selection_lods lod_);
+        rv_bounding_box selection_position_bb(const object &obj_, sqf_string_const_ref selection_name_, float lod_res_);
+        rv_bounding_box selection_position_bb(const object &obj_, sqf_string_const_ref selection_name_, float lod_index_, bool is_visual_);
+
+        enum class bounding_box_clipping_type {
+            clip_visual = 0,
+            clip_shadow = 1,
+            clip_geometry = 2,
+            clip_general = 3
+        };
+        
+        rv_bounding_box bounding_box(bounding_box_clipping_type type_, const object &model_);
+        rv_bounding_box bounding_box_real(bounding_box_clipping_type type_, const object &model_);
+
+
         vector3 bounding_center(const object &obj_);
         void set_dir(const object &value0_, float value1_);
         float get_dir(t_sqf_in_area_position from_, t_sqf_in_area_position to_);
+        float get_dir_visual(t_sqf_in_area_position from_, t_sqf_in_area_position to_);
         void set_direction(const location &location_, float direction_);
         void set_velocity_model_space(const object &vehicle_, const vector3 &relative_direction_);
         void set_velocity_transformation(const object &object_, const vector3 &position1_, const vector3 &position2_, const vector3 &velocity1_, const vector3 &velocity2_, const vector3 &direction1_, const vector3 &direction2_, const vector3 &up1_, const vector3 &up2_, float time_);
@@ -107,10 +161,13 @@ namespace intercept {
         vector3 unit_aim_position_visual(const object &unit_);
 
         //position
-        vector3 model_to_world_visual_world(const object &object_, vector3 model_pos_);
-        vector3 model_to_world_world(const object &object_, vector3 model_pos_);
+        vector3 model_to_world_visual_world(const object &object_, const vector3 &model_pos_);
+        vector3 model_to_world_world(const object &object_, const vector3 &model_pos_);
 
+        vector3 screen_to_world(const object &cam_, const vector2 &pos_);
+        vector3 screen_to_world_direction(const object &cam_, const vector2 &pos_);
         vector3 screen_to_world(const vector2 &pos_);
+        vector3 screen_to_world_direction(const vector2 &pos_);
         vector3 model_to_world(const object &object_, const vector3 &offset_);
         bool in_area(t_sqf_in_area_position position_, const object &trigger_);
         bool in_area(t_sqf_in_area_position position_, sqf_string_const_ref marker_);
@@ -122,8 +179,14 @@ namespace intercept {
         bool in_area_array(t_sqf_in_area_position_array position_, sqf_string_const_ref marker_);
         bool in_area_array(t_sqf_in_area_position_array position_, t_sqf_in_area_position center_, float radius_x_, float radius_y_, float angle_, bool is_rectangle_, std::optional<float> radius_z_);
         bool in_area_array(t_sqf_in_area_position_array position_, const location &location_);
+        std::vector<int> in_area_array_indexes(t_sqf_in_area_position_array position_, const object &trigger_);
+        std::vector<int> in_area_array_indexes(t_sqf_in_area_position_array position_, sqf_string_const_ref marker_);
+        std::vector<int> in_area_array_indexes(t_sqf_in_area_position_array position_, t_sqf_in_area_position center_, float radius_x_, float radius_y_, float angle_, bool is_rectangle_, std::optional<float> radius_z_);
+        std::vector<int> in_area_array_indexes(t_sqf_in_area_position_array position_, const location &location_);
         std::vector<vector3> is_flat_empty(const vector3 &position_, float min_distance_, float max_gradient_, float max_gradient_radius_, float over_land_or_water, bool shore_line_, const object &ignore_object_);
         bool in_polygon(const vector3 &position_, const std::vector<vector3> &polygon_);
+        bool in_polygon(const object &position_, const std::vector<vector3> &polygon_);
+        bool in_polygon(const group &position_, const std::vector<vector3> &polygon_);
         //#Categorize are these two really position category? Sounds more worldish
         vector3 find_empty_position(std::variant<std::reference_wrapper<const vector2>, std::reference_wrapper<const vector3>> center_, float min_distance_, float max_distance_, std::optional<std::string> vehicle_type_);
         bool find_empty_position_ready(std::variant<std::reference_wrapper<const vector2>, std::reference_wrapper<const vector3>> center_, float radius_, float max_distance_);
@@ -131,7 +194,10 @@ namespace intercept {
         float distance_2d(std::variant<object, vector3> start_, std::variant<object, vector3> end_);
         float distance_sqr(std::variant<object, vector3, location> start_, std::variant<object, vector3, location> end_);
         //#Categorize is this really position category? Sounds more worldish
+        std::vector<object> near_entities(const object &position, sqf_string_list_const_ref types_, float range_);
         std::vector<object> near_entities(const vector3 &pos_agl_, sqf_string_list_const_ref types_, float range_);
+        std::vector<object> near_entities(const object &position, sqf_string_const_ref type_, float range_);
+        std::vector<object> near_entities(const vector3 &pos_agl_, sqf_string_const_ref type_, float range_);
         float distance(object start_, vector3 end_);
         float distance(object start_, object end_);
         float distance(vector3 start_, vector3 end_);
@@ -146,12 +212,12 @@ namespace intercept {
         */
         std::vector<vector3> building_pos(const object &building_, int index_);
 
-        vector3 vector_model_to_world(const object &object_, vector3 modelDir_);
-        vector3 vector_model_to_world_visual(const object &object_, vector3 modelDir_);
-        vector3 vector_world_to_model(const object &object_, vector3 worldDir_);
-        vector3 vector_world_to_model_visual(const object &object_, vector3 worldDir_);
+        vector3 vector_model_to_world(const object &object_, const vector3& modelDir_);
+        vector3 vector_model_to_world_visual(const object &object_, const vector3 &modelDir_);
+        vector3 vector_world_to_model(const object &object_, const vector3 &worldDir_);
+        vector3 vector_world_to_model_visual(const object &object_, const vector3 &worldDir_);
 
-
+        vector3 get_pos_world_visual(const object &object_);
 
     }  // namespace sqf
 }  // namespace intercept

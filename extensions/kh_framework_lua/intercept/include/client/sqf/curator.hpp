@@ -38,10 +38,22 @@ namespace intercept {
             std::vector<intercept::sqf::waypoint> _waypoints;
             std::vector<marker> _marker;
         };
+
+        struct rv_curator_cam_area {
+            float cam_area_id;
+            vector3 pos;
+            float radius;
+            explicit rv_curator_cam_area(const game_value& gv_)
+                : cam_area_id(gv_[0]),
+                  pos(gv_[1]),
+                  radius(gv_[2]) {}
+        };
         
         curator_selected_return curator_selected();
         void open_curator_interface();
         bool shown_curatorcompass();
+        std::vector<rv_curator_cam_area> curator_camera_area(const object &curator_);
+        rv_curator_cam_area curator_editing_area(const object &curator_);
         float curator_camera_area_ceiling(const object &value_);
         bool curator_editing_area_type(const object &value_);
         float curator_points(const object &value_);
@@ -77,5 +89,10 @@ namespace intercept {
         void set_curator_coef(const object &curator_, sqf_string_const_ref action_, std::variant<float, bool> coef_);
         void assign_curator(const object &player_, const object &curator_module_);
 
+        void add_curator_selected(const auto_array<game_value> &data_);
+        void set_curator_selected(const auto_array<game_value> &data_);
+        std::vector<object> curator_selection_preset(float num_key_);
+        void load_curator_selection_preset(float num_key_);
+        void set_curator_selection_preset(const auto_array<game_value> &data_, float num_key_);
     }  // namespace sqf
 }  // namespace intercept

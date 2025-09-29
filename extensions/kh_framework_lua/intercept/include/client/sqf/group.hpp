@@ -1,4 +1,4 @@
-﻿/*!
+/*!
 @file
 @author Verox (verox.averre@gmail.com)
 @author Nou (korewananda@gmail.com)
@@ -19,7 +19,7 @@ namespace intercept {
     namespace sqf {
         class waypoint;
         struct rv_group_icon {
-            std::string icon;
+            sqf_string icon;
             vector2 offset;
         };
         sqf_return_string combat_mode(const group &loc_);
@@ -34,6 +34,7 @@ namespace intercept {
 
         group group_from_net_id(sqf_string_const_ref value_);
         sqf_return_string group_id(const group &value_);
+        int group_id(const object &unit_);
         float group_owner(const group &value_);
         bool set_group_owner(const group &group_, int client_id_);
 
@@ -68,6 +69,7 @@ namespace intercept {
         void join_as_silent(const object &unit_, const group &group_, int pos_id_);
 
         std::vector<object> units(const group &gp_);
+        std::vector<object> units(const side &side_);
         side get_side(const group &group_);
         side side_get(const group& group_);
         sqf_return_string_list all_variables(const group &value_);
@@ -116,6 +118,5 @@ namespace intercept {
         void delete_resources(const team_member &team_member_, sqf_string_list_const_ref resources_);
         void remove_team_member(const team_member &team_, const team_member &member_);
         void set_leader(const team_member &team_, const team_member &leader_);
-
     }  // namespace sqf
 }  // namespace intercept

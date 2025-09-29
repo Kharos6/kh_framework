@@ -1,4 +1,4 @@
-﻿/*!
+/*!
 @file
 @author Verox (verox.averre@gmail.com)
 @author Nou (korewananda@gmail.com)
@@ -28,12 +28,14 @@ namespace intercept {
         void enable_vehicle_cargo(const object &vehicle_, bool enable_);
 
         bool can_sling_load(const object &vehicle_, const object &cargo_);
+        bool can_sling_load(sqf_string_const_ref vehicle_, sqf_string_const_ref cargo_);
         bool sling_load_assistant_shown();
         bool set_sling_load(const object &vehicle_, const object &load_);
         object get_sling_load(const object &value_);
 
         //rope
         void rope_attach_to(const object &vehicle_, const vector3 &offset_, const vector3 &rope_end_down_dir_, const object &rope_);
+        void rope_attach_to(const object &entity_, const object &rope_);
         void rope_detach(const object &vehicle_, const object &rope_);
         bool rope_attach_enabled(const object &value_);
         object rope_attached_to(const object &value_);
@@ -43,6 +45,7 @@ namespace intercept {
         void enable_rope_attach(const object &value0_, bool value1_);
         std::vector<object> rope_attached_objects(const object &obj_);
         std::vector<object> ropes(const object &obj_);
+        std::vector<object> ropes_attached_to(const object &cargo_);
         object rope_create(const object &from_obj_, const vector3 &from_point_, const object &to_obj_, const vector3 &to_point_, float segments_);
         object rope_create(const object &from_obj_, const vector3 &from_point_, const object &to_obj_, const vector3 &to_point_, float segments_, float length_);
         object rope_create(const object &from_obj_, sqf_string_const_ref from_point_, const object &to_obj_, const vector3 &to_point_, float segments_);
@@ -69,9 +72,11 @@ namespace intercept {
 
         std::vector<object> attached_objects(const object &obj_);
         object attached_to(const object &obj_);
-        void attach_to(const object &object1_, const object &object2_, const vector3 &offset_, sqf_string_const_ref memPoint_);
+        void attach_to(const object &object1_, const object &object2_, const vector3 &offset_, sqf_string_const_ref memPoint_, bool follow_bone_ = false);
         void attach_to(const object &object1_, const object &object2_, const vector3 &offset_);
         void detach(const object &value_);
         int get_cargo_index(const object &vehicle_, const object &unit_);
+
+        std::vector<object> rope_segments(const object &rope_);
     }  // namespace sqf
 }  // namespace intercept

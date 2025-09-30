@@ -33,6 +33,34 @@ call KH_fnc_luaClearVariables;
 call KH_fnc_luaResetState;
 ["KH_eve_execution", KH_fnc_callParsedFunction] call CBA_fnc_addEventHandler;
 
+[
+	"KH_eve_luaEventEmission", 
+	{
+		params [["_event", "", [""]], "_arguments"];
+		luaEmitEvent [_event, _arguments];
+	}
+] call CBA_fnc_addEventHandler;
+
+[
+	"KH_eve_luaVariableEmission", 
+	{
+		params [["_name", "", [""]], "_value"];
+
+		[_name, _value] luaExecute "
+			local name, value = ...
+			_G[name] = value
+		"
+	}
+] call CBA_fnc_addEventHandler;
+
+[
+	"KH_eve_khDataWriteEmission", 
+	{
+		params [["_filename", "", [""]], ["_name", "", [""]], "_value"];
+		_filename writeKhData [_name, _value];
+	}
+] call CBA_fnc_addEventHandler;
+
 {
     private _config = _x;
     private _prefix = getText (_config >> "prefix");
@@ -104,7 +132,6 @@ call KH_fnc_luaResetState;
 } forEach ("true" configClasses (missionConfigFile >> "CfgLuaFunctions"));
 
 uiNamespace setVariable ["KH_var_cachedLuaFunctions", KH_var_cachedLuaFunctions];
-
 KH_var_remoteExecCommandsMode = ["SCALAR", ["'CfgRemoteExec' >> 'Commands' >> 'mode'", true]] call KH_fnc_getConfigValue;
 KH_var_remoteExecFunctionsMode = ["SCALAR", ["'CfgRemoteExec' >> 'Functions' >> 'mode'", true]] call KH_fnc_getConfigValue;
 KH_var_remoteExecCommandsJipMode = ["SCALAR", ["'CfgRemoteExec' >> 'Commands' >> 'jip'", true]] call KH_fnc_getConfigValue;

@@ -1,0 +1,12 @@
+name: generateUid
+description: TODO.
+syntax:
+- call: !Nulary
+  ret:
+    - Boolean
+    - TODO.
+  params:
+argument_loc: Local
+effect_loc: Local
+examples:
+- <sqf>generateUid</sqf>

@@ -1,72 +1,72 @@
 @echo off
 echo Building 64-bit kh_framework DLL with LuaJIT (Simplified)...
 
-REM Setup Visual Studio 2019 x64 Native Tools environment
-echo Setting up Visual Studio 2019 x64 environment...
+REM Setup Visual Studio 2022 x64 Native Tools environment
+echo Setting up Visual Studio 2022 x64 environment...
 
-REM Try different VS2019 installation paths and editions
-set "VS2019_FOUND="
+REM Try different VS2022 installation paths and editions
+set "VS2022_FOUND="
 
 REM Check for Enterprise edition
-if exist "C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\VC\Auxiliary\Build\vcvars64.bat" (
-    call "C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-    set "VS2019_FOUND=1"
-    echo Found VS2019 Enterprise
+if exist "C:\Program Files (x86)\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" (
+    call "C:\Program Files (x86)\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+    set "VS2022_FOUND=1"
+    echo Found VS2022 Enterprise
     goto :build
 )
 
 REM Check for Professional edition
-if exist "C:\Program Files (x86)\Microsoft Visual Studio\2019\Professional\VC\Auxiliary\Build\vcvars64.bat" (
-    call "C:\Program Files (x86)\Microsoft Visual Studio\2019\Professional\VC\Auxiliary\Build\vcvars64.bat"
-    set "VS2019_FOUND=1"
-    echo Found VS2019 Professional
+if exist "C:\Program Files (x86)\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat" (
+    call "C:\Program Files (x86)\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat"
+    set "VS2022_FOUND=1"
+    echo Found VS2022 Professional
     goto :build
 )
 
 REM Check for Community edition
-if exist "C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvars64.bat" (
-    call "C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvars64.bat"
-    set "VS2019_FOUND=1"
-    echo Found VS2019 Community
+if exist "C:\Program Files (x86)\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" (
+    call "C:\Program Files (x86)\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+    set "VS2022_FOUND=1"
+    echo Found VS2022 Community
     goto :build
 )
 
 REM Check for BuildTools edition
-if exist "C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\VC\Auxiliary\Build\vcvars64.bat" (
-    call "C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
-    set "VS2019_FOUND=1"
-    echo Found VS2019 BuildTools
+if exist "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" (
+    call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+    set "VS2022_FOUND=1"
+    echo Found VS2022 BuildTools
     goto :build
 )
 
 REM Check alternative installation location (Program Files instead of Program Files (x86))
-if exist "C:\Program Files\Microsoft Visual Studio\2019\Enterprise\VC\Auxiliary\Build\vcvars64.bat" (
-    call "C:\Program Files\Microsoft Visual Studio\2019\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-    set "VS2019_FOUND=1"
-    echo Found VS2019 Enterprise (alt location)
+if exist "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" (
+    call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+    set "VS2022_FOUND=1"
+    echo Found VS2022 Enterprise (alt location)
     goto :build
 )
 
-if exist "C:\Program Files\Microsoft Visual Studio\2019\Professional\VC\Auxiliary\Build\vcvars64.bat" (
-    call "C:\Program Files\Microsoft Visual Studio\2019\Professional\VC\Auxiliary\Build\vcvars64.bat"
-    set "VS2019_FOUND=1"
-    echo Found VS2019 Professional (alt location)
+if exist "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat" (
+    call "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat"
+    set "VS2022_FOUND=1"
+    echo Found VS2022 Professional (alt location)
     goto :build
 )
 
-if exist "C:\Program Files\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvars64.bat" (
-    call "C:\Program Files\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvars64.bat"
-    set "VS2019_FOUND=1"
-    echo Found VS2019 Community (alt location)
+if exist "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" (
+    call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+    set "VS2022_FOUND=1"
+    echo Found VS2022 Community (alt location)
     goto :build
 )
 
-REM If we get here, VS2019 wasn't found
-echo ERROR: Visual Studio 2019 not found!
-echo Please install Visual Studio 2019 with C++ tools or modify the paths in this script.
+REM If we get here, VS2022 wasn't found
+echo ERROR: Visual Studio 2022 not found!
+echo Please install Visual Studio 2022 with C++ tools or modify the paths in this script.
 echo Checked locations:
-echo   - C:\Program Files (x86)\Microsoft Visual Studio\2019\[Enterprise/Professional/Community/BuildTools]\VC\Auxiliary\Build\vcvars64.bat
-echo   - C:\Program Files\Microsoft Visual Studio\2019\[Enterprise/Professional/Community]\VC\Auxiliary\Build\vcvars64.bat
+echo   - C:\Program Files (x86)\Microsoft Visual Studio\2022\[Enterprise/Professional/Community/BuildTools]\VC\Auxiliary\Build\vcvars64.bat
+echo   - C:\Program Files\Microsoft Visual Studio\2022\[Enterprise/Professional/Community]\VC\Auxiliary\Build\vcvars64.bat
 pause
 exit /b 1
 
@@ -108,7 +108,7 @@ if exist output_x64\*.pdb del output_x64\*.pdb
 
 REM Build the DLL with LuaJIT linked
 echo Compiling kh_framework_lua_x64.dll with LuaJIT...
-cl /LD /O2 /Ox /Ot /GL /MT /std:c++17 /EHsc /TP ^
+cl /LD /O2 /Ox /Ot /GL /MT /std:c++20 /EHsc /TP ^
     /DLUAJIT_ENABLE_LUA52COMPAT ^
     /Iluajit\include ^
     /Iintercept\include ^

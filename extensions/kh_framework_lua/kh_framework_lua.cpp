@@ -20,6 +20,9 @@
 #include "intercept/include/client/pointers.hpp"
 #include "sol/sol.hpp"
 
+using namespace intercept;
+using namespace intercept::types;
+
 static bool get_machine_is_server() {
     static bool initialized = false;
     static bool is_server = false;
@@ -39,10 +42,13 @@ static bool get_machine_is_server() {
     return is_server;
 }
 
-using namespace intercept;
-using namespace intercept::types;
-constexpr uint32_t KHDATA_MAGIC = 0x5444484B; // "KHDT"
-constexpr uint32_t KHDATA_VERSION = 1;
+static float g_current_game_time = 0.0f;
+static int g_current_game_frame = 0;
+static float g_current_mission_time = 0.0f;
+static int g_current_mission_frame = 0;
+static game_value g_trigger_cba_event;
+static game_value g_create_hash_map_from_array;
+static game_value g_create_hash_map;
 
 class ErrorHandling {
 public:
@@ -222,6 +228,11 @@ public:
             hash ^= chunk;
             hash *= 0x100000001b3ull;
             data += 8;
+        }
+
+        while (data != end) {
+            hash ^= *data++;
+            hash *= 0x100000001b3ull;
         }
         
         std::string result;
@@ -493,6 +504,70 @@ public:
     }
 };
 
+class UIDGenerator {
+private:
+    static std::atomic<uint32_t> counter;
+    static std::mt19937 rng;
+    
+    // Pre-computed hex lookup
+    static constexpr char hex_chars[] = "0123456789abcdef";
+    
+    // Fast hex conversion without sprintf
+    static inline void to_hex(char* buffer, uint32_t value) {
+        for (int i = 7; i >= 0; --i) {
+            buffer[i] = hex_chars[value & 0xF];
+            value >>= 4;
+        }
+    }
+    
+public:
+    static std::string generate() {
+        static bool initialized = false;
+        static uint32_t unique_machine_id;
+        
+        if (!initialized) {
+            // Better machine ID: combine multiple sources
+            uint32_t pid = GetCurrentProcessId();
+            
+            // Get network adapter MAC address or computer name hash
+            char computerName[MAX_COMPUTERNAME_LENGTH + 1];
+            DWORD size = sizeof(computerName);
+            uint32_t name_hash = 0;
+            if (GetComputerNameA(computerName, &size)) {
+                for (DWORD i = 0; i < size; ++i) {
+                    name_hash = name_hash * 31 + computerName[i];
+                }
+            }
+            
+            // Combine and mix bits
+            unique_machine_id = (pid ^ name_hash ^ (name_hash >> 16));
+            rng.seed(std::random_device{}() ^ unique_machine_id);
+            initialized = true;
+        }
+        
+        // Use actual timestamp, not relative
+        uint32_t timestamp = static_cast<uint32_t>(
+            std::chrono::steady_clock::now().time_since_epoch().count()
+        );
+        
+        // Better bit distribution
+        uint32_t part1 = (timestamp & 0xFFFFF) | ((unique_machine_id & 0xFFF) << 20);
+        uint32_t part2 = counter.fetch_add(1, std::memory_order_relaxed);
+        
+        char buffer[17];
+        to_hex(buffer, part1);
+        to_hex(buffer + 8, part2);
+        buffer[16] = '\0';
+        
+        return std::string(buffer, 16);
+    }
+};
+
+std::atomic<uint32_t> UIDGenerator::counter{0};
+std::mt19937 UIDGenerator::rng;
+constexpr uint32_t KHDATA_MAGIC = 0x5444484B; // "KHDT"
+constexpr uint32_t KHDATA_VERSION = 1;
+
 // KHData file representation
 class KHDataFile {
 public:
@@ -745,6 +820,10 @@ private:
                         serialized = "uiNamespace";
                     } else if (value == sqf::parsing_namespace()) {
                         serialized = "parsingNamespace";
+                    } else if (value == sqf::server_namespace()) {
+                        serialized = "serverNamespace";
+                    } else if (value == sqf::mission_profile_namespace()) {
+                        serialized = "missionProfileNamespace";
                     } else {
                         serialized = "missionNamespace"; // Default fallback
                     }
@@ -906,6 +985,8 @@ private:
                     if (serialized == "profileNamespace") return sqf::profile_namespace();
                     if (serialized == "uiNamespace") return sqf::ui_namespace();
                     if (serialized == "parsingNamespace") return sqf::parsing_namespace();
+                    if (serialized == "serverNamespace") return sqf::server_namespace();
+                    if (serialized == "missionProfileNamespace") return sqf::mission_profile_namespace();
                     return sqf::mission_namespace();
                 
                 case game_data_type::SIDE:
@@ -1011,7 +1092,7 @@ private:
                         arr.push_back(read_game_value(stream));
                     }
 
-                    return sqf::call2(sqf::compile("createHashMapFromArray _this"), game_value(std::move(arr)));
+                    return sqf::call2(g_create_hash_map_from_array, game_value(std::move(arr)));
                 }
                 default:
                     return game_value();
@@ -1173,6 +1254,7 @@ public:
     KHDataFile* get_or_create_file(const std::string& filename) {        
         // Validate filename
         if (!validate_filename(filename)) {
+            ErrorHandling::report_error("Invalid filename for backup load: " + filename);
             return nullptr;
         }
         
@@ -1661,6 +1743,8 @@ static registered_sqf_function _read_khdata_sqf_command;
 static registered_sqf_function _flush_khdata_sqf_command;
 static registered_sqf_function _delete_khdata_file_sqf_command;
 static registered_sqf_function _get_terrain_matrix_sqf_command;
+static registered_sqf_function _emit_lua_event_sqf_command;
+static registered_sqf_function _emit_lua_variable_sqf_command;
 static std::vector<std::vector<float>> g_terrain_matrix;
 static float g_terrain_grid_width = 0.0f;
 static int g_terrain_grid_size = 0;
@@ -1746,6 +1830,7 @@ struct LuaCallCache {
     bool is_valid;
 };
 
+static std::unordered_map<std::string, std::vector<sol::protected_function>> g_lua_event_handlers;
 static std::unordered_map<std::string, LuaCallCache> g_call_cache;
 static std::unordered_map<size_t, sol::protected_function> g_code_cache;
 static std::unordered_map<size_t, game_value> g_sqf_compiled_cache;
@@ -2330,9 +2415,9 @@ static game_value convert_lua_to_game_value(const sol::object& obj) {
             }
             
             if (!kv_array.empty()) {
-                return sqf::call2(sqf::compile("createHashMapFromArray _this"), game_value(std::move(kv_array)));
+                return sqf::call2(g_create_hash_map_from_array, game_value(std::move(kv_array)));
             } else {
-                return sqf::call2(sqf::compile("createHashMap"));
+                return sqf::call2(g_create_hash_map);
             }
         } else {
             // Shouldn't reach here, but just in case
@@ -2351,21 +2436,537 @@ static game_value convert_lua_to_game_value(const sol::object& obj) {
 }
 
 // C++ implementations of Lua utility functions
-namespace lua_functions {
-    static int lua_init() {
-        (*g_lua_state)["MissionFrame"] = 0;
+namespace LuaFunctions {
+    struct ScheduledTask {
+        sol::protected_function callback;
+        float execute_time;      // For time-based delays
+        int execute_frame;        // For frame-based delays  
+        bool use_frames;
+        bool repeating;
+        float interval;           // For repeating tasks
+        int frame_interval;       // For repeating frame tasks
+        
+        // Timeout fields
+        float timeout_time;       // When to stop (for time-based)
+        int timeout_frame;        // When to stop (for frame-based)
+        bool has_timeout;
+        bool prioritize_timeout;  // If true, allow final execution at timeout
+        
+        // Track start for timeout calculation
+        float start_time;
+        int start_frame;
+    };
+    
+    static std::vector<ScheduledTask> lua_scheduled_tasks;
+    static int g_next_task_id = 1;
+    static std::unordered_map<int, size_t> lua_task_id_map;
+    
+    // Schedule a function to run after a delay in seconds
+    static int delay(sol::protected_function callback, float seconds) {
+        if (!callback.valid()) {
+            ErrorHandling::report_error("Invalid callback function");
+            return -1;
+        }
+        
+        int task_id = g_next_task_id++;
+        size_t index = lua_scheduled_tasks.size();
+        
+        lua_scheduled_tasks.push_back({
+            callback,
+            g_current_mission_time + seconds,
+            0,
+            false,  // use_frames = false
+            false,  // not repeating
+            0.0f,
+            0
+        });
+        
+        lua_task_id_map[task_id] = index;
+        return task_id;
+    }
+    
+    // Schedule a function to run after N frames
+    static int delay_frames(sol::protected_function callback, int frames) {
+        if (!callback.valid()) {
+            ErrorHandling::report_error("Invalid callback function");
+            return -1;
+        }
+        
+        int task_id = g_next_task_id++;
+        size_t index = lua_scheduled_tasks.size();
+        
+        lua_scheduled_tasks.push_back({
+            callback,
+            0.0f,
+            g_current_mission_frame + frames,
+            true,   // use_frames = true
+            false,  // not repeating
+            0.0f,
+            0
+        });
+        
+        lua_task_id_map[task_id] = index;
+        return task_id;
+    }
+    
+    // Enhanced interval with timeout
+    static int interval_with_timeout(sol::protected_function callback, float seconds, 
+                                     sol::optional<float> timeout_opt, 
+                                     sol::optional<bool> prioritize_opt) {
+        if (!callback.valid()) {
+            ErrorHandling::report_error("Invalid callback function");
+            return -1;
+        }
+        
+        int task_id = g_next_task_id++;
+        size_t index = lua_scheduled_tasks.size();
+        
+        ScheduledTask task = {
+            callback,
+            g_current_mission_time + seconds,
+            0,
+            false,  // use_frames = false
+            true,   // repeating
+            seconds,
+            0,
+            0.0f,   // timeout_time
+            0,      // timeout_frame
+            false,  // has_timeout
+            false,  // prioritize_timeout
+            g_current_mission_time,  // start_time
+            0
+        };
+        
+        if (timeout_opt) {
+            task.has_timeout = true;
+            task.timeout_time = g_current_mission_time + *timeout_opt;
+            task.prioritize_timeout = prioritize_opt.value_or(false);
+        }
+        
+        lua_scheduled_tasks.push_back(task);
+        lua_task_id_map[task_id] = index;
+        return task_id;
+    }
+    
+    // Enhanced interval frames with timeout
+    static int interval_frames_with_timeout(sol::protected_function callback, int frames,
+                                           sol::optional<int> timeout_opt,
+                                           sol::optional<bool> prioritize_opt) {
+        if (!callback.valid()) {
+            ErrorHandling::report_error("Invalid callback function");
+            return -1;
+        }
+        
+        int task_id = g_next_task_id++;
+        size_t index = lua_scheduled_tasks.size();
+        
+        ScheduledTask task = {
+            callback,
+            0.0f,
+            g_current_mission_frame + frames,
+            true,   // use_frames = true
+            true,   // repeating
+            0.0f,
+            frames,
+            0.0f,   // timeout_time
+            0,      // timeout_frame
+            false,  // has_timeout
+            false,  // prioritize_timeout
+            0.0f,
+            g_current_mission_frame  // start_frame
+        };
+        
+        if (timeout_opt) {
+            task.has_timeout = true;
+            task.timeout_frame = g_current_mission_frame + *timeout_opt;
+            task.prioritize_timeout = prioritize_opt.value_or(false);
+        }
+        
+        lua_scheduled_tasks.push_back(task);
+        lua_task_id_map[task_id] = index;
+        return task_id;
+    }
+    
+    // Keep simple versions for backward compatibility
+    static int interval(sol::protected_function callback, float seconds) {
+        return interval_with_timeout(callback, seconds, sol::nullopt, sol::nullopt);
+    }
+    
+    static int interval_frames(sol::protected_function callback, int frames) {
+        return interval_frames_with_timeout(callback, frames, sol::nullopt, sol::nullopt);
+    }
+    
+    // Cancel a scheduled task
+    static bool cancel_task(int task_id) {
+        auto it = lua_task_id_map.find(task_id);
+        if (it != lua_task_id_map.end()) {
+            // Mark as invalid instead of erasing to avoid index issues
+            if (it->second < lua_scheduled_tasks.size()) {
+                lua_scheduled_tasks[it->second].callback = sol::nil;
+            }
+            
+            lua_task_id_map.erase(it);
+            return true;
+        }
+        return false;
+    }
+    
+    // Update scheduler - called from on_frame
+    static void update_scheduler() {            
+        for (size_t i = 0; i < lua_scheduled_tasks.size(); ) {
+            auto& task = lua_scheduled_tasks[i];
+            
+            // Skip cancelled tasks
+            if (!task.callback.valid()) {
+                lua_scheduled_tasks.erase(lua_scheduled_tasks.begin() + i);
+                
+                for (auto& pair : lua_task_id_map) {
+                    if (pair.second > i) {
+                        pair.second--;
+                    } else if (pair.second == i) {
+                        lua_task_id_map.erase(pair.first);
+                        break;
+                    }
+                }
+                continue;
+            }
+            
+            // Check timeout first
+            bool past_timeout = false;
+            bool at_timeout_boundary = false;
+            
+            if (task.has_timeout && task.repeating) {
+                if (task.use_frames) {
+                    past_timeout = g_current_mission_frame > task.timeout_frame;
+                    
+                    if (task.prioritize_timeout && g_current_mission_frame == task.timeout_frame) {
+                        // Check if this frame is exactly on an interval boundary
+                        int elapsed = g_current_mission_frame - task.start_frame;
+                        at_timeout_boundary = (elapsed % task.frame_interval) == 0;
+                    }
+                } else {
+                    past_timeout = g_current_mission_time > task.timeout_time;
+                    
+                    if (task.prioritize_timeout) {
+                        float elapsed = g_current_mission_time - task.start_time;
+                        float epsilon = 0.01f; // Small tolerance for floating point
+                        
+                        // Check if we're at or very close to a timeout that aligns with interval
+                        if (std::abs(elapsed - task.timeout_time + task.start_time) < epsilon) {
+                            float intervals = elapsed / task.interval;
+                            at_timeout_boundary = std::abs(intervals - std::round(intervals)) < epsilon;
+                        }
+                    }
+                }
+                
+                // If past timeout and not at boundary (or not prioritizing), remove task
+                if (past_timeout && !at_timeout_boundary) {
+                    lua_scheduled_tasks.erase(lua_scheduled_tasks.begin() + i);
+                    
+                    for (auto& pair : lua_task_id_map) {
+                        if (pair.second > i) {
+                            pair.second--;
+                        } else if (pair.second == i) {
+                            lua_task_id_map.erase(pair.first);
+                            break;
+                        }
+                    }
+                    continue;
+                }
+            }
+            
+            // Check if should execute
+            bool should_execute = false;
+            
+            if (task.use_frames) {
+                should_execute = g_current_mission_frame >= task.execute_frame;
+            } else {
+                should_execute = g_current_mission_time >= task.execute_time;
+            }
+            
+            if (should_execute) {
+                // Execute callback
+                sol::protected_function_result result = task.callback();
+                
+                if (!result.valid()) {
+                    sol::error err = result;
+                    ErrorHandling::report_error("Scheduled task error: " + std::string(err.what()));
+                }
+                
+                // If this was the timeout boundary execution, remove the task
+                if (at_timeout_boundary) {
+                    lua_scheduled_tasks.erase(lua_scheduled_tasks.begin() + i);
+                    
+                    for (auto& pair : lua_task_id_map) {
+                        if (pair.second > i) {
+                            pair.second--;
+                        } else if (pair.second == i) {
+                            lua_task_id_map.erase(pair.first);
+                            break;
+                        }
+                    }
+                } else if (task.repeating) {
+                    // Reschedule
+                    if (task.use_frames) {
+                        task.execute_frame = g_current_mission_frame + task.frame_interval;
+                    } else {
+                        task.execute_time = g_current_mission_time + task.interval;
+                    }
+                    i++;
+                } else {
+                    // Remove completed one-time task
+                    lua_scheduled_tasks.erase(lua_scheduled_tasks.begin() + i);
+                    
+                    for (auto& pair : lua_task_id_map) {
+                        if (pair.second > i) {
+                            pair.second--;
+                        } else if (pair.second == i) {
+                            lua_task_id_map.erase(pair.first);
+                            break;
+                        }
+                    }
+                }
+            } else {
+                i++;
+            }
+        }
+    }
+
+    static int add_event_handler(const std::string& event_name, sol::protected_function handler) {
+        if (!handler.valid()) {
+            ErrorHandling::report_error("Invalid handler function");
+            return -1;
+        }
+        
+        auto& handlers = g_lua_event_handlers[event_name];
+        handlers.push_back(handler);
+        return static_cast<int>(handlers.size());
+    }
+    
+    // Remove an event handler
+    static bool remove_event_handler(const std::string& event_name, int handler_id) {
+        auto it = g_lua_event_handlers.find(event_name);
+
+        if (it != g_lua_event_handlers.end() && handler_id > 0 && handler_id <= it->second.size()) {
+            it->second.erase(it->second.begin() + (handler_id - 1));
+            return true;
+        }
+
+        return false;
+    }
+    
+    // Emit an event
+    static int emit_event(const std::string& event_name, sol::variadic_args args) {
+        auto it = g_lua_event_handlers.find(event_name);
+        
+        if (it == g_lua_event_handlers.end()) {
+            return 0;
+        }
+        
+        int count = 0;
+        
+        // Convert variadic_args to vector once
+        std::vector<sol::object> arg_vec;
+        for (auto arg : args) {
+            arg_vec.push_back(arg);
+        }
+        
+        for (auto& handler : it->second) {
+            if (!handler.valid()) continue;
+            
+            // Use the raw Lua C API for flexible argument passing
+            sol::state& lua = *g_lua_state;
+            lua_State* L = lua.lua_state();
+            
+            handler.push(L);
+            for (const auto& arg : arg_vec) {
+                arg.push(L);
+            }
+            
+            if (lua_pcall(L, arg_vec.size(), 0, 0) == 0) {
+                count++;
+            } else {
+                std::string err = lua_tostring(L, -1);
+                ErrorHandling::report_error("Event handler error: " + err);
+                lua_pop(L, 1);
+            }
+        }
+        
+        return count;
+    }
+
+    // Add a helper that takes a vector directly
+    static int emit_event_from_vector(const std::string& event_name, const std::vector<sol::object>& args) {
+        auto it = g_lua_event_handlers.find(event_name);
+        
+        if (it == g_lua_event_handlers.end()) {
+            return 0;
+        }
+        
+        int count = 0;
+        
+        for (auto& handler : it->second) {
+            if (!handler.valid()) continue;
+            
+            sol::state& lua = *g_lua_state;
+            lua_State* L = lua.lua_state();
+            
+            handler.push(L);
+            for (const auto& arg : args) {
+                arg.push(L);
+            }
+            
+            if (lua_pcall(L, args.size(), 0, 0) == 0) {
+                count++;
+            } else {
+                std::string err = lua_tostring(L, -1);
+                ErrorHandling::report_error("Event handler error: " + err);
+                lua_pop(L, 1);
+            }
+        }
+        
+        return count;
+    }
+    
+    // CBA-enabled emit that uses the helper
+    static int emit_event_cba(const std::string& event_name, sol::table args, 
+                              sol::object target, sol::optional<sol::object> jip) {
+        game_value target_gv = convert_lua_to_game_value(target);
+        
+        if (target_gv.is_nil()) {
+            // Fall back to local emission using the vector version
+            std::vector<sol::object> arg_vec;
+
+            for (size_t i = 1; i <= args.size(); i++) {
+                arg_vec.push_back(args[i]);
+            }
+            return emit_event_from_vector(event_name, arg_vec);
+        }
+        
+        // CBA emission (rest unchanged)
+        game_value jip_gv = jip ? convert_lua_to_game_value(*jip) : game_value();
+        auto_array<game_value> args_array;
+
+        for (size_t i = 1; i <= args.size(); i++) {
+            args_array.push_back(convert_lua_to_game_value(args[i]));
+        }
+        
+        // Build CBA parameters: ["KH_eve_luaEventEmission", arguments, target, jip]
+        auto_array<game_value> cba_event_data;
+        cba_event_data.push_back(game_value(event_name));
+        cba_event_data.push_back(game_value(std::move(args_array)));
+        auto_array<game_value> cba_params;
+        cba_params.push_back(game_value("KH_eve_luaEventEmission"));
+        cba_params.push_back(game_value(std::move(cba_event_data)));
+        cba_params.push_back(target_gv);
+        cba_params.push_back(jip_gv);
+        sqf::call2(g_trigger_cba_event, game_value(std::move(cba_params)));
         return 0;
     }
     
-    static int lua_frame_update() {
-        int frame = (*g_lua_state)["MissionFrame"].get_or(0);
-        (*g_lua_state)["MissionFrame"] = frame + 1;
-        return 0;
+    // Clear handlers
+    static void clear_events(sol::optional<std::string> event_name) {
+        if (event_name) {
+            g_lua_event_handlers.erase(*event_name);
+        } else {
+            g_lua_event_handlers.clear();
+        }
     }
     
-    static int lua_deinit() {
-        (*g_lua_state)["MissionFrame"] = 0;
-        return 0;
+    // Get handler count for debugging
+    static int get_handler_count(const std::string& event_name) {
+        auto it = g_lua_event_handlers.find(event_name);
+        return it != g_lua_event_handlers.end() ? static_cast<int>(it->second.size()) : 0;
+    }
+
+    static sol::object emit_cba_event(const std::string& event_name, sol::object arguments,
+                                sol::object target, sol::optional<sol::object> jip_opt) {
+        try {
+            // Convert arguments
+            game_value args_gv;
+            if (arguments.get_type() == sol::type::table) {
+                sol::table args_table = arguments;
+                auto_array<game_value> args_array;
+
+                for (size_t i = 1; i <= args_table.size(); i++) {
+                    args_array.push_back(convert_lua_to_game_value(args_table[i]));
+                }
+
+                args_gv = game_value(std::move(args_array));
+            } else if (arguments.get_type() != sol::type::nil) {
+                // Single argument, wrap in array
+                auto_array<game_value> args_array;
+                args_array.push_back(convert_lua_to_game_value(arguments));
+                args_gv = game_value(std::move(args_array));
+            } else {
+                // No arguments
+                args_gv = game_value(auto_array<game_value>());
+            }
+            
+            game_value target_gv = convert_lua_to_game_value(target);
+            game_value jip_gv = jip_opt ? convert_lua_to_game_value(*jip_opt) : game_value();
+            
+            // Build CBA parameters: [event_name, arguments, target, jip]
+            auto_array<game_value> cba_params;
+            cba_params.push_back(game_value(event_name));
+            cba_params.push_back(args_gv);
+            cba_params.push_back(target_gv);
+            cba_params.push_back(jip_gv);
+            sqf::call2(g_trigger_cba_event, game_value(std::move(cba_params)));
+            return sol::nil;
+        } catch (const std::exception& e) {
+            ErrorHandling::report_error("Failed to emit CBA event: " + std::string(e.what()));
+            return sol::nil;
+        }
+    }
+
+    static sol::object emit_variable(const std::string& var_name, sol::optional<sol::object> value_opt,
+                                     sol::optional<sol::object> target_opt, sol::optional<sol::object> jip_opt) {
+        try {
+            sol::state& lua = *g_lua_state;
+            
+            // Determine the value to emit
+            game_value emit_value;
+
+            if (value_opt) {
+                // Use provided value
+                emit_value = convert_lua_to_game_value(*value_opt);
+            } else {
+                // Get value from Lua global variable
+                sol::object lua_var = lua[var_name];
+
+                if (lua_var.valid()) {
+                    emit_value = convert_lua_to_game_value(lua_var);
+                } else {
+                    ErrorHandling::report_error("Lua global variable '" + var_name + "' not found or is nil");
+                    return sol::nil;
+                }
+            }
+            
+            // Default target to true if not specified
+            game_value target = target_opt ? convert_lua_to_game_value(*target_opt) : game_value(true);
+            game_value jip = jip_opt ? convert_lua_to_game_value(*jip_opt) : game_value();
+            
+            // If target is nil, set to true
+            if (target.is_nil()) {
+                target = game_value(true);
+            }
+            
+            // Build CBA parameters: ["KH_eve_luaVariableEmission", [var_name, value], target, jip]
+            auto_array<game_value> emission_data;
+            emission_data.push_back(game_value(var_name));
+            emission_data.push_back(emit_value);
+            auto_array<game_value> cba_params;
+            cba_params.push_back(game_value("KH_eve_luaVariableEmission"));
+            cba_params.push_back(game_value(std::move(emission_data)));
+            cba_params.push_back(target);
+            cba_params.push_back(jip);
+            sqf::call2(g_trigger_cba_event, game_value(std::move(cba_params)));
+            return sol::nil;
+        } catch (const std::exception& e) {
+            ErrorHandling::report_error("Failed to emit variable: " + std::string(e.what()));
+            return sol::nil;
+        }
     }
 
     // Get system time in seconds with millisecond precision
@@ -2430,10 +3031,7 @@ namespace lua_functions {
         sol::protected_function compiled;
         
         // Check if it's a function name or code to compile
-        if (code.find(' ') == std::string::npos && 
-            code.find('\t') == std::string::npos && 
-            code.find('\n') == std::string::npos) {
-            
+        if (code.find(' ') == std::string::npos && code.find('(') == std::string::npos) {
             // It's a function name
             sol::object func = lua[code];
 
@@ -2595,7 +3193,7 @@ namespace lua_functions {
             }
 
             // Then try to get from SQF variables
-            game_value sqf_var = sqf::get_variable(sqf::mission_namespace(), key_str);
+            game_value sqf_var = sqf::get_variable(sqf::current_namespace(), key_str);
 
             if (!sqf_var.is_nil()) {
                 return convert_game_value_to_lua(sqf_var);
@@ -2607,17 +3205,21 @@ namespace lua_functions {
         
         // __newindex: Write to SQF variables by default
         meta["__newindex"] = [&lua](sol::table t, sol::object key, sol::object value) {
-            if (key.get_type() != sol::type::string) return;
-            std::string var_name = key.as<std::string>();
-            
-            // Don't allow overwriting "lua" keyword
-            if (var_name == "lua") {
-                ErrorHandling::report_error("Cannot overwrite 'lua' keyword in with_sqf context");
-                return;
+            try {
+                if (key.get_type() != sol::type::string) return;
+                std::string var_name = key.as<std::string>();
+                
+                // Don't allow overwriting "lua" keyword
+                if (var_name == "lua") {
+                    ErrorHandling::report_error("Cannot overwrite 'lua' keyword in with_sqf context");
+                    return;
+                }
+                
+                // Set as SQF variable
+                sqf::set_variable(sqf::current_namespace(), var_name, convert_lua_to_game_value(value));
+            } catch (const std::exception& e) {
+                ErrorHandling::report_error("Failed to set SQF variable: " + std::string(e.what()));
             }
-            
-            // Set as SQF variable
-            sqf::set_variable(sqf::mission_namespace(), var_name, convert_lua_to_game_value(value));
         };
         
         env[sol::metatable_key] = meta;
@@ -2645,41 +3247,190 @@ namespace lua_functions {
         }
     }
 
-    static sol::object sqf_function_call(sol::object params, std::string function_name) {
-        try {            
-            // Handle parameters
-            if (params.get_type() == sol::type::nil) {
-                auto cache_it = g_sqf_function_cache.find("call " + function_name);
-                game_value compiled;
+    // Random string generation
+    static std::string generate_random_string(int length, sol::optional<bool> use_numbers, 
+                                             sol::optional<bool> use_letters, 
+                                             sol::optional<bool> use_symbols) {
+        bool nums = use_numbers.value_or(true);
+        bool letters = use_letters.value_or(true);
+        bool syms = use_symbols.value_or(false);
+        return RandomStringGenerator::generate(length, nums, letters, syms);
+    }
 
-                if (cache_it != g_sqf_function_cache.end()) {
-                    compiled = cache_it->second;
-                } else {
-                    compiled = sqf::compile("call " + function_name);
-                    g_sqf_function_cache["call " + function_name] = compiled;
-                }
+    // UID generation
+    static std::string generate_uid() {
+        return UIDGenerator::generate();
+    }
 
-                return convert_game_value_to_lua(sqf::call2(compiled));
+    // KHData write
+    static sol::object write_khdata(const std::string& filename, const std::string& var_name, 
+                                    sol::object value, sol::optional<sol::object> target_opt, 
+                                    sol::optional<sol::object> jip_opt) {
+        try {
+            game_value gv = convert_lua_to_game_value(value);
+
+            // Check if we should trigger CBA event
+            if (target_opt && !target_opt->is<sol::nil_t>()) {
+                game_value target = convert_lua_to_game_value(*target_opt);
+                game_value jip = jip_opt ? convert_lua_to_game_value(*jip_opt) : game_value();
+                
+                // Build CBA parameters: ["KH_eve_khDataWriteEmission", [filename, name, value], target, jip]
+                auto_array<game_value> value_array;
+                value_array.push_back(filename);
+                value_array.push_back(var_name);
+                value_array.push_back(gv);
+                auto_array<game_value> cba_params;
+                cba_params.push_back(game_value("KH_eve_khDataWriteEmission"));
+                cba_params.push_back(game_value(std::move(value_array)));
+                cba_params.push_back(target);
+                cba_params.push_back(jip);
+                sqf::call2(g_trigger_cba_event, game_value(std::move(cba_params)));
             } else {
-                auto cache_it = g_sqf_function_cache.find("_this call " + function_name);
-                game_value compiled;
+                auto* file = KHDataManager::instance().get_or_create_file(filename);
 
-                if (cache_it != g_sqf_function_cache.end()) {
-                    compiled = cache_it->second;
-                } else {
-                    compiled = sqf::compile("_this call " + function_name);
-                    g_sqf_function_cache["_this call " + function_name] = compiled;
+                if (!file) {
+                    ErrorHandling::report_error("Failed to access file");
+                    return sol::nil;
                 }
 
-                return convert_game_value_to_lua(sqf::call2(compiled, convert_lua_to_game_value(params)));
+                file->write_variable(var_name, gv);
             }
-        } catch (const std::exception& e) {
-            ErrorHandling::report_error(std::string(e.what()));
+
             return sol::nil;
-        } catch (...) {
-            ErrorHandling::report_error("Unknown error in SQF_FunctionCall");
+        } catch (const std::exception& e) {
+            ErrorHandling::report_error("Failed to write KHData: " + std::string(e.what()));
             return sol::nil;
         }
+    }
+    
+    // KHData read
+    static sol::object read_khdata(const std::string& filename, const std::string& var_name, 
+                                   sol::optional<sol::object> default_value) {
+        auto* file = KHDataManager::instance().get_or_create_file(filename);
+        
+        if (!file) {
+            return default_value.value_or(sol::nil);
+        }
+        
+        // Special case: if var_name == filename, return all variable names
+        if (var_name == filename) {
+            auto names = file->get_variable_names();
+            sol::table tbl = g_lua_state->create_table();
+            
+            for (size_t i = 0; i < names.size(); i++) {
+                tbl[i + 1] = names[i];
+            }
+            
+            return sol::make_object(*g_lua_state, tbl);
+        }
+        
+        game_value result = file->read_variable(var_name);
+        
+        if (result.is_nil() && default_value) {
+            return *default_value;
+        }
+        
+        return convert_game_value_to_lua(result);
+    }
+
+    // KHData flush
+    static sol::object flush_khdata() {
+        KHDataManager::instance().flush_all();
+        return sol::nil;
+    }
+
+    // KHData delete file
+    static sol::object delete_khdata_file(const std::string& filename) {
+        KHDataManager::instance().delete_file(filename);
+        return sol::nil;
+    }
+
+    // Terrain matrix getter
+    static sol::object get_terrain_matrix() {
+        if (g_terrain_matrix.empty()) {
+            return sol::nil;
+        }
+        
+        sol::table matrix = g_lua_state->create_table();
+
+        for (size_t y = 0; y < g_terrain_matrix.size(); y++) {
+            sol::table row = g_lua_state->create_table();
+            for (size_t x = 0; x < g_terrain_matrix[y].size(); x++) {
+                row[x + 1] = g_terrain_matrix[y][x];
+            }
+            matrix[y + 1] = row;
+        }
+        
+        return sol::make_object(*g_lua_state, matrix);
+    }
+
+    // Terrain grid width getter
+    static float get_terrain_grid_width() {
+        return g_terrain_grid_width;
+    }
+
+    // Terrain grid size getter
+    static int get_terrain_grid_size() {
+        return g_terrain_grid_size;
+    }
+
+    // World size getter
+    static float get_world_size() {
+        return g_world_size;
+    }
+
+    // Get terrain height at grid coordinates
+    static sol::object get_terrain_height_at(int grid_x, int grid_y) {
+        // Convert from 1-based Lua indexing to 0-based C++ indexing
+        int x = grid_x - 1;
+        int y = grid_y - 1;
+        
+        if (x < 0 || y < 0 || 
+            y >= static_cast<int>(g_terrain_matrix.size()) || 
+            x >= static_cast<int>(g_terrain_matrix[0].size())) {
+            return sol::nil;
+        }
+        
+        return sol::make_object(*g_lua_state, g_terrain_matrix[y][x]);
+    }
+
+    // Get interpolated terrain height at world position
+    static float get_terrain_height_at_pos(float world_x, float world_y) {
+        if (g_terrain_matrix.empty() || g_terrain_grid_width <= 0) {
+            return 0.0f;
+        }
+        
+        // Calculate grid coordinates
+        float fx = world_x / g_terrain_grid_width;
+        float fy = world_y / g_terrain_grid_width;
+        
+        // Get integer grid coordinates
+        int x0 = static_cast<int>(std::floor(fx));
+        int y0 = static_cast<int>(std::floor(fy));
+        int x1 = x0 + 1;
+        int y1 = y0 + 1;
+        
+        // Clamp to grid bounds
+        int max_idx = static_cast<int>(g_terrain_matrix.size()) - 1;
+        x0 = std::max(0, std::min(x0, max_idx));
+        y0 = std::max(0, std::min(y0, max_idx));
+        x1 = std::max(0, std::min(x1, max_idx));
+        y1 = std::max(0, std::min(y1, max_idx));
+        
+        // Get heights at corners
+        float h00 = g_terrain_matrix[y0][x0];
+        float h10 = g_terrain_matrix[y0][x1];
+        float h01 = g_terrain_matrix[y1][x0];
+        float h11 = g_terrain_matrix[y1][x1];
+        
+        // Bilinear interpolation
+        float fx_frac = fx - std::floor(fx);
+        float fy_frac = fy - std::floor(fy);
+        
+        float h0 = h00 * (1 - fx_frac) + h10 * fx_frac;
+        float h1 = h01 * (1 - fx_frac) + h11 * fx_frac;
+        
+        return h0 * (1 - fy_frac) + h1 * fy_frac;
     }
 }
 
@@ -2842,149 +3593,6 @@ static void initialize_lua_state() {
             return CryptoGenerator::sdbm(input);
         };
 
-        // Register random string generator
-        (*g_lua_state)["GenerateRandomString"] = [](int length, sol::optional<bool> use_numbers, 
-                                                    sol::optional<bool> use_letters, 
-                                                    sol::optional<bool> use_symbols) -> std::string {
-            bool nums = use_numbers.value_or(true);
-            bool letters = use_letters.value_or(true);
-            bool syms = use_symbols.value_or(false);
-            return RandomStringGenerator::generate(length, nums, letters, syms);
-        };
-
-        (*g_lua_state)["GenerateUid"] = []() -> std::string {
-            return RandomStringGenerator::generate(16, true, true, true);
-        };
-
-        // KHData functions
-        (*g_lua_state)["WriteKHData"] = [](const std::string& filename, const std::string& var_name, sol::object value) -> sol::object {
-            auto* file = KHDataManager::instance().get_or_create_file(filename);
-
-            if (file) {
-                game_value gv = convert_lua_to_game_value(value);
-                file->write_variable(var_name, gv);
-            }
-
-            return sol::make_object(*g_lua_state, sol::nil);
-        };
-
-        (*g_lua_state)["ReadKHData"] = [](const std::string& filename, const std::string& var_name) -> sol::object {
-            auto* file = KHDataManager::instance().get_or_create_file(filename);
-
-            if (!file) {
-                return sol::make_object(*g_lua_state, sol::nil);
-            }
-
-            if (var_name == filename) {
-                auto names = file->get_variable_names();
-                sol::table tbl = g_lua_state->create_table();
-
-                for (size_t i = 0; i < names.size(); i++) {
-                    tbl[i + 1] = names[i];
-                }
-
-                return sol::make_object(*g_lua_state, tbl);
-            }
-            
-            return convert_game_value_to_lua(file->read_variable(var_name));
-        };
-
-        (*g_lua_state)["FlushKHData"] = []() -> sol::object {
-            KHDataManager::instance().flush_all();
-            return sol::make_object(*g_lua_state, sol::nil);
-        };
-
-        (*g_lua_state)["DeleteKHDataFile"] = [](const std::string& filename) -> sol::object {
-            KHDataManager::instance().delete_file(filename);
-            return sol::make_object(*g_lua_state, sol::nil);
-        };
-
-        (*g_lua_state)["TerrainMatrix"] = sol::readonly_property([]() -> sol::object {
-            if (g_terrain_matrix.empty()) {
-                return sol::make_object(*g_lua_state, sol::nil);
-            }
-            
-            sol::table matrix = g_lua_state->create_table();
-            
-            for (size_t y = 0; y < g_terrain_matrix.size(); y++) {
-                sol::table row = g_lua_state->create_table();
-
-                for (size_t x = 0; x < g_terrain_matrix[y].size(); x++) {
-                    row[x + 1] = g_terrain_matrix[y][x]; // Lua uses 1-based indexing
-                }
-
-                matrix[y + 1] = row;
-            }
-            
-            return sol::make_object(*g_lua_state, matrix);
-        });
-
-        (*g_lua_state)["TerrainGridWidth"] = sol::readonly_property([]() -> float {
-            return g_terrain_grid_width;
-        });
-
-        (*g_lua_state)["TerrainGridSize"] = sol::readonly_property([]() -> int {
-            return g_terrain_grid_size;
-        });
-
-        (*g_lua_state)["WorldSize"] = sol::readonly_property([]() -> float {
-            return g_world_size;
-        });
-
-        // Helper function to get terrain height at specific grid coordinates
-        (*g_lua_state)["GetTerrainHeightAt"] = [](int grid_x, int grid_y) -> sol::object {
-            // Convert from 1-based Lua indexing to 0-based C++ indexing
-            int x = grid_x - 1;
-            int y = grid_y - 1;
-            
-            if (x < 0 || y < 0 || 
-                y >= static_cast<int>(g_terrain_matrix.size()) || 
-                x >= static_cast<int>(g_terrain_matrix[0].size())) {
-                return sol::make_object(*g_lua_state, sol::nil);
-            }
-            
-            return sol::make_object(*g_lua_state, g_terrain_matrix[y][x]);
-        };
-
-        // Helper to get interpolated height at world position
-        (*g_lua_state)["GetTerrainHeightAtPos"] = [](float world_x, float world_y) -> float {
-            if (g_terrain_matrix.empty() || g_terrain_grid_width <= 0) {
-                return 0.0f;
-            }
-            
-            // Calculate grid coordinates
-            float fx = world_x / g_terrain_grid_width;
-            float fy = world_y / g_terrain_grid_width;
-            
-            // Get integer grid coordinates
-            int x0 = static_cast<int>(std::floor(fx));
-            int y0 = static_cast<int>(std::floor(fy));
-            int x1 = x0 + 1;
-            int y1 = y0 + 1;
-            
-            // Clamp to grid bounds
-            int max_idx = static_cast<int>(g_terrain_matrix.size()) - 1;
-            x0 = std::max(0, std::min(x0, max_idx));
-            y0 = std::max(0, std::min(y0, max_idx));
-            x1 = std::max(0, std::min(x1, max_idx));
-            y1 = std::max(0, std::min(y1, max_idx));
-            
-            // Get heights at corners
-            float h00 = g_terrain_matrix[y0][x0];
-            float h10 = g_terrain_matrix[y0][x1];
-            float h01 = g_terrain_matrix[y1][x0];
-            float h11 = g_terrain_matrix[y1][x1];
-            
-            // Bilinear interpolation
-            float fx_frac = fx - std::floor(fx);
-            float fy_frac = fy - std::floor(fy);
-            
-            float h0 = h00 * (1 - fx_frac) + h10 * fx_frac;
-            float h1 = h01 * (1 - fx_frac) + h11 * fx_frac;
-            
-            return h0 * (1 - fy_frac) + h1 * fy_frac;
-        };
-
         // Register GameValueWrapper userdata type
         g_lua_state->new_usertype<GameValueWrapper>("GameValue",
             sol::constructors<GameValueWrapper(), GameValueWrapper(const game_value&)>(),
@@ -2994,34 +3602,83 @@ static void initialize_lua_state() {
             "type_name", &GameValueWrapper::type_name,
             "is_game_value", &GameValueWrapper::is_game_value
         );
-        
-        // Register variables in Lua global namespace
-        (*g_lua_state)["MissionFrame"] = 0;
 
         // Register all utility functions in Lua global namespace
-        (*g_lua_state)["GetSystemTime"] = lua_functions::get_system_time;
-        (*g_lua_state)["GetDateTime"] = lua_functions::get_date_time;
-        (*g_lua_state)["GetTimestamp"] = lua_functions::get_timestamp;
-        (*g_lua_state)["GetTimeMs"] = lua_functions::get_time_ms;
-        (*g_lua_state)["ProfileCode"] = lua_functions::profile_code;
-        (*g_lua_state)["GetDataType"] = lua_functions::get_data_type;
-        (*g_lua_state)["SQF_FunctionCall"] = lua_functions::sqf_function_call;
-        (*g_lua_state)["with_sqf"] = lua_functions::with_sqf;
+        (*g_lua_state)["delay"] = LuaFunctions::delay;
+        (*g_lua_state)["delay_frames"] = LuaFunctions::delay_frames;
+
+        (*g_lua_state)["interval"] = sol::overload(
+            LuaFunctions::interval,
+            LuaFunctions::interval_with_timeout
+        );
+
+        (*g_lua_state)["interval_frames"] = sol::overload(
+            LuaFunctions::interval_frames,
+            LuaFunctions::interval_frames_with_timeout
+        );
+        
+        (*g_lua_state)["CancelTask"] = LuaFunctions::cancel_task;
+        (*g_lua_state)["add_event_handler"] = LuaFunctions::add_event_handler;
+        (*g_lua_state)["remove_event_handler"] = LuaFunctions::remove_event_handler;
+
+        (*g_lua_state)["EmitEvent"] = sol::overload(
+            LuaFunctions::emit_event,      // (event_name, ...args)
+            LuaFunctions::emit_event_cba    // (event_name, args_table, target, jip?)
+        );
+
+        (*g_lua_state)["ClearEvents"] = LuaFunctions::clear_events;
+        (*g_lua_state)["GetEventHandlerCount"] = LuaFunctions::get_handler_count;
+        (*g_lua_state)["EmitCBAEvent"] = LuaFunctions::emit_cba_event;
+        (*g_lua_state)["EmitVariable"] = LuaFunctions::emit_variable;
+        (*g_lua_state)["GetSystemTime"] = LuaFunctions::get_system_time;
+        (*g_lua_state)["GetDateTime"] = LuaFunctions::get_date_time;
+        (*g_lua_state)["GetTimestamp"] = LuaFunctions::get_timestamp;
+        (*g_lua_state)["GetTimeMs"] = LuaFunctions::get_time_ms;
+        (*g_lua_state)["ProfileCode"] = LuaFunctions::profile_code;
+        (*g_lua_state)["GetDataType"] = LuaFunctions::get_data_type;
+        (*g_lua_state)["with_sqf"] = LuaFunctions::with_sqf;
+        (*g_lua_state)["GenerateRandomString"] = LuaFunctions::generate_random_string;
+        (*g_lua_state)["GenerateUid"] = LuaFunctions::generate_uid;
+
+        (*g_lua_state)["WriteKHData"] = sol::overload(
+            [](const std::string& f, const std::string& v, sol::object val) {
+                return LuaFunctions::write_khdata(f, v, val, sol::nullopt, sol::nullopt);
+            },
+
+            LuaFunctions::write_khdata
+        );
+
+        (*g_lua_state)["ReadKHData"] = sol::overload(
+            [](const std::string& f, const std::string& v) {
+                return LuaFunctions::read_khdata(f, v, sol::nullopt);
+            },
+
+            LuaFunctions::read_khdata
+        );
+
+        (*g_lua_state)["FlushKHData"] = LuaFunctions::flush_khdata;
+        (*g_lua_state)["DeleteKHDataFile"] = LuaFunctions::delete_khdata_file;
+        (*g_lua_state)["TerrainMatrix"] = sol::readonly_property([]() {return LuaFunctions::get_terrain_matrix();});
+        (*g_lua_state)["TerrainGridWidth"] = sol::readonly_property([]() {return LuaFunctions::get_terrain_grid_width();});
+        (*g_lua_state)["TerrainGridSize"] = sol::readonly_property([]() {return LuaFunctions::get_terrain_grid_size();});
+        (*g_lua_state)["WorldSize"] = sol::readonly_property([]() {return LuaFunctions::get_world_size();});
+        (*g_lua_state)["GetTerrainHeightAt"] = LuaFunctions::get_terrain_height_at;
+        (*g_lua_state)["GetTerrainHeightAtPos"] = LuaFunctions::get_terrain_height_at_pos;
 
         // This lets you get and set sqf variables using SQF_VAR.someVariable
         sol::table sqf_var = g_lua_state->create_table();
 
         sqf_var[sol::metatable_key] = g_lua_state->create_table_with(
-            "__index", [](sol::this_state L, sol::object key) -> sol::object {
+            "__index", [](sol::object key) -> sol::object {
                 if (key.get_type() != sol::type::string) return sol::nil;
                 std::string var_name = key.as<std::string>();
-                game_value result = sqf::get_variable(sqf::mission_namespace(), var_name);
+                game_value result = sqf::get_variable(sqf::current_namespace(), var_name);
                 return convert_game_value_to_lua(result);
             },
-            "__newindex", [](sol::this_state L, sol::object key, sol::object value) {
+            "__newindex", [](sol::object key, sol::object value) {
                 if (key.get_type() != sol::type::string) return;
                 std::string var_name = key.as<std::string>();
-                sqf::set_variable(sqf::mission_namespace(), var_name, convert_lua_to_game_value(value));
+                sqf::set_variable(sqf::current_namespace(), var_name, convert_lua_to_game_value(value));
             }
         );
 
@@ -3144,28 +3801,59 @@ static void initialize_lua_state() {
 
         sqf_table["call"] = [](sol::variadic_args args) -> sol::object {
             if (args[0].get_type() != sol::type::string) {
-                ErrorHandling::report_error("Code must be string");
+                ErrorHandling::report_error("Code or function name must be string");
                 return sol::nil;
             }
 
-            std::string code = args[0].as<std::string>();
-            size_t code_hash = std::hash<std::string>{}(code);
-            
-            // Check cache for compiled code
+            std::string code_or_func = args[0].as<std::string>();
             game_value compiled;
-            auto cache_it = g_sqf_compiled_cache.find(code_hash);
             
-            if (cache_it != g_sqf_compiled_cache.end()) {
-                compiled = cache_it->second;
+            if (code_or_func.find(' ') == std::string::npos && code_or_func.find(';') == std::string::npos) {
+                // Function call path - use different cache and compilation
+                if (args.size() == 1) {
+                    // No parameters - compile as "call functionName"
+                    std::string cache_key = "call " + code_or_func;
+                    auto cache_it = g_sqf_function_cache.find(cache_key);
+                    
+                    if (cache_it != g_sqf_function_cache.end()) {
+                        compiled = cache_it->second;
+                    } else {
+                        compiled = sqf::compile(cache_key);
+                        g_sqf_function_cache[cache_key] = compiled;
+                    }
+                    
+                    return convert_game_value_to_lua(sqf::call2(compiled));
+                } else if (args.size() == 2) {
+                    // With parameters - compile as "_this call functionName"
+                    std::string cache_key = "_this call " + code_or_func;
+                    auto cache_it = g_sqf_function_cache.find(cache_key);
+                    
+                    if (cache_it != g_sqf_function_cache.end()) {
+                        compiled = cache_it->second;
+                    } else {
+                        compiled = sqf::compile(cache_key);
+                        g_sqf_function_cache[cache_key] = compiled;
+                    }
+                    
+                    return convert_game_value_to_lua(sqf::call2(compiled, convert_lua_to_game_value(args[1])));
+                }
             } else {
-                compiled = sqf::compile(code);
-                g_sqf_compiled_cache[code_hash] = compiled;
-            }
-
-            if (args.size() == 1) {
-                return convert_game_value_to_lua(sqf::call2(compiled));
-            } else if (args.size() == 2) {
-                return convert_game_value_to_lua(sqf::call2(compiled, convert_lua_to_game_value(args[1])));
+                // Code execution path
+                size_t code_hash = std::hash<std::string>{}(code_or_func);
+                auto cache_it = g_sqf_compiled_cache.find(code_hash);
+                
+                if (cache_it != g_sqf_compiled_cache.end()) {
+                    compiled = cache_it->second;
+                } else {
+                    compiled = sqf::compile(code_or_func);
+                    g_sqf_compiled_cache[code_hash] = compiled;
+                }
+                
+                if (args.size() == 1) {
+                    return convert_game_value_to_lua(sqf::call2(compiled));
+                } else if (args.size() == 2) {
+                    return convert_game_value_to_lua(sqf::call2(compiled, convert_lua_to_game_value(args[1])));
+                }
             }
             
             return sol::nil;
@@ -3242,6 +3930,14 @@ static void initialize_lua_state() {
             return convert_game_value_to_lua(sqf::parsing_namespace());
         };
 
+        sqf_table["serverNamespace"] = []() -> sol::object {
+            return convert_game_value_to_lua(sqf::server_namespace());
+        };
+
+        sqf_table["missionProfileNamespace"] = []() -> sol::object {
+            return convert_game_value_to_lua(sqf::mission_profile_namespace());
+        };
+
         sqf_table["missionName"] = []() -> std::string {
             return static_cast<std::string>(sqf::mission_name());
         };
@@ -3313,12 +4009,11 @@ static game_value execute_lua_sqf(game_value_parameter args, game_value_paramete
     try {
         LuaStackGuard guard(*g_lua_state);
         std::string code_str = static_cast<std::string>(code_or_function);
-        
+
         // Check if it's a function call or code execution
-        bool is_function = code_str.find(' ') == std::string::npos && code_str.find('(') == std::string::npos;
         sol::protected_function_result result;
         
-        if (is_function) {
+        if (code_str.find(' ') == std::string::npos && code_str.find('(') == std::string::npos) {
             // Try to get the function from cache or global namespace
             auto cache_it = g_call_cache.find(code_str);
             sol::protected_function func;
@@ -3437,6 +4132,7 @@ static game_value execute_lua_sqf(game_value_parameter args, game_value_paramete
 // Native SQF command implementation for compileLua
 static game_value compile_lua_sqf(game_value_parameter name, game_value_parameter code) {    
     try {
+        LuaStackGuard guard(*g_lua_state);
         std::string lua_code = static_cast<std::string>(code);
         std::string lua_name = static_cast<std::string>(name);
         
@@ -3569,8 +4265,7 @@ static game_value generate_random_string_sqf(game_value_parameter options, game_
 
 static game_value generate_uid_sqf() {
     try {
-        // Generate 16-character UID with all character types (numbers, letters, symbols)
-        std::string uid = RandomStringGenerator::generate(16, true, true, true);
+        std::string uid = UIDGenerator::generate();
         return game_value(uid);
     } catch (const std::exception& e) {
         ErrorHandling::report_error(std::string(e.what()));
@@ -3578,44 +4273,40 @@ static game_value generate_uid_sqf() {
     }
 }
 
-static game_value write_khdata_sqf(game_value_parameter params, game_value_parameter value) {
-    try {
-        if (params.type_enum() != game_data_type::ARRAY || params.size() < 2) {
-            ErrorHandling::report_error("Expected [filename, variable_name]");
-            return game_value();
-        }
-        
-        std::string filename = static_cast<std::string>(params[0]);
-        std::string var_name = static_cast<std::string>(params[1]);
-
-        if (filename.empty() || var_name.empty()) {
-            ErrorHandling::report_error("Empty filename or variable name");
-            return game_value();
-        }
-        
-        auto* file = KHDataManager::instance().get_or_create_file(filename);
-        if (!file) {
-            ErrorHandling::report_error("Failed to access file");
-            return game_value();
-        }
-        
-        file->write_variable(var_name, value);
-        
-        return game_value();
-    } catch (const std::exception& e) {
-        ErrorHandling::report_error(std::string(e.what()));
-        return game_value();
-    }
-}
-
-static game_value read_khdata_sqf(game_value_parameter filename, game_value_parameter var_name) {
+static game_value read_khdata_sqf(game_value_parameter filename, game_value_parameter var_param) {
     try {
         std::string file_str = static_cast<std::string>(filename);
-        std::string var_str = static_cast<std::string>(var_name);
-        auto* file = KHDataManager::instance().get_or_create_file(file_str);
-
-        if (!file) {
+        std::string var_str;
+        game_value default_value;
+        bool has_default = false;
+        
+        // Parse the variable parameter
+        if (var_param.type_enum() == game_data_type::STRING) {
+            // Simple string - just variable name
+            var_str = static_cast<std::string>(var_param);
+        } else if (var_param.type_enum() == game_data_type::ARRAY) {
+            auto& arr = var_param.to_array();
+            
+            if (arr.empty() || arr[0].type_enum() != game_data_type::STRING) {
+                ErrorHandling::report_error("Array must contain variable name as first element");
+                return game_value();
+            }
+            
+            var_str = static_cast<std::string>(arr[0]);
+            
+            if (arr.size() > 1) {
+                default_value = arr[1];
+                has_default = true;
+            }
+        } else {
+            ErrorHandling::report_error("Variable parameter must be string or array");
             return game_value();
+        }
+        
+        auto* file = KHDataManager::instance().get_or_create_file(file_str);
+        
+        if (!file) {
+            return has_default ? default_value : game_value();
         }
         
         // Special case: if var_name == filename, return all variable names
@@ -3623,16 +4314,85 @@ static game_value read_khdata_sqf(game_value_parameter filename, game_value_para
             auto names = file->get_variable_names();
             auto_array<game_value> arr;
             arr.reserve(names.size());
-
+            
             for (const auto& name : names) {
                 arr.push_back(game_value(name));
             }
-
+            
             return game_value(std::move(arr));
         }
         
-        return file->read_variable(var_str);
+        game_value result = file->read_variable(var_str);
+        
+        // Return default value if result is nil and default was provided
+        if (result.is_nil() && has_default) {
+            return default_value;
+        }
+        
+        return result;
+    } catch (const std::exception& e) {
+        ErrorHandling::report_error(std::string(e.what()));
+        return game_value();
     } catch (...) {
+        return game_value();
+    }
+}
+
+static game_value write_khdata_sqf(game_value_parameter filename, game_value_parameter params) {
+    try {
+        std::string file_str = static_cast<std::string>(filename);
+        
+        if (params.type_enum() != game_data_type::ARRAY || params.size() < 2) {
+            ErrorHandling::report_error("Expected [variable_name, value, (target), (jip)]");
+            return game_value();
+        }
+        
+        auto& arr = params.to_array();
+        
+        if (arr[0].type_enum() != game_data_type::STRING) {
+            ErrorHandling::report_error("First array element must be variable name (string)");
+            return game_value();
+        }
+        
+        std::string var_name = static_cast<std::string>(arr[0]);
+        game_value value = arr[1];
+        game_value target = arr.size() > 2 ? arr[2] : game_value();
+        game_value jip = arr.size() > 3 ? arr[3] : game_value();
+        
+        if (file_str.empty() || var_name.empty()) {
+            ErrorHandling::report_error("Empty filename or variable name");
+            return game_value();
+        }
+        
+        // If target is specified, trigger CBA event
+        if (!target.is_nil()) {
+            // Build CBA parameters: ["KH_eve_khDataWriteEmission", [filename, name, value], target, jip]
+            auto_array<game_value> value_array;
+            value_array.push_back(file_str);
+            value_array.push_back(var_name);
+            value_array.push_back(value);
+            
+            auto_array<game_value> cba_params;
+            cba_params.push_back(game_value("KH_eve_khDataWriteEmission"));
+            cba_params.push_back(game_value(std::move(value_array)));
+            cba_params.push_back(target);
+            cba_params.push_back(jip);
+            
+            sqf::call2(g_trigger_cba_event, game_value(std::move(cba_params)));
+        } else {
+            auto* file = KHDataManager::instance().get_or_create_file(file_str);
+
+            if (!file) {
+                ErrorHandling::report_error("Failed to access file");
+                return game_value();
+            }
+
+            file->write_variable(var_name, value);
+        }
+        
+        return game_value();
+    } catch (const std::exception& e) {
+        ErrorHandling::report_error(std::string(e.what()));
         return game_value();
     }
 }
@@ -3685,6 +4445,175 @@ static game_value get_terrain_matrix_sqf() {
         
         return game_value(std::move(matrix));
     } catch (...) {
+        return game_value();
+    }
+}
+
+static game_value emit_lua_event_sqf(game_value_parameter params) {
+    try {
+        std::string event_name;
+        game_value event_args;
+        game_value target;
+        game_value jip;
+        
+        // Handle different input formats
+        if (params.type_enum() == game_data_type::STRING) {
+            // Simple string: just event name, no arguments
+            event_name = static_cast<std::string>(params);
+            event_args = game_value();  // nil
+            target = game_value();       // nil
+            jip = game_value();          // nil
+        } else if (params.type_enum() == game_data_type::ARRAY) {
+            auto& arr = params.to_array();
+            
+            if (arr.empty()) {
+                ErrorHandling::report_error("Array cannot be empty");
+                return game_value();
+            }
+            
+            // First element must be event name
+            if (arr[0].type_enum() != game_data_type::STRING) {
+                ErrorHandling::report_error("First array element must be event name (string)");
+                return game_value();
+            }
+            
+            event_name = static_cast<std::string>(arr[0]);
+            event_args = arr.size() > 1 ? arr[1] : game_value();
+            target = arr.size() > 2 ? arr[2] : game_value();
+            jip = arr.size() > 3 ? arr[3] : game_value();
+        } else {
+            ErrorHandling::report_error("String or array parameter required");
+            return game_value();
+        }
+        
+        // Check if we should use CBA events
+        if (!target.is_nil()) {            
+            // Build CBA parameters: ["KH_eve_luaEventEmission", [event, arguments], target, jip]
+            auto_array<game_value> cba_event_data;
+            cba_event_data.push_back(game_value(event_name));
+            cba_event_data.push_back(event_args);
+            auto_array<game_value> cba_params;
+            cba_params.push_back(game_value("KH_eve_luaEventEmission"));
+            cba_params.push_back(game_value(std::move(cba_event_data)));
+            cba_params.push_back(target);
+            cba_params.push_back(jip);
+            sqf::call2(g_trigger_cba_event, game_value(std::move(cba_params)));
+        } else {
+            LuaStackGuard guard(*g_lua_state);
+            
+            // Convert arguments and call emit_event with raw Lua API
+            sol::state& lua = *g_lua_state;
+            lua_State* L = lua.lua_state();
+            
+            // Push function name
+            lua_getglobal(L, "EmitEvent");
+            
+            // Push event name
+            lua_pushstring(L, event_name.c_str());
+            
+            // Push arguments
+            int arg_count = 1; // event name
+            if (event_args.type_enum() == game_data_type::ARRAY) {
+                auto& args_arr = event_args.to_array();
+                for (const auto& elem : args_arr) {
+                    convert_game_value_to_lua(elem).push(L);
+                    arg_count++;
+                }
+            } else if (!event_args.is_nil()) {
+                convert_game_value_to_lua(event_args).push(L);
+                arg_count++;
+            }
+            
+            // Call the function
+            lua_pcall(L, arg_count, 0, 0);
+        }
+        
+        return game_value();
+    } catch (const std::exception& e) {
+        ErrorHandling::report_error("Failed to emit event: " + std::string(e.what()));
+        return game_value();
+    } catch (...) {
+        ErrorHandling::report_error("Failed to emit event");
+        return game_value();
+    }
+}
+
+static game_value emit_lua_variable_sqf(game_value_parameter params) {
+    try {
+        LuaStackGuard guard(*g_lua_state);
+        sol::state& lua = *g_lua_state;
+        
+        std::string var_name;
+        game_value emit_value;
+        game_value target = game_value(true);  // Default to true
+        game_value jip;
+        
+        if (params.type_enum() == game_data_type::STRING) {
+            // Simple string: just variable name, fetch from Lua
+            var_name = static_cast<std::string>(params);
+            
+            // Get value from Lua global
+            sol::object lua_var = lua[var_name];
+            if (lua_var.valid() && lua_var.get_type() != sol::type::nil) {
+                emit_value = convert_lua_to_game_value(lua_var);
+            } else {
+                ErrorHandling::report_error("Lua global variable '" + var_name + "' not found or is nil");
+                return game_value();
+            }
+        } else if (params.type_enum() == game_data_type::ARRAY) {
+            auto& arr = params.to_array();
+            
+            if (arr.empty() || arr[0].type_enum() != game_data_type::STRING) {
+                ErrorHandling::report_error("First element must be variable name (string)");
+                return game_value();
+            }
+            
+            var_name = static_cast<std::string>(arr[0]);
+            
+            if (arr.size() == 1) {
+                // Just variable name, fetch from Lua
+                sol::object lua_var = lua[var_name];
+                if (lua_var.valid() && lua_var.get_type() != sol::type::nil) {
+                    emit_value = convert_lua_to_game_value(lua_var);
+                } else {
+                    ErrorHandling::report_error("Lua global variable '" + var_name + "' not found or is nil");
+                    return game_value();
+                }
+            } else {
+                // Value provided
+                emit_value = arr[1];
+                
+                // Target (defaults to true if omitted or nil)
+                if (arr.size() > 2 && !arr[2].is_nil()) {
+                    target = arr[2];
+                }
+                
+                // JIP
+                if (arr.size() > 3) {
+                    jip = arr[3];
+                }
+            }
+        } else {
+            ErrorHandling::report_error("Parameter must be string or array");
+            return game_value();
+        }
+        
+        // Build CBA parameters: ["KH_eve_luaVariableEmission", [var_name, value], target, jip]
+        auto_array<game_value> emission_data;
+        emission_data.push_back(game_value(var_name));
+        emission_data.push_back(emit_value);
+        auto_array<game_value> cba_params;
+        cba_params.push_back(game_value("KH_eve_luaVariableEmission"));
+        cba_params.push_back(game_value(std::move(emission_data)));
+        cba_params.push_back(target);
+        cba_params.push_back(jip);
+        sqf::call2(g_trigger_cba_event, game_value(std::move(cba_params)));
+        return game_value();
+    } catch (const std::exception& e) {
+        ErrorHandling::report_error("Failed to emit variable: " + std::string(e.what()));
+        return game_value();
+    } catch (...) {
+        ErrorHandling::report_error("Failed to emit variable");
         return game_value();
     }
 }
@@ -3756,9 +4685,46 @@ int intercept::api_version() {
 }
 
 void intercept::pre_start() {
+    g_trigger_cba_event = sqf::compile("_this call KH_fnc_triggerCbaEvent");
+    g_create_hash_map_from_array = sqf::compile("createHashMapFromArray _this");
+    g_create_hash_map = sqf::compile("createHashMap");
     initialize_lua_state();
     LuaStackGuard guard(*g_lua_state);
+    (*g_lua_state)["GameFrame"] = g_current_game_frame;
+    (*g_lua_state)["GameTime"] = g_current_game_time;
+    (*g_lua_state)["MissionFrame"] = g_current_mission_frame;
+    (*g_lua_state)["MissionTime"] = g_current_mission_time;
     (*g_lua_state)["MissionActive"] = false;
+
+    if (sqf::is_server()) {
+        (*g_lua_state)["MachineIsServer"] = true;
+    }
+    else {
+        (*g_lua_state)["MachineIsServer"] = false;
+    }
+
+    if (sqf::is_dedicated()) {
+        (*g_lua_state)["MachineIsDedicatedServer"] = true;
+    }
+    else {
+        (*g_lua_state)["MachineIsDedicatedServer"] = false;
+    }
+
+    if (!(sqf::is_server()) && !(sqf::has_interface())) {
+        (*g_lua_state)["MachineIsHeadless"] = true;
+    }
+    else {
+        (*g_lua_state)["MachineIsHeadless"] = false;
+    }
+
+    if (sqf::has_interface()) {
+        (*g_lua_state)["MachineIsPlayer"] = true;
+    }
+    else {
+        (*g_lua_state)["MachineIsPlayer"] = false;
+    }
+
+    KHDataManager::instance().initialize();
 
     _execute_lua_sqf_command = intercept::client::host::register_sqf_command(
         "luaExecute",
@@ -3803,25 +4769,23 @@ void intercept::pre_start() {
         game_data_type::STRING   // Return type - no arguments needed
     );
 
-    KHDataManager::instance().initialize();
-
     // Register KHData commands
     _write_khdata_sqf_command = intercept::client::host::register_sqf_command(
         "writeKhData",
-        "Write variable to KHData file",
+        "Write variable to KHData file with optional CBA event",
         userFunctionWrapper<write_khdata_sqf>,
         game_data_type::NOTHING,     // Return type
-        game_data_type::ARRAY,      // Left argument - [filename, variable_name]
-        game_data_type::ANY         // Right argument - value (nil to delete)
+        game_data_type::STRING,      // Left argument - filename
+        game_data_type::ARRAY        // Right argument - [variable_name, value, target?, jip?]
     );
 
     _read_khdata_sqf_command = intercept::client::host::register_sqf_command(
         "readKhData",
-        "Read variable from KHData file",
+        "Read variable from KHData file with optional default",
         userFunctionWrapper<read_khdata_sqf>,
-        game_data_type::ANY,        // Return type
-        game_data_type::STRING,     // Left argument - filename
-        game_data_type::STRING      // Right argument - variable_name
+        game_data_type::ANY,         // Return type
+        game_data_type::STRING,      // Left argument - filename
+        game_data_type::ANY          // Right argument - variable_name or [variable_name, default_value]
     );
 
     _flush_khdata_sqf_command = intercept::client::host::register_sqf_command(
@@ -3846,11 +4810,31 @@ void intercept::pre_start() {
         game_data_type::ARRAY      // Return type
     );
 
-    sqf::diag_log("KH Framework Lua - Pre-start Complete");
+    _emit_lua_event_sqf_command = intercept::client::host::register_sqf_command(
+        "luaEmitEvent",
+        "Emit event to Lua handlers",
+        userFunctionWrapper<emit_lua_event_sqf>,
+        game_data_type::NOTHING,
+        game_data_type::ANY    // Event name or params in format [event, arguments?, target?, jip?]
+    );
+
+    _emit_lua_variable_sqf_command = intercept::client::host::register_sqf_command(
+        "luaEmitVariable",
+        "Emit Lua variable via CBA event",
+        userFunctionWrapper<emit_lua_variable_sqf>,
+        game_data_type::NOTHING,
+        game_data_type::ANY    // String or array [name, value?, target?, jip?]
+    );
+
+    sqf::diag_log("KH Framework Lua - Pre-start");
 }
 
 void intercept::pre_init() {
     LuaStackGuard guard(*g_lua_state);
+    g_current_mission_time = 0.0f;
+    g_current_mission_frame = 0;
+    (*g_lua_state)["MissionFrame"] = g_current_mission_frame;
+    (*g_lua_state)["MissionTime"] = g_current_mission_time;
     (*g_lua_state)["MissionActive"] = true;
 
     if (sqf::is_server()) {
@@ -3882,26 +4866,43 @@ void intercept::pre_init() {
     }
 
     initialize_terrain_matrix();
-    lua_functions::lua_init();
+    LuaFunctions::lua_scheduled_tasks.clear();
+    LuaFunctions::lua_task_id_map.clear();
+    g_lua_event_handlers.clear();
     KHDataManager::instance().flush_all();
-    sqf::diag_log("KH Framework Lua - Pre-init Complete");
+    sqf::diag_log("KH Framework Lua - Pre-init");
 }
 
 void intercept::post_init() {
     LuaStackGuard guard(*g_lua_state);
-    sqf::diag_log("KH Framework Lua - Post-init Complete");
+    sqf::diag_log("KH Framework Lua - Post-init");
 }
 
 void intercept::on_frame() {
     LuaStackGuard guard(*g_lua_state);
-    lua_functions::lua_frame_update();
+    g_current_game_time += sqf::diag_delta_time();
+    g_current_game_frame++;
+    (*g_lua_state)["GameFrame"] = g_current_game_frame;
+    (*g_lua_state)["GameTime"] = g_current_game_time;
+    g_current_mission_time += sqf::diag_delta_time();
+    g_current_mission_frame++;
+    (*g_lua_state)["MissionFrame"] = g_current_mission_frame;
+    (*g_lua_state)["MissionTime"] = g_current_mission_time;
+    LuaFunctions::update_scheduler();
 }
 
 void intercept::mission_ended() {
     LuaStackGuard guard(*g_lua_state);
+    g_current_mission_time = 0.0f;
+    g_current_mission_frame = 0;
+    (*g_lua_state)["MissionFrame"] = g_current_mission_frame;
+    (*g_lua_state)["MissionTime"] = g_current_mission_time;
     (*g_lua_state)["MissionActive"] = false;
-    lua_functions::lua_deinit();
+    LuaFunctions::lua_scheduled_tasks.clear();
+    LuaFunctions::lua_task_id_map.clear();
+    g_lua_event_handlers.clear();
     KHDataManager::instance().flush_all();
+    sqf::diag_log("KH Framework Lua - Mission End");
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {

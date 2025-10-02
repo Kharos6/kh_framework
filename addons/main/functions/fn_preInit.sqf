@@ -28,16 +28,15 @@ KH_var_postInitExecutions = [];
 KH_var_preInitLuaExecutions = [];
 KH_var_postInitLuaExecutions = [];
 KH_var_loadInitLuaExecutions = [];
-KH_var_temporalStaticLuaExecutionStack = [];
 call KH_fnc_luaClearVariables;
 call KH_fnc_luaResetState;
 ["KH_eve_execution", KH_fnc_callParsedFunction] call CBA_fnc_addEventHandler;
 
 [
-	"KH_eve_luaEventEmission", 
+	"KH_eve_luaEventTrigger", 
 	{
 		params [["_event", "", [""]], "_arguments"];
-		luaEmitEvent [_event, _arguments];
+		luaTriggerEventLocal [_event, _arguments];
 	}
 ] call CBA_fnc_addEventHandler;
 
@@ -45,11 +44,7 @@ call KH_fnc_luaResetState;
 	"KH_eve_luaVariableEmission", 
 	{
 		params [["_name", "", [""]], "_value"];
-
-		[_name, _value] luaExecute "
-			local name, value = ...
-			_G[name] = value
-		"
+		luaSetVariable [_name, _value];
 	}
 ] call CBA_fnc_addEventHandler;
 
@@ -83,10 +78,10 @@ call KH_fnc_luaResetState;
         ] joinString "");
 
         private _name = if (isText (_x >> "name")) then {
-            [_prefix, "Fnc", getText (_x >> "name")] joinString "_";
+            [_prefix, getText (_x >> "name")] joinString "_";
         }
         else {
-           	[_prefix, "Fnc", configName _x] joinString "_";
+           	[_prefix, configName _x] joinString "_";
         };
 
         _name luaCompile _function;
@@ -107,26 +102,6 @@ call KH_fnc_luaResetState;
 			if ((getNumber (_x >> "loadInit")) isEqualTo 1) then {
         		KH_var_loadInitLuaExecutions pushBack _function;
 			};
-        };
-
-		if (isNumber (_x >> "temporal")) then {
-            private _time = getNumber (_x >> "temporal");
-
-        	KH_var_temporalStaticLuaExecutionStack pushBack [
-                _time, 
-                _function,
-                if (_time isEqualTo 0) then {
-                    diag_frameNo + 1;
-                }
-                else {
-                    if (_time > 0) then {
-                        diag_tickTime + _time;
-                    }
-                    else {
-                        diag_frameNo + (abs _time);
-                    };
-                }
-            ];
         };
     } forEach ("true" configClasses _config);
 } forEach ("true" configClasses (missionConfigFile >> "CfgLuaFunctions"));
@@ -254,25 +229,6 @@ addMissionEventHandler [
 				};
 			};
 		} forEach KH_var_temporalExecutionStack;
-
-		if (KH_var_temporalStaticLuaExecutionStack isNotEqualTo []) then {
-			{
-				_x params ["_delay", "_function", "_delta"];
-
-				if (_delay > 0) then {
-					if (diag_tickTime >= _delta) then {
-						[] luaExecute _function;
-						_x set [2, _delta + _delay];
-					};
-				}
-				else {
-					if (diag_frameNo >= _delta) then {
-						[] luaExecute _function;
-						_x set [2, _delta + (abs _delay)];
-					};
-				};
-			} forEach KH_var_temporalStaticLuaExecutionStack;
-		};
 	}
 ];
 

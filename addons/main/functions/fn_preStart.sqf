@@ -26,10 +26,10 @@ KH_var_aceLoaded = isClass (configFile >> "CfgPatches" >> "ace_main");
         ] joinString "");
 
         private _name = if (isText (_x >> "name")) then {
-            [_prefix, "Fnc", getText (_x >> "name")] joinString "_";
+            [_prefix, getText (_x >> "name")] joinString "_";
         }
         else {
-           	[_prefix, "Fnc", configName _x] joinString "_";
+           	[_prefix, configName _x] joinString "_";
         };
 
         _name luaCompile _function;
@@ -56,26 +56,6 @@ KH_var_aceLoaded = isClass (configFile >> "CfgPatches" >> "ace_main");
 			if ((getNumber (_x >> "loadInit")) isEqualTo 1) then {
         		KH_var_loadInitLuaExecutions pushBack _function;
 			};
-        };
-
-		if (isNumber (_x >> "temporal")) then {
-            private _time = getNumber (_x >> "temporal");
-
-        	KH_var_temporalStaticLuaExecutionStack pushBack [
-                _time, 
-                _function,
-                if (_time isEqualTo 0) then {
-                    diag_frameNo + 1;
-                }
-                else {
-                    if (_time > 0) then {
-                        diag_tickTime + _time;
-                    }
-                    else {
-                        diag_frameNo + (abs _time);
-                    };
-                }
-            ];
         };
     } forEach ("true" configClasses _config);
 } forEach ("true" configClasses (configFile >> "CfgLuaFunctions"));

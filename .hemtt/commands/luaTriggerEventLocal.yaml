@@ -1,4 +1,4 @@
-name: luaEmitEvent
+name: luaTriggerEventLocal
 description: TODO.
 syntax:
 - call: !Unary player
@@ -12,4 +12,4 @@ syntax:
 argument_loc: Local
 effect_loc: Local
 examples:
-- <sqf>luaEmitEvent object</sqf>
+- <sqf>luaTriggerEventLocal object</sqf>

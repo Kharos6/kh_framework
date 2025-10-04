@@ -37,7 +37,7 @@ if (_duration != -1) then {
 	switch _interruptType do {
 		case "GROUP": {
 			_targetGroupHitHandler = [
-				["STANDARD", group _target, "LOCAL"],
+				["ENTITY", group _target, "LOCAL"],
 				"CombatModeChanged",
 				[_event],
 				{
@@ -51,7 +51,7 @@ if (_duration != -1) then {
 			] call KH_fnc_addEventHandler;
 
 			_unitGroupHitHandler = [
-				["STANDARD", group _unit, "LOCAL"],
+				["ENTITY", group _unit, "LOCAL"],
 				"CombatModeChanged",
 				[_event],
 				{
@@ -67,7 +67,7 @@ if (_duration != -1) then {
 
 		case "UNIT": {
 			_targetHitHandler = [
-				["STANDARD", _target, "LOCAL"],
+				["ENTITY", _target, "LOCAL"],
 				"Dammaged",
 				[_event],
 				{
@@ -77,7 +77,7 @@ if (_duration != -1) then {
 			] call KH_fnc_addEventHandler;
 
 			_unitHitHandler = [
-				["STANDARD", _unit, "LOCAL"],
+				["ENTITY", _unit, "LOCAL"],
 				"Dammaged",
 				[_event],
 				{

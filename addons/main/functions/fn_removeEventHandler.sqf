@@ -22,7 +22,7 @@ _handler params [["_type", [], [[]]], ["_event", "", [true, 0, ""]], ["_handlerI
 		_type params [["_eventType", "", [""]], ["_target", objNull, [true, objNull, grpNull, missionNamespace, locationNull, controlNull, displayNull]]];
 
 		switch _eventType do {
-			case "STANDARD": {
+			case "ENTITY": {
 				_target removeEventHandler [_event, _handlerId];
 			};
 

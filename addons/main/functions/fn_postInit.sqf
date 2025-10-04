@@ -21,11 +21,6 @@ isNil {
 		};
 
 		call KH_fnc_serverMissionLoadInit;
-
-		{
-			[isServer, hasInterface] luaExecute _x;
-		} forEach KH_var_loadInitLuaExecutions;
-
 		[[], {systemChat "KH FRAMEWORK - MISSION LOADED";}, "GLOBAL", true, false] call KH_fnc_execute;
 
 		[
@@ -116,8 +111,14 @@ isNil {
 	} forEach KH_var_postInitExecutions;
 
 	{
-		[isServer, hasInterface] luaExecute _x;
+		luaExecute _x;
 	} forEach KH_var_postInitLuaExecutions;
+
+	if isDedicated then {
+		{
+			luaExecute _x;
+		} forEach KH_var_loadInitLuaExecutions;
+	};
 };
 
 nil;

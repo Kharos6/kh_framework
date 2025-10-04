@@ -1,4 +1,4 @@
-name: luaTriggerEvent
+name: execute
 description: TODO.
 syntax:
 - call: !Binary [player, player]
@@ -15,4 +15,4 @@ syntax:
 argument_loc: Local
 effect_loc: Local
 examples:
-- <sqf>object luaTriggerEvent object</sqf>
+- <sqf>object execute object</sqf>

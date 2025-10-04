@@ -15,7 +15,7 @@ private "_expression";
 if (_type isEqualType []) then {
 	_eventType = _type param [0, "", [""]];
 
-	if (_eventType isEqualTo "STANDARD") then {
+	if (_eventType isEqualTo "ENTITY") then {
 		private _scopeType = _type param [2, true, [true, ""]];
 
 		if ((_scopeType isNotEqualTo "REMOTE") && (_scopeType isNotEqualTo "PERSISTENT")) then {
@@ -61,7 +61,7 @@ else {
 };
 
 switch _eventType do {
-	case "STANDARD": {
+	case "ENTITY": {
 		private _entity = _type param [1, objNull, [objNull, grpNull]];
 		private _scopeType = _type param [2, true, [true, ""]];
 
@@ -76,7 +76,7 @@ switch _eventType do {
 
 				[
 					[
-						["STANDARD", _entity, "LOCAL"],
+						["ENTITY", _entity, "LOCAL"],
 						"Local",
 						[_event, _handler, clientOwner],
 						{

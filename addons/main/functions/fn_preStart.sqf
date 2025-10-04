@@ -36,7 +36,7 @@ KH_var_aceLoaded = isClass (configFile >> "CfgPatches" >> "ace_main");
 
 		if (isNumber (_x >> "preStart")) then {
 			if ((getNumber (_x >> "preStart")) isEqualTo 1) then {
-        		[] luaExecute _function;
+        		luaExecute _function;
 			};
         };
 

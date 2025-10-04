@@ -69,7 +69,7 @@ else {
 										params ["_unit", "_backpack", "_backpackItems"];
 
 										[
-											["STANDARD", _unit, "LOCAL"],
+											["ENTITY", _unit, "LOCAL"],
 											"SlotItemChanged",
 											[_backpack, _backpackItems],
 											{

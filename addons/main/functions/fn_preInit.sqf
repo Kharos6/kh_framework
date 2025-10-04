@@ -36,7 +36,7 @@ call KH_fnc_luaResetState;
 	"KH_eve_luaEventTrigger", 
 	{
 		params [["_event", "", [""]], "_arguments"];
-		luaTriggerEventLocal [_event, _arguments];
+		[] luaTriggerEvent _event;
 	}
 ] call CBA_fnc_addEventHandler;
 
@@ -538,7 +538,7 @@ if isServer then {
 					"KH_eve_execution",
 					[
 						[
-							["STANDARD", _target, "LOCAL"],
+							["ENTITY", _target, "LOCAL"],
 							"Local",
 							[_persistentExecutionId, _persistentEventId],
 							{
@@ -1113,7 +1113,7 @@ if hasInterface then {
 			};
 
 			KH_var_playerRespawnedEventHandler = [
-				["STANDARD", player, "LOCAL"],
+				["ENTITY", player, "LOCAL"],
 				"Respawn",
 				[],
 				{
@@ -1142,7 +1142,7 @@ if hasInterface then {
 			};
 
 			KH_var_playerKilledEventHandler = [
-				["STANDARD", player, "LOCAL"],
+				["ENTITY", player, "LOCAL"],
 				"Killed",
 				[],
 				{
@@ -1153,7 +1153,7 @@ if hasInterface then {
 			] call KH_fnc_addEventHandler;
 
 			{
-				[isServer, hasInterface] luaExecute _x;
+				luaExecute _x;
 			} forEach KH_var_loadInitLuaExecutions;
 		},
 		true,
@@ -1173,7 +1173,7 @@ if hasInterface then {
 			};
 
 			KH_var_playerRespawnedEventHandler = [
-				["STANDARD", _newUnit, "LOCAL"],
+				["ENTITY", _newUnit, "LOCAL"],
 				"Respawn",
 				[],
 				{
@@ -1202,7 +1202,7 @@ if hasInterface then {
 			};
 
 			KH_var_playerKilledEventHandler = [
-				["STANDARD", _newUnit, "LOCAL"],
+				["ENTITY", _newUnit, "LOCAL"],
 				"Killed",
 				[],
 				{
@@ -1302,7 +1302,7 @@ if (!isServer && !hasInterface) then {
 			["KH_eve_headlessLoaded", [clientOwner, getPlayerID player, player, [player, true] call KH_fnc_getEntityVariableName]] call CBA_fnc_globalEvent;				
 
 			{
-				[isServer, hasInterface] luaExecute _x;
+				luaExecute _x;
 			} forEach KH_var_loadInitLuaExecutions;
 		},
 		true,
@@ -1312,7 +1312,7 @@ if (!isServer && !hasInterface) then {
 };
 
 {
-	[isServer, hasInterface] luaExecute _x;
+	luaExecute _x;
 } forEach KH_var_preInitLuaExecutions;
 
 nil;

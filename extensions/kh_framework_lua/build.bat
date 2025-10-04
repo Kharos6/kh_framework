@@ -1,8 +1,5 @@
 @echo off
-echo Building 64-bit kh_framework DLL with LuaJIT (Simplified)...
-
-REM Setup Visual Studio 2022 x64 Native Tools environment
-echo Setting up Visual Studio 2022 x64 environment...
+echo Starting...
 
 REM Try different VS2022 installation paths and editions
 set "VS2022_FOUND="
@@ -61,7 +58,6 @@ if exist "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\B
     goto :build
 )
 
-REM If we get here, VS2022 wasn't found
 echo ERROR: Visual Studio 2022 not found!
 echo Please install Visual Studio 2022 with C++ tools or modify the paths in this script.
 echo Checked locations:
@@ -71,53 +67,25 @@ pause
 exit /b 1
 
 :build
-echo Visual Studio environment configured successfully.
-echo.
-
-REM Check for LuaJIT files
-echo Checking for LuaJIT files...
-if not exist "luajit\include\lua.h" (
-    echo ERROR: LuaJIT header files not found!
-    echo Please ensure LuaJIT headers are in: luajit\include\
-    echo Expected files:
-    echo   luajit\include\lua.h
-    echo   luajit\include\lualib.h
-    echo   luajit\include\lauxlib.h
-    pause
-    exit /b 1
-)
-
-if not exist "luajit\lib\lua51.lib" (
-    echo ERROR: LuaJIT library not found!
-    echo Please ensure LuaJIT library is at: luajit\lib\lua51.lib
-    pause
-    exit /b 1
-)
-
-REM Create output directory if it doesn't exist
-echo Creating output directory...
-if not exist "output_x64" mkdir output_x64
 
 REM Clean up previous build artifacts
-echo Cleaning previous build files...
-if exist output_x64\kh_framework_lua_x64.dll del output_x64\kh_framework_lua_x64.dll
-if exist output_x64\*.obj del output_x64\*.obj
-if exist output_x64\*.lib del output_x64\*.lib
-if exist output_x64\*.exp del output_x64\*.exp
-if exist output_x64\*.pdb del output_x64\*.pdb
+echo Setting up output directory...
+if exist output_x64 rd /s /q output_x64
+mkdir output_x64
 
-REM Build the DLL with LuaJIT linked
-echo Compiling kh_framework_lua_x64.dll with LuaJIT...
-cl /LD /O2 /Ox /Ot /GL /MT /std:c++20 /EHsc /TP ^
-    /DLUAJIT_ENABLE_LUA52COMPAT ^
+REM Build the DLL
+echo Compiling...
+cl /LD /O2 /GL /MT /std:c++20 /EHsc /TP ^
     /Iluajit\include ^
     /Iintercept\include ^
     /I. ^
-    kh_framework_lua.cpp ^
+    main.cpp ^
     /Fe:output_x64\kh_framework_lua_x64.dll ^
     /Fo:output_x64\ ^
     /Fd:output_x64\kh_framework_lua_x64.pdb ^
     /link /MACHINE:X64 ^
+    /LTCG ^
+    /OPT:REF /OPT:ICF ^
     /LIBPATH:luajit\lib ^
     /LIBPATH:intercept\lib ^
     intercept_client.lib lua51.lib ^
@@ -125,30 +93,18 @@ cl /LD /O2 /Ox /Ot /GL /MT /std:c++20 /EHsc /TP ^
 
 REM Check if build was successful
 if exist output_x64\kh_framework_lua_x64.dll (
-    echo.
     echo ================================
     echo BUILD SUCCESS!
     echo ================================
-    dir output_x64\kh_framework_lua_x64.dll | find "kh_framework_lua_x64.dll"
     echo.
-    echo KH Framework DLL with LuaJIT built successfully!
     echo Output location: output_x64\kh_framework_lua_x64.dll
-    echo.
-    echo IMPORTANT: You will need lua51.dll in the same directory as your DLL at runtime!
-    echo Copy lua51.dll to your Arma 3 directory or where kh_framework_lua_x64.dll is used.
     echo.
     echo File size:
     for %%I in (output_x64\kh_framework_lua_x64.dll) do echo %%~zI bytes
 ) else (
-    echo.
     echo ================================
     echo BUILD FAILED!
     echo ================================
-    echo Check the compiler output above for errors.
-    echo Common issues:
-    echo - Missing LuaJIT header files in luajit\include\
-    echo - Missing lua51.lib in luajit\lib\
-    echo - Linker errors due to missing dependencies
 )
 
 echo.

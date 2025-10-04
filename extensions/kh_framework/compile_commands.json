@@ -16,8 +16,8 @@
       "/wd4189",
       "/I.",
       "/Wno-microsoft-goto",
-      "kh_framework_lua.cpp"
+      "main.cpp"
     ],
-    "file": "kh_framework_lua.cpp"
+    "file": "main.cpp"
   }
 ]

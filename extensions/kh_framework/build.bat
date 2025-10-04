@@ -80,9 +80,9 @@ cl /LD /O2 /GL /MT /std:c++20 /EHsc /TP ^
     /Iintercept\include ^
     /I. ^
     main.cpp ^
-    /Fe:output_x64\kh_framework_lua_x64.dll ^
+    /Fe:output_x64\kh_framework_x64.dll ^
     /Fo:output_x64\ ^
-    /Fd:output_x64\kh_framework_lua_x64.pdb ^
+    /Fd:output_x64\kh_framework_x64.pdb ^
     /link /MACHINE:X64 ^
     /LTCG ^
     /OPT:REF /OPT:ICF ^
@@ -92,15 +92,15 @@ cl /LD /O2 /GL /MT /std:c++20 /EHsc /TP ^
     shell32.lib ole32.lib user32.lib advapi32.lib
 
 REM Check if build was successful
-if exist output_x64\kh_framework_lua_x64.dll (
+if exist output_x64\kh_framework_x64.dll (
     echo ================================
     echo BUILD SUCCESS!
     echo ================================
     echo.
-    echo Output location: output_x64\kh_framework_lua_x64.dll
+    echo Output location: output_x64\kh_framework_x64.dll
     echo.
     echo File size:
-    for %%I in (output_x64\kh_framework_lua_x64.dll) do echo %%~zI bytes
+    for %%I in (output_x64\kh_framework_x64.dll) do echo %%~zI bytes
 ) else (
     echo ================================
     echo BUILD FAILED!

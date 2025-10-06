@@ -5,8 +5,6 @@ KH_var_aceLoaded = uiNamespace getVariable "KH_var_aceLoaded";
 KH_var_missionLoaded = false;
 KH_var_jip = false;
 KH_var_playerUnit = objNull;
-KH_var_cachedLuaFunctions = createHashMap;
-KH_var_queuedLuaExecutions = [];
 KH_var_remoteExecCommandsBlacklist = createHashMap;
 KH_var_remoteExecFunctionsBlacklist = createHashMap;
 KH_var_remoteExecCommandsJipBlacklist = createHashMap;
@@ -25,9 +23,9 @@ KH_var_temporalExecutionStackDeletions = [];
 KH_var_drawUi2dExecutionStackDeletions = [];
 KH_var_drawUi3dExecutionStackDeletions = [];
 KH_var_postInitExecutions = [];
-KH_var_preInitLuaExecutions = [];
-KH_var_postInitLuaExecutions = [];
-KH_var_loadInitLuaExecutions = [];
+KH_var_preInitLuaExecutions = +(uiNamespace getVariable "KH_var_preInitLuaExecutions");
+KH_var_postInitLuaExecutions = +(uiNamespace getVariable "KH_var_postInitLuaExecutions");
+KH_var_loadInitLuaExecutions = +(uiNamespace getVariable "KH_var_loadInitLuaExecutions");
 call KH_fnc_luaClearVariables;
 call KH_fnc_luaResetState;
 ["KH_eve_execution", KH_fnc_callParsedFunction] call CBA_fnc_addEventHandler;
@@ -88,25 +86,67 @@ call KH_fnc_luaResetState;
 
 		if (isNumber (_x >> "preInit")) then {
 			if ((getNumber (_x >> "preInit")) isEqualTo 1) then {
-        		KH_var_preInitLuaExecutions pushBack _function;
+        		KH_var_preInitLuaExecutions pushBack _name;
 			};
         };
 
 		if (isNumber (_x >> "postInit")) then {
 			if ((getNumber (_x >> "postInit")) isEqualTo 1) then {
-        		KH_var_postInitLuaExecutions pushBack _function;
+        		KH_var_postInitLuaExecutions pushBack _name;
 			};
         };
 
 		if (isNumber (_x >> "loadInit")) then {
 			if ((getNumber (_x >> "loadInit")) isEqualTo 1) then {
-        		KH_var_loadInitLuaExecutions pushBack _function;
+        		KH_var_loadInitLuaExecutions pushBack _name;
 			};
         };
     } forEach ("true" configClasses _config);
 } forEach ("true" configClasses (missionConfigFile >> "CfgLuaFunctions"));
 
-uiNamespace setVariable ["KH_var_cachedLuaFunctions", KH_var_cachedLuaFunctions];
+addMissionEventHandler [
+	"Ended", 
+	{
+		with uiNamespace do {
+			{
+				private _config = _x;
+				private _prefix = getText (_config >> "prefix");
+				private _basePath = (getText (_config >> "path")) regexReplace ["(/)", "\\"];
+
+				{
+					private _pathUsed = isText (_x >> "path");
+
+					private _function = preprocessFile ([
+						_basePath,
+						["", "\"] select (_basePath isNotEqualTo ""),
+						if _pathUsed then {
+							(getText (_x >> "path")) regexReplace ["(/)", "\\"];
+						}
+						else {
+							"";
+						}, 
+						configName _x, 
+						".lua"
+					] joinString "");
+
+					private _name = if (isText (_x >> "name")) then {
+						[_prefix, getText (_x >> "name")] joinString "_";
+					}
+					else {
+						[_prefix, configName _x] joinString "_";
+					};
+
+					_name luaCompile _function;
+
+					{
+						luaExecute _x;
+					} forEach KH_var_resetInitLuaExecutions;
+				} forEach ("true" configClasses _config);
+			} forEach ("true" configClasses (configFile >> "CfgLuaFunctions"));
+		};
+	}
+];
+
 KH_var_remoteExecCommandsMode = ["SCALAR", ["'CfgRemoteExec' >> 'Commands' >> 'mode'", true]] call KH_fnc_getConfigValue;
 KH_var_remoteExecFunctionsMode = ["SCALAR", ["'CfgRemoteExec' >> 'Functions' >> 'mode'", true]] call KH_fnc_getConfigValue;
 KH_var_remoteExecCommandsJipMode = ["SCALAR", ["'CfgRemoteExec' >> 'Commands' >> 'jip'", true]] call KH_fnc_getConfigValue;

@@ -21,10 +21,10 @@ void intercept::pre_start() {
     game["postInit"] = false;
     game["frame"] = g_game_frame;
     game["time"] = g_game_time;
-    game["server"] = sqf::is_server();
-    game["dedicated"] = sqf::is_dedicated();
-    game["headless"] = (!(sqf::is_server()) && !(sqf::has_interface()));
-    game["player"] = sqf::has_interface();
+    game["server"] = g_is_server;
+    game["dedicated"] = g_is_dedicated_server;
+    game["headless"] = g_is_headless;
+    game["player"] = g_is_player;
     mission["frame"] = g_mission_frame;
     mission["time"] = g_mission_time;
     mission["active"] = false;
@@ -38,10 +38,14 @@ void intercept::pre_init() {
     sol::table mission = (*g_lua_state)["mission"];
     game["preInit"] = true;
     game["postInit"] = false;
-    game["server"] = sqf::is_server();
-    game["dedicated"] = sqf::is_dedicated();
-    game["headless"] = (!(sqf::is_server()) && !(sqf::has_interface()));
-    game["player"] = sqf::has_interface();
+    g_is_server = sqf::is_server();
+    g_is_dedicated_server = sqf::is_dedicated();
+    g_is_headless = (!(sqf::is_server()) && !(sqf::has_interface()));
+    g_is_player = sqf::has_interface();
+    game["server"] = g_is_server;
+    game["dedicated"] = g_is_dedicated_server;
+    game["headless"] = g_is_headless;
+    game["player"] = g_is_player;
     g_mission_time = 0.0f;
     g_mission_frame = 0;
     mission["frame"] = g_mission_frame;
@@ -56,7 +60,6 @@ void intercept::pre_init() {
 void intercept::post_init() {
     LuaStackGuard guard(*g_lua_state);
     sol::table game = (*g_lua_state)["game"];
-    game["preInit"] = false;
     game["postInit"] = true;
     sqf::diag_log("KH Framework - Post-init");
 }
@@ -78,17 +81,23 @@ void intercept::on_frame() {
 }
 
 void intercept::mission_ended() {
+    reset_lua_state();
     LuaStackGuard guard(*g_lua_state);
     sol::table game = (*g_lua_state)["game"];
     sol::table mission = (*g_lua_state)["mission"];
     game["preInit"] = false;
     game["postInit"] = false;
+    game["frame"] = g_game_frame;
+    game["time"] = g_game_time;
+    game["server"] = g_is_server;
+    game["dedicated"] = g_is_dedicated_server;
+    game["headless"] = g_is_headless;
+    game["player"] = g_is_player;
     g_mission_time = 0.0f;
     g_mission_frame = 0;
     mission["frame"] = g_mission_frame;
     mission["time"] = g_mission_time;
     mission["active"] = false;
-    clean_lua_state();
     KHDataManager::instance().flush_all();
     sqf::diag_log("KH Framework - Mission End");
 }

@@ -3,6 +3,10 @@ KH_var_missionSessionId = generateUid;
 KH_var_serverGameSessionId = KH_var_gameSessionId;
 KH_var_serverMissionSessionId = KH_var_missionSessionId;
 KH_var_aceLoaded = isClass (configFile >> "CfgPatches" >> "ace_main");
+KH_var_preInitLuaExecutions = [];
+KH_var_postInitLuaExecutions = [];
+KH_var_loadInitLuaExecutions = [];
+KH_var_resetInitLuaExecutions = [];
 
 {
     private _config = _x;
@@ -42,19 +46,25 @@ KH_var_aceLoaded = isClass (configFile >> "CfgPatches" >> "ace_main");
 
 		if (isNumber (_x >> "preInit")) then {
 			if ((getNumber (_x >> "preInit")) isEqualTo 1) then {
-        		KH_var_preInitLuaExecutions pushBack _function;
+        		KH_var_preInitLuaExecutions pushBack _name;
 			};
         };
 
 		if (isNumber (_x >> "postInit")) then {
 			if ((getNumber (_x >> "postInit")) isEqualTo 1) then {
-        		KH_var_postInitLuaExecutions pushBack _function;
+        		KH_var_postInitLuaExecutions pushBack _name;
 			};
         };
 
 		if (isNumber (_x >> "loadInit")) then {
 			if ((getNumber (_x >> "loadInit")) isEqualTo 1) then {
-        		KH_var_loadInitLuaExecutions pushBack _function;
+        		KH_var_loadInitLuaExecutions pushBack _name;
+			};
+        };
+
+		if (isNumber (_x >> "resetInit")) then {
+			if ((getNumber (_x >> "resetInit")) isEqualTo 1) then {
+        		KH_var_resetInitLuaExecutions pushBack _name;
 			};
         };
     } forEach ("true" configClasses _config);

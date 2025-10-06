@@ -590,7 +590,13 @@ static game_value trigger_lua_event_sqf(game_value_parameter left_arg, game_valu
             }
             
             // Call the function
-            lua_pcall(L, arg_count, 1, 0);
+            if (lua_pcall(L, arg_count, 1, 0) != 0) {
+                std::string err = lua_tostring(L, -1);
+                lua_pop(L, 1);
+                report_error("Failed to trigger event: " + err);
+                return game_value();
+            }
+            
             sol::object result = sol::stack::pop<sol::object>(L);
 
             // Return result of last added event handler

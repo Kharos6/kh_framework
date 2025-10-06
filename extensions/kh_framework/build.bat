@@ -75,7 +75,7 @@ mkdir output_x64
 
 REM Build the DLL
 echo Compiling...
-cl /LD /O2 /GL /MT /std:c++20 /EHsc /TP ^
+cl /LD /O2 /Ob3 /GL /MT /std:c++20 /EHsc /TP ^
     /Iluajit\include ^
     /Iintercept\include ^
     /I. ^

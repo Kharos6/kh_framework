@@ -2434,4 +2434,16 @@ static void clean_lua_state() {
     LuaFunctions::lua_event_handlers.clear();
     LuaFunctions::next_task_id = 1;
     LuaFunctions::next_event_handler_id = 1;
-};
+}
+
+static void reset_lua_state() {
+    try {
+        sqf::diag_log("KH Framework - Resetting Lua state");
+        clean_lua_state();
+        g_lua_state.reset();
+        initialize_lua_state();
+        sqf::diag_log("KH Framework - Lua state reset");
+    } catch (const std::exception& e) {
+        report_error("Error resetting Lua state: " + std::string(e.what()));
+    }
+}

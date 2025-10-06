@@ -27,24 +27,6 @@
         };
 
         _name luaCompile _function;
-
-		if (isNumber (_x >> "preInit")) then {
-			if ((getNumber (_x >> "preInit")) isEqualTo 1) then {
-        		KH_var_preInitLuaExecutions pushBack _function;
-			};
-        };
-
-		if (isNumber (_x >> "postInit")) then {
-			if ((getNumber (_x >> "postInit")) isEqualTo 1) then {
-        		KH_var_postInitLuaExecutions pushBack _function;
-			};
-        };
-
-		if (isNumber (_x >> "loadInit")) then {
-			if ((getNumber (_x >> "loadInit")) isEqualTo 1) then {
-        		KH_var_loadInitLuaExecutions pushBack _function;
-			};
-        };
     } forEach ("true" configClasses _config);
 } forEach (("true" configClasses (configFile >> "CfgLuaFunctions")) + ("true" configClasses (missionConfigFile >> "CfgLuaFunctions")));
 

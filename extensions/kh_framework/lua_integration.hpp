@@ -30,14 +30,14 @@ public:
 class Lua_Compilation {
 public:
     static std::string preprocess_lua_operators(const std::string& code) {
-        std::string result = code;
-        
         // Quick check - if no C-style operators, return immediately
         if (code.find("!=") == std::string::npos && 
             code.find("&&") == std::string::npos && 
             code.find("||") == std::string::npos) {
             return code;
         }
+        
+        std::string result = code;  // Keep original for range checking
         
         // Build a map of string literal ranges to avoid
         std::vector<std::pair<size_t, size_t>> string_ranges;
@@ -49,7 +49,6 @@ public:
                 size_t start = i;
                 i += 2;
 
-                // Find the closing ]]
                 while (i + 1 < result.length()) {
                     if (result[i] == ']' && result[i + 1] == ']') {
                         string_ranges.push_back({start, i + 1});
@@ -66,18 +65,14 @@ public:
                 size_t equals_count = 0;
                 size_t j = i + 1;
                 
-                // Count equals signs
                 while (j < result.length() && result[j] == '=') {
                     equals_count++;
                     j++;
                 }
                 
-                // Check if it's a valid long bracket start
                 if (j < result.length() && result[j] == '[') {
                     i = j + 1;
-                    // Build closing pattern
                     std::string closing = "]" + std::string(equals_count, '=') + "]";
-                    // Find the closing bracket
                     size_t close_pos = result.find(closing, i);
 
                     if (close_pos != std::string::npos) {
@@ -93,11 +88,18 @@ public:
                 i++;
 
                 while (i < result.length()) {
-                    if (result[i] == quote && result[i-1] != '\\') {
-                        string_ranges.push_back({start, i});
-                        break;
+                    if (result[i] == quote) {
+                        int backslash_count = 0;
+                        
+                        for (int j = static_cast<int>(i) - 1; j >= 0 && result[j] == '\\'; j--) {
+                            backslash_count++;
+                        }
+                        
+                        if (backslash_count % 2 == 0) {
+                            string_ranges.push_back({start, i});
+                            break;
+                        }
                     }
-
                     i++;
                 }
             }
@@ -110,36 +112,67 @@ public:
                     return true;
                 }
             }
-
             return false;
         };
         
-        // Replace operators
+        // Replacement definitions
         struct Replacement {
             std::string from;
             std::string to;
+            size_t extra_bytes;  // How many extra bytes this replacement adds
         };
-        
+
         std::vector<Replacement> replacements = {
-            {"!=", "~="},
-            {"&&", " and "},
-            {"||", " or "}
+            {"!=", "~=", 0},
+            {"&&", " and ", 3},
+            {"||", " or ", 2}
         };
-        
-        for (const auto& rep : replacements) {
-            size_t pos = 0;
-            
-            while ((pos = result.find(rep.from, pos)) != std::string::npos) {
-                if (!in_string(pos)) {
-                    result.replace(pos, rep.from.length(), rep.to);
-                    pos += rep.to.length();
-                } else {
-                    pos += rep.from.length();
+                
+        // Calculate space needed based on actual operator count
+        size_t extra_space = 0;
+        size_t pos = 0;
+
+        while (pos < result.length()) {
+            if (!in_string(pos)) {
+                for (const auto& rep : replacements) {
+                    if (result.compare(pos, rep.from.length(), rep.from) == 0) {
+                        extra_space += rep.extra_bytes;
+                        pos += rep.from.length();
+                        goto next_position;  // Skip to next position after match
+                    }
                 }
+            }
+            pos++;
+            next_position:;
+        }
+
+        // Build output string in single pass
+        std::string output;
+        output.reserve(result.length() + extra_space);
+
+        for (size_t i = 0; i < result.length(); ) {
+            bool replaced = false;
+            
+            // Only try replacements if not inside a string
+            if (!in_string(i)) {
+                for (const auto& rep : replacements) {
+                    if (result.compare(i, rep.from.length(), rep.from) == 0) {
+                        output += rep.to;
+                        i += rep.from.length();
+                        replaced = true;
+                        break;
+                    }
+                }
+            }
+            
+            // If no replacement made, copy character as-is
+            if (!replaced) {
+                output += result[i];
+                i++;
             }
         }
         
-        return result;
+        return output;
     }
 
     struct CompileResult {
@@ -266,16 +299,22 @@ struct GameValueWrapper {
 // Convert game_value to Lua object
 static sol::object convert_game_value_to_lua(const game_value& value) {
     sol::state& lua = *g_lua_state;
+    lua_State* L = lua.lua_state();
     
     switch (value.type_enum()) {
         case game_data_type::BOOL:
-            return sol::make_object(lua, static_cast<bool>(value));
+            lua_pushboolean(L, static_cast<bool>(value));
+            return sol::stack::pop<sol::object>(L);
 
         case game_data_type::SCALAR:
-            return sol::make_object(lua, static_cast<float>(value));
+            lua_pushnumber(L, static_cast<float>(value));
+            return sol::stack::pop<sol::object>(L);
             
-        case game_data_type::STRING:
-            return sol::make_object(lua, static_cast<std::string>(value));
+        case game_data_type::STRING: {
+            std::string str = static_cast<std::string>(value);
+            lua_pushlstring(L, str.c_str(), str.length());
+            return sol::stack::pop<sol::object>(L);
+        }
             
         case game_data_type::ARRAY: {
             auto& array = value.to_array();
@@ -284,162 +323,127 @@ static sol::object convert_game_value_to_lua(const game_value& value) {
                 return sol::make_object(lua, lua.create_table());
             }
             
-            // Check first element type
+            size_t arr_size = array.size();
+            
+            // Single-pass homogeneous detection + conversion for common types
             game_data_type first_type = array[0].type_enum();
-            bool is_homogeneous = true;
             
-            // Quick scan for homogeneity
-            for (size_t i = 1; i < array.size(); ++i) {
-                if (array[i].type_enum() != first_type) {
-                    is_homogeneous = false;
-                    break;
+            // Fast path for homogeneous primitives - single pass
+            switch (first_type) {
+                case game_data_type::SCALAR: {
+                    // Check homogeneity while converting
+                    sol::table lua_table = lua.create_table(arr_size, 0);
+                    lua_table.raw_set(1, static_cast<float>(array[0]));
+                    
+                    for (size_t i = 1; i < arr_size; ++i) {
+                        if (array[i].type_enum() != game_data_type::SCALAR) goto heterogeneous_array;
+                        lua_table.raw_set(i + 1, static_cast<float>(array[i]));
+                    }
+
+                    return sol::make_object(lua, lua_table);
                 }
-            }
-            
-            if (is_homogeneous) {
-                sol::table lua_table = lua.create_table(array.size(), 0);
                 
-                switch (first_type) {
-                    case game_data_type::SCALAR: {
-                        for (size_t i = 0; i < array.size(); ++i) {
-                            lua_table.raw_set(i + 1, static_cast<float>(array[i]));
-                        }
-
-                        return sol::make_object(lua, lua_table);
-                    }
+                case game_data_type::BOOL: {
+                    sol::table lua_table = lua.create_table(arr_size, 0);
+                    lua_table.raw_set(1, static_cast<bool>(array[0]));
                     
-                    case game_data_type::BOOL: {
-                        for (size_t i = 0; i < array.size(); ++i) {
-                            lua_table.raw_set(i + 1, static_cast<bool>(array[i]));
-                        }
-
-                        return sol::make_object(lua, lua_table);
+                    for (size_t i = 1; i < arr_size; ++i) {
+                        if (array[i].type_enum() != game_data_type::BOOL) goto heterogeneous_array;
+                        lua_table.raw_set(i + 1, static_cast<bool>(array[i]));
                     }
-                    
-                    case game_data_type::STRING: {
-                        for (size_t i = 0; i < array.size(); ++i) {
-                            lua_table.raw_set(i + 1, static_cast<std::string>(array[i]));
-                        }
 
-                        return sol::make_object(lua, lua_table);
-                    }
+                    return sol::make_object(lua, lua_table);
+                }
+                
+                case game_data_type::STRING: {
+                    sol::table lua_table = lua.create_table(arr_size, 0);
+                    lua_table.raw_set(1, static_cast<std::string>(array[0]));
                     
-                    case game_data_type::OBJECT: {
-                        for (size_t i = 0; i < array.size(); ++i) {
-                            lua_table.raw_set(i + 1, GameValueWrapper(array[i]));
-                        }
+                    for (size_t i = 1; i < arr_size; ++i) {
+                        if (array[i].type_enum() != game_data_type::STRING) goto heterogeneous_array;
+                        lua_table.raw_set(i + 1, static_cast<std::string>(array[i]));
+                    }
 
-                        return sol::make_object(lua, lua_table);
-                    }
+                    return sol::make_object(lua, lua_table);
+                }
+                
+                case game_data_type::OBJECT:
+                case game_data_type::GROUP:
+                case game_data_type::SIDE: {
+                    sol::table lua_table = lua.create_table(arr_size, 0);
+                    lua_table.raw_set(1, GameValueWrapper(array[0]));
                     
-                    case game_data_type::GROUP: {
-                        for (size_t i = 0; i < array.size(); ++i) {
-                            lua_table.raw_set(i + 1, GameValueWrapper(array[i]));
-                        }
+                    for (size_t i = 1; i < arr_size; ++i) {
+                        if (array[i].type_enum() != first_type) goto heterogeneous_array;
+                        lua_table.raw_set(i + 1, GameValueWrapper(array[i]));
+                    }
 
-                        return sol::make_object(lua, lua_table);
-                    }
-                    
-                    case game_data_type::SIDE: {
-                        for (size_t i = 0; i < array.size(); ++i) {
-                            lua_table.raw_set(i + 1, GameValueWrapper(array[i]));
-                        }
+                    return sol::make_object(lua, lua_table);
+                }
+                
+                case game_data_type::NOTHING:
+                case game_data_type::ANY: {
+                    sol::table lua_table = lua.create_table(arr_size, 0);
 
-                        return sol::make_object(lua, lua_table);
+                    for (size_t i = 0; i < arr_size; ++i) {
+                        if (i > 0 && array[i].type_enum() != first_type) goto heterogeneous_array;
+                        lua_table.raw_set(i + 1, sol::nil);
                     }
-                    
-                    case game_data_type::NOTHING:
-                    case game_data_type::ANY: {
-                        // Array of nil values
-                        for (size_t i = 0; i < array.size(); ++i) {
-                            lua_table.raw_set(i + 1, sol::nil);
-                        }
 
-                        return sol::make_object(lua, lua_table);
-                    }
+                    return sol::make_object(lua, lua_table);
+                }
+                
+                case game_data_type::ARRAY: {
+                    // Check for uniform nested array size (position arrays)
+                    size_t nested_size = array[0].size();
                     
-                    // Check for homogeneous nested arrays (e.g., array of numbers)
-                    case game_data_type::ARRAY: {
-                        // Check if all nested arrays are same size and type
-                        size_t nested_size = array[0].size();
-                        bool same_size = true;
+                    if (nested_size == 2 || nested_size == 3) {
+                        // Pre-check first element for all scalars
+                        auto& first_sub = array[0].to_array();
+                        bool all_numbers = true;
                         
-                        for (size_t i = 1; i < array.size(); ++i) {
-                            if (array[i].size() != nested_size) {
-                                same_size = false;
+                        for (size_t j = 0; j < nested_size; ++j) {
+                            if (first_sub[j].type_enum() != game_data_type::SCALAR) {
+                                all_numbers = false;
                                 break;
                             }
                         }
                         
-                        if (same_size && nested_size == 2) {
-                            // Likely array of 2D positions
-                            bool all_numbers = true;
-
-                            for (const auto& elem : array) {
-                                auto& sub = elem.to_array();
-
-                                if (sub[0].type_enum() != game_data_type::SCALAR ||
-                                    sub[1].type_enum() != game_data_type::SCALAR) {
-                                    all_numbers = false;
-                                    break;
-                                }
-                            }
+                        if (all_numbers) {
+                            // Single-pass: check + convert
+                            sol::table lua_table = lua.create_table(arr_size, 0);
                             
-                            if (all_numbers) {
-                                for (size_t i = 0; i < array.size(); ++i) {
-                                    sol::table pos = lua.create_table(2, 0);
-                                    auto& sub = array[i].to_array();
-                                    pos.raw_set(1, static_cast<float>(sub[0]));
-                                    pos.raw_set(2, static_cast<float>(sub[1]));
-                                    lua_table.raw_set(i + 1, pos);
+                            for (size_t i = 0; i < arr_size; ++i) {
+                                if (array[i].type_enum() != game_data_type::ARRAY) goto heterogeneous_array;
+                                auto& sub = array[i].to_array();
+                                if (sub.size() != nested_size) goto heterogeneous_array;
+                                sol::table pos = lua.create_table(nested_size, 0);
+
+                                for (size_t j = 0; j < nested_size; ++j) {
+                                    if (sub[j].type_enum() != game_data_type::SCALAR) goto heterogeneous_array;
+                                    pos.raw_set(j + 1, static_cast<float>(sub[j]));
                                 }
 
-                                return sol::make_object(lua, lua_table);
+                                lua_table.raw_set(i + 1, pos);
                             }
-                        } else if (same_size && nested_size == 3) {
-                            // Likely array of 3D positions
-                            bool all_numbers = true;
-                            
-                            for (const auto& elem : array) {
-                                auto& sub = elem.to_array();
-
-                                if (sub[0].type_enum() != game_data_type::SCALAR ||
-                                    sub[1].type_enum() != game_data_type::SCALAR ||
-                                    sub[2].type_enum() != game_data_type::SCALAR) {
-                                    all_numbers = false;
-                                    break;
-                                }
-                            }
-                            
-                            if (all_numbers) {
-                                for (size_t i = 0; i < array.size(); ++i) {
-                                    sol::table pos = lua.create_table(3, 0);
-                                    auto& sub = array[i].to_array();
-                                    pos.raw_set(1, static_cast<float>(sub[0]));
-                                    pos.raw_set(2, static_cast<float>(sub[1]));
-                                    pos.raw_set(3, static_cast<float>(sub[2]));
-                                    lua_table.raw_set(i + 1, pos);
-                                }
-
-                                return sol::make_object(lua, lua_table);
-                            }
+                            return sol::make_object(lua, lua_table);
                         }
-                        
-                        // Fall through to default recursive conversion
-                        break;
                     }
-                    
-                    default:
-                        // Fall through to recursive conversion
-                        break;
+                    // Fall through to heterogeneous
+                    break;
                 }
+                
+                default:
+                    // Fall through to heterogeneous
+                    break;
             }
             
-            // Default recursive conversion for heterogeneous or complex arrays
-            sol::table lua_table = lua.create_table(array.size(), 0);
+        heterogeneous_array:
+            // Heterogeneous array - recursive conversion with pre-allocated table
+            sol::table lua_table = lua.create_table(arr_size, 0);
 
-            for (size_t i = 0; i < array.size(); ++i) {
-                lua_table[i + 1] = convert_game_value_to_lua(array[i]);
+            for (size_t i = 0; i < arr_size; ++i) {
+                lua_table.raw_set(i + 1, convert_game_value_to_lua(array[i]));
             }
 
             return sol::make_object(lua, lua_table);
@@ -447,56 +451,61 @@ static sol::object convert_game_value_to_lua(const game_value& value) {
 
         case game_data_type::HASHMAP: {
             auto& hashmap = value.to_hashmap();
+            size_t count = hashmap.count();
             
-            // Check if all values are same type for optimization
-            if (hashmap.count() > 0) {
-                game_data_type value_type = game_data_type::NOTHING;
-                bool homogeneous_values = true;
-                
+            if (count == 0) {
+                return sol::make_object(lua, lua.create_table(0, 0));
+            }
+            
+            // Try optimized homogeneous conversion, fall back to full conversion
+            auto it = hashmap.begin();
+            game_data_type value_type = it->value.type_enum();
+            bool is_homogeneous = true;
+            
+            // Check if all values are same type
+            auto check_it = it;
+
+            for (; check_it != hashmap.end(); ++check_it) {
+                if (check_it->value.type_enum() != value_type) {
+                    is_homogeneous = false;
+                    break;
+                }
+            }
+            
+            // Fast path for homogeneous SCALAR
+            if (is_homogeneous && value_type == game_data_type::SCALAR) {
+                sol::table lua_table = lua.create_table(0, count);
+
                 for (auto& pair : hashmap) {
-                    if (value_type == game_data_type::NOTHING) {
-                        value_type = pair.value.type_enum();
-                    } else if (pair.value.type_enum() != value_type) {
-                        homogeneous_values = false;
-                        break;
-                    }
+                    sol::object lua_key = convert_game_value_to_lua(pair.key);
+                    lua_table.raw_set(lua_key, static_cast<float>(pair.value));
                 }
-                
-                if (homogeneous_values && value_type == game_data_type::SCALAR) {
-                    // Fast path for number-valued hashmaps
-                    sol::table lua_table = lua.create_table(0, hashmap.count());
 
-                    for (auto& pair : hashmap) {
-                        // Keys still need conversion, but values can be fast
-                        sol::object lua_key = convert_game_value_to_lua(pair.key);
-                        lua_table.raw_set(lua_key, static_cast<float>(pair.value));
-                    }
-
-                    return sol::make_object(lua, lua_table);
-                }
-                
-                if (homogeneous_values && value_type == game_data_type::STRING) {
-                    // Fast path for string-valued hashmaps
-                    sol::table lua_table = lua.create_table(0, hashmap.count());
-
-                    for (auto& pair : hashmap) {
-                        sol::object lua_key = convert_game_value_to_lua(pair.key);
-                        lua_table.raw_set(lua_key, static_cast<std::string>(pair.value));
-                    }
-                    
-                    return sol::make_object(lua, lua_table);
-                }
+                return sol::make_object(lua, lua_table);
             }
             
-            // Default conversion
-            sol::table lua_table = lua.create_table(0, hashmap.count());
+            // Fast path for homogeneous STRING
+            if (is_homogeneous && value_type == game_data_type::STRING) {
+                sol::table lua_table = lua.create_table(0, count);
+
+                for (auto& pair : hashmap) {
+                    sol::object lua_key = convert_game_value_to_lua(pair.key);
+                    lua_table.raw_set(lua_key, static_cast<std::string>(pair.value));
+                }
+
+                return sol::make_object(lua, lua_table);
+            }
             
+            // Heterogeneous or other types - full conversion
+            sol::table lua_table = lua.create_table(0, count);
+
             for (auto& pair : hashmap) {
-                sol::object lua_key = convert_game_value_to_lua(pair.key);
-                sol::object lua_value = convert_game_value_to_lua(pair.value);
-                lua_table[lua_key] = lua_value;
+                lua_table.raw_set(
+                    convert_game_value_to_lua(pair.key),
+                    convert_game_value_to_lua(pair.value)
+                );
             }
-            
+
             return sol::make_object(lua, lua_table);
         }
 
@@ -532,15 +541,25 @@ static sol::object convert_game_value_to_lua(const game_value& value) {
 
 // Convert Lua object to game_value
 static game_value convert_lua_to_game_value(const sol::object& obj) {
-    if (obj.get_type() == sol::type::nil) {
-        return game_value();
-    } else if (obj.get_type() == sol::type::boolean) {
-        return game_value(obj.as<bool>());
-    } else if (obj.get_type() == sol::type::number) {
+    sol::type type = obj.get_type();
+
+    if (type == sol::type::number) {
         return game_value(obj.as<float>());
-    } else if (obj.get_type() == sol::type::string) {
+    }
+    
+    if (type == sol::type::boolean) {
+        return game_value(obj.as<bool>());
+    }
+
+    if (type == sol::type::string) {
         return game_value(obj.as<std::string>());
-    } else if (obj.get_type() == sol::type::table) {
+    }
+
+    if (type == sol::type::nil) {
+        return game_value();
+    }
+
+    if (obj.get_type() == sol::type::table) {
         sol::table tbl = obj;
 
         // Check for metatable with __toSQF metamethod
@@ -550,115 +569,107 @@ static game_value convert_lua_to_game_value(const sol::object& obj) {
             sol::optional<sol::function> to_sqf = (*metatable)["__toSQF"];
 
             if (to_sqf) {
-                // Call the __toSQF metamethod and convert its result
                 sol::object result = (*to_sqf)(tbl);
                 return convert_lua_to_game_value(result);
             }
         }
         
+        // Single-pass table analysis
         bool is_array = true;
         bool has_non_integer_keys = false;
         size_t max_index = 0;
         size_t non_nil_count = 0;
         
-        // Analyze the table structure
+        // Detect type while counting
         for (auto& pair : tbl) {
             non_nil_count++;
             sol::object key = pair.first;
+            sol::type key_type = key.get_type();
             
-            if (key.get_type() == sol::type::number) {
+            if (key_type == sol::type::number) {
                 double key_num = key.as<double>();
                 
-                // Check if it's a positive integer
                 if (key_num > 0 && key_num == std::floor(key_num)) {
                     size_t idx = static_cast<size_t>(key_num);
-
-                    if (idx > max_index) {
-                        max_index = idx;
-                    }
+                    if (idx > max_index) max_index = idx;
                 } else {
-                    // Non-positive or non-integer numeric key
                     is_array = false;
                     has_non_integer_keys = true;
                     break;
                 }
             } else {
-                // Non-numeric key (string, etc.)
                 is_array = false;
                 has_non_integer_keys = true;
                 break;
             }
         }
         
-        // Empty tables are arrays
+        // Empty table
         if (non_nil_count == 0) {
-            is_array = true;
-            max_index = 0;
+            return game_value(auto_array<game_value>());
         }
         
-        // Additional heuristic: if we have string keys, it's definitely a hashmap
-        // But if we only have positive integer keys (even with gaps), treat it as an array
-        
+        // Dense array fast path
         if (is_array && max_index > 0) {
-            // Check array density before attempting conversion            
             float density = static_cast<float>(non_nil_count) / static_cast<float>(max_index);
             
-            if (max_index > 10000 || density < (1.0f / 100)) {
-                // Too sparse or too large - treat as hashmap instead
-                is_array = false;
-                has_non_integer_keys = true;
-                // Fall through to hashmap handling below (don't return)
-            } else {
-                // Dense enough - proceed with array conversion
+            if (max_index <= 10000 && density >= 0.01f) {
                 auto_array<game_value> arr;
                 arr.reserve(max_index);
-
+                
                 for (size_t i = 1; i <= max_index; i++) {
                     arr.push_back(convert_lua_to_game_value(tbl[i]));
                 }
 
                 return game_value(std::move(arr));
             }
+            
+            // Sparse - treat as hashmap
+            is_array = false;
+            has_non_integer_keys = true;
         }
-
-        // Allow fall-through
+        
+        // Hashmap conversion
         if (!is_array || has_non_integer_keys) {
-            // Convert native Lua table to hashmap
             auto_array<game_value> kv_array;
+            kv_array.reserve(non_nil_count);
             
             for (auto& pair : tbl) {
                 auto_array<game_value> kv_pair;
-                
-                // Convert the key properly
+                kv_pair.reserve(2);
                 sol::object key = pair.first;
+                sol::type key_type = key.get_type();
                 game_value key_value;
                 
-                // Handle different key types
-                if (key.get_type() == sol::type::string) {
-                    key_value = game_value(key.as<std::string>());
-                } else if (key.get_type() == sol::type::number) {
-                    key_value = game_value(key.as<float>());
-                } else if (key.get_type() == sol::type::boolean) {
-                    key_value = game_value(key.as<bool>());
-                } else {
-                    // For other types, try generic conversion
-                    key_value = convert_lua_to_game_value(key);
+                switch (key_type) {
+                    case sol::type::string:
+                        key_value = game_value(key.as<std::string>());
+                        break;
+                    case sol::type::number:
+                        key_value = game_value(key.as<float>());
+                        break;
+                    case sol::type::boolean:
+                        key_value = game_value(key.as<bool>());
+                        break;
+                    default:
+                        key_value = convert_lua_to_game_value(key);
+                        break;
                 }
                 
-                kv_pair.push_back(key_value);
+                kv_pair.push_back(std::move(key_value));
                 kv_pair.push_back(convert_lua_to_game_value(pair.second));
                 kv_array.push_back(game_value(std::move(kv_pair)));
             }
             
             if (!kv_array.empty()) {
-                return sqf::call2(g_compiled_sqf_create_hash_map_from_array, game_value(std::move(kv_array)));
+                return raw_call_sqf_args_native(g_compiled_sqf_create_hash_map_from_array, game_value(std::move(kv_array)));
             } else {
-                return sqf::call2(g_compiled_sqf_create_hash_map);
+                return raw_call_sqf_native(g_compiled_sqf_create_hash_map);
             }
-        } else {
-            // Empty array case
-            return game_value(auto_array<game_value>());
         }
+        
+        // Empty array
+        return game_value(auto_array<game_value>());
     } else if (obj.get_type() == sol::type::userdata) {
         // Try to extract GameValueWrapper
         sol::optional<GameValueWrapper> wrapper = obj.as<sol::optional<GameValueWrapper>>();
@@ -707,9 +718,9 @@ namespace LuaFunctions {
                     compiled = wrapper->value;
                     
                     if (args.size() == 0) {
-                        return convert_game_value_to_lua(sqf::call2(compiled));
+                        return convert_game_value_to_lua(raw_call_sqf_native(compiled));
                     } else {
-                        return convert_game_value_to_lua(sqf::call2(compiled, args_gv));
+                        return convert_game_value_to_lua(raw_call_sqf_args_native(compiled, args_gv));
                     }
                 }
             }
@@ -736,10 +747,10 @@ namespace LuaFunctions {
                         g_sqf_function_cache[cache_key] = compiled;
                     }
                     
-                    return convert_game_value_to_lua(sqf::call2(compiled));
+                    return convert_game_value_to_lua(raw_call_sqf_native(compiled));
                 } else {
                     // With parameters - compile as "_this call functionName"
-                    std::string cache_key = "_this call " + code_or_func_str;
+                    std::string cache_key = "_x call " + code_or_func_str;
                     auto cache_it = g_sqf_function_cache.find(cache_key);
                     
                     if (cache_it != g_sqf_function_cache.end()) {
@@ -749,7 +760,7 @@ namespace LuaFunctions {
                         g_sqf_function_cache[cache_key] = compiled;
                     }
                     
-                    return convert_game_value_to_lua(sqf::call2(compiled, args_gv));
+                    return convert_game_value_to_lua(raw_call_sqf_args_native(compiled, args_gv));
                 }
             } else {
                 // Code execution path
@@ -764,9 +775,9 @@ namespace LuaFunctions {
                 }
                 
                 if (args.size() == 0) {
-                    return convert_game_value_to_lua(sqf::call2(compiled));
+                    return convert_game_value_to_lua(raw_call_sqf_native(compiled));
                 } else {
-                    return convert_game_value_to_lua(sqf::call2(compiled, args_gv));
+                    return convert_game_value_to_lua(raw_call_sqf_args_native(compiled, args_gv));
                 }
             }
             
@@ -1120,7 +1131,7 @@ namespace LuaFunctions {
             cba_params.push_back(game_value(std::move(cba_event_data)));
             cba_params.push_back(target_gv);
             cba_params.push_back(jip_gv);
-            return convert_game_value_to_lua(sqf::call2(g_compiled_sqf_trigger_cba_event, game_value(std::move(cba_params))));
+            return convert_game_value_to_lua(raw_call_sqf_args_native(g_compiled_sqf_trigger_cba_event, game_value(std::move(cba_params))));
         } catch (const std::exception& e) {
             report_error("Failed to trigger event: " + std::string(e.what()));
             return sol::nil;
@@ -1173,7 +1184,7 @@ namespace LuaFunctions {
             sqf_params.push_back(game_value(static_cast<std::string>(event)));
             sqf_params.push_back(game_value(handler_uid));
             sqf_params.push_back(game_value(g_compiled_sqf_game_event_handler_lua_bridge));
-            game_value sqf_result = sqf::call2(g_compiled_sqf_add_game_event_handler, game_value(std::move(sqf_params)));
+            game_value sqf_result = raw_call_sqf_args_native(g_compiled_sqf_add_game_event_handler, game_value(std::move(sqf_params)));
             sol::table result = g_lua_state->create_table();
             result[1] = handler_uid;
             result[2] = handler_id;
@@ -1210,7 +1221,7 @@ namespace LuaFunctions {
             // Call SQF to remove the game event handler
             if (sqf_id_obj.valid() && sqf_id_obj.get_type() != sol::type::nil) {
                 game_value id_gv = convert_lua_to_game_value(sqf_id_obj);            
-                sqf::call2(g_compiled_sqf_remove_game_event_handler, id_gv);
+                raw_call_sqf_args_native(g_compiled_sqf_remove_game_event_handler, id_gv);
             }
             
             return true;
@@ -1401,7 +1412,7 @@ namespace LuaFunctions {
             sqf_params.push_back(target_gv);
             sqf_params.push_back(environment_gv);
             sqf_params.push_back(special_gv);       
-            return convert_game_value_to_lua(sqf::call2(g_compiled_sqf_execute_lua, game_value(std::move(sqf_params))));
+            return convert_game_value_to_lua(raw_call_sqf_args_native(g_compiled_sqf_execute_lua, game_value(std::move(sqf_params))));
         } catch (const std::exception& e) {
             report_error("Failed to execute: " + std::string(e.what()));
             return sol::nil;
@@ -1440,7 +1451,7 @@ namespace LuaFunctions {
             cba_params.push_back(args_gv);
             cba_params.push_back(target_gv);
             cba_params.push_back(jip_gv);
-            return convert_game_value_to_lua(sqf::call2(g_compiled_sqf_trigger_cba_event, game_value(std::move(cba_params))));
+            return convert_game_value_to_lua(raw_call_sqf_args_native(g_compiled_sqf_trigger_cba_event, game_value(std::move(cba_params))));
         } catch (const std::exception& e) {
             report_error("Failed to trigger CBA event: " + std::string(e.what()));
             return sol::nil;
@@ -1478,7 +1489,7 @@ namespace LuaFunctions {
             cba_params.push_back(game_value(std::move(emission_data)));
             cba_params.push_back(target);
             cba_params.push_back(jip);
-            return convert_game_value_to_lua(sqf::call2(g_compiled_sqf_trigger_cba_event, game_value(std::move(cba_params))));
+            return convert_game_value_to_lua(raw_call_sqf_args_native(g_compiled_sqf_trigger_cba_event, game_value(std::move(cba_params))));
         } catch (const std::exception& e) {
             report_error("Failed to emit variable: " + std::string(e.what()));
             return sol::nil;
@@ -1499,7 +1510,7 @@ namespace LuaFunctions {
             // Nest in outer array for _this call since remover accepts array in _this
             auto_array<game_value> nested;
             nested.push_back(game_value(std::move(info_array)));
-            sqf::call2(g_compiled_sqf_remove_handler, game_value(std::move(nested)));
+            raw_call_sqf_args_native(g_compiled_sqf_remove_handler, game_value(std::move(nested)));
             return sol::nil;
         } catch (const std::exception& e) {
             report_error("Failed to remove handler: " + std::string(e.what()));
@@ -1857,7 +1868,7 @@ namespace LuaFunctions {
             game_value gv = convert_lua_to_game_value(value);
 
             // Check if we should trigger CBA event
-            if (target_opt && !target_opt->is<sol::nil_t>()) {
+            if (target_opt && !target_opt->is<sol::nil_t>() && !(target_opt->is<bool>() && target_opt->as<bool>() == true)) {
                 game_value target = convert_lua_to_game_value(*target_opt);
                 game_value jip = jip_opt ? convert_lua_to_game_value(*jip_opt) : game_value();
                 auto_array<game_value> value_array;
@@ -1869,7 +1880,7 @@ namespace LuaFunctions {
                 cba_params.push_back(game_value(std::move(value_array)));
                 cba_params.push_back(target);
                 cba_params.push_back(jip);
-                return convert_game_value_to_lua(sqf::call2(g_compiled_sqf_trigger_cba_event, game_value(std::move(cba_params))));
+                return convert_game_value_to_lua(raw_call_sqf_args_native(g_compiled_sqf_trigger_cba_event, game_value(std::move(cba_params))));
             } else {
                 auto* file = KHDataManager::instance().get_or_create_file(filename);
 
@@ -2299,21 +2310,21 @@ static void initialize_lua_state() {
                     auto cache_it = g_sqf_command_cache.find(cmd);
                     
                     if (cache_it != g_sqf_command_cache.end()) {
-                        return convert_game_value_to_lua(sqf::call2(cache_it->second));
+                        return convert_game_value_to_lua(raw_call_sqf_native(cache_it->second));
                     }
                     
                     game_value compiled = sqf::compile(cmd);
                     g_sqf_command_cache.emplace(cmd, compiled);
-                    return convert_game_value_to_lua(sqf::call2(compiled));
+                    return convert_game_value_to_lua(raw_call_sqf_native(compiled));
                 }
                 
                 // Build the cache key once
                 std::string key;
                 
                 if (args.size() == 1) {
-                    key = cmd + " _this";
+                    key = cmd + " _x";
                 } else if (args.size() == 2) {
-                    key = "(_this select 0) " + cmd + " (_this select 1)";
+                    key = "(_x select 0) " + cmd + " (_x select 1)";
                 } else {
                     report_error("SQF commands only support 0-2 arguments");
                     return sol::nil;
@@ -2332,10 +2343,10 @@ static void initialize_lua_state() {
                 // Convert args based on count
                 if (args.size() == 1) {
                     return convert_game_value_to_lua(
-                        sqf::call2(compiled, convert_lua_to_game_value(args[0]))
+                        raw_call_sqf_args_native(compiled, convert_lua_to_game_value(args[0]))
                     );
                 } else {
-                    return convert_game_value_to_lua(sqf::call2(
+                    return convert_game_value_to_lua(raw_call_sqf_args_native(
                         compiled,
                         game_value({
                             convert_lua_to_game_value(args[0]),
@@ -2360,7 +2371,7 @@ static void initialize_lua_state() {
                 // First check if key exists in the table
                 sol::object existing = table.raw_get<sol::object>(key);
                 
-                if (existing.valid() && existing != sol::nil) {
+                if (existing != sol::nil) {
                     return existing;
                 }
                 

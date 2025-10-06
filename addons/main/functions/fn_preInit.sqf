@@ -1,5 +1,5 @@
 KH_var_gameSessionId = uiNamespace getVariable "KH_var_gameSessionId";
-KH_var_missionSessionId = call KH_fnc_generateUid;
+KH_var_missionSessionId = generateUid;
 uiNamespace setVariable ["KH_var_missionSessionId", KH_var_missionSessionId];
 KH_var_aceLoaded = uiNamespace getVariable "KH_var_aceLoaded";
 KH_var_missionLoaded = false;
@@ -36,7 +36,7 @@ call KH_fnc_luaResetState;
 	"KH_eve_luaEventTrigger", 
 	{
 		params [["_event", "", [""]], "_arguments"];
-		[] luaTriggerEvent _event;
+		luaTriggerEvent _event;
 	}
 ] call CBA_fnc_addEventHandler;
 

@@ -631,7 +631,7 @@ private _return = switch (typeName _target) do {
 
 if (_jip isNotEqualTo false) exitWith {
     if (_jip isEqualTo true) then {
-        private _jipId = call KH_fnc_generateUid;
+        private _jipId = generateUid;
         ["KH_eve_jipSetup", [_event, _arguments, true, false, _jipId]] call CBA_fnc_serverEvent;
         [missionNamespace, _jipId, 2];
     }
@@ -643,7 +643,7 @@ if (_jip isNotEqualTo false) exitWith {
         ];
 
         if (_jipId isEqualTo "") then {
-            _jipId = call KH_fnc_generateUid;
+            _jipId = generateUid;
         };
 
         ["KH_eve_jipSetup", [_event, _arguments, _dependency, _unitRequired, _jipId]] call CBA_fnc_serverEvent;

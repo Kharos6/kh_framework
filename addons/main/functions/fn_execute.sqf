@@ -20,7 +20,7 @@ private _subfunction = {
 	};
 
 	if (_special isEqualType createHashMap) exitWith {
-		private _argumentsId = call KH_fnc_generateUid;
+		private _argumentsId = generateUid;
 		missionNamespace setVariable [_argumentsId, _arguments];
 
 		[
@@ -59,7 +59,7 @@ private _subfunction = {
 							_specialIdOverride;
 						}
 						else {
-							call KH_fnc_generateUid;
+							generateUid;
 						};
 					}
 				]
@@ -69,7 +69,7 @@ private _subfunction = {
 		case "CALLBACK": {
 			private _callbackArguments = _special param [1];
 			private _callbackFunction = _special param [2, {}, ["", {}]];
-			private _callbackId = call KH_fnc_generateUid;
+			private _callbackId = generateUid;
 
 			[
 				"CBA",
@@ -116,7 +116,7 @@ private _subfunction = {
 					_specialIdOverride;
 				}
 				else {
-					call KH_fnc_generateUid;
+					generateUid;
 				};
 			};
 
@@ -153,7 +153,7 @@ if !(_environment isEqualType []) then {
 };
 
 private _environmentType = _environment param [0, "", [0, "", {}]];
-private _environmentId = call KH_fnc_generateUid;
+private _environmentId = generateUid;
 missionNamespace setVariable [_environmentId, true];
 
 private _specialParser = {
@@ -171,7 +171,7 @@ private _specialParser = {
 					_specialIdOverride = _specialId;
 				}
 				else {
-					_specialIdOverride = call KH_fnc_generateUid;
+					_specialIdOverride = generateUid;
 				};
 
 				[[missionNamespace, _specialIdOverride, 2], _specialIdOverride];
@@ -184,7 +184,7 @@ private _specialParser = {
 					_specialIdOverride = _specialId;
 				}
 				else {
-					_specialIdOverride = call KH_fnc_generateUid;
+					_specialIdOverride = generateUid;
 				};
 
 				[[_target, _specialIdOverride, true], _specialIdOverride];
@@ -250,7 +250,7 @@ switch (typeName _environmentType) do {
 		];
 
 		if (_timeout isNotEqualTo 0) then {
-			private _timeoutId = call KH_fnc_generateUid;
+			private _timeoutId = generateUid;
 
 			KH_var_temporalExecutionStackAdditions pushBack [
 				[_environmentId],
@@ -352,7 +352,7 @@ switch (typeName _environmentType) do {
 		];
 
 		if (_timeout isNotEqualTo 0) then {
-			private _timeoutId = call KH_fnc_generateUid;
+			private _timeoutId = generateUid;
 			
 			KH_var_temporalExecutionStackAdditions pushBack [
 				[_environmentId],

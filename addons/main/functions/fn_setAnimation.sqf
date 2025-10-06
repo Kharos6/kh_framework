@@ -1,7 +1,7 @@
 params ["_unit", "_animation", "_position", "_rotation", "_target", "_positionReset", "_rotationReset", "_duration", ["_camera", false], ["_disableUserInput", true], ["_disableDamage", true], ["_setCaptive", false], ["_interruptType", "UNIT"], ["_event", "KH_eve_scriptedAnimationFinished"]];
 
 if (_duration != -1) then {
-	private _event = call KH_fnc_generateUid;
+	private _event = generateUid;
 	private _animationId = [missionNamespace, "KH_var_setAnimationId", false, false] call KH_fnc_atomicVariable;
 	private _targetHitHandler = [];
 	private _unitHitHandler = [];

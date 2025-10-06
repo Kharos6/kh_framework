@@ -1,7 +1,7 @@
 params [["_array", [], [[], createHashMap]], ["_function", {}, [{}]], ["_layer", 0, [0]], ["_returnArray", [], [[]]], ["_breaker", "", [""]]];
 
 if (_breaker isEqualTo "") then {
-    _breaker = call KH_fnc_generateUid;
+    _breaker = generateUid;
     missionNamespace setVariable [_breaker, false];
 };
 

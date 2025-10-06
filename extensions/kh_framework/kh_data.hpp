@@ -523,7 +523,7 @@ private:
                     
                     // Compile and call the config path string to get actual config
                     game_value compiled = sqf::compile(serialized);
-                    return sqf::call2(compiled);
+                    return raw_call_sqf_native(compiled);
                 }
 
                 case game_data_type::LOCATION: {
@@ -626,7 +626,7 @@ private:
                         arr.push_back(read_game_value(stream));
                     }
 
-                    return sqf::call2(g_compiled_sqf_create_hash_map_from_array, game_value(std::move(arr)));
+                    return raw_call_sqf_args_native(g_compiled_sqf_create_hash_map_from_array, game_value(std::move(arr)));
                 }
 
                 default:

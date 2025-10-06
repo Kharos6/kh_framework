@@ -1,5 +1,5 @@
 params [["_object", objNull, [objNull]], ["_loadout", [], [[]]]];
-private _componentsId = call KH_fnc_generateUid;
+private _componentsId = generateUid;
 
 [
     fuel _object,

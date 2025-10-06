@@ -1,10 +1,10 @@
 params [["_type", "", ["", []]], ["_event", "", [true, 0, ""]], "_arguments", ["_function", {}, ["", {}]]];
-private _argumentsId = call KH_fnc_generateUid;
+private _argumentsId = generateUid;
 missionNamespace setVariable [_argumentsId, _arguments];
-private _eventNameId = call KH_fnc_generateUid;
+private _eventNameId = generateUid;
 missionNamespace setVariable [_eventNameId, _event];
-private _handlerId = call KH_fnc_generateUid;
-private _previousReturnId = call KH_fnc_generateUid;
+private _handlerId = generateUid;
+private _previousReturnId = generateUid;
 private "_persistentEventId";
 private "_persistentExecutionId";
 private "_handler";
@@ -105,12 +105,12 @@ switch _eventType do {
 			};
 
 			case "REMOTE": {
-				_persistentEventId = call KH_fnc_generateUid;
-				_persistentExecutionId = call KH_fnc_generateUid;
-				private _persistentEntityId = call KH_fnc_generateUid;
+				_persistentEventId = generateUid;
+				_persistentExecutionId = generateUid;
+				private _persistentEntityId = generateUid;
 				missionNamespace setVariable [_persistentEntityId, _entity, true];
-				private _remoteEventId = call KH_fnc_generateUid;
-				private _entityOwnerId = call KH_fnc_generateUid;
+				private _remoteEventId = generateUid;
+				private _entityOwnerId = generateUid;
 
 				_remoteHandler = [
 					"CBA",
@@ -180,9 +180,9 @@ switch _eventType do {
 			};
 			
 			case "PERSISTENT": {
-				_persistentEventId = call KH_fnc_generateUid;
-				_persistentExecutionId = call KH_fnc_generateUid;
-				private _persistentEntityId = call KH_fnc_generateUid;
+				_persistentEventId = generateUid;
+				_persistentExecutionId = generateUid;
+				private _persistentEntityId = generateUid;
 				missionNamespace setVariable [_persistentEntityId, _entity, true];
 
 				_handler = [
@@ -245,7 +245,7 @@ switch _eventType do {
 	};
 
 	case "PUBLIC_VARIABLE": {
-		_handler = call KH_fnc_generateUid;
+		_handler = generateUid;
 		missionNamespace setVariable [_handler, true];
 
 		_event addPublicVariableEventHandler (compile ([
@@ -265,7 +265,7 @@ switch _eventType do {
 			_class = typeOf _class;
 		};
 
-		_handler = call KH_fnc_generateUid;
+		_handler = generateUid;
 		missionNamespace setVariable [_handler, true];
 
 		[
@@ -307,13 +307,13 @@ switch _eventType do {
 		private _timeoutArguments = _type param [5];
 		private _timeoutFunction = _type param [6, {}, ["", {}]];
 		private _verboseDelta = _type param [7, false, [true]];
-		private _conditionArgumentsId = call KH_fnc_generateUid;
-		private _handlerTickCounterId = call KH_fnc_generateUid;
+		private _conditionArgumentsId = generateUid;
+		private _handlerTickCounterId = generateUid;
 		private _iterationCount = false;
 		private "_countConditionFailure";
 		_timeoutFunction = [_timeoutFunction, false] call KH_fnc_parseFunction;
 		missionNamespace setVariable [_conditionArgumentsId, _conditionArguments];
-		_handler = call KH_fnc_generateUid;
+		_handler = generateUid;
 
 		switch (typeName _timeoutRules) do {
 			case "BOOL": {
@@ -339,7 +339,7 @@ switch _eventType do {
 					_timeout = 1;
 					_iterationCount = true;
 					_countConditionFailure = false;
-					_handlerTickCounterId = call KH_fnc_generateUid;
+					_handlerTickCounterId = generateUid;
 					missionNamespace setVariable [_handlerTickCounterId, 1];
 				}
 				else {
@@ -355,7 +355,7 @@ switch _eventType do {
 				_timeout = (_timeout select 0) max 1;
 				_countConditionFailure = _timeout param [1, false, [true]];
 				_iterationCount = true;
-				_handlerTickCounterId = call KH_fnc_generateUid;
+				_handlerTickCounterId = generateUid;
 				missionNamespace setVariable [_handlerTickCounterId, 1];
 			};
 		};
@@ -593,7 +593,7 @@ switch _eventType do {
 		];
 
 		if (!_iterationCount && (_timeout isNotEqualTo 0)) then {
-			private _timeoutId = call KH_fnc_generateUid;
+			private _timeoutId = generateUid;
 
 			KH_var_temporalExecutionStackAdditions insert [
 				[-1, 0] select _timeoutPriority,
@@ -633,10 +633,10 @@ switch _eventType do {
 		private _timeoutRules = _type param [3, [0, false, false], [0, "", []]];
 		private _timeoutArguments = _type param [4];
 		private _timeoutFunction = _type param [5, {}, ["", {}]];
-		private _conditionArgumentsId = call KH_fnc_generateUid;
+		private _conditionArgumentsId = generateUid;
 		_timeoutFunction = [_timeoutFunction, false] call KH_fnc_parseFunction;
 		missionNamespace setVariable [_conditionArgumentsId, _conditionArguments];
-		_handler = call KH_fnc_generateUid;
+		_handler = generateUid;
 
 		if (_timeoutRules isEqualTypeAny [0, ""]) then {
 			_timeoutRules = [_timeoutRules, false, false, false];
@@ -703,7 +703,7 @@ switch _eventType do {
 		];
 
 		if (_timeout isNotEqualTo 0) then {
-			private _timeoutId = call KH_fnc_generateUid;
+			private _timeoutId = generateUid;
 
 			_drawType pushBack [
 				[_handler],
@@ -771,7 +771,7 @@ switch _eventType do {
 			];
 		};
 
-		_handler = [call KH_fnc_generateUid, _expression];
+		_handler = [generateUid, _expression];
 		_currentStack pushBack _handler;
 	};
 

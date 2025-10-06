@@ -15,7 +15,6 @@ class CfgFunctions
 			class assignTerminal {};
 			class attach {};
 			class breakDisguise {};
-			class binarizeKhData {};
 			class callExtension {};
 			class callParsedFunction {};
 			class cameraSequence {};		
@@ -24,10 +23,7 @@ class CfgFunctions
 			class contextMenu {};
 			class convertToAgent {};
 			class convertToSimpleObject {};
-			class cryptoOperation {};
 			class deleteArrayElements {};
-			class deleteKhDataFile {};
-			class deleteKhDataVariable {};
 			class diagnostics {};
 			class displaySubtitle {};
 			class draw2d {};
@@ -40,10 +36,7 @@ class CfgFunctions
 			class entitySpawner {};
 			class equipableObject {};
 			class execute {};
-			class flushKhData {};
 			class fultonExtract {};
-			class generateRandomString {};
-			class generateUid {};
 			class getClients {};
 			class getConfigValue {};
 			class getDestinationTime {};
@@ -102,7 +95,6 @@ class CfgFunctions
 			class raycast {};
 			class raycast2d {};
 			class raycast3d {};
-			class readKhData {};
 			class recoverDisconnectedPlayers {};
 			class remoteExec {};
 			class removeEventHandler {};
@@ -137,7 +129,6 @@ class CfgFunctions
 			class setVariable {};
 			class setVehicleLoadout {};
 			class setVideoTexture {};
-			class sliceExtensionReturn {};
 			class suspendMission {};
 			class teleport {};
 			class testExtension {};
@@ -145,11 +136,9 @@ class CfgFunctions
 			class testLua {};
 			class toggleUserInput {};
 			class triggerCbaEvent {};
-			class unbinarizeKhData {};
 			class unconsciousSpectator {};
 			class vehicleSequence {};
 			class visualTrigger {};
-			class writeKhData {};
 			class zeusModuleArma {};
 			class zeusModuleBreakDisguise {};
 			class zeusModuleEndMission {};

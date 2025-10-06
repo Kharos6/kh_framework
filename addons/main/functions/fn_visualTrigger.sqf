@@ -1,6 +1,6 @@
 params ["_entity", "_screenMultiplier", "_proximity", "_distance", "_conditionServer", "_conditionPlayer", "_trueFunction", ["_falseFunction", {}], ["_repeatable", false], ["_interval", 0.5], ["_shared", true]];
-private _id = call KH_fnc_generateUid;
-private _event = call KH_fnc_generateUid;
+private _id = generateUid;
+private _event = generateUid;
 private _firstTrigger = [missionNamespace, "KH_var_visualTriggerFirst", false, false] call KH_fnc_atomicVariable;
 private _conditionVariable = [missionNamespace, "KH_var_visualTriggerCondition", false, false] call KH_fnc_atomicVariable;
 private _playerVariable = [missionNamespace, "KH_var_visualTriggerPlayerPrevious", false, false] call KH_fnc_atomicVariable;

@@ -1,1 +1,0 @@
-["kh_framework", nil, "FlushKHData", false] call KH_fnc_callExtension;

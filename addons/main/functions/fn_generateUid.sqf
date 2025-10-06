@@ -1,1 +1,0 @@
-["kh_framework", [16, true, true, true], "GenerateRandomString", false] call KH_fnc_callExtension;

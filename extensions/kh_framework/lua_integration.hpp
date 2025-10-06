@@ -1087,13 +1087,37 @@ namespace LuaFunctions {
                     return sol::make_object(*g_lua_state, 0);
                 }
                 
+                // Collect handler IDs to execute (prevents iterator invalidation if handlers modify the map)
+                std::vector<int> handlers_to_execute;
+                handlers_to_execute.reserve(it->second.size());
+                
+                for (const auto& [handler_id, handler] : it->second) {
+                    if (handler.valid()) {
+                        handlers_to_execute.push_back(handler_id);
+                    }
+                }
+                
+                // Execute handlers by ID
                 sol::object last_result = sol::nil;
                 sol::state& lua = *g_lua_state;
                 lua_State* L = lua.lua_state();
                 
-                for (auto& [handler_id, handler] : it->second) {
-                    if (!handler.valid()) continue;
+                for (int handler_id : handlers_to_execute) {
+                    // Re-lookup the event name in case the map was modified
+                    auto event_it = lua_event_handlers.find(event_name);
+
+                    if (event_it == lua_event_handlers.end()) {
+                        break; // Event was completely removed
+                    }
                     
+                    // Re-lookup the handler in case it was removed
+                    auto handler_it = event_it->second.find(handler_id);
+                    
+                    if (handler_it == event_it->second.end() || !handler_it->second.valid()) {
+                        continue; // Handler was removed or invalidated
+                    }
+                    
+                    sol::protected_function& handler = handler_it->second;
                     handler.push(L);
                     
                     // Push variadic args directly

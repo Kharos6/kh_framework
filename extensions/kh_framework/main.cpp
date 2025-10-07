@@ -51,7 +51,6 @@ void intercept::pre_init() {
     mission["frame"] = g_mission_frame;
     mission["time"] = g_mission_time;
     mission["active"] = true;
-    initialize_terrain_matrix();
     clean_lua_state();
     KHDataManager::instance().flush_all();
     sqf::diag_log("KH Framework - Pre-init");

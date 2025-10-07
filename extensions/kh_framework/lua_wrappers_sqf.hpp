@@ -724,6 +724,9 @@ REG_SQF_CMD_1("priority", priority, LUA_TO_TASK);
 REG_SQF_CMD_0("profileName", profile_name);
 REG_SQF_CMD_0("profileNamespace", profile_namespace);
 REG_SQF_CMD_0("profileNameSteam", profile_namesteam);
+REG_SQF_CMD_1_VOID("publicVariable", public_variable, LUA_TO_STRING);
+REG_SQF_CMD_2_VOID("publicVariableClient", public_variable_client, LUA_TO_FLOAT, LUA_TO_STRING);
+REG_SQF_CMD_1_VOID("publicVariableServer", public_variable_server, LUA_TO_STRING);
 REG_SQF_CMD_1_VOID("putWeaponPool", put_weapon_pool, LUA_TO_OBJECT);
 REG_SQF_CMD_0("radioEnabled", radio_enabled);
 REG_SQF_CMD_0("radioVolume", radio_volume);
@@ -976,6 +979,7 @@ REG_SQF_CMD_1("vehicleCargoEnabled", vehicle_cargo_enabled, LUA_TO_OBJECT);
 REG_SQF_CMD_1("vehicleReceiveRemoteTargets", vehicle_receive_remote_targets, LUA_TO_OBJECT);
 REG_SQF_CMD_1("vehicleReportOwnPosition", vehicle_report_own_position, LUA_TO_OBJECT);
 REG_SQF_CMD_1("vehicleReportRemoteTargets", vehicle_report_remote_targets, LUA_TO_OBJECT);
+REG_SQF_CMD_1("vehicleVarName", vehicle_var_name, LUA_TO_OBJECT);
 REG_SQF_CMD_1("velocity", velocity, LUA_TO_OBJECT);
 REG_SQF_CMD_1("velocityModelSpace", velocity_model_space, LUA_TO_OBJECT);
 REG_SQF_CMD_1("vestContainer", vest_container, LUA_TO_OBJECT);
@@ -1106,6 +1110,27 @@ sqf_table["getTerrainHeightASL"] = [](sol::object pos) -> sol::object {
         return GV_TO_LUA(get_terrain_height_asl(CAST_VECTOR2(pos_gv)));
     } else {
         return GV_TO_LUA(get_terrain_height_asl(CAST_VECTOR3(pos_gv)));
+    }
+};
+
+sqf_table["getUnitLoadout"] = [](sol::object source) -> sol::object {
+    switch (TYPE_OF(source)) {
+        case GDT_OBJECT:
+            return GV_TO_LUA(get_unit_loadout(LUA_TO_OBJECT(source)));
+        case GDT_CONFIG:
+            return GV_TO_LUA(get_unit_loadout(LUA_TO_CONFIG(source)));
+        case GDT_STRING:
+            return GV_TO_LUA(get_unit_loadout(LUA_TO_STRING(source)));
+    }
+
+    return sol::nil;
+};
+
+sqf_table["groupId"] = [](sol::object entity) -> sol::object {
+    if (TYPE_OF(entity) == GDT_OBJECT) {
+        return GV_TO_LUA(group_id(LUA_TO_OBJECT(entity)));
+    } else {
+        return GV_TO_LUA(group_id(LUA_TO_GROUP(entity)));
     }
 };
 

@@ -30,6 +30,7 @@
 #define SOL_LUA_VERSION 501
 #define SOL_LUAJIT 1
 #define SOL_LUAJIT_FFI_DISABLED 1
+#define SOL_STACK_STRING_OPTIMIZATION_SIZE 2048
 
 // beginning of sol/config.hpp
 

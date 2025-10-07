@@ -104,8 +104,8 @@ call KH_fnc_luaResetState;
     } forEach ("true" configClasses _config);
 } forEach ("true" configClasses (missionConfigFile >> "CfgLuaFunctions"));
 
-addMissionEventHandler [
-	"Ended", 
+[
+	"KH_eve_luaReset",
 	{
 		with uiNamespace do {
 			{
@@ -145,7 +145,7 @@ addMissionEventHandler [
 			} forEach ("true" configClasses (configFile >> "CfgLuaFunctions"));
 		};
 	}
-];
+] call CBA_fnc_addEventHandler;
 
 KH_var_remoteExecCommandsMode = ["SCALAR", ["'CfgRemoteExec' >> 'Commands' >> 'mode'", true]] call KH_fnc_getConfigValue;
 KH_var_remoteExecFunctionsMode = ["SCALAR", ["'CfgRemoteExec' >> 'Functions' >> 'mode'", true]] call KH_fnc_getConfigValue;

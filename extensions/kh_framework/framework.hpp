@@ -34,6 +34,7 @@ static game_value g_compiled_sqf_execute_sqf;
 static game_value g_compiled_sqf_remove_handler;
 static game_value g_compiled_sqf_create_hash_map_from_array;
 static game_value g_compiled_sqf_create_hash_map;
+static game_value g_compiled_sqf_trigger_lua_reset_event;
 static bool g_is_server = false;
 static bool g_is_dedicated_server = false;
 static bool g_is_headless = false;

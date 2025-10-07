@@ -490,6 +490,9 @@ static game_value delete_khdata_file_sqf(game_value_parameter filename) {
 
 static game_value get_terrain_matrix_sqf() {
     try {
+        // Ensure terrain matrix is initialized for current world
+        initialize_terrain_matrix();
+
         if (g_terrain_matrix.empty()) {
             return game_value();
         }
@@ -1185,4 +1188,5 @@ static void initialize_sqf_integration() {
     g_compiled_sqf_remove_handler = sqf::compile("_x call KH_fnc_removeHandler;");
     g_compiled_sqf_create_hash_map_from_array = sqf::compile("createHashMapFromArray _x;");
     g_compiled_sqf_create_hash_map = sqf::compile("createHashMap;");
+    g_compiled_sqf_trigger_lua_reset_event = sqf::compile("['KH_eve_luaReset'] call CBA_fnc_localEvent;");
 }

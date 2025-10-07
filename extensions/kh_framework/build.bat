@@ -75,7 +75,7 @@ mkdir output_x64
 
 REM Build the DLL
 echo Compiling...
-cl /LD /O2 /Ob3 /GL /MT /std:c++20 /EHsc /TP /arch:AVX ^
+cl /LD /arch:AVX /O2 /Ob3 /GL /MT /std:c++20 /EHsc /TP /Gy /Gw /GS- ^
     /Iluajit\include ^
     /Iintercept\include ^
     /I. ^
@@ -85,7 +85,7 @@ cl /LD /O2 /Ob3 /GL /MT /std:c++20 /EHsc /TP /arch:AVX ^
     /Fd:output_x64\kh_framework_x64.pdb ^
     /link /MACHINE:X64 ^
     /LTCG ^
-    /OPT:REF /OPT:ICF ^
+    /OPT:REF /OPT:ICF /OPT:LBR ^
     /LIBPATH:luajit\lib ^
     /LIBPATH:intercept\lib ^
     intercept_client.lib lua51.lib ^

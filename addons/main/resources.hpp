@@ -37,6 +37,7 @@ class RscTitles
 };
 #include "\x\kh\addons\main\resources\endMission.hpp"
 #include "\x\kh\addons\main\resources\identificationCard.hpp"
+#include "\x\kh\addons\main\resources\luaConsole.hpp"
 #include "\x\kh\addons\main\resources\remoteInteractionMenu.hpp"
 #include "\x\kh\addons\main\resources\selfInteractionMenu.hpp"
 #include "\x\kh\addons\main\resources\simulatedInventory.hpp"

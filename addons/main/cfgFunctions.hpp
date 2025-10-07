@@ -88,7 +88,6 @@ class CfgFunctions
 			class parseFunction {};
 			class parseNestedTypedArray {};
 			class parseNormalizedScreenTransforms {};
-			class parseValue {};
 			class postInit {postInit = 1;};
 			class preInit {preInit = 1;};
 			class preStart {preStart = 1;};
@@ -105,7 +104,6 @@ class CfgFunctions
 			class saveMissionState {};
 			class savePlayerLoadouts {};
 			class screenToWorld {};
-			class serializeValue {};
 			class setAnimation {};
 			class setCameraTexture {};
 			class setCurators {};

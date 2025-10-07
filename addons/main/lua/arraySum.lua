@@ -1,18 +1,12 @@
 local array = ...
-local accumulator = 0
+local result = 0
 
-local function sumAllNumbers(table)
-    local result = 0
-
-    for _i, value in pairs(table) do
-        if type(value) == "number" then
-            result = result + value
-        elseif type(value) == "table" then
-            result = sumAllNumbers(value)
-        end
+for i, value in pairs(array) do
+    if type(value) == "number" then
+        result = result + value
+    elseif type(value) == "table" then
+        result = KH_arraySum(value)
     end
-    
-    return result
 end
 
-return sumAllNumbers(array)
+return result

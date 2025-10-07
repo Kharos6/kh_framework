@@ -97,7 +97,6 @@ results[65] = {{1, 2}, {3, 4}}
 results[66] = {x = 10, y = 20, z = 30}
 results[67] = {name = "test", value = 123, active = true}
 results[68] = {[1] = "first", [2] = "second", key = "value"}
-
 local temp_array = {}
 
 for i = 1, 10 do
@@ -105,7 +104,6 @@ for i = 1, 10 do
 end
 
 results[69] = temp_array
-
 local temp_sum = 0
 
 for i = 1, 100 do
@@ -113,7 +111,6 @@ for i = 1, 100 do
 end
 
 results[70] = temp_sum
-
 local temp_count = 0
 local i = 1
 
@@ -132,7 +129,6 @@ results[74] = factorial(10)
 results[75] = fibonacci(0)
 results[76] = fibonacci(1)
 results[77] = fibonacci(10)
-
 local primes = {}
 local prime_count = 0
 
@@ -179,7 +175,6 @@ else
 end
 
 results[82] = switch_result
-
 local nested_loop_result = {}
 
 for i = 1, 3 do
@@ -190,7 +185,6 @@ for i = 1, 3 do
 end
 
 results[83] = nested_loop_result
-
 local string_array = {"apple", "banana", "cherry", "date"}
 local concatenated = ""
 
@@ -242,7 +236,6 @@ local complex_table = {
 }
 
 results[90] = complex_table
-
 local matrix = {}
 
 for i = 1, 3 do
@@ -284,7 +277,6 @@ local empty_containers = {
 }
 
 results[94] = empty_containers
-
 local algorithm_test = {}
 local data = {5, 2, 8, 1, 9, 3}
 
@@ -305,7 +297,6 @@ for i = 1, 1000 do
 end
 
 results[96] = performance_test
-
 local memory_test = {}
 
 for i = 1, 100 do
@@ -328,5 +319,4 @@ local final_validation = {
 
 results[98] = final_validation
 results[99] = jit
-
 return {input1, input2, input3, results, true, 1, "string", {1, 2, 3}, {key1 = true, key2 = 2, key3 = "value", key4 = {"A", "B", "C"}, key5 = {keyA = true, keyB = false}, key6 = nil}, nil}

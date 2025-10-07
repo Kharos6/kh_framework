@@ -172,7 +172,7 @@ public:
             }
         }
         
-        return output;
+        return std::move(output);
     }
 
     struct CompileResult {
@@ -180,8 +180,8 @@ public:
         std::string error_message;
         sol::protected_function function;
         
-        CompileResult(bool s, const std::string& err, sol::protected_function func = {}) 
-            : success(s), error_message(err), function(func) {}
+        CompileResult(bool s, std::string err, sol::protected_function func = {}) 
+            : success(s), error_message(std::move(err)), function(std::move(func)) {}
     };
     
     static CompileResult lua_compile(const std::string& lua_code, const std::string& lua_name = "") {
@@ -211,8 +211,7 @@ public:
                 (*g_lua_state)[lua_name] = compiled_func;
             }
             
-            return CompileResult(true, "Success", compiled_func);
-            
+            return CompileResult(true, "Success", std::move(compiled_func));
         } catch (const sol::error& e) {
             report_error("Compilation failed: " + std::string(e.what()));
             return CompileResult(false, "Compilation failed: " + std::string(e.what()));
@@ -387,7 +386,22 @@ static sol::object convert_game_value_to_lua(const game_value& value) {
                 
                 case game_data_type::OBJECT:
                 case game_data_type::GROUP:
-                case game_data_type::SIDE: {
+                case game_data_type::SIDE:
+                case game_data_type::CONFIG:
+                case game_data_type::CONTROL:
+                case game_data_type::DISPLAY:
+                case game_data_type::LOCATION:
+                case game_data_type::SCRIPT:
+                case game_data_type::TEXT:
+                case game_data_type::TEAM_MEMBER:
+                case game_data_type::CODE:
+                case game_data_type::TASK:
+                case game_data_type::DIARY_RECORD:
+                case game_data_type::NetObject:
+                case game_data_type::SUBGROUP:
+                case game_data_type::TARGET:
+                case game_data_type::HASHMAP:
+                case game_data_type::NAMESPACE: {
                     lua_createtable(L, arr_size, 0);
                     void* userdata = lua_newuserdata(L, sizeof(GameValueWrapper));
                     new (userdata) GameValueWrapper(array[0]);
@@ -895,7 +909,7 @@ namespace LuaFunctions {
                 task.frame_interval = 0;
             }
             
-            lua_scheduled_tasks[task_id] = task;
+            lua_scheduled_tasks[task_id] = std::move(task);
             return task_id;
         } catch (const std::exception& e) {
             report_error("Failed to create temporal handler: " + std::string(e.what()));
@@ -975,7 +989,7 @@ namespace LuaFunctions {
                 }
             }
             
-            lua_scheduled_tasks[task_id] = task;
+            lua_scheduled_tasks[task_id] = std::move(task);
             return task_id;
         } catch (const std::exception& e) {
             report_error("Failed to create temporal handler: " + std::string(e.what()));
@@ -1099,7 +1113,7 @@ namespace LuaFunctions {
             }
             
             int handler_id = next_event_handler_id++;
-            lua_event_handlers[event_name][handler_id] = handler;
+            lua_event_handlers[event_name][handler_id] = std::move(handler);
             return handler_id;
         } catch (const std::exception& e) {
             report_error("Failed to add event handler: " + std::string(e.what()));
@@ -1720,7 +1734,7 @@ namespace LuaFunctions {
             double average_time = total_time / count;
             char buffer[256];
 
-            snprintf(buffer, sizeof(buffer), "Count %d\nTotal: %.6f\nAverage: %.6f", 
+            snprintf(buffer, sizeof(buffer), "Count: %d\nTotal: %.6f\nAverage: %.6f", 
                     count, total_time, average_time);
             
             return sol::make_object(lua, std::string(buffer));
@@ -2362,9 +2376,7 @@ static void initialize_lua_state() {
             "__index", [](sol::object key) -> sol::object {
                 try {
                     if (key.get_type() != sol::type::string) return sol::nil;
-                    std::string var_name = key.as<std::string>();
-                    game_value result = sqf::get_variable(sqf::current_namespace(), var_name);
-                    return convert_game_value_to_lua(result);
+                    return convert_game_value_to_lua(sqf::get_variable(sqf::current_namespace(), key.as<std::string>()));
                 } catch (const std::exception& e) {
                     report_error("sqfVar.__index error: " + std::string(e.what()));
                     return sol::nil;
@@ -2373,8 +2385,7 @@ static void initialize_lua_state() {
             "__newindex", [](sol::object key, sol::object value) {
                 try {
                     if (key.get_type() != sol::type::string) return;
-                    std::string var_name = key.as<std::string>();
-                    sqf::set_variable(sqf::current_namespace(), var_name, convert_lua_to_game_value(value));
+                    sqf::set_variable(sqf::current_namespace(), key.as<std::string>(), convert_lua_to_game_value(value));
                 } catch (const std::exception& e) {
                     report_error("sqfVar.__newindex error: " + std::string(e.what()));
                 }

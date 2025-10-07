@@ -68,7 +68,7 @@ static game_value execute_lua_sqf(game_value_parameter args, game_value_paramete
             }
             
             auto_array<game_value> sqf_params;
-            sqf_params.push_back(args);
+            sqf_params.push_back(std::move(args));
             sqf_params.push_back(game_value(code_str));
             sqf_params.push_back(target_gv);
             sqf_params.push_back(environment_gv);

@@ -1134,6 +1134,55 @@ if hasInterface then {
 	] call CBA_fnc_addKeybind;
 
 	[
+		"KH Framework", 
+		"KH_toggleLuaConsole", 
+		"Toggle Lua Console",
+		{
+			if !isMultiplayer then {
+				private _display = createDialog ["KH_LuaConsole", true];
+
+				[
+					["CONTROL", _display displayCtrl 104],
+					"ButtonClick",
+					[],
+					{
+				
+						private _input = ctrlText 101;
+
+						if (_input isNotEqualTo "") then {
+							ctrlSetText [103, [luaExecute _input] joinString ""];
+						};
+					}
+				] call KH_fnc_addEventHandler;
+
+				[
+					["CONTROL", _display displayCtrl 105],
+					"ButtonClick",
+					[],
+					{
+						private _input = ctrlText 101;
+						
+						if (_input isNotEqualTo "") then {
+							ctrlSetText [
+								103, 
+								[
+									luaExecute ([
+										"return util.profile(10000, function() ",
+										_input,
+										" end)"	
+									] joinString "")
+								] joinString ""
+							];
+						};
+					}
+				] call KH_fnc_addEventHandler;
+			};
+		}, 
+		{}, 
+		[0xD2, [false, false, false]]
+	] call CBA_fnc_addKeybind;
+
+	[
 		"unit", 
 		{
 			params ["_unit"];

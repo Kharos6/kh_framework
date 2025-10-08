@@ -25,16 +25,16 @@
 using namespace intercept;
 using namespace intercept::types;
 
-static game_value g_compiled_sqf_trigger_cba_event;
-static game_value g_compiled_sqf_add_game_event_handler;
-static game_value g_compiled_sqf_remove_game_event_handler;
-static game_value g_compiled_sqf_game_event_handler_lua_bridge;
-static game_value g_compiled_sqf_execute_lua;
-static game_value g_compiled_sqf_execute_sqf;
-static game_value g_compiled_sqf_remove_handler;
-static game_value g_compiled_sqf_create_hash_map_from_array;
-static game_value g_compiled_sqf_create_hash_map;
-static game_value g_compiled_sqf_trigger_lua_reset_event;
+static code g_compiled_sqf_trigger_cba_event;
+static code g_compiled_sqf_add_game_event_handler;
+static code g_compiled_sqf_remove_game_event_handler;
+static code g_compiled_sqf_game_event_handler_lua_bridge;
+static code g_compiled_sqf_execute_lua;
+static code g_compiled_sqf_execute_sqf;
+static code g_compiled_sqf_remove_handler;
+static code g_compiled_sqf_create_hash_map_from_array;
+static code g_compiled_sqf_create_hash_map;
+static code g_compiled_sqf_trigger_lua_reset_event;
 static bool g_is_server = false;
 static bool g_is_dedicated_server = false;
 static bool g_is_headless = false;
@@ -73,20 +73,15 @@ static void report_error(const std::string& error_message) {
     sqf::throw_exception(error_message);
 }
 
-static game_value raw_call_sqf_native(const code& code_obj) {
-    auto game_state = intercept::client::host::functions.get_engine_allocator()->gameState;
-    static r_string var_name = "_khArgs"sv;
-    game_state->set_local_variable(var_name, game_value());
-    sqf::is_nil(code_obj);
-    return game_state->get_local_variable(var_name);
+static game_value raw_call_sqf_native(const code& code_obj) noexcept {
+    intercept::client::host::functions.invoke_raw_unary(intercept::client::__sqf::unary__isnil__code_string__ret__bool, code_obj);
+    return sqf::get_variable(sqf::mission_namespace(), "khrtrn"sv);
 }
 
-static game_value raw_call_sqf_args_native(const code& code_obj, const game_value& args) {
-    auto game_state = intercept::client::host::functions.get_engine_allocator()->gameState;
-    static r_string var_name = "_khArgs"sv;
-    game_state->set_local_variable(var_name, std::move(args));
-    sqf::is_nil(code_obj);
-    return game_state->get_local_variable(var_name);
+static game_value raw_call_sqf_args_native(const code& code_obj, const game_value& args) noexcept {
+    sqf::set_variable(sqf::mission_namespace(), "khargs"sv, args);
+    intercept::client::host::functions.invoke_raw_unary(intercept::client::__sqf::unary__isnil__code_string__ret__bool, code_obj);
+    return sqf::get_variable(sqf::mission_namespace(), "khrtrn"sv);
 }
 
 class RandomStringGenerator {

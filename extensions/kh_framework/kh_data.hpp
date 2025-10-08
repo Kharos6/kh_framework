@@ -522,7 +522,7 @@ private:
                     }
                     
                     // Compile and call the config path string to get actual config
-                    game_value compiled = sqf::compile(serialized);
+                    code compiled = sqf::compile("missionNamespace setVariable ['khrtrn', call {" + serialized + "}];");
                     return raw_call_sqf_native(compiled);
                 }
 

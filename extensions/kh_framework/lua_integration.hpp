@@ -750,13 +750,15 @@ namespace LuaFunctions {
     static sol::object sqf_call(sol::object code_or_func, sol::variadic_args args) {
         try {
             LuaStackGuard guard(*g_lua_state);
-            game_value compiled;
+            code compiled;
             
             // Convert variadic args to game_value
             game_value args_gv;
+            bool no_args = false;
 
             if (args.size() == 0) {
                 // No arguments
+                no_args = true;
                 args_gv = game_value();
             } else if (args.size() == 1) {
                 // Single argument - pass directly
@@ -780,10 +782,10 @@ namespace LuaFunctions {
                 if (wrapper && wrapper->value.type_enum() == game_data_type::CODE) {
                     compiled = wrapper->value;
                     
-                    if (args.size() == 0) {
-                        return convert_game_value_to_lua(raw_call_sqf_native(compiled));
+                    if (no_args) {
+                        return convert_game_value_to_lua(sqf::call2(compiled));
                     } else {
-                        return convert_game_value_to_lua(raw_call_sqf_args_native(compiled, args_gv));
+                        return convert_game_value_to_lua(sqf::call2(compiled, args_gv));
                     }
                 }
             }
@@ -798,48 +800,56 @@ namespace LuaFunctions {
             
             if (code_or_func_str.find(' ') == std::string::npos && code_or_func_str.find(';') == std::string::npos) {
                 // Function call path
-                if (args.size() == 0) {
+                if (no_args) {
                     // No parameters - compile as "call functionName"
-                    std::string cache_key = "_khArgs = call " + code_or_func_str;
-                    auto cache_it = g_sqf_function_cache.find(cache_key);
+                    auto cache_it = g_sqf_function_cache.find(code_or_func_str);
                     
                     if (cache_it != g_sqf_function_cache.end()) {
                         compiled = cache_it->second;
                     } else {
-                        compiled = sqf::compile(cache_key);
-                        g_sqf_function_cache[cache_key] = compiled;
+                        compiled = sqf::compile("missionNamespace setVariable ['khrtrn', call " + code_or_func_str + "];");
+                        g_sqf_function_cache[code_or_func_str] = compiled;
                     }
                     
                     return convert_game_value_to_lua(raw_call_sqf_native(compiled));
                 } else {
                     // With parameters - compile as "_this call functionName"
-                    std::string cache_key = "_khArgs = _khArgs call " + code_or_func_str;
-                    auto cache_it = g_sqf_function_cache.find(cache_key);
+                    auto cache_it = g_sqf_function_cache.find(code_or_func_str);
                     
                     if (cache_it != g_sqf_function_cache.end()) {
                         compiled = cache_it->second;
                     } else {
-                        compiled = sqf::compile(cache_key);
-                        g_sqf_function_cache[cache_key] = compiled;
+                        compiled = sqf::compile("missionNamespace setVariable ['khrtrn', (missionNamespace getVariable 'khargs') call " + code_or_func_str + "];");
+                        g_sqf_function_cache[code_or_func_str] = compiled;
                     }
                     
                     return convert_game_value_to_lua(raw_call_sqf_args_native(compiled, args_gv));
                 }
             } else {
                 // Code execution path
-                size_t code_hash = std::hash<std::string>{}(code_or_func_str);
-                auto cache_it = g_sqf_compiled_cache.find(code_hash);
-                
-                if (cache_it != g_sqf_compiled_cache.end()) {
-                    compiled = cache_it->second;
-                } else {
-                    compiled = sqf::compile(code_or_func_str);
-                    g_sqf_compiled_cache[code_hash] = compiled;
-                }
-                
-                if (args.size() == 0) {
+                if (no_args) {
+                    // No parameters - compile as "call functionName"
+                    auto cache_it = g_sqf_function_cache.find(code_or_func_str);
+                    
+                    if (cache_it != g_sqf_function_cache.end()) {
+                        compiled = cache_it->second;
+                    } else {
+                        compiled = sqf::compile("missionNamespace setVariable ['khrtrn', call {" + code_or_func_str + "}];");
+                        g_sqf_function_cache[code_or_func_str] = compiled;
+                    }
+                    
                     return convert_game_value_to_lua(raw_call_sqf_native(compiled));
                 } else {
+                    // With parameters - compile as "_this call functionName"
+                    auto cache_it = g_sqf_function_cache.find(code_or_func_str);
+                    
+                    if (cache_it != g_sqf_function_cache.end()) {
+                        compiled = cache_it->second;
+                    } else {
+                        compiled = sqf::compile("missionNamespace setVariable ['khrtrn', (missionNamespace getVariable 'khargs') call {" + code_or_func_str + "}];");
+                        g_sqf_function_cache[code_or_func_str] = compiled;
+                    }
+                    
                     return convert_game_value_to_lua(raw_call_sqf_args_native(compiled, args_gv));
                 }
             }
@@ -2395,38 +2405,62 @@ static void initialize_lua_state() {
             try {
                 LuaStackGuard guard(*g_lua_state);
                 
-                // Fast path for zero args (most common case)
-                if (args.size() == 0) {
-                    auto cache_it = g_sqf_command_cache.find(cmd);
-                    
-                    if (cache_it != g_sqf_command_cache.end()) {
-                        return convert_game_value_to_lua(raw_call_sqf_native(cache_it->second));
-                    }
-                    
-                    game_value compiled = sqf::compile(cmd);
-                    g_sqf_command_cache.emplace(cmd, compiled);
-                    return convert_game_value_to_lua(raw_call_sqf_native(compiled));
-                }
-                
                 // Build the cache key once
                 std::string key;
-                
-                if (args.size() == 1) {
-                    key = "_khArgs = " + cmd + " _khArgs";
-                } else if (args.size() == 2) {
-                    key = "_khArgs = (_khArgs select 0) " + cmd + " (_khArgs select 1)";
-                } else {
-                    report_error("SQF commands only support 0-2 arguments");
-                    return sol::nil;
-                }
+
+                switch (args.size()) {
+                    case 0: {
+                        key = cmd;
+                        break;
+                    }
+
+                    case 1: {
+                        key = cmd + "_";
+                        break;
+                    }
+                    
+                    case 2: {
+                        key = "_" + cmd + "_";
+                        break;
+                    }
+
+                    default: {
+                        report_error("SQF commands only support 0-2 arguments");
+                        return sol::nil;
+                    }
+                }                    
                 
                 auto cache_it = g_sqf_command_cache.find(key);
-                game_value compiled;
+                code compiled;
                 
                 if (cache_it != g_sqf_command_cache.end()) {
                     compiled = cache_it->second;
                 } else {
-                    compiled = sqf::compile(key);
+                    std::string full_command;
+
+                    switch (args.size()) {
+                        case 0: {
+                            full_command = "missionNamespace setVariable ['khrtrn', " + cmd + "];";
+                            break;
+                        }
+
+                        case 1: {
+                            full_command = "missionNamespace setVariable ['khrtrn', " + cmd + " (missionNamespace getVariable 'khargs')];";
+                            break;
+                        }
+                        
+                        case 2: {
+                            full_command = "private _khargs = missionNamespace getVariable 'khargs'; missionNamespace setVariable ['khrtrn', (_khargs select 0) " + cmd + " (_khargs select 1)];";
+                            break;
+                        }
+
+                        default: {
+                            report_error("SQF commands only support 0-2 arguments");
+                            return sol::nil;
+                        }
+                    }
+
+                    compiled = sqf::compile(full_command);
                     g_sqf_command_cache.emplace(key, compiled);
                 }
                 

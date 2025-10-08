@@ -800,7 +800,7 @@ namespace LuaFunctions {
                 // Function call path
                 if (args.size() == 0) {
                     // No parameters - compile as "call functionName"
-                    std::string cache_key = "call " + code_or_func_str;
+                    std::string cache_key = "_khArgs = call " + code_or_func_str;
                     auto cache_it = g_sqf_function_cache.find(cache_key);
                     
                     if (cache_it != g_sqf_function_cache.end()) {
@@ -813,7 +813,7 @@ namespace LuaFunctions {
                     return convert_game_value_to_lua(raw_call_sqf_native(compiled));
                 } else {
                     // With parameters - compile as "_this call functionName"
-                    std::string cache_key = "_x call " + code_or_func_str;
+                    std::string cache_key = "_khArgs = _khArgs call " + code_or_func_str;
                     auto cache_it = g_sqf_function_cache.find(cache_key);
                     
                     if (cache_it != g_sqf_function_cache.end()) {
@@ -1249,12 +1249,21 @@ namespace LuaFunctions {
         }
     }
 
-    static sol::object add_game_event_handler(sol::object type, sqf_string_const_ref event, sol::protected_function handler) {
+    static sol::object add_game_event_handler(sol::object type, sol::object event, sol::protected_function handler) {
         try {
             LuaStackGuard guard(*g_lua_state);
             
             if (!handler.valid()) {
                 report_error("Invalid handler function");
+                return sol::nil;
+            }
+
+            std::string event_name;
+
+            if (event.get_type() == sol::type::string) {
+                event_name = event.as<std::string>();
+            } else {
+                report_error("Event name must be a string");
                 return sol::nil;
             }
             
@@ -1268,9 +1277,9 @@ namespace LuaFunctions {
             // KH_fnc_addEventHandler will trigger the Lua event when the game event fires
             auto_array<game_value> sqf_params;
             sqf_params.push_back(convert_lua_to_game_value(type));
-            sqf_params.push_back(game_value(static_cast<std::string>(event)));
+            sqf_params.push_back(game_value(event_name));
             sqf_params.push_back(game_value(handler_uid));
-            sqf_params.push_back(game_value(g_compiled_sqf_game_event_handler_lua_bridge));
+            sqf_params.push_back(g_compiled_sqf_game_event_handler_lua_bridge);
             game_value sqf_result = raw_call_sqf_args_native(g_compiled_sqf_add_game_event_handler, game_value(std::move(sqf_params)));
             sol::table result = g_lua_state->create_table();
             result[1] = handler_uid;
@@ -1669,26 +1678,14 @@ namespace LuaFunctions {
             sol::object code_obj = args[1];
             sol::protected_function compiled;
             
-            if (code_obj.get_type() == sol::type::string) {
-                // String - treat as function name
-                std::string func_name = code_obj.as<std::string>();
-                sol::object func = lua[func_name];
-
-                if (func.get_type() != sol::type::function) {
-                    report_error("Function '" + func_name + "' not found or is not a function");
-                    return sol::nil;
-                }
-                
-                compiled = func;
-            } else if (code_obj.get_type() == sol::type::function) {
-                // Direct function object
+            if (code_obj.get_type() == sol::type::function) {
                 compiled = code_obj;
             } else {
-                report_error("Second argument must be a string (function name) or function object");
+                report_error("Second argument must be a function object");
                 return sol::nil;
             }
             
-            // Remaining arguments: function parameters (varargs)
+            // Remaining arguments: function parameters
             std::vector<sol::object> func_args;
             
             for (size_t i = 2; i < args.size(); i++) {
@@ -2415,9 +2412,9 @@ static void initialize_lua_state() {
                 std::string key;
                 
                 if (args.size() == 1) {
-                    key = cmd + " _x";
+                    key = "_khArgs = " + cmd + " _khArgs";
                 } else if (args.size() == 2) {
-                    key = "(_x select 0) " + cmd + " (_x select 1)";
+                    key = "_khArgs = (_khArgs select 0) " + cmd + " (_khArgs select 1)";
                 } else {
                     report_error("SQF commands only support 0-2 arguments");
                     return sol::nil;

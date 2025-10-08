@@ -1159,34 +1159,34 @@ static void initialize_sqf_integration() {
         game_data_type::ARRAY
     );
 
-    g_compiled_sqf_trigger_cba_event = sqf::compile("_x call KH_fnc_triggerCbaEvent;");
-    g_compiled_sqf_add_game_event_handler = sqf::compile("_x call KH_fnc_addEventHandler;");
-    g_compiled_sqf_remove_game_event_handler = sqf::compile("_x call KH_fnc_removeEventHandler;");
-    g_compiled_sqf_game_event_handler_lua_bridge = sqf::compile("_x luaTriggerEvent _args;");
+    g_compiled_sqf_trigger_cba_event = sqf::compile("_khArgs = _khArgs call KH_fnc_triggerCbaEvent;");
+    g_compiled_sqf_add_game_event_handler = sqf::compile("_khArgs = _khArgs call KH_fnc_addEventHandler;");
+    g_compiled_sqf_remove_game_event_handler = sqf::compile("_khArgs = _khArgs call KH_fnc_removeEventHandler;");
+    g_compiled_sqf_game_event_handler_lua_bridge = sqf::compile("_khArgs = _khArgs luaTriggerEvent _args;");
 
     g_compiled_sqf_execute_lua = sqf::compile(R"(
-        _x set [1, ["_x luaExecute ", _x select 1] joinString ""];
+        _khArgs set [1, ["_khArgs luaExecute ", _khArgs select 1] joinString ""];
         private _special = param [5, false];
 
         if (_special isEqualType []) then {
             private _type = _special param [0, "", [""]];
 
             if (_type isEqualTo "CALLBACK") then {
-                _special set [2, ["_x append _argsCallback; _x luaExecute ", _special select 2] joinString ""];
+                _special set [2, ["_khArgs append _argsCallback; _khArgs luaExecute ", _special select 2] joinString ""];
             }
             else {
                 if (_type isEqualTo "PERSISTENT") then {
-                    _special set [3, ["_x luaExecute ", _special select 3] joinString ""];
+                    _special set [3, ["_khArgs luaExecute ", _special select 3] joinString ""];
                 };
             };
         };
 
-        _x call KH_fnc_execute;
+        _khArgs = _khArgs call KH_fnc_execute;
     )");
 
-    g_compiled_sqf_execute_sqf = sqf::compile("_x call KH_fnc_execute;");
-    g_compiled_sqf_remove_handler = sqf::compile("_x call KH_fnc_removeHandler;");
-    g_compiled_sqf_create_hash_map_from_array = sqf::compile("createHashMapFromArray _x;");
-    g_compiled_sqf_create_hash_map = sqf::compile("createHashMap;");
-    g_compiled_sqf_trigger_lua_reset_event = sqf::compile("['KH_eve_luaReset'] call CBA_fnc_localEvent;");
+    g_compiled_sqf_execute_sqf = sqf::compile("_khArgs = _khArgs call KH_fnc_execute;");
+    g_compiled_sqf_remove_handler = sqf::compile("_khArgs = _khArgs call KH_fnc_removeHandler;");
+    g_compiled_sqf_create_hash_map_from_array = sqf::compile("_khArgs = createHashMapFromArray _khArgs;");
+    g_compiled_sqf_create_hash_map = sqf::compile("_khArgs = createHashMap;");
+    g_compiled_sqf_trigger_lua_reset_event = sqf::compile("_khArgs = ['KH_eve_luaReset'] call CBA_fnc_localEvent;");
 }

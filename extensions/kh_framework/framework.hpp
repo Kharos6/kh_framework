@@ -73,20 +73,20 @@ static void report_error(const std::string& error_message) {
     sqf::throw_exception(error_message);
 }
 
-static game_value raw_call_sqf_native(const code& code_obj) noexcept {
-    static std::vector<game_value> arr;
-    arr.clear();
-    arr.push_back(game_value(std::vector<game_value>{}));
-    auto&& result = sqf::apply(arr, code_obj);
-    return result.empty() ? game_value() : std::move(result[0]);
+static game_value raw_call_sqf_native(const code& code_obj) {
+    auto game_state = intercept::client::host::functions.get_engine_allocator()->gameState;
+    static r_string var_name = "_khArgs"sv;
+    game_state->set_local_variable(var_name, game_value());
+    sqf::is_nil(code_obj);
+    return game_state->get_local_variable(var_name);
 }
 
-static game_value raw_call_sqf_args_native(const code& code_obj, const game_value& args) noexcept {
-    static std::vector<game_value> arr;
-    arr.clear();
-    arr.push_back(args);
-    auto&& result = sqf::apply(arr, code_obj);
-    return result.empty() ? game_value() : std::move(result[0]);
+static game_value raw_call_sqf_args_native(const code& code_obj, const game_value& args) {
+    auto game_state = intercept::client::host::functions.get_engine_allocator()->gameState;
+    static r_string var_name = "_khArgs"sv;
+    game_state->set_local_variable(var_name, std::move(args));
+    sqf::is_nil(code_obj);
+    return game_state->get_local_variable(var_name);
 }
 
 class RandomStringGenerator {

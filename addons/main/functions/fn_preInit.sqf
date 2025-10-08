@@ -1135,11 +1135,15 @@ if hasInterface then {
 
 	[
 		"KH Framework", 
-		"KH_toggleLuaConsole", 
-		"Toggle Lua Console",
+		"KH_debugConsole", 
+		"Debug Console",
 		{
-			if !isMultiplayer then {
-				private _display = createDialog ["KH_LuaConsole", true];
+			if (!isMultiplayer || (KH_var_adminMachine isEqualTo clientOwner)) then {
+				private _display = createDialog ["KH_DebugConsole", true];
+				private _currentConsoleCache = profileNamespace getVariable ["KH_var_debugConsoleCache", []];
+				ctrlSetText [101, _currentConsoleCache param [((count _currentConsoleCache) -1) max 0, ""]];
+				lbSetCurSel [108, profileNamespace getVariable ["KH_var_debugConsoleLanguage", 0]];
+				KH_var_debugConsoleCacheIndex = ((count _currentConsoleCache) - 1) max 0;
 
 				[
 					["CONTROL", _display displayCtrl 104],
@@ -1150,7 +1154,30 @@ if hasInterface then {
 						private _input = ctrlText 101;
 
 						if (_input isNotEqualTo "") then {
-							ctrlSetText [103, [luaExecute _input] joinString ""];
+							private _currentConsoleCache = profileNamespace getVariable ["KH_var_debugConsoleCache", []];
+
+							if (((count _input) <= 8192) && ((_currentConsoleCache param [KH_var_debugConsoleCacheIndex, ""]) isNotEqualTo _input)) then {
+								_currentConsoleCache pushBack _input;
+
+								if ((count _currentConsoleCache) > 32) then {
+									_currentConsoleCache deleteAt 0;
+								};
+
+								profileNamespace setVariable ["KH_var_debugConsoleCache", _currentConsoleCache];
+								KH_var_debugConsoleCacheIndex = (count _currentConsoleCache) - 1;
+							};
+
+							ctrlSetText [
+								103, 
+								[
+									if ((lbCurSel 108) isEqualTo 0) then {
+										call (compile _input);
+									}
+									else {
+										luaExecute _input;
+									}
+								] joinString ""
+							];
 						};
 					}
 				] call KH_fnc_addEventHandler;
@@ -1163,17 +1190,66 @@ if hasInterface then {
 						private _input = ctrlText 101;
 						
 						if (_input isNotEqualTo "") then {
+							private _currentConsoleCache = profileNamespace getVariable ["KH_var_debugConsoleCache", []];
+
+							if (((count _input) <= 8192) && ((_currentConsoleCache param [KH_var_debugConsoleCacheIndex, ""]) isNotEqualTo _input)) then {
+								_currentConsoleCache pushBack _input;
+
+								if ((count _currentConsoleCache) > 32) then {
+									_currentConsoleCache deleteAt 0;
+								};
+
+								profileNamespace setVariable ["KH_var_debugConsoleCache", _currentConsoleCache];
+								KH_var_debugConsoleCacheIndex = (count _currentConsoleCache) - 1;
+							};
+
 							ctrlSetText [
 								103, 
 								[
-									luaExecute ([
-										"return util.profile(10000, function() ",
-										_input,
-										" end)"	
-									] joinString "")
+									if ((lbCurSel 108) isEqualTo 0) then {
+										diag_codePerformance [compile _input, [], 10000];
+									}
+									else {
+										luaExecute ([
+											"return util.profile(10000, function() ",
+											_input,
+											" end)"	
+										] joinString "");
+									}
 								] joinString ""
 							];
 						};
+					}
+				] call KH_fnc_addEventHandler;
+
+				[
+					["CONTROL", _display displayCtrl 106],
+					"ButtonClick",
+					[],
+					{
+						KH_var_debugConsoleCacheIndex = (KH_var_debugConsoleCacheIndex - 1) max 0;
+						ctrlSetText [101, (profileNamespace getVariable ["KH_var_debugConsoleCache", []]) param [KH_var_debugConsoleCacheIndex, ""]];
+					}
+				] call KH_fnc_addEventHandler;
+
+				[
+					["CONTROL", _display displayCtrl 107],
+					"ButtonClick",
+					[],
+					{
+						private _currentConsoleCache = profileNamespace getVariable ["KH_var_debugConsoleCache", []];
+						KH_var_debugConsoleCacheIndex = (KH_var_debugConsoleCacheIndex + 1) min ((count _currentConsoleCache) - 1);
+						ctrlSetText [101, _currentConsoleCache param [KH_var_debugConsoleCacheIndex, ""]];
+					}
+				] call KH_fnc_addEventHandler;
+
+				[
+					["CONTROL", _display displayCtrl 108],
+					"ToolBoxSelChanged",
+					[],
+					{
+						private _selectedIndex = param [1, 0];
+						profileNamespace setVariable ["KH_var_debugConsoleLanguage", _selectedIndex];
 					}
 				] call KH_fnc_addEventHandler;
 			};

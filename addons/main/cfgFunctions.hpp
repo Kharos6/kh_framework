@@ -15,7 +15,6 @@ class CfgFunctions
 			class assignTerminal {};
 			class attach {};
 			class breakDisguise {};
-			class callExtension {};
 			class callParsedFunction {};
 			class cameraSequence {};		
 			class closeInterface {};
@@ -58,7 +57,6 @@ class CfgFunctions
 			class getUnitAttributes {};
 			class getUnits {};
 			class getUnitVehicleSlot {};
-			class getVariable {};
 			class getVehicleLoadout {};
 			class getViewTarget {};
 			class getWeaponPosition {};
@@ -77,7 +75,6 @@ class CfgFunctions
 			class moduleEditTerrainObjects {};
 			class moduleEndMission {};
 			class moduleEntitySpawner {};
-			class nestedArrayOperation {};
 			class openIdentificationCard {};
 			class openRemoteInteractionMenu {};
 			class openSelfInteractionMenu {};
@@ -86,7 +83,6 @@ class CfgFunctions
 			class orbitObject {};
 			class parseBoolean {};
 			class parseFunction {};
-			class parseNestedTypedArray {};
 			class parseNormalizedScreenTransforms {};
 			class postInit {postInit = 1;};
 			class preInit {preInit = 1;};
@@ -124,7 +120,6 @@ class CfgFunctions
 			class setTransforms {};
 			class setUnitAttributes {};
 			class setUnitVehicleSlot {};
-			class setVariable {};
 			class setVehicleLoadout {};
 			class setVideoTexture {};
 			class suspendMission {};

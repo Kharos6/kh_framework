@@ -1,15 +1,15 @@
-class KH_LuaConsole
+class KH_DebugConsole
 {
     idd = -1;
     function = "";
-    movingEnable = 0;
+    movingEnable = 1;
     onLoad = "";
     class Controls 
     {
         class KH_Title: RscText 
         {
             idc = 100;
-            text = "LUA CONSOLE";
+            text = "DEBUG CONSOLE";
             x = QUOTE(RSC_POS_X(25));
             y = QUOTE(RSC_POS_Y(18));
             w = QUOTE(RSC_POS_W(50));
@@ -56,6 +56,8 @@ class KH_LuaConsole
             y = QUOTE(RSC_POS_Y(73));
             w = QUOTE(RSC_POS_W(24.5));
             h = QUOTE(RSC_POS_H(2));
+            colorBackground[] = {0, 0, 0, 0.9};
+            colorBackgroundActive[] = {1, 1, 1, 0.9};
         };
         class KH_ButtonProfile: RscButton 
         {
@@ -65,14 +67,53 @@ class KH_LuaConsole
             y = QUOTE(RSC_POS_Y(73));
             w = QUOTE(RSC_POS_W(24.5));
             h = QUOTE(RSC_POS_H(2));
+            colorBackground[] = {0, 0, 0, 0.9};
+            colorBackgroundActive[] = {1, 1, 1, 0.9};
+        };
+        class KH_ButtonPrevious: RscButton 
+        {
+            idc = 106;
+			text = "PREVIOUS";
+            x = QUOTE(RSC_POS_X(25));
+            y = QUOTE(RSC_POS_Y(75.5));
+            w = QUOTE(RSC_POS_W(24.5));
+            h = QUOTE(RSC_POS_H(2));
+            colorBackground[] = {0, 0, 0, 0.9};
+            colorBackgroundActive[] = {1, 1, 1, 0.9};
+        };
+        class KH_ButtonNext: RscButton 
+        {
+            idc = 107;
+			text = "NEXT";
+            x = QUOTE(RSC_POS_X(50.5));
+            y = QUOTE(RSC_POS_Y(75.5));
+            w = QUOTE(RSC_POS_W(24.5));
+            h = QUOTE(RSC_POS_H(2));
+            colorBackground[] = {0, 0, 0, 0.9};
+            colorBackgroundActive[] = {1, 1, 1, 0.9};
+        };
+        class KH_Language: RscToolbox 
+        {
+            idc = 108;
+            x = QUOTE(RSC_POS_X(25));
+            y = QUOTE(RSC_POS_Y(15));
+            w = QUOTE(RSC_POS_W(50));
+            h = QUOTE(RSC_POS_H(2));
+            colorSelectedBg[] = {GUI_THEME_RGB_R, GUI_THEME_RGB_G, GUI_THEME_RGB_B, GUI_THEME_ALPHA};
+            colorBackground[] = {0, 0, 0, 0.9};
+            columns = 2;
+            rows = 1;
+            strings[] ={"SQF", "LUA"};
         };
         class KH_ButtonExit: RscButtonMenuCancel 
         {
 			text = "EXIT";
             x = QUOTE(RSC_POS_X(25));
-            y = QUOTE(RSC_POS_Y(75.5));
+            y = QUOTE(RSC_POS_Y(78));
             w = QUOTE(RSC_POS_W(50));
             h = QUOTE(RSC_POS_H(2));
+            colorBackground[] = {0, 0, 0, 0.9};
+            colorBackgroundActive[] = {1, 1, 1, 0.9};
         };
     };
 };

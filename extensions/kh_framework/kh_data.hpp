@@ -452,11 +452,9 @@ private:
         stream.read(reinterpret_cast<char*>(&is_serialized), sizeof(bool));
         
         if (is_serialized) {
-            // Read the original type
+            // Read the original serialized string-type
             game_data_type original_type;
             stream.read(reinterpret_cast<char*>(&original_type), sizeof(original_type));
-            
-            // Read the serialized string
             std::string serialized = read_string(stream);
             
             // Reconstruct based on type
@@ -508,7 +506,7 @@ private:
 
                 case game_data_type::TEXT: {
                     // Use parseText to reconstruct structured text from string
-                    // If the string is empty, return a default TEXT
+                    // If the string is empty, return a default TEXT (still will be text, not just an empty string)
                     if (serialized.empty()) {
                         return sqf::parse_text("");
                     }
@@ -522,7 +520,7 @@ private:
                     }
                     
                     // Compile and call the config path string to get actual config
-                    code compiled = sqf::compile("missionNamespace setVariable ['khrtrn', call {" + serialized + "}];");
+                    code compiled = sqf::compile("setReturnValue (call {" + serialized + "});");
                     return raw_call_sqf_native(compiled);
                 }
 
@@ -540,7 +538,7 @@ private:
                     std::vector<std::string> all_types;
                     auto all_locations = sqf::nearest_locations(center, all_types, radius);
                     
-                    // Search for matching location by class Name
+                    // We will use class name, probably for the best
                     for (const auto& loc : all_locations) {                        
                         if (static_cast<std::string>(sqf::class_name(loc)) == serialized) {
                             return loc;
@@ -574,7 +572,7 @@ private:
                 }
 
                 default:
-                    // For unsupported serialized types, return nil
+                    // For unsupported serialized types, shouoldn't happen though
                     return game_value();
             }
         } else {
@@ -784,8 +782,7 @@ public:
         }
     }
 
-    KHDataFile* get_or_create_file(const std::string& filename) {        
-        // Validate filename
+    KHDataFile* get_or_create_file(const std::string& filename) {
         if (!validate_filename(filename)) {
             report_error("Invalid filename for backup load: " + filename);
             return nullptr;
@@ -1114,7 +1111,7 @@ public:
                 std::string var_name = static_cast<std::string>(sqf::vehicle_var_name(value));
                 
                 if (var_name.empty()) {
-                    size += sizeof(uint32_t) + 19;  // Potential "UNREGISTERED_OBJECT"
+                    size += sizeof(uint32_t) + 19;  // Potentially "UNREGISTERED_OBJECT"
                 } else {
                     size += sizeof(uint32_t) + var_name.length();
                 }
@@ -1149,7 +1146,7 @@ public:
                 std::string location_name = static_cast<std::string>(sqf::class_name(value));
                 
                 if (location_name.empty()) {
-                    size += sizeof(uint32_t) + 13;  // Potential "LOCATION_NULL"
+                    size += sizeof(uint32_t) + 13;  // Potentially "LOCATION_NULL"
                 } else {
                     size += sizeof(uint32_t) + location_name.length();
                 }
@@ -1162,7 +1159,7 @@ public:
                 std::string var_name = static_cast<std::string>(sqf::vehicle_var_name(agent_obj));
                 
                 if (var_name.empty()) {
-                    size += sizeof(uint32_t) + 19;  // Potential "UNREGISTERED_OBJECT"
+                    size += sizeof(uint32_t) + 19;  // Potentially "UNREGISTERED_OBJECT"
                 } else {
                     size += sizeof(uint32_t) + var_name.length();
                 }
@@ -1302,7 +1299,6 @@ public:
     }
 
     bool delete_file(const std::string& filename) {        
-        // Validate filename
         if (!validate_filename(filename)) {
             report_error("Invalid filename for deletion: " + filename);
             return false;

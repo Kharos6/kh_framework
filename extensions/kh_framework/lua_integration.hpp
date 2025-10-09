@@ -191,7 +191,6 @@ public:
         }
 
         try {
-            // Preprocess C-style operators HERE
             std::string processed_code = preprocess_lua_operators(lua_code);
             
             // Compile the preprocessed Lua code
@@ -203,7 +202,6 @@ public:
                 return CompileResult(false, "Syntax error: " + std::string(err.what()));
             }
             
-            // Get the compiled function
             sol::protected_function compiled_func = load_result;
             
             // Register in Lua global namespace
@@ -782,6 +780,7 @@ namespace LuaFunctions {
                 if (wrapper && wrapper->value.type_enum() == game_data_type::CODE) {
                     compiled = wrapper->value;
                     
+                    // Just use regular call2
                     if (no_args) {
                         return convert_game_value_to_lua(sqf::call2(compiled));
                     } else {
@@ -801,25 +800,23 @@ namespace LuaFunctions {
             if (code_or_func_str.find(' ') == std::string::npos && code_or_func_str.find(';') == std::string::npos) {
                 // Function call path
                 if (no_args) {
-                    // No parameters - compile as "call functionName"
                     auto cache_it = g_sqf_function_cache.find(code_or_func_str);
                     
                     if (cache_it != g_sqf_function_cache.end()) {
                         compiled = cache_it->second;
                     } else {
-                        compiled = sqf::compile("missionNamespace setVariable ['khrtrn', call " + code_or_func_str + "];");
+                        compiled = sqf::compile("setReturnValue (call " + code_or_func_str + ");");
                         g_sqf_function_cache[code_or_func_str] = compiled;
                     }
                     
                     return convert_game_value_to_lua(raw_call_sqf_native(compiled));
                 } else {
-                    // With parameters - compile as "_this call functionName"
                     auto cache_it = g_sqf_function_cache.find(code_or_func_str);
                     
                     if (cache_it != g_sqf_function_cache.end()) {
                         compiled = cache_it->second;
                     } else {
-                        compiled = sqf::compile("missionNamespace setVariable ['khrtrn', (missionNamespace getVariable 'khargs') call " + code_or_func_str + "];");
+                        compiled = sqf::compile("setReturnValue (getCallArguments call " + code_or_func_str + ");");
                         g_sqf_function_cache[code_or_func_str] = compiled;
                     }
                     
@@ -828,25 +825,23 @@ namespace LuaFunctions {
             } else {
                 // Code execution path
                 if (no_args) {
-                    // No parameters - compile as "call functionName"
                     auto cache_it = g_sqf_function_cache.find(code_or_func_str);
                     
                     if (cache_it != g_sqf_function_cache.end()) {
                         compiled = cache_it->second;
                     } else {
-                        compiled = sqf::compile("missionNamespace setVariable ['khrtrn', call {" + code_or_func_str + "}];");
+                        compiled = sqf::compile("setReturnValue (call {" + code_or_func_str + "});");
                         g_sqf_function_cache[code_or_func_str] = compiled;
                     }
                     
                     return convert_game_value_to_lua(raw_call_sqf_native(compiled));
                 } else {
-                    // With parameters - compile as "_this call functionName"
                     auto cache_it = g_sqf_function_cache.find(code_or_func_str);
                     
                     if (cache_it != g_sqf_function_cache.end()) {
                         compiled = cache_it->second;
                     } else {
-                        compiled = sqf::compile("missionNamespace setVariable ['khrtrn', (missionNamespace getVariable 'khargs') call {" + code_or_func_str + "}];");
+                        compiled = sqf::compile("setReturnValue (getCallArguments call {" + code_or_func_str + "});");
                         g_sqf_function_cache[code_or_func_str] = compiled;
                     }
                     
@@ -884,7 +879,7 @@ namespace LuaFunctions {
     static std::unordered_map<int, ScheduledTask> lua_scheduled_tasks;
     static int next_task_id = 1;
     
-    // Schedule a function to run after a delay in seconds
+    // Schedule a function to run after a delay
     static int delay(float time_or_frames, sol::protected_function callback) {
         try {
             if (!callback.valid()) {
@@ -927,7 +922,7 @@ namespace LuaFunctions {
         }
     }
 
-    // Update interval function
+    // Schedule interval function
     static int interval(float time_or_frames, bool execute_immediately, float timeout, bool prioritize, sol::protected_function callback) {
         try {
             if (!callback.valid()) {
@@ -1007,7 +1002,6 @@ namespace LuaFunctions {
         }
     }
 
-    // Update cancel_task
     static bool cancel_task(int task_id) {
         try {
             return lua_scheduled_tasks.erase(task_id) > 0;
@@ -1017,7 +1011,7 @@ namespace LuaFunctions {
         }
     }
 
-    // Optimized update_scheduler - O(n) instead of O(n²)
+    // Update scheduler
     static void update_scheduler() {
         std::vector<int> tasks_to_remove;
         
@@ -1106,7 +1100,7 @@ namespace LuaFunctions {
             }
         }
         
-        // Remove all marked tasks in one pass - O(n) where n is number of tasks to remove
+        // Remove all marked tasks (one pass)
         for (int task_id : tasks_to_remove) {
             lua_scheduled_tasks.erase(task_id);
         }
@@ -1371,7 +1365,7 @@ namespace LuaFunctions {
                     sol::protected_function wrapper_factory = lua.script(wrapper_code);
                     sol::protected_function wrapper = wrapper_factory(target, special, func, args_table);
                     
-                    // Schedule interval: timeout=0, execute_immediately=true, prioritizeTimeout=false
+                    // Schedule interval: execute_immediately=true, timeout=0, prioritizeTimeout=false
                     int task_id = interval(interval_time, true, 0.0f, false, wrapper);
                     return sol::make_object(lua, task_id);
                 } else if (environment.get_type() == sol::type::string) {
@@ -1638,7 +1632,7 @@ namespace LuaFunctions {
         }
     }
 
-    // Get high-resolution timestamp in seconds (for delta calculations)
+    // Get high-resolution timestamp in seconds (mainly useful for delta calculations)
     static double get_time_epoch() {
         try {
             auto now = std::chrono::high_resolution_clock::now();
@@ -1702,7 +1696,7 @@ namespace LuaFunctions {
                 func_args.push_back(args[i]);
             }
             
-            // Warm up if count > 100
+            // Warm up if count > 100 - user probably expects overusage speed
             if (count > 100) {
                 for (int i = 0; i < 100; i++) {
                     if (func_args.empty()) {
@@ -2440,17 +2434,17 @@ static void initialize_lua_state() {
 
                     switch (args.size()) {
                         case 0: {
-                            full_command = "missionNamespace setVariable ['khrtrn', " + cmd + "];";
+                            full_command = "setReturnValue " + cmd;
                             break;
                         }
 
                         case 1: {
-                            full_command = "missionNamespace setVariable ['khrtrn', " + cmd + " (missionNamespace getVariable 'khargs')];";
+                            full_command = "setReturnValue (" + cmd + " getCallArguments);";
                             break;
                         }
                         
                         case 2: {
-                            full_command = "private _khargs = missionNamespace getVariable 'khargs'; missionNamespace setVariable ['khrtrn', (_khargs select 0) " + cmd + " (_khargs select 1)];";
+                            full_command = "private _khargs = getCallArguments; setReturnValue ((_khargs select 0) " + cmd + " (_khargs select 1));";
                             break;
                         }
 

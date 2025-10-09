@@ -35,6 +35,8 @@ static code g_compiled_sqf_remove_handler;
 static code g_compiled_sqf_create_hash_map_from_array;
 static code g_compiled_sqf_create_hash_map;
 static code g_compiled_sqf_trigger_lua_reset_event;
+static game_value g_return_value;
+static game_value g_call_arguments;
 static bool g_is_server = false;
 static bool g_is_dedicated_server = false;
 static bool g_is_headless = false;
@@ -75,13 +77,13 @@ static void report_error(const std::string& error_message) {
 
 static game_value raw_call_sqf_native(const code& code_obj) noexcept {
     intercept::client::host::functions.invoke_raw_unary(intercept::client::__sqf::unary__isnil__code_string__ret__bool, code_obj);
-    return sqf::get_variable(sqf::mission_namespace(), "khrtrn"sv);
+    return g_return_value;
 }
 
 static game_value raw_call_sqf_args_native(const code& code_obj, const game_value& args) noexcept {
-    sqf::set_variable(sqf::mission_namespace(), "khargs"sv, args);
+    g_call_arguments = args;
     intercept::client::host::functions.invoke_raw_unary(intercept::client::__sqf::unary__isnil__code_string__ret__bool, code_obj);
-    return sqf::get_variable(sqf::mission_namespace(), "khrtrn"sv);
+    return g_return_value;
 }
 
 class RandomStringGenerator {
@@ -188,8 +190,6 @@ static void initialize_terrain_matrix() {
         if (current_world == cached_world && 
             terrain_info.terrain_grid_width == cached_grid_width &&
             !g_terrain_matrix.empty()) {
-            
-            // Matrix already calculated for this world
             return;
         }
         

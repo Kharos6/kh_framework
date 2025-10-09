@@ -37,6 +37,10 @@ static registered_sqf_function _sqf_trigger_lua_event_string;
 static registered_sqf_function _sqf_trigger_lua_event_array;
 static registered_sqf_function _sqf_trigger_lua_event_any_array;
 static registered_sqf_function _sqf_trigger_lua_event_any_string;
+static registered_sqf_function _sqf_set_return_value;
+static registered_sqf_function _sqf_get_return_value;
+static registered_sqf_function _sqf_set_call_arguments;
+static registered_sqf_function _sqf_get_call_arguments;
 
 static game_value execute_lua_sqf(game_value_parameter args, game_value_parameter code_or_function) {    
     try {
@@ -86,7 +90,7 @@ static game_value execute_lua_sqf(game_value_parameter args, game_value_paramete
             code_str = static_cast<std::string>(code_or_function);
         }
 
-        // Check if it's a function call or code execution
+        // Check if it's a function call or arbitrary code execution
         sol::protected_function_result result;
         
         if (code_str.find(' ') == std::string::npos && code_str.find('(') == std::string::npos) {
@@ -430,7 +434,7 @@ static game_value write_khdata_sqf(game_value_parameter filename, game_value_par
             return game_value();
         }
         
-        // If target is specified, trigger CBA event
+        // If target or jip is specified, trigger CBA event
         if (!((target.is_nil() || (target.type_enum() == game_data_type::BOOL && static_cast<bool>(target))) &&
             (jip.is_nil() || (jip.type_enum() == game_data_type::BOOL && !static_cast<bool>(jip))))) {   
             // Build CBA parameters: ["KH_eve_khDataWriteEmission", [file_str, var_name, value], target, jip]
@@ -490,7 +494,7 @@ static game_value delete_khdata_file_sqf(game_value_parameter filename) {
 
 static game_value get_terrain_matrix_sqf() {
     try {
-        // Ensure terrain matrix is initialized for current world
+        // Ensure terrain matrix is initialized for current terrain
         initialize_terrain_matrix();
 
         if (g_terrain_matrix.empty()) {
@@ -523,7 +527,7 @@ static game_value trigger_lua_event_sqf(game_value_parameter left_arg, game_valu
         std::string event_name;
         game_value target;
         game_value jip;
-        game_value event_args = left_arg;  // Left arg is the arguments
+        game_value event_args = left_arg;  // Left arg is the actual arguments
         
         // Parse right argument
         if (right_arg.type_enum() == game_data_type::STRING) {
@@ -539,7 +543,6 @@ static game_value trigger_lua_event_sqf(game_value_parameter left_arg, game_valu
                 return game_value();
             }
             
-            // First element must be event name
             if (arr[0].type_enum() != game_data_type::STRING) {
                 report_error("First array element must be event name (string)");
                 return game_value();
@@ -573,8 +576,6 @@ static game_value trigger_lua_event_sqf(game_value_parameter left_arg, game_valu
             lua_getglobal(L, "event");
             lua_getfield(L, -1, "trigger");
             lua_remove(L, -2);  // Clean up event table from stack
-            
-            // Push event name (arg 1)
             lua_pushstring(L, event_name.c_str());
             
             // Push target (arg 2) - always true for local
@@ -856,6 +857,24 @@ static game_value remove_handler_sqf(game_value_parameter handler_info) {
         report_error("Failed to remove handler: " + std::string(e.what()));
         return game_value();
     }
+}
+
+static inline game_value set_return_value_sqf(game_value_parameter value) noexcept {
+    g_return_value = value;
+    return game_value();
+}
+
+static inline game_value get_return_value_sqf() noexcept {
+    return g_return_value;
+}
+
+static inline game_value set_call_arguments_sqf(game_value_parameter value) noexcept {
+    g_call_arguments = value;
+    return game_value();
+}
+
+static inline game_value get_call_arguments_sqf() noexcept {
+    return g_call_arguments;
 }
 
 static game_value execute_lua_sqf_unary(game_value_parameter code_or_function) {
@@ -1163,13 +1182,43 @@ static void initialize_sqf_integration() {
         game_data_type::ARRAY
     );
 
-    g_compiled_sqf_trigger_cba_event = sqf::compile(R"(missionNamespace setVariable ["khrtrn", (missionNamespace getVariable "khargs") call KH_fnc_triggerCbaEvent];)");
-    g_compiled_sqf_add_game_event_handler = sqf::compile(R"(missionNamespace setVariable ["khrtrn", (missionNamespace getVariable "khargs") call KH_fnc_addEventHandler];)");
-    g_compiled_sqf_remove_game_event_handler = sqf::compile(R"(missionNamespace setVariable ["khrtrn", (missionNamespace getVariable "khargs") call KH_fnc_removeEventHandler];)");
-    g_compiled_sqf_game_event_handler_lua_bridge = sqf::compile(R"(missionNamespace setVariable ["khrtrn", (missionNamespace getVariable "khargs") luaTriggerEvent _args];)");
+    _sqf_set_return_value = intercept::client::host::register_sqf_command(
+        "setReturnValue",
+        "Store a return value in fast memory",
+        userFunctionWrapper<set_return_value_sqf>,
+        game_data_type::NOTHING,
+        game_data_type::ANY
+    );
+
+    _sqf_get_return_value = intercept::client::host::register_sqf_command(
+        "getReturnValue",
+        "Retrieve the stored return value",
+        userFunctionWrapper<get_return_value_sqf>,
+        game_data_type::ANY
+    );
+
+    _sqf_set_call_arguments = intercept::client::host::register_sqf_command(
+        "setCallArguments",
+        "Store call arguments in fast memory",
+        userFunctionWrapper<set_call_arguments_sqf>,
+        game_data_type::NOTHING,
+        game_data_type::ANY
+    );
+
+    _sqf_get_call_arguments = intercept::client::host::register_sqf_command(
+        "getCallArguments",
+        "Retrieve the stored call arguments",
+        userFunctionWrapper<get_call_arguments_sqf>,
+        game_data_type::ANY
+    );
+
+    g_compiled_sqf_trigger_cba_event = sqf::compile(R"(setReturnValue (getCallArguments call KH_fnc_triggerCbaEvent);)");
+    g_compiled_sqf_add_game_event_handler = sqf::compile(R"(setReturnValue (getCallArguments call KH_fnc_addEventHandler);)");
+    g_compiled_sqf_remove_game_event_handler = sqf::compile(R"(setReturnValue (getCallArguments call KH_fnc_removeEventHandler);)");
+    g_compiled_sqf_game_event_handler_lua_bridge = sqf::compile(R"(setReturnValue (getCallArguments luaTriggerEvent _args);)");
 
     g_compiled_sqf_execute_lua = sqf::compile(R"(
-        private _khargs = missionNamespace getVariable "khargs";
+        private _khargs = getCallArguments;
         _khArgs set [1, ["_khArgs luaExecute ", _khArgs select 1] joinString ""];
         private _special = param [5, false];
 
@@ -1177,21 +1226,21 @@ static void initialize_sqf_integration() {
             private _type = _special param [0, "", [""]];
 
             if (_type isEqualTo "CALLBACK") then {
-                _special set [2, ["_khArgs append _argsCallback; _khArgs luaExecute ", _special select 2] joinString ""];
+                _special set [2, ["_this append _argsCallback; _this luaExecute ", _special select 2] joinString ""];
             }
             else {
                 if (_type isEqualTo "PERSISTENT") then {
-                    _special set [3, ["_khArgs luaExecute ", _special select 3] joinString ""];
+                    _special set [3, ["_this luaExecute ", _special select 3] joinString ""];
                 };
             };
         };
 
-        missionNamespace setVariable ["khrtrn", _khArgs call KH_fnc_execute];
+        setReturnValue (_khArgs call KH_fnc_execute);
     )");
 
-    g_compiled_sqf_execute_sqf = sqf::compile(R"(missionNamespace setVariable ["khrtrn", (missionNamespace getVariable "khargs") call KH_fnc_execute];)");
-    g_compiled_sqf_remove_handler = sqf::compile(R"(missionNamespace setVariable ["khrtrn", (missionNamespace getVariable "khargs") call KH_fnc_removeHandler];)");
-    g_compiled_sqf_create_hash_map_from_array = sqf::compile(R"(missionNamespace setVariable ["khrtrn", createHashMapFromArray (missionNamespace getVariable "khargs")];)");
-    g_compiled_sqf_create_hash_map = sqf::compile(R"(missionNamespace setVariable ["khrtrn", createHashMap];)");
-    g_compiled_sqf_trigger_lua_reset_event = sqf::compile(R"(missionNamespace setVariable ["khrtrn", ["KH_eve_luaReset"] call CBA_fnc_localEvent];)");
+    g_compiled_sqf_execute_sqf = sqf::compile(R"(setReturnValue (getCallArguments call KH_fnc_execute);)");
+    g_compiled_sqf_remove_handler = sqf::compile(R"(setReturnValue (getCallArguments call KH_fnc_removeHandler);)");
+    g_compiled_sqf_create_hash_map_from_array = sqf::compile(R"(setReturnValue (createHashMapFromArray getCallArguments);)");
+    g_compiled_sqf_create_hash_map = sqf::compile(R"(setReturnValue createHashMap;)");
+    g_compiled_sqf_trigger_lua_reset_event = sqf::compile(R"(setReturnValue (["KH_eve_luaReset"] call CBA_fnc_localEvent);)");
 }

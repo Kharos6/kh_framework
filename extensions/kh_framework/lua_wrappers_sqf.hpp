@@ -4,7 +4,7 @@ using namespace intercept;
 using namespace intercept::sqf;
 using namespace intercept::types;
 
-// GAME DATA TYPE SHORTHANDS
+// GAME DATA TYPES
 #define GDT_SCALAR game_data_type::SCALAR
 #define GDT_BOOL game_data_type::BOOL
 #define GDT_ARRAY game_data_type::ARRAY
@@ -256,8 +256,7 @@ using namespace intercept::types;
 /*
     rv_cargo, rv_particle_shape, rv_particle_array, rv_particle_random, rv_shot_parents, rv_action_params, rv_query_target, 
     rv_cursor_object_params, rv_vehicle_role, rv_pp_effect, rv_lnb_array, rv_ct_list, curator_selected_return, 
-    rv_group_icon, rv_task_custom_data, rv_task_variables, rv_selection_params, and rv_hc_group_params don't have game_value constructors. 
-    They're either custom return types or simple parameter structs that aren't constructed from SQF return values.
+    rv_group_icon, rv_task_custom_data, rv_task_variables, rv_selection_params, and rv_hc_group_params don't have game_value constructors.
 */
 
 // Registrations

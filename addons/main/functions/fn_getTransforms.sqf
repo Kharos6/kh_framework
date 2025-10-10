@@ -1,2 +1,0 @@
-params ["_entity", ["_positionType", "AGL"], ["_relativePosition", []], ["_relativeRotation", []]];
-[[_entity, _positionType, _relativePosition] call KH_fnc_getPosition, [_entity, _relativeRotation] call KH_fnc_getRotation];

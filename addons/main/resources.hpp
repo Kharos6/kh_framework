@@ -36,12 +36,6 @@ class RscTitles
 {
     #include "\x\kh\addons\main\resources\khDisplay.hpp"
 };
-#include "\x\kh\addons\main\resources\endMission.hpp"
 #include "\x\kh\addons\main\resources\identificationCard.hpp"
 #include "\x\kh\addons\main\resources\debugConsole.hpp"
-#include "\x\kh\addons\main\resources\remoteInteractionMenu.hpp"
-#include "\x\kh\addons\main\resources\selfInteractionMenu.hpp"
-#include "\x\kh\addons\main\resources\simulatedInventory.hpp"
-#include "\x\kh\addons\main\resources\stageExecution.hpp"
-#include "\x\kh\addons\main\resources\suspendMission.hpp"
 #include "\x\kh\addons\main\resources\terminal.hpp"

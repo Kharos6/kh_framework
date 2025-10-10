@@ -29,7 +29,7 @@ void intercept::pre_start() {
     mission["time"] = g_mission_time;
     mission["active"] = false;
     KHDataManager::instance().initialize();
-    sqf::diag_log("KH Framework - Pre-start");
+    sqf::diag_log("KH Framework Extension - Pre-start");
 }
 
 void intercept::pre_init() {
@@ -53,14 +53,14 @@ void intercept::pre_init() {
     mission["active"] = true;
     clean_lua_state();
     KHDataManager::instance().flush_all();
-    sqf::diag_log("KH Framework - Pre-init");
+    sqf::diag_log("KH Framework Extension - Pre-init");
 }
 
 void intercept::post_init() {
     LuaStackGuard guard(*g_lua_state);
     sol::table game = (*g_lua_state)["game"];
     game["postInit"] = true;
-    sqf::diag_log("KH Framework - Post-init");
+    sqf::diag_log("KH Framework Extension - Post-init");
 }
 
 void intercept::on_frame() {
@@ -98,7 +98,7 @@ void intercept::mission_ended() {
     mission["time"] = g_mission_time;
     mission["active"] = false;
     KHDataManager::instance().flush_all();
-    sqf::diag_log("KH Framework - Mission End");
+    sqf::diag_log("KH Framework Extension - Mission End");
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {

@@ -145,46 +145,6 @@ using namespace intercept::types;
         return GV_TO_LUA(name(p1_conv(p1), p2_conv(p2))); \
     }
 
-#define REG_SQF_CMD_3(lua_name, name, p1_conv, p2_conv, p3_conv) \
-    sqf_table[lua_name] = [](sol::object p1, sol::object p2, sol::object p3) -> sol::object { \
-        return GV_TO_LUA(name(p1_conv(p1), p2_conv(p2), p3_conv(p3))); \
-    }
-
-#define REG_SQF_CMD_4(lua_name, name, p1_conv, p2_conv, p3_conv, p4_conv) \
-    sqf_table[lua_name] = [](sol::object p1, sol::object p2, sol::object p3, sol::object p4) -> sol::object { \
-        return GV_TO_LUA(name(p1_conv(p1), p2_conv(p2), p3_conv(p3), p4_conv(p4))); \
-    }
-
-#define REG_SQF_CMD_5(lua_name, name, p1_conv, p2_conv, p3_conv, p4_conv, p5_conv) \
-    sqf_table[lua_name] = [](sol::object p1, sol::object p2, sol::object p3, sol::object p4, sol::object p5) -> sol::object { \
-        return GV_TO_LUA(name(p1_conv(p1), p2_conv(p2), p3_conv(p3), p4_conv(p4), p5_conv(p5))); \
-    }
-
-#define REG_SQF_CMD_6(lua_name, name, p1_conv, p2_conv, p3_conv, p4_conv, p5_conv, p6_conv) \
-    sqf_table[lua_name] = [](sol::object p1, sol::object p2, sol::object p3, sol::object p4, sol::object p5, sol::object p6) -> sol::object { \
-        return GV_TO_LUA(name(p1_conv(p1), p2_conv(p2), p3_conv(p3), p4_conv(p4), p5_conv(p5), p6_conv(p6))); \
-    }
-
-#define REG_SQF_CMD_7(lua_name, name, p1_conv, p2_conv, p3_conv, p4_conv, p5_conv, p6_conv, p7_conv) \
-    sqf_table[lua_name] = [](sol::object p1, sol::object p2, sol::object p3, sol::object p4, sol::object p5, sol::object p6, sol::object p7) -> sol::object { \
-        return GV_TO_LUA(name(p1_conv(p1), p2_conv(p2), p3_conv(p3), p4_conv(p4), p5_conv(p5), p6_conv(p6), p7_conv(p7))); \
-    }
-
-#define REG_SQF_CMD_8(lua_name, name, p1_conv, p2_conv, p3_conv, p4_conv, p5_conv, p6_conv, p7_conv, p8_conv) \
-    sqf_table[lua_name] = [](sol::object p1, sol::object p2, sol::object p3, sol::object p4, sol::object p5, sol::object p6, sol::object p7, sol::object p8) -> sol::object { \
-        return GV_TO_LUA(name(p1_conv(p1), p2_conv(p2), p3_conv(p3), p4_conv(p4), p5_conv(p5), p6_conv(p6), p7_conv(p7), p8_conv(p8))); \
-    }
-
-#define REG_SQF_CMD_9(lua_name, name, p1_conv, p2_conv, p3_conv, p4_conv, p5_conv, p6_conv, p7_conv, p8_conv, p9_conv) \
-    sqf_table[lua_name] = [](sol::object p1, sol::object p2, sol::object p3, sol::object p4, sol::object p5, sol::object p6, sol::object p7, sol::object p8, sol::object p9) -> sol::object { \
-        return GV_TO_LUA(name(p1_conv(p1), p2_conv(p2), p3_conv(p3), p4_conv(p4), p5_conv(p5), p6_conv(p6), p7_conv(p7), p8_conv(p8), p9_conv(p9))); \
-    }
-
-#define REG_SQF_CMD_10(lua_name, name, p1_conv, p2_conv, p3_conv, p4_conv, p5_conv, p6_conv, p7_conv, p8_conv, p9_conv, p10_conv) \
-    sqf_table[lua_name] = [](sol::object p1, sol::object p2, sol::object p3, sol::object p4, sol::object p5, sol::object p6, sol::object p7, sol::object p8, sol::object p9, sol::object p10) -> sol::object { \
-        return GV_TO_LUA(name(p1_conv(p1), p2_conv(p2), p3_conv(p3), p4_conv(p4), p5_conv(p5), p6_conv(p6), p7_conv(p7), p8_conv(p8), p9_conv(p9), p10_conv(p10))); \
-    }
-
 
 // REGISTRATION MACROS - VOID RETURN
 #define REG_SQF_CMD_0_VOID(lua_name, name) \
@@ -202,54 +162,6 @@ using namespace intercept::types;
 #define REG_SQF_CMD_2_VOID(lua_name, name, p1_conv, p2_conv) \
     sqf_table[lua_name] = [](sol::object p1, sol::object p2) -> sol::object { \
         name(p1_conv(p1), p2_conv(p2)); \
-        return sol::nil; \
-    }
-
-#define REG_SQF_CMD_3_VOID(lua_name, name, p1_conv, p2_conv, p3_conv) \
-    sqf_table[lua_name] = [](sol::object p1, sol::object p2, sol::object p3) -> sol::object { \
-        name(p1_conv(p1), p2_conv(p2), p3_conv(p3)); \
-        return sol::nil; \
-    }
-
-#define REG_SQF_CMD_4_VOID(lua_name, name, p1_conv, p2_conv, p3_conv, p4_conv) \
-    sqf_table[lua_name] = [](sol::object p1, sol::object p2, sol::object p3, sol::object p4) -> sol::object { \
-        name(p1_conv(p1), p2_conv(p2), p3_conv(p3), p4_conv(p4)); \
-        return sol::nil; \
-    }
-
-#define REG_SQF_CMD_5_VOID(lua_name, name, p1_conv, p2_conv, p3_conv, p4_conv, p5_conv) \
-    sqf_table[lua_name] = [](sol::object p1, sol::object p2, sol::object p3, sol::object p4, sol::object p5) -> sol::object { \
-        name(p1_conv(p1), p2_conv(p2), p3_conv(p3), p4_conv(p4), p5_conv(p5)); \
-        return sol::nil; \
-    }
-
-#define REG_SQF_CMD_6_VOID(lua_name, name, p1_conv, p2_conv, p3_conv, p4_conv, p5_conv, p6_conv) \
-    sqf_table[lua_name] = [](sol::object p1, sol::object p2, sol::object p3, sol::object p4, sol::object p5, sol::object p6) -> sol::object { \
-        name(p1_conv(p1), p2_conv(p2), p3_conv(p3), p4_conv(p4), p5_conv(p5), p6_conv(p6)); \
-        return sol::nil; \
-    }
-
-#define REG_SQF_CMD_7_VOID(lua_name, name, p1_conv, p2_conv, p3_conv, p4_conv, p5_conv, p6_conv, p7_conv) \
-    sqf_table[lua_name] = [](sol::object p1, sol::object p2, sol::object p3, sol::object p4, sol::object p5, sol::object p6, sol::object p7) -> sol::object { \
-        name(p1_conv(p1), p2_conv(p2), p3_conv(p3), p4_conv(p4), p5_conv(p5), p6_conv(p6), p7_conv(p7)); \
-        return sol::nil; \
-    }
-
-#define REG_SQF_CMD_8_VOID(lua_name, name, p1_conv, p2_conv, p3_conv, p4_conv, p5_conv, p6_conv, p7_conv, p8_conv) \
-    sqf_table[lua_name] = [](sol::object p1, sol::object p2, sol::object p3, sol::object p4, sol::object p5, sol::object p6, sol::object p7, sol::object p8) -> sol::object { \
-        name(p1_conv(p1), p2_conv(p2), p3_conv(p3), p4_conv(p4), p5_conv(p5), p6_conv(p6), p7_conv(p7), p8_conv(p8)); \
-        return sol::nil; \
-    }
-
-#define REG_SQF_CMD_9_VOID(lua_name, name, p1_conv, p2_conv, p3_conv, p4_conv, p5_conv, p6_conv, p7_conv, p8_conv, p9_conv) \
-    sqf_table[lua_name] = [](sol::object p1, sol::object p2, sol::object p3, sol::object p4, sol::object p5, sol::object p6, sol::object p7, sol::object p8, sol::object p9) -> sol::object { \
-        name(p1_conv(p1), p2_conv(p2), p3_conv(p3), p4_conv(p4), p5_conv(p5), p6_conv(p6), p7_conv(p7), p8_conv(p8), p9_conv(p9)); \
-        return sol::nil; \
-    }
-
-#define REG_SQF_CMD_10_VOID(lua_name, name, p1_conv, p2_conv, p3_conv, p4_conv, p5_conv, p6_conv, p7_conv, p8_conv, p9_conv, p10_conv) \
-    sqf_table[lua_name] = [](sol::object p1, sol::object p2, sol::object p3, sol::object p4, sol::object p5, sol::object p6, sol::object p7, sol::object p8, sol::object p9, sol::object p10) -> sol::object { \
-        name(p1_conv(p1), p2_conv(p2), p3_conv(p3), p4_conv(p4), p5_conv(p5), p6_conv(p6), p7_conv(p7), p8_conv(p8), p9_conv(p9), p10_conv(p10)); \
         return sol::nil; \
     }
 
@@ -811,8 +723,6 @@ REG_SQF_CMD_2_VOID("setCuratorEditingAreaType", set_curator_editing_area_type, L
 REG_SQF_CMD_2_VOID("setCuratorWaypointCost", set_curator_waypoint_cost, LUA_TO_OBJECT, LUA_TO_FLOAT);
 REG_SQF_CMD_2_VOID("setCustomAimCoef", set_custom_aim_coef, LUA_TO_OBJECT, LUA_TO_FLOAT);
 REG_SQF_CMD_2_VOID("setCustomWeightRTD", set_custom_weight_rtd, LUA_TO_OBJECT, LUA_TO_FLOAT);
-REG_SQF_CMD_2_VOID("setDamage", set_damage, LUA_TO_OBJECT, LUA_TO_FLOAT);
-REG_SQF_CMD_2_VOID("setDammage", set_dammage, LUA_TO_OBJECT, LUA_TO_FLOAT);
 REG_SQF_CMD_2_VOID("setDefaultCamera", set_default_camera, LUA_TO_VECTOR3, LUA_TO_VECTOR3);
 REG_SQF_CMD_2_VOID("setDetailMapBlendPars", set_detail_map_blend_pars, LUA_TO_FLOAT, LUA_TO_FLOAT);
 REG_SQF_CMD_2_VOID("setDir", set_dir, LUA_TO_OBJECT, LUA_TO_FLOAT);
@@ -1008,11 +918,75 @@ REG_SQF_CMD_2("worldToModelVisual", world_to_model_visual, LUA_TO_OBJECT, LUA_TO
 REG_SQF_CMD_0("worldSize", world_size);
 
 sqf_table["call"] = [](sol::object code_obj, sol::optional<sol::object> args) -> sol::object {
-    if (!args) {
-        return GV_TO_LUA(call(LUA_TO_CODE(code_obj)));
-    } else {
-        return GV_TO_LUA(call(LUA_TO_CODE(code_obj), LUA_TO_GAME_VALUE(*args)));
+    code compiled;
+
+    if (code_obj.get_type() == sol::type::userdata) {
+        sol::optional<GameValueWrapper> wrapper = code_obj.as<sol::optional<GameValueWrapper>>();
+        
+        if (wrapper && wrapper->value.type_enum() == game_data_type::CODE) {
+            compiled = wrapper->value;
+            
+            if (!args) {
+                return GV_TO_LUA(sqf::call2(compiled));
+            } else {
+                return GV_TO_LUA(sqf::call2(compiled, LUA_TO_GAME_VALUE(*args)));
+            }
+        }
     }
+    
+    std::string code_or_func_str = code_obj.as<std::string>();
+    
+    if (code_or_func_str.find(' ') == std::string::npos && code_or_func_str.find(';') == std::string::npos) {
+        if (!args) {
+            auto cache_it = g_sqf_function_cache.find(code_or_func_str);
+            
+            if (cache_it != g_sqf_function_cache.end()) {
+                compiled = cache_it->second;
+            } else {
+                compiled = sqf::compile("setReturnValue (call " + code_or_func_str + ");");
+                g_sqf_function_cache[code_or_func_str] = compiled;
+            }
+            
+            return GV_TO_LUA(raw_call_sqf_native(compiled));
+        } else {
+            auto cache_it = g_sqf_function_cache.find(code_or_func_str);
+            
+            if (cache_it != g_sqf_function_cache.end()) {
+                compiled = cache_it->second;
+            } else {
+                compiled = sqf::compile("setReturnValue (getCallArguments call " + code_or_func_str + ");");
+                g_sqf_function_cache[code_or_func_str] = compiled;
+            }
+            
+            return GV_TO_LUA(raw_call_sqf_args_native(compiled, LUA_TO_GAME_VALUE(*args)));
+        }
+    } else {
+        if (!args) {
+            auto cache_it = g_sqf_function_cache.find(code_or_func_str);
+            
+            if (cache_it != g_sqf_function_cache.end()) {
+                compiled = cache_it->second;
+            } else {
+                compiled = sqf::compile("setReturnValue (call {" + code_or_func_str + "});");
+                g_sqf_function_cache[code_or_func_str] = compiled;
+            }
+            
+            return GV_TO_LUA(raw_call_sqf_native(compiled));
+        } else {
+            auto cache_it = g_sqf_function_cache.find(code_or_func_str);
+            
+            if (cache_it != g_sqf_function_cache.end()) {
+                compiled = cache_it->second;
+            } else {
+                compiled = sqf::compile("setReturnValue (getCallArguments call {" + code_or_func_str + "});");
+                g_sqf_function_cache[code_or_func_str] = compiled;
+            }
+            
+            return GV_TO_LUA(raw_call_sqf_args_native(compiled, LUA_TO_GAME_VALUE(*args)));
+        }
+    }
+    
+    return sol::nil;
 };
 
 sqf_table["combatBehaviour"] = [](sol::object target) -> sol::object {

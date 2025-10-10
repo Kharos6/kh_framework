@@ -1,4 +1,15 @@
-params ["_unit", "_name", "_gender", "_race", "_dateOfBirth", "_profession", "_ethnos", "_cardNumber", "_dateOfIssue", "_dateOfExpiry"];
+params [
+	["_unit", objNull, [objNull]], 
+	["_name", "", [""]], 
+	["_gender", "", [""]], 
+	["_race", "", [""]], 
+	["_dateOfBirth", "", [""]], 
+	["_profession", "", [""]], 
+	["_ethnos", "", [""]], 
+	["_cardNumber", "", [""]], 
+	["_dateOfIssue", "", [""]], 
+	["_dateOfExpiry", "", [""]]
+];
 
 if (isNil "KH_var_assignIdentificationCardSet") then {
 	KH_var_assignIdentificationCardSet = true;
@@ -6,16 +17,16 @@ if (isNil "KH_var_assignIdentificationCardSet") then {
 	[
 		"KH_eve_playerRespawned",
 		{
-			private _newEntity = _this select 0;
-			private _oldEntity = _this select 2;
+			private _newEntity = param [0];
+			private _oldEntity = param [2];
 
-			if !(isNil {_oldEntity getVariable 'KH_var_identificationCardInformation'}) then {
+			if !(isNil {_oldEntity getVariable "KH_var_identificationCardInformation";}) then {
 				[
 					[_newEntity],
 					{
 						params ["_newEntity"];
 
-						if (_newEntity != player) then {
+						if (_newEntity isNotEqualTo player) then {
 							_newEntity addAction [
 								"View Identification Card",
 								{
@@ -62,15 +73,15 @@ if (isNil "KH_var_assignIdentificationCardSet") then {
 	] call CBA_fnc_addEventHandler;
 };
 
-if (_name == "") then {
+if (_name isEqualTo "") then {
 	_name = name _unit;
 };
 
-if (_gender == "") then {
+if (_gender isEqualTo "") then {
 	_gender = "Male";
 };
 
-if (_race == "") then {
+if (_race isEqualTo "") then {
 	private _face = face _unit;
 	private _raceSelection = "";
 
@@ -99,7 +110,7 @@ if (_race == "") then {
 	_race = _raceSelection;
 };
 
-if (_dateOfBirth == "") then {
+if (_dateOfBirth isEqualTo "") then {
 	private _day = ((floor (random 29)) max 1) min 28;
 
 	if (_day < 10) then {
@@ -122,7 +133,7 @@ if (_dateOfBirth == "") then {
 	_dateOfBirth = format ["%1/%2/%3", _day, _month, _year];
 };
 
-if (_profession == "") then {
+if (_profession isEqualTo "") then {
 	_profession = selectRandom [
 		"Librarian",
 		"Forensic Pathologist",
@@ -227,7 +238,7 @@ if (_profession == "") then {
 	];
 };
 
-if (_ethnos == "") then {
+if (_ethnos isEqualTo "") then {
 	_ethnos = selectRandom [
 		"Afghan",
 		"Albanian",
@@ -427,11 +438,11 @@ if (_ethnos == "") then {
 	];
 };
 
-if (_cardNumber == "") then {
+if (_cardNumber isEqualTo "") then {
 	_cardNumber = [12, true, false, false] call KH_fnc_generateRandomString;
 };
 
-if (_dateOfIssue == "") then {
+if (_dateOfIssue isEqualTo "") then {
 	private _day = ((floor (random 29)) max 1) min 28;
 
 	if (_day < 10) then {
@@ -454,7 +465,7 @@ if (_dateOfIssue == "") then {
 	_dateOfIssue = format ["%1/%2/%3", _day, _month, _year];
 };
 
-if (_dateOfExpiry == "") then {
+if (_dateOfExpiry isEqualTo "") then {
 	private _year = (parseNumber (_dateOfIssue select [6])) + 5;
 	_dateOfExpiry = format ["%1%2", _dateOfIssue select [0, 6], _year];
 };

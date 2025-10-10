@@ -6,7 +6,7 @@ class KH_DebugConsole
     onLoad = "";
     class Controls 
     {
-        class KH_Title: RscText 
+        class Title: RscText 
         {
             idc = 100;
             text = "DEBUG CONSOLE";
@@ -17,7 +17,7 @@ class KH_DebugConsole
             colorBackground[] = {GUI_THEME_RGB_R, GUI_THEME_RGB_G, GUI_THEME_RGB_B, GUI_THEME_ALPHA};
             moving = 1;
         };
-        class KH_Input: RscEditMulti
+        class Input: RscEditMulti
         {
             idc = 101;
             font = "EtelkaMonospacePro";
@@ -27,7 +27,7 @@ class KH_DebugConsole
             h = QUOTE(RSC_POS_H(40));
             colorBackground[] = {0, 0, 0, 0.9};
         };
-        class KH_OutputTitle: RscText 
+        class OutputTitle: RscText 
         {
             idc = 102;
             text = "OUTPUT";
@@ -38,7 +38,7 @@ class KH_DebugConsole
             colorBackground[] = {GUI_THEME_RGB_R, GUI_THEME_RGB_G, GUI_THEME_RGB_B, GUI_THEME_ALPHA};
             moving = 1;
         };
-        class KH_Output: RscTextMulti
+        class Output: RscEditMulti
         {
             idc = 103;
             text = "";
@@ -47,8 +47,9 @@ class KH_DebugConsole
             w = QUOTE(RSC_POS_W(50));
             h = QUOTE(RSC_POS_H(10));
             colorBackground[] = {0, 0, 0, 0.9};
+            canModify = 0;
         };
-        class KH_ButtonExecute: RscButton 
+        class ButtonExecute: RscButton 
         {
             idc = 104;
 			text = "EXECUTE";
@@ -59,7 +60,7 @@ class KH_DebugConsole
             colorBackground[] = {0, 0, 0, 0.9};
             colorBackgroundActive[] = {1, 1, 1, 0.9};
         };
-        class KH_ButtonProfile: RscButton 
+        class ButtonProfile: RscButton 
         {
             idc = 105;
 			text = "PROFILE";
@@ -70,7 +71,7 @@ class KH_DebugConsole
             colorBackground[] = {0, 0, 0, 0.9};
             colorBackgroundActive[] = {1, 1, 1, 0.9};
         };
-        class KH_ButtonPrevious: RscButton 
+        class ButtonPrevious: RscButton 
         {
             idc = 106;
 			text = "PREVIOUS";
@@ -81,7 +82,7 @@ class KH_DebugConsole
             colorBackground[] = {0, 0, 0, 0.9};
             colorBackgroundActive[] = {1, 1, 1, 0.9};
         };
-        class KH_ButtonNext: RscButton 
+        class ButtonNext: RscButton 
         {
             idc = 107;
 			text = "NEXT";
@@ -92,7 +93,7 @@ class KH_DebugConsole
             colorBackground[] = {0, 0, 0, 0.9};
             colorBackgroundActive[] = {1, 1, 1, 0.9};
         };
-        class KH_Language: RscToolbox 
+        class Language: RscToolbox 
         {
             idc = 108;
             x = QUOTE(RSC_POS_X(25));
@@ -105,7 +106,7 @@ class KH_DebugConsole
             rows = 1;
             strings[] ={"SQF", "LUA"};
         };
-        class KH_ButtonExit: RscButtonMenuCancel 
+        class ButtonExit: RscButtonMenuCancel 
         {
 			text = "EXIT";
             x = QUOTE(RSC_POS_X(25));

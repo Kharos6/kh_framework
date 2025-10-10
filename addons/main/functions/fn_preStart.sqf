@@ -46,25 +46,33 @@ KH_var_resetInitLuaExecutions = [];
 
 		if (isNumber (_x >> "preInit")) then {
 			if ((getNumber (_x >> "preInit")) isEqualTo 1) then {
-        		KH_var_preInitLuaExecutions pushBack _name;
+                if !(_name in KH_var_preInitLuaExecutions) then {
+        		    KH_var_preInitLuaExecutions pushBack _name;
+                };
 			};
         };
 
 		if (isNumber (_x >> "postInit")) then {
 			if ((getNumber (_x >> "postInit")) isEqualTo 1) then {
-        		KH_var_postInitLuaExecutions pushBack _name;
+                if !(_name in KH_var_postInitLuaExecutions) then {
+        		    KH_var_postInitLuaExecutions pushBack _name;
+                };
 			};
         };
 
 		if (isNumber (_x >> "loadInit")) then {
 			if ((getNumber (_x >> "loadInit")) isEqualTo 1) then {
-        		KH_var_loadInitLuaExecutions pushBack _name;
+                if !(_name in KH_var_loadInitLuaExecutions) then {
+        		    KH_var_loadInitLuaExecutions pushBack _name;
+                };
 			};
         };
 
 		if (isNumber (_x >> "resetInit")) then {
 			if ((getNumber (_x >> "resetInit")) isEqualTo 1) then {
-        		KH_var_resetInitLuaExecutions pushBack _name;
+                if !(_name in KH_var_resetInitLuaExecutions) then {
+        		    KH_var_resetInitLuaExecutions pushBack _name;
+                };
 			};
         };
     } forEach ("true" configClasses _config);

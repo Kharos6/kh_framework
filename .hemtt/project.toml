@@ -29,7 +29,8 @@ enabled = false
 [hemtt.launch.default]
 workshop = [
     "450814997",
-    "1779063631"
+    "1779063631",
+    "3499977893"
 ]
 
 executable = "arma3_x64"

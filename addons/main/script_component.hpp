@@ -58,6 +58,6 @@ class ctrlToolbox;
 class ctrlToolboxPictureKeepAspect;
 class ctrlTree;
 class ctrlXSliderH;
-class Scrollbar;
 class HScrollbar;
+class Scrollbar;
 class VScrollbar;

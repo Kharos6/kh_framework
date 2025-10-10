@@ -23,9 +23,9 @@ KH_var_temporalExecutionStackDeletions = [];
 KH_var_drawUi2dExecutionStackDeletions = [];
 KH_var_drawUi3dExecutionStackDeletions = [];
 KH_var_postInitExecutions = [];
-KH_var_preInitLuaExecutions = +(uiNamespace getVariable "KH_var_preInitLuaExecutions");
-KH_var_postInitLuaExecutions = +(uiNamespace getVariable "KH_var_postInitLuaExecutions");
-KH_var_loadInitLuaExecutions = +(uiNamespace getVariable "KH_var_loadInitLuaExecutions");
+KH_var_preInitLuaExecutions = [];
+KH_var_postInitLuaExecutions = [];
+KH_var_loadInitLuaExecutions = [];
 call KH_fnc_luaClearVariables;
 call KH_fnc_luaResetState;
 ["KH_eve_execution", KH_fnc_callParsedFunction] call CBA_fnc_addEventHandler;
@@ -86,23 +86,29 @@ call KH_fnc_luaResetState;
 
 		if (isNumber (_x >> "preInit")) then {
 			if ((getNumber (_x >> "preInit")) isEqualTo 1) then {
-        		KH_var_preInitLuaExecutions pushBack _name;
+				if !(_name in KH_var_preInitLuaExecutions) then {
+        			KH_var_preInitLuaExecutions pushBack _name;
+                };
 			};
         };
 
 		if (isNumber (_x >> "postInit")) then {
 			if ((getNumber (_x >> "postInit")) isEqualTo 1) then {
-        		KH_var_postInitLuaExecutions pushBack _name;
+				if !(_name in KH_var_postInitLuaExecutions) then {
+        			KH_var_postInitLuaExecutions pushBack _name;
+                };
 			};
         };
 
 		if (isNumber (_x >> "loadInit")) then {
 			if ((getNumber (_x >> "loadInit")) isEqualTo 1) then {
-        		KH_var_loadInitLuaExecutions pushBack _name;
+				if !(_name in KH_var_loadInitLuaExecutions) then {
+        			KH_var_loadInitLuaExecutions pushBack _name;
+                };
 			};
         };
     } forEach ("true" configClasses _config);
-} forEach ("true" configClasses (missionConfigFile >> "CfgLuaFunctions"));
+} forEach (("true" configClasses (configFile >> "CfgLuaFunctions")) + ("true" configClasses (missionConfigFile >> "CfgLuaFunctions")));
 
 [
 	"KH_eve_luaReset",
@@ -962,166 +968,6 @@ if hasInterface then {
 
 	[
 		"KH Framework", 
-		"KH_openInteractionMenu", 
-		"Open Interaction Menu", 
-		{
-			KH_var_interactionMenuOpen = true;
-			private _display = call KH_fnc_openSelfInteractionMenu;
-
-			[
-				[_display],
-				{
-					params ["_display"];
-					KH_var_interactionMenuOpen = false;
-
-					if !(isNull _display) then {
-						_display closeDisplay 2;
-					};
-				},
-				true,
-				{
-					params ["_display"];
-
-					(
-						(isNull _display) ||
-						(_currentUnit isNotEqualTo KH_var_playerUnit) ||
-						!(alive KH_var_playerUnit) || 
-						(KH_var_playerUnit getVariable ["ACE_isUnconscious", false]) || 
-						((lifeState KH_var_playerUnit) isEqualTo "INCAPACITATED")
-					);
-				},
-				false
-			] call KH_fnc_execute;
-		}, 
-		{}, 
-		[0xDC, [false, false, true]]
-	] call CBA_fnc_addKeybind;
-
-	[
-		"KH Framework", 
-		"KH_openRemoteInteractionMenu", 
-		"Open Remote Interaction Menu", 
-		{
-			private _viewTarget = call KH_fnc_getViewTarget;
-			private _surfaceDistance = _viewTarget select 0;
-			if (_surfaceDistance > 3) exitWith {};
-			private _object = createVehicleLocal ["KH_HelperSquare", ASLToAGL (_viewTarget select 3), [], 0, "CAN_COLLIDE"]; 
-			KH_var_interactionMenuOpen = true;
-			private _display = [_object] call KH_fnc_openRemoteInteractionMenu;
-			private _currentUnit = KH_var_playerUnit;
-
-			[
-				[_display, _object, _currentUnit],
-				{
-					params ["_display"];
-					KH_var_interactionMenuOpen = false;
-
-					if !(isNull _display) then {
-						_display closeDisplay 2;
-					};
-				},
-				true,
-				{
-					params ["_display", "_object", "_currentUnit"];
-
-					(
-						(isNull _display) ||
-						(_currentUnit isNotEqualTo KH_var_playerUnit) ||
-						((_object distance KH_var_playerUnit) > 3) || 
-						!(alive KH_var_playerUnit) || 
-						(KH_var_playerUnit getVariable ["ACE_isUnconscious", false]) || 
-						((lifeState KH_var_playerUnit) isEqualTo "INCAPACITATED")
-					);
-				},
-				false
-			] call KH_fnc_execute;
-		}, 
-		{}, 
-		[0xDC, [false, false, false]]
-	] call CBA_fnc_addKeybind;
-
-	[
-		"KH Framework", 
-		"KH_openVirtualInventory", 
-		"Open Virtual Inventory", 
-		{
-			KH_var_interactionMenuOpen = true;
-			private _display = [KH_var_playerUnit] call KH_fnc_openSimulatedInventory;
-
-			[
-				[_display],
-				{
-					params ["_display"];
-					KH_var_interactionMenuOpen = false;
-
-					if !(isNull _display) then {
-						_display closeDisplay 2;
-					};
-				},
-				true,
-				{
-					params ["_display"];
-
-					(
-						(isNull _display) ||
-						(_currentUnit isNotEqualTo KH_var_playerUnit) ||
-						!(alive KH_var_playerUnit) || 
-						(KH_var_playerUnit getVariable ["ACE_isUnconscious", false]) || 
-						((lifeState KH_var_playerUnit) isEqualTo "INCAPACITATED")
-					);
-				},
-				false
-			] call KH_fnc_execute;
-		}, 
-		{}, 
-		[0xDC, [false, true, true]]
-	] call CBA_fnc_addKeybind;
-
-	[
-		"KH Framework", 
-		"KH_openRemoteVirtualInventory", 
-		"Open Remote Virtual Inventory", 
-		{
-			private _viewTarget = call KH_fnc_getViewTarget;
-			private _surfaceDistance = _viewTarget select 0;
-			if (_surfaceDistance > 3) exitWith {};
-			private _object = createVehicleLocal ["KH_HelperSquare", ASLToAGL (_viewTarget select 3), [], 0, "CAN_COLLIDE"]; 
-			KH_var_interactionMenuOpen = true;
-			private _display = [_object] call KH_fnc_openSimulatedInventory;
-			private _currentUnit = KH_var_playerUnit;
-
-			[
-				[_display, _object, _currentUnit],
-				{
-					params ["_display"];
-					KH_var_interactionMenuOpen = false;
-
-					if !(isNull _display) then {
-						_display closeDisplay 2;
-					};
-				},
-				true,
-				{
-					params ["_display", "_object", "_currentUnit"];
-
-					(
-						(isNull _display) ||
-						(_currentUnit isNotEqualTo KH_var_playerUnit) ||
-						((_object distance KH_var_playerUnit) > 3) || 
-						!(alive KH_var_playerUnit) || 
-						(KH_var_playerUnit getVariable ["ACE_isUnconscious", false]) || 
-						((lifeState KH_var_playerUnit) isEqualTo "INCAPACITATED")
-					);
-				},
-				false
-			] call KH_fnc_execute;
-		}, 
-		{}, 
-		[0xDC, [false, true, false]]
-	] call CBA_fnc_addKeybind;
-
-	[
-		"KH Framework", 
 		"KH_toggleDiagnostics", 
 		"Toggle Diagnostics",
 		{
@@ -1156,7 +1002,7 @@ if hasInterface then {
 						if (_input isNotEqualTo "") then {
 							private _currentConsoleCache = profileNamespace getVariable ["KH_var_debugConsoleCache", []];
 
-							if (((count _input) <= 8192) && ((_currentConsoleCache param [KH_var_debugConsoleCacheIndex, ""]) isNotEqualTo _input)) then {
+							if (((count _input) <= 8192) && ((_currentConsoleCache param [((count _currentConsoleCache) - 1) max 0, ""]) isNotEqualTo _input)) then {
 								_currentConsoleCache pushBack _input;
 
 								if ((count _currentConsoleCache) > 32) then {
@@ -1164,7 +1010,6 @@ if hasInterface then {
 								};
 
 								profileNamespace setVariable ["KH_var_debugConsoleCache", _currentConsoleCache];
-								KH_var_debugConsoleCacheIndex = (count _currentConsoleCache) - 1;
 							};
 
 							ctrlSetText [
@@ -1178,7 +1023,11 @@ if hasInterface then {
 									}
 								] joinString ""
 							];
+
+							KH_var_debugConsoleCacheIndex = ((count _currentConsoleCache) - 1) max 0;
 						};
+
+						nil;
 					}
 				] call KH_fnc_addEventHandler;
 
@@ -1192,7 +1041,7 @@ if hasInterface then {
 						if (_input isNotEqualTo "") then {
 							private _currentConsoleCache = profileNamespace getVariable ["KH_var_debugConsoleCache", []];
 
-							if (((count _input) <= 8192) && ((_currentConsoleCache param [KH_var_debugConsoleCacheIndex, ""]) isNotEqualTo _input)) then {
+							if (((count _input) <= 8192) && ((_currentConsoleCache param [((count _currentConsoleCache) - 1) max 0, ""]) isNotEqualTo _input)) then {
 								_currentConsoleCache pushBack _input;
 
 								if ((count _currentConsoleCache) > 32) then {
@@ -1200,7 +1049,6 @@ if hasInterface then {
 								};
 
 								profileNamespace setVariable ["KH_var_debugConsoleCache", _currentConsoleCache];
-								KH_var_debugConsoleCacheIndex = (count _currentConsoleCache) - 1;
 							};
 
 							ctrlSetText [
@@ -1218,7 +1066,11 @@ if hasInterface then {
 									}
 								] joinString ""
 							];
+
+							KH_var_debugConsoleCacheIndex = ((count _currentConsoleCache) - 1) max 0;
 						};
+
+						nil;
 					}
 				] call KH_fnc_addEventHandler;
 

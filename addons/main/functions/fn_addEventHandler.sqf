@@ -26,7 +26,9 @@ if (_type isEqualType []) then {
 				private _eventName = missionNamespace getVariable '", _eventNameId, "';
 				private _eventId = missionNamespace getVariable '", _handlerId, "';
 				private _previousReturn = missionNamespace getVariable '", _previousReturnId, "';
-				missionNamespace setVariable ['", _previousReturnId, "', call (missionNamespace getVariable '", _function, "')];"
+				private _result = call (missionNamespace getVariable '", _function, "');
+				missionNamespace setVariable ['", _previousReturnId, "', _result];
+				_result;"
 			] joinString "");
 		}
 		else {
@@ -42,7 +44,9 @@ if (_type isEqualType []) then {
 				private _eventName = missionNamespace getVariable '", _eventNameId, "';
 				private _eventId = missionNamespace getVariable '", _handlerId, "';
 				private _previousReturn = missionNamespace getVariable '", _previousReturnId, "';
-				missionNamespace setVariable ['", _previousReturnId, "', call (missionNamespace getVariable '", _function, "')];"
+				private _result = call (missionNamespace getVariable '", _function, "');
+				missionNamespace setVariable ['", _previousReturnId, "', _result];
+				_result;"
 			] joinString "");
 		};
 	};
@@ -56,7 +60,9 @@ else {
 		private _eventName = missionNamespace getVariable '", _eventNameId, "';
 		private _eventId = missionNamespace getVariable '", _handlerId, "';
 		private _previousReturn = missionNamespace getVariable '", _previousReturnId, "';
-		missionNamespace setVariable ['", _previousReturnId, "', call (missionNamespace getVariable '", _function, "')];"
+		private _result = call (missionNamespace getVariable '", _function, "');
+		missionNamespace setVariable ['", _previousReturnId, "', _result];
+		_result;"
 	] joinString "");
 };
 
@@ -202,7 +208,9 @@ switch _eventType do {
 										private _args = missionNamespace getVariable '", _argumentsId, "';
 										private _eventName = missionNamespace getVariable '", _eventNameId, "';
 										private _previousReturn = missionNamespace getVariable '", _previousReturnId, "';
-										missionNamespace setVariable ['", _previousReturnId, "', call (missionNamespace getVariable '", _function, "')];
+										private _result = call (missionNamespace getVariable '", _function, "');
+										missionNamespace setVariable ['", _previousReturnId, "', _result];
+										_result;
 									}
 									else {
 										(missionNamespace getVariable ['", _persistentEntityId, "', objNull]) removeEventHandler [_thisEvent, _thisEventHandler];

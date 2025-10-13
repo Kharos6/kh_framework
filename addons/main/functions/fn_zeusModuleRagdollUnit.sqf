@@ -1,15 +1,18 @@
 isNil {
-	params [["_logic", objNull]];
-	deleteVehicle _logic;
+	params [["_logic", objNull, [objNull]]];
 
 	[
 		[attachedTo _logic],
 		{
-			params ["_entity"];
-			_entity addForce [[0, 0, 1], [0, 0, 0], false];
+			params ["_unit"];
+			_unit addForce [[0, 0, 1], [0, 0, 0], false];
 		},
-		_entity,
+		_unit,
 		true,
 		false
 	] call KH_fnc_execute;
+
+	deleteVehicle _logic;
 };
+
+nil;

@@ -8,7 +8,7 @@ class KH_Persistency: Title
 		class KH_ToggleTitle: Title
 		{
 			text = "Toggle";
-			tooltip = "<true> allows this function to execute.";
+			tooltip = "True allows this function to execute.";
 			y = QUOTE(0 * CTRL_DEFAULT_H + CTRL_DEFAULT_Y);
 		};
 		class KH_Toggle: ctrlCheckbox
@@ -36,7 +36,7 @@ class KH_Persistency: Title
 		class KH_PlayersTitle: Title
 		{
 			text = "Players";
-			tooltip = "<true> preserves player loadouts. Loadouts are assigned based on player Steam IDs, and loaded if a player has a valid loadout.";
+			tooltip = "True preserves player loadouts. Loadouts are assigned based on player Steam IDs, and loaded if a player has a valid loadout.";
 			y = QUOTE(3 * CTRL_DEFAULT_H + 10 *CTRL_DEFAULT_Y);
 		};
 		class KH_Players: ctrlCheckbox
@@ -64,7 +64,7 @@ class KH_Persistency: Title
 		class KH_ObjectsTitle: Title
 		{
 			text = "Objects";
-			tooltip = "<true> preserves cargo inventories. They are assigned based on object variable names, saved and loaded only if the object has a variable name and a valid inventory.";
+			tooltip = "True preserves cargo inventories. They are assigned based on object variable names, saved and loaded only if the object has a variable name and a valid inventory.";
 			y = QUOTE(5 * CTRL_DEFAULT_H + 20 *CTRL_DEFAULT_Y);
 		};
 		class KH_Objects: ctrlCheckbox
@@ -78,7 +78,7 @@ class KH_Persistency: Title
 		class KH_WorldTitle: Title
 		{
 			text = "World";
-			tooltip = "<true> preserves the world state, such as the time and date.";
+			tooltip = "True preserves the world state, such as the time and date.";
 			y = QUOTE(6 * CTRL_DEFAULT_H + 25 *CTRL_DEFAULT_Y);
 		};
 		class KH_World: ctrlCheckbox

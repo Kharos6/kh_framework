@@ -1,6 +1,6 @@
-params ["_speaker", "_text", ["_duration", 0]];
+params [["_speaker", "", [""]], ["_text", "", [""]], ["_duration", 0, [0]]];
 
-if (_duration == 0) then {
+if (_duration isEqualTo 0) then {
 	_duration = ((count _text) / 1125) * 60;
 };
 
@@ -22,6 +22,7 @@ private _toggleState = true;
 uiNamespace setVariable ["KH_var_subtitle", _control];
 
 [
+	[_control],
 	{
 		params ["_control"];
 
@@ -29,8 +30,9 @@ uiNamespace setVariable ["KH_var_subtitle", _control];
 			ctrlDelete _control;
 		};
 	}, 
-	[_control],
-	_duration
-] call CBA_fnc_waitAndExecute;
+	true,
+	str _duration,
+	false
+] call KH_fnc_execute;
 
 _control;

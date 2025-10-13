@@ -3,10 +3,20 @@ private _storedFunction = missionNamespace getVariable _function;
 
 if !(isNil "_storedFunction") exitWith {
 	if _unscheduled then {
-		_arguments call _storedFunction;
+		if (isNil "_arguments") then {
+			call _storedFunction;
+		}
+		else {
+			_arguments call _storedFunction;
+		};
 	}
 	else {
-		_arguments spawn _storedFunction;
+		if (isNil "_arguments") then {
+			spawn _storedFunction;
+		}
+		else {
+			_arguments spawn _storedFunction;
+		};
 	};
 };
 
@@ -20,10 +30,20 @@ if !(isNil "_storedFunction") exitWith {
 			missionNamespace setVariable [_function, _storedFunction];
 
 			if _unscheduled then {
-				_arguments call _storedFunction;
+				if (isNil "_arguments") then {
+					call _storedFunction;
+				}
+				else {
+					_arguments call _storedFunction
+				};
 			}
 			else {
-				_arguments spawn _storedFunction;
+				if (isNil "_arguments") then {
+					spawn _storedFunction;
+				}
+				else {
+					_arguments spawn _storedFunction;
+				};
 			};
 		};
 		
@@ -43,10 +63,20 @@ if !(isNil "_storedFunction") exitWith {
 					};
 
 					if _unscheduled then {
-						_arguments call _storedFunction;
+						if (isNil "_arguments") then {
+							call _storedFunction;
+						}
+						else {
+							_arguments call _storedFunction
+						};
 					}
 					else {
-						_arguments spawn _storedFunction;
+						if (isNil "_arguments") then {
+							spawn _storedFunction;
+						}
+						else {
+							_arguments spawn _storedFunction;
+						};
 					};
 				};
 			},

@@ -386,204 +386,38 @@ switch (typeName _environmentType) do {
 	};
 
 	case "STRING": {
-		if ((parseNumber _environmentType) isNotEqualTo 0) then {
-			private _unscheduled = _environment param [1, true, [true]];
-			([_special, _target] call _specialParser) params ["_return", "_specialIdOverride"];
-			_environmentType = parseNumber _environmentType;
+		private _unscheduled = _environment param [1, true, [true]];
+		([_special, _target] call _specialParser) params ["_return", "_specialIdOverride"];
+		_environmentType = parseNumber _environmentType;
 
-			KH_var_temporalExecutionStackAdditions pushBack [
-				[_arguments, [_function, false] call KH_fnc_parseFunction, _target, _special, _subfunction, _specialIdOverride, _unscheduled, _environmentId],
-				{
-					params ["_arguments", "_function", "_target", "_special", "_subfunction", "_specialIdOverride", "_unscheduled", "_environmentId"];
+		KH_var_temporalExecutionStackAdditions pushBack [
+			[_arguments, [_function, false] call KH_fnc_parseFunction, _target, _special, _subfunction, _specialIdOverride, _unscheduled, _environmentId],
+			{
+				params ["_arguments", "_function", "_target", "_special", "_subfunction", "_specialIdOverride", "_unscheduled", "_environmentId"];
 
-					if !(missionNamespace getVariable _environmentId) exitWith {																											
-						KH_var_temporalExecutionStackDeletions pushBackUnique _eventId;
-					};
-													
-					[_arguments, _function, _target, _special, _specialIdOverride, _unscheduled] call _subfunction;
+				if !(missionNamespace getVariable _environmentId) exitWith {																											
 					KH_var_temporalExecutionStackDeletions pushBackUnique _eventId;
-				},
-				_environmentType,
-				if (_environmentType > 0) then {
-					diag_tickTime + _environmentType;
-				}
-				else {
-					diag_frameNo + (abs _environmentType);
-				},
-				-1,
-				_environmentId,
-				_environmentId,
-				nil,
-				CBA_missionTime,
-				0
-			];
-
-			[[missionNamespace, _environmentId, clientOwner], _return];
-		}
-		else {
-			switch _environmentType do {
-				case "TEMPORAL": {
-					private _interval = _environment param [1, 0, [0]];
-					private _immediate = _environment param [2, true, [true]];
-					private _conditionArguments = _environment param [3];
-					private _conditionFunction = _environment param [4, {true;}, ["", {}]];
-					private _timeoutRules = _environment param [5, [0, false, false, false], [true, 0, "", []]];
-					private _timeoutArguments = _environment param [6];
-					private _timeoutFunction = _environment param [7, {}, ["", {}]];
-					private _verboseDelta = _environment param [8, false, [true]];
-					private _unscheduled = _environment param [9, true, [true]];
-					([_special, _target] call _specialParser) params ["_return", "_specialIdOverride"];
-
-					[
-						[
-							missionNamespace, 
-							_environmentId, 
-							clientOwner,
-							[
-								[
-									"TEMPORAL",
-									_immediate,
-									[_conditionArguments, missionNamespace getVariable ([_conditionFunction, false] call KH_fnc_parseFunction), _environmentId],
-									{
-										params ["_conditionArguments", "_conditionFunction", "_environmentId"];
-										private _handlerId = [missionNamespace, _environmentId, clientOwner, _eventId];
-
-										if (missionNamespace getVariable _environmentId) then {																											
-											_conditionArguments call _conditionFunction;
-										}
-										else {
-											[_handlerId] call KH_fnc_removeHandler;
-											false;
-										};
-									},
-									_timeoutRules,
-									_timeoutArguments,
-									_timeoutFunction,
-									_verboseDelta
-								],
-								_interval,
-								[_arguments, [_function, false] call KH_fnc_parseFunction, _target, _special, _subfunction, _specialIdOverride, _unscheduled, _environmentId],
-								{
-									params ["_arguments", "_function", "_target", "_special", "_subfunction", "_specialIdOverride", "_unscheduled", "_environmentId"];
-									private _handlerId = [missionNamespace, _environmentId, clientOwner, _eventId];													
-									[_arguments, _function, _target, _special, _specialIdOverride, _unscheduled] call _subfunction;
-								}
-							] call KH_fnc_addEventHandler
-						], 
-						_return
-					];
 				};
+												
+				[_arguments, _function, _target, _special, _specialIdOverride, _unscheduled] call _subfunction;
+				KH_var_temporalExecutionStackDeletions pushBackUnique _eventId;
+			},
+			_environmentType,
+			if (_environmentType > 0) then {
+				diag_tickTime + _environmentType;
+			}
+			else {
+				diag_frameNo + (abs _environmentType);
+			},
+			-1,
+			_environmentId,
+			_environmentId,
+			nil,
+			CBA_missionTime,
+			0
+		];
 
-				case "SEQUENCE": {
-					private _delays = _environment param [1, [], [[]]];
-					private _conditionArguments = _environment param [2, [], [[]]];
-					private _conditionFunctions = _environment param [3, [], [[]]];
-					private _timeout = _environment param [4, 0, [0, ""]];
-					private _timeoutOnDeletion = _environment param [5, false, [true]];
-					private _timeoutArguments = _environment param [6];
-					private _timeoutFunction = _environment param [7, {}, ["", {}]];
-					private _unscheduled = _environment param [8, true, [true]];
-					private _i = 0;
-					private _parsedExecutionRules = [[], [], []];
-					private _executions = [];
-					private _return = [];
-					private _totalDelay = diag_tickTime;
-
-					for "_i" from 0 to ((count _function) - 1) do {
-						private _currentArguments = _arguments param [_i];
-						private _currentFunction = _function param [_i, {}, ["", {}]];
-						private _currentTarget = _target param [_i, true, [true, 0, "", [], {}, objNull, teamMemberNull, grpNull, sideUnknown, locationNull]];
-						private _currentSpecial = _special param [_i, false, [true, [], createHashMap]];
-						private _currentDelay = _delays param [_i, 0, [0]];
-						private _currentConditionArguments = _conditionArguments param [_i];
-						private _currentConditionFunction = _conditionFunctions param [_i, {true;}, ["", {}]];
-						_totalDelay = _totalDelay + _currentDelay;
-						(_parsedExecutionRules select 0) set [_i, _totalDelay];
-						(_parsedExecutionRules select 1) set [_i, _currentConditionArguments];
-						(_parsedExecutionRules select 2) set [_i, missionNamespace getVariable ([_currentConditionFunction, false] call KH_fnc_parseFunction)];
-
-						if (_currentSpecial isEqualTo true) then {
-							_currentSpecial = ["JIP", true, false, ""];
-						};
-
-						if (_currentSpecial isEqualTo false) then {
-							_return pushBack [];
-							continue;
-						};
-
-						([_currentSpecial, _currentTarget] call _specialParser) params ["_currentReturn", "_currentSpecialIdOverride"];
-						_return pushBack _currentReturn;
-
-						_executions pushBack [
-							_currentArguments, 
-							[_currentFunction, false] call KH_fnc_parseFunction, 
-							_currentTarget, 
-							_currentSpecial, 
-							_currentSpecialIdOverride,
-							_unscheduled
-						];
-					};
-					
-					[
-						[
-							missionNamespace, 
-							_environmentId,
-							clientOwner,
-							[
-								[
-									"TEMPORAL",
-									true,
-									[0, _parsedExecutionRules, _environmentId],
-									{
-										params ["_currentIndex", "_parsedExecutionRules", "_environmentId"];
-										private _delay = (_parsedExecutionRules select 0) select _currentIndex;
-										private _conditionArguments = (_parsedExecutionRules select 1) select _currentIndex;
-										private _conditionFunction = (_parsedExecutionRules select 2) select _currentIndex;
-										private _handlerId = [missionNamespace, _environmentId, clientOwner, _eventId];
-										private _state = false;
-
-										if (missionNamespace getVariable _environmentId) then {
-											if (diag_tickTime > _delay) then {
-												if (_conditionArguments call _conditionFunction) then {
-													_state = true;
-													_this set [0, _currentIndex + 1];
-												};
-											};
-										}
-										else {
-											[_handlerId] call KH_fnc_removeHandler;
-										};
-
-										_state;
-									},
-									[_timeout, false, false, _timeoutOnDeletion],
-									_timeoutArguments,
-									_timeoutFunction,
-									false
-								],
-								0,
-								[0, _executions, _subfunction, _environmentId],
-								{
-									params ["_currentIndex", "_executions", "_subfunction", "_environmentId"];
-									private _handlerId = [missionNamespace, _environmentId, clientOwner, _eventId];
-									(_executions select _currentIndex) call _subfunction;
-									_this set [0, _currentIndex + 1];
-									
-									if ((_this select 0) > ((count _executions) - 1)) then {
-										[_handlerId] call KH_fnc_removeHandler;
-									};
-								}
-							] call KH_fnc_addEventHandler
-						], 
-						_return
-					];
-				};
-
-				default {
-					nil;
-				};
-			};
-		};
+		[[missionNamespace, _environmentId, clientOwner], _return];
 	};
 
 	default {

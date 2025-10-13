@@ -8,7 +8,7 @@ class KH_DynamicDisguise: Title
 		class KH_ToggleTitle: Title
 		{
 			text = "Toggle";
-			tooltip = "<true> allows this function to execute.";
+			tooltip = "True allows this function to execute.";
 			y = QUOTE(0 * CTRL_DEFAULT_H + CTRL_DEFAULT_Y);
 		};
 		class KH_Toggle: ctrlCheckbox
@@ -148,7 +148,7 @@ class KH_DynamicDisguise: Title
 		class KH_SetCaptiveTitle: Title
 		{
 			text = "Set Captive";
-			tooltip = "<true> sets disguised units as captives in order to prevent them from being engaged by their original side.";
+			tooltip = "True sets disguised units as captives in order to prevent them from being engaged by their original side.";
 			y = QUOTE(11 * CTRL_DEFAULT_H + 50 * CTRL_DEFAULT_Y);
 		};
 		class KH_SetCaptive: ctrlCheckbox

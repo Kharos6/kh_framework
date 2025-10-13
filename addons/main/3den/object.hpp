@@ -2,71 +2,6 @@ class Object
 {
 	class AttributeCategories
 	{
-		class KH_AssignIdentificationCard
-		{
-			displayName = "KH Assign Identification Card";
-			collapsed = 1;
-			class Attributes
-			{
-				class KH_AssignIdentificationCardSubcategory
-				{
-					description = "Assign an identification card to this unit, which can be used to verify the identity of the unit for missions where that is relevant.";
-					data = "AttributeSystemSubcategory";
-					control = "KH_SubcategoryNoHeader2";
-				};
-				class KH_AssignIdentificationCard 
-				{
-					property = "KH_AssignIdentificationCard";
-					control = "KH_AssignIdentificationCard";
-					expression = 
-					"\
-						_value params ['_toggle', '_name', '_gender', '_race', '_dateOfBirth', '_profession', '_ethnos', '_cardNumber', '_dateOfIssue', '_dateOfExpiry'];\
-						if (_toggle && !is3DEN) then {\
-							KH_var_postInitExecutions pushBack [\
-								[_this, _name, _gender, _race, _dateOfBirth, _profession, _ethnos, _cardNumber, _dateOfIssue, _dateOfExpiry],\
-								{\
-									_this call KH_fnc_assignIdentificationCard;\
-								}\
-							];\
-						};\
-					";
-					defaultValue = "[false, '', '', '', '', '', '', '', '', '']";
-					condition = "objectControllable";
-				};
-			};
-		};
-		class KH_AssignTerminal
-		{
-			displayName = "KH Assign Terminal";
-			collapsed = 1;
-			class Attributes
-			{
-				class KH_AssignTerminalSubcategory
-				{
-					description = "Assigns a terminal to this entity, allowing players to access it through an action.";
-					data = "AttributeSystemSubcategory";
-					control = "KH_SubcategoryNoHeader1";
-				};
-				class KH_AssignTerminal 
-				{
-					property = "KH_AssignTerminal";
-					control = "KH_AssignTerminal";
-					expression = 
-					"\
-						_value params ['_toggle', '_name', '_identifier', '_description', '_condition', '_function'];\
-						if (_toggle && !is3DEN) then {\
-							KH_var_postInitExecutions pushBack [\
-								[[_this], _name, _identifier, _description, compile _condition, compile _function],\
-								{\
-									_this call KH_fnc_assignTerminal;\
-								}\
-							];\
-						};\
-					";
-					defaultValue = "[false, '', '', '', '', '']";
-				};
-			};
-		};
 		class KH_ConditionalPresence
 		{
 			displayName = "KH Conditional Presence";
@@ -75,7 +10,7 @@ class Object
 			{
 				class KH_ConditionalPresenceSubcategory
 				{
-					description = "Specify a CBA event which, every time it is broadcasted to the server, changes the simulation and visibility of this entity. If its argument is <true>, the entity will become simulated and visible. If its argument <false>, the entity will become unsimulated and invisible. The initial simulation and visibility state of the entity remains unchanged until the event is broadcast for the first time.";
+					description = "Specify a CBA event which, every time it is broadcasted to the server, changes the simulation and visibility of this entity. If its argument is true, the entity will become simulated and visible. If its argument false, the entity will become unsimulated and invisible. The initial simulation and visibility state of the entity remains unchanged until the event is broadcast for the first time.";
 					data = "AttributeSystemSubcategory";
 					control = "KH_SubcategoryNoHeader4";
 				};
@@ -86,7 +21,7 @@ class Object
 					expression = 
 					"\
 						_value params ['_toggle', '_variableName', '_init', '_invert'];\
-						if (_toggle && !is3DEN && (_variableName != '')) then {\
+						if (_toggle && !is3DEN && (_variableName isNotEqualTo '')) then {\
 							[_this, _variableName, compile _init, _invert] call KH_fnc_conditionalPresence;\
 						};\
 					";
@@ -124,104 +59,6 @@ class Object
 					";
 					defaultValue = "[false, '']";
 					condition = "objectControllable";
-				};
-			};
-		};
-		class KH_Dynamic3DAudio
-		{
-			displayName = "KH Dynamic 3D Audio";
-			collapsed = 1;
-			class Attributes
-			{
-				class KH_Dynamic3DAudioSubcategory
-				{
-					description = "Plays 3D audio emitting from this entity for all players at a set interval and chance, under set conditions.";
-					data = "AttributeSystemSubcategory";
-					control = "KH_SubcategoryNoHeader2";
-				};
-				class KH_Dynamic3DAudio 
-				{
-					property = "KH_Dynamic3DAudio";
-					control = "KH_Dynamic3DAudio";
-					expression = 
-					"\
-						_value params ['_toggle', '_audio', '_condition', '_interval', '_randomDelay', '_chance'];\
-						if (_toggle && !is3DEN) then {\
-							[[_this], parseSimpleArray _audio, compile _condition, parseNumber _interval, parseNumber _randomDelay, _chance] call KH_fnc_dynamic3dAudio;\
-						};\
-					";
-					defaultValue = "[false, '[]', '', '', '', 1, '100%']";
-				};
-			};
-		};
-		class KH_EquipableObject
-		{
-			displayName = "KH Equipable Object";
-			collapsed = 1;
-			class Attributes
-			{
-				class KH_EquipableObjectSubcategory
-				{
-					description = "Designate this object to be equipable by players, allowing them to carry it on the designated position on their body.";
-					data = "AttributeSystemSubcategory";
-					control = "KH_SubcategoryNoHeader2";
-				};
-				class KH_EquipableObject 
-				{
-					property = "KH_EquipableObject";
-					control = "KH_EquipableObject";
-					expression = 
-					"\
-						_value params ['_toggle', '_bone', '_position', '_rotation', '_scale', '_mass', '_hideInVehicles', '_toggleEquip', '_exclusive', '_event', '_objectName'];\
-						if (_toggle && !is3DEN) then {\
-							KH_var_postInitExecutions pushBack [\
-								[objNull, _this, _bone, parseSimpleArray _position, parseSimpleArray _rotation, parseNumber _scale, parseNumber _mass, _hideInVehicles, _toggleEquip, _exclusive, _event, _objectName],\
-								{\
-									_this call KH_fnc_equipableObject;\
-								}\
-							];\
-						};\
-					";
-					defaultValue = "[false, '', '[]', '[]', '', '', true, true, true, '', '']";
-					condition = "1 - objectControllable";
-				};
-			};
-		};
-		class KH_FultonExtract
-		{
-			displayName = "KH Fulton Extract";
-			collapsed = 1;
-			class Attributes
-			{
-				class KH_FultonExtractSubcategory
-				{
-					description = "Designate this object as a fulton extraction point, allowing players to interact with it in order to summon a balloon that can be picked up by the desired vehicle, after which anchored players will be roped into said vehicle.";
-					data = "AttributeSystemSubcategory";
-					control = "KH_SubcategoryNoHeader3";
-				};
-				class KH_FultonExtract 
-				{
-					property = "KH_FultonExtract";
-					control = "KH_FultonExtract";
-					expression = 
-					"\
-						_value params ['_toggle', '_vehicles', '_height', '_distance', '_maximumParticipants', '_duration', '_objectName'];\
-						if (_toggle && !is3DEN) then {\
-							KH_var_postInitExecutions pushBack [\
-								[_this, parseSimpleArray _vehicles, _height, parseNumber _distance, parseNumber _maximumParticipants, parseNumber _duration, _objectName],\
-								{\
-									params ['_entity', '_vehicles', '_height', '_distance', '_maximumParticipants', '_duration', '_objectName'];\
-									private _parsedVehicles = [];\
-									{\
-										_parsedVehicles pushBack (missionNamespace getVariable [_x, objNull]);\
-									} forEach _vehicles;\
-									[_entity, _parsedVehicles, _height, _distance, _maximumParticipants, _duration, _objectName] call KH_fnc_fultonExtract;\
-								}\
-							];\
-						};\
-					";
-					defaultValue = "[false, '[]', 100, '', '', '', '', '100m']";
-					condition = "1 - objectControllable";
 				};
 			};
 		};
@@ -275,200 +112,6 @@ class Object
 				};
 			};
 		};
-		class KH_SetAnimation
-		{
-			displayName = "KH Set Animation";
-			collapsed = 1;
-			class Attributes
-			{
-				class KH_SetAnimationSubcategory
-				{
-					description = "Plays the desired animation on this unit.";
-					data = "AttributeSystemSubcategory";
-					control = "KH_SubcategoryNoHeader1";
-				};
-				class KH_SetAnimation 
-				{
-					property = "KH_SetAnimation";
-					control = "KH_SetAnimation";
-					expression = 
-					"\
-						_value params ['_toggle', '_animation', '_duration', '_interruptType'];\
-						if (_toggle && !is3DEN) then {\
-							private _selectedInterruptType = 'NONE';\
-							switch _interruptable do {\
-								case 1: {\
-									_selectedInterruptType = 'UNIT';\
-								};\
-								case 2: {\
-									_selectedInterruptType = 'GROUP';\
-								};\
-							};\
-							if (('[' in _animation) || (']' in _animation)) then {\
-								_animation = parseSimpleArray _animation;\
-							};\
-							KH_var_postInitExecutions pushBack [\
-								[_this, _animation, _this, _this, _this, _this, _this, parseNumber _duration, false, false, false, false, _selectedInterruptType, ''],\
-								{\
-									_this call KH_fnc_setAnimation;\
-								}\
-							];\
-						};\
-					";
-					defaultValue = "[false, '', '', 0]";
-					condition = "objectControllable";
-				};
-			};
-		};
-		class KH_SetCameraTexture
-		{
-			displayName = "KH Set Camera Texture";
-			collapsed = 1;
-			class Attributes
-			{
-				class KH_SetCameraTextureSubcategory
-				{
-					description = "Displays the view of a generated camera onto a texture on this entity.";
-					data = "AttributeSystemSubcategory";
-					control = "KH_SubcategoryNoHeader1";
-				};
-				class KH_SetCameraTexture 
-				{
-					property = "KH_SetCameraTexture";
-					control = "KH_SetCameraTexture";
-					expression = 
-					"\
-						_value params ['_toggle', '_positionEntity', '_targetEntity', '_texture', '_renderTarget'];\
-						if (_toggle && !is3DEN) then {\
-							KH_var_postInitExecutions pushBack [\
-								[_this, _positionEntity, _targetEntity, parseNumber _texture, _renderTarget + 1],\
-								{\
-									params ['_entity', '_positionEntity', '_targetEntity', '_texture', '_renderTarget'];\
-									[[_entity, missionNamespace getVariable [_positionEntity, objNull], missionNamespace getVariable [_targetEntity, objNull], _texture, _renderTarget], 'KH_fnc_setCameraTexture', ['JIP', 'PLAYERS', _entity, true, false, ''], 'THIS_FRAME'] call KH_fnc_execute;\
-								}\
-							];\
-						};\
-					";
-					defaultValue = "[false, '', '', '', 0]";
-				};
-			};
-		};
-		class KH_SetVideoTexture
-		{
-			displayName = "KH Set Video Texture";
-			collapsed = 1;
-			class Attributes
-			{
-				class KH_SetVideoTextureSubcategory
-				{
-					description = "Plays a video, and optionally audio, on the selected texture on this entity, at a desired interval, while the entity remains alive.";
-					data = "AttributeSystemSubcategory";
-					control = "KH_SubcategoryNoHeader2";
-				};
-				class KH_SetVideoTexture 
-				{
-					property = "KH_SetVideoTexture";
-					control = "KH_SetVideoTexture";
-					expression = 
-					"\
-						_value params ['_toggle', '_video', '_texture', '_audio', '_interval'];\
-						if (_toggle && !is3DEN) then {\
-							KH_var_postInitExecutions pushBack [\
-								[_this, _video, parseNumber _texture, _audio, parseNumber _interval],\
-								{\
-									params ['_entity', '_video', '_texture', '_audio', '_interval'];\
-									[\
-										_this,\
-										{\
-											params ['_entity', '_video', '_texture', '_audio', '_interval'];\
-											[\
-												{\
-													_args params ['_entity', '_video', '_texture', '_audio'];\
-													if (alive _entity) then {\
-														[_entity, _video, _texture, _audio] call KH_fnc_setVideoTexture;\
-													}\
-													else {\
-														_entity say3D '';\
-														object setObjectTexture [_texture, '#(rgb,8,8,3)color(0,0,0,1)'];\
-														[_handle] call CBA_fnc_removePerFrameHandler;\
-													};\
-												},\
-												_interval,\
-												[_entity, _video, _texture, _audio]\
-											] call CBA_fnc_addPerFrameHandler;\
-										},\
-										['JIP', 'PLAYERS', _entity, true, false, ''],\
-										'THIS_FRAME'\
-									] call KH_fnc_execute;\
-								}\
-							];\
-						};\
-					";
-					defaultValue = "[false, '', '', '', '']";
-				};
-			};
-		};
-		class KH_Teleporter
-		{
-			displayName = "KH Teleporter";
-			collapsed = 1;
-			class Attributes
-			{
-				class KH_TeleporterSubcategory
-				{
-					description = "Designates this entity as a teleporter, adding an action available to all players that allows them to teleport to the desired position.";
-					data = "AttributeSystemSubcategory";
-					control = "KH_SubcategoryNoHeader2";
-				};
-				class KH_Teleporter 
-				{
-					property = "KH_Teleporter";
-					control = "KH_Teleporter";
-					expression = 
-					"\
-						_value params ['_toggle', '_position', '_rotation', '_transition', '_heal', '_freefallHeight', '_init', '_name'];\
-						if (_toggle && !is3DEN) then {\
-							KH_var_postInitExecutions pushBack [\
-								[_this, _position, _rotation, parseNumber _transition, _heal, parseNumber _freefallHeight, compile _init, _name],\
-								{\
-									params ['_entity', '_position', '_rotation', '_transition', '_heal', '_freefallHeight', '_init', '_name'];\
-									[\
-										[_entity, missionNamespace getVariable [_position, objNull], missionNamespace getVariable [_rotation, objNull], _transition, _heal, _freefallHeight, _init, _name],\
-										{\
-											params ['_entity', '_position', '_rotation', '_transition', '_heal', '_freefallHeight', '_init', '_name'];\
-											[\
-												_entity,\
-												_name,\
-												'\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_loadVehicle_ca.paa',\
-												'\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_loadVehicle_ca.paa',\
-												'((_this distance _target) < 4)',\
-												'((_caller distance _target) < 4)',\
-												{},\
-												{},\
-												{\
-													(_this select 3) params ['_entity', '_position', '_rotation', '_transition', '_heal', '_freefallHeight', '_init'];\
-													[[player], _position, _rotation, false, _transition, _heal, _freefallHeight, _init] call KH_fnc_teleport;\
-												},\
-												{},\
-												[_entity, _position, _rotation, _transition, _heal, _freefallHeight, _init],\
-												1,\
-												0,\
-												false,\
-												false,\
-												true\
-											] call BIS_fnc_holdActionAdd;\
-										},\
-										['JIP', 'PLAYERS', _entity, false, false, ''],\
-										'THIS_FRAME'\
-									] call KH_fnc_execute;\
-								}\
-							];\
-						};\
-					";
-					defaultValue = "[false, '', '', '', false, '', '', '']";
-				};
-			};
-		};
 		class KH_TransferToHeadlessClient
 		{
 			displayName = "KH Transfer To Headless Client";
@@ -499,72 +142,6 @@ class Object
 				};
 			};
 		};
-		class KH_VehicleSequence
-		{
-			displayName = "KH Vehicle Sequence";
-			collapsed = 1;
-			class Attributes
-			{
-				class KH_VehicleSequenceSubcategory
-				{
-					description = "Play a vehicle sequence on this vehicle when the mission starts.";
-					data = "AttributeSystemSubcategory";
-					control = "KH_SubcategoryNoHeader1";
-				};
-				class KH_VehicleSequence 
-				{
-					property = "KH_VehicleSequence";
-					control = "KH_VehicleSequence";
-					expression = 
-					"\
-						_value params ['_toggle', '_movementData', '_firingData', '_disableDamage', '_endPosition'];\
-						if (_toggle && !is3DEN) then {\
-							KH_var_postInitExecutions pushBack [\
-								[_this, _movementData, _firingData, _disableDamage, _endPosition],\
-								{\
-									params ['_vehicle', '_movementData', '_firingData', '_disableDamage', '_endPosition'];\
-									[_vehicle, _movementData, _firingData, _disableDamage, missionNamespace getVariable [_endPosition, objNull]] call KH_fnc_vehicleSequence;\
-								}\
-							];\
-						};\
-					";
-					defaultValue = "[false, '', '', false, '']";
-					condition = "objectVehicle";
-				};
-			};
-		};
-		class KH_VisualTrigger
-		{
-			displayName = "KH Visual Trigger";
-			collapsed = 1;
-			class Attributes
-			{
-				class KH_VisualTriggerSubcategory
-				{
-					description = "Designate this entity as a trigger that activates and deactivates based on the entity's presence on a player's screen. This trigger does not activate for curators or spectators.";
-					data = "AttributeSystemSubcategory";
-					control = "KH_SubcategoryNoHeader2";
-				};
-				class KH_VisualTrigger 
-				{
-					property = "KH_VisualTrigger";
-					control = "KH_VisualTrigger";
-					expression = 
-					"\
-						_value params ['_toggle', '_screenMultiplier', '_proximity', '_distance', '_conditionServer', '_conditionPlayer', '_trueFunction', '_falseFunction', '_repeatable', '_interval', '_shared'];\
-						if (_toggle && !is3DEN) then {\
-							KH_var_postInitExecutions pushBack [\
-								[_this, _screenMultiplier, parseNumber _proximity, parseNumber _distance, compile _conditionServer, compile _conditionPlayer, compile _trueFunction, compile _falseFunction, _repeatable, parseNumber _interval, _shared],\
-								{\
-									_this call KH_fnc_visualTrigger;\
-								}\
-							];\
-						};\
-					";
-					defaultValue = "[false, 1, '', '', '', '', '', '', false, '', true, '100%']";
-				};
-			};
-		};
 		class KH_Miscellaneous
 		{
 			displayName = "KH Miscellaneous";
@@ -579,7 +156,7 @@ class Object
 					control = "Edit";
 					expression = 
 					"\
-						if ((_value != '') && !is3DEN) then {\
+						if ((_value isNotEqualTo '') && !is3DEN) then {\
 							KH_var_postInitExecutions pushBack [\
 								[_this, parseNumber _value],\
 								{\
@@ -607,7 +184,7 @@ class Object
 					control = "Edit";
 					expression = 
 					"\
-						if ((_value != '') && (_value != '[]') && !is3DEN) then {\
+						if ((_value isNotEqualTo '') && (_value isNotEqualTo '[]') && !is3DEN) then {\
 							private _array = parseSimpleArray _value;\
 							_this setVariable ['KH_var_assignedEntityArrayBuilderArrays', _array];\
 							private _originalArrayBuilderArray = missionNamespace getVariable ['KH_var_entityArrayBuilderArrays', []];\
@@ -630,7 +207,7 @@ class Object
 					control = "Edit";
 					expression = 
 					"\
-						if ((_value != '') && !is3DEN) then {\
+						if ((_value isNotEqualTo '') && !is3DEN) then {\
 							_this setUnitFreefallHeight (parseNumber _value);\
 						};\
 					";
@@ -645,7 +222,7 @@ class Object
 					control = "EditMulti5";
 					expression = 
 					"\
-						if ((_value != '') && !is3DEN) then {\
+						if ((_value isNotEqualTo '') && !is3DEN) then {\
 							KH_var_postInitExecutions pushBack [\
 								[_this, compile _value],\
 								{\
@@ -676,7 +253,7 @@ class Object
 					control = "EditMulti5";
 					expression = 
 					"\
-						if ((_value != '') && !is3DEN) then {\
+						if ((_value isNotEqualTo '') && !is3DEN) then {\
 							KH_var_postInitExecutions pushBack [\
 								[_this, compile _value],\
 								{\
@@ -715,21 +292,6 @@ class Object
 					";
 					defaultValue = "false";
 				};
-				class KH_RecoilCoefficient
-				{
-					displayName = "Recoil Coefficient";
-					tooltip = "Set a number to represent the amount of recoil this unit will experience when firing weapons. Leave empty for no change.";
-					property = "KH_RecoilCoefficient";
-					control = "Edit";
-					expression = 
-					"\
-						if ((_value != '') && !is3DEN) then {\
-							_this setUnitRecoilCoefficient (parseNumber _value);\
-						};\
-					";
-					defaultValue = "''";
-					condition = "objectControllable";
-				};
 				class KH_SetRandomLoadout
 				{
 					displayName = "Set Random Loadout";
@@ -738,7 +300,7 @@ class Object
 					control = "Edit";
 					expression = 
 					"\
-						if ((_value != '') && (_value != '[]') && !is3DEN) then {\
+						if ((_value isNotEqualTo '') && (_value isNotEqualTo '[]') && !is3DEN) then {\
 							KH_var_postInitExecutions pushBack [\
 								[_this, _value],\
 								{\

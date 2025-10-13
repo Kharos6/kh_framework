@@ -1,11 +1,7 @@
 isNil {
-	params [["_logic", objNull]];
-	private _entity = attachedTo _logic;
+	params [["_logic", objNull, [objNull]]];
+	[attachedTo _logic] call KH_fnc_arma;
 	deleteVehicle _logic;
-
-	if !(_entity isKindOf "Man") then {
-		[_entity] call KH_fnc_arma;
-	};
 };
 
-true;
+nil;

@@ -156,7 +156,6 @@ class CfgVehicles
 		vehicleClass = "KH_Helpers";
 		scope = 2;
 	};
-	#include "\x\kh\addons\main\vehicles\modules\cameraSequence.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\dynamicDisguiseEquipment.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\editTerrainObjects.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\endMission.hpp"

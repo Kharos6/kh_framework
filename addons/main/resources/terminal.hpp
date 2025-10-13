@@ -6,7 +6,7 @@ class KH_ResourceTerminal
     onLoad = "";
     class Controls 
     {
-        class KH_Title: RscText 
+        class Title: RscText 
         {
             idc = 100;
             text = "";
@@ -17,7 +17,7 @@ class KH_ResourceTerminal
             colorBackground[] = {GUI_THEME_RGB_R, GUI_THEME_RGB_G, GUI_THEME_RGB_B, GUI_THEME_ALPHA};
             moving = 1;
         };
-        class KH_Background: RscText 
+        class Background: RscText 
         {
             x = QUOTE(RSC_POS_X(6.5));
             y = QUOTE(RSC_POS_Y(6));
@@ -25,7 +25,7 @@ class KH_ResourceTerminal
             h = QUOTE(RSC_POS_W(27));
             colorBackground[] = {0, 0, 0, 0.9};
         };
-        class KH_Information: RscTextMulti
+        class Information: RscTextMulti
         {
             idc = 101;
             text = "";
@@ -35,7 +35,7 @@ class KH_ResourceTerminal
             h = QUOTE(RSC_POS_W(5));
             colorBackground[] = {0, 0, 0, 0.9};
         };
-        class KH_Console: RscText 
+        class Console: RscText 
         {
             text = "CONSOLE";
             x = QUOTE(RSC_POS_X(6.5));
@@ -44,7 +44,7 @@ class KH_ResourceTerminal
             h = QUOTE(RSC_POS_H(1.25));
             colorBackground[] = {GUI_THEME_RGB_R, GUI_THEME_RGB_G, GUI_THEME_RGB_B, GUI_THEME_ALPHA};
         };
-        class KH_Output: RscTextMulti
+        class Output: RscTextMulti
         {
             idc = 102;
             text = "";
@@ -54,7 +54,7 @@ class KH_ResourceTerminal
             h = QUOTE(RSC_POS_W(27));
             colorBackground[] = {0, 0, 0, 0};
         };
-        class KH_Input: RscEdit
+        class Input: RscEdit
         {
             idc = 103;
             font = "EtelkaMonospacePro";
@@ -65,7 +65,7 @@ class KH_ResourceTerminal
             deletable = 1;
             colorBackground[] = {0, 0, 0, 0.9};
         };
-        class KH_ButtonExecute: RscButton 
+        class ButtonExecute: RscButton 
         {
             idc = 104;
 			text = "EXECUTE";
@@ -74,7 +74,7 @@ class KH_ResourceTerminal
             w = QUOTE(RSC_POS_W(5));
             h = QUOTE(RSC_POS_H(1));
         };
-        class KH_ButtonExit: RscButtonMenuCancel 
+        class ButtonExit: RscButtonMenuCancel 
         {
 			text = "EXIT";
             x = QUOTE(RSC_POS_X(6.5));

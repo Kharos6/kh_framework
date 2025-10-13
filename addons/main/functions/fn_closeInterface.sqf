@@ -1,13 +1,16 @@
-params [["_displays", []], ["_dialog", true]];
+params [["_display", displayNull, [0, displayNull]], ["_dialog", true, [true]]];
 
 if _dialog then {
 	closeDialog 0;
 };
 
-{
-	if !(isNull (findDisplay _x)) then {
-		(findDisplay _x) closeDisplay 2;
+if (_display isEqualType 0) then {
+	if !(isNull (findDisplay _display)) then {
+		(findDisplay _display) closeDisplay 2;
 	};
-} forEach _displays;
-
-true;
+}
+else {
+	if !(isNull _display) then {
+		_display closeDisplay 2;
+	};
+};

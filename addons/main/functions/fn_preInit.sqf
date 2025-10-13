@@ -366,6 +366,8 @@ if isServer then {
 	publicVariable "KH_var_jipPlayerMachines";
 	KH_var_logicGroup = createGroup [sideLogic, false];
 	publicVariable "KH_var_logicGroup";
+	KH_var_diagnosticsState = false;
+	publicVariable "KH_var_diagnosticsState";
 	KH_var_jipHandlers = createHashMap;
 	KH_var_allEntities = entities [[], ["Animal"], true, false];
 	KH_var_allLivingEntities = KH_var_allEntities select {alive _x;};
@@ -946,11 +948,22 @@ if isServer then {
 			};
 		}
 	];
+
+	[
+		[],
+		{
+			if KH_var_diagnosticsState then {
+				missionNamespace setVariable ["KH_var_diagnosticsFramerateServer", parseNumber (diag_fps toFixed 0), KH_var_adminMachine];
+				missionNamespace setVariable ["KH_var_diagnosticsLocalUnitsServer", {local _x;} count allUnits, KH_var_adminMachine];
+			};
+		},
+		true,
+		1,
+		false
+	] call KH_fnc_execute;
 };
 
 if hasInterface then {
-	KH_var_contextMenuOpen = false;
-	KH_var_interactionMenuOpen = false;
 	KH_var_cameraType = "CAMERA";
 	KH_var_viewTargetCheckFrame = 0;
 	KH_var_weaponTargetCheckFrame = 0;
@@ -1303,6 +1316,18 @@ if hasInterface then {
 			KH_var_drawUiExecutionStackMonitor deleteAt _handlerId;
 		}
 	] call CBA_fnc_addEventHandler;
+
+	[
+		[],
+		{
+			if KH_var_diagnosticsState then {
+				player setVariable ["KH_var_diagnosticsFramerateServer", parseNumber (diag_fps toFixed 0), KH_var_adminMachine];
+			};
+		},
+		true,
+		1,
+		false
+	] call KH_fnc_execute;
 };
 
 if (!isServer && !hasInterface) then {
@@ -1324,6 +1349,19 @@ if (!isServer && !hasInterface) then {
 		},
 		true,
 		{(!(isNull player) && (alive player));},
+		false
+	] call KH_fnc_execute;
+
+	[
+		[],
+		{
+			if KH_var_diagnosticsState then {
+				player setVariable ["KH_var_diagnosticsFramerate", parseNumber (diag_fps toFixed 0), KH_var_adminMachine];
+				player setVariable ["KH_var_diagnosticsLocalUnits", {local _x;} count allUnits, KH_var_adminMachine];
+			};
+		},
+		true,
+		1,
 		false
 	] call KH_fnc_execute;
 };

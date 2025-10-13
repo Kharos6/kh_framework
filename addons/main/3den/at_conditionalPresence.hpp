@@ -8,7 +8,7 @@ class KH_ConditionalPresence: Title
 		class KH_ToggleTitle: Title
 		{
 			text = "Toggle";
-			tooltip = "<true> allows this function to execute.";
+			tooltip = "True allows this function to execute.";
 			y = QUOTE(0 * CTRL_DEFAULT_H + CTRL_DEFAULT_Y);
 		};
 		class KH_Toggle: ctrlCheckbox
@@ -36,7 +36,7 @@ class KH_ConditionalPresence: Title
 		class KH_InitTitle: Title
 		{
 			text = "Init";
-			tooltip = "Unscheduled code to execute locally to this entity when the variable state changes. Useful for adding velocity to vehicles in the air. Passed arguments available through <_this> are: <[_entity (OBJECT), _variableState (BOOLEAN)]>.";
+			tooltip = "Unscheduled code to execute locally to this entity when the variable state changes. Useful for adding velocity to vehicles in the air. Passed arguments available through _this are: [_entity (OBJECT), _variableState (BOOLEAN)].";
 			y = QUOTE(3 * CTRL_DEFAULT_H + 10 * CTRL_DEFAULT_Y);
 		};
 		class KH_Init: ctrlEditMulti
@@ -50,7 +50,7 @@ class KH_ConditionalPresence: Title
 		class KH_InvertTitle: Title
 		{
 			text = "Invert";
-			tooltip = "<true> makes it so that the logic is reversed, meaning that the designated variable must be <false> in order for the entity to become visible and simulated, and <true> in order for it to become invisible and unsimulated.";
+			tooltip = "True makes it so that the logic is reversed; the designated variable must be false in order for the entity to become visible and simulated, and true in order for it to become invisible and unsimulated.";
 			y = QUOTE(6 * CTRL_DEFAULT_H + 15 * CTRL_DEFAULT_Y);
 		};
 		class KH_Invert: ctrlCheckbox

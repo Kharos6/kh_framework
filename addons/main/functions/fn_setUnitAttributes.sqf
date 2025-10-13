@@ -280,8 +280,7 @@ _savedAttributes params [
 		} forEach _targets;
 
 		{
-			_x params ["_name", "_value", "_public"];
-			_unit setVariable [_name, _value call KH_fnc_parseValue, _public];
+			_unit setVariable _x;
 		} forEach _variables;
 	}, 
 	_unit, 

@@ -1,31 +1,28 @@
-params ["_objects", ["_local", true], ["_init", {}]];
-private _simpleObjects = [];
+params [["_object", objNull, [objNull]], ["_local", true, [true]], ["_init", {}, [{}]]];
+private "_simpleObject";
+private _position = getPosWorld _object;
+private _vectorDirAndUp = [vectorDir _object, vectorUp _object];
+private _currentObject = (getModelInfo _object) select 1;
+deleteVehicle _object;
 
-{
-	private _position = getPosWorld _x;
-	private _vectorDirAndUp = [vectorDir _x, vectorUp _x];
-	private _currentObject = (getModelInfo _x) select 1;
-	deleteVehicle _x;
+if _local then {
+	[
+		[_init, _position, _vectorDirAndUp, _currentObject], 
+		{
+			params ["_init", "_position", "_vectorDirAndUp", "_currentObject"];	
+			private _simpleObject = createSimpleObject [_currentObject, _position, true];
+			_simpleObject setVectorDirAndUp _vectorDirAndUp;
+			[_simpleObject] call _init;
+		},
+		"GLOBAL",
+		true,
+		true
+	] call KH_fnc_execute;
+}
+else {
+	_simpleObject = createSimpleObject [_currentObject, _position, false];
+	_simpleObject setVectorDirAndUp _vectorDirAndUp;
+	[_simpleObject] call _init;
+};
 
-	if _local then {
-		[
-			[_init, _position, _vectorDirAndUp, _currentObject], 
-			{
-				params ["_init", "_position", "_vectorDirAndUp", "_currentObject"];	
-				private _simpleObject = createSimpleObject [_currentObject, _position, true];
-				_simpleObject setVectorDirAndUp _vectorDirAndUp;
-				[_simpleObject] call _init;
-			},
-			["JIP", "GLOBAL", true, false, false, ""],
-			true
-		] call KH_fnc_execute;
-	}
-	else {
-		private _simpleObject = createSimpleObject [_currentObject, _position, false];
-		_simpleObject setVectorDirAndUp _vectorDirAndUp;
-		_simpleObjects pushBack _simpleObject;
-		[_simpleObject] call _init;
-	};
-} forEach _objects;
-
-_simpleObjects;
+_simpleObject;

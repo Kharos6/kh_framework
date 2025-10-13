@@ -8,7 +8,7 @@ class KH_RecoverDisconnectedPlayers: Title
 		class KH_ToggleTitle: Title
 		{
 			text = "Toggle";
-			tooltip = "<true> allows this function to execute.";
+			tooltip = "True allows this function to execute.";
 			y = QUOTE(0 * CTRL_DEFAULT_H + CTRL_DEFAULT_Y);
 		};
 		class KH_Toggle: ctrlCheckbox

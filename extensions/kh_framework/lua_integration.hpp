@@ -33,7 +33,8 @@ public:
         // Quick check - if no C-style operators, return immediately
         if (code.find("!=") == std::string::npos && 
             code.find("&&") == std::string::npos && 
-            code.find("||") == std::string::npos) {
+            code.find("||") == std::string::npos &&
+            code.find("!") == std::string::npos) {
             return code;
         }
         
@@ -125,7 +126,8 @@ public:
         std::vector<Replacement> replacements = {
             {"!=", "~=", 0},
             {"&&", " and ", 3},
-            {"||", " or ", 2}
+            {"||", " or ", 2},
+            {"!", " not ", 4}
         };
                 
         // Calculate space needed based on actual operator count
@@ -136,9 +138,15 @@ public:
             if (!in_string(pos)) {
                 for (const auto& rep : replacements) {
                     if (result.compare(pos, rep.from.length(), rep.from) == 0) {
+                        // Special handling for "!" - make sure it's not part of "!="
+                        if (rep.from == "!" && pos + 1 < result.length() && result[pos + 1] == '=') {
+                            // This is "!=", skip it (will be handled by the "!=" replacement)
+                            break;
+                        }
+                        
                         extra_space += rep.extra_bytes;
                         pos += rep.from.length();
-                        goto next_position;  // Skip to next position after match
+                        goto next_position;
                     }
                 }
             }
@@ -157,6 +165,12 @@ public:
             if (!in_string(i)) {
                 for (const auto& rep : replacements) {
                     if (result.compare(i, rep.from.length(), rep.from) == 0) {
+                        // Special handling for "!" - make sure it's not part of "!="
+                        if (rep.from == "!" && i + 1 < result.length() && result[i + 1] == '=') {
+                            // This is "!=", skip it (will be handled by the "!=" replacement)
+                            break;
+                        }
+                        
                         output += rep.to;
                         i += rep.from.length();
                         replaced = true;
@@ -745,117 +759,6 @@ static game_value convert_lua_to_game_value(const sol::object& obj) {
 
 // C++ implementations of Lua utility functions
 namespace LuaFunctions {
-    static sol::object sqf_call(sol::object code_or_func, sol::variadic_args args) {
-        try {
-            LuaStackGuard guard(*g_lua_state);
-            code compiled;
-            
-            // Convert variadic args to game_value
-            game_value args_gv;
-            bool no_args = false;
-
-            if (args.size() == 0) {
-                // No arguments
-                no_args = true;
-                args_gv = game_value();
-            } else if (args.size() == 1) {
-                // Single argument - pass directly
-                args_gv = convert_lua_to_game_value(args[0]);
-            } else {
-                // Multiple arguments - wrap in array
-                auto_array<game_value> args_array;
-                args_array.reserve(args.size());
-
-                for (const auto& arg : args) {
-                    args_array.push_back(convert_lua_to_game_value(arg));
-                }
-                
-                args_gv = game_value(std::move(args_array));
-            }
-            
-            // Check if first argument is already compiled code
-            if (code_or_func.get_type() == sol::type::userdata) {
-                sol::optional<GameValueWrapper> wrapper = code_or_func.as<sol::optional<GameValueWrapper>>();
-                
-                if (wrapper && wrapper->value.type_enum() == game_data_type::CODE) {
-                    compiled = wrapper->value;
-                    
-                    // Just use regular call2
-                    if (no_args) {
-                        return convert_game_value_to_lua(sqf::call2(compiled));
-                    } else {
-                        return convert_game_value_to_lua(sqf::call2(compiled, args_gv));
-                    }
-                }
-            }
-            
-            // Otherwise, must be string
-            if (code_or_func.get_type() != sol::type::string) {
-                report_error("Code or function name must be string or CODE type");
-                return sol::nil;
-            }
-
-            std::string code_or_func_str = code_or_func.as<std::string>();
-            
-            if (code_or_func_str.find(' ') == std::string::npos && code_or_func_str.find(';') == std::string::npos) {
-                // Function call path
-                if (no_args) {
-                    auto cache_it = g_sqf_function_cache.find(code_or_func_str);
-                    
-                    if (cache_it != g_sqf_function_cache.end()) {
-                        compiled = cache_it->second;
-                    } else {
-                        compiled = sqf::compile("setReturnValue (call " + code_or_func_str + ");");
-                        g_sqf_function_cache[code_or_func_str] = compiled;
-                    }
-                    
-                    return convert_game_value_to_lua(raw_call_sqf_native(compiled));
-                } else {
-                    auto cache_it = g_sqf_function_cache.find(code_or_func_str);
-                    
-                    if (cache_it != g_sqf_function_cache.end()) {
-                        compiled = cache_it->second;
-                    } else {
-                        compiled = sqf::compile("setReturnValue (getCallArguments call " + code_or_func_str + ");");
-                        g_sqf_function_cache[code_or_func_str] = compiled;
-                    }
-                    
-                    return convert_game_value_to_lua(raw_call_sqf_args_native(compiled, args_gv));
-                }
-            } else {
-                // Code execution path
-                if (no_args) {
-                    auto cache_it = g_sqf_function_cache.find(code_or_func_str);
-                    
-                    if (cache_it != g_sqf_function_cache.end()) {
-                        compiled = cache_it->second;
-                    } else {
-                        compiled = sqf::compile("setReturnValue (call {" + code_or_func_str + "});");
-                        g_sqf_function_cache[code_or_func_str] = compiled;
-                    }
-                    
-                    return convert_game_value_to_lua(raw_call_sqf_native(compiled));
-                } else {
-                    auto cache_it = g_sqf_function_cache.find(code_or_func_str);
-                    
-                    if (cache_it != g_sqf_function_cache.end()) {
-                        compiled = cache_it->second;
-                    } else {
-                        compiled = sqf::compile("setReturnValue (getCallArguments call {" + code_or_func_str + "});");
-                        g_sqf_function_cache[code_or_func_str] = compiled;
-                    }
-                    
-                    return convert_game_value_to_lua(raw_call_sqf_args_native(compiled, args_gv));
-                }
-            }
-            
-            return sol::nil;
-        } catch (const std::exception& e) {
-            report_error("Failed to call SQF: " + std::string(e.what()));
-            return sol::nil;
-        }
-    }
-
     struct ScheduledTask {
         sol::protected_function callback;
         float execute_time;      // For time-based delays
@@ -2350,7 +2253,6 @@ static void initialize_lua_state() {
         util_table["getDataType"] = LuaFunctions::get_data_type;
         util_table["withSqf"] = LuaFunctions::with_sqf;
         util_table["switch"] = LuaFunctions::switch_case;
-        util_table["sqfCall"] = LuaFunctions::sqf_call;
         util_table["removeHandler"] = LuaFunctions::remove_handler;
         
         kh_data_table["write"] = sol::overload(

@@ -12,7 +12,7 @@ class KH_ModuleEditTerrainObjects: Module_F
 	isGlobal = 0;
 	isTriggerActivated = 1;
 	isDisposable = 1;
-	is3DEN = 0;
+	is3DEN = 1;
 	icon = "\a3\modules_f\data\editterrainobject\icon32_ca.paa";
 	curatorInfoType = "";
 	curatorInfoTypeEmpty = "";

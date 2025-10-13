@@ -16,7 +16,6 @@ class CfgFunctions
 			class cameraSequence {};		
 			class closeInterface {};
 			class conditionalPresence {};
-			class contextMenu {};
 			class convertToAgent {};
 			class convertToSimpleObject {};
 			class deleteArrayElements {};
@@ -36,7 +35,6 @@ class CfgFunctions
 			class getConfigValue {};
 			class getDestinationTime {};
 			class getDestinationVelocity {};
-			class getEntityAreaPresence {};
 			class getEntityByIdentifier {};
 			class getEntityVariableName {};
 			class getGroupAttributes {};
@@ -59,11 +57,15 @@ class CfgFunctions
 			class loadPlayerLoadouts {};
 			class log {};
 			class luaRecompile {};
+			class moduleAssignTerminal {};
 			class moduleCameraSequence {};
 			class moduleDynamicDisguiseEquipment {};
 			class moduleEditTerrainObjects {};
 			class moduleEndMission {};
 			class moduleEntitySpawner {};
+			class moduleEquipableObject {};
+			class moduleFultonExtract {};
+			class moduleTeleporter {};
 			class openIdentificationCard {};
 			class openTerminal {};
 			class parseBoolean {};

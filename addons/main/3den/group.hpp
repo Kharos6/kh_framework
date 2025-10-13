@@ -16,7 +16,7 @@ class Group
 					control = "Edit";
 					expression = 
 					"\
-						if ((_value != '') && (_value != '[]') && !is3DEN) then {\
+						if ((_value isNotEqualTo '') && (_value isNotEqualTo '[]') && !is3DEN) then {\
 							{\
 								private _originalValueArray = missionNamespace getVariable [_x, []];\
 								_originalValueArray pushBack _this;\
@@ -37,7 +37,7 @@ class Group
 					control = "Edit";
 					expression = 
 					"\
-						if ((_value != '') && (_value != '[]') && !is3DEN) then {\
+						if ((_value isNotEqualTo '') && (_value isNotEqualTo '[]') && !is3DEN) then {\
 							KH_var_postInitExecutions pushBack [\
 								[_this, parseSimpleArray _value],\
 								{\
@@ -51,15 +51,45 @@ class Group
 					";
 					defaultValue = "'[]'";
 				};
+				class KH_PlayerGroupInit
+				{
+					displayName = "Player Group Init";
+					tooltip = "Unscheduled code to execute locally to the players who loads into the mission as members of this group, once their unit becomes valid. Passed arguments available through _this are: [_group (GROUP)].";
+					property = "KH_PlayerGroupInit";
+					control = "EditMulti5";
+					expression = 
+					"\
+						if ((_value isNotEqualTo '') && !is3DEN) then {\
+							KH_var_postInitExecutions pushBack [\
+								[_this, compile _value],\
+								{\
+									params ['_group', '_function'];\
+									[\
+										'CBA',\
+										'KH_eve_playerLoaded',\
+										[_group, _function],\
+										{\
+											_args params ['_group', '_function'];\
+											if ((group player) isEqualTo _group) then {\
+												[_group] call _function;\
+											};\
+										}\
+									] call KH_fnc_addEventHandler;\
+								}\
+							];\
+						};\
+					";
+					defaultValue = "''";
+				};
 				class KH_ServerGroupInit
 				{
 					displayName = "Server Group Init";
-					tooltip = "Unscheduled code to execute on the server with this group passed as an argument. Passed arguments available through <_this> are: <[_group (GROUP)]>.";
+					tooltip = "Unscheduled code to execute on the server with this group passed as an argument. Passed arguments available through _this are: [_group (GROUP)].";
 					property = "KH_ServerGroupInit";
 					control = "EditMulti5";
 					expression = 
 					"\
-						if ((_value != '') && !is3DEN) then {\
+						if ((_value isNotEqualTo '') && !is3DEN) then {\
 							KH_var_postInitExecutions pushBack [\
 								[_this, compile _value],\
 								{\

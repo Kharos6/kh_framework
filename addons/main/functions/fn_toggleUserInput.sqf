@@ -6,16 +6,7 @@ if _input then {
 	
 		if _stop then {
 			if (isNull (objectParent player)) then {
-				[
-					[player], 
-					{
-						params ["_unit"];
-						_unit switchMove [""];
-					},
-					"GLOBAL",
-					true,
-					false
-				] call KH_fnc_execute;
+				player switchMove [""];
 			};
 		};
 	};
@@ -26,16 +17,7 @@ else {
 		
 		if _stop then {
 			if (isNull (objectParent player)) then {
-				[
-					[player], 
-					{
-						params ["_unit"];
-						_unit switchMove [""];
-					},
-					"GLOBAL",
-					true,
-					false
-				] call KH_fnc_execute;
+				player switchMove [""];
 			};
 		};
 	};

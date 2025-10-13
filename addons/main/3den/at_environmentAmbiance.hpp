@@ -8,7 +8,7 @@ class KH_EnvironmentAmbiance: Title
 		class KH_ToggleTitle: Title
 		{
 			text = "Toggle";
-			tooltip = "<true> allows this function to execute.";
+			tooltip = "True allows this function to execute.";
 			y = QUOTE(0 * CTRL_DEFAULT_H + CTRL_DEFAULT_Y);
 		};
 		class KH_Toggle: ctrlCheckbox
@@ -22,7 +22,7 @@ class KH_EnvironmentAmbiance: Title
 		class KH_AmbientLifeTitle: Title
 		{
 			text = "Ambient Life";
-			tooltip = "<false> eliminates the presence of ambient life, such as bees, rabbits, snakes, and fish.";
+			tooltip = "False eliminates the presence of ambient life, such as bees, rabbits, snakes, and fish.";
 			y = QUOTE(2 * CTRL_DEFAULT_H + 5 * CTRL_DEFAULT_Y);
 		};
 		class KH_AmbientLife: ctrlCheckbox
@@ -36,7 +36,7 @@ class KH_EnvironmentAmbiance: Title
 		class KH_AmbientSoundsTitle: Title
 		{
 			text = "Ambient Sounds";
-			tooltip = "<false> eliminates the presence of ambient sounds, such as owls and birds.";
+			tooltip = "False eliminates the presence of ambient sounds, such as owls and birds.";
 			y = QUOTE(3 * CTRL_DEFAULT_H + 10 * CTRL_DEFAULT_Y);
 		};
 		class KH_AmbientSounds: ctrlCheckbox

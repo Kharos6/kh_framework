@@ -17,8 +17,8 @@ if (isNil "KH_var_assignIdentificationCardSet") then {
 	[
 		"KH_eve_playerRespawned",
 		{
-			private _newEntity = param [0];
-			private _oldEntity = param [2];
+			private _newEntity = param [3];
+			private _oldEntity = param [4];
 
 			if !(isNil {_oldEntity getVariable "KH_var_identificationCardInformation";}) then {
 				[
@@ -65,8 +65,9 @@ if (isNil "KH_var_assignIdentificationCardSet") then {
 							];
 						};
 					},
-					["JIP", "PLAYERS", _newEntity, true, false, ""], 
-					true
+					"PLAYERS",
+					true,
+					["JIP", _newEntity, true, ""]
 				] call KH_fnc_execute;
 			};
 		}
@@ -516,8 +517,9 @@ _unit setVariable ["KH_var_identificationCardInformation", [_name, _gender, _rac
 			];
 		};
 	},
-	["JIP", "PLAYERS", _unit, true, false, ""], 
-	true
+	"PLAYERS",
+	true,
+	["JIP", _unit, true, ""]
 ] call KH_fnc_execute;
 
 true;

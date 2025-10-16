@@ -68,20 +68,23 @@ if _state then {
 				private _currentInformation = [];
 				private _framerate = _x getVariable ["KH_var_diagnosticsFramerate", 1];
 				private _output = ["FPS: ", _framerate] joinString "";
-				private _color = [0, 1, 0, 0.9];
 				private _unit = _x;
 				
-				switch true do {
+				private _color = switch true do {
 					case ((_framerate < 30) && (_framerate >= 20)): {
-						_color = [1, 0.87, 0.12, 0.66];
+						[1, 0.87, 0.12, 0.66];
 					};
 					
 					case ((_framerate < 20) && (_framerate >= 10)): {
-						_color = [1, 0.64, 0, 0.66];
+						[1, 0.64, 0, 0.66];
 					};
 					
 					case (_framerate < 10): {
-						_color = [1, 0, 0, 0.66];
+						[1, 0, 0, 0.66];
+					};
+
+					default {
+						[0, 1, 0, 0.9];
 					};
 				};
 
@@ -131,7 +134,7 @@ if _state then {
 				private _framerate = _x getVariable ["KH_var_diagnosticsFramerate", 1];
 				
 				if !(isNil {_x getVariable "KH_var_diagnosticsLocalUnits";}) then {
-					_output = [name _x, " - FPS: ", _framerate, ", LOCAL UNITS: ", _x getVariable ["KH_var_diagnosticsLocalUnits", 1]] joinString "";
+					_output = [name _x, " - FPS: ", _framerate, ", LOCAL UNITS: ", _x getVariable "KH_var_diagnosticsLocalUnits"] joinString "";
 				}
 				else {
 					_output = [name _x, " - FPS: ", _framerate] joinString "";
@@ -183,3 +186,5 @@ if _state then {
 		false
 	] call KH_fnc_execute;
 };
+
+nil;

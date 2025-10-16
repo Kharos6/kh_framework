@@ -4,8 +4,8 @@ if ((count _this) isEqualTo 1) then {
 
 	{
 		_x params [
-			["_start", [], [[], objNull]],
-			["_end", [], [[], objNull]],
+			["_start", [0, 0, 0], [[], objNull]],
+			["_end", [1, 1, 1], [[], objNull]],
 			["_ignored", [], [[]]],
 			["_sort", true, [true]],
 			["_maxResults", -1, [0]],
@@ -59,7 +59,6 @@ if ((count _this) isEqualTo 1) then {
 			];
 		}
 		else {
-			private _i = 1;
 			private _maxResultsOverride = [_maxResults, -1] select _allowIgnoredCheck;
 
 			for "_i" from 1 to (ceil (_distance / 5000)) do {
@@ -172,8 +171,8 @@ if ((count _this) isEqualTo 1) then {
 }
 else {
 	params [
-		["_start", [], [[], objNull]],
-		["_end", [], [[], objNull]],
+		["_start", [0, 0, 0], [[], objNull]],
+		["_end", [1, 1, 1], [[], objNull]],
 		["_ignored", [], [[]]],
 		["_sort", true, [true]],
 		["_maxResults", -1, [0]],
@@ -230,7 +229,6 @@ else {
 	else {
 		private _allIntersections = [];
 		private _maxResultsOverride = [_maxResults, -1] select _allowIgnoredCheck;
-		private _i = 1;
 
 		for "_i" from 1 to (ceil (_distance / 5000)) do {
 			private _currentDistance = _distance - (_i - 1) * 5000;

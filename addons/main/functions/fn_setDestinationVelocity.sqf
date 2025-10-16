@@ -1,9 +1,8 @@
-params ["_entity", "_position", "_travelTime"];
+params [["_entity", objNull, [objNull]], ["_position", [0, 0, 0], [[], objNull]], ["_travelTime", 0.001, [0]]];
+_travelTime = _travelTime max 0.001;
 
 if (_position isEqualType objNull) then {
-	if !(isNull _position) then {
-		_position = getPosATL _position;
-	};
+	_position = getPosATL _position;
 };
 
 private _direction = _destination vectorDiff (getPosATL _entity);
@@ -16,7 +15,8 @@ private _velocity = [(_direction select 0) / _travelTime, (_direction select 1) 
 		_entity setVelocity _velocity;
 	},
 	_entity,
-	true
+	true,
+	false
 ] call KH_fnc_execute;
 
 _velocity;

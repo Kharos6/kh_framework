@@ -1,4 +1,4 @@
-params [["_object", objNull, [objNull]], ["_loadout", [], [[]]]];
+params [["_vehicle", objNull, [objNull]], ["_loadout", [], [[]]]];
 
 _loadout params [
     "_fuel",
@@ -12,29 +12,29 @@ _loadout params [
     "_components"
 ];
 
-_object setFuel _fuel;
-_object setAmmoCargo _ammoCargo;
-_object setFuelCargo _fuelCargo;
-_object setRepairCargo _repairCargo;
+_vehicle setFuel _fuel;
+_vehicle setAmmoCargo _ammoCargo;
+_vehicle setFuelCargo _fuelCargo;
+_vehicle setRepairCargo _repairCargo;
 
 {
-    _object setAmmo [_x select 3, _x select 6];
+    _vehicle setAmmo [_x select 3, _x select 6];
 } forEach _weaponsInfo;
 
 {
-    _object setPylonLoadout [_x select 0, _x select 3, true];
+    _vehicle setPylonLoadout [_x select 0, _x select 3, true];
 } forEach _pylonsInfo;
 
 {
-    _object setAmmoOnPylon _x;
+    _vehicle setAmmoOnPylon _x;
 } forEach _pylonsAmmo;
 
-_object setPlateNumber _plateNumber;
+_vehicle setPlateNumber _plateNumber;
 _components params ["_componentsId", "_allComponents"];
-private _currentVehicleData = _object getVariable ["bis_fnc_saveVehicle_data", []];
+private _currentVehicleData = _vehicle getVariable ["bis_fnc_saveVehicle_data", []];
 
 if (_currentVehicleData isEqualTo []) then {
-    _object setVariable ["bis_fnc_saveVehicle_data", [_componentsId, _allComponents]];
+    _vehicle setVariable ["bis_fnc_saveVehicle_data", [_componentsId, _allComponents]];
 }
 else {
     if (_componentsId in _currentVehicleData) then {
@@ -46,4 +46,5 @@ else {
     _currentVehicleData pushBack _allComponents;
 };
 
-[_object, [_object, _componentsId]] call BIS_fnc_loadVehicle;
+[_vehicle, [_vehicle, _componentsId]] call BIS_fnc_loadVehicle;
+nil;

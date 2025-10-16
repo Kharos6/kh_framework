@@ -24,7 +24,7 @@ if (_type isEqualType []) then {
 			_expression = compile ([
 				"private _args = missionNamespace getVariable '", _argumentsId, "';
 				private _eventName = missionNamespace getVariable '", _eventNameId, "';
-				private _eventId = missionNamespace getVariable '", _handlerId, "';
+				private _handlerId = missionNamespace getVariable '", _handlerId, "';
 				private _previousReturn = missionNamespace getVariable '", _previousReturnId, "';
 				private _result = call (missionNamespace getVariable '", _function, "');
 				missionNamespace setVariable ['", _previousReturnId, "', _result];
@@ -42,7 +42,7 @@ if (_type isEqualType []) then {
 			_expression = compile ([
 				"private _args = missionNamespace getVariable '", _argumentsId, "';
 				private _eventName = missionNamespace getVariable '", _eventNameId, "';
-				private _eventId = missionNamespace getVariable '", _handlerId, "';
+				private _handlerId = missionNamespace getVariable '", _handlerId, "';
 				private _previousReturn = missionNamespace getVariable '", _previousReturnId, "';
 				private _result = call (missionNamespace getVariable '", _function, "');
 				missionNamespace setVariable ['", _previousReturnId, "', _result];
@@ -58,7 +58,7 @@ else {
 	_expression = compile ([
 		"private _args = missionNamespace getVariable '", _argumentsId, "';
 		private _eventName = missionNamespace getVariable '", _eventNameId, "';
-		private _eventId = missionNamespace getVariable '", _handlerId, "';
+		private _handlerId = missionNamespace getVariable '", _handlerId, "';
 		private _previousReturn = missionNamespace getVariable '", _previousReturnId, "';
 		private _result = call (missionNamespace getVariable '", _function, "');
 		missionNamespace setVariable ['", _previousReturnId, "', _result];
@@ -142,7 +142,7 @@ switch _eventType do {
 
 						if ((_handler select 1) isEqualTo _persistentExecutionId) then {
 							[_remoteHandler select 1, _remoteHandler select 2] call CBA_fnc_removeEventHandler;
-							["KH_eve_eventHandlerRemoved", _eventId select 2] call CBA_fnc_removeEventHandler;
+							["KH_eve_eventHandlerRemoved", _handlerId select 2] call CBA_fnc_removeEventHandler;
 						};
 					}
 				] call KH_fnc_addEventHandler;
@@ -376,7 +376,7 @@ switch _eventType do {
 					compile ([
 						"private _args = missionNamespace getVariable '", _argumentsId, "';
 						private _eventName = missionNamespace getVariable '", _eventNameId, "';
-						private _eventId = missionNamespace getVariable '", _handlerId, "';
+						private _handlerId = missionNamespace getVariable '", _handlerId, "';
 						call (missionNamespace getVariable '", _timeoutFunction, "');"
 					] joinString "");
 				}
@@ -395,7 +395,7 @@ switch _eventType do {
 		if _immediate then {
 			private _args = _arguments;
 			private _totalDelta = 0;
-			private _eventId = [_type, _event, _handler, clientOwner];
+			private _handlerId = [_type, _event, _handler, clientOwner];
 			private _eventName = _handler;
 			private _executionTime = CBA_missionTime;
 			private _executionCount = 0;
@@ -610,7 +610,7 @@ switch _eventType do {
 					{
 						params ["_handler"];
 						["KH_eve_temporalExecutionStackHandler", [_handler, true, true]] call CBA_fnc_localEvent;
-						KH_var_temporalExecutionStackDeletions pushBackUnique _eventId;
+						KH_var_temporalExecutionStackDeletions pushBackUnique _handlerId;
 					},
 					_timeout,
 					if (_timeout isEqualTo 0) then {
@@ -699,7 +699,7 @@ switch _eventType do {
 					compile ([
 						"private _args = missionNamespace getVariable '", _argumentsId, "';
 						private _eventName = missionNamespace getVariable '", _eventNameId, "';
-						private _eventId = missionNamespace getVariable '", _handlerId, "';
+						private _handlerId = missionNamespace getVariable '", _handlerId, "';
 						call (missionNamespace getVariable '", _timeoutFunction, "');"
 					] joinString "");
 				}
@@ -808,7 +808,7 @@ else {
 		_eventOwner = clientOwner;
 	};
 
-	missionNamespace setVariable [_handlerId, [_type, _event, _handler, _persistentExecutionId, _eventOwner], true];
-	["KH_eve_eventHandlerAdded", [[_type, _event, _handler, _persistentExecutionId, _eventOwner]]] call CBA_fnc_globalEvent;
-	[_type, _event, _handler, _persistentExecutionId, _eventOwner];
+	missionNamespace setVariable [_handlerId, [_type, _handler, _persistentExecutionId, _eventOwner], true];
+	["KH_eve_eventHandlerAdded", [[_type, _handler, _persistentExecutionId, _eventOwner]]] call CBA_fnc_globalEvent;
+	[_type, _handler, _persistentExecutionId, _eventOwner];
 };

@@ -1,4 +1,4 @@
-params [["_endName", "", [""]], ["_isVictory", true, [true]], ["_fadeType", true, [true, 0]], ["_delay", 1, [0]], ["_nextMission", [], [[]]]];
+params [["_endName", "KH_MissionConcluded", [""]], ["_isVictory", true, [true]], ["_fadeType", true, [true, 0]], ["_delay", 1, [0]], ["_nextMission", [], [[]]]];
 _delay = _delay max 1;
 call KH_fnc_serverMissionEndInit;
 [[], "KH_fnc_playerMissionEndInit", "PLAYERS", true, false] call KH_fnc_execute;

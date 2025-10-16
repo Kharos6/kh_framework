@@ -1,19 +1,28 @@
-params ["_entity", "_identifier", "_identifierOutput", "_identifierInput", "_name", "_description", "_function", "_observerMode"];
+params [
+	["_entity", objNull, [objNull]], 
+	["_identifier", "", [""]], 
+	["_identifierOutput", "", [""]],
+	["_identifierInput", "", [""]], 
+	["_name", "", [""]], 
+	["_description", "", [""]], 
+	["_function", {}, [{}]], 
+	["_observerMode", false, [true]]
+];
+
 private _display = createDialog ["KH_ResourceTerminal", true];
-ctrlSetText [100, toUpper _name];
+ctrlSetText [100, toUpperANSI _name];
 ctrlSetText [101, _description];
 ctrlSetText [102, missionNamespace getVariable [_identifierOutput, ctrlText 102]];
 ctrlSetText [103, missionNamespace getVariable [_identifierInput, ctrlText 103]];
-player setVariable ["KH_var_dialogActive", true, [2, clientOwner]];
 
 if !_observerMode then {
 	[
+		[_identifierOutput, _identifierInput],
 		{
-			_args params ["_identifierOutput", "_identifierInput"];
+			params ["_identifierOutput", "_identifierInput"];
 
 			if !dialog then {
-				[_handle] call CBA_fnc_removePerFrameHandler;
-				player setVariable ["KH_var_dialogActive", false, [2, clientOwner]];
+				[_handlerId] call KH_fnc_removeHandler;
 			}
 			else {
 				ctrlSetText [102, missionNamespace getVariable [_identifierOutput, ctrlText 102]];
@@ -26,13 +35,15 @@ if !_observerMode then {
 						missionNamespace setVariable [_identifierInput, _input, true];
 					},
 					"SERVER",
-					true
+					true,
+					false
 				] call KH_fnc_execute;
 			};
 		},
-		0, 
-		[_identifierOutput, _identifierInput]
-	] call CBA_fnc_addPerFrameHandler;
+		true,
+		0,
+		false
+	] call KH_fnc_execute;
 
 	[
 		["DISPLAY", _display],
@@ -67,7 +78,8 @@ if !_observerMode then {
 						};
 					},
 					"SERVER",
-					true
+					true,
+					false
 				] call KH_fnc_execute;
 
 				ctrlSetText [103, ""];
@@ -107,7 +119,8 @@ if !_observerMode then {
 					};
 				},
 				"SERVER",
-				true
+				true,
+				false
 			] call KH_fnc_execute;
 
 			ctrlSetText [103, ""];
@@ -130,11 +143,11 @@ if !_observerMode then {
 					missionNamespace setVariable [_identifier, false, true];
 				},
 				"SERVER",
-				true
+				true,
+				false
 			] call KH_fnc_execute;
 			
-			player setVariable ["KH_var_dialogActive", false, [2, clientOwner]];
-			[_eventId] call KH_fnc_removeEventHandler;
+			[_handlerId] call KH_fnc_removeHandler;
 			nil;
 		}
 	] call KH_fnc_addEventHandler;
@@ -145,31 +158,35 @@ if !_observerMode then {
 			params ["_player", "_entity", "_identifier"];
 
 			[
+				[_player, _entity, _identifier], 
 				{
-					params ["_player", "_entity", "_identifier"];
-					(!(alive _player) || !(alive _entity) || ((_entity distance _player) > 4) || (isNull _entity) || (isNull _player) || !(_player getVariable ["KH_var_dialogActive", false]));
-				}, 
-				{
-					private _player = _this select 0;
-					private _identifier = _this select 2;
+					private _player = param [0];
+					private _identifier = param [2];
 					missionNamespace setVariable [_identifier, false, true];
 
 					[
 						[],
 						{
-							if (player getVariable ["KH_var_dialogActive", false]) then {
+							if dialog then {
 								closeDialog 0;
 							};
 						},
 						_player,
-						true
+						true,
+						false
 					] call KH_fnc_execute;
-				}, 
-				[_player, _entity, _identifier]
-			] call CBA_fnc_waitUntilAndExecute;
+				},
+				true,
+				{
+					params ["_player", "_entity", "_identifier"];
+					(!(alive _player) || !(alive _entity) || ((_entity distance _player) > 4) || (isNull _entity) || (isNull _player));
+				},
+				false
+			] call KH_fnc_execute;
 		},
 		"SERVER",
-		true
+		true,
+		false
 	] call KH_fnc_execute;
 }
 else {
@@ -184,34 +201,37 @@ else {
 	ctrlSetText [103, missionNamespace getVariable [_identifierInput, ctrlText 103]];
 
 	[
+		[_identifierOutput, _identifierInput],
 		{
 			_args params ["_identifierOutput", "_identifierInput"];
 
 			if !dialog then {
-				[_handle] call CBA_fnc_removePerFrameHandler;
-				player setVariable ["KH_var_dialogActive", false, [2, clientOwner]];
+				[_handlerId] call KH_fnc_removeHandler;
 			}
 			else {
 				ctrlSetText [102, missionNamespace getVariable [_identifierOutput, ctrlText 102]];
 				ctrlSetText [103, missionNamespace getVariable [_identifierInput, ctrlText 103]];
 			};
 		},
+		true,
 		0, 
-		[_identifierOutput, _identifierInput]
-	] call CBA_fnc_addPerFrameHandler;
+		false
+	] call KH_fnc_execute;
 
 	[
+		[_entity],
 		{
-			params ["_entity"];
-			(!(alive player) || !(alive _entity) || ((_entity distance player) > 4) || (isNull _entity) || (isNull player) || !(player getVariable ["KH_var_dialogActive", false]));
-		}, 
-		{
-			if (player getVariable ["KH_var_dialogActive", false]) then {
+			if dialog then {
 				closeDialog 0;
 			};
 		}, 
-		[_entity]
-	] call CBA_fnc_waitUntilAndExecute;
+		true,
+		{
+			params ["_entity"];
+			(!(alive player) || !(alive _entity) || ((_entity distance player) > 4) || (isNull _entity) || (isNull player));
+		}, 
+		false
+	] call KH_fnc_execute;
 };
 
 _display;

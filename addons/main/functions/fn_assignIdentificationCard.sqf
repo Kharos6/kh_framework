@@ -115,7 +115,7 @@ if (_dateOfBirth isEqualTo "") then {
 	private _day = ((floor (random 29)) max 1) min 28;
 
 	if (_day < 10) then {
-		_day = format ["0%1", _day];
+		_day = ["0", _day] joinString "";
 	}
 	else {
 		_day = str _day;
@@ -124,14 +124,14 @@ if (_dateOfBirth isEqualTo "") then {
 	private _month = ((floor (random 13)) max 1) min 12;
 
 	if (_month < 10) then {
-		_month = format ["0%1", _month];
+		_month = ["0", _month] joinString "";
 	}
 	else {
 		_month = str _month;
 	};
 
 	private _year = floor (random [(date select 0) - 70, (date select 0) - 45, (date select 0) - 20]);
-	_dateOfBirth = format ["%1/%2/%3", _day, _month, _year];
+	_dateOfBirth = [_day, _month, _year] joinString "/";
 };
 
 if (_profession isEqualTo "") then {
@@ -440,14 +440,14 @@ if (_ethnos isEqualTo "") then {
 };
 
 if (_cardNumber isEqualTo "") then {
-	_cardNumber = [12, true, false, false] call KH_fnc_generateRandomString;
+	_cardNumber = [true, false, false] generateRandomString 12;
 };
 
 if (_dateOfIssue isEqualTo "") then {
 	private _day = ((floor (random 29)) max 1) min 28;
 
 	if (_day < 10) then {
-		_day = format ["0%1", _day];
+		_day = ["0", _day] joinString "";
 	}
 	else {
 		_day = str _day;
@@ -456,19 +456,19 @@ if (_dateOfIssue isEqualTo "") then {
 	private _month = ((floor (random 13)) max 1) min 12;
 
 	if (_month < 10) then {
-		_month = format ["0%1", _month];
+		_month = ["0", _month] joinString "";
 	}
 	else {
 		_month = str _month;
 	};
 
 	private _year = floor (random [(date select 0) - 8, (date select 0) - 3, (date select 0) - 1]);
-	_dateOfIssue = format ["%1/%2/%3", _day, _month, _year];
+	_dateOfIssue = [_day, _month, _year] joinString "/";
 };
 
 if (_dateOfExpiry isEqualTo "") then {
 	private _year = (parseNumber (_dateOfIssue select [6])) + 5;
-	_dateOfExpiry = format ["%1%2", _dateOfIssue select [0, 6], _year];
+	_dateOfExpiry = [_dateOfIssue select [0, 6], _year] joinString "";
 };
 
 _unit setVariable ["KH_var_identificationCardInformation", [_name, _gender, _race, _dateOfBirth, _profession, _ethnos, _cardNumber, _dateOfIssue, _dateOfExpiry], true];
@@ -478,7 +478,7 @@ _unit setVariable ["KH_var_identificationCardInformation", [_name, _gender, _rac
 	{
 		params ["_unit"];
 
-		if (_unit != player) then {
+		if (_unit isNotEqualTo player) then {
 			_unit addAction [
 				"View Identification Card",
 				{
@@ -521,5 +521,3 @@ _unit setVariable ["KH_var_identificationCardInformation", [_name, _gender, _rac
 	true,
 	["JIP", _unit, true, ""]
 ] call KH_fnc_execute;
-
-true;

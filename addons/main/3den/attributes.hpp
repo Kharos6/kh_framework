@@ -199,9 +199,7 @@ class Attributes
 	#include "\x\kh\addons\main\3den\at_persistency.hpp"
 	#include "\x\kh\addons\main\3den\at_persistentInit.hpp"
 	#include "\x\kh\addons\main\3den\at_recoverDisconnectedPlayers.hpp"
-	#include "\x\kh\addons\main\3den\at_respawnSpectator.hpp"
 	#include "\x\kh\addons\main\3den\at_setCurators.hpp"
 	#include "\x\kh\addons\main\3den\at_setSideRelations.hpp"
 	#include "\x\kh\addons\main\3den\at_transferToHeadlessClient.hpp"
-	#include "\x\kh\addons\main\3den\at_unconsciousSpectator.hpp"
 };

@@ -42,7 +42,7 @@ else {
 					_unit addBackpack "B_Parachute";
 				}
 				else {
-					if (uiNamespace getVariable ["KH_var_aceLoaded", false]) then {
+					if KH_var_aceLoaded then {
 						_unit addBackpack "ACE_NonSteerableParachute";
 					}
 					else {
@@ -73,12 +73,12 @@ else {
 											_unit addItemToBackpack _x;
 										} forEach _backpackItems;
 
-										[_eventId] call KH_fnc_removeEventHandler;
+										[_handlerId] call KH_fnc_removeHandler;
 									};
 								}
 							] call KH_fnc_addEventHandler;
 						}, 
-						_unit,
+						true,
 						[
 							{
 								params ["_unit"];
@@ -100,5 +100,5 @@ else {
 		false
 	] call KH_fnc_execute;
 
-	[];
+	nil;
 };

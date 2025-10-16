@@ -14,50 +14,52 @@ class KH_ModuleEndMission: Module_F
 	isDisposable = 1;
 	is3DEN = 0;
 	icon = "\a3\modules_f_curator\data\iconendmission_ca.paa";
-	curatorInfoType = "";
-	curatorInfoTypeEmpty = "";
-	curatorCanAttach = 0;
 	class Attributes: AttributesBase
 	{
-		class KH_ModuleEndMissionEndName: Edit
+		class EndName: Edit
 		{
 			displayName = "End Name";
-			tooltip = "End name from <configFile >> 'CfgDebriefing'>.";
+			tooltip = "Class name from CfgDebriefing.";
 			property = "KH_ModuleEndMissionEndName";
-			defaultValue = "''";
+			defaultValue = "'KH_MissionConcluded'";
 		};
-		class KH_ModuleEndMissionVictory: Checkbox
+		class Victory: Checkbox
 		{
 			displayName = "Victory";
-			tooltip = "<true> considers the end a victory.";
+			tooltip = "True considers the end a victory.";
 			property = "KH_ModuleEndMissionVictory";
 			defaultValue = "true";
 		};
-		class KH_ModuleEndMissionFadeType: Edit
+		class FadeType: Edit
 		{
 			displayName = "Fade Type";
-			tooltip = "Type of fade to play after the specified <Delay> time. <-2> plays the signature closing shot and music, <-1> instantly ends the mission without the signature closing shot and music, and any value of <0> and above is a fade to black for that amount of seconds.";
+			tooltip = "Type of fade to play after the specified delay. -2 plays the signature closing shot and music, -1 instantly ends the mission without the signature closing shot and music, and any value of 0 and above is a fade to black for that amount of seconds.";
 			property = "KH_ModuleEndMissionFadeType";
 			defaultValue = "''";
 		};
-		class KH_ModuleEndMissionDelay: Edit
+		class Delay: Edit
 		{
 			displayName = "Delay";
-			tooltip = "Time to wait before initiating the end of the mission, in seconds. Will clamp to a minimum of 1 second if below <1>.";
+			tooltip = "Time to wait before initiating the end of the mission, in seconds. Will clamp to a minimum of 1 second if below 1.";
 			property = "KH_ModuleEndMissionDelay";
-			defaultValue = "''";
+			defaultValue = "'1'";
 		};
-		class KH_ModuleEndMissionNextMission: Edit
+		class NextMission: Edit
 		{
 			displayName = "Next Mission";
-			tooltip = "An array containing the string of the server password, if any, and the string of the name of the next mission, in format <[_password (STRING), _nextMission (STRING)]>. Can be an empty array in case of no subsequent mission. If this value is empty, or an empty array, it will be ignored. If this value is used, all other values are ignored, and the next mission will start immediately after <Delay> seconds.";
+			tooltip = "An array containing the string of the server password, if any, and the string of the name of the next mission, in format [_password (STRING), _nextMission (STRING)]. Use an empty array or leave the field empty if no subsequent mission is desired. If this value is used, all other values are ignored, and the next mission will start immediately after the delay.";
 			property = "KH_ModuleEndMissionNextMission";
-			defaultValue = "'[]'";
+			defaultValue = "''";
 		};
 		class ModuleDescription: ModuleDescription {};
 	};
 	class ModuleDescription: ModuleDescription
 	{
-		description[] = {"Ends the mission, saving the mission state if that was enabled, and optionally starting the next mission. Can be exclusively activated through a trigger or triggers. Can activate only once. Activated on the server."};
+		description[] = {"Ends the mission, saving any persistency values if enabled, and optionally starting the next mission. Activates only once, with a trigger, on the server."};
+		sync[] = {};
+		position = 0;
+		direction = 0;
+		optional = 0;
+		duplicate = 1;
 	};
 };

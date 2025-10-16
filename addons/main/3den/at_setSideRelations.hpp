@@ -5,13 +5,13 @@ class KH_SetSideRelations: Title
 	h = QUOTE(19 * CTRL_DEFAULT_H + 70 * pixelH);
 	class Controls: Controls
 	{
-		class KH_ToggleTitle: Title
+		class ToggleTitle: Title
 		{
 			text = "Toggle";
 			tooltip = "True allows this function to execute.";
 			y = QUOTE(0 * CTRL_DEFAULT_H + CTRL_DEFAULT_Y);
 		};
-		class KH_Toggle: ctrlCheckbox
+		class Toggle: ctrlCheckbox
 		{
 			idc = 100;
 			x = QUOTE(CTRL_DEFAULT_X);
@@ -19,13 +19,13 @@ class KH_SetSideRelations: Title
 			w = QUOTE(5 * GRID_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
-		class KH_BluforToBluforTitle: Title
+		class BluforToBluforTitle: Title
 		{
 			text = "BLUFOR To BLUFOR";
-			tooltip = "<true> makes BLUFOR units friendly to BLUFOR units.";
+			tooltip = "True makes BLUFOR units friendly to BLUFOR units.";
 			y = QUOTE(2 * CTRL_DEFAULT_H + 5 * CTRL_DEFAULT_Y);
 		};
-		class KH_BluforToBlufor: ctrlCheckbox
+		class BluforToBlufor: ctrlCheckbox
 		{
 			idc = 101;
 			x = QUOTE(CTRL_DEFAULT_X);
@@ -33,13 +33,13 @@ class KH_SetSideRelations: Title
 			w = QUOTE(5 * GRID_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
-		class KH_BluforToOpforTitle: Title
+		class BluforToOpforTitle: Title
 		{
 			text = "BLUFOR To OPFOR";
-			tooltip = "<true> makes BLUFOR units friendly to OPFOR units.";
+			tooltip = "True makes BLUFOR units friendly to OPFOR units.";
 			y = QUOTE(3 * CTRL_DEFAULT_H + 10 * CTRL_DEFAULT_Y);
 		};
-		class KH_BluforToOpfor: ctrlCheckbox
+		class BluforToOpfor: ctrlCheckbox
 		{
 			idc = 102;
 			x = QUOTE(CTRL_DEFAULT_X);
@@ -47,13 +47,13 @@ class KH_SetSideRelations: Title
 			w = QUOTE(5 * GRID_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
-		class KH_BluforToGreenforTitle: Title
+		class BluforToGreenforTitle: Title
 		{
 			text = "BLUFOR To GREENFOR";
-			tooltip = "<true> makes BLUFOR units friendly to GREENFOR units.";
+			tooltip = "True makes BLUFOR units friendly to GREENFOR units.";
 			y = QUOTE(4 * CTRL_DEFAULT_H + 15 * CTRL_DEFAULT_Y);
 		};
-		class KH_BluforToGreenfor: ctrlCheckbox
+		class BluforToGreenfor: ctrlCheckbox
 		{
 			idc = 103;
 			x = QUOTE(CTRL_DEFAULT_X);
@@ -61,13 +61,13 @@ class KH_SetSideRelations: Title
 			w = QUOTE(5 * GRID_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
-		class KH_BluforToCivilianTitle: Title
+		class BluforToCivilianTitle: Title
 		{
 			text = "BLUFOR To Civilian";
-			tooltip = "<true> makes BLUFOR units friendly to Civilian units.";
+			tooltip = "True makes BLUFOR units friendly to Civilian units.";
 			y = QUOTE(5 * CTRL_DEFAULT_H + 20 * CTRL_DEFAULT_Y);
 		};
-		class KH_BluforToCivilian: ctrlCheckbox
+		class BluforToCivilian: ctrlCheckbox
 		{
 			idc = 104;
 			x = QUOTE(CTRL_DEFAULT_X);
@@ -75,13 +75,13 @@ class KH_SetSideRelations: Title
 			w = QUOTE(5 * GRID_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
-		class KH_OpforToBluforTitle: Title
+		class OpforToBluforTitle: Title
 		{
 			text = "OPFOR To BLUFOR";
-			tooltip = "<true> makes OPFOR units friendly to BLUFOR units.";
+			tooltip = "True makes OPFOR units friendly to BLUFOR units.";
 			y = QUOTE(6 * CTRL_DEFAULT_H + 25 * CTRL_DEFAULT_Y);
 		};
-		class KH_OpforToBlufor: ctrlCheckbox
+		class OpforToBlufor: ctrlCheckbox
 		{
 			idc = 105;
 			x = QUOTE(CTRL_DEFAULT_X);
@@ -89,13 +89,13 @@ class KH_SetSideRelations: Title
 			w = QUOTE(5 * GRID_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
-		class KH_OpforToOpforTitle: Title
+		class OpforToOpforTitle: Title
 		{
 			text = "OPFOR To OPFOR";
-			tooltip = "<true> makes OPFOR units friendly to OPFOR units.";
+			tooltip = "True makes OPFOR units friendly to OPFOR units.";
 			y = QUOTE(7 * CTRL_DEFAULT_H + 30 * CTRL_DEFAULT_Y);
 		};
-		class KH_OpforToOpfor: ctrlCheckbox
+		class OpforToOpfor: ctrlCheckbox
 		{
 			idc = 106;
 			x = QUOTE(CTRL_DEFAULT_X);
@@ -103,13 +103,13 @@ class KH_SetSideRelations: Title
 			w = QUOTE(5 * GRID_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
-		class KH_OpforToGreenforTitle: Title
+		class OpforToGreenforTitle: Title
 		{
 			text = "OPFOR To GREENFFOR";
-			tooltip = "<true> makes OPFOR units friendly to GREENFOR units.";
+			tooltip = "True makes OPFOR units friendly to GREENFOR units.";
 			y = QUOTE(8 * CTRL_DEFAULT_H + 35 * CTRL_DEFAULT_Y);
 		};
-		class KH_OpforToGreenfor: ctrlCheckbox
+		class OpforToGreenfor: ctrlCheckbox
 		{
 			idc = 107;
 			x = QUOTE(CTRL_DEFAULT_X);
@@ -117,13 +117,13 @@ class KH_SetSideRelations: Title
 			w = QUOTE(5 * GRID_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
-		class KH_OpforToCivilianTitle: Title
+		class OpforToCivilianTitle: Title
 		{
 			text = "OPFOR To Civilian";
-			tooltip = "<true> makes OPFOR units friendly to Civilian units.";
+			tooltip = "True makes OPFOR units friendly to Civilian units.";
 			y = QUOTE(9 * CTRL_DEFAULT_H + 40 * CTRL_DEFAULT_Y);
 		};
-		class KH_OpforToCivilian: ctrlCheckbox
+		class OpforToCivilian: ctrlCheckbox
 		{
 			idc = 108;
 			x = QUOTE(CTRL_DEFAULT_X);
@@ -131,13 +131,13 @@ class KH_SetSideRelations: Title
 			w = QUOTE(5 * GRID_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
-		class KH_GreenforToBluforTitle: Title
+		class GreenforToBluforTitle: Title
 		{
 			text = "GREENFOR To BLUFOR";
-			tooltip = "<true> makes GREENFOR units friendly to BLUFOR units.";
+			tooltip = "True makes GREENFOR units friendly to BLUFOR units.";
 			y = QUOTE(10 * CTRL_DEFAULT_H + 45 * CTRL_DEFAULT_Y);
 		};
-		class KH_GreenforToBlufor: ctrlCheckbox
+		class GreenforToBlufor: ctrlCheckbox
 		{
 			idc = 109;
 			x = QUOTE(CTRL_DEFAULT_X);
@@ -145,13 +145,13 @@ class KH_SetSideRelations: Title
 			w = QUOTE(5 * GRID_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
-		class KH_GreenforToOpforTitle: Title
+		class GreenforToOpforTitle: Title
 		{
 			text = "GREENFOR To OPFOR";
-			tooltip = "<true> makes GREENFOR units friendly to OPFOR units.";
+			tooltip = "True makes GREENFOR units friendly to OPFOR units.";
 			y = QUOTE(11 * CTRL_DEFAULT_H + 50 * CTRL_DEFAULT_Y);
 		};
-		class KH_GreenforToOpfor: ctrlCheckbox
+		class GreenforToOpfor: ctrlCheckbox
 		{
 			idc = 110;
 			x = QUOTE(CTRL_DEFAULT_X);
@@ -159,13 +159,13 @@ class KH_SetSideRelations: Title
 			w = QUOTE(5 * GRID_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
-		class KH_GreenforToGreenforTitle: Title
+		class GreenforToGreenforTitle: Title
 		{
 			text = "GREENFOR To GREENFOR";
-			tooltip = "<true> makes GREENFOR units friendly to GREENFOR units.";
+			tooltip = "True makes GREENFOR units friendly to GREENFOR units.";
 			y = QUOTE(12 * CTRL_DEFAULT_H + 55 * CTRL_DEFAULT_Y);
 		};
-		class KH_GreenforToGreenfor: ctrlCheckbox
+		class GreenforToGreenfor: ctrlCheckbox
 		{
 			idc = 111;
 			x = QUOTE(CTRL_DEFAULT_X);
@@ -173,13 +173,13 @@ class KH_SetSideRelations: Title
 			w = QUOTE(5 * GRID_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
-		class KH_GreenforToCivilianTitle: Title
+		class GreenforToCivilianTitle: Title
 		{
 			text = "GREENFOR To Civilian";
-			tooltip = "<true> makes GREENFOR units friendly to Civilian units.";
+			tooltip = "True makes GREENFOR units friendly to Civilian units.";
 			y = QUOTE(13 * CTRL_DEFAULT_H + 60 * CTRL_DEFAULT_Y);
 		};
-		class KH_GreenforToCivilian: ctrlCheckbox
+		class GreenforToCivilian: ctrlCheckbox
 		{
 			idc = 112;
 			x = QUOTE(CTRL_DEFAULT_X);
@@ -187,13 +187,13 @@ class KH_SetSideRelations: Title
 			w = QUOTE(5 * GRID_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
-		class KH_CivilianToBluforTitle: Title
+		class CivilianToBluforTitle: Title
 		{
 			text = "Civilian To BLUFOR";
-			tooltip = "<true> makes Civilian units friendly to BLUFOR units.";
+			tooltip = "True makes Civilian units friendly to BLUFOR units.";
 			y = QUOTE(14 * CTRL_DEFAULT_H + 65 * CTRL_DEFAULT_Y);
 		};
-		class KH_CivilianToBlufor: ctrlCheckbox
+		class CivilianToBlufor: ctrlCheckbox
 		{
 			idc = 113;
 			x = QUOTE(CTRL_DEFAULT_X);
@@ -201,13 +201,13 @@ class KH_SetSideRelations: Title
 			w = QUOTE(5 * GRID_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
-		class KH_CivilianToOpforTitle: Title
+		class CivilianToOpforTitle: Title
 		{
 			text = "Civilian To OPFOR";
-			tooltip = "<true> makes Civilian units friendly to OPFOR units.";
+			tooltip = "True makes Civilian units friendly to OPFOR units.";
 			y = QUOTE(15 * CTRL_DEFAULT_H + 70 * CTRL_DEFAULT_Y);
 		};
-		class KH_CivilianToOpfor: ctrlCheckbox
+		class CivilianToOpfor: ctrlCheckbox
 		{
 			idc = 114;
 			x = QUOTE(CTRL_DEFAULT_X);
@@ -215,13 +215,13 @@ class KH_SetSideRelations: Title
 			w = QUOTE(5 * GRID_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
-		class KH_CivilianToGreenforTitle: Title
+		class CivilianToGreenforTitle: Title
 		{
 			text = "Civilian To GREENFOR";
-			tooltip = "<true> makes Civilian units friendly to GREENFOR units.";
+			tooltip = "True makes Civilian units friendly to GREENFOR units.";
 			y = QUOTE(16 * CTRL_DEFAULT_H + 75 * CTRL_DEFAULT_Y);
 		};
-		class KH_CivilianToGreenfor: ctrlCheckbox
+		class CivilianToGreenfor: ctrlCheckbox
 		{
 			idc = 115;
 			x = QUOTE(CTRL_DEFAULT_X);
@@ -229,13 +229,13 @@ class KH_SetSideRelations: Title
 			w = QUOTE(5 * GRID_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
-		class KH_CivilianToCivilianTitle: Title
+		class CivilianToCivilianTitle: Title
 		{
 			text = "Civilian To Civilian";
-			tooltip = "<true> makes Civilian units friendly to Civilian units.";
+			tooltip = "True makes Civilian units friendly to Civilian units.";
 			y = QUOTE(17 * CTRL_DEFAULT_H + 80 * CTRL_DEFAULT_Y);
 		};
-		class KH_CivilianToCivilian: ctrlCheckbox
+		class CivilianToCivilian: ctrlCheckbox
 		{
 			idc = 116;
 			x = QUOTE(CTRL_DEFAULT_X);

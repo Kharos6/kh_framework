@@ -1,43 +1,30 @@
-params ["_audio", "_condition", "_interval", "_chance"];
-private _id = [missionNamespace, "KH_var_2dAudio", "ACTIVE", false] call KH_fnc_atomicVariable;
+params [["_audio", "", ["", []]], ["_condition", {}, [{}]], ["_interval", 0, [0]], ["_chance", 1, [0]]];
 
 [
+	[_audio, _condition, _chance]
 	{
-		private _id = _args select 3;
-		private _idState = missionNamespace getVariable [_id, "ACTIVE"];
+		params ["_audio", "_condition", "_chance"];
 
-		if (_idState isNotEqualTo "INACTIVE") then {
-			switch _idState do {
-				case "ACTIVE": {
-					_args params ["_audio", "_condition", "_chance"];
-					
-					if ((random 1) <= _chance) then {
-						private _selectedAudio = selectRandom _audio;
+		if ((random 1) <= _chance) then {
+			private _selectedAudio = selectRandom _audio;
 
+			{
+				if ([_x, _selectedAudio] call _condition) then {
+					[
+						[_selectedAudio],
 						{
-							if ([_x, _selectedAudio, ["PRIVATE_HANDLER", _id, clientOwner]] call _condition) then {
-								[
-									[_selectedAudio],
-									{
-										params ["_selectedAudio"];
-										playSound _selectedAudio;
-									},
-									_x,
-									true
-								] call KH_fnc_execute;
-							};
-						} forEach KH_var_allPlayerUnits;
-					};
+							params ["_selectedAudio"];
+							playSound _selectedAudio;
+						},
+						_x,
+						true,
+						false
+					] call KH_fnc_execute;
 				};
-
-				case "TERMINATE": {
-					[_handle] call CBA_fnc_removePerFrameHandler;
-				};		
-			};
+			} forEach KH_var_allPlayerUnits;
 		};
 	},
-	_interval, 
-	[_audio, _condition, _chance, _id]
-] call CBA_fnc_addPerFrameHandler;
-
-["PRIVATE_HANDLER", _id, clientOwner];
+	true,
+	_interval,
+	false
+] call KH_fnc_execute;

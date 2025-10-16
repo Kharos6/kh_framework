@@ -86,7 +86,7 @@ private _subfunction = {
 						_arguments spawn (missionNamespace getVariable _function);
 					};
 
-					[_eventId] call KH_fnc_removeEventHandler;
+					[_handlerId] call KH_fnc_removeHandler;
 				}
 			] call KH_fnc_addEventHandler;
 
@@ -223,7 +223,7 @@ switch (typeName _environmentType) do {
 				params ["_arguments", "_function", "_target", "_special", "_subfunction", "_specialIdOverride", "_unscheduled", "_environmentId"];
 
 				if !(missionNamespace getVariable _environmentId) exitWith {																											
-					KH_var_temporalExecutionStackDeletions pushBackUnique _eventId;
+					KH_var_temporalExecutionStackDeletions pushBackUnique _environmentId;
 				};
 
 				private _handlerId = [missionNamespace, _environmentId, clientOwner];													
@@ -257,7 +257,7 @@ switch (typeName _environmentType) do {
 				{
 					params ["_environmentId"];
 					KH_var_temporalExecutionStackDeletions pushBackUnique _environmentId;
-					KH_var_temporalExecutionStackDeletions pushBackUnique _eventId;
+					KH_var_temporalExecutionStackDeletions pushBackUnique _handlerId;
 				},
 				_timeout,
 				if (_timeout isEqualTo 0) then {
@@ -319,7 +319,7 @@ switch (typeName _environmentType) do {
 				params ["_arguments", "_function", "_target", "_special", "_subfunction", "_specialIdOverride", "_unscheduled", "_environmentId", "_environmentType", "_fireOnce"];
 
 				if !(missionNamespace getVariable _environmentId) exitWith {																											
-					KH_var_temporalExecutionStackDeletions pushBackUnique _eventId;
+					KH_var_temporalExecutionStackDeletions pushBackUnique _environmentId;
 				};
 
 				if (_arguments call _environmentType) then {
@@ -327,7 +327,7 @@ switch (typeName _environmentType) do {
 					[_arguments, _function, _target, _special, _specialIdOverride, _unscheduled] call _subfunction;
 
 					if _fireOnce then {
-						KH_var_temporalExecutionStackDeletions pushBackUnique _eventId;
+						KH_var_temporalExecutionStackDeletions pushBackUnique _environmentId;
 					};
 				};
 			},
@@ -359,7 +359,7 @@ switch (typeName _environmentType) do {
 				{
 					params ["_environmentId"];
 					KH_var_temporalExecutionStackDeletions pushBackUnique _environmentId;
-					KH_var_temporalExecutionStackDeletions pushBackUnique _eventId;
+					KH_var_temporalExecutionStackDeletions pushBackUnique _handlerId;
 				},
 				_timeout,
 				if (_timeout isEqualTo 0) then {
@@ -396,11 +396,11 @@ switch (typeName _environmentType) do {
 				params ["_arguments", "_function", "_target", "_special", "_subfunction", "_specialIdOverride", "_unscheduled", "_environmentId"];
 
 				if !(missionNamespace getVariable _environmentId) exitWith {																											
-					KH_var_temporalExecutionStackDeletions pushBackUnique _eventId;
+					KH_var_temporalExecutionStackDeletions pushBackUnique _environmentId;
 				};
 												
 				[_arguments, _function, _target, _special, _specialIdOverride, _unscheduled] call _subfunction;
-				KH_var_temporalExecutionStackDeletions pushBackUnique _eventId;
+				KH_var_temporalExecutionStackDeletions pushBackUnique _environmentId;
 			},
 			_environmentType,
 			if (_environmentType > 0) then {

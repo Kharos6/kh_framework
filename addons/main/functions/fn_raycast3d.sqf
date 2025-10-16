@@ -1,6 +1,6 @@
 params [
-	["_position", [], [[], objNull]],
-	["_dimensions", [], [[]]], 
+	["_position", [0, 0, 0], [[], objNull]],
+	["_dimensions", [1, "1", 1], [[]]], 
 	["_type", "RECTANGLE", [""]], 
 	["_step", 0.1, [0]], 
 	["_ignored", [], [[]]],
@@ -66,9 +66,6 @@ private _maxResultsOverride = [_maxResults, -1] select _allowIgnoredCheck;
 
 switch _type do {
 	case "RECTANGLE": {
-		private _secondaryAxisIteration = -_secondaryAxis;
-		private _tertiaryAxisIteration = -_tertiaryAxis;
-
 		for "_secondaryAxisIteration" from -_secondaryAxis to _secondaryAxis step _step do {
 			for "_tertiaryAxisIteration" from -_tertiaryAxis to _tertiaryAxis step _step do {
 				private _currentPositionStart = [];
@@ -101,8 +98,6 @@ switch _type do {
 		private "_secondaryAxisIteration";
 		private "_tertiaryAxisIteration";
 		private "_primaryAxisIteration";
-		private _phi = -90;
-		private _theta = 0;
 		
 		for "_phi" from -90 to 90 step (_step * 20) do {
 			for "_theta" from 0 to 360 step (_step * 20) do {
@@ -139,8 +134,6 @@ switch _type do {
 		private "_secondaryAxisIteration";
 		private "_tertiaryAxisIteration";
 		private "_primaryAxisIteration";
-		private _theta = 0;
-		private _currentHeight = -_primaryAxis;
 		
 		for "_theta" from 0 to 360 step (_step * 20) do {
 			for "_currentHeight" from -_primaryAxis to _primaryAxis step _step do {
@@ -181,9 +174,6 @@ switch _type do {
 		private "_currentRadiusScale";
 		private "_surfaceSecondary";
 		private "_surfaceTertiary";
-		private _theta = 0;
-		private _currentHeight = 0;
-		private _currentRadiusOffset = 0;
 		
 		for "_theta" from 0 to 360 step (_step * 20) do {
 			for "_currentHeight" from 0 to _primaryAxis step _step do {

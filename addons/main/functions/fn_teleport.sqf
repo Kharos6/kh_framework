@@ -1,159 +1,132 @@
-params ["_units", "_position", "_rotation", ["_eject", true], ["_transition", 1], ["_heal", false], ["_freefallHeight", -1], ["_init", {}]];
+params [
+	["_entity", objNull, [objNull]], 
+	["_position", [0, 0, 0], [[], objNull]], 
+	["_rotation", [0, 0, 0], [[], objNull]], 
+	["_eject", true, [true]], 
+	["_transition", 1, [0]],
+	["_freefallHeight", -1, [0]], 
+	["_init", {}, [{}]]
+];
 
-{
-	if (_freefallHeight != 0) then {
+if (_position isEqualType objNull) then {
+	_position = getPosATL _position;
+};
+
+if (_rotation isEqualType objNull) then {
+	_rotation = [vectorDir _rotation, vectorUp _rotation];
+};
+
+if (_freefallHeight isNotEqualTo 0) then {
+	[
+		[_entity, _freefallHeight],
+		{
+			params ["_entity", "_freefallHeight"];
+			_entity setUnitFreefallHeight _freefallHeight;
+		},
+		_entity,
+		true,
+		false
+	] call KH_fnc_execute;
+};
+
+if (_transition isNotEqualTo 0) then {
+	_transition = _transition / 2;
+
+	if (isPlayer _entity) then {
 		[
-			[_x, _freefallHeight],
-			{
-				params ["_unit", "_freefallHeight"];
-				_unit setUnitFreefallHeight _freefallHeight;
-			},
-			_x,
+			["", "KH_ResourceKHDisplay", [_transition, 0, _transition], [0, 0, 0, 0], [0, 0, 100, 100], [0, 0, 0]],
+			"KH_fnc_draw2d",
+			_entity,
 			true,
 			false
 		] call KH_fnc_execute;
 	};
 
-	if (_transition != 0) then {
-		if (isPlayer _x) then {
-			[
-				[],
-				{
-					titleText [" ", "BLACK OUT", 1];
-				},
-				_x,
-				true,
-				false
-			] call KH_fnc_execute;
-		};
+	[
+		[_entity, _position, _rotation, _eject, _init],
+		{
+			params ["_entity", "_position", "_rotation", "_eject", "_init"];
 
-		[
-			{
-				params ["_unit", "_heal", "_position", "_rotation", "_eject", "_init"];
-
-				if _eject then {
-					moveOut _unit;
-
-					[
-						{
-							params ["_unit"];
-							(isNull (objectParent _unit));
-						}, 
-						{
-							params ["_unit", "_position", "_rotation", "_init"];
-
-							[
-								{
-									params ["_unit", "_position", "_rotation", "_init"];
-									[_unit, [_position, "ATL", false], [_rotation, false]] call KH_fnc_setTransforms;
-									[[_unit], _init, _unit, true, false] call KH_fnc_execute;
-								}, 
-								[_unit, _position, _rotation, _init]
-							] call CBA_fnc_execNextFrame;
-						}, 
-						[_unit, _position, _rotation, _init],
-						15
-					] call CBA_fnc_waitUntilAndExecute;
-				}
-				else {
-					[_unit, [_position, "ATL", false], [_rotation, false]] call KH_fnc_setTransforms;
-					[[_unit], _init, _unit, true, false] call KH_fnc_execute;
-				};
+			if _eject then {
+				moveOut _entity;
 				
-				if (isPlayer _unit) then {
+				[
+					[_entity, _position, _rotation, _init],
+					{
+						params ["_entity", "_position", "_rotation", "_init"];
+						_entity setPosATL _position;
+						_entity setVectorDirAndUp _rotation;
+						[_entity] call _init;
+					},
+					true,
 					[
-						[],
 						{
-							titleText [" ", "BLACK IN", 1];
+							params ["_entity"];
+							(isNull (objectParent _entity));
 						},
-						_unit,
 						true,
-						false
-					] call KH_fnc_execute;
-				};
-
-				if _heal then {
-					[
-						[_unit],
-						{
-							params ["_unit"];
-							
-							if (uiNamespace getVariable ["KH_var_aceLoaded", false]) then {
-								if ace_medical then {
-									[_unit] call ace_medical_treatment_fnc_fullHealLocal;
-								}
-								else {
-									_unit setDamage 0;
-								};
-							}
-							else {
-								_unit setDamage 0;
-							};
-						},
-						_unit,
+						1,
+						0,
 						true,
-						false
-					] call KH_fnc_execute;
-				};
+						true
+					],
+					false
+				] call KH_fnc_execute;
+			}
+			else {
+				_entity setPosATL _position;
+				_entity setVectorDirAndUp _rotation;
+				[_entity] call _init;
+			};
+		},
+		_entity,
+		str _transition,
+		false
+	] call KH_fnc_execute;
+}
+else {
+	if _eject then {
+		moveOut _entity;
+		
+		[
+			[_entity, _position, _rotation, _init],
+			{
+				params ["_entity", "_position", "_rotation", "_init"];
+				_entity setPosATL _position;
+				_entity setVectorDirAndUp _rotation;
+				[_entity] call _init;
 			},
-			[_x, _heal, _position, _rotation, _eject, _init],
-			_transition
-		] call CBA_fnc_waitAndExecute;
+			_entity,
+			[
+				{
+					params ["_entity"];
+					(isNull (objectParent _entity));
+				},
+				true,
+				1,
+				0,
+				true,
+				true
+			],
+			false
+		] call KH_fnc_execute;
 	}
 	else {
-		if _eject then {
-			moveOut _x;
-			
-			[
-				{
-					params ["_unit"];
-					(isNull (objectParent _unit));
-				}, 
-				{
-					params ["_unit", "_position", "_rotation", "_init"];
-					
-					[
-						{
-							params ["_unit", "_position", "_rotation", "_init"];
-							[_unit, [_position, "ATL", false], [_rotation, false]] call KH_fnc_setTransforms;
-							[[_unit], _init, _unit, true, false] call KH_fnc_execute;
-						}, 
-						[_unit, _position, _rotation]
-					] call CBA_fnc_execNextFrame;
-				}, 
-				[_x, _position, _rotation, _init],
-				15
-			] call CBA_fnc_waitUntilAndExecute;
-		}
-		else {
-			[_x, [_position, "ATL", false], [_rotation, false]] call KH_fnc_setTransforms;
-			[[_x], _init, _x, true, false] call KH_fnc_execute;
-		};
-		
-		if _heal then {
-			[
-				[_x],
-				{
-					params ["_unit"];
-					
-					if (uiNamespace getVariable ["KH_var_aceLoaded", false]) then {
-						if ace_medical then {
-							[_unit] call ace_medical_treatment_fnc_fullHealLocal;
-						}
-						else {
-							_unit setDamage 0;
-						};
-					}
-					else {
-						_unit setDamage 0;
-					};
-				},
-				_x,
-				true,
-				false
-			] call KH_fnc_execute;
-		};
-	};
-} forEach _units;
+		_entity setPosATL _position;
 
-true;
+		[
+			[_entity, _rotation], 
+			{
+				params ["_entity", "_rotation"];
+				_entity setVectorDirAndUp _rotation;
+			}, 
+			_entity,
+			true, 
+			false
+		] call KH_fnc_execute;
+
+		[[_entity], _init, _entity, true, false] call KH_fnc_execute;
+	};
+};
+
+nil;

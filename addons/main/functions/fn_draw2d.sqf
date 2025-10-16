@@ -10,7 +10,7 @@ params [
 _displayTimings params [["_fadeIn", 1, [0]], ["_duration", 0, [0]], ["_fadeOut", 1, [0]]];
 (_transforms call KH_fnc_parseNormalizedScreenTransforms) params ["_positionX", "_positionY", "_sizeX", "_sizeY"];
 _angle params [["_angle", 0, [0]], ["_centerX", 0, [0]], ["_centerY", 0, [0]]];
-private _khDisplay = uiNamespace getVariable ['KH_var_khDisplay', displayNull];
+private _khDisplay = uiNamespace getVariable ["KH_var_khDisplay", displayNull];
 if (isNull _khDisplay) exitWith {};
 private _control = _khDisplay ctrlCreate [_resource, -1];
 _control ctrlSetFade 1;

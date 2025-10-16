@@ -238,7 +238,7 @@ addMissionEventHandler [
 		};
 
 		{
-			_x params ["_args", "_function", "_delay", "_delta", "_totalDelta", "_eventId", "_eventName", "_previousReturn", "_executionTime", "_executionCount"];
+			_x params ["_args", "_function", "_delay", "_delta", "_totalDelta", "_handlerId", "_eventName", "_previousReturn", "_executionTime", "_executionCount"];
 
 			if (_eventName in KH_var_temporalExecutionStackDeletions) then {
 				continue;
@@ -288,7 +288,7 @@ addMissionEventHandler [
 
 		if _deleteHandler exitWith {
 			if !(_handlerId in KH_var_temporalExecutionStackDeletions) then {
-				KH_var_temporalExecutionStackDeletions pushBackUnique [_handlerId];
+				KH_var_temporalExecutionStackDeletions pushBackUnique _handlerId;
 
 				if (_timeoutOnDeletion || _overrideTimeoutOnDeletion) then {
 					_timeoutArguments call _timeoutFunction;
@@ -301,7 +301,7 @@ addMissionEventHandler [
 
 		if ((missionNamespace getVariable [_handlerTickCounter, 1]) >= _timeout) then {
 			if !(_handlerId in KH_var_temporalExecutionStackDeletions) then {
-				KH_var_temporalExecutionStackDeletions pushBackUnique [_handlerId];
+				KH_var_temporalExecutionStackDeletions pushBackUnique _handlerId;
 				_timeoutArguments call _timeoutFunction;
 			};
 
@@ -404,7 +404,7 @@ if isServer then {
 				}
 				else {
 					{
-						[_x] call KH_fnc_removeEventHandler;
+						[_x] call KH_fnc_removeHandler;
 					} forEach (_currentHandler select 5);
 				};
 			};
@@ -431,7 +431,7 @@ if isServer then {
 
 						if !(missionNamespace getVariable _jipId) exitWith {
 							KH_var_jipHandlers deleteAt _jipId;
-							[_eventId] call KH_fnc_removeEventHandler;
+							[_handlerId] call KH_fnc_removeHandler;
 						};
 
 						private _currentHandler = KH_var_jipHandlers get _jipId;
@@ -1139,7 +1139,7 @@ if hasInterface then {
 			["KH_eve_playerLoaded", [clientOwner, getPlayerUID player, getPlayerID player, player, [player, true] call KH_fnc_getEntityVariableName]] call CBA_fnc_globalEvent;				
 
 			if (KH_var_playerRespawnedEventHandler isNotEqualTo []) then {
-				[KH_var_playerRespawnedEventHandler] call KH_fnc_removeEventHandler;
+				[KH_var_playerRespawnedEventHandler] call KH_fnc_removeHandler;
 			};
 
 			KH_var_playerRespawnedEventHandler = [
@@ -1168,7 +1168,7 @@ if hasInterface then {
 			] call KH_fnc_addEventHandler;
 
 			if (KH_var_playerKilledEventHandler isNotEqualTo []) then {
-				[KH_var_playerKilledEventHandler] call KH_fnc_removeEventHandler;
+				[KH_var_playerKilledEventHandler] call KH_fnc_removeHandler;
 			};
 
 			KH_var_playerKilledEventHandler = [
@@ -1199,7 +1199,7 @@ if hasInterface then {
 			["KH_eve_playerSwitched", [clientOwner, getPlayerUID _newUnit, getPlayerID _newUnit, _newUnit, _previousUnit]] call CBA_fnc_globalEvent;
 			
 			if (KH_var_playerRespawnedEventHandler isNotEqualTo []) then {
-				[KH_var_playerRespawnedEventHandler] call KH_fnc_removeEventHandler;
+				[KH_var_playerRespawnedEventHandler] call KH_fnc_removeHandler;
 			};
 
 			KH_var_playerRespawnedEventHandler = [
@@ -1228,7 +1228,7 @@ if hasInterface then {
 			] call KH_fnc_addEventHandler;
 
 			if (KH_var_playerKilledEventHandler isNotEqualTo []) then {
-				[KH_var_playerKilledEventHandler] call KH_fnc_removeEventHandler;
+				[KH_var_playerKilledEventHandler] call KH_fnc_removeHandler;
 			};
 
 			KH_var_playerKilledEventHandler = [
@@ -1264,7 +1264,7 @@ if hasInterface then {
 			};
 
 			{
-				_x params ["_args", "_function", "_eventId", "_eventName", "_previousReturn", "_executionTime"];
+				_x params ["_args", "_function", "_handlerId", "_eventName", "_previousReturn", "_executionTime"];
 				_x set [4, _args call _function];
 			} forEach KH_var_drawUi2dExecutionStack;
 		}
@@ -1290,7 +1290,7 @@ if hasInterface then {
 			};
 
 			{
-				_x params ["_args", "_function", "_eventId", "_eventName", "_previousReturn", "_executionTime"];
+				_x params ["_args", "_function", "_handlerId", "_eventName", "_previousReturn", "_executionTime"];
 				_x set [4, _args call _function];
 			} forEach KH_var_drawUi3dExecutionStack;
 		}

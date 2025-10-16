@@ -93,8 +93,7 @@ _group setGroupIdGlobal _groupId;
 		} forEach _waypoints;
 
 		{
-			_x params ["_name", "_value", "_public"];
-			_group setVariable [_name, _value call KH_fnc_parseValue, _public];
+			_group setVariable _x;
 		} forEach _variables;
 	},
 	_group,

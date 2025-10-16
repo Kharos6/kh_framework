@@ -157,9 +157,8 @@ class CfgVehicles
 		scope = 2;
 	};
 	#include "\x\kh\addons\main\vehicles\modules\dynamicDisguiseEquipment.hpp"
-	#include "\x\kh\addons\main\vehicles\modules\editTerrainObjects.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\endMission.hpp"
-	#include "\x\kh\addons\main\vehicles\modules\entitySpawner.hpp"
+	#include "\x\kh\addons\main\vehicles\modules\teleporter.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\zeusArma.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\zeusBreakDisguise.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\zeusRagdollUnit.hpp"

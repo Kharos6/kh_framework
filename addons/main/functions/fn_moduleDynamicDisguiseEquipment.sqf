@@ -1,5 +1,5 @@
 isNil {
-	params [["_logic", objNull], ["_units", []], ["_activated", true]];
+	params [["_logic", objNull, [objNull]], ["_units", [], [[]]], ["_activated", true, [true]]];
 
 	if _activated then {
 		private _side = _logic getVariable ["KH_ModuleDynamicDisguiseEquipmentSide", "BLUFOR"];
@@ -77,4 +77,4 @@ isNil {
 	};
 };
 
-true;
+nil;

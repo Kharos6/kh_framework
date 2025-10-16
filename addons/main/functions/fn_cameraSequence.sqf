@@ -135,4 +135,4 @@ for "_i" from 0 to _cameraCount do {
 	false
 ] call KH_fnc_execute;
 
-_totalDuration;
+_camera;

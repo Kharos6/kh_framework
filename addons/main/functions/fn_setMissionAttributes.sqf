@@ -64,8 +64,7 @@ forceWeatherChange;
 } forEach _sideRelations;
 
 {
-    _x params ["_name", "_value", "_public"];
-    missionNamespace setVariable [_name, _value call KH_fnc_parseValue, _public];
+    missionNamespace setVariable _x;
 } forEach _variables;
 
 [

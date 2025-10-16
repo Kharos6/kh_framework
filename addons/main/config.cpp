@@ -1,5 +1,6 @@
 #include "\x\kh\addons\main\script_component.hpp"
 #include "\x\kh\addons\main\cfg3den.hpp"
+#include "\x\kh\addons\main\cfgDebriefing.hpp"
 #include "\x\kh\addons\main\cfgEditorCategories.hpp"
 #include "\x\kh\addons\main\cfgEditorSubcategories.hpp"
 #include "\x\kh\addons\main\cfgFactionClasses.hpp"

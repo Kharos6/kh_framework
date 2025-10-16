@@ -1,4 +1,17 @@
-params ["_unit", "_object", "_bone", "_position", "_rotation", ["_scale", 1], ["_mass", 1], ["_hideInVehicles", true], ["_toggleEquip", true], ["_exclusive", true], ["_event", "KH_eve_objectEquipped"], ["_objectName", "Item"]];
+params [
+	["_unit", objNull, [objNull]], 
+	["_object", objNull, [objNull]], 
+	["_bone", "", [""]], 
+	["_position", [], [[]]], 
+	["_rotation", [], [[]]], 
+	["_scale", 1, [0]], 
+	["_mass", 1, [0]], 
+	["_hideInVehicles", true, [true]], 
+	["_toggleEquip", true, [true]], 
+	["_exclusive", true, [true]], 
+	["_event", "KH_eve_objectEquipped", [""]], 
+	["_objectName", "Item", [""]]
+];
 
 if (isNull _unit) then {
 	private _localArguments = [_object, _bone, _position, _rotation, _scale, _mass, _hideInVehicles, _toggleEquip, _exclusive, _event, _objectName];
@@ -13,7 +26,7 @@ if (isNull _unit) then {
 			format ["Equip %1", _objectName],
 			"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_loadVehicle_ca.paa",
 			"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_loadVehicle_ca.paa",
-			"(((_this distance _target) < 4) && (isNil {_target getVariable 'KH_var_previouslyEquipped'}))",
+			"(((_this distance _target) < 4) && (isNil {_target getVariable 'KH_var_previouslyEquipped';}))",
 			"(((_caller distance _target) < 4) && (!(_caller getVariable ['KH_var_carryingObject', false]) || !(_target getVariable ['KH_var_exclusiveObject', false])))",
 			{			
 				if ((_caller getVariable ["KH_var_carryingObject", false]) && (_target getVariable ["KH_var_exclusiveObject", false])) then {
@@ -68,7 +81,7 @@ if (isNull _unit) then {
 					{
 						_args params ["_unequipAction"];
 						[player, _unequipAction] call BIS_fnc_holdActionRemove;
-						[_eventId] call KH_fnc_removeEventHandler;
+						[_handlerId] call KH_fnc_removeHandler;
 					}
 				] call KH_fnc_addEventHandler;
 			},
@@ -132,7 +145,7 @@ else {
 		[_unit, _object, _exclusive]
 	] call CBA_fnc_addPerFrameHandler;
 
-	if (_toggleEquip && (isNil {_object getVariable 'KH_var_equipActions'})) then {
+	if (_toggleEquip && (isNil {_object getVariable "KH_var_equipActions";})) then {
 		[
 			[
 				_object,
@@ -223,7 +236,7 @@ else {
 						{
 							_args params ["_unequipAction"];
 							[player, _unequipAction] call BIS_fnc_holdActionRemove;
-							[_eventId] call KH_fnc_removeEventHandler;
+							[_handlerId] call KH_fnc_removeHandler;
 						}
 					] call KH_fnc_addEventHandler;
 				},

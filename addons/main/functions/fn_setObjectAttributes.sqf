@@ -140,7 +140,6 @@ _savedAttributes params [
         _object setVelocityModelSpace _velocityModelSpace;
         _object setAngularVelocityModelSpace _angularVelocityModelSpace;
         _object setDamage _damage;
-		private _i = 0;
 		private _hitPointNames = _hitPointsDamage select 0;
 		private _hitPointValues = _hitPointsDamage select 2;
 
@@ -176,8 +175,7 @@ _savedAttributes params [
 		};
 
 		{
-			_x params ["_name", "_value", "_public"];
-			_object setVariable [_name, _value call KH_fnc_parseValue, _public];
+			_object setVariable _x;
 		} forEach _variables;
 	}, 
 	_object, 

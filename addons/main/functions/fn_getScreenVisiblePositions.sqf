@@ -1,6 +1,4 @@
 params [["_camera", objNull, [objNull]], ["_stepX", 0.01, [0]], ["_stepY", 0.01, [0]], ["_shiftX", 0, [0]], ["_shiftY", 0, [0]], ["_raycast", false, [true]], ["_draw", [], [[]]]];
-private _positionX = 0;
-private _positionY = 0;
 private _allPositions = [];
 private _safeZoneX = safeZoneX + _shiftX;
 private _safeZoneY = safeZoneY + _shiftY;

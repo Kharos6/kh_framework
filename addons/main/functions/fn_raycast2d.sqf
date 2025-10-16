@@ -1,7 +1,7 @@
 params [
-	["_position", [], [[], objNull]],
-    ["_vectorDirAndUp", [], [[], objNull]],
-    ["_length", 0, [0]],
+	["_position", [0, 0, 0], [[], objNull]],
+    ["_vectorDirAndUp", [[0, 1, 0], [0, 0, 1]], [[], objNull]],
+    ["_length", 1, [0]],
     ["_angle", 0, [0]],
     ["_cone", 0, [0]],
 	["_step", 0.1, [0]],
@@ -37,7 +37,6 @@ else {
 private _grids = [];
 private _intersectionCheckCount = 0;
 private _maxResultsOverride = [_maxResults, -1] select _allowIgnoredCheck;
-private _currentAngleStep = 0;
 
 if (_vectorDirAndUp isEqualType objNull) then {
     _vectorDirAndUp = [vectorDir _vectorDirAndUp, vectorUp _vectorDirAndUp];

@@ -57,7 +57,10 @@ private _groups = [];
 					((owner _unit) isEqualTo _owner);
 				},
 				true,
-				30
+				30,
+				0,
+				true,
+				true
 			],
 			false
 		] call KH_fnc_execute;
@@ -77,7 +80,10 @@ private _groups = [];
 					((owner _unit) isEqualTo _owner);
 				},
 				true,
-				30
+				30,
+				0,
+				true,
+				true
 			],
 			false
 		] call KH_fnc_execute;

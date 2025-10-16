@@ -1,13 +1,11 @@
-params ["_identifierOutput", "_text", ["_overwrite", false]];
-private _output = "";
+params [["_identifierOutput", "", [""]], ["_text", "", [""]], ["_overwrite", false, [true]]];
 
 if _overwrite then {
 	missionNamespace setVariable [_identifierOutput, _text, true];
-	_output = missionNamespace getVariable [_identifierOutput, ""];
+	missionNamespace getVariable [_identifierOutput, ""];
 }
 else {
-	_output = [missionNamespace getVariable [_identifierOutput, ""], _text] joinString "";
+	private _output = [missionNamespace getVariable [_identifierOutput, ""], _text] joinString "";
 	missionNamespace setVariable [_identifierOutput, _output, true];
+	_output;
 };
-
-_output;

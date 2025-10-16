@@ -5,7 +5,6 @@ clearWeaponCargoGlobal _object;
 clearBackpackCargoGlobal _object;
 private _inventorySorted = [];
 _itemInventory params ["_inventoryItems", "_inventoryItemCount"];
-private _i = 0;
 
 for "_i" from 0 to ((count _inventoryItems) - 1) do {
 	_inventorySorted pushBack [_inventoryItems select _i, _inventoryItemCount select _i];
@@ -43,7 +42,6 @@ if KH_var_aceLoaded then {
 		clearBackpackCargoGlobal _object;
 		private _inventorySorted = [];
 		_itemInventory params ["_inventoryItems", "_inventoryItemCount"];
-		private _i = 0;
 
 		for "_i" from 0 to ((count _inventoryItems) - 1) do {			
 			_inventorySorted pushBack [_inventoryItems select _i, _inventoryItemCount select _i];

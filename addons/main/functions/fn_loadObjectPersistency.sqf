@@ -33,7 +33,6 @@ else {
 		private _inventoryItems = _itemInventory select 0;
 		private _inventoryCount = (count _inventoryItems) - 1;
 		private _inventoryItemCount = _itemInventory select 1;
-		private _i = 0;
 
 		for "_i" from 0 to _inventoryCount do {			
 			private _sortedItem = [];
@@ -76,7 +75,6 @@ else {
 				private _inventoryItems = _itemInventory select 0;
 				private _inventoryCount = (count _inventoryItems) - 1;
 				private _inventoryItemCount = _itemInventory select 1;
-				private _i = 0;
 
 				for "_i" from 0 to _inventoryCount do {			
 					private _sortedItem = [];

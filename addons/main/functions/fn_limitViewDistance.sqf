@@ -1,4 +1,4 @@
-params ["_state", "_viewDistance"];
+params [["_state", true, [true]], ["_viewDistance", 0, [0]]];
 KH_var_viewDistanceLimit = _viewDistance;
 publicVariable "KH_var_viewDistanceLimit";
 
@@ -8,11 +8,13 @@ if _state then {
 
 	if (isNil "KH_var_viewDistanceSet") then {
 		KH_var_viewDistanceSet = true;
+		publicVariable "KH_var_viewDistanceSet";
 		
 		[
 			[], 
 			{
 				[
+					[],
 					{
 						if KH_var_limitViewDistanceState then {
 							if (viewDistance > KH_var_viewDistanceLimit) then {
@@ -24,12 +26,14 @@ if _state then {
 							};
 						};
 					},
-					0, 
-					[]
-				] call CBA_fnc_addPerFrameHandler;
+					true,
+					0,
+					false
+				] call KH_fnc_execute;
 			},
-			["JIP", "PLAYERS", true, false, false, ""],
-			true
+			"PLAYERS",
+			true,
+			["JIP", true, true, ""]
 		] call KH_fnc_execute;
 	};
 }
@@ -38,4 +42,4 @@ else {
 	publicVariable "KH_var_limitViewDistanceState";
 };
 
-true;
+nil;

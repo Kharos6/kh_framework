@@ -14,12 +14,9 @@ class KH_ModuleDynamicDisguiseEquipment: Module_F
 	isDisposable = 1;
 	is3DEN = 0;
 	icon = "\a3\ui_f\data\igui\cfg\simpletasks\letters\d_ca.paa";
-	curatorInfoType = "";
-	curatorInfoTypeEmpty = "";
-	curatorCanAttach = 0;
 	class Attributes: AttributesBase
 	{
-		class KH_ModuleDynamicDisguiseEquipmentSide: Combo
+		class Side: Combo
 		{
 			displayName = "Side";
 			tooltip = "Side with which the equipment of this unit will be affiliated.";
@@ -33,24 +30,24 @@ class KH_ModuleDynamicDisguiseEquipment: Module_F
 				class KH_Resistance {name = "GREENFOR"; value = "GREENFOR";};
 			};
 		};
-		class KH_ModuleDynamicDisguiseEquipmentUniforms: Checkbox
+		class Uniforms: Checkbox
 		{
 			displayName = "Uniforms";
-			tooltip = "<true> inserts the uniforms of synchronized units to the desired side's uniform table.";
+			tooltip = "True inserts the uniforms of synchronized units to the desired side's uniform table.";
 			property = "KH_ModuleDynamicDisguiseEquipmentUniforms";
 			defaultValue = "false";
 		};
-		class KH_ModuleDynamicDisguiseEquipmentVests: Checkbox
+		class Vests: Checkbox
 		{
 			displayName = "Vests";
-			tooltip = "<true> inserts the vests of synchronized units to the desired side's uniform table.";
+			tooltip = "True inserts the vests of synchronized units to the desired side's uniform table.";
 			property = "KH_ModuleDynamicDisguiseEquipmentVests";
 			defaultValue = "false";
 		};
-		class KH_ModuleDynamicDisguiseEquipmentHeadgear: Checkbox
+		class Headgear: Checkbox
 		{
 			displayName = "Headgear";
-			tooltip = "<true> inserts the headgear of synchronized units to the desired side's uniform table.";
+			tooltip = "True inserts the headgear of synchronized units to the desired side's uniform table.";
 			property = "KH_ModuleDynamicDisguiseEquipmentHeadgear";
 			defaultValue = "false";
 		};
@@ -58,7 +55,7 @@ class KH_ModuleDynamicDisguiseEquipment: Module_F
 	};
 	class ModuleDescription: ModuleDescription
 	{
-		description[] = {"Takes the uniform or headgear, or both, from the synchronized units, and assigns them as affiliated with the desired side for the Dynamic Disguise system. Will work in conjunction with the Dynamic Disguise arrays from the Eden attribute. Avoid using on playable units unless AI is enabled for consistency reasons. Activates without a trigger. Activated on the server."};
+		description[] = {"Takes the uniform, vest, and/or headgear from the synchronized units and assigns them as affiliated with the desired side for the Dynamic Disguise system. Will work in conjunction with the Dynamic Disguise arrays from the Eden attribute. Avoid using on playable units or players. Activates only once, without a trigger, on the server."};
 		sync[] = {"AnyPerson"};
 		position = 0;
 		direction = 0;

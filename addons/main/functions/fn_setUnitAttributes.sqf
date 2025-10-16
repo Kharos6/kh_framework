@@ -213,7 +213,6 @@ _savedAttributes params [
 		_unit setVectorDirAndUp [_vectorDir, _vectorUp];
 		_unit setVelocityModelSpace _velocityModelSpace;
 		_unit setDamage _damage;
-		private _i = 0;
 		private _hitPointNames = _hitPointsDamage select 0;
 		private _hitPointValues = _hitPointsDamage select 2;
 

@@ -1,11 +1,20 @@
 params [["_unit", objNull, [objNull]], ["_vehicle", [], [[], objNull]], ["_reassign", true, [true]]];
 
 if (_vehicle isEqualType objNull) exitWith {
-    _unit moveInAny _vehicle;
+    if ((_vehicle emptyPositions "") isNotEqualTo 0) then {
+        _unit moveInAny _vehicle;
+        true;
+    }
+    else {
+        false;
+    };
 };
 
-if (_vehicle isEqualTo []) exitWith {};
 _vehicle params [["_vehicle", objNull, [objNull]], ["_slot", "", [""]], ["_index", 0, [0, []]]];
+
+if ((_vehicle emptyPositions "") isEqualTo 0) exitWith {
+    false;
+};
 
 switch _slot do {
     case "DRIVER": {
@@ -58,4 +67,4 @@ switch _slot do {
     };
 };
 
-nil;
+true;

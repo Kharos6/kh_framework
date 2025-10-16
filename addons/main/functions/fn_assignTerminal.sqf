@@ -1,25 +1,25 @@
 params [["_object", objNull, [objNull]], ["_name", "", [""]], ["_identifier", "", [""]], ["_description", "", [""]], ["_condition", {}, [{}]], ["_function", {}, [{}]]];
-private _identifierOutput = format ["KH_var_terminalOutput%1", _identifier];
-private _identifierInput = format ["KH_var_terminalInput%1", _identifier];
+private _identifierOutput = ["KH_var_terminalOutput_", _identifier] joinString "";
+private _identifierInput = ["KH_var_terminalInput_", _identifier] joinString "";
 missionNamespace setVariable [_identifierOutput, "", true];
 missionNamespace setVariable [_identifierInput, "", true];
-_identifier = format ["KH_var_terminal%1Accessed", _identifier];
+_identifier = ["KH_var_terminalAccessed_", _identifier] joinString "";
 missionNamespace setVariable [_identifier, false, true];
 
 [
 	[
 		_object,
-		format ["Access Terminal %1", _name],
+		_name,
 		"\a3\ui_f\data\IGUI\Cfg\holdactions\holdAction_hack_ca.paa",
 		"\a3\ui_f\data\IGUI\Cfg\holdactions\holdAction_hack_ca.paa",
 		"((_this distance _target) < 4)",
-		["(!(missionNamespace getVariable ['", _identifier, "', false]) && (call ", _condition, ") && ((_caller distance _target) < 4))"] joinString "",
+		["(!(missionNamespace getVariable '", _identifier, "') && (call ", _condition, ") && ((_caller distance _target) < 4))"] joinString "",
 		{
 			private _args = param [3];
 			private _identifier = _args param [1];
 			private _condition = _args param [7];
 
-			if (missionNamespace getVariable [_identifier, false]) then {
+			if (missionNamespace getVariable _identifier) then {
 				hint "Someone is already using this terminal.";
 			};
 
@@ -62,7 +62,7 @@ missionNamespace setVariable [_identifier, false, true];
 [
 	[
 		_object,
-		format ["View Terminal %1", _name],
+		_name,
 		"\a3\ui_f\data\IGUI\Cfg\holdactions\holdAction_hack_ca.paa",
 		"\a3\ui_f\data\IGUI\Cfg\holdactions\holdAction_hack_ca.paa",
 		"((_this distance _target) < 4)",

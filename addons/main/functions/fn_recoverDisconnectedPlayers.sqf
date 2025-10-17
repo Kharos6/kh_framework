@@ -1,8 +1,7 @@
 params [["_state", true, [true]]];
+KH_var_recoverDisconnectedPlayers = _state;
 
-if _state then {
-	KH_var_recoverDisconnectedPlayers = true;
-	
+if _state then {	
 	if (isNil "KH_var_recoverDisconnectedPlayersSet") then {
 		KH_var_recoverDisconnectedPlayersSet = true;
 
@@ -34,9 +33,6 @@ if _state then {
 			}
 		] call CBA_fnc_addEventHandler;
 	};
-}
-else {
-	KH_var_recoverDisconnectedPlayers = false;
 };
 
 nil;

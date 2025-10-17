@@ -36,8 +36,7 @@ params [["_object", objNull, [objNull]]];
 			private _allVariables = [];
 
 			{
-				_x params [["_name", "", [""]], "_value", ["_public", false, [true]]];
-				_allVariables pushBack [_name, ["", _value] call KH_fnc_serializeValue, _public];
+				_allVariables pushBack _x;
 			} forEach (_object getVariable ["KH_var_persistentVariables", []]);
 
 			_allVariables;

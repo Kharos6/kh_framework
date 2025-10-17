@@ -1,12 +1,9 @@
-params ["_loadouts", ["_respawnType", "INITIAL"]];
-KH_var_respawnLoadoutType = _respawnType;
-
-if (_loadouts isEqualType []) then {
-	KH_var_savedLoadoutsMap = createHashMapFromArray _loadouts;
-}
-else {
-	KH_var_savedLoadoutsMap = createHashMapFromArray (missionProfileNamespace getVariable [format ["KH_var_savedPlayerLoadouts_%1", _loadouts], []]);
-};
+params [["_identifier", "", [""]], ["_loadoutRespawnType", "INITIAL", [""]], ["_useUid", true, [true]], ["_overrideAttributes", [], [[]]]];
+if (_identifier isEqualTo "") exitWith {};
+KH_var_playerPersistencyLoadoutRespawnType = _loadoutRespawnType;
+KH_var_playerPersistencyUseUid = _useUid;
+KH_var_playerPersistencyUid = "khNamespace" readKhData [["playerPersistencyUid_", _identifier] joinString "", createHashMap];
+KH_var_playerPersistencyVariableName = "khNamespace" readKhData [["playerPersistencyVariableName_", _identifier] joinString "", createHashMap];
 
 if (isNil "KH_var_initialPlayerLoadouts") then {
 	KH_var_initialPlayerLoadouts = createHashMap;
@@ -17,17 +14,30 @@ if (isNil "KH_var_deathPlayerLoadouts") then {
 };
 
 {
-	private _uid = getPlayerUID _x;		
-	private _loadout = KH_var_savedLoadoutsMap get _uid;
+	private _uid = getPlayerUID _x;
 	private _initialLoadout = KH_var_initialPlayerLoadouts get _uid;
-		
-	if !(isNil "_loadout") then {
-		_x setUnitLoadout _loadout;
+
+	private _attributes = if KH_var_playerPersistencyUseUid then {
+		if (isNil "_initialLoadout") then {
+			KH_var_initialPlayerLoadouts set [_uid, getUnitLoadout _x];
+		};
+
+		KH_var_playerPersistencyUid get _uid;
+	}
+	else {
+		private _variableName = vehicleVarName _x;
+
+		if ((_variableName isNotEqualTo "") && !(_x getVariable ["KH_var_generatedVariableName", false])) then {
+			if (isNil "_initialLoadout") then {
+				KH_var_initialPlayerLoadouts set [_variableName, getUnitLoadout _x];
+			};
+
+			KH_var_playerPersistencyVariableName get _variableName;
+		};
 	};
 
-	if (isNil "_initialLoadout") then {
-		private _currentLoadout = getUnitLoadout _x;
-		KH_var_initialPlayerLoadouts insert [[_uid, _currentLoadout]];
+	if !(isNil "_attributes") then {
+		[_x, _attributes, _overrideAttributes, true] call KH_fnc_setUnitAttributes;
 	};
 } forEach KH_var_allPlayerUnits;
 
@@ -37,12 +47,30 @@ if (isNil "KH_var_loadoutsSet") then {
 	[
 		"KH_eve_playerRespawned", 
 		{
-			if (KH_var_respawnLoadoutType != "NONE") then {
-				params ["_player"];
-				private _uid = getPlayerUID _player;	
-				private _loadout = KH_var_savedLoadoutsMap get _uid;
+			if (KH_var_respawnLoadoutType isNotEqualTo "NONE") then {
+				private _uid = param [1];
+				private _player = param [3];
 				private _initialLoadout = KH_var_initialPlayerLoadouts get _uid;
 				private _deathLoadout = KH_var_deathPlayerLoadouts get _uid;
+
+				private _loadout = if KH_var_playerPersistencyUseUid then {
+					private _attributes = KH_var_playerPersistencyUid get _uid;
+
+					if !(isNil "_attributes") then {
+						(_attributes select 5) select 21;
+					};
+				}
+				else {
+					private _variableName = vehicleVarName _x;
+
+					if ((_variableName isNotEqualTo "") && !(_x getVariable ["KH_var_generatedVariableName", false])) then {
+						private _attributes = KH_var_playerPersistencyVariableName get _variableName;
+
+						if !(isNil "_attributes") then {
+							(_attributes select 5) select 21;
+						};
+					};
+				};
 
 				switch KH_var_respawnLoadoutType do {
 					case "INITIAL": {
@@ -90,24 +118,54 @@ if (isNil "KH_var_loadoutsSet") then {
 	[
 		"KH_eve_playerLoaded", 
 		{
-			params ["_player"];
-			private _uid = getPlayerUID _player;		
-			private _loadout = KH_var_savedLoadoutsMap get _uid;
+			private _uid = param [1];
+			private _player = param [3];
 			private _initialLoadout = KH_var_initialPlayerLoadouts get _uid;
 			
-			if !(_uid in KH_var_disconnectedPlayerUids) then {	
-				if !(isNil "_loadout") then {
-					_player setUnitLoadout _loadout;
-				};
+			if !(_uid in KH_var_disconnectedPlayerUids) then {
+				if KH_var_playerPersistencyUseUid then {
+					private _attributes = KH_var_playerPersistencyUid get _uid;
 
-				if !(isNil "_initialLoadout") then {
-					if (isNil "_loadout") then {
-						_player setUnitLoadout _initialLoadout;
+					private _loadout = if !(isNil "_attributes") then {
+						(_attributes select 5) select 21;
+					};
+
+					if !(isNil "_loadout") then {
+						_player setUnitLoadout _loadout;
+					};
+
+					if !(isNil "_initialLoadout") then {
+						if (isNil "_loadout") then {
+							_player setUnitLoadout _initialLoadout;
+						};
+					}
+					else {
+						KH_var_initialPlayerLoadouts set [_uid, getUnitLoadout _player];
 					};
 				}
 				else {
-					private _currentLoadout = getUnitLoadout _player;
-					KH_var_initialPlayerLoadouts insert [[_uid, _currentLoadout]];
+					private _variableName = vehicleVarName _player;
+
+					if ((_variableName isNotEqualTo "") && !(_player getVariable ["KH_var_generatedVariableName", false])) then {
+						private _attributes = KH_var_playerPersistencyVariableName get _variableName;
+
+						private _loadout = if !(isNil "_attributes") then {
+							(_attributes select 5) select 21;
+						};
+
+						if !(isNil "_loadout") then {
+							_player setUnitLoadout _loadout;
+						};
+
+						if !(isNil "_initialLoadout") then {
+							if (isNil "_loadout") then {
+								_player setUnitLoadout _initialLoadout;
+							};
+						}
+						else {
+							KH_var_initialPlayerLoadouts set [_uid, getUnitLoadout _player];
+						};
+					};
 				};
 			};
 		}
@@ -116,19 +174,11 @@ if (isNil "KH_var_loadoutsSet") then {
 	[
 		"KH_eve_playerKilled", 
 		{
-			params ["_player"];
-			private _uid = getPlayerUID _player;
-			private _loadout = getUnitLoadout _player;	
-			private _deathLoadout = KH_var_deathPlayerLoadouts get _uid;
-
-			if !(isNil "_deathLoadout") then {
-				KH_var_deathPlayerLoadouts set [_uid, _loadout];
-			}
-			else {
-				KH_var_deathPlayerLoadouts insert [[_uid, _loadout]];
-			};
+			private _uid = param [1];
+			private _player = param [3];	
+			KH_var_deathPlayerLoadouts set [_uid, getUnitLoadout _player];
 		}
 	] call CBA_fnc_addEventHandler;
 };
 
-true;
+nil;

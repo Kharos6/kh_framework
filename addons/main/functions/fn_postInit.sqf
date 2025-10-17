@@ -86,10 +86,15 @@ isNil {
 	};
 
 	{
-		_x params ["_arguments", "_function", "_delay"];
+		_x params ["_arguments", ["_function", {}, [{}]], ["_delay", 0, [0]]];
 
 		if (_delay isEqualTo 0) then {
-			_arguments call _function;
+			if (isNil "_arguments") then {
+				call _function;
+			}
+			else {
+				_arguments call _function;
+			};
 		}
 		else {
 			_arguments = [_delay, _arguments, _function];
@@ -98,7 +103,13 @@ isNil {
 				_arguments,
 				{
 					(_this select [1]) params ["_arguments", "_function"];
-					_arguments call _function;
+
+					if (isNil "_arguments") then {
+						call _function;
+					}
+					else {
+						_arguments call _function;
+					};
 				}, 
 				true, 
 				{

@@ -9,7 +9,7 @@ params [
 	["_disableUserInput", true, [true]]
 ];
 
-private _totalDuration = [_durations] luaExecute "KH_arraySum";
+private _totalDuration = [_durations] call KH_fnc_arraySum;
 
 if ((_durations select 0) isEqualTo 0) then {
 	_durations set [0, 0.01];
@@ -69,7 +69,7 @@ for "_i" from 0 to _cameraCount do {
 	private _duration = 0;
 
 	if (_i isNotEqualTo 0) then {
-		_duration = [_durations select [0, _i]] luaExecute "KH_arraySum";
+		_duration = [_durations select [0, _i]] call KH_fnc_arraySum;
 	};
 
 	[

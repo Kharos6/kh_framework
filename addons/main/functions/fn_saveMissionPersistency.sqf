@@ -1,20 +1,7 @@
-params ["_identifier", ["_variables", []]];
-private _stateEntries = [[date]];
+params [["_identifier", "", [""]]];
 
-[
-	[_identifier, _stateEntries, _variables], 
-	{
-		params ["_identifier", "_stateEntries", "_variables"];
-		[format ["KH_var_savedMissionState_%1", _identifier], _stateEntries] call KH_fnc_editMissionProfileNamespace;
+if (_identifier isEqualTo "") exitWith {
+    [];
+};
 
-		if (_variables isNotEqualTo []) then {
-			{
-				[_x, missionNamespace getVariable _x] call KH_fnc_editMissionProfileNamespace;
-			} forEach _variables;
-		};
-	},
-	"GLOBAL",
-	true
-] call KH_fnc_execute;
-
-_stateEntries;
+"khNamespace" writeKhData [["missionPersistency_", _identifier] joinString "", call KH_fnc_getMissionAttributes];

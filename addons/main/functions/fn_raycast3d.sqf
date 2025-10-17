@@ -305,7 +305,13 @@ if (_draw isNotEqualTo []) then {
 			];
 
 			{
-				[_type, [_texture, _color, ASLToAGL (_x select 1), _width, _height, _angle, _text, _shadow, _textSize, _font, _textAlign, _drawSideArrows, _offsetX, _offsetY], _duration, [], {}] call KH_fnc_draw3d;
+				[
+					_type, 
+					[_texture, _color, ASLToAGL (_x select 1), _width, _height, _angle, _text, _shadow, _textSize, _font, _textAlign, _drawSideArrows, _offsetX, _offsetY],
+					_duration, 
+					[], 
+					{}
+				] call KH_fnc_draw3d;
 			} forEach _grids;
 		};
 	};

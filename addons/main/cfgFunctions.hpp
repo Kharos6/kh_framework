@@ -52,9 +52,12 @@ class CfgFunctions
 			class limitViewDistance {};
 			class loadControlAttributes {};
 			class loadDisplay {};
+			class loadGroupPersistency {};
 			class loadMissionPersistency {};
 			class loadObjectPersistency {};
+			class loadPersistency {};
 			class loadPlayerPersistency {};
+			class loadUnitPersistency {};
 			class log {};
 			class luaRecompile {};
 			class moduleDynamicDisguiseEquipment {};
@@ -75,9 +78,12 @@ class CfgFunctions
 			class remoteExec {};
 			class removeHandler {};
 			class saveControlAttributes {};
+			class saveGroupPersistency {};
 			class saveMissionPersistency {};
 			class saveObjectPersistency {};
+			class savePersistency {};
 			class savePlayerPersistency {};
+			class saveUnitPersistency {};
 			class screenToWorld {};
 			class setCameraTexture {};
 			class setCurators {};

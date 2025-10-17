@@ -1,4 +1,24 @@
-params ["_arguments", ["_function", "", [""]], ["_caller", 2, [0]], ["_unscheduled", true, [true]]];
+params ["_arguments", ["_function", "", ["", {}]], ["_caller", 2, [0]], ["_unscheduled", true, [true]]];
+
+if (_function isEqualType {}) exitWith {
+	if _unscheduled then {
+		if (isNil "_arguments") then {
+			call _storedFunction;
+		}
+		else {
+			_arguments call _storedFunction;
+		};
+	}
+	else {
+		if (isNil "_arguments") then {
+			spawn _storedFunction;
+		}
+		else {
+			_arguments spawn _storedFunction;
+		};
+	};
+};
+
 private _storedFunction = missionNamespace getVariable _function;
 
 if !(isNil "_storedFunction") exitWith {

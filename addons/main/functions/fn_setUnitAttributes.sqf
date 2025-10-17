@@ -18,7 +18,7 @@ if _respectAgent then {
 };
 
 if (_overrideAttributes isNotEqualTo []) then {
-	private _currentAttributes = ([_unit] call KH_fnc_getUnitAttributes) select 3;
+	private _currentAttributes = ([_unit] call KH_fnc_getUnitAttributes) select 5;
 
 	{
 		if (_x isEqualType 0) then {

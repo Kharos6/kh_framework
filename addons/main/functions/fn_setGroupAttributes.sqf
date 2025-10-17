@@ -2,7 +2,7 @@ params [["_group", grpNull, [grpNull]], ["_attributes", [], [[]]], ["_overrideAt
 private _savedAttributes = _attributes param [4];
 
 if (_overrideAttributes isNotEqualTo []) then {
-	private _currentAttributes = ([_group] call KH_fnc_getGroupAttributes) select 3;
+	private _currentAttributes = ([_group] call KH_fnc_getGroupAttributes) select 4;
 
 	{
 		if (_x isEqualType 0) then {

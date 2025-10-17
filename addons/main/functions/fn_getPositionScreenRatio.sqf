@@ -1,4 +1,4 @@
-params [["_camera", objNull, [objNull]], ["_position", [], [[], objNull]]];
+params [["_camera", objNull, [objNull]], ["_position", [0, 0, 0], [[], objNull]]];
 
 if (_position isEqualType objNull) then {
     _position = _position modelToWorld [0, 0, 0];

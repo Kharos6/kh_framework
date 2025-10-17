@@ -15,7 +15,14 @@ for "_i" from 0 to _count do {
 			_currentControl ctrlSetText (_value select _i);
 		};
 		
-		case ((_type isEqualTo 4) || ((_type isEqualTo 5) && ((ctrlStyle _currentControl) isNotEqualTo 32)) || (_type isEqualTo 6) || (_type isEqualTo 44) || (_type isEqualTo 45) || (_type isEqualTo 102)): {
+		case (
+			  (_type isEqualTo 4) || 
+			  ((_type isEqualTo 5) && ((ctrlStyle _currentControl) isNotEqualTo 32)) ||
+			  (_type isEqualTo 6) || 
+			  (_type isEqualTo 44) || 
+			  (_type isEqualTo 45) || 
+			  (_type isEqualTo 102)
+			 ): {
 			_currentControl lbSetCurSel (_value select _i);
 		};
 

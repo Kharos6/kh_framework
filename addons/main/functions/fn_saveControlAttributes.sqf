@@ -26,7 +26,14 @@ _controlsIDCSorted sort true;
 			_returnValue = ctrlText _currentControl;
 		};
 		
-		case ((_type isEqualTo 4) || ((_type isEqualTo 5) && ((ctrlStyle _currentControl) isNotEqualTo 32)) || (_type isEqualTo 6) || (_type isEqualTo 44) || (_type isEqualTo 45) || (_type isEqualTo 102)): {
+		case (
+			  (_type isEqualTo 4) || 
+			  ((_type isEqualTo 5) && ((ctrlStyle _currentControl) isNotEqualTo 32)) || 
+			  (_type isEqualTo 6) || 
+			  (_type isEqualTo 44) || 
+			  (_type isEqualTo 45) || 
+			  (_type isEqualTo 102)
+			 ): {
 			_returnValue = lbCurSel _currentControl;
 		};
 

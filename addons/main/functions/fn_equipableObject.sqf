@@ -3,7 +3,7 @@ params [
 	["_object", objNull, [objNull]], 
 	["_bone", "", [""]], 
 	["_position", [], [[]]], 
-	["_rotation", [], [[]]], 
+	["_rotation", [], [[], objNull]], 
 	["_scale", 1, [0]], 
 	["_mass", 1, [0]], 
 	["_hideInVehicles", true, [true]], 
@@ -14,7 +14,7 @@ params [
 ];
 
 if (isNull _unit) then {
-	private _localArguments = [_object, _bone, _position, _rotation, _scale, _mass, _hideInVehicles, _toggleEquip, _exclusive, _event, _objectName];
+	private _localArguments = _this select [1];
 	
 	if _exclusive then {
 		_object setVariable ["KH_var_exclusiveObject", true, true];
@@ -23,7 +23,7 @@ if (isNull _unit) then {
 	[
 		[
 			_object,
-			format ["Equip %1", _objectName],
+			["Equip ", _objectName] joinString "",
 			"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_loadVehicle_ca.paa",
 			"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_loadVehicle_ca.paa",
 			"(((_this distance _target) < 4) && (isNil {_target getVariable 'KH_var_previouslyEquipped';}))",
@@ -35,23 +35,21 @@ if (isNull _unit) then {
 			},
 			{},
 			{
-				private _localArguments = (_this select 3) select 0;
-				private _bone = _localArguments select 1;
-				private _position = _localArguments select 2;
-				private _rotation = _localArguments select 3;
-				private _scale = _localArguments select 4;
-				private _mass = _localArguments select 5;
-				private _hideInVehicles = _localArguments select 6;
-				private _toggleEquip = _localArguments select 7;
-				private _exclusive = _localArguments select 8;
-				private _event = _localArguments select 9;
-				private _objectName = _localArguments select 10;
+				private _localArguments = param [3];
+				(_localArguments select [1]) params ["_bone", "_position", "_rotation", "_scale", "_mass", "_hideInVehicles", "_toggleEquip", "_exclusive", "_event", "_objectName"];
 				_target setVariable ["KH_var_previouslyEquipped", true, true];
-				[[_caller, _target, _bone, _position, _rotation, _scale, _mass, _hideInVehicles, _toggleEquip, _exclusive, _event, _objectName], "KH_fnc_equipableObject", "SERVER", true] call KH_fnc_execute;
+
+				[
+					[_caller, _target, _bone, _position, _rotation, _scale, _mass, _hideInVehicles, _toggleEquip, _exclusive, _event, _objectName], 
+					"KH_fnc_equipableObject", 
+					"SERVER", 
+					true,
+					false
+				] call KH_fnc_execute;
 
 				private _unequipAction = [
 					_caller,
-					format ["Unequip %1", _objectName],
+					["Unequip ", _objectName] joinString "",
 					"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_unloadVehicle_ca.paa",
 					"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_unloadVehicle_ca.paa",
 					"true",
@@ -59,14 +57,14 @@ if (isNull _unit) then {
 					{},
 					{},
 					{
-						private _localArguments = (_this select 3) select 0;
-						private _object = _localArguments select 0;
-						private _event = _localArguments select 9;
+						private _localArguments = param [3];
+						private _object = _localArguments param [0];
+						private _event = _localArguments param [9];
 						[_event, [_caller, _object, false]] call CBA_fnc_globalEvent;
 						detach _object;
 					},
 					{},
-					[_localArguments],
+					_localArguments,
 					3,
 					0,
 					false,
@@ -86,20 +84,21 @@ if (isNull _unit) then {
 				] call KH_fnc_addEventHandler;
 			},
 			{},
-			[_localArguments],
+			_localArguments,
 			3,
 			0,
 			false,
 			false,
 			true
 		],
-		"BIS_fnc_holdActionAdd", 
+		"BIS_fnc_holdActionAdd",
+		"PLAYERS",
+		true,
 		["JIP", "PLAYERS", _object, false, false, ""], 
-		true
 	] call KH_fnc_execute;
 }
 else {
-	private _localArguments = [_unit, _object, _bone, _position, _rotation, _scale, _mass, _hideInVehicles, _toggleEquip, _exclusive, _event, _objectName];
+	private _localArguments = _this;
 	[_event, [_unit, _object, true]] call CBA_fnc_globalEvent;
 
 	if (isNil "KH_var_equipableObjectRespawnReset") then {
@@ -108,7 +107,7 @@ else {
 		[
 			"KH_eve_playerRespawned", 
 			{
-				params ["_unit"];
+				private _unit = param [3];
 				_unit setVariable ["KH_var_carryingObject", false, true];
 			}
 		] call CBA_fnc_addEventHandler;		
@@ -118,38 +117,45 @@ else {
 		_unit setVariable ["KH_var_carryingObject", true, true];
 	};
 
-	if (_bone != "") then {
+	if (_bone isNotEqualTo "") then {
 		_object attachTo [_unit, _position, _bone, true];
 	}
 	else {
 		_object attachTo [_unit, _position];
 	};
 
-	[_object, _rotation, false] call KH_fnc_setRotation;
+	if (_rotation isEqualType objNull) then {
+		_object setVectorDirAndUp [_rotation select 0, _rotation select 1];
+	}
+	else {
+		_object setVectorDirAndUp _rotation;
+	};
 	
 	[
+		[_unit, _object, _exclusive],
 		{
-			_args params ["_unit", "_object", "_exclusive"];
+			params ["_unit", "_object", "_exclusive"];
 			
-			if (((attachedTo _object) != _unit) || !(alive _unit)) then {
+			if (((attachedTo _object) isNotEqualTo _unit) || !(alive _unit)) then {
 				["KH_eve_equipableObjectUnequipped", [], _unit] call CBA_fnc_targetEvent;
 
 				if _exclusive then {
 					_unit setVariable ["KH_var_carryingObject", false, true];
 				};
 
-				[_handle] call CBA_fnc_removePerFrameHandler;
+				[_handlerId] call KH_fnc_removeHandler;
 			};
 		},
+		true,
 		0.1,
-		[_unit, _object, _exclusive]
-	] call CBA_fnc_addPerFrameHandler;
+		false
+	] call KH_fnc_execute;
 
 	if (_toggleEquip && (isNil {_object getVariable "KH_var_equipActions";})) then {
 		[
 			[
 				_object,
-				format ["Unequip %1 Carried By This Unit", _objectName],
+				["Unequip ", _objectName, " carried by this unit."] joinString "",
 				"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_unloadVehicle_ca.paa",
 				"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_unloadVehicle_ca.paa",
 				"(((_this distance _target) < 4) && !(isNull (attachedTo _target)))",
@@ -157,29 +163,30 @@ else {
 				{},
 				{},
 				{
-					private _localArguments = (_this select 3) select 0;
-					private _unit = _localArguments select 0;
-					private _event = _localArguments select 10;
+					private _localArguments = param [3];
+					private _unit = _localArguments param [0];
+					private _event = _localArguments param [10];
 					[_event, [_unit, _target, false]] call CBA_fnc_globalEvent;
 					detach _target;
 				},
 				{},
-				[_localArguments],
+				_localArguments,
 				3,
 				0,
 				false,
 				false,
 				false
 			],
-			"BIS_fnc_holdActionAdd", 
-			["JIP", "PLAYERS", _object, false, false, ""], 
-			true
+			"BIS_fnc_holdActionAdd",
+			"PLAYERS",
+			true,
+			["JIP", "PLAYERS", _object, false, false, ""]
 		] call KH_fnc_execute;
 		
 		[
 			[
 				_object,
-				format ["Equip %1", _objectName],
+				["Equip ", _objectName] joinString "",
 				"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_loadVehicle_ca.paa",
 				"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_loadVehicle_ca.paa",
 				"(((_this distance _target) < 4) && (isNull (attachedTo _target)))",
@@ -191,22 +198,20 @@ else {
 				},
 				{},
 				{
-					private _localArguments = (_this select 3) select 0;
-					private _bone = _localArguments select 2;
-					private _position = _localArguments select 3;
-					private _rotation = _localArguments select 4;
-					private _scale = _localArguments select 5;
-					private _mass = _localArguments select 6;
-					private _hideInVehicles = _localArguments select 7;
-					private _toggleEquip = _localArguments select 8;
-					private _exclusive = _localArguments select 9;
-					private _event = _localArguments select 10;
-					private _objectName = _localArguments select 11;
-					[[_caller, _target, _bone, _position, _rotation, _scale, _mass, _hideInVehicles, _toggleEquip, _exclusive, _event, _objectName], "KH_fnc_equipableObject", "SERVER", true] call KH_fnc_execute;
+					private _localArguments = param [3];
+					(_localArguments select [2]) params ["_bone", "_position", "_rotation", "_scale", "_mass", "_hideInVehicles", "_toggleEquip", "_exclusive", "_event", "_objectName"];
+
+					[
+						[_caller, _target, _bone, _position, _rotation, _scale, _mass, _hideInVehicles, _toggleEquip, _exclusive, _event, _objectName], 
+						"KH_fnc_equipableObject", 
+						"SERVER", 
+						true,
+						false
+					] call KH_fnc_execute;
 
 					private _unequipAction = [
 						_caller,
-						format ["Unequip %1", ((_this select 3) select 0) select 11],
+						["Unequip ", _objectName] joinString "",
 						"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_unloadVehicle_ca.paa",
 						"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_unloadVehicle_ca.paa",
 						"true",
@@ -214,14 +219,14 @@ else {
 						{},
 						{},
 						{
-							private _localArguments = (_this select 3) select 0;
-							private _object = _localArguments select 1;
-							private _event = _localArguments select 10;
+							private _localArguments = param [3];
+							private _object = _localArguments param [1];
+							private _event = _localArguments param [10];
 							[_event, [_caller, _object, false]] call CBA_fnc_globalEvent;
 							detach _object;
 						},
 						{},
-						[_localArguments],
+						_localArguments,
 						3,
 						0,
 						false,
@@ -241,16 +246,17 @@ else {
 					] call KH_fnc_addEventHandler;
 				},
 				{},
-				[_localArguments],
+				_localArguments,
 				3,
 				0,
 				false,
 				false,
 				false
 			],
-			"BIS_fnc_holdActionAdd", 
-			["JIP", "PLAYERS", _object, false, false, ""], 
-			true
+			"BIS_fnc_holdActionAdd",
+			"PLAYERS",
+			true,
+			["JIP", _object, false, ""]
 		] call KH_fnc_execute;
 		
 		if _exclusive then {
@@ -264,12 +270,14 @@ else {
 				_object setObjectScale _scale;
 				_object setMass _mass;
 			},
-			["JIP", "GLOBAL", _object, false, false, ""], 
-			true
+			"GLOBAL",
+			true,
+			["JIP", _object, false, ""]
 		] call KH_fnc_execute;
 		
-		if _hideInVehicles then {			
+		if _hideInVehicles then {	
 			[
+				[_object],
 				{
 					_args params ["_object"];
 					
@@ -280,13 +288,14 @@ else {
 						_object hideObjectGlobal false;
 					};
 				},
+				true,
 				0.1,
-				[_object]
-			] call CBA_fnc_addPerFrameHandler;
+				false
+			] call KH_fnc_execute;
 		};
 		
 		_object setVariable ["KH_var_equipActions", true];
 	};
 };
 
-true;
+nil;

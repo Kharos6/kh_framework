@@ -162,7 +162,13 @@ if ((count _this) isEqualTo 1) then {
 					["_offsetY", 0, [0]]
 				];
 
-				[_type, [_texture, _color, ASLToAGL _end, _width, _height, _angle, _text, _shadow, _textSize, _font, _textAlign, _drawSideArrows, _offsetX, _offsetY], _duration, [], {}] call KH_fnc_draw3d;
+				[
+					_type, 
+					[_texture, _color, ASLToAGL _end, _width, _height, _angle, _text, _shadow, _textSize, _font, _textAlign, _drawSideArrows, _offsetX, _offsetY], 
+					_duration, 
+					[], 
+					{}
+				] call KH_fnc_draw3d;
 			};
 		};
 	};
@@ -341,7 +347,13 @@ else {
 				];
 
 				{
-					[_type, [_texture, _color, ASLToAGL _end, _width, _height, _angle, _text, _shadow, _textSize, _font, _textAlign, _drawSideArrows, _offsetX, _offsetY], _duration, [], {}] call KH_fnc_draw3d;
+					[
+						_type, 
+						[_texture, _color, ASLToAGL _end, _width, _height, _angle, _text, _shadow, _textSize, _font, _textAlign, _drawSideArrows, _offsetX, _offsetY], 
+						_duration, 
+						[], 
+						{}
+					] call KH_fnc_draw3d;
 				} forEach _grids;
 			};
 		};

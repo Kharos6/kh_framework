@@ -48,27 +48,27 @@ private _spawnHandler = [
 							};
 
 							private _chosenTransforms = selectRandom _transforms;
-							private _position = [];
-							private _rotation = [];
 
-							if ((_chosenTransforms select 0) isEqualType objNull) then {
-								_position = [_chosenTransforms select 0, "AGL", []] call KH_fnc_getPosition;
+							private _position = if ((_chosenTransforms select 0) isEqualType objNull) then {
+								_position = (_chosenTransforms select 0) modelToWorld [0, 0, 0];
 							}
 							else {
 								_position = _chosenTransforms select 0;
 							};
 
-							if ((_chosenTransforms select 1) isEqualType objNull) then {
-								_rotation = [_chosenTransforms select 1, objNull] call KH_fnc_getRotation;
+							private _rotation = if ((_chosenTransforms select 1) isEqualType objNull) then {
+								private _chosenEntity = _chosenTransforms select 1;
+								_rotation = [vectorDir _chosenEntity, vectorUp _chosenEntity];
 							}
 							else {
-								_rotation = _chosenTransforms select 1;
+								private _vectors = _chosenTransforms select 1;
+								_rotation = [_vectors select 0, _vectors select 1];
 							};
 							
 							private _chosenRadius = _radiuses select (_transforms find _chosenTransforms);
 							_position vectorAdd [random (_chosenRadius select 0), random (_chosenRadius select 1), random (_chosenRadius select 2)];
 							private _unit = _group createUnit [selectRandom _entityTypes, _position, [], 0, _placementMode];
-							[_unit, _rotation, false] call KH_fnc_setRotation;
+							_unit setVectorDirAndUp _rotation;
 							[_unit, _chosenTransforms, _position] call _init;
 							_spawnedEntities pushBack _unit;
 						};
@@ -79,27 +79,27 @@ private _spawnHandler = [
 
 						for "_i" from 1 to _amount do {
 							private _chosenTransforms = selectRandom _transforms;
-							private _position = [];
-							private _rotation = [];
 
-							if ((_chosenTransforms select 0) isEqualType objNull) then {
-								_position = [_chosenTransforms select 0, "AGL", []] call KH_fnc_getPosition;
+							private _position = if ((_chosenTransforms select 0) isEqualType objNull) then {
+								_position = (_chosenTransforms select 0) modelToWorld [0, 0, 0];
 							}
 							else {
 								_position = _chosenTransforms select 0;
 							};
 
-							if ((_chosenTransforms select 1) isEqualType objNull) then {
-								_rotation = [_chosenTransforms select 1, objNull] call KH_fnc_getRotation;
+							private _rotation = if ((_chosenTransforms select 1) isEqualType objNull) then {
+								private _chosenEntity = _chosenTransforms select 1;
+								_rotation = [vectorDir _chosenEntity, vectorUp _chosenEntity];
 							}
 							else {
-								_rotation = _chosenTransforms select 1;
+								private _vectors = _chosenTransforms select 1;
+								_rotation = [_vectors select 0, _vectors select 1];
 							};
 
 							private _chosenRadius = _radiuses select (_transforms find _chosenTransforms);
 							_position vectorAdd [random (_chosenRadius select 0), random (_chosenRadius select 1), random (_chosenRadius select 2)];
 							private _agent = createAgent [selectRandom _entityTypes, _position, [], 0, _placementMode];
-							[_agent, _rotation, false] call KH_fnc_setRotation;
+							_agent setVectorDirAndUp _rotation;
 							[_agent, _chosenTransforms, _position] call _init;
 							_spawnedEntities pushBack _agent;
 						};
@@ -110,21 +110,21 @@ private _spawnHandler = [
 
 						for "_i" from 1 to _amount do {
 							private _chosenTransforms = selectRandom _transforms;
-							private _position = [];
-							private _rotation = [];
 
-							if ((_chosenTransforms select 0) isEqualType objNull) then {
-								_position = [_chosenTransforms select 0, "AGL", []] call KH_fnc_getPosition;
+							private _position = if ((_chosenTransforms select 0) isEqualType objNull) then {
+								_position = (_chosenTransforms select 0) modelToWorld [0, 0, 0];
 							}
 							else {
 								_position = _chosenTransforms select 0;
 							};
 
-							if ((_chosenTransforms select 1) isEqualType objNull) then {
-								_rotation = [_chosenTransforms select 1, objNull] call KH_fnc_getRotation;
+							private _rotation = if ((_chosenTransforms select 1) isEqualType objNull) then {
+								private _chosenEntity = _chosenTransforms select 1;
+								_rotation = [vectorDir _chosenEntity, vectorUp _chosenEntity];
 							}
 							else {
-								_rotation = _chosenTransforms select 1;
+								private _vectors = _chosenTransforms select 1;
+								_rotation = [_vectors select 0, _vectors select 1];
 							};
 
 							private _chosenRadius = _radiuses select (_transforms find _chosenTransforms);
@@ -138,7 +138,7 @@ private _spawnHandler = [
 								_object = createVehicleLocal [selectRandom _entityTypes, _position, [], 0, _placementMode];
 							};
 
-							[_object, _rotation, false] call KH_fnc_setRotation;
+							_object setVectorDirAndUp _rotation;
 							[_object, _chosenTransforms, _position] call _init;
 							_spawnedEntities pushBack _object;
 						};
@@ -149,27 +149,27 @@ private _spawnHandler = [
 
 						for "_i" from 1 to _amount do {
 							private _chosenTransforms = selectRandom _transforms;
-							private _position = [];
-							private _rotation = [];
 
-							if ((_chosenTransforms select 0) isEqualType objNull) then {
-								_position = [_chosenTransforms select 0, "ASL", []] call KH_fnc_getPosition;
+							private _position = if ((_chosenTransforms select 0) isEqualType objNull) then {
+								_position = (_chosenTransforms select 0) modelToWorld [0, 0, 0];
 							}
 							else {
 								_position = _chosenTransforms select 0;
 							};
 
-							if ((_chosenTransforms select 1) isEqualType objNull) then {
-								_rotation = [_chosenTransforms select 1, objNull] call KH_fnc_getRotation;
+							private _rotation = if ((_chosenTransforms select 1) isEqualType objNull) then {
+								private _chosenEntity = _chosenTransforms select 1;
+								_rotation = [vectorDir _chosenEntity, vectorUp _chosenEntity];
 							}
 							else {
-								_rotation = _chosenTransforms select 1;
+								private _vectors = _chosenTransforms select 1;
+								_rotation = [_vectors select 0, _vectors select 1];
 							};
 
 							private _chosenRadius = _radiuses select (_transforms find _chosenTransforms);
 							_position vectorAdd [random (_chosenRadius select 0), random (_chosenRadius select 1), random (_chosenRadius select 2)];
 							private _object = createSimpleObject [selectRandom _entityTypes, _position, _local];
-							[_object, _rotation, false] call KH_fnc_setRotation;
+							_object setVectorDirAndUp _rotation;
 							[_object, _chosenTransforms, _position] call _init;
 							_spawnedEntities pushBack _object;
 						};
@@ -180,27 +180,27 @@ private _spawnHandler = [
 
 						for "_i" from 1 to _amount do {
 							private _chosenTransforms = selectRandom _transforms;
-							private _position = [];
-							private _rotation = [];
 
-							if ((_chosenTransforms select 0) isEqualType objNull) then {
-								_position = [_chosenTransforms select 0, "AGL", []] call KH_fnc_getPosition;
+							private _position = if ((_chosenTransforms select 0) isEqualType objNull) then {
+								_position = (_chosenTransforms select 0) modelToWorld [0, 0, 0];
 							}
 							else {
 								_position = _chosenTransforms select 0;
 							};
 
-							if ((_chosenTransforms select 1) isEqualType objNull) then {
-								_rotation = [_chosenTransforms select 1, objNull] call KH_fnc_getRotation;
+							private _rotation = if ((_chosenTransforms select 1) isEqualType objNull) then {
+								private _chosenEntity = _chosenTransforms select 1;
+								_rotation = [vectorDir _chosenEntity, vectorUp _chosenEntity];
 							}
 							else {
-								_rotation = _chosenTransforms select 1;
+								private _vectors = _chosenTransforms select 1;
+								_rotation = [_vectors select 0, _vectors select 1];
 							};
 
 							private _chosenRadius = _radiuses select (_transforms find _chosenTransforms);
 							_position vectorAdd [random (_chosenRadius select 0), random (_chosenRadius select 1), random (_chosenRadius select 2)];
 							private _vehicle = createVehicle [selectRandom _entityTypes, _position, [], 0, _placementMode];
-							[_vehicle, _rotation, false] call KH_fnc_setRotation;
+							_vehicle setVectorDirAndUp _rotation;
 							createVehicleCrew _vehicle;
 							[_vehicle, _chosenTransforms, _position] call _init;
 							_spawnedEntities pushBack _vehicle;
@@ -249,5 +249,4 @@ private _spawnHandler = [
 	false
 ] call KH_fnc_execute;
 
-(_spawnHandler select 0) pushBack _entityHandler;
-_spawnHandler;
+[_entityHandler, _spawnHandler];

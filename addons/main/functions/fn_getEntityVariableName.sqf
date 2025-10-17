@@ -18,7 +18,7 @@ if (_entity isEqualType objNull) then {
 
 			if (isNil {missionNamespace getVariable _variableName;}) then {
 				if (_generateIfEmpty isEqualTo true) then {
-					_variableName = [_entity, _variableName] call KH_fnc_setEntityVariableName;
+					_variableName = [_entity, ""] call KH_fnc_setEntityVariableName;
 				}
 				else {
 					if (_generateIfEmpty isEqualTo false) then {

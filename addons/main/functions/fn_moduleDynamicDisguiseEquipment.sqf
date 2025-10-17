@@ -39,39 +39,21 @@ isNil {
 
 		switch _side do {
 			case "BLUFOR": {
-				private _uniformsArray = (KH_var_disguiseSideUniforms select 0);
-				_uniformsArray insert [-1, _uniforms, true];
-				KH_var_disguiseSideUniforms set [0, _uniformsArray];
-				private _vestsArray = (KH_var_disguiseSideVests select 0);
-				_vestsArray insert [-1, _vests, true];
-				KH_var_disguiseSideVests set [0, _vestsArray];
-				private _headgearArray = (KH_var_disguiseSideHeadgear select 0);
-				_headgearArray insert [-1, _headgear, true];
-				KH_var_disguiseSideHeadgear set [0, _headgearArray];
+				(KH_var_disguiseSideUniforms select 0) insert [-1, _uniforms select 0, true];
+				(KH_var_disguiseSideVests select 0) insert [-1, _vests select 0, true];
+				(KH_var_disguiseSideHeadgear select 0) insert [-1, _headgear select 0, true];
 			};
 
 			case "OPFOR": {
-				private _uniformsArray = (KH_var_disguiseSideUniforms select 1);
-				_uniformsArray insert [-1, _uniforms, true];
-				KH_var_disguiseSideUniforms set [1, _uniformsArray];
-				private _vestsArray = (KH_var_disguiseSideVests select 1);
-				_vestsArray insert [-1, _vests, true];
-				KH_var_disguiseSideVests set [1, _vestsArray];
-				private _headgearArray = (KH_var_disguiseSideHeadgear select 1);
-				_headgearArray insert [-1, _headgear, true];
-				KH_var_disguiseSideHeadgear set [1, _headgearArray];
+				(KH_var_disguiseSideUniforms select 1) insert [-1, _uniforms select 1, true];
+				(KH_var_disguiseSideVests select 1) insert [-1, _vests select 1, true];
+				(KH_var_disguiseSideHeadgear select 1) insert [-1, _headgear select 1, true];
 			};
 
 			case "GREENFOR": {
-				private _uniformsArray = (KH_var_disguiseSideUniforms select 2);
-				_uniformsArray insert [-1, _uniforms, true];
-				KH_var_disguiseSideUniforms set [2, _uniformsArray];
-				private _vestsArray = (KH_var_disguiseSideVests select 2);
-				_vestsArray insert [-1, _vests, true];
-				KH_var_disguiseSideVests set [2, _vestsArray];
-				private _headgearArray = (KH_var_disguiseSideHeadgear select 2);
-				_headgearArray insert [-1, _headgear, true];
-				KH_var_disguiseSideHeadgear set [2, _headgearArray];
+				(KH_var_disguiseSideUniforms select 2) insert [-1, _uniforms select 2, true];
+				(KH_var_disguiseSideVests select 2) insert [-1, _vests select 2, true];
+				(KH_var_disguiseSideHeadgear select 2) insert [-1, _headgear select 2, true];
 			};
 		};
 	};

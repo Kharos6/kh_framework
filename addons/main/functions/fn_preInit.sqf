@@ -26,8 +26,6 @@ KH_var_postInitExecutions = [];
 KH_var_preInitLuaExecutions = [];
 KH_var_postInitLuaExecutions = [];
 KH_var_loadInitLuaExecutions = [];
-call KH_fnc_luaClearVariables;
-call KH_fnc_luaResetState;
 ["KH_eve_execution", KH_fnc_callParsedFunction] call CBA_fnc_addEventHandler;
 
 [
@@ -80,6 +78,27 @@ call KH_fnc_luaResetState;
         }
         else {
            	[_prefix, configName _x] joinString "_";
+        };
+
+		if (isNumber (_x >> "compileSqf")) then {
+			if ((getNumber (_x >> "compileSqf")) isEqualTo 1) then {
+				private _compiled = [
+                    [
+                        _prefix,
+                        "_fnc_",
+                        if (isText (_x >> "name")) then {
+                            getText (_x >> "name");
+                        }
+                        else {
+                            configName _x;
+                        }
+                    ] joinString "",
+                    compile (["_this luaExecute '", _name, "';"] joinString "")
+				];
+
+                missionNamespace setVariable _compiled;
+				uiNamespace setVariable _compiled;
+            };
         };
 
         _name luaCompile _function;
@@ -251,7 +270,7 @@ addMissionEventHandler [
 					}
 					else {
 						_x set [4, systemTime joinString ""];
-						[systemTime joinString "", _totalDelta] luaExecute "local input1, input2 = ... return(input1 - input2)";
+						_totalDelta luaExecute "local totalDelta = ... return(sqf.systemTime() - totalDelta)";
 					};
 
 					_x set [7, _args call _function];
@@ -266,7 +285,7 @@ addMissionEventHandler [
 					}
 					else {
 						_x set [4, systemTime joinString ""];
-						[systemTime joinString "", _totalDelta] luaExecute "local input1, input2 = ... return(input1 - input2)";
+						_totalDelta luaExecute "local totalDelta = ... return(sqf.systemTime() - totalDelta)";
 					};
 
 					_x set [7, _args call _function];
@@ -964,7 +983,6 @@ if isServer then {
 };
 
 if hasInterface then {
-	KH_var_cameraType = "CAMERA";
 	KH_var_viewTargetCheckFrame = 0;
 	KH_var_weaponTargetCheckFrame = 0;
 	KH_var_allAddedDisplays = [];

@@ -1,12 +1,22 @@
-params ["_object", "_vehicles", "_height", "_distance", "_maximumParticipants", "_duration", ["_objectName", ""]];
+params [
+	["_object", objNull, [objNull]], 
+	["_vehicles", [], [[]]], 
+	["_height", 100, [0]], 
+	["_distance", 0, [0]], 
+	["_maximumParticipants", 10, [0]], 
+	["_duration", 15, [0]], 
+	["_objectName", "", [""]]
+];
+
 _height = _height min 100;
 private _fultonEvent = generateUid;
-private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_fnc_atomicVariable;
+private _fultonId = generateUid;
+missionNamespace setVariable [fultonId, false];
 
 [
 	[
 		_object,
-		format ["Prime Fulton %1", _objectName],
+		["Prime Fulton ", _objectName] joinString "",
 		"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_loadVehicle_ca.paa",
 		"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_loadVehicle_ca.paa",
 		["(!(missionNamespace getVariable ['", _fultonId, "', false]) && ((_this distance _target) < 4))"] joinString "",
@@ -25,9 +35,10 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 		false,
 		true
 	],
-	"BIS_fnc_holdActionAdd", 
-	["JIP", "PLAYERS", _object, false, false, ""], 
-	true
+	"BIS_fnc_holdActionAdd",
+	"PLAYERS",
+	true,
+	["JIP", _object, false, ""]
 ] call KH_fnc_execute;
 
 [
@@ -85,7 +96,8 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 							_anchorEnd hideObjectGlobal true;
 						},
 						"SERVER",
-						true
+						true,
+						false
 					] call KH_fnc_execute;
 
 					_anchorEnd allowDamage false;
@@ -94,13 +106,7 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 					_rope allowDamage false;
 
 					[
-						{
-							private _object = _this select 0;
-							private _participant = _this select 1;
-							private _mainFulton = _this select 2;
-							private _rope = _this select 5;
-							(!(isNull (objectParent _participant)) || !(_participant getVariable ["KH_var_fultonAttached", false]) || (isNull _object) || (isNull _mainFulton) || (isNull _rope) || !(alive _participant) || ((ropeAttachedObjects _mainFulton) isEqualTo []));
-						}, 
+						[_object, _participant, _mainFulton, _currentFultonParticipants, _anchorEnd, _rope],
 						{
 							private _participant = _this select 1;
 							private _currentFultonParticipants = _this select 3;
@@ -120,18 +126,36 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 							if (isPlayer _participant) then {
 								["KH_eve_fultonDetached", [], _participant] call CBA_fnc_targetEvent;
 							};
-						}, 
-						[_object, _participant, _mainFulton, _currentFultonParticipants, _anchorEnd, _rope]
-					] call CBA_fnc_waitUntilAndExecute;
+						},
+						true,
+						{
+							private _object = param [0];
+							private _participant = param [1];
+							private _mainFulton = param [2];
+							private _rope = param [5];
+
+							(
+								!(isNull (objectParent _participant)) || 
+								!(_participant getVariable ["KH_var_fultonAttached", false]) || 
+								(isNull _object) || 
+								(isNull _mainFulton) || 
+								(isNull _rope) || 
+								!(alive _participant) || 
+								((ropeAttachedObjects _mainFulton) isEqualTo [])
+							);
+						},
+						false
+					] call KH_fnc_execute;
 				},
 				"SERVER",
-				true
+				true,
+				false
 			] call KH_fnc_execute;
 
 			if (isPlayer _participant) then {
 				private _detachAction = [
 					_participant,
-					format ["Detach Self From Fulton %1", _objectName],
+					["Detach Self From Fulton ", _objectName] joinString "",
 					"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_unloadVehicle_ca.paa",
 					"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_unloadVehicle_ca.paa",
 					"(_this getVariable ['KH_var_fultonAttached', false])",
@@ -167,11 +191,17 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 		[
 			[
 				_object,
-				format ["Attach Self To Fulton %1", _objectName],
+				["Attach Self To Fulton ", _objectName] joinString "",
 				"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_loadVehicle_ca.paa",
 				"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_loadVehicle_ca.paa",
-				["(((count (missionNamespace getVariable ['", _currentFultonParticipants, "', []])) <= ", _maximumParticipants, ") && !(_this getVariable ['KH_var_fultonAttached', false]) && ((_this distance _target) < 6))"] joinString "",
-				["(((count (missionNamespace getVariable ['", _currentFultonParticipants, "', []])) <= ", _maximumParticipants, ") && !(_caller getVariable ['KH_var_fultonAttached', false]) && ((_caller distance _target) < 6))"] joinString "",
+				["
+					(((count (missionNamespace getVariable ['", _currentFultonParticipants, "', []])) <= ", _maximumParticipants, ") && 
+					!(_this getVariable ['KH_var_fultonAttached', false]) && ((_this distance _target) < 6))
+				"] joinString "",
+				["
+					(((count (missionNamespace getVariable ['", _currentFultonParticipants, "', []])) <= ", _maximumParticipants, ") && 
+					!(_caller getVariable ['KH_var_fultonAttached', false]) && ((_caller distance _target) < 6))
+				"] joinString "",
 				{},
 				{},
 				{
@@ -187,13 +217,15 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 				true
 			],
 			"BIS_fnc_holdActionAdd", 
-			["JIP", "PLAYERS", _object, false, false, ""], 
-			true
+			"PLAYERS",
+			true,
+			["JIP", _object, false, ""]
 		] call KH_fnc_execute;
 
 		[
+			[_object, _maximumParticipants, _objectName, _mainFulton, _fultonActive, _currentFultonParticipants, _fultonFunction, _fultonRemoteActions, _fultonBox],
 			{
-				_args params ["_object", "_maximumParticipants", "_objectName", "_mainFulton", "_fultonActive", "_currentFultonParticipants", "_fultonFunction", "_fultonRemoteActions", "_fultonBox"];
+				params ["_object", "_maximumParticipants", "_objectName", "_mainFulton", "_fultonActive", "_currentFultonParticipants", "_fultonFunction", "_fultonRemoteActions", "_fultonBox"];
 				
 				if !(missionNamespace getVariable [_fultonActive, false]) then {
 					{
@@ -203,11 +235,19 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 							[
 								[
 									_x,
-									format ["Attach %1 To Fulton %2", name _x, _objectName],
+									["Attach ", name _x, " To Fulton ", _objectName] joinString "",
 									"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_loadVehicle_ca.paa",
 									"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_loadVehicle_ca.paa",
-									["(((count (missionNamespace getVariable ['", _currentFultonParticipants, "', []])) <= ", _maximumParticipants, ") && !(_target getVariable ['KH_var_fultonAttached', false]) && ((_target distance (missionNamespace getVariable '", _fultonBox, "')) < 6) && (_target isNotEqualTo _this) && ((_this distance _target) < 4) && (alive _target))"] joinString "",
-									["(((count (missionNamespace getVariable ['", _currentFultonParticipants, "', []])) <= ", _maximumParticipants, ") && !(_target getVariable ['KH_var_fultonAttached', false]) && ((_target distance (missionNamespace getVariable '", _fultonBox, "')) < 6) && (_target isNotEqualTo _caller) && ((_caller distance _target) < 4) && (alive _target))"] joinString "",
+									["
+										(((count (missionNamespace getVariable ['", _currentFultonParticipants, "', []])) <= ", _maximumParticipants, ") && 
+										!(_target getVariable ['KH_var_fultonAttached', false]) && ((_target distance (missionNamespace getVariable '", _fultonBox, "')) < 6) && 
+										(_target isNotEqualTo _this) && ((_this distance _target) < 4) && (alive _target))
+									"] joinString "",
+									["
+										(((count (missionNamespace getVariable ['", _currentFultonParticipants, "', []])) <= ", _maximumParticipants, ") && 
+										!(_target getVariable ['KH_var_fultonAttached', false]) && ((_target distance (missionNamespace getVariable '", _fultonBox, "')) < 6) && 
+										(_target isNotEqualTo _caller) && ((_caller distance _target) < 4) && (alive _target))
+									"] joinString "",
 									{},
 									{},
 									{
@@ -223,14 +263,15 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 									true
 								],
 								"BIS_fnc_holdActionAdd", 
-								["JIP", "PLAYERS", _x, false, false, ""], 
-								true
+								"PLAYERS",
+								true,
+								["JIP", _x, false, ""]
 							] call KH_fnc_execute;
 
 							[
 								[
 									_x,
-									format ["Detach %1 From Fulton %2", name _x, _objectName],
+									["Detach ", name _x, " From Fulton ", _objectName] joinString "",
 									"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_unloadVehicle_ca.paa",
 									"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_unloadVehicle_ca.paa",
 									"((_target getVariable ['KH_var_fultonAttached', false]) && (_target isNotEqualTo _this) && ((_this distance _target) < 4) && (alive _target))",
@@ -252,9 +293,10 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 									false,
 									true
 								],
-								"BIS_fnc_holdActionAdd", 
-								["JIP", "PLAYERS", _x, false, false, ""], 
-								true
+								"BIS_fnc_holdActionAdd",
+								"PLAYERS",
+								true,
+								["JIP", "PLAYERS", _x, false, false, ""]
 							] call KH_fnc_execute;
 						};
 					} forEach (_object nearEntities ["Man", 15]);
@@ -263,17 +305,32 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 					[_handle] call CBA_fnc_removePerFrameHandler;
 				};
 			},
+			true,
 			1,
-			[_object, _maximumParticipants, _objectName, _mainFulton, _fultonActive, _currentFultonParticipants, _fultonFunction, _fultonRemoteActions, _fultonBox]
-		] call CBA_fnc_addPerFrameHandler;
+			false
+		] call KH_fnc_execute;
 
 		[
+			[_object, _vehicles, _height, _distance, _duration, _mainFulton, _fultonActive, _currentFultonParticipants, _mainFultonVelocity, _fultonAnchor, _fultonRope],
 			{
 				params ["_object", "_vehicles", "_height", "_distance", "_duration", "_mainFulton", "_fultonActive", "_currentFultonParticipants", "_mainFultonVelocity", "_fultonAnchor", "_fultonRope"];
 
 				[
+					[_object, _vehicles, _height, _distance, _duration, _mainFulton, _fultonActive, _currentFultonParticipants, _mainFultonVelocity, _fultonAnchor, _fultonRope],
 					{
-						_args params ["_object", "_vehicles", "_height", "_distance", "_duration", "_mainFulton", "_fultonActive", "_currentFultonParticipants", "_mainFultonVelocity", "_fultonAnchor", "_fultonRope"];
+						params [
+							"_object", 
+							"_vehicles", 
+							"_height", 
+							"_distance", 
+							"_duration", 
+							"_mainFulton", 
+							"_fultonActive", 
+							"_currentFultonParticipants", 
+							"_mainFultonVelocity", 
+							"_fultonAnchor", 
+							"_fultonRope"
+						];
 						
 						if !(isNull _mainFulton) then {
 							if (_vehicles isEqualTo []) then {
@@ -314,7 +371,8 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 														_unit switchMove ["Para_Pilot"];
 													},
 													"GLOBAL",
-													true
+													true,
+													false
 												] call KH_fnc_execute;
 
 												if (isPlayer _unit) then {
@@ -350,12 +408,14 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 														] call KH_fnc_addEventHandler;
 													},
 													"GLOBAL",
-													true
+													true,
+													false
 												] call KH_fnc_execute;
 
 												[
+													[_unit, _vehicle, _duration],
 													{
-														_args params ["_unit", "_vehicle", "_duration"];
+														params ["_unit", "_vehicle", "_duration"];
 														private _remainingTime = _unit getVariable ["KH_var_fultonRemainingTime", _duration];
 														private _timeStep = diag_deltaTime;
 														_remainingTime = _remainingTime - _timeStep;
@@ -363,57 +423,44 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 
 														if ((_remainingTime <= 0) || ((_unit distance _vehicle) < 30)) then {
 															_unit switchMove [""];
+															_unit moveInAny _vehicle;
 
-															[
-																{
-																	params ["_unit", "_vehicle"];
-																	_unit moveInAny _vehicle;
+															if ((objectParent _unit) isNotEqualTo _vehicle) then {
+																private _timeout = CBA_missionTime + 15;
 
-																	[
-																		{
-																			params ["_unit", "_vehicle"];
+																[
+																	[_unit, _vehicle, _timeout],
+																	{
+																		params ["_unit", "_vehicle", "_timeout"];
+																		private _finished = false;
 
-																			if ((objectParent _unit) != _vehicle) then {
-																				_unit moveInAny _vehicle;
-																				private _timeout = CBA_missionTime + 15;
+																		if ((objectParent _unit) isNotEqualTo _vehicle) then {
+																			_unit moveInAny _vehicle;
+																		}
+																		else {
+																			_finished = true;
+																			_unit allowDamage true;
+																			_unit setUnitFreefallHeight -1;
+																			[_handlerId] call KH_fnc_removeHandler;
+																		};
 
-																				[
-																					{
-																						_args params ["_unit", "_vehicle", "_timeout"];
-																						private _finished = false;
-
-																						if ((objectParent _unit) != _vehicle) then {
-																							_unit moveInAny _vehicle;
-																						}
-																						else {
-																							_finished = true;
-																							_unit allowDamage true;
-																							_unit setUnitFreefallHeight -1;
-																							[_handle] call CBA_fnc_removePerFrameHandler;
-																						};
-
-																						if ((CBA_missionTime > _timeout) && !_finished) then {
-																							_unit allowDamage true;
-																							_unit setUnitFreefallHeight -1;
-																							[_handle] call CBA_fnc_removePerFrameHandler;
-																						};
-																					},
-																					0,
-																					[_unit, _vehicle, _timeout]
-																				] call CBA_fnc_addPerFrameHandler;
-																			};
-																		}, 
-																		[_unit, _vehicle]
-																	] call CBA_fnc_execNextFrame;
-																}, 
-																[_unit, _vehicle]
-															] call CBA_fnc_execNextFrame;
+																		if ((CBA_missionTime > _timeout) && !_finished) then {
+																			_unit allowDamage true;
+																			_unit setUnitFreefallHeight -1;
+																			[_handlerId] call KH_fnc_removeHandler;
+																		};
+																	},
+																	true,
+																	0,
+																	false
+																] call KH_fnc_execute;
+															};
 
 															_unit setVariable ["KH_var_fultonRemainingTime", nil];
-															[_handle] call CBA_fnc_removePerFrameHandler;
+															[_handlerId] call KH_fnc_removeHandler;
 														} 
 														else {
-															if ((animationState _unit) != "Para_Pilot") then {
+															if ((animationState _unit) isNotEqualTo "Para_Pilot") then {
 																_unit switchMove ["Para_Pilot"];
 															};
 
@@ -427,12 +474,14 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 															_unit setAngularVelocity [0, 0, 0];
 														};
 													},
+													true,
 													0,
-													[_unit, _vehicle, _duration]
-												] call CBA_fnc_addPerFrameHandler;
+													false
+												] call KH_fnc_execute;
 											},
 											_x,
-											true
+											true,
+											false
 										] call KH_fnc_execute;
 									} forEach (missionNamespace getVariable [_currentFultonParticipants, []]);
 
@@ -441,7 +490,7 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 									deleteVehicle _fultonAnchor;
 									deleteVehicle _mainFulton;
 									deleteVehicle _object;
-									[_handle] call CBA_fnc_removePerFrameHandler;
+									[_handlerId] call KH_fnc_removeHandler;
 									break;
 								};
 							} forEach _vehicles;
@@ -449,7 +498,7 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 						else {
 							ropeDestroy _fultonRope;
 							deleteVehicle _fultonAnchor;
-							[_handle] call CBA_fnc_removePerFrameHandler;
+							[_handlerId] call KH_fnc_removeHandler;
 						};
 
 						if !(missionNamespace getVariable [_fultonActive, false]) then {
@@ -462,14 +511,14 @@ private _fultonId = [missionNamespace, "KH_var_fultonId", false, true] call KH_f
 							};
 						};
 					},
+					true,
 					0,
-					[_object, _vehicles, _height, _distance, _duration, _mainFulton, _fultonActive, _currentFultonParticipants, _mainFultonVelocity, _fultonAnchor, _fultonRope]
-				] call CBA_fnc_addPerFrameHandler;
-			}, 
-			[_object, _vehicles, _height, _distance, _duration, _mainFulton, _fultonActive, _currentFultonParticipants, _mainFultonVelocity, _fultonAnchor, _fultonRope], 
-			3
-		] call CBA_fnc_waitAndExecute;
+					false
+				] call KH_fnc_execute;
+			},
+			true,
+			"3",
+			false
+		] call KH_fnc_execute;
 	}
 ] call KH_fnc_addEventHandler;
-
-true;

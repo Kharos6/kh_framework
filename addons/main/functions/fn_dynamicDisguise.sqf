@@ -1,4 +1,5 @@
 params [["_state", true, [true]], ["_uniforms", [], [[]]], ["_vests", [], [[]]], ["_headgear", [], [[]]], ["_vehicles", [], [[]]], ["_setCaptive", false, [true]]];
+KH_var_dynamicDisguiseState = _state;
 
 if (isNil "KH_var_disguiseSideUniforms") then {
 	KH_var_disguiseSideUniforms = [[], [], []];
@@ -13,22 +14,14 @@ if (isNil "KH_var_disguiseSideHeadgear") then {
 };
 
 for "_i" from 0 to 2 do {
-	private _uniformsArray = (KH_var_disguiseSideUniforms select _i);
-	_uniformsArray insert [-1, _uniforms select _i, true];
-	KH_var_disguiseSideUniforms set [_i, _uniformsArray];
-	private _vestsArray = (KH_var_disguiseSideVests select _i);
-	_vestsArray insert [-1, _headgear select _i, true];
-	KH_var_disguiseSideVests set [_i, _vestsArray];
-	private _headgearArray = (KH_var_disguiseSideHeadgear select _i);
-	_headgearArray insert [-1, _headgear select _i, true];
-	KH_var_disguiseSideHeadgear set [_i, _headgearArray];
+	(KH_var_disguiseSideUniforms select _i) insert [-1, _uniforms select _i, true];
+	(KH_var_disguiseSideVests select _i) insert [-1, _vests select _i, true];
+	(KH_var_disguiseSideHeadgear select _i) insert [-1, _headgear select _i, true];
 };
 
 KH_var_disguiseSetCaptive = _setCaptive;
 
-if _state then {
-	KH_var_dynamicDisguiseState = true;
-	
+if _state then {	
 	if (isNil "KH_var_dynamicDisguiseSet") then {
 		KH_var_dynamicDisguiseSet = true;
 
@@ -104,14 +97,15 @@ if _state then {
 							_x addEventHandler [
 								"Dammaged", 
 								{
-									private _unit = _this select 0;
-									private _instigator = _this select 5;
+									private _unit = param [0];
+									private _instigator = param [5];
 									
 									if (
 										(_instigator getVariable ["KH_var_disguiseState", false]) && 
 										(((side (group _instigator)) isEqualTo (side (group _unit))) || (((side _instigator)) isEqualTo sideFriendly))
 									   ) then {
 										[
+											[_instigator],
 											{
 												params ["_instigator"];	
 												private _instigatorVisible = false;
@@ -123,7 +117,7 @@ if _state then {
 														((side (group _x)) isEqualTo (side (group _instigator))) && 
 														(
 														 (([_instigator, "VIEW", objectParent _instigator] checkVisibility [eyePos _instigator, eyePos _x]) > 0) || 
-														 (([_instigator, "VIEW", objectParent _instigator] checkVisibility [(getPosASL _instigator) vectorAdd [0, 0, 1], eyePos _x]) > 0)
+														 (([_instigator, "VIEW", objectParent _instigator] checkVisibility [AGLToASL (unitAimPosition _player), eyePos _x]) > 0)
 														)
 													   ) then {
 														_instigatorVisible = true;
@@ -135,10 +129,11 @@ if _state then {
 													_instigator setVariable ["KH_var_disguiseState", false];
 													_instigator setVariable ["KH_var_disguiseDetected", true];
 												};									
-											}, 
-											[_instigator], 
-											3
-										] call CBA_fnc_waitAndExecute;
+											},
+											true,
+											"3",
+											false
+										] call KH_fnc_execute;
 									};
 								}
 							];
@@ -170,7 +165,7 @@ if _state then {
 												(!(isPlayer _x) && (alive _x) && ((side (group _x)) isEqualTo _currentSide)) && 
 												(
 												 (([_player, "VIEW", objectParent _player] checkVisibility [eyePos _player, eyePos _x]) > 0) || 
-												 (([_player, "VIEW", objectParent _player] checkVisibility [(getPosASL _player) vectorAdd [0, 0, 1], eyePos _x]) > 0)
+												 (([_player, "VIEW", objectParent _player] checkVisibility [AGLToASL (unitAimPosition _player), eyePos _x]) > 0)
 												)
 											   ) then {
 												_instigatorVisible = true;
@@ -202,7 +197,8 @@ if _state then {
 									systemChat "Someone saw me. I am no longer disguised.";
 								},
 								_player,
-								true
+								true,
+								false
 							] call KH_fnc_execute;
 							
 							if KH_var_disguiseSetCaptive then {
@@ -212,7 +208,8 @@ if _state then {
 										player setCaptive false;
 									},
 									_player,
-									true
+									true,
+									false
 								] call KH_fnc_execute;
 							};
 						};
@@ -249,7 +246,8 @@ if _state then {
 										systemChat (["No one saw me. I am now disguised as the ", _currentSide, " side."] joinString "");
 									},
 									_player,
-									true
+									true,
+									false
 								] call KH_fnc_execute;
 								
 								if KH_var_disguiseSetCaptive then {
@@ -259,7 +257,8 @@ if _state then {
 											player setCaptive true;
 										},
 										_player,
-										true
+										true,
+										false
 									] call KH_fnc_execute;
 								};
 							};
@@ -272,9 +271,6 @@ if _state then {
 			false
 		] call KH_fnc_execute;
 	};
-}
-else {
-	KH_var_dynamicDisguiseState = false;
 };
 
 nil;

@@ -1,11 +1,10 @@
 params [["_state", true, [true]], ["_viewDistance", 0, [0]]];
+KH_var_limitViewDistanceState = true;
+publicVariable "KH_var_limitViewDistanceState";
 KH_var_viewDistanceLimit = _viewDistance;
 publicVariable "KH_var_viewDistanceLimit";
 
 if _state then {
-	KH_var_limitViewDistanceState = true;
-	publicVariable "KH_var_limitViewDistanceState";
-
 	if (isNil "KH_var_viewDistanceSet") then {
 		KH_var_viewDistanceSet = true;
 		publicVariable "KH_var_viewDistanceSet";
@@ -36,10 +35,6 @@ if _state then {
 			["JIP", true, true, ""]
 		] call KH_fnc_execute;
 	};
-}
-else {
-	KH_var_limitViewDistanceState = false;
-	publicVariable "KH_var_limitViewDistanceState";
 };
 
 nil;

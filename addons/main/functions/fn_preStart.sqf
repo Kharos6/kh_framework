@@ -36,6 +36,24 @@ KH_var_resetInitLuaExecutions = [];
            	[_prefix, configName _x] joinString "_";
         };
 
+		if (isNumber (_x >> "compileSqf")) then {
+			if ((getNumber (_x >> "compileSqf")) isEqualTo 1) then {
+                uiNamespace setVariable [
+                    [
+                        _prefix,
+                        "_fnc_",
+                        if (isText (_x >> "name")) then {
+                            getText (_x >> "name");
+                        }
+                        else {
+                            configName _x;
+                        }
+                    ] joinString "",
+                    compile (["_this luaExecute '", _name, "';"] joinString "") 
+                ];
+            };
+        };
+
         _name luaCompile _function;
 
 		if (isNumber (_x >> "preStart")) then {

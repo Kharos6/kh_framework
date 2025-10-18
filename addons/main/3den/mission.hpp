@@ -549,9 +549,9 @@ class Mission
 				{
 					class PersistencySubcategory
 					{
-						description = "Maintain persistency using an identifier saved in the khNamespace.khdata file. States are saved when the KH_fnc_endMission function or the KH End Mission module is executed, and loaded at the appropriate time when persistent states of the same identifier are available. The identifier attribute can be set to an empty string, or all of the checkboxes can be unticked, if only the respawn loadout usage is desired.";
+						description = "Maintain persistency using stored entity and world states. States are saved when the KH_fnc_endMission function or the KH End Mission module is executed, and loaded at the appropriate time the persistent state of the identifier is available. If only the respawn loadout usage is desired, the identifier can be set to an empty string or all of the options can be unticked. The missionNamespace, as well as all entity namespaces, may contain a 'KH_var_persistentVariables' variable that is an array of arrays in format [name (STRING), value (ANY), public (BOOL)].";
 						data = "AttributeSystemSubcategory";
-						control = "KH_SubcategoryNoHeader4";
+						control = "KH_SubcategoryNoHeader6";
 					};
 					class Persistency 
 					{

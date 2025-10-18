@@ -375,7 +375,11 @@ private _return = switch (typeName _target) do {
                 private _parsedTargets = [];
 
                 {
-                    private _target = _targets param [_forEachIndex, true, [true, 0, "", [], {}, objNull, teamMemberNull, grpNull, sideUnknown, locationNull]];
+                    private _target = _targets param [_forEachIndex, nil, [true, 0, "", [], {}, objNull, teamMemberNull, grpNull, sideUnknown, locationNull]];
+
+                    if (isNil "_target") then {
+                        continue;
+                    };
 
                     switch (typeName _target) do {
                         case "BOOL": {

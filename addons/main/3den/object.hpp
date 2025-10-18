@@ -8,21 +8,21 @@ class Object
 			collapsed = 1;
 			class Attributes
 			{
-				class KH_ConditionalPresenceSubcategory
+				class ConditionalPresenceSubcategory
 				{
-					description = "Specify a CBA event which, every time it is broadcasted to the server, changes the simulation and visibility of this entity. If its argument is true, the entity will become simulated and visible. If its argument false, the entity will become unsimulated and invisible. The initial simulation and visibility state of the entity remains unchanged until the event is broadcast for the first time.";
+					description = "Specify a CBA event which changes the simulation and visibility of this entity every time it is broadcasted to the server. If its argument is true, the entity will become simulated and visible. If its argument false, the entity will become unsimulated and invisible. The initial simulation and visibility state of the entity remains unchanged until the event is broadcast for the first time.";
 					data = "AttributeSystemSubcategory";
 					control = "KH_SubcategoryNoHeader4";
 				};
-				class KH_ConditionalPresence 
+				class ConditionalPresence 
 				{
 					property = "KH_ConditionalPresence";
 					control = "KH_ConditionalPresence";
 					expression = 
 					"\
-						_value params ['_toggle', '_variableName', '_init', '_invert'];\
-						if (_toggle && !is3DEN && (_variableName isNotEqualTo '')) then {\
-							[_this, _variableName, compile _init, _invert] call KH_fnc_conditionalPresence;\
+						_value params ['_toggle', '_event', '_init', '_invert'];\
+						if (_toggle && !is3DEN && (_event isNotEqualTo '')) then {\
+							[_this, _event, compile _init, _invert] call KH_fnc_conditionalPresence;\
 						};\
 					";
 					defaultValue = "[false, '', '', false]";
@@ -35,13 +35,13 @@ class Object
 			collapsed = 1;
 			class Attributes
 			{
-				class KH_ConvertToAgentSubcategory
+				class ConvertToAgentSubcategory
 				{
 					description = "Converts this unit to an agent upon mission start. Most Eden attributes will be lost, but can be replicated using the Init field.";
 					data = "AttributeSystemSubcategory";
 					control = "KH_SubcategoryNoHeader2";
 				};
-				class KH_ConvertToAgent 
+				class ConvertToAgent 
 				{
 					property = "KH_ConvertToAgent";
 					control = "KH_ConvertToAgent";
@@ -50,9 +50,9 @@ class Object
 						_value params ['_toggle', '_init'];\
 						if (_toggle && !is3DEN) then {\
 							KH_var_postInitExecutions pushBack [\
-								[[_this], compile _init],\
+								[_this, compile _init],\
 								{\
-									_this call KH_fnc_convertToAgent;\
+									call KH_fnc_convertToAgent;\
 								}\
 							];\
 						};\
@@ -62,19 +62,51 @@ class Object
 				};
 			};
 		};
+		class KH_PersistencySettings
+		{
+			displayName = "KH Persistency Settings";
+			collapsed = 1;
+			class Attributes
+			{
+				class PersistencySettingsSubcategory
+				{
+					description = "Settings to be used for this entity in regards to the persistency system from the mission attributes.";
+					data = "AttributeSystemSubcategory";
+					control = "KH_SubcategoryNoHeader4";
+				};
+				class PersistencySettings
+				{
+					property = "KH_PersistencySettings";
+					control = "KH_PersistencySettings";
+					expression = 
+					"\
+						_value params ['_toggle', '_playerUseVariableName', '_ignoreTransforms'];\
+						if (_toggle && !is3DEN) then {\
+							if _playerUseVariableName then {
+								_this setVariable ['KH_var_playerPersistencyUseVariableName', true];\
+							};\
+							if _ignoreTransforms then {\
+								_this setVariable ['KH_var_persistencyIgnoreTransforms', true];\
+							};\
+						};\
+					";
+					defaultValue = "[false, false, false]";
+				};
+			};
+		};
 		class KH_PersistentInit
 		{
 			displayName = "KH Persistent Init";
 			collapsed = 1;
 			class Attributes
 			{
-				class KH_PersistentInitSubcategory
+				class PersistentInitSubcategory
 				{
-					description = "Execute code every time this entity changes locality, ideal for code that is dependent on locality.";
+					description = "Unscheduled code executed every time this entity changes locality, ideal for code that is dependent on locality.";
 					data = "AttributeSystemSubcategory";
 					control = "KH_SubcategoryNoHeader1";
 				};
-				class KH_PersistentInit 
+				class PersistentInit 
 				{
 					property = "KH_PersistentInit";
 					control = "KH_PersistentInit";
@@ -92,17 +124,18 @@ class Object
 											params ['_entity', '_localFunction'];\
 											[_entity] call _localFunction;\
 										},\
+										_entity,\
+										true,\
 										[\
 											'PERSISTENT',\
-											_entity,\
+											true,\
 											[_entity, _remoteFunction],\
 											{\
 												params ['_entity', '_remoteFunction'];\
 												[_entity] call _remoteFunction;\
 											},\
-											true\
-										],\
-										'THIS_FRAME'\
+											''\
+										]\
 									] call KH_fnc_execute;\
 								}\
 							];\
@@ -118,13 +151,13 @@ class Object
 			collapsed = 1;
 			class Attributes
 			{
-				class KH_TransferToHeadlessClientSubcategory
+				class TransferToHeadlessClientSubcategory
 				{
 					description = "Designate this entity for transfer to a headless client.";
 					data = "AttributeSystemSubcategory";
 					control = "KH_SubcategoryNoHeader1";
 				};
-				class KH_TransferToHeadlessClient 
+				class TransferToHeadlessClient 
 				{
 					property = "KH_TransferToHeadlessClient";
 					control = "KH_TransferToHeadlessClient";
@@ -148,17 +181,17 @@ class Object
 			collapsed = 1;
 			class Attributes
 			{
-				class KH_AnimationSpeed
+				class AnimationSpeed
 				{
 					displayName = "Animation Speed";
-					tooltip = "Sets the animation speed of this unit. Leave empty for no change.";
+					tooltip = "Sets the animation speed of this unit. Set to -1 for no change.";
 					property = "KH_AnimationSpeed";
 					control = "Edit";
 					expression = 
 					"\
-						if ((_value isNotEqualTo '') && !is3DEN) then {\
+						if ((_value isNotEqualTo -1) && !is3DEN) then {\
 							KH_var_postInitExecutions pushBack [\
-								[_this, parseNumber _value],\
+								[_this, _value],\
 								{\
 									[\
 										_this,\
@@ -166,20 +199,23 @@ class Object
 											params ['_unit', '_speed'];\
 											_unit setAnimSpeedCoef _speed;\
 										},\
-										['JIP', 'PLAYERS', _this select 0, false, false, ''],\
-										'THIS_FRAME'\
+										'GLOBAL',\
+										true,\
+										['JIP', _this select 0, true, '']\
 									] call KH_fnc_execute;\
 								}\
 							];\
 						};\
 					";
-					defaultValue = "''";
+					defaultValue = "-1";
+					validate = "number";
+					typeName = "NUMBER";
 					condition = "objectControllable";
 				};
-				class KH_ArrayBuilder
+				class ArrayBuilder
 				{
 					displayName = "Array Builder";
-					tooltip = "Specify an array of one or more strings of global variables that will be made into an array, made public, and contain this entity and any other entities utilizing this function. In format ['globalVariable1', 'globalVariable2', 'globalVariable3']";
+					tooltip = "Specify an array of strings of global variables that will be made into an array, made public, and contain this entity and any other entities utilizing this function. In format ['globalVariable1', 'globalVariable2', 'globalVariable3', ...]";
 					property = "KH_ArrayBuilder";
 					control = "Edit";
 					expression = 
@@ -187,39 +223,57 @@ class Object
 						if ((_value isNotEqualTo '') && (_value isNotEqualTo '[]') && !is3DEN) then {\
 							private _array = parseSimpleArray _value;\
 							_this setVariable ['KH_var_assignedEntityArrayBuilderArrays', _array];\
-							private _originalArrayBuilderArray = missionNamespace getVariable ['KH_var_entityArrayBuilderArrays', []];\
 							{\
 								private _originalValueArray = missionNamespace getVariable [_x, []];\
 								_originalValueArray pushBack _this;\
 								missionNamespace setVariable [_x, _originalValueArray];\
-								_originalArrayBuilderArray pushBackUnique _x;\
-								missionNamespace setVariable ['KH_var_entityArrayBuilderArrays', _originalArrayBuilderArray];\
+								private _originalArrayArray = missionNamespace getVariable ['KH_var_entityArrayBuilderArrays', []];\
+								_originalArrayArray pushBackUnique _x;\
+								missionNamespace setVariable ['KH_var_entityArrayBuilderArrays', _originalArrayArray];\
 							} forEach _array;\
 						};\
 					";
 					defaultValue = "'[]'";
 				};
-				class KH_FreefallHeight
+				class FreefallHeight
 				{
 					displayName = "Freefall Height";
-					tooltip = "Height above which this unit will enter freefall, in meters. Leave empty for no change from the default of 100 metres.";
+					tooltip = "Height above which this unit will enter freefall, in meters. Set to -1 for no change from the default of 100 metres.";
 					property = "KH_FreefallHeight";
 					control = "Edit";
 					expression = 
 					"\
-						if ((_value isNotEqualTo '') && !is3DEN) then {\
-							_this setUnitFreefallHeight (parseNumber _value);\
+						if ((_value isNotEqualTo -1) && !is3DEN) then {\
+							_this setUnitFreefallHeight _value;\
+							[\
+								[_this, _value],\
+								{\
+									params ['_entity', '_value'];\
+									_entity setUnitFreefallHeight _value;\
+								},\
+								_this,\
+								true,\
+								[\
+									'PERSISTENT',\
+									true,\
+									[],\
+									{},\
+									''\
+								]\
+							] call KH_fnc_execute;\
 						};\
 					";
-					defaultValue = "''";
+					defaultValue = "-1";
+					validate = "number";
+					typeName = "NUMBER";
 					condition = "objectControllable";
 				};
-				class KH_PlayerObjectInit
+				class PlayerObjectInit
 				{
 					displayName = "Player Object Init";
-					tooltip = "Unscheduled code to execute locally to the player who loads into the mission as this unit, once the unit becomes valid. Only works if this unit is playable. The local <player> variable is valid as this unit.";
+					tooltip = "Unscheduled code executed locally to the player who loads into the mission as this unit. The local player variable is valid as this unit.";
 					property = "KH_PlayerObjectInit";
-					control = "EditMulti5";
+					control = "EditCodeMulti5";
 					expression = 
 					"\
 						if ((_value isNotEqualTo '') && !is3DEN) then {\
@@ -233,8 +287,8 @@ class Object
 										[_entity, _function],\
 										{\
 											_args params ['_entity', '_function'];\
-											if (player == _entity) then {\
-												[] call _function;\
+											if (player isEqualTo _entity) then {\
+												call _function;\
 											};\
 										}\
 									] call KH_fnc_addEventHandler;\
@@ -243,14 +297,15 @@ class Object
 						};\
 					";
 					defaultValue = "''";
+					validate = "expression";
 					condition = "objectControllable";
 				};
-				class KH_ServerObjectInit
+				class ServerObjectInit
 				{
 					displayName = "Server Object Init";
-					tooltip = "Unscheduled code to execute on the server with this entity passed as an argument. Passed arguments available through <_this> are: <[_entity (OBJECT)]>.";
+					tooltip = "Unscheduled code executed on the server with this entity passed as an argument. Passed arguments available through _this are: [_entity (OBJECT)].";
 					property = "KH_ServerObjectInit";
-					control = "EditMulti5";
+					control = "EditCodeMulti5";
 					expression = 
 					"\
 						if ((_value isNotEqualTo '') && !is3DEN) then {\
@@ -264,11 +319,12 @@ class Object
 						};\
 					";
 					defaultValue = "''";
+					validate = "expression";
 				};
-				class KH_LockInventory
+				class LockInventory
 				{
 					displayName = "Lock Inventory";
-					tooltip = "<true> locks the inventory of this entity, preventing the inventory from being accessible.";
+					tooltip = "True locks the inventory of this entity.";
 					property = "KH_LockInventory";
 					control = "Checkbox";
 					expression = 
@@ -283,8 +339,9 @@ class Object
 											params ['_entity'];\
 											_entity lockInventory true;\
 										},\
-										['JIP', 'PLAYERS', _this select 0, false, false, ''],\
-										'THIS_FRAME'\
+										'GLOBAL',\
+										true,\
+										['JIP', _this select 0, false, '']\
 									] call KH_fnc_execute;\
 								}\
 							];\
@@ -292,7 +349,37 @@ class Object
 					";
 					defaultValue = "false";
 				};
-				class KH_SetRandomLoadout
+				class Renegade
+				{
+					displayName = "Renegade";
+					tooltip = "True declares the unit as a renegade, causing units from all sides to attack it. Ideal for players, as AI on this unit will not attack its own side even if endangered.";
+					property = "KH_Renegade";
+					control = "Checkbox";
+					expression = 
+					"\
+						if (_value && !is3DEN) then {\
+							[\
+								[_this],\
+								{\
+									params ['_entity'];\
+									[_entity, false] call KH_fnc_setRating;\
+								},\
+								_this,\
+								true,\
+								[\
+									'PERSISTENT',\
+									true,\
+									[],\
+									{},\
+									''\
+								]\
+							] call KH_fnc_execute;\
+						};\
+					";
+					defaultValue = "false";
+					condition = "objectControllable";
+				};
+				class SetRandomLoadout
 				{
 					displayName = "Set Random Loadout";
 					tooltip = "Specify either an array of loadouts, or a global variable containing an array of loadouts, that will be selected from at random and applied to this unit.";
@@ -306,31 +393,16 @@ class Object
 								{\
 									params ['_entity', '_loadouts'];\
 									if (('[' in _loadouts) || (']' in _loadouts)) then {\
-										[[_entity], parseSimpleArray _loadouts] call KH_fnc_setRandomLoadout;\
+										_entity setUnitLoadout (selectRandom (parseSimpleArray _loadouts));\
 									}\
 									else {\
-										[[_entity], missionNamespace getVariable [_loadouts, []]] call KH_fnc_setRandomLoadout;\
+										_entity setUnitLoadout (selectRandom (missionNamespace getVariable [_loadouts, []]));\
 									};\
 								}\
 							];\
 						};\
 					";
 					defaultValue = "''";
-					condition = "objectControllable";
-				};
-				class KH_SetRenegade
-				{
-					displayName = "Set Renegade";
-					tooltip = "<true> declares the unit as a renegade, causing units from its own and allied sides to attack it, but it will not attack them back.";
-					property = "KH_SetRenegade";
-					control = "Checkbox";
-					expression = 
-					"\
-						if (_value && !is3DEN) then {\
-							_this addRating -100000;\
-						};\
-					";
-					defaultValue = "false";
 					condition = "objectControllable";
 				};
 			};

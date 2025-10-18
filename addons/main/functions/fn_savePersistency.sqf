@@ -19,3 +19,5 @@ if _player then {
 if _mission then {
     call KH_fnc_saveMissionPersistency;
 };
+
+flushKhData;

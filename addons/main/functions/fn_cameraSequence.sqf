@@ -53,11 +53,16 @@ if !(isNull _playerParent) then {
 	};
 };
 
-private _firstPosition = if (((_positions select 0) select 0) isEqualType objNull) then {
-	((_positions select 0) select 0) modelToWorld [0, 0, 0];
+private _firstPosition = if ((_positions select 0) isEqualType []) then {
+	if (((_positions select 0) select 0) isEqualType objNull) then {
+		((_positions select 0) select 0) modelToWorldVisual [0, 0, 0];
+	}
+	else {
+		_positions select 0;
+	};
 }
 else {
-	_positions select 0;
+	(_positions select 0) modelToWorldVisual [0, 0, 0];
 };
 
 private _camera = "camera" camCreate _firstPosition;
@@ -78,20 +83,25 @@ for "_i" from 0 to _cameraCount do {
 			params ["_positions", "_targets", "_fovs", "_commitTimes", "_visionTypes", "_camera", "_i"];
 			private _position = _positions select _i;
 			private _visionType = _visionTypes select _i;
-
-			if ((_position select 0) isEqualType objNull) then {
-				_position params [["_entity", objNull, [objNull]], ["_attach", false, [true]]];
-				private _attach = (_positions select _i) select 1;
-				
-				if _attach then {
-					_camera attachTo [_entity, [0, 0, 0]];
+			
+			if (_position isEqualType []) then { 
+				if ((_position select 0) isEqualType objNull) then {
+					_position params [["_entity", objNull, [objNull]], ["_attach", false, [true]]];
+					private _attach = (_positions select _i) select 1;
+					
+					if _attach then {
+						_camera attachTo [_entity, [0, 0, 0]];
+					}
+					else {
+						_camera camSetPos (_entity modelToWorldVisual [0, 0, 0]);
+					};
 				}
 				else {
-					_camera camSetPos (_entity modelToWorld [0, 0, 0]);
+					_camera camSetPos _position;
 				};
 			}
 			else {
-				_camera camSetPos _position;
+				_camera camSetPos (_position modelToWorldVisual [0, 0, 0]);
 			};
 
 			_camera camSetTarget (_targets select _i);

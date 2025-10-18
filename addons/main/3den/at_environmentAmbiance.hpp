@@ -5,13 +5,13 @@ class KH_EnvironmentAmbiance: Title
 	h = QUOTE(5 * CTRL_DEFAULT_H + 70 * pixelH);
 	class Controls: Controls
 	{
-		class KH_ToggleTitle: Title
+		class ToggleTitle: Title
 		{
 			text = "Toggle";
 			tooltip = "True allows this function to execute.";
 			y = QUOTE(0 * CTRL_DEFAULT_H + CTRL_DEFAULT_Y);
 		};
-		class KH_Toggle: ctrlCheckbox
+		class Toggle: ctrlCheckbox
 		{
 			idc = 100;
 			x = QUOTE(CTRL_DEFAULT_X);
@@ -19,13 +19,13 @@ class KH_EnvironmentAmbiance: Title
 			w = QUOTE(5 * GRID_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
-		class KH_AmbientLifeTitle: Title
+		class AmbientLifeTitle: Title
 		{
 			text = "Ambient Life";
 			tooltip = "False eliminates the presence of ambient life, such as bees, rabbits, snakes, and fish.";
 			y = QUOTE(2 * CTRL_DEFAULT_H + 5 * CTRL_DEFAULT_Y);
 		};
-		class KH_AmbientLife: ctrlCheckbox
+		class AmbientLife: ctrlCheckbox
 		{
 			idc = 101;
 			x = QUOTE(CTRL_DEFAULT_X);
@@ -33,13 +33,13 @@ class KH_EnvironmentAmbiance: Title
 			w = QUOTE(5 * GRID_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
-		class KH_AmbientSoundsTitle: Title
+		class AmbientSoundsTitle: Title
 		{
 			text = "Ambient Sounds";
 			tooltip = "False eliminates the presence of ambient sounds, such as owls and birds.";
 			y = QUOTE(3 * CTRL_DEFAULT_H + 10 * CTRL_DEFAULT_Y);
 		};
-		class KH_AmbientSounds: ctrlCheckbox
+		class AmbientSounds: ctrlCheckbox
 		{
 			idc = 102;
 			x = QUOTE(CTRL_DEFAULT_X);
@@ -47,13 +47,13 @@ class KH_EnvironmentAmbiance: Title
 			w = QUOTE(5 * GRID_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
-		class KH_WindCoefficientTitle: Title
+		class WindCoefficientTitle: Title
 		{
 			text = "Wind Coefficient";
 			tooltip = "Percentage of howling wind presence at heights.";
 			y = QUOTE(4 * CTRL_DEFAULT_H + 15 * CTRL_DEFAULT_Y);
 		};
-		class KH_WindCoefficient: ctrlXSliderH
+		class WindCoefficient: ctrlXSliderH
 		{
 			idc = 103;
 			x = QUOTE(CTRL_DEFAULT_X);
@@ -64,7 +64,7 @@ class KH_EnvironmentAmbiance: Title
        		sliderStep = 0.01;
         	lineSize = 1;
 		};
-		class KH_WindCoefficientEdit: ctrlEdit
+		class WindCoefficientEdit: ctrlEdit
 		{
 			idc = 104;
 			x = QUOTE(CTRL_DEFAULT_X * 2.455);

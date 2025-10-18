@@ -1,17 +1,17 @@
-class KH_RecoverDisconnectedPlayers: Title
+class KH_Curators: Title
 {
 	attributeLoad = "[_this, _value] call KH_fnc_loadControlAttributes;";
 	attributeSave = "[_this] call KH_fnc_saveControlAttributes;";
 	h = QUOTE(6 * CTRL_DEFAULT_H + 70 * pixelH);
 	class Controls: Controls
 	{
-		class KH_ToggleTitle: Title
+		class ToggleTitle: Title
 		{
 			text = "Toggle";
 			tooltip = "True allows this function to execute.";
 			y = QUOTE(0 * CTRL_DEFAULT_H + CTRL_DEFAULT_Y);
 		};
-		class KH_Toggle: ctrlCheckbox
+		class Toggle: ctrlCheckbox
 		{
 			idc = 100;
 			x = QUOTE(CTRL_DEFAULT_X);
@@ -19,41 +19,41 @@ class KH_RecoverDisconnectedPlayers: Title
 			w = QUOTE(5 * GRID_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
-		class KH_GroupTitle: Title
+		class CuratorsTitle: Title
 		{
-			text = "Group";
-			tooltip = "<true> makes the player join into the group that they were in at the time of disconnect, if that group still exists.";
+			text = "Curators";
+			tooltip = "Array of strings of Steam IDs whose owners will be set as curators of the curator module at the equivalent index in the Curator Modules attribute.";
 			y = QUOTE(2 * CTRL_DEFAULT_H + 5 * CTRL_DEFAULT_Y);
 		};
-		class KH_Group: ctrlCheckbox
+		class Curators: ctrlEdit
 		{
 			idc = 101;
 			x = QUOTE(CTRL_DEFAULT_X);
 			y = QUOTE(2 * CTRL_DEFAULT_H + 5 * CTRL_DEFAULT_Y);
-			w = QUOTE(5 * GRID_W);
+			w = QUOTE(CTRL_DEFAULT_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
-		class KH_LoadoutTitle: Title
+		class CuratorModulesTitle: Title
 		{
-			text = "Loadout";
-			tooltip = "<true> recovers the loadout that the player had at the time of disconnect.";
+			text = "Curator Modules";
+			tooltip = "Array of strings of variable names of curator modules that will be assigned to the owners of Steam IDs in the Curators attribute.";
 			y = QUOTE(3 * CTRL_DEFAULT_H + 10 * CTRL_DEFAULT_Y);
 		};
-		class KH_Loadout: ctrlCheckbox
+		class CuratorModules: ctrlEdit
 		{
 			idc = 102;
 			x = QUOTE(CTRL_DEFAULT_X);
 			y = QUOTE(3 * CTRL_DEFAULT_H + 10 * CTRL_DEFAULT_Y);
-			w = QUOTE(5 * GRID_W);
+			w = QUOTE(CTRL_DEFAULT_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
-		class KH_TransformsTitle: Title
+		class HideTitle: Title
 		{
-			text = "Transforms";
-			tooltip = "<true> recovers the player's position and rotation at the time of disconnect.";
+			text = "Hide";
+			tooltip = "True hides curators.";
 			y = QUOTE(4 * CTRL_DEFAULT_H + 15 * CTRL_DEFAULT_Y);
 		};
-		class KH_Transforms: ctrlCheckbox
+		class Hide: ctrlCheckbox
 		{
 			idc = 103;
 			x = QUOTE(CTRL_DEFAULT_X);
@@ -61,13 +61,13 @@ class KH_RecoverDisconnectedPlayers: Title
 			w = QUOTE(5 * GRID_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
-		class KH_VehicleTitle: Title
+		class DisableDamageTitle: Title
 		{
-			text = "Vehicle";
-			tooltip = "<true> makes the player enter the vehicle they were in at the time of disconnect, if that vehicle still exists.";
+			text = "Disable Damage";
+			tooltip = "True prevents curators from receiving damage.";
 			y = QUOTE(5 * CTRL_DEFAULT_H + 20 * CTRL_DEFAULT_Y);
 		};
-		class KH_Vehicle: ctrlCheckbox
+		class DisableDamage: ctrlCheckbox
 		{
 			idc = 104;
 			x = QUOTE(CTRL_DEFAULT_X);

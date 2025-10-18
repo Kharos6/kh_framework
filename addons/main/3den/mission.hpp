@@ -4,13 +4,13 @@ class Mission
 	{
 		class AttributeCategories
 		{
-			class KH_Init
+			class KH_Initialization
 			{
 				displayName = "KH Initialization";
 				collapsed = 1;
 				class Attributes
 				{
-					class KH_ServerMissionLoadInit
+					class ServerMissionLoadInit
 					{
 						displayName = "Server: Mission Load Init";
 						tooltip = "Unscheduled code to execute locally to the server when the mission loads. Players may not yet be present, and their units may not yet be available.";
@@ -25,7 +25,7 @@ class Mission
 						defaultValue = "''";
 						validate = "expression";
 					};
-					class KH_ServerMissionStartInit
+					class ServerMissionStartInit
 					{
 						displayName = "Server: Mission Start Init";
 						tooltip = "Unscheduled code to execute locally to the server when the mission starts. Players are present, but their units may not yet be available.";
@@ -40,7 +40,7 @@ class Mission
 						defaultValue = "''";
 						validate = "expression";
 					};		
-					class KH_ServerPlayersLoadedInit
+					class ServerPlayersLoadedInit
 					{
 						displayName = "Server: Players Loaded Init";
 						tooltip = "Unscheduled code to execute locally to the server once all player units have become available. This stage may be suspended for a maximum of 60 seconds before it automatically triggers in case of a player that never loads.";
@@ -55,7 +55,7 @@ class Mission
 						defaultValue = "''";
 						validate = "expression";
 					};
-					class KH_ServerMissionEndInit
+					class ServerMissionEndInit
 					{
 						displayName = "Server: Mission End Init";
 						tooltip = "Unscheduled code to execute locally to the server when the KH_fnc_endMission function or the End Mission module is executed.";
@@ -70,7 +70,7 @@ class Mission
 						defaultValue = "''";
 						validate = "expression";
 					};
-					class KH_HeadlessMissionLoadInit
+					class HeadlessMissionLoadInit
 					{
 						displayName = "Headless: Mission Load Init";
 						tooltip = "Unscheduled code to execute locally to each headless client when they load into the mission. Players may not yet be present, and their units may not yet be available.";
@@ -85,7 +85,7 @@ class Mission
 						defaultValue = "''";
 						validate = "expression";
 					};
-					class KH_HeadlessMissionStartInit
+					class HeadlessMissionStartInit
 					{
 						displayName = "Headless: Mission Start Init";
 						tooltip = "Unscheduled code to execute locally to each headless client when the mission starts. Players are present, but their units may not yet be available.";
@@ -100,7 +100,7 @@ class Mission
 						defaultValue = "''";
 						validate = "expression";
 					};
-					class KH_HeadlessLoadInit
+					class HeadlessLoadInit
 					{
 						displayName = "Headless: Load Init";
 						tooltip = "Unscheduled code to execute locally to each headless client when their local logic unit becomes available. Players are present, but their units may not yet be available.";
@@ -115,7 +115,7 @@ class Mission
 						defaultValue = "''";
 						validate = "expression";
 					};
-					class KH_HeadlessPlayersLoadedInit
+					class HeadlessPlayersLoadedInit
 					{
 						displayName = "Headless: Players Loaded Init";
 						tooltip = "Unscheduled code to execute locally to each headless client when all player units have become available. This stage may be suspended for a maximum of 60 seconds before it automatically triggers in case of a player that never loads.";
@@ -130,7 +130,7 @@ class Mission
 						defaultValue = "''";
 						validate = "expression";
 					};
-					class KH_HeadlessMissionEndInit
+					class HeadlessMissionEndInit
 					{
 						displayName = "Headless: Mission End Init";
 						tooltip = "Unscheduled code to execute locally to each headless client when the KH_fnc_endMission function or End Mission module is executed.";
@@ -143,8 +143,9 @@ class Mission
 							};\
 						";
 						defaultValue = "''";
+						validate = "expression";
 					};
-					class KH_PlayerMissionLoadInit
+					class PlayerMissionLoadInit
 					{
 						displayName = "Player: Mission Load Init";
 						tooltip = "Unscheduled code to execute locally to each player when they load into the mission. The local player unit is not yet available. Players may not yet be present, and their units may not yet be available.";
@@ -159,7 +160,7 @@ class Mission
 						defaultValue = "''";
 						validate = "expression";
 					};
-					class KH_PlayerMissionStartInit
+					class PlayerMissionStartInit
 					{
 						displayName = "Player: Mission Start Init";
 						tooltip = "Unscheduled code to execute locally to each player when the mission starts. The local player unit may not yet be available. Players are present, but their units may not yet be available.";
@@ -174,7 +175,7 @@ class Mission
 						defaultValue = "''";
 						validate = "expression";
 					};
-					class KH_PlayerLoadInit
+					class PlayerLoadInit
 					{
 						displayName = "Player: Load Init";
 						tooltip = "Unscheduled code to execute locally to each player when their local player unit becomes available. Players are present, but their units may not yet be available.";
@@ -189,7 +190,7 @@ class Mission
 						defaultValue = "''";
 						validate = "expression";
 					};
-					class KH_PlayerPlayersLoadedInit
+					class PlayerPlayersLoadedInit
 					{
 						displayName = "Player: Players Loaded Init";
 						tooltip = "Unscheduled code to execute locally to each player when all player units have become available. This stage may be suspended for a maximum of 60 seconds before it automatically triggers in case of a player that never loads.";
@@ -204,7 +205,7 @@ class Mission
 						defaultValue = "''";
 						validate = "expression";
 					};
-					class KH_PlayerKilledInit
+					class PlayerKilledInit
 					{
 						displayName = "Player: Killed Init";
 						tooltip = "Unscheduled code to execute locally to each player when they die. The local player unit is the killed unit. Passed arguments available through _this are: [_killer (OBJECT), _instigator (OBJECT)].";
@@ -219,7 +220,7 @@ class Mission
 						defaultValue = "''";
 						validate = "expression";
 					};
-					class KH_PlayerRespawnInit
+					class PlayerRespawnInit
 					{
 						displayName = "Player: Respawn Init";
 						tooltip = "Unscheduled code to execute locally to each player when they respawn. The local player unit is the respawned unit. Passed arguments available through _this are: [_corpse (OBJECT)].";
@@ -234,7 +235,7 @@ class Mission
 						defaultValue = "''";
 						validate = "expression";
 					};
-					class KH_PlayerSwitchInit
+					class PlayerSwitchInit
 					{
 						displayName = "Player: Switch Init";
 						tooltip = "Unscheduled code to execute locally to each player when they switch to another unit or team. The local player unit is the switched unit. Passed arguments available through _this are: [_previousUnit (OBJECT)].";
@@ -249,7 +250,7 @@ class Mission
 						defaultValue = "''";
 						validate = "expression";
 					};
-					class KH_PlayerMissionEndInit
+					class PlayerMissionEndInit
 					{
 						displayName = "Player: Mission End Init";
 						tooltip = "Unscheduled code to execute locally to each player before the mission ends when the KH_fnc_endMission function or End Mission module is executed.";
@@ -272,17 +273,17 @@ class Mission
 				collapsed = 1;
 				class Attributes
 				{
-					class KH_PersistentPlayerSynchronizer
+					class PersistentPlayerSynchronizer
 					{
 						displayName = "Persistent Player Synchronizer";
-						tooltip = "A hash map of entries where the key is a string of the variable name of an entity, and the value is either an array of strings of variable names of players, or a string of the name of a <missionNamespace> variable that is an array containing the players, which are to be synchronized to the key entity. Ideal for making sure modules are synchronized to respawning or JIP players, as well as initial players at the start of the mission. This value can also be the name of a hash map stored in <missionNamespace> containing the same elements. For example: <[['module1', ['player1', 'player2', 'player3']], ['module1', 'players123']]>.";
+						tooltip = "A hash map of entries where the key is a string of the variable name of an entity, and the value is either an array of strings of variable names of players, or a string of the name of a missionNamespace variable that is an array containing the players, which are to be synchronized to the entity assigned to the key. Ideal for making sure modules are synchronized to respawning or JIP players, as well as initial players at the start of the mission. This value can also be the name of a hash map stored in missionNamespace containing the same elements. For example: [['module1', ['player1', 'player2', 'player3', ...]], ['module1', 'playersArray']].";
 						property = "KH_PersistentPlayerSynchronizer";
 						control = "EditMulti5";
 						expression = 
 						"\
-							if ((_value != '') && (_value != '[]') && !is3DEN && isServer) then {\
+							if ((_value isNotEqualTo '') && (_value isNotEqualTo '[]') && !is3DEN && isServer) then {\
 								KH_var_postInitExecutions pushBack [\
-									[_value],\
+									[createHashMapFromArray (parseSimpleArray _value)],\
 									{\
 										params ['_value'];\
 										{\
@@ -291,26 +292,20 @@ class Mission
 												_x,\
 												[_value],\
 												{\
-													params ['_unit'];\
+													private _unit = param [3];\
 													_args params ['_value'];\
-													[\
-														{\
-															params ['_unit', '_value'];\
+													{\
+														if (_y isEqualType []) then {\
+															private _parsedEntities = [];\
 															{\
-																if (_y isEqualType []) then {\
-																	private _parsedEntities = [];\
-																	{\
-																		_parsedEntities pushBack (missionNamespace getVariable [_x, objNull]);\
-																	} forEach _y;\
-																	(missionNamespace getVariable [_x, objNull]) synchronizeObjectsAdd _parsedEntities;\
-																}\
-																else {\
-																	(missionNamespace getVariable [_x, objNull]) synchronizeObjectsAdd (missionNamespace getVariable [_y, []]);\
-																};\
-															} forEach (createHashMapFromArray (parseSimpleArray _value));\
-														},\
-														[_unit, _value]\
-													] call CBA_fnc_execNextFrame;\
+																_parsedEntities pushBack (missionNamespace getVariable [_x, objNull]);\
+															} forEach _y;\
+															(missionNamespace getVariable [_x, objNull]) synchronizeObjectsAdd _parsedEntities;\
+														}\
+														else {\
+															(missionNamespace getVariable [_x, objNull]) synchronizeObjectsAdd (missionNamespace getVariable [_y, []]);\
+														};\
+													} forEach _value;\
 												}\
 											] call KH_fnc_addEventHandler;\
 										} forEach ['KH_eve_playerLoaded', 'KH_eve_playerRespawned'];\
@@ -320,37 +315,6 @@ class Mission
 						";
 						defaultValue = "'[]'";
 					};
-					class KH_SimpleIntroText
-					{
-						displayName = "Simple Intro Text";
-						tooltip = "Displays text to the players when they join the mission. Leave empty for no intro text.";
-						property = "KH_SimpleIntroText";
-						control = "Edit";
-						expression = 
-						"\
-							if ((_value != '') && !is3DEN) then {\
-								[\
-									{\
-										(!(isNull player) && (alive player) && !visibleMap);\
-									},\
-									{\
-										params ['_text'];\
-										titleText [_text, 'BLACK IN', 999999];\
-										[\
-											{\
-												params ['_text'];\
-												titleText [_text, 'BLACK IN', 6];\
-											},\
-											[_text],\
-											3\
-										] call CBA_fnc_waitAndExecute;\
-									},\
-									[_value]\
-								] call CBA_fnc_waitUntilAndExecute;\
-							};\
-						";
-						defaultValue = "''";
-					};
 				};
 			};
 			class KH_CameraSequence
@@ -359,13 +323,13 @@ class Mission
 				collapsed = 1;
 				class Attributes
 				{
-					class KH_CameraSequenceSubcategory
+					class CameraSequenceSubcategory
 					{
-						description = "Plays a sequence of camera shots for players present at the start of the mission, and optionally JIP players. The attributes of each camera are interpolated based on index value equivalents from the different arrays of attributes. For example, the third element in <Positions> will take effect on the same shot as the third element in <Targets>.";
+						description = "Plays a sequence of camera shots for players present at the start of the mission, and optionally JIP players. The attributes of each camera are interpolated based on index value equivalents from the different arrays of attributes. For example, the third element of the Positions attribute will take effect on the same shot as the third element of the Targets attribute.";
 						data = "AttributeSystemSubcategory";
 						control = "KH_SubcategoryNoHeader4";
 					};
-					class KH_CameraSequence 
+					class CameraSequence 
 					{
 						property = "KH_CameraSequence";
 						control = "KH_CameraSequence";
@@ -376,23 +340,25 @@ class Mission
 								private _parsedPositions = [];\
 								private _parsedTargets = [];\
 								{\
-									private _position = '';\
-									if ((_x select 0) isEqualType []) then {\
-										_position = _x select 0;\
+									private _position = if (_x isEqualType []) then {\
+										if ((_x select 0) isEqualType objNull) then {\
+											[missionNamespace getVariable [_x, objNull], _x select 1];\
+										}\
+										else {\
+											_x;\
+										};\
 									}\
 									else {\
-										_position = missionNamespace getVariable [_x select 0, objNull];\
-									};\
-									private _attach = _x select 1;\
-									_parsedPositions pushBack [_position, _attach];\
+										missionNamespace getVariable [_x, objNull];\
+									};,\
+									_parsedPositions pushBack _position;\
 								} forEach (parseSimpleArray _positions);\
 								{\
-									private _target = '';\
-									if (_x isEqualType []) then {\
-										_target = _x;\
+									private _target = if (_x isEqualType []) then {\
+										_x;\
 									}\
 									else {\
-										_target = missionNamespace getVariable [_x, objNull];\
+										missionNamespace getVariable [_x, objNull];\
 									};\
 									_parsedTargets pushBack _target;\
 								} forEach (parseSimpleArray _targets);\
@@ -401,14 +367,14 @@ class Mission
 									'KH_eve_playerLoaded',\
 									[_parsedPositions, _parsedTargets, parseSimpleArray _fovs, parseSimpleArray _commitTimes, parseSimpleArray _durations, parseSimpleArray _visionTypes, _cinematicBorders, _disableUserInput, _jip],\
 									{\
-										params ['_unit'];\
+										private _unit = param [3];\
 										_args params ['_positions', '_targets', '_fovs', '_commitTimes', '_durations', '_visionTypes', '_cinematicBorders', '_disableUserInput', '_jip'];\
 										if _jip then {\
-											[[_positions, _targets, _fovs, _commitTimes, _durations, _visionTypes, _cinematicBorders, _disableUserInput], 'KH_fnc_cameraSequence', _unit, 'THIS_FRAME'] call KH_fnc_execute;\
+											[[_positions, _targets, _fovs, _commitTimes, _durations, _visionTypes, _cinematicBorders, _disableUserInput], 'KH_fnc_cameraSequence', _unit, true, false] call KH_fnc_execute;\
 										}\
 										else {\
 											if !KH_var_playersLoaded then {\
-												[[_positions, _targets, _fovs, _commitTimes, _durations, _visionTypes, _cinematicBorders, _disableUserInput], 'KH_fnc_cameraSequence', _unit, 'THIS_FRAME'] call KH_fnc_execute;\
+												[[_positions, _targets, _fovs, _commitTimes, _durations, _visionTypes, _cinematicBorders, _disableUserInput], 'KH_fnc_cameraSequence', _unit, true, false] call KH_fnc_execute;\
 											}\
 											else {\
 												[_handlerId] call KH_fnc_removeHandler;\
@@ -428,13 +394,13 @@ class Mission
 				collapsed = 1;
 				class Attributes
 				{
-					class KH_DynamicDisguiseSubcategory
+					class DynamicDisguiseSubcategory
 					{
 						description = "Activates a disguise system that dictates the side affiliation of players based on the uniform and headgear they are wearing. Will work in conjunction with the Dynamic Disguise modules.";
 						data = "AttributeSystemSubcategory";
 						control = "KH_SubcategoryNoHeader2";
 					};
-					class KH_DynamicDisguise 
+					class DynamicDisguise 
 					{
 						property = "KH_DynamicDisguise";
 						control = "KH_DynamicDisguise";
@@ -455,76 +421,98 @@ class Mission
 				collapsed = 1;
 				class Attributes
 				{
-					class KH_PersistencySubcategory
+					class PersistencySubcategory
 					{
-						description = "Maintain persistency using an identifier saved in <missionProfileNamespace>. States are saved when the <KH_fnc_endMission> function, or <End Mission> module, is executed, and loaded when valid states are available.";
+						description = "Maintain persistency using an identifier saved in the khNamespace.khdata file. States are saved when upon execution of the KH_fnc_endMission function or KH End Mission module, and loaded at the appropriate time when persistent states of the same identifier are available. The identifier attribute can be set to an empty string, or all of the checkboxes can be unticked, if only the respawn loadout usage is desired.";
 						data = "AttributeSystemSubcategory";
 						control = "KH_SubcategoryNoHeader3";
 					};
-					class KH_Persistency 
+					class Persistency 
 					{
 						property = "KH_Persistency";
 						control = "KH_Persistency";
 						expression = 
 						"\
-							_value params ['_toggle', '_identifier', '_players', '_playerRespawnType', '_objects', '_world', '_variables'];\
-							if (_toggle && !is3DEN && isServer && (_identifier != '')) then {\
-								private _parsedVariables = parseSimpleArray _variables;\
-								if (_world || (_parsedVariables isNotEqualTo [])) then {\
-									[_identifier, _world, _parsedVariables] call KH_fnc_loadMissionState;\
-								};\
-								if _players then {\
-									private _respawnType = 'NONE';\
-									switch _playerRespawnType do {\
-										case 1: {\
-											_respawnType = 'SAVED';\
-										};\
-										case 2: {\
-											_respawnType = 'INITIAL';\
-										};\
-										case 3: {\
-											_respawnType = 'DEATH';\
-										};\
+							_value params ['_toggle', '_identifier', '_players', '_playerRespawnType', '_units', '_groups', '_objects', '_mission'];\
+							if (_toggle && !is3DEN && isServer) then {\
+								private _respawnType = switch _playerRespawnType do {\
+									case 1: {\
+										'SAVED';\
 									};\
-									[_identifier, _respawnType] call KH_fnc_loadPlayerLoadouts;\
+									case 2: {\
+										'INITIAL';\
+									};\
+									case 3: {\
+										'DEATH';\
+									};\
+									default {\
+										'NONE';\
+									};\
 								};\
 								if _objects then {\
-									[_identifier] call KH_fnc_loadCargoInventories;\
+									[_identifier, []] call KH_fnc_loadObjectPersistency;\
+								};\
+								if _units then {\
+									[_identifier, []] call KH_fnc_loadUnitPersistency;\
+								};\
+								if _players then {\
+									[_identifier, _respawnType, []] call KH_fnc_loadPlayerPersistency;\
+								}\
+								else {\
+									['', _respawnType, []] call KH_fnc_loadPlayerPersistency;\
+								};\
+								if _groups then {\
+									[_identifier, []] call KH_fnc_loadGroupPersistency;\
+								};\
+								if _mission then {\
+									[_identifier] call KH_fnc_loadMissionPersistency;\
 								};\
 								[\
 									'CBA',\
 									'KH_eve_missionEnded',\
-									[_identifier, _players, _objects, _world, _parsedVariables],\
+									[_identifier, _players, _units, _groups, _objects, _mission],\
 									{\
-										_args params ['_identifier', '_players', '_objects', '_world', '_parsedVariables'];\
-										[_identifier, _parsedVariables] call KH_fnc_saveMissionState;\
-										[_identifier, KH_var_allPlayerUnits] call KH_fnc_savePlayerLoadouts;\
-										[_identifier, entities [[], ['Man', 'Logic', 'Animal'], false, false]] call KH_fnc_saveCargoInventories;\
+										_args params ['_identifier', '_players', '_units', '_groups', '_objects', '_mission'];\
+										if _objects then {\
+											[_identifier, entities [[], ['Man'], false, true]] call KH_fnc_saveObjectPersistency;\
+										};\
+										if _units then {\
+											[_identifier, allUnits] call KH_fnc_saveUnitPersistency;\
+										};\
+										if _players then {\
+											[_identifier, KH_var_allPlayerUnits] call KH_fnc_savePlayerPersistency;\
+										};\
+										if _groups then {\
+											[_identifier, allGroups] call KH_fnc_saveGroupPersistency;\
+										};\
+										if _mission then {\
+											call KH_fnc_saveMissionPersistency;\
+										};\
 										[_handlerId] call KH_fnc_removeHandler;\
 									}\
 								] call KH_fnc_addEventHandler;\
 							};\
 						";
-						defaultValue = "[false, profileName, true, 2, true, true, '[]']";
+						defaultValue = "[false, profileName, true, 2, true, true, true, true]";
 					};
 				};
 			};
-			class KH_SetCurators
+			class KH_Curators
 			{
-				displayName = "KH Set Curators";
+				displayName = "KH Curators";
 				collapsed = 1;
 				class Attributes
 				{
-					class KH_SetCuratorsSubcategory
+					class CuratorsSubcategory
 					{
 						description = "Automatically sets curators based on index pair equivalents of Steam IDs and curator modules.";
 						data = "AttributeSystemSubcategory";
 						control = "KH_SubcategoryNoHeader1";
 					};
-					class KH_SetCurators
+					class Curators
 					{
-						property = "KH_SetCurators";
-						control = "KH_SetCurators";
+						property = "KH_Curators";
+						control = "KH_Curators";
 						expression = 
 						"\
 							_value params ['_toggle', '_curators', '_curatorModules', '_hide', '_disableDamage'];\
@@ -543,22 +531,22 @@ class Mission
 					};
 				};
 			};
-			class KH_SetSideRelations
+			class KH_SideRelations
 			{
-				displayName = "KH Set Side Relations";
+				displayName = "KH Side Relations";
 				collapsed = 1;
 				class Attributes
 				{
-					class KH_SetSideRelationsSubcategory
+					class SideRelationsSubcategory
 					{
-						description = "Set the relationship state of the sides, with <true> designating friendly, and <false> designating hostile.";
+						description = "Set the relationship state of the sides, with true designating friendly and false designating hostile.";
 						data = "AttributeSystemSubcategory";
 						control = "KH_SubcategoryNoHeader2";
 					};
-					class KH_SetSideRelations
+					class SideRelations
 					{
-						property = "KH_SetSideRelations";
-						control = "KH_SetSideRelations";
+						property = "KH_SideRelations";
+						control = "KH_SideRelations";
 						expression = 
 						"\
 							_value params ['_toggle', '_bluforToBlufor', '_bluforToOpfor', '_bluforToGreenfor', '_bluforToCivilian', '_opforToBlufor', '_opforToOpfor', '_opforToGreenfor', '_opforToCivilian', '_greenforToBlufor', '_greenforToOpfor', '_greenforToGreenfor', '_greenforToCivilian', '_civilianToBlufor', '_civilianToOpfor', '_civilianToGreenfor', '_civilianToCivilian'];\
@@ -576,92 +564,25 @@ class Mission
 	{
 		class AttributeCategories
 		{
-			class KH_RecoverDisconnectedPlayers
+			class KH_Miscellaneous
 			{
-				displayName = "KH Recover Disconnected Players";
+				displayName = "KH Miscellaneous";
 				collapsed = 1;
 				class Attributes
 				{
-					class KH_RecoverDisconnectedPlayersSubcategory
+					class RecoverDisconnectedPlayers
 					{
-						description = "Recovers the unit attributes of players who reconnected after disconnecting.";
-						data = "AttributeSystemSubcategory";
-						control = "KH_SubcategoryNoHeader1";
-					};
-					class KH_RecoverDisconnectedPlayers
-					{
+						displayName = "Recover Disconnected Players";
+						tooltip = "Recovers the unit attributes of players who reconnected after disconnecting.";
 						property = "KH_RecoverDisconnectedPlayers";
-						control = "KH_RecoverDisconnectedPlayers";
+						control = "Checkbox";
 						expression = 
 						"\
-							_value params ['_toggle', '_group', '_loadout', '_transforms', '_vehicle'];\
-							if (_toggle && !is3DEN && isServer) then {\
-								[true, _group, _loadout, _transforms, _vehicle] call KH_fnc_recoverDisconnectedPlayers;\
+							if (_value && !is3DEN && isServer) then {\
+								[true] call KH_fnc_recoverDisconnectedPlayers;\
 							};\
 						";
-						defaultValue = "[false, true, true, true, true]";
-					};
-				};
-			};
-			class KH_RespawnSpectator
-			{
-				displayName = "KH Respawn Spectator";
-				collapsed = 1;
-				class Attributes
-				{
-					class KH_RespawnSpectatorSubcategory
-					{
-						description = "Makes players who respawn enter spectator mode, which can be terminated if they press the <ESC> key.";
-						data = "AttributeSystemSubcategory";
-						control = "KH_SubcategoryNoHeader2";
-					};
-					class KH_RespawnSpectator
-					{
-						property = "KH_RespawnSpectator";
-						control = "KH_RespawnSpectator";
-						expression = 
-						"\
-							_value params ['_toggle', '_type', '_freeCamera', '_playerCamera'];\
-							if (_toggle && !is3DEN && isServer) then {\
-								private _ace = false;\
-								if (_type == 1) then {\
-									_ace = true;\
-								};\
-								[true, _ace, _freeCamera, _playerCamera] call KH_fnc_respawnSpectator;\
-							};\
-						";
-						defaultValue = "[false, 0, false, true]";
-					};
-				};
-			};
-			class KH_UnconsciousSpectator
-			{
-				displayName = "KH Unconscious Spectator";
-				collapsed = 1;
-				class Attributes
-				{
-					class KH_UnconsciousSpectatorSubcategory
-					{
-						description = "Makes players who remain unconscious for a set period of time enter spectator mode, which can be terminated if they press the <ESC> key, or once they become conscious again.";
-						data = "AttributeSystemSubcategory";
-						control = "KH_SubcategoryNoHeader2";
-					};
-					class KH_UnconsciousSpectator
-					{
-						property = "KH_UnconsciousSpectator";
-						control = "KH_UnconsciousSpectator";
-						expression = 
-						"\
-							_value params ['_toggle', '_type', '_freeCamera', '_playerCamera', '_delay'];\
-							if (_toggle && !is3DEN && isServer) then {\
-								private _ace = false;\
-								if (_type == 1) then {\
-									_ace = true;\
-								};\
-								[true, _ace, _freeCamera, _playerCamera, parseNumber _delay] call KH_fnc_unconsciousSpectator;\
-							};\
-						";
-						defaultValue = "[false, 0, false, true, '30']";
+						defaultValue = "false";
 					};
 				};
 			};
@@ -677,13 +598,13 @@ class Mission
 				collapsed = 1;
 				class Attributes
 				{
-					class KH_EnvironmentAmbianceSubcategory
+					class EnvironmentAmbianceSubcategory
 					{
 						description = "Determines the amount of environmental ambiance present in the mission.";
 						data = "AttributeSystemSubcategory";
 						control = "KH_SubcategoryNoHeader1";
 					};
-					class KH_EnvironmentAmbiance 
+					class EnvironmentAmbiance 
 					{
 						property = "KH_EnvironmentAmbiance";
 						control = "KH_EnvironmentAmbiance";
@@ -694,15 +615,9 @@ class Mission
 								KH_var_postInitExecutions pushBack [\
 									[_ambientLife, _ambientSounds, _windCoefficient],\
 									{\
-										[\
-											{\
-												enableEnvironment _this;\
-											},\
-											[],\
-											1\
-										] call CBA_fnc_waitAndExecute;\
 										enableEnvironment _this;\
-									}\
+									},\
+									1\
 								];\
 							};\
 						";
@@ -722,25 +637,26 @@ class Mission
 				collapsed = 1;
 				class Attributes
 				{
-					class KH_LimitViewDistance
+					class LimitViewDistance
 					{
 						displayName = "Limit View Distance";
-						tooltip = "Limits the maximum view distance to the set amount for all players. May override custom view distance mods. Leave empty for no view distance limit. Can be edited with KH_fnc_limitViewDistance.";
+						tooltip = "Limits the maximum view distance to the set amount for all players. May override custom view distance mods. Set to -1 for no view distance limit. Can be edited with KH_fnc_limitViewDistance.";
 						property = "KH_LimitViewDistance";
 						control = "Edit";
 						expression = 
 						"\
 							if ((_value isNotEqualTo '') && !is3DEN && isServer) then {\
 								KH_var_postInitExecutions pushBack [\
-									[true, parseNumber _value],\
+									[true, _value],\
 									{\
-										_this call KH_fnc_limitViewDistance;\
+										call KH_fnc_limitViewDistance;\
 									}\
 								];\
 							};\
 						";
-						defaultValue = "''";
+						defaultValue = "-1";
 						validate = "number";
+						typeName = "NUMBER";
 					};
 				};
 			};

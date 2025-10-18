@@ -8,10 +8,10 @@ class Group
 			collapsed = 1;
 			class Attributes
 			{
-				class KH_ArrayBuilder
+				class ArrayBuilder
 				{
 					displayName = "Array Builder";
-					tooltip = "Specify an array of strings of global variables that will be made into an array, made public, and contain this group and any other groups utilizing this function. In format <['globalVariable1', 'globalVariable2', 'globalVariable3']>";
+					tooltip = "Specify an array of strings of global variables that will be made into an array, made public, and contain this group and any other groups utilizing this function. In format ['globalVariable1', 'globalVariable2', 'globalVariable3', ...].";
 					property = "KH_ArrayBuilder";
 					control = "Edit";
 					expression = 
@@ -29,10 +29,10 @@ class Group
 					";
 					defaultValue = "'[]'";
 				};
-				class KH_IgnoredTargets
+				class IgnoredTargets
 				{
 					displayName = "Ignored Targets";
-					tooltip = "Specify an array of strings of variable names of entities to be ignored as potential targets by the members of this group.";
+					tooltip = "Specify an array of strings of variable names of units or groups to be ignored as potential targets by the members of this group.";
 					property = "KH_IgnoredTargets";
 					control = "Edit";
 					expression = 
@@ -43,7 +43,7 @@ class Group
 								{\
 									params ['_group', '_targets'];\
 									{\
-										_group ignoreTarget [missionNamespace getVariable [_x, objNull], true];\
+										_group ignoreTarget (missionNamespace getVariable [_x, objNull]);\
 									} forEach _targets;\
 								}\
 							];\
@@ -51,12 +51,12 @@ class Group
 					";
 					defaultValue = "'[]'";
 				};
-				class KH_PlayerGroupInit
+				class PlayerGroupInit
 				{
 					displayName = "Player Group Init";
-					tooltip = "Unscheduled code to execute locally to the players who loads into the mission as members of this group, once their unit becomes valid. Passed arguments available through _this are: [_group (GROUP)].";
+					tooltip = "Unscheduled code to execute locally to the players who load into the mission as members of this group, once their unit becomes valid. Passed arguments available through _this are: [_group (GROUP)].";
 					property = "KH_PlayerGroupInit";
-					control = "EditMulti5";
+					control = "EditCodeMulti5";
 					expression = 
 					"\
 						if ((_value isNotEqualTo '') && !is3DEN) then {\
@@ -80,13 +80,14 @@ class Group
 						};\
 					";
 					defaultValue = "''";
+					validate = "expression";
 				};
-				class KH_ServerGroupInit
+				class ServerGroupInit
 				{
 					displayName = "Server Group Init";
 					tooltip = "Unscheduled code to execute on the server with this group passed as an argument. Passed arguments available through _this are: [_group (GROUP)].";
 					property = "KH_ServerGroupInit";
-					control = "EditMulti5";
+					control = "EditCodeMulti5";
 					expression = 
 					"\
 						if ((_value isNotEqualTo '') && !is3DEN) then {\
@@ -100,6 +101,7 @@ class Group
 						};\
 					";
 					defaultValue = "''";
+					validate = "expression";
 				};
 			};
 		};

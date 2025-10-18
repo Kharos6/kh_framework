@@ -899,24 +899,26 @@ if isServer then {
 			private _machineId = KH_var_allPlayerUidMachines get _uid;
 
 			if !(isNil "_machineId") then {
-				private _attributes = [];
-				
-				if (alive _unit) then {
-					_attributes = [_unit] call KH_fnc_getUnitAttributes;
-				};
-
-				KH_var_disconnectedPlayerUids pushBackUnique _uid;
-				publicVariable "KH_var_disconnectedPlayerUids";
-
-				{
-					if ([missionNamespace getVariable _x, [_unit]] call KH_fnc_deleteArrayElements) then {
-						publicVariable _x;
+				if !(isNull _unit) then {
+					private _attributes = [];
+					
+					if (alive _unit) then {
+						_attributes = [_unit] call KH_fnc_getUnitAttributes;
 					};
-				} forEach [
-					"KH_var_allPlayerUnits", 
-					"KH_var_jipPlayerUnits", 
-					"KH_var_initialPlayerUnits"
-				];
+
+					KH_var_disconnectedPlayerUids pushBackUnique _uid;
+					publicVariable "KH_var_disconnectedPlayerUids";
+
+					{
+						if ([missionNamespace getVariable _x, [_unit]] call KH_fnc_deleteArrayElements) then {
+							publicVariable _x;
+						};
+					} forEach [
+						"KH_var_allPlayerUnits", 
+						"KH_var_jipPlayerUnits", 
+						"KH_var_initialPlayerUnits"
+					];
+				};
 
 				{
 					if ([missionNamespace getVariable _x, [_machineId]] call KH_fnc_deleteArrayElements) then {

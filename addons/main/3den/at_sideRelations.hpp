@@ -1,4 +1,4 @@
-class KH_SetSideRelations: Title
+class KH_SideRelations: Title
 {
 	attributeLoad = "[_this, _value] call KH_fnc_loadControlAttributes;";
 	attributeSave = "[_this] call KH_fnc_saveControlAttributes;";

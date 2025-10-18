@@ -22,7 +22,7 @@ class KH_CameraSequence: Title
 		class PositionsTitle: Title
 		{
 			text = "Positions";
-			tooltip = "Array of arrays that dictate the position of the camera, in format [_position (STRING or ARRAY), _attach (BOOLEAN)], or AGL position in format [x, y, z]. For the former, _position is a string of the variable name of the entity which the position of will be used for the camera, while _attach is a boolean where true instantly attaches the camera to _position and false transitions the camera to _position.";
+			tooltip = "Array of arrays or strings that dictate the position of the camera. If array is used, it must either be in format [_position (STRING, ARRAY), _attach (BOOL)], or an AGL position in format [x, y, z]. For the former, _position is a string of the variable name of the entity which the position of will be used for the camera, while _attach is a boolean where true instantly attaches the camera to _position and false transitions the camera to _position. If a string is used, it has to be a string of the variable name of the entity which the position of will be used for the camera.";
 			y = QUOTE(2 * CTRL_DEFAULT_H + 5 * CTRL_DEFAULT_Y);
 		};
 		class Positions: ctrlEdit

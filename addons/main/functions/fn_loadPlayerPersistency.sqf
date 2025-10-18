@@ -1,9 +1,5 @@
-params [["_identifier", "", [""]], ["_loadoutRespawnType", "INITIAL", [""]], ["_useUid", true, [true]], ["_overrideAttributes", [], [[]]]];
-if (_identifier isEqualTo "") exitWith {};
-KH_var_playerPersistencyLoadoutRespawnType = _loadoutRespawnType;
-KH_var_playerPersistencyUseUid = _useUid;
-KH_var_playerPersistencyUid = "khNamespace" readKhData [["playerPersistencyUid_", _identifier] joinString "", createHashMap];
-KH_var_playerPersistencyVariableName = "khNamespace" readKhData [["playerPersistencyVariableName_", _identifier] joinString "", createHashMap];
+params [["_identifier", "", [""]], ["_loadoutRespawnType", "INITIAL", [""]], ["_overrideAttributes", [], [[]]]];
+KH_var_respawnLoadoutType = _loadoutRespawnType;
 
 if (isNil "KH_var_initialPlayerLoadouts") then {
 	KH_var_initialPlayerLoadouts = createHashMap;
@@ -13,36 +9,8 @@ if (isNil "KH_var_deathPlayerLoadouts") then {
 	KH_var_deathPlayerLoadouts = createHashMap;
 };
 
-{
-	private _uid = getPlayerUID _x;
-	private _initialLoadout = KH_var_initialPlayerLoadouts get _uid;
-
-	private _attributes = if KH_var_playerPersistencyUseUid then {
-		if (isNil "_initialLoadout") then {
-			KH_var_initialPlayerLoadouts set [_uid, getUnitLoadout _x];
-		};
-
-		KH_var_playerPersistencyUid get _uid;
-	}
-	else {
-		private _variableName = vehicleVarName _x;
-
-		if ((_variableName isNotEqualTo "") && !(_x getVariable ["KH_var_generatedVariableName", false])) then {
-			if (isNil "_initialLoadout") then {
-				KH_var_initialPlayerLoadouts set [_variableName, getUnitLoadout _x];
-			};
-
-			KH_var_playerPersistencyVariableName get _variableName;
-		};
-	};
-
-	if !(isNil "_attributes") then {
-		[_x, _attributes, _overrideAttributes, true] call KH_fnc_setUnitAttributes;
-	};
-} forEach KH_var_allPlayerUnits;
-
-if (isNil "KH_var_loadoutsSet") then {
-	KH_var_loadoutsSet = true;
+if (isNil "KH_var_respawnLoadoutsSet") then {
+	KH_var_respawnLoadoutsSet = true;
 
 	[
 		"KH_eve_playerRespawned", 
@@ -53,7 +21,7 @@ if (isNil "KH_var_loadoutsSet") then {
 				private _initialLoadout = KH_var_initialPlayerLoadouts get _uid;
 				private _deathLoadout = KH_var_deathPlayerLoadouts get _uid;
 
-				private _loadout = if KH_var_playerPersistencyUseUid then {
+				private _loadout = if !(_player getVariable ["KH_var_playerPersistencyUseVariableName", false]) then {
 					private _attributes = KH_var_playerPersistencyUid get _uid;
 
 					if !(isNil "_attributes") then {
@@ -123,7 +91,7 @@ if (isNil "KH_var_loadoutsSet") then {
 			private _initialLoadout = KH_var_initialPlayerLoadouts get _uid;
 			
 			if !(_uid in KH_var_disconnectedPlayerUids) then {
-				if KH_var_playerPersistencyUseUid then {
+				if !(_player getVariable ["KH_var_playerPersistencyUseVariableName", false]) then {
 					private _attributes = KH_var_playerPersistencyUid get _uid;
 
 					private _loadout = if !(isNil "_attributes") then {
@@ -180,5 +148,41 @@ if (isNil "KH_var_loadoutsSet") then {
 		}
 	] call CBA_fnc_addEventHandler;
 };
+
+if (_identifier isEqualTo "") exitWith {};
+KH_var_playerPersistencyUid = "khNamespace" readKhData [["playerPersistencyUid_", _identifier] joinString "", createHashMap];
+KH_var_playerPersistencyVariableName = "khNamespace" readKhData [["playerPersistencyVariableName_", _identifier] joinString "", createHashMap];
+
+{
+	private _uid = getPlayerUID _x;
+	private _initialLoadout = KH_var_initialPlayerLoadouts get _uid;
+
+	private _attributes = if !(_x getVariable ["KH_var_playerPersistencyUseVariableName", false]) then {
+		if (isNil "_initialLoadout") then {
+			KH_var_initialPlayerLoadouts set [_uid, getUnitLoadout _x];
+		};
+
+		KH_var_playerPersistencyUid get _uid;
+	}
+	else {
+		private _variableName = vehicleVarName _x;
+
+		if ((_variableName isNotEqualTo "") && !(_x getVariable ["KH_var_generatedVariableName", false])) then {
+			if (isNil "_initialLoadout") then {
+				KH_var_initialPlayerLoadouts set [_variableName, getUnitLoadout _x];
+			};
+
+			KH_var_playerPersistencyVariableName get _variableName;
+		};
+	};
+
+	if !(isNil "_attributes") then {
+		if (_x getVariable ["KH_var_persistencyIgnoreTransforms", false]) then {
+			_overrideAttributes insert [-1, [26, 27, 28], true];
+		};
+		
+		[_x, _attributes, _overrideAttributes, true] call KH_fnc_setUnitAttributes;
+	};
+} forEach KH_var_allPlayerUnits;
 
 nil;

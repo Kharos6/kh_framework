@@ -9,6 +9,10 @@ private _unitPersistency = "khNamespace" readKhData [["unitPersistency_", _ident
         private _attributes = _unitPersistency get _variableName;
 
         if !(isNil "_attributes") then {
+            if (_x getVariable ["KH_var_persistencyIgnoreTransforms", false]) then {
+                _overrideAttributes insert [-1, [26, 27, 28], true];
+            };
+
             [_x, _attributes, _overrideAttributes, true] call KH_fnc_setUnitAttributes;
         };
     };

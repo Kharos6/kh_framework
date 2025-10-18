@@ -6,7 +6,9 @@ private _groupPersistency = "khNamespace" readKhData [["groupPersistency_", _ide
     private _attributes = _groupPersistency get (groupId _x);
 
     if !(isNil "_attributes") then {
-        [_x, _attributes, _overrideAttributes] call KH_fnc_setGroupAttributes;
+        if (([side _x, groupId _x] joinString "_") isEqualTo ([_attributes select 3, (_attributes select 4) select 1] joinString "_")) then { 
+            [_x, _attributes, _overrideAttributes] call KH_fnc_setGroupAttributes;
+        };
     };
 } forEach allGroups;
 

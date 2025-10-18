@@ -1,8 +1,8 @@
-class KH_TransferToHeadlessClient: Title
+class KH_ObjectPersistencySettings: Title
 {
 	attributeLoad = "[_this, _value] call KH_fnc_loadControlAttributes;";
 	attributeSave = "[_this] call KH_fnc_saveControlAttributes;";
-	h = QUOTE(7 * CTRL_DEFAULT_H + 70 * pixelH);
+	h = QUOTE(6 * CTRL_DEFAULT_H + 70 * pixelH);
 	class Controls: Controls
 	{
 		class ToggleTitle: Title
@@ -19,47 +19,33 @@ class KH_TransferToHeadlessClient: Title
 			w = QUOTE(5 * GRID_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
-		class HeadlessClientTitle: Title
+		class PlayerUseVariableNameTitle: Title
 		{
-			text = "Headless Client";
-			tooltip = "Variable name of the headless client to which this entity will be transferred.";
+			text = "Player: Use Variable Name";
+			tooltip = "True makes it so that the unit's variable name is used instead of the Steam ID of the player when loading saved attributes.";
 			y = QUOTE(2 * CTRL_DEFAULT_H + 5 * CTRL_DEFAULT_Y);
 		};
-		class HeadlessClient: ctrlEdit
+		class PlayerUseVariableName: ctrlCheckbox
 		{
 			idc = 101;
 			x = QUOTE(CTRL_DEFAULT_X);
 			y = QUOTE(2 * CTRL_DEFAULT_H + 5 * CTRL_DEFAULT_Y);
-			w = QUOTE(CTRL_DEFAULT_W);
+			w = QUOTE(5 * GRID_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
-		class RecreateTitle: Title
+		class TransformsTitle: Title
 		{
-			text = "Recreate";
-			tooltip = "True recreates the entity upon transfer, useful in cases where the entity has special init scripts that may get lost during transfer.";
+			text = "Transforms";
+			tooltip = "True makes it so that the position and rotation of the entity are ignored when loading saved attributes.";
 			y = QUOTE(3 * CTRL_DEFAULT_H + 10 * CTRL_DEFAULT_Y);
 		};
-		class Recreate: ctrlCheckbox
+		class Transforms: ctrlCheckbox
 		{
 			idc = 102;
 			x = QUOTE(CTRL_DEFAULT_X);
 			y = QUOTE(3 * CTRL_DEFAULT_H + 10 * CTRL_DEFAULT_Y);
 			w = QUOTE(5 * GRID_W);
 			h = QUOTE(CTRL_DEFAULT_H);
-		};
-		class InitTitle: Title
-		{
-			text = "Init";
-			tooltip = "Unscheduled code executed locally to the entity after it is transferred.";
-			y = QUOTE(4 * CTRL_DEFAULT_H + 15 * CTRL_DEFAULT_Y);
-		};
-		class Init: ctrlEditMulti
-		{
-			idc = 103;
-			x = QUOTE(CTRL_DEFAULT_X);
-			y = QUOTE(4 * CTRL_DEFAULT_H + 15 * CTRL_DEFAULT_Y);
-			w = QUOTE(CTRL_DEFAULT_W);
-			h = QUOTE(CTRL_DEFAULT_H * 3);
 		};
 	};
 };

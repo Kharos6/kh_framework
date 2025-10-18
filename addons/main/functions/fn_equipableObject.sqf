@@ -94,7 +94,7 @@ if (isNull _unit) then {
 		"BIS_fnc_holdActionAdd",
 		"PLAYERS",
 		true,
-		["JIP", "PLAYERS", _object, false, false, ""], 
+		["JIP", "PLAYERS", _object, false, false, ""]
 	] call KH_fnc_execute;
 }
 else {

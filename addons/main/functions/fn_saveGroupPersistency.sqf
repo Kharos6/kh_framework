@@ -8,7 +8,9 @@ private _persistencyId = ["groupPersistency_", _identifier] joinString "";
 private _currentEntries = "khNamespace" readKhData [_persistencyId, createHashMap];
 
 {
-	_currentEntries set [[side _x, groupId _x] joinString "_", [_x] call KH_fnc_getGroupAttributes];
+	private _attributes = [_x] call KH_fnc_getGroupAttributes;
+	_currentEntries set [[side _x, groupId _x] joinString "_", _attributes];
+	_currentEntries set [groupId _x, _attributes];
 } forEach _groups;
 
 "khNamespace" writeKhData [_persistencyId, _currentEntries];

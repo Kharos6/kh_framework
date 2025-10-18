@@ -36,7 +36,7 @@ if (_entity isEqualType objNull) then {
 }
 else {
 	if (_name isEqualTo "") then {
-		_name = hashValue _entity;
+		_name = [side _entity, groupId _entity] joinString "_";
 		_entity setVariable ["KH_var_generatedVariableName", true, true];
 	}
 	else {

@@ -110,7 +110,17 @@ _savedAttributes params [
 		[_unit, _insignia] call BIS_fnc_setUnitInsignia;
 		_unit setUnitLoadout _loadout;
 		_unit setPosATL _position;
-		_group = ["GROUP", _group] call KH_fnc_getEntityByIdentifier;
+		_group = call {
+			private _allGroups = groups (side (group _unit));
+			private _index = _allGroups findIf {(_group isEqualTo (groupId _x));};
+
+			if (_index isNotEqualTo -1) then {
+				_allGroups select _index;
+			}
+			else {
+				grpNull;
+			};
+		};
 
 		if !(isNull _group) then {
 			_unit joinSilent _group;

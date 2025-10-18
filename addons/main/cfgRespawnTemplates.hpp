@@ -4,6 +4,6 @@ class CfgRespawnTemplates
 	{
 		displayName = "Disable respawn on start";
 		respawnOnStart = -1;
-		respawnTypes[] = {1, 2, 3, 4, 5};
+		respawnTypes[] = {2, 3};
 	};
 };

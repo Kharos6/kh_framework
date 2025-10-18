@@ -70,14 +70,14 @@ class Object
 			{
 				class PersistencySettingsSubcategory
 				{
-					description = "Settings to be used for this entity in regards to the persistency system from the mission attributes.";
+					description = "Settings that this entity will use for the persistency system from the mission attributes.";
 					data = "AttributeSystemSubcategory";
-					control = "KH_SubcategoryNoHeader4";
+					control = "KH_SubcategoryNoHeader1";
 				};
 				class PersistencySettings
 				{
 					property = "KH_PersistencySettings";
-					control = "KH_PersistencySettings";
+					control = "KH_ObjectPersistencySettings";
 					expression = 
 					"\
 						_value params ['_toggle', '_playerUseVariableName', '_ignoreTransforms'];\
@@ -104,7 +104,7 @@ class Object
 				{
 					description = "Unscheduled code executed every time this entity changes locality, ideal for code that is dependent on locality.";
 					data = "AttributeSystemSubcategory";
-					control = "KH_SubcategoryNoHeader1";
+					control = "KH_SubcategoryNoHeader2";
 				};
 				class PersistentInit 
 				{
@@ -215,13 +215,13 @@ class Object
 				class ArrayBuilder
 				{
 					displayName = "Array Builder";
-					tooltip = "Specify an array of strings of global variables that will be made into an array, made public, and contain this entity and any other entities utilizing this function. In format ['globalVariable1', 'globalVariable2', 'globalVariable3', ...]";
+					tooltip = "Specify an array of strings of global variables that will be made into an array, made public, and contain this entity and any other entities utilizing this function. In format 'globalVariable1', 'globalVariable2', 'globalVariable3', ...";
 					property = "KH_ArrayBuilder";
 					control = "Edit";
 					expression = 
 					"\
-						if ((_value isNotEqualTo '') && (_value isNotEqualTo '[]') && !is3DEN) then {\
-							private _array = parseSimpleArray _value;\
+						if ((_value isNotEqualTo '') && !is3DEN) then {\
+							private _array = parseSimpleArray (['[', _value, ']'] joinString '');\
 							_this setVariable ['KH_var_assignedEntityArrayBuilderArrays', _array];\
 							{\
 								private _originalValueArray = missionNamespace getVariable [_x, []];\
@@ -233,7 +233,7 @@ class Object
 							} forEach _array;\
 						};\
 					";
-					defaultValue = "'[]'";
+					defaultValue = "''";
 				};
 				class FreefallHeight
 				{

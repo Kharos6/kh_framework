@@ -16,9 +16,9 @@ params [
 ];
 
 _function = [_function, false] call KH_fnc_parseFunction;
-private _generic = (_target isEqualTo true) && (_special isEqualTo false);
+private _basic = (_target isEqualTo true) && (_special isEqualTo false);
 
-private _subfunction = if _generic then {
+private _subfunction = if _basic then {
 	KH_fnc_callParsedFunction;
 }
 else {
@@ -156,7 +156,7 @@ if (_special isEqualTo true) then {
 };
 
 if (_environment isEqualType true) exitWith {
-	if _generic then {
+	if _basic then {
 		[_arguments, _function, clientOwner, _environment] call _subfunction;
 	}
 	else {
@@ -224,7 +224,7 @@ switch (typeName _environmentType) do {
 		([_special, _target] call _specialParser) params ["_return", "_specialIdOverride"];
 		private "_previousReturn";
 
-		private _fedArguments = if _generic then {
+		private _fedArguments = if _basic then {
 			[_arguments, _function, clientOwner, _unscheduled];
 		}
 		else {
@@ -247,8 +247,7 @@ switch (typeName _environmentType) do {
 				if !(missionNamespace getVariable _environmentId) exitWith {																											
 					KH_var_temporalExecutionStackDeletions pushBackUnique _environmentId;
 				};
-
-				private _handlerId = [missionNamespace, _environmentId, clientOwner];													
+													
 				_fedArguments call _subfunction;
 			},
 			_environmentType,
@@ -264,7 +263,7 @@ switch (typeName _environmentType) do {
 				};
 			},
 			-1,
-			_environmentId,
+			[[missionNamespace, _environmentId, clientOwner], _return],
 			_environmentId,
 			_previousReturn,
 			CBA_missionTime,
@@ -315,7 +314,7 @@ switch (typeName _environmentType) do {
 		_environmentType = missionNamespace getVariable ([_environmentType, false] call KH_fnc_parseFunction);
 		private _continue = true;
 
-		private _fedArguments = if _generic then {
+		private _fedArguments = if _basic then {
 			[_arguments, _function, clientOwner, _unscheduled];
 		}
 		else {
@@ -350,8 +349,7 @@ switch (typeName _environmentType) do {
 					KH_var_temporalExecutionStackDeletions pushBackUnique _environmentId;
 				};
 
-				if (_arguments call _environmentType) then {
-					private _handlerId = [missionNamespace, _environmentId, clientOwner];													
+				if ((_fedArguments select 0) call _environmentType) then {												
 					_fedArguments call _subfunction;
 
 					if _fireOnce then {
@@ -372,7 +370,7 @@ switch (typeName _environmentType) do {
 				};
 			},
 			-1,
-			_environmentId,
+			[[missionNamespace, _environmentId, clientOwner], _return],
 			_environmentId,
 			_previousReturn,
 			CBA_missionTime,
@@ -418,11 +416,16 @@ switch (typeName _environmentType) do {
 		([_special, _target] call _specialParser) params ["_return", "_specialIdOverride"];
 		_environmentType = parseNumber _environmentType;
 
-		private _fedArguments = if _generic then {
+		private _fedArguments = if _basic then {
 			[_arguments, _function, clientOwner, _unscheduled];
 		}
 		else {
 			[_arguments, _function, _target, _special, _specialIdOverride, _unscheduled];
+		};
+
+		if (_environmentType isEqualTo 0) exitWith {
+			_fedArguments call _subFunction;
+			[[missionNamespace, _environmentId, clientOwner], _return];
 		};
 
 		KH_var_temporalExecutionStackAdditions pushBack [
@@ -445,7 +448,7 @@ switch (typeName _environmentType) do {
 				diag_frameNo + (abs _environmentType);
 			},
 			-1,
-			_environmentId,
+			[[missionNamespace, _environmentId, clientOwner], _return],
 			_environmentId,
 			nil,
 			CBA_missionTime,

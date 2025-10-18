@@ -79,7 +79,7 @@ class Mission
 					class ServerMissionEndInit
 					{
 						displayName = "Server: Mission End Init";
-						tooltip = "Unscheduled code to execute locally to the server when the KH_fnc_endMission function or the End Mission module is executed.";
+						tooltip = "Unscheduled code to execute locally to the server when the KH_fnc_endMission function or the KH End Mission module is executed.";
 						property = "KH_ServerMissionEndInit";
 						control = "EditCodeMulti5";
 						expression = 
@@ -189,7 +189,7 @@ class Mission
 					class HeadlessMissionEndInit
 					{
 						displayName = "Headless: Mission End Init";
-						tooltip = "Unscheduled code to execute locally to each headless client when the KH_fnc_endMission function or End Mission module is executed.";
+						tooltip = "Unscheduled code to execute locally to each headless client when the KH_fnc_endMission function or the KH End Mission module is executed.";
 						property = "KH_HeadlessMissionEndInit";
 						control = "EditCodeMulti5";
 						expression = 
@@ -365,7 +365,7 @@ class Mission
 					class PlayerMissionEndInit
 					{
 						displayName = "Player: Mission End Init";
-						tooltip = "Unscheduled code to execute locally to each player before the mission ends when the KH_fnc_endMission function or End Mission module is executed.";
+						tooltip = "Unscheduled code to execute locally to each player before the mission ends when the KH_fnc_endMission function or the KH End Mission module is executed.";
 						property = "KH_PlayerMissionEndInit";
 						control = "EditCodeMulti5";
 						expression = 
@@ -395,12 +395,13 @@ class Mission
 					class PersistentPlayerSynchronizer
 					{
 						displayName = "Persistent Player Synchronizer";
-						tooltip = "A hash map of entries where the key is a string of the variable name of an entity, and the value is either an array of strings of variable names of players, or a string of the name of a missionNamespace variable that is an array containing the players, which are to be synchronized to the entity assigned to the key. Ideal for making sure modules are synchronized to respawning or JIP players, as well as initial players at the start of the mission. This value can also be the name of a hash map stored in missionNamespace containing the same elements. For example: [['module1', ['player1', 'player2', 'player3', ...]], ['module1', 'playersArray']].";
+						tooltip = "A hash map of entries where the key is a string of the variable name of an entity, and the value is either an array of strings of variable names of players, or a string of the name of a missionNamespace variable that is an array containing the players, which are to be synchronized to the entity assigned to the key. Ideal for making sure modules are synchronized to respawning or JIP players, as well as initial players at the start of the mission. This value can also be the name of a hash map stored in missionNamespace containing the same elements. For example: ['module1', ['player1', 'player2', 'player3', ...]], ['module1', 'playersArray'].";
 						property = "KH_PersistentPlayerSynchronizer";
 						control = "EditMulti5";
 						expression = 
 						"\
-							if ((_value isNotEqualTo '') && (_value isNotEqualTo '[]') && !is3DEN && isServer) then {\
+							if ((_value isNotEqualTo '') && !is3DEN && isServer) then {\
+								_value = ['[', _value, ']'] joinString '';\
 								KH_var_postInitExecutions pushBack [\
 									[createHashMapFromArray (parseSimpleArray _value)],\
 									{\
@@ -432,7 +433,7 @@ class Mission
 								];\
 							};\
 						";
-						defaultValue = "'[]'";
+						defaultValue = "''";
 					};
 				};
 			};
@@ -455,6 +456,12 @@ class Mission
 						expression = 
 						"\
 							_value params ['_toggle', '_positions', '_targets', '_fovs', '_commitTimes', '_durations', '_visionTypes', '_cinematicBorders', '_disableUserInput', '_jip'];\
+							_positions = ['[', _positions, ']'] joinString '';\
+							_targets = ['[', _targets, ']'] joinString '';\
+							_fovs = ['[', _fovs, ']'] joinString '';\
+							_commitTimes = ['[', _commitTimes, ']'] joinString '';\
+							_durations = ['[', _durations, ']'] joinString '';\
+							_visionTypes = ['[', _visionTypes, ']'] joinString '';\
 							if (_toggle && !is3DEN && isServer) then {\
 								private _parsedPositions = [];\
 								private _parsedTargets = [];\
@@ -503,7 +510,7 @@ class Mission
 								] call KH_fnc_addEventHandler;\
 							};\
 						";
-						defaultValue = "[false, '[]', '[]', '[]', '[]', '[]', '[]', false, false, false]";
+						defaultValue = "[false, '', '', '', '', '', '', false, false, false]";
 					};
 				};
 			};
@@ -527,10 +534,10 @@ class Mission
 						"\
 							_value params ['_toggle', '_bluforUniforms', '_bluforVests', '_bluforHeadgear', '_opforUniforms', '_opforVests', '_opforHeadgear', '_greenforUniforms', '_greenforVests', '_greenforHeadgear', '_setCaptive'];\
 							if (_toggle && !is3DEN && isServer) then {\
-								[true, [parseSimpleArray _bluforUniforms, parseSimpleArray _opforUniforms, parseSimpleArray _greenforUniforms], [parseSimpleArray _bluforVests, parseSimpleArray _opforVests, parseSimpleArray _greenforVests], [parseSimpleArray _bluforHeadgear, parseSimpleArray _opforHeadgear, parseSimpleArray _greenforHeadgear], _setCaptive] call KH_fnc_dynamicDisguise;\
+								[true, [parseSimpleArray (['[', _bluforUniforms, ']'] joinString ''), parseSimpleArray (['[', _opforUniforms, ']'] joinString ''), parseSimpleArray (['[', _greenforUniforms, ']'] joinString '')], [parseSimpleArray (['[', _bluforVests, ']'] joinString ''), parseSimpleArray (['[', _opforVests, ']'] joinString ''), parseSimpleArray (['[', _greenforVests, ']'] joinString '')], [parseSimpleArray (['[', _bluforHeadgear, ']'] joinString ''), parseSimpleArray (['[', _opforHeadgear, ']'] joinString ''), parseSimpleArray (['[', _greenforHeadgear, ']'] joinString '')], _setCaptive] call KH_fnc_dynamicDisguise;\
 							};\
 						";
-						defaultValue = "[false, '[]', '[]', '[]', '[]', '[]', '[]', '[]', '[]', '[]', false]";
+						defaultValue = "[false, '', '', '', '', '', '', '', '', '', false]";
 					};
 				};
 			};
@@ -542,9 +549,9 @@ class Mission
 				{
 					class PersistencySubcategory
 					{
-						description = "Maintain persistency using an identifier saved in the khNamespace.khdata file. States are saved when upon execution of the KH_fnc_endMission function or KH End Mission module, and loaded at the appropriate time when persistent states of the same identifier are available. The identifier attribute can be set to an empty string, or all of the checkboxes can be unticked, if only the respawn loadout usage is desired.";
+						description = "Maintain persistency using an identifier saved in the khNamespace.khdata file. States are saved when the KH_fnc_endMission function or the KH End Mission module is executed, and loaded at the appropriate time when persistent states of the same identifier are available. The identifier attribute can be set to an empty string, or all of the checkboxes can be unticked, if only the respawn loadout usage is desired.";
 						data = "AttributeSystemSubcategory";
-						control = "KH_SubcategoryNoHeader3";
+						control = "KH_SubcategoryNoHeader4";
 					};
 					class Persistency 
 					{
@@ -635,6 +642,8 @@ class Mission
 						expression = 
 						"\
 							_value params ['_toggle', '_curators', '_curatorModules', '_hide', '_disableDamage'];\
+							_curators = ['[', _curators, ']'] joinString '';\
+							_curatorModules = ['[', _curatorModules, ']'] joinString '';\
 							if (_toggle && !is3DEN && isServer) then {\
 								private _assignedModules = [];\
 								{\
@@ -646,7 +655,7 @@ class Mission
 								[parseSimpleArray _curators, _assignedModules, _hide, _disableDamage] call KH_fnc_setCurators;\
 							};\
 						";
-						defaultValue = "[false, '[]', '[]', true, true]";
+						defaultValue = "[false, '', '', true, true]";
 					};
 				};
 			};
@@ -660,7 +669,7 @@ class Mission
 					{
 						description = "Set the relationship state of the sides, with true designating friendly and false designating hostile.";
 						data = "AttributeSystemSubcategory";
-						control = "KH_SubcategoryNoHeader2";
+						control = "KH_SubcategoryNoHeader1";
 					};
 					class SideRelations
 					{

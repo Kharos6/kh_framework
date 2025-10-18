@@ -33,7 +33,7 @@ if (_entity isEqualType objNull) then {
 	};
 }
 else {
-	_variableName = hashValue _entity;
+	_variableName = [side _entity, groupId _entity] joinString "_";
 
 	if (isNil {missionNamespace getVariable _variableName;}) then {
 		if (_generateIfEmpty isEqualTo true) then {

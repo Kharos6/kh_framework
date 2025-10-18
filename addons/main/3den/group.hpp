@@ -11,12 +11,13 @@ class Group
 				class ArrayBuilder
 				{
 					displayName = "Array Builder";
-					tooltip = "Specify an array of strings of global variables that will be made into an array, made public, and contain this group and any other groups utilizing this function. In format ['globalVariable1', 'globalVariable2', 'globalVariable3', ...].";
+					tooltip = "Specify an array of strings of global variables that will be made into an array, made public, and contain this group and any other groups utilizing this function. In format 'globalVariable1', 'globalVariable2', 'globalVariable3', ....";
 					property = "KH_ArrayBuilder";
 					control = "Edit";
 					expression = 
 					"\
-						if ((_value isNotEqualTo '') && (_value isNotEqualTo '[]') && !is3DEN) then {\
+						if ((_value isNotEqualTo '') && !is3DEN) then {\
+							_value = ['[', _value, ']'] joinString '';\
 							{\
 								private _originalValueArray = missionNamespace getVariable [_x, []];\
 								_originalValueArray pushBack _this;\
@@ -27,7 +28,7 @@ class Group
 							} forEach (parseSimpleArray _value);\
 						};\
 					";
-					defaultValue = "'[]'";
+					defaultValue = "''";
 				};
 				class IgnoredTargets
 				{
@@ -37,7 +38,8 @@ class Group
 					control = "Edit";
 					expression = 
 					"\
-						if ((_value isNotEqualTo '') && (_value isNotEqualTo '[]') && !is3DEN) then {\
+						if ((_value isNotEqualTo '') && !is3DEN) then {\
+							_value = ['[', _value, ']'] joinString '';\
 							KH_var_postInitExecutions pushBack [\
 								[_this, parseSimpleArray _value],\
 								{\
@@ -49,7 +51,7 @@ class Group
 							];\
 						};\
 					";
-					defaultValue = "'[]'";
+					defaultValue = "''";
 				};
 				class PlayerGroupInit
 				{

@@ -21,7 +21,7 @@ isNil {
 		};
 
 		call KH_fnc_serverMissionLoadInit;
-		[[], {systemChat "KH FRAMEWORK - MISSION LOADED";}, "GLOBAL", true, false] call KH_fnc_execute;
+		[[], {systemChat "KH FRAMEWORK - MISSION LOADED"; diag_log "KH FRAMEWORK - MISSION LOADED";}, ["SERVER", KH_var_currentAdmin] + KH_var_allCuratorMachines, true, false] call KH_fnc_execute;
 
 		[
 			[],
@@ -31,7 +31,7 @@ isNil {
 				call KH_fnc_serverMissionStartInit;
 				[[], "KH_fnc_playerMissionStartInit", "PLAYERS", true, false] call KH_fnc_execute;
 				[[], "KH_fnc_headlessMissionStartInit", "HEADLESS", true, false] call KH_fnc_execute;
-				[[], {systemChat "KH FRAMEWORK - MISSION STARTED";}, "GLOBAL", true, false] call KH_fnc_execute;
+				[[], {systemChat "KH FRAMEWORK - MISSION STARTED"; diag_log "KH FRAMEWORK - MISSION STARTED";}, ["SERVER", KH_var_currentAdmin] + KH_var_allCuratorMachines, true, false] call KH_fnc_execute;
 
 				[
 					[],
@@ -46,7 +46,7 @@ isNil {
 						[[], "KH_fnc_playerPlayersLoadedInit", "PLAYERS", true, false] call KH_fnc_execute;
 						[[], "KH_fnc_headlessPlayersLoadedInit", "HEADLESS", true, false] call KH_fnc_execute;
 						["KH_eve_playersLoaded", []] call CBA_fnc_globalEvent;
-						[[], {systemChat "KH FRAMEWORK - PLAYERS LOADED";}, "GLOBAL", true, false] call KH_fnc_execute;
+						[[], {systemChat "KH FRAMEWORK - PLAYERS LOADED"; diag_log "KH FRAMEWORK - PLAYERS LOADED";}, ["SERVER", KH_var_currentAdmin] + KH_var_allCuratorMachines, true, false] call KH_fnc_execute;
 					},
 					true,
 					{

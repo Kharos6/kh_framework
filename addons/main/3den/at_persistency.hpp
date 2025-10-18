@@ -22,7 +22,7 @@ class KH_Persistency: Title
 		class IdentifierTitle: Title
 		{
 			text = "Identifier";
-			tooltip = "Identifier from which to derive persistent states, and to which the persistent states will be saved when the KH_fnc_endMission function or KH End Mission module are executed.";
+			tooltip = "Identifier from which to derive persistent states, and to which the persistent states will be saved when the KH_fnc_endMission function or the KH End Mission module is executed.";
 			y = QUOTE(2 * CTRL_DEFAULT_H + 5 * CTRL_DEFAULT_Y);
 		};
 		class Identifier: ctrlEdit
@@ -86,7 +86,7 @@ class KH_Persistency: Title
 			idc = 105;
 			x = QUOTE(CTRL_DEFAULT_X);
 			y = QUOTE(6 * CTRL_DEFAULT_H + 25 * CTRL_DEFAULT_Y);
-			w = QUOTE(6 * GRID_W);
+			w = QUOTE(5 * GRID_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
 		class ObjectsTitle: Title
@@ -100,7 +100,7 @@ class KH_Persistency: Title
 			idc = 106;
 			x = QUOTE(CTRL_DEFAULT_X);
 			y = QUOTE(7 * CTRL_DEFAULT_H + 30 * CTRL_DEFAULT_Y);
-			w = QUOTE(7 * GRID_W);
+			w = QUOTE(5 * GRID_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
 		class MissionTitle: Title
@@ -114,7 +114,7 @@ class KH_Persistency: Title
 			idc = 107;
 			x = QUOTE(CTRL_DEFAULT_X);
 			y = QUOTE(8 * CTRL_DEFAULT_H + 35 * CTRL_DEFAULT_Y);
-			w = QUOTE(8 * GRID_W);
+			w = QUOTE(5 * GRID_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
 	};

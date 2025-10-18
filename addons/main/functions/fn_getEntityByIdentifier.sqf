@@ -36,7 +36,14 @@ switch _type do {
 
     case "GROUP": {
         private _allGroups = allGroups;
-        private _index = _allGroups findIf {((_identifier isEqualTo (groupId _x)) || (_identifier isEqualTo (hashValue _x)));};
+        private _index = _allGroups findIf {
+            if (_identifier isEqualTo ([side _x, groupId _x] joinString "_")) then {
+                true;
+            }
+            else {
+                (_identifier isEqualTo (groupId _x));
+            };
+        };
 
         if (_index isNotEqualTo -1) then {
             _allGroups select _index;

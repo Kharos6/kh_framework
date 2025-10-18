@@ -16,6 +16,7 @@
 #include <shlobj.h>
 #include <chrono>
 #include <wincrypt.h>
+#include <delayimp.h>
 
 #include "intercept/include/intercept.hpp"
 #include "intercept/include/client/sqf/sqf.hpp"

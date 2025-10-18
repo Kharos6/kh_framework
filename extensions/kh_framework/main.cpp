@@ -101,6 +101,42 @@ void intercept::mission_ended() {
     sqf::diag_log("KH Framework Extension - Mission End");
 }
 
+static FARPROC WINAPI delay_load_hook(unsigned dliNotify, PDelayLoadInfo pdli) {
+    if (dliNotify == dliNotePreLoadLibrary) {
+        if (_stricmp(pdli->szDll, "lua51.dll") == 0) {
+            HMODULE hModule;
+
+            GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | 
+                             GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                             (LPCSTR)&delay_load_hook, &hModule);
+            
+            char dllPath[MAX_PATH];
+
+            if (GetModuleFileNameA(hModule, dllPath, MAX_PATH) != 0) {
+                std::string pathStr(dllPath);
+                size_t lastSlash = pathStr.find_last_of("\\/");
+                
+                if (lastSlash != std::string::npos) {
+                    std::string extensionDir = pathStr.substr(0, lastSlash);
+                    size_t parentSlash = extensionDir.find_last_of("\\/");
+                    
+                    if (parentSlash != std::string::npos) {
+                        std::string modDir = extensionDir.substr(0, parentSlash);
+                        std::string luaPath = modDir + "\\lua51.dll";
+                        HMODULE hLua = LoadLibraryA(luaPath.c_str());
+                        return (FARPROC)hLua;
+                    }
+                }
+            }
+        }
+    }
+    
+    return NULL;
+}
+
+// Set the delay-load hook
+extern "C" const PfnDliHook __pfnDliNotifyHook2 = delay_load_hook;
+
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
     switch (ul_reason_for_call) {
         case DLL_PROCESS_ATTACH:

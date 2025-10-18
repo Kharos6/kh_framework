@@ -86,10 +86,11 @@ cl /LD /arch:AVX /O2 /Ob3 /GL /MT /std:c++20 /EHsc /TP /Gy /Gw /GS- ^
     /link /MACHINE:X64 ^
     /LTCG ^
     /OPT:REF /OPT:ICF /OPT:LBR ^
+    /DELAYLOAD:lua51.dll ^
     /LIBPATH:luajit\lib ^
     /LIBPATH:intercept\lib ^
     intercept_client.lib lua51.lib ^
-    shell32.lib ole32.lib user32.lib advapi32.lib
+    shell32.lib ole32.lib user32.lib advapi32.lib delayimp.lib
 
 REM Check if build was successful
 if exist output_x64\kh_framework_x64.dll (

@@ -391,6 +391,10 @@ switch _eventType do {
 
 		private _continue = true;
 		private "_previousReturn";
+		
+		if (isNil "_arguments") then {
+			_arguments = [];
+		};
 
 		if _immediate then {
 			private _args = _arguments;
@@ -658,6 +662,10 @@ switch _eventType do {
 
 		private _drawType = [KH_var_drawUi2dExecutionStackAdditions, KH_var_drawUi3dExecutionStackAdditions] select _event;
 
+		if (isNil "_arguments") then {
+			_arguments = [];
+		};
+		
 		_drawType pushBack [
 			_arguments,
 			if ((_conditionFunction isEqualTo {}) || (_conditionFunction isEqualTo "")) then {						

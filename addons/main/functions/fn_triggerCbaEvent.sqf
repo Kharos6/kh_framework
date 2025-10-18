@@ -575,7 +575,7 @@ private _return = switch (typeName _target) do {
                                     "CALLBACK",
                                     [_arguments, _target],
                                     {
-                                        params ["_arguments", "_function"];
+                                        params [["_arguments", []], "_function"];
 
                                         if (_arguments call _function) then {
                                             [clientOwner];
@@ -608,7 +608,7 @@ private _return = switch (typeName _target) do {
         [
             [_event, _arguments, _target],
             {
-                params ["_event", "_arguments", "_function"];
+                params ["_event", ["_arguments", []], "_function"];
 
                 if (_arguments call _function) then {
                     [_event, _arguments] call CBA_fnc_localEvent;

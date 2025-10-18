@@ -77,7 +77,7 @@ else {
 			};
 
 			case "CALLBACK": {
-				private _callbackArguments = _special param [1];
+				private _callbackArguments = _special param [1, []];
 				private _callbackFunction = _special param [2, {}, ["", {}]];
 				private _callbackId = generateUid;
 
@@ -321,6 +321,10 @@ switch (typeName _environmentType) do {
 			[_arguments, _function, _target, _special, _specialIdOverride, _unscheduled];
 		};
 
+		if (isNil "_arguments") then {
+			_arguments = [];
+		};
+
 		if _immediate then {
 			private _handlerId = [missionNamespace, _environmentId, clientOwner];
 			private _totalDelta = 0;
@@ -341,15 +345,15 @@ switch (typeName _environmentType) do {
 		};
 
 		KH_var_temporalExecutionStackAdditions pushBack [
-			[_fedArguments, _subfunction, _environmentId, _environmentType, _fireOnce],
+			[_arguments, _fedArguments, _subfunction, _environmentId, _environmentType, _fireOnce],
 			{
-				params ["_fedArguments", "_subfunction", "_environmentId", "_environmentType", "_fireOnce"];
+				params ["_arguments", "_fedArguments", "_subfunction", "_environmentId", "_environmentType", "_fireOnce"];
 
 				if !(missionNamespace getVariable _environmentId) exitWith {																											
 					KH_var_temporalExecutionStackDeletions pushBackUnique _environmentId;
 				};
 
-				if ((_fedArguments select 0) call _environmentType) then {												
+				if (_arguments call _environmentType) then {												
 					_fedArguments call _subfunction;
 
 					if _fireOnce then {

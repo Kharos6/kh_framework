@@ -6,80 +6,72 @@ class KH_ResourceTerminal
     onLoad = "";
     class Controls 
     {
-        class Title: RscText 
+        class Title: RscText
         {
             idc = 100;
             text = "";
-            x = QUOTE(RSC_POS_X(6.5));
-            y = QUOTE(RSC_POS_Y(0));
-            w = QUOTE(RSC_POS_W(27));
+            x = QUOTE(RSC_POS_X(20));
+            y = QUOTE(RSC_POS_Y(19));
+            w = QUOTE(RSC_POS_W(60));
             h = QUOTE(RSC_POS_H(1));
             colorBackground[] = {GUI_THEME_RGB_R, GUI_THEME_RGB_G, GUI_THEME_RGB_B, GUI_THEME_ALPHA};
             moving = 1;
-        };
-        class Background: RscText 
-        {
-            x = QUOTE(RSC_POS_X(6.5));
-            y = QUOTE(RSC_POS_Y(6));
-            w = QUOTE(RSC_POS_W(27));
-            h = QUOTE(RSC_POS_W(27));
-            colorBackground[] = {0, 0, 0, 0.9};
         };
         class Information: RscTextMulti
         {
             idc = 101;
             text = "";
-            x = QUOTE(RSC_POS_X(6.5));
-            y = QUOTE(RSC_POS_Y(1));
-            w = QUOTE(RSC_POS_W(27));
-            h = QUOTE(RSC_POS_W(5));
+            x = QUOTE(RSC_POS_X(20));
+            y = QUOTE(RSC_POS_Y(20));
+            w = QUOTE(RSC_POS_W(60));
+            h = QUOTE(RSC_POS_H(8.5));
             colorBackground[] = {0, 0, 0, 0.9};
         };
-        class Console: RscText 
+        class Console: RscText
         {
             text = "CONSOLE";
-            x = QUOTE(RSC_POS_X(6.5));
-            y = QUOTE(RSC_POS_Y(4.75));
-            w = QUOTE(RSC_POS_W(27));
-            h = QUOTE(RSC_POS_H(1.25));
+            x = QUOTE(RSC_POS_X(20));
+            y = QUOTE(RSC_POS_Y(29));
+            w = QUOTE(RSC_POS_W(60));
+            h = QUOTE(RSC_POS_H(1));
+            moving = 1;
             colorBackground[] = {GUI_THEME_RGB_R, GUI_THEME_RGB_G, GUI_THEME_RGB_B, GUI_THEME_ALPHA};
         };
         class Output: RscTextMulti
         {
             idc = 102;
             text = "";
-            x = QUOTE(RSC_POS_X(6.5));
-            y = QUOTE(RSC_POS_Y(6));
-            w = QUOTE(RSC_POS_W(27));
-            h = QUOTE(RSC_POS_W(27));
-            colorBackground[] = {0, 0, 0, 0};
+            x = QUOTE(RSC_POS_X(20));
+            y = QUOTE(RSC_POS_Y(30));
+            w = QUOTE(RSC_POS_W(60));
+            h = QUOTE(RSC_POS_H(30));
+            colorBackground[] = {0, 0, 0, 0.9};
         };
         class Input: RscEdit
         {
             idc = 103;
             font = "EtelkaMonospacePro";
-            x = QUOTE(RSC_POS_X(6.5));
-            y = QUOTE(RSC_POS_Y(26.2));
-            w = QUOTE(RSC_POS_W(27));
-            h = QUOTE(RSC_POS_W(1.5));
-            deletable = 1;
+            x = QUOTE(RSC_POS_X(20));
+            y = QUOTE(RSC_POS_Y(60.5));
+            w = QUOTE(RSC_POS_W(60));
+            h = QUOTE(RSC_POS_H(19.5));
             colorBackground[] = {0, 0, 0, 0.9};
         };
-        class ButtonExecute: RscButton 
+        class ButtonExecute: RscButton
         {
             idc = 104;
 			text = "EXECUTE";
-            x = QUOTE(RSC_POS_X(28.5));
-            y = QUOTE(RSC_POS_Y(27.3));
-            w = QUOTE(RSC_POS_W(5));
+            x = QUOTE(RSC_POS_X(20));
+            y = QUOTE(RSC_POS_Y(80.5));
+            w = QUOTE(RSC_POS_W(10));
             h = QUOTE(RSC_POS_H(1));
         };
-        class ButtonExit: RscButtonMenuCancel 
+        class ButtonExit: RscButtonMenuCancel
         {
 			text = "EXIT";
-            x = QUOTE(RSC_POS_X(6.5));
-            y = QUOTE(RSC_POS_Y(27.3));
-            w = QUOTE(RSC_POS_W(5));
+            x = QUOTE(RSC_POS_X(70));
+            y = QUOTE(RSC_POS_Y(80.5));
+            w = QUOTE(RSC_POS_W(10));
             h = QUOTE(RSC_POS_H(1));
         };
     };

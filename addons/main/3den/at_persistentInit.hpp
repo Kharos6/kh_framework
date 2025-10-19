@@ -22,7 +22,7 @@ class KH_PersistentInit: Title
 		class LocalFunctionTitle: Title
 		{
 			text = "Local Function";
-			tooltip = "Unscheduled code executed locally to the new owner of the entity. This code is also executed upon loading the mission, and upon load for the player assigned to this entity if this entity is playable. Passed arguments available through _this are: [_entity (OBJECT)].";
+			tooltip = "Unscheduled code executed locally to the new owner of the entity. This code is also executed upon loading the mission, and upon load for the player assigned to this entity. Passed arguments available through _this are: [_entity (OBJECT)].";
 			y = QUOTE(2 * CTRL_DEFAULT_H + 5 * CTRL_DEFAULT_Y);
 		};
 		class LocalFunction: ctrlEditMulti

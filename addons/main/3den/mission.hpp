@@ -522,7 +522,7 @@ class Mission
 				{
 					class DynamicDisguiseSubcategory
 					{
-						description = "Activates a disguise system that dictates the side affiliation of players based on the uniform and headgear they are wearing. Will work in conjunction with the Dynamic Disguise modules.";
+						description = "Activates a disguise system that dictates the side affiliation of players based on the uniform, vest, and headgear they are wearing. Will work in conjunction with the Dynamic Disguise modules.";
 						data = "AttributeSystemSubcategory";
 						control = "KH_SubcategoryNoHeader2";
 					};
@@ -549,7 +549,7 @@ class Mission
 				{
 					class PersistencySubcategory
 					{
-						description = "Maintain persistency using stored entity and world states. States are saved when the KH_fnc_endMission function or the KH End Mission module is executed, and loaded at the appropriate time the persistent state of the identifier is available. If only the respawn loadout usage is desired, the identifier can be set to an empty string or all of the options can be unticked. The missionNamespace, as well as all entity namespaces, may contain a 'KH_var_persistentVariables' variable that is an array of arrays in format [name (STRING), value (ANY), public (BOOL)].";
+						description = "Maintain persistency using stored entity and world states. States are saved when the KH_fnc_endMission function or the KH End Mission module is executed, and loaded at the appropriate time if the persistent state of the identifier is available. If only the respawn loadout usage is desired, the identifier can be set to an empty string or all of the options can be unticked. The missionNamespace, as well as all entity namespaces, may contain a 'KH_var_persistentVariables' variable that is an array of arrays in format [name (STRING), value (ANY), public (BOOL)].";
 						data = "AttributeSystemSubcategory";
 						control = "KH_SubcategoryNoHeader6";
 					};
@@ -701,7 +701,7 @@ class Mission
 					class RecoverDisconnectedPlayers
 					{
 						displayName = "Recover Disconnected Players";
-						tooltip = "Recovers the unit attributes of players who reconnected after disconnecting.";
+						tooltip = "Recovers the unit attributes of players who reconnect after disconnecting.";
 						property = "KH_RecoverDisconnectedPlayers";
 						control = "Checkbox";
 						expression = 

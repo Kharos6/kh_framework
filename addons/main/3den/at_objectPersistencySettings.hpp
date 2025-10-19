@@ -2,7 +2,7 @@ class KH_ObjectPersistencySettings: Title
 {
 	attributeLoad = "[_this, _value] call KH_fnc_loadControlAttributes;";
 	attributeSave = "[_this] call KH_fnc_saveControlAttributes;";
-	h = QUOTE(6 * CTRL_DEFAULT_H + 70 * pixelH);
+	h = QUOTE(4 * CTRL_DEFAULT_H + 70 * pixelH);
 	class Controls: Controls
 	{
 		class ToggleTitle: Title

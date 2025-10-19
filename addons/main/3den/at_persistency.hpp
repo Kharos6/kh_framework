@@ -2,7 +2,7 @@ class KH_Persistency: Title
 {
 	attributeLoad = "(_this controlsGroupCtrl 103) lbAdd 'NONE'; (_this controlsGroupCtrl 103) lbAdd 'SAVED'; (_this controlsGroupCtrl 103) lbAdd 'INITIAL'; (_this controlsGroupCtrl 103) lbAdd 'DEATH'; [_this, _value] call KH_fnc_loadControlAttributes;";
 	attributeSave = "[_this] call KH_fnc_saveControlAttributes;";
-	h = QUOTE(10 * CTRL_DEFAULT_H + 70 * pixelH);
+	h = QUOTE(9 * CTRL_DEFAULT_H + 70 * pixelH);
 	class Controls: Controls
 	{
 		class ToggleTitle: Title
@@ -37,7 +37,7 @@ class KH_Persistency: Title
 		{
 			text = "Players";
 			tooltip = "True preserves player attributes. Attributes are assigned based on either the Steam ID or variable name, depending on the choice in the unit attributes, and loaded if a player has valid saved attributes. Steam ID is default.";
-			y = QUOTE(3 * CTRL_DEFAULT_H + 10 *CTRL_DEFAULT_Y);
+			y = QUOTE(3 * CTRL_DEFAULT_H + 10 * CTRL_DEFAULT_Y);
 		};
 		class Players: ctrlCheckbox
 		{
@@ -65,7 +65,7 @@ class KH_Persistency: Title
 		{
 			text = "Units";
 			tooltip = "True preserves unit attributes. Attributes are assigned based on variable names, saved and loaded only if the unit has a variable name assigned.";
-			y = QUOTE(5 * CTRL_DEFAULT_H + 20 *CTRL_DEFAULT_Y);
+			y = QUOTE(5 * CTRL_DEFAULT_H + 20 * CTRL_DEFAULT_Y);
 		};
 		class Units: ctrlCheckbox
 		{
@@ -79,7 +79,7 @@ class KH_Persistency: Title
 		{
 			text = "Groups";
 			tooltip = "True preserves group attributes. Attributes are assigned based on the group side and ID.";
-			y = QUOTE(6 * CTRL_DEFAULT_H + 25 *CTRL_DEFAULT_Y);
+			y = QUOTE(6 * CTRL_DEFAULT_H + 25 * CTRL_DEFAULT_Y);
 		};
 		class Groups: ctrlCheckbox
 		{
@@ -93,7 +93,7 @@ class KH_Persistency: Title
 		{
 			text = "Objects";
 			tooltip = "True preserves object attributes. Attributes are assigned based on variable names, saved and loaded only if the object has a variable name assigned.";
-			y = QUOTE(7 * CTRL_DEFAULT_H + 30 *CTRL_DEFAULT_Y);
+			y = QUOTE(7 * CTRL_DEFAULT_H + 30 * CTRL_DEFAULT_Y);
 		};
 		class Objects: ctrlCheckbox
 		{
@@ -107,7 +107,7 @@ class KH_Persistency: Title
 		{
 			text = "Mission";
 			tooltip = "True preserves the mission state, such as the environmental conditions and date.";
-			y = QUOTE(8 * CTRL_DEFAULT_H + 35 *CTRL_DEFAULT_Y);
+			y = QUOTE(8 * CTRL_DEFAULT_H + 35 * CTRL_DEFAULT_Y);
 		};
 		class Mission: ctrlCheckbox
 		{

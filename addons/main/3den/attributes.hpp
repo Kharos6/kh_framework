@@ -27,7 +27,7 @@ class Attributes
 	{
 		attributeLoad = "((_this controlsGroupCtrl 101) controlsGroupCtrl 102) ctrlSetStructuredText (parseText (getText (_config >> 'description')))";
 		attributeSave = "";
-		h = QUOTE(GRID_H * 6);
+		h = QUOTE((2.5 * GRID_H) + (4.5 * GRID_H));
 		class Controls: Controls
 		{
 			class Group: Group
@@ -55,7 +55,7 @@ class Attributes
 	{
 		attributeLoad = "((_this controlsGroupCtrl 101) controlsGroupCtrl 102) ctrlSetStructuredText (parseText (getText (_config >> 'description')))";
 		attributeSave = "";
-		h = QUOTE((GRID_H * 6) * 2);
+		h = QUOTE((2.5 * GRID_H) + (2 * 4.5 * GRID_H));
 		class Controls: Controls
 		{
 			class Group: Group
@@ -83,7 +83,7 @@ class Attributes
 	{
 		attributeLoad = "((_this controlsGroupCtrl 101) controlsGroupCtrl 102) ctrlSetStructuredText (parseText (getText (_config >> 'description')))";
 		attributeSave = "";
-		h = QUOTE((GRID_H * 6) * 3);
+		h = QUOTE((2.5 * GRID_H) + (3 * 4.5 * GRID_H));
 		class Controls: Controls
 		{
 			class Group: Group
@@ -111,7 +111,7 @@ class Attributes
 	{
 		attributeLoad = "((_this controlsGroupCtrl 101) controlsGroupCtrl 102) ctrlSetStructuredText (parseText (getText (_config >> 'description')))";
 		attributeSave = "";
-		h = QUOTE((GRID_H * 6) * 4);
+		h = QUOTE((2.5 * GRID_H) + (4 * 4.5 * GRID_H));
 		class Controls: Controls
 		{
 			class Group: Group
@@ -139,7 +139,7 @@ class Attributes
 	{
 		attributeLoad = "((_this controlsGroupCtrl 101) controlsGroupCtrl 102) ctrlSetStructuredText (parseText (getText (_config >> 'description')))";
 		attributeSave = "";
-		h = QUOTE((GRID_H * 6) * 5);
+		h = QUOTE((2.5 * GRID_H) + (5 * 4.5 * GRID_H));
 		class Controls: Controls
 		{
 			class Group: Group
@@ -167,7 +167,7 @@ class Attributes
 	{
 		attributeLoad = "((_this controlsGroupCtrl 101) controlsGroupCtrl 102) ctrlSetStructuredText (parseText (getText (_config >> 'description')))";
 		attributeSave = "";
-		h = QUOTE((GRID_H * 6) * 6);
+		h = QUOTE((2.5 * GRID_H) + (6 * 4.5 * GRID_H));
 		class Controls: Controls
 		{
 			class Group: Group

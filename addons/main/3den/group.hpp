@@ -56,7 +56,7 @@ class Group
 				class PlayerGroupInit
 				{
 					displayName = "Player Group Init";
-					tooltip = "Unscheduled code to execute locally to the players who load into the mission as members of this group, once their unit becomes valid. Passed arguments available through _this are: [_group (GROUP)].";
+					tooltip = "Unscheduled code to execute locally to the players who load into the mission as members of this group once the player unit becomes available. Passed arguments available through _this are: [_group (GROUP)].";
 					property = "KH_PlayerGroupInit";
 					control = "EditCodeMulti5";
 					expression = 

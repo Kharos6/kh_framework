@@ -39,6 +39,7 @@ class CfgFunctions
 			class getEntityVariableName {};
 			class getGroupAttributes {};
 			class getMissionAttributes {};
+			class getMouseTarget {};
 			class getObjectAttributes {};
 			class getObjectInventory {};
 			class getPositionScreenRatio {};
@@ -60,8 +61,14 @@ class CfgFunctions
 			class loadUnitPersistency {};
 			class log {};
 			class luaRecompile {};
+			class moduleAssignIdentificationCard {};
+			class moduleAssignTerminal {};
+			class moduleDynamicDisguise {};
 			class moduleDynamicDisguiseEquipment {};
 			class moduleEndMission {};
+			class moduleEntitySpawner {};
+			class moduleEquipableObject {};
+			class moduleFultonExtract {};
 			class moduleTeleporter {};
 			class openIdentificationCard {};
 			class openTerminal {};

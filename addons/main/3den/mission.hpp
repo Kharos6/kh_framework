@@ -395,7 +395,7 @@ class Mission
 					class PersistentPlayerSynchronizer
 					{
 						displayName = "Persistent Player Synchronizer";
-						tooltip = "A hash map of entries where the key is a string of the variable name of an entity, and the value is either an array of strings of variable names of players, or a string of the name of a missionNamespace variable that is an array containing the players, which are to be synchronized to the entity assigned to the key. Ideal for making sure modules are synchronized to respawning or JIP players, as well as initial players at the start of the mission. This value can also be the name of a hash map stored in missionNamespace containing the same elements. For example: ['module1', ['player1', 'player2', 'player3', ...]], ['module1', 'playersArray'].";
+						tooltip = "A hash map of entries where the key is a string of the variable name of an entity, and the value is an array of strings of variable names of players which are to be synchronized to the entity assigned to the key. Ideal for making sure modules are synchronized to respawning or JIP players, as well as initial players at the start of the mission. For example: ['module1', ['player1', 'player2', 'player3', ...]], ['module2', ['player1', 'player2', 'player3', ...]], ....";
 						property = "KH_PersistentPlayerSynchronizer";
 						control = "EditMulti5";
 						expression = 
@@ -415,16 +415,11 @@ class Mission
 													private _unit = param [3];\
 													_args params ['_value'];\
 													{\
-														if (_y isEqualType []) then {\
-															private _parsedEntities = [];\
-															{\
-																_parsedEntities pushBack (missionNamespace getVariable [_x, objNull]);\
-															} forEach _y;\
-															(missionNamespace getVariable [_x, objNull]) synchronizeObjectsAdd _parsedEntities;\
-														}\
-														else {\
-															(missionNamespace getVariable [_x, objNull]) synchronizeObjectsAdd (missionNamespace getVariable [_y, []]);\
-														};\
+														private _parsedEntities = [];\
+														{\
+															_parsedEntities pushBack (missionNamespace getVariable [_x, objNull]);\
+														} forEach _y;\
+														(missionNamespace getVariable [_x, objNull]) synchronizeObjectsAdd _parsedEntities;\
 													} forEach _value;\
 												}\
 											] call KH_fnc_addEventHandler;\
@@ -514,30 +509,39 @@ class Mission
 					};
 				};
 			};
-			class KH_DynamicDisguise
+			class KH_Curators
 			{
-				displayName = "KH Dynamic Disguise";
+				displayName = "KH Curators";
 				collapsed = 1;
 				class Attributes
 				{
-					class DynamicDisguiseSubcategory
+					class CuratorsSubcategory
 					{
-						description = "Activates a disguise system that dictates the side affiliation of players based on the uniform, vest, and headgear they are wearing. Will work in conjunction with the Dynamic Disguise modules.";
+						description = "Automatically sets curators based on index pair equivalents of Steam IDs and curator modules.";
 						data = "AttributeSystemSubcategory";
-						control = "KH_SubcategoryNoHeader2";
+						control = "KH_SubcategoryNoHeader1";
 					};
-					class DynamicDisguise 
+					class Curators
 					{
-						property = "KH_DynamicDisguise";
-						control = "KH_DynamicDisguise";
+						property = "KH_Curators";
+						control = "KH_Curators";
 						expression = 
 						"\
-							_value params ['_toggle', '_bluforUniforms', '_bluforVests', '_bluforHeadgear', '_opforUniforms', '_opforVests', '_opforHeadgear', '_greenforUniforms', '_greenforVests', '_greenforHeadgear', '_setCaptive'];\
+							_value params ['_toggle', '_curators', '_curatorModules', '_hide', '_disableDamage'];\
+							_curators = ['[', _curators, ']'] joinString '';\
+							_curatorModules = ['[', _curatorModules, ']'] joinString '';\
 							if (_toggle && !is3DEN && isServer) then {\
-								[true, [parseSimpleArray (['[', _bluforUniforms, ']'] joinString ''), parseSimpleArray (['[', _opforUniforms, ']'] joinString ''), parseSimpleArray (['[', _greenforUniforms, ']'] joinString '')], [parseSimpleArray (['[', _bluforVests, ']'] joinString ''), parseSimpleArray (['[', _opforVests, ']'] joinString ''), parseSimpleArray (['[', _greenforVests, ']'] joinString '')], [parseSimpleArray (['[', _bluforHeadgear, ']'] joinString ''), parseSimpleArray (['[', _opforHeadgear, ']'] joinString ''), parseSimpleArray (['[', _greenforHeadgear, ']'] joinString '')], _setCaptive] call KH_fnc_dynamicDisguise;\
+								private _assignedModules = [];\
+								{\
+									private _module = missionNamespace getVariable [_x, objNull];\
+									if !(isNull _module) then {\
+										_assignedModules pushBack _module;\
+									};\
+								} forEach (parseSimpleArray _curatorModules);\
+								[parseSimpleArray _curators, _assignedModules, _hide, _disableDamage] call KH_fnc_setCurators;\
 							};\
 						";
-						defaultValue = "[false, '', '', '', '', '', '', '', '', '', false]";
+						defaultValue = "[false, '', '', true, true]";
 					};
 				};
 			};
@@ -620,42 +624,6 @@ class Mission
 							};\
 						";
 						defaultValue = "[false, profileName, true, 2, true, true, true, true]";
-					};
-				};
-			};
-			class KH_Curators
-			{
-				displayName = "KH Curators";
-				collapsed = 1;
-				class Attributes
-				{
-					class CuratorsSubcategory
-					{
-						description = "Automatically sets curators based on index pair equivalents of Steam IDs and curator modules.";
-						data = "AttributeSystemSubcategory";
-						control = "KH_SubcategoryNoHeader1";
-					};
-					class Curators
-					{
-						property = "KH_Curators";
-						control = "KH_Curators";
-						expression = 
-						"\
-							_value params ['_toggle', '_curators', '_curatorModules', '_hide', '_disableDamage'];\
-							_curators = ['[', _curators, ']'] joinString '';\
-							_curatorModules = ['[', _curatorModules, ']'] joinString '';\
-							if (_toggle && !is3DEN && isServer) then {\
-								private _assignedModules = [];\
-								{\
-									private _module = missionNamespace getVariable [_x, objNull];\
-									if !(isNull _module) then {\
-										_assignedModules pushBack _module;\
-									};\
-								} forEach (parseSimpleArray _curatorModules);\
-								[parseSimpleArray _curators, _assignedModules, _hide, _disableDamage] call KH_fnc_setCurators;\
-							};\
-						";
-						defaultValue = "[false, '', '', true, true]";
 					};
 				};
 			};

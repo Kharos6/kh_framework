@@ -1,5 +1,20 @@
-if (KH_var_weaponTargetCheckFrame isEqualTo diag_frameNo) exitWith {
+params [["_ignored", [], [[], objNull]]];
+
+_ignored = if (_ignored isEqualType objNull) then {
+    if !(isNull _ignored) then {
+        [_ignored] + [KH_var_playerUnit, objectParent KH_var_playerUnit, attachedTo KH_var_playerUnit] + (attachedObjects KH_var_playerUnit);
+    }
+    else {
+        [KH_var_playerUnit, objectParent KH_var_playerUnit, attachedTo KH_var_playerUnit] + (attachedObjects KH_var_playerUnit);
+    }
+}
+else {
+    _ignored + [KH_var_playerUnit, objectParent KH_var_playerUnit, attachedTo KH_var_playerUnit] + (attachedObjects KH_var_playerUnit);
+};
+
+if ((KH_var_weaponTargetCheckFrame isEqualTo diag_frameNo) && (KH_var_weaponTargetIgnores isEqualTo _ignored)) exitWith {
     [
+        KH_var_weaponTargetSurfacePosition,
         KH_var_weaponTargetSurfaceDistance,
         KH_var_weaponTargetSurfaceNormal,
         KH_var_weaponTargetObject,
@@ -10,6 +25,7 @@ if (KH_var_weaponTargetCheckFrame isEqualTo diag_frameNo) exitWith {
     ];
 };
 
+KH_var_weaponTargetIgnores = +_ignored;
 KH_var_weaponTargetCheckFrame = diag_frameNo;
 private _currentWeapon = currentWeapon KH_var_playerUnit;
 
@@ -46,7 +62,7 @@ private _weaponTarget = ([
     else {
         _weaponPosition vectorAdd ((getCameraViewDirection KH_var_playerUnit) vectorMultiply viewDistance);
     },
-    [KH_var_playerUnit] + (attachedObjects KH_var_playerUnit),
+    _ignored,
     true, 
     1, 
     "VIEW", 
@@ -55,7 +71,8 @@ private _weaponTarget = ([
     []
 ] call KH_fnc_raycast) param [0, []];
 
-KH_var_weaponTargetSurfaceDistance = _weaponPosition vectorDistance (_weaponTarget param [0, _weaponPosition]);
+KH_var_weaponTargetSurfacePosition = _weaponTarget param [0, _weaponPosition];
+KH_var_weaponTargetSurfaceDistance = _weaponPosition vectorDistance KH_var_weaponTargetSurfacePosition;
 KH_var_weaponTargetSurfaceNormal = _weaponTarget param [1, []];
 KH_var_weaponTargetObject = _weaponTarget param [2, objNull];
 KH_var_weaponTargetParentObject = _weaponTarget param [3, objNull];
@@ -66,10 +83,11 @@ KH_var_weaponTargetDistance = if !(isNull KH_var_weaponTargetObject) then {
     (getPosATL KH_var_playerUnit) vectorDistance (getPosATL KH_var_weaponTargetObject);
 }
 else {
-    _weaponPosition vectorDistance (_weaponTarget param [0, _weaponPosition]);
+    _weaponPosition vectorDistance KH_var_weaponTargetSurfacePosition;
 };
 
 [
+    KH_var_weaponTargetSurfacePosition,
     KH_var_weaponTargetSurfaceDistance,
     KH_var_weaponTargetSurfaceNormal,
     KH_var_weaponTargetObject,

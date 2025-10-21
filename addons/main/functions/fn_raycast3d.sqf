@@ -13,6 +13,7 @@ params [
 ];
 
 private _allowIgnoredCheck = true;
+[_ignored, {isNull _x;}] call KH_fnc_deleteArrayElements;
 private _ignored1 = objNull;
 private _ignored2 = objNull;
 
@@ -272,7 +273,7 @@ if (_draw isNotEqualTo []) then {
 
 	switch _type do {
 		case "LINE": {
-			_arguments params [["_color", [1, 1, 1, 1], [[]]], ["_width", 1, [0]]];
+			_arguments params [["_color", [1, 1, 1, 1], [[]]], ["_width", 10, [0]]];
 
 			{
 				[_type, [ASLToAGL (_x select 0), ASLToAGL (_x select 1), _color, _width], _duration, [], {}] call KH_fnc_draw3d;

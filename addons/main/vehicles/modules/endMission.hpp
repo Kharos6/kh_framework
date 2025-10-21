@@ -59,7 +59,7 @@ class KH_ModuleEndMission: Module_F
 		sync[] = {};
 		position = 0;
 		direction = 0;
-		optional = 0;
+		optional = 1;
 		duplicate = 1;
 	};
 };

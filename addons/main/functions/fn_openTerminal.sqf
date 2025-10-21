@@ -153,6 +153,49 @@ if !_observerMode then {
 	] call KH_fnc_addEventHandler;
 
 	[
+		["DISPLAY", _display],
+		"KeyDown",
+		[_identifierOutput, _function],
+		{
+			params ["_display", "_key", "_shift"];
+			_args params ["_identifierOutput", "_function"];
+
+			if ((_key isEqualTo 0x1C) && !_shift) then {
+				private _input = ctrlText 103;
+				private _command = "";
+				private _argument = "";
+
+				if ("-" in _input) then {
+					_command = _input select [0, (_input find "-") - 1];
+					_argument = _input select [(_input find "-") + 1];
+				}
+				else {
+					_command = _input;
+				};
+
+				[
+					[_identifierOutput, _function, _command, _argument],
+					{
+						params ["_identifierOutput", "_function", "_command", "_argument"];
+						private _functionOutput = [_command, _argument, _identifierOutput] call _function;
+
+						if (_functionOutput isEqualType "") then {
+							private _output = [missionNamespace getVariable [_identifierOutput, ""], _functionOutput] joinString "";
+							missionNamespace setVariable [_identifierOutput, _output, true];
+						};
+					},
+					"SERVER",
+					true,
+					false
+				] call KH_fnc_execute;
+
+				ctrlSetText [103, ""];
+				true;
+			};
+		}
+	] call KH_fnc_addEventHandler;
+
+	[
 		[player, _entity, _identifier],
 		{
 			params ["_player", "_entity", "_identifier"];

@@ -37,7 +37,7 @@ class KH_ModuleTeleporter: Module_F
 			property = "KH_ModuleTeleporterFreefallHeight";
 			defaultValue = "'-1'";
 		};
-		class Init: Edit
+		class Init: EditCodeMulti5
 		{
 			displayName = "Init";
 			tooltip = "Unscheduled code to execute locally to the entity after it is teleported. Passed arguments available through _this are: [_entity (OBJECT)].";

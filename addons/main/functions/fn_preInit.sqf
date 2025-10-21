@@ -353,9 +353,9 @@ if isServer then {
 	publicVariable "KH_var_playersLoaded";
 	KH_var_disconnectedPlayerUids = [];
 	publicVariable "KH_var_disconnectedPlayerUids";
-	KH_var_adminMachine = 2;
+	KH_var_adminMachine = clientOwner;
 	publicVariable "KH_var_adminMachine";
-	KH_var_allMachines = [2];
+	KH_var_allMachines = [clientOwner];
 	publicVariable "KH_var_allMachines";
 	KH_var_allIdMachines = createHashMap;
 	publicVariable "KH_var_allIdMachines";
@@ -985,6 +985,7 @@ if isServer then {
 };
 
 if hasInterface then {
+	KH_var_mouseTargetCheckFrame = 0;
 	KH_var_viewTargetCheckFrame = 0;
 	KH_var_weaponTargetCheckFrame = 0;
 	KH_var_allAddedDisplays = [];
@@ -1017,7 +1018,7 @@ if hasInterface then {
 		"KH_debugConsole", 
 		"Debug Console",
 		{
-			if (!isMultiplayer || (KH_var_adminMachine isEqualTo clientOwner)) then {
+			if (KH_var_adminMachine isEqualTo clientOwner) then {
 				private _display = createDialog ["KH_DebugConsole", true];
 				private _currentConsoleCache = profileNamespace getVariable ["KH_var_debugConsoleCache", []];
 				ctrlSetText [101, _currentConsoleCache param [((count _currentConsoleCache) -1) max 0, ""]];
@@ -1029,7 +1030,6 @@ if hasInterface then {
 					"ButtonClick",
 					[],
 					{
-				
 						private _input = ctrlText 101;
 
 						if (_input isNotEqualTo "") then {
@@ -1104,6 +1104,49 @@ if hasInterface then {
 						};
 
 						nil;
+					}
+				] call KH_fnc_addEventHandler;
+
+				[
+					["DISPLAY", _display],
+					"KeyDown",
+					[],
+					{
+						params ["_display", "_key", "_shift"];
+
+						if ((_key isEqualTo 0x1C) && !_shift) then {
+							private _input = ctrlText 101;
+
+							if (_input isNotEqualTo "") then {
+								private _currentConsoleCache = profileNamespace getVariable ["KH_var_debugConsoleCache", []];
+
+								if (((count _input) <= 8192) && ((_currentConsoleCache param [((count _currentConsoleCache) - 1) max 0, ""]) isNotEqualTo _input)) then {
+									_currentConsoleCache pushBack _input;
+
+									if ((count _currentConsoleCache) > 32) then {
+										_currentConsoleCache deleteAt 0;
+									};
+
+									profileNamespace setVariable ["KH_var_debugConsoleCache", _currentConsoleCache];
+								};
+
+								ctrlSetText [
+									103, 
+									[
+										if ((lbCurSel 108) isEqualTo 0) then {
+											call (compile _input);
+										}
+										else {
+											luaExecute _input;
+										}
+									] joinString ""
+								];
+
+								KH_var_debugConsoleCacheIndex = ((count _currentConsoleCache) - 1) max 0;
+							};
+
+							true;
+						};
 					}
 				] call KH_fnc_addEventHandler;
 
@@ -1341,7 +1384,8 @@ if hasInterface then {
 		[],
 		{
 			if KH_var_diagnosticsState then {
-				player setVariable ["KH_var_diagnosticsFramerateServer", parseNumber (diag_fps toFixed 0), KH_var_adminMachine];
+				player setVariable ["KH_var_diagnosticsFramerate", parseNumber (diag_fps toFixed 0), KH_var_adminMachine];
+				player setVariable ["KH_var_diagnosticsViewDistance", viewDistance, KH_var_adminMachine];
 			};
 		},
 		true,

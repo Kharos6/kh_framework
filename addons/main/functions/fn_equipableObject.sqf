@@ -9,7 +9,6 @@ params [
 	["_hideInVehicles", true, [true]], 
 	["_toggleEquip", true, [true]], 
 	["_exclusive", true, [true]], 
-	["_event", "KH_eve_objectEquipped", [""]], 
 	["_objectName", "Item", [""]]
 ];
 
@@ -36,11 +35,11 @@ if (isNull _unit) then {
 			{},
 			{
 				private _localArguments = param [3];
-				(_localArguments select [1]) params ["_bone", "_position", "_rotation", "_scale", "_mass", "_hideInVehicles", "_toggleEquip", "_exclusive", "_event", "_objectName"];
+				(_localArguments select [1]) params ["_bone", "_position", "_rotation", "_scale", "_mass", "_hideInVehicles", "_toggleEquip", "_exclusive", "_objectName"];
 				_target setVariable ["KH_var_previouslyEquipped", true, true];
 
 				[
-					[_caller, _target, _bone, _position, _rotation, _scale, _mass, _hideInVehicles, _toggleEquip, _exclusive, _event, _objectName], 
+					[_caller, _target, _bone, _position, _rotation, _scale, _mass, _hideInVehicles, _toggleEquip, _exclusive, _objectName], 
 					"KH_fnc_equipableObject", 
 					"SERVER", 
 					true,
@@ -59,8 +58,7 @@ if (isNull _unit) then {
 					{
 						private _localArguments = param [3];
 						private _object = _localArguments param [0];
-						private _event = _localArguments param [9];
-						[_event, [_caller, _object, false]] call CBA_fnc_globalEvent;
+						["KH_eve_equipableObjectExchanged", [_caller, _object, false]] call CBA_fnc_globalEvent;
 						detach _object;
 					},
 					{},
@@ -99,7 +97,7 @@ if (isNull _unit) then {
 }
 else {
 	private _localArguments = _this;
-	[_event, [_unit, _object, true]] call CBA_fnc_globalEvent;
+	["KH_eve_equipableObjectExchanged", [_unit, _object, true]] call CBA_fnc_globalEvent;
 
 	if (isNil "KH_var_equipableObjectRespawnReset") then {
 		KH_var_equipableObjectRespawnReset = true;
@@ -165,8 +163,7 @@ else {
 				{
 					private _localArguments = param [3];
 					private _unit = _localArguments param [0];
-					private _event = _localArguments param [10];
-					[_event, [_unit, _target, false]] call CBA_fnc_globalEvent;
+					["KH_eve_equipableObjectExchanged", [_unit, _target, false]] call CBA_fnc_globalEvent;
 					detach _target;
 				},
 				{},
@@ -199,10 +196,10 @@ else {
 				{},
 				{
 					private _localArguments = param [3];
-					(_localArguments select [2]) params ["_bone", "_position", "_rotation", "_scale", "_mass", "_hideInVehicles", "_toggleEquip", "_exclusive", "_event", "_objectName"];
+					(_localArguments select [2]) params ["_bone", "_position", "_rotation", "_scale", "_mass", "_hideInVehicles", "_toggleEquip", "_exclusive", "_objectName"];
 
 					[
-						[_caller, _target, _bone, _position, _rotation, _scale, _mass, _hideInVehicles, _toggleEquip, _exclusive, _event, _objectName], 
+						[_caller, _target, _bone, _position, _rotation, _scale, _mass, _hideInVehicles, _toggleEquip, _exclusive, _objectName], 
 						"KH_fnc_equipableObject", 
 						"SERVER", 
 						true,
@@ -221,8 +218,7 @@ else {
 						{
 							private _localArguments = param [3];
 							private _object = _localArguments param [1];
-							private _event = _localArguments param [10];
-							[_event, [_caller, _object, false]] call CBA_fnc_globalEvent;
+							["KH_eve_equipableObjectExchanged", [_caller, _object, false]] call CBA_fnc_globalEvent;
 							detach _object;
 						},
 						{},

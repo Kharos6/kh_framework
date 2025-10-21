@@ -6,7 +6,7 @@ if (_id isEqualTypeAll []) exitWith {
     } forEach _id;
 };
 
-if ((_id select 1) isEqualType []) exitWith {
+if ((_id select 1) isEqualType []) then {
 	_id params [["_type", [], [[]]], ["_handlerId", [], [[]]], ["_persistentExecutionId", "", [""]], ["_eventOwner", nil, [0]]];
 	missionNamespace setVariable [_persistentExecutionId, false, true];
 	[_handlerId] call KH_fnc_removeHandler;

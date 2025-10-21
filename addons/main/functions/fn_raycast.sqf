@@ -14,7 +14,8 @@ if ((count _this) isEqualTo 1) then {
 			["_returnUnique", true, [true]],
 			["_draw", [], [[]]]
 		];
-
+		
+		[_ignored, {isNull _x;}] call KH_fnc_deleteArrayElements;
 		private _allowIgnoredCheck = true;
 		private _ignored1 = objNull;
 		private _ignored2 = objNull;
@@ -83,6 +84,52 @@ if ((count _this) isEqualTo 1) then {
 				];
 			};
 		};
+
+		if (_draw isNotEqualTo []) then {
+			_draw params [["_type", "", [""]], ["_arguments", [], [[]]], ["_duration", 0, [0, ""]]];
+
+			if (_duration isEqualTo 0) then {
+				_duration = true;
+			};
+
+			switch _type do {
+				case "LINE": {
+					_arguments params [["_color", [1, 1, 1, 1], [[]]], ["_width", 10, [0]]];
+					[_type, [ASLToAGL _start, ASLToAGL _end, _color, _width], _duration, [], {}] call KH_fnc_draw3d;
+				};
+
+				case "LASER": {
+					_arguments params [["_beamColor", [1, 1, 1], [[]]], ["_dotColor", [1, 1, 1], [[]]], ["_dotSize", 1, [0]], ["_beamThickness", 1, [0]], ["_beamMaxLength", 0, [0]], ["_ir", false, [true]]];
+					[_type, [_start, _end, _beamColor, _dotColor, _dotSize, _beamThickness, _beamMaxLength, _ir], _duration, [], {}] call KH_fnc_draw3d;
+				};
+
+				case "ICON": {
+					_arguments params [
+						["_texture", "\a3\ui_f\data\IGUI\Cfg\Radar\radar_ca.paa", [""]],
+						["_color", [1, 1, 1, 1], [[]]],
+						["_width", 1, [0]],
+						["_height", 1, [0]],
+						["_angle", 1, [0]],
+						["_text", "", [""]],
+						["_shadow", false, [true, 0]],
+						["_textSize", 1, [0]],
+						["_font", "RobotoCondensedBold", [""]],
+						["_textAlign", "center", [""]],
+						["_drawSideArrows", false, [true]],
+						["_offsetX", 0, [0]],
+						["_offsetY", 0, [0]]
+					];
+
+					[
+						_type, 
+						[_texture, _color, ASLToAGL _end, _width, _height, _angle, _text, _shadow, _textSize, _font, _textAlign, _drawSideArrows, _offsetX, _offsetY], 
+						_duration, 
+						[], 
+						{}
+					] call KH_fnc_draw3d;
+				};
+			};
+		};
 	} forEach _intersectionArguments;
 
 	private _intersections = lineIntersectsSurfaces [_allIntersections];
@@ -127,52 +174,6 @@ if ((count _this) isEqualTo 1) then {
 		_intersections deleteAt _deletions;
 	};
 
-	if (_draw isNotEqualTo []) then {
-		_draw params [["_type", "", [""]], ["_arguments", [], [[]]], ["_duration", 0, [0, ""]]];
-
-		if (_duration isEqualTo 0) then {
-			_duration = true;
-		};
-
-		switch _type do {
-			case "LINE": {
-				_arguments params [["_color", [1, 1, 1, 1], [[]]], ["_width", 1, [0]]];
-				[_type, [ASLToAGL _start, ASLToAGL _end, _color, _width], _duration, [], {}] call KH_fnc_draw3d;
-			};
-
-			case "LASER": {
-				_arguments params [["_beamColor", [1, 1, 1], [[]]], ["_dotColor", [1, 1, 1], [[]]], ["_dotSize", 1, [0]], ["_beamThickness", 1, [0]], ["_beamMaxLength", 0, [0]], ["_ir", false, [true]]];
-				[_type, [_start, _end, _beamColor, _dotColor, _dotSize, _beamThickness, _beamMaxLength, _ir], _duration, [], {}] call KH_fnc_draw3d;
-			};
-
-			case "ICON": {
-				_arguments params [
-					["_texture", "\a3\ui_f\data\IGUI\Cfg\Radar\radar_ca.paa", [""]],
-					["_color", [1, 1, 1, 1], [[]]],
-					["_width", 1, [0]],
-					["_height", 1, [0]],
-					["_angle", 1, [0]],
-					["_text", "", [""]],
-					["_shadow", false, [true, 0]],
-					["_textSize", 1, [0]],
-					["_font", "RobotoCondensedBold", [""]],
-					["_textAlign", "center", [""]],
-					["_drawSideArrows", false, [true]],
-					["_offsetX", 0, [0]],
-					["_offsetY", 0, [0]]
-				];
-
-				[
-					_type, 
-					[_texture, _color, ASLToAGL _end, _width, _height, _angle, _text, _shadow, _textSize, _font, _textAlign, _drawSideArrows, _offsetX, _offsetY], 
-					_duration, 
-					[], 
-					{}
-				] call KH_fnc_draw3d;
-			};
-		};
-	};
-
 	_intersections;
 }
 else {
@@ -188,6 +189,7 @@ else {
 		["_draw", [], [[]]]
 	];
 
+	[_ignored, {isNull _x;}] call KH_fnc_deleteArrayElements;
 	private _allowIgnoredCheck = true;
 	private _ignored1 = objNull;
 	private _ignored2 = objNull;
@@ -314,19 +316,13 @@ else {
 
 		switch _type do {
 			case "LINE": {
-				_arguments params [["_color", [1, 1, 1, 1], [[]]], ["_width", 1, [0]]];
-
-				{
-					[_type, [ASLToAGL _start, ASLToAGL _end, _color, _width], _duration, [], {}] call KH_fnc_draw3d;
-				} forEach _grids;
+				_arguments params [["_color", [1, 1, 1, 1], [[]]], ["_width", 10, [0]]];
+				[_type, [ASLToAGL _start, ASLToAGL _end, _color, _width], _duration, [], {}] call KH_fnc_draw3d;
 			};
 
 			case "LASER": {
 				_arguments params [["_beamColor", [1, 1, 1], [[]]], ["_dotColor", [1, 1, 1], [[]]], ["_dotSize", 1, [0]], ["_beamThickness", 1, [0]], ["_beamMaxLength", 0, [0]], ["_ir", false, [true]]];
-
-				{
-					[_type, [_start, _end, _beamColor, _dotColor, _dotSize, _beamThickness, _beamMaxLength, _ir], _duration, [], {}] call KH_fnc_draw3d;
-				} forEach _grids;
+				[_type, [_start, _end, _beamColor, _dotColor, _dotSize, _beamThickness, _beamMaxLength, _ir], _duration, [], {}] call KH_fnc_draw3d;
 			};
 
 			case "ICON": {
@@ -346,15 +342,13 @@ else {
 					["_offsetY", 0, [0]]
 				];
 
-				{
-					[
-						_type, 
-						[_texture, _color, ASLToAGL _end, _width, _height, _angle, _text, _shadow, _textSize, _font, _textAlign, _drawSideArrows, _offsetX, _offsetY], 
-						_duration, 
-						[], 
-						{}
-					] call KH_fnc_draw3d;
-				} forEach _grids;
+				[
+					_type, 
+					[_texture, _color, ASLToAGL _end, _width, _height, _angle, _text, _shadow, _textSize, _font, _textAlign, _drawSideArrows, _offsetX, _offsetY], 
+					_duration, 
+					[], 
+					{}
+				] call KH_fnc_draw3d;
 			};
 		};
 	};

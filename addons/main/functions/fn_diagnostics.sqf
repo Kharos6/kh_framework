@@ -2,6 +2,10 @@ params [["_state", true, [true]]];
 KH_var_diagnosticsState = _state;
 publicVariable "KH_var_diagnosticsState";
 
+if !(isNil "KH_var_diagnosticsValidatePositionHelper") then {
+	deleteVehicle KH_var_diagnosticsValidatePositionHelper;
+};
+
 if !(isNil "KH_var_diagnosticsDrawHandler") then {
 	removeMissionEventHandler ["Draw3D", KH_var_diagnosticsDrawHandler];
 };
@@ -30,25 +34,98 @@ if _state then {
 	KH_var_diagnosticsAllMarkers = [];
 	KH_var_diagnosticsInformation = [];
 	KH_var_diagnosticsCurrentMarkers = [];
+	KH_var_diagnosticsValidatePositionHelper = createVehicleLocal ["KH_HelperRectangle_1x1x2", [0, 0, 0], [], 0, "CAN_COLLIDE"];
+	KH_var_diagnosticsValidatePositionHelper setPhysicsCollisionFlag false;
 
 	KH_var_diagnosticsDrawHandler = addMissionEventHandler [
 		"Draw3D",
 		{	
 			{
-				_x params ["_output", "_color", "_unit"];
+				_x params ["_unit", "_framerateOutput", "_framerateColor", "_viewDistance"];
 				
 				if (isNull curatorCamera) then {
-					_output = [name _unit, " - ", _output] joinString "";
+					_framerateOutput = [name _unit, " - ", _framerateOutput] joinString "";
+				}
+				else {
+					private _mousePosition3d = ([KH_var_diagnosticsValidatePositionHelper] call KH_fnc_getMouseTarget) select 0;
+					KH_var_diagnosticsValidatePositionHelper setPosASL _mousePosition3d;
+					KH_var_diagnosticsValidatePositionHelper setVectorDirAndUp [[0, 1, 0], [0, 0, 1]];
+
+					private _actualPosition = (([
+						curatorCamera,
+						_mousePosition3d,
+						[KH_var_diagnosticsValidatePositionHelper],
+						true,
+						1,
+						"VIEW",
+						"FIRE",
+						true,
+						[]
+					] call KH_fnc_raycast) select 0) select 0;
+
+					private _intersections = [];
+
+					{
+						private _raycasts = [];
+
+						for "_positionX" from -0.5 to 0.5 step 0.25 do {
+							for "_positionY" from -0.5 to 0.5 step 0.25 do {
+								for "_positionZ" from 0 to 2 step 0.5 do {
+									_raycasts pushBack [
+										eyePos _x,
+										_actualPosition vectorAdd [_positionX, _positionY, _positionZ],
+										[_x, objectParent _x, attachedTo _x] + (attachedObjects _x),
+										true,
+										1,
+										"VIEW",
+										"FIRE",
+										true,
+										["LINE"]
+									]
+								};
+							};
+						};
+
+						_intersections pushBack [_x, [_raycasts] call KH_fnc_raycast];
+					} forEach KH_var_allPlayerUnits;
+
+					{
+						_x params ["_unit", "_currentIntersection"];
+
+						if (_currentIntersection isNotEqualTo []) then {
+							if (((_currentIntersection select 0) select 3) isEqualTo KH_var_diagnosticsValidatePositionHelper) then {
+								private _mousePosition3dAgl = ASLToAGL _mousePosition3d;
+								drawLine3D [ASLToAGL (eyePos _unit), _mousePosition3dAgl, [1, 0, 0, 0.9], 10];
+
+								drawIcon3D [
+									"",
+									[1, 0, 0, 0.66],
+									_mousePosition3dAgl,
+									0,
+									0,
+									0,
+									"X",
+									2,
+									0.03,
+									"PuristaMedium",
+									"center",
+									true
+								];
+
+								break;
+							};
+						};
+					} forEach _intersections;
 				};
 
 				drawIcon3D [
 					"",
-					_color,
+					_framerateColor,
 					_unit modelToWorldVisual [0, 0, 0],
 					1,
 					2,
 					0,
-					_output,
+					_framerateOutput,
 					2,
 					0.03,
 					"PuristaMedium",
@@ -65,12 +142,11 @@ if _state then {
 			KH_var_diagnosticsInformation resize 0;
 
 			{
-				private _currentInformation = [];
 				private _framerate = _x getVariable ["KH_var_diagnosticsFramerate", 1];
-				private _output = ["FPS: ", _framerate] joinString "";
+				private _framerateOutput = ["FPS: ", _framerate] joinString "";
 				private _unit = _x;
 				
-				private _color = switch true do {
+				private _framerateColor = switch true do {
 					case ((_framerate < 30) && (_framerate >= 20)): {
 						[1, 0.87, 0.12, 0.66];
 					};
@@ -88,10 +164,7 @@ if _state then {
 					};
 				};
 
-				_currentInformation pushBack _output;
-				_currentInformation pushBack _color;
-				_currentInformation pushBack _unit;
-				KH_var_diagnosticsInformation pushBack _currentInformation;
+				KH_var_diagnosticsInformation pushBack [_unit, _framerateOutput, _framerateColor, _x getVariable ["KH_var_diagnosticsViewDistance", 1]];
 			} forEach (KH_var_allPlayerUnits + KH_var_allHeadlessUnits);
 
 			private _worldX = (worldSize * 0.0033);

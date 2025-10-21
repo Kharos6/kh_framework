@@ -10,7 +10,7 @@ switch _type do {
             ["_start", [], [[], objNull]], 
             ["_end", [], [[], objNull]], 
             ["_color", [1, 1, 1, 1], [[]]], 
-            ["_width", 1, [0]]
+            ["_width", 10, [0]]
         ];
 
         if (_duration isEqualTo true) then {

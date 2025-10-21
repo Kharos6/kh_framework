@@ -12,7 +12,7 @@ if (isNull _camera) then {
                 _allPositions pushBack [
                     _cameraPosition, 
                     _cameraPosition vectorAdd ((screenToWorldDirection [_positionX, _positionY]) vectorMultiply viewDistance), 
-                    [KH_var_playerUnit] + (attachedObjects KH_var_playerUnit),
+                    [KH_var_playerUnit, objectParent KH_var_playerUnit, attachedTo KH_var_playerUnit] + (attachedObjects KH_var_playerUnit),
                     true, 
                     1, 
                     "VIEW",
@@ -53,7 +53,7 @@ else {
                 _allPositions pushBack [
                     _cameraPosition, 
                     _cameraPosition vectorAdd ((_camera screenToWorldDirection [_positionX, _positionY]) vectorMultiply viewDistance), 
-                    [KH_var_playerUnit] + (attachedObjects KH_var_playerUnit),
+                    [KH_var_playerUnit, objectParent KH_var_playerUnit, attachedTo KH_var_playerUnit] + (attachedObjects KH_var_playerUnit),
                     true, 
                     1, 
                     "VIEW",

@@ -186,7 +186,6 @@ class CfgVehicles
 	#include "\x\kh\addons\main\vehicles\modules\dynamicDisguise.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\dynamicDisguiseEquipment.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\endMission.hpp"
-	#include "\x\kh\addons\main\vehicles\modules\entitySpawner.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\equipableObject.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\fultonExtract.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\teleporter.hpp"

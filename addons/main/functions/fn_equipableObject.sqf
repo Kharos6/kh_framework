@@ -5,7 +5,7 @@ params [
 	["_position", [], [[]]], 
 	["_rotation", [], [[], objNull]], 
 	["_scale", 1, [0]], 
-	["_mass", 1, [0]], 
+	["_disableCollision", true, [false]], 
 	["_hideInVehicles", true, [true]], 
 	["_toggleEquip", true, [true]], 
 	["_exclusive", true, [true]], 
@@ -35,11 +35,11 @@ if (isNull _unit) then {
 			{},
 			{
 				private _localArguments = param [3];
-				(_localArguments select [1]) params ["_bone", "_position", "_rotation", "_scale", "_mass", "_hideInVehicles", "_toggleEquip", "_exclusive", "_objectName"];
+				(_localArguments select [1]) params ["_bone", "_position", "_rotation", "_scale", "_disableCollision", "_hideInVehicles", "_toggleEquip", "_exclusive", "_objectName"];
 				_target setVariable ["KH_var_previouslyEquipped", true, true];
 
 				[
-					[_caller, _target, _bone, _position, _rotation, _scale, _mass, _hideInVehicles, _toggleEquip, _exclusive, _objectName], 
+					[_caller, _target, _bone, _position, _rotation, _scale, _disableCollision, _hideInVehicles, _toggleEquip, _exclusive, _objectName], 
 					"KH_fnc_equipableObject", 
 					"SERVER", 
 					true,
@@ -60,6 +60,17 @@ if (isNull _unit) then {
 						private _object = _localArguments param [0];
 						["KH_eve_equipableObjectExchanged", [_caller, _object, false]] call CBA_fnc_globalEvent;
 						detach _object;
+
+						[
+							[_object],
+							{
+								params ["_object"];
+								_object setPhysicsCollisionFlag true;
+							},
+							"GLOBAL",
+							true,
+							["JIP", _object, false, ["KH_var_equipableObjectAttributes_", [_object, true] call KH_fnc_getEntityVariableName] joinString ""]
+						] call KH_fnc_execute;
 					},
 					{},
 					_localArguments,
@@ -122,11 +133,18 @@ else {
 		_object attachTo [_unit, _position];
 	};
 
+	_object setObjectScale _scale;
+
 	if (_rotation isEqualType objNull) then {
-		_object setVectorDirAndUp [_rotation select 0, _rotation select 1];
+		_object setVectorDirAndUp [vectorDir _rotation, vectorUp _rotation];
 	}
 	else {
-		_object setVectorDirAndUp _rotation;
+		if (_rotation isEqualTypeAll []) then {
+			_object setVectorDirAndUp _rotation;
+		}
+		else {
+			_object setRotationEuler _rotation;
+		};
 	};
 	
 	[
@@ -145,7 +163,7 @@ else {
 			};
 		},
 		true,
-		0.1,
+		0,
 		false
 	] call KH_fnc_execute;
 
@@ -165,6 +183,17 @@ else {
 					private _unit = _localArguments param [0];
 					["KH_eve_equipableObjectExchanged", [_unit, _target, false]] call CBA_fnc_globalEvent;
 					detach _target;
+
+					[
+						[_target],
+						{
+							params ["_target"];
+							_target setPhysicsCollisionFlag true;
+						},
+						"GLOBAL",
+						true,
+						["JIP", _target, false, ["KH_var_equipableObjectAttributes_", [_target, true] call KH_fnc_getEntityVariableName] joinString ""]
+					] call KH_fnc_execute;
 				},
 				{},
 				_localArguments,
@@ -196,10 +225,10 @@ else {
 				{},
 				{
 					private _localArguments = param [3];
-					(_localArguments select [2]) params ["_bone", "_position", "_rotation", "_scale", "_mass", "_hideInVehicles", "_toggleEquip", "_exclusive", "_objectName"];
+					(_localArguments select [2]) params ["_bone", "_position", "_rotation", "_scale", "_disableCollision", "_hideInVehicles", "_toggleEquip", "_exclusive", "_objectName"];
 
 					[
-						[_caller, _target, _bone, _position, _rotation, _scale, _mass, _hideInVehicles, _toggleEquip, _exclusive, _objectName], 
+						[_caller, _target, _bone, _position, _rotation, _scale, _disableCollision, _hideInVehicles, _toggleEquip, _exclusive, _objectName], 
 						"KH_fnc_equipableObject", 
 						"SERVER", 
 						true,
@@ -220,6 +249,17 @@ else {
 							private _object = _localArguments param [1];
 							["KH_eve_equipableObjectExchanged", [_caller, _object, false]] call CBA_fnc_globalEvent;
 							detach _object;
+
+							[
+								[_object],
+								{
+									params ["_object"];
+									_object setPhysicsCollisionFlag true;
+								},
+								"GLOBAL",
+								true,
+								["JIP", _object, false, ["KH_var_equipableObjectAttributes_", [_object, true] call KH_fnc_getEntityVariableName] joinString ""]
+							] call KH_fnc_execute;
 						},
 						{},
 						_localArguments,
@@ -260,15 +300,18 @@ else {
 		};
 		
 		[
-			[_object, _scale, _mass],
+			[_object, _scale, _disableCollision],
 			{
-				params ["_object", "_scale", "_mass"];
+				params ["_object", "_scale", "_disableCollision"];
 				_object setObjectScale _scale;
-				_object setMass _mass;
+
+				if _disableCollision then {
+					_object setPhysicsCollisionFlag false;
+				};
 			},
 			"GLOBAL",
 			true,
-			["JIP", _object, false, ""]
+			["JIP", _object, false, ["KH_var_equipableObjectAttributes_", [_object, true] call KH_fnc_getEntityVariableName] joinString ""]
 		] call KH_fnc_execute;
 		
 		if _hideInVehicles then {	
@@ -285,7 +328,7 @@ else {
 					};
 				},
 				true,
-				0.1,
+				0,
 				false
 			] call KH_fnc_execute;
 		};

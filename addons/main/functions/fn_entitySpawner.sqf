@@ -7,7 +7,9 @@ params [
 	["_condition", {}, [{}]], 
 	["_init", {}, [{}]], 
 	["_type", [], [[]]],
-	["_interval", 1, [0]]
+	["_interval", 1, [0]],
+	["_validatePosition", false, [true]],
+	["_minimumDistance", 0, [0]]
 ];
 
 private _spawnerCount = generateUid;
@@ -24,224 +26,401 @@ private _entityHandler = [
 ] call KH_fnc_addEventHandler;
 
 private _spawnHandler = [
-	[_entityTypes, _transforms, _radiuses, _amount, _maximum, _condition, _init, _type, _spawnerCount],
+	[_entityTypes, _transforms, _radiuses, _amount, _maximum, _condition, _init, _type, _validatePosition, _minimumDistance, _spawnerCount],
 	{
-		params ["_entityTypes", "_transforms", "_radiuses", "_amount", "_maximum", "_condition", "_init", "_type", "_spawnerCount"];
+		params ["_entityTypes", "_transforms", "_radiuses", "_amount", "_maximum", "_condition", "_init", "_type", "_validatePosition", "_minimumDistance", "_spawnerCount"];
 
 		if ((missionNamespace getVariable [_spawnerCount, 0]) < _maximum) then {
-			if ([missionNamespace getVariable [_spawnerCount, 0]] call _condition) then {
-				private _spawnedEntities = [];
-				private _entityType = _type param [0, "UNIT", [""]];
+			private _spawnedEntities = [];
+			private _entityType = _type param [0, "UNIT", [""]];
 
-				switch _entityType do {
-					case "UNIT": {
-						(_type select [1]) params [["_placementMode", "CAN_COLLIDE", [""]], ["_side", sideUnknown, [sideUnknown]], ["_shareGroup", true, [true]]];
-						private _group = grpNull;
+			switch _entityType do {
+				case "UNIT": {
+					(_type select [1]) params [["_placementMode", "CAN_COLLIDE", [""]], ["_side", sideUnknown, [sideUnknown]], ["_shareGroup", true, [true]]];
+					private _group = grpNull;
 
-						if _shareGroup then {
+					if _shareGroup then {
+						_group = createGroup [_side, true];
+					};
+
+					for "_i" from 1 to _amount do {
+						if !_shareGroup then {
 							_group = createGroup [_side, true];
 						};
 
-						for "_i" from 1 to _amount do {
-							if !_shareGroup then {
-								_group = createGroup [_side, true];
-							};
+						private _chosenTransforms = selectRandom _transforms;
 
-							private _chosenTransforms = selectRandom _transforms;
+						private _position = if ((_chosenTransforms select 0) isEqualType objNull) then {
+							(_chosenTransforms select 0) modelToWorld [0, 0, 0];
+						}
+						else {
+							_chosenTransforms select 0;
+						};
 
-							private _position = if ((_chosenTransforms select 0) isEqualType objNull) then {
-								_position = (_chosenTransforms select 0) modelToWorld [0, 0, 0];
-							}
-							else {
-								_position = _chosenTransforms select 0;
-							};
+						if !([_chosenTransforms, missionNamespace getVariable [_spawnerCount, 0]] call _condition) then {
+							continue;
+						};
 
-							private _rotation = if ((_chosenTransforms select 1) isEqualType objNull) then {
+						private _spawnValid = true;
+
+						if _validatePosition then {
+							{
+								if ([_x, AGLToASL _position, _x, 1, _minimumDistance, 0, objNull] call KH_fnc_getPositionVisibility) then {
+									_spawnValid = false;
+									break;
+								};
+							} forEach KH_var_allPlayerUnits;
+						};
+
+						if !_spawnValid then {
+							continue;
+						};
+
+						private _rotation = if ((count _chosenTransforms) > 1) then {
+							if ((_chosenTransforms select 1) isEqualType objNull) then {
 								private _chosenEntity = _chosenTransforms select 1;
-								_rotation = [vectorDir _chosenEntity, vectorUp _chosenEntity];
+								[vectorDir _chosenEntity, vectorUp _chosenEntity];
 							}
 							else {
-								private _vectors = _chosenTransforms select 1;
-								_rotation = [_vectors select 0, _vectors select 1];
+								if ((_chosenTransforms select 1) isEqualTypeAll []) then {
+									private _vectors = _chosenTransforms select 1;
+									[_vectors select 0, _vectors select 1];
+								}
+								else {
+									_chosenTransforms select 1;
+								};
 							};
-							
-							private _chosenRadius = _radiuses select (_transforms find _chosenTransforms);
-							_position vectorAdd [random (_chosenRadius select 0), random (_chosenRadius select 1), random (_chosenRadius select 2)];
-							private _unit = _group createUnit [selectRandom _entityTypes, _position, [], 0, _placementMode];
+						}
+						else {
+							[[0, 1, 0], [0, 0, 1]];
+						};
+						
+						private _chosenRadius = _radiuses select (_transforms find _chosenTransforms);
+						_position vectorAdd [random (_chosenRadius select 0), random (_chosenRadius select 1), random (_chosenRadius select 2)];
+						private _unit = _group createUnit [selectRandom _entityTypes, _position, [], 0, _placementMode];
+						
+						if (_rotation isEqualTypeAll []) then {
 							_unit setVectorDirAndUp _rotation;
-							[_unit, _chosenTransforms, _position] call _init;
-							_spawnedEntities pushBack _unit;
+						}
+						else {
+							_unit setRotationEuler _rotation;
 						};
-					};
 
-					case "AGENT": {
-						private _placementMode = _type param [1, "CAN_COLLIDE", [""]];
-
-						for "_i" from 1 to _amount do {
-							private _chosenTransforms = selectRandom _transforms;
-
-							private _position = if ((_chosenTransforms select 0) isEqualType objNull) then {
-								_position = (_chosenTransforms select 0) modelToWorld [0, 0, 0];
-							}
-							else {
-								_position = _chosenTransforms select 0;
-							};
-
-							private _rotation = if ((_chosenTransforms select 1) isEqualType objNull) then {
-								private _chosenEntity = _chosenTransforms select 1;
-								_rotation = [vectorDir _chosenEntity, vectorUp _chosenEntity];
-							}
-							else {
-								private _vectors = _chosenTransforms select 1;
-								_rotation = [_vectors select 0, _vectors select 1];
-							};
-
-							private _chosenRadius = _radiuses select (_transforms find _chosenTransforms);
-							_position vectorAdd [random (_chosenRadius select 0), random (_chosenRadius select 1), random (_chosenRadius select 2)];
-							private _agent = createAgent [selectRandom _entityTypes, _position, [], 0, _placementMode];
-							_agent setVectorDirAndUp _rotation;
-							[_agent, _chosenTransforms, _position] call _init;
-							_spawnedEntities pushBack _agent;
-						};
-					};
-
-					case "OBJECT": {
-						(_type select [1]) params [["_placementMode", "CAN_COLLIDE", [""]], ["_local", false, [true]]];
-
-						for "_i" from 1 to _amount do {
-							private _chosenTransforms = selectRandom _transforms;
-
-							private _position = if ((_chosenTransforms select 0) isEqualType objNull) then {
-								_position = (_chosenTransforms select 0) modelToWorld [0, 0, 0];
-							}
-							else {
-								_position = _chosenTransforms select 0;
-							};
-
-							private _rotation = if ((_chosenTransforms select 1) isEqualType objNull) then {
-								private _chosenEntity = _chosenTransforms select 1;
-								_rotation = [vectorDir _chosenEntity, vectorUp _chosenEntity];
-							}
-							else {
-								private _vectors = _chosenTransforms select 1;
-								_rotation = [_vectors select 0, _vectors select 1];
-							};
-
-							private _chosenRadius = _radiuses select (_transforms find _chosenTransforms);
-							_position vectorAdd [random (_chosenRadius select 0), random (_chosenRadius select 1), random (_chosenRadius select 2)];
-							private _object = objNull;
-							
-							if !_local then {
-								_object = createVehicle [selectRandom _entityTypes, _position, [], 0, _placementMode];
-							}
-							else {
-								_object = createVehicleLocal [selectRandom _entityTypes, _position, [], 0, _placementMode];
-							};
-
-							_object setVectorDirAndUp _rotation;
-							[_object, _chosenTransforms, _position] call _init;
-							_spawnedEntities pushBack _object;
-						};
-					};
-
-					case "SIMPLE_OBJECT": {
-						private _local = _type param [1, false, [true]];
-
-						for "_i" from 1 to _amount do {
-							private _chosenTransforms = selectRandom _transforms;
-
-							private _position = if ((_chosenTransforms select 0) isEqualType objNull) then {
-								_position = (_chosenTransforms select 0) modelToWorld [0, 0, 0];
-							}
-							else {
-								_position = _chosenTransforms select 0;
-							};
-
-							private _rotation = if ((_chosenTransforms select 1) isEqualType objNull) then {
-								private _chosenEntity = _chosenTransforms select 1;
-								_rotation = [vectorDir _chosenEntity, vectorUp _chosenEntity];
-							}
-							else {
-								private _vectors = _chosenTransforms select 1;
-								_rotation = [_vectors select 0, _vectors select 1];
-							};
-
-							private _chosenRadius = _radiuses select (_transforms find _chosenTransforms);
-							_position vectorAdd [random (_chosenRadius select 0), random (_chosenRadius select 1), random (_chosenRadius select 2)];
-							private _object = createSimpleObject [selectRandom _entityTypes, _position, _local];
-							_object setVectorDirAndUp _rotation;
-							[_object, _chosenTransforms, _position] call _init;
-							_spawnedEntities pushBack _object;
-						};
-					};
-
-					case "VEHICLE": {
-						private _placementMode = _type param [1, "CAN_COLLIDE", [""]];
-
-						for "_i" from 1 to _amount do {
-							private _chosenTransforms = selectRandom _transforms;
-
-							private _position = if ((_chosenTransforms select 0) isEqualType objNull) then {
-								_position = (_chosenTransforms select 0) modelToWorld [0, 0, 0];
-							}
-							else {
-								_position = _chosenTransforms select 0;
-							};
-
-							private _rotation = if ((_chosenTransforms select 1) isEqualType objNull) then {
-								private _chosenEntity = _chosenTransforms select 1;
-								_rotation = [vectorDir _chosenEntity, vectorUp _chosenEntity];
-							}
-							else {
-								private _vectors = _chosenTransforms select 1;
-								_rotation = [_vectors select 0, _vectors select 1];
-							};
-
-							private _chosenRadius = _radiuses select (_transforms find _chosenTransforms);
-							_position vectorAdd [random (_chosenRadius select 0), random (_chosenRadius select 1), random (_chosenRadius select 2)];
-							private _vehicle = createVehicle [selectRandom _entityTypes, _position, [], 0, _placementMode];
-							_vehicle setVectorDirAndUp _rotation;
-							createVehicleCrew _vehicle;
-							[_vehicle, _chosenTransforms, _position] call _init;
-							_spawnedEntities pushBack _vehicle;
-						};
+						[_unit, _chosenTransforms, _position] call _init;
+						_spawnedEntities pushBack _unit;
 					};
 				};
 
-				missionNamespace setVariable [_spawnerCount, (missionNamespace getVariable [_spawnerCount, 0]) + (count _spawnedEntities)];
+				case "AGENT": {
+					private _placementMode = _type param [1, "CAN_COLLIDE", [""]];
 
-				{
-					[
-						["ENTITY", _x, "REMOTE"],
-						"Killed",
-						[],
-						{
-							params ["_entity"];
-							["KH_eve_spawnedEntityTerminated", []] call CBA_fnc_localEvent;
-							[_handlerId] call KH_fnc_removeHandler;
+					for "_i" from 1 to _amount do {
+						private _chosenTransforms = selectRandom _transforms;
+
+						private _position = if ((_chosenTransforms select 0) isEqualType objNull) then {
+							(_chosenTransforms select 0) modelToWorld [0, 0, 0];
 						}
-					] call KH_fnc_addEventHandler;
+						else {
+							_chosenTransforms select 0;
+						};
 
-					[
-						["ENTITY", _x, "REMOTE"],
-						"Deleted",
-						[],
-						{
-							params ["_entity"];
+						if !([_chosenTransforms, missionNamespace getVariable [_spawnerCount, 0]] call _condition) then {
+							continue;
+						};
 
-							if (alive _entity) then {
-								["KH_eve_spawnedEntityTerminated", []] call CBA_fnc_localEvent;
+						private _spawnValid = true;
+
+						if _validatePosition then {
+							{
+								if ([_x, AGLToASL _position, _x, 1, _minimumDistance, 0, objNull] call KH_fnc_getPositionVisibility) then {
+									_spawnValid = false;
+									break;
+								};
+							} forEach KH_var_allPlayerUnits;
+						};
+
+						if !_spawnValid then {
+							continue;
+						};
+
+						private _rotation = if ((count _chosenTransforms) > 1) then {
+							if ((_chosenTransforms select 1) isEqualType objNull) then {
+								private _chosenEntity = _chosenTransforms select 1;
+								[vectorDir _chosenEntity, vectorUp _chosenEntity];
+							}
+							else {
+								if ((_chosenTransforms select 1) isEqualTypeAll []) then {
+									private _vectors = _chosenTransforms select 1;
+									[_vectors select 0, _vectors select 1];
+								}
+								else {
+									_chosenTransforms select 1;
+								};
 							};
-
-							[_handlerId] call KH_fnc_removeHandler;
 						}
-					] call KH_fnc_addEventHandler;
-				} forEach _spawnedEntities;
+						else {
+							[[0, 1, 0], [0, 0, 1]];
+						};
 
-				{
-					_x addCuratorEditableObjects [_spawnedEntities, true];
-				} forEach allCurators;
+						private _chosenRadius = _radiuses select (_transforms find _chosenTransforms);
+						_position vectorAdd [random (_chosenRadius select 0), random (_chosenRadius select 1), random (_chosenRadius select 2)];
+						private _agent = createAgent [selectRandom _entityTypes, _position, [], 0, _placementMode];
+
+						if (_rotation isEqualTypeAll []) then {
+							_agent setVectorDirAndUp _rotation;
+						}
+						else {
+							_agent setRotationEuler _rotation;
+						};
+
+						[_agent, _chosenTransforms, _position] call _init;
+						_spawnedEntities pushBack _agent;
+					};
+				};
+
+				case "OBJECT": {
+					(_type select [1]) params [["_placementMode", "CAN_COLLIDE", [""]], ["_local", false, [true]]];
+
+					for "_i" from 1 to _amount do {
+						private _chosenTransforms = selectRandom _transforms;
+
+						private _position = if ((_chosenTransforms select 0) isEqualType objNull) then {
+							(_chosenTransforms select 0) modelToWorld [0, 0, 0];
+						}
+						else {
+							_chosenTransforms select 0;
+						};
+
+						if !([_chosenTransforms, missionNamespace getVariable [_spawnerCount, 0]] call _condition) then {
+							continue;
+						};
+
+						private _spawnValid = true;
+
+						if _validatePosition then {
+							{
+								if ([_x, AGLToASL _position, _x, 1, _minimumDistance, 0, objNull] call KH_fnc_getPositionVisibility) then {
+									_spawnValid = false;
+									break;
+								};
+							} forEach KH_var_allPlayerUnits;
+						};
+
+						if !_spawnValid then {
+							continue;
+						};
+
+						private _rotation = if ((count _chosenTransforms) > 1) then {
+							if ((_chosenTransforms select 1) isEqualType objNull) then {
+								private _chosenEntity = _chosenTransforms select 1;
+								[vectorDir _chosenEntity, vectorUp _chosenEntity];
+							}
+							else {
+								if ((_chosenTransforms select 1) isEqualTypeAll []) then {
+									private _vectors = _chosenTransforms select 1;
+									[_vectors select 0, _vectors select 1];
+								}
+								else {
+									_chosenTransforms select 1;
+								};
+							};
+						}
+						else {
+							[[0, 1, 0], [0, 0, 1]];
+						};
+
+						private _chosenRadius = _radiuses select (_transforms find _chosenTransforms);
+						_position vectorAdd [random (_chosenRadius select 0), random (_chosenRadius select 1), random (_chosenRadius select 2)];
+						private _object = objNull;
+						
+						if !_local then {
+							_object = createVehicle [selectRandom _entityTypes, _position, [], 0, _placementMode];
+						}
+						else {
+							_object = createVehicleLocal [selectRandom _entityTypes, _position, [], 0, _placementMode];
+						};
+
+						if (_rotation isEqualTypeAll []) then {
+							_object setVectorDirAndUp _rotation;
+						}
+						else {
+							_object setRotationEuler _rotation;
+						};
+
+						[_object, _chosenTransforms, _position] call _init;
+						_spawnedEntities pushBack _object;
+					};
+				};
+
+				case "SIMPLE_OBJECT": {
+					private _local = _type param [1, false, [true]];
+
+					for "_i" from 1 to _amount do {
+						private _chosenTransforms = selectRandom _transforms;
+
+						private _position = if ((_chosenTransforms select 0) isEqualType objNull) then {
+							getPosASL (_chosenTransforms select 0);
+						}
+						else {
+							_chosenTransforms select 0;
+						};
+
+						if !([_chosenTransforms, missionNamespace getVariable [_spawnerCount, 0]] call _condition) then {
+							continue;
+						};
+
+						private _spawnValid = true;
+
+						if _validatePosition then {
+							{
+								if ([_x, _position, _x, 1, _minimumDistance, 0, objNull] call KH_fnc_getPositionVisibility) then {
+									_spawnValid = false;
+									break;
+								};
+							} forEach KH_var_allPlayerUnits;
+						};
+
+						if !_spawnValid then {
+							continue;
+						};
+
+						private _rotation = if ((count _chosenTransforms) > 1) then {
+							if ((_chosenTransforms select 1) isEqualType objNull) then {
+								private _chosenEntity = _chosenTransforms select 1;
+								[vectorDir _chosenEntity, vectorUp _chosenEntity];
+							}
+							else {
+								if ((_chosenTransforms select 1) isEqualTypeAll []) then {
+									private _vectors = _chosenTransforms select 1;
+									[_vectors select 0, _vectors select 1];
+								}
+								else {
+									_chosenTransforms select 1;
+								};
+							};
+						}
+						else {
+							[[0, 1, 0], [0, 0, 1]];
+						};
+
+						private _chosenRadius = _radiuses select (_transforms find _chosenTransforms);
+						_position vectorAdd [random (_chosenRadius select 0), random (_chosenRadius select 1), random (_chosenRadius select 2)];
+						private _object = createSimpleObject [selectRandom _entityTypes, _position, _local];
+
+						if (_rotation isEqualTypeAll []) then {
+							_object setVectorDirAndUp _rotation;
+						}
+						else {
+							_object setRotationEuler _rotation;
+						};
+
+						[_object, _chosenTransforms, _position] call _init;
+						_spawnedEntities pushBack _object;
+					};
+				};
+
+				case "VEHICLE": {
+					private _placementMode = _type param [1, "CAN_COLLIDE", [""]];
+
+					for "_i" from 1 to _amount do {
+						private _chosenTransforms = selectRandom _transforms;
+
+						private _position = if ((_chosenTransforms select 0) isEqualType objNull) then {
+							(_chosenTransforms select 0) modelToWorld [0, 0, 0];
+						}
+						else {
+							_chosenTransforms select 0;
+						};
+
+						if !([_chosenTransforms, missionNamespace getVariable [_spawnerCount, 0]] call _condition) then {
+							continue;
+						};
+
+						private _spawnValid = true;
+
+						if _validatePosition then {
+							{
+								if ([_x, AGLToASL _position, _x, 1, _minimumDistance, 0, objNull] call KH_fnc_getPositionVisibility) then {
+									_spawnValid = false;
+									break;
+								};
+							} forEach KH_var_allPlayerUnits;
+						};
+
+						if !_spawnValid then {
+							continue;
+						};
+
+						private _rotation = if ((count _chosenTransforms) > 1) then {
+							if ((_chosenTransforms select 1) isEqualType objNull) then {
+								private _chosenEntity = _chosenTransforms select 1;
+								[vectorDir _chosenEntity, vectorUp _chosenEntity];
+							}
+							else {
+								if ((_chosenTransforms select 1) isEqualTypeAll []) then {
+									private _vectors = _chosenTransforms select 1;
+									[_vectors select 0, _vectors select 1];
+								}
+								else {
+									_chosenTransforms select 1;
+								};
+							};
+						}
+						else {
+							[[0, 1, 0], [0, 0, 1]];
+						};
+
+						private _chosenRadius = _radiuses select (_transforms find _chosenTransforms);
+						_position vectorAdd [random (_chosenRadius select 0), random (_chosenRadius select 1), random (_chosenRadius select 2)];
+						private _vehicle = createVehicle [selectRandom _entityTypes, _position, [], 0, _placementMode];
+
+						if (_rotation isEqualTypeAll []) then {
+							_vehicle setVectorDirAndUp _rotation;
+						}
+						else {
+							_vehicle setRotationEuler _rotation;
+						};
+
+						createVehicleCrew _vehicle;
+						[_vehicle, _chosenTransforms, _position] call _init;
+						_spawnedEntities pushBack _vehicle;
+					};
+				};
 			};
+
+			missionNamespace setVariable [_spawnerCount, (missionNamespace getVariable [_spawnerCount, 0]) + (count _spawnedEntities)];
+
+			{
+				[
+					["ENTITY", _x, "REMOTE"],
+					"Killed",
+					[],
+					{
+						params ["_entity"];
+						["KH_eve_spawnedEntityTerminated", []] call CBA_fnc_localEvent;
+						[_handlerId] call KH_fnc_removeHandler;
+					}
+				] call KH_fnc_addEventHandler;
+
+				[
+					["ENTITY", _x, "REMOTE"],
+					"Deleted",
+					[],
+					{
+						params ["_entity"];
+
+						if (alive _entity) then {
+							["KH_eve_spawnedEntityTerminated", []] call CBA_fnc_localEvent;
+						};
+
+						[_handlerId] call KH_fnc_removeHandler;
+					}
+				] call KH_fnc_addEventHandler;
+			} forEach _spawnedEntities;
+
+			{
+				_x addCuratorEditableObjects [_spawnedEntities, true];
+			} forEach allCurators;
 		};
 	},
 	true,

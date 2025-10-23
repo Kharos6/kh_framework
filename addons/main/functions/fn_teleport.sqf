@@ -55,7 +55,14 @@ if (_transition isNotEqualTo 0) then {
 					{
 						params ["_entity", "_position", "_rotation", "_init"];
 						_entity setPosATL _position;
-						_entity setVectorDirAndUp _rotation;
+
+						if (_rotation isEqualTypeAll []) then {
+							_entity setVectorDirAndUp _rotation;
+						}
+						else {
+							_entity setRotationEuler _rotation;
+						};
+
 						[_entity] call _init;
 					},
 					true,
@@ -75,7 +82,14 @@ if (_transition isNotEqualTo 0) then {
 			}
 			else {
 				_entity setPosATL _position;
-				_entity setVectorDirAndUp _rotation;
+
+				if (_rotation isEqualTypeAll []) then {
+					_entity setVectorDirAndUp _rotation;
+				}
+				else {
+					_entity setRotationEuler _rotation;
+				};
+
 				[_entity] call _init;
 			};
 		},
@@ -93,7 +107,14 @@ else {
 			{
 				params ["_entity", "_position", "_rotation", "_init"];
 				_entity setPosATL _position;
-				_entity setVectorDirAndUp _rotation;
+
+				if (_rotation isEqualTypeAll []) then {
+					_entity setVectorDirAndUp _rotation;
+				}
+				else {
+					_entity setRotationEuler _rotation;
+				};
+
 				[_entity] call _init;
 			},
 			_entity,
@@ -118,7 +139,13 @@ else {
 			[_entity, _rotation], 
 			{
 				params ["_entity", "_rotation"];
-				_entity setVectorDirAndUp _rotation;
+				
+				if (_rotation isEqualTypeAll []) then {
+					_entity setVectorDirAndUp _rotation;
+				}
+				else {
+					_entity setRotationEuler _rotation;
+				};
 			}, 
 			_entity,
 			true, 

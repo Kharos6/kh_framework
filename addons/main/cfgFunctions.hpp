@@ -67,7 +67,6 @@ class CfgFunctions
 			class moduleDynamicDisguise {};
 			class moduleDynamicDisguiseEquipment {};
 			class moduleEndMission {};
-			class moduleEntitySpawner {};
 			class moduleEquipableObject {};
 			class moduleFultonExtract {};
 			class moduleTeleporter {};

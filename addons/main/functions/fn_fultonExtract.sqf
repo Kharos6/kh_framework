@@ -9,6 +9,7 @@ params [
 ];
 
 _height = _height min 100;
+_distance = _distance max 10;
 private _fultonEvent = generateUid;
 private _fultonId = generateUid;
 missionNamespace setVariable [fultonId, false];
@@ -339,7 +340,7 @@ missionNamespace setVariable [fultonId, false];
 						
 						if !(isNull _mainFulton) then {
 							if (_vehicles isEqualTo []) then {
-								_vehicles = _mainFulton nearEntities ["Plane", _distance + 100];
+								_vehicles = _mainFulton nearEntities ["Plane", _distance];
 							}
 							else {
 								private _vehiclesNull = true;
@@ -352,12 +353,12 @@ missionNamespace setVariable [fultonId, false];
 								} forEach _vehicles;
 
 								if _vehiclesNull then {
-									_vehicles = _mainFulton nearEntities ["Plane", _distance + 100];
+									_vehicles = _mainFulton nearEntities ["Plane", _distance];
 								};
 							};
 
 							{
-								if ((_x distance _mainFulton) < _distance) then {
+								if ((_x distance _mainFulton) <= _distance) then {
 									private _vehicle = _x;
 									
 									{

@@ -1,5 +1,6 @@
 class KH_ModuleEndMission: Module_F
 {
+	author = "Kharos";
 	scope = 2;
 	scopeCurator = 1;
 	canSetArea = 0;

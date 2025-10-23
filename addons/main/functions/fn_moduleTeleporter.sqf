@@ -19,10 +19,10 @@ isNil {
                     [
                         _teleporter,
                         _name,
-                        '\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_loadVehicle_ca.paa',
-                        '\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_loadVehicle_ca.paa',
-                        '((_this distance _target) < 4)',
-                        '((_caller distance _target) < 4)',
+                        "\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_loadVehicle_ca.paa",
+                        "\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_loadVehicle_ca.paa",
+                        "((_this distance _target) < 4)",
+                        "((_caller distance _target) < 4)",
                         {},
                         {},
                         {

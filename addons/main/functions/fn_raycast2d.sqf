@@ -1,6 +1,6 @@
 params [
 	["_position", [0, 0, 0], [[], objNull]],
-    ["_vectorDirAndUp", [[0, 1, 0], [0, 0, 1]], [[], objNull]],
+    ["_rotation", [[0, 1, 0], [0, 0, 1]], [[], objNull]],
     ["_length", 1, [0]],
     ["_angle", 0, [0]],
     ["_cone", 0, [0]],
@@ -39,11 +39,11 @@ private _grids = [];
 private _intersectionCheckCount = 0;
 private _maxResultsOverride = [_maxResults, -1] select _allowIgnoredCheck;
 
-if (_vectorDirAndUp isEqualType objNull) then {
-    _vectorDirAndUp = [vectorDir _vectorDirAndUp, vectorUp _vectorDirAndUp];
+if (_rotation isEqualType objNull) then {
+    _rotation = [vectorDir _rotation, vectorUp _rotation];
 };
 
-_vectorDirAndUp params [["_vectorDir", [0, 1, 0], [[]]], ["_vectorUp", [0, 0, 1], [[]]]];
+_rotation params [["_vectorDir", [0, 1, 0], [[]]], ["_vectorUp", [0, 0, 1], [[]]]];
 
 if (_cone isEqualTo 0) then {
     private _right = vectorNormalized (_vectorDir vectorCrossProduct _vectorUp);

@@ -57,7 +57,7 @@ if _state then {
 						KH_var_diagnosticsValidatePositionHelper setVectorDirAndUp [[0, 1, 0], [0, 0, 1]];
 						private _raycasts = [];
 
-						if ([_playerUnit, _mousePosition3d, _cameraDirection, 1, _viewDistance, false] call KH_fnc_getPositionVisibility) then {
+						if ([_playerUnit, _mousePosition3d, _cameraDirection, 1, 0, _viewDistance, false] call KH_fnc_getPositionVisibility) then {
 							for "_positionX" from -0.5 to 0.5 step 0.25 do {
 								for "_positionY" from -0.5 to 0.5 step 0.25 do {
 									for "_positionZ" from 0 to 2 step 0.5 do {

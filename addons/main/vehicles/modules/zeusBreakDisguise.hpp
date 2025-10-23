@@ -1,5 +1,6 @@
 class KH_ZeusModuleBreakDisguise: Module_F
 {
+	author = "Kharos";
 	scope = 1;
 	scopeCurator = 2;
 	canSetArea = 0;

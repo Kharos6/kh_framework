@@ -1,5 +1,6 @@
 class KH_ModuleAssignTerminal: Module_F
 {
+	author = "Kharos";
 	scope = 2;
 	scopeCurator = 1;
 	canSetArea = 0;
@@ -13,7 +14,7 @@ class KH_ModuleAssignTerminal: Module_F
 	isTriggerActivated = 0;
 	isDisposable = 1;
 	is3DEN = 0;
-	icon = "\a3\modules_f_curator\data\iconendmission_ca.paa";
+	icon = "\a3\Modules_F_Tacops\Data\CivilianPresence\icon32_ca.paa";
 	class Attributes: AttributesBase
 	{
 		class Name: Edit

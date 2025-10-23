@@ -3,18 +3,18 @@ params ["_arguments", ["_function", "", ["", {}]], ["_caller", 2, [0]], ["_unsch
 if (_function isEqualType {}) exitWith {
 	if _unscheduled then {
 		if (isNil "_arguments") then {
-			call _storedFunction;
+			call _function;
 		}
 		else {
-			_arguments call _storedFunction;
+			_arguments call _function;
 		};
 	}
 	else {
 		if (isNil "_arguments") then {
-			spawn _storedFunction;
+			spawn _function;
 		}
 		else {
-			_arguments spawn _storedFunction;
+			_arguments spawn _function;
 		};
 	};
 };

@@ -50,7 +50,7 @@ KH_var_viewTargetSelections = _viewTarget param [4, []];
 KH_var_viewTargetSurfaceType = _viewTarget param [5, ""];
 
 KH_var_viewTargetDistance = if !(isNull KH_var_viewTargetObject) then {
-    (getPosATL KH_var_playerUnit) vectorDistance (getPosATL KH_var_viewTargetObject);
+    (getPosASL KH_var_playerUnit) vectorDistance (getPosASL KH_var_viewTargetObject);
 }
 else {
     _viewPosition vectorDistance KH_var_viewTargetSurfacePosition;

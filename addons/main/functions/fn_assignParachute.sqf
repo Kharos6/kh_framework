@@ -14,7 +14,6 @@ if _equip then {
 		_parachute setVectorDir (vectorDir _unit);
 		_parachute setVelocity (velocity _unit);
 		_unit moveInAny _parachute;
-		_parachutes pushBack _parachute;
 	};
 
 	_parachute;

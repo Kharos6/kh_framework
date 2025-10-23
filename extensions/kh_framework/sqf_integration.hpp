@@ -41,6 +41,9 @@ static registered_sqf_function _sqf_set_return_value;
 static registered_sqf_function _sqf_get_return_value;
 static registered_sqf_function _sqf_set_call_arguments;
 static registered_sqf_function _sqf_get_call_arguments;
+static registered_sqf_function _sqf_get_rotation_euler_object;
+static registered_sqf_function _sqf_get_rotation_euler_object_object;
+static registered_sqf_function _sqf_set_rotation_euler;
 
 static game_value execute_lua_sqf(game_value_parameter args, game_value_parameter code_or_function) {    
     try {
@@ -877,6 +880,116 @@ static inline game_value get_call_arguments_sqf() noexcept {
     return g_call_arguments;
 }
 
+static game_value get_rotation_euler_sqf(game_value_parameter relative, game_value_parameter entity) {
+    try {
+        object obj = static_cast<object>(entity);
+        constexpr float RAD_TO_DEG = 180.0f / 3.14159265359f;
+        vector3 dir = sqf::vector_dir(obj);
+        vector3 up = sqf::vector_up(obj);
+        
+        // If relative object is not nil, calculate relative rotation
+        if (!relative.is_nil()) {
+            object rel_obj = static_cast<object>(relative);
+            vector3 current_pos = sqf::get_pos_atl(obj);
+            vector3 relative_pos = sqf::get_pos_atl(rel_obj);
+            float dx = relative_pos.x - current_pos.x;
+            float dy = relative_pos.y - current_pos.y;
+            float dz = relative_pos.z - current_pos.z;
+            float distance_horizontal = std::sqrt(dx * dx + dy * dy);
+            float yaw = std::atan2(dy, dx);
+            float pitch = std::atan2(dz, distance_horizontal);
+            float cos_pitch = std::cos(pitch);
+            float sin_pitch = std::sin(pitch);
+            float cos_yaw = std::cos(yaw);
+            float sin_yaw = std::sin(yaw);
+            dir.x = cos_pitch * cos_yaw;
+            dir.y = cos_pitch * sin_yaw;
+            dir.z = sin_pitch;
+            up.x = 0.0f;
+            up.y = 0.0f;
+            up.z = 1.0f;
+        }
+        
+        float dirX = dir.x;
+        float dirY = dir.y;
+        float dirZ = dir.z;
+        float upX = up.x;
+        float upZ = up.z;
+        float aroundX = std::fmod(std::atan2(-dirZ, std::sqrt(dirX * dirX + dirY * dirY)) * RAD_TO_DEG + 360.0f, 360.0f);
+        float aroundY = std::fmod(360.0f - std::atan2(upX, upZ) * RAD_TO_DEG, 360.0f);
+        float aroundZ = std::fmod(std::atan2(dirX, dirY) * RAD_TO_DEG + 360.0f, 360.0f);
+        auto_array<game_value> result;
+        result.reserve(3);
+        result.push_back(game_value(aroundX));
+        result.push_back(game_value(aroundY));
+        result.push_back(game_value(aroundZ));
+        return game_value(std::move(result));
+    } catch (const std::exception& e) {
+        report_error("Failed to get rotation: " + std::string(e.what()));
+        return game_value();
+    }
+}
+
+static game_value set_rotation_euler_sqf(game_value_parameter entity, game_value_parameter rotation) {
+    try {
+        object obj = static_cast<object>(entity);
+        auto& rot = rotation.to_array();
+        
+        if (rot.size() != 3) {
+            report_error("Rotation must be an array of 3 elements [pitch, roll, yaw]");
+            return game_value();
+        }
+        
+        constexpr float DEG_TO_RAD = 3.14159265359f / 180.0f;
+        float aroundX = -static_cast<float>(rot[0]) * DEG_TO_RAD;
+        float aroundY = -static_cast<float>(rot[1]) * DEG_TO_RAD;
+        float aroundZ = -static_cast<float>(rot[2]) * DEG_TO_RAD;
+        float dirX = 0.0f;
+        float dirY = 1.0f;
+        float dirZ = 0.0f;
+        float upX = 0.0f;
+        float upY = 0.0f;
+        float upZ = 1.0f;
+
+        if (std::abs(aroundX) > 0.0001f) {
+            float cosX = std::cos(aroundX);
+            float sinX = std::sin(aroundX);
+            dirY = cosX;
+            dirZ = sinX;
+            upY = -sinX;
+            upZ = cosX;
+        }
+
+        if (std::abs(aroundY) > 0.0001f) {
+            float cosY = std::cos(aroundY);
+            float sinY = std::sin(aroundY);
+            dirX = dirZ * sinY;
+            dirZ = dirZ * cosY;
+            upX = upZ * sinY;
+            upZ = upZ * cosY;
+        }
+
+        if (std::abs(aroundZ) > 0.0001f) {
+            float cosZ = std::cos(aroundZ);
+            float sinZ = std::sin(aroundZ);
+            float dirXTemp = dirX;
+            dirX = dirXTemp * cosZ - dirY * sinZ;
+            dirY = dirY * cosZ + dirXTemp * sinZ;
+            float upXTemp = upX;
+            upX = upXTemp * cosZ - upY * sinZ;
+            upY = upY * cosZ + upXTemp * sinZ;
+        }
+        
+        vector3 dir(dirX, dirY, dirZ);
+        vector3 up(upX, upY, upZ);
+        sqf::set_vector_dir_and_up(obj, dir, up);
+        return game_value();
+    } catch (const std::exception& e) {
+        report_error("Failed to set rotation: " + std::string(e.what()));
+        return game_value();
+    }
+}
+
 static game_value execute_lua_sqf_unary(game_value_parameter code_or_function) {
     return execute_lua_sqf(game_value(), code_or_function);
 }
@@ -895,6 +1008,10 @@ static game_value trigger_lua_event_sqf_unary(game_value_parameter right_arg) {
 
 static game_value execute_sqf_unary(game_value_parameter code_or_function) {
     return execute_sqf(game_value(), code_or_function);
+}
+
+static game_value get_rotation_euler_unary(game_value_parameter right_arg) {
+    return get_rotation_euler_sqf(game_value(), right_arg);
 }
 
 static void initialize_sqf_integration() {
@@ -1210,6 +1327,32 @@ static void initialize_sqf_integration() {
         "Retrieve the stored call arguments",
         userFunctionWrapper<get_call_arguments_sqf>,
         game_data_type::ANY
+    );
+
+    _sqf_get_rotation_euler_object = intercept::client::host::register_sqf_command(
+        "getRotationEuler",
+        "Get object rotation as Euler angles [pitch, roll, yaw] in degrees",
+        userFunctionWrapper<get_rotation_euler_unary>,
+        game_data_type::ARRAY,
+        game_data_type::OBJECT
+    );
+
+    _sqf_get_rotation_euler_object_object = intercept::client::host::register_sqf_command(
+        "getRotationEuler",
+        "Get object rotation as Euler angles [pitch, roll, yaw] in degrees",
+        userFunctionWrapper<get_rotation_euler_sqf>,
+        game_data_type::ARRAY,
+        game_data_type::OBJECT,
+        game_data_type::OBJECT
+    );
+
+    _sqf_set_rotation_euler = intercept::client::host::register_sqf_command(
+        "setRotationEuler",
+        "Set object rotation from Euler angles [pitch, roll, yaw] in degrees",
+        userFunctionWrapper<set_rotation_euler_sqf>,
+        game_data_type::NOTHING,
+        game_data_type::OBJECT,
+        game_data_type::ARRAY
     );
 
     g_compiled_sqf_trigger_cba_event = sqf::compile(R"(setReturnValue (getCallArguments call KH_fnc_triggerCbaEvent);)");

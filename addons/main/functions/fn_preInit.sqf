@@ -899,9 +899,9 @@ if isServer then {
 			private _machineId = KH_var_allPlayerUidMachines get _uid;
 
 			if !(isNil "_machineId") then {
-				if !(isNull _unit) then {
-					private _attributes = [];
-					
+				private _attributes = [];
+
+				if !(isNull _unit) then {					
 					if (alive _unit) then {
 						_attributes = [_unit] call KH_fnc_getUnitAttributes;
 					};
@@ -980,6 +980,24 @@ if isServer then {
 		},
 		true,
 		1,
+		false
+	] call KH_fnc_execute;
+
+	[
+		[],
+		{
+			if (KH_var_adminMachine isNotEqualTo clientOwner) then {
+				{
+					_x setVariable ["KH_var_playerViewDistance", _x getVariable "KH_var_playerViewDistance", KH_var_adminMachine];
+					_x setVariable ["KH_var_playerAspectRatio", _x getVariable "KH_var_playerAspectRatio", KH_var_adminMachine];
+					_x setVariable ["KH_var_playerCameraPosition", _x getVariable "KH_var_playerCameraPosition", KH_var_adminMachine];
+					_x setVariable ["KH_var_playerCameraDirection", _x getVariable "KH_var_playerCameraDirection", KH_var_adminMachine];
+					_x setVariable ["KH_var_playerUnit", _x getVariable "KH_var_playerUnit", KH_var_adminMachine];
+				} forEach KH_var_allPlayerUnits;
+			};
+		},
+		true,
+		0,
 		false
 	] call KH_fnc_execute;
 };
@@ -1191,6 +1209,7 @@ if hasInterface then {
 		{
 			params ["_unit"];
 			KH_var_playerUnit = _unit;
+			player setVariable ["KH_var_playerUnit", KH_var_playerUnit, 2];
 		},
 		true
 	] call CBA_fnc_addPlayerEventHandler;
@@ -1385,11 +1404,23 @@ if hasInterface then {
 		{
 			if KH_var_diagnosticsState then {
 				player setVariable ["KH_var_diagnosticsFramerate", parseNumber (diag_fps toFixed 0), KH_var_adminMachine];
-				player setVariable ["KH_var_diagnosticsViewDistance", viewDistance, KH_var_adminMachine];
 			};
 		},
 		true,
 		1,
+		false
+	] call KH_fnc_execute;
+
+	[
+		[],
+		{
+			player setVariable ["KH_var_playerViewDistance", viewDistance, 2];
+			player setVariable ["KH_var_playerAspectRatio", getResolution select 4, 2];
+			player setVariable ["KH_var_playerCameraPosition", positionCameraToWorld [0, 0, 0], 2];
+			player setVariable ["KH_var_playerCameraDirection", getCameraViewDirection player, 2];
+		},
+		true,
+		0,
 		false
 	] call KH_fnc_execute;
 };

@@ -229,7 +229,7 @@ switch _type do {
 
         if (_duration isEqualTo true) then {
             if (_position isEqualType objNull) then {
-                _position = _start modelToWorldVisual [0, 0, 0];
+                _position = _position modelToWorldVisual [0, 0, 0];
             }
             else {
                 if ((_position select 0) isEqualType objNull) then {

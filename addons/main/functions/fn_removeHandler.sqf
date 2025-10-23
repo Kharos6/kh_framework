@@ -1,4 +1,5 @@
 params [["_id", [], [[]]]];
+if (_id isEqualTo []) exitWith {};
 
 if (_id isEqualTypeAll []) exitWith {
     {
@@ -55,7 +56,7 @@ else {
                     };
 
                     case "USER_ACTION": {
-                        removeUserActionEventHandler [_event, _handlerId];
+                        removeUserActionEventHandler [_target, _event, _handlerId];
                     };
 
                     case "MUSIC": {

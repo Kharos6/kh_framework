@@ -1,0 +1,15 @@
+name: getRotationEuler
+description: TODO.
+syntax:
+- call: !Unary player
+  ret:
+    - Boolean
+    - TODO.
+  params:
+  - name: arg1
+    description: TODO.
+    type: Object
+argument_loc: Local
+effect_loc: Local
+examples:
+- <sqf>getRotationEuler object</sqf>

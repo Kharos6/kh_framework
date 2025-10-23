@@ -2,10 +2,10 @@ params [["_entity", objNull, [objNull]], ["_position", [0, 0, 0], [[], objNull]]
 _travelTime = _travelTime max 0.001;
 
 if (_position isEqualType objNull) then {
-	_position = getPosATL _position;
+	_position = getPosASL _position;
 };
 
-private _direction = _destination vectorDiff (getPosATL _entity);
+private _direction = _position vectorDiff (getPosASL _entity);
 private _velocity = [(_direction select 0) / _travelTime, (_direction select 1) / _travelTime, ((_direction select 2) / _travelTime) + (0.5 * 9.807 * _travelTime)];
 
 [

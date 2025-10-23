@@ -34,94 +34,79 @@ if _state then {
 	KH_var_diagnosticsAllMarkers = [];
 	KH_var_diagnosticsInformation = [];
 	KH_var_diagnosticsCurrentMarkers = [];
-	KH_var_diagnosticsValidatePositionHelper = createVehicleLocal ["KH_HelperRectangle_1x1x2", [0, 0, 0], [], 0, "CAN_COLLIDE"];
+	KH_var_diagnosticsValidatePositionHelper = createSimpleObject ["KH_HelperRectangle_1x1x2", [0, 0, 0], true];
 	KH_var_diagnosticsValidatePositionHelper setPhysicsCollisionFlag false;
 
 	KH_var_diagnosticsDrawHandler = addMissionEventHandler [
 		"Draw3D",
 		{	
 			{
-				_x params ["_unit", "_framerateOutput", "_framerateColor", "_viewDistance"];
-				
+				_x params ["_unit", "_framerateOutput", "_framerateColor", "_viewDistance", "_cameraPosition", "_cameraDirection", "_playerUnit"];
+
 				if (isNull curatorCamera) then {
 					_framerateOutput = [name _unit, " - ", _framerateOutput] joinString "";
 				}
 				else {
-					private _mousePosition3d = ([KH_var_diagnosticsValidatePositionHelper] call KH_fnc_getMouseTarget) select 0;
-					KH_var_diagnosticsValidatePositionHelper setPosASL _mousePosition3d;
-					KH_var_diagnosticsValidatePositionHelper setVectorDirAndUp [[0, 1, 0], [0, 0, 1]];
+					if (_unit isNotEqualTo _playerUnit) then {
+						_framerateOutput = [name _unit, " - ", _framerateOutput] joinString "";
+					};
 
-					private _actualPosition = (([
-						curatorCamera,
-						_mousePosition3d,
-						[KH_var_diagnosticsValidatePositionHelper],
-						true,
-						1,
-						"VIEW",
-						"FIRE",
-						true,
-						[]
-					] call KH_fnc_raycast) select 0) select 0;
-
-					private _intersections = [];
-
-					{
+					if (_playerUnit isNotEqualTo KH_var_playerUnit) then {
+						private _mousePosition3d = ([KH_var_diagnosticsValidatePositionHelper] call KH_fnc_getMouseTarget) select 0;
+						KH_var_diagnosticsValidatePositionHelper setPosASL _mousePosition3d;
+						KH_var_diagnosticsValidatePositionHelper setVectorDirAndUp [[0, 1, 0], [0, 0, 1]];
 						private _raycasts = [];
 
-						for "_positionX" from -0.5 to 0.5 step 0.25 do {
-							for "_positionY" from -0.5 to 0.5 step 0.25 do {
-								for "_positionZ" from 0 to 2 step 0.5 do {
-									_raycasts pushBack [
-										eyePos _x,
-										_actualPosition vectorAdd [_positionX, _positionY, _positionZ],
-										[_x, objectParent _x, attachedTo _x] + (attachedObjects _x),
-										true,
-										1,
-										"VIEW",
-										"FIRE",
-										true,
-										["LINE"]
-									]
+						if ([_playerUnit, _mousePosition3d, _cameraDirection, 1, _viewDistance, false] call KH_fnc_getPositionVisibility) then {
+							for "_positionX" from -0.5 to 0.5 step 0.25 do {
+								for "_positionY" from -0.5 to 0.5 step 0.25 do {
+									for "_positionZ" from 0 to 2 step 0.5 do {
+										_raycasts pushBack [
+											AGLToASL _cameraPosition,
+											_mousePosition3d vectorAdd [_positionX, _positionY, _positionZ],
+											[_playerUnit, objectParent _playerUnit, attachedTo _playerUnit] + (attachedObjects _playerUnit),
+											true,
+											1,
+											"VIEW",
+											"FIRE",
+											true,
+											[]
+										]
+									};
 								};
 							};
+
+							{
+								if ((_x select 3) isEqualTo KH_var_diagnosticsValidatePositionHelper) then {
+									private _mousePosition3dAgl = ASLToAGL _mousePosition3d;
+									drawLine3D [_cameraPosition, _mousePosition3dAgl, [1, 0, 0, 0.9], 10];
+
+									drawIcon3D [
+										"\a3\ui_f\data\map\markers\military\warning_CA.paa",
+										[1, 0, 0, 0.9],
+										_mousePosition3dAgl,
+										0.5,
+										0.5,
+										0,
+										"",
+										0,
+										0.03,
+										"PuristaMedium",
+										"center",
+										false
+									];
+
+									break;
+								};
+							} forEach ([_raycasts] call KH_fnc_raycast);
 						};
-
-						_intersections pushBack [_x, [_raycasts] call KH_fnc_raycast];
-					} forEach KH_var_allPlayerUnits;
-
-					{
-						_x params ["_unit", "_currentIntersection"];
-
-						if (_currentIntersection isNotEqualTo []) then {
-							if (((_currentIntersection select 0) select 3) isEqualTo KH_var_diagnosticsValidatePositionHelper) then {
-								private _mousePosition3dAgl = ASLToAGL _mousePosition3d;
-								drawLine3D [ASLToAGL (eyePos _unit), _mousePosition3dAgl, [1, 0, 0, 0.9], 10];
-
-								drawIcon3D [
-									"",
-									[1, 0, 0, 0.66],
-									_mousePosition3dAgl,
-									0,
-									0,
-									0,
-									"X",
-									2,
-									0.03,
-									"PuristaMedium",
-									"center",
-									true
-								];
-
-								break;
-							};
-						};
-					} forEach _intersections;
+					};
 				};
 
 				drawIcon3D [
 					"",
 					_framerateColor,
-					_unit modelToWorldVisual [0, 0, 0],
+					_playerUnit modelToWorldVisual [0, 0, 0],
 					1,
 					2,
 					0,
@@ -164,7 +149,15 @@ if _state then {
 					};
 				};
 
-				KH_var_diagnosticsInformation pushBack [_unit, _framerateOutput, _framerateColor, _x getVariable ["KH_var_diagnosticsViewDistance", 1]];
+				KH_var_diagnosticsInformation pushBack [
+					_unit, 
+					_framerateOutput, 
+					_framerateColor, 
+					_x getVariable ["KH_var_playerViewDistance", 1],
+					_x getVariable ["KH_var_playerCameraPosition", eyePos _x],
+					_x getVariable ["KH_var_playerCameraDirection", eyeDirection _x],
+					_x getVariable ["KH_var_playerUnit", objNull]
+				];
 			} forEach (KH_var_allPlayerUnits + KH_var_allHeadlessUnits);
 
 			private _worldX = (worldSize * 0.0033);
@@ -255,7 +248,7 @@ if _state then {
 			] call KH_fnc_deleteArrayElements;
 		},
 		true, 
-		1,
+		0,
 		false
 	] call KH_fnc_execute;
 };

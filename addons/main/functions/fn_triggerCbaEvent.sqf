@@ -172,7 +172,7 @@ private _return = switch (typeName _target) do {
 
                                         if (_groupTargets isNotEqualTo []) then {
                                             {
-                                                private _target = _group;
+                                                private _target = _x;
                                                 private _playerUnits = KH_var_allPlayerUnits select {(group _x) isEqualTo _target;};
 
                                                 if (((local _target) && (_playerUnits isEqualTo [])) || ((local _target) && (player in _playerUnits) && ((count _playerUnits) <= 1))) then {
@@ -269,7 +269,7 @@ private _return = switch (typeName _target) do {
 
                                     if (_groupTargets isNotEqualTo []) then {
                                         {
-                                            private _target = _group;
+                                            private _target = _x;
                                             private _playerUnits = KH_var_allPlayerUnits select {(group _x) isEqualTo _target;};
 
                                             if (((local _target) && (_playerUnits isEqualTo [])) || ((local _target) && (player in _playerUnits) && ((count _playerUnits) <= 1))) then {
@@ -323,7 +323,7 @@ private _return = switch (typeName _target) do {
 
                         if (_groupTargets isNotEqualTo []) then {
                             {
-                                private _target = _group;
+                                private _target = _x;
                                 private _playerUnits = KH_var_allPlayerUnits select {(group _x) isEqualTo _target;};
 
                                 if (((local _target) && (_playerUnits isEqualTo [])) || ((local _target) && (player in _playerUnits) && ((count _playerUnits) <= 1))) then {

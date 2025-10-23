@@ -120,7 +120,7 @@ else {
 };
 
 private _intersections = lineIntersectsSurfaces [_grids];
-private _intersectionCount = count (_intersections select {_x isNotEqualTo [];});
+private _intersectionCount = {_x isNotEqualTo [];} count _intersections;
 private _flattenedIntersections = [];
 
 {

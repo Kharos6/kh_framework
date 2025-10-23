@@ -50,7 +50,7 @@ KH_var_mouseTargetSelections = _mouseTarget param [4, []];
 KH_var_mouseTargetSurfaceType = _mouseTarget param [5, ""];
 
 KH_var_mouseTargetDistance = if !(isNull KH_var_mouseTargetObject) then {
-    (getPosATL KH_var_playerUnit) vectorDistance (getPosATL KH_var_mouseTargetObject);
+    (getPosASL KH_var_playerUnit) vectorDistance (getPosASL KH_var_mouseTargetObject);
 }
 else {
     _mousePosition vectorDistance KH_var_mouseTargetSurfacePosition;

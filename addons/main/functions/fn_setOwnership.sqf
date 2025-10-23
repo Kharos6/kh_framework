@@ -1,6 +1,6 @@
 params [["_entities", [], [[], objNull, teamMemberNull, grpNull]], ["_owner", 0, [0, objNull]], ["_recreate", false, [true]], ["_init", {}, [{}]]];
 
-if !(_entites isEqualType []) then {
+if !(_entities isEqualType []) then {
 	_entities = [_entities];
 };
 

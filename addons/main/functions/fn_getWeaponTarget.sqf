@@ -80,7 +80,7 @@ KH_var_weaponTargetSelections = _weaponTarget param [4, []];
 KH_var_weaponTargetSurfaceType = _weaponTarget param [5, ""];
 
 KH_var_weaponTargetDistance = if !(isNull KH_var_weaponTargetObject) then {
-    (getPosATL KH_var_playerUnit) vectorDistance (getPosATL KH_var_weaponTargetObject);
+    (getPosASL KH_var_playerUnit) vectorDistance (getPosASL KH_var_weaponTargetObject);
 }
 else {
     _weaponPosition vectorDistance KH_var_weaponTargetSurfacePosition;

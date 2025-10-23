@@ -18,9 +18,9 @@ if (isNil "KH_var_curatorsSet") then {
 			};
 
 			[
-				[_x, _module, _timeout],
+				[_x, _module],
 				{
-					params ["_player", "_module", "_timeout"];
+					params ["_player", "_module"];
 
 					if (((getAssignedCuratorUnit _module) isNotEqualTo _player) || ((getAssignedCuratorLogic _player) isNotEqualTo _module)) then {
 						if (!(isNull (getAssignedCuratorUnit _module)) && (isNull (getAssignedCuratorLogic _player))) then {

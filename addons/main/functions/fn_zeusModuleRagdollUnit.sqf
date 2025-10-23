@@ -1,8 +1,9 @@
 isNil {
 	params [["_logic", objNull, [objNull]]];
+	private _unit = attachedTo _logic;
 
 	[
-		[attachedTo _logic],
+		[_unit],
 		{
 			params ["_unit"];
 			_unit addForce [[0, 0, 1], [0, 0, 0], false];

@@ -1,18 +1,12 @@
 name: getTerrainMatrix
 description: TODO.
 syntax:
-- call: !Binary [player, player]
+- call: !Nular
   ret:
     - Boolean
     - TODO.
   params:
-  - name: arg1
-    description: TODO.
-    type: Object
-  - name: arg2
-    description: TODO.
-    type: Object
 argument_loc: Local
 effect_loc: Local
 examples:
-- <sqf>object getTerrainMatrix object</sqf>
+- <sqf>getTerrainMatrix</sqf>

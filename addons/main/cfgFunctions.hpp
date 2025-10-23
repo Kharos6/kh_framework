@@ -43,6 +43,7 @@ class CfgFunctions
 			class getObjectAttributes {};
 			class getObjectInventory {};
 			class getPositionScreenRatio {};
+			class getPositionVisibility {};
 			class getScreenVisiblePositions {};
 			class getUnitAttributes {};
 			class getUnitVehicleSlot {};

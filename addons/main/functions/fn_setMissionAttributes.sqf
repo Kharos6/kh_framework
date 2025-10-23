@@ -2,7 +2,7 @@ params [["_attributes", [], [[]]], ["_overrideAttributes", [], [[]]]];
 private _savedAttributes = _attributes param [1];
 
 if (_overrideAttributes isNotEqualTo []) then {
-	private _currentAttributes = ([_object] call KH_fnc_getMissionAttributes) select 3;
+	private _currentAttributes = (call KH_fnc_getMissionAttributes) select 3;
 
 	{
 		if (_x isEqualType 0) then {

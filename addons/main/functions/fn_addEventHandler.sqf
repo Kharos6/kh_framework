@@ -295,7 +295,8 @@ switch _eventType do {
 	};
 
 	case "USER_ACTION": {
-		_handler = addUserActionEventHandler [_event, _expression];
+		private _keyName = _type param [1, "", [""]];
+		_handler = addUserActionEventHandler [_keyName, _event, _expression];
 	};
 
 	case "MUSIC": {
@@ -351,7 +352,7 @@ switch _eventType do {
 					missionNamespace setVariable [_handlerTickCounterId, 1];
 				}
 				else {
-					0;
+					_timeout = 0;
 				};
 			};
 
@@ -360,8 +361,8 @@ switch _eventType do {
 			};
 
 			case "ARRAY": {
-				_timeout = (_timeout select 0) max 1;
 				_countConditionFailure = _timeout param [1, false, [true]];
+				_timeout = (_timeout select 0) max 1;
 				_iterationCount = true;
 				_handlerTickCounterId = generateUid;
 				missionNamespace setVariable [_handlerTickCounterId, 1];

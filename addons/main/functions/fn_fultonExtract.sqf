@@ -50,11 +50,16 @@ missionNamespace setVariable [fultonId, false];
 		missionNamespace setVariable [_fultonId, true, true];
 		private _mainFulton = createVehicle ["B_Parachute_02_F", _object, [], 0, "CAN_COLLIDE"];
 		_mainFulton allowDamage false;
-		private _fultonActive = [missionNamespace, "KH_var_fultonActive", false, true] call KH_fnc_atomicVariable;
-		private _currentFultonParticipants = [missionNamespace, "KH_var_currentFultonParticipants", [], true] call KH_fnc_atomicVariable;
-		private _fultonBox = [missionNamespace, "KH_var_fultonBox", _object, true] call KH_fnc_atomicVariable;
-		private _mainFultonVelocity = [missionNamespace, "KH_var_fultonExtractVelocity", 0.1, false] call KH_fnc_atomicVariable;
-		private _fultonRemoteActions = [missionNamespace, "KH_var_fultonRemoteActions", false, false] call KH_fnc_atomicVariable;
+		private _fultonActive = generateUid;
+		private _currentFultonParticipants = generateUid;
+		private _fultonBox = generateUid;
+		private _mainFultonVelocity = generateUid;
+		private _fultonRemoteActions = generateUid;
+		missionNamespace setVariable [_fultonActive, false, true];
+		missionNamespace setVariable [_currentFultonParticipants, [], true];
+		missionNamespace setVariable [_fultonBox, _object, true];
+		missionNamespace setVariable [_mainFultonVelocity, 0.1];
+		missionNamespace setVariable [_fultonRemoteActions, false];
 		private _fultonAnchor = createVehicle ["Land_Can_V2_F", _object, [], 0, "CAN_COLLIDE"];
 		_fultonAnchor allowDamage false;
 		_fultonAnchor hideObjectGlobal true;												
@@ -464,12 +469,12 @@ missionNamespace setVariable [fultonId, false];
 																_unit switchMove ["Para_Pilot"];
 															};
 
-															private _unitPosition = getPosATL _unit;
-															private _vehiclePosition = getPosATL _vehicle;
-															private _vehicleRotation = [_vehicle, objNull] call KH_fnc_getRotation;
-															private _relativeRotation = [_unit, _vehicle] call KH_fnc_getRotation;
+															private _unitPosition = getPosASL _unit;
+															private _vehiclePosition = getPosASL _vehicle;
+															private _vehicleRotation = getRotationEuler _vehicle;
+															private _relativeRotation = _vehicle getRotationEuler _unit;
 															private _velocity = (_vehiclePosition vectorDiff _unitPosition) vectorMultiply (3 / _remainingTime);
-															[_unit, [-(_relativeRotation select 0) - 75, 0, (_relativeRotation select 2) + 180], false] call KH_fnc_setRotation;
+															_unit setRotationEuler [-(_relativeRotation select 0) - 75, 0, (_relativeRotation select 2) + 180];
 															_unit setVelocity _velocity;
 															_unit setAngularVelocity [0, 0, 0];
 														};
@@ -503,8 +508,8 @@ missionNamespace setVariable [fultonId, false];
 
 						if !(missionNamespace getVariable [_fultonActive, false]) then {
 							if (((getPosATL _mainFulton) select 2) < _height) then {
-								private _velocity = [missionNamespace, _mainFultonVelocity, 0.02, false] call KH_fnc_atomicValue;
-								_mainFulton setVelocity [0, 0, _velocity];
+								missionNamespace setVariable [_mainFultonVelocity, (missionNamespace getVariable _mainFultonVelocity) + 0.02];
+								_mainFulton setVelocity [0, 0, missionNamespace getVariable _mainFultonVelocity];
 							}
 							else {
 								_mainFulton setVelocity [0, 0, 0];

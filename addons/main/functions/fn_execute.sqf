@@ -325,6 +325,8 @@ switch (typeName _environmentType) do {
 			_arguments = [];
 		};
 
+		private "_previousReturn";
+
 		if _immediate then {
 			private _handlerId = [missionNamespace, _environmentId, clientOwner];
 			private _totalDelta = 0;
@@ -332,7 +334,7 @@ switch (typeName _environmentType) do {
 			private _executionCount = 0;
 
 			if (_arguments call _environmentType) then {
-				_fedArguments call _subfunction;
+				_previousReturn = _fedArguments call _subfunction;
 
 				if _fireOnce then {
 					_continue = false;

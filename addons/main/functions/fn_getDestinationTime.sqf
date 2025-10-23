@@ -2,10 +2,10 @@ params [["_entity", objNull, [objNull]], ["_position", [0, 0, 0], [[], objNull]]
 _speed = _speed max 0.001;
 
 if (_position isEqualType objNull) then {
-	_position = getPosATL _position;
+	_position = getPosASL _position;
 };
 
-private _direction = _position vectorDiff (getPosATL _entity);
+private _direction = _position vectorDiff (getPosASL _entity);
 private _distance = _direction distance [0, 0, 0];
 
 if (_speed isEqualTo 0) then {

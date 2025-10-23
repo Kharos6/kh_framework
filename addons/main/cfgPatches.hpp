@@ -6,7 +6,7 @@ class CfgPatches
 		author = "Kharos";
 		units[] = {};
 		weapons[] = {};
-		requiredVersion = 1;
+		requiredVersion = 2.20;
 		requiredAddons[] = {"cba_main", "Intercept_Core"};
 		skipWhenMissingDependencies = 1;
 	};

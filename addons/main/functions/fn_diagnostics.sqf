@@ -90,7 +90,7 @@ if _state then {
 										0,
 										"",
 										0,
-										0.03,
+										0.04,
 										"PuristaMedium",
 										"center",
 										false
@@ -112,7 +112,7 @@ if _state then {
 					0,
 					_framerateOutput,
 					2,
-					0.03,
+					0.04,
 					"PuristaMedium",
 					"center",
 					true

@@ -8,7 +8,7 @@ class Object
 			collapsed = 1;
 			class Attributes
 			{
-				class AnimationSpeed
+				class KH_AnimationSpeed
 				{
 					displayName = "Animation Speed";
 					tooltip = "Sets the animation speed of this unit. Set to -1 for no change.";
@@ -39,7 +39,7 @@ class Object
 					typeName = "NUMBER";
 					condition = "objectControllable";
 				};
-				class ArrayBuilder
+				class KH_ArrayBuilder
 				{
 					displayName = "Array Builder";
 					tooltip = "Specify an array of strings of global variables that will be made into an array, made public, and contain this entity and any other entities utilizing this function. In format 'globalVariable1', 'globalVariable2', 'globalVariable3', ...";
@@ -62,7 +62,7 @@ class Object
 					";
 					defaultValue = "''";
 				};
-				class FreefallHeight
+				class KH_FreefallHeight
 				{
 					displayName = "Freefall Height";
 					tooltip = "Height above which this unit will enter freefall, in meters. Set to -1 for no change from the default of 100 metres.";
@@ -95,7 +95,7 @@ class Object
 					typeName = "NUMBER";
 					condition = "objectControllable";
 				};
-				class PlayerObjectInit
+				class KH_PlayerObjectInit
 				{
 					displayName = "Player Object Init";
 					tooltip = "Unscheduled code executed locally to the player who loads into the mission as this unit. The local player variable is valid as this unit.";
@@ -127,7 +127,7 @@ class Object
 					validate = "expression";
 					condition = "objectControllable";
 				};
-				class ServerObjectInit
+				class KH_ServerObjectInit
 				{
 					displayName = "Server Object Init";
 					tooltip = "Unscheduled code executed on the server with this entity passed as an argument. Passed arguments available through _this are: [_entity (OBJECT)].";
@@ -148,7 +148,7 @@ class Object
 					defaultValue = "''";
 					validate = "expression";
 				};
-				class LockInventory
+				class KH_LockInventory
 				{
 					displayName = "Lock Inventory";
 					tooltip = "True locks the inventory of this entity.";
@@ -176,7 +176,7 @@ class Object
 					";
 					defaultValue = "false";
 				};
-				class Renegade
+				class KH_Renegade
 				{
 					displayName = "Renegade";
 					tooltip = "True declares the unit as a renegade, causing units from all sides to attack it. Ideal for players, as AI on this unit will not attack its own side even if endangered.";
@@ -206,7 +206,7 @@ class Object
 					defaultValue = "false";
 					condition = "objectControllable";
 				};
-				class SetRandomLoadout
+				class KH_SetRandomLoadout
 				{
 					displayName = "Set Random Loadout";
 					tooltip = "Specify either an array of loadouts, or a global variable containing an array of loadouts, that will be selected from at random and applied to this unit.";
@@ -240,13 +240,13 @@ class Object
 			collapsed = 1;
 			class Attributes
 			{
-				class ConditionalPresenceSubcategory
+				class KH_ConditionalPresenceSubcategory
 				{
 					description = "Specify a CBA event which changes the simulation and visibility of this entity every time it is broadcasted to the server. If its argument is true, the entity will become simulated and visible. If its argument false, the entity will become unsimulated and invisible. The initial simulation and visibility state of the entity remains unchanged until the event is broadcast for the first time.";
 					data = "AttributeSystemSubcategory";
 					control = "KH_SubcategoryNoHeader4";
 				};
-				class ConditionalPresence 
+				class KH_ConditionalPresence 
 				{
 					property = "KH_ConditionalPresence";
 					control = "KH_ConditionalPresence";
@@ -267,13 +267,13 @@ class Object
 			collapsed = 1;
 			class Attributes
 			{
-				class ConvertToAgentSubcategory
+				class KH_ConvertToAgentSubcategory
 				{
 					description = "Converts this unit to an agent upon mission start. Most Eden attributes will be lost, but can be replicated using the Init field.";
 					data = "AttributeSystemSubcategory";
 					control = "KH_SubcategoryNoHeader2";
 				};
-				class ConvertToAgent 
+				class KH_ConvertToAgent 
 				{
 					property = "KH_ConvertToAgent";
 					control = "KH_ConvertToAgent";
@@ -300,13 +300,13 @@ class Object
 			collapsed = 1;
 			class Attributes
 			{
-				class PersistencySettingsSubcategory
+				class KH_PersistencySettingsSubcategory
 				{
 					description = "Settings that this entity will use for the persistency system from the mission attributes.";
 					data = "AttributeSystemSubcategory";
 					control = "KH_SubcategoryNoHeader1";
 				};
-				class PersistencySettings
+				class KH_PersistencySettings
 				{
 					property = "KH_PersistencySettings";
 					control = "KH_ObjectPersistencySettings";
@@ -332,13 +332,13 @@ class Object
 			collapsed = 1;
 			class Attributes
 			{
-				class PersistentInitSubcategory
+				class KH_PersistentInitSubcategory
 				{
 					description = "Unscheduled code executed every time this entity changes locality, ideal for code that is dependent on locality.";
 					data = "AttributeSystemSubcategory";
 					control = "KH_SubcategoryNoHeader2";
 				};
-				class PersistentInit 
+				class KH_PersistentInit 
 				{
 					property = "KH_PersistentInit";
 					control = "KH_PersistentInit";
@@ -383,13 +383,13 @@ class Object
 			collapsed = 1;
 			class Attributes
 			{
-				class TransferToHeadlessClientSubcategory
+				class KH_TransferToHeadlessClientSubcategory
 				{
 					description = "Designate this entity for transfer to a headless client.";
 					data = "AttributeSystemSubcategory";
 					control = "KH_SubcategoryNoHeader1";
 				};
-				class TransferToHeadlessClient 
+				class KH_TransferToHeadlessClient 
 				{
 					property = "KH_TransferToHeadlessClient";
 					control = "KH_TransferToHeadlessClient";

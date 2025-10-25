@@ -14,73 +14,76 @@ class KH_ModuleDynamicDisguise: Module_F
 	isTriggerActivated = 0;
 	isDisposable = 1;
 	is3DEN = 0;
+	curatorInfoType = "";
+	curatorInfoTypeEmpty = "";
+	curatorCanAttach = 0;
 	icon = "\a3\ui_f\data\igui\cfg\simpletasks\letters\d_ca.paa";
 	class Attributes: AttributesBase
 	{
-		class BLUFORUniforms: EditMulti5
+		class KH_ModuleDynamicDisguiseBLUFORUniforms: EditMulti5
 		{
 			displayName = "BLUFOR Uniforms";
 			tooltip = "Array of strings of uniform class names designated as BLUFOR.";
-			property = "KH_ModuleDynamicDisguiseBluforUniforms";
+			property = "KH_ModuleDynamicDisguiseBLUFORUniforms";
 			defaultValue = "''";
 		};
-		class OPFORUniforms: EditMulti5
+		class KH_ModuleDynamicDisguiseOPFORUniforms: EditMulti5
 		{
 			displayName = "OPFOR Uniforms";
 			tooltip = "Array of strings of uniform class names designated as OPFOR.";
-			property = "KH_ModuleDynamicDisguiseOpforUniforms";
+			property = "KH_ModuleDynamicDisguiseOPFORUniforms";
 			defaultValue = "''";
 		};
-		class GREENFORUniforms: EditMulti5
+		class KH_ModuleDynamicDisguiseGREENFORUniforms: EditMulti5
 		{
 			displayName = "GREENFOR Uniforms";
 			tooltip = "Array of strings of uniform class names designated as GREENFOR.";
-			property = "KH_ModuleDynamicDisguiseGreenforUniforms";
+			property = "KH_ModuleDynamicDisguiseGREENFORUniforms";
 			defaultValue = "''";
 		};
-		class BLUFORVests: EditMulti5
+		class KH_ModuleDynamicDisguiseBLUFORVests: EditMulti5
 		{
 			displayName = "BLUFOR Vests";
 			tooltip = "Array of strings of vest class names designated as BLUFOR.";
-			property = "KH_ModuleDynamicDisguiseBluforVests";
+			property = "KH_ModuleDynamicDisguiseBLUFORVests";
 			defaultValue = "''";
 		};
-		class OPFORVests: EditMulti5
+		class KH_ModuleDynamicDisguiseOPFORVests: EditMulti5
 		{
 			displayName = "OPFOR Vests";
 			tooltip = "Array of strings of vest class names designated as OPFOR.";
-			property = "KH_ModuleDynamicDisguiseOpforVests";
+			property = "KH_ModuleDynamicDisguiseOPFORVests";
 			defaultValue = "''";
 		};
-		class GREENFORVests: EditMulti5
+		class KH_ModuleDynamicDisguiseGREENFORVests: EditMulti5
 		{
 			displayName = "GREENFOR Vests";
 			tooltip = "Array of strings of vest class names designated as GREENFOR.";
-			property = "KH_ModuleDynamicDisguiseGreenforVests";
+			property = "KH_ModuleDynamicDisguiseGREENFORVests";
 			defaultValue = "''";
 		};
-		class BLUFORHeadgear: EditMulti5
+		class KH_ModuleDynamicDisguiseBLUFORHeadgear: EditMulti5
 		{
 			displayName = "BLUFOR Headgear";
 			tooltip = "Array of strings of headgear class names designated as BLUFOR.";
-			property = "KH_ModuleDynamicDisguiseBluforHeadgear";
+			property = "KH_ModuleDynamicDisguiseBLUFORHeadgear";
 			defaultValue = "''";
 		};
-		class OPFORHeadgear: EditMulti5
+		class KH_ModuleDynamicDisguiseOPFORHeadgear: EditMulti5
 		{
 			displayName = "OPFOR Headgear";
 			tooltip = "Array of strings of headgear class names designated as OPFOR.";
-			property = "KH_ModuleDynamicDisguiseOpforHeadgear";
+			property = "KH_ModuleDynamicDisguiseOPFORHeadgear";
 			defaultValue = "''";
 		};
-		class GREENFORHeadgear: EditMulti5
+		class KH_ModuleDynamicDisguiseGREENFORHeadgear: EditMulti5
 		{
 			displayName = "GREENFOR Headgear";
 			tooltip = "Array of strings of headgear class names designated as GREENFOR.";
-			property = "KH_ModuleDynamicDisguiseGreenforHeadgear";
+			property = "KH_ModuleDynamicDisguiseGREENFORHeadgear";
 			defaultValue = "''";
 		};
-		class Captive: Checkbox
+		class KH_ModuleDynamicDisguiseCaptive: Checkbox
 		{
 			displayName = "Captive";
 			tooltip = "True sets disguised units as captives in order to prevent them from being engaged by their original side.";

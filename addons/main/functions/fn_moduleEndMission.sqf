@@ -5,7 +5,7 @@ isNil {
 		private _parsedNextMission = parseSimpleArray (["[", _logic getVariable ["KH_ModuleEndMissionNextMission", ""], "]"] joinString "");
 
 		[
-			_logic getVariable ["KH_ModuleEndMissionEndName", "KH_MissionConcluded"], 
+			_logic getVariable ["KH_ModuleEndMissionName", "KH_MissionConcluded"], 
 			_logic getVariable ["KH_ModuleEndMissionVictory", true], 
 			parseNumber (_logic getVariable ["KH_ModuleEndMissionFadeType", "0"]),
 			parseNumber (_logic getVariable ["KH_ModuleEndMissionDelay", "1"]),

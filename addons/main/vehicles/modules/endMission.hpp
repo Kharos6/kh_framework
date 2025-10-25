@@ -14,38 +14,41 @@ class KH_ModuleEndMission: Module_F
 	isTriggerActivated = 1;
 	isDisposable = 1;
 	is3DEN = 0;
+	curatorInfoType = "";
+	curatorInfoTypeEmpty = "";
+	curatorCanAttach = 0;
 	icon = "\a3\modules_f_curator\data\iconendmission_ca.paa";
 	class Attributes: AttributesBase
 	{
-		class EndName: Edit
+		class KH_ModuleEndMissionName: Edit
 		{
-			displayName = "End Name";
+			displayName = "Name";
 			tooltip = "Class name from CfgDebriefing.";
-			property = "KH_ModuleEndMissionEndName";
+			property = "KH_ModuleEndMissionName";
 			defaultValue = "'KH_MissionConcluded'";
 		};
-		class Victory: Checkbox
+		class KH_ModuleEndMissionVictory: Checkbox
 		{
 			displayName = "Victory";
 			tooltip = "True considers the end a victory.";
 			property = "KH_ModuleEndMissionVictory";
 			defaultValue = "true";
 		};
-		class FadeType: Edit
+		class KH_ModuleEndMissionFadeType: Edit
 		{
 			displayName = "Fade Type";
 			tooltip = "Type of fade to play after the specified delay. -2 plays the signature closing shot and music, -1 instantly ends the mission without the signature closing shot and music, and any value of 0 and above is a fade to black for that amount of seconds.";
 			property = "KH_ModuleEndMissionFadeType";
 			defaultValue = "''";
 		};
-		class Delay: Edit
+		class KH_ModuleEndMissionDelay: Edit
 		{
 			displayName = "Delay";
 			tooltip = "Time to wait before initiating the end of the mission, in seconds. Will clamp to a minimum of 1 second if below 1.";
 			property = "KH_ModuleEndMissionDelay";
 			defaultValue = "'1'";
 		};
-		class NextMission: Edit
+		class KH_ModuleEndMissionNextMission: Edit
 		{
 			displayName = "Next Mission";
 			tooltip = "An array containing the string of the server password, if any, and the string of the name of the next mission, in format [password (STRING), nextMission (STRING)]. Use an empty array or leave the field empty if no subsequent mission is desired. If this value is used, all other values are ignored, and the next mission will start immediately after the delay.";

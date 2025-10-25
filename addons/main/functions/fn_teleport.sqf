@@ -34,7 +34,7 @@ if (_transition isNotEqualTo 0) then {
 
 	if (isPlayer _entity) then {
 		[
-			["", "KH_ResourceKHDisplay", [_transition, 0, _transition], [0, 0, 0, 0], [0, 0, 100, 100], [0, 0, 0]],
+			["", "", [_transition, 0, _transition], [0, 0, 0, 1], [0, 0, 100, 100], [0, 0, 0]],
 			"KH_fnc_draw2d",
 			_entity,
 			true,
@@ -66,17 +66,10 @@ if (_transition isNotEqualTo 0) then {
 						[_entity] call _init;
 					},
 					true,
-					[
-						{
-							params ["_entity"];
-							(isNull (objectParent _entity));
-						},
-						true,
-						1,
-						0,
-						true,
-						true
-					],
+					{
+						params ["_entity"];
+						(isNull (objectParent _entity));
+					},
 					false
 				] call KH_fnc_execute;
 			}
@@ -118,17 +111,10 @@ else {
 				[_entity] call _init;
 			},
 			_entity,
-			[
-				{
-					params ["_entity"];
-					(isNull (objectParent _entity));
-				},
-				true,
-				1,
-				0,
-				true,
-				true
-			],
+			{
+				params ["_entity"];
+				(isNull (objectParent _entity));
+			},
 			false
 		] call KH_fnc_execute;
 	}

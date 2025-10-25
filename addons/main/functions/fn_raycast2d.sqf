@@ -195,7 +195,7 @@ if (_draw isNotEqualTo []) then {
 				["_angle", 1, [0]],
 				["_text", "", [""]],
 				["_shadow", false, [true, 0]],
-				["_textSize", 1, [0]],
+				["_textSize", 0.04, [0]],
 				["_font", "RobotoCondensedBold", [""]],
 				["_textAlign", "center", [""]],
 				["_drawSideArrows", false, [true]],

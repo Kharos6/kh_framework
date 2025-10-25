@@ -10,70 +10,73 @@ class KH_ModuleAssignIdentificationCard: Module_F
 	category = "KH_Modules";
 	function = "KH_fnc_moduleAssignIdentificationCard";
 	functionPriority = 1;
-	isGlobal = 2;
+	isGlobal = 0;
 	isTriggerActivated = 0;
 	isDisposable = 1;
 	is3DEN = 0;
+	curatorInfoType = "";
+	curatorInfoTypeEmpty = "";
+	curatorCanAttach = 0;
 	icon = "\a3\Modules_F_Curator\Data\iconMissionName_ca.paa";
 	class Attributes: AttributesBase
 	{
-		class Name: Edit
+		class KH_ModuleAssignIdentificationCardName: Edit
 		{
 			displayName = "Name";
 			tooltip = "Name.";
 			property = "KH_ModuleAssignIdentificationCardName";
 			defaultValue = "''";
 		};
-    	class Gender: Edit
+    	class KH_ModuleAssignIdentificationCardGender: Edit
 		{
 			displayName = "Gender";
 			tooltip = "Gender.";
 			property = "KH_ModuleAssignIdentificationCardGender";
 			defaultValue = "''";
 		};
-		class Race: Edit
+		class KH_ModuleAssignIdentificationCardRace: Edit
 		{
 			displayName = "Race";
 			tooltip = "Race.";
 			property = "KH_ModuleAssignIdentificationCardRace";
 			defaultValue = "''";
 		};
-    	class DateOfBirth: Edit
+    	class KH_ModuleAssignIdentificationCardDateOfBirth: Edit
 		{
 			displayName = "Date Of Birth";
 			tooltip = "Date of birth.";
 			property = "KH_ModuleAssignIdentificationCardDateOfBirth";
 			defaultValue = "''";
 		};
-		class Profession: Edit
+		class KH_ModuleAssignIdentificationCardProfession: Edit
 		{
 			displayName = "Profession";
 			tooltip = "Profession.";
 			property = "KH_ModuleAssignIdentificationCardProfession";
 			defaultValue = "''";
 		};
-    	class Ethnos: Edit
+    	class KH_ModuleAssignIdentificationCardEthnos: Edit
 		{
 			displayName = "Ethnos";
 			tooltip = "Ethnos or nationality.";
 			property = "KH_ModuleAssignIdentificationCardEthnos";
 			defaultValue = "''";
 		};
-		class CardNumber: Edit
+		class KH_ModuleAssignIdentificationCardCardNumber: Edit
 		{
 			displayName = "Card Number";
 			tooltip = "Card number.";
 			property = "KH_ModuleAssignIdentificationCardCardNumber";
 			defaultValue = "''";
 		};
-    	class DateOfIssue: Edit
+    	class KH_ModuleAssignIdentificationCardDateOfIssue: Edit
 		{
 			displayName = "Date Of Issue";
 			tooltip = "Date of issue.";
 			property = "KH_ModuleAssignIdentificationCardDateOfIssue";
 			defaultValue = "''";
 		};
-		class DateOfExpiry: Edit
+		class KH_ModuleAssignIdentificationCardDateOfExpiry: Edit
 		{
 			displayName = "Date Of Expiry";
 			tooltip = "Date of expiry.";
@@ -84,11 +87,11 @@ class KH_ModuleAssignIdentificationCard: Module_F
 	};
 	class ModuleDescription: ModuleDescription
 	{
-		description[] = {"Adds an action to the synchronized units that allows players to view their identification card. Activates only once, without a trigger, globally and persistently."};
-		sync[] = {"AnyPerson"};
+		description[] = {"Adds an action to the synchronized units that allows players to view their identification card. Activates only once, without a trigger, on the server."};
+		sync[] = {"AnyBrain"};
 		position = 0;
 		direction = 0;
 		optional = 0;
-		duplicate = 0;
+		duplicate = 1;
 	};
 };

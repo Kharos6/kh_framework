@@ -2,7 +2,7 @@ params [
 	["_object", objNull, [objNull]], 
 	["_vehicles", [], [[]]], 
 	["_height", 100, [0]], 
-	["_distance", 0, [0]], 
+	["_distance", 10, [0]], 
 	["_maximumParticipants", 10, [0]], 
 	["_duration", 15, [0]], 
 	["_objectName", "", [""]]
@@ -12,7 +12,7 @@ _height = _height min 100;
 _distance = _distance max 10;
 private _fultonEvent = generateUid;
 private _fultonId = generateUid;
-missionNamespace setVariable [fultonId, false];
+missionNamespace setVariable [_fultonId, false];
 
 [
 	[
@@ -302,7 +302,7 @@ missionNamespace setVariable [fultonId, false];
 								"BIS_fnc_holdActionAdd",
 								"PLAYERS",
 								true,
-								["JIP", "PLAYERS", _x, false, false, ""]
+								["JIP", _x, false, ""]
 							] call KH_fnc_execute;
 						};
 					} forEach (_object nearEntities ["Man", 15]);
@@ -427,7 +427,7 @@ missionNamespace setVariable [fultonId, false];
 														_remainingTime = _remainingTime - _timeStep;
 														_unit setVariable ["KH_var_fultonRemainingTime", _remainingTime];
 
-														if ((_remainingTime <= 0) || ((_unit distance _vehicle) < 30)) then {
+														if ((_remainingTime <= 0) || ((_unit distance _vehicle) < 10)) then {
 															_unit switchMove [""];
 															_unit moveInAny _vehicle;
 

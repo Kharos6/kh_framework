@@ -1,13 +1,17 @@
 params [
+    ["_resource", "", [""]],
     ["_text", "", [""]], 
-    ["_resource", "", [""]], 
     ["_displayTimings", [1, 0, 1], [[]]], 
-    ["_color", [0, 0, 0, 0], [[]]], 
+    ["_backgroundColor", [0, 0, 0, 1], [[]]], 
     ["_transforms", [0, 0, 100, 100], [[]]], 
     ["_angle", [0, 0, 0], [[]]]
 ];
 
-_displayTimings params [["_fadeIn", 1, [0]], ["_duration", 0, [0]], ["_fadeOut", 1, [0]]];
+if (_resource isEqualTo "") then {
+    _resource = "KH_ResourceKHControl";
+};
+
+_displayTimings params [["_fadeIn", 0.5, [0]], ["_duration", 0, [0]], ["_fadeOut", 0.5, [0]]];
 (_transforms call KH_fnc_parseNormalizedScreenTransforms) params ["_positionX", "_positionY", "_sizeX", "_sizeY"];
 _angle params [["_angle", 0, [0]], ["_centerX", 0, [0]], ["_centerY", 0, [0]]];
 private _khDisplay = uiNamespace getVariable ["KH_var_khDisplay", displayNull];
@@ -19,13 +23,13 @@ _control ctrlSetAngle [_angle, _centerX, _centerY];
 _control ctrlCommit 0;
 
 if (_text isEqualTo "") then {
-    _control ctrlSetText "#(rgb,8,8,3)color(1,1,1,1)";
+    _control ctrlSetText (["#(rgb,8,8,3)color(", _backgroundColor select 0, ",", _backgroundColor select 1, ",", _backgroundColor select 2, ",", _backgroundColor select 3, ")"] joinString "");
 }
 else {
     _control ctrlSetText _text;
 };
 
-_control ctrlSetTextColor _color;
+_control ctrlSetBackgroundColor _backgroundColor;
 _control ctrlSetFade 0;
 _control ctrlCommit _fadeIn;
 

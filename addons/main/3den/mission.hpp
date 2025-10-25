@@ -10,7 +10,7 @@ class Mission
 				collapsed = 1;
 				class Attributes
 				{
-					class ServerMissionLoadInit
+					class KH_ServerMissionLoadInit
 					{
 						displayName = "Server: Mission Load Init";
 						tooltip = "Unscheduled code to execute locally to the server when the mission loads. Players may not yet be present, and their units may not yet be available.";
@@ -32,7 +32,7 @@ class Mission
 						defaultValue = "''";
 						validate = "expression";
 					};
-					class ServerMissionStartInit
+					class KH_ServerMissionStartInit
 					{
 						displayName = "Server: Mission Start Init";
 						tooltip = "Unscheduled code to execute locally to the server when the mission starts. Players are present, but their units may not yet be available.";
@@ -54,7 +54,7 @@ class Mission
 						defaultValue = "''";
 						validate = "expression";
 					};		
-					class ServerPlayersLoadedInit
+					class KH_ServerPlayersLoadedInit
 					{
 						displayName = "Server: Players Loaded Init";
 						tooltip = "Unscheduled code to execute locally to the server once all player units have become available. This stage may be suspended for a maximum of 60 seconds before it automatically triggers in case of a player that never loads.";
@@ -76,7 +76,7 @@ class Mission
 						defaultValue = "''";
 						validate = "expression";
 					};
-					class ServerMissionEndInit
+					class KH_ServerMissionEndInit
 					{
 						displayName = "Server: Mission End Init";
 						tooltip = "Unscheduled code to execute locally to the server when the KH_fnc_endMission function or the KH End Mission module is executed.";
@@ -98,7 +98,7 @@ class Mission
 						defaultValue = "''";
 						validate = "expression";
 					};
-					class HeadlessMissionLoadInit
+					class KH_HeadlessMissionLoadInit
 					{
 						displayName = "Headless: Mission Load Init";
 						tooltip = "Unscheduled code to execute locally to each headless client when they load into the mission. Players may not yet be present, and their units may not yet be available.";
@@ -120,7 +120,7 @@ class Mission
 						defaultValue = "''";
 						validate = "expression";
 					};
-					class HeadlessMissionStartInit
+					class KH_HeadlessMissionStartInit
 					{
 						displayName = "Headless: Mission Start Init";
 						tooltip = "Unscheduled code to execute locally to each headless client when the mission starts. Players are present, but their units may not yet be available.";
@@ -142,7 +142,7 @@ class Mission
 						defaultValue = "''";
 						validate = "expression";
 					};
-					class HeadlessLoadInit
+					class KH_HeadlessLoadInit
 					{
 						displayName = "Headless: Load Init";
 						tooltip = "Unscheduled code to execute locally to each headless client when their local logic unit becomes available. Players are present, but their units may not yet be available.";
@@ -164,7 +164,7 @@ class Mission
 						defaultValue = "''";
 						validate = "expression";
 					};
-					class HeadlessPlayersLoadedInit
+					class KH_HeadlessPlayersLoadedInit
 					{
 						displayName = "Headless: Players Loaded Init";
 						tooltip = "Unscheduled code to execute locally to each headless client when all player units have become available. This stage may be suspended for a maximum of 60 seconds before it automatically triggers in case of a player that never loads.";
@@ -186,7 +186,7 @@ class Mission
 						defaultValue = "''";
 						validate = "expression";
 					};
-					class HeadlessMissionEndInit
+					class KH_HeadlessMissionEndInit
 					{
 						displayName = "Headless: Mission End Init";
 						tooltip = "Unscheduled code to execute locally to each headless client when the KH_fnc_endMission function or the KH End Mission module is executed.";
@@ -208,7 +208,7 @@ class Mission
 						defaultValue = "''";
 						validate = "expression";
 					};
-					class PlayerMissionLoadInit
+					class KH_PlayerMissionLoadInit
 					{
 						displayName = "Player: Mission Load Init";
 						tooltip = "Unscheduled code to execute locally to each player when they load into the mission. The local player unit is not yet available. Players may not yet be present, and their units may not yet be available.";
@@ -230,7 +230,7 @@ class Mission
 						defaultValue = "''";
 						validate = "expression";
 					};
-					class PlayerMissionStartInit
+					class KH_PlayerMissionStartInit
 					{
 						displayName = "Player: Mission Start Init";
 						tooltip = "Unscheduled code to execute locally to each player when the mission starts. The local player unit may not yet be available. Players are present, but their units may not yet be available.";
@@ -252,7 +252,7 @@ class Mission
 						defaultValue = "''";
 						validate = "expression";
 					};
-					class PlayerLoadInit
+					class KH_PlayerLoadInit
 					{
 						displayName = "Player: Load Init";
 						tooltip = "Unscheduled code to execute locally to each player when their local player unit becomes available. Players are present, but their units may not yet be available.";
@@ -274,7 +274,7 @@ class Mission
 						defaultValue = "''";
 						validate = "expression";
 					};
-					class PlayerPlayersLoadedInit
+					class KH_PlayerPlayersLoadedInit
 					{
 						displayName = "Player: Players Loaded Init";
 						tooltip = "Unscheduled code to execute locally to each player when all player units have become available. This stage may be suspended for a maximum of 60 seconds before it automatically triggers in case of a player that never loads.";
@@ -296,7 +296,7 @@ class Mission
 						defaultValue = "''";
 						validate = "expression";
 					};
-					class PlayerKilledInit
+					class KH_PlayerKilledInit
 					{
 						displayName = "Player: Killed Init";
 						tooltip = "Unscheduled code to execute locally to each player when they die. The local player unit is the killed unit. Passed arguments available through _this are: [_killer (OBJECT), _instigator (OBJECT)].";
@@ -318,7 +318,7 @@ class Mission
 						defaultValue = "''";
 						validate = "expression";
 					};
-					class PlayerRespawnInit
+					class KH_PlayerRespawnInit
 					{
 						displayName = "Player: Respawn Init";
 						tooltip = "Unscheduled code to execute locally to each player when they respawn. The local player unit is the respawned unit. Passed arguments available through _this are: [_corpse (OBJECT)].";
@@ -340,7 +340,7 @@ class Mission
 						defaultValue = "''";
 						validate = "expression";
 					};
-					class PlayerSwitchInit
+					class KH_PlayerSwitchInit
 					{
 						displayName = "Player: Switch Init";
 						tooltip = "Unscheduled code to execute locally to each player when they switch to another unit or team. The local player unit is the switched unit. Passed arguments available through _this are: [_previousUnit (OBJECT)].";
@@ -362,7 +362,7 @@ class Mission
 						defaultValue = "''";
 						validate = "expression";
 					};
-					class PlayerMissionEndInit
+					class KH_PlayerMissionEndInit
 					{
 						displayName = "Player: Mission End Init";
 						tooltip = "Unscheduled code to execute locally to each player before the mission ends when the KH_fnc_endMission function or the KH End Mission module is executed.";
@@ -392,7 +392,7 @@ class Mission
 				collapsed = 1;
 				class Attributes
 				{
-					class PersistentPlayerSynchronizer
+					class KH_PersistentPlayerSynchronizer
 					{
 						displayName = "Persistent Player Synchronizer";
 						tooltip = "A hash map of entries where the key is a string of the variable name of an entity, and the value is an array of strings of variable names of players which are to be synchronized to the entity assigned to the key. Ideal for making sure modules are synchronized to respawning or JIP players, as well as initial players at the start of the mission. For example: ['module1', ['player1', 'player2', 'player3', ...]], ['module2', ['player1', 'player2', 'player3', ...]], ....";
@@ -438,13 +438,13 @@ class Mission
 				collapsed = 1;
 				class Attributes
 				{
-					class CameraSequenceSubcategory
+					class KH_CameraSequenceSubcategory
 					{
 						description = "Plays a sequence of camera shots for players present at the start of the mission, and optionally JIP players. The attributes of each camera are interpolated based on index value equivalents from the different arrays of attributes. For example, the third element of the Positions attribute will take effect on the same shot as the third element of the Targets attribute.";
 						data = "AttributeSystemSubcategory";
 						control = "KH_SubcategoryNoHeader4";
 					};
-					class CameraSequence 
+					class KH_CameraSequence 
 					{
 						property = "KH_CameraSequence";
 						control = "KH_CameraSequence";
@@ -515,13 +515,13 @@ class Mission
 				collapsed = 1;
 				class Attributes
 				{
-					class CuratorsSubcategory
+					class KH_CuratorsSubcategory
 					{
 						description = "Automatically sets curators based on index pair equivalents of Steam IDs and curator modules.";
 						data = "AttributeSystemSubcategory";
 						control = "KH_SubcategoryNoHeader1";
 					};
-					class Curators
+					class KH_Curators
 					{
 						property = "KH_Curators";
 						control = "KH_Curators";
@@ -551,13 +551,13 @@ class Mission
 				collapsed = 1;
 				class Attributes
 				{
-					class PersistencySubcategory
+					class KH_PersistencySubcategory
 					{
-						description = "Maintain persistency using stored entity and world states. States are saved when the KH_fnc_endMission function or the KH End Mission module is executed, and loaded at the appropriate time if the persistent state of the identifier is available. If only the respawn loadout usage is desired, the identifier can be set to an empty string or all of the options can be unticked. The missionNamespace, as well as all entity namespaces, may contain a 'KH_var_persistentVariables' variable that is an array of arrays in format [name (STRING), value (ANY), public (BOOL)].";
+						description = "Maintain persistency using stored entity and world states. States are saved when the KH_fnc_endMission function or the KH End Mission module is executed, and loaded at the appropriate time if the persistent state of the identifier is available. If only the respawn loadout usage is desired, the identifier can be left empty, or all of the options can be unticked. The missionNamespace, as well as all entity namespaces, may contain a 'KH_var_persistentVariables' variable that is an array of arrays in format [name (STRING), value (ANY), public (BOOL)].";
 						data = "AttributeSystemSubcategory";
 						control = "KH_SubcategoryNoHeader6";
 					};
-					class Persistency 
+					class KH_Persistency 
 					{
 						property = "KH_Persistency";
 						control = "KH_Persistency";
@@ -633,13 +633,13 @@ class Mission
 				collapsed = 1;
 				class Attributes
 				{
-					class SideRelationsSubcategory
+					class KH_SideRelationsSubcategory
 					{
 						description = "Set the relationship state of the sides, with true designating friendly and false designating hostile.";
 						data = "AttributeSystemSubcategory";
 						control = "KH_SubcategoryNoHeader1";
 					};
-					class SideRelations
+					class KH_SideRelations
 					{
 						property = "KH_SideRelations";
 						control = "KH_SideRelations";
@@ -666,7 +666,7 @@ class Mission
 				collapsed = 1;
 				class Attributes
 				{
-					class RecoverDisconnectedPlayers
+					class KH_RecoverDisconnectedPlayers
 					{
 						displayName = "Recover Disconnected Players";
 						tooltip = "Recovers the unit attributes of players who reconnect after disconnecting.";
@@ -694,13 +694,13 @@ class Mission
 				collapsed = 1;
 				class Attributes
 				{
-					class EnvironmentAmbianceSubcategory
+					class KH_EnvironmentAmbianceSubcategory
 					{
 						description = "Determines the amount of environmental ambiance present in the mission.";
 						data = "AttributeSystemSubcategory";
 						control = "KH_SubcategoryNoHeader1";
 					};
-					class EnvironmentAmbiance 
+					class KH_EnvironmentAmbiance 
 					{
 						property = "KH_EnvironmentAmbiance";
 						control = "KH_EnvironmentAmbiance";
@@ -733,7 +733,7 @@ class Mission
 				collapsed = 1;
 				class Attributes
 				{
-					class LimitViewDistance
+					class KH_LimitViewDistance
 					{
 						displayName = "Limit View Distance";
 						tooltip = "Limits the maximum view distance to the set amount for all players. May override custom view distance mods. Set to -1 for no view distance limit. Can be edited with KH_fnc_limitViewDistance.";

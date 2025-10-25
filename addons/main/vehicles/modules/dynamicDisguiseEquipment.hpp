@@ -14,10 +14,13 @@ class KH_ModuleDynamicDisguiseEquipment: Module_F
 	isTriggerActivated = 0;
 	isDisposable = 1;
 	is3DEN = 0;
+	curatorInfoType = "";
+	curatorInfoTypeEmpty = "";
+	curatorCanAttach = 0;
 	icon = "\a3\ui_f\data\igui\cfg\simpletasks\letters\d_ca.paa";
 	class Attributes: AttributesBase
 	{
-		class Side: Combo
+		class KH_ModuleDynamicDisguiseEquipmentSide: Combo
 		{
 			displayName = "Side";
 			tooltip = "Side with which the equipment of this unit will be affiliated.";
@@ -31,21 +34,21 @@ class KH_ModuleDynamicDisguiseEquipment: Module_F
 				class KH_Resistance {name = "GREENFOR"; value = "GREENFOR";};
 			};
 		};
-		class Uniforms: Checkbox
+		class KH_ModuleDynamicDisguiseEquipmentUniforms: Checkbox
 		{
 			displayName = "Uniforms";
 			tooltip = "True inserts the uniforms of synchronized units to the desired side's uniform table.";
 			property = "KH_ModuleDynamicDisguiseEquipmentUniforms";
 			defaultValue = "false";
 		};
-		class Vests: Checkbox
+		class KH_ModuleDynamicDisguiseEquipmentVests: Checkbox
 		{
 			displayName = "Vests";
 			tooltip = "True inserts the vests of synchronized units to the desired side's uniform table.";
 			property = "KH_ModuleDynamicDisguiseEquipmentVests";
 			defaultValue = "false";
 		};
-		class Headgear: Checkbox
+		class KH_ModuleDynamicDisguiseEquipmentHeadgear: Checkbox
 		{
 			displayName = "Headgear";
 			tooltip = "True inserts the headgear of synchronized units to the desired side's uniform table.";

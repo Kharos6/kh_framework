@@ -8,7 +8,7 @@ class Group
 			collapsed = 1;
 			class Attributes
 			{
-				class ArrayBuilder
+				class KH_ArrayBuilder
 				{
 					displayName = "Array Builder";
 					tooltip = "Specify an array of strings of global variables that will be made into an array, made public, and contain this group and any other groups utilizing this function. In format 'globalVariable1', 'globalVariable2', 'globalVariable3', ....";
@@ -30,7 +30,7 @@ class Group
 					";
 					defaultValue = "''";
 				};
-				class IgnoredTargets
+				class KH_IgnoredTargets
 				{
 					displayName = "Ignored Targets";
 					tooltip = "Specify an array of strings of variable names of units or groups to be ignored as potential targets by the members of this group.";
@@ -53,7 +53,7 @@ class Group
 					";
 					defaultValue = "''";
 				};
-				class PlayerGroupInit
+				class KH_PlayerGroupInit
 				{
 					displayName = "Player Group Init";
 					tooltip = "Unscheduled code to execute locally to the players who load into the mission as members of this group once the player unit becomes available. Passed arguments available through _this are: [_group (GROUP)].";
@@ -84,7 +84,7 @@ class Group
 					defaultValue = "''";
 					validate = "expression";
 				};
-				class ServerGroupInit
+				class KH_ServerGroupInit
 				{
 					displayName = "Server Group Init";
 					tooltip = "Unscheduled code to execute on the server with this group passed as an argument. Passed arguments available through _this are: [_group (GROUP)].";

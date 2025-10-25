@@ -89,11 +89,21 @@ else {
 						_args params ["_arguments", "_function", "_unscheduled"];
 						private _argsCallback = param [1];
 
-						if _unscheduled then {
-							_arguments call (missionNamespace getVariable _function);
+						if (isNil "_arguments") then {
+							if _unscheduled then {
+								call (missionNamespace getVariable _function);
+							}
+							else {
+								spawn (missionNamespace getVariable _function);
+							};
 						}
 						else {
-							_arguments spawn (missionNamespace getVariable _function);
+							if _unscheduled then {
+								_arguments call (missionNamespace getVariable _function);
+							}
+							else {
+								_arguments spawn (missionNamespace getVariable _function);
+							};
 						};
 
 						[_handlerId] call KH_fnc_removeHandler;
@@ -219,10 +229,63 @@ private _specialParser = {
 switch (typeName _environmentType) do {
 	case "SCALAR": {
 		private _immediate = _environment param [1, true, [true]];
-		private _timeout = _environment param [2, 0, [0]];
-		private _unscheduled = _environment param [3, true, [true]];
+		private _timeoutRules = _environment param [2, false, [true, 0, "", []]];
+		private _timeoutFunction = _environment param [3, {}, [{}]];
+		private _verboseDelta = _environment param [4, false, [true]];
+		private _unscheduled = _environment param [5, true, [true]];
+		private _handlerTickCounterId = generateUid;
+		private _iterationCount = false;
+		
+		switch (typeName _timeoutRules) do {
+			case "BOOL": {
+				if _timeoutRules then {
+					_timeoutRules = [[1], false, false, false];
+				}
+				else {
+					_timeoutRules = [0, false, false, false];
+				};
+			};
+
+			case "SCALAR";
+			case "STRING": {
+				_timeoutRules = [_timeoutRules, false, false, false];
+			};
+		};
+
+		_timeoutRules params [["_timeout", 0, [true, 0, "", []]], ["_timeoutPriority", false, [true]], ["_timeoutOnConditionFailure", false, [true]], ["_timeoutOnDeletion", false, [true]]];
+
+		switch (typeName _timeout) do {
+			case "BOOL": {
+				if _timeout then {
+					_timeout = 1;
+					_iterationCount = true;
+					_handlerTickCounterId = generateUid;
+					missionNamespace setVariable [_handlerTickCounterId, 1];
+				}
+				else {
+					_timeout = 0;
+				};
+			};
+
+			case "STRING": {
+				_timeout = ((parseNumber _timeout) - CBA_missionTime) max 0;
+			};
+
+			case "ARRAY": {
+				_timeout = (_timeout select 0) max 1;
+				_iterationCount = true;
+				_handlerTickCounterId = generateUid;
+				missionNamespace setVariable [_handlerTickCounterId, 1];
+			};
+		};
+
 		([_special, _target] call _specialParser) params ["_return", "_specialIdOverride"];
 		private "_previousReturn";
+		private _continue = true;
+
+		if (isNil "_arguments") then {
+			_arguments = [];
+		};
 
 		private _fedArguments = if _basic then {
 			[_arguments, _function, clientOwner, _unscheduled];
@@ -231,24 +294,63 @@ switch (typeName _environmentType) do {
 			[_arguments, _function, _target, _special, _specialIdOverride, _unscheduled];
 		};
 
+		KH_var_temporalExecutionStackMonitor set [
+			_environmentId, 
+			[
+				[_arguments, _timeoutFunction, _environmentId, _return],
+				{
+					params ["_arguments", "_timeoutFunction", "_environmentId", "_return"];
+					private _handlerId = [[["TEMPORAL"], _environmentType, _environmentId, clientOwner], _return];
+					_arguments call _timeoutFunction;
+				},
+				_handlerTickCounterId, 
+				_timeout, 
+				_timeoutOnDeletion
+			]
+		];
+
 		if _immediate then {
-			private _handlerId = [missionNamespace, _environmentId, clientOwner];
+			private _handlerId = [[["TEMPORAL"], _environmentType, _environmentId, clientOwner], _return];
 			private _totalDelta = 0;
 			private _executionTime = CBA_missionTime;
 			private _executionCount = 0;
-			_previousReturn = _fedArguments call _subfunction;
+
+			if _iterationCount then {
+				_previousReturn = _fedArguments call _subfunction;
+				["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false]] call CBA_fnc_localEvent;
+
+				if (_timeout isEqualTo 1) then {
+					_continue = false;
+				};
+			}
+			else {
+				_previousReturn = _fedArguments call _subfunction;
+			};
+		};
+
+		if !_continue exitWith {
+			[[["TEMPORAL"], _environmentType, _environmentId, clientOwner], _return];
 		};
 
 		KH_var_temporalExecutionStackAdditions pushBack [
 			[_fedArguments, _subfunction, _environmentId],
-			{
-				params ["_fedArguments", "_subfunction", "_environmentId"];
-
-				if !(missionNamespace getVariable _environmentId) exitWith {																											
-					KH_var_temporalExecutionStackDeletions pushBackUnique _environmentId;
+			if _iterationCount then {
+				{
+					params ["_fedArguments", "_subfunction"];														
+					_fedArguments call _subfunction;
+					["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false]] call CBA_fnc_localEvent;
 				};
-													
-				_fedArguments call _subfunction;
+			}
+			else {
+				{
+					params ["_fedArguments", "_subfunction", "_environmentId"];
+
+					if !(missionNamespace getVariable _environmentId) exitWith {
+						KH_var_temporalExecutionStackDeletions pushBackUnique _environmentId;
+					};
+														
+					_fedArguments call _subfunction;
+				};
 			},
 			_environmentType,
 			if (_environmentType isEqualTo 0) then {
@@ -263,56 +365,116 @@ switch (typeName _environmentType) do {
 				};
 			},
 			-1,
-			[[missionNamespace, _environmentId, clientOwner], _return],
+			[[["TEMPORAL"], _environmentType, _environmentId, clientOwner], _return],
 			_environmentId,
 			_previousReturn,
 			CBA_missionTime,
 			[0, 1] select _immediate
 		];
 
-		if (_timeout isNotEqualTo 0) then {
+		if (!_iterationCount && (_timeout isNotEqualTo 0)) then {
 			private _timeoutId = generateUid;
 
-			KH_var_temporalExecutionStackAdditions pushBack [
-				[_environmentId],
-				{
-					params ["_environmentId"];
-					KH_var_temporalExecutionStackDeletions pushBackUnique _environmentId;
-					KH_var_temporalExecutionStackDeletions pushBackUnique _handlerId;
-				},
-				_timeout,
-				if (_timeout isEqualTo 0) then {
-					diag_frameNo + 1;
-				}
-				else {
-					if (_timeout > 0) then {
-						diag_tickTime + _timeout;
-					}
-					else {
-						diag_frameNo + (abs _timeout);
-					};
-				},
-				-1,
-				_timeoutId,
-				_timeoutId,
-				nil,
-				CBA_missionTime,
-				0
+			KH_var_temporalExecutionStackAdditions insert [
+				[-1, 0] select _timeoutPriority,
+				[
+					[
+						[_environmentId],
+						{
+							params ["_environmentId"];
+							["KH_eve_temporalExecutionStackHandler", [_environmentId, true, true, false]] call CBA_fnc_localEvent;
+							KH_var_temporalExecutionStackDeletions pushBackUnique _handlerId;
+						},
+						_timeout,
+						if (_timeout isEqualTo 0) then {
+							diag_frameNo + 1;
+						}
+						else {
+							if (_timeout > 0) then {
+								diag_tickTime + _timeout;
+							}
+							else {
+								diag_frameNo + (abs _timeout);
+							};
+						},
+						-1,
+						_timeoutId,
+						_timeoutId,
+						nil,
+						CBA_missionTime,
+						0
+					]
+				]
 			];
 		};
 
-		[[missionNamespace, _environmentId, clientOwner], _return];
+		[[["TEMPORAL"], _environmentType, _environmentId, clientOwner], _return];
 	};
 
 	case "CODE": {
 		private _immediate = _environment param [1, true, [true]];
-		private _timeout = _environment param [2, 0, [0]];
-		private _interval = _environment param [3, 0, [0]];
-		private _fireOnce = _environment param [4, true, [true]];
-		private _unscheduled = _environment param [5, true, [true]];
+		private _interval = _environment param [2, 0, [0]];
+		private _timeoutRules = _environment param [3, [[1, false], false, false, false], [true, 0, "", []]];
+		private _timeoutFunction = _environment param [4, {}, [{}]];
+		private _verboseDelta = _environment param [5, false, [true]];
+		private _unscheduled = _environment param [6, true, [true]];
+		private _handlerTickCounterId = generateUid;
+		private _iterationCount = false;
+		private "_countConditionFailure";
+		
+		switch (typeName _timeoutRules) do {
+			case "BOOL": {
+				if _timeoutRules then {
+					_timeoutRules = [[1], false, false, false];
+				}
+				else {
+					_timeoutRules = [0, false, false, false];
+				};
+			};
+
+			case "SCALAR";
+			case "STRING": {
+				_timeoutRules = [_timeoutRules, false, false, false];
+			};
+		};
+
+		_timeoutRules params [["_timeout", 0, [true, 0, "", []]], ["_timeoutPriority", false, [true]], ["_timeoutOnConditionFailure", false, [true]], ["_timeoutOnDeletion", false, [true]]];
+
+		switch (typeName _timeout) do {
+			case "BOOL": {
+				if _timeout then {
+					_timeout = 1;
+					_iterationCount = true;
+					_countConditionFailure = false;
+					_handlerTickCounterId = generateUid;
+					missionNamespace setVariable [_handlerTickCounterId, 1];
+				}
+				else {
+					_timeout = 0;
+				};
+			};
+
+			case "STRING": {
+				_timeout = ((parseNumber _timeout) - CBA_missionTime) max 0;
+			};
+
+			case "ARRAY": {
+				_countConditionFailure = _timeout param [1, false, [true]];
+				_timeout = (_timeout select 0) max 1;
+				_iterationCount = true;
+				_handlerTickCounterId = generateUid;
+				missionNamespace setVariable [_handlerTickCounterId, 1];
+			};
+		};
+
 		([_special, _target] call _specialParser) params ["_return", "_specialIdOverride"];
 		_environmentType = missionNamespace getVariable ([_environmentType, false] call KH_fnc_parseFunction);
+		private "_previousReturn";
 		private _continue = true;
+
+		if (isNil "_arguments") then {
+			_arguments = [];
+		};
 
 		private _fedArguments = if _basic then {
 			[_arguments, _function, clientOwner, _unscheduled];
@@ -321,45 +483,176 @@ switch (typeName _environmentType) do {
 			[_arguments, _function, _target, _special, _specialIdOverride, _unscheduled];
 		};
 
-		if (isNil "_arguments") then {
-			_arguments = [];
-		};
-
-		private "_previousReturn";
+		KH_var_temporalExecutionStackMonitor set [
+			_environmentId, 
+			[
+				[_arguments, _timeoutFunction, _environmentId, _interval, _return],
+				{
+					params ["_arguments", "_timeoutFunction", "_environmentId", "_interval", "_return"];
+					private _handlerId = [[["TEMPORAL"], _interval, _environmentId, clientOwner], _return];
+					_arguments call _timeoutFunction;
+				},
+				_handlerTickCounterId, 
+				_timeout, 
+				_timeoutOnDeletion
+			]
+		];
 
 		if _immediate then {
-			private _handlerId = [missionNamespace, _environmentId, clientOwner];
+			private _handlerId = [[["TEMPORAL"], _interval, _environmentId, clientOwner], _return];
 			private _totalDelta = 0;
 			private _executionTime = CBA_missionTime;
 			private _executionCount = 0;
 
-			if (_arguments call _environmentType) then {
-				_previousReturn = _fedArguments call _subfunction;
+			if _iterationCount then {
+				if _countConditionFailure then {
+					if _timeoutOnConditionFailure then {
+						if (_arguments call _environmentType) then {
+							_previousReturn = _fedArguments call _subfunction;
+							["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false]] call CBA_fnc_localEvent;
+						}
+						else {
+							["KH_eve_temporalExecutionStackHandler", [_environmentId, true, true, true]] call CBA_fnc_localEvent;
+						};
+					}
+					else {
+						if (_arguments call _environmentType) then {
+							_previousReturn = _fedArguments call _subfunction;
+							["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false]] call CBA_fnc_localEvent;
+						}
+						else {
+							["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, true]] call CBA_fnc_localEvent;
+						};
+					};
 
-				if _fireOnce then {
-					_continue = false;
+					if (_timeout isEqualTo 1) then {
+						_continue = false;
+					};
+				}
+				else {
+					if _timeoutOnConditionFailure then {
+						if (_arguments call _environmentType) then {
+							_previousReturn = _fedArguments call _subfunction;
+							["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false]] call CBA_fnc_localEvent;
+
+							if (_timeout isEqualTo 1) then {
+								_continue = false;
+							};
+						}
+						else {
+							["KH_eve_temporalExecutionStackHandler", [_environmentId, true, true, true]] call CBA_fnc_localEvent;
+						};
+					}
+					else {
+						if (_arguments call _environmentType) then {
+							_previousReturn = _fedArguments call _subfunction;
+							["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false]] call CBA_fnc_localEvent;
+
+							if (_timeout isEqualTo 1) then {
+								_continue = false;
+							};
+						};
+					};
+				};
+			}
+			else {
+				if _timeoutOnConditionFailure then {
+					if (_arguments call _environmentType) then {
+						_previousReturn = _fedArguments call _subfunction;
+					}
+					else {
+						["KH_eve_temporalExecutionStackHandler", [_environmentId, true, true, true]] call CBA_fnc_localEvent;
+					};
+				}
+				else {
+					if (_arguments call _environmentType) then {
+						_previousReturn = _fedArguments call _subfunction;
+					};
 				};
 			};
 		};
 
 		if !_continue exitWith {
-			[[missionNamespace, _environmentId, clientOwner], _return];
+			[[["TEMPORAL"], _interval, _environmentId, clientOwner], _return];
 		};
 
 		KH_var_temporalExecutionStackAdditions pushBack [
-			[_arguments, _fedArguments, _subfunction, _environmentId, _environmentType, _fireOnce],
-			{
-				params ["_arguments", "_fedArguments", "_subfunction", "_environmentId", "_environmentType", "_fireOnce"];
+			[_arguments, _fedArguments, _subfunction, _environmentId, _environmentType],
+			if _iterationCount then {
+				if _countConditionFailure then {
+					if _timeoutOnConditionFailure then {
+						{
+							params ["_arguments", "_fedArguments", "_subfunction", "_environmentId", "_environmentType"];
 
-				if !(missionNamespace getVariable _environmentId) exitWith {																											
-					KH_var_temporalExecutionStackDeletions pushBackUnique _environmentId;
+							if (_arguments call _environmentType) then {
+								_fedArguments call _subfunction;
+								["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false]] call CBA_fnc_localEvent;
+							}
+							else {
+								["KH_eve_temporalExecutionStackHandler", [_environmentId, true, true, true]] call CBA_fnc_localEvent;
+							};
+						};
+					}
+					else {
+						{
+							params ["_arguments", "_fedArguments", "_subfunction", "_environmentId", "_environmentType"];
+
+							if (_arguments call _environmentType) then {
+								_fedArguments call _subfunction;
+								["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false]] call CBA_fnc_localEvent;
+							}
+							else {
+								["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, true]] call CBA_fnc_localEvent;
+							};
+						};
+					};
+				}
+				else {
+					if _timeoutOnConditionFailure then {
+						{
+							params ["_arguments", "_fedArguments", "_subfunction", "_environmentId", "_environmentType"];
+
+							if (_arguments call _environmentType) then {
+								_fedArguments call _subfunction;
+								["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false]] call CBA_fnc_localEvent;
+							}
+							else {
+								["KH_eve_temporalExecutionStackHandler", [_environmentId, true, true, true]] call CBA_fnc_localEvent;
+							};
+						};
+					}
+					else {
+						{
+							params ["_arguments", "_fedArguments", "_subfunction", "_environmentId", "_environmentType"];
+
+							if (_arguments call _environmentType) then {
+								_fedArguments call _subfunction;
+								["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false]] call CBA_fnc_localEvent;
+							};
+						};
+					};
 				};
+			}
+			else {
+				if _timeoutOnConditionFailure then {
+					{
+						params ["_arguments", "_fedArguments", "_subfunction", "_environmentId", "_environmentType"];
 
-				if (_arguments call _environmentType) then {												
-					_fedArguments call _subfunction;
+						if (_arguments call _environmentType) then {
+							_fedArguments call _subfunction;
+						}
+						else {
+							["KH_eve_temporalExecutionStackHandler", [_environmentId, true, true, true]] call CBA_fnc_localEvent;
+						};
+					};
+				}
+				else {
+					{
+						params ["_arguments", "_fedArguments", "_subfunction", "_environmentId", "_environmentType"];
 
-					if _fireOnce then {
-						KH_var_temporalExecutionStackDeletions pushBackUnique _environmentId;
+						if (_arguments call _environmentType) then {
+							_fedArguments call _subfunction;
+						}
 					};
 				};
 			},
@@ -376,45 +669,50 @@ switch (typeName _environmentType) do {
 				};
 			},
 			-1,
-			[[missionNamespace, _environmentId, clientOwner], _return],
+			[[["TEMPORAL"], _interval, _environmentId, clientOwner], _return],
 			_environmentId,
 			_previousReturn,
 			CBA_missionTime,
 			[0, 1] select _immediate
 		];
 
-		if (_timeout isNotEqualTo 0) then {
+		if (!_iterationCount && (_timeout isNotEqualTo 0)) then {
 			private _timeoutId = generateUid;
-			
-			KH_var_temporalExecutionStackAdditions pushBack [
-				[_environmentId],
-				{
-					params ["_environmentId"];
-					KH_var_temporalExecutionStackDeletions pushBackUnique _environmentId;
-					KH_var_temporalExecutionStackDeletions pushBackUnique _handlerId;
-				},
-				_timeout,
-				if (_timeout isEqualTo 0) then {
-					diag_frameNo + 1;
-				}
-				else {
-					if (_timeout > 0) then {
-						diag_tickTime + _timeout;
-					}
-					else {
-						diag_frameNo + (abs _timeout);
-					};
-				},
-				-1,
-				_timeoutId,
-				_timeoutId,
-				nil,
-				CBA_missionTime,
-				0
+
+			KH_var_temporalExecutionStackAdditions insert [
+				[-1, 0] select _timeoutPriority,
+				[
+					[
+						[_environmentId],
+						{
+							params ["_environmentId"];
+							["KH_eve_temporalExecutionStackHandler", [_environmentId, true, true, false]] call CBA_fnc_localEvent;
+							KH_var_temporalExecutionStackDeletions pushBackUnique _handlerId;
+						},
+						_timeout,
+						if (_timeout isEqualTo 0) then {
+							diag_frameNo + 1;
+						}
+						else {
+							if (_timeout > 0) then {
+								diag_tickTime + _timeout;
+							}
+							else {
+								diag_frameNo + (abs _timeout);
+							};
+						},
+						-1,
+						_timeoutId,
+						_timeoutId,
+						nil,
+						CBA_missionTime,
+						0
+					]
+				]
 			];
 		};
 
-		[[missionNamespace, _environmentId, clientOwner], _return];
+		[[["TEMPORAL"], _interval, _environmentId, clientOwner], _return];
 	};
 
 	case "STRING": {

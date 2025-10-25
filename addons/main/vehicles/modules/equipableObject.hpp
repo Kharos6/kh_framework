@@ -14,66 +14,69 @@ class KH_ModuleEquipableObject: Module_F
 	isTriggerActivated = 0;
 	isDisposable = 1;
 	is3DEN = 0;
+	curatorInfoType = "";
+	curatorInfoTypeEmpty = "";
+	curatorCanAttach = 0;
 	icon = "\a3\Ui_f\data\IGUI\Cfg\simpleTasks\types\box_ca.paa";
 	class Attributes: AttributesBase
 	{
-		class Name: Edit
+		class KH_ModuleEquipableObjectName: Edit
 		{
 			displayName = "Name";
 			tooltip = "Name assigned to the object for equip and unequip actions.";
 			property = "KH_ModuleEquipableObjectName";
 			defaultValue = "''";
 		};
-		class Bone: Edit
+		class KH_ModuleEquipableObjectBone: Edit
 		{
 			displayName = "Bone";
-			tooltip = "Name of the bone on the equipping unit's skeleton to which the object will be attached. Set to an empty string to attach at the root.";
+			tooltip = "Name of the bone on the equipping unit's skeleton to which the object will be attached. Leave empty to attach at the root.";
 			property = "KH_ModuleEquipableObjectBone";
 			defaultValue = "''";
 		};
-		class Position: Edit
+		class KH_ModuleEquipableObjectPosition: Edit
 		{
 			displayName = "Position";
 			tooltip = "Position of the object relative to the assigned bone.";
 			property = "KH_ModuleEquipableObjectPosition";
 			defaultValue = "'0, 0, 0'";
 		};
-		class Rotation: Edit
+		class KH_ModuleEquipableObjectRotation: Edit
 		{
 			displayName = "Rotation";
 			tooltip = "Rotation of the object relative to the assigned bone. Can either be in euler format [x, y, z], or vectorDir and vectorUp format [x, y, z], [x, y, z]";
 			property = "KH_ModuleEquipableObjectRotation";
 			defaultValue = "'0, 0, 0'";
 		};
-		class Scale: Edit
+		class KH_ModuleEquipableObjectScale: Edit
 		{
 			displayName = "Scale";
 			tooltip = "Scale of the object while it is equipped.";
 			property = "KH_ModuleEquipableObjectScale";
 			defaultValue = "'1'";
 		};
-		class DisableCollision: Checkbox
+		class KH_ModuleEquipableObjectDisableCollision: Checkbox
 		{
 			displayName = "Disable Collision";
 			tooltip = "True disables collision on this object while it is equipped.";
 			property = "KH_ModuleEquipableObjectDisableCollision";
 			defaultValue = "true";
 		};
-		class HideInVehicles: Checkbox
+		class KH_ModuleEquipableObjectHideInVehicles: Checkbox
 		{
 			displayName = "Hide In Vehicles";
 			tooltip = "True hides the object while equipped on a unit that is inside of a vehicle.";
 			property = "KH_ModuleEquipableObjectHideInVehicles";
 			defaultValue = "true";
 		};
-		class ToggleEquip: Checkbox
+		class KH_ModuleEquipableObjectToggleEquip: Checkbox
 		{
 			displayName = "Toggle Equip";
 			tooltip = "True allows the object to be unequipped and reequipped repeatedly.";
 			property = "KH_ModuleEquipableObjectToggleEquip";
 			defaultValue = "true";
 		};
-		class Exclusive: Checkbox
+		class KH_ModuleEquipableObjectExclusive: Checkbox
 		{
 			displayName = "Exclusive";
 			tooltip = "True prevents a unit from equipping another object with this same exclusive flag set to true while this object is equipped.";
@@ -84,11 +87,11 @@ class KH_ModuleEquipableObject: Module_F
 	};
 	class ModuleDescription: ModuleDescription
 	{
-		description[] = {"Adds an action to the synchronized objects that allows players to equip them on their person. Activates only once, without a trigger, on the server."};
+		description[] = {"Adds an action to the synchronized objects that allows players to equip them on their person. Each equip and unequip triggers the 'KH_eve_equipableObjectExchanged' event, where passed arguments available through _this are: [_carrier (OBJECT), _equipableObject (OBJECT), _equipped (BOOL)]. Activates only once, without a trigger, on the server."};
 		sync[] = {"AnyStaticObject"};
 		position = 0;
 		direction = 0;
 		optional = 0;
-		duplicate = 0;
+		duplicate = 1;
 	};
 };

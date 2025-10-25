@@ -67,7 +67,7 @@ if (isNil "KH_var_assignIdentificationCardSet") then {
 					},
 					"PLAYERS",
 					true,
-					["JIP", _newEntity, true, ""]
+					["JIP", _newEntity, false, ""]
 				] call KH_fnc_execute;
 			};
 		}
@@ -519,5 +519,5 @@ _unit setVariable ["KH_var_identificationCardInformation", [_name, _gender, _rac
 	},
 	"PLAYERS",
 	true,
-	["JIP", _unit, true, ""]
+	["JIP", _unit, false, ""]
 ] call KH_fnc_execute;

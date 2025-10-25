@@ -6,6 +6,7 @@ class CfgFunctions
 		class KH_Framework
 		{
 			file = "\x\kh\addons\main\functions";
+			class addAction {};
 			class addEventHandler {};
 			class addVisualTrigger {};
 			class arma {};
@@ -62,6 +63,7 @@ class CfgFunctions
 			class loadUnitPersistency {};
 			class log {};
 			class luaRecompile {};
+			class moduleAddAction {};
 			class moduleAssignIdentificationCard {};
 			class moduleAssignTerminal {};
 			class moduleDynamicDisguise {};

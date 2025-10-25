@@ -14,45 +14,48 @@ class KH_ModuleFultonExtract: Module_F
 	isTriggerActivated = 0;
 	isDisposable = 1;
 	is3DEN = 0;
+	curatorInfoType = "";
+	curatorInfoTypeEmpty = "";
+	curatorCanAttach = 0;
 	icon = "a3\Modules_F_Tacops\Data\CivilianPresenceSafeSpot\icon32_ca.paa";
 	class Attributes: AttributesBase
 	{
-		class Name: Edit
+		class KH_ModuleFultonExtractName: Edit
 		{
 			displayName = "Name";
 			tooltip = "Name assigned to the object for actions.";
 			property = "KH_ModuleFultonExtractName";
 			defaultValue = "''";
 		};
-		class Vehicles: Edit
+		class KH_ModuleFultonExtractVehicles: Edit
 		{
 			displayName = "Vehicles";
-			tooltip = "Array of strings of variable names of vehicles that are allowed to activate the fulton baloon.";
+			tooltip = "Array of strings of variable names of vehicles that are allowed to activate the fulton baloon. If left empty, and all vehicles of the 'Plane' type will be considered valid.";
 			property = "KH_ModuleFultonExtractVehicles";
 			defaultValue = "''";
 		};
-		class Height: Edit
+		class KH_ModuleFultonExtractHeight: Edit
 		{
 			displayName = "Height";
 			tooltip = "Height, in metres, that the fulton baloon will reach as it waits for a designated vehicle. Maximum value is clamped to 100.";
 			property = "KH_ModuleFultonExtractHeight";
 			defaultValue = "'100'";
 		};
-		class Distance: Edit
+		class KH_ModuleFultonExtractDistance: Edit
 		{
 			displayName = "Distance";
 			tooltip = "The minimum activation distance, in metres, between a designated vehicle and the fulton baloon, within which the attached units will start being pulled to the vehicle. Minimum value is clamped to 10, though could be more generous depending on the vehicles.";
 			property = "KH_ModuleFultonExtractDistance";
-			defaultValue = "'5'";
+			defaultValue = "'10'";
 		};
-		class MaximumParticipants: Edit
+		class KH_ModuleFultonExtractMaximumParticipants: Edit
 		{
 			displayName = "Maximum Participants";
-			tooltip = "The maximum amount of people that are allowed to carry a harness for this fulton.";
+			tooltip = "The maximum amount of people that are allowed to carry a harness for this fulton. Beware that this will not override the maximum capacity of a fulton vehicle, and any units beyond the designated vehicle's passenger capacity will simply be thrown out once they are fully pulled in.";
 			property = "KH_ModuleFultonExtractMaximumParticipants";
 			defaultValue = "'10'";
 		};
-		class Duration: Edit
+		class KH_ModuleFultonExtractDuration: Edit
 		{
 			displayName = "Duration";
 			tooltip = "The time it will take for participants to get pulled into the vehicle.";
@@ -68,6 +71,6 @@ class KH_ModuleFultonExtract: Module_F
 		position = 0;
 		direction = 0;
 		optional = 0;
-		duplicate = 0;
+		duplicate = 1;
 	};
 };

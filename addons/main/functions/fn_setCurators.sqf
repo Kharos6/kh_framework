@@ -41,7 +41,8 @@ if (isNil "KH_var_curatorsSet") then {
 									player allowDamage false;
 								},
 								_player,
-								true
+								true,
+								false
 							] call KH_fnc_execute;
 						};
 
@@ -55,7 +56,7 @@ if (isNil "KH_var_curatorsSet") then {
 					};
 				},
 				true,
-				[1, true, 60, true],
+				[1, true, 60, {}, false, true],
 				false 
 			] call KH_fnc_execute;
 		}
@@ -120,7 +121,7 @@ if (isNil "KH_var_curatorsSet") then {
 							};
 						},
 						true,
-						[1, true, 60, true],
+						[1, true, 60, {}, false, true],
 						false 
 					] call KH_fnc_execute;
 				}

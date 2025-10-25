@@ -128,7 +128,13 @@ switch _eventType do {
 						private _entityOwner = missionNamespace getVariable _entityOwnerId;
 						private _args = missionNamespace getVariable _argumentsId;
 						private _eventName = missionNamespace getVariable _eventNameId;
-						_arguments call (missionNamespace getVariable _function);
+
+						if (isNil "_arguments") then {
+							call (missionNamespace getVariable _function);
+						}
+						else {
+							_arguments call (missionNamespace getVariable _function);
+						};
 					}
 				] call KH_fnc_addEventHandler;
 
@@ -308,340 +314,8 @@ switch _eventType do {
 		_handler = [_namespace, _event, _expression] call BIS_fnc_addScriptedEventHandler;
 	};
 
-	case "TEMPORAL": {
-		private _immediate = _type param [1, true, [true]];
-		private _conditionArguments = _type param [2];
-		private _conditionFunction = _type param [3, {}, ["", {}]];
-		private _timeoutRules = _type param [4, [0, false, false, false], [true, 0, "", []]];
-		private _timeoutArguments = _type param [5];
-		private _timeoutFunction = _type param [6, {}, ["", {}]];
-		private _verboseDelta = _type param [7, false, [true]];
-		private _conditionArgumentsId = generateUid;
-		private _handlerTickCounterId = generateUid;
-		private _iterationCount = false;
-		private "_countConditionFailure";
-		_timeoutFunction = [_timeoutFunction, false] call KH_fnc_parseFunction;
-		missionNamespace setVariable [_conditionArgumentsId, _conditionArguments];
-		_handler = generateUid;
-
-		switch (typeName _timeoutRules) do {
-			case "BOOL": {
-				if _timeoutRules then {
-					_timeoutRules = [[1], false, false, false];
-				}
-				else {
-					_timeoutRules = [0, false, false, false];
-				};
-			};
-
-			case "SCALAR";
-			case "STRING": {
-				_timeoutRules = [_timeoutRules, false, false, false];
-			};
-		};
-
-		_timeoutRules params [["_timeout", 0, [true, 0, "", []]], ["_timeoutPriority", false, [true]], ["_timeoutOnConditionFailure", false, [true]], ["_timeoutOnDeletion", false, [true]]];
-
-		switch (typeName _timeout) do {
-			case "BOOL": {
-				if _timeout then {
-					_timeout = 1;
-					_iterationCount = true;
-					_countConditionFailure = false;
-					_handlerTickCounterId = generateUid;
-					missionNamespace setVariable [_handlerTickCounterId, 1];
-				}
-				else {
-					_timeout = 0;
-				};
-			};
-
-			case "STRING": {
-				_timeout = ((parseNumber _timeout) - CBA_missionTime) max 0;
-			};
-
-			case "ARRAY": {
-				_countConditionFailure = _timeout param [1, false, [true]];
-				_timeout = (_timeout select 0) max 1;
-				_iterationCount = true;
-				_handlerTickCounterId = generateUid;
-				missionNamespace setVariable [_handlerTickCounterId, 1];
-			};
-		};
-
-		KH_var_temporalExecutionStackMonitor set [
-			_handler, 
-			[
-				_timeoutArguments, 
-				if ((missionNamespace getVariable _timeoutFunction) isNotEqualTo {}) then {
-					compile ([
-						"private _args = missionNamespace getVariable '", _argumentsId, "';
-						private _eventName = missionNamespace getVariable '", _eventNameId, "';
-						private _handlerId = missionNamespace getVariable '", _handlerId, "';
-						call (missionNamespace getVariable '", _timeoutFunction, "');"
-					] joinString "");
-				}
-				else {
-					{};
-				}, 
-				_handlerTickCounterId, 
-				_timeout, 
-				_timeoutOnDeletion
-			]
-		];
-
-		private _continue = true;
-		private "_previousReturn";
-		
-		if (isNil "_arguments") then {
-			_arguments = [];
-		};
-
-		if _immediate then {
-			private _args = _arguments;
-			private _totalDelta = 0;
-			private _handlerId = [_type, _event, _handler, clientOwner];
-			private _eventName = _handler;
-			private _executionTime = CBA_missionTime;
-			private _executionCount = 0;
-
-			if ((_conditionFunction isEqualTo {}) || (_conditionFunction isEqualTo "")) then {						
-				if _iterationCount then {
-					_previousReturn = _arguments call (missionNamespace getVariable _function);
-					["KH_eve_temporalExecutionStackHandler", [_handler, false, false]] call CBA_fnc_localEvent;
-
-					if (_timeout isEqualTo 1) then {
-						_continue = false;
-					};
-				}
-				else {
-					_previousReturn = _arguments call (missionNamespace getVariable _function);
-				};
-			}
-			else {
-				private _conditionFunctionId = [_conditionFunction, false] call KH_fnc_parseFunction;
-
-				if _iterationCount then {
-					if _countConditionFailure then {
-						if _timeoutOnConditionFailure then {
-							if (_conditionArguments call (missionNamespace getVariable _conditionFunctionId)) then {
-								_previousReturn = _arguments call (missionNamespace getVariable _function);
-								["KH_eve_temporalExecutionStackHandler", [_handler, false, false]] call CBA_fnc_localEvent;
-							}
-							else {
-								["KH_eve_temporalExecutionStackHandler", [_handler, true, true]] call CBA_fnc_localEvent;
-							};
-						}
-						else {
-							if (_conditionArguments call (missionNamespace getVariable _conditionFunctionId)) then {
-								_previousReturn = _arguments call (missionNamespace getVariable _function);
-								["KH_eve_temporalExecutionStackHandler", [_handler, false, false]] call CBA_fnc_localEvent;
-							}
-							else {
-								["KH_eve_temporalExecutionStackHandler", [_handler, false, false]] call CBA_fnc_localEvent;
-							};
-						};
-
-						if (_timeout isEqualTo 1) then {
-							_continue = false;
-						};
-					}
-					else {
-						if _timeoutOnConditionFailure then {
-							if (_conditionArguments call (missionNamespace getVariable _conditionFunctionId)) then {
-								_previousReturn = _arguments call (missionNamespace getVariable _function);
-								["KH_eve_temporalExecutionStackHandler", [_handler, false, false]] call CBA_fnc_localEvent;
-
-								if (_timeout isEqualTo 1) then {
-									_continue = false;
-								};
-							}
-							else {
-								["KH_eve_temporalExecutionStackHandler", [_handler, true, true]] call CBA_fnc_localEvent;
-							};
-						}
-						else {
-							if (_conditionArguments call (missionNamespace getVariable _conditionFunctionId)) then {
-								_previousReturn = _arguments call (missionNamespace getVariable _function);
-								["KH_eve_temporalExecutionStackHandler", [_handler, false, false]] call CBA_fnc_localEvent;
-
-								if (_timeout isEqualTo 1) then {
-									_continue = false;
-								};
-							};
-						};
-					};
-				}
-				else {
-					if _timeoutOnConditionFailure then {
-						if (_conditionArguments call (missionNamespace getVariable _conditionFunctionId)) then {
-							_previousReturn = _arguments call (missionNamespace getVariable _function);
-						}
-						else {
-							["KH_eve_temporalExecutionStackHandler", [_handler, true, true]] call CBA_fnc_localEvent;
-						};
-					}
-					else {
-						if (_conditionArguments call (missionNamespace getVariable _conditionFunctionId)) then {
-							_previousReturn = _arguments call (missionNamespace getVariable _function);
-						};
-					};
-				};
-			};
-		};
-
-		if !_continue exitWith {};
-
-		KH_var_temporalExecutionStackAdditions insert [
-			[0, -1] select _timeoutPriority,
-			[
-				[
-					_arguments,
-					if ((_conditionFunction isEqualTo {}) || (_conditionFunction isEqualTo "")) then {						
-						if _iterationCount then {
-							compile ([
-								"call (missionNamespace getVariable '", _function, "');
-								['KH_eve_temporalExecutionStackHandler', ['", _handler, "', false, false]] call CBA_fnc_localEvent;"
-							] joinString "");
-						}
-						else {
-							missionNamespace getVariable _function;
-						};
-					}
-					else {
-						private _conditionFunctionId = [_conditionFunction, false] call KH_fnc_parseFunction;
-
-						if _iterationCount then {
-							if _countConditionFailure then {
-								if _timeoutOnConditionFailure then {
-									compile ([
-										"if ((missionNamespace getVariable '", _conditionArgumentsId, "') call (missionNamespace getVariable '", _conditionFunctionId, "')) then {
-											call (missionNamespace getVariable '", _function, "');
-											['KH_eve_temporalExecutionStackHandler', ['", _handler, "', false, false]] call CBA_fnc_localEvent;
-										}
-										else {
-											['KH_eve_temporalExecutionStackHandler', ['", _handler, "', true, true]] call CBA_fnc_localEvent;
-										};"
-									] joinString "");
-								}
-								else {
-									compile ([
-										"if ((missionNamespace getVariable '", _conditionArgumentsId, "') call (missionNamespace getVariable '", _conditionFunctionId, "')) then {
-											call (missionNamespace getVariable '", _function, "');
-											['KH_eve_temporalExecutionStackHandler', ['", _handler, "', false, false]] call CBA_fnc_localEvent;
-										}
-										else {
-											['KH_eve_temporalExecutionStackHandler', ['", _handler, "', false, false]] call CBA_fnc_localEvent;
-										};"
-									] joinString "");
-								};
-							}
-							else {
-								if _timeoutOnConditionFailure then {
-									compile ([
-										"if ((missionNamespace getVariable '", _conditionArgumentsId, "') call (missionNamespace getVariable '", _conditionFunctionId, "')) then {
-											call (missionNamespace getVariable '", _function, "');
-											['KH_eve_temporalExecutionStackHandler', ['", _handler, "', false, false]] call CBA_fnc_localEvent;
-										}
-										else {
-											['KH_eve_temporalExecutionStackHandler', ['", _handler, "', true, true]] call CBA_fnc_localEvent;
-										};"
-									] joinString "");
-								}
-								else {
-									compile ([
-										"if ((missionNamespace getVariable '", _conditionArgumentsId, "') call (missionNamespace getVariable '", _conditionFunctionId, "')) then {
-											call (missionNamespace getVariable '", _function, "');
-											['KH_eve_temporalExecutionStackHandler', ['", _handler, "', false, false]] call CBA_fnc_localEvent;
-										};"
-									] joinString "");
-								};
-							};
-						}
-						else {
-							if _timeoutOnConditionFailure then {
-								compile ([
-									"if ((missionNamespace getVariable '", _conditionArgumentsId, "') call (missionNamespace getVariable '", _conditionFunctionId, "')) then {
-										call (missionNamespace getVariable '", _function, "');
-									}
-									else {
-										['KH_eve_temporalExecutionStackHandler', ['", _handler, "', true, true]] call CBA_fnc_localEvent;
-									};"
-								] joinString "");
-							}
-							else {
-								compile ([
-									"if ((missionNamespace getVariable '", _conditionArgumentsId, "') call (missionNamespace getVariable '", _conditionFunctionId, "')) then {
-										call (missionNamespace getVariable '", _function, "');
-									};"
-								] joinString "");
-							};
-						};
-					},
-					_event,
-					if (_event isEqualTo 0) then {
-						diag_frameNo + 1;
-					}
-					else {
-						if (_event > 0) then {
-							diag_tickTime + _event;
-						}
-						else {
-							diag_frameNo + (abs _event);
-						};
-					},
-					if _verboseDelta then {
-						systemTime joinString "";
-					}
-					else {
-						-1;
-					},
-					[_type, _event, _handler, clientOwner],
-					_handler,
-					_previousReturn,
-					CBA_missionTime,
-					[0, 1] select _immediate
-				]
-			]
-		];
-
-		if (!_iterationCount && (_timeout isNotEqualTo 0)) then {
-			private _timeoutId = generateUid;
-
-			KH_var_temporalExecutionStackAdditions insert [
-				[-1, 0] select _timeoutPriority,
-				[
-					[_handler],
-					{
-						params ["_handler"];
-						["KH_eve_temporalExecutionStackHandler", [_handler, true, true]] call CBA_fnc_localEvent;
-						KH_var_temporalExecutionStackDeletions pushBackUnique _handlerId;
-					},
-					_timeout,
-					if (_timeout isEqualTo 0) then {
-						diag_frameNo + 1;
-					}
-					else {
-						if (_timeout > 0) then {
-							diag_tickTime + _timeout;
-						}
-						else {
-							diag_frameNo + (abs _timeout);
-						};
-					},
-					-1,
-					_timeoutId,
-					_timeoutId,
-					nil,
-					CBA_missionTime,
-					0
-				]
-			];
-		};
-	};
-
 	case "DRAW_UI": {
-		private _conditionArguments = _type param [1];
+		private _conditionArguments = _type param [1, []];
 		private _conditionFunction = _type param [2, {}, ["", {}]];
 		private _timeoutRules = _type param [3, [0, false, false], [0, "", []]];
 		private _timeoutArguments = _type param [4];
@@ -681,7 +355,7 @@ switch _eventType do {
 							call (missionNamespace getVariable '", _function, "');
 						}
 						else {
-							['KH_eve_drawUiExecutionStackHandler', ['", _handler, "', true]] call CBA_fnc_localEvent;
+							['KH_eve_drawUiExecutionStackHandler', ['", _handler, "', true, true]] call CBA_fnc_localEvent;
 						};"
 					] joinString "");
 				}
@@ -726,7 +400,7 @@ switch _eventType do {
 				[_handler],
 				{
 					params ["_handler"];
-					["KH_eve_drawUiExecutionStackHandler", [_handler, true]] call CBA_fnc_localEvent;
+					["KH_eve_drawUiExecutionStackHandler", [_handler, true, false]] call CBA_fnc_localEvent;
 				},
 				_timeout,
 				if (_timeout isEqualTo 0) then {

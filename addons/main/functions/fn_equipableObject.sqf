@@ -5,7 +5,7 @@ params [
 	["_position", [], [[]]], 
 	["_rotation", [], [[], objNull]], 
 	["_scale", 1, [0]], 
-	["_disableCollision", true, [false]], 
+	["_disableCollision", true, [true]], 
 	["_hideInVehicles", true, [true]], 
 	["_toggleEquip", true, [true]], 
 	["_exclusive", true, [true]], 
@@ -35,11 +35,11 @@ if (isNull _unit) then {
 			{},
 			{
 				private _localArguments = param [3];
-				(_localArguments select [1]) params ["_bone", "_position", "_rotation", "_scale", "_disableCollision", "_hideInVehicles", "_toggleEquip", "_exclusive", "_objectName"];
-				_target setVariable ["KH_var_previouslyEquipped", true, true];
+				_localArguments params ["_object", "_bone", "_position", "_rotation", "_scale", "_disableCollision", "_hideInVehicles", "_toggleEquip", "_exclusive", "_objectName"];
+				_object setVariable ["KH_var_previouslyEquipped", true, true];
 
 				[
-					[_caller, _target, _bone, _position, _rotation, _scale, _disableCollision, _hideInVehicles, _toggleEquip, _exclusive, _objectName], 
+					[_caller, _object, _bone, _position, _rotation, _scale, _disableCollision, _hideInVehicles, _toggleEquip, _exclusive, _objectName], 
 					"KH_fnc_equipableObject", 
 					"SERVER", 
 					true,
@@ -57,7 +57,7 @@ if (isNull _unit) then {
 					{},
 					{
 						private _localArguments = param [3];
-						private _object = _localArguments param [0];
+						_localArguments params ["_object"];
 						["KH_eve_equipableObjectExchanged", [_caller, _object, false]] call CBA_fnc_globalEvent;
 						detach _object;
 
@@ -74,7 +74,7 @@ if (isNull _unit) then {
 					},
 					{},
 					_localArguments,
-					3,
+					1,
 					0,
 					false,
 					false,
@@ -83,18 +83,22 @@ if (isNull _unit) then {
 				
 				[
 					"CBA",
-					"KH_eve_equipableObjectUnequipped",
-					[_unequipAction],
+					"KH_eve_equipableObjectExchanged",
+					[_object, _unequipAction],
 					{
-						_args params ["_unequipAction"];
-						[player, _unequipAction] call BIS_fnc_holdActionRemove;
-						[_handlerId] call KH_fnc_removeHandler;
+						private _exchangedObject = param [1];
+						_args params ["_object", "_unequipAction"];
+
+						if (_object isEqualTo _exchangedObject) then {
+							[player, _unequipAction] call BIS_fnc_holdActionRemove;
+							[_handlerId] call KH_fnc_removeHandler;
+						};
 					}
 				] call KH_fnc_addEventHandler;
 			},
 			{},
 			_localArguments,
-			3,
+			1,
 			0,
 			false,
 			false,
@@ -103,11 +107,10 @@ if (isNull _unit) then {
 		"BIS_fnc_holdActionAdd",
 		"PLAYERS",
 		true,
-		["JIP", "PLAYERS", _object, false, false, ""]
+		["JIP", _object, false, ""]
 	] call KH_fnc_execute;
 }
 else {
-	private _localArguments = _this;
 	["KH_eve_equipableObjectExchanged", [_unit, _object, true]] call CBA_fnc_globalEvent;
 
 	if (isNil "KH_var_equipableObjectRespawnReset") then {
@@ -153,8 +156,6 @@ else {
 			params ["_unit", "_object", "_exclusive"];
 			
 			if (((attachedTo _object) isNotEqualTo _unit) || !(alive _unit)) then {
-				["KH_eve_equipableObjectUnequipped", [], _unit] call CBA_fnc_targetEvent;
-
 				if _exclusive then {
 					_unit setVariable ["KH_var_carryingObject", false, true];
 				};
@@ -180,24 +181,24 @@ else {
 				{},
 				{
 					private _localArguments = param [3];
-					private _unit = _localArguments param [0];
-					["KH_eve_equipableObjectExchanged", [_unit, _target, false]] call CBA_fnc_globalEvent;
-					detach _target;
+					_localArguments params ["_unit", "_object"];
+					["KH_eve_equipableObjectExchanged", [_unit, _object, false]] call CBA_fnc_globalEvent;
+					detach _object;
 
 					[
-						[_target],
+						[_object],
 						{
-							params ["_target"];
-							_target setPhysicsCollisionFlag true;
+							params ["_object"];
+							_object setPhysicsCollisionFlag true;
 						},
 						"GLOBAL",
 						true,
-						["JIP", _target, false, ["KH_var_equipableObjectAttributes_", [_target, true] call KH_fnc_getEntityVariableName] joinString ""]
+						["JIP", _object, false, ["KH_var_equipableObjectAttributes_", [_object, true] call KH_fnc_getEntityVariableName] joinString ""]
 					] call KH_fnc_execute;
 				},
 				{},
-				_localArguments,
-				3,
+				_this,
+				1,
 				0,
 				false,
 				false,
@@ -206,7 +207,7 @@ else {
 			"BIS_fnc_holdActionAdd",
 			"PLAYERS",
 			true,
-			["JIP", "PLAYERS", _object, false, false, ""]
+			["JIP", _object, false, ""]
 		] call KH_fnc_execute;
 		
 		[
@@ -225,10 +226,10 @@ else {
 				{},
 				{
 					private _localArguments = param [3];
-					(_localArguments select [2]) params ["_bone", "_position", "_rotation", "_scale", "_disableCollision", "_hideInVehicles", "_toggleEquip", "_exclusive", "_objectName"];
+					(_localArguments select [1]) params ["_object", "_bone", "_position", "_rotation", "_scale", "_disableCollision", "_hideInVehicles", "_toggleEquip", "_exclusive", "_objectName"];
 
 					[
-						[_caller, _target, _bone, _position, _rotation, _scale, _disableCollision, _hideInVehicles, _toggleEquip, _exclusive, _objectName], 
+						[_caller, _object, _bone, _position, _rotation, _scale, _disableCollision, _hideInVehicles, _toggleEquip, _exclusive, _objectName], 
 						"KH_fnc_equipableObject", 
 						"SERVER", 
 						true,
@@ -263,7 +264,7 @@ else {
 						},
 						{},
 						_localArguments,
-						3,
+						1,
 						0,
 						false,
 						false,
@@ -272,18 +273,22 @@ else {
 					
 					[
 						"CBA",
-						"KH_eve_equipableObjectUnequipped",
-						[_unequipAction],
+						"KH_eve_equipableObjectExchanged",
+						[_object, _unequipAction],
 						{
-							_args params ["_unequipAction"];
-							[player, _unequipAction] call BIS_fnc_holdActionRemove;
-							[_handlerId] call KH_fnc_removeHandler;
+							private _exchangedObject = param [1];
+							_args params ["_object", "_unequipAction"];
+
+							if (_object isEqualTo _exchangedObject) then {
+								[player, _unequipAction] call BIS_fnc_holdActionRemove;
+								[_handlerId] call KH_fnc_removeHandler;
+							};
 						}
 					] call KH_fnc_addEventHandler;
 				},
 				{},
-				_localArguments,
-				3,
+				_this,
+				1,
 				0,
 				false,
 				false,
@@ -318,7 +323,7 @@ else {
 			[
 				[_object],
 				{
-					_args params ["_object"];
+					params ["_object"];
 					
 					if !(isNull (objectParent (attachedTo _object))) then {
 						_object hideObjectGlobal true;

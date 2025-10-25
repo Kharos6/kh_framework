@@ -181,6 +181,7 @@ class CfgVehicles
 		vehicleClass = "KH_Helpers";
 		scope = 2;
 	};
+	#include "\x\kh\addons\main\vehicles\modules\addAction.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\assignIdentificationCard.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\assignTerminal.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\dynamicDisguise.hpp"

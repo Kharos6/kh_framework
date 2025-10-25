@@ -21,7 +21,13 @@ isNil {
 		};
 
 		call KH_fnc_serverMissionLoadInit;
-		[[], {systemChat "KH FRAMEWORK - MISSION LOADED"; diag_log "KH FRAMEWORK - MISSION LOADED";}, ["SERVER", "ADMIN"] + KH_var_allCuratorMachines, true, false] call KH_fnc_execute;
+
+		if isMultiplayer then {
+			[[], {systemChat "KH FRAMEWORK - MISSION LOADED"; diag_log "KH FRAMEWORK - MISSION LOADED";}, ["SERVER", "ADMIN"] + KH_var_allCuratorMachines, true, false] call KH_fnc_execute;
+		}
+		else {
+			diag_log "KH FRAMEWORK - MISSION LOADED";
+		};
 
 		[
 			[],
@@ -31,7 +37,13 @@ isNil {
 				call KH_fnc_serverMissionStartInit;
 				[[], "KH_fnc_playerMissionStartInit", "PLAYERS", true, false] call KH_fnc_execute;
 				[[], "KH_fnc_headlessMissionStartInit", "HEADLESS", true, false] call KH_fnc_execute;
-				[[], {systemChat "KH FRAMEWORK - MISSION STARTED"; diag_log "KH FRAMEWORK - MISSION STARTED";}, ["SERVER", "ADMIN"] + KH_var_allCuratorMachines, true, false] call KH_fnc_execute;
+
+				if isMultiplayer then {
+					[[], {systemChat "KH FRAMEWORK - MISSION STARTED"; diag_log "KH FRAMEWORK - MISSION STARTED";}, ["SERVER", "ADMIN"] + KH_var_allCuratorMachines, true, false] call KH_fnc_execute;
+				}
+				else {
+					diag_log "KH FRAMEWORK - MISSION STARTED";
+				};
 
 				[
 					[],
@@ -46,7 +58,13 @@ isNil {
 						[[], "KH_fnc_playerPlayersLoadedInit", "PLAYERS", true, false] call KH_fnc_execute;
 						[[], "KH_fnc_headlessPlayersLoadedInit", "HEADLESS", true, false] call KH_fnc_execute;
 						["KH_eve_playersLoaded", []] call CBA_fnc_globalEvent;
-						[[], {systemChat "KH FRAMEWORK - PLAYERS LOADED"; diag_log "KH FRAMEWORK - PLAYERS LOADED";}, ["SERVER", "ADMIN"] + KH_var_allCuratorMachines, true, false] call KH_fnc_execute;
+
+						if isMultiplayer then {
+							[[], {systemChat "KH FRAMEWORK - PLAYERS LOADED"; diag_log "KH FRAMEWORK - PLAYERS LOADED";}, ["SERVER", "ADMIN"] + KH_var_allCuratorMachines, true, false] call KH_fnc_execute;
+						}
+						else {
+							diag_log "KH FRAMEWORK - PLAYERS LOADED";
+						};
 					},
 					true,
 					{

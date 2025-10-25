@@ -16,6 +16,7 @@ KH_var_inGameUiEventHandlerStackDeletions = [];
 KH_var_temporalExecutionStack = [];
 KH_var_drawUi2dExecutionStack = [];
 KH_var_drawUi3dExecutionStack = [];
+KH_var_drawUi3dOrphanExecutionStack = [];
 KH_var_temporalExecutionStackAdditions = [];
 KH_var_drawUi2dExecutionStackAdditions = [];
 KH_var_drawUi3dExecutionStackAdditions = [];
@@ -26,6 +27,12 @@ KH_var_postInitExecutions = [];
 KH_var_preInitLuaExecutions = [];
 KH_var_postInitLuaExecutions = [];
 KH_var_loadInitLuaExecutions = [];
+KH_var_mouseTargetCheckFrame = 0;
+KH_var_viewTargetCheckFrame = 0;
+KH_var_weaponTargetCheckFrame = 0;
+KH_var_allAddedDisplays = [];
+KH_var_playerRespawnedEventHandler = [];
+KH_var_playerKilledEventHandler = [];
 ["KH_eve_execution", KH_fnc_callParsedFunction] call CBA_fnc_addEventHandler;
 
 [
@@ -300,7 +307,7 @@ addMissionEventHandler [
 [
 	"KH_eve_temporalExecutionStackHandler", 
 	{
-		params ["_handlerId", "_deleteHandler", "_overrideTimeoutOnDeletion"];
+		params ["_handlerId", "_deleteHandler", "_overrideTimeoutOnDeletion", "_conditionFailure"];
 		private _currentHandler = KH_var_temporalExecutionStackMonitor get _handlerId;
 		if (isNil "_currentHandler") exitWith {};
 		_currentHandler params ["_timeoutArguments", "_timeoutFunction", "_handlerTickCounter", "_timeout", "_timeoutOnDeletion"];
@@ -1003,12 +1010,6 @@ if isServer then {
 };
 
 if hasInterface then {
-	KH_var_mouseTargetCheckFrame = 0;
-	KH_var_viewTargetCheckFrame = 0;
-	KH_var_weaponTargetCheckFrame = 0;
-	KH_var_allAddedDisplays = [];
-	KH_var_playerRespawnedEventHandler = [];
-	KH_var_playerKilledEventHandler = [];
 	KH_fnc_playerMissionLoadInit = {};
 	KH_fnc_playerMissionStartInit = {};
 	KH_fnc_playerLoadInit = {};
@@ -1355,6 +1356,28 @@ if hasInterface then {
 	addMissionEventHandler [
 		"Draw3D", 
 		{
+			if (KH_var_drawUi3dOrphanExecutionStack isNotEqualTo []) then {
+				{
+					_x params ["_type", "_arguments"];
+
+					switch _type do {
+						case "LINE": {
+							drawLine3D _arguments;
+						};
+
+						case "LASER": {
+							drawLaser _arguments;
+						};
+
+						case "ICON": {
+							drawIcon3D _arguments;
+						};
+					};
+				} forEach KH_var_drawUi3dOrphanExecutionStack;
+
+				KH_var_drawUi3dOrphanExecutionStack resize 0;
+			};
+
 			if (KH_var_drawUi3dExecutionStackAdditions isNotEqualTo []) then {
 				KH_var_drawUi3dExecutionStack append KH_var_drawUi3dExecutionStackAdditions;
 				KH_var_drawUi3dExecutionStackAdditions resize 0;
@@ -1381,7 +1404,7 @@ if hasInterface then {
 	[
 		"KH_eve_drawUiExecutionStackHandler", 
 		{
-			params ["_handlerId", "_overrideTimeoutOnDeletion"];
+			params ["_handlerId", "_overrideTimeoutOnDeletion", "_conditionFailure"];
 			private _currentHandler = KH_var_drawUiExecutionStackMonitor get _handlerId;
 			if (isNil "_currentHandler") exitWith {};
 			_currentHandler params ["_event", "_timeoutArguments", "_timeoutFunction", "_timeoutOnDeletion"];

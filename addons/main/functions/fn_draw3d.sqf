@@ -1,4 +1,4 @@
-params [["_type", "", [""]], ["_arguments", [], [[]]], ["_duration", false, [true, 0, ""]], "_conditionArguments", ["_conditionFunction", {}, ["", {}]]];
+params [["_type", "", [""]], ["_arguments", [], [[]]], ["_duration", false, [true, 0, ""]], ["_conditionArguments", []], ["_conditionFunction", {}, [{}]]];
 
 if (_duration isEqualTo false) then {
     _duration = 0;
@@ -32,7 +32,14 @@ switch _type do {
                 };
             };
 
-            drawLine3D [_start, _end, _color, _width];
+            if (_conditionFunction isEqualTo {}) then {
+                KH_var_drawUi3dOrphanExecutionStack pushBack ["LINE", [_start, _end, _color, _width]];
+            }
+            else {
+                if (_conditionArguments call _conditionFunction) then {
+                    KH_var_drawUi3dOrphanExecutionStack pushBack ["LINE", [_start, _end, _color, _width]];
+                };
+            };
         }
         else {
             private _typeObject = if (_start isEqualType objNull) then {
@@ -133,7 +140,14 @@ switch _type do {
                 _beamMaxLength = _start vectorDistance _end;
             };
 
-            drawLaser [_start, _end, _beamColor, _dotColor, _dotSize, _beamThickness, _beamMaxLength, _ir];
+            if (_conditionFunction isEqualTo {}) then {
+                KH_var_drawUi3dOrphanExecutionStack pushBack ["LASER", [_start, _end, _beamColor, _dotColor, _dotSize, _beamThickness, _beamMaxLength, _ir]];
+            }
+            else {
+                if (_conditionArguments call _conditionFunction) then {
+                    KH_var_drawUi3dOrphanExecutionStack pushBack ["LASER", [_start, _end, _beamColor, _dotColor, _dotSize, _beamThickness, _beamMaxLength, _ir]];
+                };
+            };
         }
         else {
             private _typeObject = if (_start isEqualType objNull) then {
@@ -219,7 +233,7 @@ switch _type do {
             ["_angle", 1, [0]],
             ["_text", "", [""]],
             ["_shadow", false, [true, 0]],
-            ["_textSize", 1, [0]],
+            ["_textSize", 0.04, [0]],
             ["_font", "RobotoCondensedBold", [""]],
             ["_textAlign", "center", [""]],
             ["_drawSideArrows", false, [true]],
@@ -238,7 +252,15 @@ switch _type do {
             };
 
             if (!_drawSideArrows && ((worldToScreen _position) isEqualTo [])) exitWith {};
-            drawIcon3D [_texture, _color, _position, _width, _height, _angle, _text, _shadow, _textSize, _font, _textAlign, _drawSideArrows, _offsetX, _offsetY];
+
+            if (_conditionFunction isEqualTo {}) then {
+                KH_var_drawUi3dOrphanExecutionStack pushBack ["ICON", [_texture, _color, _position, _width, _height, _angle, _text, _shadow, _textSize, _font, _textAlign, _drawSideArrows, _offsetX, _offsetY]];
+            }
+            else {
+                if (_conditionArguments call _conditionFunction) then {
+                    KH_var_drawUi3dOrphanExecutionStack pushBack ["ICON", [_texture, _color, _position, _width, _height, _angle, _text, _shadow, _textSize, _font, _textAlign, _drawSideArrows, _offsetX, _offsetY]];
+                };
+            };
         }
         else {
             private _typeObject = if (_position isEqualType objNull) then {

@@ -68,11 +68,11 @@ else {
                     };
 
                     case "TEMPORAL": {
-                        ["KH_eve_temporalExecutionStackHandler", [_handlerId, true, false]] call CBA_fnc_localEvent;
+                        ["KH_eve_temporalExecutionStackHandler", [_handlerId, true, false, false]] call CBA_fnc_localEvent;
                     };
 
                     case "DRAW_UI": {
-                        ["KH_eve_drawUiExecutionStackHandler", [_handlerId, false]] call CBA_fnc_localEvent;
+                        ["KH_eve_drawUiExecutionStackHandler", [_handlerId, false, false]] call CBA_fnc_localEvent;
                     };
 
                     case "IN_GAME_UI": {

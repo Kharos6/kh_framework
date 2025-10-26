@@ -14,10 +14,11 @@ params [
     ["_showUnconscious", false, [true]],
     ["_hideOnUse", false, [true]],
     ["_drawHint", false, [true, []]],
-    ["_detection", true, [true, ""]],
+    ["_detection", true, [true, "", []]],
     ["_userInput", "", [""]],
     ["_progressDisplay", "BAR", [""]],
-    ["_identifier", "", [""]]
+    ["_identifier", "", [""]],
+    ["_parentUnit", true, [true, objNull]]
 ];
 
 if _jip then {
@@ -33,15 +34,15 @@ else {
             "ICON",
             [
                 "\x\kh\addons\main\ui\helper_arrow_up.paa",
-                [profileNamespace getVariable ['GUI_BCG_RGB_R', 0.13], profileNamespace getVariable ['GUI_BCG_RGB_G', 0.54], profileNamespace getVariable ['GUI_BCG_RGB_B', 0.21], 0.5],
+                [profileNamespace getVariable ['GUI_BCG_RGB_R', 0.13], profileNamespace getVariable ['GUI_BCG_RGB_G', 0.54], profileNamespace getVariable ['GUI_BCG_RGB_B', 0.21], 0.9],
                 if (_detection isEqualType "") then {
                     _object modelToWorldVisual (_object selectionPosition _detection);
                 }
                 else {
                     unitAimPositionVisual _object;
                 },
-                0.5,
-                0.5,
+                0.25,
+                0.25,
                 1,
                 if (_name isEqualType "") then {
                     _name;
@@ -50,8 +51,8 @@ else {
                     _name select 0;
                 },
                 true,
-                0.04,
-                "RobotoCondensedBold",
+                0.02,
+                "EtelkaMonospacePro",
                 "center",
                 false,
                 0,
@@ -94,7 +95,9 @@ if (isNil {missionNamespace getVariable _parsedActionId;}) then {
         _function, 
         _condition, 
         _repeatable, 
-        _exclusive, 
+        _exclusive,
+        _target,
+        _jip,
         _duration, 
         _distance,
         _showImmediately,
@@ -103,10 +106,11 @@ if (isNil {missionNamespace getVariable _parsedActionId;}) then {
         _drawHint, 
         _detection, 
         _userInput, 
-        _progressDisplay, 
+        _progressDisplay,
+        _identifier,
+        _parentUnit,
         _actionExistenceId, 
-        _conditionShowId,
-        _parsedActionId
+        _conditionShowId
     ],
     {
         params [
@@ -117,6 +121,8 @@ if (isNil {missionNamespace getVariable _parsedActionId;}) then {
             "_condition",
             "_repeatable", 
             "_exclusive",
+            "_target",
+            "_jip",
             "_duration", 
             "_distance",
             "_showImmediately",
@@ -126,11 +132,13 @@ if (isNil {missionNamespace getVariable _parsedActionId;}) then {
             "_detection",
             "_userInput",
             "_progressDisplay",
+            "_identifier",
+            "_parentUnit",
             "_actionExistenceId",
-            "_conditionShowId",
-            "_parsedActionId"
+            "_conditionShowId"
         ];
-
+        
+        if (_parentUnit isEqualTo objNull) exitWith {};
         private _allowedActivationId = generateUid;
         missionNamespace setVariable [_allowedActivationId, true];
         private "_menuName";
@@ -146,6 +154,8 @@ if (isNil {missionNamespace getVariable _parsedActionId;}) then {
         private _functionProgress = {};
         private _functionInterrupt = {};
         private "_functionComplete";
+        private "_initialDetection";
+        private "_progressDetection";
 
         if (_name isEqualType "") then {
             _menuName = _name;
@@ -184,17 +194,42 @@ if (isNil {missionNamespace getVariable _parsedActionId;}) then {
             _functionInterrupt = _function param [2, _functionInterrupt, [{}]];
             _functionComplete = _function param [3, {}];
         };
+        
+        if (_detection isEqualType []) then {
+            _initialDetection = _detection param [0, true, [true, ""]];
+            _progressDetection = _detection param [1, true, [true, ""]];
+        }
+        else {
+            _initialDetection = _detection;
+            _progressDetection = false;
+        };
+
+        private _registerPlayerChange = false;
+
+        if (_parentUnit isEqualType true) then {
+            if _parentUnit then {
+                _parentUnit = player;
+                _registerPlayerChange = true;
+            }
+            else {
+                _parentUnit = player;
+            };
+        };
 
         private _argumentsReferenceId = generateUid;
         private _conditionShowReferenceId = generateUid;
         private _drawHintReferenceId = generateUid;
         private _lastProgressId = generateUid;
+        private _objectId = generateUid;
+        private _parentUnitId = generateUid;
         missionNamespace setVariable [_argumentsReferenceId, _arguments];
         missionNamespace setVariable [_conditionShowReferenceId, _conditionShow];
         missionNamespace setVariable [_drawHintReferenceId, _drawHint];
         missionNamespace setVariable [_lastProgressId, _lastProgressId];
+        missionNamespace setVariable [_objectId, _object];
+        missionNamespace setVariable [_parentUnitId, _parentUnit];
 
-        private _action = player addAction [
+        private _action = _parentUnit addAction [
             _menuName,
             {
                 isNil {
@@ -220,14 +255,16 @@ if (isNil {missionNamespace getVariable _parsedActionId;}) then {
                         "_duration",
                         "_distance",
                         "_progressDisplay",
+                        "_parentUnit",
                         "_actionExistenceId",
                         "_conditionShowId",
                         "_allowedActivationId",
-                        "_lastProgressId"
+                        "_lastProgressId",
+                        "_progressDetection"
                     ];
                     
                     if !(missionNamespace getVariable _actionExistenceId) exitWith {
-                        player removeAction _actionId;
+                        _parentUnit removeAction _actionId;
                     };
 
                     if !(missionNamespace getVariable _allowedActivationId) exitWith {
@@ -235,7 +272,7 @@ if (isNil {missionNamespace getVariable _parsedActionId;}) then {
                             [missionNamespace getVariable (["KH_var_activeAction", _target, _actionId] joinString "_")] call KH_fnc_removeHandler;
                             missionNamespace setVariable [_allowedActivationId, true];
                             missionNamespace setVariable [_conditionShowId, true, KH_var_allMachines - [clientOwner]];
-                            player setUserActionText [_actionId, _menuName, _windowBackgroundName, _windowForegroundName];
+                            _parentUnit setUserActionText [_actionId, _menuName, _windowBackgroundName, _windowForegroundName];
                         };
                     };
 
@@ -286,11 +323,14 @@ if (isNil {missionNamespace getVariable _parsedActionId;}) then {
                                 _duration, 
                                 _distance,
                                 _progressDisplay,
+                                _parentUnit,
                                 _actionExistenceId, 
                                 _conditionShowId,
                                 _allowedActivationId,
                                 _lastProgressId,
-                                _actionId, 
+                                _progressDetection,
+                                _actionId,
+                                _handlerId,
                                 _interactionHelper,
                                 time,
                                 time + _duration
@@ -316,30 +356,31 @@ if (isNil {missionNamespace getVariable _parsedActionId;}) then {
                                     "_duration",
                                     "_distance",
                                     "_progressDisplay",
+                                    "_parentUnit",
                                     "_actionExistenceId",
                                     "_conditionShowId",
                                     "_allowedActivationId",
                                     "_lastProgressId",
+                                    "_progressDetection",
                                     "_actionId",
+                                    "_handlerId",
                                     "_interactionHelper",
                                     "_startTime",
                                     "_endTime"
                                 ];
-
-                                private _handlerId = [[missionNamespace, _actionExistenceId, true], _handlerId];
 
                                 if (_progressDisplay isNotEqualTo "NONE") then {
                                     private _progress = switch (_progressDisplay) do {
                                         case "PERCENTAGE": {
                                             private _currentProgress = ((parseNumber ((((time - _startTime) / (_endTime - _startTime)) * 100) toFixed 1)) min 100) toFixed 1;
                                             missionNamespace setVariable [_lastProgressId, _currentProgress];
-                                            ["<t size='1.25' font='EtelkaMonospaceProBold'>", _currentProgress, "%</t>"] joinString "";
+                                            ["<t size='1.25' font='EtelkaMonospacePro'>", _currentProgress, "%</t>"] joinString "";
                                         };
 
                                         case "TIME": {
                                             private _currentProgress = ((parseNumber ((_endTime - time) toFixed 1)) max 0) toFixed 1;
                                             missionNamespace setVariable [_lastProgressId, _currentProgress];
-                                            ["<t size='1.25' font='EtelkaMonospaceProBold'>", _currentProgress, "s</t>"] joinString "";
+                                            ["<t size='1.25' font='EtelkaMonospacePro'>", _currentProgress, "s</t>"] joinString "";
                                         };
 
                                         case "BAR": {
@@ -356,15 +397,15 @@ if (isNil {missionNamespace getVariable _parsedActionId;}) then {
                                             };
 
                                             missionNamespace setVariable [_lastProgressId, _currentProgress];
-                                            ["<t size='0.75' font='EtelkaMonospaceProBold'>", (str _bars) regexReplace ["['"",]", ""], "</t>"] joinString "";
+                                            ["<t size='0.75' font='EtelkaMonospacePro'>", (str _bars) regexReplace ["['"",]", ""], "</t>"] joinString "";
                                         };
 
                                         default {
-                                            "<t size='1.25' font='EtelkaMonospaceProBold'>PROGRESS UNKNOWN</t>";
+                                            "<t size='1.25' font='EtelkaMonospacePro'>PROGRESS UNKNOWN</t>";
                                         };
                                     };
 
-                                    player setUserActionText [_actionId, [_progressMenuName, _progress] joinString " ", [_progressWindowBackgroundName, "<br/>", _progress] joinString "", _progressWindowForegroundName];
+                                    _parentUnit setUserActionText [_actionId, [_progressMenuName, _progress] joinString " ", [_progressWindowBackgroundName, "<br/>", _progress] joinString "", _progressWindowForegroundName];
                                 };
 
                                 _arguments call _functionProgress;
@@ -392,22 +433,58 @@ if (isNil {missionNamespace getVariable _parsedActionId;}) then {
                                         "_duration",
                                         "_distance",
                                         "_progressDisplay",
+                                        "_parentUnit",
                                         "_actionExistenceId",
                                         "_conditionShowId",
                                         "_allowedActivationId",
                                         "_lastProgressId",
+                                        "_progressDetection",
                                         "_actionId",
+                                        "_handlerId",
                                         "_interactionHelper",
                                         "_startTime",
                                         "_endTime"
                                     ];
-                                    
-                                    if ((_interactionHelper distance _caller) > _distance) then {
+
+                                    if (_target isEqualTo _parentUnit) exitWith {
                                         deleteVehicle _interactionHelper;
-                                        false;
-                                    }
-                                    else {
                                         _arguments call _conditionProgress;
+                                    };
+
+                                    switch _progressDetection do {
+                                        case true: {
+                                            deleteVehicle _interactionHelper;
+                                            private _viewTarget = call KH_fnc_getViewTarget;
+                                            
+                                            if (((_viewTarget select 1) > _distance) || ((_viewTarget select 4) isNotEqualTo _target)) then {
+                                                false;
+                                            }
+                                            else {
+                                                _arguments call _conditionProgress;
+                                            };
+                                        };
+
+                                        case false: {
+                                            if ((_interactionHelper distance _caller) > _distance) then {
+                                                deleteVehicle _interactionHelper;
+                                                false;
+                                            }
+                                            else {
+                                                _arguments call _conditionProgress;
+                                            };
+                                        };
+
+                                        default {
+                                            deleteVehicle _interactionHelper;
+                                            private _viewTarget = call KH_fnc_getViewTarget;
+                                            
+                                            if (((_viewTarget select 1) > _distance) || ((_viewTarget select 5) isNotEqualTo _progressDetection)) then {
+                                                false;
+                                            }
+                                            else {
+                                                _arguments call _conditionProgress;
+                                            };
+                                        };
                                     };
                                 },
                                 true,
@@ -434,18 +511,20 @@ if (isNil {missionNamespace getVariable _parsedActionId;}) then {
                                         "_duration",
                                         "_distance",
                                         "_progressDisplay",
+                                        "_parentUnit",
                                         "_actionExistenceId",
                                         "_conditionShowId",
                                         "_allowedActivationId",
                                         "_lastProgressId",
+                                        "_progressDetection",
                                         "_actionId",
+                                        "_handlerId",
                                         "_interactionHelper",
                                         "_startTime",
                                         "_endTime"
                                     ];
                                     
                                     deleteVehicle _interactionHelper;
-                                    private _handlerId = [[missionNamespace, _actionExistenceId, true], _handlerId];
                                     missionNamespace setVariable [_allowedActivationId, true];
 
                                     if (_exclusive || (_duration isNotEqualTo 0)) then {
@@ -463,7 +542,7 @@ if (isNil {missionNamespace getVariable _parsedActionId;}) then {
                                         _arguments call _functionComplete;
                                     };
 
-                                    player setUserActionText [_actionId, _menuName, _windowBackgroundName, _windowForegroundName];
+                                    _parentUnit setUserActionText [_actionId, _menuName, _windowBackgroundName, _windowForegroundName];
                                 },
                                 false,
                                 true
@@ -497,26 +576,36 @@ if (isNil {missionNamespace getVariable _parsedActionId;}) then {
                 _duration, 
                 _distance,
                 _progressDisplay,
+                _parentUnit,
                 _actionExistenceId,
                 _conditionShowId,
                 _allowedActivationId,
-                _lastProgressId
+                _lastProgressId,
+                _progressDetection
             ],
             1.5,
             _showImmediately,
             _hideOnUse,
             _userInput,
-            if (_object isEqualTo player) then {
-                private _objectId = generateUid;
-                missionNamespace setVariable [_objectId, _object, true];
+            switch _initialDetection do {
+                case true: {
+                    [
+                        "if !(missionNamespace getVariable '", _actionExistenceId, "') exitWith {
+                            (missionNamespace getVariable '", _parentUnitId, "') removeAction _actionId;
+                            false;
+                        };
 
-                [
-                    "if !(missionNamespace getVariable '", _actionExistenceId, "') exitWith {
-                        player removeAction _actionId;
-                        false;
-                    };
+                        if ((missionNamespace getVariable '", _objectId, "') isEqualTo KH_var_playerUnit) exitWith {
+                            private _caller = _this;
+                            private _handlerId = [missionNamespace, '", _actionExistenceId, "', true];
 
-                    if ((missionNamespace getVariable '", _objectId, "') isNotEqualTo player) exitWith {
+                            if ((missionNamespace getVariable '", _drawHintReferenceId, "') isNotEqualTo []) then {
+                                (missionNamespace getVariable '", _drawHintReferenceId, "') call KH_fnc_draw3d;  
+                            };
+                            
+                            (((missionNamespace getVariable '", _argumentsReferenceId, "') call (missionNamespace getVariable '", _conditionShowReferenceId, "')) && (missionNamespace getVariable '", _conditionShowId, "'))
+                        };
+
                         private _viewTarget = call KH_fnc_getViewTarget;
 
                         if (((_viewTarget select 1) <= ", _distance, ") && ((_viewTarget select 4) isEqualTo (missionNamespace getVariable '", _objectId, "'))) then {
@@ -527,98 +616,86 @@ if (isNil {missionNamespace getVariable _parsedActionId;}) then {
                                 (missionNamespace getVariable '", _drawHintReferenceId, "') call KH_fnc_draw3d;  
                             };
                             
-                            (((missionNamespace getVariable '", _argumentsReferenceId, "') call (missionNamespace getVariable '", _conditionShowReferenceId, "')) && (missionNamespace getVariable '", _conditionShowId, "'))
+                            (((missionNamespace getVariable '", _argumentsReferenceId, "') call (missionNamespace getVariable '", _conditionShowReferenceId, "')) && (missionNamespace getVariable '", _conditionShowId, "'));
                         } 
                         else {
                             false;
+                        }"
+                    ] joinString "";
+                };
+
+                case false: {
+                    [
+                        "if !(missionNamespace getVariable '", _actionExistenceId, "') exitWith {
+                            (missionNamespace getVariable '", _parentUnitId, "') removeAction _actionId;
+                            false;
                         };
-                    };
+                        
+                        if ((missionNamespace getVariable '", _objectId, "') isEqualTo KH_var_playerUnit) exitWith {
+                            private _caller = _this;
+                            private _handlerId = [missionNamespace, '", _actionExistenceId, "', true];
 
-                    private _handlerId = [missionNamespace, '", _actionExistenceId, "', true];
-                    private _caller = _this;
-                    (((missionNamespace getVariable '", _argumentsReferenceId, "') call (missionNamespace getVariable '", _conditionShowReferenceId, "')) && (missionNamespace getVariable '", _conditionShowId, "'))"
-                ] joinString "";
-            }
-            else {
-                switch _detection do {
-                    case true: { 
-                        private _objectId = generateUid;
-                        missionNamespace setVariable [_objectId, _object, true];
-
-                        [
-                            "if !(missionNamespace getVariable '", _actionExistenceId, "') exitWith {
-                                player removeAction _actionId;
-                                false;
-                            };
-
-                            private _viewTarget = call KH_fnc_getViewTarget;
-
-                            if (((_viewTarget select 1) <= ", _distance, ") && ((_viewTarget select 4) isEqualTo (missionNamespace getVariable '", _objectId, "'))) then {
-                                private _caller = _this;
-                                private _handlerId = [missionNamespace, '", _actionExistenceId, "', true];
-
-                                if ((missionNamespace getVariable '", _drawHintReferenceId, "') isNotEqualTo []) then {
-                                    (missionNamespace getVariable '", _drawHintReferenceId, "') call KH_fnc_draw3d;  
-                                };
-                                
-                                (((missionNamespace getVariable '", _argumentsReferenceId, "') call (missionNamespace getVariable '", _conditionShowReferenceId, "')) && (missionNamespace getVariable '", _conditionShowId, "'))
-                            } 
-                            else {
-                                false;
-                            }"
-                        ] joinString "";
-                    };
-
-                    case false: {
-                        private _objectId = generateUid;
-                        missionNamespace setVariable [_objectId, _object, true];
-
-                        [
-                            "if !(missionNamespace getVariable '", _actionExistenceId, "') exitWith {
-                                player removeAction _actionId;
-                                false;
+                            if ((missionNamespace getVariable '", _drawHintReferenceId, "') isNotEqualTo []) then {
+                                (missionNamespace getVariable '", _drawHintReferenceId, "') call KH_fnc_draw3d;  
                             };
                             
-                            if (((missionNamespace getVariable '", _objectId, "') distance player) <= ", _distance, ") then {
-                                private _caller = _this;
-                                private _handlerId = [missionNamespace, '", _actionExistenceId, "', true];
-                            
-                                if ((missionNamespace getVariable '", _drawHintReferenceId, "') isNotEqualTo []) then {
-                                    (missionNamespace getVariable '", _drawHintReferenceId, "') call KH_fnc_draw3d;  
-                                };
+                            (((missionNamespace getVariable '", _argumentsReferenceId, "') call (missionNamespace getVariable '", _conditionShowReferenceId, "')) && (missionNamespace getVariable '", _conditionShowId, "'))
+                        };
 
-                                (((missionNamespace getVariable '", _argumentsReferenceId, "') call (missionNamespace getVariable '", _conditionShowReferenceId, "')) && (missionNamespace getVariable '", _conditionShowId, "'))
-                            }
-                            else {
-                                false;
-                            }"
-                        ] joinString "";
-                    };
+                        if (((missionNamespace getVariable '", _objectId, "') distance (missionNamespace getVariable '", _parentUnitId, "')) <= ", _distance, ") then {
+                            private _caller = _this;
+                            private _handlerId = [missionNamespace, '", _actionExistenceId, "', true];
+                        
+                            if ((missionNamespace getVariable '", _drawHintReferenceId, "') isNotEqualTo []) then {
+                                (missionNamespace getVariable '", _drawHintReferenceId, "') call KH_fnc_draw3d;  
+                            };
 
-                    default {
-                        [
-                            "if !(missionNamespace getVariable '", _actionExistenceId, "') exitWith {
-                                player removeAction _actionId;
-                                false;
+                            (((missionNamespace getVariable '", _argumentsReferenceId, "') call (missionNamespace getVariable '", _conditionShowReferenceId, "')) && (missionNamespace getVariable '", _conditionShowId, "'));
+                        }
+                        else {
+                            false;
+                        }"
+                    ] joinString "";
+                };
+
+                default {
+                    [
+                        "if !(missionNamespace getVariable '", _actionExistenceId, "') exitWith {
+                            (missionNamespace getVariable '", _parentUnitId, "') removeAction _actionId;
+                            false;
+                        };
+
+                        if ((missionNamespace getVariable '", _objectId, "') isEqualTo KH_var_playerUnit) exitWith {
+                            private _caller = _this;
+                            private _handlerId = [missionNamespace, '", _actionExistenceId, "', true];
+
+                            if ((missionNamespace getVariable '", _drawHintReferenceId, "') isNotEqualTo []) then {
+                                (missionNamespace getVariable '", _drawHintReferenceId, "') call KH_fnc_draw3d;  
                             };
                             
-                            private _viewTarget = call KH_fnc_getViewTarget;
+                            (((missionNamespace getVariable '", _argumentsReferenceId, "') call (missionNamespace getVariable '", _conditionShowReferenceId, "')) && (missionNamespace getVariable '", _conditionShowId, "'))
+                        };
 
-                            if (((_viewTarget select 1) <= ", _distance, ") && (((_viewTarget select 5) param [0, '']) isEqualTo '", _detection, "')) then {
-                                private _caller = _this;
-                                private _handlerId = [missionNamespace, '", _actionExistenceId, "', true];
+                        private _viewTarget = call KH_fnc_getViewTarget;
 
-                                if ((missionNamespace getVariable '", _drawHintReferenceId, "') isNotEqualTo []) then {
-                                    (missionNamespace getVariable '", _drawHintReferenceId, "') call KH_fnc_draw3d;  
-                                };
+                        if (
+                            ((_viewTarget select 1) <= ", _distance, ") && 
+                            (((_viewTarget select 5) param [0, '']) isEqualTo '", _initialDetection, "') && 
+                            ((_viewTarget select 4) isEqualTo (missionNamespace getVariable '", _objectId, "'))
+                           ) then {
+                            private _caller = _this;
+                            private _handlerId = [missionNamespace, '", _actionExistenceId, "', true];
 
-                                (((missionNamespace getVariable '", _argumentsReferenceId, "') call (missionNamespace getVariable '", _conditionShowReferenceId, "')) && (missionNamespace getVariable '", _conditionShowId, "'))
-                            }
-                            else {
-                                false;
-                            }"
-                        ] joinString "";
-                    };
+                            if ((missionNamespace getVariable '", _drawHintReferenceId, "') isNotEqualTo []) then {
+                                (missionNamespace getVariable '", _drawHintReferenceId, "') call KH_fnc_draw3d;  
+                            };
+
+                            (((missionNamespace getVariable '", _argumentsReferenceId, "') call (missionNamespace getVariable '", _conditionShowReferenceId, "')) && (missionNamespace getVariable '", _conditionShowId, "'));
+                        }
+                        else {
+                            false;
+                        }"
+                    ] joinString "";
                 };
             },
             0,
@@ -627,34 +704,160 @@ if (isNil {missionNamespace getVariable _parsedActionId;}) then {
             ""
         ];
 
-        player setUserActionText [_action, _menuName, _windowBackgroundName, _windowForegroundName];
+        _parentUnit setUserActionText [_action, _menuName, _windowBackgroundName, _windowForegroundName];
+        private _playerControlHandlerId = ["KH_var_objectActionRespawnId", _object, _actionExistenceId] joinString "_";
 
-        [
-            ["ENTITY", player, "LOCAL"],
-            "Respawn",
+        if (isNil {_object getVariable _playerControlHandlerId;}) then {
+            _object setVariable [_playerControlHandlerId, true];
+
             [
-                _object, 
-                _name, 
-                _arguments, 
-                _function, 
-                _condition, 
-                _repeatable, 
-                _exclusive,
-                player,
-                false,
-                _duration, 
-                _distance,
-                _showImmediately,
-                _showUnconscious,
-                _hideOnUse,
-                _drawHint, 
-                _detection, 
-                _userInput, 
-                _progressDisplay, 
-                _parsedActionId
-            ],
-            "KH_fnc_addAction"
-        ] call KH_fnc_addEventHandler;
+                ["ENTITY", _parentUnit, "LOCAL"],
+                "Respawn",
+                [
+                    _object,
+                    _name, 
+                    _arguments, 
+                    _function, 
+                    _condition, 
+                    _repeatable, 
+                    _exclusive,
+                    _target,
+                    _jip,
+                    _duration, 
+                    _distance,
+                    _showImmediately,
+                    _showUnconscious,
+                    _hideOnUse,
+                    _drawHint, 
+                    _detection, 
+                    _userInput, 
+                    _progressDisplay,
+                    _identifier,
+                    _parentUnit
+                ],
+                {
+                    params ["_unit", "_corpse"];
+
+                    _args params [
+                        "_object",
+                        "_name", 
+                        "_arguments", 
+                        "_function", 
+                        "_condition", 
+                        "_repeatable", 
+                        "_exclusive",
+                        "_target",
+                        "_jip",
+                        "_duration", 
+                        "_distance",
+                        "_showImmediately",
+                        "_showUnconscious",
+                        "_hideOnUse",
+                        "_drawHint", 
+                        "_detection", 
+                        "_userInput", 
+                        "_progressDisplay",
+                        "_identifier",
+                        "_parentUnit"
+                    ];
+
+                    [
+                        [_object, _unit] select (_object isEqualTo _corpse),
+                        _name, 
+                        _arguments, 
+                        _function, 
+                        _condition, 
+                        _repeatable, 
+                        _exclusive,
+                        [_parentUnit, _target] select (_object isEqualTo _corpse),
+                        [false, _jip] select (_object isEqualTo _corpse),
+                        _duration, 
+                        _distance,
+                        _showImmediately,
+                        _showUnconscious,
+                        _hideOnUse,
+                        _drawHint, 
+                        _detection, 
+                        _userInput, 
+                        _progressDisplay,
+                        _identifier,
+                        _parentUnit
+                    ] call KH_fnc_addAction;
+                }
+            ] call KH_fnc_addEventHandler;
+
+            if _registerPlayerChange then {
+                [
+                    "PLAYER",
+                    "unit",
+                    [
+                        _object,
+                        _name, 
+                        _arguments, 
+                        _function, 
+                        _condition, 
+                        _repeatable, 
+                        _exclusive,
+                        _duration, 
+                        _distance,
+                        _showImmediately,
+                        _showUnconscious,
+                        _hideOnUse,
+                        _drawHint, 
+                        _detection, 
+                        _userInput, 
+                        _progressDisplay, 
+                        _identifier
+                    ],
+                    {
+                        params ["_unit"];
+
+                        _args params [
+                            "_object",
+                            "_name", 
+                            "_arguments", 
+                            "_function", 
+                            "_condition", 
+                            "_repeatable", 
+                            "_exclusive",
+                            "_duration", 
+                            "_distance",
+                            "_showImmediately",
+                            "_showUnconscious",
+                            "_hideOnUse",
+                            "_drawHint", 
+                            "_detection", 
+                            "_userInput", 
+                            "_progressDisplay", 
+                            "_identifier"
+                        ];
+
+                        [
+                            _object,
+                            _name, 
+                            _arguments, 
+                            _function, 
+                            _condition, 
+                            _repeatable, 
+                            _exclusive,
+                            player,
+                            false,
+                            _duration, 
+                            _distance,
+                            _showImmediately,
+                            _showUnconscious,
+                            _hideOnUse,
+                            _drawHint, 
+                            _detection, 
+                            _userInput, 
+                            _progressDisplay, 
+                            _identifier,
+                            _unit
+                        ] call KH_fnc_addAction;
+                    }
+                ] call KH_fnc_addEventHandler;
+            };
+        };
     },
     _target,
     true,

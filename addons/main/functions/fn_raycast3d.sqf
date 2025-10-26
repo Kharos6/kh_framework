@@ -298,7 +298,7 @@ if (_draw isNotEqualTo []) then {
 				["_text", "", [""]],
 				["_shadow", false, [true, 0]],
 				["_textSize", 0.04, [0]],
-				["_font", "RobotoCondensedBold", [""]],
+				["_font", "EtelkaMonospacePro", [""]],
 				["_textAlign", "center", [""]],
 				["_drawSideArrows", false, [true]],
 				["_offsetX", 0, [0]],

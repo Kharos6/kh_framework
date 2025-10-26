@@ -8,6 +8,37 @@ class Object
 			collapsed = 1;
 			class Attributes
 			{
+				class KH_AimCoefficient
+				{
+					displayName = "Aim Coefficient";
+					tooltip = "Sets a custom aim coefficient that affects the weapon sway of this unit. Set to -1 for no change.";
+					property = "KH_AimCoefficient";
+					control = "Edit";
+					expression = 
+					"\
+						if ((_value isNotEqualTo -1) && !is3DEN) then {\
+							KH_var_postInitExecutions pushBack [\
+								[_this, _value],\
+								{\
+									[\
+										_this,\
+										{\
+											params ['_unit', '_aim'];\
+											_unit setCustomAimCoef _aim;\
+										},\
+										'GLOBAL',\
+										true,\
+										['JIP', _this select 0, true, '']\
+									] call KH_fnc_execute;\
+								}\
+							];\
+						};\
+					";
+					defaultValue = "-1";
+					validate = "number";
+					typeName = "NUMBER";
+					condition = "objectControllable";
+				};
 				class KH_AnimationSpeed
 				{
 					displayName = "Animation Speed";
@@ -127,26 +158,40 @@ class Object
 					validate = "expression";
 					condition = "objectControllable";
 				};
-				class KH_ServerObjectInit
+				class KH_ObjectScale
 				{
-					displayName = "Server Object Init";
-					tooltip = "Unscheduled code executed on the server with this entity passed as an argument. Passed arguments available through _this are: [_entity (OBJECT)].";
-					property = "KH_ServerObjectInit";
-					control = "EditCodeMulti5";
+					displayName = "Object Scale";
+					tooltip = "Sets the object scale.";
+					property = "KH_ObjectScale";
+					control = "Edit";
 					expression = 
 					"\
-						if ((_value isNotEqualTo '') && !is3DEN) then {\
-							KH_var_postInitExecutions pushBack [\
-								[_this, compile _value],\
-								{\
-									params ['_entity', '_function'];\
-									[_entity] call _function;\
-								}\
-							];\
+						if is3DEN then {\
+							_this setVariable ['KH_var_edenObjectScale', _value];
+							_this setObjectScale _value;\
+							if (isNil 'KH_var_edenObjectScaleHandlerObjects') then {\
+								KH_var_edenObjectScaleHandlerObjects = [];\
+								addMissionEventHandler [\
+									'EachFrame',\
+									{\
+										{\
+											_x setObjectScale (_x getVariable ['KH_var_edenObjectScale', 1]);\
+										} forEach KH_var_edenObjectScaleHandlerObjects;\
+									}\
+								];\
+							};\
+							KH_var_edenObjectScaleHandlerObjects pushBackUnique _this;\
+						}\
+						else {\
+							if (_value isNotEqualTo 1) then {\
+								[_this, KH_var_helperObject, true] call BIS_fnc_attachToRelative;\
+								_this setObjectScale _value;\
+							};\
 						};\
 					";
-					defaultValue = "''";
-					validate = "expression";
+					defaultValue = "1";
+					validate = "number";
+					typeName = "NUMBER";
 				};
 				class KH_LockInventory
 				{
@@ -205,6 +250,27 @@ class Object
 					";
 					defaultValue = "false";
 					condition = "objectControllable";
+				};
+				class KH_ServerEntityInit
+				{
+					displayName = "Server Entity Init";
+					tooltip = "Unscheduled code executed on the server with this entity passed as an argument. Passed arguments available through _this are: [_entity (OBJECT)].";
+					property = "KH_ServerEntityInit";
+					control = "EditCodeMulti5";
+					expression = 
+					"\
+						if ((_value isNotEqualTo '') && !is3DEN) then {\
+							KH_var_postInitExecutions pushBack [\
+								[_this, compile _value],\
+								{\
+									params ['_entity', '_function'];\
+									[_entity] call _function;\
+								}\
+							];\
+						};\
+					";
+					defaultValue = "''";
+					validate = "expression";
 				};
 				class KH_SetRandomLoadout
 				{

@@ -10,7 +10,9 @@ private _currentEntriesUid = "khNamespace" readKhData [_persistencyUidId, create
 private _currentEntriesVariableName = "khNamespace" readKhData [_persistencyVariableNameId, createHashMap];
 
 {
-	_currentEntriesUid set [getPlayerUID _x, [_x] call KH_fnc_getUnitAttributes];
+	private _scores = getPlayerScores _x;
+	_scores deleteAt 5;
+	_currentEntriesUid set [getPlayerUID _x, [[_x] call KH_fnc_getUnitAttributes, _scores]];
 	private _variableName = vehicleVarName _x;
 
 	if ((_variableName isNotEqualTo "") && !(_x getVariable ["KH_var_generatedVariableName", false])) then {

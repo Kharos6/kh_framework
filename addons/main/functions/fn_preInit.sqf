@@ -392,6 +392,12 @@ if isServer then {
 	publicVariable "KH_var_jipPlayerMachines";
 	KH_var_logicGroup = createGroup [sideLogic, false];
 	publicVariable "KH_var_logicGroup";
+	KH_var_helperLogic = KH_var_logicGroup createUnit ["Logic", [0, 0, 0], [], 0, "CAN_COLLIDE"];
+	publicVariable "KH_var_helperLogic";
+	KH_var_helperObject = createVehicle ["KH_HelperSquare", [0, 0, 0], [], 0, "CAN_COLLIDE"];
+	publicVariable "KH_var_helperObject";
+	KH_var_simpleHelperObject = createSimpleObject ["KH_HelperSquare", [0, 0, 0], false];
+	publicVariable "KH_var_simpleHelperObject";
 	KH_var_diagnosticsState = false;
 	publicVariable "KH_var_diagnosticsState";
 	KH_var_jipHandlers = createHashMap;

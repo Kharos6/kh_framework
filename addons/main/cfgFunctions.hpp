@@ -102,7 +102,9 @@ class CfgFunctions
 			class setMissionAttributes {};
 			class setObjectAttributes {};
 			class setObjectInventory {};
+			class setObjectScale {};
 			class setOwnership {};
+			class setPlayerScores {};
 			class setRating {};
 			class setSideRelations {};
 			class setTerminalText {};

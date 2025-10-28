@@ -135,6 +135,7 @@ private _parsedActionId = ["KH_var_actionId", _parsedIdentifier] joinString "_";
 private _actionExistenceId = ["KH_var_actionExistenceId", _parsedIdentifier] joinString "_";
 private _actionSafetyId = ["KH_var_actionSafetyId", _parsedIdentifier] joinString "_";
 private _actionStorageId = ["KH_var_actionStorageId", _parsedIdentifier] joinString "_";
+private _completionId = ["KH_var_actionCompletionId", _parsedIdentifier] joinString "_";
 private _conditionShowId = ["KH_var_actionShowId", _parsedIdentifier] joinString "_";
 private _targetId = ["KH_var_actionTargetId", _parsedIdentifier] joinString "_";
 
@@ -143,6 +144,7 @@ if (isNil {missionNamespace getVariable _parsedActionId;}) then {
     missionNamespace setVariable [_actionExistenceId, true, true];
     missionNamespace setVariable [_conditionShowId, true, true];
     missionNamespace setVariable [_actionStorageId, [], true];
+    missionNamespace setVariable [_completionId, false, true];
 };
 
 if !(missionNamespace getVariable _actionExistenceId) exitWith {
@@ -175,6 +177,7 @@ private _actionHandler = [
         _actionExistenceId,
         _actionSafetyId,
         _actionStorageId,
+        _completionId,
         _conditionShowId
     ],
     {
@@ -203,10 +206,11 @@ private _actionHandler = [
             "_actionExistenceId",
             "_actionSafetyId",
             "_actionStorageId",
+            "_completionId",
             "_conditionShowId"
         ];
 
-        if (!hasInterface || (_parentUnit isEqualTo objNull) || (_object isEqualTo objNull) || !(missionNamespace getVariable _actionExistenceId)) exitWith {};
+        if (!hasInterface || (_parentUnit isEqualTo objNull) || (_object isEqualTo objNull) || !(missionNamespace getVariable _actionExistenceId) || (missionNamespace getVariable _completionId)) exitWith {};
 
         if (isNull KH_var_playerUnit) exitWith {
             [
@@ -335,10 +339,19 @@ private _actionHandler = [
             _conditionComplete = _condition;
         }
         else {
-            _conditionShow = [_condition param [0, {true;}, ["", [], {}]]] call _conditionParser;
-            _conditionStart = [_condition param [1, {true;}, ["", [], {}]]] call _conditionParser;
-            _conditionProgress = [_condition param [2, {true;}, ["", [], {}]]] call _conditionParser;
-            _conditionComplete = [_condition param [3, {true;}, ["", [], {}]]] call _conditionParser;
+            if ((count _condition) <= 1) then {
+                _conditionShow = {true;};
+                _conditionStart = {true;};
+                _conditionProgress = {true;};
+                _conditionComplete = {true;};
+            }
+            else {
+                _condition = _condition select [1];
+                _conditionShow = [_condition param [0, {true;}, ["", [], {}]]] call _conditionParser;
+                _conditionStart = [_condition param [1, {true;}, ["", [], {}]]] call _conditionParser;
+                _conditionProgress = [_condition param [2, {true;}, ["", [], {}]]] call _conditionParser;
+                _conditionComplete = [_condition param [3, {true;}, ["", [], {}]]] call _conditionParser;
+            };
         };
 
         if (_function isEqualType {}) then {
@@ -455,13 +468,14 @@ private _actionHandler = [
                         "_actionSafetyId",
                         "_conditionShowId",
                         "_allowedActivationId",
+                        "_completionId",
                         "_lastProgressId",
                         "_cancelInterruptId",
                         "_detectionType",
                         "_progressDetection"
                     ];
                     
-                    if !(missionNamespace getVariable _actionExistenceId) exitWith {
+                    if (!(missionNamespace getVariable _actionExistenceId) || (missionNamespace getVariable _completionId)) exitWith {
                         _parentUnit removeAction _actionId;
                     };
                     
@@ -512,7 +526,7 @@ private _actionHandler = [
                                 [_handlerId] call KH_fnc_removeHandler;
                             }
                             else {
-                                missionNamespace setVariable [_actionExistenceId, false];
+                                missionNamespace setVariable [_completionId, true];
                             };
                         };
                     }
@@ -559,6 +573,7 @@ private _actionHandler = [
                                 _actionSafetyId,
                                 _conditionShowId,
                                 _allowedActivationId,
+                                _completionId,
                                 _lastProgressId,
                                 _cancelInterruptId,
                                 _detectionType,
@@ -605,6 +620,7 @@ private _actionHandler = [
                                     "_actionSafetyId",
                                     "_conditionShowId",
                                     "_allowedActivationId",
+                                    "_completionId",
                                     "_lastProgressId",
                                     "_cancelInterruptId",
                                     "_detectionType",
@@ -709,6 +725,7 @@ private _actionHandler = [
                                         "_actionSafetyId",
                                         "_conditionShowId",
                                         "_allowedActivationId",
+                                        "_completionId",
                                         "_lastProgressId",
                                         "_cancelInterruptId",
                                         "_detectionType",
@@ -724,8 +741,9 @@ private _actionHandler = [
                                     if (
                                         !(alive _parentUnit) || 
                                         (_parentUnit isNotEqualTo KH_var_playerUnit) || 
-                                        !(missionNamespace getVariable _actionExistenceId) || 
+                                        !(missionNamespace getVariable _actionExistenceId) ||
                                         !(missionNamespace getVariable _conditionShowId) ||
+                                        (missionNamespace getVariable _completionId) ||
                                         ((((lifeState _parentUnit) isEqualTo "INCAPACITATED") || ((lifeState _parentUnit) isEqualTo "UNCONSCIOUS")) && !_allowIncapacitated)
                                        ) exitWith {
                                         deleteVehicle _interactionHelper;
@@ -813,6 +831,7 @@ private _actionHandler = [
                                         "_actionSafetyId",
                                         "_conditionShowId",
                                         "_allowedActivationId",
+                                        "_completionId",
                                         "_lastProgressId",
                                         "_cancelInterruptId",
                                         "_detectionType",
@@ -842,7 +861,12 @@ private _actionHandler = [
                                     }
                                     else {
                                         if !_repeatable then {
-                                            missionNamespace setVariable [_actionExistenceId, false, _exclusive];
+                                            if _exclusive then {
+                                                [_handlerId] call KH_fnc_removeHandler;
+                                            }
+                                            else {
+                                                missionNamespace setVariable [_completionId, true];
+                                            };
                                         };
 
                                         missionNamespace setVariable [_resultCompleteId, _arguments call _functionComplete];
@@ -896,6 +920,7 @@ private _actionHandler = [
                 _actionSafetyId,
                 _conditionShowId,
                 _allowedActivationId,
+                _completionId,
                 _lastProgressId,
                 _cancelInterruptId,
                 _detectionType,
@@ -907,7 +932,7 @@ private _actionHandler = [
             _userInput,
             if _visiblePerPlayer then {
                 [
-                    "if !(missionNamespace getVariable '", _actionExistenceId, "') exitWith {
+                    "if (!(missionNamespace getVariable '", _actionExistenceId, "') || (missionNamespace getVariable '", _completionId, "')) exitWith {
                         (missionNamespace getVariable '", _parentUnitId, "') removeAction _actionId;
                         false;
                     };
@@ -923,7 +948,7 @@ private _actionHandler = [
                 switch _initialDetection do {
                     case true: {
                         [
-                            "if (!(missionNamespace getVariable '", _actionExistenceId, "') || (isNull (missionNamespace getVariable '", _objectId, "'))) exitWith {
+                            "if (!(missionNamespace getVariable '", _actionExistenceId, "') || (isNull (missionNamespace getVariable '", _objectId, "')) || (missionNamespace getVariable '", _completionId, "')) exitWith {
                                 (missionNamespace getVariable '", _parentUnitId, "') removeAction _actionId;
                                 false;
                             };
@@ -963,7 +988,7 @@ private _actionHandler = [
 
                     case false: {
                         [
-                            "if (!(missionNamespace getVariable '", _actionExistenceId, "') || (isNull (missionNamespace getVariable '", _objectId, "'))) exitWith {
+                            "if (!(missionNamespace getVariable '", _actionExistenceId, "') || (isNull (missionNamespace getVariable '", _objectId, "')) || (missionNamespace getVariable '", _completionId, "')) exitWith {
                                 (missionNamespace getVariable '", _parentUnitId, "') removeAction _actionId;
                                 false;
                             };
@@ -1001,7 +1026,7 @@ private _actionHandler = [
 
                     default {
                         [
-                            "if (!(missionNamespace getVariable '", _actionExistenceId, "') || (isNull (missionNamespace getVariable '", _objectId, "'))) exitWith {
+                            "if (!(missionNamespace getVariable '", _actionExistenceId, "') || (isNull (missionNamespace getVariable '", _objectId, "')) || (missionNamespace getVariable '", _completionId, "')) exitWith {
                                 (missionNamespace getVariable '", _parentUnitId, "') removeAction _actionId;
                                 false;
                             };
@@ -1075,7 +1100,8 @@ private _actionHandler = [
                         _userInput,
                         _progressDisplay,
                         _parsedIdentifier,
-                        _actionExistenceId
+                        _actionExistenceId,
+                        [_parentUnit, _action] joinString ""
                     ],
                     {
                         params ["_unit"];
@@ -1098,12 +1124,16 @@ private _actionHandler = [
                             "_userInput", 
                             "_progressDisplay",
                             "_parsedIdentifier",
-                            "_actionExistenceId"
+                            "_actionExistenceId",
+                            "_strictUnitId"
                         ];
 
                         if !(missionNamespace getVariable _actionExistenceId) exitWith {
                             [_handlerId] call KH_fnc_removeHandler;
                         };
+
+                        if !(isNil {_unit getVariable _strictUnitId;}) exitWith {};
+                        _unit setVariable [_strictUnitId, true];
 
                         [
                             [_object, false],
@@ -1445,5 +1475,26 @@ private _actionHandler = [
     true,
     false
 ] call KH_fnc_execute;
+
+if (_condition isEqualType []) then {
+    if (_condition isNotEqualTo []) then {
+        [
+            [_arguments, _condition select 0, _actionExistenceId],
+            {
+                private _actionExistenceId = param [2];
+
+                if (missionNamespace getVariable _actionExistenceId) then {
+                    [[missionNamespace, _actionExistenceId, true]] call KH_fnc_removeHandler;
+                };
+            },
+            true,
+            {
+                params ["_arguments", "_function", "_actionExistenceId"];
+                (!(_arguments call _function) || !(missionNamespace getVariable _actionExistenceId));
+            },
+            false
+        ] call KH_fnc_execute;
+    };
+};
 
 [missionNamespace, _actionExistenceId, true];

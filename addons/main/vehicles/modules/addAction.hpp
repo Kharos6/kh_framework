@@ -69,6 +69,13 @@ class KH_ModuleAddAction: Module_F
 			property = "KH_ModuleAddActionFunctionComplete";
 			defaultValue = "''";
 		};
+		class KH_ModuleAddActionConditionExist: EditCodeMulti5
+		{
+			displayName = "Condition Exist";
+			tooltip = "Unscheduled code, executed locally to the server, that must return true in order for the action to exist.";
+			property = "KH_ModuleAddActionConditionExist";
+			defaultValue = "'true'";
+		};
 		class KH_ModuleAddActionConditionShow: EditCodeMulti5
 		{
 			displayName = "Condition Show";

@@ -25,6 +25,7 @@ KH_var_postInitExecutions pushBack [
                     compile (_logic getVariable ["KH_ModuleAddActionFunctionComplete", ""])
                 ],
                 [
+                    compile (_logic getVariable ["KH_ModuleAddActionConditionExist", "true"]),
                     if (
                         (((_conditionShow select 0) isEqualTo "'") && ((_conditionShow select ((count _conditionShow) - 1)) isEqualTo "'")) || 
                         (((_conditionShow select 0) isEqualTo '"') && ((_conditionShow select ((count _conditionShow) - 1)) isEqualTo '"')) ||

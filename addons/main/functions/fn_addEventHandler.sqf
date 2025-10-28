@@ -123,24 +123,17 @@ switch _eventType do {
 					_remoteEventId,
 					[_entityOwnerId, _argumentsId, _eventNameId, _function],
 					{
-						private _arguments = param [1];
 						_args params ["_entityOwnerId", "_argumentsId", "_eventNameId", "_function"];
 						private _entityOwner = missionNamespace getVariable _entityOwnerId;
 						private _args = missionNamespace getVariable _argumentsId;
 						private _eventName = missionNamespace getVariable _eventNameId;
-
-						if (isNil "_arguments") then {
-							call (missionNamespace getVariable _function);
-						}
-						else {
-							_arguments call (missionNamespace getVariable _function);
-						};
+						call (missionNamespace getVariable _function);
 					}
 				] call KH_fnc_addEventHandler;
 
 				[
 					"CBA",
-					"KH_eve_eventHandlerRemoved",
+					"KH_eve_handlerRemoved",
 					[_remoteHandler, _persistentExecutionId],
 					{
 						params ["_handler"];
@@ -148,7 +141,7 @@ switch _eventType do {
 
 						if ((_handler select 1) isEqualTo _persistentExecutionId) then {
 							[_remoteHandler select 1, _remoteHandler select 2] call CBA_fnc_removeEventHandler;
-							["KH_eve_eventHandlerRemoved", _handlerId select 2] call CBA_fnc_removeEventHandler;
+							["KH_eve_handlerRemoved", _handlerId select 2] call CBA_fnc_removeEventHandler;
 						};
 					}
 				] call KH_fnc_addEventHandler;
@@ -179,7 +172,7 @@ switch _eventType do {
 					true,
 					[
 						"PERSISTENT",
-						true,
+						_entity,
 						[_entity, _persistentEventId, _persistentExecutionId], 
 						{
 							params ["_entity", "_persistentEventId", "_persistentExecutionId"];
@@ -229,7 +222,7 @@ switch _eventType do {
 					true,
 					[
 						"PERSISTENT",
-						true,
+						_entity,
 						[_entity, _persistentEventId, _persistentExecutionId], 
 						{
 							params ["_entity", "_persistentEventId", "_persistentExecutionId"];

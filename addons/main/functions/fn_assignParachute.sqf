@@ -1,7 +1,7 @@
 params [["_unit", objNull, [objNull]], ["_steerable", true, [true]], ["_equip", false, [false]]];
 
 if _equip then {
-	private "_parachute";
+	private _parachute = objNull;
 
 	if (isNull (objectParent _unit)) then {		
 		if _steerable then {

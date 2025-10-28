@@ -4,7 +4,7 @@ if (_entity isEqualType teamMemberNull) then {
 	_entity = agent _entity;
 };
 
-private "_variableName";
+private _variableName = "";
 
 if (_entity isEqualType objNull) then {
 	_variableName = vehicleVarName _entity;
@@ -40,10 +40,7 @@ else {
 			_variableName = [_entity, ""] call KH_fnc_setEntityVariableName;
 		}
 		else {
-			if (_generateIfEmpty isEqualTo false) then {
-				_variableName = "";
-			}
-			else {
+			if (_generateIfEmpty isNotEqualTo false) then {
 				_variableName = [_entity, _generateIfEmpty] call KH_fnc_setEntityVariableName;
 			};
 		};

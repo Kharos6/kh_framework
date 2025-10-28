@@ -519,5 +519,5 @@ _unit setVariable ["KH_var_identificationCardInformation", [_name, _gender, _rac
 	},
 	"PLAYERS",
 	true,
-	["JIP", _unit, false, ""]
+	["JIP", true, true, ""]
 ] call KH_fnc_execute;

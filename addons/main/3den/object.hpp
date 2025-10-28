@@ -73,7 +73,7 @@ class Object
 				class KH_ArrayBuilder
 				{
 					displayName = "Array Builder";
-					tooltip = "Specify an array of strings of global variables that will be made into an array, made public, and contain this entity and any other entities utilizing this function. In format 'globalVariable1', 'globalVariable2', 'globalVariable3', ...";
+					tooltip = "Strings of global variables that will be made into an array, made public, and contain this entity and any other entities utilizing this function. In format 'globalVariable1', 'globalVariable2', 'globalVariable3', ...";
 					property = "KH_ArrayBuilder";
 					control = "Edit";
 					expression = 
@@ -254,7 +254,7 @@ class Object
 				class KH_ServerEntityInit
 				{
 					displayName = "Server Entity Init";
-					tooltip = "Unscheduled code executed on the server with this entity passed as an argument. Passed arguments available through _this are: [_entity (OBJECT)].";
+					tooltip = "Unscheduled code executed locally to the server with this entity passed as an argument. Passed arguments available through _this are: [_entity (OBJECT)].";
 					property = "KH_ServerEntityInit";
 					control = "EditCodeMulti5";
 					expression = 
@@ -275,7 +275,7 @@ class Object
 				class KH_SetRandomLoadout
 				{
 					displayName = "Set Random Loadout";
-					tooltip = "Specify either an array of loadouts, or a global variable containing an array of loadouts, that will be selected from at random and applied to this unit.";
+					tooltip = "Either loadout arrays or a global variable containing an array of loadouts that will be selected from at random and applied to this unit.";
 					property = "KH_SetRandomLoadout";
 					control = "Edit";
 					expression = 

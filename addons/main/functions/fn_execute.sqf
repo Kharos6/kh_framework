@@ -54,25 +54,25 @@ else {
 				private _unitRequired = _special param [2, false, [true]];
 				private _jipId = _special param [3, "", [""]];
 
+				_jipId = if (_jipId isNotEqualTo "") then {
+					_jipId;
+				}
+				else {
+					if (_specialIdOverride isNotEqualTo "") then {
+						_specialIdOverride;
+					}
+					else {
+						generateUid;
+					};
+				};
+
+				missionNamespace setVariable [_jipId, true, 2];
+
 				[
 					"KH_eve_execution", 
 					[_arguments, _function, clientOwner, _unscheduled],
 					_target, 
-					[
-						_dependency, 
-						_unitRequired, 
-						if (_jipId isNotEqualTo "") then {
-							_jipId;
-						}
-						else {
-							if (_specialIdOverride isNotEqualTo "") then {
-								_specialIdOverride;
-							}
-							else {
-								generateUid;
-							};
-						}
-					]
+					[_dependency, _unitRequired, _jipId]
 				] call KH_fnc_triggerCbaEvent;
 			};
 
@@ -119,16 +119,12 @@ else {
 			};
 
 			case "PERSISTENT": {
-				private _immediate = _special param [1, true, [true]];
+				private _object = _special param [1, objNull, [objNull]];
 				private _sendoffArguments = _special param [2];
 				private _sendoffFunction = _special param [3, {}, ["", {}]];
 				private _persistentExecutionId = _special param [4, "", [""]];
 
-				if (_target isEqualType teamMemberNull) then {
-					_target = agent _target;
-				};
-
-				if (_persistentExecutionId isNotEqualTo "") then {
+				_persistentExecutionId = if (_persistentExecutionId isNotEqualTo "") then {
 					_persistentExecutionId;
 				}
 				else {
@@ -140,18 +136,113 @@ else {
 					};
 				};
 
-				if _immediate then {
-					["KH_eve_execution", [_arguments, _function, clientOwner, _unscheduled], _target, false] call KH_fnc_triggerCbaEvent;
-				};
+				_object setVariable [_persistentExecutionId, true, true];
+				["KH_eve_execution", [_arguments, _function, clientOwner, _unscheduled], _target, false] call KH_fnc_triggerCbaEvent;
 
 				[
 					"KH_eve_persistentExecutionSetup", 
-					[_arguments, _function, _target, _sendoffArguments, [_sendoffFunction, false] call KH_fnc_parseFunction, clientOwner, _unscheduled, _persistentExecutionId], 
+					[_arguments, _function, _object, _sendoffArguments, [_sendoffFunction, false] call KH_fnc_parseFunction, clientOwner, _unscheduled, _persistentExecutionId], 
 					"SERVER", 
 					false
 				] call KH_fnc_triggerCbaEvent;
 
-				[_target, _persistentExecutionId, true];
+				[_object, _persistentExecutionId, true];
+			};
+
+			case "NEAR_PLAYERS": {
+				private _object = _special param [1, objNull, [objNull]];
+				private _distance = _special param [2, 0, [0]];
+				private _jip = _special param [3, true, [true]];
+				private _nearId = _special param [4, "", [""]];
+				
+				_nearId = if (_nearId isNotEqualTo "") then {
+					_nearId;
+				}
+				else {
+					if (_specialIdOverride isNotEqualTo "") then {
+						_specialIdOverride;
+					}
+					else {
+						generateUid;
+					};
+				};
+
+				missionNamespace setVariable [_nearId, true, 2];
+				["KH_eve_execution", [_arguments, _function, clientOwner, _unscheduled], _target, false] call KH_fnc_triggerCbaEvent;
+
+				[
+					[_arguments, _function, clientOwner, _unscheduled, _object, _distance, _nearId, +KH_var_allPlayerControlledUnits, _jip],
+					{
+						params ["_arguments", "_function", "_caller", "_unscheduled", "_object", "_distance", "_nearId", "_units", "_jip"];
+
+						[
+							[_arguments, _function, _caller, _unscheduled, _object, _distance, _nearId, _units],
+							{
+								params ["_arguments", "_function", "_caller", "_unscheduled", "_object", "_distance", "_nearId", "_units"];
+
+								if ((_units isEqualTo []) || !(missionNamespace getVariable _nearId)) exitWith {
+									[_handlerId] call KH_fnc_removeHandler;
+								};
+
+								private _deletions = [];
+
+								{
+									private _object = param [4];
+									private _distance = param [5];
+
+									if ((_x distance _object) <= _distance) then {
+										["KH_eve_execution", [_arguments, _function, _caller, _unscheduled], _x, false] call KH_fnc_triggerCbaEvent;
+										_deletions pushBack _x;
+									};
+								} forEach _units;
+
+								_units deleteAt _deletions;
+							},
+							true,
+							0,
+							false
+						] call KH_fnc_execute;
+
+						if _jip then {
+							[
+								"CBA",
+								"KH_eve_playerLoaded",
+								[_arguments, _function, _caller, _unscheduled, _object, _distance, _nearId],
+								{
+									private _unit = param [3];
+									_args params ["_arguments", "_function", "_caller", "_unscheduled", "_object", "_distance", "_nearId"];
+
+									if !(missionNamespace getVariable _nearId) exitWith {
+										[_handlerId] call KH_fnc_removeHandler;
+									};
+
+									[
+										[_arguments, _function, _caller, _unscheduled, _object, _distance, _unit],
+										{
+											params ["_arguments", "_function", "_caller", "_unscheduled", "_object", "_distance", "_unit"];
+
+											if !(missionNamespace getVariable _nearId) exitWith {
+												[_handlerId] call KH_fnc_removeHandler;
+											};
+
+											if ((_unit distance _object) <= _distance) then {
+												["KH_eve_execution", [_arguments, _function, _caller, _unscheduled], _x, false] call KH_fnc_triggerCbaEvent;
+											};
+										},
+										true,
+										0,
+										false
+									] call KH_fnc_execute;
+								}
+							] call KH_fnc_addEventHandler;
+						};
+					},
+					"SERVER",
+					true,
+					false
+				] call KH_fnc_execute;
+
+				[missionNamespace, _nearId, 2];
 			};
 
 			default {
@@ -192,6 +283,19 @@ private _specialParser = {
 		switch _specialType do {
 			case "JIP": {
 				private _specialId = _special param [3, "", [""]];
+
+				if (_specialId isNotEqualTo "") then {
+					_specialIdOverride = _specialId;
+				}
+				else {
+					_specialIdOverride = generateUid;
+				};
+
+				[[missionNamespace, _specialIdOverride, 2], _specialIdOverride];
+			};
+
+			case "NEAR_PLAYERS": {
+				private _specialId = _special param [4, "", [""]];
 
 				if (_specialId isNotEqualTo "") then {
 					_specialIdOverride = _specialId;
@@ -280,7 +384,7 @@ switch (typeName _environmentType) do {
 		};
 
 		([_special, _target] call _specialParser) params ["_return", "_specialIdOverride"];
-		private "_previousReturn";
+		private _previousReturn = nil;
 		private _continue = true;
 
 		if (isNil "_arguments") then {
@@ -469,7 +573,7 @@ switch (typeName _environmentType) do {
 
 		([_special, _target] call _specialParser) params ["_return", "_specialIdOverride"];
 		_environmentType = missionNamespace getVariable ([_environmentType, false] call KH_fnc_parseFunction);
-		private "_previousReturn";
+		private _previousReturn = nil;
 		private _continue = true;
 
 		if (isNil "_arguments") then {

@@ -30,7 +30,7 @@ class KH_ModuleFultonExtract: Module_F
 		class KH_ModuleFultonExtractVehicles: Edit
 		{
 			displayName = "Vehicles";
-			tooltip = "Array of strings of variable names of vehicles that are allowed to activate the fulton baloon. If left empty, and all vehicles of the 'Plane' type will be considered valid.";
+			tooltip = "Strings of variable names of vehicles that are allowed to activate the fulton baloon. If left empty, and all vehicles of the 'Plane' type will be considered valid.";
 			property = "KH_ModuleFultonExtractVehicles";
 			defaultValue = "''";
 		};

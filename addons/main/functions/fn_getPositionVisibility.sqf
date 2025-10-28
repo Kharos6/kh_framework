@@ -117,6 +117,7 @@ if (_minimalFov >= 360) exitWith {
             };
 
             ([_raycasts] call KH_fnc_raycast) isNotEqualTo [];
+            deleteVehicle _checkerObject;
         }
         else {
             true;
@@ -163,8 +164,10 @@ if !((_horizontalAngle <= (_horizontalFov / 2)) && (_verticalAngle <= (_vertical
 };
 
 if (_raycast isNotEqualTo false) then {
+    private "_result";
+    
     if (_raycast isEqualTo true) then {
-        (
+        _result = (
             [
                 _start,
                 _end,
@@ -201,9 +204,12 @@ if (_raycast isNotEqualTo false) then {
                 };
             };
         };
-
-        ([_raycasts] call KH_fnc_raycast) isNotEqualTo [];
+        
+        _result = ([_raycasts] call KH_fnc_raycast) isNotEqualTo [];
+        deleteVehicle _checkerObject;
     };
+
+    _result;
 }
 else {
     true;

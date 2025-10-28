@@ -1,12 +1,14 @@
 params [
 	["_entity", objNull, [objNull]], 
-	["_screenMultiplier", 0, [0]], 
-	["_proximity", 0, [0]], 
-	["_distance", 0, [0]], 
-	["_conditionServer", {}, [{}]], 
-	["_conditionPlayer", {}, [{}]], 
-	["_trueFunction", {}, [{}]], 
-	["_falseFunction", {}, [{}]], 
+	["_screenPercentage", 0.5, [0]], 
+	["_minimumDistance", 1, [0]], 
+	["_maximumDistance", 1000, [0]], 
+	["_conditionServer", {true;}, [{}]], 
+	["_conditionPlayer", {true;}, [{}]], 
+	["_trueFunctionServer", {}, [{}]], 
+	["_falseFunctionServer", {}, [{}]],
+	["_trueFunctionPlayer", {}, [{}]], 
+	["_falseFunctionPlayer", {}, [{}]], 
 	["_repeatable", false, [true]], 
 	["_interval", 0.5, [0]], 
 	["_shared", true, [true]]
@@ -25,14 +27,14 @@ _entity setVariable [_entityVariable, false];
 _entity setVariable [_conditionReference, createHashMap];
 	
 private _triggerHandler = [
-	[_entity, _distance, _conditionPlayer, _interval, _event, _triggerId], 
+	[_entity, _maximumDistance, _conditionPlayer, _interval, _event, _triggerId], 
 	{
-		params ["_entity", "_distance", "_conditionPlayer", "_interval", "_event", "_triggerId"];
+		params ["_entity", "_maximumDistance", "_conditionPlayer", "_interval", "_event", "_triggerId"];
 		
 		[
-			[_entity, _distance, _conditionPlayer, _event, _triggerId],
+			[_entity, _maximumDistance, _conditionPlayer, _event, _triggerId],
 			{
-				params ["_entity", "_distance", "_conditionPlayer", "_event", "_triggerId"];
+				params ["_entity", "_maximumDistance", "_conditionPlayer", "_event", "_triggerId"];
 
 				if !(_entity getVariable _triggerId) exitWith {
 					[_handlerId] call KH_fnc_removeHandler;
@@ -41,11 +43,11 @@ private _triggerHandler = [
 				if ([_entity] call _conditionPlayer) then {						
 					if !(isNull _entity) then {
 						if (
-							((player distance _entity) < _distance) && 
+							((player distance _entity) < _maximumDistance) && 
 							(alive player) && 
-							!(clientOwner in KH_var_allCuratorMachines)
+							(isNull curatorCamera)
 						   ) then {
-							[_event, [worldToScreen (ASLToAGL (getPosASL _entity)), player]] call CBA_fnc_serverEvent;
+							[_event, [player]] call CBA_fnc_serverEvent;
 						};
 					}
 					else {
@@ -68,11 +70,13 @@ private _eventHandler = [
 	_event,
 	[
 		_entity, 
-		_screenMultiplier, 
-		_proximity, 
+		_screenPercentage, 
+		_minimumDistance, 
 		_conditionServer, 
-		_trueFunction, 
-		_falseFunction,
+		_trueFunctionServer, 
+		_falseFunctionServer,
+		_trueFunctionPlayer,
+		_falseFunctionPlayer,
 		_repeatable, 
 		_shared, 
 		_firstTrigger, 
@@ -82,15 +86,17 @@ private _eventHandler = [
 		_entity getVariable _conditionReference
 	],
 	{
-		params ["_screenPos", "_currentPlayer"];
+		params ["_currentPlayer"];
 
 		_args params [
 			"_entity", 
-			"_screenMultiplier", 
-			"_proximity", 
+			"_screenPercentage", 
+			"_minimumDistance", 
 			"_conditionServer",
-			"_trueFunction", 
-			"_falseFunction", 
+			"_trueFunctionServer", 
+			"_falseFunctionServer",
+			"_trueFunctionPlayer",
+			"_falseFunctionPlayer",
 			"_repeatable", 
 			"_shared", 
 			"_firstTrigger", 
@@ -107,38 +113,15 @@ private _eventHandler = [
 
 			private _conditionVariableId = getPlayerUID _currentPlayer;
 								
-			if ((_currentPlayer distance _entity) < _proximity) then {
+			if ((_currentPlayer distance _entity) < _minimumDistance) then {
 				_conditionReference set [_conditionVariableId, true];
 			}
 			else {
-				if (_screenPos isEqualTo []) then {
+				if !([_currentPlayer, _entity, _currentPlayer, _screenPercentage, 0, _maximumDistance, true] call KH_fnc_getPositionVisibility) then {
 					_conditionReference set [_conditionVariableId, false];
 				}
 				else {
-					_screenPos params ["_screenPosX", "_screenPosY"];
-
-					if (
-						(_screenPosX > (0.5 - _screenMultiplier)) && 
-						(_screenPosX < (0.5 + _screenMultiplier)) && 
-						(_screenPosY > (0.5 - _screenMultiplier)) && 
-						(_screenPosY < (0.5 + _screenMultiplier))
-					   ) then {
-						private _playerEyes = eyePos _currentPlayer;
-						private _entityPosition = getPosASL _entity;
-						
-						if (
-							(([_entity, "VIEW", objNull] checkVisibility [_playerEyes, _entityPosition]) > 0) ||
-							(!(terrainIntersectASL [_playerEyes, _entityPosition]) && !(lineIntersects [_playerEyes, _entityPosition, _currentPlayer, _entity]))
-						   ) then {
-							_conditionReference set [_conditionVariableId, true];
-						}
-						else {
-							_conditionReference set [_conditionVariableId, false];
-						};
-					}
-					else {
-						_conditionReference set [_conditionVariableId, false];
-					};
+					_conditionReference set [_conditionVariableId, true];
 				};
 			};
 			
@@ -155,13 +138,15 @@ private _eventHandler = [
 				if _condition then {
 					if !(_entity getVariable _entityVariable) then {
 						_entity setVariable [_firstTrigger, true];
-						[_currentPlayer, _entity] call _trueFunction;
+						[_currentPlayer, _entity] call _trueFunctionServer;
+						[[_entity], _trueFunctionPlayer, _currentPlayer, true, false] call KH_fnc_execute;
 					};
 				}
 				else {
 					if (_entity getVariable _entityVariable) then {
 						if (_entity getVariable [_firstTrigger, false]) then {
-							[_currentPlayer, _entity] call _falseFunction;
+							[_currentPlayer, _entity] call _falseFunctionServer;
+							[[_entity], _falseFunctionPlayer, _currentPlayer, true, false] call KH_fnc_execute;
 						};
 						
 						if !_repeatable then {
@@ -175,13 +160,15 @@ private _eventHandler = [
 				if _condition then {
 					if !(_currentPlayer getVariable _playerVariable) then {
 						_entity setVariable [_firstTrigger, true];
-						[_currentPlayer, _entity] call _trueFunction;
+						[_currentPlayer, _entity] call _trueFunctionServer;
+						[[_entity], _trueFunctionPlayer, _currentPlayer, true, false] call KH_fnc_execute;
 					};
 				}
 				else {
 					if (_currentPlayer getVariable _playerVariable) then {
 						if (_entity getVariable [_firstTrigger, false]) then {
-							[_currentPlayer, _entity] call _falseFunction;
+							[_currentPlayer, _entity] call _falseFunctionServer;
+							[[_entity], _falseFunctionPlayer, _currentPlayer, true, false] call KH_fnc_execute;
 						};
 						
 						if !_repeatable then {

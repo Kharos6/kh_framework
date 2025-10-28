@@ -1,15 +1,16 @@
 params [
 	["_entityTypes", [], [[]]], 
-	["_transforms", [], [[]]], 
-	["_radiuses", [], [[]]], 
+	["_transforms", [[[0, 0, 0], [0, 0, 0]]], [[]]], 
+	["_radius", [100, 100, 0], [[]]], 
 	["_amount", 1, [0]], 
 	["_maximum", 1, [0]], 
-	["_condition", {}, [{}]], 
+	["_condition", {true;}, [{}]], 
 	["_init", {}, [{}]], 
 	["_type", [], [[]]],
 	["_interval", 1, [0]],
-	["_validatePosition", false, [true]],
-	["_minimumDistance", 0, [0]]
+	["_countKilled", true, [true]],
+	["_validatePosition", true, [true]],
+	["_minimumPlayerDistance", 0, [0]]
 ];
 
 private _spawnerCount = generateUid;
@@ -26,11 +27,12 @@ private _entityHandler = [
 ] call KH_fnc_addEventHandler;
 
 private _spawnHandler = [
-	[_entityTypes, _transforms, _radiuses, _amount, _maximum, _condition, _init, _type, _validatePosition, _minimumDistance, _spawnerCount],
+	[_entityTypes, _transforms, _radius, _amount, _maximum, _condition, _init, _type, _countKilled, _validatePosition, _minimumPlayerDistance, _spawnerCount],
 	{
-		params ["_entityTypes", "_transforms", "_radiuses", "_amount", "_maximum", "_condition", "_init", "_type", "_validatePosition", "_minimumDistance", "_spawnerCount"];
+		params ["_entityTypes", "_transforms", "_radius", "_amount", "_maximum", "_condition", "_init", "_type", "_countKilled", "_validatePosition", "_minimumPlayerDistance", "_spawnerCount"];
+		private _negativeRadius = [-(_radius select 0), -(_radius select 1), -(_radius select 2)];
 
-		if ((missionNamespace getVariable [_spawnerCount, 0]) < _maximum) then {
+		if ((missionNamespace getVariable [_spawnerCount, 0]) < (_maximum + _amount)) then {
 			private _spawnedEntities = [];
 			private _entityType = _type param [0, "UNIT", [""]];
 
@@ -65,7 +67,7 @@ private _spawnHandler = [
 
 						if _validatePosition then {
 							{
-								if ([_x, AGLToASL _position, _x, 1, _minimumDistance, 0, objNull] call KH_fnc_getPositionVisibility) then {
+								if ([_x, AGLToASL _position, _x, 1, _minimumPlayerDistance, 0, objNull] call KH_fnc_getPositionVisibility) then {
 									_spawnValid = false;
 									break;
 								};
@@ -95,8 +97,12 @@ private _spawnHandler = [
 							[[0, 1, 0], [0, 0, 1]];
 						};
 						
-						private _chosenRadius = _radiuses select (_transforms find _chosenTransforms);
-						_position vectorAdd [random (_chosenRadius select 0), random (_chosenRadius select 1), random (_chosenRadius select 2)];
+						_position vectorAdd [random [(_radius select 0), 0, (_negativeRadius select 0)], random [(_radius select 1), 0, (_negativeRadius select 1)], random [(_radius select 2), 0, (_negativeRadius select 2)]];
+
+						if !([_position, missionNamespace getVariable [_spawnerCount, 0]] call _condition) then {
+							continue;
+						};
+
 						private _unit = _group createUnit [selectRandom _entityTypes, _position, [], 0, _placementMode];
 						
 						if (_rotation isEqualTypeAll []) then {
@@ -132,7 +138,7 @@ private _spawnHandler = [
 
 						if _validatePosition then {
 							{
-								if ([_x, AGLToASL _position, _x, 1, _minimumDistance, 0, objNull] call KH_fnc_getPositionVisibility) then {
+								if ([_x, AGLToASL _position, _x, 1, _minimumPlayerDistance, 0, objNull] call KH_fnc_getPositionVisibility) then {
 									_spawnValid = false;
 									break;
 								};
@@ -162,8 +168,12 @@ private _spawnHandler = [
 							[[0, 1, 0], [0, 0, 1]];
 						};
 
-						private _chosenRadius = _radiuses select (_transforms find _chosenTransforms);
-						_position vectorAdd [random (_chosenRadius select 0), random (_chosenRadius select 1), random (_chosenRadius select 2)];
+						_position vectorAdd [random [(_radius select 0), 0, (_negativeRadius select 0)], random [(_radius select 1), 0, (_negativeRadius select 1)], random [(_radius select 2), 0, (_negativeRadius select 2)]];
+
+						if !([_position, missionNamespace getVariable [_spawnerCount, 0]] call _condition) then {
+							continue;
+						};
+
 						private _agent = createAgent [selectRandom _entityTypes, _position, [], 0, _placementMode];
 
 						if (_rotation isEqualTypeAll []) then {
@@ -199,7 +209,7 @@ private _spawnHandler = [
 
 						if _validatePosition then {
 							{
-								if ([_x, AGLToASL _position, _x, 1, _minimumDistance, 0, objNull] call KH_fnc_getPositionVisibility) then {
+								if ([_x, AGLToASL _position, _x, 1, _minimumPlayerDistance, 0, objNull] call KH_fnc_getPositionVisibility) then {
 									_spawnValid = false;
 									break;
 								};
@@ -229,11 +239,13 @@ private _spawnHandler = [
 							[[0, 1, 0], [0, 0, 1]];
 						};
 
-						private _chosenRadius = _radiuses select (_transforms find _chosenTransforms);
-						_position vectorAdd [random (_chosenRadius select 0), random (_chosenRadius select 1), random (_chosenRadius select 2)];
-						private _object = objNull;
-						
-						if !_local then {
+						_position vectorAdd [random [(_radius select 0), 0, (_negativeRadius select 0)], random [(_radius select 1), 0, (_negativeRadius select 1)], random [(_radius select 2), 0, (_negativeRadius select 2)]];
+
+						if !([_position, missionNamespace getVariable [_spawnerCount, 0]] call _condition) then {
+							continue;
+						};
+
+						private _object = if !_local then {
 							_object = createVehicle [selectRandom _entityTypes, _position, [], 0, _placementMode];
 						}
 						else {
@@ -273,7 +285,7 @@ private _spawnHandler = [
 
 						if _validatePosition then {
 							{
-								if ([_x, _position, _x, 1, _minimumDistance, 0, objNull] call KH_fnc_getPositionVisibility) then {
+								if ([_x, _position, _x, 1, _minimumPlayerDistance, 0, objNull] call KH_fnc_getPositionVisibility) then {
 									_spawnValid = false;
 									break;
 								};
@@ -303,8 +315,12 @@ private _spawnHandler = [
 							[[0, 1, 0], [0, 0, 1]];
 						};
 
-						private _chosenRadius = _radiuses select (_transforms find _chosenTransforms);
-						_position vectorAdd [random (_chosenRadius select 0), random (_chosenRadius select 1), random (_chosenRadius select 2)];
+						_position vectorAdd [random [(_radius select 0), 0, (_negativeRadius select 0)], random [(_radius select 1), 0, (_negativeRadius select 1)], random [(_radius select 2), 0, (_negativeRadius select 2)]];
+
+						if !([_position, missionNamespace getVariable [_spawnerCount, 0]] call _condition) then {
+							continue;
+						};
+
 						private _object = createSimpleObject [selectRandom _entityTypes, _position, _local];
 
 						if (_rotation isEqualTypeAll []) then {
@@ -340,7 +356,7 @@ private _spawnHandler = [
 
 						if _validatePosition then {
 							{
-								if ([_x, AGLToASL _position, _x, 1, _minimumDistance, 0, objNull] call KH_fnc_getPositionVisibility) then {
+								if ([_x, AGLToASL _position, _x, 1, _minimumPlayerDistance, 0, objNull] call KH_fnc_getPositionVisibility) then {
 									_spawnValid = false;
 									break;
 								};
@@ -370,8 +386,12 @@ private _spawnHandler = [
 							[[0, 1, 0], [0, 0, 1]];
 						};
 
-						private _chosenRadius = _radiuses select (_transforms find _chosenTransforms);
-						_position vectorAdd [random (_chosenRadius select 0), random (_chosenRadius select 1), random (_chosenRadius select 2)];
+						_position vectorAdd [random [(_radius select 0), 0, (_negativeRadius select 0)], random [(_radius select 1), 0, (_negativeRadius select 1)], random [(_radius select 2), 0, (_negativeRadius select 2)]];
+						
+						if !([_position, missionNamespace getVariable [_spawnerCount, 0]] call _condition) then {
+							continue;
+						};
+
 						private _vehicle = createVehicle [selectRandom _entityTypes, _position, [], 0, _placementMode];
 
 						if (_rotation isEqualTypeAll []) then {
@@ -391,16 +411,18 @@ private _spawnHandler = [
 			missionNamespace setVariable [_spawnerCount, (missionNamespace getVariable [_spawnerCount, 0]) + (count _spawnedEntities)];
 
 			{
-				[
-					["ENTITY", _x, "REMOTE"],
-					"Killed",
-					[],
-					{
-						params ["_entity"];
-						["KH_eve_spawnedEntityTerminated", []] call CBA_fnc_localEvent;
-						[_handlerId] call KH_fnc_removeHandler;
-					}
-				] call KH_fnc_addEventHandler;
+				if _countKilled then {
+					[
+						["ENTITY", _x, "REMOTE"],
+						"Killed",
+						[],
+						{
+							params ["_entity"];
+							["KH_eve_spawnedEntityTerminated", []] call CBA_fnc_localEvent;
+							[_handlerId] call KH_fnc_removeHandler;
+						}
+					] call KH_fnc_addEventHandler;
+				};
 
 				[
 					["ENTITY", _x, "REMOTE"],

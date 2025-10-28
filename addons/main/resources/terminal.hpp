@@ -69,6 +69,8 @@ class KH_ResourceTerminal
             y = QUOTE(RSC_POS_Y(80.5));
             w = QUOTE(RSC_POS_W(10));
             h = QUOTE(RSC_POS_H(2));
+            colorBackground[] = {0, 0, 0, 0.9};
+            colorBackgroundActive[] = {1, 1, 1, 0.9};
         };
         class ButtonExit: RscButtonMenuCancel
         {
@@ -77,6 +79,8 @@ class KH_ResourceTerminal
             y = QUOTE(RSC_POS_Y(80.5));
             w = QUOTE(RSC_POS_W(10));
             h = QUOTE(RSC_POS_H(2));
+            colorBackground[] = {0, 0, 0, 0.9};
+            colorBackgroundActive[] = {1, 1, 1, 0.9};
         };
     };
 };

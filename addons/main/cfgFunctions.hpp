@@ -8,7 +8,6 @@ class CfgFunctions
 			file = "\x\kh\addons\main\functions";
 			class addAction {};
 			class addEventHandler {};
-			class addVisualTrigger {};
 			class arma {};
 			class assignIdentificationCard {};
 			class assignParachute {};
@@ -69,9 +68,11 @@ class CfgFunctions
 			class moduleDynamicDisguise {};
 			class moduleDynamicDisguiseEquipment {};
 			class moduleEndMission {};
+			class moduleEntitySpawner {};
 			class moduleEquipableObject {};
 			class moduleFultonExtract {};
 			class moduleTeleporter {};
+			class moduleVisualTrigger {};
 			class openIdentificationCard {};
 			class openTerminal {};
 			class parseBoolean {};
@@ -116,9 +117,12 @@ class CfgFunctions
 			class toggleUserInput {};
 			class triggerCbaEvent {};
 			class vehicleSequence {};
+			class visualTrigger {};
 			class zeusModuleArma {};
 			class zeusModuleBreakDisguise {};
+			class zeusModuleEndMission {};
 			class zeusModuleRagdollUnit {};
+			class zeusModuleSuspendMission {};
 		};
 	};
 };

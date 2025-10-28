@@ -11,7 +11,7 @@ class Group
 				class KH_ArrayBuilder
 				{
 					displayName = "Array Builder";
-					tooltip = "Specify an array of strings of global variables that will be made into an array, made public, and contain this group and any other groups utilizing this function. In format 'globalVariable1', 'globalVariable2', 'globalVariable3', ....";
+					tooltip = "Strings of global variables that will be made into an array, made public, and contain this group and any other groups utilizing this function. In format 'globalVariable1', 'globalVariable2', 'globalVariable3', ....";
 					property = "KH_ArrayBuilder";
 					control = "Edit";
 					expression = 
@@ -33,7 +33,7 @@ class Group
 				class KH_IgnoredTargets
 				{
 					displayName = "Ignored Targets";
-					tooltip = "Specify an array of strings of variable names of units or groups to be ignored as potential targets by the members of this group.";
+					tooltip = "Strings of variable names of units or groups to be ignored as potential targets by the members of this group.";
 					property = "KH_IgnoredTargets";
 					control = "Edit";
 					expression = 

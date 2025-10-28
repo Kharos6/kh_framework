@@ -36,7 +36,9 @@ class RscTitles
 {
     #include "\x\kh\addons\main\resources\khDisplay.hpp"
 };
-#include "\x\kh\addons\main\resources\identificationCard.hpp"
 #include "\x\kh\addons\main\resources\debugConsole.hpp"
+#include "\x\kh\addons\main\resources\endMission.hpp"
+#include "\x\kh\addons\main\resources\identificationCard.hpp"
 #include "\x\kh\addons\main\resources\khControl.hpp"
+#include "\x\kh\addons\main\resources\suspendMission.hpp"
 #include "\x\kh\addons\main\resources\terminal.hpp"

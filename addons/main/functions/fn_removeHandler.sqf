@@ -13,10 +13,10 @@ if ((_id select 1) isEqualType []) then {
 	[_handlerId] call KH_fnc_removeHandler;
 
 	if (isNil "_eventOwner") then {
-		["KH_eve_eventHandlerRemoved", [_id]] call CBA_fnc_globalEvent;
+		["KH_eve_handlerRemoved", [_id]] call CBA_fnc_globalEvent;
 	}
 	else {
-		["KH_eve_eventHandlerRemoved", [_id], _eventOwner] call CBA_fnc_ownerEvent;
+		["KH_eve_handlerRemoved", [_id], _eventOwner] call CBA_fnc_ownerEvent;
 	};
 }
 else {
@@ -88,7 +88,7 @@ else {
                     };
                 };
 
-                ["KH_eve_eventHandlerRemoved", [_id]] call CBA_fnc_localEvent;
+                ["KH_eve_handlerRemoved", [_id]] call CBA_fnc_localEvent;
             },
             _eventOwner,
             true,
@@ -104,5 +104,19 @@ else {
         ];
 
         _namespace setVariable [_variable, _valueOverride, _target];
+
+        if (_target isEqualType true) then {
+            if _target then {
+                ["KH_eve_handlerRemoved", [_id]] call CBA_fnc_globalEvent;
+            }
+            else {
+                ["KH_eve_handlerRemoved", [_id]] call CBA_fnc_localEvent;
+            };
+        }
+        else {
+            ["KH_eve_handlerRemoved", [_id]] call KH_fnc_triggerCbaEvent;
+        };
     };
 };
+
+nil;

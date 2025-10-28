@@ -1,5 +1,5 @@
 params [
-    ["_resource", "", [""]],
+    ["_resource", "KH_ResourceKHControl", [""]],
     ["_text", "", [""]], 
     ["_displayTimings", [1, 0, 1], [[]]], 
     ["_backgroundColor", [0, 0, 0, 1], [[]]], 
@@ -11,7 +11,7 @@ if (_resource isEqualTo "") then {
     _resource = "KH_ResourceKHControl";
 };
 
-_displayTimings params [["_fadeIn", 0.5, [0]], ["_duration", 0, [0]], ["_fadeOut", 0.5, [0]]];
+_displayTimings params [["_fadeIn", 0.5, [0]], ["_duration", true, [true, 0]], ["_fadeOut", 0.5, [0]]];
 (_transforms call KH_fnc_parseNormalizedScreenTransforms) params ["_positionX", "_positionY", "_sizeX", "_sizeY"];
 _angle params [["_angle", 0, [0]], ["_centerX", 0, [0]], ["_centerY", 0, [0]]];
 private _khDisplay = uiNamespace getVariable ["KH_var_khDisplay", displayNull];
@@ -32,6 +32,15 @@ else {
 _control ctrlSetBackgroundColor _backgroundColor;
 _control ctrlSetFade 0;
 _control ctrlCommit _fadeIn;
+
+if (_duration isEqualTo true) then {
+    _duration = 0;
+}
+else {
+    if (_duration isEqualTo false) then {
+        _duration = -1;
+    };
+};
 
 if (_duration >= 0) then {
     private _totalDuration = _duration + _fadeIn;

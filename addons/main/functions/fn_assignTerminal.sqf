@@ -1,4 +1,4 @@
-params [["_object", objNull, [objNull]], ["_name", "", [""]], ["_identifier", "", [""]], ["_description", "", [""]], ["_condition", {}, [{}]], ["_function", {}, [{}]]];
+params [["_object", objNull, [objNull]], ["_name", "", [""]], ["_identifier", "", [""]], ["_description", "", [""]], ["_condition", {true;}, [{}]], ["_function", {}, [{}]]];
 private _identifierOutput = ["KH_var_terminalOutput_", _identifier] joinString "";
 private _identifierInput = ["KH_var_terminalInput_", _identifier] joinString "";
 missionNamespace setVariable [_identifierOutput, "", true];

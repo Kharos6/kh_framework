@@ -1,5 +1,5 @@
 params [["_object", objNull, [objNull]], ["_local", true, [true]], ["_init", {}, [{}]]];
-private "_simpleObject";
+private _simpleObject = objNull;
 private _position = getPosWorld _object;
 private _vectorDirAndUp = [vectorDir _object, vectorUp _object];
 private _currentObject = (getModelInfo _object) select 1;

@@ -104,6 +104,8 @@ class KH_ResourceIdentificationCard
             y = QUOTE(RSC_POS_Y(59.5));
             w = QUOTE(RSC_POS_W(20));
             h = QUOTE(RSC_POS_W(2));
+            colorBackground[] = {0, 0, 0, 0.9};
+            colorBackgroundActive[] = {1, 1, 1, 0.9};
         };
     };
 };

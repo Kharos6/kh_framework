@@ -34,7 +34,7 @@ if (_transition isNotEqualTo 0) then {
 
 	if (isPlayer _entity) then {
 		[
-			["", "", [_transition, 0, _transition], [0, 0, 0, 1], [0, 0, 100, 100], [0, 0, 0]],
+			["", "", [_transition, true, _transition], [0, 0, 0, 1], [0, 0, 100, 100], [0, 0, 0]],
 			"KH_fnc_draw2d",
 			_entity,
 			true,

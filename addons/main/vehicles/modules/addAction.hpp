@@ -20,6 +20,13 @@ class KH_ModuleAddAction: Module_F
 	icon = "iconmodule";
 	class Attributes: AttributesBase
 	{
+		class KH_ModuleAddActionHandleObjectActionRecovery: Checkbox
+		{
+			displayName = "Handle Object Action Recovery";
+			tooltip = "True recovers the action if a synchronized entity respawns or changes locality.";
+			property = "KH_ModuleAddActionHandleObjectActionRecovery";
+			defaultValue = "true";
+		};
 		class KH_ModuleAddActionName: Edit
 		{
 			displayName = "Name";
@@ -30,49 +37,63 @@ class KH_ModuleAddAction: Module_F
 		class KH_ModuleAddActionFunctionStart: EditCodeMulti5
 		{
 			displayName = "Function Start";
-			tooltip = "Unscheduled code executed locally to the caller when the caller initiates the action. Local variables exposed to the function are: _caller, _target, _actionId, and _handlerId";
+			tooltip = "Unscheduled code executed locally to the caller when the caller initiates the action. Local variables exposed to the function are: _caller, _target, _actionId, _handlerId, _resultPreviousStart, _resultPreviousProgress, _resultPreviousInterrupt, _resultPreviousCancel, _resultPreviousComplete, and _duration. The _duration variable may be changed to alter the duration of the action for the current execution.";
 			property = "KH_ModuleAddActionFunctionStart";
 			defaultValue = "''";
 		};
 		class KH_ModuleAddActionFunctionProgress: EditCodeMulti5
 		{
 			displayName = "Function Progress";
-			tooltip = "Unscheduled code executed locally to the caller on each frame as the action progresses through its duration. Local variables exposed to the function are: _caller, _target, _actionId, and _handlerId";
+			tooltip = "Unscheduled code executed locally to the caller on each frame as the action progresses through its duration. Local variables exposed to the function are: _caller, _target, _actionId, _handlerId, _resultPreviousStart, _resultPreviousProgress, _resultPreviousInterrupt, _resultPreviousCancel, _resultPreviousComplete, _resultStart, and _resultProgress.";
 			property = "KH_ModuleAddActionFunctionProgress";
 			defaultValue = "''";
 		};
 		class KH_ModuleAddActionFunctionInterrupt: EditCodeMulti5
 		{
 			displayName = "Function Interrupt";
-			tooltip = "Unscheduled code executed locally to the caller when the action is interrupted in the event of a condition failure or the caller moving beyond the designated distance. Local variables exposed to the function are: _caller, _target, _actionId, and _handlerId";
+			tooltip = "Unscheduled code executed locally to the caller when the action is interrupted in the event of a condition failure, the caller moving beyond the designated distance. Local variables exposed to the function are: _caller, _target, _actionId, _handlerId, _resultPreviousStart, _resultPreviousProgress, _resultPreviousInterrupt, _resultPreviousCancel, _resultPreviousComplete, _resultStart, and _resultProgress.";
 			property = "KH_ModuleAddActionFunctionInterrupt";
+			defaultValue = "''";
+		};
+		class KH_ModuleAddActionFunctionCancel: EditCodeMulti5
+		{
+			displayName = "Function Cancel";
+			tooltip = "Unscheduled code executed locally to the caller when the action is cancelled by the caller. Local variables exposed to the function are: _caller, _target, _actionId, _handlerId, _resultPreviousStart, _resultPreviousProgress, _resultPreviousInterrupt, _resultPreviousCancel, _resultPreviousComplete, _resultStart, and _resultProgress.";
+			property = "KH_ModuleAddActionFunctionCancel";
 			defaultValue = "''";
 		};
 		class KH_ModuleAddActionFunctionComplete: EditCodeMulti5
 		{
 			displayName = "Function Complete";
-			tooltip = "Unscheduled code executed locally to the caller when the action is completed. Local variables exposed to the function are: _caller, _target, _actionId, and _handlerId";
+			tooltip = "Unscheduled code executed locally to the caller when the action is completed. Local variables exposed to the function are: _caller, _target, _actionId, _handlerId, _resultStart, _resultPreviousStart, _resultPreviousProgress, _resultPreviousInterrupt, _resultPreviousCancel, _resultPreviousComplete, and _resultProgress.";
 			property = "KH_ModuleAddActionFunctionComplete";
 			defaultValue = "''";
 		};
 		class KH_ModuleAddActionConditionShow: EditCodeMulti5
 		{
 			displayName = "Condition Show";
-			tooltip = "Unscheduled code, executed locally to the caller, that must return true in order for the action to be visible. Local variables exposed to the function are: _caller, _target, _actionId, and _handlerId";
+			tooltip = "Unscheduled code, executed locally to the caller, that must return true in order for the action to be visible. A string representation of a variable or multiple variables in the synchronized object's namespace that must be true, or arrays in format [variableName (STRING), wantedValue (BOOL, SCALAR, STRING, ARRAY, HASHMAP)] of variables that must return the wanted value, can also be used, as simply as 'myVariable' or 'myVariable1', 'myVariable2', 'myVariable3', ..., or ['myVariable1', wantedValue1], ['myVariable2', wantedValue2], ['myVariable3', wantedValue3], .... If no entities are synchronized, these variables are taken from the player unit namespace. Local variables exposed to the function are: _caller, _target, _actionId, _handlerId, _resultPreviousStart, _resultPreviousProgress, _resultPreviousInterrupt, _resultPreviousCancel, and _resultPreviousComplete.";
 			property = "KH_ModuleAddActionConditionShow";
+			defaultValue = "'true'";
+		};
+		class KH_ModuleAddActionConditionStart: EditCodeMulti5
+		{
+			displayName = "Condition Start";
+			tooltip = "Unscheduled code, executed locally to the caller, that must return true in order for the action to start. A string representation of a variable or multiple variables in the synchronized object's namespace that must be true, or arrays in format [variableName (STRING), wantedValue (BOOL, SCALAR, STRING, ARRAY, HASHMAP)] of variables that must return the wanted value, can also be used, as simply as 'myVariable', or 'myVariable1', 'myVariable2', 'myVariable3', ..., or ['myVariable1', wantedValue1], ['myVariable2', wantedValue2], ['myVariable3', wantedValue3], .... If no entities are synchronized, these variables are taken from the player unit namespace. Local variables exposed to the function are: _caller, _target, _actionId, _handlerId, _resultPreviousStart, _resultPreviousProgress, _resultPreviousInterrupt, _resultPreviousCancel, _resultPreviousComplete, and _duration. The _duration variable may be changed to alter the duration of the action for the current execution.";
+			property = "KH_ModuleAddActionConditionStart";
 			defaultValue = "'true'";
 		};
 		class KH_ModuleAddActionConditionProgress: EditCodeMulti5
 		{
 			displayName = "Condition Progress";
-			tooltip = "Unscheduled code, executed locally to the caller, that must return true in order for the action to progress through its duration. Local variables exposed to the function are: _caller, _target, _actionId, and _handlerId";
+			tooltip = "Unscheduled code, executed locally to the caller, that must return true in order for the action to progress through its duration. A string representation of a variable or multiple variables in the synchronized object's namespace that must be true, or arrays in format [variableName (STRING), wantedValue (BOOL, SCALAR, STRING, ARRAY, HASHMAP)] of variables that must return the wanted value, can also be used, as simply as 'myVariable' or 'myVariable1', 'myVariable2', 'myVariable3', ..., or ['myVariable1', wantedValue1], ['myVariable2', wantedValue2], ['myVariable3', wantedValue3], .... If no entities are synchronized, these variables are taken from the player unit namespace. Local variables exposed to the function are: _caller, _target, _actionId, _handlerId, _resultPreviousStart, _resultPreviousProgress, _resultPreviousInterrupt, _resultPreviousCancel, _resultPreviousComplete, _resultStart, and _resultProgress.";
 			property = "KH_ModuleAddActionConditionProgress";
 			defaultValue = "'true'";
 		};
 		class KH_ModuleAddActionConditionComplete: EditCodeMulti5
 		{
 			displayName = "Condition Complete";
-			tooltip = "Unscheduled code, executed locally to the caller, that must return true in order for the action to be allowed to complete. Local variables exposed to the function are: _caller, _target, _actionId, and _handlerId";
+			tooltip = "Unscheduled code, executed locally to the caller, that must return true in order for the action to be allowed to complete. A string representation of a variable or multiple variables in the synchronized object's namespace that must be true, or arrays in format [variableName (STRING), wantedValue (BOOL, SCALAR, STRING, ARRAY, HASHMAP)] of variables that must return the wanted value, can also be used, as simply as 'myVariable' or 'myVariable1', 'myVariable2', 'myVariable3', ..., or ['myVariable1', wantedValue1], ['myVariable2', wantedValue2], ['myVariable3', wantedValue3], .... If no entities are synchronized, these variables are taken from the player unit namespace. Local variables exposed to the function are: _caller, _target, _actionId, _handlerId, _resultPreviousStart, _resultPreviousProgress, _resultPreviousInterrupt, _resultPreviousCancel, _resultPreviousComplete, _resultStart, and _resultProgress.";
 			property = "KH_ModuleAddActionConditionComplete";
 			defaultValue = "'true'";
 		};
@@ -100,7 +121,7 @@ class KH_ModuleAddAction: Module_F
 		class KH_ModuleAddActionDuration: Edit
 		{
 			displayName = "Duration";
-			tooltip = "Duration of the action call before completion. Set to 0 for instant completion, still subject to the conditions.";
+			tooltip = "Duration of the action call before completion. Set to 0 for instant completion, -1 for infinite progression that is useful for operation length defined by the caller, or any positive number for duration in seconds.";
 			property = "KH_ModuleAddActionDuration";
 			defaultValue = "'0'";
 		};
@@ -118,11 +139,11 @@ class KH_ModuleAddAction: Module_F
 			property = "KH_ModuleAddActionShowImmediately";
 			defaultValue = "true";
 		};
-		class KH_ModuleAddActionShowUnconscious: Checkbox
+		class KH_ModuleAddActionAllowIncapacitated: Checkbox
 		{
-			displayName = "Show Unconscious";
-			tooltip = "True allows the action to be usable while the caller is unconscious.";
-			property = "KH_ModuleAddActionShowUnconscious";
+			displayName = "Allow Incapacitated";
+			tooltip = "True allows the action to be usable while the caller is incapacitated.";
+			property = "KH_ModuleAddActionAllowIncapacitated";
 			defaultValue = "false";
 		};
 		class KH_ModuleAddActionHideOnUse: Checkbox
@@ -139,19 +160,33 @@ class KH_ModuleAddAction: Module_F
 			property = "KH_ModuleAddActionDrawHint";
 			defaultValue = "false";
 		};
-		class KH_ModuleAddActionDetectionShow: Checkbox
+		class KH_ModuleAddActionDetectionType: Combo
+		{
+			displayName = "Detection Type";
+			tooltip = "Type of detection if Detection Show is not false. 'VIEW' uses the caller's camera aim point. 'WEAPON' uses the caller's weapon aim point. 'CURSOR' uses the caller's cursor position on screen.";
+			property = "KH_ModuleAddActionDetectionType";
+			typeName = "STRING";
+			defaultValue = "'VIEW'";
+			class Values
+			{
+				class KH_Camera {name = "VIEW"; value = "VIEW";};
+                class KH_Weapon {name = "WEAPON"; value = "WEAPON";};
+                class KH_Cursor {name = "CURSOR"; value = "CURSOR";};
+			};
+		};
+		class KH_ModuleAddActionDetectionShow: Edit
 		{
 			displayName = "Detection Show";
-			tooltip = "True makes it so that the caller must be looking at the surface of a synchronized entity in order for the action to be usable. False makes it so that the action is usable at any point for as long as the user is within the designated distance of a synchronized entity.";
+			tooltip = "Either a selection name on the synchronized entity which must be observed in order for the action to be usable, or a lowercase boolean. In case of boolean, true makes it so that the caller must be looking at the surface of a synchronized entity in order for the action to be usable. False makes it so that the action is usable at any point for as long as the user is within the designated distance of a synchronized entity.";
 			property = "KH_ModuleAddActionDetectionShow";
-			defaultValue = "true";
+			defaultValue = "'true'";
 		};
-		class KH_ModuleAddActionDetectionProgress: Checkbox
+		class KH_ModuleAddActionDetectionProgress: Edit
 		{
 			displayName = "Detection Progress";
-			tooltip = "True makes it so that the caller must be looking at the surface of a synchronized entity in order for the action to progress. False makes it so that the action is usable at any point for as long as the user is within the designated distance of a synchronized entity.";
+			tooltip = "Either a selection name on the synchronized entity which must be observed in order for the action to progress, or a lowercase boolean. In case of boolean, true makes it so that the caller must be looking at the surface of a synchronized entity in order for the action to progress. False makes it so that the action is usable at any point for as long as the user is within the designated distance of a synchronized entity.";
 			property = "KH_ModuleAddActionDetectionProgress";
-			defaultValue = "false";
+			defaultValue = "'false'";
 		};
 		class KH_ModuleAddActionUserInput: Edit
 		{
@@ -185,15 +220,22 @@ class KH_ModuleAddAction: Module_F
 		class KH_ModuleAddActionParentUnit: Edit
 		{
 			displayName = "Parent Unit";
-			tooltip = "The variable name of a unit which, if used, makes it so that only the player controlling the unit has the action available. Leave empty to make the action available for any player.";
+			tooltip = "The variable name of a unit which makes it so that only the player controlling the unit has the action available, or a lowercase boolean. In case of boolean, true makes it so that the action is available only if the player is currently controlling their player unit while false makes it so that the action is available regardless of which unit the player is controlling.";
 			property = "KH_ModuleAddActionParentUnit";
-			defaultValue = "''";
+			defaultValue = "'true'";
+		};
+		class KH_ModuleAddActionHandleParentActionRecovery: Checkbox
+		{
+			displayName = "Handle Parent Action Recovery";
+			tooltip = "True recovers the action if a potential caller unit respawns or changes locality.";
+			property = "KH_ModuleAddActionHandleParentActionRecovery";
+			defaultValue = "true";
 		};
 		class ModuleDescription: ModuleDescription {};
 	};
 	class ModuleDescription: ModuleDescription
 	{
-		description[] = {"Adds an action to the synchronized entities. Activates only once, without a trigger, on the server."};
+		description[] = {"Adds an action to the synchronized entities. If no entities are synchronized, the action is added to every player unit. The action can be instant or have a duration. In case of duration, it can be cancelled by selecting the action again while it is progressing. Activates only once, without a trigger, on the server."};
 		sync[] = {"Anything"};
 		position = 0;
 		direction = 0;

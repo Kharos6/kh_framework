@@ -11,7 +11,20 @@ if (isNil "KH_var_curatorsSet") then {
 		private _uid = getPlayerUID _x;
 
 		if (_uid in KH_var_curators) then {
-			private _module = KH_var_curatorModules select (KH_var_curators find _uid);
+			private _module = KH_var_curatorModules param [(KH_var_curators find _uid)];
+
+			if (isNil "_module") then {
+				_module = KH_var_logicGroup createUnit ["ModuleCurator_F", [0, 0, 0], [], 0, "CAN_COLLIDE"];
+				_module setVariable ["Addons", 3, true];
+				_module setVariable ["BIS_fnc_initModules_disableAutoActivation", false];
+				_module setCuratorCoef ["Place", 0];
+				_module setCuratorCoef ["Edit", 0];
+				_module setCuratorCoef ["Delete", 0];
+				_module setCuratorCoef ["Destroy", 0];
+				_module setCuratorCoef ["Group", 0];
+				_module setCuratorCoef ["Synchronize", 0];
+				KH_var_curatorModules set [KH_var_curators find _uid, _module];
+			};
 			
 			if !(isNull (getAssignedCuratorUnit _module)) then {
 				unassignCurator _module;
@@ -78,7 +91,20 @@ if (isNil "KH_var_curatorsSet") then {
 
 				if (_uid in KH_var_curators) then {
 					private _module = KH_var_curatorModules select (KH_var_curators find _uid);
-					
+
+					if (isNil "_module") then {
+						_module = KH_var_logicGroup createUnit ["ModuleCurator_F", [0, 0, 0], [], 0, "CAN_COLLIDE"];
+						_module setVariable ["Addons", 3, true];
+						_module setVariable ["BIS_fnc_initModules_disableAutoActivation", false];
+						_module setCuratorCoef ["Place", 0];
+						_module setCuratorCoef ["Edit", 0];
+						_module setCuratorCoef ["Delete", 0];
+						_module setCuratorCoef ["Destroy", 0];
+						_module setCuratorCoef ["Group", 0];
+						_module setCuratorCoef ["Synchronize", 0];
+						KH_var_curatorModules set [KH_var_curators find _uid, _module];
+					};
+
 					if !(isNull (getAssignedCuratorUnit _module)) then {
 						unassignCurator _module;
 					};

@@ -41,7 +41,7 @@ if !(isNull _playerParent) then {
 						params ["_vehicle"];
 						_vehicle enableSimulationGlobal true;
 					}, 
-					_vehicle, 
+					true, 
 					str _totalDuration,
 					false
 				] call KH_fnc_execute;

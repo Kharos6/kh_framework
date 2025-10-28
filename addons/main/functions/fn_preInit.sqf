@@ -390,6 +390,10 @@ if isServer then {
 	publicVariable "KH_var_jipPlayerUnits";
 	KH_var_jipPlayerMachines = [];
 	publicVariable "KH_var_jipPlayerMachines";
+	KH_var_allPlayerControlledUnits = [];
+	publicVariable "KH_var_allPlayerControlledUnits";
+	KH_var_allPlayerControlledUnitsMachines = createHashMap;
+	publicVariable "KH_var_allPlayerControlledUnitsMachines";
 	KH_var_logicGroup = createGroup [sideLogic, false];
 	publicVariable "KH_var_logicGroup";
 	KH_var_helperLogic = KH_var_logicGroup createUnit ["Logic", [0, 0, 0], [], 0, "CAN_COLLIDE"];
@@ -400,6 +404,8 @@ if isServer then {
 	publicVariable "KH_var_simpleHelperObject";
 	KH_var_diagnosticsState = false;
 	publicVariable "KH_var_diagnosticsState";
+	KH_var_missionSuspended = false;
+	publicVariable "KH_var_missionSuspended";
 	KH_var_jipHandlers = createHashMap;
 	KH_var_allEntities = entities [[], ["Animal"], true, false];
 	KH_var_allLivingEntities = KH_var_allEntities select {alive _x;};
@@ -425,7 +431,6 @@ if isServer then {
 		"KH_eve_jipSetup",
 		{
 			params ["_name", "_arguments", "_dependency", "_unitRequired", "_jipId"];
-			missionNamespace setVariable [_jipId, true];
 			private _currentHandler = KH_var_jipHandlers get _jipId;
 			private _continue = true;
 
@@ -610,7 +615,6 @@ if isServer then {
 		"KH_eve_persistentExecutionSetup",
 		{
 			params ["_arguments", "_function", "_target", "_sendoffArguments", "_sendoffFunction", "_caller", "_unscheduled", "_persistentExecutionId"];
-			_target setVariable [_persistentExecutionId, true, true];
 			private _persistentEventId = [hashValue _target, _persistentExecutionId] joinString "";
 
 			if (isNil {missionNamespace getVariable _persistentEventId;}) then {
@@ -820,6 +824,23 @@ if isServer then {
 					publicVariable _x;
 				};
 			} forEach ["KH_var_allPlayerUnits", "KH_var_jipPlayerUnits", "KH_var_initialPlayerUnits"];
+		}
+	] call CBA_fnc_addEventHandler;
+
+	[
+		"KH_eve_playerControlledUnitChanged", 
+		{
+			params ["_owner", "_unit"];
+			private _oldUnit = KH_var_allPlayerControlledUnitsMachines get _owner;
+
+			if !(isNil "_oldUnit") then {
+				KH_var_allPlayerControlledUnits deleteAt (KH_var_allPlayerControlledUnits find _oldUnit);
+			};
+
+			KH_var_allPlayerControlledUnitsMachines set [_owner, _unit];
+			publicVariable "KH_var_allPlayerControlledUnitsMachines";
+			KH_var_allPlayerControlledUnits pushBackUnique _unit;
+			publicVariable "KH_var_allPlayerControlledUnits"
 		}
 	] call CBA_fnc_addEventHandler;
 
@@ -1217,9 +1238,21 @@ if hasInterface then {
 			params ["_unit"];
 			KH_var_playerUnit = _unit;
 			player setVariable ["KH_var_playerUnit", KH_var_playerUnit, 2];
+			["KH_eve_playerControlledUnitChanged", [clientOwner, _unit]] call CBA_fnc_serverEvent;
 		},
 		true
 	] call CBA_fnc_addPlayerEventHandler;
+
+	[
+		"KH_eve_playerMissionLoaded", 
+		{
+			private _uid = param [1];
+			
+			if (isNil {profileNamespace getVariable "KH_var_steamId";}) then {
+				profileNamespace setVariable ["KH_var_steamId", _uid];
+			};
+		}
+	] call CBA_fnc_addEventHandler;
 
 	[
 		[],

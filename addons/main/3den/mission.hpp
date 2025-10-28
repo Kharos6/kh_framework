@@ -386,52 +386,6 @@ class Mission
 					};
 				};
 			};
-			class KH_Miscellaneous
-			{
-				displayName = "KH Miscellaneous";
-				collapsed = 1;
-				class Attributes
-				{
-					class KH_PersistentPlayerSynchronizer
-					{
-						displayName = "Persistent Player Synchronizer";
-						tooltip = "A hash map of entries where the key is a string of the variable name of an entity, and the value is an array of strings of variable names of players which are to be synchronized to the entity assigned to the key. Ideal for making sure modules are synchronized to respawning or JIP players, as well as initial players at the start of the mission. For example: ['module1', ['player1', 'player2', 'player3', ...]], ['module2', ['player1', 'player2', 'player3', ...]], ....";
-						property = "KH_PersistentPlayerSynchronizer";
-						control = "EditMulti5";
-						expression = 
-						"\
-							if ((_value isNotEqualTo '') && !is3DEN && isServer) then {\
-								_value = ['[', _value, ']'] joinString '';\
-								KH_var_postInitExecutions pushBack [\
-									[createHashMapFromArray (parseSimpleArray _value)],\
-									{\
-										params ['_value'];\
-										{\
-											[\
-												'CBA',\
-												_x,\
-												[_value],\
-												{\
-													private _unit = param [3];\
-													_args params ['_value'];\
-													{\
-														private _parsedEntities = [];\
-														{\
-															_parsedEntities pushBack (missionNamespace getVariable [_x, objNull]);\
-														} forEach _y;\
-														(missionNamespace getVariable [_x, objNull]) synchronizeObjectsAdd _parsedEntities;\
-													} forEach _value;\
-												}\
-											] call KH_fnc_addEventHandler;\
-										} forEach ['KH_eve_playerLoaded', 'KH_eve_playerRespawned'];\
-									}\
-								];\
-							};\
-						";
-						defaultValue = "''";
-					};
-				};
-			};
 			class KH_CameraSequence
 			{
 				displayName = "KH Camera Sequence";
@@ -483,26 +437,39 @@ class Mission
 									};\
 									_parsedTargets pushBack _target;\
 								} forEach (parseSimpleArray _targets);\
-								[\
-									'CBA',\
-									'KH_eve_playerLoaded',\
+								KH_var_postInitExecutions pushBack [\
 									[_parsedPositions, _parsedTargets, parseSimpleArray _fovs, parseSimpleArray _commitTimes, parseSimpleArray _durations, parseSimpleArray _visionTypes, _cinematicBorders, _disableUserInput, _jip],\
 									{\
-										private _unit = param [3];\
-										_args params ['_positions', '_targets', '_fovs', '_commitTimes', '_durations', '_visionTypes', '_cinematicBorders', '_disableUserInput', '_jip'];\
-										if _jip then {\
-											[[_positions, _targets, _fovs, _commitTimes, _durations, _visionTypes, _cinematicBorders, _disableUserInput], 'KH_fnc_cameraSequence', _unit, true, false] call KH_fnc_execute;\
-										}\
-										else {\
-											if !KH_var_playersLoaded then {\
-												[[_positions, _targets, _fovs, _commitTimes, _durations, _visionTypes, _cinematicBorders, _disableUserInput], 'KH_fnc_cameraSequence', _unit, true, false] call KH_fnc_execute;\
-											}\
-											else {\
-												[_handlerId] call KH_fnc_removeHandler;\
-											};\
-										};\
+										[\
+											_this,\
+											{\
+												[\
+													'CBA',\
+													'KH_eve_playerLoaded',\
+													_this,\
+													{\
+														private _unit = param [3];\
+														_args params ['_positions', '_targets', '_fovs', '_commitTimes', '_durations', '_visionTypes', '_cinematicBorders', '_disableUserInput', '_jip'];\
+														if _jip then {\
+															[[_positions, _targets, _fovs, _commitTimes, _durations, _visionTypes, _cinematicBorders, _disableUserInput], 'KH_fnc_cameraSequence', _unit, true, false] call KH_fnc_execute;\
+														}\
+														else {\
+															if !KH_var_playersLoaded then {\
+																[[_positions, _targets, _fovs, _commitTimes, _durations, _visionTypes, _cinematicBorders, _disableUserInput], 'KH_fnc_cameraSequence', _unit, true, false] call KH_fnc_execute;\
+															}\
+															else {\
+																[_handlerId] call KH_fnc_removeHandler;\
+															};\
+														};\
+													}\
+												] call KH_fnc_addEventHandler;\
+											},\
+											true,\
+											[{KH_var_playersLoaded;}, true] select (isNil 'KH_var_missionStartSuspension'),\
+											false\
+										] call KH_fnc_execute;\
 									}\
-								] call KH_fnc_addEventHandler;\
+								];\
 							};\
 						";
 						defaultValue = "[false, '', '', '', '', '', '', false, false, false]";
@@ -517,7 +484,7 @@ class Mission
 				{
 					class KH_CuratorsSubcategory
 					{
-						description = "Automatically sets curators based on index pair equivalents of Steam IDs and curator modules.";
+						description = "Automatically sets curators based on index pair equivalents of strings of Steam IDs and curator module variable names. If a Steam ID does not have a module pair, a module will be created for that player.";
 						data = "AttributeSystemSubcategory";
 						control = "KH_SubcategoryNoHeader1";
 					};
@@ -541,7 +508,7 @@ class Mission
 								[parseSimpleArray _curators, _assignedModules, _hide, _disableDamage] call KH_fnc_setCurators;\
 							};\
 						";
-						defaultValue = "[false, '', '', true, true]";
+						defaultValue = "[false, str (profileNamespace getVariable ['KH_var_steamId', '']), '', true, true]";
 					};
 				};
 			};
@@ -553,7 +520,7 @@ class Mission
 				{
 					class KH_PersistencySubcategory
 					{
-						description = "Maintain persistency using stored entity and world states. States are saved when the KH_fnc_endMission function or the KH End Mission module is executed, and loaded at the appropriate time if the persistent state of the identifier is available. If only the respawn loadout usage is desired, the identifier can be left empty, or all of the options can be unticked. The missionNamespace, as well as all entity namespaces, may contain a 'KH_var_persistentVariables' variable that is an array of arrays in format [name (STRING), value (ANY), public (BOOL)].";
+						description = "Maintain persistency using stored entity and world states. States are saved when the KH_fnc_endMission function or the KH End Mission module is executed, and loaded at the appropriate time if the persistent state of the identifier is available. If only the respawn loadout usage is desired, the identifier can be left empty, or all of the options can be unticked. The missionNamespace, as well as all entity namespaces, may contain a 'KH_var_persistentVariables' variable that is an array of arrays in format [name (STRING), value (BOOL, SCALAR, STRING, ARRAY, HASHMAP), public (BOOL)].";
 						data = "AttributeSystemSubcategory";
 						control = "KH_SubcategoryNoHeader6";
 					};
@@ -666,6 +633,80 @@ class Mission
 				collapsed = 1;
 				class Attributes
 				{
+					class KH_MissionStartSuspension
+					{
+						displayName = "Mission Start Suspension";
+						tooltip = "Suspends the mission until all players have loaded in.";
+						property = "KH_MissionStartSuspension";
+						control = "Combo";
+						expression = 
+						"\
+							if ((_value isNotEqualTo 0) && !is3DEN && isServer) then {\
+								KH_var_missionStartSuspension = _value;\
+							};\
+						";
+						defaultValue = "0";
+						typeName = "NUMBER";
+						class Values
+						{
+							class KH_None
+							{
+								name = "NONE";
+								tooltip = "Prevents this function from executing.";
+								value = "0";
+							};
+							class KH_Players
+							{
+								name = "PLAYERS";
+								tooltip = "Disables player input and displays a suspension message to them until all players are loaded.";
+								value = "1";
+							};
+							class KH_All
+							{
+								name = "ALL";
+								tooltip = "Disables player input, displays a suspension message to them, and disables simulation on all units until all players are loaded.";
+								value = "2";
+							};
+						};
+					};
+					class KH_PlayerSynchronizer
+					{
+						displayName = "Player Synchronizer";
+						tooltip = "A hash map of entries where the key is a string of the variable name of an entity, and the value is an array of strings of variable names of players which are to be synchronized to the entity assigned to the key. Ideal for making sure modules are synchronized to respawning or JIP players, as well as initial players at the start of the mission. For example: ['module1', ['player1', 'player2', 'player3', ...]], ['module2', ['player1', 'player2', 'player3', ...]], ....";
+						property = "KH_PlayerSynchronizer";
+						control = "EditMulti5";
+						expression = 
+						"\
+							if ((_value isNotEqualTo '') && !is3DEN && isServer) then {\
+								_value = ['[', _value, ']'] joinString '';\
+								KH_var_postInitExecutions pushBack [\
+									[createHashMapFromArray (parseSimpleArray _value)],\
+									{\
+										params ['_value'];\
+										{\
+											[\
+												'CBA',\
+												_x,\
+												[_value],\
+												{\
+													private _unit = param [3];\
+													_args params ['_value'];\
+													{\
+														private _parsedEntities = [];\
+														{\
+															_parsedEntities pushBack (missionNamespace getVariable [_x, objNull]);\
+														} forEach _y;\
+														(missionNamespace getVariable [_x, objNull]) synchronizeObjectsAdd _parsedEntities;\
+													} forEach _value;\
+												}\
+											] call KH_fnc_addEventHandler;\
+										} forEach ['KH_eve_playerLoaded', 'KH_eve_playerRespawned'];\
+									}\
+								];\
+							};\
+						";
+						defaultValue = "''";
+					};
 					class KH_RecoverDisconnectedPlayers
 					{
 						displayName = "Recover Disconnected Players";

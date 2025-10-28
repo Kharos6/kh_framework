@@ -1,4 +1,4 @@
-params [["_audio", "", ["", []]], ["_condition", {}, [{}]], ["_interval", 0, [0]], ["_chance", 1, [0]]];
+params [["_audio", "", ["", []]], ["_condition", {true;}, [{}]], ["_interval", 0, [0]], ["_chance", 1, [0]]];
 
 [
 	[_audio, _condition, _chance],

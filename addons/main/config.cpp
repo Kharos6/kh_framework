@@ -3,6 +3,7 @@
 #include "\x\kh\addons\main\cfgDebriefing.hpp"
 #include "\x\kh\addons\main\cfgEditorCategories.hpp"
 #include "\x\kh\addons\main\cfgEditorSubcategories.hpp"
+#include "\x\kh\addons\main\extendedPreInitEventhandlers.hpp"
 #include "\x\kh\addons\main\cfgFactionClasses.hpp"
 #include "\x\kh\addons\main\cfgFunctions.hpp"
 #include "\x\kh\addons\main\cfgIrLaserSettings.hpp"

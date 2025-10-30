@@ -30,6 +30,7 @@ KH_var_postInitExecutions pushBack [
                 [_visualTriggers],
                 {
                     _args params ["_visualTriggers"];
+                    
                     {
                         [_x] call KH_fnc_removeHandler;
                     } forEach _visualTriggers;

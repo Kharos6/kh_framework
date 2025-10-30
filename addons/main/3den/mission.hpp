@@ -362,6 +362,28 @@ class Mission
 						defaultValue = "''";
 						validate = "expression";
 					};
+					class KH_PlayerControlledUnitChangeInit
+					{
+						displayName = "Player: Controlled Unit Change Init";
+						tooltip = "Unscheduled code to execute locally to each player when their controlled unit changes, such as during remote control. The local player unit remains the original player unit. This function will also activate as soon as the local player unit becomes available. Passed arguments available through _this are: [_previousUnit (OBJECT), _currentUnit (OBJECT)].";
+						property = "KH_PlayerControlledUnitChangeInit";
+						control = "EditCodeMulti5";
+						expression = 
+						"\
+							if (_value isEqualTo '') then {\
+								if (fileExists 'kh_playerControlledUnitChangeInit.sqf') then {
+									KH_fnc_playerControlledUnitChangeInit = compileScript ['kh_playerControlledUnitChangeInit.sqf', false, ''];
+								};
+							}\
+							else {\
+								if (!is3DEN && hasInterface) then {\
+									KH_fnc_playerControlledUnitChangeInit = compile _value;\
+								};\
+							};\
+						";
+						defaultValue = "''";
+						validate = "expression";
+					};
 					class KH_PlayerMissionEndInit
 					{
 						displayName = "Player: Mission End Init";
@@ -672,7 +694,7 @@ class Mission
 					class KH_PlayerSynchronizer
 					{
 						displayName = "Player Synchronizer";
-						tooltip = "A hash map of entries where the key is a string of the variable name of an entity, and the value is an array of strings of variable names of players which are to be synchronized to the entity assigned to the key. Ideal for making sure modules are synchronized to respawning or JIP players, as well as initial players at the start of the mission. For example: ['module1', ['player1', 'player2', 'player3', ...]], ['module2', ['player1', 'player2', 'player3', ...]], ....";
+						tooltip = "Hashmap style arrays where the key is a string of the variable name of an entity, and the value is an array of strings of variable names of players which are to be synchronized to the entity assigned to the key. Ideal for making sure modules are synchronized to respawning or JIP players, as well as initial players at the start of the mission.";
 						property = "KH_PlayerSynchronizer";
 						control = "EditMulti5";
 						expression = 

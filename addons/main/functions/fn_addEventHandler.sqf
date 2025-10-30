@@ -163,7 +163,9 @@ switch _eventType do {
 									}
 									else {
 										(missionNamespace getVariable ['", _persistentEntityId, "', objNull]) removeEventHandler [_thisEvent, _thisEventHandler];
-									};"
+									};
+									
+									nil;"
 								] joinString "")
 							]
 						];

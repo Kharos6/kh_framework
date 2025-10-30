@@ -44,7 +44,7 @@ class KH_ModuleEquipableObject: Module_F
 		class KH_ModuleEquipableObjectRotation: Edit
 		{
 			displayName = "Rotation";
-			tooltip = "Rotation of the object relative to the assigned bone. Can either be in euler format [x, y, z], or vectorDir and vectorUp format [x, y, z], [x, y, z]";
+			tooltip = "Rotation of the object relative to the assigned bone. Can either be in euler format x, y, z, or vectorDir and vectorUp in format [x, y, z], [x, y, z]";
 			property = "KH_ModuleEquipableObjectRotation";
 			defaultValue = "'0, 0, 0'";
 		};

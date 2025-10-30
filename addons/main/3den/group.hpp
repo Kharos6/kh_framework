@@ -11,7 +11,7 @@ class Group
 				class KH_ArrayBuilder
 				{
 					displayName = "Array Builder";
-					tooltip = "Strings of global variables that will be made into an array, made public, and contain this group and any other groups utilizing this function. In format 'globalVariable1', 'globalVariable2', 'globalVariable3', ....";
+					tooltip = "Strings of global variables that will be made into an array, made public, and contain this group and any other groups utilizing this function.";
 					property = "KH_ArrayBuilder";
 					control = "Edit";
 					expression = 

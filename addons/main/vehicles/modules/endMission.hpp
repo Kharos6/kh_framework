@@ -51,7 +51,7 @@ class KH_ModuleEndMission: Module_F
 		class KH_ModuleEndMissionNextMission: Edit
 		{
 			displayName = "Next Mission";
-			tooltip = "An array containing the string of the server password, if any, and the string of the name of the next mission, in format [password (STRING), nextMission (STRING)]. Use an empty array or leave the field empty if no subsequent mission is desired. If this value is used, all other values are ignored, and the next mission will start immediately after the delay.";
+			tooltip = "The string of the server password followed by the string of the name of the next mission. Leave empty if no subsequent mission is desired. If this attribute is used, all other attributes are ignored, and the next mission will start immediately after the delay.";
 			property = "KH_ModuleEndMissionNextMission";
 			defaultValue = "''";
 		};
@@ -59,7 +59,7 @@ class KH_ModuleEndMission: Module_F
 	};
 	class ModuleDescription: ModuleDescription
 	{
-		description[] = {"Ends the mission, saving any persistency values if enabled, and optionally starting the next mission. Activates only once, with a trigger, on the server."};
+		description[] = {"Ends the mission, saving any persistency values if the persistency system is enabled and optionally starting the next mission. Activates only once, with a trigger, on the server."};
 		sync[] = {};
 		position = 0;
 		direction = 0;

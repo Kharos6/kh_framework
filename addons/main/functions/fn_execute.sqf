@@ -141,10 +141,8 @@ else {
 
 				[
 					"KH_eve_persistentExecutionSetup", 
-					[_arguments, _function, _object, _sendoffArguments, [_sendoffFunction, false] call KH_fnc_parseFunction, clientOwner, _unscheduled, _persistentExecutionId], 
-					"SERVER", 
-					false
-				] call KH_fnc_triggerCbaEvent;
+					[_arguments, _function, _object, _sendoffArguments, [_sendoffFunction, false] call KH_fnc_parseFunction, clientOwner, _unscheduled, _persistentExecutionId]
+				] call CBA_fnc_serverEvent;
 
 				[_object, _persistentExecutionId, true];
 			};
@@ -169,79 +167,7 @@ else {
 
 				missionNamespace setVariable [_nearId, true, 2];
 				["KH_eve_execution", [_arguments, _function, clientOwner, _unscheduled], _target, false] call KH_fnc_triggerCbaEvent;
-
-				[
-					[_arguments, _function, clientOwner, _unscheduled, _object, _distance, _nearId, +KH_var_allPlayerControlledUnits, _jip],
-					{
-						params ["_arguments", "_function", "_caller", "_unscheduled", "_object", "_distance", "_nearId", "_units", "_jip"];
-
-						[
-							[_arguments, _function, _caller, _unscheduled, _object, _distance, _nearId, _units],
-							{
-								params ["_arguments", "_function", "_caller", "_unscheduled", "_object", "_distance", "_nearId", "_units"];
-
-								if ((_units isEqualTo []) || !(missionNamespace getVariable _nearId)) exitWith {
-									[_handlerId] call KH_fnc_removeHandler;
-								};
-
-								private _deletions = [];
-
-								{
-									private _object = param [4];
-									private _distance = param [5];
-
-									if ((_x distance _object) <= _distance) then {
-										["KH_eve_execution", [_arguments, _function, _caller, _unscheduled], _x, false] call KH_fnc_triggerCbaEvent;
-										_deletions pushBack _x;
-									};
-								} forEach _units;
-
-								_units deleteAt _deletions;
-							},
-							true,
-							0,
-							false
-						] call KH_fnc_execute;
-
-						if _jip then {
-							[
-								"CBA",
-								"KH_eve_playerLoaded",
-								[_arguments, _function, _caller, _unscheduled, _object, _distance, _nearId],
-								{
-									private _unit = param [3];
-									_args params ["_arguments", "_function", "_caller", "_unscheduled", "_object", "_distance", "_nearId"];
-
-									if !(missionNamespace getVariable _nearId) exitWith {
-										[_handlerId] call KH_fnc_removeHandler;
-									};
-
-									[
-										[_arguments, _function, _caller, _unscheduled, _object, _distance, _unit],
-										{
-											params ["_arguments", "_function", "_caller", "_unscheduled", "_object", "_distance", "_unit"];
-
-											if !(missionNamespace getVariable _nearId) exitWith {
-												[_handlerId] call KH_fnc_removeHandler;
-											};
-
-											if ((_unit distance _object) <= _distance) then {
-												["KH_eve_execution", [_arguments, _function, _caller, _unscheduled], _x, false] call KH_fnc_triggerCbaEvent;
-											};
-										},
-										true,
-										0,
-										false
-									] call KH_fnc_execute;
-								}
-							] call KH_fnc_addEventHandler;
-						};
-					},
-					"SERVER",
-					true,
-					false
-				] call KH_fnc_execute;
-
+				["KH_eve_nearPlayersExecutionSetup", [_arguments, _function, clientOwner, _unscheduled, _object, _distance, _nearId, +KH_var_allPlayerControlledUnits, _jip]] call CBA_fnc_serverEvent;
 				[missionNamespace, _nearId, 2];
 			};
 

@@ -23,7 +23,7 @@ class KH_ModuleEntitySpawner: Module_F
 		class KH_ModuleEntitySpawnerEntityTypes: Edit
 		{
 			displayName = "Entity Types";
-			tooltip = "Strings of class names of entity types from CfgVehicles that will be chosen at random to spawn. In format 'entity1', 'entity2', 'entity3', ....";
+			tooltip = "Strings of class names of entity types from CfgVehicles that will be chosen at random to spawn.";
 			property = "KH_ModuleEntitySpawnerEntityTypes";
 			defaultValue = "''";
 		};
@@ -53,7 +53,7 @@ class KH_ModuleEntitySpawner: Module_F
 			defaultValue = "'CAN_COLLIDE'";
 			class Values
 			{
-				class KH_NONE {name = "NONE"; value = "NONE";};
+				class KH_None {name = "NONE"; value = "NONE";};
                 class KH_CanCollide {name = "CAN COLLIDE"; value = "CAN_COLLIDE";};
                 class KH_Fly {name = "FLY"; value = "FLY";};
 			};
@@ -97,14 +97,14 @@ class KH_ModuleEntitySpawner: Module_F
 		class KH_ModuleEntitySpawnerCondition: EditCodeMulti5
 		{
 			displayName = "Condition";
-			tooltip = "Unscheduled code executed locally to the server that must return true in order for a spawn to be allowed. Passed arguments available through _this are: [_chosenSpawnPoint (ARRAY), _spawnedCount (SCALAR)]. Local variables exposed to the function are: _handlerId.";
+			tooltip = "Unscheduled code executed locally to the server that must return true in order for a spawn to be allowed. Passed arguments available through _this are: [_chosenSpawnPoint (ARRAY), _spawnedCount (SCALAR)]. Local variables exposed to the function are: _handlerId (ARRAY).";
 			property = "KH_ModuleEntitySpawnerCondition";
 			defaultValue = "'true'";
 		};
 		class KH_ModuleEntitySpawnerInit: EditCodeMulti5
 		{
 			displayName = "Init";
-			tooltip = "Unscheduled code executed locally to the server acting as the initialization of each spawned entity. Passed arguments available through _this are: [_entity (OBJECT), _chosenSpawnPoint (ARRAY), _chosenSpawnPosition (ARRAY)]. Local variables exposed to the function are: _handlerId.";
+			tooltip = "Unscheduled code executed locally to the server acting as the initialization of each spawned entity. Passed arguments available through _this are: [_entity (OBJECT), _chosenSpawnPoint (ARRAY), _chosenSpawnPosition (ARRAY)]. Local variables exposed to the function are: _handlerId (ARRAY).";
 			property = "KH_ModuleEntitySpawnerInit";
 			defaultValue = "''";
 		};

@@ -615,9 +615,9 @@ if isServer then {
 		"KH_eve_persistentExecutionSetup",
 		{
 			params ["_arguments", "_function", "_target", "_sendoffArguments", "_sendoffFunction", "_caller", "_unscheduled", "_persistentExecutionId"];
-			private _persistentEventId = [hashValue _target, _persistentExecutionId] joinString "";
+			private _persistentEventId = ["KH_var_persistentEventId", _persistentExecutionId] joinString "_";
 
-			if (isNil {missionNamespace getVariable _persistentEventId;}) then {
+			if (isNil {_target getVariable _persistentEventId;}) then {
 				[
 					"KH_eve_execution",
 					[
@@ -630,7 +630,7 @@ if isServer then {
 								_args params ["_persistentExecutionId", "_persistentEventId"];
 
 								if (_entity getVariable _persistentExecutionId) then {
-									(missionNamespace getVariable _persistentEventId) params ["_arguments", "_function", "_sendoffArguments", "_sendoffFunction", "_caller", "_unscheduled"];
+									(_entity getVariable _persistentEventId) params ["_arguments", "_function", "_sendoffArguments", "_sendoffFunction", "_caller", "_unscheduled"];
 									
 									if _local then {
 										[_arguments, _function, _caller, _unscheduled] call KH_fnc_callParsedFunction;
@@ -649,7 +649,76 @@ if isServer then {
 				] call KH_fnc_triggerCbaEvent;
 			};
 
-			missionNamespace setVariable [_persistentEventId, [_arguments, _function, _sendoffArguments, _sendoffFunction, _caller, _unscheduled], true];
+			_target setVariable [_persistentEventId, [_arguments, _function, _sendoffArguments, _sendoffFunction, _caller, _unscheduled], true];
+		}
+	] call CBA_fnc_addEventHandler;
+
+	[
+		"KH_eve_nearPlayersExecutionSetup",
+		{
+			params ["_arguments", "_function", "_caller", "_unscheduled", "_object", "_distance", "_nearId", "_units", "_jip"];
+
+			[
+				[_arguments, _function, _caller, _unscheduled, _object, _distance, _nearId, _units],
+				{
+					params ["_arguments", "_function", "_caller", "_unscheduled", "_object", "_distance", "_nearId", "_units"];
+				
+					if ((isNull _object) || (_units isEqualTo []) || !(missionNamespace getVariable _nearId)) exitWith {
+						[_handlerId] call KH_fnc_removeHandler;
+					};
+
+					private _deletions = [];
+
+					{
+						private _object = param [4];
+						private _distance = param [5];
+
+						if ((_x distance _object) <= _distance) then {
+							["KH_eve_execution", [_arguments, _function, _caller, _unscheduled], _x, false] call KH_fnc_triggerCbaEvent;
+							_deletions pushBack _x;
+						};
+					} forEach _units;
+
+					_units deleteAt _deletions;
+				},
+				true,
+				0,
+				false
+			] call KH_fnc_execute;
+
+			if _jip then {
+				[
+					"CBA",
+					"KH_eve_playerLoaded",
+					[_arguments, _function, _caller, _unscheduled, _object, _distance, _nearId],
+					{
+						private _unit = param [3];
+						_args params ["_arguments", "_function", "_caller", "_unscheduled", "_object", "_distance", "_nearId"];
+
+						if !(missionNamespace getVariable _nearId) exitWith {
+							[_handlerId] call KH_fnc_removeHandler;
+						};
+
+						[
+							[_arguments, _function, _caller, _unscheduled, _object, _distance, _unit],
+							{
+								params ["_arguments", "_function", "_caller", "_unscheduled", "_object", "_distance", "_unit"];
+
+								if !(missionNamespace getVariable _nearId) exitWith {
+									[_handlerId] call KH_fnc_removeHandler;
+								};
+
+								if ((_unit distance _object) <= _distance) then {
+									["KH_eve_execution", [_arguments, _function, _caller, _unscheduled], _x, false] call KH_fnc_triggerCbaEvent;
+								};
+							},
+							true,
+							0,
+							false
+						] call KH_fnc_execute;
+					}
+				] call KH_fnc_addEventHandler;
+			};
 		}
 	] call CBA_fnc_addEventHandler;
 
@@ -830,7 +899,8 @@ if isServer then {
 	[
 		"KH_eve_playerControlledUnitChanged", 
 		{
-			params ["_owner", "_unit"];
+			private _owner = param [0];
+			private _unit = param [3];
 			private _oldUnit = KH_var_allPlayerControlledUnitsMachines get _owner;
 
 			if !(isNil "_oldUnit") then {
@@ -1044,6 +1114,7 @@ if hasInterface then {
 	KH_fnc_playerKilledInit = {};
 	KH_fnc_playerRespawnInit = {};
 	KH_fnc_playerSwitchInit = {};
+	KH_fnc_playerControlledUnitChangeInit = {};
 	KH_fnc_playerMissionEndInit = {};
 
 	[
@@ -1237,8 +1308,9 @@ if hasInterface then {
 		{
 			params ["_unit"];
 			KH_var_playerUnit = _unit;
-			player setVariable ["KH_var_playerUnit", KH_var_playerUnit, 2];
-			["KH_eve_playerControlledUnitChanged", [clientOwner, _unit]] call CBA_fnc_serverEvent;
+			player setVariable ["KH_var_playerUnit", KH_var_playerUnit, true];
+			["KH_eve_playerControlledUnitChanged", [clientOwner, getPlayerUID player, getPlayerID player, _unit, [_unit, true] call KH_fnc_getEntityVariableName]] call CBA_fnc_globalEvent;
+			[_previousUnit, _unit] call KH_fnc_playerControlledUnitChangeInit;
 		},
 		true
 	] call CBA_fnc_addPlayerEventHandler;

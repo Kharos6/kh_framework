@@ -107,6 +107,7 @@ class CfgFunctions
 			class setOwnership {};
 			class setPlayerScores {};
 			class setRating {};
+			class setRespawnVariable {};
 			class setSideRelations {};
 			class setTerminalText {};
 			class setUnitAttributes {};

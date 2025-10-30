@@ -50,7 +50,7 @@ class KH_Persistency: Title
 		class PlayerRespawnTypeTitle: Title
 		{
 			text = "Player Respawn Type";
-			tooltip = "Loadout restoration type on player respawn. 'NONE' results in the players getting the default loadout of their unit. 'SAVED' results in the players getting the persistently saved player loadout. If one does not exist, they get the loadout that they started with. 'INITIAL' results in the players getting the loadout that they started with. 'DEATH' results in the players getting the loadout they had when they died. Does not require the player attribute to be true, and thus can be used without the persistency system.";
+			tooltip = "Loadout restoration type on player respawn. NONE results in the players getting the default loadout of their unit. SAVED results in the players getting the persistently saved player loadout. If one does not exist, they get the loadout that they started with. INITIAL results in the players getting the loadout that they started with. DEATH results in the players getting the loadout they had when they died. Does not require the Player attribute to be true, and thus can be used without the persistency system.";
 			y = QUOTE(4 * CTRL_DEFAULT_H + 15 * CTRL_DEFAULT_Y);
 		};
 		class PlayerRespawnType: ctrlCombo

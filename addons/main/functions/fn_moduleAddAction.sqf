@@ -27,7 +27,8 @@ KH_var_postInitExecutions pushBack [
                             compile (_logic getVariable ["KH_ModuleAddActionFunctionProgress", ""]),
                             compile (_logic getVariable ["KH_ModuleAddActionFunctionInterrupt", ""]),
                             compile (_logic getVariable ["KH_ModuleAddActionFunctionCancel", ""]),
-                            compile (_logic getVariable ["KH_ModuleAddActionFunctionComplete", ""])
+                            compile (_logic getVariable ["KH_ModuleAddActionFunctionComplete", ""]),
+                            compile (_logic getVariable ["KH_ModuleAddActionFunctionTerminate", ""])
                         ],
                         [
                             if (_conditionExist isEqualTo "true") then {
@@ -171,16 +172,31 @@ KH_var_postInitExecutions pushBack [
                         }
                     ];
 
+                    private _actionHandlers = [];
+
                     if _useAllPlayers then {
                         _arguments insert [0, [[true, _logic getVariable ["KH_ModuleAddActionHandleObjectActionRecovery", true]]]];
-                        _arguments call KH_fnc_addAction;
+                        _actionHandlers pushBack (_arguments call KH_fnc_addAction);
                     }
                     else {
                         {
                             _arguments insert [0, [[_x, _logic getVariable ["KH_ModuleAddActionHandleObjectActionRecovery", true]]]];
-                            _currentArguments call KH_fnc_addAction;
+                            _actionHandlers pushBack (_currentArguments call KH_fnc_addAction);
                         } forEach _units;
                     };
+
+                    [
+                        ["ENTITY", _logic, "REMOTE"],
+                        "Deleted",
+                        [_actionHandlers],
+                        {
+                            _args params ["_actionHandlers"];
+                            
+                            {
+                                [_x] call KH_fnc_removeHandler;
+                            } forEach _actionHandlers;
+                        }
+                    ] call KH_fnc_addEventHandler;
                 },
                 true,
                 {KH_var_playersLoaded;},

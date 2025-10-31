@@ -408,6 +408,42 @@ class Mission
 					};
 				};
 			};
+			class KH_Miscellaneous
+			{
+				displayName = "KH Miscellaneous";
+				collapsed = 1;
+				class Attributes
+				{
+					class KH_QuickFunctions
+					{
+						displayName = "Quick Functions";
+						tooltip = "Hashmap style arrays where the first value is the name of the function, and the second value is the path to the function file which can either be SQF or Lua. The function will be compiled and defined in both the missionNamespace and uiNamespace if it is an SQF function, and into Lua global variables if it is a Lua function. These functions will then become available for execution in the KH debug console for quick and easy access during the mission.";
+						property = "KH_QuickFunctions";
+						control = "EditMulti5";
+						expression = 
+						"\
+							if ((_value isNotEqualTo '') && !is3DEN) then {\
+								{\
+									_x params ['_name', '_function'];\
+									if ('.sqf' in _function) then {\
+										_function = compile (preprocessFileLineNumbers _function);\
+										missionNamespace setVariable [_name, _function];\
+										uiNamespace setVariable [_name, _function];\
+										KH_var_quickFunctionsSqf set [_name, _function];\
+									}\
+									else {\
+										_name luaCompile (preprocessFile _function);\
+										KH_var_quickFunctionsLua set [_name, _function];\
+									};\
+								} forEach (parseSimpleArray (['[', _value, ']'] joinString ''));\
+								uiNamespace setVariable ['KH_var_quickFunctionsSqf', KH_var_quickFunctionsSqf];\
+								uiNamespace setVariable ['KH_var_quickFunctionsLua', KH_var_quickFunctionsLua];\
+							};\
+						";
+						defaultValue = "''";
+					};
+				};
+			};
 			class KH_CameraSequence
 			{
 				displayName = "KH Camera Sequence";
@@ -596,7 +632,7 @@ class Mission
 											[_identifier, entities [[], ['Man'], false, true]] call KH_fnc_saveObjectPersistency;\
 										};\
 										if _units then {\
-											[_identifier, allUnits] call KH_fnc_saveUnitPersistency;\
+											[_identifier, allUnits + allDeadMen] call KH_fnc_saveUnitPersistency;\
 										};\
 										if _players then {\
 											[_identifier, KH_var_allPlayerUnits] call KH_fnc_savePlayerPersistency;\
@@ -799,12 +835,12 @@ class Mission
 					class KH_LimitViewDistance
 					{
 						displayName = "Limit View Distance";
-						tooltip = "Limits the maximum view distance to the set amount for all players. May override custom view distance mods. Set to -1 for no view distance limit. Can be edited with KH_fnc_limitViewDistance.";
+						tooltip = "Limits the maximum view distance to the set amount for all players, preventing them from increasing it beyond the desired distance. Negative values will prevent players from decreasing it below the desired distance. May override custom view distance mods. Set to 0 for no view distance limit. Can be edited with KH_fnc_limitViewDistance.";
 						property = "KH_LimitViewDistance";
 						control = "Edit";
 						expression = 
 						"\
-							if ((_value isNotEqualTo '') && !is3DEN && isServer) then {\
+							if ((_value isNotEqualTo 0) && !is3DEN && isServer) then {\
 								KH_var_postInitExecutions pushBack [\
 									[true, _value],\
 									{\
@@ -813,7 +849,7 @@ class Mission
 								];\
 							};\
 						";
-						defaultValue = "-1";
+						defaultValue = "0";
 						validate = "number";
 						typeName = "NUMBER";
 					};

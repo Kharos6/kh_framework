@@ -265,6 +265,17 @@ if !_continue exitWith {
     [];
 };
 
+private _functionTerminate = if (_function isEqualType []) then {
+    if ((count _function) isEqualTo 6) then {
+        private _thisFunction = _function param [5];
+        if !(isNil "_thisFunction") then {
+            if (_thisFunction isNotEqualTo {}) then {
+                _thisFunction;
+            };
+        };
+    };
+};
+
 private _actionHandler = [
     [
         _object, 
@@ -408,11 +419,11 @@ private _actionHandler = [
         }
         else {
             _menuName = _name param [0, "", [""]];
-            _windowBackgroundName = _name param [1, "", [""]];
-            _windowForegroundName = _name param [2, "", [""]];
-            _progressMenuName = _name param [3, "", [""]];
-            _progressWindowBackgroundName = _name param [4, "", [""]];
-            _progressWindowForegroundName = _name param [5, "", [""]];
+            _windowBackgroundName = _name param [1, _menuName, [""]];
+            _windowForegroundName = _name param [2, _menuName, [""]];
+            _progressMenuName = _name param [3, _menuName, [""]];
+            _progressWindowBackgroundName = _name param [4, _progressMenuName, [""]];
+            _progressWindowForegroundName = _name param [5, _progressMenuName, [""]];
         };
 
         private _conditionParser = {
@@ -483,6 +494,18 @@ private _actionHandler = [
                 _conditionStart = [_condition param [1, {true;}, ["", [], {}]]] call _conditionParser;
                 _conditionProgress = [_condition param [2, {true;}, ["", [], {}]]] call _conditionParser;
                 _conditionComplete = [_condition param [3, {true;}, ["", [], {}]]] call _conditionParser;
+
+                if (_conditionStart isEqualTo {}) then {
+                    _conditionStart = _conditionShow;
+                };
+
+                if (_conditionProgress isEqualTo {}) then {
+                    _conditionProgress = _conditionStart;
+                };
+
+                if (_conditionComplete isEqualTo {}) then {
+                    _conditionComplete = _conditionProgress;
+                };
             };
         };
 
@@ -969,11 +992,13 @@ private _actionHandler = [
 
                                     if (_conditionFailure || !(_arguments call _conditionComplete)) then {
                                         if (missionNamespace getVariable _cancelInterruptId) then {
-                                            missionNamespace setVariable [_cancelInterruptId, false];
                                             missionNamespace setVariable [_resultInterruptId, _arguments call _functionInterrupt];
+                                            missionNamespace setVariable [_cancelInterruptId, false];
                                         };
                                     }
                                     else {
+                                        missionNamespace setVariable [_resultCompleteId, _arguments call _functionComplete];
+
                                         if !_repeatable then {
                                             if _exclusive then {
                                                 [_handlerId] call KH_fnc_removeHandler;
@@ -982,8 +1007,6 @@ private _actionHandler = [
                                                 missionNamespace setVariable [_completionId, true];
                                             };
                                         };
-
-                                        missionNamespace setVariable [_resultCompleteId, _arguments call _functionComplete];
                                     };
 
                                     _caller setUserActionText [_actionId, _menuName, _windowBackgroundName, _windowForegroundName];
@@ -1053,6 +1076,7 @@ private _actionHandler = [
                         false;
                     };
 
+                    private _caller = _this;
                     (((missionNamespace getVariable '", _argumentsReferenceId, "') call (missionNamespace getVariable '", _conditionShowReferenceId, "')) && (missionNamespace getVariable '", _conditionShowId, "'));"
                 ] joinString "";
             }
@@ -1573,6 +1597,7 @@ private _actionHandler = [
                             false
                         ] call KH_fnc_execute;
 
+                        ["KH_eve_actionRemoved", [_actionExistenceId], _currentTarget] call KH_fnc_triggerCbaEvent;
                         ["KH_eve_handlerRemoved", _handlerId select 2] call CBA_fnc_removeEventHandler;
                     };
                 }
@@ -1587,7 +1612,7 @@ private _actionHandler = [
     false
 ] call KH_fnc_execute;
 
-if (_firstCall && !(isNil "_parsedConditionExist")) then {
+if !(isNil "_parsedConditionExist") then {
     private "_objectId";
 
     if !(_object isEqualType true) then {
@@ -1615,6 +1640,23 @@ if (_firstCall && !(isNil "_parsedConditionExist")) then {
         },
         false
     ] call KH_fnc_execute;
+};
+
+if !(isNil "_functionTerminate") then {
+    [
+        "CBA",
+        "KH_eve_handlerRemoved",
+        [_arguments, _functionTerminate, _actionExistenceId],
+        {
+            params ["_handler"];
+            _args params ["_arguments", "_functionTerminate", "_actionExistenceId"];
+
+            if ((_handler select 1) isEqualTo _actionExistenceId) then {
+                _arguments call _functionTerminate;
+                ["KH_eve_handlerRemoved", _handlerId select 2] call CBA_fnc_removeEventHandler;
+            };
+        }
+    ] call KH_fnc_addEventHandler;
 };
 
 [missionNamespace, _actionExistenceId, true];

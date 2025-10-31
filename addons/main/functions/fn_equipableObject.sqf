@@ -7,126 +7,121 @@ params [
 	["_scale", 1, [0]], 
 	["_disableCollision", true, [true]], 
 	["_hideInVehicles", true, [true]], 
-	["_toggleEquip", true, [true]], 
 	["_exclusive", true, [true]], 
-	["_objectName", "Item", [""]]
+	["_name", "", [""]]
 ];
 
-if (isNull _unit) then {
-	private _localArguments = _this select [1];
-	
-	if _exclusive then {
-		_object setVariable ["KH_var_exclusiveObject", true, true];
+if (isNil {_object getVariable "KH_var_equipableObjectSet";}) then {
+	if (_name isEqualTo "")then {
+		_name = getText (configFile >> "CfgVehicles" >> (typeOf _object) >> "displayName");
 	};
-	
+
+	_object setVariable ["KH_var_equipableObjectSet", true, true];
+
 	[
-		[
-			_object,
-			["Equip ", _objectName] joinString "",
-			"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_loadVehicle_ca.paa",
-			"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_loadVehicle_ca.paa",
-			"(((_this distance _target) < 4) && (isNil {_target getVariable 'KH_var_previouslyEquipped';}))",
-			"(((_caller distance _target) < 4) && (!(_caller getVariable ['KH_var_carryingObject', false]) || !(_target getVariable ['KH_var_exclusiveObject', false])))",
-			{			
-				if ((_caller getVariable ["KH_var_carryingObject", false]) && (_target getVariable ["KH_var_exclusiveObject", false])) then {
-					hint "You are already carrying an object that is incompatible with this one.";
-				};			
-			},
-			{},
-			{
-				private _localArguments = param [3];
-				_localArguments params ["_object", "_bone", "_position", "_rotation", "_scale", "_disableCollision", "_hideInVehicles", "_toggleEquip", "_exclusive", "_objectName"];
-				_object setVariable ["KH_var_previouslyEquipped", true, true];
-
-				[
-					[_caller, _object, _bone, _position, _rotation, _scale, _disableCollision, _hideInVehicles, _toggleEquip, _exclusive, _objectName], 
-					"KH_fnc_equipableObject", 
-					"SERVER", 
-					true,
-					false
-				] call KH_fnc_execute;
-
-				private _unequipAction = [
-					_caller,
-					["Unequip ", _objectName] joinString "",
-					"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_unloadVehicle_ca.paa",
-					"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_unloadVehicle_ca.paa",
-					"true",
-					"true",
-					{},
-					{},
-					{
-						private _localArguments = param [3];
-						_localArguments params ["_object"];
-						["KH_eve_equipableObjectExchanged", [_caller, _object, false]] call CBA_fnc_globalEvent;
-						detach _object;
-
-						[
-							[_object],
-							{
-								params ["_object"];
-								_object setPhysicsCollisionFlag true;
-							},
-							"GLOBAL",
-							true,
-							["JIP", _object, false, ["KH_var_equipableObjectAttributes_", [_object, true] call KH_fnc_getEntityVariableName] joinString ""]
-						] call KH_fnc_execute;
-					},
-					{},
-					_localArguments,
-					1,
-					0,
-					false,
-					false,
-					false
-				] call BIS_fnc_holdActionAdd;
-				
-				[
-					"CBA",
-					"KH_eve_equipableObjectExchanged",
-					[_object, _unequipAction],
-					{
-						private _exchangedObject = param [1];
-						_args params ["_object", "_unequipAction"];
-
-						if (_object isEqualTo _exchangedObject) then {
-							[player, _unequipAction] call BIS_fnc_holdActionRemove;
-							[_handlerId] call KH_fnc_removeHandler;
-						};
-					}
-				] call KH_fnc_addEventHandler;
-			},
-			{},
-			_localArguments,
-			1,
-			0,
-			false,
-			false,
-			true
-		],
-		"BIS_fnc_holdActionAdd",
-		"PLAYERS",
+		[_object, false],
+		["Equip ", _name] joinString "",
+		+_this,
+		{
+			private _arguments = +_this;
+			_arguments insert [0, [_caller]];
+			_arguments call KH_fnc_equipableObject;
+		},
+		{
+			(isNull (attachedTo _target));
+		},
 		true,
-		["JIP", _object, false, ""]
-	] call KH_fnc_execute;
-}
-else {
+		true,
+		"PLAYERS",
+		false,
+		3,
+		true,
+		false,
+		false,
+		true,
+		true,
+		"",
+		"",
+		false
+	] call KH_fnc_addAction;
+
+	[
+		[_object, false],
+		["Unequip ", _name, " carried by ", name (attachedTo _object)] joinString "",
+		[_exclusive],
+		{
+			params ["_exclusive"];
+			private _carrier = attachedTo _target;
+			["KH_eve_equipableObjectExchanged", [_carrier, _target, false]] call CBA_fnc_globalEvent;
+
+			if _exclusive then {
+				if (_carrier getVariable ["KH_var_equipableObjectExclusive", false]) then {
+					_carrier setVariable ["KH_var_equipableObjectExclusive", false, true];
+				};
+			};
+
+			detach _target;
+		},
+		{
+			!(isNull (attachedTo _target));
+		},
+		true,
+		true,
+		"PLAYERS",
+		false,
+		3,
+		true,
+		false,
+		false,
+		true,
+		true,
+		"",
+		"",
+		false
+	] call KH_fnc_addAction;
+
+	[
+		false,
+		["Unequip ", _name] joinString "",
+		[_object, _exclusive],
+		{
+			params ["_object", "_exclusive"];
+			["KH_eve_equipableObjectExchanged", [_caller, _object, false]] call CBA_fnc_globalEvent;
+
+			if _exclusive then {
+				if (_caller getVariable ["KH_var_equipableObjectExclusive", false]) then {
+					_caller setVariable ["KH_var_equipableObjectExclusive", false, true];
+				};
+			};
+
+			detach _object;
+		},
+		{
+			params ["_object"];
+			((attachedTo _object) isEqualTo _caller);
+		},
+		true,
+		true,
+		"PLAYERS",
+		false,
+		3,
+		true,
+		false,
+		false,
+		true,
+		true,
+		"",
+		"",
+		false
+	] call KH_fnc_addAction;
+};
+
+if !(isNull _unit) then {
+	if (_unit getVariable ["KH_var_equipableObjectExclusive", false]) exitWith {};
 	["KH_eve_equipableObjectExchanged", [_unit, _object, true]] call CBA_fnc_globalEvent;
 
-	if (isNil "KH_var_equipableObjectRespawnReset") then {
-		KH_var_equipableObjectRespawnReset = true;
-
-		[
-			"KH_eve_playerRespawned", 
-			{
-				private _unit = param [3];
-				_unit setVariable ["KH_var_carryingObject", false, true];
-			}
-		] call CBA_fnc_addEventHandler;		
-	};
-	
 	if _exclusive then {
-		_unit setVariable ["KH_var_carryingObject", true, true];
+		_unit setVariable ["KH_var_equipableObjectExclusive", true, true];
 	};
 
 	if (_bone isNotEqualTo "") then {
@@ -149,7 +144,29 @@ else {
 			_object setRotationEuler _rotation;
 		};
 	};
-	
+
+	[
+		[_object, _rotation],
+		{
+			params ["_object", "_rotation"];
+
+			if (_rotation isEqualType objNull) then {
+				_object setVectorDirAndUp [vectorDir _rotation, vectorUp _rotation];
+			}
+			else {
+				if (_rotation isEqualTypeAll []) then {
+					_object setVectorDirAndUp _rotation;
+				}
+				else {
+					_object setRotationEuler _rotation;
+				};
+			};
+		},
+		_object,
+		true,
+		false
+	] call KH_fnc_execute;
+
 	[
 		[_unit, _object, _exclusive],
 		{
@@ -168,177 +185,66 @@ else {
 		false
 	] call KH_fnc_execute;
 
-	if (_toggleEquip && (isNil {_object getVariable "KH_var_equipActions";})) then {
+	if (_hideInVehicles || _disableCollision) then {	
 		[
-			[
-				_object,
-				["Unequip ", _objectName, " carried by this unit."] joinString "",
-				"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_unloadVehicle_ca.paa",
-				"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_unloadVehicle_ca.paa",
-				"(((_this distance _target) < 4) && !(isNull (attachedTo _target)))",
-				"((_caller distance _target) < 4)",
-				{},
-				{},
-				{
-					private _localArguments = param [3];
-					_localArguments params ["_unit", "_object"];
-					["KH_eve_equipableObjectExchanged", [_unit, _object, false]] call CBA_fnc_globalEvent;
-					detach _object;
-
-					[
-						[_object],
-						{
-							params ["_object"];
-							_object setPhysicsCollisionFlag true;
-						},
-						"GLOBAL",
-						true,
-						["JIP", _object, false, ["KH_var_equipableObjectAttributes_", [_object, true] call KH_fnc_getEntityVariableName] joinString ""]
-					] call KH_fnc_execute;
-				},
-				{},
-				_this,
-				1,
-				0,
-				false,
-				false,
-				false
-			],
-			"BIS_fnc_holdActionAdd",
-			"PLAYERS",
-			true,
-			["JIP", _object, false, ""]
-		] call KH_fnc_execute;
-		
-		[
-			[
-				_object,
-				["Equip ", _objectName] joinString "",
-				"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_loadVehicle_ca.paa",
-				"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_loadVehicle_ca.paa",
-				"(((_this distance _target) < 4) && (isNull (attachedTo _target)))",
-				"(((_caller distance _target) < 4) && (!(_caller getVariable ['KH_var_carryingObject', false]) || !(_target getVariable ['KH_var_exclusiveObject', false])))",
-				{							
-					if ((_caller getVariable ["KH_var_carryingObject", false]) && (_target getVariable ["KH_var_exclusiveObject", false])) then {
-						hint "You are already carrying an object that is incompatible with this one.";
-					};			
-				},
-				{},
-				{
-					private _localArguments = param [3];
-					(_localArguments select [1]) params ["_object", "_bone", "_position", "_rotation", "_scale", "_disableCollision", "_hideInVehicles", "_toggleEquip", "_exclusive", "_objectName"];
-
-					[
-						[_caller, _object, _bone, _position, _rotation, _scale, _disableCollision, _hideInVehicles, _toggleEquip, _exclusive, _objectName], 
-						"KH_fnc_equipableObject", 
-						"SERVER", 
-						true,
-						false
-					] call KH_fnc_execute;
-
-					private _unequipAction = [
-						_caller,
-						["Unequip ", _objectName] joinString "",
-						"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_unloadVehicle_ca.paa",
-						"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_unloadVehicle_ca.paa",
-						"true",
-						"true",
-						{},
-						{},
-						{
-							private _localArguments = param [3];
-							private _object = _localArguments param [1];
-							["KH_eve_equipableObjectExchanged", [_caller, _object, false]] call CBA_fnc_globalEvent;
-							detach _object;
-
-							[
-								[_object],
-								{
-									params ["_object"];
-									_object setPhysicsCollisionFlag true;
-								},
-								"GLOBAL",
-								true,
-								["JIP", _object, false, ["KH_var_equipableObjectAttributes_", [_object, true] call KH_fnc_getEntityVariableName] joinString ""]
-							] call KH_fnc_execute;
-						},
-						{},
-						_localArguments,
-						1,
-						0,
-						false,
-						false,
-						false
-					] call BIS_fnc_holdActionAdd;
-					
-					[
-						"CBA",
-						"KH_eve_equipableObjectExchanged",
-						[_object, _unequipAction],
-						{
-							private _exchangedObject = param [1];
-							_args params ["_object", "_unequipAction"];
-
-							if (_object isEqualTo _exchangedObject) then {
-								[player, _unequipAction] call BIS_fnc_holdActionRemove;
-								[_handlerId] call KH_fnc_removeHandler;
-							};
-						}
-					] call KH_fnc_addEventHandler;
-				},
-				{},
-				_this,
-				1,
-				0,
-				false,
-				false,
-				false
-			],
-			"BIS_fnc_holdActionAdd",
-			"PLAYERS",
-			true,
-			["JIP", _object, false, ""]
-		] call KH_fnc_execute;
-		
-		if _exclusive then {
-			_object setVariable ["KH_var_exclusiveObject", true, true];
-		};
-		
-		[
-			[_object, _scale, _disableCollision],
+			[_object, _hideInVehicles, _disableCollision],
 			{
-				params ["_object", "_scale", "_disableCollision"];
-				_object setObjectScale _scale;
+				params ["_object", "_hideInVehicles", "_disableCollision"];
+				
+				if (isNil {_object getVariable "KH_var_equipableObjectHandler";}) then { 
+					private _handler = [
+						[_object, _hideInVehicles, _disableCollision],
+						{
+							params ["_object", "_hideInVehicles", "_disableCollision"];
 
-				if _disableCollision then {
-					_object setPhysicsCollisionFlag false;
+							if _disableCollision then {
+								if (getPhysicsCollisionFlag _object) then {
+									[
+										[_object],
+										{
+											params ["_object"];
+											_object setPhysicsCollisionFlag false;
+										},
+										"GLOBAL",
+										true,
+										["JIP", _object, false, ["KH_var_equipableObjectCollision", _object] joinString "_"]
+									] call KH_fnc_execute;
+								}
+								else {
+									[
+										[_object],
+										{
+											params ["_object"];
+											_object setPhysicsCollisionFlag true;
+										},
+										"GLOBAL",
+										true,
+										["JIP", _object, false, ["KH_var_equipableObjectCollision", _object] joinString "_"]
+									] call KH_fnc_execute;
+								};
+							};
+
+							if _hideInVehicles then {
+								if !(isNull (objectParent (attachedTo _object))) then {
+									_object hideObjectGlobal true;
+								}
+								else {
+									_object hideObjectGlobal false;
+								};
+							};
+						},
+						true,
+						0,
+						false
+					] call KH_fnc_execute;
+
+					_object setVariable ["KH_var_equipableObjectHandler", _handler];
 				};
 			},
-			"GLOBAL",
+			"SERVER",
 			true,
-			["JIP", _object, false, ["KH_var_equipableObjectAttributes_", [_object, true] call KH_fnc_getEntityVariableName] joinString ""]
+			false
 		] call KH_fnc_execute;
-		
-		if _hideInVehicles then {	
-			[
-				[_object],
-				{
-					params ["_object"];
-					
-					if !(isNull (objectParent (attachedTo _object))) then {
-						_object hideObjectGlobal true;
-					}
-					else {
-						_object hideObjectGlobal false;
-					};
-				},
-				true,
-				0,
-				false
-			] call KH_fnc_execute;
-		};
-		
-		_object setVariable ["KH_var_equipActions", true];
 	};
 };
 

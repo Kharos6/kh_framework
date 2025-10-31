@@ -360,6 +360,37 @@ class Object
 				};
 			};
 		};
+		class KH_MedicalSettings
+		{
+			displayName = "KH Medical Settings";
+			collapsed = 1;
+			class Attributes
+			{
+				class KH_MedicalSettingsSubcategory
+				{
+					description = "Settings for the KH medical system specific to this unit.";
+					data = "AttributeSystemSubcategory";
+					control = "KH_SubcategoryNoHeader1";
+				};
+				class KH_MedicalSettings 
+				{
+					property = "KH_MedicalSettings";
+					control = "KH_MedicalSettings";
+					expression = 
+					"\
+						_value params ['_toggle', '_medicalHandling', '_globalDamageMultipliers', '_plotArmor', '_damageMultiplier'];\
+						if (_toggle && !is3DEN) then {\
+							_this setVariable ['KH_var_khMedicalHandling', _medicalHandling, true];\
+							_this setVariable ['KH_var_allowGlobalDamageMultipliers', _globalDamageMultipliers, true];\
+							_this setVariable ['KH_var_plotArmor', _plotArmor, true];\
+							_this setVariable ['KH_var_damageMultiplier', _damageMultiplier, true];\
+						};\
+					";
+					defaultValue = "[false, true, true, false, 1, '1.00']";
+					condition = "objectControllable";
+				};
+			};
+		};
 		class KH_PersistencySettings
 		{
 			displayName = "KH Persistency Settings";
@@ -378,17 +409,23 @@ class Object
 					control = "KH_ObjectPersistencySettings";
 					expression = 
 					"\
-						_value params ['_toggle', '_playerUseVariableName', '_ignoreTransforms'];\
+						_value params ['_toggle', '_allowPersistency', '_playerUseVariableName', '_allowTransforms'];\
 						if (_toggle && !is3DEN) then {\
-							if _playerUseVariableName then {
+							if _allowPersistency then {\
 								_this setVariable ['KH_var_playerPersistencyUseVariableName', true];\
-							};\
-							if _ignoreTransforms then {\
-								_this setVariable ['KH_var_persistencyIgnoreTransforms', true];\
+								if _playerUseVariableName then {\
+									_this setVariable ['KH_var_playerPersistencyUseVariableName', true];\
+								};\
+								if !_allowTransforms then {\
+									_this setVariable ['KH_var_persistencyTransforms', false];\
+								};\
+							}\
+							else {\
+								_this setVariable ['KH_var_allowPersistency', false];\
 							};\
 						};\
 					";
-					defaultValue = "[false, false, false]";
+					defaultValue = "[false, true, false, true]";
 				};
 			};
 		};

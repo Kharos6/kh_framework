@@ -19,13 +19,13 @@ class KH_ObjectPersistencySettings: Title
 			w = QUOTE(5 * GRID_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
-		class PlayerUseVariableNameTitle: Title
+		class AllowPersistencyTitle: Title
 		{
-			text = "Player: Use Variable Name";
-			tooltip = "True makes it so that the unit's variable name is used instead of the Steam ID of the player when loading saved attributes.";
+			text = "Allow Persistency";
+			tooltip = "False makes it so that the unit's persistency is not saved or loaded, regardless of whether the unit is a player or the unit has variable name assigned.";
 			y = QUOTE(2 * CTRL_DEFAULT_H + 5 * CTRL_DEFAULT_Y);
 		};
-		class PlayerUseVariableName: ctrlCheckbox
+		class AllowPersistency: ctrlCheckbox
 		{
 			idc = 101;
 			x = QUOTE(CTRL_DEFAULT_X);
@@ -33,17 +33,31 @@ class KH_ObjectPersistencySettings: Title
 			w = QUOTE(5 * GRID_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
-		class TransformsTitle: Title
+		class PlayerUseVariableNameTitle: Title
 		{
-			text = "Transforms";
-			tooltip = "True makes it so that the position and rotation of the entity are ignored when loading saved attributes.";
+			text = "Player: Use Variable Name";
+			tooltip = "True makes it so that the unit's variable name is used instead of the Steam ID of the player when loading saved attributes.";
 			y = QUOTE(3 * CTRL_DEFAULT_H + 10 * CTRL_DEFAULT_Y);
 		};
-		class Transforms: ctrlCheckbox
+		class PlayerUseVariableName: ctrlCheckbox
 		{
 			idc = 102;
 			x = QUOTE(CTRL_DEFAULT_X);
 			y = QUOTE(3 * CTRL_DEFAULT_H + 10 * CTRL_DEFAULT_Y);
+			w = QUOTE(5 * GRID_W);
+			h = QUOTE(CTRL_DEFAULT_H);
+		};
+		class TransformsTitle: Title
+		{
+			text = "Transforms";
+			tooltip = "False makes it so that the position and rotation of the entity are ignored when loading saved attributes.";
+			y = QUOTE(4 * CTRL_DEFAULT_H + 15 * CTRL_DEFAULT_Y);
+		};
+		class Transforms: ctrlCheckbox
+		{
+			idc = 103;
+			x = QUOTE(CTRL_DEFAULT_X);
+			y = QUOTE(4 * CTRL_DEFAULT_H + 15 * CTRL_DEFAULT_Y);
 			w = QUOTE(5 * GRID_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};

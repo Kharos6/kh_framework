@@ -1,7 +1,7 @@
 params [["_identifier", "", [""]], ["_unit", true, [true]], ["_group", true, [true]], ["_object", true, [true]], ["_player", true, [true]], ["_mission", true, [true]]];
 
 if _unit then {
-    [_identifier, allUnits] call KH_fnc_saveUnitPersistency;
+    [_identifier, allUnits + allDeadMen] call KH_fnc_saveUnitPersistency;
 };
 
 if _group then {

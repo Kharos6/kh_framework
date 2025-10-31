@@ -106,6 +106,22 @@ class KH_DebugConsole
             rows = 1;
             strings[] ={"SQF", "LUA"};
         };
+        class QuickFunctions: RscCombo
+        {
+            idc = 109;
+            tooltip = "Quick functions compiled for this mission.";
+            font = "EtelkaMonospacePro";
+            x = QUOTE(RSC_POS_X(25));
+            y = QUOTE(RSC_POS_Y(80.5));
+            w = QUOTE(RSC_POS_W(25));
+            h = QUOTE(RSC_POS_H(2));
+            wholeHeight = 0.45;
+            class ComboScrollBar: Scrollbar
+            {
+                color[] = {1,1,1,1};
+            };
+            colorBackground[] = {0, 0, 0, 0.9};
+        };
         class ButtonExit: RscButtonMenuCancel 
         {
 			text = "EXIT";

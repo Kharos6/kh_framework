@@ -12,7 +12,7 @@ class KH_ModuleAddAction: Module_F
 	functionPriority = 1;
 	isGlobal = 0;
 	isTriggerActivated = 0;
-	isDisposable = 1;
+	isDisposable = 0;
 	is3DEN = 0;
 	curatorInfoType = "";
 	curatorInfoTypeEmpty = "";
@@ -69,6 +69,13 @@ class KH_ModuleAddAction: Module_F
 			property = "KH_ModuleAddActionFunctionComplete";
 			defaultValue = "''";
 		};
+		class KH_ModuleAddActionFunctionTerminate: EditCodeMulti5
+		{
+			displayName = "Function Terminate";
+			tooltip = "Unscheduled code executed locally to the creator of the action, in this case the server, when the action is deleted due to Exclusive being true and Repeatable being false.";
+			property = "KH_ModuleAddActionFunctionTerminate";
+			defaultValue = "''";
+		};
 		class KH_ModuleAddActionConditionExist: EditCodeMulti5
 		{
 			displayName = "Condition Exist";
@@ -86,21 +93,21 @@ class KH_ModuleAddAction: Module_F
 		class KH_ModuleAddActionConditionStart: EditCodeMulti5
 		{
 			displayName = "Condition Start";
-			tooltip = "Unscheduled code, executed locally to the caller, that must return true in order for the action to start. Can also be a string representation of a variable, an array of strings of multiple variables in an affected object's namespace that must be true, or an array of arrays of variables that must return the wanted value in format [variableName (STRING), wantedValue (BOOL, SCALAR, STRING, ARRAY, HASHMAP)], as simply as 'myVariable', or ['myVariable1', 'myVariable2', 'myVariable3', ...] or [['myVariable1', wantedValue1], ['myVariable2', wantedValue2], ['myVariable3', wantedValue3], ...]. Local variables exposed to the function are: _caller (OBJECT), _target (OBJECT), _actionId (SCALAR), _handlerId (ARRAY), _duration (BOOL, SCALAR), _resultPreviousStart, _resultPreviousProgress, _resultPreviousInterrupt, _resultPreviousCancel, and _resultPreviousComplete. The _duration variable may be changed to alter the duration of the action for the current execution.";
+			tooltip = "Unscheduled code, executed locally to the caller, that must return true in order for the action to start. Can also be a string representation of a variable, an array of strings of multiple variables in an affected object's namespace that must be true, or an array of arrays of variables that must return the wanted value in format [variableName (STRING), wantedValue (BOOL, SCALAR, STRING, ARRAY, HASHMAP)], as simply as 'myVariable', or ['myVariable1', 'myVariable2', 'myVariable3', ...] or [['myVariable1', wantedValue1], ['myVariable2', wantedValue2], ['myVariable3', wantedValue3], ...]. Leave empty to inherit condition from Condition Show. Local variables exposed to the function are: _caller (OBJECT), _target (OBJECT), _actionId (SCALAR), _handlerId (ARRAY), _duration (BOOL, SCALAR), _resultPreviousStart, _resultPreviousProgress, _resultPreviousInterrupt, _resultPreviousCancel, and _resultPreviousComplete. The _duration variable may be changed to alter the duration of the action for the current execution.";
 			property = "KH_ModuleAddActionConditionStart";
 			defaultValue = "'true'";
 		};
 		class KH_ModuleAddActionConditionProgress: EditCodeMulti5
 		{
 			displayName = "Condition Progress";
-			tooltip = "Unscheduled code, executed locally to the caller, that must return true in order for the action to progress through its duration. Can also be a string representation of a variable, an array of strings of multiple variables in an affected object's namespace that must be true, or an array of arrays of variables that must return the wanted value in format [variableName (STRING), wantedValue (BOOL, SCALAR, STRING, ARRAY, HASHMAP)], as simply as 'myVariable', or ['myVariable1', 'myVariable2', 'myVariable3', ...] or [['myVariable1', wantedValue1], ['myVariable2', wantedValue2], ['myVariable3', wantedValue3], ...]. Local variables exposed to the function are: _caller (OBJECT), _target (OBJECT), _actionId (SCALAR), _handlerId (ARRAY), _resultPreviousStart, _resultPreviousProgress, _resultPreviousInterrupt, _resultPreviousCancel, _resultPreviousComplete, _resultStart, and _resultProgress.";
+			tooltip = "Unscheduled code, executed locally to the caller, that must return true in order for the action to progress through its duration. Can also be a string representation of a variable, an array of strings of multiple variables in an affected object's namespace that must be true, or an array of arrays of variables that must return the wanted value in format [variableName (STRING), wantedValue (BOOL, SCALAR, STRING, ARRAY, HASHMAP)], as simply as 'myVariable', or ['myVariable1', 'myVariable2', 'myVariable3', ...] or [['myVariable1', wantedValue1], ['myVariable2', wantedValue2], ['myVariable3', wantedValue3], ...]. Leave empty to inherit condition from Condition Start. Local variables exposed to the function are: _caller (OBJECT), _target (OBJECT), _actionId (SCALAR), _handlerId (ARRAY), _resultPreviousStart, _resultPreviousProgress, _resultPreviousInterrupt, _resultPreviousCancel, _resultPreviousComplete, _resultStart, and _resultProgress.";
 			property = "KH_ModuleAddActionConditionProgress";
 			defaultValue = "'true'";
 		};
 		class KH_ModuleAddActionConditionComplete: EditCodeMulti5
 		{
 			displayName = "Condition Complete";
-			tooltip = "Unscheduled code, executed locally to the caller, that must return true in order for the action to be allowed to complete. Can also be a string representation of a variable, an array of strings of multiple variables in an affected object's namespace that must be true, or an array of arrays of variables that must return the wanted value in format [variableName (STRING), wantedValue (BOOL, SCALAR, STRING, ARRAY, HASHMAP)] of variables that must return the wanted value, as simply as 'myVariable' or ['myVariable1', 'myVariable2', 'myVariable3', ...] or [['myVariable1', wantedValue1], ['myVariable2', wantedValue2], ['myVariable3', wantedValue3], ...]. Local variables exposed to the function are: _caller (OBJECT), _target (OBJECT), _actionId (SCALAR), _handlerId (ARRAY), _resultPreviousStart, _resultPreviousProgress, _resultPreviousInterrupt, _resultPreviousCancel, _resultPreviousComplete, _resultStart, and _resultProgress.";
+			tooltip = "Unscheduled code, executed locally to the caller, that must return true in order for the action to be allowed to complete. Can also be a string representation of a variable, an array of strings of multiple variables in an affected object's namespace that must be true, or an array of arrays of variables that must return the wanted value in format [variableName (STRING), wantedValue (BOOL, SCALAR, STRING, ARRAY, HASHMAP)] of variables that must return the wanted value, as simply as 'myVariable' or ['myVariable1', 'myVariable2', 'myVariable3', ...] or [['myVariable1', wantedValue1], ['myVariable2', wantedValue2], ['myVariable3', wantedValue3], ...]. Leave empty to inherit condition from Condition Progress. Local variables exposed to the function are: _caller (OBJECT), _target (OBJECT), _actionId (SCALAR), _handlerId (ARRAY), _resultPreviousStart, _resultPreviousProgress, _resultPreviousInterrupt, _resultPreviousCancel, _resultPreviousComplete, _resultStart, and _resultProgress.";
 			property = "KH_ModuleAddActionConditionComplete";
 			defaultValue = "'true'";
 		};
@@ -114,14 +121,14 @@ class KH_ModuleAddAction: Module_F
 		class KH_ModuleAddActionExclusive: Checkbox
 		{
 			displayName = "Exclusive";
-			tooltip = "True prevents multiple players from being able to call the action at the same time.";
+			tooltip = "True prevents multiple players from being able to call the action at the same time, requiring the current caller to complete, interrupt, or cancel their current action call before the action becomes usable for others again. If combined with the Repeatable attribute set to false, the action is removed for all potential callers on the first successful completion.";
 			property = "KH_ModuleAddActionExclusive";
 			defaultValue = "true";
 		};
 		class KH_ModuleAddActionJIP: Checkbox
 		{
 			displayName = "JIP";
-			tooltip = "True makes the action available for players who join while the mission is in progress.";
+			tooltip = "True makes the action usable for players who join while the mission is in progress.";
 			property = "KH_ModuleAddActionJIP";
 			defaultValue = "true";
 		};
@@ -220,14 +227,14 @@ class KH_ModuleAddAction: Module_F
 		class KH_ModuleAddActionIdentifier: Edit
 		{
 			displayName = "Identifier";
-			tooltip = "An identifier that is otherwise unique per action, but can be overriden by this attribute; if used, all actions tied to this identifier will share the same exclusivity and existence conditions. For example, if the action has a duration, exclusive is true, and repeatable is false, and two actions share the same identifier, then as soon as one of those actions is activated, the other one will not be usable and will be deleted when the first one completes. Action recovery rules and exist condition will be inherited from the first added action from the same action creator with this identifier. Leave empty to generate a unique identifier per action.";
+			tooltip = "An identifier that is otherwise unique per action, but can be overriden by this attribute; if used, all actions tied to this identifier will share the same exclusivity and existence conditions. For example, if the action has a duration, Exclusive is true, and Repeatable is false, and two actions share the same identifier, then as soon as one of those actions is activated, the other one will not be usable and will be deleted when the first one completes. Action recovery rules will be inherited from the first added action from the same action creator with this identifier, while Condition Exist of any of the actions that share the same identifier will affect the rest. Leave empty to generate a unique identifier per action.";
 			property = "KH_ModuleAddActionIdentifier";
 			defaultValue = "''";
 		};
 		class KH_ModuleAddActionParent: Edit
 		{
 			displayName = "Parent";
-			tooltip = "The variable name of a unit which makes it so that only the player controlling the unit with that variable name has the action available, or a lowercase boolean. In case of boolean, true makes it so that the action is available only if the player is currently controlling their player unit, while false makes it so that the action is available regardless of which unit the player is controlling.";
+			tooltip = "The variable name of a unit which makes it so that only the player controlling the unit with that variable name can use the action, or a lowercase boolean. In case of boolean, true makes it so that the action can only be used if the player is currently controlling their player unit, while false makes it so that the action is usable regardless of which unit the player is controlling.";
 			property = "KH_ModuleAddActionParent";
 			defaultValue = "'true'";
 		};
@@ -242,7 +249,7 @@ class KH_ModuleAddAction: Module_F
 	};
 	class ModuleDescription: ModuleDescription
 	{
-		description[] = {"Adds an action to the synchronized objects. If no objects are synchronized, the action is added to every player unit. The action addition happens once a potential caller comes within the Distance attribute's designated distance. Activates only once, without a trigger, on the server."};
+		description[] = {"Adds an action to the synchronized objects. If no objects are synchronized, the action is added to every player unit. The action addition happens once a potential caller comes within the Distance attribute's designated distance. The action will continue existing until manual scripted removal, Condition Exist failure, or the module being deleted. When the action is removed, the 'KH_eve_actionRemoved' event is triggered for all potential callers, where passed arguments available through _this are: [_identifier, (STRING)]. Activates only once, without a trigger, on the server."};
 		sync[] = {"Anything"};
 		position = 0;
 		direction = 0;

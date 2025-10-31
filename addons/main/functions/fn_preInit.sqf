@@ -12,6 +12,10 @@ KH_var_remoteExecFunctionsJipBlacklist = createHashMap;
 KH_var_inGameUiEventHandlerStack = createHashMap;
 KH_var_temporalExecutionStackMonitor = createHashMap;
 KH_var_drawUiExecutionStackMonitor = createHashMap;
+KH_var_quickFunctionsSqf = createHashMap;
+uiNamespace setVariable ["KH_var_quickFunctionsSqf", KH_var_quickFunctionsSqf];
+KH_var_quickFunctionsLua = createHashMap;
+uiNamespace setVariable ["KH_var_quickFunctionsLua", KH_var_quickFunctionsLua];
 KH_var_inGameUiEventHandlerStackDeletions = [];
 KH_var_temporalExecutionStack = [];
 KH_var_drawUi2dExecutionStack = [];
@@ -1132,6 +1136,90 @@ if hasInterface then {
 
 	[
 		"KH Framework", 
+		"KH_playDead", 
+		"Play Dead",
+		{
+			if (KH_var_playingDeadAllowed && !(KH_var_playerUnit getVariable ["KH_var_playingDead", false]) && !(captive KH_var_playerUnit)) then {
+				KH_var_playDeadUnit = KH_var_playerUnit;
+				systemChat "Time to play dead.";
+
+				KH_var_playDeadHandler = [
+					[],
+					{
+						if (
+							!KH_var_playingDeadAllowed ||
+							(KH_var_playDeadUnit getVariable ["KH_var_playingDead", false]) ||
+							(captive KH_var_playDeadUnit) ||
+							(KH_var_playDeadUnit isNotEqualTo KH_var_playerUnit)
+						   ) exitWith {
+							[_handlerId] call KH_fnc_removeHandler;
+						};
+						
+						KH_var_playDeadUnit setVariable ["KH_var_playingDead", true];
+						KH_var_playDeadUnit setCaptive true;
+						KH_var_playDeadUnit addForce [[0, 0, 0.001], [0, 0, 0], false];
+
+						KH_var_playDeadHandler = [
+							[],
+							{
+								params [];
+
+								if (!KH_var_playingDeadAllowed || (KH_var_playDeadUnit isNotEqualTo KH_var_playerUnit) || !(KH_var_playDeadUnit getVariable ["KH_var_playingDead", false])) exitWith {
+									KH_var_playDeadUnit setVariable ["KH_var_playingDead", false];
+									KH_var_playDeadUnit setCaptive false;
+									KH_var_playDeadUnit switchMove [""];
+									[_handlerId] call KH_fnc_removeHandler;
+								};
+
+								KH_var_playDeadUnit addForce [[0, 0, 0.001], [0, 0, 0], false];
+								
+								{
+									private _distance = KH_var_playDeadUnit distance _x;
+
+									if (
+										(_distance <= KH_var_playingDeadDiscoveryDistanceMinimum) ||
+										(
+										(_distance <= KH_var_playingDeadDiscoveryDistanceMaximum) &&
+										((random KH_var_playingDeadDiscoveryDistanceMaximum) >= _distance)
+										)
+									) then {
+										systemChat "I think I've been seen...";
+										KH_var_playDeadUnit setVariable ["KH_var_playingDead", false];
+										KH_var_playDeadUnit setCaptive false;
+										KH_var_playDeadUnit switchMove [""];
+										[_handlerId] call KH_fnc_removeHandler;
+										break;
+									};
+								} forEach (KH_var_playDeadUnit nearEntities ["Man", KH_var_playingDeadDiscoveryDistanceMaximum]);
+							},
+							true,
+							1,
+							false
+						] call KH_fnc_execute;
+
+						[_handlerId] call KH_fnc_removeHandler;
+					},
+					true,
+					str KH_var_playingDeadStartDuration,
+					false
+				] call KH_fnc_execute;
+			}
+			else {
+				if !(isNil "KH_var_playDeadHandler") then {
+					systemChat "No longer playing dead, time to get up.";
+					KH_var_playDeadUnit setVariable ["KH_var_playingDead", false];
+					KH_var_playDeadUnit setCaptive false;
+					KH_var_playDeadUnit switchMove [""];
+					[KH_var_playDeadHandler] call KH_fnc_removeHandler;
+				};
+			};
+		}, 
+		{}, 
+		[0xDC, [true, true, false]]
+	] call CBA_fnc_addKeybind;
+
+	[
+		"KH Framework", 
 		"KH_debugConsole", 
 		"Debug Console",
 		{
@@ -1141,6 +1229,14 @@ if hasInterface then {
 				ctrlSetText [101, _currentConsoleCache param [((count _currentConsoleCache) -1) max 0, ""]];
 				lbSetCurSel [108, profileNamespace getVariable ["KH_var_debugConsoleLanguage", 0]];
 				KH_var_debugConsoleCacheIndex = ((count _currentConsoleCache) - 1) max 0;
+				lbClear 109;
+				lbAdd [109, "None"];
+
+				{
+					lbAdd [109, _x];
+				} forEach ([KH_var_quickFunctionsSqf, KH_var_quickFunctionsLua] select (lbCurSel 108));
+
+				lbSetCurSel [109, 0];
 
 				[
 					["CONTROL", _display displayCtrl 104],
@@ -1293,8 +1389,40 @@ if hasInterface then {
 					"ToolBoxSelChanged",
 					[],
 					{
+						_args params [];
 						private _selectedIndex = param [1, 0];
 						profileNamespace setVariable ["KH_var_debugConsoleLanguage", _selectedIndex];
+						lbClear 109;
+						lbAdd [109, "None"];
+
+						{
+							lbAdd [109, _x];
+						} forEach ([KH_var_quickFunctionsSqf, KH_var_quickFunctionsLua] select _selectedIndex);
+
+						lbSetCurSel [109, 0];
+					}
+				] call KH_fnc_addEventHandler;
+
+				[
+					["CONTROL", _display displayCtrl 109],
+					"LBSelChanged",
+					[],
+					{
+						private _selectedIndex = param [1, 0];
+
+						if (_selectedIndex isNotEqualTo 0) then {
+							private _language = lbCurSel 109;
+							private _entry = ([KH_var_quickFunctionsSqf, KH_var_quickFunctionsLua] select _language) get (lbText [109, _selectedIndex]);
+
+							if !(isNil "_entry") then {
+								if (_language isEqualTo 0) then {
+									ctrlSetText [101, toString _entry];
+								}
+								else {
+									ctrlSetText [101, _entry];
+								};
+							};
+						};
 					}
 				] call KH_fnc_addEventHandler;
 			};
@@ -1307,9 +1435,10 @@ if hasInterface then {
 		"unit", 
 		{
 			params ["_unit"];
+			private _previousUnit = KH_var_playerUnit;
 			KH_var_playerUnit = _unit;
 			player setVariable ["KH_var_playerUnit", KH_var_playerUnit, true];
-			["KH_eve_playerControlledUnitChanged", [clientOwner, getPlayerUID player, getPlayerID player, _unit, [_unit, true] call KH_fnc_getEntityVariableName]] call CBA_fnc_globalEvent;
+			["KH_eve_playerControlledUnitChanged", [clientOwner, getPlayerUID player, getPlayerID player, _unit, _previousUnit, [_unit, true] call KH_fnc_getEntityVariableName]] call CBA_fnc_globalEvent;
 			[_previousUnit, _unit] call KH_fnc_playerControlledUnitChangeInit;
 		},
 		true

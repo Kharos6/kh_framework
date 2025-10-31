@@ -23,7 +23,7 @@ class KH_ModuleEquipableObject: Module_F
 		class KH_ModuleEquipableObjectName: Edit
 		{
 			displayName = "Name";
-			tooltip = "Name assigned to the object for equip and unequip actions.";
+			tooltip = "Name assigned to the object for equip and unequip actions. Leave empty to assign name based on the displayName of the object's config.";
 			property = "KH_ModuleEquipableObjectName";
 			defaultValue = "''";
 		};
@@ -67,13 +67,6 @@ class KH_ModuleEquipableObject: Module_F
 			displayName = "Hide In Vehicles";
 			tooltip = "True hides the object while equipped on a unit that is inside of a vehicle.";
 			property = "KH_ModuleEquipableObjectHideInVehicles";
-			defaultValue = "true";
-		};
-		class KH_ModuleEquipableObjectToggleEquip: Checkbox
-		{
-			displayName = "Toggle Equip";
-			tooltip = "True allows the object to be unequipped and reequipped repeatedly.";
-			property = "KH_ModuleEquipableObjectToggleEquip";
 			defaultValue = "true";
 		};
 		class KH_ModuleEquipableObjectExclusive: Checkbox

@@ -29,9 +29,9 @@ if (isNil "KH_var_playerPersistencySet") then {
 					};
 				}
 				else {
-					private _variableName = vehicleVarName _x;
+					private _variableName = vehicleVarName _player;
 
-					if ((_variableName isNotEqualTo "") && !(_x getVariable ["KH_var_generatedVariableName", false])) then {
+					if ((_variableName isNotEqualTo "") && !(_player getVariable ["KH_var_generatedVariableName", false])) then {
 						private _attributes = KH_var_playerPersistencyVariableName get _variableName;
 
 						if !(isNil "_attributes") then {
@@ -53,7 +53,7 @@ if (isNil "KH_var_playerPersistencySet") then {
 					};
 
 					case "SAVED": {
-						if !(isNil "_loadout") then {
+						if (!(isNil "_loadout") && (_player getVariable ["KH_var_allowPersistency", true])) then {
 							_player setUnitLoadout _loadout;
 						}
 						else {
@@ -106,16 +106,18 @@ if (isNil "KH_var_playerPersistencySet") then {
 				};
 
 				if !(isNil "_attributes") then {
-					if (isNil "_initialLoadout") then {
+					if ((isNil "_initialLoadout") && (_player getVariable ["KH_var_allowPersistency", true])) then {
 						KH_var_initialPlayerLoadouts set [_uid, (_attributes select 5) select 21];
 					};
 					
-					[_x, _attributes, [[], [26, 27, 28]] select (_x getVariable ["KH_var_persistencyIgnoreTransforms", false]), true] call KH_fnc_setUnitAttributes;
-					[_x, _attributesMain select 1] call KH_fnc_setPlayerScores;
+					if (_player getVariable ["KH_var_allowPersistency", true]) then {
+						[_player, _attributes, [[26, 27, 28], []] select (_player getVariable ["KH_var_persistencyTransforms", true]), true] call KH_fnc_setUnitAttributes;
+						[_player, _attributesMain select 1] call KH_fnc_setPlayerScores;
+					};
 				}
 				else {
 					if (isNil "_initialLoadout") then {
-						KH_var_initialPlayerLoadouts set [_uid, getUnitLoadout _x];
+						KH_var_initialPlayerLoadouts set [_uid, getUnitLoadout _player];
 					};
 				};
 			};
@@ -155,12 +157,14 @@ KH_var_playerPersistencyVariableName = "khNamespace" readKhData [["playerPersist
 	};
 
 	if !(isNil "_attributes") then {
-		if (isNil "_initialLoadout") then {
+		if ((isNil "_initialLoadout") && (_x getVariable ["KH_var_allowPersistency", true])) then {
 			KH_var_initialPlayerLoadouts set [_uid, (_attributes select 5) select 21];
 		};
 
-		[_x, _attributes, [[], [26, 27, 28]] select (_x getVariable ["KH_var_persistencyIgnoreTransforms", false]), true] call KH_fnc_setUnitAttributes;
-		[_x, _attributesMain select 1] call KH_fnc_setPlayerScores;
+		if (_x getVariable ["KH_var_allowPersistency", true]) then {
+			[_x, _attributes, [[26, 27, 28], []] select (_x getVariable ["KH_var_persistencyTransforms", true]), true] call KH_fnc_setUnitAttributes;
+			[_x, _attributesMain select 1] call KH_fnc_setPlayerScores;
+		};
 	}
 	else {
 		if (isNil "_initialLoadout") then {

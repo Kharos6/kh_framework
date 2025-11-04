@@ -12,7 +12,7 @@ params [
 ];
 
 if (isNil {_object getVariable "KH_var_equipableObjectSet";}) then {
-	if (_name isEqualTo "")then {
+	if (_name isEqualTo "") then {
 		_name = getText (configFile >> "CfgVehicles" >> (typeOf _object) >> "displayName");
 	};
 
@@ -20,12 +20,11 @@ if (isNil {_object getVariable "KH_var_equipableObjectSet";}) then {
 
 	[
 		[_object, false],
-		["Equip ", _name] joinString "",
-		+_this,
+		["<img image='\A3\ui_f\data\igui\cfg\actions\take_ca.paa' size='1.8'/><br/>EQUIP ", _name] joinString "",
+		[objNull, _object, _bone, _position, _rotation, _scale, _disableCollision, _hideInVehicles, _exclusive, _name],
 		{
-			private _arguments = +_this;
-			_arguments insert [0, [_caller]];
-			_arguments call KH_fnc_equipableObject;
+			_this set [0, _caller];
+			call KH_fnc_equipableObject;
 		},
 		{
 			(isNull (attachedTo _target));
@@ -34,7 +33,7 @@ if (isNil {_object getVariable "KH_var_equipableObjectSet";}) then {
 		true,
 		"PLAYERS",
 		false,
-		3,
+		2,
 		true,
 		false,
 		false,
@@ -47,7 +46,7 @@ if (isNil {_object getVariable "KH_var_equipableObjectSet";}) then {
 
 	[
 		[_object, false],
-		["Unequip ", _name, " carried by ", name (attachedTo _object)] joinString "",
+		["<img image='\A3\ui_f\data\igui\cfg\actions\take_ca.paa' size='1.8'/><br/>UNEQUIP ", _name, " FROM ", name (attachedTo _object)] joinString "",
 		[_exclusive],
 		{
 			params ["_exclusive"];
@@ -69,7 +68,7 @@ if (isNil {_object getVariable "KH_var_equipableObjectSet";}) then {
 		true,
 		"PLAYERS",
 		false,
-		3,
+		2,
 		true,
 		false,
 		false,
@@ -82,7 +81,7 @@ if (isNil {_object getVariable "KH_var_equipableObjectSet";}) then {
 
 	[
 		false,
-		["Unequip ", _name] joinString "",
+		["<img image='\A3\ui_f\data\igui\cfg\actions\take_ca.paa' size='1.8'/><br/>UNEQUIP ", _name] joinString "",
 		[_object, _exclusive],
 		{
 			params ["_object", "_exclusive"];
@@ -104,7 +103,7 @@ if (isNil {_object getVariable "KH_var_equipableObjectSet";}) then {
 		true,
 		"PLAYERS",
 		false,
-		3,
+		2,
 		true,
 		false,
 		false,

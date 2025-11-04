@@ -64,7 +64,7 @@ else {
 
 if (_parent isEqualType []) then {
     _handleParentActionRecovery = _parent param [1, true, [true]];
-    _parent = _parent param [0, nil, [objNull]];
+    _parent = _parent param [0, true, [true, objNull]];
 }
 else {
     _handleParentActionRecovery = true;
@@ -133,7 +133,9 @@ else {
             ];
         }
         else {
-            _drawHint = ["ICON", _drawHint, true, [], {}];
+            if (_drawHint isNotEqualTo []) then {
+                _drawHint = ["ICON", _drawHint, true, [], {}];
+            };
         };
     };
 };
@@ -152,6 +154,8 @@ private _actionStorageId = ["KH_var_actionStorageId", _parsedIdentifier] joinStr
 private _completionId = ["KH_var_actionCompletionId", _parsedIdentifier] joinString "_";
 private _conditionShowId = ["KH_var_actionShowId", _parsedIdentifier] joinString "_";
 private _targetId = ["KH_var_actionTargetId", _parsedIdentifier] joinString "_";
+private _objectId = generateUid;
+missionNamespace setVariable [_objectId, _object];
 private _firstCall = false;
 
 if (isNil {missionNamespace getVariable _parsedActionId;}) then {
@@ -161,6 +165,7 @@ if (isNil {missionNamespace getVariable _parsedActionId;}) then {
     missionNamespace setVariable [_conditionShowId, true, true];
     missionNamespace setVariable [_actionStorageId, [], true];
     missionNamespace setVariable [_completionId, false, true];
+    missionNamespace setVariable [_targetId, [[_target], [clientOwner]] select ((_target isEqualTo true) || (_target isEqualTo "LOCAL")), true];
 };
 
 if !(missionNamespace getVariable _actionExistenceId) exitWith {
@@ -168,7 +173,7 @@ if !(missionNamespace getVariable _actionExistenceId) exitWith {
 };
 
 private _parsedConditionExist = if (_firstCall && (_condition isEqualType [])) then {
-    _condition params ["_conditionExist", {}, ["", [], {}]];
+    _condition params [["_conditionExist", {}, ["", [], {}]]];
 
     if (_conditionExist isNotEqualTo {}) then {
         switch (typeName _conditionExist) do {
@@ -268,6 +273,7 @@ if !_continue exitWith {
 private _functionTerminate = if (_function isEqualType []) then {
     if ((count _function) isEqualTo 6) then {
         private _thisFunction = _function param [5];
+
         if !(isNil "_thisFunction") then {
             if (_thisFunction isNotEqualTo {}) then {
                 _thisFunction;
@@ -721,8 +727,8 @@ private _actionHandler = [
                                 _actionId,
                                 _handlerId,
                                 _interactionHelper,
-                                time,
-                                time + _duration,
+                                diag_tickTime,
+                                diag_tickTime + _duration,
                                 _resultStart
                             ],
                             {
@@ -788,32 +794,32 @@ private _actionHandler = [
 
                                         switch (_progressDisplay) do {
                                             case "PERCENTAGE": {
-                                                private _currentProgress = ((parseNumber ((((time - _startTime) / (_endTime - _startTime)) * 100) toFixed 1)) min 100) toFixed 1;
+                                                private _currentProgress = ((parseNumber ((((diag_tickTime - _startTime) / (_endTime - _startTime)) * 100) toFixed 1)) min 100) toFixed 1;
                                                 missionNamespace setVariable [_lastProgressId, _currentProgress];
                                                 ["<t size='1.25' color='", _progressColor, "' font='EtelkaMonospaceProBold'>", _currentProgress, "%</t>"] joinString "";
                                             };
 
                                             case "TIME": {
-                                                private _currentProgress = ((parseNumber ((_endTime - time) toFixed 1)) max 0) toFixed 1;
+                                                private _currentProgress = ((parseNumber ((_endTime - diag_tickTime) toFixed 1)) max 0) toFixed 1;
                                                 missionNamespace setVariable [_lastProgressId, _currentProgress];
                                                 ["<t size='1.25' color='", _progressColor, "' font='EtelkaMonospaceProBold'>", _currentProgress, "s</t>"] joinString "";
                                             };
 
                                             case "BAR": {
-                                                private _currentProgress = floor (((time - _startTime) / (_endTime - _startTime)) * 100);
+                                                private _currentProgress = floor (((diag_tickTime - _startTime) / (_endTime - _startTime)) * 100);
                                                 private _bars = [];
 
-                                                for "_i" from 1 to 100 do {
+                                                for "_i" from 5 to 100 step 5 do {
                                                     if (_i <= _currentProgress) then {
                                                         _bars pushBack "|";
                                                     }
                                                     else {
-                                                        _bars pushBack " ";
+                                                        _bars pushBack ".";
                                                     };
                                                 };
 
                                                 missionNamespace setVariable [_lastProgressId, _currentProgress];
-                                                ["<t size='0.75' color='", _progressColor, "' font='EtelkaMonospaceProBold'>", (str _bars) regexReplace ["['"",]", ""], "</t>"] joinString "";
+                                                ["<t size='1.25' color='", _progressColor, "' font='EtelkaMonospaceProBold'>", (str _bars) regexReplace ["['"",]", ""], "</t>"] joinString "";
                                             };
 
                                             default {
@@ -882,7 +888,7 @@ private _actionHandler = [
                                         !(missionNamespace getVariable _actionExistenceId) ||
                                         !(missionNamespace getVariable _conditionShowId) ||
                                         (missionNamespace getVariable _completionId) ||
-                                        ((((lifeState _caller) isEqualTo "INCAPACITATED") || ((lifeState _caller) isEqualTo "UNCONSCIOUS")) && !_allowIncapacitated)
+                                        ((((lifeState _caller) isEqualTo "INCAPACITATED") || ((lifeState _caller) isEqualTo "UNCONSCIOUS") || (_caller getVariable ["KH_var_incapacitated", false])) && !_allowIncapacitated)
                                        ) exitWith {
                                         deleteVehicle _interactionHelper;
                                         false;
@@ -1077,6 +1083,7 @@ private _actionHandler = [
                     };
 
                     private _caller = _this;
+                    private _target = missionNamespace getVariable '", _objectId, "';
                     (((missionNamespace getVariable '", _argumentsReferenceId, "') call (missionNamespace getVariable '", _conditionShowReferenceId, "')) && (missionNamespace getVariable '", _conditionShowId, "'));"
                 ] joinString "";
             }
@@ -1093,7 +1100,9 @@ private _actionHandler = [
                                 false;
                             };
 
-                            if ((missionNamespace getVariable '", _objectId, "') isEqualTo KH_var_playerUnit) exitWith {
+                            private _target = missionNamespace getVariable '", _objectId, "';
+
+                            if ((_target isEqualTo KH_var_playerUnit) || ((_target distance KH_var_playerUnit) <= 0.01)) exitWith {
                                 private _caller = _this;
                                 private _handlerId = [missionNamespace, '", _actionExistenceId, "', true];
 
@@ -1101,12 +1110,12 @@ private _actionHandler = [
                                     (missionNamespace getVariable '", _drawHintReferenceId, "') call KH_fnc_draw3d;  
                                 };
                                 
-                                (((missionNamespace getVariable '", _argumentsReferenceId, "') call (missionNamespace getVariable '", _conditionShowReferenceId, "')) && (missionNamespace getVariable '", _conditionShowId, "'))
+                                (((missionNamespace getVariable '", _argumentsReferenceId, "') call (missionNamespace getVariable '", _conditionShowReferenceId, "')) && (missionNamespace getVariable '", _conditionShowId, "'));
                             };
 
                             private _viewTarget = call ", _detectionType, ";
 
-                            if (((_viewTarget select 1) <= ", _distance, ") && ((_viewTarget select 4) isEqualTo (missionNamespace getVariable '", _objectId, "'))) then {
+                            if (((_viewTarget select 1) <= ", _distance, ") && ((_viewTarget select 4) isEqualTo _target)) then {
                                 private _caller = _this;
                                 private _handlerId = [missionNamespace, '", _actionExistenceId, "', true];
 
@@ -1133,7 +1142,9 @@ private _actionHandler = [
                                 false;
                             };
 
-                            if ((missionNamespace getVariable '", _objectId, "') isEqualTo KH_var_playerUnit) exitWith {
+                            private _target = missionNamespace getVariable '", _objectId, "';
+
+                            if ((_target isEqualTo KH_var_playerUnit) || ((_target distance KH_var_playerUnit) <= 0.01)) exitWith {
                                 private _caller = _this;
                                 private _handlerId = [missionNamespace, '", _actionExistenceId, "', true];
 
@@ -1141,10 +1152,10 @@ private _actionHandler = [
                                     (missionNamespace getVariable '", _drawHintReferenceId, "') call KH_fnc_draw3d;  
                                 };
                                 
-                                (((missionNamespace getVariable '", _argumentsReferenceId, "') call (missionNamespace getVariable '", _conditionShowReferenceId, "')) && (missionNamespace getVariable '", _conditionShowId, "'))
+                                (((missionNamespace getVariable '", _argumentsReferenceId, "') call (missionNamespace getVariable '", _conditionShowReferenceId, "')) && (missionNamespace getVariable '", _conditionShowId, "'));
                             };
 
-                            if (((missionNamespace getVariable '", _objectId, "') distance (missionNamespace getVariable '", _parentId, "')) <= ", _distance, ") then {
+                            if ((_target distance (missionNamespace getVariable '", _parentId, "')) <= ", _distance, ") then {
                                 private _caller = _this;
                                 private _handlerId = [missionNamespace, '", _actionExistenceId, "', true];
                             
@@ -1171,7 +1182,9 @@ private _actionHandler = [
                                 false;
                             };
 
-                            if ((missionNamespace getVariable '", _objectId, "') isEqualTo KH_var_playerUnit) exitWith {
+                            private _target = missionNamespace getVariable '", _objectId, "';
+
+                            if ((_target isEqualTo KH_var_playerUnit) || ((_target distance KH_var_playerUnit) <= 0.01)) exitWith {
                                 private _caller = _this;
                                 private _handlerId = [missionNamespace, '", _actionExistenceId, "', true];
 
@@ -1179,7 +1192,7 @@ private _actionHandler = [
                                     (missionNamespace getVariable '", _drawHintReferenceId, "') call KH_fnc_draw3d;  
                                 };
                                 
-                                (((missionNamespace getVariable '", _argumentsReferenceId, "') call (missionNamespace getVariable '", _conditionShowReferenceId, "')) && (missionNamespace getVariable '", _conditionShowId, "'))
+                                (((missionNamespace getVariable '", _argumentsReferenceId, "') call (missionNamespace getVariable '", _conditionShowReferenceId, "')) && (missionNamespace getVariable '", _conditionShowId, "'));
                             };
 
                             private _viewTarget = call ", _detectionType, ";
@@ -1187,7 +1200,7 @@ private _actionHandler = [
                             if (
                                 ((_viewTarget select 1) <= ", _distance, ") && 
                                 (((_viewTarget select 5) param [0, '']) isEqualTo '", _initialDetection, "') && 
-                                ((_viewTarget select 4) isEqualTo (missionNamespace getVariable '", _objectId, "'))
+                                ((_viewTarget select 4) isEqualTo _target)
                             ) then {
                                 private _caller = _this;
                                 private _handlerId = [missionNamespace, '", _actionExistenceId, "', true];
@@ -1212,15 +1225,14 @@ private _actionHandler = [
         ];
 
         _parsedParent setUserActionText [_action, _menuName, _windowBackgroundName, _windowForegroundName];
-        private _currentTarget = missionNamespace getVariable [_targetId, []]; 
-        _currentTarget insert [-1, [[_target], [clientOwner]] select ((_target isEqualTo true) || (_target isEqualTo "LOCAL")), true];
-        missionNamespace setVariable [_targetId, _currentTarget];
 
-        if _handleParentActionRecovery then {
-            if !_playerOnly then {
+        if _handleParentActionRecovery then {            
+            if (_playerOnly isEqualTo false) then {
+                private _controlledUnitActions = [KH_var_playerUnit];
+
                 [
-                    "PLAYER",
-                    "unit",
+                    "CBA",
+                    "KH_eve_playerControlledUnitChanged",
                     [
                         _object,
                         _name, 
@@ -1240,10 +1252,12 @@ private _actionHandler = [
                         _progressDisplay,
                         _parsedIdentifier,
                         _actionExistenceId,
-                        []
+                        _controlledUnitActions
                     ],
                     {
-                        params ["_unit"];
+                        private _owner = param [0];
+                        private _unit = param [3];
+                        if (_owner isNotEqualTo clientOwner) exitWith {};
 
                         _args params [
                             "_object",
@@ -1295,6 +1309,83 @@ private _actionHandler = [
                                 [_unit, false]
                             ] call KH_fnc_addAction;
                         };
+                    }
+                ] call KH_fnc_addEventHandler;
+            }
+            else {
+                [
+                    ["ENTITY", _parsedParent, "REMOTE"],
+                    "Respawn",
+                    [
+                        _object,
+                        _name, 
+                        _arguments, 
+                        _function, 
+                        _condition, 
+                        _repeatable, 
+                        _exclusive,
+                        _duration, 
+                        _distance,
+                        _showImmediately,
+                        _allowIncapacitated,
+                        _hideOnUse,
+                        _drawHint, 
+                        _detection, 
+                        _userInput, 
+                        _progressDisplay,
+                        _parsedIdentifier,
+                        _actionExistenceId
+                    ],
+                    {
+                        params ["_unit"];
+
+                        _args params [
+                            "_object",
+                            "_name", 
+                            "_arguments", 
+                            "_function", 
+                            "_condition", 
+                            "_repeatable", 
+                            "_exclusive",
+                            "_duration", 
+                            "_distance",
+                            "_showImmediately",
+                            "_allowIncapacitated",
+                            "_hideOnUse",
+                            "_drawHint", 
+                            "_detection", 
+                            "_userInput", 
+                            "_progressDisplay",
+                            "_parsedIdentifier",
+                            "_actionExistenceId"
+                        ];
+
+                        if !(missionNamespace getVariable _actionExistenceId) exitWith {
+                            [_handlerId] call KH_fnc_removeHandler;
+                        };
+
+                        [
+                            [_object, false],
+                            _name, 
+                            _arguments, 
+                            _function, 
+                            _condition, 
+                            _repeatable, 
+                            _exclusive,
+                            [true, false],
+                            [_duration, _progressDisplay],
+                            _distance,
+                            _showImmediately,
+                            _allowIncapacitated,
+                            _hideOnUse,
+                            _drawHint, 
+                            _detection, 
+                            _userInput, 
+                            _parsedIdentifier,
+                            [_unit, false]
+                        ] call KH_fnc_addAction;
+
+                        nil;
                     }
                 ] call KH_fnc_addEventHandler;
             };
@@ -1382,7 +1473,7 @@ private _actionHandler = [
             ] call KH_fnc_addEventHandler;
         };
 
-        (missionNamespace getVariable _actionStorageId) pushBack [_parent, _action];
+        (missionNamespace getVariable _actionStorageId) pushBack [_parsedParent, _action];
         nil;
     },
     [_target, false] select ((_target isEqualTo "PLAYERS") && !(_object isEqualType true)),
@@ -1420,7 +1511,8 @@ private _actionHandler = [
         _actionStorageId,
         _conditionShowId,
         _actionHandler,
-        _firstCall
+        _firstCall,
+        clientOwner
     ],
     {
         params [
@@ -1452,16 +1544,21 @@ private _actionHandler = [
             "_actionStorageId",
             "_conditionShowId",
             "_actionHandler",
-            "_firstCall"
+            "_firstCall",
+            "_clientOwner"
         ];
 
-        private _currentTarget = missionNamespace getVariable [_targetId, []]; 
-        _currentTarget insert [-1, [[_target], [clientOwner]] select ((_target isEqualTo true) || (_target isEqualTo "LOCAL")), true];
-        missionNamespace setVariable [_targetId, _currentTarget];
         private _actionCleanupHandlerId = ["KH_var_actionCleanupHandlerId", _parsedIdentifier] joinString "_";
-        private _actionCleanupHandler = missionNamespace getVariable _actionCleanupHandlerId;
+        private _actionCleanupHandler = missionNamespace getVariable [_actionCleanupHandlerId, []];
+        _actionCleanupHandler pushBack _actionHandler;
+        missionNamespace setVariable [_actionCleanupHandlerId, _actionCleanupHandler];
 
-        if _firstCall then {
+        if !_firstCall then {
+            private _currentTarget = missionNamespace getVariable _targetId; 
+            _currentTarget insert [-1, [[_target], [_clientOwner]] select ((_target isEqualTo true) || (_target isEqualTo "LOCAL")), true];
+            missionNamespace setVariable [_targetId, _currentTarget, true];
+        }
+        else {
             if !(_object isEqualType true) then {
                 if _handleObjectActionRecovery then {
                     [
@@ -1568,21 +1665,18 @@ private _actionHandler = [
                 }
             ] call KH_fnc_addEventHandler;
 
-            _actionCleanupHandler = [_actionHandler];
-            missionNamespace setVariable [_actionCleanupHandlerId, _actionCleanupHandler];
-
             [
                 "CBA",
                 "KH_eve_handlerRemoved",
-                [_actionCleanupHandlerId, _actionExistenceId, _currentTarget, _actionStorageId],
+                [_actionCleanupHandlerId, _actionExistenceId, _targetId, _actionStorageId],
                 {
                     params ["_handler"];
-                    _args params ["_actionCleanupHandlerId", "_actionExistenceId", "_currentTarget", "_actionStorageId"];
+                    _args params ["_actionCleanupHandlerId", "_actionExistenceId", "_targetId", "_actionStorageId"];
 
                     if ((_handler select 1) isEqualTo _actionExistenceId) then {
                         {
                             [_x] call KH_fnc_removeHandler;
-                        } forEach _actionCleanupHandlerId;
+                        } forEach (missionNamespace getVariable _actionCleanupHandlerId);
 
                         [
                             [_actionStorageId],
@@ -1592,19 +1686,16 @@ private _actionHandler = [
                                     (_x select 0) removeAction (_x select 1);
                                 } forEach (missionNamespace getVariable _actionStorageId);
                             },
-                            _currentTarget,
+                            missionNamespace getVariable _targetId,
                             true,
                             false
                         ] call KH_fnc_execute;
 
-                        ["KH_eve_actionRemoved", [_actionExistenceId], _currentTarget] call KH_fnc_triggerCbaEvent;
+                        ["KH_eve_actionRemoved", [_actionExistenceId],  missionNamespace getVariable _targetId] call KH_fnc_triggerCbaEvent;
                         ["KH_eve_handlerRemoved", _handlerId select 2] call CBA_fnc_removeEventHandler;
                     };
                 }
             ] call KH_fnc_addEventHandler;
-        }
-        else {
-            _actionCleanupHandler pushBack _actionHandler;
         };
     },
     "SERVER",
@@ -1613,21 +1704,15 @@ private _actionHandler = [
 ] call KH_fnc_execute;
 
 if !(isNil "_parsedConditionExist") then {
-    private "_objectId";
-
-    if !(_object isEqualType true) then {
-        _objectId = generateUid;
-        missionNamespace setVariable [_objectId, _object];
-    };
-
     [
         [
             _arguments, 
-            _parsedConditionExist, 
+            _parsedConditionExist,
+            [objNull, _object] select (_object isEqualType objNull), 
             _actionExistenceId
         ],
         {
-            private _actionExistenceId = param [2];
+            private _actionExistenceId = param [3];
 
             if (missionNamespace getVariable _actionExistenceId) then {
                 [[missionNamespace, _actionExistenceId, true]] call KH_fnc_removeHandler;
@@ -1635,8 +1720,8 @@ if !(isNil "_parsedConditionExist") then {
         },
         true,
         {
-            params ["_arguments", "_condition", "_actionExistenceId"];
-            (!(_arguments call _condition) || !(missionNamespace getVariable _actionExistenceId));
+            params ["_arguments", "_parsedConditionExist", "_object", "_actionExistenceId"];
+            (!(_arguments call _parsedConditionExist) || !(missionNamespace getVariable _actionExistenceId));
         },
         false
     ] call KH_fnc_execute;

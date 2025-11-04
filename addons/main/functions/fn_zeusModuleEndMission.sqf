@@ -18,8 +18,10 @@ isNil {
                 };
             };
 
+			private _isVictory = cbChecked (_display displayCtrl 101);
+
 			[
-				["KH_MissionConcluded", ctrlChecked (_display displayCtrl 101), _fadeType, 1, []],
+				[["KH_MissionFailed", "KH_MissionCompleted"] select _isVictory, _isVictory, _fadeType, 1, []],
 				"KH_fnc_endMission",
 				"SERVER",
 				true,

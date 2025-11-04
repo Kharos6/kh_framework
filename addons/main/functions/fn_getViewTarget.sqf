@@ -25,7 +25,7 @@ if ((KH_var_viewTargetCheckFrame isEqualTo diag_frameNo) && (KH_var_viewTargetIg
     ];
 };
 
-KH_var_viewTargetIgnores = +_ignored;
+KH_var_viewTargetIgnores = _ignored;
 KH_var_viewTargetCheckFrame = diag_frameNo;
 private _viewPosition = AGLToASL (positionCameraToWorld [0, 0, 0]);
 

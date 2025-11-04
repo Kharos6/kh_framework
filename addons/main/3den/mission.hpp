@@ -417,7 +417,7 @@ class Mission
 					class KH_QuickFunctions
 					{
 						displayName = "Quick Functions";
-						tooltip = "Hashmap style arrays where the first value is the name of the function, and the second value is the path to the function file which can either be SQF or Lua. The function will be compiled and defined in both the missionNamespace and uiNamespace if it is an SQF function, and into Lua global variables if it is a Lua function. These functions will then become available for execution in the KH debug console for quick and easy access during the mission.";
+						tooltip = "Hashmap style arrays where the key is the name of the function, and the value is the path to the function file which can either be SQF or Lua. The function will be compiled and defined in both the missionNamespace and uiNamespace if it is an SQF function, and into Lua global variables if it is a Lua function. These functions will then become available for execution in the KH Console for quick and easy access during the mission.";
 						property = "KH_QuickFunctions";
 						control = "EditMulti5";
 						expression = 

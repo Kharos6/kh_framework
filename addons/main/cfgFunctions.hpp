@@ -122,8 +122,10 @@ class CfgFunctions
 			class zeusModuleArma {};
 			class zeusModuleBreakDisguise {};
 			class zeusModuleEndMission {};
+			class zeusModuleHeal {};
+			class zeusModuleHealAllPlayers {};
 			class zeusModuleRagdollUnit {};
-			class zeusModuleSuspendMission {};
+			class zeusModuleToggleMissionSuspension {};
 		};
 	};
 };

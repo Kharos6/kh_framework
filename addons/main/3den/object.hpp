@@ -378,15 +378,17 @@ class Object
 					control = "KH_MedicalSettings";
 					expression = 
 					"\
-						_value params ['_toggle', '_medicalHandling', '_globalDamageMultipliers', '_plotArmor', '_damageMultiplier'];\
+						_value params ['_toggle', '_medicalHandling', '_globalDamageMultipliers', '_plotArmor', '_damageMultiplier', '_incapacitation'];\
 						if (_toggle && !is3DEN) then {\
 							_this setVariable ['KH_var_khMedicalHandling', _medicalHandling, true];\
-							_this setVariable ['KH_var_allowGlobalDamageMultipliers', _globalDamageMultipliers, true];\
 							_this setVariable ['KH_var_plotArmor', _plotArmor, true];\
 							_this setVariable ['KH_var_damageMultiplier', _damageMultiplier, true];\
+							if (_incapacitation isNotEqualTo 0) then {\
+								_this setVariable ['KH_var_allowIncapacitation', [true, false] select (_incapacitation - 1)];\
+							};\
 						};\
 					";
-					defaultValue = "[false, true, true, false, 1, '1.00']";
+					defaultValue = "[false, true, false, 1, '1.00', 0]";
 					condition = "objectControllable";
 				};
 			};

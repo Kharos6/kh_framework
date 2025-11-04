@@ -227,21 +227,21 @@ class KH_ModuleAddAction: Module_F
 		class KH_ModuleAddActionIdentifier: Edit
 		{
 			displayName = "Identifier";
-			tooltip = "An identifier that is otherwise unique per action, but can be overriden by this attribute; if used, all actions tied to this identifier will share the same exclusivity and existence conditions. For example, if the action has a duration, Exclusive is true, and Repeatable is false, and two actions share the same identifier, then as soon as one of those actions is activated, the other one will not be usable and will be deleted when the first one completes. Action recovery rules will be inherited from the first added action from the same action creator with this identifier, while Condition Exist of any of the actions that share the same identifier will affect the rest. Leave empty to generate a unique identifier per action.";
+			tooltip = "An identifier that is otherwise unique per action, but can be overriden by this attribute; if used, all actions tied to this identifier will share the same exclusivity and existence conditions. For example, if the action has a duration, Exclusive is true, and Repeatable is false, and two actions share the same identifier, then as soon as one of those actions is activated, the other one will not be usable and will be deleted when the first one completes. Action recovery rules and the JIP flag will be inherited from the first added action from the same action creator with this identifier, and Condition Exist of any of the actions that share the same identifier will affect the rest. Leave empty to generate a unique identifier per action.";
 			property = "KH_ModuleAddActionIdentifier";
 			defaultValue = "''";
 		};
 		class KH_ModuleAddActionParent: Edit
 		{
 			displayName = "Parent";
-			tooltip = "The variable name of a unit which makes it so that only the player controlling the unit with that variable name can use the action, or a lowercase boolean. In case of boolean, true makes it so that the action can only be used if the player is currently controlling their player unit, while false makes it so that the action is usable regardless of which unit the player is controlling.";
+			tooltip = "The variable name of a unit which makes it so that only the player controlling the unit with that variable name can use the action. The player controlling said unit with the desired variable name must be present at mission start. This attribute can also be a lowercase boolean. In case of boolean, true makes it so that the action can only be used if the player is currently controlling their player unit, while false makes it so that the action is usable regardless of which unit the player is controlling.";
 			property = "KH_ModuleAddActionParent";
 			defaultValue = "'true'";
 		};
 		class KH_ModuleAddActionHandleParentActionRecovery: Checkbox
 		{
 			displayName = "Handle Parent Action Recovery";
-			tooltip = "True recovers the action if a parent unit respawns, as well if the player controlled unit changes if the Parent Unit attribute being set to false.";
+			tooltip = "True recovers the action if a parent unit respawns, as well if the player controlled unit changes if the Parent Unit attribute is set to false.";
 			property = "KH_ModuleAddActionHandleParentActionRecovery";
 			defaultValue = "true";
 		};

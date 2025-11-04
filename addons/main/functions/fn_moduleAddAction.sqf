@@ -20,6 +20,7 @@ KH_var_postInitExecutions pushBack [
                     private _useAllPlayers = [false, true] select (_units isEqualTo []);
 
                     private _arguments = [
+                        objNull,
                         _logic getVariable ["KH_ModuleAddActionName", ""],
                         [],
                         [
@@ -36,9 +37,9 @@ KH_var_postInitExecutions pushBack [
                             }
                             else {
                                 if (
-                                    (((_conditionExist select 0) isEqualTo "'") && ((_conditionExist select ((count _conditionExist) - 1)) isEqualTo "'")) || 
-                                    (((_conditionExist select 0) isEqualTo '"') && ((_conditionExist select ((count _conditionExist) - 1)) isEqualTo '"')) ||
-                                    (((_conditionExist select 0) isEqualTo '[') && ((_conditionExist select ((count _conditionExist) - 1)) isEqualTo ']')) &&
+                                    (((_conditionExist select [0, 1]) isEqualTo "'") && ((_conditionExist select [(count _conditionExist) - 1, 1]) isEqualTo "'")) || 
+                                    (((_conditionExist select [0, 1]) isEqualTo '"') && ((_conditionExist select [(count _conditionExist) - 1, 1]) isEqualTo '"')) ||
+                                    (((_conditionExist select [0, 1]) isEqualTo '[') && ((_conditionExist select [(count _conditionExist) - 1, 1]) isEqualTo ']')) &&
                                     !(";" in _conditionExist)
                                 ) then {
                                     if ("," in _conditionExist) then {
@@ -53,9 +54,9 @@ KH_var_postInitExecutions pushBack [
                                 };
                             },
                             if (
-                                (((_conditionShow select 0) isEqualTo "'") && ((_conditionShow select ((count _conditionShow) - 1)) isEqualTo "'")) || 
-                                (((_conditionShow select 0) isEqualTo '"') && ((_conditionShow select ((count _conditionShow) - 1)) isEqualTo '"')) ||
-                                (((_conditionShow select 0) isEqualTo '[') && ((_conditionShow select ((count _conditionShow) - 1)) isEqualTo ']')) &&
+                                (((_conditionShow select [0, 1]) isEqualTo "'") && ((_conditionShow select [(count _conditionShow) - 1, 1]) isEqualTo "'")) || 
+                                (((_conditionShow select [0, 1]) isEqualTo '"') && ((_conditionShow select [(count _conditionShow) - 1, 1]) isEqualTo '"')) ||
+                                (((_conditionShow select [0, 1]) isEqualTo '[') && ((_conditionShow select [(count _conditionShow) - 1, 1]) isEqualTo ']')) &&
                                 !(";" in _conditionShow)
                             ) then {
                                 if ("," in _conditionShow) then {
@@ -69,9 +70,9 @@ KH_var_postInitExecutions pushBack [
                                 compile _conditionShow;
                             },
                             if (
-                                (((_conditionStart select 0) isEqualTo "'") && ((_conditionStart select ((count _conditionStart) - 1)) isEqualTo "'")) || 
-                                (((_conditionStart select 0) isEqualTo '"') && ((_conditionStart select ((count _conditionStart) - 1)) isEqualTo '"')) ||
-                                (((_conditionStart select 0) isEqualTo '[') && ((_conditionStart select ((count _conditionStart) - 1)) isEqualTo ']')) &&
+                                (((_conditionStart select [0, 1]) isEqualTo "'") && ((_conditionStart select [(count _conditionStart) - 1, 1]) isEqualTo "'")) || 
+                                (((_conditionStart select [0, 1]) isEqualTo '"') && ((_conditionStart select [(count _conditionStart) - 1, 1]) isEqualTo '"')) ||
+                                (((_conditionStart select [0, 1]) isEqualTo '[') && ((_conditionStart select [(count _conditionStart) - 1, 1]) isEqualTo ']')) &&
                                 !(";" in _conditionStart)
                             ) then {
                                 if ("," in _conditionStart) then {
@@ -85,9 +86,9 @@ KH_var_postInitExecutions pushBack [
                                 compile _conditionStart;
                             },
                             if (
-                                (((_conditionProgress select 0) isEqualTo "'") && ((_conditionProgress select ((count _conditionProgress) - 1)) isEqualTo "'")) || 
-                                (((_conditionProgress select 0) isEqualTo '"') && ((_conditionProgress select ((count _conditionProgress) - 1)) isEqualTo '"')) ||
-                                (((_conditionProgress select 0) isEqualTo '[') && ((_conditionProgress select ((count _conditionProgress) - 1)) isEqualTo ']')) &&
+                                (((_conditionProgress select [0, 1]) isEqualTo "'") && ((_conditionProgress select [(count _conditionProgress) - 1, 1]) isEqualTo "'")) || 
+                                (((_conditionProgress select [0, 1]) isEqualTo '"') && ((_conditionProgress select [(count _conditionProgress) - 1, 1]) isEqualTo '"')) ||
+                                (((_conditionProgress select [0, 1]) isEqualTo '[') && ((_conditionProgress select [(count _conditionProgress) - 1, 1]) isEqualTo ']')) &&
                                 !(";" in _conditionProgress)
                             ) then {
                                 if ("," in _conditionProgress) then {
@@ -101,9 +102,9 @@ KH_var_postInitExecutions pushBack [
                                 compile _conditionProgress;
                             },
                             if (
-                                (((_conditionComplete select 0) isEqualTo "'") && ((_conditionComplete select ((count _conditionComplete) - 1)) isEqualTo "'")) || 
-                                (((_conditionComplete select 0) isEqualTo '"') && ((_conditionComplete select ((count _conditionComplete) - 1)) isEqualTo '"')) ||
-                                (((_conditionComplete select 0) isEqualTo '[') && ((_conditionComplete select ((count _conditionComplete) - 1)) isEqualTo ']')) &&
+                                (((_conditionComplete select [0, 1]) isEqualTo "'") && ((_conditionComplete select [(count _conditionComplete) - 1, 1]) isEqualTo "'")) || 
+                                (((_conditionComplete select [0, 1]) isEqualTo '"') && ((_conditionComplete select [(count _conditionComplete) - 1, 1]) isEqualTo '"')) ||
+                                (((_conditionComplete select [0, 1]) isEqualTo '[') && ((_conditionComplete select [(count _conditionComplete) - 1, 1]) isEqualTo ']')) &&
                                 !(";" in _conditionComplete)
                             ) then {
                                 if ("," in _conditionComplete) then {
@@ -175,13 +176,13 @@ KH_var_postInitExecutions pushBack [
                     private _actionHandlers = [];
 
                     if _useAllPlayers then {
-                        _arguments insert [0, [[true, _logic getVariable ["KH_ModuleAddActionHandleObjectActionRecovery", true]]]];
+                        _arguments set [0, [true, _logic getVariable ["KH_ModuleAddActionHandleObjectActionRecovery", true]]];
                         _actionHandlers pushBack (_arguments call KH_fnc_addAction);
                     }
                     else {
                         {
-                            _arguments insert [0, [[_x, _logic getVariable ["KH_ModuleAddActionHandleObjectActionRecovery", true]]]];
-                            _actionHandlers pushBack (_currentArguments call KH_fnc_addAction);
+                            _arguments set [0, [_x, _logic getVariable ["KH_ModuleAddActionHandleObjectActionRecovery", true]]];
+                            _actionHandlers pushBack (_arguments call KH_fnc_addAction);
                         } forEach _units;
                     };
 

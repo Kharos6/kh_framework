@@ -233,7 +233,7 @@ _savedAttributes params [
 		_unit setBleedingRemaining _bleedingRemaining;
 		_unit setOxygenRemaining _oxygenRemaining;
 
-		if ((_lifeState isEqualTo "INCAPACITATED") || (_lifeState isEqualTo "UNCONSCIOUS")) then {
+		if ((_lifeState isEqualTo "INCAPACITATED") || (_lifeState isEqualTo "UNCONSCIOUS") || (_unit getVariable ["KH_var_incapacitated", false])) then {
 			_unit setUnconscious true;
 		};
 

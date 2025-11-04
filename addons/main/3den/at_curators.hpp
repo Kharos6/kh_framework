@@ -36,7 +36,7 @@ class KH_Curators: Title
 		class CuratorModulesTitle: Title
 		{
 			text = "Curator Modules";
-			tooltip = "Strings of variable names of curator modules that will be assigned to the owners of Steam IDs in the Curators attribute.";
+			tooltip = "Strings of variable names of curator modules that will be assigned to the owners of Steam IDs in the Curators attribute. Leave empty to automatically create curator modules.";
 			y = QUOTE(3 * CTRL_DEFAULT_H + 10 * CTRL_DEFAULT_Y);
 		};
 		class CuratorModules: ctrlEdit

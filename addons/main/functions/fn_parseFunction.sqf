@@ -23,7 +23,8 @@ if (isNil {missionNamespace getVariable _hashValue;}) then {
 		};
 	};
 
-	if _public then {
+	if (_public && (isNil {missionNamespace getVariable (["KH_var_publicFunction_", _hashValue] joinString "_");})) then {
+		missionNamespace setVariable [["KH_var_publicFunction_", _hashValue] joinString "_", true, true];
 		missionNamespace setVariable [_hashValue, _function, true];
 	}
 	else {
@@ -35,12 +36,16 @@ if (isNil {missionNamespace getVariable _hashValue;}) then {
 	};
 }
 else {
-	if _public then {
-		if ((".sqf" in _function) && !(" " in _function)) then {
-			_function = compileScript [_function, false, ""];
-		}
-		else {
-			_function = compile _function;
+	if (_public && (isNil {missionNamespace getVariable (["KH_var_publicFunction_", _hashValue] joinString "_");})) then {
+		missionNamespace setVariable [["KH_var_publicFunction_", _hashValue] joinString "_", true, true];
+
+		if (_function isEqualType "") then {
+			if ((".sqf" in _function) && !(" " in _function)) then {
+				_function = compileScript [_function, false, ""];
+			}
+			else {
+				_function = compile _function;
+			};
 		};
 
 		missionNamespace setVariable [_hashValue, _function, true];

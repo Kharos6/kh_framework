@@ -25,7 +25,7 @@ if ((KH_var_weaponTargetCheckFrame isEqualTo diag_frameNo) && (KH_var_weaponTarg
     ];
 };
 
-KH_var_weaponTargetIgnores = +_ignored;
+KH_var_weaponTargetIgnores = _ignored;
 KH_var_weaponTargetCheckFrame = diag_frameNo;
 private _currentWeapon = currentWeapon KH_var_playerUnit;
 

@@ -4,14 +4,17 @@ publicVariable "KH_var_diagnosticsState";
 
 if !(isNil "KH_var_diagnosticsValidatePositionHelper") then {
 	deleteVehicle KH_var_diagnosticsValidatePositionHelper;
+	KH_var_diagnosticsValidatePositionHelper = nil;
 };
 
 if !(isNil "KH_var_diagnosticsDrawHandler") then {
 	removeMissionEventHandler ["Draw3D", KH_var_diagnosticsDrawHandler];
+	KH_var_diagnosticsDrawHandler = nil;
 };
 
 if !(isNil "KH_var_diagnosticsHandler") then {
 	[KH_var_diagnosticsHandler] call KH_fnc_removeHandler;
+	KH_var_diagnosticsHandler = nil;
 };
 
 if !(isNil "KH_var_diagnosticsAllMarkers") then {

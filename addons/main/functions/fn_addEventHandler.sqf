@@ -175,11 +175,11 @@ switch _eventType do {
 					[
 						"PERSISTENT",
 						_entity,
-						[_entity, _persistentEventId, _persistentExecutionId], 
+						[_entity, _event, _persistentEventId, _persistentExecutionId], 
 						{
-							params ["_entity", "_persistentEventId", "_persistentExecutionId"];
+							params ["_entity", "_event", "_persistentEventId", "_persistentExecutionId"];
 							missionNamespace setVariable [_persistentExecutionId, false];
-							_entity removeEventHandler (missionNamespace getVariable [_persistentEventId, []]);
+							_entity removeEventHandler [_event, missionNamespace getVariable [_persistentEventId, []]];
 						},
 						""
 					]
@@ -225,11 +225,11 @@ switch _eventType do {
 					[
 						"PERSISTENT",
 						_entity,
-						[_entity, _persistentEventId, _persistentExecutionId], 
+						[_entity, _event, _persistentEventId, _persistentExecutionId], 
 						{
-							params ["_entity", "_persistentEventId", "_persistentExecutionId"];
+							params ["_entity", "_event", "_persistentEventId", "_persistentExecutionId"];
 							missionNamespace setVariable [_persistentExecutionId, false];
-							_entity removeEventHandler (missionNamespace getVariable [_persistentEventId, []]);
+							_entity removeEventHandler [_event, missionNamespace getVariable [_persistentEventId, []]];
 						},
 						""
 					]

@@ -1,4 +1,4 @@
-class KH_DebugConsole
+class KH_Console
 {
     idd = -1;
     function = "";
@@ -9,7 +9,7 @@ class KH_DebugConsole
         class Title: RscText 
         {
             idc = 100;
-            text = "DEBUG CONSOLE";
+            text = "CONSOLE";
             x = QUOTE(RSC_POS_X(25));
             y = QUOTE(RSC_POS_Y(18));
             w = QUOTE(RSC_POS_W(50));

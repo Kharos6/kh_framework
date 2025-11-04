@@ -22,7 +22,7 @@ if !(alive player) exitWith {
 [displayNull, true] call KH_fnc_closeInterface;
 
 if _disableUserInput then {
-	[false, true] call KH_fnc_toggleUserInput;
+	[false, true, true] call KH_fnc_toggleUserInput;
 };
 
 private _playerParent = objectParent player;
@@ -137,7 +137,7 @@ for "_i" from 0 to _cameraCount do {
 		camDestroy _camera;
 
 		if _disableUserInput then {
-			[true, true] call KH_fnc_toggleUserInput;
+			[true, true, true] call KH_fnc_toggleUserInput;
 		};
 	}, 
 	true, 

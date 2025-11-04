@@ -186,4 +186,15 @@ ctrlSetText [103, missionNamespace getVariable [_identifierInput, ctrlText 103]]
 	false
 ] call KH_fnc_execute;
 
+[
+	[_identifier],
+	{
+		params ["_identifier"];
+		missionNamespace setVariable [_identifier, false, true];
+	},
+	true,
+	{!dialog},
+	false
+] call KH_fnc_execute;
+
 _display;

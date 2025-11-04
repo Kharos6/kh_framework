@@ -679,7 +679,7 @@ if isServer then {
 
 						if ((_x distance _object) <= _distance) then {
 							["KH_eve_execution", [_arguments, _function, _caller, _unscheduled], _x, false] call KH_fnc_triggerCbaEvent;
-							_deletions pushBack _x;
+							_deletions pushBack _forEachIndex;
 						};
 					} forEach _units;
 
@@ -707,6 +707,7 @@ if isServer then {
 							[_arguments, _function, _caller, _unscheduled, _object, _distance, _unit],
 							{
 								params ["_arguments", "_function", "_caller", "_unscheduled", "_object", "_distance", "_unit"];
+								_this set [6, _unit getVariable ["KH_var_playerUnit", _unit]];
 
 								if !(missionNamespace getVariable _nearId) exitWith {
 									[_handlerId] call KH_fnc_removeHandler;
@@ -714,6 +715,7 @@ if isServer then {
 
 								if ((_unit distance _object) <= _distance) then {
 									["KH_eve_execution", [_arguments, _function, _caller, _unscheduled], _x, false] call KH_fnc_triggerCbaEvent;
+									[_handlerId] call KH_fnc_removeHandler;
 								};
 							},
 							true,
@@ -1139,68 +1141,86 @@ if hasInterface then {
 		"KH_playDead", 
 		"Play Dead",
 		{
-			if (KH_var_playingDeadAllowed && !(KH_var_playerUnit getVariable ["KH_var_playingDead", false]) && !(captive KH_var_playerUnit)) then {
-				KH_var_playDeadUnit = KH_var_playerUnit;
+			if (
+				KH_var_playingDeadAllowed && 
+				!(KH_var_playerUnit getVariable ["KH_var_playingDead", false]) && 
+				!(captive KH_var_playerUnit) && 
+				(isTouchingGround KH_var_playerUnit) &&
+				((lifeState KH_var_playerUnit) isNotEqualTo "INCAPACITATED") &&
+				((lifeState KH_var_playerUnit) isNotEqualTo "UNCONSCIOUS") &&
+				!(KH_var_playerUnit getVariable ["KH_var_incapacitated", false])
+			   ) then {
 				systemChat "Time to play dead.";
+				KH_var_playDeadUnit = KH_var_playerUnit;
+				KH_var_playDeadUnit setVariable ["KH_var_playingDead", true];
+				KH_var_playDeadUnit addForce [[0, 0, 0.001], [0, 0, 0], false];
 
 				KH_var_playDeadHandler = [
-					[],
+					[diag_tickTime + KH_var_playingDeadStartDelay, diag_tickTime + 2],
 					{
-						if (
-							!KH_var_playingDeadAllowed ||
-							(KH_var_playDeadUnit getVariable ["KH_var_playingDead", false]) ||
-							(captive KH_var_playDeadUnit) ||
-							(KH_var_playDeadUnit isNotEqualTo KH_var_playerUnit)
-						   ) exitWith {
-							[_handlerId] call KH_fnc_removeHandler;
+						params ["_deadline", "_animationDeadline"];
+
+						if (diag_tickTime >= _animationDeadline) then {
+							if ((vectorMagnitude (velocity KH_var_playDeadUnit)) <= 0.1) then {
+								KH_var_playDeadUnit switchMove ["Unconscious"];
+							};
 						};
-						
-						KH_var_playDeadUnit setVariable ["KH_var_playingDead", true];
-						KH_var_playDeadUnit setCaptive true;
-						KH_var_playDeadUnit addForce [[0, 0, 0.001], [0, 0, 0], false];
 
-						KH_var_playDeadHandler = [
-							[],
+						if (diag_tickTime >= _deadline) then {
+							KH_var_playDeadUnit setCaptive true;
+
+							if (!KH_var_playingDeadAllowed || (KH_var_playDeadUnit isNotEqualTo KH_var_playerUnit) || !(KH_var_playDeadUnit getVariable ["KH_var_playingDead", false])) exitWith {
+								KH_var_playDeadUnit setVariable ["KH_var_playingDead", false];
+								KH_var_playDeadUnit setCaptive false;
+								KH_var_playDeadUnit switchMove [""];
+
+								if !(_unit getVariable ["KH_var_incapacitated", false]) then {
+									KH_var_playDeadUnit playActionNow "Lying";
+								};
+								
+								[_handlerId] call KH_fnc_removeHandler;
+							};
+							
 							{
-								params [];
+								if ((side (group _x)) isEqualTo (side (group KH_var_playDeadUnit))) then {
+									continue;
+								};
 
-								if (!KH_var_playingDeadAllowed || (KH_var_playDeadUnit isNotEqualTo KH_var_playerUnit) || !(KH_var_playDeadUnit getVariable ["KH_var_playingDead", false])) exitWith {
+								private _distance = KH_var_playDeadUnit distance _x;
+
+								if (
+									(_distance <= KH_var_playingDeadDiscoveryDistanceMinimum) ||
+									(
+									 (_distance <= KH_var_playingDeadDiscoveryDistanceMaximum) &&
+									 ((random KH_var_playingDeadDiscoveryDistanceMaximum) >= _distance)
+									)
+								) then {
+									systemChat "I think I've been seen...";
 									KH_var_playDeadUnit setVariable ["KH_var_playingDead", false];
 									KH_var_playDeadUnit setCaptive false;
 									KH_var_playDeadUnit switchMove [""];
-									[_handlerId] call KH_fnc_removeHandler;
-								};
 
-								KH_var_playDeadUnit addForce [[0, 0, 0.001], [0, 0, 0], false];
-								
-								{
-									private _distance = KH_var_playDeadUnit distance _x;
-
-									if (
-										(_distance <= KH_var_playingDeadDiscoveryDistanceMinimum) ||
-										(
-										(_distance <= KH_var_playingDeadDiscoveryDistanceMaximum) &&
-										((random KH_var_playingDeadDiscoveryDistanceMaximum) >= _distance)
-										)
-									) then {
-										systemChat "I think I've been seen...";
-										KH_var_playDeadUnit setVariable ["KH_var_playingDead", false];
-										KH_var_playDeadUnit setCaptive false;
-										KH_var_playDeadUnit switchMove [""];
-										[_handlerId] call KH_fnc_removeHandler;
-										break;
+									if !(_unit getVariable ["KH_var_incapacitated", false]) then {
+										KH_var_playDeadUnit playActionNow "Lying";
 									};
-								} forEach (KH_var_playDeadUnit nearEntities ["Man", KH_var_playingDeadDiscoveryDistanceMaximum]);
-							},
-							true,
-							1,
-							false
-						] call KH_fnc_execute;
 
-						[_handlerId] call KH_fnc_removeHandler;
+									[_handlerId] call KH_fnc_removeHandler;
+									break;
+								};
+							} forEach (KH_var_playDeadUnit nearEntities ["Man", KH_var_playingDeadDiscoveryDistanceMaximum]);
+						}
+						else {
+							if (
+								!KH_var_playingDeadAllowed ||
+								(captive KH_var_playDeadUnit) ||
+								(KH_var_playDeadUnit isNotEqualTo KH_var_playerUnit)
+							) then {
+								[_handlerId] call KH_fnc_removeHandler;
+							};
+						};
 					},
 					true,
-					str KH_var_playingDeadStartDuration,
+					1,
 					false
 				] call KH_fnc_execute;
 			}
@@ -1210,7 +1230,13 @@ if hasInterface then {
 					KH_var_playDeadUnit setVariable ["KH_var_playingDead", false];
 					KH_var_playDeadUnit setCaptive false;
 					KH_var_playDeadUnit switchMove [""];
+
+					if !(_unit getVariable ["KH_var_incapacitated", false]) then {
+						KH_var_playDeadUnit playActionNow "Lying";
+					};
+
 					[KH_var_playDeadHandler] call KH_fnc_removeHandler;
+					KH_var_playDeadHandler = nil;
 				};
 			};
 		}, 
@@ -1220,15 +1246,15 @@ if hasInterface then {
 
 	[
 		"KH Framework", 
-		"KH_debugConsole", 
-		"Debug Console",
+		"KH_console", 
+		"Console",
 		{
 			if (KH_var_adminMachine isEqualTo clientOwner) then {
-				private _display = createDialog ["KH_DebugConsole", true];
-				private _currentConsoleCache = profileNamespace getVariable ["KH_var_debugConsoleCache", []];
+				private _display = createDialog ["KH_Console", true];
+				private _currentConsoleCache = profileNamespace getVariable ["KH_var_consoleCache", []];
 				ctrlSetText [101, _currentConsoleCache param [((count _currentConsoleCache) -1) max 0, ""]];
-				lbSetCurSel [108, profileNamespace getVariable ["KH_var_debugConsoleLanguage", 0]];
-				KH_var_debugConsoleCacheIndex = ((count _currentConsoleCache) - 1) max 0;
+				lbSetCurSel [108, profileNamespace getVariable ["KH_var_consoleLanguage", 0]];
+				KH_var_consoleCacheIndex = ((count _currentConsoleCache) - 1) max 0;
 				lbClear 109;
 				lbAdd [109, "None"];
 
@@ -1246,7 +1272,7 @@ if hasInterface then {
 						private _input = ctrlText 101;
 
 						if (_input isNotEqualTo "") then {
-							private _currentConsoleCache = profileNamespace getVariable ["KH_var_debugConsoleCache", []];
+							private _currentConsoleCache = profileNamespace getVariable ["KH_var_consoleCache", []];
 
 							if (((count _input) <= 8192) && ((_currentConsoleCache param [((count _currentConsoleCache) - 1) max 0, ""]) isNotEqualTo _input)) then {
 								_currentConsoleCache pushBack _input;
@@ -1255,7 +1281,7 @@ if hasInterface then {
 									_currentConsoleCache deleteAt 0;
 								};
 
-								profileNamespace setVariable ["KH_var_debugConsoleCache", _currentConsoleCache];
+								profileNamespace setVariable ["KH_var_consoleCache", _currentConsoleCache];
 							};
 
 							ctrlSetText [
@@ -1270,7 +1296,7 @@ if hasInterface then {
 								] joinString ""
 							];
 
-							KH_var_debugConsoleCacheIndex = ((count _currentConsoleCache) - 1) max 0;
+							KH_var_consoleCacheIndex = ((count _currentConsoleCache) - 1) max 0;
 						};
 
 						nil;
@@ -1285,7 +1311,7 @@ if hasInterface then {
 						private _input = ctrlText 101;
 						
 						if (_input isNotEqualTo "") then {
-							private _currentConsoleCache = profileNamespace getVariable ["KH_var_debugConsoleCache", []];
+							private _currentConsoleCache = profileNamespace getVariable ["KH_var_consoleCache", []];
 
 							if (((count _input) <= 8192) && ((_currentConsoleCache param [((count _currentConsoleCache) - 1) max 0, ""]) isNotEqualTo _input)) then {
 								_currentConsoleCache pushBack _input;
@@ -1294,7 +1320,7 @@ if hasInterface then {
 									_currentConsoleCache deleteAt 0;
 								};
 
-								profileNamespace setVariable ["KH_var_debugConsoleCache", _currentConsoleCache];
+								profileNamespace setVariable ["KH_var_consoleCache", _currentConsoleCache];
 							};
 
 							ctrlSetText [
@@ -1313,7 +1339,7 @@ if hasInterface then {
 								] joinString ""
 							];
 
-							KH_var_debugConsoleCacheIndex = ((count _currentConsoleCache) - 1) max 0;
+							KH_var_consoleCacheIndex = ((count _currentConsoleCache) - 1) max 0;
 						};
 
 						nil;
@@ -1331,7 +1357,7 @@ if hasInterface then {
 							private _input = ctrlText 101;
 
 							if (_input isNotEqualTo "") then {
-								private _currentConsoleCache = profileNamespace getVariable ["KH_var_debugConsoleCache", []];
+								private _currentConsoleCache = profileNamespace getVariable ["KH_var_consoleCache", []];
 
 								if (((count _input) <= 8192) && ((_currentConsoleCache param [((count _currentConsoleCache) - 1) max 0, ""]) isNotEqualTo _input)) then {
 									_currentConsoleCache pushBack _input;
@@ -1340,7 +1366,7 @@ if hasInterface then {
 										_currentConsoleCache deleteAt 0;
 									};
 
-									profileNamespace setVariable ["KH_var_debugConsoleCache", _currentConsoleCache];
+									profileNamespace setVariable ["KH_var_consoleCache", _currentConsoleCache];
 								};
 
 								ctrlSetText [
@@ -1355,7 +1381,7 @@ if hasInterface then {
 									] joinString ""
 								];
 
-								KH_var_debugConsoleCacheIndex = ((count _currentConsoleCache) - 1) max 0;
+								KH_var_consoleCacheIndex = ((count _currentConsoleCache) - 1) max 0;
 							};
 
 							true;
@@ -1368,8 +1394,8 @@ if hasInterface then {
 					"ButtonClick",
 					[],
 					{
-						KH_var_debugConsoleCacheIndex = (KH_var_debugConsoleCacheIndex - 1) max 0;
-						ctrlSetText [101, (profileNamespace getVariable ["KH_var_debugConsoleCache", []]) param [KH_var_debugConsoleCacheIndex, ""]];
+						KH_var_consoleCacheIndex = (KH_var_consoleCacheIndex - 1) max 0;
+						ctrlSetText [101, (profileNamespace getVariable ["KH_var_consoleCache", []]) param [KH_var_consoleCacheIndex, ""]];
 					}
 				] call KH_fnc_addEventHandler;
 
@@ -1378,9 +1404,9 @@ if hasInterface then {
 					"ButtonClick",
 					[],
 					{
-						private _currentConsoleCache = profileNamespace getVariable ["KH_var_debugConsoleCache", []];
-						KH_var_debugConsoleCacheIndex = (KH_var_debugConsoleCacheIndex + 1) min ((count _currentConsoleCache) - 1);
-						ctrlSetText [101, _currentConsoleCache param [KH_var_debugConsoleCacheIndex, ""]];
+						private _currentConsoleCache = profileNamespace getVariable ["KH_var_consoleCache", []];
+						KH_var_consoleCacheIndex = (KH_var_consoleCacheIndex + 1) min ((count _currentConsoleCache) - 1);
+						ctrlSetText [101, _currentConsoleCache param [KH_var_consoleCacheIndex, ""]];
 					}
 				] call KH_fnc_addEventHandler;
 
@@ -1389,9 +1415,8 @@ if hasInterface then {
 					"ToolBoxSelChanged",
 					[],
 					{
-						_args params [];
 						private _selectedIndex = param [1, 0];
-						profileNamespace setVariable ["KH_var_debugConsoleLanguage", _selectedIndex];
+						profileNamespace setVariable ["KH_var_consoleLanguage", _selectedIndex];
 						lbClear 109;
 						lbAdd [109, "None"];
 
@@ -1471,6 +1496,7 @@ if hasInterface then {
 				[],
 				{
 					params ["_unit", "_corpse"];
+					_corpse setVariable ["KH_var_playerUnit", _unit];
 					_corpse setVehicleVarName "";
 
 					[
@@ -1531,6 +1557,7 @@ if hasInterface then {
 				[],
 				{
 					params ["_unit", "_corpse"];
+					_corpse setVariable ["KH_var_playerUnit", _unit];
 					_corpse setVehicleVarName "";
 
 					[

@@ -50,17 +50,17 @@
 ] call CBA_fnc_addSetting;
 
 [
-	"KH_var_playingDeadStartDuration",
+	"KH_var_playingDeadStartDelay",
 	"TIME",   
 	[
-		"Playing Dead Start Duration", 
+		"Playing Dead Start Delay", 
 		"Time it takes for a player who is playing dead to be turned into a captive to prevent enemies from shooting at them."
 	], 
 	[
         "KH Miscellaneous",
         "Deception"
     ], 
-	[0, 60, 5],
+	[0, 60, 3],
 	1,
 	{},
 	false
@@ -106,30 +106,13 @@
 	"SLIDER",   
 	[
 		"Incapacitation Threshold", 
-		"The amount of damage to total health beyond which a unit will be incapacitated. 1.00 is 100% health, 0.00 is 0% health."
+		"The amount of damage to total health beyond which a unit will be incapacitated. 1.00 is 100% damage, 0.00 is 0% damage."
 	], 
 	[
         "KH Medical",
         "Incapacitation"
     ], 
 	[0, 1.00, 0.90, 2],
-	1,
-	{},
-	false
-] call CBA_fnc_addSetting;
-
-[
-	"KH_var_incapacitatedCaptives",
-	"CHECKBOX",   
-	[
-		"Incapacitated Captives", 
-		"True sets incapacitated units as captives so that their enemies avoid shooting them while they are incapacitated. The captivity status is reset upon revive or withstanding, unless the revive was conducted by an enemy unit."
-	], 
-	[
-        "KH Medical",
-        "Incapacitation"
-    ], 
-	true,
 	1,
 	{},
 	false
@@ -163,41 +146,24 @@
         "KH Medical",
         "Incapacitation"
     ], 
-	false,
+	true,
 	1,
 	{},
 	false
 ] call CBA_fnc_addSetting;
 
 [
-	"KH_var_allowWoundPressing",
+	"KH_var_reviveRequireStabilization",
 	"CHECKBOX",   
 	[
-		"Wound Pressing", 
-		"True allows players to press the wound of an incapacitated unit in order to slow down the Incapacitation Death Time."
+		"Revive Require Stabilization", 
+		"True requires a unit to be stabilized before they can be revived."
 	], 
 	[
         "KH Medical",
         "Incapacitation"
     ], 
-	false,
-	1,
-	{},
-	false
-] call CBA_fnc_addSetting;
-
-[
-	"KH_var_woundPressMultiplier",
-	"SLIDER",   
-	[
-		"Would Press Multiplier", 
-		"The current remaining Incapacitation Death Time tick speed is multiplied by this value when the wound is being pressed."
-	], 
-	[
-        "KH Medical",
-        "Incapacitation"
-    ], 
-	[0, 1.00, 0.50, 2],
+	true,
 	1,
 	{},
 	false
@@ -374,23 +340,6 @@
 ] call CBA_fnc_addSetting;
 
 [
-	"KH_var_selfReviveRequiredFirstAidKits",
-	"SLIDER",   
-	[
-		"Self Revive Required First Aid Kits",
-		"Amount of first aid kits required for people to revive themselves when no medikit is available and Self Revive Require Medikit is false."
-	], 
-	[
-        "KH Medical",
-        "Incapacitation"
-    ], 
-	[0, 15, 4, 0],
-	1,
-	{},
-	false
-] call CBA_fnc_addSetting;
-
-[
 	"KH_var_selfReviveRequireWithstanding",
 	"CHECKBOX",   
 	[
@@ -408,11 +357,28 @@
 ] call CBA_fnc_addSetting;
 
 [
-	"KH_var_maximumReviveHeal",
+	"KH_var_batchHeal",
+	"CHECKBOX",
+	[
+		"Batch Heal", 
+		"True makes it so that as many first aid kits as are necessary are used in order to restore full health. If false, healing needs to be conducted one action at a time until health is fully restored."
+	], 
+	[
+        "KH Medical",
+        "Healing"
+    ], 
+	true,
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_firstAidKitHeal",
 	"SLIDER",   
 	[
-		"Maximum Revive Heal",
-		"Amount of health that is recovered after reviving, normalized to Incapacitation Threshold. 1.00 is 100% health, 0.00 is the incapacitation threshold health."
+		"First Aid Kit Heal",
+		"Amount of health added per first aid kit used on another person. 1.00 is 100% health, 0.00 is 0% health."
 	], 
 	[
         "KH Medical",
@@ -425,17 +391,221 @@
 ] call CBA_fnc_addSetting;
 
 [
-	"KH_var_maximumReviveHealMedic",
+	"KH_var_firstAidKitSelfHeal",
 	"SLIDER",   
 	[
-		"Maximum Revive Heal medic",
-		"Amount of health that is recovered by medics after reviving, normalized to Incapacitation Threshold. 1.00 is 100% health, 0.00 is the incapacitation threshold health."
+		"First Aid Kit Self Heal",
+		"Amount of health added per first aid kit used by a person on themselves. 1.00 is 100% health, 0.00 is 0% health."
+	], 
+	[
+        "KH Medical",
+        "Healing"
+    ], 
+	[0, 1.00, 0.50, 2],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_firstAidKitHealMedic",
+	"SLIDER",   
+	[
+		"First Aid Kit Heal Medic",
+		"Amount of health added per first aid kit used by a medic on another person. 1.00 is 100% health, 0.00 is 0% health."
 	], 
 	[
         "KH Medical",
         "Healing"
     ], 
 	[0, 1.00, 1.00, 2],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_firstAidKitSelfHealMedic",
+	"SLIDER",   
+	[
+		"First Aid Kit Self Heal Medic",
+		"Amount of health added per first aid kit used by a medic on themselves. 1.00 is 100% health, 0.00 is 0% health."
+	], 
+	[
+        "KH Medical",
+        "Healing"
+    ], 
+	[0, 1.00, 1.00, 2],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_reviveHeal",
+	"SLIDER",   
+	[
+		"Revive Heal",
+		"Amount of health that is recovered after reviving. 1.00 is 100% health, 0.00 is 0% health. If the amount of health results in the remaining damage being above the incapacitation threshold, the next hit on the revived unit will immediately incapacitate them."
+	], 
+	[
+        "KH Medical",
+        "Healing"
+    ], 
+	[0, 1.00, 0.50, 2],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_reviveHealMedic",
+	"SLIDER",   
+	[
+		"Revive Heal medic",
+		"Amount of health that is recovered by medics after reviving. 1.00 is 100% health, 0.00 is 0% health. If the amount of health results in the remaining damage being above the incapacitation threshold, the next hit on the revived unit will immediately incapacitate them."
+	], 
+	[
+        "KH Medical",
+        "Healing"
+    ], 
+	[0, 1.00, 1.00, 2],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_selfReviveHeal",
+	"SLIDER",   
+	[
+		"Self Revive Heal",
+		"Amount of health that is recovered after a unit revives itself. 1.00 is 100% health, 0.00 is 0% health. If the amount of health results in the remaining damage being above the incapacitation threshold, the next hit on the revived unit will immediately incapacitate them."
+	], 
+	[
+        "KH Medical",
+        "Healing"
+    ], 
+	[0, 1.00, 0.50, 2],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_selfReviveHealMedic",
+	"SLIDER",   
+	[
+		"Self Revive Heal medic",
+		"Amount of health that is recovered by medics after they revive themselves. 1.00 is 100% health, 0.00 is 0% health. If the amount of health results in the remaining damage being above the incapacitation threshold, the next hit on the revived unit will immediately incapacitate them."
+	], 
+	[
+        "KH Medical",
+        "Healing"
+    ], 
+	[0, 1.00, 1.00, 2],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_stabilizationAllowed",
+	"CHECKBOX",   
+	[
+		"Enable", 
+		"True allows players to stabilize incapacitated units. Stabilization stops the Incapacitation Death Time countdown."
+	], 
+	[
+        "KH Medical",
+        "Stabilization"
+    ], 
+	true,
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_stabilizationDuration",
+	"TIME",   
+	[
+		"Stabilization Duration", 
+		"Time it takes to stabilize a person."
+	], 
+	[
+        "KH Medical",
+        "Stabilization"
+    ], 
+	[0, 300, 30],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_stabilizationMedicOnly",
+	"CHECKBOX",   
+	[
+		"Medic Only", 
+		"True only allows medics to stabilize incapacitated units."
+	], 
+	[
+        "KH Medical",
+        "Stabilization"
+    ], 
+	false,
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_stabilizationDurationMedic",
+	"TIME",   
+	[
+		"Stabilization Duration Medic", 
+		"Time it takes for medics to stabilize a person."
+	], 
+	[
+        "KH Medical",
+        "Stabilization"
+    ], 
+	[0, 300, 15],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_stabilizationRequireMedikit",
+	"CHECKBOX",   
+	[
+		"Require Medikit", 
+		"True makes it so that a medikit is required to stabilize a person."
+	], 
+	[
+        "KH Medical",
+        "Stabilization"
+    ], 
+	true,
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_stabilizationRequiredFirstAidKits",
+	"SLIDER",   
+	[
+		"Required First Aid Kits", 
+		"Amount of first aid kits required for stabilizing a person if Require Medikit is false."
+	], 
+	[
+        "KH Medical",
+        "Stabilization"
+    ], 
+	[0, 15, 1, 0],
 	1,
 	{},
 	false
@@ -459,10 +629,27 @@
 ] call CBA_fnc_addSetting;
 
 [
-	"KH_var_withstandThreshold",
+	"KH_var_withstandingRequireStabilization",
+	"CHECKBOX",   
+	[
+		"Require Stabilization", 
+		"True only allows players to withstand if they are stabilized."
+	], 
+	[
+        "KH Medical",
+        "Withstanding"
+    ], 
+	true,
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_withstandDelay",
 	"TIME",   
 	[
-		"Withstand Threshold", 
+		"Delay", 
 		"Time required for a player to be incapacitated before they are able to withstand."
 	], 
 	[
@@ -479,8 +666,8 @@
 	"KH_var_withstandActionDuration",
 	"TIME",   
 	[
-		"Withstand Action Duration", 
-		"The time it takes to withstand."
+		"Action Duration", 
+		"The time it takes to start and cancel withstanding."
 	], 
 	[
         "KH Medical",
@@ -496,7 +683,7 @@
 	"KH_var_withstandDuration",
 	"TIME",   
 	[
-		"Withstand Duration", 
+		"Duration", 
 		"Time it takes for a withstanding player to collapse into the incapacitation state again, with no more withstanding ability until they are revived. Set to 0 for infinite withstanding."
 	], 
 	[
@@ -504,6 +691,23 @@
         "Withstanding"
     ], 
 	[0, 1800, 60],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_withstandingAllowCancel",
+	"CHECKBOX",   
+	[
+		"Allow Cancel", 
+		"True allows players who are withstanding to cancel withstanding and become incapacitated again. This will prevent further withstanding until revived."
+	], 
+	[
+        "KH Medical",
+        "Withstanding"
+    ], 
+	true,
 	1,
 	{},
 	false
@@ -742,6 +946,332 @@
         "Damage Multipliers"
     ], 
 	[0.00, 10.00, 2.00, 2],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_classDamageMultipliersRaw",
+	"EDITBOX",   
+	[
+		"Class Damage Multipliers", 
+		"Hashmap style arrays where the key element is a class name, and the value is its damage multiplier. All units of a specified class will have all damage calculations for all hit points and total unit health multiplied by the value."
+	], 
+	[
+        "KH Medical",
+        "Damage Multipliers"
+    ], 
+	"",
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_healthDisplay",
+	"LIST",   
+	[
+		"Health Display", 
+		"The type of health representation displayed to a player, representing their own health."
+	], 
+	[
+        "KH Medical",
+        "Interface"
+    ], 
+	[
+        ["NONE", "BAR", "PERCENTAGE"],
+        ["NONE", "BAR", "PERCENTAGE"],
+        1
+    ],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_healthDisplayHideFullHealth",
+	"CHECKBOX",   
+	[
+		"Health Display Hide Full Health", 
+		"True hides the health display if health is full."
+	], 
+	[
+        "KH Medical",
+        "Interface"
+    ], 
+	false,
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_healthDisplayBarPositionX",
+	"SLIDER",   
+	[
+		"Health Display Bar Position X", 
+		"X axis position of the bar health display. 100.00 is the left edge of the screen, 0.00 is the right edge of the screen."
+	], 
+	[
+        "KH Medical",
+        "Interface"
+    ], 
+	[0.00, 100.00, 40.00, 2],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_healthDisplayBarPositionY",
+	"SLIDER",   
+	[
+		"Health Display Bar Position Y", 
+		"Y axis position of the bar health display. 100.00 is the top edge of the screen, 0.00 is the bottom edge of the screen."
+	], 
+	[
+        "KH Medical",
+        "Interface"
+    ], 
+	[0.00, 100.00, 95.00, 2],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_healthDisplayBarSizeX",
+	"SLIDER",   
+	[
+		"Health Display Bar Size X", 
+		"X axis size of the bar health display. The pivot point is on the left edge of the UI element."
+	], 
+	[
+        "KH Medical",
+        "Interface"
+    ], 
+	[0.00, 100.00, 20.00, 2],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_healthDisplayBarSizeY",
+	"SLIDER",   
+	[
+		"Health Display Bar Size Y", 
+		"Y axis size of the bar health display. The pivot point is on the top edge of the UI element."
+	], 
+	[
+        "KH Medical",
+        "Interface"
+    ], 
+	[0.00, 100.00, 1.50, 2],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_healthDisplayBarAngle",
+	"SLIDER",   
+	[
+		"Health Display Bar Angle", 
+		"Angle of the bar health display. The pivot point is on the top left edge of the UI element."
+	], 
+	[
+        "KH Medical",
+        "Interface"
+    ], 
+	[0.00, 360.00, 0.00, 2],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_healthDisplayPercentagePositionX",
+	"SLIDER",   
+	[
+		"Health Display Percentage Position X", 
+		"X axis position of the percentage health display. 100.00 is the left edge of the screen, 0.00 is the right edge of the screen."
+	], 
+	[
+        "KH Medical",
+        "Interface"
+    ], 
+	[0.00, 100.00, 46.50, 2],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_healthDisplayPercentagePositionY",
+	"SLIDER",   
+	[
+		"Health Display Percentage Position Y", 
+		"Y axis position of the percentage health display. 100.00 is the top edge of the screen, 0.00 is the bottom edge of the screen."
+	], 
+	[
+        "KH Medical",
+        "Interface"
+    ], 
+	[0.00, 100.00, 94.00, 2],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_healthDisplayPercentageSizeX",
+	"SLIDER",   
+	[
+		"Health Display Percentage Size X", 
+		"X axis size of the percentage health display. The pivot point is on the left edge of the UI element."
+	], 
+	[
+        "KH Medical",
+        "Interface"
+    ], 
+	[0.00, 100.00, 7.00, 2],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_healthDisplayPercentageSizeY",
+	"SLIDER",   
+	[
+		"Health Display Percentage Size Y", 
+		"Y axis size of the percentage health display. The pivot point is on the top edge of the UI element."
+	], 
+	[
+        "KH Medical",
+        "Interface"
+    ], 
+	[0.00, 100.00, 2.50, 2],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_healthDisplayPercentageAngle",
+	"SLIDER",   
+	[
+		"Health Display Percentage Angle", 
+		"Angle of the percentage health display. The pivot point is on the top left edge of the UI element."
+	], 
+	[
+        "KH Medical",
+        "Interface"
+    ], 
+	[0.00, 360.00, 0.00, 2],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_healthDisplayPercentageTextSize",
+	"SLIDER",   
+	[
+		"Health Display Percentage Text Size", 
+		"Size of the percentage health display text, relative to the standard 0.04 config text size."
+	], 
+	[
+        "KH Medical",
+        "Interface"
+    ], 
+	[0.00, 10.00, 2.00, 2],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_giveUpProgressDisplay",
+	"LIST",   
+	[
+		"Give Up Progress Display", 
+		"The type of progress representation displayed to the person giving up."
+	], 
+	[
+        "KH Medical",
+        "Interface"
+    ], 
+	[
+        ["NONE", "BAR", "PERCENTAGE", "TIME"],
+        ["NONE", "BAR", "PERCENTAGE", "TIME"],
+        1
+    ],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_reviveProgressDisplay",
+	"LIST",   
+	[
+		"Revive Progress Display", 
+		"The type of progress representation displayed to the person using a revive action."
+	], 
+	[
+        "KH Medical",
+        "Interface"
+    ], 
+	[
+        ["NONE", "BAR", "PERCENTAGE", "TIME"],
+        ["NONE", "BAR", "PERCENTAGE", "TIME"],
+        1
+    ],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_stabilizationProgressDisplay",
+	"LIST",   
+	[
+		"Stabilization Progress Display", 
+		"The type of progress representation displayed to the person stabilizing an incapacitated unit."
+	], 
+	[
+        "KH Medical",
+        "Interface"
+    ], 
+	[
+        ["NONE", "BAR", "PERCENTAGE", "TIME"],
+        ["NONE", "BAR", "PERCENTAGE", "TIME"],
+        1
+    ],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_withstandProgressDisplay",
+	"LIST",   
+	[
+		"Withstand Progress Display", 
+		"The type of progress representation displayed to the person using a withstand or cancel withstand action."
+	], 
+	[
+        "KH Medical",
+        "Interface"
+    ], 
+	[
+        ["NONE", "BAR", "PERCENTAGE", "TIME"],
+        ["NONE", "BAR", "PERCENTAGE", "TIME"],
+        1
+    ],
 	1,
 	{},
 	false

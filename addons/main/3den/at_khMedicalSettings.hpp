@@ -1,6 +1,6 @@
 class KH_MedicalSettings: Title
 {
-	attributeLoad = "[_this controlsGroupCtrl 104, _this controlsGroupCtrl 105, ''] call BIS_fnc_initSliderValue; [_this controlsGroupCtrl 104, _this controlsGroupCtrl 105, '', _value select 3] call BIS_fnc_initSliderValue; [_this, _value] call KH_fnc_loadControlAttributes;";
+	attributeLoad = "(_this controlsGroupCtrl 105) lbAdd 'GLOBAL'; (_this controlsGroupCtrl 105) lbAdd 'ENABLE'; (_this controlsGroupCtrl 105) lbAdd 'DISABLE'; [_this controlsGroupCtrl 103, _this controlsGroupCtrl 104, ''] call BIS_fnc_initSliderValue; [_this controlsGroupCtrl 103, _this controlsGroupCtrl 104, '', _value select 3] call BIS_fnc_initSliderValue; [_this, _value] call KH_fnc_loadControlAttributes;";
 	attributeSave = "[_this] call KH_fnc_saveControlAttributes;";
 	h = QUOTE(6 * CTRL_DEFAULT_H + 70 * pixelH);
 	class Controls: Controls
@@ -33,13 +33,13 @@ class KH_MedicalSettings: Title
 			w = QUOTE(5 * GRID_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
-		class GlobalDamageMultipliersTitle: Title
+		class PlotArmorTitle: Title
 		{
-			text = "Global Damage Multipliers";
-			tooltip = "False ignores the global overall damage multiplication for this unit, only allowing the overall damage multiplication from the Damage Multiplier attribute for this unit. True combines the Damage Bultiplier attribute for this unit with the global one.";
+			text = "Plot Armor";
+			tooltip = "True prevents the unit from ever dying; mortal wounds will only result in unconsciousness.";
 			y = QUOTE(3 * CTRL_DEFAULT_H + CTRL_DEFAULT_Y);
 		};
-		class GlobalDamageMultipliers: ctrlCheckbox
+		class PlotArmor: ctrlCheckbox
 		{
 			idc = 102;
 			x = QUOTE(CTRL_DEFAULT_X);
@@ -47,31 +47,17 @@ class KH_MedicalSettings: Title
 			w = QUOTE(5 * GRID_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
-		class PlotArmorTitle: Title
-		{
-			text = "Plot Armor";
-			tooltip = "True prevents the unit from ever dying; mortal wounds will only result in unconsciousness.";
-			y = QUOTE(4 * CTRL_DEFAULT_H + CTRL_DEFAULT_Y);
-		};
-		class PlotArmor: ctrlCheckbox
-		{
-			idc = 103;
-			x = QUOTE(CTRL_DEFAULT_X);
-			y = QUOTE(4 * CTRL_DEFAULT_H + CTRL_DEFAULT_Y);
-			w = QUOTE(5 * GRID_W);
-			h = QUOTE(CTRL_DEFAULT_H);
-		};
 		class DamageMultiplierTitle: Title
 		{
 			text = "Damage Multiplier";
-			tooltip = "All damage calculations for all hit points and total unit health are multiplied by this value.";
-			y = QUOTE(5 * CTRL_DEFAULT_H + 20 * CTRL_DEFAULT_Y);
+			tooltip = "All damage calculations for hit points and total unit health are multiplied by this value.";
+			y = QUOTE(4 * CTRL_DEFAULT_H + 15 * CTRL_DEFAULT_Y);
 		};
 		class DamageMultiplier: ctrlXSliderH
 		{
-			idc = 104;
+			idc = 103;
 			x = QUOTE(CTRL_DEFAULT_X);
-			y = QUOTE(5 * CTRL_DEFAULT_H + 20 * CTRL_DEFAULT_Y);
+			y = QUOTE(4 * CTRL_DEFAULT_H + 15 * CTRL_DEFAULT_Y);
 			w = QUOTE(CTRL_DEFAULT_W * 0.85);
 			h = QUOTE(CTRL_DEFAULT_H);
         	sliderRange[] = {0, 10};
@@ -80,10 +66,24 @@ class KH_MedicalSettings: Title
 		};
 		class DamageMultiplierEdit: ctrlEdit
 		{
-			idc = 105;
+			idc = 104;
 			x = QUOTE(CTRL_DEFAULT_X * 2.455);
-			y = QUOTE(5 * CTRL_DEFAULT_H + 20 * CTRL_DEFAULT_Y);
+			y = QUOTE(4 * CTRL_DEFAULT_H + 15 * CTRL_DEFAULT_Y);
 			w = QUOTE(CTRL_DEFAULT_W * 0.15);
+			h = QUOTE(CTRL_DEFAULT_H);
+		};
+		class IncapacitationTitle: Title
+		{
+			text = "Incapacitation";
+			tooltip = "Whether to override the global incapacitation setting, and to what. GLOBAL uses the global incapacitation setting. ENABLE allows incapacitation on this unit regardless of the global incapacitation setting. DISABLE prevents incapacitation on this unit regardless of the global incapacitation setting.";
+			y = QUOTE(5 * CTRL_DEFAULT_H + 20 * CTRL_DEFAULT_Y);
+		};
+		class Incapacitation: ctrlCombo
+		{
+			idc = 105;
+			x = QUOTE(CTRL_DEFAULT_X);
+			y = QUOTE(5 * CTRL_DEFAULT_H + 20 * CTRL_DEFAULT_Y);
+			w = QUOTE(CTRL_DEFAULT_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
 	};

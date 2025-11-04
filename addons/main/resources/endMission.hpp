@@ -22,7 +22,7 @@ class KH_ResourceEndMission
             x = QUOTE(RSC_POS_X(40));
             y = QUOTE(RSC_POS_Y(40));
             w = QUOTE(RSC_POS_W(20));
-            h = QUOTE(RSC_POS_H(4));
+            h = QUOTE(RSC_POS_H(4.5));
             colorBackground[] = {0, 0, 0, 0.9};
         };
         class KH_VictoryTitle: RscText
@@ -39,8 +39,8 @@ class KH_ResourceEndMission
 			idc = 101;
             x = QUOTE(RSC_POS_X(50));
             y = QUOTE(RSC_POS_Y(40));
-            w = QUOTE(RSC_POS_W(1));
-            h = QUOTE(RSC_POS_W(1));
+            w = QUOTE(RSC_POS_W(1.5));
+            h = QUOTE(RSC_POS_W(1.5));
         };
         class KH_FadeTypeTitle: RscText
         {
@@ -57,13 +57,13 @@ class KH_ResourceEndMission
             text = "-1";
             x = QUOTE(RSC_POS_X(50));
             y = QUOTE(RSC_POS_Y(42));
-            w = QUOTE(RSC_POS_W(1));
-            h = QUOTE(RSC_POS_W(1));
+            w = QUOTE(RSC_POS_W(9.75));
+            h = QUOTE(RSC_POS_W(1.75));
         };
         class KH_ButtonOK: RscButtonMenuOK 
         {
             x = QUOTE(RSC_POS_X(40));
-            y = QUOTE(RSC_POS_Y(44.5));
+            y = QUOTE(RSC_POS_Y(45));
             w = QUOTE(RSC_POS_W(5));
             h = QUOTE(RSC_POS_W(2));
             colorBackground[] = {0, 0, 0, 0.9};
@@ -72,7 +72,7 @@ class KH_ResourceEndMission
         class KH_ButtonCancel: RscButtonMenuCancel 
         {
             x = QUOTE(RSC_POS_X(55));
-            y = QUOTE(RSC_POS_Y(44.5));
+            y = QUOTE(RSC_POS_Y(45));
             w = QUOTE(RSC_POS_W(5));
             h = QUOTE(RSC_POS_W(2));
             colorBackground[] = {0, 0, 0, 0.9};

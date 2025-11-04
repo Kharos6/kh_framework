@@ -25,7 +25,7 @@ if ((KH_var_mouseTargetCheckFrame isEqualTo diag_frameNo) && (KH_var_mouseTarget
     ];
 };
 
-KH_var_mouseTargetIgnores = +_ignored;
+KH_var_mouseTargetIgnores = _ignored;
 KH_var_mouseTargetCheckFrame = diag_frameNo;
 private _mousePosition = AGLToASL (positionCameraToWorld [0, 0, 0]);
 

@@ -4,7 +4,15 @@ class CfgPatches
 	{
 		name = "KH Framework";
 		author = "Kharos";
-		units[] = {};
+		units[] = {
+			"KH_ZeusModuleArma",
+			"KH_ZeusModuleBreakDisguise",
+			"KH_ZeusModuleEndMission",
+			"KH_ZeusModuleHeal",
+			"KH_ZeusModuleHealAllPlayers",
+			"KH_ZeusModuleRagdollUnit",
+			"KH_ZeusModuleToggleMissionSuspension"
+		};
 		weapons[] = {};
 		requiredVersion = 2.20;
 		requiredAddons[] = {"cba_main", "Intercept_Core"};

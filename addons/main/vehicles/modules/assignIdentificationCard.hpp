@@ -87,7 +87,7 @@ class KH_ModuleAssignIdentificationCard: Module_F
 	};
 	class ModuleDescription: ModuleDescription
 	{
-		description[] = {"Adds an action to the synchronized units that allows players to view their identification card. Activates only once, without a trigger, on the server."};
+		description[] = {"Adds an action to the synchronized units that allows players to view their identification card. Any attribute can be left empty to generate a random one. Activates only once, without a trigger, on the server."};
 		sync[] = {"AnyBrain"};
 		position = 0;
 		direction = 0;

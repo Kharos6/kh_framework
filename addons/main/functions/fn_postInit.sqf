@@ -101,7 +101,7 @@ isNil {
 							};
 						} forEach allUsers;
 						
-						((((count KH_var_allPlayerUnits) >= _initialPlayerCount)) || (CBA_missionTime > 60) || !isMultiplayer);
+						(((count KH_var_allPlayerUnits) >= _initialPlayerCount)) || (CBA_missionTime > 60);
 					},
 					false
 				] call KH_fnc_execute;

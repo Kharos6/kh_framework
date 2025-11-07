@@ -39,7 +39,7 @@ class KH_ModuleEndMission: Module_F
 			displayName = "Fade Type";
 			tooltip = "Type of fade to play after the specified delay. -2 plays the signature closing shot and music, -1 instantly ends the mission without the signature closing shot and music, and any value of 0 and above is a fade to black for that amount of seconds.";
 			property = "KH_ModuleEndMissionFadeType";
-			defaultValue = "''";
+			defaultValue = "'-2'";
 		};
 		class KH_ModuleEndMissionDelay: Edit
 		{

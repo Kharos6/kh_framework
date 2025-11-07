@@ -658,14 +658,14 @@ if isServer then {
 	] call CBA_fnc_addEventHandler;
 
 	[
-		"KH_eve_nearPlayersExecutionSetup",
+		"KH_eve_playerPresenceExecutionSetup",
 		{
-			params ["_arguments", "_function", "_caller", "_unscheduled", "_object", "_distance", "_nearId", "_units", "_jip"];
+			params ["_arguments", "_function", "_caller", "_unscheduled", "_object", "_present", "_distance", "_nearId", "_units", "_jip"];
 
 			[
-				[_arguments, _function, _caller, _unscheduled, _object, _distance, _nearId, _units],
+				[_arguments, _function, _caller, _unscheduled, _object, _present, _distance, _nearId, _units],
 				{
-					params ["_arguments", "_function", "_caller", "_unscheduled", "_object", "_distance", "_nearId", "_units"];
+					params ["_arguments", "_function", "_caller", "_unscheduled", "_object", "_present", "_distance", "_nearId", "_units"];
 				
 					if ((isNull _object) || (_units isEqualTo []) || !(missionNamespace getVariable _nearId)) exitWith {
 						[_handlerId] call KH_fnc_removeHandler;
@@ -675,11 +675,19 @@ if isServer then {
 
 					{
 						private _object = param [4];
-						private _distance = param [5];
+						private _distance = param [6];
 
-						if ((_x distance _object) <= _distance) then {
-							["KH_eve_execution", [_arguments, _function, _caller, _unscheduled], _x, false] call KH_fnc_triggerCbaEvent;
-							_deletions pushBack _forEachIndex;
+						if _present then {
+							if ((_x distance _object) <= _distance) then {
+								["KH_eve_execution", [_arguments, _function, _caller, _unscheduled], _x, false] call KH_fnc_triggerCbaEvent;
+								_deletions pushBack _forEachIndex;
+							};
+						}
+						else {
+							if ((_x distance _object) > _distance) then {
+								["KH_eve_execution", [_arguments, _function, _caller, _unscheduled], _x, false] call KH_fnc_triggerCbaEvent;
+								_deletions pushBack _forEachIndex;
+							};
 						};
 					} forEach _units;
 
@@ -694,28 +702,36 @@ if isServer then {
 				[
 					"CBA",
 					"KH_eve_playerLoaded",
-					[_arguments, _function, _caller, _unscheduled, _object, _distance, _nearId],
+					[_arguments, _function, _caller, _unscheduled, _object, _present, _distance, _nearId],
 					{
 						private _unit = param [3];
-						_args params ["_arguments", "_function", "_caller", "_unscheduled", "_object", "_distance", "_nearId"];
+						_args params ["_arguments", "_function", "_caller", "_unscheduled", "_object", "_present", "_distance", "_nearId"];
 
 						if !(missionNamespace getVariable _nearId) exitWith {
 							[_handlerId] call KH_fnc_removeHandler;
 						};
 
 						[
-							[_arguments, _function, _caller, _unscheduled, _object, _distance, _unit],
+							[_arguments, _function, _caller, _unscheduled, _object, _present, _distance, _unit],
 							{
-								params ["_arguments", "_function", "_caller", "_unscheduled", "_object", "_distance", "_unit"];
-								_this set [6, _unit getVariable ["KH_var_playerUnit", _unit]];
+								params ["_arguments", "_function", "_caller", "_unscheduled", "_object", "_present", "_distance", "_unit"];
+								_this set [7, _unit getVariable ["KH_var_playerUnit", _unit]];
 
 								if !(missionNamespace getVariable _nearId) exitWith {
 									[_handlerId] call KH_fnc_removeHandler;
 								};
-
-								if ((_unit distance _object) <= _distance) then {
-									["KH_eve_execution", [_arguments, _function, _caller, _unscheduled], _x, false] call KH_fnc_triggerCbaEvent;
-									[_handlerId] call KH_fnc_removeHandler;
+								
+								if _present then {
+									if ((_unit distance _object) <= _distance) then {
+										["KH_eve_execution", [_arguments, _function, _caller, _unscheduled], _x, false] call KH_fnc_triggerCbaEvent;
+										[_handlerId] call KH_fnc_removeHandler;
+									};
+								}
+								else {
+									if ((_unit distance _object) > _distance) then {
+										["KH_eve_execution", [_arguments, _function, _caller, _unscheduled], _x, false] call KH_fnc_triggerCbaEvent;
+										[_handlerId] call KH_fnc_removeHandler;
+									};
 								};
 							},
 							true,
@@ -1162,7 +1178,7 @@ if hasInterface then {
 
 						if (diag_tickTime >= _animationDeadline) then {
 							if ((vectorMagnitude (velocity KH_var_playDeadUnit)) <= 0.1) then {
-								KH_var_playDeadUnit switchMove ["Unconscious"];
+								KH_var_playDeadUnit playActionNow "Unconscious";
 							};
 						};
 
@@ -1172,10 +1188,9 @@ if hasInterface then {
 							if (!KH_var_playingDeadAllowed || (KH_var_playDeadUnit isNotEqualTo KH_var_playerUnit) || !(KH_var_playDeadUnit getVariable ["KH_var_playingDead", false])) exitWith {
 								KH_var_playDeadUnit setVariable ["KH_var_playingDead", false];
 								KH_var_playDeadUnit setCaptive false;
-								KH_var_playDeadUnit switchMove [""];
 
 								if !(_unit getVariable ["KH_var_incapacitated", false]) then {
-									KH_var_playDeadUnit playActionNow "Lying";
+									KH_var_playDeadUnit switchMove "AmovPpneMstpSnonWnonDnon";
 								};
 								
 								[_handlerId] call KH_fnc_removeHandler;
@@ -1198,10 +1213,9 @@ if hasInterface then {
 									systemChat "I think I've been seen...";
 									KH_var_playDeadUnit setVariable ["KH_var_playingDead", false];
 									KH_var_playDeadUnit setCaptive false;
-									KH_var_playDeadUnit switchMove [""];
 
 									if !(_unit getVariable ["KH_var_incapacitated", false]) then {
-										KH_var_playDeadUnit playActionNow "Lying";
+										KH_var_playDeadUnit switchMove "AmovPpneMstpSnonWnonDnon";
 									};
 
 									[_handlerId] call KH_fnc_removeHandler;
@@ -1229,10 +1243,9 @@ if hasInterface then {
 					systemChat "No longer playing dead, time to get up.";
 					KH_var_playDeadUnit setVariable ["KH_var_playingDead", false];
 					KH_var_playDeadUnit setCaptive false;
-					KH_var_playDeadUnit switchMove [""];
 
 					if !(_unit getVariable ["KH_var_incapacitated", false]) then {
-						KH_var_playDeadUnit playActionNow "Lying";
+						KH_var_playDeadUnit switchMove "AmovPpneMstpSnonWnonDnon";
 					};
 
 					[KH_var_playDeadHandler] call KH_fnc_removeHandler;

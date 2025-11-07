@@ -153,6 +153,23 @@
 ] call CBA_fnc_addSetting;
 
 [
+	"KH_var_incapacitatedCaptives",
+	"CHECKBOX",   
+	[
+		"Incapacitated Captives", 
+		"True sets incapacitated units as captives to prevent executions by enemies."
+	], 
+	[
+        "KH Medical",
+        "Incapacitation"
+    ], 
+	true,
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
 	"KH_var_reviveRequireStabilization",
 	"CHECKBOX",   
 	[
@@ -163,7 +180,7 @@
         "KH Medical",
         "Incapacitation"
     ], 
-	true,
+	false,
 	1,
 	{},
 	false
@@ -180,7 +197,7 @@
         "KH Medical",
         "Incapacitation"
     ], 
-	[0, 300, 30],
+	[0, 300, 15],
 	1,
 	{},
 	false
@@ -214,7 +231,7 @@
         "KH Medical",
         "Incapacitation"
     ], 
-	[0, 300, 15],
+	[0, 300, 10],
 	1,
 	{},
 	false
@@ -248,7 +265,7 @@
         "KH Medical",
         "Incapacitation"
     ], 
-	[0, 15, 2, 0],
+	[0, 15, 3, 0],
 	1,
 	{},
 	false
@@ -282,7 +299,7 @@
         "KH Medical",
         "Incapacitation"
     ], 
-	[0, 300, 45],
+	[0, 300, 30],
 	1,
 	{},
 	false
@@ -316,7 +333,7 @@
         "KH Medical",
         "Incapacitation"
     ], 
-	[0, 300, 30],
+	[0, 300, 20],
 	1,
 	{},
 	false
@@ -340,6 +357,23 @@
 ] call CBA_fnc_addSetting;
 
 [
+	"KH_var_selfReviveRequiredFirstAidKits",
+	"SLIDER",   
+	[
+		"Self Revive Required First Aid Kits", 
+		"Amount of first aid kits required for a person to revive themselves when no medikit is available and Revive Require Medikit is false."
+	], 
+	[
+        "KH Medical",
+        "Incapacitation"
+    ], 
+	[0, 15, 6, 0],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
 	"KH_var_selfReviveRequireWithstanding",
 	"CHECKBOX",   
 	[
@@ -350,7 +384,7 @@
         "KH Medical",
         "Incapacitation"
     ], 
-	false,
+	true,
 	1,
 	{},
 	false
@@ -436,6 +470,74 @@
         "Healing"
     ], 
 	[0, 1.00, 1.00, 2],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_firstAidKitHealWithstanding",
+	"SLIDER",   
+	[
+		"First Aid Kit Heal Withstanding",
+		"Amount of health added per first aid kit used on another person that is withstanding. 1.00 is 100% health, 0.00 is 0% health."
+	], 
+	[
+        "KH Medical",
+        "Healing"
+    ], 
+	[0, 1.00, 0.25, 2],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_firstAidKitSelfHealWithstanding",
+	"SLIDER",   
+	[
+		"First Aid Kit Self Heal Withstanding",
+		"Amount of health added per first aid kit used by a person on themselves while they are withstanding. 1.00 is 100% health, 0.00 is 0% health."
+	], 
+	[
+        "KH Medical",
+        "Healing"
+    ], 
+	[0, 1.00, 0.25, 2],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_firstAidKitHealWithstandingMedic",
+	"SLIDER",   
+	[
+		"First Aid Kit Heal Withstanding Medic",
+		"Amount of health added per first aid kit used by a medic on another person that is withstanding. 1.00 is 100% health, 0.00 is 0% health."
+	], 
+	[
+        "KH Medical",
+        "Healing"
+    ], 
+	[0, 1.00, 0.50, 2],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_firstAidKitSelfHealWithstandingMedic",
+	"SLIDER",   
+	[
+		"First Aid Kit Self Heal Withstanding Medic",
+		"Amount of health added per first aid kit used by a medic on themselves while they are withstanding. 1.00 is 100% health, 0.00 is 0% health."
+	], 
+	[
+        "KH Medical",
+        "Healing"
+    ], 
+	[0, 1.00, 0.50, 2],
 	1,
 	{},
 	false
@@ -537,7 +639,7 @@
         "KH Medical",
         "Stabilization"
     ], 
-	[0, 300, 30],
+	[0, 300, 15],
 	1,
 	{},
 	false
@@ -571,7 +673,7 @@
         "KH Medical",
         "Stabilization"
     ], 
-	[0, 300, 15],
+	[0, 300, 10],
 	1,
 	{},
 	false
@@ -588,7 +690,7 @@
         "KH Medical",
         "Stabilization"
     ], 
-	true,
+	false,
 	1,
 	{},
 	false
@@ -599,7 +701,7 @@
 	"SLIDER",   
 	[
 		"Required First Aid Kits", 
-		"Amount of first aid kits required for stabilizing a person if Require Medikit is false."
+		"Amount of first aid kits required for stabilizing a person when no medikit is available and Require Medikit is false."
 	], 
 	[
         "KH Medical",
@@ -639,7 +741,7 @@
         "KH Medical",
         "Withstanding"
     ], 
-	true,
+	false,
 	1,
 	{},
 	false
@@ -656,7 +758,7 @@
         "KH Medical",
         "Withstanding"
     ], 
-	[0, 1800, 15],
+	[0, 1800, 10],
 	1,
 	{},
 	false
@@ -673,7 +775,7 @@
         "KH Medical",
         "Withstanding"
     ], 
-	[0, 60, 5],
+	[0, 60, 3],
 	1,
 	{},
 	false
@@ -690,7 +792,7 @@
         "KH Medical",
         "Withstanding"
     ], 
-	[0, 1800, 60],
+	[0, 1800, 180],
 	1,
 	{},
 	false
@@ -724,7 +826,7 @@
         "KH Medical",
         "Withstanding"
     ], 
-	false,
+	true,
 	1,
 	{},
 	false
@@ -741,7 +843,7 @@
         "KH Medical",
         "Damage Multipliers"
     ], 
-	[0.00, 10.00, 1.00, 2],
+	[0.00, 10.000, 1.000, 3],
 	1,
 	{},
 	false
@@ -758,7 +860,7 @@
         "KH Medical",
         "Damage Multipliers"
     ], 
-	[0.00, 10.00, 1.00, 2],
+	[0.00, 10.000, 1.000, 3],
 	1,
 	{},
 	false
@@ -775,7 +877,7 @@
         "KH Medical",
         "Damage Multipliers"
     ], 
-	[0.00, 10.00, 1.00, 2],
+	[0.00, 10.000, 1.000, 3],
 	1,
 	{},
 	false
@@ -792,7 +894,7 @@
         "KH Medical",
         "Damage Multipliers"
     ], 
-	[0.00, 10.00, 1.00, 2],
+	[0.00, 10.000, 1.000, 3],
 	1,
 	{},
 	false
@@ -809,7 +911,7 @@
         "KH Medical",
         "Damage Multipliers"
     ], 
-	[0.00, 10.00, 1.00, 2],
+	[0.00, 10.000, 1.000, 3],
 	1,
 	{},
 	false
@@ -826,7 +928,7 @@
         "KH Medical",
         "Damage Multipliers"
     ], 
-	[0.00, 10.00, 1.00, 2],
+	[0.00, 10.000, 1.000, 3],
 	1,
 	{},
 	false
@@ -843,7 +945,7 @@
         "KH Medical",
         "Damage Multipliers"
     ], 
-	[0.00, 10.00, 1.00, 2],
+	[0.00, 10.000, 1.000, 3],
 	1,
 	{},
 	false
@@ -860,7 +962,7 @@
         "KH Medical",
         "Damage Multipliers"
     ], 
-	[0.00, 10.00, 1.00, 2],
+	[0.00, 10.000, 1.000, 3],
 	1,
 	{},
 	false
@@ -877,7 +979,7 @@
         "KH Medical",
         "Damage Multipliers"
     ], 
-	[0.00, 10.00, 1.00, 2],
+	[0.00, 10.000, 1.000, 3],
 	1,
 	{},
 	false
@@ -894,7 +996,7 @@
         "KH Medical",
         "Damage Multipliers"
     ], 
-	[0.00, 10.00, 1.00, 2],
+	[0.00, 10.000, 1.000, 3],
 	1,
 	{},
 	false
@@ -911,7 +1013,7 @@
         "KH Medical",
         "Damage Multipliers"
     ], 
-	[0.00, 10.00, 1.00, 2],
+	[0.00, 10.000, 1.000, 3],
 	1,
 	{},
 	false
@@ -928,7 +1030,7 @@
         "KH Medical",
         "Damage Multipliers"
     ], 
-	[0.00, 10.00, 0.50, 2],
+	[0.00, 10.000, 0.500, 3],
 	1,
 	{},
 	false
@@ -945,7 +1047,7 @@
         "KH Medical",
         "Damage Multipliers"
     ], 
-	[0.00, 10.00, 2.00, 2],
+	[0.00, 10.000, 2.000, 3],
 	1,
 	{},
 	false
@@ -956,7 +1058,7 @@
 	"EDITBOX",   
 	[
 		"Class Damage Multipliers", 
-		"Hashmap style arrays where the key element is a class name, and the value is its damage multiplier. All units of a specified class will have all damage calculations for all hit points and total unit health multiplied by the value."
+		"Hashmap style arrays where the key element is a string of a class name, and the value is its damage multiplier. All units of a specified class will have all damage calculations for all hit points and total unit health multiplied by the value. Requires restart."
 	], 
 	[
         "KH Medical",
@@ -965,7 +1067,24 @@
 	"",
 	1,
 	{},
-	false
+	true
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_childClassDamageMultipliersRaw",
+	"EDITBOX",   
+	[
+		"Child Class Damage Multipliers", 
+		"Hashmap style arrays where the key element is a string of a class name, and the value is its damage multiplier. All units whose classes are children of a specified class will have all damage calculations for all hit points and total unit health multiplied by the value. Requires restart."
+	], 
+	[
+        "KH Medical",
+        "Damage Multipliers"
+    ], 
+	"",
+	1,
+	{},
+	true
 ] call CBA_fnc_addSetting;
 
 [
@@ -984,7 +1103,7 @@
         ["NONE", "BAR", "PERCENTAGE"],
         1
     ],
-	1,
+	0,
 	{},
 	false
 ] call CBA_fnc_addSetting;
@@ -1001,7 +1120,7 @@
         "Interface"
     ], 
 	false,
-	1,
+	0,
 	{},
 	false
 ] call CBA_fnc_addSetting;
@@ -1018,7 +1137,7 @@
         "Interface"
     ], 
 	[0.00, 100.00, 40.00, 2],
-	1,
+	0,
 	{},
 	false
 ] call CBA_fnc_addSetting;
@@ -1035,7 +1154,7 @@
         "Interface"
     ], 
 	[0.00, 100.00, 95.00, 2],
-	1,
+	0,
 	{},
 	false
 ] call CBA_fnc_addSetting;
@@ -1052,7 +1171,7 @@
         "Interface"
     ], 
 	[0.00, 100.00, 20.00, 2],
-	1,
+	0,
 	{},
 	false
 ] call CBA_fnc_addSetting;
@@ -1069,7 +1188,7 @@
         "Interface"
     ], 
 	[0.00, 100.00, 1.50, 2],
-	1,
+	0,
 	{},
 	false
 ] call CBA_fnc_addSetting;
@@ -1086,7 +1205,7 @@
         "Interface"
     ], 
 	[0.00, 360.00, 0.00, 2],
-	1,
+	0,
 	{},
 	false
 ] call CBA_fnc_addSetting;
@@ -1103,7 +1222,7 @@
         "Interface"
     ], 
 	[0.00, 100.00, 46.50, 2],
-	1,
+	0,
 	{},
 	false
 ] call CBA_fnc_addSetting;
@@ -1120,7 +1239,7 @@
         "Interface"
     ], 
 	[0.00, 100.00, 94.00, 2],
-	1,
+	0,
 	{},
 	false
 ] call CBA_fnc_addSetting;
@@ -1137,7 +1256,7 @@
         "Interface"
     ], 
 	[0.00, 100.00, 7.00, 2],
-	1,
+	0,
 	{},
 	false
 ] call CBA_fnc_addSetting;
@@ -1154,7 +1273,7 @@
         "Interface"
     ], 
 	[0.00, 100.00, 2.50, 2],
-	1,
+	0,
 	{},
 	false
 ] call CBA_fnc_addSetting;
@@ -1171,7 +1290,7 @@
         "Interface"
     ], 
 	[0.00, 360.00, 0.00, 2],
-	1,
+	0,
 	{},
 	false
 ] call CBA_fnc_addSetting;
@@ -1188,7 +1307,7 @@
         "Interface"
     ], 
 	[0.00, 10.00, 2.00, 2],
-	1,
+	0,
 	{},
 	false
 ] call CBA_fnc_addSetting;
@@ -1209,7 +1328,7 @@
         ["NONE", "BAR", "PERCENTAGE", "TIME"],
         1
     ],
-	1,
+	0,
 	{},
 	false
 ] call CBA_fnc_addSetting;
@@ -1230,7 +1349,7 @@
         ["NONE", "BAR", "PERCENTAGE", "TIME"],
         1
     ],
-	1,
+	0,
 	{},
 	false
 ] call CBA_fnc_addSetting;
@@ -1251,7 +1370,7 @@
         ["NONE", "BAR", "PERCENTAGE", "TIME"],
         1
     ],
-	1,
+	0,
 	{},
 	false
 ] call CBA_fnc_addSetting;
@@ -1272,7 +1391,24 @@
         ["NONE", "BAR", "PERCENTAGE", "TIME"],
         1
     ],
-	1,
+	0,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_allowHitPointMaximumDamage",
+	"CHECKBOX",   
+	[
+		"Allow Hit Point Maximum Damage", 
+		"True allows maximum damage to hit points, which is otherwise capped to 0.99 if false. This means that maximum damage to critical hit points, such as the head, can kill a unit regardless of their total health."
+	], 
+	[
+        "KH Medical",
+        "General"
+    ], 
+	false,
+	0,
 	{},
 	false
 ] call CBA_fnc_addSetting;

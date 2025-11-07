@@ -8,7 +8,7 @@ params [
     ["_exclusive", true, [true]],
     ["_target", true, [true, 0, "", [], {}, objNull, teamMemberNull, grpNull, sideUnknown, locationNull]],
     ["_duration", false, [true, 0, []]],
-    ["_distance", 3, [0]],
+    ["_distance", 2, [0]],
     ["_showImmediately", true, [true]],
     ["_allowIncapacitated", false, [true]],
     ["_hideOnUse", false, [true]],
@@ -433,18 +433,18 @@ private _actionHandler = [
         };
 
         private _conditionParser = {
-            params [["_condition", {true;}, ["", [], {}]]];
+            params [["_currentCondition", {true;}, ["", [], {}]]];
 
-            switch (typeName _condition) do {
+            switch (typeName _currentCondition) do {
                 case "STRING": {
                     compile ([
-                        "(missionNamespace getVariable '", _objectId, "') getVariable ['", _condition, "', false];"
+                        "(missionNamespace getVariable '", _objectId, "') getVariable ['", _currentCondition, "', false];"
                     ] joinString "");
                 };
 
                 case "ARRAY": {
                     private _conditionsId = generateUid;
-                    missionNamespace setVariable [_conditionsId, _condition];
+                    missionNamespace setVariable [_conditionsId, _currentCondition];
                     
                     compile ([
                         "private _result = true;
@@ -476,7 +476,7 @@ private _actionHandler = [
                 };
 
                 case "CODE": {
-                    _condition;
+                    _currentCondition;
                 };
             };
         };
@@ -495,11 +495,11 @@ private _actionHandler = [
                 _conditionComplete = {true;};
             }
             else {
-                _condition = _condition select [1];
-                _conditionShow = [_condition param [0, {true;}, ["", [], {}]]] call _conditionParser;
-                _conditionStart = [_condition param [1, {true;}, ["", [], {}]]] call _conditionParser;
-                _conditionProgress = [_condition param [2, {true;}, ["", [], {}]]] call _conditionParser;
-                _conditionComplete = [_condition param [3, {true;}, ["", [], {}]]] call _conditionParser;
+                private _trimmedCondition = _condition select [1];
+                _conditionShow = [_trimmedCondition param [0, {true;}, ["", [], {}]]] call _conditionParser;
+                _conditionStart = [_trimmedCondition param [1, {true;}, ["", [], {}]]] call _conditionParser;
+                _conditionProgress = [_trimmedCondition param [2, {true;}, ["", [], {}]]] call _conditionParser;
+                _conditionComplete = [_trimmedCondition param [3, {true;}, ["", [], {}]]] call _conditionParser;
 
                 if (_conditionStart isEqualTo {}) then {
                     _conditionStart = _conditionShow;
@@ -570,12 +570,14 @@ private _actionHandler = [
         private _resultInterruptId = generateUid;
         private _resultCancelId = generateUid;
         private _resultCompleteId = generateUid;
+        private _progressId = generateUid;
         missionNamespace setVariable [_argumentsReferenceId, _arguments];
         missionNamespace setVariable [_conditionShowReferenceId, _conditionShow];
         missionNamespace setVariable [_drawHintReferenceId, _drawHint];
         missionNamespace setVariable [_lastProgressId, 0];
         missionNamespace setVariable [_parentId, _parsedParent];
         missionNamespace setVariable [_cancelInterruptId, false];
+        missionNamespace setVariable [_progressId, false];
 
         private _action = _parsedParent addAction [
             _menuName,
@@ -619,15 +621,16 @@ private _actionHandler = [
                         "_lastProgressId",
                         "_cancelInterruptId",
                         "_detectionType",
-                        "_progressDetection"
+                        "_progressDetection",
+                        "_progressId"
                     ];
                     
                     if (!(missionNamespace getVariable _actionExistenceId) || (missionNamespace getVariable _completionId)) exitWith {
                         _caller removeAction _actionId;
                     };
                     
-                    private _resultStart = nil;
-                    private _resultProgress = nil;
+                    private "_resultStart";
+                    private "_resultProgress";
                     private _handlerId = [missionNamespace, _actionExistenceId, true];
                     private _resultPreviousStart = missionNamespace getVariable _resultStartId;
                     private _resultPreviousProgress = missionNamespace getVariable _resultProgressId;
@@ -640,7 +643,6 @@ private _actionHandler = [
                             missionNamespace setVariable [_resultCancelId, _args call _functionCancel];
                             missionNamespace setVariable [_cancelInterruptId, true];
                             [_target getVariable (["KH_var_activeAction", _actionId] joinString "_")] call KH_fnc_removeHandler;
-                            missionNamespace setVariable [_allowedActivationId, true];
                             missionNamespace setVariable [_conditionShowId, true, KH_var_allMachines - [clientOwner]];
                             _caller setUserActionText [_actionId, _menuName, _windowBackgroundName, _windowForegroundName];
                         };
@@ -678,10 +680,7 @@ private _actionHandler = [
                         };
                     }
                     else {
-                        if !(_args call _conditionStart) exitWith {
-                            _args call _functionInterrupt;
-                        };
-
+                        missionNamespace setVariable [_progressId, true];
                         private _interactionHelper = createSimpleObject ["KH_HelperSquare", getPosASL _caller, true];
                         missionNamespace setVariable [_lastProgressId, 0];
 
@@ -729,7 +728,8 @@ private _actionHandler = [
                                 _interactionHelper,
                                 diag_tickTime,
                                 diag_tickTime + _duration,
-                                _resultStart
+                                _resultStart,
+                                _progressId
                             ],
                             {
                                 params [
@@ -775,7 +775,8 @@ private _actionHandler = [
                                     "_interactionHelper",
                                     "_startTime",
                                     "_endTime",
-                                    "_resultStart"
+                                    "_resultStart",
+                                    "_progressId"
                                 ];
 
                                 private _resultProgress = missionNamespace getVariable _resultProgressId;
@@ -879,7 +880,8 @@ private _actionHandler = [
                                         "_interactionHelper",
                                         "_startTime",
                                         "_endTime",
-                                        "_resultStart"
+                                        "_resultStart",
+                                        "_progressId"
                                     ];
 
                                     if (
@@ -939,7 +941,7 @@ private _actionHandler = [
                                 },
                                 true,
                                 0,
-                                [_duration, false, true, false],
+                                [_duration, false, true, true],
                                 {
                                     params [
                                         "_target",
@@ -984,11 +986,13 @@ private _actionHandler = [
                                         "_interactionHelper",
                                         "_startTime",
                                         "_endTime",
-                                        "_resultStart"
+                                        "_resultStart",
+                                        "_progressId"
                                     ];
                                     
                                     deleteVehicle _interactionHelper;
                                     missionNamespace setVariable [_allowedActivationId, true];
+                                    missionNamespace setVariable [_progressId, false];
 
                                     if (_exclusive || (_duration isNotEqualTo 0)) then {
                                         missionNamespace setVariable [_conditionShowId, true, true];
@@ -996,10 +1000,12 @@ private _actionHandler = [
 
                                     private _resultProgress = missionNamespace getVariable _resultProgressId;
 
-                                    if (_conditionFailure || !(_arguments call _conditionComplete)) then {
+                                    if (_conditionFailure || !(_arguments call _conditionComplete) || (missionNamespace getVariable _cancelInterruptId)) then {
                                         if (missionNamespace getVariable _cancelInterruptId) then {
-                                            missionNamespace setVariable [_resultInterruptId, _arguments call _functionInterrupt];
                                             missionNamespace setVariable [_cancelInterruptId, false];
+                                        }
+                                        else {
+                                            missionNamespace setVariable [_resultInterruptId, _arguments call _functionInterrupt];
                                         };
                                     }
                                     else {
@@ -1065,7 +1071,8 @@ private _actionHandler = [
                 _lastProgressId,
                 _cancelInterruptId,
                 _detectionType,
-                _progressDetection
+                _progressDetection,
+                _progressId
             ],
             1.5,
             _showImmediately,
@@ -1073,152 +1080,183 @@ private _actionHandler = [
             _userInput,
             if _visiblePerPlayer then {
                 [
-                    "if (!(missionNamespace getVariable '", _actionExistenceId, "') || (missionNamespace getVariable '", _completionId, "')) exitWith {
+                    "if (!(missionNamespace getVariable '", _actionExistenceId, "') || (missionNamespace getVariable '", _completionId, "')) then {
                         (missionNamespace getVariable '", _parentId, "') removeAction _actionId;
                         false;
-                    };
-
-                    if ((missionNamespace getVariable '", _parentId, "') isNotEqualTo KH_var_playerUnit) exitWith {
-                        false;
-                    };
-
-                    private _caller = _this;
-                    private _target = missionNamespace getVariable '", _objectId, "';
-                    (((missionNamespace getVariable '", _argumentsReferenceId, "') call (missionNamespace getVariable '", _conditionShowReferenceId, "')) && (missionNamespace getVariable '", _conditionShowId, "'));"
+                    }
+                    else {
+                        if ((missionNamespace getVariable '", _parentId, "') isNotEqualTo KH_var_playerUnit) then {
+                            false;
+                        }
+                        else {
+                            if (missionNamespace getVariable '", _progressId, "') then {
+                                true;
+                            }
+                            else {
+                                private _caller = _this;
+                                private _target = missionNamespace getVariable '", _objectId, "';
+                                (((missionNamespace getVariable '", _argumentsReferenceId, "') call (missionNamespace getVariable '", _conditionShowReferenceId, "')) && (missionNamespace getVariable '", _conditionShowId, "'));
+                            };
+                        };
+                    };"
                 ] joinString "";
             }
             else {
                 switch _initialDetection do {
                     case true: {
                         [
-                            "if (!(missionNamespace getVariable '", _actionExistenceId, "') || (isNull (missionNamespace getVariable '", _objectId, "')) || (missionNamespace getVariable '", _completionId, "')) exitWith {
+                            "if (!(missionNamespace getVariable '", _actionExistenceId, "') || (isNull (missionNamespace getVariable '", _objectId, "')) || (missionNamespace getVariable '", _completionId, "')) then {
                                 (missionNamespace getVariable '", _parentId, "') removeAction _actionId;
                                 false;
-                            };
-
-                            if ((missionNamespace getVariable '", _parentId, "') isNotEqualTo KH_var_playerUnit) exitWith {
-                                false;
-                            };
-
-                            private _target = missionNamespace getVariable '", _objectId, "';
-
-                            if ((_target isEqualTo KH_var_playerUnit) || ((_target distance KH_var_playerUnit) <= 0.01)) exitWith {
-                                private _caller = _this;
-                                private _handlerId = [missionNamespace, '", _actionExistenceId, "', true];
-
-                                if ((missionNamespace getVariable '", _drawHintReferenceId, "') isNotEqualTo []) then {
-                                    (missionNamespace getVariable '", _drawHintReferenceId, "') call KH_fnc_draw3d;  
-                                };
-                                
-                                (((missionNamespace getVariable '", _argumentsReferenceId, "') call (missionNamespace getVariable '", _conditionShowReferenceId, "')) && (missionNamespace getVariable '", _conditionShowId, "'));
-                            };
-
-                            private _viewTarget = call ", _detectionType, ";
-
-                            if (((_viewTarget select 1) <= ", _distance, ") && ((_viewTarget select 4) isEqualTo _target)) then {
-                                private _caller = _this;
-                                private _handlerId = [missionNamespace, '", _actionExistenceId, "', true];
-
-                                if ((missionNamespace getVariable '", _drawHintReferenceId, "') isNotEqualTo []) then {
-                                    (missionNamespace getVariable '", _drawHintReferenceId, "') call KH_fnc_draw3d;  
-                                };
-                                
-                                (((missionNamespace getVariable '", _argumentsReferenceId, "') call (missionNamespace getVariable '", _conditionShowReferenceId, "')) && (missionNamespace getVariable '", _conditionShowId, "'));
-                            } 
+                            }
                             else {
-                                false;
-                            }"
+                                if ((missionNamespace getVariable '", _parentId, "') isNotEqualTo KH_var_playerUnit) then {
+                                    false;
+                                }
+                                else {
+                                    if (missionNamespace getVariable '", _progressId, "') then {
+                                        true;
+                                    }
+                                    else {
+                                        private _target = missionNamespace getVariable '", _objectId, "';
+
+                                        if ((_target isEqualTo KH_var_playerUnit) || ((_target distance KH_var_playerUnit) <= 0.01)) then {
+                                            private _caller = _this;
+                                            private _handlerId = [missionNamespace, '", _actionExistenceId, "', true];
+
+                                            if ((missionNamespace getVariable '", _drawHintReferenceId, "') isNotEqualTo []) then {
+                                                (missionNamespace getVariable '", _drawHintReferenceId, "') call KH_fnc_draw3d;  
+                                            };
+                                            
+                                            (((missionNamespace getVariable '", _argumentsReferenceId, "') call (missionNamespace getVariable '", _conditionShowReferenceId, "')) && (missionNamespace getVariable '", _conditionShowId, "'));
+                                        }
+                                        else {
+                                            private _viewTarget = call ", _detectionType, ";
+
+                                            if (((_viewTarget select 1) <= ", _distance, ") && ((_viewTarget select 4) isEqualTo _target)) then {
+                                                private _caller = _this;
+                                                private _handlerId = [missionNamespace, '", _actionExistenceId, "', true];
+
+                                                if ((missionNamespace getVariable '", _drawHintReferenceId, "') isNotEqualTo []) then {
+                                                    (missionNamespace getVariable '", _drawHintReferenceId, "') call KH_fnc_draw3d;  
+                                                };
+                                                
+                                                (((missionNamespace getVariable '", _argumentsReferenceId, "') call (missionNamespace getVariable '", _conditionShowReferenceId, "')) && (missionNamespace getVariable '", _conditionShowId, "'));
+                                            } 
+                                            else {
+                                                false;
+                                            };
+                                        };
+                                    };
+                                };
+                            };"
                         ] joinString "";
                     };
 
                     case false: {
                         [
-                            "if (!(missionNamespace getVariable '", _actionExistenceId, "') || (isNull (missionNamespace getVariable '", _objectId, "')) || (missionNamespace getVariable '", _completionId, "')) exitWith {
+                            "if (!(missionNamespace getVariable '", _actionExistenceId, "') || (isNull (missionNamespace getVariable '", _objectId, "')) || (missionNamespace getVariable '", _completionId, "')) then {
                                 (missionNamespace getVariable '", _parentId, "') removeAction _actionId;
                                 false;
-                            };
-
-                            if ((missionNamespace getVariable '", _parentId, "') isNotEqualTo KH_var_playerUnit) exitWith {
-                                false;
-                            };
-
-                            private _target = missionNamespace getVariable '", _objectId, "';
-
-                            if ((_target isEqualTo KH_var_playerUnit) || ((_target distance KH_var_playerUnit) <= 0.01)) exitWith {
-                                private _caller = _this;
-                                private _handlerId = [missionNamespace, '", _actionExistenceId, "', true];
-
-                                if ((missionNamespace getVariable '", _drawHintReferenceId, "') isNotEqualTo []) then {
-                                    (missionNamespace getVariable '", _drawHintReferenceId, "') call KH_fnc_draw3d;  
-                                };
-                                
-                                (((missionNamespace getVariable '", _argumentsReferenceId, "') call (missionNamespace getVariable '", _conditionShowReferenceId, "')) && (missionNamespace getVariable '", _conditionShowId, "'));
-                            };
-
-                            if ((_target distance (missionNamespace getVariable '", _parentId, "')) <= ", _distance, ") then {
-                                private _caller = _this;
-                                private _handlerId = [missionNamespace, '", _actionExistenceId, "', true];
-                            
-                                if ((missionNamespace getVariable '", _drawHintReferenceId, "') isNotEqualTo []) then {
-                                    (missionNamespace getVariable '", _drawHintReferenceId, "') call KH_fnc_draw3d;  
-                                };
-
-                                (((missionNamespace getVariable '", _argumentsReferenceId, "') call (missionNamespace getVariable '", _conditionShowReferenceId, "')) && (missionNamespace getVariable '", _conditionShowId, "'));
                             }
                             else {
-                                false;
-                            }"
+                                if ((missionNamespace getVariable '", _parentId, "') isNotEqualTo KH_var_playerUnit) then {
+                                    false;
+                                }
+                                else {
+                                    if (missionNamespace getVariable '", _progressId, "') then {
+                                        true;
+                                    }
+                                    else {
+                                        private _target = missionNamespace getVariable '", _objectId, "';
+
+                                        if ((_target isEqualTo KH_var_playerUnit) || ((_target distance KH_var_playerUnit) <= 0.01)) then {
+                                            private _caller = _this;
+                                            private _handlerId = [missionNamespace, '", _actionExistenceId, "', true];
+
+                                            if ((missionNamespace getVariable '", _drawHintReferenceId, "') isNotEqualTo []) then {
+                                                (missionNamespace getVariable '", _drawHintReferenceId, "') call KH_fnc_draw3d;  
+                                            };
+                                            
+                                            (((missionNamespace getVariable '", _argumentsReferenceId, "') call (missionNamespace getVariable '", _conditionShowReferenceId, "')) && (missionNamespace getVariable '", _conditionShowId, "'));
+                                        }
+                                        else {
+                                            if ((_target distance (missionNamespace getVariable '", _parentId, "')) <= ", _distance, ") then {
+                                                private _caller = _this;
+                                                private _handlerId = [missionNamespace, '", _actionExistenceId, "', true];
+                                            
+                                                if ((missionNamespace getVariable '", _drawHintReferenceId, "') isNotEqualTo []) then {
+                                                    (missionNamespace getVariable '", _drawHintReferenceId, "') call KH_fnc_draw3d;  
+                                                };
+
+                                                (((missionNamespace getVariable '", _argumentsReferenceId, "') call (missionNamespace getVariable '", _conditionShowReferenceId, "')) && (missionNamespace getVariable '", _conditionShowId, "'));
+                                            }
+                                            else {
+                                                false;
+                                            };
+                                        };
+                                    };
+                                };
+                            };"
                         ] joinString "";
                     };
 
                     default {
                         [
-                            "if (!(missionNamespace getVariable '", _actionExistenceId, "') || (isNull (missionNamespace getVariable '", _objectId, "')) || (missionNamespace getVariable '", _completionId, "')) exitWith {
+                            "if (!(missionNamespace getVariable '", _actionExistenceId, "') || (isNull (missionNamespace getVariable '", _objectId, "')) || (missionNamespace getVariable '", _completionId, "')) then {
                                 (missionNamespace getVariable '", _parentId, "') removeAction _actionId;
                                 false;
-                            };
-
-                            if ((missionNamespace getVariable '", _parentId, "') isNotEqualTo KH_var_playerUnit) exitWith {
-                                false;
-                            };
-
-                            private _target = missionNamespace getVariable '", _objectId, "';
-
-                            if ((_target isEqualTo KH_var_playerUnit) || ((_target distance KH_var_playerUnit) <= 0.01)) exitWith {
-                                private _caller = _this;
-                                private _handlerId = [missionNamespace, '", _actionExistenceId, "', true];
-
-                                if ((missionNamespace getVariable '", _drawHintReferenceId, "') isNotEqualTo []) then {
-                                    (missionNamespace getVariable '", _drawHintReferenceId, "') call KH_fnc_draw3d;  
-                                };
-                                
-                                (((missionNamespace getVariable '", _argumentsReferenceId, "') call (missionNamespace getVariable '", _conditionShowReferenceId, "')) && (missionNamespace getVariable '", _conditionShowId, "'));
-                            };
-
-                            private _viewTarget = call ", _detectionType, ";
-
-                            if (
-                                ((_viewTarget select 1) <= ", _distance, ") && 
-                                (((_viewTarget select 5) param [0, '']) isEqualTo '", _initialDetection, "') && 
-                                ((_viewTarget select 4) isEqualTo _target)
-                            ) then {
-                                private _caller = _this;
-                                private _handlerId = [missionNamespace, '", _actionExistenceId, "', true];
-
-                                if ((missionNamespace getVariable '", _drawHintReferenceId, "') isNotEqualTo []) then {
-                                    (missionNamespace getVariable '", _drawHintReferenceId, "') call KH_fnc_draw3d;  
-                                };
-
-                                (((missionNamespace getVariable '", _argumentsReferenceId, "') call (missionNamespace getVariable '", _conditionShowReferenceId, "')) && (missionNamespace getVariable '", _conditionShowId, "'));
                             }
                             else {
-                                false;
-                            }"
+                                if ((missionNamespace getVariable '", _parentId, "') isNotEqualTo KH_var_playerUnit) then {
+                                    false;
+                                }
+                                else {
+                                    if (missionNamespace getVariable '", _progressId, "') then {
+                                        true;
+                                    }
+                                    else {
+                                        private _target = missionNamespace getVariable '", _objectId, "';
+
+                                        if ((_target isEqualTo KH_var_playerUnit) || ((_target distance KH_var_playerUnit) <= 0.01)) then {
+                                            private _caller = _this;
+                                            private _handlerId = [missionNamespace, '", _actionExistenceId, "', true];
+
+                                            if ((missionNamespace getVariable '", _drawHintReferenceId, "') isNotEqualTo []) then {
+                                                (missionNamespace getVariable '", _drawHintReferenceId, "') call KH_fnc_draw3d;  
+                                            };
+                                            
+                                            (((missionNamespace getVariable '", _argumentsReferenceId, "') call (missionNamespace getVariable '", _conditionShowReferenceId, "')) && (missionNamespace getVariable '", _conditionShowId, "'));
+                                        }
+                                        else {
+                                            private _viewTarget = call ", _detectionType, ";
+
+                                            if (
+                                                ((_viewTarget select 1) <= ", _distance, ") && 
+                                                (((_viewTarget select 5) param [0, '']) isEqualTo '", _initialDetection, "') && 
+                                                ((_viewTarget select 4) isEqualTo _target)
+                                            ) then {
+                                                private _caller = _this;
+                                                private _handlerId = [missionNamespace, '", _actionExistenceId, "', true];
+
+                                                if ((missionNamespace getVariable '", _drawHintReferenceId, "') isNotEqualTo []) then {
+                                                    (missionNamespace getVariable '", _drawHintReferenceId, "') call KH_fnc_draw3d;  
+                                                };
+
+                                                (((missionNamespace getVariable '", _argumentsReferenceId, "') call (missionNamespace getVariable '", _conditionShowReferenceId, "')) && (missionNamespace getVariable '", _conditionShowId, "'));
+                                            }
+                                            else {
+                                                false;
+                                            };
+                                        };
+                                    };
+                                };
+                            };"
                         ] joinString "";
                     };
                 };
             },
-            0,
+            0.01,
             _allowIncapacitated,
             "",
             ""
@@ -1478,7 +1516,7 @@ private _actionHandler = [
     },
     [_target, false] select ((_target isEqualTo "PLAYERS") && !(_object isEqualType true)),
     true,
-    [[false, ["JIP", _object, true, ""]] select _jip, ["NEAR_PLAYERS", _object, _distance + 100, _jip, ""]] select ((_target isEqualTo "PLAYERS") && !(_object isEqualType true))
+    [[false, ["JIP", _object, true, ""]] select _jip, ["PLAYER_PRESENCE", _object, true, _distance + 100, _jip, ""]] select ((_target isEqualTo "PLAYERS") && !(_object isEqualType true))
 ] call KH_fnc_execute;
 
 [

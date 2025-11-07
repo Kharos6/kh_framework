@@ -197,6 +197,7 @@ class CfgVehicles
 	#include "\x\kh\addons\main\vehicles\modules\zeusEndMission.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\zeusHeal.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\zeusHealAllPlayers.hpp"
+	#include "\x\kh\addons\main\vehicles\modules\zeusKill.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\zeusRagdollUnit.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\zeusToggleMissionSuspension.hpp"
 };

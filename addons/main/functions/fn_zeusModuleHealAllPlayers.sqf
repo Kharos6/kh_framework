@@ -32,6 +32,21 @@ isNil {
         _unit setVariable ["KH_var_incapacitated", false, true];
         _unit setVariable ["KH_var_withstanding", false, true];
         _unit setVariable ["KH_var_stabilized", false, true];
+        _unit setVariable ["KH_var_beingRevived", false, true];
+        _unit setVariable ["KH_var_beingStabilized", false, true];
+
+        if KH_var_incapacitatedCaptives then {
+            [
+                [_unit],
+                {
+                    params ["_unit"];
+                    _unit setCaptive false;
+                },
+                _unit,
+                true,
+                false
+            ] call KH_fnc_execute;
+        };
     } forEach KH_var_allPlayerUnits;
 
 	deleteVehicle _logic;

@@ -161,6 +161,7 @@ isNil {
 
 								_control ctrlSetAngle [KH_var_healthDisplayBarAngle, 0, 0, true];
 								_controlBackground ctrlSetAngle [KH_var_healthDisplayBarAngle, 0, 0, true];
+								_control ctrlSetStructuredText (parseText "");
 								_control ctrlSetBackgroundColor [profileNamespace getVariable ["GUI_BCG_RGB_R", 0.13], profileNamespace getVariable ["GUI_BCG_RGB_G", 0.54], profileNamespace getVariable ["GUI_BCG_RGB_B", 0.21], 0.9];
 							}
 							else {
@@ -181,6 +182,7 @@ isNil {
 								_control ctrlSetAngle [KH_var_healthDisplayPercentageAngle, 0, 0, true];
 								_controlBackground ctrlSetAngle [KH_var_healthDisplayPercentageAngle, 0, 0, true];
 								_control ctrlSetStructuredText (parseText (["<t align='center' valign='middle' size='", KH_var_healthDisplayPercentageTextSize, "' color='", _percentageColor, "' font='EtelkaMonospaceProBold'>", ((1 - (damage KH_var_playerUnit)) * 100) toFixed 0, "%</t>"] joinString ""));
+								_control ctrlSetBackgroundColor [0, 0, 0, 0.45];
 							};
 
 							_control ctrlCommit 0;
@@ -196,42 +198,6 @@ isNil {
 				0,
 				false
 			] call KH_fnc_execute;
-
-			[
-				"AllVehicles",
-				"init", 
-				{
-					params ["_unit"];
-					
-					if !(_unit isKindOf "Man") then {
-						_unit addAction [
-							"<img image='\A3\ui_f\data\igui\cfg\actions\unloadIncapacitated_ca.paa' size='1.8'/><br/>UNLOAD INCAPACITATED",
-							{
-								params ["_target"];
-
-								{
-									if (((lifeState _x) isEqualTo "INCAPACITATED") || ((lifeState _x) isEqualTo "UNCONSCIOUS") || (_x getVariable ["KH_var_incapacitated", false])) then {
-										moveOut _x;
-									};
-								} forEach (crew _target);
-							},
-							[],
-							1.5,
-							false,
-							true,
-							"",
-							"((((call KH_fnc_getViewTarget) select 1) < 2) && ((crew _target) isNotEqualTo []))",
-							50,
-							false,
-							"",
-							""
-						];
-					};
-				},
-				true,
-				[],
-				true
-			] call CBA_fnc_addClassEventHandler;
 		};
 	};
 
@@ -373,6 +339,7 @@ isNil {
 
 		if KH_var_khMedical then {
 			KH_var_classDamageMultipliers = createHashMapFromArray (parseSimpleArray (["[", KH_var_classDamageMultipliersRaw, "]"] joinString ""));
+			KH_var_childClassDamageMultipliers = parseSimpleArray (["[", KH_var_childClassDamageMultipliersRaw, "]"] joinString "");
 			
 			[
 				"CAManBase",
@@ -380,12 +347,36 @@ isNil {
 				{
 					params ["_unit"];
 					if !(isNil {_unit getVariable "KH_var_initComplete";}) exitWith {};
+					private _classDamageMultiplier = KH_var_classDamageMultipliers get (typeOf _unit);
+					private "_childClassDamageMultiplier";
+					
+					{
+						_x params ["_class", "_multiplier"];
+						
+						if (_unit isKindOf _class) then {
+							_childClassDamageMultiplier = _multiplier;
+							break;
+						};
+					} forEach KH_var_childClassDamageMultipliers;
+					
+					if !(isNil "_classDamageMultiplier") then {
+						_unit setVariable ["KH_var_classDamageMultiplier", _classDamageMultiplier, true];
+					};
+
+					if !(isNil "_childClassDamageMultiplier") then {
+						_unit setVariable ["KH_var_childClassDamageMultiplier", _childClassDamageMultiplier, true];
+					};
+
 					_unit setVariable ["KH_var_initComplete", true, true];
 					
 					if (_unit getVariable ["KH_var_khMedicalHandling", true]) then {
 						[_unit, "KH_var_stabilized", false, true, true] call KH_fnc_setRespawnVariable;
 						[_unit, "KH_var_withstanding", false, true, true] call KH_fnc_setRespawnVariable;
 						[_unit, "KH_var_incapacitated", false, true, true] call KH_fnc_setRespawnVariable;
+						[_unit, "KH_var_beingRevived", false, true, true] call KH_fnc_setRespawnVariable;
+						[_unit, "KH_var_beingStabilized", false, true, true] call KH_fnc_setRespawnVariable;
+						[_unit, "KH_var_beingTreated", false, true, true] call KH_fnc_setRespawnVariable;
+						[_unit, "KH_var_isTreating", false, true, true] call KH_fnc_setRespawnVariable;
 
 						[
 							["ENTITY", _unit, "PERSISTENT"],
@@ -413,7 +404,7 @@ isNil {
 									_unit getHitPointDamage _hitPoint;
 								};
 
-								if ((_projectile isEqualTo "") && _totalDamage) then {
+								if (_projectile isEqualTo "") then {
 									_damage = _damage * KH_var_absoluteImpactDamageMultiplier;
 								};
 
@@ -421,36 +412,41 @@ isNil {
 									_currentDamage;
 								};
 
-								private _hitPointType = switch true do {
-									case (("head" in _hitPoint) || ("face" in _hitPoint)): {
+								private _hitPointType = switch _hitPoint do {
+									case "hithead";
+									case "hitface": {
 										"head";
 									};
 
-									case ("neck" in _hitPoint): {
+									case "hitneck": {
 										"neck";
 									};
 
-									case (("arm" in _hitPoint) || ("shoulder" in _hitPoint) || ("clavicle" in _hitPoint) || ("hand" in _hitPoint)): {
-										"arm";
-									};
-
-									case (("leg" in _hitPoint) || ("calf" in _hitPoint) || ("thigh" in _hitPoint)): {
-										"leg";
-									};
-
-									case (("chest" in _hitPoint) || ("spine" in _hitPoint) || ("torso" in _hitPoint) || ("diaphragm" in _hitPoint)): {
-										"torso";
-									};
-
-									case (("pelvis" in _hitPoint) || ("hip" in _hitPoint) || ("abdomen" in _hitPoint)): {
+									case "hitpelvis";
+									case "hitabdomen": {
 										"pelvis";
+									};
+
+									case "hitdiaphragm";
+									case "hitchest": {
+										"torso";	
+									};
+
+									case "hithands";
+									case "hitarms": {
+										"arms";
+									};
+
+									case "hitlegs": {
+										"legs";
 									};
 									
 									default {
-										"";
+										"body";
 									};
 								};
-
+								
+								private _isPlayer = isPlayer _unit;
 								private _incapacitated = _unit getVariable ["KH_var_incapacitated", false];
 								private _withstanding = _unit getVariable ["KH_var_withstanding", false];
 								_unit setVariable ["KH_var_currentProcessedDamage", _damage];
@@ -459,8 +455,6 @@ isNil {
 									private _currentProcessedDamage = _unit getVariable "KH_var_currentProcessedDamage";
 									_unit setVariable ["KH_var_currentProcessedDamage", call _x];
 								} forEach (_unit getVariable ["KH_var_allDamageHandlers", []]);
-
-								private _classDamageMultiplier = KH_var_classDamageMultipliers get (typeOf _unit);
 
 								private _processedDamage = (
 									((_unit getVariable "KH_var_currentProcessedDamage") max 0) * 
@@ -495,18 +489,17 @@ isNil {
 											};
 										}
 									) *
-									([KH_var_absoluteAiDamageMultiplier, KH_var_absolutePlayerDamageMultiplier] select (isPlayer _unit)) * 
+									([KH_var_absoluteAiDamageMultiplier, KH_var_absolutePlayerDamageMultiplier] select _isPlayer) * 
 									KH_var_absoluteDamageMultiplier *
-									([1, _classDamageMultiplier] select !(isNil "_classDamageMultiplier")) *
+									(_unit getVariable ["KH_var_classDamageMultiplier", 1]) * 
+									(_unit getVariable ["KH_var_childClassDamageMultiplier", 1]) *
 									(_unit getVariable ["KH_var_damageMultiplier", 1])
 								);
 
-								private _maximumDamage = [1, 0.99] select (_unit getVariable ["KH_var_plotArmor", false]);
-
 								if _totalDamage then {
 									if (
-										(((_currentDamage + _processedDamage) min 1) >= KH_var_incapacitationThreshold) && 
-										(((_unit getVariable ["KH_var_allowIncapacitation", KH_var_allowIncapacitation]) && (isPlayer _unit)) || (_unit getVariable ["KH_var_allowIncapacitation", KH_var_allowAiIncapacitation]))
+										((_currentDamage + (_processedDamage * KH_var_absoluteTotalDamageMultiplier)) >= KH_var_incapacitationThreshold) && 
+										(((_unit getVariable ["KH_var_allowIncapacitation", KH_var_allowIncapacitation]) && _isPlayer) || (_unit getVariable ["KH_var_allowIncapacitation", KH_var_allowAiIncapacitation]))
 									   ) then {
 										if _withstanding then {
 											(
@@ -516,7 +509,7 @@ isNil {
 													KH_var_absoluteWithstandingDamageMultiplier *
 													KH_var_absoluteTotalDamageMultiplier
 												)
-											) min _maximumDamage;
+											) min ([1, 0.99] select (_unit getVariable ["KH_var_plotArmor", false]));
 										}
 										else {
 											if _incapacitated then {
@@ -527,11 +520,15 @@ isNil {
 														KH_var_absoluteIncapacitatedDamageMultiplier *
 														KH_var_absoluteTotalDamageMultiplier
 													)
-												) min _maximumDamage;
+												) min ([1, 0.99] select (_unit getVariable ["KH_var_plotArmor", false]));
 											}
 											else {
 												_unit setUnconscious true;
 												_unit setVariable ["KH_var_incapacitated", true, true];
+
+												if KH_var_incapacitatedCaptives then {
+													_unit setCaptive true;
+												};
 
 												if (_unit isEqualTo player) then {
 													KH_var_incapacitationFade = ppEffectCreate ["ColorCorrections", 892003];
@@ -579,6 +576,11 @@ isNil {
 																	[],
 																	{
 																		player setUnconscious false;
+
+																		if KH_var_incapacitatedCaptives then {
+																			player setCaptive false;
+																		};
+
 																		player setVariable ["KH_var_withstanding", true, true];
 																		KH_var_withstandingEffectRadial = ppEffectCreate ["radialBlur", 892000];
 																		KH_var_withstandingEffectRadial ppEffectEnable true;
@@ -600,7 +602,14 @@ isNil {
 																					params ["_deadline"];
 
 																					if ((diag_tickTime >= _deadline) || !(alive player) || !(player getVariable ["KH_var_incapacitated", false])) then {
-																						player setUnconscious false;
+																						if (player getVariable ["KH_var_incapacitated", false]) then {
+																							player setUnconscious true;
+
+																							if KH_var_incapacitatedCaptives then {
+																								player setCaptive true;
+																							};
+																						};
+
 																						player setVariable ["KH_var_withstanding", false, true];
 																						[_hanlderId] call KH_fnc_removeHandler;
 																					};
@@ -614,10 +623,15 @@ isNil {
 																		if KH_var_withstandingAllowCancel then {
 																			[
 																				[true, false],
-																				"<img image='\A3\ui_f\data\igui\cfg\actions\bandage_ca.paa' size='1.8'/><br/>CANCEL WITHSTANDING",
+																				"<img image='\A3\ui_f\data\igui\cfg\actions\bandage_ca.paa' size='1.8'/><br/>STOP WITHSTANDING",
 																				[],
 																				{
 																					player setUnconscious true;
+
+																					if KH_var_incapacitatedCaptives then {
+																						player setCaptive true;
+																					};
+																					
 																					player setVariable ["KH_var_withstanding", false, true];
 																				},
 																				[
@@ -654,7 +668,7 @@ isNil {
 																	true,
 																	[KH_var_withstandActionDuration, KH_var_withstandProgressDisplay],
 																	2,
-																	false,
+																	true,
 																	true,
 																	false,
 																	false,
@@ -716,60 +730,70 @@ isNil {
 													[_unit],
 													[
 														{
-															if ((isNull (objectParent _caller)) && (_caller isNotEqualTo _target)) then {
-																_caller playActionNow "MedicOther";
+															_target setVariable ["KH_var_beingRevived", true, true];
+
+															if (isNull (objectParent _caller)) then {
+																if (_caller isEqualTo _target) then {
+																	if (!("medic" in (animationState _caller)) && (_caller getVariable ["KH_var_withstanding", false])) then {
+																		_caller playActionNow "Medic";
+																	};
+																}
+																else {
+																	if !("medic" in (animationState _caller)) then {
+																		_caller playActionNow "MedicOther";
+																	};
+																};
 															};
 
 															_duration = [
 																[KH_var_reviveDuration, KH_var_selfReviveDuration] select (_caller isEqualTo _target), 
 																[KH_var_reviveMedicDuration, KH_var_selfReviveMedicDuration] select (_caller isEqualTo _target)
 															] select ([_caller getUnitTrait "Medic"] call KH_fnc_parseBoolean);
+
+															nil;
 														},
 														{
-															if (isNull (objectParent _caller) && (_caller isNotEqualTo _target)) then {
-																if !("medic" in (animationState _caller)) then {
-																	_caller playActionNow "MedicOther";
+															if (isNull (objectParent _caller)) then {
+																if (_caller isEqualTo _target) then {
+																	if (!("medic" in (animationState _caller)) && (_caller getVariable ["KH_var_withstanding", false])) then {
+																		_caller playActionNow "Medic";
+																	};
+																}
+																else {
+																	if !("medic" in (animationState _caller)) then {
+																		_caller playActionNow "MedicOther";
+																	};
 																};
 															};
 														},
 														{
-															if (isNull (objectParent _caller) && (_caller isNotEqualTo _target)) then {
-																_caller playActionNow "MedicStop";
-															};
+															_target setVariable ["KH_var_beingRevived", false, true];
 														},
 														{
-															if (isNull (objectParent _caller) && (_caller isNotEqualTo _target)) then {
-																_caller playActionNow "MedicStop";
-															};
+															_target setVariable ["KH_var_beingRevived", false, true];
 														},
 														{
-															private _newDamage = ((1 - (abs (([
+															private _damageOffset = [
 																[KH_var_reviveHeal, KH_var_selfReviveHeal] select (_caller isEqualTo _target),
 																[KH_var_reviveHealMedic, KH_var_selfReviveHealMedic] select (_caller isEqualTo _target)
-															] select ([_caller getUnitTrait "Medic"] call KH_fnc_parseBoolean)) - 1))) min 1) max 0;
+															] select ([_caller getUnitTrait "Medic"] call KH_fnc_parseBoolean);
 
-															if ((damage _target) > _newDamage) then {
-																_target setDamage [_newDamage, 0] select (_newDamage <= 0.25);
-															};
-
+															_target setDamage (([(damage _target) - _damageOffset, 0] select (((damage _target) - _damageOffset) <= 0.25)) max 0);
 															private _damages = getAllHitPointsDamage _target;
 
-															if ((damage _target) isEqualTo 0) then {
-																_newDamage = 0;
-															};
-
 															{
-																if (((_damages select 2) select _forEachIndex) > _newDamage) then {
-																	_target setHitPointDamage [_x, _newDamage];
-																};
+																_target setHitPointDamage [_x, (((_damages select 2) select _forEachIndex) - _damageOffset) max 0];
 															} forEach (_damages select 0);
-															
-															_target setUnconscious false;
 
 															[
-																[_target],
+																[_target, _caller],
 																{
-																	params ["_target"];
+																	params ["_target", "_caller"];
+																	_target setUnconscious false;
+
+																	if KH_var_incapacitatedCaptives then {
+																		_target setCaptive false;
+																	};
 
 																	if (_target isEqualTo player) then {
 																		if (player getVariable ["KH_var_withstanding", false]) then {
@@ -784,21 +808,26 @@ isNil {
 																false
 															] call KH_fnc_execute;
 
-															_target setVariable ["KH_var_incapacitated", false, true];
-															_target setVariable ["KH_var_withstanding", false, true];
-															_target setVariable ["KH_var_stabilized", false, true];
-
 															if !("Medikit" in (items _caller)) then {
-																for "_i" from 1 to KH_var_reviveRequiredFirstAidKits do {
+																for "_i" from 1 to ([KH_var_reviveRequiredFirstAidKits, KH_var_selfReviveRequiredFirstAidKits] select (_caller isEqualTo _target)) do {
 																	_caller removeItem "FirstAidKit";
 																};
 															};
 
-															if (isNull (objectParent _caller) && (_caller isNotEqualTo _target)) then {
-																_caller playActionNow "MedicStop";
-															};
+															_target setVariable ["KH_var_incapacitated", false, true];
+															_target setVariable ["KH_var_withstanding", false, true];
+															_target setVariable ["KH_var_stabilized", false, true];
+															_target setVariable ["KH_var_beingRevived", false, true];
+															_target setVariable ["KH_var_beingStabilized", false, true];
 														},
-														{}
+														{
+															params ["_unit"];
+															_unit setVariable ["KH_var_incapacitated", false, true];
+															_unit setVariable ["KH_var_withstanding", false, true];
+															_unit setVariable ["KH_var_stabilized", false, true];
+															_unit setVariable ["KH_var_beingRevived", false, true];
+															_unit setVariable ["KH_var_beingStabilized", false, true];
+														}
 													],
 													[
 														{
@@ -806,16 +835,23 @@ isNil {
 															((_unit getVariable ["KH_var_incapacitated", false]) && (alive _unit));
 														},
 														{
+															if (_target getVariable ["KH_var_beingStabilized", false]) exitWith {
+																false;
+															};
+
 															if (KH_var_reviveRequireStabilization && !(_target getVariable ["KH_var_stabilized", false])) exitWith {
 																false;
 															};
 
 															if (_caller isEqualTo _target) then {
-																if (KH_var_selfRevive && (!KH_var_selfReviveRequireMedikit || ("Medikit" in (items _caller)))) then {																	
+																if KH_var_selfRevive then {																	
 																	(
-																		(!KH_var_selfReviveRequireMedikit || (([items _caller, "FirstAidKit"] call KH_fnc_countArrayElements) >= KH_var_reviveRequiredFirstAidKits)) &&
+																		(
+																			(KH_var_selfReviveRequireMedikit && ("Medikit" in (items _caller))) ||
+																			(!KH_var_selfReviveRequireMedikit && (([items _caller, "FirstAidKit"] call KH_fnc_countArrayElements) >= KH_var_selfReviveRequiredFirstAidKits))
+																		) &&
 																		(!KH_var_selfReviveMedicOnly || ([_caller getUnitTrait "Medic"] call KH_fnc_parseBoolean)) &&
-																		(!KH_var_selfReviveRequireWithstanding || (KH_var_selfReviveRequireWithstanding && (_caller getVariable ["KH_var_withstanding", false])))
+																		(!KH_var_selfReviveRequireWithstanding || (_caller getVariable ["KH_var_withstanding", false]))
 																	);
 																}
 																else {
@@ -884,7 +920,7 @@ isNil {
 													[
 														{
 															params ["_unit"];
-															((((lifeState _unit) isEqualTo "INCAPACITATED") || ((lifeState _unit) isEqualTo "UNCONSCIOUS") || (_unit getVariable ["KH_var_incapacitated", false])) && (isNull (objectParent _unit)) && (alive _unit));
+															(((_unit getVariable ["KH_var_incapacitated", false])) && (isNull (objectParent _unit)) && (alive _unit));
 														},
 														{
 															((((_target nearEntities ["AllVehicles", 10]) select {!(_x isKindOf "Man");}) isNotEqualTo []) && (_target isNotEqualTo _caller));
@@ -920,11 +956,14 @@ isNil {
 														[_unit],
 														[
 															{
+																_target setVariable ["KH_var_beingStabilized", true, true];
+
 																if (isNull (objectParent _caller)) then {
 																	_caller playActionNow "MedicOther";
 																};
 
 																_duration = [KH_var_stabilizationDuration, KH_var_stabilizationDurationMedic] select ([_caller getUnitTrait "Medic"] call KH_fnc_parseBoolean);
+																nil;
 															},
 															{
 																if (isNull (objectParent _caller)) then {
@@ -934,14 +973,10 @@ isNil {
 																};
 															},
 															{
-																if (isNull (objectParent _caller)) then {
-																	_caller playActionNow "MedicStop";
-																};
+																_target setVariable ["KH_var_beingStabilized", false, true];
 															},
 															{
-																if (isNull (objectParent _caller)) then {
-																	_caller playActionNow "MedicStop";
-																};
+																_target setVariable ["KH_var_beingStabilized", false, true];
 															},
 															{
 																if !("Medikit" in (items _caller)) then {
@@ -949,12 +984,9 @@ isNil {
 																		_caller removeItem "FirstAidKit";
 																	};
 																};
-
+																
+																_target setVariable ["KH_var_beingStabilized", false, true];
 																_target setVariable ["KH_var_stabilized", true, true];
-
-																if (isNull (objectParent _caller)) then {
-																	_caller playActionNow "MedicStop";
-																};
 															},
 															{}
 														],
@@ -963,15 +995,21 @@ isNil {
 																params ["_unit"];
 																((_unit getVariable ["KH_var_incapacitated", false]) && (alive _unit));
 															},
-															{																
+															{
+																if (_target getVariable ["KH_var_beingRevived", false]) exitWith {
+																	false;
+																};
+
 																if ((KH_var_stabilizationMedicOnly && !([_caller getUnitTrait "Medic"] call KH_fnc_parseBoolean)) || (_caller isEqualTo _target)) exitWith {
 																	false;
 																};
 
-																(
-																	(KH_var_stabilizationRequireMedikit && ("Medikit" in (items _caller))) ||
-																	(!KH_var_stabilizationRequireMedikit && (([items _caller, "FirstAidKit"] call KH_fnc_countArrayElements) >= KH_var_stabilizationRequiredFirstAidKits))
-																);										
+																if KH_var_stabilizationRequireMedikit then {
+																	"Medikit" in (items _caller);
+																}
+																else {
+																	([items _caller, "FirstAidKit"] call KH_fnc_countArrayElements) >= KH_var_stabilizationRequiredFirstAidKits;
+																};									
 															},
 															{},
 															{},
@@ -994,39 +1032,17 @@ isNil {
 												};
 
 												(
-													_currentDamage + 
-													(
-														(KH_var_incapacitationThreshold + ((_processedDamage - KH_var_incapacitationThreshold) * KH_var_absoluteIncapacitatedDamageMultiplier)) * 
-														KH_var_absoluteTotalDamageMultiplier
-													) 
-												) min _maximumDamage;
+													KH_var_incapacitationThreshold + (((_currentDamage + (_processedDamage * KH_var_absoluteTotalDamageMultiplier)) - KH_var_incapacitationThreshold) * KH_var_absoluteIncapacitatedDamageMultiplier)
+												) min ([1, 0.99] select (_unit getVariable ["KH_var_plotArmor", false]));
 											};
 										};
 									}
 									else {
-										(_currentDamage + (_processedDamage * KH_var_absoluteTotalDamageMultiplier)) min _maximumDamage;
+										(_currentDamage + (_processedDamage * KH_var_absoluteTotalDamageMultiplier)) min ([1, 0.99] select (_unit getVariable ["KH_var_plotArmor", false]));
 									};
 								}
 								else {
-									if (
-										(((_currentDamage + _processedDamage) min 1) >= KH_var_incapacitationThreshold) && 
-										(((_unit getVariable ["KH_var_allowIncapacitation", KH_var_allowIncapacitation]) && (isPlayer _unit)) || (_unit getVariable ["KH_var_allowIncapacitation", KH_var_allowAiIncapacitation]))
-									   ) then {
-										if _withstanding then {
-											(_currentDamage + (_processedDamage * KH_var_absoluteWithstandingDamageMultiplier)) min _maximumDamage;
-										}
-										else {
-											if _incapacitated then {
-												(_currentDamage + (_processedDamage * KH_var_absoluteIncapacitatedDamageMultiplier)) min _maximumDamage;
-											}
-											else {
-												(_currentDamage + (KH_var_incapacitationThreshold + ((_processedDamage - KH_var_incapacitationThreshold) * KH_var_absoluteIncapacitatedDamageMultiplier))) min _maximumDamage;
-											};
-										};
-									}
-									else {
-										(_currentDamage + _processedDamage) min _maximumDamage;
-									};
+									(_currentDamage + _processedDamage) min ([[0.99, 1] select KH_var_allowHitPointMaximumDamage, 0.99] select (_unit getVariable ["KH_var_plotArmor", false]));
 								};
 							}
 						] call KH_fnc_addEventHandler;
@@ -1041,9 +1057,10 @@ isNil {
 									{
 										params ["_injured", "_healer", "_isMedic", "_atVehicle"];
 										
-										if !(_injured getVariable ["KH_var_isHealing", false]) then {
+										if (!(_injured getVariable ["KH_var_beingTreated", false]) && !(_healer getVariable ["KH_var_isTreating", false])) then {
 											private _isSelfHeal = _injured isEqualTo _healer;
-											_injured setVariable ["KH_var_isHealing", true, true];
+											_injured setVariable ["KH_var_beingTreated", true, true];
+											_healer setVariable ["KH_var_isTreating", true, true];
 
 											[
 												[_injured, _healer, _isMedic, _atVehicle, _isSelfHeal, damage _injured],
@@ -1062,8 +1079,14 @@ isNil {
 
 																	for "_i" from 1 to _healItemCount do {
 																		_currentDamageOffset = _currentDamageOffset + ([
-																			[KH_var_firstAidKitHeal, KH_var_firstAidKitSelfHeal] select _isSelfHeal, 
-																			[KH_var_firstAidKitHealMedic, KH_var_firstAidKitSelfHealMedic] select _isSelfHeal
+																			[
+																				[KH_var_firstAidKitHeal, KH_var_firstAidKitHealWithstanding] select (_injured getVariable ["KH_var_withstanding", false]), 
+																				[KH_var_firstAidKitSelfHeal, KH_var_firstAidKitSelfHealWithstanding] select (_healer getVariable ["KH_var_withstanding", false])
+																			] select _isSelfHeal, 
+																			[
+																				[KH_var_firstAidKitHealMedic, KH_var_firstAidKitHealWithstandingMedic] select (_injured getVariable ["KH_var_withstanding", false]), 
+																				[KH_var_firstAidKitSelfHealMedic, KH_var_firstAidKitSelfHealWithstandingMedic] select (_healer getVariable ["KH_var_withstanding", false])
+																			] select _isSelfHeal
 																		] select _isMedic);
 
 																		if (_i isNotEqualTo 1) then {
@@ -1092,16 +1115,17 @@ isNil {
 															{
 																_injured setHitPointDamage [_x, (((_damages select 2) select _forEachIndex) - _damageOffset) max 0];
 															} forEach (_damages select 0);
-
-															_injured setVariable ["KH_var_isHealing", false, true];
 														};
 													};
+
+													_injured setVariable ["KH_var_beingTreated", false, true];
+													_healer setVariable ["KH_var_isTreating", false, true];
 												},
 												true,
 												{
 													private _injured = param [0];
 													private _oldDamage = param [5];
-													((damage _injured) != _oldDamage);
+													((damage _injured) isNotEqualTo _oldDamage);
 												},
 												false
 											] call KH_fnc_execute;

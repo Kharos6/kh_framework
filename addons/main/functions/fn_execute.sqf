@@ -147,11 +147,12 @@ else {
 				[_object, _persistentExecutionId, true];
 			};
 
-			case "NEAR_PLAYERS": {
+			case "PLAYER_PRESENCE": {
 				private _object = _special param [1, objNull, [objNull]];
-				private _distance = _special param [2, 0, [0]];
-				private _jip = _special param [3, true, [true]];
-				private _nearId = _special param [4, "", [""]];
+				private _present = _special param [2, true, [true]];
+				private _distance = _special param [3, 0, [0]];
+				private _jip = _special param [4, true, [true]];
+				private _nearId = _special param [5, "", [""]];
 				
 				_nearId = if (_nearId isNotEqualTo "") then {
 					_nearId;
@@ -167,7 +168,7 @@ else {
 
 				missionNamespace setVariable [_nearId, true, 2];
 				["KH_eve_execution", [_arguments, _function, clientOwner, _unscheduled], _target, false] call KH_fnc_triggerCbaEvent;
-				["KH_eve_nearPlayersExecutionSetup", [_arguments, _function, clientOwner, _unscheduled, _object, _distance, _nearId, +KH_var_allPlayerControlledUnits, _jip]] call CBA_fnc_serverEvent;
+				["KH_eve_playerPresenceExecutionSetup", [_arguments, _function, clientOwner, _unscheduled, _object, _present, _distance, _nearId, +KH_var_allPlayerControlledUnits, _jip]] call CBA_fnc_serverEvent;
 				[missionNamespace, _nearId, 2];
 			};
 
@@ -220,8 +221,8 @@ private _specialParser = {
 				[[missionNamespace, _specialIdOverride, 2], _specialIdOverride];
 			};
 
-			case "NEAR_PLAYERS": {
-				private _specialId = _special param [4, "", [""]];
+			case "PLAYER_PRESENCE": {
+				private _specialId = _special param [5, "", [""]];
 
 				if (_specialId isNotEqualTo "") then {
 					_specialIdOverride = _specialId;
@@ -310,7 +311,7 @@ switch (typeName _environmentType) do {
 		};
 
 		([_special, _target] call _specialParser) params ["_return", "_specialIdOverride"];
-		private _previousReturn = nil;
+		private "_previousReturn";
 		private _continue = true;
 
 		if (isNil "_arguments") then {
@@ -499,7 +500,7 @@ switch (typeName _environmentType) do {
 
 		([_special, _target] call _specialParser) params ["_return", "_specialIdOverride"];
 		_environmentType = missionNamespace getVariable ([_environmentType, false] call KH_fnc_parseFunction);
-		private _previousReturn = nil;
+		private "_previousReturn";
 		private _continue = true;
 
 		if (isNil "_arguments") then {

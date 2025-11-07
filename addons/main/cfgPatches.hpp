@@ -10,6 +10,7 @@ class CfgPatches
 			"KH_ZeusModuleEndMission",
 			"KH_ZeusModuleHeal",
 			"KH_ZeusModuleHealAllPlayers",
+			"KH_ZeusModuleKill",
 			"KH_ZeusModuleRagdollUnit",
 			"KH_ZeusModuleToggleMissionSuspension"
 		};

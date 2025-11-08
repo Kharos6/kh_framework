@@ -32,6 +32,7 @@ params [["_object", objNull, [objNull]]];
         getWaterFillPercentage _object,
         isVehicleCargo _object,
 		[(collisionDisabledWith _object) select 0, true] call KH_fnc_getEntityVariableName,
+		(getPhysicsCollisionFlag _object) select 0,
 		call {
 			private _allVariables = [];
 

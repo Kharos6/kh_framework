@@ -1,6 +1,6 @@
 params [
     ["_resource", "RscText", [""]],
-    ["_text", "", [""]], 
+    ["_text", "", ["", text ""]], 
     ["_displayTimings", [1, 0, 1], [[]]], 
     ["_backgroundColor", [0, 0, 0, 1], [[]]], 
     ["_transforms", [0, 0, 100, 100], [[]]],
@@ -21,11 +21,16 @@ _control ctrlSetPosition ([_transforms, _square] call KH_fnc_parseNormalizedScre
 _control ctrlSetAngle [_angle, _centerX, _centerY, true];
 _control ctrlCommit 0;
 
-if (_text isEqualTo "") then {
-    _control ctrlSetText (["#(rgb,8,8,3)color(", _backgroundColor select 0, ",", _backgroundColor select 1, ",", _backgroundColor select 2, ",", _backgroundColor select 3, ")"] joinString "");
+if (_text isEqualType "") then {
+    if (_text isEqualTo "") then {
+        _control ctrlSetText (["#(rgb,8,8,3)color(", _backgroundColor select 0, ",", _backgroundColor select 1, ",", _backgroundColor select 2, ",", _backgroundColor select 3, ")"] joinString "");
+    }
+    else {
+        _control ctrlSetText _text;
+    };
 }
 else {
-    _control ctrlSetText _text;
+    _control ctrlSetStructuredText _text;
 };
 
 _control ctrlSetBackgroundColor _backgroundColor;

@@ -1412,3 +1412,333 @@
 	{},
 	false
 ] call CBA_fnc_addSetting;
+
+[
+	"KH Framework", 
+	"KH_playDead", 
+	"Play Dead",
+	{
+		if (
+			KH_var_playingDeadAllowed && 
+			!(KH_var_playerUnit getVariable ["KH_var_playingDead", false]) && 
+			!(captive KH_var_playerUnit) && 
+			(isTouchingGround KH_var_playerUnit) &&
+			((lifeState KH_var_playerUnit) isNotEqualTo "INCAPACITATED") &&
+			((lifeState KH_var_playerUnit) isNotEqualTo "UNCONSCIOUS") &&
+			!(KH_var_playerUnit getVariable ["KH_var_incapacitated", false])
+			) then {
+			systemChat "Time to play dead.";
+			KH_var_playDeadUnit = KH_var_playerUnit;
+			KH_var_playDeadUnit setVariable ["KH_var_playingDead", true];
+			KH_var_playDeadUnit addForce [[0, 0, 0.001], [0, 0, 0], false];
+
+			KH_var_playDeadHandler = [
+				[diag_tickTime + KH_var_playingDeadStartDelay, diag_tickTime + 2],
+				{
+					params ["_deadline", "_animationDeadline"];
+
+					if (diag_tickTime >= _animationDeadline) then {
+						if ((vectorMagnitude (velocity KH_var_playDeadUnit)) <= 0.1) then {
+							KH_var_playDeadUnit playActionNow "Unconscious";
+						};
+					};
+
+					if (diag_tickTime >= _deadline) then {
+						KH_var_playDeadUnit setCaptive true;
+
+						if (!KH_var_playingDeadAllowed || (KH_var_playDeadUnit isNotEqualTo KH_var_playerUnit) || !(KH_var_playDeadUnit getVariable ["KH_var_playingDead", false])) exitWith {
+							KH_var_playDeadUnit setVariable ["KH_var_playingDead", false];
+							KH_var_playDeadUnit setCaptive false;
+
+							if !(_unit getVariable ["KH_var_incapacitated", false]) then {
+								KH_var_playDeadUnit switchMove "AmovPpneMstpSnonWnonDnon";
+							};
+							
+							[_handlerId] call KH_fnc_removeHandler;
+						};
+						
+						{
+							if ((side (group _x)) isEqualTo (side (group KH_var_playDeadUnit))) then {
+								continue;
+							};
+
+							private _distance = KH_var_playDeadUnit distance _x;
+
+							if (
+								(_distance <= KH_var_playingDeadDiscoveryDistanceMinimum) ||
+								(
+									(_distance <= KH_var_playingDeadDiscoveryDistanceMaximum) &&
+									((random KH_var_playingDeadDiscoveryDistanceMaximum) >= _distance)
+								)
+							) then {
+								systemChat "I think I've been seen...";
+								KH_var_playDeadUnit setVariable ["KH_var_playingDead", false];
+								KH_var_playDeadUnit setCaptive false;
+
+								if !(_unit getVariable ["KH_var_incapacitated", false]) then {
+									KH_var_playDeadUnit switchMove "AmovPpneMstpSnonWnonDnon";
+								};
+
+								[_handlerId] call KH_fnc_removeHandler;
+								break;
+							};
+						} forEach (KH_var_playDeadUnit nearEntities ["Man", KH_var_playingDeadDiscoveryDistanceMaximum]);
+					}
+					else {
+						if (
+							!KH_var_playingDeadAllowed ||
+							(captive KH_var_playDeadUnit) ||
+							(KH_var_playDeadUnit isNotEqualTo KH_var_playerUnit)
+						) then {
+							[_handlerId] call KH_fnc_removeHandler;
+						};
+					};
+				},
+				true,
+				1,
+				false
+			] call KH_fnc_execute;
+		}
+		else {
+			if !(isNil "KH_var_playDeadHandler") then {
+				systemChat "No longer playing dead, time to get up.";
+				KH_var_playDeadUnit setVariable ["KH_var_playingDead", false];
+				KH_var_playDeadUnit setCaptive false;
+
+				if !(_unit getVariable ["KH_var_incapacitated", false]) then {
+					KH_var_playDeadUnit switchMove "AmovPpneMstpSnonWnonDnon";
+				};
+
+				[KH_var_playDeadHandler] call KH_fnc_removeHandler;
+				KH_var_playDeadHandler = nil;
+			};
+		};
+	}, 
+	{}, 
+	[0xDC, [true, true, false]]
+] call CBA_fnc_addKeybind;
+
+[
+	"KH Framework", 
+	"KH_toggleDiagnostics", 
+	"Toggle Diagnostics",
+	{
+		if (KH_var_adminMachine isEqualTo clientOwner) then {
+			[!KH_var_diagnosticsState] call KH_fnc_diagnostics;
+		};
+	}, 
+	{}, 
+	[0xC7, [false, false, false]]
+] call CBA_fnc_addKeybind;
+
+[
+	"KH Framework", 
+	"KH_console", 
+	"Console",
+	{
+		if (KH_var_adminMachine isEqualTo clientOwner) then {
+			private _display = createDialog ["KH_Console", true];
+			private _currentConsoleCache = profileNamespace getVariable ["KH_var_consoleCache", []];
+			ctrlSetText [101, _currentConsoleCache param [((count _currentConsoleCache) -1) max 0, ""]];
+			lbSetCurSel [108, profileNamespace getVariable ["KH_var_consoleLanguage", 0]];
+			KH_var_consoleCacheIndex = ((count _currentConsoleCache) - 1) max 0;
+			lbClear 109;
+			lbAdd [109, "None"];
+
+			{
+				lbAdd [109, _x];
+			} forEach ([KH_var_quickFunctionsSqf, KH_var_quickFunctionsLua] select (lbCurSel 108));
+
+			lbSetCurSel [109, 0];
+
+			[
+				["CONTROL", _display displayCtrl 104],
+				"ButtonClick",
+				[],
+				{
+					private _input = ctrlText 101;
+
+					if (_input isNotEqualTo "") then {
+						private _currentConsoleCache = profileNamespace getVariable ["KH_var_consoleCache", []];
+
+						if (((count _input) <= 8192) && ((_currentConsoleCache param [((count _currentConsoleCache) - 1) max 0, ""]) isNotEqualTo _input)) then {
+							_currentConsoleCache pushBack _input;
+
+							if ((count _currentConsoleCache) > 32) then {
+								_currentConsoleCache deleteAt 0;
+							};
+
+							profileNamespace setVariable ["KH_var_consoleCache", _currentConsoleCache];
+						};
+
+						ctrlSetText [
+							103, 
+							[
+								if ((lbCurSel 108) isEqualTo 0) then {
+									call (compile _input);
+								}
+								else {
+									luaExecute _input;
+								}
+							] joinString ""
+						];
+
+						KH_var_consoleCacheIndex = ((count _currentConsoleCache) - 1) max 0;
+					};
+
+					nil;
+				}
+			] call KH_fnc_addEventHandler;
+
+			[
+				["CONTROL", _display displayCtrl 105],
+				"ButtonClick",
+				[],
+				{
+					private _input = ctrlText 101;
+					
+					if (_input isNotEqualTo "") then {
+						private _currentConsoleCache = profileNamespace getVariable ["KH_var_consoleCache", []];
+
+						if (((count _input) <= 8192) && ((_currentConsoleCache param [((count _currentConsoleCache) - 1) max 0, ""]) isNotEqualTo _input)) then {
+							_currentConsoleCache pushBack _input;
+
+							if ((count _currentConsoleCache) > 32) then {
+								_currentConsoleCache deleteAt 0;
+							};
+
+							profileNamespace setVariable ["KH_var_consoleCache", _currentConsoleCache];
+						};
+
+						ctrlSetText [
+							103, 
+							[
+								if ((lbCurSel 108) isEqualTo 0) then {
+									diag_codePerformance [compile _input, [], 10000];
+								}
+								else {
+									luaExecute ([
+										"return util.profile(10000, function() ",
+										_input,
+										" end)"	
+									] joinString "");
+								}
+							] joinString ""
+						];
+
+						KH_var_consoleCacheIndex = ((count _currentConsoleCache) - 1) max 0;
+					};
+
+					nil;
+				}
+			] call KH_fnc_addEventHandler;
+
+			[
+				["DISPLAY", _display],
+				"KeyDown",
+				[],
+				{
+					params ["_display", "_key", "_shift"];
+
+					if ((_key isEqualTo 0x1C) && !_shift) then {
+						private _input = ctrlText 101;
+
+						if (_input isNotEqualTo "") then {
+							private _currentConsoleCache = profileNamespace getVariable ["KH_var_consoleCache", []];
+
+							if (((count _input) <= 8192) && ((_currentConsoleCache param [((count _currentConsoleCache) - 1) max 0, ""]) isNotEqualTo _input)) then {
+								_currentConsoleCache pushBack _input;
+
+								if ((count _currentConsoleCache) > 32) then {
+									_currentConsoleCache deleteAt 0;
+								};
+
+								profileNamespace setVariable ["KH_var_consoleCache", _currentConsoleCache];
+							};
+
+							ctrlSetText [
+								103, 
+								[
+									if ((lbCurSel 108) isEqualTo 0) then {
+										call (compile _input);
+									}
+									else {
+										luaExecute _input;
+									}
+								] joinString ""
+							];
+
+							KH_var_consoleCacheIndex = ((count _currentConsoleCache) - 1) max 0;
+						};
+
+						true;
+					};
+				}
+			] call KH_fnc_addEventHandler;
+
+			[
+				["CONTROL", _display displayCtrl 106],
+				"ButtonClick",
+				[],
+				{
+					KH_var_consoleCacheIndex = (KH_var_consoleCacheIndex - 1) max 0;
+					ctrlSetText [101, (profileNamespace getVariable ["KH_var_consoleCache", []]) param [KH_var_consoleCacheIndex, ""]];
+				}
+			] call KH_fnc_addEventHandler;
+
+			[
+				["CONTROL", _display displayCtrl 107],
+				"ButtonClick",
+				[],
+				{
+					private _currentConsoleCache = profileNamespace getVariable ["KH_var_consoleCache", []];
+					KH_var_consoleCacheIndex = (KH_var_consoleCacheIndex + 1) min ((count _currentConsoleCache) - 1);
+					ctrlSetText [101, _currentConsoleCache param [KH_var_consoleCacheIndex, ""]];
+				}
+			] call KH_fnc_addEventHandler;
+
+			[
+				["CONTROL", _display displayCtrl 108],
+				"ToolBoxSelChanged",
+				[],
+				{
+					private _selectedIndex = param [1, 0];
+					profileNamespace setVariable ["KH_var_consoleLanguage", _selectedIndex];
+					lbClear 109;
+					lbAdd [109, "None"];
+
+					{
+						lbAdd [109, _x];
+					} forEach ([KH_var_quickFunctionsSqf, KH_var_quickFunctionsLua] select _selectedIndex);
+
+					lbSetCurSel [109, 0];
+				}
+			] call KH_fnc_addEventHandler;
+
+			[
+				["CONTROL", _display displayCtrl 109],
+				"LBSelChanged",
+				[],
+				{
+					private _selectedIndex = param [1, 0];
+
+					if (_selectedIndex isNotEqualTo 0) then {
+						private _language = lbCurSel 109;
+						private _entry = ([KH_var_quickFunctionsSqf, KH_var_quickFunctionsLua] select _language) get (lbText [109, _selectedIndex]);
+
+						if !(isNil "_entry") then {
+							if (_language isEqualTo 0) then {
+								ctrlSetText [101, toString _entry];
+							}
+							else {
+								ctrlSetText [101, _entry];
+							};
+						};
+					};
+				}
+			] call KH_fnc_addEventHandler;
+		};
+	}, 
+	{}, 
+	[0xD2, [false, false, false]]
+] call CBA_fnc_addKeybind;

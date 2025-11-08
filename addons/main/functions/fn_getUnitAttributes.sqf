@@ -100,6 +100,7 @@ params [["_unit", objNull, [objNull]]];
 			};
 		},
 		[(collisionDisabledWith _unit) select 0, true] call KH_fnc_getEntityVariableName,
+		(getPhysicsCollisionFlag _unit) select 0,
 		call {
 			private _entities = [];
 

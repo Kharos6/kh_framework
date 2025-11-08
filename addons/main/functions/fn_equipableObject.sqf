@@ -13,7 +13,7 @@ params [
 
 if (isNil {_object getVariable "KH_var_equipableObjectSet";}) then {
 	if (_name isEqualTo "") then {
-		_name = getText (configFile >> "CfgVehicles" >> (typeOf _object) >> "displayName");
+		_name = getText ((configOf _object) >> "displayName");
 	};
 
 	_object setVariable ["KH_var_equipableObjectSet", true, true];
@@ -197,7 +197,7 @@ if !(isNull _unit) then {
 							params ["_object", "_hideInVehicles", "_disableCollision"];
 
 							if _disableCollision then {
-								if (getPhysicsCollisionFlag _object) then {
+								if ((getPhysicsCollisionFlag _object) select 0) then {
 									[
 										[_object],
 										{

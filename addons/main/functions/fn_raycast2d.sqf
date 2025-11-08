@@ -41,6 +41,11 @@ private _maxResultsOverride = [_maxResults, -1] select _allowIgnoredCheck;
 
 if (_rotation isEqualType objNull) then {
     _rotation = [vectorDir _rotation, vectorUp _rotation];
+}
+else {
+	if (_rotation isEqualTypeAll 0) then {
+		_rotation = eulerToVector _rotation;
+	};
 };
 
 _rotation params [["_vectorDir", [0, 1, 0], [[]]], ["_vectorUp", [0, 0, 1], [[]]]];

@@ -44,6 +44,8 @@ static registered_sqf_function _sqf_get_call_arguments;
 static registered_sqf_function _sqf_get_rotation_euler_object;
 static registered_sqf_function _sqf_get_rotation_euler_object_object;
 static registered_sqf_function _sqf_set_rotation_euler;
+static registered_sqf_function _sqf_vector_to_euler;
+static registered_sqf_function _sqf_euler_to_vector;
 
 static game_value execute_lua_sqf(game_value_parameter args, game_value_parameter code_or_function) {    
     try {
@@ -990,6 +992,114 @@ static game_value set_rotation_euler_sqf(game_value_parameter entity, game_value
     }
 }
 
+static game_value vector_to_euler_sqf(game_value_parameter vectors) {
+    try {
+        auto& vec_array = vectors.to_array();
+        
+        if (vec_array.size() != 2) {
+            report_error("vectorToEuler requires an array of 2 vectors [[dirX, dirY, dirZ], [upX, upY, upZ]]");
+            return game_value();
+        }
+        
+        auto& dir_array = vec_array[0].to_array();
+        auto& up_array = vec_array[1].to_array();
+        
+        if (dir_array.size() != 3 || up_array.size() != 3) {
+            report_error("vectorToEuler requires vectors with 3 components each");
+            return game_value();
+        }
+        
+        constexpr float RAD_TO_DEG = 180.0f / 3.14159265359f;
+        float dirX = static_cast<float>(dir_array[0]);
+        float dirY = static_cast<float>(dir_array[1]);
+        float dirZ = static_cast<float>(dir_array[2]);
+        float upX = static_cast<float>(up_array[0]);
+        float upZ = static_cast<float>(up_array[2]);
+        float aroundX = std::fmod(std::atan2(-dirZ, std::sqrt(dirX * dirX + dirY * dirY)) * RAD_TO_DEG + 360.0f, 360.0f);
+        float aroundY = std::fmod(360.0f - std::atan2(upX, upZ) * RAD_TO_DEG, 360.0f);
+        float aroundZ = std::fmod(std::atan2(dirX, dirY) * RAD_TO_DEG + 360.0f, 360.0f);
+        auto_array<game_value> result;
+        result.reserve(3);
+        result.push_back(game_value(aroundX));
+        result.push_back(game_value(aroundY));
+        result.push_back(game_value(aroundZ));
+        return game_value(std::move(result));
+    } catch (const std::exception& e) {
+        report_error("Failed to convert vector to euler: " + std::string(e.what()));
+        return game_value();
+    }
+}
+
+static game_value euler_to_vector_sqf(game_value_parameter rotation) {
+    try {
+        auto& rot = rotation.to_array();
+        
+        if (rot.size() != 3) {
+            report_error("eulerToVector requires an array of 3 elements [pitch, roll, yaw]");
+            return game_value();
+        }
+    
+        constexpr float DEG_TO_RAD = 3.14159265359f / 180.0f;
+        float aroundX = -static_cast<float>(rot[0]) * DEG_TO_RAD;
+        float aroundY = -static_cast<float>(rot[1]) * DEG_TO_RAD;
+        float aroundZ = -static_cast<float>(rot[2]) * DEG_TO_RAD;
+        float dirX = 0.0f;
+        float dirY = 1.0f;
+        float dirZ = 0.0f;
+        float upX = 0.0f;
+        float upY = 0.0f;
+        float upZ = 1.0f;
+
+        if (std::abs(aroundX) > 0.0001f) {
+            float cosX = std::cos(aroundX);
+            float sinX = std::sin(aroundX);
+            dirY = cosX;
+            dirZ = sinX;
+            upY = -sinX;
+            upZ = cosX;
+        }
+        
+        if (std::abs(aroundY) > 0.0001f) {
+            float cosY = std::cos(aroundY);
+            float sinY = std::sin(aroundY);
+            dirX = dirZ * sinY;
+            dirZ = dirZ * cosY;
+            upX = upZ * sinY;
+            upZ = upZ * cosY;
+        }
+        
+        if (std::abs(aroundZ) > 0.0001f) {
+            float cosZ = std::cos(aroundZ);
+            float sinZ = std::sin(aroundZ);
+            float dirXTemp = dirX;
+            dirX = dirXTemp * cosZ - dirY * sinZ;
+            dirY = dirY * cosZ + dirXTemp * sinZ;
+            float upXTemp = upX;
+            upX = upXTemp * cosZ - upY * sinZ;
+            upY = upY * cosZ + upXTemp * sinZ;
+        }
+
+        auto_array<game_value> dir_array;
+        dir_array.reserve(3);
+        dir_array.push_back(game_value(dirX));
+        dir_array.push_back(game_value(dirY));
+        dir_array.push_back(game_value(dirZ));
+        auto_array<game_value> up_array;
+        up_array.reserve(3);
+        up_array.push_back(game_value(upX));
+        up_array.push_back(game_value(upY));
+        up_array.push_back(game_value(upZ));
+        auto_array<game_value> result;
+        result.reserve(2);
+        result.push_back(game_value(std::move(dir_array)));
+        result.push_back(game_value(std::move(up_array)));
+        return game_value(std::move(result));
+    } catch (const std::exception& e) {
+        report_error("Failed to convert euler to vector: " + std::string(e.what()));
+        return game_value();
+    }
+}
+
 static game_value execute_lua_sqf_unary(game_value_parameter code_or_function) {
     return execute_lua_sqf(game_value(), code_or_function);
 }
@@ -1352,6 +1462,22 @@ static void initialize_sqf_integration() {
         userFunctionWrapper<set_rotation_euler_sqf>,
         game_data_type::NOTHING,
         game_data_type::OBJECT,
+        game_data_type::ARRAY
+    );
+
+    _sqf_vector_to_euler = intercept::client::host::register_sqf_command(
+        "vectorToEuler",
+        "Convert [vectorDir, vectorUp] to Euler angles [pitch, roll, yaw] in degrees",
+        userFunctionWrapper<vector_to_euler_sqf>,
+        game_data_type::ARRAY,
+        game_data_type::ARRAY
+    );
+
+    _sqf_euler_to_vector = intercept::client::host::register_sqf_command(
+        "eulerToVector",
+        "Convert Euler angles [pitch, roll, yaw] in degrees to [vectorDir, vectorUp]",
+        userFunctionWrapper<euler_to_vector_sqf>,
+        game_data_type::ARRAY,
         game_data_type::ARRAY
     );
 

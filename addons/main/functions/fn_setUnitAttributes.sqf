@@ -75,6 +75,7 @@ _savedAttributes params [
 	"_assignedTeam",
 	"_vehicle",
 	"_collisionDisabledWith",
+	"_physicsCollisionFlag",
 	"_targets",
 	"_variables"
 ];
@@ -308,7 +309,8 @@ _savedAttributes params [
 		_pitch,
 		_nameSound,
 		_animSpeedCoef,
-		_customAimCoef
+		_customAimCoef,
+		_physicsCollisionFlag
 	], 
 	{
 		params [
@@ -321,7 +323,8 @@ _savedAttributes params [
 			"_pitch",
 			"_nameSound",
 			"_animSpeedCoef",
-			"_customAimCoef"
+			"_customAimCoef",
+			"_physicsCollisionFlag"
 		];
 
 		_unit enableDynamicSimulation _dynamicSimulation;
@@ -333,6 +336,7 @@ _savedAttributes params [
 		_unit setNameSound _nameSound;
 		_unit setAnimSpeedCoef _animSpeedCoef;
 		_unit setCustomAimCoef _customAimCoef;
+		_unit setPhysicsCollisionFlag _physicsCollisionFlag;
 	}, 
 	"GLOBAL", 
 	true, 

@@ -99,14 +99,14 @@ results[67] = {name = "test", value = 123, active = true}
 results[68] = {[1] = "first", [2] = "second", key = "value"}
 local temp_array = {}
 
-for i = 1, 10 do
+for i = 1, 16 do
     temp_array[i] = i * i
 end
 
 results[69] = temp_array
 local temp_sum = 0
 
-for i = 1, 100 do
+for i = 1, 128 do
     temp_sum = temp_sum + i
 end
 
@@ -114,7 +114,7 @@ results[70] = temp_sum
 local temp_count = 0
 local i = 1
 
-while i <= 50 do
+while i <= 128 do
     if i % 2 == 0 then
         temp_count = temp_count + 1
     end
@@ -132,7 +132,7 @@ results[77] = fibonacci(10)
 local primes = {}
 local prime_count = 0
 
-for i = 2, 50 do
+for i = 2, 64 do
     if isPrime(i) then
         prime_count = prime_count + 1
         primes[prime_count] = i
@@ -143,7 +143,7 @@ results[78] = primes
 results[79] = prime_count
 
 local mixed_operations = {
-    math.floor(math.random() * 1000),
+    math.floor(math.random() * 1024),
     string.format("%.2f", 3.14159),
     (#"test string"),
     type(42),
@@ -197,7 +197,6 @@ for k, v in ipairs(string_array) do
 end
 
 results[84] = concatenated
-
 local key_value_pairs = {a = 1, b = 2, c = 3, d = 4}
 local keys = {}
 local values = {}
@@ -289,17 +288,16 @@ for i = 1, #data do
 end
 
 results[95] = data
-
 local performance_test = 0
 
-for i = 1, 1000 do
-    performance_test = performance_test + math.sin(i) * math.cos(i)
+for i = 1, 8192 do
+    performance_test = performance_test + math.random(8192) + math.sin(i) * math.cos(i)
 end
 
 results[96] = performance_test
 local memory_test = {}
 
-for i = 1, 100 do
+for i = 1, 128 do
     memory_test[i] = {
         index = i,
         square = i * i,
@@ -319,4 +317,5 @@ local final_validation = {
 
 results[98] = final_validation
 results[99] = jit
+results[100] = _VERSION
 return {input1, input2, input3, results, true, 1, "string", {1, 2, 3}, {key1 = true, key2 = 2, key3 = "value", key4 = {"A", "B", "C"}, key5 = {keyA = true, keyB = false}, key6 = nil}, nil}

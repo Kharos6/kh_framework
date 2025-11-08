@@ -56,6 +56,7 @@ _savedAttributes params [
     "_waterFillPercentage",
     "_vehicleCargo",
 	"_collisionDisabledWith",
+    "_physicsCollisionFlag",
     "_variables"
 ];
 
@@ -188,19 +189,22 @@ _savedAttributes params [
 		_object,
         _dynamicSimulation,
         _lockedInventory,
-        _waterFillPercentage
+        _waterFillPercentage,
+        _physicsCollisionFlag
 	], 
 	{
 		params [
 			"_object",
             "_dynamicSimulation",
             "_lockedInventory",
-            "_waterFillPercentage"
+            "_waterFillPercentage",
+            "_physicsCollisionFlag"
 		];
 
 		_object enableDynamicSimulation _dynamicSimulation;
         _object lockInventory _lockedInventory;
         _object setWaterFillPercentage _waterFillPercentage;
+        _object setPhysicsCollisionFlag _physicsCollisionFlag;
 	}, 
 	"GLOBAL", 
 	true, 

@@ -117,7 +117,7 @@ private _eventHandler = [
 				_conditionReference set [_conditionVariableId, true];
 			}
 			else {
-				if !([_currentPlayer, _entity, _currentPlayer, _screenPercentage, 0, _maximumDistance, true] call KH_fnc_getPositionVisibility) then {
+				if !([_currentPlayer, unitAimPositionVisual _entity, _currentPlayer, _screenPercentage, 0, _maximumDistance, true] call KH_fnc_getPositionVisibility) then {
 					_conditionReference set [_conditionVariableId, false];
 				}
 				else {

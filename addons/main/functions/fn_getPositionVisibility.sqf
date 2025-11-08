@@ -35,8 +35,23 @@ else {
     _minimalFov = abs _fov;
 };
 
-private _ignored = if ((_start isEqualType objNull) && (_raycast isNotEqualTo false)) then {
-    [_start, objectParent _start, attachedTo _start] + (attachedObjects _start);
+private _ignored = if (_raycast isNotEqualTo false) then {
+    if (_start isEqualType objNull) then {
+        if (_end isEqualType objNull) then {
+            [_start, objectParent _start, attachedTo _start] + (attachedObjects _start) + [_end, objectParent _end, attachedTo _end] + (attachedObjects _end);
+        }
+        else {
+            [_start, objectParent _start, attachedTo _start] + (attachedObjects _start);
+        };
+    }
+    else {
+        if (_end isEqualType objNull) then {
+            [_end, objectParent _end, attachedTo _end] + (attachedObjects _end);
+        }
+        else {
+            [];
+        };
+    };
 }
 else {
     [];
@@ -77,7 +92,9 @@ if ((_start vectorDistance _end) < _minimumDistance) exitWith {
 
 if (_minimalFov >= 360) exitWith {
     if (_raycast isEqualTo true) then {
-        (
+        private _result = false;
+
+        private _raycasts = (
             [
                 _start,
                 _end,
@@ -89,10 +106,25 @@ if (_minimalFov >= 360) exitWith {
                 true,
                 []
             ] call KH_fnc_raycast
-        ) isNotEqualTo [];
+        );
+
+        if (_raycasts isEqualTo []) then {
+            _result = true;
+        }
+        else {
+            {
+                if (((_x select 0) vectorDistance _start) >= (_start vectorDistance _end)) then {
+                    _result = true;
+                    break;
+                };
+            } forEach _raycasts;
+        };
+
+        _result;
     }
     else {
         if (_raycast isEqualType objNull) then {
+            private _result = false;
             private _checkerObject = createSimpleObject ["KH_HelperRectangle_1x1x2", _end, true];
             _checkerObject setVectorDirAndUp [[0, 1, 0], [0, 0, 1]];
             _checkerObject setPhysicsCollisionFlag false;
@@ -116,8 +148,15 @@ if (_minimalFov >= 360) exitWith {
                 };
             };
 
-            ([_raycasts] call KH_fnc_raycast) isNotEqualTo [];
+            {
+                if ((_x select 3) isEqualTo _checkerObject) then {
+                    result = true;
+                    break;
+                };
+            } forEach ([_raycasts] call KH_fnc_raycast);
+
             deleteVehicle _checkerObject;
+            _result;
         }
         else {
             true;
@@ -164,10 +203,10 @@ if !((_horizontalAngle <= (_horizontalFov / 2)) && (_verticalAngle <= (_vertical
 };
 
 if (_raycast isNotEqualTo false) then {
-    private "_result";
-    
+    private _result = false;
+
     if (_raycast isEqualTo true) then {
-        _result = (
+        private _raycasts = (
             [
                 _start,
                 _end,
@@ -179,7 +218,19 @@ if (_raycast isNotEqualTo false) then {
                 true,
                 []
             ] call KH_fnc_raycast
-        ) isNotEqualTo [];
+        );
+
+        if (_raycasts isEqualTo []) then {
+            _result = true;
+        }
+        else {
+            {
+                if (((_x select 0) vectorDistance _start) >= (_start vectorDistance _end)) then {
+                    _result = true;
+                    break;
+                };
+            } forEach _raycasts;
+        };
     }
     else {
         private _checkerObject = createSimpleObject ["KH_HelperRectangle_1x1x2", _end, true];
@@ -204,8 +255,14 @@ if (_raycast isNotEqualTo false) then {
                 };
             };
         };
-        
-        _result = ([_raycasts] call KH_fnc_raycast) isNotEqualTo [];
+
+        {
+            if ((_x select 3) isEqualTo _checkerObject) then {
+                result = true;
+                break;
+            };
+        } forEach ([_raycasts] call KH_fnc_raycast);
+
         deleteVehicle _checkerObject;
     };
 

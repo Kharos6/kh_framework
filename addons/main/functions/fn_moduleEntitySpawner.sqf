@@ -7,7 +7,7 @@ KH_var_postInitExecutions pushBack [
             private _spawnHandler = [
                 parseSimpleArray (["[", _logic getVariable ["KH_ModuleEntitySpawnerEntityTypes", ""], "]"] joinString ""),
                 [[_logic, [vectorDir _logic, vectorUp _logic]]],
-                parseSimpleArray (["[", _logic getVariable ["KH_ModuleEntitySpawnerRadius", "100, 100, 0"], "]"] joinString ""),
+                _logic getVariable ["KH_ModuleEntitySpawnerRadius", [100, 100, 0]],
                 parseNumber (_logic getVariable ["KH_ModuleEntitySpawnerAmount", "1"]),
                 parseNumber (_logic getVariable ["KH_ModuleEntitySpawnerMaximum", "1"]),
                 compile (_logic getVariable ["KH_ModuleEntitySpawnerCondition", "true"]),
@@ -38,11 +38,7 @@ KH_var_postInitExecutions pushBack [
                         ];
                     };
 
-                    case "AGENT": {
-                        ["AGENT", _logic getVariable ["KH_ModuleEntitySpawnerPlacementMode", ""]];
-                    };
-
-                    case "GROUP": {
+                    case "UNIT_GROUP": {
                         [
                             "UNIT",
                             _logic getVariable ["KH_ModuleEntitySpawnerPlacementMode", ""],
@@ -67,6 +63,34 @@ KH_var_postInitExecutions pushBack [
                         ];
                     };
 
+                    case "AGENT": {
+                        ["AGENT", _logic getVariable ["KH_ModuleEntitySpawnerPlacementMode", ""]];
+                    };
+
+                    case "GROUP": {
+                        [
+                            "GROUP",
+                            _logic getVariable ["KH_ModuleEntitySpawnerPlacementMode", ""],
+                            switch (_logic getVariable ["KH_ModuleEntitySpawnerSide", ""]) do {
+                                case "BLUFOR": {
+                                    west;
+                                };
+
+                                case "OPFOR": {
+                                    east;
+                                };
+
+                                case "GREENFOR": {
+                                    resistance;
+                                };
+
+                                case "CIVILIAN": {
+                                    civilian;
+                                };
+                            }
+                        ];
+                    };
+
                     case "OBJECT": {
                         ["OBJECT", _logic getVariable ["KH_ModuleEntitySpawnerPlacementMode", ""], false];
                     };
@@ -80,8 +104,10 @@ KH_var_postInitExecutions pushBack [
                     };
                 },
                 parseNumber (_logic getVariable ["KH_ModuleEntitySpawnerInterval", "1"]),
+                _logic getVariable ["KH_ModuleEntitySpawnerCountKilled", true],
                 _logic getVariable ["KH_ModuleEntitySpawnerValidatePosition", true],
-                parseNumber (_logic getVariable ["KH_ModuleEntitySpawnerMinimumPlayerDistance", "0"])
+                parseNumber (_logic getVariable ["KH_ModuleEntitySpawnerMinimumPlayerDistance", "100"]),
+                parseNumber (_logic getVariable ["KH_ModuleEntitySpawnerMaximumPlayerDistance", "3000"])
             ] call KH_fnc_entitySpawner;
 
             [

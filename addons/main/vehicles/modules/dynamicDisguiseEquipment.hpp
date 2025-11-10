@@ -39,7 +39,7 @@ class KH_ModuleDynamicDisguiseEquipment: Module_F
 			displayName = "Uniforms";
 			tooltip = "True inserts the uniforms of synchronized units to the desired side's uniform table.";
 			property = "KH_ModuleDynamicDisguiseEquipmentUniforms";
-			defaultValue = "false";
+			defaultValue = "true";
 		};
 		class KH_ModuleDynamicDisguiseEquipmentVests: Checkbox
 		{
@@ -53,7 +53,7 @@ class KH_ModuleDynamicDisguiseEquipment: Module_F
 			displayName = "Headgear";
 			tooltip = "True inserts the headgear of synchronized units to the desired side's uniform table.";
 			property = "KH_ModuleDynamicDisguiseEquipmentHeadgear";
-			defaultValue = "false";
+			defaultValue = "true";
 		};
 		class ModuleDescription: ModuleDescription {};
 	};

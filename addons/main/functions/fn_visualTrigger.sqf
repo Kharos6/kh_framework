@@ -22,7 +22,6 @@ private _entityVariable = generateUid;
 private _conditionReference = generateUid;
 _entity setVariable [_triggerId, true, true];
 _entity setVariable [_firstTrigger, false];
-_entity setVariable [_playerVariable, false];
 _entity setVariable [_entityVariable, false];
 _entity setVariable [_conditionReference, createHashMap];
 	
@@ -43,7 +42,7 @@ private _triggerHandler = [
 				if ([_entity] call _conditionPlayer) then {						
 					if !(isNull _entity) then {
 						if (
-							((player distance _entity) < _maximumDistance) && 
+							((player distance _entity) <= _maximumDistance) && 
 							(alive player) && 
 							(isNull curatorCamera)
 						   ) then {
@@ -106,23 +105,16 @@ private _eventHandler = [
 			"_conditionReference"
 		];
 		
-		if ([_entity] call _conditionServer) then {
+		if ([_currentPlayer, _entity] call _conditionServer) then {
 			if (isNull _entity) exitWith {
 				[_handlerId] call KH_fnc_removeHandler;
 			};
-
-			private _conditionVariableId = getPlayerUID _currentPlayer;
 								
 			if ((_currentPlayer distance _entity) < _minimumDistance) then {
-				_conditionReference set [_conditionVariableId, true];
+				_conditionReference set [getPlayerUID _currentPlayer, true];
 			}
 			else {
-				if !([_currentPlayer, unitAimPositionVisual _entity, _currentPlayer, _screenPercentage, 0, _maximumDistance, true] call KH_fnc_getPositionVisibility) then {
-					_conditionReference set [_conditionVariableId, false];
-				}
-				else {
-					_conditionReference set [_conditionVariableId, true];
-				};
+				_conditionReference set [getPlayerUID _currentPlayer, [_currentPlayer, _entity, _currentPlayer, _screenPercentage, 0, _maximumDistance, true] call KH_fnc_getPositionVisibility];
 			};
 			
 			private _condition = false;

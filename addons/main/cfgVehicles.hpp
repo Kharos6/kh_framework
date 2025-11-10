@@ -10,20 +10,21 @@ class CfgVehicles
 			class Combo;
 			class Default;
 			class Edit;
-			class EditCodeMulti5 {
+			class EditCodeMulti5: Default {
 				control = "EditCodeMulti5";
 				defaultValue = "''";
-				expression = "_this setVariable ['%s', _value, true];";
 			};
-			class EditMulti3 {
+			class EditMulti3: Default {
 				control = "EditMulti3";
 				defaultValue = "''";
-				expression = "_this setVariable ['%s', _value, true];";
 			};
-			class EditMulti5 {
+			class EditMulti5: Default {
 				control = "EditMulti5";
 				defaultValue = "''";
-				expression = "_this setVariable ['%s', _value, true];";
+			};
+			class EditXYZ: Default {
+				control = "EditXYZ";
+				defaultValue = "[0, 0, 0]";
 			};
 			class ModuleDescription;
 			class Units;

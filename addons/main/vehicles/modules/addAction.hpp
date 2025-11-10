@@ -249,7 +249,7 @@ class KH_ModuleAddAction: Module_F
 	};
 	class ModuleDescription: ModuleDescription
 	{
-		description[] = {"Adds an action to the synchronized objects. If no objects are synchronized, the action is added to every player unit. The action addition happens once a potential caller comes within the Distance attribute's designated distance. The action will continue existing until manual scripted removal, Condition Exist failure, or the module being deleted. When the action is removed, the 'KH_eve_actionRemoved' event is triggered for all potential callers, where passed arguments available through _this are: [_identifier, (STRING)]. Activates only once, without a trigger, on the server."};
+		description[] = {"Adds an action to the synchronized entities. If no entities are synchronized, the action is added to every player unit. The action addition happens once a potential caller comes within the Distance attribute's designated distance. The action will continue existing until manual scripted removal, Condition Exist failure, or the module being deleted. When the action is removed, the 'KH_eve_actionRemoved' event is triggered for all potential callers, where passed arguments available through _this are: [_identifier, (STRING)]. Activates only once, without a trigger, on the server."};
 		sync[] = {"Anything"};
 		position = 0;
 		direction = 0;

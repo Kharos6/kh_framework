@@ -66,7 +66,7 @@ class KH_ModuleFultonExtract: Module_F
 	};
 	class ModuleDescription: ModuleDescription
 	{
-		description[] = {"Adds an action to the synchronized objects that allows players to attach a fulton harness to themselves or others, which will then pull them towards the designated vehicle after said vehicle passes within the designated distance of the baloon. Activates only once, without a trigger, on the server."};
+		description[] = {"Adds an action to the synchronized entities that allows players to attach a fulton harness to themselves or others, which will then pull them towards the designated vehicle after said vehicle passes within the designated distance of the baloon. Activates only once, without a trigger, on the server."};
 		sync[] = {"AnyStaticObject"};
 		position = 0;
 		direction = 0;

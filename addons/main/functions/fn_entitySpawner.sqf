@@ -10,7 +10,8 @@ params [
 	["_interval", 1, [0]],
 	["_countKilled", true, [true]],
 	["_validatePosition", true, [true]],
-	["_minimumPlayerDistance", 0, [0]]
+	["_minimumPlayerDistance", 0, [0]],
+	["_maximumPlayerDistance", 0, [0]]
 ];
 
 private _spawnerCount = generateUid;
@@ -27,12 +28,13 @@ private _entityHandler = [
 ] call KH_fnc_addEventHandler;
 
 private _spawnHandler = [
-	[_entityTypes, _transforms, _radius, _amount, _maximum, _condition, _init, _type, _countKilled, _validatePosition, _minimumPlayerDistance, _spawnerCount],
+	[_entityTypes, _transforms, _radius, _amount, _maximum, _condition, _init, _type, _countKilled, _validatePosition, _minimumPlayerDistance, _maximumPlayerDistance, _spawnerCount],
 	{
-		params ["_entityTypes", "_transforms", "_radius", "_amount", "_maximum", "_condition", "_init", "_type", "_countKilled", "_validatePosition", "_minimumPlayerDistance", "_spawnerCount"];
-		private _negativeRadius = [-(_radius select 0), -(_radius select 1), -(_radius select 2)];
+		params ["_entityTypes", "_transforms", "_radius", "_amount", "_maximum", "_condition", "_init", "_type", "_countKilled", "_validatePosition", "_minimumPlayerDistance", "_maximumPlayerDistance", "_spawnerCount"];
 
-		if ((missionNamespace getVariable [_spawnerCount, 0]) < (_maximum + _amount)) then {
+		if ((missionNamespace getVariable [_spawnerCount, 0]) < _maximum) then {
+			private _negativeRadius = [-(_radius select 0), -(_radius select 1), -(_radius select 2)];
+			_amount = (_maximum - (missionNamespace getVariable [_spawnerCount, 0])) min _amount;
 			private _spawnedEntities = [];
 			private _entityType = _type param [0, "UNIT", [""]];
 
@@ -67,7 +69,7 @@ private _spawnHandler = [
 
 						if _validatePosition then {
 							{
-								if ([_x, AGLToASL _position, _x, 1, _minimumPlayerDistance, 0, objNull] call KH_fnc_getPositionVisibility) then {
+								if ([_x, AGLToASL _position, _x, 1, _minimumPlayerDistance, _maximumPlayerDistance, objNull] call KH_fnc_getPositionVisibility) then {
 									_spawnValid = false;
 									break;
 								};
@@ -117,6 +119,82 @@ private _spawnHandler = [
 					};
 				};
 
+				case "GROUP": {
+					(_type select [1]) params [["_placementMode", "CAN_COLLIDE", [""]], ["_side", sideUnknown, [sideUnknown]]];
+					private _group = createGroup [_side, _countKilled];
+
+					for "_i" from 1 to _amount do {
+						private _chosenTransforms = selectRandom _transforms;
+
+						private _position = if ((_chosenTransforms select 0) isEqualType objNull) then {
+							(_chosenTransforms select 0) modelToWorld [0, 0, 0];
+						}
+						else {
+							_chosenTransforms select 0;
+						};
+
+						if !([_chosenTransforms, missionNamespace getVariable [_spawnerCount, 0]] call _condition) then {
+							continue;
+						};
+
+						private _spawnValid = true;
+
+						if _validatePosition then {
+							{
+								if ([_x, AGLToASL _position, _x, 1, _minimumPlayerDistance, _maximumPlayerDistance, objNull] call KH_fnc_getPositionVisibility) then {
+									_spawnValid = false;
+									break;
+								};
+							} forEach KH_var_allPlayerUnits;
+						};
+
+						if !_spawnValid then {
+							continue;
+						};
+
+						private _rotation = if ((count _chosenTransforms) > 1) then {
+							if ((_chosenTransforms select 1) isEqualType objNull) then {
+								private _chosenEntity = _chosenTransforms select 1;
+								[vectorDir _chosenEntity, vectorUp _chosenEntity];
+							}
+							else {
+								if ((_chosenTransforms select 1) isEqualTypeAll []) then {
+									private _vectors = _chosenTransforms select 1;
+									[_vectors select 0, _vectors select 1];
+								}
+								else {
+									_chosenTransforms select 1;
+								};
+							};
+						}
+						else {
+							[[0, 1, 0], [0, 0, 1]];
+						};
+						
+						_position vectorAdd [random [(_radius select 0), 0, (_negativeRadius select 0)], random [(_radius select 1), 0, (_negativeRadius select 1)], random [(_radius select 2), 0, (_negativeRadius select 2)]];
+
+						if !([_position, missionNamespace getVariable [_spawnerCount, 0]] call _condition) then {
+							continue;
+						};
+
+						private _groupArray = selectRandom _entityTypes;
+
+						{
+							private _unit = _group createUnit [_x, _position, [], 0, _placementMode];
+
+							if (_rotation isEqualTypeAll []) then {
+								_unit setVectorDirAndUp _rotation;
+							}
+							else {
+								_unit setRotationEuler _rotation;
+							};
+						} forEach _groupArray;
+
+						[_group, _chosenTransforms, _position] call _init;
+						_spawnedEntities pushBack _group;
+					};
+				};
+
 				case "AGENT": {
 					private _placementMode = _type param [1, "CAN_COLLIDE", [""]];
 
@@ -138,7 +216,7 @@ private _spawnHandler = [
 
 						if _validatePosition then {
 							{
-								if ([_x, AGLToASL _position, _x, 1, _minimumPlayerDistance, 0, objNull] call KH_fnc_getPositionVisibility) then {
+								if ([_x, AGLToASL _position, _x, 1, _minimumPlayerDistance, _maximumPlayerDistance, objNull] call KH_fnc_getPositionVisibility) then {
 									_spawnValid = false;
 									break;
 								};
@@ -209,7 +287,7 @@ private _spawnHandler = [
 
 						if _validatePosition then {
 							{
-								if ([_x, AGLToASL _position, _x, 1, _minimumPlayerDistance, 0, objNull] call KH_fnc_getPositionVisibility) then {
+								if ([_x, AGLToASL _position, _x, 1, _minimumPlayerDistance, _maximumPlayerDistance, objNull] call KH_fnc_getPositionVisibility) then {
 									_spawnValid = false;
 									break;
 								};
@@ -285,7 +363,7 @@ private _spawnHandler = [
 
 						if _validatePosition then {
 							{
-								if ([_x, _position, _x, 1, _minimumPlayerDistance, 0, objNull] call KH_fnc_getPositionVisibility) then {
+								if ([_x, _position, _x, 1, _minimumPlayerDistance, _maximumPlayerDistance, objNull] call KH_fnc_getPositionVisibility) then {
 									_spawnValid = false;
 									break;
 								};
@@ -356,7 +434,7 @@ private _spawnHandler = [
 
 						if _validatePosition then {
 							{
-								if ([_x, AGLToASL _position, _x, 1, _minimumPlayerDistance, 0, objNull] call KH_fnc_getPositionVisibility) then {
+								if ([_x, AGLToASL _position, _x, 1, _minimumPlayerDistance, _maximumPlayerDistance, objNull] call KH_fnc_getPositionVisibility) then {
 									_spawnValid = false;
 									break;
 								};
@@ -410,11 +488,11 @@ private _spawnHandler = [
 
 			missionNamespace setVariable [_spawnerCount, (missionNamespace getVariable [_spawnerCount, 0]) + (count _spawnedEntities)];
 
-			{
-				if _countKilled then {
+			if (_spawnedEntities isEqualTypeAll grpNull) then {
+				{
 					[
-						["ENTITY", _x, "REMOTE"],
-						"Killed",
+						["ENTITY", _group, "REMOTE"],
+						"Deleted",
 						[],
 						{
 							params ["_entity"];
@@ -422,27 +500,47 @@ private _spawnHandler = [
 							[_handlerId] call KH_fnc_removeHandler;
 						}
 					] call KH_fnc_addEventHandler;
-				};
 
-				[
-					["ENTITY", _x, "REMOTE"],
-					"Deleted",
-					[],
 					{
-						params ["_entity"];
+						_x addCuratorEditableObjects [units _x, true];
+					} forEach allCurators;
+				} forEach _spawnedEntities;
+			}
+			else {
+				{
+					if _countKilled then {
+						[
+							["ENTITY", _x, "REMOTE"],
+							"Killed",
+							[],
+							{
+								params ["_entity"];
+								["KH_eve_spawnedEntityTerminated", []] call CBA_fnc_localEvent;
+								[_handlerId] call KH_fnc_removeHandler;
+							}
+						] call KH_fnc_addEventHandler;
+					};
 
-						if (alive _entity) then {
-							["KH_eve_spawnedEntityTerminated", []] call CBA_fnc_localEvent;
-						};
+					[
+						["ENTITY", _x, "REMOTE"],
+						"Deleted",
+						[],
+						{
+							params ["_entity"];
 
-						[_handlerId] call KH_fnc_removeHandler;
-					}
-				] call KH_fnc_addEventHandler;
-			} forEach _spawnedEntities;
+							if (alive _entity) then {
+								["KH_eve_spawnedEntityTerminated", []] call CBA_fnc_localEvent;
+							};
 
-			{
-				_x addCuratorEditableObjects [_spawnedEntities, true];
-			} forEach allCurators;
+							[_handlerId] call KH_fnc_removeHandler;
+						}
+					] call KH_fnc_addEventHandler;
+				} forEach _spawnedEntities;
+
+				{
+					_x addCuratorEditableObjects [_spawnedEntities, true];
+				} forEach allCurators;
+			};
 		};
 	},
 	true,

@@ -19,9 +19,9 @@ class Mission
 						expression = 
 						"\
 							if (_value isEqualTo '') then {\
-								if (fileExists 'kh_serverMissionLoadInit.sqf') then {
-									KH_fnc_serverMissionLoadInit = compileScript ['kh_serverMissionLoadInit.sqf', false, ''];
-								};
+								if (fileExists 'kh_serverMissionLoadInit.sqf') then {\
+									KH_fnc_serverMissionLoadInit = compileScript ['kh_serverMissionLoadInit.sqf', false, ''];\
+								};\
 							}\
 							else {\
 								if (!is3DEN && isServer) then {\
@@ -41,9 +41,9 @@ class Mission
 						expression = 
 						"\
 							if (_value isEqualTo '') then {\
-								if (fileExists 'kh_serverMissionStartInit.sqf') then {
-									KH_fnc_serverMissionStartInit = compileScript ['kh_serverMissionStartInit.sqf', false, ''];
-								};
+								if (fileExists 'kh_serverMissionStartInit.sqf') then {\
+									KH_fnc_serverMissionStartInit = compileScript ['kh_serverMissionStartInit.sqf', false, ''];\
+								};\
 							}\
 							else {\
 								if (!is3DEN && isServer) then {\
@@ -63,9 +63,9 @@ class Mission
 						expression = 
 						"\
 							if (_value isEqualTo '') then {\
-								if (fileExists 'kh_serverPlayersLoadedInit.sqf') then {
-									KH_fnc_serverPlayersLoadedInit = compileScript ['kh_serverPlayersLoadedInit.sqf', false, ''];
-								};
+								if (fileExists 'kh_serverPlayersLoadedInit.sqf') then {\
+									KH_fnc_serverPlayersLoadedInit = compileScript ['kh_serverPlayersLoadedInit.sqf', false, ''];\
+								};\
 							}\
 							else {\
 								if (!is3DEN && isServer) then {\
@@ -85,9 +85,9 @@ class Mission
 						expression = 
 						"\
 							if (_value isEqualTo '') then {\
-								if (fileExists 'kh_serverMissionEndInit.sqf') then {
-									KH_fnc_serverMissionEndInit = compileScript ['kh_serverMissionEndInit.sqf', false, ''];
-								};
+								if (fileExists 'kh_serverMissionEndInit.sqf') then {\
+									KH_fnc_serverMissionEndInit = compileScript ['kh_serverMissionEndInit.sqf', false, ''];\
+								};\
 							}\
 							else {\
 								if (!is3DEN && isServer) then {\
@@ -107,9 +107,9 @@ class Mission
 						expression = 
 						"\
 							if (_value isEqualTo '') then {\
-								if (fileExists 'kh_headlessMissionLoadInit.sqf') then {
-									KH_fnc_headlessMissionLoadInit = compileScript ['kh_headlessMissionLoadInit.sqf', false, ''];
-								};
+								if (fileExists 'kh_headlessMissionLoadInit.sqf') then {\
+									KH_fnc_headlessMissionLoadInit = compileScript ['kh_headlessMissionLoadInit.sqf', false, ''];\
+								};\
 							}\
 							else {\
 								if (!is3DEN && !isServer && !hasInterface) then {\
@@ -129,9 +129,9 @@ class Mission
 						expression = 
 						"\
 							if (_value isEqualTo '') then {\
-								if (fileExists 'kh_headlessMissionStartInit.sqf') then {
-									KH_fnc_headlessMissionStartInit = compileScript ['kh_headlessMissionStartInit.sqf', false, ''];
-								};
+								if (fileExists 'kh_headlessMissionStartInit.sqf') then {\
+									KH_fnc_headlessMissionStartInit = compileScript ['kh_headlessMissionStartInit.sqf', false, ''];\
+								};\
 							}\
 							else {\
 								if (!is3DEN && !isServer && !hasInterface) then {\
@@ -151,9 +151,9 @@ class Mission
 						expression = 
 						"\
 							if (_value isEqualTo '') then {\
-								if (fileExists 'kh_headlessLoadInit.sqf') then {
-									KH_fnc_headlessLoadInit = compileScript ['kh_headlessLoadInit.sqf', false, ''];
-								};
+								if (fileExists 'kh_headlessLoadInit.sqf') then {\
+									KH_fnc_headlessLoadInit = compileScript ['kh_headlessLoadInit.sqf', false, ''];\
+								};\
 							}\
 							else {\
 								if (!is3DEN && !isServer && !hasInterface) then {\
@@ -173,9 +173,9 @@ class Mission
 						expression = 
 						"\
 							if (_value isEqualTo '') then {\
-								if (fileExists 'kh_headlessPlayersLoadedInit.sqf') then {
-									KH_fnc_headlessPlayersLoadedInit = compileScript ['kh_headlessPlayersLoadedInit.sqf', false, ''];
-								};
+								if (fileExists 'kh_headlessPlayersLoadedInit.sqf') then {\
+									KH_fnc_headlessPlayersLoadedInit = compileScript ['kh_headlessPlayersLoadedInit.sqf', false, ''];\
+								};\
 							}\
 							else {\
 								if (!is3DEN && !isServer && !hasInterface) then {\
@@ -195,9 +195,9 @@ class Mission
 						expression = 
 						"\
 							if (_value isEqualTo '') then {\
-								if (fileExists 'kh_headlessMissionEndInit.sqf') then {
-									KH_fnc_headlessMissionEndInit = compileScript ['kh_headlessMissionEndInit.sqf', false, ''];
-								};
+								if (fileExists 'kh_headlessMissionEndInit.sqf') then {\
+									KH_fnc_headlessMissionEndInit = compileScript ['kh_headlessMissionEndInit.sqf', false, ''];\
+								};\
 							}\
 							else {\
 								if (!is3DEN && !isServer && !hasInterface) then {\
@@ -217,8 +217,8 @@ class Mission
 						expression = 
 						"\
 							if (_value isEqualTo '') then {\
-								if (fileExists 'kh_playerMissionLoadInit.sqf') then {
-									KH_fnc_playerMissionLoadInit = compileScript ['kh_playerMissionLoadInit.sqf', false, ''];
+								if (fileExists 'kh_playerMissionLoadInit.sqf') then {\
+									KH_fnc_playerMissionLoadInit = compileScript ['kh_playerMissionLoadInit.sqf', false, ''];\
 								};
 							}\
 							else {\
@@ -239,9 +239,9 @@ class Mission
 						expression = 
 						"\
 							if (_value isEqualTo '') then {\
-								if (fileExists 'kh_playerMissionStartInit.sqf') then {
-									KH_fnc_playerMissionStartInit = compileScript ['kh_playerMissionStartInit.sqf', false, ''];
-								};
+								if (fileExists 'kh_playerMissionStartInit.sqf') then {\
+									KH_fnc_playerMissionStartInit = compileScript ['kh_playerMissionStartInit.sqf', false, ''];\
+								};\
 							}\
 							else {\
 								if (!is3DEN && hasInterface) then {\
@@ -261,9 +261,9 @@ class Mission
 						expression = 
 						"\
 							if (_value isEqualTo '') then {\
-								if (fileExists 'kh_playerLoadInit.sqf') then {
-									KH_fnc_playerLoadInit = compileScript ['kh_playerLoadInit.sqf', false, ''];
-								};
+								if (fileExists 'kh_playerLoadInit.sqf') then {\
+									KH_fnc_playerLoadInit = compileScript ['kh_playerLoadInit.sqf', false, ''];\
+								};\
 							}\
 							else {\
 								if (!is3DEN && hasInterface) then {\
@@ -283,9 +283,9 @@ class Mission
 						expression = 
 						"\
 							if (_value isEqualTo '') then {\
-								if (fileExists 'kh_playerPlayersLoadedInit.sqf') then {
-									KH_fnc_playerPlayersLoadedInit = compileScript ['kh_playerPlayersLoadedInit.sqf', false, ''];
-								};
+								if (fileExists 'kh_playerPlayersLoadedInit.sqf') then {\
+									KH_fnc_playerPlayersLoadedInit = compileScript ['kh_playerPlayersLoadedInit.sqf', false, ''];\
+								};\
 							}\
 							else {\
 								if (!is3DEN && hasInterface) then {\
@@ -305,9 +305,9 @@ class Mission
 						expression = 
 						"\
 							if (_value isEqualTo '') then {\
-								if (fileExists 'kh_playerKilledInit.sqf') then {
-									KH_fnc_playerKilledInit = compileScript ['kh_playerKilledInit.sqf', false, ''];
-								};
+								if (fileExists 'kh_playerKilledInit.sqf') then {\
+									KH_fnc_playerKilledInit = compileScript ['kh_playerKilledInit.sqf', false, ''];\
+								};\
 							}\
 							else {\
 								if (!is3DEN && hasInterface) then {\
@@ -327,9 +327,9 @@ class Mission
 						expression = 
 						"\
 							if (_value isEqualTo '') then {\
-								if (fileExists 'kh_playerRespawnInit.sqf') then {
-									KH_fnc_playerRespawnInit = compileScript ['kh_playerRespawnInit.sqf', false, ''];
-								};
+								if (fileExists 'kh_playerRespawnInit.sqf') then {\
+									KH_fnc_playerRespawnInit = compileScript ['kh_playerRespawnInit.sqf', false, ''];\
+								};\
 							}\
 							else {\
 								if (!is3DEN && hasInterface) then {\
@@ -349,9 +349,9 @@ class Mission
 						expression = 
 						"\
 							if (_value isEqualTo '') then {\
-								if (fileExists 'kh_playerSwitchInit.sqf') then {
-									KH_fnc_playerSwitchInit = compileScript ['kh_playerSwitchInit.sqf', false, ''];
-								};
+								if (fileExists 'kh_playerSwitchInit.sqf') then {\
+									KH_fnc_playerSwitchInit = compileScript ['kh_playerSwitchInit.sqf', false, ''];\
+								};\
 							}\
 							else {\
 								if (!is3DEN && hasInterface) then {\
@@ -371,9 +371,9 @@ class Mission
 						expression = 
 						"\
 							if (_value isEqualTo '') then {\
-								if (fileExists 'kh_playerControlledUnitChangeInit.sqf') then {
-									KH_fnc_playerControlledUnitChangeInit = compileScript ['kh_playerControlledUnitChangeInit.sqf', false, ''];
-								};
+								if (fileExists 'kh_playerControlledUnitChangeInit.sqf') then {\
+									KH_fnc_playerControlledUnitChangeInit = compileScript ['kh_playerControlledUnitChangeInit.sqf', false, ''];\
+								};\
 							}\
 							else {\
 								if (!is3DEN && hasInterface) then {\
@@ -393,9 +393,9 @@ class Mission
 						expression = 
 						"\
 							if (_value isEqualTo '') then {\
-								if (fileExists 'kh_playerMissionEndInit.sqf') then {
-									KH_fnc_playerMissionEndInit = compileScript ['kh_playerMissionEndInit.sqf', false, ''];
-								};
+								if (fileExists 'kh_playerMissionEndInit.sqf') then {\
+									KH_fnc_playerMissionEndInit = compileScript ['kh_playerMissionEndInit.sqf', false, ''];\
+								};\
 							}\
 							else {\
 								if (!is3DEN && hasInterface) then {\

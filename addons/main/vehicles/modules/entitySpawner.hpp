@@ -23,7 +23,7 @@ class KH_ModuleEntitySpawner: Module_F
 		class KH_ModuleEntitySpawnerEntityTypes: Edit
 		{
 			displayName = "Entity Types";
-			tooltip = "Strings of class names of entity types from CfgVehicles that will be chosen at random to spawn.";
+			tooltip = "Strings of class names of entity types from CfgVehicles that will be chosen at random to spawn. If Spawner Type is GROUP, must be arrays of strings of class names of entity types from CfgVehicles. The arrays will be chosen at random and will spawn a unit for each class name entry in order.";
 			property = "KH_ModuleEntitySpawnerEntityTypes";
 			defaultValue = "''";
 		};
@@ -37,6 +37,7 @@ class KH_ModuleEntitySpawner: Module_F
 			class Values
 			{
 				class KH_Unit {name = "UNIT"; value = "UNIT";};
+				class KH_UnitGroup {name = "UNIT GROUP"; value = "UNIT_GROUP";};
                 class KH_Agent {name = "AGENT"; value = "AGENT";};
                 class KH_Group {name = "GROUP"; value = "GROUP";};
                 class KH_Object {name = "OBJECT"; value = "OBJECT";};
@@ -47,10 +48,10 @@ class KH_ModuleEntitySpawner: Module_F
 		class KH_ModuleEntitySpawnerPlacementMode: Combo
 		{
 			displayName = "Placement Mode";
-			tooltip = "Placement mode. FLY will have the same effect as NONE for agents or units.";
+			tooltip = "Placement mode.";
 			property = "KH_ModuleEntitySpawnerPlacementMode";
 			typeName = "STRING";
-			defaultValue = "'CAN_COLLIDE'";
+			defaultValue = "'NONE'";
 			class Values
 			{
 				class KH_None {name = "NONE"; value = "NONE";};
@@ -73,24 +74,24 @@ class KH_ModuleEntitySpawner: Module_F
                 class KH_Civilian {name = "CIVILIAN"; value = "CIVILIAN";};
 			};
 		};
-		class KH_ModuleEntitySpawnerRadius: Edit
+		class KH_ModuleEntitySpawnerRadius: EditXYZ
 		{
 			displayName = "Radius";
-			tooltip = "Randomly chosen spawn position within a 3d vector radius, in format x, y, z.";
+			tooltip = "Randomly chosen spawn position within a 3d vector radius.";
 			property = "KH_ModuleEntitySpawnerRadius";
-			defaultValue = "'100, 100, 0'";
+			defaultValue = "[100, 100, 0]";
 		};
 		class KH_ModuleEntitySpawnerAmount: Edit
 		{
 			displayName = "Amount";
-			tooltip = "Amount the spawned entities per interval. For GROUP type, this does not mean the number of groups, but rather the amount of units within the group.";
+			tooltip = "Amount of spawned entities per interval. This will be clamped by the Maximum. If Spawner Type is GROUP, this means the number of groups.";
 			property = "KH_ModuleEntitySpawnerAmount";
 			defaultValue = "'1'";
 		};
 		class KH_ModuleEntitySpawnerMaximum: Edit
 		{
 			displayName = "Maximum";
-			tooltip = "Maximum allowed amount the spawned entities per interval.";
+			tooltip = "Maximum allowed amount of spawned entities.";
 			property = "KH_ModuleEntitySpawnerMaximum";
 			defaultValue = "'1'";
 		};
@@ -104,7 +105,7 @@ class KH_ModuleEntitySpawner: Module_F
 		class KH_ModuleEntitySpawnerInit: EditCodeMulti5
 		{
 			displayName = "Init";
-			tooltip = "Unscheduled code executed locally to the server acting as the initialization of each spawned entity. Passed arguments available through _this are: [_entity (OBJECT), _chosenSpawnPoint (ARRAY), _chosenSpawnPosition (ARRAY)]. Local variables exposed to the function are: _handlerId (ARRAY).";
+			tooltip = "Unscheduled code executed locally to the server acting as the initialization of each spawned entity. Passed arguments available through _this are: [_entity (OBJECT, GROUP), _chosenSpawnPoint (ARRAY), _chosenSpawnPosition (ARRAY)]. Local variables exposed to the function are: _handlerId (ARRAY).";
 			property = "KH_ModuleEntitySpawnerInit";
 			defaultValue = "''";
 		};
@@ -118,7 +119,7 @@ class KH_ModuleEntitySpawner: Module_F
 		class KH_ModuleEntitySpawnerCountKilled: Checkbox
 		{
 			displayName = "Count Killed";
-			tooltip = "True makes it so that killed entities decrement the spawned count, allowing for others to take its place.";
+			tooltip = "True makes it so that killed entities decrement the spawned count, allowing for others to take its place. If true and Spawner Type is GROUP, the group will only be deleted after all of its units are dead. False will prevent automatic group deletion.";
 			property = "KH_ModuleEntitySpawnerCountKilled";
 			defaultValue = "true";
 		};
@@ -134,7 +135,14 @@ class KH_ModuleEntitySpawner: Module_F
 			displayName = "Minimum Player Distance";
 			tooltip = "The distance between any player and a chosen spawn position within which the spawner will refuse to spawn an entity.";
 			property = "KH_ModuleEntitySpawnerMinimumPlayerDistance";
-			defaultValue = "'0'";
+			defaultValue = "'100'";
+		};
+		class KH_ModuleEntitySpawnerMaximumPlayerDistance: Edit
+		{
+			displayName = "Maximum Player Distance";
+			tooltip = "The distance between any player and a chosen spawn position beyond which the spawner will refuse to spawn an entity.";
+			property = "KH_ModuleEntitySpawnerMaximumPlayerDistance";
+			defaultValue = "'3000'";
 		};
 		class ModuleDescription: ModuleDescription {};
 	};

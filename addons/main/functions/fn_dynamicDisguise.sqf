@@ -162,7 +162,7 @@ if _state then {
 									else {
 										{
 											if (
-												(!(isPlayer _x) && (alive _x) && ((side (group _x)) isEqualTo _currentSide)) && 
+												(!(isPlayer _x) && (alive _x) && (simulationEnabled _x) && ((side (group _x)) isEqualTo _currentSide)) && 
 												(
 												 (([_player, "VIEW", objectParent _player] checkVisibility [eyePos _player, eyePos _x]) > 0) || 
 												 (([_player, "VIEW", objectParent _player] checkVisibility [AGLToASL (unitAimPosition _player), eyePos _x]) > 0)
@@ -223,10 +223,11 @@ if _state then {
 									(
 									 !(isPlayer _x) && 
 									 (alive _x) && 
+									 (simulationEnabled _x) &&
 									 ((side (group _x)) isEqualTo _currentSide) && 
 									 (
 									  (([_player, "VIEW", objectParent _player] checkVisibility [eyePos _player, eyePos _x]) > 0) || 
-									  (([_player, "VIEW", objectParent _player] checkVisibility [(getPosASL _player) vectorAdd [0, 0, 1], eyePos _x]) > 0)
+									  (([_player, "VIEW", objectParent _player] checkVisibility [AGLToASL (unitAimPosition _player), eyePos _x]) > 0)
 									 )
 									) || 
 									(_player getVariable ["KH_var_disguiseRecoveryChecker", false])

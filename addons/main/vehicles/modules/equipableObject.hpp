@@ -34,19 +34,19 @@ class KH_ModuleEquipableObject: Module_F
 			property = "KH_ModuleEquipableObjectBone";
 			defaultValue = "''";
 		};
-		class KH_ModuleEquipableObjectPosition: Edit
+		class KH_ModuleEquipableObjectPosition: EditXYZ
 		{
 			displayName = "Position";
 			tooltip = "Position of the object relative to the assigned bone.";
 			property = "KH_ModuleEquipableObjectPosition";
-			defaultValue = "'0, 0, 0'";
+			defaultValue = "[0, 0, 0]";
 		};
-		class KH_ModuleEquipableObjectRotation: Edit
+		class KH_ModuleEquipableObjectRotation: EditXYZ
 		{
 			displayName = "Rotation";
-			tooltip = "Rotation of the object relative to the assigned bone. Can either be in euler format x, y, z, or vectorDir and vectorUp in format [x, y, z], [x, y, z]";
+			tooltip = "Rotation of the object relative to the assigned bone.";
 			property = "KH_ModuleEquipableObjectRotation";
-			defaultValue = "'0, 0, 0'";
+			defaultValue = "[0, 0, 0]";
 		};
 		class KH_ModuleEquipableObjectScale: Edit
 		{
@@ -80,7 +80,7 @@ class KH_ModuleEquipableObject: Module_F
 	};
 	class ModuleDescription: ModuleDescription
 	{
-		description[] = {"Adds an action to the synchronized objects that allows players to equip them on their person. Each equip and unequip triggers the 'KH_eve_equipableObjectExchanged' event, where passed arguments available through _this are: [_carrier (OBJECT), _equipableObject (OBJECT), _equipped (BOOL)]. Activates only once, without a trigger, on the server."};
+		description[] = {"Adds an action to the synchronized entities that allows players to equip them on their person. Each equip and unequip triggers the 'KH_eve_equipableObjectExchanged' event, where passed arguments available through _this are: [_carrier (OBJECT), _equipableObject (OBJECT), _equipped (BOOL)]. Activates only once, without a trigger, on the server."};
 		sync[] = {"AnyStaticObject"};
 		position = 0;
 		direction = 0;

@@ -44,7 +44,7 @@ class KH_ModuleVisualTrigger: Module_F
 		class KH_ModuleVisualTriggerConditionServer: EditCodeMulti5
 		{
 			displayName = "Condition Server";
-			tooltip = "Unscheduled code executed locally to the server that must return true in order for the trigger to activate. Both this and Condition Player must be true. Passed arguments available through _this are: [_entity (OBJECT)]";
+			tooltip = "Unscheduled code executed locally to the server that must return true in order for the trigger to activate. Both this and Condition Player must be true. Passed arguments available through _this are: [_activatingPlayer (OBJECT), _entity (OBJECT)]";
 			property = "KH_ModuleVisualTriggerConditionServer";
 			defaultValue = "'true'";
 		};
@@ -108,7 +108,7 @@ class KH_ModuleVisualTrigger: Module_F
 	};
 	class ModuleDescription: ModuleDescription
 	{
-		description[] = {"Makes the synchronized entities act as a visual trigger, executing unscheduled code on activation and deactivation when a player observes the object with clear line of sight, for as long as the module exists. Activates only once, without a trigger, on the server."};
+		description[] = {"Makes the synchronized entities act as a visual trigger, executing unscheduled code on activation and deactivation when a player observes the entity with clear line of sight, for as long as the module exists. Activates only once, without a trigger, on the server."};
 		sync[] = {"Anything"};
 		position = 0;
 		direction = 0;

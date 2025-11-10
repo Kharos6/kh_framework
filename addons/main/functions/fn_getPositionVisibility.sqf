@@ -61,21 +61,21 @@ if (_start isEqualType objNull) then {
     if (isPlayer _start) then {
         _verticalFov = (getObjectFOV _start) * (180 / pi) * _verticalFov;
         _horizontalFov = 2 * (atan (((_start getVariable ["KH_var_playerAspectRatio", 1.777777]) * _horizontalFov) * tan ((_verticalFov / 2) * (pi / 180)))) * (180 / pi);
-        _start = AGLToASL (_start getVariable ["KH_var_playerCameraPosition", eyePos _start]);
         _maximumDistance = _start getVariable ["KH_var_playerViewDistance", _maximumDistance];
+        _start = AGLToASL (_start getVariable ["KH_var_playerCameraPosition", eyePos _start]);
     }
     else {
         if (_start isKindOf "Man") then {
             _start = eyePos _start;
         }
         else {
-            _start = getPosASL _start;
+            _start = AGLToASL (unitAimPositionVisual _start);
         };
     };
 };
 
 if (_end isEqualType objNull) then {
-    _end = getPosASL _end;
+    _end = AGLToASL (unitAimPositionVisual _end);
 };
 
 if (_maximumDistance isEqualTo 0) then {
@@ -92,9 +92,7 @@ if ((_start vectorDistance _end) < _minimumDistance) exitWith {
 
 if (_minimalFov >= 360) exitWith {
     if (_raycast isEqualTo true) then {
-        private _result = false;
-
-        private _raycasts = (
+        (
             [
                 _start,
                 _end,
@@ -106,21 +104,7 @@ if (_minimalFov >= 360) exitWith {
                 true,
                 []
             ] call KH_fnc_raycast
-        );
-
-        if (_raycasts isEqualTo []) then {
-            _result = true;
-        }
-        else {
-            {
-                if (((_x select 0) vectorDistance _start) >= (_start vectorDistance _end)) then {
-                    _result = true;
-                    break;
-                };
-            } forEach _raycasts;
-        };
-
-        _result;
+        ) isEqualTo [];
     }
     else {
         if (_raycast isEqualType objNull) then {
@@ -203,10 +187,8 @@ if !((_horizontalAngle <= (_horizontalFov / 2)) && (_verticalAngle <= (_vertical
 };
 
 if (_raycast isNotEqualTo false) then {
-    private _result = false;
-
     if (_raycast isEqualTo true) then {
-        private _raycasts = (
+        (
             [
                 _start,
                 _end,
@@ -218,21 +200,10 @@ if (_raycast isNotEqualTo false) then {
                 true,
                 []
             ] call KH_fnc_raycast
-        );
-
-        if (_raycasts isEqualTo []) then {
-            _result = true;
-        }
-        else {
-            {
-                if (((_x select 0) vectorDistance _start) >= (_start vectorDistance _end)) then {
-                    _result = true;
-                    break;
-                };
-            } forEach _raycasts;
-        };
+        ) isEqualTo [];
     }
     else {
+        private _result = false;
         private _checkerObject = createSimpleObject ["KH_HelperRectangle_1x1x2", _end, true];
         _checkerObject setVectorDirAndUp [[0, 1, 0], [0, 0, 1]];
         _checkerObject setPhysicsCollisionFlag false;
@@ -264,9 +235,8 @@ if (_raycast isNotEqualTo false) then {
         } forEach ([_raycasts] call KH_fnc_raycast);
 
         deleteVehicle _checkerObject;
+        _result;
     };
-
-    _result;
 }
 else {
     true;

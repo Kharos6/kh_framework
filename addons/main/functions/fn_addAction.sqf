@@ -113,12 +113,7 @@ else {
                     0.25,
                     0.25,
                     1,
-                    if (_name isEqualType "") then {
-                        _name;
-                    }
-                    else {
-                        _name select 0;
-                    },
+                    "INTERACT",
                     true,
                     0.02,
                     "EtelkaMonospacePro",

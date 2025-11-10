@@ -20,12 +20,13 @@ class KH_ModuleVisualTrigger: Module_F
 	icon = "iconLogic";
 	class Attributes: AttributesBase
 	{
-		class KH_ModuleVisualTriggerScreenPercentage: Edit
+		class KH_ModuleVisualTriggerScreenPercentage: Default
 		{
-			displayName = "Screen Percentage";
-			tooltip = "The distance from the edge of the screen to the center of the screen within which the trigger will activate, from 0 to 1, where 0 is pin point center and 1 is the whole screen.";
+			control = "KH_VisualTriggerScreenPercentage";
+			displayName = "";
+			tooltip = "";
 			property = "KH_ModuleVisualTriggerScreenPercentage";
-			defaultValue = "'0.5'";
+			defaultValue = "0.5";
 		};
 		class KH_ModuleVisualTriggerMinimumDistance: Edit
 		{

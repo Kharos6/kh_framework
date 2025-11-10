@@ -9,7 +9,7 @@ KH_var_postInitExecutions pushBack [
             {
                 _visualTriggers pushBack ([
                     _x,
-                    parseNumber (_logic getVariable ["KH_ModuleVisualTriggerScreenPercentage", "0.5"]),
+                    _logic getVariable ["KH_ModuleVisualTriggerScreenPercentage", 0.5],
                     parseNumber (_logic getVariable ["KH_ModuleVisualTriggerMinimumDistance", "1"]),
                     parseNumber (_logic getVariable ["KH_ModuleVisualTriggerMaximumDistance", "1000"]),
                     compile (_logic getVariable ["KH_ModuleVisualTriggerConditionServer", "true"]),

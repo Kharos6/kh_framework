@@ -4,9 +4,9 @@ prefix = "kh"
 author = "Kharos"
 
 [version]
-major = 1
-minor = 4
-patch = 4
+major = 2
+minor = 0
+patch = 0
 git_hash = 0
 
 [hemtt.build]

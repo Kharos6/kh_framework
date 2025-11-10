@@ -34,12 +34,12 @@ class KH_ModuleFultonExtract: Module_F
 			property = "KH_ModuleFultonExtractVehicles";
 			defaultValue = "''";
 		};
-		class KH_ModuleFultonExtractHeight: Edit
+		class KH_ModuleFultonExtractHeight: EditZ
 		{
 			displayName = "Height";
 			tooltip = "Height, in metres, that the fulton baloon will reach as it waits for a designated vehicle. Maximum value is clamped to 100.";
 			property = "KH_ModuleFultonExtractHeight";
-			defaultValue = "'100'";
+			defaultValue = "100";
 		};
 		class KH_ModuleFultonExtractDistance: Edit
 		{

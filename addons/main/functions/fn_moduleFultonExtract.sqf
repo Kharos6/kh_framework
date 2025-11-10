@@ -14,7 +14,7 @@ KH_var_postInitExecutions pushBack [
                 [
                     _x,
                     _vehicles,
-                    parseNumber (_logic getVariable ["KH_ModuleFultonExtractHeight", "100"]),
+                    _logic getVariable ["KH_ModuleFultonExtractHeight", 100],
                     parseNumber (_logic getVariable ["KH_ModuleFultonExtractDistance", "10"]),
                     parseNumber (_logic getVariable ["KH_ModuleFultonExtractMaximumParticipants", "10"]),
                     parseNumber (_logic getVariable ["KH_ModuleFultonExtractDuration", "15"]),

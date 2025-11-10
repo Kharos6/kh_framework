@@ -8,6 +8,13 @@ class Attributes
 			class Title;
 		};
 	};
+	class Slider: Title 
+	{
+		class Controls
+		{
+			class Title;
+		};
+	};
 	class SubCategoryNoHeader1: Default
 	{
 		class Controls
@@ -202,4 +209,5 @@ class Attributes
 	#include "\x\kh\addons\main\3den\at_persistentInit.hpp"
 	#include "\x\kh\addons\main\3den\at_sideRelations.hpp"
 	#include "\x\kh\addons\main\3den\at_transferToHeadlessClient.hpp"
+	#include "\x\kh\addons\main\3den\at_visualTriggerScreenPercentage.hpp"
 };

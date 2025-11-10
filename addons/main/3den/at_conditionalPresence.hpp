@@ -42,6 +42,7 @@ class KH_ConditionalPresence: Title
 		class Init: ctrlEditMulti
 		{
 			idc = 102;
+			font = "EtelkaMonospacePro";
 			x = QUOTE(CTRL_DEFAULT_X);
 			y = QUOTE(3 * CTRL_DEFAULT_H + 10 * CTRL_DEFAULT_Y);
 			w = QUOTE(CTRL_DEFAULT_W);

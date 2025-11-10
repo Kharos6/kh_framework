@@ -28,6 +28,7 @@ class KH_PersistentInit: Title
 		class LocalFunction: ctrlEditMulti
 		{
 			idc = 101;
+			font = "EtelkaMonospacePro";
 			x = QUOTE(CTRL_DEFAULT_X);
 			y = QUOTE(2 * CTRL_DEFAULT_H + 5 * CTRL_DEFAULT_Y);
 			w = QUOTE(CTRL_DEFAULT_W);
@@ -42,6 +43,7 @@ class KH_PersistentInit: Title
 		class RemoteFunction: ctrlEditMulti
 		{
 			idc = 102;
+			font = "EtelkaMonospacePro";
 			x = QUOTE(CTRL_DEFAULT_X);
 			y = QUOTE(5 * CTRL_DEFAULT_H + 10 * CTRL_DEFAULT_Y);
 			w = QUOTE(CTRL_DEFAULT_W);

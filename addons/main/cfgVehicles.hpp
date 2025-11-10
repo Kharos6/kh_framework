@@ -26,6 +26,10 @@ class CfgVehicles
 				control = "EditXYZ";
 				defaultValue = "[0, 0, 0]";
 			};
+			class EditZ: Default {
+				control = "EditZ";
+				defaultValue = "0";
+			};
 			class ModuleDescription;
 			class Units;
 		};

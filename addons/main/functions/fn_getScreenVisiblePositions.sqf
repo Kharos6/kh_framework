@@ -1,9 +1,9 @@
 params [["_camera", objNull, [objNull]], ["_stepX", 0.01, [0]], ["_stepY", 0.01, [0]], ["_shiftX", 0, [0]], ["_shiftY", 0, [0]], ["_raycast", false, [true]], ["_draw", [], [[]]]];
+private _safeZoneX = safeZoneX + (_stepX * _shiftX);
+private _safeZoneY = safeZoneY + (_stepX * _shiftY);
+private _endX = 1 + (abs safeZoneX);
+private _endY = 1 + (abs safeZoneY);
 private _allPositions = [];
-private _safeZoneX = safeZoneX + _shiftX;
-private _safeZoneY = safeZoneY + _shiftY;
-private _endX = (1 + (abs safeZoneX)) + _shiftX;
-private _endY = (1 + (abs safeZoneY)) + _shiftY;
 
 if (isNull _camera) then {
     if _raycast then {

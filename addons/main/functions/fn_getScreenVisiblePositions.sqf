@@ -2,11 +2,13 @@ params [["_camera", objNull, [objNull]], ["_stepX", 0.01, [0]], ["_stepY", 0.01,
 private _allPositions = [];
 private _safeZoneX = safeZoneX + _shiftX;
 private _safeZoneY = safeZoneY + _shiftY;
+private _endX = (1 + (abs safeZoneX)) + _shiftX;
+private _endY = (1 + (abs safeZoneY)) + _shiftY;
 
 if (isNull _camera) then {
     if _raycast then {
-        for "_positionX" from _safeZoneX to (1 + (abs _safeZoneX)) step _stepX do {
-            for "_positionY" from _safeZoneY to (1 + (abs _safeZoneY)) step _stepY do {
+        for "_positionX" from _safeZoneX to _endX step _stepX do {
+            for "_positionY" from _safeZoneY to _endY step _stepY do {
                 private _cameraPosition = AGLToASL (positionCameraToWorld [0, 0, 0]);
 
                 _allPositions pushBack [
@@ -24,8 +26,8 @@ if (isNull _camera) then {
         };
     }
     else {
-        for "_positionX" from _safeZoneX to (1 + (abs _safeZoneX)) step _stepX do {
-            for "_positionY" from _safeZoneY to (1 + (abs _safeZoneY)) step _stepY do {
+        for "_positionX" from _safeZoneX to _endX step _stepX do {
+            for "_positionY" from _safeZoneY to _endY step _stepY do {
                 private _cameraPosition = positionCameraToWorld [0, 0, 0];
                 private _position = screenToWorld [_positionX, _positionY];
                 private _currentVectorDirection = _cameraPosition vectorFromTo _position;
@@ -46,8 +48,8 @@ if (isNull _camera) then {
 }
 else {
     if _raycast then {
-        for "_positionX" from _safeZoneX to (1 + (abs _safeZoneX)) step _stepX do {
-            for "_positionY" from _safeZoneY to (1 + (abs _safeZoneY)) step _stepY do {
+        for "_positionX" from _safeZoneX to _endX step _stepX do {
+            for "_positionY" from _safeZoneY to _endY step _stepY do {
                 private _cameraPosition = getPosASL _camera;
 
                 _allPositions pushBack [
@@ -65,8 +67,8 @@ else {
         };
     }
     else {
-        for "_positionX" from _safeZoneX to (1 + (abs _safeZoneX)) step _stepX do {
-            for "_positionY" from _safeZoneY to (1 + (abs _safeZoneY)) step _stepY do {
+        for "_positionX" from _safeZoneX to _endX step _stepX do {
+            for "_positionY" from _safeZoneY to _endY step _stepY do {
                 private _cameraPosition = _camera modelToWorld [0, 0, 0];
                 private _position = _camera screenToWorld [_positionX, _positionY];
                 private _currentVectorDirection = _cameraPosition vectorFromTo _position;

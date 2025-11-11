@@ -752,8 +752,8 @@ if isServer then {
 			publicVariable "KH_var_allMachines";
 			KH_var_allPlayerMachines pushBackUnique _machineId;
 			publicVariable "KH_var_allPlayerMachines";
-			private _uid = "";
-			private _id = "";
+			private "_uid";
+			private "_id";
 			
 			{
 				if ((_x getUserInfo 1) isEqualTo _machineId) then {
@@ -1167,66 +1167,6 @@ if hasInterface then {
 		true
 	] call CBA_fnc_addPlayerEventHandler;
 
-	[
-		[],
-		{
-			call KH_fnc_playerLoadInit;
-			["KH_eve_playerLoaded", [clientOwner, getPlayerUID player, getPlayerID player, player, [player, true] call KH_fnc_getEntityVariableName]] call CBA_fnc_globalEvent;				
-
-			if (KH_var_playerRespawnedEventHandler isNotEqualTo []) then {
-				[KH_var_playerRespawnedEventHandler] call KH_fnc_removeHandler;
-			};
-
-			KH_var_playerRespawnedEventHandler = [
-				["ENTITY", player, "LOCAL"],
-				"Respawn",
-				[],
-				{
-					params ["_unit", "_corpse"];
-					_corpse setVariable ["KH_var_playerUnit", _unit];
-					_corpse setVehicleVarName "";
-
-					[
-						[_corpse],
-						{
-							params ["_corpse"];
-							_corpse setVehicleVarName "";
-						},
-						"GLOBAL",
-						true,
-						true
-					] call KH_fnc_execute;
-
-					[_corpse] call KH_fnc_playerRespawnInit;
-					["KH_eve_playerRespawned", [owner _unit, getPlayerUID _unit, getPlayerID _unit, _unit, _corpse]] call CBA_fnc_globalEvent;
-					nil;
-				}
-			] call KH_fnc_addEventHandler;
-
-			if (KH_var_playerKilledEventHandler isNotEqualTo []) then {
-				[KH_var_playerKilledEventHandler] call KH_fnc_removeHandler;
-			};
-
-			KH_var_playerKilledEventHandler = [
-				["ENTITY", player, "LOCAL"],
-				"Killed",
-				[],
-				{
-					params ["_unit", "_killer", "_instigator"];
-					[_killer, _instigator] call KH_fnc_playerKilledInit;
-					["KH_eve_playerKilled", [owner _unit, getPlayerUID _unit, getPlayerID _unit, _unit, _killer, _instigator]] call CBA_fnc_globalEvent;
-				}
-			] call KH_fnc_addEventHandler;
-
-			{
-				luaExecute _x;
-			} forEach KH_var_loadInitLuaExecutions;
-		},
-		true,
-		{(!(isNull player) && (alive player));},
-		false
-	] call KH_fnc_execute;
-
 	addMissionEventHandler [
 		"TeamSwitch", 
 		{
@@ -1408,21 +1348,6 @@ if (!isServer && !hasInterface) then {
 	KH_fnc_headlessLoadInit = {};
 	KH_fnc_headlessPlayersLoadedInit = {};
 	KH_fnc_headlessMissionEndInit = {};
-
-	[
-		[],
-		{
-			call KH_fnc_headlessLoadInit;
-			["KH_eve_headlessLoaded", [clientOwner, getPlayerID player, player, [player, true] call KH_fnc_getEntityVariableName]] call CBA_fnc_globalEvent;				
-
-			{
-				luaExecute _x;
-			} forEach KH_var_loadInitLuaExecutions;
-		},
-		true,
-		{(!(isNull player) && (alive player));},
-		false
-	] call KH_fnc_execute;
 
 	[
 		[],

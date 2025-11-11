@@ -101,7 +101,7 @@ isNil {
 							};
 						} forEach allUsers;
 						
-						(((count KH_var_allPlayerUnits) >= _initialPlayerCount)) || (CBA_missionTime > 60);
+						((((count KH_var_allPlayerMachines) >= _initialPlayerCount)) && ((count KH_var_allPlayerUnits) >= _initialPlayerCount)) || (CBA_missionTime > 60);
 					},
 					false
 				] call KH_fnc_execute;
@@ -121,6 +121,66 @@ isNil {
 		"KH_var_khDisplayLayer" cutRsc ["KH_ResourceKHDisplay", "PLAIN", -1, true, true];
 		call KH_fnc_playerMissionLoadInit;
 		["KH_eve_playerMissionPreloaded", [clientOwner]] call CBA_fnc_serverEvent;
+
+		[
+			[],
+			{
+				call KH_fnc_playerLoadInit;
+				["KH_eve_playerLoaded", [clientOwner, getPlayerUID player, getPlayerID player, player, [player, true] call KH_fnc_getEntityVariableName]] call CBA_fnc_globalEvent;				
+
+				if (KH_var_playerRespawnedEventHandler isNotEqualTo []) then {
+					[KH_var_playerRespawnedEventHandler] call KH_fnc_removeHandler;
+				};
+
+				KH_var_playerRespawnedEventHandler = [
+					["ENTITY", player, "LOCAL"],
+					"Respawn",
+					[],
+					{
+						params ["_unit", "_corpse"];
+						_corpse setVariable ["KH_var_playerUnit", _unit];
+						_corpse setVehicleVarName "";
+
+						[
+							[_corpse],
+							{
+								params ["_corpse"];
+								_corpse setVehicleVarName "";
+							},
+							"GLOBAL",
+							true,
+							true
+						] call KH_fnc_execute;
+
+						[_corpse] call KH_fnc_playerRespawnInit;
+						["KH_eve_playerRespawned", [owner _unit, getPlayerUID _unit, getPlayerID _unit, _unit, _corpse]] call CBA_fnc_globalEvent;
+						nil;
+					}
+				] call KH_fnc_addEventHandler;
+
+				if (KH_var_playerKilledEventHandler isNotEqualTo []) then {
+					[KH_var_playerKilledEventHandler] call KH_fnc_removeHandler;
+				};
+
+				KH_var_playerKilledEventHandler = [
+					["ENTITY", player, "LOCAL"],
+					"Killed",
+					[],
+					{
+						params ["_unit", "_killer", "_instigator"];
+						[_killer, _instigator] call KH_fnc_playerKilledInit;
+						["KH_eve_playerKilled", [owner _unit, getPlayerUID _unit, getPlayerID _unit, _unit, _killer, _instigator]] call CBA_fnc_globalEvent;
+					}
+				] call KH_fnc_addEventHandler;
+
+				{
+					luaExecute _x;
+				} forEach KH_var_loadInitLuaExecutions;
+			},
+			true,
+			{(!(isNull player) && (alive player));},
+			false
+		] call KH_fnc_execute;
 
 		if KH_var_khMedical then {
 			private _control = (uiNamespace getVariable ["KH_var_khDisplay", displayNull]) ctrlCreate ["RscStructuredText", -1];
@@ -204,6 +264,21 @@ isNil {
 	if (!isServer && !hasInterface) then {
 		call KH_fnc_headlessMissionLoadInit;
 		["KH_eve_headlessMissionPreloaded", [clientOwner]] call CBA_fnc_serverEvent;
+
+		[
+			[],
+			{
+				call KH_fnc_headlessLoadInit;
+				["KH_eve_headlessLoaded", [clientOwner, getPlayerID player, player, [player, true] call KH_fnc_getEntityVariableName]] call CBA_fnc_globalEvent;				
+
+				{
+					luaExecute _x;
+				} forEach KH_var_loadInitLuaExecutions;
+			},
+			true,
+			{(!(isNull player) && (alive player));},
+			false
+		] call KH_fnc_execute;
 	};
 
 	{

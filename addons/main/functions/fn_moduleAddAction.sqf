@@ -21,7 +21,14 @@ KH_var_postInitExecutions pushBack [
 
                     private _arguments = [
                         objNull,
-                        _logic getVariable ["KH_ModuleAddActionName", ""],
+                        [
+                            _logic getVariable ["KH_ModuleAddActionMenuName", ""],
+                            _logic getVariable ["KH_ModuleAddActionWindowBackgroundName", ""],
+                            _logic getVariable ["KH_ModuleAddActionWindowForegroundName", ""],
+                            _logic getVariable ["KH_ModuleAddActionProgressMenuName", ""],
+                            _logic getVariable ["KH_ModuleAddActionProgressWindowBackgroundName", ""],
+                            _logic getVariable ["KH_ModuleAddActionProgressWindowForegroundName", ""]
+                        ],
                         [],
                         [
                             compile (_logic getVariable ["KH_ModuleAddActionFunctionStart", ""]),

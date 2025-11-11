@@ -27,11 +27,46 @@ class KH_ModuleAddAction: Module_F
 			property = "KH_ModuleAddActionHandleObjectActionRecovery";
 			defaultValue = "true";
 		};
-		class KH_ModuleAddActionName: Edit
+		class KH_ModuleAddActionMenuName: Edit
 		{
-			displayName = "Name";
-			tooltip = "Name of the action.";
-			property = "KH_ModuleAddActionName";
+			displayName = "Menu Name";
+			tooltip = "Name of the action shown in the action menu. Structured text formatting applies.";
+			property = "KH_ModuleAddActionMenuName";
+			defaultValue = "''";
+		};
+		class KH_ModuleAddActionWindowBackgroundName: Edit
+		{
+			displayName = "Window Background Name";
+			tooltip = "Name of the action shown in the background of the action window. Leave empty to inherit from Menu Name. Structured text formatting applies.";
+			property = "KH_ModuleAddActionWindowBackgroundName";
+			defaultValue = "''";
+		};
+		class KH_ModuleAddActionWindowForegroundName: Edit
+		{
+			displayName = "Window Foreground Name";
+			tooltip = "Name of the action shown in the foreground of the action window. Leave empty to inherit from Menu Name. Structured text formatting applies.";
+			property = "KH_ModuleAddActionWindowForegroundName";
+			defaultValue = "''";
+		};
+		class KH_ModuleAddActionProgressMenuName: Edit
+		{
+			displayName = "Progress Menu Name";
+			tooltip = "Name of the action shown in the action menu during action progress. Structured text formatting applies.";
+			property = "KH_ModuleAddActionProgressMenuName";
+			defaultValue = "''";
+		};
+		class KH_ModuleAddActionProgressWindowBackgroundName: Edit
+		{
+			displayName = "Progress Window Background Name";
+			tooltip = "Name of the action shown in the background of the action window during action progress. Leave empty to inherit from Progress Menu Name. Structured text formatting applies.";
+			property = "KH_ModuleAddActionProgressWindowBackgroundName";
+			defaultValue = "''";
+		};
+		class KH_ModuleAddActionProgressWindowForegroundName: Edit
+		{
+			displayName = "Progress Window Foreground Name";
+			tooltip = "Name of the action shown in the foreground of the action window during action progress. Leave empty to inherit from Progress Menu Name. Structured text formatting applies.";
+			property = "KH_ModuleAddActionProgressWindowForegroundName";
 			defaultValue = "''";
 		};
 		class KH_ModuleAddActionFunctionStart: EditCodeMulti5
@@ -159,7 +194,7 @@ class KH_ModuleAddAction: Module_F
 			displayName = "Distance";
 			tooltip = "Distance within which the caller must be to the closest surface of the affected objects in order for the action to be usable. A caller moving beyond this distance will interrupt the action if it is currently in progress.";
 			property = "KH_ModuleAddActionDistance";
-			defaultValue = "'3'";
+			defaultValue = "'2'";
 		};
 		class KH_ModuleAddActionShowImmediately: Checkbox
 		{

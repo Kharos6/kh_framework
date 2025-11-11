@@ -1488,18 +1488,18 @@ static void initialize_sqf_integration() {
 
     g_compiled_sqf_execute_lua = sqf::compile(R"(
         private _khargs = getCallArguments;
-        _khArgs set [1, ["_khArgs luaExecute ", _khArgs select 1] joinString ""];
-        private _special = param [5, false];
+        _khArgs set [1, compile (["_khArgs luaExecute ", _khArgs select 1] joinString "")];
+        private _special = _khargs param [4, false, [true, []]];
 
         if (_special isEqualType []) then {
             private _type = _special param [0, "", [""]];
 
             if (_type isEqualTo "CALLBACK") then {
-                _special set [2, ["_this append _argsCallback; _this luaExecute ", _special select 2] joinString ""];
+                _special set [2, compile (["_this append _argsCallback; _this luaExecute ", _special select 2] joinString "")];
             }
             else {
                 if (_type isEqualTo "PERSISTENT") then {
-                    _special set [3, ["_this luaExecute ", _special select 3] joinString ""];
+                    _special set [3, compile (["_this luaExecute ", _special select 3] joinString "")];
                 };
             };
         };

@@ -19,7 +19,7 @@ if (_type isEqualType []) then {
 		private _scopeType = _type param [2, true, [true, ""]];
 
 		if ((_scopeType isNotEqualTo "REMOTE") && (_scopeType isNotEqualTo "PERSISTENT")) then {
-			_function = [_function, false] call KH_fnc_parseFunction;
+			_function = [_function, false] call KH_fnc_serializeFunction;
 
 			_expression = compile ([
 				"private _args = missionNamespace getVariable '", _argumentsId, "';
@@ -32,11 +32,11 @@ if (_type isEqualType []) then {
 			] joinString "");
 		}
 		else {
-			_function = [_function, _scopeType isEqualTo "PERSISTENT"] call KH_fnc_parseFunction;
+			_function = [_function, _scopeType isEqualTo "PERSISTENT"] call KH_fnc_serializeFunction;
 		};
 	}
 	else {
-		_function = [_function, false] call KH_fnc_parseFunction;
+		_function = [_function, false] call KH_fnc_serializeFunction;
 
 		if ((_eventType isNotEqualTo "TEMPORAL") && (_eventType isNotEqualTo "DRAW_UI")) then {
 			_expression = compile ([
@@ -52,7 +52,7 @@ if (_type isEqualType []) then {
 	};
 }
 else {
-	_function = [_function, false] call KH_fnc_parseFunction;
+	_function = [_function, false] call KH_fnc_serializeFunction;
 	_eventType = _type;
 
 	_expression = compile ([
@@ -316,7 +316,7 @@ switch _eventType do {
 		private _timeoutArguments = _type param [4];
 		private _timeoutFunction = _type param [5, {}, ["", {}]];
 		private _conditionArgumentsId = generateUid;
-		_timeoutFunction = [_timeoutFunction, false] call KH_fnc_parseFunction;
+		_timeoutFunction = [_timeoutFunction, false] call KH_fnc_serializeFunction;
 		missionNamespace setVariable [_conditionArgumentsId, _conditionArguments];
 		_handler = generateUid;
 
@@ -342,7 +342,7 @@ switch _eventType do {
 				missionNamespace getVariable _function;
 			}
 			else {
-				_conditionFunction = [_conditionFunction, false] call KH_fnc_parseFunction;
+				_conditionFunction = [_conditionFunction, false] call KH_fnc_serializeFunction;
 				
 				if _timeoutOnConditionFailure then {
 					compile ([

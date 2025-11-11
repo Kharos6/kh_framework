@@ -11,7 +11,7 @@ if (_function isEqualType {}) exitWith {
 	}
 	else {
 		if (isNil "_arguments") then {
-			spawn _function;
+			[] spawn _function;
 		}
 		else {
 			_arguments spawn _function;
@@ -32,7 +32,7 @@ if !(isNil "_storedFunction") exitWith {
 	}
 	else {
 		if (isNil "_arguments") then {
-			spawn _storedFunction;
+			[] spawn _storedFunction;
 		}
 		else {
 			_arguments spawn _storedFunction;
@@ -54,12 +54,12 @@ if !(isNil "_storedFunction") exitWith {
 					call _storedFunction;
 				}
 				else {
-					_arguments call _storedFunction
+					_arguments call _storedFunction;
 				};
 			}
 			else {
 				if (isNil "_arguments") then {
-					spawn _storedFunction;
+					[] spawn _storedFunction;
 				}
 				else {
 					_arguments spawn _storedFunction;
@@ -87,12 +87,12 @@ if !(isNil "_storedFunction") exitWith {
 							call _storedFunction;
 						}
 						else {
-							_arguments call _storedFunction
+							_arguments call _storedFunction;
 						};
 					}
 					else {
 						if (isNil "_arguments") then {
-							spawn _storedFunction;
+							[] spawn _storedFunction;
 						}
 						else {
 							_arguments spawn _storedFunction;

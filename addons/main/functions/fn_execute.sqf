@@ -15,11 +15,11 @@ params [
 	["_special", false, [true, [], createHashMap]]
 ];
 
-_function = [_function, false] call KH_fnc_parseFunction;
+_function = [_function, false] call KH_fnc_serializeFunction;
 private _basic = (_target isEqualTo true) && (_special isEqualTo false);
 
 private _subfunction = if _basic then {
-	KH_fnc_callParsedFunction;
+	KH_fnc_callSerializedFunction;
 }
 else {
 	{
@@ -37,7 +37,7 @@ else {
 				"KH_eve_execution", 
 				[
 					_arguments, 
-					[compile ([_special, " call ['", _function, "', missionNamespace getVariable '", _argumentsId, "'];"] joinString ""), false] call KH_fnc_parseFunction, 
+					[compile ([_special, " call ['", _function, "', missionNamespace getVariable '", _argumentsId, "'];"] joinString ""), false] call KH_fnc_serializeFunction, 
 					clientOwner, 
 					true
 				], 
@@ -87,19 +87,19 @@ else {
 					[_arguments, _function, _unscheduled],
 					{
 						_args params ["_arguments", "_function", "_unscheduled"];
-						private _argsCallback = param [1];
+						private _argsCallback = _this;
 
-						if (isNil "_arguments") then {
-							if _unscheduled then {
+						if _unscheduled then {
+							if (isNil "_arguments") then {
 								call (missionNamespace getVariable _function);
 							}
 							else {
-								spawn (missionNamespace getVariable _function);
+								_arguments call (missionNamespace getVariable _function);
 							};
 						}
 						else {
-							if _unscheduled then {
-								_arguments call (missionNamespace getVariable _function);
+							if (isNil "_arguments") then {
+								[] spawn (missionNamespace getVariable _function);
 							}
 							else {
 								_arguments spawn (missionNamespace getVariable _function);
@@ -112,7 +112,7 @@ else {
 
 				[
 					"KH_eve_registerCallback", 
-					[_callbackArguments, [_callbackFunction, false] call KH_fnc_parseFunction, clientOwner, _unscheduled, _callbackId], 
+					[_callbackArguments, [_callbackFunction, false] call KH_fnc_serializeFunction, clientOwner, _unscheduled, _callbackId], 
 					_target, 
 					false
 				] call KH_fnc_triggerCbaEvent;
@@ -141,7 +141,7 @@ else {
 
 				[
 					"KH_eve_persistentExecutionSetup", 
-					[_arguments, _function, _object, _sendoffArguments, [_sendoffFunction, false] call KH_fnc_parseFunction, clientOwner, _unscheduled, _persistentExecutionId]
+					[_arguments, _function, _object, _sendoffArguments, [_sendoffFunction, false] call KH_fnc_serializeFunction, clientOwner, _unscheduled, _persistentExecutionId]
 				] call CBA_fnc_serverEvent;
 
 				[_object, _persistentExecutionId, true];
@@ -499,7 +499,7 @@ switch (typeName _environmentType) do {
 		};
 
 		([_special, _target] call _specialParser) params ["_return", "_specialIdOverride"];
-		_environmentType = missionNamespace getVariable ([_environmentType, false] call KH_fnc_parseFunction);
+		_environmentType = missionNamespace getVariable ([_environmentType, false] call KH_fnc_serializeFunction);
 		private "_previousReturn";
 		private _continue = true;
 

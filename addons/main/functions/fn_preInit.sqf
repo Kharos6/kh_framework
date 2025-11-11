@@ -37,7 +37,7 @@ KH_var_weaponTargetCheckFrame = 0;
 KH_var_allAddedDisplays = [];
 KH_var_playerRespawnedEventHandler = [];
 KH_var_playerKilledEventHandler = [];
-["KH_eve_execution", KH_fnc_callParsedFunction] call CBA_fnc_addEventHandler;
+["KH_eve_execution", KH_fnc_callSerializedFunction] call CBA_fnc_addEventHandler;
 
 [
 	"KH_eve_luaEventTrigger", 
@@ -348,7 +348,7 @@ addMissionEventHandler [
 	"KH_eve_registerCallback", 
 	{
 		params ["_arguments", ["_function", "", [""]], ["_caller", 2, [0]], ["_unscheduled", true, [true]], ["_callbackId", "", [""]]];
-		[_callbackId, [_arguments, _function, _caller, _unscheduled] call KH_fnc_callParsedFunction, _caller] call CBA_fnc_ownerEvent;		
+		[_callbackId, [_arguments, _function, _caller, _unscheduled] call KH_fnc_callSerializedFunction, _caller] call CBA_fnc_ownerEvent;		
 	}
 ] call CBA_fnc_addEventHandler;
 
@@ -637,10 +637,10 @@ if isServer then {
 									(_entity getVariable _persistentEventId) params ["_arguments", "_function", "_sendoffArguments", "_sendoffFunction", "_caller", "_unscheduled"];
 									
 									if _local then {
-										[_arguments, _function, _caller, _unscheduled] call KH_fnc_callParsedFunction;
+										[_arguments, _function, _caller, _unscheduled] call KH_fnc_callSerializedFunction;
 									}
 									else {
-										[_sendoffArguments, _sendoffFunction, _caller, _unscheduled] call KH_fnc_callParsedFunction;
+										[_sendoffArguments, _sendoffFunction, _caller, _unscheduled] call KH_fnc_callSerializedFunction;
 									};
 								};
 							}
@@ -780,6 +780,20 @@ if isServer then {
 				KH_var_adminMachine = _machineId;
 				publicVariable "KH_var_adminMachine";
 			};
+
+			[
+				[_uid],
+				{
+					params ["_uid"];
+
+					if (isNil {profileNamespace getVariable "KH_var_steamId";}) then {
+						profileNamespace setVariable ["KH_var_steamId", _uid];
+					};					
+				},
+				_machineId,
+				true,
+				false
+			] call KH_fnc_execute;
 
 			["KH_eve_playerMissionLoaded", [_machineId, _uid, _id]] call CBA_fnc_globalEvent;
 		}
@@ -1152,17 +1166,6 @@ if hasInterface then {
 		},
 		true
 	] call CBA_fnc_addPlayerEventHandler;
-
-	[
-		"KH_eve_playerMissionLoaded", 
-		{
-			private _uid = param [1];
-			
-			if (isNil {profileNamespace getVariable "KH_var_steamId";}) then {
-				profileNamespace setVariable ["KH_var_steamId", _uid];
-			};
-		}
-	] call CBA_fnc_addEventHandler;
 
 	[
 		[],

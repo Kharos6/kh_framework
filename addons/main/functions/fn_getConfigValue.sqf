@@ -99,7 +99,7 @@ else {
         };
 
         case "CODE": {
-            missionNamespace getVariable ([getText _config, false] call KH_fnc_parseFunction);
+            missionNamespace getVariable ([getText _config, false] call KH_fnc_serializeFunction);
         };
 
         case "CLASSES": {

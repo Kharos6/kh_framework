@@ -167,7 +167,7 @@ class Object
 					expression = 
 					"\
 						if is3DEN then {\
-							_this setVariable ['KH_var_edenObjectScale', _value];
+							_this setVariable ['KH_var_edenObjectScale', _value];\
 							_this setObjectScale _value;\
 							if (isNil 'KH_var_edenObjectScaleHandlerObjects') then {\
 								KH_var_edenObjectScaleHandlerObjects = [];\

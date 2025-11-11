@@ -13,7 +13,7 @@ class CfgFunctions
 			class assignParachute {};
 			class assignTerminal {};
 			class breakDisguise {};
-			class callParsedFunction {};
+			class callSerializedFunction {};
 			class cameraSequence {};		
 			class closeInterface {};
 			class conditionalPresence {};
@@ -76,7 +76,6 @@ class CfgFunctions
 			class openIdentificationCard {};
 			class openTerminal {};
 			class parseBoolean {};
-			class parseFunction {};
 			class parseNormalizedScreenTransforms {};
 			class postInit {postInit = 1;};
 			class preInit {preInit = 1;};
@@ -95,6 +94,7 @@ class CfgFunctions
 			class savePlayerPersistency {};
 			class saveUnitPersistency {};
 			class screenToWorld {};
+			class serializeFunction {};
 			class setCameraTexture {};
 			class setCurators {};
 			class setDestinationVelocity {};

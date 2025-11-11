@@ -18,13 +18,13 @@ class Mission
 						control = "EditCodeMulti5";
 						expression = 
 						"\
-							if (_value isEqualTo '') then {\
-								if (fileExists 'kh_serverMissionLoadInit.sqf') then {\
-									KH_fnc_serverMissionLoadInit = compileScript ['kh_serverMissionLoadInit.sqf', false, ''];\
-								};\
-							}\
-							else {\
-								if (!is3DEN && isServer) then {\
+							if (!is3DEN && isServer) then {\
+								if (_value isEqualTo '') then {\
+									if (fileExists 'kh_serverMissionLoadInit.sqf') then {\
+										KH_fnc_serverMissionLoadInit = compileScript ['kh_serverMissionLoadInit.sqf', false, ''];\
+									};\
+								}\
+								else {\
 									KH_fnc_serverMissionLoadInit = compile _value;\
 								};\
 							};\
@@ -40,13 +40,13 @@ class Mission
 						control = "EditCodeMulti5";
 						expression = 
 						"\
-							if (_value isEqualTo '') then {\
-								if (fileExists 'kh_serverMissionStartInit.sqf') then {\
-									KH_fnc_serverMissionStartInit = compileScript ['kh_serverMissionStartInit.sqf', false, ''];\
-								};\
-							}\
-							else {\
-								if (!is3DEN && isServer) then {\
+							if (!is3DEN && isServer) then {\
+								if (_value isEqualTo '') then {\
+									if (fileExists 'kh_serverMissionStartInit.sqf') then {\
+										KH_fnc_serverMissionStartInit = compileScript ['kh_serverMissionStartInit.sqf', false, ''];\
+									};\
+								}\
+								else {\
 									KH_fnc_serverMissionStartInit = compile _value;\
 								};\
 							};\
@@ -62,13 +62,13 @@ class Mission
 						control = "EditCodeMulti5";
 						expression = 
 						"\
-							if (_value isEqualTo '') then {\
-								if (fileExists 'kh_serverPlayersLoadedInit.sqf') then {\
-									KH_fnc_serverPlayersLoadedInit = compileScript ['kh_serverPlayersLoadedInit.sqf', false, ''];\
-								};\
-							}\
-							else {\
-								if (!is3DEN && isServer) then {\
+							if (!is3DEN && isServer) then {\
+								if (_value isEqualTo '') then {\
+									if (fileExists 'kh_serverPlayersLoadedInit.sqf') then {\
+										KH_fnc_serverPlayersLoadedInit = compileScript ['kh_serverPlayersLoadedInit.sqf', false, ''];\
+									};\
+								}\
+								else {\
 									KH_fnc_serverPlayersLoadedInit = compile _value;\
 								};\
 							};\
@@ -84,13 +84,13 @@ class Mission
 						control = "EditCodeMulti5";
 						expression = 
 						"\
-							if (_value isEqualTo '') then {\
-								if (fileExists 'kh_serverMissionEndInit.sqf') then {\
-									KH_fnc_serverMissionEndInit = compileScript ['kh_serverMissionEndInit.sqf', false, ''];\
-								};\
-							}\
-							else {\
-								if (!is3DEN && isServer) then {\
+							if (!is3DEN && isServer) then {\
+								if (_value isEqualTo '') then {\
+									if (fileExists 'kh_serverMissionEndInit.sqf') then {\
+										KH_fnc_serverMissionEndInit = compileScript ['kh_serverMissionEndInit.sqf', false, ''];\
+									};\
+								}\
+								else {\
 									KH_fnc_serverMissionEndInit = compile _value;\
 								};\
 							};\
@@ -106,13 +106,13 @@ class Mission
 						control = "EditCodeMulti5";
 						expression = 
 						"\
-							if (_value isEqualTo '') then {\
-								if (fileExists 'kh_headlessMissionLoadInit.sqf') then {\
-									KH_fnc_headlessMissionLoadInit = compileScript ['kh_headlessMissionLoadInit.sqf', false, ''];\
-								};\
-							}\
-							else {\
-								if (!is3DEN && !isServer && !hasInterface) then {\
+							if (!is3DEN && !isServer && !hasInterface) then {\
+								if (_value isEqualTo '') then {\
+									if (fileExists 'kh_headlessMissionLoadInit.sqf') then {\
+										KH_fnc_headlessMissionLoadInit = compileScript ['kh_headlessMissionLoadInit.sqf', false, ''];\
+									};\
+								}\
+								else {\
 									KH_fnc_headlessMissionLoadInit = compile _value;\
 								};\
 							};\
@@ -128,13 +128,13 @@ class Mission
 						control = "EditCodeMulti5";
 						expression = 
 						"\
-							if (_value isEqualTo '') then {\
-								if (fileExists 'kh_headlessMissionStartInit.sqf') then {\
-									KH_fnc_headlessMissionStartInit = compileScript ['kh_headlessMissionStartInit.sqf', false, ''];\
-								};\
-							}\
-							else {\
-								if (!is3DEN && !isServer && !hasInterface) then {\
+							if (!is3DEN && !isServer && !hasInterface) then {\
+								if (_value isEqualTo '') then {\
+									if (fileExists 'kh_headlessMissionStartInit.sqf') then {\
+										KH_fnc_headlessMissionStartInit = compileScript ['kh_headlessMissionStartInit.sqf', false, ''];\
+									};\
+								}\
+								else {\
 									KH_fnc_headlessMissionStartInit = compile _value;\
 								};\
 							};\
@@ -150,13 +150,13 @@ class Mission
 						control = "EditCodeMulti5";
 						expression = 
 						"\
-							if (_value isEqualTo '') then {\
-								if (fileExists 'kh_headlessLoadInit.sqf') then {\
-									KH_fnc_headlessLoadInit = compileScript ['kh_headlessLoadInit.sqf', false, ''];\
-								};\
-							}\
-							else {\
-								if (!is3DEN && !isServer && !hasInterface) then {\
+							if (!is3DEN && !isServer && !hasInterface) then {\
+								if (_value isEqualTo '') then {\
+									if (fileExists 'kh_headlessLoadInit.sqf') then {\
+										KH_fnc_headlessLoadInit = compileScript ['kh_headlessLoadInit.sqf', false, ''];\
+									};\
+								}\
+								else {\
 									KH_fnc_headlessLoadInit = compile _value;\
 								};\
 							};\
@@ -172,13 +172,13 @@ class Mission
 						control = "EditCodeMulti5";
 						expression = 
 						"\
-							if (_value isEqualTo '') then {\
-								if (fileExists 'kh_headlessPlayersLoadedInit.sqf') then {\
-									KH_fnc_headlessPlayersLoadedInit = compileScript ['kh_headlessPlayersLoadedInit.sqf', false, ''];\
-								};\
-							}\
-							else {\
-								if (!is3DEN && !isServer && !hasInterface) then {\
+							if (!is3DEN && !isServer && !hasInterface) then {\
+								if (_value isEqualTo '') then {\
+									if (fileExists 'kh_headlessPlayersLoadedInit.sqf') then {\
+										KH_fnc_headlessPlayersLoadedInit = compileScript ['kh_headlessPlayersLoadedInit.sqf', false, ''];\
+									};\
+								}\
+								else {\
 									KH_fnc_headlessPlayersLoadedInit = compile _value;\
 								};\
 							};\
@@ -194,13 +194,13 @@ class Mission
 						control = "EditCodeMulti5";
 						expression = 
 						"\
-							if (_value isEqualTo '') then {\
-								if (fileExists 'kh_headlessMissionEndInit.sqf') then {\
-									KH_fnc_headlessMissionEndInit = compileScript ['kh_headlessMissionEndInit.sqf', false, ''];\
-								};\
-							}\
-							else {\
-								if (!is3DEN && !isServer && !hasInterface) then {\
+							if (!is3DEN && !isServer && !hasInterface) then {\
+								if (_value isEqualTo '') then {\
+									if (fileExists 'kh_headlessMissionEndInit.sqf') then {\
+										KH_fnc_headlessMissionEndInit = compileScript ['kh_headlessMissionEndInit.sqf', false, ''];\
+									};\
+								}\
+								else {\
 									KH_fnc_headlessMissionEndInit = compile _value;\
 								};\
 							};\
@@ -216,13 +216,13 @@ class Mission
 						control = "EditCodeMulti5";
 						expression = 
 						"\
-							if (_value isEqualTo '') then {\
-								if (fileExists 'kh_playerMissionLoadInit.sqf') then {\
-									KH_fnc_playerMissionLoadInit = compileScript ['kh_playerMissionLoadInit.sqf', false, ''];\
-								};
-							}\
-							else {\
-								if (!is3DEN && hasInterface) then {\
+							if (!is3DEN && hasInterface) then {\
+								if (_value isEqualTo '') then {\
+									if (fileExists 'kh_playerMissionLoadInit.sqf') then {\
+										KH_fnc_playerMissionLoadInit = compileScript ['kh_playerMissionLoadInit.sqf', false, ''];\
+									};
+								}\
+								else {\
 									KH_fnc_playerMissionLoadInit = compile _value;\
 								};\
 							};\
@@ -238,13 +238,13 @@ class Mission
 						control = "EditCodeMulti5";
 						expression = 
 						"\
-							if (_value isEqualTo '') then {\
-								if (fileExists 'kh_playerMissionStartInit.sqf') then {\
-									KH_fnc_playerMissionStartInit = compileScript ['kh_playerMissionStartInit.sqf', false, ''];\
-								};\
-							}\
-							else {\
-								if (!is3DEN && hasInterface) then {\
+							if (!is3DEN && hasInterface) then {\
+								if (_value isEqualTo '') then {\
+									if (fileExists 'kh_playerMissionStartInit.sqf') then {\
+										KH_fnc_playerMissionStartInit = compileScript ['kh_playerMissionStartInit.sqf', false, ''];\
+									};\
+								}\
+								else {\
 									KH_fnc_playerMissionStartInit = compile _value;\
 								};\
 							};\
@@ -260,13 +260,13 @@ class Mission
 						control = "EditCodeMulti5";
 						expression = 
 						"\
-							if (_value isEqualTo '') then {\
-								if (fileExists 'kh_playerLoadInit.sqf') then {\
-									KH_fnc_playerLoadInit = compileScript ['kh_playerLoadInit.sqf', false, ''];\
-								};\
-							}\
-							else {\
-								if (!is3DEN && hasInterface) then {\
+							if (!is3DEN && hasInterface) then {\
+								if (_value isEqualTo '') then {\
+									if (fileExists 'kh_playerLoadInit.sqf') then {\
+										KH_fnc_playerLoadInit = compileScript ['kh_playerLoadInit.sqf', false, ''];\
+									};\
+								}\
+								else {\
 									KH_fnc_playerLoadInit = compile _value;\
 								};\
 							};\
@@ -282,13 +282,13 @@ class Mission
 						control = "EditCodeMulti5";
 						expression = 
 						"\
-							if (_value isEqualTo '') then {\
-								if (fileExists 'kh_playerPlayersLoadedInit.sqf') then {\
-									KH_fnc_playerPlayersLoadedInit = compileScript ['kh_playerPlayersLoadedInit.sqf', false, ''];\
-								};\
-							}\
-							else {\
-								if (!is3DEN && hasInterface) then {\
+							if (!is3DEN && hasInterface) then {\
+								if (_value isEqualTo '') then {\
+									if (fileExists 'kh_playerPlayersLoadedInit.sqf') then {\
+										KH_fnc_playerPlayersLoadedInit = compileScript ['kh_playerPlayersLoadedInit.sqf', false, ''];\
+									};\
+								}\
+								else {\
 									KH_fnc_playerPlayersLoadedInit = compile _value;\
 								};\
 							};\
@@ -304,13 +304,13 @@ class Mission
 						control = "EditCodeMulti5";
 						expression = 
 						"\
-							if (_value isEqualTo '') then {\
-								if (fileExists 'kh_playerKilledInit.sqf') then {\
-									KH_fnc_playerKilledInit = compileScript ['kh_playerKilledInit.sqf', false, ''];\
-								};\
-							}\
-							else {\
-								if (!is3DEN && hasInterface) then {\
+							if (!is3DEN && hasInterface) then {\
+								if (_value isEqualTo '') then {\
+									if (fileExists 'kh_playerKilledInit.sqf') then {\
+										KH_fnc_playerKilledInit = compileScript ['kh_playerKilledInit.sqf', false, ''];\
+									};\
+								}\
+								else {\
 									KH_fnc_playerKilledInit = compile _value;\
 								};\
 							};\
@@ -326,13 +326,13 @@ class Mission
 						control = "EditCodeMulti5";
 						expression = 
 						"\
-							if (_value isEqualTo '') then {\
-								if (fileExists 'kh_playerRespawnInit.sqf') then {\
-									KH_fnc_playerRespawnInit = compileScript ['kh_playerRespawnInit.sqf', false, ''];\
-								};\
-							}\
-							else {\
-								if (!is3DEN && hasInterface) then {\
+							if (!is3DEN && hasInterface) then {\
+								if (_value isEqualTo '') then {\
+									if (fileExists 'kh_playerRespawnInit.sqf') then {\
+										KH_fnc_playerRespawnInit = compileScript ['kh_playerRespawnInit.sqf', false, ''];\
+									};\
+								}\
+								else {\
 									KH_fnc_playerRespawnInit = compile _value;\
 								};\
 							};\
@@ -348,13 +348,13 @@ class Mission
 						control = "EditCodeMulti5";
 						expression = 
 						"\
-							if (_value isEqualTo '') then {\
-								if (fileExists 'kh_playerSwitchInit.sqf') then {\
-									KH_fnc_playerSwitchInit = compileScript ['kh_playerSwitchInit.sqf', false, ''];\
-								};\
-							}\
-							else {\
-								if (!is3DEN && hasInterface) then {\
+							if (!is3DEN && hasInterface) then {\
+								if (_value isEqualTo '') then {\
+									if (fileExists 'kh_playerSwitchInit.sqf') then {\
+										KH_fnc_playerSwitchInit = compileScript ['kh_playerSwitchInit.sqf', false, ''];\
+									};\
+								}\
+								else {\
 									KH_fnc_playerSwitchInit = compile _value;\
 								};\
 							};\
@@ -370,13 +370,13 @@ class Mission
 						control = "EditCodeMulti5";
 						expression = 
 						"\
-							if (_value isEqualTo '') then {\
-								if (fileExists 'kh_playerControlledUnitChangeInit.sqf') then {\
-									KH_fnc_playerControlledUnitChangeInit = compileScript ['kh_playerControlledUnitChangeInit.sqf', false, ''];\
-								};\
-							}\
-							else {\
-								if (!is3DEN && hasInterface) then {\
+							if (!is3DEN && hasInterface) then {\
+								if (_value isEqualTo '') then {\
+									if (fileExists 'kh_playerControlledUnitChangeInit.sqf') then {\
+										KH_fnc_playerControlledUnitChangeInit = compileScript ['kh_playerControlledUnitChangeInit.sqf', false, ''];\
+									};\
+								}\
+								else {\
 									KH_fnc_playerControlledUnitChangeInit = compile _value;\
 								};\
 							};\
@@ -392,13 +392,13 @@ class Mission
 						control = "EditCodeMulti5";
 						expression = 
 						"\
-							if (_value isEqualTo '') then {\
-								if (fileExists 'kh_playerMissionEndInit.sqf') then {\
-									KH_fnc_playerMissionEndInit = compileScript ['kh_playerMissionEndInit.sqf', false, ''];\
-								};\
-							}\
-							else {\
-								if (!is3DEN && hasInterface) then {\
+							if (!is3DEN && hasInterface) then {\
+								if (_value isEqualTo '') then {\
+									if (fileExists 'kh_playerMissionEndInit.sqf') then {\
+										KH_fnc_playerMissionEndInit = compileScript ['kh_playerMissionEndInit.sqf', false, ''];\
+									};\
+								}\
+								else {\
 									KH_fnc_playerMissionEndInit = compile _value;\
 								};\
 							};\
@@ -463,13 +463,13 @@ class Mission
 						expression = 
 						"\
 							_value params ['_toggle', '_positions', '_targets', '_fovs', '_commitTimes', '_durations', '_visionTypes', '_cinematicBorders', '_disableUserInput', '_jip'];\
-							_positions = ['[', _positions, ']'] joinString '';\
-							_targets = ['[', _targets, ']'] joinString '';\
-							_fovs = ['[', _fovs, ']'] joinString '';\
-							_commitTimes = ['[', _commitTimes, ']'] joinString '';\
-							_durations = ['[', _durations, ']'] joinString '';\
-							_visionTypes = ['[', _visionTypes, ']'] joinString '';\
 							if (_toggle && !is3DEN && isServer) then {\
+								_positions = ['[', _positions, ']'] joinString '';\
+								_targets = ['[', _targets, ']'] joinString '';\
+								_fovs = ['[', _fovs, ']'] joinString '';\
+								_commitTimes = ['[', _commitTimes, ']'] joinString '';\
+								_durations = ['[', _durations, ']'] joinString '';\
+								_visionTypes = ['[', _visionTypes, ']'] joinString '';\
 								private _parsedPositions = [];\
 								private _parsedTargets = [];\
 								{\
@@ -553,9 +553,9 @@ class Mission
 						expression = 
 						"\
 							_value params ['_toggle', '_curators', '_curatorModules', '_hide', '_disableDamage'];\
-							_curators = ['[', _curators, ']'] joinString '';\
-							_curatorModules = ['[', _curatorModules, ']'] joinString '';\
 							if (_toggle && !is3DEN && isServer) then {\
+								_curators = ['[', _curators, ']'] joinString '';\
+								_curatorModules = ['[', _curatorModules, ']'] joinString '';\
 								private _assignedModules = [];\
 								{\
 									private _module = missionNamespace getVariable [_x, objNull];\

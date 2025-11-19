@@ -1,7 +1,28 @@
 isNil {
 	params [["_logic", objNull, [objNull]]];
-	[attachedTo _logic] call KH_fnc_arma;
-	deleteVehicle _logic;
+
+	[
+		[_logic],
+		{
+			params ["_logic"];
+			[attachedTo _logic] call KH_fnc_arma;
+			deleteVehicle _logic;
+		},
+		true,
+		[
+			{
+				params ["_logic"];
+				!(isNull (attachedTo _logic));
+			},
+			true,
+			0,
+			1,
+			{},
+			false,
+			true
+		],
+		false
+	] call KH_fnc_execute;
 };
 
 nil;

@@ -187,6 +187,7 @@ class CfgVehicles
 		scope = 2;
 	};
 	#include "\x\kh\addons\main\vehicles\modules\addAction.hpp"
+	#include "\x\kh\addons\main\vehicles\modules\aiInstanceSetup.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\assignIdentificationCard.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\assignTerminal.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\dynamicDisguise.hpp"
@@ -196,6 +197,7 @@ class CfgVehicles
 	#include "\x\kh\addons\main\vehicles\modules\equipableObject.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\fultonExtract.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\teleporter.hpp"
+	#include "\x\kh\addons\main\vehicles\modules\updateAiInstance.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\visualTrigger.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\zeusArma.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\zeusBreakDisguise.hpp"

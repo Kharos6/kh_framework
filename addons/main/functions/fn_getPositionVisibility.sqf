@@ -114,8 +114,8 @@ if (_minimalFov >= 360) exitWith {
             _checkerObject setPhysicsCollisionFlag false;
             private _raycasts = [];
 
-            for "_positionX" from -0.5 to 0.5 step 0.25 do {
-                for "_positionY" from -0.5 to 0.5 step 0.25 do {
+            for "_positionX" from -0.5 to 0.5 step 0.5 do {
+                for "_positionY" from -0.5 to 0.5 step 0.5 do {
                     for "_positionZ" from 0 to 2 step 0.5 do {
                         _raycasts pushBack [
                             _start,
@@ -163,11 +163,11 @@ if (_direction isEqualType objNull) then {
 };
 
 private _toTarget = _end vectorDiff _start;
-private _toTargetNormalized = _toTarget vectorMultiply (1 / (vectorMagnitude _toTarget));
+private _toTargetNormalized = _toTarget vectorMultiply (1 / ((vectorMagnitude _toTarget) max 0.001));
 private _directionXY = [_direction select 0, _direction select 1, 0];
 private _targetXY = [_toTargetNormalized select 0, _toTargetNormalized select 1, 0];
-private _directionXYMagnitude = vectorMagnitude _directionXY;
-private _targetXYMagnitude = vectorMagnitude _targetXY;
+private _directionXYMagnitude = (vectorMagnitude _directionXY) max 0.001;
+private _targetXYMagnitude = (vectorMagnitude _targetXY) max 0.001;
 private _horizontalAngle = 90;
 
 if (_directionXYMagnitude > 0.001 && _targetXYMagnitude > 0.001) then {
@@ -178,7 +178,7 @@ if (_directionXYMagnitude > 0.001 && _targetXYMagnitude > 0.001) then {
     _horizontalAngle = acos _dotProduct;
 };
 
-private _dirPitch = asin ((_direction select 2) / (vectorMagnitude _direction));
+private _dirPitch = asin (((_direction select 2) max 0.001) / ((vectorMagnitude _direction) max 0.001));
 private _targetPitch = asin (_toTargetNormalized select 2);
 private _verticalAngle = abs (_targetPitch - _dirPitch);
 
@@ -209,8 +209,8 @@ if (_raycast isNotEqualTo false) then {
         _checkerObject setPhysicsCollisionFlag false;
         private _raycasts = [];
 
-        for "_positionX" from -0.5 to 0.5 step 0.25 do {
-            for "_positionY" from -0.5 to 0.5 step 0.25 do {
+        for "_positionX" from -0.5 to 0.5 step 0.5 do {
+            for "_positionY" from -0.5 to 0.5 step 0.5 do {
                 for "_positionZ" from 0 to 2 step 0.5 do {
                     _raycasts pushBack [
                         _start,

@@ -483,7 +483,7 @@ class Mission
 									}\
 									else {\
 										missionNamespace getVariable [_x, objNull];\
-									};,\
+									};\
 									_parsedPositions pushBack _position;\
 								} forEach (parseSimpleArray _positions);\
 								{\
@@ -506,14 +506,14 @@ class Mission
 													'KH_eve_playerLoaded',\
 													_this,\
 													{\
-														private _unit = param [3];\
+														params ['_clientOwner'];\
 														_args params ['_positions', '_targets', '_fovs', '_commitTimes', '_durations', '_visionTypes', '_cinematicBorders', '_disableUserInput', '_jip'];\
 														if _jip then {\
-															[[_positions, _targets, _fovs, _commitTimes, _durations, _visionTypes, _cinematicBorders, _disableUserInput], 'KH_fnc_cameraSequence', _unit, true, false] call KH_fnc_execute;\
+															[[_positions, _targets, _fovs, _commitTimes, _durations, _visionTypes, _cinematicBorders, _disableUserInput], 'KH_fnc_cameraSequence', _clientOwner, true, false] call KH_fnc_execute;\
 														}\
 														else {\
 															if !KH_var_playersLoaded then {\
-																[[_positions, _targets, _fovs, _commitTimes, _durations, _visionTypes, _cinematicBorders, _disableUserInput], 'KH_fnc_cameraSequence', _unit, true, false] call KH_fnc_execute;\
+																[[_positions, _targets, _fovs, _commitTimes, _durations, _visionTypes, _cinematicBorders, _disableUserInput], 'KH_fnc_cameraSequence', _clientOwner, true, false] call KH_fnc_execute;\
 															}\
 															else {\
 																[_handlerId] call KH_fnc_removeHandler;\
@@ -747,7 +747,6 @@ class Mission
 												_x,\
 												[_value],\
 												{\
-													private _unit = param [3];\
 													_args params ['_value'];\
 													{\
 														private _parsedEntities = [];\

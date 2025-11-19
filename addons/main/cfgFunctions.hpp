@@ -62,7 +62,9 @@ class CfgFunctions
 			class loadUnitPersistency {};
 			class log {};
 			class luaRecompile {};
+			class medicalSetup {};
 			class moduleAddAction {};
+			class moduleAiInstanceSetup {};
 			class moduleAssignIdentificationCard {};
 			class moduleAssignTerminal {};
 			class moduleDynamicDisguise {};
@@ -72,6 +74,7 @@ class CfgFunctions
 			class moduleEquipableObject {};
 			class moduleFultonExtract {};
 			class moduleTeleporter {};
+			class moduleUpdateAiInstance {};
 			class moduleVisualTrigger {};
 			class openIdentificationCard {};
 			class openTerminal {};

@@ -11,7 +11,7 @@ params [
 	["_name", "", [""]]
 ];
 
-if (isNil {_object getVariable "KH_var_equipableObjectSet";}) then {
+if (_object isNil "KH_var_equipableObjectSet") then {
 	if (_name isEqualTo "") then {
 		_name = getText ((configOf _object) >> "displayName");
 	};
@@ -190,7 +190,7 @@ if !(isNull _unit) then {
 			{
 				params ["_object", "_hideInVehicles", "_disableCollision"];
 				
-				if (isNil {_object getVariable "KH_var_equipableObjectHandler";}) then { 
+				if (_object isNil "KH_var_equipableObjectHandler") then { 
 					private _handler = [
 						[_object, _hideInVehicles, _disableCollision],
 						{

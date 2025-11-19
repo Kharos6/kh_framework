@@ -71,9 +71,10 @@ class Group
 										'KH_eve_playerLoaded',\
 										[_group, _function],\
 										{\
+											private _unit = param [3];\
 											_args params ['_group', '_function'];\
-											if ((group player) isEqualTo _group) then {\
-												[_group] call _function;\
+											if ((group _unit) isEqualTo _group) then {\
+												[[_group], _function, _unit, true, false] call KH_fnc_execute;\
 											};\
 										}\
 									] call KH_fnc_addEventHandler;\

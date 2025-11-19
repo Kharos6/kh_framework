@@ -621,7 +621,7 @@ if isServer then {
 			params ["_arguments", "_function", "_target", "_sendoffArguments", "_sendoffFunction", "_caller", "_unscheduled", "_persistentExecutionId"];
 			private _persistentEventId = ["KH_var_persistentEventId", _persistentExecutionId] joinString "_";
 
-			if (isNil {_target getVariable _persistentEventId;}) then {
+			if (_target isNil _persistentEventId) then {
 				[
 					"KH_eve_execution",
 					[
@@ -786,7 +786,7 @@ if isServer then {
 				{
 					params ["_uid"];
 
-					if (isNil {profileNamespace getVariable "KH_var_steamId";}) then {
+					if (profileNamespace isNil "KH_var_steamId") then {
 						profileNamespace setVariable ["KH_var_steamId", _uid];
 					};					
 				},
@@ -970,6 +970,10 @@ if isServer then {
 			if (alive _entity) then {
 				KH_var_allLivingEntities pushBackUnique _entity;
 			};
+
+			if (_entity isKindOf "CAManBase") then {
+				[_entity] call KH_fnc_medicalSetup;
+			};
 		}
 	];
 
@@ -1042,8 +1046,11 @@ if isServer then {
 				private _attributes = [];
 
 				if !(isNull _unit) then {					
-					if (alive _unit) then {
-						_attributes = [_unit] call KH_fnc_getUnitAttributes;
+					_attributes = if (alive _unit) then {
+						[_unit] call KH_fnc_getUnitAttributes;
+					}
+					else {
+						[];
 					};
 
 					KH_var_disconnectedPlayerUids pushBackUnique _uid;
@@ -1141,6 +1148,10 @@ if isServer then {
 		0,
 		false
 	] call KH_fnc_execute;
+
+	{
+		[_x] call KH_fnc_medicalSetup;
+	} forEach (KH_var_allEntities select {_x isKindOf "CAManBase";});
 };
 
 if hasInterface then {

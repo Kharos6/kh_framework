@@ -61,8 +61,8 @@ if _state then {
 						private _raycasts = [];
 
 						if ([_playerUnit, _mousePosition3d, _cameraDirection, 1, 0, _viewDistance, false] call KH_fnc_getPositionVisibility) then {
-							for "_positionX" from -0.5 to 0.5 step 0.25 do {
-								for "_positionY" from -0.5 to 0.5 step 0.25 do {
+							for "_positionX" from -0.5 to 0.5 step 0.5 do {
+								for "_positionY" from -0.5 to 0.5 step 0.5 do {
 									for "_positionZ" from 0 to 2 step 0.5 do {
 										_raycasts pushBack [
 											AGLToASL _cameraPosition,
@@ -88,6 +88,21 @@ if _state then {
 										"\a3\ui_f\data\map\markers\military\warning_CA.paa",
 										[1, 0, 0, 0.9],
 										_mousePosition3dAgl,
+										0.5,
+										0.5,
+										0,
+										"",
+										0,
+										0.04,
+										"PuristaMedium",
+										"center",
+										false
+									];
+
+									drawIcon3D [
+										"\a3\ui_f\data\map\markers\military\warning_CA.paa",
+										[1, 0, 0, 0.9],
+										_cameraPosition,
 										0.5,
 										0.5,
 										0,
@@ -128,6 +143,8 @@ if _state then {
 		[],
 		{
 			KH_var_diagnosticsInformation resize 0;
+			KH_var_diagnosticsCurrentMarkers resize 0;
+			KH_var_diagnosticsValidatePositionHelper hideObject ([false, true] select (isNull curatorCamera));
 
 			{
 				private _framerate = _x getVariable ["KH_var_diagnosticsFramerate", 1];
@@ -163,24 +180,25 @@ if _state then {
 				];
 			} forEach (KH_var_allPlayerUnits + KH_var_allHeadlessUnits);
 
+			private _serverFramerate = missionNamespace getVariable ["KH_var_diagnosticsFramerateServer", 1];
 			private _worldX = (worldSize * 0.0033);
 			private _worldY = (worldSize * 0.0065);
 			private _worldYInterval = (_worldY * 2.45);
-			private _serverOutput = ["SERVER - FPS: ", missionNamespace getVariable ["KH_var_diagnosticsFramerateServer", 1], ", LOCAL UNITS: ", missionNamespace getVariable ["KH_var_diagnosticsLocalUnitsServer", 1]] joinString "";
+			private _serverOutput = ["SERVER - FPS: ", _serverFramerate, ", LOCAL UNITS: ", missionNamespace getVariable ["KH_var_diagnosticsLocalUnitsServer", 1]] joinString "";
 			private _markerName = "KH_mrk_diagnosticsIdServer";
 			KH_var_diagnosticsCurrentMarkers pushBackUnique _markerName;
 			KH_var_diagnosticsAllMarkers pushBackUnique _markerName;
 			
 			private _markerColor = switch true do {
-				case ((diag_fps < 40) && (diag_fps >= 30)): {
+				case ((_serverFramerate < 40) && (_serverFramerate >= 30)): {
 					"ColorYellow";
 				};
 				
-				case ((diag_fps < 30) && (diag_fps >= 20)): {
+				case ((_serverFramerate < 30) && (_serverFramerate >= 20)): {
 					"ColorOrange";
 				};
 				
-				case (diag_fps < 20): {
+				case (_serverFramerate < 20): {
 					"ColorRed";
 				};
 
@@ -202,7 +220,7 @@ if _state then {
 				private _output = "";
 				private _framerate = _x getVariable ["KH_var_diagnosticsFramerate", 1];
 				
-				if !(isNil {_x getVariable "KH_var_diagnosticsLocalUnits";}) then {
+				if !(_x isNil "KH_var_diagnosticsLocalUnits") then {
 					_output = [name _x, " - FPS: ", _framerate, ", LOCAL UNITS: ", _x getVariable "KH_var_diagnosticsLocalUnits"] joinString "";
 				}
 				else {

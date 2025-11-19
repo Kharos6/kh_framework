@@ -24,13 +24,13 @@ if (
 	(isNil {KH_var_remoteExecFunctionsBlacklist get _function;}) && 
 	(isNil {KH_var_remoteExecCommandsBlacklist get _function;}) &&
 	(
-	 ((KH_var_remoteExecCommandsMode isNotEqualTo 0) && (isNil {missionNamespace getVariable _function;})) ||
-	 ((KH_var_remoteExecFunctionsMode isNotEqualTo 0) && !(isNil {missionNamespace getVariable _function;}))
+	 ((KH_var_remoteExecCommandsMode isNotEqualTo 0) && (missionNamespace isNil _function)) ||
+	 ((KH_var_remoteExecFunctionsMode isNotEqualTo 0) && !(missionNamespace isNil _function))
 	) && 
 	(
 	 (
-	  ((KH_var_remoteExecCommandsJipMode isEqualTo 1) && (isNil {missionNamespace getVariable _function;})) ||
-	  ((KH_var_remoteExecFunctionsJipMode isEqualTo 1) && !(isNil {missionNamespace getVariable _function;}))
+	  ((KH_var_remoteExecCommandsJipMode isEqualTo 1) && (missionNamespace isNil _function)) ||
+	  ((KH_var_remoteExecFunctionsJipMode isEqualTo 1) && !(missionNamespace isNil _function))
 	 ) ||
 	 (_jip isEqualTo false)
 	)

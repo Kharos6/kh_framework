@@ -78,6 +78,7 @@ echo Compiling...
 cl /LD /arch:AVX /O2 /Ob3 /GL /MT /std:c++20 /EHsc /TP /Gy /Gw /GS- ^
     /Iluajit\include ^
     /Iintercept\include ^
+    /Illama\include ^
     /I. ^
     main.cpp ^
     /Fe:output_x64\kh_framework_x64.dll ^
@@ -87,10 +88,15 @@ cl /LD /arch:AVX /O2 /Ob3 /GL /MT /std:c++20 /EHsc /TP /Gy /Gw /GS- ^
     /LTCG ^
     /OPT:REF /OPT:ICF /OPT:LBR ^
     /DELAYLOAD:lua51.dll ^
+    /DELAYLOAD:cublas64_12.dll ^
     /LIBPATH:luajit\lib ^
     /LIBPATH:intercept\lib ^
+    /LIBPATH:llama\lib ^
+    /LIBPATH:C:\Progra~1\NVIDIA~2\CUDA\v12.9\lib\x64 ^
     intercept_client.lib lua51.lib ^
-    shell32.lib ole32.lib user32.lib advapi32.lib delayimp.lib
+    llama.lib common.lib ggml.lib ggml-base.lib ggml-cpu.lib ggml-cuda.lib ^
+    cuda.lib cudart_static.lib cublas.lib cublasLt.lib ^
+    gdi32.lib shell32.lib ole32.lib user32.lib advapi32.lib delayimp.lib
 
 REM Check if build was successful
 if exist output_x64\kh_framework_x64.dll (

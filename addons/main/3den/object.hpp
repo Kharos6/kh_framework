@@ -144,9 +144,10 @@ class Object
 										'KH_eve_playerLoaded',\
 										[_entity, _function],\
 										{\
+											private _unit = param [3];\
 											_args params ['_entity', '_function'];\
-											if (player isEqualTo _entity) then {\
-												call _function;\
+											if (_unit isEqualTo _entity) then {\
+												[[_entity], _function, _unit, true, false] call KH_fnc_execute;\
 											};\
 										}\
 									] call KH_fnc_addEventHandler;\

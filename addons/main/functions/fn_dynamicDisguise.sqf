@@ -33,7 +33,7 @@ if _state then {
 				{
 					private _player = _x;
 
-					if (isNil {_player getVariable "KH_var_disguiseOriginalSide";}) then {
+					if (_player isNil "KH_var_disguiseOriginalSide") then {
 						_player setVariable ["KH_var_disguiseOriginalSide", side (group _player)];
 					};
 

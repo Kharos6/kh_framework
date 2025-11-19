@@ -9,8 +9,6 @@ isNil {
             _unit setHitPointDamage [_x, 0];
         } forEach ((getAllHitPointsDamage _unit) select 0);
 
-        _unit setUnconscious false;
-
         [
             [_unit],
             {
@@ -23,6 +21,12 @@ isNil {
 
                     ppEffectDestroy KH_var_incapacitationFade;
                 };
+
+                _unit setUnconscious false;
+
+                if KH_var_incapacitatedCaptives then {
+                    _unit setCaptive false;
+                };
             },
             _unit,
             true,
@@ -34,19 +38,6 @@ isNil {
         _unit setVariable ["KH_var_stabilized", false, true];
         _unit setVariable ["KH_var_beingRevived", false, true];
         _unit setVariable ["KH_var_beingStabilized", false, true];
-
-        if KH_var_incapacitatedCaptives then {
-            [
-                [_unit],
-                {
-                    params ["_unit"];
-                    _unit setCaptive false;
-                },
-                _unit,
-                true,
-                false
-            ] call KH_fnc_execute;
-        };
     } forEach KH_var_allPlayerUnits;
 
 	deleteVehicle _logic;

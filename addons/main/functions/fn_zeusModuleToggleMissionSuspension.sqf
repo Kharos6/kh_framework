@@ -10,12 +10,14 @@ isNil {
 
             if !KH_var_missionSuspended then {
                 [
-                    [],
+                    [cbChecked (_display displayCtrl 101)],
                     {
+                        params ["_unitType"];
+
                         {
                             _x enableSimulationGlobal false;
                             (objectParent _x) enableSimulationGlobal false;
-                        } forEach ([KH_var_allPlayerUnits, allUnits] select (cbChecked (_display displayCtrl 101)));
+                        } forEach ([KH_var_allPlayerUnits, allUnits] select _unitType);
                     },
                     "SERVER",
                     true,
@@ -45,12 +47,14 @@ isNil {
             }
             else {
                 [
-                    [],
+                    [cbChecked (_display displayCtrl 101)],
                     {
+                        params ["_unitType"];
+
                         {
                             _x enableSimulationGlobal true;
                             (objectParent _x) enableSimulationGlobal true;
-                        } forEach ([KH_var_allPlayerUnits, allUnits] select (cbChecked (_display displayCtrl 102)));
+                        } forEach ([KH_var_allPlayerUnits, allUnits] select _unitType);
                     },
                     "SERVER",
                     true,
@@ -62,7 +66,7 @@ isNil {
                     {
                         with uiNamespace do {
                             if !(isNil "KH_var_suspensionDisplay") then {
-                                KH_var_suspensionDisplay closeDisplay 2;
+                                ctrlDelete KH_var_suspensionDisplay;
                                 KH_var_suspensionDisplay = nil;
                             };
                         };

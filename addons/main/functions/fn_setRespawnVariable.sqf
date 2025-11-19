@@ -11,9 +11,17 @@ if (isNil "_currentVariableHandler") then {
         {
             params ["_unit"];
 
-            {
-                _unit setVariable [_x, _y select 0, _y select 1];
-            } forEach (_unit getVariable "KH_var_respawnVariableHandler");
+            [
+                [_unit],
+                {
+                    {
+                        _unit setVariable [_x, _y select 0, _y select 1];
+                    } forEach (_unit getVariable "KH_var_respawnVariableHandler");
+                },
+                true,
+                "1",
+                false
+            ] call KH_fnc_execute;
         }
     ] call KH_fnc_addEventHandler;
 }

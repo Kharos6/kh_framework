@@ -46,6 +46,19 @@ static registered_sqf_function _sqf_get_rotation_euler_object_object;
 static registered_sqf_function _sqf_set_rotation_euler;
 static registered_sqf_function _sqf_vector_to_euler;
 static registered_sqf_function _sqf_euler_to_vector;
+static registered_sqf_function _sqf_initialize_ai;
+static registered_sqf_function _sqf_stop_ai;
+static registered_sqf_function _sqf_stop_all_ai;
+static registered_sqf_function _sqf_is_ai_active;
+static registered_sqf_function _sqf_get_active_ai;
+static registered_sqf_function _sqf_set_ai_model_string_string;
+static registered_sqf_function _sqf_set_ai_model_string;
+static registered_sqf_function _sqf_clear_ai_notes;
+static registered_sqf_function _sqf_update_ai_system_prompt;
+static registered_sqf_function _sqf_update_ai_user_prompt;
+static registered_sqf_function _sqf_set_ai_parameters;
+static registered_sqf_function _sqf_trigger_ai_inference;
+static registered_sqf_function _sqf_set_ai_markers;
 
 static game_value execute_lua_sqf(game_value_parameter args, game_value_parameter code_or_function) {    
     try {
@@ -1100,6 +1113,248 @@ static game_value euler_to_vector_sqf(game_value_parameter rotation) {
     }
 }
 
+static game_value initialize_ai_sqf(game_value_parameter ai_name) {
+    try {
+        std::string name = ai_name;
+        
+        if (name.empty()) {
+            return game_value(false);
+        }
+        
+        auto& framework = AIFramework::instance();
+        bool success = framework.initialize_ai(name);        
+        return game_value(success);
+    } catch (const std::exception& e) {
+        report_error("Error in initializeAi - " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value stop_ai_sqf(game_value_parameter ai_name) {
+    try {
+        std::string name = ai_name;
+        
+        if (name.empty()) {
+            return game_value(false);
+        }
+        
+        auto& framework = AIFramework::instance();
+        bool success = framework.stop_ai(name);        
+        return game_value(success);
+    } catch (const std::exception& e) {
+        report_error("Error in stopAi - " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value stop_all_ai_sqf() {
+    try {
+        auto& framework = AIFramework::instance();
+        framework.stop_all();
+        return game_value(true);
+    } catch (const std::exception& e) {
+        report_error("Error in stopAllAi - " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value is_ai_active_sqf(game_value_parameter ai_name) {
+    try {
+        std::string name = ai_name;
+        
+        if (name.empty()) {
+            return game_value(false);
+        }
+        
+        auto& framework = AIFramework::instance();
+        return game_value(framework.is_ai_active(name));
+    } catch (const std::exception& e) {
+        report_error("Error in isAiActive - " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value get_active_ai_sqf() {
+    try {
+        auto& framework = AIFramework::instance();
+        auto active_names = framework.get_active_ai_names();
+        auto_array<game_value> result;
+
+        for (const auto& name : active_names) {
+            result.push_back(name);
+        }
+        
+        return result;
+    } catch (const std::exception& e) {
+        report_error("Error in getActiveAi - " + std::string(e.what()));
+        return game_value();
+    }
+}
+
+static game_value set_ai_model_sqf(game_value_parameter model) {
+    try {
+        std::string filename = model;
+        
+        if (filename.empty()) {
+            return game_value(false);
+        }
+        
+        auto& framework = AIFramework::instance();
+        framework.set_model_path(filename);
+        return game_value(true);
+    } catch (const std::exception& e) {
+        report_error("Error in setAiModel - " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value set_ai_instance_model_path_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
+    try {
+        std::string ai_name = left_arg;
+        std::string filename = right_arg;
+        
+        if (ai_name.empty() || filename.empty()) {
+            report_error("KH - AI Framework: Both AI name and model filename must be provided");
+            return game_value(false);
+        }
+        
+        auto& framework = AIFramework::instance();
+        bool success = framework.set_ai_model_path(ai_name, filename);
+        return game_value(success);
+    } catch (const std::exception& e) {
+        report_error("Error in setAiModelPath - " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value clear_ai_notes_sqf(game_value_parameter right) {
+    std::string ai_name = right;
+    
+    try {
+        bool success = AIFramework::instance().clear_ai_notes(ai_name);
+        return game_value(success);
+    } catch (const std::exception& e) {
+        report_error("Error in clearAiNotes - " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value update_ai_system_prompt_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
+    try {
+        std::string ai_name = left_arg;
+        std::string prompt = right_arg;
+        
+        if (ai_name.empty()) {
+            return game_value(false);
+        }
+        
+        auto& framework = AIFramework::instance();
+        bool success = framework.update_system_prompt(ai_name, prompt);        
+        return game_value(success);
+    } catch (const std::exception& e) {
+        report_error("Error in updateAiSystemPrompt - " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value update_ai_user_prompt_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
+    try {
+        std::string ai_name = left_arg;
+        std::string prompt = right_arg;
+        
+        if (ai_name.empty()) {
+            return game_value(false);
+        }
+        
+        auto& framework = AIFramework::instance();
+        bool success = framework.update_user_prompt(ai_name, prompt);
+        return game_value(success);
+    } catch (const std::exception& e) {
+        report_error("Error in updateAiUserPrompt - " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value set_ai_parameters_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
+    try {
+        std::string ai_name = left_arg;
+        auto params = right_arg.to_array();
+        
+        if (params.size() != 9) {
+            report_error("KH - AI Framework: setAiParameters requires exactly 8 parameters: [N_CTX, MAX_NEW_TOKENS, TEMPERATURE, TOP_K, TOP_P, N_BATCH, N_UBATCH, CPU_THREADS, CPU_THREADS_BATCH, GPU_LAYERS, FLASH_ATTENTION, OFFLOAD_KV_CACHE]");
+            return game_value(false);
+        }
+        
+        // Extract and convert parameters
+        int n_ctx = static_cast<int>((float)params[0]);
+        int max_new_tokens = static_cast<int>((float)params[1]);
+        float temperature = static_cast<float>(params[2]);
+        int top_k = static_cast<int>((float)params[3]);
+        float top_p = static_cast<float>(params[4]);
+        int n_batch = static_cast<int>((float)params[5]);
+        int n_ubatch = static_cast<int>((float)params[6]);
+        int cpu_threads = static_cast<int>((float)params[7]);
+        int cpu_threads_batch = static_cast<int>((float)params[8]);
+        int gpu_layers = static_cast<int>((float)params[9]);
+        bool flash_attention = static_cast<bool>(params[10]);
+        bool offload_kv_cache = static_cast<bool>(params[11]);
+        bool result = AIFramework::instance().set_ai_parameters(ai_name, n_ctx, max_new_tokens, temperature, top_k, top_p, n_batch, n_ubatch, cpu_threads, cpu_threads_batch, gpu_layers, flash_attention, offload_kv_cache);
+        return game_value(result);
+    } catch (const std::exception& e) {
+        report_error("KH - AI Framework: setAiParameters error: " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value trigger_ai_inference_sqf(game_value_parameter right_arg) {
+    try {
+        std::string ai_name = right_arg;
+        bool result = AIFramework::instance().trigger_ai_inference(ai_name);
+        return game_value(result);
+    } catch (const std::exception& e) {
+        report_error("KH - AI Framework: triggerAiInference error: " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value set_ai_markers_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
+    try {
+        std::string ai_name = left_arg;
+        auto markers = right_arg.to_array();
+        
+        if (ai_name.empty()) {
+            report_error("KH - AI Framework: AI name must be provided");
+            return game_value(false);
+        }
+        
+        if (markers.size() != 6) {
+            report_error("KH - AI Framework: setAiMarkers requires exactly 6 markers: [systemStart, systemEnd, userStart, userEnd, assistantStart, assistantEnd]");
+            return game_value(false);
+        }
+
+        std::string sys_start = static_cast<std::string>(markers[0]);
+        std::string sys_end = static_cast<std::string>(markers[1]);
+        std::string usr_start = static_cast<std::string>(markers[2]);
+        std::string usr_end = static_cast<std::string>(markers[3]);
+        std::string asst_start = static_cast<std::string>(markers[4]);
+        std::string asst_end = static_cast<std::string>(markers[5]);
+
+        if (sys_start.empty() || sys_end.empty() || 
+            usr_start.empty() || usr_end.empty() ||
+            asst_start.empty() || asst_end.empty()) {
+            report_error("KH - AI Framework: All markers must be non-empty strings");
+            return game_value(false);
+        }
+        
+        auto& framework = AIFramework::instance();
+        bool success = framework.set_ai_markers(ai_name, sys_start, sys_end, usr_start, usr_end, asst_start, asst_end);
+        return game_value(success);
+    } catch (const std::exception& e) {
+        report_error("Error in setAiMarkers - " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
 static game_value execute_lua_sqf_unary(game_value_parameter code_or_function) {
     return execute_lua_sqf(game_value(), code_or_function);
 }
@@ -1481,6 +1736,113 @@ static void initialize_sqf_integration() {
         game_data_type::ARRAY
     );
 
+    _sqf_initialize_ai = intercept::client::host::register_sqf_command(
+        "initializeAi",
+        "Initialize an AI instance with specified name",
+        userFunctionWrapper<initialize_ai_sqf>,
+        game_data_type::BOOL,
+        game_data_type::STRING
+    );
+    
+    _sqf_stop_ai = intercept::client::host::register_sqf_command(
+        "stopAi",
+        "Stop a specific AI instance",
+        userFunctionWrapper<stop_ai_sqf>,
+        game_data_type::BOOL,
+        game_data_type::STRING
+    );
+    
+    _sqf_stop_all_ai = intercept::client::host::register_sqf_command(
+        "stopAllAi",
+        "Stop all AI instances",
+        userFunctionWrapper<stop_all_ai_sqf>,
+        game_data_type::BOOL
+    );
+    
+    _sqf_is_ai_active = intercept::client::host::register_sqf_command(
+        "isAiActive",
+        "Check if a specific AI is currently active",
+        userFunctionWrapper<is_ai_active_sqf>,
+        game_data_type::BOOL,
+        game_data_type::STRING
+    );
+    
+    _sqf_get_active_ai = intercept::client::host::register_sqf_command(
+        "getActiveAi",
+        "Get array of active AI names",
+        userFunctionWrapper<get_active_ai_sqf>,
+        game_data_type::ARRAY
+    );
+    
+    _sqf_set_ai_model_string = intercept::client::host::register_sqf_command(
+        "setAiModel",
+        "Set the global AI model",
+        userFunctionWrapper<set_ai_model_sqf>,
+        game_data_type::BOOL,
+        game_data_type::STRING
+    );
+
+    _sqf_set_ai_model_string_string = intercept::client::host::register_sqf_command(
+        "setAiModel",
+        "Set the specific AI instance model",
+        userFunctionWrapper<set_ai_instance_model_path_sqf>,
+        game_data_type::BOOL,
+        game_data_type::STRING,
+        game_data_type::STRING
+    );
+
+    _sqf_clear_ai_notes = intercept::client::host::register_sqf_command(
+        "clearAiNotes",
+        "Clear assistant notes for specified AI (resets memory of previous responses). Returns true on success.",
+        userFunctionWrapper<clear_ai_notes_sqf>,
+        game_data_type::BOOL,
+        game_data_type::STRING
+    );
+    
+    _sqf_update_ai_system_prompt = intercept::client::host::register_sqf_command(
+        "updateAiSystemPrompt",
+        "Update the system prompt for an AI",
+        userFunctionWrapper<update_ai_system_prompt_sqf>,
+        game_data_type::BOOL,
+        game_data_type::STRING,
+        game_data_type::STRING
+    );
+    
+    _sqf_update_ai_user_prompt = intercept::client::host::register_sqf_command(
+        "updateAiUserPrompt",
+        "Update the user prompt for an AI",
+        userFunctionWrapper<update_ai_user_prompt_sqf>,
+        game_data_type::BOOL,
+        game_data_type::STRING,
+        game_data_type::STRING
+    );
+        
+    _sqf_set_ai_parameters = intercept::client::host::register_sqf_command(
+        "setAiParameters",
+        "Set parameters for an AI",
+        userFunctionWrapper<set_ai_parameters_sqf>,
+        game_data_type::BOOL,
+        game_data_type::STRING,
+        game_data_type::ARRAY
+    );
+
+    _sqf_trigger_ai_inference = intercept::client::host::register_sqf_command(
+        "triggerAiInference",
+        "Trigger inference for an AI",
+        userFunctionWrapper<trigger_ai_inference_sqf>,
+        game_data_type::BOOL,
+        game_data_type::STRING
+    );
+
+    _sqf_set_ai_markers = intercept::client::host::register_sqf_command(
+        "setAiMarkers",
+        "Set custom prompt markers for an AI instance",
+        userFunctionWrapper<set_ai_markers_sqf>,
+        game_data_type::BOOL,
+        game_data_type::STRING,
+        game_data_type::ARRAY
+    );
+
     g_compiled_sqf_trigger_cba_event = sqf::compile(R"(setReturnValue (getCallArguments call KH_fnc_triggerCbaEvent);)");
     g_compiled_sqf_add_game_event_handler = sqf::compile(R"(setReturnValue (getCallArguments call KH_fnc_addEventHandler);)");
     g_compiled_sqf_remove_game_event_handler = sqf::compile(R"(setReturnValue (getCallArguments call KH_fnc_removeHandler);)");
@@ -1512,4 +1874,6 @@ static void initialize_sqf_integration() {
     g_compiled_sqf_create_hash_map_from_array = sqf::compile(R"(setReturnValue (createHashMapFromArray getCallArguments);)");
     g_compiled_sqf_create_hash_map = sqf::compile(R"(setReturnValue createHashMap;)");
     g_compiled_sqf_trigger_lua_reset_event = sqf::compile(R"(setReturnValue (["KH_eve_luaReset"] call CBA_fnc_localEvent);)");
+    g_compiled_ai_response_progress_event = sqf::compile(R"(["KH_eve_aiResponseProgress", _this] call CBA_fnc_localEvent;)");
+    g_compiled_ai_response_event = sqf::compile(R"(["KH_eve_aiResponse", _this] call CBA_fnc_localEvent;)");
 }

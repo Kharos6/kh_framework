@@ -153,7 +153,7 @@ private _objectId = generateUid;
 missionNamespace setVariable [_objectId, _object];
 private _firstCall = false;
 
-if (isNil {missionNamespace getVariable _parsedActionId;}) then {
+if (missionNamespace isNil _parsedActionId) then {
     _firstCall = true;
     missionNamespace setVariable [_parsedActionId, true, true];
     missionNamespace setVariable [_actionExistenceId, true, true];
@@ -634,7 +634,7 @@ private _actionHandler = [
                     private _resultPreviousComplete = missionNamespace getVariable _resultCompleteId;
 
                     if !(missionNamespace getVariable _allowedActivationId) exitWith {
-                        if !(isNil {_target getVariable (["KH_var_activeAction", _actionId] joinString "_");}) then {
+                        if !(_target isNil (["KH_var_activeAction", _actionId] joinString "_")) then {
                             missionNamespace setVariable [_resultCancelId, _args call _functionCancel];
                             missionNamespace setVariable [_cancelInterruptId, true];
                             [_target getVariable (["KH_var_activeAction", _actionId] joinString "_")] call KH_fnc_removeHandler;

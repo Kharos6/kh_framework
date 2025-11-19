@@ -6,15 +6,23 @@
 #include <string>
 #include <vector>
 #include <random>
+#include <deque>
 #include <algorithm>
 #include <sstream>
 #include <fstream>
+#include <cmath>
+#include <cstdint>
 #include <filesystem>
 #include <iomanip>
 #include <memory>
+#include <stdexcept>
 #include <unordered_map>
 #include <shlobj.h>
 #include <chrono>
+#include <thread>
+#include <atomic>
+#include <mutex>
+#include <condition_variable>
 #include <wincrypt.h>
 #include <delayimp.h>
 
@@ -22,6 +30,8 @@
 #include "intercept/include/client/sqf/sqf.hpp"
 #include "intercept/include/client/pointers.hpp"
 #include "sol/sol.hpp"
+#include "llama/include/llama.h"
+#include "llama/include/common.h"
 
 using namespace intercept;
 using namespace intercept::types;
@@ -36,6 +46,8 @@ static code g_compiled_sqf_remove_handler;
 static code g_compiled_sqf_create_hash_map_from_array;
 static code g_compiled_sqf_create_hash_map;
 static code g_compiled_sqf_trigger_lua_reset_event;
+static code g_compiled_ai_response_progress_event;
+static code g_compiled_ai_response_event;
 static game_value g_return_value;
 static game_value g_call_arguments;
 static bool g_is_server = false;
@@ -50,6 +62,7 @@ static std::vector<std::vector<float>> g_terrain_matrix;
 static float g_terrain_grid_width = 0.0f;
 static int g_terrain_grid_size = 0;
 static float g_world_size = 0.0f;
+static std::atomic<bool> g_cuda_available{true};
 
 // Detect explicitly dedicated server
 static bool get_machine_is_server() {

@@ -20,7 +20,7 @@ if (isNil "KH_var_assignIdentificationCardSet") then {
 			private _newEntity = param [3];
 			private _oldEntity = param [4];
 
-			if !(isNil {_oldEntity getVariable "KH_var_identificationCardInformation";}) then {
+			if !(_oldEntity isNil "KH_var_identificationCardInformation") then {
 				[
 					[_newEntity],
 					{

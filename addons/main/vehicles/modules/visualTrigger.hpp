@@ -45,14 +45,14 @@ class KH_ModuleVisualTrigger: Module_F
 		class KH_ModuleVisualTriggerConditionServer: EditCodeMulti5
 		{
 			displayName = "Condition Server";
-			tooltip = "Unscheduled code executed locally to the server that must return true in order for the trigger to activate. Both this and Condition Player must be true. Passed arguments available through _this are: [_activatingPlayer (OBJECT), _entity (OBJECT)]";
+			tooltip = "Unscheduled code, executed locally to the server, that must return true in order for the trigger to activate. Both this and Condition Player must be true. Passed arguments available through _this are: [_activatingPlayer (OBJECT), _entity (OBJECT)]";
 			property = "KH_ModuleVisualTriggerConditionServer";
 			defaultValue = "'true'";
 		};
 		class KH_ModuleVisualTriggerConditionPlayer: EditCodeMulti5
 		{
 			displayName = "Condition Player";
-			tooltip = "Unscheduled code executed locally to the observing player that must return true in order for the trigger to activate. Both this and Condition Server must be true. Passed arguments available through _this are: [_entity (OBJECT)]";
+			tooltip = "Unscheduled code, executed locally to the observing player, that must return true in order for the trigger to activate. Both this and Condition Server must be true. Passed arguments available through _this are: [_entity (OBJECT)]";
 			property = "KH_ModuleVisualTriggerConditionPlayer";
 			defaultValue = "'true'";
 		};

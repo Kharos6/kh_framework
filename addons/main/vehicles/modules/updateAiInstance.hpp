@@ -41,32 +41,74 @@ class KH_ModuleUpdateAIInstance: Module_F
 			property = "KH_ModuleUpdateAIInstanceName";
 			defaultValue = "''";
 		};
-		class KH_ModuleUpdateAIInstanceSystemPrompt: EditMulti5
+		class KH_ModuleUpdateAIInstanceSystemPrompt: EditCodeMulti5
 		{
 			displayName = "System Prompt";
-			tooltip = "Instructions that the AI will strictly adhere to. Leave empty for no change.";
+			tooltip = "Unscheduled code, executed locally to the owner, that must return a string or structured text which will be fed to the system prompt; the string or structured text should contain instructions that the AI will strictly adhere to. Leave empty for no change. Passed arguments available through _this are: [_name (STRING)].";
 			property = "KH_ModuleUpdateAIInstanceSystemPrompt";
 			defaultValue = "''";
 		};
-		class KH_ModuleUpdateAIInstanceUserPrompt: EditMulti5
+		class KH_ModuleUpdateAIInstanceUserPrompt: EditCodeMulti5
 		{
 			displayName = "User Prompt";
-			tooltip = "Instructions that the AI will fulfill. Leave empty for no change.";
+			tooltip = "Unscheduled code, executed locally to the owner, that must return a string or structured text which will be fed to the user prompt; the string or structured text should contain instructions that the AI will fulfill. Leave empty for no change. Passed arguments available through _this are: [_name (STRING)].";
 			property = "KH_ModuleUpdateAIInstanceUserPrompt";
+			defaultValue = "''";
+		};
+		class KH_ModuleUpdateAIInstanceResponseProgressFunction: EditCodeMulti5
+		{
+			displayName = "Response Progress Function";
+			tooltip = "Unscheduled code executed locally to the owner on the next response. Passed arguments available through _this are: [_name (STRING), _response (STRING)].";
+			property = "KH_ModuleUpdateAIInstanceResponseProgressFunction";
+			defaultValue = "''";
+		};
+		class KH_ModuleUpdateAIInstanceResponseFunction: EditCodeMulti5
+		{
+			displayName = "Response Function";
+			tooltip = "Unscheduled code executed locally to the owner on the next response. Passed arguments available through _this are: [_name (STRING), _response (STRING)].";
+			property = "KH_ModuleUpdateAIInstanceResponseFunction";
 			defaultValue = "''";
 		};
 		class KH_ModuleUpdateAIInstanceTriggerInference: Checkbox
 		{
 			displayName = "Trigger Inference";
-			tooltip = "Triggers an inference, making the AI respond.";
+			tooltip = "True triggers an inference, making the AI respond. If the AI is currently generating a response, the inference will trigger when the response is complete.";
 			property = "KH_ModuleUpdateAIInstanceTriggerInference";
 			defaultValue = "true";
+		};
+		class KH_ModuleUpdateAIInstanceAbortGeneration: Checkbox
+		{
+			displayName = "Abort Generation";
+			tooltip = "True aborts the current generation if any is in progress.";
+			property = "KH_ModuleUpdateAIInstanceAbortGeneration";
+			defaultValue = "true";
+		};
+		class KH_ModuleUpdateAIInstanceResetContext: Checkbox
+		{
+			displayName = "Reset Context";
+			tooltip = "True clears the conversation history while retaining the system prompt.";
+			property = "KH_ModuleUpdateAIInstanceResetContext";
+			defaultValue = "false";
+		};
+		class KH_ModuleUpdateAIInstanceLogGeneration: Checkbox
+		{
+			displayName = "Log Generation";
+			tooltip = "True enables logging for token generation.";
+			property = "KH_ModuleUpdateAIInstanceLogGeneration";
+			defaultValue = "false";
+		};
+		class KH_ModuleUpdateAIInstanceStop: Checkbox
+		{
+			displayName = "Stop";
+			tooltip = "True terminates the AI instance.";
+			property = "KH_ModuleUpdateAIInstanceStop";
+			defaultValue = "false";
 		};
 		class ModuleDescription: ModuleDescription {};
 	};
 	class ModuleDescription: ModuleDescription
 	{
-		description[] = {"Updates the state of an AI instance. Activates multiple times, without a trigger, on the server."};
+		description[] = {"Updates the state of an AI instance, with each subsequent update overriding the previous one. Activates multiple times, with a trigger, on the server."};
 		sync[] = {};
 		position = 0;
 		direction = 0;

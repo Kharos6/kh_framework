@@ -8,6 +8,7 @@ class CfgFunctions
 			file = "\x\kh\addons\main\functions";
 			class addAction {};
 			class addEventHandler {};
+			class aiInstanceSetup {};
 			class arma {};
 			class assignIdentificationCard {};
 			class assignParachute {};
@@ -51,6 +52,8 @@ class CfgFunctions
 			class getViewTarget {};
 			class getWeaponPosition {};
 			class getWeaponTarget {};
+			class initializeStt {};
+			class initializeTts {};
 			class limitViewDistance {};
 			class loadControlAttributes {};
 			class loadDisplay {};
@@ -73,8 +76,11 @@ class CfgFunctions
 			class moduleEntitySpawner {};
 			class moduleEquipableObject {};
 			class moduleFultonExtract {};
+			class moduleInitializeStt {};
+			class moduleInitializeTts {};
 			class moduleTeleporter {};
 			class moduleUpdateAiInstance {};
+			class moduleUpdateTtsSpeakerEntity {};
 			class moduleVisualTrigger {};
 			class openIdentificationCard {};
 			class openTerminal {};
@@ -120,6 +126,8 @@ class CfgFunctions
 			class teleport {};
 			class toggleUserInput {};
 			class triggerCbaEvent {};
+			class updateAiInstance {};
+			class updateTtsSpeakerEntity {};
 			class vehicleSequence {};
 			class visualTrigger {};
 			class zeusModuleArma {};

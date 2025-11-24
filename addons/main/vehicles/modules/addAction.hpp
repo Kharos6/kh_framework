@@ -114,7 +114,7 @@ class KH_ModuleAddAction: Module_F
 		class KH_ModuleAddActionConditionExist: EditCodeMulti5
 		{
 			displayName = "Condition Exist";
-			tooltip = "Unscheduled code, executed locally to the creator of the action, in this case the server, that must return true in order for the action to exist. Can also be a string representation of a variable, an array of strings of multiple variables in the affected object's namespace that must be true, or an array of arrays of variables that must return the wanted value in format [variableName (STRING), wantedValue (BOOL, SCALAR, STRING, ARRAY, HASHMAP)], as simply as 'myVariable', or ['myVariable1', 'myVariable2', 'myVariable3', ...] or [['myVariable1', wantedValue1], ['myVariable2', wantedValue2], ['myVariable3', wantedValue3], ...]. If no objects are synchronized, missionNamespace is used to validate the variables instead.";
+			tooltip = "Unscheduled code executed locally to the creator of the action, in this case the server, that must return true in order for the action to exist. Can also be a string representation of a variable, an array of strings of multiple variables in the affected object's namespace that must be true, or an array of arrays of variables that must return the wanted value in format [variableName (STRING), wantedValue (BOOL, SCALAR, STRING, ARRAY, HASHMAP)], as simply as 'myVariable', or ['myVariable1', 'myVariable2', 'myVariable3', ...] or [['myVariable1', wantedValue1], ['myVariable2', wantedValue2], ['myVariable3', wantedValue3], ...]. If no objects are synchronized, missionNamespace is used to validate the variables instead.";
 			property = "KH_ModuleAddActionConditionExist";
 			defaultValue = "'true'";
 		};

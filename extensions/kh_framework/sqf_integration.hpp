@@ -50,15 +50,32 @@ static registered_sqf_function _sqf_initialize_ai;
 static registered_sqf_function _sqf_stop_ai;
 static registered_sqf_function _sqf_stop_all_ai;
 static registered_sqf_function _sqf_is_ai_active;
+static registered_sqf_function _sqf_is_ai_generating;
 static registered_sqf_function _sqf_get_active_ai;
 static registered_sqf_function _sqf_set_ai_model_string_string;
 static registered_sqf_function _sqf_set_ai_model_string;
-static registered_sqf_function _sqf_clear_ai_notes;
 static registered_sqf_function _sqf_update_ai_system_prompt;
 static registered_sqf_function _sqf_update_ai_user_prompt;
 static registered_sqf_function _sqf_set_ai_parameters;
 static registered_sqf_function _sqf_trigger_ai_inference;
 static registered_sqf_function _sqf_set_ai_markers;
+static registered_sqf_function _sqf_abort_ai_generation;
+static registered_sqf_function _sqf_log_ai_generation;
+static registered_sqf_function _sqf_reset_ai_context;
+static registered_sqf_function _sqf_tts_load_model_string;
+static registered_sqf_function _sqf_tts_load_model_string_array;
+static registered_sqf_function _sqf_tts_speak;
+static registered_sqf_function _sqf_tts_update_speaker;
+static registered_sqf_function _sqf_tts_stop_speaker;
+static registered_sqf_function _sqf_tts_is_playing;
+static registered_sqf_function _sqf_tts_stop_all;
+static registered_sqf_function _sqf_tts_is_initialized;
+static registered_sqf_function _sqf_stt_load_model_string;
+static registered_sqf_function _sqf_stt_load_model_string_array;
+static registered_sqf_function _sqf_stt_is_initialized;
+static registered_sqf_function _sqf_stt_is_capturing;
+static registered_sqf_function _sqf_stt_start_capture;
+static registered_sqf_function _sqf_stt_stop_capture;
 
 static game_value execute_lua_sqf(game_value_parameter args, game_value_parameter code_or_function) {    
     try {
@@ -1118,6 +1135,7 @@ static game_value initialize_ai_sqf(game_value_parameter ai_name) {
         std::string name = ai_name;
         
         if (name.empty()) {
+            report_error("KH - AI Framework: Error in initializeAi - Name cannot be empty");
             return game_value(false);
         }
         
@@ -1125,7 +1143,7 @@ static game_value initialize_ai_sqf(game_value_parameter ai_name) {
         bool success = framework.initialize_ai(name);        
         return game_value(success);
     } catch (const std::exception& e) {
-        report_error("Error in initializeAi - " + std::string(e.what()));
+        report_error("KH - AI Framework: Error in initializeAi - " + std::string(e.what()));
         return game_value(false);
     }
 }
@@ -1135,6 +1153,7 @@ static game_value stop_ai_sqf(game_value_parameter ai_name) {
         std::string name = ai_name;
         
         if (name.empty()) {
+            report_error("KH - AI Framework: Error in stopAi - Name cannot be empty");
             return game_value(false);
         }
         
@@ -1142,7 +1161,7 @@ static game_value stop_ai_sqf(game_value_parameter ai_name) {
         bool success = framework.stop_ai(name);        
         return game_value(success);
     } catch (const std::exception& e) {
-        report_error("Error in stopAi - " + std::string(e.what()));
+        report_error("KH - AI Framework: Error in stopAi - " + std::string(e.what()));
         return game_value(false);
     }
 }
@@ -1153,7 +1172,7 @@ static game_value stop_all_ai_sqf() {
         framework.stop_all();
         return game_value(true);
     } catch (const std::exception& e) {
-        report_error("Error in stopAllAi - " + std::string(e.what()));
+        report_error("KH - AI Framework: Error in stopAllAi - " + std::string(e.what()));
         return game_value(false);
     }
 }
@@ -1163,13 +1182,31 @@ static game_value is_ai_active_sqf(game_value_parameter ai_name) {
         std::string name = ai_name;
         
         if (name.empty()) {
+            report_error("KH - AI Framework: Error in isAiActive - Name cannot be empty");
             return game_value(false);
         }
         
         auto& framework = AIFramework::instance();
         return game_value(framework.is_ai_active(name));
     } catch (const std::exception& e) {
-        report_error("Error in isAiActive - " + std::string(e.what()));
+        report_error("KH - AI Framework: Error in isAiActive - " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value is_ai_generating_sqf(game_value_parameter ai_name) {    
+    try {
+        std::string name = ai_name;
+
+        if (name.empty()) {
+            report_error("KH - AI Framework: Error in isAiGenerating - Name cannot be empty");
+            return game_value(false);
+        }
+
+        bool is_generating = AIFramework::instance().is_ai_generating(name);
+        return game_value(is_generating);
+    } catch (const std::exception& e) {
+        report_error("KH - AI Framework: Error in isAiGenerating: " + std::string(e.what()));
         return game_value(false);
     }
 }
@@ -1186,7 +1223,7 @@ static game_value get_active_ai_sqf() {
         
         return result;
     } catch (const std::exception& e) {
-        report_error("Error in getActiveAi - " + std::string(e.what()));
+        report_error("KH - AI Framework: Error in getActiveAi - " + std::string(e.what()));
         return game_value();
     }
 }
@@ -1196,6 +1233,7 @@ static game_value set_ai_model_sqf(game_value_parameter model) {
         std::string filename = model;
         
         if (filename.empty()) {
+            report_error("KH - AI Framework: Error in setAiModel - Name cannot be empty");
             return game_value(false);
         }
         
@@ -1203,7 +1241,7 @@ static game_value set_ai_model_sqf(game_value_parameter model) {
         framework.set_model_path(filename);
         return game_value(true);
     } catch (const std::exception& e) {
-        report_error("Error in setAiModel - " + std::string(e.what()));
+        report_error("KH - AI Framework: Error in setAiModel - " + std::string(e.what()));
         return game_value(false);
     }
 }
@@ -1214,7 +1252,7 @@ static game_value set_ai_instance_model_path_sqf(game_value_parameter left_arg, 
         std::string filename = right_arg;
         
         if (ai_name.empty() || filename.empty()) {
-            report_error("KH - AI Framework: Both AI name and model filename must be provided");
+            report_error("KH - AI Framework: Error in setAiModel - Both AI name and model filename must be provided");
             return game_value(false);
         }
         
@@ -1222,19 +1260,7 @@ static game_value set_ai_instance_model_path_sqf(game_value_parameter left_arg, 
         bool success = framework.set_ai_model_path(ai_name, filename);
         return game_value(success);
     } catch (const std::exception& e) {
-        report_error("Error in setAiModelPath - " + std::string(e.what()));
-        return game_value(false);
-    }
-}
-
-static game_value clear_ai_notes_sqf(game_value_parameter right) {
-    std::string ai_name = right;
-    
-    try {
-        bool success = AIFramework::instance().clear_ai_notes(ai_name);
-        return game_value(success);
-    } catch (const std::exception& e) {
-        report_error("Error in clearAiNotes - " + std::string(e.what()));
+        report_error("KH - AI Framework: Error in setAiModelPath - " + std::string(e.what()));
         return game_value(false);
     }
 }
@@ -1245,6 +1271,7 @@ static game_value update_ai_system_prompt_sqf(game_value_parameter left_arg, gam
         std::string prompt = right_arg;
         
         if (ai_name.empty()) {
+            report_error("KH - AI Framework: Error in updateAiSystemPrompt - Name cannot be empty");
             return game_value(false);
         }
         
@@ -1252,7 +1279,7 @@ static game_value update_ai_system_prompt_sqf(game_value_parameter left_arg, gam
         bool success = framework.update_system_prompt(ai_name, prompt);        
         return game_value(success);
     } catch (const std::exception& e) {
-        report_error("Error in updateAiSystemPrompt - " + std::string(e.what()));
+        report_error("KH - AI Framework: Error in updateAiSystemPrompt - " + std::string(e.what()));
         return game_value(false);
     }
 }
@@ -1263,6 +1290,7 @@ static game_value update_ai_user_prompt_sqf(game_value_parameter left_arg, game_
         std::string prompt = right_arg;
         
         if (ai_name.empty()) {
+            report_error("KH - AI Framework: Error in updateAiUserPrompt - Name cannot be empty");
             return game_value(false);
         }
         
@@ -1270,7 +1298,7 @@ static game_value update_ai_user_prompt_sqf(game_value_parameter left_arg, game_
         bool success = framework.update_user_prompt(ai_name, prompt);
         return game_value(success);
     } catch (const std::exception& e) {
-        report_error("Error in updateAiUserPrompt - " + std::string(e.what()));
+        report_error("KH - AI Framework: Error in updateAiUserPrompt - " + std::string(e.what()));
         return game_value(false);
     }
 }
@@ -1278,10 +1306,16 @@ static game_value update_ai_user_prompt_sqf(game_value_parameter left_arg, game_
 static game_value set_ai_parameters_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
     try {
         std::string ai_name = left_arg;
+
+        if (ai_name.empty()) {
+            report_error("KH - AI Framework: Error in setAiParameters - Name cannot be empty");
+            return game_value(false);
+        }
+
         auto params = right_arg.to_array();
         
-        if (params.size() != 9) {
-            report_error("KH - AI Framework: setAiParameters requires exactly 8 parameters: [N_CTX, MAX_NEW_TOKENS, TEMPERATURE, TOP_K, TOP_P, N_BATCH, N_UBATCH, CPU_THREADS, CPU_THREADS_BATCH, GPU_LAYERS, FLASH_ATTENTION, OFFLOAD_KV_CACHE]");
+        if (params.size() != 12) {
+            report_error("KH - AI Framework: setAiParameters requires exactly 12 parameters: [N_CTX, MAX_NEW_TOKENS, TEMPERATURE, TOP_K, TOP_P, N_BATCH, N_UBATCH, CPU_THREADS, CPU_THREADS_BATCH, GPU_LAYERS, FLASH_ATTENTION, OFFLOAD_KV_CACHE]");
             return game_value(false);
         }
         
@@ -1309,6 +1343,12 @@ static game_value set_ai_parameters_sqf(game_value_parameter left_arg, game_valu
 static game_value trigger_ai_inference_sqf(game_value_parameter right_arg) {
     try {
         std::string ai_name = right_arg;
+
+        if (ai_name.empty()) {
+            report_error("KH - AI Framework: Error in triggerAiInference - Name cannot be empty");
+            return game_value(false);
+        }
+
         bool result = AIFramework::instance().trigger_ai_inference(ai_name);
         return game_value(result);
     } catch (const std::exception& e) {
@@ -1323,7 +1363,7 @@ static game_value set_ai_markers_sqf(game_value_parameter left_arg, game_value_p
         auto markers = right_arg.to_array();
         
         if (ai_name.empty()) {
-            report_error("KH - AI Framework: AI name must be provided");
+            report_error("KH - AI Framework: Error in setAiMarkers - Name cannot be empty");
             return game_value(false);
         }
         
@@ -1350,7 +1390,307 @@ static game_value set_ai_markers_sqf(game_value_parameter left_arg, game_value_p
         bool success = framework.set_ai_markers(ai_name, sys_start, sys_end, usr_start, usr_end, asst_start, asst_end);
         return game_value(success);
     } catch (const std::exception& e) {
-        report_error("Error in setAiMarkers - " + std::string(e.what()));
+        report_error("KH - AI Framework: Error in setAiMarkers - " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value abort_ai_generation_sqf(game_value_parameter right) {
+    std::string ai_name = right;
+
+    if (ai_name.empty()) {
+        report_error("KH - AI Framework: Error in abortAiGeneration - Name cannot be empty");
+        return game_value(false);
+    }
+
+    try {
+        bool success = AIFramework::instance().abort_ai_generation(ai_name);
+        return game_value(success);
+    } catch (const std::exception& e) {
+        report_error("KH - AI Framework: Error in abortAiGeneration - " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value log_ai_generation_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
+    std::string ai_name = left_arg;
+
+    if (ai_name.empty()) {
+        report_error("KH - AI Framework: Error in logAiGeneration - Name cannot be empty");
+        return game_value(false);
+    }
+
+    bool enabled = right_arg;
+    
+    try {        
+        bool success = AIFramework::instance().set_ai_log_generation(ai_name, enabled);
+        return game_value(success);
+    } catch (const std::exception& e) {
+        report_error("KH - AI Framework: Error in logAiGeneration - " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value reset_ai_context_sqf(game_value_parameter right) {
+    std::string ai_name = right;
+
+    if (ai_name.empty()) {
+        report_error("KH - AI Framework: Error in resetAiContext - Name cannot be empty");
+        return game_value(false);
+    }
+    
+    try {
+        bool success = AIFramework::instance().reset_ai_context(ai_name);
+        return game_value(success);
+    } catch (const std::exception& e) {
+        report_error("KH - AI Framework: Error in resetAiContext - " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value tts_load_model_sqf(game_value_parameter model) {
+    try {
+        std::string model_name = model;        
+        bool success = TTSFramework::instance().load_model(model_name);
+        
+        if (!success) {
+            report_error("KH - TTS Framework: Failed to load model: " + model_name);
+        }
+        
+        return game_value(success);
+    } catch (const std::exception& e) {
+        report_error("KH - TTS Framework: Error in ttsLoadModel - " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value tts_load_model_with_config_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
+    try {
+        std::string model_name = left_arg;
+        std::string provider = "dml";
+        int num_threads = 4;
+        float noise_scale = 0.667f;
+        float noise_scale_w = 0.8f;
+        float length_scale = 1.0f;
+        
+        if (right_arg.type_enum() == game_data_type::ARRAY) {
+            try {
+                auto config = right_arg.to_array();
+                
+                if (config.size() > 0 && !config[0].is_nil()) {
+                    provider = static_cast<std::string>(config[0]);
+                }
+                
+                if (config.size() > 1 && !config[1].is_nil()) {
+                    num_threads = static_cast<int>(static_cast<float>(config[1]));
+                }
+                
+                if (config.size() > 2 && !config[2].is_nil()) {
+                    noise_scale = static_cast<float>(config[2]);
+                }
+                
+                if (config.size() > 3 && !config[3].is_nil()) {
+                    noise_scale_w = static_cast<float>(config[3]);
+                }
+                
+                if (config.size() > 4 && !config[4].is_nil()) {
+                    length_scale = static_cast<float>(config[4]);
+                }
+            } catch (...) {
+                // Use defaults if parsing fails
+            }
+        }
+        
+        bool success = TTSFramework::instance().load_model(
+            model_name, provider, num_threads, noise_scale, noise_scale_w, length_scale
+        );
+        
+        if (!success) {
+            report_error("KH - TTS Framework: Failed to load model: " + model_name);
+        }
+        
+        return game_value(success);
+    } catch (const std::exception& e) {
+        report_error("KH - TTS Framework: Error in ttsLoadModel - " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value tts_speak_sqf(game_value_parameter params) {
+    try {
+        auto arr = params.to_array();
+        
+        if (arr.size() < 2) {
+            report_error("KH - TTS Framework: ttsSpeak requires at least [speakerId, text]");
+            return game_value(false);
+        }
+        
+        std::string speaker_id = arr[0];
+        std::string text = arr[1];
+        float x = arr.size() > 2 ? static_cast<float>(arr[2]) : 0.0f;
+        float y = arr.size() > 3 ? static_cast<float>(arr[3]) : 0.0f;
+        float z = arr.size() > 4 ? static_cast<float>(arr[4]) : 0.0f;
+        float volume = arr.size() > 5 ? static_cast<float>(arr[5]) : 1.0f;
+        float speed = arr.size() > 6 ? static_cast<float>(arr[6]) : 1.0f;
+        int sid = arr.size() > 7 ? static_cast<int>(static_cast<float>(arr[7])) : 0;
+        
+        if (speaker_id.empty()) {
+            report_error("KH - TTS Framework: Speaker ID cannot be empty");
+            return game_value(false);
+        }
+        
+        if (text.empty()) {
+            report_error("KH - TTS Framework: Text cannot be empty");
+            return game_value(false);
+        }
+        
+        bool success = TTSFramework::instance().speak(
+            speaker_id, text, x, y, z, volume, speed, sid
+        );
+        
+        return game_value(success);
+    } catch (const std::exception& e) {
+        report_error("KH - TTS Framework: Error in ttsSpeak - " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value tts_update_speaker_sqf(game_value_parameter params) {
+    try {
+        auto arr = params.to_array();
+        
+        if (arr.size() < 5) {
+            report_error("KH - TTS Framework: ttsUpdateSpeaker requires [speakerId, x, y, z, volume]");
+            return game_value(false);
+        }
+        
+        std::string speaker_id = arr[0];
+        float x = static_cast<float>(arr[1]);
+        float y = static_cast<float>(arr[2]);
+        float z = static_cast<float>(arr[3]);
+        float volume = static_cast<float>(arr[4]);
+        
+        if (speaker_id.empty()) {
+            report_error("KH - TTS Framework: Speaker ID cannot be empty");
+            return game_value(false);
+        }
+        
+        bool success = TTSFramework::instance().update_speaker(speaker_id, x, y, z, volume);
+        return game_value(success);
+    } catch (const std::exception& e) {
+        report_error("KH - TTS Framework: Error in ttsUpdateSpeaker - " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value tts_stop_speaker_sqf(game_value_parameter speaker_id) {
+    try {
+        std::string id = speaker_id;
+        
+        if (id.empty()) {
+            report_error("KH - TTS Framework: Speaker ID cannot be empty");
+            return game_value(false);
+        }
+        
+        bool success = TTSFramework::instance().stop_speaker(id);
+        return game_value(success);
+    } catch (const std::exception& e) {
+        report_error("KH - TTS Framework: Error in ttsStopSpeaker - " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value tts_is_playing_sqf(game_value_parameter speaker_id) {
+    try {
+        std::string id = speaker_id;
+        
+        if (id.empty()) {
+            return game_value(false);
+        }
+        
+        bool is_playing = TTSFramework::instance().is_playing(id);
+        return game_value(is_playing);
+    } catch (const std::exception& e) {
+        report_error("KH - TTS Framework: Error in ttsIsPlaying - " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value tts_stop_all_sqf() {
+    try {
+        TTSFramework::instance().stop_all();
+        return game_value(true);
+    } catch (const std::exception& e) {
+        report_error("KH - TTS Framework: Error in ttsStopAll - " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value tts_is_initialized_sqf() {
+    try {
+        bool initialized = TTSFramework::instance().is_initialized();
+        return game_value(initialized);
+    } catch (const std::exception& e) {
+        report_error("KH - TTS Framework: Error in ttsIsInitialized - " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value stt_load_model_sqf(game_value_parameter model_name) {
+    try {
+        std::string model = model_name;
+        return game_value(STTFramework::instance().load_model_public(model));
+    } catch (const std::exception& e) {
+        report_error("KH - STT Framework: sttLoadModel failed: " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value stt_load_model_with_config_sqf(game_value_parameter model_name, game_value_parameter config) {
+    try {
+        std::string model = model_name;
+        auto& config_arr = config.to_array();
+        std::string provider = config_arr.size() > 0 ? static_cast<std::string>(config_arr[0]) : "dml";
+        int threads = config_arr.size() > 1 ? static_cast<int>(static_cast<float>(config_arr[1])) : 4;
+        return game_value(STTFramework::instance().load_model_public(model, provider, threads));
+    } catch (const std::exception& e) {
+        report_error("KH - STT Framework: sttLoadModel failed: " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value stt_is_initialized_sqf() {
+    try {
+        return game_value(STTFramework::instance().is_initialized_public());
+    } catch (const std::exception& e) {
+        report_error("KH - STT Framework: sttIsInitialized failed: " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value stt_is_capturing_sqf() {
+    try {
+        return game_value(STTFramework::instance().is_capturing_audio_public());
+    } catch (const std::exception& e) {
+        report_error("KH - STT Framework: sttIsCapturing failed: " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value stt_start_capture_sqf() {
+    try {
+        return game_value(STTFramework::instance().start_capture_public());
+    } catch (const std::exception& e) {
+        report_error("KH - STT Framework: sttStartCapture failed: " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value stt_stop_capture_sqf() {
+    try {
+        return game_value(STTFramework::instance().stop_capture_public());
+    } catch (const std::exception& e) {
+        report_error("KH - STT Framework: sttStopCapture failed: " + std::string(e.what()));
         return game_value(false);
     }
 }
@@ -1767,6 +2107,14 @@ static void initialize_sqf_integration() {
         game_data_type::STRING
     );
     
+    _sqf_is_ai_generating = intercept::client::host::register_sqf_command(
+        "isAiGenerating",
+        "Check if a specific AI is currently generating a response",
+        userFunctionWrapper<is_ai_generating_sqf>,
+        game_data_type::BOOL,
+        game_data_type::STRING
+    );
+
     _sqf_get_active_ai = intercept::client::host::register_sqf_command(
         "getActiveAi",
         "Get array of active AI names",
@@ -1791,14 +2139,6 @@ static void initialize_sqf_integration() {
         game_data_type::STRING
     );
 
-    _sqf_clear_ai_notes = intercept::client::host::register_sqf_command(
-        "clearAiNotes",
-        "Clear assistant notes for specified AI (resets memory of previous responses). Returns true on success.",
-        userFunctionWrapper<clear_ai_notes_sqf>,
-        game_data_type::BOOL,
-        game_data_type::STRING
-    );
-    
     _sqf_update_ai_system_prompt = intercept::client::host::register_sqf_command(
         "updateAiSystemPrompt",
         "Update the system prompt for an AI",
@@ -1843,6 +2183,139 @@ static void initialize_sqf_integration() {
         game_data_type::ARRAY
     );
 
+    _sqf_abort_ai_generation = intercept::client::host::register_sqf_command(
+        "abortAiGeneration",
+        "Abort current AI response generation for specified AI",
+        userFunctionWrapper<abort_ai_generation_sqf>,
+        game_data_type::BOOL,
+        game_data_type::STRING
+    );
+
+    _sqf_log_ai_generation = intercept::client::host::register_sqf_command(
+        "logAiGeneration",
+        "Enable or disable generation statistics logging for specified AI",
+        userFunctionWrapper<log_ai_generation_sqf>,
+        game_data_type::BOOL,
+        game_data_type::STRING,
+        game_data_type::BOOL
+    );
+
+    _sqf_reset_ai_context = intercept::client::host::register_sqf_command(
+        "resetAiContext",
+        "Reset conversation context for specified AI",
+        userFunctionWrapper<reset_ai_context_sqf>,
+        game_data_type::BOOL,
+        game_data_type::STRING
+    );
+
+    _sqf_tts_load_model_string = intercept::client::host::register_sqf_command(
+        "ttsLoadModel",
+        "Load a TTS model",
+        userFunctionWrapper<tts_load_model_sqf>,
+        game_data_type::BOOL,
+        game_data_type::STRING
+    );
+    
+    _sqf_tts_load_model_string_array = intercept::client::host::register_sqf_command(
+        "ttsLoadModel",
+        "Load a TTS model with configuration",
+        userFunctionWrapper<tts_load_model_with_config_sqf>,
+        game_data_type::BOOL,
+        game_data_type::STRING,
+        game_data_type::ARRAY
+    );
+    
+    _sqf_tts_is_initialized = intercept::client::host::register_sqf_command(
+        "ttsIsInitialized",
+        "Check if TTS system is initialized",
+        userFunctionWrapper<tts_is_initialized_sqf>,
+        game_data_type::BOOL
+    );
+    
+    _sqf_tts_speak = intercept::client::host::register_sqf_command(
+        "ttsSpeak",
+        "Generate and play speech",
+        userFunctionWrapper<tts_speak_sqf>,
+        game_data_type::BOOL,
+        game_data_type::ARRAY
+    );
+    
+    _sqf_tts_update_speaker = intercept::client::host::register_sqf_command(
+        "ttsUpdateSpeaker",
+        "Update speaker position/volume",
+        userFunctionWrapper<tts_update_speaker_sqf>,
+        game_data_type::BOOL,
+        game_data_type::ARRAY
+    );
+    
+    _sqf_tts_stop_speaker = intercept::client::host::register_sqf_command(
+        "ttsStopSpeaker",
+        "Stop specific speaker",
+        userFunctionWrapper<tts_stop_speaker_sqf>,
+        game_data_type::BOOL,
+        game_data_type::STRING
+    );
+    
+    _sqf_tts_is_playing = intercept::client::host::register_sqf_command(
+        "ttsIsPlaying",
+        "Check if speaker is playing",
+        userFunctionWrapper<tts_is_playing_sqf>,
+        game_data_type::BOOL,
+        game_data_type::STRING
+    );
+    
+    _sqf_tts_stop_all = intercept::client::host::register_sqf_command(
+        "ttsStopAll",
+        "Stop all speakers",
+        userFunctionWrapper<tts_stop_all_sqf>,
+        game_data_type::BOOL
+    );
+
+    _sqf_stt_load_model_string = intercept::client::host::register_sqf_command(
+        "sttLoadModel",
+        "Load an STT model by name",
+        userFunctionWrapper<stt_load_model_sqf>,
+        game_data_type::BOOL,
+        game_data_type::STRING
+    );
+
+    _sqf_stt_load_model_string_array = intercept::client::host::register_sqf_command(
+        "sttLoadModel",
+        "Load STT model with config",
+        userFunctionWrapper<stt_load_model_with_config_sqf>,
+        game_data_type::BOOL,
+        game_data_type::STRING,
+        game_data_type::ARRAY
+    );
+
+    _sqf_stt_is_initialized = intercept::client::host::register_sqf_command(
+        "sttIsInitialized",
+        "Check if STT is initialized",
+        userFunctionWrapper<stt_is_initialized_sqf>,
+        game_data_type::BOOL
+    );
+
+    _sqf_stt_is_capturing = intercept::client::host::register_sqf_command(
+        "sttIsCapturing",
+        "Check if currently capturing audio",
+        userFunctionWrapper<stt_is_capturing_sqf>,
+        game_data_type::BOOL
+    );
+
+    _sqf_stt_start_capture = client::host::register_sqf_command(
+        "sttStartCapture", 
+        "Manually start audio capture",
+        userFunctionWrapper<stt_start_capture_sqf>,
+        game_data_type::BOOL
+    );
+
+    _sqf_stt_stop_capture = client::host::register_sqf_command(
+        "sttStopCapture", 
+        "Manually stop audio capture and process",
+        userFunctionWrapper<stt_stop_capture_sqf>,
+        game_data_type::BOOL
+    );
+    
     g_compiled_sqf_trigger_cba_event = sqf::compile(R"(setReturnValue (getCallArguments call KH_fnc_triggerCbaEvent);)");
     g_compiled_sqf_add_game_event_handler = sqf::compile(R"(setReturnValue (getCallArguments call KH_fnc_addEventHandler);)");
     g_compiled_sqf_remove_game_event_handler = sqf::compile(R"(setReturnValue (getCallArguments call KH_fnc_removeHandler);)");
@@ -1874,6 +2347,10 @@ static void initialize_sqf_integration() {
     g_compiled_sqf_create_hash_map_from_array = sqf::compile(R"(setReturnValue (createHashMapFromArray getCallArguments);)");
     g_compiled_sqf_create_hash_map = sqf::compile(R"(setReturnValue createHashMap;)");
     g_compiled_sqf_trigger_lua_reset_event = sqf::compile(R"(setReturnValue (["KH_eve_luaReset"] call CBA_fnc_localEvent);)");
-    g_compiled_ai_response_progress_event = sqf::compile(R"(["KH_eve_aiResponseProgress", _this] call CBA_fnc_localEvent;)");
-    g_compiled_ai_response_event = sqf::compile(R"(["KH_eve_aiResponse", _this] call CBA_fnc_localEvent;)");
+    g_compiled_ai_initialized_event = sqf::compile(R"(["KH_eve_aiInitialized", _khargs] call CBA_fnc_localEvent;)");
+    g_compiled_ai_response_progress_event = sqf::compile(R"(["KH_eve_aiResponseProgress", _khargs] call CBA_fnc_localEvent;)");
+    g_compiled_ai_response_event = sqf::compile(R"(["KH_eve_aiResponse", _khargs] call CBA_fnc_localEvent;)");
+    g_compiled_tts_generated_event = sqf::compile(R"(["KH_eve_ttsGenerated", _khargs] call CBA_fnc_localEvent;)");
+    g_compiled_tts_finished_event = sqf::compile(R"(["KH_eve_ttsFinished", _khargs] call CBA_fnc_localEvent;)");
+    g_compiled_stt_transcription_event = sqf::compile(R"(["KH_eve_sttTranscription", _khargs] call CBA_fnc_localEvent;)");
 }

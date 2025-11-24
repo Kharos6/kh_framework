@@ -1347,6 +1347,36 @@
 
 [
 	"KH Framework", 
+	"KH_toggleSpeechRecognition", 
+	"Toggle Speech Recognition",
+	{
+		if sttIsInitialized then {
+			if sttIsCapturing then {
+				sttStopCapture;
+
+				if !(uiNamespace isNil "KH_var_speechRecognitionDisplay") then {
+					ctrlDelete (uiNamespace getVariable "KH_var_speechRecognitionDisplay");
+					uiNamespace setVariable ["KH_var_speechRecognitionDisplay", nil];
+				};
+			}
+			else {
+				sttStartCapture;
+
+				if (uiNamespace isNil "KH_var_speechRecognitionDisplay") then {
+					uiNamespace setVariable [
+						"KH_var_speechRecognitionDisplay",
+						["RscText", "CAPTURING", [0, false, 0], [0, 0, 0, 0], [0, 0, 10, 2], false, [0, 0, 0]] call KH_fnc_draw2d
+					];
+				};
+			};
+		};
+	}, 
+	{}, 
+	[0xDB, [false, false, true]]
+] call CBA_fnc_addKeybind;
+
+[
+	"KH Framework", 
 	"KH_toggleDiagnostics", 
 	"Toggle Diagnostics",
 	{

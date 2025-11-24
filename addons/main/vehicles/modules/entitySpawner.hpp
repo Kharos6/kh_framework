@@ -98,7 +98,7 @@ class KH_ModuleEntitySpawner: Module_F
 		class KH_ModuleEntitySpawnerCondition: EditCodeMulti5
 		{
 			displayName = "Condition";
-			tooltip = "Unscheduled code executed locally to the server that must return true in order for a spawn to be allowed. Passed arguments available through _this are: [_chosenSpawnPoint (ARRAY), _spawnedCount (SCALAR)]. Local variables exposed to the function are: _handlerId (ARRAY).";
+			tooltip = "Unscheduled code, executed locally to the server, that must return true in order for a spawn to be allowed. Passed arguments available through _this are: [_chosenSpawnPoint (ARRAY), _spawnedCount (SCALAR)]. Local variables exposed to the function are: _handlerId (ARRAY).";
 			property = "KH_ModuleEntitySpawnerCondition";
 			defaultValue = "'true'";
 		};

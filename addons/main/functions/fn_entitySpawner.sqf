@@ -324,10 +324,10 @@ private _spawnHandler = [
 						};
 
 						private _object = if !_local then {
-							_object = createVehicle [selectRandom _entityTypes, _position, [], 0, _placementMode];
+							createVehicle [selectRandom _entityTypes, _position, [], 0, _placementMode];
 						}
 						else {
-							_object = createVehicleLocal [selectRandom _entityTypes, _position, [], 0, _placementMode];
+							createVehicleLocal [selectRandom _entityTypes, _position, [], 0, _placementMode];
 						};
 
 						if (_rotation isEqualTypeAll []) then {

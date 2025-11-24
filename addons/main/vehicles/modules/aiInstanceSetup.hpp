@@ -37,7 +37,7 @@ class KH_ModuleAIInstanceSetup: Module_F
 		class KH_ModuleAIInstanceSetupModel: Edit
 		{
 			displayName = "Model";
-			tooltip = "Name of the AI model that will be used. Must include the .gguf extension and be located in Documents/Arma 3/kh_framework/ai_models on the machine hosting the AI instance.";
+			tooltip = "Name of the AI model that will be used. Must include the .gguf extension and be located in the Documents/Arma 3/kh_framework/ai_models folder or any activated mod under the ai_models folder on the machine hosting the AI instance. Leave empty to automatically use the first model located within any folder.";
 			property = "KH_ModuleAIInstanceSetupModel";
 			defaultValue = "''";
 		};
@@ -83,17 +83,17 @@ class KH_ModuleAIInstanceSetup: Module_F
 			property = "KH_ModuleAIInstanceSetupMarkerAssistantEnd";
 			defaultValue = "'<|eot_id|>'";
 		};
-		class KH_ModuleAIInstanceSetupSystemPrompt: EditMulti5
+		class KH_ModuleAIInstanceSetupSystemPrompt: EditCodeMulti5
 		{
 			displayName = "System Prompt";
-			tooltip = "Base instructions that the AI will strictly adhere to.";
+			tooltip = "Unscheduled code, executed locally to the owner, that must return a string or structured text which will be fed to the user prompt; the string or structured text should contain instructions that the AI will strictly adhere to. Leave empty for no change. Passed arguments available through _this are: [_name (STRING)].";
 			property = "KH_ModuleAIInstanceSetupSystemPrompt";
 			defaultValue = "''";
 		};
-		class KH_ModuleAIInstanceSetupUserPrompt: EditMulti5
+		class KH_ModuleAIInstanceSetupUserPrompt: EditCodeMulti5
 		{
 			displayName = "User Prompt";
-			tooltip = "Default instructions that the AI will fulfill.";
+			tooltip = "Unscheduled code, executed locally to the owner, that must return a string or structured text which will be fed to the user prompt; the string or structured text should contain instructions that the AI will fulfill. Leave empty for no change. Passed arguments available through _this are: [_name (STRING)].";
 			property = "KH_ModuleAIInstanceSetupUserPrompt";
 			defaultValue = "''";
 		};
@@ -149,7 +149,7 @@ class KH_ModuleAIInstanceSetup: Module_F
 		class KH_ModuleAIInstanceSetupCPUThreads: Edit
 		{
 			displayName = "CPU Threads";
-			tooltip = "Number of CPU threads used during token generation. 4 to 8 threads usually provides optimal performance.";
+			tooltip = "Number of CPU threads used during token generation. 2 to 8 threads usually provides optimal performance.";
 			property = "KH_ModuleAIInstanceSetupCPUThreads";
 			defaultValue = "'4'";
 		};
@@ -158,7 +158,7 @@ class KH_ModuleAIInstanceSetup: Module_F
 			displayName = "CPU Threads Batch";
 			tooltip = "Number of CPU threads used for processing the prompt. Can be higher than the CPU Threads attribute for faster prompt processing without affecting generation speed.";
 			property = "KH_ModuleAIInstanceSetupCPUThreadsBatch";
-			defaultValue = "'8'";
+			defaultValue = "'6'";
 		};
 		class KH_ModuleAIInstanceSetupGPULayers: Edit
 		{
@@ -180,6 +180,41 @@ class KH_ModuleAIInstanceSetup: Module_F
 			tooltip = "Stores the attention cache in VRAM instead of RAM. While faster, it consumes a bit more memory, depending on context length.";
 			property = "KH_ModuleAIInstanceSetupOffloadKVCache";
 			defaultValue = "true";
+		};
+		class KH_ModuleAIInstanceSetupResponseProgressFunction: EditCodeMulti5
+		{
+			displayName = "Response Progress Function";
+			tooltip = "Unscheduled code executed locally to the owner every time a response token is generated. Passed arguments available through _this are: [_name (STRING), _response (STRING)].";
+			property = "KH_ModuleAIInstanceSetupResponseProgressFunction";
+			defaultValue = "''";
+		};
+		class KH_ModuleAIInstanceSetupResponseFunction: EditCodeMulti5
+		{
+			displayName = "Response Function";
+			tooltip = "Unscheduled code executed locally to the owner every time a response is completed. Passed arguments available through _this are: [_name (STRING), _response (STRING)].";
+			property = "KH_ModuleAIInstanceSetupResponseFunction";
+			defaultValue = "''";
+		};
+		class KH_ModuleAIInstanceSetupInit: EditCodeMulti5
+		{
+			displayName = "Init";
+			tooltip = "Unscheduled code executed locally to the owner once the AI is intialized. Passed arguments available through _this are: [_name (STRING)].";
+			property = "KH_ModuleAIInstanceSetupInit";
+			defaultValue = "''";
+		};
+		class KH_ModuleAIInstanceSetupImmediateInference: Checkbox
+		{
+			displayName = "Immediate Inference";
+			tooltip = "True immediately triggers an inference when the AI is initialized.";
+			property = "KH_ModuleAIInstanceSetupImmediateInference";
+			defaultValue = "false";
+		};
+		class KH_ModuleAIInstanceSetupLogGeneration: Checkbox
+		{
+			displayName = "Log Generation";
+			tooltip = "True enables logging for token generation.";
+			property = "KH_ModuleAIInstanceSetupLogGeneration";
+			defaultValue = "false";
 		};
 		class ModuleDescription: ModuleDescription {};
 	};

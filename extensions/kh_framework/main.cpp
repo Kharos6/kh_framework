@@ -1,8 +1,11 @@
 #include "framework.hpp"
+#include "search_mod_folders.hpp"
 #include "cryptography.hpp"
 #include "kh_data.hpp"
 #include "lua_integration.hpp"
 #include "ai_integration.hpp"
+#include "text_to_speech_integration.hpp"
+#include "speech_to_text_integration.hpp"
 #include "sqf_integration.hpp"
 
 using namespace intercept;
@@ -84,6 +87,36 @@ void intercept::on_frame() {
 }
 
 void intercept::mission_ended() {
+    if (AIFramework::instance().is_initialized()) {
+        try {
+            AIFramework::instance().stop_all();
+        } catch (const std::exception& e) {
+            report_error("KH Framework Extension - Error stopping AI instances: " + std::string(e.what()));
+        } catch (...) {
+            report_error("KH Framework Extension - Unknown error stopping AI instances");
+        }
+    }
+
+    if (TTSFramework::instance().is_initialized()) {
+        try {
+            TTSFramework::instance().cleanup();
+        } catch (const std::exception& e) {
+            report_error("KH Framework Extension - Error stopping TTS instances: " + std::string(e.what()));
+        } catch (...) {
+            report_error("KH Framework Extension - Unknown error stopping TTS instances");
+        }
+    }
+
+    if (STTFramework::instance().is_initialized_public()) {
+        try {
+            STTFramework::instance().cleanup_public();
+        } catch (const std::exception& e) {
+            report_error("KH Framework Extension - Error stopping STT: " + std::string(e.what()));
+        } catch (...) {
+            report_error("KH Framework Extension - Unknown error stopping STT");
+        }
+    }
+
     reset_lua_state();
     LuaStackGuard guard(*g_lua_state);
     sol::table game = (*g_lua_state)["game"];
@@ -107,78 +140,77 @@ void intercept::mission_ended() {
 
 static FARPROC WINAPI delay_load_hook(unsigned dliNotify, PDelayLoadInfo pdli) {
     std::lock_guard<std::mutex> lock(g_delay_load_mutex);
+    HMODULE hModule;
+
+    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | 
+                     GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                     (LPCSTR)&delay_load_hook, &hModule);
     
+    char dllPath[MAX_PATH];
+
     if (dliNotify == dliNotePreLoadLibrary) {
         std::string dll_name = pdli->szDll;
         
-        if (_stricmp(dll_name.c_str(), "lua51.dll") == 0) {
-            HMODULE hModule;
-
-            GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | 
-                             GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                             (LPCSTR)&delay_load_hook, &hModule);
+        if (GetModuleFileNameA(hModule, dllPath, MAX_PATH) != 0) {
+            std::string pathStr(dllPath);
+            size_t lastSlash = pathStr.find_last_of("\\/");
             
-            char dllPath[MAX_PATH];
-            
-            if (GetModuleFileNameA(hModule, dllPath, MAX_PATH) != 0) {
-                std::string pathStr(dllPath);
-                size_t lastSlash = pathStr.find_last_of("\\/");
+            if (lastSlash != std::string::npos) {
+                std::string extensionDir = pathStr.substr(0, lastSlash);
+                size_t parentSlash = extensionDir.find_last_of("\\/");
                 
-                if (lastSlash != std::string::npos) {
-                    std::string extensionDir = pathStr.substr(0, lastSlash);
-                    size_t parentSlash = extensionDir.find_last_of("\\/");
+                if (parentSlash != std::string::npos) {
+                    std::string modDir = extensionDir.substr(0, parentSlash);
+                    std::string dllPath = modDir + "\\" + dll_name;
                     
-                    if (parentSlash != std::string::npos) {
-                        std::string modDir = extensionDir.substr(0, parentSlash);
-                        std::string luaPath = modDir + "\\lua51.dll";
-                        HMODULE hLua = LoadLibraryA(luaPath.c_str());
+                    if ((_stricmp(dll_name.c_str(), "cublas64_12.dll") == 0) || (_stricmp(dll_name.c_str(), "cublaslt64_12.dll") == 0)) {
+                        std::vector<std::string> cuda_paths_to_try;
+                        char cudaPath[MAX_PATH];
+                        DWORD result = GetEnvironmentVariableA("CUDA_PATH", cudaPath, MAX_PATH);
                         
-                        if (hLua != NULL) {
-                            g_loaded_delay_modules[dll_name] = hLua;
-                            return (FARPROC)hLua;
+                        if (result > 0 && result < MAX_PATH) {
+                            cuda_paths_to_try.push_back(std::string(cudaPath) + "\\bin\\");
+                        }
+                        
+                        result = GetEnvironmentVariableA("CUDA_PATH_V12_9", cudaPath, MAX_PATH);
+                        
+                        if (result > 0 && result < MAX_PATH) {
+                            cuda_paths_to_try.push_back(std::string(cudaPath) + "\\bin\\");
+                        }
+                        
+                        // Add standard installation paths
+                        cuda_paths_to_try.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.9\\bin\\");
+                        cuda_paths_to_try.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.8\\bin\\");
+                        cuda_paths_to_try.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.7\\bin\\");
+                        cuda_paths_to_try.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.6\\bin\\");
+                        cuda_paths_to_try.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.5\\bin\\");
+                        
+                        for (const auto& path : cuda_paths_to_try) {
+                            std::string fullPath = path + dll_name;
+                            HMODULE hCudaDll = LoadLibraryA(fullPath.c_str());
+                            
+                            if (hCudaDll != NULL) {
+                                g_loaded_delay_modules[dll_name] = hCudaDll;
+                                return (FARPROC)hCudaDll;
+                            }
+                        }
+                        
+                        // None of the paths worked
+                        report_error("KH - AI Framework: " + dll_name + " not found in standard locations");
+                        g_cuda_available = false;
+                    } else {
+                        HMODULE hDll = LoadLibraryA(dllPath.c_str());
+                        
+                        if (hDll != NULL) {
+                            g_loaded_delay_modules[dll_name] = hDll;
+                            return (FARPROC)hDll;
                         } else {
                             DWORD error = GetLastError();
-                            report_error("Failed to load " + dll_name + " from " + luaPath + " - error code: " + std::to_string(error));
+                            report_error("Failed to load " + dll_name + " from " + dllPath + " - error code: " + std::to_string(error));
                         }
                     }
                 }
             }
-        }
-        else if ((_stricmp(dll_name.c_str(), "cublas64_12.dll") == 0) || (_stricmp(dll_name.c_str(), "cublaslt64_12.dll") == 0)) {
-            std::vector<std::string> cuda_paths_to_try;
-            char cudaPath[MAX_PATH];
-            DWORD result = GetEnvironmentVariableA("CUDA_PATH", cudaPath, MAX_PATH);
-            
-            if (result > 0 && result < MAX_PATH) {
-                cuda_paths_to_try.push_back(std::string(cudaPath) + "\\bin\\");
-            }
-            
-            result = GetEnvironmentVariableA("CUDA_PATH_V12_9", cudaPath, MAX_PATH);
-            
-            if (result > 0 && result < MAX_PATH) {
-                cuda_paths_to_try.push_back(std::string(cudaPath) + "\\bin\\");
-            }
-            
-            // Add standard installation paths
-            cuda_paths_to_try.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.9\\bin\\");
-            cuda_paths_to_try.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.8\\bin\\");
-            cuda_paths_to_try.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.7\\bin\\");
-            cuda_paths_to_try.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.6\\bin\\");
-            cuda_paths_to_try.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.5\\bin\\");
-            
-            for (const auto& path : cuda_paths_to_try) {
-                std::string fullPath = path + dll_name;
-                HMODULE hCudaDll = LoadLibraryA(fullPath.c_str());
-                
-                if (hCudaDll != NULL) {
-                    g_loaded_delay_modules[dll_name] = hCudaDll;
-                    return (FARPROC)hCudaDll;
-                }
-            }
-            
-            // None of the paths worked
-            report_error("KH - AI Framework: " + dll_name + " not found in standard locations");
-            g_cuda_available = false;
         }
     }
     else if (dliNotify == dliFailLoadLib) {
@@ -227,6 +259,18 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         case DLL_PROCESS_ATTACH:
             break;
         case DLL_PROCESS_DETACH:
+            if (!lpReserved) {
+                if (AIFramework::instance().is_initialized()) {
+                    try {
+                        AIFramework::instance().stop_all();
+                        TTSFramework::instance().cleanup();
+                        STTFramework::instance().cleanup_public();
+                    } catch (...) {
+                        // Ignore errors during forced shutdown
+                    }
+                }
+            }
+
             cleanup_delay_loaded_modules();
             break;
         case DLL_THREAD_ATTACH:

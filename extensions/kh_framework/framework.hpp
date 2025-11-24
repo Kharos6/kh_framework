@@ -3,6 +3,7 @@
 #define NOMINMAX
 
 #include <windows.h>
+#include <Winternl.h>
 #include <string>
 #include <vector>
 #include <random>
@@ -21,15 +22,21 @@
 #include <chrono>
 #include <thread>
 #include <atomic>
+#include <set>
 #include <mutex>
 #include <condition_variable>
 #include <wincrypt.h>
 #include <delayimp.h>
+#include <mmeapi.h>
+#include <mmdeviceapi.h>
+#include <audioclient.h>
+#include <propsys.h>
 
 #include "intercept/include/intercept.hpp"
 #include "intercept/include/client/sqf/sqf.hpp"
 #include "intercept/include/client/pointers.hpp"
 #include "sol/sol.hpp"
+#include "sherpa/include/c-api.h"
 #include "llama/include/llama.h"
 #include "llama/include/common.h"
 
@@ -46,8 +53,12 @@ static code g_compiled_sqf_remove_handler;
 static code g_compiled_sqf_create_hash_map_from_array;
 static code g_compiled_sqf_create_hash_map;
 static code g_compiled_sqf_trigger_lua_reset_event;
+static code g_compiled_ai_initialized_event;
 static code g_compiled_ai_response_progress_event;
 static code g_compiled_ai_response_event;
+static code g_compiled_tts_generated_event;
+static code g_compiled_tts_finished_event;
+static code g_compiled_stt_transcription_event;
 static game_value g_return_value;
 static game_value g_call_arguments;
 static bool g_is_server = false;
@@ -98,6 +109,19 @@ static game_value raw_call_sqf_args_native(const code& code_obj, const game_valu
     g_call_arguments = args;
     intercept::client::host::functions.invoke_raw_unary(intercept::client::__sqf::unary__isnil__code_string__ret__bool, code_obj);
     return g_return_value;
+}
+
+static game_value raw_call_sqf_native_no_return(const code& code_obj, const game_value& args) noexcept {
+    intercept::client::host::functions.invoke_raw_unary(intercept::client::__sqf::unary__isnil__code_string__ret__bool, code_obj);
+    return game_value();
+}
+
+static game_value raw_call_sqf_args_native_no_return(const code& code_obj, const game_value& args) noexcept {
+    auto game_state = (intercept::client::host::functions.get_engine_allocator())->gameState;
+    static r_string args_name = "_khargs"sv;
+    game_state->set_local_variable(args_name, std::move(args));
+    intercept::client::host::functions.invoke_raw_unary(intercept::client::__sqf::unary__isnil__code_string__ret__bool, code_obj);
+    return game_value();
 }
 
 class RandomStringGenerator {

@@ -106,19 +106,31 @@ private:
 
         HANDLE pid = reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(GetCurrentProcessId()));
         HANDLE processHandle = GetCurrentProcess();
-        auto handleInfo = static_cast<PSYSTEM_HANDLE_INFORMATION_EX>(malloc(handleInfoSize));
+        struct FreeDeleter { void operator()(void* p) { free(p); } };
+        
+        std::unique_ptr<SYSTEM_HANDLE_INFORMATION_EX, FreeDeleter> handleInfo(
+            static_cast<PSYSTEM_HANDLE_INFORMATION_EX>(malloc(handleInfoSize))
+        );
+
+        if (!handleInfo) {
+            return mod_folders;
+        }
 
         while ((status = NtQuerySystemInformation(
             SystemHandleInformationEx,
-            handleInfo,
+            handleInfo.get(),
             handleInfoSize,
             nullptr
         )) == STATUS_INFO_LENGTH_MISMATCH) {
-            handleInfo = static_cast<PSYSTEM_HANDLE_INFORMATION_EX>(realloc(handleInfo, handleInfoSize *= 2));
+            handleInfoSize *= 2;
+            handleInfo.reset(static_cast<PSYSTEM_HANDLE_INFORMATION_EX>(malloc(handleInfoSize)));
+
+            if (!handleInfo) {
+                return mod_folders;
+            }
         }
 
         if (!NT_SUCCESS(status)) {
-            free(handleInfo);
             return mod_folders;
         }
 
@@ -145,41 +157,49 @@ private:
                 continue;
             }
 
+            std::unique_ptr<void, decltype(&CloseHandle)> dupHandleGuard(dupHandle, &CloseHandle);
+
             if (GetFileType(dupHandle) != FILE_TYPE_DISK) {
-                CloseHandle(dupHandle);
                 continue;
             }
 
-            auto objectTypeInfo = static_cast<POBJECT_TYPE_INFORMATION>(malloc(0x1000));
+            std::unique_ptr<OBJECT_TYPE_INFORMATION, FreeDeleter> objectTypeInfo(
+                static_cast<POBJECT_TYPE_INFORMATION>(malloc(0x1000))
+            );
 
-            if (!NT_SUCCESS(NtQueryObject(dupHandle, ObjectTypeInformation, objectTypeInfo, 0x1000, NULL))) {
-                CloseHandle(dupHandle);
-                free(objectTypeInfo);
+            if (!objectTypeInfo) {
+                continue;
+            }
+
+            if (!NT_SUCCESS(NtQueryObject(dupHandle, ObjectTypeInformation, objectTypeInfo.get(), 0x1000, NULL))) {
                 continue;
             }
 
             // Skip handles with problematic access rights
             if (handle.GrantedAccess == 0x0012019f) {
-                free(objectTypeInfo);
-                CloseHandle(dupHandle);
                 continue;
             }
 
             ULONG returnLength;
-            auto objectNameInfo = malloc(0x1000);
+            std::unique_ptr<void, FreeDeleter> objectNameInfo(malloc(0x1000));
             
-            if (!NT_SUCCESS(NtQueryObject(dupHandle, ObjectNameInformation, objectNameInfo, 0x1000, &returnLength))) {
-                objectNameInfo = realloc(objectNameInfo, returnLength);
+            if (!objectNameInfo) {
+                continue;
+            }
+            
+            if (!NT_SUCCESS(NtQueryObject(dupHandle, ObjectNameInformation, objectNameInfo.get(), 0x1000, &returnLength))) {
+                objectNameInfo.reset(malloc(returnLength));
+                
+                if (!objectNameInfo) {
+                    continue;
+                }
 
-                if (!NT_SUCCESS(NtQueryObject(dupHandle, ObjectNameInformation, objectNameInfo, returnLength, NULL))) {
-                    free(objectTypeInfo);
-                    free(objectNameInfo);
-                    CloseHandle(dupHandle);
+                if (!NT_SUCCESS(NtQueryObject(dupHandle, ObjectNameInformation, objectNameInfo.get(), returnLength, NULL))) {
                     continue;
                 }
             }
 
-            UNICODE_STRING objectName = *static_cast<PUNICODE_STRING>(objectNameInfo);
+            UNICODE_STRING objectName = *static_cast<PUNICODE_STRING>(objectNameInfo.get());
 
             // Check if this is a PBO file
             if (objectName.Length) {
@@ -216,13 +236,7 @@ private:
                     }
                 }
             }
-
-            free(objectTypeInfo);
-            free(objectNameInfo);
-            CloseHandle(dupHandle);
         }
-
-        free(handleInfo);
 
         // Convert set to vector
         mod_folders.assign(unique_folders.begin(), unique_folders.end());

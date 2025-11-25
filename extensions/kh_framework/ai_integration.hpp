@@ -141,15 +141,17 @@ public:
 
         if (it != shared_models.end()) {
             auto shared_model = it->second;
-            shared_model->ref_count++;            
+            shared_model->ref_count.fetch_add(1, std::memory_order_relaxed);            
             return shared_model;
         }
 
         llama_model* model = llama_load_model_from_file(model_path.c_str(), model_params);
         
         if (!model) {
-            intercept::client::invoker_lock lock;
-            report_error("Failed to load model from file");
+            MainThreadScheduler::instance().schedule([]() {
+                report_error("KH - AI Framework: Failed to load model from file");
+            });
+
             throw std::runtime_error("Failed to load model from file");
         }
         
@@ -219,6 +221,7 @@ private:
     std::string user_prompt;
     mutable std::mutex prompt_mutex;
     mutable std::mutex lua_execution_mutex;
+    mutable std::mutex kv_cache_mutex;
     std::condition_variable inference_trigger;
     std::mutex inference_mutex;
     std::atomic<bool> inference_requested{false};
@@ -231,20 +234,6 @@ private:
     std::string marker_user_end = "<|eot_id|>";
     std::string marker_assistant_start = "<|start_header_id|>assistant<|end_header_id|>";
     std::string marker_assistant_end = "<|eot_id|>";
-
-    struct AsyncEvent {
-        enum Type { LOG, PROGRESS_CALLBACK } type;
-        std::string message;
-        std::string ai_name;
-        std::string response_data;
-        uint64_t generation_id{0};
-    };
-
-    std::deque<AsyncEvent> event_queue;
-    std::mutex event_queue_mutex;
-    std::condition_variable event_queue_cv;
-    std::thread event_processor_thread;
-    std::atomic<bool> event_processor_running{false};
     std::atomic<uint64_t> current_generation_id{0};
 
     std::string clean_response_for_display(const std::string& raw_response) const {
@@ -285,74 +274,30 @@ private:
         return cleaned;
     }
 
-    // Event processor thread function
-    void event_processor_func() {
-        while (event_processor_running || !event_queue.empty()) {
-            AsyncEvent event;
-            bool has_event = false;
-            
-            {
-                std::unique_lock<std::mutex> lock(event_queue_mutex);
-
-                event_queue_cv.wait_for(lock, std::chrono::milliseconds(10), [this] {
-                    return !event_queue.empty() || !event_processor_running;
-                });
-                
-                if (!event_queue.empty()) {
-                    event = event_queue.front();
-                    event_queue.pop_front();
-                    has_event = true;
-                }
-            }
-            
-            if (has_event) {
-                try {
-                    intercept::client::invoker_lock lock;
-                    
-                    if (event.type == AsyncEvent::LOG) {
-                        sqf::diag_log(event.message);
-                    } else if (event.type == AsyncEvent::PROGRESS_CALLBACK) {
-                        if (event.generation_id < current_generation_id) {
-                            continue;
-                        }
-
-                        auto_array<game_value> ai_response_progress_data;
-                        ai_response_progress_data.push_back(game_value(event.ai_name));
-                        ai_response_progress_data.push_back(game_value(clean_response_for_display(event.response_data)));
-                        raw_call_sqf_args_native_no_return(g_compiled_ai_response_progress_event, game_value(std::move(ai_response_progress_data)));
-                    }
-                } catch (const std::exception& e) {
-                    try {
-                        intercept::client::invoker_lock lock;
-                        report_error("KH - AI Framework: Event processor exception - " + std::string(e.what()));
-                    } catch (...) {
-                        // Too bad
-                    }
-                } catch (...) {
-                    try {
-                        intercept::client::invoker_lock lock;
-                        report_error("KH - AI Framework: Event processor unknown exception");
-                    } catch (...) {
-                        // Too bad
-                    }
-                }
-            }
-        }
-    }
-
-    // Helper to enqueue log message (non-blocking)
-    void async_log(const std::string& message) {
+    void schedule_log(const std::string& message) {
         if (!log_generation) return;
-        std::lock_guard<std::mutex> lock(event_queue_mutex);
-        event_queue.push_back({AsyncEvent::LOG, message, "", ""});
-        event_queue_cv.notify_one();
+
+        MainThreadScheduler::instance().schedule([message]() {
+            sqf::diag_log(message);
+        });
     }
 
-    // Helper to enqueue progress callback (non-blocking)
-    void async_progress_callback(const std::string& response_so_far) {
-        std::lock_guard<std::mutex> lock(event_queue_mutex);
-        event_queue.push_back({AsyncEvent::PROGRESS_CALLBACK, "", ai_name, response_so_far, current_generation_id});
-        event_queue_cv.notify_one();
+    void schedule_progress_callback(const std::string& response_so_far) {
+        std::string name = ai_name;
+        std::string cleaned = clean_response_for_display(response_so_far);
+        uint64_t gen_id = current_generation_id.load();
+        
+        MainThreadScheduler::instance().schedule([name, cleaned, gen_id, this]() {
+            // Check if this generation is still current
+            if (gen_id < current_generation_id.load()) {
+                return;
+            }
+            
+            auto_array<game_value> ai_response_progress_data;
+            ai_response_progress_data.push_back(game_value(name));
+            ai_response_progress_data.push_back(game_value(cleaned));
+            raw_call_sqf_args_native_no_return(g_compiled_ai_response_progress_event, game_value(std::move(ai_response_progress_data)));
+        });
     }
 
     struct ConversationTurn {
@@ -494,14 +439,17 @@ private:
             std::vector<llama_token> tokens = common_tokenize(ctx, text, true, true);
             
             if (tokens.size() > MAX_PROMPT_TOKENS) {
-                intercept::client::invoker_lock lock;
                 tokens.resize(MAX_PROMPT_TOKENS);
             }
             
             return tokens;
         } catch (const std::exception& e) {
-            intercept::client::invoker_lock lock;
-            report_error("KH - AI Framework: Tokenization error: " + std::string(e.what()));
+            std::string error_msg = e.what();
+
+            MainThreadScheduler::instance().schedule([error_msg]() {
+                report_error("KH - AI Framework: Tokenization error: " + error_msg);
+            });
+
             throw;
         }
     }
@@ -523,15 +471,20 @@ private:
                 int result = llama_decode(ctx, batch);
 
                 if (result != 0) {
-                    intercept::client::invoker_lock lock;
-                    report_error("KH - AI Framework: System prompt decode failed");
+                    MainThreadScheduler::instance().schedule([]() {
+                        report_error("KH - AI Framework: System prompt decode failed");
+                    });
                 }
             }
       
             system_prompt_cached = true;
         } catch (const std::exception& e) {
-            intercept::client::invoker_lock lock;
-            report_error("KH - AI Framework: AI Controller (" + ai_name + "): Failed to cache system prompt: " + std::string(e.what()));
+            std::string name = ai_name;
+            std::string error_msg = e.what();
+
+            MainThreadScheduler::instance().schedule([name, error_msg]() {
+                report_error("KH - AI Framework: AI Controller (" + name + "): Failed to cache system prompt: " + error_msg);
+            });
         }
     }
 
@@ -581,10 +534,9 @@ private:
                 std::string error_msg = "Lua syntax error: " + std::string(err.what());
                 ai_lua_state.reset();
                 
-                try {
-                    intercept::client::invoker_lock lock;
+                MainThreadScheduler::instance().schedule([error_msg]() {
                     report_error("KH - AI Framework: " + error_msg);
-                } catch (...) {}
+                });
                 
                 return "[ERROR: " + std::string(err.what()) + "]";
             }
@@ -598,10 +550,9 @@ private:
                 std::string error_msg = "Lua execution error: " + std::string(err.what());
                 ai_lua_state.reset();
                 
-                try {
-                    intercept::client::invoker_lock lock;
+                MainThreadScheduler::instance().schedule([error_msg]() {
                     report_error("KH - AI Framework: " + error_msg);
-                } catch (...) {}
+                });
                 
                 return "[ERROR: " + std::string(err.what()) + "]";
             }
@@ -680,13 +631,11 @@ private:
                 
             } catch (const std::exception& e) {
                 ai_lua_state.reset();
+                std::string error_msg = e.what();
 
-                try {
-                    intercept::client::invoker_lock lock;
-                    report_error("KH - AI Framework: Error converting Lua result to string: " + std::string(e.what()));
-                } catch (...) {
-                    // Too bad
-                }
+                MainThreadScheduler::instance().schedule([error_msg]() {
+                    report_error("KH - AI Framework: Error converting Lua result to string: " + error_msg);
+                });
                 
                 return "[ERROR: Type conversion failed - " + std::string(e.what()) + "]";
             }
@@ -694,34 +643,29 @@ private:
         } catch (const sol::error& e) {
             ai_lua_state.reset();
 
-            try {
-                intercept::client::invoker_lock lock;
-                report_error("KH - AI Framework: Lua block execution exception: " + std::string(e.what()));
-            } catch (...) {
-                // Too bad
-            }
+            std::string error_msg = e.what();
+
+            MainThreadScheduler::instance().schedule([error_msg]() {
+                report_error("KH - AI Framework: Lua block execution exception: " + error_msg);
+            });
             
             return "[ERROR: " + std::string(e.what()) + "]";
         } catch (const std::exception& e) {
             ai_lua_state.reset();
 
-            try {
-                intercept::client::invoker_lock lock;
-                report_error("KH - AI Framework: Lua block execution exception: " + std::string(e.what()));
-            } catch (...) {
-                // Too bad
-            }
+            std::string error_msg = e.what();
+
+            MainThreadScheduler::instance().schedule([error_msg]() {
+                report_error("KH - AI Framework: Lua block execution exception: " + error_msg);
+            });
             
             return "[ERROR: " + std::string(e.what()) + "]";
         } catch (...) {
             ai_lua_state.reset();
             
-            try {
-                intercept::client::invoker_lock lock;
+            MainThreadScheduler::instance().schedule([]() {
                 report_error("KH - AI Framework: Unknown error in Lua block execution");
-            } catch (...) {
-                // Too bad
-            }
+            });
             
             return "[ERROR: Unknown error]";
         }
@@ -897,10 +841,6 @@ private:
         GenerationGuard guard(is_generating);
 
         if (math_state != MathBlockState::OUTSIDE) {
-            if (log_generation) {
-                async_log("KH - AI Framework: WARNING - Math state was not OUTSIDE at generation start, resetting");
-            }
-            
             math_state = MathBlockState::OUTSIDE;
             math_block_buffer.clear();
             math_block_start_pos = 0;
@@ -920,11 +860,14 @@ private:
         }
         
         if (!ctx || !model) {
-            intercept::client::invoker_lock lock;
-            report_error("KH - AI Framework: Context or model not initialized");
+            MainThreadScheduler::instance().schedule([]() {
+                report_error("KH - AI Framework: Context or model not initialized");
+            });
+
             throw std::runtime_error("Context or model not initialized");
         }
 
+        std::unique_lock<std::mutex> kv_lock(kv_cache_mutex);
         bool system_prompt_was_recached = false;
         
         if (!system_prompt_cached) {
@@ -983,8 +926,10 @@ private:
         }
         
         if (all_prompt_tokens.empty()) {
-            intercept::client::invoker_lock lock;
-            report_error("KH - AI Framework: Tokenization produced empty result");
+            MainThreadScheduler::instance().schedule([]() {
+                report_error("KH - AI Framework: Tokenization produced empty result");
+            });
+
             throw std::runtime_error("Tokenization produced empty result");
         }
 
@@ -1008,11 +953,14 @@ private:
             decode_result = llama_decode(ctx, batch);
             
             if (decode_result != 0) {
-                intercept::client::invoker_lock lock;
-                
-                report_error("KH - AI Framework: Decode failed at chunk " + 
-                            std::to_string(i / N_BATCH) + " with code " + 
-                            std::to_string(decode_result));
+                int chunk_num = static_cast<int>(i / N_BATCH);
+                int result_code = decode_result;
+
+                MainThreadScheduler::instance().schedule([chunk_num, result_code]() {
+                    report_error("KH - AI Framework: Decode failed at chunk " + 
+                                std::to_string(chunk_num) + " with code " + 
+                                std::to_string(result_code));
+                });
 
                 throw std::runtime_error("Decode failed");
             }
@@ -1032,23 +980,23 @@ private:
 
         if (log_generation) {
             int total_tokens = system_prompt_token_count + static_cast<int>(all_prompt_tokens.size());
-            async_log("KH - AI Framework: (" + ai_name + "): ========== INFERENCE START ==========");
-            async_log("KH - AI Framework: (" + ai_name + "):   System Token Count: " + std::to_string(system_prompt_token_count) + " tokens");
-            async_log("KH - AI Framework: (" + ai_name + "):   Conversation Token Count: " + std::to_string(total_tokens - system_prompt_token_count) + " tokens");
-            async_log("KH - AI Framework: (" + ai_name + "):   Total Context Usage: " + std::to_string(total_tokens) + " / " + std::to_string(N_CTX) + "%");
-            async_log("KH - AI Framework: (" + ai_name + "):   Maximum Generated Tokens: " + std::to_string(MAX_NEW_TOKENS));
-            async_log("KH - AI Framework: (" + ai_name + "):   Maximum Total Tokens: " + std::to_string(MAX_PROMPT_TOKENS));
-            async_log("KH - AI Framework: (" + ai_name + "):   Context Size: " + std::to_string(N_CTX));
-            async_log("KH - AI Framework: (" + ai_name + "):   Temperature: " + std::to_string(TEMPERATURE));
-            async_log("KH - AI Framework: (" + ai_name + "):   Top K: " + std::to_string(TOP_K));
-            async_log("KH - AI Framework: (" + ai_name + "):   Top P: " + std::to_string(TOP_P));
-            async_log("KH - AI Framework: (" + ai_name + "):   Batch Size: " + std::to_string(N_BATCH));
-            async_log("KH - AI Framework: (" + ai_name + "):   Micro Batch Size: " + std::to_string(N_UBATCH));
-            async_log("KH - AI Framework: (" + ai_name + "):   CPU Threads: " + std::to_string(CPU_THREADS));
-            async_log("KH - AI Framework: (" + ai_name + "):   CPU Threads Batch: " + std::to_string(CPU_THREADS_BATCH));
-            async_log("KH - AI Framework: (" + ai_name + "):   GPU Layers: " + std::to_string(GPU_LAYERS));
-            async_log("KH - AI Framework: (" + ai_name + "):   Flash Attention: " + std::string(FLASH_ATTENTION ? "enabled" : "disabled"));
-            async_log("KH - AI Framework: (" + ai_name + "):   KV Cache Offload: " + std::string(OFFLOAD_KV_CACHE ? "enabled" : "disabled"));
+            schedule_log("KH - AI Framework: (" + ai_name + "): ========== INFERENCE START ==========");
+            schedule_log("KH - AI Framework: (" + ai_name + "):   System Token Count: " + std::to_string(system_prompt_token_count) + " tokens");
+            schedule_log("KH - AI Framework: (" + ai_name + "):   Conversation Token Count: " + std::to_string(total_tokens - system_prompt_token_count) + " tokens");
+            schedule_log("KH - AI Framework: (" + ai_name + "):   Total Context Usage: " + std::to_string(total_tokens) + " / " + std::to_string(N_CTX) + "%");
+            schedule_log("KH - AI Framework: (" + ai_name + "):   Maximum Generated Tokens: " + std::to_string(MAX_NEW_TOKENS));
+            schedule_log("KH - AI Framework: (" + ai_name + "):   Maximum Total Tokens: " + std::to_string(MAX_PROMPT_TOKENS));
+            schedule_log("KH - AI Framework: (" + ai_name + "):   Context Size: " + std::to_string(N_CTX));
+            schedule_log("KH - AI Framework: (" + ai_name + "):   Temperature: " + std::to_string(TEMPERATURE));
+            schedule_log("KH - AI Framework: (" + ai_name + "):   Top K: " + std::to_string(TOP_K));
+            schedule_log("KH - AI Framework: (" + ai_name + "):   Top P: " + std::to_string(TOP_P));
+            schedule_log("KH - AI Framework: (" + ai_name + "):   Batch Size: " + std::to_string(N_BATCH));
+            schedule_log("KH - AI Framework: (" + ai_name + "):   Micro Batch Size: " + std::to_string(N_UBATCH));
+            schedule_log("KH - AI Framework: (" + ai_name + "):   CPU Threads: " + std::to_string(CPU_THREADS));
+            schedule_log("KH - AI Framework: (" + ai_name + "):   CPU Threads Batch: " + std::to_string(CPU_THREADS_BATCH));
+            schedule_log("KH - AI Framework: (" + ai_name + "):   GPU Layers: " + std::to_string(GPU_LAYERS));
+            schedule_log("KH - AI Framework: (" + ai_name + "):   Flash Attention: " + std::string(FLASH_ATTENTION ? "enabled" : "disabled"));
+            schedule_log("KH - AI Framework: (" + ai_name + "):   KV Cache Offload: " + std::string(OFFLOAD_KV_CACHE ? "enabled" : "disabled"));
         }
 
         for (int i = 0; i < MAX_NEW_TOKENS; i++) {
@@ -1069,10 +1017,13 @@ private:
             int vocab_size = llama_vocab_n_tokens(vocab);
 
             if (new_token_id < 0 || new_token_id >= vocab_size) {
-                intercept::client::invoker_lock lock;
+                int token_id = new_token_id;
+                int vsize = vocab_size;
 
-                report_error("KH - AI Framework: Invalid token ID sampled: " + std::to_string(new_token_id) + 
-                            " (vocab size: " + std::to_string(vocab_size) + ")");
+                MainThreadScheduler::instance().schedule([token_id, vsize]() {
+                    report_error("KH - AI Framework: Invalid token ID sampled: " + std::to_string(token_id) + 
+                                " (vocab size: " + std::to_string(vsize) + ")");
+                });
                             
                 break;
             }
@@ -1088,8 +1039,10 @@ private:
             auto ttp_end = std::chrono::high_resolution_clock::now();
             
             if (n_chars < 0) {
-                intercept::client::invoker_lock lock;
-                report_error("KH - AI Framework: ERROR: Token to piece conversion failed");
+                MainThreadScheduler::instance().schedule([]() {
+                    report_error("KH - AI Framework: ERROR: Token to piece conversion failed");
+                });
+
                 break;
             }
             
@@ -1107,8 +1060,10 @@ private:
             auto get_batch_end = std::chrono::high_resolution_clock::now();
             
             if (batch.n_tokens != 1) {
-                intercept::client::invoker_lock lock;
-                report_error("KH - AI Framework: ERROR: Batch creation failed");
+                MainThreadScheduler::instance().schedule([]() {
+                    report_error("KH - AI Framework: ERROR: Batch creation failed");
+                });
+
                 break;
             }
             
@@ -1121,41 +1076,49 @@ private:
             try {
                 decode_result = llama_decode(ctx, batch);
             } catch (const std::exception& e) {
-                intercept::client::invoker_lock lock;
-                report_error("KH - AI Framework: EXCEPTION during generation: " + std::string(e.what()));
+                std::string error_msg = e.what();
+
+                MainThreadScheduler::instance().schedule([error_msg]() {
+                    report_error("KH - AI Framework: EXCEPTION during generation: " + error_msg);
+                });
+
                 break;
             }
 
             auto decode_end = std::chrono::high_resolution_clock::now();
                     
             if (decode_result != 0) {
-                intercept::client::invoker_lock lock;
-                report_error("KH - AI Framework: Generation decode failed at token " + std::to_string(n_generated));
+                int token_num = n_generated;
+
+                MainThreadScheduler::instance().schedule([token_num]() {
+                    report_error("KH - AI Framework: Generation decode failed at token " + std::to_string(token_num));
+                });
+
                 break;
             }
 
             if (n_generated % PROGRESS_UPDATE_INTERVAL == 0) {
-                async_progress_callback(raw_response);
+                schedule_progress_callback(raw_response);
             }
 
             if (log_generation) {
                 auto current_time = std::chrono::high_resolution_clock::now();
                 auto time_since_last_log = std::chrono::duration_cast<std::chrono::milliseconds>(current_time - last_log_time);
                 auto sample_duration = std::chrono::duration_cast<std::chrono::milliseconds>(sample_end - sample_start);
-                async_log("KH - AI Framework: (" + ai_name + "):   Token Sampling Time: " + std::to_string(sample_duration.count()) + "ms");
+                schedule_log("KH - AI Framework: (" + ai_name + "):   Token Sampling Time: " + std::to_string(sample_duration.count()) + "ms");
                 auto ttp_duration = std::chrono::duration_cast<std::chrono::milliseconds>(ttp_end - ttp_start);
-                async_log("KH - AI Framework: (" + ai_name + "):   Token To Piece Time: " + std::to_string(ttp_duration.count()) + "ms");
+                schedule_log("KH - AI Framework: (" + ai_name + "):   Token To Piece Time: " + std::to_string(ttp_duration.count()) + "ms");
                 auto token_process_duration = std::chrono::duration_cast<std::chrono::milliseconds>(token_process_end - token_process_start);
-                async_log("KH - AI Framework: (" + ai_name + "):   Token Process Time: " + std::to_string(token_process_duration.count()) + "ms");
+                schedule_log("KH - AI Framework: (" + ai_name + "):   Token Process Time: " + std::to_string(token_process_duration.count()) + "ms");
                 auto get_batch_duration = std::chrono::duration_cast<std::chrono::milliseconds>(get_batch_end - get_batch_start);
-                async_log("KH - AI Framework: (" + ai_name + "):   Token Batch Time: " + std::to_string(get_batch_duration.count()) + "ms");
+                schedule_log("KH - AI Framework: (" + ai_name + "):   Token Batch Time: " + std::to_string(get_batch_duration.count()) + "ms");
                 auto decode_duration = std::chrono::duration_cast<std::chrono::milliseconds>(decode_end - decode_start);
-                async_log("KH - AI Framework: (" + ai_name + "):   Token Decode Time: " + std::to_string(decode_duration.count()) + "ms");
+                schedule_log("KH - AI Framework: (" + ai_name + "):   Token Decode Time: " + std::to_string(decode_duration.count()) + "ms");
                 
                 if (time_since_last_log.count() >= 1000) {
                     float tokens_per_second = (tokens_since_last_log * 1000.0f) / time_since_last_log.count();
 
-                    async_log("KH - AI Framework: (" + ai_name + "):   Generation rate: " + 
+                    schedule_log("KH - AI Framework: (" + ai_name + "):   Generation rate: " + 
                                 std::to_string(static_cast<int>(tokens_per_second)) + " tokens/sec (" + 
                                 std::to_string(tokens_since_last_log) + " tokens in " + 
                                 std::to_string(time_since_last_log.count()) + "ms)");
@@ -1166,6 +1129,7 @@ private:
             }
         }
 
+        kv_lock.unlock();
         auto gen_duration = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - start_gen);
 
         if (math_state == MathBlockState::INSIDE_BLOCK) {
@@ -1181,15 +1145,15 @@ private:
                     processed_display_output = processed_display_output.substr(0, incomplete_math_pos);
                     
                     if (log_generation) {
-                        async_log("KH - AI Framework: (" + ai_name + 
+                        schedule_log("KH - AI Framework: (" + ai_name + 
                                 "):   WARNING - Generation ended inside math block at position " +
                                 std::to_string(incomplete_math_pos) + ", removed incomplete block");
                     }
                 }
             } else {
-                // Shouldn't happen
+                // Shouldn't happen but hey
                 if (log_generation) {
-                    async_log("KH - AI Framework: (" + ai_name + 
+                    schedule_log("KH - AI Framework: (" + ai_name + 
                             "):   WARNING - Math block state inconsistency detected");
                 }
             }
@@ -1198,10 +1162,10 @@ private:
         math_guard.reset();
 
         if (log_generation) {
-            async_log("KH - AI Framework: (" + ai_name + "):   Tokens Generated: " + std::to_string(n_generated));
-            async_log("KH - AI Framework: (" + ai_name + "):   Total Generation Time: " + std::to_string(gen_duration.count()) + "ms");
-            async_log("KH - AI Framework: (" + ai_name + "):   Response: " + processed_display_output);
-            async_log("KH - AI Framework: (" + ai_name + "): ========== INFERENCE END ==========");
+            schedule_log("KH - AI Framework: (" + ai_name + "):   Tokens Generated: " + std::to_string(n_generated));
+            schedule_log("KH - AI Framework: (" + ai_name + "):   Total Generation Time: " + std::to_string(gen_duration.count()) + "ms");
+            schedule_log("KH - AI Framework: (" + ai_name + "):   Response: " + processed_display_output);
+            schedule_log("KH - AI Framework: (" + ai_name + "): ========== INFERENCE END ==========");
         }
 
         size_t end_pos = processed_display_output.find(marker_assistant_end);
@@ -1236,8 +1200,13 @@ private:
         try {
             initialize_internal(model_path);
         } catch (const std::exception& e) {
-            intercept::client::invoker_lock lock;
-            report_error("KH - AI Framework: AI Controller (" + ai_name + "): Failed to initialize: " + std::string(e.what()));
+            std::string name = ai_name;
+            std::string error_msg = e.what();
+
+            MainThreadScheduler::instance().schedule([name, error_msg]() {
+                report_error("KH - AI Framework: AI Controller (" + name + "): Failed to initialize: " + error_msg);
+            });
+
             running = false;
             return;
         }
@@ -1246,8 +1215,12 @@ private:
         while (!should_stop && !force_terminate) {
             try {
                 if (force_terminate) {
-                    intercept::client::invoker_lock lock;
-                    sqf::diag_log("KH - AI Framework: AI thread (" + ai_name + ") received force termination signal");
+                    std::string name = ai_name;
+
+                    MainThreadScheduler::instance().schedule([name]() {
+                        sqf::diag_log("KH - AI Framework: AI thread (" + name + ") received force termination signal");
+                    });
+
                     break;
                 }
 
@@ -1279,24 +1252,30 @@ private:
 
                 if (force_terminate) break;
                 abort_generation = false;
+                current_generation_id++;  // Increment before generation so progress events use correct ID
                 std::string raw_response = generate_response();
                 if (force_terminate) break;
-                current_generation_id++;
                 
                 // Trigger events for the response
-                try {
-                    intercept::client::invoker_lock lock;
-                    auto_array<game_value> ai_response_data;
-                    ai_response_data.push_back(game_value(ai_name));
-                    ai_response_data.push_back(game_value(raw_response));
-                    raw_call_sqf_args_native_no_return(g_compiled_ai_response_event, game_value(std::move(ai_response_data)));
-                } catch (const std::exception& e) {
-                    intercept::client::invoker_lock lock;
-                    report_error("KH - AI Framework: AI Controller (" + ai_name + "): Error calling response event: " + std::string(e.what()));
+                {
+                    std::string name = ai_name;
+                    std::string response = raw_response;
+                    
+                    MainThreadScheduler::instance().schedule([name, response]() {
+                        auto_array<game_value> ai_response_data;
+                        ai_response_data.push_back(game_value(name));
+                        ai_response_data.push_back(game_value(response));
+                        raw_call_sqf_args_native_no_return(g_compiled_ai_response_event, game_value(std::move(ai_response_data)));
+                    });
                 }
             } catch (const std::exception& e) {
-                intercept::client::invoker_lock lock;
-                report_error("KH - AI Framework: AI Controller (" + ai_name + "): Thread error: " + std::string(e.what()));
+                std::string name = ai_name;
+                std::string error_msg = e.what();
+
+                MainThreadScheduler::instance().schedule([name, error_msg]() {
+                    report_error("KH - AI Framework: AI Controller (" + name + "): Thread error: " + error_msg);
+                });
+
                 std::this_thread::sleep_for(std::chrono::seconds(1));
             }
         }
@@ -1312,20 +1291,25 @@ private:
             // main_gpu, tensor_split, etc... use their defaults
 
             {
-                intercept::client::invoker_lock lock;
-                if (g_cuda_available) {
-                    sqf::diag_log("KH - AI Framework: using CUDA");
-                } else {
-                    sqf::diag_log("KH - AI Framework: using CPU - SLOW");
-                }
+                bool cuda = g_cuda_available;
+
+                MainThreadScheduler::instance().schedule([cuda]() {
+                    if (cuda) {
+                        sqf::diag_log("KH - AI Framework: using CUDA");
+                    } else {
+                        sqf::diag_log("KH - AI Framework: using CPU");
+                    }
+                });
             }
 
             // Get or create shared model - will share if model_path AND all model_params match
             shared_model = SharedModelManager::get_or_create_model(model_path, model_params);
 
             if (!shared_model || !shared_model->model) {
-                intercept::client::invoker_lock lock;
-                report_error("KH - AI Framework: Failed to load model");
+                MainThreadScheduler::instance().schedule([]() {
+                    report_error("KH - AI Framework: Failed to load model");
+                });
+
                 throw std::runtime_error("Failed to load model");
             }
 
@@ -1333,8 +1317,10 @@ private:
             vocab = llama_model_get_vocab(model);
 
             if (!vocab) {
-                intercept::client::invoker_lock lock;
-                report_error("KH - AI Framework: Failed to get vocabulary");
+                MainThreadScheduler::instance().schedule([]() {
+                    report_error("KH - AI Framework: Failed to get vocabulary");
+                });
+
                 throw std::runtime_error("Failed to get vocabulary");
             }
 
@@ -1350,8 +1336,10 @@ private:
             ctx = llama_new_context_with_model(model, ctx_params);
 
             if (!ctx) {
-                intercept::client::invoker_lock lock;
-                report_error("KH - AI Framework: Failed to create context");
+                MainThreadScheduler::instance().schedule([]() {
+                    report_error("KH - AI Framework: Failed to create context");
+                });
+
                 throw std::runtime_error("Failed to create context");
             }
 
@@ -1365,29 +1353,39 @@ private:
             initialized = true;
 
             {
-                intercept::client::invoker_lock lock;
-                auto_array<game_value> ai_initialized_data;
-                ai_initialized_data.push_back(game_value(ai_name));
-                raw_call_sqf_args_native_no_return(g_compiled_ai_initialized_event, game_value(std::move(ai_initialized_data)));
+                std::string name = ai_name;
+                
+                MainThreadScheduler::instance().schedule([name]() {
+                    auto_array<game_value> ai_initialized_data;
+                    ai_initialized_data.push_back(game_value(name));
+                    raw_call_sqf_args_native_no_return(g_compiled_ai_initialized_event, game_value(std::move(ai_initialized_data)));
+                });
             }
         } catch (const std::exception& e) {
             cleanup_resources();
-            intercept::client::invoker_lock lock;
-            report_error("KH - AI Framework: AI Controller (" + ai_name + "): Initialization failed: " + std::string(e.what()));
+            std::string name = ai_name;
             std::string error_msg = e.what();
-            
-            if (error_msg.find("CUDA") != std::string::npos || 
-                error_msg.find("cublas") != std::string::npos ||
-                error_msg.find("GPU") != std::string::npos) {
-                report_error("KH - AI Framework: This may be a CUDA-related error. Ensure CUDA Toolkit 12.x is installed.");
-            }
+
+            MainThreadScheduler::instance().schedule([name, error_msg]() {
+                report_error("KH - AI Framework: AI Controller (" + name + "): Initialization failed: " + error_msg);
+                
+                if (error_msg.find("CUDA") != std::string::npos || 
+                    error_msg.find("cublas") != std::string::npos ||
+                    error_msg.find("GPU") != std::string::npos) {
+                    report_error("KH - AI Framework: This may be a CUDA-related error. Ensure CUDA Toolkit 12.x is installed.");
+                }
+            });
             
             throw;
         } catch (...) {
             cleanup_resources();
-            intercept::client::invoker_lock lock;
-            report_error("KH - AI Framework: AI Controller (" + ai_name + "): FAILED: Unknown error");
-            report_error("KH - AI Framework: CUDA libraries not found or failed to load.");
+            std::string name = ai_name;
+
+            MainThreadScheduler::instance().schedule([name]() {
+                report_error("KH - AI Framework: AI Controller (" + name + "): FAILED: Unknown error");
+                report_error("KH - AI Framework: CUDA libraries not found or failed to load.");
+            });
+
             throw;
         }
     }
@@ -1405,12 +1403,16 @@ public:
                 ai_thread.join();
             }
         } catch (const std::exception& e) {
-            // Log but don't throw from destructor
-            intercept::client::invoker_lock lock;
-            report_error("KH - AI Framework: Exception in ~AIController: " + std::string(e.what()));
+            // Log but don't throw from destructor - schedule for next frame
+            std::string error_msg = e.what();
+
+            MainThreadScheduler::instance().schedule([error_msg]() {
+                report_error("KH - AI Framework: Exception in ~AIController: " + error_msg);
+            });
         } catch (...) {
-            intercept::client::invoker_lock lock;
-            report_error("KH - AI Framework: Unknown exception in ~AIController");
+            MainThreadScheduler::instance().schedule([]() {
+                report_error("KH - AI Framework: Unknown exception in ~AIController");
+            });
         }
     }
     
@@ -1422,15 +1424,23 @@ public:
 
     bool start(const std::string& model_path) {
         if (running) {
-            intercept::client::invoker_lock lock;
-            report_error("KH - AI Framework: AI Controller (" + ai_name + "): Already running");
+            std::string name = ai_name;
+
+            MainThreadScheduler::instance().schedule([name]() {
+                report_error("KH - AI Framework: AI Controller (" + name + "): Already running");
+            });
+
             return false;
         }
         
         // Use instance-specific model path if set, otherwise use provided path
         if (model_path.empty()) {
-            intercept::client::invoker_lock lock;
-            report_error("KH - AI Framework: AI Controller (" + ai_name + "): No model path specified");
+            std::string name = ai_name;
+
+            MainThreadScheduler::instance().schedule([name]() {
+                report_error("KH - AI Framework: AI Controller (" + name + "): No model path specified");
+            });
+
             return false;
         }
         
@@ -1440,8 +1450,6 @@ public:
         system_prompt_tokens.clear();
         system_prompt_token_count = 0;
         abort_generation = false;
-        event_processor_running = true;
-        event_processor_thread = std::thread(&AIController::event_processor_func, this);
         ai_thread = std::thread(&AIController::ai_thread_func, this, model_path);
         return true;
     }
@@ -1453,65 +1461,39 @@ public:
         
         should_stop = true;
         running = false;
-        event_processor_running = false;
-        event_queue_cv.notify_all();
-
-        if (event_processor_thread.joinable()) {
-            event_processor_thread.join();
-        }
         
-        // Wake up thread if it's waiting
         {
             std::lock_guard<std::mutex> lock(inference_mutex);
             inference_requested = true;
         }
 
         inference_trigger.notify_one();
-        bool forced_shutdown = false;
+
+        // Wait for thread to notice and exit
+        auto start = std::chrono::steady_clock::now();
         
-        // Wait for thread with timeout
+        while (is_generating && 
+            std::chrono::steady_clock::now() - start < std::chrono::seconds(1)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        
+        // If still generating, force terminate
+        if (is_generating) {
+            force_terminate = true;
+            inference_trigger.notify_all();
+            
+            // Give it another second
+            start = std::chrono::steady_clock::now();
+            
+            while (is_generating && 
+                std::chrono::steady_clock::now() - start < std::chrono::seconds(1)) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+        }
+        
+        // Final join - this will block until thread actually exits
         if (ai_thread.joinable()) {
-            // First attempt: polite shutdown
-            auto start = std::chrono::steady_clock::now();
-            bool joined = false;
-            
-            while (!joined && std::chrono::steady_clock::now() - start < std::chrono::seconds(1)) {
-                if (ai_thread.joinable()) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                } else {
-                    joined = true;
-                    break;
-                }
-            }
-            
-            // If still not joined, try force termination
-            if (!joined && ai_thread.joinable()) {
-                force_terminate = true;
-                inference_trigger.notify_all();
-                start = std::chrono::steady_clock::now();
-
-                while (ai_thread.joinable() && 
-                    std::chrono::steady_clock::now() - start < std::chrono::seconds(1)) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                }
-
-                if (ai_thread.joinable()) {
-                    try {
-                        // Last attempt - blocking join with no timeout
-                        // This is safer than detaching when GPU resources are involved
-                        ai_thread.join();
-                        joined = true;
-                    } catch (...) {
-                        // Thread is truly stuck - this is a critical error
-                        // DO NOT detach if we're holding GPU resources
-                        // Let the process termination handle it
-                        joined = false;
-                    }
-                }
-            } else if (ai_thread.joinable()) {
-                // Normal case - thread stopped cleanly
-                ai_thread.join();
-            }
+            ai_thread.join();
         }
             
         cleanup_resources();
@@ -1527,23 +1509,16 @@ public:
 
     void abort_current_generation() {
         abort_generation = true;
-        math_state = MathBlockState::OUTSIDE;
-        math_block_buffer.clear();
-        math_block_start_pos = 0;
     }
 
     void update_system_prompt(const std::string& prompt) {
-        if (is_generating) {
-            intercept::client::invoker_lock lock;
-            report_error("KH - AI Framework: Cannot update prompt during generation");
-            return;
-        }
-        
         std::lock_guard<std::mutex> lock(prompt_mutex);
 
         if (is_generating) {
-            intercept::client::invoker_lock lock;
-            report_error("KH - AI Framework: Cannot update prompt during generation");
+            MainThreadScheduler::instance().schedule([]() {
+                report_error("KH - AI Framework: Cannot update prompt during generation");
+            });
+
             return;
         }
 
@@ -1556,17 +1531,13 @@ public:
     }
     
     void update_user_prompt(const std::string& prompt) {
-        if (is_generating) {
-            intercept::client::invoker_lock lock;
-            report_error("KH - AI Framework: Cannot update prompt during generation");
-            return;
-        }
-
         std::lock_guard<std::mutex> lock(prompt_mutex);
 
         if (is_generating) {
-            intercept::client::invoker_lock lock;
-            report_error("KH - AI Framework: Cannot update prompt during generation");
+            MainThreadScheduler::instance().schedule([]() {
+                report_error("KH - AI Framework: Cannot update prompt during generation");
+            });
+
             return;
         }
 
@@ -1586,69 +1557,93 @@ public:
     bool set_parameters(int n_ctx, int max_new_tokens, float temperature, 
                     int top_k, float top_p, int n_batch, int n_ubatch, int cpu_threads, int cpu_threads_batch, int gpu_layers, bool flash_attention, bool offload_kv_cache) {
         if (running) {
-            intercept::client::invoker_lock lock;
-            report_error("KH - AI Framework: Cannot change parameters while AI is running. Stop the AI first.");
+            MainThreadScheduler::instance().schedule([]() {
+                report_error("KH - AI Framework: Cannot change parameters while AI is running. Stop the AI first.");
+            });
+
             return false;
         }
         
         // Validate parameters
         if (n_ctx < 512) {
-            intercept::client::invoker_lock lock;
-            report_error("KH - AI Framework: N_CTX must be at least 512");
+            MainThreadScheduler::instance().schedule([]() {
+                report_error("KH - AI Framework: N_CTX must be at least 512");
+            });
+
             return false;
         }
         
         if (max_new_tokens < 1) {
-            intercept::client::invoker_lock lock;
-            report_error("KH - AI Framework: MAX_NEW_TOKENS must be at least 1");
+            MainThreadScheduler::instance().schedule([]() {
+                report_error("KH - AI Framework: MAX_NEW_TOKENS must be at least 1");
+            });
+
             return false;
         }
         
         if (temperature < 0.0f || temperature > 2.0f) {
-            intercept::client::invoker_lock lock;
-            report_error("KH - AI Framework: TEMPERATURE must be between 0.0 and 2.0");
+            MainThreadScheduler::instance().schedule([]() {
+                report_error("KH - AI Framework: TEMPERATURE must be between 0.0 and 2.0");
+            });
+
             return false;
         }
         
         if (top_k < 1 || top_k > 1000) {
-            intercept::client::invoker_lock lock;
-            report_error("KH - AI Framework: TOP_K must be between 1 and 1000");
+            MainThreadScheduler::instance().schedule([]() {
+                report_error("KH - AI Framework: TOP_K must be between 1 and 1000");
+            });
+
             return false;
         }
         
         if (top_p < 0.0f || top_p > 1.0f) {
-            intercept::client::invoker_lock lock;
-            report_error("KH - AI Framework: TOP_P must be between 0.0 and 1.0");
+            MainThreadScheduler::instance().schedule([]() {
+                report_error("KH - AI Framework: TOP_P must be between 0.0 and 1.0");
+            });
+
             return false;
         }
         
         if (n_batch < 1) {
-            intercept::client::invoker_lock lock;
-            report_error("KH - AI Framework: N_BATCH must be at least 1");
+            MainThreadScheduler::instance().schedule([]() {
+                report_error("KH - AI Framework: N_BATCH must be at least 1");
+            });
+
             return false;
         }
         
         if (n_ubatch < 1) {
-            intercept::client::invoker_lock lock;
-            report_error("KH - AI Framework: N_UBATCH must be at least 1");
+            MainThreadScheduler::instance().schedule([]() {
+                report_error("KH - AI Framework: N_UBATCH must be at least 1");
+            });
+
             return false;
         }
         
         if (cpu_threads < 1) {
-            intercept::client::invoker_lock lock;
-            report_error("KH - AI Framework: CPU_THREADS must be greater than 0");
+            MainThreadScheduler::instance().schedule([]() {
+                report_error("KH - AI Framework: CPU_THREADS must be greater than 0");
+            });
+
             return false;
         }
 
         if (cpu_threads_batch < 1) {
-            intercept::client::invoker_lock lock;
-            report_error("KH - AI Framework: CPU_THREADS_BATCH must be greater than 0");
+            MainThreadScheduler::instance().schedule([]() {
+                report_error("KH - AI Framework: CPU_THREADS_BATCH must be greater than 0");
+            });
+
             return false;
         }
 
         if (n_ctx < SAFETY_MARGIN + max_new_tokens + 2048) {
-            intercept::client::invoker_lock lock;
-            report_error("KH - AI Framework: N_CTX too small for MAX_NEW_TOKENS. Need at least " + std::to_string(SAFETY_MARGIN + max_new_tokens + 2048));
+            int required = SAFETY_MARGIN + max_new_tokens + 2048;
+            
+            MainThreadScheduler::instance().schedule([required]() {
+                report_error("KH - AI Framework: N_CTX too small for MAX_NEW_TOKENS. Need at least " + std::to_string(required));
+            });
+
             return false;
         }
         
@@ -1673,8 +1668,12 @@ public:
 
     bool trigger_inference() {
         if (!running) {
-            intercept::client::invoker_lock lock;
-            report_error("KH - AI Framework: AI (" + ai_name + ") is not running");
+            std::string name = ai_name;
+
+            MainThreadScheduler::instance().schedule([name]() {
+                report_error("KH - AI Framework: AI (" + name + ") is not running");
+            });
+            
             return false;
         }
 
@@ -1690,8 +1689,12 @@ public:
         }
         
         if (!has_prompt) {
-            intercept::client::invoker_lock lock;
-            report_error("KH - AI Framework: AI (" + ai_name + ") has no user prompt set");
+            std::string name = ai_name;
+
+            MainThreadScheduler::instance().schedule([name]() {
+                report_error("KH - AI Framework: AI (" + name + ") has no user prompt set");
+            });
+
             return false;
         }
 
@@ -1705,76 +1708,59 @@ public:
     }
 
     void reset_conversation() {
-        if (is_generating) {
-            abort_generation = true; 
-            auto start = std::chrono::steady_clock::now();
-            const auto timeout = std::chrono::seconds(5);
-
-            while (is_generating) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                
-                if (std::chrono::steady_clock::now() - start > timeout) {
-                    intercept::client::invoker_lock lock;
-                    report_error("KH - AI Framework: Timeout waiting for generation to stop.");
-                    break;
-                }
-            }
-            
-            // Small additional delay to ensure decode operations have completed
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        // Request abort if generating
+        if (is_generating.load()) {
+            abort_generation.store(true);
         }
 
-        if (!initialized) {
-            intercept::client::invoker_lock lock;
-            report_error("KH - AI Framework: Cannot reset context - AI still initializing");
+        std::lock_guard<std::mutex> kv_lock(kv_cache_mutex);
+        
+        if (!initialized || !ctx) {
             return;
         }
-
+        
+        // Clear conversation history
         {
-            std::lock_guard<std::mutex> lock(conversation_mutex);
-
-            if (!is_generating) {
-                conversation_history.clear();
-
-                if (ctx) {
-                    llama_memory_t kv_memory = llama_get_memory(ctx);
-                    
-                    if (system_prompt_cached && system_prompt_token_count > 0) {
-                        // Preserve cached system prompt, clear only conversation tokens
-                        llama_memory_seq_rm(kv_memory, -1, system_prompt_token_count, -1);
-                    } else {
-                        // System prompt not cached or invalid - clear entire cache
-                        // Next generation will re-cache the system prompt anyway
-                        llama_memory_seq_rm(kv_memory, -1, 0, -1);
-                    }
-                }
-            } else {
-                intercept::client::invoker_lock lock;
-                report_error("KH - AI Framework: WARNING - Generation restarted during reset. Aborting reset.");
-                return;
-            }
+            std::lock_guard<std::mutex> conv_lock(conversation_mutex);
+            conversation_history.clear();
         }
-
+        
+        // Clear KV cache
+        llama_memory_t kv_memory = llama_get_memory(ctx);
+        
+        if (system_prompt_cached && system_prompt_token_count > 0) {
+            llama_memory_seq_rm(kv_memory, -1, system_prompt_token_count, -1);
+        } else {
+            llama_memory_seq_rm(kv_memory, -1, 0, -1);
+        }
+        
+        // Clear user prompt
         {
-            std::lock_guard<std::mutex> lock(prompt_mutex);
+            std::lock_guard<std::mutex> prompt_lock(prompt_mutex);
             user_prompt.clear();
         }
+        
+        abort_generation.store(false);
     }
 
     bool set_markers(const std::string& sys_start, const std::string& sys_end,
                      const std::string& usr_start, const std::string& usr_end,
                      const std::string& asst_start, const std::string& asst_end) {
         if (running) {
-            intercept::client::invoker_lock lock;
-            report_error("KH - AI Framework: Cannot change markers while AI is running. Stop the AI first.");
+            MainThreadScheduler::instance().schedule([]() {
+                report_error("KH - AI Framework: Cannot change markers while AI is running. Stop the AI first.");
+            });
+
             return false;
         }
 
         if (sys_start.empty() || sys_end.empty() || 
             usr_start.empty() || usr_end.empty() ||
             asst_start.empty() || asst_end.empty()) {
-            intercept::client::invoker_lock lock;
-            report_error("KH - AI Framework: Prompt markers cannot be empty");
+            MainThreadScheduler::instance().schedule([]() {
+                report_error("KH - AI Framework: Prompt markers cannot be empty");
+            });
+
             return false;
         }
 
@@ -1782,8 +1768,10 @@ public:
         std::set<std::string> start_markers = {sys_start, usr_start, asst_start};
 
         if (start_markers.size() != 3) {
-            intercept::client::invoker_lock lock;
-            report_error("KH - AI Framework: Start markers must be unique from each other");
+            MainThreadScheduler::instance().schedule([]() {
+                report_error("KH - AI Framework: Start markers must be unique from each other");
+            });
+
             return false;
         }
 
@@ -1795,8 +1783,10 @@ public:
             for (const auto& reserved_marker : reserved) {
                 if (marker.find(reserved_marker) != std::string::npos || 
                     reserved_marker.find(marker) != std::string::npos) {
-                    intercept::client::invoker_lock lock;
-                    report_error("KH - AI Framework: Markers cannot overlap with reserved sequences");
+                    MainThreadScheduler::instance().schedule([]() {
+                        report_error("KH - AI Framework: Markers cannot overlap with reserved sequences");
+                    });
+                    
                     return false;
                 }
             }
@@ -1884,8 +1874,10 @@ public:
         char docs_path[MAX_PATH];
         
         if (SHGetFolderPathA(NULL, CSIDL_MYDOCUMENTS, NULL, SHGFP_TYPE_CURRENT, docs_path) != S_OK) {
-            intercept::client::invoker_lock lock;
-            report_error("KH - AI Framework: Failed to get Documents folder path");
+            MainThreadScheduler::instance().schedule([]() {
+                report_error("KH - AI Framework: Failed to get Documents folder path");
+            });
+
             throw std::runtime_error("Failed to get Documents folder path");
         }
         
@@ -1894,8 +1886,12 @@ public:
         try {
             std::filesystem::create_directories(ai_models_path);
         } catch (const std::exception& e) {
-            intercept::client::invoker_lock lock;
-            report_error("KH - AI Framework: Failed to create AI models directory: " + std::string(e.what()));
+            std::string error_msg = e.what();
+
+            MainThreadScheduler::instance().schedule([error_msg]() {
+                report_error("KH - AI Framework: Failed to create AI models directory: " + error_msg);
+            });
+
             throw std::runtime_error("Failed to create AI models directory: " + std::string(e.what()));
         }
         
@@ -1928,17 +1924,25 @@ public:
             std::string model_path = AIModelDiscovery::find_any_gguf_model();
             
             if (!model_path.empty()) {
-                intercept::client::invoker_lock lock;
-                sqf::diag_log("KH - AI Framework: Auto-discovered model: " + model_path);
+                MainThreadScheduler::instance().schedule([model_path]() {
+                    sqf::diag_log("KH - AI Framework: Model loaded successfully - " + model_path);
+                });
+
                 return model_path;
             }
 
-            intercept::client::invoker_lock lock;
-            report_error("KH - AI Framework: No .gguf model files found in any search location");
+            MainThreadScheduler::instance().schedule([]() {
+                report_error("KH - AI Framework: No .gguf model files found in any search location");
+            });
+
             return "";
         } catch (const std::exception& e) {
-            intercept::client::invoker_lock lock;
-            report_error("KH - AI Framework: Error searching for model files: " + std::string(e.what()));
+            std::string error_msg = e.what();
+
+            MainThreadScheduler::instance().schedule([error_msg]() {
+                report_error("KH - AI Framework: Error searching for model files: " + error_msg);
+            });
+
             return "";
         }
     }
@@ -1949,18 +1953,25 @@ public:
             std::string found_path = AIModelDiscovery::find_model_file(filename);
             
             if (found_path.empty()) {
-                intercept::client::invoker_lock lock;
-                report_error("KH - AI Framework: AI model file not found: " + filename);
+                MainThreadScheduler::instance().schedule([filename]() {
+                    report_error("KH - AI Framework: AI model file not found: " + filename);
+                });
+
                 return;
             }
             
             std::lock_guard<std::mutex> lock(model_path_mutex);
             model_path = found_path;
-            intercept::client::invoker_lock inv_lock;
-            sqf::diag_log("KH - AI Framework: Model path set to: " + found_path);
+
+            MainThreadScheduler::instance().schedule([found_path]() {
+                sqf::diag_log("KH - AI Framework: Model path set to: " + found_path);
+            });
         } catch (const std::exception& e) {
-            intercept::client::invoker_lock lock;
-            report_error("KH - AI Framework: Error setting global model path - " + std::string(e.what()));
+            std::string error_msg = e.what();
+
+            MainThreadScheduler::instance().schedule([error_msg]() {
+                report_error("KH - AI Framework: Error setting global model path - " + error_msg);
+            });
         }
     }
 
@@ -1975,8 +1986,10 @@ public:
             std::string found_path = AIModelDiscovery::find_model_file(filename);
             
             if (found_path.empty()) {
-                intercept::client::invoker_lock lock;
-                report_error("KH - AI Framework: Model file not found: " + filename);
+                MainThreadScheduler::instance().schedule([filename]() {
+                    report_error("KH - AI Framework: Model file not found: " + filename);
+                });
+
                 return false;
             }
             
@@ -1985,12 +1998,18 @@ public:
                 ai_model_configs[ai_name].model_path = found_path;
             }
             
-            intercept::client::invoker_lock inv_lock;
-            sqf::diag_log("KH - AI Framework: AI (" + ai_name + ") model path set to: " + found_path);
+            MainThreadScheduler::instance().schedule([ai_name, found_path]() {
+                sqf::diag_log("KH - AI Framework: AI (" + ai_name + ") model path set to: " + found_path);
+            });
+
             return true;
         } catch (const std::exception& e) {
-            intercept::client::invoker_lock lock;
-            report_error("KH - AI Framework: Error setting AI model path - " + std::string(e.what()));
+            std::string error_msg = e.what();
+
+            MainThreadScheduler::instance().schedule([error_msg]() {
+                report_error("KH - AI Framework: Error setting AI model path - " + error_msg);
+            });
+
             return false;
         }
     }
@@ -2015,8 +2034,10 @@ public:
         if (sys_start.empty() || sys_end.empty() || 
             usr_start.empty() || usr_end.empty() ||
             asst_start.empty() || asst_end.empty()) {
-            intercept::client::invoker_lock lock;
-            report_error("KH - AI Framework: Prompt markers cannot be empty");
+            MainThreadScheduler::instance().schedule([]() {
+                report_error("KH - AI Framework: Prompt markers cannot be empty");
+            });
+
             return false;
         }
         
@@ -2104,8 +2125,10 @@ public:
         auto it = ai_instances.find(ai_name);
         
         if (it == ai_instances.end()) {
-            intercept::client::invoker_lock lock;
-            report_error("KH - AI Framework: AI (" + ai_name + ") not found");
+            MainThreadScheduler::instance().schedule([ai_name]() {
+                report_error("KH - AI Framework: AI (" + ai_name + ") not found");
+            });
+
             return false;
         }
         
@@ -2142,8 +2165,10 @@ public:
             std::string system_prompt, user_prompt;
             
             if (!get_prompts_local(ai_name, system_prompt, user_prompt)) {
-                intercept::client::invoker_lock lock;
-                report_error("KH - AI Framework: Failed to get prompts for AI (" + ai_name + ")");
+                MainThreadScheduler::instance().schedule([ai_name]() {
+                    report_error("KH - AI Framework: Failed to get prompts for AI (" + ai_name + ")");
+                });
+
                 return false;
             }
 
@@ -2168,8 +2193,10 @@ public:
                 current_model_path = find_any_gguf_model();
                 
                 if (current_model_path.empty()) {
-                    intercept::client::invoker_lock lock;
-                    report_error("KH - AI Framework: No model path set and no .gguf files found in AI models directory");
+                    MainThreadScheduler::instance().schedule([]() {
+                        report_error("KH - AI Framework: No model path set and no .gguf files found in AI models directory");
+                    });
+
                     return false;
                 }
                 
@@ -2181,8 +2208,10 @@ public:
             }
             
             if (current_model_path.empty()) {
-                intercept::client::invoker_lock lock;
-                report_error("KH - AI Framework: No model path set");
+                MainThreadScheduler::instance().schedule([]() {
+                    report_error("KH - AI Framework: No model path set");
+                });
+
                 return false;
             }
             
@@ -2246,15 +2275,21 @@ public:
                     }
                 }
                 
-                intercept::client::invoker_lock lock;
-                report_error("KH - AI Framework: Failed to initialize AI (" + ai_name + ")");
+                MainThreadScheduler::instance().schedule([ai_name]() {
+                    report_error("KH - AI Framework: Failed to initialize AI (" + ai_name + ")");
+                });
+
                 return false;
             }
             
             return true;
         } catch (const std::exception& e) {
-            intercept::client::invoker_lock lock;
-            report_error("KH - AI Framework: Exception initializing AI (" + ai_name + "): " + std::string(e.what()));
+            std::string error_msg = e.what();
+
+            MainThreadScheduler::instance().schedule([ai_name, error_msg]() {
+                report_error("KH - AI Framework: Exception initializing AI (" + ai_name + "): " + error_msg);
+            });
+
             return false;
         }
     }
@@ -2268,8 +2303,10 @@ public:
             auto it = ai_instances.find(ai_name);
             
             if (it == ai_instances.end()) {
-                intercept::client::invoker_lock lock;
-                report_error("KH - AI Framework: AI (" + ai_name + ") was not found");
+                MainThreadScheduler::instance().schedule([ai_name]() {
+                    report_error("KH - AI Framework: AI (" + ai_name + ") was not found");
+                });
+
                 return false;
             }
 
@@ -2349,8 +2386,10 @@ public:
         auto it = ai_instances.find(ai_name);
 
         if (it == ai_instances.end()) {
-            intercept::client::invoker_lock lock;
-            report_error("KH - AI Framework: AI (" + ai_name + ") was not found");
+            MainThreadScheduler::instance().schedule([ai_name]() {
+                report_error("KH - AI Framework: AI (" + ai_name + ") was not found");
+            });
+
             return false;
         }
         
@@ -2401,8 +2440,10 @@ public:
         auto it = ai_instances.find(ai_name);
 
         if (it == ai_instances.end()) {
-            intercept::client::invoker_lock lock;
-            report_error("KH - AI Framework: AI (" + ai_name + ") was not found");
+            MainThreadScheduler::instance().schedule([ai_name]() {
+                report_error("KH - AI Framework: AI (" + ai_name + ") was not found");
+            });
+
             return false;
         }
         

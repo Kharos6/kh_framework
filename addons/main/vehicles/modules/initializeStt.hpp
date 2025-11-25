@@ -50,7 +50,7 @@ class KH_ModuleInitializeSTT: Module_F
 		class KH_ModuleInitializeSTTTranscriptionFunction: EditCodeMulti5
 		{
 			displayName = "Transcription Function";
-			tooltip = "Unscheduled code executed locally to each player when their STT recording is transcribed. Passed arguments available through _this are: [_player (OBJECT), _text (STRING)].";
+			tooltip = "Unscheduled code executed locally to each player when their STT recording is transcribed. Passed arguments available through _this are: [_text (STRING)].";
 			property = "KH_ModuleInitializeSTTTranscriptionFunction";
 			defaultValue = "''";
 		};

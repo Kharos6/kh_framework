@@ -106,14 +106,12 @@ private:
     std::vector<int16_t> buffer;
     std::mutex buffer_mutex;
     std::atomic<bool> is_recording{false};
-    std::atomic<bool> should_clear{false};
 
 public:
     void start_recording() {
         std::lock_guard<std::mutex> lock(buffer_mutex);
         buffer.clear();
         is_recording = true;
-        should_clear = false;
     }
 
     void stop_recording() {
@@ -123,18 +121,11 @@ public:
     void clear() {
         std::lock_guard<std::mutex> lock(buffer_mutex);
         buffer.clear();
-        should_clear = false;
     }
 
     void append_samples(const int16_t* samples, size_t count) {
         if (!is_recording) return;
         std::lock_guard<std::mutex> lock(buffer_mutex);
-
-        if (should_clear) {
-            buffer.clear();
-            should_clear = false;
-        }
-
         buffer.insert(buffer.end(), samples, samples + count);
     }
 
@@ -159,14 +150,17 @@ private:
     ~STTFramework() { cleanup(); }
     STTFramework(const STTFramework&) = delete;
     STTFramework& operator=(const STTFramework&) = delete;
-    const SherpaOnnxOfflineRecognizer* recognizer_handle = nullptr;
-    std::mutex stt_mutex;
+    std::shared_ptr<const SherpaOnnxOfflineRecognizer> recognizer_handle;
+    mutable std::mutex stt_mutex;
     std::string current_model_name;
     int sample_rate = STT_SAMPLE_RATE;
     AudioCaptureBuffer capture_buffer;
     std::thread capture_thread;
+    std::atomic<bool> is_initialized_flag{false};
     std::atomic<bool> capture_thread_running{false};
+    std::atomic<bool> capture_thread_alive{false};
     std::atomic<bool> is_capturing{false};
+    std::mutex capture_state_mutex;
     std::thread processing_thread;
     std::atomic<bool> processing_thread_running{false};
     std::chrono::steady_clock::time_point capture_start_time;
@@ -176,8 +170,27 @@ private:
     std::condition_variable processing_cv;
     std::deque<std::vector<int16_t>> processing_queue;
 
+    struct RecognizerDeleter {
+        void operator()(const SherpaOnnxOfflineRecognizer* p) const {
+            if (p) SherpaOnnxDestroyOfflineRecognizer(p);
+        }
+    };
+
     void audio_capture_worker() {
+        capture_thread_alive = true;
+
+        struct ThreadAliveGuard {
+            std::atomic<bool>& flag;
+            ThreadAliveGuard(std::atomic<bool>& f) : flag(f) {}
+            ~ThreadAliveGuard() { flag = false; }
+        } alive_guard(capture_thread_alive);
+        
         CoInitializeEx(NULL, COINIT_MULTITHREADED);
+
+        struct CoInitGuard {
+            ~CoInitGuard() { CoUninitialize(); }
+        } co_guard;
+        
         HWAVEIN hWaveIn = NULL;
         WAVEFORMATEX wfx = {};
         wfx.wFormatTag = WAVE_FORMAT_PCM;
@@ -189,16 +202,16 @@ private:
         MMRESULT result = waveInOpen(&hWaveIn, WAVE_MAPPER, &wfx, 0, 0, CALLBACK_NULL);
         
         if (result != MMSYSERR_NOERROR) {
-            try {
-                intercept::client::invoker_lock lock;
-                report_error("KH - STT Framework: Failed to open audio input device");
-            } catch (...) {}
+            capture_thread_running = false;
+            int error_code = result;
+            
+            MainThreadScheduler::instance().schedule([error_code]() {
+                report_error("KH - STT Framework: Failed to open audio input device - error code: " + std::to_string(error_code));
+            });
 
-            CoUninitialize();
             return;
         }
 
-        // Prepare buffers (100ms chunks)
         constexpr int BUFFER_SIZE = STT_SAMPLE_RATE / 10 * STT_CHANNELS;
         constexpr int NUM_BUFFERS = 4;
         std::vector<std::vector<int16_t>> buffers(NUM_BUFFERS);
@@ -217,42 +230,43 @@ private:
         waveInStart(hWaveIn);
 
         while (capture_thread_running) {
-            // Check for completed buffers
             for (int i = 0; i < NUM_BUFFERS; i++) {
                 if (headers[i].dwFlags & WHDR_DONE) {
                     size_t samples_captured = headers[i].dwBytesRecorded / sizeof(int16_t);
                     
                     if (samples_captured > 0) {
                         capture_buffer.append_samples(buffers[i].data(), samples_captured);
-                        
-                        // Check for timeout
-                        if (is_capturing) {
-                            std::lock_guard<std::mutex> lock(capture_time_mutex);
-                            auto now = std::chrono::steady_clock::now();
-                            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - capture_start_time).count();
-                            
-                            if (elapsed >= MAX_CAPTURE_DURATION_MS) {
-                                try {
-                                    intercept::client::invoker_lock inv_lock;
-                                    sqf::diag_log("KH - STT Framework: 120 second timeout - auto-stopping");
-                                } catch (...) {}
 
-                                is_capturing = false;
-                                capture_buffer.stop_recording();
-                                std::vector<int16_t> audio_data = capture_buffer.get_buffer_copy();
-                                
-                                if (!audio_data.empty()) {
-                                    std::lock_guard<std::mutex> proc_lock(processing_mutex);
-                                    processing_queue.push_back(std::move(audio_data));
-                                    processing_cv.notify_one();
+                        if (is_capturing) {
+                            bool timed_out = false;
+                            
+                            {
+                                std::lock_guard<std::mutex> lock(capture_time_mutex);
+                                auto now = std::chrono::steady_clock::now();
+                                auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - capture_start_time).count();
+                                timed_out = (elapsed >= MAX_CAPTURE_DURATION_MS);
+                            }
+                            
+                            if (timed_out) {
+                                std::lock_guard<std::mutex> state_lock(capture_state_mutex);
+
+                                if (is_capturing) {
+                                    is_capturing = false;
+                                    capture_buffer.stop_recording();
+                                    std::vector<int16_t> audio_data = capture_buffer.get_buffer_copy();
                                     
-                                    try {
-                                        intercept::client::invoker_lock inv_lock;
-                                        sqf::diag_log("KH - STT Framework: Audio queued (timeout)");
-                                    } catch (...) {}
+                                    if (!audio_data.empty()) {
+                                        {
+                                            std::lock_guard<std::mutex> proc_lock(processing_mutex);
+                                            processing_queue.clear();
+                                            processing_queue.push_back(std::move(audio_data));
+                                        }
+
+                                        processing_cv.notify_one();
+                                    }
+                                    
+                                    capture_buffer.clear();
                                 }
-                                
-                                capture_buffer.clear();
                             }
                         }
                     }
@@ -263,11 +277,12 @@ private:
 
                     MMRESULT prepare_result = waveInPrepareHeader(hWaveIn, &headers[i], sizeof(WAVEHDR));
                     if (prepare_result != MMSYSERR_NOERROR) {
-                        try {
-                            intercept::client::invoker_lock lock;
+                        int error_code = prepare_result;
+
+                        MainThreadScheduler::instance().schedule([error_code]() {
                             report_error("KH - STT Framework: Audio device error (prepare failed) - code: " + 
-                                        std::to_string(prepare_result) + " - stopping capture");
-                        } catch (...) {}
+                                        std::to_string(error_code) + " - stopping capture");
+                        });
                         
                         capture_thread_running = false;
                         break;
@@ -276,11 +291,12 @@ private:
                     MMRESULT add_result = waveInAddBuffer(hWaveIn, &headers[i], sizeof(WAVEHDR));
 
                     if (add_result != MMSYSERR_NOERROR) {
-                        try {
-                            intercept::client::invoker_lock lock;
+                        int error_code = add_result;
+
+                        MainThreadScheduler::instance().schedule([error_code]() {
                             report_error("KH - STT Framework: Audio device error (add buffer failed) - code: " + 
-                                        std::to_string(add_result) + " - stopping capture");
-                        } catch (...) {}
+                                        std::to_string(error_code) + " - stopping capture");
+                        });
 
                         capture_thread_running = false;
                         break;
@@ -296,7 +312,7 @@ private:
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
         for (int i = 0; i < NUM_BUFFERS; i++) {
-            // Check if buffer needs additional waiting, just in case I guess
+            // Check if buffer needs additional waiting
             int timeout = 0;
 
             while ((headers[i].dwFlags & WHDR_PREPARED) && timeout < 10) {
@@ -309,26 +325,30 @@ private:
             }
         }
 
-        waveInClose(hWaveIn);       
-        CoUninitialize();
+        waveInClose(hWaveIn);
     }
 
     void processing_worker() {
         CoInitializeEx(NULL, COINIT_MULTITHREADED);
+        
+        struct CoInitGuard {
+            ~CoInitGuard() { CoUninitialize(); }
+        } co_guard;
 
-        while (processing_thread_running) {
+        while (processing_thread_running.load(std::memory_order_acquire)) {
             std::vector<int16_t> audio_data;
             bool has_data = false;
             
             {
                 std::unique_lock<std::mutex> lock(processing_mutex);
-                processing_cv.wait_for(lock, std::chrono::milliseconds(100), [this] {
-                    return !processing_queue.empty() || !processing_thread_running;
+                
+                processing_cv.wait_for(lock, std::chrono::milliseconds(50), [this] {
+                    return !processing_queue.empty() || !processing_thread_running.load(std::memory_order_acquire);
                 });
                 
                 if (!processing_queue.empty()) {
-                    audio_data = std::move(processing_queue.front());
-                    processing_queue.pop_front();
+                    audio_data = std::move(processing_queue.back());
+                    processing_queue.clear();
                     has_data = true;
                 }
             }
@@ -338,35 +358,37 @@ private:
                     std::string transcription = transcribe_audio(audio_data);
                     
                     if (!transcription.empty()) {
-                        // Send to SQF via CBA event
-                        try {
-                            intercept::client::invoker_lock lock;
+                        MainThreadScheduler::instance().schedule([transcription]() {                            
                             auto_array<game_value> stt_data;
-                            stt_data.push_back(game_value(sqf::get_variable(sqf::mission_namespace(), "kh_var_playerunit", sqf::obj_null())));
                             stt_data.push_back(game_value(transcription));
                             raw_call_sqf_args_native_no_return(g_compiled_stt_transcription_event, game_value(std::move(stt_data)));
-                        } catch (const std::exception& e) {
-                            report_error("KH - STT Framework: Failed to send transcription event: " + 
-                                       std::string(e.what()));
-                        }
+                        });
                     }
                 } catch (const std::exception& e) {
-                    try {
-                        intercept::client::invoker_lock lock;
-                        report_error("KH - STT Framework: Transcription failed: " + std::string(e.what()));
-                    } catch (...) {}
+                    std::string error_msg = e.what();
+
+                    MainThreadScheduler::instance().schedule([error_msg]() {
+                        report_error("KH - STT Framework: Transcription failed: " + error_msg);
+                    });
                 }
             }
         }
-
-        CoUninitialize();
     }
 
     std::string transcribe_audio(const std::vector<int16_t>& audio_data) {
-        std::lock_guard<std::mutex> lock(stt_mutex);
+        // Get handle under lock, release before actual transcription
+        std::shared_ptr<const SherpaOnnxOfflineRecognizer> handle_copy;
+        int current_sample_rate = 0;
         
-        if (!recognizer_handle) {
-            throw std::runtime_error("STT not initialized");
+        {
+            std::lock_guard<std::mutex> lock(stt_mutex);
+
+            if (!recognizer_handle) {
+                throw std::runtime_error("STT not initialized");
+            }
+
+            handle_copy = recognizer_handle;
+            current_sample_rate = sample_rate;
         }
 
         std::vector<float> float_samples(audio_data.size());
@@ -375,36 +397,46 @@ private:
             float_samples[i] = static_cast<float>(audio_data[i]) / 32768.0f;
         }
 
-        const SherpaOnnxOfflineStream* stream = SherpaOnnxCreateOfflineStream(recognizer_handle);
+        struct StreamDeleter {
+            void operator()(const SherpaOnnxOfflineStream* s) const {
+                if (s) SherpaOnnxDestroyOfflineStream(s);
+            }
+        };
+
+        struct ResultDeleter {
+            void operator()(const SherpaOnnxOfflineRecognizerResult* r) const {
+                if (r) SherpaOnnxDestroyOfflineRecognizerResult(r);
+            }
+        };
+
+        std::unique_ptr<const SherpaOnnxOfflineStream, StreamDeleter> stream(
+            SherpaOnnxCreateOfflineStream(handle_copy.get())
+        );
         
         if (!stream) {
             throw std::runtime_error("Failed to create recognition stream");
         }
 
-        // Feed audio to stream
-        SherpaOnnxAcceptWaveformOffline(stream, sample_rate, 
+        SherpaOnnxAcceptWaveformOffline(stream.get(), current_sample_rate, 
                                        float_samples.data(), 
                                        static_cast<int32_t>(float_samples.size()));
 
-        // Decode
-        SherpaOnnxDecodeOfflineStream(recognizer_handle, stream);
+        SherpaOnnxDecodeOfflineStream(handle_copy.get(), stream.get());
 
-        // Get result
-        const SherpaOnnxOfflineRecognizerResult* result = SherpaOnnxGetOfflineStreamResult(stream);
+        std::unique_ptr<const SherpaOnnxOfflineRecognizerResult, ResultDeleter> result(
+            SherpaOnnxGetOfflineStreamResult(stream.get())
+        );
 
         std::string transcription;
-
+        
         if (result && result->text) {
             transcription = result->text;
         }
 
-        SherpaOnnxDestroyOfflineRecognizerResult(result);
-        SherpaOnnxDestroyOfflineStream(stream);
-
         if (!transcription.empty()) {
             size_t start = transcription.find_first_not_of(" \t\n\r");
             size_t end = transcription.find_last_not_of(" \t\n\r");
-            
+
             if (start != std::string::npos && end != std::string::npos) {
                 transcription = transcription.substr(start, end - start + 1);
             } else {
@@ -418,145 +450,159 @@ private:
     bool load_model(const std::string& model_name, 
                    const std::string& provider = "dml",
                    int num_threads = 4) {
-        std::lock_guard<std::mutex> lock(stt_mutex);
+        std::string log_message;
+        std::string error_message;
+        bool success = false;
+        bool dml_fallback = false;
+        std::string resolved_model_name;
+        std::string actual_provider = provider;
+        int loaded_sample_rate = 0;
+        
+        {
+            std::lock_guard<std::mutex> lock(stt_mutex);
+            recognizer_handle.reset();
 
-        // Cleanup existing model
-        if (recognizer_handle) {
-            SherpaOnnxDestroyOfflineRecognizer(recognizer_handle);
-            recognizer_handle = nullptr;
+            try {
+                std::filesystem::path model_path;
+                resolved_model_name = model_name;
+                
+                if (model_name.empty()) {
+                    model_path = STTModelDiscovery::find_any_model();
+                    
+                    if (model_path.empty()) {
+                        error_message = "KH - STT Framework: No STT models found in any search location";
+                    }
+                    else {
+                        resolved_model_name = model_path.filename().string();
+                    }
+                } else {
+                    model_path = STTModelDiscovery::find_model(model_name);
+                    
+                    if (model_path.empty()) {
+                        error_message = "KH - STT Framework: Model not found: " + model_name;
+                    }
+                }
+
+                if (error_message.empty()) {
+                    std::string encoder_path;
+                    std::string decoder_path;
+                    std::string joiner_path;
+                    std::string tokens_path;
+                    
+                    for (const auto& entry : std::filesystem::directory_iterator(model_path)) {
+                        if (!entry.is_regular_file()) continue;
+                        std::string filename = entry.path().filename().string();
+                        std::string lower_filename = filename;
+                        std::transform(lower_filename.begin(), lower_filename.end(), lower_filename.begin(), ::tolower);
+                        
+                        if (lower_filename.find("encoder") != std::string::npos && 
+                            lower_filename.ends_with(".onnx")) {
+                            encoder_path = entry.path().string();
+                        }
+                        else if (lower_filename.find("decoder") != std::string::npos && 
+                                 lower_filename.ends_with(".onnx")) {
+                            decoder_path = entry.path().string();
+                        }
+                        else if (lower_filename.find("joiner") != std::string::npos && 
+                                 lower_filename.ends_with(".onnx")) {
+                            joiner_path = entry.path().string();
+                        }
+                        else if (lower_filename == "tokens.txt") {
+                            tokens_path = entry.path().string();
+                        }
+                    }
+
+                    if (encoder_path.empty() || decoder_path.empty() || 
+                        joiner_path.empty() || tokens_path.empty()) {
+                        error_message = "KH - STT Framework: Incomplete model files. Required: encoder.onnx, decoder.onnx, joiner.onnx, tokens.txt";
+                    }
+                    else {
+                        SherpaOnnxOfflineRecognizerConfig config;
+                        memset(&config, 0, sizeof(config));
+                        config.model_config.transducer.encoder = encoder_path.c_str();
+                        config.model_config.transducer.decoder = decoder_path.c_str();
+                        config.model_config.transducer.joiner = joiner_path.c_str();
+                        config.model_config.tokens = tokens_path.c_str();
+                        config.model_config.num_threads = num_threads;
+                        config.model_config.provider = actual_provider.c_str();
+                        config.model_config.debug = 0;
+                        config.decoding_method = "greedy_search";
+                        config.max_active_paths = 4;
+                        recognizer_handle = std::shared_ptr<const SherpaOnnxOfflineRecognizer>(SherpaOnnxCreateOfflineRecognizer(&config), RecognizerDeleter{});
+                        
+                        // Fallback to CPU if DML fails
+                        if (!recognizer_handle && _stricmp(actual_provider.c_str(), "dml") == 0) {
+                            dml_fallback = true;
+                            actual_provider = "cpu";
+                            config.model_config.provider = actual_provider.c_str();
+                            recognizer_handle = std::shared_ptr<const SherpaOnnxOfflineRecognizer>(SherpaOnnxCreateOfflineRecognizer(&config), RecognizerDeleter{});
+                        }
+                        
+                        if (!recognizer_handle) {
+                            error_message = "KH - STT Framework: Failed to create recognizer";
+                        }
+                        else {
+                            sample_rate = 16000;
+                            current_model_name = resolved_model_name;
+                            loaded_sample_rate = sample_rate;
+                            is_initialized_flag.store(true, std::memory_order_release);
+                            success = true;
+                            std::string provider_name = actual_provider;
+
+                            std::transform(provider_name.begin(), provider_name.end(), 
+                                         provider_name.begin(), ::toupper);
+                            
+                            log_message = "KH - STT Framework: Model loaded successfully - " + model_path.string() + 
+                                " | Provider: " + provider_name + 
+                                " | Sample Rate: " + std::to_string(loaded_sample_rate) + " Hz";
+                        }
+                    }
+                }
+            } catch (const std::exception& e) {
+                error_message = "KH - STT Framework: Model loading exception: " + std::string(e.what());
+            }
         }
 
-        try {
-            std::filesystem::path model_path;
-            std::string resolved_model_name = model_name;
+        if (!error_message.empty()) {
+            std::string msg = error_message;
             
-            if (model_name.empty()) {
-                // Find any available model
-                model_path = STTModelDiscovery::find_any_model();
-                
-                if (model_path.empty()) {
-                    intercept::client::invoker_lock inv_lock;
-                    report_error("KH - STT Framework: No STT models found in any search location");
-                    return false;
+            MainThreadScheduler::instance().schedule([msg]() {
+                report_error(msg);
+            });
+
+            return false;
+        }
+        
+        if (!log_message.empty()) {
+            std::string msg = log_message;
+            bool had_dml_fallback = dml_fallback;
+
+            MainThreadScheduler::instance().schedule([msg, had_dml_fallback]() {
+                sqf::diag_log(msg);
+
+                if (had_dml_fallback) {
+                    sqf::diag_log("KH - STT Framework: DirectML not supported, fell back to CPU");
                 }
-                
-                resolved_model_name = model_path.filename().string();
-            } else {
-                model_path = STTModelDiscovery::find_model(model_name);
-                
-                if (model_path.empty()) {
-                    intercept::client::invoker_lock inv_lock;
-                    report_error("KH - STT Framework: Model not found: " + model_name);
-                    return false;
-                }
-            }
+            });
+        }
 
-            std::string encoder_path;
-            std::string decoder_path;
-            std::string joiner_path;
-            std::string tokens_path;
-            
-            for (const auto& entry : std::filesystem::directory_iterator(model_path)) {
-                if (!entry.is_regular_file()) continue;
-                std::string filename = entry.path().filename().string();
-                std::string lower_filename = filename;
-                std::transform(lower_filename.begin(), lower_filename.end(), lower_filename.begin(), ::tolower);
-                
-                if (lower_filename.find("encoder") != std::string::npos && 
-                    lower_filename.ends_with(".onnx")) {
-                    encoder_path = entry.path().string();
-                }
-                else if (lower_filename.find("decoder") != std::string::npos && 
-                         lower_filename.ends_with(".onnx")) {
-                    decoder_path = entry.path().string();
-                }
-                else if (lower_filename.find("joiner") != std::string::npos && 
-                         lower_filename.ends_with(".onnx")) {
-                    joiner_path = entry.path().string();
-                }
-                else if (lower_filename == "tokens.txt") {
-                    tokens_path = entry.path().string();
-                }
-            }
-
-            if (encoder_path.empty() || decoder_path.empty() || 
-                joiner_path.empty() || tokens_path.empty()) {
-                intercept::client::invoker_lock lock;
-                report_error("KH - STT Framework: Incomplete model files. Required: encoder.onnx, decoder.onnx, joiner.onnx, tokens.txt");
-                return false;
-            }
-
-            SherpaOnnxOfflineRecognizerConfig config;
-            memset(&config, 0, sizeof(config));
-            
-            // Model configuration (Transducer)
-            config.model_config.transducer.encoder = encoder_path.c_str();
-            config.model_config.transducer.decoder = decoder_path.c_str();
-            config.model_config.transducer.joiner = joiner_path.c_str();
-            config.model_config.tokens = tokens_path.c_str();
-            config.model_config.num_threads = num_threads;
-            config.model_config.provider = provider.c_str();
-            config.model_config.debug = 0;
-            
-            // Decoding configuration
-            config.decoding_method = "greedy_search";
-            config.max_active_paths = 4;
-
-            std::string actual_provider = provider;
-            recognizer_handle = SherpaOnnxCreateOfflineRecognizer(&config);
-            
-            // Fallback to CPU if DML fails
-            if (!recognizer_handle && _stricmp(actual_provider.c_str(), "dml") == 0) {
-                intercept::client::invoker_lock lock;
-                sqf::diag_log("KH - STT Framework: DirectML not supported, falling back to CPU");
-                actual_provider = "cpu";
-                config.model_config.provider = actual_provider.c_str();
-                recognizer_handle = SherpaOnnxCreateOfflineRecognizer(&config);
-            }
-            
-            if (!recognizer_handle) {
-                intercept::client::invoker_lock lock;
-                report_error("KH - STT Framework: Failed to create recognizer");
-                return false;
-            }
-
-            // Sample rate is set in config (16000 Hz standard for speech)
-            sample_rate = 16000;
-            current_model_name = resolved_model_name;
-
-            {
-                intercept::client::invoker_lock lock;
-                std::string provider_name = actual_provider;
-                
-                std::transform(provider_name.begin(), provider_name.end(), 
-                             provider_name.begin(), ::toupper);
-                
-                sqf::diag_log("KH - STT Framework: Model loaded successfully - " + resolved_model_name + 
-                    " | Provider: " + provider_name + 
-                    " | Sample Rate: " + std::to_string(sample_rate) + " Hz"
-                );
-            }
-
-            if (!capture_thread_running) {
-                capture_thread_running = true;
+        if (success) {
+            if (!capture_thread_running.load(std::memory_order_acquire)) {
+                capture_thread_running.store(true, std::memory_order_release);
                 capture_thread = std::thread(&STTFramework::audio_capture_worker, this);
             }
 
-            if (!processing_thread_running) {
-                processing_thread_running = true;
+            if (!processing_thread_running.load(std::memory_order_acquire)) {
+                processing_thread_running.store(true, std::memory_order_release);
                 processing_thread = std::thread(&STTFramework::processing_worker, this);
             }
-
-            return true;
-        } catch (const std::exception& e) {
-            intercept::client::invoker_lock lock;
-            report_error("KH - STT Framework: Model loading exception: " + std::string(e.what()));
-            return false;
         }
+
+        return success;
     }
 
     bool is_initialized() const {
-        return recognizer_handle != nullptr;
+        return is_initialized_flag.load(std::memory_order_acquire);
     }
 
     bool is_capturing_audio() const {
@@ -564,34 +610,28 @@ private:
     }
 
     void cleanup() {
-        is_capturing = false;
-        capture_thread_running = false;
-        processing_thread_running = false;
+        {
+            std::lock_guard<std::mutex> state_lock(capture_state_mutex);
+            is_capturing.store(false, std::memory_order_release);
+            capture_buffer.stop_recording();
+        }
+
+        capture_thread_running.store(false, std::memory_order_release);
+        processing_thread_running.store(false, std::memory_order_release);
         processing_cv.notify_all();
-        std::thread capture_to_join;
-        std::thread processing_to_join;
-        
+
         if (capture_thread.joinable()) {
-            capture_to_join = std::move(capture_thread);
+            capture_thread.join();
         }
         
         if (processing_thread.joinable()) {
-            processing_to_join = std::move(processing_thread);
+            processing_thread.join();
         }
 
-        if (capture_to_join.joinable()) {
-            capture_to_join.join();
-        }
-        
-        if (processing_to_join.joinable()) {
-            processing_to_join.join();
-        }
-
-        std::lock_guard<std::mutex> lock(stt_mutex);
-        
-        if (recognizer_handle) {
-            SherpaOnnxDestroyOfflineRecognizer(recognizer_handle);
-            recognizer_handle = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(stt_mutex);
+            is_initialized_flag.store(false, std::memory_order_release);
+            recognizer_handle.reset();
         }
 
         capture_buffer.clear();
@@ -605,32 +645,68 @@ private:
     }
 
     bool start_capture_manual() {
-        if (!recognizer_handle) {
-            try {
-                intercept::client::invoker_lock lock;
+        if (!is_initialized_flag.load(std::memory_order_acquire)) {
+            MainThreadScheduler::instance().schedule([]() {
                 report_error("KH - STT Framework: Cannot start capture - no model loaded");
-            } catch (...) {}
-
+            });
+            
             return false;
         }
 
-        if (!capture_thread_running) {
-            try {
-                intercept::client::invoker_lock lock;
-                report_error("KH - STT Framework: Capture thread not running");
-            } catch (...) {}
+        // Restart capture thread if dead
+        if (!capture_thread_alive.load(std::memory_order_acquire)) {
+            if (capture_thread.joinable()) {
+                capture_thread.join();
+            }
 
-            return false;
+            if (is_initialized_flag.load(std::memory_order_acquire)) {
+                capture_thread_running.store(true, std::memory_order_release);
+                capture_thread = std::thread(&STTFramework::audio_capture_worker, this);
+
+                for (int i = 0; i < 50 && !capture_thread_alive.load() && capture_thread_running.load(); i++) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                }
+                
+                if (!capture_thread_alive.load(std::memory_order_acquire)) {
+                    MainThreadScheduler::instance().schedule([]() {
+                        report_error("KH - STT Framework: Failed to restart capture thread");
+                    });
+
+                    return false;
+                }
+            } else {
+                MainThreadScheduler::instance().schedule([]() {
+                    report_error("KH - STT Framework: Capture thread not running and no model loaded");
+                });
+
+                return false;
+            }
         }
 
-        if (is_capturing) {
-            return false;
+        // Clear pending transcriptions when starting new capture
+        // This prevents old recordings from being processed after new ones
+        {
+            std::lock_guard<std::mutex> proc_lock(processing_mutex);
+
+            if (!processing_queue.empty()) {
+                processing_queue.clear();
+            }
         }
 
-        // Clear and start recording in buffer
+        std::lock_guard<std::mutex> state_lock(capture_state_mutex);
+
+        // If already capturing, RESTART instead of failing
+        if (is_capturing.load(std::memory_order_acquire)) {
+            // Stop current capture without processing
+            capture_buffer.stop_recording();
+            capture_buffer.clear();
+            // Don't return false - continue to start new capture
+        }
+
+        // Start fresh recording
         capture_buffer.clear();
         capture_buffer.start_recording();
-        is_capturing = true;
+        is_capturing.store(true, std::memory_order_release);
 
         {
             std::lock_guard<std::mutex> lock(capture_time_mutex);
@@ -641,21 +717,29 @@ private:
     }
 
     bool stop_capture_manual() {
-        if (!is_capturing) {
+        std::unique_lock<std::mutex> state_lock(capture_state_mutex);
+        bool was_capturing = is_capturing.exchange(false, std::memory_order_acq_rel);
+        
+        if (!was_capturing) {
             return false;
         }
 
-        is_capturing = false;
         capture_buffer.stop_recording();
         std::vector<int16_t> audio_data = capture_buffer.get_buffer_copy();
+        capture_buffer.clear();
+        state_lock.unlock();
 
-        // Queue for processing if we have data
         if (!audio_data.empty()) {
-            std::lock_guard<std::mutex> proc_lock(processing_mutex);
-            processing_queue.push_back(std::move(audio_data));
+            // Clear any old pending items and add new one
+            {
+                std::lock_guard<std::mutex> proc_lock(processing_mutex);
+                processing_queue.clear();
+                processing_queue.push_back(std::move(audio_data));
+            }
+
             processing_cv.notify_one();
             return true;
-        } else {
+        } else {            
             return false;
         }
     }

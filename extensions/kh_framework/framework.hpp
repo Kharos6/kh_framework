@@ -8,6 +8,7 @@
 #include <vector>
 #include <random>
 #include <deque>
+#include <functional>
 #include <algorithm>
 #include <sstream>
 #include <fstream>
@@ -24,6 +25,7 @@
 #include <atomic>
 #include <set>
 #include <mutex>
+#include <shared_mutex>
 #include <condition_variable>
 #include <wincrypt.h>
 #include <delayimp.h>
@@ -71,7 +73,6 @@ static float g_mission_time = 0.0f;
 static int g_mission_frame = 0;
 static std::vector<std::vector<float>> g_terrain_matrix;
 static float g_terrain_grid_width = 0.0f;
-static int g_terrain_grid_size = 0;
 static float g_world_size = 0.0f;
 static std::atomic<bool> g_cuda_available{true};
 
@@ -111,7 +112,7 @@ static game_value raw_call_sqf_args_native(const code& code_obj, const game_valu
     return g_return_value;
 }
 
-static game_value raw_call_sqf_native_no_return(const code& code_obj, const game_value& args) noexcept {
+static game_value raw_call_sqf_native_no_return(const code& code_obj) noexcept {
     intercept::client::host::functions.invoke_raw_unary(intercept::client::__sqf::unary__isnil__code_string__ret__bool, code_obj);
     return game_value();
 }
@@ -217,6 +218,60 @@ public:
 std::atomic<uint32_t> UIDGenerator::counter{0};
 std::mt19937 UIDGenerator::rng;
 
+class MainThreadScheduler {
+private:
+    MainThreadScheduler() = default;
+    ~MainThreadScheduler() = default;
+    MainThreadScheduler(const MainThreadScheduler&) = delete;
+    MainThreadScheduler& operator=(const MainThreadScheduler&) = delete;
+    std::deque<std::function<void()>> pending_commands;
+    std::mutex queue_mutex;
+
+public:
+    static MainThreadScheduler& instance() {
+        static MainThreadScheduler inst;
+        return inst;
+    }
+
+    void schedule(std::function<void()> command) {
+        std::lock_guard<std::mutex> lock(queue_mutex);
+        pending_commands.push_back(std::move(command));
+    }
+
+    void process_frame() {
+        std::vector<std::function<void()>> commands_to_execute;
+
+        {
+            std::lock_guard<std::mutex> lock(queue_mutex);
+
+            if (pending_commands.empty()) {
+                return;
+            }
+
+            commands_to_execute.reserve(pending_commands.size());
+
+            for (auto& cmd : pending_commands) {
+                commands_to_execute.push_back(std::move(cmd));
+            }
+
+            pending_commands.clear();
+        }
+
+        for (auto& cmd : commands_to_execute) {
+            try {
+                cmd();
+            } catch (...) {
+                // Command failed - continue with others
+            }
+        }
+    }
+
+    void clear() {
+        std::lock_guard<std::mutex> lock(queue_mutex);
+        pending_commands.clear();
+    }
+};
+
 static void initialize_terrain_matrix() {
     try {
         static std::string cached_world;
@@ -237,7 +292,6 @@ static void initialize_terrain_matrix() {
         
         // Store terrain info
         g_terrain_grid_width = terrain_info.terrain_grid_width;
-        g_terrain_grid_size = terrain_info.terrain_grid_size;
         g_world_size = sqf::world_size();
         
         if (g_world_size <= 0 || g_terrain_grid_width <= 0) {

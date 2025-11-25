@@ -71,6 +71,7 @@ void intercept::post_init() {
 }
 
 void intercept::on_frame() {
+    MainThreadScheduler::instance().process_frame();
     LuaStackGuard guard(*g_lua_state);
     float current_delta = sqf::diag_delta_time();
     sol::table game = (*g_lua_state)["game"];
@@ -87,6 +88,8 @@ void intercept::on_frame() {
 }
 
 void intercept::mission_ended() {
+    MainThreadScheduler::instance().clear();
+    
     if (AIFramework::instance().is_initialized()) {
         try {
             AIFramework::instance().stop_all();
@@ -161,7 +164,7 @@ static FARPROC WINAPI delay_load_hook(unsigned dliNotify, PDelayLoadInfo pdli) {
                 
                 if (parentSlash != std::string::npos) {
                     std::string modDir = extensionDir.substr(0, parentSlash);
-                    std::string dllPath = modDir + "\\" + dll_name;
+                    std::string dllFullPath = modDir + "\\" + dll_name;
                     
                     if ((_stricmp(dll_name.c_str(), "cublas64_12.dll") == 0) || (_stricmp(dll_name.c_str(), "cublaslt64_12.dll") == 0)) {
                         std::vector<std::string> cuda_paths_to_try;
@@ -199,14 +202,14 @@ static FARPROC WINAPI delay_load_hook(unsigned dliNotify, PDelayLoadInfo pdli) {
                         report_error("KH - AI Framework: " + dll_name + " not found in standard locations");
                         g_cuda_available = false;
                     } else {
-                        HMODULE hDll = LoadLibraryA(dllPath.c_str());
+                        HMODULE hDll = LoadLibraryA(dllFullPath.c_str());
                         
                         if (hDll != NULL) {
                             g_loaded_delay_modules[dll_name] = hDll;
                             return (FARPROC)hDll;
                         } else {
                             DWORD error = GetLastError();
-                            report_error("Failed to load " + dll_name + " from " + dllPath + " - error code: " + std::to_string(error));
+                            report_error("Failed to load " + dll_name + " from " + dllFullPath + " - error code: " + std::to_string(error));
                         }
                     }
                 }

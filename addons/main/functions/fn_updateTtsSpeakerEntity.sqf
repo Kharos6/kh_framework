@@ -77,7 +77,7 @@ params [
 
         if _canUpdate then {
             if !(missionNamespace isNil _speaker) then {
-                [_speaker] call KH_fnc_removeHandler;
+                [missionNamespace getVariable _speaker] call KH_fnc_removeHandler;
             };
             
             private _generationHandler = [
@@ -124,7 +124,7 @@ params [
                         ];
 
                         if ((_subtitleName isNotEqualTo "") && (((positionCameraToWorld [0, 0, 0]) vectorDistance (unitAimPositionVisual _entity)) < _maximumDistance)) then {
-                            [_subtitleName, _text, 0] call KH_fnc_subtitleName;
+                            [_subtitleName, _text, 0] call KH_fnc_displaySubtitle;
                         };
 
                         call ((missionNamespace getVariable _argumentsId) select 2);                        
@@ -142,7 +142,7 @@ params [
                     _args params ["_speaker", "_generationHandler", "_argumentsId", "_subtitleName"];
 
                     if (_speakerId isEqualTo _speaker) then {
-                        if _stoppped then {
+                        if _stopped then {
                             [_generationHandler] call KH_fnc_removeHandler;
                             call ((missionNamespace getVariable _argumentsId) select 3);
                             [_handlerId] call KH_fnc_removeHandler;
@@ -153,7 +153,7 @@ params [
                         };
 
                         if (_subtitleName isNotEqualTo "") then {
-                            [_subtitleName, "", 0] call KH_fnc_subtitleName;
+                            [_subtitleName, "", 0] call KH_fnc_displaySubtitle;
                         };
                     };
                 }

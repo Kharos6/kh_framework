@@ -12,6 +12,8 @@ struct SpeakerState {
     std::atomic<float> volume{1.0f};
     std::thread playback_thread;
     std::mutex buffer_mutex;
+    std::atomic<bool> pending_finished_event{false};
+    std::atomic<bool> finished_was_stopped{false};
 };
 
 class TTSModelDiscovery {
@@ -137,6 +139,12 @@ static void audio_playback_thread(SpeakerState* state, int sample_rate) {
 
     if (waveOutOpen(&hWaveOut, WAVE_MAPPER, &wfx, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR) {
         state->is_playing = false;
+        std::string speaker_id_copy = state->speaker_id;
+
+        MainThreadScheduler::instance().schedule([speaker_id_copy]() {
+            report_error("KH - TTS Framework: Failed to open audio output device for speaker: " + speaker_id_copy);
+        });
+        
         return;
     }
 
@@ -245,32 +253,17 @@ static void audio_playback_thread(SpeakerState* state, int sample_rate) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
-    if (state->should_stop) {
-        waveOutReset(hWaveOut);
-    }
+    waveOutReset(hWaveOut);
 
+    // Now all buffers are guaranteed to be done (WHDR_DONE set, WHDR_INQUEUE cleared)
     for (int i = 0; i < NUM_BUFFERS; i++) {
-        int timeout = 0;
-
-        while ((headers[i].dwFlags & WHDR_INQUEUE) && timeout < 50) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            timeout++;
-        }
-
         waveOutUnprepareHeader(hWaveOut, &headers[i], sizeof(WAVEHDR));
     }
 
     waveOutClose(hWaveOut);
+    state->finished_was_stopped = state->should_stop.load();
+    state->pending_finished_event = true;
     state->is_playing = false;
-    bool was_stopped = state->should_stop;
-
-    try {
-        intercept::client::invoker_lock lock;
-        auto_array<game_value> tts_finished_data;
-        tts_finished_data.push_back(game_value(state->speaker_id));
-        tts_finished_data.push_back(game_value(was_stopped));
-        raw_call_sqf_args_native_no_return(g_compiled_tts_finished_event, game_value(std::move(tts_finished_data)));
-    } catch (...) {}
 }
 
 class TTSFramework {
@@ -279,13 +272,25 @@ private:
     ~TTSFramework() { cleanup(); }
     TTSFramework(const TTSFramework&) = delete;
     TTSFramework& operator=(const TTSFramework&) = delete;
-    const SherpaOnnxOfflineTts* tts_handle = nullptr;
+    std::shared_ptr<const SherpaOnnxOfflineTts> tts_handle;
     std::mutex tts_handle_mutex;  // Protects tts_handle, sample_rate, num_speakers, current_model_name
     std::unordered_map<std::string, std::unique_ptr<SpeakerState>> speaker_states;
-    std::mutex speaker_mutex;     // Protects speaker_states only
+    mutable std::shared_mutex speaker_mutex;     // Protects speaker_states only
     std::string current_model_name;
     int sample_rate = 22050;
     int num_speakers = 1;
+    std::atomic<bool> is_initialized_flag{false};
+    std::thread cleanup_thread;
+    std::atomic<bool> cleanup_thread_running{false};
+    std::mutex cleanup_mutex;
+    std::condition_variable cleanup_cv;
+    std::deque<std::thread> threads_to_cleanup;
+
+    struct TtsHandleDeleter {
+        void operator()(const SherpaOnnxOfflineTts* p) const {
+            if (p) SherpaOnnxDestroyOfflineTts(p);
+        }
+    };
 
     struct GenerationRequest {
         std::string speaker_id;
@@ -300,17 +305,80 @@ private:
     std::condition_variable queue_cv;
     std::thread generation_thread;
     std::atomic<bool> generation_thread_running{false};
-    
+
+    // Helper functions to schedule events on main thread
+    void schedule_tts_generated_event(const std::string& speaker_id, const std::string& text) {
+        MainThreadScheduler::instance().schedule([speaker_id, text]() {
+            auto_array<game_value> tts_data;
+            tts_data.push_back(game_value(speaker_id));
+            tts_data.push_back(game_value(text));
+            raw_call_sqf_args_native_no_return(g_compiled_tts_generated_event, game_value(std::move(tts_data)));
+        });
+    }
+
+    void schedule_tts_finished_event(const std::string& speaker_id, bool was_stopped) {
+        MainThreadScheduler::instance().schedule([speaker_id, was_stopped]() {
+            auto_array<game_value> tts_finished_data;
+            tts_finished_data.push_back(game_value(speaker_id));
+            tts_finished_data.push_back(game_value(was_stopped));
+            raw_call_sqf_args_native_no_return(g_compiled_tts_finished_event, game_value(std::move(tts_finished_data)));
+        });
+    }
+
+    void cleanup_worker() {
+        while (cleanup_thread_running) {
+            std::thread thread_to_join;
+            bool has_thread = false;
+            
+            {
+                std::unique_lock<std::mutex> lock(cleanup_mutex);
+                
+                cleanup_cv.wait_for(lock, std::chrono::milliseconds(100), [this] {
+                    return !threads_to_cleanup.empty() || !cleanup_thread_running;
+                });
+                
+                if (!threads_to_cleanup.empty()) {
+                    thread_to_join = std::move(threads_to_cleanup.front());
+                    threads_to_cleanup.pop_front();
+                    has_thread = true;
+                }
+            }
+
+            if (has_thread && thread_to_join.joinable()) {
+                thread_to_join.join();
+            }
+        }
+        
+        // Drain remaining threads on shutdown
+        std::unique_lock<std::mutex> lock(cleanup_mutex);
+
+        for (auto& t : threads_to_cleanup) {
+            if (t.joinable()) {
+                lock.unlock();
+                t.join();
+                lock.lock();
+            }
+        }
+        threads_to_cleanup.clear();
+    }
+
+    void queue_thread_for_cleanup(std::thread&& t) {
+        if (!t.joinable()) return;
+        std::lock_guard<std::mutex> lock(cleanup_mutex);
+        threads_to_cleanup.push_back(std::move(t));
+        cleanup_cv.notify_one();
+    }
+
     void generation_worker() {
-        while (generation_thread_running) {
+        while (generation_thread_running.load(std::memory_order_acquire)) {
             GenerationRequest request;
             bool has_request = false;
             
             {
                 std::unique_lock<std::mutex> lock(queue_mutex);
 
-                queue_cv.wait_for(lock, std::chrono::milliseconds(100), [this] {
-                    return !generation_queue.empty() || !generation_thread_running;
+                queue_cv.wait_for(lock, std::chrono::milliseconds(16), [this] {
+                    return !generation_queue.empty() || !generation_thread_running.load(std::memory_order_acquire);
                 });
                 
                 if (!generation_queue.empty()) {
@@ -320,137 +388,138 @@ private:
                 }
             }
             
+            // Check for pending finished events from playback threads
+            {
+                std::unique_lock<std::shared_mutex> speaker_lock(speaker_mutex, std::try_to_lock);
+                
+                if (speaker_lock.owns_lock()) {
+                    std::vector<std::string> speakers_to_cleanup;
+                    
+                    for (auto& [id, state] : speaker_states) {
+                        if (state->pending_finished_event.exchange(false, std::memory_order_acq_rel)) {
+                            schedule_tts_finished_event(state->speaker_id, 
+                                          state->finished_was_stopped.load(std::memory_order_acquire));
+                            
+                            if (!state->is_playing.load(std::memory_order_acquire)) {
+                                speakers_to_cleanup.push_back(id);
+                            }
+                        }
+                    }
+                    
+                    for (const auto& speaker_id : speakers_to_cleanup) {
+                        auto it = speaker_states.find(speaker_id);
+
+                        if (it != speaker_states.end() && !it->second->is_playing.load()) {
+                            if (it->second->playback_thread.joinable()) {
+                                queue_thread_for_cleanup(std::move(it->second->playback_thread));
+                            }
+
+                            speaker_states.erase(it);
+                        }
+                    }
+                }
+            }
+                        
             if (has_request) {
                 try {
-                    const SherpaOnnxOfflineTts* handle_copy = nullptr;
+                    std::shared_ptr<const SherpaOnnxOfflineTts> handle_copy;
                     int current_sample_rate = 0;
                     
                     {
                         std::lock_guard<std::mutex> lock(tts_handle_mutex);
-                        
+
                         if (!tts_handle) {
-                            intercept::client::invoker_lock lock;
-                            report_error("KH - TTS Framework: Cannot generate speech - no model loaded");
+                            schedule_tts_finished_event(request.speaker_id, true);
                             continue;
                         }
-                        
+
                         handle_copy = tts_handle;
                         current_sample_rate = sample_rate;
                     }
 
-                    const SherpaOnnxGeneratedAudio* audio = SherpaOnnxOfflineTtsGenerate(handle_copy, request.text.c_str(), request.sid, request.speed);
-
+                    // Generate audio - handle_copy keeps the handle alive even if load_model() is called
+                    const SherpaOnnxGeneratedAudio* audio = SherpaOnnxOfflineTtsGenerate(
+                        handle_copy.get(), request.text.c_str(), request.sid, request.speed);
+                    
+                    // No need to check if handle changed - our ref keeps it alive
+                    // But we should skip if a NEW model was loaded (user expectation)
                     {
                         std::lock_guard<std::mutex> handle_lock(tts_handle_mutex);
 
                         if (tts_handle != handle_copy) {
-                            if (audio) {
-                                SherpaOnnxDestroyOfflineTtsGeneratedAudio(audio);
-                            }
-
+                            if (audio) SherpaOnnxDestroyOfflineTtsGeneratedAudio(audio);
                             continue;
                         }
+                    }
+
+                    bool should_start_playback = false;
+                    std::string speaker_id_for_event = request.speaker_id;
+                    std::string text_for_event = request.text;
+
+                    if (audio && audio->samples && audio->n > 0) {
+                        std::unique_lock<std::shared_mutex> speaker_lock(speaker_mutex);
+                        auto it = speaker_states.find(request.speaker_id);
+
+                        if (it != speaker_states.end()) {
+                            auto& old_state = it->second;
+                            
+                            // Check if actually playing/generating - fire interrupted event
+                            bool was_active = old_state->is_playing.load(std::memory_order_acquire);
+                            
+                            // Signal stop
+                            old_state->should_stop.store(true, std::memory_order_release);
+
+                            if (old_state->playback_thread.joinable()) {
+                                std::thread thread_to_join = std::move(old_state->playback_thread);
+                                auto old_state_kept_alive = std::move(it->second);
+                                speaker_states.erase(it);
+                                speaker_lock.unlock();
+                                thread_to_join.join();
+                                speaker_lock.lock();
+                            } else {
+                                speaker_states.erase(it);
+                            }
+                            
+                            // Fire ttsFinished for the interrupted speech
+                            if (was_active) {
+                                schedule_tts_finished_event(request.speaker_id, true);
+                            }
+                        }
                         
-                        // Check if we need to join a previous playback thread - extract it without blocking
-                        std::thread thread_to_join;
-                        bool should_start_playback = false;
-                        bool should_stop_early = false;
+                        // Create fresh state for new playback
+                        auto new_state = std::make_unique<SpeakerState>();
+                        new_state->speaker_id = request.speaker_id;
                         
                         {
-                            std::lock_guard<std::mutex> speaker_lock(speaker_mutex);
-                            
-                            if (speaker_states.find(request.speaker_id) == speaker_states.end()) {
-                                auto new_state = std::make_unique<SpeakerState>();
-                                new_state->speaker_id = request.speaker_id;
-                                speaker_states[request.speaker_id] = std::move(new_state);
-                            }
-
-                            auto& state = speaker_states[request.speaker_id];
-                            
-                            if (audio && audio->samples && audio->n > 0) {
-                                std::lock_guard<std::mutex> buffer_lock(state->buffer_mutex);
-                                state->audio_buffer = float_to_int16(audio->samples, audio->n);
-                                state->position_3d[0] = request.x;
-                                state->position_3d[1] = request.y;
-                                state->position_3d[2] = request.z;
-                                state->volume = request.volume;
-
-                                if (!state->is_playing && !state->audio_buffer.empty()) {
-                                    if (state->should_stop) {
-                                        should_stop_early = true;
-                                    } else {
-                                        // Extract thread to join OUTSIDE the lock
-                                        if (state->playback_thread.joinable()) {
-                                            thread_to_join = std::move(state->playback_thread);
-                                        }
-
-                                        should_start_playback = true;
-                                    }
-                                }
-                            } else {
-                                if (audio) {
-                                    SherpaOnnxDestroyOfflineTtsGeneratedAudio(audio);
-                                }
-
-                                intercept::client::invoker_lock lock;
-                                report_error("KH - TTS Framework: Audio generation failed for speaker: " + request.speaker_id);
-                                continue;
-                            }
+                            std::lock_guard<std::mutex> buffer_lock(new_state->buffer_mutex);
+                            new_state->audio_buffer = float_to_int16(audio->samples, audio->n);
                         }
                         
-                        // Join thread OUTSIDE the speaker_mutex lock to prevent deadlock
-                        if (thread_to_join.joinable()) {
-                            thread_to_join.join();
-                        }
-                        
-                        if (should_stop_early) {
-                            SherpaOnnxDestroyOfflineTtsGeneratedAudio(audio);
-                            
-                            try {
-                                intercept::client::invoker_lock lock;
-                                auto_array<game_value> tts_finished_data;
-                                tts_finished_data.push_back(game_value(request.speaker_id));
-                                tts_finished_data.push_back(game_value(true));
-                                raw_call_sqf_args_native_no_return(g_compiled_tts_finished_event, game_value(std::move(tts_finished_data)));
-                            } catch (...) {}
+                        new_state->position_3d[0].store(request.x, std::memory_order_release);
+                        new_state->position_3d[1].store(request.y, std::memory_order_release);
+                        new_state->position_3d[2].store(request.z, std::memory_order_release);
+                        new_state->volume.store(request.volume, std::memory_order_release);
+                        new_state->is_playing.store(true, std::memory_order_release);               
+                        speaker_states[request.speaker_id] = std::move(new_state);
+                        speaker_states[request.speaker_id]->playback_thread = std::thread(audio_playback_thread, speaker_states[request.speaker_id].get(), current_sample_rate);
+                        should_start_playback = true;
+                    }
 
-                            continue;
-                        }
-                        
-                        if (should_start_playback) {
-                            // Re-acquire lock to start playback thread
-                            std::lock_guard<std::mutex> speaker_lock(speaker_mutex);
-                            auto it = speaker_states.find(request.speaker_id);
-                            
-                            if (it != speaker_states.end()) {
-                                auto& state = it->second;
-                                
-                                // Double-check state hasn't changed
-                                if (!state->is_playing && !state->should_stop) {
-                                    state->is_playing = true;
-                                    state->should_stop = false;
-                                    state->playback_thread = std::thread(audio_playback_thread, state.get(), current_sample_rate);
-                                    
-                                    try {
-                                        intercept::client::invoker_lock lock;
-                                        auto_array<game_value> tts_data;
-                                        tts_data.push_back(game_value(request.speaker_id));
-                                        tts_data.push_back(game_value(request.text));
-                                        raw_call_sqf_args_native_no_return(g_compiled_tts_generated_event, game_value(std::move(tts_data)));
-                                    } catch (...) {}
-                                }
-                            }
-                        }
-                        
+                    if (should_start_playback) {
+                        schedule_tts_generated_event(speaker_id_for_event, text_for_event);
+                    }
+
+                    if (audio) {
                         SherpaOnnxDestroyOfflineTtsGeneratedAudio(audio);
                     }
+                    
                 } catch (const std::exception& e) {
-                    intercept::client::invoker_lock lock;
-                    report_error("KH - TTS Framework: Generation exception: " + std::string(e.what()));
-                } catch (...) {
-                    intercept::client::invoker_lock lock;
-                    report_error("KH - TTS Framework: Unknown generation exception");
-                }
+                    std::string error_msg = e.what();
+
+                    MainThreadScheduler::instance().schedule([error_msg]() {
+                        report_error("KH - TTS Framework: Generation exception: " + error_msg);
+                    });
+                } catch (...) {}
             }
         }
     }
@@ -469,138 +538,166 @@ public:
         float noise_scale_w = 0.8f,
         float length_scale = 1.0f
     ) {
-        try {
+        // Collect info for logging outside the lock
+        std::string log_message;
+        bool success = false;
+        bool dml_fallback = false;
+        std::string resolved_model_name;
+        std::string actual_provider = provider;
+        int loaded_sample_rate = 0;
+        int loaded_num_speakers = 0;
+        
+        {
             std::lock_guard<std::mutex> lock(tts_handle_mutex);
 
+            // Clear generation queue when loading new model
             {
                 std::lock_guard<std::mutex> queue_lock(queue_mutex);
                 generation_queue.clear();
             }
-
-            if (tts_handle) {
-                SherpaOnnxDestroyOfflineTts(tts_handle);
-                tts_handle = nullptr;
-            }
-
-            std::filesystem::path model_path;
-            std::string resolved_model_name = model_name;
             
-            if (model_name.empty()) {
-                // Find any available model
-                model_path = TTSModelDiscovery::find_any_model();
+            // Cleanup existing model
+            tts_handle.reset();
+
+            try {
+                std::filesystem::path model_path;
+                resolved_model_name = model_name;
                 
-                if (model_path.empty()) {
-                    report_error("KH - TTS Framework: No TTS models found in any search location");
-                    return false;
+                if (model_name.empty()) {
+                    model_path = TTSModelDiscovery::find_any_model();
+                    
+                    if (model_path.empty()) {
+                        log_message = "KH - TTS Framework: No TTS models found in any search location";
+                    } else {
+                        resolved_model_name = model_path.filename().string();
+                    }
+                } else {
+                    model_path = TTSModelDiscovery::find_model(model_name);
+                    
+                    if (model_path.empty()) {
+                        log_message = "KH - TTS Framework: Model not found: " + model_name;
+                    }
                 }
-                
-                resolved_model_name = model_path.filename().string();
-            } else {
-                model_path = TTSModelDiscovery::find_model(model_name);
-                
-                if (model_path.empty()) {
-                    report_error("KH - TTS Framework: Model not found: " + model_name);
-                    return false;
+
+                if (log_message.empty() && !model_path.empty()) {
+                    std::filesystem::path espeak_data_path = TTSModelDiscovery::find_espeak_data(model_path);
+                    
+                    if (espeak_data_path.empty()) {
+                        log_message = "KH - TTS Framework: espeak-ng-data not found in model directory: " + model_path.string();
+                    } else {
+                        // Find ONNX model file and tokens
+                        std::string model_file_path;
+                        std::string tokens_file_path;
+
+                        for (const auto& entry : std::filesystem::directory_iterator(model_path)) {
+                            std::string filename = entry.path().filename().string();
+                            std::string lower_filename = filename;
+
+                            std::transform(lower_filename.begin(), lower_filename.end(), 
+                                         lower_filename.begin(), ::tolower);
+                            
+                            if (lower_filename.ends_with(".onnx") && !lower_filename.ends_with(".json")) {
+                                model_file_path = entry.path().string();
+                            }
+                            else if (lower_filename == "tokens.txt") {
+                                tokens_file_path = entry.path().string();
+                            }
+                        }
+
+                        if (model_file_path.empty()) {
+                            log_message = "KH - TTS Framework: No .onnx file found in model directory";
+                        } else {
+                            std::string espeak_data_str = espeak_data_path.string();
+                            SherpaOnnxOfflineTtsConfig config;
+                            memset(&config, 0, sizeof(config));
+                            config.model.vits.model = model_file_path.c_str();
+                            config.model.vits.lexicon = "";
+                            config.model.vits.tokens = tokens_file_path.empty() ? "" : tokens_file_path.c_str();
+                            config.model.vits.data_dir = espeak_data_str.c_str();
+                            config.model.vits.noise_scale = noise_scale;
+                            config.model.vits.noise_scale_w = noise_scale_w;
+                            config.model.vits.length_scale = length_scale;
+                            config.model.vits.dict_dir = "";
+                            config.model.num_threads = num_threads;
+                            config.model.debug = 0;
+                            config.model.provider = actual_provider.c_str();
+                            config.max_num_sentences = 1;
+                            config.rule_fsts = "";
+                            config.rule_fars = "";
+                            tts_handle = std::shared_ptr<const SherpaOnnxOfflineTts>(SherpaOnnxCreateOfflineTts(&config), TtsHandleDeleter{});
+                            
+                            // Fallback to CPU if DML fails
+                            if (!tts_handle && _stricmp(actual_provider.c_str(), "dml") == 0) {
+                                dml_fallback = true;
+                                actual_provider = "cpu";
+                                config.model.provider = actual_provider.c_str();
+                                tts_handle = std::shared_ptr<const SherpaOnnxOfflineTts>(SherpaOnnxCreateOfflineTts(&config), TtsHandleDeleter{});
+                            }
+                            
+                            if (!tts_handle) {
+                                log_message = "KH - TTS Framework: Failed to create TTS instance";
+                            } else {
+                                num_speakers = SherpaOnnxOfflineTtsNumSpeakers(tts_handle.get());
+                                sample_rate = SherpaOnnxOfflineTtsSampleRate(tts_handle.get());
+                                current_model_name = resolved_model_name;
+                                loaded_num_speakers = num_speakers;
+                                loaded_sample_rate = sample_rate;
+                                is_initialized_flag.store(true, std::memory_order_release);
+                                success = true;
+                                
+                                std::string provider_name = actual_provider;
+                                std::transform(provider_name.begin(), provider_name.end(), 
+                                             provider_name.begin(), ::toupper);
+                                
+                                log_message = "KH - TTS Framework: Model loaded successfully - " + model_path.string() + 
+                                    " | Provider: " + provider_name + 
+                                    " | Speakers: " + std::to_string(loaded_num_speakers) + 
+                                    " | Sample Rate: " + std::to_string(loaded_sample_rate) + " Hz";
+                            }
+                        }
+                    }
                 }
+            } catch (const std::exception& e) {
+                log_message = "KH - TTS Framework: Model loading exception: " + std::string(e.what());
             }
+        }
 
-            std::filesystem::path espeak_data_path = TTSModelDiscovery::find_espeak_data(model_path);
+        if (!log_message.empty()) {
+            std::string msg = log_message;
+            bool was_success = success;
+            bool had_dml_fallback = dml_fallback;
 
-            if (espeak_data_path.empty()) {
-                report_error("KH - TTS Framework: espeak-ng-data not found in model directory: " + model_path.string());
-                return false;
-            }
+            MainThreadScheduler::instance().schedule([msg, was_success, had_dml_fallback]() {
+                if (was_success) {
+                    sqf::diag_log(msg);
 
-            std::string model_file_path;
-            std::string tokens_file_path;
-            
-            for (const auto& entry : std::filesystem::directory_iterator(model_path)) {
-                std::string filename = entry.path().filename().string();
-                std::string lower_filename = filename;
-
-                std::transform(lower_filename.begin(), lower_filename.end(), 
-                             lower_filename.begin(), ::tolower);
-                
-                if (lower_filename.ends_with(".onnx") && !lower_filename.ends_with(".json")) {
-                    model_file_path = entry.path().string();
+                    if (had_dml_fallback) {
+                        sqf::diag_log("KH - TTS Framework: DirectML not supported, fell back to CPU");
+                    }
+                } else {
+                    report_error(msg);
                 }
-                else if (lower_filename == "tokens.txt") {
-                    tokens_file_path = entry.path().string();
-                }
-            }
+            });
+        }
 
-            if (model_file_path.empty()) {
-                report_error("KH - TTS Framework: No .onnx file found in model directory");
-                return false;
-            }
-
-            std::string espeak_data_str = espeak_data_path.string();
-            SherpaOnnxOfflineTtsConfig config;
-            memset(&config, 0, sizeof(config));
-            config.model.vits.model = model_file_path.c_str();
-            config.model.vits.lexicon = "";
-            config.model.vits.tokens = tokens_file_path.empty() ? "" : tokens_file_path.c_str();
-            config.model.vits.data_dir = espeak_data_str.c_str();
-            config.model.vits.noise_scale = noise_scale;
-            config.model.vits.noise_scale_w = noise_scale_w;
-            config.model.vits.length_scale = length_scale;
-            config.model.vits.dict_dir = "";
-            config.model.num_threads = num_threads;
-            config.model.debug = 0;
-            config.model.provider = provider.c_str();
-            config.max_num_sentences = 1;
-            config.rule_fsts = "";
-            config.rule_fars = "";
-            std::string actual_provider = provider;
-            config.model.provider = actual_provider.c_str();
-            tts_handle = SherpaOnnxCreateOfflineTts(&config);
-            
-            // If DML failed, fallback to CPU
-            if (!tts_handle && _stricmp(actual_provider.c_str(), "dml") == 0) {
-                intercept::client::invoker_lock lock;
-                intercept::sqf::diag_log("KH - TTS Framework: DirectML not supported, falling back to CPU");
-                actual_provider = "cpu";
-                config.model.provider = actual_provider.c_str();
-                tts_handle = SherpaOnnxCreateOfflineTts(&config);
+        if (success) {
+            if (!cleanup_thread_running.load(std::memory_order_acquire)) {
+                cleanup_thread_running.store(true, std::memory_order_release);
+                cleanup_thread = std::thread(&TTSFramework::cleanup_worker, this);
             }
             
-            if (!tts_handle) {
-                report_error("KH - TTS Framework: Failed to create TTS instance");
-                return false;
-            }
-
-            num_speakers = SherpaOnnxOfflineTtsNumSpeakers(tts_handle);
-            sample_rate = SherpaOnnxOfflineTtsSampleRate(tts_handle);
-            current_model_name = resolved_model_name;
-            
-            {
-                intercept::client::invoker_lock lock;
-                std::string provider_name = actual_provider;
-
-                std::transform(provider_name.begin(), provider_name.end(), 
-                             provider_name.begin(), ::toupper);
-                
-                sqf::diag_log("KH - TTS Framework: Model loaded successfully - " + resolved_model_name + 
-                    " | Provider: " + provider_name + 
-                    " | Speakers: " + std::to_string(num_speakers) + 
-                    " | Sample Rate: " + std::to_string(sample_rate) + " Hz"
-                );
-            }
-
-            // Start generation thread if not running
-            if (!generation_thread_running) {
-                generation_thread_running = true;
+            if (!generation_thread_running.load(std::memory_order_acquire)) {
+                generation_thread_running.store(true, std::memory_order_release);
                 generation_thread = std::thread(&TTSFramework::generation_worker, this);
             }
-            
-            return true;
-        } catch (const std::exception& e) {
-            report_error("KH - TTS Framework: Model loading exception: " + std::string(e.what()));
-            return false;
         }
+        
+        return success;
     }
 
     bool speak(const std::string& speaker_id, const std::string& text, float x, float y, float z, float volume, float speed = 1.0f, int sid = 0) {
+        if (speaker_id.empty() || text.empty()) return false;
+        
         {
             std::lock_guard<std::mutex> lock(tts_handle_mutex);
             if (!tts_handle) return false;
@@ -618,6 +715,17 @@ public:
         
         {
             std::lock_guard<std::mutex> lock(queue_mutex);
+
+            // Remove any pending (not yet started) requests for this speaker
+            // Note: We do NOT fire events for these - they never started generating
+            generation_queue.erase(
+                std::remove_if(generation_queue.begin(), generation_queue.end(),
+                    [&speaker_id](const GenerationRequest& req) {
+                        return req.speaker_id == speaker_id;
+                    }),
+                generation_queue.end()
+            );
+            
             generation_queue.push_back(request);
         }
 
@@ -626,7 +734,8 @@ public:
     }
 
     bool update_speaker(const std::string& speaker_id, float x, float y, float z, float volume) {
-        std::lock_guard<std::mutex> lock(speaker_mutex);
+        if (speaker_id.empty()) return false;
+        std::unique_lock<std::shared_mutex> lock(speaker_mutex);
         auto it = speaker_states.find(speaker_id);
         if (it == speaker_states.end()) return false;
         auto& state = it->second;
@@ -638,115 +747,131 @@ public:
     }
 
     bool stop_speaker(const std::string& speaker_id) {
-        std::thread thread_to_join;
+        if (speaker_id.empty()) return false;
+        bool was_playing = false;
         
         {
-            std::lock_guard<std::mutex> lock(speaker_mutex);
+            std::unique_lock<std::shared_mutex> lock(speaker_mutex);
             auto it = speaker_states.find(speaker_id);
             if (it == speaker_states.end()) return false;
             auto& state = it->second;
-            state->should_stop = true;
+            was_playing = state->is_playing.load(std::memory_order_acquire);
+            state->should_stop.store(true, std::memory_order_release);
 
             if (state->playback_thread.joinable()) {
-                thread_to_join = std::move(state->playback_thread);
+                std::thread thread_to_join = std::move(state->playback_thread);
+                auto state_kept_alive = std::move(it->second);
+                speaker_states.erase(it);
+                lock.unlock();
+                thread_to_join.join();
+            } else {
+                speaker_states.erase(it);
             }
-            
-            speaker_states.erase(it);
         }
 
-        if (thread_to_join.joinable()) {
-            thread_to_join.join();
+        if (was_playing) {
+            schedule_tts_finished_event(speaker_id, true);
         }
         
         return true;
     }
 
     bool is_playing(const std::string& speaker_id) {
-        std::lock_guard<std::mutex> lock(speaker_mutex);
-        
+        if (speaker_id.empty()) return false;
+        std::shared_lock<std::shared_mutex> lock(speaker_mutex);
         auto it = speaker_states.find(speaker_id);
         if (it == speaker_states.end()) return false;
-        
-        return it->second->is_playing;
+        return it->second->is_playing.load(std::memory_order_acquire);
     }
 
     void stop_all() {
+        std::vector<std::string> speakers_that_were_playing;
         std::vector<std::thread> threads_to_join;
+        std::vector<std::unique_ptr<SpeakerState>> states_to_keep_alive;
         
         {
-            std::lock_guard<std::mutex> lock(speaker_mutex);
+            std::unique_lock<std::shared_mutex> lock(speaker_mutex);
             
             for (auto& [id, state] : speaker_states) {
-                state->should_stop = true;
+                if (state->is_playing.load(std::memory_order_acquire)) {
+                    speakers_that_were_playing.push_back(id);
+                }
 
+                state->should_stop.store(true, std::memory_order_release);
+                
                 if (state->playback_thread.joinable()) {
                     threads_to_join.push_back(std::move(state->playback_thread));
+                    states_to_keep_alive.push_back(std::move(state));
                 }
             }
             
             speaker_states.clear();
         }
 
-        for (auto& thread : threads_to_join) {
-            if (thread.joinable()) {
-                thread.join();
+        for (auto& t : threads_to_join) {
+            if (t.joinable()) {
+                t.join();
             }
+        }
+
+        // Schedule events for main thread
+        for (const auto& speaker_id : speakers_that_were_playing) {
+            schedule_tts_finished_event(speaker_id, true);
         }
     }
 
     bool is_initialized() {
-        std::lock_guard<std::mutex> lock(tts_handle_mutex);
-        return tts_handle != nullptr;
+        return is_initialized_flag.load(std::memory_order_acquire);
     }
 
     void cleanup() {
-        generation_thread_running = false;
+        generation_thread_running.store(false, std::memory_order_release);
+        cleanup_thread_running.store(false, std::memory_order_release);
         queue_cv.notify_all();
+        cleanup_cv.notify_all();
 
         {
-            std::lock_guard<std::mutex> lock(speaker_mutex);
+            std::unique_lock<std::shared_mutex> lock(speaker_mutex);
 
             for (auto& [id, state] : speaker_states) {
-                state->should_stop = true;
+                state->should_stop.store(true, std::memory_order_release);
             }
         }
 
         if (generation_thread.joinable()) {
             generation_thread.join();
         }
-        
-        // Extract and join playback threads
-        std::vector<std::thread> threads_to_join;
+
+        if (cleanup_thread.joinable()) {
+            cleanup_thread.join();
+        }
+
+        std::vector<std::thread> remaining_threads;
+        std::vector<std::unique_ptr<SpeakerState>> remaining_states;
 
         {
-            std::lock_guard<std::mutex> lock(speaker_mutex);
+            std::unique_lock<std::shared_mutex> lock(speaker_mutex);
 
             for (auto& [id, state] : speaker_states) {
                 if (state->playback_thread.joinable()) {
-                    threads_to_join.push_back(std::move(state->playback_thread));
+                    remaining_threads.push_back(std::move(state->playback_thread));
+                    remaining_states.push_back(std::move(state));
                 }
             }
-        }
 
-        for (auto& thread : threads_to_join) {
-            if (thread.joinable()) {
-                thread.join();
-            }
-        }
-
-        {
-            std::lock_guard<std::mutex> speaker_lock(speaker_mutex);
             speaker_states.clear();
         }
-        
+
+        for (auto& t : remaining_threads) {
+            if (t.joinable()) {
+                t.join();
+            }
+        }
+
         {
             std::lock_guard<std::mutex> handle_lock(tts_handle_mutex);
-            
-            if (tts_handle) {
-                SherpaOnnxDestroyOfflineTts(tts_handle);
-                tts_handle = nullptr;
-            }
-            
+            is_initialized_flag.store(false, std::memory_order_release);
+            tts_handle.reset();
             current_model_name.clear();
         }
 

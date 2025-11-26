@@ -108,7 +108,7 @@ class KH_ModuleUpdateAIInstance: Module_F
 	};
 	class ModuleDescription: ModuleDescription
 	{
-		description[] = {"Updates the state of an AI instance, with each subsequent update overriding the previous one. Activates multiple times, with a trigger, on the server."};
+		description[] = {"Updates the state of an AI instance, with each subsequent update overriding the previous one and interrupting the current response if it is in progress. Activates multiple times, with a trigger, on the server."};
 		sync[] = {};
 		position = 0;
 		direction = 0;

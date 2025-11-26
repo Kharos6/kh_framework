@@ -22,10 +22,7 @@ _control ctrlSetAngle [_angle, _centerX, _centerY, true];
 _control ctrlCommit 0;
 
 if (_text isEqualType "") then {
-    if (_text isEqualTo "") then {
-        _control ctrlSetText (["#(rgb,8,8,3)color(", _backgroundColor select 0, ",", _backgroundColor select 1, ",", _backgroundColor select 2, ",", _backgroundColor select 3, ")"] joinString "");
-    }
-    else {
+    if (_text isNotEqualTo "") then {
         _control ctrlSetText _text;
     };
 }

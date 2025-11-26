@@ -834,16 +834,26 @@ public:
             std::unique_lock<std::shared_mutex> lock(speaker_mutex);
 
             for (auto& [id, state] : speaker_states) {
-                state->should_stop.store(true, std::memory_order_release);
+                if (state) {
+                    state->should_stop.store(true, std::memory_order_release);
+                }
             }
         }
 
         if (generation_thread.joinable()) {
-            generation_thread.join();
+            try {
+                generation_thread.join();
+            } catch (...) {
+                // Thread join failed, continue cleanup
+            }
         }
 
         if (cleanup_thread.joinable()) {
-            cleanup_thread.join();
+            try {
+                cleanup_thread.join();
+            } catch (...) {
+                // Thread join failed, continue cleanup
+            }
         }
 
         std::vector<std::thread> remaining_threads;
@@ -853,7 +863,7 @@ public:
             std::unique_lock<std::shared_mutex> lock(speaker_mutex);
 
             for (auto& [id, state] : speaker_states) {
-                if (state->playback_thread.joinable()) {
+                if (state && state->playback_thread.joinable()) {
                     remaining_threads.push_back(std::move(state->playback_thread));
                     remaining_states.push_back(std::move(state));
                 }
@@ -864,20 +874,45 @@ public:
 
         for (auto& t : remaining_threads) {
             if (t.joinable()) {
-                t.join();
+                try {
+                    t.join();
+                } catch (...) {
+                    // Thread join failed, continue cleanup
+                }
             }
         }
+
+        remaining_states.clear();
+        remaining_threads.clear();
 
         {
             std::lock_guard<std::mutex> handle_lock(tts_handle_mutex);
             is_initialized_flag.store(false, std::memory_order_release);
             tts_handle.reset();
             current_model_name.clear();
+            sample_rate = 22050;
+            num_speakers = 1;
         }
 
         {
             std::lock_guard<std::mutex> lock(queue_mutex);
             generation_queue.clear();
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(cleanup_mutex);
+
+            for (auto& t : threads_to_cleanup) {
+                if (t.joinable()) {
+                    try {
+                        t.join();
+                    } catch (...) {
+                        // Continue anyway
+                    }
+                }
+            }
+
+            threads_to_cleanup.clear();
         }
     }
 };

@@ -75,11 +75,7 @@ params [
             };
         };
 
-        if _canUpdate then {
-            if !(missionNamespace isNil _speaker) then {
-                [missionNamespace getVariable _speaker] call KH_fnc_removeHandler;
-            };
-            
+        if _canUpdate then {            
             private _generationHandler = [
                 "CBA",
                 "KH_eve_ttsGenerated",
@@ -97,24 +93,19 @@ params [
                                     params ["_entity", "_speaker", "_argumentsId"];
                                     (missionNamespace getVariable _argumentsId) params ["_volume", "_maximumDistance"];
 
-                                    if (ttsIsPlaying _speaker) then {
-                                        if (((positionCameraToWorld [0, 0, 0]) vectorDistance (unitAimPositionVisual _entity)) < _maximumDistance) then {
-                                            private _worldDir = (positionCameraToWorld [0, 0, 0]) vectorFromTo (unitAimPositionVisual _entity);
-                                            private _cameraForward = getCameraViewDirection KH_var_playerUnit;
-                                            private _cameraRight = vectorNormalized (_cameraForward vectorCrossProduct [0, 0, 1]);
-                                            private _cameraUp = vectorNormalized (_cameraRight vectorCrossProduct _cameraForward);
+                                    if (((positionCameraToWorld [0, 0, 0]) vectorDistance (unitAimPositionVisual _entity)) < _maximumDistance) then {
+                                        private _worldDir = (positionCameraToWorld [0, 0, 0]) vectorFromTo (unitAimPositionVisual _entity);
+                                        private _cameraForward = getCameraViewDirection KH_var_playerUnit;
+                                        private _cameraRight = vectorNormalized (_cameraForward vectorCrossProduct [0, 0, 1]);
+                                        private _cameraUp = vectorNormalized (_cameraRight vectorCrossProduct _cameraForward);
 
-                                            ttsUpdateSpeaker [
-                                                _speaker, 
-                                                _worldDir vectorDotProduct _cameraRight, 
-                                                _worldDir vectorDotProduct _cameraForward, 
-                                                _worldDir vectorDotProduct _cameraUp, 
-                                                _volume * (linearConversion [0, _maximumDistance, ((positionCameraToWorld [0, 0, 0]) vectorDistance (unitAimPositionVisual _entity)), 1, 0, true])
-                                            ];
-                                        };
-                                    } 
-                                    else {
-                                        [_handlerId] call KH_fnc_removeHandler;
+                                        ttsUpdateSpeaker [
+                                            _speaker, 
+                                            _worldDir vectorDotProduct _cameraRight, 
+                                            _worldDir vectorDotProduct _cameraForward, 
+                                            _worldDir vectorDotProduct _cameraUp, 
+                                            _volume * (linearConversion [0, _maximumDistance, ((positionCameraToWorld [0, 0, 0]) vectorDistance (unitAimPositionVisual _entity)), 1, 0, true])
+                                        ];
                                     };
                                 },
                                 true,
@@ -150,6 +141,10 @@ params [
                         else {
                             call ((missionNamespace getVariable _argumentsId) select 3);
                             [_handlerId] call KH_fnc_removeHandler;
+                        };
+
+                        if !(missionNamespace isNil _speaker) then {
+                            [missionNamespace getVariable _speaker] call KH_fnc_removeHandler;
                         };
 
                         if (_subtitleName isNotEqualTo "") then {

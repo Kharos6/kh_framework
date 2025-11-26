@@ -165,7 +165,7 @@ private:
     std::atomic<bool> processing_thread_running{false};
     std::chrono::steady_clock::time_point capture_start_time;
     std::mutex capture_time_mutex;
-    static constexpr int MAX_CAPTURE_DURATION_MS = 120000;
+    static constexpr int MAX_CAPTURE_DURATION_MS = 30000;
     std::mutex processing_mutex;
     std::condition_variable processing_cv;
     std::deque<std::vector<int16_t>> processing_queue;
@@ -621,27 +621,37 @@ private:
         processing_cv.notify_all();
 
         if (capture_thread.joinable()) {
-            capture_thread.join();
+            try {
+                capture_thread.join();
+            } catch (...) {
+                // Thread join failed, continue cleanup
+            }
         }
-        
+
         if (processing_thread.joinable()) {
-            processing_thread.join();
+            try {
+                processing_thread.join();
+            } catch (...) {
+                // Thread join failed, continue cleanup
+            }
         }
 
         {
             std::lock_guard<std::mutex> lock(stt_mutex);
             is_initialized_flag.store(false, std::memory_order_release);
             recognizer_handle.reset();
+            sample_rate = STT_SAMPLE_RATE;
         }
 
         capture_buffer.clear();
-        
+
         {
             std::lock_guard<std::mutex> proc_lock(processing_mutex);
             processing_queue.clear();
         }
-        
+
         current_model_name.clear();
+        capture_thread_alive.store(false, std::memory_order_release);
     }
 
     bool start_capture_manual() {
@@ -653,7 +663,6 @@ private:
             return false;
         }
 
-        // Restart capture thread if dead
         if (!capture_thread_alive.load(std::memory_order_acquire)) {
             if (capture_thread.joinable()) {
                 capture_thread.join();

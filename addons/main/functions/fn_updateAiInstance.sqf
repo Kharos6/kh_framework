@@ -26,23 +26,23 @@ if (missionNamespace isNil _aiInstanceHandlerId) then {
         [_name, _aiInstanceHandlerId, _aiInstanceArgumentsId, _aiInstanceTriggerId, _aiInstanceResponseProgressHandlerId, _aiInstanceResponseHandlerId],
         {
             params ["_name", "_aiInstanceHandlerId", "_aiInstanceArgumentsId", "_aiInstanceTriggerId", "_aiInstanceResponseProgressHandlerId", "_aiInstanceResponseHandlerId"];
-            (missionNamespace getVariable _aiInstanceArguments) params ["_systemPrompt", "_userPrompt", "_abortGeneration", "_resetContext", "_logGeneration", "_stop"];
-
-            if (!(isAiActive _name) || (isAiGenerating _name) || (missionNamespace getVariable _aiInstanceHandlerId)) exitWith {
-                if (isAiActive _name) then {
-                    if _abortGeneration then {
-                        abortAiGeneration _name;
-                    };
-                };
-
-                if _stop then {
-                    stopAi _name;
-                    missionNamespace setVariable [_aiInstanceHandlerId, nil];
-                    [_handlerId] call KH_fnc_removeHandler;
-                };
+            (missionNamespace getVariable _aiInstanceArgumentsId) params ["_systemPrompt", "_userPrompt", "_responseProgressFunction", "_responseFunction", "_abortGeneration", "_resetContext", "_logGeneration", "_stop"];
+            if !(isAiActive _name) exitWith {};
+            
+            if _stop exitWith {
+                stopAi _name;
+                missionNamespace setVariable [_aiInstanceHandlerId, nil];
+                [_handlerId] call KH_fnc_removeHandler;
             };
 
+            if (missionNamespace getVariable _aiInstanceHandlerId) exitWith {};
             missionNamespace setVariable [_aiInstanceHandlerId, true];
+
+            if (isAiGenerating _name) then {
+                if _abortGeneration then {
+                    abortAiGeneration _name;
+                };
+            };
 
             if _resetContext then {
                 resetAiContext _name;

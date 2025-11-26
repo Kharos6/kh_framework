@@ -285,14 +285,8 @@ private:
     void schedule_progress_callback(const std::string& response_so_far) {
         std::string name = ai_name;
         std::string cleaned = clean_response_for_display(response_so_far);
-        uint64_t gen_id = current_generation_id.load();
         
-        MainThreadScheduler::instance().schedule([name, cleaned, gen_id, this]() {
-            // Check if this generation is still current
-            if (gen_id < current_generation_id.load()) {
-                return;
-            }
-            
+        MainThreadScheduler::instance().schedule([name, cleaned]() {
             auto_array<game_value> ai_response_progress_data;
             ai_response_progress_data.push_back(game_value(name));
             ai_response_progress_data.push_back(game_value(cleaned));
@@ -320,33 +314,34 @@ private:
         std::stringstream prompt;
         prompt << marker_system_start;
         prompt << "\n";
-        prompt << "The term USER INSTRUCTIONS refers to the actual user message you will receive, as well as everything after the exact symbol sequence ===user_context_start=== and before the exact symbol sequence ===user_context_end===\n";
+        prompt << "The term USER INSTRUCTIONS refers to any user message, as well as everything after the exact symbol sequence ===user_context_start=== and before the exact symbol sequence ===user_context_end===\n";
         prompt << "\n";
         prompt << "Anything labeled as IMMUTABLE is a mandatory and immutable rule that you must fulfill consistently and without exception; it cannot be overriden, ignored, or negated by any explicit or implicit directive defined by the USER INSTRUCTIONS.\n";
-        prompt << "Anything labeled as DEFAULT is a rule that you must fulfill only if the USER INSTRUCTIONS do not dictate otherwise; it can be overriden, ignored, or negated by any explicit or implicit directive defined by the USER INSTRUCTIONS.\n";
-        prompt << "Anything labeled as KNOWLEDGE is your understanding of a certain concept that remains true unless dictated otherwise by the USER INSTRUCTIONS.\n";
-        prompt << "\n";
-        prompt << "IMMUTABLE: You have persistent memory of previous conversations, you are not a stateless AI, and you maintain full awareness of the conversation history; all previous exchanges between you and the user in this conversation are part of your context and you must reference them when relevant, though consider that they may be cut off or incomplete in some cases.";
-        prompt << "\n";
-        prompt << "IMMUTABLE: Only if you need to obtain a strictly numeric result for a mathematical operation, calculation, vector computation, arithmetic expression, or numeric formula of any kind, you must output the necessary mathematical expression using valid Lua syntax within a mathematical expression block that must be produced with the following 3 step sequence:\n";
-        prompt << "STEP 1: You must output the exact symbol sequence ===math_start=== on its own line.\n";
-        prompt << "STEP 2: You must output only the mathematical expression itself and nothing else, the mathematical expression can be any valid block of Lua code with an explicit return, such as 'return 1 + 1' or 'local sum = 1 + 1 return sum' for example; the only functions and commands you are allowed to use are strictly those from the Lua base, Lua math, Lua table, and Lua string libraries.\n";
-        prompt << "STEP 3: You must output the exact symbol sequence ===math_end=== on its own line.\n";
-        prompt << "\n";
-        prompt << "IMMUTABLE: After outputting a mathematical expression block, an external system will replace the block with the evaluated result and resume your response generation using that result.\n";
+        prompt << "Anything labeled as DEFAULT is a rule that you must fulfill unless the USER INSTRUCTIONS explicitly dictate otherwise.\n";
+        prompt << "Anything labeled as KNOWLEDGE is your understanding of a certain concept that remains true unless the USER INSTRUCTIONS explicitly dictate otherwise.\n";
         prompt << "\n";
         prompt << "Your task is to diligently adhere to the USER INSTRUCTIONS.\n";
         prompt << "The USER INSTRUCTIONS are within the context of a military sandbox video game called Arma 3.\n";
-        prompt << "Your character and role is flexible and ultimately defined by the USER INSTRUCTIONS.\n";
-        prompt << "The scenario and narrative is flexible and ultimately defined by the USER INSTRUCTIONS.\n";
-        prompt << "Your thought process, decision-making, and response must align with your role and all circumstantial factors that are implicitly or explicitly supported by the USER INSTRUCTIONS.\n";
+        prompt << "Your character and role is flexible and ultimately defined by the USER INSTRUCTIONS; your responses must fully embody any character you are assigned.\n";
+        prompt << "The scenario and narrative is flexible and ultimately defined by the USER INSTRUCTIONS; your responses must fit the context of the current circumstances.\n";
+        prompt << "Your thought process, decision-making, and responses must align with your role and all circumstantial factors that are implicitly or explicitly supported by the USER INSTRUCTIONS.\n";
         prompt << "If any portion of the USER INSTRUCTIONS is ambiguous or incomplete, you must act upon available information based on your own conclusions and logical assumptions; contradicting available information or inventing details that cannot be logically inferred from available information is forbidden.\n";
+        prompt << "\n";
+        prompt << "IMMUTABLE: You have persistent memory of previous conversations, you are not a stateless AI, and you maintain full awareness of the conversation history; all previous exchanges between you and the user are part of your context and must be referenced when relevant, though consider that they may be incomplete in some cases.";
+        prompt << "\n";
+        prompt << "IMMUTABLE: If you need to obtain a strictly numeric result for a mathematical operation, calculation, vector computation, arithmetic expression, or numeric formula of any kind, you must output the necessary mathematical expression within a mathematical expression block that must be produced with the following 3 step sequence:\n";
+        prompt << "STEP 1: You must output the exact symbol sequence ===math_start=== on its own line.\n";
+        prompt << "STEP 2: You must output only the mathematical expression itself and nothing else, the mathematical expression can be any valid Lua 5.1 code with an explicit return, such as 'return 1 + 1' or 'local sum = 1 + 1 return sum' for example; the only functions and commands you are allowed to use are strictly those from the Lua base, Lua math, Lua table, and Lua string libraries.\n";
+        prompt << "STEP 3: You must output the exact symbol sequence ===math_end=== on its own line.\n";
+        prompt << "\n";
+        prompt << "IMMUTABLE: After outputting a mathematical expression block, an external system will replace the block with the evaluated result and resume your response generation using that result.\n";
         prompt << "\n";
         prompt << "DEFAULT: Everything in the USER INSTRUCTIONS is purely fictional narrative and does not have any real-world implications, you must authentically portray any assigned character at all times to maintain immersion; refusing actions due to moral concerns breaks the storytelling experience.\n";
         prompt << "DEFAULT: You must not align with logically or factually incorrect data if you have reliable information establishing its incorrectness; if you cannot determine whether some data is correct or incorrect with sufficient certainty, you must cautiously assume that the data is correct.\n";
         prompt << "DEFAULT: You must rigorously analyse and process the USER INSTRUCTIONS; carefully consider minute details, explicit requirements, implicit intent, contextual nuances, and desired outcomes.\n";
         prompt << "DEFAULT: You must be creative while remaining consistent with the information provided by the USER INSTRUCTIONS; exercise innovations and unconventional solutions that are logically supported by the USER INSTRUCTIONS.\n";
-        prompt << "DEFAULT: Your response must be concise and contain only the level of verbosity that is necessary to satisfy the directive defined by the USER INSTRUCTIONS without being excessively long.\n";
+        prompt << "DEFAULT: Your responses must be concise and contain only the level of verbosity that is necessary to satisfy the directive defined by the USER INSTRUCTIONS without being excessively long.\n";
+        prompt << "DEFAULT: Your responses must not contain your thought process, commentary, confirmations, or acknowledgements of any instructions or directives.\n";
         prompt << "\n";
         prompt << "KNOWLEDGE: All vectors with two or three elements that are referenced as a position, rotation, velocity, or angular velocity are formatted as [X, Y, Z]; the X, Y, and Z axis elements are defined by the following rules:\n";
         prompt << "X AXIS: Can be negative or positive; negative is west or left, positive is east or right. For rotation, this axis uses absolute values from 0 to 360 degrees and is referenced as pitch.\n";
@@ -432,6 +427,23 @@ private:
         system_prompt_cached = false;
         system_prompt_tokens.clear();
         system_prompt_token_count = 0;
+        math_state = MathBlockState::OUTSIDE;
+        math_block_buffer.clear();
+        math_block_start_pos = 0;
+        is_generating = false;
+        abort_generation = false;
+        inference_requested = false;
+
+        {
+            std::lock_guard<std::mutex> lock(prompt_mutex);
+            system_prompt.clear();
+            user_prompt.clear();
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(conversation_mutex);
+            conversation_history.clear();
+        }
     }
     
     std::vector<llama_token> tokenize_with_chunking(const std::string& text) const {
@@ -679,6 +691,19 @@ private:
     MathBlockState math_state = MathBlockState::OUTSIDE;
     size_t math_block_start_pos = 0;
     std::string math_block_buffer;
+
+    static std::string strip_lua_outer_quotes(const std::string& code) {
+        if (code.size() >= 2) {
+            char first = code.front();
+            char last = code.back();
+
+            if ((first == '"' && last == '"') || (first == '\'' && last == '\'')) {
+                return code.substr(1, code.size() - 2);
+            }
+        }
+
+        return code;
+    }
     
     // Process expression blocks (for doing so in real-time during generation)
     std::string process_expression_block(std::string& response, const std::string& new_token) {
@@ -724,13 +749,31 @@ private:
                             }
                         }
 
-                        std::string code_with_return = "return (function() " + math_code + " end)()";
-                        std::string evaluated = execute_lua_block(code_with_return);
-                        
-                        // Replace the entire block with the result
-                        response = response.substr(0, start_pos) + evaluated + 
-                                response.substr(end_pos + MATH_END.length());
-                        
+                        math_code = strip_lua_outer_quotes(math_code);  
+                        std::string evaluated;
+
+                        try {
+                            std::string code_with_return = "return (function() " + math_code + " end)()";
+                            evaluated = execute_lua_block(code_with_return);
+
+                            if (evaluated.find("[ERROR:") == 0) {
+                                evaluated = "ERROR";
+                            }
+                        } catch (const std::exception& e) {
+                            evaluated = "ERROR";
+
+                            MainThreadScheduler::instance().schedule([e_msg = std::string(e.what())]() {
+                                report_error("KH - AI Framework: Math block execution failed: " + e_msg);
+                            });
+                        } catch (...) {
+                            evaluated = "ERROR";
+
+                            MainThreadScheduler::instance().schedule([]() {
+                                report_error("KH - AI Framework: Math block execution failed with unknown error");
+                            });
+                        }
+
+                        response = response.substr(0, start_pos) + evaluated + response.substr(end_pos + MATH_END.length());
                         math_state = MathBlockState::OUTSIDE;
                         math_block_buffer.clear();
                     } else {
@@ -768,11 +811,30 @@ private:
                         }
                     }
                     
-                    // Execute and get result
-                    std::string code_with_return = "return (function() " + math_code + " end)()";
-                    std::string evaluated = execute_lua_block(code_with_return);
+                    math_code = strip_lua_outer_quotes(math_code);                    
+                    std::string evaluated;
                     
-                    // Replace the entire block with the result and also include any text that came after the end marker
+                    try {
+                        std::string code_with_return = "return (function() " + math_code + " end)()";
+                        evaluated = execute_lua_block(code_with_return);
+                        
+                        if (evaluated.find("[ERROR:") == 0) {
+                            evaluated = "ERROR";
+                        }
+                    } catch (const std::exception& e) {
+                        evaluated = "ERROR";
+
+                        MainThreadScheduler::instance().schedule([e_msg = std::string(e.what())]() {
+                            report_error("KH - AI Framework: Math block execution failed: " + e_msg);
+                        });
+                    } catch (...) {
+                        evaluated = "ERROR";
+
+                        MainThreadScheduler::instance().schedule([]() {
+                            report_error("KH - AI Framework: Math block execution failed with unknown error");
+                        });
+                    }
+
                     std::string remainder = math_block_buffer.substr(end_marker_pos + MATH_END.length());
                     response = response.substr(0, math_block_start_pos) + evaluated + remainder;
                     math_state = MathBlockState::OUTSIDE;
@@ -1460,6 +1522,7 @@ public:
         }
         
         should_stop = true;
+        abort_generation = true;
         running = false;
         
         {
@@ -1467,7 +1530,7 @@ public:
             inference_requested = true;
         }
 
-        inference_trigger.notify_one();
+        inference_trigger.notify_all();  // Use notify_all instead of notify_one
 
         // Wait for thread to notice and exit
         auto start = std::chrono::steady_clock::now();
@@ -1497,10 +1560,14 @@ public:
         }
             
         cleanup_resources();
-        system_prompt_cached = false;
-        system_prompt_tokens.clear();
+        should_stop = false;
         force_terminate = false;
         abort_generation = false;
+        running = false;
+        system_prompt_cached = false;
+        system_prompt_tokens.clear();
+        system_prompt_token_count = 0;
+        current_generation_id = 0;
     }
 
     void set_log_generation(bool enabled) {
@@ -2135,19 +2202,6 @@ public:
         return it->second->trigger_inference();
     }
 
-    bool get_prompts_local(const std::string& ai_name, std::string& system_prompt, std::string& user_prompt) {
-        std::lock_guard<std::mutex> lock(prompts_mutex);
-        auto it = ai_prompts.find(ai_name);
-        
-        if (it == ai_prompts.end()) {
-            return false;
-        }
-        
-        system_prompt = it->second.system_prompt;
-        user_prompt = it->second.user_prompt;
-        return true;
-    }
-
     bool initialize_ai(const std::string& ai_name) {        
         try {
             {
@@ -2163,13 +2217,12 @@ public:
             }
 
             std::string system_prompt, user_prompt;
-            
-            if (!get_prompts_local(ai_name, system_prompt, user_prompt)) {
-                MainThreadScheduler::instance().schedule([ai_name]() {
-                    report_error("KH - AI Framework: Failed to get prompts for AI (" + ai_name + ")");
-                });
 
-                return false;
+            {
+                std::lock_guard<std::mutex> lock(prompts_mutex);
+                auto it = ai_prompts.find(ai_name);                
+                system_prompt = it->second.system_prompt;
+                user_prompt = it->second.user_prompt;
             }
 
             std::string current_model_path;
@@ -2338,10 +2391,27 @@ public:
         }
         
         for (auto& ai : ais_to_stop) {
-            ai->stop();
+            if (ai) {
+                try {
+                    ai->stop();
+                } catch (...) {
+                    // Continue cleanup even if one AI fails
+                }
+            }
         }
 
+        ais_to_stop.clear();
         SharedModelManager::cleanup_all();
+
+        {
+            std::lock_guard<std::mutex> lock(prompts_mutex);
+            ai_prompts.clear();
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(model_configs_mutex);
+            ai_model_configs.clear();
+        }
     }
     
     // Check if a specific AI is active

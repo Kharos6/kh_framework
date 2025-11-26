@@ -19,10 +19,10 @@ isNil {
         }
         else {
             [
-                [_owner, _name, _systemPrompt, _userPrompt, _triggerInference, _abortGeneration, _resetContext, _logGeneration, _stop],
+                [_owner, _name, _systemPrompt, _userPrompt, _responseProgressFunction, _responseFunction, _triggerInference, _abortGeneration, _resetContext, _logGeneration, _stop],
                 {
                     _this deleteAt 0;
-                    [_this, "KH_fnc_aiupdateAiInstance", missionNamespace getVariable _owner, true, false] call KH_fnc_execute;
+                    [_this, "KH_fnc_updateAiInstance", missionNamespace getVariable _owner, true, false] call KH_fnc_execute;
                 },
                 true,
                 {

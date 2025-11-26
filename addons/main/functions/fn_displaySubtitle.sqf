@@ -35,4 +35,4 @@ uiNamespace setVariable ["KH_var_subtitle", _control];
 	false
 ] call KH_fnc_execute;
 
-_control;
+_duration;

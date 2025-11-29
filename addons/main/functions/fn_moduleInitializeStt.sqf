@@ -7,8 +7,7 @@ KH_var_postInitExecutions pushBack [
             [
                 [
                     _logic getVariable ["KH_ModuleInitializeSTTModel", ""],
-                    _logic getVariable ["KH_ModuleInitializeSTTProvider", "dml"],
-                    parseNumber (_logic getVariable ["KH_ModuleInitializeSTTCPUThreads", "4"]),
+                    parseNumber (_logic getVariable ["KH_ModuleInitializeSTTCPUThreads", "2"]),
                     compile (_logic getVariable ["KH_ModuleInitializeSTTTranscriptionFunction", ""])
                 ],
                 "KH_fnc_initializeStt",

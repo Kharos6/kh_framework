@@ -8,6 +8,7 @@ params [
     ["_markerAssistantStart", "<|start_header_id|>assistant<|end_header_id|>", ["", text ""]],
     ["_markerAssistantEnd", "<|eot_id|>", ["", text ""]],
     ["_systemPrompt", "", ["", text "", {}]],
+    ["_masterPrompt", "", ["", text "", {}]],
     ["_userPrompt", "", ["", text "", {}]],
     ["_contextSize", 32768, [0]],
     ["_maximumGeneratedTokens", 3072, [0]],
@@ -55,6 +56,22 @@ if ((_systemPrompt isNotEqualTo {}) && (_systemPrompt isNotEqualTo "") && (_syst
 
         case "CODE": {
             _name updateAiSystemPrompt ([_name] call _systemPrompt);
+        };
+    };
+};
+
+if ((_masterPrompt isNotEqualTo {}) && (_masterPrompt isNotEqualTo "") && (_masterPrompt isNotEqualTo (text ""))) then {
+    switch (typeName _masterPrompt) do {
+        case "STRING": {
+            _name updateAiMasterPrompt _masterPrompt;
+        };
+
+        case "TEXT": {
+            _name updateAiMasterPrompt ([_masterPrompt] joinString "");
+        };
+
+        case "CODE": {
+            _name updateAiMasterPrompt ([_name] call _masterPrompt);
         };
     };
 };

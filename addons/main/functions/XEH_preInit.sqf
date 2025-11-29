@@ -1369,6 +1369,28 @@
 					];
 				};
 			};
+
+			if (missionNamespace isNil "KH_var_sttHandler") then {
+				missionNamespace setVariable [
+					"KH_var_sttHandler"
+					[
+						[],
+						{
+							if sttIsInitialized then {
+								if !sttIsCapturing then {
+									if !(uiNamespace isNil "KH_var_speechRecognitionDisplay") then {
+										ctrlDelete (uiNamespace getVariable "KH_var_speechRecognitionDisplay");
+										uiNamespace setVariable ["KH_var_speechRecognitionDisplay", nil];
+									};
+								};
+							};
+						},
+						true,
+						0,
+						false
+					] call KH_fnc_execute;
+				];
+			};
 		};
 	}, 
 	{}, 
@@ -1390,6 +1412,28 @@
 						["RscText", "CAPTURING", [0, false, 0], [0, 0, 0, 0], [0, 0, 10, 2], false, [0, 0, 0]] call KH_fnc_draw2d
 					];
 				};
+			};
+
+			if (missionNamespace isNil "KH_var_sttHandler") then {
+				missionNamespace setVariable [
+					"KH_var_sttHandler"
+					[
+						[],
+						{
+							if sttIsInitialized then {
+								if !sttIsCapturing then {
+									if !(uiNamespace isNil "KH_var_speechRecognitionDisplay") then {
+										ctrlDelete (uiNamespace getVariable "KH_var_speechRecognitionDisplay");
+										uiNamespace setVariable ["KH_var_speechRecognitionDisplay", nil];
+									};
+								};
+							};
+						},
+						true,
+						0,
+						false
+					] call KH_fnc_execute;
+				];
 			};
 		};
 	}, 

@@ -14,6 +14,7 @@ KH_var_postInitExecutions pushBack [
             private _markerAssistantStart = _logic getVariable ["KH_ModuleAIInstanceSetupMarkerAssistantStart", "<|start_header_id|>assistant<|end_header_id|>"];
             private _markerAssistantEnd = _logic getVariable ["KH_ModuleAIInstanceSetupMarkerAssistantEnd", "<|eot_id|>"];
             private _systemPrompt = compile (_logic getVariable ["KH_ModuleAIInstanceSetupSystemPrompt", ""]);
+            private _masterPrompt = compile (_logic getVariable ["KH_ModuleAIInstanceSetupMasterPrompt", ""]);
             private _userPrompt = compile (_logic getVariable ["KH_ModuleAIInstanceSetupUserPrompt", ""]);
             private _contextSize = parseNumber (_logic getVariable ["KH_ModuleAIInstanceSetupContextSize", "32768"]);
             private _maximumGeneratedTokens = parseNumber (_logic getVariable ["KH_ModuleAIInstanceSetupMaximumGeneratedTokens", "3072"]);
@@ -43,7 +44,8 @@ KH_var_postInitExecutions pushBack [
                     _markerUserEnd, 
                     _markerAssistantStart, 
                     _markerAssistantEnd,
-                    _systemPrompt, 
+                    _systemPrompt,
+                    _masterPrompt,
                     _userPrompt, 
                     _contextSize, 
                     _maximumGeneratedTokens, 
@@ -76,7 +78,8 @@ KH_var_postInitExecutions pushBack [
                         _markerUserEnd, 
                         _markerAssistantStart, 
                         _markerAssistantEnd,
-                        _systemPrompt, 
+                        _systemPrompt,
+                        _masterPrompt,
                         _userPrompt, 
                         _contextSize, 
                         _maximumGeneratedTokens, 
@@ -97,16 +100,22 @@ KH_var_postInitExecutions pushBack [
                         _logGeneration
                     ],
                     {
+                        params ["_owner"];
                         _this deleteAt 0;
-                        [_this, "KH_fnc_aiInstanceSetup", missionNamespace getVariable _owner, true, false] call KH_fnc_execute;
+                        [_this, "KH_fnc_aiInstanceSetup", [missionNamespace getVariable _owner, KH_var_allPlayerUidMachines get _owner] select ((_owner select [0, 1]) isNotEqualTo 0), true, false] call KH_fnc_execute;
                     },
                     true,
                     {
                         params ["_owner"];
                         
-                        if !(missionNamespace isNil _owner) then {
-                            private _unit = missionNamespace getVariable _owner;
-                            (!(local _unit) && !(isNull _unit));
+                        if ((_owner select [0, 1]) isNotEqualTo 0) then {
+                            !(isNil {KH_var_allPlayerUidMachines get _owner;});
+                        }
+                        else {
+                            if !(missionNamespace isNil _owner) then {
+                                private _unit = missionNamespace getVariable _owner;
+                                (!(local _unit) && !(isNull _unit));
+                            };
                         };
                     },
                     false

@@ -1,5 +1,5 @@
-params [["_model", "", [""]], ["_provider", "dml", [""]], ["_threads", 4, [0]], ["_function", {}, [{}]]];
-_model sttLoadModel [_provider, _threads];
+params [["_model", "", [""]], ["_threads", 2, [0]], ["_function", {}, [{}]]];
+_model sttLoadModel [_threads];
 KH_var_sttHandlerFunction = _function;
 
 if (isNil "KH_var_sttHandler") then {

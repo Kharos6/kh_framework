@@ -1,6 +1,7 @@
 params [
     ["_name", "", [""]], 
-    ["_systemPrompt", "", ["", text "", {}]], 
+    ["_systemPrompt", "", ["", text "", {}]],
+    ["_masterPrompt", "", ["", text "", {}]],
     ["_userPrompt", "", ["", text "", {}]], 
     ["_responseProgressFunction", {}, [{}]],
     ["_responseFunction", {}, [{}]],
@@ -60,6 +61,22 @@ if (missionNamespace isNil _aiInstanceHandlerId) then {
 
                     case "CODE": {
                         _name updateAiSystemPrompt ([_name] call _systemPrompt);
+                    };
+                };
+            };
+
+            if ((_masterPrompt isNotEqualTo {}) && (_masterPrompt isNotEqualTo "") && (_masterPrompt isNotEqualTo (text ""))) then {
+                switch (typeName _masterPrompt) do {
+                    case "STRING": {
+                        _name updateAiMasterPrompt _masterPrompt;
+                    };
+
+                    case "TEXT": {
+                        _name updateAiMasterPrompt ([_masterPrompt] joinString "");
+                    };
+
+                    case "CODE": {
+                        _name updateAiMasterPrompt ([_name] call _masterPrompt);
                     };
                 };
             };
@@ -135,6 +152,10 @@ if (missionNamespace isNil _aiInstanceHandlerId) then {
             ];
 
             if (missionNamespace getVariable _aiInstanceTriggerId) then {
+                if (isAiGenerating _name) then {
+                    abortAiGeneration _name;
+                };
+
                 triggerAiInference _name;
             };
         },

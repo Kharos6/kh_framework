@@ -27,25 +27,12 @@ class KH_ModuleInitializeSTT: Module_F
 			property = "KH_ModuleInitializeSTTModel";
 			defaultValue = "''";
 		};
-		class KH_ModuleInitializeSTTProvider: Combo
-		{
-			displayName = "Provider";
-			tooltip = "STT engine provider. DML is for any GPU with DirectX12 support; will fall back to CPU if a machine does not support DML.";
-			property = "KH_ModuleInitializeSTTProvider";
-			typeName = "STRING";
-			defaultValue = "'DML'";
-			class Values
-			{
-				class KH_DML {name = "DML"; value = "dml";};
-				class KH_CPU {name = "CPU"; value = "cpu";};
-			};
-		};
 		class KH_ModuleInitializeSTTCPUThreads: Edit
 		{
 			displayName = "CPU Threads";
-			tooltip = "Number of CPU threads used for STT processing.";
+			tooltip = "Number of CPU threads used for STT processing. No more than 4 threads should be used in typical scenarios.";
 			property = "KH_ModuleInitializeSTTCPUThreads";
-			defaultValue = "'4'";
+			defaultValue = "'2'";
 		};
 		class KH_ModuleInitializeSTTTranscriptionFunction: EditCodeMulti5
 		{

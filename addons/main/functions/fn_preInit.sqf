@@ -5,6 +5,7 @@ KH_var_aceLoaded = uiNamespace getVariable "KH_var_aceLoaded";
 KH_var_missionLoaded = false;
 KH_var_jip = false;
 KH_var_playerUnit = objNull;
+KH_var_defaultAiSystemPrompt = uiNamespace getVariable "KH_var_defaultAiSystemPrompt";
 KH_var_remoteExecCommandsBlacklist = createHashMap;
 KH_var_remoteExecFunctionsBlacklist = createHashMap;
 KH_var_remoteExecCommandsJipBlacklist = createHashMap;

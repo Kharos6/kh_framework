@@ -9,6 +9,11 @@ if !(isNull (uiNamespace getVariable ["KH_var_subtitle", controlNull])) then {
 };
 
 uiNamespace setVariable ["KH_var_subtitle", controlNull];
+
+if (_text isEqualTo "") exitWith {
+	0;
+};
+
 private _control = (findDisplay 46) ctrlCreate ["RscStructuredText",-1];
 _control ctrlSetBackgroundColor (["Subtitles", "Background"] call BIS_fnc_displayColorGet);
 _control ctrlSetTextColor (["Subtitles", "Text"] call BIS_fnc_displayColorGet);

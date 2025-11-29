@@ -27,23 +27,23 @@ class KH_ModuleUpdateTTSSpeakerEntity: Module_F
 			property = "KH_ModuleUpdateTTSSpeakerEntityActivateOnce";
 			defaultValue = "true";
 		};
-		class KH_ModuleUpdateTTSSpeakerEntityText: Edit
+		class KH_ModuleUpdateTTSSpeakerEntityText: EditCodeMulti5
 		{
 			displayName = "Text";
-			tooltip = "Text that will be transformed into speech.";
+			tooltip = "Unscheduled code, executed locally to each player, that must return a string or structured text which will be fed to the TTS engine.";
 			property = "KH_ModuleUpdateTTSSpeakerEntityText";
 			defaultValue = "''";
 		};
 		class KH_ModuleUpdateTTSSpeakerEntityVolume: Edit
 		{
 			displayName = "Volume";
-			tooltip = "Volume.";
+			tooltip = "Volume of the audio playback.";
 			property = "KH_ModuleUpdateTTSSpeakerEntityVolume";
 			defaultValue = "'1'";
 		};
 		class KH_ModuleUpdateTTSSpeakerEntitySpeed: Edit
 		{
-			displayName = "Volume";
+			displayName = "Speed";
 			tooltip = "Speed of the audio playback.";
 			property = "KH_ModuleUpdateTTSSpeakerEntitySpeed";
 			defaultValue = "'1'";
@@ -62,10 +62,17 @@ class KH_ModuleUpdateTTSSpeakerEntity: Module_F
 			property = "KH_ModuleUpdateTTSSpeakerEntityMaximumDistance";
 			defaultValue = "'100'";
 		};
+		class KH_ModuleUpdateTTSSpeakerEntityEffectChain: EditCodeMulti5
+		{
+			displayName = "Effect Chain";
+			tooltip = "Unscheduled code, executed locally to each player, that must return an array of arrays where the first element is a string representing the name of an effect and the second element is a scalar representing the effect magnitude. Possible effects are: ['lowpass', 0-1], ['highpass', 0-1], ['distortion', 0-1], ['bitcrush', 0-1], ['noise', 0-1], ['ring_mod', 0-1000], ['pitch_shift', 0-2], ['echo_delay', 0-1], ['echo_decay', 0-0.95], and ['reverb', 0-1]. Almost any effect can be used multiple times and is applied in order of addition. The pitch_shift and echo_decay are the only effects that cannot be applied multiple times.";
+			property = "KH_ModuleUpdateTTSSpeakerEntityEffectChain";
+			defaultValue = "'[]'";
+		};
 		class KH_ModuleUpdateTTSSpeakerEntityGeneratedFunction: EditCodeMulti5
 		{
 			displayName = "Generated Function";
-			tooltip = "Unscheduled code executed locally to each player when the TTS audio is generated. Passed arguments available through _this are: [_speaker (STRING), _text (STRING)].";
+			tooltip = "Unscheduled code executed locally to each player when the TTS audio is generated. Passed arguments available through _this are: [_speaker (STRING), _text (STRING), _duration (SCALAR)].";
 			property = "KH_ModuleUpdateTTSSpeakerEntityGeneratedFunction";
 			defaultValue = "''";
 		};
@@ -86,9 +93,9 @@ class KH_ModuleUpdateTTSSpeakerEntity: Module_F
 		class KH_ModuleUpdateTTSSpeakerEntityOverride: Checkbox
 		{
 			displayName = "Override";
-			tooltip = "True updates the Volume, Maximum Distance, Generated Function, and Finished Function parameters if TTS audio is already playing for this speaker; it also stops the current audio if the Text parameter is empty.";
+			tooltip = "True interrupts the current audio to play new audio. Can be used with an empty string from the Text parameter to simply stop the current audio.";
 			property = "KH_ModuleUpdateTTSSpeakerEntityOverride";
-			defaultValue = "false";
+			defaultValue = "true";
 		};
 		class ModuleDescription: ModuleDescription {};
 	};

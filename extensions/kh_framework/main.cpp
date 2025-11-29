@@ -36,6 +36,21 @@ void intercept::pre_start() {
     mission["time"] = g_mission_time;
     mission["active"] = false;
     KHDataManager::instance().initialize();
+
+    if (g_has_cuda) {
+        sqf::diag_log("KH Framework Extension - CUDA Detected");
+    }
+    else {
+        sqf::diag_log("KH Framework Extension - CUDA Not Detected");
+    }
+
+    if (g_has_vulkan) {
+        sqf::diag_log("KH Framework Extension - Vulkan Detected");
+    }
+    else {
+        sqf::diag_log("KH Framework Extension - Vulkan Not Detected");
+    }
+
     sqf::diag_log("KH Framework Extension - Pre-start");
 }
 
@@ -141,6 +156,99 @@ void intercept::mission_ended() {
     sqf::diag_log("KH Framework Extension - Mission End");
 }
 
+static bool try_load_vulkan() {
+    std::vector<std::string> vulkan_paths_to_try;
+    char vulkanPath[MAX_PATH];
+    DWORD result = GetEnvironmentVariableA("VULKAN_SDK", vulkanPath, MAX_PATH);
+    
+    if (result > 0 && result < MAX_PATH) {
+        vulkan_paths_to_try.push_back(std::string(vulkanPath) + "\\Bin\\");
+    }
+    
+    result = GetEnvironmentVariableA("VK_SDK_PATH", vulkanPath, MAX_PATH);
+
+    if (result > 0 && result < MAX_PATH) {
+        vulkan_paths_to_try.push_back(std::string(vulkanPath) + "\\Bin\\");
+    }
+
+    vulkan_paths_to_try.push_back("C:\\Windows\\System32\\");
+    vulkan_paths_to_try.push_back("C:\\VulkanSDK\\1.4.309.0\\Bin\\");
+    vulkan_paths_to_try.push_back("C:\\VulkanSDK\\1.4.304.1\\Bin\\");
+    vulkan_paths_to_try.push_back("C:\\VulkanSDK\\1.3.296.0\\Bin\\");
+    vulkan_paths_to_try.push_back("C:\\VulkanSDK\\1.3.290.0\\Bin\\");
+    vulkan_paths_to_try.push_back("C:\\VulkanSDK\\1.3.283.0\\Bin\\");
+    vulkan_paths_to_try.push_back("C:\\VulkanSDK\\1.3.280.0\\Bin\\");
+    vulkan_paths_to_try.push_back("C:\\VulkanSDK\\1.3.275.0\\Bin\\");
+    vulkan_paths_to_try.push_back("C:\\VulkanSDK\\1.3.268.0\\Bin\\");
+
+    for (const auto& path : vulkan_paths_to_try) {
+        std::string fullPath = path + "vulkan-1.dll";
+        DWORD attrs = GetFileAttributesA(fullPath.c_str());
+
+        if (attrs != INVALID_FILE_ATTRIBUTES) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool try_load_cuda() {
+    std::vector<std::string> cuda_paths_to_try;
+    char cudaPath[MAX_PATH];
+    DWORD result = GetEnvironmentVariableA("CUDA_PATH", cudaPath, MAX_PATH);
+    
+    if (result > 0 && result < MAX_PATH) {
+        cuda_paths_to_try.push_back(std::string(cudaPath) + "\\bin\\");
+    }
+    
+    result = GetEnvironmentVariableA("CUDA_PATH_V12_9", cudaPath, MAX_PATH);
+
+    if (result > 0 && result < MAX_PATH) {
+        cuda_paths_to_try.push_back(std::string(cudaPath) + "\\bin\\");
+    }
+    
+    cuda_paths_to_try.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.9\\bin\\");
+    cuda_paths_to_try.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.8\\bin\\");
+    cuda_paths_to_try.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.7\\bin\\");
+    cuda_paths_to_try.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.6\\bin\\");
+    cuda_paths_to_try.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.5\\bin\\");
+    cuda_paths_to_try.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.4\\bin\\");
+    cuda_paths_to_try.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.3\\bin\\");
+    cuda_paths_to_try.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.2\\bin\\");
+    cuda_paths_to_try.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.1\\bin\\");
+    cuda_paths_to_try.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.0\\bin\\");
+    cuda_paths_to_try.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12\\bin\\");
+    
+    for (const auto& path : cuda_paths_to_try) {
+        std::string fullPath = path + "cublas64_12.dll";
+        DWORD attrs = GetFileAttributesA(fullPath.c_str());
+
+        if (attrs != INVALID_FILE_ATTRIBUTES) {
+            return true;
+        }
+    }
+    
+    return false;
+}
+
+static void detect_gpu_backends() {
+    // Priority: CUDA > Vulkan > CPU
+    if (try_load_cuda()) {
+        g_active_backend = GPUBackend::CUDA;
+        g_has_cuda = true;
+        return;
+    }
+
+    if (try_load_vulkan()) {
+        g_active_backend = GPUBackend::VULKAN;
+        g_has_vulkan = true;
+        return;
+    }
+
+    g_active_backend = GPUBackend::CPU;
+}
+
 static FARPROC WINAPI delay_load_hook(unsigned dliNotify, PDelayLoadInfo pdli) {
     std::lock_guard<std::mutex> lock(g_delay_load_mutex);
     HMODULE hModule;
@@ -180,13 +288,18 @@ static FARPROC WINAPI delay_load_hook(unsigned dliNotify, PDelayLoadInfo pdli) {
                         if (result > 0 && result < MAX_PATH) {
                             cuda_paths_to_try.push_back(std::string(cudaPath) + "\\bin\\");
                         }
-                        
-                        // Add standard installation paths
+
                         cuda_paths_to_try.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.9\\bin\\");
                         cuda_paths_to_try.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.8\\bin\\");
                         cuda_paths_to_try.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.7\\bin\\");
                         cuda_paths_to_try.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.6\\bin\\");
                         cuda_paths_to_try.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.5\\bin\\");
+                        cuda_paths_to_try.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.4\\bin\\");
+                        cuda_paths_to_try.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.3\\bin\\");
+                        cuda_paths_to_try.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.2\\bin\\");
+                        cuda_paths_to_try.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.1\\bin\\");
+                        cuda_paths_to_try.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.0\\bin\\");
+                        cuda_paths_to_try.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12\\bin\\");
                         
                         for (const auto& path : cuda_paths_to_try) {
                             std::string fullPath = path + dll_name;
@@ -197,10 +310,68 @@ static FARPROC WINAPI delay_load_hook(unsigned dliNotify, PDelayLoadInfo pdli) {
                                 return (FARPROC)hCudaDll;
                             }
                         }
+
+                        sqf::diag_log("KH - AI Framework: " + dll_name + " not found in standard locations");
+                    } else if (_stricmp(dll_name.c_str(), "vulkan-1.dll") == 0) {
+                        std::vector<std::string> vulkan_paths_to_try;
+                        char vulkanPath[MAX_PATH];
+                        DWORD result = GetEnvironmentVariableA("VULKAN_SDK", vulkanPath, MAX_PATH);
                         
-                        // None of the paths worked
-                        report_error("KH - AI Framework: " + dll_name + " not found in standard locations");
-                        g_cuda_available = false;
+                        if (result > 0 && result < MAX_PATH) {
+                            vulkan_paths_to_try.push_back(std::string(vulkanPath) + "\\Bin\\");
+                        }
+                        
+                        result = GetEnvironmentVariableA("VK_SDK_PATH", vulkanPath, MAX_PATH);
+                        
+                        if (result > 0 && result < MAX_PATH) {
+                            vulkan_paths_to_try.push_back(std::string(vulkanPath) + "\\Bin\\");
+                        }
+
+                        vulkan_paths_to_try.push_back("C:\\Windows\\System32\\");
+                        vulkan_paths_to_try.push_back("C:\\VulkanSDK\\1.4.309.0\\Bin\\");
+                        vulkan_paths_to_try.push_back("C:\\VulkanSDK\\1.4.304.1\\Bin\\");
+                        vulkan_paths_to_try.push_back("C:\\VulkanSDK\\1.3.296.0\\Bin\\");
+                        vulkan_paths_to_try.push_back("C:\\VulkanSDK\\1.3.290.0\\Bin\\");
+                        vulkan_paths_to_try.push_back("C:\\VulkanSDK\\1.3.283.0\\Bin\\");
+                        vulkan_paths_to_try.push_back("C:\\VulkanSDK\\1.3.280.0\\Bin\\");
+                        vulkan_paths_to_try.push_back("C:\\VulkanSDK\\1.3.275.0\\Bin\\");
+                        vulkan_paths_to_try.push_back("C:\\VulkanSDK\\1.3.268.0\\Bin\\");
+                        
+                        for (const auto& path : vulkan_paths_to_try) {
+                            std::string fullPath = path + dll_name;
+                            HMODULE hVulkanDll = LoadLibraryA(fullPath.c_str());
+                            
+                            if (hVulkanDll != NULL) {
+                                g_loaded_delay_modules[dll_name] = hVulkanDll;
+                                return (FARPROC)hVulkanDll;
+                            }
+                        }
+
+                        sqf::diag_log("KH - AI Framework: " + dll_name + " not found in standard locations");
+                    } else if (_stricmp(dll_name.c_str(), "sherpa-onnx-c-api.dll") == 0) {
+                        std::string directml_path = modDir + "\\DirectML.dll";
+                        std::string onnxruntime_path = modDir + "\\onnxruntime.dll";
+                        HMODULE hDirectML = LoadLibraryA(directml_path.c_str());
+
+                        if (hDirectML != NULL) {
+                            g_loaded_delay_modules["DirectML.dll"] = hDirectML;
+                        }
+                        
+                        HMODULE hOnnx = LoadLibraryA(onnxruntime_path.c_str());
+
+                        if (hOnnx != NULL) {
+                            g_loaded_delay_modules["onnxruntime.dll"] = hOnnx;
+                        }
+
+                        HMODULE hDll = LoadLibraryA(dllFullPath.c_str());
+
+                        if (hDll != NULL) {
+                            g_loaded_delay_modules[dll_name] = hDll;
+                            return (FARPROC)hDll;
+                        } else {
+                            DWORD error = GetLastError();
+                            report_error("Failed to load " + dll_name + " from " + dllFullPath + " - error code: " + std::to_string(error));
+                        }
                     } else {
                         HMODULE hDll = LoadLibraryA(dllFullPath.c_str());
                         
@@ -222,7 +393,6 @@ static FARPROC WINAPI delay_load_hook(unsigned dliNotify, PDelayLoadInfo pdli) {
         if ((_stricmp(dll_name.c_str(), "cublas64_12.dll") == 0) || 
             (_stricmp(dll_name.c_str(), "cublaslt64_12.dll") == 0)) {
             // Expected on systems without CUDA - don't treat as error
-            g_cuda_available = false;
             report_error("KH - AI Framework: " + dll_name + " failed to load");
         } else if (_stricmp(dll_name.c_str(), "lua51.dll") == 0) {
             // This IS critical
@@ -260,6 +430,8 @@ extern "C" const PfnDliHook __pfnDliFailureHook2 = delay_load_hook;
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
     switch (ul_reason_for_call) {
         case DLL_PROCESS_ATTACH:
+            DisableProcessWindowsGhosting();
+            detect_gpu_backends();
             break;
         case DLL_PROCESS_DETACH:
             if (!lpReserved) {

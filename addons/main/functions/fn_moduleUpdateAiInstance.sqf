@@ -5,6 +5,7 @@ isNil {
         private _owner = _logic getVariable ["KH_ModuleUpdateAIInstanceOwner", "SERVER"];
         private _name = _logic getVariable ["KH_ModuleUpdateAIInstanceName", ""];
         private _systemPrompt = compile (_logic getVariable ["KH_ModuleUpdateAIInstanceSystemPrompt", ""]);
+        private _masterPrompt = compile (_logic getVariable ["KH_ModuleUpdateAIInstanceMasterPrompt", ""]);
         private _userPrompt = compile (_logic getVariable ["KH_ModuleUpdateAIInstanceUserPrompt", ""]);
         private _responseProgressFunction = compile (_logic getVariable ["KH_ModuleUpdateAIInstanceResponseProgressFunction", ""]);
         private _responseFunction = compile (_logic getVariable ["KH_ModuleUpdateAIInstanceResponseFunction", ""]);
@@ -15,11 +16,11 @@ isNil {
         private _stop = _logic getVariable ["KH_ModuleUpdateAIInstanceStop", false];
         
         if (_owner isEqualTo "SERVER") then {
-            [_name, _systemPrompt, _userPrompt, _responseProgressFunction, _responseFunction, _triggerInference, _abortGeneration, _resetContext, _logGeneration, _stop] call KH_fnc_updateAiInstance;
+            [_name, _systemPrompt, _masterPrompt, _userPrompt, _responseProgressFunction, _responseFunction, _triggerInference, _abortGeneration, _resetContext, _logGeneration, _stop] call KH_fnc_updateAiInstance;
         }
         else {
             [
-                [_owner, _name, _systemPrompt, _userPrompt, _responseProgressFunction, _responseFunction, _triggerInference, _abortGeneration, _resetContext, _logGeneration, _stop],
+                [_owner, _name, _systemPrompt, _masterPrompt, _userPrompt, _responseProgressFunction, _responseFunction, _triggerInference, _abortGeneration, _resetContext, _logGeneration, _stop],
                 {
                     _this deleteAt 0;
                     [_this, "KH_fnc_updateAiInstance", missionNamespace getVariable _owner, true, false] call KH_fnc_execute;

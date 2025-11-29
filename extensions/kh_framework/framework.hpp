@@ -74,7 +74,28 @@ static int g_mission_frame = 0;
 static std::vector<std::vector<float>> g_terrain_matrix;
 static float g_terrain_grid_width = 0.0f;
 static float g_world_size = 0.0f;
-static std::atomic<bool> g_cuda_available{true};
+
+enum class GPUBackend {
+    CPU = 0,
+    CUDA = 1,
+    VULKAN = 2
+};
+
+static std::atomic<GPUBackend> g_active_backend{GPUBackend::CPU};
+static bool g_has_cuda = false;
+static bool g_has_vulkan = false;
+
+inline bool g_gpu_available() {
+    return g_active_backend != GPUBackend::CPU;
+}
+
+inline std::string get_backend_name() {
+    switch (g_active_backend) {
+        case GPUBackend::CUDA: return "CUDA";
+        case GPUBackend::VULKAN: return "Vulkan";
+        default: return "CPU";
+    }
+}
 
 // Detect explicitly dedicated server
 static bool get_machine_is_server() {

@@ -88,7 +88,10 @@ public:
                         }
                     }
                     
-                    if (has_encoder && has_decoder && has_joiner && has_tokens) {
+                    bool is_transducer = has_encoder && has_decoder && has_joiner && has_tokens;
+                    bool is_whisper = has_encoder && has_decoder && !has_joiner && has_tokens;
+                    
+                    if (is_transducer || is_whisper) {
                         return model_path;
                     }
                 }
@@ -152,7 +155,6 @@ private:
     STTFramework& operator=(const STTFramework&) = delete;
     std::shared_ptr<const SherpaOnnxOfflineRecognizer> recognizer_handle;
     mutable std::mutex stt_mutex;
-    std::string current_model_name;
     int sample_rate = STT_SAMPLE_RATE;
     AudioCaptureBuffer capture_buffer;
     std::thread capture_thread;
@@ -335,7 +337,7 @@ private:
             ~CoInitGuard() { CoUninitialize(); }
         } co_guard;
 
-        while (processing_thread_running.load(std::memory_order_acquire)) {
+        while (processing_thread_running) {
             std::vector<int16_t> audio_data;
             bool has_data = false;
             
@@ -343,7 +345,7 @@ private:
                 std::unique_lock<std::mutex> lock(processing_mutex);
                 
                 processing_cv.wait_for(lock, std::chrono::milliseconds(50), [this] {
-                    return !processing_queue.empty() || !processing_thread_running.load(std::memory_order_acquire);
+                    return !processing_queue.empty() || !processing_thread_running;
                 });
                 
                 if (!processing_queue.empty()) {
@@ -447,15 +449,10 @@ private:
         return transcription;
     }
 
-    bool load_model(const std::string& model_name, 
-                   const std::string& provider = "dml",
-                   int num_threads = 4) {
+    bool load_model(const std::string& model_name, int num_threads = 4) {
         std::string log_message;
-        std::string error_message;
         bool success = false;
-        bool dml_fallback = false;
         std::string resolved_model_name;
-        std::string actual_provider = provider;
         int loaded_sample_rate = 0;
         
         {
@@ -470,20 +467,19 @@ private:
                     model_path = STTModelDiscovery::find_any_model();
                     
                     if (model_path.empty()) {
-                        error_message = "KH - STT Framework: No STT models found in any search location";
-                    }
-                    else {
+                        log_message = "KH - STT Framework: No STT models found in any search location";
+                    } else {
                         resolved_model_name = model_path.filename().string();
                     }
                 } else {
                     model_path = STTModelDiscovery::find_model(model_name);
                     
                     if (model_path.empty()) {
-                        error_message = "KH - STT Framework: Model not found: " + model_name;
+                        log_message = "KH - STT Framework: Model not found: " + model_name;
                     }
                 }
 
-                if (error_message.empty()) {
+                if (!model_path.empty()) {
                     std::string encoder_path;
                     std::string decoder_path;
                     std::string joiner_path;
@@ -512,87 +508,71 @@ private:
                         }
                     }
 
-                    if (encoder_path.empty() || decoder_path.empty() || 
-                        joiner_path.empty() || tokens_path.empty()) {
-                        error_message = "KH - STT Framework: Incomplete model files. Required: encoder.onnx, decoder.onnx, joiner.onnx, tokens.txt";
+                    if (encoder_path.empty() || decoder_path.empty() || tokens_path.empty()) {
+                        log_message = "KH - STT Framework: Incomplete model files. Minimal required: encoder.onnx, decoder.onnx, tokens.txt";
                     }
                     else {
                         SherpaOnnxOfflineRecognizerConfig config;
                         memset(&config, 0, sizeof(config));
-                        config.model_config.transducer.encoder = encoder_path.c_str();
-                        config.model_config.transducer.decoder = decoder_path.c_str();
-                        config.model_config.transducer.joiner = joiner_path.c_str();
+                        bool is_whisper = joiner_path.empty();
+                        
+                        if (is_whisper) {
+                            config.model_config.whisper.encoder = encoder_path.c_str();
+                            config.model_config.whisper.decoder = decoder_path.c_str();
+                            config.model_config.whisper.language = "en";
+                            config.model_config.whisper.task = "transcribe";
+                        } else {
+                            config.model_config.transducer.encoder = encoder_path.c_str();
+                            config.model_config.transducer.decoder = decoder_path.c_str();
+                            config.model_config.transducer.joiner = joiner_path.c_str();
+                        }
+                        
                         config.model_config.tokens = tokens_path.c_str();
                         config.model_config.num_threads = num_threads;
-                        config.model_config.provider = actual_provider.c_str();
+                        config.model_config.provider = "directml";
                         config.model_config.debug = 0;
                         config.decoding_method = "greedy_search";
                         config.max_active_paths = 4;
                         recognizer_handle = std::shared_ptr<const SherpaOnnxOfflineRecognizer>(SherpaOnnxCreateOfflineRecognizer(&config), RecognizerDeleter{});
                         
-                        // Fallback to CPU if DML fails
-                        if (!recognizer_handle && _stricmp(actual_provider.c_str(), "dml") == 0) {
-                            dml_fallback = true;
-                            actual_provider = "cpu";
-                            config.model_config.provider = actual_provider.c_str();
-                            recognizer_handle = std::shared_ptr<const SherpaOnnxOfflineRecognizer>(SherpaOnnxCreateOfflineRecognizer(&config), RecognizerDeleter{});
-                        }
-                        
                         if (!recognizer_handle) {
-                            error_message = "KH - STT Framework: Failed to create recognizer";
+                            log_message = "KH - STT Framework: Failed to create recognizer";
                         }
                         else {
                             sample_rate = 16000;
-                            current_model_name = resolved_model_name;
                             loaded_sample_rate = sample_rate;
                             is_initialized_flag.store(true, std::memory_order_release);
                             success = true;
-                            std::string provider_name = actual_provider;
-
-                            std::transform(provider_name.begin(), provider_name.end(), 
-                                         provider_name.begin(), ::toupper);
                             
                             log_message = "KH - STT Framework: Model loaded successfully - " + model_path.string() + 
-                                " | Provider: " + provider_name + 
                                 " | Sample Rate: " + std::to_string(loaded_sample_rate) + " Hz";
                         }
                     }
                 }
             } catch (const std::exception& e) {
-                error_message = "KH - STT Framework: Model loading exception: " + std::string(e.what());
+                log_message = "KH - STT Framework: Model loading exception: " + std::string(e.what());
             }
         }
 
-        if (!error_message.empty()) {
-            std::string msg = error_message;
-            
-            MainThreadScheduler::instance().schedule([msg]() {
-                report_error(msg);
-            });
-
-            return false;
-        }
-        
         if (!log_message.empty()) {
             std::string msg = log_message;
-            bool had_dml_fallback = dml_fallback;
 
-            MainThreadScheduler::instance().schedule([msg, had_dml_fallback]() {
-                sqf::diag_log(msg);
-
-                if (had_dml_fallback) {
-                    sqf::diag_log("KH - STT Framework: DirectML not supported, fell back to CPU");
+            MainThreadScheduler::instance().schedule([msg, success]() {
+                if (success) {
+                    sqf::diag_log(msg);
+                } else {
+                    report_error(msg);
                 }
             });
         }
 
         if (success) {
-            if (!capture_thread_running.load(std::memory_order_acquire)) {
+            if (!capture_thread_running) {
                 capture_thread_running.store(true, std::memory_order_release);
                 capture_thread = std::thread(&STTFramework::audio_capture_worker, this);
             }
 
-            if (!processing_thread_running.load(std::memory_order_acquire)) {
+            if (!processing_thread_running) {
                 processing_thread_running.store(true, std::memory_order_release);
                 processing_thread = std::thread(&STTFramework::processing_worker, this);
             }
@@ -602,7 +582,7 @@ private:
     }
 
     bool is_initialized() const {
-        return is_initialized_flag.load(std::memory_order_acquire);
+        return is_initialized_flag;
     }
 
     bool is_capturing_audio() const {
@@ -650,12 +630,11 @@ private:
             processing_queue.clear();
         }
 
-        current_model_name.clear();
         capture_thread_alive.store(false, std::memory_order_release);
     }
 
     bool start_capture_manual() {
-        if (!is_initialized_flag.load(std::memory_order_acquire)) {
+        if (!is_initialized_flag) {
             MainThreadScheduler::instance().schedule([]() {
                 report_error("KH - STT Framework: Cannot start capture - no model loaded");
             });
@@ -663,20 +642,20 @@ private:
             return false;
         }
 
-        if (!capture_thread_alive.load(std::memory_order_acquire)) {
+        if (!capture_thread_alive) {
             if (capture_thread.joinable()) {
                 capture_thread.join();
             }
 
-            if (is_initialized_flag.load(std::memory_order_acquire)) {
+            if (is_initialized_flag) {
                 capture_thread_running.store(true, std::memory_order_release);
                 capture_thread = std::thread(&STTFramework::audio_capture_worker, this);
 
-                for (int i = 0; i < 50 && !capture_thread_alive.load() && capture_thread_running.load(); i++) {
+                for (int i = 0; i < 50 && !capture_thread_alive && capture_thread_running; i++) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 }
                 
-                if (!capture_thread_alive.load(std::memory_order_acquire)) {
+                if (!capture_thread_alive) {
                     MainThreadScheduler::instance().schedule([]() {
                         report_error("KH - STT Framework: Failed to restart capture thread");
                     });
@@ -705,7 +684,7 @@ private:
         std::lock_guard<std::mutex> state_lock(capture_state_mutex);
 
         // If already capturing, RESTART instead of failing
-        if (is_capturing.load(std::memory_order_acquire)) {
+        if (is_capturing) {
             // Stop current capture without processing
             capture_buffer.stop_recording();
             capture_buffer.clear();
@@ -759,8 +738,8 @@ public:
         return instance;
     }
 
-    bool load_model_public(const std::string& model_name, const std::string& provider = "dml", int num_threads = 4) {
-        return load_model(model_name, provider, num_threads);
+    bool load_model_public(const std::string& model_name, int num_threads = 4) {
+        return load_model(model_name, num_threads);
     }
 
     bool is_initialized_public() const {

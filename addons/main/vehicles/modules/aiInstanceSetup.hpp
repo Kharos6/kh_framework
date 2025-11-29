@@ -23,7 +23,7 @@ class KH_ModuleAIInstanceSetup: Module_F
 		class KH_ModuleAIInstanceSetupOwner: Edit
 		{
 			displayName = "Owner";
-			tooltip = "The actual machine that will host the AI instance; can be a variable name of a playable unit or just SERVER.";
+			tooltip = "The actual machine that will host the AI instance; can be a variable name of a playable unit, a steam ID, or just SERVER.";
 			property = "KH_ModuleAIInstanceSetupOwner";
 			defaultValue = "'SERVER'";
 		};
@@ -86,8 +86,15 @@ class KH_ModuleAIInstanceSetup: Module_F
 		class KH_ModuleAIInstanceSetupSystemPrompt: EditCodeMulti5
 		{
 			displayName = "System Prompt";
-			tooltip = "Unscheduled code, executed locally to the owner, that must return a string or structured text which will be fed to the user prompt; the string or structured text should contain instructions that the AI will strictly adhere to. Leave empty for no change. Passed arguments available through _this are: [_name (STRING)].";
+			tooltip = "Unscheduled code, executed locally to the owner, that must return a string or structured text which will be fed to the user prompt; the string or structured text should contain instructions that the AI will strictly adhere to. The default KH_var_defaultAiSystemPrompt variable contains a basic prompt that gives the AI enough information about the game and expected behaviour. Leave empty for no change. Passed arguments available through _this are: [_name (STRING)].";
 			property = "KH_ModuleAIInstanceSetupSystemPrompt";
+			defaultValue = "'KH_var_defaultAiSystemPrompt'";
+		};
+		class KH_ModuleAIInstanceSetupMasterPrompt: EditCodeMulti5
+		{
+			displayName = "Master Prompt";
+			tooltip = "Unscheduled code, executed locally to the owner, that must return a string or structured text which will be fed to the master prompt; the string or structured text should contain the essential rules and instructions that the AI will adhere to. Leave empty for no change. Passed arguments available through _this are: [_name (STRING)].";
+			property = "KH_ModuleAIInstanceSetupMasterPrompt";
 			defaultValue = "''";
 		};
 		class KH_ModuleAIInstanceSetupUserPrompt: EditCodeMulti5

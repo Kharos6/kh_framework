@@ -55,6 +55,7 @@ static registered_sqf_function _sqf_get_active_ai;
 static registered_sqf_function _sqf_set_ai_model_string_string;
 static registered_sqf_function _sqf_set_ai_model_string;
 static registered_sqf_function _sqf_update_ai_system_prompt;
+static registered_sqf_function _sqf_update_ai_master_prompt;
 static registered_sqf_function _sqf_update_ai_user_prompt;
 static registered_sqf_function _sqf_set_ai_parameters;
 static registered_sqf_function _sqf_trigger_ai_inference;
@@ -1284,6 +1285,25 @@ static game_value update_ai_system_prompt_sqf(game_value_parameter left_arg, gam
     }
 }
 
+static game_value update_ai_master_prompt_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
+    try {
+        std::string ai_name = left_arg;
+        std::string prompt = right_arg;
+        
+        if (ai_name.empty()) {
+            report_error("KH - AI Framework: Error in updateAiMasterPrompt - Name cannot be empty");
+            return game_value(false);
+        }
+        
+        auto& framework = AIFramework::instance();
+        bool success = framework.update_master_prompt(ai_name, prompt);
+        return game_value(success);
+    } catch (const std::exception& e) {
+        report_error("KH - AI Framework: Error in updateAiMasterPrompt - " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
 static game_value update_ai_user_prompt_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
     try {
         std::string ai_name = left_arg;
@@ -1377,15 +1397,7 @@ static game_value set_ai_markers_sqf(game_value_parameter left_arg, game_value_p
         std::string usr_start = static_cast<std::string>(markers[2]);
         std::string usr_end = static_cast<std::string>(markers[3]);
         std::string asst_start = static_cast<std::string>(markers[4]);
-        std::string asst_end = static_cast<std::string>(markers[5]);
-
-        if (sys_start.empty() || sys_end.empty() || 
-            usr_start.empty() || usr_end.empty() ||
-            asst_start.empty() || asst_end.empty()) {
-            report_error("KH - AI Framework: All markers must be non-empty strings");
-            return game_value(false);
-        }
-        
+        std::string asst_end = static_cast<std::string>(markers[5]);        
         auto& framework = AIFramework::instance();
         bool success = framework.set_ai_markers(ai_name, sys_start, sys_end, usr_start, usr_end, asst_start, asst_end);
         return game_value(success);
@@ -1467,7 +1479,6 @@ static game_value tts_load_model_sqf(game_value_parameter model) {
 static game_value tts_load_model_with_config_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
     try {
         std::string model_name = left_arg;
-        std::string provider = "dml";
         int num_threads = 4;
         float noise_scale = 0.667f;
         float noise_scale_w = 0.8f;
@@ -1478,23 +1489,19 @@ static game_value tts_load_model_with_config_sqf(game_value_parameter left_arg, 
                 auto config = right_arg.to_array();
                 
                 if (config.size() > 0 && !config[0].is_nil()) {
-                    provider = static_cast<std::string>(config[0]);
+                    num_threads = static_cast<int>(static_cast<float>(config[0]));
                 }
                 
                 if (config.size() > 1 && !config[1].is_nil()) {
-                    num_threads = static_cast<int>(static_cast<float>(config[1]));
+                    noise_scale = static_cast<float>(config[1]);
                 }
                 
                 if (config.size() > 2 && !config[2].is_nil()) {
-                    noise_scale = static_cast<float>(config[2]);
+                    noise_scale_w = static_cast<float>(config[2]);
                 }
                 
                 if (config.size() > 3 && !config[3].is_nil()) {
-                    noise_scale_w = static_cast<float>(config[3]);
-                }
-                
-                if (config.size() > 4 && !config[4].is_nil()) {
-                    length_scale = static_cast<float>(config[4]);
+                    length_scale = static_cast<float>(config[3]);
                 }
             } catch (...) {
                 // Use defaults if parsing fails
@@ -1502,7 +1509,7 @@ static game_value tts_load_model_with_config_sqf(game_value_parameter left_arg, 
         }
         
         bool success = TTSFramework::instance().load_model(
-            model_name, provider, num_threads, noise_scale, noise_scale_w, length_scale
+            model_name, num_threads, noise_scale, noise_scale_w, length_scale
         );
         
         if (!success) {
@@ -1533,6 +1540,7 @@ static game_value tts_speak_sqf(game_value_parameter params) {
         float volume = arr.size() > 5 ? static_cast<float>(arr[5]) : 1.0f;
         float speed = arr.size() > 6 ? static_cast<float>(arr[6]) : 1.0f;
         int sid = arr.size() > 7 ? static_cast<int>(static_cast<float>(arr[7])) : 0;
+        auto effects = TTSFramework::parse_effects_from_args(arr, 8);
         
         if (speaker_id.empty()) {
             report_error("KH - TTS Framework: Speaker ID cannot be empty");
@@ -1544,10 +1552,7 @@ static game_value tts_speak_sqf(game_value_parameter params) {
             return game_value(false);
         }
         
-        bool success = TTSFramework::instance().speak(
-            speaker_id, text, x, y, z, volume, speed, sid
-        );
-        
+        bool success = TTSFramework::instance().speak(speaker_id, text, x, y, z, volume, speed, sid, effects);
         return game_value(success);
     } catch (const std::exception& e) {
         report_error("KH - TTS Framework: Error in ttsSpeak - " + std::string(e.what()));
@@ -1569,13 +1574,14 @@ static game_value tts_update_speaker_sqf(game_value_parameter params) {
         float y = static_cast<float>(arr[2]);
         float z = static_cast<float>(arr[3]);
         float volume = static_cast<float>(arr[4]);
+        auto effects = TTSFramework::parse_effects_from_args(arr, 5);
         
         if (speaker_id.empty()) {
             report_error("KH - TTS Framework: Speaker ID cannot be empty");
             return game_value(false);
         }
         
-        bool success = TTSFramework::instance().update_speaker(speaker_id, x, y, z, volume);
+        bool success = TTSFramework::instance().update_speaker(speaker_id, x, y, z, volume, effects);
         return game_value(success);
     } catch (const std::exception& e) {
         report_error("KH - TTS Framework: Error in ttsUpdateSpeaker - " + std::string(e.what()));
@@ -1650,9 +1656,8 @@ static game_value stt_load_model_with_config_sqf(game_value_parameter model_name
     try {
         std::string model = model_name;
         auto& config_arr = config.to_array();
-        std::string provider = config_arr.size() > 0 ? static_cast<std::string>(config_arr[0]) : "dml";
-        int threads = config_arr.size() > 1 ? static_cast<int>(static_cast<float>(config_arr[1])) : 4;
-        return game_value(STTFramework::instance().load_model_public(model, provider, threads));
+        int threads = config_arr.size() > 0 ? static_cast<int>(static_cast<float>(config_arr[0])) : 4;
+        return game_value(STTFramework::instance().load_model_public(model, threads));
     } catch (const std::exception& e) {
         report_error("KH - STT Framework: sttLoadModel failed: " + std::string(e.what()));
         return game_value(false);
@@ -2147,7 +2152,16 @@ static void initialize_sqf_integration() {
         game_data_type::STRING,
         game_data_type::STRING
     );
-    
+
+    _sqf_update_ai_master_prompt = intercept::client::host::register_sqf_command(
+        "updateAiMasterPrompt",
+        "Update the master prompt for an AI",
+        userFunctionWrapper<update_ai_master_prompt_sqf>,
+        game_data_type::BOOL,
+        game_data_type::STRING,
+        game_data_type::STRING
+    );
+        
     _sqf_update_ai_user_prompt = intercept::client::host::register_sqf_command(
         "updateAiUserPrompt",
         "Update the user prompt for an AI",

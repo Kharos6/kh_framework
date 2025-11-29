@@ -27,44 +27,31 @@ class KH_ModuleInitializeTTS: Module_F
 			property = "KH_ModuleInitializeTTSModel";
 			defaultValue = "''";
 		};
-		class KH_ModuleInitializeTTSProvider: Combo
-		{
-			displayName = "Provider";
-			tooltip = "TTS engine provider. DML is for any GPU with DirectX12 support; will fall back to CPU if a machine does not support DML.";
-			property = "KH_ModuleInitializeTTSProvider";
-			typeName = "STRING";
-			defaultValue = "'DML'";
-			class Values
-			{
-				class KH_DML {name = "DML"; value = "dml";};
-				class KH_CPU {name = "CPU"; value = "cpu";};
-			};
-		};
 		class KH_ModuleInitializeTTSCPUThreads: Edit
 		{
 			displayName = "CPU Threads";
-			tooltip = "Number of CPU threads used for TTS processing.";
+			tooltip = "Number of CPU threads used for TTS processing. No more than 4 threads should be used in typical scenarios.";
 			property = "KH_ModuleInitializeTTSCPUThreads";
-			defaultValue = "'4'";
+			defaultValue = "'2'";
 		};
 		class KH_ModuleInitializeTTSNoiseScale: Edit
 		{
 			displayName = "Noise Scale";
-			tooltip = "Controls the frequency of the noise pattern; higher values mean more dense or fine detail, lower values mean smoother or broader patterns.";
+			tooltip = "Controls the frequency of the noise pattern, defining overall randomness and variation in the voice where lower is more robotic and higher is more natural but possibly unstable.";
 			property = "KH_ModuleInitializeTTSNoiseScale";
 			defaultValue = "'0.667'";
 		};
 		class KH_ModuleInitializeTTSNoiseScaleW: Edit
 		{
 			displayName = "Noise Scale W";
-			tooltip = "Controls the frequency of the noise pattern; higher values mean more dense or fine detail, lower values mean smoother or broader patterns.";
+			tooltip = "Controls the frequency of the noise pattern, defining variation in how long each phoneme is held.";
 			property = "KH_ModuleInitializeTTSNoiseScaleW";
 			defaultValue = "'0.8'";
 		};
 		class KH_ModuleInitializeTTSLengthScale: Edit
 		{
 			displayName = "Length Scale";
-			tooltip = "Controls the overall amplitude or spatial extent of the effect; in other words, how far the noise influence reaches.";
+			tooltip = "Controls the overall speed of the voice.";
 			property = "KH_ModuleInitializeTTSLengthScale";
 			defaultValue = "'1'";
 		};

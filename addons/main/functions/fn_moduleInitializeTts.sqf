@@ -7,8 +7,7 @@ KH_var_postInitExecutions pushBack [
             [
                 [
                     _logic getVariable ["KH_ModuleInitializeTTSModel", ""],
-                    _logic getVariable ["KH_ModuleInitializeTTSProvider", "dml"],
-                    parseNumber (_logic getVariable ["KH_ModuleInitializeTTSCPUThreads", "4"]),
+                    parseNumber (_logic getVariable ["KH_ModuleInitializeTTSCPUThreads", "2"]),
                     parseNumber (_logic getVariable ["KH_ModuleInitializeTTSNoiseScale", "0.667"]),
                     parseNumber (_logic getVariable ["KH_ModuleInitializeTTSNoiseScaleW", "0.8"]),
                     parseNumber (_logic getVariable ["KH_ModuleInitializeTTSLengthScale", "1"]),

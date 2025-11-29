@@ -44,8 +44,15 @@ class KH_ModuleUpdateAIInstance: Module_F
 		class KH_ModuleUpdateAIInstanceSystemPrompt: EditCodeMulti5
 		{
 			displayName = "System Prompt";
-			tooltip = "Unscheduled code, executed locally to the owner, that must return a string or structured text which will be fed to the system prompt; the string or structured text should contain instructions that the AI will strictly adhere to. Leave empty for no change. Passed arguments available through _this are: [_name (STRING)].";
+			tooltip = "Unscheduled code, executed locally to the owner, that must return a string or structured text which will be fed to the user prompt; the string or structured text should contain instructions that the AI will strictly adhere to. The default KH_var_defaultAiSystemPrompt variable contains a basic prompt that gives the AI enough information about the game and expected behaviour. Leave empty for no change. Passed arguments available through _this are: [_name (STRING)].";
 			property = "KH_ModuleUpdateAIInstanceSystemPrompt";
+			defaultValue = "''";
+		};
+		class KH_ModuleUpdateAIInstanceMasterPrompt: EditCodeMulti5
+		{
+			displayName = "Master Prompt";
+			tooltip = "Unscheduled code, executed locally to the owner, that must return a string or structured text which will be fed to the master prompt; the string or structured text should contain the essential rules and instructions that the AI will adhere to. Leave empty for no change. Passed arguments available through _this are: [_name (STRING)].";
+			property = "KH_ModuleUpdateAIInstanceMasterPrompt";
 			defaultValue = "''";
 		};
 		class KH_ModuleUpdateAIInstanceUserPrompt: EditCodeMulti5

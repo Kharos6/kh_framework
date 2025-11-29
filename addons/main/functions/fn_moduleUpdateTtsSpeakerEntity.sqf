@@ -20,7 +20,7 @@ isNil {
                 params ["_units", "_text", "_volume", "_speed", "_speakerId", "_maximumDistance", "_effectChain", "_functionGenerated", "_functionFinished", "_subtitleName", "_override"];
 
                 {
-                    [_x, _text, _volume, _speed, _speakerId, _maximumDistance, _effectChain, _functionGenerated, _functionFinished, _subtitleName, _override] call KH_fnc_updateTtsSpeakerEntity;
+                    [_x, call _text, _volume, _speed, _speakerId, _maximumDistance, call _effectChain, _functionGenerated, _functionFinished, _subtitleName, _override] call KH_fnc_updateTtsSpeakerEntity;
                 } forEach _units;
             },
             "PLAYERS",

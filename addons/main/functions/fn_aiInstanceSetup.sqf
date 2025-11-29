@@ -1,20 +1,30 @@
 params [
     ["_name", "", [""]],
     ["_model", "", [""]],
-    ["_markerSystemStart", "<|begin_of_text|><|start_header_id|>system<|end_header_id|>", ["", text ""]],
-    ["_markerSystemEnd", "<|eot_id|>", ["", text ""]],
-    ["_markerUserStart", "<|start_header_id|>user<|end_header_id|>", ["", text ""]],
-    ["_markerUserEnd", "<|eot_id|>", ["", text ""]],
-    ["_markerAssistantStart", "<|start_header_id|>assistant<|end_header_id|>", ["", text ""]],
-    ["_markerAssistantEnd", "<|eot_id|>", ["", text ""]],
-    ["_systemPrompt", "", ["", text "", {}]],
-    ["_masterPrompt", "", ["", text "", {}]],
-    ["_userPrompt", "", ["", text "", {}]],
+    ["_markerSystemStart", "<|begin_of_text|><|start_header_id|>system<|end_header_id|>", [""]],
+    ["_markerSystemEnd", "<|eot_id|>", [""]],
+    ["_markerUserStart", "<|start_header_id|>user<|end_header_id|>", [""]],
+    ["_markerUserEnd", "<|eot_id|>", [""]],
+    ["_markerAssistantStart", "<|start_header_id|>assistant<|end_header_id|>", [""]],
+    ["_markerAssistantEnd", "<|eot_id|>", [""]],
+    ["_systemPrompt", "", ["", text ""]],
+    ["_masterPrompt", "", ["", text ""]],
+    ["_userPrompt", "", ["", text ""]],
     ["_contextSize", 32768, [0]],
     ["_maximumGeneratedTokens", 3072, [0]],
     ["_temperature", 0.3, [0]],
     ["_topK", 30, [0]],
     ["_topP", 0.9, [0]],
+    ["_minP", 0.05, [0]],
+    ["_typicalP", 1, [0]],
+    ["_repeatPenalty", 1.1, [0]],
+    ["_repetitionCheckTokenCount", 64, [0]],
+    ["_presencePenalty", 0, [0]],
+    ["_frequencyPenalty", 0, [0]],
+    ["_mirostat", 0, [0]],
+    ["_mirostatTau", 5, [0]],
+    ["_mirostatEta", 0.1, [0]],
+    ["_seed", -1, [0]],
     ["_batchSize", 2048, [0]],
     ["_microBatchSize", 1024, [0]],
     ["_cpuThreads", 4, [0]],
@@ -22,6 +32,9 @@ params [
     ["_gpuLayers", 999, [0]],
     ["_flashAttention", true, [true]],
     ["_offloadKvCache", true, [true]],
+    ["_mainGpu", 0, [0]],
+    ["_tensorSplit", [], [[]]],
+    ["_splitMode", 0, [0]],
     ["_responseProgressFunction", {}, [{}]],
     ["_responseFunction", {}, [{}]],
     ["_init", {}, [{}]],
@@ -33,7 +46,33 @@ if (_model isNotEqualTo "") then {
     _name setAiModel _model;
 };
 
-_name setAiParameters [_contextSize, _maximumGeneratedTokens, _temperature, _topK, _topP, _batchSize, _microBatchSize, _cpuThreads, _cpuThreadsBatch, _gpuLayers, _flashAttention, _offloadKvCache];
+_name setAiParameters [
+    _contextSize, 
+    _maximumGeneratedTokens, 
+    _temperature, 
+    _topK, 
+    _topP, 
+    _minP,
+    _typicalP,
+    _repeatPenalty,
+    _repetitionCheckTokenCount,
+    _presencePenalty,
+    _frequencyPenalty,
+    _mirostat,
+    _mirostatTau,
+    _mirostatEta,
+    _seed,
+    _batchSize, 
+    _microBatchSize, 
+    _cpuThreads, 
+    _cpuThreadsBatch, 
+    _gpuLayers, 
+    _flashAttention, 
+    _offloadKvCache, 
+    _mainGpu, 
+    _tensorSplit,
+    _splitMode
+];
 
 _name setAiMarkers [
     [[_markerSystemStart] joinString "", _markerSystemStart] select (_markerSystemStart isEqualType ""), 
@@ -44,51 +83,30 @@ _name setAiMarkers [
     [[_markerAssistantEnd] joinString "", _markerAssistantEnd] select (_markerAssistantEnd isEqualType "")
 ];
 
-if ((_systemPrompt isNotEqualTo {}) && (_systemPrompt isNotEqualTo "") && (_systemPrompt isNotEqualTo (text ""))) then {
-    switch (typeName _systemPrompt) do {
-        case "STRING": {
-            _name updateAiSystemPrompt _systemPrompt;
-        };
-
-        case "TEXT": {
-            _name updateAiSystemPrompt ([_systemPrompt] joinString "");
-        };
-
-        case "CODE": {
-            _name updateAiSystemPrompt ([_name] call _systemPrompt);
-        };
+if ((_systemPrompt isNotEqualTo "") && (_systemPrompt isNotEqualTo (text ""))) then {
+    if (_systemPrompt isEqualType "") then {
+        _name updateAiSystemPrompt _systemPrompt;
+    }
+    else {
+        _name updateAiSystemPrompt ([_systemPrompt] joinString "");
     };
 };
 
-if ((_masterPrompt isNotEqualTo {}) && (_masterPrompt isNotEqualTo "") && (_masterPrompt isNotEqualTo (text ""))) then {
-    switch (typeName _masterPrompt) do {
-        case "STRING": {
-            _name updateAiMasterPrompt _masterPrompt;
-        };
-
-        case "TEXT": {
-            _name updateAiMasterPrompt ([_masterPrompt] joinString "");
-        };
-
-        case "CODE": {
-            _name updateAiMasterPrompt ([_name] call _masterPrompt);
-        };
+if ((_masterPrompt isNotEqualTo "") && (_masterPrompt isNotEqualTo (text ""))) then {
+    if (_masterPrompt isEqualType "") then {
+        _name updateAiMasterPrompt _masterPrompt;
+    }
+    else {
+        _name updateAiMasterPrompt ([_masterPrompt] joinString "");
     };
 };
 
-if ((_userPrompt isNotEqualTo {}) && (_userPrompt isNotEqualTo "") && (_userPrompt isNotEqualTo (text ""))) then {
-    switch (typeName _userPrompt) do {
-        case "STRING": {
-            _name updateAiUserPrompt _userPrompt;
-        };
-
-        case "TEXT": {
-            _name updateAiUserPrompt ([_userPrompt] joinString "");
-        };
-
-        case "CODE": {
-            _name updateAiUserPrompt ([_name] call _userPrompt);
-        };
+if ((_userPrompt isNotEqualTo "") && (_userPrompt isNotEqualTo (text ""))) then {
+    if (_userPrompt isEqualType "") then {
+        _name updateAiUserPrompt _userPrompt;
+    }
+    else {
+        _name updateAiUserPrompt ([_userPrompt] joinString "");
     };
 };
 

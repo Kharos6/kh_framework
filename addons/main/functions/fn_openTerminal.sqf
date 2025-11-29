@@ -49,23 +49,12 @@ ctrlSetText [103, missionNamespace getVariable [_identifierInput, ctrlText 103]]
 	[_identifierOutput, _function],
 	{
 		_args params ["_identifierOutput", "_function"];
-		private _input = ctrlText 103;
-		private _command = "";
-		private _argument = "";
-
-		if ("-" in _input) then {
-			_command = _input select [0, (_input find "-") - 1];
-			_argument = _input select [(_input find "-") + 1];
-		}
-		else {
-			_command = _input;
-		};
 
 		[
-			[_identifierOutput, _function, _command, _argument],
+			[_identifierOutput, _function, ctrlText 103],
 			{
-				params ["_identifierOutput", "_function", "_command", "_argument"];
-				private _functionOutput = [_command, _argument, _identifierOutput] call _function;
+				params ["_identifierOutput", "_function", "_input"];
+				private _functionOutput = [_input, _identifierOutput] call _function;
 
 				if (_functionOutput isEqualType "") then {
 					private _output = [missionNamespace getVariable [_identifierOutput, ""], _functionOutput] joinString "";
@@ -115,23 +104,11 @@ ctrlSetText [103, missionNamespace getVariable [_identifierInput, ctrlText 103]]
 		_args params ["_identifierOutput", "_function"];
 
 		if ((_key isEqualTo 0x1C) && !_shift) then {
-			private _input = ctrlText 103;
-			private _command = "";
-			private _argument = "";
-
-			if ("-" in _input) then {
-				_command = _input select [0, (_input find "-") - 1];
-				_argument = _input select [(_input find "-") + 1];
-			}
-			else {
-				_command = _input;
-			};
-
 			[
-				[_identifierOutput, _function, _command, _argument],
+				[_identifierOutput, _function, ctrlText 103],
 				{
-					params ["_identifierOutput", "_function", "_command", "_argument"];
-					private _functionOutput = [_command, _argument, _identifierOutput] call _function;
+					params ["_identifierOutput", "_function", "_input"];
+					private _functionOutput = [_input, _identifierOutput] call _function;
 
 					if (_functionOutput isEqualType "") then {
 						private _output = [missionNamespace getVariable [_identifierOutput, ""], _functionOutput] joinString "";

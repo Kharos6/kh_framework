@@ -20,11 +20,11 @@ missionNamespace setVariable [_identifier, false, true];
 			private _condition = _args param [7];
 
 			if (missionNamespace getVariable _identifier) then {
-				hint "Someone is already using this terminal.";
+				systemChat "Someone is already using this terminal.";
 			};
 
 			if !(call _condition) then {
-				hint "I cannot access this terminal.";
+				systemChat "I cannot access this terminal.";
 			};
 		},
 		{},

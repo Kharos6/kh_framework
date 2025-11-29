@@ -1326,6 +1326,7 @@ static game_value update_ai_user_prompt_sqf(game_value_parameter left_arg, game_
 static game_value set_ai_parameters_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
     try {
         std::string ai_name = left_arg;
+        std::vector<float> tensor_split;
 
         if (ai_name.empty()) {
             report_error("KH - AI Framework: Error in setAiParameters - Name cannot be empty");
@@ -1334,25 +1335,58 @@ static game_value set_ai_parameters_sqf(game_value_parameter left_arg, game_valu
 
         auto params = right_arg.to_array();
         
-        if (params.size() != 12) {
-            report_error("KH - AI Framework: setAiParameters requires exactly 12 parameters: [N_CTX, MAX_NEW_TOKENS, TEMPERATURE, TOP_K, TOP_P, N_BATCH, N_UBATCH, CPU_THREADS, CPU_THREADS_BATCH, GPU_LAYERS, FLASH_ATTENTION, OFFLOAD_KV_CACHE]");
+        if (params.size() != 25) {
+            report_error("KH - AI Framework: setAiParameters requires exactly 25 parameters");
             return game_value(false);
         }
-        
-        // Extract and convert parameters
+
         int n_ctx = static_cast<int>((float)params[0]);
         int max_new_tokens = static_cast<int>((float)params[1]);
         float temperature = static_cast<float>(params[2]);
         int top_k = static_cast<int>((float)params[3]);
         float top_p = static_cast<float>(params[4]);
-        int n_batch = static_cast<int>((float)params[5]);
-        int n_ubatch = static_cast<int>((float)params[6]);
-        int cpu_threads = static_cast<int>((float)params[7]);
-        int cpu_threads_batch = static_cast<int>((float)params[8]);
-        int gpu_layers = static_cast<int>((float)params[9]);
-        bool flash_attention = static_cast<bool>(params[10]);
-        bool offload_kv_cache = static_cast<bool>(params[11]);
-        bool result = AIFramework::instance().set_ai_parameters(ai_name, n_ctx, max_new_tokens, temperature, top_k, top_p, n_batch, n_ubatch, cpu_threads, cpu_threads_batch, gpu_layers, flash_attention, offload_kv_cache);
+        float min_p = static_cast<float>(params[5]);
+        float typical_p = static_cast<float>(params[6]);
+        float repeat_penalty = static_cast<float>(params[7]);
+        int repeat_last_n = static_cast<int>(params[8]);
+        float presence_penalty = static_cast<float>(params[9]);
+        float frequency_penalty = static_cast<float>(params[10]);
+        int mirostat = static_cast<int>(params[11]);
+        float mirostat_tau = static_cast<float>(params[12]);
+        float mirostat_eta = static_cast<float>(params[13]);
+        int seed = static_cast<uint32_t>(static_cast<int>(params[14]));
+        int n_batch = static_cast<int>((float)params[15]);
+        int n_ubatch = static_cast<int>((float)params[16]);
+        int cpu_threads = static_cast<int>((float)params[17]);
+        int cpu_threads_batch = static_cast<int>((float)params[18]);
+        int gpu_layers = static_cast<int>((float)params[19]);
+        bool flash_attention = static_cast<bool>(params[20]);
+        bool offload_kv_cache = static_cast<bool>(params[21]);
+        int main_gpu = static_cast<int>(params[22]);
+        
+        if (params[23].type_enum() == game_data_type::ARRAY) {
+            auto& split_params = params[23].to_array();
+
+            for (size_t i = 0; i < split_params.size(); i++) {
+                if (split_params[i].type_enum() == game_data_type::SCALAR) {
+                    tensor_split.push_back(static_cast<float>(split_params[i]));
+                }
+            }
+        } else {
+            report_error("KH - AI Framework: setAiParameters error: Tensor Split must be an array");
+        }
+
+        int split_mode = static_cast<int>(params[24]);
+
+        bool result = AIFramework::instance().set_ai_parameters(
+            ai_name, n_ctx, max_new_tokens, temperature, top_k, top_p,
+            min_p, typical_p, repeat_penalty, repeat_last_n,
+            presence_penalty, frequency_penalty, mirostat, mirostat_tau, mirostat_eta, seed,
+            n_batch, n_ubatch, cpu_threads, cpu_threads_batch, gpu_layers,
+            flash_attention, offload_kv_cache, main_gpu, tensor_split,
+            split_mode
+        );
+
         return game_value(result);
     } catch (const std::exception& e) {
         report_error("KH - AI Framework: setAiParameters error: " + std::string(e.what()));

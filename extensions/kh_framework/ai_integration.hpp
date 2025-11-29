@@ -206,6 +206,16 @@ private:
     float TEMPERATURE = 0.3f;
     int TOP_K = 30;
     float TOP_P = 0.9f;
+    float MIN_P = 0.05f;
+    float TYPICAL_P = 1.0f;
+    float REPEAT_PENALTY = 1.1f;
+    int REPEAT_LAST_N = 64;
+    float PRESENCE_PENALTY = 0.0f;
+    float FREQUENCY_PENALTY = 0.0f;
+    int MIROSTAT = 0;
+    float MIROSTAT_TAU = 5.0f;
+    float MIROSTAT_ETA = 0.1f;
+    uint32_t SEED = LLAMA_DEFAULT_SEED;
     int N_BATCH = 2048; // Up to 2048 is good but depends on model
     int N_UBATCH = 1024;
     int CPU_THREADS = 4;
@@ -213,6 +223,9 @@ private:
     int GPU_LAYERS = g_gpu_available() ? 999 : 0;
     bool FLASH_ATTENTION = g_gpu_available();
     bool OFFLOAD_KV_CACHE = g_gpu_available();
+    int MAIN_GPU = 0;
+    std::vector<float> TENSOR_SPLIT;
+    int SPLIT_MODE = 1;  // LLAMA_SPLIT_MODE_LAYER
     std::atomic<bool> running{false};
     std::atomic<bool> should_stop{false};
     std::thread ai_thread;
@@ -603,9 +616,26 @@ private:
             schedule_log("KH - AI Framework: (" + ai_name + "):   Maximum Generated Tokens: " + std::to_string(MAX_NEW_TOKENS));
             schedule_log("KH - AI Framework: (" + ai_name + "):   Maximum Total Tokens: " + std::to_string(MAX_PROMPT_TOKENS));
             schedule_log("KH - AI Framework: (" + ai_name + "):   Context Size: " + std::to_string(N_CTX));
-            schedule_log("KH - AI Framework: (" + ai_name + "):   Temperature: " + std::to_string(TEMPERATURE));
-            schedule_log("KH - AI Framework: (" + ai_name + "):   Top K: " + std::to_string(TOP_K));
-            schedule_log("KH - AI Framework: (" + ai_name + "):   Top P: " + std::to_string(TOP_P));
+            schedule_log("KH - AI Framework: (" + ai_name + "):   -------- Sampling Parameters --------");
+            schedule_log("KH - AI Framework: (" + ai_name + "):   Mirostat: " + std::string(MIROSTAT == 0 ? "disabled" : (MIROSTAT == 1 ? "v1" : "v2")));
+            if (MIROSTAT > 0) {
+                schedule_log("KH - AI Framework: (" + ai_name + "):   Mirostat Tau: " + std::to_string(MIROSTAT_TAU));
+                schedule_log("KH - AI Framework: (" + ai_name + "):   Mirostat Eta: " + std::to_string(MIROSTAT_ETA));
+                schedule_log("KH - AI Framework: (" + ai_name + "):   (Temperature, Top K, Top P, Min P, and Typical P are ignored when Mirostat enabled)");
+            } else {
+                schedule_log("KH - AI Framework: (" + ai_name + "):   Temperature: " + std::to_string(TEMPERATURE));
+                schedule_log("KH - AI Framework: (" + ai_name + "):   Top K: " + std::to_string(TOP_K));
+                schedule_log("KH - AI Framework: (" + ai_name + "):   Top P: " + std::to_string(TOP_P));
+                schedule_log("KH - AI Framework: (" + ai_name + "):   Min P: " + std::to_string(MIN_P));
+                schedule_log("KH - AI Framework: (" + ai_name + "):   Typical P: " + std::to_string(TYPICAL_P) + (TYPICAL_P >= 1.0f ? " (disabled)" : ""));
+            }
+            schedule_log("KH - AI Framework: (" + ai_name + "):   -------- Penalty Parameters --------");
+            schedule_log("KH - AI Framework: (" + ai_name + "):   Repeat Penalty: " + std::to_string(REPEAT_PENALTY) + (REPEAT_PENALTY == 1.0f ? " (disabled)" : ""));
+            schedule_log("KH - AI Framework: (" + ai_name + "):   Repeat Last N: " + std::to_string(REPEAT_LAST_N) + (REPEAT_LAST_N == 0 ? " (disabled)" : ""));
+            schedule_log("KH - AI Framework: (" + ai_name + "):   Presence Penalty: " + std::to_string(PRESENCE_PENALTY) + (PRESENCE_PENALTY == 0.0f ? " (disabled)" : ""));
+            schedule_log("KH - AI Framework: (" + ai_name + "):   Frequency Penalty: " + std::to_string(FREQUENCY_PENALTY) + (FREQUENCY_PENALTY == 0.0f ? " (disabled)" : ""));
+            schedule_log("KH - AI Framework: (" + ai_name + "):   -------- Hardware Parameters --------");
+            schedule_log("KH - AI Framework: (" + ai_name + "):   Seed: " + (SEED == LLAMA_DEFAULT_SEED ? "random" : std::to_string(SEED)));
             schedule_log("KH - AI Framework: (" + ai_name + "):   Batch Size: " + std::to_string(N_BATCH));
             schedule_log("KH - AI Framework: (" + ai_name + "):   Micro Batch Size: " + std::to_string(N_UBATCH));
             schedule_log("KH - AI Framework: (" + ai_name + "):   CPU Threads: " + std::to_string(CPU_THREADS));
@@ -613,6 +643,8 @@ private:
             schedule_log("KH - AI Framework: (" + ai_name + "):   GPU Layers: " + std::to_string(GPU_LAYERS));
             schedule_log("KH - AI Framework: (" + ai_name + "):   Flash Attention: " + std::string(FLASH_ATTENTION ? "enabled" : "disabled"));
             schedule_log("KH - AI Framework: (" + ai_name + "):   KV Cache Offload: " + std::string(OFFLOAD_KV_CACHE ? "enabled" : "disabled"));
+            schedule_log("KH - AI Framework: (" + ai_name + "):   Main GPU: " + std::to_string(MAIN_GPU));
+            schedule_log("KH - AI Framework: (" + ai_name + "):   Split Mode: " + std::string(SPLIT_MODE == 0 ? "none" : (SPLIT_MODE == 1 ? "layer" : "row")));
         }
 
         for (int i = 0; i < MAX_NEW_TOKENS; i++) {
@@ -862,6 +894,12 @@ private:
             model_params.n_gpu_layers = g_gpu_available() ? GPU_LAYERS : 0;
             model_params.use_mmap = true;
             model_params.use_mlock = false;
+            model_params.main_gpu = MAIN_GPU;
+            model_params.split_mode = static_cast<llama_split_mode>(SPLIT_MODE);
+
+            if (!TENSOR_SPLIT.empty()) {
+                model_params.tensor_split = TENSOR_SPLIT.data();
+            }
             // main_gpu, tensor_split, etc... use their defaults
 
             {
@@ -923,10 +961,47 @@ private:
             auto sampler_params = llama_sampler_chain_default_params();
             sampler_params.no_perf = false;
             sampler = llama_sampler_chain_init(sampler_params);
-            llama_sampler_chain_add(sampler, llama_sampler_init_temp(TEMPERATURE));
-            llama_sampler_chain_add(sampler, llama_sampler_init_top_k(TOP_K));
-            llama_sampler_chain_add(sampler, llama_sampler_init_top_p(TOP_P, 1));
-            llama_sampler_chain_add(sampler, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
+            
+            llama_sampler_chain_add(sampler, llama_sampler_init_penalties(
+                REPEAT_LAST_N,
+                REPEAT_PENALTY,
+                FREQUENCY_PENALTY,
+                PRESENCE_PENALTY
+            ));
+
+            // Mirostat OR traditional sampling (mutually exclusive)
+            if (MIROSTAT == 1) {
+                llama_sampler_chain_add(sampler, llama_sampler_init_mirostat(
+                    llama_n_vocab(llama_model_get_vocab(model)),
+                    SEED,
+                    MIROSTAT_TAU,
+                    MIROSTAT_ETA,
+                    100
+                ));
+            } else if (MIROSTAT == 2) {
+                llama_sampler_chain_add(sampler, llama_sampler_init_mirostat_v2(
+                    SEED,
+                    MIROSTAT_TAU,
+                    MIROSTAT_ETA
+                ));
+            } else {
+                // Traditional sampling chain
+                llama_sampler_chain_add(sampler, llama_sampler_init_top_k(TOP_K));
+                
+                if (TYPICAL_P < 1.0f) {
+                    llama_sampler_chain_add(sampler, llama_sampler_init_typical(TYPICAL_P, 1));
+                }
+                
+                llama_sampler_chain_add(sampler, llama_sampler_init_top_p(TOP_P, 1));
+                
+                if (MIN_P > 0.0f) {
+                    llama_sampler_chain_add(sampler, llama_sampler_init_min_p(MIN_P, 1));
+                }
+                
+                llama_sampler_chain_add(sampler, llama_sampler_init_temp(TEMPERATURE));
+                llama_sampler_chain_add(sampler, llama_sampler_init_dist(SEED));
+            }
+
             initialized = true;
 
             {
@@ -1164,7 +1239,15 @@ public:
         
     // Set AI parameters (must be called before start() or while stopped)
     bool set_parameters(int n_ctx, int max_new_tokens, float temperature, 
-                    int top_k, float top_p, int n_batch, int n_ubatch, int cpu_threads, int cpu_threads_batch, int gpu_layers, bool flash_attention, bool offload_kv_cache) {
+                int top_k, float top_p, float min_p, float typical_p,
+                float repeat_penalty, int repeat_last_n,
+                float presence_penalty, float frequency_penalty,
+                int mirostat, float mirostat_tau, float mirostat_eta, uint32_t seed, 
+                int n_batch, int n_ubatch, 
+                int cpu_threads, int cpu_threads_batch, int gpu_layers, 
+                bool flash_attention, bool offload_kv_cache,
+                int main_gpu, const std::vector<float>& tensor_split,
+                int split_mode) {
         if (running) {
             MainThreadScheduler::instance().schedule([]() {
                 report_error("KH - AI Framework: Cannot change parameters while AI is running. Stop the AI first.");
@@ -1213,6 +1296,78 @@ public:
 
             return false;
         }
+
+        if (min_p < 0.0f || min_p > 1.0f) {
+            MainThreadScheduler::instance().schedule([]() {
+                report_error("KH - AI Framework: MIN_P must be between 0.0 and 1.0");
+            });
+
+            return false;
+        }
+
+        if (typical_p < 0.0f || typical_p > 1.0f) {
+            MainThreadScheduler::instance().schedule([]() {
+                report_error("KH - AI Framework: TYPICAL_P must be between 0.0 and 1.0");
+            });
+
+            return false;
+        }
+
+        if (repeat_penalty < 0.5f || repeat_penalty > 3.0f) {
+            MainThreadScheduler::instance().schedule([]() {
+                report_error("KH - AI Framework: REPEAT_PENALTY must be between 0.5 and 3.0");
+            });
+
+            return false;
+        }
+
+        if (repeat_last_n < -1 || repeat_last_n > n_ctx) {
+            MainThreadScheduler::instance().schedule([n_ctx]() {
+                report_error("KH - AI Framework: REPEAT_LAST_N must be between -1 and N_CTX (" + std::to_string(n_ctx) + ")");
+            });
+
+            return false;
+        }
+
+        if (presence_penalty < -2.0f || presence_penalty > 2.0f) {
+            MainThreadScheduler::instance().schedule([]() {
+                report_error("KH - AI Framework: PRESENCE_PENALTY must be between -2.0 and 2.0");
+            });
+
+            return false;
+        }
+
+        if (frequency_penalty < -2.0f || frequency_penalty > 2.0f) {
+            MainThreadScheduler::instance().schedule([]() {
+                report_error("KH - AI Framework: FREQUENCY_PENALTY must be between -2.0 and 2.0");
+            });
+
+            return false;
+        }
+
+        if (mirostat < 0 || mirostat > 2) {
+            MainThreadScheduler::instance().schedule([]() {
+                report_error("KH - AI Framework: MIROSTAT must be 0 (disabled), 1 (v1), or 2 (v2)");
+            });
+
+            return false;
+        }
+
+        if (mirostat_tau < 0.5f || mirostat_tau > 10.0f) {
+            MainThreadScheduler::instance().schedule([]() {
+                report_error("KH - AI Framework: MIROSTAT_TAU must be between 0.5 and 10.0");
+            });
+            
+            return false;
+        }
+
+        if (mirostat_eta < 0.01f || mirostat_eta > 1.0f) {
+            MainThreadScheduler::instance().schedule([]() {
+                report_error("KH - AI Framework: MIROSTAT_ETA must be between 0.01 and 1.0");
+            });
+
+            return false;
+        }
         
         if (n_batch < 1) {
             MainThreadScheduler::instance().schedule([]() {
@@ -1246,6 +1401,14 @@ public:
             return false;
         }
 
+        if (split_mode < 0 || split_mode > 2) {
+            MainThreadScheduler::instance().schedule([]() {
+                report_error("KH - AI Framework: SPLIT_MODE must be 0 (NONE), 1 (LAYER), or 2 (ROW)");
+            });
+
+            return false;
+        }
+
         if (n_ctx < SAFETY_MARGIN + max_new_tokens + 2048) {
             int required = SAFETY_MARGIN + max_new_tokens + 2048;
             
@@ -1261,6 +1424,16 @@ public:
         TEMPERATURE = temperature;
         TOP_K = top_k;
         TOP_P = top_p;
+        MIN_P = min_p;
+        TYPICAL_P = typical_p;
+        REPEAT_PENALTY = repeat_penalty;
+        REPEAT_LAST_N = repeat_last_n;
+        PRESENCE_PENALTY = presence_penalty;
+        FREQUENCY_PENALTY = frequency_penalty;
+        MIROSTAT = mirostat;
+        MIROSTAT_TAU = mirostat_tau;
+        MIROSTAT_ETA = mirostat_eta;
+        SEED = seed;
         N_BATCH = n_batch;
         N_UBATCH = n_ubatch;
         CPU_THREADS = cpu_threads;
@@ -1269,6 +1442,9 @@ public:
         GPU_LAYERS = gpu_layers;
         FLASH_ATTENTION = flash_attention;
         OFFLOAD_KV_CACHE = offload_kv_cache;
+        MAIN_GPU = main_gpu;
+        TENSOR_SPLIT = tensor_split;
+        SPLIT_MODE = split_mode;
         system_prompt_cached = false;
         system_prompt_tokens.clear();
         system_prompt_token_count = 0;
@@ -1400,6 +1576,16 @@ private:
         float temperature = 0.3f;
         int top_k = 30;
         float top_p = 0.9f;
+        float min_p = 0.05f;
+        float typical_p = 1.0f;
+        float repeat_penalty = 1.1f;
+        int repeat_last_n = 64;
+        float presence_penalty = 0.0f;
+        float frequency_penalty = 0.0f;
+        int mirostat = 0;
+        float mirostat_tau = 5.0f;
+        float mirostat_eta = 0.1f;
+        uint32_t seed = LLAMA_DEFAULT_SEED;
         int n_batch = 2048;
         int n_ubatch = 1024;
         int cpu_threads = 4;
@@ -1407,6 +1593,9 @@ private:
         int gpu_layers = 999;
         bool flash_attention = true;
         bool offload_kv_cache = true;
+        int main_gpu = 0;
+        std::vector<float> tensor_split;
+        int split_mode = 1;
     };
 
     std::unordered_map<std::string, AIModelConfig> ai_model_configs;
@@ -1620,10 +1809,15 @@ public:
         return true;
     }
 
-    bool set_ai_parameters(const std::string& ai_name, int n_ctx, int max_new_tokens, 
-                        float temperature, int top_k, float top_p, 
-                        int n_batch, int n_ubatch, int cpu_threads, int cpu_threads_batch, 
-                        int gpu_layers, bool flash_attention, bool offload_kv_cache) {
+bool set_ai_parameters(const std::string& ai_name, int n_ctx, int max_new_tokens, 
+                    float temperature, int top_k, float top_p, float min_p, float typical_p,
+                    float repeat_penalty, int repeat_last_n,
+                    float presence_penalty, float frequency_penalty,
+                    int mirostat, float mirostat_tau, float mirostat_eta, uint32_t seed,
+                    int n_batch, int n_ubatch, int cpu_threads, int cpu_threads_batch, 
+                    int gpu_layers, bool flash_attention, bool offload_kv_cache,
+                    int main_gpu, const std::vector<float>& tensor_split,
+                    int split_mode) {
         {
             std::lock_guard<std::mutex> lock(model_configs_mutex);
             auto& config = ai_model_configs[ai_name];
@@ -1633,6 +1827,16 @@ public:
             config.temperature = temperature;
             config.top_k = top_k;
             config.top_p = top_p;
+            config.min_p = min_p;
+            config.typical_p = typical_p;
+            config.repeat_penalty = repeat_penalty;
+            config.repeat_last_n = repeat_last_n;
+            config.presence_penalty = presence_penalty;
+            config.frequency_penalty = frequency_penalty;
+            config.mirostat = mirostat;
+            config.mirostat_tau = mirostat_tau;
+            config.mirostat_eta = mirostat_eta;
+            config.seed = seed;
             config.n_batch = n_batch;
             config.n_ubatch = n_ubatch;
             config.cpu_threads = cpu_threads;
@@ -1640,6 +1844,9 @@ public:
             config.gpu_layers = gpu_layers;
             config.flash_attention = flash_attention;
             config.offload_kv_cache = offload_kv_cache;
+            config.main_gpu = main_gpu;
+            config.tensor_split = tensor_split;
+            config.split_mode = split_mode;
         }
 
         {
@@ -1648,8 +1855,12 @@ public:
             
             if (it != ai_instances.end()) {
                 return it->second->set_parameters(n_ctx, max_new_tokens, temperature, top_k, top_p, 
+                                                min_p, typical_p,
+                                                repeat_penalty, repeat_last_n, presence_penalty, frequency_penalty,
+                                                mirostat, mirostat_tau, mirostat_eta, seed,
                                                 n_batch, n_ubatch, cpu_threads, cpu_threads_batch, 
-                                                gpu_layers, flash_attention, offload_kv_cache);
+                                                gpu_layers, flash_attention, offload_kv_cache,
+                                                main_gpu, tensor_split, split_mode);
             }
         }
 
@@ -1791,13 +2002,26 @@ public:
                             config_it->second.temperature,
                             config_it->second.top_k,
                             config_it->second.top_p,
+                            config_it->second.min_p,
+                            config_it->second.typical_p,
+                            config_it->second.repeat_penalty,
+                            config_it->second.repeat_last_n,
+                            config_it->second.presence_penalty,
+                            config_it->second.frequency_penalty,
+                            config_it->second.mirostat,
+                            config_it->second.mirostat_tau,
+                            config_it->second.mirostat_eta,
+                            config_it->second.seed,
                             config_it->second.n_batch,
                             config_it->second.n_ubatch,
                             config_it->second.cpu_threads,
                             config_it->second.cpu_threads_batch,
                             config_it->second.gpu_layers,
                             config_it->second.flash_attention,
-                            config_it->second.offload_kv_cache
+                            config_it->second.offload_kv_cache,
+                            config_it->second.main_gpu,
+                            config_it->second.tensor_split,
+                            config_it->second.split_mode
                         );
                     }
                 }

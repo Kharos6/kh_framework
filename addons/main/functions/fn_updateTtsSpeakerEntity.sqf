@@ -17,11 +17,8 @@ params [
     {
         params ["_entity", "_text", "_volume", "_speed", "_speakerId", "_maximumDistance", "_effectChain", "_functionGenerated", "_functionFinished", "_subtitleName", "_override"];
 
-        _text = if (_text isEqualType "") then {
-            _text;
-        }
-        else {
-            [_text] joinString "";
+        if !(_text isEqualType "") then {
+            _text = [_text] joinString "";
         };
 
         private _speaker = ["KH_var_ttsSpeaker_", hashValue _entity] joinString "";
@@ -34,7 +31,14 @@ params [
 
         if (_override || (missionNamespace isNil _speaker)) then {
             private _worldDir = (positionCameraToWorld [0, 0, 0]) vectorFromTo (unitAimPositionVisual _entity);
-            private _cameraForward = getCameraViewDirection KH_var_playerUnit;
+
+            private _cameraForward = if (isNull curatorCamera) then {
+                getCameraViewDirection KH_var_playerUnit;
+            }
+            else {
+                vectorDir curatorCamera;
+            };
+
             private _cameraRight = vectorNormalized (_cameraForward vectorCrossProduct [0, 0, 1]);
             private _cameraUp = vectorNormalized (_cameraRight vectorCrossProduct _cameraForward);
             
@@ -69,7 +73,14 @@ params [
 
                                     if (((positionCameraToWorld [0, 0, 0]) vectorDistance (unitAimPositionVisual _entity)) < _maximumDistance) then {
                                         private _worldDir = (positionCameraToWorld [0, 0, 0]) vectorFromTo (unitAimPositionVisual _entity);
-                                        private _cameraForward = getCameraViewDirection KH_var_playerUnit;
+                                        
+                                        private _cameraForward = if (isNull curatorCamera) then {
+                                            getCameraViewDirection KH_var_playerUnit;
+                                        }
+                                        else {
+                                            vectorDir curatorCamera;
+                                        };
+
                                         private _cameraRight = vectorNormalized (_cameraForward vectorCrossProduct [0, 0, 1]);
                                         private _cameraUp = vectorNormalized (_cameraRight vectorCrossProduct _cameraForward);
 

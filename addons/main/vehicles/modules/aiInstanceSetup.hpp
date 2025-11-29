@@ -134,10 +134,87 @@ class KH_ModuleAIInstanceSetup: Module_F
 		};
 		class KH_ModuleAIInstanceSetupTopP: Edit
 		{
-			displayName = "Top K";
+			displayName = "Top P";
 			tooltip = "Nucleus sampling threshold that selects tokens until cumulative probability reaches P; lower values are more focused while higher value allow more variety. Must be a value between 0 and 1.";
 			property = "KH_ModuleAIInstanceSetupTopP";
 			defaultValue = "'0.9'";
+		};
+		class KH_ModuleAIInstanceSetupMinP: Edit
+		{
+			displayName = "Min P";
+			tooltip = "Minimum probability threshold where tokens below Min P * Top P are filtered out. Must be a value between 0 and 1.";
+			property = "KH_ModuleAIInstanceSetupMinP";
+			defaultValue = "'0.05'";
+		};
+		class KH_ModuleAIInstanceSetupTypicalP: Edit
+		{
+			displayName = "Typical P";
+			tooltip = "Locally typical sampling that keeps tokens close to expected entropy. Must be a value between 0 and 1.";
+			property = "KH_ModuleAIInstanceSetupTypicalP";
+			defaultValue = "'1'";
+		};
+		class KH_ModuleAIInstanceSetupRepeatPenalty: Edit
+		{
+			displayName = "Repeat Penalty";
+			tooltip = "Multiplicative penalty for repeated tokens that controls repetition in responses. Must be a value between 0.5 and 3.";
+			property = "KH_ModuleAIInstanceSetupRepeatPenalty";
+			defaultValue = "'1.1'";
+		};
+		class KH_ModuleAIInstanceSetupRepetitionCheckTokenCount: Edit
+		{
+			displayName = "Repetition Check Token Count";
+			tooltip = "Number of tokens to check for repetition. Must be a value between -1 and the Context Size attribute's value. A value of -1 encompasses the full context.";
+			property = "KH_ModuleAIInstanceSetupRepetitionCheckTokenCount";
+			defaultValue = "'64'";
+		};
+		class KH_ModuleAIInstanceSetupPresencePenalty: Edit
+		{
+			displayName = "Presence Penalty";
+			tooltip = "Additive penalty for tokens that appeared at all. Must be a value between -2 and 2.";
+			property = "KH_ModuleAIInstanceSetupPresencePenalty";
+			defaultValue = "'0'";
+		};
+		class KH_ModuleAIInstanceSetupFrequencyPenalty: Edit
+		{
+			displayName = "Frequency Penalty";
+			tooltip = "Additive penalty scaling with token frequency. Must be a value between -2 and 2.";
+			property = "KH_ModuleAIInstanceSetupFrequencyPenalty";
+			defaultValue = "'0'";
+		};
+		class KH_ModuleAIInstanceSetupMirostat: Combo
+		{
+			displayName = "Mirostat";
+			tooltip = "Adaptive sampling mode that automatically adjusts how creative the AI is, targeting a specific level of unpredictability. Temperature, Top K, Top P, Min P, and Typical P attributes are invalidated by either of the two Mirostat variants.";
+			property = "KH_ModuleAIInstanceSetupMirostat";
+			typeName = "STRING";
+			defaultValue = "'DISABLED'";
+			class Values
+			{
+				class KH_Disabled {name = "DISABLED"; value = "DISABLED";};
+				class KH_Version1 {name = "VERSION 1"; value = "1";};
+				class KH_Version2 {name = "VERSION 2"; value = "2";};
+			};
+		};
+		class KH_ModuleAIInstanceSetupMirostatTau: Edit
+		{
+			displayName = "Mirostat Tau";
+			tooltip = "Target entropy for mirostat. Must be a value between 0.5 and 10.";
+			property = "KH_ModuleAIInstanceSetupMirostatTau";
+			defaultValue = "'5'";
+		};
+		class KH_ModuleAIInstanceSetupMirostatETA: Edit
+		{
+			displayName = "Mirostat ETA";
+			tooltip = "Mirostat learning rate dictating adaptation speed. Must be a value between 0.01 and 1.";
+			property = "KH_ModuleAIInstanceSetupMirostatETA";
+			defaultValue = "'0.1'";
+		};
+		class KH_ModuleAIInstanceSetupSeed: Edit
+		{
+			displayName = "Seed";
+			tooltip = "Random seed for the AI. Use -1 or 0 for completely random.";
+			property = "KH_ModuleAIInstanceSetupSeed";
+			defaultValue = "'-1'";
 		};
 		class KH_ModuleAIInstanceSetupBatchSize: Edit
 		{
@@ -149,7 +226,7 @@ class KH_ModuleAIInstanceSetup: Module_F
 		class KH_ModuleAIInstanceSetupMicroBatchSize: Edit
 		{
 			displayName = "Micro Batch Size";
-			tooltip = "Number of tokens physically processed at once by hardware, splitting batches into smaller chunks. Should be half or equal to N_BATCH for optimal performance.";
+			tooltip = "Number of tokens physically processed at once by hardware, splitting batches into smaller chunks. Should be half or equal to the Batch Size attribute for optimal performance.";
 			property = "KH_ModuleAIInstanceSetupMicroBatchSize";
 			defaultValue = "'1024'";
 		};
@@ -184,9 +261,37 @@ class KH_ModuleAIInstanceSetup: Module_F
 		class KH_ModuleAIInstanceSetupOffloadKVCache: Checkbox
 		{
 			displayName = "Offload KV Cache";
-			tooltip = "Stores the attention cache in VRAM instead of RAM. While faster, it consumes a bit more memory, depending on context length.";
+			tooltip = "Stores the attention cache in VRAM instead of RAM. While faster, it consumes a bit more memory depending on context length.";
 			property = "KH_ModuleAIInstanceSetupOffloadKVCache";
 			defaultValue = "true";
+		};
+		class KH_ModuleAIInstanceSetupMainGPU: Edit
+		{
+			displayName = "Main GPU";
+			tooltip = "GPU index for the primary GPU used to process the AI.";
+			property = "KH_ModuleAIInstanceSetupMainGPU";
+			defaultValue = "'0'";
+		};
+		class KH_ModuleAIInstanceSetupTensorSplit: Edit
+		{
+			displayName = "Tensor Split";
+			tooltip = "Any number of floats that determine how to distribute model layers across multiple GPUs by proportion of VRAM to use. Index of the floats represents the GPU index; if a GPU should not be used, leave its value at 0. Leave empty if only one GPU is being used.";
+			property = "KH_ModuleAIInstanceSetupTensorSplit";
+			defaultValue = "''";
+		};
+		class KH_ModuleAIInstanceSetupSplitMode: Combo
+		{
+			displayName = "Split Mode";
+			tooltip = "Defines how to split the model across multiple GPUs; ROW is faster but uses more VRAM, while LAYER is more memory efficient.";
+			property = "KH_ModuleAIInstanceSetupSplitMode";
+			typeName = "STRING";
+			defaultValue = "'DISABLED'";
+			class Values
+			{
+				class KH_Disabled {name = "DISABLED"; value = "DISABLED";};
+				class KH_Layer {name = "LAYER"; value = "1";};
+				class KH_Row {name = "ROW"; value = "2";};
+			};
 		};
 		class KH_ModuleAIInstanceSetupResponseProgressFunction: EditCodeMulti5
 		{
@@ -227,7 +332,7 @@ class KH_ModuleAIInstanceSetup: Module_F
 	};
 	class ModuleDescription: ModuleDescription
 	{
-		description[] = {"Initializes and defines base parameters for an AI instance. Activates only once, without a trigger, on the server."};
+		description[] = {"Initializes an AI instance and defines its base parameters. Activates only once, without a trigger, on the server."};
 		sync[] = {};
 		position = 0;
 		direction = 0;

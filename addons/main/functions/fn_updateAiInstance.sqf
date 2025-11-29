@@ -1,8 +1,8 @@
 params [
     ["_name", "", [""]], 
-    ["_systemPrompt", "", ["", text "", {}]],
-    ["_masterPrompt", "", ["", text "", {}]],
-    ["_userPrompt", "", ["", text "", {}]], 
+    ["_systemPrompt", "", ["", text ""]],
+    ["_masterPrompt", "", ["", text ""]],
+    ["_userPrompt", "", ["", text ""]], 
     ["_responseProgressFunction", {}, [{}]],
     ["_responseFunction", {}, [{}]],
     ["_triggerInference", true, [true]], 
@@ -49,51 +49,30 @@ if (missionNamespace isNil _aiInstanceHandlerId) then {
                 resetAiContext _name;
             };
             
-            if ((_systemPrompt isNotEqualTo {}) && (_systemPrompt isNotEqualTo "") && (_systemPrompt isNotEqualTo (text ""))) then {
-                switch (typeName _systemPrompt) do {
-                    case "STRING": {
-                        _name updateAiSystemPrompt _systemPrompt;
-                    };
-
-                    case "TEXT": {
-                        _name updateAiSystemPrompt ([_systemPrompt] joinString "");
-                    };
-
-                    case "CODE": {
-                        _name updateAiSystemPrompt ([_name] call _systemPrompt);
-                    };
+            if ((_systemPrompt isNotEqualTo "") && (_systemPrompt isNotEqualTo (text ""))) then {
+                if (_systemPrompt isEqualType "") then {
+                    _name updateAiSystemPrompt _systemPrompt;
+                }
+                else {
+                    _name updateAiSystemPrompt ([_systemPrompt] joinString "");
                 };
             };
 
-            if ((_masterPrompt isNotEqualTo {}) && (_masterPrompt isNotEqualTo "") && (_masterPrompt isNotEqualTo (text ""))) then {
-                switch (typeName _masterPrompt) do {
-                    case "STRING": {
-                        _name updateAiMasterPrompt _masterPrompt;
-                    };
-
-                    case "TEXT": {
-                        _name updateAiMasterPrompt ([_masterPrompt] joinString "");
-                    };
-
-                    case "CODE": {
-                        _name updateAiMasterPrompt ([_name] call _masterPrompt);
-                    };
+            if ((_masterPrompt isNotEqualTo "") && (_masterPrompt isNotEqualTo (text ""))) then {
+                if (_masterPrompt isEqualType "") then {
+                    _name updateAiMasterPrompt _masterPrompt;
+                }
+                else {
+                    _name updateAiMasterPrompt ([_masterPrompt] joinString "");
                 };
             };
 
-            if ((_userPrompt isNotEqualTo {}) && (_userPrompt isNotEqualTo "") && (_userPrompt isNotEqualTo (text ""))) then {
-                switch (typeName _userPrompt) do {
-                    case "STRING": {
-                        _name updateAiUserPrompt _userPrompt;
-                    };
-
-                    case "TEXT": {
-                        _name updateAiUserPrompt ([_userPrompt] joinString "");
-                    };
-
-                    case "CODE": {
-                        _name updateAiUserPrompt ([_name] call _userPrompt);
-                    };
+            if ((_userPrompt isNotEqualTo "") && (_userPrompt isNotEqualTo (text ""))) then {
+                if (_userPrompt isEqualType "") then {
+                    _name updateAiUserPrompt _userPrompt;
+                }
+                else {
+                    _name updateAiUserPrompt ([_userPrompt] joinString "");
                 };
             };
 

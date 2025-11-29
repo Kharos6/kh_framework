@@ -16,12 +16,15 @@ isNil {
         private _stop = _logic getVariable ["KH_ModuleUpdateAIInstanceStop", false];
         
         if (_owner isEqualTo "SERVER") then {
-            [_name, _systemPrompt, _masterPrompt, _userPrompt, _responseProgressFunction, _responseFunction, _triggerInference, _abortGeneration, _resetContext, _logGeneration, _stop] call KH_fnc_updateAiInstance;
+            [_name, call _systemPrompt, call _masterPrompt, call _userPrompt, _responseProgressFunction, _responseFunction, _triggerInference, _abortGeneration, _resetContext, _logGeneration, _stop] call KH_fnc_updateAiInstance;
         }
         else {
             [
                 [_owner, _name, _systemPrompt, _masterPrompt, _userPrompt, _responseProgressFunction, _responseFunction, _triggerInference, _abortGeneration, _resetContext, _logGeneration, _stop],
                 {
+                    _this set [2, call (_this select 2)];
+                    _this set [3, call (_this select 3)];
+                    _this set [4, call (_this select 4)];
                     _this deleteAt 0;
                     [_this, "KH_fnc_updateAiInstance", missionNamespace getVariable _owner, true, false] call KH_fnc_execute;
                 },

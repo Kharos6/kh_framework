@@ -1372,7 +1372,7 @@
 
 			if (missionNamespace isNil "KH_var_sttHandler") then {
 				missionNamespace setVariable [
-					"KH_var_sttHandler"
+					"KH_var_sttHandler",
 					[
 						[],
 						{
@@ -1388,7 +1388,7 @@
 						true,
 						0,
 						false
-					] call KH_fnc_execute;
+					] call KH_fnc_execute
 				];
 			};
 		};
@@ -1416,7 +1416,7 @@
 
 			if (missionNamespace isNil "KH_var_sttHandler") then {
 				missionNamespace setVariable [
-					"KH_var_sttHandler"
+					"KH_var_sttHandler",
 					[
 						[],
 						{
@@ -1432,7 +1432,7 @@
 						true,
 						0,
 						false
-					] call KH_fnc_execute;
+					] call KH_fnc_execute
 				];
 			};
 		};

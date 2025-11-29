@@ -233,20 +233,22 @@ static bool try_load_cuda() {
 }
 
 static void detect_gpu_backends() {
-    // Priority: CUDA > Vulkan > CPU
     if (try_load_cuda()) {
         g_active_backend = GPUBackend::CUDA;
         g_has_cuda = true;
-        return;
     }
 
     if (try_load_vulkan()) {
-        g_active_backend = GPUBackend::VULKAN;
+        if (!g_has_cuda) {
+            g_active_backend = GPUBackend::VULKAN;
+        }
+
         g_has_vulkan = true;
-        return;
     }
 
-    g_active_backend = GPUBackend::CPU;
+    if (!g_has_cuda && !g_has_vulkan) {
+        g_active_backend = GPUBackend::CPU;
+    }
 }
 
 static FARPROC WINAPI delay_load_hook(unsigned dliNotify, PDelayLoadInfo pdli) {

@@ -5,12 +5,12 @@ isNil {
         [
             [
                 _units,
-                call (compile (_logic getVariable ["KH_ModuleUpdateTTSSpeakerEntityText", ""])),
+                compile (_logic getVariable ["KH_ModuleUpdateTTSSpeakerEntityText", ""]),
                 parseNumber (_logic getVariable ["KH_ModuleUpdateTTSSpeakerEntityVolume", "1"]),
                 parseNumber (_logic getVariable ["KH_ModuleUpdateTTSSpeakerEntitySpeed", "1"]),
                 parseNumber (_logic getVariable ["KH_ModuleUpdateTTSSpeakerEntitySpeakerID", "0"]),
                 parseNumber (_logic getVariable ["KH_ModuleUpdateTTSSpeakerEntityMaximumDistance", "100"]),
-                call (compile (_logic getVariable ["KH_ModuleUpdateTTSSpeakerEntityEffectChain", "[]"])),
+                compile (_logic getVariable ["KH_ModuleUpdateTTSSpeakerEntityEffectChain", "[]"]),
                 compile (_logic getVariable ["KH_ModuleUpdateTTSSpeakerEntityGeneratedFunction", ""]),
                 compile (_logic getVariable ["KH_ModuleUpdateTTSSpeakerEntityFinishedFunction", ""]),
                 _logic getVariable ["KH_ModuleUpdateTTSSpeakerEntitySubtitleName", ""],

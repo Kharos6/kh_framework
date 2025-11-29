@@ -9,6 +9,189 @@ constexpr int STT_BITS_PER_SAMPLE = 16;
 
 class STTModelDiscovery {
 public:
+    enum class STTModelType {
+        UNKNOWN,
+        TRANSDUCER,
+        WHISPER,
+        PARAFORMER,
+        SENSEVOICE,
+        MOONSHINE,
+        NEMO_CTC,
+        ZIPFORMER_CTC,
+        TDNN,
+        WENET_CTC
+    };
+
+    static std::string stt_model_type_to_string(STTModelType type) {
+        switch (type) {
+            case STTModelType::TRANSDUCER: return "Transducer";
+            case STTModelType::WHISPER: return "Whisper";
+            case STTModelType::PARAFORMER: return "Paraformer";
+            case STTModelType::SENSEVOICE: return "SenseVoice";
+            case STTModelType::MOONSHINE: return "Moonshine";
+            case STTModelType::NEMO_CTC: return "NeMo CTC";
+            case STTModelType::ZIPFORMER_CTC: return "Zipformer CTC";
+            case STTModelType::TDNN: return "TDNN";
+            case STTModelType::WENET_CTC: return "Wenet CTC";
+            default: return "Unknown";
+        }
+    }
+
+    static STTModelType detect_stt_model_type(const std::filesystem::path& model_path) {
+        if (model_path.empty() || !std::filesystem::exists(model_path) || !std::filesystem::is_directory(model_path)) {
+            return STTModelType::UNKNOWN;
+        }
+
+        std::string dir_name = model_path.filename().string();
+        std::string lower_dir_name = dir_name;
+        std::transform(lower_dir_name.begin(), lower_dir_name.end(), lower_dir_name.begin(), ::tolower);
+        bool has_tokens = false;
+        bool has_encoder = false;
+        bool has_decoder = false;
+        bool has_joiner = false;
+        bool has_generic_model = false;
+        bool has_preprocess = false;
+        bool has_encode = false;
+        bool has_uncached_decode = false;
+        bool has_cached_decode = false;
+        std::string encoder_path;
+        std::string decoder_path;
+        std::string joiner_path;
+        std::string generic_model_path;
+        std::string preprocess_path;
+        std::string encode_path;
+        std::string uncached_decode_path;
+        std::string cached_decode_path;
+        std::string tokens_path;
+        
+        try {
+            for (const auto& file : std::filesystem::directory_iterator(model_path)) {
+                if (!file.is_regular_file()) continue;
+                std::string filename = file.path().filename().string();
+                std::string lower_filename = filename;
+                std::transform(lower_filename.begin(), lower_filename.end(), lower_filename.begin(), ::tolower);
+                
+                if (lower_filename == "tokens.txt") {
+                    has_tokens = true;
+                    tokens_path = file.path().string();
+                }
+                else if (lower_filename.ends_with(".onnx")) {
+                    // Moonshine detection (must check first - has specific naming)
+                    if (lower_filename.find("preprocess") != std::string::npos) {
+                        has_preprocess = true;
+                        preprocess_path = file.path().string();
+                    }
+                    else if (lower_filename.find("uncached_decode") != std::string::npos ||
+                            lower_filename.find("uncached-decode") != std::string::npos) {
+                        has_uncached_decode = true;
+                        uncached_decode_path = file.path().string();
+                    }
+                    else if (lower_filename.find("cached_decode") != std::string::npos ||
+                            lower_filename.find("cached-decode") != std::string::npos) {
+                        has_cached_decode = true;
+                        cached_decode_path = file.path().string();
+                    }
+                    // Note: Moonshine uses "encode" not "encoder"
+                    else if ((lower_filename.find("encode") != std::string::npos && 
+                            lower_filename.find("encoder") == std::string::npos) ||
+                            lower_filename == "encode.onnx" ||
+                            lower_filename == "encode.int8.onnx") {
+                        has_encode = true;
+                        encode_path = file.path().string();
+                    }
+                    // Transducer/Whisper components
+                    else if (lower_filename.find("encoder") != std::string::npos) {
+                        has_encoder = true;
+                        encoder_path = file.path().string();
+                    }
+                    else if (lower_filename.find("decoder") != std::string::npos) {
+                        has_decoder = true;
+                        decoder_path = file.path().string();
+                    }
+                    else if (lower_filename.find("joiner") != std::string::npos) {
+                        has_joiner = true;
+                        joiner_path = file.path().string();
+                    }
+                    // Generic model.onnx (for Paraformer, SenseVoice, NeMo, etc.)
+                    else if (lower_filename == "model.onnx" || 
+                            lower_filename == "model.int8.onnx" ||
+                            lower_filename.starts_with("model.")) {
+                        has_generic_model = true;
+                        generic_model_path = file.path().string();
+                    }
+                }
+            }
+        } catch (...) {
+            return STTModelType::UNKNOWN;
+        }
+        
+        // Detection logic - ORDER MATTERS (most specific first)
+        // 1. MOONSHINE: preprocess + encode + uncached_decode + cached_decode
+        if (has_preprocess && has_encode && has_uncached_decode && has_cached_decode && has_tokens) {
+            return STTModelType::MOONSHINE;
+        }
+        
+        // 2. TRANSDUCER: encoder + decoder + joiner
+        if (has_encoder && has_decoder && has_joiner && has_tokens) {
+            return STTModelType::TRANSDUCER;
+        }
+        
+        // 3. WHISPER: encoder + decoder (no joiner)
+        if (has_encoder && has_decoder && !has_joiner && has_tokens) {
+            return STTModelType::WHISPER;
+        }
+        
+        // 4-9. Single model types - use directory name to distinguish
+        if (has_generic_model && has_tokens) {
+            // Check directory name for model type hints
+            
+            // SenseVoice
+            if (lower_dir_name.find("sense-voice") != std::string::npos ||
+                lower_dir_name.find("sensevoice") != std::string::npos ||
+                lower_dir_name.find("sense_voice") != std::string::npos) {
+                return STTModelType::SENSEVOICE;
+            }
+            
+            // Paraformer
+            if (lower_dir_name.find("paraformer") != std::string::npos) {
+                return STTModelType::PARAFORMER;
+            }
+            
+            // NeMo CTC (check for both "nemo" and "ctc")
+            if (lower_dir_name.find("nemo") != std::string::npos &&
+                lower_dir_name.find("ctc") != std::string::npos) {
+                return STTModelType::NEMO_CTC;
+            }
+            
+            // Zipformer CTC
+            if (lower_dir_name.find("zipformer") != std::string::npos &&
+                lower_dir_name.find("ctc") != std::string::npos) {
+                return STTModelType::ZIPFORMER_CTC;
+            }
+            
+            // Wenet CTC
+            if (lower_dir_name.find("wenet") != std::string::npos) {
+                return STTModelType::WENET_CTC;
+            }
+            
+            // TDNN
+            if (lower_dir_name.find("tdnn") != std::string::npos) {
+                return STTModelType::TDNN;
+            }
+            
+            // NeMo CTC without explicit "ctc" in name (NeMo models are usually CTC)
+            if (lower_dir_name.find("nemo") != std::string::npos) {
+                return STTModelType::NEMO_CTC;
+            }
+            
+            // Default single-model fallback: Try Paraformer (most common single-model type)
+            // This is a reasonable default since Paraformer is widely used
+            return STTModelType::PARAFORMER;
+        }
+        
+        return STTModelType::UNKNOWN;
+    }
+
     static std::vector<std::filesystem::path> find_all_stt_model_directories() {
         std::vector<std::filesystem::path> search_paths;
         
@@ -57,42 +240,12 @@ public:
                 for (const auto& entry : std::filesystem::directory_iterator(base_path)) {
                     if (!entry.is_directory()) continue;
                     std::filesystem::path model_path = entry.path();
-                    bool has_encoder = false;
-                    bool has_decoder = false;
-                    bool has_joiner = false;
-                    bool has_tokens = false;
                     
-                    for (const auto& file : std::filesystem::directory_iterator(model_path)) {
-                        if (!file.is_regular_file()) continue;
-                        
-                        std::string filename = file.path().filename().string();
-                        std::string lower_filename = filename;
-
-                        std::transform(lower_filename.begin(), lower_filename.end(), 
-                                     lower_filename.begin(), ::tolower);
-                        
-                        if (lower_filename.find("encoder") != std::string::npos && 
-                            lower_filename.ends_with(".onnx")) {
-                            has_encoder = true;
-                        }
-                        else if (lower_filename.find("decoder") != std::string::npos && 
-                                 lower_filename.ends_with(".onnx")) {
-                            has_decoder = true;
-                        }
-                        else if (lower_filename.find("joiner") != std::string::npos && 
-                                 lower_filename.ends_with(".onnx")) {
-                            has_joiner = true;
-                        }
-                        else if (lower_filename == "tokens.txt") {
-                            has_tokens = true;
-                        }
-                    }
+                    // Use the new detection function to validate
+                    STTModelType model_type = detect_stt_model_type(model_path);
                     
-                    bool is_transducer = has_encoder && has_decoder && has_joiner && has_tokens;
-                    bool is_whisper = has_encoder && has_decoder && !has_joiner && has_tokens;
-                    
-                    if (is_transducer || is_whisper) {
-                        return model_path;
+                    if (model_type != STTModelType::UNKNOWN) {
+                        return model_path;  // Just return path, not type
                     }
                 }
             } catch (...) {
@@ -480,72 +633,199 @@ private:
                 }
 
                 if (!model_path.empty()) {
-                    std::string encoder_path;
-                    std::string decoder_path;
-                    std::string joiner_path;
-                    std::string tokens_path;
+                    // Detect model type
+                    STTModelDiscovery::STTModelType model_type = STTModelDiscovery::detect_stt_model_type(model_path);
                     
-                    for (const auto& entry : std::filesystem::directory_iterator(model_path)) {
-                        if (!entry.is_regular_file()) continue;
-                        std::string filename = entry.path().filename().string();
-                        std::string lower_filename = filename;
-                        std::transform(lower_filename.begin(), lower_filename.end(), lower_filename.begin(), ::tolower);
-                        
-                        if (lower_filename.find("encoder") != std::string::npos && 
-                            lower_filename.ends_with(".onnx")) {
-                            encoder_path = entry.path().string();
-                        }
-                        else if (lower_filename.find("decoder") != std::string::npos && 
-                                 lower_filename.ends_with(".onnx")) {
-                            decoder_path = entry.path().string();
-                        }
-                        else if (lower_filename.find("joiner") != std::string::npos && 
-                                 lower_filename.ends_with(".onnx")) {
-                            joiner_path = entry.path().string();
-                        }
-                        else if (lower_filename == "tokens.txt") {
-                            tokens_path = entry.path().string();
-                        }
-                    }
-
-                    if (encoder_path.empty() || decoder_path.empty() || tokens_path.empty()) {
-                        log_message = "KH - STT Framework: Incomplete model files. Minimal required: encoder.onnx, decoder.onnx, tokens.txt";
+                    if (model_type == STTModelDiscovery::STTModelType::UNKNOWN) {
+                        log_message = "KH - STT Framework: Unable to determine model type for: " + model_path.string();
                     }
                     else {
+                        std::string encoder_path;
+                        std::string decoder_path;
+                        std::string joiner_path;
+                        std::string tokens_path;
+                        std::string generic_model_path;
+                        
+                        // Moonshine-specific
+                        std::string preprocess_path;
+                        std::string encode_path;
+                        std::string uncached_decode_path;
+                        std::string cached_decode_path;
+                        
+                        for (const auto& entry : std::filesystem::directory_iterator(model_path)) {
+                            if (!entry.is_regular_file()) continue;
+                            std::string filename = entry.path().filename().string();
+                            std::string lower_filename = filename;
+                            std::transform(lower_filename.begin(), lower_filename.end(), lower_filename.begin(), ::tolower);
+                            
+                            if (lower_filename == "tokens.txt") {
+                                tokens_path = entry.path().string();
+                            }
+                            else if (lower_filename.ends_with(".onnx")) {
+                                // Moonshine files
+                                if (lower_filename.find("preprocess") != std::string::npos) {
+                                    preprocess_path = entry.path().string();
+                                }
+                                else if (lower_filename.find("uncached_decode") != std::string::npos ||
+                                        lower_filename.find("uncached-decode") != std::string::npos) {
+                                    uncached_decode_path = entry.path().string();
+                                }
+                                else if (lower_filename.find("cached_decode") != std::string::npos ||
+                                        lower_filename.find("cached-decode") != std::string::npos) {
+                                    cached_decode_path = entry.path().string();
+                                }
+                                else if ((lower_filename.find("encode") != std::string::npos && 
+                                        lower_filename.find("encoder") == std::string::npos) ||
+                                        lower_filename == "encode.onnx" ||
+                                        lower_filename == "encode.int8.onnx") {
+                                    encode_path = entry.path().string();
+                                }
+                                // Transducer/Whisper
+                                else if (lower_filename.find("encoder") != std::string::npos) {
+                                    encoder_path = entry.path().string();
+                                }
+                                else if (lower_filename.find("decoder") != std::string::npos) {
+                                    decoder_path = entry.path().string();
+                                }
+                                else if (lower_filename.find("joiner") != std::string::npos) {
+                                    joiner_path = entry.path().string();
+                                }
+                                // Generic model
+                                else if (lower_filename == "model.onnx" || 
+                                        lower_filename == "model.int8.onnx" ||
+                                        lower_filename.starts_with("model.")) {
+                                    generic_model_path = entry.path().string();
+                                }
+                            }
+                        }
+                        
+                        // Configure recognizer based on model type
                         SherpaOnnxOfflineRecognizerConfig config;
                         memset(&config, 0, sizeof(config));
-                        bool is_whisper = joiner_path.empty();
+                        bool config_valid = false;
                         
-                        if (is_whisper) {
-                            config.model_config.whisper.encoder = encoder_path.c_str();
-                            config.model_config.whisper.decoder = decoder_path.c_str();
-                            config.model_config.whisper.language = "en";
-                            config.model_config.whisper.task = "transcribe";
-                        } else {
-                            config.model_config.transducer.encoder = encoder_path.c_str();
-                            config.model_config.transducer.decoder = decoder_path.c_str();
-                            config.model_config.transducer.joiner = joiner_path.c_str();
+                        switch (model_type) {
+                            case STTModelDiscovery::STTModelType::TRANSDUCER:
+                                if (!encoder_path.empty() && !decoder_path.empty() && 
+                                    !joiner_path.empty() && !tokens_path.empty()) {
+                                    config.model_config.transducer.encoder = encoder_path.c_str();
+                                    config.model_config.transducer.decoder = decoder_path.c_str();
+                                    config.model_config.transducer.joiner = joiner_path.c_str();
+                                    config_valid = true;
+                                }
+
+                                break;
+                                
+                            case STTModelDiscovery::STTModelType::WHISPER:
+                                if (!encoder_path.empty() && !decoder_path.empty() && !tokens_path.empty()) {
+                                    config.model_config.whisper.encoder = encoder_path.c_str();
+                                    config.model_config.whisper.decoder = decoder_path.c_str();
+                                    config.model_config.whisper.language = "en";
+                                    config.model_config.whisper.task = "transcribe";
+                                    config_valid = true;
+                                }
+
+                                break;
+                                
+                            case STTModelDiscovery::STTModelType::PARAFORMER:
+                                if (!generic_model_path.empty() && !tokens_path.empty()) {
+                                    config.model_config.paraformer.model = generic_model_path.c_str();
+                                    config_valid = true;
+                                }
+
+                                break;
+                                
+                            case STTModelDiscovery::STTModelType::SENSEVOICE:
+                                if (!generic_model_path.empty() && !tokens_path.empty()) {
+                                    config.model_config.sense_voice.model = generic_model_path.c_str();
+                                    config.model_config.sense_voice.language = "";
+                                    config.model_config.sense_voice.use_itn = 0;
+                                    config_valid = true;
+                                }
+
+                                break;
+                                
+                            case STTModelDiscovery::STTModelType::MOONSHINE:
+                                if (!preprocess_path.empty() && !encode_path.empty() && 
+                                    !uncached_decode_path.empty() && !cached_decode_path.empty() && 
+                                    !tokens_path.empty()) {
+                                    config.model_config.moonshine.preprocessor = preprocess_path.c_str();
+                                    config.model_config.moonshine.encoder = encode_path.c_str();
+                                    config.model_config.moonshine.uncached_decoder = uncached_decode_path.c_str();
+                                    config.model_config.moonshine.cached_decoder = cached_decode_path.c_str();
+                                    config_valid = true;
+                                }
+                                
+                                break;
+                                
+                            case STTModelDiscovery::STTModelType::NEMO_CTC:
+                                if (!generic_model_path.empty() && !tokens_path.empty()) {
+                                    config.model_config.nemo_ctc.model = generic_model_path.c_str();
+                                    config_valid = true;
+                                }
+                                
+                                break;
+                                
+                            case STTModelDiscovery::STTModelType::ZIPFORMER_CTC:
+                                if (!generic_model_path.empty() && !tokens_path.empty()) {
+                                    config.model_config.zipformer_ctc.model = generic_model_path.c_str();
+                                    config_valid = true;
+                                }
+
+                                break;
+                                
+                            case STTModelDiscovery::STTModelType::TDNN:
+                                if (!generic_model_path.empty() && !tokens_path.empty()) {
+                                    config.model_config.tdnn.model = generic_model_path.c_str();
+                                    config_valid = true;
+                                }
+
+                                break;
+                                
+                            case STTModelDiscovery::STTModelType::WENET_CTC:
+                                if (!generic_model_path.empty() && !tokens_path.empty()) {
+                                    config.model_config.wenet_ctc.model = generic_model_path.c_str();
+                                    config_valid = true;
+                                }
+                                
+                                break;
+                                
+                            default:
+                                log_message = "KH - STT Framework: Unsupported model type";
+                                break;
                         }
                         
-                        config.model_config.tokens = tokens_path.c_str();
-                        config.model_config.num_threads = num_threads;
-                        config.model_config.provider = "directml";
-                        config.model_config.debug = 0;
-                        config.decoding_method = "greedy_search";
-                        config.max_active_paths = 4;
-                        recognizer_handle = std::shared_ptr<const SherpaOnnxOfflineRecognizer>(SherpaOnnxCreateOfflineRecognizer(&config), RecognizerDeleter{});
-                        
-                        if (!recognizer_handle) {
-                            log_message = "KH - STT Framework: Failed to create recognizer";
-                        }
-                        else {
-                            sample_rate = 16000;
-                            loaded_sample_rate = sample_rate;
-                            is_initialized_flag.store(true, std::memory_order_release);
-                            success = true;
+                        if (config_valid) {
+                            config.model_config.tokens = tokens_path.c_str();
+                            config.model_config.num_threads = num_threads;
+                            config.model_config.provider = "directml";
+                            config.model_config.debug = 0;
+                            config.decoding_method = "greedy_search";
+                            config.max_active_paths = 4;
                             
-                            log_message = "KH - STT Framework: Model loaded successfully - " + model_path.string() + 
-                                " | Sample Rate: " + std::to_string(loaded_sample_rate) + " Hz";
+                            recognizer_handle = std::shared_ptr<const SherpaOnnxOfflineRecognizer>(
+                                SherpaOnnxCreateOfflineRecognizer(&config), 
+                                RecognizerDeleter{}
+                            );
+                            
+                            if (!recognizer_handle) {
+                                log_message = "KH - STT Framework: Failed to create recognizer for " + 
+                                            STTModelDiscovery::stt_model_type_to_string(model_type) + " model";
+                            }
+                            else {
+                                sample_rate = 16000;
+                                loaded_sample_rate = sample_rate;
+                                is_initialized_flag.store(true, std::memory_order_release);
+                                success = true;
+                                
+                                log_message = "KH - STT Framework: " + STTModelDiscovery::stt_model_type_to_string(model_type) + 
+                                    " model loaded successfully - " + model_path.string() + 
+                                    " | Sample Rate: " + std::to_string(loaded_sample_rate) + " Hz";
+                            }
+                        }
+                        else if (log_message.empty()) {
+                            log_message = "KH - STT Framework: Missing required files for " + 
+                                        STTModelDiscovery::stt_model_type_to_string(model_type) + " model";
                         }
                     }
                 }

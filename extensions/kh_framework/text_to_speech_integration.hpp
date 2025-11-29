@@ -20,6 +20,155 @@ struct SpeakerState {
 
 class TTSModelDiscovery {
 public:
+    enum class TTSModelType {
+        UNKNOWN,
+        VITS,
+        MATCHA,
+        KOKORO,
+        KITTEN,
+        ZIPVOICE
+    };
+
+    static TTSModelType detect_model_type(const std::filesystem::path& model_path) {
+        if (model_path.empty() || !std::filesystem::exists(model_path) || !std::filesystem::is_directory(model_path)) {
+            return TTSModelType::UNKNOWN;
+        }
+
+        std::string dir_name = model_path.filename().string();
+        std::string lower_dir_name = dir_name;
+        std::transform(lower_dir_name.begin(), lower_dir_name.end(), lower_dir_name.begin(), ::tolower);
+        bool has_tokens = false;
+        bool has_espeak = false;
+        bool has_lexicon = false;
+        bool has_voices_bin = false;
+        bool has_acoustic_onnx = false;
+        bool has_vocoder_onnx = false;
+        bool has_text_encoder_onnx = false;
+        bool has_flow_matching_onnx = false;
+        bool has_kokoro_onnx = false;
+        bool has_kitten_onnx = false;
+        bool has_generic_onnx = false;
+        std::string generic_onnx_name;
+        
+        try {
+            std::filesystem::path espeak_path = model_path / "espeak-ng-data";
+            has_espeak = std::filesystem::exists(espeak_path) && std::filesystem::is_directory(espeak_path);
+            
+            for (const auto& file : std::filesystem::directory_iterator(model_path)) {
+                if (!file.is_regular_file()) continue;
+                std::string filename = file.path().filename().string();
+                std::string lower_filename = filename;
+                std::transform(lower_filename.begin(), lower_filename.end(), lower_filename.begin(), ::tolower);
+                
+                // Check for specific files
+                if (lower_filename == "tokens.txt") {
+                    has_tokens = true;
+                }
+                else if (lower_filename == "lexicon.txt") {
+                    has_lexicon = true;
+                }
+                else if (lower_filename == "voices.bin") {
+                    has_voices_bin = true;
+                }
+                else if (lower_filename.ends_with(".onnx")) {
+                    // Categorize ONNX files by name patterns
+                    if (lower_filename.find("acoustic") != std::string::npos) {
+                        has_acoustic_onnx = true;
+                    }
+                    else if (lower_filename.find("vocoder") != std::string::npos ||
+                            lower_filename.find("vocos") != std::string::npos) {
+                        has_vocoder_onnx = true;
+                    }
+                    else if (lower_filename.find("text_encoder") != std::string::npos || 
+                            lower_filename.find("text-encoder") != std::string::npos) {
+                        has_text_encoder_onnx = true;
+                    }
+                    else if (lower_filename.find("flow_matching") != std::string::npos || 
+                            lower_filename.find("flow-matching") != std::string::npos ||
+                            lower_filename.find("fm_decoder") != std::string::npos) {
+                        has_flow_matching_onnx = true;
+                    }
+                    else if (lower_filename.find("kokoro") != std::string::npos) {
+                        has_kokoro_onnx = true;
+                    }
+                    else if (lower_filename.find("kitten") != std::string::npos) {
+                        has_kitten_onnx = true;
+                    }
+                    else {
+                        // Generic ONNX file (potential VITS, Kokoro, or Kitten model)
+                        has_generic_onnx = true;
+                        generic_onnx_name = lower_filename;
+                    }
+                }
+            }
+        } catch (...) {
+            return TTSModelType::UNKNOWN;
+        }
+        
+        // Detection logic with priority ordering to prevent mis-detection
+        // 1. ZIPVOICE: Must have text_encoder + flow_matching + vocoder
+        if (has_text_encoder_onnx && has_flow_matching_onnx && has_vocoder_onnx && has_tokens) {
+            return TTSModelType::ZIPVOICE;
+        }
+        
+        // 2. MATCHA: Must have acoustic + vocoder (but NOT text_encoder/flow_matching which would be Zipvoice)
+        if (has_acoustic_onnx && has_vocoder_onnx && !has_text_encoder_onnx && !has_flow_matching_onnx) {
+            return TTSModelType::MATCHA;
+        }
+        
+        // 3. KITTEN: Check filename first, then directory name
+        if (has_kitten_onnx && has_tokens) {
+            return TTSModelType::KITTEN;
+        }
+        
+        // 4. KOKORO: Check filename first, then directory name  
+        if (has_kokoro_onnx && has_tokens) {
+            return TTSModelType::KOKORO;
+        }
+        
+        // 5. KOKORO/KITTEN with voices.bin: Use DIRECTORY NAME to distinguish
+        if (has_voices_bin && has_generic_onnx && has_tokens) {
+            // Check directory name for hints
+            if (lower_dir_name.find("kitten") != std::string::npos) {
+                return TTSModelType::KITTEN;
+            }
+            
+            if (lower_dir_name.find("kokoro") != std::string::npos) {
+                return TTSModelType::KOKORO;
+            }
+            
+            // Fallback: Check onnx filename
+            if (generic_onnx_name.find("kitten") != std::string::npos) {
+                return TTSModelType::KITTEN;
+            }
+
+            if (generic_onnx_name.find("kokoro") != std::string::npos) {
+                return TTSModelType::KOKORO;
+            }
+
+            // Default to KOKORO for voices.bin models if no other hints
+            return TTSModelType::KOKORO;
+        }
+        
+        // 6. VITS: Generic onnx + (espeak OR lexicon OR tokens) but NO voices.bin
+        if (has_generic_onnx && !has_voices_bin && (has_espeak || has_lexicon || has_tokens)) {
+            return TTSModelType::VITS;
+        }
+        
+        return TTSModelType::UNKNOWN;
+    }
+
+    static std::string model_type_to_string(TTSModelType type) {
+        switch (type) {
+            case TTSModelType::VITS: return "VITS";
+            case TTSModelType::MATCHA: return "Matcha";
+            case TTSModelType::KOKORO: return "Kokoro";
+            case TTSModelType::KITTEN: return "Kitten";
+            case TTSModelType::ZIPVOICE: return "Zipvoice";
+            default: return "Unknown";
+        }
+    }
+
     static std::vector<std::filesystem::path> find_all_tts_model_directories() {
         std::vector<std::filesystem::path> search_paths;
         
@@ -47,6 +196,7 @@ public:
         
         for (const auto& base_path : search_paths) {
             std::filesystem::path model_path = base_path / model_name;
+            
             if (std::filesystem::exists(model_path) && std::filesystem::is_directory(model_path)) {
                 return model_path;
             }
@@ -99,49 +249,9 @@ public:
                 for (const auto& entry : std::filesystem::directory_iterator(base_path)) {
                     if (!entry.is_directory()) continue;
                     std::filesystem::path model_path = entry.path();
-                    bool has_onnx = false;
-                    bool has_espeak = false;
-
-                    for (const auto& file : std::filesystem::directory_iterator(model_path)) {
-                        if (file.is_regular_file()) {
-                            std::string filename = file.path().filename().string();
-                            std::string lower_filename = filename;
-
-                            std::transform(lower_filename.begin(), lower_filename.end(), 
-                                         lower_filename.begin(), ::tolower);
-                            
-                            if (lower_filename.ends_with(".onnx") && !lower_filename.ends_with(".json")) {
-                                has_onnx = true;
-                                break;
-                            }
-                        }
-                    }
-
-                    has_espeak = !find_espeak_data(model_path).empty();
-                    bool has_lexicon = !find_lexicon(model_path).empty();
+                    TTSModelType model_type = detect_model_type(model_path);
                     
-                    // Check for Matcha TTS (has acoustic + vocoder)
-                    bool has_acoustic = false;
-                    bool has_vocoder = false;
-                    
-                    for (const auto& file : std::filesystem::directory_iterator(model_path)) {
-                        if (!file.is_regular_file()) continue;
-                        std::string filename = file.path().filename().string();
-                        std::string lower_filename = filename;
-                        std::transform(lower_filename.begin(), lower_filename.end(), lower_filename.begin(), ::tolower);
-                        
-                        if (lower_filename.find("acoustic") != std::string::npos && lower_filename.ends_with(".onnx")) {
-                            has_acoustic = true;
-                        }
-                        if (lower_filename.find("vocoder") != std::string::npos && lower_filename.ends_with(".onnx")) {
-                            has_vocoder = true;
-                        }
-                    }
-                    
-                    bool is_vits = has_onnx && (has_espeak || has_lexicon);
-                    bool is_matcha = has_acoustic && has_vocoder;
-                    
-                    if (is_vits || is_matcha) {
+                    if (model_type != TTSModelType::UNKNOWN) {
                         return model_path;
                     }
                 }
@@ -829,95 +939,180 @@ public:
                 }
 
                 if (!model_path.empty()) {
-                    std::filesystem::path espeak_data_path = TTSModelDiscovery::find_espeak_data(model_path);
+                    TTSModelDiscovery::TTSModelType model_type = TTSModelDiscovery::detect_model_type(model_path);
                     
-                    // Scan for all model files in one pass
-                    std::string model_file_path;
-                    std::string tokens_file_path;
-                    std::string acoustic_path;
-                    std::string vocoder_path;
-                    std::string lexicon_path;
-
-                    for (const auto& entry : std::filesystem::directory_iterator(model_path)) {
-                        if (!entry.is_regular_file()) continue;  
-                        std::string filename = entry.path().filename().string();
-                        std::string lower_filename = filename;
-
-                        std::transform(lower_filename.begin(), lower_filename.end(), 
-                                       lower_filename.begin(), ::tolower);
-                        
-                        if (lower_filename.ends_with(".onnx")) {
-                            if (lower_filename.find("acoustic") != std::string::npos) {
-                                acoustic_path = entry.path().string();
-                            }
-                            else if (lower_filename.find("vocoder") != std::string::npos) {
-                                vocoder_path = entry.path().string();
-                            }
-                            else {
-                                model_file_path = entry.path().string();
-                            }
-                        }
-                        else if (lower_filename == "tokens.txt") {
-                            tokens_file_path = entry.path().string();
-                        }
-                        else if (lower_filename == "lexicon.txt") {
-                            lexicon_path = entry.path().string();
-                        }
-                    }
-                    
-                    bool is_matcha = !acoustic_path.empty() && !vocoder_path.empty();
-                    bool is_vits = !model_file_path.empty();
-                    
-                    if (!is_matcha && !is_vits) {
-                        log_message = "KH - TTS Framework: No valid model files found in directory";
+                    if (model_type == TTSModelDiscovery::TTSModelType::UNKNOWN) {
+                        log_message = "KH - TTS Framework: Could not determine model type for: " + model_path.string();
                     } else {
+                        std::string model_file_path;
+                        std::string tokens_file_path;
+                        std::string lexicon_path;
+                        std::string acoustic_path;
+                        std::string vocoder_path;
+                        std::string voices_path;
+                        std::string text_encoder_path;
+                        std::string flow_matching_path;
+                        std::string dict_dir_path;
+                        std::filesystem::path espeak_data_path = TTSModelDiscovery::find_espeak_data(model_path);
                         std::string espeak_data_str = espeak_data_path.empty() ? "" : espeak_data_path.string();
+
+                        for (const auto& entry : std::filesystem::directory_iterator(model_path)) {
+                            if (!entry.is_regular_file()) continue;
+                            std::string filename = entry.path().filename().string();
+                            std::string lower_filename = filename;
+                            std::transform(lower_filename.begin(), lower_filename.end(), lower_filename.begin(), ::tolower);
+                            
+                            if (lower_filename == "tokens.txt") {
+                                tokens_file_path = entry.path().string();
+                            }
+                            else if (lower_filename == "lexicon.txt") {
+                                lexicon_path = entry.path().string();
+                            }
+                            else if (lower_filename == "voices.bin") {
+                                voices_path = entry.path().string();
+                            }
+                            else if (lower_filename.ends_with(".onnx")) {
+                                if (lower_filename.find("acoustic") != std::string::npos) {
+                                    acoustic_path = entry.path().string();
+                                }
+                                else if (lower_filename.find("vocoder") != std::string::npos ||
+                                        lower_filename.find("vocos") != std::string::npos) {
+                                    vocoder_path = entry.path().string();
+                                }
+                                else if (lower_filename.find("text_encoder") != std::string::npos ||
+                                        lower_filename.find("text-encoder") != std::string::npos) {
+                                    text_encoder_path = entry.path().string();
+                                }
+                                else if (lower_filename.find("flow_matching") != std::string::npos ||
+                                        lower_filename.find("flow-matching") != std::string::npos ||
+                                        lower_filename.find("fm_decoder") != std::string::npos) {
+                                    flow_matching_path = entry.path().string();
+                                }
+                                else {
+                                    model_file_path = entry.path().string();
+                                }
+                            }
+                        }
+                        
+                        // Check for dict directory (used by some Kokoro models)
+                        std::filesystem::path dict_path = model_path / "dict";
+
+                        if (std::filesystem::exists(dict_path) && std::filesystem::is_directory(dict_path)) {
+                            dict_dir_path = dict_path.string();
+                        }
+                        
                         SherpaOnnxOfflineTtsConfig config;
                         memset(&config, 0, sizeof(config));
+                        bool config_valid = false;
                         
-                        if (is_matcha) {
-                            // Matcha TTS configuration
-                            config.model.matcha.acoustic_model = acoustic_path.c_str();
-                            config.model.matcha.vocoder = vocoder_path.c_str();
-                            config.model.matcha.lexicon = lexicon_path.empty() ? "" : lexicon_path.c_str();
-                            config.model.matcha.tokens = tokens_file_path.empty() ? "" : tokens_file_path.c_str();
-                            config.model.matcha.data_dir = espeak_data_str.c_str();
-                            config.model.matcha.noise_scale = noise_scale;
-                            config.model.matcha.length_scale = length_scale;
-                        } else {
-                            // VITS configuration
-                            config.model.vits.model = model_file_path.c_str();
-                            config.model.vits.lexicon = lexicon_path.empty() ? "" : lexicon_path.c_str();
-                            config.model.vits.tokens = tokens_file_path.empty() ? "" : tokens_file_path.c_str();
-                            config.model.vits.data_dir = espeak_data_str.c_str();
-                            config.model.vits.noise_scale = noise_scale;
-                            config.model.vits.noise_scale_w = noise_scale_w;
-                            config.model.vits.length_scale = length_scale;
-                            config.model.vits.dict_dir = "";
-                        }
+                        switch (model_type) {
+                            case TTSModelDiscovery::TTSModelType::VITS:
+                                if (!model_file_path.empty() && !tokens_file_path.empty()) {
+                                    config.model.vits.model = model_file_path.c_str();
+                                    config.model.vits.lexicon = lexicon_path.empty() ? "" : lexicon_path.c_str();
+                                    config.model.vits.tokens = tokens_file_path.c_str();
+                                    config.model.vits.data_dir = espeak_data_str.c_str();
+                                    config.model.vits.noise_scale = noise_scale;
+                                    config.model.vits.noise_scale_w = noise_scale_w;
+                                    config.model.vits.length_scale = length_scale;
+                                    config.model.vits.dict_dir = "";
+                                    config_valid = true;
+                                }
+                                
+                                break;
+                                
+                            case TTSModelDiscovery::TTSModelType::MATCHA:
+                                if (!acoustic_path.empty() && !vocoder_path.empty() && !tokens_file_path.empty()) {
+                                    config.model.matcha.acoustic_model = acoustic_path.c_str();
+                                    config.model.matcha.vocoder = vocoder_path.c_str();
+                                    config.model.matcha.lexicon = lexicon_path.empty() ? "" : lexicon_path.c_str();
+                                    config.model.matcha.tokens = tokens_file_path.c_str();
+                                    config.model.matcha.data_dir = espeak_data_str.c_str();
+                                    config.model.matcha.noise_scale = noise_scale;
+                                    config.model.matcha.length_scale = length_scale;
+                                    config_valid = true;
+                                }
 
-                        config.model.num_threads = num_threads;
-                        config.model.debug = 0;
-                        config.model.provider = "directml";
-                        config.max_num_sentences = 1;
-                        config.rule_fsts = "";
-                        config.rule_fars = "";
-                        tts_handle = std::shared_ptr<const SherpaOnnxOfflineTts>(SherpaOnnxCreateOfflineTts(&config), TtsHandleDeleter{});
+                                break;
+                                
+                            case TTSModelDiscovery::TTSModelType::KOKORO:
+                                if (!model_file_path.empty() && !tokens_file_path.empty()) {
+                                    config.model.kokoro.model = model_file_path.c_str();
+                                    config.model.kokoro.voices = voices_path.empty() ? "" : voices_path.c_str();
+                                    config.model.kokoro.tokens = tokens_file_path.c_str();
+                                    config.model.kokoro.data_dir = espeak_data_str.c_str();
+                                    config.model.kokoro.lexicon = lexicon_path.empty() ? "" : lexicon_path.c_str();
+                                    config.model.kokoro.dict_dir = dict_dir_path.empty() ? "" : dict_dir_path.c_str();
+                                    config.model.kokoro.length_scale = length_scale;
+                                    config_valid = true;
+                                }
+
+                                break;
+                                
+                            case TTSModelDiscovery::TTSModelType::KITTEN:
+                                if (!model_file_path.empty() && !tokens_file_path.empty()) {
+                                    config.model.kitten.model = model_file_path.c_str();
+                                    config.model.kitten.voices = voices_path.empty() ? "" : voices_path.c_str();
+                                    config.model.kitten.tokens = tokens_file_path.c_str();
+                                    config.model.kitten.data_dir = espeak_data_str.c_str();
+                                    config.model.kitten.length_scale = length_scale;
+                                    config_valid = true;
+                                }
+
+                                break;
+                                
+                            case TTSModelDiscovery::TTSModelType::ZIPVOICE:
+                                if (!text_encoder_path.empty() && !flow_matching_path.empty() && 
+                                    !vocoder_path.empty() && !tokens_file_path.empty()) {
+                                    config.model.zipvoice.tokens = tokens_file_path.c_str();
+                                    config.model.zipvoice.text_model = text_encoder_path.c_str();
+                                    config.model.zipvoice.flow_matching_model = flow_matching_path.c_str();
+                                    config.model.zipvoice.vocoder = vocoder_path.c_str();
+                                    config.model.zipvoice.data_dir = espeak_data_str.c_str();
+                                    config.model.zipvoice.feat_scale = 1.0f;
+                                    config.model.zipvoice.t_shift = 0.0f;
+                                    config.model.zipvoice.target_rms = 0.15f;
+                                    config.model.zipvoice.guidance_scale = 1.0f;
+                                    config_valid = true;
+                                }
+                                
+                                break;
+                                
+                            default:
+                                log_message = "KH - TTS Framework: Unsupported model type";
+                                break;
+                        }
                         
-                        if (!tts_handle) {
-                            log_message = "KH - TTS Framework: Failed to create TTS instance";
-                        } else {
-                            num_speakers = SherpaOnnxOfflineTtsNumSpeakers(tts_handle.get());
-                            sample_rate = SherpaOnnxOfflineTtsSampleRate(tts_handle.get());
-                            loaded_num_speakers = num_speakers;
-                            loaded_sample_rate = sample_rate;
-                            is_initialized_flag.store(true, std::memory_order_release);
-                            success = true;
+                        if (config_valid) {
+                            config.model.num_threads = num_threads;
+                            config.model.debug = 0;
+                            config.model.provider = "directml";
+                            config.max_num_sentences = 1;
+                            config.rule_fsts = "";
+                            config.rule_fars = "";
                             
-                            log_message = "KH - TTS Framework: Model loaded successfully - " + model_path.string() + 
-                                " | Type: " + (is_matcha ? "Matcha" : "VITS") +
-                                " | Speakers: " + std::to_string(loaded_num_speakers) + 
-                                " | Sample Rate: " + std::to_string(loaded_sample_rate) + " Hz";
+                            tts_handle = std::shared_ptr<const SherpaOnnxOfflineTts>(
+                                SherpaOnnxCreateOfflineTts(&config), TtsHandleDeleter{});
+                            
+                            if (!tts_handle) {
+                                log_message = "KH - TTS Framework: Failed to create TTS instance";
+                            } else {
+                                num_speakers = SherpaOnnxOfflineTtsNumSpeakers(tts_handle.get());
+                                sample_rate = SherpaOnnxOfflineTtsSampleRate(tts_handle.get());
+                                loaded_num_speakers = num_speakers;
+                                loaded_sample_rate = sample_rate;
+                                is_initialized_flag.store(true, std::memory_order_release);
+                                success = true;
+                                
+                                log_message = "KH - TTS Framework: Model loaded successfully - " + model_path.string() + 
+                                    " | Type: " + TTSModelDiscovery::model_type_to_string(model_type) +
+                                    " | Speakers: " + std::to_string(loaded_num_speakers) + 
+                                    " | Sample Rate: " + std::to_string(loaded_sample_rate) + " Hz";
+                            }
+                        }
+                        else if (log_message.empty()) {
+                            log_message = "KH - TTS Framework: Missing required files for " + 
+                                        TTSModelDiscovery::model_type_to_string(model_type) + " model";
                         }
                     }
                 }

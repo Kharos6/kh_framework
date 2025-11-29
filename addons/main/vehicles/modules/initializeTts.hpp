@@ -37,21 +37,21 @@ class KH_ModuleInitializeTTS: Module_F
 		class KH_ModuleInitializeTTSNoiseScale: Edit
 		{
 			displayName = "Noise Scale";
-			tooltip = "Controls the frequency of the noise pattern, defining overall randomness and variation in the voice where lower is more robotic and higher is more natural but possibly unstable.";
+			tooltip = "Controls the frequency of the noise pattern, defining overall randomness and variation in the voice where lower is more robotic and higher is more natural but possibly unstable. May or may not have an effect depending on the model used.";
 			property = "KH_ModuleInitializeTTSNoiseScale";
 			defaultValue = "'0.667'";
 		};
 		class KH_ModuleInitializeTTSNoiseScaleW: Edit
 		{
 			displayName = "Noise Scale W";
-			tooltip = "Controls the frequency of the noise pattern, defining variation in how long each phoneme is held.";
+			tooltip = "Controls the frequency of the noise pattern, defining variation in how long each phoneme is held. May or may not have an effect depending on the model used.";
 			property = "KH_ModuleInitializeTTSNoiseScaleW";
 			defaultValue = "'0.8'";
 		};
 		class KH_ModuleInitializeTTSLengthScale: Edit
 		{
 			displayName = "Length Scale";
-			tooltip = "Controls the overall speed of the voice.";
+			tooltip = "Controls the overall speed of the voice. May or may not have an effect depending on the model used.";
 			property = "KH_ModuleInitializeTTSLengthScale";
 			defaultValue = "'1'";
 		};

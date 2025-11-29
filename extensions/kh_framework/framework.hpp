@@ -6,6 +6,7 @@
 #include <Winternl.h>
 #include <string>
 #include <vector>
+#include <regex>
 #include <random>
 #include <deque>
 #include <functional>

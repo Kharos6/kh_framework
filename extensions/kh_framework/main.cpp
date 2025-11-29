@@ -392,16 +392,8 @@ static FARPROC WINAPI delay_load_hook(unsigned dliNotify, PDelayLoadInfo pdli) {
     else if (dliNotify == dliFailLoadLib) {
         std::string dll_name = pdli->szDll;
         
-        if ((_stricmp(dll_name.c_str(), "cublas64_12.dll") == 0) || 
-            (_stricmp(dll_name.c_str(), "cublaslt64_12.dll") == 0)) {
-            // Expected on systems without CUDA - don't treat as error
-            report_error("KH - AI Framework: " + dll_name + " failed to load");
-        } else if (_stricmp(dll_name.c_str(), "lua51.dll") == 0) {
-            // This IS critical
+        if (_stricmp(dll_name.c_str(), "lua51.dll") == 0) {
             report_error("KH - AI Framework: CRITICAL - " + dll_name + " failed to load - extension cannot function");
-        } else {
-            // Other DLL failures
-            report_error("KH - AI Framework: " + dll_name + " failed to load");
         }
     }
     

@@ -1,11 +1,13 @@
 #include "framework.hpp"
 #include "search_mod_folders.hpp"
+#include "rv_extension_bridge.hpp"
 #include "cryptography.hpp"
 #include "kh_data.hpp"
 #include "lua_integration.hpp"
 #include "ai_integration.hpp"
 #include "text_to_speech_integration.hpp"
 #include "speech_to_text_integration.hpp"
+#include "ui_integration.hpp"
 #include "sqf_integration.hpp"
 
 using namespace intercept;
@@ -19,6 +21,14 @@ int intercept::api_version() {
 }
 
 void intercept::pre_start() {
+    sqf::call_extension("kh_rv_extension", "ready");
+
+    if (RVExtBridge::initialize()) {
+        sqf::diag_log("KH Framework Extension - RV Extension Initialized");
+    } else {
+        sqf::diag_log("KH Framework Extension - RV Extension Failed");
+    }
+
     initialize_sqf_integration();
     initialize_lua_state();
     LuaStackGuard guard(*g_lua_state);
@@ -100,6 +110,10 @@ void intercept::on_frame() {
     mission["frame"] = g_mission_frame;
     mission["time"] = g_mission_time;
     LuaFunctions::update_scheduler();
+
+    if (UIFramework::instance().is_initialized()) {
+        UIFramework::instance().update();
+    }
 }
 
 void intercept::mission_ended() {
@@ -132,6 +146,16 @@ void intercept::mission_ended() {
             report_error("KH Framework Extension - Error stopping STT: " + std::string(e.what()));
         } catch (...) {
             report_error("KH Framework Extension - Unknown error stopping STT");
+        }
+    }
+
+    if (UIFramework::instance().is_initialized()) {
+        try {
+            UIFramework::instance().shutdown();
+        } catch (const std::exception& e) {
+            report_error("KH Framework Extension - Error stopping UI framework: " + std::string(e.what()));
+        } catch (...) {
+            report_error("KH Framework Extension - Unknown error stopping UI framework");
         }
     }
 
@@ -374,6 +398,46 @@ static FARPROC WINAPI delay_load_hook(unsigned dliNotify, PDelayLoadInfo pdli) {
                             DWORD error = GetLastError();
                             report_error("Failed to load " + dll_name + " from " + dllFullPath + " - error code: " + std::to_string(error));
                         }
+
+                        sqf::diag_log("KH - AI Framework: " + dll_name + " not found in standard locations");
+                    } else if (_stricmp(dll_name.c_str(), "UltralightCore.dll") == 0) {
+                        HMODULE hDll = LoadLibraryA(dllFullPath.c_str());
+                        
+                        if (hDll != NULL) {
+                            g_loaded_delay_modules[dll_name] = hDll;
+                            return (FARPROC)hDll;
+                        } else {
+                            DWORD error = GetLastError();
+                            report_error("Failed to load " + dll_name + " from " + dllFullPath + " - error code: " + std::to_string(error));
+                        }
+
+                        sqf::diag_log("KH - AI Framework: " + dll_name + " not found in standard locations");
+                    } else if (_stricmp(dll_name.c_str(), "Ultralight.dll") == 0) {
+                        std::string core_path = modDir + "\\UltralightCore.dll";
+                        std::string webcore_path = modDir + "\\WebCore.dll";
+                        HMODULE hCore = LoadLibraryA(core_path.c_str());
+
+                        if (hCore != NULL) {
+                            g_loaded_delay_modules["UltralightCore.dll"] = hCore;
+                        }
+
+                        HMODULE hWebCore = LoadLibraryA(webcore_path.c_str());
+
+                        if (hWebCore != NULL) {
+                            g_loaded_delay_modules["WebCore.dll"] = hWebCore;
+                        }
+
+                        HMODULE hDll = LoadLibraryA(dllFullPath.c_str());
+                        
+                        if (hDll != NULL) {
+                            g_loaded_delay_modules[dll_name] = hDll;
+                            return (FARPROC)hDll;
+                        } else {
+                            DWORD error = GetLastError();
+                            report_error("Failed to load " + dll_name + " from " + dllFullPath + " - error code: " + std::to_string(error));
+                        }
+
+                        sqf::diag_log("KH - AI Framework: " + dll_name + " not found in standard locations");
                     } else {
                         HMODULE hDll = LoadLibraryA(dllFullPath.c_str());
                         
@@ -384,6 +448,8 @@ static FARPROC WINAPI delay_load_hook(unsigned dliNotify, PDelayLoadInfo pdli) {
                             DWORD error = GetLastError();
                             report_error("Failed to load " + dll_name + " from " + dllFullPath + " - error code: " + std::to_string(error));
                         }
+
+                        sqf::diag_log("KH - AI Framework: " + dll_name + " not found in standard locations");
                     }
                 }
             }
@@ -428,17 +494,41 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             detect_gpu_backends();
             break;
         case DLL_PROCESS_DETACH:
-            if (!lpReserved) {
-                if (AIFramework::instance().is_initialized()) {
+            if (AIFramework::instance().is_initialized()) {
+                try {
+                    AIFramework::instance().stop_all();
+                } catch (...) {}
+            }
+
+            if (TTSFramework::instance().is_initialized()) {
+                try {
+                    TTSFramework::instance().cleanup();
+                } catch (...) {}
+            }
+
+            if (STTFramework::instance().is_initialized_public()) {
+                try {
+                    STTFramework::instance().cleanup_public();
+                } catch (...) {}
+            }
+
+            if (lpReserved != nullptr) {
+                if (UIFramework::instance().is_initialized()) {
                     try {
-                        AIFramework::instance().stop_all();
-                        TTSFramework::instance().cleanup();
-                        STTFramework::instance().cleanup_public();
-                    } catch (...) {
-                        // Ignore errors during forced shutdown
-                    }
+                        UIFramework::instance().emergency_shutdown();
+                    } catch (...) {}
+                }
+            } else {
+                if (UIFramework::instance().is_initialized()) {
+                    try {
+                        UIFramework::instance().shutdown();
+                    } catch (...) {}
                 }
             }
+
+            try {
+                MH_Uninitialize();
+            } catch (...) {}
 
             cleanup_delay_loaded_modules();
             break;

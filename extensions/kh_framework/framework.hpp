@@ -34,6 +34,13 @@
 #include <mmdeviceapi.h>
 #include <audioclient.h>
 #include <propsys.h>
+#include <gdiplus.h>
+#include <dxgi.h>
+#include <d3d11.h>
+#include <DirectXMath.h>
+#include <d3dcompiler.h>
+#include <wrl/client.h>
+#include <dwrite.h>
 
 #include "intercept/include/intercept.hpp"
 #include "intercept/include/client/sqf/sqf.hpp"
@@ -42,6 +49,8 @@
 #include "sherpa/include/c-api.h"
 #include "llama/include/llama.h"
 #include "llama/include/common.h"
+#include "ultralight/include/Ultralight/Ultralight.h"
+#include "minhook/include/MinHook.h"
 
 using namespace intercept;
 using namespace intercept::types;
@@ -86,11 +95,11 @@ static std::atomic<GPUBackend> g_active_backend{GPUBackend::CPU};
 static bool g_has_cuda = false;
 static bool g_has_vulkan = false;
 
-inline bool g_gpu_available() {
+bool g_gpu_available() {
     return g_active_backend != GPUBackend::CPU;
 }
 
-inline std::string get_backend_name() {
+std::string get_backend_name() {
     switch (g_active_backend) {
         case GPUBackend::CUDA: return "CUDA";
         case GPUBackend::VULKAN: return "Vulkan";
@@ -183,12 +192,12 @@ public:
 class UIDGenerator {
 private:
     static std::atomic<uint32_t> counter;
-    static std::mt19937 rng;
+    static thread_local std::mt19937 rng;
     
     // Pre-computed hex lookup
     static constexpr char hex_chars[] = "0123456789abcdef";
     
-    static inline void to_hex(char* buffer, uint32_t value) {
+    static void to_hex(char* buffer, uint32_t value) {
         for (int i = 7; i >= 0; --i) {
             buffer[i] = hex_chars[value & 0xF];
             value >>= 4;
@@ -238,7 +247,7 @@ public:
 };
 
 std::atomic<uint32_t> UIDGenerator::counter{0};
-std::mt19937 UIDGenerator::rng;
+thread_local std::mt19937 UIDGenerator::rng;
 
 class MainThreadScheduler {
 private:

@@ -40,7 +40,7 @@ private:
 
     template<typename T>
 
-    static inline void append_hex(std::string& result, T value) {
+    static void append_hex(std::string& result, T value) {
         for (size_t i = 0; i < sizeof(T); i++) {
             uint8_t byte = (value >> (i * 8)) & 0xFF;
             result.push_back(hex_chars[byte >> 4]);

@@ -80,6 +80,7 @@ cl /LD /arch:AVX /O2 /Ob3 /GL /MT /std:c++20 /EHsc /TP /Gy /Gw /GS- ^
     /Iintercept\include ^
     /Isherpa\include ^
     /Illama\include ^
+    /Iultralight\include ^
     /I. ^
     main.cpp ^
     /Fe:output_x64\kh_framework_x64.dll ^
@@ -92,17 +93,23 @@ cl /LD /arch:AVX /O2 /Ob3 /GL /MT /std:c++20 /EHsc /TP /Gy /Gw /GS- ^
     /DELAYLOAD:cublas64_12.dll ^
     /DELAYLOAD:vulkan-1.dll ^
     /DELAYLOAD:sherpa-onnx-c-api.dll ^
+    /DELAYLOAD:UltralightCore.dll ^
+    /DELAYLOAD:Ultralight.dll ^
     /LIBPATH:luajit\lib ^
     /LIBPATH:intercept\lib ^
     /LIBPATH:sherpa\lib ^
     /LIBPATH:vulkan\lib ^
     /LIBPATH:llama\lib ^
     /LIBPATH:C:\Progra~1\NVIDIA~2\CUDA\v12.9\lib\x64 ^
+    /LIBPATH:ultralight\lib ^
+    /LIBPATH:minhook\lib ^
     intercept_client.lib lua51.lib ^
     sherpa-onnx-c-api.lib ^
     llama.lib common.lib ggml.lib ggml-base.lib ggml-cpu.lib ggml-cuda.lib ggml-vulkan.lib ^
     cuda.lib cudart_static.lib cublas.lib cublasLt.lib vulkan-1.lib ^
-    winmm.lib gdi32.lib shell32.lib ole32.lib user32.lib advapi32.lib delayimp.lib
+    Ultralight.lib UltralightCore.lib WebCore.lib ^
+    libMinHook.x64.lib ^
+    winmm.lib gdi32.lib shell32.lib ole32.lib user32.lib advapi32.lib delayimp.lib d3d11.lib dxgi.lib d3dcompiler.lib gdiplus.lib dwrite.lib
 
 REM Check if build was successful
 if exist output_x64\kh_framework_x64.dll (

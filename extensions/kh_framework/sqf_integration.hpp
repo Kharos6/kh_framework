@@ -77,6 +77,19 @@ static registered_sqf_function _sqf_stt_is_initialized;
 static registered_sqf_function _sqf_stt_is_capturing;
 static registered_sqf_function _sqf_stt_start_capture;
 static registered_sqf_function _sqf_stt_stop_capture;
+static registered_sqf_function _sqf_html_open;
+static registered_sqf_function _sqf_html_close;
+static registered_sqf_function _sqf_html_set_visible;
+static registered_sqf_function _sqf_html_get_open;
+static registered_sqf_function _sqf_html_is_initialized;
+static registered_sqf_function _sqf_html_execute_js;
+static registered_sqf_function _sqf_html_set_position;
+static registered_sqf_function _sqf_html_set_opacity;
+static registered_sqf_function _sqf_html_set_size;
+static registered_sqf_function _sqf_html_set_z_order;
+static registered_sqf_function _sqf_html_bring_to_front;
+static registered_sqf_function _sqf_html_send_to_back;
+static registered_sqf_function _sqf_html_reload;
 
 static game_value execute_lua_sqf(game_value_parameter args, game_value_parameter code_or_function) {    
     try {
@@ -895,21 +908,21 @@ static game_value remove_handler_sqf(game_value_parameter handler_info) {
     }
 }
 
-static inline game_value set_return_value_sqf(game_value_parameter value) noexcept {
+static game_value set_return_value_sqf(game_value_parameter value) noexcept {
     g_return_value = value;
     return game_value();
 }
 
-static inline game_value get_return_value_sqf() noexcept {
+static game_value get_return_value_sqf() noexcept {
     return g_return_value;
 }
 
-static inline game_value set_call_arguments_sqf(game_value_parameter value) noexcept {
+static game_value set_call_arguments_sqf(game_value_parameter value) noexcept {
     g_call_arguments = value;
     return game_value();
 }
 
-static inline game_value get_call_arguments_sqf() noexcept {
+static game_value get_call_arguments_sqf() noexcept {
     return g_call_arguments;
 }
 
@@ -1734,6 +1747,247 @@ static game_value stt_stop_capture_sqf() {
     }
 }
 
+static game_value ui_open_html_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
+    try {
+        std::string filename = left_arg;
+        
+        if (filename.empty()) {
+            return game_value("");
+        }
+        
+        int x = 0, y = 0, width = 0, height = 0;
+        float opacity = 1.0f;
+        
+        if (right_arg.type_enum() == game_data_type::ARRAY) {
+            auto& arr = right_arg.to_array();
+            x = arr.size() > 0 ? static_cast<int>(static_cast<float>(arr[0])) : 0;
+            y = arr.size() > 1 ? static_cast<int>(static_cast<float>(arr[1])) : 0;
+            width = arr.size() > 2 ? static_cast<int>(static_cast<float>(arr[2])) : 0;
+            height = arr.size() > 3 ? static_cast<int>(static_cast<float>(arr[3])) : 0;
+            opacity = arr.size() > 4 ? static_cast<float>(arr[4]) : 1.0f;
+        }
+        
+        return game_value(UIFramework::instance().open_html(filename, x, y, width, height, opacity));
+    } catch (const std::exception& e) {
+        report_error("KH - UI Framework: Error in htmlOpen - " + std::string(e.what()));
+        return game_value("");
+    }
+}
+
+static game_value ui_close_html_sqf(game_value_parameter args) {
+    try {
+        std::string doc_id = args;
+        
+        if (doc_id.empty()) {
+            return game_value(false);
+        }
+        
+        return game_value(UIFramework::instance().close_html(doc_id));
+    } catch (const std::exception& e) {
+        report_error("KH - UI Framework: Error in htmlClose - " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value ui_set_html_visible_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
+    try {
+        std::string doc_id = left_arg;
+        
+        if (doc_id.empty()) {
+            return game_value(false);
+        }
+        
+        bool visible = static_cast<bool>(right_arg);
+        return game_value(UIFramework::instance().set_html_visible(doc_id, visible));
+    } catch (const std::exception& e) {
+        report_error("KH - UI Framework: Error in htmlSetVisible - " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value ui_get_open_documents_sqf() {
+    try {
+        auto docs = UIFramework::instance().get_open_documents();
+        auto_array<game_value> result;
+        result.reserve(docs.size());
+        
+        for (const auto& id : docs) {
+            result.push_back(game_value(id));
+        }
+        
+        return game_value(std::move(result));
+    } catch (const std::exception& e) {
+        report_error("KH - UI Framework: Error in htmlGetOpenDocuments - " + std::string(e.what()));
+        return game_value(auto_array<game_value>());
+    }
+}
+
+static game_value ui_is_initialized_sqf() {
+    try {
+        return game_value(UIFramework::instance().is_initialized());
+    } catch (const std::exception& e) {
+        report_error("KH - UI Framework: Error in htmlIsInitialized - " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value ui_execute_js_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
+    try {
+        std::string doc_id = left_arg;
+        
+        if (doc_id.empty()) {
+            return game_value("");
+        }
+        
+        std::string script = right_arg;
+        
+        if (script.empty()) {
+            return game_value("");
+        }
+        
+        return game_value(UIFramework::instance().execute_javascript(doc_id, script));
+    } catch (const std::exception& e) {
+        report_error("KH - UI Framework: Error in htmlExecuteJS - " + std::string(e.what()));
+        return game_value("");
+    }
+}
+
+static game_value ui_set_position_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
+    try {
+        std::string doc_id = left_arg;
+        
+        if (doc_id.empty()) {
+            return game_value(false);
+        }
+        
+        if (right_arg.type_enum() != game_data_type::ARRAY) {
+            return game_value(false);
+        }
+        
+        auto& arr = right_arg.to_array();
+        
+        if (arr.size() < 2) {
+            return game_value(false);
+        }
+        
+        int x = static_cast<int>(static_cast<float>(arr[0]));
+        int y = static_cast<int>(static_cast<float>(arr[1]));
+        return game_value(UIFramework::instance().set_html_position(doc_id, x, y));
+    } catch (const std::exception& e) {
+        report_error("KH - UI Framework: Error in htmlSetPosition - " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value ui_set_opacity_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
+    try {
+        std::string doc_id = left_arg;
+        
+        if (doc_id.empty()) {
+            return game_value(false);
+        }
+        
+        float opacity = static_cast<float>(right_arg);
+        return game_value(UIFramework::instance().set_html_opacity(doc_id, opacity));
+    } catch (const std::exception& e) {
+        report_error("KH - UI Framework: Error in htmlSetOpacity - " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value ui_set_size_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
+    try {
+        std::string doc_id = left_arg;
+        
+        if (doc_id.empty()) {
+            return game_value(false);
+        }
+        
+        if (right_arg.type_enum() != game_data_type::ARRAY) {
+            return game_value(false);
+        }
+        
+        auto& arr = right_arg.to_array();
+        
+        if (arr.size() < 2) {
+            return game_value(false);
+        }
+        
+        int width = static_cast<int>(static_cast<float>(arr[0]));
+        int height = static_cast<int>(static_cast<float>(arr[1]));
+        
+        if (width <= 0 || height <= 0) {
+            return game_value(false);
+        }
+        
+        return game_value(UIFramework::instance().set_html_size(doc_id, width, height));
+    } catch (const std::exception& e) {
+        report_error("KH - UI Framework: Error in htmlSetSize - " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value ui_set_z_order_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
+    try {
+        std::string doc_id = left_arg;
+        
+        if (doc_id.empty()) {
+            return game_value(false);
+        }
+        
+        int z_order = static_cast<int>(static_cast<float>(right_arg));
+        return game_value(UIFramework::instance().set_html_z_order(doc_id, z_order));
+    } catch (const std::exception& e) {
+        report_error("KH - UI Framework: Error in htmlSetZOrder - " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value ui_bring_to_front_sqf(game_value_parameter args) {
+    try {
+        std::string doc_id = args;
+        
+        if (doc_id.empty()) {
+            return game_value(false);
+        }
+        
+        return game_value(UIFramework::instance().bring_html_to_front(doc_id));
+    } catch (const std::exception& e) {
+        report_error("KH - UI Framework: Error in htmlBringToFront - " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value ui_send_to_back_sqf(game_value_parameter args) {
+    try {
+        std::string doc_id = args;
+        
+        if (doc_id.empty()) {
+            return game_value(false);
+        }
+        
+        return game_value(UIFramework::instance().send_html_to_back(doc_id));
+    } catch (const std::exception& e) {
+        report_error("KH - UI Framework: Error in htmlSendToBack - " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value ui_reload_html_sqf(game_value_parameter args) {
+    try {
+        std::string doc_id = args;
+        
+        if (doc_id.empty()) {
+            return game_value("");
+        }
+        
+        return game_value(UIFramework::instance().reload_html(doc_id));
+    } catch (const std::exception& e) {
+        report_error("KH - UI Framework: Error in htmlReload - " + std::string(e.what()));
+        return game_value("");
+    }
+}
+
 static game_value execute_lua_sqf_unary(game_value_parameter code_or_function) {
     return execute_lua_sqf(game_value(), code_or_function);
 }
@@ -2364,6 +2618,115 @@ static void initialize_sqf_integration() {
         game_data_type::BOOL
     );
     
+    _sqf_html_open = intercept::client::host::register_sqf_command(
+        "htmlOpen",
+        "Open an HTML file as UI overlay",
+        userFunctionWrapper<ui_open_html_sqf>,
+        game_data_type::STRING,
+        game_data_type::STRING,
+        game_data_type::ARRAY
+    );
+
+    _sqf_html_close = intercept::client::host::register_sqf_command(
+        "htmlClose",
+        "Close an HTML UI document by ID",
+        userFunctionWrapper<ui_close_html_sqf>,
+        game_data_type::BOOL,
+        game_data_type::STRING
+    );
+
+    _sqf_html_set_visible = intercept::client::host::register_sqf_command(
+        "htmlSetVisible",
+        "Set HTML UI visibility",
+        userFunctionWrapper<ui_set_html_visible_sqf>,
+        game_data_type::BOOL,
+        game_data_type::STRING,
+        game_data_type::BOOL
+    );
+
+    _sqf_html_get_open = intercept::client::host::register_sqf_command(
+        "htmlGetOpenDocuments",
+        "Get array of open HTML UI document IDs",
+        userFunctionWrapper<ui_get_open_documents_sqf>,
+        game_data_type::ARRAY
+    );
+
+    _sqf_html_is_initialized = intercept::client::host::register_sqf_command(
+        "htmlIsInitialized",
+        "Check if HTML UI framework is initialized",
+        userFunctionWrapper<ui_is_initialized_sqf>,
+        game_data_type::BOOL
+    );
+
+    _sqf_html_execute_js = intercept::client::host::register_sqf_command(
+        "htmlExecuteJS",
+        "Execute JavaScript in HTML document",
+        userFunctionWrapper<ui_execute_js_sqf>,
+        game_data_type::STRING,
+        game_data_type::STRING,
+        game_data_type::STRING
+    );
+
+    _sqf_html_set_position = intercept::client::host::register_sqf_command(
+        "htmlSetPosition",
+        "Set HTML UI position",
+        userFunctionWrapper<ui_set_position_sqf>,
+        game_data_type::BOOL,
+        game_data_type::STRING,
+        game_data_type::ARRAY
+    );
+
+    _sqf_html_set_opacity = intercept::client::host::register_sqf_command(
+        "htmlSetOpacity",
+        "Set HTML UI opacity",
+        userFunctionWrapper<ui_set_opacity_sqf>,
+        game_data_type::BOOL,
+        game_data_type::STRING,
+        game_data_type::SCALAR
+    );
+
+    _sqf_html_set_size = intercept::client::host::register_sqf_command(
+        "htmlSetSize",
+        "Resize HTML UI",
+        userFunctionWrapper<ui_set_size_sqf>,
+        game_data_type::BOOL,
+        game_data_type::STRING,
+        game_data_type::ARRAY
+    );
+
+    _sqf_html_set_z_order = intercept::client::host::register_sqf_command(
+        "htmlSetZOrder",
+        "Set HTML UI z-order",
+        userFunctionWrapper<ui_set_z_order_sqf>,
+        game_data_type::BOOL,
+        game_data_type::STRING,
+        game_data_type::SCALAR
+    );
+
+    _sqf_html_bring_to_front = intercept::client::host::register_sqf_command(
+        "htmlBringToFront",
+        "Bring HTML UI to front of all others",
+        userFunctionWrapper<ui_bring_to_front_sqf>,
+        game_data_type::BOOL,
+        game_data_type::STRING
+    );
+
+    _sqf_html_send_to_back = intercept::client::host::register_sqf_command(
+        "htmlSendToBack",
+        "Send HTML UI behind all others",
+        userFunctionWrapper<ui_send_to_back_sqf>,
+        game_data_type::BOOL,
+        game_data_type::STRING
+    );
+
+    _sqf_html_reload = intercept::client::host::register_sqf_command(
+        "htmlReload",
+        "Reload HTML file from disk",
+        userFunctionWrapper<ui_reload_html_sqf>,
+        game_data_type::STRING,
+        game_data_type::STRING
+    );
+
     g_compiled_sqf_trigger_cba_event = sqf::compile(R"(setReturnValue (getCallArguments call KH_fnc_triggerCbaEvent);)");
     g_compiled_sqf_add_game_event_handler = sqf::compile(R"(setReturnValue (getCallArguments call KH_fnc_addEventHandler);)");
     g_compiled_sqf_remove_game_event_handler = sqf::compile(R"(setReturnValue (getCallArguments call KH_fnc_removeHandler);)");

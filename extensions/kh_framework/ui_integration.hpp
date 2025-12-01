@@ -369,6 +369,7 @@ public:
 struct UIDocument {
     std::string id;
     std::string html_path;
+    std::string html_content;
     ultralight::RefPtr<ultralight::View> view;
     bool visible = true;
     bool fullscreen = false;
@@ -840,6 +841,31 @@ public:
         has_pending_commands_.store(false, std::memory_order_release);
         shutting_down_.store(false, std::memory_order_release);
         last_swap_chain_ = nullptr;
+    }
+
+    std::string create_html(const std::string& html_content, int x, int y, int width, int height, float opacity = 1.0f) {
+        if (!initialized_.load(std::memory_order_acquire) && !initialize()) return "";
+        if (html_content.empty()) return "";
+        std::string doc_id = UIDGenerator::generate();
+        std::promise<bool> promise;
+        auto future = promise.get_future();
+        
+        queue_command([this, doc_id, html_content, x, y, width, height, opacity, &promise]() {
+            create_html_internal(doc_id, html_content, x, y, width, height, opacity);
+            promise.set_value(true);
+        });
+
+        future.wait();
+
+        {
+            std::lock_guard<std::mutex> lock(documents_mutex_);
+            
+            if (documents_.find(doc_id) == documents_.end()) {
+                return "";  // Creation failed
+            }
+        }
+        
+        return doc_id;
     }
 
     std::string open_html(const std::string& filename, int x, int y, int width, int height, float opacity = 1.0f) {
@@ -1445,6 +1471,45 @@ private:
         }
     }
 
+    void create_html_internal(const std::string& doc_id, const std::string& html_content, 
+                              int x, int y, int width, int height, float opacity) {
+        if (!renderer_) return;
+        int w = width, h = height;
+        bool fs = (width <= 0 || height <= 0);
+        if (fs) { w = GetSystemMetrics(SM_CXSCREEN); h = GetSystemMetrics(SM_CYSCREEN); }
+        ultralight::ViewConfig vc;
+        vc.is_accelerated = false;
+        vc.is_transparent = true;
+        auto view = renderer_->CreateView(w, h, vc, nullptr);
+
+        if (!view) {
+            MainThreadScheduler::instance().schedule([]() {
+                report_error("KH - UI Framework: Failed to create view for dynamic HTML");
+            });
+
+            return;
+        }
+        
+        view->Focus();
+        auto doc = std::make_shared<UIDocument>();
+        doc->id = doc_id;
+        doc->html_content = html_content;
+        doc->view = view;
+        doc->x = x; doc->y = y;
+        doc->width = w; doc->height = h;
+        doc->opacity = std::clamp(opacity, 0.0f, 1.0f);
+        doc->fullscreen = fs;
+        doc->listener = std::make_unique<UIDocumentListener>();
+        view->set_view_listener(doc->listener.get());
+        view->LoadHTML(ultralight::String(html_content.c_str()));
+
+        {
+            std::lock_guard<std::mutex> lock(documents_mutex_);
+            doc->z_order = static_cast<int>(documents_.size());
+            documents_[doc->id] = doc;
+        }
+    }
+
     void open_html_internal(const std::string& doc_id, const std::string& filename, 
                             int x, int y, int width, int height, float opacity) {
         auto html_path = find_html_file(filename);
@@ -1537,8 +1602,14 @@ private:
         vc.is_transparent = true;
         auto new_view = renderer_->CreateView(width, height, vc, nullptr);
         if (!new_view) return;
-        std::string url = "file:///" + html_path_copy;
-        std::replace(url.begin(), url.end(), '\\', '/');
+
+        if (!doc->html_content.empty()) {
+            new_view->LoadHTML(ultralight::String(doc->html_content.c_str()));
+        } else {
+            std::string url = "file:///" + html_path_copy;
+            std::replace(url.begin(), url.end(), '\\', '/');
+            new_view->LoadURL(ultralight::String(url.c_str()));
+        }
 
         {
             std::lock_guard<std::mutex> lock(documents_mutex_);
@@ -1547,8 +1618,7 @@ private:
             if (it == documents_.end() || it->second != doc) {
                 return;
             }
-            
-            new_view->LoadURL(ultralight::String(url.c_str()));
+
             new_view->Focus();
             doc->view = new_view;
             doc->width = width;
@@ -1577,9 +1647,14 @@ private:
         }
         
         if (!view_copy) return;
-        std::string url = "file:///" + html_path_copy;
-        std::replace(url.begin(), url.end(), '\\', '/');
-        view_copy->LoadURL(ultralight::String(url.c_str()));
+
+        if (!doc->html_content.empty()) {
+            view_copy->LoadHTML(ultralight::String(doc->html_content.c_str()));
+        } else {
+            std::string url = "file:///" + html_path_copy;
+            std::replace(url.begin(), url.end(), '\\', '/');
+            view_copy->LoadURL(ultralight::String(url.c_str()));
+        }
         
         {
             std::lock_guard<std::mutex> lock(documents_mutex_);

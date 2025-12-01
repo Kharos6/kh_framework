@@ -77,6 +77,7 @@ static registered_sqf_function _sqf_stt_is_initialized;
 static registered_sqf_function _sqf_stt_is_capturing;
 static registered_sqf_function _sqf_stt_start_capture;
 static registered_sqf_function _sqf_stt_stop_capture;
+static registered_sqf_function _sqf_html_create;
 static registered_sqf_function _sqf_html_open;
 static registered_sqf_function _sqf_html_close;
 static registered_sqf_function _sqf_html_set_visible;
@@ -1749,6 +1750,29 @@ static game_value stt_stop_capture_sqf() {
     }
 }
 
+static game_value ui_create_html_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
+    try {
+        std::string html_content = left_arg;
+        
+        if (html_content.empty()) {
+            return game_value("");
+        }
+        
+        int x = 0, y = 0, width = 0, height = 0;
+        float opacity = 1.0f;
+        auto& arr = right_arg.to_array();
+        x = arr.size() > 0 ? static_cast<int>(static_cast<float>(arr[0])) : 0;
+        y = arr.size() > 1 ? static_cast<int>(static_cast<float>(arr[1])) : 0;
+        width = arr.size() > 2 ? static_cast<int>(static_cast<float>(arr[2])) : 0;
+        height = arr.size() > 3 ? static_cast<int>(static_cast<float>(arr[3])) : 0;
+        opacity = arr.size() > 4 ? static_cast<float>(arr[4]) : 1.0f;
+        return game_value(UIFramework::instance().create_html(html_content, x, y, width, height, opacity));
+    } catch (const std::exception& e) {
+        report_error("KH - UI Framework: Error in htmlCreate - " + std::string(e.what()));
+        return game_value("");
+    }
+}
+
 static game_value ui_open_html_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
     try {
         std::string filename = left_arg;
@@ -2674,6 +2698,15 @@ static void initialize_sqf_integration() {
         game_data_type::BOOL
     );
     
+    _sqf_html_create = intercept::client::host::register_sqf_command(
+        "htmlCreate",
+        "Create an HTML UI overlay from HTML content string",
+        userFunctionWrapper<ui_create_html_sqf>,
+        game_data_type::STRING,
+        game_data_type::STRING,
+        game_data_type::ARRAY
+    );
+
     _sqf_html_open = intercept::client::host::register_sqf_command(
         "htmlOpen",
         "Open an HTML file as UI overlay",

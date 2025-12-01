@@ -41,6 +41,7 @@ class CfgFunctions
 			class getGroupAttributes {};
 			class getMissionAttributes {};
 			class getMouseTarget {};
+			class getNormalizedScreenTransforms {};
 			class getObjectAttributes {};
 			class getObjectInventory {};
 			class getPositionScreenRatio {};

@@ -18,6 +18,7 @@
 #include <filesystem>
 #include <iomanip>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <unordered_map>
 #include <shlobj.h>
@@ -193,8 +194,9 @@ class UIDGenerator {
 private:
     static std::atomic<uint32_t> counter;
     static thread_local std::mt19937 rng;
-    
-    // Pre-computed hex lookup
+    static thread_local bool rng_seeded;
+    static std::once_flag init_flag;
+    static uint32_t unique_machine_id;
     static constexpr char hex_chars[] = "0123456789abcdef";
     
     static void to_hex(char* buffer, uint32_t value) {
@@ -204,39 +206,36 @@ private:
         }
     }
     
-public:
-    static std::string generate() {
-        static bool initialized = false;
-        static uint32_t unique_machine_id;
-        
-        if (!initialized) {
-            // Machine ID: combine multiple sources
-            uint32_t pid = GetCurrentProcessId();
-            
-            // Get network adapter MAC address or computer name hash
-            char computerName[MAX_COMPUTERNAME_LENGTH + 1];
-            DWORD size = sizeof(computerName);
-            uint32_t name_hash = 0;
+    static void initialize_machine_id() {
+        uint32_t pid = GetCurrentProcessId();
+        char computerName[MAX_COMPUTERNAME_LENGTH + 1];
+        DWORD size = sizeof(computerName);
+        uint32_t name_hash = 0;
 
-            if (GetComputerNameA(computerName, &size)) {
-                for (DWORD i = 0; i < size; ++i) {
-                    name_hash = name_hash * 31 + computerName[i];
-                }
+        if (GetComputerNameA(computerName, &size)) {
+            for (DWORD i = 0; i < size; ++i) {
+                name_hash = name_hash * 31 + computerName[i];
             }
-            
-            // Combine and mix bits
-            unique_machine_id = (pid ^ name_hash ^ (name_hash >> 16));
-            rng.seed(std::random_device{}() ^ unique_machine_id);
-            initialized = true;
         }
         
-        // Use actual timestamp, not relative
+        unique_machine_id = (pid ^ name_hash ^ (name_hash >> 16));
+    }
+    
+public:
+    static std::string generate() {
+        std::call_once(init_flag, initialize_machine_id);
+
+        if (!rng_seeded) {
+            rng.seed(std::random_device{}() ^ unique_machine_id);
+            rng_seeded = true;
+        }
+        
         uint32_t timestamp = static_cast<uint32_t>(
             std::chrono::steady_clock::now().time_since_epoch().count()
         );
-        
-        // Bit distribution
-        uint32_t part1 = (timestamp & 0xFFFFF) | ((unique_machine_id & 0xFFF) << 20);
+
+        uint32_t random_bits = rng() & 0xFFF;
+        uint32_t part1 = (timestamp & 0xFFFF) | ((unique_machine_id & 0xFF) << 16) | ((rng() & 0xFF) << 24);
         uint32_t part2 = counter.fetch_add(1, std::memory_order_relaxed);
         char buffer[17];
         to_hex(buffer, part1);
@@ -248,6 +247,9 @@ public:
 
 std::atomic<uint32_t> UIDGenerator::counter{0};
 thread_local std::mt19937 UIDGenerator::rng;
+thread_local bool UIDGenerator::rng_seeded = false;
+std::once_flag UIDGenerator::init_flag;
+uint32_t UIDGenerator::unique_machine_id = 0;
 
 class MainThreadScheduler {
 private:
@@ -301,6 +303,131 @@ public:
         std::lock_guard<std::mutex> lock(queue_mutex);
         pending_commands.clear();
     }
+};
+
+template<typename Key, typename Value>
+class LRUCache {
+public:
+    explicit LRUCache(size_t max_size) : max_size_(max_size) {
+        if (max_size_ == 0) max_size_ = 1;
+    }
+    
+    LRUCache(const LRUCache&) = delete;
+    LRUCache& operator=(const LRUCache&) = delete;
+    
+    LRUCache(LRUCache&& other) noexcept {
+        std::unique_lock<std::shared_mutex> lock(other.mutex_);
+        max_size_ = other.max_size_;
+        access_order_ = std::move(other.access_order_);
+        cache_map_ = std::move(other.cache_map_);
+    }
+    
+    LRUCache& operator=(LRUCache&& other) noexcept {
+        if (this != &other) {
+            std::unique_lock<std::shared_mutex> lock1(mutex_, std::defer_lock);
+            std::unique_lock<std::shared_mutex> lock2(other.mutex_, std::defer_lock);
+            std::lock(lock1, lock2);
+            max_size_ = other.max_size_;
+            access_order_ = std::move(other.access_order_);
+            cache_map_ = std::move(other.cache_map_);
+        }
+
+        return *this;
+    }
+    
+    std::optional<Value> get(const Key& key) {
+        std::unique_lock<std::shared_mutex> lock(mutex_);
+        auto it = cache_map_.find(key);
+        
+        if (it == cache_map_.end()) {
+            return std::nullopt;
+        }
+        
+        // Move accessed item to front (most recently used)
+        access_order_.splice(access_order_.begin(), access_order_, it->second.list_it);
+        return it->second.value;
+    }
+    
+    // Get without updating LRU order (for read-heavy scenarios)
+    std::optional<Value> peek(const Key& key) const {
+        std::shared_lock<std::shared_mutex> lock(mutex_);
+        auto it = cache_map_.find(key);
+        
+        if (it == cache_map_.end()) {
+            return std::nullopt;
+        }
+        
+        return it->second.value;
+    }
+    
+    void put(const Key& key, const Value& value) {
+        std::unique_lock<std::shared_mutex> lock(mutex_);
+        auto it = cache_map_.find(key);
+        
+        if (it != cache_map_.end()) {
+            it->second.value = value;
+            access_order_.splice(access_order_.begin(), access_order_, it->second.list_it);
+            return;
+        }
+        
+        // Evict least recently used if at capacity
+        while (cache_map_.size() >= max_size_) {
+            const Key& lru_key = access_order_.back();
+            cache_map_.erase(lru_key);
+            access_order_.pop_back();
+        }
+        
+        // Insert new entry at front
+        access_order_.push_front(key);
+        cache_map_[key] = {value, access_order_.begin()};
+    }
+    
+    bool contains(const Key& key) const {
+        std::shared_lock<std::shared_mutex> lock(mutex_);
+        return cache_map_.find(key) != cache_map_.end();
+    }
+    
+    void remove(const Key& key) {
+        std::unique_lock<std::shared_mutex> lock(mutex_);
+        auto it = cache_map_.find(key);
+        
+        if (it != cache_map_.end()) {
+            access_order_.erase(it->second.list_it);
+            cache_map_.erase(it);
+        }
+    }
+    
+    void clear() {
+        std::unique_lock<std::shared_mutex> lock(mutex_);
+        cache_map_.clear();
+        access_order_.clear();
+    }
+    
+    size_t size() const {
+        std::shared_lock<std::shared_mutex> lock(mutex_);
+        return cache_map_.size();
+    }
+    
+    size_t max_size() const {
+        std::shared_lock<std::shared_mutex> lock(mutex_);
+        return max_size_;
+    }
+    
+    bool empty() const {
+        std::shared_lock<std::shared_mutex> lock(mutex_);
+        return cache_map_.empty();
+    }
+
+private:
+    struct CacheEntry {
+        Value value;
+        typename std::list<Key>::iterator list_it;
+    };
+    
+    size_t max_size_;
+    std::list<Key> access_order_;  // Front = most recent, Back = least recent
+    std::unordered_map<Key, CacheEntry> cache_map_;
+    mutable std::shared_mutex mutex_;
 };
 
 static void initialize_terrain_matrix() {
@@ -360,3 +487,68 @@ static void initialize_terrain_matrix() {
         report_error("Unknown error initializing terrain matrix");
     }
 }
+
+class ShutdownWatchdog {
+public:
+    static ShutdownWatchdog& instance() {
+        static ShutdownWatchdog inst;
+        return inst;
+    }
+
+    void initialize() {
+        if (InterlockedCompareExchange(&initialized_, 1, 0) == 1) return;
+        
+        HANDLE hThread = CreateThread(
+            nullptr, 
+            0, 
+            WatchdogThreadProc, 
+            this, 
+            0, 
+            nullptr
+        );
+        
+        if (hThread) {
+            CloseHandle(hThread);
+        }
+    }
+
+    void arm(DWORD timeout_ms = 3000) {
+        timeout_ms_ = timeout_ms;
+        arm_time_ = GetTickCount64();
+        InterlockedExchange(&armed_, 1);
+    }
+
+    void disarm() {
+        InterlockedExchange(&armed_, 0);
+    }
+
+    static void force_terminate(UINT exit_code = 0xDEAD0002) {
+        TerminateProcess(GetCurrentProcess(), exit_code);
+    }
+
+private:
+    static DWORD WINAPI WatchdogThreadProc(LPVOID lpParam) {
+        ShutdownWatchdog* self = static_cast<ShutdownWatchdog*>(lpParam);
+        
+        while (InterlockedCompareExchange(&self->shutdown_thread_, 0, 0) == 0) {
+            if (InterlockedCompareExchange(&self->armed_, 1, 1) == 1) {
+                ULONGLONG elapsed = GetTickCount64() - self->arm_time_;
+                
+                if (elapsed >= self->timeout_ms_) {
+                    TerminateProcess(GetCurrentProcess(), 0xDEAD0001);
+                }
+            }
+            
+            Sleep(50);
+        }
+        
+        return 0;
+    }
+
+    ShutdownWatchdog() = default;
+    volatile LONG initialized_ = 0;
+    volatile LONG armed_ = 0;
+    volatile LONG shutdown_thread_ = 0;
+    volatile ULONGLONG arm_time_ = 0;
+    volatile DWORD timeout_ms_ = 3000;
+};

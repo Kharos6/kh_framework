@@ -400,18 +400,6 @@ static FARPROC WINAPI delay_load_hook(unsigned dliNotify, PDelayLoadInfo pdli) {
                         }
 
                         sqf::diag_log("KH - AI Framework: " + dll_name + " not found in standard locations");
-                    } else if (_stricmp(dll_name.c_str(), "UltralightCore.dll") == 0) {
-                        HMODULE hDll = LoadLibraryA(dllFullPath.c_str());
-                        
-                        if (hDll != NULL) {
-                            g_loaded_delay_modules[dll_name] = hDll;
-                            return (FARPROC)hDll;
-                        } else {
-                            DWORD error = GetLastError();
-                            report_error("Failed to load " + dll_name + " from " + dllFullPath + " - error code: " + std::to_string(error));
-                        }
-
-                        sqf::diag_log("KH - AI Framework: " + dll_name + " not found in standard locations");
                     } else if (_stricmp(dll_name.c_str(), "Ultralight.dll") == 0) {
                         std::string core_path = modDir + "\\UltralightCore.dll";
                         std::string webcore_path = modDir + "\\WebCore.dll";
@@ -491,46 +479,51 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
     switch (ul_reason_for_call) {
         case DLL_PROCESS_ATTACH:
             DisableProcessWindowsGhosting();
+            ShutdownWatchdog::instance().initialize();
             detect_gpu_backends();
             break;
         case DLL_PROCESS_DETACH:
-            if (AIFramework::instance().is_initialized()) {
-                try {
+            ShutdownWatchdog::instance().arm(3000);
+            
+            __try { 
+                if (AIFramework::instance().is_initialized()) {
                     AIFramework::instance().stop_all();
-                } catch (...) {}
-            }
+                }
+            } __except(EXCEPTION_EXECUTE_HANDLER) {}
 
-            if (TTSFramework::instance().is_initialized()) {
-                try {
+            __try {
+                if (TTSFramework::instance().is_initialized()) {
                     TTSFramework::instance().cleanup();
-                } catch (...) {}
-            }
+                }
+            } __except(EXCEPTION_EXECUTE_HANDLER) {}
 
-            if (STTFramework::instance().is_initialized_public()) {
-                try {
+            __try {
+                if (STTFramework::instance().is_initialized_public()) {
                     STTFramework::instance().cleanup_public();
-                } catch (...) {}
-            }
+                }
+            } __except(EXCEPTION_EXECUTE_HANDLER) {}
 
-            if (lpReserved != nullptr) {
+            __try {
                 if (UIFramework::instance().is_initialized()) {
-                    try {
+                    if (lpReserved != nullptr) {
                         UIFramework::instance().emergency_shutdown();
-                    } catch (...) {}
-                }
-            } else {
-                if (UIFramework::instance().is_initialized()) {
-                    try {
+                    } else {
                         UIFramework::instance().shutdown();
-                    } catch (...) {}
+                    }
                 }
+            } __except(EXCEPTION_EXECUTE_HANDLER) {}
+
+            __try { 
+                MH_Uninitialize(); 
+            } __except(EXCEPTION_EXECUTE_HANDLER) {}
+            
+            if (lpReserved == nullptr) {
+                __try { 
+                    cleanup_delay_loaded_modules(); 
+                } __except(EXCEPTION_EXECUTE_HANDLER) {}
             }
-
-            try {
-                MH_Uninitialize();
-            } catch (...) {}
-
-            cleanup_delay_loaded_modules();
+            
+            ShutdownWatchdog::instance().disarm();
             break;
         case DLL_THREAD_ATTACH:
             break;

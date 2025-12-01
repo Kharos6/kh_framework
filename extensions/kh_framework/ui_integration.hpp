@@ -4,33 +4,87 @@ using Microsoft::WRL::ComPtr;
 
 class DirectWriteFontLoader : public ultralight::FontLoader {
 public:
-    DirectWriteFontLoader() {
-        HRESULT hr = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
-                            reinterpret_cast<IUnknown**>(&dwrite_factory_));
+    DirectWriteFontLoader() : font_cache_(128) {
+        HRESULT hr = DWriteCreateFactory(
+            DWRITE_FACTORY_TYPE_SHARED,
+            __uuidof(IDWriteFactory),
+            reinterpret_cast<IUnknown**>(&dwrite_factory_)
+        );
+        
         if (FAILED(hr)) {
             dwrite_factory_ = nullptr;
         }
     }
 
     ~DirectWriteFontLoader() {
-        if (dwrite_factory_) dwrite_factory_->Release();
+        font_cache_.clear();
+        
+        if (dwrite_factory_) {
+            dwrite_factory_->Release();
+            dwrite_factory_ = nullptr;
+        }
     }
+    
+    DirectWriteFontLoader(const DirectWriteFontLoader&) = delete;
+    DirectWriteFontLoader& operator=(const DirectWriteFontLoader&) = delete;
 
     ultralight::String fallback_font() const override {
         return "Segoe UI";
     }
 
-    ultralight::String fallback_font_for_characters(const ultralight::String& characters,
-                                             int weight,
-                                             bool italic) const override {
+    ultralight::String fallback_font_for_characters(
+        const ultralight::String& characters,
+        int weight,
+        bool italic) const override {
         return "Segoe UI";
     }
 
-    ultralight::RefPtr<ultralight::FontFile> Load(const ultralight::String& family,
-                                   int weight,
-                                   bool italic) override {
+    ultralight::RefPtr<ultralight::FontFile> Load(
+        const ultralight::String& family,
+        int weight,
+        bool italic) override {
         if (!dwrite_factory_) return nullptr;
         std::string family_str(family.utf8().data());
+        uint64_t key = hash_font_key(family_str, weight, italic);
+        auto cached = font_cache_.get(key);
+
+        if (cached.has_value()) {
+            return cached.value();
+        }
+        
+        // Cache miss - load the font
+        auto font_file = LoadFontInternal(family_str, weight, italic);
+
+        if (font_file) {
+            font_cache_.put(key, font_file);
+        }
+                
+        return font_file;
+    }
+
+private:
+    IDWriteFactory* dwrite_factory_ = nullptr;
+    mutable LRUCache<uint64_t, ultralight::RefPtr<ultralight::FontFile>> font_cache_;
+    
+    static uint64_t hash_font_key(const std::string& family, int weight, bool italic) {
+        uint64_t h = 14695981039346656037ULL;
+        
+        for (char c : family) {
+            h ^= static_cast<uint64_t>(static_cast<unsigned char>(c));
+            h *= 1099511628211ULL;
+        }
+
+        h ^= static_cast<uint64_t>(static_cast<uint32_t>(weight));
+        h *= 1099511628211ULL;
+        h ^= static_cast<uint64_t>(italic ? 1 : 0);
+        h *= 1099511628211ULL;
+        return h;
+    }
+    
+    ultralight::RefPtr<ultralight::FontFile> LoadFontInternal(
+        const std::string& family_str,
+        int weight,
+        bool italic) {
         int wide_len = MultiByteToWideChar(CP_UTF8, 0, family_str.c_str(), -1, nullptr, 0);
         if (wide_len <= 0) return nullptr;
         std::wstring family_wide(wide_len, L'\0');
@@ -38,8 +92,9 @@ public:
         family_wide.resize(wide_len - 1);
         ComPtr<IDWriteFontCollection> font_collection;
 
-        if (FAILED(dwrite_factory_->GetSystemFontCollection(&font_collection, FALSE)))
+        if (FAILED(dwrite_factory_->GetSystemFontCollection(&font_collection, FALSE))) {
             return nullptr;
+        }
 
         UINT32 family_index = 0;
         BOOL exists = FALSE;
@@ -51,21 +106,24 @@ public:
         }
 
         ComPtr<IDWriteFontFamily> font_family;
-        
-        if (FAILED(font_collection->GetFontFamily(family_index, &font_family)))
+
+        if (FAILED(font_collection->GetFontFamily(family_index, &font_family))) {
             return nullptr;
+        }
 
         DWRITE_FONT_WEIGHT dw_weight = static_cast<DWRITE_FONT_WEIGHT>(weight);
         DWRITE_FONT_STYLE dw_style = italic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL;
         ComPtr<IDWriteFont> font;
 
-        if (FAILED(font_family->GetFirstMatchingFont(dw_weight, DWRITE_FONT_STRETCH_NORMAL, dw_style, &font)))
+        if (FAILED(font_family->GetFirstMatchingFont(dw_weight, DWRITE_FONT_STRETCH_NORMAL, dw_style, &font))) {
             return nullptr;
+        }
 
         ComPtr<IDWriteFontFace> font_face;
 
-        if (FAILED(font->CreateFontFace(&font_face)))
+        if (FAILED(font->CreateFontFace(&font_face))) {
             return nullptr;
+        }
 
         UINT32 file_count = 0;
         font_face->GetFiles(&file_count, nullptr);
@@ -75,7 +133,7 @@ public:
         }
 
         std::vector<IDWriteFontFile*> font_files(file_count);
-        
+
         if (FAILED(font_face->GetFiles(&file_count, font_files.data()))) {
             return nullptr;
         }
@@ -89,20 +147,20 @@ public:
                 }
             }
         } cleanup{font_files};
-        
+
         ComPtr<IDWriteFontFileLoader> loader;
-        
+
         if (FAILED(font_files[0]->GetLoader(&loader)) || !loader) {
             return nullptr;
         }
-        
+
         const void* ref_key = nullptr;
         UINT32 ref_key_size = 0;
-        
+
         if (FAILED(font_files[0]->GetReferenceKey(&ref_key, &ref_key_size))) {
             return nullptr;
         }
-        
+
         ComPtr<IDWriteFontFileStream> stream;
 
         if (FAILED(loader->CreateStreamFromKey(ref_key, ref_key_size, &stream))) {
@@ -110,95 +168,179 @@ public:
         }
 
         UINT64 file_size = 0;
-        
+
         if (FAILED(stream->GetFileSize(&file_size))) {
             return nullptr;
         }
-        
+
         const void* font_data = nullptr;
         void* context = nullptr;
-        
+
         if (FAILED(stream->ReadFileFragment(&font_data, 0, file_size, &context))) {
             return nullptr;
         }
         
+        // Create Ultralight buffer and font file
         auto buffer = ultralight::Buffer::CreateFromCopy(font_data, static_cast<size_t>(file_size));
         stream->ReleaseFileFragment(context);
         return ultralight::FontFile::Create(buffer);
     }
-
-private:
-    IDWriteFactory* dwrite_factory_ = nullptr;
 };
 
 class UIFileSystem : public ultralight::FileSystem {
 public:
-    UIFileSystem(const std::vector<std::filesystem::path>& search_paths,
-                   const std::filesystem::path& resources_path)
-        : search_paths_(search_paths), resources_path_(resources_path) {}
+    UIFileSystem(
+        const std::vector<std::filesystem::path>& search_paths,
+        const std::filesystem::path& resources_path)
+        : search_paths_(search_paths)
+        , resources_path_(resources_path)
+        , exists_cache_(1024) {}
+    
+    UIFileSystem(const UIFileSystem&) = delete;
+    UIFileSystem& operator=(const UIFileSystem&) = delete;
 
     bool FileExists(const ultralight::String& path) override {
         std::string path_str = path.utf8().data();
-        if (path_str.find("file:///") == 0) path_str = path_str.substr(8);
         
-        if (!resources_path_.empty()) {
-            std::filesystem::path full = resources_path_ / path_str;
-            if (std::filesystem::exists(full)) return true;
-        }
-        
-        for (const auto& base : search_paths_) {
-            if (std::filesystem::exists(base / path_str)) return true;
+        if (path_str.find("file:///") == 0) {
+            path_str = path_str.substr(8);
         }
 
-        return std::filesystem::exists(path_str);
+        auto cached = exists_cache_.get(path_str);
+
+        if (cached.has_value()) {
+            return cached.value();
+        }
+        
+        // Cache miss - check filesystem
+        bool exists = CheckExistsInternal(path_str);
+        exists_cache_.put(path_str, exists);
+        return exists;
     }
 
     ultralight::RefPtr<ultralight::Buffer> OpenFile(const ultralight::String& path) override {
         std::string path_str = path.utf8().data();
-        if (path_str.find("file:///") == 0) path_str = path_str.substr(8);
-        std::filesystem::path file_path;
         
-        if (!resources_path_.empty()) {
-            std::filesystem::path full = resources_path_ / path_str;
-            if (std::filesystem::exists(full)) file_path = full;
+        if (path_str.find("file:///") == 0) {
+            path_str = path_str.substr(8);
         }
+        
+        std::filesystem::path file_path = ResolvePath(path_str);
         
         if (file_path.empty()) {
-            for (const auto& base : search_paths_) {
-                std::filesystem::path full = base / path_str;
-                if (std::filesystem::exists(full)) { file_path = full; break; }
-            }
+            return nullptr;
         }
         
-        if (file_path.empty() && std::filesystem::exists(path_str)) file_path = path_str;
-        if (file_path.empty()) return nullptr;
         std::ifstream file(file_path, std::ios::binary | std::ios::ate);
-        if (!file) return nullptr;
-        size_t size = file.tellg();
+        
+        if (!file) {
+            return nullptr;
+        }
+        
+        std::streamsize size = file.tellg();
+        
+        if (size <= 0) {
+            return nullptr;
+        }
+        
         file.seekg(0, std::ios::beg);
-        std::vector<char> data(size);
-        file.read(data.data(), size);
-        return ultralight::Buffer::CreateFromCopy(data.data(), size);
+        std::vector<char> data(static_cast<size_t>(size));
+        
+        if (!file.read(data.data(), size)) {
+            return nullptr;
+        }
+        
+        return ultralight::Buffer::CreateFromCopy(data.data(), data.size());
     }
 
     ultralight::String GetFileMimeType(const ultralight::String& path) override {
-        std::string ext = std::filesystem::path(std::string(path.utf8().data())).extension().string();
-        if (ext == ".html" || ext == ".htm") return "text/html";
-        if (ext == ".css") return "text/css";
-        if (ext == ".js") return "application/javascript";
-        if (ext == ".png") return "image/png";
-        if (ext == ".jpg" || ext == ".jpeg") return "image/jpeg";
-        if (ext == ".svg") return "image/svg+xml";
-        return "application/octet-stream";
+        static const std::unordered_map<std::string, const char*> mime_types = {
+            {".html", "text/html"}, {".htm", "text/html"},
+            {".css", "text/css"},
+            {".js", "application/javascript"}, {".mjs", "application/javascript"},
+            {".png", "image/png"}, {".jpg", "image/jpeg"}, {".jpeg", "image/jpeg"},
+            {".gif", "image/gif"}, {".webp", "image/webp"},
+            {".svg", "image/svg+xml"}, {".ico", "image/x-icon"},
+            {".woff", "font/woff"}, {".woff2", "font/woff2"},
+            {".ttf", "font/ttf"}, {".otf", "font/otf"},
+            {".eot", "application/vnd.ms-fontobject"},
+            {".json", "application/json"}, {".xml", "application/xml"}
+        };
+        
+        std::string ext = std::filesystem::path(path.utf8().data()).extension().string();
+        
+        // Lowercase in-place
+        for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        auto it = mime_types.find(ext);
+        return (it != mime_types.end()) ? it->second : "application/octet-stream";
     }
 
     ultralight::String GetFileCharset(const ultralight::String& path) override {
         return "utf-8";
     }
+    
+    void clear_cache() {
+        exists_cache_.clear();
+    }
 
 private:
     std::vector<std::filesystem::path> search_paths_;
     std::filesystem::path resources_path_;
+    mutable LRUCache<std::string, bool> exists_cache_;
+
+    bool CheckExistsInternal(const std::string& path_str) const {
+        try {
+            // Check resources path first
+            if (!resources_path_.empty()) {
+                if (std::filesystem::exists(resources_path_ / path_str)) {
+                    return true;
+                }
+            }
+            
+            // Check search paths
+            for (const auto& base : search_paths_) {
+                if (std::filesystem::exists(base / path_str)) {
+                    return true;
+                }
+            }
+            
+            // Check absolute/relative path
+            return std::filesystem::exists(path_str);
+        } catch (const std::filesystem::filesystem_error&) {
+            return false;
+        }
+    }
+    
+    std::filesystem::path ResolvePath(const std::string& path_str) const {
+        try {
+            // Check resources path first
+            if (!resources_path_.empty()) {
+                std::filesystem::path full = resources_path_ / path_str;
+
+                if (std::filesystem::exists(full)) {
+                    return full;
+                }
+            }
+            
+            // Check search paths
+            for (const auto& base : search_paths_) {
+                std::filesystem::path full = base / path_str;
+                
+                if (std::filesystem::exists(full)) {
+                    return full;
+                }
+            }
+            
+            // Check absolute/relative path
+            if (std::filesystem::exists(path_str)) {
+                return path_str;
+            }
+        } catch (const std::filesystem::filesystem_error&) {
+            // Ignore filesystem errors
+        }
+        
+        return {};
+    }
 };
 
 struct UIDocument {
@@ -210,14 +352,15 @@ struct UIDocument {
     int x = 0, y = 0, width = 0, height = 0;
     float opacity = 1.0f;
     int z_order = 0;
-    
-    // Cached pixels for transfer between threads
     std::vector<uint8_t> cached_pixels;
     int cached_width = 0;
     int cached_height = 0;
+    int dirty_top = 0;
+    int dirty_bottom = 0;
     uint32_t cached_stride = 0;
     std::atomic<bool> pixels_ready{false};
-    mutable std::mutex pixel_mutex;
+    std::atomic<bool> texture_needs_update{true};
+    std::mutex pixel_mutex;
 };
 
 class UIOverlayRenderer {
@@ -232,10 +375,41 @@ class UIOverlayRenderer {
     ComPtr<ID3D11BlendState> blend_state_;
     ComPtr<ID3D11RasterizerState> rasterizer_state_;
     ComPtr<ID3D11DepthStencilState> depth_stencil_state_;
-    ComPtr<ID3D11Texture2D> overlay_texture_;
-    ComPtr<ID3D11ShaderResourceView> overlay_srv_;
-    int texture_width_ = 0, texture_height_ = 0;
+    ComPtr<ID3D11BlendState> saved_blend_;
+    FLOAT saved_bf_[4] = {};
+    UINT saved_sm_ = 0;
+    ComPtr<ID3D11DepthStencilState> saved_ds_;
+    UINT saved_sr_ = 0;
+    ComPtr<ID3D11RasterizerState> saved_rs_;
+    ComPtr<ID3D11RenderTargetView> saved_rtv_;
+    ComPtr<ID3D11DepthStencilView> saved_dsv_;
+    D3D11_VIEWPORT saved_vp_[16] = {};
+    UINT saved_nvp_ = 0;
+    D3D11_RECT saved_scissor_[16] = {};
+    UINT saved_nsr_ = 0;
+    ComPtr<ID3D11VertexShader> saved_vs_;
+    ComPtr<ID3D11PixelShader> saved_ps_;
+    ComPtr<ID3D11GeometryShader> saved_gs_;
+    ComPtr<ID3D11InputLayout> saved_il_;
+    D3D11_PRIMITIVE_TOPOLOGY saved_pt_ = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
+    ComPtr<ID3D11Buffer> saved_vb_;
+    UINT saved_vb_st_ = 0, saved_vb_of_ = 0;
+    ComPtr<ID3D11Buffer> saved_ib_;
+    DXGI_FORMAT saved_ib_fmt_ = DXGI_FORMAT_UNKNOWN;
+    UINT saved_ib_off_ = 0;
+    ComPtr<ID3D11Buffer> saved_cb_vs_, saved_cb_ps_;
+    ComPtr<ID3D11ShaderResourceView> saved_srv_;
+    ComPtr<ID3D11SamplerState> saved_samp_;
+
+    struct DocTexture {
+        ComPtr<ID3D11Texture2D> texture;
+        ComPtr<ID3D11ShaderResourceView> srv;
+        int width = 0, height = 0;
+    };
+
+    std::unordered_map<std::string, DocTexture> doc_textures_;
     std::atomic<bool> initialized_{false};
+    mutable std::mutex texture_mutex_;
     std::mutex init_mutex_;
     struct Vertex { float x, y, z, u, v; };
     struct ConstantBuffer { float screen_width, screen_height, offset_x, offset_y, doc_width, doc_height, opacity, padding; };
@@ -298,8 +472,12 @@ public:
 
     void cleanup() {
         std::lock_guard<std::mutex> lock(init_mutex_);
-        overlay_srv_.Reset();
-        overlay_texture_.Reset();
+        
+        {
+            std::lock_guard<std::mutex> tex_lock(texture_mutex_);
+            doc_textures_.clear();
+        }
+
         depth_stencil_state_.Reset();
         rasterizer_state_.Reset();
         blend_state_.Reset();
@@ -311,68 +489,84 @@ public:
         vertex_shader_.Reset();
         context_.Reset();
         device_.Reset();
-        texture_width_ = 0;
-        texture_height_ = 0;
         initialized_.store(false, std::memory_order_release);
     }
 
-    bool update_texture(const void* pixels, int width, int height, uint32_t stride) {
+    bool update_texture(const std::string& doc_id, const void* pixels, int width, int height, uint32_t stride) {
         if (!initialized_.load(std::memory_order_acquire)) return false;
-        if (!device_ || !pixels || width <= 0 || height <= 0) return false;
-
-        if (texture_width_ != width || texture_height_ != height) {
-            overlay_texture_.Reset(); overlay_srv_.Reset();
-            D3D11_TEXTURE2D_DESC td = {(UINT)width, (UINT)height, 1, 1, DXGI_FORMAT_B8G8R8A8_UNORM, {1,0}, D3D11_USAGE_DYNAMIC, D3D11_BIND_SHADER_RESOURCE, D3D11_CPU_ACCESS_WRITE, 0};
-            if (FAILED(device_->CreateTexture2D(&td, 0, &overlay_texture_))) return false;
-            if (FAILED(device_->CreateShaderResourceView(overlay_texture_.Get(), 0, &overlay_srv_))) return false;
-            texture_width_ = width; texture_height_ = height;
+        if (!device_ || !context_ || !pixels || width <= 0 || height <= 0) return false;
+        std::lock_guard<std::mutex> lock(texture_mutex_);
+        auto& tex = doc_textures_[doc_id];
+        
+        if (tex.width != width || tex.height != height) {
+            tex.texture.Reset();
+            tex.srv.Reset();
+            D3D11_TEXTURE2D_DESC td = {};
+            td.Width = width;
+            td.Height = height;
+            td.MipLevels = 1;
+            td.ArraySize = 1;
+            td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+            td.SampleDesc.Count = 1;
+            td.SampleDesc.Quality = 0;
+            td.Usage = D3D11_USAGE_DEFAULT;
+            td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            td.CPUAccessFlags = 0;
+            td.MiscFlags = 0;
+            if (FAILED(device_->CreateTexture2D(&td, nullptr, &tex.texture))) return false;
+            if (FAILED(device_->CreateShaderResourceView(tex.texture.Get(), nullptr, &tex.srv))) return false;
+            tex.width = width;
+            tex.height = height;
         }
 
-        D3D11_MAPPED_SUBRESOURCE mapped;
+        context_->UpdateSubresource(tex.texture.Get(), 0, nullptr, pixels, stride, 0);
+        return true;
+    }
+    
+    bool update_texture_partial(const std::string& doc_id, const void* pixels, 
+                                int width, int height, uint32_t stride,
+                                int dirty_top, int dirty_bottom) {
+        if (!initialized_.load(std::memory_order_acquire)) return false;
+        if (!context_ || !pixels || width <= 0 || height <= 0) return false;
+        if (dirty_top >= dirty_bottom) return true;
+        std::lock_guard<std::mutex> lock(texture_mutex_);
+        auto it = doc_textures_.find(doc_id);
 
-        if (SUCCEEDED(context_->Map(overlay_texture_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
-            for (int y = 0; y < height; y++)
-                memcpy((BYTE*)mapped.pData + y * mapped.RowPitch, (const BYTE*)pixels + y * stride, width * 4);
-            context_->Unmap(overlay_texture_.Get(), 0);
+        if (it == doc_textures_.end() || it->second.width != width || it->second.height != height) {
+            return false;
         }
-
+        
+        D3D11_BOX box = {};
+        box.left = 0;
+        box.right = width;
+        box.top = dirty_top;
+        box.bottom = dirty_bottom;
+        box.front = 0;
+        box.back = 1;
+        const uint8_t* src = static_cast<const uint8_t*>(pixels) + (dirty_top * stride);
+        context_->UpdateSubresource(it->second.texture.Get(), 0, &box, src, stride, 0);
         return true;
     }
 
-    void render(int sw, int sh, int dx, int dy, int dw, int dh, float opacity) {
-        if (!initialized_.load(std::memory_order_acquire) || !overlay_srv_ || !context_) return;
-        ComPtr<ID3D11BlendState> old_blend; FLOAT old_bf[4]; UINT old_sm;
-        context_->OMGetBlendState(&old_blend, old_bf, &old_sm);
-        ComPtr<ID3D11DepthStencilState> old_ds; UINT old_sr;
-        context_->OMGetDepthStencilState(&old_ds, &old_sr);
-        ComPtr<ID3D11RasterizerState> old_rs; context_->RSGetState(&old_rs);
-        ComPtr<ID3D11RenderTargetView> old_rtv; ComPtr<ID3D11DepthStencilView> old_dsv;
-        context_->OMGetRenderTargets(1, &old_rtv, &old_dsv);
-        D3D11_VIEWPORT old_vp[16]; UINT nvp = 16; context_->RSGetViewports(&nvp, old_vp);
-        D3D11_RECT old_scissor[16]; UINT nsr = 16; context_->RSGetScissorRects(&nsr, old_scissor);
-        ComPtr<ID3D11VertexShader> old_vs; context_->VSGetShader(&old_vs, 0, 0);
-        ComPtr<ID3D11PixelShader> old_ps; context_->PSGetShader(&old_ps, 0, 0);
-        ComPtr<ID3D11GeometryShader> old_gs; context_->GSGetShader(&old_gs, 0, 0);
-        ComPtr<ID3D11InputLayout> old_il; context_->IAGetInputLayout(&old_il);
-        D3D11_PRIMITIVE_TOPOLOGY old_pt; context_->IAGetPrimitiveTopology(&old_pt);
-        ComPtr<ID3D11Buffer> old_vb; UINT old_st, old_of; context_->IAGetVertexBuffers(0, 1, &old_vb, &old_st, &old_of);
-        ComPtr<ID3D11Buffer> old_ib; DXGI_FORMAT old_ib_fmt; UINT old_ib_off;
-        context_->IAGetIndexBuffer(&old_ib, &old_ib_fmt, &old_ib_off);
-        ComPtr<ID3D11Buffer> old_cb_vs; context_->VSGetConstantBuffers(0, 1, &old_cb_vs);
-        ComPtr<ID3D11Buffer> old_cb_ps; context_->PSGetConstantBuffers(0, 1, &old_cb_ps);
-        ComPtr<ID3D11ShaderResourceView> old_srv; context_->PSGetShaderResources(0, 1, &old_srv);
-        ComPtr<ID3D11SamplerState> old_samp; context_->PSGetSamplers(0, 1, &old_samp);
-        D3D11_MAPPED_SUBRESOURCE m;
-
-        if (SUCCEEDED(context_->Map(constant_buffer_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) {
-            ConstantBuffer* cb = (ConstantBuffer*)m.pData;
-            cb->screen_width = (float)sw; cb->screen_height = (float)sh;
-            cb->offset_x = (float)dx; cb->offset_y = (float)dy;
-            cb->doc_width = (float)dw; cb->doc_height = (float)dh;
-            cb->opacity = opacity;
-            context_->Unmap(constant_buffer_.Get(), 0);
-        }
-
+    void begin_batch(int sw, int sh) {
+        if (!initialized_.load(std::memory_order_acquire) || !context_) return;
+        context_->OMGetBlendState(&saved_blend_, saved_bf_, &saved_sm_);
+        context_->OMGetDepthStencilState(&saved_ds_, &saved_sr_);
+        context_->RSGetState(&saved_rs_);
+        context_->OMGetRenderTargets(1, &saved_rtv_, &saved_dsv_);
+        saved_nvp_ = 16; context_->RSGetViewports(&saved_nvp_, saved_vp_);
+        saved_nsr_ = 16; context_->RSGetScissorRects(&saved_nsr_, saved_scissor_);
+        context_->VSGetShader(&saved_vs_, 0, 0);
+        context_->PSGetShader(&saved_ps_, 0, 0);
+        context_->GSGetShader(&saved_gs_, 0, 0);
+        context_->IAGetInputLayout(&saved_il_);
+        context_->IAGetPrimitiveTopology(&saved_pt_);
+        context_->IAGetVertexBuffers(0, 1, &saved_vb_, &saved_vb_st_, &saved_vb_of_);
+        context_->IAGetIndexBuffer(&saved_ib_, &saved_ib_fmt_, &saved_ib_off_);
+        context_->VSGetConstantBuffers(0, 1, &saved_cb_vs_);
+        context_->PSGetConstantBuffers(0, 1, &saved_cb_ps_);
+        context_->PSGetShaderResources(0, 1, &saved_srv_);
+        context_->PSGetSamplers(0, 1, &saved_samp_);
         D3D11_VIEWPORT vp = {0, 0, (float)sw, (float)sh, 0, 1};
         context_->RSSetViewports(1, &vp);
         context_->OMSetBlendState(blend_state_.Get(), 0, 0xFFFFFFFF);
@@ -388,28 +582,85 @@ public:
         context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
         context_->VSSetConstantBuffers(0, 1, constant_buffer_.GetAddressOf());
         context_->PSSetConstantBuffers(0, 1, constant_buffer_.GetAddressOf());
-        context_->PSSetShaderResources(0, 1, overlay_srv_.GetAddressOf());
         context_->PSSetSamplers(0, 1, sampler_state_.GetAddressOf());
+    }
+    
+    void draw_quad(const std::string& doc_id, int sw, int sh, int dx, int dy, int dw, int dh, float opacity) {
+        if (!initialized_.load(std::memory_order_acquire) || !context_) return;
+        std::lock_guard<std::mutex> lock(texture_mutex_);
+        auto it = doc_textures_.find(doc_id);
+        if (it == doc_textures_.end() || !it->second.srv) return;
+        D3D11_MAPPED_SUBRESOURCE m;
+
+        if (SUCCEEDED(context_->Map(constant_buffer_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) {
+            ConstantBuffer* cb = (ConstantBuffer*)m.pData;
+            cb->screen_width = (float)sw; cb->screen_height = (float)sh;
+            cb->offset_x = (float)dx; cb->offset_y = (float)dy;
+            cb->doc_width = (float)dw; cb->doc_height = (float)dh;
+            cb->opacity = opacity;
+            context_->Unmap(constant_buffer_.Get(), 0);
+        }
+
+        context_->PSSetShaderResources(0, 1, it->second.srv.GetAddressOf());
         context_->Draw(4, 0);
+    }
+
+    void draw_quad_with_srv(ID3D11ShaderResourceView* srv, int sw, int sh, 
+                            int dx, int dy, int dw, int dh, float opacity) {
+        if (!initialized_.load(std::memory_order_acquire) || !context_ || !srv) return;
+        D3D11_MAPPED_SUBRESOURCE m;
+
+        if (SUCCEEDED(context_->Map(constant_buffer_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) {
+            ConstantBuffer* cb = (ConstantBuffer*)m.pData;
+            cb->screen_width = (float)sw; cb->screen_height = (float)sh;
+            cb->offset_x = (float)dx; cb->offset_y = (float)dy;
+            cb->doc_width = (float)dw; cb->doc_height = (float)dh;
+            cb->opacity = opacity;
+            context_->Unmap(constant_buffer_.Get(), 0);
+        }
+
+        context_->PSSetShaderResources(0, 1, &srv);
+        context_->Draw(4, 0);
+    }
+        
+    ID3D11ShaderResourceView* get_srv(const std::string& doc_id) {
+        std::lock_guard<std::mutex> lock(texture_mutex_);
+        auto it = doc_textures_.find(doc_id);
+        if (it == doc_textures_.end() || !it->second.srv) return nullptr;
+        return it->second.srv.Get();
+    }
+
+    void remove_doc_texture(const std::string& doc_id) {
+        std::lock_guard<std::mutex> lock(texture_mutex_);
+        doc_textures_.erase(doc_id);
+    }
+    
+    void end_batch() {
+        if (!initialized_.load(std::memory_order_acquire) || !context_) return;
         ID3D11ShaderResourceView* null_srv = nullptr;
         context_->PSSetShaderResources(0, 1, &null_srv);
-        context_->OMSetRenderTargets(1, old_rtv.GetAddressOf(), old_dsv.Get());
-        context_->OMSetBlendState(old_blend.Get(), old_bf, old_sm);
-        context_->OMSetDepthStencilState(old_ds.Get(), old_sr);
-        context_->RSSetState(old_rs.Get());
-        context_->RSSetViewports(nvp, old_vp);
-        if (nsr > 0) context_->RSSetScissorRects(nsr, old_scissor);
-        context_->VSSetShader(old_vs.Get(), 0, 0);
-        context_->PSSetShader(old_ps.Get(), 0, 0);
-        context_->GSSetShader(old_gs.Get(), 0, 0);
-        context_->IASetInputLayout(old_il.Get());
-        context_->IASetPrimitiveTopology(old_pt);
-        context_->IASetVertexBuffers(0, 1, old_vb.GetAddressOf(), &old_st, &old_of);
-        context_->IASetIndexBuffer(old_ib.Get(), old_ib_fmt, old_ib_off);
-        context_->VSSetConstantBuffers(0, 1, old_cb_vs.GetAddressOf());
-        context_->PSSetConstantBuffers(0, 1, old_cb_ps.GetAddressOf());
-        context_->PSSetShaderResources(0, 1, old_srv.GetAddressOf());
-        context_->PSSetSamplers(0, 1, old_samp.GetAddressOf());
+        context_->OMSetRenderTargets(1, saved_rtv_.GetAddressOf(), saved_dsv_.Get());
+        context_->OMSetBlendState(saved_blend_.Get(), saved_bf_, saved_sm_);
+        context_->OMSetDepthStencilState(saved_ds_.Get(), saved_sr_);
+        context_->RSSetState(saved_rs_.Get());
+        context_->RSSetViewports(saved_nvp_, saved_vp_);
+        if (saved_nsr_ > 0) context_->RSSetScissorRects(saved_nsr_, saved_scissor_);
+        context_->VSSetShader(saved_vs_.Get(), 0, 0);
+        context_->PSSetShader(saved_ps_.Get(), 0, 0);
+        context_->GSSetShader(saved_gs_.Get(), 0, 0);
+        context_->IASetInputLayout(saved_il_.Get());
+        context_->IASetPrimitiveTopology(saved_pt_);
+        context_->IASetVertexBuffers(0, 1, saved_vb_.GetAddressOf(), &saved_vb_st_, &saved_vb_of_);
+        context_->IASetIndexBuffer(saved_ib_.Get(), saved_ib_fmt_, saved_ib_off_);
+        context_->VSSetConstantBuffers(0, 1, saved_cb_vs_.GetAddressOf());
+        context_->PSSetConstantBuffers(0, 1, saved_cb_ps_.GetAddressOf());
+        context_->PSSetShaderResources(0, 1, saved_srv_.GetAddressOf());
+        context_->PSSetSamplers(0, 1, saved_samp_.GetAddressOf());
+        saved_blend_.Reset(); saved_ds_.Reset(); saved_rs_.Reset();
+        saved_rtv_.Reset(); saved_dsv_.Reset(); saved_vs_.Reset();
+        saved_ps_.Reset(); saved_gs_.Reset(); saved_il_.Reset();
+        saved_vb_.Reset(); saved_ib_.Reset(); saved_cb_vs_.Reset();
+        saved_cb_ps_.Reset(); saved_srv_.Reset(); saved_samp_.Reset();
     }
 
     bool is_initialized() const { return initialized_.load(std::memory_order_acquire); }
@@ -423,7 +674,12 @@ public:
     }
 
     bool initialize() {
+        // Allow retry if previously failed
+        if (initialized_.load(std::memory_order_acquire)) return true;
+        
         std::lock_guard<std::mutex> lock(init_mutex_);
+        
+        // Double-check after acquiring lock for safety
         if (initialized_.load(std::memory_order_acquire)) return true;
 
         try {
@@ -436,7 +692,6 @@ public:
             if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                                 reinterpret_cast<LPCSTR>(&module_marker), &this_module) &&
                 GetModuleFileNameA(this_module, module_path, MAX_PATH)) {
-                
                 std::filesystem::path dll_path(module_path);
                 std::string path_str = dll_path.string();
                 
@@ -453,15 +708,10 @@ public:
                 }
             }
 
-            // Set up FileSystem FIRST - Ultralight needs it to find icudt67l.dat
             file_system_ = std::make_unique<UIFileSystem>(html_dirs_, resources_dir);
             ultralight::Platform::instance().set_file_system(file_system_.get());
-
-            // Set up FontLoader
             font_loader_ = std::make_unique<DirectWriteFontLoader>();
             ultralight::Platform::instance().set_font_loader(font_loader_.get());
-
-            // Set config
             ultralight::Config config;
             config.animation_timer_delay = 1.0 / 60.0;
             config.scroll_timer_delay = 1.0 / 60.0;
@@ -474,6 +724,8 @@ public:
                     report_error("KH - UI Framework: Failed to create renderer");
                 });
 
+                file_system_.reset();
+                font_loader_.reset();
                 return false;
             }
 
@@ -487,12 +739,18 @@ public:
                 report_error("KH - UI Framework: init failed: " + error_msg);
             });
 
+            file_system_.reset();
+            font_loader_.reset();
+            renderer_ = nullptr;
             return false;
         } catch (...) {
             MainThreadScheduler::instance().schedule([]() {
                 report_error("KH - UI Framework: init failed: Unknown exception");
             });
 
+            file_system_.reset();
+            font_loader_.reset();
+            renderer_ = nullptr;
             return false;
         }
     }
@@ -524,12 +782,27 @@ public:
                 MH_DisableHook(hooked_present_addr_);
             }
         }
-        
+
         auto start = std::chrono::steady_clock::now();
         constexpr auto timeout = std::chrono::milliseconds(1000);
+        constexpr auto warning_threshold = std::chrono::milliseconds(500);
+        bool warned = false;
 
-        while (hook_executing_.load(std::memory_order_seq_cst) && 
-               std::chrono::steady_clock::now() - start < timeout) {
+        while (hook_executing_.load(std::memory_order_seq_cst)) {
+            auto elapsed = std::chrono::steady_clock::now() - start;
+            
+            if (elapsed >= timeout) {
+                MainThreadScheduler::instance().schedule([]() {
+                    report_error("KH - UI Framework: Shutdown timeout waiting for hook - forcing cleanup");
+                });
+
+                break;
+            }
+            
+            if (!warned && elapsed >= warning_threshold) {
+                warned = true;
+            }
+            
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
             std::this_thread::yield();
         }
@@ -641,6 +914,8 @@ public:
             doc_to_close = it->second;
             documents_.erase(it);
         }
+
+        d3d_renderer_.remove_doc_texture(doc_id);
         
         if (doc_to_close) {
             doc_to_close->view = nullptr;
@@ -671,6 +946,7 @@ public:
 
     bool set_html_size(const std::string& doc_id, int width, int height) {
         if (width <= 0 || height <= 0) return false;
+        if (shutting_down_.load(std::memory_order_acquire)) return false;
         ultralight::RefPtr<ultralight::Renderer> renderer_copy;
         std::shared_ptr<UIDocument> doc;
         std::string html_path_copy;
@@ -692,17 +968,21 @@ public:
         if (!new_view) return false;
         std::string url = "file:///" + html_path_copy;
         std::replace(url.begin(), url.end(), '\\', '/');
-        new_view->LoadURL(ultralight::String(url.c_str()));
-        new_view->Focus();
-        
+
         {
             std::lock_guard<std::mutex> lock(documents_mutex_);
             auto it = documents_.find(doc_id);
-
+            
+            // Document was removed or replaced while we were creating the view
             if (it == documents_.end() || it->second != doc) {
+                // new_view will be cleaned up by RefPtr destructor
+                // Don't load URL since we're discarding this view
                 return false;
             }
-
+            
+            // Document still valid - now load URL and assign
+            new_view->LoadURL(ultralight::String(url.c_str()));
+            new_view->Focus();
             doc->view = new_view;
             doc->width = width;
             doc->height = height;
@@ -733,6 +1013,11 @@ public:
             if (doc->z_order > max_z) max_z = doc->z_order;
         }
 
+        if (max_z > 100000) {
+            normalize_z_orders();
+            max_z = static_cast<int>(documents_.size()) - 1;
+        }
+
         it->second->z_order = max_z + 1;
         return true;
     }
@@ -747,6 +1032,11 @@ public:
             if (doc->z_order < min_z) min_z = doc->z_order;
         }
 
+        if (min_z < -100000) {
+            normalize_z_orders();
+            min_z = 0;
+        }
+
         it->second->z_order = min_z - 1;
         return true;
     }
@@ -755,6 +1045,7 @@ public:
         if (shutting_down_.load(std::memory_order_acquire)) return "";
         std::shared_ptr<UIDocument> doc;
         std::string html_path_copy;
+        ultralight::RefPtr<ultralight::View> view_copy;
         
         {
             std::lock_guard<std::mutex> lock(documents_mutex_);
@@ -763,13 +1054,23 @@ public:
             doc = it->second;
             if (!doc || !doc->view) return "";
             html_path_copy = doc->html_path;
+            view_copy = doc->view;
         }
         
+        if (!view_copy) return "";
         std::string url = "file:///" + html_path_copy;
         std::replace(url.begin(), url.end(), '\\', '/');
-        doc->view->LoadURL(ultralight::String(url.c_str()));
+        view_copy->LoadURL(ultralight::String(url.c_str()));
         
+        // Re-verify document is still in map before modifying state
         {
+            std::lock_guard<std::mutex> lock(documents_mutex_);
+            auto it = documents_.find(doc_id);
+            
+            if (it == documents_.end() || it->second != doc) {
+                return "";
+            }
+
             std::lock_guard<std::mutex> pixel_lock(doc->pixel_mutex);
             doc->pixels_ready.store(false, std::memory_order_release);
         }
@@ -780,23 +1081,19 @@ public:
     std::string execute_javascript(const std::string& doc_id, const std::string& script) {
         if (!initialized_.load(std::memory_order_acquire)) return "";
         if (shutting_down_.load(std::memory_order_acquire)) return "";
-        std::shared_ptr<UIDocument> doc;
-        ultralight::RefPtr<ultralight::Renderer> renderer_copy;
+        ultralight::RefPtr<ultralight::View> view_copy;
         
         {
             std::lock_guard<std::mutex> lock(documents_mutex_);
             if (shutting_down_.load(std::memory_order_acquire)) return "";
             auto it = documents_.find(doc_id);
             if (it == documents_.end()) return "";
-            doc = it->second;
-            renderer_copy = renderer_;
+            if (!it->second || !it->second->view) return "";
+            view_copy = it->second->view;
         }
         
-        if (!renderer_copy || !doc || !doc->view) return "";
-        
-        // Execute JS with our local copy of the renderer reference
-        renderer_copy->Update();
-        auto result = doc->view->EvaluateScript(ultralight::String(script.c_str()));
+        if (!view_copy) return "";
+        auto result = view_copy->EvaluateScript(ultralight::String(script.c_str()));
         return std::string(result.utf8().data());
     }
 
@@ -845,6 +1142,12 @@ public:
             auto* surface = doc->view->surface();
             if (!surface) continue;
             auto* bmp_surface = static_cast<ultralight::BitmapSurface*>(surface);
+            ultralight::IntRect dirty = bmp_surface->dirty_bounds();
+
+            if (dirty.IsEmpty()) {
+                continue;
+            }
+            
             auto bitmap = bmp_surface->bitmap();
             if (!bitmap) continue;
             void* pixels = bitmap->LockPixels();
@@ -855,20 +1158,41 @@ public:
                     ~UnlockGuard() { bmp->UnlockPixels(); }
                 } unlock_guard{bitmap};
                 
+                std::lock_guard<std::mutex> pixel_lock(doc->pixel_mutex);
                 int w = bitmap->width();
                 int h = bitmap->height();
                 uint32_t stride = bitmap->row_bytes();
                 size_t size = static_cast<size_t>(h) * stride;
-                
-                if (doc->cached_pixels.size() != size) {
-                    doc->cached_pixels.resize(size);
-                }
 
-                memcpy(doc->cached_pixels.data(), pixels, size);
+                if (doc->cached_pixels.size() != size) {
+                    // Size changed - full copy required
+                    doc->cached_pixels.resize(size);
+                    memcpy(doc->cached_pixels.data(), pixels, size);
+                    doc->dirty_top = 0;
+                    doc->dirty_bottom = h;
+                } else {
+                    // Partial update - copy only dirty rows
+                    int dirty_top = std::max(0, dirty.top);
+                    int dirty_bottom = std::min(h, dirty.bottom);
+                    doc->dirty_top = dirty_top;
+                    doc->dirty_bottom = dirty_bottom;
+
+                    if (dirty_top < dirty_bottom) {
+                        size_t offset = static_cast<size_t>(dirty_top) * stride;
+                        size_t copy_size = static_cast<size_t>(dirty_bottom - dirty_top) * stride;
+                        
+                        memcpy(doc->cached_pixels.data() + offset, 
+                            static_cast<const uint8_t*>(pixels) + offset, 
+                            copy_size);
+                    }
+                }
+                
                 doc->cached_width = w;
                 doc->cached_height = h;
                 doc->cached_stride = stride;
                 doc->pixels_ready.store(true, std::memory_order_release);
+                doc->texture_needs_update.store(true, std::memory_order_release);
+                bmp_surface->ClearDirtyBounds();
             }
         }
     }
@@ -888,14 +1212,17 @@ public:
 
         if (shutting_down_.load(std::memory_order_seq_cst)) return;
 
-        // Get screen dimensions from swap chain
-        ComPtr<ID3D11Texture2D> back_buffer;
-        
-        if (SUCCEEDED(swap_chain->GetBuffer(0, IID_PPV_ARGS(&back_buffer)))) {
-            D3D11_TEXTURE2D_DESC desc;
-            back_buffer->GetDesc(&desc);
-            screen_width_.store(desc.Width, std::memory_order_relaxed);
-            screen_height_.store(desc.Height, std::memory_order_relaxed);
+        if (swap_chain != last_swap_chain_) {
+            ComPtr<ID3D11Texture2D> back_buffer;
+
+            if (SUCCEEDED(swap_chain->GetBuffer(0, IID_PPV_ARGS(&back_buffer)))) {
+                D3D11_TEXTURE2D_DESC desc;
+                back_buffer->GetDesc(&desc);
+                screen_width_.store(desc.Width, std::memory_order_relaxed);
+                screen_height_.store(desc.Height, std::memory_order_relaxed);
+            }
+
+            last_swap_chain_ = swap_chain;
         }
 
         // Initialize D3D renderer if needed
@@ -912,48 +1239,105 @@ public:
         if (!d3d_initialized_.load(std::memory_order_acquire)) return;
         int sw = screen_width_.load(std::memory_order_relaxed);
         int sh = screen_height_.load(std::memory_order_relaxed);
-        std::vector<std::shared_ptr<UIDocument>> docs_to_render;
-        
+
+        struct RenderItem {
+            std::shared_ptr<UIDocument> doc;
+            const std::string* id;
+            ID3D11ShaderResourceView* srv;
+            int x, y, width, height;
+            float opacity;
+            int z_order;
+        };
+
+        std::vector<RenderItem> render_list;
+
         {
             std::lock_guard<std::mutex> lock(documents_mutex_);
-            docs_to_render.reserve(documents_.size());
+            render_list.reserve(documents_.size());
             
             for (auto& [id, doc] : documents_) {
                 if (doc && doc->visible && doc->pixels_ready.load(std::memory_order_acquire)) {
-                    docs_to_render.push_back(doc);
+                    render_list.push_back({
+                        doc,
+                        &doc->id,
+                        nullptr,
+                        doc->x, doc->y, doc->width, doc->height,
+                        doc->opacity,
+                        doc->z_order
+                    });
                 }
             }
         }
-        
-        // Sort by z_order for proper layering
-        std::sort(docs_to_render.begin(), docs_to_render.end(),
-            [](const auto& a, const auto& b) { return a->z_order < b->z_order; });
 
-        // Render each document
-        for (const auto& doc : docs_to_render) {
+        if (render_list.empty()) return;
+
+        // Sort by z_order
+        std::sort(render_list.begin(), render_list.end(),
+            [](const auto& a, const auto& b) { return a.z_order < b.z_order; });
+
+        d3d_renderer_.begin_batch(sw, sh);
+
+        // Update textures that need it
+        for (auto& item : render_list) {
             if (shutting_down_.load(std::memory_order_acquire)) break;
-            if (!d3d_renderer_.is_initialized()) break;
-            std::lock_guard<std::mutex> pixel_lock(doc->pixel_mutex);
-            if (doc->cached_pixels.empty()) continue;
-            if (!doc->pixels_ready.load(std::memory_order_acquire)) continue;
-            if (shutting_down_.load(std::memory_order_acquire)) break;
+
+            if (item.x + item.width < 0 || item.x > sw ||
+                item.y + item.height < 0 || item.y > sh) continue;
+
+            if (!item.doc->texture_needs_update.load(std::memory_order_acquire)) continue;
+            if (item.opacity <= 0.0f) continue;
+            std::lock_guard<std::mutex> pixel_lock(item.doc->pixel_mutex);
+            if (item.doc->cached_pixels.empty()) continue;
+            if (!item.doc->pixels_ready.load(std::memory_order_acquire)) continue;
             
-            d3d_renderer_.update_texture(
-                doc->cached_pixels.data(),
-                doc->cached_width,
-                doc->cached_height,
-                doc->cached_stride
+            // Try partial update first
+            bool partial_ok = d3d_renderer_.update_texture_partial(
+                *item.id,
+                item.doc->cached_pixels.data(),
+                item.doc->cached_width,
+                item.doc->cached_height,
+                item.doc->cached_stride,
+                item.doc->dirty_top,
+                item.doc->dirty_bottom
             );
-
-            if (shutting_down_.load(std::memory_order_acquire)) break;
             
-            d3d_renderer_.render(
+            // Fall back to full update if partial failed (texture doesn't exist or resized)
+            if (!partial_ok) {
+                d3d_renderer_.update_texture(
+                    *item.id,
+                    item.doc->cached_pixels.data(),
+                    item.doc->cached_width,
+                    item.doc->cached_height,
+                    item.doc->cached_stride
+                );
+            }
+
+            item.doc->texture_needs_update.store(false, std::memory_order_release);
+        }
+
+        // Pre-fetch all SRVs
+        for (auto& item : render_list) {
+            item.srv = d3d_renderer_.get_srv(*item.id);
+        }
+
+        // Draw all quads
+        for (const auto& item : render_list) {
+            if (shutting_down_.load(std::memory_order_acquire)) break;
+            if (!item.srv || item.opacity <= 0.0f) continue;
+
+            if (item.x + item.width < 0 || item.x > sw ||
+                item.y + item.height < 0 || item.y > sh) continue;
+            
+            d3d_renderer_.draw_quad_with_srv(
+                item.srv,
                 sw, sh,
-                doc->x, doc->y,
-                doc->width, doc->height,
-                doc->opacity
+                item.x, item.y,
+                item.width, item.height,
+                item.opacity
             );
         }
+        
+        d3d_renderer_.end_batch();
     }
 
 private:
@@ -979,6 +1363,7 @@ private:
     std::atomic<int> screen_height_{1080};
     std::atomic<bool> shutting_down_{false};
     std::atomic<bool> hook_executing_{false};
+    IDXGISwapChain* last_swap_chain_ = nullptr;
     
     // Mutex for document map operations
     std::mutex documents_mutex_;
@@ -1128,9 +1513,26 @@ private:
         hook_installed_.store(false, std::memory_order_release);
         instance_ptr_.store(nullptr, std::memory_order_release);
     }
+
+    void normalize_z_orders() {
+        std::vector<std::pair<std::string, int>> ordered;
+        ordered.reserve(documents_.size());
+        
+        for (const auto& [id, doc] : documents_) {
+            ordered.emplace_back(id, doc->z_order);
+        }
+        
+        std::sort(ordered.begin(), ordered.end(),
+            [](const auto& a, const auto& b) { return a.second < b.second; });
+        
+        int new_z = 0;
+
+        for (const auto& [id, old_z] : ordered) {
+            documents_[id]->z_order = new_z++;
+        }
+    }
 };
 
-// Static member definitions
 std::atomic<UIFramework*> UIFramework::instance_ptr_{nullptr};
 UIFramework::PresentFn UIFramework::original_present_ = nullptr;
 void* UIFramework::hooked_present_addr_ = nullptr;

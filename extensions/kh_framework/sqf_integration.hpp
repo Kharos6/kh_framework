@@ -93,6 +93,13 @@ static registered_sqf_function _sqf_html_set_z_order;
 static registered_sqf_function _sqf_html_bring_to_front;
 static registered_sqf_function _sqf_html_send_to_back;
 static registered_sqf_function _sqf_html_reload;
+static registered_sqf_function _sqf_set_network_port;
+static registered_sqf_function _sqf_network_message_send;
+static registered_sqf_function _sqf_network_message_receive_scalar_array;
+static registered_sqf_function _sqf_network_message_receive_scalar_code;
+static registered_sqf_function _sqf_network_remove_handler;
+static registered_sqf_function _sqf_network_is_initialized;
+static registered_sqf_function _sqf_network_shutdown;
 
 static game_value execute_lua_sqf(game_value_parameter args, game_value_parameter code_or_function) {    
     try {
@@ -2068,6 +2075,155 @@ static game_value ui_reload_html_sqf(game_value_parameter args) {
     }
 }
 
+static game_value set_network_port_sqf(game_value_parameter port_value) {
+    try {
+        int port = static_cast<int>(static_cast<float>(port_value));
+        
+        if (port < 1 || port > 65535) {
+            report_error("KH Network: Invalid port number. Must be between 1 and 65535");
+            return game_value(false);
+        }
+        
+        NetworkFramework::instance().set_port(port);
+        sqf::diag_log("KH Network: Port set to " + std::to_string(port));
+        return game_value(true);
+    } catch (const std::exception& e) {
+        report_error("KH Network: Error in setNetworkPort - " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value network_message_send_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
+    try {
+        // Left arg is target client owner
+        int target_client = static_cast<int>(static_cast<float>(left_arg));        
+        auto& arr = right_arg.to_array();
+
+        if (arr.size() < 2) {
+            report_error("KH Network: networkMessageSend requires [name, message]");
+            return game_value(false);
+        }
+        
+        std::string event_name = static_cast<std::string>(arr[0]);
+        game_value message = arr[1];
+        
+        if (event_name.empty()) {
+            report_error("KH Network: Event name cannot be empty");
+            return game_value(false);
+        }
+
+        if (!NetworkFramework::instance().is_running()) {
+            bool is_server = sqf::is_server();
+
+            if (!is_server) {
+                game_value server_ip_gv = sqf::get_variable(sqf::mission_namespace(), "kh_var_serverAddress", game_value(""));
+                std::string server_ip = static_cast<std::string>(server_ip_gv);
+
+                if (!server_ip.empty()) {
+                    NetworkFramework::instance().set_server_ip(server_ip);
+                }
+            }
+            
+            if (!NetworkFramework::instance().start(is_server)) {
+                report_error("KH Network: Failed to start network framework");
+                return game_value(false);
+            }
+        }
+        
+        bool success = NetworkFramework::instance().send_message(target_client, event_name, message);
+        return game_value(success);
+    } catch (const std::exception& e) {
+        report_error("KH Network: Error in networkMessageSend - " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value network_message_receive_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
+    try {
+        std::string event_name = static_cast<std::string>(left_arg);
+        
+        if (event_name.empty()) {
+            report_error("KH Network: Event name cannot be empty");
+            return game_value(-1.0f);
+        }
+        
+        game_value handler_args;
+        code handler_function;
+        
+        if (right_arg.type_enum() == game_data_type::ARRAY) {
+            auto& arr = right_arg.to_array();
+
+            if (arr.size() < 2) {
+                report_error("KH Network: networkMessageReceive requires [arguments, function] or just function");
+                return game_value(-1.0f);
+            }
+
+            handler_args = arr[0];
+            
+            if (arr[1].type_enum() == game_data_type::CODE) {
+                handler_function = static_cast<code>(arr[1]);
+            } else {
+                report_error("KH Network: Handler must be code");
+                return game_value(-1.0f);
+            }
+        } else {
+            handler_function = static_cast<code>(right_arg);
+        }
+        
+        // Ensure network is initialized
+        if (!NetworkFramework::instance().is_initialized()) {
+            if (!NetworkFramework::instance().initialize()) {
+                report_error("KH Network: Failed to initialize network framework");
+                return game_value(-1.0f);
+            }
+        }
+        
+        int handler_id = NetworkFramework::instance().add_message_handler(event_name, handler_function, handler_args);
+        sqf::diag_log("KH Network: Handler " + std::to_string(handler_id) + " registered for event '" + event_name + "'");
+        return game_value(static_cast<float>(handler_id));
+    } catch (const std::exception& e) {
+        report_error("KH Network: Error in networkMessageReceive - " + std::string(e.what()));
+        return game_value(-1.0f);
+    }
+}
+
+static game_value network_is_initialized_sqf() {
+    return game_value(NetworkFramework::instance().is_initialized());
+}
+
+static game_value network_remove_handler_sqf(game_value_parameter handler_id_value) {
+    try {
+        int handler_id = static_cast<int>(static_cast<float>(handler_id_value));
+        
+        if (handler_id < 0) {
+            report_error("KH Network: Invalid handler ID");
+            return game_value(false);
+        }
+        
+        bool success = NetworkFramework::instance().remove_message_handler(handler_id);
+        
+        if (success) {
+            sqf::diag_log("KH Network: Handler " + std::to_string(handler_id) + " removed");
+        } else {
+            sqf::diag_log("KH Network: Handler " + std::to_string(handler_id) + " not found");
+        }
+        
+        return game_value(success);
+    } catch (const std::exception& e) {
+        report_error("KH Network: Error in networkRemoveHandler - " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value network_shutdown_sqf() {
+    try {
+        NetworkFramework::instance().shutdown();
+        return game_value(true);
+    } catch (...) {
+        return game_value(false);
+    }
+}
+
 static game_value execute_lua_sqf_unary(game_value_parameter code_or_function) {
     return execute_lua_sqf(game_value(), code_or_function);
 }
@@ -2833,7 +2989,64 @@ static void initialize_sqf_integration() {
         game_data_type::STRING,
         game_data_type::STRING
     );
+    
+    _sqf_set_network_port = intercept::client::host::register_sqf_command(
+        "setNetworkPort",
+        "Set the server network port for KH Framework networking",
+        userFunctionWrapper<set_network_port_sqf>,
+        game_data_type::BOOL,
+        game_data_type::SCALAR
+    );
+    
+    _sqf_network_message_send = intercept::client::host::register_sqf_command(
+        "networkMessageSend",
+        "Send a network message to the target client",
+        userFunctionWrapper<network_message_send_sqf>,
+        game_data_type::BOOL,
+        game_data_type::SCALAR,
+        game_data_type::ARRAY
+    );
+    
+    _sqf_network_message_receive_scalar_array = intercept::client::host::register_sqf_command(
+        "networkMessageReceive",
+        "Register a handler for network messages",
+        userFunctionWrapper<network_message_receive_sqf>,
+        game_data_type::SCALAR,
+        game_data_type::STRING,
+        game_data_type::ARRAY
+    );
 
+    _sqf_network_message_receive_scalar_code = intercept::client::host::register_sqf_command(
+        "networkMessageReceive",
+        "Register a handler for network messages",
+        userFunctionWrapper<network_message_receive_sqf>,
+        game_data_type::SCALAR,
+        game_data_type::STRING,
+        game_data_type::CODE
+    );
+    
+    _sqf_network_remove_handler = intercept::client::host::register_sqf_command(
+        "networkRemoveHandler",
+        "Remove a network message handler by ID",
+        userFunctionWrapper<network_remove_handler_sqf>,
+        game_data_type::BOOL,
+        game_data_type::SCALAR
+    );
+    
+    _sqf_network_is_initialized = intercept::client::host::register_sqf_command(
+        "networkIsInitialized",
+        "Check if the network framework is initialized",
+        userFunctionWrapper<network_is_initialized_sqf>,
+        game_data_type::BOOL
+    );
+    
+    _sqf_network_shutdown = intercept::client::host::register_sqf_command(
+        "networkShutdown",
+        "Shutdown the network framework",
+        userFunctionWrapper<network_shutdown_sqf>,
+        game_data_type::BOOL
+    );
+    
     g_compiled_sqf_trigger_cba_event = sqf::compile(R"(setReturnValue (getCallArguments call KH_fnc_triggerCbaEvent);)");
     g_compiled_sqf_add_game_event_handler = sqf::compile(R"(setReturnValue (getCallArguments call KH_fnc_addEventHandler);)");
     g_compiled_sqf_remove_game_event_handler = sqf::compile(R"(setReturnValue (getCallArguments call KH_fnc_removeHandler);)");

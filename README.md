@@ -2,7 +2,7 @@
   DESCRIPTION
 </h1>
 
-Tool package designed to facilitate the creation of missions and addons. Contains a library of functions, editor attributes, events, modules, and various global variables. Created out of necessity to make mission making easier for my unit, especially for mission makers who may not have much experience in coding. Granted, basic syntax knowledge is still required for certain functionalities. A good portion of this mod also exposes or simplifies processes that would otherwise involve tediously wrestling with the volatility of things like locality, remote execution, player unit existence, or JIP; all of which, and more, can now be solved with a single function or Eden attribute. Most notably, remote execution is now possible from any machine to any machine without the use of <remoteExec> or <remoteExecCall> thanks to <KH_fnc_execute>, which uses CBA events to achieve the same, and allows for even more intricate execution parameters. Finally, all code introduced by this mod runs in the unscheduled environment.
+KH Framework is a tool package designed to facilitate the creation of missions and addons for Arma 3. It contains a library of commands, functions, editor attributes, events, modules, and other various utilities.
 
 <h1 align="center">
   COMPATIBILITY
@@ -25,9 +25,3 @@ Tool package designed to facilitate the creation of missions and addons. Contain
 </h1>
 
 So long as it is done in good will, and credit to the original author is provided alongside the necessary links to the original content, you are allowed to modify, redistribute, and repurpose this mod as you see fit.
-
-<h1 align="center">
-  CONTRIBUTION
-</h1>
-
-Anyone is welcome to contribute to this project.

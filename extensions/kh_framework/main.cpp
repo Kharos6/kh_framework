@@ -8,6 +8,7 @@
 #include "text_to_speech_integration.hpp"
 #include "speech_to_text_integration.hpp"
 #include "ui_integration.hpp"
+#include "network_integration.hpp"
 #include "sqf_integration.hpp"
 
 using namespace intercept;
@@ -85,6 +86,7 @@ void intercept::pre_init() {
     mission["active"] = true;
     clean_lua_state();
     KHDataManager::instance().flush_all();
+    network_pre_init();
     sqf::diag_log("KH Framework Extension - Pre-init");
 }
 
@@ -110,6 +112,7 @@ void intercept::on_frame() {
     mission["frame"] = g_mission_frame;
     mission["time"] = g_mission_time;
     LuaFunctions::update_scheduler();
+    network_on_frame();
 }
 
 void intercept::mission_ended() {
@@ -152,6 +155,16 @@ void intercept::mission_ended() {
             report_error("KH Framework Extension - Error stopping UI framework: " + std::string(e.what()));
         } catch (...) {
             report_error("KH Framework Extension - Unknown error stopping UI framework");
+        }
+    }
+
+    if (NetworkFramework::instance().is_initialized()) {
+        try {
+            NetworkFramework::instance().shutdown();
+        } catch (const std::exception& e) {
+            report_error("KH Framework Extension - Error stopping Network framework: " + std::string(e.what()));
+        } catch (...) {
+            report_error("KH Framework Extension - Unknown error stopping Network framework");
         }
     }
 
@@ -506,6 +519,12 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
                     } else {
                         UIFramework::instance().shutdown();
                     }
+                }
+            } __except(EXCEPTION_EXECUTE_HANDLER) {}
+
+            __try {
+                if (NetworkFramework::instance().is_initialized()) {
+                    NetworkFramework::instance().shutdown();
                 }
             } __except(EXCEPTION_EXECUTE_HANDLER) {}
 

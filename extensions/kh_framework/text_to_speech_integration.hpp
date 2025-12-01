@@ -1128,7 +1128,7 @@ public:
                 if (success) {
                     sqf::diag_log(msg);
                 } else {
-                    report_error(msg);
+                    report_error("KH - TTS Framework: " + msg);
                 }
             });
         }

@@ -325,7 +325,7 @@ private:
             // Check search paths
             for (const auto& base : search_paths_) {
                 std::filesystem::path full = base / path_str;
-                
+
                 if (std::filesystem::exists(full)) {
                     return full;
                 }
@@ -342,6 +342,29 @@ private:
         return {};
     }
 };
+
+class UIDocumentListener : public ultralight::ViewListener {
+public:
+    void OnAddConsoleMessage(ultralight::View* caller,
+                             const ultralight::ConsoleMessage& msg) override {
+        auto level = msg.level();
+        
+        if (level == ultralight::kMessageLevel_Error || 
+            level == ultralight::kMessageLevel_Warning) {
+            std::string level_str = (level == ultralight::kMessageLevel_Error) ? "Error" : "Warning";
+
+            std::string err = "JS " + level_str
+                            + " at line " + std::to_string(msg.line_number()) 
+                            + ", col " + std::to_string(msg.column_number())
+                            + ": " + std::string(msg.message().utf8().data());
+            
+            MainThreadScheduler::instance().schedule([err]() {
+                report_error("KH - UI Framework: " + err);
+            });
+        }
+    }
+};
+
 
 struct UIDocument {
     std::string id;
@@ -361,6 +384,7 @@ struct UIDocument {
     std::atomic<bool> pixels_ready{false};
     std::atomic<bool> texture_needs_update{true};
     std::mutex pixel_mutex;
+    std::unique_ptr<UIDocumentListener> listener;
 };
 
 class UIOverlayRenderer {
@@ -673,93 +697,56 @@ public:
         return inst;
     }
 
+    // Initialize the UI framework and start the worker thread
     bool initialize() {
-        // Allow retry if previously failed
+        if (shutting_down_.load(std::memory_order_acquire)) return false;
         if (initialized_.load(std::memory_order_acquire)) return true;
-        
         std::lock_guard<std::mutex> lock(init_mutex_);
-        
-        // Double-check after acquiring lock for safety
+        if (shutting_down_.load(std::memory_order_acquire)) return false;
         if (initialized_.load(std::memory_order_acquire)) return true;
-
-        try {
-            html_dirs_ = find_html_ui_directories();
-            std::filesystem::path resources_dir;
-            char module_path[MAX_PATH];
-            HMODULE this_module = nullptr;
-            static const int module_marker = 0;
-            
-            if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                                reinterpret_cast<LPCSTR>(&module_marker), &this_module) &&
-                GetModuleFileNameA(this_module, module_path, MAX_PATH)) {
-                std::filesystem::path dll_path(module_path);
-                std::string path_str = dll_path.string();
-                
-                if (path_str.find("\\\\?\\") == 0) {
-                    path_str = path_str.substr(4);
-                    dll_path = path_str;
-                }
-
-                std::filesystem::path mod_dir = dll_path.parent_path().parent_path();
-                std::filesystem::path res_path = mod_dir / "ultralight_resources";
-                
-                if (std::filesystem::exists(res_path)) {
-                    resources_dir = res_path;
-                }
-            }
-
-            file_system_ = std::make_unique<UIFileSystem>(html_dirs_, resources_dir);
-            ultralight::Platform::instance().set_file_system(file_system_.get());
-            font_loader_ = std::make_unique<DirectWriteFontLoader>();
-            ultralight::Platform::instance().set_font_loader(font_loader_.get());
-            ultralight::Config config;
-            config.animation_timer_delay = 1.0 / 60.0;
-            config.scroll_timer_delay = 1.0 / 60.0;
-            config.recycle_delay = 1.0 / 60.0;
-            ultralight::Platform::instance().set_config(config);
-            renderer_ = ultralight::Renderer::Create();
-            
-            if (!renderer_) {
+        should_stop_.store(false, std::memory_order_release);
+        worker_thread_ = std::thread(&UIFramework::worker_thread_func, this);
+        auto start = std::chrono::steady_clock::now();
+        constexpr auto timeout = std::chrono::seconds(10);
+        
+        while (!worker_initialized_.load(std::memory_order_acquire) &&
+               !worker_init_failed_.load(std::memory_order_acquire)) {
+            if (std::chrono::steady_clock::now() - start > timeout) {
                 MainThreadScheduler::instance().schedule([]() {
-                    report_error("KH - UI Framework: Failed to create renderer");
+                    report_error("KH - UI Framework: Worker thread initialization timeout");
                 });
 
-                file_system_.reset();
-                font_loader_.reset();
+                should_stop_.store(true, std::memory_order_release);
+                worker_cv_.notify_all();
+
+                if (worker_thread_.joinable()) {
+                    worker_thread_.join();
+                }
+
                 return false;
             }
 
-            initialized_.store(true, std::memory_order_release);
-            install_present_hook();
-            return true;
-        } catch (const std::exception& e) {
-            std::string error_msg = e.what();
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        
+        if (worker_init_failed_.load(std::memory_order_acquire)) {
+            if (worker_thread_.joinable()) {
+                worker_thread_.join();
+            }
 
-            MainThreadScheduler::instance().schedule([error_msg]() {
-                report_error("KH - UI Framework: init failed: " + error_msg);
-            });
-
-            file_system_.reset();
-            font_loader_.reset();
-            renderer_ = nullptr;
-            return false;
-        } catch (...) {
-            MainThreadScheduler::instance().schedule([]() {
-                report_error("KH - UI Framework: init failed: Unknown exception");
-            });
-
-            file_system_.reset();
-            font_loader_.reset();
-            renderer_ = nullptr;
             return false;
         }
+        
+        initialized_.store(true, std::memory_order_release);
+        return true;
     }
 
     void emergency_shutdown() {
-        // Minimal shutdown for process termination - just set flags, don't clean up
         shutting_down_.store(true, std::memory_order_seq_cst);
         initialized_.store(false, std::memory_order_seq_cst);
         instance_ptr_.store(nullptr, std::memory_order_seq_cst);
+        should_stop_.store(true, std::memory_order_seq_cst);
+        worker_cv_.notify_all();
         
         __try {
             if (hook_installed_.load(std::memory_order_acquire) && hooked_present_addr_) {
@@ -774,7 +761,20 @@ public:
     }
 
     void shutdown() {
+        if (!initialized_.load(std::memory_order_acquire) && 
+            !worker_thread_.joinable()) {
+            return;
+        }
+
         shutting_down_.store(true, std::memory_order_seq_cst);
+        should_stop_.store(true, std::memory_order_release);
+        
+        {
+            std::lock_guard<std::mutex> lock(worker_mutex_);
+            has_pending_commands_.store(true, std::memory_order_release);
+        }
+
+        worker_cv_.notify_all();
 
         {
             std::lock_guard<std::mutex> lock(hook_mutex_);
@@ -785,34 +785,26 @@ public:
 
         auto start = std::chrono::steady_clock::now();
         constexpr auto timeout = std::chrono::milliseconds(1000);
-        constexpr auto warning_threshold = std::chrono::milliseconds(500);
-        bool warned = false;
 
         while (hook_executing_.load(std::memory_order_seq_cst)) {
             auto elapsed = std::chrono::steady_clock::now() - start;
             
             if (elapsed >= timeout) {
                 MainThreadScheduler::instance().schedule([]() {
-                    report_error("KH - UI Framework: Shutdown timeout waiting for hook - forcing cleanup");
+                    report_error("KH - UI Framework: Shutdown timeout waiting for hook, forcing cleanup");
                 });
-
+                
                 break;
-            }
-            
-            if (!warned && elapsed >= warning_threshold) {
-                warned = true;
             }
             
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
             std::this_thread::yield();
         }
 
-        if (!initialized_.load(std::memory_order_acquire)) {
-            shutting_down_.store(false, std::memory_order_release);
-            return;
+        // Wait for worker thread to finish
+        if (worker_thread_.joinable()) {
+            worker_thread_.join();
         }
-        
-        initialized_.store(false, std::memory_order_seq_cst);
 
         try {
             uninstall_present_hook_internal();
@@ -838,96 +830,60 @@ public:
         try {
             d3d_renderer_.cleanup();
         } catch (...) {}
-        
-        d3d_initialized_.store(false, std::memory_order_release); 
-        renderer_ = nullptr;
-        file_system_.reset();
-        font_loader_.reset();
+
+        // Reset ALL state for potential re-initialization
+        d3d_initialized_.store(false, std::memory_order_release);
+        initialized_.store(false, std::memory_order_release);
+        worker_initialized_.store(false, std::memory_order_release);
+        worker_init_failed_.store(false, std::memory_order_release);
+        should_stop_.store(false, std::memory_order_release);
+        has_pending_commands_.store(false, std::memory_order_release);
         shutting_down_.store(false, std::memory_order_release);
+        last_swap_chain_ = nullptr;
     }
 
     std::string open_html(const std::string& filename, int x, int y, int width, int height, float opacity = 1.0f) {
         if (!initialized_.load(std::memory_order_acquire) && !initialize()) return "";
-        auto html_path = find_html_file(filename);
+        std::string doc_id = UIDGenerator::generate();
+        std::promise<bool> promise;
+        auto future = promise.get_future();
+        
+        queue_command([this, doc_id, filename, x, y, width, height, opacity, &promise]() {
+            open_html_internal(doc_id, filename, x, y, width, height, opacity);
+            promise.set_value(true);
+        });
 
-        if (html_path.empty()) {
-            MainThreadScheduler::instance().schedule([filename]() {
-                report_error("KH - UI Framework: HTML not found: " + filename);
-            });
+        future.wait();
+
+        {
+            std::lock_guard<std::mutex> lock(documents_mutex_);
             
-            return "";
-        }
-
-        ultralight::RefPtr<ultralight::Renderer> renderer_copy;
-
-        {
-            std::lock_guard<std::mutex> lock(documents_mutex_);
-            renderer_copy = renderer_;
+            if (documents_.find(doc_id) == documents_.end()) {
+                return "";  // Creation failed
+            }
         }
         
-        if (!renderer_copy) return "";
-        int w = width, h = height;
-        bool fs = (width <= 0 || height <= 0);
-        if (fs) { w = GetSystemMetrics(SM_CXSCREEN); h = GetSystemMetrics(SM_CYSCREEN); }
-        ultralight::ViewConfig vc;
-        vc.is_accelerated = false;
-        vc.is_transparent = true;
-        auto view = renderer_copy->CreateView(w, h, vc, nullptr);
-
-        if (!view) {
-            MainThreadScheduler::instance().schedule([]() {
-                report_error("KH - UI Framework: Failed to create view");
-            });
-
-            return "";
-        }
-        
-        view->Focus();
-        auto doc = std::make_shared<UIDocument>();
-        doc->id = UIDGenerator::generate();
-        doc->html_path = html_path.string();
-        doc->view = view;
-        doc->x = x; doc->y = y;
-        doc->width = w; doc->height = h;
-        doc->opacity = std::clamp(opacity, 0.0f, 1.0f);
-        doc->fullscreen = fs;
-        std::string url = "file:///" + html_path.string();
-        std::replace(url.begin(), url.end(), '\\', '/');
-        view->LoadURL(ultralight::String(url.c_str()));
-
-        {
-            std::lock_guard<std::mutex> lock(documents_mutex_);
-            doc->z_order = static_cast<int>(documents_.size());
-            documents_[doc->id] = doc;
-        }
-        
-        return doc->id;
+        return doc_id;
     }
 
     bool close_html(const std::string& doc_id) {
-        std::shared_ptr<UIDocument> doc_to_close;
+        if (!initialized_.load(std::memory_order_acquire)) return false;
         
         {
             std::lock_guard<std::mutex> lock(documents_mutex_);
-            auto it = documents_.find(doc_id);
-            if (it == documents_.end()) return false;
-            doc_to_close = it->second;
-            documents_.erase(it);
+            if (documents_.find(doc_id) == documents_.end()) return false;
         }
-
-        d3d_renderer_.remove_doc_texture(doc_id);
         
-        if (doc_to_close) {
-            doc_to_close->view = nullptr;
-            std::lock_guard<std::mutex> pixel_lock(doc_to_close->pixel_mutex);
-            doc_to_close->cached_pixels.clear();
-            doc_to_close->pixels_ready.store(false, std::memory_order_release);
-        }
+        queue_command([this, doc_id]() {
+            close_html_internal(doc_id);
+        });
         
         return true;
     }
 
     bool set_html_position(const std::string& doc_id, int x, int y) {
+        if (!initialized_.load(std::memory_order_acquire)) return false;
+        
         std::lock_guard<std::mutex> lock(documents_mutex_);
         auto it = documents_.find(doc_id);
         if (it == documents_.end()) return false;
@@ -937,6 +893,7 @@ public:
     }
 
     bool set_html_opacity(const std::string& doc_id, float opacity) {
+        if (!initialized_.load(std::memory_order_acquire)) return false;
         std::lock_guard<std::mutex> lock(documents_mutex_);
         auto it = documents_.find(doc_id);
         if (it == documents_.end()) return false;
@@ -946,56 +903,23 @@ public:
 
     bool set_html_size(const std::string& doc_id, int width, int height) {
         if (width <= 0 || height <= 0) return false;
+        if (!initialized_.load(std::memory_order_acquire)) return false;
         if (shutting_down_.load(std::memory_order_acquire)) return false;
-        ultralight::RefPtr<ultralight::Renderer> renderer_copy;
-        std::shared_ptr<UIDocument> doc;
-        std::string html_path_copy;
         
         {
             std::lock_guard<std::mutex> lock(documents_mutex_);
-            renderer_copy = renderer_;
-            auto it = documents_.find(doc_id);
-            if (it == documents_.end()) return false;
-            doc = it->second;
-            html_path_copy = doc->html_path;
+            if (documents_.find(doc_id) == documents_.end()) return false;
         }
         
-        if (!renderer_copy || !doc) return false;
-        ultralight::ViewConfig vc;
-        vc.is_accelerated = false;
-        vc.is_transparent = true;
-        auto new_view = renderer_copy->CreateView(width, height, vc, nullptr);
-        if (!new_view) return false;
-        std::string url = "file:///" + html_path_copy;
-        std::replace(url.begin(), url.end(), '\\', '/');
-
-        {
-            std::lock_guard<std::mutex> lock(documents_mutex_);
-            auto it = documents_.find(doc_id);
-            
-            // Document was removed or replaced while we were creating the view
-            if (it == documents_.end() || it->second != doc) {
-                // new_view will be cleaned up by RefPtr destructor
-                // Don't load URL since we're discarding this view
-                return false;
-            }
-            
-            // Document still valid - now load URL and assign
-            new_view->LoadURL(ultralight::String(url.c_str()));
-            new_view->Focus();
-            doc->view = new_view;
-            doc->width = width;
-            doc->height = height;
-            doc->fullscreen = false;
-            std::lock_guard<std::mutex> pixel_lock(doc->pixel_mutex);
-            doc->pixels_ready.store(false, std::memory_order_release);
-            doc->cached_pixels.clear();
-        }
+        queue_command([this, doc_id, width, height]() {
+            set_html_size_internal(doc_id, width, height);
+        });
         
         return true;
     }
 
     bool set_html_z_order(const std::string& doc_id, int z_order) {
+        if (!initialized_.load(std::memory_order_acquire)) return false;
         std::lock_guard<std::mutex> lock(documents_mutex_);
         auto it = documents_.find(doc_id);
         if (it == documents_.end()) return false;
@@ -1004,6 +928,7 @@ public:
     }
 
     bool bring_html_to_front(const std::string& doc_id) {
+        if (!initialized_.load(std::memory_order_acquire)) return false;
         std::lock_guard<std::mutex> lock(documents_mutex_);
         auto it = documents_.find(doc_id);
         if (it == documents_.end()) return false;
@@ -1017,12 +942,13 @@ public:
             normalize_z_orders();
             max_z = static_cast<int>(documents_.size()) - 1;
         }
-
+        
         it->second->z_order = max_z + 1;
         return true;
     }
 
     bool send_html_to_back(const std::string& doc_id) {
+        if (!initialized_.load(std::memory_order_acquire)) return false;
         std::lock_guard<std::mutex> lock(documents_mutex_);
         auto it = documents_.find(doc_id);
         if (it == documents_.end()) return false;
@@ -1042,62 +968,43 @@ public:
     }
 
     std::string reload_html(const std::string& doc_id) {
+        if (!initialized_.load(std::memory_order_acquire)) return "";
         if (shutting_down_.load(std::memory_order_acquire)) return "";
-        std::shared_ptr<UIDocument> doc;
-        std::string html_path_copy;
-        ultralight::RefPtr<ultralight::View> view_copy;
         
         {
             std::lock_guard<std::mutex> lock(documents_mutex_);
             auto it = documents_.find(doc_id);
             if (it == documents_.end()) return "";
-            doc = it->second;
-            if (!doc || !doc->view) return "";
-            html_path_copy = doc->html_path;
-            view_copy = doc->view;
+            if (!it->second || !it->second->view) return "";
         }
         
-        if (!view_copy) return "";
-        std::string url = "file:///" + html_path_copy;
-        std::replace(url.begin(), url.end(), '\\', '/');
-        view_copy->LoadURL(ultralight::String(url.c_str()));
-        
-        // Re-verify document is still in map before modifying state
-        {
-            std::lock_guard<std::mutex> lock(documents_mutex_);
-            auto it = documents_.find(doc_id);
-            
-            if (it == documents_.end() || it->second != doc) {
-                return "";
-            }
-
-            std::lock_guard<std::mutex> pixel_lock(doc->pixel_mutex);
-            doc->pixels_ready.store(false, std::memory_order_release);
-        }
+        queue_command([this, doc_id]() {
+            reload_html_internal(doc_id);
+        });
         
         return doc_id;
     }
 
-    std::string execute_javascript(const std::string& doc_id, const std::string& script) {
-        if (!initialized_.load(std::memory_order_acquire)) return "";
-        if (shutting_down_.load(std::memory_order_acquire)) return "";
-        ultralight::RefPtr<ultralight::View> view_copy;
+    bool execute_javascript(const std::string& doc_id, const std::string& script) {
+        if (!initialized_.load(std::memory_order_acquire)) return false;
+        if (shutting_down_.load(std::memory_order_acquire)) return false;
         
         {
             std::lock_guard<std::mutex> lock(documents_mutex_);
-            if (shutting_down_.load(std::memory_order_acquire)) return "";
             auto it = documents_.find(doc_id);
-            if (it == documents_.end()) return "";
-            if (!it->second || !it->second->view) return "";
-            view_copy = it->second->view;
+            if (it == documents_.end()) return false;
+            if (!it->second || !it->second->view) return false;
         }
         
-        if (!view_copy) return "";
-        auto result = view_copy->EvaluateScript(ultralight::String(script.c_str()));
-        return std::string(result.utf8().data());
+        queue_command([this, doc_id, script]() {
+            execute_javascript_internal(doc_id, script);
+        });
+        
+        return true;
     }
 
     bool set_html_visible(const std::string& doc_id, bool visible) {
+        if (!initialized_.load(std::memory_order_acquire)) return false;
         std::lock_guard<std::mutex> lock(documents_mutex_);
         auto it = documents_.find(doc_id);
         if (it == documents_.end()) return false;
@@ -1115,90 +1022,6 @@ public:
 
     bool is_initialized() const { return initialized_.load(std::memory_order_acquire); }
 
-    // Called from MAIN THREAD via on_frame()
-    // Updates Ultralight and caches pixels for render thread
-    void update() {
-        if (!initialized_.load(std::memory_order_acquire)) return;
-        if (shutting_down_.load(std::memory_order_acquire)) return;
-        ultralight::RefPtr<ultralight::Renderer> renderer_copy;
-
-        {
-            std::lock_guard<std::mutex> lock(documents_mutex_);
-            renderer_copy = renderer_;
-        }
-        
-        if (!renderer_copy) return;
-        
-        // Update Ultralight - advances animations and JS timers
-        renderer_copy->Update();
-        renderer_copy->RefreshDisplay(0);
-        renderer_copy->Render();
-
-        // Cache pixels for each document
-        std::lock_guard<std::mutex> lock(documents_mutex_);
-        
-        for (auto& [id, doc] : documents_) {
-            if (!doc || !doc->visible || !doc->view) continue;
-            auto* surface = doc->view->surface();
-            if (!surface) continue;
-            auto* bmp_surface = static_cast<ultralight::BitmapSurface*>(surface);
-            ultralight::IntRect dirty = bmp_surface->dirty_bounds();
-
-            if (dirty.IsEmpty()) {
-                continue;
-            }
-            
-            auto bitmap = bmp_surface->bitmap();
-            if (!bitmap) continue;
-            void* pixels = bitmap->LockPixels();
-
-            if (pixels) {
-                struct UnlockGuard {
-                    ultralight::RefPtr<ultralight::Bitmap>& bmp;
-                    ~UnlockGuard() { bmp->UnlockPixels(); }
-                } unlock_guard{bitmap};
-                
-                std::lock_guard<std::mutex> pixel_lock(doc->pixel_mutex);
-                int w = bitmap->width();
-                int h = bitmap->height();
-                uint32_t stride = bitmap->row_bytes();
-                size_t size = static_cast<size_t>(h) * stride;
-
-                if (doc->cached_pixels.size() != size) {
-                    // Size changed - full copy required
-                    doc->cached_pixels.resize(size);
-                    memcpy(doc->cached_pixels.data(), pixels, size);
-                    doc->dirty_top = 0;
-                    doc->dirty_bottom = h;
-                } else {
-                    // Partial update - copy only dirty rows
-                    int dirty_top = std::max(0, dirty.top);
-                    int dirty_bottom = std::min(h, dirty.bottom);
-                    doc->dirty_top = dirty_top;
-                    doc->dirty_bottom = dirty_bottom;
-
-                    if (dirty_top < dirty_bottom) {
-                        size_t offset = static_cast<size_t>(dirty_top) * stride;
-                        size_t copy_size = static_cast<size_t>(dirty_bottom - dirty_top) * stride;
-                        
-                        memcpy(doc->cached_pixels.data() + offset, 
-                            static_cast<const uint8_t*>(pixels) + offset, 
-                            copy_size);
-                    }
-                }
-                
-                doc->cached_width = w;
-                doc->cached_height = h;
-                doc->cached_stride = stride;
-                doc->pixels_ready.store(true, std::memory_order_release);
-                doc->texture_needs_update.store(true, std::memory_order_release);
-                bmp_surface->ClearDirtyBounds();
-            }
-        }
-    }
-
-    // Called from RENDER THREAD via Present hook
-    // Uploads cached pixels to D3D and renders
     void on_present(IDXGISwapChain* swap_chain) {
         if (!swap_chain) return;
         if (shutting_down_.load(std::memory_order_seq_cst)) return;
@@ -1301,7 +1124,7 @@ public:
                 item.doc->dirty_bottom
             );
             
-            // Fall back to full update if partial failed (texture doesn't exist or resized)
+            // Fall back to full update if partial failed
             if (!partial_ok) {
                 d3d_renderer_.update_texture(
                     *item.id,
@@ -1351,6 +1174,400 @@ private:
 
     UIFramework(const UIFramework&) = delete;
     UIFramework& operator=(const UIFramework&) = delete;
+
+    void worker_thread_func() {
+        try {
+            if (!initialize_ultralight()) {
+                worker_init_failed_.store(true, std::memory_order_release);
+                return;
+            }
+            
+            worker_initialized_.store(true, std::memory_order_release);
+            install_present_hook();
+            
+            // Main processing loop
+            while (!should_stop_.load(std::memory_order_acquire)) {
+                process_commands();
+                update_ultralight();
+
+                {
+                    std::unique_lock<std::mutex> lock(worker_mutex_);
+
+                    worker_cv_.wait_for(lock, std::chrono::milliseconds(16), [this] {
+                        return should_stop_.load(std::memory_order_acquire) ||
+                               has_pending_commands_.load(std::memory_order_acquire);
+                    });
+                }
+            }
+
+            cleanup_ultralight();            
+        } catch (const std::exception& e) {
+            std::string error_msg = e.what();
+
+            MainThreadScheduler::instance().schedule([error_msg]() {
+                report_error("KH - UI Framework: Worker thread error: " + error_msg);
+            });
+
+            worker_init_failed_.store(true, std::memory_order_release);
+        } catch (...) {
+            MainThreadScheduler::instance().schedule([]() {
+                report_error("KH - UI Framework: Worker thread unknown error");
+            });
+
+            worker_init_failed_.store(true, std::memory_order_release);
+        }
+    }
+
+    bool initialize_ultralight() {
+        try {
+            html_dirs_ = find_html_ui_directories();
+            std::filesystem::path resources_dir;
+            char module_path[MAX_PATH];
+            HMODULE this_module = nullptr;
+            static const int module_marker = 0;
+            
+            if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                reinterpret_cast<LPCSTR>(&module_marker), &this_module) &&
+                GetModuleFileNameA(this_module, module_path, MAX_PATH)) {
+                std::filesystem::path dll_path(module_path);
+                std::string path_str = dll_path.string();
+                
+                if (path_str.find("\\\\?\\") == 0) {
+                    path_str = path_str.substr(4);
+                    dll_path = path_str;
+                }
+
+                std::filesystem::path mod_dir = dll_path.parent_path().parent_path();
+                std::filesystem::path res_path = mod_dir / "ultralight_resources";
+                
+                if (std::filesystem::exists(res_path)) {
+                    resources_dir = res_path;
+                }
+            }
+
+            file_system_ = std::make_unique<UIFileSystem>(html_dirs_, resources_dir);
+            ultralight::Platform::instance().set_file_system(file_system_.get());
+            font_loader_ = std::make_unique<DirectWriteFontLoader>();
+            ultralight::Platform::instance().set_font_loader(font_loader_.get());
+            ultralight::Config config;
+            config.animation_timer_delay = 1.0 / 60.0;
+            config.scroll_timer_delay = 1.0 / 60.0;
+            config.recycle_delay = 1.0 / 60.0;
+            ultralight::Platform::instance().set_config(config);
+            renderer_ = ultralight::Renderer::Create();
+            
+            if (!renderer_) {
+                MainThreadScheduler::instance().schedule([]() {
+                    report_error("KH - UI Framework: Failed to create renderer");
+                });
+
+                file_system_.reset();
+                font_loader_.reset();
+                return false;
+            }
+
+            return true;
+        } catch (const std::exception& e) {
+            std::string error_msg = e.what();
+
+            MainThreadScheduler::instance().schedule([error_msg]() {
+                report_error("KH - UI Framework: init failed: " + error_msg);
+            });
+
+            file_system_.reset();
+            font_loader_.reset();
+            renderer_ = nullptr;
+            return false;
+        } catch (...) {
+            MainThreadScheduler::instance().schedule([]() {
+                report_error("KH - UI Framework: init failed: Unknown exception");
+            });
+
+            file_system_.reset();
+            font_loader_.reset();
+            renderer_ = nullptr;
+            return false;
+        }
+    }
+
+    void cleanup_ultralight() {
+        renderer_ = nullptr;
+        file_system_.reset();
+        font_loader_.reset();
+    }
+
+    void update_ultralight() {
+        if (shutting_down_.load(std::memory_order_acquire)) return;
+        if (!renderer_) return;
+        
+        // Update Ultralight - advances animations and JS timers
+        renderer_->Update();
+        renderer_->RefreshDisplay(0);
+        renderer_->Render();
+
+        // Cache pixels for each document
+        std::lock_guard<std::mutex> lock(documents_mutex_);
+        
+        for (auto& [id, doc] : documents_) {
+            if (!doc || !doc->visible || !doc->view) continue;
+            auto* surface = doc->view->surface();
+            if (!surface) continue;
+            auto* bmp_surface = static_cast<ultralight::BitmapSurface*>(surface);
+            ultralight::IntRect dirty = bmp_surface->dirty_bounds();
+
+            if (dirty.IsEmpty()) {
+                continue;
+            }
+            
+            auto bitmap = bmp_surface->bitmap();
+            if (!bitmap) continue;
+            void* pixels = bitmap->LockPixels();
+
+            if (pixels) {
+                struct UnlockGuard {
+                    ultralight::RefPtr<ultralight::Bitmap>& bmp;
+                    ~UnlockGuard() { bmp->UnlockPixels(); }
+                } unlock_guard{bitmap};
+                
+                std::lock_guard<std::mutex> pixel_lock(doc->pixel_mutex);
+                int w = bitmap->width();
+                int h = bitmap->height();
+                uint32_t stride = bitmap->row_bytes();
+                size_t size = static_cast<size_t>(h) * stride;
+
+                if (doc->cached_pixels.size() != size) {
+                    doc->cached_pixels.resize(size);
+                    memcpy(doc->cached_pixels.data(), pixels, size);
+                    doc->dirty_top = 0;
+                    doc->dirty_bottom = h;
+                } else {
+                    int dirty_top = std::max(0, dirty.top);
+                    int dirty_bottom = std::min(h, dirty.bottom);
+                    doc->dirty_top = dirty_top;
+                    doc->dirty_bottom = dirty_bottom;
+
+                    if (dirty_top < dirty_bottom) {
+                        size_t offset = static_cast<size_t>(dirty_top) * stride;
+                        size_t copy_size = static_cast<size_t>(dirty_bottom - dirty_top) * stride;
+                        
+                        memcpy(doc->cached_pixels.data() + offset, 
+                            static_cast<const uint8_t*>(pixels) + offset, 
+                            copy_size);
+                    }
+                }
+                
+                doc->cached_width = w;
+                doc->cached_height = h;
+                doc->cached_stride = stride;
+                doc->pixels_ready.store(true, std::memory_order_release);
+                doc->texture_needs_update.store(true, std::memory_order_release);
+                bmp_surface->ClearDirtyBounds();
+            }
+        }
+    }
+
+    void queue_command(std::function<void()> cmd) {
+        {
+            std::lock_guard<std::mutex> lock(command_mutex_);
+            pending_commands_.push_back(std::move(cmd));
+            has_pending_commands_.store(true, std::memory_order_release);
+        }
+        worker_cv_.notify_one();
+    }
+
+    void process_commands() {
+        std::deque<std::function<void()>> commands_to_execute;
+        
+        {
+            std::lock_guard<std::mutex> lock(command_mutex_);
+            if (pending_commands_.empty()) return;
+            commands_to_execute.swap(pending_commands_);
+            has_pending_commands_.store(false, std::memory_order_release);
+        }
+        
+        for (auto& cmd : commands_to_execute) {
+            try {
+                cmd();
+            } catch (const std::exception& e) {
+                std::string error_msg = e.what();
+
+                MainThreadScheduler::instance().schedule([error_msg]() {
+                    report_error("KH - UI Framework: Command error: " + error_msg);
+                });
+            } catch (...) {
+                MainThreadScheduler::instance().schedule([]() {
+                    report_error("KH - UI Framework: Command unknown error");
+                });
+            }
+        }
+    }
+
+    void open_html_internal(const std::string& doc_id, const std::string& filename, 
+                            int x, int y, int width, int height, float opacity) {
+        auto html_path = find_html_file(filename);
+
+        if (html_path.empty()) {
+            MainThreadScheduler::instance().schedule([filename]() {
+                report_error("KH - UI Framework: HTML not found: " + filename);
+            });
+
+            return;
+        }
+
+        if (!renderer_) return;
+        int w = width, h = height;
+        bool fs = (width <= 0 || height <= 0);
+        if (fs) { w = GetSystemMetrics(SM_CXSCREEN); h = GetSystemMetrics(SM_CYSCREEN); }
+        ultralight::ViewConfig vc;
+        vc.is_accelerated = false;
+        vc.is_transparent = true;
+        auto view = renderer_->CreateView(w, h, vc, nullptr);
+
+        if (!view) {
+            MainThreadScheduler::instance().schedule([]() {
+                report_error("KH - UI Framework: Failed to create view");
+            });
+
+            return;
+        }
+        
+        view->Focus();
+        auto doc = std::make_shared<UIDocument>();
+        doc->id = doc_id;
+        doc->html_path = html_path.string();
+        doc->view = view;
+        doc->x = x; doc->y = y;
+        doc->width = w; doc->height = h;
+        doc->opacity = std::clamp(opacity, 0.0f, 1.0f);
+        doc->fullscreen = fs;
+        doc->listener = std::make_unique<UIDocumentListener>();
+        view->set_view_listener(doc->listener.get());
+        std::string url = "file:///" + html_path.string();
+        std::replace(url.begin(), url.end(), '\\', '/');
+        view->LoadURL(ultralight::String(url.c_str()));
+
+        {
+            std::lock_guard<std::mutex> lock(documents_mutex_);
+            doc->z_order = static_cast<int>(documents_.size());
+            documents_[doc->id] = doc;
+        }
+    }
+
+    void close_html_internal(const std::string& doc_id) {
+        std::shared_ptr<UIDocument> doc_to_close;
+        
+        {
+            std::lock_guard<std::mutex> lock(documents_mutex_);
+            auto it = documents_.find(doc_id);
+            if (it == documents_.end()) return;
+            doc_to_close = it->second;
+            documents_.erase(it);
+        }
+
+        d3d_renderer_.remove_doc_texture(doc_id);
+        
+        if (doc_to_close) {
+            doc_to_close->view = nullptr;
+            std::lock_guard<std::mutex> pixel_lock(doc_to_close->pixel_mutex);
+            doc_to_close->cached_pixels.clear();
+            doc_to_close->pixels_ready.store(false, std::memory_order_release);
+        }
+    }
+
+    void set_html_size_internal(const std::string& doc_id, int width, int height) {
+        if (shutting_down_.load(std::memory_order_acquire)) return;
+        
+        std::shared_ptr<UIDocument> doc;
+        std::string html_path_copy;
+        
+        {
+            std::lock_guard<std::mutex> lock(documents_mutex_);
+            auto it = documents_.find(doc_id);
+            if (it == documents_.end()) return;
+            doc = it->second;
+            html_path_copy = doc->html_path;
+        }
+        
+        if (!renderer_ || !doc) return;
+        ultralight::ViewConfig vc;
+        vc.is_accelerated = false;
+        vc.is_transparent = true;
+        auto new_view = renderer_->CreateView(width, height, vc, nullptr);
+        if (!new_view) return;
+        std::string url = "file:///" + html_path_copy;
+        std::replace(url.begin(), url.end(), '\\', '/');
+
+        {
+            std::lock_guard<std::mutex> lock(documents_mutex_);
+            auto it = documents_.find(doc_id);
+            
+            if (it == documents_.end() || it->second != doc) {
+                return;
+            }
+            
+            new_view->LoadURL(ultralight::String(url.c_str()));
+            new_view->Focus();
+            doc->view = new_view;
+            doc->width = width;
+            doc->height = height;
+            doc->fullscreen = false;
+            std::lock_guard<std::mutex> pixel_lock(doc->pixel_mutex);
+            doc->pixels_ready.store(false, std::memory_order_release);
+            doc->cached_pixels.clear();
+        }
+    }
+
+    void reload_html_internal(const std::string& doc_id) {
+        if (shutting_down_.load(std::memory_order_acquire)) return;
+        std::shared_ptr<UIDocument> doc;
+        std::string html_path_copy;
+        ultralight::RefPtr<ultralight::View> view_copy;
+        
+        {
+            std::lock_guard<std::mutex> lock(documents_mutex_);
+            auto it = documents_.find(doc_id);
+            if (it == documents_.end()) return;
+            doc = it->second;
+            if (!doc || !doc->view) return;
+            html_path_copy = doc->html_path;
+            view_copy = doc->view;
+        }
+        
+        if (!view_copy) return;
+        std::string url = "file:///" + html_path_copy;
+        std::replace(url.begin(), url.end(), '\\', '/');
+        view_copy->LoadURL(ultralight::String(url.c_str()));
+        
+        {
+            std::lock_guard<std::mutex> lock(documents_mutex_);
+            auto it = documents_.find(doc_id);
+            
+            if (it == documents_.end() || it->second != doc) {
+                return;
+            }
+
+            std::lock_guard<std::mutex> pixel_lock(doc->pixel_mutex);
+            doc->pixels_ready.store(false, std::memory_order_release);
+        }
+    }
+
+    std::string execute_javascript_internal(const std::string& doc_id, const std::string& script) {
+        if (shutting_down_.load(std::memory_order_acquire)) return "";
+        ultralight::RefPtr<ultralight::View> view_copy;
+        
+        {
+            std::lock_guard<std::mutex> lock(documents_mutex_);
+            auto it = documents_.find(doc_id);
+            if (it == documents_.end()) return "";
+            if (!it->second || !it->second->view) return "";
+            view_copy = it->second->view;
+        }
+        
+        if (!view_copy) return "";
+        auto result = view_copy->EvaluateScript(ultralight::String(script.c_str()));
+        return std::string(result.utf8().data());
+    }
+
     std::unordered_map<std::string, std::shared_ptr<UIDocument>> documents_;
     std::vector<std::filesystem::path> html_dirs_;
     ultralight::RefPtr<ultralight::Renderer> renderer_;
@@ -1368,6 +1585,19 @@ private:
     // Mutex for document map operations
     std::mutex documents_mutex_;
     std::mutex init_mutex_;
+
+    // Worker thread members
+    std::thread worker_thread_;
+    std::atomic<bool> should_stop_{false};
+    std::atomic<bool> worker_initialized_{false};
+    std::atomic<bool> worker_init_failed_{false};
+    std::mutex worker_mutex_;
+    std::condition_variable worker_cv_;
+    
+    // Command queue
+    std::deque<std::function<void()>> pending_commands_;
+    std::mutex command_mutex_;
+    std::atomic<bool> has_pending_commands_{false};
 
     // MinHook members
     static std::atomic<UIFramework*> instance_ptr_;

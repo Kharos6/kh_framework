@@ -110,10 +110,6 @@ void intercept::on_frame() {
     mission["frame"] = g_mission_frame;
     mission["time"] = g_mission_time;
     LuaFunctions::update_scheduler();
-
-    if (UIFramework::instance().is_initialized()) {
-        UIFramework::instance().update();
-    }
 }
 
 void intercept::mission_ended() {
@@ -447,7 +443,7 @@ static FARPROC WINAPI delay_load_hook(unsigned dliNotify, PDelayLoadInfo pdli) {
         std::string dll_name = pdli->szDll;
         
         if (_stricmp(dll_name.c_str(), "lua51.dll") == 0) {
-            report_error("KH - AI Framework: CRITICAL - " + dll_name + " failed to load - extension cannot function");
+            report_error("CRITICAL - " + dll_name + " failed to load - extension cannot function");
         }
     }
     

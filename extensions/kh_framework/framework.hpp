@@ -18,6 +18,7 @@
 #include <filesystem>
 #include <iomanip>
 #include <memory>
+#include <future>
 #include <optional>
 #include <stdexcept>
 #include <unordered_map>
@@ -484,7 +485,7 @@ static void initialize_terrain_matrix() {
     } catch (const std::exception& e) {
         report_error("Failed to initialize terrain matrix: " + std::string(e.what()));
     } catch (...) {
-        report_error("Unknown error initializing terrain matrix");
+        report_error("Unknown error while initializing terrain matrix");
     }
 }
 

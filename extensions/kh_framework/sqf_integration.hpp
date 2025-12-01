@@ -83,6 +83,8 @@ static registered_sqf_function _sqf_html_set_visible;
 static registered_sqf_function _sqf_html_get_open;
 static registered_sqf_function _sqf_html_is_initialized;
 static registered_sqf_function _sqf_html_execute_js;
+static registered_sqf_function _sqf_html_set_js_variable;
+static registered_sqf_function _sqf_html_get_js_variable;
 static registered_sqf_function _sqf_html_set_position;
 static registered_sqf_function _sqf_html_set_opacity;
 static registered_sqf_function _sqf_html_set_size;
@@ -1852,6 +1854,60 @@ static game_value ui_execute_js_sqf(game_value_parameter left_arg, game_value_pa
     }
 }
 
+static game_value ui_set_js_variable_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
+    try {
+        std::string doc_id = left_arg;
+        
+        if (doc_id.empty()) {
+            return game_value(false);
+        }
+        
+        if (right_arg.type_enum() != game_data_type::ARRAY) {
+            return game_value(false);
+        }
+        
+        auto& arr = right_arg.to_array();
+        
+        if (arr.size() < 2) {
+            return game_value(false);
+        }
+        
+        std::string var_name = arr[0];
+        
+        if (var_name.empty()) {
+            return game_value(false);
+        }
+        
+        std::string value_json = game_value_to_json(arr[1]);
+        return game_value(UIFramework::instance().set_js_variable(doc_id, var_name, value_json));
+    } catch (const std::exception& e) {
+        report_error("KH - UI Framework: Error in htmlSetJsVariable - " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value ui_get_js_variable_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
+    try {
+        std::string doc_id = left_arg;
+        
+        if (doc_id.empty()) {
+            return game_value();
+        }
+        
+        std::string var_name = right_arg;
+        
+        if (var_name.empty()) {
+            return game_value();
+        }
+        
+        std::string json_result = UIFramework::instance().get_js_variable(doc_id, var_name);
+        return json_to_game_value(json_result);
+    } catch (const std::exception& e) {
+        report_error("KH - UI Framework: Error in htmlGetJsVariable - " + std::string(e.what()));
+        return game_value();
+    }
+}
+
 static game_value ui_set_position_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
     try {
         std::string doc_id = left_arg;
@@ -2663,6 +2719,24 @@ static void initialize_sqf_integration() {
         "Execute JavaScript in HTML document",
         userFunctionWrapper<ui_execute_js_sqf>,
         game_data_type::STRING,
+        game_data_type::STRING,
+        game_data_type::STRING
+    );
+
+    _sqf_html_set_js_variable = intercept::client::host::register_sqf_command(
+        "htmlSetJsVariable",
+        "Set a global JavaScript variable in HTML document",
+        userFunctionWrapper<ui_set_js_variable_sqf>,
+        game_data_type::BOOL,
+        game_data_type::STRING,
+        game_data_type::ARRAY
+    );
+
+    _sqf_html_get_js_variable = intercept::client::host::register_sqf_command(
+        "htmlGetJsVariable",
+        "Get a global JavaScript variable from HTML document",
+        userFunctionWrapper<ui_get_js_variable_sqf>,
+        game_data_type::ANY,
         game_data_type::STRING,
         game_data_type::STRING
     );

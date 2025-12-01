@@ -1003,6 +1003,49 @@ public:
         return true;
     }
 
+    bool set_js_variable(const std::string& doc_id, const std::string& var_name, const std::string& value_json) {
+        if (!initialized_.load(std::memory_order_acquire)) return false;
+        if (shutting_down_.load(std::memory_order_acquire)) return false;
+        
+        {
+            std::lock_guard<std::mutex> lock(documents_mutex_);
+            auto it = documents_.find(doc_id);
+            if (it == documents_.end()) return false;
+            if (!it->second || !it->second->view) return false;
+        }
+        
+        std::string script = "window[\"" + var_name + "\"] = " + value_json + ";";
+        
+        queue_command([this, doc_id, script]() {
+            execute_javascript_internal(doc_id, script);
+        });
+        
+        return true;
+    }
+
+    std::string get_js_variable(const std::string& doc_id, const std::string& var_name) {
+        if (!initialized_.load(std::memory_order_acquire)) return "";
+        if (shutting_down_.load(std::memory_order_acquire)) return "";
+        
+        {
+            std::lock_guard<std::mutex> lock(documents_mutex_);
+            auto it = documents_.find(doc_id);
+            if (it == documents_.end()) return "";
+            if (!it->second || !it->second->view) return "";
+        }
+        
+        std::string script = "JSON.stringify(window[\"" + var_name + "\"])";
+        std::string result;
+        std::promise<std::string> promise;
+        auto future = promise.get_future();
+        
+        queue_command([this, doc_id, script, &promise]() {
+            promise.set_value(execute_javascript_internal(doc_id, script));
+        });
+        
+        return future.get();
+    }
+
     bool set_html_visible(const std::string& doc_id, bool visible) {
         if (!initialized_.load(std::memory_order_acquire)) return false;
         std::lock_guard<std::mutex> lock(documents_mutex_);

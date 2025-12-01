@@ -235,7 +235,6 @@ public:
             std::chrono::steady_clock::now().time_since_epoch().count()
         );
 
-        uint32_t random_bits = rng() & 0xFFF;
         uint32_t part1 = (timestamp & 0xFFFF) | ((unique_machine_id & 0xFF) << 16) | ((rng() & 0xFF) << 24);
         uint32_t part2 = counter.fetch_add(1, std::memory_order_relaxed);
         char buffer[17];
@@ -430,6 +429,139 @@ private:
     std::unordered_map<Key, CacheEntry> cache_map_;
     mutable std::shared_mutex mutex_;
 };
+
+static std::string game_value_to_json(const game_value& val) {
+    switch (val.type_enum()) {
+        case game_data_type::SCALAR:
+            return std::to_string(static_cast<float>(val));
+
+        case game_data_type::BOOL:
+            return static_cast<bool>(val) ? "true" : "false";
+
+        case game_data_type::STRING: {
+            std::string str = static_cast<std::string>(val);
+            std::string escaped = "\"";
+
+            for (char c : str) {
+                switch (c) {
+                    case '"': escaped += "\\\""; break;
+                    case '\\': escaped += "\\\\"; break;
+                    case '\n': escaped += "\\n"; break;
+                    case '\r': escaped += "\\r"; break;
+                    case '\t': escaped += "\\t"; break;
+                    default: escaped += c;
+                }
+            }
+
+            escaped += "\"";
+            return escaped;
+        }
+
+        case game_data_type::ARRAY: {
+            auto& arr = val.to_array();
+            std::string result = "[";
+            
+            for (size_t i = 0; i < arr.size(); ++i) {
+                if (i > 0) result += ",";
+                result += game_value_to_json(arr[i]);
+            }
+            
+            result += "]";
+            return result;
+        }
+
+        case game_data_type::NOTHING:
+            return "null";
+            
+        default:
+            return "null";
+    }
+}
+
+static game_value json_to_game_value(const std::string& json) {
+    if (json.empty() || json == "undefined" || json == "null") {
+        return game_value();
+    }
+
+    if (json == "true") return game_value(true);
+    if (json == "false") return game_value(false);
+
+    if (json.size() >= 2 && json.front() == '"' && json.back() == '"') {
+        std::string result;
+        result.reserve(json.size() - 2);
+        
+        for (size_t i = 1; i < json.size() - 1; ++i) {
+            if (json[i] == '\\' && i + 1 < json.size() - 1) {
+                char next = json[i + 1];
+
+                switch (next) {
+                    case '"': result += '"'; ++i; break;
+                    case '\\': result += '\\'; ++i; break;
+                    case 'n': result += '\n'; ++i; break;
+                    case 'r': result += '\r'; ++i; break;
+                    case 't': result += '\t'; ++i; break;
+                    default: result += json[i]; break;
+                }
+            } else {
+                result += json[i];
+            }
+        }
+
+        return game_value(result);
+    }
+
+    if (json.front() == '[' && json.back() == ']') {
+        auto_array<game_value> arr;
+        std::string content = json.substr(1, json.size() - 2);
+        
+        if (content.empty()) {
+            return game_value(std::move(arr));
+        }
+        
+        size_t pos = 0;
+        int depth = 0;
+        size_t start = 0;
+        bool in_string = false;
+        
+        while (pos < content.size()) {
+            char c = content[pos];
+            
+            if (c == '"' && (pos == 0 || content[pos - 1] != '\\')) {
+                in_string = !in_string;
+            } else if (!in_string) {
+                if (c == '[' || c == '{') depth++;
+                else if (c == ']' || c == '}') depth--;
+                else if (c == ',' && depth == 0) {
+                    arr.push_back(json_to_game_value(content.substr(start, pos - start)));
+                    start = pos + 1;
+                    while (start < content.size() && content[start] == ' ') start++;
+                    pos = start;
+                    continue;
+                }
+            }
+
+            pos++;
+        }
+        
+        if (start < content.size()) {
+            arr.push_back(json_to_game_value(content.substr(start)));
+        }
+        
+        return game_value(std::move(arr));
+    }
+
+    try {
+        size_t processed = 0;
+        float num = std::stof(json, &processed);
+
+        if (processed == json.size()) {
+            return game_value(num);
+        }
+    } catch (...) {}
+    
+    // Fallback: return as string
+    return game_value(json);
+}
 
 static void initialize_terrain_matrix() {
     try {

@@ -22,6 +22,7 @@
 #include <memory>
 #include <future>
 #include <optional>
+#include <unordered_set>
 #include <stdexcept>
 #include <unordered_map>
 #include <shlobj.h>

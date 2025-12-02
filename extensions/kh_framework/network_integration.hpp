@@ -12,6 +12,31 @@ constexpr int NET_DEFAULT_PORT = 21337;
 constexpr int NET_CONNECT_TIMEOUT_MS = 5000;
 constexpr int NET_SEND_TIMEOUT_MS = 3000;
 constexpr int NET_RECV_TIMEOUT_MS = 3000;
+constexpr const char* NET_INTERNAL_ROUTE_EVENT = "_KH_INTERNAL_ROUTE_";
+constexpr const char* NET_INTERNAL_CONDITIONAL_EVENT = "_KH_INTERNAL_COND_";
+
+enum class NetworkTargetType : uint8_t {
+    CLIENT_ID = 0,           // Specific client owner ID (positive)
+    CLIENT_ID_EXCLUDE = 1,   // Everyone except this client (negative ID)
+    LOCAL_ONLY = 2,          // Local execution only (bool true)
+    DO_NOTHING = 3,          // No execution (bool false)
+    OBJECT_OWNER = 4,        // Send to owner of object
+    GROUP_MEMBERS = 5,       // Send to all group member owners  
+    TEAM_MEMBER_OWNER = 6,   // Send to team member's agent owner
+    SIDE_MEMBERS = 7,        // Send to all players of a side
+    LOCATION_UNITS = 8,      // Send to all players in location
+    STRING_SERVER = 9,       // "SERVER"
+    STRING_GLOBAL = 10,      // "GLOBAL"
+    STRING_LOCAL = 11,       // "LOCAL"
+    STRING_PLAYERS = 12,     // "PLAYERS"
+    STRING_REMOTE = 13,      // "REMOTE"
+    STRING_ADMIN = 14,       // "ADMIN"
+    STRING_HEADLESS = 15,    // "HEADLESS"
+    STRING_CURATORS = 16,    // "CURATORS"
+    CODE_CONDITION = 17,     // CODE
+    ARRAY_TARGETS = 18,      // Array of mixed target types
+    STRING_EXTENDED = 19     // Specific string type
+};
 
 // Global handler ID counter
 static std::atomic<uint64_t> g_network_handler_id_counter{0};
@@ -27,14 +52,32 @@ struct NetworkMessage {
         : event_name(name), payload(std::move(data)), sender_client_id(sender) {}
 };
 
-struct OutgoingMessage {
+struct LocalMessage {
+    std::string event_name;
+    game_value message;
+    int sender_client_id;
+    
+    LocalMessage() : sender_client_id(-1) {}
+    LocalMessage(const std::string& name, const game_value& msg, int sender = -1)
+        : event_name(name), message(msg), sender_client_id(sender) {}
+};
+
+struct JipMessage {
+    std::string event_name;
     std::vector<uint8_t> payload;
+    int original_sender;
+    std::string dependency_net_id;  // Empty = no dependency, otherwise netId of object/group
+    bool dependency_is_group;       // true = group, false = object
+};
+
+struct OutgoingMessage {
+    std::shared_ptr<std::vector<uint8_t>> payload;
     std::string event_name;
     int target_client;
     int sender_client;
     OutgoingMessage() : target_client(-1), sender_client(-1) {}
     
-    OutgoingMessage(int target, int sender, std::string&& event, std::vector<uint8_t>&& data)
+    OutgoingMessage(int target, int sender, std::string&& event, std::shared_ptr<std::vector<uint8_t>> data)
         : payload(std::move(data)), event_name(std::move(event)), 
           target_client(target), sender_client(sender) {}
 };
@@ -74,7 +117,9 @@ private:
     // Incoming message queue
     std::deque<NetworkMessage> incoming_queue_;
     std::mutex incoming_mutex_;
-    
+    std::deque<LocalMessage> local_incoming_queue_;
+    std::mutex local_incoming_mutex_;
+        
     // Outgoing message queue
     std::deque<OutgoingMessage> outgoing_queue_;
     std::mutex outgoing_mutex_;
@@ -85,6 +130,10 @@ private:
     std::thread send_thread_;
     std::thread receive_thread_;
     
+    // Jip
+    std::unordered_map<std::string, JipMessage> jip_messages_;
+    std::mutex jip_mutex_;
+
     // Initialization
     bool wsa_initialized_{false};
     std::atomic<int> cached_client_id_{-1};
@@ -521,6 +570,829 @@ private:
             }
         }
     }
+    
+    static std::vector<int> get_unique_client_ids(const std::vector<int>& ids) {
+        std::vector<int> unique_ids;
+        std::unordered_set<int> seen;
+        
+        for (int id : ids) {
+            if (seen.find(id) == seen.end()) {
+                seen.insert(id);
+                unique_ids.push_back(id);
+            }
+        }
+        
+        return unique_ids;
+    }
+
+    // Resolve targets when we are the server
+    // Returns vector of client IDs to send to, empty means no send needed
+    // Sets local_exec to true if local execution should happen
+    std::vector<int> resolve_targets_server(
+        NetworkTargetType target_type,
+        const game_value& target_data,
+        int sender_client_id,
+        bool& local_exec
+    ) {
+        std::vector<int> targets;
+        local_exec = false;
+        int our_client_id = cached_client_id_.load();
+        
+        switch (target_type) {
+            case NetworkTargetType::CLIENT_ID: {
+                int target_id = static_cast<int>(static_cast<float>(target_data));
+                
+                if (target_id == our_client_id || target_id == 2) {
+                    local_exec = true;
+                } else {
+                    targets.push_back(target_id);
+                }
+                
+                break;
+            }
+            
+            case NetworkTargetType::CLIENT_ID_EXCLUDE: {
+                int exclude_id = static_cast<int>(static_cast<float>(target_data));
+                
+                if (exclude_id < 0) {
+                    exclude_id = -exclude_id;
+                }
+                
+                // Get all connected clients
+                {
+                    std::lock_guard<std::mutex> lock(connections_mutex_);
+                    
+                    for (const auto& pair : client_connections_) {
+                        if (pair.first != exclude_id) {
+                            targets.push_back(pair.first);
+                        }
+                    }
+                }
+                
+                // Include ourselves if we're not excluded
+                if (our_client_id != exclude_id) {
+                    local_exec = true;
+                }
+                
+                break;
+            }
+            
+            case NetworkTargetType::LOCAL_ONLY: {
+                local_exec = true;
+                break;
+            }
+            
+            case NetworkTargetType::DO_NOTHING: {
+                // No action
+                break;
+            }
+            
+            case NetworkTargetType::OBJECT_OWNER: {
+                object obj = static_cast<object>(target_data);
+                
+                if (sqf::is_null(obj)) {
+                    break;
+                }
+                
+                int owner_id = static_cast<int>(sqf::owner(obj));
+                
+                if (owner_id == our_client_id || owner_id == 2) {
+                    local_exec = true;
+                } else {
+                    targets.push_back(owner_id);
+                }
+                
+                break;
+            }
+            
+            case NetworkTargetType::GROUP_MEMBERS: {
+                group grp = static_cast<group>(target_data);
+                
+                if (sqf::is_null(grp)) {
+                    break;
+                }
+                
+                auto units = sqf::units(grp);
+                std::vector<int> owner_ids;
+                
+                for (const auto& unit : units) {
+                    int owner_id = static_cast<int>(sqf::owner(unit));
+                    owner_ids.push_back(owner_id);
+                }
+                
+                auto unique_ids = get_unique_client_ids(owner_ids);
+                
+                for (int id : unique_ids) {
+                    if (id == our_client_id || id == 2) {
+                        local_exec = true;
+                    } else {
+                        targets.push_back(id);
+                    }
+                }
+                
+                break;
+            }
+            
+            case NetworkTargetType::TEAM_MEMBER_OWNER: {
+                game_value agent_obj = sqf::agent(target_data);
+                object obj = static_cast<object>(agent_obj);
+                
+                if (sqf::is_null(obj)) {
+                    break;
+                }
+                
+                int owner_id = static_cast<int>(sqf::owner(obj));
+                
+                if (owner_id == our_client_id || owner_id == 2) {
+                    local_exec = true;
+                } else {
+                    targets.push_back(owner_id);
+                }
+                
+                break;
+            }
+            
+            case NetworkTargetType::SIDE_MEMBERS: {
+                side target_side = static_cast<side>(target_data);
+                game_value all_players_gv = sqf::get_variable(sqf::mission_namespace(), "kh_var_allplayerunits", game_value());
+                
+                if (all_players_gv.is_nil() || all_players_gv.type_enum() != game_data_type::ARRAY) {
+                    break;
+                }
+                
+                auto& all_players = all_players_gv.to_array();
+                std::vector<int> owner_ids;
+                
+                for (const auto& player_gv : all_players) {
+                    object player_unit = static_cast<object>(player_gv);
+                    
+                    if (sqf::is_null(player_unit)) {
+                        continue;
+                    }
+                    
+                    group player_group = sqf::get_group(player_unit);
+                    side player_side = sqf::get_side(player_group);
+                    
+                    if (player_side == target_side) {
+                        int owner_id = static_cast<int>(sqf::owner(player_unit));
+                        owner_ids.push_back(owner_id);
+                    }
+                }
+                
+                auto unique_ids = get_unique_client_ids(owner_ids);
+                
+                for (int id : unique_ids) {
+                    if (id == our_client_id || id == 2) {
+                        local_exec = true;
+                    } else {
+                        targets.push_back(id);
+                    }
+                }
+                
+                break;
+            }
+            
+            case NetworkTargetType::LOCATION_UNITS: {
+                location loc = static_cast<location>(target_data);
+                
+                if (sqf::is_null(loc)) {
+                    break;
+                }
+                
+                game_value all_players_gv = sqf::get_variable(sqf::mission_namespace(), "kh_var_allplayerunits", game_value());
+                
+                if (all_players_gv.is_nil() || all_players_gv.type_enum() != game_data_type::ARRAY) {
+                    break;
+                }
+                
+                auto& all_players = all_players_gv.to_array();
+                std::vector<int> owner_ids;
+                
+                for (const auto& player_gv : all_players) {
+                    object player_unit = static_cast<object>(player_gv);
+                    
+                    if (sqf::is_null(player_unit)) {
+                        continue;
+                    }
+                    
+                    if (sqf::in_area(player_unit, loc)) {
+                        int owner_id = static_cast<int>(sqf::owner(player_unit));
+                        owner_ids.push_back(owner_id);
+                    }
+                }
+                
+                auto unique_ids = get_unique_client_ids(owner_ids);
+                
+                for (int id : unique_ids) {
+                    if (id == our_client_id || id == 2) {
+                        local_exec = true;
+                    } else {
+                        targets.push_back(id);
+                    }
+                }
+                
+                break;
+            }
+            
+            case NetworkTargetType::STRING_SERVER: {
+                if (our_client_id == 2) {
+                    local_exec = true;
+                } else {
+                    targets.push_back(2);
+                }
+                
+                break;
+            }
+            
+            case NetworkTargetType::STRING_GLOBAL: {
+                // Everyone including local
+                local_exec = true;
+                
+                {
+                    std::lock_guard<std::mutex> lock(connections_mutex_);
+                    
+                    for (const auto& pair : client_connections_) {
+                        targets.push_back(pair.first);
+                    }
+                }
+                
+                break;
+            }
+            
+            case NetworkTargetType::STRING_LOCAL: {
+                local_exec = true;
+                break;
+            }
+            
+            case NetworkTargetType::STRING_PLAYERS: {
+                game_value all_machines_gv = sqf::get_variable(sqf::mission_namespace(), "kh_var_allplayermachines", game_value());
+                
+                if (all_machines_gv.is_nil() || all_machines_gv.type_enum() != game_data_type::ARRAY) {
+                    break;
+                }
+                
+                auto& all_machines = all_machines_gv.to_array();
+                
+                for (const auto& machine_gv : all_machines) {
+                    int client_id = static_cast<int>(static_cast<float>(machine_gv));
+                    
+                    if (client_id == our_client_id || client_id == 2) {
+                        local_exec = true;
+                    } else {
+                        targets.push_back(client_id);
+                    }
+                }
+                
+                break;
+            }
+            
+            case NetworkTargetType::STRING_REMOTE: {
+                // Everyone except sender
+                {
+                    std::lock_guard<std::mutex> lock(connections_mutex_);
+                    
+                    for (const auto& pair : client_connections_) {
+                        if (pair.first != sender_client_id) {
+                            targets.push_back(pair.first);
+                        }
+                    }
+                }
+                
+                // Include server if sender is not server
+                if (sender_client_id != our_client_id && sender_client_id != 2) {
+                    local_exec = true;
+                }
+                
+                break;
+            }
+            
+            case NetworkTargetType::STRING_ADMIN: {
+                game_value admin_gv = sqf::get_variable(sqf::mission_namespace(), "kh_var_adminmachine", game_value());
+                
+                if (admin_gv.is_nil()) {
+                    break;
+                }
+                
+                int admin_id = static_cast<int>(static_cast<float>(admin_gv));
+                
+                if (admin_id == our_client_id || admin_id == 2) {
+                    local_exec = true;
+                } else {
+                    targets.push_back(admin_id);
+                }
+                
+                break;
+            }
+            
+            case NetworkTargetType::STRING_HEADLESS: {
+                game_value headless_gv = sqf::get_variable(sqf::mission_namespace(), "kh_var_allheadlessmachines", game_value());
+                
+                if (headless_gv.is_nil() || headless_gv.type_enum() != game_data_type::ARRAY) {
+                    break;
+                }
+                
+                auto& headless_machines = headless_gv.to_array();
+                
+                for (const auto& machine_gv : headless_machines) {
+                    int client_id = static_cast<int>(static_cast<float>(machine_gv));
+                    
+                    if (client_id == our_client_id || client_id == 2) {
+                        local_exec = true;
+                    } else {
+                        targets.push_back(client_id);
+                    }
+                }
+                
+                break;
+            }
+            
+            case NetworkTargetType::STRING_CURATORS: {
+                game_value all_players_gv = sqf::get_variable(sqf::mission_namespace(), "kh_var_allplayerunits", game_value());
+                
+                if (all_players_gv.is_nil() || all_players_gv.type_enum() != game_data_type::ARRAY) {
+                    break;
+                }
+                
+                auto& all_players = all_players_gv.to_array();
+                std::vector<int> owner_ids;
+                
+                for (const auto& player_gv : all_players) {
+                    object player_unit = static_cast<object>(player_gv);
+                    
+                    if (sqf::is_null(player_unit)) {
+                        continue;
+                    }
+                    
+                    game_value curator_logic = sqf::get_assigned_curator_logic(player_unit);
+                    
+                    if (!curator_logic.is_nil() && !sqf::is_null(static_cast<object>(curator_logic))) {
+                        int owner_id = static_cast<int>(sqf::owner(player_unit));
+                        owner_ids.push_back(owner_id);
+                    }
+                }
+                
+                auto unique_ids = get_unique_client_ids(owner_ids);
+                
+                for (int id : unique_ids) {
+                    if (id == our_client_id || id == 2) {
+                        local_exec = true;
+                    } else {
+                        targets.push_back(id);
+                    }
+                }
+                                
+                break;
+            }
+
+            case NetworkTargetType::STRING_EXTENDED: {
+                std::string target_str = static_cast<std::string>(target_data);
+                targets = resolve_string_target_extended(target_str, sender_client_id, local_exec);
+                break;
+            }
+
+            case NetworkTargetType::CODE_CONDITION: {
+                // Same as GLOBAL - send to everyone, condition checked on receive
+                local_exec = true;
+                
+                {
+                    std::lock_guard<std::mutex> lock(connections_mutex_);
+                    
+                    for (const auto& pair : client_connections_) {
+                        targets.push_back(pair.first);
+                    }
+                }
+                
+                break;
+            }
+
+            case NetworkTargetType::ARRAY_TARGETS: {
+                targets = resolve_array_targets(target_data, sender_client_id, local_exec);
+                break;
+            }
+                        
+            default:
+                break;
+        }
+        
+        return targets;
+    }
+
+    void resolve_single_target(
+        const game_value& target,
+        int sender_client_id,
+        std::vector<int>& out_targets,
+        bool& out_local_exec
+    ) {
+        if (target.is_nil()) {
+            return;
+        }
+        
+        auto type = target.type_enum();
+        
+        switch (type) {
+            case game_data_type::SCALAR: {
+                int client_id = static_cast<int>(static_cast<float>(target));
+                
+                if (client_id < 0) {
+                    // Exclude mode
+                    bool local_exec = false;
+                    auto targets = resolve_targets_server(NetworkTargetType::CLIENT_ID_EXCLUDE, target, sender_client_id, local_exec);
+                    out_targets.insert(out_targets.end(), targets.begin(), targets.end());
+                    if (local_exec) out_local_exec = true;
+                } else {
+                    int our_client_id = cached_client_id_.load();
+                    
+                    if (client_id == our_client_id || client_id == 2) {
+                        out_local_exec = true;
+                    } else {
+                        out_targets.push_back(client_id);
+                    }
+                }
+                break;
+            }
+            
+            case game_data_type::BOOL: {
+                bool val = static_cast<bool>(target);
+
+                if (val) {
+                    out_local_exec = true;
+                }
+
+                // false = do nothing
+                break;
+            }
+            
+            case game_data_type::OBJECT: {
+                bool local_exec = false;
+                auto targets = resolve_targets_server(NetworkTargetType::OBJECT_OWNER, target, sender_client_id, local_exec);
+                out_targets.insert(out_targets.end(), targets.begin(), targets.end());
+                if (local_exec) out_local_exec = true;
+                break;
+            }
+            
+            case game_data_type::GROUP: {
+                bool local_exec = false;
+                auto targets = resolve_targets_server(NetworkTargetType::GROUP_MEMBERS, target, sender_client_id, local_exec);
+                out_targets.insert(out_targets.end(), targets.begin(), targets.end());
+                if (local_exec) out_local_exec = true;
+                break;
+            }
+            
+            case game_data_type::TEAM_MEMBER: {
+                bool local_exec = false;
+                auto targets = resolve_targets_server(NetworkTargetType::TEAM_MEMBER_OWNER, target, sender_client_id, local_exec);
+                out_targets.insert(out_targets.end(), targets.begin(), targets.end());
+                if (local_exec) out_local_exec = true;
+                break;
+            }
+            
+            case game_data_type::SIDE: {
+                bool local_exec = false;
+                auto targets = resolve_targets_server(NetworkTargetType::SIDE_MEMBERS, target, sender_client_id, local_exec);
+                out_targets.insert(out_targets.end(), targets.begin(), targets.end());
+                if (local_exec) out_local_exec = true;
+                break;
+            }
+            
+            case game_data_type::LOCATION: {
+                bool local_exec = false;
+                auto targets = resolve_targets_server(NetworkTargetType::LOCATION_UNITS, target, sender_client_id, local_exec);
+                out_targets.insert(out_targets.end(), targets.begin(), targets.end());
+                if (local_exec) out_local_exec = true;
+                break;
+            }
+            
+            case game_data_type::STRING: {
+                std::string target_str = static_cast<std::string>(target);
+                if (target_str.empty()) break;
+                std::string target_upper = target_str;
+                std::transform(target_upper.begin(), target_upper.end(), target_upper.begin(), ::toupper);
+                NetworkTargetType str_type;
+                bool use_extended = false;
+                if (target_upper == "SERVER") str_type = NetworkTargetType::STRING_SERVER;
+                else if (target_upper == "GLOBAL") str_type = NetworkTargetType::STRING_GLOBAL;
+                else if (target_upper == "LOCAL") str_type = NetworkTargetType::STRING_LOCAL;
+                else if (target_upper == "PLAYERS") str_type = NetworkTargetType::STRING_PLAYERS;
+                else if (target_upper == "REMOTE") str_type = NetworkTargetType::STRING_REMOTE;
+                else if (target_upper == "ADMIN") str_type = NetworkTargetType::STRING_ADMIN;
+                else if (target_upper == "HEADLESS") str_type = NetworkTargetType::STRING_HEADLESS;
+                else if (target_upper == "CURATORS") str_type = NetworkTargetType::STRING_CURATORS;
+                else {
+                    use_extended = true;
+                }
+                
+                if (use_extended) {
+                    // Use extended string lookup
+                    bool ext_local = false;
+                    auto ext_targets = resolve_string_target_extended(target_str, sender_client_id, ext_local);
+                    out_targets.insert(out_targets.end(), ext_targets.begin(), ext_targets.end());
+                    if (ext_local) out_local_exec = true;
+                } else {
+                    bool local_exec = false;
+                    auto targets = resolve_targets_server(str_type, game_value(), sender_client_id, local_exec);
+                    out_targets.insert(out_targets.end(), targets.begin(), targets.end());
+                    if (local_exec) out_local_exec = true;
+                }
+                
+                break;
+            }
+                        
+            case game_data_type::ARRAY: {
+                // Recursive case
+                auto& arr = target.to_array();
+
+                for (const auto& elem : arr) {
+                    resolve_single_target(elem, sender_client_id, out_targets, out_local_exec);
+                }
+
+                break;
+            }
+            
+            default:
+                break;
+        }
+    }
+
+    std::vector<int> resolve_array_targets(
+        const game_value& array_target,
+        int sender_client_id,
+        bool& local_exec
+    ) {
+        std::vector<int> all_targets;
+        local_exec = false;
+        
+        if (array_target.type_enum() != game_data_type::ARRAY) {
+            return all_targets;
+        }
+        
+        auto& arr = array_target.to_array();
+        
+        for (const auto& elem : arr) {
+            resolve_single_target(elem, sender_client_id, all_targets, local_exec);
+        }
+        
+        return get_unique_client_ids(all_targets);
+    }
+
+    // Resolve arbitrary string target using various lookup methods
+    std::vector<int> resolve_string_target_extended(
+        const std::string& target_str,
+        int sender_client_id,
+        bool& local_exec
+    ) {
+        std::vector<int> targets;
+        local_exec = false;
+        int our_client_id = cached_client_id_.load();
+        
+        // Check for colon - netId format
+        if (target_str.find(':') != std::string::npos) {
+            // Try object first
+            object obj = sqf::object_from_net_id(target_str);
+            
+            if (!sqf::is_null(obj)) {
+                int owner_id = static_cast<int>(sqf::owner(obj));
+                
+                if (owner_id == our_client_id || owner_id == 2) {
+                    local_exec = true;
+                } else {
+                    targets.push_back(owner_id);
+                }
+                
+                return targets;
+            }
+            
+            // Try group
+            group grp = sqf::group_from_net_id(target_str);
+            
+            if (!sqf::is_null(grp)) {
+                auto units = sqf::units(grp);
+                std::vector<int> owner_ids;
+                
+                for (const auto& unit : units) {
+                    owner_ids.push_back(static_cast<int>(sqf::owner(unit)));
+                }
+                
+                auto unique_ids = get_unique_client_ids(owner_ids);
+                
+                for (int id : unique_ids) {
+                    if (id == our_client_id || id == 2) {
+                        local_exec = true;
+                    } else {
+                        targets.push_back(id);
+                    }
+                }
+                
+                return targets;
+            }
+            
+            // NetId format but nothing found
+            return targets;
+        }
+        
+        // Check UID/ID hashmaps
+        game_value uid_machines_gv = sqf::get_variable(sqf::mission_namespace(), "kh_var_allplayeruidmachines", game_value());
+
+        if (!uid_machines_gv.is_nil() && uid_machines_gv.type_enum() == game_data_type::HASHMAP) {
+            auto& map = uid_machines_gv.to_hashmap();
+            
+            for (const auto& pair : map) {
+                if (pair.key.type_enum() == game_data_type::STRING) {
+                    std::string key_str = static_cast<std::string>(pair.key);
+                    
+                    if (key_str == target_str && pair.value.type_enum() == game_data_type::SCALAR) {
+                        int client_id = static_cast<int>(static_cast<float>(pair.value));
+                        
+                        if (client_id == our_client_id || client_id == 2) {
+                            local_exec = true;
+                        } else {
+                            targets.push_back(client_id);
+                        }
+                        
+                        return targets;
+                    }
+                }
+            }
+        }
+
+        game_value id_machines_gv = sqf::get_variable(sqf::mission_namespace(), "kh_var_allidmachines", game_value());
+
+        if (!id_machines_gv.is_nil() && id_machines_gv.type_enum() == game_data_type::HASHMAP) {
+            auto& map = id_machines_gv.to_hashmap();
+            
+            for (const auto& pair : map) {
+                if (pair.key.type_enum() == game_data_type::STRING) {
+                    std::string key_str = static_cast<std::string>(pair.key);
+                    
+                    if (key_str == target_str && pair.value.type_enum() == game_data_type::SCALAR) {
+                        int client_id = static_cast<int>(static_cast<float>(pair.value));
+                        
+                        if (client_id == our_client_id || client_id == 2) {
+                            local_exec = true;
+                        } else {
+                            targets.push_back(client_id);
+                        }
+                        
+                        return targets;
+                    }
+                }
+            }
+        }
+        
+        // Check player units by role_description and name
+        game_value all_players_gv = sqf::get_variable(sqf::mission_namespace(), "kh_var_allplayerunits", game_value());
+        
+        if (!all_players_gv.is_nil() && all_players_gv.type_enum() == game_data_type::ARRAY) {
+            auto& all_players = all_players_gv.to_array();
+            object matched_unit;
+            bool found_role_desc = false;
+            
+            for (const auto& player_gv : all_players) {
+                object player_unit = static_cast<object>(player_gv);
+                
+                if (sqf::is_null(player_unit)) {
+                    continue;
+                }
+                
+                std::string role_desc = static_cast<std::string>(sqf::role_description(player_unit));
+                
+                if (role_desc == target_str) {
+                    matched_unit = player_unit;
+                    found_role_desc = true;
+                    break; // Role description takes priority
+                }
+                
+                if (!found_role_desc) {
+                    std::string unit_name = static_cast<std::string>(sqf::name(player_unit));
+                    
+                    if (unit_name == target_str) {
+                        matched_unit = player_unit;
+                    }
+                }
+            }
+            
+            if (!sqf::is_null(matched_unit)) {
+                int owner_id = static_cast<int>(sqf::owner(matched_unit));
+                
+                if (owner_id == our_client_id || owner_id == 2) {
+                    local_exec = true;
+                } else {
+                    targets.push_back(owner_id);
+                }
+                
+                return targets;
+            }
+        }
+        
+        // Check all groups by group_id
+        auto all_groups = sqf::all_groups();
+        
+        for (const auto& grp : all_groups) {
+            std::string grp_id = static_cast<std::string>(sqf::group_id(grp));
+            
+            if (grp_id == target_str) {
+                auto units = sqf::units(grp);
+                std::vector<int> owner_ids;
+                
+                for (const auto& unit : units) {
+                    owner_ids.push_back(static_cast<int>(sqf::owner(unit)));
+                }
+                
+                auto unique_ids = get_unique_client_ids(owner_ids);
+                
+                for (int id : unique_ids) {
+                    if (id == our_client_id || id == 2) {
+                        local_exec = true;
+                    } else {
+                        targets.push_back(id);
+                    }
+                }
+                
+                return targets;
+            }
+        }
+        
+        // Check map markers
+        auto all_markers = sqf::all_map_markers();
+        
+        for (const auto& marker : all_markers) {
+            std::string marker_name = static_cast<std::string>(marker);
+            
+            if (marker_name == target_str) {
+                std::vector<int> owner_ids;
+                
+                if (!all_players_gv.is_nil() && all_players_gv.type_enum() == game_data_type::ARRAY) {
+                    auto& all_players = all_players_gv.to_array();
+                    
+                    for (const auto& player_gv : all_players) {
+                        object player_unit = static_cast<object>(player_gv);
+                        
+                        if (!sqf::is_null(player_unit) && sqf::in_area(player_unit, marker_name)) {
+                            owner_ids.push_back(static_cast<int>(sqf::owner(player_unit)));
+                        }
+                    }
+                }
+                
+                auto unique_ids = get_unique_client_ids(owner_ids);
+                
+                for (int id : unique_ids) {
+                    if (id == our_client_id || id == 2) {
+                        local_exec = true;
+                    } else {
+                        targets.push_back(id);
+                    }
+                }
+                
+                return targets;
+            }
+        }
+        
+        // Nothing matched - do nothing
+        return targets;
+    }
+
+    // Send to multiple targets
+    bool send_to_targets(
+        const std::vector<int>& targets,
+        bool local_exec,
+        const std::string& event_name,
+        const game_value& message,
+        int sender_client_id
+    ) {
+        if (!running_.load()) {
+            return false;
+        }
+        
+        try {
+            // Serialize first if we have remote targets (preserves atomicity - if this fails, nothing is queued)
+            std::shared_ptr<std::vector<uint8_t>> payload;
+            
+            if (!targets.empty()) {
+                payload = std::make_shared<std::vector<uint8_t>>();
+                serialize_game_value(*payload, message);
+            }
+            
+            // Handle local execution without serialization
+            if (local_exec) {
+                queue_local_message(event_name, message, sender_client_id);
+            }
+            
+            // Send to remote targets - payload is shared across all targets
+            if (!targets.empty()) {
+                std::lock_guard<std::mutex> lock(outgoing_mutex_);
+                
+                for (int target : targets) {
+                    outgoing_queue_.emplace_back(target, sender_client_id, std::string(event_name), payload);
+                }
+                
+                outgoing_cv_.notify_one();
+            }
+            
+            return true;
+        } catch (const std::exception& e) {
+            report_error("KH Network: Failed to send to targets - " + std::string(e.what()));
+            return false;
+        }
+    }
 
     // Message format: [MAGIC(4)][VERSION(4)][TARGET_CLIENT(4)][SENDER_CLIENT(4)][EVENT_LEN(4)][EVENT_NAME][PAYLOAD_LEN(4)][PAYLOAD]
 
@@ -794,6 +1666,8 @@ private:
                             client_connections_[client_id] = client_sock;
                         }
                         
+                        send_jip_messages_to_client(client_id);
+                        
                         // Schedule log on main thread
                         MainThreadScheduler::instance().schedule([client_id]() {
                             sqf::diag_log("KH Network: Client " + std::to_string(client_id) + " connected");
@@ -825,7 +1699,7 @@ private:
                             } else {
                                 {
                                     std::lock_guard<std::mutex> out_lock(outgoing_mutex_);
-                                    outgoing_queue_.emplace_back(target_client, sender_client, std::move(event_name), std::move(payload));
+                                    outgoing_queue_.emplace_back(target_client, sender_client, std::move(event_name), std::make_shared<std::vector<uint8_t>>(std::move(payload)));
                                 }
 
                                 outgoing_cv_.notify_one();
@@ -1037,7 +1911,7 @@ private:
             // Process batch without holding lock
             for (size_t i = 0; i < batch.size(); ++i) {
                 auto& msg = batch[i];
-                create_network_packet_into(packet_buffer, msg.target_client, msg.sender_client, msg.event_name, msg.payload);
+                create_network_packet_into(packet_buffer, msg.target_client, msg.sender_client, msg.event_name, *msg.payload);
                 
                 if (is_server_.load()) {
                     // Server mode - send directly to client
@@ -1051,10 +1925,12 @@ private:
                     // Client mode - send to server for relaying
                     if (!connect_to_server_internal()) {
                         // Re-queue this and all remaining messages
-                        std::lock_guard<std::mutex> lock(outgoing_mutex_);
+                        {
+                            std::lock_guard<std::mutex> lock(outgoing_mutex_);
 
-                        for (size_t j = batch.size(); j-- > i; ) {
-                            outgoing_queue_.push_front(std::move(batch[j]));
+                            for (size_t j = batch.size(); j-- > i; ) {
+                                outgoing_queue_.push_front(std::move(batch[j]));
+                            }
                         }
 
                         std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -1227,6 +2103,11 @@ public:
         }
 
         {
+            std::lock_guard<std::mutex> lock(local_incoming_mutex_);
+            local_incoming_queue_.clear();
+        }
+
+        {
             std::lock_guard<std::mutex> lock(outgoing_mutex_);
             outgoing_queue_.clear();
         }
@@ -1235,6 +2116,11 @@ public:
             std::lock_guard<std::mutex> lock(handlers_mutex_);
             message_handlers_.clear();
             handler_id_to_event_.clear();
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(jip_mutex_);
+            jip_messages_.clear();
         }
         
         cached_client_id_.store(-1);
@@ -1265,26 +2151,93 @@ public:
         std::lock_guard<std::mutex> lock(server_ip_mutex_);
         server_ip_ = ip;
     }
-    
-    bool send_message(int target_client, const std::string& event_name, const game_value& message) {
-        if (!running_.load()) {
-            return false;
+
+    void store_jip_message(const std::string& jip_key, const std::string& event_name, const game_value& message, int sender, const std::string& dependency_net_id = "", bool dependency_is_group = false) {
+        if (jip_key.empty() || !is_server_.load()) {
+            return;
         }
         
         try {
             std::vector<uint8_t> payload;
             serialize_game_value(payload, message);
-            int our_client_id = cached_client_id_.load();
+            std::lock_guard<std::mutex> lock(jip_mutex_);
+            jip_messages_[jip_key] = {event_name, std::move(payload), sender, dependency_net_id, dependency_is_group};
+        } catch (const std::exception& e) {
+            report_error("KH Network: Failed to store JIP message '" + jip_key + "' - " + std::string(e.what()));
+        } catch (...) {
+            report_error("KH Network: Failed to store JIP message '" + jip_key + "' - unknown error");
+        }
+    }
+
+    void remove_jip_message(const std::string& jip_key) {
+        std::lock_guard<std::mutex> lock(jip_mutex_);
+        jip_messages_.erase(jip_key);
+    }
+
+    void clear_all_jip_messages() {
+        std::lock_guard<std::mutex> lock(jip_mutex_);
+        jip_messages_.clear();
+    }
+
+    void send_jip_messages_to_client(int client_id) {
+        std::vector<std::tuple<std::string, std::vector<uint8_t>, int>> messages_to_send;
+        
+        {
+            std::lock_guard<std::mutex> lock(jip_mutex_);
+            messages_to_send.reserve(jip_messages_.size());
             
-            // Special case: server sending to itself (client 2)
-            // Or any machine sending to its own client ID
-            if (target_client == our_client_id || 
-                (is_server_.load() && target_client == 2)) {
-                // Queue directly to incoming queue - no network needed
-                std::lock_guard<std::mutex> lock(incoming_mutex_);
-                incoming_queue_.emplace_back(event_name, std::move(payload), our_client_id);
-                return true;
+            for (const auto& [key, msg] : jip_messages_) {
+                // Check dependency if one exists
+                if (!msg.dependency_net_id.empty()) {
+                    if (msg.dependency_is_group) {
+                        group grp = sqf::group_from_net_id(msg.dependency_net_id);
+
+                        if (sqf::is_null(grp)) {
+                            continue;
+                        }
+                    } else {
+                        object obj = sqf::object_from_net_id(msg.dependency_net_id);
+                        
+                        if (sqf::is_null(obj)) {
+                            continue;
+                        }
+                    }
+                }
+                
+                messages_to_send.emplace_back(msg.event_name, msg.payload, msg.original_sender);
             }
+        }
+        
+        if (!messages_to_send.empty()) {
+            std::lock_guard<std::mutex> lock(outgoing_mutex_);
+            
+            for (auto& [event_name, payload, sender] : messages_to_send) {
+                outgoing_queue_.emplace_back(client_id, sender, std::string(event_name), std::make_shared<std::vector<uint8_t>>(payload));
+            }
+            
+            outgoing_cv_.notify_one();
+        }
+    }
+
+    bool send_message(int target_client, const std::string& event_name, const game_value& message) {
+        if (!running_.load()) {
+            return false;
+        }
+        
+        int our_client_id = cached_client_id_.load();
+        
+        // Special case: server sending to itself (client 2)
+        // Or any machine sending to its own client ID
+        if (target_client == our_client_id || 
+            (is_server_.load() && target_client == 2)) {
+            // Queue directly to local queue - no serialization needed
+            queue_local_message(event_name, message, our_client_id);
+            return true;
+        }
+        
+        try {
+            auto payload = std::make_shared<std::vector<uint8_t>>();
+            serialize_game_value(*payload, message);
             
             {
                 std::lock_guard<std::mutex> lock(outgoing_mutex_);
@@ -1296,6 +2249,158 @@ public:
         } catch (const std::exception& e) {
             report_error("KH Network: Failed to serialize message - " + std::string(e.what()));
             return false;
+        }
+    }
+    
+    bool send_message_to_target(
+        NetworkTargetType target_type,
+        const game_value& target_data,
+        const std::string& event_name,
+        const game_value& message
+    ) {
+        if (!running_.load()) {
+            return false;
+        }
+        
+        int our_client_id = cached_client_id_.load();
+        
+        // Handle simple local-only cases first
+        if (target_type == NetworkTargetType::DO_NOTHING) {
+            return true;
+        }
+        
+        if (target_type == NetworkTargetType::LOCAL_ONLY) {
+            queue_local_message(event_name, message, our_client_id);
+            return true;
+        }
+        
+        // If we're the server, we can resolve all targets directly
+        if (is_server_.load()) {
+            bool local_exec = false;
+            std::vector<int> targets = resolve_targets_server(target_type, target_data, our_client_id, local_exec);
+            return send_to_targets(targets, local_exec, event_name, message, our_client_id);
+        }
+        
+        // We're a client - check if we can resolve locally or need server help
+        bool can_resolve_locally = false;
+        bool local_exec = false;
+        std::vector<int> targets;
+        
+        switch (target_type) {
+            case NetworkTargetType::CLIENT_ID: {
+                int target_id = static_cast<int>(static_cast<float>(target_data));
+                
+                if (target_id == our_client_id) {
+                    local_exec = true;
+                } else {
+                    targets.push_back(target_id);
+                }
+                
+                can_resolve_locally = true;
+                break;
+            }
+            
+            case NetworkTargetType::STRING_SERVER: {
+                targets.push_back(2);
+                can_resolve_locally = true;
+                break;
+            }
+            
+            case NetworkTargetType::STRING_LOCAL: {
+                local_exec = true;
+                can_resolve_locally = true;
+                break;
+            }
+            
+            case NetworkTargetType::OBJECT_OWNER: {
+                object obj = static_cast<object>(target_data);
+                
+                if (sqf::is_null(obj)) {
+                    return true;
+                }
+                
+                // If object is local, execute locally
+                if (sqf::local(obj)) {
+                    local_exec = true;
+                    can_resolve_locally = true;
+                }
+
+                // Otherwise need server resolution
+                break;
+            }
+            
+            case NetworkTargetType::TEAM_MEMBER_OWNER: {
+                game_value agent_obj = sqf::agent(target_data);
+                object obj = static_cast<object>(agent_obj);
+                
+                if (sqf::is_null(obj)) {
+                    return true;
+                }
+                
+                if (sqf::local(obj)) {
+                    local_exec = true;
+                    can_resolve_locally = true;
+                }
+
+                // Otherwise need server resolution
+                break;
+            }
+            
+            default:
+                // All other types need server resolution when on client
+                break;
+        }
+        
+        if (can_resolve_locally) {
+            return send_to_targets(targets, local_exec, event_name, message, our_client_id);
+        }
+        
+        // Need server resolution - send routing request to server
+        try {
+            // Create routing request payload
+            // Format: [target_type, target_data, event_name, message]
+            auto_array<game_value> route_data;
+            route_data.push_back(game_value(static_cast<float>(static_cast<uint8_t>(target_type))));
+            route_data.push_back(target_data);
+            route_data.push_back(game_value(event_name));
+            route_data.push_back(message);
+            
+            // Send to server with special routing event name
+            return send_message(2, NET_INTERNAL_ROUTE_EVENT, game_value(std::move(route_data)));
+        } catch (const std::exception& e) {
+            report_error("KH Network: Failed to send routing request - " + std::string(e.what()));
+            return false;
+        }
+    }
+
+    void queue_local_message(const std::string& event_name, const game_value& message, int sender_client_id) {
+        std::lock_guard<std::mutex> lock(local_incoming_mutex_);
+        local_incoming_queue_.emplace_back(event_name, message, sender_client_id);
+    }
+    
+    // Process internal routing messages (called by server when receiving _KH_INTERNAL_ROUTE_ events)
+    void process_routing_request(const game_value& route_data, int sender_client_id) {
+        if (!is_server_.load()) {
+            return; // Only server processes routing requests
+        }
+        
+        try {
+            auto& arr = route_data.to_array();
+            
+            if (arr.size() < 4) {
+                report_error("KH Network: Invalid routing request format");
+                return;
+            }
+            
+            NetworkTargetType target_type = static_cast<NetworkTargetType>(static_cast<uint8_t>(static_cast<float>(arr[0])));
+            game_value target_data = arr[1];
+            std::string event_name = static_cast<std::string>(arr[2]);
+            game_value message = arr[3];
+            bool local_exec = false;
+            std::vector<int> targets = resolve_targets_server(target_type, target_data, sender_client_id, local_exec);
+            send_to_targets(targets, local_exec, event_name, message, sender_client_id);
+        } catch (const std::exception& e) {
+            report_error("KH Network: Failed to process routing request - " + std::string(e.what()));
         }
     }
     
@@ -1340,22 +2445,175 @@ public:
     
     // Called from main thread during on_frame
     void process_incoming_messages() {
-        std::vector<NetworkMessage> messages;
+        // Process local messages first (no deserialization needed)
+        std::deque<LocalMessage> local_messages;
+        
+        {
+            std::lock_guard<std::mutex> lock(local_incoming_mutex_);
+            
+            if (!local_incoming_queue_.empty()) {
+                local_messages.swap(local_incoming_queue_);
+            }
+        }
+        
+        for (auto& msg : local_messages) {
+            try {
+                // Internal routing requests should never be local, but handle defensively
+                if (msg.event_name == NET_INTERNAL_ROUTE_EVENT) {
+                    process_routing_request(msg.message, msg.sender_client_id);
+                    continue;
+                }
+                
+                // Check for internal conditional event
+                if (msg.event_name == NET_INTERNAL_CONDITIONAL_EVENT) {
+                    try {
+                        auto& arr = msg.message.to_array();
+                        
+                        if (arr.size() >= 3) {
+                            code condition = arr[0];
+                            std::string real_event_name = static_cast<std::string>(arr[1]);
+                            game_value real_message = arr[2];
+                            game_value result = raw_call_sqf_native(condition);
+                            
+                            if (result.type_enum() == game_data_type::BOOL && static_cast<bool>(result)) {
+                                std::vector<NetworkMessageHandler> handlers_copy;
+
+                                {
+                                    std::lock_guard<std::mutex> lock(handlers_mutex_);
+                                    auto it = message_handlers_.find(real_event_name);
+
+                                    if (it != message_handlers_.end()) {
+                                        handlers_copy = it->second;
+                                    }
+                                }
+                                
+                                for (auto& handler : handlers_copy) {
+                                    try {
+                                        auto game_state = (intercept::client::host::functions.get_engine_allocator())->gameState;
+                                        static r_string message_name = "_this"sv;
+                                        static r_string sender_name = "_sender"sv;
+                                        static r_string args_name = "_args"sv;
+                                        static r_string handler_id_name = "_handlerid"sv;
+                                        game_state->set_local_variable(message_name, real_message);
+                                        game_state->set_local_variable(sender_name, game_value(static_cast<float>(msg.sender_client_id)));
+                                        game_state->set_local_variable(args_name, handler.handler_arguments);
+                                        game_state->set_local_variable(handler_id_name, game_value(static_cast<float>(handler.handler_id)));
+                                        intercept::client::host::functions.invoke_raw_unary(intercept::client::__sqf::unary__isnil__code_string__ret__bool, handler.handler_function);
+                                    } catch (const std::exception& e) {
+                                        report_error("KH Network: Handler error for '" + real_event_name + "' - " + std::string(e.what()));
+                                    }
+                                }
+                            }
+                        }
+                    } catch (const std::exception& e) {
+                        report_error("KH Network: Failed to process local conditional message - " + std::string(e.what()));
+                    }
+
+                    continue;
+                }
+                
+                std::vector<NetworkMessageHandler> handlers_copy;
+
+                {
+                    std::lock_guard<std::mutex> lock(handlers_mutex_);
+                    auto it = message_handlers_.find(msg.event_name);
+
+                    if (it != message_handlers_.end()) {
+                        handlers_copy = it->second;
+                    }
+                }
+                
+                for (auto& handler : handlers_copy) {
+                    try {
+                        auto game_state = (intercept::client::host::functions.get_engine_allocator())->gameState;
+                        static r_string message_name = "_this"sv;
+                        static r_string sender_name = "_sender"sv;
+                        static r_string args_name = "_args"sv;
+                        static r_string handler_id_name = "_handlerid"sv;
+                        game_state->set_local_variable(message_name, msg.message);
+                        game_state->set_local_variable(sender_name, game_value(static_cast<float>(msg.sender_client_id)));
+                        game_state->set_local_variable(args_name, handler.handler_arguments);
+                        game_state->set_local_variable(handler_id_name, game_value(static_cast<float>(handler.handler_id)));
+                        intercept::client::host::functions.invoke_raw_unary(intercept::client::__sqf::unary__isnil__code_string__ret__bool, handler.handler_function);
+                    } catch (const std::exception& e) {
+                        report_error("KH Network: Handler error for '" + msg.event_name + "' - " + std::string(e.what()));
+                    }
+                }
+            } catch (const std::exception& e) {
+                report_error("KH Network: Failed to process local message - " + std::string(e.what()));
+            }
+        }
+        
+        // Process network messages (require deserialization)
+        std::deque<NetworkMessage> messages;
 
         {
             std::lock_guard<std::mutex> lock(incoming_mutex_);
-
-            messages = std::vector<NetworkMessage>(
-                std::make_move_iterator(incoming_queue_.begin()),
-                std::make_move_iterator(incoming_queue_.end())
-            );
-
-            incoming_queue_.clear();
+            if (incoming_queue_.empty()) return;
+            messages.swap(incoming_queue_);
         }
         
         for (auto& msg : messages) {
             try {
-                // Handle empty payload - deserialize as nil/nothing
+                // Check for internal routing request
+                if (msg.event_name == NET_INTERNAL_ROUTE_EVENT) {
+                    if (!msg.payload.empty()) {
+                        size_t offset = 0;
+                        game_value route_data = deserialize_game_value(msg.payload.data(), offset, msg.payload.size());
+                        process_routing_request(route_data, msg.sender_client_id);
+                    }
+
+                    continue;
+                } else if (msg.event_name == NET_INTERNAL_CONDITIONAL_EVENT) {
+                    if (!msg.payload.empty()) {
+                        try {
+                            size_t offset = 0;
+                            game_value cond_data = deserialize_game_value(msg.payload.data(), offset, msg.payload.size());
+                            auto& arr = cond_data.to_array();
+                            
+                            if (arr.size() >= 3) {
+                                code condition = arr[0];
+                                std::string real_event_name = static_cast<std::string>(arr[1]);
+                                game_value real_message = arr[2];
+                                game_value result = raw_call_sqf_native(condition);
+                                
+                                if (result.type_enum() == game_data_type::BOOL && static_cast<bool>(result)) {
+                                    std::vector<NetworkMessageHandler> handlers_copy;
+
+                                    {
+                                        std::lock_guard<std::mutex> lock(handlers_mutex_);
+                                        auto it = message_handlers_.find(real_event_name);
+
+                                        if (it != message_handlers_.end()) {
+                                            handlers_copy = it->second;
+                                        }
+                                    }
+                                    
+                                    for (auto& handler : handlers_copy) {
+                                        try {
+                                            auto game_state = (intercept::client::host::functions.get_engine_allocator())->gameState;
+                                            static r_string message_name = "_this"sv;
+                                            static r_string sender_name = "_sender"sv;
+                                            static r_string args_name = "_args"sv;
+                                            static r_string handler_id_name = "_handlerid"sv;
+                                            game_state->set_local_variable(message_name, real_message);
+                                            game_state->set_local_variable(sender_name, game_value(static_cast<float>(msg.sender_client_id)));
+                                            game_state->set_local_variable(args_name, handler.handler_arguments);
+                                            game_state->set_local_variable(handler_id_name, game_value(static_cast<float>(handler.handler_id)));
+                                            intercept::client::host::functions.invoke_raw_unary(intercept::client::__sqf::unary__isnil__code_string__ret__bool, handler.handler_function);
+                                        } catch (const std::exception& e) {
+                                            report_error("KH Network: Handler error for '" + real_event_name + "' - " + std::string(e.what()));
+                                        }
+                                    }
+                                }
+                            }
+                        } catch (const std::exception& e) {
+                            report_error("KH Network: Failed to process conditional message - " + std::string(e.what()));
+                        }
+                    }
+                    continue;
+                }
+
                 game_value deserialized;
                 
                 if (!msg.payload.empty()) {
@@ -1376,14 +2634,15 @@ public:
                 
                 for (auto& handler : handlers_copy) {
                     try {
-                        // Create arguments array: [message, sender_client_id, handler_args]
                         auto game_state = (intercept::client::host::functions.get_engine_allocator())->gameState;
                         static r_string message_name = "_this"sv;
                         static r_string sender_name = "_sender"sv;
                         static r_string args_name = "_args"sv;
+                        static r_string handler_id_name = "_handlerid"sv;
                         game_state->set_local_variable(message_name, deserialized);
                         game_state->set_local_variable(sender_name, game_value(static_cast<float>(msg.sender_client_id)));
                         game_state->set_local_variable(args_name, handler.handler_arguments);
+                        game_state->set_local_variable(handler_id_name, game_value(static_cast<float>(handler.handler_id)));
                         intercept::client::host::functions.invoke_raw_unary(intercept::client::__sqf::unary__isnil__code_string__ret__bool, handler.handler_function);
                     } catch (const std::exception& e) {
                         report_error("KH Network: Handler error for '" + msg.event_name + "' - " + std::string(e.what()));
@@ -1394,7 +2653,7 @@ public:
             }
         }
     }
-    
+        
     bool is_initialized() const {
         return initialized_.load();
     }
@@ -1416,10 +2675,23 @@ static void network_pre_init() {
     
     if (sqf::is_server()) {
         std::string ip_port = NetworkFramework::instance().get_local_ip_port();
-        sqf::set_variable(sqf::mission_namespace(), "kh_var_serverAddress", game_value(ip_port), true);
+        sqf::set_variable(sqf::mission_namespace(), "kh_var_serveraddress", game_value(ip_port), true);
 
         if (NetworkFramework::instance().start(true)) {
             sqf::diag_log("KH Network: Server started successfully");
+        }
+    } else {
+        game_value server_ip_gv = sqf::get_variable(sqf::mission_namespace(), "kh_var_serveraddress", game_value(""));
+        std::string server_ip = static_cast<std::string>(server_ip_gv);
+
+        if (!server_ip.empty()) {
+            NetworkFramework::instance().set_server_ip(server_ip);
+            
+            if (NetworkFramework::instance().start(false)) {
+                sqf::diag_log("KH Network: Client started successfully");
+            }
+        } else {
+            report_error("KH Network: Failed to get server");
         }
     }
 }

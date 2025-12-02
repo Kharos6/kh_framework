@@ -139,7 +139,7 @@ switch _eventType do {
 						params ["_handler"];
 						_args params ["_remoteHandler", "_persistentExecutionId"];
 
-						if ((_handler select 1) isEqualTo _persistentExecutionId) then {
+						if ((_handler select 2) isEqualTo _persistentExecutionId) then {
 							[_remoteHandler select 1, _remoteHandler select 2] call CBA_fnc_removeEventHandler;
 							["KH_eve_handlerRemoved", _handlerId select 2] call CBA_fnc_removeEventHandler;
 						};
@@ -157,7 +157,7 @@ switch _eventType do {
 							_entity addEventHandler [
 								_event, 
 								compile ([
-									"if (missionNamespace getVariable ['", _persistentExecutionId, "', false]) then {
+									"if (missionNamespace getVariable ['", _persistentExecutionId, "', true]) then {
 										['", _remoteEventId, "', _this, ", _eventOwner, "] call CBA_fnc_ownerEvent;
 									}
 									else {
@@ -174,10 +174,9 @@ switch _eventType do {
 					[
 						"PERSISTENT",
 						_entity,
-						[_entity, _event, _persistentEventId, _persistentExecutionId], 
+						[_entity, _event, _persistentEventId], 
 						{
-							params ["_entity", "_event", "_persistentEventId", "_persistentExecutionId"];
-							missionNamespace setVariable [_persistentExecutionId, false];
+							params ["_entity", "_event", "_persistentEventId"];
 
 							if !(missionNamespace isNil _persistentEventId) then {
 								_entity removeEventHandler [_event, missionNamespace getVariable _persistentEventId];
@@ -206,7 +205,7 @@ switch _eventType do {
 							_entity addEventHandler [
 								_event, 
 								compile ([
-									"if (missionNamespace getVariable ['", _persistentExecutionId, "', false]) then {
+									"if (missionNamespace getVariable ['", _persistentExecutionId, "', true]) then {
 										private _args = missionNamespace getVariable '", _argumentsId, "';
 										private _eventName = missionNamespace getVariable '", _eventNameId, "';
 										private _previousReturn = missionNamespace getVariable '", _previousReturnId, "';
@@ -226,11 +225,10 @@ switch _eventType do {
 					[
 						"PERSISTENT",
 						_entity,
-						[_entity, _event, _persistentEventId, _persistentExecutionId], 
+						[_entity, _event, _persistentEventId], 
 						{
-							params ["_entity", "_event", "_persistentEventId", "_persistentExecutionId"];
-							missionNamespace setVariable [_persistentExecutionId, false];
-							
+							params ["_entity", "_event", "_persistentEventId"];
+
 							if !(missionNamespace isNil _persistentEventId) then {
 								_entity removeEventHandler [_event, missionNamespace getVariable _persistentEventId];
 							};

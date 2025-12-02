@@ -101,6 +101,7 @@ static registered_sqf_function _sqf_network_message_receive_string_array;
 static registered_sqf_function _sqf_network_message_receive_string_code;
 static registered_sqf_function _sqf_network_remove_handler;
 static registered_sqf_function _sqf_network_is_initialized;
+static registered_sqf_function _sqf_network_initialize;
 static registered_sqf_function _sqf_network_shutdown;
 
 static game_value execute_lua_sqf(game_value_parameter args, game_value_parameter code_or_function) {    
@@ -2442,6 +2443,15 @@ static game_value network_remove_handler_sqf(game_value_parameter handler_id_val
     }
 }
 
+static game_value network_initialize_sqf() {
+    try {
+        network_pre_init();
+        return game_value(true);
+    } catch (...) {
+        return game_value(false);
+    }
+}
+
 static game_value network_shutdown_sqf() {
     try {
         NetworkFramework::instance().shutdown();
@@ -3284,6 +3294,13 @@ static void initialize_sqf_integration() {
         "networkIsInitialized",
         "Check if the network framework is initialized",
         userFunctionWrapper<network_is_initialized_sqf>,
+        game_data_type::BOOL
+    );
+
+    _sqf_network_initialize = intercept::client::host::register_sqf_command(
+        "networkInitialize",
+        "Initialize network framework",
+        userFunctionWrapper<network_initialize_sqf>,
         game_data_type::BOOL
     );
     

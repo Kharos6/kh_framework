@@ -1346,6 +1346,160 @@
 ] call CBA_fnc_addSetting;
 
 [
+	"KH_var_networkingPort",
+	"SLIDER",   
+	[
+		"Port", 
+		"Networking port. Requires restart."
+	], 
+	"KH Networking", 
+	[1, 65535, 21337, 0],
+	1,
+	{},
+	true
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_networkingMaximumMessageSize",
+	"EDITBOX",   
+	[
+		"Maximum Message Size", 
+		"Maximum payload size in bytes. Requires restart."
+	], 
+	"KH Networking", 
+	"16777216",
+	1,
+	{},
+	true
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_networkingReceiveBufferSize",
+	"EDITBOX",   
+	[
+		"Receive Buffer Size", 
+		"Socket receive buffer size in bytes. Requires restart."
+	], 
+	"KH Networking", 
+	"262144",
+	1,
+	{},
+	true
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_networkingSendBufferSize",
+	"EDITBOX",   
+	[
+		"Send Buffer Size", 
+		"Socket send buffer size in bytes. Requires restart."
+	], 
+	"KH Networking", 
+	"262144",
+	1,
+	{},
+	true
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_networkingConnectionTimeout",
+	"EDITBOX",   
+	[
+		"Connection Timeout", 
+		"Connection timeout in milliseconds. Requires restart."
+	], 
+	"KH Networking", 
+	"5000",
+	1,
+	{},
+	true
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_networkingSendTimeout",
+	"EDITBOX",   
+	[
+		"Send Timeout", 
+		"Send operation timeout in milliseconds. Requires restart."
+	], 
+	"KH Networking", 
+	"3000",
+	1,
+	{},
+	true
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_networkingReceiveTimeout",
+	"EDITBOX",   
+	[
+		"Receive Timeout", 
+		"Receive operation timeout in milliseconds. Requires restart."
+	], 
+	"KH Networking", 
+	"3000",
+	1,
+	{},
+	true
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_networkingClientStallTimeout",
+	"EDITBOX",   
+	[
+		"Client Stall Timeout", 
+		"Time before disconnecting unresponsive client in milliseconds. Requires restart."
+	], 
+	"KH Networking", 
+	"10000",
+	1,
+	{},
+	true
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_networkingKeepAliveTime",
+	"EDITBOX",   
+	[
+		"Keep Alive Time", 
+		"Time before the first keep-alive probe in milliseconds. Requires restart."
+	], 
+	"KH Networking", 
+	"15000",
+	1,
+	{},
+	true
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_networkingKeepAliveInterval",
+	"EDITBOX",   
+	[
+		"Keep Alive Interval", 
+		"Interval between keep-alive probes probes in milliseconds. Requires restart."
+	], 
+	"KH Networking", 
+	"1000",
+	1,
+	{},
+	true
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_networkingSendBatchSize",
+	"EDITBOX",   
+	[
+		"Send Batch Size", 
+		"Maximum messages sent per cycle. Requires restart."
+	], 
+	"KH Networking", 
+	"64",
+	1,
+	{},
+	true
+] call CBA_fnc_addSetting;
+
+[
 	"KH Framework", 
 	"KH_speechRecognitionToggle", 
 	"Speech Recognition (TOGGLE)",

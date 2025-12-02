@@ -5,13 +5,17 @@ using namespace intercept::types;
 
 constexpr uint32_t NET_MSG_MAGIC = 0x4E48484B; // "KHHN" - KH Network Header
 constexpr uint32_t NET_MSG_VERSION = 1;
-constexpr size_t NET_MAX_MESSAGE_SIZE = 16 * 1024 * 1024; // 16MB max message size
-constexpr size_t NET_RECV_BUFFER_SIZE = 262144; // 256KB receive buffer
-constexpr size_t NET_SEND_BUFFER_SIZE = 262144; // 256KB send buffer
 constexpr int NET_DEFAULT_PORT = 21337;
-constexpr int NET_CONNECT_TIMEOUT_MS = 5000;
-constexpr int NET_SEND_TIMEOUT_MS = 3000;
-constexpr int NET_RECV_TIMEOUT_MS = 3000;
+constexpr size_t NET_DEFAULT_MAX_MESSAGE_SIZE = 16 * 1024 * 1024; // 16MB
+constexpr size_t NET_DEFAULT_RECV_BUFFER_SIZE = 262144; // 256KB
+constexpr size_t NET_DEFAULT_SEND_BUFFER_SIZE = 262144; // 256KB
+constexpr int NET_DEFAULT_CONNECT_TIMEOUT_MS = 5000;
+constexpr int NET_DEFAULT_SEND_TIMEOUT_MS = 3000;
+constexpr int NET_DEFAULT_RECV_TIMEOUT_MS = 3000;
+constexpr int NET_DEFAULT_CLIENT_STALL_TIMEOUT_MS = 10000;
+constexpr int NET_DEFAULT_KEEPALIVE_TIME_MS = 15000;
+constexpr int NET_DEFAULT_KEEPALIVE_INTERVAL_MS = 1000;
+constexpr int NET_DEFAULT_SEND_BATCH_SIZE = 64;
 constexpr const char* NET_INTERNAL_ROUTE_EVENT = "_KH_INTERNAL_ROUTE_";
 constexpr const char* NET_INTERNAL_CONDITIONAL_EVENT = "_KH_INTERNAL_COND_";
 
@@ -90,6 +94,61 @@ struct NetworkMessageHandler {
     game_value handler_arguments;
 };
 
+class PayloadPool : public std::enable_shared_from_this<PayloadPool> {
+private:
+    std::vector<std::vector<uint8_t>*> pool_;
+    std::mutex mutex_;
+    size_t max_size_;
+    
+public:
+    PayloadPool(size_t max_size = 256) : max_size_(max_size) {}
+    
+    ~PayloadPool() {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        for (auto* p : pool_) {
+            delete p;
+        }
+    }
+    
+    PayloadPool(const PayloadPool&) = delete;
+    PayloadPool& operator=(const PayloadPool&) = delete;
+    
+    std::shared_ptr<std::vector<uint8_t>> acquire() {
+        std::vector<uint8_t>* raw = nullptr;
+        
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!pool_.empty()) {
+                raw = pool_.back();
+                pool_.pop_back();
+            }
+        }
+        
+        if (raw) {
+            raw->clear();
+        } else {
+            raw = new std::vector<uint8_t>();
+            raw->reserve(4096);
+        }
+        
+        std::weak_ptr<PayloadPool> weak_self = shared_from_this();
+
+        return std::shared_ptr<std::vector<uint8_t>>(raw, [weak_self](std::vector<uint8_t>* p) {
+            if (auto self = weak_self.lock()) {
+                std::lock_guard<std::mutex> lock(self->mutex_);
+
+                if (self->pool_.size() < self->max_size_) {
+                    self->pool_.push_back(p);
+                    return;
+                }
+            }
+            
+            delete p;
+        });
+    }
+};
+
 class NetworkFramework {
 private:
     // Singleton
@@ -113,7 +172,21 @@ private:
     std::unordered_map<std::string, std::vector<NetworkMessageHandler>> message_handlers_;
     std::unordered_map<int, std::string> handler_id_to_event_;
     std::mutex handlers_mutex_;
-    
+    std::unordered_map<int, std::deque<OutgoingMessage>> per_client_queues_;
+    std::unordered_map<int, int64_t> client_stall_start_times_;
+    std::shared_ptr<PayloadPool> payload_pool_;
+    std::atomic<bool> warned_fd_limit_{false};
+    size_t config_max_message_size_{NET_DEFAULT_MAX_MESSAGE_SIZE};
+    size_t config_recv_buffer_size_{NET_DEFAULT_RECV_BUFFER_SIZE};
+    size_t config_send_buffer_size_{NET_DEFAULT_SEND_BUFFER_SIZE};
+    int config_connect_timeout_ms_{NET_DEFAULT_CONNECT_TIMEOUT_MS};
+    int config_send_timeout_ms_{NET_DEFAULT_SEND_TIMEOUT_MS};
+    int config_recv_timeout_ms_{NET_DEFAULT_RECV_TIMEOUT_MS};
+    int config_client_stall_timeout_ms_{NET_DEFAULT_CLIENT_STALL_TIMEOUT_MS};
+    int config_keepalive_time_ms_{NET_DEFAULT_KEEPALIVE_TIME_MS};
+    int config_keepalive_interval_ms_{NET_DEFAULT_KEEPALIVE_INTERVAL_MS};
+    int config_send_batch_size_{NET_DEFAULT_SEND_BATCH_SIZE};
+
     // Incoming message queue
     std::deque<NetworkMessage> incoming_queue_;
     std::mutex incoming_mutex_;
@@ -1363,20 +1436,17 @@ private:
         }
         
         try {
-            // Serialize first if we have remote targets (preserves atomicity - if this fails, nothing is queued)
             std::shared_ptr<std::vector<uint8_t>> payload;
             
             if (!targets.empty()) {
-                payload = std::make_shared<std::vector<uint8_t>>();
+                payload = payload_pool_->acquire();
                 serialize_game_value(*payload, message);
             }
             
-            // Handle local execution without serialization
             if (local_exec) {
                 queue_local_message(event_name, message, sender_client_id);
             }
             
-            // Send to remote targets - payload is shared across all targets
             if (!targets.empty()) {
                 std::lock_guard<std::mutex> lock(outgoing_mutex_);
                 
@@ -1443,28 +1513,32 @@ private:
     }
     
     bool set_socket_options(SOCKET sock) {
-        // Set TCP_NODELAY for low latency
         int flag = 1;
 
         if (setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&flag), sizeof(flag)) != 0) {
             return false;
         }
         
-        // Set send/recv timeouts
-        DWORD timeout = NET_SEND_TIMEOUT_MS;
+        DWORD timeout = static_cast<DWORD>(config_send_timeout_ms_);
         setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
-        timeout = NET_RECV_TIMEOUT_MS;
+        timeout = static_cast<DWORD>(config_recv_timeout_ms_);
         setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
-        
-        // Large-ish buffer sizes
-        int recvbuf = NET_RECV_BUFFER_SIZE;
-        int sendbuf = NET_SEND_BUFFER_SIZE;
+        int recvbuf = static_cast<int>(config_recv_buffer_size_);
+        int sendbuf = static_cast<int>(config_send_buffer_size_);
         setsockopt(sock, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<const char*>(&recvbuf), sizeof(recvbuf));
         setsockopt(sock, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<const char*>(&sendbuf), sizeof(sendbuf));
-        
-        // Enable keep-alive for connection health
         int keepalive = 1;
         setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, reinterpret_cast<const char*>(&keepalive), sizeof(keepalive));
+        struct tcp_keepalive ka;
+        ka.onoff = 1;
+        ka.keepalivetime = static_cast<ULONG>(config_keepalive_time_ms_);
+        ka.keepaliveinterval = static_cast<ULONG>(config_keepalive_interval_ms_);
+        DWORD bytes_returned = 0;
+        WSAIoctl(sock, SIO_KEEPALIVE_VALS, &ka, sizeof(ka), nullptr, 0, &bytes_returned, nullptr, nullptr);
+        struct linger lin;
+        lin.l_onoff = 1;
+        lin.l_linger = 2;
+        setsockopt(sock, SOL_SOCKET, SO_LINGER, reinterpret_cast<const char*>(&lin), sizeof(lin));
         return true;
     }
     
@@ -1529,13 +1603,13 @@ private:
                     (static_cast<uint32_t>(len_buf[2]) << 16) |
                     (static_cast<uint32_t>(len_buf[3]) << 24);
         
-        if (len > NET_MAX_MESSAGE_SIZE) {
+        if (len > config_max_message_size_) {
             return false;
         }
         
         // Resize thread-local buffer if needed (will reuse capacity)
         if (tls_recv_buffer.capacity() < len) {
-            tls_recv_buffer.reserve(std::max(len, static_cast<uint32_t>(NET_RECV_BUFFER_SIZE)));
+            tls_recv_buffer.reserve(std::max(len, static_cast<uint32_t>(config_recv_buffer_size_)));
         }
 
         tls_recv_buffer.resize(len);
@@ -1553,6 +1627,11 @@ private:
         }
 
         data.swap(tls_recv_buffer);
+
+        if (tls_recv_buffer.capacity() < config_recv_buffer_size_) {
+            tls_recv_buffer.reserve(config_recv_buffer_size_);
+        }
+        
         return true;
     }
 
@@ -1594,8 +1673,6 @@ private:
             fd_set read_fds;
             FD_ZERO(&read_fds);
             FD_SET(listen_socket_, &read_fds);
-            
-            // Reuse vector, just clear and refill
             listen_active_clients_.clear();
 
             {
@@ -1608,17 +1685,14 @@ private:
             }
 
             size_t clients_in_fdset = 0;
-            constexpr size_t max_clients_per_select = FD_SETSIZE - 1; // -1 for listen socket
+            constexpr size_t max_clients_per_select = FD_SETSIZE - 1;
 
             for (size_t i = 0; i < listen_active_clients_.size() && clients_in_fdset < max_clients_per_select; ++i) {
                 FD_SET(listen_active_clients_[i].second, &read_fds);
                 clients_in_fdset++;
             }
-            
-            // Warn once if we hit the limit
-            static std::atomic<bool> warned_fd_limit{false};
 
-            if (listen_active_clients_.size() > max_clients_per_select && !warned_fd_limit.exchange(true)) {
+            if (listen_active_clients_.size() > max_clients_per_select && !warned_fd_limit_.exchange(true)) {
                 MainThreadScheduler::instance().schedule([]() {
                     sqf::diag_log("KH Network: WARNING - More than " + std::to_string(FD_SETSIZE - 1) + 
                                 " clients connected, some may experience delayed messages");
@@ -1627,7 +1701,7 @@ private:
             
             struct timeval tv;
             tv.tv_sec = 0;
-            tv.tv_usec = 1000; // 1ms timeout for minimal latency
+            tv.tv_usec = 1000;
             int result = select(0, &read_fds, nullptr, nullptr, &tv);
             
             if (result == SOCKET_ERROR) {
@@ -1646,8 +1720,6 @@ private:
                 
                 if (client_sock != INVALID_SOCKET) {
                     set_socket_options(client_sock);
-
-                    // Receive client ID
                     std::vector<uint8_t> id_data;
 
                     if (recv_all(client_sock, id_data) && id_data.size() >= 4) {
@@ -1656,19 +1728,22 @@ private:
                         
                         {
                             std::lock_guard<std::mutex> lock(connections_mutex_);
-                            // Close existing connection for this client if any
                             auto existing = client_connections_.find(client_id);
 
                             if (existing != client_connections_.end()) {
+                                ::shutdown(existing->second, SD_BOTH);
                                 closesocket(existing->second);
+                                per_client_queues_.erase(client_id);
+                                client_stall_start_times_.erase(client_id);
                             }
 
                             client_connections_[client_id] = client_sock;
                         }
                         
-                        send_jip_messages_to_client(client_id);
+                        MainThreadScheduler::instance().schedule([this, client_id]() {
+                            send_jip_messages_to_client(client_id);
+                        });
                         
-                        // Schedule log on main thread
                         MainThreadScheduler::instance().schedule([client_id]() {
                             sqf::diag_log("KH Network: Client " + std::to_string(client_id) + " connected");
                         });
@@ -1678,7 +1753,7 @@ private:
                 }
             }
             
-            // Check for incoming data from clients (only those we added to fd_set)
+            // Check for incoming data from clients
             listen_clients_to_remove_.clear();
             listen_messages_to_queue_.clear();
             
@@ -1727,8 +1802,11 @@ private:
                     auto it = client_connections_.find(id);
                     
                     if (it != client_connections_.end()) {
+                        ::shutdown(it->second, SD_BOTH);
                         closesocket(it->second);
                         client_connections_.erase(it);
+                        per_client_queues_.erase(id);
+                        client_stall_start_times_.erase(id);
                         
                         MainThreadScheduler::instance().schedule([id]() {
                             sqf::diag_log("KH Network: Client " + std::to_string(id) + " disconnected");
@@ -1777,10 +1855,10 @@ private:
         struct sockaddr_in server;
         server.sin_family = AF_INET;
         server.sin_port = htons(static_cast<u_short>(port));
-        inet_pton(AF_INET, ip.c_str(), &server.sin_addr);
         SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 
-        if (sock == INVALID_SOCKET) {
+        if (inet_pton(AF_INET, ip.c_str(), &server.sin_addr) != 1) {
+            closesocket(sock);
             return false;
         }
 
@@ -1791,8 +1869,8 @@ private:
         FD_ZERO(&write_fds);
         FD_SET(sock, &write_fds);
         struct timeval tv;
-        tv.tv_sec = NET_CONNECT_TIMEOUT_MS / 1000;
-        tv.tv_usec = (NET_CONNECT_TIMEOUT_MS % 1000) * 1000;
+        tv.tv_sec = config_connect_timeout_ms_ / 1000;
+        tv.tv_usec = (config_connect_timeout_ms_ % 1000) * 1000;
         
         if (select(0, nullptr, &write_fds, nullptr, &tv) <= 0) {
             closesocket(sock);
@@ -1872,7 +1950,8 @@ private:
                     // Connection lost
                     std::lock_guard<std::mutex> lock(server_connection_mutex_);
 
-                    if (server_connection_ == sock) {
+                    if (server_connection_ != INVALID_SOCKET && server_connection_ == sock) {
+                        ::shutdown(server_connection_, SD_BOTH);
                         closesocket(server_connection_);
                         server_connection_ = INVALID_SOCKET;
                     }
@@ -1883,9 +1962,10 @@ private:
     
     void send_thread_func() {
         std::vector<OutgoingMessage> batch;
-        batch.reserve(64); // Pre-allocate for batch processing
+        batch.reserve(config_send_batch_size_);
         std::vector<uint8_t> packet_buffer;
-        packet_buffer.reserve(NET_RECV_BUFFER_SIZE);
+        packet_buffer.reserve(config_send_buffer_size_);
+        std::vector<int> clients_to_disconnect;
         
         while (running_.load()) {
             {
@@ -1897,58 +1977,190 @@ private:
                 
                 if (!running_.load()) break;
                 
-                // Grab all pending messages at once
-                while (!outgoing_queue_.empty() && batch.size() < 64) {
+                while (!outgoing_queue_.empty() && batch.size() < static_cast<size_t>(config_send_batch_size_)) {
                     batch.push_back(std::move(outgoing_queue_.front()));
                     outgoing_queue_.pop_front();
                 }
             }
 
-            if (batch.empty()) {
-                continue;
-            }
-            
-            // Process batch without holding lock
-            for (size_t i = 0; i < batch.size(); ++i) {
-                auto& msg = batch[i];
-                create_network_packet_into(packet_buffer, msg.target_client, msg.sender_client, msg.event_name, *msg.payload);
+            if (is_server_.load()) {
+                clients_to_disconnect.clear();
                 
-                if (is_server_.load()) {
-                    // Server mode - send directly to client
+                {
                     std::lock_guard<std::mutex> conn_lock(connections_mutex_);
-                    auto it = client_connections_.find(msg.target_client);
-
-                    if (it != client_connections_.end()) {
-                        send_all(it->second, packet_buffer);
+                    
+                    // Add new messages to per-client queues
+                    for (auto& msg : batch) {
+                        if (client_connections_.find(msg.target_client) != client_connections_.end()) {
+                            per_client_queues_[msg.target_client].push_back(std::move(msg));
+                        }
                     }
-                } else {
-                    // Client mode - send to server for relaying
-                    if (!connect_to_server_internal()) {
-                        // Re-queue this and all remaining messages
-                        {
-                            std::lock_guard<std::mutex> lock(outgoing_mutex_);
+                    batch.clear();
+                }
+                
+                // Process each client independently - get socket, check, send, then move to next
+                // This way a slow client only blocks itself, not others
+                std::vector<int> client_ids;
+                
+                {
+                    std::lock_guard<std::mutex> conn_lock(connections_mutex_);
+                    client_ids.reserve(client_connections_.size());
 
-                            for (size_t j = batch.size(); j-- > i; ) {
-                                outgoing_queue_.push_front(std::move(batch[j]));
-                            }
+                    for (auto& [id, sock] : client_connections_) {
+                        client_ids.push_back(id);
+                    }
+                }
+                
+                for (int client_id : client_ids) {
+                    SOCKET sock = INVALID_SOCKET;
+                    OutgoingMessage msg;
+                    bool has_message = false;
+                    
+                    {
+                        std::lock_guard<std::mutex> conn_lock(connections_mutex_);
+                        auto conn_it = client_connections_.find(client_id);
+
+                        if (conn_it == client_connections_.end()) {
+                            continue;  // Client disconnected
                         }
 
-                        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                        break;
+                        sock = conn_it->second;
+                        auto queue_it = per_client_queues_.find(client_id);
+
+                        if (queue_it == per_client_queues_.end() || queue_it->second.empty()) {
+                            client_stall_start_times_.erase(client_id);
+                            continue;  // No messages for this client
+                        }
+                        
+                        // Non-blocking check if socket is writable
+                        fd_set write_fds;
+                        FD_ZERO(&write_fds);
+                        FD_SET(sock, &write_fds);
+                        fd_set error_fds;
+                        FD_ZERO(&error_fds);
+                        FD_SET(sock, &error_fds);
+                        struct timeval tv;
+                        tv.tv_sec = 0;
+                        tv.tv_usec = 0;
+                        int sel_result = select(0, nullptr, &write_fds, &error_fds, &tv);
+                        
+                        if (sel_result == SOCKET_ERROR || FD_ISSET(sock, &error_fds)) {
+                            clients_to_disconnect.push_back(client_id);
+                            continue;
+                        }
+                        
+                        if (sel_result == 0 || !FD_ISSET(sock, &write_fds)) {
+                            // Socket not ready - track stall
+                            int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now().time_since_epoch()).count();
+                            
+                            auto stall_it = client_stall_start_times_.find(client_id);
+
+                            if (stall_it == client_stall_start_times_.end()) {
+                                client_stall_start_times_[client_id] = now;
+                            } else if (now - stall_it->second > config_client_stall_timeout_ms_) {
+                                clients_to_disconnect.push_back(client_id);
+                            }
+
+                            continue;  // Skip this client, try next
+                        }
+                        
+                        // Socket is writable - grab message
+                        client_stall_start_times_.erase(client_id);
+                        msg = std::move(queue_it->second.front());
+                        queue_it->second.pop_front();
+                        has_message = true;
                     }
-
-                    std::lock_guard<std::mutex> srv_lock(server_connection_mutex_);
-
-                    if (server_connection_ != INVALID_SOCKET) {
-                        if (!send_all(server_connection_, packet_buffer)) {
-                            closesocket(server_connection_);
-                            server_connection_ = INVALID_SOCKET;
+                    
+                    // Send outside the lock - only this client is affected if slow
+                    if (has_message) {
+                        create_network_packet_into(packet_buffer, msg.target_client, msg.sender_client,
+                                                   msg.event_name, *msg.payload);
+                        
+                        if (!send_all(sock, packet_buffer)) {
+                            clients_to_disconnect.push_back(client_id);
                         }
                     }
                 }
-            }
+                
+                // Disconnect bad clients
+                if (!clients_to_disconnect.empty()) {
+                    std::lock_guard<std::mutex> conn_lock(connections_mutex_);
 
-            batch.clear();
+                    for (int id : clients_to_disconnect) {
+                        auto it = client_connections_.find(id);
+
+                        if (it != client_connections_.end()) {
+                            ::shutdown(it->second, SD_BOTH);
+                            closesocket(it->second);
+                            client_connections_.erase(it);
+                            per_client_queues_.erase(id);
+                            client_stall_start_times_.erase(id);
+                            
+                            MainThreadScheduler::instance().schedule([id]() {
+                                sqf::diag_log("KH Network: Client " + std::to_string(id) + " disconnected (stall/error)");
+                            });
+                        }
+                    }
+                }
+                
+            } else {
+                // Client mode - send to server
+                bool need_requeue = false;
+                size_t requeue_from = 0;
+
+                for (size_t i = 0; i < batch.size(); ++i) {
+                    auto& msg = batch[i];
+
+                    create_network_packet_into(packet_buffer, msg.target_client, msg.sender_client,
+                                            msg.event_name, *msg.payload);
+                    
+                    if (!connect_to_server_internal()) {
+                        need_requeue = true;
+                        requeue_from = i;
+                        break;
+                    }
+
+                    bool send_failed = false;
+
+                    {
+                        std::lock_guard<std::mutex> srv_lock(server_connection_mutex_);
+                        
+                        if (server_connection_ == INVALID_SOCKET) {
+                            need_requeue = true;
+                            requeue_from = i;
+                            break;
+                        }
+
+                        if (!send_all(server_connection_, packet_buffer)) {
+                            ::shutdown(server_connection_, SD_BOTH);
+                            closesocket(server_connection_);
+                            server_connection_ = INVALID_SOCKET;
+                            send_failed = true;
+                        }
+                    }
+                    
+                    if (send_failed) {
+                        need_requeue = true;
+                        requeue_from = i;
+                        break;
+                    }
+                }
+
+                if (need_requeue) {
+                    {
+                        std::lock_guard<std::mutex> lock(outgoing_mutex_);
+
+                        for (size_t j = batch.size(); j-- > requeue_from; ) {
+                            outgoing_queue_.push_front(std::move(batch[j]));
+                        }
+                    }
+                    
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                }
+
+                batch.clear();
+            }
         }
     }
 
@@ -1979,6 +2191,7 @@ public:
             local_ip_ = detect_local_ip();
         }
         
+        payload_pool_ = std::make_shared<PayloadPool>(256);
         initialized_.store(true);
         return true;
     }
@@ -2064,7 +2277,6 @@ public:
             send_thread_.join();
         }
         
-        // Close all sockets
         if (listen_socket_ != INVALID_SOCKET) {
             closesocket(listen_socket_);
             listen_socket_ = INVALID_SOCKET;
@@ -2074,12 +2286,13 @@ public:
             std::lock_guard<std::mutex> lock(connections_mutex_);
 
             for (auto& pair : client_connections_) {
+                ::shutdown(pair.second, SD_BOTH);
                 closesocket(pair.second);
             }
 
             client_connections_.clear();
-
-            // Clear reusable listen thread buffers
+            per_client_queues_.clear();
+            client_stall_start_times_.clear();
             listen_active_clients_.clear();
             listen_active_clients_.shrink_to_fit();
             listen_clients_to_remove_.clear();
@@ -2092,6 +2305,7 @@ public:
             std::lock_guard<std::mutex> lock(server_connection_mutex_);
 
             if (server_connection_ != INVALID_SOCKET) {
+                ::shutdown(server_connection_, SD_BOTH);
                 closesocket(server_connection_);
                 server_connection_ = INVALID_SOCKET;
             }
@@ -2124,14 +2338,15 @@ public:
         }
         
         cached_client_id_.store(-1);
+        warned_fd_limit_.store(false);
+        payload_pool_.reset();
         initialized_.store(false);
+        sqf::diag_log("KH Network: SHUTDOWN");
 
         if (wsa_initialized_) {
             WSACleanup();
             wsa_initialized_ = false;
         }
-        
-        sqf::diag_log("KH Network: SHUTDOWN");
     }
     
     void set_port(int port) {
@@ -2180,14 +2395,13 @@ public:
     }
 
     void send_jip_messages_to_client(int client_id) {
-        std::vector<std::tuple<std::string, std::vector<uint8_t>, int>> messages_to_send;
+        std::vector<std::tuple<std::string, std::shared_ptr<std::vector<uint8_t>>, int>> messages_to_send;
         
         {
             std::lock_guard<std::mutex> lock(jip_mutex_);
             messages_to_send.reserve(jip_messages_.size());
             
             for (const auto& [key, msg] : jip_messages_) {
-                // Check dependency if one exists
                 if (!msg.dependency_net_id.empty()) {
                     if (msg.dependency_is_group) {
                         group grp = sqf::group_from_net_id(msg.dependency_net_id);
@@ -2204,15 +2418,19 @@ public:
                     }
                 }
                 
-                messages_to_send.emplace_back(msg.event_name, msg.payload, msg.original_sender);
+                auto pooled_payload = payload_pool_->acquire();
+                *pooled_payload = msg.payload;  // Copy from stored JIP message
+                messages_to_send.emplace_back(msg.event_name, std::move(pooled_payload), msg.original_sender);
             }
         }
         
         if (!messages_to_send.empty()) {
-            std::lock_guard<std::mutex> lock(outgoing_mutex_);
-            
-            for (auto& [event_name, payload, sender] : messages_to_send) {
-                outgoing_queue_.emplace_back(client_id, sender, std::string(event_name), std::make_shared<std::vector<uint8_t>>(payload));
+            {
+                std::lock_guard<std::mutex> lock(outgoing_mutex_);
+                
+                for (auto& [event_name, payload, sender] : messages_to_send) {
+                    outgoing_queue_.emplace_back(client_id, sender, std::string(event_name), std::move(payload));
+                }
             }
             
             outgoing_cv_.notify_one();
@@ -2225,18 +2443,17 @@ public:
         }
         
         int our_client_id = cached_client_id_.load();
-        
+
         // Special case: server sending to itself (client 2)
         // Or any machine sending to its own client ID
         if (target_client == our_client_id || 
             (is_server_.load() && target_client == 2)) {
-            // Queue directly to local queue - no serialization needed
             queue_local_message(event_name, message, our_client_id);
             return true;
         }
         
         try {
-            auto payload = std::make_shared<std::vector<uint8_t>>();
+            auto payload = payload_pool_->acquire();
             serialize_game_value(*payload, message);
             
             {
@@ -2653,6 +2870,61 @@ public:
             }
         }
     }
+
+    void apply_settings(const game_value& settings) {
+        if (running_.load()) {
+            report_error("KH Network: Cannot apply settings while running");
+            return;
+        }
+
+        if (settings.is_nil() || settings.type_enum() != game_data_type::ARRAY) {
+            return; // Use defaults
+        }
+        
+        auto& arr = settings.to_array();
+        
+        // Helper to safely get values with bounds checking
+        auto get_int = [&arr](size_t index, int default_val) -> int {
+            if (index < arr.size() && arr[index].type_enum() == game_data_type::SCALAR) {
+                return static_cast<int>(static_cast<float>(arr[index]));
+            }
+
+            return default_val;
+        };
+        
+        auto get_size = [&arr](size_t index, size_t default_val) -> size_t {
+            if (index < arr.size() && arr[index].type_enum() == game_data_type::SCALAR) {
+                float val = static_cast<float>(arr[index]);
+                return val > 0 ? static_cast<size_t>(val) : default_val;
+            }
+            
+            return default_val;
+        };
+        
+        // Apply settings from array indices
+        network_port_.store(get_int(0, NET_DEFAULT_PORT));
+        config_max_message_size_ = get_size(1, NET_DEFAULT_MAX_MESSAGE_SIZE);
+        config_recv_buffer_size_ = get_size(2, NET_DEFAULT_RECV_BUFFER_SIZE);
+        config_send_buffer_size_ = get_size(3, NET_DEFAULT_SEND_BUFFER_SIZE);
+        config_connect_timeout_ms_ = get_int(4, NET_DEFAULT_CONNECT_TIMEOUT_MS);
+        config_send_timeout_ms_ = get_int(5, NET_DEFAULT_SEND_TIMEOUT_MS);
+        config_recv_timeout_ms_ = get_int(6, NET_DEFAULT_RECV_TIMEOUT_MS);
+        config_client_stall_timeout_ms_ = get_int(7, NET_DEFAULT_CLIENT_STALL_TIMEOUT_MS);
+        config_keepalive_time_ms_ = get_int(8, NET_DEFAULT_KEEPALIVE_TIME_MS);
+        config_keepalive_interval_ms_ = get_int(9, NET_DEFAULT_KEEPALIVE_INTERVAL_MS);
+        config_send_batch_size_ = std::max(1, get_int(10, NET_DEFAULT_SEND_BATCH_SIZE));
+        
+        // Clamp values to reasonable ranges
+        if (config_max_message_size_ < 1024) config_max_message_size_ = 1024;
+        if (config_max_message_size_ > 64 * 1024 * 1024) config_max_message_size_ = 64 * 1024 * 1024;
+        if (config_recv_buffer_size_ < 4096) config_recv_buffer_size_ = 4096;
+        if (config_send_buffer_size_ < 4096) config_send_buffer_size_ = 4096;
+        if (config_connect_timeout_ms_ < 1000) config_connect_timeout_ms_ = 1000;
+        if (config_send_timeout_ms_ < 500) config_send_timeout_ms_ = 500;
+        if (config_recv_timeout_ms_ < 500) config_recv_timeout_ms_ = 500;
+        if (config_client_stall_timeout_ms_ < 1000) config_client_stall_timeout_ms_ = 1000;
+        if (config_send_batch_size_ > 256) config_send_batch_size_ = 256;
+    }
         
     bool is_initialized() const {
         return initialized_.load();
@@ -2672,6 +2944,9 @@ static void network_pre_init() {
         report_error("KH Network: Failed to initialize");
         return;
     }
+
+    game_value settings = sqf::get_variable(sqf::mission_namespace(), "kh_var_networkingsettings", game_value());
+    NetworkFramework::instance().apply_settings(settings);
     
     if (sqf::is_server()) {
         std::string ip_port = NetworkFramework::instance().get_local_ip_port();

@@ -86,7 +86,6 @@ void intercept::pre_init() {
     mission["active"] = true;
     clean_lua_state();
     KHDataManager::instance().flush_all();
-    network_pre_init();
     sqf::diag_log("KH Framework Extension - Pre-init");
 }
 

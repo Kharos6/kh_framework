@@ -101,6 +101,81 @@ struct NetworkMessageHandler {
     game_value handler_arguments;
 };
 
+template<typename T>
+class LockFreeMPSCQueue {
+private:
+    struct Node {
+        std::atomic<Node*> next{nullptr};
+        T data;
+        Node() = default;
+        explicit Node(T&& item) : data(std::move(item)) {}
+    };
+    
+    alignas(64) std::atomic<Node*> head_;
+    alignas(64) std::atomic<Node*> tail_;
+    alignas(64) std::atomic<size_t> size_{0};
+    
+public:
+    LockFreeMPSCQueue() {
+        Node* dummy = new Node();
+        head_.store(dummy, std::memory_order_relaxed);
+        tail_.store(dummy, std::memory_order_relaxed);
+    }
+    
+    ~LockFreeMPSCQueue() {
+        T item;
+        while (try_pop(item)) {}
+        delete head_.load(std::memory_order_relaxed);
+    }
+    
+    LockFreeMPSCQueue(const LockFreeMPSCQueue&) = delete;
+    LockFreeMPSCQueue& operator=(const LockFreeMPSCQueue&) = delete;
+    
+    void push(T&& item) {
+        Node* new_node = new Node(std::move(item));
+        Node* prev_tail = tail_.exchange(new_node, std::memory_order_acq_rel);
+        prev_tail->next.store(new_node, std::memory_order_release);
+        size_.fetch_add(1, std::memory_order_relaxed);
+    }
+    
+    bool try_pop(T& item) {
+        Node* head = head_.load(std::memory_order_relaxed);
+        Node* next = head->next.load(std::memory_order_acquire);
+        
+        if (next == nullptr) {
+            return false;
+        }
+        
+        item = std::move(next->data);
+        head_.store(next, std::memory_order_release);
+        delete head;
+        size_.fetch_sub(1, std::memory_order_relaxed);
+        return true;
+    }
+    
+    // Bulk pop for efficiency - pops up to max_count items
+    size_t pop_bulk(std::vector<T>& out, size_t max_count) {
+        size_t count = 0;
+        T item;
+        
+        while (count < max_count && try_pop(item)) {
+            out.push_back(std::move(item));
+            ++count;
+        }
+        
+        return count;
+    }
+    
+    bool empty() const {
+        Node* head = head_.load(std::memory_order_relaxed);
+        return head->next.load(std::memory_order_acquire) == nullptr;
+    }
+    
+    size_t size_approx() const {
+        return size_.load(std::memory_order_relaxed);
+    }
+};
+
 class PayloadPool : public std::enable_shared_from_this<PayloadPool> {
 private:
     std::vector<std::vector<uint8_t>*> pool_;
@@ -156,6 +231,85 @@ public:
     }
 };
 
+using HandlerList = std::vector<NetworkMessageHandler>;
+using HandlerListPtr = std::shared_ptr<const HandlerList>;
+
+class COWHandlerMap {
+private:
+    mutable std::shared_mutex mutex_;
+    std::unordered_map<std::string, HandlerListPtr> handlers_;
+    std::unordered_map<int, std::string> handler_id_to_event_;
+    
+public:
+    HandlerListPtr get_handlers(const std::string& event_name) const {
+        std::shared_lock<std::shared_mutex> lock(mutex_);
+        auto it = handlers_.find(event_name);
+
+        if (it != handlers_.end()) {
+            return it->second;
+        }
+
+        return nullptr;
+    }
+    
+    int add_handler(const std::string& event_name, const code& handler, const game_value& args) {
+        std::unique_lock<std::shared_mutex> lock(mutex_);
+        int handler_id = static_cast<int>(g_network_handler_id_counter.fetch_add(1) & 0x7FFFFFFF);
+        
+        // Copy-on-write: create new list with added handler
+        auto it = handlers_.find(event_name);
+        HandlerListPtr old_list = (it != handlers_.end()) ? it->second : nullptr;
+        auto new_list = std::make_shared<HandlerList>();
+        
+        if (old_list) {
+            *new_list = *old_list;  // Copy existing handlers
+        }
+        
+        new_list->push_back({handler_id, event_name, handler, args});
+        handlers_[event_name] = new_list;
+        handler_id_to_event_[handler_id] = event_name;
+        return handler_id;
+    }
+    
+    bool remove_handler(int handler_id) {
+        std::unique_lock<std::shared_mutex> lock(mutex_);
+        auto id_it = handler_id_to_event_.find(handler_id);
+
+        if (id_it == handler_id_to_event_.end()) {
+            return false;
+        }
+        
+        std::string event_name = id_it->second;
+        handler_id_to_event_.erase(id_it);
+        auto handlers_it = handlers_.find(event_name);
+
+        if (handlers_it != handlers_.end() && handlers_it->second) {
+            // Copy-on-write: create new list without the removed handler
+            auto new_list = std::make_shared<HandlerList>();
+            
+            for (const auto& h : *handlers_it->second) {
+                if (h.handler_id != handler_id) {
+                    new_list->push_back(h);
+                }
+            }
+            
+            if (new_list->empty()) {
+                handlers_.erase(handlers_it);
+            } else {
+                handlers_[event_name] = new_list;
+            }
+        }
+        
+        return true;
+    }
+    
+    void clear() {
+        std::unique_lock<std::shared_mutex> lock(mutex_);
+        handlers_.clear();
+        handler_id_to_event_.clear();
+    }
+};
+
 class NetworkFramework {
 private:
     // Singleton
@@ -176,9 +330,7 @@ private:
     std::atomic<bool> is_server_{false};
     std::string server_ip_;
     std::mutex server_ip_mutex_;
-    std::unordered_map<std::string, std::vector<NetworkMessageHandler>> message_handlers_;
-    std::unordered_map<int, std::string> handler_id_to_event_;
-    std::mutex handlers_mutex_;
+    COWHandlerMap cow_handlers_;
     std::unordered_map<int, std::deque<OutgoingMessage>> per_client_queues_;
     std::unordered_map<int, int64_t> client_stall_start_times_;
     std::shared_ptr<PayloadPool> payload_pool_;
@@ -205,10 +357,9 @@ private:
     std::deque<LocalMessage> local_incoming_queue_;
     std::mutex local_incoming_mutex_;
         
-    // Outgoing message queue
-    std::deque<OutgoingMessage> outgoing_queue_;
-    std::mutex outgoing_mutex_;
-    std::condition_variable outgoing_cv_;
+    // Lock-free outgoing message queue
+    LockFreeMPSCQueue<OutgoingMessage> outgoing_queue_lockfree_;
+    std::atomic<bool> outgoing_has_data_{false};
     
     // Network threads
     std::thread listen_thread_;
@@ -390,7 +541,7 @@ private:
     void create_coalesced_packet(
         std::vector<uint8_t>& output,
         const std::vector<OutgoingMessage>& messages,
-        std::vector<std::vector<uint8_t>>& temp_compressed_buffers
+        std::vector<uint8_t>& temp_uncompressed_buffer
     ) {
         if (messages.empty()) {
             output.clear();
@@ -405,97 +556,125 @@ private:
             return;
         }
         
-        // Estimate total size for reservation
-        size_t estimated_size = 10; // Header: magic(4) + version(4) + count(2)
+        // Build uncompressed coalesced content first
+        // Format: [MESSAGE_COUNT(2)] + for each: [TARGET(4)][SENDER(4)][EVENT_LEN(2)][EVENT][PAYLOAD_LEN(4)][PAYLOAD]
+        temp_uncompressed_buffer.clear();
+        
+        // Estimate size for reservation
+        size_t estimated_size = 2;  // message count
 
         for (const auto& msg : messages) {
-            // flags(1) + target(4) + sender(4) + event_len(2) + event + payload_len(4) + payload
-            estimated_size += 15 + msg.event_name.size() + msg.payload->size();
+            estimated_size += 14 + msg.event_name.size() + msg.payload->size();
+        }
+
+        temp_uncompressed_buffer.reserve(estimated_size);
+        
+        // Write message count
+        write_uint16(temp_uncompressed_buffer, static_cast<uint16_t>(messages.size()));
+        
+        // Write each message (without per-message compression)
+        for (const auto& msg : messages) {
+            write_uint32(temp_uncompressed_buffer, static_cast<uint32_t>(msg.target_client));
+            write_uint32(temp_uncompressed_buffer, static_cast<uint32_t>(msg.sender_client));
+            write_uint16(temp_uncompressed_buffer, static_cast<uint16_t>(msg.event_name.size()));
+            
+            temp_uncompressed_buffer.insert(temp_uncompressed_buffer.end(), 
+                                            msg.event_name.begin(), msg.event_name.end());
+
+            write_uint32(temp_uncompressed_buffer, static_cast<uint32_t>(msg.payload->size()));
+
+            temp_uncompressed_buffer.insert(temp_uncompressed_buffer.end(), 
+                                            msg.payload->begin(), msg.payload->end());
         }
         
+        // Now build final packet with optional whole-packet compression
         output.clear();
-        output.reserve(estimated_size);
+        
+        bool should_compress = config_compression_enabled_ && 
+                               temp_uncompressed_buffer.size() > NET_COMPRESSION_THRESHOLD;
+        
+        std::vector<uint8_t> compressed_data;
+        const std::vector<uint8_t>* final_payload = &temp_uncompressed_buffer;
+        uint8_t flags = NET_FLAG_NONE;
+        
+        if (should_compress) {
+            compressed_data = compress_payload(temp_uncompressed_buffer);
+
+            if (!compressed_data.empty()) {
+                final_payload = &compressed_data;
+                flags |= NET_FLAG_COMPRESSED;
+            }
+        }
+        
+        // Header: [COALESCED_MAGIC(4)][VERSION(4)][FLAGS(1)][PAYLOAD_LEN(4)][PAYLOAD]
+        output.reserve(13 + final_payload->size());
         write_uint32(output, NET_COALESCED_MAGIC);
         write_uint32(output, NET_MSG_VERSION);
-        write_uint16(output, static_cast<uint16_t>(messages.size()));
-        temp_compressed_buffers.resize(messages.size());
-        
-        // Write each message
-        for (size_t i = 0; i < messages.size(); ++i) {
-            const auto& msg = messages[i];
-            const std::vector<uint8_t>& payload = *msg.payload;
-            bool should_compress = config_compression_enabled_ && payload.size() > NET_COMPRESSION_THRESHOLD;
-            const std::vector<uint8_t>* final_payload = &payload;
-            uint8_t flags = NET_FLAG_NONE;
-            
-            if (should_compress) {
-                temp_compressed_buffers[i] = compress_payload(payload);
-
-                if (!temp_compressed_buffers[i].empty()) {
-                    final_payload = &temp_compressed_buffers[i];
-                    flags |= NET_FLAG_COMPRESSED;
-                }
-            }
-
-            output.push_back(flags);
-            write_uint32(output, static_cast<uint32_t>(msg.target_client));
-            write_uint32(output, static_cast<uint32_t>(msg.sender_client));
-            write_uint16(output, static_cast<uint16_t>(msg.event_name.size()));
-            output.insert(output.end(), msg.event_name.begin(), msg.event_name.end());
-            write_uint32(output, static_cast<uint32_t>(final_payload->size()));
-            output.insert(output.end(), final_payload->begin(), final_payload->end());
-        }
+        output.push_back(flags);
+        write_uint32(output, static_cast<uint32_t>(final_payload->size()));
+        output.insert(output.end(), final_payload->begin(), final_payload->end());
     }
     
     // Parses either a coalesced packet or a single packet
     bool parse_coalesced_or_single_packet(
         const std::vector<uint8_t>& data,
         std::vector<NetworkMessage>& out_messages,
-        std::vector<OutgoingMessage>& out_forward_messages  // For server forwarding
+        std::vector<OutgoingMessage>& out_forward_messages
     ) {
         if (data.size() < 4) return false;
         size_t offset = 0;
         uint32_t magic = read_uint32(data.data(), offset, data.size());
         
         if (magic == NET_COALESCED_MAGIC) {
-            // Coalesced packet
-            if (data.size() < 10) return false;
+            // We compress the coalesced packet
+            if (data.size() < 13) return false;
             uint32_t version = read_uint32(data.data(), offset, data.size());
             if (version > NET_MSG_VERSION) return false;
-            uint16_t message_count = read_uint16(data.data(), offset, data.size());
+            uint8_t flags = data[offset++];
+            uint32_t payload_len = read_uint32(data.data(), offset, data.size());
+            if (offset + payload_len > data.size()) return false;
+            
+            // Decompress if needed
+            const uint8_t* payload_data;
+            std::vector<uint8_t> decompressed_payload;
+            size_t payload_size;
+            
+            if (flags & NET_FLAG_COMPRESSED) {
+                decompressed_payload = decompress_payload(data.data() + offset, payload_len);
+                if (decompressed_payload.empty() && payload_len > 4) return false;
+                payload_data = decompressed_payload.data();
+                payload_size = decompressed_payload.size();
+            } else {
+                payload_data = data.data() + offset;
+                payload_size = payload_len;
+            }
+            
+            // Parse the decompressed coalesced content
+            size_t inner_offset = 0;
+            if (payload_size < 2) return false;
+            uint16_t message_count = read_uint16(payload_data, inner_offset, payload_size);
             if (message_count == 0 || message_count > config_coalesce_max_messages_) return false;
             out_messages.reserve(out_messages.size() + message_count);
             out_forward_messages.reserve(out_forward_messages.size() + message_count);
             
             for (uint16_t i = 0; i < message_count; ++i) {
-                if (offset >= data.size()) return false;
-                uint8_t flags = data[offset++];
-                if (offset + 8 > data.size()) return false;
-                int target_client = static_cast<int>(read_uint32(data.data(), offset, data.size()));
-                int sender_client = static_cast<int>(read_uint32(data.data(), offset, data.size()));
-                if (offset + 2 > data.size()) return false;
-                uint16_t event_len = read_uint16(data.data(), offset, data.size());
-                if (offset + event_len > data.size()) return false;
-                std::string event_name(reinterpret_cast<const char*>(data.data() + offset), event_len);
-                offset += event_len;
-                if (offset + 4 > data.size()) return false;
-                uint32_t payload_len = read_uint32(data.data(), offset, data.size());
-                if (offset + payload_len > data.size()) return false;
-                std::vector<uint8_t> payload;
+                if (inner_offset + 8 > payload_size) return false;
+                int target_client = static_cast<int>(read_uint32(payload_data, inner_offset, payload_size));
+                int sender_client = static_cast<int>(read_uint32(payload_data, inner_offset, payload_size));
+                if (inner_offset + 2 > payload_size) return false;
+                uint16_t event_len = read_uint16(payload_data, inner_offset, payload_size);
+                if (inner_offset + event_len > payload_size) return false;
+                std::string event_name(reinterpret_cast<const char*>(payload_data + inner_offset), event_len);
+                inner_offset += event_len;
+                if (inner_offset + 4 > payload_size) return false;
+                uint32_t msg_payload_len = read_uint32(payload_data, inner_offset, payload_size);
+                if (inner_offset + msg_payload_len > payload_size) return false;
 
-                if (flags & NET_FLAG_COMPRESSED) {
-                    payload = decompress_payload(data.data() + offset, payload_len);
+                std::vector<uint8_t> payload(payload_data + inner_offset, 
+                                              payload_data + inner_offset + msg_payload_len);
 
-                    if (payload.empty() && payload_len > 4) {
-                        offset += payload_len;
-                        continue; // Skip this message on decompression failure
-                    }
-                } else {
-                    payload.assign(data.begin() + offset, data.begin() + offset + payload_len);
-                }
-
-                offset += payload_len;
-
+                inner_offset += msg_payload_len;
+                
                 if (target_client == 2) {
                     out_messages.emplace_back(event_name, std::move(payload), sender_client);
                 } else {
@@ -543,47 +722,57 @@ private:
         uint32_t magic = read_uint32(data.data(), offset, data.size());
         
         if (magic == NET_COALESCED_MAGIC) {
-            if (data.size() < 10) return false;
+            if (data.size() < 13) return false;
             uint32_t version = read_uint32(data.data(), offset, data.size());
             if (version > NET_MSG_VERSION) return false;
-            uint16_t message_count = read_uint16(data.data(), offset, data.size());
+            uint8_t flags = data[offset++];
+            uint32_t payload_len = read_uint32(data.data(), offset, data.size());
+            if (offset + payload_len > data.size()) return false;
+            
+            // Decompress if needed
+            const uint8_t* payload_data;
+            std::vector<uint8_t> decompressed_payload;
+            size_t payload_size;
+            
+            if (flags & NET_FLAG_COMPRESSED) {
+                decompressed_payload = decompress_payload(data.data() + offset, payload_len);
+                if (decompressed_payload.empty() && payload_len > 4) return false;
+                payload_data = decompressed_payload.data();
+                payload_size = decompressed_payload.size();
+            } else {
+                payload_data = data.data() + offset;
+                payload_size = payload_len;
+            }
+            
+            // Parse the decompressed coalesced content
+            size_t inner_offset = 0;
+            if (payload_size < 2) return false;
+            uint16_t message_count = read_uint16(payload_data, inner_offset, payload_size);
             if (message_count == 0 || message_count > config_coalesce_max_messages_) return false;
             out_messages.reserve(out_messages.size() + message_count);
             
             for (uint16_t i = 0; i < message_count; ++i) {
-                if (offset >= data.size()) return false;
-                uint8_t flags = data[offset++];
-                if (offset + 8 > data.size()) return false;
-                int target_client = static_cast<int>(read_uint32(data.data(), offset, data.size()));
-                int sender_client = static_cast<int>(read_uint32(data.data(), offset, data.size()));
-                (void)target_client; // Client doesn't need this, it's for them
-                if (offset + 2 > data.size()) return false;
-                uint16_t event_len = read_uint16(data.data(), offset, data.size());
-                if (offset + event_len > data.size()) return false;
-                std::string event_name(reinterpret_cast<const char*>(data.data() + offset), event_len);
-                offset += event_len;
-                if (offset + 4 > data.size()) return false;
-                uint32_t payload_len = read_uint32(data.data(), offset, data.size());
-                if (offset + payload_len > data.size()) return false;
-                std::vector<uint8_t> payload;
-                
-                if (flags & NET_FLAG_COMPRESSED) {
-                    payload = decompress_payload(data.data() + offset, payload_len);
+                if (inner_offset + 8 > payload_size) return false;
+                int target_client = static_cast<int>(read_uint32(payload_data, inner_offset, payload_size));
+                int sender_client = static_cast<int>(read_uint32(payload_data, inner_offset, payload_size));
+                (void)target_client;  // Client doesn't need this
+                if (inner_offset + 2 > payload_size) return false;
+                uint16_t event_len = read_uint16(payload_data, inner_offset, payload_size);
+                if (inner_offset + event_len > payload_size) return false;
+                std::string event_name(reinterpret_cast<const char*>(payload_data + inner_offset), event_len);
+                inner_offset += event_len;
+                if (inner_offset + 4 > payload_size) return false;
+                uint32_t msg_payload_len = read_uint32(payload_data, inner_offset, payload_size);
+                if (inner_offset + msg_payload_len > payload_size) return false;
 
-                    if (payload.empty() && payload_len > 4) {
-                        offset += payload_len;
-                        continue;
-                    }
-                } else {
-                    payload.assign(data.begin() + offset, data.begin() + offset + payload_len);
-                }
+                std::vector<uint8_t> payload(payload_data + inner_offset,
+                                              payload_data + inner_offset + msg_payload_len);
 
-                offset += payload_len;
+                inner_offset += msg_payload_len;
                 out_messages.emplace_back(event_name, std::move(payload), sender_client);
             }
             
             return true;
-            
         } else if (magic == NET_MSG_MAGIC) {
             offset = 0;
             int target_client, sender_client;
@@ -1770,13 +1959,13 @@ private:
             }
             
             if (!targets.empty()) {
-                std::lock_guard<std::mutex> lock(outgoing_mutex_);
-                
                 for (int target : targets) {
-                    outgoing_queue_.emplace_back(target, sender_client_id, std::string(event_name), payload);
+                    outgoing_queue_lockfree_.push(
+                        OutgoingMessage(target, sender_client_id, std::string(event_name), payload)
+                    );
                 }
-                
-                outgoing_cv_.notify_one();
+
+                outgoing_has_data_.store(true, std::memory_order_release);
             }
             
             return true;
@@ -1978,7 +2167,8 @@ private:
         }
 
         data.swap(tls_recv_buffer);
-
+        tls_recv_buffer.clear();  // Clear swapped-in data
+        
         if (tls_recv_buffer.capacity() < config_recv_buffer_size_) {
             tls_recv_buffer.reserve(config_recv_buffer_size_);
         }
@@ -2146,13 +2336,11 @@ private:
             }
             
             if (!forward_messages.empty()) {
-                std::lock_guard<std::mutex> out_lock(outgoing_mutex_);
-
                 for (auto& msg : forward_messages) {
-                    outgoing_queue_.push_back(std::move(msg));
+                    outgoing_queue_lockfree_.push(std::move(msg));
                 }
 
-                outgoing_cv_.notify_one();
+                outgoing_has_data_.store(true, std::memory_order_release);
             }
             
             // Remove disconnected clients
@@ -2217,6 +2405,10 @@ private:
         server.sin_family = AF_INET;
         server.sin_port = htons(static_cast<u_short>(port));
         SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+
+        if (sock == INVALID_SOCKET) {
+            return false;
+        }
 
         if (inet_pton(AF_INET, ip.c_str(), &server.sin_addr) != 1) {
             closesocket(sock);
@@ -2333,36 +2525,41 @@ private:
         batch.reserve(config_send_batch_size_);
         std::vector<uint8_t> packet_buffer;
         packet_buffer.reserve(config_send_buffer_size_);
+        std::vector<uint8_t> temp_uncompressed_buffer;
+        temp_uncompressed_buffer.reserve(config_coalesce_max_size_);
         std::unordered_set<int> clients_to_disconnect;
         std::vector<OutgoingMessage> client_batch;
         client_batch.reserve(config_coalesce_max_messages_);
-        std::vector<std::vector<uint8_t>> temp_compressed_buffers;
-        temp_compressed_buffers.reserve(config_coalesce_max_messages_);
         
         while (running_.load()) {
-            {
-                std::unique_lock<std::mutex> lock(outgoing_mutex_);
-
+            // Wait for data with timeout
+            if (!outgoing_has_data_.load(std::memory_order_acquire)) {
                 if (config_coalesce_enabled_ && config_coalesce_delay_us_ > 0) {
-                    outgoing_cv_.wait_for(lock, std::chrono::microseconds(config_coalesce_delay_us_), [this]() {
-                        return !outgoing_queue_.empty() || !running_.load();
-                    });
+                    std::this_thread::sleep_for(std::chrono::microseconds(config_coalesce_delay_us_));
                 } else {
-                    outgoing_cv_.wait_for(lock, std::chrono::milliseconds(1), [this]() {
-                        return !outgoing_queue_.empty() || !running_.load();
-                    });
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 }
-                
-                if (!running_.load()) break;
+            }
+            
+            if (!running_.load()) break;
+            
+            // Drain the lock-free queue
+            batch.clear();
 
-                size_t max_grab = config_coalesce_enabled_ ? 
-                    std::max(static_cast<size_t>(config_send_batch_size_), config_coalesce_max_messages_ * 2) :
-                    static_cast<size_t>(config_send_batch_size_);
-                
-                while (!outgoing_queue_.empty() && batch.size() < max_grab) {
-                    batch.push_back(std::move(outgoing_queue_.front()));
-                    outgoing_queue_.pop_front();
-                }
+            size_t max_grab = config_coalesce_enabled_ ? 
+                std::max(static_cast<size_t>(config_send_batch_size_), config_coalesce_max_messages_ * 2) :
+                static_cast<size_t>(config_send_batch_size_);
+            
+            outgoing_queue_lockfree_.pop_bulk(batch, max_grab);
+            
+            if (batch.empty()) {
+                outgoing_has_data_.store(false, std::memory_order_release);
+                continue;
+            }
+            
+            // Check if more data might be available
+            if (outgoing_queue_lockfree_.empty()) {
+                outgoing_has_data_.store(false, std::memory_order_release);
             }
 
             if (is_server_.load()) {
@@ -2382,7 +2579,7 @@ private:
 
                     batch.clear();
                     
-                    // Also gather from per-client queues
+                    // Also gather from per-client queues (for requeued messages)
                     for (auto& [client_id, queue] : per_client_queues_) {
                         if (queue.empty()) continue;
                         auto& client_msgs = per_client_batch[client_id];
@@ -2453,9 +2650,8 @@ private:
                         bool send_error = false;
                         
                         for (size_t i = 0; i < messages.size(); ++i) {
-                            size_t msg_size = 15 + messages[i].event_name.size() + messages[i].payload->size();
+                            size_t msg_size = 14 + messages[i].event_name.size() + messages[i].payload->size();
                             
-                            // Check if adding this message would exceed limits
                             bool should_flush = (i - current_batch_start >= config_coalesce_max_messages_) ||
                                                (current_batch_size + msg_size > config_coalesce_max_size_ && 
                                                 i > current_batch_start);
@@ -2467,21 +2663,18 @@ private:
                                     client_batch.push_back(std::move(messages[j]));
                                 }
                                 
-                                create_coalesced_packet(packet_buffer, client_batch, temp_compressed_buffers);
+                                create_coalesced_packet(packet_buffer, client_batch, temp_uncompressed_buffer);
                                 
                                 if (!send_all(sock, packet_buffer)) {
                                     clients_to_disconnect.insert(client_id);
 
-                                    // Requeue remaining messages INCLUDING the failed batch
                                     std::lock_guard<std::mutex> conn_lock(connections_mutex_);
                                     auto& queue = per_client_queues_[client_id];
                                     
-                                    // First requeue unprocessed messages
                                     for (size_t k = messages.size(); k-- > i; ) {
                                         queue.push_front(std::move(messages[k]));
                                     }
                                     
-                                    // Then requeue the failed batch
                                     for (auto it = client_batch.rbegin(); it != client_batch.rend(); ++it) {
                                         queue.push_front(std::move(*it));
                                     }
@@ -2497,7 +2690,7 @@ private:
                             }
                         }
                         
-                        // Send remaining batch (if no error occurred)
+                        // Send remaining batch
                         if (!send_error && current_batch_start < messages.size() && 
                             clients_to_disconnect.count(client_id) == 0) {
                             client_batch.clear();
@@ -2506,12 +2699,11 @@ private:
                                 client_batch.push_back(std::move(messages[j]));
                             }
                             
-                            create_coalesced_packet(packet_buffer, client_batch, temp_compressed_buffers);
+                            create_coalesced_packet(packet_buffer, client_batch, temp_uncompressed_buffer);
                             
                             if (!send_all(sock, packet_buffer)) {
                                 clients_to_disconnect.insert(client_id);
 
-                                // Requeue the failed batch (in reverse for correct order)
                                 std::lock_guard<std::mutex> conn_lock(connections_mutex_);
                                 auto& queue = per_client_queues_[client_id];
 
@@ -2531,7 +2723,6 @@ private:
                             if (!send_all(sock, packet_buffer)) {
                                 clients_to_disconnect.insert(client_id);
                                 
-                                // Requeue remaining messages
                                 std::lock_guard<std::mutex> conn_lock(connections_mutex_);
                                 auto& queue = per_client_queues_[client_id];
                                 
@@ -2572,12 +2763,11 @@ private:
                 
                 if (!connect_to_server_internal()) {
                     // Requeue all
-                    std::lock_guard<std::mutex> lock(outgoing_mutex_);
-
                     for (auto it = batch.rbegin(); it != batch.rend(); ++it) {
-                        outgoing_queue_.push_front(std::move(*it));
+                        outgoing_queue_lockfree_.push(std::move(*it));
                     }
-
+                    
+                    outgoing_has_data_.store(true, std::memory_order_release);
                     batch.clear();
                     std::this_thread::sleep_for(std::chrono::milliseconds(50));
                     continue;
@@ -2592,7 +2782,7 @@ private:
                     
                     for (size_t i = 0; i <= batch.size(); ++i) {
                         size_t msg_size = (i < batch.size()) ? 
-                            15 + batch[i].event_name.size() + batch[i].payload->size() : 0;
+                            14 + batch[i].event_name.size() + batch[i].payload->size() : 0;
                         
                         bool should_flush = (i == batch.size()) ||
                                            (i - current_batch_start >= config_coalesce_max_messages_) ||
@@ -2606,7 +2796,7 @@ private:
                                 client_batch.push_back(std::move(batch[j]));
                             }
                             
-                            create_coalesced_packet(packet_buffer, client_batch, temp_compressed_buffers);
+                            create_coalesced_packet(packet_buffer, client_batch, temp_uncompressed_buffer);
                             
                             {
                                 std::lock_guard<std::mutex> srv_lock(server_connection_mutex_);
@@ -2622,19 +2812,16 @@ private:
                             }
                             
                             if (send_failed) {
-                                // Requeue remaining messages INCLUDING the failed batch
-                                std::lock_guard<std::mutex> lock(outgoing_mutex_);
-
-                                // First requeue unprocessed messages (already in reverse order)
+                                // Requeue remaining messages
                                 for (size_t k = batch.size(); k-- > i; ) {
-                                    outgoing_queue_.push_front(std::move(batch[k]));
+                                    outgoing_queue_lockfree_.push(std::move(batch[k]));
                                 }
                                 
-                                // Then requeue the failed batch (in reverse for correct order)
                                 for (auto it = client_batch.rbegin(); it != client_batch.rend(); ++it) {
-                                    outgoing_queue_.push_front(std::move(*it));
+                                    outgoing_queue_lockfree_.push(std::move(*it));
                                 }
                                 
+                                outgoing_has_data_.store(true, std::memory_order_release);
                                 break;
                             }
                                                         
@@ -2666,12 +2853,11 @@ private:
                         }
                         
                         if (send_failed) {
-                            std::lock_guard<std::mutex> lock(outgoing_mutex_);
-
                             for (size_t j = batch.size(); j-- > i; ) {
-                                outgoing_queue_.push_front(std::move(batch[j]));
+                                outgoing_queue_lockfree_.push(std::move(batch[j]));
                             }
-                            
+
+                            outgoing_has_data_.store(true, std::memory_order_release);
                             break;
                         }
                     }
@@ -2785,7 +2971,6 @@ public:
         }
         
         running_.store(false);
-        outgoing_cv_.notify_all();
 
         if (listen_thread_.joinable()) {
             listen_thread_.join();
@@ -2843,16 +3028,7 @@ public:
             local_incoming_queue_.clear();
         }
 
-        {
-            std::lock_guard<std::mutex> lock(outgoing_mutex_);
-            outgoing_queue_.clear();
-        }
-
-        {
-            std::lock_guard<std::mutex> lock(handlers_mutex_);
-            message_handlers_.clear();
-            handler_id_to_event_.clear();
-        }
+        cow_handlers_.clear();
 
         {
             std::lock_guard<std::mutex> lock(jip_mutex_);
@@ -2947,15 +3123,13 @@ public:
         }
         
         if (!messages_to_send.empty()) {
-            {
-                std::lock_guard<std::mutex> lock(outgoing_mutex_);
-                
-                for (auto& [event_name, payload, sender] : messages_to_send) {
-                    outgoing_queue_.emplace_back(client_id, sender, std::string(event_name), std::move(payload));
-                }
+            for (auto& [event_name, payload, sender] : messages_to_send) {
+                outgoing_queue_lockfree_.push(
+                    OutgoingMessage(client_id, sender, std::string(event_name), std::move(payload))
+                );
             }
-            
-            outgoing_cv_.notify_one();
+
+            outgoing_has_data_.store(true, std::memory_order_release);
         }
     }
 
@@ -2978,12 +3152,11 @@ public:
             auto payload = payload_pool_->acquire();
             serialize_game_value(*payload, message);
             
-            {
-                std::lock_guard<std::mutex> lock(outgoing_mutex_);
-                outgoing_queue_.emplace_back(target_client, our_client_id, std::string(event_name), std::move(payload));
-            }
+            outgoing_queue_lockfree_.push(
+                OutgoingMessage(target_client, our_client_id, std::string(event_name), std::move(payload))
+            );
 
-            outgoing_cv_.notify_one();
+            outgoing_has_data_.store(true, std::memory_order_release);
             return true;
         } catch (const std::exception& e) {
             report_error("KH Network: Failed to serialize message - " + std::string(e.what()));
@@ -3144,42 +3317,11 @@ public:
     }
     
     int add_message_handler(const std::string& event_name, const code& handler, const game_value& args) {
-        std::lock_guard<std::mutex> lock(handlers_mutex_);
-        int handler_id = static_cast<int>(g_network_handler_id_counter.fetch_add(1) & 0x7FFFFFFF);
-        message_handlers_[event_name].push_back({handler_id, event_name, handler, args});
-        handler_id_to_event_[handler_id] = event_name;
-        return handler_id;
+        return cow_handlers_.add_handler(event_name, handler, args);
     }
     
     bool remove_message_handler(int handler_id) {
-        std::lock_guard<std::mutex> lock(handlers_mutex_);
-        
-        // Find which event this handler belongs to
-        auto id_it = handler_id_to_event_.find(handler_id);
-
-        if (id_it == handler_id_to_event_.end()) {
-            return false;
-        }
-        
-        std::string event_name = id_it->second;
-        handler_id_to_event_.erase(id_it);
-        auto handlers_it = message_handlers_.find(event_name);
-
-        if (handlers_it != message_handlers_.end()) {
-            auto& handlers = handlers_it->second;
-            
-            handlers.erase(
-                std::remove_if(handlers.begin(), handlers.end(),
-                    [handler_id](const NetworkMessageHandler& h) { return h.handler_id == handler_id; }),
-                handlers.end()
-            );
-
-            if (handlers.empty()) {
-                message_handlers_.erase(handlers_it);
-            }
-        }
-        
-        return true;
+        return cow_handlers_.remove_handler(handler_id);
     }
     
     // Called from main thread during on_frame
@@ -3215,31 +3357,24 @@ public:
                             game_value result = raw_call_sqf_native(condition);
                             
                             if (result.type_enum() == game_data_type::BOOL && static_cast<bool>(result)) {
-                                std::vector<NetworkMessageHandler> handlers_copy;
-
-                                {
-                                    std::lock_guard<std::mutex> lock(handlers_mutex_);
-                                    auto it = message_handlers_.find(real_event_name);
-
-                                    if (it != message_handlers_.end()) {
-                                        handlers_copy = it->second;
-                                    }
-                                }
+                                HandlerListPtr handlers = cow_handlers_.get_handlers(real_event_name);
                                 
-                                for (auto& handler : handlers_copy) {
-                                    try {
-                                        auto game_state = (intercept::client::host::functions.get_engine_allocator())->gameState;
-                                        static r_string message_name = "_this"sv;
-                                        static r_string sender_name = "_sender"sv;
-                                        static r_string args_name = "_args"sv;
-                                        static r_string handler_id_name = "_handlerid"sv;
-                                        game_state->set_local_variable(message_name, real_message);
-                                        game_state->set_local_variable(sender_name, game_value(static_cast<float>(msg.sender_client_id)));
-                                        game_state->set_local_variable(args_name, handler.handler_arguments);
-                                        game_state->set_local_variable(handler_id_name, game_value(static_cast<float>(handler.handler_id)));
-                                        intercept::client::host::functions.invoke_raw_unary(intercept::client::__sqf::unary__isnil__code_string__ret__bool, handler.handler_function);
-                                    } catch (const std::exception& e) {
-                                        report_error("KH Network: Handler error for '" + real_event_name + "' - " + std::string(e.what()));
+                                if (handlers) {
+                                    for (const auto& handler : *handlers) {
+                                        try {
+                                            auto game_state = (intercept::client::host::functions.get_engine_allocator())->gameState;
+                                            static r_string message_name = "_this"sv;
+                                            static r_string sender_name = "_sender"sv;
+                                            static r_string args_name = "_args"sv;
+                                            static r_string handler_id_name = "_handlerid"sv;
+                                            game_state->set_local_variable(message_name, real_message);
+                                            game_state->set_local_variable(sender_name, game_value(static_cast<float>(msg.sender_client_id)));
+                                            game_state->set_local_variable(args_name, handler.handler_arguments);
+                                            game_state->set_local_variable(handler_id_name, game_value(static_cast<float>(handler.handler_id)));
+                                            intercept::client::host::functions.invoke_raw_unary(intercept::client::__sqf::unary__isnil__code_string__ret__bool, handler.handler_function);
+                                        } catch (const std::exception& e) {
+                                            report_error("KH Network: Handler error for '" + msg.event_name + "' - " + std::string(e.what()));
+                                        }
                                     }
                                 }
                             }
@@ -3251,31 +3386,24 @@ public:
                     continue;
                 }
                 
-                std::vector<NetworkMessageHandler> handlers_copy;
-
-                {
-                    std::lock_guard<std::mutex> lock(handlers_mutex_);
-                    auto it = message_handlers_.find(msg.event_name);
-
-                    if (it != message_handlers_.end()) {
-                        handlers_copy = it->second;
-                    }
-                }
+                HandlerListPtr handlers = cow_handlers_.get_handlers(msg.event_name);
                 
-                for (auto& handler : handlers_copy) {
-                    try {
-                        auto game_state = (intercept::client::host::functions.get_engine_allocator())->gameState;
-                        static r_string message_name = "_this"sv;
-                        static r_string sender_name = "_sender"sv;
-                        static r_string args_name = "_args"sv;
-                        static r_string handler_id_name = "_handlerid"sv;
-                        game_state->set_local_variable(message_name, msg.message);
-                        game_state->set_local_variable(sender_name, game_value(static_cast<float>(msg.sender_client_id)));
-                        game_state->set_local_variable(args_name, handler.handler_arguments);
-                        game_state->set_local_variable(handler_id_name, game_value(static_cast<float>(handler.handler_id)));
-                        intercept::client::host::functions.invoke_raw_unary(intercept::client::__sqf::unary__isnil__code_string__ret__bool, handler.handler_function);
-                    } catch (const std::exception& e) {
-                        report_error("KH Network: Handler error for '" + msg.event_name + "' - " + std::string(e.what()));
+                if (handlers) {
+                    for (const auto& handler : *handlers) {
+                        try {
+                            auto game_state = (intercept::client::host::functions.get_engine_allocator())->gameState;
+                            static r_string message_name = "_this"sv;
+                            static r_string sender_name = "_sender"sv;
+                            static r_string args_name = "_args"sv;
+                            static r_string handler_id_name = "_handlerid"sv;
+                            game_state->set_local_variable(message_name, msg.message);
+                            game_state->set_local_variable(sender_name, game_value(static_cast<float>(msg.sender_client_id)));
+                            game_state->set_local_variable(args_name, handler.handler_arguments);
+                            game_state->set_local_variable(handler_id_name, game_value(static_cast<float>(handler.handler_id)));
+                            intercept::client::host::functions.invoke_raw_unary(intercept::client::__sqf::unary__isnil__code_string__ret__bool, handler.handler_function);
+                        } catch (const std::exception& e) {
+                            report_error("KH Network: Handler error for '" + msg.event_name + "' - " + std::string(e.what()));
+                        }
                     }
                 }
             } catch (const std::exception& e) {
@@ -3317,31 +3445,24 @@ public:
                                 game_value result = raw_call_sqf_native(condition);
                                 
                                 if (result.type_enum() == game_data_type::BOOL && static_cast<bool>(result)) {
-                                    std::vector<NetworkMessageHandler> handlers_copy;
-
-                                    {
-                                        std::lock_guard<std::mutex> lock(handlers_mutex_);
-                                        auto it = message_handlers_.find(real_event_name);
-
-                                        if (it != message_handlers_.end()) {
-                                            handlers_copy = it->second;
-                                        }
-                                    }
+                                    HandlerListPtr handlers = cow_handlers_.get_handlers(real_event_name);
                                     
-                                    for (auto& handler : handlers_copy) {
-                                        try {
-                                            auto game_state = (intercept::client::host::functions.get_engine_allocator())->gameState;
-                                            static r_string message_name = "_this"sv;
-                                            static r_string sender_name = "_sender"sv;
-                                            static r_string args_name = "_args"sv;
-                                            static r_string handler_id_name = "_handlerid"sv;
-                                            game_state->set_local_variable(message_name, real_message);
-                                            game_state->set_local_variable(sender_name, game_value(static_cast<float>(msg.sender_client_id)));
-                                            game_state->set_local_variable(args_name, handler.handler_arguments);
-                                            game_state->set_local_variable(handler_id_name, game_value(static_cast<float>(handler.handler_id)));
-                                            intercept::client::host::functions.invoke_raw_unary(intercept::client::__sqf::unary__isnil__code_string__ret__bool, handler.handler_function);
-                                        } catch (const std::exception& e) {
-                                            report_error("KH Network: Handler error for '" + real_event_name + "' - " + std::string(e.what()));
+                                    if (handlers) {
+                                        for (const auto& handler : *handlers) {
+                                            try {
+                                                auto game_state = (intercept::client::host::functions.get_engine_allocator())->gameState;
+                                                static r_string message_name = "_this"sv;
+                                                static r_string sender_name = "_sender"sv;
+                                                static r_string args_name = "_args"sv;
+                                                static r_string handler_id_name = "_handlerid"sv;
+                                                game_state->set_local_variable(message_name, real_message);
+                                                game_state->set_local_variable(sender_name, game_value(static_cast<float>(msg.sender_client_id)));
+                                                game_state->set_local_variable(args_name, handler.handler_arguments);
+                                                game_state->set_local_variable(handler_id_name, game_value(static_cast<float>(handler.handler_id)));
+                                                intercept::client::host::functions.invoke_raw_unary(intercept::client::__sqf::unary__isnil__code_string__ret__bool, handler.handler_function);
+                                            } catch (const std::exception& e) {
+                                                report_error("KH Network: Handler error for '" + msg.event_name + "' - " + std::string(e.what()));
+                                            }
                                         }
                                     }
                                 }
@@ -3350,6 +3471,7 @@ public:
                             report_error("KH Network: Failed to process conditional message - " + std::string(e.what()));
                         }
                     }
+
                     continue;
                 }
 
@@ -3360,31 +3482,24 @@ public:
                     deserialized = deserialize_game_value(msg.payload.data(), offset, msg.payload.size());
                 }
                 
-                std::vector<NetworkMessageHandler> handlers_copy;
-
-                {
-                    std::lock_guard<std::mutex> lock(handlers_mutex_);
-                    auto it = message_handlers_.find(msg.event_name);
-
-                    if (it != message_handlers_.end()) {
-                        handlers_copy = it->second;
-                    }
-                }
+                HandlerListPtr handlers = cow_handlers_.get_handlers(msg.event_name);
                 
-                for (auto& handler : handlers_copy) {
-                    try {
-                        auto game_state = (intercept::client::host::functions.get_engine_allocator())->gameState;
-                        static r_string message_name = "_this"sv;
-                        static r_string sender_name = "_sender"sv;
-                        static r_string args_name = "_args"sv;
-                        static r_string handler_id_name = "_handlerid"sv;
-                        game_state->set_local_variable(message_name, deserialized);
-                        game_state->set_local_variable(sender_name, game_value(static_cast<float>(msg.sender_client_id)));
-                        game_state->set_local_variable(args_name, handler.handler_arguments);
-                        game_state->set_local_variable(handler_id_name, game_value(static_cast<float>(handler.handler_id)));
-                        intercept::client::host::functions.invoke_raw_unary(intercept::client::__sqf::unary__isnil__code_string__ret__bool, handler.handler_function);
-                    } catch (const std::exception& e) {
-                        report_error("KH Network: Handler error for '" + msg.event_name + "' - " + std::string(e.what()));
+                if (handlers) {
+                    for (const auto& handler : *handlers) {
+                        try {
+                            auto game_state = (intercept::client::host::functions.get_engine_allocator())->gameState;
+                            static r_string message_name = "_this"sv;
+                            static r_string sender_name = "_sender"sv;
+                            static r_string args_name = "_args"sv;
+                            static r_string handler_id_name = "_handlerid"sv;
+                            game_state->set_local_variable(message_name, deserialized);
+                            game_state->set_local_variable(sender_name, game_value(static_cast<float>(msg.sender_client_id)));
+                            game_state->set_local_variable(args_name, handler.handler_arguments);
+                            game_state->set_local_variable(handler_id_name, game_value(static_cast<float>(handler.handler_id)));
+                            intercept::client::host::functions.invoke_raw_unary(intercept::client::__sqf::unary__isnil__code_string__ret__bool, handler.handler_function);
+                        } catch (const std::exception& e) {
+                            report_error("KH Network: Handler error for '" + msg.event_name + "' - " + std::string(e.what()));
+                        }
                     }
                 }
             } catch (const std::exception& e) {

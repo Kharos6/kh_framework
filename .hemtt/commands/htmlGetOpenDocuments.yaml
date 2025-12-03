@@ -1,0 +1,12 @@
+name: htmlGetOpenDocuments
+description: TODO.
+syntax:
+- call: !Nular
+  ret:
+    - Boolean
+    - TODO.
+  params:
+argument_loc: Local
+effect_loc: Local
+examples:
+- <sqf>htmlGetOpenDocuments</sqf>

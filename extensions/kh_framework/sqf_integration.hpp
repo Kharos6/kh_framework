@@ -93,7 +93,6 @@ static registered_sqf_function _sqf_html_set_z_order;
 static registered_sqf_function _sqf_html_bring_to_front;
 static registered_sqf_function _sqf_html_send_to_back;
 static registered_sqf_function _sqf_html_reload;
-static registered_sqf_function _sqf_set_network_port;
 static registered_sqf_function _sqf_network_message_send_any_array;
 static registered_sqf_function _sqf_network_message_send_array;
 static registered_sqf_function _sqf_network_remove_jip;
@@ -2081,24 +2080,6 @@ static game_value ui_reload_html_sqf(game_value_parameter args) {
     }
 }
 
-static game_value set_network_port_sqf(game_value_parameter port_value) {
-    try {
-        int port = static_cast<int>(static_cast<float>(port_value));
-        
-        if (port < 1 || port > 65535) {
-            report_error("KH Network: Invalid port number. Must be between 1 and 65535");
-            return game_value(false);
-        }
-        
-        NetworkFramework::instance().set_port(port);
-        sqf::diag_log("KH Network: Port set to " + std::to_string(port));
-        return game_value(true);
-    } catch (const std::exception& e) {
-        report_error("KH Network: Error in setNetworkPort - " + std::string(e.what()));
-        return game_value(false);
-    }
-}
-
 static game_value network_message_send_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
     try {
         auto& arr = right_arg.to_array();
@@ -3229,14 +3210,6 @@ static void initialize_sqf_integration() {
         userFunctionWrapper<ui_reload_html_sqf>,
         game_data_type::STRING,
         game_data_type::STRING
-    );
-    
-    _sqf_set_network_port = intercept::client::host::register_sqf_command(
-        "setNetworkPort",
-        "Set the server network port for KH Framework networking",
-        userFunctionWrapper<set_network_port_sqf>,
-        game_data_type::BOOL,
-        game_data_type::SCALAR
     );
     
     _sqf_network_message_send_any_array = intercept::client::host::register_sqf_command(

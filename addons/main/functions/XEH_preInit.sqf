@@ -1353,7 +1353,7 @@
 		"Networking port. Requires restart."
 	], 
 	"KH Networking", 
-	[1, 65535, 21337, 0],
+	[1024, 65535, 21337, 0],
 	1,
 	{},
 	true
@@ -1508,6 +1508,62 @@
 	], 
 	"KH Networking", 
 	true,
+	1,
+	{},
+	true
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_networkingCoalesceMessages",
+	"CHECKBOX",   
+	[
+		"Coalesce Messages", 
+		"True bundles multiple simultaneous messages together to reduce overhead. Requires restart."
+	], 
+	"KH Networking", 
+	true,
+	1,
+	{},
+	true
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_networkingMaximumCoalesceSize",
+	"EDITBOX",   
+	[
+		"Maximum Coalesce Size", 
+		"Maximum total size in bytes for a coalesced packet before it's flushed and a new one is started. Requires restart."
+	], 
+	"KH Networking", 
+	"65536",
+	1,
+	{},
+	true
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_networkingMaximumCoalescedMessages",
+	"EDITBOX",   
+	[
+		"Maximum Coalesced Messages", 
+		"Maximum number of individual messages that can be bundled into a single coalesced packet. Requires restart."
+	], 
+	"KH Networking", 
+	"128",
+	1,
+	{},
+	true
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_networkingCoalesceDelay",
+	"EDITBOX",   
+	[
+		"Coalesce Delay", 
+		"How long the send thread waits, in microseconds, for additional messages to arrive before sending a partially-filled coalesced packet. Requires restart."
+	], 
+	"KH Networking", 
+	"100",
 	1,
 	{},
 	true

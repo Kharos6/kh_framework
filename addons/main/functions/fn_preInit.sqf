@@ -357,7 +357,7 @@ addMissionEventHandler [
 	[],
 	{
 		KH_var_networkingSettings = [
-			parseNumber KH_var_networkingPort,
+			KH_var_networkingPort,
 			parseNumber KH_var_networkingMaximumMessageSize,
 			parseNumber KH_var_networkingReceiveBufferSize,
 			parseNumber KH_var_networkingSendBufferSize,
@@ -368,7 +368,11 @@ addMissionEventHandler [
 			parseNumber KH_var_networkingKeepAliveTime,
 			parseNumber KH_var_networkingKeepAliveInterval,
 			parseNumber KH_var_networkingSendBatchSize,
-			KH_var_networkingCompression
+			KH_var_networkingCompression,
+			KH_var_networkingCoalesceMessages,
+			parseNumber KH_var_networkingMaximumCoalesceSize,
+			parseNumber KH_var_networkingMaximumCoalescedMessages,
+			parseNumber KH_var_networkingCoalesceDelay
 		];
 
 		networkInitialize;
@@ -388,7 +392,11 @@ addMissionEventHandler [
 			!(isNil "KH_var_networkingKeepAliveTime") &&
 			!(isNil "KH_var_networkingKeepAliveInterval") &&
 			!(isNil "KH_var_networkingSendBatchSize") &&
-			!(isNil "KH_var_networkingCompression")
+			!(isNil "KH_var_networkingCompression") &&
+			!(isNil "KH_var_networkingCoalesceMessages") &&
+			!(isNil "KH_var_networkingMaximumCoalesceSize") &&
+			!(isNil "KH_var_networkingMaximumCoalescedMessages") &&
+			!(isNil "KH_var_networkingCoalesceDelay")
 		);
 	},
 	false

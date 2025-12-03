@@ -1563,7 +1563,7 @@
 		"How long the send thread waits, in microseconds, for additional messages to arrive before sending a partially-filled coalesced packet. Requires restart."
 	], 
 	"KH Networking", 
-	"100",
+	"3000",
 	1,
 	{},
 	true

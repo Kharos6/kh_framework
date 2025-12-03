@@ -8,7 +8,7 @@ constexpr uint32_t NET_MSG_VERSION = 1;
 constexpr uint32_t NET_COALESCED_MAGIC = 0x434E484B; // "KHNC" - KH Network Coalesced
 constexpr size_t NET_DEFAULT_COALESCE_MAX_SIZE = 65536;      // 64KB max coalesced packet
 constexpr size_t NET_DEFAULT_COALESCE_MAX_MESSAGES = 128;    // Max messages per coalesced packet
-constexpr int NET_DEFAULT_COALESCE_DELAY_US = 100;           // Microseconds to wait for more messages
+constexpr int NET_DEFAULT_COALESCE_DELAY_US = 3000;           // Microseconds to wait for more messages
 constexpr size_t NET_COMPRESSION_THRESHOLD = 256;   // Only compress payloads > 256 bytes
 constexpr uint8_t NET_FLAG_NONE = 0x00;
 constexpr uint8_t NET_FLAG_COMPRESSED = 0x01;
@@ -1092,7 +1092,14 @@ private:
                 }
                 
                 case game_data_type::DISPLAY: {
-                    int idd = std::stoi(serialized);
+                    int idd;
+                    
+                    try {
+                        idd = std::stoi(serialized);
+                    } catch (...) {
+                        return sqf::display_null();
+                    }
+                    
                     return sqf::find_display(idd);
                 }
                 

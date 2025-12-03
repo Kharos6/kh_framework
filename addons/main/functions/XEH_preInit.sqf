@@ -1500,6 +1500,20 @@
 ] call CBA_fnc_addSetting;
 
 [
+	"KH_var_networkingCompression",
+	"CHECKBOX",   
+	[
+		"Compression", 
+		"True enables compression on network packets. Requires restart."
+	], 
+	"KH Networking", 
+	true,
+	1,
+	{},
+	true
+] call CBA_fnc_addSetting;
+
+[
 	"KH Framework", 
 	"KH_speechRecognitionToggle", 
 	"Speech Recognition (TOGGLE)",

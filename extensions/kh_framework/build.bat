@@ -76,13 +76,16 @@ mkdir output_x64
 REM Build the DLL
 echo Compiling...
 cl /LD /arch:AVX /O2 /Ob3 /GL /MT /std:c++20 /EHsc /TP /Gy /Gw /GS- ^
+    /Isol ^
     /Iluajit\include ^
     /Iintercept\include ^
     /Isherpa\include ^
     /Illama\include ^
     /Iultralight\include ^
+    /Ilz4\include ^
     /I. ^
     main.cpp ^
+    lz4\include\lz4.c ^
     /Fe:output_x64\kh_framework_x64.dll ^
     /Fo:output_x64\ ^
     /Fd:output_x64\kh_framework_x64.pdb ^

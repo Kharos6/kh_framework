@@ -357,17 +357,18 @@ addMissionEventHandler [
 	[],
 	{
 		KH_var_networkingSettings = [
-			KH_var_networkingPort,
-			KH_var_networkingMaximumMessageSize,
-			KH_var_networkingReceiveBufferSize,
-			KH_var_networkingSendBufferSize,
-			KH_var_networkingConnectionTimeout,
-			KH_var_networkingSendTimeout,
-			KH_var_networkingReceiveTimeout,
-			KH_var_networkingClientStallTimeout,
-			KH_var_networkingKeepAliveTime,
-			KH_var_networkingKeepAliveInterval,
-			KH_var_networkingSendBatchSize
+			parseNumber KH_var_networkingPort,
+			parseNumber KH_var_networkingMaximumMessageSize,
+			parseNumber KH_var_networkingReceiveBufferSize,
+			parseNumber KH_var_networkingSendBufferSize,
+			parseNumber KH_var_networkingConnectionTimeout,
+			parseNumber KH_var_networkingSendTimeout,
+			parseNumber KH_var_networkingReceiveTimeout,
+			parseNumber KH_var_networkingClientStallTimeout,
+			parseNumber KH_var_networkingKeepAliveTime,
+			parseNumber KH_var_networkingKeepAliveInterval,
+			parseNumber KH_var_networkingSendBatchSize,
+			KH_var_networkingCompression
 		];
 
 		networkInitialize;
@@ -386,7 +387,8 @@ addMissionEventHandler [
 			!(isNil "KH_var_networkingClientStallTimeout") &&
 			!(isNil "KH_var_networkingKeepAliveTime") &&
 			!(isNil "KH_var_networkingKeepAliveInterval") &&
-			!(isNil "KH_var_networkingSendBatchSize")
+			!(isNil "KH_var_networkingSendBatchSize") &&
+			!(isNil "KH_var_networkingCompression")
 		);
 	},
 	false

@@ -3,8 +3,11 @@
 using namespace intercept;
 using namespace intercept::types;
 
-constexpr uint32_t NET_MSG_MAGIC = 0x4E48484B; // "KHHN" - KH Network Header
+constexpr uint32_t NET_MSG_MAGIC = 0x4E48484B; // "KHHN"
 constexpr uint32_t NET_MSG_VERSION = 1;
+constexpr size_t NET_COMPRESSION_THRESHOLD = 256;   // Only compress payloads > 256 bytes
+constexpr uint8_t NET_FLAG_NONE = 0x00;
+constexpr uint8_t NET_FLAG_COMPRESSED = 0x01;
 constexpr int NET_DEFAULT_PORT = 21337;
 constexpr size_t NET_DEFAULT_MAX_MESSAGE_SIZE = 16 * 1024 * 1024; // 16MB
 constexpr size_t NET_DEFAULT_RECV_BUFFER_SIZE = 262144; // 256KB
@@ -186,6 +189,7 @@ private:
     int config_keepalive_time_ms_{NET_DEFAULT_KEEPALIVE_TIME_MS};
     int config_keepalive_interval_ms_{NET_DEFAULT_KEEPALIVE_INTERVAL_MS};
     int config_send_batch_size_{NET_DEFAULT_SEND_BATCH_SIZE};
+    bool config_compression_enabled_{true};
 
     // Incoming message queue
     std::deque<NetworkMessage> incoming_queue_;
@@ -277,6 +281,77 @@ private:
         bool value = data[offset] != 0;
         offset += 1;
         return value;
+    }
+
+    static std::vector<uint8_t> compress_payload(const std::vector<uint8_t>& input) {
+        if (input.empty()) {
+            return {};
+        }
+        
+        int max_compressed_size = LZ4_compressBound(static_cast<int>(input.size()));
+
+        if (max_compressed_size <= 0) {
+            return {};
+        }
+
+        std::vector<uint8_t> compressed(4 + static_cast<size_t>(max_compressed_size));
+        uint32_t original_size = static_cast<uint32_t>(input.size());
+        compressed[0] = static_cast<uint8_t>(original_size & 0xFF);
+        compressed[1] = static_cast<uint8_t>((original_size >> 8) & 0xFF);
+        compressed[2] = static_cast<uint8_t>((original_size >> 16) & 0xFF);
+        compressed[3] = static_cast<uint8_t>((original_size >> 24) & 0xFF);
+        
+        int compressed_size = LZ4_compress_default(
+            reinterpret_cast<const char*>(input.data()),
+            reinterpret_cast<char*>(compressed.data() + 4),
+            static_cast<int>(input.size()),
+            max_compressed_size
+        );
+        
+        if (compressed_size <= 0) {
+            return {};
+        }
+        
+        // Only use compression if it actually saves space
+        size_t total_compressed_size = 4 + static_cast<size_t>(compressed_size);
+        
+        if (total_compressed_size >= input.size()) {
+            return {};
+        }
+        
+        compressed.resize(total_compressed_size);
+        return compressed;
+    }
+
+    std::vector<uint8_t> decompress_payload(const uint8_t* data, size_t data_size) {
+        if (data_size < 4) {
+            return {};
+        }
+        
+        // Read original size (little-endian)
+        uint32_t original_size = static_cast<uint32_t>(data[0]) |
+                                (static_cast<uint32_t>(data[1]) << 8) |
+                                (static_cast<uint32_t>(data[2]) << 16) |
+                                (static_cast<uint32_t>(data[3]) << 24);
+        
+        if (original_size > config_max_message_size_) {
+            return {};
+        }
+        
+        std::vector<uint8_t> decompressed(original_size);
+        
+        int decompressed_size = LZ4_decompress_safe(
+            reinterpret_cast<const char*>(data + 4),
+            reinterpret_cast<char*>(decompressed.data()),
+            static_cast<int>(data_size - 4),
+            static_cast<int>(original_size)
+        );
+        
+        if (decompressed_size < 0 || static_cast<uint32_t>(decompressed_size) != original_size) {
+            return {};
+        }
+        
+        return decompressed;
     }
     
     static void serialize_game_value(std::vector<uint8_t>& buffer, const game_value& value) {
@@ -1464,24 +1539,40 @@ private:
         }
     }
 
-    // Message format: [MAGIC(4)][VERSION(4)][TARGET_CLIENT(4)][SENDER_CLIENT(4)][EVENT_LEN(4)][EVENT_NAME][PAYLOAD_LEN(4)][PAYLOAD]
+    // [MAGIC(4)][VERSION(4)][FLAGS(1)][TARGET(4)][SENDER(4)][EVENT_LEN(4)][EVENT][PAYLOAD_LEN(4)][PAYLOAD]
+    // If compressed: PAYLOAD = [ORIGINAL_SIZE(4)][COMPRESSED_DATA]
 
-    static void create_network_packet_into(std::vector<uint8_t>& packet, int target_client, int sender_client,
-                                            const std::string& event_name, const std::vector<uint8_t>& payload) {
-        size_t required_size = 24 + event_name.size() + payload.size();
+    void create_network_packet_into(std::vector<uint8_t>& packet, int target_client, int sender_client,
+                                    const std::string& event_name, const std::vector<uint8_t>& payload) {
         packet.clear();
-        packet.reserve(required_size);
+        bool should_compress = config_compression_enabled_ && payload.size() > NET_COMPRESSION_THRESHOLD;
+        std::vector<uint8_t> compressed_payload;
+        const std::vector<uint8_t>* final_payload = &payload;
+        uint8_t flags = NET_FLAG_NONE;
         
+        if (should_compress) {
+            compressed_payload = compress_payload(payload);
+
+            if (!compressed_payload.empty()) {
+                final_payload = &compressed_payload;
+                flags |= NET_FLAG_COMPRESSED;
+            }
+        }
+        
+        // Header size: magic(4) + version(4) + flags(1) + target(4) + sender(4) + event_len(4) + event + payload_len(4) + payload
+        size_t required_size = 25 + event_name.size() + final_payload->size();
+        packet.reserve(required_size);
         write_uint32(packet, NET_MSG_MAGIC);
         write_uint32(packet, NET_MSG_VERSION);
+        packet.push_back(flags);
         write_uint32(packet, static_cast<uint32_t>(target_client));
         write_uint32(packet, static_cast<uint32_t>(sender_client));
         write_string(packet, event_name);
-        write_uint32(packet, static_cast<uint32_t>(payload.size()));
-        packet.insert(packet.end(), payload.begin(), payload.end());
+        write_uint32(packet, static_cast<uint32_t>(final_payload->size()));
+        packet.insert(packet.end(), final_payload->begin(), final_payload->end());
     }
 
-    static std::vector<uint8_t> create_network_packet(int target_client, int sender_client,
+    std::vector<uint8_t> create_network_packet(int target_client, int sender_client,
                                                     const std::string& event_name,
                                                     const std::vector<uint8_t>& payload) {
         std::vector<uint8_t> packet;
@@ -1490,14 +1581,16 @@ private:
     }
         
     static bool parse_network_packet(const std::vector<uint8_t>& data, int& target_client, 
-                                     int& sender_client, std::string& event_name, 
-                                     std::vector<uint8_t>& payload) {
-        if (data.size() < 24) return false;
+                                    int& sender_client, std::string& event_name, 
+                                    std::vector<uint8_t>& payload) {
+        if (data.size() < 12) return false;
         size_t offset = 0;
         uint32_t magic = read_uint32(data.data(), offset, data.size());
         if (magic != NET_MSG_MAGIC) return false;
         uint32_t version = read_uint32(data.data(), offset, data.size());
-        if (version != NET_MSG_VERSION) return false;
+        if (data.size() < 25) return false;
+        if (offset >= data.size()) return false;
+        uint8_t flags = data[offset++];
         target_client = static_cast<int>(read_uint32(data.data(), offset, data.size()));
         sender_client = static_cast<int>(read_uint32(data.data(), offset, data.size()));
         
@@ -1505,11 +1598,24 @@ private:
             event_name = read_string(data.data(), offset, data.size());
             uint32_t payload_len = read_uint32(data.data(), offset, data.size());
             if (payload_len > data.size() - offset) return false;
-            payload.assign(data.begin() + offset, data.begin() + offset + payload_len);
+            
+            if (flags & NET_FLAG_COMPRESSED) {
+                std::vector<uint8_t> decompressed = decompress_payload(data.data() + offset, payload_len);
+
+                if (decompressed.empty() && payload_len > 4) {
+                    return false;  // Decompression failed
+                }
+
+                payload = std::move(decompressed);
+            } else {
+                payload.assign(data.begin() + offset, data.begin() + offset + payload_len);
+            }
             return true;
         } catch (...) {
             return false;
         }
+
+        return false;
     }
     
     bool set_socket_options(SOCKET sock) {
@@ -2914,6 +3020,14 @@ public:
         config_keepalive_interval_ms_ = get_int(9, NET_DEFAULT_KEEPALIVE_INTERVAL_MS);
         config_send_batch_size_ = std::max(1, get_int(10, NET_DEFAULT_SEND_BATCH_SIZE));
         
+        if (arr.size() > 11) {
+            if (arr[11].type_enum() == game_data_type::BOOL) {
+                config_compression_enabled_ = static_cast<bool>(arr[11]);
+            } else if (arr[11].type_enum() == game_data_type::SCALAR) {
+                config_compression_enabled_ = static_cast<float>(arr[11]) != 0.0f;
+            }
+        }
+                
         // Clamp values to reasonable ranges
         if (config_max_message_size_ < 1024) config_max_message_size_ = 1024;
         if (config_max_message_size_ > 64 * 1024 * 1024) config_max_message_size_ = 64 * 1024 * 1024;

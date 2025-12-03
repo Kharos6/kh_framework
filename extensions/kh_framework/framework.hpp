@@ -1,6 +1,7 @@
 #pragma once
 
 #define NOMINMAX
+#define FD_SETSIZE 256
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -57,6 +58,7 @@
 #include "llama/include/common.h"
 #include "ultralight/include/Ultralight/Ultralight.h"
 #include "minhook/include/MinHook.h"
+#include "lz4/include/lz4.h"
 
 using namespace intercept;
 using namespace intercept::types;

@@ -1,6 +1,55 @@
 isNil {
 	KH_var_missionLoaded = true;
 
+	[
+		[],
+		{
+			KH_var_networkingSettings = [
+				KH_var_networkingPort,
+				parseNumber KH_var_networkingMaximumMessageSize,
+				parseNumber KH_var_networkingReceiveBufferSize,
+				parseNumber KH_var_networkingSendBufferSize,
+				parseNumber KH_var_networkingConnectionTimeout,
+				parseNumber KH_var_networkingSendTimeout,
+				parseNumber KH_var_networkingReceiveTimeout,
+				parseNumber KH_var_networkingClientStallTimeout,
+				parseNumber KH_var_networkingKeepAliveTime,
+				parseNumber KH_var_networkingKeepAliveInterval,
+				parseNumber KH_var_networkingSendBatchSize,
+				KH_var_networkingCompression,
+				KH_var_networkingCoalesceMessages,
+				parseNumber KH_var_networkingMaximumCoalesceSize,
+				parseNumber KH_var_networkingMaximumCoalescedMessages,
+				parseNumber KH_var_networkingCoalesceDelay
+			];
+
+			networkInitialize;
+		},
+		true,
+		{
+			(
+				!(isNil "KH_var_serverAddress") &&
+				!(isNil "KH_var_networkingPort") &&
+				!(isNil "KH_var_networkingMaximumMessageSize") &&
+				!(isNil "KH_var_networkingReceiveBufferSize") &&
+				!(isNil "KH_var_networkingSendBufferSize") &&
+				!(isNil "KH_var_networkingConnectionTimeout") &&
+				!(isNil "KH_var_networkingSendTimeout") &&
+				!(isNil "KH_var_networkingReceiveTimeout") &&
+				!(isNil "KH_var_networkingClientStallTimeout") &&
+				!(isNil "KH_var_networkingKeepAliveTime") &&
+				!(isNil "KH_var_networkingKeepAliveInterval") &&
+				!(isNil "KH_var_networkingSendBatchSize") &&
+				!(isNil "KH_var_networkingCompression") &&
+				!(isNil "KH_var_networkingCoalesceMessages") &&
+				!(isNil "KH_var_networkingMaximumCoalesceSize") &&
+				!(isNil "KH_var_networkingMaximumCoalescedMessages") &&
+				!(isNil "KH_var_networkingCoalesceDelay")
+			);
+		},
+		false
+	] call KH_fnc_execute;
+
 	if isServer then {
 		switch KH_var_incapacitationAvailability do {
 			case 0: {

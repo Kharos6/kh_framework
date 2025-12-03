@@ -5,6 +5,10 @@ using namespace intercept::types;
 
 constexpr uint32_t NET_MSG_MAGIC = 0x4E48484B; // "KHHN"
 constexpr uint32_t NET_MSG_VERSION = 1;
+constexpr uint32_t NET_COALESCED_MAGIC = 0x434E484B; // "KHNC" - KH Network Coalesced
+constexpr size_t NET_DEFAULT_COALESCE_MAX_SIZE = 65536;      // 64KB max coalesced packet
+constexpr size_t NET_DEFAULT_COALESCE_MAX_MESSAGES = 128;    // Max messages per coalesced packet
+constexpr int NET_DEFAULT_COALESCE_DELAY_US = 100;           // Microseconds to wait for more messages
 constexpr size_t NET_COMPRESSION_THRESHOLD = 256;   // Only compress payloads > 256 bytes
 constexpr uint8_t NET_FLAG_NONE = 0x00;
 constexpr uint8_t NET_FLAG_COMPRESSED = 0x01;
@@ -190,6 +194,10 @@ private:
     int config_keepalive_interval_ms_{NET_DEFAULT_KEEPALIVE_INTERVAL_MS};
     int config_send_batch_size_{NET_DEFAULT_SEND_BATCH_SIZE};
     bool config_compression_enabled_{true};
+    bool config_coalesce_enabled_{true};
+    size_t config_coalesce_max_size_{NET_DEFAULT_COALESCE_MAX_SIZE};
+    size_t config_coalesce_max_messages_{NET_DEFAULT_COALESCE_MAX_MESSAGES};
+    int config_coalesce_delay_us_{NET_DEFAULT_COALESCE_DELAY_US};
 
     // Incoming message queue
     std::deque<NetworkMessage> incoming_queue_;
@@ -354,6 +362,245 @@ private:
         return decompressed;
     }
     
+    // Coalesced packet format:
+    // [COALESCED_MAGIC(4)][VERSION(4)][MESSAGE_COUNT(2)]
+    // For each message:
+    //   [FLAGS(1)][TARGET(4)][SENDER(4)][EVENT_LEN(2)][EVENT][PAYLOAD_LEN(4)][PAYLOAD]
+    // If FLAGS has NET_FLAG_COMPRESSED, PAYLOAD = [ORIGINAL_SIZE(4)][COMPRESSED_DATA]
+    
+    static void write_uint16(std::vector<uint8_t>& buffer, uint16_t value) {
+        buffer.push_back(static_cast<uint8_t>(value & 0xFF));
+        buffer.push_back(static_cast<uint8_t>((value >> 8) & 0xFF));
+    }
+    
+    static uint16_t read_uint16(const uint8_t* data, size_t& offset, size_t max_size) {
+        if (offset + 2 > max_size) {
+            throw std::runtime_error("Buffer underrun reading uint16");
+        }
+        
+        uint16_t value = static_cast<uint16_t>(data[offset]) |
+                        (static_cast<uint16_t>(data[offset + 1]) << 8);
+
+        offset += 2;
+        return value;
+    }
+
+    // Creates a coalesced packet from multiple OutgoingMessages
+    // Returns empty vector if coalescing isn't beneficial (single small message)
+    void create_coalesced_packet(
+        std::vector<uint8_t>& output,
+        const std::vector<OutgoingMessage>& messages,
+        std::vector<std::vector<uint8_t>>& temp_compressed_buffers
+    ) {
+        if (messages.empty()) {
+            output.clear();
+            return;
+        }
+        
+        // For single message, use regular packet format (no coalescing overhead)
+        if (messages.size() == 1) {
+            create_network_packet_into(output, messages[0].target_client, messages[0].sender_client,
+                                       messages[0].event_name, *messages[0].payload);
+
+            return;
+        }
+        
+        // Estimate total size for reservation
+        size_t estimated_size = 10; // Header: magic(4) + version(4) + count(2)
+
+        for (const auto& msg : messages) {
+            // flags(1) + target(4) + sender(4) + event_len(2) + event + payload_len(4) + payload
+            estimated_size += 15 + msg.event_name.size() + msg.payload->size();
+        }
+        
+        output.clear();
+        output.reserve(estimated_size);
+        write_uint32(output, NET_COALESCED_MAGIC);
+        write_uint32(output, NET_MSG_VERSION);
+        write_uint16(output, static_cast<uint16_t>(messages.size()));
+        temp_compressed_buffers.resize(messages.size());
+        
+        // Write each message
+        for (size_t i = 0; i < messages.size(); ++i) {
+            const auto& msg = messages[i];
+            const std::vector<uint8_t>& payload = *msg.payload;
+            bool should_compress = config_compression_enabled_ && payload.size() > NET_COMPRESSION_THRESHOLD;
+            const std::vector<uint8_t>* final_payload = &payload;
+            uint8_t flags = NET_FLAG_NONE;
+            
+            if (should_compress) {
+                temp_compressed_buffers[i] = compress_payload(payload);
+
+                if (!temp_compressed_buffers[i].empty()) {
+                    final_payload = &temp_compressed_buffers[i];
+                    flags |= NET_FLAG_COMPRESSED;
+                }
+            }
+
+            output.push_back(flags);
+            write_uint32(output, static_cast<uint32_t>(msg.target_client));
+            write_uint32(output, static_cast<uint32_t>(msg.sender_client));
+            write_uint16(output, static_cast<uint16_t>(msg.event_name.size()));
+            output.insert(output.end(), msg.event_name.begin(), msg.event_name.end());
+            write_uint32(output, static_cast<uint32_t>(final_payload->size()));
+            output.insert(output.end(), final_payload->begin(), final_payload->end());
+        }
+    }
+    
+    // Parses either a coalesced packet or a single packet
+    bool parse_coalesced_or_single_packet(
+        const std::vector<uint8_t>& data,
+        std::vector<NetworkMessage>& out_messages,
+        std::vector<OutgoingMessage>& out_forward_messages  // For server forwarding
+    ) {
+        if (data.size() < 4) return false;
+        size_t offset = 0;
+        uint32_t magic = read_uint32(data.data(), offset, data.size());
+        
+        if (magic == NET_COALESCED_MAGIC) {
+            // Coalesced packet
+            if (data.size() < 10) return false;
+            uint32_t version = read_uint32(data.data(), offset, data.size());
+            if (version > NET_MSG_VERSION) return false;
+            uint16_t message_count = read_uint16(data.data(), offset, data.size());
+            if (message_count == 0 || message_count > config_coalesce_max_messages_) return false;
+            out_messages.reserve(out_messages.size() + message_count);
+            out_forward_messages.reserve(out_forward_messages.size() + message_count);
+            
+            for (uint16_t i = 0; i < message_count; ++i) {
+                if (offset >= data.size()) return false;
+                uint8_t flags = data[offset++];
+                if (offset + 8 > data.size()) return false;
+                int target_client = static_cast<int>(read_uint32(data.data(), offset, data.size()));
+                int sender_client = static_cast<int>(read_uint32(data.data(), offset, data.size()));
+                if (offset + 2 > data.size()) return false;
+                uint16_t event_len = read_uint16(data.data(), offset, data.size());
+                if (offset + event_len > data.size()) return false;
+                std::string event_name(reinterpret_cast<const char*>(data.data() + offset), event_len);
+                offset += event_len;
+                if (offset + 4 > data.size()) return false;
+                uint32_t payload_len = read_uint32(data.data(), offset, data.size());
+                if (offset + payload_len > data.size()) return false;
+                std::vector<uint8_t> payload;
+
+                if (flags & NET_FLAG_COMPRESSED) {
+                    payload = decompress_payload(data.data() + offset, payload_len);
+
+                    if (payload.empty() && payload_len > 4) {
+                        offset += payload_len;
+                        continue; // Skip this message on decompression failure
+                    }
+                } else {
+                    payload.assign(data.begin() + offset, data.begin() + offset + payload_len);
+                }
+
+                offset += payload_len;
+
+                if (target_client == 2) {
+                    out_messages.emplace_back(event_name, std::move(payload), sender_client);
+                } else {
+                    out_forward_messages.emplace_back(
+                        target_client, sender_client, std::string(event_name),
+                        std::make_shared<std::vector<uint8_t>>(std::move(payload))
+                    );
+                }
+            }
+            
+            return true;
+        } else if (magic == NET_MSG_MAGIC) {
+            // Single packet - use existing parser
+            offset = 0;
+            int target_client, sender_client;
+            std::string event_name;
+            std::vector<uint8_t> payload;
+            
+            if (!parse_network_packet(data, target_client, sender_client, event_name, payload)) {
+                return false;
+            }
+            
+            if (target_client == 2) {
+                out_messages.emplace_back(event_name, std::move(payload), sender_client);
+            } else {
+                out_forward_messages.emplace_back(
+                    target_client, sender_client, std::move(event_name),
+                    std::make_shared<std::vector<uint8_t>>(std::move(payload))
+                );
+            }
+            
+            return true;
+        }
+        
+        return false;
+    }
+    
+    // Client-side: parse incoming coalesced packet from server
+    bool parse_incoming_coalesced_packet(
+        const std::vector<uint8_t>& data,
+        std::vector<NetworkMessage>& out_messages
+    ) {
+        if (data.size() < 4) return false;
+        size_t offset = 0;
+        uint32_t magic = read_uint32(data.data(), offset, data.size());
+        
+        if (magic == NET_COALESCED_MAGIC) {
+            if (data.size() < 10) return false;
+            uint32_t version = read_uint32(data.data(), offset, data.size());
+            if (version > NET_MSG_VERSION) return false;
+            uint16_t message_count = read_uint16(data.data(), offset, data.size());
+            if (message_count == 0 || message_count > config_coalesce_max_messages_) return false;
+            out_messages.reserve(out_messages.size() + message_count);
+            
+            for (uint16_t i = 0; i < message_count; ++i) {
+                if (offset >= data.size()) return false;
+                uint8_t flags = data[offset++];
+                if (offset + 8 > data.size()) return false;
+                int target_client = static_cast<int>(read_uint32(data.data(), offset, data.size()));
+                int sender_client = static_cast<int>(read_uint32(data.data(), offset, data.size()));
+                (void)target_client; // Client doesn't need this, it's for them
+                if (offset + 2 > data.size()) return false;
+                uint16_t event_len = read_uint16(data.data(), offset, data.size());
+                if (offset + event_len > data.size()) return false;
+                std::string event_name(reinterpret_cast<const char*>(data.data() + offset), event_len);
+                offset += event_len;
+                if (offset + 4 > data.size()) return false;
+                uint32_t payload_len = read_uint32(data.data(), offset, data.size());
+                if (offset + payload_len > data.size()) return false;
+                std::vector<uint8_t> payload;
+                
+                if (flags & NET_FLAG_COMPRESSED) {
+                    payload = decompress_payload(data.data() + offset, payload_len);
+
+                    if (payload.empty() && payload_len > 4) {
+                        offset += payload_len;
+                        continue;
+                    }
+                } else {
+                    payload.assign(data.begin() + offset, data.begin() + offset + payload_len);
+                }
+
+                offset += payload_len;
+                out_messages.emplace_back(event_name, std::move(payload), sender_client);
+            }
+            
+            return true;
+            
+        } else if (magic == NET_MSG_MAGIC) {
+            offset = 0;
+            int target_client, sender_client;
+            std::string event_name;
+            std::vector<uint8_t> payload;
+            
+            if (!parse_network_packet(data, target_client, sender_client, event_name, payload)) {
+                return false;
+            }
+            
+            out_messages.emplace_back(event_name, std::move(payload), sender_client);
+            return true;
+        }
+        
+        return false;
+    }
+
     static void serialize_game_value(std::vector<uint8_t>& buffer, const game_value& value) {
         auto type = value.type_enum();
         bool needs_special_handling = false;
@@ -1580,7 +1827,7 @@ private:
         return packet;
     }
         
-    static bool parse_network_packet(const std::vector<uint8_t>& data, int& target_client, 
+    bool parse_network_packet(const std::vector<uint8_t>& data, int& target_client, 
                                     int& sender_client, std::string& event_name, 
                                     std::vector<uint8_t>& payload) {
         if (data.size() < 12) return false;
@@ -1614,8 +1861,6 @@ private:
         } catch (...) {
             return false;
         }
-
-        return false;
     }
     
     bool set_socket_options(SOCKET sock) {
@@ -1862,6 +2107,7 @@ private:
             // Check for incoming data from clients
             listen_clients_to_remove_.clear();
             listen_messages_to_queue_.clear();
+            std::vector<OutgoingMessage> forward_messages;
             
             for (size_t i = 0; i < clients_in_fdset && i < listen_active_clients_.size(); ++i) {
                 auto& [client_id, client_sock] = listen_active_clients_[i];
@@ -1870,20 +2116,19 @@ private:
                     std::vector<uint8_t> packet;
 
                     if (recv_all(client_sock, packet)) {
-                        int target_client, sender_client;
-                        std::string event_name;
-                        std::vector<uint8_t> payload;
+                        std::vector<NetworkMessage> local_messages;
+                        std::vector<OutgoingMessage> fwd_messages;
                         
-                        if (parse_network_packet(packet, target_client, sender_client, event_name, payload)) {
-                            if (target_client == 2) {
-                                listen_messages_to_queue_.emplace_back(event_name, std::move(payload), sender_client);
-                            } else {
-                                {
-                                    std::lock_guard<std::mutex> out_lock(outgoing_mutex_);
-                                    outgoing_queue_.emplace_back(target_client, sender_client, std::move(event_name), std::make_shared<std::vector<uint8_t>>(std::move(payload)));
-                                }
+                        // Handle both coalesced and single packets
+                        if (parse_coalesced_or_single_packet(packet, local_messages, fwd_messages)) {
+                            for (auto& msg : local_messages) {
+                                msg.sender_client_id = client_id;
+                                listen_messages_to_queue_.push_back(std::move(msg));
+                            }
 
-                                outgoing_cv_.notify_one();
+                            for (auto& msg : fwd_messages) {
+                                msg.sender_client = client_id;
+                                forward_messages.push_back(std::move(msg));
                             }
                         }
                     } else {
@@ -1898,6 +2143,16 @@ private:
                 for (auto& msg : listen_messages_to_queue_) {
                     incoming_queue_.push_back(std::move(msg));
                 }
+            }
+            
+            if (!forward_messages.empty()) {
+                std::lock_guard<std::mutex> out_lock(outgoing_mutex_);
+
+                for (auto& msg : forward_messages) {
+                    outgoing_queue_.push_back(std::move(msg));
+                }
+
+                outgoing_cv_.notify_one();
             }
             
             // Remove disconnected clients
@@ -2014,6 +2269,9 @@ private:
     }
     
     void receive_thread_func() {
+        std::vector<NetworkMessage> parsed_messages;
+        parsed_messages.reserve(config_coalesce_max_messages_);
+        
         while (running_.load()) {
             if (is_server_.load()) {
                 // Server mode - handled by listen thread
@@ -2039,18 +2297,22 @@ private:
             FD_SET(sock, &read_fds);
             struct timeval tv;
             tv.tv_sec = 0;
-            tv.tv_usec = 1000; // 1ms timeout for minimal latency
+            tv.tv_usec = 1000;
             
             if (select(0, &read_fds, nullptr, nullptr, &tv) > 0) {
                 std::vector<uint8_t> packet;
+
                 if (recv_all(sock, packet)) {
-                    int target_client, sender_client;
-                    std::string event_name;
-                    std::vector<uint8_t> payload;
+                    parsed_messages.clear();
                     
-                    if (parse_network_packet(packet, target_client, sender_client, event_name, payload)) {
-                        std::lock_guard<std::mutex> lock(incoming_mutex_);
-                        incoming_queue_.emplace_back(event_name, std::move(payload), sender_client);
+                    if (parse_incoming_coalesced_packet(packet, parsed_messages)) {
+                        if (!parsed_messages.empty()) {
+                            std::lock_guard<std::mutex> lock(incoming_mutex_);
+                            
+                            for (auto& msg : parsed_messages) {
+                                incoming_queue_.push_back(std::move(msg));
+                            }
+                        }
                     }
                 } else {
                     // Connection lost
@@ -2071,19 +2333,33 @@ private:
         batch.reserve(config_send_batch_size_);
         std::vector<uint8_t> packet_buffer;
         packet_buffer.reserve(config_send_buffer_size_);
-        std::vector<int> clients_to_disconnect;
+        std::unordered_set<int> clients_to_disconnect;
+        std::vector<OutgoingMessage> client_batch;
+        client_batch.reserve(config_coalesce_max_messages_);
+        std::vector<std::vector<uint8_t>> temp_compressed_buffers;
+        temp_compressed_buffers.reserve(config_coalesce_max_messages_);
         
         while (running_.load()) {
             {
                 std::unique_lock<std::mutex> lock(outgoing_mutex_);
-                
-                outgoing_cv_.wait_for(lock, std::chrono::milliseconds(1), [this]() {
-                    return !outgoing_queue_.empty() || !running_.load();
-                });
+
+                if (config_coalesce_enabled_ && config_coalesce_delay_us_ > 0) {
+                    outgoing_cv_.wait_for(lock, std::chrono::microseconds(config_coalesce_delay_us_), [this]() {
+                        return !outgoing_queue_.empty() || !running_.load();
+                    });
+                } else {
+                    outgoing_cv_.wait_for(lock, std::chrono::milliseconds(1), [this]() {
+                        return !outgoing_queue_.empty() || !running_.load();
+                    });
+                }
                 
                 if (!running_.load()) break;
+
+                size_t max_grab = config_coalesce_enabled_ ? 
+                    std::max(static_cast<size_t>(config_send_batch_size_), config_coalesce_max_messages_ * 2) :
+                    static_cast<size_t>(config_send_batch_size_);
                 
-                while (!outgoing_queue_.empty() && batch.size() < static_cast<size_t>(config_send_batch_size_)) {
+                while (!outgoing_queue_.empty() && batch.size() < max_grab) {
                     batch.push_back(std::move(outgoing_queue_.front()));
                     outgoing_queue_.pop_front();
                 }
@@ -2092,71 +2368,66 @@ private:
             if (is_server_.load()) {
                 clients_to_disconnect.clear();
                 
+                // Group messages by target client for coalescing
+                std::unordered_map<int, std::vector<OutgoingMessage>> per_client_batch;
+                
                 {
                     std::lock_guard<std::mutex> conn_lock(connections_mutex_);
                     
-                    // Add new messages to per-client queues
                     for (auto& msg : batch) {
                         if (client_connections_.find(msg.target_client) != client_connections_.end()) {
-                            per_client_queues_[msg.target_client].push_back(std::move(msg));
+                            per_client_batch[msg.target_client].push_back(std::move(msg));
                         }
                     }
-                    batch.clear();
-                }
-                
-                // Process each client independently - get socket, check, send, then move to next
-                // This way a slow client only blocks itself, not others
-                std::vector<int> client_ids;
-                
-                {
-                    std::lock_guard<std::mutex> conn_lock(connections_mutex_);
-                    client_ids.reserve(client_connections_.size());
 
-                    for (auto& [id, sock] : client_connections_) {
-                        client_ids.push_back(id);
+                    batch.clear();
+                    
+                    // Also gather from per-client queues
+                    for (auto& [client_id, queue] : per_client_queues_) {
+                        if (queue.empty()) continue;
+                        auto& client_msgs = per_client_batch[client_id];
+
+                        size_t to_grab = std::min(queue.size(), 
+                            config_coalesce_max_messages_ - client_msgs.size());
+                        
+                        for (size_t i = 0; i < to_grab; ++i) {
+                            client_msgs.push_back(std::move(queue.front()));
+                            queue.pop_front();
+                        }
                     }
                 }
                 
-                for (int client_id : client_ids) {
+                // Process each client's messages with coalescing
+                for (auto& [client_id, messages] : per_client_batch) {
+                    if (messages.empty()) continue;
                     SOCKET sock = INVALID_SOCKET;
-                    OutgoingMessage msg;
-                    bool has_message = false;
                     
                     {
                         std::lock_guard<std::mutex> conn_lock(connections_mutex_);
                         auto conn_it = client_connections_.find(client_id);
-
-                        if (conn_it == client_connections_.end()) {
-                            continue;  // Client disconnected
-                        }
-
+                        if (conn_it == client_connections_.end()) continue;
                         sock = conn_it->second;
-                        auto queue_it = per_client_queues_.find(client_id);
-
-                        if (queue_it == per_client_queues_.end() || queue_it->second.empty()) {
-                            client_stall_start_times_.erase(client_id);
-                            continue;  // No messages for this client
-                        }
-                        
-                        // Non-blocking check if socket is writable
-                        fd_set write_fds;
+                        fd_set write_fds, error_fds;
                         FD_ZERO(&write_fds);
-                        FD_SET(sock, &write_fds);
-                        fd_set error_fds;
                         FD_ZERO(&error_fds);
+                        FD_SET(sock, &write_fds);
                         FD_SET(sock, &error_fds);
-                        struct timeval tv;
-                        tv.tv_sec = 0;
-                        tv.tv_usec = 0;
+                        struct timeval tv = {0, 0};
                         int sel_result = select(0, nullptr, &write_fds, &error_fds, &tv);
                         
                         if (sel_result == SOCKET_ERROR || FD_ISSET(sock, &error_fds)) {
-                            clients_to_disconnect.push_back(client_id);
+                            clients_to_disconnect.insert(client_id);
                             continue;
                         }
                         
                         if (sel_result == 0 || !FD_ISSET(sock, &write_fds)) {
-                            // Socket not ready - track stall
+                            // Socket not ready - requeue messages and track stall
+                            auto& queue = per_client_queues_[client_id];
+
+                            for (auto it = messages.rbegin(); it != messages.rend(); ++it) {
+                                queue.push_front(std::move(*it));
+                            }
+                            
                             int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
                                 std::chrono::steady_clock::now().time_since_epoch()).count();
                             
@@ -2165,26 +2436,111 @@ private:
                             if (stall_it == client_stall_start_times_.end()) {
                                 client_stall_start_times_[client_id] = now;
                             } else if (now - stall_it->second > config_client_stall_timeout_ms_) {
-                                clients_to_disconnect.push_back(client_id);
+                                clients_to_disconnect.insert(client_id);
                             }
 
-                            continue;  // Skip this client, try next
+                            continue;
                         }
                         
-                        // Socket is writable - grab message
                         client_stall_start_times_.erase(client_id);
-                        msg = std::move(queue_it->second.front());
-                        queue_it->second.pop_front();
-                        has_message = true;
                     }
                     
-                    // Send outside the lock - only this client is affected if slow
-                    if (has_message) {
-                        create_network_packet_into(packet_buffer, msg.target_client, msg.sender_client,
-                                                   msg.event_name, *msg.payload);
+                    // Build coalesced packet or packets and send
+                    if (config_coalesce_enabled_ && messages.size() > 1) {
+                        // Coalesce messages up to max size
+                        size_t current_batch_start = 0;
+                        size_t current_batch_size = 0;
+                        bool send_error = false;
                         
-                        if (!send_all(sock, packet_buffer)) {
-                            clients_to_disconnect.push_back(client_id);
+                        for (size_t i = 0; i < messages.size(); ++i) {
+                            size_t msg_size = 15 + messages[i].event_name.size() + messages[i].payload->size();
+                            
+                            // Check if adding this message would exceed limits
+                            bool should_flush = (i - current_batch_start >= config_coalesce_max_messages_) ||
+                                               (current_batch_size + msg_size > config_coalesce_max_size_ && 
+                                                i > current_batch_start);
+                            
+                            if (should_flush) {
+                                client_batch.clear();
+
+                                for (size_t j = current_batch_start; j < i; ++j) {
+                                    client_batch.push_back(std::move(messages[j]));
+                                }
+                                
+                                create_coalesced_packet(packet_buffer, client_batch, temp_compressed_buffers);
+                                
+                                if (!send_all(sock, packet_buffer)) {
+                                    clients_to_disconnect.insert(client_id);
+
+                                    // Requeue remaining messages INCLUDING the failed batch
+                                    std::lock_guard<std::mutex> conn_lock(connections_mutex_);
+                                    auto& queue = per_client_queues_[client_id];
+                                    
+                                    // First requeue unprocessed messages
+                                    for (size_t k = messages.size(); k-- > i; ) {
+                                        queue.push_front(std::move(messages[k]));
+                                    }
+                                    
+                                    // Then requeue the failed batch
+                                    for (auto it = client_batch.rbegin(); it != client_batch.rend(); ++it) {
+                                        queue.push_front(std::move(*it));
+                                    }
+                                    
+                                    send_error = true;
+                                    break;
+                                }
+                                
+                                current_batch_start = i;
+                                current_batch_size = msg_size;
+                            } else {
+                                current_batch_size += msg_size;
+                            }
+                        }
+                        
+                        // Send remaining batch (if no error occurred)
+                        if (!send_error && current_batch_start < messages.size() && 
+                            clients_to_disconnect.count(client_id) == 0) {
+                            client_batch.clear();
+
+                            for (size_t j = current_batch_start; j < messages.size(); ++j) {
+                                client_batch.push_back(std::move(messages[j]));
+                            }
+                            
+                            create_coalesced_packet(packet_buffer, client_batch, temp_compressed_buffers);
+                            
+                            if (!send_all(sock, packet_buffer)) {
+                                clients_to_disconnect.insert(client_id);
+
+                                // Requeue the failed batch (in reverse for correct order)
+                                std::lock_guard<std::mutex> conn_lock(connections_mutex_);
+                                auto& queue = per_client_queues_[client_id];
+
+                                for (auto it = client_batch.rbegin(); it != client_batch.rend(); ++it) {
+                                    queue.push_front(std::move(*it));
+                                }
+                            }
+                        }
+                    } else {
+                        // No coalescing - send individually
+                        for (size_t i = 0; i < messages.size(); ++i) {
+                            auto& msg = messages[i];
+
+                            create_network_packet_into(packet_buffer, msg.target_client, msg.sender_client,
+                                                       msg.event_name, *msg.payload);
+                            
+                            if (!send_all(sock, packet_buffer)) {
+                                clients_to_disconnect.insert(client_id);
+                                
+                                // Requeue remaining messages
+                                std::lock_guard<std::mutex> conn_lock(connections_mutex_);
+                                auto& queue = per_client_queues_[client_id];
+                                
+                                for (size_t k = messages.size(); k-- > i; ) {
+                                    queue.push_front(std::move(messages[k]));
+                                }
+                                
+                                break;
+                            }
                         }
                     }
                 }
@@ -2211,61 +2567,121 @@ private:
                 }
                 
             } else {
-                // Client mode - send to server
-                bool need_requeue = false;
-                size_t requeue_from = 0;
+                // Client mode - send to server with coalescing
+                if (batch.empty()) continue;
+                
+                if (!connect_to_server_internal()) {
+                    // Requeue all
+                    std::lock_guard<std::mutex> lock(outgoing_mutex_);
 
-                for (size_t i = 0; i < batch.size(); ++i) {
-                    auto& msg = batch[i];
-
-                    create_network_packet_into(packet_buffer, msg.target_client, msg.sender_client,
-                                            msg.event_name, *msg.payload);
-                    
-                    if (!connect_to_server_internal()) {
-                        need_requeue = true;
-                        requeue_from = i;
-                        break;
+                    for (auto it = batch.rbegin(); it != batch.rend(); ++it) {
+                        outgoing_queue_.push_front(std::move(*it));
                     }
 
-                    bool send_failed = false;
-
-                    {
-                        std::lock_guard<std::mutex> srv_lock(server_connection_mutex_);
+                    batch.clear();
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                    continue;
+                }
+                
+                bool send_failed = false;
+                
+                if (config_coalesce_enabled_ && batch.size() > 1) {
+                    // Coalesce messages to server
+                    size_t current_batch_start = 0;
+                    size_t current_batch_size = 0;
+                    
+                    for (size_t i = 0; i <= batch.size(); ++i) {
+                        size_t msg_size = (i < batch.size()) ? 
+                            15 + batch[i].event_name.size() + batch[i].payload->size() : 0;
                         
-                        if (server_connection_ == INVALID_SOCKET) {
-                            need_requeue = true;
-                            requeue_from = i;
+                        bool should_flush = (i == batch.size()) ||
+                                           (i - current_batch_start >= config_coalesce_max_messages_) ||
+                                           (current_batch_size + msg_size > config_coalesce_max_size_ && 
+                                            i > current_batch_start);
+                        
+                        if (should_flush && i > current_batch_start) {
+                            client_batch.clear();
+
+                            for (size_t j = current_batch_start; j < i; ++j) {
+                                client_batch.push_back(std::move(batch[j]));
+                            }
+                            
+                            create_coalesced_packet(packet_buffer, client_batch, temp_compressed_buffers);
+                            
+                            {
+                                std::lock_guard<std::mutex> srv_lock(server_connection_mutex_);
+
+                                if (server_connection_ == INVALID_SOCKET) {
+                                    send_failed = true;
+                                } else if (!send_all(server_connection_, packet_buffer)) {
+                                    ::shutdown(server_connection_, SD_BOTH);
+                                    closesocket(server_connection_);
+                                    server_connection_ = INVALID_SOCKET;
+                                    send_failed = true;
+                                }
+                            }
+                            
+                            if (send_failed) {
+                                // Requeue remaining messages INCLUDING the failed batch
+                                std::lock_guard<std::mutex> lock(outgoing_mutex_);
+
+                                // First requeue unprocessed messages (already in reverse order)
+                                for (size_t k = batch.size(); k-- > i; ) {
+                                    outgoing_queue_.push_front(std::move(batch[k]));
+                                }
+                                
+                                // Then requeue the failed batch (in reverse for correct order)
+                                for (auto it = client_batch.rbegin(); it != client_batch.rend(); ++it) {
+                                    outgoing_queue_.push_front(std::move(*it));
+                                }
+                                
+                                break;
+                            }
+                                                        
+                            current_batch_start = i;
+                            current_batch_size = msg_size;
+                        } else if (i < batch.size()) {
+                            current_batch_size += msg_size;
+                        }
+                    }
+                } else {
+                    // No coalescing
+                    for (size_t i = 0; i < batch.size(); ++i) {
+                        auto& msg = batch[i];
+
+                        create_network_packet_into(packet_buffer, msg.target_client, msg.sender_client,
+                                                   msg.event_name, *msg.payload);
+                        
+                        {
+                            std::lock_guard<std::mutex> srv_lock(server_connection_mutex_);
+
+                            if (server_connection_ == INVALID_SOCKET) {
+                                send_failed = true;
+                            } else if (!send_all(server_connection_, packet_buffer)) {
+                                ::shutdown(server_connection_, SD_BOTH);
+                                closesocket(server_connection_);
+                                server_connection_ = INVALID_SOCKET;
+                                send_failed = true;
+                            }
+                        }
+                        
+                        if (send_failed) {
+                            std::lock_guard<std::mutex> lock(outgoing_mutex_);
+
+                            for (size_t j = batch.size(); j-- > i; ) {
+                                outgoing_queue_.push_front(std::move(batch[j]));
+                            }
+                            
                             break;
                         }
-
-                        if (!send_all(server_connection_, packet_buffer)) {
-                            ::shutdown(server_connection_, SD_BOTH);
-                            closesocket(server_connection_);
-                            server_connection_ = INVALID_SOCKET;
-                            send_failed = true;
-                        }
-                    }
-                    
-                    if (send_failed) {
-                        need_requeue = true;
-                        requeue_from = i;
-                        break;
                     }
                 }
-
-                if (need_requeue) {
-                    {
-                        std::lock_guard<std::mutex> lock(outgoing_mutex_);
-
-                        for (size_t j = batch.size(); j-- > requeue_from; ) {
-                            outgoing_queue_.push_front(std::move(batch[j]));
-                        }
-                    }
-                    
+                
+                batch.clear();
+                
+                if (send_failed) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(50));
                 }
-
-                batch.clear();
             }
         }
     }
@@ -3027,6 +3443,23 @@ public:
                 config_compression_enabled_ = static_cast<float>(arr[11]) != 0.0f;
             }
         }
+
+        if (arr.size() > 12) {
+            if (arr[12].type_enum() == game_data_type::BOOL) {
+                config_coalesce_enabled_ = static_cast<bool>(arr[12]);
+            } else if (arr[12].type_enum() == game_data_type::SCALAR) {
+                config_coalesce_enabled_ = static_cast<float>(arr[12]) != 0.0f;
+            }
+        }
+        
+        // Index 13: Coalesce max size
+        config_coalesce_max_size_ = get_size(13, NET_DEFAULT_COALESCE_MAX_SIZE);
+        
+        // Index 14: Coalesce max messages
+        config_coalesce_max_messages_ = get_size(14, NET_DEFAULT_COALESCE_MAX_MESSAGES);
+        
+        // Index 15: Coalesce delay microseconds
+        config_coalesce_delay_us_ = get_int(15, NET_DEFAULT_COALESCE_DELAY_US);
                 
         // Clamp values to reasonable ranges
         if (config_max_message_size_ < 1024) config_max_message_size_ = 1024;
@@ -3038,6 +3471,12 @@ public:
         if (config_recv_timeout_ms_ < 500) config_recv_timeout_ms_ = 500;
         if (config_client_stall_timeout_ms_ < 1000) config_client_stall_timeout_ms_ = 1000;
         if (config_send_batch_size_ > 256) config_send_batch_size_ = 256;
+        if (config_coalesce_max_size_ < 1024) config_coalesce_max_size_ = 1024;
+        if (config_coalesce_max_size_ > 1024 * 1024) config_coalesce_max_size_ = 1024 * 1024; // 1MB max
+        if (config_coalesce_max_messages_ < 1) config_coalesce_max_messages_ = 1;
+        if (config_coalesce_max_messages_ > 1024) config_coalesce_max_messages_ = 1024;
+        if (config_coalesce_delay_us_ < 0) config_coalesce_delay_us_ = 0;
+        if (config_coalesce_delay_us_ > 10000) config_coalesce_delay_us_ = 10000; // 10ms max
     }
         
     bool is_initialized() const {

@@ -49,6 +49,86 @@ enum class NetworkTargetType : uint8_t {
     STRING_EXTENDED = 19     // Specific string type
 };
 
+enum class WireType : uint8_t {
+    // Simple types (0x00-0x7F) - no special handling needed
+    NOTHING         = 0x00,  // nil/nothing value, no data
+    
+    // Scalar optimizations
+    SCALAR_FLOAT    = 0x01,  // Full 4-byte IEEE 754 float follows
+    SCALAR_VARINT_P = 0x02,  // Positive integer as varint (0 to 2^28-1)
+    SCALAR_VARINT_N = 0x03,  // Negative integer as varint (stores abs value)
+    SCALAR_ZERO     = 0x04,  // Literal 0.0, no data follows
+    SCALAR_ONE      = 0x05,  // Literal 1.0, no data follows
+    SCALAR_NEG_ONE  = 0x06,  // Literal -1.0, no data follows
+    
+    // Boolean - type encodes value, no additional data
+    BOOL_FALSE      = 0x07,
+    BOOL_TRUE       = 0x08,
+    
+    // String
+    STRING          = 0x09,  // Varint length, then UTF-8 bytes
+    STRING_EMPTY    = 0x0A,  // Empty string, no data follows
+    
+    // Array
+    ARRAY           = 0x0B,  // Varint count, then elements
+    ARRAY_EMPTY     = 0x0C,  // Empty array, no data follows
+    ARRAY_SINGLE    = 0x0D,  // Single element follows directly
+    VEC2_FLOAT32    = 0x14,  // [f32, f32] - 8 bytes data (full precision)
+    VEC3_FLOAT32    = 0x15,  // [f32, f32, f32] - 12 bytes data (full precision)
+    VEC2_FLOAT16    = 0x16,  // [f16, f16] - 4 bytes data (half precision)
+    VEC3_FLOAT16    = 0x17,  // [f16, f16, f16] - 6 bytes data (half precision)
+    VEC2_MIXED      = 0x18,  // [scalar, scalar] - mixed encoding per component
+    VEC3_MIXED      = 0x19,  // [scalar, scalar, scalar] - mixed encoding
+    
+    // HashMap
+    HASHMAP         = 0x0E,  // Varint count, then key-value pairs
+    HASHMAP_EMPTY   = 0x0F,  // Empty hashmap, no data follows
+    
+    // Any/nil
+    ANY_NIL         = 0x10,
+    
+    // Reserved: 0x11 - 0x7F
+    
+    // Special handling types (0x80+) - require string/id serialization
+    SPECIAL_OBJECT      = 0x80,  // NetId string follows
+    SPECIAL_GROUP       = 0x81,  // NetId string follows
+    SPECIAL_CODE        = 0x82,  // Code string follows
+    SPECIAL_NAMESPACE   = 0x83,  // 1-byte WireNamespace enum follows
+    SPECIAL_SIDE        = 0x84,  // 1-byte WireSide enum follows
+    SPECIAL_TEXT        = 0x85,  // Structured text string follows
+    SPECIAL_CONFIG      = 0x86,  // Config path string follows
+    SPECIAL_LOCATION    = 0x87,  // Location class name follows
+    SPECIAL_TEAM_MEMBER = 0x88,  // Agent's object NetId follows
+    SPECIAL_DISPLAY     = 0x89,  // Display IDD as varint follows
+
+    // Net ID
+    SPECIAL_OBJECT_NETID = 0x8A,  // Two varints: creator, id
+    SPECIAL_GROUP_NETID  = 0x8B,
+    SPECIAL_TEAM_MEMBER_NETID = 0x8C
+};
+
+enum class WireSide : uint8_t {
+    WEST          = 0,
+    EAST          = 1,
+    RESISTANCE    = 2,
+    CIVILIAN      = 3,
+    SIDE_LOGIC    = 4,
+    SIDE_UNKNOWN  = 5,
+    SIDE_ENEMY    = 6,
+    SIDE_FRIENDLY = 7,
+    SIDE_AMBIENT  = 8,
+    SIDE_EMPTY    = 9
+};
+
+enum class WireNamespace : uint8_t {
+    MISSION         = 0,
+    PROFILE         = 1,
+    UI              = 2,
+    PARSING         = 3,
+    SERVER          = 4,
+    MISSION_PROFILE = 5
+};
+
 // Global handler ID counter
 static std::atomic<uint64_t> g_network_handler_id_counter{0};
 
@@ -335,6 +415,7 @@ private:
     std::unordered_map<int, int64_t> client_stall_start_times_;
     std::shared_ptr<PayloadPool> payload_pool_;
     std::atomic<bool> warned_fd_limit_{false};
+    std::atomic<bool> network_logging_enabled_{false};
     size_t config_max_message_size_{NET_DEFAULT_MAX_MESSAGE_SIZE};
     size_t config_recv_buffer_size_{NET_DEFAULT_RECV_BUFFER_SIZE};
     size_t config_send_buffer_size_{NET_DEFAULT_SEND_BUFFER_SIZE};
@@ -440,6 +521,442 @@ private:
         bool value = data[offset] != 0;
         offset += 1;
         return value;
+    }
+
+    static void write_varint(std::vector<uint8_t>& buffer, uint32_t value) {
+        while (value >= 0x80) {
+            buffer.push_back(static_cast<uint8_t>((value & 0x7F) | 0x80));
+            value >>= 7;
+        }
+
+        buffer.push_back(static_cast<uint8_t>(value));
+    }
+
+    static uint32_t read_varint(const uint8_t* data, size_t& offset, size_t max_size) {
+        uint32_t result = 0;
+        uint32_t shift = 0;
+        
+        while (offset < max_size) {
+            uint8_t byte = data[offset++];
+            result |= static_cast<uint32_t>(byte & 0x7F) << shift;
+            
+            if ((byte & 0x80) == 0) {
+                return result;
+            }
+            
+            shift += 7;
+
+            if (shift >= 32) {
+                throw std::runtime_error("Varint too long");
+            }
+        }
+        
+        throw std::runtime_error("Buffer underrun reading varint");
+    }
+
+    static void write_string_compact(std::vector<uint8_t>& buffer, const std::string& str) {
+        write_varint(buffer, static_cast<uint32_t>(str.length()));
+        buffer.insert(buffer.end(), str.begin(), str.end());
+    }
+
+    static std::string read_string_compact(const uint8_t* data, size_t& offset, size_t max_size) {
+        uint32_t len = read_varint(data, offset, max_size);
+        
+        if (len > max_size - offset) {
+            throw std::runtime_error("String length exceeds buffer size");
+        }
+        
+        std::string result(reinterpret_cast<const char*>(data + offset), len);
+        offset += len;
+        return result;
+    }
+
+    static bool float_is_exact_integer(float value, int32_t& out_int) {
+        if (value >= -268435456.0f && value <= 268435455.0f) {
+            float truncated = std::trunc(value);
+
+            if (truncated == value) {
+                out_int = static_cast<int32_t>(truncated);
+                return true;
+            }
+        }
+        
+        return false;
+    }
+
+    static bool parse_net_id_to_ints(const std::string& net_id, uint32_t& creator, uint32_t& id) {
+        if (net_id.empty()) return false;
+        const char* p = net_id.c_str();
+        const char* end = p + net_id.length();
+        
+        // Parse creator (first number before colon)
+        creator = 0;
+
+        while (p < end && *p != ':') {
+            if (*p < '0' || *p > '9') return false;
+            creator = creator * 10 + static_cast<uint32_t>(*p - '0');
+            ++p;
+        }
+        
+        // Must have colon and more digits after
+        if (p >= end || *p != ':') return false;
+        ++p;
+        if (p >= end) return false;
+        id = 0;
+
+        while (p < end) {
+            if (*p < '0' || *p > '9') return false;
+            id = id * 10 + static_cast<uint32_t>(*p - '0');
+            ++p;
+        }
+        
+        return true;
+    }
+
+    // Fast NetId formatter using pre-allocated thread-local buffer
+    static const std::string& format_net_id_from_ints(uint32_t creator, uint32_t id) {
+        thread_local std::string tls_netid_buffer;
+        tls_netid_buffer.clear();
+        char temp[24];
+        int len = snprintf(temp, sizeof(temp), "%u:%u", creator, id);
+        tls_netid_buffer.assign(temp, len);
+        return tls_netid_buffer;
+    }
+
+    // Thread-local serialization buffer to reduce allocations
+    static std::vector<uint8_t>& get_tls_serialize_buffer() {
+        thread_local std::vector<uint8_t> buffer;
+
+        if (buffer.capacity() < 4096) {
+            buffer.reserve(4096);
+        }
+
+        return buffer;
+    }
+
+    // Component encoding for mixed vectors
+    enum class ComponentEncoding : uint8_t {
+        ZERO = 0,
+        ONE = 1,
+        VARINT = 2,
+        FLOAT32 = 3
+    };
+
+    // Convert float32 to float16 (IEEE 754 binary16)
+    static uint16_t float_to_half(float value) {
+        uint32_t f32;
+        std::memcpy(&f32, &value, sizeof(float));
+        uint32_t sign = (f32 >> 16) & 0x8000;
+        int32_t exponent = ((f32 >> 23) & 0xFF) - 127 + 15;
+        uint32_t mantissa = f32 & 0x007FFFFF;
+        
+        if (exponent <= 0) {
+            if (exponent < -10) {
+                return static_cast<uint16_t>(sign);
+            }
+
+            mantissa |= 0x00800000;
+            int shift = 14 - exponent;
+            uint32_t half_mantissa = mantissa >> shift;
+            uint32_t remainder = mantissa & ((1 << shift) - 1);
+            uint32_t halfway = 1 << (shift - 1);
+
+            if (remainder > halfway || (remainder == halfway && (half_mantissa & 1))) {
+                half_mantissa++;
+            }
+
+            return static_cast<uint16_t>(sign | half_mantissa);
+        } else if (exponent >= 31) {
+            return static_cast<uint16_t>(sign | 0x7C00);
+        }
+        
+        uint32_t half_mantissa = mantissa >> 13;
+        uint32_t remainder = mantissa & 0x1FFF;
+
+        if (remainder > 0x1000 || (remainder == 0x1000 && (half_mantissa & 1))) {
+            half_mantissa++;
+
+            if (half_mantissa >= 0x400) {
+                half_mantissa = 0;
+                exponent++;
+
+                if (exponent >= 31) {
+                    return static_cast<uint16_t>(sign | 0x7C00);
+                }
+            }
+        }
+        
+        return static_cast<uint16_t>(sign | (static_cast<uint32_t>(exponent) << 10) | half_mantissa);
+    }
+
+    static float half_to_float(uint16_t h) {
+        uint32_t sign = (static_cast<uint32_t>(h) & 0x8000) << 16;
+        uint32_t exponent = (h >> 10) & 0x1F;
+        uint32_t mantissa = h & 0x03FF;
+        uint32_t f32;
+        
+        if (exponent == 0) {
+            if (mantissa == 0) {
+                f32 = sign;
+            } else {
+                exponent = 1;
+
+                while ((mantissa & 0x0400) == 0) {
+                    mantissa <<= 1;
+                    exponent--;
+                }
+
+                mantissa &= 0x03FF;
+                f32 = sign | ((exponent + 127 - 15) << 23) | (mantissa << 13);
+            }
+        } else if (exponent == 31) {
+            f32 = sign | 0x7F800000 | (mantissa << 13);
+        } else {
+            f32 = sign | ((exponent + 127 - 15) << 23) | (mantissa << 13);
+        }
+        
+        float result;
+        std::memcpy(&result, &f32, sizeof(float));
+        return result;
+    }
+
+    // Check if a float can be accurately represented as half-precision
+    static bool can_use_half_precision(float value) {
+        if (value > 65504.0f || value < -65504.0f) {
+            return false;
+        }
+        
+        float abs_val = std::fabs(value);
+        
+        if (abs_val > 0.0f && abs_val < 6.1e-5f) {
+            return false;
+        }
+        
+        uint16_t half = float_to_half(value);
+        float reconstructed = half_to_float(half);
+        float abs_error = std::fabs(value - reconstructed);
+        float rel_error = abs_val > 1.0f ? abs_error / abs_val : abs_error;
+        return abs_error <= 0.5f && rel_error <= 0.0005f;
+    }
+
+    static bool can_vector_use_half_precision(const float* values, size_t count) {
+        for (size_t i = 0; i < count; ++i) {
+            if (!can_use_half_precision(values[i])) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    // Read/write helpers for float16
+    static void write_float16(std::vector<uint8_t>& buffer, float value) {
+        uint16_t h = float_to_half(value);
+        buffer.push_back(static_cast<uint8_t>(h & 0xFF));
+        buffer.push_back(static_cast<uint8_t>((h >> 8) & 0xFF));
+    }
+
+    static float read_float16(const uint8_t* data, size_t& offset, size_t max_size) {
+        if (offset + 2 > max_size) {
+            throw std::runtime_error("Buffer underrun reading float16");
+        }
+
+        uint16_t h = static_cast<uint16_t>(data[offset]) |
+                    (static_cast<uint16_t>(data[offset + 1]) << 8);
+
+        offset += 2;
+        return half_to_float(h);
+    }
+
+    // Raw float32 read/write without type tag
+    static void write_float32_raw(std::vector<uint8_t>& buffer, float value) {
+        uint32_t raw;
+        std::memcpy(&raw, &value, sizeof(float));
+        buffer.push_back(static_cast<uint8_t>(raw & 0xFF));
+        buffer.push_back(static_cast<uint8_t>((raw >> 8) & 0xFF));
+        buffer.push_back(static_cast<uint8_t>((raw >> 16) & 0xFF));
+        buffer.push_back(static_cast<uint8_t>((raw >> 24) & 0xFF));
+    }
+
+    static float read_float32_raw(const uint8_t* data, size_t& offset, size_t max_size) {
+        if (offset + 4 > max_size) {
+            throw std::runtime_error("Buffer underrun reading float32");
+        }
+
+        uint32_t raw = static_cast<uint32_t>(data[offset]) |
+                    (static_cast<uint32_t>(data[offset + 1]) << 8) |
+                    (static_cast<uint32_t>(data[offset + 2]) << 16) |
+                    (static_cast<uint32_t>(data[offset + 3]) << 24);
+
+        offset += 4;
+        float value;
+        std::memcpy(&value, &raw, sizeof(float));
+        return value;
+    }
+
+    static ComponentEncoding get_component_encoding(float value, int32_t& int_val) {
+        if (value == 0.0f) return ComponentEncoding::ZERO;
+        if (value == 1.0f || value == -1.0f) return ComponentEncoding::ONE;
+        
+        if (float_is_exact_integer(value, int_val)) {
+            return ComponentEncoding::VARINT;
+        }
+        
+        return ComponentEncoding::FLOAT32;
+    }
+
+    static bool try_serialize_as_vector(std::vector<uint8_t>& buffer, const auto_array<game_value>& arr) {
+        size_t size = arr.size();
+        
+        if (size != 2 && size != 3) {
+            return false;
+        }
+        
+        float values[3];
+
+        for (size_t i = 0; i < size; ++i) {
+            if (arr[i].type_enum() != game_data_type::SCALAR) {
+                return false;
+            }
+
+            values[i] = static_cast<float>(arr[i]);
+        }
+        
+        if (size == 2) {
+            float x = values[0], y = values[1];
+            
+            // Try half precision first (5 bytes total)
+            if (can_vector_use_half_precision(values, 2)) {
+                buffer.push_back(static_cast<uint8_t>(WireType::VEC2_FLOAT16));
+                write_float16(buffer, x);
+                write_float16(buffer, y);
+                return true;
+            }
+            
+            // Calculate mixed encoding cost
+            int32_t ix = 0, iy = 0;
+            ComponentEncoding ex = get_component_encoding(x, ix);
+            ComponentEncoding ey = get_component_encoding(y, iy);
+            size_t mixed_cost = 2; // type + encoding byte
+
+            if (ex == ComponentEncoding::VARINT) {
+                uint32_t abs_val = static_cast<uint32_t>(std::abs(ix));
+                mixed_cost += (abs_val < 128) ? 1 : (abs_val < 16384) ? 2 : 3;
+            } else if (ex == ComponentEncoding::FLOAT32) {
+                mixed_cost += 4;
+            }
+
+            if (ey == ComponentEncoding::VARINT) {
+                uint32_t abs_val = static_cast<uint32_t>(std::abs(iy));
+                mixed_cost += (abs_val < 128) ? 1 : (abs_val < 16384) ? 2 : 3;
+            } else if (ey == ComponentEncoding::FLOAT32) {
+                mixed_cost += 4;
+            }
+            
+            // Choose best encoding
+            if (mixed_cost < 9) {
+                buffer.push_back(static_cast<uint8_t>(WireType::VEC2_MIXED));
+                uint8_t encoding = static_cast<uint8_t>(ex) | (static_cast<uint8_t>(ey) << 2);
+                if (ex == ComponentEncoding::VARINT && ix < 0) encoding |= 0x40;
+                if (ey == ComponentEncoding::VARINT && iy < 0) encoding |= 0x80;
+                if (ex == ComponentEncoding::ONE && x < 0) encoding |= 0x40;
+                if (ey == ComponentEncoding::ONE && y < 0) encoding |= 0x80;
+                buffer.push_back(encoding);
+                
+                if (ex == ComponentEncoding::VARINT) {
+                    write_varint(buffer, static_cast<uint32_t>(std::abs(ix)));
+                } else if (ex == ComponentEncoding::FLOAT32) {
+                    write_float32_raw(buffer, x);
+                }
+
+                if (ey == ComponentEncoding::VARINT) {
+                    write_varint(buffer, static_cast<uint32_t>(std::abs(iy)));
+                } else if (ey == ComponentEncoding::FLOAT32) {
+                    write_float32_raw(buffer, y);
+                }
+            } else {
+                buffer.push_back(static_cast<uint8_t>(WireType::VEC2_FLOAT32));
+                write_float32_raw(buffer, x);
+                write_float32_raw(buffer, y);
+            }
+
+            return true;
+        } else { // size == 3
+            float x = values[0], y = values[1], z = values[2];
+            
+            // Try half precision first (7 bytes total)
+            if (can_vector_use_half_precision(values, 3)) {
+                buffer.push_back(static_cast<uint8_t>(WireType::VEC3_FLOAT16));
+                write_float16(buffer, x);
+                write_float16(buffer, y);
+                write_float16(buffer, z);
+                return true;
+            }
+            
+            // Calculate mixed encoding cost
+            int32_t ix = 0, iy = 0, iz = 0;
+            ComponentEncoding ex = get_component_encoding(x, ix);
+            ComponentEncoding ey = get_component_encoding(y, iy);
+            ComponentEncoding ez = get_component_encoding(z, iz);
+            size_t mixed_cost = 3;
+            
+            auto add_cost = [&mixed_cost](ComponentEncoding e, int32_t val) {
+                if (e == ComponentEncoding::VARINT) {
+                    uint32_t abs_val = static_cast<uint32_t>(std::abs(val));
+                    mixed_cost += (abs_val < 128) ? 1 : (abs_val < 16384) ? 2 : 3;
+                } else if (e == ComponentEncoding::FLOAT32) {
+                    mixed_cost += 4;
+                }
+            };
+
+            add_cost(ex, ix);
+            add_cost(ey, iy);
+            add_cost(ez, iz);
+            
+            // Choose best encoding
+            if (mixed_cost < 13) {
+                buffer.push_back(static_cast<uint8_t>(WireType::VEC3_MIXED));
+                
+                uint8_t encoding1 = static_cast<uint8_t>(ex) | 
+                                (static_cast<uint8_t>(ey) << 2) |
+                                (static_cast<uint8_t>(ez) << 4);
+
+                if (ex == ComponentEncoding::VARINT && ix < 0) encoding1 |= 0x40;
+                if (ey == ComponentEncoding::VARINT && iy < 0) encoding1 |= 0x80;
+                if (ex == ComponentEncoding::ONE && x < 0) encoding1 |= 0x40;
+                if (ey == ComponentEncoding::ONE && y < 0) encoding1 |= 0x80;
+                buffer.push_back(encoding1);
+                uint8_t encoding2 = 0;
+                if (ez == ComponentEncoding::VARINT && iz < 0) encoding2 |= 0x01;
+                if (ez == ComponentEncoding::ONE && z < 0) encoding2 |= 0x01;
+                buffer.push_back(encoding2);
+                
+                if (ex == ComponentEncoding::VARINT) {
+                    write_varint(buffer, static_cast<uint32_t>(std::abs(ix)));
+                } else if (ex == ComponentEncoding::FLOAT32) {
+                    write_float32_raw(buffer, x);
+                }
+                
+                if (ey == ComponentEncoding::VARINT) {
+                    write_varint(buffer, static_cast<uint32_t>(std::abs(iy)));
+                } else if (ey == ComponentEncoding::FLOAT32) {
+                    write_float32_raw(buffer, y);
+                }
+
+                if (ez == ComponentEncoding::VARINT) {
+                    write_varint(buffer, static_cast<uint32_t>(std::abs(iz)));
+                } else if (ez == ComponentEncoding::FLOAT32) {
+                    write_float32_raw(buffer, z);
+                }
+            } else {
+                buffer.push_back(static_cast<uint8_t>(WireType::VEC3_FLOAT32));
+                write_float32_raw(buffer, x);
+                write_float32_raw(buffer, y);
+                write_float32_raw(buffer, z);
+            }
+            
+            return true;
+        }
     }
 
     static std::vector<uint8_t> compress_payload(const std::vector<uint8_t>& input) {
@@ -553,26 +1070,36 @@ private:
             create_network_packet_into(output, messages[0].target_client, messages[0].sender_client,
                                        messages[0].event_name, *messages[0].payload);
 
+            // Log single message send
+            if (network_logging_enabled_) {
+                bool was_compressed = config_compression_enabled_ && messages[0].payload->size() > NET_COMPRESSION_THRESHOLD;
+                std::string event_name_copy = messages[0].event_name;
+                int sender = messages[0].sender_client;
+                int target = messages[0].target_client;
+                size_t payload_sz = messages[0].payload->size();
+                size_t output_sz = output.size();
+                
+                MainThreadScheduler::instance().schedule([this, event_name_copy, sender, target, payload_sz, output_sz, was_compressed]() {
+                    log_network_message("SEND", event_name_copy, sender, target, payload_sz, output_sz, was_compressed, false);
+                });
+            }
+
             return;
         }
         
         // Build uncompressed coalesced content first
-        // Format: [MESSAGE_COUNT(2)] + for each: [TARGET(4)][SENDER(4)][EVENT_LEN(2)][EVENT][PAYLOAD_LEN(4)][PAYLOAD]
         temp_uncompressed_buffer.clear();
-        
-        // Estimate size for reservation
-        size_t estimated_size = 2;  // message count
+        size_t estimated_size = 2;
+        size_t total_payload_size = 0;
 
         for (const auto& msg : messages) {
             estimated_size += 14 + msg.event_name.size() + msg.payload->size();
+            total_payload_size += msg.payload->size();
         }
 
         temp_uncompressed_buffer.reserve(estimated_size);
-        
-        // Write message count
         write_uint16(temp_uncompressed_buffer, static_cast<uint16_t>(messages.size()));
         
-        // Write each message (without per-message compression)
         for (const auto& msg : messages) {
             write_uint32(temp_uncompressed_buffer, static_cast<uint32_t>(msg.target_client));
             write_uint32(temp_uncompressed_buffer, static_cast<uint32_t>(msg.sender_client));
@@ -587,15 +1114,12 @@ private:
                                             msg.payload->begin(), msg.payload->end());
         }
         
-        // Now build final packet with optional whole-packet compression
         output.clear();
-        
-        bool should_compress = config_compression_enabled_ && 
-                               temp_uncompressed_buffer.size() > NET_COMPRESSION_THRESHOLD;
-        
+        bool should_compress = config_compression_enabled_ && temp_uncompressed_buffer.size() > NET_COMPRESSION_THRESHOLD;
         std::vector<uint8_t> compressed_data;
         const std::vector<uint8_t>* final_payload = &temp_uncompressed_buffer;
         uint8_t flags = NET_FLAG_NONE;
+        bool was_compressed = false;
         
         if (should_compress) {
             compressed_data = compress_payload(temp_uncompressed_buffer);
@@ -603,16 +1127,28 @@ private:
             if (!compressed_data.empty()) {
                 final_payload = &compressed_data;
                 flags |= NET_FLAG_COMPRESSED;
+                was_compressed = true;
             }
         }
         
-        // Header: [COALESCED_MAGIC(4)][VERSION(4)][FLAGS(1)][PAYLOAD_LEN(4)][PAYLOAD]
         output.reserve(13 + final_payload->size());
         write_uint32(output, NET_COALESCED_MAGIC);
         write_uint32(output, NET_MSG_VERSION);
         output.push_back(flags);
         write_uint32(output, static_cast<uint32_t>(final_payload->size()));
         output.insert(output.end(), final_payload->begin(), final_payload->end());
+
+        // Log coalesced batch
+        if (network_logging_enabled_) {
+            int target = messages.empty() ? -1 : messages[0].target_client;
+            size_t total_payload_copy = total_payload_size;
+            size_t output_sz = output.size();
+            int msg_count = static_cast<int>(messages.size());
+            
+            MainThreadScheduler::instance().schedule([this, target, total_payload_copy, output_sz, was_compressed, msg_count]() {
+                log_network_batch("SEND COALESCED", target, total_payload_copy, output_sz, was_compressed, msg_count);
+            });
+        }
     }
     
     // Parses either a coalesced packet or a single packet
@@ -626,7 +1162,6 @@ private:
         uint32_t magic = read_uint32(data.data(), offset, data.size());
         
         if (magic == NET_COALESCED_MAGIC) {
-            // We compress the coalesced packet
             if (data.size() < 13) return false;
             uint32_t version = read_uint32(data.data(), offset, data.size());
             if (version > NET_MSG_VERSION) return false;
@@ -634,12 +1169,12 @@ private:
             uint32_t payload_len = read_uint32(data.data(), offset, data.size());
             if (offset + payload_len > data.size()) return false;
             
-            // Decompress if needed
             const uint8_t* payload_data;
             std::vector<uint8_t> decompressed_payload;
             size_t payload_size;
+            bool was_compressed = (flags & NET_FLAG_COMPRESSED) != 0;
             
-            if (flags & NET_FLAG_COMPRESSED) {
+            if (was_compressed) {
                 decompressed_payload = decompress_payload(data.data() + offset, payload_len);
                 if (decompressed_payload.empty() && payload_len > 4) return false;
                 payload_data = decompressed_payload.data();
@@ -649,7 +1184,6 @@ private:
                 payload_size = payload_len;
             }
             
-            // Parse the decompressed coalesced content
             size_t inner_offset = 0;
             if (payload_size < 2) return false;
             uint16_t message_count = read_uint16(payload_data, inner_offset, payload_size);
@@ -685,9 +1219,19 @@ private:
                 }
             }
             
+            // Log received coalesced packet
+            if (network_logging_enabled_) {
+                size_t payload_sz = payload_size;
+                size_t data_sz = data.size();
+                int msg_cnt = message_count;
+                
+                MainThreadScheduler::instance().schedule([this, payload_sz, data_sz, was_compressed, msg_cnt]() {
+                    log_network_batch("RECV COALESCED", 2, payload_sz, data_sz, was_compressed, msg_cnt);
+                });
+            }
+            
             return true;
         } else if (magic == NET_MSG_MAGIC) {
-            // Single packet - use existing parser
             offset = 0;
             int target_client, sender_client;
             std::string event_name;
@@ -695,6 +1239,17 @@ private:
             
             if (!parse_network_packet(data, target_client, sender_client, event_name, payload)) {
                 return false;
+            }
+            
+            // Log received single packet
+            if (network_logging_enabled_) {
+                std::string event_name_copy = event_name;
+                size_t payload_sz = payload.size();
+                size_t data_sz = data.size();
+                
+                MainThreadScheduler::instance().schedule([this, event_name_copy, sender_client, target_client, payload_sz, data_sz]() {
+                    log_network_message("RECV", event_name_copy, sender_client, target_client, payload_sz, data_sz, false, false);
+                });
             }
             
             if (target_client == 2) {
@@ -792,21 +1347,254 @@ private:
 
     static void serialize_game_value(std::vector<uint8_t>& buffer, const game_value& value) {
         auto type = value.type_enum();
-        bool needs_special_handling = false;
         
         switch (type) {
-            case game_data_type::OBJECT:
-            case game_data_type::GROUP:
-            case game_data_type::CODE:
-            case game_data_type::NAMESPACE:
-            case game_data_type::SIDE:
-            case game_data_type::TEXT:
-            case game_data_type::CONFIG:
-            case game_data_type::LOCATION:
-            case game_data_type::TEAM_MEMBER:
-            case game_data_type::DISPLAY:
-                needs_special_handling = true;
-                break;
+            case game_data_type::NOTHING:
+                buffer.push_back(static_cast<uint8_t>(WireType::NOTHING));
+                return;
+                
+            case game_data_type::ANY:
+                buffer.push_back(static_cast<uint8_t>(WireType::ANY_NIL));
+                return;
+                
+            case game_data_type::SCALAR: {
+                float val = static_cast<float>(value);
+                
+                // Common constants - single byte, no data
+                if (val == 0.0f) {
+                    buffer.push_back(static_cast<uint8_t>(WireType::SCALAR_ZERO));
+                    return;
+                }
+                if (val == 1.0f) {
+                    buffer.push_back(static_cast<uint8_t>(WireType::SCALAR_ONE));
+                    return;
+                }
+                if (val == -1.0f) {
+                    buffer.push_back(static_cast<uint8_t>(WireType::SCALAR_NEG_ONE));
+                    return;
+                }
+                
+                // Try integer encoding (common for IDs, counts, indices)
+                int32_t int_val;
+
+                if (float_is_exact_integer(val, int_val)) {
+                    if (int_val >= 0) {
+                        buffer.push_back(static_cast<uint8_t>(WireType::SCALAR_VARINT_P));
+                        write_varint(buffer, static_cast<uint32_t>(int_val));
+                        return;
+                    } else {
+                        buffer.push_back(static_cast<uint8_t>(WireType::SCALAR_VARINT_N));
+                        write_varint(buffer, static_cast<uint32_t>(-int_val));
+                        return;
+                    }
+                }
+                
+                // Fall back to full float
+                buffer.push_back(static_cast<uint8_t>(WireType::SCALAR_FLOAT));
+                uint32_t raw;
+                std::memcpy(&raw, &val, sizeof(float));
+                buffer.push_back(static_cast<uint8_t>(raw & 0xFF));
+                buffer.push_back(static_cast<uint8_t>((raw >> 8) & 0xFF));
+                buffer.push_back(static_cast<uint8_t>((raw >> 16) & 0xFF));
+                buffer.push_back(static_cast<uint8_t>((raw >> 24) & 0xFF));
+                return;
+            }
+            
+            case game_data_type::BOOL: {
+                buffer.push_back(static_cast<uint8_t>(static_cast<bool>(value) ? WireType::BOOL_TRUE : WireType::BOOL_FALSE));
+                return;
+            }
+            
+            case game_data_type::STRING: {
+                std::string str_val = static_cast<std::string>(value);
+                
+                if (str_val.empty()) {
+                    buffer.push_back(static_cast<uint8_t>(WireType::STRING_EMPTY));
+                    return;
+                }
+                
+                buffer.push_back(static_cast<uint8_t>(WireType::STRING));
+                write_string_compact(buffer, str_val);
+                return;
+            }
+            
+            case game_data_type::ARRAY: {
+                auto& arr = value.to_array();
+                
+                if (arr.empty()) {
+                    buffer.push_back(static_cast<uint8_t>(WireType::ARRAY_EMPTY));
+                    return;
+                }
+                
+                if (arr.size() == 1) {
+                    buffer.push_back(static_cast<uint8_t>(WireType::ARRAY_SINGLE));
+                    serialize_game_value(buffer, arr[0]);
+                    return;
+                }
+                
+                // Try optimized vector encoding for 2D/3D numeric arrays
+                if (try_serialize_as_vector(buffer, arr)) {
+                    return;
+                }
+                
+                // Fall back to standard array encoding
+                buffer.push_back(static_cast<uint8_t>(WireType::ARRAY));
+                write_varint(buffer, static_cast<uint32_t>(arr.size()));
+                
+                for (const auto& elem : arr) {
+                    serialize_game_value(buffer, elem);
+                }
+                
+                return;
+            }
+            
+            case game_data_type::HASHMAP: {
+                auto& map = value.to_hashmap();
+                uint32_t count = static_cast<uint32_t>(map.count());
+                
+                if (count == 0) {
+                    buffer.push_back(static_cast<uint8_t>(WireType::HASHMAP_EMPTY));
+                    return;
+                }
+                
+                buffer.push_back(static_cast<uint8_t>(WireType::HASHMAP));
+                write_varint(buffer, count);
+                
+                for (const auto& pair : map) {
+                    serialize_game_value(buffer, pair.key);
+                    serialize_game_value(buffer, pair.value);
+                }
+
+                return;
+            }
+            
+            // Special handling types
+            case game_data_type::OBJECT: {
+                std::string net_id = static_cast<std::string>(sqf::net_id(static_cast<object>(value)));
+                uint32_t creator, id;
+                
+                if (parse_net_id_to_ints(net_id, creator, id)) {
+                    buffer.push_back(static_cast<uint8_t>(WireType::SPECIAL_OBJECT_NETID));
+                    write_varint(buffer, creator);
+                    write_varint(buffer, id);
+                } else {
+                    // Fallback
+                    buffer.push_back(static_cast<uint8_t>(WireType::SPECIAL_OBJECT));
+                    write_string_compact(buffer, net_id);
+                }
+
+                return;
+            }
+            
+            case game_data_type::GROUP: {
+                std::string net_id = static_cast<std::string>(sqf::net_id(static_cast<group>(value)));
+                uint32_t creator, id;
+                
+                if (parse_net_id_to_ints(net_id, creator, id)) {
+                    buffer.push_back(static_cast<uint8_t>(WireType::SPECIAL_GROUP_NETID));
+                    write_varint(buffer, creator);
+                    write_varint(buffer, id);
+                } else {
+                    // Fallback
+                    buffer.push_back(static_cast<uint8_t>(WireType::SPECIAL_GROUP));
+                    write_string_compact(buffer, net_id);
+                }
+
+                return;
+            }
+            
+            case game_data_type::CODE: {
+                buffer.push_back(static_cast<uint8_t>(WireType::SPECIAL_CODE));
+                write_string_compact(buffer, static_cast<std::string>(value));
+                return;
+            }
+            
+            case game_data_type::NAMESPACE: {
+                buffer.push_back(static_cast<uint8_t>(WireType::SPECIAL_NAMESPACE));
+                WireNamespace ns = WireNamespace::MISSION;
+                if (value == sqf::profile_namespace()) ns = WireNamespace::PROFILE;
+                else if (value == sqf::ui_namespace()) ns = WireNamespace::UI;
+                else if (value == sqf::parsing_namespace()) ns = WireNamespace::PARSING;
+                else if (value == sqf::server_namespace()) ns = WireNamespace::SERVER;
+                else if (value == sqf::mission_profile_namespace()) ns = WireNamespace::MISSION_PROFILE;
+                buffer.push_back(static_cast<uint8_t>(ns));
+                return;
+            }
+            
+            case game_data_type::SIDE: {
+                buffer.push_back(static_cast<uint8_t>(WireType::SPECIAL_SIDE));
+                WireSide side = WireSide::SIDE_UNKNOWN;
+                if (value == sqf::west() || value == sqf::blufor()) side = WireSide::WEST;
+                else if (value == sqf::east() || value == sqf::opfor()) side = WireSide::EAST;
+                else if (value == sqf::resistance() || value == sqf::independent()) side = WireSide::RESISTANCE;
+                else if (value == sqf::civilian()) side = WireSide::CIVILIAN;
+                else if (value == sqf::side_logic()) side = WireSide::SIDE_LOGIC;
+                else if (value == sqf::side_enemy()) side = WireSide::SIDE_ENEMY;
+                else if (value == sqf::side_friendly()) side = WireSide::SIDE_FRIENDLY;
+                else if (value == sqf::side_ambient_life()) side = WireSide::SIDE_AMBIENT;
+                else if (value == sqf::side_empty()) side = WireSide::SIDE_EMPTY;
+                buffer.push_back(static_cast<uint8_t>(side));
+                return;
+            }
+            
+            case game_data_type::TEXT: {
+                buffer.push_back(static_cast<uint8_t>(WireType::SPECIAL_TEXT));
+                write_string_compact(buffer, static_cast<std::string>(value));
+                return;
+            }
+            
+            case game_data_type::CONFIG: {
+                buffer.push_back(static_cast<uint8_t>(WireType::SPECIAL_CONFIG));
+                auto hierarchy = sqf::config_hierarchy(value);
+                std::string config_path = "configFile";
+                
+                for (size_t i = 1; i < hierarchy.size(); i++) {
+                    std::string entry = static_cast<std::string>(hierarchy[i]);
+                    size_t last_slash = entry.find_last_of('/');
+
+                    if (last_slash != std::string::npos) {
+                        entry = entry.substr(last_slash + 1);
+                    }
+
+                    config_path += " >> " + entry;
+                }
+                
+                write_string_compact(buffer, config_path);
+                return;
+            }
+            
+            case game_data_type::LOCATION: {
+                buffer.push_back(static_cast<uint8_t>(WireType::SPECIAL_LOCATION));
+                std::string location_name = static_cast<std::string>(sqf::class_name(value));
+                write_string_compact(buffer, location_name.empty() ? "" : location_name);
+                return;
+            }
+            
+            case game_data_type::TEAM_MEMBER: {
+                game_value agent_obj = sqf::agent(value);
+                std::string net_id = static_cast<std::string>(sqf::net_id(static_cast<object>(agent_obj)));
+                uint32_t creator, id;
+                
+                if (parse_net_id_to_ints(net_id, creator, id)) {
+                    buffer.push_back(static_cast<uint8_t>(WireType::SPECIAL_TEAM_MEMBER_NETID));
+                    write_varint(buffer, creator);
+                    write_varint(buffer, id);
+                } else {
+                    buffer.push_back(static_cast<uint8_t>(WireType::SPECIAL_TEAM_MEMBER));
+                    write_string_compact(buffer, net_id);
+                }
+                
+                return;
+            }
+            
+            case game_data_type::DISPLAY: {
+                buffer.push_back(static_cast<uint8_t>(WireType::SPECIAL_DISPLAY));
+                int idd = static_cast<int>(sqf::ctrl_idd(value));
+                write_varint(buffer, static_cast<uint32_t>(idd >= 0 ? idd : 0));
+                return;
+            }
+            
+            // Unsupported types
             case game_data_type::CONTROL:
             case game_data_type::SCRIPT:
             case game_data_type::TASK:
@@ -815,187 +1603,10 @@ private:
             case game_data_type::SUBGROUP:
             case game_data_type::TARGET:
                 throw std::runtime_error("Cannot serialize unsupported network type");
+                
             default:
-                break;
-        }
-
-        write_bool(buffer, needs_special_handling);
-        
-        if (needs_special_handling) {
-            write_uint32(buffer, static_cast<uint32_t>(type));
-            std::string serialized;
-            
-            switch (type) {
-                case game_data_type::CODE: {
-                    std::string code_str = static_cast<std::string>(value);
-                    serialized = code_str;
-                    break;
-                }
-                
-                case game_data_type::NAMESPACE: {
-                    if (value == sqf::mission_namespace()) {
-                        serialized = "missionNamespace";
-                    } else if (value == sqf::profile_namespace()) {
-                        serialized = "profileNamespace";
-                    } else if (value == sqf::ui_namespace()) {
-                        serialized = "uiNamespace";
-                    } else if (value == sqf::parsing_namespace()) {
-                        serialized = "parsingNamespace";
-                    } else if (value == sqf::server_namespace()) {
-                        serialized = "serverNamespace";
-                    } else if (value == sqf::mission_profile_namespace()) {
-                        serialized = "missionProfileNamespace";
-                    } else {
-                        serialized = "missionNamespace";
-                    }
-
-                    break;
-                }
-                
-                case game_data_type::SIDE: {
-                    if (value == sqf::west() || value == sqf::blufor()) {
-                        serialized = "west";
-                    } else if (value == sqf::east() || value == sqf::opfor()) {
-                        serialized = "east";
-                    } else if (value == sqf::resistance() || value == sqf::independent()) {
-                        serialized = "resistance";
-                    } else if (value == sqf::civilian()) {
-                        serialized = "civilian";
-                    } else if (value == sqf::side_logic()) {
-                        serialized = "sideLogic";
-                    } else if (value == sqf::side_unknown()) {
-                        serialized = "sideUnknown";
-                    } else if (value == sqf::side_enemy()) {
-                        serialized = "sideEnemy";
-                    } else if (value == sqf::side_friendly()) {
-                        serialized = "sideFriendly";
-                    } else if (value == sqf::side_ambient_life()) {
-                        serialized = "sideAmbientLife";
-                    } else if (value == sqf::side_empty()) {
-                        serialized = "sideEmpty";
-                    } else {
-                        serialized = "sideUnknown";
-                    }
-
-                    break;
-                }
-                
-                case game_data_type::GROUP: {
-                    serialized = static_cast<std::string>(sqf::net_id(static_cast<group>(value)));
-                    break;
-                }
-
-                case game_data_type::OBJECT: {
-                    serialized = static_cast<std::string>(sqf::net_id(static_cast<object>(value)));
-                    break;
-                }
-                
-                case game_data_type::TEXT: {
-                    std::string text_str = static_cast<std::string>(value);
-                    serialized = text_str;
-                    break;
-                }
-                
-                case game_data_type::CONFIG: {
-                    auto hierarchy = sqf::config_hierarchy(value);
-
-                    if (hierarchy.size() <= 1) {
-                        serialized = "configFile";
-                    } else {
-                        std::string config_path = "configFile";
-
-                        for (size_t i = 1; i < hierarchy.size(); i++) {
-                            std::string entry = static_cast<std::string>(hierarchy[i]);
-                            size_t last_slash = entry.find_last_of('/');
-
-                            if (last_slash != std::string::npos) {
-                                entry = entry.substr(last_slash + 1);
-                            }
-
-                            config_path += " >> " + entry;
-                        }
-
-                        serialized = config_path;
-                    }
-
-                    break;
-                }
-                
-                case game_data_type::LOCATION: {
-                    std::string location_name = static_cast<std::string>(sqf::class_name(value));
-                    serialized = location_name.empty() ? "LOCATION_NULL" : location_name;
-                    break;
-                }
-                
-                case game_data_type::TEAM_MEMBER: {
-                    game_value agent_obj = sqf::agent(value);
-                    serialized = static_cast<std::string>(sqf::net_id(static_cast<object>(agent_obj)));
-                    break;
-                }
-                
-                case game_data_type::DISPLAY: {
-                    serialized = std::to_string(static_cast<int>(sqf::ctrl_idd(value)));
-                    break;
-                }
-                
-                default:
-                    throw std::runtime_error("Cannot serialize game value type");
-            }
-            
-            write_string(buffer, serialized);
-        } else {
-            write_uint32(buffer, static_cast<uint32_t>(type));
-            
-            // Write value normally for simple types
-            switch (type) {
-                case game_data_type::NOTHING:
-                case game_data_type::ANY:
-                    break;
-                    
-                case game_data_type::SCALAR: {
-                    float val = value;
-                    write_float(buffer, val);
-                    break;
-                }
-                
-                case game_data_type::BOOL: {
-                    bool val = value;
-                    write_bool(buffer, val);
-                    break;
-                }
-                
-                case game_data_type::STRING: {
-                    std::string str_val = static_cast<std::string>(value);
-                    write_string(buffer, str_val);
-                    break;
-                }
-                
-                case game_data_type::ARRAY: {
-                    auto& arr = value.to_array();
-                    write_uint32(buffer, static_cast<uint32_t>(arr.size()));
-
-                    for (const auto& elem : arr) {
-                        serialize_game_value(buffer, elem);
-                    }
-
-                    break;
-                }
-                
-                case game_data_type::HASHMAP: {
-                    auto& map = value.to_hashmap();
-                    write_uint32(buffer, static_cast<uint32_t>(map.count()));
-
-                    for (const auto& pair : map) {
-                        serialize_game_value(buffer, pair.key);
-                        serialize_game_value(buffer, pair.value);
-                    }
-
-                    break;
-                }
-                
-                default:
-                    break;
-            }
+                buffer.push_back(static_cast<uint8_t>(WireType::NOTHING));
+                return;
         }
     }
     
@@ -1004,161 +1615,330 @@ private:
             throw std::runtime_error("Buffer underrun during deserialization");
         }
         
-        bool is_serialized = read_bool(data, offset, max_size);
+        WireType wire_type = static_cast<WireType>(data[offset++]);
         
-        if (is_serialized) {
-            game_data_type original_type = static_cast<game_data_type>(read_uint32(data, offset, max_size));
-            std::string serialized = read_string(data, offset, max_size);
+        switch (wire_type) {
+            case WireType::NOTHING:
+            case WireType::ANY_NIL:
+                return game_value();
+                
+            case WireType::SCALAR_ZERO:
+                return game_value(0.0f);
+                
+            case WireType::SCALAR_ONE:
+                return game_value(1.0f);
+                
+            case WireType::SCALAR_NEG_ONE:
+                return game_value(-1.0f);
+                
+            case WireType::SCALAR_VARINT_P:
+                return game_value(static_cast<float>(read_varint(data, offset, max_size)));
             
-            switch (original_type) {
-                case game_data_type::CODE:
-                    return sqf::compile(serialized);
+            case WireType::SCALAR_VARINT_N:
+                return game_value(static_cast<float>(-static_cast<int32_t>(read_varint(data, offset, max_size))));
+            
+            case WireType::SCALAR_FLOAT: {
+                if (offset + 4 > max_size) {
+                    throw std::runtime_error("Buffer underrun reading float");
+                }
+
+                uint32_t raw = static_cast<uint32_t>(data[offset]) |
+                              (static_cast<uint32_t>(data[offset + 1]) << 8) |
+                              (static_cast<uint32_t>(data[offset + 2]) << 16) |
+                              (static_cast<uint32_t>(data[offset + 3]) << 24);
+
+                offset += 4;
+                float val;
+                std::memcpy(&val, &raw, sizeof(float));
+                return game_value(val);
+            }
+            
+            case WireType::BOOL_FALSE:
+                return game_value(false);
                 
-                case game_data_type::NAMESPACE:
-                    if (serialized == "missionNamespace") return sqf::mission_namespace();
-                    if (serialized == "profileNamespace") return sqf::profile_namespace();
-                    if (serialized == "uiNamespace") return sqf::ui_namespace();
-                    if (serialized == "parsingNamespace") return sqf::parsing_namespace();
-                    if (serialized == "serverNamespace") return sqf::server_namespace();
-                    if (serialized == "missionProfileNamespace") return sqf::mission_profile_namespace();
-                    return sqf::mission_namespace();
+            case WireType::BOOL_TRUE:
+                return game_value(true);
                 
-                case game_data_type::SIDE:
-                    if (serialized == "west") return sqf::west();
-                    if (serialized == "east") return sqf::east();
-                    if (serialized == "resistance") return sqf::resistance();
-                    if (serialized == "civilian") return sqf::civilian();
-                    if (serialized == "sideLogic") return sqf::side_logic();
-                    if (serialized == "sideUnknown") return sqf::side_unknown();
-                    if (serialized == "sideEnemy") return sqf::side_enemy();
-                    if (serialized == "sideFriendly") return sqf::side_friendly();
-                    if (serialized == "sideAmbientLife") return sqf::side_ambient_life();
-                    if (serialized == "sideEmpty") return sqf::side_empty();
-                    return sqf::side_unknown();
+            case WireType::STRING_EMPTY:
+                return game_value(std::string(""));
+            
+            case WireType::STRING:
+                return game_value(read_string_compact(data, offset, max_size));
+            
+            case WireType::ARRAY_EMPTY:
+                return game_value(auto_array<game_value>());
                 
-                case game_data_type::GROUP: {
-                    return sqf::group_from_net_id(serialized);
+            case WireType::ARRAY_SINGLE: {
+                auto_array<game_value> arr;
+                arr.push_back(deserialize_game_value(data, offset, max_size));
+                return game_value(std::move(arr));
+            }
+            
+            case WireType::ARRAY: {
+                uint32_t count = read_varint(data, offset, max_size);
+                auto_array<game_value> arr;
+                arr.reserve(count);
+                
+                for (uint32_t i = 0; i < count; i++) {
+                    arr.push_back(deserialize_game_value(data, offset, max_size));
                 }
                 
-                case game_data_type::OBJECT: {
-                    return sqf::object_from_net_id(serialized);
+                return game_value(std::move(arr));
+            }
+
+            case WireType::VEC2_FLOAT16: {
+                auto_array<game_value> arr;
+                arr.reserve(2);
+                arr.push_back(game_value(read_float16(data, offset, max_size)));
+                arr.push_back(game_value(read_float16(data, offset, max_size)));
+                return game_value(std::move(arr));
+            }
+
+            case WireType::VEC3_FLOAT16: {
+                auto_array<game_value> arr;
+                arr.reserve(3);
+                arr.push_back(game_value(read_float16(data, offset, max_size)));
+                arr.push_back(game_value(read_float16(data, offset, max_size)));
+                arr.push_back(game_value(read_float16(data, offset, max_size)));
+                return game_value(std::move(arr));
+            }
+
+            case WireType::VEC2_FLOAT32: {
+                auto_array<game_value> arr;
+                arr.reserve(2);
+                arr.push_back(game_value(read_float32_raw(data, offset, max_size)));
+                arr.push_back(game_value(read_float32_raw(data, offset, max_size)));
+                return game_value(std::move(arr));
+            }
+
+            case WireType::VEC3_FLOAT32: {
+                auto_array<game_value> arr;
+                arr.reserve(3);
+                arr.push_back(game_value(read_float32_raw(data, offset, max_size)));
+                arr.push_back(game_value(read_float32_raw(data, offset, max_size)));
+                arr.push_back(game_value(read_float32_raw(data, offset, max_size)));
+                return game_value(std::move(arr));
+            }
+
+            case WireType::VEC2_MIXED: {
+                if (offset >= max_size) {
+                    throw std::runtime_error("Buffer underrun reading vec2 mixed encoding");
                 }
+
+                uint8_t encoding = data[offset++];
                 
-                case game_data_type::TEXT: {
-                    if (serialized.empty()) {
-                        return sqf::parse_text("");
-                    }
+                auto read_component = [&](int shift, int sign_bit) -> float {
+                    ComponentEncoding ce = static_cast<ComponentEncoding>((encoding >> shift) & 0x03);
+                    bool negative = (encoding & (1 << sign_bit)) != 0;
+                    
+                    switch (ce) {
+                        case ComponentEncoding::ZERO:
+                            return 0.0f;
 
-                    return sqf::parse_text(serialized);
-                }
-                
-                case game_data_type::CONFIG: {
-                    if (serialized == "configFile" || serialized.empty()) {
-                        return sqf::config_file();
-                    }
-
-                    code compiled = sqf::compile("setReturnValue (call {" + serialized + "});");
-                    return raw_call_sqf_native(compiled);
-                }
-                
-                case game_data_type::LOCATION: {
-                    if (serialized == "LOCATION_NULL" || serialized.empty()) {
-                        return sqf::location_null();
-                    }
-
-                    float world_size = sqf::world_size();
-                    vector3 center(world_size / 2.0f, world_size / 2.0f, 0.0f);
-                    float radius = world_size * std::sqrt(2.0f) / 2.0f;
-                    std::vector<std::string> all_types;
-                    auto all_locations = sqf::nearest_locations(center, all_types, radius);
-
-                    for (const auto& loc : all_locations) {
-                        if (static_cast<std::string>(sqf::class_name(loc)) == serialized) {
-                            return loc;
+                        case ComponentEncoding::ONE:
+                            return negative ? -1.0f : 1.0f;
+                            
+                        case ComponentEncoding::VARINT: {
+                            float val = static_cast<float>(read_varint(data, offset, max_size));
+                            return negative ? -val : val;
                         }
-                    }
 
+                        case ComponentEncoding::FLOAT32:
+                            return read_float32_raw(data, offset, max_size);
+
+                        default:
+                            return 0.0f;
+                    }
+                };
+                
+                auto_array<game_value> arr;
+                arr.reserve(2);
+                arr.push_back(game_value(read_component(0, 6)));
+                arr.push_back(game_value(read_component(2, 7)));
+                return game_value(std::move(arr));
+            }
+
+            case WireType::VEC3_MIXED: {
+                if (offset + 2 > max_size) {
+                    throw std::runtime_error("Buffer underrun reading vec3 mixed encoding");
+                }
+
+                uint8_t encoding1 = data[offset++];
+                uint8_t encoding2 = data[offset++];
+                
+                auto read_component = [&](int shift, int sign_bit, uint8_t enc_byte) -> float {
+                    ComponentEncoding ce = static_cast<ComponentEncoding>((encoding1 >> shift) & 0x03);
+                    bool negative = (enc_byte & (1 << sign_bit)) != 0;
+                    
+                    switch (ce) {
+                        case ComponentEncoding::ZERO:
+                            return 0.0f;
+
+                        case ComponentEncoding::ONE:
+                            return negative ? -1.0f : 1.0f;
+
+                        case ComponentEncoding::VARINT: {
+                            float val = static_cast<float>(read_varint(data, offset, max_size));
+                            return negative ? -val : val;
+                        }
+
+                        case ComponentEncoding::FLOAT32:
+                            return read_float32_raw(data, offset, max_size);
+
+                        default:
+                            return 0.0f;
+                    }
+                };
+                
+                auto_array<game_value> arr;
+                arr.reserve(3);
+                arr.push_back(game_value(read_component(0, 6, encoding1)));
+                arr.push_back(game_value(read_component(2, 7, encoding1)));
+                arr.push_back(game_value(read_component(4, 0, encoding2)));
+                return game_value(std::move(arr));
+            }
+                        
+            case WireType::HASHMAP_EMPTY: {
+                auto_array<game_value> empty_pairs;
+                return raw_call_sqf_args_native(g_compiled_sqf_create_hash_map_from_array, game_value(std::move(empty_pairs)));
+            }
+            
+            case WireType::HASHMAP: {
+                uint32_t count = read_varint(data, offset, max_size);
+                auto_array<game_value> pairs;
+                pairs.reserve(count);
+                
+                for (uint32_t i = 0; i < count; i++) {
+                    auto_array<game_value> kv;
+                    kv.push_back(deserialize_game_value(data, offset, max_size));
+                    kv.push_back(deserialize_game_value(data, offset, max_size));
+                    pairs.push_back(game_value(std::move(kv)));
+                }
+                
+                return raw_call_sqf_args_native(g_compiled_sqf_create_hash_map_from_array, game_value(std::move(pairs)));
+            }
+            
+            // Special handling types
+            case WireType::SPECIAL_OBJECT:
+                return sqf::object_from_net_id(read_string_compact(data, offset, max_size));
+            
+            case WireType::SPECIAL_GROUP:
+                return sqf::group_from_net_id(read_string_compact(data, offset, max_size));
+
+            case WireType::SPECIAL_OBJECT_NETID: {
+                uint32_t creator = read_varint(data, offset, max_size);
+                uint32_t id = read_varint(data, offset, max_size);
+                return sqf::object_from_net_id(format_net_id_from_ints(creator, id));
+            }
+            
+            case WireType::SPECIAL_GROUP_NETID: {
+                uint32_t creator = read_varint(data, offset, max_size);
+                uint32_t id = read_varint(data, offset, max_size);
+                return sqf::group_from_net_id(format_net_id_from_ints(creator, id));
+            }
+            
+            case WireType::SPECIAL_CODE:
+                return sqf::compile(read_string_compact(data, offset, max_size));
+            
+            case WireType::SPECIAL_NAMESPACE: {
+                if (offset >= max_size) {
+                    throw std::runtime_error("Buffer underrun reading namespace");
+                }
+                
+                switch (static_cast<WireNamespace>(data[offset++])) {
+                    case WireNamespace::PROFILE:         return sqf::profile_namespace();
+                    case WireNamespace::UI:              return sqf::ui_namespace();
+                    case WireNamespace::PARSING:         return sqf::parsing_namespace();
+                    case WireNamespace::SERVER:          return sqf::server_namespace();
+                    case WireNamespace::MISSION_PROFILE: return sqf::mission_profile_namespace();
+                    default:                             return sqf::mission_namespace();
+                }
+            }
+            
+            case WireType::SPECIAL_SIDE: {
+                if (offset >= max_size) {
+                    throw std::runtime_error("Buffer underrun reading side");
+                }
+                
+                switch (static_cast<WireSide>(data[offset++])) {
+                    case WireSide::WEST:          return sqf::west();
+                    case WireSide::EAST:          return sqf::east();
+                    case WireSide::RESISTANCE:    return sqf::resistance();
+                    case WireSide::CIVILIAN:      return sqf::civilian();
+                    case WireSide::SIDE_LOGIC:    return sqf::side_logic();
+                    case WireSide::SIDE_ENEMY:    return sqf::side_enemy();
+                    case WireSide::SIDE_FRIENDLY: return sqf::side_friendly();
+                    case WireSide::SIDE_AMBIENT:  return sqf::side_ambient_life();
+                    case WireSide::SIDE_EMPTY:    return sqf::side_empty();
+                    default:                      return sqf::side_unknown();
+                }
+            }
+            
+            case WireType::SPECIAL_TEXT: {
+                std::string text_str = read_string_compact(data, offset, max_size);
+                return sqf::parse_text(text_str);
+            }
+            
+            case WireType::SPECIAL_CONFIG: {
+                std::string config_path = read_string_compact(data, offset, max_size);
+
+                if (config_path == "configFile" || config_path.empty()) {
+                    return sqf::config_file();
+                }
+
+                code compiled = sqf::compile("setReturnValue (call {" + config_path + "});");
+                return raw_call_sqf_native(compiled);
+            }
+            
+            case WireType::SPECIAL_LOCATION: {
+                std::string location_name = read_string_compact(data, offset, max_size);
+                
+                if (location_name.empty()) {
                     return sqf::location_null();
                 }
                 
-                case game_data_type::TEAM_MEMBER: {
-                    game_value agent_obj = sqf::object_from_net_id(serialized);
-
-                    if (agent_obj.is_null()) {
-                        return sqf::team_member_null();
+                float world_size = sqf::world_size();
+                vector3 center(world_size / 2.0f, world_size / 2.0f, 0.0f);
+                float radius = world_size * std::sqrt(2.0f) / 2.0f;
+                std::vector<std::string> all_types;
+                auto all_locations = sqf::nearest_locations(center, all_types, radius);
+                
+                for (const auto& loc : all_locations) {
+                    if (static_cast<std::string>(sqf::class_name(loc)) == location_name) {
+                        return loc;
                     }
-
-                    return sqf::agent(agent_obj);
                 }
                 
-                case game_data_type::DISPLAY: {
-                    int idd;
-                    
-                    try {
-                        idd = std::stoi(serialized);
-                    } catch (...) {
-                        return sqf::display_null();
-                    }
-                    
-                    return sqf::find_display(idd);
-                }
-                
-                default:
-                    return game_value();
+                return sqf::location_null();
             }
-        } else {
-            game_data_type type = static_cast<game_data_type>(read_uint32(data, offset, max_size));
             
-            switch (type) {
-                case game_data_type::NOTHING:
-                case game_data_type::ANY:
-                    return game_value();
+            case WireType::SPECIAL_TEAM_MEMBER: {
+                game_value agent_obj = sqf::object_from_net_id(read_string_compact(data, offset, max_size));
                 
-                case game_data_type::SCALAR: {
-                    float val = read_float(data, offset, max_size);
-                    return game_value(val);
+                if (agent_obj.is_null()) {
+                    return sqf::team_member_null();
                 }
                 
-                case game_data_type::BOOL: {
-                    bool val = read_bool(data, offset, max_size);
-                    return game_value(val);
-                }
-                
-                case game_data_type::STRING: {
-                    std::string str = read_string(data, offset, max_size);
-                    return game_value(str);
-                }
-                
-                case game_data_type::ARRAY: {
-                    uint32_t size = read_uint32(data, offset, max_size);
-                    auto_array<game_value> arr;
-                    arr.reserve(size);
-
-                    for (uint32_t i = 0; i < size; i++) {
-                        arr.push_back(deserialize_game_value(data, offset, max_size));
-                    }
-
-                    return game_value(std::move(arr));
-                }
-                
-                case game_data_type::HASHMAP: {
-                    uint32_t size = read_uint32(data, offset, max_size);
-                    auto_array<game_value> pairs;
-                    pairs.reserve(size);
-
-                    for (uint32_t i = 0; i < size; i++) {
-                        auto_array<game_value> kv;
-                        kv.push_back(deserialize_game_value(data, offset, max_size));
-                        kv.push_back(deserialize_game_value(data, offset, max_size));
-                        pairs.push_back(game_value(std::move(kv)));
-                    }
-
-                    return raw_call_sqf_args_native(g_compiled_sqf_create_hash_map_from_array, game_value(std::move(pairs)));
-                }
-                
-                default:
-                    return game_value();
+                return sqf::agent(agent_obj);
             }
+
+            case WireType::SPECIAL_TEAM_MEMBER_NETID: {
+                uint32_t creator = read_varint(data, offset, max_size);
+                uint32_t id = read_varint(data, offset, max_size);
+                game_value agent_obj = sqf::object_from_net_id(format_net_id_from_ints(creator, id));
+                
+                if (agent_obj.is_null()) {
+                    return sqf::team_member_null();
+                }
+                
+                return sqf::agent(agent_obj);
+            }
+            
+            case WireType::SPECIAL_DISPLAY:
+                return sqf::find_display(static_cast<int>(read_varint(data, offset, max_size)));
+            
+            default:
+                return game_value();
         }
     }
     
@@ -1187,7 +1967,7 @@ private:
     ) {
         std::vector<int> targets;
         local_exec = false;
-        int our_client_id = cached_client_id_.load();
+        int our_client_id = cached_client_id_;
         
         switch (target_type) {
             case NetworkTargetType::CLIENT_ID: {
@@ -1591,7 +2371,7 @@ private:
                     out_targets.insert(out_targets.end(), targets.begin(), targets.end());
                     if (local_exec) out_local_exec = true;
                 } else {
-                    int our_client_id = cached_client_id_.load();
+                    int our_client_id = cached_client_id_;
                     
                     if (client_id == our_client_id || client_id == 2) {
                         out_local_exec = true;
@@ -1733,7 +2513,7 @@ private:
     ) {
         std::vector<int> targets;
         local_exec = false;
-        int our_client_id = cached_client_id_.load();
+        int our_client_id = cached_client_id_;
         
         // Check for colon - netId format
         if (target_str.find(':') != std::string::npos) {
@@ -1949,7 +2729,7 @@ private:
         const game_value& message,
         int sender_client_id
     ) {
-        if (!running_.load()) {
+        if (!running_) {
             return false;
         }
         
@@ -1957,12 +2737,20 @@ private:
             std::shared_ptr<std::vector<uint8_t>> payload;
             
             if (!targets.empty()) {
+                auto& tls_buffer = get_tls_serialize_buffer();
+                tls_buffer.clear();
+                serialize_game_value(tls_buffer, message);
                 payload = payload_pool_->acquire();
-                serialize_game_value(*payload, message);
+                payload->assign(tls_buffer.begin(), tls_buffer.end());
             }
             
             if (local_exec) {
                 queue_local_message(event_name, message, sender_client_id);
+                
+                if (network_logging_enabled_) {
+                    sqf::diag_log("KH Network [SEND LOCAL] Event: \"" + event_name + 
+                                  "\" | Sender: " + std::to_string(sender_client_id));
+                }
             }
             
             if (!targets.empty()) {
@@ -1970,6 +2758,11 @@ private:
                     outgoing_queue_lockfree_.push(
                         OutgoingMessage(target, sender_client_id, std::string(event_name), payload)
                     );
+                    
+                    if (network_logging_enabled_) {
+                        log_network_message("SEND", event_name, sender_client_id, target, 
+                                           payload->size(), payload->size(), false, false);
+                    }
                 }
 
                 outgoing_has_data_.store(true, std::memory_order_release);
@@ -2217,7 +3010,7 @@ private:
     }
 
     void listen_thread_func() {
-        while (running_.load()) {
+        while (running_) {
             fd_set read_fds;
             FD_ZERO(&read_fds);
             FD_SET(listen_socket_, &read_fds);
@@ -2395,7 +3188,7 @@ private:
         
         // Parse IP:port or just IP
         std::string ip = server_addr;
-        int port = network_port_.load();
+        int port = network_port_;
         size_t colon_pos = server_addr.find(':');
 
         if (colon_pos != std::string::npos) {
@@ -2440,7 +3233,7 @@ private:
         mode = 0;
         ioctlsocket(sock, FIONBIO, &mode);
         set_socket_options(sock);
-        int our_client_id = cached_client_id_.load();
+        int our_client_id = cached_client_id_;
 
         if (our_client_id < 0) {
             closesocket(sock);
@@ -2471,8 +3264,8 @@ private:
         std::vector<NetworkMessage> parsed_messages;
         parsed_messages.reserve(config_coalesce_max_messages_);
         
-        while (running_.load()) {
-            if (is_server_.load()) {
+        while (running_) {
+            if (is_server_) {
                 // Server mode - handled by listen thread
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 continue;
@@ -2538,7 +3331,7 @@ private:
         std::vector<OutgoingMessage> client_batch;
         client_batch.reserve(config_coalesce_max_messages_);
         
-        while (running_.load()) {
+        while (running_) {
             // Wait for data with timeout
             if (!outgoing_has_data_.load(std::memory_order_acquire)) {
                 if (config_coalesce_enabled_ && config_coalesce_delay_us_ > 0) {
@@ -2548,7 +3341,7 @@ private:
                 }
             }
             
-            if (!running_.load()) break;
+            if (!running_) break;
             
             // Drain the lock-free queue
             batch.clear();
@@ -2569,7 +3362,7 @@ private:
                 outgoing_has_data_.store(false, std::memory_order_release);
             }
 
-            if (is_server_.load()) {
+            if (is_server_) {
                 clients_to_disconnect.clear();
                 
                 // Group messages by target client for coalescing
@@ -2886,7 +3679,7 @@ public:
     }
     
     bool initialize() {
-        if (initialized_.load()) {
+        if (initialized_) {
             return true;
         }
         
@@ -2912,13 +3705,13 @@ public:
     }
     
     bool start(bool as_server) {
-        if (!initialized_.load()) {
+        if (!initialized_) {
             if (!initialize()) {
                 return false;
             }
         }
         
-        if (running_.load()) {
+        if (running_) {
             return true;
         }
         
@@ -2942,10 +3735,10 @@ public:
             struct sockaddr_in server_addr;
             server_addr.sin_family = AF_INET;
             server_addr.sin_addr.s_addr = INADDR_ANY;
-            server_addr.sin_port = htons(static_cast<u_short>(network_port_.load()));
+            server_addr.sin_port = htons(static_cast<u_short>(network_port_));
             
             if (bind(listen_socket_, reinterpret_cast<struct sockaddr*>(&server_addr), sizeof(server_addr)) == SOCKET_ERROR) {
-                report_error("KH Network: Failed to bind listen socket on port " + std::to_string(network_port_.load()));
+                report_error("KH Network: Failed to bind listen socket on port " + std::to_string(network_port_));
                 closesocket(listen_socket_);
                 listen_socket_ = INVALID_SOCKET;
                 return false;
@@ -2958,7 +3751,7 @@ public:
                 return false;
             }
             
-            sqf::diag_log("KH Network: Server listening on port " + std::to_string(network_port_.load()));
+            sqf::diag_log("KH Network: Server listening on port " + std::to_string(network_port_));
         }
         
         running_.store(true);
@@ -2973,7 +3766,7 @@ public:
     }
     
     void shutdown() {
-        if (!running_.load() && !initialized_.load()) {
+        if (!running_ && !initialized_) {
             return;
         }
         
@@ -3059,12 +3852,12 @@ public:
     }
     
     int get_port() const {
-        return network_port_.load();
+        return network_port_;
     }
     
     std::string get_local_ip_port() {
         std::lock_guard<std::mutex> lock(local_ip_mutex_);
-        return local_ip_ + ":" + std::to_string(network_port_.load());
+        return local_ip_ + ":" + std::to_string(network_port_);
     }
     
     void set_server_ip(const std::string& ip) {
@@ -3073,13 +3866,15 @@ public:
     }
 
     void store_jip_message(const std::string& jip_key, const std::string& event_name, const game_value& message, int sender, const std::string& dependency_net_id = "", bool dependency_is_group = false) {
-        if (jip_key.empty() || !is_server_.load()) {
+        if (jip_key.empty() || !is_server_) {
             return;
         }
         
         try {
-            std::vector<uint8_t> payload;
-            serialize_game_value(payload, message);
+            auto& tls_buffer = get_tls_serialize_buffer();
+            tls_buffer.clear();
+            serialize_game_value(tls_buffer, message);
+            std::vector<uint8_t> payload(tls_buffer.begin(), tls_buffer.end());
             std::lock_guard<std::mutex> lock(jip_mutex_);
             jip_messages_[jip_key] = {event_name, std::move(payload), sender, dependency_net_id, dependency_is_group};
         } catch (const std::exception& e) {
@@ -3141,23 +3936,26 @@ public:
     }
 
     bool send_message(int target_client, const std::string& event_name, const game_value& message) {
-        if (!running_.load()) {
+        if (!running_) {
             return false;
         }
         
-        int our_client_id = cached_client_id_.load();
+        int our_client_id = cached_client_id_;
 
         // Special case: server sending to itself (client 2)
         // Or any machine sending to its own client ID
         if (target_client == our_client_id || 
-            (is_server_.load() && target_client == 2)) {
+            (is_server_ && target_client == 2)) {
             queue_local_message(event_name, message, our_client_id);
             return true;
         }
         
         try {
+            auto& tls_buffer = get_tls_serialize_buffer();
+            tls_buffer.clear();
+            serialize_game_value(tls_buffer, message);
             auto payload = payload_pool_->acquire();
-            serialize_game_value(*payload, message);
+            payload->assign(tls_buffer.begin(), tls_buffer.end());
             
             outgoing_queue_lockfree_.push(
                 OutgoingMessage(target_client, our_client_id, std::string(event_name), std::move(payload))
@@ -3177,11 +3975,11 @@ public:
         const std::string& event_name,
         const game_value& message
     ) {
-        if (!running_.load()) {
+        if (!running_) {
             return false;
         }
         
-        int our_client_id = cached_client_id_.load();
+        int our_client_id = cached_client_id_;
         
         // Handle simple local-only cases first
         if (target_type == NetworkTargetType::DO_NOTHING) {
@@ -3194,7 +3992,7 @@ public:
         }
         
         // If we're the server, we can resolve all targets directly
-        if (is_server_.load()) {
+        if (is_server_) {
             bool local_exec = false;
             std::vector<int> targets = resolve_targets_server(target_type, target_data, our_client_id, local_exec);
             return send_to_targets(targets, local_exec, event_name, message, our_client_id);
@@ -3299,7 +4097,7 @@ public:
     
     // Process internal routing messages (called by server when receiving _KH_INTERNAL_ROUTE_ events)
     void process_routing_request(const game_value& route_data, int sender_client_id) {
-        if (!is_server_.load()) {
+        if (!is_server_) {
             return; // Only server processes routing requests
         }
         
@@ -3488,6 +4286,12 @@ public:
                     size_t offset = 0;
                     deserialized = deserialize_game_value(msg.payload.data(), offset, msg.payload.size());
                 }
+
+                if (network_logging_enabled_) {
+                    sqf::diag_log("KH Network [PROCESS] Event: \"" + msg.event_name + 
+                                  "\" | Sender: " + std::to_string(msg.sender_client_id) +
+                                  " | Payload: " + std::to_string(msg.payload.size()) + "B");
+                }
                 
                 HandlerListPtr handlers = cow_handlers_.get_handlers(msg.event_name);
                 
@@ -3516,7 +4320,7 @@ public:
     }
 
     void apply_settings(const game_value& settings) {
-        if (running_.load()) {
+        if (running_) {
             report_error("KH Network: Cannot apply settings while running");
             return;
         }
@@ -3600,17 +4404,69 @@ public:
         if (config_coalesce_delay_us_ < 0) config_coalesce_delay_us_ = 0;
         if (config_coalesce_delay_us_ > 10000) config_coalesce_delay_us_ = 10000; // 10ms max
     }
+
+    void set_network_logging(bool enabled) {
+        if (!is_server_) {
+            return;  // Server-only feature
+        }
+
+        network_logging_enabled_.store(enabled);
+        sqf::diag_log(std::string("KH Network: Logging ") + (enabled ? "ENABLED" : "DISABLED"));
+    }
+
+    bool is_network_logging_enabled() const {
+        return network_logging_enabled_;
+    }
+
+    void log_network_message(const std::string& direction, const std::string& event_name, 
+                             int sender_id, int target_id, size_t payload_size,
+                             size_t wire_size, bool compressed, bool coalesced, int msg_count = 1) {
+        if (!network_logging_enabled_) return;
+        std::string log_msg = "KH Network [" + direction + "] Event: \"" + event_name + "\"";
+        log_msg += " | Sender: " + std::to_string(sender_id);
+        log_msg += " | Target: " + std::to_string(target_id);
+        log_msg += " | Payload: " + std::to_string(payload_size) + "B";
+        log_msg += " | Wire: " + std::to_string(wire_size) + "B";
+        
+        if (compressed) {
+            float ratio = payload_size > 0 ? (1.0f - static_cast<float>(wire_size) / static_cast<float>(payload_size)) * 100.0f : 0.0f;
+            log_msg += " | Compressed: " + std::to_string(static_cast<int>(ratio)) + "%";
+        }
+        
+        if (coalesced) {
+            log_msg += " | Coalesced: " + std::to_string(msg_count) + " msgs";
+        }
+        
+        sqf::diag_log(log_msg);
+    }
+
+    void log_network_batch(const std::string& direction, int target_id, 
+                           size_t total_payload, size_t wire_size, 
+                           bool compressed, int msg_count) {
+        if (!network_logging_enabled_) return;
+        std::string log_msg = "KH Network [" + direction + " BATCH] Target: " + std::to_string(target_id);
+        log_msg += " | Messages: " + std::to_string(msg_count);
+        log_msg += " | Total Payload: " + std::to_string(total_payload) + "B";
+        log_msg += " | Wire: " + std::to_string(wire_size) + "B";
+        
+        if (compressed && total_payload > 0) {
+            float ratio = (1.0f - static_cast<float>(wire_size) / static_cast<float>(total_payload)) * 100.0f;
+            log_msg += " | Compression: " + std::to_string(static_cast<int>(ratio)) + "%";
+        }
+        
+        sqf::diag_log(log_msg);
+    }
         
     bool is_initialized() const {
-        return initialized_.load();
+        return initialized_;
     }
     
     bool is_running() const {
-        return running_.load();
+        return running_;
     }
     
     bool is_server() const {
-        return is_server_.load();
+        return is_server_;
     }
 };
 

@@ -102,6 +102,7 @@ static registered_sqf_function _sqf_network_remove_handler;
 static registered_sqf_function _sqf_network_is_initialized;
 static registered_sqf_function _sqf_network_initialize;
 static registered_sqf_function _sqf_network_shutdown;
+static registered_sqf_function _sqf_enable_network_logging;
 
 static game_value execute_lua_sqf(game_value_parameter args, game_value_parameter code_or_function) {    
     try {
@@ -2442,6 +2443,21 @@ static game_value network_shutdown_sqf() {
     }
 }
 
+static game_value enable_network_logging_sqf(game_value_parameter enabled_value) {
+    try {
+        if (!sqf::is_server()) {
+            return game_value(false);
+        }
+        
+        bool enabled = static_cast<bool>(enabled_value);        
+        NetworkFramework::instance().set_network_logging(enabled);
+        return game_value(true);
+    } catch (const std::exception& e) {
+        report_error("KH Network: Error in khNetworkLog - " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
 static game_value execute_lua_sqf_unary(game_value_parameter code_or_function) {
     return execute_lua_sqf(game_value(), code_or_function);
 }
@@ -3281,6 +3297,14 @@ static void initialize_sqf_integration() {
         "networkShutdown",
         "Shutdown the network framework",
         userFunctionWrapper<network_shutdown_sqf>,
+        game_data_type::BOOL
+    );
+    
+    _sqf_enable_network_logging = intercept::client::host::register_sqf_command(
+        "enableNetworkLogging",
+        "Network message logging",
+        userFunctionWrapper<enable_network_logging_sqf>,
+        game_data_type::BOOL,
         game_data_type::BOOL
     );
     

@@ -2389,7 +2389,6 @@ static game_value network_message_receive_sqf(game_value_parameter left_arg, gam
         }
         
         int handler_id = NetworkFramework::instance().add_message_handler(event_name, handler_function, handler_args);
-        sqf::diag_log("KH Network: Handler " + std::to_string(handler_id) + " registered for event '" + event_name + "'");
         return game_value(static_cast<float>(handler_id));
     } catch (const std::exception& e) {
         report_error("KH Network: Error in networkMessageReceive - " + std::string(e.what()));

@@ -2976,6 +2976,271 @@ private:
         return true;
     }
 
+    std::string fetch_public_ip_from_service(const wchar_t* host, const wchar_t* path, 
+                                              const std::function<std::string(const std::string&)>& parser) {
+        std::string result;
+        HINTERNET hSession = nullptr;
+        HINTERNET hConnect = nullptr;
+        HINTERNET hRequest = nullptr;
+        
+        hSession = WinHttpOpen(L"KH-Network/1.0", 
+                               WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                               WINHTTP_NO_PROXY_NAME, 
+                               WINHTTP_NO_PROXY_BYPASS, 
+                               0);
+
+        if (!hSession) {
+            return result;
+        }
+        
+        // Set timeouts: resolve=5s, connect=5s, send=5s, receive=5s
+        WinHttpSetTimeouts(hSession, 5000, 5000, 5000, 5000);
+        
+        hConnect = WinHttpConnect(hSession, host, INTERNET_DEFAULT_HTTPS_PORT, 0);
+
+        if (!hConnect) {
+            WinHttpCloseHandle(hSession);
+            return result;
+        }
+        
+        hRequest = WinHttpOpenRequest(hConnect, L"GET", path,
+                                       nullptr, WINHTTP_NO_REFERER,
+                                       WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                       WINHTTP_FLAG_SECURE);
+        if (!hRequest) {
+            WinHttpCloseHandle(hConnect);
+            WinHttpCloseHandle(hSession);
+            return result;
+        }
+        
+        // Ignore certificate errors for reliability (IP services use valid certs anyway)
+        DWORD dwFlags = SECURITY_FLAG_IGNORE_UNKNOWN_CA |
+                        SECURITY_FLAG_IGNORE_CERT_DATE_INVALID |
+                        SECURITY_FLAG_IGNORE_CERT_CN_INVALID;
+
+        WinHttpSetOption(hRequest, WINHTTP_OPTION_SECURITY_FLAGS, &dwFlags, sizeof(dwFlags));
+        
+        if (!WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                                 WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) {
+            WinHttpCloseHandle(hRequest);
+            WinHttpCloseHandle(hConnect);
+            WinHttpCloseHandle(hSession);
+            return result;
+        }
+        
+        if (!WinHttpReceiveResponse(hRequest, nullptr)) {
+            WinHttpCloseHandle(hRequest);
+            WinHttpCloseHandle(hConnect);
+            WinHttpCloseHandle(hSession);
+            return result;
+        }
+        
+        // Check status code
+        DWORD statusCode = 0;
+        DWORD statusCodeSize = sizeof(statusCode);
+
+        if (!WinHttpQueryHeaders(hRequest, 
+                                  WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                                  WINHTTP_HEADER_NAME_BY_INDEX, 
+                                  &statusCode, &statusCodeSize, 
+                                  WINHTTP_NO_HEADER_INDEX) || statusCode != 200) {
+            WinHttpCloseHandle(hRequest);
+            WinHttpCloseHandle(hConnect);
+            WinHttpCloseHandle(hSession);
+            return result;
+        }
+        
+        // Read response body
+        std::string response_body;
+        response_body.reserve(256);
+        DWORD dwSize = 0;
+        DWORD dwDownloaded = 0;
+        char buffer[1024];
+        
+        do {
+            dwSize = 0;
+            if (!WinHttpQueryDataAvailable(hRequest, &dwSize)) {
+                break;
+            }
+
+            if (dwSize == 0) {
+                break;
+            }
+
+            DWORD toRead = (dwSize > sizeof(buffer)) ? sizeof(buffer) : dwSize;
+
+            if (!WinHttpReadData(hRequest, buffer, toRead, &dwDownloaded)) {
+                break;
+            }
+
+            response_body.append(buffer, dwDownloaded);
+
+            if (response_body.size() > 4096) {
+                break;
+            }
+        } while (dwSize > 0);
+        
+        WinHttpCloseHandle(hRequest);
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        
+        if (!response_body.empty()) {
+            result = parser(response_body);
+        }
+        
+        return result;
+    }
+    
+    // Validates an IPv4 address string
+    bool is_valid_ipv4(const std::string& ip) {
+        if (ip.empty() || ip.length() > 15) {
+            return false;
+        }
+        
+        int dots = 0;
+        int num = 0;
+        bool has_digit = false;
+        
+        for (size_t i = 0; i < ip.length(); ++i) {
+            char c = ip[i];
+
+            if (c >= '0' && c <= '9') {
+                num = num * 10 + (c - '0');
+
+                if (num > 255) {
+                    return false;
+                }
+
+                has_digit = true;
+            } else if (c == '.') {
+                if (!has_digit) {
+                    return false;
+                }
+
+                dots++;
+                num = 0;
+                has_digit = false;
+            } else {
+                return false;
+            }
+        }
+        
+        return dots == 3 && has_digit;
+    }
+    
+    // Trims whitespace from a string
+    std::string trim_ip_string(const std::string& str) {
+        size_t start = 0;
+        size_t end = str.length();
+        
+        while (start < end && (str[start] == ' ' || str[start] == '\t' || 
+               str[start] == '\r' || str[start] == '\n')) {
+            start++;
+        }
+        while (end > start && (str[end - 1] == ' ' || str[end - 1] == '\t' || 
+               str[end - 1] == '\r' || str[end - 1] == '\n')) {
+            end--;
+        }
+        
+        return str.substr(start, end - start);
+    }
+    
+    // Parser for plain text IP responses (ipify, amazonaws)
+    static std::string parse_plain_text_ip(const std::string& response) {
+        std::string trimmed;
+        size_t start = 0;
+        size_t end = response.length();
+        
+        while (start < end && (response[start] == ' ' || response[start] == '\t' || 
+               response[start] == '\r' || response[start] == '\n')) {
+            start++;
+        }
+
+        while (end > start && (response[end - 1] == ' ' || response[end - 1] == '\t' || 
+               response[end - 1] == '\r' || response[end - 1] == '\n')) {
+            end--;
+        }
+        
+        return response.substr(start, end - start);
+    }
+    
+    // Parser for Cloudflare trace response (finds "ip=x.x.x.x" line)
+    static std::string parse_cloudflare_trace(const std::string& response) {
+        size_t pos = response.find("ip=");
+
+        if (pos == std::string::npos) {
+            return "";
+        }
+        
+        pos += 3; // Skip "ip="
+        size_t end = pos;
+        
+        while (end < response.length() && response[end] != '\r' && response[end] != '\n') {
+            end++;
+        }
+        
+        return response.substr(pos, end - pos);
+    }
+    
+    // Parser for ipinfo.io JSON response (finds "ip": "x.x.x.x")
+    static std::string parse_ipinfo_json(const std::string& response) {
+        // Look for "ip": " or "ip":"
+        size_t pos = response.find("\"ip\"");
+        
+        if (pos == std::string::npos) {
+            return "";
+        }
+        
+        pos = response.find("\"", pos + 4);
+
+        if (pos == std::string::npos) {
+            return "";
+        }
+
+        pos++; // Skip opening quote
+        size_t end = response.find("\"", pos);
+
+        if (end == std::string::npos) {
+            return "";
+        }
+        
+        return response.substr(pos, end - pos);
+    }
+
+    // Detects the public IP address by querying multiple services
+    // Falls back to local IP if all services fail
+    std::string detect_public_ip() {
+        struct IPService {
+            const wchar_t* host;
+            const wchar_t* path;
+            std::function<std::string(const std::string&)> parser;
+        };
+        
+        // Services ordered by reliability and speed
+        std::vector<IPService> services = {
+            // ipify - most reliable, plain text response
+            { L"api.ipify.org", L"/", parse_plain_text_ip },
+            // Cloudflare - very reliable, need to parse trace format
+            { L"1.1.1.1", L"/cdn-cgi/trace", parse_cloudflare_trace },
+            // Amazon AWS checkip - plain text
+            { L"checkip.amazonaws.com", L"/", parse_plain_text_ip },
+            // ipinfo.io - JSON response
+            { L"ipinfo.io", L"/ip", parse_plain_text_ip },
+        };
+        
+        for (const auto& service : services) {
+            std::string ip = fetch_public_ip_from_service(service.host, service.path, service.parser);
+            
+            if (!ip.empty() && is_valid_ipv4(ip)) {
+                return ip;
+            }
+        }
+        
+        // All services failed - fall back to local IP for LAN play
+        return detect_local_ip();
+    }
+
+    // Original local IP detection - kept for LAN fallback
     std::string detect_local_ip() {
         std::string result = "127.0.0.1";
         char hostname[256];
@@ -3696,7 +3961,7 @@ public:
         // Detect local IP
         {
             std::lock_guard<std::mutex> lock(local_ip_mutex_);
-            local_ip_ = detect_local_ip();
+            local_ip_ = detect_public_ip();
         }
         
         payload_pool_ = std::make_shared<PayloadPool>(256);
@@ -3758,6 +4023,12 @@ public:
 
         if (as_server) {
             listen_thread_ = std::thread(&NetworkFramework::listen_thread_func, this);
+        } else {
+            if (!connect_to_server_internal()) {
+                report_error("KH Network: Initial connection to server failed");
+            } else {
+                sqf::diag_log("KH Network: Connected to server");
+            }
         }
 
         receive_thread_ = std::thread(&NetworkFramework::receive_thread_func, this);
@@ -4330,22 +4601,93 @@ public:
         }
         
         auto& arr = settings.to_array();
-        
-        // Helper to safely get values with bounds checking
+
         auto get_int = [&arr](size_t index, int default_val) -> int {
-            if (index < arr.size() && arr[index].type_enum() == game_data_type::SCALAR) {
+            if (index >= arr.size()) {
+                return default_val;
+            }
+            
+            auto type = arr[index].type_enum();
+            
+            if (type == game_data_type::SCALAR) {
                 return static_cast<int>(static_cast<float>(arr[index]));
+            } else if (type == game_data_type::STRING) {
+                try {
+                    std::string str_val = static_cast<std::string>(arr[index]);
+
+                    if (str_val.empty()) {
+                        return default_val;
+                    }
+
+                    return std::stoi(str_val);
+                } catch (...) {
+                    return default_val;
+                }
             }
 
             return default_val;
         };
-        
+
         auto get_size = [&arr](size_t index, size_t default_val) -> size_t {
-            if (index < arr.size() && arr[index].type_enum() == game_data_type::SCALAR) {
-                float val = static_cast<float>(arr[index]);
-                return val > 0 ? static_cast<size_t>(val) : default_val;
+            if (index >= arr.size()) {
+                return default_val;
             }
             
+            auto type = arr[index].type_enum();
+            
+            if (type == game_data_type::SCALAR) {
+                float val = static_cast<float>(arr[index]);
+                return val > 0 ? static_cast<size_t>(val) : default_val;
+            } else if (type == game_data_type::STRING) {
+                try {
+                    std::string str_val = static_cast<std::string>(arr[index]);
+                    
+                    if (str_val.empty()) {
+                        return default_val;
+                    }
+
+                    long long val = std::stoll(str_val);
+                    return val > 0 ? static_cast<size_t>(val) : default_val;
+                } catch (...) {
+                    return default_val;
+                }
+            }
+            
+            return default_val;
+        };
+
+        auto get_bool = [&arr](size_t index, bool default_val) -> bool {
+            if (index >= arr.size()) {
+                return default_val;
+            }
+            
+            auto type = arr[index].type_enum();
+            
+            if (type == game_data_type::BOOL) {
+                return static_cast<bool>(arr[index]);
+            } else if (type == game_data_type::SCALAR) {
+                return static_cast<float>(arr[index]) != 0.0f;
+            } else if (type == game_data_type::STRING) {
+                std::string str_val = static_cast<std::string>(arr[index]);
+
+                if (str_val.empty()) {
+                    return default_val;
+                }
+
+                // Convert to lowercase for comparison
+                for (char& c : str_val) {
+                    if (c >= 'A' && c <= 'Z') {
+                        c = c + ('a' - 'A');
+                    }
+                }
+                
+                if (str_val == "true" || str_val == "1" || str_val == "yes") {
+                    return true;
+                } else if (str_val == "false" || str_val == "0" || str_val == "no") {
+                    return false;
+                }
+            }
+
             return default_val;
         };
         
@@ -4361,30 +4703,10 @@ public:
         config_keepalive_time_ms_ = get_int(8, NET_DEFAULT_KEEPALIVE_TIME_MS);
         config_keepalive_interval_ms_ = get_int(9, NET_DEFAULT_KEEPALIVE_INTERVAL_MS);
         config_send_batch_size_ = std::max(1, get_int(10, NET_DEFAULT_SEND_BATCH_SIZE));
-        
-        if (arr.size() > 11) {
-            if (arr[11].type_enum() == game_data_type::BOOL) {
-                config_compression_enabled_ = static_cast<bool>(arr[11]);
-            } else if (arr[11].type_enum() == game_data_type::SCALAR) {
-                config_compression_enabled_ = static_cast<float>(arr[11]) != 0.0f;
-            }
-        }
-
-        if (arr.size() > 12) {
-            if (arr[12].type_enum() == game_data_type::BOOL) {
-                config_coalesce_enabled_ = static_cast<bool>(arr[12]);
-            } else if (arr[12].type_enum() == game_data_type::SCALAR) {
-                config_coalesce_enabled_ = static_cast<float>(arr[12]) != 0.0f;
-            }
-        }
-        
-        // Index 13: Coalesce max size
+        config_compression_enabled_ = get_bool(11, true);
+        config_coalesce_enabled_ = get_bool(12, true);
         config_coalesce_max_size_ = get_size(13, NET_DEFAULT_COALESCE_MAX_SIZE);
-        
-        // Index 14: Coalesce max messages
         config_coalesce_max_messages_ = get_size(14, NET_DEFAULT_COALESCE_MAX_MESSAGES);
-        
-        // Index 15: Coalesce delay microseconds
         config_coalesce_delay_us_ = get_int(15, NET_DEFAULT_COALESCE_DELAY_US);
                 
         // Clamp values to reasonable ranges

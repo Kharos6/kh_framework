@@ -112,7 +112,7 @@ cl /LD /arch:AVX /O2 /Ob3 /GL /MT /std:c++20 /EHsc /TP /Gy /Gw /GS- ^
     cuda.lib cudart_static.lib cublas.lib cublasLt.lib vulkan-1.lib ^
     Ultralight.lib UltralightCore.lib WebCore.lib ^
     libMinHook.x64.lib ^
-    winmm.lib gdi32.lib shell32.lib ole32.lib user32.lib advapi32.lib delayimp.lib d3d11.lib dxgi.lib d3dcompiler.lib gdiplus.lib dwrite.lib ws2_32.lib
+    winmm.lib gdi32.lib shell32.lib ole32.lib user32.lib advapi32.lib delayimp.lib d3d11.lib dxgi.lib d3dcompiler.lib gdiplus.lib dwrite.lib ws2_32.lib winhttp.lib
 
 REM Check if build was successful
 if exist output_x64\kh_framework_x64.dll (

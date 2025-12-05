@@ -6,6 +6,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <mstcpip.h>
+#include <winhttp.h>
 #include <windows.h>
 #include <Winternl.h>
 #include <string>

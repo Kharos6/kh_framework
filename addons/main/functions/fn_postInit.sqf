@@ -461,6 +461,10 @@ isNil {
 				] call KH_fnc_execute;
 			} forEach allUnits;
 		};
+
+		{
+			[_x] call KH_fnc_medicalSetup;
+		} forEach (KH_var_allEntities select {_x isKindOf "CAManBase";});
 	};
 };
 

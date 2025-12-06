@@ -19,7 +19,7 @@ if (isNil "_currentVariableHandler") then {
                     } forEach (_unit getVariable "KH_var_respawnVariableHandler");
                 },
                 true,
-                "1",
+                "-1",
                 false
             ] call KH_fnc_execute;
         }

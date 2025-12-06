@@ -225,6 +225,8 @@ if KH_var_khMedical then {
                                             [
                                                 [],
                                                 {
+                                                    if (!(player getVariable ["KH_var_incapacitated", false]) || !(alive player)) exitWith {};
+
                                                     [
                                                         [true, false],
                                                         [
@@ -390,14 +392,18 @@ if KH_var_khMedical then {
                                             {
                                                 if (!(isNil "KH_var_withstandingEffectRadial") && !(isNil "KH_var_withstandingEffectChromatic") && !(isNil "KH_var_withstandingEffectWet")) then {
                                                     ppEffectDestroy [KH_var_withstandingEffectRadial, KH_var_withstandingEffectChromatic, KH_var_withstandingEffectWet];
+                                                    KH_var_withstandingEffectRadial = nil;
+                                                    KH_var_withstandingEffectChromatic = nil;
+                                                    KH_var_withstandingEffectWet = nil;
                                                 };
                                                 
                                                 if !(isNil "KH_var_incapacitationFade") then {
                                                     ppEffectDestroy KH_var_incapacitationFade;
+                                                    KH_var_incapacitationFade = nil;
                                                 };														
                                             },
                                             true,
-                                            {!(alive player)},
+                                            {((damage player) < KH_var_incapacitationThreshold) || !(alive player)},
                                             false
                                         ] call KH_fnc_execute;
                                     };
@@ -420,16 +426,6 @@ if KH_var_khMedical then {
 
                                                     if KH_var_incapacitatedCaptives then {
                                                         _unit setCaptive false;
-                                                    };
-
-                                                    if (_unit isEqualTo player) then {
-                                                        if (!(isNil "KH_var_withstandingEffectRadial") && !(isNil "KH_var_withstandingEffectChromatic") && !(isNil "KH_var_withstandingEffectWet")) then {
-                                                            ppEffectDestroy [KH_var_withstandingEffectRadial, KH_var_withstandingEffectChromatic, KH_var_withstandingEffectWet];
-                                                        };
-                                                        
-                                                        if !(isNil "KH_var_incapacitationFade") then {
-                                                            ppEffectDestroy KH_var_incapacitationFade;
-                                                        };
                                                     };
                                                     
                                                     [_handlerId] call KH_fnc_removeHandler;
@@ -500,9 +496,11 @@ if KH_var_khMedical then {
                                             },
                                             {
                                                 _target setVariable ["KH_var_beingRevived", false, true];
+                                                _caller playActionNow "Default";
                                             },
                                             {
                                                 _target setVariable ["KH_var_beingRevived", false, true];
+                                                _caller playActionNow "Default";
                                             },
                                             {
                                                 private _damageOffset = [
@@ -526,16 +524,6 @@ if KH_var_khMedical then {
                                                         if KH_var_incapacitatedCaptives then {
                                                             _target setCaptive false;
                                                         };
-
-                                                        if (_target isEqualTo player) then {
-                                                            if (!(isNil "KH_var_withstandingEffectRadial") && !(isNil "KH_var_withstandingEffectChromatic") && !(isNil "KH_var_withstandingEffectWet")) then {
-                                                                ppEffectDestroy [KH_var_withstandingEffectRadial, KH_var_withstandingEffectChromatic, KH_var_withstandingEffectWet];
-                                                            };
-                                                            
-                                                            if !(isNil "KH_var_incapacitationFade") then {
-                                                                ppEffectDestroy KH_var_incapacitationFade;
-                                                            };
-                                                        };
                                                     },
                                                     _target,
                                                     true,
@@ -553,6 +541,7 @@ if KH_var_khMedical then {
                                                 _target setVariable ["KH_var_stabilized", false, true];
                                                 _target setVariable ["KH_var_beingRevived", false, true];
                                                 _target setVariable ["KH_var_beingStabilized", false, true];
+                                                _caller playActionNow "Default";
                                             },
                                             {
                                                 params ["_unit"];
@@ -708,9 +697,11 @@ if KH_var_khMedical then {
                                                 },
                                                 {
                                                     _target setVariable ["KH_var_beingStabilized", false, true];
+                                                    _caller playActionNow "Default";
                                                 },
                                                 {
                                                     _target setVariable ["KH_var_beingStabilized", false, true];
+                                                    _caller playActionNow "Default";
                                                 },
                                                 {
                                                     if !("Medikit" in (items _caller)) then {
@@ -721,6 +712,7 @@ if KH_var_khMedical then {
                                                     
                                                     _target setVariable ["KH_var_beingStabilized", false, true];
                                                     _target setVariable ["KH_var_stabilized", true, true];
+                                                    _caller playActionNow "Default";
                                                 },
                                                 {}
                                             ],

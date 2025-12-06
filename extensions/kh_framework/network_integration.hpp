@@ -12,6 +12,7 @@ constexpr int NET_DEFAULT_COALESCE_DELAY_US = 3000;           // Microseconds to
 constexpr size_t NET_COMPRESSION_THRESHOLD = 256;   // Only compress payloads > 256 bytes
 constexpr uint8_t NET_FLAG_NONE = 0x00;
 constexpr uint8_t NET_FLAG_COMPRESSED = 0x01;
+constexpr int NET_RECONNECT_INTERVAL_MS = 3000;
 constexpr int NET_DEFAULT_PORT = 21337;
 constexpr size_t NET_DEFAULT_MAX_MESSAGE_SIZE = 16 * 1024 * 1024; // 16MB
 constexpr size_t NET_DEFAULT_RECV_BUFFER_SIZE = 262144; // 256KB
@@ -179,6 +180,24 @@ struct NetworkMessageHandler {
     std::string event_name;
     code handler_function;
     game_value handler_arguments;
+};
+
+enum class SendResult : uint8_t {
+    SUCCESS = 0,        // All data sent successfully
+    PARTIAL = 1,        // Some data sent, more remaining (WOULDBLOCK)
+    WOULD_BLOCK = 2,    // No data sent, would block (buffer full)
+    ERROR_FATAL = 3     // Connection error, should disconnect
+};
+
+struct PendingSend {
+    std::vector<uint8_t> data;      // Data to send (includes 4-byte length prefix)
+    size_t bytes_sent;               // How many bytes already sent
+    PendingSend() : bytes_sent(0) {}
+    PendingSend(std::vector<uint8_t>&& d) : data(std::move(d)), bytes_sent(0) {}
+    size_t remaining() const { return data.size() - bytes_sent; }
+    bool complete() const { return bytes_sent >= data.size() || data.empty(); }
+    const uint8_t* current_ptr() const { return data.data() + bytes_sent; }
+    void clear() { data.clear(); bytes_sent = 0; }
 };
 
 template<typename T>
@@ -411,11 +430,14 @@ private:
     std::string server_ip_;
     std::mutex server_ip_mutex_;
     COWHandlerMap cow_handlers_;
+    std::unordered_map<int, PendingSend> client_pending_sends_;
+    PendingSend server_pending_send_;
     std::unordered_map<int, std::deque<OutgoingMessage>> per_client_queues_;
     std::unordered_map<int, int64_t> client_stall_start_times_;
     std::shared_ptr<PayloadPool> payload_pool_;
     std::atomic<bool> warned_fd_limit_{false};
     std::atomic<bool> network_logging_enabled_{false};
+    int reconnect_interval_ms_{NET_RECONNECT_INTERVAL_MS};
     size_t config_max_message_size_{NET_DEFAULT_MAX_MESSAGE_SIZE};
     size_t config_recv_buffer_size_{NET_DEFAULT_RECV_BUFFER_SIZE};
     size_t config_send_buffer_size_{NET_DEFAULT_SEND_BUFFER_SIZE};
@@ -2824,6 +2846,7 @@ private:
         uint32_t magic = read_uint32(data.data(), offset, data.size());
         if (magic != NET_MSG_MAGIC) return false;
         uint32_t version = read_uint32(data.data(), offset, data.size());
+        if (version > NET_MSG_VERSION) return false;
         if (data.size() < 25) return false;
         if (offset >= data.size()) return false;
         uint8_t flags = data[offset++];
@@ -2921,6 +2944,73 @@ private:
         }
         
         return true;
+    }
+
+    static std::vector<uint8_t> prepare_send_buffer(const std::vector<uint8_t>& data) {
+        std::vector<uint8_t> buffer(4 + data.size());
+        uint32_t len = static_cast<uint32_t>(data.size());
+        buffer[0] = static_cast<uint8_t>(len & 0xFF);
+        buffer[1] = static_cast<uint8_t>((len >> 8) & 0xFF);
+        buffer[2] = static_cast<uint8_t>((len >> 16) & 0xFF);
+        buffer[3] = static_cast<uint8_t>((len >> 24) & 0xFF);
+        std::memcpy(buffer.data() + 4, data.data(), data.size());
+        return buffer;
+    }
+
+    // NOTE: Below function does NOT hold any mutex - caller must ensure pending remains valid
+    SendResult send_nonblocking(SOCKET sock, PendingSend& pending) {
+        if (pending.complete()) {
+            return SendResult::SUCCESS;
+        }
+        
+        // Set socket to non-blocking mode temporarily
+        u_long mode = 1;
+
+        if (ioctlsocket(sock, FIONBIO, &mode) != 0) {
+            return SendResult::ERROR_FATAL;
+        }
+        
+        size_t sent_this_call = 0;
+        SendResult final_result = SendResult::SUCCESS;
+        
+        while (pending.remaining() > 0) {
+            int to_send = static_cast<int>(std::min(pending.remaining(), static_cast<size_t>(INT_MAX)));
+            int result = send(sock, reinterpret_cast<const char*>(pending.current_ptr()), to_send, 0);
+            
+            if (result > 0) {
+                pending.bytes_sent += static_cast<size_t>(result);
+                sent_this_call += static_cast<size_t>(result);
+            } else if (result == 0) {
+                // Connection closed gracefully
+                final_result = SendResult::ERROR_FATAL;
+                break;
+            } else {
+                // SOCKET_ERROR
+                int err = WSAGetLastError();
+                
+                if (err == WSAEWOULDBLOCK) {
+                    // Buffer is full - this is normal, not an error
+                    final_result = (sent_this_call > 0) ? SendResult::PARTIAL : SendResult::WOULD_BLOCK;
+                    break;
+                }
+                
+                if (err == WSAEINTR) {
+                    // Interrupted - try again
+                    continue;
+                }
+                
+                // Fatal errors - connection is dead
+                // WSAECONNRESET, WSAECONNABORTED, WSAENETRESET, WSAENOTCONN,
+                // WSAESHUTDOWN, WSAEHOSTUNREACH, WSAETIMEDOUT, etc...
+                final_result = SendResult::ERROR_FATAL;
+                break;
+            }
+        }
+        
+        // Restore blocking mode
+        mode = 0;
+        ioctlsocket(sock, FIONBIO, &mode);
+        return final_result;
     }
     
     bool recv_all(SOCKET sock, std::vector<uint8_t>& data) {
@@ -3347,7 +3437,7 @@ private:
                         }
                         
                         MainThreadScheduler::instance().schedule([this, client_id]() {
-                            send_jip_messages_to_client(client_id);
+                            if (running_) send_jip_messages_to_client(client_id);
                         });
                         
                         MainThreadScheduler::instance().schedule([client_id]() {
@@ -3418,6 +3508,7 @@ private:
                     if (it != client_connections_.end()) {
                         ::shutdown(it->second, SD_BOTH);
                         closesocket(it->second);
+                        client_pending_sends_.erase(id);
                         client_connections_.erase(it);
                         per_client_queues_.erase(id);
                         client_stall_start_times_.erase(id);
@@ -3544,6 +3635,31 @@ private:
                 sock = server_connection_;
             }
             
+            // If disconnected, attempt to reconnect indefinitely until shutdown
+            if (sock == INVALID_SOCKET) {
+                if (connect_to_server_internal()) {
+                    MainThreadScheduler::instance().schedule([]() {
+                        sqf::diag_log("KH Network: Reconnected to server");
+                    });
+
+                    {
+                        std::lock_guard<std::mutex> lock(server_connection_mutex_);
+                        sock = server_connection_;
+                    }
+                } else {
+                    // Failed to reconnect - wait before trying again
+                    int waited_ms = 0;
+
+                    while (running_ && waited_ms < reconnect_interval_ms_) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                        waited_ms += 100;
+                    }
+
+                    continue;
+                }
+            }
+            
+            // If still no valid socket (shouldn't happen but guard against it)
             if (sock == INVALID_SOCKET) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 continue;
@@ -3572,19 +3688,125 @@ private:
                         }
                     }
                 } else {
-                    // Connection lost
-                    std::lock_guard<std::mutex> lock(server_connection_mutex_);
+                    // Connection lost - close socket and mark as disconnected
+                    // The loop will attempt reconnection on the next iteration
+                    {
+                        std::lock_guard<std::mutex> lock(server_connection_mutex_);
 
-                    if (server_connection_ != INVALID_SOCKET && server_connection_ == sock) {
-                        ::shutdown(server_connection_, SD_BOTH);
-                        closesocket(server_connection_);
-                        server_connection_ = INVALID_SOCKET;
+                        if (server_connection_ != INVALID_SOCKET && server_connection_ == sock) {
+                            ::shutdown(server_connection_, SD_BOTH);
+                            closesocket(server_connection_);
+                            server_connection_ = INVALID_SOCKET;
+                        }
                     }
+                    
+                    MainThreadScheduler::instance().schedule([]() {
+                        sqf::diag_log("KH Network: Connection to server lost, attempting to reconnect...");
+                    });
                 }
             }
         }
     }
     
+    void process_pending_sends_server_locked(std::unordered_set<int>& clients_to_disconnect) {
+        for (auto it = client_pending_sends_.begin(); it != client_pending_sends_.end(); ) {
+            int client_id = it->first;
+            PendingSend& pending = it->second;
+            
+            if (pending.complete()) {
+                it = client_pending_sends_.erase(it);
+                client_stall_start_times_.erase(client_id);
+                continue;
+            }
+            
+            auto conn_it = client_connections_.find(client_id);
+
+            if (conn_it == client_connections_.end()) {
+                it = client_pending_sends_.erase(it);
+                continue;
+            }
+            
+            SOCKET sock = conn_it->second;
+            SendResult result = send_nonblocking(sock, pending);
+            
+            if (result == SendResult::ERROR_FATAL) {
+                clients_to_disconnect.insert(client_id);
+                it = client_pending_sends_.erase(it);
+            } else if (result == SendResult::SUCCESS) {
+                it = client_pending_sends_.erase(it);
+                client_stall_start_times_.erase(client_id);
+            } else {
+                int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
+                
+                auto stall_it = client_stall_start_times_.find(client_id);
+
+                if (stall_it == client_stall_start_times_.end()) {
+                    client_stall_start_times_[client_id] = now;
+                } else if (now - stall_it->second > config_client_stall_timeout_ms_) {
+                    clients_to_disconnect.insert(client_id);
+                    it = client_pending_sends_.erase(it);
+                    continue;
+                }
+
+                ++it;
+            }
+        }
+    }
+    
+    // Disconnect a client - MUST be called while holding connections_mutex_
+    void disconnect_client_locked(int client_id) {
+        auto it = client_connections_.find(client_id);
+
+        if (it != client_connections_.end()) {
+            ::shutdown(it->second, SD_BOTH);
+            closesocket(it->second);
+            client_connections_.erase(it);
+            per_client_queues_.erase(client_id);
+            client_stall_start_times_.erase(client_id);
+            client_pending_sends_.erase(client_id);
+            
+            MainThreadScheduler::instance().schedule([client_id]() {
+                sqf::diag_log("KH Network: Client " + std::to_string(client_id) + " disconnected (stall/error)");
+            });
+        }
+    }
+    
+    // Process pending partial send for client mode
+    // Only called from send_thread, no mutex needed for server_pending_send_
+    void process_pending_send_client() {
+        if (server_pending_send_.complete()) return;
+        SOCKET sock = INVALID_SOCKET;
+        
+        {
+            std::lock_guard<std::mutex> srv_lock(server_connection_mutex_);
+            sock = server_connection_;
+        }
+        
+        if (sock == INVALID_SOCKET) {
+            server_pending_send_.clear();
+            return;
+        }
+        
+        SendResult result = send_nonblocking(sock, server_pending_send_);
+        
+        if (result == SendResult::ERROR_FATAL) {
+            std::lock_guard<std::mutex> srv_lock(server_connection_mutex_);
+
+            // Only close if it's still the same socket (defensive check)
+            if (server_connection_ != INVALID_SOCKET && server_connection_ == sock) {
+                ::shutdown(server_connection_, SD_BOTH);
+                closesocket(server_connection_);
+                server_connection_ = INVALID_SOCKET;
+            }
+
+            server_pending_send_.clear();
+        } else if (result == SendResult::SUCCESS) {
+            server_pending_send_.clear();
+        }
+        // PARTIAL or WOULD_BLOCK - keep pending, will retry next iteration
+    }
+
     void send_thread_func() {
         std::vector<OutgoingMessage> batch;
         batch.reserve(config_send_batch_size_);
@@ -3619,6 +3841,22 @@ private:
             
             if (batch.empty()) {
                 outgoing_has_data_.store(false, std::memory_order_release);
+                
+                // Even with no new messages, try to complete pending sends
+                if (is_server_) {
+                    std::lock_guard<std::mutex> conn_lock(connections_mutex_);
+                    process_pending_sends_server_locked(clients_to_disconnect);
+                    
+                    // Disconnect clients that failed
+                    for (int id : clients_to_disconnect) {
+                        disconnect_client_locked(id);
+                    }
+                    
+                    clients_to_disconnect.clear();
+                } else {
+                    process_pending_send_client();
+                }
+
                 continue;
             }
             
@@ -3636,6 +3874,9 @@ private:
                 {
                     std::lock_guard<std::mutex> conn_lock(connections_mutex_);
                     
+                    // First, try to complete any pending partial sends
+                    process_pending_sends_server_locked(clients_to_disconnect);
+                    
                     for (auto& msg : batch) {
                         if (client_connections_.find(msg.target_client) != client_connections_.end()) {
                             per_client_batch[msg.target_client].push_back(std::move(msg));
@@ -3647,6 +3888,14 @@ private:
                     // Also gather from per-client queues (for requeued messages)
                     for (auto& [client_id, queue] : per_client_queues_) {
                         if (queue.empty()) continue;
+                        
+                        // Skip if this client has a pending partial send
+                        auto pending_it = client_pending_sends_.find(client_id);
+
+                        if (pending_it != client_pending_sends_.end() && !pending_it->second.complete()) {
+                            continue;
+                        }
+                        
                         auto& client_msgs = per_client_batch[client_id];
 
                         size_t to_grab = std::min(queue.size(), 
@@ -3663,12 +3912,29 @@ private:
                 for (auto& [client_id, messages] : per_client_batch) {
                     if (messages.empty()) continue;
                     SOCKET sock = INVALID_SOCKET;
+                    bool has_pending = false;
                     
                     {
                         std::lock_guard<std::mutex> conn_lock(connections_mutex_);
                         auto conn_it = client_connections_.find(client_id);
                         if (conn_it == client_connections_.end()) continue;
                         sock = conn_it->second;
+                        
+                        // Check if client has pending send
+                        auto pending_it = client_pending_sends_.find(client_id);
+                        has_pending = (pending_it != client_pending_sends_.end() && !pending_it->second.complete());
+                        
+                        if (has_pending) {
+                            // Requeue all messages - can't send new data until pending completes
+                            auto& queue = per_client_queues_[client_id];
+
+                            for (auto it = messages.rbegin(); it != messages.rend(); ++it) {
+                                queue.push_front(std::move(*it));
+                            }
+
+                            continue;
+                        }
+
                         fd_set write_fds, error_fds;
                         FD_ZERO(&write_fds);
                         FD_ZERO(&error_fds);
@@ -3729,10 +3995,11 @@ private:
                                 }
                                 
                                 create_coalesced_packet(packet_buffer, client_batch, temp_uncompressed_buffer);
+                                PendingSend pending(prepare_send_buffer(packet_buffer));
+                                SendResult result = send_nonblocking(sock, pending);
                                 
-                                if (!send_all(sock, packet_buffer)) {
+                                if (result == SendResult::ERROR_FATAL) {
                                     clients_to_disconnect.insert(client_id);
-
                                     std::lock_guard<std::mutex> conn_lock(connections_mutex_);
                                     auto& queue = per_client_queues_[client_id];
                                     
@@ -3740,8 +4007,29 @@ private:
                                         queue.push_front(std::move(messages[k]));
                                     }
                                     
+                                    // Also requeue the batch that failed (connection dead)
                                     for (auto it = client_batch.rbegin(); it != client_batch.rend(); ++it) {
                                         queue.push_front(std::move(*it));
+                                    }
+                                    
+                                    send_error = true;
+                                    break;
+                                } else if (result == SendResult::PARTIAL || result == SendResult::WOULD_BLOCK) {
+                                    // Store pending send and requeue remaining messages
+                                    std::lock_guard<std::mutex> conn_lock(connections_mutex_);
+                                    client_pending_sends_[client_id] = std::move(pending);
+                                    auto& queue = per_client_queues_[client_id];
+
+                                    for (size_t k = messages.size(); k-- > i; ) {
+                                        queue.push_front(std::move(messages[k]));
+                                    }
+                                    
+                                    // Track stall time
+                                    int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        std::chrono::steady_clock::now().time_since_epoch()).count();
+
+                                    if (client_stall_start_times_.find(client_id) == client_stall_start_times_.end()) {
+                                        client_stall_start_times_[client_id] = now;
                                     }
                                     
                                     send_error = true;
@@ -3765,15 +4053,26 @@ private:
                             }
                             
                             create_coalesced_packet(packet_buffer, client_batch, temp_uncompressed_buffer);
+                            PendingSend pending(prepare_send_buffer(packet_buffer));
+                            SendResult result = send_nonblocking(sock, pending);
                             
-                            if (!send_all(sock, packet_buffer)) {
+                            if (result == SendResult::ERROR_FATAL) {
                                 clients_to_disconnect.insert(client_id);
-
                                 std::lock_guard<std::mutex> conn_lock(connections_mutex_);
                                 auto& queue = per_client_queues_[client_id];
 
                                 for (auto it = client_batch.rbegin(); it != client_batch.rend(); ++it) {
                                     queue.push_front(std::move(*it));
+                                }
+                            } else if (result == SendResult::PARTIAL || result == SendResult::WOULD_BLOCK) {
+                                std::lock_guard<std::mutex> conn_lock(connections_mutex_);
+                                client_pending_sends_[client_id] = std::move(pending);
+                                
+                                int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::steady_clock::now().time_since_epoch()).count();
+
+                                if (client_stall_start_times_.find(client_id) == client_stall_start_times_.end()) {
+                                    client_stall_start_times_[client_id] = now;
                                 }
                             }
                         }
@@ -3785,14 +4084,35 @@ private:
                             create_network_packet_into(packet_buffer, msg.target_client, msg.sender_client,
                                                        msg.event_name, *msg.payload);
                             
-                            if (!send_all(sock, packet_buffer)) {
+                            PendingSend pending(prepare_send_buffer(packet_buffer));
+                            SendResult result = send_nonblocking(sock, pending);
+                            
+                            if (result == SendResult::ERROR_FATAL) {
                                 clients_to_disconnect.insert(client_id);
-                                
                                 std::lock_guard<std::mutex> conn_lock(connections_mutex_);
                                 auto& queue = per_client_queues_[client_id];
                                 
+                                // Requeue current and remaining messages
                                 for (size_t k = messages.size(); k-- > i; ) {
                                     queue.push_front(std::move(messages[k]));
+                                }
+                                
+                                break;
+                            } else if (result == SendResult::PARTIAL || result == SendResult::WOULD_BLOCK) {
+                                std::lock_guard<std::mutex> conn_lock(connections_mutex_);
+                                client_pending_sends_[client_id] = std::move(pending);
+                                auto& queue = per_client_queues_[client_id];
+
+                                // Requeue remaining messages (current one is in pending)
+                                for (size_t k = messages.size(); k-- > (i + 1); ) {
+                                    queue.push_front(std::move(messages[k]));
+                                }
+                                
+                                int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::steady_clock::now().time_since_epoch()).count();
+                                    
+                                if (client_stall_start_times_.find(client_id) == client_stall_start_times_.end()) {
+                                    client_stall_start_times_[client_id] = now;
                                 }
                                 
                                 break;
@@ -3806,25 +4126,29 @@ private:
                     std::lock_guard<std::mutex> conn_lock(connections_mutex_);
 
                     for (int id : clients_to_disconnect) {
-                        auto it = client_connections_.find(id);
-
-                        if (it != client_connections_.end()) {
-                            ::shutdown(it->second, SD_BOTH);
-                            closesocket(it->second);
-                            client_connections_.erase(it);
-                            per_client_queues_.erase(id);
-                            client_stall_start_times_.erase(id);
-                            
-                            MainThreadScheduler::instance().schedule([id]() {
-                                sqf::diag_log("KH Network: Client " + std::to_string(id) + " disconnected (stall/error)");
-                            });
-                        }
+                        disconnect_client_locked(id);
                     }
                 }
                 
             } else {
                 // Client mode - send to server with coalescing
                 if (batch.empty()) continue;
+
+                if (!server_pending_send_.complete()) {
+                    process_pending_send_client();
+                    
+                    if (!server_pending_send_.complete()) {
+                        // Still have pending data - requeue all new messages
+                        for (auto it = batch.rbegin(); it != batch.rend(); ++it) {
+                            outgoing_queue_lockfree_.push(std::move(*it));
+                        }
+
+                        outgoing_has_data_.store(true, std::memory_order_release);
+                        batch.clear();
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                        continue;
+                    }
+                }
                 
                 if (!connect_to_server_internal()) {
                     // Requeue all
@@ -3839,6 +4163,24 @@ private:
                 }
                 
                 bool send_failed = false;
+                SOCKET server_sock = INVALID_SOCKET;
+                
+                {
+                    std::lock_guard<std::mutex> srv_lock(server_connection_mutex_);
+                    server_sock = server_connection_;
+                }
+                
+                if (server_sock == INVALID_SOCKET) {
+                    // Requeue all
+                    for (auto it = batch.rbegin(); it != batch.rend(); ++it) {
+                        outgoing_queue_lockfree_.push(std::move(*it));
+                    }
+
+                    outgoing_has_data_.store(true, std::memory_order_release);
+                    batch.clear();
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                    continue;
+                }
                 
                 if (config_coalesce_enabled_ && batch.size() > 1) {
                     // Coalesce messages to server
@@ -3863,33 +4205,48 @@ private:
                             
                             create_coalesced_packet(packet_buffer, client_batch, temp_uncompressed_buffer);
                             
-                            {
-                                std::lock_guard<std::mutex> srv_lock(server_connection_mutex_);
-
-                                if (server_connection_ == INVALID_SOCKET) {
-                                    send_failed = true;
-                                } else if (!send_all(server_connection_, packet_buffer)) {
-                                    ::shutdown(server_connection_, SD_BOTH);
-                                    closesocket(server_connection_);
-                                    server_connection_ = INVALID_SOCKET;
-                                    send_failed = true;
-                                }
-                            }
+                            server_pending_send_ = PendingSend(prepare_send_buffer(packet_buffer));
+                            SendResult result = send_nonblocking(server_sock, server_pending_send_);
                             
-                            if (send_failed) {
+                            if (result == SendResult::ERROR_FATAL) {
+                                {
+                                    std::lock_guard<std::mutex> srv_lock(server_connection_mutex_);
+
+                                    if (server_connection_ != INVALID_SOCKET && server_connection_ == server_sock) {
+                                        ::shutdown(server_connection_, SD_BOTH);
+                                        closesocket(server_connection_);
+                                        server_connection_ = INVALID_SOCKET;
+                                    }
+                                }
+
+                                server_pending_send_.clear();
+                                send_failed = true;
+
                                 // Requeue remaining messages
                                 for (size_t k = batch.size(); k-- > i; ) {
                                     outgoing_queue_lockfree_.push(std::move(batch[k]));
                                 }
                                 
+                                // Requeue the batch that failed
                                 for (auto it = client_batch.rbegin(); it != client_batch.rend(); ++it) {
                                     outgoing_queue_lockfree_.push(std::move(*it));
                                 }
                                 
                                 outgoing_has_data_.store(true, std::memory_order_release);
                                 break;
+                            } else if (result == SendResult::PARTIAL || result == SendResult::WOULD_BLOCK) {
+                                // Partial send - requeue remaining messages, pending stays
+                                for (size_t k = batch.size(); k-- > i; ) {
+                                    outgoing_queue_lockfree_.push(std::move(batch[k]));
+                                }
+
+                                outgoing_has_data_.store(true, std::memory_order_release);
+                                send_failed = true;
+                                break;
                             }
-                                                        
+                            
+                            // Success - clear pending
+                            server_pending_send_.clear();                  
                             current_batch_start = i;
                             current_batch_size = msg_size;
                         } else if (i < batch.size()) {
@@ -3904,27 +4261,41 @@ private:
                         create_network_packet_into(packet_buffer, msg.target_client, msg.sender_client,
                                                    msg.event_name, *msg.payload);
                         
-                        {
-                            std::lock_guard<std::mutex> srv_lock(server_connection_mutex_);
-
-                            if (server_connection_ == INVALID_SOCKET) {
-                                send_failed = true;
-                            } else if (!send_all(server_connection_, packet_buffer)) {
-                                ::shutdown(server_connection_, SD_BOTH);
-                                closesocket(server_connection_);
-                                server_connection_ = INVALID_SOCKET;
-                                send_failed = true;
-                            }
-                        }
+                        server_pending_send_ = PendingSend(prepare_send_buffer(packet_buffer));
+                        SendResult result = send_nonblocking(server_sock, server_pending_send_);
                         
-                        if (send_failed) {
+                        if (result == SendResult::ERROR_FATAL) {
+                            {
+                                std::lock_guard<std::mutex> srv_lock(server_connection_mutex_);
+
+                                if (server_connection_ != INVALID_SOCKET && server_connection_ == server_sock) {
+                                    ::shutdown(server_connection_, SD_BOTH);
+                                    closesocket(server_connection_);
+                                    server_connection_ = INVALID_SOCKET;
+                                }
+                            }
+
+                            server_pending_send_.clear();
+                            send_failed = true;
+
                             for (size_t j = batch.size(); j-- > i; ) {
+                                outgoing_queue_lockfree_.push(std::move(batch[j]));
+                            }
+                            
+                            outgoing_has_data_.store(true, std::memory_order_release);
+                            break;
+                        } else if (result == SendResult::PARTIAL || result == SendResult::WOULD_BLOCK) {
+                            // Requeue remaining (current message is in pending)
+                            for (size_t j = batch.size(); j-- > (i + 1); ) {
                                 outgoing_queue_lockfree_.push(std::move(batch[j]));
                             }
 
                             outgoing_has_data_.store(true, std::memory_order_release);
+                            send_failed = true;
                             break;
                         }
+                        
+                        server_pending_send_.clear();
                     }
                 }
                 
@@ -4067,7 +4438,8 @@ public:
                 ::shutdown(pair.second, SD_BOTH);
                 closesocket(pair.second);
             }
-
+            
+            client_pending_sends_.clear();
             client_connections_.clear();
             per_client_queues_.clear();
             client_stall_start_times_.clear();
@@ -4087,6 +4459,8 @@ public:
                 closesocket(server_connection_);
                 server_connection_ = INVALID_SOCKET;
             }
+
+            server_pending_send_.clear();
         }
 
         {

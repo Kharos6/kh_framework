@@ -1197,10 +1197,6 @@ if isServer then {
 		0,
 		false
 	] call KH_fnc_execute;
-
-	{
-		[_x] call KH_fnc_medicalSetup;
-	} forEach (KH_var_allEntities select {_x isKindOf "CAManBase";});
 };
 
 if hasInterface then {

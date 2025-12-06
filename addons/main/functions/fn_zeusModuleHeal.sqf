@@ -18,11 +18,17 @@ isNil {
                     params ["_unit"];
                     
                     if (_unit isEqualTo player) then {
-                        if (player getVariable ["KH_var_withstanding", false]) then {
+                        if (!(isNil "KH_var_withstandingEffectRadial") && !(isNil "KH_var_withstandingEffectChromatic") && !(isNil "KH_var_withstandingEffectWet")) then {
                             ppEffectDestroy [KH_var_withstandingEffectRadial, KH_var_withstandingEffectChromatic, KH_var_withstandingEffectWet];
+                            KH_var_withstandingEffectRadial = nil;
+                            KH_var_withstandingEffectChromatic = nil;
+                            KH_var_withstandingEffectWet = nil;
                         };
-
-                        ppEffectDestroy KH_var_incapacitationFade;
+                        
+                        if !(isNil "KH_var_incapacitationFade") then {
+                            ppEffectDestroy KH_var_incapacitationFade;
+                            KH_var_incapacitationFade = nil;
+                        };	
                     };
 
                     _unit setUnconscious false;

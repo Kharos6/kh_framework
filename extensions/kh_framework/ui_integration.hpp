@@ -343,7 +343,109 @@ private:
     }
 };
 
-class UIDocumentListener : public ultralight::ViewListener {
+static game_value js_value_to_game_value(JSContextRef ctx, JSValueRef value) {
+    if (JSValueIsNull(ctx, value) || JSValueIsUndefined(ctx, value)) {
+        return game_value();
+    }
+    
+    if (JSValueIsBoolean(ctx, value)) {
+        return game_value(JSValueToBoolean(ctx, value));
+    }
+    
+    if (JSValueIsNumber(ctx, value)) {
+        return game_value(static_cast<float>(JSValueToNumber(ctx, value, nullptr)));
+    }
+    
+    if (JSValueIsString(ctx, value)) {
+        JSStringRef js_str = JSValueToStringCopy(ctx, value, nullptr);
+        size_t max_size = JSStringGetMaximumUTF8CStringSize(js_str);
+        std::vector<char> buffer(max_size);
+        JSStringGetUTF8CString(js_str, buffer.data(), max_size);
+        JSStringRelease(js_str);
+        return game_value(std::string(buffer.data()));
+    }
+    
+    if (JSValueIsArray(ctx, value)) {
+        JSObjectRef arr_obj = JSValueToObject(ctx, value, nullptr);
+        JSStringRef length_str = JSStringCreateWithUTF8CString("length");
+        JSValueRef length_val = JSObjectGetProperty(ctx, arr_obj, length_str, nullptr);
+        JSStringRelease(length_str);
+        size_t length = static_cast<size_t>(JSValueToNumber(ctx, length_val, nullptr));
+        auto_array<game_value> result;
+        result.reserve(length);
+        
+        for (size_t i = 0; i < length; i++) {
+            JSValueRef element = JSObjectGetPropertyAtIndex(ctx, arr_obj, static_cast<unsigned>(i), nullptr);
+            result.push_back(js_value_to_game_value(ctx, element));
+        }
+        
+        return game_value(std::move(result));
+    }
+    
+    if (JSValueIsObject(ctx, value)) {
+        // Convert object to string representation (JSON)
+        JSStringRef json_str = JSValueCreateJSONString(ctx, value, 0, nullptr);
+
+        if (json_str) {
+            size_t max_size = JSStringGetMaximumUTF8CStringSize(json_str);
+            std::vector<char> buffer(max_size);
+            JSStringGetUTF8CString(json_str, buffer.data(), max_size);
+            JSStringRelease(json_str);
+            return game_value(std::string(buffer.data()));
+        }
+    }
+    
+    return game_value();
+}
+
+class UIJavaScriptBridge {
+public:
+    static void inject_bridge(ultralight::View* view) {
+        if (!view) return;
+        auto ctx = view->LockJSContext();
+        JSContextRef js_ctx = ctx->ctx();
+        JSObjectRef global = JSContextGetGlobalObject(js_ctx);
+        JSStringRef func_name = JSStringCreateWithUTF8CString("call_sqf_event");
+        JSObjectRef func = JSObjectMakeFunctionWithCallback(js_ctx, func_name, call_sqf_event_callback);
+        JSObjectSetProperty(js_ctx, global, func_name, func, kJSPropertyAttributeReadOnly, nullptr);
+        JSStringRelease(func_name);
+    }
+    
+private:
+    static JSValueRef call_sqf_event_callback(JSContextRef ctx, JSObjectRef function,
+                                               JSObjectRef thisObject, size_t argumentCount,
+                                               const JSValueRef arguments[], JSValueRef* exception) {
+        if (argumentCount == 0) {
+            return JSValueMakeUndefined(ctx);
+        }
+        
+        // Convert all arguments to a game_value array
+        auto_array<game_value> args_array;
+        args_array.reserve(argumentCount);
+        
+        for (size_t i = 0; i < argumentCount; i++) {
+            args_array.push_back(js_value_to_game_value(ctx, arguments[i]));
+        }
+        
+        // Create the final game_value (single arg or array)
+        game_value args_to_send;
+
+        if (argumentCount == 1) {
+            args_to_send = std::move(args_array[0]);
+        } else {
+            args_to_send = game_value(std::move(args_array));
+        }
+        
+        // Schedule execution on main thread
+        MainThreadScheduler::instance().schedule([args = std::move(args_to_send)]() mutable {
+            raw_call_sqf_args_native_no_return(g_compiled_html_js_event, std::move(args));
+        });
+        
+        return JSValueMakeUndefined(ctx);
+    }
+};
+
+class UIDocumentListener : public ultralight::ViewListener, public ultralight::LoadListener {
 public:
     void OnAddConsoleMessage(ultralight::View* caller,
                              const ultralight::ConsoleMessage& msg) override {
@@ -363,8 +465,16 @@ public:
             });
         }
     }
+    
+    void OnDOMReady(ultralight::View* caller,
+                    uint64_t frame_id,
+                    bool is_main_frame,
+                    const ultralight::String& url) override {
+        if (is_main_frame) {
+            UIJavaScriptBridge::inject_bridge(caller);
+        }
+    }
 };
-
 
 struct UIDocument {
     std::string id;
@@ -373,6 +483,7 @@ struct UIDocument {
     ultralight::RefPtr<ultralight::View> view;
     bool visible = true;
     bool fullscreen = false;
+    bool interactive = true;
     int x = 0, y = 0, width = 0, height = 0;
     float opacity = 1.0f;
     int z_order = 0;
@@ -748,7 +859,12 @@ public:
         instance_ptr_.store(nullptr, std::memory_order_seq_cst);
         should_stop_.store(true, std::memory_order_seq_cst);
         worker_cv_.notify_all();
-        
+
+        __try {
+            uninstall_wndproc_hook();
+        }
+        __except(EXCEPTION_EXECUTE_HANDLER) {}
+
         __try {
             if (hook_installed_.load(std::memory_order_acquire) && hooked_present_addr_) {
                 MH_DisableHook(hooked_present_addr_);
@@ -808,6 +924,10 @@ public:
         }
 
         try {
+            uninstall_wndproc_hook();
+        } catch (...) {}
+        
+        try {
             uninstall_present_hook_internal();
         } catch (...) {}
 
@@ -847,12 +967,16 @@ public:
         if (!initialized_.load(std::memory_order_acquire) && !initialize()) return "";
         if (html_content.empty()) return "";
         std::string doc_id = UIDGenerator::generate();
-        std::promise<bool> promise;
-        auto future = promise.get_future();
+        auto promise = std::make_shared<std::promise<bool>>();
+        auto future = promise->get_future();
         
-        queue_command([this, doc_id, html_content, x, y, width, height, opacity, &promise]() {
-            create_html_internal(doc_id, html_content, x, y, width, height, opacity);
-            promise.set_value(true);
+        queue_command([this, doc_id, html_content, x, y, width, height, opacity, promise]() {
+            try {
+                create_html_internal(doc_id, html_content, x, y, width, height, opacity);
+                promise->set_value(true);
+            } catch (...) {
+                promise->set_value(false);
+            }
         });
 
         future.wait();
@@ -861,7 +985,7 @@ public:
             std::lock_guard<std::mutex> lock(documents_mutex_);
             
             if (documents_.find(doc_id) == documents_.end()) {
-                return "";  // Creation failed
+                return "";
             }
         }
         
@@ -871,12 +995,16 @@ public:
     std::string open_html(const std::string& filename, int x, int y, int width, int height, float opacity = 1.0f) {
         if (!initialized_.load(std::memory_order_acquire) && !initialize()) return "";
         std::string doc_id = UIDGenerator::generate();
-        std::promise<bool> promise;
-        auto future = promise.get_future();
+        auto promise = std::make_shared<std::promise<bool>>();
+        auto future = promise->get_future();
         
-        queue_command([this, doc_id, filename, x, y, width, height, opacity, &promise]() {
-            open_html_internal(doc_id, filename, x, y, width, height, opacity);
-            promise.set_value(true);
+        queue_command([this, doc_id, filename, x, y, width, height, opacity, promise]() {
+            try {
+                open_html_internal(doc_id, filename, x, y, width, height, opacity);
+                promise->set_value(true);
+            } catch (...) {
+                promise->set_value(false);
+            }
         });
 
         future.wait();
@@ -885,7 +1013,7 @@ public:
             std::lock_guard<std::mutex> lock(documents_mutex_);
             
             if (documents_.find(doc_id) == documents_.end()) {
-                return "";  // Creation failed
+                return "";
             }
         }
         
@@ -1062,11 +1190,15 @@ public:
         
         std::string script = "JSON.stringify(window[\"" + var_name + "\"])";
         std::string result;
-        std::promise<std::string> promise;
-        auto future = promise.get_future();
+        auto promise = std::make_shared<std::promise<std::string>>();
+        auto future = promise->get_future();
         
-        queue_command([this, doc_id, script, &promise]() {
-            promise.set_value(execute_javascript_internal(doc_id, script));
+        queue_command([this, doc_id, script, promise]() {
+            try {
+                promise->set_value(execute_javascript_internal(doc_id, script));
+            } catch (...) {
+                promise->set_value("");
+            }
         });
         
         return future.get();
@@ -1090,6 +1222,10 @@ public:
     }
 
     bool is_initialized() const { return initialized_.load(std::memory_order_acquire); }
+
+    void set_mouse_enabled(bool enabled) {
+        mouse_enabled_.store(enabled, std::memory_order_release);
+    }
 
     void on_present(IDXGISwapChain* swap_chain) {
         if (!swap_chain) return;
@@ -1253,7 +1389,11 @@ private:
             
             worker_initialized_.store(true, std::memory_order_release);
             install_present_hook();
-            
+
+            MainThreadScheduler::instance().schedule([this]() {
+                install_wndproc_hook();
+            });
+                        
             // Main processing loop
             while (!should_stop_.load(std::memory_order_acquire)) {
                 process_commands();
@@ -1501,6 +1641,7 @@ private:
         doc->fullscreen = fs;
         doc->listener = std::make_unique<UIDocumentListener>();
         view->set_view_listener(doc->listener.get());
+        view->set_load_listener(doc->listener.get());
         view->LoadHTML(ultralight::String(html_content.c_str()));
 
         {
@@ -1550,6 +1691,7 @@ private:
         doc->fullscreen = fs;
         doc->listener = std::make_unique<UIDocumentListener>();
         view->set_view_listener(doc->listener.get());
+        view->set_load_listener(doc->listener.get());
         std::string url = "file:///" + html_path.string();
         std::replace(url.begin(), url.end(), '\\', '/');
         view->LoadURL(ultralight::String(url.c_str()));
@@ -1602,6 +1744,8 @@ private:
         vc.is_transparent = true;
         auto new_view = renderer_->CreateView(width, height, vc, nullptr);
         if (!new_view) return;
+        new_view->set_view_listener(doc->listener.get());
+        new_view->set_load_listener(doc->listener.get());
 
         if (!doc->html_content.empty()) {
             new_view->LoadHTML(ultralight::String(doc->html_content.c_str()));
@@ -1699,6 +1843,13 @@ private:
     std::atomic<bool> shutting_down_{false};
     std::atomic<bool> hook_executing_{false};
     IDXGISwapChain* last_swap_chain_ = nullptr;
+    static std::atomic<WNDPROC> original_wndproc_;
+    static std::atomic<HWND> game_hwnd_;
+    std::atomic<int> last_mouse_x_{0};
+    std::atomic<int> last_mouse_y_{0};
+    std::string hovered_doc_id_;
+    std::atomic<bool> mouse_enabled_{false};
+    std::mutex mouse_mutex_;
     
     // Mutex for document map operations
     std::mutex documents_mutex_;
@@ -1777,11 +1928,39 @@ private:
         return S_OK;
     }
 
+    static HWND find_game_window() {
+        // Try window class name first
+        HWND hwnd = FindWindowA("Arma 3", nullptr);
+        if (hwnd) return hwnd;
+        
+        // Fallback: enumerate windows for this process
+        DWORD current_pid = GetCurrentProcessId();
+        HWND found_hwnd = nullptr;
+        
+        EnumWindows([](HWND hwnd, LPARAM lParam) -> BOOL {
+            HWND* out_hwnd = reinterpret_cast<HWND*>(lParam);
+            DWORD pid;
+            GetWindowThreadProcessId(hwnd, &pid);
+            
+            if (pid == GetCurrentProcessId() && IsWindowVisible(hwnd)) {
+                // Check if it's a main window (has no owner)
+                if (GetWindow(hwnd, GW_OWNER) == nullptr) {
+                    *out_hwnd = hwnd;
+                    return FALSE;  // Stop enumeration
+                }
+            }
+            
+            return TRUE;  // Continue enumeration
+        }, reinterpret_cast<LPARAM>(&found_hwnd));
+        
+        return found_hwnd;
+    }
+
     bool install_present_hook() {
         std::lock_guard<std::mutex> lock(hook_mutex_);
         if (hook_installed_.load(std::memory_order_acquire)) return true;
         instance_ptr_.store(this, std::memory_order_release);
-        HWND hwnd = FindWindowA("Arma 3", nullptr);
+        HWND hwnd = find_game_window();
         if (!hwnd) hwnd = GetDesktopWindow();
         DXGI_SWAP_CHAIN_DESC sd = {};
         sd.BufferCount = 1;
@@ -1879,6 +2058,623 @@ private:
             documents_[id]->z_order = new_z++;
         }
     }
+
+    static LRESULT CALLBACK hooked_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+        UIFramework* ptr = instance_ptr_.load(std::memory_order_acquire);
+        
+        if (ptr && !ptr->shutting_down_.load(std::memory_order_acquire)) {
+            switch (msg) {
+                case WM_MOUSEMOVE: {
+                    int x = GET_X_LPARAM(lParam);
+                    int y = GET_Y_LPARAM(lParam);
+                    ptr->on_mouse_move(x, y);
+                    break;
+                }
+                
+                case WM_LBUTTONDOWN:
+                    ptr->on_mouse_button(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam), 
+                                         ultralight::MouseEvent::kButton_Left, true);
+
+                    return 0;
+                    break;
+                
+                case WM_LBUTTONUP:
+                    ptr->on_mouse_button(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam),
+                                         ultralight::MouseEvent::kButton_Left, false);
+
+                    return 0;
+                    break;
+                
+                case WM_RBUTTONDOWN:
+                    ptr->on_mouse_button(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam),
+                                         ultralight::MouseEvent::kButton_Right, true);
+
+                    return 0;
+                    break;
+                
+                case WM_RBUTTONUP:
+                    ptr->on_mouse_button(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam),
+                                         ultralight::MouseEvent::kButton_Right, false);
+
+                    return 0;
+                    break;
+                
+                case WM_MBUTTONDOWN:
+                    ptr->on_mouse_button(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam),
+                                         ultralight::MouseEvent::kButton_Middle, true);
+
+                    return 0;
+                    break;
+                
+                case WM_MBUTTONUP:
+                    ptr->on_mouse_button(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam),
+                                         ultralight::MouseEvent::kButton_Middle, false);
+
+                    return 0;
+                    break;
+                
+                case WM_MOUSEWHEEL: {
+                    POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+                    ScreenToClient(hwnd, &pt);
+                    int delta = GET_WHEEL_DELTA_WPARAM(wParam) / WHEEL_DELTA;
+                    if (ptr->on_mouse_scroll(pt.x, pt.y, delta)) return 0;
+                    break;
+                }
+                
+                // Keyboard events - fire to all documents but don't swallow
+                case WM_KEYDOWN:
+                    ptr->on_key_event(wParam, lParam, true, false);
+                    break;
+                
+                case WM_KEYUP:
+                    ptr->on_key_event(wParam, lParam, false, false);
+                    break;
+                
+                case WM_SYSKEYDOWN:
+                    ptr->on_key_event(wParam, lParam, true, true);
+                    break;
+                
+                case WM_SYSKEYUP:
+                    ptr->on_key_event(wParam, lParam, false, true);
+                    break;
+                
+                case WM_CHAR:
+                    ptr->on_char_event(wParam, lParam);
+                    break;
+                
+                case WM_SYSCHAR:
+                    ptr->on_char_event(wParam, lParam);
+                    break;
+            }
+        }
+        
+        WNDPROC orig = original_wndproc_.load(std::memory_order_acquire);
+
+        if (orig) {
+            return CallWindowProcW(orig, hwnd, msg, wParam, lParam);
+        }
+
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    bool install_wndproc_hook() {
+        if (original_wndproc_.load(std::memory_order_acquire)) return true;
+        HWND hwnd = find_game_window();
+
+        if (!hwnd) {
+            MainThreadScheduler::instance().schedule([]() {
+                report_error("KH - UI Framework: Could not find game window for mouse hook");
+            });
+
+            return false;
+        }
+
+        game_hwnd_.store(hwnd, std::memory_order_release);
+        HWND stored_hwnd = hwnd;
+
+        if (!stored_hwnd) {
+            MainThreadScheduler::instance().schedule([]() {
+                report_error("KH - UI Framework: Could not find game window for mouse hook");
+            });
+
+            return false;
+        }
+
+        WNDPROC prev = reinterpret_cast<WNDPROC>(GetWindowLongPtrW(stored_hwnd, GWLP_WNDPROC));
+        original_wndproc_.store(prev, std::memory_order_release);
+
+        WNDPROC actual_prev = reinterpret_cast<WNDPROC>(
+            SetWindowLongPtrW(stored_hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(hooked_wndproc))
+        );
+
+        if (!actual_prev) {
+            DWORD err = GetLastError();
+            original_wndproc_.store(nullptr, std::memory_order_release);
+
+            MainThreadScheduler::instance().schedule([err]() {
+                report_error("KH - UI Framework: Failed to hook WndProc, error: " + std::to_string(err));
+            });
+
+            return false;
+        }
+        
+        if (actual_prev != prev) {
+            original_wndproc_.store(actual_prev, std::memory_order_release);
+        }
+        
+        return true;
+    }
+
+    void uninstall_wndproc_hook() {
+        WNDPROC orig = original_wndproc_.load(std::memory_order_acquire);
+        HWND hwnd = game_hwnd_.load(std::memory_order_acquire);
+        
+        if (orig && hwnd && IsWindow(hwnd)) {
+            SetWindowLongPtrW(hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(orig));
+            original_wndproc_.store(nullptr, std::memory_order_release);
+        }
+
+        game_hwnd_.store(nullptr, std::memory_order_release);
+    }
+
+    void on_mouse_move(int x, int y) {
+        last_mouse_x_.store(x, std::memory_order_release);
+        last_mouse_y_.store(y, std::memory_order_release);
+        std::string target_doc;
+        int local_x = 0, local_y = 0;
+        std::string old_hovered;
+        
+        {
+            std::lock_guard<std::mutex> lock(documents_mutex_);
+            target_doc = find_document_at(x, y, local_x, local_y);
+        }
+        
+        {
+            std::lock_guard<std::mutex> lock(mouse_mutex_);
+            old_hovered = hovered_doc_id_;
+            
+            if (target_doc != old_hovered) {
+                if (!old_hovered.empty()) {
+                    queue_command([this, old_hovered]() {
+                        fire_mouse_leave_internal(old_hovered);
+                    });
+                }
+
+                hovered_doc_id_ = target_doc;
+            }
+        }
+        
+        if (!target_doc.empty()) {
+            queue_command([this, target_doc, local_x, local_y]() {
+                fire_mouse_move_internal(target_doc, local_x, local_y);
+            });
+        }
+    }
+
+    bool on_mouse_button(int x, int y, ultralight::MouseEvent::Button button, bool pressed) {
+        std::string target_doc;
+        int local_x = 0, local_y = 0;
+        
+        {
+            std::lock_guard<std::mutex> lock(documents_mutex_);
+            target_doc = find_document_at(x, y, local_x, local_y);
+        }
+        
+        if (target_doc.empty()) return false;
+        
+        ultralight::MouseEvent::Type type = pressed 
+            ? ultralight::MouseEvent::kType_MouseDown 
+            : ultralight::MouseEvent::kType_MouseUp;
+        
+        queue_command([this, target_doc, local_x, local_y, type, button]() {
+            fire_mouse_button_internal(target_doc, local_x, local_y, type, button);
+        });
+        
+        return true;  // We handled it
+    }
+
+    bool on_mouse_scroll(int x, int y, int delta) {
+        std::string target_doc;
+        int local_x = 0, local_y = 0;
+        
+        {
+            std::lock_guard<std::mutex> lock(documents_mutex_);
+            target_doc = find_document_at(x, y, local_x, local_y);
+        }
+        
+        if (target_doc.empty()) return false;
+        
+        queue_command([this, target_doc, local_x, local_y, delta]() {
+            fire_scroll_internal(target_doc, local_x, local_y, delta);
+        });
+        
+        return true;
+    }
+
+    // Find topmost interactive document at screen coordinates
+    // Must be called with documents_mutex_ held
+    std::string find_document_at(int screen_x, int screen_y, int& local_x, int& local_y) {
+        if (!mouse_enabled_.load(std::memory_order_acquire)) {
+            return "";  // Mouse input disabled
+        }
+        
+        std::string result;
+        int highest_z = INT_MIN;
+        
+        for (const auto& [id, doc] : documents_) {
+            if (!doc || !doc->visible || !doc->interactive) continue;
+            if (!doc->view) continue;
+            
+            if (screen_x >= doc->x && screen_x < doc->x + doc->width &&
+                screen_y >= doc->y && screen_y < doc->y + doc->height) {
+                
+                if (doc->z_order > highest_z) {
+                    highest_z = doc->z_order;
+                    result = id;
+                    local_x = screen_x - doc->x;
+                    local_y = screen_y - doc->y;
+                }
+            }
+        }
+        
+        return result;
+    }
+
+    void fire_mouse_move_internal(const std::string& doc_id, int x, int y) {
+        if (shutting_down_.load(std::memory_order_acquire)) return;
+        std::shared_ptr<UIDocument> doc;
+
+        {
+            std::lock_guard<std::mutex> lock(documents_mutex_);
+            auto it = documents_.find(doc_id);
+            if (it == documents_.end()) return;
+            doc = it->second;
+        }
+        
+        if (!doc || !doc->view) return;
+        ultralight::MouseEvent evt;
+        evt.type = ultralight::MouseEvent::kType_MouseMoved;
+        evt.x = x;
+        evt.y = y;
+        evt.button = ultralight::MouseEvent::kButton_None;
+        doc->view->FireMouseEvent(evt);
+    }
+
+    void fire_mouse_leave_internal(const std::string& doc_id) {
+        if (shutting_down_.load(std::memory_order_acquire)) return;
+        std::shared_ptr<UIDocument> doc;
+
+        {
+            std::lock_guard<std::mutex> lock(documents_mutex_);
+            auto it = documents_.find(doc_id);
+            if (it == documents_.end()) return;
+            doc = it->second;
+        }
+        
+        if (!doc || !doc->view) return;
+        ultralight::MouseEvent evt;
+        evt.type = ultralight::MouseEvent::kType_MouseMoved;
+        evt.x = -1;
+        evt.y = -1;
+        evt.button = ultralight::MouseEvent::kButton_None;
+        doc->view->FireMouseEvent(evt);
+    }
+
+    void fire_mouse_button_internal(const std::string& doc_id, int x, int y,
+                                     ultralight::MouseEvent::Type type,
+                                     ultralight::MouseEvent::Button button) {
+        if (shutting_down_.load(std::memory_order_acquire)) return;
+        std::shared_ptr<UIDocument> doc;
+
+        {
+            std::lock_guard<std::mutex> lock(documents_mutex_);
+            auto it = documents_.find(doc_id);
+            if (it == documents_.end()) return;
+            doc = it->second;
+        }
+        
+        if (!doc || !doc->view) return;
+        ultralight::MouseEvent evt;
+        evt.type = type;
+        evt.x = x;
+        evt.y = y;
+        evt.button = button;
+        doc->view->FireMouseEvent(evt);
+    }
+
+    void fire_scroll_internal(const std::string& doc_id, int x, int y, int delta) {
+        if (shutting_down_.load(std::memory_order_acquire)) return;
+        std::shared_ptr<UIDocument> doc;
+
+        {
+            std::lock_guard<std::mutex> lock(documents_mutex_);
+            auto it = documents_.find(doc_id);
+            if (it == documents_.end()) return;
+            doc = it->second;
+        }
+        
+        if (!doc || !doc->view) return;
+        ultralight::ScrollEvent evt;
+        evt.type = ultralight::ScrollEvent::kType_ScrollByPixel;
+        evt.delta_x = 0;
+        evt.delta_y = delta * 40;
+        doc->view->FireScrollEvent(evt);
+    }
+
+    static int windows_vk_to_ultralight_keycode(WPARAM vk) {
+        // Ultralight uses the same values as Windows for most keys
+        switch (vk) {
+            case VK_BACK:       return 0x08;  // Backspace
+            case VK_TAB:        return 0x09;  // Tab
+            case VK_CLEAR:      return 0x0C;  // Clear
+            case VK_RETURN:     return 0x0D;  // Enter
+            case VK_SHIFT:      return 0x10;  // Shift
+            case VK_CONTROL:    return 0x11;  // Ctrl
+            case VK_MENU:       return 0x12;  // Alt
+            case VK_PAUSE:      return 0x13;  // Pause
+            case VK_CAPITAL:    return 0x14;  // Caps Lock
+            case VK_ESCAPE:     return 0x1B;  // Escape
+            case VK_SPACE:      return 0x20;  // Space
+            case VK_PRIOR:      return 0x21;  // Page Up
+            case VK_NEXT:       return 0x22;  // Page Down
+            case VK_END:        return 0x23;  // End
+            case VK_HOME:       return 0x24;  // Home
+            case VK_LEFT:       return 0x25;  // Left Arrow
+            case VK_UP:         return 0x26;  // Up Arrow
+            case VK_RIGHT:      return 0x27;  // Right Arrow
+            case VK_DOWN:       return 0x28;  // Down Arrow
+            case VK_SELECT:     return 0x29;  // Select
+            case VK_PRINT:      return 0x2A;  // Print
+            case VK_EXECUTE:    return 0x2B;  // Execute
+            case VK_SNAPSHOT:   return 0x2C;  // Print Screen
+            case VK_INSERT:     return 0x2D;  // Insert
+            case VK_DELETE:     return 0x2E;  // Delete
+            case VK_HELP:       return 0x2F;  // Help
+            // 0-9 keys (0x30-0x39) - same as Windows
+            case '0': case '1': case '2': case '3': case '4':
+            case '5': case '6': case '7': case '8': case '9':
+                return static_cast<int>(vk);
+            // A-Z keys (0x41-0x5A) - same as Windows
+            case 'A': case 'B': case 'C': case 'D': case 'E': case 'F':
+            case 'G': case 'H': case 'I': case 'J': case 'K': case 'L':
+            case 'M': case 'N': case 'O': case 'P': case 'Q': case 'R':
+            case 'S': case 'T': case 'U': case 'V': case 'W': case 'X':
+            case 'Y': case 'Z':
+                return static_cast<int>(vk);
+            case VK_LWIN:       return 0x5B;  // Left Windows
+            case VK_RWIN:       return 0x5C;  // Right Windows
+            case VK_APPS:       return 0x5D;  // Applications
+            case VK_SLEEP:      return 0x5F;  // Sleep
+            // Numpad keys
+            case VK_NUMPAD0:    return 0x60;
+            case VK_NUMPAD1:    return 0x61;
+            case VK_NUMPAD2:    return 0x62;
+            case VK_NUMPAD3:    return 0x63;
+            case VK_NUMPAD4:    return 0x64;
+            case VK_NUMPAD5:    return 0x65;
+            case VK_NUMPAD6:    return 0x66;
+            case VK_NUMPAD7:    return 0x67;
+            case VK_NUMPAD8:    return 0x68;
+            case VK_NUMPAD9:    return 0x69;
+            case VK_MULTIPLY:   return 0x6A;
+            case VK_ADD:        return 0x6B;
+            case VK_SEPARATOR:  return 0x6C;
+            case VK_SUBTRACT:   return 0x6D;
+            case VK_DECIMAL:    return 0x6E;
+            case VK_DIVIDE:     return 0x6F;
+            // Function keys
+            case VK_F1:         return 0x70;
+            case VK_F2:         return 0x71;
+            case VK_F3:         return 0x72;
+            case VK_F4:         return 0x73;
+            case VK_F5:         return 0x74;
+            case VK_F6:         return 0x75;
+            case VK_F7:         return 0x76;
+            case VK_F8:         return 0x77;
+            case VK_F9:         return 0x78;
+            case VK_F10:        return 0x79;
+            case VK_F11:        return 0x7A;
+            case VK_F12:        return 0x7B;
+            case VK_F13:        return 0x7C;
+            case VK_F14:        return 0x7D;
+            case VK_F15:        return 0x7E;
+            case VK_F16:        return 0x7F;
+            case VK_F17:        return 0x80;
+            case VK_F18:        return 0x81;
+            case VK_F19:        return 0x82;
+            case VK_F20:        return 0x83;
+            case VK_F21:        return 0x84;
+            case VK_F22:        return 0x85;
+            case VK_F23:        return 0x86;
+            case VK_F24:        return 0x87;
+            case VK_NUMLOCK:    return 0x90;
+            case VK_SCROLL:     return 0x91;
+            case VK_LSHIFT:     return 0xA0;
+            case VK_RSHIFT:     return 0xA1;
+            case VK_LCONTROL:   return 0xA2;
+            case VK_RCONTROL:   return 0xA3;
+            case VK_LMENU:      return 0xA4;
+            case VK_RMENU:      return 0xA5;
+            // OEM keys
+            case VK_OEM_1:      return 0xBA;  // ;:
+            case VK_OEM_PLUS:   return 0xBB;  // =+
+            case VK_OEM_COMMA:  return 0xBC;  // ,
+            case VK_OEM_MINUS:  return 0xBD;  // -_
+            case VK_OEM_PERIOD: return 0xBE;  // .>
+            case VK_OEM_2:      return 0xBF;  // /?
+            case VK_OEM_3:      return 0xC0;  // `~
+            case VK_OEM_4:      return 0xDB;  // [{
+            case VK_OEM_5:      return 0xDC;  // \|
+            case VK_OEM_6:      return 0xDD;  // ]}
+            case VK_OEM_7:      return 0xDE;  // '"
+            case VK_OEM_8:      return 0xDF;
+            case VK_OEM_102:    return 0xE2;  // <> or \| on RT 102-key
+            default:
+                return static_cast<int>(vk);
+        }
+    }
+
+    static unsigned get_keyboard_modifiers() {
+        unsigned modifiers = 0;
+
+        if (GetKeyState(VK_MENU) & 0x8000)     modifiers |= ultralight::KeyEvent::kMod_AltKey;
+        if (GetKeyState(VK_CONTROL) & 0x8000)  modifiers |= ultralight::KeyEvent::kMod_CtrlKey;
+        if (GetKeyState(VK_SHIFT) & 0x8000)    modifiers |= ultralight::KeyEvent::kMod_ShiftKey;
+        if (GetKeyState(VK_LWIN) & 0x8000 || GetKeyState(VK_RWIN) & 0x8000) 
+            modifiers |= ultralight::KeyEvent::kMod_MetaKey;
+
+        return modifiers;
+    }
+
+    void on_key_event(WPARAM vk, LPARAM lParam, bool is_down, bool is_system_key) {
+        int ul_keycode = windows_vk_to_ultralight_keycode(vk);
+        unsigned modifiers = get_keyboard_modifiers();
+        
+        // Determine if this is a keypad key
+        bool is_keypad = false;
+        bool is_extended = (lParam >> 24) & 1;
+
+        if (!is_extended) {
+            switch (vk) {
+                case VK_INSERT: case VK_DELETE: case VK_HOME: case VK_END:
+                case VK_PRIOR: case VK_NEXT: case VK_LEFT: case VK_RIGHT:
+                case VK_UP: case VK_DOWN:
+                    is_keypad = true;
+                    break;
+            }
+        }
+        
+        if (vk >= VK_NUMPAD0 && vk <= VK_DIVIDE) {
+            is_keypad = true;
+        }
+        
+        queue_command([this, ul_keycode, vk, modifiers, is_down, is_keypad]() {
+            fire_key_event_to_all_documents(ul_keycode, static_cast<int>(vk), modifiers, is_down, is_keypad);
+        });
+    }
+
+    void on_char_event(WPARAM charCode, LPARAM lParam) {
+        if (charCode < 32 && charCode != '\r' && charCode != '\t') return;  // Skip control chars except enter/tab
+        unsigned modifiers = get_keyboard_modifiers();
+        wchar_t wch = static_cast<wchar_t>(charCode);
+        char utf8[8] = {0};
+        WideCharToMultiByte(CP_UTF8, 0, &wch, 1, utf8, sizeof(utf8), nullptr, nullptr);
+        std::string text(utf8);
+        
+        queue_command([this, text, modifiers]() {
+            fire_char_event_to_all_documents(text, modifiers);
+        });
+    }
+
+    void fire_key_event_to_all_documents(int ul_keycode, int native_keycode, unsigned modifiers, bool is_down, bool is_keypad) {
+        if (shutting_down_.load(std::memory_order_acquire)) return;
+        std::vector<std::shared_ptr<UIDocument>> docs_to_notify;
+        
+        {
+            std::lock_guard<std::mutex> lock(documents_mutex_);
+            
+            for (const auto& [id, doc] : documents_) {
+                if (doc && doc->view && doc->visible) {
+                    docs_to_notify.push_back(doc);
+                }
+            }
+        }
+        
+        for (const auto& doc : docs_to_notify) {
+            if (!doc->view) continue;
+            ultralight::KeyEvent evt;
+            evt.type = is_down ? ultralight::KeyEvent::kType_RawKeyDown : ultralight::KeyEvent::kType_KeyUp;
+            evt.virtual_key_code = ul_keycode;
+            evt.native_key_code = native_keycode;
+            evt.modifiers = modifiers;
+            evt.is_auto_repeat = false;
+            evt.is_keypad = is_keypad;
+            evt.is_system_key = false;
+            GetKeyIdentifierFromVirtualKeyCode(native_keycode, evt.key_identifier);
+            doc->view->FireKeyEvent(evt);
+        }
+    }
+
+    void fire_char_event_to_all_documents(const std::string& text, unsigned modifiers) {
+        if (shutting_down_.load(std::memory_order_acquire)) return;
+        std::vector<std::shared_ptr<UIDocument>> docs_to_notify;
+        
+        {
+            std::lock_guard<std::mutex> lock(documents_mutex_);
+
+            for (const auto& [id, doc] : documents_) {
+                if (doc && doc->view && doc->visible) {
+                    docs_to_notify.push_back(doc);
+                }
+            }
+        }
+        
+        for (const auto& doc : docs_to_notify) {
+            if (!doc->view) continue;
+            ultralight::KeyEvent evt;
+            evt.type = ultralight::KeyEvent::kType_Char;
+            evt.text = ultralight::String(text.c_str());
+            evt.unmodified_text = ultralight::String(text.c_str());
+            evt.modifiers = modifiers;
+            evt.is_auto_repeat = false;
+            evt.is_keypad = false;
+            evt.is_system_key = false;
+            doc->view->FireKeyEvent(evt);
+        }
+    }
+
+    static void GetKeyIdentifierFromVirtualKeyCode(int virtual_key_code, ultralight::String& key_identifier) {
+        // Map virtual key codes to DOM key identifiers
+        switch (virtual_key_code) {
+            case VK_MENU:    case VK_LMENU:   case VK_RMENU:    key_identifier = "Alt"; break;
+            case VK_CONTROL: case VK_LCONTROL: case VK_RCONTROL: key_identifier = "Control"; break;
+            case VK_SHIFT:   case VK_LSHIFT:  case VK_RSHIFT:   key_identifier = "Shift"; break;
+            case VK_LWIN:    case VK_RWIN:                       key_identifier = "Meta"; break;
+            case VK_CAPITAL:  key_identifier = "CapsLock"; break;
+            case VK_NUMLOCK:  key_identifier = "NumLock"; break;
+            case VK_SCROLL:   key_identifier = "ScrollLock"; break;
+            case VK_BACK:     key_identifier = "Backspace"; break;
+            case VK_TAB:      key_identifier = "Tab"; break;
+            case VK_RETURN:   key_identifier = "Enter"; break;
+            case VK_ESCAPE:   key_identifier = "Escape"; break;
+            case VK_SPACE:    key_identifier = " "; break;
+            case VK_PRIOR:    key_identifier = "PageUp"; break;
+            case VK_NEXT:     key_identifier = "PageDown"; break;
+            case VK_END:      key_identifier = "End"; break;
+            case VK_HOME:     key_identifier = "Home"; break;
+            case VK_LEFT:     key_identifier = "ArrowLeft"; break;
+            case VK_UP:       key_identifier = "ArrowUp"; break;
+            case VK_RIGHT:    key_identifier = "ArrowRight"; break;
+            case VK_DOWN:     key_identifier = "ArrowDown"; break;
+            case VK_DELETE:   key_identifier = "Delete"; break;
+            case VK_INSERT:   key_identifier = "Insert"; break;
+            case VK_F1:       key_identifier = "F1"; break;
+            case VK_F2:       key_identifier = "F2"; break;
+            case VK_F3:       key_identifier = "F3"; break;
+            case VK_F4:       key_identifier = "F4"; break;
+            case VK_F5:       key_identifier = "F5"; break;
+            case VK_F6:       key_identifier = "F6"; break;
+            case VK_F7:       key_identifier = "F7"; break;
+            case VK_F8:       key_identifier = "F8"; break;
+            case VK_F9:       key_identifier = "F9"; break;
+            case VK_F10:      key_identifier = "F10"; break;
+            case VK_F11:      key_identifier = "F11"; break;
+            case VK_F12:      key_identifier = "F12"; break;
+            case VK_PAUSE:    key_identifier = "Pause"; break;
+            default: {
+                // For letter and number keys, use the character itself
+                if ((virtual_key_code >= '0' && virtual_key_code <= '9') ||
+                    (virtual_key_code >= 'A' && virtual_key_code <= 'Z')) {
+                    char buf[2] = { static_cast<char>(virtual_key_code), 0 };
+                    key_identifier = buf;
+                } else {
+                    key_identifier = "Unidentified";
+                }
+
+                break;
+            }
+        }
+    }
 };
 
 std::atomic<UIFramework*> UIFramework::instance_ptr_{nullptr};
@@ -1887,3 +2683,5 @@ void* UIFramework::hooked_present_addr_ = nullptr;
 std::atomic<bool> UIFramework::hook_installed_{false};
 std::atomic<bool> UIFramework::minhook_initialized_{false};
 std::mutex UIFramework::hook_mutex_;
+std::atomic<WNDPROC> UIFramework::original_wndproc_{nullptr};
+std::atomic<HWND> UIFramework::game_hwnd_{nullptr};

@@ -66,55 +66,26 @@ void intercept::pre_start() {
 }
 
 void intercept::pre_init() {
+    g_is_server = sqf::is_server();
+    g_is_dedicated_server = sqf::is_dedicated();
+    g_is_headless = (!(sqf::is_server()) && !(sqf::has_interface()));
+    g_is_player = sqf::has_interface();
+    g_mission_time = 0.0f;
+    g_mission_frame = 0;
     LuaStackGuard guard(*g_lua_state);
     sol::table game = (*g_lua_state)["game"];
     sol::table mission = (*g_lua_state)["mission"];
     game["preInit"] = true;
     game["postInit"] = false;
-    g_is_server = sqf::is_server();
-    g_is_dedicated_server = sqf::is_dedicated();
-    g_is_headless = (!(sqf::is_server()) && !(sqf::has_interface()));
-    g_is_player = sqf::has_interface();
     game["server"] = g_is_server;
     game["dedicated"] = g_is_dedicated_server;
     game["headless"] = g_is_headless;
     game["player"] = g_is_player;
-    g_mission_time = 0.0f;
-    g_mission_frame = 0;
     mission["frame"] = g_mission_frame;
     mission["time"] = g_mission_time;
     mission["active"] = true;
     clean_lua_state();
     KHDataManager::instance().flush_all();
-    sqf::diag_log("KH Framework Extension - Pre-init");
-}
-
-void intercept::post_init() {
-    LuaStackGuard guard(*g_lua_state);
-    sol::table game = (*g_lua_state)["game"];
-    game["postInit"] = true;
-    sqf::diag_log("KH Framework Extension - Post-init");
-}
-
-void intercept::on_frame() {
-    MainThreadScheduler::instance().process_frame();
-    LuaStackGuard guard(*g_lua_state);
-    float current_delta = sqf::diag_delta_time();
-    sol::table game = (*g_lua_state)["game"];
-    sol::table mission = (*g_lua_state)["mission"];
-    g_game_time += current_delta;
-    g_game_frame++;
-    game["frame"] = g_game_frame;
-    game["time"] = g_game_time;
-    g_mission_time += current_delta;
-    g_mission_frame++;
-    mission["frame"] = g_mission_frame;
-    mission["time"] = g_mission_time;
-    LuaFunctions::update_scheduler();
-    network_on_frame();
-}
-
-void intercept::mission_ended() {
     MainThreadScheduler::instance().clear();
     
     if (AIFramework::instance().is_initialized()) {
@@ -167,7 +138,42 @@ void intercept::mission_ended() {
         }
     }
 
+    sqf::diag_log("KH Framework Extension - Pre-init");
+}
+
+void intercept::post_init() {
+    LuaStackGuard guard(*g_lua_state);
+    sol::table game = (*g_lua_state)["game"];
+    game["postInit"] = true;
+    sqf::diag_log("KH Framework Extension - Post-init");
+}
+
+void intercept::on_frame() {
+    if (UIFramework::instance().is_initialized()) {
+        UIFramework::instance().set_mouse_enabled(sqf::dialog());
+    }
+    
+    MainThreadScheduler::instance().process_frame();
+    LuaStackGuard guard(*g_lua_state);
+    float current_delta = sqf::diag_delta_time();
+    sol::table game = (*g_lua_state)["game"];
+    sol::table mission = (*g_lua_state)["mission"];
+    g_game_time += current_delta;
+    g_game_frame++;
+    game["frame"] = g_game_frame;
+    game["time"] = g_game_time;
+    g_mission_time += current_delta;
+    g_mission_frame++;
+    mission["frame"] = g_mission_frame;
+    mission["time"] = g_mission_time;
+    LuaFunctions::update_scheduler();
+    network_on_frame();
+}
+
+void intercept::mission_ended() {
     reset_lua_state();
+    g_mission_time = 0.0f;
+    g_mission_frame = 0;
     LuaStackGuard guard(*g_lua_state);
     sol::table game = (*g_lua_state)["game"];
     sol::table mission = (*g_lua_state)["mission"];
@@ -179,12 +185,62 @@ void intercept::mission_ended() {
     game["dedicated"] = g_is_dedicated_server;
     game["headless"] = g_is_headless;
     game["player"] = g_is_player;
-    g_mission_time = 0.0f;
-    g_mission_frame = 0;
     mission["frame"] = g_mission_frame;
     mission["time"] = g_mission_time;
     mission["active"] = false;
     KHDataManager::instance().flush_all();
+    MainThreadScheduler::instance().clear();
+    
+    if (AIFramework::instance().is_initialized()) {
+        try {
+            AIFramework::instance().stop_all();
+        } catch (const std::exception& e) {
+            report_error("KH Framework Extension - Error stopping AI instances: " + std::string(e.what()));
+        } catch (...) {
+            report_error("KH Framework Extension - Unknown error stopping AI instances");
+        }
+    }
+
+    if (TTSFramework::instance().is_initialized()) {
+        try {
+            TTSFramework::instance().cleanup();
+        } catch (const std::exception& e) {
+            report_error("KH Framework Extension - Error stopping TTS instances: " + std::string(e.what()));
+        } catch (...) {
+            report_error("KH Framework Extension - Unknown error stopping TTS instances");
+        }
+    }
+
+    if (STTFramework::instance().is_initialized_public()) {
+        try {
+            STTFramework::instance().cleanup_public();
+        } catch (const std::exception& e) {
+            report_error("KH Framework Extension - Error stopping STT: " + std::string(e.what()));
+        } catch (...) {
+            report_error("KH Framework Extension - Unknown error stopping STT");
+        }
+    }
+
+    if (UIFramework::instance().is_initialized()) {
+        try {
+            UIFramework::instance().shutdown();
+        } catch (const std::exception& e) {
+            report_error("KH Framework Extension - Error stopping UI framework: " + std::string(e.what()));
+        } catch (...) {
+            report_error("KH Framework Extension - Unknown error stopping UI framework");
+        }
+    }
+
+    if (NetworkFramework::instance().is_initialized()) {
+        try {
+            NetworkFramework::instance().shutdown();
+        } catch (const std::exception& e) {
+            report_error("KH Framework Extension - Error stopping Network framework: " + std::string(e.what()));
+        } catch (...) {
+            report_error("KH Framework Extension - Unknown error stopping Network framework");
+        }
+    }
+
     sqf::diag_log("KH Framework Extension - Mission End");
 }
 

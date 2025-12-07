@@ -8,6 +8,7 @@
 #include <mstcpip.h>
 #include <winhttp.h>
 #include <windows.h>
+#include <windowsx.h>
 #include <Winternl.h>
 #include <string>
 #include <vector>
@@ -80,6 +81,7 @@ static code g_compiled_ai_response_event;
 static code g_compiled_tts_generated_event;
 static code g_compiled_tts_finished_event;
 static code g_compiled_stt_transcription_event;
+static code g_compiled_html_js_event;
 static game_value g_return_value;
 static game_value g_call_arguments;
 static bool g_is_server = false;

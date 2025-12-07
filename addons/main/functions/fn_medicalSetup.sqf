@@ -50,7 +50,7 @@ if KH_var_khMedical then {
                         _unit getHitPointDamage "hithead";
                     };
 
-                    if ((_context isEqualTo 0) && ((abs (_damage - (_unit getHitPointDamage _hitPoint) - 1)) < 0.001) && (_projectile isEqualTo "") && (isNull _source) && (isNull _instigator)) exitWith {
+                    if ((_context isEqualTo 0) && (_projectile isEqualTo "") && (isNull _source) && (isNull _instigator)) exitWith {
                         _damage;
                     };
 
@@ -414,27 +414,9 @@ if KH_var_khMedical then {
                                             params ["_unit"];
 
                                             if (_unit getVariable ["KH_var_incapacitated", false]) then {
-                                                if (((damage _unit) < KH_var_incapacitationThreshold) || !(alive _unit)) then {
-                                                    _unit setVariable ["KH_var_stabilized", false, true];
-                                                    _unit setVariable ["KH_var_withstanding", false, true];
-                                                    _unit setVariable ["KH_var_incapacitated", false, true];
-                                                    _unit setVariable ["KH_var_beingRevived", false, true];
-                                                    _unit setVariable ["KH_var_beingStabilized", false, true];
-                                                    _unit setVariable ["KH_var_beingTreated", false, true];
-                                                    _unit setVariable ["KH_var_isTreating", false, true];
-                                                    _unit setUnconscious false;
-
-                                                    if KH_var_incapacitatedCaptives then {
-                                                        _unit setCaptive false;
-                                                    };
-                                                    
-                                                    [_handlerId] call KH_fnc_removeHandler;
-                                                }
-                                                else {
-                                                    if !(_unit getVariable ["KH_var_withstanding", false]) then {
-                                                        if ((isNull (attachedTo _unit)) && (isNull (objectParent _unit)) && !("unconscious" in (animationState _unit)) && !("ainj" in (animationState _unit))) then {
-                                                            _unit playActionNow "Unconscious";
-                                                        };
+                                                if !(_unit getVariable ["KH_var_withstanding", false]) then {
+                                                    if ((isNull (attachedTo _unit)) && (isNull (objectParent _unit)) && !("unconscious" in (animationState _unit)) && !("ainj" in (animationState _unit))) then {
+                                                        _unit playActionNow "Unconscious";
                                                     };
                                                 };
                                             }
@@ -868,6 +850,16 @@ if KH_var_khMedical then {
                 true,
                 false
             ] call KH_fnc_execute;
+
+            [
+                ["ENTITY", _unit, "PERSISTENT"],
+                "Respawn",
+                [],
+                {
+                    params ["_unit"];
+                    _unit setCaptive false;
+                }
+            ] call KH_fnc_addEventHandler;
         },
         true,
         "1",

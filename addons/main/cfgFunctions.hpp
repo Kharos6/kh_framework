@@ -129,6 +129,7 @@ class CfgFunctions
 			class triggerCbaEvent {};
 			class updateAiInstance {};
 			class updateTtsSpeakerEntity {};
+			class vectorDirToPitchYaw {};
 			class vehicleSequence {};
 			class visualTrigger {};
 			class zeusModuleArma {};

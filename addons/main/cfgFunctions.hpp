@@ -66,6 +66,7 @@ class CfgFunctions
 			class loadUnitPersistency {};
 			class log {};
 			class luaRecompile {};
+			class medicalAddDamageHandler {};
 			class medicalSetup {};
 			class moduleAddAction {};
 			class moduleAiInstanceSetup {};

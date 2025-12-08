@@ -399,6 +399,7 @@ public:
         heartbeat_running.store(true, std::memory_order_release);
         heartbeat_thread = std::thread(&TeamspeakFramework::heartbeat_loop, this);
         is_initialized_flag.store(true, std::memory_order_release);
+        reapply_stored_effects();
         return true;
     }
     
@@ -511,14 +512,23 @@ public:
         ReleaseMutex(mutex_handle);
         return transmitting;
     }
-        
+
     bool apply_voice_effects(const std::vector<std::pair<std::string, float>>& effects) {
+        // Always store effects locally first
+        {
+            std::lock_guard<std::mutex> fx_lock(effects_mutex);
+            current_effects = effects;
+        }
+        
+        // If not initialized, just store - will apply on next connection
         if (!is_initialized_flag.load(std::memory_order_acquire)) {
-            if (!initialize()) {
-                return false;
-            }
+            return true;
         }
 
+        return write_effects_to_shared_memory(effects);
+    }
+    
+    bool write_effects_to_shared_memory(const std::vector<std::pair<std::string, float>>& effects) {
         std::lock_guard<std::mutex> ipc_lock(ipc_mutex);
         
         if (effect_config == nullptr || mutex_handle == nullptr) {
@@ -562,6 +572,7 @@ public:
                 case TSEffectType::AGC:
                 case TSEffectType::CHORUS:
                 case TSEffectType::FLANGER:
+                case TSEffectType::BASS_BOOST:
                     clamped_value = std::clamp(value, 0.0f, 1.0f);
                     break;
                 case TSEffectType::RING_MOD:
@@ -586,9 +597,6 @@ public:
                 case TSEffectType::FLANGER_RATE:
                     clamped_value = std::clamp(value, 0.1f, 5.0f);
                     break;
-                case TSEffectType::BASS_BOOST:
-                    clamped_value = std::clamp(value, 0.0f, 10.0f);
-                    break;
                 default:
                     break;
             }
@@ -603,21 +611,34 @@ public:
         effect_config->checksum = calculate_checksum(effect_config);
         ReleaseMutex(mutex_handle);
         
-        // Store current effects
-        {
-            std::lock_guard<std::mutex> fx_lock(effects_mutex);
-            current_effects = effects;
-        }
-        
         return true;
     }
     
-    bool clear_voice_effects() {
-        std::lock_guard<std::mutex> ipc_lock(ipc_mutex);
-        
-        if (!is_initialized_flag.load(std::memory_order_acquire)) {
-            return true; // Nothing to clear
+    void reapply_stored_effects() {
+        std::vector<std::pair<std::string, float>> effects_copy;
+
+        {
+            std::lock_guard<std::mutex> fx_lock(effects_mutex);
+            if (current_effects.empty()) return;
+            effects_copy = current_effects;
         }
+
+        write_effects_to_shared_memory(effects_copy);
+    }
+    
+    bool clear_voice_effects() {
+        // Always clear stored effects
+        {
+            std::lock_guard<std::mutex> fx_lock(effects_mutex);
+            current_effects.clear();
+        }
+        
+        // If not initialized, nothing else to do
+        if (!is_initialized_flag.load(std::memory_order_acquire)) {
+            return true;
+        }
+        
+        std::lock_guard<std::mutex> ipc_lock(ipc_mutex);
         
         if (effect_config == nullptr || mutex_handle == nullptr) {
             return false;
@@ -634,12 +655,6 @@ public:
         effect_config->effect_chain_count = 0;
         effect_config->checksum = calculate_checksum(effect_config);
         ReleaseMutex(mutex_handle);
-    
-        {
-            std::lock_guard<std::mutex> fx_lock(effects_mutex);
-            current_effects.clear();
-        }
-        
         return true;
     }
     

@@ -890,6 +890,10 @@ static size_t g_loopback_write_pos = 0;
 static size_t g_loopback_read_pos = 0;
 static std::atomic<size_t> g_loopback_available{0};
 static std::mutex g_loopback_mutex;
+static std::atomic<bool> g_tail_active{false};
+static std::atomic<DWORD> g_tail_start_time{0};
+static std::atomic<DWORD> g_tail_duration_ms{0};
+static uint64 g_current_server_connection_handler = 0;
 
 // Audio effect functions
 namespace AudioEffects {
@@ -1521,7 +1525,66 @@ static void update_plugin_status() {
     }
 }
 
+static DWORD calculate_tail_duration_ms(const TSVoiceEffectConfig& effects) {
+    DWORD max_tail_ms = 0;
+    
+    for (uint8_t i = 0; i < effects.effect_chain_count && i < TSVoiceEffectConfig::MAX_EFFECT_CHAIN; i++) {
+        TSEffectType type = static_cast<TSEffectType>(effects.effect_chain_types[i]);
+        float value = effects.effect_chain_values[i];
+        
+        switch (type) {
+            case TSEffectType::ECHO_DELAY:
+                // Echo can repeat multiple times based on decay
+                // Estimate ~3-4 audible repeats
+                max_tail_ms = std::max(max_tail_ms, static_cast<DWORD>(value * 1000.0f * 4));
+                break;
+            case TSEffectType::REVERB:
+                // Reverb tail ~500ms at full amount
+                max_tail_ms = std::max(max_tail_ms, static_cast<DWORD>(value * 500.0f));
+                break;
+            case TSEffectType::CHORUS:
+            case TSEffectType::FLANGER:
+                // Short tails ~50ms
+                max_tail_ms = std::max(max_tail_ms, static_cast<DWORD>(50));
+                break;
+            default:
+                break;
+        }
+    }
+    
+    return max_tail_ms;
+}
+
+static void start_tail_transmission(uint64 serverConnectionHandlerID) {
+    TSVoiceEffectConfig effects;
+
+    {
+        std::lock_guard<std::mutex> lock(g_effect_mutex);
+        effects = g_cached_effects;
+    }
+    
+    if (!effects.effects_enabled) return;
+    DWORD tail_ms = calculate_tail_duration_ms(effects);
+    if (tail_ms == 0) return;
+    g_current_server_connection_handler = serverConnectionHandlerID;
+    g_tail_duration_ms.store(tail_ms);
+    g_tail_start_time.store(GetTickCount());
+    g_tail_active.store(true);
+    ts3Functions.startVoiceRecording(serverConnectionHandlerID);
+}
+
+static void check_tail_completion() {
+    if (!g_tail_active.load()) return;
+    DWORD elapsed = GetTickCount() - g_tail_start_time.load();
+
+    if (elapsed >= g_tail_duration_ms.load()) {
+        g_tail_active.store(false);
+        ts3Functions.stopVoiceRecording(g_current_server_connection_handler);
+    }
+}
+
 static void process_audio(short* samples, int sample_count, int channels) {
+    check_tail_completion();
     update_cached_effects();
     static std::atomic<DWORD> last_status_update{0};
     DWORD now = GetTickCount();
@@ -1824,11 +1887,16 @@ void ts3plugin_onConnectStatusChangeEvent(uint64 serverConnectionHandlerID, int 
     g_connected.store(newStatus == STATUS_CONNECTION_ESTABLISHED);
     
     if (newStatus == STATUS_CONNECTION_ESTABLISHED) {
+        g_current_server_connection_handler = serverConnectionHandlerID;
+        
         // Reset audio state on new connection
         {
             std::lock_guard<std::mutex> lock(g_audio_state_mutex);
             g_audio_state.reset();
         }
+    } else if (newStatus == STATUS_DISCONNECTED) {
+        // Clean up tail state on disconnect
+        g_tail_active.store(false);
     }
     
     update_plugin_status();
@@ -1852,14 +1920,27 @@ void ts3plugin_onTalkStatusChangeEvent(uint64 serverConnectionHandlerID, int sta
     
     if (ts3Functions.getClientID(serverConnectionHandlerID, &myID) == ERROR_ok) {
         if (clientID == myID) {
-            g_transmitting.store(status == STATUS_TALKING);
+            bool was_transmitting = g_transmitting.load();
+            bool now_talking = (status == STATUS_TALKING);
+            g_transmitting.store(now_talking);
             
-            if (status == STATUS_TALKING) {
+            if (now_talking) {
+                // User started talking - cancel any active tail
+                if (g_tail_active.load()) {
+                    g_tail_active.store(false);
+                    ts3Functions.stopVoiceRecording(serverConnectionHandlerID);
+                }
+                
                 // Reset some effect states on new transmission
+                std::lock_guard<std::mutex> lock(g_audio_state_mutex);
+
                 for (size_t i = 0; i < AudioProcessorState::MAX_SLOTS; i++) {
                     g_audio_state.slots[i].ring_mod_phase = 0.0f;
                     g_audio_state.slots[i].wobble_phase = 0.0f;
                 }
+            } else if (was_transmitting && !g_tail_active.load()) {
+                // User stopped talking naturally - start tail if needed
+                start_tail_transmission(serverConnectionHandlerID);
             }
             
             update_plugin_status();

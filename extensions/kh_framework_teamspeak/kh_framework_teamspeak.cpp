@@ -1499,7 +1499,9 @@ static void update_cached_effects() {
         }
     }
 
-    if (WaitForSingleObject(g_mutex_handle, 0) == WAIT_OBJECT_0) {
+    DWORD wait_result = WaitForSingleObject(g_mutex_handle, 0);
+    
+    if (wait_result == WAIT_OBJECT_0 || wait_result == WAIT_ABANDONED) {
         uint32_t current_seq = g_effect_config->sequence_number;
         
         if (current_seq != g_last_sequence) {
@@ -1519,8 +1521,9 @@ static void update_cached_effects() {
 
 static void update_plugin_status() {
     if (g_plugin_status == nullptr || g_mutex_handle == nullptr) return;
-    
-    if (WaitForSingleObject(g_mutex_handle, 10) == WAIT_OBJECT_0) {
+    DWORD wait_result = WaitForSingleObject(g_mutex_handle, 10);
+
+    if (wait_result == WAIT_OBJECT_0 || wait_result == WAIT_ABANDONED) {
         g_plugin_status->plugin_active = 1;
         g_plugin_status->connected = g_connected.load() ? 1 : 0;
         g_plugin_status->capturing = g_transmitting.load() ? 1 : 0;

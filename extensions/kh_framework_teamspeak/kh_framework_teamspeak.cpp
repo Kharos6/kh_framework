@@ -1014,7 +1014,7 @@ namespace AudioEffects {
         return sample * (1.0f - amount * 0.3f) + noise * amount * 0.15f + pop;
     }
     
-    inline float apply_squelch(float sample, float amount, float& squelch_state) {
+    inline float apply_squelch(float sample, float amount, float& squelch_state, int sample_rate) {
         if (amount <= 0.0f) return sample;
         float abs_sample = std::abs(sample);
         float threshold = (1.0f - amount) * 0.1f;
@@ -1023,7 +1023,7 @@ namespace AudioEffects {
         if (abs_sample > threshold * 1.2f) {
             squelch_state = 1.0f;
         } else if (abs_sample < threshold * 0.8f) {
-            float release_coeff = std::exp(-1.0f / (0.010f * static_cast<float>(sample_rate))); // 10ms release
+            float release_coeff = std::exp(-1.0f / (0.010f * static_cast<float>(sample_rate)));
             squelch_state *= release_coeff;
         }
         
@@ -1761,7 +1761,7 @@ static void process_audio(short* samples, int sample_count, int channels) {
 
                 case TSEffectType::RADIO_SQUELCH:
                     if (value > 0.0f) {
-                        sample = AudioEffects::apply_squelch(sample, value, slot.squelch_state);
+                        sample = AudioEffects::apply_squelch(sample, value, slot.squelch_state, g_audio_state.sample_rate);
                     }
 
                     break;

@@ -976,8 +976,13 @@ namespace AudioEffects {
             size_t echo_samples = static_cast<size_t>(std::min(echo_delay, 2.0f) * sample_rate);
 
             if (echo_samples > 0 && echo_samples != state.echo_buffer.size()) {
+                size_t old_size = state.echo_buffer.size();
                 state.echo_buffer.resize(echo_samples, 0.0f);
-                state.echo_pos = 0;
+                
+                // Keep position valid, wrap if buffer shrunk
+                if (state.echo_pos >= echo_samples) {
+                    state.echo_pos = 0;
+                }
             }
 
             state.last_echo_delay = echo_delay;
@@ -1018,7 +1023,8 @@ namespace AudioEffects {
         if (abs_sample > threshold * 1.2f) {
             squelch_state = 1.0f;
         } else if (abs_sample < threshold * 0.8f) {
-            squelch_state *= 0.95f;
+            float release_coeff = std::exp(-1.0f / (0.010f * static_cast<float>(sample_rate))); // 10ms release
+            squelch_state *= release_coeff;
         }
         
         return sample * squelch_state;
@@ -1217,7 +1223,8 @@ namespace AudioEffects {
         }
         
         // Smooth gain changes
-        gain += 0.01f * (desired_gain - gain);
+        float smooth_coeff = 1.0f - std::exp(-1.0f / (0.010f * static_cast<float>(sample_rate))); // 10ms
+        gain += smooth_coeff * (desired_gain - gain);
         
         // Blend based on amount
         float processed = sample * gain;
@@ -1259,7 +1266,6 @@ namespace AudioEffects {
     inline float apply_flanger(float sample, float amount, float rate, EffectSlotState& state, int sample_rate) {
         if (amount <= 0.0f || state.flanger_buffer.empty()) return sample;
         size_t buf_size = state.flanger_buffer.size();
-        state.flanger_buffer[state.flanger_write_pos] = sample;
         
         // LFO for delay modulation
         float lfo = 0.5f + 0.5f * std::sin(state.flanger_lfo_phase * TWO_PI);
@@ -1630,170 +1636,181 @@ static void process_audio(short* samples, int sample_count, int channels) {
     
     // Process each sample
     for (int i = 0; i < sample_count; i++) {
+        // Average all channels to mono for processing
+        float mono_sample = 0.0f;
+        
         for (int ch = 0; ch < channels; ch++) {
-            int idx = i * channels + ch;
-            float sample = static_cast<float>(samples[idx]) / 32768.0f;
-            
-            // Apply effects in user-specified order
-            for (uint8_t fx_idx = 0; fx_idx < effects.effect_chain_count && fx_idx < TSVoiceEffectConfig::MAX_EFFECT_CHAIN; fx_idx++) {
-                TSEffectType effect_type = static_cast<TSEffectType>(effects.effect_chain_types[fx_idx]);
-                float value = effects.effect_chain_values[fx_idx];
-                EffectSlotState& slot = g_audio_state.slots[fx_idx];
+            mono_sample += static_cast<float>(samples[i * channels + ch]) / 32768.0f;
+        }
+
+        mono_sample /= static_cast<float>(channels);
+        
+        // Apply effects in user-specified order (on mono signal)
+        for (uint8_t fx_idx = 0; fx_idx < effects.effect_chain_count && fx_idx < TSVoiceEffectConfig::MAX_EFFECT_CHAIN; fx_idx++) {
+            TSEffectType effect_type = static_cast<TSEffectType>(effects.effect_chain_types[fx_idx]);
+            float value = effects.effect_chain_values[fx_idx];
+            EffectSlotState& slot = g_audio_state.slots[fx_idx];
+            float sample = mono_sample;
                 
-                switch (effect_type) {
-                    case TSEffectType::PITCH_SHIFT:
-                        if (std::abs(value) > 0.01f) {
-                            sample = AudioEffects::apply_pitch_shift(sample, value, slot, g_audio_state.sample_rate);
-                        }
-                        
-                        break;
+            switch (effect_type) {
+                case TSEffectType::PITCH_SHIFT:
+                    if (std::abs(value) > 0.01f) {
+                        sample = AudioEffects::apply_pitch_shift(sample, value, slot, g_audio_state.sample_rate);
+                    }
+                    
+                    break;
 
-                    case TSEffectType::DISTORTION:
-                        if (value > 0.0f) {
-                            sample = AudioEffects::distort(sample, value);
-                        }
+                case TSEffectType::DISTORTION:
+                    if (value > 0.0f) {
+                        sample = AudioEffects::distort(sample, value);
+                    }
 
-                        break;
+                    break;
 
-                    case TSEffectType::BITCRUSH:
-                        if (value > 0.0f) {
-                            sample = AudioEffects::bitcrush(sample, value);
-                        }
+                case TSEffectType::BITCRUSH:
+                    if (value > 0.0f) {
+                        sample = AudioEffects::bitcrush(sample, value);
+                    }
 
-                        break;
+                    break;
 
-                    case TSEffectType::RING_MOD:
-                        if (value > 0.0f) {
-                            sample = AudioEffects::ring_mod(sample, slot.ring_mod_phase, value, g_audio_state.sample_rate);
-                        }
-                        
-                        break;
+                case TSEffectType::RING_MOD:
+                    if (value > 0.0f) {
+                        sample = AudioEffects::ring_mod(sample, slot.ring_mod_phase, value, g_audio_state.sample_rate);
+                    }
+                    
+                    break;
 
-                    case TSEffectType::TREMOLO_RATE:
-                        if (value > 0.0f) {
-                            sample = AudioEffects::apply_tremolo(sample, slot.tremolo_phase, value, tremolo_depth_value, g_audio_state.sample_rate);
-                        }
+                case TSEffectType::TREMOLO_RATE:
+                    if (value > 0.0f) {
+                        sample = AudioEffects::apply_tremolo(sample, slot.tremolo_phase, value, tremolo_depth_value, g_audio_state.sample_rate);
+                    }
 
-                        break;
+                    break;
 
-                    case TSEffectType::CHORUS:
-                        if (value > 0.0f) {
-                            sample = AudioEffects::apply_chorus(sample, value, chorus_rate_value, slot, g_audio_state.sample_rate);
-                        }
+                case TSEffectType::CHORUS:
+                    if (value > 0.0f) {
+                        sample = AudioEffects::apply_chorus(sample, value, chorus_rate_value, slot, g_audio_state.sample_rate);
+                    }
 
-                        break;
+                    break;
 
-                    case TSEffectType::FLANGER:
-                        if (value > 0.0f) {
-                            sample = AudioEffects::apply_flanger(sample, value, flanger_rate_value, slot, g_audio_state.sample_rate);
-                        }
+                case TSEffectType::FLANGER:
+                    if (value > 0.0f) {
+                        sample = AudioEffects::apply_flanger(sample, value, flanger_rate_value, slot, g_audio_state.sample_rate);
+                    }
 
-                        break;
+                    break;
 
-                    case TSEffectType::NOISE:
-                        if (value > 0.0f) {
-                            sample = AudioEffects::add_noise(sample, value, g_audio_state.rng_state);
-                        }
+                case TSEffectType::NOISE:
+                    if (value > 0.0f) {
+                        sample = AudioEffects::add_noise(sample, value, g_audio_state.rng_state);
+                    }
 
-                        break;
+                    break;
 
-                    case TSEffectType::RADIO_STATIC:
-                        if (value > 0.0f) {
-                            sample = AudioEffects::add_radio_static(sample, value, g_audio_state.rng_state);
-                        }
+                case TSEffectType::RADIO_STATIC:
+                    if (value > 0.0f) {
+                        sample = AudioEffects::add_radio_static(sample, value, g_audio_state.rng_state);
+                    }
 
-                        break;
+                    break;
 
-                    case TSEffectType::REVERB:
-                        if (value > 0.0f) {
-                            sample = AudioEffects::apply_reverb(sample, value, slot);
-                        }
+                case TSEffectType::REVERB:
+                    if (value > 0.0f) {
+                        sample = AudioEffects::apply_reverb(sample, value, slot);
+                    }
 
-                        break;
+                    break;
 
-                    case TSEffectType::LOWPASS:
-                        if (value > 0.0f && value < 1.0f) {
-                            sample = AudioEffects::lowpass(sample, value, slot.lp_prev, g_audio_state.sample_rate);
-                        }
+                case TSEffectType::LOWPASS:
+                    if (value > 0.0f && value < 1.0f) {
+                        sample = AudioEffects::lowpass(sample, value, slot.lp_prev, g_audio_state.sample_rate);
+                    }
 
-                        break;
+                    break;
 
-                    case TSEffectType::HIGHPASS:
-                        if (value > 0.0f) {
-                            sample = AudioEffects::highpass(sample, value, slot.hp_prev_in, slot.hp_prev_out, g_audio_state.sample_rate);
-                        }
+                case TSEffectType::HIGHPASS:
+                    if (value > 0.0f) {
+                        sample = AudioEffects::highpass(sample, value, slot.hp_prev_in, slot.hp_prev_out, g_audio_state.sample_rate);
+                    }
 
-                        break;
+                    break;
 
-                    case TSEffectType::TELEPHONE:
-                        if (value > 0.0f) {
-                            sample = AudioEffects::apply_telephone_filter(sample, value, slot.tel_lp_prev, slot.tel_hp_prev_in, slot.tel_hp_prev_out, g_audio_state.sample_rate);
-                        }
+                case TSEffectType::TELEPHONE:
+                    if (value > 0.0f) {
+                        sample = AudioEffects::apply_telephone_filter(sample, value, slot.tel_lp_prev, slot.tel_hp_prev_in, slot.tel_hp_prev_out, g_audio_state.sample_rate);
+                    }
 
-                        break;
+                    break;
 
-                    case TSEffectType::UNDERWATER:
-                        if (value > 0.0f) {
-                            sample = AudioEffects::apply_underwater(sample, value, slot.uw_lp_prev1, slot.uw_lp_prev2, g_audio_state.sample_rate);
-                        }
+                case TSEffectType::UNDERWATER:
+                    if (value > 0.0f) {
+                        sample = AudioEffects::apply_underwater(sample, value, slot.uw_lp_prev1, slot.uw_lp_prev2, g_audio_state.sample_rate);
+                    }
 
-                        break;
+                    break;
 
-                    case TSEffectType::ECHO_DELAY:
-                        if (value > 0.0f) {
-                            AudioEffects::update_echo_buffer(value, g_audio_state.sample_rate, slot);
-                            sample = AudioEffects::apply_echo(sample, value, echo_decay_value, slot);
-                        }
+                case TSEffectType::ECHO_DELAY:
+                    if (value > 0.0f) {
+                        AudioEffects::update_echo_buffer(value, g_audio_state.sample_rate, slot);
+                        sample = AudioEffects::apply_echo(sample, value, echo_decay_value, slot);
+                    }
 
-                        break;
+                    break;
 
-                    case TSEffectType::RADIO_SQUELCH:
-                        if (value > 0.0f) {
-                            sample = AudioEffects::apply_squelch(sample, value, slot.squelch_state);
-                        }
+                case TSEffectType::RADIO_SQUELCH:
+                    if (value > 0.0f) {
+                        sample = AudioEffects::apply_squelch(sample, value, slot.squelch_state);
+                    }
 
-                        break;
+                    break;
 
-                    case TSEffectType::FREQUENCY_WOBBLE:
-                        if (value > 0.0f) {
-                            sample = AudioEffects::apply_frequency_wobble(sample, slot.wobble_phase, value, g_audio_state.sample_rate);
-                        }
+                case TSEffectType::FREQUENCY_WOBBLE:
+                    if (value > 0.0f) {
+                        sample = AudioEffects::apply_frequency_wobble(sample, slot.wobble_phase, value, g_audio_state.sample_rate);
+                    }
 
-                        break;
+                    break;
 
-                    case TSEffectType::COMPRESSOR_THRESHOLD:
-                        if (value > 0.0f && compressor_ratio_value > 1.0f) {
-                            sample = AudioEffects::apply_compressor(sample, value, compressor_ratio_value, slot.compressor_envelope, g_audio_state.sample_rate);
-                        }
+                case TSEffectType::COMPRESSOR_THRESHOLD:
+                    if (value > 0.0f && compressor_ratio_value > 1.0f) {
+                        sample = AudioEffects::apply_compressor(sample, value, compressor_ratio_value, slot.compressor_envelope, g_audio_state.sample_rate);
+                    }
 
-                        break;
+                    break;
 
-                    case TSEffectType::AGC:
-                        if (value > 0.0f) {
-                            sample = AudioEffects::apply_agc(sample, value, slot.agc_gain, slot.agc_envelope, g_audio_state.sample_rate);
-                        }
+                case TSEffectType::AGC:
+                    if (value > 0.0f) {
+                        sample = AudioEffects::apply_agc(sample, value, slot.agc_gain, slot.agc_envelope, g_audio_state.sample_rate);
+                    }
 
-                        break;
+                    break;
 
-                    case TSEffectType::BASS_BOOST:
-                        if (value > 0.0f) {
-                            sample = AudioEffects::apply_bass_boost(sample, value, slot.bass_lp_prev1, slot.bass_lp_prev2, g_audio_state.sample_rate);
-                        }
+                case TSEffectType::BASS_BOOST:
+                    if (value > 0.0f) {
+                        sample = AudioEffects::apply_bass_boost(sample, value, slot.bass_lp_prev1, slot.bass_lp_prev2, g_audio_state.sample_rate);
+                    }
 
-                        break;
+                    break;
 
-                    case TSEffectType::VOLUME:
-                        sample *= value;
-                        break;
+                case TSEffectType::VOLUME:
+                    sample *= value;
+                    break;
 
-                    default:
-                        break;
-                }
+                default:
+                    break;
             }
             
-            // Clamp and convert back to int16
-            sample = std::clamp(sample, -1.0f, 1.0f);
-            samples[idx] = static_cast<short>(sample * 32767.0f);
+            mono_sample = sample;
+        }
+        
+        // Clamp and apply processed mono to all channels
+        mono_sample = std::clamp(mono_sample, -1.0f, 1.0f);
+        short output_sample = static_cast<short>(mono_sample * 32767.0f);
+        
+        for (int ch = 0; ch < channels; ch++) {
+            samples[i * channels + ch] = output_sample;
         }
     }
 

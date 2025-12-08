@@ -220,15 +220,16 @@ private:
     
     void reset_effects_internal() {
         if (effect_config == nullptr || mutex_handle == nullptr) return;
-
-        if (WaitForSingleObject(mutex_handle, 1000) != WAIT_OBJECT_0) {
+        DWORD wait_result = WaitForSingleObject(mutex_handle, 1000);
+        
+        if (wait_result != WAIT_OBJECT_0 && wait_result != WAIT_ABANDONED) {
             report_error("KH - TeamSpeak: Mutex wait timeout in reset_effects_internal");
             return;
         }
 
         memset(effect_config, 0, sizeof(TSVoiceEffectConfig));
         effect_config->version = TS_IPC_VERSION;
-        effect_config->sequence_number = sequence_counter.fetch_add(1);
+        effect_config->sequence_number = sequence_counter.fetch_add(1, std::memory_order_relaxed) + 1;
         effect_config->effects_enabled = 0;
         effect_config->effect_chain_count = 0;
         effect_config->checksum = calculate_checksum(effect_config);
@@ -239,7 +240,9 @@ private:
         while (heartbeat_running.load(std::memory_order_acquire)) {
             // Check plugin status periodically
             if (plugin_status != nullptr && mutex_handle != nullptr) {
-                if (WaitForSingleObject(mutex_handle, 50) == WAIT_OBJECT_0) {
+                DWORD wait_result = WaitForSingleObject(mutex_handle, 50);
+                
+                if (wait_result == WAIT_OBJECT_0 || wait_result == WAIT_ABANDONED) {
                     uint32_t current_tick = static_cast<uint32_t>(GetTickCount());
                     uint32_t last_heartbeat = plugin_status->last_heartbeat;
                     bool plugin_active_flag = plugin_status->plugin_active;
@@ -456,7 +459,9 @@ public:
             return false;
         }
         
-        if (WaitForSingleObject(mutex_handle, 50) != WAIT_OBJECT_0) {
+        DWORD wait_result = WaitForSingleObject(mutex_handle, 50);
+        
+        if (wait_result != WAIT_OBJECT_0 && wait_result != WAIT_ABANDONED) {
             return false;
         }
         
@@ -478,7 +483,9 @@ public:
             return false;
         }
         
-        if (WaitForSingleObject(mutex_handle, 50) != WAIT_OBJECT_0) {
+        DWORD wait_result = WaitForSingleObject(mutex_handle, 50);
+
+        if (wait_result != WAIT_OBJECT_0 && wait_result != WAIT_ABANDONED) {
             return false;
         }
         
@@ -501,7 +508,9 @@ public:
             return false;
         }
         
-        if (WaitForSingleObject(mutex_handle, 50) != WAIT_OBJECT_0) {
+        DWORD wait_result = WaitForSingleObject(mutex_handle, 50);
+        
+        if (wait_result != WAIT_OBJECT_0 && wait_result != WAIT_ABANDONED) {
             return false;
         }
         
@@ -535,7 +544,9 @@ public:
             return false;
         }
         
-        if (WaitForSingleObject(mutex_handle, 1000) != WAIT_OBJECT_0) {
+        DWORD wait_result = WaitForSingleObject(mutex_handle, 1000);
+        
+        if (wait_result != WAIT_OBJECT_0 && wait_result != WAIT_ABANDONED) {
             return false;
         }
 
@@ -607,10 +618,9 @@ public:
 
         effect_config->effects_enabled = (chain_idx > 0) ? 1 : 0;
         effect_config->effect_chain_count = chain_idx;
-        effect_config->sequence_number = sequence_counter.fetch_add(1);
+        effect_config->sequence_number = sequence_counter.fetch_add(1, std::memory_order_relaxed) + 1;
         effect_config->checksum = calculate_checksum(effect_config);
         ReleaseMutex(mutex_handle);
-        
         return true;
     }
     
@@ -644,13 +654,15 @@ public:
             return false;
         }
         
-        if (WaitForSingleObject(mutex_handle, 1000) != WAIT_OBJECT_0) {
+        DWORD wait_result = WaitForSingleObject(mutex_handle, 1000);
+        
+        if (wait_result != WAIT_OBJECT_0 && wait_result != WAIT_ABANDONED) {
             return false;
         }
         
         memset(effect_config, 0, sizeof(TSVoiceEffectConfig));
         effect_config->version = TS_IPC_VERSION;
-        effect_config->sequence_number = sequence_counter.fetch_add(1);
+        effect_config->sequence_number = sequence_counter.fetch_add(1, std::memory_order_relaxed) + 1;
         effect_config->effects_enabled = 0;
         effect_config->effect_chain_count = 0;
         effect_config->checksum = calculate_checksum(effect_config);

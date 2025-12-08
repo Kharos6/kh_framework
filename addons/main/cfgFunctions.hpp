@@ -29,6 +29,7 @@ class CfgFunctions
 			class dynamic3dAudio {};
 			class dynamicDisguise {};
 			class endMission {};
+			class entityInit {};
 			class entitySpawner {};
 			class equipableObject {};
 			class execute {};

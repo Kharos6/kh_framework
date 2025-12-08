@@ -419,6 +419,7 @@ if isServer then {
 	KH_var_entityArrayBuilderArrays = [];
 	KH_var_groupArrayBuilderArrays = [];
 	KH_var_initialSideRelations = [];
+	KH_var_entityInitializations = [];
 	KH_fnc_serverMissionLoadInit = {};
 	KH_fnc_serverMissionStartInit = {};
 	KH_fnc_serverPlayersLoadedInit = {};
@@ -1020,9 +1021,19 @@ if isServer then {
 				KH_var_allLivingEntities pushBackUnique _entity;
 			};
 
-			if (_entity isKindOf "CAManBase") then {
-				[_entity] call KH_fnc_medicalSetup;
+			if KH_var_khMedical then {
+				if (_entity isKindOf "CAManBase") then {
+					[_entity] call KH_fnc_medicalSetup;
+				};
 			};
+
+			{
+				_x params ["_type", "_function"];
+
+				if (_entity isKindOf _type) then {
+					[_entity] call _function;
+				};
+			} forEach KH_var_entityInitializations;
 		}
 	];
 

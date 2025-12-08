@@ -462,9 +462,23 @@ isNil {
 			} forEach allUnits;
 		};
 
+		if KH_var_khMedical then {
+			{
+				[_x] call KH_fnc_medicalSetup;
+			} forEach (KH_var_allEntities select {_x isKindOf "CAManBase";});
+		};
+
 		{
-			[_x] call KH_fnc_medicalSetup;
-		} forEach (KH_var_allEntities select {_x isKindOf "CAManBase";});
+			private _entity = _x;
+			
+			{
+				_x params ["_type", "_function"];
+
+				if (_entity isKindOf _type) then {
+					[_entity] call _function;
+				};
+			} forEach KH_var_entityInitializations;
+		} forEach KH_var_allEntities;
 	};
 };
 

@@ -97,6 +97,7 @@ cl /LD /arch:AVX /O2 /Ob3 /GL /MT /std:c++20 /EHsc /TP /Gy /Gw /GS- ^
     /DELAYLOAD:vulkan-1.dll ^
     /DELAYLOAD:sherpa-onnx-c-api.dll ^
     /DELAYLOAD:UltralightCore.dll ^
+    /DELAYLOAD:WebCore.dll ^
     /DELAYLOAD:Ultralight.dll ^
     /LIBPATH:luajit\lib ^
     /LIBPATH:intercept\lib ^

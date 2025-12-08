@@ -95,6 +95,7 @@ static int g_mission_frame = 0;
 static std::vector<std::vector<float>> g_terrain_matrix;
 static float g_terrain_grid_width = 0.0f;
 static float g_world_size = 0.0f;
+static float g_last_ts_connect_attempt = -1.0f;
 
 enum class GPUBackend {
     CPU = 0,

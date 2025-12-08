@@ -3,6 +3,8 @@
 *.lib
 *.obj
 *.exp
+*.ini
+*.ts3_plugin
 .hemttout
 .vscode
 releases/

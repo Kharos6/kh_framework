@@ -103,6 +103,15 @@ static registered_sqf_function _sqf_network_is_initialized;
 static registered_sqf_function _sqf_network_initialize;
 static registered_sqf_function _sqf_network_shutdown;
 static registered_sqf_function _sqf_enable_network_logging;
+static registered_sqf_function _sqf_ts_connect;
+static registered_sqf_function _sqf_ts_disconnect;
+static registered_sqf_function _sqf_ts_apply_voice_effects;
+static registered_sqf_function _sqf_ts_clear_voice_effects;
+static registered_sqf_function _sqf_ts_is_initialized;
+static registered_sqf_function _sqf_ts_is_plugin_active;
+static registered_sqf_function _sqf_ts_is_connected;
+static registered_sqf_function _sqf_ts_is_transmitting;
+static registered_sqf_function _sqf_ts_is_plugin_installed;
 
 static game_value execute_lua_sqf(game_value_parameter args, game_value_parameter code_or_function) {    
     try {
@@ -2457,6 +2466,103 @@ static game_value enable_network_logging_sqf(game_value_parameter enabled_value)
     }
 }
 
+static game_value ts_connect_sqf() {
+    try {
+        bool success = TeamspeakFramework::instance().initialize();
+        
+        if (success) {
+            sqf::diag_log("KH - TeamSpeak: Connected to IPC");
+        }
+
+        return game_value(success);
+    } catch (const std::exception& e) {
+        report_error("KH - TeamSpeak: Error in tsConnect - " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value ts_disconnect_sqf() {
+    try {
+        TeamspeakFramework::instance().cleanup();
+        sqf::diag_log("KH - TeamSpeak: Disconnected from IPC");
+        return game_value(true);
+    } catch (const std::exception& e) {
+        report_error("KH - TeamSpeak: Error in tsDisconnect - " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value ts_apply_voice_effects_sqf(game_value_parameter params) {
+    try {
+        if (params.type_enum() != game_data_type::ARRAY) {
+            report_error("KH - TeamSpeak: tsApplyVoiceEffects requires an array of effects");
+            return game_value(false);
+        }
+        
+        auto effects = TeamspeakFramework::parse_effects_from_args(params, 0);
+        bool success = TeamspeakFramework::instance().apply_voice_effects(effects);        
+        return game_value(success);
+    } catch (const std::exception& e) {
+        report_error("KH - TeamSpeak: Error in tsApplyVoiceEffects - " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value ts_clear_voice_effects_sqf() {
+    try {
+        bool success = TeamspeakFramework::instance().clear_voice_effects();        
+        return game_value(success);
+    } catch (const std::exception& e) {
+        report_error("KH - TeamSpeak: Error in tsClearVoiceEffects - " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value ts_is_initialized_sqf() {
+    try {
+        return game_value(TeamspeakFramework::instance().is_initialized());
+    } catch (const std::exception& e) {
+        report_error("KH - TeamSpeak: Error in tsIsInitialized - " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value ts_is_plugin_active_sqf() {
+    try {
+        return game_value(TeamspeakFramework::instance().is_plugin_active());
+    } catch (const std::exception& e) {
+        report_error("KH - TeamSpeak: Error in tsIsPluginActive - " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value ts_is_connected_sqf() {
+    try {
+        return game_value(TeamspeakFramework::instance().is_connected());
+    } catch (const std::exception& e) {
+        report_error("KH - TeamSpeak: Error in tsIsConnected - " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value ts_is_transmitting_sqf() {
+    try {
+        return game_value(TeamspeakFramework::instance().is_transmitting());
+    } catch (const std::exception& e) {
+        report_error("KH - TeamSpeak: Error in tsIsTransmitting - " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
+static game_value ts_is_plugin_installed_sqf() {
+    try {
+        return game_value(TeamspeakFramework::is_plugin_installed());
+    } catch (const std::exception& e) {
+        report_error("KH - TeamSpeak: Error in tsIsPluginInstalled - " + std::string(e.what()));
+        return game_value(false);
+    }
+}
+
 static game_value execute_lua_sqf_unary(game_value_parameter code_or_function) {
     return execute_lua_sqf(game_value(), code_or_function);
 }
@@ -3304,6 +3410,70 @@ static void initialize_sqf_integration() {
         "Network message logging",
         userFunctionWrapper<enable_network_logging_sqf>,
         game_data_type::BOOL,
+        game_data_type::BOOL
+    );
+
+    _sqf_ts_connect = intercept::client::host::register_sqf_command(
+        "tsConnect",
+        "Initialize TeamSpeak IPC connection",
+        userFunctionWrapper<ts_connect_sqf>,
+        game_data_type::BOOL
+    );
+
+    _sqf_ts_disconnect = intercept::client::host::register_sqf_command(
+        "tsDisconnect",
+        "Cleanup TeamSpeak IPC connection",
+        userFunctionWrapper<ts_disconnect_sqf>,
+        game_data_type::BOOL
+    );
+
+    _sqf_ts_apply_voice_effects = intercept::client::host::register_sqf_command(
+        "tsApplyVoiceEffects",
+        "Apply voice effects to TeamSpeak transmission",
+        userFunctionWrapper<ts_apply_voice_effects_sqf>,
+        game_data_type::BOOL,
+        game_data_type::ARRAY
+    );
+    
+    _sqf_ts_clear_voice_effects = intercept::client::host::register_sqf_command(
+        "tsClearVoiceEffects",
+        "Clear all voice effects from TeamSpeak transmission",
+        userFunctionWrapper<ts_clear_voice_effects_sqf>,
+        game_data_type::BOOL
+    );
+    
+    _sqf_ts_is_initialized = intercept::client::host::register_sqf_command(
+        "tsIsInitialized",
+        "Check if TeamSpeak integration is initialized",
+        userFunctionWrapper<ts_is_initialized_sqf>,
+        game_data_type::BOOL
+    );
+    
+    _sqf_ts_is_plugin_active = intercept::client::host::register_sqf_command(
+        "tsIsPluginActive",
+        "Check if TeamSpeak plugin is active and responding",
+        userFunctionWrapper<ts_is_plugin_active_sqf>,
+        game_data_type::BOOL
+    );
+    
+    _sqf_ts_is_connected = intercept::client::host::register_sqf_command(
+        "tsIsConnected",
+        "Check if connected to a TeamSpeak server",
+        userFunctionWrapper<ts_is_connected_sqf>,
+        game_data_type::BOOL
+    );
+    
+    _sqf_ts_is_transmitting = intercept::client::host::register_sqf_command(
+        "tsIsTransmitting",
+        "Check if currently transmitting voice",
+        userFunctionWrapper<ts_is_transmitting_sqf>,
+        game_data_type::BOOL
+    );
+    
+    _sqf_ts_is_plugin_installed = intercept::client::host::register_sqf_command(
+        "tsIsPluginInstalled",
+        "Check if TeamSpeak plugin is installed",
+        userFunctionWrapper<ts_is_plugin_installed_sqf>,
         game_data_type::BOOL
     );
     

@@ -9,6 +9,7 @@
 #include "speech_to_text_integration.hpp"
 #include "ui_integration.hpp"
 #include "network_integration.hpp"
+#include "teamspeak_integration.hpp"
 #include "sqf_integration.hpp"
 
 using namespace intercept;
@@ -62,10 +63,12 @@ void intercept::pre_start() {
         sqf::diag_log("KH Framework Extension - Vulkan Not Detected");
     }
 
+    teamspeak_check_and_install_plugin();
     sqf::diag_log("KH Framework Extension - Pre-start");
 }
 
 void intercept::pre_init() {
+    g_last_ts_connect_attempt = -1.0f;
     g_is_server = sqf::is_server();
     g_is_dedicated_server = sqf::is_dedicated();
     g_is_headless = (!(sqf::is_server()) && !(sqf::has_interface()));
@@ -138,6 +141,16 @@ void intercept::pre_init() {
         }
     }
 
+    if (TeamspeakFramework::instance().is_initialized()) {
+        try {
+            TeamspeakFramework::instance().clear_voice_effects();
+        } catch (const std::exception& e) {
+            report_error("KH Framework Extension - Error clearing TeamSpeak effects: " + std::string(e.what()));
+        } catch (...) {
+            report_error("KH Framework Extension - Unknown error clearing TeamSpeak effects");
+        }
+    }
+
     sqf::diag_log("KH Framework Extension - Pre-init");
 }
 
@@ -149,6 +162,16 @@ void intercept::post_init() {
 }
 
 void intercept::on_frame() {
+    if (g_last_ts_connect_attempt < 0.0f || g_game_time - g_last_ts_connect_attempt >= 1.0f) {
+        g_last_ts_connect_attempt = g_game_time;
+        
+        try {
+            TeamspeakFramework::instance().initialize();
+        } catch (...) {
+            // Silent failure - will retry next second
+        }
+    }
+
     if (UIFramework::instance().is_initialized()) {
         UIFramework::instance().set_mouse_enabled(sqf::dialog());
     }
@@ -238,6 +261,16 @@ void intercept::mission_ended() {
             report_error("KH Framework Extension - Error stopping Network framework: " + std::string(e.what()));
         } catch (...) {
             report_error("KH Framework Extension - Unknown error stopping Network framework");
+        }
+    }
+
+    if (TeamspeakFramework::instance().is_initialized()) {
+        try {
+            TeamspeakFramework::instance().cleanup();
+        } catch (const std::exception& e) {
+            report_error("KH Framework Extension - Error stopping TeamSpeak: " + std::string(e.what()));
+        } catch (...) {
+            report_error("KH Framework Extension - Unknown error stopping TeamSpeak");
         }
     }
 
@@ -490,6 +523,25 @@ static FARPROC WINAPI delay_load_hook(unsigned dliNotify, PDelayLoadInfo pdli) {
                         }
 
                         sqf::diag_log("KH - AI Framework: " + dll_name + " not found in standard locations");
+                    } else if (_stricmp(dll_name.c_str(), "WebCore.dll") == 0) {
+                        std::string core_path = modDir + "\\UltralightCore.dll";
+                        HMODULE hCore = LoadLibraryA(core_path.c_str());
+
+                        if (hCore != NULL) {
+                            g_loaded_delay_modules["UltralightCore.dll"] = hCore;
+                        }
+
+                        HMODULE hDll = LoadLibraryA(dllFullPath.c_str());
+                        
+                        if (hDll != NULL) {
+                            g_loaded_delay_modules[dll_name] = hDll;
+                            return (FARPROC)hDll;
+                        } else {
+                            DWORD error = GetLastError();
+                            report_error("Failed to load " + dll_name + " from " + dllFullPath + " - error code: " + std::to_string(error));
+                        }
+
+                        sqf::diag_log("KH - AI Framework: " + dll_name + " not found in standard locations");
                     } else {
                         HMODULE hDll = LoadLibraryA(dllFullPath.c_str());
                         
@@ -583,6 +635,12 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
                 }
             } __except(EXCEPTION_EXECUTE_HANDLER) {}
 
+            __try {
+                if (TeamspeakFramework::instance().is_initialized()) {
+                    TeamspeakFramework::instance().cleanup();
+                }
+            } __except(EXCEPTION_EXECUTE_HANDLER) {}
+            
             __try { 
                 MH_Uninitialize(); 
             } __except(EXCEPTION_EXECUTE_HANDLER) {}

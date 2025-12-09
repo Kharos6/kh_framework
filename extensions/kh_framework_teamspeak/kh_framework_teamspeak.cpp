@@ -723,6 +723,7 @@ static HANDLE g_status_memory_handle = nullptr;
 static HANDLE g_mutex_handle = nullptr;
 static TSVoiceEffectConfig* g_effect_config = nullptr;
 static TSPluginStatus* g_plugin_status = nullptr;
+static std::mutex g_ipc_handle_mutex;
 
 // Effect state
 static std::mutex g_effect_mutex;
@@ -765,6 +766,7 @@ struct EffectSlotState {
     float pitch_phase_a = 0.0f;          // Grain A phase (0-1)
     float pitch_phase_b = 0.5f;          // Grain B phase (0-1), starts offset
     bool pitch_initialized = false;
+    float pitch_formant_state = 0.0f;
     
     // Tremolo state
     float tremolo_phase = 0.0f;
@@ -805,7 +807,7 @@ struct EffectSlotState {
         reverb_buf3.resize(static_cast<size_t>(sample_rate * 0.05f), 0.0f);
         size_t pitch_buf_size = static_cast<size_t>(sample_rate * 0.3f);  // 300ms buffer
         pitch_buffer.resize(pitch_buf_size, 0.0f);
-        pitch_grain_size = static_cast<size_t>(sample_rate * 0.06f);      // 60ms grains
+        pitch_grain_size = static_cast<size_t>(sample_rate * 0.10f);      // 100ms grains
         pitch_initialized = false;
         chorus_buffer.resize(static_cast<size_t>(sample_rate * 0.05f), 0.0f);
         flanger_buffer.resize(static_cast<size_t>(sample_rate * 0.01f), 0.0f);
@@ -827,6 +829,7 @@ struct EffectSlotState {
         pitch_phase_b = 0.5f;
         pitch_write_pos = 0;
         pitch_initialized = false;
+        pitch_formant_state = 0.0f;
         tremolo_phase = 0.0f;
         compressor_envelope = 0.0f;
         tel_lp_prev = 0.0f;
@@ -1059,9 +1062,15 @@ namespace AudioEffects {
         
         const float pitch_ratio = std::pow(2.0f, semitones / 12.0f);
         
-        // Hann window for smooth crossfade
-        auto hann = [](float phase) -> float {
-            return 0.5f * (1.0f - std::cos(phase * TWO_PI));
+        // Tukey window (tapered cosine) for smoother transitions than Hann
+        auto tukey_window = [](float phase, float alpha = 0.5f) -> float {
+            if (phase < alpha / 2.0f) {
+                return 0.5f * (1.0f + std::cos(TWO_PI * (phase / alpha - 0.5f)));
+            } else if (phase < 1.0f - alpha / 2.0f) {
+                return 1.0f;
+            } else {
+                return 0.5f * (1.0f + std::cos(TWO_PI * ((phase - 1.0f) / alpha + 0.5f)));
+            }
         };
         
         // Wrap position to buffer bounds
@@ -1071,55 +1080,85 @@ namespace AudioEffects {
             return pos;
         };
         
-        // Linear interpolation read
-        auto read_interp = [&](float pos) -> float {
+        // Cubic Hermite interpolation - much smoother than linear
+        auto read_cubic = [&](float pos) -> float {
             pos = wrap(pos);
-            size_t idx0 = static_cast<size_t>(pos);
-            size_t idx1 = (idx0 + 1) % buf_size;
-            float frac = pos - static_cast<float>(idx0);
-            return state.pitch_buffer[idx0] * (1.0f - frac) + state.pitch_buffer[idx1] * frac;
+            size_t idx1 = static_cast<size_t>(pos);
+            size_t idx0 = (idx1 + buf_size - 1) % buf_size;
+            size_t idx2 = (idx1 + 1) % buf_size;
+            size_t idx3 = (idx1 + 2) % buf_size;
+            float frac = pos - static_cast<float>(idx1);
+            float y0 = state.pitch_buffer[idx0];
+            float y1 = state.pitch_buffer[idx1];
+            float y2 = state.pitch_buffer[idx2];
+            float y3 = state.pitch_buffer[idx3];
+            
+            // Hermite interpolation coefficients
+            float c0 = y1;
+            float c1 = 0.5f * (y2 - y0);
+            float c2 = y0 - 2.5f * y1 + 2.0f * y2 - 0.5f * y3;
+            float c3 = 0.5f * (y3 - y0) + 1.5f * (y1 - y2);
+            return ((c3 * frac + c2) * frac + c1) * frac + c0;
         };
         
-        // Reset a grain's read position to optimal location behind write head
-        auto reset_grain = [&](float& read_pos) {
-            read_pos = wrap(write_pos_f - grain_size_f * 1.5f);
+        // Reset a grain's read position with slight randomization to reduce coherent artifacts
+        auto reset_grain = [&](float& read_pos, float offset_factor) {
+            float base_offset = grain_size_f * 1.5f;
+            read_pos = wrap(write_pos_f - base_offset + offset_factor * grain_size_f * 0.25f);
         };
         
-        // Initialize on first use
+        // Initialize on first use - use 4 grains at 25% phase offsets
         if (!state.pitch_initialized) {
-            reset_grain(state.pitch_read_pos_a);
+            reset_grain(state.pitch_read_pos_a, 0.0f);
             state.pitch_phase_a = 0.0f;
-            reset_grain(state.pitch_read_pos_b);
-            state.pitch_phase_b = 0.5f;
-            // Offset grain B's read position to match its phase offset
-            state.pitch_read_pos_b = wrap(state.pitch_read_pos_b + grain_size_f * 0.5f * pitch_ratio);
+            reset_grain(state.pitch_read_pos_b, 0.5f);
+            state.pitch_phase_b = 0.25f;
             state.pitch_initialized = true;
         }
         
         // --- Process Grain A ---
-        float weight_a = hann(state.pitch_phase_a);
-        float sample_a = read_interp(state.pitch_read_pos_a);
+        float weight_a = tukey_window(state.pitch_phase_a, 0.5f);
+        float sample_a = read_cubic(state.pitch_read_pos_a);
         state.pitch_read_pos_a = wrap(state.pitch_read_pos_a + pitch_ratio);
         state.pitch_phase_a += phase_inc;
         
         if (state.pitch_phase_a >= 1.0f) {
             state.pitch_phase_a -= 1.0f;
-            reset_grain(state.pitch_read_pos_a);
+            reset_grain(state.pitch_read_pos_a, 0.0f);
         }
         
-        // --- Process Grain B ---
-        float weight_b = hann(state.pitch_phase_b);
-        float sample_b = read_interp(state.pitch_read_pos_b);
+        // --- Process Grain B (offset by 0.25 phase) ---
+        float weight_b = tukey_window(state.pitch_phase_b, 0.5f);
+        float sample_b = read_cubic(state.pitch_read_pos_b);
         state.pitch_read_pos_b = wrap(state.pitch_read_pos_b + pitch_ratio);
         state.pitch_phase_b += phase_inc;
         
         if (state.pitch_phase_b >= 1.0f) {
             state.pitch_phase_b -= 1.0f;
-            reset_grain(state.pitch_read_pos_b);
+            reset_grain(state.pitch_read_pos_b, 0.5f);
+        }
+
+        float total_weight = weight_a + weight_b;
+        if (total_weight < 0.001f) total_weight = 1.0f;
+        float output = (sample_a * weight_a + sample_b * weight_b) / total_weight;
+        float& formant_filter_state = state.pitch_formant_state;
+
+        if (semitones > 1.0f) {
+            // Pitching up - apply subtle lowpass to darken
+            float correction_amount = std::min(semitones / 12.0f, 1.0f) * 0.3f;
+            float alpha = 0.1f + correction_amount * 0.2f;
+            formant_filter_state = formant_filter_state + alpha * (output - formant_filter_state);
+            output = output * (1.0f - correction_amount * 0.5f) + formant_filter_state * correction_amount * 0.5f;
+        } else if (semitones < -1.0f) {
+            // Pitching down - apply subtle highpass to brighten  
+            float correction_amount = std::min(-semitones / 12.0f, 1.0f) * 0.3f;
+            float alpha = 0.85f + correction_amount * 0.1f;
+            float hp_out = output - formant_filter_state;
+            formant_filter_state = formant_filter_state + (1.0f - alpha) * (output - formant_filter_state);
+            output = output * (1.0f - correction_amount * 0.5f) + hp_out * correction_amount * 0.5f;
         }
         
-        // Combine - Hann windows at 50% overlap sum to 1.0
-        return sample_a * weight_a + sample_b * weight_b;
+        return output;
     }
 
     inline float apply_tremolo(float sample, float& phase, float rate, float depth, int sample_rate) {
@@ -1367,6 +1406,37 @@ static const char* get_effect_name(TSEffectType type) {
 }
 
 static bool init_shared_memory() {
+    // If already initialized, don't re-initialize
+    if (g_effect_config != nullptr && g_mutex_handle != nullptr) {
+        return true;
+    }
+    
+    // Clean up any partial state from previous failed init
+    if (g_effect_config != nullptr) {
+        UnmapViewOfFile(g_effect_config);
+        g_effect_config = nullptr;
+    }
+
+    if (g_shared_memory_handle != nullptr) {
+        CloseHandle(g_shared_memory_handle);
+        g_shared_memory_handle = nullptr;
+    }
+
+    if (g_plugin_status != nullptr) {
+        UnmapViewOfFile(g_plugin_status);
+        g_plugin_status = nullptr;
+    }
+
+    if (g_status_memory_handle != nullptr) {
+        CloseHandle(g_status_memory_handle);
+        g_status_memory_handle = nullptr;
+    }
+
+    if (g_mutex_handle != nullptr) {
+        CloseHandle(g_mutex_handle);
+        g_mutex_handle = nullptr;
+    }
+    
     // Open mutex
     g_mutex_handle = OpenMutexA(MUTEX_ALL_ACCESS, FALSE, TS_MUTEX_NAME);
 
@@ -1486,22 +1556,45 @@ static void cleanup_shared_memory() {
         CloseHandle(g_mutex_handle);
         g_mutex_handle = nullptr;
     }
+    
+    // Reset sequence to force re-sync on reconnect
+    g_last_sequence = 0;
 }
 
 // Update cached effects from shared memory
 static void update_cached_effects() {
+    // Don't try to update if plugin not fully initialized
+    if (!g_plugin_initialized.load(std::memory_order_acquire)) {
+        return;
+    }
+    
+    std::unique_lock<std::mutex> ipc_lock(g_ipc_handle_mutex, std::try_to_lock);
+
+    if (!ipc_lock.owns_lock()) {
+        return;
+    }
+    
     if (g_effect_config == nullptr || g_mutex_handle == nullptr) {
         // Try to reconnect
-        init_shared_memory();
-        
-        if (g_effect_config == nullptr || g_mutex_handle == nullptr) {
+        if (!init_shared_memory()) {
             return;
         }
+    }
+    
+    // Double-check after potential reconnection
+    if (g_effect_config == nullptr || g_mutex_handle == nullptr) {
+        return;
     }
 
     DWORD wait_result = WaitForSingleObject(g_mutex_handle, 0);
     
     if (wait_result == WAIT_OBJECT_0 || wait_result == WAIT_ABANDONED) {
+        if (wait_result == WAIT_ABANDONED) {
+            // Mutex owner crashed - data may be corrupt, skip this update
+            ReleaseMutex(g_mutex_handle);
+            return;
+        }
+        
         uint32_t current_seq = g_effect_config->sequence_number;
         
         if (current_seq != g_last_sequence) {
@@ -1520,6 +1613,16 @@ static void update_cached_effects() {
 }
 
 static void update_plugin_status() {
+    if (!g_plugin_initialized.load(std::memory_order_acquire)) {
+        return;
+    }
+    
+    std::unique_lock<std::mutex> ipc_lock(g_ipc_handle_mutex, std::try_to_lock);
+
+    if (!ipc_lock.owns_lock()) {
+        return;
+    }
+    
     if (g_plugin_status == nullptr || g_mutex_handle == nullptr) return;
     DWORD wait_result = WaitForSingleObject(g_mutex_handle, 10);
 
@@ -1588,11 +1691,21 @@ static void check_tail_completion() {
 
     if (elapsed >= g_tail_duration_ms.load()) {
         g_tail_active.store(false);
-        ts3Functions.stopVoiceRecording(g_current_server_connection_handler);
+
+        if (g_current_server_connection_handler != 0) {
+            ts3Functions.stopVoiceRecording(g_current_server_connection_handler);
+        }
     }
 }
 
 static void process_audio(short* samples, int sample_count, int channels) {
+    // Acquire audio mutex to synchronize with shutdown
+    std::lock_guard<std::mutex> audio_lock(g_audio_state_mutex);
+
+    if (!g_plugin_initialized.load(std::memory_order_acquire)) {
+        return;
+    }
+    
     check_tail_completion();
     update_cached_effects();
     static std::atomic<DWORD> last_status_update{0};
@@ -1610,8 +1723,6 @@ static void process_audio(short* samples, int sample_count, int channels) {
         std::lock_guard<std::mutex> lock(g_effect_mutex);
         effects = g_cached_effects;
     }
-
-    std::lock_guard<std::mutex> audio_lock(g_audio_state_mutex);
     
     // Check if effects are enabled
     if (!effects.effects_enabled || effects.effect_chain_count == 0) return;
@@ -1872,7 +1983,13 @@ void ts3plugin_setFunctionPointers(const struct TS3Functions funcs) {
 }
 
 int ts3plugin_init() {
-    g_audio_state.init(48000);
+    // Mark as not initialized during setup
+    g_plugin_initialized.store(false, std::memory_order_release);
+    
+    {
+        std::lock_guard<std::mutex> lock(g_audio_state_mutex);
+        g_audio_state.init(48000);
+    }
 
     {
         std::lock_guard<std::mutex> lock(g_loopback_mutex);
@@ -1882,8 +1999,15 @@ int ts3plugin_init() {
         g_loopback_available.store(0);
     }
     
-    init_shared_memory();
-    g_plugin_initialized.store(true);
+    {
+        std::lock_guard<std::mutex> lock(g_ipc_handle_mutex);
+        g_last_sequence = 0;
+        init_shared_memory();  // May fail, that's OK - will retry in update_cached_effects
+    }
+    
+    // Memory barrier to ensure all initialization is visible before setting flag
+    std::atomic_thread_fence(std::memory_order_release);
+    g_plugin_initialized.store(true, std::memory_order_release);
     char msg[256];
     snprintf(msg, sizeof(msg), "%s initialized", PLUGIN_NAME);
     ts3Functions.logMessage(msg, LogLevel_INFO, PLUGIN_NAME, 0);
@@ -1891,8 +2015,22 @@ int ts3plugin_init() {
 }
 
 void ts3plugin_shutdown() {
-    g_plugin_initialized.store(false);
-    cleanup_shared_memory();
+    g_plugin_initialized.store(false, std::memory_order_release);
+    g_tail_active.store(false);
+    
+    {
+        std::lock_guard<std::mutex> lock(g_audio_state_mutex);
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(g_loopback_mutex);
+    }
+    
+    {
+        std::lock_guard<std::mutex> lock(g_ipc_handle_mutex);
+        cleanup_shared_memory();
+    }
+    
     char msg[256];
     snprintf(msg, sizeof(msg), "%s shutdown", PLUGIN_NAME);
     ts3Functions.logMessage(msg, LogLevel_INFO, PLUGIN_NAME, 0);
@@ -1924,13 +2062,12 @@ void ts3plugin_onConnectStatusChangeEvent(uint64 serverConnectionHandlerID, int 
 
 // Voice processing - this is called for outgoing voice data
 void ts3plugin_onEditCapturedVoiceDataEvent(uint64 serverConnectionHandlerID, short* samples, int sampleCount, int channels, int* edited) {
-    if (!g_plugin_initialized.load()) return;
-    
-    // Process the audio
+    if (!g_plugin_initialized.load(std::memory_order_acquire)) return;
     process_audio(samples, sampleCount, channels);
-    
-    // Indicate we modified the data
-    *edited |= 0x1;
+
+    if (g_plugin_initialized.load(std::memory_order_acquire)) {
+        *edited |= 0x1;
+    }
 }
 
 // Called when starting to talk
@@ -1969,11 +2106,17 @@ void ts3plugin_onTalkStatusChangeEvent(uint64 serverConnectionHandlerID, int sta
 }
 
 void ts3plugin_onEditMixedPlaybackVoiceDataEvent(uint64 serverConnectionHandlerID, short* samples, int sampleCount, int channels, const unsigned int* channelSpeakerArray, unsigned int* channelFillMask) {
-    if (!g_plugin_initialized.load() || !g_local_test_mode.load(std::memory_order_relaxed)) {
+    if (!g_plugin_initialized.load(std::memory_order_acquire)) {
         return;
     }
     
     std::lock_guard<std::mutex> lock(g_loopback_mutex);
+
+    if (!g_plugin_initialized.load(std::memory_order_acquire) || 
+        !g_local_test_mode.load(std::memory_order_relaxed)) {
+        return;
+    }
+    
     size_t available = g_loopback_available.load(std::memory_order_acquire);
 
     if (available == 0) {

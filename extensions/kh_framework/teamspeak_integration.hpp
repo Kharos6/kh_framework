@@ -116,7 +116,7 @@ private:
     TSPluginStatus* plugin_status = nullptr;
     std::atomic<bool> is_initialized_flag{false};
     std::atomic<uint32_t> sequence_counter{0};
-    std::mutex ipc_mutex;
+    mutable std::mutex ipc_mutex;
     std::thread heartbeat_thread;
     std::atomic<bool> heartbeat_running{false};
     
@@ -453,7 +453,7 @@ public:
             return false;
         }
 
-        std::lock_guard<std::mutex> lock(const_cast<std::mutex&>(ipc_mutex));
+        std::lock_guard<std::mutex> lock(ipc_mutex);
         
         if (plugin_status == nullptr || mutex_handle == nullptr) {
             return false;
@@ -477,7 +477,7 @@ public:
             return false;
         }
         
-        std::lock_guard<std::mutex> lock(const_cast<std::mutex&>(ipc_mutex));
+        std::lock_guard<std::mutex> lock(ipc_mutex);
         
         if (plugin_status == nullptr || mutex_handle == nullptr) {
             return false;
@@ -502,7 +502,7 @@ public:
             return false;
         }
 
-        std::lock_guard<std::mutex> lock(const_cast<std::mutex&>(ipc_mutex));
+        std::lock_guard<std::mutex> lock(ipc_mutex);
         
         if (plugin_status == nullptr || mutex_handle == nullptr) {
             return false;

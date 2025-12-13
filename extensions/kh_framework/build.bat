@@ -93,6 +93,7 @@ cl /LD /arch:AVX /O2 /Ob3 /GL /MT /std:c++20 /EHsc /TP /Gy /Gw /GS- ^
     /LTCG ^
     /OPT:REF /OPT:ICF /OPT:LBR ^
     /DELAYLOAD:lua51.dll ^
+    /DELAYLOAD:nvcuda.dll ^
     /DELAYLOAD:cublas64_12.dll ^
     /DELAYLOAD:vulkan-1.dll ^
     /DELAYLOAD:sherpa-onnx-c-api.dll ^

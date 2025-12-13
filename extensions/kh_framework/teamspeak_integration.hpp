@@ -407,6 +407,8 @@ public:
     }
     
     void cleanup() {
+        clear_voice_effects();
+        
         // Signal stop BEFORE joining - must be atomic with release semantics
         heartbeat_running.store(false, std::memory_order_release);
         
@@ -682,12 +684,12 @@ public:
         std::string source_dll_path = get_plugin_dll_source_path();
         
         if (source_dll_path.empty()) {
-            report_error("KH - TeamSpeak: Could not determine extension directory");
+            sqf::diag_log("KH - TeamSpeak: Could not determine extension directory");
             return false;
         }
         
         if (!std::filesystem::exists(source_dll_path)) {
-            report_error("KH - TeamSpeak: Plugin DLL not found at: " + source_dll_path);
+            sqf::diag_log("KH - TeamSpeak: Plugin DLL not found at: " + source_dll_path);
             return false;
         }
         
@@ -695,7 +697,7 @@ public:
         auto ts3_dirs = find_ts3_plugin_directories();
         
         if (ts3_dirs.empty()) {
-            report_error("KH - TeamSpeak: No TeamSpeak plugin directories found");
+            sqf::diag_log("KH - TeamSpeak: No TeamSpeak plugin directories found");
             return false;
         }
         
@@ -719,13 +721,13 @@ public:
                 installed = true;
                 break;
             } catch (const std::filesystem::filesystem_error& e) {
-                report_error("KH - TeamSpeak: Failed to copy plugin to " + dest_path + ": " + std::string(e.what()));
+                sqf::diag_log("KH - TeamSpeak: Failed to copy plugin to " + dest_path + ": " + std::string(e.what()));
                 // Continue trying other directories
             }
         }
         
         if (!installed) {
-            report_error("KH - TeamSpeak: Failed to install plugin to any TeamSpeak directory");
+            sqf::diag_log("KH - TeamSpeak: Failed to install plugin to any TeamSpeak directory");
         }
         
         return installed;

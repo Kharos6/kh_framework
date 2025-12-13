@@ -162,18 +162,20 @@ void intercept::post_init() {
 }
 
 void intercept::on_frame() {
-    if (g_last_ts_connect_attempt < 0.0f || g_game_time - g_last_ts_connect_attempt >= 1.0f) {
-        g_last_ts_connect_attempt = g_game_time;
-        
-        try {
-            TeamspeakFramework::instance().initialize();
-        } catch (...) {
-            // Silent failure - will retry next second
+    if (!g_is_dedicated_server) {
+        if (g_last_ts_connect_attempt < 0.0f || g_game_time - g_last_ts_connect_attempt >= 1.0f) {
+            g_last_ts_connect_attempt = g_game_time;
+            
+            try {
+                TeamspeakFramework::instance().initialize();
+            } catch (...) {
+                // Silent failure - will retry next second
+            }
         }
-    }
 
-    if (UIFramework::instance().is_initialized()) {
-        UIFramework::instance().set_mouse_enabled(sqf::dialog());
+        if (UIFramework::instance().is_initialized()) {
+            UIFramework::instance().set_mouse_enabled(sqf::dialog());
+        }
     }
     
     MainThreadScheduler::instance().process_frame();

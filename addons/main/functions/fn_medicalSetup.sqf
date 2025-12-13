@@ -403,7 +403,15 @@ if KH_var_medical then {
                                                 };														
                                             },
                                             true,
-                                            {((damage player) < KH_var_incapacitationThreshold) || !(alive player)},
+                                            [
+                                                {((damage player) < KH_var_incapacitationThreshold) || !(alive player)},
+                                                false,
+                                                0,
+                                                [[1, false], false, false, false],
+                                                {},
+                                                false,
+                                                true
+                                            ],
                                             false
                                         ] call KH_fnc_execute;
                                     };

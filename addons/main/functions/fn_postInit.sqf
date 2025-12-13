@@ -316,19 +316,19 @@ isNil {
 			false
 		] call KH_fnc_execute;
 
-		if KH_var_medical then {
-			private _control = (uiNamespace getVariable ["KH_var_display", displayNull]) ctrlCreate ["RscStructuredText", -1];
-			private _controlBackground = (uiNamespace getVariable ["KH_var_display", displayNull]) ctrlCreate ["RscText", -1];
-			_control ctrlShow false;
-			_controlBackground ctrlShow false;
-			_controlBackground ctrlSetBackgroundColor KH_var_uiBackgroundColor;
-			_controlBackground ctrlCommit 0;
+		private _medicalControl = (uiNamespace getVariable ["KH_var_display", displayNull]) ctrlCreate ["RscStructuredText", -1];
+		private _medicalControlBackground = (uiNamespace getVariable ["KH_var_display", displayNull]) ctrlCreate ["RscText", -1];
+		_medicalControl ctrlShow false;
+		_medicalControlBackground ctrlShow false;
+		_medicalControlBackground ctrlSetBackgroundColor KH_var_uiBackgroundColor;
+		_medicalControlBackground ctrlCommit 0;
 
-			[
-				[_control, _controlBackground],
-				{
-					params ["_control", "_controlBackground"];
-
+		[
+			[_medicalControl, _medicalControlBackground],
+			{
+				params ["_control", "_controlBackground"];
+				
+				if KH_var_medical then {
 					if ((KH_var_healthDisplay isNotEqualTo "NONE") && !visibleMap) then {
 						if (KH_var_healthDisplayHideFullHealth && ((damage KH_var_playerUnit) isEqualTo 0)) then {
 							_control ctrlShow false;
@@ -382,12 +382,12 @@ isNil {
 						_control ctrlShow false;
 						_controlBackground ctrlShow false;
 					};
-				},
-				true,
-				0,
-				false
-			] call KH_fnc_execute;
-		};
+				};
+			},
+			true,
+			0,
+			false
+		] call KH_fnc_execute;
 	};
 
 	if (!isServer && !hasInterface) then {

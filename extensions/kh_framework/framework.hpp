@@ -641,7 +641,7 @@ public:
     void initialize() {
         if (InterlockedCompareExchange(&initialized_, 1, 0) == 1) return;
         
-        HANDLE hThread = CreateThread(
+        thread_handle_ = CreateThread(
             nullptr, 
             0, 
             WatchdogThreadProc, 
@@ -649,9 +649,26 @@ public:
             0, 
             nullptr
         );
+    }
+    
+    void shutdown(bool process_terminating = false) {
+        // Always disarm first
+        InterlockedExchange(&armed_, 0);
         
-        if (hThread) {
-            CloseHandle(hThread);
+        if (process_terminating) {
+            // During process termination, don't touch the thread.
+            // Windows will kill all threads. Attempting to wait or close
+            // handles can deadlock or crash.
+            return;
+        }
+        
+        // Normal DLL unload
+        InterlockedExchange(&shutdown_thread_, 1);
+        
+        if (thread_handle_ != nullptr) {
+            WaitForSingleObject(thread_handle_, 1000);
+            CloseHandle(thread_handle_);
+            thread_handle_ = nullptr;
         }
     }
 
@@ -689,6 +706,10 @@ private:
     }
 
     ShutdownWatchdog() = default;
+    ~ShutdownWatchdog() = default;
+    ShutdownWatchdog(const ShutdownWatchdog&) = delete;
+    ShutdownWatchdog& operator=(const ShutdownWatchdog&) = delete;
+    HANDLE thread_handle_ = nullptr;
     volatile LONG initialized_ = 0;
     volatile LONG armed_ = 0;
     volatile LONG shutdown_thread_ = 0;

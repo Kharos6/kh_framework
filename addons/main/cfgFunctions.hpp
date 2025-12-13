@@ -47,6 +47,7 @@ class CfgFunctions
 			class getObjectInventory {};
 			class getPositionScreenRatio {};
 			class getPositionVisibility {};
+			class getRemoteVariable {};
 			class getScreenVisiblePositions {};
 			class getUnitAttributes {};
 			class getUnitVehicleSlot {};

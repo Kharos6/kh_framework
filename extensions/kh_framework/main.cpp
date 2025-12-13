@@ -23,6 +23,12 @@ int intercept::api_version() {
 }
 
 void intercept::pre_start() {
+    (void)AIFramework::instance();
+    (void)TTSFramework::instance();
+    (void)STTFramework::instance();
+    (void)UIFramework::instance();
+    (void)NetworkFramework::instance();
+    (void)TeamspeakFramework::instance();
     sqf::call_extension("kh_rv_extension", "ready");
 
     if (RVExtBridge::initialize()) {
@@ -579,7 +585,6 @@ static void cleanup_delay_loaded_modules() {
         try {
             if (pair.second != NULL) {
                 FreeLibrary(pair.second);
-                sqf::diag_log("Unloaded delay-loaded module: " + pair.first);
             }
         } catch (...) {
             // Ignore errors during cleanup
@@ -653,7 +658,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
                 } __except(EXCEPTION_EXECUTE_HANDLER) {}
             }
             
-            ShutdownWatchdog::instance().disarm();
+            ShutdownWatchdog::instance().shutdown(lpReserved != nullptr);
             break;
         case DLL_THREAD_ATTACH:
             break;

@@ -5,6 +5,6 @@ class KH_ResourceKHDisplay
     fadeOut = 0;
     duration = 1e11;
     function = "";
-    onLoad = "uiNamespace setVariable ['KH_var_khDisplay', _this select 0];";
+    onLoad = "uiNamespace setVariable ['KH_var_display', _this select 0];";
     class Controls {};
 };

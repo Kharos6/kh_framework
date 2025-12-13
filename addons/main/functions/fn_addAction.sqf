@@ -103,7 +103,7 @@ else {
                 "ICON",
                 [
                     "\x\kh\addons\main\ui\helper_arrow_up.paa",
-                    [profileNamespace getVariable ["GUI_BCG_RGB_R", 0.13], profileNamespace getVariable ["GUI_BCG_RGB_G", 0.54], profileNamespace getVariable ["GUI_BCG_RGB_B", 0.21], 0.9],
+                    KH_var_uiEnabledElementColor,
                     if (_detection isEqualType "") then {
                         _object modelToWorldVisual (_object selectionPosition _detection);
                     }
@@ -781,12 +781,7 @@ private _actionHandler = [
                                         "ACTIVE";
                                     }
                                     else {
-                                        private _progressColor = [
-                                            profileNamespace getVariable ["GUI_BCG_RGB_R", 0.13], 
-                                            profileNamespace getVariable ["GUI_BCG_RGB_G", 0.54], 
-                                            profileNamespace getVariable ["GUI_BCG_RGB_B", 0.21], 
-                                            1
-                                        ] call BIS_fnc_colorRGBAtoHTML;
+                                        private _progressColor = KH_var_uiEnabledElementColor call BIS_fnc_colorRGBAtoHTML;
 
                                         switch (_progressDisplay) do {
                                             case "PERCENTAGE": {

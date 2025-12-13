@@ -45,6 +45,10 @@ isNil {
 			} forEach KH_var_initialSideRelations;
 		};
 
+		{
+			call _x;
+		} forEach KH_var_serverMissionLoadStack;
+
 		call KH_fnc_serverMissionLoadInit;
 
 		if isMultiplayer then {
@@ -59,9 +63,40 @@ isNil {
 			{
 				KH_var_missionStarted = true;
 				publicVariable "KH_var_missionStarted";
+
+				{
+					call _x;
+				} forEach KH_var_serverMissionStartStack;
+
 				call KH_fnc_serverMissionStartInit;
-				[[], "KH_fnc_playerMissionStartInit", "PLAYERS", true, false] call KH_fnc_execute;
-				[[], "KH_fnc_headlessMissionStartInit", "HEADLESS", true, false] call KH_fnc_execute;
+
+				[
+					[],
+					{
+						{
+							call _x;
+						} forEach KH_var_playerMissionStartStack;
+
+						call KH_fnc_playerMissionStartInit;
+					},
+					"PLAYERS",
+					true,
+					false
+				] call KH_fnc_execute;
+
+				[
+					[],
+					{
+						{
+							call _x;
+						} forEach KH_var_headlessMissionStartStack;
+
+						call KH_fnc_headlessMissionStartInit;
+					},
+					"HEADLESS",
+					true,
+					false
+				] call KH_fnc_execute;
 
 				if isMultiplayer then {
 					[[], {systemChat "KH FRAMEWORK - MISSION STARTED"; diag_log "KH FRAMEWORK - MISSION STARTED";}, ["SERVER", "ADMIN"] + KH_var_allCuratorMachines, true, false] call KH_fnc_execute;
@@ -79,9 +114,41 @@ isNil {
 						publicVariable "KH_var_initialPlayerMachines";
 						KH_var_playersLoaded = true;
 						publicVariable "KH_var_playersLoaded";
+
+						{
+							call _x;
+						} forEach KH_var_serverPlayersLoadedStack;
+
 						call KH_fnc_serverPlayersLoadedInit;
-						[[], "KH_fnc_playerPlayersLoadedInit", "PLAYERS", true, false] call KH_fnc_execute;
-						[[], "KH_fnc_headlessPlayersLoadedInit", "HEADLESS", true, false] call KH_fnc_execute;
+
+						[
+							[],
+							{
+								{
+									call _x;
+								} forEach KH_var_playerPlayersLoadedStack;
+
+								call KH_fnc_playerPlayersLoadedInit;
+							},
+							"PLAYERS",
+							true,
+							false
+						] call KH_fnc_execute;
+
+						[
+							[],
+							{
+								{
+									call _x;
+								} forEach KH_var_headlessPlayersLoadedStack;
+
+								call KH_fnc_headlessPlayersLoadedInit;
+							},
+							"HEADLESS",
+							true,
+							false
+						] call KH_fnc_execute;
+
 						["KH_eve_playersLoaded", []] call CBA_fnc_globalEvent;
 
 						if isMultiplayer then {
@@ -167,13 +234,22 @@ isNil {
 	};
 	
 	if hasInterface then {
-		"KH_var_khDisplayLayer" cutRsc ["KH_ResourceKHDisplay", "PLAIN", -1, true, true];
+		"KH_var_displayLayer" cutRsc ["KH_ResourceKHDisplay", "PLAIN", -1, true, true];
+
+		{
+			call _x;
+		} forEach KH_var_playerMissionLoadStack;
+
 		call KH_fnc_playerMissionLoadInit;
 		["KH_eve_playerMissionPreloaded", [clientOwner]] call CBA_fnc_serverEvent;
 
 		[
 			[],
 			{
+				{
+					call _x;
+				} forEach KH_var_playerLoadStack;
+
 				call KH_fnc_playerLoadInit;
 				["KH_eve_playerLoaded", [clientOwner, getPlayerUID player, getPlayerID player, player, [player, true] call KH_fnc_getEntityVariableName]] call CBA_fnc_globalEvent;				
 
@@ -201,6 +277,10 @@ isNil {
 							true
 						] call KH_fnc_execute;
 
+						{
+							[_corpse] call _x;
+						} forEach KH_var_playerRespawnStack;
+
 						[_corpse] call KH_fnc_playerRespawnInit;
 						["KH_eve_playerRespawned", [owner _unit, getPlayerUID _unit, getPlayerID _unit, _unit, _corpse]] call CBA_fnc_globalEvent;
 						nil;
@@ -217,6 +297,11 @@ isNil {
 					[],
 					{
 						params ["_unit", "_killer", "_instigator"];
+
+						{
+							[_killer, _instigator] call _x;
+						} forEach KH_var_playerKilledStack;
+
 						[_killer, _instigator] call KH_fnc_playerKilledInit;
 						["KH_eve_playerKilled", [owner _unit, getPlayerUID _unit, getPlayerID _unit, _unit, _killer, _instigator]] call CBA_fnc_globalEvent;
 					}
@@ -231,12 +316,12 @@ isNil {
 			false
 		] call KH_fnc_execute;
 
-		if KH_var_khMedical then {
-			private _control = (uiNamespace getVariable ["KH_var_khDisplay", displayNull]) ctrlCreate ["RscStructuredText", -1];
-			private _controlBackground = (uiNamespace getVariable ["KH_var_khDisplay", displayNull]) ctrlCreate ["RscText", -1];
+		if KH_var_medical then {
+			private _control = (uiNamespace getVariable ["KH_var_display", displayNull]) ctrlCreate ["RscStructuredText", -1];
+			private _controlBackground = (uiNamespace getVariable ["KH_var_display", displayNull]) ctrlCreate ["RscText", -1];
 			_control ctrlShow false;
 			_controlBackground ctrlShow false;
-			_controlBackground ctrlSetBackgroundColor [0, 0, 0, 0.45];
+			_controlBackground ctrlSetBackgroundColor KH_var_uiBackgroundColor;
 			_controlBackground ctrlCommit 0;
 
 			[
@@ -271,15 +356,10 @@ isNil {
 								_control ctrlSetAngle [KH_var_healthDisplayBarAngle, 0, 0, true];
 								_controlBackground ctrlSetAngle [KH_var_healthDisplayBarAngle, 0, 0, true];
 								_control ctrlSetStructuredText (parseText "");
-								_control ctrlSetBackgroundColor [profileNamespace getVariable ["GUI_BCG_RGB_R", 0.13], profileNamespace getVariable ["GUI_BCG_RGB_G", 0.54], profileNamespace getVariable ["GUI_BCG_RGB_B", 0.21], 0.9];
+								_control ctrlSetBackgroundColor KH_var_uiEnabledElementColor;
 							}
 							else {
-								private _percentageColor = [
-									profileNamespace getVariable ["GUI_BCG_RGB_R", 0.13], 
-									profileNamespace getVariable ["GUI_BCG_RGB_G", 0.54], 
-									profileNamespace getVariable ["GUI_BCG_RGB_B", 0.21], 
-									1
-								] call BIS_fnc_colorRGBAtoHTML;
+								private _percentageColor = KH_var_uiEnabledElementColor call BIS_fnc_colorRGBAtoHTML;
 
 								private _position = [
 									[KH_var_healthDisplayPercentagePositionX, KH_var_healthDisplayPercentagePositionY, KH_var_healthDisplayPercentageSizeX, KH_var_healthDisplayPercentageSizeY], 
@@ -291,7 +371,7 @@ isNil {
 								_control ctrlSetAngle [KH_var_healthDisplayPercentageAngle, 0, 0, true];
 								_controlBackground ctrlSetAngle [KH_var_healthDisplayPercentageAngle, 0, 0, true];
 								_control ctrlSetStructuredText (parseText (["<t align='center' valign='middle' size='", KH_var_healthDisplayPercentageTextSize, "' color='", _percentageColor, "' font='EtelkaMonospaceProBold'>", ((1 - (damage KH_var_playerUnit)) * 100) toFixed 0, "%</t>"] joinString ""));
-								_control ctrlSetBackgroundColor [0, 0, 0, 0.45];
+								_control ctrlSetBackgroundColor KH_var_uiBackgroundColor;
 							};
 
 							_control ctrlCommit 0;
@@ -311,12 +391,20 @@ isNil {
 	};
 
 	if (!isServer && !hasInterface) then {
+		{
+			call _x;
+		} forEach KH_var_headlessMissionLoadStack;
+
 		call KH_fnc_headlessMissionLoadInit;
 		["KH_eve_headlessMissionPreloaded", [clientOwner]] call CBA_fnc_serverEvent;
 
 		[
 			[],
 			{
+				{
+					call _x;
+				} forEach KH_var_headlessLoadStack;
+
 				call KH_fnc_headlessLoadInit;
 				["KH_eve_headlessLoaded", [clientOwner, getPlayerID player, player, [player, true] call KH_fnc_getEntityVariableName]] call CBA_fnc_globalEvent;				
 
@@ -462,23 +550,9 @@ isNil {
 			} forEach allUnits;
 		};
 
-		if KH_var_khMedical then {
-			{
-				[_x] call KH_fnc_medicalSetup;
-			} forEach (KH_var_allEntities select {_x isKindOf "CAManBase";});
+		if KH_var_medical then {
+			["CAManBase", KH_fnc_medicalSetup, true] call KH_fnc_entityInit;
 		};
-
-		{
-			private _entity = _x;
-			
-			{
-				_x params ["_type", "_function"];
-
-				if (_entity isKindOf _type) then {
-					[_entity] call _function;
-				};
-			} forEach KH_var_entityInitializations;
-		} forEach KH_var_allEntities;
 	};
 };
 

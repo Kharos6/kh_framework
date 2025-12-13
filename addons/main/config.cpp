@@ -7,6 +7,7 @@
 #include "\x\kh\addons\main\cfgFactionClasses.hpp"
 #include "\x\kh\addons\main\cfgFunctions.hpp"
 #include "\x\kh\addons\main\cfgIrLaserSettings.hpp"
+#include "\x\kh\addons\main\cfgKhinitFunctions.hpp"
 #include "\x\kh\addons\main\cfgLuaFunctions.hpp"
 #include "\x\kh\addons\main\cfgPatches.hpp"
 #include "\x\kh\addons\main\cfgPostProcessTemplates.hpp"

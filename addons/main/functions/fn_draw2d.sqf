@@ -14,7 +14,7 @@ if (_resource isEqualTo "") then {
 
 _displayTimings params [["_fadeIn", 0.5, [0]], ["_duration", true, [true, 0]], ["_fadeOut", 0.5, [0]]];
 _angle params [["_angle", 0, [0]], ["_centerX", 0, [0]], ["_centerY", 0, [0]]];
-private _khDisplay = uiNamespace getVariable ["KH_var_khDisplay", displayNull];
+private _khDisplay = uiNamespace getVariable ["KH_var_display", displayNull];
 private _control = _khDisplay ctrlCreate [_resource, -1];
 _control ctrlSetFade 1;
 _control ctrlSetPosition ([_transforms, _square] call KH_fnc_parseNormalizedScreenTransforms);

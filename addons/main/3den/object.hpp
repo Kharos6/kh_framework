@@ -381,7 +381,7 @@ class Object
 					"\
 						_value params ['_toggle', '_medicalHandling', '_globalDamageMultipliers', '_plotArmor', '_damageMultiplier', '_incapacitation'];\
 						if (_toggle && !is3DEN) then {\
-							_this setVariable ['KH_var_khMedicalHandling', _medicalHandling, true];\
+							_this setVariable ['KH_var_medicalHandling', _medicalHandling, true];\
 							_this setVariable ['KH_var_plotArmor', _plotArmor, true];\
 							_this setVariable ['KH_var_damageMultiplier', _damageMultiplier, true];\
 							if (_incapacitation isNotEqualTo 0) then {\

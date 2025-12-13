@@ -3,13 +3,7 @@ uiNamespace setVariable ["KH_var_missionSessionId", generateUid];
 uiNamespace setVariable ["KH_var_serverGameSessionId", uiNamespace getVariable "KH_var_gameSessionId"];
 uiNamespace setVariable ["KH_var_serverMissionSessionId", uiNamespace getVariable "KH_var_missionSessionId"];
 uiNamespace setVariable ["KH_var_aceLoaded", isClass (configFile >> "CfgPatches" >> "ace_main")];
-uiNamespace setVariable ["KH_var_preInitLuaExecutions", []];
-uiNamespace setVariable ["KH_var_postInitLuaExecutions", []];
-uiNamespace setVariable ["KH_var_loadInitLuaExecutions", []];
 uiNamespace setVariable ["KH_var_resetInitLuaExecutions", []];
-private _preInitLuaExecutions = uiNamespace getVariable "KH_var_preInitLuaExecutions";
-private _postInitLuaExecutions = uiNamespace getVariable "KH_var_postInitLuaExecutions";
-private _loadInitLuaExecutions = uiNamespace getVariable "KH_var_loadInitLuaExecutions";
 private _resetInitLuaExecutions = uiNamespace getVariable "KH_var_resetInitLuaExecutions";
 
 {
@@ -62,31 +56,7 @@ private _resetInitLuaExecutions = uiNamespace getVariable "KH_var_resetInitLuaEx
 
 		if (isNumber (_x >> "preStart")) then {
 			if ((getNumber (_x >> "preStart")) isEqualTo 1) then {
-        		luaExecute _function;
-			};
-        };
-
-		if (isNumber (_x >> "preInit")) then {
-			if ((getNumber (_x >> "preInit")) isEqualTo 1) then {
-                if !(_name in _preInitLuaExecutions) then {
-        		    _preInitLuaExecutions pushBack _name;
-                };
-			};
-        };
-
-		if (isNumber (_x >> "postInit")) then {
-			if ((getNumber (_x >> "postInit")) isEqualTo 1) then {
-                if !(_name in _postInitLuaExecutions) then {
-        		    _postInitLuaExecutions pushBack _name;
-                };
-			};
-        };
-
-		if (isNumber (_x >> "loadInit")) then {
-			if ((getNumber (_x >> "loadInit")) isEqualTo 1) then {
-                if !(_name in _loadInitLuaExecutions) then {
-        		    _loadInitLuaExecutions pushBack _name;
-                };
+        		luaExecute _name;
 			};
         };
 

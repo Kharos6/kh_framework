@@ -30,20 +30,24 @@ isNil {
 
                 _unit setUnconscious false;
 
-                if KH_var_incapacitatedCaptives then {
-                    _unit setCaptive false;
+                if KH_var_medical then {
+                    if KH_var_incapacitatedCaptives then {
+                        _unit setCaptive false;
+                    };
                 };
             },
             _unit,
             true,
             false
         ] call KH_fnc_execute;
-
-        _unit setVariable ["KH_var_incapacitated", false, true];
-        _unit setVariable ["KH_var_withstanding", false, true];
-        _unit setVariable ["KH_var_stabilized", false, true];
-        _unit setVariable ["KH_var_beingRevived", false, true];
-        _unit setVariable ["KH_var_beingStabilized", false, true];
+        
+        if KH_var_medical then {
+            _unit setVariable ["KH_var_incapacitated", false, true];
+            _unit setVariable ["KH_var_withstanding", false, true];
+            _unit setVariable ["KH_var_stabilized", false, true];
+            _unit setVariable ["KH_var_beingRevived", false, true];
+            _unit setVariable ["KH_var_beingStabilized", false, true];
+        };
     } forEach KH_var_allPlayerUnits;
 
 	deleteVehicle _logic;

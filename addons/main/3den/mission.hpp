@@ -554,16 +554,21 @@ class Mission
 						"\
 							_value params ['_toggle', '_curators', '_curatorModules', '_hide', '_disableDamage'];\
 							if (_toggle && !is3DEN && isServer) then {\
-								_curators = ['[', _curators, ']'] joinString '';\
-								_curatorModules = ['[', _curatorModules, ']'] joinString '';\
-								private _assignedModules = [];\
-								{\
-									private _module = missionNamespace getVariable [_x, objNull];\
-									if !(isNull _module) then {\
-										_assignedModules pushBack _module;\
-									};\
-								} forEach (parseSimpleArray _curatorModules);\
-								[parseSimpleArray _curators, _assignedModules, _hide, _disableDamage] call KH_fnc_setCurators;\
+								KH_var_postInitExecutions pushBack [\
+									[parseSimpleArray (['[', _curators, ']'] joinString ''), parseSimpleArray (['[', _curatorModules, ']'] joinString ''), _hide, _disableDamage],\
+									{\
+										params ['_curators', '_curatorModules', '_hide', '_disableDamage'];\
+										private _assignedModules = [];\
+										{\
+											private _module = missionNamespace getVariable [_x, objNull];\
+											if !(isNull _module) then {\
+												_assignedModules pushBack _module;\
+											};\
+										} forEach _curatorModules;\
+										[_curators, _assignedModules, _hide, _disableDamage] call KH_fnc_setCurators;\
+									},\
+									1\
+								];\
 							};\
 						";
 						defaultValue = "[false, str (profileNamespace getVariable ['KH_var_steamId', '']), '', true, true]";

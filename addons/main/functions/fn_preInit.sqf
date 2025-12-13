@@ -424,6 +424,39 @@ if isServer then {
 	KH_fnc_serverMissionStartInit = {};
 	KH_fnc_serverPlayersLoadedInit = {};
 	KH_fnc_serverMissionEndInit = {};
+	KH_var_serverMissionLoadStack = [];
+	KH_var_serverMissionStartStack = [];
+	KH_var_serverPlayersLoadedStack = [];
+	KH_var_serverMissionEndStack = [];
+
+	{
+		private _basePath = (getText (_x >> "path")) regexReplace ["(/)", "\\"];
+
+		{
+			private _config = _x;
+
+			{
+				if (isNumber (_config >> _x)) then {
+					if ((getNumber (_config >> _x)) isEqualTo 1) then {
+						private _pathUsed = isText (_config >> "path");
+
+						(missionNamespace getVariable (["kh_var_", _x, "stack"] joinString "")) pushBack (compile (preprocessFileLineNumbers ([
+							_basePath,
+							["", "\"] select (_basePath isNotEqualTo ""),
+							if _pathUsed then {
+								(getText (_config >> "path")) regexReplace ["(/)", "\\"];
+							}
+							else {
+								"";
+							}, 
+							configName _config, 
+							".sqf"
+						] joinString "")));
+					};
+				};
+			} forEach ["servermissionload", "servermissionstart", "serverplayersloaded", "servermissionend"];
+		} forEach ("true" configClasses _x);
+	} forEach (("true" configClasses (configFile >> "CfgKhInitFunctions")) + ("true" configClasses (missionConfigFile >> "CfgKhInitFunctions")));
 
 	[
 		[],
@@ -1021,12 +1054,6 @@ if isServer then {
 				KH_var_allLivingEntities pushBackUnique _entity;
 			};
 
-			if KH_var_khMedical then {
-				if (_entity isKindOf "CAManBase") then {
-					[_entity] call KH_fnc_medicalSetup;
-				};
-			};
-
 			{
 				_x params ["_type", "_function"];
 
@@ -1220,6 +1247,44 @@ if hasInterface then {
 	KH_fnc_playerSwitchInit = {};
 	KH_fnc_playerControlledUnitChangeInit = {};
 	KH_fnc_playerMissionEndInit = {};
+	KH_var_playerMissionLoadStack = [];
+	KH_var_playerMissionStartStack = [];
+	KH_var_playerLoadStack = [];
+	KH_var_playerPlayersLoadedStack = [];
+	KH_var_playerKilledStack = [];
+	KH_var_playerRespawnStack = [];
+	KH_var_playerSwitchStack = [];
+	KH_var_playerControlledUnitChangeStack = [];
+	KH_var_playerMissionEndStack = [];
+
+	{
+		private _basePath = (getText (_x >> "path")) regexReplace ["(/)", "\\"];
+
+		{
+			private _config = _x;
+
+			{
+				if (isNumber (_config >> _x)) then {
+					if ((getNumber (_config >> _x)) isEqualTo 1) then {
+						private _pathUsed = isText (_config >> "path");
+
+						(missionNamespace getVariable (["kh_var_", _x, "stack"] joinString "")) pushBack (compile (preprocessFileLineNumbers ([
+							_basePath,
+							["", "\"] select (_basePath isNotEqualTo ""),
+							if _pathUsed then {
+								(getText (_config >> "path")) regexReplace ["(/)", "\\"];
+							}
+							else {
+								"";
+							}, 
+							configName _config, 
+							".sqf"
+						] joinString "")));
+					};
+				};
+			} forEach ["playermissionload", "playermissionstart", "playerload", "playerplayersloaded", "playerkilled", "playerrespawn", "playerswitch", "playercontrolledunitchange", "playermissionend"];
+		} forEach ("true" configClasses _x);
+	} forEach (("true" configClasses (configFile >> "CfgKhInitFunctions")) + ("true" configClasses (missionConfigFile >> "CfgKhInitFunctions")));
 
 	[
 		"unit", 
@@ -1229,6 +1294,11 @@ if hasInterface then {
 			KH_var_playerUnit = _unit;
 			player setVariable ["KH_var_playerUnit", KH_var_playerUnit, true];
 			["KH_eve_playerControlledUnitChanged", [clientOwner, getPlayerUID player, getPlayerID player, _unit, _previousUnit, [_unit, true] call KH_fnc_getEntityVariableName]] call CBA_fnc_globalEvent;
+
+			{
+				[_previousUnit, _unit] call _x;
+			} forEach KH_var_playerControlledUnitChangeStack;
+
 			[_previousUnit, _unit] call KH_fnc_playerControlledUnitChangeInit;
 		},
 		true
@@ -1238,6 +1308,11 @@ if hasInterface then {
 		"TeamSwitch", 
 		{
 			params ["_previousUnit", "_newUnit"];
+
+			{
+				[_previousUnit] call _x;
+			} forEach KH_var_playerSwitchStack;
+
 			[_previousUnit] call KH_fnc_playerSwitchInit;
 			["KH_eve_playerSwitched", [clientOwner, getPlayerUID _newUnit, getPlayerID _newUnit, _newUnit, _previousUnit]] call CBA_fnc_globalEvent;
 			
@@ -1415,6 +1490,41 @@ if (!isServer && !hasInterface) then {
 	KH_fnc_headlessLoadInit = {};
 	KH_fnc_headlessPlayersLoadedInit = {};
 	KH_fnc_headlessMissionEndInit = {};
+	KH_var_headlessMissionLoadStack = [];
+	KH_var_headlessMissionStartStack = [];
+	KH_var_headlessLoadStack = [];
+	KH_var_headlessPlayersLoadedStack = [];
+	KH_var_headlessMissionEndStack = [];
+
+
+	{
+		private _basePath = (getText (_x >> "path")) regexReplace ["(/)", "\\"];
+
+		{
+			private _config = _x;
+
+			{
+				if (isNumber (_config >> _x)) then {
+					if ((getNumber (_config >> _x)) isEqualTo 1) then {
+						private _pathUsed = isText (_config >> "path");
+
+						(missionNamespace getVariable (["kh_var_", _x, "stack"] joinString "")) pushBack (compile (preprocessFileLineNumbers ([
+							_basePath,
+							["", "\"] select (_basePath isNotEqualTo ""),
+							if _pathUsed then {
+								(getText (_config >> "path")) regexReplace ["(/)", "\\"];
+							}
+							else {
+								"";
+							}, 
+							configName _config, 
+							".sqf"
+						] joinString "")));
+					};
+				};
+			} forEach ["headlessmissionload", "headlessmissionstart", "headlessload", "headlessplayersloaded", "headlessmissionend"];
+		} forEach ("true" configClasses _x);
+	} forEach (("true" configClasses (configFile >> "CfgKhInitFunctions")) + ("true" configClasses (missionConfigFile >> "CfgKhInitFunctions")));
 
 	[
 		[],

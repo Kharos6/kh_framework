@@ -1,5 +1,75 @@
 [
-	"KH_var_khMedical",
+	"KH_var_uiEnabledElementColor",
+	"COLOR",
+	[
+		"UI Enabled Element Color", 
+		"Personalized color choice for enabled UI elements."
+	], 
+	"KH User Interface", 
+	[1, 0.6, 0.1, 0.75],
+	0,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_uiDisabledElementColor",
+	"COLOR",
+	[
+		"UI Disabled Element Color", 
+		"Personalized color choice for disabled UI elements."
+	], 
+	"KH User Interface", 
+	[1, 0.6, 0.1, 0.45],
+	0,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_uiActiveElementColor",
+	"COLOR",
+	[
+		"UI Active Element Color", 
+		"Personalized color choice for active UI elements."
+	], 
+	"KH User Interface", 
+	[1, 0.6, 0.1, 1],
+	0,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_uiForegroundColor",
+	"COLOR",
+	[
+		"UI Foreground Color", 
+		"Personalized UI foreground color choice."
+	],
+	"KH User Interface", 
+	[0, 0, 0, 0.9],
+	0,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_uiBackgroundColor",
+	"COLOR",
+	[
+		"UI Background Color", 
+		"Personalized UI background color choice."
+	],
+	"KH User Interface", 
+	[0, 0, 0, 0.45],
+	0,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_medical",
 	"CHECKBOX",   
 	[
 		"Enable", 
@@ -1068,7 +1138,7 @@
         "KH Medical",
         "Interface"
     ], 
-	[0.00, 100.00, 40.00, 2],
+	[0.00, 100.00, 2.50, 2],
 	0,
 	{},
 	false
@@ -1153,7 +1223,7 @@
         "KH Medical",
         "Interface"
     ], 
-	[0.00, 100.00, 46.50, 2],
+	[0.00, 100.00, 2.50, 2],
 	0,
 	{},
 	false
@@ -1170,7 +1240,7 @@
         "KH Medical",
         "Interface"
     ], 
-	[0.00, 100.00, 94.00, 2],
+	[0.00, 100.00, 92.50, 2],
 	0,
 	{},
 	false

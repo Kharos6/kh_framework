@@ -8,13 +8,15 @@ if (isNil "KH_var_curatorsSet") then {
 	KH_var_curatorsSet = true;
 
 	{
-		private _uid = getPlayerUID _x;
+		private _player = _x;
+		private _uid = getPlayerUID _player;
 
 		if (_uid in KH_var_curators) then {
-			private _module = KH_var_curatorModules param [(KH_var_curators find _uid)];
+			private _module = KH_var_curatorModules param [KH_var_curators find _uid];
 
 			if (isNil "_module") then {
-				_module = KH_var_logicGroup createUnit ["ModuleCurator_F", [0, 0, 0], [], 0, "CAN_COLLIDE"];
+				_module = (createGroup [sideLogic, true]) createUnit ["ModuleCurator_F", [0, 0, 0], [], 0, "CAN_COLLIDE"];
+				_module setVariable ["owner", _uid, true];
 				_module setVariable ["Addons", 3, true];
 				_module setVariable ["BIS_fnc_initModules_disableAutoActivation", false];
 				_module setCuratorCoef ["Place", 0];
@@ -31,7 +33,7 @@ if (isNil "KH_var_curatorsSet") then {
 			};
 
 			[
-				[_x, _module],
+				[_player, _module],
 				{
 					params ["_player", "_module"];
 
@@ -65,6 +67,7 @@ if (isNil "KH_var_curatorsSet") then {
 
 						KH_var_allCuratorMachines pushBackUnique (owner _player);
 						publicVariable "KH_var_allCuratorMachines";
+						_module addCuratorEditableObjects [KH_var_allEntities, true];
 						[_handlerId] call KH_fnc_removeHandler;
 					};
 				},
@@ -75,7 +78,7 @@ if (isNil "KH_var_curatorsSet") then {
 		}
 		else {
 			{
-				if ((getAssignedCuratorUnit _x) isEqualTo _x) then {
+				if ((getAssignedCuratorUnit _x) isEqualTo _player) then {
 					unassignCurator _x;
 				};
 			} forEach KH_var_curatorModules;
@@ -90,10 +93,11 @@ if (isNil "KH_var_curatorsSet") then {
 				private _uid = getPlayerUID _player;
 
 				if (_uid in KH_var_curators) then {
-					private _module = KH_var_curatorModules select (KH_var_curators find _uid);
+					private _module = KH_var_curatorModules param [KH_var_curators find _uid];
 
 					if (isNil "_module") then {
-						_module = KH_var_logicGroup createUnit ["ModuleCurator_F", [0, 0, 0], [], 0, "CAN_COLLIDE"];
+						_module = (createGroup [sideLogic, true]) createUnit ["ModuleCurator_F", [0, 0, 0], [], 0, "CAN_COLLIDE"];
+						_module setVariable ["owner", _uid, true];
 						_module setVariable ["Addons", 3, true];
 						_module setVariable ["BIS_fnc_initModules_disableAutoActivation", false];
 						_module setCuratorCoef ["Place", 0];
@@ -143,6 +147,7 @@ if (isNil "KH_var_curatorsSet") then {
 
 								KH_var_allCuratorMachines pushBackUnique (owner _player);
 								publicVariable "KH_var_allCuratorMachines";
+								_module addCuratorEditableObjects [KH_var_allEntities, true];
 								[_handlerId] call KH_fnc_removeHandler;
 							};
 						},

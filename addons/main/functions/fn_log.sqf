@@ -1,9 +1,5 @@
 params [["_header", "", [""]], ["_message", [], [[]]], ["_throw", true, [true]], ["_verboseFormat", true, [true]], ["_sendToServer", false, [true]]];
 
-if _throw then {
-	throw ([_header, _message joinString ""] joinString "");
-};
-
 if !_verboseFormat then {
 	_message insert [0, [[" | USER = ", profileName, " | "] joinString ""]];
 	_message = _message joinString "";
@@ -72,4 +68,8 @@ else {
 			} forEach _message;
 		};
 	};
+};
+
+if _throw then {
+	throw ([_header, " | ", _message joinString ""] joinString "");
 };

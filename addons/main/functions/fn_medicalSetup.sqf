@@ -1,6 +1,6 @@
 params [["_unit", objNull, [objNull]]];
 
-if KH_var_khMedical then {
+if KH_var_medical then {
     [
         [_unit],
         {
@@ -43,7 +43,7 @@ if KH_var_khMedical then {
                 [],
                 {
                     params ["_unit", "_selection", "_damage", "_source", "_projectile", "_hitPartIndex", "_instigator", "_hitPoint", "_directHit", "_context"];
-                    if !(_unit getVariable ["KH_var_khMedicalHandling", true]) exitWith {};
+                    if !(_unit getVariable ["KH_var_medicalHandling", true]) exitWith {};
                     _hitPoint = toLowerANSI _hitPoint;
 
                     if ((_context isEqualTo 3) && (_hitPoint isEqualTo "hithead")) exitWith {

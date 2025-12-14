@@ -92,6 +92,7 @@ cl /LD /arch:AVX /O2 /Ob3 /GL /MT /std:c++20 /EHsc /TP /Gy /Gw /GS- ^
     /link /MACHINE:X64 ^
     /LTCG ^
     /OPT:REF /OPT:ICF /OPT:LBR ^
+    /DELAYLOAD:vcomp140.dll ^
     /DELAYLOAD:lua51.dll ^
     /DELAYLOAD:nvcuda.dll ^
     /DELAYLOAD:cublas64_12.dll ^

@@ -67,7 +67,6 @@ if (isNil "KH_var_curatorsSet") then {
 
 						KH_var_allCuratorMachines pushBackUnique (owner _player);
 						publicVariable "KH_var_allCuratorMachines";
-						_module addCuratorEditableObjects [KH_var_allEntities, true];
 						[_handlerId] call KH_fnc_removeHandler;
 					};
 				},
@@ -147,7 +146,6 @@ if (isNil "KH_var_curatorsSet") then {
 
 								KH_var_allCuratorMachines pushBackUnique (owner _player);
 								publicVariable "KH_var_allCuratorMachines";
-								_module addCuratorEditableObjects [KH_var_allEntities, true];
 								[_handlerId] call KH_fnc_removeHandler;
 							};
 						},

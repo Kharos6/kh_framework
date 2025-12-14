@@ -45,6 +45,11 @@ isNil {
 			} forEach KH_var_initialSideRelations;
 		};
 
+		if !(isNil "KH_var_missionStartSuspension") then {
+			KH_var_missionSuspended = true;
+			publicVariable "KH_var_missionSuspended";
+		};
+
 		{
 			call _x;
 		} forEach KH_var_serverMissionLoadStack;
@@ -52,7 +57,7 @@ isNil {
 		call KH_fnc_serverMissionLoadInit;
 
 		if isMultiplayer then {
-			[[], {systemChat "KH FRAMEWORK - MISSION LOADED"; diag_log "KH FRAMEWORK - MISSION LOADED";}, ["SERVER", "ADMIN"] + KH_var_allCuratorMachines, true, false] call KH_fnc_execute;
+			[[], {systemChat "KH FRAMEWORK - MISSION LOADED"; diag_log "KH FRAMEWORK - MISSION LOADED";}, ["SERVER", "ADMIN"], true, false] call KH_fnc_execute;
 		}
 		else {
 			diag_log "KH FRAMEWORK - MISSION LOADED";
@@ -99,7 +104,7 @@ isNil {
 				] call KH_fnc_execute;
 
 				if isMultiplayer then {
-					[[], {systemChat "KH FRAMEWORK - MISSION STARTED"; diag_log "KH FRAMEWORK - MISSION STARTED";}, ["SERVER", "ADMIN"] + KH_var_allCuratorMachines, true, false] call KH_fnc_execute;
+					[[], {systemChat "KH FRAMEWORK - MISSION STARTED"; diag_log "KH FRAMEWORK - MISSION STARTED";}, ["SERVER", "ADMIN"], true, false] call KH_fnc_execute;
 				}
 				else {
 					diag_log "KH FRAMEWORK - MISSION STARTED";
@@ -152,7 +157,7 @@ isNil {
 						["KH_eve_playersLoaded", []] call CBA_fnc_globalEvent;
 
 						if isMultiplayer then {
-							[[], {systemChat "KH FRAMEWORK - PLAYERS LOADED"; diag_log "KH FRAMEWORK - PLAYERS LOADED";}, ["SERVER", "ADMIN"] + KH_var_allCuratorMachines, true, false] call KH_fnc_execute;
+							[[], {systemChat "KH FRAMEWORK - PLAYERS LOADED"; diag_log "KH FRAMEWORK - PLAYERS LOADED";}, ["SERVER", "ADMIN"], true, false] call KH_fnc_execute;
 						}
 						else {
 							diag_log "KH FRAMEWORK - PLAYERS LOADED";
@@ -186,49 +191,38 @@ isNil {
 		[
 			[],
 			{
-				KH_var_networkingSettings = [
-					KH_var_networkingPort,
-					KH_var_networkingMaximumMessageSize,
-					KH_var_networkingReceiveBufferSize,
-					KH_var_networkingSendBufferSize,
-					KH_var_networkingConnectionTimeout,
-					KH_var_networkingSendTimeout,
-					KH_var_networkingReceiveTimeout,
-					KH_var_networkingClientStallTimeout,
-					KH_var_networkingKeepAliveTime,
-					KH_var_networkingKeepAliveInterval,
-					KH_var_networkingSendBatchSize,
-					KH_var_networkingCompression,
-					KH_var_networkingCoalesceMessages,
-					KH_var_networkingMaximumCoalesceSize,
-					KH_var_networkingMaximumCoalescedMessages,
-					KH_var_networkingCoalesceDelay
-				];
+				if (isNil "KH_var_serverAddress") exitWith {};
 
+				private _networking = [
+					missionNamespace,
+					[
+						"KH_var_networkingPort",
+						"KH_var_networkingMaximumMessageSize",
+						"KH_var_networkingReceiveBufferSize",
+						"KH_var_networkingSendBufferSize",
+						"KH_var_networkingConnectionTimeout",
+						"KH_var_networkingSendTimeout",
+						"KH_var_networkingReceiveTimeout",
+						"KH_var_networkingClientStallTimeout",
+						"KH_var_networkingKeepAliveTime",
+						"KH_var_networkingKeepAliveInterval",
+						"KH_var_networkingSendBatchSize",
+						"KH_var_networkingCompression",
+						"KH_var_networkingCoalesceMessages",
+						"KH_var_networkingMaximumCoalesceSize",
+						"KH_var_networkingMaximumCoalescedMessages",
+						"KH_var_networkingCoalesceDelay"
+					],
+					"SERVER"
+				] call KH_fnc_getRemoteVariable;
+
+				if (isNil "_networking") exitWith {};
+				KH_var_networkingSettings = _networking;
 				networkInitialize;
+				[_handlerId] call KH_fnc_removeHandler;
 			},
 			true,
-			{
-				(
-					!(isNil "KH_var_serverAddress") &&
-					!(isNil "KH_var_networkingPort") &&
-					!(isNil "KH_var_networkingMaximumMessageSize") &&
-					!(isNil "KH_var_networkingReceiveBufferSize") &&
-					!(isNil "KH_var_networkingSendBufferSize") &&
-					!(isNil "KH_var_networkingConnectionTimeout") &&
-					!(isNil "KH_var_networkingSendTimeout") &&
-					!(isNil "KH_var_networkingReceiveTimeout") &&
-					!(isNil "KH_var_networkingClientStallTimeout") &&
-					!(isNil "KH_var_networkingKeepAliveTime") &&
-					!(isNil "KH_var_networkingKeepAliveInterval") &&
-					!(isNil "KH_var_networkingSendBatchSize") &&
-					!(isNil "KH_var_networkingCompression") &&
-					!(isNil "KH_var_networkingCoalesceMessages") &&
-					!(isNil "KH_var_networkingMaximumCoalesceSize") &&
-					!(isNil "KH_var_networkingMaximumCoalescedMessages") &&
-					!(isNil "KH_var_networkingCoalesceDelay")
-				);
-			},
+			0,
 			false
 		] call KH_fnc_execute;
 	};
@@ -316,73 +310,86 @@ isNil {
 			false
 		] call KH_fnc_execute;
 
-		private _medicalControl = (uiNamespace getVariable ["KH_var_display", displayNull]) ctrlCreate ["RscStructuredText", -1];
-		private _medicalControlBackground = (uiNamespace getVariable ["KH_var_display", displayNull]) ctrlCreate ["RscText", -1];
-		_medicalControl ctrlShow false;
-		_medicalControlBackground ctrlShow false;
-		_medicalControlBackground ctrlSetBackgroundColor KH_var_uiBackgroundColor;
-		_medicalControlBackground ctrlCommit 0;
-
 		[
-			[_medicalControl, _medicalControlBackground],
+			[],
 			{
-				params ["_control", "_controlBackground"];
-				
-				if KH_var_medical then {
-					if ((KH_var_healthDisplay isNotEqualTo "NONE") && !visibleMap) then {
-						if (KH_var_healthDisplayHideFullHealth && ((damage KH_var_playerUnit) isEqualTo 0)) then {
-							_control ctrlShow false;
-							_controlBackground ctrlShow false;
-						}
-						else {
-							_control ctrlShow true;
-							_controlBackground ctrlShow true;
+				private _medical = [missionNamespace, "KH_var_medical", "SERVER"] call KH_fnc_getRemoteVariable;
+				if (isNil "_medical") exitWith {};
 
-							if (KH_var_healthDisplay isEqualTo "BAR") then {
-								_control ctrlSetPosition (
-									[
-										[KH_var_healthDisplayBarPositionX, KH_var_healthDisplayBarPositionY, KH_var_healthDisplayBarSizeX * (1 - (damage KH_var_playerUnit)), KH_var_healthDisplayBarSizeY], 
-										false
-									] call KH_fnc_parseNormalizedScreenTransforms
-								);
-								
-								_controlBackground ctrlSetPosition (
-									[
-										[KH_var_healthDisplayBarPositionX, KH_var_healthDisplayBarPositionY, KH_var_healthDisplayBarSizeX, KH_var_healthDisplayBarSizeY], 
-										false
-									] call KH_fnc_parseNormalizedScreenTransforms
-								);
+				if (_medical param [0, false]) then {
+					private _medicalControl = (uiNamespace getVariable ["KH_var_display", displayNull]) ctrlCreate ["RscStructuredText", -1];
+					private _medicalControlBackground = (uiNamespace getVariable ["KH_var_display", displayNull]) ctrlCreate ["RscText", -1];
+					_medicalControl ctrlShow false;
+					_medicalControlBackground ctrlShow false;
+					_medicalControlBackground ctrlSetBackgroundColor KH_var_uiBackgroundColor;
+					_medicalControlBackground ctrlCommit 0;
 
-								_control ctrlSetAngle [KH_var_healthDisplayBarAngle, 0, 0, true];
-								_controlBackground ctrlSetAngle [KH_var_healthDisplayBarAngle, 0, 0, true];
-								_control ctrlSetStructuredText (parseText "");
-								_control ctrlSetBackgroundColor KH_var_uiEnabledElementColor;
+					[
+						[_medicalControl, _medicalControlBackground],
+						{
+							params ["_control", "_controlBackground"];
+
+							if ((KH_var_healthDisplay isNotEqualTo "NONE") && !visibleMap) then {
+								if (KH_var_healthDisplayHideFullHealth && ((damage KH_var_playerUnit) isEqualTo 0)) then {
+									_control ctrlShow false;
+									_controlBackground ctrlShow false;
+								}
+								else {
+									_control ctrlShow true;
+									_controlBackground ctrlShow true;
+
+									if (KH_var_healthDisplay isEqualTo "BAR") then {
+										_control ctrlSetPosition (
+											[
+												[KH_var_healthDisplayBarPositionX, KH_var_healthDisplayBarPositionY, KH_var_healthDisplayBarSizeX * (1 - (damage KH_var_playerUnit)), KH_var_healthDisplayBarSizeY], 
+												false
+											] call KH_fnc_parseNormalizedScreenTransforms
+										);
+										
+										_controlBackground ctrlSetPosition (
+											[
+												[KH_var_healthDisplayBarPositionX, KH_var_healthDisplayBarPositionY, KH_var_healthDisplayBarSizeX, KH_var_healthDisplayBarSizeY], 
+												false
+											] call KH_fnc_parseNormalizedScreenTransforms
+										);
+
+										_control ctrlSetAngle [KH_var_healthDisplayBarAngle, 0, 0, true];
+										_controlBackground ctrlSetAngle [KH_var_healthDisplayBarAngle, 0, 0, true];
+										_control ctrlSetStructuredText (parseText "");
+										_control ctrlSetBackgroundColor KH_var_uiEnabledElementColor;
+									}
+									else {
+										private _percentageColor = KH_var_uiEnabledElementColor call BIS_fnc_colorRGBAtoHTML;
+
+										private _position = [
+											[KH_var_healthDisplayPercentagePositionX, KH_var_healthDisplayPercentagePositionY, KH_var_healthDisplayPercentageSizeX, KH_var_healthDisplayPercentageSizeY], 
+											false
+										] call KH_fnc_parseNormalizedScreenTransforms;
+
+										_control ctrlSetPosition _position;
+										_controlBackground ctrlSetPosition _position;
+										_control ctrlSetAngle [KH_var_healthDisplayPercentageAngle, 0, 0, true];
+										_controlBackground ctrlSetAngle [KH_var_healthDisplayPercentageAngle, 0, 0, true];
+										_control ctrlSetStructuredText (parseText (["<t align='center' valign='middle' size='", KH_var_healthDisplayPercentageTextSize, "' color='", _percentageColor, "' font='EtelkaMonospaceProBold'>", ((1 - (damage KH_var_playerUnit)) * 100) toFixed 0, "%</t>"] joinString ""));
+										_control ctrlSetBackgroundColor KH_var_uiBackgroundColor;
+									};
+
+									_control ctrlCommit 0;
+									_controlBackground ctrlCommit 0;
+								};
 							}
 							else {
-								private _percentageColor = KH_var_uiEnabledElementColor call BIS_fnc_colorRGBAtoHTML;
-
-								private _position = [
-									[KH_var_healthDisplayPercentagePositionX, KH_var_healthDisplayPercentagePositionY, KH_var_healthDisplayPercentageSizeX, KH_var_healthDisplayPercentageSizeY], 
-									false
-								] call KH_fnc_parseNormalizedScreenTransforms;
-
-								_control ctrlSetPosition _position;
-								_controlBackground ctrlSetPosition _position;
-								_control ctrlSetAngle [KH_var_healthDisplayPercentageAngle, 0, 0, true];
-								_controlBackground ctrlSetAngle [KH_var_healthDisplayPercentageAngle, 0, 0, true];
-								_control ctrlSetStructuredText (parseText (["<t align='center' valign='middle' size='", KH_var_healthDisplayPercentageTextSize, "' color='", _percentageColor, "' font='EtelkaMonospaceProBold'>", ((1 - (damage KH_var_playerUnit)) * 100) toFixed 0, "%</t>"] joinString ""));
-								_control ctrlSetBackgroundColor KH_var_uiBackgroundColor;
+								_control ctrlShow false;
+								_controlBackground ctrlShow false;
 							};
-
-							_control ctrlCommit 0;
-							_controlBackground ctrlCommit 0;
-						};
-					}
-					else {
-						_control ctrlShow false;
-						_controlBackground ctrlShow false;
-					};
+						},
+						true,
+						0,
+						false
+					] call KH_fnc_execute;
 				};
+
+				[_handlerId] call KH_fnc_removeHandler;
 			},
 			true,
 			0,
@@ -467,34 +474,44 @@ isNil {
 	if isServer then {
 		if !(isNil "KH_var_missionStartSuspension") then {
 			{
-				KH_var_missionStartSuspensionEntities = [];
+				KH_var_missionSuspensionEntities = [];
 				private _timeMultiplier = timeMultiplier;
 				setTimeMultiplier 0.1;
 
-				if (KH_var_missionStartSuspension isEqualTo 2) then {
-					{
-						if (simulationEnabled _x) then {
-							_x enableSimulationGlobal false;
-							(objectParent _x) enableSimulationGlobal false;
-							KH_var_missionStartSuspensionEntities insert [-1, [_x, objectParent _x], true];
-						};
-					} forEach (allUnits select {(owner _x) isNotEqualTo KH_var_adminMachine;});
-				}
-				else {
-					{
+				{
+					if !(_x in KH_var_missionSuspensionEntities) then {
+						_x setVariable ["KH_var_originalSimulationState", simulationEnabled _x];
 						_x enableSimulationGlobal false;
-						(objectParent _x) enableSimulationGlobal false;
-						KH_var_missionStartSuspensionEntities insert [-1, [_x, objectParent _x], true];
-					} forEach (KH_var_allPlayerUnits select {(owner _x) isNotEqualTo KH_var_adminMachine;});
-				};
+					};
 
-				[
+					private _parent = objectParent _x;
+					
+					if !(_parent in KH_var_missionSuspensionEntities) then {
+						_parent setVariable ["KH_var_originalSimulationState", simulationEnabled _parent];
+						_parent enableSimulationGlobal false;
+					};
+					
+					KH_var_missionSuspensionEntities insert [-1, [_x, _parent], true];
+				} forEach ([KH_var_allPlayerUnits, allUnits] select (KH_var_missionStartSuspension isEqualTo 2));
+
+				private _playerLoadHandler = [
 					"KH_eve_playerLoaded",
 					{
 						private _unit = param [3];
-						_x enableSimulationGlobal false;
-						(objectParent _x) enableSimulationGlobal false;
-						KH_var_missionStartSuspensionEntities pushBackUnique _unit;
+
+						if !(_unit in KH_var_missionSuspensionEntities) then {
+							_unit setVariable ["KH_var_originalSimulationState", simulationEnabled _unit];
+							_unit enableSimulationGlobal false;
+						};
+
+						private _parent = objectParent _unit;
+
+						if !(_parent in KH_var_missionSuspensionEntities) then {
+							_parent setVariable ["KH_var_originalSimulationState", simulationEnabled _parent];
+							_parent enableSimulationGlobal false;
+						};
+					
+						KH_var_missionSuspensionEntities insert [-1, [_unit, _parent], true];
 					}
 				] call CBA_fnc_addEventHandler;
 
@@ -518,13 +535,13 @@ isNil {
 				] call KH_fnc_execute;
 
 				[
-					[_timeMultiplier],
+					[_timeMultiplier, _playerLoadHandler],
 					{
-						params ["_timeMultiplier"];
+						params ["_timeMultiplier", "_playerLoadHandler"];
 
 						{
-							_x enableSimulationGlobal true;
-						} forEach KH_var_missionStartSuspensionEntities;
+                            _x enableSimulationGlobal (_x getVariable ["KH_var_originalSimulationState", true]);
+						} forEach KH_var_missionSuspensionEntities;
 
 						setTimeMultiplier _timeMultiplier;
 
@@ -542,6 +559,10 @@ isNil {
 							true,
 							false
 						] call KH_fnc_execute;
+
+						[_playerLoadHandler] call KH_fnc_removeHandler;
+						KH_var_missionSuspended = false;
+						publicVariable "KH_var_missionSuspended";
 					},
 					true,
 					{KH_var_playersLoaded;},

@@ -1,4 +1,8 @@
-params [["_namespace", missionNamespace, [true, objNull, grpNull, locationNull, displayNull, controlNull, missionNamespace]], ["_name", "", [""]], ["_target", true, [true, 0, "", [], {}, objNull, teamMemberNull, grpNull, sideUnknown, locationNull]]];
+params [
+    ["_namespace", missionNamespace, [true, objNull, grpNull, locationNull, displayNull, controlNull, missionNamespace]], 
+    ["_name", "", ["", []]], 
+    ["_target", true, [true, 0, "", [], {}, objNull, teamMemberNull, grpNull, sideUnknown, locationNull]]
+];
 
 if (_target isEqualType teamMemberNull) then {
     _target = agent _target;
@@ -30,7 +34,19 @@ if (missionNamespace isNil _variableHandlerId) then {
             [_namespace, _name],
             {
                 params ["_namespace", "_name"];
-                [_namespace getVariable _name];
+
+                if (_name isEqualType "") then {
+                    [_namespace getVariable _name];
+                }
+                else {
+                    private _values = [];
+
+                    {
+                        _values pushBack (_namespace getVariable _x);
+                    } forEach _name;
+
+                    _values;
+                };
             }
         ]
     ] call KH_fnc_execute;

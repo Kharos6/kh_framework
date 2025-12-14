@@ -28,7 +28,7 @@ class KH_ResourceToggleMissionSuspension
         class KH_ToggleSimulationTitle: RscText
         {
 			text = "Toggle Simulation";
-            tooltip = "By default, players and their vehicles have their simulation disabled; this option goes further and also disables all AI and their vehicles if true, also resuming it if they were previously suspended if true.";
+            tooltip = "Only applicable when suspension is being enabled, true disables the simulation of all AI units and their vehicles in addition to the default behaviour of disabling player simulation and input.";
             x = QUOTE(RSC_POS_X(40));
             y = QUOTE(RSC_POS_Y(40));
             w = QUOTE(RSC_POS_W(10));

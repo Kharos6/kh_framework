@@ -655,10 +655,13 @@ private _actionHandler = [
                     missionNamespace setVariable [_resultStartId, _resultStart];
                     missionNamespace setVariable [_resultProgressId, nil];
 
-                    if (_exclusive || (_duration isNotEqualTo 0)) then {
-                        missionNamespace setVariable [_actionSafetyId, getPlayerUID player, 2];
-                        missionNamespace setVariable [_allowedActivationId, false];
+                    if _exclusive then {
                         missionNamespace setVariable [_conditionShowId, false, KH_var_allMachines - [clientOwner]];
+
+                        if (_duration isNotEqualTo 0) then {
+                            missionNamespace setVariable [_actionSafetyId, getPlayerUID player, 2];
+                            missionNamespace setVariable [_allowedActivationId, false];
+                        };
                     };
 
                     if (_duration isEqualTo 0) then {
@@ -987,11 +990,6 @@ private _actionHandler = [
                                     deleteVehicle _interactionHelper;
                                     missionNamespace setVariable [_allowedActivationId, true];
                                     missionNamespace setVariable [_progressId, false];
-
-                                    if (_exclusive || (_duration isNotEqualTo 0)) then {
-                                        missionNamespace setVariable [_conditionShowId, true, true];
-                                    };
-
                                     private _resultProgress = missionNamespace getVariable _resultProgressId;
 
                                     if (_conditionFailure || !(_arguments call _conditionComplete) || (missionNamespace getVariable _cancelInterruptId)) then {
@@ -1000,6 +998,10 @@ private _actionHandler = [
                                         }
                                         else {
                                             missionNamespace setVariable [_resultInterruptId, _arguments call _functionInterrupt];
+                                        };
+
+                                        if _exclusive then {
+                                            missionNamespace setVariable [_conditionShowId, true, true];
                                         };
                                     }
                                     else {
@@ -1011,6 +1013,11 @@ private _actionHandler = [
                                             }
                                             else {
                                                 missionNamespace setVariable [_completionId, true];
+                                            };
+                                        }
+                                        else {
+                                            if _exclusive then {
+                                                missionNamespace setVariable [_conditionShowId, true, true];
                                             };
                                         };
                                     };

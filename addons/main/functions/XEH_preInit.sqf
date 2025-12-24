@@ -121,6 +121,23 @@
 ] call CBA_fnc_addSetting;
 
 [
+	"KH_var_incapacitationDamageSpillover",
+	"CHECKBOX",   
+	[
+		"Incapacitation Damage Spillover", 
+		"True makes it so that damage that would spill over the incapacitation threshold is recalculated with the Incapacitated Damage Multiplier, while false clamps the spilled over damage to the Incapacitation Threshold to prevent instant deaths from extreme damage."
+	], 
+	[
+        "KH Medical",
+        "Incapacitation"
+    ], 
+	true,
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
 	"KH_var_incapacitationDeathTime",
 	"TIME",   
 	[
@@ -210,7 +227,7 @@
 	"CHECKBOX",   
 	[
 		"Revive Medic Only", 
-		"True only allows medics to perform revives on other people."
+		"True only allows medics to revive incapacitated units."
 	], 
 	[
         "KH Medical",
@@ -244,7 +261,7 @@
 	"CHECKBOX",   
 	[
 		"Revive Require Medikit", 
-		"True makes the medikit required for reviving other people."
+		"True makes the medikit required to revive an incapacitated unit."
 	], 
 	[
         "KH Medical",
@@ -261,13 +278,13 @@
 	"SLIDER",   
 	[
 		"Revive Required First Aid Kits", 
-		"Amount of first aid kits required for reviving other people when no medikit is available and Revive Require Medikit is false."
+		"Amount of first aid kits required for reviving a person when no medikit is available and Revive Require Medikit is false."
 	], 
 	[
         "KH Medical",
         "Incapacitation"
     ], 
-	[0, 15, 3, 0],
+	[0, 15, 2, 0],
 	1,
 	{},
 	false
@@ -278,7 +295,7 @@
 	"CHECKBOX",   
 	[
 		"Self Revive", 
-		"True allows people to revive themselves."
+		"True allows a person to revive themselves."
 	], 
 	[
         "KH Medical",
@@ -346,7 +363,7 @@
 	"CHECKBOX",   
 	[
 		"Self Revive Require Medikit", 
-		"True makes the medikit required for people to revive themselves."
+		"True makes the medikit required for a person to revive themselves."
 	], 
 	[
         "KH Medical",
@@ -363,13 +380,13 @@
 	"SLIDER",   
 	[
 		"Self Revive Required First Aid Kits", 
-		"Amount of first aid kits required for a person to revive themselves when no medikit is available and Revive Require Medikit is false."
+		"Amount of first aid kits required for a person to revive themselves when no medikit is available and Self Revive Require Medikit is false."
 	], 
 	[
         "KH Medical",
         "Incapacitation"
     ], 
-	[0, 15, 6, 0],
+	[0, 15, 3, 0],
 	1,
 	{},
 	false
@@ -651,7 +668,7 @@
 	"KH_var_stabilizationMedicOnly",
 	"CHECKBOX",   
 	[
-		"Medic Only", 
+		"Stabilization Medic Only", 
 		"True only allows medics to stabilize incapacitated units."
 	], 
 	[
@@ -685,8 +702,8 @@
 	"KH_var_stabilizationRequireMedikit",
 	"CHECKBOX",   
 	[
-		"Require Medikit", 
-		"True makes it so that a medikit is required to stabilize a person."
+		"Stabilization Require Medikit", 
+		"True makes the medikit required to stabilize an incapacitated unit."
 	], 
 	[
         "KH Medical",
@@ -702,14 +719,116 @@
 	"KH_var_stabilizationRequiredFirstAidKits",
 	"SLIDER",   
 	[
-		"Required First Aid Kits", 
-		"Amount of first aid kits required for stabilizing a person when no medikit is available and Require Medikit is false."
+		"Stabilization Required First Aid Kits", 
+		"Amount of first aid kits required for stabilizing a person when no medikit is available and Stabilization Require Medikit is false."
 	], 
 	[
         "KH Medical",
         "Stabilization"
     ], 
 	[0, 15, 1, 0],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_selfStabilization",
+	"CHECKBOX",   
+	[
+		"Self Stabilization", 
+		"True allows a person to stabilize themselves."
+	], 
+	[
+        "KH Medical",
+        "Stabilization"
+    ], 
+	true,
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_selfStabilizationDuration",
+	"TIME",   
+	[
+		"Self Stabilization Duration", 
+		"Time it takes for a person to stabilize themselves."
+	], 
+	[
+        "KH Medical",
+        "Stabilization"
+    ], 
+	[0, 300, 20],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_selfStabilizationMedicOnly",
+	"CHECKBOX",   
+	[
+		"Self Stabilization Medic Only", 
+		"True only allows medics to stabilize themselves."
+	], 
+	[
+        "KH Medical",
+        "Stabilization"
+    ], 
+	false,
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_selfStabilizationDurationMedic",
+	"TIME",   
+	[
+		"Self Stabilization Duration Medic", 
+		"Time it takes for medics to stabilize themselves."
+	], 
+	[
+        "KH Medical",
+        "Stabilization"
+    ], 
+	[0, 300, 15],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_selfStabilizationRequireMedikit",
+	"CHECKBOX",   
+	[
+		"Self Stabilization Require Medikit", 
+		"True makes the medikit required for a person to stabilize themselves."
+	], 
+	[
+        "KH Medical",
+        "Stabilization"
+    ], 
+	false,
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_selfStabilizationRequiredFirstAidKits",
+	"SLIDER",   
+	[
+		"Self Stabilization Required First Aid Kits", 
+		"Amount of first aid kits required for a person to stabilize themselves when no medikit is available and Self Stabilization Require Medikit is false."
+	], 
+	[
+        "KH Medical",
+        "Stabilization"
+    ], 
+	[0, 15, 2, 0],
 	1,
 	{},
 	false
@@ -1411,23 +1530,6 @@
     ], 
 	false,
 	1,
-	{},
-	false
-] call CBA_fnc_addSetting;
-
-[
-	"KH_var_maximumReceivedDamage",
-	"SLIDER",   
-	[
-		"Maximum Received Damage", 
-		"Maximum amount of damage that be received from a single hit, applied before damage calculation. Set to 0 for no damage limitation."
-	], 
-	[
-        "KH Medical",
-        "General"
-    ], 
-	[0.000, 1.000, 0.000, 3],
-	0,
 	{},
 	false
 ] call CBA_fnc_addSetting;

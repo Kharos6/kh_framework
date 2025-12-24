@@ -303,6 +303,66 @@ isNil {
 								["KH_eve_playerKilled", [owner _unit, getPlayerUID _unit, getPlayerID _unit, _unit, _killer, _instigator]] call CBA_fnc_globalEvent;
 							}
 						] call KH_fnc_addEventHandler;
+
+						[
+							[false, true],
+							"Inventory",
+							[],
+							{
+								private _currentTarget = (call KH_fnc_getHeadViewTarget) select 4;
+
+								if !(missionNamespace isNil "KH_var_remoteInventoryHandler") then {
+									[KH_var_remoteInventoryHandler] call KH_fnc_removeHandler;
+									closeDialog 2;
+								};
+
+								_caller action ["Gear", _currentTarget];
+
+								missionNamespace setVariable [
+									"KH_var_remoteInventoryHandler",
+									[
+										[_caller, _currentTarget, false],
+										{
+											params ["_caller", "_currentTarget", "_inventoryOpened"];
+											private _inventoryDisplay = findDisplay 602;
+
+											if (isNull _inventoryDisplay) then {
+												if _inventoryOpened then {
+													[_handlerId] call KH_fnc_removeHandler;
+												};
+											}
+											else {
+												if !_inventoryOpened then {
+													_this set [2, true];
+												};
+
+												if ((_currentTarget distance _caller) > 6) then {
+													closeDialog 2;
+													[_handlerId] call KH_fnc_removeHandler;
+												};
+											};
+										},
+										true,
+										0,
+										false
+									] call KH_fnc_execute
+								];
+							},
+							{((call KH_fnc_getHeadViewTarget) select 4) isKindOf "Man";},
+							true,
+							true,
+							true,
+							false,
+							2,
+							false,
+							false,
+							true,
+							false,
+							true,
+							"",
+							"",
+							[false, true]
+						] call KH_fnc_addAction;
 					},
 					true,
 					{(!(isNull player) && (alive player));},

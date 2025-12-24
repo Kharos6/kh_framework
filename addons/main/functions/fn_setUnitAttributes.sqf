@@ -124,10 +124,14 @@ _savedAttributes params [
 		};
 
 		if !(isNull _group) then {
-			_unit joinSilent _group;
+			[_unit] joinSilent _group;
 		};
+		
+		_assignedTeam = toUpperANSI _assignedTeam;
 
-		_unit assignTeam _assignedTeam;
+		if ((_assignedTeam isEqualTo "MAIN") || (_assignedTeam isEqualTo "RED") || (_assignedTeam isEqualTo "GREEN") || (_assignedTeam isEqualTo "BLUE") || (_assignedTeam isEqualTo "YELLOW")) then {
+			_unit assignTeam _assignedTeam;
+		};
 	}, 
 	"SERVER", 
 	true, 

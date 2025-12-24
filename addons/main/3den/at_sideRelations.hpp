@@ -2,7 +2,7 @@ class KH_SideRelations: Title
 {
 	attributeLoad = "[_this, _value] call KH_fnc_loadControlAttributes;";
 	attributeSave = "[_this] call KH_fnc_saveControlAttributes;";
-	h = QUOTE(19 * CTRL_DEFAULT_H + 70 * pixelH);
+	h = QUOTE(18 * CTRL_DEFAULT_H + 80 * pixelH);
 	class Controls: Controls
 	{
 		class ToggleTitle: Title

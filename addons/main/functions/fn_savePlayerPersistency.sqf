@@ -17,7 +17,7 @@ private _currentEntriesVariableName = "khNamespace" readKhData [_persistencyVari
 		private _variableName = vehicleVarName _x;
 
 		if ((_variableName isNotEqualTo "") && !(_x getVariable ["KH_var_generatedVariableName", false])) then {
-			_currentEntriesVariableName set [_variableName, [_x] call KH_fnc_getUnitAttributes];
+			_currentEntriesVariableName set [_variableName, [[_x] call KH_fnc_getUnitAttributes, _scores]];
 		};
 	};
 } forEach _players;

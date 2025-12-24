@@ -526,12 +526,12 @@ private _actionHandler = [
         };
         
         if (_detection isEqualType []) then {
-            _detectionType = _detection param [0, "VIEW", [""]];
+            _detectionType = _detection param [0, "HEAD_VIEW", [""]];
             _initialDetection = _detection param [1, true, [true, ""]];
             _progressDetection = _detection param [2, false, [true, ""]];
         }
         else {
-            _detectionType = "VIEW";
+            _detectionType = "HEAD_VIEW";
             _initialDetection = _detection;
             _progressDetection = false;
         };
@@ -539,6 +539,10 @@ private _actionHandler = [
         _detectionType = switch _detectionType do {
             case "VIEW": {
                 "KH_fnc_getViewTarget";
+            }; 
+
+            case "HEAD_VIEW": {
+                "KH_fnc_getHeadViewTarget";
             }; 
             
             case "WEAPON": {

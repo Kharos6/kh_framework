@@ -646,7 +646,7 @@ class Mission
 											[_identifier, allGroups] call KH_fnc_saveGroupPersistency;\
 										};\
 										if _mission then {\
-											call KH_fnc_saveMissionPersistency;\
+											[_identifier] call KH_fnc_saveMissionPersistency;\
 										};\
 										[_handlerId] call KH_fnc_removeHandler;\
 									}\
@@ -716,19 +716,19 @@ class Mission
 							{
 								name = "NONE";
 								tooltip = "Prevents this function from executing.";
-								value = "0";
+								value = 0;
 							};
 							class KH_Players
 							{
 								name = "PLAYERS";
 								tooltip = "Disables player input and displays a suspension message to them until all players are loaded.";
-								value = "1";
+								value = 1;
 							};
 							class KH_All
 							{
 								name = "ALL";
 								tooltip = "Disables player input, displays a suspension message to them, and disables simulation on all units until all players are loaded.";
-								value = "2";
+								value = 2;
 							};
 						};
 					};
@@ -774,14 +774,36 @@ class Mission
 						displayName = "Recover Disconnected Players";
 						tooltip = "Recovers the unit attributes of players who reconnect after disconnecting.";
 						property = "KH_RecoverDisconnectedPlayers";
-						control = "Checkbox";
+						control = "Combo";
 						expression = 
 						"\
-							if (_value && !is3DEN && isServer) then {\
-								[true] call KH_fnc_recoverDisconnectedPlayers;\
+							if ((_value isNotEqualTo 0) && !is3DEN && isServer) then {\
+								[true, _value isEqualTo 2] call KH_fnc_recoverDisconnectedPlayers;\
 							};\
 						";
-						defaultValue = "false";
+						defaultValue = "0";
+						typeName = "NUMBER";
+						class Values
+						{
+							class KH_None
+							{
+								name = "NONE";
+								tooltip = "Prevents this function from executing.";
+								value = 0;
+							};
+							class KH_Recover
+							{
+								name = "RECOVER";
+								tooltip = "Recovers disconnected players.";
+								value = 1;
+							};
+							class KH_RecoverDeleteUnit
+							{
+								name = "RECOVER AND DELETE UNIT";
+								tooltip = "Recovers disconnected players and deletes their unit.";
+								value = 2;
+							};
+						};
 					};
 				};
 			};
@@ -845,12 +867,7 @@ class Mission
 						expression = 
 						"\
 							if ((_value isNotEqualTo 0) && !is3DEN && isServer) then {\
-								KH_var_postInitExecutions pushBack [\
-									[true, _value],\
-									{\
-										call KH_fnc_limitViewDistance;\
-									}\
-								];\
+								KH_var_postInitExecutions pushBack [[true, _value], KH_fnc_limitViewDistance];\
 							};\
 						";
 						defaultValue = "0";

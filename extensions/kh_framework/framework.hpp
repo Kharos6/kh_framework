@@ -652,19 +652,14 @@ public:
     }
     
     void shutdown(bool process_terminating = false) {
-        // Always disarm first
         InterlockedExchange(&armed_, 0);
+        InterlockedExchange(&shutdown_thread_, 1);
         
         if (process_terminating) {
-            // During process termination, don't touch the thread.
-            // Windows will kill all threads. Attempting to wait or close
-            // handles can deadlock or crash.
             return;
         }
         
-        // Normal DLL unload
-        InterlockedExchange(&shutdown_thread_, 1);
-        
+        // Normal DLL unload - wait and cleanup
         if (thread_handle_ != nullptr) {
             WaitForSingleObject(thread_handle_, 1000);
             CloseHandle(thread_handle_);

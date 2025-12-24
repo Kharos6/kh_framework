@@ -36,7 +36,7 @@ _savedAttributes params [
 setTimeMultiplier _timeMultiplier;
 setDate _date;
 0 setFog _fogParams;
-setWind _wind;
+setWind [_wind select 0, _wind select 1, true];
 0 setWindDir _windDir;
 0 setGusts _gusts;
 0 setOvercast _overcast;

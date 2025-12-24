@@ -935,51 +935,58 @@ sqf_table["call"] = [](sol::object code_obj, sol::optional<sol::object> args) ->
     }
     
     std::string code_or_func_str = code_obj.as<std::string>();
+    std::string key;
+
+    if (!args) {
+        key = code_or_func_str;
+    } else {
+        key = code_or_func_str + "_";
+    }                   
     
     if (code_or_func_str.find(' ') == std::string::npos && code_or_func_str.find(';') == std::string::npos) {
         if (!args) {
-            auto cache_it = g_sqf_function_cache.find(code_or_func_str);
+            auto cache_it = g_sqf_function_cache.find(key);
             
             if (cache_it != g_sqf_function_cache.end()) {
                 compiled = cache_it->second;
             } else {
                 compiled = sqf::compile("setReturnValue (call " + code_or_func_str + ");");
-                g_sqf_function_cache[code_or_func_str] = compiled;
+                g_sqf_function_cache[key] = compiled;
             }
             
             return GV_TO_LUA(raw_call_sqf_native(compiled));
         } else {
-            auto cache_it = g_sqf_function_cache.find(code_or_func_str);
+            auto cache_it = g_sqf_function_cache.find(key);
             
             if (cache_it != g_sqf_function_cache.end()) {
                 compiled = cache_it->second;
             } else {
                 compiled = sqf::compile("setReturnValue (getCallArguments call " + code_or_func_str + ");");
-                g_sqf_function_cache[code_or_func_str] = compiled;
+                g_sqf_function_cache[key] = compiled;
             }
             
             return GV_TO_LUA(raw_call_sqf_args_native(compiled, LUA_TO_GAME_VALUE(*args)));
         }
     } else {
         if (!args) {
-            auto cache_it = g_sqf_function_cache.find(code_or_func_str);
+            auto cache_it = g_sqf_function_cache.find(key);
             
             if (cache_it != g_sqf_function_cache.end()) {
                 compiled = cache_it->second;
             } else {
                 compiled = sqf::compile("setReturnValue (call {" + code_or_func_str + "});");
-                g_sqf_function_cache[code_or_func_str] = compiled;
+                g_sqf_function_cache[key] = compiled;
             }
             
             return GV_TO_LUA(raw_call_sqf_native(compiled));
         } else {
-            auto cache_it = g_sqf_function_cache.find(code_or_func_str);
+            auto cache_it = g_sqf_function_cache.find(key);
             
             if (cache_it != g_sqf_function_cache.end()) {
                 compiled = cache_it->second;
             } else {
                 compiled = sqf::compile("setReturnValue (getCallArguments call {" + code_or_func_str + "});");
-                g_sqf_function_cache[code_or_func_str] = compiled;
+                g_sqf_function_cache[key] = compiled;
             }
             
             return GV_TO_LUA(raw_call_sqf_args_native(compiled, LUA_TO_GAME_VALUE(*args)));

@@ -31,7 +31,6 @@ KH_var_drawUi3dExecutionStackDeletions = [];
 KH_var_postInitExecutions = [];
 KH_var_preInitLuaExecutions = [];
 KH_var_postInitLuaExecutions = [];
-KH_var_loadInitLuaExecutions = [];
 KH_var_mouseTargetCheckFrame = 0;
 KH_var_viewTargetCheckFrame = 0;
 KH_var_weaponTargetCheckFrame = 0;
@@ -127,14 +126,6 @@ KH_var_playerKilledEventHandler = [];
 			if ((getNumber (_x >> "postInit")) isEqualTo 1) then {
 				if !(_name in KH_var_postInitLuaExecutions) then {
         			KH_var_postInitLuaExecutions pushBack _name;
-                };
-			};
-        };
-
-		if (isNumber (_x >> "loadInit")) then {
-			if ((getNumber (_x >> "loadInit")) isEqualTo 1) then {
-				if !(_name in KH_var_loadInitLuaExecutions) then {
-        			KH_var_loadInitLuaExecutions pushBack _name;
                 };
 			};
         };
@@ -282,7 +273,7 @@ addMissionEventHandler [
 					}
 					else {
 						_x set [4, systemTime joinString ""];
-						_totalDelta luaExecute "local totalDelta = ... return (sqf.systemTime() - totalDelta)";
+						_totalDelta luaExecute "local totalDelta = ... return (toNumber(sqf.joinString(sqf.systemTime())) - totalDelta)";
 					};
 
 					_x set [7, _args call _function];
@@ -297,7 +288,7 @@ addMissionEventHandler [
 					}
 					else {
 						_x set [4, systemTime joinString ""];
-						_totalDelta luaExecute "local totalDelta = ... return (sqf.systemTime() - totalDelta)";
+						_totalDelta luaExecute "local totalDelta = ... return (toNumber(sqf.joinString(sqf.systemTime())) - totalDelta)";
 					};
 
 					_x set [7, _args call _function];
@@ -412,9 +403,6 @@ if isServer then {
 	KH_var_missionSuspended = false;
 	publicVariable "KH_var_missionSuspended";
 	KH_var_jipHandlers = createHashMap;
-	KH_var_allEntities = entities [[], ["Animal"], true, false];
-	KH_var_allLivingEntities = KH_var_allEntities select {alive _x;};
-	KH_var_allDeadEntities = KH_var_allEntities select {!(alive _x);};
 	KH_var_headlessClientTransfers = [];
 	KH_var_entityArrayBuilderArrays = [];
 	KH_var_groupArrayBuilderArrays = [];
@@ -1048,31 +1036,37 @@ if isServer then {
 		"EntityCreated", 
 		{
 			params ["_entity"];
-			KH_var_allEntities pushBackUnique _entity;
-
-			if (alive _entity) then {
-				KH_var_allLivingEntities pushBackUnique _entity;
-			};
 
 			{
-				_x params ["_type", "_function"];
+				_x params ["_typeInclude", "_typeExclude", "_function"];
+				private _continue = true;
 
-				if (_entity isKindOf _type) then {
-					[_entity] call _function;
+				{
+					if (_entity isKindOf _x) then {
+						_continue = false;
+						break;
+					};
+				} forEach _typeExclude;
+				
+				if !_continue then {
+					continue;
 				};
+
+				_continue = false;
+
+				{
+					if (_entity isKindOf _x) then {
+						_continue = true;
+						break;
+					};
+				} forEach _typeInclude;
+
+				if !_continue then {
+					continue;
+				};
+
+				[_entity] call _function;
 			} forEach KH_var_entityInitializations;
-		}
-	];
-
-	addMissionEventHandler [
-		"EntityKilled", 
-		{
-			params ["_entity", "_killer", "_instigator"];
-			KH_var_allDeadEntities pushBackUnique _entity;
-
-			if (_entity in KH_var_allLivingEntities) then {
-				KH_var_allLivingEntities deleteAt (KH_var_allLivingEntities find _entity);
-			};
 		}
 	];
 
@@ -1099,10 +1093,6 @@ if isServer then {
 					missionNamespace setVariable [_x, _entityArray, true];
 				};
 			} forEach KH_var_entityArrayBuilderArrays;
-
-			if (_oldEntity in KH_var_allLivingEntities) then {
-				_oldEntity deleteAt (KH_var_allLivingEntities find _oldEntity);
-			};
 		}
 	];
 
@@ -1116,10 +1106,6 @@ if isServer then {
 					publicVariable _x;
 				};
 			} forEach ["KH_var_allPlayerUnits", "KH_var_jipPlayerUnits", "KH_var_initialPlayerUnits", "KH_var_allHeadlessUnits", "KH_var_allPlayerControlledUnits"];
-
-			{
-				[missionNamespace getVariable _x, [_entity]] call KH_fnc_deleteArrayElements;
-			} forEach ["KH_var_allEntities", "KH_var_allLivingEntities", "KH_var_allDeadEntities"];
 		}
 	];
 

@@ -2,7 +2,7 @@ class KH_Persistency: Title
 {
 	attributeLoad = "(_this controlsGroupCtrl 103) lbAdd 'NONE'; (_this controlsGroupCtrl 103) lbAdd 'SAVED'; (_this controlsGroupCtrl 103) lbAdd 'INITIAL'; (_this controlsGroupCtrl 103) lbAdd 'DEATH'; [_this, _value] call KH_fnc_loadControlAttributes;";
 	attributeSave = "[_this] call KH_fnc_saveControlAttributes;";
-	h = QUOTE(9 * CTRL_DEFAULT_H + 70 * pixelH);
+	h = QUOTE(8 * CTRL_DEFAULT_H + 90 * pixelH);
 	class Controls: Controls
 	{
 		class ToggleTitle: Title

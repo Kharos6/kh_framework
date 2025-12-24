@@ -1,5 +1,6 @@
-params [["_state", true, [true]]];
+params [["_state", true, [true]], ["_deleteUnit", false, [true]]];
 KH_var_recoverDisconnectedPlayers = _state;
+KH_var_recoverDisconnectedPlayersDeleteUnit = _deleteUnit;
 
 if _state then {	
 	if (isNil "KH_var_recoverDisconnectedPlayersSet") then {
@@ -10,6 +11,7 @@ if _state then {
 			{
 				if KH_var_recoverDisconnectedPlayers then {	
 					private _uid = param [1];
+					private _unit = param [3];
 					private _attributes = param [4];
 					
 					if (_attributes isNotEqualTo []) then {
@@ -28,6 +30,25 @@ if _state then {
 								};
 							}
 						] call KH_fnc_addEventHandler;
+					};
+
+					if KH_var_recoverDisconnectedPlayersDeleteUnit then {
+						[
+							[_unit],	
+							{
+								params ["_unit"];
+
+								if !(isNull _unit) then {
+									deleteVehicle _unit;
+								}
+								else {
+									[_handlerId] call KH_fnc_removeHandler;
+								};
+							},
+							true,
+							0,
+							false
+						] call KH_fnc_execute;
 					};
 				};
 			}

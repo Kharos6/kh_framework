@@ -1,8 +1,8 @@
 class KH_MedicalSettings: Title
 {
-	attributeLoad = "(_this controlsGroupCtrl 105) lbAdd 'GLOBAL'; (_this controlsGroupCtrl 105) lbAdd 'ENABLE'; (_this controlsGroupCtrl 105) lbAdd 'DISABLE'; [_this controlsGroupCtrl 103, _this controlsGroupCtrl 104, ''] call BIS_fnc_initSliderValue; [_this controlsGroupCtrl 103, _this controlsGroupCtrl 104, '', _value select 3] call BIS_fnc_initSliderValue; [_this, _value] call KH_fnc_loadControlAttributes;";
+	attributeLoad = "(_this controlsGroupCtrl 105) lbAdd 'GLOBAL'; (_this controlsGroupCtrl 105) lbAdd 'ENABLE'; (_this controlsGroupCtrl 105) lbAdd 'DISABLE'; [_this controlsGroupCtrl 103, _this controlsGroupCtrl 104, 'x'] call BIS_fnc_initSliderValue; [_this controlsGroupCtrl 103, _this controlsGroupCtrl 104, 'x', _value select 3] call BIS_fnc_initSliderValue; [_this, _value] call KH_fnc_loadControlAttributes;";
 	attributeSave = "[_this] call KH_fnc_saveControlAttributes;";
-	h = QUOTE(6 * CTRL_DEFAULT_H + 70 * pixelH);
+	h = QUOTE(5 * CTRL_DEFAULT_H + 75 * pixelH);
 	class Controls: Controls
 	{
 		class ToggleTitle: Title
@@ -23,13 +23,13 @@ class KH_MedicalSettings: Title
 		{
 			text = "KH Medical Handling";
 			tooltip = "False disables the KH Medical system on this unit, even if the global KH medical system is enabled.";
-			y = QUOTE(2 * CTRL_DEFAULT_H + CTRL_DEFAULT_Y);
+			y = QUOTE(2 * CTRL_DEFAULT_H + 5 * CTRL_DEFAULT_Y);
 		};
 		class KHMedicalHandling: ctrlCheckbox
 		{
 			idc = 101;
 			x = QUOTE(CTRL_DEFAULT_X);
-			y = QUOTE(2 * CTRL_DEFAULT_H + CTRL_DEFAULT_Y);
+			y = QUOTE(2 * CTRL_DEFAULT_H + 5 * CTRL_DEFAULT_Y);
 			w = QUOTE(5 * GRID_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
@@ -37,13 +37,13 @@ class KH_MedicalSettings: Title
 		{
 			text = "Plot Armor";
 			tooltip = "True prevents the unit from ever dying; mortal wounds will only result in unconsciousness.";
-			y = QUOTE(3 * CTRL_DEFAULT_H + CTRL_DEFAULT_Y);
+			y = QUOTE(3 * CTRL_DEFAULT_H + 10 * CTRL_DEFAULT_Y);
 		};
 		class PlotArmor: ctrlCheckbox
 		{
 			idc = 102;
 			x = QUOTE(CTRL_DEFAULT_X);
-			y = QUOTE(3 * CTRL_DEFAULT_H + CTRL_DEFAULT_Y);
+			y = QUOTE(3 * CTRL_DEFAULT_H + 10 * CTRL_DEFAULT_Y);
 			w = QUOTE(5 * GRID_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};

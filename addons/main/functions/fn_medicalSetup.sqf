@@ -32,10 +32,12 @@ if KH_var_medical then {
             [_unit, "KH_var_stabilized", false, true, true] call KH_fnc_setRespawnVariable;
             [_unit, "KH_var_withstanding", false, true, true] call KH_fnc_setRespawnVariable;
             [_unit, "KH_var_incapacitated", false, true, true] call KH_fnc_setRespawnVariable;
+            [_unit, "KH_var_beingTreated", false, true, true] call KH_fnc_setRespawnVariable;
             [_unit, "KH_var_beingRevived", false, true, true] call KH_fnc_setRespawnVariable;
             [_unit, "KH_var_beingStabilized", false, true, true] call KH_fnc_setRespawnVariable;
-            [_unit, "KH_var_beingTreated", false, true, true] call KH_fnc_setRespawnVariable;
-            [_unit, "KH_var_isTreating", false, true, true] call KH_fnc_setRespawnVariable;
+            [_unit, "KH_var_treating", false, true, true] call KH_fnc_setRespawnVariable;
+            [_unit, "KH_var_reviving", false, true, true] call KH_fnc_setRespawnVariable;
+            [_unit, "KH_var_stabilizing", false, true, true] call KH_fnc_setRespawnVariable;
 
             [
                 ["ENTITY", _unit, "PERSISTENT"],
@@ -64,12 +66,12 @@ if KH_var_medical then {
                         _unit getHitPointDamage _hitPoint;
                     };
 
-                    if (_projectile isEqualTo "") then {
-                        _damage = _damage * KH_var_absoluteImpactDamageMultiplier;
+                    if (KH_var_maximumReceivedDamage isNotEqualTo 0) then {
+                        _damage = _damage min KH_var_maximumReceivedDamage;
                     };
 
-                    if (_damage isEqualTo 0) exitWith {
-                        _currentDamage;
+                    if (_projectile isEqualTo "") then {
+                        _damage = _damage * KH_var_absoluteImpactDamageMultiplier;
                     };
 
                     private _hitPointType = switch _hitPoint do {
@@ -403,15 +405,9 @@ if KH_var_medical then {
                                                 };														
                                             },
                                             true,
-                                            [
-                                                {((damage player) < KH_var_incapacitationThreshold) || !(alive player)},
-                                                false,
-                                                0,
-                                                [[1, false], false, false, false],
-                                                {},
-                                                false,
-                                                true
-                                            ],
+                                            {
+                                                (!(player getVariable ["KH_var_incapacitated", false]) || !(alive player));
+                                            },
                                             false
                                         ] call KH_fnc_execute;
                                     };
@@ -424,11 +420,12 @@ if KH_var_medical then {
                                             if (_unit getVariable ["KH_var_incapacitated", false]) then {
                                                 if !(_unit getVariable ["KH_var_withstanding", false]) then {
                                                     if ((isNull (attachedTo _unit)) && (isNull (objectParent _unit)) && !("unconscious" in (animationState _unit)) && !("ainj" in (animationState _unit))) then {
-                                                        _unit playActionNow "Unconscious";
+                                                        [_unit, [["MOVE_SWITCH_GLOBAL", ["Unconscious"]]], false, false, false] call KH_fnc_setAnimation;
                                                     };
                                                 };
                                             }
                                             else {
+                                                [_unit, [["MOVE_SWITCH_GLOBAL", ["AmovPpneMstpSnonWnonDnon"]]], false, false, false] call KH_fnc_setAnimation;
                                                 [_handlerId] call KH_fnc_removeHandler;
                                             };									
                                         },
@@ -449,6 +446,7 @@ if KH_var_medical then {
                                         [
                                             {
                                                 _target setVariable ["KH_var_beingRevived", true, true];
+                                                _caller setVariable ["KH_var_reviving", true, true];
 
                                                 if (isNull (objectParent _caller)) then {
                                                     if (_caller isEqualTo _target) then {
@@ -486,11 +484,19 @@ if KH_var_medical then {
                                             },
                                             {
                                                 _target setVariable ["KH_var_beingRevived", false, true];
-                                                _caller playActionNow "Default";
+                                                _caller setVariable ["KH_var_reviving", false, true];
+
+                                                if (!(_caller getVariable ["KH_var_incapacitated", false]) && (_caller isNotEqualTo _target)) then {
+                                                    _caller switchAction "MedicStop";
+                                                };
                                             },
                                             {
                                                 _target setVariable ["KH_var_beingRevived", false, true];
-                                                _caller playActionNow "Default";
+                                                _caller setVariable ["KH_var_reviving", false, true];
+
+                                                if (!(_caller getVariable ["KH_var_incapacitated", false]) && (_caller isNotEqualTo _target)) then {
+                                                    _caller switchAction "MedicStop";
+                                                };
                                             },
                                             {
                                                 private _damageOffset = [
@@ -500,6 +506,10 @@ if KH_var_medical then {
 
                                                 _target setDamage (([(damage _target) - _damageOffset, 0] select (((damage _target) - _damageOffset) <= 0.25)) max 0);
                                                 private _damages = getAllHitPointsDamage _target;
+
+                                                if ((damage _target) isEqualTo 0) then {
+                                                    _damageOffset = 1;
+                                                };
 
                                                 {
                                                     _target setHitPointDamage [_x, (((_damages select 2) select _forEachIndex) - _damageOffset) max 0];
@@ -531,7 +541,8 @@ if KH_var_medical then {
                                                 _target setVariable ["KH_var_stabilized", false, true];
                                                 _target setVariable ["KH_var_beingRevived", false, true];
                                                 _target setVariable ["KH_var_beingStabilized", false, true];
-                                                _caller playActionNow "Default";
+                                                _caller setVariable ["KH_var_reviving", false, true];
+                                                _caller switchAction "MedicStop";
                                             },
                                             {
                                                 params ["_unit"];
@@ -548,7 +559,7 @@ if KH_var_medical then {
                                                 ((_unit getVariable ["KH_var_incapacitated", false]) && (alive _unit));
                                             },
                                             {
-                                                if (_target getVariable ["KH_var_beingStabilized", false]) exitWith {
+                                                if ((_target getVariable ["KH_var_beingStabilized", false]) || (_caller getVariable ["KH_var_stabilizing", false]) || (_caller getVariable ["KH_var_treating", false])) exitWith {
                                                     false;
                                                 };
 
@@ -628,21 +639,21 @@ if KH_var_medical then {
                                         ],
                                         [_unit],
                                         {
-                                            _target moveInAny (((_target nearEntities ["AllVehicles", 10]) select {!(_x isKindOf "Man");}) select 0);
+                                            [_target, [((_target nearEntities ["AllVehicles", 10]) select {!(_x isKindOf "Man");}) select 0, "CARGO", 0], true] call KH_fnc_setUnitVehicleSlot;
                                         },
                                         [
                                             {
                                                 params ["_unit"];
-                                                (((_unit getVariable ["KH_var_incapacitated", false])) && (isNull (objectParent _unit)) && (alive _unit));
+                                                (((_unit getVariable ["KH_var_incapacitated", false])) && (alive _unit));
                                             },
                                             {
-                                                ((((_target nearEntities ["AllVehicles", 10]) select {!(_x isKindOf "Man");}) isNotEqualTo []) && (_target isNotEqualTo _caller));
+                                                ((((_target nearEntities ["AllVehicles", 10]) select {!(_x isKindOf "Man");}) isNotEqualTo []) && (isNull (objectParent _target)) && (_target isNotEqualTo _caller));
                                             },
                                             {},
                                             {},
                                             {}
                                         ],
-                                        false,
+                                        true,
                                         true,
                                         "PLAYERS",
                                         [3, "BAR"],
@@ -670,6 +681,7 @@ if KH_var_medical then {
                                             [
                                                 {
                                                     _target setVariable ["KH_var_beingStabilized", true, true];
+                                                    _caller setVariable ["KH_var_stabilizing", true, true];
 
                                                     if (isNull (objectParent _caller)) then {
                                                         _caller playActionNow "MedicOther";
@@ -687,11 +699,19 @@ if KH_var_medical then {
                                                 },
                                                 {
                                                     _target setVariable ["KH_var_beingStabilized", false, true];
-                                                    _caller playActionNow "Default";
+                                                    _caller setVariable ["KH_var_stabilizing", false, true];
+
+                                                    if !(_caller getVariable ["KH_var_incapacitated", false]) then {
+                                                        _caller switchAction "MedicStop";
+                                                    };
                                                 },
                                                 {
                                                     _target setVariable ["KH_var_beingStabilized", false, true];
-                                                    _caller playActionNow "Default";
+                                                    _caller setVariable ["KH_var_stabilizing", false, true];
+
+                                                    if !(_caller getVariable ["KH_var_incapacitated", false]) then {
+                                                        _caller switchAction "MedicStop";
+                                                    };
                                                 },
                                                 {
                                                     if !("Medikit" in (items _caller)) then {
@@ -702,7 +722,8 @@ if KH_var_medical then {
                                                     
                                                     _target setVariable ["KH_var_beingStabilized", false, true];
                                                     _target setVariable ["KH_var_stabilized", true, true];
-                                                    _caller playActionNow "Default";
+                                                    _caller setVariable ["KH_var_stabilizing", false, true];
+                                                    _caller switchAction "MedicStop";
                                                 },
                                                 {}
                                             ],
@@ -712,7 +733,7 @@ if KH_var_medical then {
                                                     ((_unit getVariable ["KH_var_incapacitated", false]) && (alive _unit));
                                                 },
                                                 {
-                                                    if (_target getVariable ["KH_var_beingRevived", false]) exitWith {
+                                                    if ((_target getVariable ["KH_var_beingRevived", false]) || (_caller getVariable ["KH_var_reviving", false]) || (_caller getVariable ["KH_var_treating", false])) exitWith {
                                                         false;
                                                     };
 
@@ -773,10 +794,10 @@ if KH_var_medical then {
                         {
                             params ["_injured", "_healer", "_isMedic", "_atVehicle"];
                             
-                            if (!(_injured getVariable ["KH_var_beingTreated", false]) && !(_healer getVariable ["KH_var_isTreating", false])) then {
+                            if (!(_injured getVariable ["KH_var_beingTreated", false]) && !(_healer getVariable ["KH_var_treating", false]) && !(_healer getVariable ["KH_var_reviving", false]) && !(_healer getVariable ["KH_var_stabilizing", false])) then {
                                 private _isSelfHeal = _injured isEqualTo _healer;
                                 _injured setVariable ["KH_var_beingTreated", true, true];
-                                _healer setVariable ["KH_var_isTreating", true, true];
+                                _healer setVariable ["KH_var_treating", true, true];
 
                                 [
                                     [_injured, _healer, _isMedic, _atVehicle, _isSelfHeal, damage _injured],
@@ -821,6 +842,14 @@ if KH_var_medical then {
                                                     };
                                                 };
 
+                                                _injured setVariable ["KH_var_currentProcessedHeal", _damageOffset];
+
+                                                {
+                                                    private _currentProcessedHeal = _injured getVariable "KH_var_currentProcessedHeal";
+                                                    _injured setVariable ["KH_var_currentProcessedHeal", call _x];
+                                                } forEach (_injured getVariable ["KH_var_allHealHandlers", []]);
+
+                                                _damageOffset = _injured getVariable "KH_var_currentProcessedHeal";
                                                 _injured setDamage (([_oldDamage - _damageOffset, 0] select ((_oldDamage - _damageOffset) <= 0.25)) max 0);
                                                 private _damages = getAllHitPointsDamage _injured;
 
@@ -835,7 +864,7 @@ if KH_var_medical then {
                                         };
 
                                         _injured setVariable ["KH_var_beingTreated", false, true];
-                                        _healer setVariable ["KH_var_isTreating", false, true];
+                                        _healer setVariable ["KH_var_treating", false, true];
                                     },
                                     true,
                                     {
@@ -865,7 +894,22 @@ if KH_var_medical then {
                 [],
                 {
                     params ["_unit"];
-                    _unit setCaptive false;
+
+                    if KH_var_incapacitatedCaptives then {
+                        _unit setCaptive false;
+                    };
+
+                    if (!(isNil "KH_var_withstandingEffectRadial") && !(isNil "KH_var_withstandingEffectChromatic") && !(isNil "KH_var_withstandingEffectWet")) then {
+                        ppEffectDestroy [KH_var_withstandingEffectRadial, KH_var_withstandingEffectChromatic, KH_var_withstandingEffectWet];
+                        KH_var_withstandingEffectRadial = nil;
+                        KH_var_withstandingEffectChromatic = nil;
+                        KH_var_withstandingEffectWet = nil;
+                    };
+                    
+                    if !(isNil "KH_var_incapacitationFade") then {
+                        ppEffectDestroy KH_var_incapacitationFade;
+                        KH_var_incapacitationFade = nil;
+                    };	
                 }
             ] call KH_fnc_addEventHandler;
         },

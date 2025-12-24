@@ -29,6 +29,7 @@ class CfgFunctions
 			class dynamic3dAudio {};
 			class dynamicDisguise {};
 			class endMission {};
+			class engineeringSetup {};
 			class entityInit {};
 			class entitySpawner {};
 			class equipableObject {};
@@ -40,6 +41,7 @@ class CfgFunctions
 			class getEntityByIdentifier {};
 			class getEntityVariableName {};
 			class getGroupAttributes {};
+			class getHeadViewTarget {};
 			class getMissionAttributes {};
 			class getMouseTarget {};
 			class getNormalizedScreenTransforms {};
@@ -108,6 +110,7 @@ class CfgFunctions
 			class saveUnitPersistency {};
 			class screenToWorld {};
 			class serializeFunction {};
+			class setAnimation {};
 			class setCameraTexture {};
 			class setCurators {};
 			class setDestinationVelocity {};
@@ -124,6 +127,7 @@ class CfgFunctions
 			class setSideRelations {};
 			class setTerminalText {};
 			class setUnitAttributes {};
+			class setUnitRotationLock {};
 			class setUnitVehicleSlot {};
 			class setVehicleLoadout {};
 			class setVideoTexture {};

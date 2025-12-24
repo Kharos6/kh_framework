@@ -27,7 +27,7 @@ _savedAttributes params [
 	"_variables"
 ];
 
-_group setGroupIdGlobal _groupId;
+_group setGroupIdGlobal [_groupId];
 
 [
 	[

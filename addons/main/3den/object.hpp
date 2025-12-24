@@ -348,16 +348,45 @@ class Object
 					"\
 						_value params ['_toggle', '_init'];\
 						if (_toggle && !is3DEN) then {\
-							KH_var_postInitExecutions pushBack [\
-								[_this, compile _init],\
-								{\
-									call KH_fnc_convertToAgent;\
-								}\
-							];\
+							KH_var_postInitExecutions pushBack [[_this, compile _init], KH_fnc_convertToAgent];\
 						};\
 					";
 					defaultValue = "[false, '']";
 					condition = "objectControllable";
+				};
+			};
+		};
+		class KH_EngineeringSettings
+		{
+			displayName = "KH Engineering Settings";
+			collapsed = 1;
+			class Attributes
+			{
+				class KH_EngineeringSettingsSubcategory
+				{
+					description = "Settings for the KH Engineering system specific to this vehicle.";
+					data = "AttributeSystemSubcategory";
+					control = "KH_SubcategoryNoHeader1";
+				};
+				class KH_EngineeringSettings 
+				{
+					property = "KH_EngineeringSettings";
+					control = "KH_EngineeringSettings";
+					expression = 
+					"\
+						_value params ['_toggle', '_engineeringHandling', '_recoverable', '_damageMultiplier', '_damageMultiplierDummy', '_totalDamageMultiplier', '_totalDamageMultiplierDummy', '_impactDamageMultiplier', '_impactDamageMultiplierDummy', '_hitPointDamageMultipliers'];\
+						if (_toggle && _engineeringHandling && !is3DEN) then {\
+							_hitPointDamageMultipliers = if (_hitPointDamageMultipliers isEqualTo '') then {\
+								[];\
+							}\
+							else {\
+								createHashMapFromArray (parseSimpleArray _hitPointDamageMultipliers);\
+							};\
+							KH_var_postInitExecutions pushBack [[_this, true, _damageMultiplier, _totalDamageMultiplier, _impactDamageMultiplier, _hitPointDamageMultipliers, _recoverable], KH_fnc_engineeringSetup];\
+						};\
+					";
+					defaultValue = "[false, true, false, 1, '1.00x', 1, '1.00x', 1, '1.00x', '']";
+					condition = "objectVehicle";
 				};
 			};
 		};
@@ -379,7 +408,7 @@ class Object
 					control = "KH_MedicalSettings";
 					expression = 
 					"\
-						_value params ['_toggle', '_medicalHandling', '_globalDamageMultipliers', '_plotArmor', '_damageMultiplier', '_incapacitation'];\
+						_value params ['_toggle', '_medicalHandling', '_plotArmor', '_damageMultiplier', '_damageMultiplierDummy', '_incapacitation'];\
 						if (_toggle && !is3DEN) then {\
 							_this setVariable ['KH_var_medicalHandling', _medicalHandling, true];\
 							_this setVariable ['KH_var_plotArmor', _plotArmor, true];\
@@ -389,7 +418,7 @@ class Object
 							};\
 						};\
 					";
-					defaultValue = "[false, true, false, 1, '1.00', 0]";
+					defaultValue = "[false, true, false, 1, '1.00x', 0]";
 					condition = "objectControllable";
 				};
 			};

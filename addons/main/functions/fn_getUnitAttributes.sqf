@@ -37,7 +37,7 @@ params [["_unit", objNull, [objNull]]];
 			{
 				private _weapon = _x select 2;
 				private _muzzle = _x select 3;
-				_zeroing pushBack [_weapon, _muzzle, _unit currentZeroing [_weapon, _muzzle]];
+				_zeroing pushBack [_weapon, _muzzle, (_unit currentZeroing [_weapon, _muzzle]) select 1];
 			} forEach (_unit weaponsInfo ["", false]);
 
 			_zeroing;			

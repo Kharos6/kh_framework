@@ -54,7 +54,7 @@ switch _type do {
                         true;
                     }
                     else {
-                        [false, true] select ((_end select 0) isEqualType objNull);
+                        (_end select 0) isEqualType objNull;
                     };
                 };
             };
@@ -162,7 +162,7 @@ switch _type do {
                         true;
                     }
                     else {
-                        [false, true] select ((_end select 0) isEqualType objNull);
+                        (_end select 0) isEqualType objNull;
                     };
                 };
             };
@@ -267,7 +267,7 @@ switch _type do {
                 true;
             }
             else {
-                [false, true] select ((_position select 0) isEqualType objNull);
+                (_position select 0) isEqualType objNull;
             };
 
             if _typeObject then {

@@ -2,7 +2,7 @@ class KH_CameraSequence: Title
 {
 	attributeLoad = "[_this, _value] call KH_fnc_loadControlAttributes;";
 	attributeSave = "[_this] call KH_fnc_saveControlAttributes;";
-	h = QUOTE(11 * CTRL_DEFAULT_H + 70 * pixelH);
+	h = QUOTE(10 * CTRL_DEFAULT_H + 95 * pixelH);
 	class Controls: Controls
 	{
 		class ToggleTitle: Title

@@ -2,7 +2,7 @@ class KH_EnvironmentAmbiance: Title
 {
 	attributeLoad = "[_this controlsGroupCtrl 103, _this controlsGroupCtrl 104, '%'] call BIS_fnc_initSliderValue; [_this controlsGroupCtrl 103, _this controlsGroupCtrl 104, '%', _value select 3] call BIS_fnc_initSliderValue; [_this, _value] call KH_fnc_loadControlAttributes;";
 	attributeSave = "[_this] call KH_fnc_saveControlAttributes;";
-	h = QUOTE(5 * CTRL_DEFAULT_H + 70 * pixelH);
+	h = QUOTE(4 * CTRL_DEFAULT_H + 70 * pixelH);
 	class Controls: Controls
 	{
 		class ToggleTitle: Title

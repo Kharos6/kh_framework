@@ -144,7 +144,7 @@ if _state then {
 		{
 			KH_var_diagnosticsInformation resize 0;
 			KH_var_diagnosticsCurrentMarkers resize 0;
-			KH_var_diagnosticsValidatePositionHelper hideObject ([false, true] select (isNull curatorCamera));
+			KH_var_diagnosticsValidatePositionHelper hideObject (isNull curatorCamera);
 
 			{
 				private _framerate = _x getVariable ["KH_var_diagnosticsFramerate", 1];

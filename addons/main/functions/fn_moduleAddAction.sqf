@@ -17,7 +17,7 @@ KH_var_postInitExecutions pushBack [
                     private _detectionShow = _logic getVariable ["KH_ModuleAddActionDetectionShow", "true"];
                     private _detectionProgress = _logic getVariable ["KH_ModuleAddActionDetectionProgress", "false"];
                     private _parent = _logic getVariable ["KH_ModuleAddActionParent", ""];
-                    private _useAllPlayers = [false, true] select (_units isEqualTo []);
+                    private _useAllPlayers = _units isEqualTo [];
 
                     private _arguments = [
                         objNull,

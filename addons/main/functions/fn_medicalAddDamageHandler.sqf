@@ -7,22 +7,24 @@ if (isNil "_damageHandlers") then {
     _unit setVariable ["KH_var_allDamageHandlers", []];
 };
 
-_damageHandlers pushBack [
-    "if (missionNamespace getVariable '", _damageHandlerId, "') then {
-        call ", _function, ";
-    }
-    else {
-        [
-            [_unit, _forEachIndex],
-            {
-                params ['_unit', '_index'];
-                (_unit getVariable 'KH_var_allDamageHandlers') deleteAt _index;
-            },
-            true,
-            '-1',
-            false
-        ] call KH_fnc_execute;
-    };"
-] joinString "";
+_damageHandlers pushBack (
+    compile ([
+        "if (missionNamespace getVariable '", _damageHandlerId, "') then {
+            call ", _function, ";
+        }
+        else {
+            [
+                [_unit, _forEachIndex],
+                {
+                    params ['_unit', '_index'];
+                    (_unit getVariable 'KH_var_allDamageHandlers') deleteAt _index;
+                },
+                true,
+                '-1',
+                false
+            ] call KH_fnc_execute;
+        };"
+    ] joinString "")
+);
 
 [_unit, _damageHandlerId, false];

@@ -114,7 +114,7 @@
         "KH Medical",
         "Incapacitation"
     ], 
-	[0, 1.00, 0.90, 2],
+	[0.00, 1.00, 0.90, 2],
 	1,
 	{},
 	false
@@ -420,7 +420,7 @@
         "KH Medical",
         "Healing"
     ], 
-	[0, 1.00, 0.50, 2],
+	[0.00, 1.00, 0.50, 2],
 	1,
 	{},
 	false
@@ -437,7 +437,7 @@
         "KH Medical",
         "Healing"
     ], 
-	[0, 1.00, 0.50, 2],
+	[0.00, 1.00, 0.50, 2],
 	1,
 	{},
 	false
@@ -454,7 +454,7 @@
         "KH Medical",
         "Healing"
     ], 
-	[0, 1.00, 1.00, 2],
+	[0.00, 1.00, 1.00, 2],
 	1,
 	{},
 	false
@@ -471,7 +471,7 @@
         "KH Medical",
         "Healing"
     ], 
-	[0, 1.00, 1.00, 2],
+	[0.00, 1.00, 1.00, 2],
 	1,
 	{},
 	false
@@ -488,7 +488,7 @@
         "KH Medical",
         "Healing"
     ], 
-	[0, 1.00, 0.25, 2],
+	[0.00, 1.00, 0.25, 2],
 	1,
 	{},
 	false
@@ -505,7 +505,7 @@
         "KH Medical",
         "Healing"
     ], 
-	[0, 1.00, 0.25, 2],
+	[0.00, 1.00, 0.25, 2],
 	1,
 	{},
 	false
@@ -522,7 +522,7 @@
         "KH Medical",
         "Healing"
     ], 
-	[0, 1.00, 0.50, 2],
+	[0.00, 1.00, 0.50, 2],
 	1,
 	{},
 	false
@@ -539,7 +539,7 @@
         "KH Medical",
         "Healing"
     ], 
-	[0, 1.00, 0.50, 2],
+	[0.00, 1.00, 0.50, 2],
 	1,
 	{},
 	false
@@ -556,7 +556,7 @@
         "KH Medical",
         "Healing"
     ], 
-	[0, 1.00, 0.50, 2],
+	[0.00, 1.00, 0.50, 2],
 	1,
 	{},
 	false
@@ -566,14 +566,14 @@
 	"KH_var_reviveHealMedic",
 	"SLIDER",   
 	[
-		"Revive Heal medic",
+		"Revive Heal Medic",
 		"Amount of health that is recovered by medics after reviving. 1.00 is 100% health, 0.00 is 0% health. If the amount of health results in the remaining damage being above the incapacitation threshold, the next hit on the revived unit will immediately incapacitate them."
 	], 
 	[
         "KH Medical",
         "Healing"
     ], 
-	[0, 1.00, 1.00, 2],
+	[0.00, 1.00, 1.00, 2],
 	1,
 	{},
 	false
@@ -590,7 +590,7 @@
         "KH Medical",
         "Healing"
     ], 
-	[0, 1.00, 0.50, 2],
+	[0.00, 1.00, 0.50, 2],
 	1,
 	{},
 	false
@@ -600,14 +600,14 @@
 	"KH_var_selfReviveHealMedic",
 	"SLIDER",   
 	[
-		"Self Revive Heal medic",
+		"Self Revive Heal Medic",
 		"Amount of health that is recovered by medics after they revive themselves. 1.00 is 100% health, 0.00 is 0% health. If the amount of health results in the remaining damage being above the incapacitation threshold, the next hit on the revived unit will immediately incapacitate them."
 	], 
 	[
         "KH Medical",
         "Healing"
     ], 
-	[0, 1.00, 1.00, 2],
+	[0.00, 1.00, 1.00, 2],
 	1,
 	{},
 	false
@@ -845,7 +845,7 @@
         "KH Medical",
         "Damage Multipliers"
     ], 
-	[0.00, 10.000, 1.000, 3],
+	[0.000, 10.000, 1.000, 3],
 	1,
 	{},
 	false
@@ -862,7 +862,7 @@
         "KH Medical",
         "Damage Multipliers"
     ], 
-	[0.00, 10.000, 1.000, 3],
+	[0.000, 10.000, 1.000, 3],
 	1,
 	{},
 	false
@@ -879,7 +879,7 @@
         "KH Medical",
         "Damage Multipliers"
     ], 
-	[0.00, 10.000, 1.000, 3],
+	[0.000, 10.000, 1.000, 3],
 	1,
 	{},
 	false
@@ -896,7 +896,7 @@
         "KH Medical",
         "Damage Multipliers"
     ], 
-	[0.00, 10.000, 1.000, 3],
+	[0.000, 10.000, 1.000, 3],
 	1,
 	{},
 	false
@@ -913,7 +913,7 @@
         "KH Medical",
         "Damage Multipliers"
     ], 
-	[0.00, 10.000, 1.000, 3],
+	[0.000, 10.000, 1.000, 3],
 	1,
 	{},
 	false
@@ -930,7 +930,7 @@
         "KH Medical",
         "Damage Multipliers"
     ], 
-	[0.00, 10.000, 1.000, 3],
+	[0.000, 10.000, 1.000, 3],
 	1,
 	{},
 	false
@@ -947,7 +947,7 @@
         "KH Medical",
         "Damage Multipliers"
     ], 
-	[0.00, 10.000, 1.000, 3],
+	[0.000, 10.000, 1.000, 3],
 	1,
 	{},
 	false
@@ -964,7 +964,7 @@
         "KH Medical",
         "Damage Multipliers"
     ], 
-	[0.00, 10.000, 1.000, 3],
+	[0.000, 10.000, 1.000, 3],
 	1,
 	{},
 	false
@@ -981,7 +981,7 @@
         "KH Medical",
         "Damage Multipliers"
     ], 
-	[0.00, 10.000, 1.000, 3],
+	[0.000, 10.000, 1.000, 3],
 	1,
 	{},
 	false
@@ -998,7 +998,7 @@
         "KH Medical",
         "Damage Multipliers"
     ], 
-	[0.00, 10.000, 1.000, 3],
+	[0.000, 10.000, 1.000, 3],
 	1,
 	{},
 	false
@@ -1015,7 +1015,7 @@
         "KH Medical",
         "Damage Multipliers"
     ], 
-	[0.00, 10.000, 1.000, 3],
+	[0.000, 10.000, 1.000, 3],
 	1,
 	{},
 	false
@@ -1032,7 +1032,7 @@
         "KH Medical",
         "Damage Multipliers"
     ], 
-	[0.00, 10.000, 0.500, 3],
+	[0.000, 10.000, 0.500, 3],
 	1,
 	{},
 	false
@@ -1049,7 +1049,7 @@
         "KH Medical",
         "Damage Multipliers"
     ], 
-	[0.00, 10.000, 2.000, 3],
+	[0.000, 10.000, 2.000, 3],
 	1,
 	{},
 	false
@@ -1411,6 +1411,23 @@
     ], 
 	false,
 	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_maximumReceivedDamage",
+	"SLIDER",   
+	[
+		"Maximum Received Damage", 
+		"Maximum amount of damage that be received from a single hit, applied before damage calculation. Set to 0 for no damage limitation."
+	], 
+	[
+        "KH Medical",
+        "General"
+    ], 
+	[0.000, 1.000, 0.000, 3],
+	0,
 	{},
 	false
 ] call CBA_fnc_addSetting;

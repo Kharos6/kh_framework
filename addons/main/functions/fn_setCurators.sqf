@@ -1,6 +1,38 @@
 params [["_curators", [], [[]]], ["_modules", allCurators, [[]]], ["_hide", true, [true]], ["_disableDamage", true, [true]]];
-KH_var_curators = _curators;
-KH_var_curatorModules = _modules;
+KH_var_curators = createHashMap;
+KH_var_curatorModules = [];
+
+{
+	private _module = _modules param [_forEachIndex];
+
+	if (isNil "_module") then {
+		_module = (createGroup [sideLogic, true]) createUnit ["ModuleCurator_F", [0, 0, 0], [], 0, "CAN_COLLIDE"];
+		_module setVariable ["Addons", 3, true];
+		_module setVariable ["BIS_fnc_initModules_disableAutoActivation", false];
+		_module setCuratorCoef ["Place", 0];
+		_module setCuratorCoef ["Edit", 0];
+		_module setCuratorCoef ["Delete", 0];
+		_module setCuratorCoef ["Destroy", 0];
+		_module setCuratorCoef ["Group", 0];
+		_module setCuratorCoef ["Synchronize", 0];
+	};
+
+	if (isNull _module) then {
+		_module = (createGroup [sideLogic, true]) createUnit ["ModuleCurator_F", [0, 0, 0], [], 0, "CAN_COLLIDE"];
+		_module setVariable ["Addons", 3, true];
+		_module setVariable ["BIS_fnc_initModules_disableAutoActivation", false];
+		_module setCuratorCoef ["Place", 0];
+		_module setCuratorCoef ["Edit", 0];
+		_module setCuratorCoef ["Delete", 0];
+		_module setCuratorCoef ["Destroy", 0];
+		_module setCuratorCoef ["Group", 0];
+		_module setCuratorCoef ["Synchronize", 0];
+	};
+
+	KH_var_curators set [_x, _module];
+	KH_var_curatorModules pushBack _module;
+} forEach _curators;
+
 KH_var_curatorsHidden = _hide;
 KH_var_curatorsDamageDisabled = _disableDamage;
 
@@ -10,13 +42,11 @@ if (isNil "KH_var_curatorsSet") then {
 	{
 		private _player = _x;
 		private _uid = getPlayerUID _player;
+		private _module = KH_var_curators get _uid;
 
-		if (_uid in KH_var_curators) then {
-			private _module = KH_var_curatorModules param [KH_var_curators find _uid];
-
-			if (isNil "_module") then {
+		if !(isNil "_module") then {
+			if (isNull _module) then {
 				_module = (createGroup [sideLogic, true]) createUnit ["ModuleCurator_F", [0, 0, 0], [], 0, "CAN_COLLIDE"];
-				_module setVariable ["owner", _uid, true];
 				_module setVariable ["Addons", 3, true];
 				_module setVariable ["BIS_fnc_initModules_disableAutoActivation", false];
 				_module setCuratorCoef ["Place", 0];
@@ -25,9 +55,9 @@ if (isNil "KH_var_curatorsSet") then {
 				_module setCuratorCoef ["Destroy", 0];
 				_module setCuratorCoef ["Group", 0];
 				_module setCuratorCoef ["Synchronize", 0];
-				KH_var_curatorModules set [KH_var_curators find _uid, _module];
+				KH_var_curators set [_uid, _module];
 			};
-			
+
 			if !(isNull (getAssignedCuratorUnit _module)) then {
 				unassignCurator _module;
 			};
@@ -89,14 +119,12 @@ if (isNil "KH_var_curatorsSet") then {
 			_x,
 			{
 				private _player = param [3];
-				private _uid = getPlayerUID _player;
+				private _uid = param [1];
+				private _module = KH_var_curators get _uid;
 
-				if (_uid in KH_var_curators) then {
-					private _module = KH_var_curatorModules param [KH_var_curators find _uid];
-
-					if (isNil "_module") then {
+				if !(isNil "_module") then {
+					if (isNull _module) then {
 						_module = (createGroup [sideLogic, true]) createUnit ["ModuleCurator_F", [0, 0, 0], [], 0, "CAN_COLLIDE"];
-						_module setVariable ["owner", _uid, true];
 						_module setVariable ["Addons", 3, true];
 						_module setVariable ["BIS_fnc_initModules_disableAutoActivation", false];
 						_module setCuratorCoef ["Place", 0];
@@ -105,7 +133,7 @@ if (isNil "KH_var_curatorsSet") then {
 						_module setCuratorCoef ["Destroy", 0];
 						_module setCuratorCoef ["Group", 0];
 						_module setCuratorCoef ["Synchronize", 0];
-						KH_var_curatorModules set [KH_var_curators find _uid, _module];
+						KH_var_curators set [_uid, _module];
 					};
 
 					if !(isNull (getAssignedCuratorUnit _module)) then {
@@ -169,10 +197,10 @@ if (isNil "KH_var_curatorsSet") then {
 		"KH_eve_playerDisconnected", 
 		{
 			private _uid = param [1];
-			private _uidIndex = KH_var_curators find _uid;
+			private _module = KH_var_curators get _uid;
 
-			if (_uidIndex isNotEqualTo -1) then {
-				unassignCurator (KH_var_curatorModules select _uidIndex);
+			if !(isNil "_module") then {
+				unassignCurator _module;
 			};
 		}
 	] call CBA_fnc_addEventHandler;

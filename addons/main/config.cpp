@@ -10,6 +10,7 @@
 #include "\x\kh\addons\main\cfgKhinitFunctions.hpp"
 #include "\x\kh\addons\main\cfgLuaFunctions.hpp"
 #include "\x\kh\addons\main\cfgMoves.hpp"
+#include "\x\kh\addons\main\cfgNonAiVehicles.hpp"
 #include "\x\kh\addons\main\cfgPatches.hpp"
 #include "\x\kh\addons\main\cfgPostProcessTemplates.hpp"
 #include "\x\kh\addons\main\cfgRemoteExec.hpp"

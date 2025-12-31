@@ -7,6 +7,7 @@ class CfgPatches
 		units[] = {
 			"KH_ZeusModuleArma",
 			"KH_ZeusModuleBreakDisguise",
+			"KH_ZeusModuleDisembarkUnits",
 			"KH_ZeusModuleEndMission",
 			"KH_ZeusModuleHeal",
 			"KH_ZeusModuleHealAllPlayers",

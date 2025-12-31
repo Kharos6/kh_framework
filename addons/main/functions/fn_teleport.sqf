@@ -8,52 +8,44 @@ params [
 	["_init", {}, [{}]]
 ];
 
+if (_freefallHeight isNotEqualTo 0) then {
+	_entity setUnitFreefallHeight _freefallHeight;
+};
+
 if (_position isEqualType objNull) then {
 	_position = getPosATL _position;
 };
 
 if (_rotation isEqualType objNull) then {
 	_rotation = [vectorDir _rotation, vectorUp _rotation];
-};
-
-if (_freefallHeight isNotEqualTo 0) then {
-	[
-		[_entity, _freefallHeight],
-		{
-			params ["_entity", "_freefallHeight"];
-			_entity setUnitFreefallHeight _freefallHeight;
-		},
-		_entity,
-		true,
-		false
-	] call KH_fnc_execute;
-};
-
-if (_transition isNotEqualTo 0) then {
-	_transition = _transition / 2;
-
-	if (isPlayer _entity) then {
-		[
-			["RscText", "", [_transition, true, _transition], [0, 0, 0, 1], [0, 0, 100, 100], false, [0, 0, 0]],
-			"KH_fnc_draw2d",
-			_entity,
-			true,
-			false
-		] call KH_fnc_execute;
+}
+else {
+	if (_rotation isEqualTypeAll 0) then {
+		eulerToVector _rotation;
 	};
+};
 
-	[
-		[_entity, _position, _rotation, _eject, _init],
-		{
-			params ["_entity", "_position", "_rotation", "_eject", "_init"];
+private _useTransition = if (_transition isNotEqualTo 0) then {
+	_transition = _transition / 2;
+	["RscText", "", [_transition, true, _transition], [0, 0, 0, 1], [0, 0, 100, 100], false, [0, 0, 0]] call KH_fnc_draw2d;
+	true;
+}
+else {
+	false;
+};
 
-			if _eject then {
-				moveOut _entity;
-				
-				[
-					[_entity, _position, _rotation, _init],
-					{
-						params ["_entity", "_position", "_rotation", "_init"];
+[
+	[_entity, _position, _rotation, _eject, _init],
+	{
+		params ["_entity", "_position", "_rotation", "_eject", "_init"];
+
+		if _eject then {
+			[
+				[_entity, _position, _rotation, _init],
+				{
+					params ["_entity", "_position", "_rotation", "_init"];
+
+					if (isNull (objectParent _entity)) then {
 						_entity setPosATL _position;
 
 						if (_rotation isEqualTypeAll []) then {
@@ -64,82 +56,33 @@ if (_transition isNotEqualTo 0) then {
 						};
 
 						[_entity] call _init;
-					},
-					true,
-					{
-						params ["_entity"];
-						(isNull (objectParent _entity));
-					},
-					false
-				] call KH_fnc_execute;
+						[_handlerId] call KH_fnc_removeHandler;
+					}
+					else {
+						moveOut _entity;
+					};
+				},
+				true,
+				0,
+				false
+			] call KH_fnc_execute;
+		}
+		else {
+			_entity setPosATL _position;
+
+			if (_rotation isEqualTypeAll []) then {
+				_entity setVectorDirAndUp _rotation;
 			}
 			else {
-				_entity setPosATL _position;
-
-				if (_rotation isEqualTypeAll []) then {
-					_entity setVectorDirAndUp _rotation;
-				}
-				else {
-					_entity setRotationEuler _rotation;
-				};
-
-				[_entity] call _init;
+				_entity setRotationEuler _rotation;
 			};
-		},
-		_entity,
-		str _transition,
-		false
-	] call KH_fnc_execute;
-}
-else {
-	if _eject then {
-		moveOut _entity;
-		
-		[
-			[_entity, _position, _rotation, _init],
-			{
-				params ["_entity", "_position", "_rotation", "_init"];
-				_entity setPosATL _position;
 
-				if (_rotation isEqualTypeAll []) then {
-					_entity setVectorDirAndUp _rotation;
-				}
-				else {
-					_entity setRotationEuler _rotation;
-				};
-
-				[_entity] call _init;
-			},
-			_entity,
-			{
-				params ["_entity"];
-				(isNull (objectParent _entity));
-			},
-			false
-		] call KH_fnc_execute;
-	}
-	else {
-		_entity setPosATL _position;
-
-		[
-			[_entity, _rotation], 
-			{
-				params ["_entity", "_rotation"];
-				
-				if (_rotation isEqualTypeAll []) then {
-					_entity setVectorDirAndUp _rotation;
-				}
-				else {
-					_entity setRotationEuler _rotation;
-				};
-			}, 
-			_entity,
-			true, 
-			false
-		] call KH_fnc_execute;
-
-		[[_entity], _init, _entity, true, false] call KH_fnc_execute;
-	};
-};
+			[_entity] call _init;
+		};
+	},
+	true,
+	[true, str _transition] select _useTransition,
+	false
+] call KH_fnc_execute;
 
 nil;

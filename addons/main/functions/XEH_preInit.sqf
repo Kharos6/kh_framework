@@ -69,6 +69,102 @@
 ] call CBA_fnc_addSetting;
 
 [
+	"KH_var_allowRemoteInventories",
+	"CHECKBOX",   
+	[
+		"Allow Remote Inventories", 
+		"True allows players to open the inventory of other units."
+	], 
+	"KH Miscellaneous", 
+	false,
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_anchorPlayersToMovingObjects",
+	"CHECKBOX",   
+	[
+		"Anchor Players To Moving Objects", 
+		"True allows players to walk on moving objects such as vehicles or physics objects. Volatile."
+	], 
+	"KH Miscellaneous", 
+	false,
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_fuelSiphoning",
+	"CHECKBOX",   
+	[
+		"Enable", 
+		"True allows players to siphon fuel from one vehicle to another."
+	], 
+	[
+		"KH Engineering",
+		"Fuel Siphoning"
+	],
+	false,
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_fuelSiphoningRequireToolkit",
+	"CHECKBOX",   
+	[
+		"Require Toolkit", 
+		"True makes it so that the toolkit is required in order to use the fuel siphoning system."
+	], 
+	[
+		"KH Engineering",
+		"Fuel Siphoning"
+	],
+	true,
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_fuelSiphoningEngineerOnly",
+	"CHECKBOX",   
+	[
+		"Engineer Only", 
+		"True makes it so that only engineers can siphon fuel."
+	], 
+	[
+		"KH Engineering",
+		"Fuel Siphoning"
+	],
+	false,
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_fuelSiphoningSpeed",
+	"SLIDER",   
+	[
+		"Speed", 
+		"The amount of fuel siphoned per second. 1.000 is 100% fuel, 0.000 is 0% fuel."
+	], 
+	[
+        "KH Engineering",
+        "Fuel Siphoning"
+    ], 
+	[0.000, 1.000, 0.010, 3],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
 	"KH_var_medical",
 	"CHECKBOX",   
 	[

@@ -13,6 +13,7 @@ class CfgFunctions
 			class assignIdentificationCard {};
 			class assignParachute {};
 			class assignTerminal {};
+			class attach {};
 			class breakDisguise {};
 			class callSerializedFunction {};
 			class cameraSequence {};		
@@ -70,7 +71,6 @@ class CfgFunctions
 			class loadUnitPersistency {};
 			class log {};
 			class luaRecompile {};
-			class medicalAddDamageHandler {};
 			class medicalSetup {};
 			class moduleAddAction {};
 			class moduleAiInstanceSetup {};
@@ -141,6 +141,7 @@ class CfgFunctions
 			class visualTrigger {};
 			class zeusModuleArma {};
 			class zeusModuleBreakDisguise {};
+			class zeusModuleDisembarkUnits {};
 			class zeusModuleEndMission {};
 			class zeusModuleHeal {};
 			class zeusModuleHealAllPlayers {};

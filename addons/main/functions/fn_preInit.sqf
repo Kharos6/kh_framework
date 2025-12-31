@@ -272,8 +272,8 @@ addMissionEventHandler [
 						diag_deltaTime;
 					}
 					else {
-						_x set [4, systemTime joinString ""];
-						_totalDelta luaExecute "local totalDelta = ... return (toNumber(sqf.joinString(sqf.systemTime())) - totalDelta)";
+						_x set [4, getEpoch];
+						getEpochDelta _totalDelta;
 					};
 
 					_x set [7, _args call _function];
@@ -287,8 +287,8 @@ addMissionEventHandler [
 						diag_deltaTime;
 					}
 					else {
-						_x set [4, systemTime joinString ""];
-						_totalDelta luaExecute "local totalDelta = ... return (toNumber(sqf.joinString(sqf.systemTime())) - totalDelta)";
+						_x set [4, getEpoch];
+						getEpochDelta _totalDelta;
 					};
 
 					_x set [7, _args call _function];
@@ -1242,6 +1242,8 @@ if hasInterface then {
 	KH_var_playerSwitchStack = [];
 	KH_var_playerControlledUnitChangeStack = [];
 	KH_var_playerMissionEndStack = [];
+	KH_var_playerMovingObjectParent = objNull;
+	KH_var_playerMovingObjectHandler = [];
 
 	{
 		private _basePath = (getText (_x >> "path")) regexReplace ["(/)", "\\"];
@@ -1463,6 +1465,75 @@ if hasInterface then {
 			player setVariable ["KH_var_playerAspectRatio", getResolution select 4, 2];
 			player setVariable ["KH_var_playerCameraPosition", positionCameraToWorld [0, 0, 0], 2];
 			player setVariable ["KH_var_playerCameraDirection", getCameraViewDirection player, 2];
+
+			if KH_var_anchorPlayersToMovingObjects then {
+				private _position = getPosASLVisual player;
+				private _aimPosition = AGLToASL (unitAimPositionVisual player);
+				_aimPosition = [_position select 0, _position select 1, _aimPosition select 2];
+
+				private _groundIntersection = [
+					_aimPosition,
+					_position vectorAdd [0, 0, -0.1],
+					[player, objectParent player, attachedTo player] + (attachedObjects player),
+					true,
+					1,
+					"ROADWAY",
+					"GEOM",
+					true,
+					[]
+				] call KH_fnc_raycast;
+
+				if (_groundIntersection isEqualTo []) then {
+					_groundIntersection = [
+						_aimPosition,
+						_position vectorAdd [0, 0, -0.1],
+						[player, objectParent player, attachedTo player] + (attachedObjects player),
+						true,
+						1,
+						"GEOM",
+						"FIRE",
+						true,
+						[]
+					] call KH_fnc_raycast;
+				};
+
+				if (_groundIntersection isNotEqualTo []) then {
+					private _entity = (_groundIntersection select 0) select 3;
+
+					if (isNull _entity) exitWith {
+						if ((missionNamespace getVariable ["KH_var_playerMovingObjectHandler", []]) isNotEqualTo []) then {
+							[missionNamespace getVariable ["KH_var_playerMovingObjectHandler", []]] call KH_fnc_removeHandler;
+							missionNamespace setVariable ["KH_var_playerMovingObjectHandler", []];
+							KH_var_playerMovingObjectParent = objNull;
+						};
+					};
+
+					if (((vectorMagnitude (velocity _entity)) >= 0.01) || ((vectorMagnitude (velocity (attachedTo _entity))) >= 0.01)) then {
+						if (_entity isNotEqualTo KH_var_playerMovingObjectParent) then {
+							KH_var_playerMovingObjectParent = _entity;
+							missionNamespace setVariable ["KH_var_playerMovingObjectHandler", [player, _entity, true, [vectorDirVisual player, vectorUpVisual player], 1, "", true] call KH_fnc_attach];
+						};
+					}
+					else {
+						[missionNamespace getVariable ["KH_var_playerMovingObjectHandler", []]] call KH_fnc_removeHandler;
+						missionNamespace setVariable ["KH_var_playerMovingObjectHandler", []];
+						KH_var_playerMovingObjectParent = objNull;
+					};
+				}
+				else {
+					if ((missionNamespace getVariable ["KH_var_playerMovingObjectHandler", []]) isNotEqualTo []) then {
+						[missionNamespace getVariable ["KH_var_playerMovingObjectHandler", []]] call KH_fnc_removeHandler;
+						missionNamespace setVariable ["KH_var_playerMovingObjectHandler", []];
+						KH_var_playerMovingObjectParent = objNull;
+					};
+				};
+			}
+			else {
+				if ((missionNamespace getVariable ["KH_var_playerMovingObjectHandler", []]) isNotEqualTo []) then {
+					[missionNamespace getVariable ["KH_var_playerMovingObjectHandler", []]] call KH_fnc_removeHandler;
+					missionNamespace setVariable ["KH_var_playerMovingObjectHandler", []];
+				};
+			};
 		},
 		true,
 		0,

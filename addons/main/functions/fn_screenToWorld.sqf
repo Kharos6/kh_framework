@@ -9,7 +9,7 @@ if (isNull _camera) then {
     if ([(_currentVectorDirection select 0) toFixed 0, (_currentVectorDirection select 1) toFixed 0, (_currentVectorDirection select 2) toFixed 0] 
         isNotEqualTo 
         [(_screenToWorldDirection select 0) toFixed 0, (_screenToWorldDirection select 1) toFixed 0, (_screenToWorldDirection select 2) toFixed 0]
-        ) then {
+       ) then {
         _cameraPosition vectorAdd (_screenToWorldDirection vectorMultiply viewDistance);
     }
     else {

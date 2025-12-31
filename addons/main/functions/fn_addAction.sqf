@@ -1132,7 +1132,7 @@ private _actionHandler = [
                                             (((missionNamespace getVariable '", _argumentsReferenceId, "') call (missionNamespace getVariable '", _conditionShowReferenceId, "')) && (missionNamespace getVariable '", _conditionShowId, "'));
                                         }
                                         else {
-                                            private _viewTarget = call ", _detectionType, ";
+                                            private _viewTarget = [] call ", _detectionType, ";
 
                                             if (((_viewTarget select 1) <= ", _distance, ") && ((_viewTarget select 4) isEqualTo _target)) then {
                                                 private _caller = _this;
@@ -1230,13 +1230,13 @@ private _actionHandler = [
                                             (((missionNamespace getVariable '", _argumentsReferenceId, "') call (missionNamespace getVariable '", _conditionShowReferenceId, "')) && (missionNamespace getVariable '", _conditionShowId, "'));
                                         }
                                         else {
-                                            private _viewTarget = call ", _detectionType, ";
+                                            private _viewTarget = [] call ", _detectionType, ";
 
                                             if (
                                                 ((_viewTarget select 1) <= ", _distance, ") && 
                                                 (((_viewTarget select 5) param [0, '']) isEqualTo '", _initialDetection, "') && 
                                                 ((_viewTarget select 4) isEqualTo _target)
-                                            ) then {
+                                               ) then {
                                                 private _caller = _this;
                                                 private _handlerId = [missionNamespace, '", _actionExistenceId, "', true];
 

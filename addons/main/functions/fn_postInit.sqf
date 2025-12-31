@@ -309,7 +309,7 @@ isNil {
 							"Inventory",
 							[],
 							{
-								private _currentTarget = (call KH_fnc_getHeadViewTarget) select 4;
+								private _currentTarget = ([] call KH_fnc_getHeadViewTarget) select 4;
 
 								if !(missionNamespace isNil "KH_var_remoteInventoryHandler") then {
 									[KH_var_remoteInventoryHandler] call KH_fnc_removeHandler;
@@ -336,7 +336,7 @@ isNil {
 													_this set [2, true];
 												};
 
-												if ((_currentTarget distance _caller) > 6) then {
+												if (((_currentTarget distance _caller) > 5) || !(alive _currentTarget)) then {
 													closeDialog 2;
 													[_handlerId] call KH_fnc_removeHandler;
 												};
@@ -348,12 +348,336 @@ isNil {
 									] call KH_fnc_execute
 								];
 							},
-							{((call KH_fnc_getHeadViewTarget) select 4) isKindOf "Man";},
+							{
+								if !KH_var_allowRemoteInventories exitWith {
+									false;
+								};
+								
+								private _headViewTarget = [] call KH_fnc_getHeadViewTarget;
+								private _currentTargetDistance = _headViewTarget select 1;
+								private _currentTarget = _headViewTarget select 4;
+								((_currentTarget isKindOf "Man") && (alive _currentTarget) && (_currentTargetDistance <= 2));
+							},
+							true,
+							false,
+							true,
+							false,
+							0,
+							false,
+							false,
+							true,
+							false,
+							true,
+							"",
+							"",
+							[false, true]
+						] call KH_fnc_addAction;
+
+						[player, "KH_var_fuelSiphonHolding", objNull, true, true] call KH_fnc_setRespawnVariable;
+
+						[
+							[false, true],
+							"",
+							[],
+							[
+								{
+									private _headViewTarget = [] call KH_fnc_getHeadViewTarget;
+									private _currentTargetDistance = _headViewTarget select 1;
+									private _currentTarget = _headViewTarget select 4;
+
+									if ((!("Toolkit" in (items _caller)) && KH_var_fuelSiphoningRequireToolkit) || (!([_caller getUnitTrait "Engineer"] call KH_fnc_parseBoolean) && KH_var_fuelSiphoningEngineerOnly)) then {
+										if !(isNull (_caller getVariable ["KH_var_fuelSiphonHolding", objNull])) then {
+											private _oldTarget = _caller getVariable ["KH_var_fuelSiphonHolding", objNull];
+											_caller setVariable ["KH_var_fuelSiphonHolding", objNull, true];
+											_oldTarget setVariable ["KH_var_fuelSiphonNozzleHeld", false, true];
+											_oldTarget;
+										};
+									}
+									else {
+										if (
+											(((_caller getVariable ["KH_var_fuelSiphonHolding", objNull]) isEqualTo _currentTarget) && (isNull (_currentTarget getVariable ["KH_var_fuelSiphonAttached", objNull])) && !(isNull _currentTarget)) ||
+											(!(isNull (_caller getVariable ["KH_var_fuelSiphonHolding", objNull])) && (isNull _currentTarget))
+										   ) then {
+											private _oldTarget = _caller getVariable ["KH_var_fuelSiphonHolding", objNull];
+											_caller setVariable ["KH_var_fuelSiphonHolding", objNull, true];
+											_oldTarget setVariable ["KH_var_fuelSiphonNozzleHeld", false, true];
+											_oldTarget;
+										}
+										else {
+											if !(isNull (_caller getVariable ["KH_var_fuelSiphonHolding", objNull])) then {
+												if (
+													(isNull (_currentTarget getVariable ["KH_var_fuelSiphonAttached", objNull])) && 
+													(isNull ((_caller getVariable ["KH_var_fuelSiphonHolding", objNull]) getVariable ["KH_var_fuelSiphonAttached", objNull])) && 
+													!(isNull _currentTarget) && 
+													(_currentTargetDistance <= 2) && 
+													(alive _currentTarget) && 
+													(((_currentTarget isKindOf "Air") || (_currentTarget isKindOf "LandVehicle") || (_currentTarget isKindOf "Ship")) && !(_currentTarget isKindOf "StaticWeapon"))
+												   ) then {
+													private _siphonedTarget = _caller getVariable ["KH_var_fuelSiphonHolding", objNull];
+													_currentTarget setVariable ["KH_var_fuelSiphonNozzle", _siphonedTarget getVariable ["KH_var_fuelSiphonNozzle", objNull], true];
+													_currentTarget setVariable ["KH_var_fuelSiphonAttached", _siphonedTarget, true];
+													_siphonedTarget setVariable ["KH_var_fuelSiphonAttached", _currentTarget, true];
+													_siphonedTarget setVariable ["KH_var_fuelSiphonNozzleHeld", false, true];
+													_caller setVariable ["KH_var_fuelSiphonHolding", objNull, true];
+													[_siphonedTarget, _currentTarget];
+												}
+												else {
+													private _oldTarget = _caller getVariable ["KH_var_fuelSiphonHolding", objNull];
+													_caller setVariable ["KH_var_fuelSiphonHolding", objNull, true];
+													_oldTarget setVariable ["KH_var_fuelSiphonNozzleHeld", false, true];
+													_oldTarget;
+												};
+											}
+											else {
+												if (
+													(_currentTargetDistance <= 2) && 
+													!(isNull _currentTarget) && 
+													(alive _currentTarget) && 
+													(((_currentTarget isKindOf "Air") || (_currentTarget isKindOf "LandVehicle") || (_currentTarget isKindOf "Ship")) && !(_currentTarget isKindOf "StaticWeapon"))
+												   ) then {
+													if (isNull (_currentTarget getVariable ["KH_var_fuelSiphonAttached", objNull])) then {
+														_caller setVariable ["KH_var_fuelSiphonHolding", _currentTarget, true];
+														private _nozzleTip = createVehicle ["Land_Can_V1_F", _currentTarget, [], 0, "CAN_COLLIDE"];
+														private _nozzle = ropeCreate [_currentTarget, _currentTarget worldToModelVisual (unitAimPositionVisual _currentTarget), _nozzleTip, [0, 0, 0], 15, ["", [0, 0, -1]], ["", [0, 0, -1]], "KH_FuelSiphon", 63];
+
+														[
+															[_caller, _currentTarget, _nozzleTip, _nozzle],
+															{
+																params ["_caller", "_currentTarget", "_nozzleTip", "_nozzle"];
+																_nozzleTip hideObjectGlobal true;
+
+																[
+																	_this,
+																	{
+																		params ["_caller", "_currentTarget", "_nozzleTip", "_nozzle"];
+
+																		if ((!(alive _caller) || !(isNull (objectParent _caller)) || (isNull _caller) || (isNull _nozzleTip) || (isNull _nozzle)) || !(isNull (_currentTarget getVariable ["KH_var_fuelSiphonAttached", objNull]))) then {
+																			if (isNull (_currentTarget getVariable ["KH_var_fuelSiphonAttached", objNull])) then {
+																				_caller setVariable ["KH_var_fuelSiphonHolding", objNull, true];
+																				_currentTarget setVariable ["KH_var_fuelSiphonNozzleHeld", false, true];
+																				deleteVehicle _nozzleTip;
+																				ropeDestroy _nozzle;
+																				[_handlerId] call KH_fnc_removeHandler;
+																			}
+																			else {
+																				[_handlerId] call KH_fnc_removeHandler;
+																			};
+																		};
+																	},
+																	true,
+																	0,
+																	false
+																] call KH_fnc_execute;
+															},
+															"SERVER",
+															true,
+															false
+														] call KH_fnc_execute;
+
+														_nozzleTip attachTo [_caller, [0, 0, 0], "rightHand", true];
+														_currentTarget setVariable ["KH_var_fuelSiphonNozzle", [_nozzleTip, _nozzle], true];
+														_currentTarget setVariable ["KH_var_fuelSiphonNozzleHeld", true, true];
+														objNull;
+													}
+													else {
+														(_currentTarget getVariable ["KH_var_fuelSiphonAttached", objNull]) setVariable ["KH_var_fuelSiphonAttached", objNull, true];
+														_currentTarget setVariable ["KH_var_fuelSiphonAttached", objNull, true];
+														objNull;
+													};
+												};
+											};
+										};
+									};
+								},
+								{},
+								{},
+								{},
+								{
+									systemChat format ["%1", _resultStart];
+									if !(_resultStart isEqualType objNull) then {
+										[
+											_resultStart,
+											{
+												params ["_siphonedTarget", "_currentTarget"];
+												private _nozzleTip = (_siphonedTarget getVariable ["KH_var_fuelSiphonNozzle", []]) param [0, objNull]; 
+												_nozzleTip attachTo [_currentTarget, _currentTarget worldToModelVisual (unitAimPositionVisual _currentTarget), "", false];
+
+												[
+													[_siphonedTarget, _currentTarget],
+													{
+														params ["_siphonedTarget", "_currentTarget"];
+														(_siphonedTarget getVariable ["KH_var_fuelSiphonNozzle", []]) params [["_nozzleTip", objNull], ["_nozzle", objNull]];
+
+														if (
+															((_currentTarget getVariable ["KH_var_fuelSiphonAttached", objNull]) isEqualTo _siphonedTarget) && 
+															((_siphonedTarget getVariable ["KH_var_fuelSiphonAttached", objNull]) isEqualTo _currentTarget) &&
+															!(isNull _nozzleTip) && 
+															!(isNull _nozzle) &&
+															(_siphonedTarget in (ropesAttachedTo _nozzleTip))
+														   ) then {
+															private _siphonedFuel = ((KH_var_fuelSiphoningSpeed * _totalDelta) min (fuel _siphonedTarget)) min (1 - fuel _currentTarget);
+
+															if (_siphonedFuel isNotEqualTo 0) then {
+																[
+																	[_siphonedTarget, _siphonedFuel],
+																	{
+																		params ["_siphonedTarget", "_siphonedFuel"];
+																		_siphonedTarget setFuel ((fuel _siphonedTarget) - _siphonedFuel);
+																	},
+																	_siphonedTarget,
+																	true,
+																	false
+																] call KH_fnc_execute;
+
+																[
+																	[_currentTarget, _siphonedFuel],
+																	{
+																		params ["_currentTarget", "_siphonedFuel"];
+																		_currentTarget setFuel ((fuel _currentTarget) + _siphonedFuel);
+																	},
+																	_currentTarget,
+																	true,
+																	false
+																] call KH_fnc_execute;
+															};
+														}
+														else {
+															if !(isNull _siphonedTarget) then {
+																(_siphonedTarget getVariable ["KH_var_fuelSiphonNozzle", []]) params [["_nozzleTip", objNull], ["_nozzle", objNull]];
+																deleteVehicle _nozzleTip;
+																ropeDestroy _nozzle;
+															}
+															else {
+																if !(isNull _currentTarget) then {
+																	(_currentTarget getVariable ["KH_var_fuelSiphonNozzle", []]) params [["_nozzleTip", objNull], ["_nozzle", objNull]];
+																	deleteVehicle _nozzleTip;
+																	ropeDestroy _nozzle;
+																}
+															};
+
+															_siphonedTarget setVariable ["KH_var_fuelSiphonAttached", objNull, true];
+															_currentTarget setVariable ["KH_var_fuelSiphonAttached", objNull, true];
+															[_handlerId] call KH_fnc_removeHandler;
+														};
+													},
+													true,
+													[
+														0.1,
+														false,
+														false,
+														{},
+														true,
+														true
+													],
+													false
+												] call KH_fnc_execute;
+											},
+											"SERVER",
+											true,
+											false
+										] call KH_fnc_execute;
+									}
+									else {
+										if !(isNull _resultStart) then {
+											(_resultStart getVariable ["KH_var_fuelSiphonNozzle", []]) params [["_nozzleTip", objNull], ["_nozzle", objNull]];
+											deleteVehicle _nozzleTip;
+											ropeDestroy _nozzle;
+										};
+									};
+								},
+								{}
+							],
+							[
+								{},
+								{
+									if !KH_var_fuelSiphoning exitWith {
+										false;
+									};
+
+									private _headViewTarget = [] call KH_fnc_getHeadViewTarget;
+									private _currentTargetDistance = _headViewTarget select 1;
+									private _currentTarget = _headViewTarget select 4;
+
+									if (
+										(
+										 (!((_currentTarget isKindOf "Air") || (_currentTarget isKindOf "LandVehicle") || (_currentTarget isKindOf "Ship")) || (_currentTarget isKindOf "StaticWeapon") || !(alive _currentTarget)) &&
+										 (isNull (_caller getVariable ["KH_var_fuelSiphonHolding", objNull]))
+									    ) ||
+										(
+										 (_currentTarget getVariable ["KH_var_fuelSiphonNozzleHeld", false]) &&
+										 (isNull (_caller getVariable ["KH_var_fuelSiphonHolding", objNull]))
+										) ||
+										!(isNull (objectParent _caller))
+									   ) then {
+										false;
+									}
+									else {
+										private _text = if ((!("Toolkit" in (items _caller)) && KH_var_fuelSiphoningRequireToolkit) || (!([_caller getUnitTrait "Engineer"] call KH_fnc_parseBoolean) && KH_var_fuelSiphoningEngineerOnly)) then {
+											["Drop fuel siphon", ""] select (isNull (_caller getVariable ["KH_var_fuelSiphonHolding", objNull]));
+										}
+										else {
+											if (
+												(((_caller getVariable ["KH_var_fuelSiphonHolding", objNull]) isEqualTo _currentTarget) && (isNull (_currentTarget getVariable ["KH_var_fuelSiphonAttached", objNull])) && !(isNull _currentTarget)) ||
+												(!(isNull (_caller getVariable ["KH_var_fuelSiphonHolding", objNull])) && (isNull _currentTarget))
+											   ) then {
+												"Drop fuel siphon";
+											}
+											else {
+												if !(isNull (_caller getVariable ["KH_var_fuelSiphonHolding", objNull])) then {
+													if (
+														(isNull (_currentTarget getVariable ["KH_var_fuelSiphonAttached", objNull])) && 
+														(isNull ((_caller getVariable ["KH_var_fuelSiphonHolding", objNull]) getVariable ["KH_var_fuelSiphonAttached", objNull])) && 
+														!(isNull _currentTarget) && 
+														(_currentTargetDistance <= 2) && 
+														(alive _currentTarget) && 
+														(((_currentTarget isKindOf "Air") || (_currentTarget isKindOf "LandVehicle") || (_currentTarget isKindOf "Ship")) && !(_currentTarget isKindOf "StaticWeapon"))
+													   ) then {
+														"Attach fuel siphon";
+													}
+													else {
+														"Drop fuel siphon";
+													};
+												}
+												else {
+													if (
+														(_currentTargetDistance <= 2) && 
+														!(isNull _currentTarget) && 
+														(alive _currentTarget) && 
+														(((_currentTarget isKindOf "Air") || (_currentTarget isKindOf "LandVehicle") || (_currentTarget isKindOf "Ship")) && !(_currentTarget isKindOf "StaticWeapon"))
+													   ) then {
+														if (isNull (_currentTarget getVariable ["KH_var_fuelSiphonAttached", objNull])) then {
+															"Take fuel siphon";
+														}
+														else {
+															"Detach fuel siphon";
+														};
+													}
+													else {
+														"";
+													};
+												};
+											};
+										};
+
+										if (_text isNotEqualTo "") then {
+											_caller setUserActionText [_actionId, _text, _text, ""];
+											true;
+										}
+										else {
+											_caller setUserActionText [_actionId, "", "", ""];
+											false;
+										};
+									};
+								},
+								{true;},
+								{true;},
+								{true;}
+							],
 							true,
 							true,
 							true,
 							false,
-							2,
+							0,
 							false,
 							false,
 							true,

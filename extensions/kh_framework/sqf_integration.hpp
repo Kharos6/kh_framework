@@ -13,6 +13,8 @@ static registered_sqf_function _sqf_compile_lua_string_string;
 static registered_sqf_function _sqf_compile_lua_string_code;
 static registered_sqf_function _sqf_crypto_hash_string_string;
 static registered_sqf_function _sqf_generate_uid;
+static registered_sqf_function _sqf_get_epoch;
+static registered_sqf_function _sqf_get_epoch_delta;
 static registered_sqf_function _sqf_write_khdata_string_array;
 static registered_sqf_function _sqf_read_khdata_string_array;
 static registered_sqf_function _sqf_read_khdata_string_string;
@@ -416,6 +418,34 @@ static game_value generate_uid_sqf() {
     } catch (const std::exception& e) {
         report_error(std::string(e.what()));
         return game_value("");
+    }
+}
+
+static game_value get_epoch_sqf() noexcept {
+    try {
+        auto now = std::chrono::high_resolution_clock::now();
+        auto duration = now.time_since_epoch();
+        auto microseconds = std::chrono::duration_cast<std::chrono::microseconds>(duration).count();
+        double seconds = microseconds / 1000000.0;
+        std::ostringstream oss;
+        oss << std::fixed << std::setprecision(6) << seconds;
+        return game_value(oss.str());
+    } catch (...) {
+        return game_value("0");
+    }
+}
+
+static game_value get_epoch_delta_sqf(game_value_parameter past_epoch_str) noexcept {
+    try {
+        std::string past_str = static_cast<std::string>(past_epoch_str);
+        double past_epoch = std::stod(past_str);
+        auto now = std::chrono::high_resolution_clock::now();
+        auto duration = now.time_since_epoch();
+        auto microseconds = std::chrono::duration_cast<std::chrono::microseconds>(duration).count();
+        double current_epoch = microseconds / 1000000.0;
+        return game_value(static_cast<float>(current_epoch - past_epoch));
+    } catch (...) {
+        return game_value(0.0f);
     }
 }
 
@@ -2659,6 +2689,21 @@ static void initialize_sqf_integration() {
         "generateUid",
         "Generate a unique identifier",
         userFunctionWrapper<generate_uid_sqf>,
+        game_data_type::STRING
+    );
+
+    _sqf_get_epoch = intercept::client::host::register_sqf_command(
+        "getEpoch",
+        "Get current epoch time",
+        userFunctionWrapper<get_epoch_sqf>,
+        game_data_type::STRING
+    );
+
+    _sqf_get_epoch_delta = intercept::client::host::register_sqf_command(
+        "getEpochDelta",
+        "Get delta time in seconds from a past epoch to now",
+        userFunctionWrapper<get_epoch_delta_sqf>,
+        game_data_type::SCALAR,
         game_data_type::STRING
     );
 

@@ -44,6 +44,15 @@ class CfgVehicles
 			class EmptyDetector;
 		};
 	};
+	class Rope;
+    class KH_FuelSiphon: Rope 
+	{
+		author = "Kharos";
+        hiddenSelections[] = {"rope"};
+        hiddenSelectionsTextures[] = {"#(argb,8,8,3)color(0.015,0.015,0.015,1.0,co)"};
+		model = "\x\kh\addons\main\models\SKM_FuelSiphon.p3d";
+		segmentType = "KH_FuelSiphonSegment";
+    };
 	class Static;
 	class Land_InvisibleBarrier_F;
 	class KH_HelperArrow: Static
@@ -186,6 +195,16 @@ class CfgVehicles
 		vehicleClass = "KH_Helpers";
 		scope = 2;
 	};
+	class KH_WalkableSurface_1x1x0: Land_InvisibleBarrier_F
+	{
+		author = "Kharos";
+		displayName = "Walkable Surface 1x1x0";
+		editorCategory = "KH_Helpers";
+		editorSubcategory = "KH_Invisible";
+		model = "\x\kh\addons\main\models\SM_WalkableSurface_1x1x0.p3d";
+		vehicleClass = "KH_Helpers";
+		scope = 2;
+	};
 	#include "\x\kh\addons\main\vehicles\modules\addAction.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\aiInstanceSetup.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\assignIdentificationCard.hpp"
@@ -204,6 +223,7 @@ class CfgVehicles
 	#include "\x\kh\addons\main\vehicles\modules\visualTrigger.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\zeusArma.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\zeusBreakDisguise.hpp"
+	#include "\x\kh\addons\main\vehicles\modules\zeusDisembarkUnits.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\zeusEndMission.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\zeusHeal.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\zeusHealAllPlayers.hpp"

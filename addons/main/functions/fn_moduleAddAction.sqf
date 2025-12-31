@@ -48,7 +48,7 @@ KH_var_postInitExecutions pushBack [
                                     (((_conditionExist select [0, 1]) isEqualTo '"') && ((_conditionExist select [(count _conditionExist) - 1, 1]) isEqualTo '"')) ||
                                     (((_conditionExist select [0, 1]) isEqualTo '[') && ((_conditionExist select [(count _conditionExist) - 1, 1]) isEqualTo ']')) &&
                                     !(";" in _conditionExist)
-                                ) then {
+                                   ) then {
                                     if ("," in _conditionExist) then {
                                         parseSimpleArray _conditionExist;
                                     }
@@ -65,7 +65,7 @@ KH_var_postInitExecutions pushBack [
                                 (((_conditionShow select [0, 1]) isEqualTo '"') && ((_conditionShow select [(count _conditionShow) - 1, 1]) isEqualTo '"')) ||
                                 (((_conditionShow select [0, 1]) isEqualTo '[') && ((_conditionShow select [(count _conditionShow) - 1, 1]) isEqualTo ']')) &&
                                 !(";" in _conditionShow)
-                            ) then {
+                               ) then {
                                 if ("," in _conditionShow) then {
                                     parseSimpleArray _conditionShow;
                                 }
@@ -81,7 +81,7 @@ KH_var_postInitExecutions pushBack [
                                 (((_conditionStart select [0, 1]) isEqualTo '"') && ((_conditionStart select [(count _conditionStart) - 1, 1]) isEqualTo '"')) ||
                                 (((_conditionStart select [0, 1]) isEqualTo '[') && ((_conditionStart select [(count _conditionStart) - 1, 1]) isEqualTo ']')) &&
                                 !(";" in _conditionStart)
-                            ) then {
+                               ) then {
                                 if ("," in _conditionStart) then {
                                     parseSimpleArray _conditionStart;
                                 }
@@ -97,7 +97,7 @@ KH_var_postInitExecutions pushBack [
                                 (((_conditionProgress select [0, 1]) isEqualTo '"') && ((_conditionProgress select [(count _conditionProgress) - 1, 1]) isEqualTo '"')) ||
                                 (((_conditionProgress select [0, 1]) isEqualTo '[') && ((_conditionProgress select [(count _conditionProgress) - 1, 1]) isEqualTo ']')) &&
                                 !(";" in _conditionProgress)
-                            ) then {
+                               ) then {
                                 if ("," in _conditionProgress) then {
                                     parseSimpleArray _conditionProgress;
                                 }
@@ -113,7 +113,7 @@ KH_var_postInitExecutions pushBack [
                                 (((_conditionComplete select [0, 1]) isEqualTo '"') && ((_conditionComplete select [(count _conditionComplete) - 1, 1]) isEqualTo '"')) ||
                                 (((_conditionComplete select [0, 1]) isEqualTo '[') && ((_conditionComplete select [(count _conditionComplete) - 1, 1]) isEqualTo ']')) &&
                                 !(";" in _conditionComplete)
-                            ) then {
+                               ) then {
                                 if ("," in _conditionComplete) then {
                                     parseSimpleArray _conditionComplete;
                                 }

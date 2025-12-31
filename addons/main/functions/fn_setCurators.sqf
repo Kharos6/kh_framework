@@ -44,6 +44,10 @@ if (isNil "KH_var_curatorsSet") then {
 		private _uid = getPlayerUID _player;
 		private _module = KH_var_curators get _uid;
 
+		if (isNil "_module") then {
+			_module = KH_var_curators get (vehicleVarName _player);
+		};
+
 		if !(isNil "_module") then {
 			if (isNull _module) then {
 				_module = (createGroup [sideLogic, true]) createUnit ["ModuleCurator_F", [0, 0, 0], [], 0, "CAN_COLLIDE"];
@@ -118,9 +122,13 @@ if (isNil "KH_var_curatorsSet") then {
 		[
 			_x,
 			{
-				private _player = param [3];
 				private _uid = param [1];
+				private _player = param [3];
 				private _module = KH_var_curators get _uid;
+
+				if (isNil "_module") then {
+					_module = KH_var_curators get (vehicleVarName _player);
+				};
 
 				if !(isNil "_module") then {
 					if (isNull _module) then {
@@ -197,7 +205,12 @@ if (isNil "KH_var_curatorsSet") then {
 		"KH_eve_playerDisconnected", 
 		{
 			private _uid = param [1];
+			private _player = param [3];
 			private _module = KH_var_curators get _uid;
+
+			if (isNil "_module") then {
+				_module = KH_var_curators get (vehicleVarName _player);
+			};
 
 			if !(isNil "_module") then {
 				unassignCurator _module;

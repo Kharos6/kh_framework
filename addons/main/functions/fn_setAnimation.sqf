@@ -1,14 +1,4 @@
-params [["_unit", objNull, [objNull]], ["_animation", [], [[]]], ["_allowVehicle", false, [true]], ["_lock", false, [true]], ["_force", false, [true]]];
-
-if (_lock && ((_unit getVariable ["KH_var_animationSequenceHandler", []]) isNotEqualTo [])) then {
-    [_unit getVariable ["KH_var_animationSequenceHandler", []]] call KH_fnc_removeHandler;
-    _unit setVariable ["KH_var_animationSequenceHandler", []];
-};
-
-if _lock exitWith {
-    _this set [4, false];
-    _unit setVariable ["KH_var_animationSequenceHandler", [_this, "KH_fnc_setAnimation", true, 0, false] call KH_fnc_execute];
-};
+params [["_unit", objNull, [objNull]], ["_animation", [], [[]]], ["_allowVehicle", false, [true]], ["_force", false, [true]]];
 
 if !_force then {
     if (_animation isNotEqualTo []) then {

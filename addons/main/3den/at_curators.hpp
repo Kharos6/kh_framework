@@ -22,7 +22,7 @@ class KH_Curators: Title
 		class CuratorsTitle: Title
 		{
 			text = "Curators";
-			tooltip = "Strings of Steam IDs whose owners will be set as curators of the curator module at the equivalent index in the Curator Modules attribute.";
+			tooltip = "Strings of Steam IDs or unit variable names whose owners will be set as curators of the curator module at the equivalent index in the Curator Modules attribute.";
 			y = QUOTE(2 * CTRL_DEFAULT_H + 5 * CTRL_DEFAULT_Y);
 		};
 		class Curators: ctrlEdit

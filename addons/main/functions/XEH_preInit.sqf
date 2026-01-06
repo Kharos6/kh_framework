@@ -83,14 +83,32 @@
 ] call CBA_fnc_addSetting;
 
 [
-	"KH_var_anchorPlayersToMovingObjects",
+	"KH_var_anchorPlayersToGeometry",
 	"CHECKBOX",   
 	[
-		"Anchor Players To Moving Objects", 
-		"True allows players to walk on moving objects such as vehicles or physics objects. Volatile."
+		"Anchor Players To Geometry", 
+		"True allows players to walk on geometry that would otherwise cause falling. May or may not be volatile, depending on the surface in question."
 	], 
 	"KH Miscellaneous", 
 	false,
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_anchorPlayersToMovingObjects",
+	"LIST",   
+	[
+		"Anchor Players To Moving Objects", 
+		"Defines whether players can walk on moving objects such as vehicles or physics objects. May or may not be volatile, depending on the surface in question. Position based uses reliable position snapping, but results in rubber banding for other clients in multiplayer. Velocity based uses velocity blending that looks better in multiplayer, but can cause jittering in first person during high speeds and may result in a space program. Variable uses velocity when the speed is below 10 metres per second and position when the speed is above 10 metres per second, granting the best of both worlds."
+	], 
+	"KH Miscellaneous", 
+	[
+        [0, 1, 2, 3],
+        ["NONE", "VELOCITY BASED", "POSITION BASED", "VARIABLE"],
+        0
+    ],
 	1,
 	{},
 	false

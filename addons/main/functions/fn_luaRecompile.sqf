@@ -1,7 +1,6 @@
 {
-    private _config = _x;
-    private _prefix = getText (_config >> "prefix");
-    private _basePath = (getText (_config >> "path")) regexReplace ["(/)", "\\"];
+    private _prefix = getText (_x >> "prefix");
+    private _basePath = (getText (_x >> "path")) regexReplace ["(/)", "\\"];
 
     {
         private _pathUsed = isText (_x >> "path");
@@ -45,7 +44,7 @@
         };
 
         _name luaCompile _function;
-    } forEach ("true" configClasses _config);
+    } forEach ("true" configClasses _x);
 } forEach (("true" configClasses (configFile >> "CfgLuaFunctions")) + ("true" configClasses (missionConfigFile >> "CfgLuaFunctions")));
 
 nil;

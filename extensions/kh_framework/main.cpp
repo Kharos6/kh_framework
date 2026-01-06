@@ -5,11 +5,11 @@
 #include "kh_data.hpp"
 #include "lua_integration.hpp"
 #include "ai_integration.hpp"
+#include "teamspeak_integration.hpp"
 #include "text_to_speech_integration.hpp"
 #include "speech_to_text_integration.hpp"
 #include "ui_integration.hpp"
 #include "network_integration.hpp"
-#include "teamspeak_integration.hpp"
 #include "sqf_integration.hpp"
 
 using namespace intercept;
@@ -74,131 +74,142 @@ void intercept::pre_start() {
 }
 
 void intercept::pre_init() {
-    g_last_ts_connect_attempt = -1.0f;
-    g_is_server = sqf::is_server();
-    g_is_dedicated_server = sqf::is_dedicated();
-    g_is_headless = (!(sqf::is_server()) && !(sqf::has_interface()));
-    g_is_player = sqf::has_interface();
-    g_mission_time = 0.0f;
-    g_mission_frame = 0;
-    LuaStackGuard guard(*g_lua_state);
-    sol::table game = (*g_lua_state)["game"];
-    sol::table mission = (*g_lua_state)["mission"];
-    game["preInit"] = true;
-    game["postInit"] = false;
-    game["server"] = g_is_server;
-    game["dedicated"] = g_is_dedicated_server;
-    game["headless"] = g_is_headless;
-    game["player"] = g_is_player;
-    mission["frame"] = g_mission_frame;
-    mission["time"] = g_mission_time;
-    mission["active"] = true;
-    clean_lua_state();
-    KHDataManager::instance().flush_all();
-    MainThreadScheduler::instance().clear();
-    
-    if (AIFramework::instance().is_initialized()) {
-        try {
-            AIFramework::instance().stop_all();
-        } catch (const std::exception& e) {
-            report_error("KH Framework Extension - Error stopping AI instances: " + std::string(e.what()));
-        } catch (...) {
-            report_error("KH Framework Extension - Unknown error stopping AI instances");
-        }
-    }
+    auto displays = sqf::all_displays();
+    g_is_menu = (displays.size() == 1 && displays[0] == sqf::find_display(0));
 
-    if (TTSFramework::instance().is_initialized()) {
-        try {
-            TTSFramework::instance().cleanup();
-        } catch (const std::exception& e) {
-            report_error("KH Framework Extension - Error stopping TTS instances: " + std::string(e.what()));
-        } catch (...) {
-            report_error("KH Framework Extension - Unknown error stopping TTS instances");
-        }
-    }
-
-    if (STTFramework::instance().is_initialized_public()) {
-        try {
-            STTFramework::instance().cleanup_public();
-        } catch (const std::exception& e) {
-            report_error("KH Framework Extension - Error stopping STT: " + std::string(e.what()));
-        } catch (...) {
-            report_error("KH Framework Extension - Unknown error stopping STT");
-        }
-    }
-
-    if (UIFramework::instance().is_initialized()) {
-        try {
-            UIFramework::instance().shutdown();
-        } catch (const std::exception& e) {
-            report_error("KH Framework Extension - Error stopping UI framework: " + std::string(e.what()));
-        } catch (...) {
-            report_error("KH Framework Extension - Unknown error stopping UI framework");
-        }
-    }
-
-    if (NetworkFramework::instance().is_initialized()) {
-        try {
-            NetworkFramework::instance().shutdown();
-        } catch (const std::exception& e) {
-            report_error("KH Framework Extension - Error stopping Network framework: " + std::string(e.what()));
-        } catch (...) {
-            report_error("KH Framework Extension - Unknown error stopping Network framework");
-        }
-    }
-
-    if (TeamspeakFramework::instance().is_initialized()) {
-        try {
-            TeamspeakFramework::instance().clear_voice_effects();
-        } catch (const std::exception& e) {
-            report_error("KH Framework Extension - Error clearing TeamSpeak effects: " + std::string(e.what()));
-        } catch (...) {
-            report_error("KH Framework Extension - Unknown error clearing TeamSpeak effects");
-        }
-    }
-
-    sqf::diag_log("KH Framework Extension - Pre-init");
-}
-
-void intercept::post_init() {
-    LuaStackGuard guard(*g_lua_state);
-    sol::table game = (*g_lua_state)["game"];
-    game["postInit"] = true;
-    sqf::diag_log("KH Framework Extension - Post-init");
-}
-
-void intercept::on_frame() {
-    if (!g_is_dedicated_server) {
-        if (g_last_ts_connect_attempt < 0.0f || g_game_time - g_last_ts_connect_attempt >= 1.0f) {
-            g_last_ts_connect_attempt = g_game_time;
-            
+    if (!g_is_menu) {
+        g_last_ts_connect_attempt = -1.0f;
+        g_is_server = sqf::is_server();
+        g_is_dedicated_server = sqf::is_dedicated();
+        g_is_headless = (!(sqf::is_server()) && !(sqf::has_interface()));
+        g_is_player = sqf::has_interface();
+        g_mission_time = 0.0f;
+        g_mission_frame = 0;
+        LuaStackGuard guard(*g_lua_state);
+        sol::table game = (*g_lua_state)["game"];
+        sol::table mission = (*g_lua_state)["mission"];
+        game["preInit"] = true;
+        game["postInit"] = false;
+        game["server"] = g_is_server;
+        game["dedicated"] = g_is_dedicated_server;
+        game["headless"] = g_is_headless;
+        game["player"] = g_is_player;
+        mission["frame"] = g_mission_frame;
+        mission["time"] = g_mission_time;
+        mission["active"] = true;
+        clean_lua_state();
+        KHDataManager::instance().flush_all();
+        MainThreadScheduler::instance().clear();
+        
+        if (AIFramework::instance().is_initialized()) {
             try {
-                TeamspeakFramework::instance().initialize();
+                AIFramework::instance().stop_all();
+            } catch (const std::exception& e) {
+                report_error("KH Framework Extension - Error stopping AI instances: " + std::string(e.what()));
             } catch (...) {
-                // Silent failure - will retry next second
+                report_error("KH Framework Extension - Unknown error stopping AI instances");
+            }
+        }
+
+        if (TTSFramework::instance().is_initialized()) {
+            try {
+                TTSFramework::instance().cleanup();
+            } catch (const std::exception& e) {
+                report_error("KH Framework Extension - Error stopping TTS instances: " + std::string(e.what()));
+            } catch (...) {
+                report_error("KH Framework Extension - Unknown error stopping TTS instances");
+            }
+        }
+
+        if (STTFramework::instance().is_initialized_public()) {
+            try {
+                STTFramework::instance().cleanup_public();
+            } catch (const std::exception& e) {
+                report_error("KH Framework Extension - Error stopping STT: " + std::string(e.what()));
+            } catch (...) {
+                report_error("KH Framework Extension - Unknown error stopping STT");
             }
         }
 
         if (UIFramework::instance().is_initialized()) {
-            UIFramework::instance().set_mouse_enabled(sqf::dialog());
+            try {
+                UIFramework::instance().shutdown();
+            } catch (const std::exception& e) {
+                report_error("KH Framework Extension - Error stopping UI framework: " + std::string(e.what()));
+            } catch (...) {
+                report_error("KH Framework Extension - Unknown error stopping UI framework");
+            }
         }
+
+        if (NetworkFramework::instance().is_initialized()) {
+            try {
+                NetworkFramework::instance().shutdown();
+            } catch (const std::exception& e) {
+                report_error("KH Framework Extension - Error stopping Network framework: " + std::string(e.what()));
+            } catch (...) {
+                report_error("KH Framework Extension - Unknown error stopping Network framework");
+            }
+        }
+
+        if (TeamspeakFramework::instance().is_initialized()) {
+            try {
+                TeamspeakFramework::instance().clear_voice_effects();
+            } catch (const std::exception& e) {
+                report_error("KH Framework Extension - Error clearing TeamSpeak effects: " + std::string(e.what()));
+            } catch (...) {
+                report_error("KH Framework Extension - Unknown error clearing TeamSpeak effects");
+            }
+        }
+
+        sqf::diag_log("KH Framework Extension - Pre-init");
     }
-    
-    MainThreadScheduler::instance().process_frame();
-    LuaStackGuard guard(*g_lua_state);
-    float current_delta = sqf::diag_delta_time();
-    sol::table game = (*g_lua_state)["game"];
-    sol::table mission = (*g_lua_state)["mission"];
-    g_game_time += current_delta;
-    g_game_frame++;
-    game["frame"] = g_game_frame;
-    game["time"] = g_game_time;
-    g_mission_time += current_delta;
-    g_mission_frame++;
-    mission["frame"] = g_mission_frame;
-    mission["time"] = g_mission_time;
-    LuaFunctions::update_scheduler();
-    network_on_frame();
+}
+
+void intercept::post_init() {
+    if (!g_is_menu) {
+        LuaStackGuard guard(*g_lua_state);
+        sol::table game = (*g_lua_state)["game"];
+        game["postInit"] = true;
+        sqf::diag_log("KH Framework Extension - Post-init");
+    }
+}
+
+void intercept::on_frame() {
+    if (!g_is_menu) {
+        if (!g_is_dedicated_server) {
+            if (!sqf::is_eden() && sqf::is_multiplayer()) {
+                if (g_last_ts_connect_attempt < 0.0f || g_game_time - g_last_ts_connect_attempt >= 1.0f) {
+                    g_last_ts_connect_attempt = g_game_time;
+                    
+                    try {
+                        TeamspeakFramework::instance().initialize();
+                    } catch (...) {
+                        // Silent failure - will retry next second
+                    }
+                }
+            }
+
+            if (UIFramework::instance().is_initialized()) {
+                UIFramework::instance().set_mouse_enabled(sqf::dialog());
+            }
+        }
+        
+        MainThreadScheduler::instance().process_frame();
+        LuaStackGuard guard(*g_lua_state);
+        float current_delta = sqf::diag_delta_time();
+        sol::table game = (*g_lua_state)["game"];
+        sol::table mission = (*g_lua_state)["mission"];
+        g_game_time += current_delta;
+        g_game_frame++;
+        game["frame"] = g_game_frame;
+        game["time"] = g_game_time;
+        g_mission_time += current_delta;
+        g_mission_frame++;
+        mission["frame"] = g_mission_frame;
+        mission["time"] = g_mission_time;
+        LuaFunctions::update_scheduler();
+        network_on_frame();
+    }
 }
 
 void intercept::mission_ended() {
@@ -246,9 +257,9 @@ void intercept::mission_ended() {
         try {
             STTFramework::instance().cleanup_public();
         } catch (const std::exception& e) {
-            report_error("KH Framework Extension - Error stopping STT: " + std::string(e.what()));
+            report_error("KH Framework Extension - Error stopping STT instance: " + std::string(e.what()));
         } catch (...) {
-            report_error("KH Framework Extension - Unknown error stopping STT");
+            report_error("KH Framework Extension - Unknown error stopping STT instance");
         }
     }
 
@@ -276,9 +287,9 @@ void intercept::mission_ended() {
         try {
             TeamspeakFramework::instance().cleanup();
         } catch (const std::exception& e) {
-            report_error("KH Framework Extension - Error stopping TeamSpeak: " + std::string(e.what()));
+            report_error("KH Framework Extension - Error stopping TeamSpeak bridge: " + std::string(e.what()));
         } catch (...) {
-            report_error("KH Framework Extension - Unknown error stopping TeamSpeak");
+            report_error("KH Framework Extension - Unknown error stopping TeamSpeak bridge");
         }
     }
 
@@ -442,7 +453,7 @@ static FARPROC WINAPI delay_load_hook(unsigned dliNotify, PDelayLoadInfo pdli) {
                             }
                         }
 
-                        sqf::diag_log("KH - AI Framework: " + dll_name + " not found in standard locations");
+                        sqf::diag_log("KH Framework Extension - " + dll_name + " not found in standard locations");
                     } else if (_stricmp(dll_name.c_str(), "vulkan-1.dll") == 0) {
                         std::vector<std::string> vulkan_paths_to_try;
                         char vulkanPath[MAX_PATH];
@@ -478,7 +489,7 @@ static FARPROC WINAPI delay_load_hook(unsigned dliNotify, PDelayLoadInfo pdli) {
                             }
                         }
 
-                        sqf::diag_log("KH - AI Framework: " + dll_name + " not found in standard locations");
+                        sqf::diag_log("KH Framework Extension - " + dll_name + " not found in standard locations");
                     } else if (_stricmp(dll_name.c_str(), "sherpa-onnx-c-api.dll") == 0) {
                         std::string directml_path = modDir + "\\DirectML.dll";
                         std::string onnxruntime_path = modDir + "\\onnxruntime.dll";
@@ -501,10 +512,10 @@ static FARPROC WINAPI delay_load_hook(unsigned dliNotify, PDelayLoadInfo pdli) {
                             return (FARPROC)hDll;
                         } else {
                             DWORD error = GetLastError();
-                            report_error("Failed to load " + dll_name + " from " + dllFullPath + " - error code: " + std::to_string(error));
+                            report_error("KH Framework Extension - Failed to load " + dll_name + " from " + dllFullPath + " - error code: " + std::to_string(error));
                         }
 
-                        sqf::diag_log("KH - AI Framework: " + dll_name + " not found in standard locations");
+                        sqf::diag_log("KH Framework Extension - " + dll_name + " not found in standard locations");
                     } else if (_stricmp(dll_name.c_str(), "Ultralight.dll") == 0) {
                         std::string core_path = modDir + "\\UltralightCore.dll";
                         std::string webcore_path = modDir + "\\WebCore.dll";
@@ -527,10 +538,10 @@ static FARPROC WINAPI delay_load_hook(unsigned dliNotify, PDelayLoadInfo pdli) {
                             return (FARPROC)hDll;
                         } else {
                             DWORD error = GetLastError();
-                            report_error("Failed to load " + dll_name + " from " + dllFullPath + " - error code: " + std::to_string(error));
+                            report_error("KH Framework Extension - Failed to load " + dll_name + " from " + dllFullPath + " - error code: " + std::to_string(error));
                         }
 
-                        sqf::diag_log("KH - AI Framework: " + dll_name + " not found in standard locations");
+                        sqf::diag_log("KH Framework Extension - " + dll_name + " not found in standard locations");
                     } else if (_stricmp(dll_name.c_str(), "WebCore.dll") == 0) {
                         std::string core_path = modDir + "\\UltralightCore.dll";
                         HMODULE hCore = LoadLibraryA(core_path.c_str());
@@ -546,11 +557,11 @@ static FARPROC WINAPI delay_load_hook(unsigned dliNotify, PDelayLoadInfo pdli) {
                             return (FARPROC)hDll;
                         } else {
                             DWORD error = GetLastError();
-                            report_error("Failed to load " + dll_name + " from " + dllFullPath + " - error code: " + std::to_string(error));
+                            report_error("KH Framework Extension - Failed to load " + dll_name + " from " + dllFullPath + " - error code: " + std::to_string(error));
                         }
 
-                        sqf::diag_log("KH - AI Framework: " + dll_name + " not found in standard locations");
-                    } else {
+                        sqf::diag_log("KH Framework Extension - " + dll_name + " not found in standard locations");
+                    } else if (_stricmp(dll_name.c_str(), "lua51.dll") == 0) {
                         HMODULE hDll = LoadLibraryA(dllFullPath.c_str());
                         
                         if (hDll != NULL) {
@@ -558,10 +569,12 @@ static FARPROC WINAPI delay_load_hook(unsigned dliNotify, PDelayLoadInfo pdli) {
                             return (FARPROC)hDll;
                         } else {
                             DWORD error = GetLastError();
-                            report_error("Failed to load " + dll_name + " from " + dllFullPath + " - error code: " + std::to_string(error));
+                            report_error("KH Framework Extension - Failed to load " + dll_name + " from " + dllFullPath + " - error code: " + std::to_string(error));
                         }
 
-                        sqf::diag_log("KH - AI Framework: " + dll_name + " not found in standard locations");
+                        report_error("KH Framework Extension - CRITICAL - " + dll_name + " failed to load - extension cannot function");
+                    } else {
+                        return NULL;
                     }
                 }
             }
@@ -571,7 +584,9 @@ static FARPROC WINAPI delay_load_hook(unsigned dliNotify, PDelayLoadInfo pdli) {
         std::string dll_name = pdli->szDll;
         
         if (_stricmp(dll_name.c_str(), "lua51.dll") == 0) {
-            report_error("CRITICAL - " + dll_name + " failed to load - extension cannot function");
+            report_error("KH Framework Extension - CRITICAL - " + dll_name + " failed to load - extension cannot function");
+        } else {
+            report_error("KH Framework Extension - " + dll_name + " failed to load");
         }
     }
     
@@ -607,6 +622,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             break;
         case DLL_PROCESS_DETACH:
             ShutdownWatchdog::instance().arm(3000);
+            reset_lua_state();
+            MainThreadScheduler::instance().clear();
             
             __try { 
                 if (AIFramework::instance().is_initialized()) {

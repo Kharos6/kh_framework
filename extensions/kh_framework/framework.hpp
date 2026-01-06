@@ -50,6 +50,7 @@
 #include <d3dcompiler.h>
 #include <wrl/client.h>
 #include <dwrite.h>
+#include <ksmedia.h>
 
 #include "intercept/include/intercept.hpp"
 #include "intercept/include/client/sqf/sqf.hpp"
@@ -84,6 +85,7 @@ static code g_compiled_stt_transcription_event;
 static code g_compiled_html_js_event;
 static game_value g_return_value;
 static game_value g_call_arguments;
+static bool g_is_menu = false;
 static bool g_is_server = false;
 static bool g_is_dedicated_server = false;
 static bool g_is_headless = false;

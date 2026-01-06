@@ -18,7 +18,7 @@ if (isNull _camera) then {
                     true, 
                     1, 
                     "VIEW",
-                    "FIRE", 
+                    "NONE", 
                     true,
                     _draw
                 ];
@@ -59,7 +59,7 @@ else {
                     true, 
                     1, 
                     "VIEW",
-                    "FIRE", 
+                    "NONE", 
                     true,
                     _draw
                 ];

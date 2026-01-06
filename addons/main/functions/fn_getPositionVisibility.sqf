@@ -100,7 +100,7 @@ if (_minimalFov >= 360) exitWith {
                 true,
                 1,
                 "VIEW",
-                "FIRE",
+                "NONE",
                 true,
                 []
             ] call KH_fnc_raycast
@@ -124,7 +124,7 @@ if (_minimalFov >= 360) exitWith {
                             true,
                             1,
                             "VIEW",
-                            "FIRE",
+                            "NONE",
                             true,
                             []
                         ]
@@ -196,7 +196,7 @@ if (_raycast isNotEqualTo false) then {
                 true,
                 1,
                 "VIEW",
-                "FIRE",
+                "NONE",
                 true,
                 []
             ] call KH_fnc_raycast
@@ -219,7 +219,7 @@ if (_raycast isNotEqualTo false) then {
                         true,
                         1,
                         "VIEW",
-                        "FIRE",
+                        "NONE",
                         true,
                         []
                     ]

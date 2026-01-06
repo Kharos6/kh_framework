@@ -9,20 +9,32 @@ params [
 	["_sort", true, [true]],
 	["_maxResults", -1, [0]],
 	["_lod1", "VIEW", [""]], 
-	["_lod2", "FIRE", [""]], 
+	["_lod2", "NONE", [""]], 
 	["_returnUnique", true, [true]],
 	["_draw", [], [[]]]
 ];
 
 _angle = ((_angle min 180) max 0) - 90;
-[_ignored, {isNull _x;}] call KH_fnc_deleteArrayElements;
+
+[
+	_ignored, 
+	{
+		if (_x isEqualType objNull) then {
+			isNull _x;
+		}
+		else {
+			false;
+		};
+	}
+] call KH_fnc_deleteArrayElements;
+
 private _allowIgnoredCheck = true;
 private _ignored1 = objNull;
 private _ignored2 = objNull;
 
-if ((count _ignored) <= 2) then {
-	_ignored1 = _ignored param [0, objNull, [objNull]];
-	_ignored2 = _ignored param [1, objNull, [objNull]];
+if (((count _ignored) <= 2) && (_ignored isEqualTypeAll objNull)) then {
+	_ignored1 = _ignored param [0, objNull, ["", objNull]];
+	_ignored2 = _ignored param [1, objNull, ["", objNull]];
 	_allowIgnoredCheck = false;
 };
 

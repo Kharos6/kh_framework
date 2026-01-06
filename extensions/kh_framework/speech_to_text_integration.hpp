@@ -331,7 +331,30 @@ private:
         }
     };
 
-    void audio_capture_worker() {
+    void resample_audio(const std::vector<int16_t>& input, uint32_t input_rate,
+                        std::vector<int16_t>& output, uint32_t output_rate) {
+        if (input.empty() || input_rate == 0 || output_rate == 0) {
+            output.clear();
+            return;
+        }
+        
+        double ratio = static_cast<double>(input_rate) / static_cast<double>(output_rate);
+        size_t output_size = static_cast<size_t>(input.size() / ratio);
+        output.resize(output_size);
+        
+        for (size_t i = 0; i < output_size; i++) {
+            double src_idx = i * ratio;
+            size_t idx0 = static_cast<size_t>(src_idx);
+            size_t idx1 = std::min(idx0 + 1, input.size() - 1);
+            double frac = src_idx - idx0;
+            
+            output[i] = static_cast<int16_t>(
+                input[idx0] * (1.0 - frac) + input[idx1] * frac
+            );
+        }
+    }
+
+void audio_capture_worker() {
         capture_thread_alive = true;
 
         struct ThreadAliveGuard {
@@ -346,141 +369,213 @@ private:
             ~CoInitGuard() { CoUninitialize(); }
         } co_guard;
         
-        HWAVEIN hWaveIn = NULL;
-        WAVEFORMATEX wfx = {};
-        wfx.wFormatTag = WAVE_FORMAT_PCM;
-        wfx.nChannels = STT_CHANNELS;
-        wfx.nSamplesPerSec = STT_SAMPLE_RATE;
-        wfx.wBitsPerSample = STT_BITS_PER_SAMPLE;
-        wfx.nBlockAlign = wfx.nChannels * wfx.wBitsPerSample / 8;
-        wfx.nAvgBytesPerSec = wfx.nSamplesPerSec * wfx.nBlockAlign;
-        MMRESULT result = waveInOpen(&hWaveIn, WAVE_MAPPER, &wfx, 0, 0, CALLBACK_NULL);
+        HRESULT hr;
+        IMMDeviceEnumerator* enumerator = nullptr;
+        IMMDevice* device = nullptr;
+        IAudioClient* audio_client = nullptr;
+        IAudioCaptureClient* capture_client = nullptr;
+        WAVEFORMATEX* device_format = nullptr;
         
-        if (result != MMSYSERR_NOERROR) {
-            capture_thread_running = false;
-            int error_code = result;
-            
-            MainThreadScheduler::instance().schedule([error_code]() {
-                report_error("KH - STT Framework: Failed to open audio input device - error code: " + std::to_string(error_code));
+        hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+                              __uuidof(IMMDeviceEnumerator), (void**)&enumerator);
+
+        if (FAILED(hr)) {
+            MainThreadScheduler::instance().schedule([]() {
+                report_error("KH - STT Framework: Failed to create device enumerator");
             });
 
             return;
         }
-
-        constexpr int BUFFER_SIZE = STT_SAMPLE_RATE / 10 * STT_CHANNELS;
-        constexpr int NUM_BUFFERS = 4;
-        std::vector<std::vector<int16_t>> buffers(NUM_BUFFERS);
-        std::vector<WAVEHDR> headers(NUM_BUFFERS);
         
-        for (int i = 0; i < NUM_BUFFERS; i++) {
-            buffers[i].resize(BUFFER_SIZE);
-            headers[i] = {};
-            headers[i].lpData = reinterpret_cast<LPSTR>(buffers[i].data());
-            headers[i].dwBufferLength = BUFFER_SIZE * sizeof(int16_t);
-            headers[i].dwFlags = 0;
-            waveInPrepareHeader(hWaveIn, &headers[i], sizeof(WAVEHDR));
-            waveInAddBuffer(hWaveIn, &headers[i], sizeof(WAVEHDR));
+        hr = enumerator->GetDefaultAudioEndpoint(eCapture, eConsole, &device);
+
+        if (FAILED(hr)) {
+            enumerator->Release();
+
+            MainThreadScheduler::instance().schedule([]() {
+                report_error("KH - STT Framework: Failed to get default capture device");
+            });
+
+            return;
         }
+        
+        hr = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, (void**)&audio_client);
 
-        waveInStart(hWaveIn);
+        if (FAILED(hr)) {
+            device->Release();
+            enumerator->Release();
 
+            MainThreadScheduler::instance().schedule([]() {
+                report_error("KH - STT Framework: Failed to activate audio client");
+            });
+
+            return;
+        }
+        
+        hr = audio_client->GetMixFormat(&device_format);
+
+        if (FAILED(hr)) {
+            audio_client->Release();
+            device->Release();
+            enumerator->Release();
+
+            MainThreadScheduler::instance().schedule([]() {
+                report_error("KH - STT Framework: Failed to get mix format");
+            });
+
+            return;
+        }
+        
+        REFERENCE_TIME buffer_duration = 200000;
+        hr = audio_client->Initialize(AUDCLNT_SHAREMODE_SHARED, 0, buffer_duration, 0, device_format, nullptr);
+
+        if (FAILED(hr)) {
+            CoTaskMemFree(device_format);
+            audio_client->Release();
+            device->Release();
+            enumerator->Release();
+
+            MainThreadScheduler::instance().schedule([]() {
+                report_error("KH - STT Framework: Failed to initialize audio client");
+            });
+
+            return;
+        }
+        
+        hr = audio_client->GetService(__uuidof(IAudioCaptureClient), (void**)&capture_client);
+
+        if (FAILED(hr)) {
+            CoTaskMemFree(device_format);
+            audio_client->Release();
+            device->Release();
+            enumerator->Release();
+
+            MainThreadScheduler::instance().schedule([]() {
+                report_error("KH - STT Framework: Failed to get capture client");
+            });
+
+            return;
+        }
+        
+        uint32_t device_sample_rate = device_format->nSamplesPerSec;
+        uint16_t device_channels = device_format->nChannels;
+        uint16_t device_bits = device_format->wBitsPerSample;
+        bool is_float = (device_format->wFormatTag == WAVE_FORMAT_IEEE_FLOAT);
+
+        if (device_format->wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
+            WAVEFORMATEXTENSIBLE* ext = reinterpret_cast<WAVEFORMATEXTENSIBLE*>(device_format);
+            // Check SubFormat - IEEE float GUID is {00000003-0000-0010-8000-00AA00389B71}
+            is_float = (ext->SubFormat.Data1 == 3 && ext->SubFormat.Data2 == 0 && ext->SubFormat.Data3 == 0x10);
+        }
+        
+        CoTaskMemFree(device_format);
+        hr = audio_client->Start();
+
+        if (FAILED(hr)) {
+            capture_client->Release();
+            audio_client->Release();
+            device->Release();
+            enumerator->Release();
+
+            MainThreadScheduler::instance().schedule([]() {
+                report_error("KH - STT Framework: Failed to start capture");
+            });
+
+            return;
+        }
+        
+        std::vector<int16_t> resample_buffer;
+        
         while (capture_thread_running) {
-            for (int i = 0; i < NUM_BUFFERS; i++) {
-                if (headers[i].dwFlags & WHDR_DONE) {
-                    size_t samples_captured = headers[i].dwBytesRecorded / sizeof(int16_t);
+            UINT32 packet_length = 0;
+            hr = capture_client->GetNextPacketSize(&packet_length);
+            
+            while (SUCCEEDED(hr) && packet_length > 0) {
+                BYTE* data;
+                UINT32 frames_available;
+                DWORD flags;
+                hr = capture_client->GetBuffer(&data, &frames_available, &flags, nullptr, nullptr);
+                if (FAILED(hr)) break;
+                
+                if (!(flags & AUDCLNT_BUFFERFLAGS_SILENT) && frames_available > 0) {
+                    std::vector<int16_t> mono_samples(frames_available);
                     
-                    if (samples_captured > 0) {
-                        capture_buffer.append_samples(buffers[i].data(), samples_captured);
+                    for (UINT32 i = 0; i < frames_available; i++) {
+                        float sample_sum = 0.0f;
+                        
+                        for (uint16_t ch = 0; ch < device_channels; ch++) {
+                            float sample;
 
-                        if (is_capturing) {
-                            bool timed_out = false;
-                            
-                            {
-                                std::lock_guard<std::mutex> lock(capture_time_mutex);
-                                auto now = std::chrono::steady_clock::now();
-                                auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - capture_start_time).count();
-                                timed_out = (elapsed >= MAX_CAPTURE_DURATION_MS);
+                            if (is_float) {
+                                sample = reinterpret_cast<float*>(data)[i * device_channels + ch];
+                            } else if (device_bits == 16) {
+                                sample = reinterpret_cast<int16_t*>(data)[i * device_channels + ch] / 32768.0f;
+                            } else if (device_bits == 32) {
+                                sample = reinterpret_cast<int32_t*>(data)[i * device_channels + ch] / 2147483648.0f;
+                            } else {
+                                sample = 0.0f;
                             }
-                            
-                            if (timed_out) {
-                                std::lock_guard<std::mutex> state_lock(capture_state_mutex);
 
-                                if (is_capturing) {
-                                    is_capturing = false;
-                                    capture_buffer.stop_recording();
-                                    std::vector<int16_t> audio_data = capture_buffer.get_buffer_copy();
-                                    
-                                    if (!audio_data.empty()) {
-                                        {
-                                            std::lock_guard<std::mutex> proc_lock(processing_mutex);
-                                            processing_queue.clear();
-                                            processing_queue.push_back(std::move(audio_data));
-                                        }
+                            sample_sum += sample;
+                        }
+                        
+                        float mono = sample_sum / device_channels;
+                        mono_samples[i] = static_cast<int16_t>(std::clamp(mono, -1.0f, 1.0f) * 32767.0f);
+                    }
+                    
+                    if (device_sample_rate != STT_SAMPLE_RATE) {
+                        resample_audio(mono_samples, device_sample_rate, resample_buffer, STT_SAMPLE_RATE);
+                        capture_buffer.append_samples(resample_buffer.data(), resample_buffer.size());
+                    } else {
+                        capture_buffer.append_samples(mono_samples.data(), mono_samples.size());
+                    }
+                    
+                    if (is_capturing) {
+                        bool timed_out = false;
+                        
+                        {
+                            std::lock_guard<std::mutex> lock(capture_time_mutex);
+                            auto now = std::chrono::steady_clock::now();
+                            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - capture_start_time).count();
+                            timed_out = (elapsed >= MAX_CAPTURE_DURATION_MS);
+                        }
+                        
+                        if (timed_out) {
+                            std::lock_guard<std::mutex> state_lock(capture_state_mutex);
 
-                                        processing_cv.notify_one();
+                            if (is_capturing) {
+                                is_capturing = false;
+                                capture_buffer.stop_recording();
+                                std::vector<int16_t> audio_data = capture_buffer.get_buffer_copy();
+                                
+                                if (!audio_data.empty()) {
+                                    {
+                                        std::lock_guard<std::mutex> proc_lock(processing_mutex);
+                                        processing_queue.clear();
+                                        processing_queue.push_back(std::move(audio_data));
                                     }
-                                    
-                                    capture_buffer.clear();
+
+                                    processing_cv.notify_one();
                                 }
+                                
+                                capture_buffer.clear();
                             }
                         }
                     }
-                    
-                    // Reset and re-add buffer
-                    headers[i].dwFlags = 0;
-                    headers[i].dwBytesRecorded = 0;
-
-                    MMRESULT prepare_result = waveInPrepareHeader(hWaveIn, &headers[i], sizeof(WAVEHDR));
-                    if (prepare_result != MMSYSERR_NOERROR) {
-                        int error_code = prepare_result;
-
-                        MainThreadScheduler::instance().schedule([error_code]() {
-                            report_error("KH - STT Framework: Audio device error (prepare failed) - code: " + 
-                                        std::to_string(error_code) + " - stopping capture");
-                        });
-                        
-                        capture_thread_running = false;
-                        break;
-                    }
-
-                    MMRESULT add_result = waveInAddBuffer(hWaveIn, &headers[i], sizeof(WAVEHDR));
-
-                    if (add_result != MMSYSERR_NOERROR) {
-                        int error_code = add_result;
-
-                        MainThreadScheduler::instance().schedule([error_code]() {
-                            report_error("KH - STT Framework: Audio device error (add buffer failed) - code: " + 
-                                        std::to_string(error_code) + " - stopping capture");
-                        });
-
-                        capture_thread_running = false;
-                        break;
-                    }
                 }
+                
+                capture_client->ReleaseBuffer(frames_available);
+                hr = capture_client->GetNextPacketSize(&packet_length);
             }
             
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
-
-        waveInStop(hWaveIn);
-        waveInReset(hWaveIn);
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-
-        for (int i = 0; i < NUM_BUFFERS; i++) {
-            // Check if buffer needs additional waiting
-            int timeout = 0;
-
-            while ((headers[i].dwFlags & WHDR_PREPARED) && timeout < 10) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                timeout++;
-            }
-            
-            if (headers[i].dwFlags & WHDR_PREPARED) {
-                waveInUnprepareHeader(hWaveIn, &headers[i], sizeof(WAVEHDR));
-            }
-        }
-
-        waveInClose(hWaveIn);
+        
+        audio_client->Stop();
+        capture_client->Release();
+        audio_client->Release();
+        device->Release();
+        enumerator->Release();
     }
 
     void processing_worker() {

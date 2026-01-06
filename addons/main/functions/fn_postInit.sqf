@@ -1,4 +1,6 @@
 isNil {
+	if KH_var_isMenu exitWith {};
+
 	[
 		[],
 		{
@@ -493,7 +495,6 @@ isNil {
 								{},
 								{},
 								{
-									systemChat format ["%1", _resultStart];
 									if !(_resultStart isEqualType objNull) then {
 										[
 											_resultStart,
@@ -624,19 +625,14 @@ isNil {
 											}
 											else {
 												if !(isNull (_caller getVariable ["KH_var_fuelSiphonHolding", objNull])) then {
-													if (
+													["Drop fuel siphon", "Attach fuel siphon"] select (
 														(isNull (_currentTarget getVariable ["KH_var_fuelSiphonAttached", objNull])) && 
 														(isNull ((_caller getVariable ["KH_var_fuelSiphonHolding", objNull]) getVariable ["KH_var_fuelSiphonAttached", objNull])) && 
 														!(isNull _currentTarget) && 
 														(_currentTargetDistance <= 2) && 
 														(alive _currentTarget) && 
 														(((_currentTarget isKindOf "Air") || (_currentTarget isKindOf "LandVehicle") || (_currentTarget isKindOf "Ship")) && !(_currentTarget isKindOf "StaticWeapon"))
-													   ) then {
-														"Attach fuel siphon";
-													}
-													else {
-														"Drop fuel siphon";
-													};
+													);
 												}
 												else {
 													if (
@@ -645,12 +641,7 @@ isNil {
 														(alive _currentTarget) && 
 														(((_currentTarget isKindOf "Air") || (_currentTarget isKindOf "LandVehicle") || (_currentTarget isKindOf "Ship")) && !(_currentTarget isKindOf "StaticWeapon"))
 													   ) then {
-														if (isNull (_currentTarget getVariable ["KH_var_fuelSiphonAttached", objNull])) then {
-															"Take fuel siphon";
-														}
-														else {
-															"Detach fuel siphon";
-														};
+														["Detach fuel siphon", "Take fuel siphon"] select (isNull (_currentTarget getVariable ["KH_var_fuelSiphonAttached", objNull]));
 													}
 													else {
 														"";

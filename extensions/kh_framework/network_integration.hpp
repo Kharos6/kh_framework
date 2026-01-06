@@ -4484,7 +4484,6 @@ public:
         warned_fd_limit_.store(false);
         payload_pool_.reset();
         initialized_.store(false);
-        sqf::diag_log("KH Network: SHUTDOWN");
 
         if (wsa_initialized_) {
             WSACleanup();

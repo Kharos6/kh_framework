@@ -71,7 +71,7 @@ if _state then {
 											true,
 											1,
 											"VIEW",
-											"FIRE",
+											"NONE",
 											true,
 											[]
 										]

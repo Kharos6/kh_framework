@@ -395,7 +395,7 @@ switch (typeName _environmentType) do {
 					diag_frameNo + (abs _environmentType);
 				};
 			},
-			-1,
+			[-1, getEpoch] select _verboseDelta,
 			[[["TEMPORAL"], _environmentType, _environmentId, clientOwner], _return],
 			_environmentId,
 			_previousReturn,
@@ -699,7 +699,7 @@ switch (typeName _environmentType) do {
 					diag_frameNo + (abs _interval);
 				};
 			},
-			-1,
+			[-1, getEpoch] select _verboseDelta,
 			[[["TEMPORAL"], _interval, _environmentId, clientOwner], _return],
 			_environmentId,
 			_previousReturn,

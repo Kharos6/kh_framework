@@ -895,6 +895,7 @@ public:
 
         {
             std::lock_guard<std::mutex> lock(hook_mutex_);
+            
             if (hook_installed_.load(std::memory_order_acquire) && hooked_present_addr_) {
                 MH_DisableHook(hooked_present_addr_);
             }
@@ -906,11 +907,7 @@ public:
         while (hook_executing_.load(std::memory_order_seq_cst)) {
             auto elapsed = std::chrono::steady_clock::now() - start;
             
-            if (elapsed >= timeout) {
-                MainThreadScheduler::instance().schedule([]() {
-                    report_error("KH - UI Framework: Shutdown timeout waiting for hook, forcing cleanup");
-                });
-                
+            if (elapsed >= timeout) {                
                 break;
             }
             
@@ -932,21 +929,6 @@ public:
         } catch (...) {}
 
         std::lock_guard<std::mutex> lock(init_mutex_);
-
-        {
-            std::lock_guard<std::mutex> doc_lock(documents_mutex_);
-
-            for (auto& [id, doc] : documents_) {
-                if (doc) {
-                    doc->view = nullptr;
-                    std::lock_guard<std::mutex> pixel_lock(doc->pixel_mutex);
-                    doc->cached_pixels.clear();
-                    doc->pixels_ready.store(false, std::memory_order_release);
-                }
-            }
-
-            documents_.clear();
-        }
 
         try {
             d3d_renderer_.cleanup();
@@ -1370,13 +1352,7 @@ public:
 
 private:
     UIFramework() = default;
-
-    ~UIFramework() {
-        try {
-            shutdown();
-        } catch (...) {}
-    }
-
+    ~UIFramework() { shutdown(); }
     UIFramework(const UIFramework&) = delete;
     UIFramework& operator=(const UIFramework&) = delete;
 
@@ -1500,6 +1476,31 @@ private:
     }
 
     void cleanup_ultralight() {
+        {
+            std::lock_guard<std::mutex> lock(documents_mutex_);
+
+            for (auto& [id, doc] : documents_) {
+                if (doc && doc->view) {
+                    doc->view->set_view_listener(nullptr);
+                    doc->view->set_load_listener(nullptr);
+                    doc->view = nullptr;  // Release the view
+                }
+
+                if (doc) {
+                    doc->listener.reset();
+                }
+            }
+
+            documents_.clear();
+        }
+
+        if (renderer_) {
+            try {
+                renderer_->Update();
+                renderer_->Render();
+            } catch (...) {}
+        }
+
         renderer_ = nullptr;
         file_system_.reset();
         font_loader_.reset();

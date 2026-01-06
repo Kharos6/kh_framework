@@ -1,3 +1,5 @@
+KH_var_isMenu = allDisplays isEqualTo [findDisplay 0];
+if KH_var_isMenu exitWith {};
 KH_var_gameSessionId = uiNamespace getVariable "KH_var_gameSessionId";
 KH_var_missionSessionId = generateUid;
 uiNamespace setVariable ["KH_var_missionSessionId", KH_var_missionSessionId];
@@ -64,9 +66,8 @@ KH_var_playerKilledEventHandler = [];
 ] call CBA_fnc_addEventHandler;
 
 {
-    private _config = _x;
-    private _prefix = getText (_config >> "prefix");
-    private _basePath = (getText (_config >> "path")) regexReplace ["(/)", "\\"];
+    private _prefix = getText (_x >> "prefix");
+    private _basePath = (getText (_x >> "path")) regexReplace ["(/)", "\\"];
 
     {
         private _pathUsed = isText (_x >> "path");
@@ -129,7 +130,7 @@ KH_var_playerKilledEventHandler = [];
                 };
 			};
         };
-    } forEach ("true" configClasses _config);
+    } forEach ("true" configClasses _x);
 } forEach (("true" configClasses (configFile >> "CfgLuaFunctions")) + ("true" configClasses (missionConfigFile >> "CfgLuaFunctions")));
 
 [
@@ -137,9 +138,8 @@ KH_var_playerKilledEventHandler = [];
 	{
 		with uiNamespace do {
 			{
-				private _config = _x;
-				private _prefix = getText (_config >> "prefix");
-				private _basePath = (getText (_config >> "path")) regexReplace ["(/)", "\\"];
+				private _prefix = getText (_x >> "prefix");
+				private _basePath = (getText (_x >> "path")) regexReplace ["(/)", "\\"];
 
 				{
 					private _pathUsed = isText (_x >> "path");
@@ -169,7 +169,7 @@ KH_var_playerKilledEventHandler = [];
 					{
 						luaExecute _x;
 					} forEach KH_var_resetInitLuaExecutions;
-				} forEach ("true" configClasses _config);
+				} forEach ("true" configClasses _x);
 			} forEach ("true" configClasses (configFile >> "CfgLuaFunctions"));
 		};
 	}
@@ -1243,7 +1243,7 @@ if hasInterface then {
 	KH_var_playerControlledUnitChangeStack = [];
 	KH_var_playerMissionEndStack = [];
 	KH_var_playerMovingObjectParent = objNull;
-	KH_var_playerMovingObjectHandler = [];
+	KH_var_playerGeometryRoadway = objNull;
 
 	{
 		private _basePath = (getText (_x >> "path")) regexReplace ["(/)", "\\"];
@@ -1466,19 +1466,30 @@ if hasInterface then {
 			player setVariable ["KH_var_playerCameraPosition", positionCameraToWorld [0, 0, 0], 2];
 			player setVariable ["KH_var_playerCameraDirection", getCameraViewDirection player, 2];
 
-			if KH_var_anchorPlayersToMovingObjects then {
+			if (KH_var_anchorPlayersToGeometry || (KH_var_anchorPlayersToMovingObjects isNotEqualTo 0) && (isNull (objectParent player)) && (isNull (attachedTo player)) && (alive player)) then {
 				private _position = getPosASLVisual player;
-				private _aimPosition = AGLToASL (unitAimPositionVisual player);
-				_aimPosition = [_position select 0, _position select 1, _aimPosition select 2];
+				private _aimPosition = [_position select 0, _position select 1, (AGLToASL (unitAimPositionVisual player)) select 2];
+
+				private _roofIntersection = [
+					_aimPosition,
+					_aimPosition vectorAdd [0, 0, 1],
+					[player, "KH_InvisibleWalkableSurface_1x1x0"] + (attachedObjects player),
+					true,
+					1,
+					"GEOM",
+					"FIRE",
+					true,
+					[]
+				] call KH_fnc_raycast;
 
 				private _groundIntersection = [
 					_aimPosition,
-					_position vectorAdd [0, 0, -0.1],
-					[player, objectParent player, attachedTo player] + (attachedObjects player),
+					_position vectorAdd [0, 0, -1],
+					[player, "KH_InvisibleWalkableSurface_1x1x0"] + (attachedObjects player),
 					true,
 					1,
 					"ROADWAY",
-					"GEOM",
+					"NONE",
 					true,
 					[]
 				] call KH_fnc_raycast;
@@ -1486,8 +1497,8 @@ if hasInterface then {
 				if (_groundIntersection isEqualTo []) then {
 					_groundIntersection = [
 						_aimPosition,
-						_position vectorAdd [0, 0, -0.1],
-						[player, objectParent player, attachedTo player] + (attachedObjects player),
+						_position vectorAdd [0, 0, -1],
+						[player, "KH_InvisibleWalkableSurface_1x1x0"] + (attachedObjects player),
 						true,
 						1,
 						"GEOM",
@@ -1497,41 +1508,181 @@ if hasInterface then {
 					] call KH_fnc_raycast;
 				};
 
-				if (_groundIntersection isNotEqualTo []) then {
-					private _entity = (_groundIntersection select 0) select 3;
+				private _useRoadway = if (KH_var_anchorPlayersToMovingObjects isNotEqualTo 0) then {
+					if ((_groundIntersection isNotEqualTo []) && (_roofIntersection isEqualTo [])) then {
+						private _entity = (_groundIntersection select 0) select 3;
 
-					if (isNull _entity) exitWith {
-						if ((missionNamespace getVariable ["KH_var_playerMovingObjectHandler", []]) isNotEqualTo []) then {
-							[missionNamespace getVariable ["KH_var_playerMovingObjectHandler", []]] call KH_fnc_removeHandler;
-							missionNamespace setVariable ["KH_var_playerMovingObjectHandler", []];
-							KH_var_playerMovingObjectParent = objNull;
+						if (isNull _entity) exitWith {
+							if !(isNull KH_var_playerMovingObjectParent) then {
+								KH_var_playerMovingObjectParent = objNull;
+							};
+
+							if ((missionNamespace getVariable ["KH_var_playerAnchorHandler", []]) isNotEqualTo []) then {
+								[(missionNamespace getVariable ["KH_var_playerAnchorHandler", []])] call KH_fnc_removeHandler;
+								missionNamespace setVariable ["KH_var_playerAnchorHandler", []];
+							};
+
+							true;
 						};
-					};
 
-					if (((vectorMagnitude (velocity _entity)) >= 0.01) || ((vectorMagnitude (velocity (attachedTo _entity))) >= 0.01)) then {
-						if (_entity isNotEqualTo KH_var_playerMovingObjectParent) then {
-							KH_var_playerMovingObjectParent = _entity;
-							missionNamespace setVariable ["KH_var_playerMovingObjectHandler", [player, _entity, true, [vectorDirVisual player, vectorUpVisual player], 1, "", true] call KH_fnc_attach];
+						if (((vectorMagnitude (velocity _entity)) > 0.001) || ((vectorMagnitude (velocity (attachedTo _entity))) > 0.001)) then {
+							private _attachEntity = [_entity, attachedTo _entity] select ((vectorMagnitude (velocity (attachedTo _entity))) > 0.001);
+
+							if !(isNull KH_var_playerGeometryRoadway) then {
+								KH_var_playerGeometryRoadway setPosASL [0, 0, 0];
+							};
+							
+							if (_attachEntity isNotEqualTo KH_var_playerMovingObjectParent) then {
+								KH_var_playerMovingObjectParent = _attachEntity;
+
+								missionNamespace setVariable [
+									"KH_var_playerAnchorHandler",
+									[
+										player, 
+										_attachEntity, 
+										true, 
+										true, 
+										1, 
+										"", 
+										[
+											true, 
+											true,
+											switch KH_var_anchorPlayersToMovingObjects do {
+												case 1: {
+													"VELOCITY";
+												};
+
+												case 2: {
+													"POSITION";
+												};
+
+												case 3: {
+													"VARIABLE";
+												};
+											},
+											true,
+											1
+										]
+									] call KH_fnc_attach
+								];
+							};
+							
+							false;
+						}
+						else {
+							if !(isNull KH_var_playerMovingObjectParent) then {
+								KH_var_playerMovingObjectParent = objNull;
+							};
+
+							if ((missionNamespace getVariable ["KH_var_playerAnchorHandler", []]) isNotEqualTo []) then {
+								[(missionNamespace getVariable ["KH_var_playerAnchorHandler", []])] call KH_fnc_removeHandler;
+								missionNamespace setVariable ["KH_var_playerAnchorHandler", []];
+							};
+
+							true;
 						};
 					}
 					else {
-						[missionNamespace getVariable ["KH_var_playerMovingObjectHandler", []]] call KH_fnc_removeHandler;
-						missionNamespace setVariable ["KH_var_playerMovingObjectHandler", []];
-						KH_var_playerMovingObjectParent = objNull;
+						if !(isNull KH_var_playerMovingObjectParent) then {
+							KH_var_playerMovingObjectParent = objNull;
+						};
+
+						if ((missionNamespace getVariable ["KH_var_playerAnchorHandler", []]) isNotEqualTo []) then {
+							[(missionNamespace getVariable ["KH_var_playerAnchorHandler", []])] call KH_fnc_removeHandler;
+							missionNamespace setVariable ["KH_var_playerAnchorHandler", []];
+						};
+
+						true;
 					};
 				}
 				else {
-					if ((missionNamespace getVariable ["KH_var_playerMovingObjectHandler", []]) isNotEqualTo []) then {
-						[missionNamespace getVariable ["KH_var_playerMovingObjectHandler", []]] call KH_fnc_removeHandler;
-						missionNamespace setVariable ["KH_var_playerMovingObjectHandler", []];
+					if !(isNull KH_var_playerMovingObjectParent) then {
 						KH_var_playerMovingObjectParent = objNull;
+					};
+
+					if ((missionNamespace getVariable ["KH_var_playerAnchorHandler", []]) isNotEqualTo []) then {
+						[(missionNamespace getVariable ["KH_var_playerAnchorHandler", []])] call KH_fnc_removeHandler;
+						missionNamespace setVariable ["KH_var_playerAnchorHandler", []];
+					};
+
+					true;
+				};
+
+				if KH_var_anchorPlayersToGeometry then {
+					if (isNull KH_var_playerGeometryRoadway) then {
+						KH_var_playerGeometryRoadway = createVehicleLocal ["KH_InvisibleWalkableSurface_1x1x0", getPosATLVisual player, [], 0, "CAN_COLLIDE"];
+					};
+
+					if _useRoadway then {
+						private _roadwayIntersection = [
+							_aimPosition,
+							_position vectorAdd [0, 0, -1],
+							[player, "KH_InvisibleWalkableSurface_1x1x0"] + (attachedObjects player),
+							true,
+							1,
+							"GEOM",
+							"FIRE",
+							true,
+							[]
+						] call KH_fnc_raycast;
+
+						if ((_roadwayIntersection isNotEqualTo []) && (_roofIntersection isEqualTo [])) then {
+							private _entity = (_roadwayIntersection select 0) select 3;
+
+							if (isNull _entity) exitWith {
+								KH_var_playerGeometryRoadway setPosASL [0, 0, 0];
+							};
+
+							if (((vectorMagnitude (velocity _entity)) <= 0.001) && ((vectorMagnitude (velocity (attachedTo _entity))) <= 0.001)) then {
+								private _roadwayPosition = ((_roadwayIntersection select 0) select 0) vectorAdd (((_roadwayIntersection select 0) select 1) vectorMultiply 0.01);
+								KH_var_playerGeometryRoadway setPosASL _roadwayPosition;
+
+								if (((getPosASLVisual player) select 2) < (_roadwayPosition select 2)) then {
+									player setVariable ["KH_var_attachFallVelocity", 0];
+									player setPosASL _roadwayPosition;
+								}
+								else {
+									if !(isTouchingGround player) then {
+										private _newVelocity = ((velocity player) vectorAdd [0, 0, (player getVariable ["KH_var_attachFallVelocity", 0]) - (0.5 * 9.807 * _totalDelta)]);
+										_newVelocity set [2, ((_newVelocity select 2) min -0.01) max -60];
+										player setVariable ["KH_var_attachFallVelocity", _newVelocity select 2];
+										player setVelocity _newVelocity;
+									}
+									else {
+										player setVariable ["KH_var_attachFallVelocity", 0];
+									};
+								};
+							}
+							else {
+								KH_var_playerGeometryRoadway setPosASL [0, 0, 0];
+							};
+						}
+						else {
+							KH_var_playerGeometryRoadway setPosASL [0, 0, 0];
+						};
+					}
+					else {
+						KH_var_playerGeometryRoadway setPosASL [0, 0, 0];
+					};
+				}
+				else {
+					if !(isNull KH_var_playerGeometryRoadway) then {
+						deleteVehicle KH_var_playerGeometryRoadway;
 					};
 				};
 			}
 			else {
-				if ((missionNamespace getVariable ["KH_var_playerMovingObjectHandler", []]) isNotEqualTo []) then {
-					[missionNamespace getVariable ["KH_var_playerMovingObjectHandler", []]] call KH_fnc_removeHandler;
-					missionNamespace setVariable ["KH_var_playerMovingObjectHandler", []];
+				if !(isNull KH_var_playerMovingObjectParent) then {
+					KH_var_playerMovingObjectParent = objNull;
+				};
+
+				if ((missionNamespace getVariable ["KH_var_playerAnchorHandler", []]) isNotEqualTo []) then {
+					[(missionNamespace getVariable ["KH_var_playerAnchorHandler", []])] call KH_fnc_removeHandler;
+					missionNamespace setVariable ["KH_var_playerAnchorHandler", []];
+				};
+
+				if !(isNull KH_var_playerGeometryRoadway) then {
+					deleteVehicle KH_var_playerGeometryRoadway;
 				};
 			};
 		},

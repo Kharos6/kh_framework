@@ -88,7 +88,7 @@ class CfgVehicles
 	class KH_InvisibleWall_1x1x1: Land_InvisibleBarrier_F
 	{
 		author = "Kharos";
-		displayName = "Invisible Wall 1x1x1";
+		displayName = "Wall 1x1x1";
 		editorCategory = "KH_Helpers";
 		editorSubcategory = "KH_Invisible";
 		model = "\x\kh\addons\main\models\SM_InvisibleWall_1x1x1.p3d";
@@ -98,7 +98,7 @@ class CfgVehicles
 	class KH_InvisibleWall_2x1x1: Land_InvisibleBarrier_F
 	{
 		author = "Kharos";
-		displayName = "Invisible Wall 2x1x1";
+		displayName = "Wall 2x1x1";
 		editorCategory = "KH_Helpers";
 		editorSubcategory = "KH_Invisible";
 		model = "\x\kh\addons\main\models\SM_InvisibleWall_2x1x1.p3d";
@@ -108,7 +108,7 @@ class CfgVehicles
 	class KH_InvisibleWall_2x1x2: Land_InvisibleBarrier_F
 	{
 		author = "Kharos";
-		displayName = "Invisible Wall 2x1x2";
+		displayName = "Wall 2x1x2";
 		editorCategory = "KH_Helpers";
 		editorSubcategory = "KH_Invisible";
 		model = "\x\kh\addons\main\models\SM_InvisibleWall_2x1x2.p3d";
@@ -118,7 +118,7 @@ class CfgVehicles
 	class KH_InvisibleWall_4x1x2: Land_InvisibleBarrier_F
 	{
 		author = "Kharos";
-		displayName = "Invisible Wall 4x1x2";
+		displayName = "Wall 4x1x2";
 		editorCategory = "KH_Helpers";
 		editorSubcategory = "KH_Invisible";
 		model = "\x\kh\addons\main\models\SM_InvisibleWall_4x1x2.p3d";
@@ -128,7 +128,7 @@ class CfgVehicles
 	class KH_InvisibleWall_4x1x4: Land_InvisibleBarrier_F
 	{
 		author = "Kharos";
-		displayName = "Invisible Wall 4x1x4";
+		displayName = "Wall 4x1x4";
 		editorCategory = "KH_Helpers";
 		editorSubcategory = "KH_Invisible";
 		model = "\x\kh\addons\main\models\SM_InvisibleWall_4x1x4.p3d";
@@ -138,7 +138,7 @@ class CfgVehicles
 	class KH_InvisibleWall_8x1x4: Land_InvisibleBarrier_F
 	{
 		author = "Kharos";
-		displayName = "Invisible Wall 8x1x4";
+		displayName = "Wall 8x1x4";
 		editorCategory = "KH_Helpers";
 		editorSubcategory = "KH_Invisible";
 		model = "\x\kh\addons\main\models\SM_InvisibleWall_8x1x4.p3d";
@@ -148,7 +148,7 @@ class CfgVehicles
 	class KH_InvisibleWall_8x1x8: Land_InvisibleBarrier_F
 	{
 		author = "Kharos";
-		displayName = "Invisible Wall 8x1x8";
+		displayName = "Wall 8x1x8";
 		editorCategory = "KH_Helpers";
 		editorSubcategory = "KH_Invisible";
 		model = "\x\kh\addons\main\models\SM_InvisibleWall_8x1x8.p3d";
@@ -158,7 +158,7 @@ class CfgVehicles
 	class KH_InvisibleWall_16x1x8: Land_InvisibleBarrier_F
 	{
 		author = "Kharos";
-		displayName = "Invisible Wall 16x1x8";
+		displayName = "Wall 16x1x8";
 		editorCategory = "KH_Helpers";
 		editorSubcategory = "KH_Invisible";
 		model = "\x\kh\addons\main\models\SM_InvisibleWall_16x1x8.p3d";
@@ -168,7 +168,7 @@ class CfgVehicles
 	class KH_InvisibleWall_16x1x16: Land_InvisibleBarrier_F
 	{
 		author = "Kharos";
-		displayName = "Invisible Wall 16x1x16";
+		displayName = "Wall 16x1x16";
 		editorCategory = "KH_Helpers";
 		editorSubcategory = "KH_Invisible";
 		model = "\x\kh\addons\main\models\SM_InvisibleWall_16x1x16.p3d";
@@ -178,7 +178,7 @@ class CfgVehicles
 	class KH_InvisibleWall_32x1x16: Land_InvisibleBarrier_F
 	{
 		author = "Kharos";
-		displayName = "Invisible Wall 32x1x16";
+		displayName = "Wall 32x1x16";
 		editorCategory = "KH_Helpers";
 		editorSubcategory = "KH_Invisible";
 		model = "\x\kh\addons\main\models\SM_InvisibleWall_32x1x16.p3d";
@@ -188,20 +188,40 @@ class CfgVehicles
 	class KH_InvisibleWall_32x1x32: Land_InvisibleBarrier_F
 	{
 		author = "Kharos";
-		displayName = "Invisible Wall 32x1x32";
+		displayName = "Wall 32x1x32";
 		editorCategory = "KH_Helpers";
 		editorSubcategory = "KH_Invisible";
 		model = "\x\kh\addons\main\models\SM_InvisibleWall_32x1x32.p3d";
 		vehicleClass = "KH_Helpers";
 		scope = 2;
 	};
-	class KH_WalkableSurface_1x1x0: Land_InvisibleBarrier_F
+	class KH_InvisibleWalkableSurface_1x1x0: Land_InvisibleBarrier_F
 	{
 		author = "Kharos";
 		displayName = "Walkable Surface 1x1x0";
 		editorCategory = "KH_Helpers";
 		editorSubcategory = "KH_Invisible";
-		model = "\x\kh\addons\main\models\SM_WalkableSurface_1x1x0.p3d";
+		model = "\x\kh\addons\main\models\SM_InvisibleWalkableSurface_1x1x0.p3d";
+		vehicleClass = "KH_Helpers";
+		scope = 2;
+	};
+	class KH_InvisibleWalkableSurface_2x2x0: Land_InvisibleBarrier_F
+	{
+		author = "Kharos";
+		displayName = "Walkable Surface 2x2x0";
+		editorCategory = "KH_Helpers";
+		editorSubcategory = "KH_Invisible";
+		model = "\x\kh\addons\main\models\SM_InvisibleWalkableSurface_2x2x0.p3d";
+		vehicleClass = "KH_Helpers";
+		scope = 2;
+	};
+	class KH_InvisibleWalkableSurface_4x4x0: Land_InvisibleBarrier_F
+	{
+		author = "Kharos";
+		displayName = "Walkable Surface 4x4x0";
+		editorCategory = "KH_Helpers";
+		editorSubcategory = "KH_Invisible";
+		model = "\x\kh\addons\main\models\SM_InvisibleWalkableSurface_4x4x0.p3d";
 		vehicleClass = "KH_Helpers";
 		scope = 2;
 	};

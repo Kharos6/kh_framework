@@ -7,9 +7,8 @@ uiNamespace setVariable ["KH_var_resetInitLuaExecutions", []];
 private _resetInitLuaExecutions = uiNamespace getVariable "KH_var_resetInitLuaExecutions";
 
 {
-    private _config = _x;
-    private _prefix = getText (_config >> "prefix");
-    private _basePath = (getText (_config >> "path")) regexReplace ["(/)", "\\"];
+    private _prefix = getText (_x >> "prefix");
+    private _basePath = (getText (_x >> "path")) regexReplace ["(/)", "\\"];
 
     {
         private _pathUsed = isText (_x >> "path");
@@ -67,7 +66,7 @@ private _resetInitLuaExecutions = uiNamespace getVariable "KH_var_resetInitLuaEx
                 };
 			};
         };
-    } forEach ("true" configClasses _config);
+    } forEach ("true" configClasses _x);
 } forEach ("true" configClasses (configFile >> "CfgLuaFunctions"));
 
 uiNamespace setVariable [

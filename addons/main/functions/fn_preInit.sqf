@@ -1198,6 +1198,10 @@ if isServer then {
 				missionNamespace setVariable ["KH_var_diagnosticsFramerateServer", parseNumber (diag_fps toFixed 0), KH_var_adminMachine];
 				missionNamespace setVariable ["KH_var_diagnosticsLocalUnitsServer", {local _x;} count allUnits, KH_var_adminMachine];
 			};
+
+			{
+				missionNamespace setVariable [["KH_var_ping_", owner _x] joinString "", ((getPlayerID _x) getUserInfo 9) select 0, true];
+			} forEach KH_var_allPlayerUnits;
 		},
 		true,
 		1,
@@ -1561,7 +1565,9 @@ if hasInterface then {
 												};
 											},
 											true,
-											1
+											true,
+											1,
+											true
 										]
 									] call KH_fnc_attach
 								];

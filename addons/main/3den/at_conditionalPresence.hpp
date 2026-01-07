@@ -22,7 +22,7 @@ class KH_ConditionalPresence: Title
 		class EventNameTitle: Title
 		{
 			text = "Event Name";
-			tooltip = "Event that dictates the presence of this entity.";
+			tooltip = "Either the variable name of a trigger or a CBA event name that dictates the presence of this entity.";
 			y = QUOTE(2 * CTRL_DEFAULT_H + 5 * CTRL_DEFAULT_Y);
 		};
 		class EventName: ctrlEdit

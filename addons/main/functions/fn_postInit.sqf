@@ -516,7 +516,7 @@ isNil {
 															!(isNull _nozzle) &&
 															(_siphonedTarget in (ropesAttachedTo _nozzleTip))
 														   ) then {
-															private _siphonedFuel = ((KH_var_fuelSiphoningSpeed * _totalDelta) min (fuel _siphonedTarget)) min (1 - fuel _currentTarget);
+															private _siphonedFuel = ((KH_var_fuelSiphoningSpeed * _totalDelta) min (fuel _siphonedTarget)) min (1 - (fuel _currentTarget));
 
 															if (_siphonedFuel isNotEqualTo 0) then {
 																[
@@ -938,6 +938,36 @@ isNil {
 				if KH_var_medical then {
 					[["CAManBase"], [], KH_fnc_medicalSetup, true] call KH_fnc_entityInit;
 				};
+
+				[
+					["Man"], 
+					[], 
+					{
+						params ["_unit"];
+
+						[
+							[_unit], 
+							{
+								params ["_unit"];
+
+								[
+									[_unit, clientOwner],
+									{
+										params ["_unit", "_clientOwner"];
+										_unit setVariable ["KH_var_owner", _clientOwner, true];
+									},
+									"SERVER",
+									true,
+									false
+								] call KH_fnc_execute;
+							},
+							_unit,
+							true,
+							["PERSISTENT", _unit, [], {}, ""]
+						] call KH_fnc_execute;
+					}, 
+					true
+				] call KH_fnc_entityInit;
 			};
 		},
 		true,

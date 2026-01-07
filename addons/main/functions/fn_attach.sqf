@@ -12,20 +12,26 @@ private _oldScale = getObjectScale _entity;
 private "_useGeometryRoadway";
 private "_type";
 private "_useGravity";
+private "_followRotation";
 private "_attachDistance";
+private "_checkCollision";
 
 if (_softAttach isEqualType []) then {
     _useGeometryRoadway = _softAttach param [1, true, [true]];
     _type = _softAttach param [2, "VELOCITY", [""]];
     _useGravity = _softAttach param [3, true, [true]];
-    _attachDistance = _softAttach param [4, 0, [0]];
+    _followRotation = _softAttach param [4, true, [true]];
+    _attachDistance = _softAttach param [5, 0, [0]];
+    _checkCollision = _softAttach param [6, true, [true]];
     _softAttach = _softAttach param [0, true, [true]];
 }
 else {
     _useGeometryRoadway = true;
     _type = "VELOCITY";
     _useGravity = true;
+    _followRotation = true;
     _attachDistance = 0;
+    _checkCollision = true;
 };
 
 if _softAttach exitWith {
@@ -123,9 +129,9 @@ if _softAttach exitWith {
     _entity setVariable ["KH_var_targetAttachDirection", getDir _target];
 
     private _attachHandler = [
-        [_entity, _target, _scale, _oldScale, _attachHandlerId, _healthHandler, _roadways, _useGeometryRoadway, _type, _useGravity, _attachDistance],
+        [_entity, _target, _scale, _oldScale, _attachHandlerId, _healthHandler, _roadways, _useGeometryRoadway, _type, _useGravity, _followRotation, _attachDistance, _checkCollision],
         {
-            params ["_entity", "_target", "_scale", "_oldScale", "_attachHandlerId", "_healthHandler", "_roadways", "_useGeometryRoadway", "_type", "_useGravity", "_attachDistance"];
+            params ["_entity", "_target", "_scale", "_oldScale", "_attachHandlerId", "_healthHandler", "_roadways", "_useGeometryRoadway", "_type", "_useGravity", "_followRotation", "_attachDistance", "_checkCollision"];
             private _targetVelocity = velocity _target;
             private _targetPosition = getPosASLVisual _target;
             private _entityPosition = getPosASLVisual _entity;
@@ -221,65 +227,67 @@ if _softAttach exitWith {
                 _movementVelocity = ((_entity getVariable ["KH_var_attachPreviousMovementVelocity", [0, 0, 0]]) vectorMultiply (1 - _blend)) vectorAdd (_currentMovementVelocity vectorMultiply _blend);
                 _localPosition = _localPosition vectorAdd (_target vectorWorldToModelVisual (_movementVelocity vectorMultiply _totalDelta));
             };
+            
+            if _checkCollision then {
+                private _wallIntersectionStartPosition = _entityPosition vectorAdd [0, 0, 0.1];
 
-            private _wallIntersectionStartPosition = _entityPosition vectorAdd [0, 0, 0.1];
+                private _wallIntersections = [[
+                    [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [0, 0.5, 1], _entityIgnores, true, 1, "GEOM", "FIRE", true, []],
+                    [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [0, -0.5, 1], _entityIgnores, true, 1, "GEOM", "FIRE", true, []],
+                    [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [0.5, 0, 1], _entityIgnores, true, 1, "GEOM", "FIRE", true, []],
+                    [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [-0.5, 0, 1], _entityIgnores, true, 1, "GEOM", "FIRE", true, []],
+                    [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [0.354, 0.354, 1], _entityIgnores, true, 1, "GEOM", "FIRE", true, []],
+                    [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [-0.354, 0.354, 1], _entityIgnores, true, 1, "GEOM", "FIRE", true, []],
+                    [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [0.354, -0.354, 1], _entityIgnores, true, 1, "GEOM", "FIRE", true, []],
+                    [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [-0.354, -0.354, 1], _entityIgnores, true, 1, "GEOM", "FIRE", true, []],
+                    [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [0.427, 0.427, 1], _entityIgnores, true, 1, "GEOM", "FIRE", true, []],
+                    [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [-0.427, 0.427, 1], _entityIgnores, true, 1, "GEOM", "FIRE", true, []],
+                    [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [0.427, -0.427, 1], _entityIgnores, true, 1, "GEOM", "FIRE", true, []],
+                    [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [-0.427, -0.427, 1], _entityIgnores, true, 1, "GEOM", "FIRE", true, []],
+                    [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [0.177, 0.177, 1], _entityIgnores, true, 1, "GEOM", "FIRE", true, []],
+                    [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [-0.177, 0.177, 1], _entityIgnores, true, 1, "GEOM", "FIRE", true, []],
+                    [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [0.177, -0.177, 1], _entityIgnores, true, 1, "GEOM", "FIRE", true, []],
+                    [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [-0.177, -0.177, 1], _entityIgnores, true, 1, "GEOM", "FIRE", true, []]
+                ]] call KH_fnc_raycast;
 
-            private _wallIntersections = [[
-                [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [0, 0.5, 1], _entityIgnores, true, 1, "GEOM", "FIRE", true, []],
-                [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [0, -0.5, 1], _entityIgnores, true, 1, "GEOM", "FIRE", true, []],
-                [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [0.5, 0, 1], _entityIgnores, true, 1, "GEOM", "FIRE", true, []],
-                [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [-0.5, 0, 1], _entityIgnores, true, 1, "GEOM", "FIRE", true, []],
-                [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [0.354, 0.354, 1], _entityIgnores, true, 1, "GEOM", "FIRE", true, []],
-                [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [-0.354, 0.354, 1], _entityIgnores, true, 1, "GEOM", "FIRE", true, []],
-                [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [0.354, -0.354, 1], _entityIgnores, true, 1, "GEOM", "FIRE", true, []],
-                [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [-0.354, -0.354, 1], _entityIgnores, true, 1, "GEOM", "FIRE", true, []],
-                [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [0.427, 0.427, 1], _entityIgnores, true, 1, "GEOM", "FIRE", true, []],
-                [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [-0.427, 0.427, 1], _entityIgnores, true, 1, "GEOM", "FIRE", true, []],
-                [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [0.427, -0.427, 1], _entityIgnores, true, 1, "GEOM", "FIRE", true, []],
-                [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [-0.427, -0.427, 1], _entityIgnores, true, 1, "GEOM", "FIRE", true, []],
-                [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [0.177, 0.177, 1], _entityIgnores, true, 1, "GEOM", "FIRE", true, []],
-                [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [-0.177, 0.177, 1], _entityIgnores, true, 1, "GEOM", "FIRE", true, []],
-                [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [0.177, -0.177, 1], _entityIgnores, true, 1, "GEOM", "FIRE", true, []],
-                [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [-0.177, -0.177, 1], _entityIgnores, true, 1, "GEOM", "FIRE", true, []]
-            ]] call KH_fnc_raycast;
+                private _wallCollisionVector = if (_wallIntersections isNotEqualTo []) then {
+                    private _totalVector = [0, 0, 0];
 
-            private _wallCollisionVector = if (_wallIntersections isNotEqualTo []) then {
-                private _totalVector = [0, 0, 0];
-
-                {
-                    _x params ["_hitPosition", "_hitNormal"];
-                    private _entityPosition2d = [_entityPosition select 0, _entityPosition select 1, 0];
-                    private _hitPosition2d = [_hitPosition select 0, _hitPosition select 1, 0];
-                    private _penetration = 0.25 - (_entityPosition2d vectorDistance _hitPosition2d);
-                    
-                    if (_penetration > 0) then {
-                        private _normal2d = [_hitNormal select 0, _hitNormal select 1, 0];
+                    {
+                        _x params ["_hitPosition", "_hitNormal"];
+                        private _entityPosition2d = [_entityPosition select 0, _entityPosition select 1, 0];
+                        private _hitPosition2d = [_hitPosition select 0, _hitPosition select 1, 0];
+                        private _penetration = 0.25 - (_entityPosition2d vectorDistance _hitPosition2d);
                         
-                        private _pushDirection = if ((vectorMagnitude _normal2d) > 0.001) then {
-                            vectorNormalized _normal2d;
-                        } 
-                        else {
-                            private _rawDirection = _entityPosition2d vectorDiff _hitPosition2d;
+                        if (_penetration > 0) then {
+                            private _normal2d = [_hitNormal select 0, _hitNormal select 1, 0];
                             
-                            if ((vectorMagnitude _rawDirection) > 0.001) then {
-                                vectorNormalized _rawDirection;
-                            } else {
-                                [0, 0, 0];
+                            private _pushDirection = if ((vectorMagnitude _normal2d) > 0.001) then {
+                                vectorNormalized _normal2d;
+                            } 
+                            else {
+                                private _rawDirection = _entityPosition2d vectorDiff _hitPosition2d;
+                                
+                                if ((vectorMagnitude _rawDirection) > 0.001) then {
+                                    vectorNormalized _rawDirection;
+                                } else {
+                                    [0, 0, 0];
+                                };
                             };
+                            
+                            _totalVector = _totalVector vectorAdd (_pushDirection vectorMultiply _penetration);
                         };
-                        
-                        _totalVector = _totalVector vectorAdd (_pushDirection vectorMultiply _penetration);
-                    };
-                } forEach _wallIntersections;
+                    } forEach _wallIntersections;
 
-                _totalVector;
-            }
-            else {
-                [0, 0, 0];
-            };
+                    _totalVector;
+                }
+                else {
+                    [0, 0, 0];
+                };
 
-            if (_wallCollisionVector isNotEqualTo [0, 0, 0]) then {
-                _localPosition = _localPosition vectorAdd (_target vectorWorldToModelVisual _wallCollisionVector);
+                if (_wallCollisionVector isNotEqualTo [0, 0, 0]) then {
+                    _localPosition = _localPosition vectorAdd (_target vectorWorldToModelVisual _wallCollisionVector);
+                };
             };
             
             private _correctionVelocity = if (_totalDelta > 0) then {
@@ -451,8 +459,10 @@ if _softAttach exitWith {
                 _entity setVelocity [0, 0, _fallVelocity];
             };
 
-            private _direction = (getDir _entity) - ((_entity getVariable ["KH_var_targetAttachDirection", getDir _target]) - (getDir _target));
-            _entity setVectorDir [sin _direction, cos _direction, 0];
+            if _followRotation then {
+                private _direction = (getDir _entity) - ((_entity getVariable ["KH_var_targetAttachDirection", getDir _target]) - (getDir _target));
+                _entity setVectorDir [sin _direction, cos _direction, 0];
+            };
 
             if (_scale isEqualTo 0) then {
                 _entity setObjectScale _oldScale;

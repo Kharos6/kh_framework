@@ -29,6 +29,7 @@ class CfgFunctions
 			class dynamic2dAudio {};
 			class dynamic3dAudio {};
 			class dynamicDisguise {};
+			class editTerrainHeight {};
 			class endMission {};
 			class engineeringSetup {};
 			class entityInit {};
@@ -43,6 +44,7 @@ class CfgFunctions
 			class getEntityVariableName {};
 			class getGroupAttributes {};
 			class getHeadViewTarget {};
+			class getLatency {};
 			class getMissionAttributes {};
 			class getMouseTarget {};
 			class getNormalizedScreenTransforms {};
@@ -78,6 +80,7 @@ class CfgFunctions
 			class moduleAssignTerminal {};
 			class moduleDynamicDisguise {};
 			class moduleDynamicDisguiseEquipment {};
+			class moduleEditTerrainHeight {};
 			class moduleEndMission {};
 			class moduleEntitySpawner {};
 			class moduleEquipableObject {};

@@ -198,6 +198,34 @@ class Attributes
 			};
 		};
 	};
+	class KH_SubcategoryNoHeader7: SubCategoryNoHeader1
+	{
+		attributeLoad = "((_this controlsGroupCtrl 101) controlsGroupCtrl 102) ctrlSetStructuredText (parseText (getText (_config >> 'description')))";
+		attributeSave = "";
+		h = QUOTE((2.5 * GRID_H) + (7 * 4.5 * GRID_H));
+		class Controls: Controls
+		{
+			class Group: Group
+			{
+				h = QUOTE((4.5 * GRID_H) * 7);
+				class Controls: Controls
+				{
+					class Title: Title
+					{
+						h = QUOTE((4.5 * GRID_H) * 7);
+					};
+					class DescriptionDeco: DescriptionDeco
+					{
+						h = QUOTE((4.5 * GRID_H) * 7);
+					};
+					class Description: Description
+					{
+						h = QUOTE((4.5 * GRID_H) * 7);
+					};
+				};
+			};
+		};
+	};
 	#include "\x\kh\addons\main\3den\at_cameraSequence.hpp"
 	#include "\x\kh\addons\main\3den\at_conditionalPresence.hpp"
 	#include "\x\kh\addons\main\3den\at_convertToAgent.hpp"

@@ -58,7 +58,7 @@ class CfgVehicles
 	class KH_HelperArrow: Static
 	{
 		author = "Kharos";
-		displayName = "Helper (Arrow)";
+		displayName = "Helper Arrow";
 		editorCategory = "KH_Helpers";
 		editorSubcategory = "KH_Invisible";
 		vehicleClass = "KH_Helpers";
@@ -68,7 +68,7 @@ class CfgVehicles
 	class KH_HelperSquare: Static
 	{
 		author = "Kharos";
-		displayName = "Helper (Square)";
+		displayName = "Helper Square";
 		editorCategory = "KH_Helpers";
 		editorSubcategory = "KH_Invisible";
 		icon = "iconObject_1x1";
@@ -231,6 +231,7 @@ class CfgVehicles
 	#include "\x\kh\addons\main\vehicles\modules\assignTerminal.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\dynamicDisguise.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\dynamicDisguiseEquipment.hpp"
+	#include "\x\kh\addons\main\vehicles\modules\editTerrainHeight.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\endMission.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\entitySpawner.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\equipableObject.hpp"

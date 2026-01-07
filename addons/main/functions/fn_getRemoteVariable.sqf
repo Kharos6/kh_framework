@@ -1,7 +1,7 @@
 params [
     ["_namespace", missionNamespace, [true, objNull, grpNull, locationNull, displayNull, controlNull, missionNamespace]], 
     ["_name", "", ["", []]], 
-    ["_target", true, [true, 0, "", [], {}, objNull, teamMemberNull, grpNull, sideUnknown, locationNull]]
+    ["_target", true, [true, 0, "", {}, objNull, teamMemberNull]]
 ];
 
 if (_target isEqualType teamMemberNull) then {

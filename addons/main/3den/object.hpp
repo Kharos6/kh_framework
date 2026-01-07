@@ -278,7 +278,7 @@ class Object
 					displayName = "Set Random Loadout";
 					tooltip = "Either loadout arrays or a global variable containing an array of loadouts that will be selected from at random and applied to this unit.";
 					property = "KH_SetRandomLoadout";
-					control = "Edit";
+					control = "EditMulti5";
 					expression = 
 					"\
 						if ((_value isNotEqualTo '') && (_value isNotEqualTo '[]') && !is3DEN) then {\
@@ -287,7 +287,7 @@ class Object
 								{\
 									params ['_entity', '_loadouts'];\
 									if (('[' in _loadouts) || (']' in _loadouts)) then {\
-										_entity setUnitLoadout (selectRandom (parseSimpleArray _loadouts));\
+										_entity setUnitLoadout (selectRandom (parseSimpleArray (['[', _loadouts, ']'] joinString '')));\
 									}\
 									else {\
 										_entity setUnitLoadout (selectRandom (missionNamespace getVariable [_loadouts, []]));\
@@ -309,9 +309,9 @@ class Object
 			{
 				class KH_ConditionalPresenceSubcategory
 				{
-					description = "Specify a CBA event which changes the simulation and visibility of this entity every time it is broadcasted to the server. If its argument is true, the entity will become simulated and visible. If its argument false, the entity will become unsimulated and invisible. The initial simulation and visibility state of the entity remains unchanged until the event is broadcast for the first time.";
+					description = "Specify the variable name of a trigger or a CBA event that will change the simulation and visibility of this entity. In case of a trigger, the simulation and visibility changes when it is activated or deactivated. In case of a CBA event, the simulation and visiblity changes when it is broadcasted to the server with a true or false argument. If activated or true, the entity will become simulated and visible; if deactivated or false, the entity will become unsimulated and invisible. The initial simulation and visibility state of the entity remains unchanged until the trigger state changes or the event is broadcast for the first time.";
 					data = "AttributeSystemSubcategory";
-					control = "KH_SubcategoryNoHeader4";
+					control = "KH_SubcategoryNoHeader7";
 				};
 				class KH_ConditionalPresence 
 				{
@@ -321,7 +321,10 @@ class Object
 					"\
 						_value params ['_toggle', '_event', '_init', '_invert'];\
 						if (_toggle && !is3DEN && (_event isNotEqualTo '')) then {\
-							[_this, _event, compile _init, _invert] call KH_fnc_conditionalPresence;\
+							if !(isNull (missionNamespace getVariable [_event, objNull])) then {\
+								_event = missionNamespace getVariable [_event, objNull];\
+							};\
+							KH_var_postInitExecutions pushBack [[_this, _event, compile _init, _invert], KH_fnc_conditionalPresence];\
 						};\
 					";
 					defaultValue = "[false, '', '', false]";

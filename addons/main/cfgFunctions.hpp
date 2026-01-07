@@ -137,6 +137,7 @@ class CfgFunctions
 			class teleport {};
 			class toggleUserInput {};
 			class triggerCbaEvent {};
+			class unitAction {};
 			class updateAiInstance {};
 			class updateTtsSpeakerEntity {};
 			class vectorDirToPitchYaw {};

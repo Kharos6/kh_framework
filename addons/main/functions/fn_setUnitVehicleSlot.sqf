@@ -1,16 +1,27 @@
 params [["_unit", objNull, [objNull]], ["_vehicle", [], [[], objNull]], ["_reassign", true, [true]]];
 
 if (_vehicle isEqualType objNull) exitWith {
-    if ((_vehicle emptyPositions "") isNotEqualTo 0) then {
-        _unit moveInAny _vehicle;
-        true;
+    if (isNull _vehicle) then {
+        unassignVehicle _unit;
+        moveOut _unit;
     }
     else {
-        false;
+        if ((_vehicle emptyPositions "") isNotEqualTo 0) then {
+            _unit moveInAny _vehicle;
+            true;
+        }
+        else {
+            false;
+        };
     };
 };
 
 _vehicle params [["_vehicle", objNull, [objNull]], ["_slot", "", [""]], ["_index", 0, [0, []]]];
+
+if (isNull _vehicle) exitWith {
+    unassignVehicle _unit;
+    moveOut _unit;
+};
 
 if ((_vehicle emptyPositions "") isEqualTo 0) exitWith {
     false;

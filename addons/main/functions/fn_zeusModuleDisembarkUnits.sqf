@@ -7,6 +7,7 @@ isNil {
 			params ["_logic"];
 
             {
+				unassignVehicle _x;
                 moveOut _x;
             } forEach (crew (attachedTo _logic));
 

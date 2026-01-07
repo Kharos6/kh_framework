@@ -59,6 +59,7 @@ else {
 						[_handlerId] call KH_fnc_removeHandler;
 					}
 					else {
+						unassignVehicle _entity;
 						moveOut _entity;
 					};
 				},

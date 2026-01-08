@@ -1,4 +1,4 @@
-name: networkMessageReceive
+name: khSetVariable
 description: TODO.
 syntax:
 - call: !Binary [player, player]
@@ -15,4 +15,4 @@ syntax:
 argument_loc: Local
 effect_loc: Local
 examples:
-- <sqf>object networkMessageReceive object</sqf>
+- <sqf>object khSetVariable object</sqf>

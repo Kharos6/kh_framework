@@ -25,6 +25,7 @@ constexpr int NET_DEFAULT_KEEPALIVE_TIME_MS = 15000;
 constexpr int NET_DEFAULT_KEEPALIVE_INTERVAL_MS = 1000;
 constexpr int NET_DEFAULT_SEND_BATCH_SIZE = 64;
 constexpr const char* NET_INTERNAL_ROUTE_EVENT = "_KH_INTERNAL_ROUTE_";
+constexpr const char* NET_INTERNAL_SET_VARIABLE_EVENT = "_KH_INTERNAL_SETVAR_";
 constexpr const char* NET_INTERNAL_CONDITIONAL_EVENT = "_KH_INTERNAL_COND_";
 
 enum class NetworkTargetType : uint8_t {
@@ -48,6 +49,19 @@ enum class NetworkTargetType : uint8_t {
     CODE_CONDITION = 17,     // CODE
     ARRAY_TARGETS = 18,      // Array of mixed target types
     STRING_EXTENDED = 19     // Specific string type
+};
+
+enum class SetVariableNamespaceType : uint8_t {
+    NAMESPACE_MISSION = 0,
+    NAMESPACE_PROFILE = 1,
+    NAMESPACE_UI = 2,
+    NAMESPACE_PARSING = 3,
+    NAMESPACE_SERVER = 4,
+    NAMESPACE_MISSION_PROFILE = 5,
+    OBJECT = 10,
+    GROUP = 11,
+    LOCATION = 12,
+    DISPLAY = 13,
 };
 
 enum class WireType : uint8_t {
@@ -4514,17 +4528,48 @@ public:
             return;
         }
         
+        std::string actual_key = jip_key;
+        
+        if (event_name == NET_INTERNAL_SET_VARIABLE_EVENT) {
+            try {
+                auto& arr = message.to_array();
+                
+                if (arr.size() >= 2) {
+                    game_value ns_data = arr[0];
+                    std::string var_name = static_cast<std::string>(arr[1]);
+                    auto& ns_arr = ns_data.to_array();
+                    
+                    if (!ns_arr.empty()) {
+                        int ns_type = static_cast<int>(static_cast<float>(ns_arr[0]));
+                        std::string ns_id;
+                        
+                        if (ns_arr.size() > 1) {
+                            if (ns_arr[1].type_enum() == game_data_type::STRING) {
+                                ns_id = static_cast<std::string>(ns_arr[1]);
+                            } else if (ns_arr[1].type_enum() == game_data_type::SCALAR) {
+                                ns_id = std::to_string(static_cast<int>(static_cast<float>(ns_arr[1])));
+                            }
+                        }
+                        
+                        actual_key = "_SETVAR_" + std::to_string(ns_type) + "_" + ns_id + "_" + var_name;
+                    }
+                }
+            } catch (...) {
+                // Fall back to provided key if parsing fails
+            }
+        }
+        
         try {
             auto& tls_buffer = get_tls_serialize_buffer();
             tls_buffer.clear();
             serialize_game_value(tls_buffer, message);
             std::vector<uint8_t> payload(tls_buffer.begin(), tls_buffer.end());
             std::lock_guard<std::mutex> lock(jip_mutex_);
-            jip_messages_[jip_key] = {event_name, std::move(payload), sender, dependency_net_id, dependency_is_group};
+            jip_messages_[actual_key] = {event_name, std::move(payload), sender, dependency_net_id, dependency_is_group};
         } catch (const std::exception& e) {
-            report_error("KH Network: Failed to store JIP message '" + jip_key + "' - " + std::string(e.what()));
+            report_error("KH Network: Failed to store JIP message '" + actual_key + "' - " + std::string(e.what()));
         } catch (...) {
-            report_error("KH Network: Failed to store JIP message '" + jip_key + "' - unknown error");
+            report_error("KH Network: Failed to store JIP message '" + actual_key + "' - unknown error");
         }
     }
 
@@ -4793,6 +4838,11 @@ public:
                     process_routing_request(msg.message, msg.sender_client_id);
                     continue;
                 }
+
+                if (msg.event_name == NET_INTERNAL_SET_VARIABLE_EVENT) {
+                    process_set_variable_message(msg.message, msg.sender_client_id);
+                    continue;
+                }
                 
                 // Check for internal conditional event
                 if (msg.event_name == NET_INTERNAL_CONDITIONAL_EVENT) {
@@ -4806,23 +4856,27 @@ public:
                             game_value result = raw_call_sqf_native(condition);
                             
                             if (result.type_enum() == game_data_type::BOOL && static_cast<bool>(result)) {
-                                HandlerListPtr handlers = cow_handlers_.get_handlers(real_event_name);
+                                if (real_event_name == NET_INTERNAL_SET_VARIABLE_EVENT) {
+                                    process_set_variable_message(real_message, msg.sender_client_id);
+                                } else {
+                                    HandlerListPtr handlers = cow_handlers_.get_handlers(real_event_name);
                                 
-                                if (handlers) {
-                                    for (const auto& handler : *handlers) {
-                                        try {
-                                            auto game_state = (intercept::client::host::functions.get_engine_allocator())->gameState;
-                                            static r_string message_name = "_this"sv;
-                                            static r_string sender_name = "_sender"sv;
-                                            static r_string args_name = "_args"sv;
-                                            static r_string handler_id_name = "_handlerid"sv;
-                                            game_state->set_local_variable(message_name, real_message);
-                                            game_state->set_local_variable(sender_name, game_value(static_cast<float>(msg.sender_client_id)));
-                                            game_state->set_local_variable(args_name, handler.handler_arguments);
-                                            game_state->set_local_variable(handler_id_name, game_value(static_cast<float>(handler.handler_id)));
-                                            intercept::client::host::functions.invoke_raw_unary(intercept::client::__sqf::unary__isnil__code_string__ret__bool, handler.handler_function);
-                                        } catch (const std::exception& e) {
-                                            report_error("KH Network: Handler error for '" + msg.event_name + "' - " + std::string(e.what()));
+                                    if (handlers) {
+                                        for (const auto& handler : *handlers) {
+                                            try {
+                                                auto game_state = (intercept::client::host::functions.get_engine_allocator())->gameState;
+                                                static r_string message_name = "_this"sv;
+                                                static r_string sender_name = "_sender"sv;
+                                                static r_string args_name = "_args"sv;
+                                                static r_string handler_id_name = "_handlerid"sv;
+                                                game_state->set_local_variable(message_name, real_message);
+                                                game_state->set_local_variable(sender_name, game_value(static_cast<float>(msg.sender_client_id)));
+                                                game_state->set_local_variable(args_name, handler.handler_arguments);
+                                                game_state->set_local_variable(handler_id_name, game_value(static_cast<float>(handler.handler_id)));
+                                                intercept::client::host::functions.invoke_raw_unary(intercept::client::__sqf::unary__isnil__code_string__ret__bool, handler.handler_function);
+                                            } catch (const std::exception& e) {
+                                                report_error("KH Network: Handler error for '" + msg.event_name + "' - " + std::string(e.what()));
+                                            }
                                         }
                                     }
                                 }
@@ -4880,6 +4934,14 @@ public:
                     }
 
                     continue;
+                } else if (msg.event_name == NET_INTERNAL_SET_VARIABLE_EVENT) {
+                    if (!msg.payload.empty()) {
+                        size_t offset = 0;
+                        game_value setvar_data = deserialize_game_value(msg.payload.data(), offset, msg.payload.size());
+                        process_set_variable_message(setvar_data, msg.sender_client_id);
+                    }
+
+                    continue;
                 } else if (msg.event_name == NET_INTERNAL_CONDITIONAL_EVENT) {
                     if (!msg.payload.empty()) {
                         try {
@@ -4894,23 +4956,27 @@ public:
                                 game_value result = raw_call_sqf_native(condition);
                                 
                                 if (result.type_enum() == game_data_type::BOOL && static_cast<bool>(result)) {
-                                    HandlerListPtr handlers = cow_handlers_.get_handlers(real_event_name);
-                                    
-                                    if (handlers) {
-                                        for (const auto& handler : *handlers) {
-                                            try {
-                                                auto game_state = (intercept::client::host::functions.get_engine_allocator())->gameState;
-                                                static r_string message_name = "_this"sv;
-                                                static r_string sender_name = "_sender"sv;
-                                                static r_string args_name = "_args"sv;
-                                                static r_string handler_id_name = "_handlerid"sv;
-                                                game_state->set_local_variable(message_name, real_message);
-                                                game_state->set_local_variable(sender_name, game_value(static_cast<float>(msg.sender_client_id)));
-                                                game_state->set_local_variable(args_name, handler.handler_arguments);
-                                                game_state->set_local_variable(handler_id_name, game_value(static_cast<float>(handler.handler_id)));
-                                                intercept::client::host::functions.invoke_raw_unary(intercept::client::__sqf::unary__isnil__code_string__ret__bool, handler.handler_function);
-                                            } catch (const std::exception& e) {
-                                                report_error("KH Network: Handler error for '" + msg.event_name + "' - " + std::string(e.what()));
+                                    if (real_event_name == NET_INTERNAL_SET_VARIABLE_EVENT) {
+                                        process_set_variable_message(real_message, msg.sender_client_id);
+                                    } else {
+                                        HandlerListPtr handlers = cow_handlers_.get_handlers(real_event_name);
+                                        
+                                        if (handlers) {
+                                            for (const auto& handler : *handlers) {
+                                                try {
+                                                    auto game_state = (intercept::client::host::functions.get_engine_allocator())->gameState;
+                                                    static r_string message_name = "_this"sv;
+                                                    static r_string sender_name = "_sender"sv;
+                                                    static r_string args_name = "_args"sv;
+                                                    static r_string handler_id_name = "_handlerid"sv;
+                                                    game_state->set_local_variable(message_name, real_message);
+                                                    game_state->set_local_variable(sender_name, game_value(static_cast<float>(msg.sender_client_id)));
+                                                    game_state->set_local_variable(args_name, handler.handler_arguments);
+                                                    game_state->set_local_variable(handler_id_name, game_value(static_cast<float>(handler.handler_id)));
+                                                    intercept::client::host::functions.invoke_raw_unary(intercept::client::__sqf::unary__isnil__code_string__ret__bool, handler.handler_function);
+                                                } catch (const std::exception& e) {
+                                                    report_error("KH Network: Handler error for '" + msg.event_name + "' - " + std::string(e.what()));
+                                                }
                                             }
                                         }
                                     }
@@ -5150,6 +5216,215 @@ public:
         }
         
         sqf::diag_log(log_msg);
+    }
+
+    static SetVariableNamespaceType get_namespace_type(const game_value& ns_value) {
+        auto type = ns_value.type_enum();
+        
+        switch (type) {
+            case game_data_type::NAMESPACE: {
+                if (ns_value == sqf::mission_namespace()) {
+                    return SetVariableNamespaceType::NAMESPACE_MISSION;
+                } else if (ns_value == sqf::profile_namespace()) {
+                    return SetVariableNamespaceType::NAMESPACE_PROFILE;
+                } else if (ns_value == sqf::ui_namespace()) {
+                    return SetVariableNamespaceType::NAMESPACE_UI;
+                } else if (ns_value == sqf::parsing_namespace()) {
+                    return SetVariableNamespaceType::NAMESPACE_PARSING;
+                } else if (ns_value == sqf::server_namespace()) {
+                    return SetVariableNamespaceType::NAMESPACE_SERVER;
+                }
+                // Default to mission namespace
+                return SetVariableNamespaceType::NAMESPACE_MISSION;
+            }
+
+            case game_data_type::OBJECT:
+                return SetVariableNamespaceType::OBJECT;
+            case game_data_type::GROUP:
+                return SetVariableNamespaceType::GROUP;
+            case game_data_type::LOCATION:
+                return SetVariableNamespaceType::LOCATION;
+            case game_data_type::DISPLAY:
+                return SetVariableNamespaceType::DISPLAY;
+            default:
+                return SetVariableNamespaceType::NAMESPACE_MISSION;
+        }
+    }
+
+    static game_value serialize_namespace_for_network(const game_value& ns_value) {
+        auto ns_type = get_namespace_type(ns_value);
+        auto_array<game_value> result;
+        result.push_back(game_value(static_cast<float>(static_cast<uint8_t>(ns_type))));
+        
+        switch (ns_type) {
+            case SetVariableNamespaceType::OBJECT: {
+                object obj = static_cast<object>(ns_value);
+
+                if (!sqf::is_null(obj)) {
+                    result.push_back(game_value(static_cast<std::string>(sqf::net_id(obj))));
+                } else {
+                    result.push_back(game_value(""));
+                }
+
+                break;
+            }
+
+            case SetVariableNamespaceType::GROUP: {
+                group grp = static_cast<group>(ns_value);
+
+                if (!sqf::is_null(grp)) {
+                    result.push_back(game_value(static_cast<std::string>(sqf::net_id(grp))));
+                } else {
+                    result.push_back(game_value(""));
+                }
+
+                break;
+            }
+
+            case SetVariableNamespaceType::LOCATION: {
+                location loc = static_cast<location>(ns_value);
+
+                if (!sqf::is_null(loc)) {
+                    result.push_back(game_value(static_cast<std::string>(sqf::class_name(loc))));
+                } else {
+                    result.push_back(game_value(""));
+                }
+                
+                break;
+            }
+
+            case SetVariableNamespaceType::DISPLAY: {
+                display disp = static_cast<display>(ns_value);
+
+                if (!sqf::is_null(disp)) {
+                    result.push_back(game_value(static_cast<float>(sqf::ctrl_idd(disp))));
+                } else {
+                    result.push_back(game_value(-1.0f));
+                }
+
+                break;
+            }
+
+            default:
+                // Named namespaces don't need additional data
+                result.push_back(game_value());
+                break;
+        }
+        
+        return game_value(std::move(result));
+    }
+
+    static void apply_set_variable_from_network(const game_value& ns_data, const std::string& var_name, const game_value& value) {        
+        auto& arr = ns_data.to_array();
+        
+        SetVariableNamespaceType ns_type = static_cast<SetVariableNamespaceType>(
+            static_cast<uint8_t>(static_cast<float>(arr[0]))
+        );
+
+        game_value ns_identifier = arr[1];
+        
+        try {
+            switch (ns_type) {
+                case SetVariableNamespaceType::NAMESPACE_MISSION:
+                    sqf::set_variable(sqf::mission_namespace(), var_name, value);
+                    break;
+                case SetVariableNamespaceType::NAMESPACE_PROFILE:
+                    sqf::set_variable(sqf::profile_namespace(), var_name, value);
+                    break;
+                case SetVariableNamespaceType::NAMESPACE_UI:
+                    sqf::set_variable(sqf::ui_namespace(), var_name, value);
+                    break;
+                case SetVariableNamespaceType::NAMESPACE_PARSING:
+                    sqf::set_variable(sqf::parsing_namespace(), var_name, value);
+                    break;
+                case SetVariableNamespaceType::NAMESPACE_SERVER:
+                    sqf::set_variable(sqf::server_namespace(), var_name, value);
+                    break;
+                case SetVariableNamespaceType::NAMESPACE_MISSION_PROFILE:
+                    sqf::set_variable(sqf::mission_profile_namespace(), var_name, value);
+                    break;
+                case SetVariableNamespaceType::OBJECT: {
+                    std::string net_id = static_cast<std::string>(ns_identifier);
+
+                    if (!net_id.empty()) {
+                        object obj = sqf::object_from_net_id(net_id);
+
+                        if (!sqf::is_null(obj)) {
+                            sqf::set_variable(obj, var_name, value);
+                        }
+                    }
+
+                    break;
+                }
+
+                case SetVariableNamespaceType::GROUP: {
+                    std::string net_id = static_cast<std::string>(ns_identifier);
+
+                    if (!net_id.empty()) {
+                        group grp = sqf::group_from_net_id(net_id);
+
+                        if (!sqf::is_null(grp)) {
+                            sqf::set_variable(grp, var_name, value);
+                        }
+                    }
+                    
+                    break;
+                }
+
+                case SetVariableNamespaceType::LOCATION: {
+                    std::string loc_name = static_cast<std::string>(ns_identifier);
+
+                    if (!loc_name.empty()) {
+                        float world_size = sqf::world_size();
+                        vector3 center(world_size / 2.0f, world_size / 2.0f, 0.0f);
+                        float radius = world_size * std::sqrt(2.0f) / 2.0f;
+                        std::vector<std::string> all_types;
+                        auto all_locations = sqf::nearest_locations(center, all_types, radius);
+                        
+                        for (const auto& loc : all_locations) {
+                            if (static_cast<std::string>(sqf::class_name(loc)) == loc_name) {
+                                sqf::set_variable(loc, var_name, value);
+                                break;
+                            }
+                        }
+                    }
+
+                    break;
+                }
+                
+                case SetVariableNamespaceType::DISPLAY: {
+                    int idd = static_cast<int>(static_cast<float>(ns_identifier));
+
+                    if (idd >= 0) {
+                        display disp = sqf::find_display(idd);
+
+                        if (!sqf::is_null(disp)) {
+                            sqf::set_variable(disp, var_name, value);
+                        }
+                    }
+
+                    break;
+                }
+
+                default:
+                    sqf::set_variable(sqf::mission_namespace(), var_name, value);
+                    break;
+            }
+        } catch (const std::exception& e) {
+            report_error("KH Network: Failed to apply variable - " + std::string(e.what()));
+        }
+    }
+
+    static void process_set_variable_message(const game_value& message, int sender_client_id) {
+        try {
+            auto& arr = message.to_array();
+            game_value ns_data = arr[0];
+            std::string var_name = static_cast<std::string>(arr[1]);
+            game_value value = arr[2];
+            apply_set_variable_from_network(ns_data, var_name, value);
+        } catch (const std::exception& e) {
+            report_error("KH Network: Error processing message - " + std::string(e.what()));
+        }
     }
         
     bool is_initialized() const {

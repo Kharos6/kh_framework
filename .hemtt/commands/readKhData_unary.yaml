@@ -1,7 +1,7 @@
-name: networkMessageSend
+name: readKhData
 description: TODO.
 syntax:
-- call: !Binary [player, player]
+- call: !Unary player
   ret:
     - Boolean
     - TODO.
@@ -9,10 +9,7 @@ syntax:
   - name: arg1
     description: TODO.
     type: Object
-  - name: arg2
-    description: TODO.
-    type: Object
 argument_loc: Local
 effect_loc: Local
 examples:
-- <sqf>object networkMessageSend object</sqf>
+- <sqf>readKhData object</sqf>

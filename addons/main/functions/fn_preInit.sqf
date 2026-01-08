@@ -468,7 +468,7 @@ if isServer then {
 				KH_var_networkingCoalesceDelay
 			];
 
-			networkInitialize;
+			khNetworkInitialize;
 		},
 		true,
 		{

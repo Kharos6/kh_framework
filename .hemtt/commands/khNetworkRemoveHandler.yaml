@@ -1,4 +1,4 @@
-name: networkMessageSend
+name: khNetworkRemoveHandler
 description: TODO.
 syntax:
 - call: !Unary player
@@ -12,4 +12,4 @@ syntax:
 argument_loc: Local
 effect_loc: Local
 examples:
-- <sqf>networkMessageSend object</sqf>
+- <sqf>khNetworkRemoveHandler object</sqf>

@@ -1,4 +1,4 @@
-name: networkShutdown
+name: khNetworkInitialize
 description: TODO.
 syntax:
 - call: !Nular
@@ -9,4 +9,4 @@ syntax:
 argument_loc: Local
 effect_loc: Local
 examples:
-- <sqf>networkShutdown</sqf>
+- <sqf>khNetworkInitialize</sqf>

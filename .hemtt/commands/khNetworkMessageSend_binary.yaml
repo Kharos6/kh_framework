@@ -1,7 +1,7 @@
-name: enableNetworkLogging
+name: khNetworkMessageSend
 description: TODO.
 syntax:
-- call: !Unary player
+- call: !Binary [player, player]
   ret:
     - Boolean
     - TODO.
@@ -9,7 +9,10 @@ syntax:
   - name: arg1
     description: TODO.
     type: Object
+  - name: arg2
+    description: TODO.
+    type: Object
 argument_loc: Local
 effect_loc: Local
 examples:
-- <sqf>enableNetworkLogging object</sqf>
+- <sqf>object khNetworkMessageSend object</sqf>

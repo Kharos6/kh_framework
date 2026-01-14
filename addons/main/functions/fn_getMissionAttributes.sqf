@@ -1,5 +1,5 @@
 [
-    KH_var_missionSessionId,
+    KH_var_serverMissionSessionId,
     [
         environmentEnabled,
         timeMultiplier,

@@ -103,7 +103,7 @@ class KH_ModuleEditTerrainHeight: Module_F
 		sync[] = {};
 		position = 1;
 		direction = 1;
-		optional = 0;
+		optional = 1;
 		duplicate = 1;
 	};
 };

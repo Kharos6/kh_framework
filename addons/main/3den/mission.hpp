@@ -544,7 +544,7 @@ class Mission
 					{
 						description = "Automatically sets curators based on index pair equivalents of strings of Steam IDs and curator module variable names. If a Steam ID does not have a module pair, a module will be created for that player.";
 						data = "AttributeSystemSubcategory";
-						control = "KH_SubcategoryNoHeader1";
+						control = "KH_SubcategoryNoHeader3";
 					};
 					class KH_Curators
 					{

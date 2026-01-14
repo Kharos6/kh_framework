@@ -23,9 +23,9 @@ class KH_ModuleAIInstanceSetup: Module_F
 		class KH_ModuleAIInstanceSetupOwner: Edit
 		{
 			displayName = "Owner";
-			tooltip = "The actual machine that will host the AI instance; can be a variable name of a playable unit, a steam ID, or just SERVER.";
+			tooltip = "The actual machine that will host the AI instance; can be a variable name of a playable unit or a steam ID. Leave empty to use server.";
 			property = "KH_ModuleAIInstanceSetupOwner";
-			defaultValue = "'SERVER'";
+			defaultValue = "''";
 		};
 		class KH_ModuleAIInstanceSetupName: Edit
 		{
@@ -46,42 +46,42 @@ class KH_ModuleAIInstanceSetup: Module_F
 			displayName = "Marker: System Start";
 			tooltip = "Symbol sequence used to define the start of the system sequence; dependant on the model.";
 			property = "KH_ModuleAIInstanceSetupMarkerSystemStart";
-			defaultValue = "'<|begin_of_text|><|start_header_id|>system<|end_header_id|>'";
+			defaultValue = "''";
 		};
 		class KH_ModuleAIInstanceSetupMarkerSystemEnd: Edit
 		{
 			displayName = "Marker: System End";
 			tooltip = "Symbol sequence used to define the end of the system sequence; dependant on the model.";
 			property = "KH_ModuleAIInstanceSetupMarkerSystemEnd";
-			defaultValue = "'<|eot_id|>'";
+			defaultValue = "''";
 		};
 		class KH_ModuleAIInstanceSetupMarkerUserStart: Edit
 		{
 			displayName = "Marker: User Start";
 			tooltip = "Symbol sequence used to define the start of the user sequence; dependant on the model.";
 			property = "KH_ModuleAIInstanceSetupMarkerUserStart";
-			defaultValue = "'<|start_header_id|>user<|end_header_id|>'";
+			defaultValue = "''";
 		};
 		class KH_ModuleAIInstanceSetupMarkerUserEnd: Edit
 		{
 			displayName = "Marker: User End";
 			tooltip = "Symbol sequence used to define the end of the user sequence; dependant on the model.";
 			property = "KH_ModuleAIInstanceSetupMarkerUserEnd";
-			defaultValue = "'<|eot_id|>'";
+			defaultValue = "''";
 		};
 		class KH_ModuleAIInstanceSetupMarkerAssistantStart: Edit
 		{
 			displayName = "Marker: Assistant Start";
 			tooltip = "Symbol sequence used to define the start of the assistant sequence; dependant on the model.";
 			property = "KH_ModuleAIInstanceSetupMarkerAssistantStart";
-			defaultValue = "'<|start_header_id|>assistant<|end_header_id|>'";
+			defaultValue = "''";
 		};
 		class KH_ModuleAIInstanceSetupMarkerAssistantEnd: Edit
 		{
 			displayName = "Marker: Assistant End";
 			tooltip = "Symbol sequence used to define the end of the assistant sequence; dependant on the model.";
 			property = "KH_ModuleAIInstanceSetupMarkerAssistantEnd";
-			defaultValue = "'<|eot_id|>'";
+			defaultValue = "''";
 		};
 		class KH_ModuleAIInstanceSetupSystemPrompt: EditCodeMulti5
 		{

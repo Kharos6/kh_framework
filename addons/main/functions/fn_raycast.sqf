@@ -17,7 +17,18 @@ if ((count _this) isEqualTo 1) then {
 			["_draw", [], [[]]]
 		];
 		
-		[_ignored, {isNull _x;}] call KH_fnc_deleteArrayElements;
+		[
+			_ignored, 
+			{
+				if (_x isEqualType objNull) then {
+					isNull _x;
+				}
+				else {
+					false;
+				};
+			}
+		] call KH_fnc_deleteArrayElements;
+		
 		private _allowIgnoredCheck = true;
 		private _ignored1 = objNull;
 		private _ignored2 = objNull;

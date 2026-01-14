@@ -27,7 +27,7 @@ if ((_vehicle emptyPositions "") isEqualTo 0) exitWith {
     false;
 };
 
-switch _slot do {
+switch (toUpperANSI _slot) do {
     case "DRIVER": {
         if (_reassign && !(isNull (driver _vehicle))) then {
             _unit moveInAny _vehicle;

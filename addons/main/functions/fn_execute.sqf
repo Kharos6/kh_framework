@@ -119,7 +119,7 @@ else {
 			};
 
 			case "PERSISTENT": {
-				private _object = _special param [1, objNull, [objNull]];
+				private _entity = _special param [1, objNull, [objNull, grpNull]];
 				private _sendoffArguments = _special param [2];
 				private _sendoffFunction = _special param [3, {}, ["", {}]];
 				private _persistentExecutionId = _special param [4, "", [""]];
@@ -136,15 +136,15 @@ else {
 					};
 				};
 
-				_object setVariable [_persistentExecutionId, true, true];
+				_entity setVariable [_persistentExecutionId, true, true];
 				["KH_eve_execution", [_arguments, _function, clientOwner, _unscheduled], _target, false] call KH_fnc_triggerCbaEvent;
 
 				[
 					"KH_eve_persistentExecutionSetup", 
-					[_arguments, _function, _object, _sendoffArguments, [_sendoffFunction, false] call KH_fnc_serializeFunction, clientOwner, _unscheduled, _persistentExecutionId]
+					[_arguments, _function, _entity, _sendoffArguments, [_sendoffFunction, false] call KH_fnc_serializeFunction, clientOwner, _unscheduled, _persistentExecutionId]
 				] call CBA_fnc_serverEvent;
 
-				[_object, _persistentExecutionId, true];
+				[_entity, _persistentExecutionId, true];
 			};
 
 			case "PLAYER_PRESENCE": {

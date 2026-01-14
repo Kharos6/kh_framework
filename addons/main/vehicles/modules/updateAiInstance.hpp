@@ -30,9 +30,9 @@ class KH_ModuleUpdateAIInstance: Module_F
 		class KH_ModuleUpdateAIInstanceOwner: Edit
 		{
 			displayName = "Owner";
-			tooltip = "The actual machine on which the AI instance will be updated; can be a variable name of a playable unit or just SERVER.";
+			tooltip = "The actual machine on which the AI instance will be updated; can be a variable name of a playable unit or a steam ID. Leave empty to use server.";
 			property = "KH_ModuleUpdateAIInstanceOwner";
-			defaultValue = "'SERVER'";
+			defaultValue = "''";
 		};
 		class KH_ModuleUpdateAIInstanceName: Edit
 		{

@@ -4,15 +4,15 @@ KH_var_postInitExecutions pushBack [
         params [["_logic", objNull, [objNull]], ["_units", [], [[]]], ["_activated", true, [true]]];
 
         if _activated then {
-            private _owner = _logic getVariable ["KH_ModuleAIInstanceSetupOwner", "SERVER"];
+            private _owner = _logic getVariable ["KH_ModuleAIInstanceSetupOwner", ""];
             private _name = _logic getVariable ["KH_ModuleAIInstanceSetupName", ""];
             private _model = _logic getVariable ["KH_ModuleAIInstanceSetupModel", ""];
-            private _markerSystemStart = _logic getVariable ["KH_ModuleAIInstanceSetupMarkerSystemStart", "<|begin_of_text|><|start_header_id|>system<|end_header_id|>"];
-            private _markerSystemEnd = _logic getVariable ["KH_ModuleAIInstanceSetupMarkerSystemEnd", "<|eot_id|>"];
-            private _markerUserStart = _logic getVariable ["KH_ModuleAIInstanceSetupMarkerUserStart", "<|start_header_id|>user<|end_header_id|>"];
-            private _markerUserEnd = _logic getVariable ["KH_ModuleAIInstanceSetupMarkerUserEnd", "<|eot_id|>"];
-            private _markerAssistantStart = _logic getVariable ["KH_ModuleAIInstanceSetupMarkerAssistantStart", "<|start_header_id|>assistant<|end_header_id|>"];
-            private _markerAssistantEnd = _logic getVariable ["KH_ModuleAIInstanceSetupMarkerAssistantEnd", "<|eot_id|>"];
+            private _markerSystemStart = _logic getVariable ["KH_ModuleAIInstanceSetupMarkerSystemStart", ""];
+            private _markerSystemEnd = _logic getVariable ["KH_ModuleAIInstanceSetupMarkerSystemEnd", ""];
+            private _markerUserStart = _logic getVariable ["KH_ModuleAIInstanceSetupMarkerUserStart", ""];
+            private _markerUserEnd = _logic getVariable ["KH_ModuleAIInstanceSetupMarkerUserEnd", ""];
+            private _markerAssistantStart = _logic getVariable ["KH_ModuleAIInstanceSetupMarkerAssistantStart", ""];
+            private _markerAssistantEnd = _logic getVariable ["KH_ModuleAIInstanceSetupMarkerAssistantEnd", ""];
             private _systemPrompt = compile (_logic getVariable ["KH_ModuleAIInstanceSetupSystemPrompt", ""]);
             private _masterPrompt = compile (_logic getVariable ["KH_ModuleAIInstanceSetupMasterPrompt", ""]);
             private _userPrompt = compile (_logic getVariable ["KH_ModuleAIInstanceSetupUserPrompt", ""]);
@@ -47,7 +47,7 @@ KH_var_postInitExecutions pushBack [
             private _immediateInference = _logic getVariable ["KH_ModuleAIInstanceSetupImmediateInference", false];
             private _logGeneration = _logic getVariable ["KH_ModuleAIInstanceSetupLogGeneration", false];
             
-            if (_owner isEqualTo "SERVER") then {
+            if (_owner isEqualTo "") then {
                 [
                     _name, 
                     _model,
@@ -150,7 +150,7 @@ KH_var_postInitExecutions pushBack [
                     {
                         params ["_owner"];
                         
-                        if ((_owner select [0, 1]) isNotEqualTo 0) then {
+                        if ((parseNumber (_owner select [0, 1])) isNotEqualTo 0) then {
                             !(isNil {KH_var_allPlayerUidMachines get _owner;});
                         }
                         else {

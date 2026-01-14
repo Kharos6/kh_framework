@@ -240,12 +240,12 @@ private:
     std::atomic<bool> is_generating{false};
     std::atomic<bool> abort_generation{false};
     std::atomic<bool> log_generation{false};
-    std::string marker_system_start = "<|begin_of_text|><|start_header_id|>system<|end_header_id|>";
-    std::string marker_system_end = "<|eot_id|>";
-    std::string marker_user_start = "<|start_header_id|>user<|end_header_id|>";
-    std::string marker_user_end = "<|eot_id|>";
-    std::string marker_assistant_start = "<|start_header_id|>assistant<|end_header_id|>";
-    std::string marker_assistant_end = "<|eot_id|>";
+    std::string marker_system_start;
+    std::string marker_system_end;
+    std::string marker_user_start;
+    std::string marker_user_end;
+    std::string marker_assistant_start;
+    std::string marker_assistant_end;
     std::atomic<uint64_t> current_generation_id{0};
 
     void schedule_log(const std::string& message) {

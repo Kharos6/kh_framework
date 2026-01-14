@@ -33,6 +33,8 @@ KH_var_drawUi3dExecutionStackDeletions = [];
 KH_var_postInitExecutions = [];
 KH_var_preInitLuaExecutions = [];
 KH_var_postInitLuaExecutions = [];
+KH_var_entityInitializations = [];
+KH_var_entityInitializationsDeletions = [];
 KH_var_mouseTargetCheckFrame = 0;
 KH_var_viewTargetCheckFrame = 0;
 KH_var_weaponTargetCheckFrame = 0;
@@ -243,6 +245,19 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 addMissionEventHandler [
 	"EachFrame", 
 	{
+		if (KH_var_entityInitializationsDeletions isNotEqualTo []) then {
+			private _entityInitializationsDeletions = [];
+
+			{
+				if ((_x select 3) in KH_var_entityInitializationsDeletions) then {
+					_entityInitializationsDeletions pushBack _forEachIndex;
+				};
+			} forEach KH_var_entityInitializations;
+
+			KH_var_entityInitializations deleteAt _entityInitializationsDeletions;
+			KH_var_entityInitializationsDeletions resize 0;
+		};
+
 		if (KH_var_temporalExecutionStackAdditions isNotEqualTo []) then {
 			KH_var_temporalExecutionStack append KH_var_temporalExecutionStackAdditions;
 			KH_var_temporalExecutionStackAdditions resize 0;
@@ -344,6 +359,50 @@ addMissionEventHandler [
 	}
 ] call CBA_fnc_addEventHandler;
 
+addMissionEventHandler [
+	"EntityCreated", 
+	{
+		params ["_entity"];
+
+		{
+			_x params ["_typeInclude", "_typeExclude", "_function", "_id"];
+
+			if !(missionNamespace getVariable _id) then {
+				KH_var_entityInitializationsDeletions pushBack _id;
+				continue;
+			};
+
+			private _continue = true;
+
+			{
+				if (_entity isKindOf _x) then {
+					_continue = false;
+					break;
+				};
+			} forEach _typeExclude;
+			
+			if !_continue then {
+				continue;
+			};
+
+			_continue = false;
+
+			{
+				if (_entity isKindOf _x) then {
+					_continue = true;
+					break;
+				};
+			} forEach _typeInclude;
+
+			if !_continue then {
+				continue;
+			};
+
+			[_entity] call _function;
+		} forEach KH_var_entityInitializations;
+	}
+];
+
 if isServer then {
 	KH_var_serverGameSessionId = KH_var_gameSessionId;
 	publicVariable "KH_var_serverGameSessionId";
@@ -407,7 +466,6 @@ if isServer then {
 	KH_var_entityArrayBuilderArrays = [];
 	KH_var_groupArrayBuilderArrays = [];
 	KH_var_initialSideRelations = [];
-	KH_var_entityInitializations = [];
 	KH_fnc_serverMissionLoadInit = {};
 	KH_fnc_serverMissionStartInit = {};
 	KH_fnc_serverPlayersLoadedInit = {};
@@ -1029,44 +1087,6 @@ if isServer then {
 			KH_var_adminMachine = [2, _machineId] select (_loggedIn || _votedIn);
 			publicVariable "KH_var_adminMachine";
 			["KH_eve_adminChanged", [_machineId, _loggedIn, _votedIn]] call CBA_fnc_globalEvent;
-		}
-	];
-
-	addMissionEventHandler [
-		"EntityCreated", 
-		{
-			params ["_entity"];
-
-			{
-				_x params ["_typeInclude", "_typeExclude", "_function"];
-				private _continue = true;
-
-				{
-					if (_entity isKindOf _x) then {
-						_continue = false;
-						break;
-					};
-				} forEach _typeExclude;
-				
-				if !_continue then {
-					continue;
-				};
-
-				_continue = false;
-
-				{
-					if (_entity isKindOf _x) then {
-						_continue = true;
-						break;
-					};
-				} forEach _typeInclude;
-
-				if !_continue then {
-					continue;
-				};
-
-				[_entity] call _function;
-			} forEach KH_var_entityInitializations;
 		}
 	];
 

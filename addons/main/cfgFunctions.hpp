@@ -18,6 +18,10 @@ class CfgFunctions
 			class callSerializedFunction {};
 			class cameraSequence {};		
 			class closeInterface {};
+			class collectGroupData {};
+			class collectObjectData {};
+			class collectScenarioData {};
+			class collectUnitData {};
 			class conditionalPresence {};
 			class convertToAgent {};
 			class convertToSimpleObject {};
@@ -87,6 +91,8 @@ class CfgFunctions
 			class moduleFultonExtract {};
 			class moduleInitializeStt {};
 			class moduleInitializeTts {};
+			class modulePlayRecordedMission {};
+			class moduleRecordMission {};
 			class moduleTeleporter {};
 			class moduleUpdateAiInstance {};
 			class moduleUpdateTtsSpeakerEntity {};
@@ -95,12 +101,14 @@ class CfgFunctions
 			class openTerminal {};
 			class parseBoolean {};
 			class parseNormalizedScreenTransforms {};
+			class playRecordedMission {};
 			class postInit {postInit = 1;};
 			class preInit {preInit = 1;};
 			class preStart {preStart = 1;};
 			class raycast {};
 			class raycast2d {};
 			class raycast3d {};
+			class recordMission {};
 			class recoverDisconnectedPlayers {};
 			class remoteExec {};
 			class removeHandler {};

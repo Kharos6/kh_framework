@@ -2,7 +2,7 @@ isNil {
     params [["_logic", objNull, [objNull]], ["_units", [], [[]]], ["_activated", true, [true]]];
 
     if _activated then {
-        private _owner = _logic getVariable ["KH_ModuleUpdateAIInstanceOwner", "SERVER"];
+        private _owner = _logic getVariable ["KH_ModuleUpdateAIInstanceOwner", ""];
         private _name = _logic getVariable ["KH_ModuleUpdateAIInstanceName", ""];
         private _systemPrompt = compile (_logic getVariable ["KH_ModuleUpdateAIInstanceSystemPrompt", ""]);
         private _masterPrompt = compile (_logic getVariable ["KH_ModuleUpdateAIInstanceMasterPrompt", ""]);
@@ -15,7 +15,7 @@ isNil {
         private _logGeneration = _logic getVariable ["KH_ModuleUpdateAIInstanceLogGeneration", false];
         private _stop = _logic getVariable ["KH_ModuleUpdateAIInstanceStop", false];
         
-        if (_owner isEqualTo "SERVER") then {
+        if (_owner isEqualTo "") then {
             [_name, call _systemPrompt, call _masterPrompt, call _userPrompt, _responseProgressFunction, _responseFunction, _triggerInference, _abortGeneration, _resetContext, _logGeneration, _stop] call KH_fnc_updateAiInstance;
         }
         else {
@@ -32,9 +32,14 @@ isNil {
                 {
                     params ["_owner"];
                     
-                    if !(missionNamespace isNil _owner) then {
-                        private _unit = missionNamespace getVariable _owner;
-                        (!(local _unit) && !(isNull _unit));
+                    if ((parseNumber (_owner select [0, 1])) isNotEqualTo 0) then {
+                        !(isNil {KH_var_allPlayerUidMachines get _owner;});
+                    }
+                    else {
+                        if !(missionNamespace isNil _owner) then {
+                            private _unit = missionNamespace getVariable _owner;
+                            (!(local _unit) && !(isNull _unit));
+                        };
                     };
                 },
                 false

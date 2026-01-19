@@ -6,8 +6,8 @@ if (_identifier isEqualTo "") exitWith {
 
 private _persistencyUidId = ["playerPersistencyUid_", _identifier] joinString "";
 private _persistencyVariableNameId = ["playerPersistencyVariableName_", _identifier] joinString "";
-private _currentEntriesUid = "khNamespace" readKhData [_persistencyUidId, createHashMap];
-private _currentEntriesVariableName = "khNamespace" readKhData [_persistencyVariableNameId, createHashMap];
+private _currentEntriesUid = "kh_namespace" readKhData [_persistencyUidId, createHashMap];
+private _currentEntriesVariableName = "kh_namespace" readKhData [_persistencyVariableNameId, createHashMap];
 
 {
 	if (_x getVariable ["KH_var_allowPersistency", true]) then {
@@ -22,6 +22,6 @@ private _currentEntriesVariableName = "khNamespace" readKhData [_persistencyVari
 	};
 } forEach _players;
 
-"khNamespace" writeKhData [_persistencyUidId, _currentEntriesUid];
-"khNamespace" writeKhData [_persistencyVariableNameId, _currentEntriesVariableName];
+"kh_namespace" writeKhData [_persistencyUidId, _currentEntriesUid];
+"kh_namespace" writeKhData [_persistencyVariableNameId, _currentEntriesVariableName];
 [_currentEntriesUid, _currentEntriesVariableName];

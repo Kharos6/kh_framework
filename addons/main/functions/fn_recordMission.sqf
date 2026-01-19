@@ -128,7 +128,7 @@ if _scenario then {
             if _units then {
                 {
                     _unitDataFinal set [netId _x, [_x] call KH_fnc_getUnitAttributes];
-                } forEach (allunits + allDeadMen);
+                } forEach (allUnits + allDeadMen);
             };
 
             if _groups then {
@@ -152,6 +152,7 @@ if _scenario then {
         _fileName writeKhData ["groupDataFinal", _groupDataFinal];
         _fileName writeKhData ["objectDataFinal", _objectDataFinal];
         _fileName writeKhData ["scenarioDataFinal", _scenarioDataFinal];
+        _fileName writeKhData ["dataEnd", CBA_missionTime];
     }
 ] call KH_fnc_addEventHandler;
 

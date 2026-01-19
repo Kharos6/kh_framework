@@ -35,7 +35,7 @@ call KH_fnc_serverMissionEndInit;
 	false
 ] call KH_fnc_execute;
 
-["KH_eve_missionEnded", [_isVictory, _nextMission]] call CBA_fnc_globalEvent;
+["KH_eve_missionEnded", [_isVictory, _nextMission], "GLOBAL", false] call KH_fnc_triggerCbaEvent;
 
 [
 	[_endName, _isVictory, _fadeType, _nextMission],

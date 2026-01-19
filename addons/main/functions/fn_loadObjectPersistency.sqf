@@ -1,6 +1,6 @@
 params [["_identifier", "", [""]], ["_overrideAttributes", [], [[]]]];
 if (_identifier isEqualTo "") exitWith {};
-private _objectPersistency = "khNamespace" readKhData [["objectPersistency_", _identifier] joinString "", createHashMap];
+private _objectPersistency = "kh_namespace" readKhData [["objectPersistency_", _identifier] joinString "", createHashMap];
 
 {
     if (_x getVariable ["KH_var_allowPersistency", true]) then {

@@ -3,12 +3,10 @@
     private _basePath = (getText (_x >> "path")) regexReplace ["(/)", "\\"];
 
     {
-        private _pathUsed = isText (_x >> "path");
-
         private _function = preprocessFile ([
             _basePath,
             ["", "\"] select (_basePath isNotEqualTo ""),
-            if _pathUsed then {
+            if (isText (_x >> "path")) then {
                 (getText (_x >> "path")) regexReplace ["(/)", "\\"];
             }
             else {

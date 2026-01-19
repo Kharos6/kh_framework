@@ -7,7 +7,9 @@ if _state then {
 		KH_var_recoverDisconnectedPlayersSet = true;
 
 		[
-			"KH_eve_playerDisconnected", 
+			"CBA",
+			"KH_eve_playerDisconnected",
+			[], 
 			{
 				if KH_var_recoverDisconnectedPlayers then {	
 					private _uid = param [1];
@@ -52,7 +54,7 @@ if _state then {
 					};
 				};
 			}
-		] call CBA_fnc_addEventHandler;
+		] call KH_fnc_addEventHandler;
 	};
 };
 

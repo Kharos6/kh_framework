@@ -21,7 +21,9 @@ if (isNil "KH_var_playerPersistencySet") then {
 	KH_var_playerPersistencySet = true;
 
 	[
-		"KH_eve_playerRespawned", 
+		"CBA",
+		"KH_eve_playerRespawned",
+		[], 
 		{
 			if (KH_var_respawnLoadoutType isNotEqualTo "NONE") then {
 				private _uid = param [1];
@@ -89,10 +91,12 @@ if (isNil "KH_var_playerPersistencySet") then {
 				};
 			};
 		}
-	] call CBA_fnc_addEventHandler;
+	] call KH_fnc_addEventHandler;
 	
 	[
+		"CBA",
 		"KH_eve_playerLoaded", 
+		[],
 		{
 			private _uid = param [1];
 			private _player = param [3];
@@ -127,21 +131,23 @@ if (isNil "KH_var_playerPersistencySet") then {
 				};
 			};
 		}
-	] call CBA_fnc_addEventHandler;
+	] call KH_fnc_addEventHandler;
 
 	[
-		"KH_eve_playerKilled", 
+		"CBA",
+		"KH_eve_playerKilled",
+		[], 
 		{
 			private _uid = param [1];
 			private _player = param [3];	
 			KH_var_deathPlayerLoadouts set [_uid, getUnitLoadout _player];
 		}
-	] call CBA_fnc_addEventHandler;
+	] call KH_fnc_addEventHandler;
 };
 
 if (_identifier isEqualTo "") exitWith {};
-KH_var_playerPersistencyUid = "khNamespace" readKhData [["playerPersistencyUid_", _identifier] joinString "", createHashMap];
-KH_var_playerPersistencyVariableName = "khNamespace" readKhData [["playerPersistencyVariableName_", _identifier] joinString "", createHashMap];
+KH_var_playerPersistencyUid = "kh_namespace" readKhData [["playerPersistencyUid_", _identifier] joinString "", createHashMap];
+KH_var_playerPersistencyVariableName = "kh_namespace" readKhData [["playerPersistencyVariableName_", _identifier] joinString "", createHashMap];
 
 {
 	private _uid = getPlayerUID _x;

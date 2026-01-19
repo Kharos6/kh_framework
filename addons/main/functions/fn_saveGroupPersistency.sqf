@@ -5,7 +5,7 @@ if (_identifier isEqualTo "") exitWith {
 };
 
 private _persistencyId = ["groupPersistency_", _identifier] joinString "";
-private _currentEntries = "khNamespace" readKhData [_persistencyId, createHashMap];
+private _currentEntries = "kh_namespace" readKhData [_persistencyId, createHashMap];
 
 {
 	private _attributes = [_x] call KH_fnc_getGroupAttributes;
@@ -13,5 +13,5 @@ private _currentEntries = "khNamespace" readKhData [_persistencyId, createHashMa
 	_currentEntries set [groupId _x, _attributes];
 } forEach _groups;
 
-"khNamespace" writeKhData [_persistencyId, _currentEntries];
+"kh_namespace" writeKhData [_persistencyId, _currentEntries];
 _currentEntries;

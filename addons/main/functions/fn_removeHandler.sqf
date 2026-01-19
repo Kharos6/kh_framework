@@ -13,10 +13,10 @@ if ((_id select 1) isEqualType []) then {
 	[_handlerId] call KH_fnc_removeHandler;
 
 	if (isNil "_eventOwner") then {
-		["KH_eve_handlerRemoved", [_id]] call CBA_fnc_globalEvent;
+		["KH_eve_handlerRemoved", [_id], "GLOBAL", false] call KH_fnc_triggerCbaEvent;
 	}
 	else {
-		["KH_eve_handlerRemoved", [_id], _eventOwner] call CBA_fnc_ownerEvent;
+		["KH_eve_handlerRemoved", [_id], _eventOwner, false] call KH_fnc_triggerCbaEvent;
 	};
 }
 else {
@@ -68,11 +68,11 @@ else {
                     };
 
                     case "TEMPORAL": {
-                        ["KH_eve_temporalExecutionStackHandler", [_handlerId, true, false, false]] call CBA_fnc_localEvent;
+                        ["KH_eve_temporalExecutionStackHandler", [_handlerId, true, false, false], true, false] call KH_fnc_triggerCbaEvent;
                     };
 
                     case "DRAW_UI": {
-                        ["KH_eve_drawUiExecutionStackHandler", [_handlerId, false, false]] call CBA_fnc_localEvent;
+                        ["KH_eve_drawUiExecutionStackHandler", [_handlerId, false, false], true, false] call KH_fnc_triggerCbaEvent;
                     };
 
                     case "IN_GAME_UI": {
@@ -88,7 +88,7 @@ else {
                     };
                 };
 
-                ["KH_eve_handlerRemoved", [_id]] call CBA_fnc_localEvent;
+                ["KH_eve_handlerRemoved", [_id], true, false] call KH_fnc_triggerCbaEvent;
             },
             _eventOwner,
             true,
@@ -107,10 +107,10 @@ else {
 
         if (_target isEqualType true) then {
             if _target then {
-                ["KH_eve_handlerRemoved", [_id]] call CBA_fnc_globalEvent;
+                ["KH_eve_handlerRemoved", [_id], "GLOBAL", false] call KH_fnc_triggerCbaEvent;
             }
             else {
-                ["KH_eve_handlerRemoved", [_id]] call CBA_fnc_localEvent;
+                ["KH_eve_handlerRemoved", [_id], true, false] call KH_fnc_triggerCbaEvent;
             };
         }
         else {

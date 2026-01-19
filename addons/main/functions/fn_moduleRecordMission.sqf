@@ -16,8 +16,8 @@ isNil {
             [
                 [_owner, [_identifier, _units, _groups, _objects, _scenario]],
                 {
-                    private _arguments = param [1];
-                    _arguments call KH_fnc_recordMission;
+                    params ["_owner", "_arguments"];
+                    [_arguments, "KH_fnc_recordMission", missionNamespace getVariable _owner, true, false] call KH_fnc_execute;
                 },
                 true,
                 {

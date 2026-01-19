@@ -96,7 +96,7 @@ if (isNil "KH_var_curatorsSet") then {
 						};
 
 						if !((owner _player) in KH_var_allCuratorMachines) then {
-							["KH_eve_curatorAssigned", [owner _player, getPlayerUID _player, _player]] call CBA_fnc_globalEvent;
+							["KH_eve_curatorAssigned", [owner _player, getPlayerUID _player, _player], "GLOBAL", false] call KH_fnc_triggerCbaEvent;
 						};
 
 						KH_var_allCuratorMachines pushBackUnique (owner _player);
@@ -120,7 +120,9 @@ if (isNil "KH_var_curatorsSet") then {
 
 	{
 		[
+			"CBA",
 			_x,
+			[],
 			{
 				private _uid = param [1];
 				private _player = param [3];
@@ -177,7 +179,7 @@ if (isNil "KH_var_curatorsSet") then {
 								};
 
 								if !((owner _player) in KH_var_allCuratorMachines) then {
-									["KH_eve_curatorAssigned", [owner _player, getPlayerUID _player, _player]] call CBA_fnc_globalEvent;
+									["KH_eve_curatorAssigned", [owner _player, getPlayerUID _player, _player], "GLOBAL", false] call KH_fnc_triggerCbaEvent;
 								};
 
 								KH_var_allCuratorMachines pushBackUnique (owner _player);
@@ -198,11 +200,13 @@ if (isNil "KH_var_curatorsSet") then {
 					} forEach KH_var_curatorModules;
 				};
 			}
-		] call CBA_fnc_addEventHandler;
+		] call KH_fnc_addEventHandler;
 	} forEach ["KH_eve_playerRespawned", "KH_eve_playerLoaded", "KH_eve_playerSwitched"];
 
 	[
-		"KH_eve_playerDisconnected", 
+		"CBA",
+		"KH_eve_playerDisconnected",
+		[], 
 		{
 			private _uid = param [1];
 			private _player = param [3];
@@ -216,7 +220,7 @@ if (isNil "KH_var_curatorsSet") then {
 				unassignCurator _module;
 			};
 		}
-	] call CBA_fnc_addEventHandler;
+	] call KH_fnc_addEventHandler;
 };
 
 nil;

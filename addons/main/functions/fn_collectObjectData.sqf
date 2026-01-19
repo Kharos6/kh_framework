@@ -65,7 +65,7 @@ private _result = [
             {
                 params ["_parentVehicle", "_cargoVehicle"];
                 _args params ["_object", "_data"];
-                (_data get "CargoLoaded") pushBack [(CBA_missionTime - ([_object, false] call KH_fnc_getLatency)) max 0, [netId _parentVehicle, typeOf _parentVehicle, netId _cargoVehicle, typeOf _cargoVehicle]];
+                (_data get "CargoLoaded") pushBack [(CBA_missionTime - ([_object, false] call KH_fnc_getLatency)) max 0, [netId _parentVehicle, netId _cargoVehicle]];
             }
         ] call KH_fnc_addEventHandler,
         [
@@ -75,7 +75,7 @@ private _result = [
             {
                 params ["_parentVehicle", "_cargoVehicle"];
                 _args params ["_object", "_data"];
-                (_data get "CargoUnloaded") pushBack [(CBA_missionTime - ([_object, false] call KH_fnc_getLatency)) max 0, [netId _parentVehicle, typeOf _parentVehicle, netId _cargoVehicle, typeOf _cargoVehicle]];
+                (_data get "CargoUnloaded") pushBack [(CBA_missionTime - ([_object, false] call KH_fnc_getLatency)) max 0, [netId _parentVehicle, netId _cargoVehicle]];
             }
         ] call KH_fnc_addEventHandler,
         [
@@ -109,7 +109,7 @@ private _result = [
                 private _instigator = param [6];
                 private _hitPoint = param [7];
                 _args params ["_data"];
-                (_data get "Hit") pushBack [(CBA_missionTime - ([_object, false] call KH_fnc_getLatency)) max 0, [netId _source, typeOf _source, _projectile, netId _instigator, _hitPoint]];
+                (_data get "Hit") pushBack [(CBA_missionTime - ([_object, false] call KH_fnc_getLatency)) max 0, [netId _source, _projectile, netId _instigator, _hitPoint]];
             }
         ] call KH_fnc_addEventHandler,
         [
@@ -119,7 +119,7 @@ private _result = [
             {
                 params ["_object", "_ammo", "_shooter", "_instigator", "_missile"];
                 _args params ["_data"];
-                (_data get "IncomingMissile") pushBack [(CBA_missionTime - ([_object, false] call KH_fnc_getLatency)) max 0, [_ammo, netId _shooter, typeOf _shooter, netId _instigator, netId _missile]];
+                (_data get "IncomingMissile") pushBack [(CBA_missionTime - ([_object, false] call KH_fnc_getLatency)) max 0, [_ammo, netId _shooter, netId _instigator, netId _missile]];
             }
         ] call KH_fnc_addEventHandler,
         [
@@ -137,9 +137,11 @@ private _result = [
             "PylonChanged",
             [_data],
             {
-                params ["_object", "_pylonIndex", "_oldMagazine", "_newMagazine"];
+                private _object = param [0];
+                private _pylonindex = param [1];
+                private _newMagazine = param [2];
                 _args params ["_data"];
-                (_data get "PylonChange") pushBack [(CBA_missionTime - ([_object, false] call KH_fnc_getLatency)) max 0, [_pylonIndex, _oldMagazine, _newMagazine]];
+                (_data get "PylonChange") pushBack [(CBA_missionTime - ([_object, false] call KH_fnc_getLatency)) max 0, [_pylonIndex, _newMagazine]];
             }
         ] call KH_fnc_addEventHandler,
         [
@@ -225,8 +227,10 @@ private _result = [
                     _object setVariable ["KH_var_collectedLockedInventory", _currentLockedInventory];
                 };
 
-                if ((_object getVariable ["KH_var_collectedPosition", []]) isNotEqualTo ([getPosATLVisual _object, getPosASLVisual _object, getPosVisual _object])) then {
-                    private _currentPosition = [getPosATLVisual _object, getPosASLVisual _object, getPosVisual _object];
+                private _positionAsl = getPosASLVisual _object;
+
+                if ((_object getVariable ["KH_var_collectedPosition", []]) isNotEqualTo [_positionAsl select [0, 2], (getPosATLVisual _object) select 2, _positionAsl select 2, (getPosVisual _object) select 2]) then {
+                    private _currentPosition = [_positionAsl select [0, 2], (getPosATLVisual _object) select 2, _positionAsl select 2, (getPosVisual _object) select 2];
                     (_data get "Position") pushBack [CBA_missionTime, _currentPosition];
                     _object setVariable ["KH_var_collectedPosition", _currentPosition];
                 };

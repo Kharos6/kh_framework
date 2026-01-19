@@ -35,7 +35,9 @@ isNil {
                         } forEach ([KH_var_allPlayerUnits, allUnits] select _unitType);
 
                         private _playerLoadHandler = [
+                            "CBA",
                             "KH_eve_playerLoaded",
+                            [],
                             {
                                 private _unit = param [3];
 
@@ -53,7 +55,7 @@ isNil {
                             
                                 KH_var_missionSuspensionEntities insert [-1, [_unit, _parent], true];
                             }
-                        ] call CBA_fnc_addEventHandler;
+                        ] call KH_fnc_addEventHandler;
 
                         [
                             [_playerLoadHandler],

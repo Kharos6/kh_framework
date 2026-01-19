@@ -51,7 +51,7 @@ if (_object isNil "KH_var_equipableObjectSet") then {
 		{
 			params ["_exclusive"];
 			private _carrier = attachedTo _target;
-			["KH_eve_equipableObjectExchanged", [_carrier, _target, false]] call CBA_fnc_globalEvent;
+			["KH_eve_equipableObjectExchanged", [_carrier, _target, false], "GLOBAL", false] call KH_fnc_triggerCbaEvent;
 
 			if _exclusive then {
 				if (_carrier getVariable ["KH_var_equipableObjectExclusive", false]) then {
@@ -85,7 +85,7 @@ if (_object isNil "KH_var_equipableObjectSet") then {
 		[_object, _exclusive],
 		{
 			params ["_object", "_exclusive"];
-			["KH_eve_equipableObjectExchanged", [_caller, _object, false]] call CBA_fnc_globalEvent;
+			["KH_eve_equipableObjectExchanged", [_caller, _object, false], "GLOBAL", false] call KH_fnc_triggerCbaEvent;
 
 			if _exclusive then {
 				if (_caller getVariable ["KH_var_equipableObjectExclusive", false]) then {
@@ -117,7 +117,7 @@ if (_object isNil "KH_var_equipableObjectSet") then {
 
 if !(isNull _unit) then {
 	if (_unit getVariable ["KH_var_equipableObjectExclusive", false]) exitWith {};
-	["KH_eve_equipableObjectExchanged", [_unit, _object, true]] call CBA_fnc_globalEvent;
+	["KH_eve_equipableObjectExchanged", [_unit, _object, true], "GLOBAL", false] call KH_fnc_triggerCbaEvent;
 
 	if _exclusive then {
 		_unit setVariable ["KH_var_equipableObjectExclusive", true, true];

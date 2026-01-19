@@ -111,15 +111,15 @@ if ((_userPrompt isNotEqualTo "") && (_userPrompt isNotEqualTo (text ""))) then 
 };
 
 if (_responseProgressFunction isNotEqualTo {}) then {
-    ["KH_eve_aiResponseProgress", _responseProgressFunction] call CBA_fnc_addEventHandler;
+    ["CBA", "KH_eve_aiResponseProgress", [], _responseProgressFunction] call KH_fnc_addEventHandler;
 };
 
 if (_responseFunction isNotEqualTo {}) then {
-    ["KH_eve_aiResponse", _responseFunction] call CBA_fnc_addEventHandler;
+    ["CBA", "KH_eve_aiResponse", [], _responseFunction] call KH_fnc_addEventHandler;
 };
 
 if (_init isNotEqualTo {}) then {
-    ["KH_eve_aiInitialized", _init] call CBA_fnc_addEventHandler;
+    ["CBA", "KH_eve_aiInitialized", [], _init] call KH_fnc_addEventHandler;
 };
 
 if _logGeneration then {

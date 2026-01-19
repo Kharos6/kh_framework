@@ -94,8 +94,10 @@ if _state then {
 						if !(_x getVariable ["KH_var_disguiseChecker", false]) then {
 							_x setVariable ["KH_var_disguiseChecker", true];
 							
-							_x addEventHandler [
-								"Dammaged", 
+							[
+								["ENTITY", _x, "LOCAL"],
+								"Dammaged",
+								[],
 								{
 									private _unit = param [0];
 									private _instigator = param [5];
@@ -136,7 +138,7 @@ if _state then {
 										] call KH_fnc_execute;
 									};
 								}
-							];
+							] call KH_fnc_addEventHandler;
 						};
 					} forEach allUnits;
 

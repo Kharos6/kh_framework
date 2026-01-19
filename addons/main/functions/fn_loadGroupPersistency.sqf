@@ -1,6 +1,6 @@
 params [["_identifier", "", [""]], ["_overrideAttributes", [], [[]]]];
 if (_identifier isEqualTo "") exitWith {};
-private _groupPersistency = "khNamespace" readKhData [["groupPersistency_", _identifier] joinString "", createHashMap];
+private _groupPersistency = "kh_namespace" readKhData [["groupPersistency_", _identifier] joinString "", createHashMap];
 
 {
     private _groupSideId = [side _x, groupId _x] joinString "_";

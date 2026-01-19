@@ -44,6 +44,6 @@ if (
 }
 else {
 	if _allowBlacklisted then {
-		["KH_eve_execution", [_this, "KH_fnc_remoteExec", clientOwner]] call CBA_fnc_serverEvent;
+		["KH_eve_execution", [_this, "KH_fnc_remoteExec", clientOwner], "SERVER", false] call KH_fnc_triggerCbaEvent;
 	};
 };

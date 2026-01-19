@@ -12,6 +12,7 @@ KH_var_recordedObjects = createHashMap;
     private _attributes = (((_y select 0) select 1) get "Header") select 1;
     private _object = createVehicle [_attributes select 3, [0, 0, 0], [], 0, "CAN_COLLIDE"];
     [_object, _attributes, [], true] call KH_fnc_setObjectAttributes;
+    _object allowDamage false;
     KH_var_recordedObjects set [_x, _object];
 } forEach KH_var_recordedObjectData;
 
@@ -57,6 +58,153 @@ if (KH_var_recordedScenarioData isNotEqualTo []) then {
 [
     [],
     {
+        {
+            private _object = KH_var_recordedUnits get _x;
+
+            if (_y isEqualTo []) then {
+                continue;
+            };
+
+            private _currentRecordedData = _y select (_object getVariable ["KH_var_currentRecordingIndex", 0]);
+
+            if (CBA_missionTime >= ((_y param [(_object getVariable ["KH_var_currentRecordingIndex", 0]) + 1, [999999]]) select 0)) then {
+                private _nextData = _y param [(_object getVariable ["KH_var_currentRecordingIndex", 0]) + 1, []];
+
+                if (_nextData isNotEqualTo []) then {
+                    [_object, ((_nextData select 1) get "Header") select 3, [], true] call KH_fnc_setObjectAttributes;
+                    _object setVariable ["KH_var_currentRecordingIndex", (_object getVariable ["KH_var_currentRecordingIndex", 0]) + 1];
+                };
+
+                continue;
+            };
+
+            private _currentData = _currentRecordedData select 1;
+
+            {
+                _x params ["_time", "_data"];
+
+                if (_time <= CBA_missionTime) then {
+                    _object setDamage (_data select 0);
+
+                    {
+                        _object setHitPointDamage [_x select 0, _x select 1];
+                    } forEach (_data select 1);
+                }
+                else {
+                    break;
+                };
+            } forEach (_currentData get "Damage");
+
+            {
+                _x params ["_time", "_data"];
+
+                if (_time <= CBA_missionTime) then {
+                    _object setVectorDirAndUp _data;
+                }
+                else {
+                    break;
+                };
+            } forEach (_currentData get "Direction");
+
+            {
+                _x params ["_time", "_data"];
+
+                if (_time <= CBA_missionTime) then {
+                    _object setPosATL [(_data select 0) select 0, (_data select 0) select 1, _data select 1];
+                }
+                else {
+                    break;
+                };
+            } forEach (_currentData get "Position");
+
+            {
+                _x params ["_time", "_data"];
+
+                if (_time <= CBA_missionTime) then {
+                    _object setVelocity _data;
+                }
+                else {
+                    break;
+                };
+            } forEach (_currentData get "Velocity");
+
+            {
+                private _currentRemovalData = +(_currentData get _x);
+
+                [
+                    _currentRemovalData,
+                    {
+                        ((_x select 0) <= CBA_missionTime);
+                    }
+                ] call KH_fnc_deleteArrayElements;
+
+                _currentData set [_x, _currentRemovalData];
+            } forEach [
+                "Damage", 
+                "Direction",
+                "Position",
+                "Velocity"
+            ];
+        } forEach KH_var_recordedObjectData;
+
+        {
+            private _group = KH_var_recordedUnits get _x;
+
+            if (_y isEqualTo []) then {
+                continue;
+            };
+
+            private _currentRecordedData = _y select (_group getVariable ["KH_var_currentRecordingIndex", 0]);
+
+            if (CBA_missionTime >= ((_y param [(_group getVariable ["KH_var_currentRecordingIndex", 0]) + 1, [999999]]) select 0)) then {
+                private _nextData = _y param [(_group getVariable ["KH_var_currentRecordingIndex", 0]) + 1, []];
+
+                if (_nextData isNotEqualTo []) then {
+                    [_group, ((_nextData select 1) get "Header") select 3, [], true] call KH_fnc_setGroupAttributes;
+                    _group setVariable ["KH_var_currentRecordingIndex", (_group getVariable ["KH_var_currentRecordingIndex", 0]) + 1];
+                };
+
+                continue;
+            };
+
+            private _currentData = _currentRecordedData select 1;
+
+            {
+                _x params ["_time", "_data"];
+
+                if (_time <= CBA_missionTime) then {
+                    _group setGroupIdGlobal _data;
+                }
+                else {
+                    break;
+                };
+            } forEach (_currentData get "GroupID");
+
+            {
+                _x params ["_time", "_data"];
+
+                if (_time <= CBA_missionTime) then {
+                    _group setLeader (KH_var_recordedUnits get _data);
+                }
+                else {
+                    break;
+                };
+            } forEach (_currentData get "Leader");
+
+            {
+                private _currentRemovalData = +(_currentData get _x);
+
+                [
+                    _currentRemovalData,
+                    {
+                        ((_x select 0) <= CBA_missionTime);
+                    }
+                ] call KH_fnc_deleteArrayElements;
+
+                _currentData set [_x, _currentRemovalData];
+            } forEach ["GroupID", "Leader"];
+        } forEach KH_var_recordedGroupData;
+        
         {
             private _unit = KH_var_recordedUnits get _x;
 

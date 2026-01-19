@@ -5,6 +5,6 @@ KH_var_ttsFinishedHandlerFunction = _functionFinished;
 
 if (isNil "KH_var_ttsHandler") then {
     KH_var_ttsHandler = true;
-    ["KH_eve_ttsGenerated", {call KH_var_ttsGeneratedHandlerFunction;}] call CBA_fnc_addEventHandler;
-    ["KH_eve_ttsFinished", {call KH_var_ttsFinishedHandlerFunction;}] call CBA_fnc_addEventHandler;
+    ["CBA", "KH_eve_ttsGenerated", [], {call KH_var_ttsGeneratedHandlerFunction;}] call KH_fnc_addEventHandler;
+    ["CBA", "KH_eve_ttsFinished", [], {call KH_var_ttsFinishedHandlerFunction;}] call KH_fnc_addEventHandler;
 };

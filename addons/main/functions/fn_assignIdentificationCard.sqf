@@ -15,7 +15,9 @@ if (isNil "KH_var_assignIdentificationCardSet") then {
 	KH_var_assignIdentificationCardSet = true;
 
 	[
+		"CBA",
 		"KH_eve_playerRespawned",
+		[],
 		{
 			private _newEntity = param [3];
 			private _oldEntity = param [4];
@@ -71,7 +73,7 @@ if (isNil "KH_var_assignIdentificationCardSet") then {
 				] call KH_fnc_execute;
 			};
 		}
-	] call CBA_fnc_addEventHandler;
+	] call KH_fnc_addEventHandler;
 };
 
 if (_name isEqualTo "") then {

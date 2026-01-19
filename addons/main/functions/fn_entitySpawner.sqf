@@ -496,7 +496,7 @@ private _spawnHandler = [
 						[],
 						{
 							params ["_entity"];
-							["KH_eve_spawnedEntityTerminated", []] call CBA_fnc_localEvent;
+							["KH_eve_spawnedEntityTerminated", [], true, false] call KH_fnc_triggerCbaEvent;
 							[_handlerId] call KH_fnc_removeHandler;
 						}
 					] call KH_fnc_addEventHandler;
@@ -515,7 +515,7 @@ private _spawnHandler = [
 							[],
 							{
 								params ["_entity"];
-								["KH_eve_spawnedEntityTerminated", []] call CBA_fnc_localEvent;
+								["KH_eve_spawnedEntityTerminated", [], true, false] call KH_fnc_triggerCbaEvent;
 								[_handlerId] call KH_fnc_removeHandler;
 							}
 						] call KH_fnc_addEventHandler;
@@ -529,7 +529,7 @@ private _spawnHandler = [
 							params ["_entity"];
 
 							if (alive _entity) then {
-								["KH_eve_spawnedEntityTerminated", []] call CBA_fnc_localEvent;
+								["KH_eve_spawnedEntityTerminated", [], true, false] call KH_fnc_triggerCbaEvent;
 							};
 
 							[_handlerId] call KH_fnc_removeHandler;

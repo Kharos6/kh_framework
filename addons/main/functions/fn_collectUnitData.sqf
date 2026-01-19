@@ -95,20 +95,6 @@ private _result = [
     _data,
     [
         [
-            ["ENTITY", _unit, "REMOTE"],
-            "HandleDamage",
-            [_data],
-            {
-                private _unit = param [0];
-                private _source = param [3];
-                private _projectile = param [4];
-                private _instigator = param [6];
-                private _hitPoint = param [7];
-                _args params ["_data"];
-                (_data get "Hit") pushBack [(CBA_missionTime - ([_unit, false] call KH_fnc_getLatency)) max 0, [netId _source, typeOf _source, _projectile, netId _instigator, _hitPoint]];
-            }
-        ] call KH_fnc_addEventHandler,
-        [
             ["ENTITY", _unit, "PERSISTENT"],
             "FiredMan",
             [clientOwner, _name],
@@ -166,8 +152,7 @@ private _result = [
                     "HitExplosion",
                     [_unit, _collector, _name],
                     {
-                        private _projectile = param [0];
-                        private _hitEntity = param [1];
+                        params ["_projectile", "_hitEntity"];
                         _args params ["_unit", "_collector", "_name"];
 
                         [
@@ -204,7 +189,7 @@ private _result = [
             {
                 params ["_unit", "_role", "_vehicle", "_turret"];
                 _args params ["_data"];
-                (_data get "GetIn") pushBack [(CBA_missionTime - ([_unit, false] call KH_fnc_getLatency)) max 0, [_role, netId _vehicle, typeOf _vehicle, _turret]];
+                (_data get "GetIn") pushBack [(CBA_missionTime - ([_unit, false] call KH_fnc_getLatency)) max 0, [_role, netId _vehicle, _turret]];
             }
         ] call KH_fnc_addEventHandler,
         [
@@ -214,7 +199,7 @@ private _result = [
             {
                 params ["_unit", "_role", "_vehicle", "_turret", "_isEject"];
                 _args params ["_data"];
-                (_data get "GetOut") pushBack [(CBA_missionTime - ([_unit, false] call KH_fnc_getLatency)) max 0, [_role, netId _vehicle, typeOf _vehicle, _turret, _isEject]];
+                (_data get "GetOut") pushBack [(CBA_missionTime - ([_unit, false] call KH_fnc_getLatency)) max 0, [_role, netId _vehicle, _turret, _isEject]];
             }
         ] call KH_fnc_addEventHandler,
         [
@@ -225,6 +210,20 @@ private _result = [
                 params ["_injured", "_healer", "_isMedic"];
                 _args params ["_unit", "_data"];
                 (_data get "Heal") pushBack [(CBA_missionTime - ([_unit, false] call KH_fnc_getLatency)) max 0, [netId _injured, netId _healer, _isMedic]];
+            }
+        ] call KH_fnc_addEventHandler,
+        [
+            ["ENTITY", _unit, "REMOTE"],
+            "HandleDamage",
+            [_data],
+            {
+                private _unit = param [0];
+                private _source = param [3];
+                private _projectile = param [4];
+                private _instigator = param [6];
+                private _hitPoint = param [7];
+                _args params ["_data"];
+                (_data get "Hit") pushBack [(CBA_missionTime - ([_unit, false] call KH_fnc_getLatency)) max 0, [netId _source, _projectile, netId _instigator, _hitPoint]];
             }
         ] call KH_fnc_addEventHandler,
         [
@@ -264,7 +263,7 @@ private _result = [
             {
                 params ["_unit", "_newLeaning", "_oldLeaning"];
                 _args params ["_data"];
-                (_data get "Leaning") pushback [(CBA_missionTime - ([_unit, false] call KH_fnc_getLatency)) max 0, [_newLeaning, _oldLeaning]];
+                (_data get "Leaning") pushBack [(CBA_missionTime - ([_unit, false] call KH_fnc_getLatency)) max 0, [_newLeaning, _oldLeaning]];
             }
         ] call KH_fnc_addEventHandler,
         [
@@ -274,7 +273,7 @@ private _result = [
             {
                 params ["_unit", "_container", "_item"];
                 _args params ["_data"];
-                (_data get "Put") pushback [(CBA_missionTime - ([_unit, false] call KH_fnc_getLatency)) max 0, [netId _container, _item]];
+                (_data get "Put") pushBack [(CBA_missionTime - ([_unit, false] call KH_fnc_getLatency)) max 0, [netId _container, _item]];
             }
         ] call KH_fnc_addEventHandler,
         [
@@ -346,7 +345,7 @@ private _result = [
             {
                 params ["_unit", "_container", "_item"];
                 _args params ["_data"];
-                (_data get "Take") pushback [(CBA_missionTime - ([_unit, false] call KH_fnc_getLatency)) max 0, [netId _container, _item]];
+                (_data get "Take") pushBack [(CBA_missionTime - ([_unit, false] call KH_fnc_getLatency)) max 0, [netId _container, _item]];
             }
         ] call KH_fnc_addEventHandler,
         [
@@ -360,7 +359,7 @@ private _result = [
                 private _vehicle = param [5];
                 private _turret = param [6];
                 _args params ["_data"];
-                (_data get "VisionMode") pushback [(CBA_missionTime - ([_unit, false] call KH_fnc_getLatency)) max 0, [_visionMode, _TiIndex, netId _vehicle, _turret]];
+                (_data get "VisionMode") pushBack [(CBA_missionTime - ([_unit, false] call KH_fnc_getLatency)) max 0, [_visionMode, _TiIndex, netId _vehicle, _turret]];
             }
         ] call KH_fnc_addEventHandler,
         [
@@ -371,8 +370,9 @@ private _result = [
                 private _newWeapon = param [2];
                 private _newMode = param [4];
                 private _newMuzzle = param [6];
+                private _turretIndex = param [7];
                 _args params ["_data"];
-                (_data get "Weapon") pushback [(CBA_missionTime - ([_unit, false] call KH_fnc_getLatency)) max 0, [_newWeapon, _newMode, _newMuzzle]];
+                (_data get "Weapon") pushBack [(CBA_missionTime - ([_unit, false] call KH_fnc_getLatency)) max 0, [_newWeapon, _newMode, _newMuzzle, _turretIndex]];
             }
         ] call KH_fnc_addEventHandler,
         [
@@ -480,8 +480,8 @@ private _result = [
                     _unit setVariable ["KH_var_collectedNearMines", _currentNearMines];
                 };
 
-                private _currentNearObjects = ((nearestTerrainObjects [_unit, ["Thing", "Static"], 100, true, true]) + (_unit nearEntities ["Thing", 100]) + (_unit nearEntities ["Static", 100])) apply {
-                    [netId _x, ASLToATL (AGLToASL (unitAimPositionVisual _x)), _x isKindOf "Building", (boundingBoxReal [_x, "FireGeometry"]) param [2, 0]];
+                private _currentNearObjects = ((nearestTerrainObjects [_unit, ["Thing", "Static"], 50, true, true]) + (_unit nearEntities ["Thing", 50]) + (_unit nearEntities ["Static", 50])) apply {
+                    [netId _x, ASLToATL (AGLToASL (unitAimPositionVisual _x)), (boundingBoxReal [_x, "FireGeometry"]) param [2, 0]];
                 };
 
                 if ((_unit getVariable ["KH_var_collectedNearObjects", []]) isNotEqualTo _currentNearObjects) then {
@@ -489,7 +489,7 @@ private _result = [
                     _unit setVariable ["KH_var_collectedNearObjects", _currentNearObjects];
                 };
 
-                private _currentNearRoads = (_unit nearRoads 100) apply {getPosATLVisual _x;};
+                private _currentNearRoads = (_unit nearRoads 50) apply {getPosATLVisual _x;};
 
                 if ((_unit getVariable ["KH_var_collectedNearRoads", []]) isNotEqualTo _currentNearRoads) then {
                     (_data get "NearRoads") pushBack [CBA_missionTime, _currentNearRoads];
@@ -538,7 +538,7 @@ private _result = [
                         };
 
                         default {
-                            "AUTO"
+                            "AUTO";
                         };
                     };
 
@@ -558,7 +558,7 @@ private _result = [
                 };
 
                 private _currentTask = if ((count (waypoints _unit)) > 1) then {
-                    private _currentWaypoint = ((waypoints _unit) select {(_x select 1) isEqualTo (currentWaypoint (group _unit));});
+                    private _currentWaypoint = ((waypoints _unit) select {(_x select 1) isEqualTo (currentWaypoint (group _unit));}) select 0;
                     private _taskPosition = getWPPos [_unit, _currentWaypoint select 1];
 
                     private _roadwayTaskIntersection = [
@@ -576,7 +576,7 @@ private _result = [
                     private _object = objNull;
 
                     private _entries = if (_roadwayTaskIntersection isNotEqualTo []) then {
-                        _object = _roadwayTaskIntersection select 3;
+                        _object = (_roadwayTaskIntersection select 0) select 3;
                         private _currentEntries = [];
                         
                         for "_i" from 0 to 999 do {
@@ -653,9 +653,11 @@ private _result = [
                     [];
                 };
 
-                if ((_unit getVariable ["KH_var_collectedTask", []]) isNotEqualTo _currentTask) then {
-                    (_data get "Task") pushBack [_trueTime, _currentTask];
-                    _unit setVariable ["KH_var_collectedTask", _currentTask];
+                private _otherTasks = (waypoints _unit) apply {[waypointType _x, getWPPos [_unit, _x select 1]];};
+
+                if ((_unit getVariable ["KH_var_collectedTask", []]) isNotEqualTo [_currentTask, _otherTasks]) then {
+                    (_data get "Task") pushBack [_trueTime, [_currentTask, _otherTasks]];
+                    _unit setVariable ["KH_var_collectedTask", [_currentTask, _otherTasks]];
                 };
 
                 if ((_unit getVariable ["KH_var_collectedTeam", []]) isNotEqualTo (assignedTeam _unit)) then {
@@ -683,7 +685,7 @@ private _result = [
                 ] call KH_fnc_raycast;
 
                 if (_roadwayIntersection isNotEqualTo []) then {
-                    private _object = _roadwayIntersection select 3;
+                    private _object = (_roadwayIntersection select 0) select 3;
 
                     if ((_unit getVariable ["KH_var_collectedValidPositionsInterior", []]) isNotEqualTo [netId _object, _object call BIS_fnc_buildingPositions]) then {
                         private _currentValidPositionsInterior = _object call BIS_fnc_buildingPositions;

@@ -141,8 +141,10 @@ else {
 
 				[
 					"KH_eve_persistentExecutionSetup", 
-					[_arguments, _function, _entity, _sendoffArguments, [_sendoffFunction, false] call KH_fnc_serializeFunction, clientOwner, _unscheduled, _persistentExecutionId]
-				] call CBA_fnc_serverEvent;
+					[_arguments, _function, _entity, _sendoffArguments, [_sendoffFunction, false] call KH_fnc_serializeFunction, clientOwner, _unscheduled, _persistentExecutionId],
+					"SERVER",
+					false
+				] call KH_fnc_triggerCbaEvent;
 
 				[_entity, _persistentExecutionId, true];
 			};
@@ -168,7 +170,7 @@ else {
 
 				missionNamespace setVariable [_nearId, true, 2];
 				["KH_eve_execution", [_arguments, _function, clientOwner, _unscheduled], _target, false] call KH_fnc_triggerCbaEvent;
-				["KH_eve_playerPresenceExecutionSetup", [_arguments, _function, clientOwner, _unscheduled, _object, _present, _distance, _nearId, +KH_var_allPlayerControlledUnits, _jip]] call CBA_fnc_serverEvent;
+				["KH_eve_playerPresenceExecutionSetup", [_arguments, _function, clientOwner, _unscheduled, _object, _present, _distance, _nearId, +KH_var_allPlayerControlledUnits, _jip], "SERVER", false] call KH_fnc_triggerCbaEvent;
 				[missionNamespace, _nearId, 2];
 			};
 
@@ -348,7 +350,7 @@ switch (typeName _environmentType) do {
 
 			if _iterationCount then {
 				_previousReturn = _fedArguments call _subfunction;
-				["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false]] call CBA_fnc_localEvent;
+				["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false], true, false] call KH_fnc_triggerCbaEvent;
 
 				if (_timeout isEqualTo 1) then {
 					_continue = false;
@@ -369,7 +371,7 @@ switch (typeName _environmentType) do {
 				{
 					params ["_fedArguments", "_subfunction"];														
 					_fedArguments call _subfunction;
-					["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false]] call CBA_fnc_localEvent;
+					["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false], true, false] call KH_fnc_triggerCbaEvent;
 				};
 			}
 			else {
@@ -413,7 +415,7 @@ switch (typeName _environmentType) do {
 						[_environmentId],
 						{
 							params ["_environmentId"];
-							["KH_eve_temporalExecutionStackHandler", [_environmentId, true, true, false]] call CBA_fnc_localEvent;
+							["KH_eve_temporalExecutionStackHandler", [_environmentId, true, true, false], true, false] call KH_fnc_triggerCbaEvent;
 							KH_var_temporalExecutionStackDeletions pushBackUnique _handlerId;
 						},
 						_timeout,
@@ -540,19 +542,19 @@ switch (typeName _environmentType) do {
 					if _timeoutOnConditionFailure then {
 						if (_arguments call _environmentType) then {
 							_previousReturn = _fedArguments call _subfunction;
-							["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false]] call CBA_fnc_localEvent;
+							["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false], true, false] call KH_fnc_triggerCbaEvent;
 						}
 						else {
-							["KH_eve_temporalExecutionStackHandler", [_environmentId, true, true, true]] call CBA_fnc_localEvent;
+							["KH_eve_temporalExecutionStackHandler", [_environmentId, true, true, true], true, false] call KH_fnc_triggerCbaEvent;
 						};
 					}
 					else {
 						if (_arguments call _environmentType) then {
 							_previousReturn = _fedArguments call _subfunction;
-							["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false]] call CBA_fnc_localEvent;
+							["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false], true, false] call KH_fnc_triggerCbaEvent;
 						}
 						else {
-							["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, true]] call CBA_fnc_localEvent;
+							["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, true], true, false] call KH_fnc_triggerCbaEvent;
 						};
 					};
 
@@ -564,20 +566,20 @@ switch (typeName _environmentType) do {
 					if _timeoutOnConditionFailure then {
 						if (_arguments call _environmentType) then {
 							_previousReturn = _fedArguments call _subfunction;
-							["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false]] call CBA_fnc_localEvent;
+							["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false], true, false] call KH_fnc_triggerCbaEvent;
 
 							if (_timeout isEqualTo 1) then {
 								_continue = false;
 							};
 						}
 						else {
-							["KH_eve_temporalExecutionStackHandler", [_environmentId, true, true, true]] call CBA_fnc_localEvent;
+							["KH_eve_temporalExecutionStackHandler", [_environmentId, true, true, true], true, false] call KH_fnc_triggerCbaEvent;
 						};
 					}
 					else {
 						if (_arguments call _environmentType) then {
 							_previousReturn = _fedArguments call _subfunction;
-							["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false]] call CBA_fnc_localEvent;
+							["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false], true, false] call KH_fnc_triggerCbaEvent;
 
 							if (_timeout isEqualTo 1) then {
 								_continue = false;
@@ -592,7 +594,7 @@ switch (typeName _environmentType) do {
 						_previousReturn = _fedArguments call _subfunction;
 					}
 					else {
-						["KH_eve_temporalExecutionStackHandler", [_environmentId, true, true, true]] call CBA_fnc_localEvent;
+						["KH_eve_temporalExecutionStackHandler", [_environmentId, true, true, true], true, false] call KH_fnc_triggerCbaEvent;
 					};
 				}
 				else {
@@ -617,10 +619,10 @@ switch (typeName _environmentType) do {
 
 							if (_arguments call _environmentType) then {
 								_fedArguments call _subfunction;
-								["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false]] call CBA_fnc_localEvent;
+								["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false], true, false] call KH_fnc_triggerCbaEvent;
 							}
 							else {
-								["KH_eve_temporalExecutionStackHandler", [_environmentId, true, true, true]] call CBA_fnc_localEvent;
+								["KH_eve_temporalExecutionStackHandler", [_environmentId, true, true, true], true, false] call KH_fnc_triggerCbaEvent;
 							};
 						};
 					}
@@ -630,10 +632,10 @@ switch (typeName _environmentType) do {
 
 							if (_arguments call _environmentType) then {
 								_fedArguments call _subfunction;
-								["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false]] call CBA_fnc_localEvent;
+								["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false], true, false] call KH_fnc_triggerCbaEvent;
 							}
 							else {
-								["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, true]] call CBA_fnc_localEvent;
+								["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, true], true, false] call KH_fnc_triggerCbaEvent;
 							};
 						};
 					};
@@ -645,10 +647,10 @@ switch (typeName _environmentType) do {
 
 							if (_arguments call _environmentType) then {
 								_fedArguments call _subfunction;
-								["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false]] call CBA_fnc_localEvent;
+								["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false], true, false] call KH_fnc_triggerCbaEvent;
 							}
 							else {
-								["KH_eve_temporalExecutionStackHandler", [_environmentId, true, true, true]] call CBA_fnc_localEvent;
+								["KH_eve_temporalExecutionStackHandler", [_environmentId, true, true, true], true, false] call KH_fnc_triggerCbaEvent;
 							};
 						};
 					}
@@ -658,7 +660,7 @@ switch (typeName _environmentType) do {
 
 							if (_arguments call _environmentType) then {
 								_fedArguments call _subfunction;
-								["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false]] call CBA_fnc_localEvent;
+								["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false], true, false] call KH_fnc_triggerCbaEvent;
 							};
 						};
 					};
@@ -673,7 +675,7 @@ switch (typeName _environmentType) do {
 							_fedArguments call _subfunction;
 						}
 						else {
-							["KH_eve_temporalExecutionStackHandler", [_environmentId, true, true, true]] call CBA_fnc_localEvent;
+							["KH_eve_temporalExecutionStackHandler", [_environmentId, true, true, true], true, false] call KH_fnc_triggerCbaEvent;
 						};
 					};
 				}
@@ -717,7 +719,7 @@ switch (typeName _environmentType) do {
 						[_environmentId],
 						{
 							params ["_environmentId"];
-							["KH_eve_temporalExecutionStackHandler", [_environmentId, true, true, false]] call CBA_fnc_localEvent;
+							["KH_eve_temporalExecutionStackHandler", [_environmentId, true, true, false], true, false] call KH_fnc_triggerCbaEvent;
 							KH_var_temporalExecutionStackDeletions pushBackUnique _handlerId;
 						},
 						_timeout,

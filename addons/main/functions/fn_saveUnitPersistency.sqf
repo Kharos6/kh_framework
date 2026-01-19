@@ -5,7 +5,7 @@ if (_identifier isEqualTo "") exitWith {
 };
 
 private _persistencyId = ["unitPersistency_", _identifier] joinString "";
-private _currentEntries = "khNamespace" readKhData [_persistencyId, createHashMap];
+private _currentEntries = "kh_namespace" readKhData [_persistencyId, createHashMap];
 
 {
 	if (_x getVariable ["KH_var_allowPersistency", true]) then {
@@ -17,5 +17,5 @@ private _currentEntries = "khNamespace" readKhData [_persistencyId, createHashMa
 	};
 } forEach (_units select {!(isPlayer _x);});
 
-"khNamespace" writeKhData [_persistencyId, _currentEntries];
+"kh_namespace" writeKhData [_persistencyId, _currentEntries];
 _currentEntries;

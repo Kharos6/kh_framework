@@ -26,7 +26,7 @@ missionNamespace setVariable [_fultonId, false];
 		{},
 		{
 			(_this select 3) params ["_fultonEvent"];
-			[_fultonEvent, []] call CBA_fnc_serverEvent;
+			[_fultonEvent, [], "SERVER", false] call KH_fnc_triggerCbaEvent;
 		},
 		{},
 		[_fultonEvent],
@@ -81,13 +81,15 @@ missionNamespace setVariable [_fultonId, false];
 						KH_var_fultonRespawnReset = true;
 
 						[
-							"KH_eve_playerRespawned", 
+							"CBA",
+							"KH_eve_playerRespawned",
+							[],
 							{
 								params ["_unit"];
 								_unit setVariable ["KH_var_fultonAttached", false, true];
-								["KH_eve_fultonDetached", [], _unit] call CBA_fnc_targetEvent;
+								["KH_eve_fultonDetached", [], _unit, false] call KH_fnc_triggerCbaEvent;
 							}
-						] call CBA_fnc_addEventHandler;		
+						] call KH_fnc_addEventHandler;		
 					};
 
 					private _currentParticipants = missionNamespace getVariable [_currentFultonParticipants, []];
@@ -130,7 +132,7 @@ missionNamespace setVariable [_fultonId, false];
 							deleteVehicle _anchorEnd;
 
 							if (isPlayer _participant) then {
-								["KH_eve_fultonDetached", [], _participant] call CBA_fnc_targetEvent;
+								["KH_eve_fultonDetached", [], _participant, false] call KH_fnc_triggerCbaEvent;
 							};
 						},
 						true,
@@ -170,7 +172,7 @@ missionNamespace setVariable [_fultonId, false];
 					{},
 					{
 						_caller setVariable ["KH_var_fultonAttached", false, true];
-						["KH_eve_fultonDetached", []] call CBA_fnc_localEvent;
+						["KH_eve_fultonDetached", [], true, false] call KH_fnc_triggerCbaEvent;
 					},
 					{},
 					[],
@@ -288,7 +290,7 @@ missionNamespace setVariable [_fultonId, false];
 										_target setVariable ["KH_var_fultonAttached", false, true];
 
 										if (isPlayer _target) then {
-											["KH_eve_fultonDetached", [], _target] call CBA_fnc_targetEvent;
+											["KH_eve_fultonDetached", [], _target, false] call KH_fnc_triggerCbaEvent;
 										};
 									},
 									{},
@@ -308,7 +310,7 @@ missionNamespace setVariable [_fultonId, false];
 					} forEach (_object nearEntities ["Man", 15]);
 				}
 				else {
-					[_handle] call CBA_fnc_removePerFrameHandler;
+					[_handlerId] call KH_fnc_removeHandler;
 				};
 			},
 			true,

@@ -40,8 +40,10 @@ if _state then {
 	KH_var_diagnosticsValidatePositionHelper = createSimpleObject ["KH_HelperRectangle_1x1x2", [0, 0, 0], true];
 	KH_var_diagnosticsValidatePositionHelper setPhysicsCollisionFlag false;
 
-	KH_var_diagnosticsDrawHandler = addMissionEventHandler [
+	KH_var_diagnosticsDrawHandler = [
+		"MISSION",
 		"Draw3D",
+		[],
 		{	
 			{
 				_x params ["_unit", "_framerateOutput", "_framerateColor", "_viewDistance", "_cameraPosition", "_cameraDirection", "_playerUnit"];
@@ -137,7 +139,7 @@ if _state then {
 				];
 			} forEach KH_var_diagnosticsInformation;
 		}
-	];
+	] call KH_fnc_addEventHandler;
 
 	KH_var_diagnosticsHandler = [
 		[],

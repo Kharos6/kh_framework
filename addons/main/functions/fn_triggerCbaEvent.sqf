@@ -94,11 +94,15 @@ private _return = switch (typeName _target) do {
             };
 
             case "GLOBAL": {
-                [_event, _arguments] call CBA_fnc_globalEvent;
+                {
+                    [_event, _arguments, _x] call CBA_fnc_ownerEvent;
+                } forEach KH_var_allMachines;
             };
 
             case "REMOTE": {
-                [_event, _arguments] call CBA_fnc_remoteEvent;
+                {
+                    [_event, _arguments, _x] call CBA_fnc_ownerEvent;
+                } forEach (KH_var_allMachines - [clientOwner]);
             };
 
             case "PLAYERS": {

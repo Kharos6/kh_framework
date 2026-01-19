@@ -426,7 +426,14 @@ if KH_var_medical then {
                                             };									
                                         },
                                         true,
-                                        0,
+                                        [
+                                            0,
+                                            false,
+                                            false,
+                                            {},
+                                            false,
+                                            true
+                                        ],
                                         false
                                     ] call KH_fnc_execute;
 

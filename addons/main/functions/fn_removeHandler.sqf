@@ -106,15 +106,10 @@ else {
         _namespace setVariable [_variable, _valueOverride, _target];
 
         if (_target isEqualType true) then {
-            if _target then {
-                ["KH_eve_handlerRemoved", [_id], "GLOBAL", false] call KH_fnc_triggerCbaEvent;
-            }
-            else {
-                ["KH_eve_handlerRemoved", [_id], true, false] call KH_fnc_triggerCbaEvent;
-            };
+            ["KH_eve_handlerRemoved", [_id], [true, "GLOBAL"] select _target, false] call KH_fnc_triggerCbaEvent;
         }
         else {
-            ["KH_eve_handlerRemoved", [_id]] call KH_fnc_triggerCbaEvent;
+            ["KH_eve_handlerRemoved", [_id], _target, false] call KH_fnc_triggerCbaEvent;
         };
     };
 };

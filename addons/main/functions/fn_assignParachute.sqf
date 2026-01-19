@@ -78,17 +78,7 @@ else {
 							] call KH_fnc_addEventHandler;
 						}, 
 						true,
-						[
-							{
-								params ["_unit"];
-								(((backpack _unit) isEqualTo "B_Parachute") || ((backpack _unit) isEqualTo "ACE_NonSteerableParachute"));
-							},
-							true,
-							1,
-							0,
-							true,
-							true
-						],
+						"-1",
 						false
 					] call KH_fnc_execute;
 				};
@@ -99,5 +89,5 @@ else {
 		false
 	] call KH_fnc_execute;
 
-	nil;
+	objNull;
 };

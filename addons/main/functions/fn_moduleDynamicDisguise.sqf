@@ -6,6 +6,7 @@ isNil {
 
             if _activated then {
                 [
+                    true,
                     [
                         parseSimpleArray (["[", _logic getVariable ["KH_ModuleDynamicDisguiseBluforUniforms", ""], "]"] joinString ""), 
                         parseSimpleArray (["[", _logic getVariable ["KH_ModuleDynamicDisguiseOpforUniforms", ""], "]"] joinString ""), 

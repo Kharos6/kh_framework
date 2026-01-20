@@ -5,16 +5,10 @@ isNil {
             params [["_logic", objNull, [objNull]], ["_units", [], [[]]], ["_activated", true, [true]]];
 
             if _activated then {
-                private _vehicles = [];
-
-                {
-                    _vehicles pushBack (missionNamespace getVariable [_x, objNull]);
-                } forEach (parseSimpleArray (["[", _logic getVariable ["KH_ModuleFultonExtractVehicles", ""], "]"] joinString ""));
-
                 {
                     [
                         _x,
-                        _vehicles,
+                        (parseSimpleArray (["[", _logic getVariable ["KH_ModuleFultonExtractVehicles", ""], "]"] joinString "")) apply {missionNamespace getVariable [_x, objNull];},
                         _logic getVariable ["KH_ModuleFultonExtractHeight", 100],
                         parseNumber (_logic getVariable ["KH_ModuleFultonExtractDistance", "10"]),
                         parseNumber (_logic getVariable ["KH_ModuleFultonExtractMaximumParticipants", "10"]),

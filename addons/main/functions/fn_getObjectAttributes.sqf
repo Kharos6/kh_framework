@@ -33,14 +33,6 @@ params [["_object", objNull, [objNull]]];
         isVehicleCargo _object,
 		[(collisionDisabledWith _object) select 0, true] call KH_fnc_getEntityVariableName,
 		(getPhysicsCollisionFlag _object) select 0,
-		call {
-			private _allVariables = [];
-
-			{
-				_allVariables pushBack _x;
-			} forEach (_object getVariable ["KH_var_persistentVariables", []]);
-
-			_allVariables;
-		}
+		_object getVariable ["KH_var_persistentVariables", []]
 	]
 ];

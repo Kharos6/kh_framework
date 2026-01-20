@@ -5,7 +5,6 @@ isNil {
 			params [["_logic", objNull, [objNull]], ["_units", [], [[]]], ["_activated", true, [true]]];
 
 			if _activated then {
-				private _side = _logic getVariable ["KH_ModuleDynamicDisguiseEquipmentSide", "BLUFOR"];
 				private _uniforms = [];
 				private _vests = [];
 				private _headgear = [];
@@ -40,23 +39,23 @@ isNil {
 					} forEach _units;
 				};
 
-				switch _side do {
+				switch (_logic getVariable ["KH_ModuleDynamicDisguiseEquipmentSide", "BLUFOR"]) do {
 					case "BLUFOR": {
-						(KH_var_disguiseSideUniforms select 0) insert [-1, _uniforms select 0, true];
-						(KH_var_disguiseSideVests select 0) insert [-1, _vests select 0, true];
-						(KH_var_disguiseSideHeadgear select 0) insert [-1, _headgear select 0, true];
+						(KH_var_disguiseSideUniforms select 0) insert [-1, _uniforms, true];
+						(KH_var_disguiseSideVests select 0) insert [-1, _vests, true];
+						(KH_var_disguiseSideHeadgear select 0) insert [-1, _headgear, true];
 					};
 
 					case "OPFOR": {
-						(KH_var_disguiseSideUniforms select 1) insert [-1, _uniforms select 1, true];
-						(KH_var_disguiseSideVests select 1) insert [-1, _vests select 1, true];
-						(KH_var_disguiseSideHeadgear select 1) insert [-1, _headgear select 1, true];
+						(KH_var_disguiseSideUniforms select 1) insert [-1, _uniforms, true];
+						(KH_var_disguiseSideVests select 1) insert [-1, _vests, true];
+						(KH_var_disguiseSideHeadgear select 1) insert [-1, _headgear, true];
 					};
 
 					case "GREENFOR": {
-						(KH_var_disguiseSideUniforms select 2) insert [-1, _uniforms select 2, true];
-						(KH_var_disguiseSideVests select 2) insert [-1, _vests select 2, true];
-						(KH_var_disguiseSideHeadgear select 2) insert [-1, _headgear select 2, true];
+						(KH_var_disguiseSideUniforms select 2) insert [-1, _uniforms, true];
+						(KH_var_disguiseSideVests select 2) insert [-1, _vests, true];
+						(KH_var_disguiseSideHeadgear select 2) insert [-1, _headgear, true];
 					};
 				};
 			};

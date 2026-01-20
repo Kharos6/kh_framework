@@ -8,15 +8,7 @@ private _componentsId = generateUid;
     getRepairCargo _object,
     _object weaponsInfo ["", false],
     getAllPylonsInfo _object,
-    call {
-        private _pylonAmmo = [];
-
-        {
-            _pylonAmmo pushBack [_x select 0, _x select 4];
-        } forEach (getAllPylonsInfo _object);
-
-        _pylonAmmo;
-    },
+    (getAllPylonsInfo _object) apply {[_x select 0, _x select 4];},
     getPlateNumber _object,
     [
         _componentsId,

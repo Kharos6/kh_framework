@@ -199,32 +199,31 @@ else {
 
             if (diag_tickTime < (_startTime + _changeDuration)) then {
                 private _time = (diag_tickTime - _startTime) / _changeDuration;
-                private _interpolatedHeights = [];
 
-                {
-                    _x params ["_i", "_j", "_originalHeight"];
-                    
-                    _interpolatedHeights pushBack [
-                        _i, 
-                        _j, 
-                        switch _animationCurveType do {
-                            case "NONE": { 
-                                _originalHeight;
-                            };
+                setTerrainHeight [
+                    _originalHeights apply {
+                        _x params ["_i", "_j", "_originalHeight"];
+                        
+                        [
+                            _i, 
+                            _j, 
+                            switch _animationCurveType do {
+                                case "NONE": { 
+                                    _originalHeight;
+                                };
 
-                            case "LINEAR": { 
-                                linearConversion [0, 1, _time, _originalHeight, (_targetHeights select _forEachIndex) select 2, false];
-                            };
+                                case "LINEAR": { 
+                                    linearConversion [0, 1, _time, _originalHeight, (_targetHeights select _forEachIndex) select 2, false];
+                                };
 
-                            case "BEZIER": {
-                                linearConversion [0, 1, _time * _time * (3 - 2 * _time), _originalHeight, (_targetHeights select _forEachIndex) select 2, false];
-                            };
-                        }
-                    ];
-
-                } forEach _originalHeights;
-
-                setTerrainHeight [_interpolatedHeights, _adjustObjectHeight];
+                                case "BEZIER": {
+                                    linearConversion [0, 1, _time * _time * (3 - 2 * _time), _originalHeight, (_targetHeights select _forEachIndex) select 2, false];
+                                };
+                            }
+                        ];
+                    }, 
+                    _adjustObjectHeight
+                ];
             }
             else {
                 setTerrainHeight [_targetHeights, _adjustObjectHeight];

@@ -1,4 +1,4 @@
-params [["_state", true, [true]], ["_uniforms", [], [[]]], ["_vests", [], [[]]], ["_headgear", [], [[]]], ["_vehicles", [], [[]]], ["_setCaptive", false, [true]]];
+params [["_state", true, [true]], ["_uniforms", [], [[]]], ["_vests", [], [[]]], ["_headgear", [], [[]]], ["_setCaptive", false, [true]]];
 KH_var_dynamicDisguiseState = _state;
 
 if (isNil "KH_var_disguiseSideUniforms") then {

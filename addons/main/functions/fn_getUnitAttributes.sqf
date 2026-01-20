@@ -31,16 +31,10 @@ params [["_unit", objNull, [objNull]]];
 		getUnitLoadout _unit,
 		getAllUnitTraits _unit,
 		weaponState _unit,
-		call {
-			private _zeroing = [];
-
-			{
-				private _weapon = _x select 2;
-				private _muzzle = _x select 3;
-				_zeroing pushBack [_weapon, _muzzle, (_unit currentZeroing [_weapon, _muzzle]) select 1];
-			} forEach (_unit weaponsInfo ["", false]);
-
-			_zeroing;			
+		(_unit weaponsInfo ["", false]) apply {
+			private _weapon = _x select 2;
+			private _muzzle = _x select 3;
+			[_weapon, _muzzle, (_unit currentZeroing [_weapon, _muzzle]) select 1];
 		},
 		currentThrowable _unit,
 		getPosATL _unit,
@@ -101,24 +95,10 @@ params [["_unit", objNull, [objNull]]];
 		},
 		[(collisionDisabledWith _unit) select 0, true] call KH_fnc_getEntityVariableName,
 		(getPhysicsCollisionFlag _unit) select 0,
-		call {
-			private _entities = [];
-
-			{
-				_x params ["_accuracy", "_target", "_targetSide", "_targetType", "_targetPosition", "_targetAge"];
-				_entities pushBack [_accuracy, [_target, true] call KH_fnc_getEntityVariableName, _targetSide, _targetType, _targetPosition, _targetAge];
-			} forEach (_unit targetsQuery [objNull, sideUnknown, "", [], 0]);	
-
-			_entities;			
+		(_unit targetsQuery [objNull, sideUnknown, "", [], 0]) apply {
+			_x params ["_accuracy", "_target", "_targetSide", "_targetType", "_targetPosition", "_targetAge"];
+			[_accuracy, [_target, true] call KH_fnc_getEntityVariableName, _targetSide, _targetType, _targetPosition, _targetAge];
 		},
-		call {
-			private _allVariables = [];
-
-			{
-				_allVariables pushBack _x;
-			} forEach (_unit getVariable ["KH_var_persistentVariables", []]);
-
-			_allVariables;
-		}
+		_unit getVariable ["KH_var_persistentVariables", []]
 	]
 ];

@@ -39,13 +39,7 @@ if (missionNamespace isNil _variableHandlerId) then {
                     [_namespace getVariable _name];
                 }
                 else {
-                    private _values = [];
-
-                    {
-                        _values pushBack (_namespace getVariable _x);
-                    } forEach _name;
-
-                    _values;
+                    _name apply {_namespace getVariable _x;};
                 };
             }
         ]

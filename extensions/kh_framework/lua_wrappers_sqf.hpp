@@ -820,7 +820,6 @@ REG_SQF_CMD_0("sideAmbientLife", side_ambient_life);
 REG_SQF_CMD_0("sideEmpty", side_empty);
 REG_SQF_CMD_0("sideEnemy", side_enemy);
 REG_SQF_CMD_0("sideFriendly", side_friendly);
-REG_SQF_CMD_1("sideGet", side_get, LUA_TO_GROUP);
 REG_SQF_CMD_0("sideLogic", side_logic);
 REG_SQF_CMD_0("sideUnknown", side_unknown);
 REG_SQF_CMD_1("simulationEnabled", simulation_enabled, LUA_TO_OBJECT);

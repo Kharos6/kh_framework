@@ -527,7 +527,7 @@ private _result = [
                     [_x select 0, netId (_x select 1), _x select 2, _x select 3, _x select 4, _x select 5];
                 };
 
-                _currentTargets = [_currentTargets, [], {_x select 1;}, "ASCEND"] call BIS_fnc_sortBy;
+                _currentTargets = [_currentTargets, [], {_x select 5;}, "ASCEND"] call BIS_fnc_sortBy;
 
                 if ((_unit getVariable ["KH_var_collectedTargets", []]) isNotEqualTo _currentTargets) then {
                     (_data get "Targets") pushBack [CBA_missionTime, _currentTargets];

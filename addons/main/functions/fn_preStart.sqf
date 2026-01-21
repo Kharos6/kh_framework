@@ -1,3 +1,4 @@
+uiNamespace setVariable ["KH_var_khDataNamespace", ["kh_namespace_", profileName] joinString ""];
 uiNamespace setVariable ["KH_var_gameSessionId", generateUid];
 uiNamespace setVariable ["KH_var_missionSessionId", generateUid];
 uiNamespace setVariable ["KH_var_serverGameSessionId", uiNamespace getVariable "KH_var_gameSessionId"];

@@ -1,3 +1,5 @@
+KH_var_khDataNamespace = ["kh_namespace_", profileName] joinString "";
+uiNamespace setVariable ["KH_var_khDataNamespace", KH_var_khDataNamespace];
 KH_var_isMenu = allDisplays isEqualTo [findDisplay 0];
 if KH_var_isMenu exitWith {};
 KH_var_gameSessionId = uiNamespace getVariable "KH_var_gameSessionId";

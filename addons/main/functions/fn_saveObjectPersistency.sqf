@@ -5,7 +5,7 @@ if (_identifier isEqualTo "") exitWith {
 };
 
 private _persistencyId = ["objectPersistency_", _identifier] joinString "";
-private _currentEntries = "kh_namespace" readKhData [_persistencyId, createHashMap];
+private _currentEntries = KH_var_khDataNamespace readKhData [_persistencyId, createHashMap];
 
 {
 	if (_x getVariable ["KH_var_allowPersistency", true]) then {
@@ -17,5 +17,5 @@ private _currentEntries = "kh_namespace" readKhData [_persistencyId, createHashM
 	};
 } forEach _objects;
 
-"kh_namespace" writeKhData [_persistencyId, _currentEntries];
+KH_var_khDataNamespace writeKhData [_persistencyId, _currentEntries];
 _currentEntries;

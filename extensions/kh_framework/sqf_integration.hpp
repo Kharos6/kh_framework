@@ -457,7 +457,7 @@ static game_value get_epoch_delta_sqf(game_value_parameter past_epoch_str) noexc
 
 static game_value read_khdata_sqf(game_value_parameter filename, game_value_parameter var_param) {
     try {
-        std::string file_str = static_cast<std::string>(filename) + "_" + sqf::profile_name();
+        std::string file_str = static_cast<std::string>(filename);
         std::transform(file_str.begin(), file_str.end(), file_str.begin(), ::tolower);
         std::string var_str;
         game_value default_value;
@@ -506,7 +506,7 @@ static game_value read_khdata_sqf(game_value_parameter filename, game_value_para
 
 static game_value read_khdata_unary_sqf(game_value_parameter filename) {
     try {
-        std::string file_str = static_cast<std::string>(filename) + "_" + sqf::profile_name();
+        std::string file_str = static_cast<std::string>(filename);
         std::transform(file_str.begin(), file_str.end(), file_str.begin(), ::tolower);
         auto* file = KHDataManager::instance().get_or_create_file(file_str);
         
@@ -533,7 +533,7 @@ static game_value read_khdata_unary_sqf(game_value_parameter filename) {
 
 static game_value write_khdata_sqf(game_value_parameter filename, game_value_parameter params) {
     try {
-        std::string file_str = static_cast<std::string>(filename) + "_" + sqf::profile_name();
+        std::string file_str = static_cast<std::string>(filename);
         std::transform(file_str.begin(), file_str.end(), file_str.begin(), ::tolower);
         
         if (params.size() < 2) {
@@ -604,7 +604,7 @@ static game_value flush_khdata_sqf() {
 
 static game_value delete_khdata_file_sqf(game_value_parameter filename) {
     try {
-        std::string file_str = static_cast<std::string>(filename) + "_" + sqf::profile_name();
+        std::string file_str = static_cast<std::string>(filename);
         
         if (KHDataManager::instance().delete_file(file_str)) {
             return game_value();

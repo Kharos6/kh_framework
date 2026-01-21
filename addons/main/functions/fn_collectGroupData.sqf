@@ -42,17 +42,13 @@ private _result = [
     _data,
     [
         [
-            "MISSION",
-            "GroupDeleted",
-            [_group, _data],
+            ["ENTITY", _group, "LOCAL"],
+            "Deleted",
+            [_data],
             {
-                params ["_deletedGroup"];
-                _args params ["_group", "_data"];
-
-                if (_group isEqualTo _deletedGroup) then {
-                    _data set ["Deleted", CBA_missionTime];
-                    [_handlerId] call KH_fnc_removeHandler;
-                };
+                params ["_group"];
+                _args params ["_data"];
+                _data set ["Deleted", CBA_missionTime];
             }
         ] call KH_fnc_addEventHandler,
         [

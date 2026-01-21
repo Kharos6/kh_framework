@@ -60,6 +60,10 @@ switch (toUpperANSI _slot) do {
             _unit moveInAny _vehicle;
         }
         else {
+            if (_index isEqualType []) then {
+                _index = (_index param [1, [0]]) param [0, 0];
+            };
+
             _unit moveInCargo [_vehicle, _index, _reassign];
         };
     };

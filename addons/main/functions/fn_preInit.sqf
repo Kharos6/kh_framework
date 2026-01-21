@@ -1551,7 +1551,7 @@ if hasInterface then {
 			player setVariable ["KH_var_playerCameraPosition", positionCameraToWorld [0, 0, 0], 2];
 			player setVariable ["KH_var_playerCameraDirection", getCameraViewDirection player, 2];
 
-			if (KH_var_anchorPlayersToGeometry || (KH_var_anchorPlayersToMovingObjects isNotEqualTo 0) && (isNull (objectParent player)) && (isNull (attachedTo player)) && (alive player)) then {
+			if ((KH_var_anchorPlayersToGeometry || (KH_var_anchorPlayersToMovingObjects isNotEqualTo 0)) && (isNull (objectParent player)) && (isNull (attachedTo player)) && (alive player)) then {
 				private _position = getPosASLVisual player;
 				private _aimPosition = [_position select 0, _position select 1, (AGLToASL (unitAimPositionVisual player)) select 2];
 
@@ -1697,7 +1697,7 @@ if hasInterface then {
 
 				if KH_var_anchorPlayersToGeometry then {
 					if (isNull KH_var_playerGeometryRoadway) then {
-						KH_var_playerGeometryRoadway = createVehicleLocal ["KH_InvisibleWalkableSurface_1x1x0", getPosATLVisual player, [], 0, "CAN_COLLIDE"];
+						KH_var_playerGeometryRoadway = createVehicleLocal ["KH_InvisibleWalkableSurface_1x1x0", [0, 0, 0], [], 0, "CAN_COLLIDE"];
 					};
 
 					if _useRoadway then {
@@ -1723,20 +1723,6 @@ if hasInterface then {
 							if (((vectorMagnitude (velocity _entity)) <= 0.001) && ((vectorMagnitude (velocity (attachedTo _entity))) <= 0.001)) then {
 								private _roadwayPosition = ((_roadwayIntersection select 0) select 0) vectorAdd (((_roadwayIntersection select 0) select 1) vectorMultiply 0.01);
 								KH_var_playerGeometryRoadway setPosASL _roadwayPosition;
-
-								[
-									[_roadwayPosition],
-									{
-										params ["_roadwayPosition"];
-
-										if (KH_var_anchorPlayersToGeometry && (isNull (objectParent player)) && ((vehicle player) isEqualTo player) && (((getPosASLVisual player) select 2) < (_roadwayPosition select 2))) then {
-											player setPosASL _roadwayPosition;
-										};
-									},
-									true,
-									"-1",
-									false
-								] call KH_fnc_execute;
 							}
 							else {
 								KH_var_playerGeometryRoadway setPosASL [0, 0, 0];

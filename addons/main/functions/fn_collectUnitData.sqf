@@ -25,6 +25,7 @@ _data set ["Animation", []];
 _data set ["Burning", []];
 _data set ["Captive", []];
 _data set ["Damage", []];
+_data set ["Deleted", -1];
 _data set ["Direction", []];
 _data set ["EyeDirection", []];
 _data set ["Fatigue", []];
@@ -55,10 +56,6 @@ _data set ["IRLaserState", []];
 _data set ["Killed", -1];
 _data set ["LaserState", []];
 _data set ["Leaning", []];
-_data set ["NearMines", []];
-_data set ["NearObjects", []];
-_data set ["NearRoads", []];
-_data set ["NearSupplies", []];
 _data set ["OnRoad", []];
 _data set ["Oxygen", []];
 _data set ["Position", []];
@@ -94,6 +91,16 @@ private _result = [
     _unit getVariable ["KH_var_allCollectedData", []],
     _data,
     [
+        [
+            ["ENTITY", _unit, "LOCAL"],
+            "Deleted",
+            [_data],
+            {
+                params ["_unit"];
+                _args params ["_data"];
+                _data set ["Deleted", CBA_missionTime];
+            }
+        ] call KH_fnc_addEventHandler,
         [
             ["ENTITY", _unit, "PERSISTENT"],
             "FiredMan",
@@ -471,36 +478,6 @@ private _result = [
                     private _currentLaserState = isLaserOn _unit;
                     (_data get "LaserState") pushBack [_trueTime, _currentLaserState];
                     _unit setVariable ["KH_var_collectedLaserState", _currentLaserState];
-                };
-
-                private _currentNearMines = (nearestMines [_unit, [], 50]) apply {getPosATLVisual _x;};
-
-                if ((_unit getVariable ["KH_var_collectedNearMines", []]) isNotEqualTo _currentNearMines) then {
-                    (_data get "NearMines") pushBack [CBA_missionTime, _currentNearMines];
-                    _unit setVariable ["KH_var_collectedNearMines", _currentNearMines];
-                };
-
-                private _currentNearObjects = ((nearestTerrainObjects [_unit, ["Thing", "Static"], 50, true, true]) + (_unit nearEntities ["Thing", 50]) + (_unit nearEntities ["Static", 50])) apply {
-                    [netId _x, ASLToATL (AGLToASL (unitAimPositionVisual _x)), (boundingBoxReal [_x, "FireGeometry"]) param [2, 0]];
-                };
-
-                if ((_unit getVariable ["KH_var_collectedNearObjects", []]) isNotEqualTo _currentNearObjects) then {
-                    (_data get "NearObjects") pushBack [CBA_missionTime, _currentNearObjects];
-                    _unit setVariable ["KH_var_collectedNearObjects", _currentNearObjects];
-                };
-
-                private _currentNearRoads = (_unit nearRoads 50) apply {getPosATLVisual _x;};
-
-                if ((_unit getVariable ["KH_var_collectedNearRoads", []]) isNotEqualTo _currentNearRoads) then {
-                    (_data get "NearRoads") pushBack [CBA_missionTime, _currentNearRoads];
-                    _unit setVariable ["KH_var_collectedNearRoads", _currentNearRoads];
-                };
-
-                private _currentNearSupplies = (_unit nearSupplies 50) apply {[netId _x, getPosATLVisual _x];};
-
-                if ((_unit getVariable ["KH_var_collectedNearSupplies", []]) isNotEqualTo _currentNearSupplies) then {
-                    (_data get "NearSupplies") pushBack [CBA_missionTime, _currentNearSupplies];
-                    _unit setVariable ["KH_var_collectedNearSupplies", _currentNearSupplies];
                 };
 
                 if ((_unit getVariable ["KH_var_collectedOnRoad", false]) isNotEqualTo (isOnRoad _unit)) then {

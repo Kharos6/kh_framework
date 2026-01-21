@@ -1,9 +1,8 @@
 params [["_identifier", "", [""]]];
-private _file = ["mission_recording_", _identifier] joinString "";
-KH_var_recordedUnitData = _file readKhData ["unitData", createHashMap];
-KH_var_recordedGroupData = _file readKhData ["groupData", createHashMap];
-KH_var_recordedObjectData = _file readKhData ["objectData", createHashMap];
-KH_var_recordedScenarioData = _file readKhData ["scenarioData", []];
+KH_var_recordedUnitData = _identifier readKhData ["unitData", createHashMap];
+KH_var_recordedGroupData = _identifier readKhData ["groupData", createHashMap];
+KH_var_recordedObjectData = _identifier readKhData ["objectData", createHashMap];
+KH_var_recordedScenarioData = _identifier readKhData ["scenarioData", []];
 KH_var_recordedUnits = createHashMap;
 KH_var_recordedGroups = createHashMap;
 KH_var_recordedObjects = createHashMap;
@@ -58,8 +57,89 @@ if (KH_var_recordedScenarioData isNotEqualTo []) then {
 [
     [],
     {
+        private _currentRecordedScenarioData = KH_var_recordedScenarioData select (missionNamespace getVariable ["KH_var_currentRecordingIndex", 0]);
+
+        if (CBA_missionTime >= ((KH_var_recordedScenarioData param [(missionNamespace getVariable ["KH_var_currentRecordingIndex", 0]) + 1, [999999]]) select 0)) then {
+            private _nextData = KH_var_recordedScenarioData param [(missionNamespace getVariable ["KH_var_currentRecordingIndex", 0]) + 1, []];
+
+            if (_nextData isNotEqualTo []) then {
+                [missionNamespace, ((_nextData select 1) get "Header") select 2, []] call KH_fnc_setMissionAttributes;
+                missionNamespace setVariable ["KH_var_currentRecordingIndex", (missionNamespace getVariable ["KH_var_currentRecordingIndex", 0]) + 1];
+            };
+        }
+        else {
+            private _currentData = _currentRecordedScenarioData select 1;
+
+            {
+                _x params ["_time", "_data"];
+
+                if (_time <= CBA_missionTime) then {
+                    _data params [
+                        "_environmentEnabled",
+                        "_timeMultiplier",
+                        "_date",
+                        "_fogParams",
+                        "_wind",
+                        "_windDir",
+                        "_gusts",
+                        "_overcast",
+                        "_lightnings",
+                        "_rainParams",
+                        "_rainbow",
+                        "_humidity",
+                        "_waves"
+                    ];
+
+                    setTimeMultiplier _timeMultiplier;
+                    setDate _date;
+                    0 setFog _fogParams;
+                    setWind [_wind select 0, _wind select 1, true];
+                    0 setWindDir _windDir;
+                    0 setGusts _gusts;
+                    0 setOvercast _overcast;
+                    0 setLightnings _lightnings;
+                    setRain _rainParams;
+                    0 setRainbow _rainbow;
+                    setHumidity _humidity;
+                    0 setWaves _waves;
+                    forceWeatherChange;
+                    enableEnvironment _environmentEnabled;
+                }
+                else {
+                    break;
+                };
+            } forEach (_currentData get "Environment");
+
+            {
+                _x params ["_time", "_data"];
+
+                if (_time <= CBA_missionTime) then {
+                    {
+                        _x params ["_side1", "_side2", "_relationship"];
+                        _side1 setFriend [_side2, _relationship];
+                    } forEach _data;
+                }
+                else {
+                    break;
+                };
+            } forEach (_currentData get "SideRelations");
+
+            {
+                private _currentRemovalData = +(_currentData get _x);
+
+                [
+                    _currentRemovalData,
+                    {
+                        ((_x select 0) <= CBA_missionTime);
+                    }
+                ] call KH_fnc_deleteArrayElements;
+
+                _currentData set [_x, _currentRemovalData];
+            } forEach ["Environment", "SideRelations"];
+        };
+
         {
-            private _object = KH_var_recordedUnits get _x;
+            private _object = KH_var_recordedObjects get _x;
 
             if (_y isEqualTo []) then {
                 continue;
@@ -148,7 +228,7 @@ if (KH_var_recordedScenarioData isNotEqualTo []) then {
         } forEach KH_var_recordedObjectData;
 
         {
-            private _group = KH_var_recordedUnits get _x;
+            private _group = KH_var_recordedGroups get _x;
 
             if (_y isEqualTo []) then {
                 continue;
@@ -173,7 +253,7 @@ if (KH_var_recordedScenarioData isNotEqualTo []) then {
                 _x params ["_time", "_data"];
 
                 if (_time <= CBA_missionTime) then {
-                    _group setGroupIdGlobal _data;
+                    _group setGroupIdGlobal [_data];
                 }
                 else {
                     break;
@@ -291,7 +371,7 @@ if (KH_var_recordedScenarioData isNotEqualTo []) then {
                 _x params ["_time", "_data"];
 
                 if (_time <= CBA_missionTime) then {
-                    [_unit, [KH_var_recordedObjects get (_data select 1), _data select 0, _data select 3], true] call KH_fnc_setUnitVehicleSlot;
+                    [_unit, [KH_var_recordedObjects get (_data select 1), _data select 0, _data select 2], true] call KH_fnc_setUnitVehicleSlot;
                 }
                 else {
                     break;

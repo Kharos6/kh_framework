@@ -224,15 +224,21 @@ _savedAttributes params [
 			_unit setWeaponZeroing _x;
 		} forEach _currentZeroing;
 
-		_unit selectThrowable (_currentThrowable select 1);
+		if (_currentThrowable isNotEqualTo []) then {
+			_unit selectThrowable (_currentThrowable select 1);
+		};
+		
 		_unit setVectorDirAndUp [_vectorDir, _vectorUp];
 		_unit setVelocityModelSpace _velocityModelSpace;
 		_unit setDamage _damage;
-		private _hitPointNames = _hitPointsDamage select 0;
-		private _hitPointValues = _hitPointsDamage select 2;
 
-		for "_i" from 0 to ((count _hitPointNames) - 1) do {
-			_unit setHitPointDamage [_hitPointNames select _i, _hitPointValues select _i];
+		if (_hitPointsDamage isNotEqualTo []) then {
+			private _hitPointNames = _hitPointsDamage select 0;
+			private _hitPointValues = _hitPointsDamage select 2;
+
+			for "_i" from 0 to ((count _hitPointNames) - 1) do {
+				_unit setHitPointDamage [_hitPointNames select _i, _hitPointValues select _i];
+			};
 		};
 
 		_unit setBleedingRemaining _bleedingRemaining;
@@ -274,8 +280,8 @@ _savedAttributes params [
 		_unit enableAIFeature ["FIREWEAPON", _aiFeatures select 17];
 
 		if (_vehicle isNotEqualTo []) then {
-			_vehicle set [0, ["OBJECT", _vehicle] call KH_fnc_getEntityByIdentifier];
-			[_unit, _vehicle] call KH_fnc_setUnitVehicleSlot;
+			_vehicle set [0, ["OBJECT", _vehicle select 0] call KH_fnc_getEntityByIdentifier];
+			[_unit, _vehicle, true] call KH_fnc_setUnitVehicleSlot;
 		};
 
 		private _collisionEntity = ["OBJECT", _collisionDisabledWith] call KH_fnc_getEntityByIdentifier;

@@ -27,6 +27,7 @@ _data set ["CargoLoaded", []];
 _data set ["CargoUnloaded", []];
 _data set ["CollisionLights", []];
 _data set ["Damage", []];
+_data set ["Deleted", []];
 _data set ["Direction", []];
 _data set ["Engine", []];
 _data set ["Fuel", []];
@@ -48,7 +49,7 @@ _data set ["Lights", []];
 _data set ["Locked", []];
 _data set ["LockedInventory", []];
 _data set ["Position", []];
-_data set ["PylonChange", []];
+_data set ["PylonChanged", []];
 _data set ["Reload", []];
 _data set ["RepairCargo", []];
 _data set ["Velocity", []];
@@ -58,6 +59,16 @@ private _result = [
     _object getVariable ["KH_var_allCollectedData", []],
     _data,
     [
+        [
+            ["ENTITY", _object, "LOCAL"],
+            "Deleted",
+            [_data],
+            {
+                params ["_object"];
+                _args params ["_data"];
+                _data set ["Deleted", CBA_missionTime];
+            }
+        ] call KH_fnc_addEventHandler,
         [
             ["ENTITY", _object, "REMOTE"],
             "CargoLoaded",
@@ -141,7 +152,7 @@ private _result = [
                 private _pylonindex = param [1];
                 private _newMagazine = param [2];
                 _args params ["_data"];
-                (_data get "PylonChange") pushBack [(CBA_missionTime - ([_object, false] call KH_fnc_getLatency)) max 0, [_pylonIndex, _newMagazine]];
+                (_data get "PylonChanged") pushBack [(CBA_missionTime - ([_object, false] call KH_fnc_getLatency)) max 0, [_pylonIndex, _newMagazine]];
             }
         ] call KH_fnc_addEventHandler,
         [

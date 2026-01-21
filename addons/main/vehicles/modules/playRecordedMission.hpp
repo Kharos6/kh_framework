@@ -23,7 +23,7 @@ class KH_ModulePlayRecordedMission: Module_F
 		class KH_ModulePlayRecordedMissionIdentifier: Edit
 		{
 			displayName = "Identifier";
-			tooltip = "Identifier of a mission recording.";
+			tooltip = "Name of a KH Data file containing a mission recording.";
 			property = "KH_ModulePlayRecordedMissionIdentifier";
 			defaultValue = "''";
 		};

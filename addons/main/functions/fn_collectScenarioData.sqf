@@ -12,9 +12,8 @@ if (missionNamespace isNil "KH_var_allCollectedData") then {
 };
 
 (missionNamespace getVariable ["KH_var_allCollectedData", []]) pushBack [CBA_missionTime, _data];
-_data set ["BuildingChange", []];
+_data set ["BuildingChanged", []];
 _data set ["Environment", []];
-_data set ["SideRelations", []];
 
 _data set [
     "Header", 
@@ -24,6 +23,13 @@ _data set [
         call KH_fnc_getMissionAttributes
     ]
 ];
+
+_data set ["Roads", ([worldSize / 2, worldSize / 2] nearRoads (worldSize * sqrt 2 / 2)) apply {getPosATLVisual _x;}];
+_data set ["SideRelations", []];
+
+_data set ["TerrainObjects", (nearestTerrainObjects [[worldSize / 2, worldSize / 2], ["Thing", "Static"], worldSize * sqrt 2 / 2, false, true]) apply {
+    [typeOf _x, getPosATLVisual _x, boundingBoxReal [_x, "FireGeometry"]];
+}];
 
 private _result = [
     missionNamespace getVariable ["KH_var_allCollectedData", []],
@@ -36,7 +42,7 @@ private _result = [
             {
                 params ["_from", "_to", "_isRuin"];
                 _args params ["_data"];
-                (_data get "BuildingChange") pushBack [CBA_missionTime, [typeOf _from, typeOf _to, netId _to, _isRuin]];
+                (_data get "BuildingChanged") pushBack [CBA_missionTime, [typeOf _from, getPosATLVisual _from, netId _to, _isRuin]];
             }
         ] call KH_fnc_addEventHandler,
         [

@@ -110,19 +110,18 @@ if _scenario then {
 [
     "CBA",
     "KH_eve_missionEnded",
-    [_identifier],
+    [_identifier, _captureFinalData],
     {
-        _args params ["_identifier"];
-        private _fileName = ["mission_recording_", _identifier] joinString "";
+        _args params ["_identifier", "_captureFinalData"];
         private _unitDataFinal = createHashMap;
         private _groupDataFinal = createHashMap;
         private _objectDataFinal = createHashMap;
         private _scenarioDataFinal = [];
-        _fileName writeKhData ["sessionId", KH_var_serverMissionSessionId];
-        _fileName writeKhData ["unitData", KH_var_recordedUnitData];
-        _fileName writeKhData ["groupData", KH_var_recordedGroupData];
-        _fileName writeKhData ["objectData", KH_var_recordedObjectData];
-        _fileName writeKhData ["scenarioData", KH_var_recordedScenarioData];
+        _identifier writeKhData ["sessionId", KH_var_serverMissionSessionId];
+        _identifier writeKhData ["unitData", KH_var_recordedUnitData];
+        _identifier writeKhData ["groupData", KH_var_recordedGroupData];
+        _identifier writeKhData ["objectData", KH_var_recordedObjectData];
+        _identifier writeKhData ["scenarioData", KH_var_recordedScenarioData];
 
         if _captureFinalData then { 
             if _units then {
@@ -148,11 +147,11 @@ if _scenario then {
             };
         };
 
-        _fileName writeKhData ["unitDataFinal", _unitDataFinal];
-        _fileName writeKhData ["groupDataFinal", _groupDataFinal];
-        _fileName writeKhData ["objectDataFinal", _objectDataFinal];
-        _fileName writeKhData ["scenarioDataFinal", _scenarioDataFinal];
-        _fileName writeKhData ["dataEnd", CBA_missionTime];
+        _identifier writeKhData ["unitDataFinal", _unitDataFinal];
+        _identifier writeKhData ["groupDataFinal", _groupDataFinal];
+        _identifier writeKhData ["objectDataFinal", _objectDataFinal];
+        _identifier writeKhData ["scenarioDataFinal", _scenarioDataFinal];
+        _identifier writeKhData ["dataEnd", CBA_missionTime];
     }
 ] call KH_fnc_addEventHandler;
 

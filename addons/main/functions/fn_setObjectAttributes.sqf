@@ -141,13 +141,16 @@ _savedAttributes params [
         _object setVelocityModelSpace _velocityModelSpace;
         _object setAngularVelocityModelSpace _angularVelocityModelSpace;
         _object setDamage _damage;
-		private _hitPointNames = _hitPointsDamage select 0;
-		private _hitPointValues = _hitPointsDamage select 2;
 
-		for "_i" from 0 to ((count _hitPointNames) - 1) do {
-			_object setHitPointDamage [_hitPointNames select _i, _hitPointValues select _i];
-		};
+        if (_hitPointsDamage isNotEqualTo []) then {
+            private _hitPointNames = _hitPointsDamage select 0;
+            private _hitPointValues = _hitPointsDamage select 2;
 
+            for "_i" from 0 to ((count _hitPointNames) - 1) do {
+                _object setHitPointDamage [_hitPointNames select _i, _hitPointValues select _i];
+            };
+        };
+        
         _object lock _locked;
         _object engineOn _engineOn;
         _object setPilotLight _light;

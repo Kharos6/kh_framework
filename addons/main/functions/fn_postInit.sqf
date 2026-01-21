@@ -182,6 +182,141 @@ isNil {
 							},
 							false
 						] call KH_fnc_execute;
+
+						if !(isNil "KH_var_missionStartSuspension") then {
+							{
+								KH_var_missionSuspensionEntities = [];
+								private _timeMultiplier = timeMultiplier;
+								setTimeMultiplier 0.1;
+
+								{
+									if !(_x in KH_var_missionSuspensionEntities) then {
+										_x setVariable ["KH_var_originalSimulationState", simulationEnabled _x];
+										_x enableSimulationGlobal false;
+									};
+
+									private _parent = objectParent _x;
+									
+									if !(_parent in KH_var_missionSuspensionEntities) then {
+										_parent setVariable ["KH_var_originalSimulationState", simulationEnabled _parent];
+										_parent enableSimulationGlobal false;
+									};
+									
+									KH_var_missionSuspensionEntities insert [-1, [_x, _parent], true];
+								} forEach ([KH_var_allPlayerUnits, allUnits] select (KH_var_missionStartSuspension isEqualTo 2));
+
+								private _playerLoadHandler = [
+									"CBA",
+									"KH_eve_playerLoaded",
+									[],
+									{
+										private _unit = param [3];
+
+										if !(_unit in KH_var_missionSuspensionEntities) then {
+											_unit setVariable ["KH_var_originalSimulationState", simulationEnabled _unit];
+											_unit enableSimulationGlobal false;
+										};
+
+										private _parent = objectParent _unit;
+
+										if !(_parent in KH_var_missionSuspensionEntities) then {
+											_parent setVariable ["KH_var_originalSimulationState", simulationEnabled _parent];
+											_parent enableSimulationGlobal false;
+										};
+									
+										KH_var_missionSuspensionEntities insert [-1, [_unit, _parent], true];
+									}
+								] call KH_fnc_addEventHandler;
+
+								[
+									[],
+									{
+										with uiNamespace do {
+											if (isNil "KH_var_suspensionDisplay") then {
+												KH_var_suspensionDisplay = ["RscText", "PLAYERS LOADING...", [0, false, 0], [0, 0, 0, 1], [0, 0, 100, 100], false, [0, 0, 0]] call KH_fnc_draw2d;
+											}
+											else {
+												if (isNull KH_var_suspensionDisplay) then {
+													KH_var_suspensionDisplay = ["RscText", "PLAYERS LOADING...", [0, false, 0], [0, 0, 0, 1], [0, 0, 100, 100], false, [0, 0, 0]] call KH_fnc_draw2d;
+												};
+											};
+										};
+									},
+									KH_var_allPlayerMachines - [KH_var_adminMachine],
+									true,
+									["JIP", {!KH_var_playersLoaded;}, true, ""]
+								] call KH_fnc_execute;
+
+								[
+									[_timeMultiplier, _playerLoadHandler],
+									{
+										params ["_timeMultiplier", "_playerLoadHandler"];
+
+										{
+											_x enableSimulationGlobal (_x getVariable ["KH_var_originalSimulationState", true]);
+										} forEach KH_var_missionSuspensionEntities;
+
+										setTimeMultiplier _timeMultiplier;
+
+										[
+											[],
+											{
+												with uiNamespace do {
+													if !(isNil "KH_var_suspensionDisplay") then {
+														ctrlDelete KH_var_suspensionDisplay;
+														KH_var_suspensionDisplay = nil;
+													};
+												};
+											},
+											"PLAYERS",
+											true,
+											false
+										] call KH_fnc_execute;
+
+										[_playerLoadHandler] call KH_fnc_removeHandler;
+										KH_var_missionSuspended = false;
+										publicVariable "KH_var_missionSuspended";
+									},
+									true,
+									{KH_var_playersLoaded;},
+									false
+								] call KH_fnc_execute;
+							} forEach allUnits;
+						};
+
+						if KH_var_medical then {
+							[["CAManBase"], [], KH_fnc_medicalSetup, true] call KH_fnc_entityInit;
+						};
+
+						[
+							["Man"], 
+							[], 
+							{
+								params ["_unit"];
+
+								[
+									[_unit], 
+									{
+										params ["_unit"];
+
+										[
+											[_unit, clientOwner],
+											{
+												params ["_unit", "_clientOwner"];
+												_unit setVariable ["KH_var_owner", _clientOwner, true];
+											},
+											"SERVER",
+											true,
+											false
+										] call KH_fnc_execute;
+									},
+									_unit,
+									true,
+									["PERSISTENT", _unit, [], {}, ""]
+								] call KH_fnc_execute;
+							}, 
+							true
+						] call KH_fnc_entityInit;
 					},
 					true,
 					{time > 0;},
@@ -860,143 +995,6 @@ isNil {
 			{
 				luaExecute _x;
 			} forEach KH_var_postInitLuaExecutions;
-
-			if isServer then {
-				if !(isNil "KH_var_missionStartSuspension") then {
-					{
-						KH_var_missionSuspensionEntities = [];
-						private _timeMultiplier = timeMultiplier;
-						setTimeMultiplier 0.1;
-
-						{
-							if !(_x in KH_var_missionSuspensionEntities) then {
-								_x setVariable ["KH_var_originalSimulationState", simulationEnabled _x];
-								_x enableSimulationGlobal false;
-							};
-
-							private _parent = objectParent _x;
-							
-							if !(_parent in KH_var_missionSuspensionEntities) then {
-								_parent setVariable ["KH_var_originalSimulationState", simulationEnabled _parent];
-								_parent enableSimulationGlobal false;
-							};
-							
-							KH_var_missionSuspensionEntities insert [-1, [_x, _parent], true];
-						} forEach ([KH_var_allPlayerUnits, allUnits] select (KH_var_missionStartSuspension isEqualTo 2));
-
-						private _playerLoadHandler = [
-							"CBA",
-							"KH_eve_playerLoaded",
-							[],
-							{
-								private _unit = param [3];
-
-								if !(_unit in KH_var_missionSuspensionEntities) then {
-									_unit setVariable ["KH_var_originalSimulationState", simulationEnabled _unit];
-									_unit enableSimulationGlobal false;
-								};
-
-								private _parent = objectParent _unit;
-
-								if !(_parent in KH_var_missionSuspensionEntities) then {
-									_parent setVariable ["KH_var_originalSimulationState", simulationEnabled _parent];
-									_parent enableSimulationGlobal false;
-								};
-							
-								KH_var_missionSuspensionEntities insert [-1, [_unit, _parent], true];
-							}
-						] call KH_fnc_addEventHandler;
-
-						[
-							[],
-							{
-								with uiNamespace do {
-									if (isNil "KH_var_suspensionDisplay") then {
-										KH_var_suspensionDisplay = ["RscText", "PLAYERS LOADING...", [0, false, 0], [0, 0, 0, 1], [0, 0, 100, 100], false, [0, 0, 0]] call KH_fnc_draw2d;
-									}
-									else {
-										if (isNull KH_var_suspensionDisplay) then {
-											KH_var_suspensionDisplay = ["RscText", "PLAYERS LOADING...", [0, false, 0], [0, 0, 0, 1], [0, 0, 100, 100], false, [0, 0, 0]] call KH_fnc_draw2d;
-										};
-									};
-								};
-							},
-							KH_var_allPlayerMachines - [KH_var_adminMachine],
-							true,
-							["JIP", {!KH_var_playersLoaded;}, true, ""]
-						] call KH_fnc_execute;
-
-						[
-							[_timeMultiplier, _playerLoadHandler],
-							{
-								params ["_timeMultiplier", "_playerLoadHandler"];
-
-								{
-									_x enableSimulationGlobal (_x getVariable ["KH_var_originalSimulationState", true]);
-								} forEach KH_var_missionSuspensionEntities;
-
-								setTimeMultiplier _timeMultiplier;
-
-								[
-									[],
-									{
-										with uiNamespace do {
-											if !(isNil "KH_var_suspensionDisplay") then {
-												ctrlDelete KH_var_suspensionDisplay;
-												KH_var_suspensionDisplay = nil;
-											};
-										};
-									},
-									"PLAYERS",
-									true,
-									false
-								] call KH_fnc_execute;
-
-								[_playerLoadHandler] call KH_fnc_removeHandler;
-								KH_var_missionSuspended = false;
-								publicVariable "KH_var_missionSuspended";
-							},
-							true,
-							{KH_var_playersLoaded;},
-							false
-						] call KH_fnc_execute;
-					} forEach allUnits;
-				};
-
-				if KH_var_medical then {
-					[["CAManBase"], [], KH_fnc_medicalSetup, true] call KH_fnc_entityInit;
-				};
-
-				[
-					["Man"], 
-					[], 
-					{
-						params ["_unit"];
-
-						[
-							[_unit], 
-							{
-								params ["_unit"];
-
-								[
-									[_unit, clientOwner],
-									{
-										params ["_unit", "_clientOwner"];
-										_unit setVariable ["KH_var_owner", _clientOwner, true];
-									},
-									"SERVER",
-									true,
-									false
-								] call KH_fnc_execute;
-							},
-							_unit,
-							true,
-							["PERSISTENT", _unit, [], {}, ""]
-						] call KH_fnc_execute;
-					}, 
-					true
-				] call KH_fnc_entityInit;
-			};
 		},
 		true,
 		"-1",

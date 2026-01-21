@@ -30,7 +30,7 @@ class KH_ModuleRecordMission: Module_F
 		class KH_ModuleRecordMissionIdentifier: Edit
 		{
 			displayName = "Identifier";
-			tooltip = "Identifier by which the recording will be saved.";
+			tooltip = "Name of the KH Data file to which the recording will be saved.";
 			property = "KH_ModuleRecordMissionIdentifier";
 			defaultValue = "''";
 		};
@@ -73,7 +73,7 @@ class KH_ModuleRecordMission: Module_F
 	};
 	class ModuleDescription: ModuleDescription
 	{
-		description[] = {"Records everything that happened during the mission and saves it to a KH Data file; useful for mission analysis or replay. Activates only once, with a trigger, on the server."};
+		description[] = {"Records everything that happened during the mission and saves it to a KH Data file. The format for units, objects, and groups is a hash map where the key is the network ID and the value is an array of arrays of recording segments. The format for the scenario data is an array of arrays of recording segments. A recording segment array has the time of recording as the first element, and a hash map of recorded data as the second element. Activates only once, with a trigger, on the server."};
 		sync[] = {};
 		position = 0;
 		direction = 0;

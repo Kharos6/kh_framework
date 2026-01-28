@@ -15,7 +15,6 @@ switch _action do {
     };
 
     case "MOVE": {
-        _unit setVariable ["KH_var_actionMove", _subaction];
         doStop _unit;
 
         switch (_subaction param [0, "", [""]]) do {
@@ -60,8 +59,6 @@ switch _action do {
     };
 
     case "TASK": {
-        _unit setVariable ["KH_var_actionTask", _subaction];
-
         switch (_subaction param [0, "", [""]]) do {
             case "NONE": {
                 _unit doTarget objNull;

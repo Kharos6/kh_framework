@@ -10,23 +10,28 @@ class CfgVehicles
 			class Combo;
 			class Default;
 			class Edit;
-			class EditCodeMulti5: Default {
+			class EditCodeMulti5: Default 
+			{
 				control = "EditCodeMulti5";
 				defaultValue = "''";
 			};
-			class EditMulti3: Default {
+			class EditMulti3: Default 
+			{
 				control = "EditMulti3";
 				defaultValue = "''";
 			};
-			class EditMulti5: Default {
+			class EditMulti5: Default 
+			{
 				control = "EditMulti5";
 				defaultValue = "''";
 			};
-			class EditXYZ: Default {
+			class EditXYZ: Default 
+			{
 				control = "EditXYZ";
 				defaultValue = "[0, 0, 0]";
 			};
-			class EditZ: Default {
+			class EditZ: Default 
+			{
 				control = "EditZ";
 				defaultValue = "0";
 			};

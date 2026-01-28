@@ -25,7 +25,13 @@ if _lock then {
             ],
             {
                 params ["_unit", "_vectorDirAndUp"];
-                _unit setVectorDirAndUp _vectorDirAndUp;
+
+                if (alive _unit) then {
+                    _unit setVectorDirAndUp _vectorDirAndUp;
+                }
+                else {
+                    [_handlerId] call KH_fnc_removeHandler;
+                };
             },
             true,
             0,

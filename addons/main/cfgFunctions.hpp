@@ -142,11 +142,13 @@ class CfgFunctions
 			class setUnitVehicleSlot {};
 			class setVehicleLoadout {};
 			class setVideoTexture {};
+			class simulateHit {};
 			class teleport {};
 			class toggleUserInput {};
 			class triggerCbaEvent {};
 			class unitAction {};
 			class updateAiInstance {};
+			class updateMeleeState {};
 			class updateTtsSpeakerEntity {};
 			class vectorDirToPitchYaw {};
 			class vehicleSequence {};

@@ -670,6 +670,7 @@ public:
     }
 
     void arm(DWORD timeout_ms = 3000) {
+        if (InterlockedCompareExchange(&shutdown_thread_, 0, 0) == 1) return;
         timeout_ms_ = timeout_ms;
         arm_time_ = GetTickCount64();
         InterlockedExchange(&armed_, 1);

@@ -621,61 +621,60 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             detect_gpu_backends();
             break;
         case DLL_PROCESS_DETACH:
-            ShutdownWatchdog::instance().arm(3000);
-            reset_lua_state();
-            MainThreadScheduler::instance().clear();
-            
-            __try { 
-                if (AIFramework::instance().is_initialized()) {
-                    AIFramework::instance().stop_all();
-                }
-            } __except(EXCEPTION_EXECUTE_HANDLER) {}
+            if (lpReserved != nullptr) {                                
+                ShutdownWatchdog::instance().shutdown(true);
+            } else {
+                ShutdownWatchdog::instance().arm(3000);
+                reset_lua_state();
+                MainThreadScheduler::instance().clear();
+                
+                __try { 
+                    if (AIFramework::instance().is_initialized()) {
+                        AIFramework::instance().stop_all();
+                    }
+                } __except(EXCEPTION_EXECUTE_HANDLER) {}
 
-            __try {
-                if (TTSFramework::instance().is_initialized()) {
-                    TTSFramework::instance().cleanup();
-                }
-            } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                __try {
+                    if (TTSFramework::instance().is_initialized()) {
+                        TTSFramework::instance().cleanup();
+                    }
+                } __except(EXCEPTION_EXECUTE_HANDLER) {}
 
-            __try {
-                if (STTFramework::instance().is_initialized_public()) {
-                    STTFramework::instance().cleanup_public();
-                }
-            } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                __try {
+                    if (STTFramework::instance().is_initialized_public()) {
+                        STTFramework::instance().cleanup_public();
+                    }
+                } __except(EXCEPTION_EXECUTE_HANDLER) {}
 
-            __try {
-                if (UIFramework::instance().is_initialized()) {
-                    if (lpReserved != nullptr) {
-                        UIFramework::instance().emergency_shutdown();
-                    } else {
+                __try {
+                    if (UIFramework::instance().is_initialized()) {
                         UIFramework::instance().shutdown();
                     }
-                }
-            } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                } __except(EXCEPTION_EXECUTE_HANDLER) {}
 
-            __try {
-                if (NetworkFramework::instance().is_initialized()) {
-                    NetworkFramework::instance().shutdown();
-                }
-            } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                __try {
+                    if (NetworkFramework::instance().is_initialized()) {
+                        NetworkFramework::instance().shutdown();
+                    }
+                } __except(EXCEPTION_EXECUTE_HANDLER) {}
 
-            __try {
-                if (TeamspeakFramework::instance().is_initialized()) {
-                    TeamspeakFramework::instance().cleanup();
-                }
-            } __except(EXCEPTION_EXECUTE_HANDLER) {}
-            
-            __try { 
-                MH_Uninitialize(); 
-            } __except(EXCEPTION_EXECUTE_HANDLER) {}
-            
-            if (lpReserved == nullptr) {
+                __try {
+                    if (TeamspeakFramework::instance().is_initialized()) {
+                        TeamspeakFramework::instance().cleanup();
+                    }
+                } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                
+                __try { 
+                    MH_Uninitialize(); 
+                } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                
                 __try { 
                     cleanup_delay_loaded_modules(); 
                 } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                
+                ShutdownWatchdog::instance().shutdown(false);
             }
-            
-            ShutdownWatchdog::instance().shutdown(lpReserved != nullptr);
+
             break;
         case DLL_THREAD_ATTACH:
             break;

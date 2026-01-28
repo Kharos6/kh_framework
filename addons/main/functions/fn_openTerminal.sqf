@@ -100,7 +100,7 @@ ctrlSetText [103, missionNamespace getVariable [_identifierInput, ctrlText 103]]
 	"KeyDown",
 	[_identifierOutput, _function],
 	{
-		params ["_display", "_key", "_shift"];
+		(_this select [1]) params ["_key", "_shift"];
 		_args params ["_identifierOutput", "_function"];
 
 		if ((_key isEqualTo 0x1C) && !_shift) then {

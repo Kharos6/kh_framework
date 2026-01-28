@@ -66,7 +66,7 @@ if (_type isEqualTo "") then {
 else {
     switch _type do {
         case "BOOL": {
-            [getNumber _config, false] call KH_fnc_parseBoolean;
+            [getNumber _config] call KH_fnc_parseBoolean;
         };
 
         case "SCALAR": {

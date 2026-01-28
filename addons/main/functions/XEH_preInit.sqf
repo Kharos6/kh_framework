@@ -2099,7 +2099,7 @@
 				"KeyDown",
 				[],
 				{
-					params ["_display", "_key", "_shift"];
+					(_this select [1]) params ["_key", "_shift"];
 
 					if ((_key isEqualTo 0x1C) && !_shift) then {
 						private _input = ctrlText 101;

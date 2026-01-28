@@ -317,6 +317,349 @@ isNil {
 							}, 
 							true
 						] call KH_fnc_entityInit;
+
+						[
+							["Man"],
+							[],
+							{
+								params ["_unit"];
+								[[_unit], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
+
+								[
+									["ENTITY", _unit, "PERSISTENT"],
+									"AnimStateChanged",
+									[getText ((configOf _unit) >> "moves")],
+									{
+										params ["_unit", "_animation"];
+										_args params ["_moves"];
+
+										if ((getNumber (configFile >> _moves >> "states" >> _animation >> "kh_melee")) isEqualTo 1) then {
+											private _animationConfig = configFile >> _moves >> "states" >> _animation;
+											_unit setVariable ["KH_var_meleeBlockedUnits", [], [[clientOwner, 2], false] select isServer];
+											_unit setVariable ["KH_var_meleeParriedUnits", [], [[clientOwner, 2], false] select isServer];
+											_unit setFatigue (((getFatigue _unit) + ((getNumber (_animationConfig >> "kh_meleeCost")) * ((_unit getVariable "KH_var_meleeAttributes") select 0))) min 1);
+
+											[
+												[
+													_unit,
+													_animation,
+													_unit getVariable "KH_var_meleeBlockedUnits",
+													_unit getVariable "KH_var_meleeParriedUnits",
+													getArray (_animationConfig >> "kh_meleeHitTiming"), 
+													getArray (_animationConfig >> "kh_meleeBlockTiming"), 
+													getArray (_animationConfig >> "kh_meleeParryTiming"),
+													getArray (_animationConfig >> "kh_meleeKickTiming"),
+													getArray (_animationConfig >> "kh_meleeTackleTiming")
+												],
+												{
+													params ["_unit", "_animation", "_blockedUnits", "_parriedUnits", "_hitTiming", "_blockTiming", "_parryTiming", "_kickTiming", "_tackleTiming"];
+
+													((_unit getVariable "KH_var_meleeAttributes") select [1]) params [
+														"_hitType",
+														"_hitRadius",
+														"_hitBlockPower", 
+														"_hitParryPower",
+														"_blockAngle", 
+														"_blockPower", 
+														"_parryAngle", 
+														"_parryPower",
+														"_kickType",
+														"_kickPower",
+														"_tackleType",
+														"_tacklePower"
+													];
+
+													if (_animation isNotEqualTo (animationState _unit)) exitWith {
+														_unit setVariable ["KH_var_meleeBlockedUnits", [], [[clientOwner, 2], false] select isServer];
+														_unit setVariable ["KH_var_meleeParriedUnits", [], [[clientOwner, 2], false] select isServer];
+														[_handlerId] call KH_fnc_removeHandler;
+													};
+
+													private _deletionsHit = [];
+													private _deletionsKick = [];
+													private _nearUnits = _unit nearEntities ["Man", 15];
+													private _time = _unit getUnitMovesInfo 0;
+
+													if (_hitTiming isNotEqualTo []) then {
+														private _hitObjects = [];
+														private _handledObjects = [];
+
+														{
+															_x params ["_start", "_origin", "_point", "_direction", "_hitTypeOverride", "_unique"];
+															_unique = [_unique] call KH_fnc_parseBoolean;
+
+															if (_time >= _start) then {
+																_point = if (_point isEqualType []) then {
+																	_unit modelToWorldVisualWorld (_unit selectionPosition _point);
+																}
+																else {
+																	_unit modelToWorldVisualWorld _point;
+																};
+
+																private _lineHit = [
+																	if (_origin isEqualType []) then {
+																		_unit modelToWorldVisualWorld (_unit selectionPosition _origin);
+																	}
+																	else {
+																		_unit modelToWorldVisualWorld _origin;
+																	}, 
+																	_point, 
+																	[_unit] + (attachedObjects _unit),
+																	true, 
+																	-1, 
+																	"FIRE", 
+																	"NONE", 
+																	true,
+																	[]
+																] call KH_fnc_raycast;
+
+																if (_lineHit isNotEqualTo []) then {
+																	if (((_x select 3) in _handledObjects) && !_unique) then {
+																		continue;
+																	};
+
+																	{
+																		_hitObjects pushBack [_x select 3, (_x select 4) param [0, ""], _x select 0, _direction];
+																	} forEach _lineHit;
+
+																	_handledObjects pushBack (_x select 3);
+																};
+																
+																if (_hitRadius isNotEqualTo 0) then {
+																	private _radiusHit = [
+																		_point, 
+																		[_hitRadius, str _hitRadius, _hitRadius],
+																		"OVAL",
+																		_hitRadius / 3,
+																		[_unit] + (attachedObjects _unit),
+																		true, 
+																		-1, 
+																		"FIRE", 
+																		"NONE",
+																		true,
+																		[]
+																	] call KH_fnc_raycast3d;
+
+																	if (_radiusHit isNotEqualTo []) then {
+																		if (((_x select 3) in _handledObjects) && !_unique) then {
+																			continue;
+																		};
+
+																		{
+																			_hitObjects pushBack [_x select 3, (_x select 4) param [0, ""], _x select 0, _direction];
+																		} forEach _radiusHit;
+
+																		_handledObjects pushBack (_x select 3);
+																	};
+																};
+
+																_deletionsHit pushBack _forEachIndex;
+															};
+														} forEach _hitTiming;
+
+														{
+															_x params ["_object", "_selection", "_position", "_direction"];
+
+															[
+																"KH_eve_meleeInternalGotHit", 
+																[_object, _unit, _selection, [_hitTypeOverride, _hitType] select (_hitTypeOverride isEqualTo ""), _hitRadius, _hitBlockPower, _hitParryPower, _position, _direction],
+																[_object, "SERVER"] select (isPlayer _object),
+																false
+															] call KH_fnc_triggerCbaEvent;
+														} forEach _hitObjects;
+													};
+
+													private _previousBlocks = [];
+
+													if (_blockTiming isNotEqualTo []) then {
+														{
+															_x params ["_start", "_end"];
+
+															if ((_time >= _start) && (_time <= _end)) then {
+																{
+																	if ((abs ((((_unit getRelDir _x) + 180) % 360) - 180)) <= _blockAngle) then {
+																		_blockedUnits pushBackUnique _x;
+																	}
+																	else {
+																		_blockedUnits deleteAt (_blockedUnits find _x);
+																	};
+																} forEach _nearUnits;
+
+																if (_previousBlocks isNotEqualTo _blockedUnits) then {
+																	_unit setVariable ["KH_var_meleeBlockedUnits", _blockedUnits, 2];
+																	_previousBlocks = +_blockedUnits;
+																};
+																
+																break;
+															}
+															else {
+																_blockedUnits resize 0;
+
+																if (_previousBlocks isNotEqualTo _blockedUnits) then {
+																	_unit setVariable ["KH_var_meleeBlockedUnits", [], 2];
+																	_previousBlocks = [];
+																};
+															};
+														} forEach _blockTiming;
+													};
+
+													private _previousParries = [];
+
+													if (_parryTiming isNotEqualTo []) then {
+														{
+															_x params ["_start", "_end"];
+
+															if ((_time >= _start) && (_time <= _end)) then {
+																{
+																	if ((abs ((((_unit getRelDir _x) + 180) % 360) - 180)) <= _parryAngle) then {
+																		_parriedUnits pushBackUnique _x;
+																	}
+																	else {
+																		_parriedUnits deleteAt (_parriedUnits find _x);
+																	};
+																} forEach _nearUnits;
+
+																if (_previousParries isNotEqualTo _parriedUnits) then {
+																	_unit setVariable ["KH_var_meleeParriedUnits", _parriedUnits, 2];
+																	_previousParries = +_parriedUnits;
+																};
+
+																break;
+															}
+															else {
+																_parriedUnits resize 0;
+
+																if (_previousParries isNotEqualTo _parriedUnits) then {
+																	_unit setVariable ["KH_var_meleeParriedUnits", [], 2];
+																	_previousParries = [];
+																};
+															};
+														} forEach _parryTiming;
+													};
+
+													if (_kickTiming isNotEqualTo []) then {
+														private _handledObjects = [];
+														private _kickedObjects = [];
+
+														{
+															_x params ["_start", "_point", "_direction"];
+															_unique = [_unique] call KH_fnc_parseBoolean;
+
+															if (_time >= _start) then {
+																private _radiusKick = [
+																	if (_point isEqualType []) then {
+																		_unit modelToWorldVisualWorld (_unit selectionPosition _point);
+																	}
+																	else {
+																		_unit modelToWorldVisualWorld _point;
+																	}, 
+																	[0.1, "0.1", 0.1],
+																	"OVAL",
+																	0.1,
+																	[_unit] + (attachedObjects _unit),
+																	true, 
+																	-1, 
+																	"FIRE", 
+																	"NONE",
+																	true,
+																	[]
+																] call KH_fnc_raycast3d;
+
+																if (_radiusKick isNotEqualTo []) then {
+																	if (((_x select 3) in _handledObjects) && !_unique) then {
+																		continue;
+																	};
+
+																	{
+																		_kickedObjects pushBack [_x select 3, (_x select 4) param [0, ""], _x select 0, _direction];
+																	} forEach _radiusKick;
+
+																	_handledObjects pushBack (_x select 3);
+																};
+
+																_deletionsKick pushBack _forEachIndex;
+															};
+														} forEach _kickTiming;
+
+														{
+															_x params ["_object", "_selection", "_position", "_direction"];
+
+															[
+																"KH_eve_meleeInternalGotKicked", 
+																[_object, _unit, _selection, _kickType, _kickPower, _position, _direction],
+																[_object, "SERVER"] select (isPlayer _object),
+																false
+															] call KH_fnc_triggerCbaEvent;
+														} forEach _kickedObjects;
+													};
+
+													if (_tackleTiming isNotEqualTo []) then {
+														private _handledObjects = [];
+														private _tackledObjects = [];
+
+														{
+															_x params ["_start", "_end", "_direction"];
+
+															if ((_time >= _start) && (_time <= _end)) then {
+																private _radiusTackle = [
+																	AGLToASL (unitAimPositionVisual _unit), 
+																	[1.5, 1.5, "1"],
+																	"OVAL",
+																	0.5,
+																	[_unit] + (attachedObjects _unit),
+																	true, 
+																	-1, 
+																	"FIRE", 
+																	"NONE",
+																	true,
+																	[]
+																] call KH_fnc_raycast3d;
+
+																if (_radiusKick isNotEqualTo []) then {
+																	if (((_x select 3) in _handledObjects) && !_unique) then {
+																		continue;
+																	};
+
+																	{
+																		_tackledObjects pushBack [_x select 3, _x select 0, _direction];
+																	} forEach _radiusTackle;
+
+																	_handledObjects pushBack (_x select 3);
+																};
+
+																break;
+															};
+														} forEach _tackleTiming;
+
+														{
+															_x params ["_object", "_direction"];
+
+															[
+																"KH_eve_meleeInternalGotTackled", 
+																[_object, _unit, _tackleType, _tacklePower, _direction],
+																[_object, "SERVER"] select (isPlayer _object),
+																false
+															] call KH_fnc_triggerCbaEvent;
+														} forEach _tackledObjects;
+													};
+
+													_hitTiming deleteAt _deletionsHit;
+													_kickTiming deleteAt _deletionsKick;
+												},
+												true,
+												0,
+												false
+											] call KH_fnc_execute;
+										};
+									}
+								] call KH_fnc_addEventHandler;
+
+								{
+									[["ENTITY", _unit, "PERSISTENT"], _x, [], KH_fnc_updateMeleeState] call KH_fnc_addEventHandler;
+								} forEach ["Attached", "Detached", "GetInMan", "GetOutMan", "WeaponChanged"];
+							},
+							true
+						] call KH_fnc_entityInit;
 					},
 					true,
 					{time > 0;},

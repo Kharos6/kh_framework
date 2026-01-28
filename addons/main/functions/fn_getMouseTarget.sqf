@@ -6,7 +6,7 @@ _ignored = if (_ignored isEqualType objNull) then {
     }
     else {
         [KH_var_playerUnit, objectParent KH_var_playerUnit, attachedTo KH_var_playerUnit] + (attachedObjects KH_var_playerUnit);
-    }
+    };
 }
 else {
     _ignored + [KH_var_playerUnit, objectParent KH_var_playerUnit, attachedTo KH_var_playerUnit] + (attachedObjects KH_var_playerUnit);

@@ -411,14 +411,14 @@ if KH_var_medical then {
                                             if (_unit getVariable ["KH_var_incapacitated", false]) then {
                                                 if !(_unit getVariable ["KH_var_withstanding", false]) then {
                                                     if ((isNull (attachedTo _unit)) && (isNull (objectParent _unit)) && !("unconscious" in (animationState _unit)) && !("ainj" in (animationState _unit))) then {
-                                                        [_unit, [["MOVE_SWITCH_GLOBAL", ["Unconscious"]]], false, false] call KH_fnc_setAnimation;
+                                                        [_unit, ["MOVE_SWITCH_GLOBAL", ["Unconscious"]], false, false] call KH_fnc_setAnimation;
                                                         _unit setVariable ["KH_var_unconsciousAnimationReset", true, true];
                                                     };
                                                 };
                                             }
                                             else {
                                                 if ((isNull (objectParent _unit)) && (_unit getVariable ["KH_var_unconsciousAnimationReset", false])) then {
-                                                    [_unit, [["MOVE_SWITCH_GLOBAL", ["AmovPpneMstpSnonWnonDnon"]]], false, false] call KH_fnc_setAnimation;
+                                                    [_unit, ["MOVE_SWITCH_GLOBAL", ["AmovPpneMstpSnonWnonDnon"]], false, false] call KH_fnc_setAnimation;
                                                 };
 
                                                 _unit setVariable ["KH_var_unconsciousAnimationReset", false, true];

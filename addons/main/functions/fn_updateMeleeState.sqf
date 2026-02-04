@@ -11,16 +11,33 @@ if (
     false;
 };
 
-private _weapon = currentWeapon _unit;
+private _weaponConfig = configFile >> "CfgWeapons" >> (currentWeapon _unit);
 
-if ((getText (configFile >> "CfgWeapons" >> _weapon >> "kh_meleeHitType")) isNotEqualTo "") then {
-    _unit playActionNow (["KH_MeleeIn", getText (configFile >> "CfgWeapons" >> _weapon >> "kh_meleeHitType")] joinString "");
+if ((getText (_weaponConfig >> "kh_melee")) isNotEqualTo "") then {
+    _unit playActionNow (["KH_MeleeIn", getText (_weaponConfig >> "kh_melee")] joinString "");
+
+    _unit playAction (switch (currentWeapon _unit) do {
+        case (primaryWeapon _unit): {
+            "primaryWeapon";
+        };
+
+        case (secondaryWeapon _unit): {
+            "weaponOn";
+        };
+
+        case (handgunWeapon _unit): {
+            "handGunOn";
+        };
+
+        case (binocular _unit): {
+            "binocOn";
+        };
+    });
 }
 else {
     _unit playActionNow "KH_MeleeOut";
 };
 
-private _weaponConfig = configFile >> "CfgWeapons" >> _weapon;
 private _unitConfig = configOf _unit;
 
 _unit setVariable [

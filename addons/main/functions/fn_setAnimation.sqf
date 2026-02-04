@@ -2,13 +2,13 @@ params [["_unit", objNull, [objNull]], ["_animation", [], [[]]], ["_allowVehicle
 
 if !_force then {
     if (_animation isNotEqualTo []) then {
-        if ((count _animation) isNotEqualTo 1) then {
+        if !((_animation select 0) isEqualType "") then {
             private _currentAnimationSequenceFrame = diag_frameNo;
             _unit setVariable ["KH_var_currentAnimationSequenceFrame", _currentAnimationSequenceFrame];
             private _totalDelay = 0;
 
             {
-                _x params ["_delay", "_currentAnimationSequence"];
+                _x params ["_delay", "_animationType", "_currentAnimation"];
                 _totalDelay = _totalDelay + _delay;
 
                 if (_totalDelay isEqualTo 0) then {
@@ -16,8 +16,6 @@ if !_force then {
                         continue;
                     }
                     else {
-                        _currentAnimationSequence params ["_animationType", "_currentAnimation"];
-
                         switch _animationType do {
                             case "MOVE_PLAY": {
                                 _unit playMove _currentAnimation;
@@ -64,13 +62,12 @@ if !_force then {
                 };
 
                 [
-                    [_unit, _currentAnimationSequence, _allowVehicle, _currentAnimationSequenceFrame],
+                    [_unit, _allowVehicle, _currentAnimationSequenceFrame, _animationType, _currentAnimation],
                     {
-                        params ["_unit", "_currentAnimationSequence", "_allowVehicle", "_currentAnimationSequenceFrame"];
+                        params ["_unit", "_allowVehicle", "_currentAnimationSequenceFrame", "_animationType", "_currentAnimation"];
                         
                         if ((_unit getVariable ["KH_var_currentAnimationSequenceFrame", 0]) isEqualTo _currentAnimationSequenceFrame) then {
                             if (!_allowVehicle && !(isNull (objectParent _unit))) exitWith {};
-                            _currentAnimationSequence params ["_animationType", "_currentAnimation"];
 
                             switch _animationType do {
                                 case "MOVE_PLAY": {
@@ -186,13 +183,13 @@ else {
             deleteVehicle _dummyVehicle;
 
             if (_animation isNotEqualTo []) then {
-                if ((count _animation) isNotEqualTo 1) then {
+                if !((_animation select 0) isEqualType "") then {
                     private _currentAnimationSequenceFrame = diag_frameNo;
                     _unit setVariable ["KH_var_currentAnimationSequenceFrame", _currentAnimationSequenceFrame];
                     private _totalDelay = 0;
 
                     {
-                        _x params ["_delay", "_currentAnimationSequence"];
+                        _x params ["_delay", "_animationType", "_currentAnimation"];
                         _totalDelay = _totalDelay + _delay;
 
                         if (_totalDelay isEqualTo 0) then {
@@ -200,8 +197,6 @@ else {
                                 continue;
                             }
                             else {
-                                _currentAnimationSequence params ["_animationType", "_currentAnimation"];
-
                                 switch _animationType do {
                                     case "MOVE_PLAY": {
                                         _unit playMove _currentAnimation;
@@ -248,13 +243,12 @@ else {
                         };
 
                         [
-                            [_unit, _currentAnimationSequence, _allowVehicle, _currentAnimationSequenceFrame],
+                            [_unit, _allowVehicle, _currentAnimationSequenceFrame, _animationType, _currentAnimation],
                             {
-                                params ["_unit", "_currentAnimationSequence", "_allowVehicle", "_currentAnimationSequenceFrame"];
+                                params ["_unit", "_allowVehicle", "_currentAnimationSequenceFrame", "_animationType", "_currentAnimation"];
 
                                 if ((_unit getVariable ["KH_var_currentAnimationSequenceFrame", 0]) isEqualTo _currentAnimationSequenceFrame) then {
                                     if (!_allowVehicle && !(isNull (objectParent _unit))) exitWith {};
-                                    _currentAnimationSequence params ["_animationType", "_currentAnimation"];
 
                                     switch _animationType do {
                                         case "MOVE_PLAY": {

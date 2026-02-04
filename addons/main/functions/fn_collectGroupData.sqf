@@ -95,7 +95,7 @@ private _result = [
             [_group, _data],
             {
                 params ["_group", "_data"];
-                private _trueTime = (CBA_missionTime - ([_unit, false] call KH_fnc_getLatency)) max 0;
+                private _trueTime = (CBA_missionTime - ([_group, false] call KH_fnc_getLatency)) max 0;
 
                 private _currentTask = if ((count (waypoints _group)) > 1) then {
                     private _currentWaypoint = ((waypoints _group) select {(_x select 1) isEqualTo (currentWaypoint _group);}) select 0;

@@ -433,10 +433,10 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 	[],
 	{
 		params ["_unit", "_instigator", "_selection", "_hitType", "_hitRadius", "_hitBlockPower", "_hitParryPower", "_position", "_direction"];
-		private _blockPower = (_unit getVariable "KH_var_meleeAttributes") param [6, 1];
-		private _parryPower = (_unit getVariable "KH_var_meleeAttributes") param [8, 1];
-		private _blocked = (_instigator in (_unit getVariable ["KH_var_meleeBlockedUnits", []])) && (_blockPower > _hitBlockPower);
-		private _parried = (_instigator in (_unit getVariable ["KH_var_meleeParriedUnits", []])) && (_parryPower > _hitParryPower);
+		private _blockPower = (_unit getVariable "KH_var_meleeAttributes") select 6;
+		private _parryPower = (_unit getVariable "KH_var_meleeAttributes") select 8;
+		private _blocked = (_instigator in (_unit getVariable ["KH_var_meleeBlockedUnits", []])) && (_blockPower >= _hitBlockPower);
+		private _parried = (_instigator in (_unit getVariable ["KH_var_meleeParriedUnits", []])) && (_parryPower >= _hitParryPower);
 
 		[
 			"KH_eve_meleeHasHit", 
@@ -456,7 +456,7 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 			private _damageFunction = missionNamespace getVariable ((_unit getVariable "KH_var_meleeAttributes") select 13);
 
 			if (_damageFunction isNotEqualTo "") then {
-				if ([_unit, _instigator, _kickType, _kickPower, _position, _direction, _blockPower] call _damageFunction) then {
+				if ([_unit, _instigator, ["HIT", _hitType, _hitRadius, _hitBlockPower, _hitParryPower, _position, _direction, _blockPower, _parryPower]] call _damageFunction) then {
 					[[_unit, _selection, _hitType, _instigator], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
 				};
 			}
@@ -473,8 +473,8 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 	[],
 	{
 		params ["_unit", "_instigator", "_selection", "_kickType", "_kickPower", "_position", "_direction"];
-		private _blockPower = (_unit getVariable "KH_var_meleeAttributes") param [6, 1];
-		private _blocked = (_instigator in (_unit getVariable ["KH_var_meleeBlockedUnits", []])) && (_blockPower > _kickPower);
+		private _blockPower = (_unit getVariable "KH_var_meleeAttributes") select 6;
+		private _blocked = (_instigator in (_unit getVariable ["KH_var_meleeBlockedUnits", []])) && (_blockPower >= _kickPower);
 
 		[
 			"KH_eve_meleeHasKicked", 
@@ -494,7 +494,7 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 			private _damageFunction = missionNamespace getVariable ((_unit getVariable "KH_var_meleeAttributes") select 13);
 
 			if (_damageFunction isNotEqualTo "") then {
-				if ([_unit, _instigator, _kickType, _kickPower, _position, _direction, _blockPower] call _damageFunction) then {
+				if ([_unit, _instigator, ["KICK", _kickType, _kickPower, _position, _direction, _blockPower]] call _damageFunction) then {
 					[[_unit, _selection, _kickType, _instigator], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
 				};
 			}
@@ -511,8 +511,9 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 	[],
 	{
 		params ["_unit", "_instigator", "_tackleType", "_tacklePower", "_direction"];
-		private _blockPower = (_unit getVariable "KH_var_meleeAttributes") param [6, 1];
-		private _blocked = (_instigator in (_unit getVariable ["KH_var_meleeBlockedUnits", []])) && (_blockPower > _tacklePower);
+		private _blockPower = (_unit getVariable "KH_var_meleeAttributes") select 6;
+		private _blocked = (_instigator in (_unit getVariable ["KH_var_meleeBlockedUnits", []])) && (_blockPower >= _tacklePower);
+		private _denied = ((_unit getVariable "KH_var_meleeAttributes") select 12) >= ((_instigator getVariable "KH_var_meleeAttributes") select 12);
 
 		[
 			"KH_eve_meleeHasTackled", 
@@ -532,7 +533,7 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 			private _damageFunction = missionNamespace getVariable ((_unit getVariable "KH_var_meleeAttributes") select 13);
 
 			if (_damageFunction isNotEqualTo "") then {
-				if ([_unit, _instigator, _kickType, _kickPower, _position, _direction, _blockPower] call _damageFunction) then {
+				if ([_unit, _instigator, ["TACKLE", _tackleType, _tacklePower, _direction]] call _damageFunction) then {
 					[[_unit, selectRandom (_unit selectionNames "FireGeometry"), _tackleType, _instigator], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
 				};
 			}

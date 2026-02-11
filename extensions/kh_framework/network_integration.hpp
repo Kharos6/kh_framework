@@ -188,6 +188,110 @@ struct OutgoingMessage {
           target_client(target), sender_client(sender) {}
 };
 
+struct RecvBuffer {
+    std::vector<uint8_t> data;
+    size_t write_pos{0};       // How many bytes written so far
+    size_t read_pos{0};        // How many bytes consumed so far
+
+    RecvBuffer() {
+        data.resize(65536);    // 64KB initial buffer
+    }
+
+    // Returns pointer to write into
+    uint8_t* write_ptr() {
+        ensure_capacity(4096);
+        return data.data() + write_pos;
+    }
+
+    // How many bytes we can accept in one recv() call
+    size_t write_capacity() const {
+        return data.size() - write_pos;
+    }
+
+    // Call after recv() returns `n` bytes
+    void advance_write(size_t n) {
+        write_pos += n;
+    }
+
+    size_t available() const {
+        return write_pos - read_pos;
+    }
+
+    // Try to extract one complete length-prefixed message.
+    // Returns true if a complete message was extracted into `out`.
+    // Can be called in a loop to drain multiple messages from one recv.
+    bool try_extract(std::vector<uint8_t>& out, size_t max_message_size) {
+        size_t avail = available();
+        if (avail < 4) return false;
+        const uint8_t* base = data.data() + read_pos;
+        
+        uint32_t payload_len = static_cast<uint32_t>(base[0]) |
+                              (static_cast<uint32_t>(base[1]) << 8) |
+                              (static_cast<uint32_t>(base[2]) << 16) |
+                              (static_cast<uint32_t>(base[3]) << 24);
+
+        if (payload_len > max_message_size) {
+            return false;
+        }
+
+        if (avail < 4 + payload_len) return false;
+        out.assign(base + 4, base + 4 + payload_len);
+        read_pos += 4 + payload_len;
+        compact_if_needed();
+        return true;
+    }
+
+    // Check if the length prefix (if readable) indicates a corrupt stream
+    bool has_protocol_error(size_t max_message_size) const {
+        if (available() < 4) return false;
+        const uint8_t* base = data.data() + read_pos;
+
+        uint32_t payload_len = static_cast<uint32_t>(base[0]) |
+                              (static_cast<uint32_t>(base[1]) << 8) |
+                              (static_cast<uint32_t>(base[2]) << 16) |
+                              (static_cast<uint32_t>(base[3]) << 24);
+
+        return payload_len > max_message_size;
+    }
+
+    void reset() {
+        write_pos = 0;
+        read_pos = 0;
+    }
+
+private:
+    void compact_if_needed() {
+        // Compact when we've consumed more than half the buffer
+        if (read_pos > data.size() / 2) {
+            size_t remaining = write_pos - read_pos;
+
+            if (remaining > 0) {
+                std::memmove(data.data(), data.data() + read_pos, remaining);
+            }
+
+            read_pos = 0;
+            write_pos = remaining;
+        }
+    }
+
+    void ensure_capacity(size_t min_free) {
+        if (write_capacity() < min_free) {
+            size_t remaining = write_pos - read_pos;
+
+            if (remaining > 0) {
+                std::memmove(data.data(), data.data() + read_pos, remaining);
+            }
+
+            read_pos = 0;
+            write_pos = remaining;
+
+            if (data.size() - write_pos < min_free) {
+                data.resize(data.size() * 2);
+            }
+        }
+    }
+};
+
 // Message handler structure
 struct NetworkMessageHandler {
     int handler_id;
@@ -467,6 +571,9 @@ private:
     size_t config_coalesce_max_size_{NET_DEFAULT_COALESCE_MAX_SIZE};
     size_t config_coalesce_max_messages_{NET_DEFAULT_COALESCE_MAX_MESSAGES};
     int config_coalesce_delay_us_{NET_DEFAULT_COALESCE_DELAY_US};
+    std::unordered_map<int, RecvBuffer> client_recv_buffers_;
+    RecvBuffer server_recv_buffer_;
+    std::mutex reconnect_mutex_;
 
     // Incoming message queue
     std::deque<NetworkMessage> incoming_queue_;
@@ -2976,108 +3083,97 @@ private:
         if (pending.complete()) {
             return SendResult::SUCCESS;
         }
-        
-        // Set socket to non-blocking mode temporarily
-        u_long mode = 1;
 
-        if (ioctlsocket(sock, FIONBIO, &mode) != 0) {
-            return SendResult::ERROR_FATAL;
-        }
-        
         size_t sent_this_call = 0;
         SendResult final_result = SendResult::SUCCESS;
-        
+
         while (pending.remaining() > 0) {
             int to_send = static_cast<int>(std::min(pending.remaining(), static_cast<size_t>(INT_MAX)));
             int result = send(sock, reinterpret_cast<const char*>(pending.current_ptr()), to_send, 0);
-            
+
             if (result > 0) {
                 pending.bytes_sent += static_cast<size_t>(result);
                 sent_this_call += static_cast<size_t>(result);
             } else if (result == 0) {
-                // Connection closed gracefully
                 final_result = SendResult::ERROR_FATAL;
                 break;
             } else {
-                // SOCKET_ERROR
                 int err = WSAGetLastError();
-                
+
                 if (err == WSAEWOULDBLOCK) {
-                    // Buffer is full - this is normal, not an error
                     final_result = (sent_this_call > 0) ? SendResult::PARTIAL : SendResult::WOULD_BLOCK;
                     break;
                 }
-                
+
                 if (err == WSAEINTR) {
-                    // Interrupted - try again
                     continue;
                 }
-                
-                // Fatal errors - connection is dead
-                // WSAECONNRESET, WSAECONNABORTED, WSAENETRESET, WSAENOTCONN,
-                // WSAESHUTDOWN, WSAEHOSTUNREACH, WSAETIMEDOUT, etc...
+
                 final_result = SendResult::ERROR_FATAL;
                 break;
             }
         }
-        
-        // Restore blocking mode
-        mode = 0;
-        ioctlsocket(sock, FIONBIO, &mode);
+
         return final_result;
     }
     
-    bool recv_all(SOCKET sock, std::vector<uint8_t>& data) {
-        thread_local std::vector<uint8_t> tls_recv_buffer;
-        uint8_t len_buf[4];
-        int total_recv = 0;
+    bool ensure_server_connection() {
+        {
+            std::lock_guard<std::mutex> srv_lock(server_connection_mutex_);
+            if (server_connection_ != INVALID_SOCKET) return true;
+        }
 
-        while (total_recv < 4) {
-            int result = recv(sock, reinterpret_cast<char*>(len_buf + total_recv), 4 - total_recv, 0);
+        std::unique_lock<std::mutex> recon_lock(reconnect_mutex_, std::try_to_lock);
 
-            if (result == SOCKET_ERROR || result == 0) {
-                return false;
+        if (!recon_lock.owns_lock()) {
+            // Another thread is reconnecting — wait for it to finish
+            std::lock_guard<std::mutex> wait_lock(reconnect_mutex_);
+            std::lock_guard<std::mutex> srv_lock(server_connection_mutex_);
+            return server_connection_ != INVALID_SOCKET;
+        }
+
+        // Re-check — might have been reconnected between our first check and acquiring the lock
+        {
+            std::lock_guard<std::mutex> srv_lock(server_connection_mutex_);
+            if (server_connection_ != INVALID_SOCKET) return true;
+        }
+
+        return connect_to_server_internal();
+    }
+
+    enum class RecvNBResult {
+        OK,             // Got some data (or nothing available yet — both fine)
+        DISCONNECTED
+    };
+
+    RecvNBResult recv_nonblocking(SOCKET sock, RecvBuffer& buf) {
+        // Read as much as is available in a loop
+        for (;;) {
+            int result = recv(sock,
+                              reinterpret_cast<char*>(buf.write_ptr()),
+                              static_cast<int>(buf.write_capacity()),
+                              0);
+
+            if (result > 0) {
+                buf.advance_write(static_cast<size_t>(result));
+                continue;
             }
 
-            total_recv += result;
-        }
-        
-        uint32_t len = static_cast<uint32_t>(len_buf[0]) |
-                    (static_cast<uint32_t>(len_buf[1]) << 8) |
-                    (static_cast<uint32_t>(len_buf[2]) << 16) |
-                    (static_cast<uint32_t>(len_buf[3]) << 24);
-        
-        if (len > config_max_message_size_) {
-            return false;
-        }
-        
-        // Resize thread-local buffer if needed (will reuse capacity)
-        if (tls_recv_buffer.capacity() < len) {
-            tls_recv_buffer.reserve(std::max(len, static_cast<uint32_t>(config_recv_buffer_size_)));
-        }
-
-        tls_recv_buffer.resize(len);
-        total_recv = 0;
-
-        while (static_cast<uint32_t>(total_recv) < len) {
-            int result = recv(sock, reinterpret_cast<char*>(tls_recv_buffer.data() + total_recv),
-                            static_cast<int>(len - total_recv), 0);
-
-            if (result == SOCKET_ERROR || result == 0) {
-                return false;
+            if (result == 0) {
+                return RecvNBResult::DISCONNECTED;
             }
 
-            total_recv += result;
-        }
+            int err = WSAGetLastError();
 
-        data.swap(tls_recv_buffer);
-        tls_recv_buffer.clear();  // Clear swapped-in data
-        
-        if (tls_recv_buffer.capacity() < config_recv_buffer_size_) {
-            tls_recv_buffer.reserve(config_recv_buffer_size_);
+            if (err == WSAEWOULDBLOCK) {
+                return RecvNBResult::OK;
+            }
+            if (err == WSAEINTR) {
+                continue;
+            }
+
+            return RecvNBResult::DISCONNECTED;
         }
-        
-        return true;
     }
 
     std::string fetch_public_ip_from_service(const wchar_t* host, const wchar_t* path, 
@@ -3389,6 +3485,15 @@ private:
                 std::lock_guard<std::mutex> lock(connections_mutex_);
                 listen_active_clients_.reserve(client_connections_.size());
                 
+                // Clean up recv buffers for clients disconnected by send thread
+                for (auto it = client_recv_buffers_.begin(); it != client_recv_buffers_.end(); ) {
+                    if (client_connections_.find(it->first) == client_connections_.end()) {
+                        it = client_recv_buffers_.erase(it);
+                    } else {
+                        ++it;
+                    }
+                }
+
                 for (auto& pair : client_connections_) {
                     listen_active_clients_.push_back(pair);
                 }
@@ -3430,11 +3535,19 @@ private:
                 
                 if (client_sock != INVALID_SOCKET) {
                     set_socket_options(client_sock);
-                    std::vector<uint8_t> id_data;
+                    uint8_t id_raw[4];
+                    int id_recv = 0;
+                    bool id_ok = true;
 
-                    if (recv_all(client_sock, id_data) && id_data.size() >= 4) {
+                    while (id_recv < 4) {
+                        int r = recv(client_sock, reinterpret_cast<char*>(id_raw + id_recv), 4 - id_recv, 0);
+                        if (r <= 0) { id_ok = false; break; }
+                        id_recv += r;
+                    }
+
+                    if (id_ok) {
                         size_t offset = 0;
-                        int client_id = static_cast<int>(read_uint32(id_data.data(), offset, id_data.size()));
+                        int client_id = static_cast<int>(read_uint32(id_raw, offset, 4));
                         
                         {
                             std::lock_guard<std::mutex> lock(connections_mutex_);
@@ -3445,9 +3558,15 @@ private:
                                 closesocket(existing->second);
                                 per_client_queues_.erase(client_id);
                                 client_stall_start_times_.erase(client_id);
+                                client_recv_buffers_.erase(client_id);
                             }
 
                             client_connections_[client_id] = client_sock;
+                            u_long nb_mode = 1;
+                            ioctlsocket(client_sock, FIONBIO, &nb_mode);
+
+                            // Initialize recv buffer for this client
+                            client_recv_buffers_[client_id];
                         }
                         
                         MainThreadScheduler::instance().schedule([this, client_id]() {
@@ -3467,18 +3586,39 @@ private:
             listen_clients_to_remove_.clear();
             listen_messages_to_queue_.clear();
             std::vector<OutgoingMessage> forward_messages;
-            
+
             for (size_t i = 0; i < clients_in_fdset && i < listen_active_clients_.size(); ++i) {
                 auto& [client_id, client_sock] = listen_active_clients_[i];
 
                 if (FD_ISSET(client_sock, &read_fds)) {
-                    std::vector<uint8_t> packet;
+                    // Look up this client's recv buffer (must exist — created on accept)
+                    auto buf_it = client_recv_buffers_.find(client_id);
 
-                    if (recv_all(client_sock, packet)) {
+                    if (buf_it == client_recv_buffers_.end()) {
+                        // Shouldn't happen, but guard against it
+                        listen_clients_to_remove_.push_back(client_id);
+                        continue;
+                    }
+
+                    RecvBuffer& recv_buf = buf_it->second;
+                    RecvNBResult recv_result = recv_nonblocking(client_sock, recv_buf);
+
+                    if (recv_result == RecvNBResult::DISCONNECTED) {
+                        listen_clients_to_remove_.push_back(client_id);
+                        continue;
+                    }
+
+                    if (recv_buf.has_protocol_error(config_max_message_size_)) {
+                        listen_clients_to_remove_.push_back(client_id);
+                        continue;
+                    }
+
+                    std::vector<uint8_t> packet;
+                    
+                    while (recv_buf.try_extract(packet, config_max_message_size_)) {
                         std::vector<NetworkMessage> local_messages;
                         std::vector<OutgoingMessage> fwd_messages;
-                        
-                        // Handle both coalesced and single packets
+
                         if (parse_coalesced_or_single_packet(packet, local_messages, fwd_messages)) {
                             for (auto& msg : local_messages) {
                                 msg.sender_client_id = client_id;
@@ -3490,8 +3630,6 @@ private:
                                 forward_messages.push_back(std::move(msg));
                             }
                         }
-                    } else {
-                        listen_clients_to_remove_.push_back(client_id);
                     }
                 }
             }
@@ -3526,7 +3664,8 @@ private:
                         client_connections_.erase(it);
                         per_client_queues_.erase(id);
                         client_stall_start_times_.erase(id);
-                        
+                        client_recv_buffers_.erase(id);
+
                         MainThreadScheduler::instance().schedule([id]() {
                             sqf::diag_log("KH Network: Client " + std::to_string(id) + " disconnected");
                         });
@@ -3618,14 +3757,16 @@ private:
             return false;
         }
 
+        u_long nb_mode = 1;
+        ioctlsocket(sock, FIONBIO, &nb_mode);
         std::lock_guard<std::mutex> lock(server_connection_mutex_);
 
         if (server_connection_ != INVALID_SOCKET) {
-            // Another thread connected while we were connecting
             closesocket(sock);
             return true;
         }
 
+        server_recv_buffer_.reset();
         server_connection_ = sock;
         return true;
     }
@@ -3651,7 +3792,7 @@ private:
             
             // If disconnected, attempt to reconnect indefinitely until shutdown
             if (sock == INVALID_SOCKET) {
-                if (connect_to_server_internal()) {
+                if (ensure_server_connection()) {
                     MainThreadScheduler::instance().schedule([]() {
                         sqf::diag_log("KH Network: Reconnected to server");
                     });
@@ -3661,7 +3802,6 @@ private:
                         sock = server_connection_;
                     }
                 } else {
-                    // Failed to reconnect - wait before trying again
                     int waited_ms = 0;
 
                     while (running_ && waited_ms < reconnect_interval_ms_) {
@@ -3685,25 +3825,13 @@ private:
             struct timeval tv;
             tv.tv_sec = 0;
             tv.tv_usec = 1000;
-            
-            if (select(0, &read_fds, nullptr, nullptr, &tv) > 0) {
-                std::vector<uint8_t> packet;
 
-                if (recv_all(sock, packet)) {
-                    parsed_messages.clear();
-                    
-                    if (parse_incoming_coalesced_packet(packet, parsed_messages)) {
-                        if (!parsed_messages.empty()) {
-                            std::lock_guard<std::mutex> lock(incoming_mutex_);
-                            
-                            for (auto& msg : parsed_messages) {
-                                incoming_queue_.push_back(std::move(msg));
-                            }
-                        }
-                    }
-                } else {
-                    // Connection lost - close socket and mark as disconnected
-                    // The loop will attempt reconnection on the next iteration
+            if (select(0, &read_fds, nullptr, nullptr, &tv) > 0 && FD_ISSET(sock, &read_fds)) {
+                RecvNBResult recv_result = recv_nonblocking(sock, server_recv_buffer_);
+
+                if (recv_result == RecvNBResult::DISCONNECTED ||
+                    server_recv_buffer_.has_protocol_error(config_max_message_size_)) {
+                    // Connection lost or corrupt stream
                     {
                         std::lock_guard<std::mutex> lock(server_connection_mutex_);
 
@@ -3712,11 +3840,29 @@ private:
                             closesocket(server_connection_);
                             server_connection_ = INVALID_SOCKET;
                         }
+
+                        server_recv_buffer_.reset();
                     }
-                    
+
                     MainThreadScheduler::instance().schedule([]() {
                         sqf::diag_log("KH Network: Connection to server lost, attempting to reconnect...");
                     });
+                } else {
+                    // Extract all complete messages
+                    std::vector<uint8_t> packet;
+                    parsed_messages.clear();
+
+                    while (server_recv_buffer_.try_extract(packet, config_max_message_size_)) {
+                        parse_incoming_coalesced_packet(packet, parsed_messages);
+                    }
+
+                    if (!parsed_messages.empty()) {
+                        std::lock_guard<std::mutex> lock(incoming_mutex_);
+
+                        for (auto& msg : parsed_messages) {
+                            incoming_queue_.push_back(std::move(msg));
+                        }
+                    }
                 }
             }
         }
@@ -4153,8 +4299,8 @@ private:
                     
                     if (!server_pending_send_.complete()) {
                         // Still have pending data - requeue all new messages
-                        for (auto it = batch.rbegin(); it != batch.rend(); ++it) {
-                            outgoing_queue_lockfree_.push(std::move(*it));
+                        for (auto& requeue_msg : batch) {
+                            outgoing_queue_lockfree_.push(std::move(requeue_msg));
                         }
 
                         outgoing_has_data_.store(true, std::memory_order_release);
@@ -4164,10 +4310,9 @@ private:
                     }
                 }
                 
-                if (!connect_to_server_internal()) {
-                    // Requeue all
-                    for (auto it = batch.rbegin(); it != batch.rend(); ++it) {
-                        outgoing_queue_lockfree_.push(std::move(*it));
+                if (!ensure_server_connection()) {
+                    for (auto& requeue_msg : batch) {
+                        outgoing_queue_lockfree_.push(std::move(requeue_msg));
                     }
                     
                     outgoing_has_data_.store(true, std::memory_order_release);
@@ -4186,8 +4331,8 @@ private:
                 
                 if (server_sock == INVALID_SOCKET) {
                     // Requeue all
-                    for (auto it = batch.rbegin(); it != batch.rend(); ++it) {
-                        outgoing_queue_lockfree_.push(std::move(*it));
+                    for (auto& requeue_msg : batch) {
+                        outgoing_queue_lockfree_.push(std::move(requeue_msg));
                     }
 
                     outgoing_has_data_.store(true, std::memory_order_release);
@@ -4236,21 +4381,21 @@ private:
                                 server_pending_send_.clear();
                                 send_failed = true;
 
-                                // Requeue remaining messages
-                                for (size_t k = batch.size(); k-- > i; ) {
-                                    outgoing_queue_lockfree_.push(std::move(batch[k]));
+                                // Requeue the batch that failed (in order)
+                                for (auto& requeue_msg : client_batch) {
+                                    outgoing_queue_lockfree_.push(std::move(requeue_msg));
                                 }
-                                
-                                // Requeue the batch that failed
-                                for (auto it = client_batch.rbegin(); it != client_batch.rend(); ++it) {
-                                    outgoing_queue_lockfree_.push(std::move(*it));
+
+                                // Requeue remaining unsent messages (in order)
+                                for (size_t k = i; k < batch.size(); ++k) {
+                                    outgoing_queue_lockfree_.push(std::move(batch[k]));
                                 }
                                 
                                 outgoing_has_data_.store(true, std::memory_order_release);
                                 break;
                             } else if (result == SendResult::PARTIAL || result == SendResult::WOULD_BLOCK) {
                                 // Partial send - requeue remaining messages, pending stays
-                                for (size_t k = batch.size(); k-- > i; ) {
+                                for (size_t k = i; k < batch.size(); ++k) {
                                     outgoing_queue_lockfree_.push(std::move(batch[k]));
                                 }
 
@@ -4292,7 +4437,7 @@ private:
                             server_pending_send_.clear();
                             send_failed = true;
 
-                            for (size_t j = batch.size(); j-- > i; ) {
+                            for (size_t j = i; j < batch.size(); ++j) {
                                 outgoing_queue_lockfree_.push(std::move(batch[j]));
                             }
                             
@@ -4300,7 +4445,7 @@ private:
                             break;
                         } else if (result == SendResult::PARTIAL || result == SendResult::WOULD_BLOCK) {
                             // Requeue remaining (current message is in pending)
-                            for (size_t j = batch.size(); j-- > (i + 1); ) {
+                            for (size_t j = i + 1; j < batch.size(); ++j) {
                                 outgoing_queue_lockfree_.push(std::move(batch[j]));
                             }
 
@@ -4454,6 +4599,7 @@ public:
             }
             
             client_pending_sends_.clear();
+            client_recv_buffers_.clear();
             client_connections_.clear();
             per_client_queues_.clear();
             client_stall_start_times_.clear();
@@ -4475,6 +4621,7 @@ public:
             }
 
             server_pending_send_.clear();
+            server_recv_buffer_.reset();
         }
 
         {

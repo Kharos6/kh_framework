@@ -165,7 +165,7 @@ static game_value raw_call_sqf_native_no_return(const code& code_obj) noexcept {
 static game_value raw_call_sqf_args_native_no_return(const code& code_obj, const game_value& args) noexcept {
     auto game_state = (intercept::client::host::functions.get_engine_allocator())->gameState;
     static r_string args_name = "_khargs"sv;
-    game_state->set_local_variable(args_name, std::move(args));
+    game_state->set_local_variable(args_name, args);
     intercept::client::host::functions.invoke_raw_unary(intercept::client::__sqf::unary__isnil__code_string__ret__bool, code_obj);
     return game_value();
 }

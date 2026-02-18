@@ -1,5 +1,37 @@
 class CfgVehicles
 {
+	class Land;
+	class Man: Land
+	{
+		kh_meleeType = "KH_MeleeGenericMan";
+	}; 
+	class Launcher_Base_F;
+	class KH_MeleeWeaponTertiaryBase: Launcher_Base_F
+	{
+		author = "Kharos";
+		scope = 0;
+	};
+	class KH_SwordGeneric01: KH_MeleeWeaponTertiaryBase
+	{
+		model = "\x\kh\addons\main\models\SM_SwordGeneric01.p3d";
+		hiddenSelections[] = {
+			"mat_sword"
+		};
+		hiddenSelectionsMaterials[] = {
+			"x\kh\addons\main\materials\weapons\SwordGeneric01.rvmat"
+		};
+		hiddenSelectionsTextures[] = {
+			"x\kh\addons\main\textures\weapons\SwordGeneric01_CO.paa"
+		};
+		class TransportWeapons
+		{
+			class KH_SwordGeneric01
+			{
+				count = 1;
+				weapon = "KH_SwordGeneric01";
+			};
+		};
+	};
 	class Logic;
 	class Module_F: Logic
 	{

@@ -1873,7 +1873,53 @@
 ] call CBA_fnc_addSetting;
 
 [
-	"KH Framework", 
+	"KH Melee", 
+	"KH_meleeBlock", 
+	"Block",
+	{
+		KH_var_playerUnit playActionNow "KH_MeleeBlockIn";
+	}, 
+	{
+		KH_var_playerUnit playActionNow "KH_MeleeBlockOut";
+	}, 
+	[0x10, [false, false, false]]
+] call CBA_fnc_addKeybind;
+
+[
+	"KH Melee", 
+	"KH_meleeParry", 
+	"Parry",
+	{
+		KH_var_playerUnit playActionNow "KH_MeleeParry";
+	}, 
+	{}, 
+	[0x12, [false, false, false]]
+] call CBA_fnc_addKeybind;
+
+[
+	"KH Melee", 
+	"KH_meleeKick", 
+	"Kick",
+	{
+		KH_var_playerUnit playActionNow "KH_MeleeKick";
+	}, 
+	{}, 
+	[0x13, [false, false, false]]
+] call CBA_fnc_addKeybind;
+
+[
+	"KH Melee", 
+	"KH_meleeTackle", 
+	"Tackle",
+	{
+		KH_var_playerUnit playActionNow "KH_MeleeTackle";
+	}, 
+	{}, 
+	[0x2D, [false, false, false]]
+] call CBA_fnc_addKeybind;
+
+[
+	"KH Miscellaneous", 
 	"KH_speechRecognitionToggle", 
 	"Speech Recognition (TOGGLE)",
 	{
@@ -1925,7 +1971,7 @@
 ] call CBA_fnc_addKeybind;
 
 [
-	"KH Framework", 
+	"KH Miscellaneous", 
 	"KH_speechRecognitionHold", 
 	"Speech Recognition (HOLD)",
 	{
@@ -1980,7 +2026,7 @@
 ] call CBA_fnc_addKeybind;
 
 [
-	"KH Framework", 
+	"KH Miscellaneous", 
 	"KH_toggleDiagnostics", 
 	"Toggle Diagnostics",
 	{
@@ -1993,7 +2039,7 @@
 ] call CBA_fnc_addKeybind;
 
 [
-	"KH Framework", 
+	"KH Miscellaneous", 
 	"KH_console", 
 	"Console",
 	{

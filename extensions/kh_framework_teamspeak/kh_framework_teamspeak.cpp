@@ -1698,12 +1698,12 @@ static void check_tail_completion() {
     }
 }
 
-static void process_audio(short* samples, int sample_count, int channels) {
+static bool process_audio(short* samples, int sample_count, int channels) {
     // Acquire audio mutex to synchronize with shutdown
     std::lock_guard<std::mutex> audio_lock(g_audio_state_mutex);
 
     if (!g_plugin_initialized.load(std::memory_order_acquire)) {
-        return;
+        return false;
     }
     
     check_tail_completion();
@@ -1725,7 +1725,7 @@ static void process_audio(short* samples, int sample_count, int channels) {
     }
     
     // Check if effects are enabled
-    if (!effects.effects_enabled || effects.effect_chain_count == 0) return;
+    if (!effects.effects_enabled || effects.effect_chain_count == 0) return false;
     
     // Pre-extract paired parameters
     float tremolo_depth_value = 0.5f;
@@ -1953,6 +1953,8 @@ static void process_audio(short* samples, int sample_count, int channels) {
 
         g_loopback_available.store(new_available);
     }
+
+    return true;
 }
 
 extern "C" {
@@ -2063,9 +2065,9 @@ void ts3plugin_onConnectStatusChangeEvent(uint64 serverConnectionHandlerID, int 
 // Voice processing - this is called for outgoing voice data
 void ts3plugin_onEditCapturedVoiceDataEvent(uint64 serverConnectionHandlerID, short* samples, int sampleCount, int channels, int* edited) {
     if (!g_plugin_initialized.load(std::memory_order_acquire)) return;
-    process_audio(samples, sampleCount, channels);
+    bool was_modified = process_audio(samples, sampleCount, channels);
 
-    if (g_plugin_initialized.load(std::memory_order_acquire)) {
+    if (was_modified) {
         *edited |= 0x1;
     }
 }

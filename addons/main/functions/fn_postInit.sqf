@@ -409,8 +409,8 @@ isNil {
 															private _hitObjects = [];
 
 															{
-																_x params ["_start", "_origin", "_point", "_direction", "_hitTypeOverride", "_unique"];
-																_unique = [_unique] call KH_fnc_parseBoolean;
+																_x params ["_start", "_origin", "_point", "_attackType", "_unique"];
+																_unique = [_unique, false] call KH_fnc_parseBoolean;
 
 																if (_time >= _start) then {
 																	_point = if (_point isEqualType []) then {
@@ -443,7 +443,7 @@ isNil {
 																				continue;
 																			};
 
-																			_hitObjects pushBack [_x select 3, (_x select 4) param [0, ""], _x select 0, _direction];
+																			_hitObjects pushBack [_x select 3, (_x select 4) param [0, ""], _x select 0];
 																			_handledHit pushBackUnique (_x select 3);
 																		} forEach _lineIntersections;
 																	};
@@ -469,7 +469,7 @@ isNil {
 																					continue;
 																				};
 																				
-																				_hitObjects pushBack [_x select 3, (_x select 4) param [0, ""], _x select 0, _direction];
+																				_hitObjects pushBack [_x select 3, (_x select 4) param [0, ""], _x select 0];
 																				_handledHit pushBackUnique (_x select 3);
 																			} forEach _radiusIntersections;
 																		};
@@ -480,11 +480,11 @@ isNil {
 															} forEach _hitTiming;
 
 															{
-																_x params ["_object", "_selection", "_position", "_direction"];
+																_x params ["_object", "_selection", "_position"];
 
 																[
 																	"KH_eve_meleeInternalGotHit", 
-																	[_object, _unit, _selection, _position, _direction, [_hitTypeOverride, _hitType] select (_hitTypeOverride isEqualTo ""), _hitRadius, _hitBlockPower, _hitParryPower],
+																	[_object, _unit, _selection, _position, _attackType, _hitRadius, _hitBlockPower, _hitParryPower],
 																	[_object, "SERVER"] select (isPlayer _object),
 																	false
 																] call KH_fnc_triggerCbaEvent;
@@ -670,11 +670,11 @@ isNil {
 											};
 										}
 									] call KH_fnc_addEventHandler;
-								} forEach ["AnimStateChanged", "GestureStateChanged"];
+								} forEach ["AnimStateChanged", "GestureChanged"];
 
 								{
 									[["ENTITY", _unit, "PERSISTENT"], _x, [], KH_fnc_updateMeleeState] call KH_fnc_addEventHandler;
-								} forEach ["Attached", "Detached", "GetInMan", "GetOutMan", "WeaponChanged"];
+								} forEach ["Attached", "Detached", "GetInMan", "GetOutMan", "SlotItemChanged", "WeaponChanged"];
 							},
 							true
 						] call KH_fnc_entityInit;
@@ -895,7 +895,7 @@ isNil {
 											private _currentTargetDistance = _headViewTarget select 1;
 											private _currentTarget = _headViewTarget select 4;
 
-											if ((!("Toolkit" in (items _caller)) && KH_var_fuelSiphoningRequireToolkit) || (!([_caller getUnitTrait "Engineer"] call KH_fnc_parseBoolean) && KH_var_fuelSiphoningEngineerOnly)) then {
+											if ((!("Toolkit" in (items _caller)) && KH_var_fuelSiphoningRequireToolkit) || (!([_caller getUnitTrait "Engineer", false] call KH_fnc_parseBoolean) && KH_var_fuelSiphoningEngineerOnly)) then {
 												if !(isNull (_caller getVariable ["KH_var_fuelSiphonHolding", objNull])) then {
 													private _oldTarget = _caller getVariable ["KH_var_fuelSiphonHolding", objNull];
 													_caller setVariable ["KH_var_fuelSiphonHolding", objNull, true];
@@ -1121,7 +1121,7 @@ isNil {
 												false;
 											}
 											else {
-												private _text = if ((!("Toolkit" in (items _caller)) && KH_var_fuelSiphoningRequireToolkit) || (!([_caller getUnitTrait "Engineer"] call KH_fnc_parseBoolean) && KH_var_fuelSiphoningEngineerOnly)) then {
+												private _text = if ((!("Toolkit" in (items _caller)) && KH_var_fuelSiphoningRequireToolkit) || (!([_caller getUnitTrait "Engineer", false] call KH_fnc_parseBoolean) && KH_var_fuelSiphoningEngineerOnly)) then {
 													["Drop fuel siphon", ""] select (isNull (_caller getVariable ["KH_var_fuelSiphonHolding", objNull]));
 												}
 												else {

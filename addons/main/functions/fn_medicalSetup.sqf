@@ -467,7 +467,7 @@ if KH_var_medical then {
                                                 _duration = [
                                                     [KH_var_reviveDuration, KH_var_selfReviveDuration] select (_caller isEqualTo _target), 
                                                     [KH_var_reviveMedicDuration, KH_var_selfReviveMedicDuration] select (_caller isEqualTo _target)
-                                                ] select ([_caller getUnitTrait "Medic"] call KH_fnc_parseBoolean);
+                                                ] select ([_caller getUnitTrait "Medic", false] call KH_fnc_parseBoolean);
 
                                                 nil;
                                             },
@@ -505,9 +505,9 @@ if KH_var_medical then {
                                                 private _damageOffset = [
                                                     [KH_var_reviveHeal, KH_var_selfReviveHeal] select (_caller isEqualTo _target),
                                                     [KH_var_reviveHealMedic, KH_var_selfReviveHealMedic] select (_caller isEqualTo _target)
-                                                ] select ([_caller getUnitTrait "Medic"] call KH_fnc_parseBoolean);
+                                                ] select ([_caller getUnitTrait "Medic", false] call KH_fnc_parseBoolean);
 
-                                                _target setDamage (([(damage _target) - _damageOffset, 0] select (((damage _target) - _damageOffset) <= 0.25)) max 0);
+                                                _target setDamage (((damage _target) - _damageOffset) max 0);
                                                 private _damages = getAllHitPointsDamage _target;
 
                                                 if ((damage _target) isEqualTo 0) then {
@@ -580,7 +580,7 @@ if KH_var_medical then {
                                                                 ("Medikit" in (items _caller)) ||
                                                                 (!KH_var_selfReviveRequireMedikit && (([items _caller, "FirstAidKit"] call KH_fnc_countArrayElements) >= KH_var_selfReviveRequiredFirstAidKits))
                                                             ) &&
-                                                            (!KH_var_selfReviveMedicOnly || ([_caller getUnitTrait "Medic"] call KH_fnc_parseBoolean)) &&
+                                                            (!KH_var_selfReviveMedicOnly || ([_caller getUnitTrait "Medic", false] call KH_fnc_parseBoolean)) &&
                                                             (!KH_var_selfReviveRequireWithstanding || (_caller getVariable ["KH_var_withstanding", false]))
                                                         );
                                                     }
@@ -596,13 +596,13 @@ if KH_var_medical then {
                                                         else {
                                                             if KH_var_reviveRequireMedikit then {
                                                                 (
-                                                                    (!KH_var_reviveMedicOnly || ([_caller getUnitTrait "Medic"] call KH_fnc_parseBoolean)) && 
+                                                                    (!KH_var_reviveMedicOnly || ([_caller getUnitTrait "Medic", false] call KH_fnc_parseBoolean)) && 
                                                                     ("Medikit" in (items _caller))
                                                                 );
                                                             }
                                                             else {
                                                                 (
-                                                                    (!KH_var_reviveMedicOnly || ([_caller getUnitTrait "Medic"] call KH_fnc_parseBoolean)) &&
+                                                                    (!KH_var_reviveMedicOnly || ([_caller getUnitTrait "Medic", false] call KH_fnc_parseBoolean)) &&
                                                                     (
                                                                         (([items _caller, "FirstAidKit"] call KH_fnc_countArrayElements) >= KH_var_reviveRequiredFirstAidKits) ||
                                                                         ("Medikit" in (items _caller))
@@ -703,8 +703,8 @@ if KH_var_medical then {
                                                     };
 
                                                     _duration = [
-                                                        [KH_var_stabilizationDuration, KH_var_stabilizationDurationMedic] select ([_caller getUnitTrait "Medic"] call KH_fnc_parseBoolean),
-                                                        [KH_var_selfStabilizationDuration, KH_var_selfStabilizationDurationMedic] select ([_caller getUnitTrait "Medic"] call KH_fnc_parseBoolean)
+                                                        [KH_var_stabilizationDuration, KH_var_stabilizationDurationMedic] select ([_caller getUnitTrait "Medic", false] call KH_fnc_parseBoolean),
+                                                        [KH_var_selfStabilizationDuration, KH_var_selfStabilizationDurationMedic] select ([_caller getUnitTrait "Medic", false] call KH_fnc_parseBoolean)
                                                     ] select (_caller isEqualTo _target);
 
                                                     nil;
@@ -768,7 +768,7 @@ if KH_var_medical then {
                                                     
                                                     if (_caller isEqualTo _target) then {
                                                         if KH_var_selfStabilization then {
-                                                            if (KH_var_selfStabilizationMedicOnly && !([_caller getUnitTrait "Medic"] call KH_fnc_parseBoolean)) exitWith {
+                                                            if (KH_var_selfStabilizationMedicOnly && !([_caller getUnitTrait "Medic", false] call KH_fnc_parseBoolean)) exitWith {
                                                                 false;
                                                             };
 
@@ -784,7 +784,7 @@ if KH_var_medical then {
                                                         };
                                                     }
                                                     else {
-                                                        if (KH_var_stabilizationMedicOnly && !([_caller getUnitTrait "Medic"] call KH_fnc_parseBoolean)) exitWith {
+                                                        if (KH_var_stabilizationMedicOnly && !([_caller getUnitTrait "Medic", false] call KH_fnc_parseBoolean)) exitWith {
                                                             false;
                                                         };
 
@@ -900,7 +900,7 @@ if KH_var_medical then {
                                                     };
                                                 };
 
-                                                _injured setDamage (([_oldDamage - _damageOffset, 0] select ((_oldDamage - _damageOffset) <= 0.25)) max 0);
+                                                _injured setDamage ((_oldDamage - _damageOffset) max 0);
                                                 private _damages = getAllHitPointsDamage _injured;
 
                                                 if ((damage _injured) isEqualTo 0) then {

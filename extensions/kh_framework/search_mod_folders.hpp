@@ -209,7 +209,7 @@ private:
                 if (tmp_type == L"File"sv && tmp_name.find(L".pbo"sv) != std::wstring::npos) {
                     wchar_t buffer[MAX_PATH];
 
-                    if (GetFinalPathNameByHandleW(dupHandle, buffer, sizeof(buffer), VOLUME_NAME_DOS) > 0) {
+                    if (GetFinalPathNameByHandleW(dupHandle, buffer, MAX_PATH, VOLUME_NAME_DOS) > 0) {
                         try {
                             std::filesystem::path pbo_path(buffer);
                             

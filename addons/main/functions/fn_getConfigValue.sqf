@@ -1,4 +1,4 @@
-params [["_type", "", [""]], ["_config", "", ["", [], {}, objNull, configNull]]];
+params [["_type", "", [""]], ["_config", "", ["", [], {}, objNull, configNull]], "_default"];
 
 if !(_config isEqualType configNull) then {
     _config = switch (typeName _config) do {
@@ -38,7 +38,9 @@ if !(_config isEqualType configNull) then {
     };
 };
 
-if (isNull _config) exitWith {};
+if (isNull _config) exitWith {
+    _default;
+};
 
 if (_type isEqualTo "") then {
     switch true do {
@@ -59,55 +61,95 @@ if (_type isEqualTo "") then {
         };
 
         default {
-            nil;
+            _default;
         };
     };
 }
 else {
     switch _type do {
         case "BOOL": {
-            [getNumber _config] call KH_fnc_parseBoolean;
+            if (isNumber _config) then {
+                [getNumber _config, false] call KH_fnc_parseBoolean;
+            }
+            else {
+                _default;
+            };
         };
 
         case "SCALAR": {
-            getNumber _config;
+            if (isNumber _config) then {
+                getNumber _config;
+            }
+            else {
+                _default;
+            };
         };
 
         case "STRING": {
-            getText _config;
+            if (isText _config) then {
+                getText _config;
+            }
+            else {
+                _default;
+            };
         };
 
         case "TEXT": {
-            getTextRaw _config;
+            if (isText _config) then {
+                getTextRaw _config;
+            }
+            else {
+                _default;
+            };
         };
 
         case "ARRAY": {
-            getArray _config;
+            if (isArray _config) then {
+                getArray _config;
+            }
+            else {
+                _default;
+            };
         };
 
         case "HASHMAP": {
-            private _array = getArray _config;
-            private _hashMap = createHashMap;
+            if (isArray _config) then {
+                private _array = getArray _config;
+                private _hashMap = createHashMap;
 
-            {
-                if ((_forEachIndex % 2) isEqualTo 0) then {
-                    _hashMap set [_x, _array select (_forEachIndex + 1)];
-                };
-            } forEach _array;
+                {
+                    if ((_forEachIndex % 2) isEqualTo 0) then {
+                        _hashMap set [_x, _array select (_forEachIndex + 1)];
+                    };
+                } forEach _array;
 
-            _hashMap;
+                _hashMap;
+            }
+            else {
+                _default;
+            };
         };
 
         case "CODE": {
-            missionNamespace getVariable ([getText _config, false] call KH_fnc_serializeFunction);
+            if (isText _config) then {
+                missionNamespace getVariable ([getText _config, false] call KH_fnc_serializeFunction);
+            }
+            else {
+                _default;
+            };
         };
 
         case "CLASSES": {
-            "true" configClasses _config;
+            if (isClass _config) then {
+                "true" configClasses _config;
+            }
+            else {
+                _default;
+            };
         };
         
         default {
-            nil;
+            _default;
         };
     };
 };

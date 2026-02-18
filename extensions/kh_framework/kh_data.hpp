@@ -368,7 +368,7 @@ private:
                 }
 
                 case game_data_type::DISPLAY: {
-                    serialized = static_cast<int>(sqf::ctrl_idd(value));
+                    serialized = std::to_string(static_cast<int>(sqf::ctrl_idd(value)));
                     break;
                 }
 
@@ -762,15 +762,7 @@ public:
             size += calculate_value_size(value);      // Variable value
         }
         
-        // Add 10% overhead for potential alignment and metadata
-        size = static_cast<size_t>(size * 1.1);
-        
-        if (size > MAX_TOTAL_KHDATA_SIZE && (!get_machine_is_server())) {
-            file->mark_size_exceeded();
-            report_error("File " + file->get_filepath().string() + 
-                                    " exceeds size limit: " + std::to_string(size));
-        }
-        
+        size = static_cast<size_t>(size * 1.1);        
         return size;
     }
     
@@ -1188,10 +1180,9 @@ public:
         if (!file) return false;
         
         // Check size limit before saving
-        size_t new_size = estimate_file_size(file);
-        size_t total_without_this = total_data_size - new_size;
+        update_total_size();
         
-        if ((total_without_this + new_size >= MAX_TOTAL_KHDATA_SIZE) && (!get_machine_is_server())) {
+        if ((total_data_size >= MAX_TOTAL_KHDATA_SIZE) && (!get_machine_is_server())) {
             file->mark_size_exceeded();
             report_error("File size limit exceeded: " + file->get_filepath().string());
             return false;

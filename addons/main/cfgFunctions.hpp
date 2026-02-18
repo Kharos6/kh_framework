@@ -138,7 +138,6 @@ class CfgFunctions
 			class setSideRelations {};
 			class setTerminalText {};
 			class setUnitAttributes {};
-			class setUnitRotationLock {};
 			class setUnitVehicleSlot {};
 			class setVehicleLoadout {};
 			class setVideoTexture {};

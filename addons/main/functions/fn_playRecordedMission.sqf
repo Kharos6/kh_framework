@@ -393,7 +393,7 @@ if (KH_var_recordedScenarioData isNotEqualTo []) then {
                 _x params ["_time", "_data"];
 
                 if (_time <= CBA_missionTime) then {
-                    _unit switchGesture _data;
+                    _unit switchGesture [_data];
                 }
                 else {
                     break;

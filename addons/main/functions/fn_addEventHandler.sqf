@@ -393,11 +393,12 @@ switch _eventType do {
 		if (_timeout isNotEqualTo 0) then {
 			private _timeoutId = generateUid;
 
-			_drawType pushBack [
+			KH_var_temporalExecutionStackAdditions pushBack [
 				[_handler],
 				{
 					params ["_handler"];
 					["KH_eve_drawUiExecutionStackHandler", [_handler, true, false], true, false] call KH_fnc_triggerCbaEvent;
+					KH_var_temporalExecutionStackDeletions pushBackUnique _handlerId;
 				},
 				_timeout,
 				if (_timeout isEqualTo 0) then {
@@ -415,7 +416,8 @@ switch _eventType do {
 				_timeoutId,
 				_timeoutId,
 				nil,
-				CBA_missionTime
+				CBA_missionTime,
+				0
 			]
 		};
 	};

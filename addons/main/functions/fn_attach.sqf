@@ -441,7 +441,7 @@ if _softAttach exitWith {
 
             private _lifeState = lifeState _entity;
 
-            if (_velocityBased && ((_lifeState isNotEqualTo "INCAPACITATED") && (_lifeState isNotEqualTo "UNCONSCIOUS") && !(_entity getVariable ["KH_var_incapacitated", false]))) then {
+            if (_velocityBased && ((_lifeState isNotEqualTo "INCAPACITATED") && (_lifeState isNotEqualTo "UNCONSCIOUS"))) then {
                 if (_newPosition isNotEqualTo []) then {
                     _entity setPosASL _newPosition;
                 };

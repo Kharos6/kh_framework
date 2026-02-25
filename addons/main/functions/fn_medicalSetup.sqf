@@ -69,6 +69,34 @@ if KH_var_medical then {
 
                     if (_projectile isEqualTo "") then {
                         _damage = _damage * KH_var_absoluteImpactDamageMultiplier;
+                    }
+                    else {
+                        if ((getNumber (configFile >> "CfgAmmo" >> _projectile >> "kh_melee")) isEqualTo 1) then {
+                            _damage = _damage * KH_var_absoluteMeleeDamageMultiplier * (1 - ((getFatigue _instigator) * KH_var_meleeDamageReductionStaminaCoefficient));
+
+                            if ((side (group _instigator)) isEqualTo (side (group _unit))) then {
+                                _damage = _damage * KH_var_absoluteFriendlyDamageMultiplier * KH_var_absoluteMeleeFriendlyDamageMultiplier;
+                            };
+
+                            switch (getText (configFile >> "CfgAmmo" >> _projectile >> "kh_meleeActionType")) do {
+                                case "attack": {
+                                    _damage = _damage * KH_var_absoluteMeleeAttackDamageMultiplier;
+                                };
+
+                                case "kick": {
+                                    _damage = _damage * KH_var_absoluteMeleeKickDamageMultiplier;
+                                };
+
+                                case "tackle": {
+                                    _damage = _damage * KH_var_absoluteMeleeTackleDamageMultiplier;
+                                };
+                            };
+                        }
+                        else {
+                            if ((side (group _instigator)) isEqualTo (side (group _unit))) then {
+                                _damage = _damage * KH_var_absoluteFriendlyDamageMultiplier;
+                            };
+                        };
                     };
 
                     private _hitPointType = switch _hitPoint do {

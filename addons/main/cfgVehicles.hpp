@@ -1,9 +1,19 @@
 class CfgVehicles
 {
+	class All
+	{
+		kh_meleeSoundType = "";
+		kh_meleeSurfaceBlockPower = 1;
+	};
 	class Land;
 	class Man: Land
 	{
 		kh_meleeType = "KH_MeleeGenericMan";
+		kh_meleeActions = "";
+		kh_meleeSoundType = "Flesh";
+		kh_meleeDodgeCost = 0.2;
+		kh_meleeSurfaceBlockPower = 0;
+		kh_meleeModes[] = {"KH_Attack01", "KH_Attack02"};
 	}; 
 	class Launcher_Base_F;
 	class KH_MeleeWeaponTertiaryBase: Launcher_Base_F
@@ -13,6 +23,7 @@ class CfgVehicles
 	};
 	class KH_SwordGeneric01: KH_MeleeWeaponTertiaryBase
 	{
+		author = "Kharos";
 		model = "\x\kh\addons\main\models\SM_SwordGeneric01.p3d";
 		hiddenSelections[] = {
 			"mat_sword"
@@ -29,6 +40,28 @@ class CfgVehicles
 			{
 				count = 1;
 				weapon = "KH_SwordGeneric01";
+			};
+		};
+	};
+	class KH_KnifeM3: KH_MeleeWeaponTertiaryBase
+	{
+		author = "Kharos";
+		model = "\x\kh\addons\main\models\SM_KnifeM3.p3d";
+		hiddenSelections[] = {
+			"mat_knife"
+		};
+		hiddenSelectionsMaterials[] = {
+			"x\kh\addons\main\materials\weapons\KnifeM3.rvmat"
+		};
+		hiddenSelectionsTextures[] = {
+			"x\kh\addons\main\textures\weapons\KnifeM3_CO.paa"
+		};
+		class TransportWeapons
+		{
+			class KH_KnifeM3
+			{
+				count = 1;
+				weapon = "KH_KnifeM3";
 			};
 		};
 	};

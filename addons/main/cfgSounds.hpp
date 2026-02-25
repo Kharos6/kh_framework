@@ -48,6 +48,18 @@ class CfgSounds
 		sound[] = {"\x\kh\addons\main\sounds\MeleeSharpHitMetal03.ogg", 1.0, 1.0};
 		titles[] = {0, ""};	
 	};
+	class KH_MeleeSharpScrape01
+	{
+		name = "KH_MeleeSharpScrape01";
+		sound[] = {"\x\kh\addons\main\sounds\MeleeSharpScrape01.ogg", 1.0, 1.0};
+		titles[] = {0, ""};	
+	};
+	class KH_MeleeSharpScrape02
+	{
+		name = "KH_MeleeSharpScrape02";
+		sound[] = {"\x\kh\addons\main\sounds\MeleeSharpScrape02.ogg", 1.0, 1.0};
+		titles[] = {0, ""};	
+	};
 	class KH_MeleeSwingLight01
 	{
 		name = "KH_MeleeSwingLight01";
@@ -82,6 +94,42 @@ class CfgSounds
 	{
 		name = "KH_MeleeSwingLight06";
 		sound[] = {"\x\kh\addons\main\sounds\MeleeSwingLight06.ogg", 1.0, 1.0};
+		titles[] = {0, ""};	
+	};
+	class KH_MeleeKick01
+	{
+		name = "KH_MeleeKick01";
+		sound[] = {"\x\kh\addons\main\sounds\MeleeKick01.ogg", 1.0, 1.0};
+		titles[] = {0, ""};	
+	};
+	class KH_MeleeKick02
+	{
+		name = "KH_MeleeKick02";
+		sound[] = {"\x\kh\addons\main\sounds\MeleeKick02.ogg", 1.0, 1.0};
+		titles[] = {0, ""};	
+	};
+	class KH_MeleeKick03
+	{
+		name = "KH_MeleeKick03";
+		sound[] = {"\x\kh\addons\main\sounds\MeleeKick03.ogg", 1.0, 1.0};
+		titles[] = {0, ""};	
+	};
+	class KH_MeleeKick04
+	{
+		name = "KH_MeleeKick04";
+		sound[] = {"\x\kh\addons\main\sounds\MeleeKick04.ogg", 1.0, 1.0};
+		titles[] = {0, ""};	
+	};
+	class KH_MeleeTackle01
+	{
+		name = "KH_MeleeTackle01";
+		sound[] = {"\x\kh\addons\main\sounds\MeleeTackle01.ogg", 1.0, 1.0};
+		titles[] = {0, ""};	
+	};
+	class KH_MeleeTackle02
+	{
+		name = "KH_MeleeTackle02";
+		sound[] = {"\x\kh\addons\main\sounds\MeleeTackle02.ogg", 1.0, 1.0};
 		titles[] = {0, ""};	
 	};
 };

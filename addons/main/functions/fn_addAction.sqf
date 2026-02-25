@@ -887,7 +887,7 @@ private _actionHandler = [
                                         !(missionNamespace getVariable _actionExistenceId) ||
                                         !(missionNamespace getVariable _conditionShowId) ||
                                         (missionNamespace getVariable _completionId) ||
-                                        ((((lifeState _caller) isEqualTo "INCAPACITATED") || ((lifeState _caller) isEqualTo "UNCONSCIOUS") || (_caller getVariable ["KH_var_incapacitated", false])) && !_allowIncapacitated)
+                                        ((((lifeState _caller) isEqualTo "INCAPACITATED") || ((lifeState _caller) isEqualTo "UNCONSCIOUS")) && !_allowIncapacitated)
                                        ) exitWith {
                                         deleteVehicle _interactionHelper;
                                         false;

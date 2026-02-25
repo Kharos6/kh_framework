@@ -33,7 +33,8 @@ class CfgPatches
 			"KH_InvisibleWalkableSurface_4x4x0"
 		};
 		weapons[] = {
-			"KH_SwordGeneric01"
+			"KH_SwordGeneric01",
+			"KH_KnifeM3"
 		};
 		requiredVersion = 2.20;
 		requiredAddons[] = {"cba_main", "Intercept_Core"};

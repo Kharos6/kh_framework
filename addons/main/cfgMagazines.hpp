@@ -5,9 +5,8 @@ class CfgMagazines
     {
         author = "Kharos";
         ammo = "KH_MeleeDummy";
-        count = 0;
+        count = 1;
         displayName = "Melee";
-        scope = 2;
-        type = "3 * 256";
+        picture = "\x\kh\addons\main\ui\kh_logo_512.paa";
     };
 };

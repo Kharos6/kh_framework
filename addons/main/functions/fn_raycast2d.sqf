@@ -150,7 +150,12 @@ _intersections = _flattenedIntersections;
 
 if _allowIgnoredCheck then {
 	private _deletions = [];
-	private _resultCount = [0, 999999] select (_maxResults isEqualTo -1);
+
+	if (_maxResults isEqualTo -1) then {
+		_maxResults = 999999;
+	};
+
+	private _resultCount = 0;
 	private _ignoreTerrain = "TERRAIN" in _ignored;
 	private _ignoredObjects = _ignored select {_x isEqualType objNull;};
 	private _ignoredTypes = _ignored select {_x isEqualType "";};

@@ -1204,6 +1204,108 @@
 ] call CBA_fnc_addSetting;
 
 [
+	"KH_var_absoluteFriendlyDamageMultiplier",
+	"SLIDER",   
+	[
+		"Friendly Damage Multiplier", 
+		"All friendly damage calculations are multiplied by this value."
+	], 
+	[
+        "KH Medical",
+        "Damage Multipliers"
+    ], 
+	[0.000, 10.000, 1.000, 3],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_absoluteMeleeAttackDamageMultiplier",
+	"SLIDER",   
+	[
+		"Melee Attack Damage Multiplier", 
+		"All melee attack damage calculations are multiplied by this value."
+	], 
+	[
+        "KH Medical",
+        "Damage Multipliers"
+    ], 
+	[0.000, 10.000, 1.000, 3],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_absoluteMeleeKickDamageMultiplier",
+	"SLIDER",   
+	[
+		"Melee Kick Damage Multiplier", 
+		"All melee kick damage calculations are multiplied by this value."
+	], 
+	[
+        "KH Medical",
+        "Damage Multipliers"
+    ], 
+	[0.000, 10.000, 1.000, 3],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_absoluteMeleeTackleInstigatorDamageMultiplier",
+	"SLIDER",   
+	[
+		"Melee Tackle Instigator Damage Multiplier", 
+		"All melee damage calculations on tacklers are multiplied by this value."
+	], 
+	[
+        "KH Medical",
+        "Damage Multipliers"
+    ], 
+	[0.000, 10.000, 1.000, 3],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_absoluteMeleeDamageMultiplier",
+	"SLIDER",   
+	[
+		"Melee Damage Multiplier", 
+		"All melee damage calculations are multiplied by this value."
+	], 
+	[
+        "KH Medical",
+        "Damage Multipliers"
+    ], 
+	[0.000, 10.000, 1.000, 3],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_absoluteFriendlyMeleeDamageMultiplier",
+	"SLIDER",   
+	[
+		"Melee Friendly Damage Multiplier", 
+		"All friendly melee damage calculations are multiplied by this value."
+	], 
+	[
+        "KH Medical",
+        "Damage Multipliers"
+    ], 
+	[0.000, 10.000, 1.000, 3],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
 	"KH_var_absoluteDamageMultiplier",
 	"SLIDER",   
 	[
@@ -1873,15 +1975,428 @@
 ] call CBA_fnc_addSetting;
 
 [
+	"KH_var_meleeDebugMode",
+	"CHECKBOX",   
+	[
+		"Debug Mode", 
+		"True displays debug information for melee actions."
+	], 
+	"KH Melee", 
+	false,
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_meleeAttackAnimationTypePriority",
+	"LIST",   
+	[
+		"Attack Animation Type Priority", 
+		"Defines whether absolute or additive animations are prioritized for attacks. If an attack does not have a prioritized equivalent, the other one is used."
+	], 
+	[
+        "KH Melee",
+        "Animation Type Priorities"
+    ], 
+	[
+        [0, 1],
+        ["ABSOLUTE", "ADDITIVE"],
+        0
+    ],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_meleeBlockAnimationTypePriority",
+	"LIST",   
+	[
+		"Block Animation Type Priority", 
+		"Defines whether absolute or additive animations are prioritized for blocks. If a block does not have a prioritized equivalent, the other one is used."
+	], 
+	[
+        "KH Melee",
+        "Animation Type Priorities"
+    ],
+	[
+        [0, 1],
+        ["ABSOLUTE", "ADDITIVE"],
+        0
+    ],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_meleeParryAnimationTypePriority",
+	"LIST",   
+	[
+		"Parry Animation Type Priority", 
+		"Defines whether absolute or additive animations are prioritized for parries. If a parry does not have a prioritized equivalent, the other one is used."
+	], 
+	[
+        "KH Melee",
+        "Animation Type Priorities"
+    ],
+	[
+        [0, 1],
+        ["ABSOLUTE", "ADDITIVE"],
+        0
+    ],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_meleeAbsoluteStaminaConsumptionMultiplier",
+	"SLIDER",   
+	[
+		"Stamina Consumption Multiplier", 
+		"Stamina consumption from all actions is multiplied by this value."
+	], 
+	[
+        "KH Melee",
+        "Stamina Multipliers"
+    ], 
+	[0.000, 10.000, 1.000, 3],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_meleeAbsoluteAttackStaminaConsumptionMultiplier",
+	"SLIDER",   
+	[
+		"Attack Stamina Consumption Multiplier", 
+		"Stamina consumption from attacks is multiplied by this value."
+	], 
+	[
+        "KH Melee",
+        "Stamina Multipliers"
+    ], 
+	[0.000, 10.000, 1.000, 3],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_meleeAbsoluteBlockStaminaConsumptionMultiplier",
+	"SLIDER",   
+	[
+		"Block Stamina Consumption Multiplier", 
+		"Stamina consumption from blocks is multiplied by this value."
+	], 
+	[
+        "KH Melee",
+        "Stamina Multipliers"
+    ], 
+	[0.000, 10.000, 1.000, 3],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_meleeAbsoluteParryStaminaConsumptionMultiplier",
+	"SLIDER",   
+	[
+		"Parry Stamina Consumption Multiplier", 
+		"Stamina consumption from parries is multiplied by this value."
+	], 
+	[
+        "KH Melee",
+        "Stamina Multipliers"
+    ], 
+	[0.000, 10.000, 1.000, 3],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_meleeAbsoluteKickStaminaConsumptionMultiplier",
+	"SLIDER",   
+	[
+		"Kick Stamina Consumption Multiplier", 
+		"Stamina consumption from kicks is multiplied by this value."
+	], 
+	[
+        "KH Melee",
+        "Stamina Multipliers"
+    ], 
+	[0.000, 10.000, 1.000, 3],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_meleeAbsoluteTackleStaminaConsumptionMultiplier",
+	"SLIDER",   
+	[
+		"Tackle Stamina Consumption Multiplier", 
+		"Stamina consumption from tackles is multiplied by this value."
+	], 
+	[
+        "KH Melee",
+        "Stamina Multipliers"
+    ], 
+	[0.000, 10.000, 1.000, 3],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_meleeAbsoluteDodgeStaminaConsumptionMultiplier",
+	"SLIDER",   
+	[
+		"Dodge Stamina Consumption Multiplier", 
+		"Stamina consumption from dodges is multiplied by this value."
+	], 
+	[
+        "KH Melee",
+        "Stamina Multipliers"
+    ], 
+	[0.000, 10.000, 1.000, 3],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_meleeAbsoluteStaminaExhaustionMultiplier",
+	"SLIDER",   
+	[
+		"Stamina Exhaustion Multiplier", 
+		"Stamina exhaustion from all incoming actions is multiplied by this value."
+	], 
+	[
+        "KH Melee",
+        "Stamina Multipliers"
+    ], 
+	[0.000, 10.000, 1.000, 3],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_meleeAbsoluteAttackStaminaExhaustionMultiplier",
+	"SLIDER",   
+	[
+		"Attack Stamina Exhaustion Multiplier", 
+		"Stamina exhaustion from incoming attacks is multiplied by this value."
+	], 
+	[
+        "KH Melee",
+        "Stamina Multipliers"
+    ], 
+	[0.000, 10.000, 1.000, 3],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_meleeAbsoluteBlockStaminaExhaustionMultiplier",
+	"SLIDER",   
+	[
+		"Block Stamina Exhaustion Multiplier", 
+		"Stamina exhaustion from incoming blocks is multiplied by this value."
+	], 
+	[
+        "KH Melee",
+        "Stamina Multipliers"
+    ], 
+	[0.000, 10.000, 1.000, 3],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_meleeAbsoluteParryStaminaExhaustionMultiplier",
+	"SLIDER",   
+	[
+		"Parry Stamina Exhaustion Multiplier", 
+		"Stamina exhaustion from incoming parries is multiplied by this value."
+	], 
+	[
+        "KH Melee",
+        "Stamina Multipliers"
+    ], 
+	[0.000, 10.000, 1.000, 3],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_meleeAbsoluteKickStaminaExhaustionMultiplier",
+	"SLIDER",   
+	[
+		"Kick Stamina Exhaustion Multiplier", 
+		"Stamina exhaustion from incoming kicks is multiplied by this value."
+	], 
+	[
+        "KH Melee",
+        "Stamina Multipliers"
+    ], 
+	[0.000, 10.000, 1.000, 3],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_meleeAbsoluteTackleStaminaExhaustionMultiplier",
+	"SLIDER",   
+	[
+		"Tackle Stamina Exhaustion Multiplier", 
+		"Stamina exhaustion from incoming tackles is multiplied by this value."
+	], 
+	[
+        "KH Melee",
+        "Stamina Multipliers"
+    ], 
+	[0.000, 10.000, 1.000, 3],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_meleeAbsoluteTackleBlockStaminaExhaustionMultiplier",
+	"SLIDER",   
+	[
+		"Tackle Block Stamina Exhaustion Multiplier", 
+		"Stamina exhaustion from incoming tackles while blocking is multiplied by this value."
+	], 
+	[
+        "KH Melee",
+        "Stamina Multipliers"
+    ], 
+	[0.000, 10.000, 1.000, 3],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_meleeHitsInterruptAttacks",
+	"CHECKBOX",   
+	[
+		"Hits Interrupt Attacks", 
+		"True makes it so that attacks are interrupted by hits."
+	], 
+	[
+        "KH Melee",
+        "General"
+    ], 
+	false,
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_meleeAttackRecoilOnInsufficientStamina",
+	"CHECKBOX",   
+	[
+		"Attack Recoil On Insufficient Stamina", 
+		"True results in all attacks recoiling if the amount of stamina required for the attack is insufficient."
+	], 
+	[
+        "KH Melee",
+        "General"
+    ], 
+	true,
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_meleePowerReductionStaminaCoefficient",
+	"SLIDER",   
+	[
+		"Power Reduction Stamina Coefficient", 
+		"Power for all melee actions is reduced by this value as a percentage relative to the remaining stamina. 1.000 is 100% power, 0 is 0% power. For example, a value of 0.5 will cut power by half if stamina is completely exhausted."
+	], 
+	[
+        "KH Melee",
+        "General"
+    ], 
+	[0.000, 1.000, 0.000, 3],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_meleeDamageReductionStaminaCoefficient",
+	"SLIDER",   
+	[
+		"Damage Reduction Stamina Coefficient", 
+		"Damage for all melee actions is reduced by this value as a percentage relative to the remaining stamina. 1.000 is 100% damage, 0 is 0% damage. For example, a value of 0.5 will cut damage by half if stamina is completely exhausted."
+	], 
+	[
+        "KH Melee",
+        "General"
+    ], 
+	[0.000, 1.000, 0.000, 3],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH Melee", 
+	"KH_meleeCycleAttackMode", 
+	"Cycle Attack Mode",
+	{
+		if (!dialog && !visibleMap && (isNull curatorCamera) && (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false])) then {
+			[KH_var_playerUnit, "CYCLE_ATTACK_MODE"] call KH_fnc_updateMeleeState;
+		};
+	}, 
+	{}, 
+	[0x21, [false, false, false]]
+] call CBA_fnc_addKeybind;
+
+[
+	"KH Melee", 
+	"KH_meleeDodge", 
+	"Dodge",
+	{
+		if (!dialog && !visibleMap && (isNull curatorCamera) && (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false])) then {
+			[KH_var_playerUnit, "DODGE"] call KH_fnc_updateMeleeState;
+		};
+	}, 
+	{}, 
+	[0x39, [false, false, false]]
+] call CBA_fnc_addKeybind;
+
+[
 	"KH Melee", 
 	"KH_meleeBlock", 
 	"Block",
 	{
-		KH_var_playerUnit playActionNow "KH_MeleeBlockIn";
-	}, 
+		if (!dialog && !visibleMap && (isNull curatorCamera) && (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false])) then {
+			[KH_var_playerUnit, "BLOCK_IN"] call KH_fnc_updateMeleeState;
+		};
+	},
 	{
-		KH_var_playerUnit playActionNow "KH_MeleeBlockOut";
-	}, 
+		if (!dialog && !visibleMap && (isNull curatorCamera) && (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false])) then {
+			[KH_var_playerUnit, "BLOCK_OUT"] call KH_fnc_updateMeleeState;
+		};
+	},
 	[0x10, [false, false, false]]
 ] call CBA_fnc_addKeybind;
 
@@ -1890,7 +2405,9 @@
 	"KH_meleeParry", 
 	"Parry",
 	{
-		KH_var_playerUnit playActionNow "KH_MeleeParry";
+		if (!dialog && !visibleMap && (isNull curatorCamera) && (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false])) then {
+			[KH_var_playerUnit, "PARRY"] call KH_fnc_updateMeleeState;
+		};
 	}, 
 	{}, 
 	[0x12, [false, false, false]]
@@ -1901,7 +2418,9 @@
 	"KH_meleeKick", 
 	"Kick",
 	{
-		KH_var_playerUnit playActionNow "KH_MeleeKick";
+		if (!dialog && !visibleMap && (isNull curatorCamera) && (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false])) then {
+			[KH_var_playerUnit, "KICK"] call KH_fnc_updateMeleeState;
+		};
 	}, 
 	{}, 
 	[0x13, [false, false, false]]
@@ -1912,7 +2431,9 @@
 	"KH_meleeTackle", 
 	"Tackle",
 	{
-		KH_var_playerUnit playActionNow "KH_MeleeTackle";
+		if (!dialog && !visibleMap && (isNull curatorCamera) && (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false])) then {
+			[KH_var_playerUnit, "TACKLE"] call KH_fnc_updateMeleeState;
+		};
 	}, 
 	{}, 
 	[0x2D, [false, false, false]]

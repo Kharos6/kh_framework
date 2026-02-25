@@ -15,7 +15,7 @@ private _projectile = createVehicle [
         ASLToATL (AGLToASL (unitAimPosition _entity));
     }
     else {
-        ASLToATL (_entity modelToWorldWorld (selectionPosition [_entity, _selection, _lod select 0, false, "AveragePoint"]));;
+        ASLToATL (_entity modelToWorldWorld (selectionPosition [_entity, _selection, (_lod select 0) select 0, false, "AveragePoint"]));;
     },
     [], 
     0, 
@@ -23,5 +23,5 @@ private _projectile = createVehicle [
 ];
 
 _projectile setShotParents _parent;
-_projectile setVelocity [0, 0, -100];
+_projectile setVelocity [0, 0, -(getNumber (configFile >> "CfgAmmo" >> _ammo >> "typicalSpeed"))];
 _projectile;

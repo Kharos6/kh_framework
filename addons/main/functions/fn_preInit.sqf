@@ -432,36 +432,180 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 	"KH_eve_meleeInternalGotHit",
 	[],
 	{
-		params ["_unit", "_instigator", "_selection", "_hitType", "_hitRadius", "_hitBlockPower", "_hitParryPower", "_position", "_direction"];
-		private _blockPower = (_unit getVariable "KH_var_meleeAttributes") select 6;
-		private _parryPower = (_unit getVariable "KH_var_meleeAttributes") select 8;
-		private _blocked = (_instigator in (_unit getVariable ["KH_var_meleeBlockedUnits", []])) && (_blockPower >= _hitBlockPower);
+		params ["_unit", "_instigator", "_selection", "_position", "_attack"];
+		private _continue = true;
+
+		if ((_unit getVariable ["KH_var_currentMeleeDodgeDirection", -1]) isNotEqualTo -1) then {
+			private _difference = (abs ((_unit getVariable ["KH_var_currentMeleeDodgeDirection", -1]) - (_unit getRelDir _instigator))) mod 360;
+
+			if (_difference > 180) then {
+				_difference = 360 - _difference;
+			};
+			
+			if (_difference > 90) then {
+				_continue = false;
+			};
+		};
+		
+		if !_continue exitWith {};
+		private _unitConfig = configFile >> "CfgKHMeleeTypes" >> (_unit getVariable ["KH_var_meleeType", ""]);
+		private _instigatorConfig = configFile >> "CfgKHMeleeTypes" >> (_instigator getVariable ["KH_var_meleeType", ""]);
+		private _hitBlockPower = (getNumber (_instigatorConfig >> _attack >> "blockPower")) * (1 - ((getFatigue _instigator) * KH_var_meleePowerReductionStaminaCoefficient));
+		private _blockPower = (getNumber (_unitConfig >> (_unit getVariable ["KH_var_currentMeleeBlock", ""]) >> "power")) * (1 - ((getFatigue _unit) * KH_var_meleePowerReductionStaminaCoefficient));
+		private _hitParryPower = (getNumber (_instigatorConfig >> _attack >> "parryPower")) * (1 - ((getFatigue _instigator) * KH_var_meleePowerReductionStaminaCoefficient));
+		private _parryPower = (getNumber (_unitConfig >> (_unit getVariable ["KH_var_currentMeleeParry", ""]) >> "power")) * (1 - ((getFatigue _unit) * KH_var_meleePowerReductionStaminaCoefficient));
+		private _surfaceBlockPower = getNumber ((configOf _unit) >> "kh_meleeSurfaceBlockPower");
+		_blockPower = _blockPower + _surfaceBlockPower;
+		private _isBlocking = (_instigator in (_unit getVariable ["KH_var_meleeBlockedUnits", []])) || (_surfaceBlockPower >= _hitBlockPower);
+		private _blocked = _isBlocking && (_blockPower >= _hitBlockPower);
 		private _parried = (_instigator in (_unit getVariable ["KH_var_meleeParriedUnits", []])) && (_parryPower >= _hitParryPower);
+
+		if _isBlocking then {
+			[
+				[_unit, getNumber (_unitConfig >> (_unit getVariable ["KH_var_currentMeleeBlock", ""]) >> "cost")],
+				{
+					params ["_unit", "_cost"];
+
+					_unit setFatigue (
+						(
+							(getFatigue _unit) + 
+							(
+								_cost * 
+								KH_var_meleeAbsoluteBlockStaminaConsumptionMultiplier * 
+								KH_var_meleeAbsoluteStaminaConsumptionMultiplier
+							)
+						) min 1
+					);
+				},
+				_unit,
+				true,
+				false
+			] call KH_fnc_execute;
+		};
 
 		[
 			"KH_eve_meleeHasHit", 
-			[_instigator, _unit, _hitType, _hitRadius, _hitBlockPower, _hitParryPower, _position, _direction, _blockPower, _parryPower, _blocked, _parried], 
+			[_instigator, _unit, _attack, _hitBlockPower, _hitParryPower, _position, _blockPower, _parryPower, _blocked, _parried], 
 			_instigator, 
 			false
 		] call KH_fnc_triggerCbaEvent;
 
 		[
 			"KH_eve_meleeGotHit", 
-			[_unit, _instigator, _hitType, _hitRadius, _hitBlockPower, _hitParryPower, _position, _direction, _blockPower, _parryPower, _blocked, _parried],
+			[_unit, _instigator, _attack, _hitBlockPower, _hitParryPower, _position, _blockPower, _parryPower, _blocked, _parried],
 			_unit,
 			false
 		] call KH_fnc_triggerCbaEvent;
 
 		if (!_blocked && !_parried) then {
-			private _damageFunction = missionNamespace getVariable ((_unit getVariable "KH_var_meleeAttributes") select 13);
+			private _damageFunction = missionNamespace getVariable [getText (_instigatorConfig >> _attack >> "damageFunction"), {}];
 
-			if (_damageFunction isNotEqualTo "") then {
-				if ([_unit, _instigator, ["HIT", _hitType, _hitRadius, _hitBlockPower, _hitParryPower, _position, _direction, _blockPower, _parryPower]] call _damageFunction) then {
-					[[_unit, _selection, _hitType, _instigator], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
+			private _playSound = if (_damageFunction isNotEqualTo {}) then {
+				if ([_unit, _instigator, ["HIT", _attack, _hitBlockPower, _hitParryPower, _position, _blockPower, _parryPower]] call _damageFunction) then {
+					[[_unit, ["HIT", "", _unit getRelDir _instigator]], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
+					[[_unit, _selection, getText (_instigatorConfig >> _attack >> "type"), _instigator], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
+					true;
+				}
+				else {
+					false;
 				};
 			}
 			else {
-				[[_unit, _selection, _hitType, _instigator], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
+				[[_unit, ["HIT", "", _unit getRelDir _instigator]], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
+				[[_unit, _selection, getText (_instigatorConfig >> _attack >> "type"), _instigator], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
+				true;
+			};
+
+			if _playSound then {
+				private _sounds = getArray (_instigatorConfig >> _attack >> "Sounds" >> (getText ((configOf _unit) >> "kh_meleeSoundType")));
+
+				if (_sounds isNotEqualTo []) then {
+					playSound3D [((getArray (configFile >> "CfgSounds" >> (selectRandom _sounds) >> "sound")) select 0) select [1], _unit, [insideBuilding _unit, false] call KH_fnc_parseBoolean, getPosASL _unit, 5, 1, 100, 0, false];
+				}
+				else {
+					_sounds = getArray (_instigatorConfig >> _attack >> "Sounds" >> "generic");
+
+					if (_sounds isNotEqualTo []) then {
+						playSound3D [((getArray (configFile >> "CfgSounds" >> (selectRandom _sounds) >> "sound")) select 0) select [1], _unit, [insideBuilding _unit, false] call KH_fnc_parseBoolean, getPosASL _unit, 5, 1, 100, 0, false];
+					};
+				};
+			};
+
+			if (KH_var_meleeAttackRecoilOnInsufficientStamina && ((getFatigue _instigator) >= (1 - (getNumber (_instigatorConfig >> _attack >> "cost"))))) then {
+				[
+					[_instigator, "RECOIL"],
+					"KH_fnc_updateMeleeState",
+					_instigator,
+					true,
+					false
+				] call KH_fnc_execute;
+			};
+
+			[
+				[
+					_unit,
+					getNumber (_instigatorConfig >> _attack >> "costInfliction")
+				],
+				{
+					params ["_unit", "_costInfliction"];
+					
+					_unit setFatigue (
+						(
+							(getFatigue _unit) + 
+							(_costInfliction * KH_var_meleeAbsoluteAttackStaminaExhaustionMultiplier * KH_var_meleeAbsoluteStaminaExhaustionMultiplier)
+						) min 1
+					);
+				},
+				_unit,
+				true,
+				false
+			] call KH_fnc_execute;
+		}
+		else {
+			if _blocked then {
+				[_unit, "BLOCK_SUCCESS"] call KH_fnc_updateMeleeState;
+			};
+
+			[
+				[
+					_instigator,
+					["RECOIL", ["STAGGER", "LIGHT", 0]] select _parried, 
+					if _parried then {
+						getNumber (_unitConfig >> (_unit getVariable ["KH_var_currentMeleeParry", ""]) >> "costInfliction");
+					}
+					else {
+						getNumber (_unitConfig >> (_unit getVariable ["KH_var_currentMeleeBlock", ""]) >> "costInfliction");
+					},
+					_parried
+				],
+				{
+					params ["_instigator", "_action", "_costInfliction", "_parried"];
+					
+					_instigator setFatigue (
+						(
+							(getFatigue _instigator) + 
+							(_costInfliction * ([KH_var_meleeAbsoluteBlockStaminaExhaustionMultiplier, KH_var_meleeAbsoluteParryStaminaExhaustionMultiplier] select _parried) * KH_var_meleeAbsoluteStaminaExhaustionMultiplier)
+						) min 1
+					);
+
+					[_instigator, _action] call KH_fnc_updateMeleeState;
+				},
+				_instigator,
+				true,
+				false
+			] call KH_fnc_execute;
+
+			private _sounds = getArray (_instigatorConfig >> _attack >> "Sounds" >> (["parried", "blocked"] select _blocked));
+
+			if (_sounds isNotEqualTo []) then {
+				playSound3D [((getArray (configFile >> "CfgSounds" >> (selectRandom _sounds) >> "sound")) select 0) select [1], _unit, [insideBuilding _unit, false] call KH_fnc_parseBoolean, getPosASL _unit, 5, 1, 100, 0, false];
+			}
+			else {
+				_sounds = getArray (_instigatorConfig >> _attack >> "Sounds" >> (["blocked", "parried"] select _parried));
+
+				if (_sounds isNotEqualTo []) then {
+					playSound3D [((getArray (configFile >> "CfgSounds" >> (selectRandom _sounds) >> "sound")) select 0) select [1], _unit, [insideBuilding _unit, false] call KH_fnc_parseBoolean, getPosASL _unit, 5, 1, 100, 0, false];
+				};
 			};
 		};
 	}
@@ -472,34 +616,114 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 	"KH_eve_meleeInternalGotKicked",
 	[],
 	{
-		params ["_unit", "_instigator", "_selection", "_kickType", "_kickPower", "_position", "_direction"];
-		private _blockPower = (_unit getVariable "KH_var_meleeAttributes") select 6;
-		private _blocked = (_instigator in (_unit getVariable ["KH_var_meleeBlockedUnits", []])) && (_blockPower >= _kickPower);
+		params ["_unit", "_instigator", "_selection", "_position", "_kick"];
+		private _continue = true;
+
+		if ((_unit getVariable ["KH_var_currentMeleeDodgeDirection", -1]) isNotEqualTo -1) then {
+			private _difference = (abs ((_unit getVariable ["KH_var_currentMeleeDodgeDirection", -1]) - (_unit getRelDir _instigator))) mod 360;
+
+			if (_difference > 180) then {
+				_difference = 360 - _difference;
+			};
+			
+			if (_difference > 90) then {
+				_continue = false;
+			};
+		};
+		
+		if !_continue exitWith {};
+		private _unitConfig = configFile >> "CfgKHMeleeTypes" >> (_unit getVariable ["KH_var_meleeType", ""]);
+		private _instigatorConfig = configFile >> "CfgKHMeleeTypes" >> (_instigator getVariable ["KH_var_meleeType", ""]);
+		private _kickPower = (getNumber (_instigatorConfig >> _kick >> "power")) * (1 - ((getFatigue _instigator) * KH_var_meleePowerReductionStaminaCoefficient));
+		private _blockPower = (getNumber (_unitConfig >> (_unit getVariable ["KH_var_currentMeleeBlock", ""]) >> "power")) * (1 - ((getFatigue _unit) * KH_var_meleePowerReductionStaminaCoefficient));
+		private _isBlocking = _instigator in (_unit getVariable ["KH_var_meleeBlockedUnits", []]);
+		private _blocked = _isBlocking && (_blockPower >= _kickPower);
+
+		if _isBlocking then {
+			[
+				[_unit, getNumber (_unitConfig >> (_unit getVariable ["KH_var_currentMeleeBlock", ""]) >> "cost")],
+				{
+					params ["_unit", "_cost"];
+
+					_unit setFatigue (
+						(
+							(getFatigue _unit) + 
+							(
+								_cost * 
+								KH_var_meleeAbsoluteBlockStaminaConsumptionMultiplier * 
+								KH_var_meleeAbsoluteStaminaConsumptionMultiplier
+							)
+						) min 1
+					);
+				},
+				_unit,
+				true,
+				false
+			] call KH_fnc_execute;
+		};
 
 		[
 			"KH_eve_meleeHasKicked", 
-			[_instigator, _unit, _kickType, _kickPower, _position, _direction, _blockPower, _blocked], 
+			[_instigator, _unit, _kick, _position, _kickPower, _blockPower, _blocked], 
 			_instigator, 
 			false
 		] call KH_fnc_triggerCbaEvent;
 
 		[
 			"KH_eve_meleeGotKicked", 
-			[_unit, _instigator, _kickType, _kickPower, _position, _direction, _blockPower, _blocked],
+			[_unit, _instigator, _kick, _position, _kickPower, _blockPower, _blocked],
 			_unit,
 			false
 		] call KH_fnc_triggerCbaEvent;
 
 		if !_blocked then {
-			private _damageFunction = missionNamespace getVariable ((_unit getVariable "KH_var_meleeAttributes") select 13);
+			private _damageFunction = missionNamespace getVariable [getText (_instigatorConfig >> _kick >> "damageFunction"), {}];
 
-			if (_damageFunction isNotEqualTo "") then {
-				if ([_unit, _instigator, ["KICK", _kickType, _kickPower, _position, _direction, _blockPower]] call _damageFunction) then {
-					[[_unit, _selection, _kickType, _instigator], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
+			if (_damageFunction isNotEqualTo {}) then {
+				if ([_unit, _instigator, ["KICK", _kick, _position, _kickPower, _blockPower]] call _damageFunction) then {
+					[[_unit, ["STAGGER", "LIGHT", _unit getRelDir _instigator]], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
+					[[_unit, _selection, getText (_instigatorConfig >> _kick >> "type"), _instigator], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
 				};
 			}
 			else {
-				[[_unit, _selection, _kickType, _instigator], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
+				[[_unit, ["STAGGER", "LIGHT", _unit getRelDir _instigator]], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
+				[[_unit, _selection, getText (_instigatorConfig >> _kick >> "type"), _instigator], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
+			};
+
+			[
+				[
+					_unit,
+					getNumber (_instigatorConfig >> _kick >> "costInfliction")
+				],
+				{
+					params ["_unit", "_costInfliction"];
+					
+					_unit setFatigue (
+						(
+							(getFatigue _unit) + 
+							(_costInfliction * KH_var_meleeAbsoluteKickStaminaExhaustionMultiplier * KH_var_meleeAbsoluteStaminaExhaustionMultiplier)
+						) min 1
+					);
+				},
+				_unit,
+				true,
+				false
+			] call KH_fnc_execute;
+		}
+		else {
+			[_unit, "BLOCK_SUCCESS"] call KH_fnc_updateMeleeState;
+		};
+
+		private _sounds = getArray (_instigatorConfig >> _kick >> "Sounds" >> (getText ((configOf _unit) >> "kh_meleeSoundType")));
+
+		if (_sounds isNotEqualTo []) then {
+			playSound3D [((getArray (configFile >> "CfgSounds" >> (selectRandom _sounds) >> "sound")) select 0) select [1], _unit, [insideBuilding _unit, false] call KH_fnc_parseBoolean, getPosASL _unit, 5, 1, 100, 0, false];
+		}
+		else {
+			_sounds = getArray (_instigatorConfig >> _kick >> "Sounds" >> "generic");
+
+			if (_sounds isNotEqualTo []) then {
+				playSound3D [((getArray (configFile >> "CfgSounds" >> (selectRandom _sounds) >> "sound")) select 0) select [1], _unit, [insideBuilding _unit, false] call KH_fnc_parseBoolean, getPosASL _unit, 5, 1, 100, 0, false];
 			};
 		};
 	}
@@ -510,35 +734,115 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 	"KH_eve_meleeInternalGotTackled",
 	[],
 	{
-		params ["_unit", "_instigator", "_tackleType", "_tacklePower", "_direction"];
-		private _blockPower = (_unit getVariable "KH_var_meleeAttributes") select 6;
-		private _blocked = (_instigator in (_unit getVariable ["KH_var_meleeBlockedUnits", []])) && (_blockPower >= _tacklePower);
-		private _denied = ((_unit getVariable "KH_var_meleeAttributes") select 12) >= ((_instigator getVariable "KH_var_meleeAttributes") select 12);
+		params ["_unit", "_instigator", "_tackle"];
+		private _continue = true;
+
+		if ((_unit getVariable ["KH_var_currentMeleeDodgeDirection", -1]) isNotEqualTo -1) then {
+			private _difference = (abs ((_unit getVariable ["KH_var_currentMeleeDodgeDirection", -1]) - (_unit getDir _instigator))) mod 360;
+
+			if (_difference > 180) then {
+				_difference = 360 - _difference;
+			};
+			
+			if (_difference > 90) then {
+				_continue = false;
+			};
+		};
+		
+		if !_continue exitWith {};
+		private _unitConfig = configFile >> "CfgKHMeleeTypes" >> (_unit getVariable ["KH_var_meleeType", ""]);
+		private _instigatorConfig = configFile >> "CfgKHMeleeTypes" >> (_instigator getVariable ["KH_var_meleeType", ""]);
+		private _tacklePower = (getNumber (_instigatorConfig >> _tackle >> "power")) * (1 - ((getFatigue _instigator) * KH_var_meleePowerReductionStaminaCoefficient));
+		private _blockPower = (getNumber (_unitConfig >> (_unit getVariable ["KH_var_currentMeleeBlock", ""]) >> "power")) * (1 - ((getFatigue _unit) * KH_var_meleePowerReductionStaminaCoefficient));
+		private _isBlocking = _instigator in (_unit getVariable ["KH_var_meleeBlockedUnits", []]);
+		private _blocked = _isBlocking && (_blockPower >= _tacklePower);
+
+		if _isBlocking then {
+			[
+				[_unit, ((getNumber (_unitConfig >> (_unit getVariable ["KH_var_currentMeleeBlock", ""]) >> "cost")) + (getNumber (_instigatorConfig >> _tackle >> "costBlockInfliction"))) min 1],
+				{
+					params ["_unit", "_cost"];
+
+					_unit setFatigue (
+						(
+							(getFatigue _unit) + 
+							(
+								_cost * 
+								KH_var_meleeAbsoluteBlockStaminaConsumptionMultiplier *
+								KH_var_meleeAbsoluteTackleBlockStaminaExhaustionMultiplier *  
+								KH_var_meleeAbsoluteStaminaConsumptionMultiplier
+							)
+						) min 1
+					);
+				},
+				_unit,
+				true,
+				false
+			] call KH_fnc_execute;
+		};
 
 		[
 			"KH_eve_meleeHasTackled", 
-			[_instigator, _unit, _tackleType, _tacklePower, _position, _direction, _blockPower, _blocked], 
+			[_instigator, _unit, _tackle, _tacklePower, _blockPower, _blocked], 
 			_instigator, 
 			false
 		] call KH_fnc_triggerCbaEvent;
 
 		[
 			"KH_eve_meleeGotTackled", 
-			[_unit, _instigator, _tackleType, _tacklePower, _position, _direction, _blockPower, _blocked],
+			[_unit, _instigator, _tackle, _tacklePower, _blockPower, _blocked],
 			_unit,
 			false
 		] call KH_fnc_triggerCbaEvent;
 
 		if !_blocked then {
-			private _damageFunction = missionNamespace getVariable ((_unit getVariable "KH_var_meleeAttributes") select 13);
+			private _damageFunction = missionNamespace getVariable [getText (_instigatorConfig >> _tackle >> "damageFunction"), {}];
 
-			if (_damageFunction isNotEqualTo "") then {
-				if ([_unit, _instigator, ["TACKLE", _tackleType, _tacklePower, _direction]] call _damageFunction) then {
-					[[_unit, selectRandom (_unit selectionNames "FireGeometry"), _tackleType, _instigator], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
+			if (_damageFunction isNotEqualTo {}) then {
+				if ([_unit, _instigator, ["TACKLE", _tackle, _tacklePower, _blockPower]] call _damageFunction) then {
+					[[_unit, ["STAGGER", "HEAVY", _unit getRelDir _instigator]], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
+					[[_unit, selectRandom ((_unit selectionNames "FireGeometry") select {"hit" in _x;}), getText (_instigatorConfig >> _tackle >> "type"), _instigator], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
 				};
 			}
 			else {
-				[[_unit, selectRandom (_unit selectionNames "FireGeometry"), _tackleType, _instigator], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
+				[[_unit, ["STAGGER", "HEAVY", _unit getRelDir _instigator]], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
+				[[_unit, selectRandom ((_unit selectionNames "FireGeometry") select {"hit" in _x;}), getText (_instigatorConfig >> _tackle >> "type"), _instigator], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
+			};
+
+			[
+				[
+					_unit,
+					getNumber (_instigatorConfig >> _tackle >> "costInfliction")
+				],
+				{
+					params ["_unit", "_costInfliction"];
+					
+					_unit setFatigue (
+						(
+							(getFatigue _unit) + 
+							(_costInfliction * KH_var_meleeAbsoluteTackleStaminaExhaustionMultiplier * KH_var_meleeAbsoluteStaminaExhaustionMultiplier)
+						) min 1
+					);
+				},
+				_unit,
+				true,
+				false
+			] call KH_fnc_execute;
+		}
+		else {
+			[_unit, "BLOCK_SUCCESS"] call KH_fnc_updateMeleeState;
+		};
+
+		private _sounds = getArray (_instigatorConfig >> _tackle >> "Sounds" >> (getText ((configOf _unit) >> "kh_meleeSoundType")));
+
+		if (_sounds isNotEqualTo []) then {
+			playSound3D [((getArray (configFile >> "CfgSounds" >> (selectRandom _sounds) >> "sound")) select 0) select [1], _unit, [insideBuilding _unit, false] call KH_fnc_parseBoolean, getPosASL _unit, 5, 1, 100, 0, false];
+		}
+		else {
+			_sounds = getArray (_instigatorConfig >> _tackle >> "Sounds" >> "generic");
+
+			if (_sounds isNotEqualTo []) then {
+				playSound3D [((getArray (configFile >> "CfgSounds" >> (selectRandom _sounds) >> "sound")) select 0) select [1], _unit, [insideBuilding _unit, false] call KH_fnc_parseBoolean, getPosASL _unit, 5, 1, 100, 0, false];
 			};
 		};
 	}
@@ -1469,6 +1773,19 @@ if hasInterface then {
 	} forEach (("true" configClasses (configFile >> "CfgKhInitFunctions")) + ("true" configClasses (missionConfigFile >> "CfgKhInitFunctions")));
 
 	[
+		["USER_ACTION", "defaultAction"],
+		"Activate",
+		[],
+		{
+			if ((KH_var_playerUnit getVariable ["KH_var_meleeMode", ""]) isNotEqualTo "") then {
+				if (!dialog && !visibleMap && (isNull curatorCamera)) then {
+					[KH_var_playerUnit, "ATTACK"] call KH_fnc_updateMeleeState;
+				};
+			};
+		}
+	] call KH_fnc_addEventHandler;
+
+	[
 		"PLAYER",
 		"unit",
 		[],
@@ -1637,6 +1954,7 @@ if hasInterface then {
 			if (isNil "_currentHandler") exitWith {};
 			_currentHandler params ["_event", "_timeoutArguments", "_timeoutFunction", "_timeoutOnDeletion"];
 			private _drawType = [KH_var_drawUi2dExecutionStackAdditions, KH_var_drawUi3dExecutionStackAdditions] select _event;
+			private _deletionType = [KH_var_drawUi2dExecutionStackDeletions, KH_var_drawUi3dExecutionStackDeletions] select _event;
 
 			if !(_handlerId in _deletionType) then {
 				_deletionType insert [0, [_handlerId]];

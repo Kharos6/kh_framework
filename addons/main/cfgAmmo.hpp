@@ -59,28 +59,28 @@ class CfgAmmo
 		hit = 0.5;
 		kh_meleeActionType = "tackle";
 	};
-	class KH_MeleeCleavingSharpLightSwing: KH_MeleeBase
+	class KH_MeleeCleavingSharpLightLongSwing: KH_MeleeBase
 	{
-		caliber = 4;
+		caliber = 3;
 		hit = 3;
 		kh_meleeActionType = "attack";
 	};
-	class KH_MeleeCleavingSharpLightThrust: KH_MeleeBase
+	class KH_MeleeCleavingSharpLightLongThrust: KH_MeleeBase
 	{
-		caliber = 6;
+		caliber = 4;
 		hit = 5;
 		kh_meleeActionType = "attack";
 	};
-	class KH_MeleeBluntLightSwing: KH_MeleeBase
+	class KH_MeleeCleavingSharpLightShortSwing: KH_MeleeBase
 	{
-		caliber = 2;
-		hit = 4;
+		caliber = 5;
+		hit = 3;
 		kh_meleeActionType = "attack";
 	};
-	class KH_MeleeBluntLightThrust: KH_MeleeBase
+	class KH_MeleeCleavingSharpLightShortThrust: KH_MeleeBase
 	{
-		caliber = 3;
-		hit = 2;
+		caliber = 6;
+		hit = 5;
 		kh_meleeActionType = "attack";
 	};
     class MissileBase;

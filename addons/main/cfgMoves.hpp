@@ -11,40 +11,65 @@ class CfgMovesBasic
         kh_meleeTackleTiming[] = {};
         kh_meleeDodgeTiming[] = {};
         kh_meleeSoundTiming[] = {};
+        kh_meleeAttackPhase = 0;
+        kh_meleeKickPhase = 0;
+        kh_meleeTacklePhase = 0;
+        kh_meleeActionGestureExclusive = 0;
     };
     class ManActions
     {
-        KH_MeleeDodge = "";
         KH_MeleeInLightSword = "Hum_AbsStaSaf_IdlLhtMel";
         KH_MeleeInLightSwordTransition = "Hum_AbsStaSaf_IdlUna_Tra_AbsStaSaf_IdlLhtMel";
+        KH_MeleeDodge = "";
         KH_MeleeBlockGesture[] = {"", "Gesture"};
         KH_MeleeBlockIn = "";
         KH_MeleeBlockOut = "";
         KH_MeleeBlockSuccess = "";
         KH_MeleeBlockSuccessGesture[] = {"", "Gesture"};
         KH_MeleeBlockFailure = "";
+        KH_MeleeBlocked = "";
         KH_MeleeParry = "";
         KH_MeleeParryGesture[] = {"", "Gesture"};
+        KH_MeleeParried = "";
         KH_MeleeKick = "";
         KH_MeleeTackle = "";
         KH_MeleeStop = "";
-        KH_MeleeRecoil = "";
-        KH_Attack01 = "";
-        KH_Attack02 = "";
-        KH_Attack01Gesture[] = {"", "Gesture"};
-        KH_Attack02Gesture[] = {"", "Gesture"};
-        KH_StaggerLightForward = "";
-        KH_StaggerLightBackward = "";
-        KH_StaggerLightLeftward = "";
-        KH_StaggerLightRightward = "";
-        KH_StaggerHeavyForward = "";
-        KH_StaggerHeavyBackward = "";
-        KH_StaggerHeavyLeftward = "";
-        KH_StaggerHeavyRightward = "";
+        KH_MeleeAttack01 = "";
+        KH_MeleeAttack01AGesture[] = {"", "Gesture"};
+        KH_MeleeAttack01BGesture[] = {"", "Gesture"};
+        KH_MeleeAttack01CGesture[] = {"", "Gesture"};
+        KH_MeleeAttack02 = "";
+        KH_MeleeAttack02AGesture[] = {"", "Gesture"};
+        KH_MeleeAttack02BGesture[] = {"", "Gesture"};
+        KH_MeleeAttack02CGesture[] = {"", "Gesture"};
+        KH_MeleeAttack03 = "";
+        KH_MeleeAttack03AGesture[] = {"", "Gesture"};
+        KH_MeleeAttack03BGesture[] = {"", "Gesture"};
+        KH_MeleeAttack03CGesture[] = {"", "Gesture"};
         KH_MeleeHitLeftGesture[] = {"", "Gesture"};
         KH_MeleeHitRightGesture[] = {"", "Gesture"};
         KH_MeleeHitFrontGesture[] = {"", "Gesture"};
+        KH_MeleeHitFrontLeftGesture[] = {"", "Gesture"};
+        KH_MeleeHitFrontRightGesture[] = {"", "Gesture"};
         KH_MeleeHitBackGesture[] = {"", "Gesture"};
+        KH_MeleeHitBackLeftGesture[] = {"", "Gesture"};
+        KH_MeleeHitBackRightGesture[] = {"", "Gesture"};
+        KH_StaggerLightForward = "";
+        KH_StaggerLightForwardLeftward = "";
+        KH_StaggerLightForwardRightward = "";
+        KH_StaggerLightBackward = "";
+        KH_StaggerLightBackwardLeftward = "";
+        KH_StaggerLightBackwardRightward = "";
+        KH_StaggerLightLeftward = "";
+        KH_StaggerLightRightward = "";
+        KH_StaggerHeavyForward = "";
+        KH_StaggerHeavyForwardLeftward = "";
+        KH_StaggerHeavyForwardRightward = "";
+        KH_StaggerHeavyBackward = "";
+        KH_StaggerHeavyBackwardLeftward = "";
+        KH_StaggerHeavyBackwardRightward = "";
+        KH_StaggerHeavyLeftward = "";
+        KH_StaggerHeavyRightward = "";
     };
     class States;
 };
@@ -72,30 +97,45 @@ class CfgMovesMaleSdr: CfgMovesBasic
             FastRF = "Hum_AbsStaCom_RunFwdRwdLhtMel";
             FireNotPossible = "Hum_AbsStaCom_IdlLhtMel";
             KH_MeleeDodge = "Hum_AbsStaCom_DgeBwdLhtMel";
-            KH_MeleeBlockGesture[] = {"Hum_AddStaAny_BloLhtMel", "Gesture"};
+            KH_MeleeBlockGesture[] = {"Hum_AddStaCom_BloLhtMel", "Gesture"};
             KH_MeleeBlockIn = "Hum_AbsStaCom_BloLhtMel";
             KH_MeleeBlockOut = "Hum_AbsStaCom_IdlLhtMel";
             KH_MeleeBlockSuccess = "Hum_AbsStaCom_BloSucLhtMel";
-            KH_MeleeBlockSuccessGesture[] = {"Hum_AddStaAny_BloSucLhtMel", "Gesture"};
+            KH_MeleeBlockSuccessGesture[] = {"Hum_AddStaCom_BloSucLhtMel", "Gesture"};
             KH_MeleeBlockFailure = "Hum_AbsStaCom_StgHvyBwdLhtMel";
-            KH_MeleeInLightSword = "Hum_AbsStaCom_IdlLhtMel";
-            KH_MeleeKick = "Hum_AbsStaCom_KckLhtMel";
-            KH_Attack01 = "Hum_AbsStaCom_AttLhtMel01A";
-            KH_Attack02 = "Hum_AbsStaCom_AttLhtMel02A";
+            KH_MeleeBlocked = "Hum_AbsStaCom_RclRhtLhtMel";
             KH_MeleeParry = "Hum_AbsStaCom_ParLhtMel";
-            KH_MeleeStop = "Hum_AbsStaCom_IdlLhtMel";
-            KH_MeleeRecoil = "Hum_AbsStaCom_RclRhtLhtMel";
+            KH_MeleeParryGesture[] = {"Hum_AddStaCom_ParLhtMel", "Gesture"};
+            KH_MeleeParried = "Hum_AbsStaCom_StgLhtBwdLhtMel";
+            KH_MeleeKick = "Hum_AbsStaCom_KckLhtMel";
             KH_MeleeTackle = "Hum_AbsStaCom_TklLhtMel";
+            KH_MeleeStop = "Hum_AbsStaCom_IdlLhtMel";
+            KH_MeleeAttack01 = "Hum_AbsStaCom_AttLhtMel01A";
+            KH_MeleeAttack01AGesture[] = {"Hum_AddStaCom_AttLhtMel01A", "Gesture"};
+            KH_MeleeAttack01BGesture[] = {"Hum_AddStaCom_AttLhtMel01B", "Gesture"};
+            KH_MeleeAttack02 = "Hum_AbsStaCom_AttLhtMel02A";
             KH_MeleeHitLeftGesture[] = {"Hum_AddAnyAny_HitLftLhtMel", "Gesture"};
             KH_MeleeHitRightGesture[] = {"Hum_AddAnyAny_HitRhtLhtMel", "Gesture"};
             KH_MeleeHitFrontGesture[] = {"Hum_AddAnyAny_HitFroLhtMel", "Gesture"};
+            KH_MeleeHitFrontLeftGesture[] = {"Hum_AddAnyAny_HitFroLhtMel", "Gesture"};
+            KH_MeleeHitFrontRightGesture[] = {"Hum_AddAnyAny_HitFroLhtMel", "Gesture"};
             KH_MeleeHitBackGesture[] = {"Hum_AddAnyAny_HitBckLhtMel", "Gesture"};
+            KH_MeleeHitBackLeftGesture[] = {"Hum_AddAnyAny_HitBckLhtMel", "Gesture"};
+            KH_MeleeHitBackRightGesture[] = {"Hum_AddAnyAny_HitBckLhtMel", "Gesture"};
             KH_StaggerLightForward = "Hum_AbsStaCom_StgLhtFwdLhtMel";
+            KH_StaggerLightForwardLeftward = "Hum_AbsStaCom_StgLhtFwdLhtMel";
+            KH_StaggerLightForwardRightward = "Hum_AbsStaCom_StgLhtFwdLhtMel";
             KH_StaggerLightBackward = "Hum_AbsStaCom_StgLhtBwdLhtMel";
+            KH_StaggerLightBackwardLeftward = "Hum_AbsStaCom_StgLhtBwdLhtMel";
+            KH_StaggerLightBackwardRightward = "Hum_AbsStaCom_StgLhtBwdLhtMel";
             KH_StaggerLightLeftward = "Hum_AbsStaCom_StgLhtLwdLhtMel";
             KH_StaggerLightRightward = "Hum_AbsStaCom_StgLhtRwdLhtMel";
             KH_StaggerHeavyForward = "Hum_AbsStaCom_StgHvyFwdLhtMel";
+            KH_StaggerHeavyForwardLeftward = "Hum_AbsStaCom_StgHvyFwdLhtMel";
+            KH_StaggerHeavyForwardRightward = "Hum_AbsStaCom_StgHvyFwdLhtMel";
             KH_StaggerHeavyBackward = "Hum_AbsStaCom_StgHvyBwdLhtMel";
+            KH_StaggerHeavyBackwardLeftward = "Hum_AbsStaCom_StgHvyBwdLhtMel";
+            KH_StaggerHeavyBackwardRightward = "Hum_AbsStaCom_StgHvyBwdLhtMel";
             KH_StaggerHeavyLeftward = "Hum_AbsStaCom_StgHvyLwdLhtMel";
             KH_StaggerHeavyRightward = "Hum_AbsStaCom_StgHvyRwdLhtMel";
             leanLRot = 0.5;
@@ -211,33 +251,33 @@ class CfgMovesMaleSdr: CfgMovesBasic
         };
         class KH_MeleeTertiaryMeleeLightSwordAttack01A: KH_MeleeTertiaryLightSwordActions
         {
-            KH_Attack01 = "Hum_AbsStaCom_AttLhtMel01B";
-            KH_Attack02 = "Hum_AbsStaCom_AttLhtMel02B";
+            KH_MeleeAttack01 = "Hum_AbsStaCom_AttLhtMel01B";
+            KH_MeleeAttack02 = "Hum_AbsStaCom_AttLhtMel02B";
         };
         class KH_MeleeTertiaryMeleeLightSwordAttack01B: KH_MeleeTertiaryLightSwordActions
         {
-            KH_Attack01 = "Hum_AbsStaCom_AttLhtMel01C";
-            KH_Attack02 = "Hum_AbsStaCom_AttLhtMel02C";
+            KH_MeleeAttack01 = "Hum_AbsStaCom_AttLhtMel01C";
+            KH_MeleeAttack02 = "Hum_AbsStaCom_AttLhtMel02C";
         };
         class KH_MeleeTertiaryMeleeLightSwordAttack01C: KH_MeleeTertiaryLightSwordActions
         {
-            KH_Attack01 = "Hum_AbsStaCom_IdlLhtMel";
-            KH_Attack02 = "Hum_AbsStaCom_IdlLhtMel";
+            KH_MeleeAttack01 = "Hum_AbsStaCom_IdlLhtMel";
+            KH_MeleeAttack02 = "Hum_AbsStaCom_IdlLhtMel";
         };
         class KH_MeleeTertiaryMeleeLightSwordAttack02A: KH_MeleeTertiaryLightSwordActions
         {
-            KH_Attack01 = "Hum_AbsStaCom_AttLhtMel01B";
-            KH_Attack02 = "Hum_AbsStaCom_AttLhtMel02B";
+            KH_MeleeAttack01 = "Hum_AbsStaCom_AttLhtMel01B";
+            KH_MeleeAttack02 = "Hum_AbsStaCom_AttLhtMel02B";
         };
         class KH_MeleeTertiaryMeleeLightSwordAttack02B: KH_MeleeTertiaryLightSwordActions
         {
-            KH_Attack01 = "Hum_AbsStaCom_AttLhtMel01C";
-            KH_Attack02 = "Hum_AbsStaCom_AttLhtMel02C";
+            KH_MeleeAttack01 = "Hum_AbsStaCom_AttLhtMel01C";
+            KH_MeleeAttack02 = "Hum_AbsStaCom_AttLhtMel02C";
         };
         class KH_MeleeTertiaryMeleeLightSwordAttack02C: KH_MeleeTertiaryLightSwordActions
         {
-            KH_Attack01 = "Hum_AbsStaCom_IdlLhtMel";
-            KH_Attack02 = "Hum_AbsStaCom_IdlLhtMel";
+            KH_MeleeAttack01 = "Hum_AbsStaCom_IdlLhtMel";
+            KH_MeleeAttack02 = "Hum_AbsStaCom_IdlLhtMel";
         };
     };
     class StandBase;
@@ -366,7 +406,9 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_IdlLhtMel_Tra_AbsStaSaf_IdlLhtMel", 0.1
             };
             interpolateTo[] += {
+                "Unconscious", 0.05,
                 "Hum_AbsStaCom_BloLhtMel", 0.1,
+                "Hum_AbsStaCom_RclRhtLhtMel", 0.1,
                 "Hum_AbsStaCom_JogBwdLhtMel", 0.1,
                 "Hum_AbsStaCom_JogBwdLwdLhtMel", 0.1,
                 "Hum_AbsStaCom_JogBwdRwdLhtMel", 0.1,
@@ -411,6 +453,7 @@ class CfgMovesMaleSdr: CfgMovesBasic
             actions = "KH_MeleeTertiaryMeleeLightSwordAttack01A";
             speed = 1.25;
             minPlayTime = 1;
+            kh_meleeAttackPhase = 1;
             kh_meleeHitTiming[] = {
                 {0.7667, "launcher", {0.571089, 0.327445, 1.878061}, "Attack01", 0},
                 {0.8000, "launcher", {0.518998, 0.651819, 1.631181}, "Attack01", 0},
@@ -430,7 +473,15 @@ class CfgMovesMaleSdr: CfgMovesBasic
             };
             interpolateTo[] = {
                 "Hum_AbsStaCom_AttLhtMel02B", 0.15,
-                "Hum_AbsStaCom_RclRhtLhtMel", 0.2
+                "Hum_AbsStaCom_RclRhtLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
             };
         };
         class Hum_AbsStaCom_AttLhtMel01B: KH_MeleeBespokeBase
@@ -438,6 +489,7 @@ class CfgMovesMaleSdr: CfgMovesBasic
             actions = "KH_MeleeTertiaryMeleeLightSwordAttack01B";
             speed = 1.7857125;
             minPlayTime = 1;
+            kh_meleeAttackPhase = 1;
             kh_meleeHitTiming[] = {
                 {0.6190, "launcher", {-0.184743, 0.285979, 1.863449}, "Attack01", 0},
                 {0.6667, "launcher", {-0.038018, 0.555262, 1.668209}, "Attack01", 0},
@@ -456,7 +508,15 @@ class CfgMovesMaleSdr: CfgMovesBasic
             };
             interpolateTo[] = {
                 "Hum_AbsStaCom_AttLhtMel02C", 0.15,
-                "Hum_AbsStaCom_RclRhtLhtMel", 0.2
+                "Hum_AbsStaCom_RclRhtLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
             };
         };
         class Hum_AbsStaCom_AttLhtMel01C: KH_MeleeBespokeBase
@@ -464,6 +524,7 @@ class CfgMovesMaleSdr: CfgMovesBasic
             actions = "KH_MeleeTertiaryMeleeLightSwordAttack01C";
             speed = 0.5952375;
             minPlayTime = 0.75;
+            kh_meleeAttackPhase = 1;
             soundOverride = "Walk";
             soundEdge[] = {0.3, 0.7, 0.9};
             kh_meleeHitTiming[] = {
@@ -486,7 +547,7 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_DgeFwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeLwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeRwdLhtMel", 0.1,
-                "Hum_AbsStaCom_RclRhtLhtMel", 0.2,
+                "Hum_AbsStaCom_RclRhtLhtMel", 0.1,
                 "Hum_AbsStaCom_JogBwdLhtMel", 0.1,
                 "Hum_AbsStaCom_JogBwdLwdLhtMel", 0.1,
                 "Hum_AbsStaCom_JogBwdRwdLhtMel", 0.1,
@@ -515,7 +576,19 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_TroLwdLhtMel", 0.1,
                 "Hum_AbsStaCom_TroRwdLhtMel", 0.1,
                 "Hum_AbsStaCom_TrnLftLhtMel", 0.1,
-                "Hum_AbsStaCom_TrnRhtLhtMel", 0.1
+                "Hum_AbsStaCom_TrnRhtLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_TklLhtMel", 0.1,
+                "Hum_AbsStaCom_KckLhtMel", 0.1,
+                "Hum_AbsStaCom_ParLhtMel", 0.1,
+                "Hum_AbsStaCom_BloLhtMel", 0.1
             };
         };
         class Hum_AbsStaCom_AttLhtMel02A: KH_MeleeBespokeBase
@@ -523,6 +596,7 @@ class CfgMovesMaleSdr: CfgMovesBasic
             actions = "KH_MeleeTertiaryMeleeLightSwordAttack02A";
             speed = 1.10294125;
             minPlayTime = 1;
+            kh_meleeAttackPhase = 1;
             kh_meleeHitTiming[] = {
                 {0.7941, "launcher", {0.228647, 0.809746, 0.936372}, "Attack02", 0},
                 {0.8235, "launcher", {0.164290, 0.909469, 1.052379}, "Attack02", 0},
@@ -542,7 +616,15 @@ class CfgMovesMaleSdr: CfgMovesBasic
             };
             interpolateTo[] = {
                 "Hum_AbsStaCom_AttLhtMel01B", 0.15,
-                "Hum_AbsStaCom_RclRhtLhtMel", 0.2
+                "Hum_AbsStaCom_RclRhtLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
             };
         };
         class Hum_AbsStaCom_AttLhtMel02B: KH_MeleeBespokeBase
@@ -550,6 +632,7 @@ class CfgMovesMaleSdr: CfgMovesBasic
             actions = "KH_MeleeTertiaryMeleeLightSwordAttack02B";
             speed = 1.171875;
             minPlayTime = 1;
+            kh_meleeAttackPhase = 1;
             kh_meleeHitTiming[] = {
                 {0.5938, "launcher", {0.700077, 0.387612, 1.229074}, "Attack02", 0},
                 {0.6250, "launcher", {0.507225, 0.577151, 1.121093}, "Attack02", 0},
@@ -568,7 +651,15 @@ class CfgMovesMaleSdr: CfgMovesBasic
             };
             interpolateTo[] = {
                 "Hum_AbsStaCom_AttLhtMel01C", 0.15,
-                "Hum_AbsStaCom_RclRhtLhtMel", 0.2
+                "Hum_AbsStaCom_RclRhtLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
             };
         };
         class Hum_AbsStaCom_AttLhtMel02C: KH_MeleeBespokeBase
@@ -576,6 +667,7 @@ class CfgMovesMaleSdr: CfgMovesBasic
             actions = "KH_MeleeTertiaryMeleeLightSwordAttack02C";
             speed = 0.56818125;
             minPlayTime = 0.6;
+            kh_meleeAttackPhase = 1;
             kh_meleeHitTiming[] = {
                 {0.1515, "launcher", {0.402936, 0.870261, 1.535653}, "Attack02", 0},
                 {0.1667, "launcher", {0.113386, 1.034553, 1.303826}, "Attack02", 0},
@@ -598,7 +690,7 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_DgeFwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeLwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeRwdLhtMel", 0.1,
-                "Hum_AbsStaCom_RclRhtLhtMel", 0.2,
+                "Hum_AbsStaCom_RclRhtLhtMel", 0.1,
                 "Hum_AbsStaCom_JogBwdLhtMel", 0.1,
                 "Hum_AbsStaCom_JogBwdLwdLhtMel", 0.1,
                 "Hum_AbsStaCom_JogBwdRwdLhtMel", 0.1,
@@ -627,7 +719,19 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_TroLwdLhtMel", 0.1,
                 "Hum_AbsStaCom_TroRwdLhtMel", 0.1,
                 "Hum_AbsStaCom_TrnLftLhtMel", 0.1,
-                "Hum_AbsStaCom_TrnRhtLhtMel", 0.1
+                "Hum_AbsStaCom_TrnRhtLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_TklLhtMel", 0.1,
+                "Hum_AbsStaCom_KckLhtMel", 0.1,
+                "Hum_AbsStaCom_ParLhtMel", 0.1,
+                "Hum_AbsStaCom_BloLhtMel", 0.1
             };
         };
         class Hum_AbsStaCom_AttLhtMelCbo01: KH_MeleeBespokeBase
@@ -659,7 +763,24 @@ class CfgMovesMaleSdr: CfgMovesBasic
             connectTo[] = {};
             interpolateTo[] = {
                 "Hum_AbsStaCom_IdlLhtMel", 0.1,
-                "Hum_AbsStaCom_BloSucLhtMel", 0.2
+                "Hum_AbsStaCom_BloSucLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_AttLhtMel01A", 0.1,
+                "Hum_AbsStaCom_AttLhtMel02A", 0.1,
+                "Hum_AbsStaCom_DgeBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_DgeFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_DgeLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_DgeRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_TklLhtMel", 0.1,
+                "Hum_AbsStaCom_KckLhtMel", 0.1,
+                "Hum_AbsStaCom_ParLhtMel", 0.1
             };
         };
         class Hum_AbsStaCom_BloSucLhtMel: KH_MeleeBespokeBase
@@ -670,7 +791,26 @@ class CfgMovesMaleSdr: CfgMovesBasic
             connectTo[] = {
                 "Hum_AbsStaCom_IdlLhtMel", 0.1
             };
-            interpolateTo[] = {};
+            interpolateTo[] = {
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_AttLhtMel01A", 0.1,
+                "Hum_AbsStaCom_AttLhtMel02A", 0.1,
+                "Hum_AbsStaCom_DgeBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_DgeFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_DgeLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_DgeRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_TklLhtMel", 0.1,
+                "Hum_AbsStaCom_KckLhtMel", 0.1,
+                "Hum_AbsStaCom_ParLhtMel", 0.1,
+                "Hum_AbsStaCom_BloLhtMel", 0.1
+            };
         };
         class Hum_AbsStaCom_DgeBwdLhtMel: KH_MeleeBespokeBase
         {
@@ -721,7 +861,18 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_TroRwdLhtMel", 0.1,
                 "Hum_AbsStaCom_TrnLftLhtMel", 0.1,
                 "Hum_AbsStaCom_TrnRhtLhtMel", 0.1,
-                "Hum_AbsStaCom_TklLhtMel", 0.1
+                "Hum_AbsStaCom_TklLhtMel", 0.1,
+                "Hum_AbsStaCom_KckLhtMel", 0.1,
+                "Hum_AbsStaCom_BloLhtMel", 0.1,
+                "Hum_AbsStaCom_ParLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
             };
         };
         class Hum_AbsStaCom_DgeFwdLhtMel: KH_MeleeBespokeBase
@@ -773,7 +924,18 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_TroRwdLhtMel", 0.1,
                 "Hum_AbsStaCom_TrnLftLhtMel", 0.1,
                 "Hum_AbsStaCom_TrnRhtLhtMel", 0.1,
-                "Hum_AbsStaCom_TklLhtMel", 0.1
+                "Hum_AbsStaCom_TklLhtMel", 0.1,
+                "Hum_AbsStaCom_KckLhtMel", 0.1,
+                "Hum_AbsStaCom_BloLhtMel", 0.1,
+                "Hum_AbsStaCom_ParLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
             };
         };
         class Hum_AbsStaCom_DgeLwdLhtMel: KH_MeleeBespokeBase
@@ -825,7 +987,18 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_TroRwdLhtMel", 0.1,
                 "Hum_AbsStaCom_TrnLftLhtMel", 0.1,
                 "Hum_AbsStaCom_TrnRhtLhtMel", 0.1,
-                "Hum_AbsStaCom_TklLhtMel", 0.1
+                "Hum_AbsStaCom_TklLhtMel", 0.1,
+                "Hum_AbsStaCom_KckLhtMel", 0.1,
+                "Hum_AbsStaCom_BloLhtMel", 0.1,
+                "Hum_AbsStaCom_ParLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
             };
         };
         class Hum_AbsStaCom_DgeRwdLhtMel: KH_MeleeBespokeBase
@@ -877,7 +1050,18 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_TroRwdLhtMel", 0.1,
                 "Hum_AbsStaCom_TrnLftLhtMel", 0.1,
                 "Hum_AbsStaCom_TrnRhtLhtMel", 0.1,
-                "Hum_AbsStaCom_TklLhtMel", 0.1
+                "Hum_AbsStaCom_TklLhtMel", 0.1,
+                "Hum_AbsStaCom_KckLhtMel", 0.1,
+                "Hum_AbsStaCom_BloLhtMel", 0.1,
+                "Hum_AbsStaCom_ParLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
             };
         };
         class Hum_AbsStaCom_JogBwdLhtMel: KH_MeleeBase
@@ -925,7 +1109,18 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_DgeFwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeLwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeRwdLhtMel", 0.1,
-                "Hum_AbsStaCom_TklLhtMel", 0.1
+                "Hum_AbsStaCom_TklLhtMel", 0.1,
+                "Hum_AbsStaCom_KckLhtMel", 0.1,
+                "Hum_AbsStaCom_BloLhtMel", 0.1,
+                "Hum_AbsStaCom_ParLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
             };
         };
         class Hum_AbsStaCom_JogBwdLwdLhtMel: KH_MeleeBase
@@ -973,7 +1168,18 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_DgeFwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeLwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeRwdLhtMel", 0.1,
-                "Hum_AbsStaCom_TklLhtMel", 0.1
+                "Hum_AbsStaCom_TklLhtMel", 0.1,
+                "Hum_AbsStaCom_KckLhtMel", 0.1,
+                "Hum_AbsStaCom_BloLhtMel", 0.1,
+                "Hum_AbsStaCom_ParLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
             };
         };
         class Hum_AbsStaCom_JogBwdRwdLhtMel: KH_MeleeBase
@@ -1021,7 +1227,18 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_DgeFwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeLwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeRwdLhtMel", 0.1,
-                "Hum_AbsStaCom_TklLhtMel", 0.1
+                "Hum_AbsStaCom_TklLhtMel", 0.1,
+                "Hum_AbsStaCom_KckLhtMel", 0.1,
+                "Hum_AbsStaCom_BloLhtMel", 0.1,
+                "Hum_AbsStaCom_ParLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
             };
         };
         class Hum_AbsStaCom_JogFwdLhtMel: KH_MeleeBase
@@ -1069,7 +1286,18 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_DgeFwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeLwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeRwdLhtMel", 0.1,
-                "Hum_AbsStaCom_TklLhtMel", 0.1
+                "Hum_AbsStaCom_TklLhtMel", 0.1,
+                "Hum_AbsStaCom_KckLhtMel", 0.1,
+                "Hum_AbsStaCom_BloLhtMel", 0.1,
+                "Hum_AbsStaCom_ParLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
             };
         };
         class Hum_AbsStaCom_JogFwdLwdLhtMel: KH_MeleeBase
@@ -1117,7 +1345,18 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_DgeFwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeLwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeRwdLhtMel", 0.1,
-                "Hum_AbsStaCom_TklLhtMel", 0.1
+                "Hum_AbsStaCom_TklLhtMel", 0.1,
+                "Hum_AbsStaCom_KckLhtMel", 0.1,
+                "Hum_AbsStaCom_BloLhtMel", 0.1,
+                "Hum_AbsStaCom_ParLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
             };
         };
         class Hum_AbsStaCom_JogFwdRwdLhtMel: KH_MeleeBase
@@ -1165,7 +1404,18 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_DgeFwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeLwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeRwdLhtMel", 0.1,
-                "Hum_AbsStaCom_TklLhtMel", 0.1
+                "Hum_AbsStaCom_TklLhtMel", 0.1,
+                "Hum_AbsStaCom_KckLhtMel", 0.1,
+                "Hum_AbsStaCom_BloLhtMel", 0.1,
+                "Hum_AbsStaCom_ParLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
             };
         };
         class Hum_AbsStaCom_JogLwdLhtMel: KH_MeleeBase
@@ -1213,7 +1463,18 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_DgeFwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeLwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeRwdLhtMel", 0.1,
-                "Hum_AbsStaCom_TklLhtMel", 0.1
+                "Hum_AbsStaCom_TklLhtMel", 0.1,
+                "Hum_AbsStaCom_KckLhtMel", 0.1,
+                "Hum_AbsStaCom_BloLhtMel", 0.1,
+                "Hum_AbsStaCom_ParLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
             };
         };
         class Hum_AbsStaCom_JogRwdLhtMel: KH_MeleeBase
@@ -1261,7 +1522,18 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_DgeFwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeLwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeRwdLhtMel", 0.1,
-                "Hum_AbsStaCom_TklLhtMel", 0.1
+                "Hum_AbsStaCom_TklLhtMel", 0.1,
+                "Hum_AbsStaCom_KckLhtMel", 0.1,
+                "Hum_AbsStaCom_BloLhtMel", 0.1,
+                "Hum_AbsStaCom_ParLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
             };
         };
         class Hum_AbsStaCom_KckLhtMel: KH_MeleeBespokeBase
@@ -1274,6 +1546,7 @@ class CfgMovesMaleSdr: CfgMovesBasic
             soundEdge[] = {0.14, 0.73, 0.91};
             file = "x\kh\addons\main\animations\human\Hum_AbsStaCom_KckLhtMel.rtm";
             minPlayTime = 0.8;
+            kh_meleeKickPhase = 1;
             connectTo[] = {
                 "Hum_AbsStaCom_IdlLhtMel", 0.1
             };
@@ -1307,7 +1580,23 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_TroRwdLhtMel", 0.1,
                 "Hum_AbsStaCom_TrnLftLhtMel", 0.1,
                 "Hum_AbsStaCom_TrnRhtLhtMel", 0.1,
-                "Hum_AbsStaCom_TklLhtMel", 0.1
+                "Hum_AbsStaCom_AttLhtMel01A", 0.1,
+                "Hum_AbsStaCom_AttLhtMel02A", 0.1,
+                "Hum_AbsStaCom_DgeBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_DgeFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_DgeLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_DgeRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_TklLhtMel", 0.1,
+                "Hum_AbsStaCom_ParLhtMel", 0.1,
+                "Hum_AbsStaCom_BloLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
             };
         };
         class Hum_AbsStaCom_ParLhtMel: KH_MeleeBespokeBase
@@ -1321,18 +1610,46 @@ class CfgMovesMaleSdr: CfgMovesBasic
             connectTo[] = {
                 "Hum_AbsStaCom_IdlLhtMel", 0.1
             };
-            interpolateTo[] = {};
+            interpolateTo[] = {
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_AttLhtMel01A", 0.1,
+                "Hum_AbsStaCom_AttLhtMel02A", 0.1,
+                "Hum_AbsStaCom_DgeBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_DgeFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_DgeLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_DgeRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_TklLhtMel", 0.1,
+                "Hum_AbsStaCom_KckLhtMel", 0.1,
+                "Hum_AbsStaCom_BloLhtMel", 0.1
+            };
         };
         class Hum_AbsStaCom_RclRhtLhtMel: KH_MeleeBespokeBase
         {
             speed = 0.638298;
             minPlayTime = 0.9;
+            kh_meleeActionGestureExclusive = 1;
             soundOverride = "Walk";
             soundEdge[] = {0.21, 0.65, 0.9};
             file = "x\kh\addons\main\animations\human\Hum_AbsStaCom_RclRhtLhtMel.rtm";
-            connectTo[] = {};
-            interpolateTo[] = {
+            connectTo[] = {
                 "Hum_AbsStaCom_IdlLhtMel", 0.1
+            };
+            interpolateTo[] = {
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
             };
         };
         class Hum_AbsStaCom_RunFwdLhtMel: KH_MeleeBase
@@ -1378,7 +1695,18 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_DgeFwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeLwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeRwdLhtMel", 0.1,
-                "Hum_AbsStaCom_TklLhtMel", 0.1
+                "Hum_AbsStaCom_TklLhtMel", 0.1,
+                "Hum_AbsStaCom_KckLhtMel", 0.1,
+                "Hum_AbsStaCom_BloLhtMel", 0.1,
+                "Hum_AbsStaCom_ParLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
             };
         };
         class Hum_AbsStaCom_RunFwdLwdLhtMel: KH_MeleeBase
@@ -1424,7 +1752,18 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_DgeFwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeLwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeRwdLhtMel", 0.1,
-                "Hum_AbsStaCom_TklLhtMel", 0.1
+                "Hum_AbsStaCom_TklLhtMel", 0.1,
+                "Hum_AbsStaCom_KckLhtMel", 0.1,
+                "Hum_AbsStaCom_BloLhtMel", 0.1,
+                "Hum_AbsStaCom_ParLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
             };
         };
         class Hum_AbsStaCom_RunFwdRwdLhtMel: KH_MeleeBase
@@ -1470,13 +1809,25 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_DgeFwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeLwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeRwdLhtMel", 0.1,
-                "Hum_AbsStaCom_TklLhtMel", 0.1
+                "Hum_AbsStaCom_TklLhtMel", 0.1,
+                "Hum_AbsStaCom_KckLhtMel", 0.1,
+                "Hum_AbsStaCom_BloLhtMel", 0.1,
+                "Hum_AbsStaCom_ParLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
             };
         };
         class Hum_AbsStaCom_StgHvyBwdLhtMel: KH_MeleeBespokeBase
         {
             speed = 0.810811;
             minPlayTime = 1;
+            kh_meleeActionGestureExclusive = 1;
             soundOverride = "sprint";
             soundEdge[] = {0.62, 0.83};
             file = "x\kh\addons\main\animations\human\Hum_AbsStaCom_StgHvyBwdLhtMel.rtm";
@@ -1484,12 +1835,20 @@ class CfgMovesMaleSdr: CfgMovesBasic
             connectTo[] = {
                 "Hum_AbsStaCom_StgHvyBwdLhtMel_Tra_AbsStaCom_IdlLhtMel", 0.1
             };
-            interpolateTo[] = {};
+            interpolateTo[] = {
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1
+            };
+            ignoreMinPlayTime[] = {
+                "Unconscious"
+            };
         };
         class Hum_AbsStaCom_StgHvyFwdLhtMel: KH_MeleeBespokeBase
         {
             speed = 0.9375;
             minPlayTime = 1;
+            kh_meleeActionGestureExclusive = 1;
             soundOverride = "sprint";
             soundEdge[] = {0.85};
             file = "x\kh\addons\main\animations\human\Hum_AbsStaCom_StgHvyFwdLhtMel.rtm";
@@ -1497,12 +1856,20 @@ class CfgMovesMaleSdr: CfgMovesBasic
             connectTo[] = {
                 "Hum_AbsStaCom_StgHvyFwdLhtMel_Tra_AbsStaCom_IdlLhtMel", 0.1
             };
-            interpolateTo[] = {};
+            interpolateTo[] = {
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1
+            };
+            ignoreMinPlayTime[] = {
+                "Unconscious"
+            };
         };
         class Hum_AbsStaCom_StgHvyLwdLhtMel: KH_MeleeBespokeBase
         {
             speed = 0.810811;
             minPlayTime = 1;
+            kh_meleeActionGestureExclusive = 1;
             soundOverride = "sprint";
             soundEdge[] = {0.54, 0.78};
             file = "x\kh\addons\main\animations\human\Hum_AbsStaCom_StgHvyLwdLhtMel.rtm";
@@ -1510,12 +1877,20 @@ class CfgMovesMaleSdr: CfgMovesBasic
             connectTo[] = {
                 "Hum_AbsStaCom_StgHvyLwdLhtMel_Tra_AbsStaCom_IdlLhtMel", 0.1
             };
-            interpolateTo[] = {};
+            interpolateTo[] = {
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1
+            };
+            ignoreMinPlayTime[] = {
+                "Unconscious"
+            };
         };
         class Hum_AbsStaCom_StgHvyRwdLhtMel: KH_MeleeBespokeBase
         {
             speed = 0.909091;
             minPlayTime = 1;
+            kh_meleeActionGestureExclusive = 1;
             soundOverride = "sprint";
             soundEdge[] = {0.45, 0.78};
             file = "x\kh\addons\main\animations\human\Hum_AbsStaCom_StgHvyRwdLhtMel.rtm";
@@ -1523,12 +1898,20 @@ class CfgMovesMaleSdr: CfgMovesBasic
             connectTo[] = {
                 "Hum_AbsStaCom_StgHvyRwdLhtMel_Tra_AbsStaCom_IdlLhtMel", 0.1
             };
-            interpolateTo[] = {};
+            interpolateTo[] = {
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1
+            };
+            ignoreMinPlayTime[] = {
+                "Unconscious"
+            };
         };
         class Hum_AbsStaCom_StgLhtBwdLhtMel: KH_MeleeBespokeBase
         {
             speed = 0.588235;
             minPlayTime = 0.9;
+            kh_meleeActionGestureExclusive = 1;
             soundOverride = "Walk";
             soundEdge[] = {0.15, 0.5, 0.76};
             file = "x\kh\addons\main\animations\human\Hum_AbsStaCom_StgLhtBwdLhtMel.rtm";
@@ -1542,6 +1925,7 @@ class CfgMovesMaleSdr: CfgMovesBasic
         {
             speed = 0.491803;
             minPlayTime = 0.9;
+            kh_meleeActionGestureExclusive = 1;
             soundOverride = "Walk";
             soundEdge[] = {0.15, 0.4, 0.65};
             file = "x\kh\addons\main\animations\human\Hum_AbsStaCom_StgLhtFwdLhtMel.rtm";
@@ -1555,6 +1939,7 @@ class CfgMovesMaleSdr: CfgMovesBasic
         {
             speed = 0.731707;
             minPlayTime = 0.9;
+            kh_meleeActionGestureExclusive = 1;
             soundOverride = "Walk";
             soundEdge[] = {0.31, 0.58, 0.82};
             file = "x\kh\addons\main\animations\human\Hum_AbsStaCom_StgLhtLwdLhtMel.rtm";
@@ -1568,6 +1953,7 @@ class CfgMovesMaleSdr: CfgMovesBasic
         {
             speed = 0.666667;
             minPlayTime = 0.9;
+            kh_meleeActionGestureExclusive = 1;
             soundOverride = "Walk";
             soundEdge[] = {0.26, 0.57, 0.88};
             file = "x\kh\addons\main\animations\human\Hum_AbsStaCom_StgLhtRwdLhtMel.rtm";
@@ -1585,6 +1971,7 @@ class CfgMovesMaleSdr: CfgMovesBasic
             };
             soundOverride = "Walk";
             soundEdge[] = {0.5, 0.64};
+            kh_meleeTacklePhase = 1;
             file = "x\kh\addons\main\animations\human\Hum_AbsStaCom_TklLhtMel.rtm";
             minPlayTime = 0.8;
             connectTo[] = {
@@ -1592,6 +1979,7 @@ class CfgMovesMaleSdr: CfgMovesBasic
             };
             interpolateTo[] = {
                 "Hum_AbsStaCom_DgeBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_DgeFwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeLwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeRwdLhtMel", 0.1,
                 "Hum_AbsStaCom_AttLhtMel01A", 0.1,
@@ -1624,7 +2012,18 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_TroLwdLhtMel", 0.1,
                 "Hum_AbsStaCom_TroRwdLhtMel", 0.1,
                 "Hum_AbsStaCom_TrnLftLhtMel", 0.1,
-                "Hum_AbsStaCom_TrnRhtLhtMel", 0.1
+                "Hum_AbsStaCom_TrnRhtLhtMel", 0.1,
+                "Hum_AbsStaCom_KckLhtMel", 0.1,
+                "Hum_AbsStaCom_BloLhtMel", 0.1,
+                "Hum_AbsStaCom_ParLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
             };
         };
         class Hum_AbsStaCom_TrnLftLhtMel: KH_MeleeBase
@@ -1669,7 +2068,18 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_DgeFwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeLwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeRwdLhtMel", 0.1,
-                "Hum_AbsStaCom_TklLhtMel", 0.1
+                "Hum_AbsStaCom_TklLhtMel", 0.1,
+                "Hum_AbsStaCom_KckLhtMel", 0.1,
+                "Hum_AbsStaCom_BloLhtMel", 0.1,
+                "Hum_AbsStaCom_ParLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
             };
         };
         class Hum_AbsStaCom_TrnRhtLhtMel: KH_MeleeBase
@@ -1714,7 +2124,18 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_DgeFwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeLwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeRwdLhtMel", 0.1,
-                "Hum_AbsStaCom_TklLhtMel", 0.1
+                "Hum_AbsStaCom_TklLhtMel", 0.1,
+                "Hum_AbsStaCom_KckLhtMel", 0.1,
+                "Hum_AbsStaCom_BloLhtMel", 0.1,
+                "Hum_AbsStaCom_ParLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
             };
         };
         class Hum_AbsStaCom_TroBwdLhtMel: KH_MeleeBase
@@ -1762,7 +2183,18 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_DgeFwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeLwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeRwdLhtMel", 0.1,
-                "Hum_AbsStaCom_TklLhtMel", 0.1
+                "Hum_AbsStaCom_TklLhtMel", 0.1,
+                "Hum_AbsStaCom_KckLhtMel", 0.1,
+                "Hum_AbsStaCom_BloLhtMel", 0.1,
+                "Hum_AbsStaCom_ParLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
             };
         };
         class Hum_AbsStaCom_TroBwdLwdLhtMel: KH_MeleeBase
@@ -1810,7 +2242,18 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_DgeFwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeLwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeRwdLhtMel", 0.1,
-                "Hum_AbsStaCom_TklLhtMel", 0.1
+                "Hum_AbsStaCom_TklLhtMel", 0.1,
+                "Hum_AbsStaCom_KckLhtMel", 0.1,
+                "Hum_AbsStaCom_BloLhtMel", 0.1,
+                "Hum_AbsStaCom_ParLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
             };
         };
         class Hum_AbsStaCom_TroBwdRwdLhtMel: KH_MeleeBase
@@ -1858,7 +2301,18 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_DgeFwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeLwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeRwdLhtMel", 0.1,
-                "Hum_AbsStaCom_TklLhtMel", 0.1
+                "Hum_AbsStaCom_TklLhtMel", 0.1,
+                "Hum_AbsStaCom_KckLhtMel", 0.1,
+                "Hum_AbsStaCom_BloLhtMel", 0.1,
+                "Hum_AbsStaCom_ParLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
             };
         };
         class Hum_AbsStaCom_TroFwdLhtMel: KH_MeleeBase
@@ -1906,7 +2360,18 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_DgeFwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeLwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeRwdLhtMel", 0.1,
-                "Hum_AbsStaCom_TklLhtMel", 0.1
+                "Hum_AbsStaCom_TklLhtMel", 0.1,
+                "Hum_AbsStaCom_KckLhtMel", 0.1,
+                "Hum_AbsStaCom_BloLhtMel", 0.1,
+                "Hum_AbsStaCom_ParLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
             };
         };
         class Hum_AbsStaCom_TroFwdLwdLhtMel: KH_MeleeBase
@@ -1954,7 +2419,18 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_DgeFwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeLwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeRwdLhtMel", 0.1,
-                "Hum_AbsStaCom_TklLhtMel", 0.1
+                "Hum_AbsStaCom_TklLhtMel", 0.1,
+                "Hum_AbsStaCom_KckLhtMel", 0.1,
+                "Hum_AbsStaCom_BloLhtMel", 0.1,
+                "Hum_AbsStaCom_ParLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
             };
         };
         class Hum_AbsStaCom_TroFwdRwdLhtMel: KH_MeleeBase
@@ -2002,7 +2478,18 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_DgeFwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeLwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeRwdLhtMel", 0.1,
-                "Hum_AbsStaCom_TklLhtMel", 0.1
+                "Hum_AbsStaCom_TklLhtMel", 0.1,
+                "Hum_AbsStaCom_KckLhtMel", 0.1,
+                "Hum_AbsStaCom_BloLhtMel", 0.1,
+                "Hum_AbsStaCom_ParLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
             };
         };
         class Hum_AbsStaCom_TroLwdLhtMel: KH_MeleeBase
@@ -2050,7 +2537,18 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_DgeFwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeLwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeRwdLhtMel", 0.1,
-                "Hum_AbsStaCom_TklLhtMel", 0.1
+                "Hum_AbsStaCom_TklLhtMel", 0.1,
+                "Hum_AbsStaCom_KckLhtMel", 0.1,
+                "Hum_AbsStaCom_BloLhtMel", 0.1,
+                "Hum_AbsStaCom_ParLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
             };
         };
         class Hum_AbsStaCom_TroRwdLhtMel: KH_MeleeBase
@@ -2098,7 +2596,18 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_DgeFwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeLwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeRwdLhtMel", 0.1,
-                "Hum_AbsStaCom_TklLhtMel", 0.1
+                "Hum_AbsStaCom_TklLhtMel", 0.1,
+                "Hum_AbsStaCom_KckLhtMel", 0.1,
+                "Hum_AbsStaCom_BloLhtMel", 0.1,
+                "Hum_AbsStaCom_ParLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
             };
         };
         class Hum_AbsStaCom_WlkBwdLhtMel: KH_MeleeBase
@@ -2146,7 +2655,18 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_DgeFwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeLwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeRwdLhtMel", 0.1,
-                "Hum_AbsStaCom_TklLhtMel", 0.1
+                "Hum_AbsStaCom_TklLhtMel", 0.1,
+                "Hum_AbsStaCom_KckLhtMel", 0.1,
+                "Hum_AbsStaCom_BloLhtMel", 0.1,
+                "Hum_AbsStaCom_ParLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
             };
         };
         class Hum_AbsStaCom_WlkBwdLwdLhtMel: KH_MeleeBase
@@ -2194,7 +2714,18 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_DgeFwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeLwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeRwdLhtMel", 0.1,
-                "Hum_AbsStaCom_TklLhtMel", 0.1
+                "Hum_AbsStaCom_TklLhtMel", 0.1,
+                "Hum_AbsStaCom_KckLhtMel", 0.1,
+                "Hum_AbsStaCom_BloLhtMel", 0.1,
+                "Hum_AbsStaCom_ParLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
             };
         };
         class Hum_AbsStaCom_WlkBwdRwdLhtMel: KH_MeleeBase
@@ -2242,7 +2773,18 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_DgeFwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeLwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeRwdLhtMel", 0.1,
-                "Hum_AbsStaCom_TklLhtMel", 0.1
+                "Hum_AbsStaCom_TklLhtMel", 0.1,
+                "Hum_AbsStaCom_KckLhtMel", 0.1,
+                "Hum_AbsStaCom_BloLhtMel", 0.1,
+                "Hum_AbsStaCom_ParLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
             };
         };
         class Hum_AbsStaCom_WlkFwdLhtMel: KH_MeleeBase
@@ -2288,7 +2830,18 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_DgeFwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeLwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeRwdLhtMel", 0.1,
-                "Hum_AbsStaCom_TklLhtMel", 0.1
+                "Hum_AbsStaCom_TklLhtMel", 0.1,
+                "Hum_AbsStaCom_KckLhtMel", 0.1,
+                "Hum_AbsStaCom_BloLhtMel", 0.1,
+                "Hum_AbsStaCom_ParLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
             };
         };
         class Hum_AbsStaCom_WlkFwdLwdLhtMel: KH_MeleeBase
@@ -2334,7 +2887,18 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_DgeFwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeLwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeRwdLhtMel", 0.1,
-                "Hum_AbsStaCom_TklLhtMel", 0.1
+                "Hum_AbsStaCom_TklLhtMel", 0.1,
+                "Hum_AbsStaCom_KckLhtMel", 0.1,
+                "Hum_AbsStaCom_BloLhtMel", 0.1,
+                "Hum_AbsStaCom_ParLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
             };
         };
         class Hum_AbsStaCom_WlkFwdRwdLhtMel: KH_MeleeBase
@@ -2380,7 +2944,18 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_DgeFwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeLwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeRwdLhtMel", 0.1,
-                "Hum_AbsStaCom_TklLhtMel", 0.1
+                "Hum_AbsStaCom_TklLhtMel", 0.1,
+                "Hum_AbsStaCom_KckLhtMel", 0.1,
+                "Hum_AbsStaCom_BloLhtMel", 0.1,
+                "Hum_AbsStaCom_ParLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
             };
         };
         class Hum_AbsStaCom_WlkLwdLhtMel: KH_MeleeBase
@@ -2428,7 +3003,18 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_DgeFwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeLwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeRwdLhtMel", 0.1,
-                "Hum_AbsStaCom_TklLhtMel", 0.1
+                "Hum_AbsStaCom_TklLhtMel", 0.1,
+                "Hum_AbsStaCom_KckLhtMel", 0.1,
+                "Hum_AbsStaCom_BloLhtMel", 0.1,
+                "Hum_AbsStaCom_ParLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
             };
         };
         class Hum_AbsStaCom_WlkRwdLhtMel: KH_MeleeBase
@@ -2476,7 +3062,18 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_DgeFwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeLwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeRwdLhtMel", 0.1,
-                "Hum_AbsStaCom_TklLhtMel", 0.1
+                "Hum_AbsStaCom_TklLhtMel", 0.1,
+                "Hum_AbsStaCom_KckLhtMel", 0.1,
+                "Hum_AbsStaCom_BloLhtMel", 0.1,
+                "Hum_AbsStaCom_ParLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
             };
         };
         class Hum_AbsStaSaf_IdlLhtMel: KH_MeleeBase
@@ -2488,13 +3085,22 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaSaf_IdlLhtMel_Tra_AbsStaCom_IdlLhtMel", 0.1
             };
             interpolateTo[] += {
-                "Hum_AbsStaSaf_IdlLhtMel_Tra_AbsStaSaf_IdlUna", 0.1
+                "Hum_AbsStaSaf_IdlLhtMel_Tra_AbsStaSaf_IdlUna", 0.1,
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
             };
         };
         class Hum_AbsStaCom_AttLhtMel01A_Tra_AbsStaCom_IdlLhtMel: KH_MeleeBespokeBase
         {
             speed = 1.7857125;
             minPlayTime = 1;
+            kh_meleeAttackPhase = 1;
             soundOverride = "Walk";
             soundEdge[] = {0.8};
             file = "x\kh\addons\main\animations\human\Hum_AbsStaCom_AttLhtMel01A_Tra_AbsStaCom_IdlLhtMel.rtm";
@@ -2506,7 +3112,7 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_DgeFwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeLwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeRwdLhtMel", 0.1,
-                "Hum_AbsStaCom_RclRhtLhtMel", 0.15,
+                "Hum_AbsStaCom_RclRhtLhtMel", 0.1,
                 "Hum_AbsStaCom_JogBwdLhtMel", 0.1,
                 "Hum_AbsStaCom_JogBwdLwdLhtMel", 0.1,
                 "Hum_AbsStaCom_JogBwdRwdLhtMel", 0.1,
@@ -2536,13 +3142,25 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_TroRwdLhtMel", 0.1,
                 "Hum_AbsStaCom_TrnLftLhtMel", 0.1,
                 "Hum_AbsStaCom_TrnRhtLhtMel", 0.1,
-                "Hum_AbsStaCom_TklLhtMel", 0.1
+                "Hum_AbsStaCom_TklLhtMel", 0.1,
+                "Hum_AbsStaCom_KckLhtMel", 0.1,
+                "Hum_AbsStaCom_BloLhtMel", 0.1,
+                "Hum_AbsStaCom_ParLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
             };
         };
         class Hum_AbsStaCom_AttLhtMel01B_Tra_AbsStaCom_IdlLhtMel: KH_MeleeBespokeBase
         {
             speed = 1.7857125;
             minPlayTime = 0.6;
+            kh_meleeAttackPhase = 1;
             soundOverride = "Walk";
             soundEdge[] = {0.66, 0.99};
             file = "x\kh\addons\main\animations\human\Hum_AbsStaCom_AttLhtMel01B_Tra_AbsStaCom_IdlLhtMel.rtm";
@@ -2554,7 +3172,7 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_DgeFwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeLwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeRwdLhtMel", 0.1,
-                "Hum_AbsStaCom_RclRhtLhtMel", 0.15,
+                "Hum_AbsStaCom_RclRhtLhtMel", 0.1,
                 "Hum_AbsStaCom_JogBwdLhtMel", 0.1,
                 "Hum_AbsStaCom_JogBwdLwdLhtMel", 0.1,
                 "Hum_AbsStaCom_JogBwdRwdLhtMel", 0.1,
@@ -2584,13 +3202,25 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_TroRwdLhtMel", 0.1,
                 "Hum_AbsStaCom_TrnLftLhtMel", 0.1,
                 "Hum_AbsStaCom_TrnRhtLhtMel", 0.1,
-                "Hum_AbsStaCom_TklLhtMel", 0.1
+                "Hum_AbsStaCom_TklLhtMel", 0.1,
+                "Hum_AbsStaCom_KckLhtMel", 0.1,
+                "Hum_AbsStaCom_BloLhtMel", 0.1,
+                "Hum_AbsStaCom_ParLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
             };
         };
         class Hum_AbsStaCom_AttLhtMel02A_Tra_AbsStaCom_IdlLhtMel: KH_MeleeBespokeBase
         {
             speed = 1.3888875;
             minPlayTime = 0.75;
+            kh_meleeAttackPhase = 1;
             soundOverride = "Walk";
             soundEdge[] = {0.75, 0.99};
             file = "x\kh\addons\main\animations\human\Hum_AbsStaCom_AttLhtMel02A_Tra_AbsStaCom_IdlLhtMel.rtm";
@@ -2602,7 +3232,7 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_DgeFwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeLwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeRwdLhtMel", 0.1,
-                "Hum_AbsStaCom_RclRhtLhtMel", 0.15,
+                "Hum_AbsStaCom_RclRhtLhtMel", 0.1,
                 "Hum_AbsStaCom_JogBwdLhtMel", 0.1,
                 "Hum_AbsStaCom_JogBwdLwdLhtMel", 0.1,
                 "Hum_AbsStaCom_JogBwdRwdLhtMel", 0.1,
@@ -2632,13 +3262,25 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_TroRwdLhtMel", 0.1,
                 "Hum_AbsStaCom_TrnLftLhtMel", 0.1,
                 "Hum_AbsStaCom_TrnRhtLhtMel", 0.1,
-                "Hum_AbsStaCom_TklLhtMel", 0.1
+                "Hum_AbsStaCom_TklLhtMel", 0.1,
+                "Hum_AbsStaCom_KckLhtMel", 0.1,
+                "Hum_AbsStaCom_BloLhtMel", 0.1,
+                "Hum_AbsStaCom_ParLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
             };
         };
         class Hum_AbsStaCom_AttLhtMel02B_Tra_AbsStaCom_IdlLhtMel: KH_MeleeBespokeBase
         {
             speed = 0.56818125;
             minPlayTime = 0.6;
+            kh_meleeAttackPhase = 1;
             soundOverride = "Walk";
             soundEdge[] = {0.21, 0.5, 0.8};
             file = "x\kh\addons\main\animations\human\Hum_AbsStaCom_AttLhtMel02B_Tra_AbsStaCom_IdlLhtMel.rtm";
@@ -2650,7 +3292,7 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_DgeFwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeLwdLhtMel", 0.1,
                 "Hum_AbsStaCom_DgeRwdLhtMel", 0.1,
-                "Hum_AbsStaCom_RclRhtLhtMel", 0.15,
+                "Hum_AbsStaCom_RclRhtLhtMel", 0.1,
                 "Hum_AbsStaCom_JogBwdLhtMel", 0.1,
                 "Hum_AbsStaCom_JogBwdLwdLhtMel", 0.1,
                 "Hum_AbsStaCom_JogBwdRwdLhtMel", 0.1,
@@ -2680,7 +3322,18 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_TroRwdLhtMel", 0.1,
                 "Hum_AbsStaCom_TrnLftLhtMel", 0.1,
                 "Hum_AbsStaCom_TrnRhtLhtMel", 0.1,
-                "Hum_AbsStaCom_TklLhtMel", 0.1
+                "Hum_AbsStaCom_TklLhtMel", 0.1,
+                "Hum_AbsStaCom_KckLhtMel", 0.1,
+                "Hum_AbsStaCom_BloLhtMel", 0.1,
+                "Hum_AbsStaCom_ParLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
             };
         };
         class Hum_AbsStaCom_IdlLhtMel_Tra_AbsStaSaf_IdlLhtMel: KH_MeleeBespokeBase
@@ -2697,49 +3350,89 @@ class CfgMovesMaleSdr: CfgMovesBasic
         {
             speed = 0.348837;
             minPlayTime = 1;
+            kh_meleeActionGestureExclusive = 1;
             soundOverride = "Walk";
             soundEdge[] = {0.25, 0.5, 0.81, 0.9};
             file = "x\kh\addons\main\animations\human\Hum_AbsStaCom_StgHvyBwdLhtMel_Tra_AbsStaCom_IdlLhtMel.rtm";
             connectTo[] = {
                 "Hum_AbsStaCom_IdlLhtMel", 0.1
             };
-            interpolateTo[] = {};
+            interpolateTo[] = {
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
+            };
         };
         class Hum_AbsStaCom_StgHvyFwdLhtMel_Tra_AbsStaCom_IdlLhtMel: KH_MeleeBespokeBase
         {
             speed = 0.319149;
             minPlayTime = 1;
+            kh_meleeActionGestureExclusive = 1;
             soundOverride = "Walk";
             soundEdge[] = {0.54, 0.78, 0.93};
             file = "x\kh\addons\main\animations\human\Hum_AbsStaCom_StgHvyFwdLhtMel_Tra_AbsStaCom_IdlLhtMel.rtm";
             connectTo[] = {
                 "Hum_AbsStaCom_IdlLhtMel", 0.1
             };
-            interpolateTo[] = {};
+            interpolateTo[] = {
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
+            };
         };
         class Hum_AbsStaCom_StgHvyLwdLhtMel_Tra_AbsStaCom_IdlLhtMel: KH_MeleeBespokeBase
         {
             speed = 0.340909;
             minPlayTime = 1;
+            kh_meleeActionGestureExclusive = 1;
             soundOverride = "Walk";
             soundEdge[] = {0.48, 0.72, 0.9};
             file = "x\kh\addons\main\animations\human\Hum_AbsStaCom_StgHvyLwdLhtMel_Tra_AbsStaCom_IdlLhtMel.rtm";
             connectTo[] = {
                 "Hum_AbsStaCom_IdlLhtMel", 0.1
             };
-            interpolateTo[] = {};
+            interpolateTo[] = {
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
+            };
         };
         class Hum_AbsStaCom_StgHvyRwdLhtMel_Tra_AbsStaCom_IdlLhtMel: KH_MeleeBespokeBase
         {
             speed = 0.361446;
             minPlayTime = 1;
+            kh_meleeActionGestureExclusive = 1;
             soundOverride = "Walk";
             soundEdge[] = {0.6, 0.72, 0.87};
             file = "x\kh\addons\main\animations\human\Hum_AbsStaCom_StgHvyRwdLhtMel_Tra_AbsStaCom_IdlLhtMel.rtm";
             connectTo[] = {
                 "Hum_AbsStaCom_IdlLhtMel", 0.1
             };
-            interpolateTo[] = {};
+            interpolateTo[] = {
+                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
+                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
+            };
         };
         class Hum_AbsStaSaf_IdlLhtMel_Tra_AbsStaCom_IdlLhtMel: KH_MeleeBespokeBase
         {

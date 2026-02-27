@@ -92,8 +92,9 @@ class CfgWeapons
         overviewPicture = "\x\kh\addons\main\ui\sword_generic_01.paa";
         picture = "\x\kh\addons\main\ui\sword_generic_01.paa";
         kh_meleeActions = "KH_MeleeInLightSword";
-        kh_meleeType = "KH_MeleeCleavingSharpLight";
-        kh_meleeModes[] = {"KH_Attack01", "KH_Attack02"};
+        kh_meleeType = "KH_MeleeCleavingSharpLightLong";
+        kh_meleeModes[] = {"KH_MeleeAttack01", "KH_MeleeAttack02"};
+        kh_meleeModesGestures[] = {{"KH_MeleeAttack01AGesture", "KH_MeleeAttack01BGesture"}, {}};
 		model = "\x\kh\addons\main\models\SM_SwordGeneric01.p3d";
 		hiddenSelections[] = {
 			"mat_sword"
@@ -114,8 +115,9 @@ class CfgWeapons
         overviewPicture = "\x\kh\addons\main\ui\knife_m3.paa";
         picture = "\x\kh\addons\main\ui\knife_m3.paa";
         kh_meleeActions = "KH_MeleeInLightSword";
-        kh_meleeType = "KH_MeleeCleavingSharpLight";
-        kh_meleeModes[] = {"KH_Attack01", "KH_Attack02"};
+        kh_meleeType = "KH_MeleeCleavingSharpLightShort";
+        kh_meleeModes[] = {"KH_MeleeAttack01", "KH_MeleeAttack02"};
+        kh_meleeModesGestures[] = {{"KH_MeleeAttack01AGesture", "KH_MeleeAttack01BGesture"}, {}};
 		model = "\x\kh\addons\main\models\SM_KnifeM3.p3d";
 		hiddenSelections[] = {
 			"mat_knife"

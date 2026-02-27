@@ -213,7 +213,40 @@
         1
     ],
 	1,
-	{},
+	{
+		[
+			[],
+			{
+				switch KH_var_incapacitationAvailability do {
+					case 0: {
+						KH_var_allowIncapacitation = false;
+						KH_var_allowAiIncapacitation = false;
+					};
+
+					case 1: {
+						KH_var_allowIncapacitation = true;
+						KH_var_allowAiIncapacitation = false;
+					};
+
+					case 2: {
+						KH_var_allowIncapacitation = true;
+						KH_var_allowAiIncapacitation = true;
+					};
+
+					default {
+						KH_var_allowIncapacitation = true;
+						KH_var_allowAiIncapacitation = false;
+					};
+				};
+
+				publicVariable "KH_var_allowIncapacitation";
+				publicVariable "KH_var_allowAiIncapacitation";
+			},
+			"SERVER",
+			"1",
+			false
+		] call KH_fnc_execute;
+	},
 	false
 ] call CBA_fnc_addSetting;
 
@@ -1289,7 +1322,7 @@
 ] call CBA_fnc_addSetting;
 
 [
-	"KH_var_absoluteFriendlyMeleeDamageMultiplier",
+	"KH_var_absoluteMeleeFriendlyDamageMultiplier",
 	"SLIDER",   
 	[
 		"Melee Friendly Damage Multiplier", 
@@ -1989,11 +2022,11 @@
 ] call CBA_fnc_addSetting;
 
 [
-	"KH_var_meleeAttackAnimationTypePriority",
+	"KH_var_meleePlayerAttackAnimationTypePriority",
 	"LIST",   
 	[
-		"Attack Animation Type Priority", 
-		"Defines whether absolute or additive animations are prioritized for attacks. If an attack does not have a prioritized equivalent, the other one is used."
+		"Player Attack Animation Type Priority", 
+		"Defines whether absolute or additive animations are prioritized for player attacks. If an attack does not have a prioritized equivalent, the other one is used."
 	], 
 	[
         "KH Melee",
@@ -2010,11 +2043,11 @@
 ] call CBA_fnc_addSetting;
 
 [
-	"KH_var_meleeBlockAnimationTypePriority",
+	"KH_var_meleePlayerBlockAnimationTypePriority",
 	"LIST",   
 	[
-		"Block Animation Type Priority", 
-		"Defines whether absolute or additive animations are prioritized for blocks. If a block does not have a prioritized equivalent, the other one is used."
+		"Player Block Animation Type Priority", 
+		"Defines whether absolute or additive animations are prioritized for player blocks. If a block does not have a prioritized equivalent, the other one is used."
 	], 
 	[
         "KH Melee",
@@ -2031,11 +2064,74 @@
 ] call CBA_fnc_addSetting;
 
 [
-	"KH_var_meleeParryAnimationTypePriority",
+	"KH_var_meleePlayerParryAnimationTypePriority",
 	"LIST",   
 	[
-		"Parry Animation Type Priority", 
-		"Defines whether absolute or additive animations are prioritized for parries. If a parry does not have a prioritized equivalent, the other one is used."
+		"Player Parry Animation Type Priority", 
+		"Defines whether absolute or additive animations are prioritized for player parries. If a parry does not have a prioritized equivalent, the other one is used."
+	], 
+	[
+        "KH Melee",
+        "Animation Type Priorities"
+    ],
+	[
+        [0, 1],
+        ["ABSOLUTE", "ADDITIVE"],
+        0
+    ],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_meleeAiAttackAnimationTypePriority",
+	"LIST",   
+	[
+		"AI Attack Animation Type Priority", 
+		"Defines whether absolute or additive animations are prioritized for AI attacks. If an attack does not have a prioritized equivalent, the other one is used."
+	], 
+	[
+        "KH Melee",
+        "Animation Type Priorities"
+    ], 
+	[
+        [0, 1],
+        ["ABSOLUTE", "ADDITIVE"],
+        0
+    ],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_meleeAiBlockAnimationTypePriority",
+	"LIST",   
+	[
+		"AI Block Animation Type Priority", 
+		"Defines whether absolute or additive animations are prioritized for AI blocks. If a block does not have a prioritized equivalent, the other one is used."
+	], 
+	[
+        "KH Melee",
+        "Animation Type Priorities"
+    ],
+	[
+        [0, 1],
+        ["ABSOLUTE", "ADDITIVE"],
+        0
+    ],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_meleeAiParryAnimationTypePriority",
+	"LIST",   
+	[
+		"AI Parry Animation Type Priority", 
+		"Defines whether absolute or additive animations are prioritized for AI parries. If a parry does not have a prioritized equivalent, the other one is used."
 	], 
 	[
         "KH Melee",
@@ -2290,11 +2386,79 @@
 ] call CBA_fnc_addSetting;
 
 [
-	"KH_var_meleeHitsInterruptAttacks",
+	"KH_var_meleeAttacksInterruptAttacks",
 	"CHECKBOX",   
 	[
-		"Hits Interrupt Attacks", 
-		"True makes it so that attacks are interrupted by hits."
+		"Attacks Interrupt Attacks", 
+		"True makes it so that attacks can be interrupted by powerful attacks."
+	], 
+	[
+        "KH Melee",
+        "General"
+    ], 
+	true,
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_meleeAttacksInterruptKicks",
+	"CHECKBOX",   
+	[
+		"Attacks Interrupt Kicks", 
+		"True makes it so that kicks can be interrupted by powerful attacks."
+	], 
+	[
+        "KH Melee",
+        "General"
+    ], 
+	true,
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_meleeAttacksInterruptTackles",
+	"CHECKBOX",   
+	[
+		"Attacks Interrupt Tackles", 
+		"True makes it so that tackles can be interrupted by powerful attacks."
+	], 
+	[
+        "KH Melee",
+        "General"
+    ], 
+	true,
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_meleeAttackBlockOnInsufficientStamina",
+	"CHECKBOX",   
+	[
+		"Attack Block On Insufficient Stamina", 
+		"True results in all attacks being blocked if the amount of stamina required for the attack is insufficient. Damage still passes through, but the combo is interrupted."
+	], 
+	[
+        "KH Melee",
+        "General"
+    ], 
+	true,
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_meleeAttackIgnoreFriendlies",
+	"CHECKBOX",   
+	[
+		"Attack Ignore Friendlies", 
+		"True results in attack hit detection ignoring friendlies."
 	], 
 	[
         "KH Melee",
@@ -2307,11 +2471,45 @@
 ] call CBA_fnc_addSetting;
 
 [
-	"KH_var_meleeAttackRecoilOnInsufficientStamina",
+	"KH_var_meleeKickIgnoreFriendlies",
 	"CHECKBOX",   
 	[
-		"Attack Recoil On Insufficient Stamina", 
-		"True results in all attacks recoiling if the amount of stamina required for the attack is insufficient."
+		"Kick Ignore Friendlies", 
+		"True results in kick hit detection ignoring friendlies."
+	], 
+	[
+        "KH Melee",
+        "General"
+    ], 
+	false,
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_meleeTackleIgnoreFriendlies",
+	"CHECKBOX",   
+	[
+		"Tackle Ignore Friendlies", 
+		"True results in tackle hit detection ignoring friendlies."
+	], 
+	[
+        "KH Melee",
+        "General"
+    ], 
+	false,
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_meleeAiCollisionDetection",
+	"CHECKBOX",   
+	[
+		"AI Collision Detection", 
+		"True enables a system that tries its best to avoid AI clipping into other AI during melee actions."
 	], 
 	[
         "KH Melee",
@@ -2352,6 +2550,51 @@
         "General"
     ], 
 	[0.000, 1.000, 0.000, 3],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_meleeDodgeFailureAngleRange",
+	"SLIDER",   
+	[
+		"Dodge Failure Angle Range", 
+		"Dodges that move towards a unit who is performing an offensive action will fail if said unit is within the number of degrees defined here, relative to the direction of the dodge."
+	], 
+	[
+        "KH Melee",
+        "General"
+    ], 
+	[0, 360, 90, 0],
+	1,
+	{
+		[
+			[],
+			{
+				KH_var_meleeDodgeFailureAngleRange = KH_var_meleeDodgeFailureAngleRange / 2;
+				publicVariable "KH_var_meleeDodgeFailureAngleRange";
+			},
+			"SERVER",
+			"1",
+			false
+		] call KH_fnc_execute;
+	},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_meleeAiEngageDistance",
+	"SLIDER",   
+	[
+		"AI Engage Distance", 
+		"Distance within which melee AI will try to engage enemy units, in metres."
+	], 
+	[
+        "KH Melee",
+        "General"
+    ], 
+	[0, 1000, 100, 0],
 	1,
 	{},
 	false

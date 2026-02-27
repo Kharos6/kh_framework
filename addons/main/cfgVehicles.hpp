@@ -2,7 +2,7 @@ class CfgVehicles
 {
 	class All
 	{
-		kh_meleeSoundType = "";
+		kh_meleeSoundType = "generic";
 		kh_meleeSurfaceBlockPower = 1;
 	};
 	class Land;
@@ -13,7 +13,7 @@ class CfgVehicles
 		kh_meleeSoundType = "Flesh";
 		kh_meleeDodgeCost = 0.2;
 		kh_meleeSurfaceBlockPower = 0;
-		kh_meleeModes[] = {"KH_Attack01", "KH_Attack02"};
+		kh_meleeModes[] = {"KH_MeleeAttack01", "KH_MeleeAttack02"};
 	}; 
 	class Launcher_Base_F;
 	class KH_MeleeWeaponTertiaryBase: Launcher_Base_F

@@ -442,7 +442,7 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 				_difference = 360 - _difference;
 			};
 			
-			if (_difference > 90) then {
+			if (_difference >= KH_var_meleeDodgeFailureAngleRange) then {
 				_continue = false;
 			};
 		};
@@ -502,7 +502,7 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 
 			private _playSound = if (_damageFunction isNotEqualTo {}) then {
 				if ([_unit, _instigator, ["HIT", _attack, _hitBlockPower, _hitParryPower, _position, _blockPower, _parryPower]] call _damageFunction) then {
-					[[_unit, ["HIT", "", _unit getRelDir _instigator]], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
+					[[_unit, ["HIT", [getNumber (_instigatorConfig >> _attack >> "kickPower"), getNumber (_instigatorConfig >> _attack >> "tacklePower")], _unit getRelDir _instigator]], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
 					[[_unit, _selection, getText (_instigatorConfig >> _attack >> "type"), _instigator], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
 					true;
 				}
@@ -511,7 +511,7 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 				};
 			}
 			else {
-				[[_unit, ["HIT", "", _unit getRelDir _instigator]], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
+				[[_unit, ["HIT", [getNumber (_instigatorConfig >> _attack >> "kickPower"), getNumber (_instigatorConfig >> _attack >> "tacklePower")], _unit getRelDir _instigator]], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
 				[[_unit, _selection, getText (_instigatorConfig >> _attack >> "type"), _instigator], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
 				true;
 			};
@@ -520,25 +520,19 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 				private _sounds = getArray (_instigatorConfig >> _attack >> "Sounds" >> (getText ((configOf _unit) >> "kh_meleeSoundType")));
 
 				if (_sounds isNotEqualTo []) then {
-					playSound3D [((getArray (configFile >> "CfgSounds" >> (selectRandom _sounds) >> "sound")) select 0) select [1], _unit, [insideBuilding _unit, false] call KH_fnc_parseBoolean, getPosASL _unit, 5, 1, 100, 0, false];
+					playSound3D [((getArray (configFile >> "CfgSounds" >> (selectRandom _sounds) >> "sound")) select 0) select [1], _unit, (insideBuilding _unit) >= 0.5, getPosASL _unit, 5, 1, 100, 0, false];
 				}
 				else {
 					_sounds = getArray (_instigatorConfig >> _attack >> "Sounds" >> "generic");
 
 					if (_sounds isNotEqualTo []) then {
-						playSound3D [((getArray (configFile >> "CfgSounds" >> (selectRandom _sounds) >> "sound")) select 0) select [1], _unit, [insideBuilding _unit, false] call KH_fnc_parseBoolean, getPosASL _unit, 5, 1, 100, 0, false];
+						playSound3D [((getArray (configFile >> "CfgSounds" >> (selectRandom _sounds) >> "sound")) select 0) select [1], _unit, (insideBuilding _unit) >= 0.5, getPosASL _unit, 5, 1, 100, 0, false];
 					};
 				};
 			};
 
-			if (KH_var_meleeAttackRecoilOnInsufficientStamina && ((getFatigue _instigator) >= (1 - (getNumber (_instigatorConfig >> _attack >> "cost"))))) then {
-				[
-					[_instigator, "RECOIL"],
-					"KH_fnc_updateMeleeState",
-					_instigator,
-					true,
-					false
-				] call KH_fnc_execute;
+			if (KH_var_meleeAttackBlockOnInsufficientStamina && ((getFatigue _instigator) >= (1 - (getNumber (_instigatorConfig >> _attack >> "cost"))))) then {
+				[[_instigator, "BLOCKED"], "KH_fnc_updateMeleeState", _instigator, true, false] call KH_fnc_execute;
 			};
 
 			[
@@ -563,13 +557,13 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 		}
 		else {
 			if _blocked then {
-				[_unit, "BLOCK_SUCCESS"] call KH_fnc_updateMeleeState;
+				[[_unit, "BLOCK_SUCCESS"], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
 			};
 
 			[
 				[
 					_instigator,
-					["RECOIL", ["STAGGER", "LIGHT", 0]] select _parried, 
+					["BLOCKED", "PARRIED"] select _parried,
 					if _parried then {
 						getNumber (_unitConfig >> (_unit getVariable ["KH_var_currentMeleeParry", ""]) >> "costInfliction");
 					}
@@ -598,13 +592,13 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 			private _sounds = getArray (_instigatorConfig >> _attack >> "Sounds" >> (["parried", "blocked"] select _blocked));
 
 			if (_sounds isNotEqualTo []) then {
-				playSound3D [((getArray (configFile >> "CfgSounds" >> (selectRandom _sounds) >> "sound")) select 0) select [1], _unit, [insideBuilding _unit, false] call KH_fnc_parseBoolean, getPosASL _unit, 5, 1, 100, 0, false];
+				playSound3D [((getArray (configFile >> "CfgSounds" >> (selectRandom _sounds) >> "sound")) select 0) select [1], _unit, (insideBuilding _unit) >= 0.5, getPosASL _unit, 5, 1, 100, 0, false];
 			}
 			else {
 				_sounds = getArray (_instigatorConfig >> _attack >> "Sounds" >> (["blocked", "parried"] select _parried));
 
 				if (_sounds isNotEqualTo []) then {
-					playSound3D [((getArray (configFile >> "CfgSounds" >> (selectRandom _sounds) >> "sound")) select 0) select [1], _unit, [insideBuilding _unit, false] call KH_fnc_parseBoolean, getPosASL _unit, 5, 1, 100, 0, false];
+					playSound3D [((getArray (configFile >> "CfgSounds" >> (selectRandom _sounds) >> "sound")) select 0) select [1], _unit, (insideBuilding _unit) >= 0.5, getPosASL _unit, 5, 1, 100, 0, false];
 				};
 			};
 		};
@@ -626,7 +620,7 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 				_difference = 360 - _difference;
 			};
 			
-			if (_difference > 90) then {
+			if (_difference >= KH_var_meleeDodgeFailureAngleRange) then {
 				_continue = false;
 			};
 		};
@@ -681,12 +675,12 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 
 			if (_damageFunction isNotEqualTo {}) then {
 				if ([_unit, _instigator, ["KICK", _kick, _position, _kickPower, _blockPower]] call _damageFunction) then {
-					[[_unit, ["STAGGER", "LIGHT", _unit getRelDir _instigator]], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
+					[[_unit, ["STAGGER", false, _unit getRelDir _instigator]], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
 					[[_unit, _selection, getText (_instigatorConfig >> _kick >> "type"), _instigator], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
 				};
 			}
 			else {
-				[[_unit, ["STAGGER", "LIGHT", _unit getRelDir _instigator]], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
+				[[_unit, ["STAGGER", false, _unit getRelDir _instigator]], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
 				[[_unit, _selection, getText (_instigatorConfig >> _kick >> "type"), _instigator], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
 			};
 
@@ -711,19 +705,19 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 			] call KH_fnc_execute;
 		}
 		else {
-			[_unit, "BLOCK_SUCCESS"] call KH_fnc_updateMeleeState;
+			[[_unit, "BLOCK_SUCCESS"], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
 		};
 
 		private _sounds = getArray (_instigatorConfig >> _kick >> "Sounds" >> (getText ((configOf _unit) >> "kh_meleeSoundType")));
 
 		if (_sounds isNotEqualTo []) then {
-			playSound3D [((getArray (configFile >> "CfgSounds" >> (selectRandom _sounds) >> "sound")) select 0) select [1], _unit, [insideBuilding _unit, false] call KH_fnc_parseBoolean, getPosASL _unit, 5, 1, 100, 0, false];
+			playSound3D [((getArray (configFile >> "CfgSounds" >> (selectRandom _sounds) >> "sound")) select 0) select [1], _unit, (insideBuilding _unit) >= 0.5, getPosASL _unit, 5, 1, 100, 0, false];
 		}
 		else {
 			_sounds = getArray (_instigatorConfig >> _kick >> "Sounds" >> "generic");
 
 			if (_sounds isNotEqualTo []) then {
-				playSound3D [((getArray (configFile >> "CfgSounds" >> (selectRandom _sounds) >> "sound")) select 0) select [1], _unit, [insideBuilding _unit, false] call KH_fnc_parseBoolean, getPosASL _unit, 5, 1, 100, 0, false];
+				playSound3D [((getArray (configFile >> "CfgSounds" >> (selectRandom _sounds) >> "sound")) select 0) select [1], _unit, (insideBuilding _unit) >= 0.5, getPosASL _unit, 5, 1, 100, 0, false];
 			};
 		};
 	}
@@ -744,7 +738,7 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 				_difference = 360 - _difference;
 			};
 			
-			if (_difference > 90) then {
+			if (_difference >= KH_var_meleeDodgeFailureAngleRange) then {
 				_continue = false;
 			};
 		};
@@ -800,12 +794,12 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 
 			if (_damageFunction isNotEqualTo {}) then {
 				if ([_unit, _instigator, ["TACKLE", _tackle, _tacklePower, _blockPower]] call _damageFunction) then {
-					[[_unit, ["STAGGER", "HEAVY", _unit getRelDir _instigator]], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
+					[[_unit, ["STAGGER", true, _unit getRelDir _instigator]], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
 					[[_unit, selectRandom ((_unit selectionNames "FireGeometry") select {"hit" in _x;}), getText (_instigatorConfig >> _tackle >> "type"), _instigator], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
 				};
 			}
 			else {
-				[[_unit, ["STAGGER", "HEAVY", _unit getRelDir _instigator]], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
+				[[_unit, ["STAGGER", true, _unit getRelDir _instigator]], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
 				[[_unit, selectRandom ((_unit selectionNames "FireGeometry") select {"hit" in _x;}), getText (_instigatorConfig >> _tackle >> "type"), _instigator], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
 			};
 
@@ -830,19 +824,19 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 			] call KH_fnc_execute;
 		}
 		else {
-			[_unit, "BLOCK_SUCCESS"] call KH_fnc_updateMeleeState;
+			[[_unit, "BLOCK_SUCCESS"], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
 		};
 
 		private _sounds = getArray (_instigatorConfig >> _tackle >> "Sounds" >> (getText ((configOf _unit) >> "kh_meleeSoundType")));
 
 		if (_sounds isNotEqualTo []) then {
-			playSound3D [((getArray (configFile >> "CfgSounds" >> (selectRandom _sounds) >> "sound")) select 0) select [1], _unit, [insideBuilding _unit, false] call KH_fnc_parseBoolean, getPosASL _unit, 5, 1, 100, 0, false];
+			playSound3D [((getArray (configFile >> "CfgSounds" >> (selectRandom _sounds) >> "sound")) select 0) select [1], _unit, (insideBuilding _unit) >= 0.5, getPosASL _unit, 5, 1, 100, 0, false];
 		}
 		else {
 			_sounds = getArray (_instigatorConfig >> _tackle >> "Sounds" >> "generic");
 
 			if (_sounds isNotEqualTo []) then {
-				playSound3D [((getArray (configFile >> "CfgSounds" >> (selectRandom _sounds) >> "sound")) select 0) select [1], _unit, [insideBuilding _unit, false] call KH_fnc_parseBoolean, getPosASL _unit, 5, 1, 100, 0, false];
+				playSound3D [((getArray (configFile >> "CfgSounds" >> (selectRandom _sounds) >> "sound")) select 0) select [1], _unit, (insideBuilding _unit) >= 0.5, getPosASL _unit, 5, 1, 100, 0, false];
 			};
 		};
 	}

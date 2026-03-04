@@ -1,0 +1,167 @@
+params [["_unit", objNull, [objNull]]];
+if ((getNumber (configFile >> (getText ((configOf _unit) >> "moves")) >> "states" >> (animationState _unit) >> "kh_traversal")) isEqualTo 1) exitWith {};
+private _currentPosition = getPosASLVisual _unit;
+private _unitPositionHeight = _currentPosition select 2;
+private _bounds = (2 boundingBoxReal _unit) select 1;
+private _unitWidth = (_bounds select 0) * 0.5;
+private _unitLength = (_bounds select 1) * 0.5;
+private _unitHeight = _bounds select 2;
+
+private _obstacleIntersections = ([
+    _currentPosition vectorAdd [0, 0, 0.1], 
+    _unit,
+    [_unitWidth, _unitLength, str -(_unitHeight + 10)],
+    "RECTANGLE",
+    0.25,
+    [_unit, "TERRAIN"] + (attachedObjects _unit),
+    true, 
+    1, 
+    "GEOM", 
+    "ROADWAY",
+    true,
+    ["LASER", [], 1]
+] call KH_fnc_raycast3d) select 0;
+
+private _maximumHeight = if (_obstacleIntersections isNotEqualTo []) then {
+    private _highestPoint = 10;
+
+    {
+        private _currentHeight = ((_x select 0) select 2) - _unitPositionHeight;
+
+        if (_currentHeight < _highestPoint) then {
+            _highestPoint = _currentHeight;
+        };
+    } forEach _obstacleIntersections;
+
+    _highestPoint;
+}
+else {
+    10;
+};
+
+if ((_maximumHeight - _unitHeight) < 0.25) exitWith {
+    if (((velocityModelSpace _unit) select 1) > 1) then {
+        _unit playActionNow "KH_TraversalJump";
+        _unit playAction "default";
+    };
+
+    false;
+};
+
+private _climbIntersections = ([
+    _unit modelToWorldVisualWorld [0, _unitLength * 1.75, _maximumHeight], 
+    _unit,
+    [_unitWidth, _unitLength, str _maximumHeight],
+    "RECTANGLE",
+    0.25,
+    [_unit, "TERRAIN"] + (attachedObjects _unit),
+    false, 
+    -1, 
+    "GEOM", 
+    "ROADWAY",
+    true,
+    ["LASER", [], 1]
+] call KH_fnc_raycast3d) select 0;
+
+if (_climbIntersections isEqualTo []) exitWith {
+    if (((velocityModelSpace _unit) select 1) > 1) then {
+        _unit playActionNow "KH_TraversalJump";
+        _unit playAction "default";
+    };
+
+    false;
+};
+
+private _floorIndex = -1;
+private _floorPositions = [];
+
+{
+    private _intersectionPosition = _x select 0;
+
+    if (
+        (((_intersectionPosition select 2) - _unitPositionHeight) >= 0.25) &&
+        (((_intersectionPosition select 2) - _unitPositionHeight) > ((((_floorPositions param [[_floorIndex, 0] select (_floorIndex isEqualTo -1), []]) param [2, 0]) + _unitHeight) - _unitPositionHeight))
+       ) 
+    then {
+        _floorPositions pushBack _intersectionPosition;
+        _floorIndex = _floorIndex + 1;
+    };
+} forEach _climbIntersections;
+
+if (_floorPositions isEqualTo []) exitWith {
+    if (((velocityModelSpace _unit) select 1) > 1) then {
+        _unit playActionNow "KH_TraversalJump";
+        _unit playAction "default";
+    };
+    
+    false;
+};
+
+private _chosenTraversalTarget = if (isPlayer _unit) then {
+    private _traversalTargets = createHashMap;
+
+    {
+        _traversalTargets set [([objNull, ASLToAGL _x] call KH_fnc_getPositionScreenRatio) select 1, _x];
+    } forEach _floorPositions;
+
+    private _finalTarget = _traversalTargets get (selectMax (keys _traversalTargets));
+
+    if (isNil "_finalTarget") then {
+        selectRandom _floorPositions;
+    }
+    else {
+        _finalTarget;
+    };
+}
+else {
+    selectRandom _floorPositions;
+};
+
+private _height = (_chosenTraversalTarget select 2) - _unitPositionHeight;
+
+private _vault = ((([
+    _unit modelToWorldVisualWorld [0, _unitLength * 2.75, _height], 
+    _unit,
+    [_unitWidth, _unitLength, str _unitHeight],
+    "RECTANGLE",
+    0.25,
+    [_unit, "TERRAIN"] + (attachedObjects _unit),
+    true, 
+    1, 
+    "GEOM", 
+    "ROADWAY",
+    true,
+    ["LASER", [], 1]
+] call KH_fnc_raycast3d) select 0) param [0, []]) isEqualTo [];
+
+_unit playActionNow (
+    switch true do {
+        case ((_height >= 0.25) && (_height < 0.75)): {
+            ["KH_TraversalClimb0_5m", "KH_TraversalVault0_5m"] select _vault;
+        };
+
+        case ((_height >= 0.75) && (_height < 1.25)): {
+            ["KH_TraversalClimb1m", "KH_TraversalVault1m"] select _vault;
+        };
+
+        case ((_height >= 1.25) && (_height < 1.75)): {
+            ["KH_TraversalClimb1_5m", "KH_TraversalVault1_5m"] select _vault;
+        };
+
+        case ((_height >= 1.75) && (_height < 2.25)): {
+            ["KH_TraversalClimb2m", "KH_TraversalVault2m"] select _vault;
+        };
+        
+        default {
+            "default";
+        };
+    }
+);
+
+_unit playAction "default";
+
+if ((getNumber (configFile >> (getText ((configOf _unit) >> "moves")) >> "states" >> (animationState _unit) >> "kh_traversalTeleport")) isEqualTo 1) then {
+    _unit setPosASL _chosenTraversalTarget;
+};
+
+true;

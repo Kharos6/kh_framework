@@ -32,15 +32,15 @@ class KH_ResourceEndMission
             x = QUOTE(RSC_POS_X(40));
             y = QUOTE(RSC_POS_Y(40));
             w = QUOTE(RSC_POS_W(10));
-            h = QUOTE(RSC_POS_W(2));
+            h = QUOTE(RSC_POS_H(2));
         };
         class KH_Victory: ctrlCheckbox
         {
 			idc = 101;
             x = QUOTE(RSC_POS_X(50));
             y = QUOTE(RSC_POS_Y(40));
-            w = QUOTE(RSC_POS_W(1.5));
-            h = QUOTE(RSC_POS_W(1.5));
+            w = QUOTE(RSC_POS_W(1));
+            h = QUOTE(RSC_POS_H_SQUARE(1));
         };
         class KH_FadeTypeTitle: RscText
         {
@@ -49,7 +49,7 @@ class KH_ResourceEndMission
             x = QUOTE(RSC_POS_X(40));
             y = QUOTE(RSC_POS_Y(42));
             w = QUOTE(RSC_POS_W(10));
-            h = QUOTE(RSC_POS_W(2));
+            h = QUOTE(RSC_POS_H(2));
         };
         class KH_FadeType: ctrlEdit
         {
@@ -58,14 +58,14 @@ class KH_ResourceEndMission
             x = QUOTE(RSC_POS_X(50));
             y = QUOTE(RSC_POS_Y(42));
             w = QUOTE(RSC_POS_W(9.75));
-            h = QUOTE(RSC_POS_W(1.75));
+            h = QUOTE(RSC_POS_H(1.75));
         };
         class KH_ButtonOK: RscButtonMenuOK 
         {
             x = QUOTE(RSC_POS_X(40));
             y = QUOTE(RSC_POS_Y(45));
             w = QUOTE(RSC_POS_W(5));
-            h = QUOTE(RSC_POS_W(2));
+            h = QUOTE(RSC_POS_H(2));
             colorBackground[] = {0, 0, 0, 0.9};
             colorBackgroundActive[] = {1, 1, 1, 0.9};
         };
@@ -74,7 +74,7 @@ class KH_ResourceEndMission
             x = QUOTE(RSC_POS_X(55));
             y = QUOTE(RSC_POS_Y(45));
             w = QUOTE(RSC_POS_W(5));
-            h = QUOTE(RSC_POS_W(2));
+            h = QUOTE(RSC_POS_H(2));
             colorBackground[] = {0, 0, 0, 0.9};
             colorBackgroundActive[] = {1, 1, 1, 0.9};
         };

@@ -10,6 +10,8 @@ class CfgGesturesMale
         kh_meleeTackleTiming[] = {};
         kh_meleeDodgeTiming[] = {};
         kh_meleeSoundTiming[] = {};
+        kh_meleeAttackPhase = 0;
+        kh_meleeMainAction = "";
     };
     class BlendAnims
     {
@@ -86,8 +88,9 @@ class CfgGesturesMale
     };
     class States
     {
-        class GestureNone: Default
+        class KH_GestureNone: Default
         {
+            minPlayTime = 0;
             mask = "empty";
             looped = 0;
             speed = 1e+10;
@@ -144,6 +147,8 @@ class CfgGesturesMale
         class Hum_AddStaCom_BloLhtMel: KH_MeleeTertiaryGestureBase
         {
             looped = 1;
+            kh_meleeHasAction = 1;
+            kh_meleeMainAction = "block";
             kh_meleeBlockTiming[] = {
                 {0, 1, "Block01"}
             };
@@ -152,6 +157,9 @@ class CfgGesturesMale
         class Hum_AddStaCom_ParLhtMel: KH_MeleeTertiaryGestureBase
         {
             speed = 0.697674;
+            minPlayTime = 0.5;
+            kh_meleeHasAction = 1;
+            kh_meleeMainAction = "parry";
             kh_meleeParryTiming[] = {
                 {0, 1, "Parry01"}
             };
@@ -160,6 +168,9 @@ class CfgGesturesMale
         class Hum_AddStaCom_AttLhtMel01A: KH_MeleeTertiaryGestureBase
         {
             minPlayTime = 0.66;
+            kh_meleeAttackPhase = 1;
+            kh_meleeHasAction = 1;
+            kh_meleeMainAction = "attack";
             kh_meleeHitTiming[] = {
                 {0.4800, "launcher", {0.811733, 0.531356, 1.645111}, "Attack01", 0},
                 {0.5000, "launcher", {0.664187, 0.771464, 1.378433}, "Attack01", 0},
@@ -175,6 +186,9 @@ class CfgGesturesMale
         class Hum_AddStaCom_AttLhtMel01B: KH_MeleeTertiaryGestureBase
         {
             minPlayTime = 0.5609;
+            kh_meleeAttackPhase = 1;
+            kh_meleeHasAction = 1;
+            kh_meleeMainAction = "attack";
             kh_meleeHitTiming[] = {
                 {0.3171, "launcher", {-0.251478, 0.386765, 1.867224}, "Attack01", 0},
                 {0.3415, "launcher", {-0.167461, 0.621735, 1.699616}, "Attack01", 0},
@@ -194,6 +208,8 @@ class CfgGesturesMale
             kh_meleeBlockTiming[] = {
                 {0, 1, "Block01"}
             };
+            kh_meleeHasAction = 1;
+            kh_meleeMainAction = "block";
             speed = 1.5789;
             file = "x\kh\addons\main\animations\human\Hum_AddStaCom_BloSucLhtMel.rtm";
         };

@@ -20,7 +20,7 @@ class KH_ModuleEntitySpawner: Module_F
 	icon = "\a3\Missions_F_Curator\data\img\iconMPTypeSectorControl_ca.paa";
 	class Attributes: AttributesBase
 	{
-		class KH_ModuleEntitySpawnerEntityTypes: Edit
+		class KH_ModuleEntitySpawnerEntityTypes: EditMulti5
 		{
 			displayName = "Entity Types";
 			tooltip = "Strings of class names of entity types from CfgVehicles that will be chosen at random to spawn. If Spawner Type is GROUP, must be arrays of strings of class names of entity types from CfgVehicles. The arrays will be chosen at random and will spawn a unit for each class name entry in order.";

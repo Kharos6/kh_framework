@@ -734,18 +734,23 @@ public:
     }
     
     // Check if plugin is installed
-    static bool is_plugin_installed() {
+    static bool is_plugin_installed(bool* needs_update = nullptr) {
+        if (needs_update) *needs_update = false;
+        std::string source_path = get_plugin_dll_source_path();
         auto ts3_dirs = find_ts3_plugin_directories();
-        
+
         for (const auto& plugins_dir : ts3_dirs) {
-            // Check for the DLL with the naming convention TS3 uses
             std::string plugin_path = plugins_dir + "\\kh_framework_teamspeak_win64.dll";
 
             if (std::filesystem::exists(plugin_path)) {
+                if (needs_update && !source_path.empty() && std::filesystem::exists(source_path)) {
+                    *needs_update = (hash_file(source_path) != hash_file(plugin_path));
+                }
+
                 return true;
             }
         }
-        
+
         return false;
     }
 
@@ -776,12 +781,14 @@ public:
 // Auto-install check function - call from pre_start
 static void teamspeak_check_and_install_plugin() {
     try {
-        if (!TeamspeakFramework::is_plugin_installed()) {
+        bool needs_update = false;
+        
+        if (!TeamspeakFramework::is_plugin_installed(&needs_update) || needs_update) {
             TeamspeakFramework::install_plugin();
         }
     } catch (const std::exception& e) {
-        // Silent failure for auto-check
+        // ...
     } catch (...) {
-        // Silent failure
+        // ...
     }
 }

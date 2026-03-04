@@ -338,24 +338,19 @@ isNil {
 											_args params ["_animationType", "_isMove"];
 
 											if ((getNumber (configFile >> _animationType >> "states" >> _animation >> "kh_melee")) isEqualTo 1) then {
-												if !(_unit getVariable ["KH_var_inMeleeState", false]) then {
-													_unit setVariable ["KH_var_inMeleeState", true, true];
+												_unit setVariable ["KH_var_inMeleeState", true, true];
+												if ((getNumber (configFile >> _animationType >> "states" >> _animation >> "kh_meleeHasAction")) isEqualTo 0) exitWith {};
+												private _handlerType = ["KH_var_meleeStateHandler", "KH_var_meleeGestureHandler"] select _isMove;
+
+												if !(_unit isNil _handlerType) then {
+													[_unit getVariable _handlerType] call KH_fnc_removeHandler;
 												};
 												
 												private _clientType = [[clientOwner, 2], false] select isServer;
-
-												if (_unit isNil "KH_var_meleeBlockedUnits") then {
-													_unit setVariable ["KH_var_meleeBlockedUnits", [], _clientType];
-												};
-
-												if (_unit isNil "KH_var_meleeParriedUnits") then {
-													_unit setVariable ["KH_var_meleeParriedUnits", [], _clientType];
-												};
-
 												private _animationConfig = configFile >> _animationType >> "states" >> _animation;
 
 												if _isMove then {
-													if (!(_unit getVariable ["KH_var_meleeMoveActive", false]) && ((getNumber (_animationConfig >> "minPlayTime")) isNotEqualTo 0)) then {
+													if ((getNumber (_animationConfig >> "minPlayTime")) isNotEqualTo 0) then {
 														_unit setVariable ["KH_var_meleeMoveActive", true];
 													}
 													else {
@@ -363,7 +358,7 @@ isNil {
 													};
 												}
 												else {
-													if (!(_unit getVariable ["KH_var_meleeGestureActive", false]) && ((getNumber (_animationConfig >> "minPlayTime")) isNotEqualTo 0)) then {
+													if ((getNumber (_animationConfig >> "minPlayTime")) isNotEqualTo 0) then {
 														_unit setVariable ["KH_var_meleeGestureActive", true];
 													}
 													else {
@@ -371,16 +366,26 @@ isNil {
 													};
 												};
 
+												_unit setVariable ["KH_var_meleeBlockedUnits", [], _clientType];
+												_unit setVariable ["KH_var_currentMeleeBlock", "", _clientType];
+												_unit setVariable ["KH_var_meleeParriedUnits", [], _clientType];
+												_unit setVariable ["KH_var_currentMeleeParry", "", _clientType];
+												_unit setVariable ["KH_var_currentMeleeKick", "", _clientType];
+												_unit setVariable ["KH_var_currentMeleeTackle", "", _clientType];
+												_unit setVariable ["KH_var_currentMeleeDodgeDirection", -1, _clientType];
 												private _moveVector = [0, 0, 0];
 												private _moveThreshold = [];
 
 												private _avoidCollision = if (!(isPlayer _unit) && _isMove && KH_var_meleeAiCollisionDetection) then {
-													_moveVector = _unit getUnitMovesInfo 4;
+													_moveVector = _unit vectorModelToWorldVisual ((_unit getUnitMovesInfo 4) vectorMultiply -1);
 													private _aimPosition = AGLToASL (unitAimPositionVisual _unit);
+													private _positionAsl = getPosASLVisual _unit;
+													_aimPosition set [1, _positionAsl select 1];
+													_aimPosition set [2, _positionAsl select 2];
 
 													private _moveIntersection = ([
 														_aimPosition,
-														_aimPosition vectorAdd (_moveVector vectorMultiply -1), 
+														_aimPosition vectorAdd _moveVector, 
 														[_unit, "TERRAIN"] + (attachedObjects _unit),
 														true, 
 														1, 
@@ -391,9 +396,16 @@ isNil {
 													] call KH_fnc_raycast) param [0, []];
 
 													if (_moveIntersection isNotEqualTo []) then {
-														if !(isPlayer (_moveIntersection select 3)) then {
-															_moveThreshold = (_moveIntersection select 0) vectorAdd ((vectorNormalized _moveVector) vectorMultiply 0.75);
-															true;
+														private _entity = _moveIntersection select 3;
+
+														if !(isNull _entity) then {
+															if !(isPlayer _entity) then {
+																_moveThreshold = (_moveIntersection select 0) vectorAdd ((vectorNormalized _moveVector) vectorMultiply -0.45);
+																true;
+															}
+															else {
+																false;
+															};
 														}
 														else {
 															false;
@@ -407,203 +419,432 @@ isNil {
 													false;
 												};
 
-												[
+												_unit setVariable [
+													_handlerType,
 													[
-														_unit,
-														_animation,
-														_clientType,
-														getNumber (_animationConfig >> "minPlayTime"),
-														_isMove,
-														_moveVector vectorMultiply -1,
-														_moveThreshold,
-														getPosWorld _unit,
-														_avoidCollision,
-														false,
-														configFile >> "CfgKHMeleeTypes" >> (_unit getVariable ["KH_var_meleeType", ""]),
-														[],
-														[],
-														[],
-														[],
-														[],
-														_unit getVariable "KH_var_meleeBlockedUnits",
-														_unit getVariable "KH_var_meleeParriedUnits",
-														getArray (_animationConfig >> "kh_meleeHitTiming"), 
-														getArray (_animationConfig >> "kh_meleeBlockTiming"), 
-														getArray (_animationConfig >> "kh_meleeParryTiming"),
-														getArray (_animationConfig >> "kh_meleeKickTiming"),
-														getArray (_animationConfig >> "kh_meleeTackleTiming"),
-														getArray (_animationConfig >> "kh_meleeDodgeTiming"),
-														getArray (_animationConfig >> "kh_meleeSoundTiming")
-													],
-													{
-														params [
-															"_unit", 
-															"_animation",
-															"_clientType",
-															"_exclusiveTime",
-															"_isMove",
-															"_moveVector",
-															"_moveThreshold",
-															"_previousPosition",
-															"_avoidCollision",
-															"_collided",
-															"_meleeTypeConfig",
-															"_handledHit", 
-															"_handledKick", 
-															"_handledTackle",
-															"_previousBlocks",
-															"_previousParries",
-															"_blockedUnits", 
-															"_parriedUnits", 
-															"_hitTiming", 
-															"_blockTiming", 
-															"_parryTiming", 
-															"_kickTiming", 
-															"_tackleTiming",
-															"_dodgeTiming",
-															"_soundTiming"
-														];
+														[
+															_unit,
+															_animation,
+															_clientType,
+															getNumber (_animationConfig >> "minPlayTime"),
+															_isMove,
+															_moveVector,
+															_moveThreshold,
+															getPosWorldVisual _unit,
+															_avoidCollision,
+															false,
+															configFile >> "CfgKHMeleeTypes" >> (_unit getVariable ["KH_var_meleeType", ""]),
+															[],
+															[],
+															[],
+															[],
+															[],
+															_unit getVariable "KH_var_meleeBlockedUnits",
+															_unit getVariable "KH_var_meleeParriedUnits",
+															getArray (_animationConfig >> "kh_meleeHitTiming"), 
+															getArray (_animationConfig >> "kh_meleeBlockTiming"), 
+															getArray (_animationConfig >> "kh_meleeParryTiming"),
+															getArray (_animationConfig >> "kh_meleeKickTiming"),
+															getArray (_animationConfig >> "kh_meleeTackleTiming"),
+															getArray (_animationConfig >> "kh_meleeDodgeTiming"),
+															getArray (_animationConfig >> "kh_meleeSoundTiming"),
+															false,
+															false,
+															false,
+															false,
+															false
+														],
+														{
+															params [
+																"_unit", 
+																"_animation",
+																"_clientType",
+																"_exclusiveTime",
+																"_isMove",
+																"_moveVector",
+																"_moveThreshold",
+																"_correctedPosition",
+																"_avoidCollision",
+																"_collided",
+																"_meleeTypeConfig",
+																"_handledHit", 
+																"_handledKick", 
+																"_handledTackle",
+																"_previousBlocks",
+																"_previousParries",
+																"_blockedUnits", 
+																"_parriedUnits", 
+																"_hitTiming", 
+																"_blockTiming", 
+																"_parryTiming", 
+																"_kickTiming", 
+																"_tackleTiming",
+																"_dodgeTiming",
+																"_soundTiming",
+																"_hitFatigue",
+																"_parryFatigue",
+																"_kickFatigue",
+																"_tackleFatigue",
+																"_dodgeFatigue"
+															];
 
-														if ((_animation isNotEqualTo ([gestureState _unit, animationState _unit] select _isMove)) || !(_unit getVariable ["KH_var_inMeleeState", false])) exitWith {
-															if (_blockTiming isNotEqualTo []) then {
-																_unit setVariable ["KH_var_meleeBlockedUnits", [], _clientType];
-																_unit setVariable ["KH_var_currentMeleeBlock", "", _clientType];
+															if ((_animation isNotEqualTo ([gestureState _unit, animationState _unit] select _isMove)) || !(_unit getVariable ["KH_var_inMeleeState", false])) exitWith {
+																[_handlerId] call KH_fnc_removeHandler;
 															};
 
-															if (_parryTiming isNotEqualTo []) then {
-																_unit setVariable ["KH_var_meleeParriedUnits", [], _clientType];
-																_unit setVariable ["KH_var_currentMeleeParry", "", _clientType];
-															};
+															private _time = _unit getUnitMovesInfo ([5, 0] select _isMove);
 
-															if (_kickTiming isNotEqualTo []) then {
-																_unit setVariable ["KH_var_currentMeleeKick", "", _clientType];
-															};
-
-															if (_tackleTiming isNotEqualTo []) then {
-																_unit setVariable ["KH_var_currentMeleeTackle", "", _clientType];
-															};
-
-															if (_dodgeTiming isNotEqualTo []) then {
-																_unit setVariable ["KH_var_currentMeleeDodgeDirection", -1, _clientType];
-															};
-
-															[_handlerId] call KH_fnc_removeHandler;
-														};
-
-														private _time = _unit getUnitMovesInfo ([5, 0] select _isMove);
-
-														if !_isMove then {
-															if (_time >= _exclusiveTime) then {
-																if (_unit getVariable ["KH_var_meleeGestureActive", false]) then {
+															if !_isMove then {
+																if (_time >= _exclusiveTime) then {
 																	_unit setVariable ["KH_var_meleeGestureActive", false];
 																};
-															};
-														}
-														else {
-															if (_time >= _exclusiveTime) then {
-																if (_unit getVariable ["KH_var_meleeMoveActive", false]) then {
+															}
+															else {
+																if (_time >= _exclusiveTime) then {
 																	_unit setVariable ["KH_var_meleeMoveActive", false];
 																};
 															};
-														};
 
-														private _vectorCorrected = false;
-														private _deletionsHit = [];
-														private _deletionsKick = [];
-														private _deletionsSound = [];
+															private _vectorCorrected = false;
+															private _deletionsHit = [];
+															private _deletionsKick = [];
+															private _deletionsSound = [];
 
-														private _nearUnits = if ((_blockTiming isNotEqualTo []) || (_parryTiming isNotEqualTo [])) then {
-															(_unit nearEntities ["Man", 10]) - [_unit];
-														}
-														else {
-															[];
-														};
-
-														if (_hitTiming isNotEqualTo []) then {
-															if !_vectorCorrected then {
-																if _avoidCollision then {
-																	if _collided then {
-																		_unit setPosWorld _previousPosition;
-																	}
-																	else {
-																		private _currentPosition = getPosWorld _unit;
-
-																		if (((_currentPosition vectorDiff _moveThreshold) vectorDotProduct (vectorNormalized _moveVector)) >= 0) then {
-																			_unit setPosWorld _previousPosition;
-																			_this set [9, true];
-																		} 
-																		else {
-																			_this set [7, _currentPosition];
-																		};
-																	};
-
-																	_vectorCorrected = true;
-																};
+															private _nearUnits = if ((_blockTiming isNotEqualTo []) || (_parryTiming isNotEqualTo [])) then {
+																(_unit nearEntities ["Man", 10]) - [_unit];
+															}
+															else {
+																[];
 															};
 
-															private _hitObjects = [];
-
-															{
-																_x params ["_start", "_origin", "_point", "_attack", "_unique"];
-																_unique = [_unique, false] call KH_fnc_parseBoolean;
-
-																if (_time >= _start) then {
-																	_unit setFatigue (
-																		(
-																			(getFatigue _unit) + 
-																			(
-																		 		((getNumber (_meleeTypeConfig >> _attack >> "cost")) / (count _hitTiming)) * 
-																		 		KH_var_meleeAbsoluteAttackStaminaConsumptionMultiplier * 
-																		 		KH_var_meleeAbsoluteStaminaConsumptionMultiplier
-																			)
-																		) min 1
-																	);
-
-																	_point = if (_point isEqualType []) then {
-																		_unit modelToWorldVisualWorld _point;
-																	}
-																	else {
-																		_unit modelToWorldVisualWorld (_unit selectionPosition _point);
-																	};
-
-																	private _lineIntersections = [
-																		if (_origin isEqualType []) then {
-																			_unit modelToWorldVisualWorld _origin;
+															if (_hitTiming isNotEqualTo []) then {
+																if !_vectorCorrected then {
+																	if _avoidCollision then {
+																		if _collided then {
+																			_unit setPosWorld _correctedPosition;
 																		}
 																		else {
-																			_unit modelToWorldVisualWorld (_unit selectionPosition _origin);
-																		}, 
-																		_point, 
-																		[_unit, "TERRAIN"] + (attachedObjects _unit),
-																		true, 
-																		-1, 
-																		"FIRE", 
-																		"NONE", 
-																		true,
-																		[[], ["LINE", [], 1]] select KH_var_meleeDebugMode
-																	] call KH_fnc_raycast;
+																			private _currentPosition = getPosWorldVisual _unit;
 
-																	if (_lineIntersections isNotEqualTo []) then {
-																		{
-																			private _object = _x select 3;
-
-																			if (((_object in _handledHit) && !_unique) || (((side (group _object)) isEqualTo (side (group _unit))) && KH_var_meleeAttackIgnoreFriendlies)) then {
-																				continue;
+																			if (((_currentPosition vectorDiff _moveThreshold) vectorDotProduct (vectorNormalized _moveVector)) >= 0) then {
+																				private _direction = vectorNormalized _moveVector;
+																				private _correction = _currentPosition vectorAdd (_direction vectorMultiply -((_currentPosition vectorDiff _moveThreshold) vectorDotProduct _direction));
+																				_unit setPosWorld _correction;
+																				_this set [9, true];
+																				_this set [7, _correction];
 																			};
+																		};
 
-																			_hitObjects pushBack [_object, ((_x select 4) select {"hit" in _x;}) param [0, selectRandom ((_object selectionNames "FireGeometry") select {"hit" in _x;})], _x select 0, _attack];
-																			_handledHit pushBackUnique _object;
-																		} forEach _lineIntersections;
+																		_vectorCorrected = true;
+																	};
+																};
+
+																private _hitObjects = [];
+
+																{
+																	_x params ["_start", "_origin", "_point", "_attack", "_unique"];
+																	_unique = [_unique, false] call KH_fnc_parseBoolean;
+
+																	if !_hitFatigue then {
+																		_unit setFatigue (
+																			(
+																				(getFatigue _unit) + 
+																				(
+																					(getNumber (_meleeTypeConfig >> _attack >> "cost")) * 
+																					KH_var_meleeAbsoluteAttackStaminaConsumptionMultiplier * 
+																					KH_var_meleeAbsoluteStaminaConsumptionMultiplier
+																				)
+																			) min 1
+																		);
+
+																		_this set [25, true];
 																	};
 
-																	private _hitRadius = getNumber (_meleeTypeConfig >> _attack >> "radius");
-																	
-																	if (_hitRadius isNotEqualTo 0) then {
-																		private _radiusIntersections = ([
+																	if (_time >= _start) then {
+																		private _rangeOffset = getArray (_meleeTypeConfig >> _attack >> "rangeOffset");
+
+																		_point = if (_point isEqualType []) then {
+																			_unit modelToWorldVisualWorld (_point vectorAdd _rangeOffset);
+																		}
+																		else {
+																			_unit modelToWorldVisualWorld ((_unit selectionPosition _point) vectorAdd _rangeOffset);
+																		};
+
+																		private _lineIntersections = [
+																			if (_origin isEqualType []) then {
+																				_unit modelToWorldVisualWorld _origin;
+																			}
+																			else {
+																				_unit modelToWorldVisualWorld (_unit selectionPosition _origin);
+																			}, 
 																			_point, 
-																			[_hitRadius, str _hitRadius, _hitRadius],
+																			[_unit, "TERRAIN"] + (attachedObjects _unit),
+																			true, 
+																			-1, 
+																			"FIRE", 
+																			"NONE", 
+																			true,
+																			[[], ["LINE", [], 1]] select KH_var_meleeDebugMode
+																		] call KH_fnc_raycast;
+
+																		if (_lineIntersections isNotEqualTo []) then {
+																			{
+																				private _object = _x select 3;
+
+																				if (((_object in _handledHit) && !_unique) || (((side (group _object)) isEqualTo (side (group _unit))) && KH_var_meleeAttackIgnoreFriendlies)) then {
+																					continue;
+																				};
+
+																				_hitObjects pushBack [_object, ((_x select 4) select {"hit" in _x;}) param [0, selectRandom ((_object selectionNames "FireGeometry") select {"hit" in _x;})], _x select 0, _attack];
+																				_handledHit pushBackUnique _object;
+																			} forEach _lineIntersections;
+																		};
+
+																		private _hitRadius = getNumber (_meleeTypeConfig >> _attack >> "radius");
+																		
+																		if (_hitRadius isNotEqualTo 0) then {
+																			private _radiusIntersections = ([
+																				_point, 
+																				[[0, 1, 0], [0, 0, 1]],
+																				[_hitRadius, _hitRadius, str _hitRadius],
+																				"OVAL",
+																				6,
+																				[_unit, "TERRAIN"] + (attachedObjects _unit),
+																				true, 
+																				-1, 
+																				"FIRE", 
+																				"NONE",
+																				true,
+																				[[], ["LINE", [], 1]] select KH_var_meleeDebugMode
+																			] call KH_fnc_raycast3d) select 0;
+
+																			if (_radiusIntersections isNotEqualTo []) then {
+																				{
+																					private _object = _x select 3;
+
+																					if (((_object in _handledHit) && !_unique) || (((side (group _object)) isEqualTo (side (group _unit))) && KH_var_meleeAttackIgnoreFriendlies)) then {
+																						continue;
+																					};
+																					
+																					_hitObjects pushBack [_object, ((_x select 4) select {"hit" in _x;}) param [0, selectRandom ((_object selectionNames "FireGeometry") select {"hit" in _x;})], _x select 0, _attack];
+																					_handledHit pushBackUnique _object;
+																				} forEach _radiusIntersections;
+																			};
+																		};
+
+																		_deletionsHit pushBack _forEachIndex;
+																	};
+																} forEach _hitTiming;
+
+																{
+																	_x params ["_object", "_selection", "_position", "_attack"];
+
+																	[
+																		"KH_eve_meleeInternalGotHit", 
+																		[_object, _unit, _selection, _position, _attack],
+																		[_object, "SERVER"] select (isPlayer _object),
+																		false
+																	] call KH_fnc_triggerCbaEvent;
+																} forEach _hitObjects;
+															};
+
+															if (_blockTiming isNotEqualTo []) then {
+																if !_vectorCorrected then {
+																	if _avoidCollision then {
+																		if _collided then {
+																			_unit setPosWorld _correctedPosition;
+																		}
+																		else {
+																			private _currentPosition = getPosWorldVisual _unit;
+
+																			if (((_currentPosition vectorDiff _moveThreshold) vectorDotProduct (vectorNormalized _moveVector)) >= 0) then {
+																				private _direction = vectorNormalized _moveVector;
+																				private _correction = _currentPosition vectorAdd (_direction vectorMultiply -((_currentPosition vectorDiff _moveThreshold) vectorDotProduct _direction));
+																				_unit setPosWorld _correction;
+																				_this set [9, true];
+																				_this set [7, _correction];
+																			};
+																		};
+
+																		_vectorCorrected = true;
+																	};
+																};
+
+																{
+																	_x params ["_start", "_end", "_block"];
+																	
+																	if ((_time >= _start) && (_time <= _end)) then {
+																		{
+																			if ((abs ((((_unit getRelDir _x) + 180) % 360) - 180)) <= (getNumber (_meleeTypeConfig >> _block >> "angle"))) then {
+																				_blockedUnits pushBackUnique _x;
+																			}
+																			else {
+																				if (_x in _blockedUnits) then {
+																					_blockedUnits deleteAt (_blockedUnits find _x);
+																				};
+																			};
+																		} forEach _nearUnits;
+
+																		if (_previousBlocks isNotEqualTo _blockedUnits) then {
+																			_unit setVariable ["KH_var_meleeBlockedUnits", _blockedUnits, 2];
+																			_previousBlocks resize 0;
+																			_previousBlocks insert [0, _blockedUnits];
+																		};
+
+																		if ((_unit getVariable ["KH_var_currentMeleeBlock", ""]) isNotEqualTo _block) then {
+																			_unit setVariable ["KH_var_currentMeleeBlock", _block, _clientType];
+																		};
+																	
+																		break;
+																	}
+																	else {
+																		_blockedUnits resize 0;
+
+																		if (_previousBlocks isNotEqualTo _blockedUnits) then {
+																			_unit setVariable ["KH_var_meleeBlockedUnits", [], 2];
+																			_previousBlocks resize 0;
+																		};
+
+																		if ((_unit getVariable ["KH_var_currentMeleeBlock", ""]) isNotEqualTo "") then {
+																			_unit setVariable ["KH_var_currentMeleeBlock", "", _clientType];
+																		};
+																	};
+																} forEach _blockTiming;
+															};
+
+															if (_parryTiming isNotEqualTo []) then {
+																if !_vectorCorrected then {
+																	if _avoidCollision then {
+																		if _collided then {
+																			_unit setPosWorld _correctedPosition;
+																		}
+																		else {
+																			private _currentPosition = getPosWorldVisual _unit;
+
+																			if (((_currentPosition vectorDiff _moveThreshold) vectorDotProduct (vectorNormalized _moveVector)) >= 0) then {
+																				private _direction = vectorNormalized _moveVector;
+																				private _correction = _currentPosition vectorAdd (_direction vectorMultiply -((_currentPosition vectorDiff _moveThreshold) vectorDotProduct _direction));
+																				_unit setPosWorld _correction;
+																				_this set [9, true];
+																				_this set [7, _correction];
+																			};
+																		};
+
+																		_vectorCorrected = true;
+																	};
+																};
+
+																{
+																	_x params ["_start", "_end", "_parry"];
+
+																	if !_parryFatigue then {
+																		_unit setFatigue (
+																			(
+																				(getFatigue _unit) + 
+																				(
+																					(getNumber (_meleeTypeConfig >> _parry >> "cost")) * 
+																					KH_var_meleeAbsoluteParryStaminaConsumptionMultiplier * 
+																					KH_var_meleeAbsoluteStaminaConsumptionMultiplier
+																				)
+																			) min 1
+																		);
+
+																		_this set [26, true];
+																	};
+
+																	if ((_time >= _start) && (_time <= _end)) then {
+																		{
+																			if ((abs ((((_unit getRelDir _x) + 180) % 360) - 180)) <= (getNumber (_meleeTypeConfig >> _parry >> "angle"))) then {
+																				_parriedUnits pushBackUnique _x;
+																			}
+																			else {
+																				if (_x in _parriedUnits) then {
+																					_parriedUnits deleteAt (_parriedUnits find _x);
+																				};
+																			};
+																		} forEach _nearUnits;
+
+																		if (_previousParries isNotEqualTo _parriedUnits) then {
+																			_unit setVariable ["KH_var_meleeParriedUnits", _parriedUnits, 2];
+																			_previousParries resize 0;
+																			_previousParries insert [0, _parriedUnits];
+																		};
+
+																		if ((_unit getVariable ["KH_var_currentMeleeParry", ""]) isNotEqualTo _parry) then {
+																			_unit setVariable ["KH_var_currentMeleeParry", _parry, _clientType];
+																		};
+
+																		break;
+																	}
+																	else {
+																		_parriedUnits resize 0;
+
+																		if (_previousParries isNotEqualTo _parriedUnits) then {
+																			_unit setVariable ["KH_var_meleeParriedUnits", [], 2];
+																			_previousParries resize 0;
+																		};
+
+																		if ((_unit getVariable ["KH_var_currentMeleeParry", ""]) isNotEqualTo "") then {
+																			_unit setVariable ["KH_var_currentMeleeParry", "", _clientType];
+																		};
+																	};
+																} forEach _parryTiming;
+															};
+
+															if (_kickTiming isNotEqualTo []) then {
+																if !_vectorCorrected then {
+																	if _avoidCollision then {
+																		if _collided then {
+																			_unit setPosWorld _correctedPosition;
+																		}
+																		else {
+																			private _currentPosition = getPosWorldVisual _unit;
+
+																			if (((_currentPosition vectorDiff _moveThreshold) vectorDotProduct (vectorNormalized _moveVector)) >= 0) then {
+																				private _direction = vectorNormalized _moveVector;
+																				private _correction = _currentPosition vectorAdd (_direction vectorMultiply -((_currentPosition vectorDiff _moveThreshold) vectorDotProduct _direction));
+																				_unit setPosWorld _correction;
+																				_this set [9, true];
+																				_this set [7, _correction];
+																			};
+																		};
+
+																		_vectorCorrected = true;
+																	};
+																};
+
+																private _kickedObjects = [];
+
+																{
+																	_x params ["_start", "_point", "_kick"];
+
+																	if !_kickFatigue then {
+																		_unit setFatigue (
+																			(
+																				(getFatigue _unit) + 
+																				(
+																					(getNumber (_meleeTypeConfig >> _kick >> "cost")) * 
+																					KH_var_meleeAbsoluteKickStaminaConsumptionMultiplier * 
+																					KH_var_meleeAbsoluteStaminaConsumptionMultiplier
+																				)
+																			) min 1
+																		);
+
+																		_this set [27, true];
+																	};
+
+																	if (_time >= _start) then {
+																		private _kickIntersections = ([
+																			if (_point isEqualType []) then {
+																				_unit modelToWorldVisualWorld _point;
+																			}
+																			else {
+																				_unit modelToWorldVisualWorld (_unit selectionPosition _point);
+																			},
+																			[[0, 1, 0], [0, 0, 1]],
+																			[0.3, 0.3, "0.3"],
 																			"OVAL",
-																			5,
+																			6,
 																			[_unit, "TERRAIN"] + (attachedObjects _unit),
 																			true, 
 																			-1, 
@@ -613,478 +854,258 @@ isNil {
 																			[[], ["LINE", [], 1]] select KH_var_meleeDebugMode
 																		] call KH_fnc_raycast3d) select 0;
 
-																		if (_radiusIntersections isNotEqualTo []) then {
+																		if (_kickIntersections isNotEqualTo []) then {
 																			{
 																				private _object = _x select 3;
 
-																				if (((_object in _handledHit) && !_unique) || (((side (group _object)) isEqualTo (side (group _unit))) && KH_var_meleeAttackIgnoreFriendlies)) then {
+																				if ((_object in _handledKick) || (((side (group _object)) isEqualTo (side (group _unit))) && KH_var_meleeKickIgnoreFriendlies)) then {
 																					continue;
 																				};
-																				
-																				_hitObjects pushBack [_object, ((_x select 4) select {"hit" in _x;}) param [0, selectRandom ((_object selectionNames "FireGeometry") select {"hit" in _x;})], _x select 0, _attack];
-																				_handledHit pushBackUnique _object;
-																			} forEach _radiusIntersections;
+
+																				_kickedObjects pushBack [_object, ((_x select 4) select {"hit" in _x;}) param [0, selectRandom ((_object selectionNames "FireGeometry") select {"hit" in _x;})], _x select 0, _kick];
+																				_handledKick pushBack _object;
+																			} forEach _kickIntersections;
 																		};
-																	};
 
-																	_deletionsHit pushBack _forEachIndex;
-																};
-															} forEach _hitTiming;
-
-															{
-																_x params ["_object", "_selection", "_position", "_attack"];
-
-																[
-																	"KH_eve_meleeInternalGotHit", 
-																	[_object, _unit, _selection, _position, _attack],
-																	[_object, "SERVER"] select (isPlayer _object),
-																	false
-																] call KH_fnc_triggerCbaEvent;
-															} forEach _hitObjects;
-														};
-
-														if (_blockTiming isNotEqualTo []) then {
-															if !_vectorCorrected then {
-																if _avoidCollision then {
-																	if _collided then {
-																		_unit setPosWorld _previousPosition;
-																	}
-																	else {
-																		private _currentPosition = getPosWorld _unit;
-
-																		if (((_currentPosition vectorDiff _moveThreshold) vectorDotProduct (vectorNormalized _moveVector)) >= 0) then {
-																			_unit setPosWorld _previousPosition;
-																			_this set [9, true];
-																		} 
-																		else {
-																			_this set [7, _currentPosition];
+																		if ((_unit getVariable ["KH_var_currentMeleeKick", ""]) isNotEqualTo _kick) then {
+																			_unit setVariable ["KH_var_currentMeleeKick", _kick, _clientType];
 																		};
-																	};
 
-																	_vectorCorrected = true;
-																};
+																		_deletionsKick pushBack _forEachIndex;
+																	};
+																} forEach _kickTiming;
+
+																{
+																	_x params ["_object", "_selection", "_position", "_kick"];
+
+																	[
+																		"KH_eve_meleeInternalGotKicked", 
+																		[_object, _unit, _selection, _position, _kick],
+																		[_object, "SERVER"] select (isPlayer _object),
+																		false
+																	] call KH_fnc_triggerCbaEvent;
+																} forEach _kickedObjects;
 															};
 
-															{
-																_x params ["_start", "_end", "_block"];
+															if (_tackleTiming isNotEqualTo []) then {
+																if !_vectorCorrected then {
+																	if _avoidCollision then {
+																		if _collided then {
+																			_unit setPosWorld _correctedPosition;
+																		}
+																		else {
+																			private _currentPosition = getPosWorldVisual _unit;
+
+																			if (((_currentPosition vectorDiff _moveThreshold) vectorDotProduct (vectorNormalized _moveVector)) >= 0) then {
+																				private _direction = vectorNormalized _moveVector;
+																				private _correction = _currentPosition vectorAdd (_direction vectorMultiply -((_currentPosition vectorDiff _moveThreshold) vectorDotProduct _direction));
+																				_unit setPosWorld _correction;
+																				_this set [9, true];
+																				_this set [7, _correction];
+																			};
+																		};
+
+																		_vectorCorrected = true;
+																	};
+																};
+
+																private _tackledObjects = [];
+
+																{
+																	_x params ["_start", "_end", "_tackle"];
+
+																	if !_tackleFatigue then {
+																		_unit setFatigue (
+																			(
+																				(getFatigue _unit) + 
+																				(
+																					(getNumber (_meleeTypeConfig >> _tackle >> "cost")) * 
+																					KH_var_meleeAbsoluteTackleStaminaConsumptionMultiplier * 
+																					KH_var_meleeAbsoluteStaminaConsumptionMultiplier
+																				)
+																			) min 1
+																		);
+
+																		_this set [28, true];
+																	};
+
+																	if ((_time >= _start) && (_time <= _end)) then {
+																		private _aimPosition = (AGLToASL (unitAimPositionVisual _unit)) vectorAdd ((vectorDir _unit) vectorMultiply 0.25);
+
+																		private _lineIntersections = [
+																			_aimPosition, 
+																			_aimPosition vectorAdd ((vectorDir _unit) vectorMultiply 0.5), 
+																			[_unit, "TERRAIN"] + (attachedObjects _unit),
+																			true, 
+																			-1, 
+																			"FIRE", 
+																			"GEOM", 
+																			true,
+																			[[], ["LINE", [], 1]] select KH_var_meleeDebugMode
+																		] call KH_fnc_raycast;
+
+																		if (_lineIntersections isNotEqualTo []) then {
+																			{
+																				private _object = _x select 3;
+
+																				if ((_object in _handledTackle) || (((side (group _object)) isEqualTo (side (group _unit))) && KH_var_meleeTackleIgnoreFriendlies)) then {
+																					continue;
+																				};
+
+																				_tackledObjects pushBack [_object, _tackle];
+																				_handledTackle pushBack _object;
+																			} forEach _lineIntersections;
+																		};
+
+																		private _tackleIntersections = ([
+																			_aimPosition, 
+																			[[0, 1, 0], [0, 0, 1]],
+																			[0.5, 0.5, "0.75"],
+																			"OVAL",
+																			6,
+																			[_unit, "TERRAIN"] + (attachedObjects _unit),
+																			true, 
+																			-1, 
+																			"FIRE", 
+																			"GEOM",
+																			true,
+																			[[], ["LINE", [], 1]] select KH_var_meleeDebugMode
+																		] call KH_fnc_raycast3d) select 0;
+
+																		if (_tackleIntersections isNotEqualTo []) then {
+																			{
+																				private _object = _x select 3;
+
+																				if ((_object in _handledTackle) || (((side (group _object)) isEqualTo (side (group _unit))) && KH_var_meleeTackleIgnoreFriendlies)) then {
+																					continue;
+																				};
+
+																				_tackledObjects pushBack [_x select 3, _tackle];
+																				_handledTackle pushBack _object;
+																			} forEach _tackleIntersections;
+																		};
+
+																		if ((_unit getVariable ["KH_var_currentMeleeTackle", ""]) isNotEqualTo _tackle) then {
+																			_unit setVariable ["KH_var_currentMeleeTackle", _tackle, _clientType];
+																		};
+
+																		break;
+																	}
+																	else {
+																		if ((_unit getVariable ["KH_var_currentMeleeTackle", ""]) isNotEqualTo "") then {
+																			_unit setVariable ["KH_var_currentMeleeTackle", "", _clientType];
+																		};
+																	};
+																} forEach _tackleTiming;
+
+																{
+																	_x params ["_object", "_tackle"];
+
+																	[
+																		"KH_eve_meleeInternalGotTackled", 
+																		[_object, _unit, _tackle],
+																		[_object, "SERVER"] select (isPlayer _object),
+																		false
+																	] call KH_fnc_triggerCbaEvent;
+																} forEach _tackledObjects;
+															};
+
+															if (_dodgeTiming isNotEqualTo []) then {
+																if !_vectorCorrected then {
+																	if _avoidCollision then {
+																		if _collided then {
+																			_unit setPosWorld _correctedPosition;
+																		}
+																		else {
+																			private _currentPosition = getPosWorldVisual _unit;
+
+																			if (((_currentPosition vectorDiff _moveThreshold) vectorDotProduct (vectorNormalized _moveVector)) >= 0) then {
+																				private _direction = vectorNormalized _moveVector;
+																				private _correction = _currentPosition vectorAdd (_direction vectorMultiply -((_currentPosition vectorDiff _moveThreshold) vectorDotProduct _direction));
+																				_unit setPosWorld _correction;
+																				_this set [9, true];
+																				_this set [7, _correction];
+																			};
+																		};
+
+																		_vectorCorrected = true;
+																	};
+																};
 																
-																if ((_time >= _start) && (_time <= _end)) then {
-																	{
-																		if ((abs ((((_unit getRelDir _x) + 180) % 360) - 180)) <= (getNumber (_meleeTypeConfig >> _block >> "angle"))) then {
-																			_blockedUnits pushBackUnique _x;
-																		}
-																		else {
-																			if (_x in _blockedUnits) then {
-																				_blockedUnits deleteAt (_blockedUnits find _x);
-																			};
+																{
+																	_x params ["_start", "_end", "_direction"];
+
+																	if !_dodgeFatigue then {
+																		_unit setFatigue (
+																			(
+																				(getFatigue _unit) + 
+																				(
+																					(getNumber ((configOf _unit) >> "kh_meleeDodgeCost")) * 
+																					KH_var_meleeAbsoluteDodgeStaminaConsumptionMultiplier * 
+																					KH_var_meleeAbsoluteStaminaConsumptionMultiplier
+																				)
+																			) min 1
+																		);
+																		
+																		_this set [29, true];
+																	};
+
+																	if ((_time >= _start) && (_time <= _end)) then {
+																		if ((_unit getVariable ["KH_var_currentMeleeDodgeDirection", -1]) isNotEqualTo _direction) then {
+																			_unit setVariable ["KH_var_currentMeleeDodgeDirection", _direction, _clientType];
 																		};
-																	} forEach _nearUnits;
 
-																	if (_previousBlocks isNotEqualTo _blockedUnits) then {
-																		_unit setVariable ["KH_var_meleeBlockedUnits", _blockedUnits, 2];
-																		_previousBlocks resize 0;
-																		_previousBlocks insert [0, _blockedUnits];
-																	};
-
-																	if ((_unit getVariable ["KH_var_currentMeleeBlock", ""]) isNotEqualTo _block) then {
-																		_unit setVariable ["KH_var_currentMeleeBlock", _block, _clientType];
-																	};
-																
-																	break;
-																}
-																else {
-																	_blockedUnits resize 0;
-
-																	if (_previousBlocks isNotEqualTo _blockedUnits) then {
-																		_unit setVariable ["KH_var_meleeBlockedUnits", [], 2];
-																		_previousBlocks resize 0;
-																	};
-
-																	if ((_unit getVariable ["KH_var_currentMeleeBlock", ""]) isNotEqualTo "") then {
-																		_unit setVariable ["KH_var_currentMeleeBlock", "", _clientType];
-																	};
-																};
-															} forEach _blockTiming;
-														};
-
-														if (_parryTiming isNotEqualTo []) then {
-															if !_vectorCorrected then {
-																if _avoidCollision then {
-																	if _collided then {
-																		_unit setPosWorld _previousPosition;
+																		break;
 																	}
 																	else {
-																		private _currentPosition = getPosWorld _unit;
-
-																		if (((_currentPosition vectorDiff _moveThreshold) vectorDotProduct (vectorNormalized _moveVector)) >= 0) then {
-																			_unit setPosWorld _previousPosition;
-																			_this set [9, true];
-																		} 
-																		else {
-																			_this set [7, _currentPosition];
+																		if ((_unit getVariable ["KH_var_currentMeleeDodgeDirection", -1]) isNotEqualTo "") then {
+																			_unit setVariable ["KH_var_currentMeleeDodgeDirection", -1, _clientType];
 																		};
 																	};
-
-																	_vectorCorrected = true;
-																};
+																} forEach _dodgeTiming;
 															};
 
-															{
-																_x params ["_start", "_end", "_parry"];
+															if (_soundTiming isNotEqualTo []) then {
+																{
+																	_x params ["_start", "_point", "_type", "_sound"];
 
-																if ((_time >= _start) && (_time <= _end)) then {
-																	_unit setFatigue (
-																		(
-																			(getFatigue _unit) + 
-																			(
-																		 		((getNumber (_meleeTypeConfig >> _parry >> "cost")) / (count _parryTiming)) * 
-																		 		KH_var_meleeAbsoluteParryStaminaConsumptionMultiplier * 
-																		 		KH_var_meleeAbsoluteStaminaConsumptionMultiplier
-																			)
-																		) min 1
-																	);
+																	if (_time >= _start) then {
+																		private _sound = getArray (_meleeTypeConfig >> _type >> "Sounds" >> _sound);
 
-																	{
-																		if ((abs ((((_unit getRelDir _x) + 180) % 360) - 180)) <= (getNumber (_meleeTypeConfig >> _parry >> "angle"))) then {
-																			_parriedUnits pushBackUnique _x;
-																		}
-																		else {
-																			if (_x in _parriedUnits) then {
-																				_parriedUnits deleteAt (_parriedUnits find _x);
-																			};
+																		if (_sound isNotEqualTo []) then {
+																			playSound3D [
+																				((getArray (configFile >> "CfgSounds" >> (selectRandom _sound) >> "sound")) select 0) select [1], 
+																				_unit, 
+																				(insideBuilding _unit) >= 0.5, 
+																				_unit modelToWorldVisualWorld (_unit selectionPosition _point), 
+																				1, 
+																				1, 
+																				100, 
+																				0, 
+																				false
+																			];
 																		};
-																	} forEach _nearUnits;
 
-																	if (_previousParries isNotEqualTo _parriedUnits) then {
-																		_unit setVariable ["KH_var_meleeParriedUnits", _parriedUnits, 2];
-																		_previousParries resize 0;
-																		_previousParries insert [0, _parriedUnits];
+																		_deletionsSound pushBack _forEachIndex;
 																	};
-
-																	if ((_unit getVariable ["KH_var_currentMeleeParry", ""]) isNotEqualTo _parry) then {
-																		_unit setVariable ["KH_var_currentMeleeParry", _parry, _clientType];
-																	};
-
-																	break;
-																}
-																else {
-																	_parriedUnits resize 0;
-
-																	if (_previousParries isNotEqualTo _parriedUnits) then {
-																		_unit setVariable ["KH_var_meleeParriedUnits", [], 2];
-																		_previousParries resize 0;
-																	};
-
-																	if ((_unit getVariable ["KH_var_currentMeleeParry", ""]) isNotEqualTo "") then {
-																		_unit setVariable ["KH_var_currentMeleeParry", "", _clientType];
-																	};
-																};
-															} forEach _parryTiming;
-														};
-
-														if (_kickTiming isNotEqualTo []) then {
-															if !_vectorCorrected then {
-																if _avoidCollision then {
-																	if _collided then {
-																		_unit setPosWorld _previousPosition;
-																	}
-																	else {
-																		private _currentPosition = getPosWorld _unit;
-
-																		if (((_currentPosition vectorDiff _moveThreshold) vectorDotProduct (vectorNormalized _moveVector)) >= 0) then {
-																			_unit setPosWorld _previousPosition;
-																			_this set [9, true];
-																		} 
-																		else {
-																			_this set [7, _currentPosition];
-																		};
-																	};
-
-																	_vectorCorrected = true;
-																};
+																} forEach _soundTiming;
 															};
 
-															private _kickedObjects = [];
-
-															{
-																_x params ["_start", "_point", "_kick"];
-
-																if (_time >= _start) then {
-																	_unit setFatigue (
-																		(
-																			(getFatigue _unit) + 
-																			(
-																		 		((getNumber (_meleeTypeConfig >> _kick >> "cost")) / (count _kickTiming)) * 
-																		 		KH_var_meleeAbsoluteKickStaminaConsumptionMultiplier * 
-																		 		KH_var_meleeAbsoluteStaminaConsumptionMultiplier
-																			)
-																		) min 1
-																	);
-
-																	private _kickIntersections = ([
-																		if (_point isEqualType []) then {
-																			_unit modelToWorldVisualWorld _point;
-																		}
-																		else {
-																			_unit modelToWorldVisualWorld (_unit selectionPosition _point);
-																		}, 
-																		[0.5, "0.5", 0.5],
-																		"OVAL",
-																		5,
-																		[_unit, "TERRAIN"] + (attachedObjects _unit),
-																		true, 
-																		-1, 
-																		"FIRE", 
-																		"NONE",
-																		true,
-																		[[], ["LINE", [], 1]] select KH_var_meleeDebugMode
-																	] call KH_fnc_raycast3d) select 0;
-
-																	if (_kickIntersections isNotEqualTo []) then {
-																		{
-																			private _object = _x select 3;
-
-																			if ((_object in _handledKick) || (((side (group _object)) isEqualTo (side (group _unit))) && KH_var_meleeKickIgnoreFriendlies)) then {
-																				continue;
-																			};
-
-																			_kickedObjects pushBack [_object, ((_x select 4) select {"hit" in _x;}) param [0, selectRandom ((_object selectionNames "FireGeometry") select {"hit" in _x;})], _x select 0, _kick];
-																			_handledKick pushBack _object;
-																		} forEach _kickIntersections;
-																	};
-
-																	if ((_unit getVariable ["KH_var_currentMeleeKick", ""]) isNotEqualTo _kick) then {
-																		_unit setVariable ["KH_var_currentMeleeKick", _kick, _clientType];
-																	};
-
-																	_deletionsKick pushBack _forEachIndex;
-																};
-															} forEach _kickTiming;
-
-															{
-																_x params ["_object", "_selection", "_position", "_kick"];
-
-																[
-																	"KH_eve_meleeInternalGotKicked", 
-																	[_object, _unit, _selection, _position, _kick],
-																	[_object, "SERVER"] select (isPlayer _object),
-																	false
-																] call KH_fnc_triggerCbaEvent;
-															} forEach _kickedObjects;
-														};
-
-														if (_tackleTiming isNotEqualTo []) then {
-															if !_vectorCorrected then {
-																if _avoidCollision then {
-																	if _collided then {
-																		_unit setPosWorld _previousPosition;
-																	}
-																	else {
-																		private _currentPosition = getPosWorld _unit;
-
-																		if (((_currentPosition vectorDiff _moveThreshold) vectorDotProduct (vectorNormalized _moveVector)) >= 0) then {
-																			_unit setPosWorld _previousPosition;
-																			_this set [9, true];
-																		} 
-																		else {
-																			_this set [7, _currentPosition];
-																		};
-																	};
-
-																	_vectorCorrected = true;
-																};
-															};
-
-															private _tackledObjects = [];
-
-															{
-																_x params ["_start", "_end", "_tackle"];
-
-																if ((_time >= _start) && (_time <= _end)) then {
-																	_unit setFatigue (
-																		(
-																			(getFatigue _unit) + 
-																			(
-																		 		((getNumber (_meleeTypeConfig >> _tackle >> "cost")) / (count _tackleTiming)) * 
-																		 		KH_var_meleeAbsoluteTackleStaminaConsumptionMultiplier * 
-																		 		KH_var_meleeAbsoluteStaminaConsumptionMultiplier
-																			)
-																		) min 1
-																	);
-
-																	private _aimPosition = (AGLToASL (unitAimPositionVisual _unit)) vectorAdd ((vectorDir _unit) vectorMultiply 0.25);
-
-																	private _lineIntersections = [
-																		_aimPosition, 
-																		_aimPosition vectorAdd ((vectorDir _unit) vectorMultiply 0.5), 
-																		[_unit, "TERRAIN"] + (attachedObjects _unit),
-																		true, 
-																		-1, 
-																		"FIRE", 
-																		"GEOM", 
-																		true,
-																		[[], ["LINE", [], 1]] select KH_var_meleeDebugMode
-																	] call KH_fnc_raycast;
-
-																	if (_lineIntersections isNotEqualTo []) then {
-																		{
-																			private _object = _x select 3;
-
-																			if ((_object in _handledTackle) || (((side (group _object)) isEqualTo (side (group _unit))) && KH_var_meleeTackleIgnoreFriendlies)) then {
-																				continue;
-																			};
-
-																			_tackledObjects pushBack [_object, _tackle];
-																			_handledTackle pushBack _object;
-																		} forEach _lineIntersections;
-																	};
-
-																	private _tackleIntersections = ([
-																		_aimPosition, 
-																		[0.5, 0.5, "1"],
-																		"OVAL",
-																		5,
-																		[_unit, "TERRAIN"] + (attachedObjects _unit),
-																		true, 
-																		-1, 
-																		"FIRE", 
-																		"GEOM",
-																		true,
-																		[[], ["LINE", [], 1]] select KH_var_meleeDebugMode
-																	] call KH_fnc_raycast3d) select 0;
-
-																	if (_tackleIntersections isNotEqualTo []) then {
-																		{
-																			private _object = _x select 3;
-
-																			if ((_object in _handledTackle) || (((side (group _object)) isEqualTo (side (group _unit))) && KH_var_meleeTackleIgnoreFriendlies)) then {
-																				continue;
-																			};
-
-																			_tackledObjects pushBack [_x select 3, _tackle];
-																			_handledTackle pushBack _object;
-																		} forEach _tackleIntersections;
-																	};
-
-																	if ((_unit getVariable ["KH_var_currentMeleeTackle", ""]) isNotEqualTo _tackle) then {
-																		_unit setVariable ["KH_var_currentMeleeTackle", _tackle, _clientType];
-																	};
-
-																	break;
-																}
-																else {
-																	if ((_unit getVariable ["KH_var_currentMeleeTackle", ""]) isNotEqualTo "") then {
-																		_unit setVariable ["KH_var_currentMeleeTackle", "", _clientType];
-																	};
-																};
-															} forEach _tackleTiming;
-
-															{
-																_x params ["_object", "_tackle"];
-
-																[
-																	"KH_eve_meleeInternalGotTackled", 
-																	[_object, _unit, _tackle],
-																	[_object, "SERVER"] select (isPlayer _object),
-																	false
-																] call KH_fnc_triggerCbaEvent;
-															} forEach _tackledObjects;
-														};
-
-														if (_dodgeTiming isNotEqualTo []) then {
-															if !_vectorCorrected then {
-																if _avoidCollision then {
-																	if _collided then {
-																		_unit setPosWorld _previousPosition;
-																	}
-																	else {
-																		private _currentPosition = getPosWorld _unit;
-
-																		if (((_currentPosition vectorDiff _moveThreshold) vectorDotProduct (vectorNormalized _moveVector)) >= 0) then {
-																			_unit setPosWorld _previousPosition;
-																			_this set [9, true];
-																		} 
-																		else {
-																			_this set [7, _currentPosition];
-																		};
-																	};
-
-																	_vectorCorrected = true;
-																};
-															};
-															
-															{
-																_x params ["_start", "_end", "_direction"];
-
-																if ((_time >= _start) && (_time <= _end)) then {
-																	_unit setFatigue (
-																		(
-																			(getFatigue _unit) + 
-																			(
-																		 		((getNumber ((configOf _unit) >> "kh_meleeDodgeCost")) / (count _dodgeTiming)) * 
-																		 		KH_var_meleeAbsoluteDodgeStaminaConsumptionMultiplier * 
-																		 		KH_var_meleeAbsoluteStaminaConsumptionMultiplier
-																			)
-																		) min 1
-																	);
-
-																	if ((_unit getVariable ["KH_var_currentMeleeDodgeDirection", -1]) isNotEqualTo _direction) then {
-																		_unit setVariable ["KH_var_currentMeleeDodgeDirection", _direction, _clientType];
-																	};
-
-																	break;
-																}
-																else {
-																	if ((_unit getVariable ["KH_var_currentMeleeDodgeDirection", -1]) isNotEqualTo "") then {
-																		_unit setVariable ["KH_var_currentMeleeDodgeDirection", -1, _clientType];
-																	};
-																};
-															} forEach _dodgeTiming;
-														};
-
-														if (_soundTiming isNotEqualTo []) then {
-															{
-																_x params ["_start", "_point", "_type", "_sound"];
-
-																if (_time >= _start) then {
-																	private _sound = getArray (_meleeTypeConfig >> _type >> "Sounds" >> _sound);
-
-																	if (_sound isNotEqualTo []) then {
-																		playSound3D [
-																			((getArray (configFile >> "CfgSounds" >> (selectRandom _sound) >> "sound")) select 0) select [1], 
-																			_unit, 
-																			(insideBuilding _unit) >= 0.5, 
-																			_unit modelToWorldVisualWorld (_unit selectionPosition _point), 
-																			1, 
-																			1, 
-																			100, 
-																			0, 
-																			false
-																		];
-																	};
-
-																	_deletionsSound pushBack _forEachIndex;
-																};
-															} forEach _soundTiming;
-														};
-
-														_hitTiming deleteAt _deletionsHit;
-														_kickTiming deleteAt _deletionsKick;
-														_soundTiming deleteAt _deletionsSound;
-													},
-													true,
-													0,
-													false
-												] call KH_fnc_execute;
+															_hitTiming deleteAt _deletionsHit;
+															_kickTiming deleteAt _deletionsKick;
+															_soundTiming deleteAt _deletionsSound;
+														},
+														true,
+														0,
+														false
+													] call KH_fnc_execute
+												];
 											}
 											else {
 												if _isMove then {
 													if (_unit getVariable ["KH_var_inMeleeState", false]) then {
 														_unit setVariable ["KH_var_inMeleeState", false, true];
-
-														if (_unit getVariable ["KH_var_meleeMoveActive", false]) then {
-															_unit setVariable ["KH_var_meleeMoveActive", false];
-														};
+														_unit setVariable ["KH_var_meleeMoveActive", false];
 													};
 												}
 												else {
@@ -1103,10 +1124,8 @@ isNil {
 									[],
 									{
 										params ["_unit"];
-										
-										if (_unit getVariable ["KH_var_meleeGestureActive", false]) then {
-											_unit setVariable ["KH_var_meleeGestureActive", false];
-										};
+										_unit setVariable ["KH_var_meleeGestureActive", false];
+										_unit setVariable ["KH_var_attackGestureIndex", -1];
 									}
 								] call KH_fnc_addEventHandler;
 
@@ -1808,123 +1827,23 @@ isNil {
 				while {true;} do {
 					sleep 0.2;
 
-					{
-						private _unit = _x;
-						private _primaryWeapon = primaryWeapon _unit;
-						private _handgunWeapon = handgunWeapon _unit;
-						private _secondaryWeapon = secondaryWeapon _unit;
-						
-						private _meleeWeapon = if ((getText (configFile >> "CfgWeapons" >> _primaryWeapon >> "kh_meleeActions")) isNotEqualTo "") then {
-							((_unit weaponsInfo [_primaryWeapon, false]) select 0) select 0;
-						}
-						else {
-							if ((getNumber (configFile >> "CfgWeapons" >> _handgunWeapon >> "kh_meleeActions")) isNotEqualTo "") then {
-								((_unit weaponsInfo [_handgunWeapon, false]) select 0) select 0;
+					if KH_var_allowAiMelee then {
+						{
+							private _isAgent = _x isEqualType [];
+
+							private _unit = if _isAgent then {
+								_x select 0;
 							}
 							else {
-								if ((getNumber (configFile >> "CfgWeapons" >> _secondaryWeapon >> "kh_meleeActions")) isNotEqualTo "") then {
-									((_unit weaponsInfo [_secondaryWeapon, false]) select 0) select 0;
-								}
-								else {
-									-1;
-								};
+								_x;
 							};
-						};
 
-						if ((_meleeWeapon isNotEqualTo -1) && ((count ([_primaryWeapon, _handgunWeapon, _secondaryWeapon] select {_x isNotEqualTo "";})) isEqualTo 1)) then {
-							[
-								[_unit, _meleeWeapon],
-								{
-									params ["_unit", "_meleeWeapon"];
-
-									if !(_unit getVariable ["KH_var_aiIsMelee", false]) then {
-										_unit setVariable ["KH_var_aiIsMelee", true, true];
-
-										_unit setVariable [
-											"KH_var_aiPreMeleeFeatures", 
-											[
-												_unit checkAIFeature "AUTOTARGET",
-												_unit checkAIFeature "AIMINGERROR",
-												_unit checkAIFeature "TARGET",
-												_unit checkAIFeature "WEAPONAIM",
-												_unit checkAIFeature "FSM",
-												_unit checkAIFeature "AUTOCOMBAT",
-												_unit checkAIFeature "COVER",
-												_unit checkAIFeature "SUPPRESSION",
-												_unit checkAIFeature "FIREWEAPON"
-											]
-										];
-
-										_unit setVariable [
-											"KH_var_aiPreMeleeSkill", 
-											[
-												_unit skill "aimingAccuracy",
-												_unit skill "aimingShake",
-												_unit skill "aimingSpeed",
-												_unit skill "spotDistance",
-												_unit skill "spotTime",
-												_unit skill "courage",
-												_unit skill "reloadSpeed",
-												_unit skill "commanding",
-												_unit skill "general"
-											]
-										];
-
-										_unit setVariable ["KH_var_aiPreMeleeBehaviour", behaviour _unit];
-										_unit setVariable ["KH_var_aiPreMeleeCombatMode", combatMode _unit];
-										_unit setVariable ["KH_var_aiPreMeleeStance", unitPos _unit];
-										_unit enableAIFeature ["AUTOTARGET", false];
-										_unit enableAIFeature ["AIMINGERROR", false];
-										_unit enableAIFeature ["TARGET", false];
-										_unit enableAIFeature ["WEAPONAIM", false];
-										_unit enableAIFeature ["FSM", false];
-										_unit enableAIFeature ["AUTOCOMBAT", false];
-										_unit enableAIFeature ["COVER", false];
-										_unit enableAIFeature ["SUPPRESSION", false];
-										_unit enableAIFeature ["FIREWEAPON", false];
-										_unit setSkill ["aimingAccuracy", 0];
-										_unit setSkill ["aimingShake", 0];
-										_unit setSkill ["aimingSpeed", 1];
-										_unit setSkill ["spotDistance", 0];
-										_unit setSkill ["spotTime", 0];
-										_unit setSkill ["courage", 1];
-										_unit setSkill ["reloadSpeed", 0];
-										_unit setSkill ["commanding", 0];
-										_unit setSkill ["general", 1];
-										_unit setBehaviourStrong "CARELESS";
-										_unit setUnitCombatMode "BLUE";
-										_unit setUnitPos "UP";
-										_unit action ["SwitchWeapon", _unit, _unit, _meleeWeapon];
-									};
-
-									private _closestTarget = _unit findNearestEnemy (getPosATL _unit);
-
-									if !(isNull _closestTarget) then {
-										if ((_unit distance _closestTarget) <= KH_var_meleeAiEngageDistance) then {
-											_unit lookAt _closestTarget;
-											_unit move (getPosATL _closestTarget);
-
-											if (((_unit distance _closestTarget) <= 2) && ((abs ((((_unit getRelDir _closestTarget) + 180) % 360) - 180)) <= 22.5)) then {
-												if ((random 1) <= 0.1) then {
-													[_unit, "CYCLE_ATTACK_MODE"] call KH_fnc_updateMeleeState;
-												};
-
-												[_unit, selectRandomWeighted ["ATTACK", 1, "PARRY", 0.8, "KICK", 0.5, "TACKLE", 0.3, "BLOCK_IN", 0.8, "DODGE", 0.5]] call KH_fnc_updateMeleeState;
-											};
-										};
-									};
-								},
-								true,
-								true,
-								false
-							] call KH_fnc_execute;
-						}
-						else {
-							[
-								[_unit],
-								{
-									params ["_unit"];
-
+							private _primaryWeapon = primaryWeapon _unit;
+							private _handgunWeapon = handgunWeapon _unit;
+							private _secondaryWeapon = secondaryWeapon _unit;
+							
+							if ((count ([_primaryWeapon, _handgunWeapon, _secondaryWeapon] select {_x isNotEqualTo "";})) isNotEqualTo 1) then {
+								isNil {
 									if (_unit getVariable ["KH_var_aiIsMelee", false]) then {
 										_unit setVariable ["KH_var_aiIsMelee", false, true];
 										private _aiFeatures = _unit getVariable ["KH_var_aiPreMeleeFeatures", []];
@@ -1932,7 +1851,7 @@ isNil {
 
 										{
 											_unit enableAIFeature [_x, _aiFeatures param [_forEachIndex, true]];
-										} forEach ["AUTOTARGET", "AIMINGERROR", "TARGET", "WEAPONAIM", "FSM", "AUTOCOMBAT", "COVER", "SUPPRESSION", "FIREWEAPON"];
+										} forEach ["AUTOTARGET", "AIMINGERROR", "TARGET", "WEAPONAIM", "FSM", "AUTOCOMBAT", "COVER", "SUPPRESSION", "FIREWEAPON", "RADIOPROTOCOL"];
 
 										{
 											_unit setSkill [_x, _aiSkill param [_forEachIndex, 1]];
@@ -1941,15 +1860,200 @@ isNil {
 										_unit setBehaviourStrong ((_unit getVariable ["KH_var_aiPreMeleeBehaviour", "SAFE"]));
 										_unit setUnitCombatMode ((_unit getVariable ["KH_var_aiPreMeleeCombatMode", "YELLOW"]));
 										_unit setUnitPos ((_unit getVariable ["KH_var_aiPreMeleeStance", "UP"]));
+										_unit doFollow (leader (group _unit));
 										_unit action ["SwitchWeapon", _unit, _unit, 299];
 									};
-								},
-								true,
-								true,
-								false
-							] call KH_fnc_execute;
-						};
-					} forEach (allUnits select {(!(isPlayer _x) && (isNull (remoteControlled _x)) && (local _x));});
+								};
+							}
+							else {
+								private _meleeWeapon = if ((getText (configFile >> "CfgWeapons" >> _primaryWeapon >> "kh_meleeActions")) isNotEqualTo "") then {
+									((_unit weaponsInfo [_primaryWeapon, false]) param [0, []]) param [0, -1];
+								}
+								else {
+									if ((getNumber (configFile >> "CfgWeapons" >> _handgunWeapon >> "kh_meleeActions")) isNotEqualTo "") then {
+										((_unit weaponsInfo [_handgunWeapon, false]) param [0, []]) param [0, -1];
+									}
+									else {
+										if ((getNumber (configFile >> "CfgWeapons" >> _secondaryWeapon >> "kh_meleeActions")) isNotEqualTo "") then {
+											((_unit weaponsInfo [_secondaryWeapon, false]) param [0, []]) param [0, -1];
+										}
+										else {
+											-1;
+										};
+									};
+								};
+
+								if (_meleeWeapon isNotEqualTo -1) then {
+									isNil {
+										if !(_unit getVariable ["KH_var_aiIsMelee", false]) then {
+											_unit setVariable ["KH_var_aiIsMelee", true, true];
+
+											_unit setVariable [
+												"KH_var_aiPreMeleeFeatures", 
+												[
+													_unit checkAIFeature "AUTOTARGET",
+													_unit checkAIFeature "AIMINGERROR",
+													_unit checkAIFeature "TARGET",
+													_unit checkAIFeature "WEAPONAIM",
+													_unit checkAIFeature "FSM",
+													_unit checkAIFeature "AUTOCOMBAT",
+													_unit checkAIFeature "COVER",
+													_unit checkAIFeature "SUPPRESSION",
+													_unit checkAIFeature "FIREWEAPON",
+													_unit checkAIFeature "RADIOPROTOCOL"
+												]
+											];
+
+											_unit setVariable [
+												"KH_var_aiPreMeleeSkill", 
+												[
+													_unit skill "aimingAccuracy",
+													_unit skill "aimingShake",
+													_unit skill "aimingSpeed",
+													_unit skill "spotDistance",
+													_unit skill "spotTime",
+													_unit skill "courage",
+													_unit skill "reloadSpeed",
+													_unit skill "commanding",
+													_unit skill "general"
+												]
+											];
+
+											_unit setVariable ["KH_var_aiPreMeleeBehaviour", behaviour _unit];
+											_unit setVariable ["KH_var_aiPreMeleeCombatMode", combatMode _unit];
+											_unit setVariable ["KH_var_aiPreMeleeStance", unitPos _unit];
+											_unit enableAIFeature ["AUTOTARGET", false];
+											_unit enableAIFeature ["AIMINGERROR", false];
+											_unit enableAIFeature ["TARGET", false];
+											_unit enableAIFeature ["WEAPONAIM", false];
+											_unit enableAIFeature ["FSM", false];
+											_unit enableAIFeature ["AUTOCOMBAT", false];
+											_unit enableAIFeature ["COVER", false];
+											_unit enableAIFeature ["SUPPRESSION", false];
+											_unit enableAIFeature ["FIREWEAPON", false];
+											_unit enableAIFeature ["RADIOPROTOCOL", false];
+											_unit setSkill ["aimingAccuracy", 0];
+											_unit setSkill ["aimingShake", 0];
+											_unit setSkill ["aimingSpeed", 1];
+											_unit setSkill ["spotDistance", 1];
+											_unit setSkill ["spotTime", 1];
+											_unit setSkill ["courage", 1];
+											_unit setSkill ["reloadSpeed", 0];
+											_unit setSkill ["commanding", 1];
+											_unit setSkill ["general", 1];
+											_unit setBehaviourStrong "CARELESS";
+											_unit setUnitCombatMode "BLUE";
+											_unit setUnitPos "UP";
+
+											if _isAgent then {
+												_unit setDestination [getPosATL _unit, "DoNotPlan", true];
+											}
+											else {
+												doStop _unit;
+											};
+
+											_unit action ["SwitchWeapon", _unit, _unit, _meleeWeapon];
+										};
+									};
+
+									private _closestTarget = _unit findNearestEnemy (getPosATL _unit);
+
+									if !(isNull _closestTarget) then {
+										if ((_unit distance _closestTarget) <= KH_var_meleeAiEngageDistance) then {
+											_unit lookAt _closestTarget;
+
+											if ((_unit distance _closestTarget) <= (selectRandom [3, 2.5, 2])) then {
+												if _isAgent then {
+													_unit setDestination [getPosATL _unit, "DoNotPlan", true];
+												}
+												else {
+													doStop _unit;
+												};
+												
+												if ((abs ((((_unit getRelDir _closestTarget) + 180) % 360) - 180)) <= (selectRandom [22.5, 11.25])) then {
+													if ((random 1) <= 0.2) then {
+														isNil {
+															[_unit, "CYCLE_ATTACK_MODE"] call KH_fnc_updateMeleeState;
+														};
+													};
+
+													private _moves = getText ((configOf _closestTarget) >> "moves");
+													private _moveAction = getText (configFile >> _moves >> "states" >> (animationState _closestTarget) >> "kh_meleeMainAction");
+													private _gestureAction = getText (configFile >> (getText (configFile >> _moves >> "gestures")) >> "states" >> (gestureState _closestTarget) >> "kh_meleeMainAction");
+													private _finalAction = [_gestureAction, _moveAction] select (_moveAction isNotEqualTo "");
+
+													isNil {
+														if (_finalAction isNotEqualTo "") then {
+															switch _finalAction do {
+																case "attack": {
+																	[_unit, selectRandomWeighted ["ATTACK", 0.75, "PARRY", 1, "BLOCK_IN", 1, selectRandom [["DODGE", "LEFTWARD"], ["DODGE", "RIGHTWARD"], ["DODGE", "BACKWARD"], ["DODGE", "BACKWARD_RIGHTWARD"], ["DODGE", "BACKWARD_LEFTWARD"]], 0.25]] call KH_fnc_updateMeleeState;
+																};
+
+																case "block": {
+																	[_unit, selectRandomWeighted ["ATTACK", 0.25, "KICK", 1, "TACKLE", 1]] call KH_fnc_updateMeleeState;
+																};
+															
+																case "parry": {
+																	[_unit, selectRandomWeighted ["ATTACK", 0.25, "KICK", 1, "TACKLE", 1, "STOP", 0.25]] call KH_fnc_updateMeleeState;
+																};
+
+																case "dodge": {
+																	[_unit, selectRandomWeighted ["ATTACK", 1, "TACKLE", 0.5, "STOP", 0.25]] call KH_fnc_updateMeleeState;
+																};
+
+																case "kick": {
+																	[_unit, selectRandomWeighted ["ATTACK", 0.25, "BLOCK", 0.5, selectRandom [["DODGE", "LEFTWARD"], ["DODGE", "RIGHTWARD"], ["DODGE", "BACKWARD"], ["DODGE", "BACKWARD_RIGHTWARD"], ["DODGE", "BACKWARD_LEFTWARD"]], 1]] call KH_fnc_updateMeleeState;
+																};
+
+																case "tackle": {
+																	[_unit, selectRandomWeighted ["ATTACK", 0.5, selectRandom [["DODGE", "LEFTWARD"], ["DODGE", "RIGHTWARD"], ["DODGE", "BACKWARD"], ["DODGE", "BACKWARD_RIGHTWARD"], ["DODGE", "BACKWARD_LEFTWARD"]], 1]] call KH_fnc_updateMeleeState;
+																};
+															};
+														}
+														else {
+															[_unit, selectRandomWeighted ["ATTACK", 1, "PARRY", 0.75, "KICK", 0.5, "TACKLE", 0.3, "BLOCK_IN", 0.75, selectRandom [["DODGE", "LEFTWARD"], ["DODGE", "RIGHTWARD"], ["DODGE", "BACKWARD"], ["DODGE", "BACKWARD_RIGHTWARD"], ["DODGE", "BACKWARD_LEFTWARD"]], 0.5]] call KH_fnc_updateMeleeState;
+														};
+													};
+												};
+											}
+											else {
+												if _isAgent then {
+													_unit setDestination [getPosATL _closestTarget, "LEADER PLANNED", true];
+												}
+												else {
+													_unit doMove (getPosATL _closestTarget);
+												};
+											};
+										};
+									};
+								}
+								else {
+									isNil {
+										params ["_unit"];
+
+										if (_unit getVariable ["KH_var_aiIsMelee", false]) then {
+											_unit setVariable ["KH_var_aiIsMelee", false, true];
+											private _aiFeatures = _unit getVariable ["KH_var_aiPreMeleeFeatures", []];
+											private _aiSkill = _unit getVariable ["KH_var_aiPreMeleeSkill", []];
+
+											{
+												_unit enableAIFeature [_x, _aiFeatures param [_forEachIndex, true]];
+											} forEach ["AUTOTARGET", "AIMINGERROR", "TARGET", "WEAPONAIM", "FSM", "AUTOCOMBAT", "COVER", "SUPPRESSION", "FIREWEAPON", "RADIOPROTOCOL"];
+
+											{
+												_unit setSkill [_x, _aiSkill param [_forEachIndex, 1]];
+											} forEach ["aimingAccuracy", "aimingShake", "aimingSpeed", "spotDistance", "spotTime", "courage", "reloadSpeed", "commanding", "general"];
+
+											_unit setBehaviourStrong ((_unit getVariable ["KH_var_aiPreMeleeBehaviour", "SAFE"]));
+											_unit setUnitCombatMode ((_unit getVariable ["KH_var_aiPreMeleeCombatMode", "YELLOW"]));
+											_unit setUnitPos ((_unit getVariable ["KH_var_aiPreMeleeStance", "UP"]));
+											_unit action ["SwitchWeapon", _unit, _unit, 299];
+										};
+									};
+								};
+							};
+						} forEach ((allUnits select {(!(isPlayer _x) && (isNull (remoteControlled _x)) && (local _x));}) + ((agents apply {[agent _x];}) select {local (_x select 0);}));
+					};
 				};
 			};
 		},

@@ -26,8 +26,8 @@ class CfgWeapons
         };
         class WeaponSlotsInfo
         {
-            allowedSlots[] = {};
-            mass = 100;
+            allowedslots[] = {701, 801, 901};
+            mass = 50;
         };
         class DefaultMode
         {
@@ -105,28 +105,36 @@ class CfgWeapons
 		hiddenSelectionsTextures[] = {
 			"x\kh\addons\main\textures\weapons\SwordGeneric01_CO.paa"
 		};
+        class WeaponSlotsInfo: WeaponSlotsInfo
+        {
+            mass = 25;
+        };
 	};
-	class KH_KnifeM3: KH_MeleeWeaponTertiaryBase
+	class KH_KnifeM9: KH_MeleeWeaponTertiaryBase
 	{
         author = "Kharos";
 		scope = 2;
-		displayName = "Knife M3";
+		displayName = "Knife M9";
 		handAnim[] = {"OFP2_ManSkeleton", "\x\kh\addons\main\animations\human\Hum_AbsStaSaf_IdlLhtMel.rtm"};
-        overviewPicture = "\x\kh\addons\main\ui\knife_m3.paa";
-        picture = "\x\kh\addons\main\ui\knife_m3.paa";
+        overviewPicture = "\x\kh\addons\main\ui\knife_m9.paa";
+        picture = "\x\kh\addons\main\ui\knife_m9.paa";
         kh_meleeActions = "KH_MeleeInLightSword";
         kh_meleeType = "KH_MeleeCleavingSharpLightShort";
         kh_meleeModes[] = {"KH_MeleeAttack01", "KH_MeleeAttack02"};
         kh_meleeModesGestures[] = {{"KH_MeleeAttack01AGesture", "KH_MeleeAttack01BGesture"}, {}};
-		model = "\x\kh\addons\main\models\SM_KnifeM3.p3d";
+		model = "\x\kh\addons\main\models\SM_KnifeM9.p3d";
 		hiddenSelections[] = {
 			"mat_knife"
 		};
 		hiddenSelectionsMaterials[] = {
-			"x\kh\addons\main\materials\weapons\KnifeM3.rvmat"
+			"x\kh\addons\main\materials\weapons\KnifeM9.rvmat"
 		};
 		hiddenSelectionsTextures[] = {
-			"x\kh\addons\main\textures\weapons\KnifeM3_CO.paa"
+			"x\kh\addons\main\textures\weapons\KnifeM9_CO.paa"
 		};
+        class WeaponSlotsInfo: WeaponSlotsInfo
+        {
+            mass = 5;
+        };
 	};
 };

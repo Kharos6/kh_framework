@@ -1772,8 +1772,19 @@ if hasInterface then {
 		[],
 		{
 			if ((KH_var_playerUnit getVariable ["KH_var_meleeMode", ""]) isNotEqualTo "") then {
-				if (!dialog && !visibleMap && (isNull curatorCamera)) then {
-					[KH_var_playerUnit, "ATTACK"] call KH_fnc_updateMeleeState;
+				if (!dialog && !visibleMap) then {
+					private _continue = true;
+
+					{
+						if (((_x select 0) isNotEqualTo KH_var_playerUnit) && (_x select 2)) then {
+							_continue = false;
+							break;
+						};
+					} forEach allCameras;
+
+					if _continue then {
+						[KH_var_playerUnit, "ATTACK"] call KH_fnc_updateMeleeState;
+					};
 				};
 			};
 		}

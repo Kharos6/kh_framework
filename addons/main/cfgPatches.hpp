@@ -34,7 +34,7 @@ class CfgPatches
 		};
 		weapons[] = {
 			"KH_SwordGeneric01",
-			"KH_KnifeM3"
+			"KH_KnifeM9"
 		};
 		requiredVersion = 2.20;
 		requiredAddons[] = {"cba_main", "Intercept_Core"};

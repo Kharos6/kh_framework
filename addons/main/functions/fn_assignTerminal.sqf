@@ -15,35 +15,39 @@ missionNamespace setVariable [_identifier, false, true];
 		"((_this distance _target) < 4)",
 		["(!(missionNamespace getVariable '", _identifier, "') && (call ", _condition, ") && ((_caller distance _target) < 4))"] joinString "",
 		{
-			private _args = param [3];
-			private _identifier = _args param [1];
-			private _condition = _args param [7];
+			isNil {
+				private _args = param [3];
+				private _identifier = _args param [1];
+				private _condition = _args param [7];
 
-			if (missionNamespace getVariable _identifier) then {
-				systemChat "Someone is already using this terminal.";
-			};
+				if (missionNamespace getVariable _identifier) then {
+					systemChat "Someone is already using this terminal.";
+				};
 
-			if !(call _condition) then {
-				systemChat "I cannot access this terminal.";
+				if !(call _condition) then {
+					systemChat "I cannot access this terminal.";
+				};
 			};
 		},
 		{},
 		{
-			private _args = param [3];
-			_args params ["_entity", "_identifier", "_identifierOutput", "_identifierInput", "_name", "_description", "_function"];
+			isNil {
+				private _args = param [3];
+				_args params ["_entity", "_identifier", "_identifierOutput", "_identifierInput", "_name", "_description", "_function"];
 
-			[
-				[_identifier],
-				{
-					params ["_identifier"];
-					missionNamespace setVariable [_identifier, true, true];
-				},
-				"SERVER",
-				true,
-				false
-			] call KH_fnc_execute;
+				[
+					[_identifier],
+					{
+						params ["_identifier"];
+						missionNamespace setVariable [_identifier, true, true];
+					},
+					"SERVER",
+					true,
+					false
+				] call KH_fnc_execute;
 
-			[_entity, _identifier, _identifierOutput, _identifierInput, _name, _description, _function] call KH_fnc_openTerminal;
+				[_entity, _identifier, _identifierOutput, _identifierInput, _name, _description, _function] call KH_fnc_openTerminal;
+			};
 		},
 		{},
 		[_object, _identifier, _identifierOutput, _identifierInput, _name, _description, _function, _condition],

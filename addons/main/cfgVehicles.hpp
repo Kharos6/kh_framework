@@ -11,7 +11,7 @@ class CfgVehicles
 		kh_meleeType = "KH_MeleeGenericMan";
 		kh_meleeActions = "";
 		kh_meleeSoundType = "Flesh";
-		kh_meleeDodgeCost = 0.2;
+		kh_meleeDodgeCost = 0.15;
 		kh_meleeSurfaceBlockPower = 0;
 		kh_meleeModes[] = {"KH_MeleeAttack01", "KH_MeleeAttack02"};
 	}; 
@@ -43,25 +43,25 @@ class CfgVehicles
 			};
 		};
 	};
-	class KH_KnifeM3: KH_MeleeWeaponTertiaryBase
+	class KH_KnifeM9: KH_MeleeWeaponTertiaryBase
 	{
 		author = "Kharos";
-		model = "\x\kh\addons\main\models\SM_KnifeM3.p3d";
+		model = "\x\kh\addons\main\models\SM_KnifeM9.p3d";
 		hiddenSelections[] = {
 			"mat_knife"
 		};
 		hiddenSelectionsMaterials[] = {
-			"x\kh\addons\main\materials\weapons\KnifeM3.rvmat"
+			"x\kh\addons\main\materials\weapons\KnifeM9.rvmat"
 		};
 		hiddenSelectionsTextures[] = {
-			"x\kh\addons\main\textures\weapons\KnifeM3_CO.paa"
+			"x\kh\addons\main\textures\weapons\KnifeM9_CO.paa"
 		};
 		class TransportWeapons
 		{
-			class KH_KnifeM3
+			class KH_KnifeM9
 			{
 				count = 1;
-				weapon = "KH_KnifeM3";
+				weapon = "KH_KnifeM9";
 			};
 		};
 	};
@@ -299,6 +299,7 @@ class CfgVehicles
 	#include "\x\kh\addons\main\vehicles\modules\aiInstanceSetup.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\assignIdentificationCard.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\assignTerminal.hpp"
+	#include "\x\kh\addons\main\vehicles\modules\assignVehicleSpawner.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\dynamicDisguise.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\dynamicDisguiseEquipment.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\editTerrainHeight.hpp"

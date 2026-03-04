@@ -2361,7 +2361,9 @@ static void initialize_lua_state() {
                 }
                 
                 // Convert args based on count
-                if (args.size() == 1) {
+                if (args.size() == 0) {
+                    return convert_game_value_to_lua(raw_call_sqf_native(compiled));
+                } else if (args.size() == 1) {
                     return convert_game_value_to_lua(
                         raw_call_sqf_args_native(compiled, convert_lua_to_game_value(args[0]))
                     );

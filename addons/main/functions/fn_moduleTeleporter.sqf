@@ -29,8 +29,10 @@ isNil {
                                 {},
                                 {},
                                 {
-                                    (_this select 3) params ["_position", "_rotation", "_transition", "_freefallHeight", "_init"];
-                                    [_caller, _position, _rotation, false, _transition, _freefallHeight, _init] call KH_fnc_teleport;
+                                    isNil {
+                                        (_this select 3) params ["_position", "_rotation", "_transition", "_freefallHeight", "_init"];
+                                        [_caller, _position, _rotation, false, _transition, _freefallHeight, _init] call KH_fnc_teleport;
+                                    };
                                 },
                                 {},
                                 [_position, _rotation, _transition, _freefallHeight, _init],

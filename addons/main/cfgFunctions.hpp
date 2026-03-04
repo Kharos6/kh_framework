@@ -13,6 +13,7 @@ class CfgFunctions
 			class assignIdentificationCard {};
 			class assignParachute {};
 			class assignTerminal {};
+			class assignVehicleSpawner {};
 			class attach {};
 			class breakDisguise {};
 			class callSerializedFunction {};
@@ -82,6 +83,7 @@ class CfgFunctions
 			class moduleAiInstanceSetup {};
 			class moduleAssignIdentificationCard {};
 			class moduleAssignTerminal {};
+			class moduleAssignVehicleSpawner {};
 			class moduleDynamicDisguise {};
 			class moduleDynamicDisguiseEquipment {};
 			class moduleEditTerrainHeight {};
@@ -144,6 +146,7 @@ class CfgFunctions
 			class simulateHit {};
 			class teleport {};
 			class toggleUserInput {};
+			class traverseObstacle {};
 			class triggerCbaEvent {};
 			class updateAiInstance {};
 			class updateMeleeState {};

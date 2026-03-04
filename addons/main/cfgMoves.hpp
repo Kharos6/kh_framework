@@ -4,6 +4,7 @@ class CfgMovesBasic
     class Default
     {
         kh_melee = 0;
+        kh_meleeHasAction = 0;
         kh_meleeHitTiming[] = {};
         kh_meleeBlockTiming[] = {};
         kh_meleeParryTiming[] = {};
@@ -14,13 +15,25 @@ class CfgMovesBasic
         kh_meleeAttackPhase = 0;
         kh_meleeKickPhase = 0;
         kh_meleeTacklePhase = 0;
+        kh_meleeMainAction = "";
         kh_meleeActionGestureExclusive = 0;
+        kh_traversal = 0;
+        kh_traversalTeleport = 1;
     };
     class ManActions
     {
+        KH_GestureNone[] = {"KH_GestureNone", "Gesture"};
         KH_MeleeInLightSword = "Hum_AbsStaSaf_IdlLhtMel";
         KH_MeleeInLightSwordTransition = "Hum_AbsStaSaf_IdlUna_Tra_AbsStaSaf_IdlLhtMel";
         KH_MeleeDodge = "";
+        KH_MeleeDodgeForward = "";
+        KH_MeleeDodgeForwardLeftward = "";
+        KH_MeleeDodgeForwardRightward = "";
+        KH_MeleeDodgeBackward = "";
+        KH_MeleeDodgeBackwardLeftward = "";
+        KH_MeleeDodgeBackwardRightward = "";
+        KH_MeleeDodgeLeftward = "";
+        KH_MeleeDodgeRightward = "";
         KH_MeleeBlockGesture[] = {"", "Gesture"};
         KH_MeleeBlockIn = "";
         KH_MeleeBlockOut = "";
@@ -70,6 +83,15 @@ class CfgMovesBasic
         KH_StaggerHeavyBackwardRightward = "";
         KH_StaggerHeavyLeftward = "";
         KH_StaggerHeavyRightward = "";
+        KH_TraversalJump = "Hum_AbsStaAny_JmpFwdRfl";
+        KH_TraversalClimb0_5m = "Hum_AbsStaAny_Cli05mRfl";
+        KH_TraversalClimb1m = "Hum_AbsStaAny_Cli1mRfl";
+        KH_TraversalClimb1_5m = "Hum_AbsStaAny_Cli1mRfl";
+        KH_TraversalClimb2m = "Hum_AbsStaAny_Cli1mRfl";
+        KH_TraversalVault0_5m = "Hum_AbsStaAny_Cli05mRfl";
+        KH_TraversalVault1m = "Hum_AbsStaAny_Cli1mRfl";
+        KH_TraversalVault1_5m = "Hum_AbsStaAny_Cli1mRfl";
+        KH_TraversalVault2m = "Hum_AbsStaAny_Cli1mRfl";
     };
     class States;
 };
@@ -97,6 +119,14 @@ class CfgMovesMaleSdr: CfgMovesBasic
             FastRF = "Hum_AbsStaCom_RunFwdRwdLhtMel";
             FireNotPossible = "Hum_AbsStaCom_IdlLhtMel";
             KH_MeleeDodge = "Hum_AbsStaCom_DgeBwdLhtMel";
+            KH_MeleeDodgeForward = "Hum_AbsStaCom_DgeFwdLhtMel";
+            KH_MeleeDodgeForwardLeftward = "Hum_AbsStaCom_DgeFwdLhtMel";
+            KH_MeleeDodgeForwardRightward = "Hum_AbsStaCom_DgeFwdLhtMel";
+            KH_MeleeDodgeBackward = "Hum_AbsStaCom_DgeBwdLhtMel";
+            KH_MeleeDodgeBackwardLeftward = "Hum_AbsStaCom_DgeBwdLhtMel";
+            KH_MeleeDodgeBackwardRightward = "Hum_AbsStaCom_DgeBwdLhtMel";
+            KH_MeleeDodgeLeftward = "Hum_AbsStaCom_DgeLwdLhtMel";
+            KH_MeleeDodgeRightward = "Hum_AbsStaCom_DgeRwdLhtMel";
             KH_MeleeBlockGesture[] = {"Hum_AddStaCom_BloLhtMel", "Gesture"};
             KH_MeleeBlockIn = "Hum_AbsStaCom_BloLhtMel";
             KH_MeleeBlockOut = "Hum_AbsStaCom_IdlLhtMel";
@@ -178,7 +208,6 @@ class CfgMovesMaleSdr: CfgMovesBasic
             PlayerWalkRB = "Hum_AbsStaCom_WlkBwdRwdLhtMel";
             PlayerWalkRF = "Hum_AbsStaCom_WlkFwdRwdLhtMel";
             Relax = "Hum_AbsStaCom_IdlLhtMel";
-            SecondaryWeapon = "Hum_AbsStaCom_IdlLhtMel";
             SlowB = "Hum_AbsStaCom_TroBwdLhtMel";
             SlowF = "Hum_AbsStaCom_TroFwdLhtMel";
             SlowL = "Hum_AbsStaCom_TroLwdLhtMel";
@@ -211,7 +240,6 @@ class CfgMovesMaleSdr: CfgMovesBasic
             WalkR = "Hum_AbsStaCom_WlkRwdLhtMel";
             WalkRB = "Hum_AbsStaCom_WlkBwdRwdLhtMel";
             WalkRF = "Hum_AbsStaCom_WlkFwdRwdLhtMel";
-            weaponOn = "Hum_AbsStaCom_IdlLhtMel";
             weaponOff = "Hum_AbsStaCom_IdlLhtMel";
         };
         class KH_MeleeTertiaryLightSwordBlock: KH_MeleeTertiaryLightSwordActions
@@ -223,7 +251,6 @@ class CfgMovesMaleSdr: CfgMovesBasic
             FireNotPossible = "Hum_AbsStaCom_BloLhtMel";
             obstructed = "Hum_AbsStaCom_BloLhtMel";
             Relax = "Hum_AbsStaCom_BloLhtMel";
-            SecondaryWeapon = "Hum_AbsStaCom_BloLhtMel";
             stop = "Hum_AbsStaCom_BloLhtMel";
             stopRelaxed = "Hum_AbsStaCom_BloLhtMel";
             turnL = "Hum_AbsStaCom_BloLhtMel";
@@ -231,7 +258,6 @@ class CfgMovesMaleSdr: CfgMovesBasic
             turnR = "Hum_AbsStaCom_BloLhtMel";
             turnRRelaxed = "Hum_AbsStaCom_BloLhtMel";
             weaponOff = "Hum_AbsStaCom_BloLhtMel";
-            weaponOn = "Hum_AbsStaCom_BloLhtMel";
         };
         class KH_MeleeTertiaryLightSwordForward: KH_MeleeTertiaryLightSwordActions
         {
@@ -453,6 +479,8 @@ class CfgMovesMaleSdr: CfgMovesBasic
             actions = "KH_MeleeTertiaryMeleeLightSwordAttack01A";
             speed = 1.25;
             minPlayTime = 1;
+            kh_meleeMainAction = "attack";
+            kh_meleeHasAction = 1;
             kh_meleeAttackPhase = 1;
             kh_meleeHitTiming[] = {
                 {0.7667, "launcher", {0.571089, 0.327445, 1.878061}, "Attack01", 0},
@@ -489,6 +517,8 @@ class CfgMovesMaleSdr: CfgMovesBasic
             actions = "KH_MeleeTertiaryMeleeLightSwordAttack01B";
             speed = 1.7857125;
             minPlayTime = 1;
+            kh_meleeMainAction = "attack";
+            kh_meleeHasAction = 1;
             kh_meleeAttackPhase = 1;
             kh_meleeHitTiming[] = {
                 {0.6190, "launcher", {-0.184743, 0.285979, 1.863449}, "Attack01", 0},
@@ -524,6 +554,8 @@ class CfgMovesMaleSdr: CfgMovesBasic
             actions = "KH_MeleeTertiaryMeleeLightSwordAttack01C";
             speed = 0.5952375;
             minPlayTime = 0.75;
+            kh_meleeMainAction = "attack";
+            kh_meleeHasAction = 1;
             kh_meleeAttackPhase = 1;
             soundOverride = "Walk";
             soundEdge[] = {0.3, 0.7, 0.9};
@@ -596,6 +628,8 @@ class CfgMovesMaleSdr: CfgMovesBasic
             actions = "KH_MeleeTertiaryMeleeLightSwordAttack02A";
             speed = 1.10294125;
             minPlayTime = 1;
+            kh_meleeMainAction = "attack";
+            kh_meleeHasAction = 1;
             kh_meleeAttackPhase = 1;
             kh_meleeHitTiming[] = {
                 {0.7941, "launcher", {0.228647, 0.809746, 0.936372}, "Attack02", 0},
@@ -632,6 +666,8 @@ class CfgMovesMaleSdr: CfgMovesBasic
             actions = "KH_MeleeTertiaryMeleeLightSwordAttack02B";
             speed = 1.171875;
             minPlayTime = 1;
+            kh_meleeMainAction = "attack";
+            kh_meleeHasAction = 1;
             kh_meleeAttackPhase = 1;
             kh_meleeHitTiming[] = {
                 {0.5938, "launcher", {0.700077, 0.387612, 1.229074}, "Attack02", 0},
@@ -667,6 +703,8 @@ class CfgMovesMaleSdr: CfgMovesBasic
             actions = "KH_MeleeTertiaryMeleeLightSwordAttack02C";
             speed = 0.56818125;
             minPlayTime = 0.6;
+            kh_meleeMainAction = "attack";
+            kh_meleeHasAction = 1;
             kh_meleeAttackPhase = 1;
             kh_meleeHitTiming[] = {
                 {0.1515, "launcher", {0.402936, 0.870261, 1.535653}, "Attack02", 0},
@@ -756,6 +794,8 @@ class CfgMovesMaleSdr: CfgMovesBasic
         {
             actions = "KH_MeleeTertiaryLightSwordBlock";
             speed = 1e+10;
+            kh_meleeMainAction = "block";
+            kh_meleeHasAction = 1;
             kh_meleeBlockTiming[] = {
                 {0, 1, "Block01"}
             };
@@ -787,6 +827,11 @@ class CfgMovesMaleSdr: CfgMovesBasic
         {
             speed = 1.57895;
             minPlayTime = 1;
+            kh_meleeMainAction = "block";
+            kh_meleeHasAction = 1;
+            kh_meleeBlockTiming[] = {
+                {0, 1, "Block01"}
+            };
             file = "x\kh\addons\main\animations\human\Hum_AbsStaCom_BloSucLhtMel.rtm";
             connectTo[] = {
                 "Hum_AbsStaCom_IdlLhtMel", 0.1
@@ -817,8 +862,10 @@ class CfgMovesMaleSdr: CfgMovesBasic
             actions = "KH_MeleeTertiaryLightSwordBackward";
             speed = 1.03448;
             minPlayTime = 0.6;
+            kh_meleeHasAction = 1;
+            kh_meleeMainAction = "dodge";
             kh_meleeDodgeTiming[] = {
-                {0.2, 0.8, 180}
+                {0, 0.9, 180}
             };
             soundOverride = "run";
             soundEdge[] = {0.5, 0.75};
@@ -880,8 +927,10 @@ class CfgMovesMaleSdr: CfgMovesBasic
             actions = "KH_MeleeTertiaryLightSwordForward";
             speed = 1.15385;
             minPlayTime = 0.6;
+            kh_meleeHasAction = 1;
+            kh_meleeMainAction = "dodge";
             kh_meleeDodgeTiming[] = {
-                {0.2, 0.8, 0}
+                {0, 0.9, 0}
             };
             soundOverride = "run";
             soundEdge[] = {0.5, 0.75};
@@ -943,8 +992,10 @@ class CfgMovesMaleSdr: CfgMovesBasic
             actions = "KH_MeleeTertiaryLightSwordLeftward";
             speed = 1.11111;
             minPlayTime = 0.6;
+            kh_meleeHasAction = 1;
+            kh_meleeMainAction = "dodge";
             kh_meleeDodgeTiming[] = {
-                {0.2, 0.8, 270}
+                {0, 0.9, 270}
             };
             soundOverride = "run";
             soundEdge[] = {0.65, 0.85};
@@ -1006,8 +1057,10 @@ class CfgMovesMaleSdr: CfgMovesBasic
             actions = "KH_MeleeTertiaryLightSwordRightward";
             speed = 1.11111;
             minPlayTime = 0.6;
+            kh_meleeHasAction = 1;
+            kh_meleeMainAction = "dodge";
             kh_meleeDodgeTiming[] = {
-                {0.2, 0.8, 90}
+                {0, 0.9, 90}
             };
             soundOverride = "run";
             soundEdge[] = {0.65, 0.8};
@@ -1539,7 +1592,11 @@ class CfgMovesMaleSdr: CfgMovesBasic
         class Hum_AbsStaCom_KckLhtMel: KH_MeleeBespokeBase
         {
             speed = 0.605263;
+            kh_meleeHasAction = 1;
+            kh_meleeMainAction = "kick";
             kh_meleeKickTiming[] = {
+                {0.3157, "RightFoot", "Kick01"},
+                {0.3333, "RightFoot", "Kick01"},
                 {0.35087, "RightFoot", "Kick01"}
             };
             soundOverride = "Walk";
@@ -1602,6 +1659,8 @@ class CfgMovesMaleSdr: CfgMovesBasic
         class Hum_AbsStaCom_ParLhtMel: KH_MeleeBespokeBase
         {
             speed = 0.697674;
+            kh_meleeHasAction = 1;
+            kh_meleeMainAction = "parry";
             kh_meleeParryTiming[] = {
                 {0.1, 0.6, "Parry01"}
             };
@@ -1633,6 +1692,7 @@ class CfgMovesMaleSdr: CfgMovesBasic
         class Hum_AbsStaCom_RclRhtLhtMel: KH_MeleeBespokeBase
         {
             speed = 0.638298;
+            kh_meleeHasAction = 1;
             minPlayTime = 0.9;
             kh_meleeActionGestureExclusive = 1;
             soundOverride = "Walk";
@@ -1827,6 +1887,7 @@ class CfgMovesMaleSdr: CfgMovesBasic
         {
             speed = 0.810811;
             minPlayTime = 1;
+            kh_meleeHasAction = 1;
             kh_meleeActionGestureExclusive = 1;
             soundOverride = "sprint";
             soundEdge[] = {0.62, 0.83};
@@ -1848,6 +1909,7 @@ class CfgMovesMaleSdr: CfgMovesBasic
         {
             speed = 0.9375;
             minPlayTime = 1;
+            kh_meleeHasAction = 1;
             kh_meleeActionGestureExclusive = 1;
             soundOverride = "sprint";
             soundEdge[] = {0.85};
@@ -1869,6 +1931,7 @@ class CfgMovesMaleSdr: CfgMovesBasic
         {
             speed = 0.810811;
             minPlayTime = 1;
+            kh_meleeHasAction = 1;
             kh_meleeActionGestureExclusive = 1;
             soundOverride = "sprint";
             soundEdge[] = {0.54, 0.78};
@@ -1890,6 +1953,7 @@ class CfgMovesMaleSdr: CfgMovesBasic
         {
             speed = 0.909091;
             minPlayTime = 1;
+            kh_meleeHasAction = 1;
             kh_meleeActionGestureExclusive = 1;
             soundOverride = "sprint";
             soundEdge[] = {0.45, 0.78};
@@ -1911,6 +1975,7 @@ class CfgMovesMaleSdr: CfgMovesBasic
         {
             speed = 0.588235;
             minPlayTime = 0.9;
+            kh_meleeHasAction = 1;
             kh_meleeActionGestureExclusive = 1;
             soundOverride = "Walk";
             soundEdge[] = {0.15, 0.5, 0.76};
@@ -1925,6 +1990,7 @@ class CfgMovesMaleSdr: CfgMovesBasic
         {
             speed = 0.491803;
             minPlayTime = 0.9;
+            kh_meleeHasAction = 1;
             kh_meleeActionGestureExclusive = 1;
             soundOverride = "Walk";
             soundEdge[] = {0.15, 0.4, 0.65};
@@ -1939,6 +2005,7 @@ class CfgMovesMaleSdr: CfgMovesBasic
         {
             speed = 0.731707;
             minPlayTime = 0.9;
+            kh_meleeHasAction = 1;
             kh_meleeActionGestureExclusive = 1;
             soundOverride = "Walk";
             soundEdge[] = {0.31, 0.58, 0.82};
@@ -1953,6 +2020,7 @@ class CfgMovesMaleSdr: CfgMovesBasic
         {
             speed = 0.666667;
             minPlayTime = 0.9;
+            kh_meleeHasAction = 1;
             kh_meleeActionGestureExclusive = 1;
             soundOverride = "Walk";
             soundEdge[] = {0.26, 0.57, 0.88};
@@ -1966,6 +2034,8 @@ class CfgMovesMaleSdr: CfgMovesBasic
         class Hum_AbsStaCom_TklLhtMel: KH_MeleeBespokeBase
         {
             speed = 0.588235;
+            kh_meleeHasAction = 1;
+            kh_meleeMainAction = "tackle";
             kh_meleeTackleTiming[] = {
                 {0.3921, 0.6274, "Tackle01"}
             };
@@ -3085,21 +3155,14 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaSaf_IdlLhtMel_Tra_AbsStaCom_IdlLhtMel", 0.1
             };
             interpolateTo[] += {
-                "Hum_AbsStaSaf_IdlLhtMel_Tra_AbsStaSaf_IdlUna", 0.1,
-                "Hum_AbsStaCom_StgHvyBwdLhtMel", 0.1,
-                "Hum_AbsStaCom_StgHvyFwdLhtMel", 0.1,
-                "Hum_AbsStaCom_StgHvyLwdLhtMel", 0.1,
-                "Hum_AbsStaCom_StgHvyRwdLhtMel", 0.1,
-                "Hum_AbsStaCom_StgLhtBwdLhtMel", 0.1,
-                "Hum_AbsStaCom_StgLhtFwdLhtMel", 0.1,
-                "Hum_AbsStaCom_StgLhtLwdLhtMel", 0.1,
-                "Hum_AbsStaCom_StgLhtRwdLhtMel", 0.1
+                "Hum_AbsStaSaf_IdlLhtMel_Tra_AbsStaSaf_IdlUna", 0.1
             };
         };
         class Hum_AbsStaCom_AttLhtMel01A_Tra_AbsStaCom_IdlLhtMel: KH_MeleeBespokeBase
         {
             speed = 1.7857125;
             minPlayTime = 1;
+            kh_meleeHasAction = 1;
             kh_meleeAttackPhase = 1;
             soundOverride = "Walk";
             soundEdge[] = {0.8};
@@ -3160,6 +3223,7 @@ class CfgMovesMaleSdr: CfgMovesBasic
         {
             speed = 1.7857125;
             minPlayTime = 0.6;
+            kh_meleeHasAction = 1;
             kh_meleeAttackPhase = 1;
             soundOverride = "Walk";
             soundEdge[] = {0.66, 0.99};
@@ -3220,6 +3284,7 @@ class CfgMovesMaleSdr: CfgMovesBasic
         {
             speed = 1.3888875;
             minPlayTime = 0.75;
+            kh_meleeHasAction = 1;
             kh_meleeAttackPhase = 1;
             soundOverride = "Walk";
             soundEdge[] = {0.75, 0.99};
@@ -3280,6 +3345,7 @@ class CfgMovesMaleSdr: CfgMovesBasic
         {
             speed = 0.56818125;
             minPlayTime = 0.6;
+            kh_meleeHasAction = 1;
             kh_meleeAttackPhase = 1;
             soundOverride = "Walk";
             soundEdge[] = {0.21, 0.5, 0.8};
@@ -3340,6 +3406,7 @@ class CfgMovesMaleSdr: CfgMovesBasic
         {
             speed = 1.875;
             minPlayTime = 0.5;
+            kh_meleeHasAction = 1;
             file = "x\kh\addons\main\animations\human\Hum_AbsStaCom_IdlLhtMel_Tra_AbsStaSaf_IdlLhtMel.rtm";
             connectTo[] = {
                 "Hum_AbsStaSaf_IdlLhtMel", 0.1
@@ -3349,7 +3416,8 @@ class CfgMovesMaleSdr: CfgMovesBasic
         class Hum_AbsStaCom_StgHvyBwdLhtMel_Tra_AbsStaCom_IdlLhtMel: KH_MeleeBespokeBase
         {
             speed = 0.348837;
-            minPlayTime = 1;
+            minPlayTime = 0.6976;
+            kh_meleeHasAction = 1;
             kh_meleeActionGestureExclusive = 1;
             soundOverride = "Walk";
             soundEdge[] = {0.25, 0.5, 0.81, 0.9};
@@ -3371,7 +3439,8 @@ class CfgMovesMaleSdr: CfgMovesBasic
         class Hum_AbsStaCom_StgHvyFwdLhtMel_Tra_AbsStaCom_IdlLhtMel: KH_MeleeBespokeBase
         {
             speed = 0.319149;
-            minPlayTime = 1;
+            minPlayTime = 0.6808;
+            kh_meleeHasAction = 1;
             kh_meleeActionGestureExclusive = 1;
             soundOverride = "Walk";
             soundEdge[] = {0.54, 0.78, 0.93};
@@ -3393,7 +3462,8 @@ class CfgMovesMaleSdr: CfgMovesBasic
         class Hum_AbsStaCom_StgHvyLwdLhtMel_Tra_AbsStaCom_IdlLhtMel: KH_MeleeBespokeBase
         {
             speed = 0.340909;
-            minPlayTime = 1;
+            minPlayTime = 0.6818;
+            kh_meleeHasAction = 1;
             kh_meleeActionGestureExclusive = 1;
             soundOverride = "Walk";
             soundEdge[] = {0.48, 0.72, 0.9};
@@ -3415,7 +3485,8 @@ class CfgMovesMaleSdr: CfgMovesBasic
         class Hum_AbsStaCom_StgHvyRwdLhtMel_Tra_AbsStaCom_IdlLhtMel: KH_MeleeBespokeBase
         {
             speed = 0.361446;
-            minPlayTime = 1;
+            minPlayTime = 0.6867;
+            kh_meleeHasAction = 1;
             kh_meleeActionGestureExclusive = 1;
             soundOverride = "Walk";
             soundEdge[] = {0.6, 0.72, 0.87};
@@ -3468,6 +3539,86 @@ class CfgMovesMaleSdr: CfgMovesBasic
             connectTo[] = {};
             interpolateTo[] = {
                 "Hum_AbsStaSaf_IdlLhtMel", 0.1
+            };
+        };
+        class KH_TraversalStandBase: StandBase
+        {
+            canBlendStep = 1;
+            canPullTrigger = 0;
+            canReload = 0;
+            disableWeapons = 1;
+            disableWeaponsLong = 1;
+            enableBinocular = 0;
+            enableDirectControl = 1;
+            enableMissile = 0;
+            enableOptics = 0;
+            forceAim = 1;
+            interpolationRestart = 1;
+            interpolationSpeed = 8;
+            looped = 0;
+            kh_traversal = 1;
+            connectTo[] = {};
+            interpolateTo[] = {};
+        };
+        class Hum_AbsStaAny_JmpFwdRfl: KH_TraversalStandBase
+        {
+            speed = 1.0714;
+            minPlayTime = 0.9;
+            collisionShape = "x\kh\addons\main\models\SKM_HumanCollision_0_5M.p3d";
+            file = "x\kh\addons\main\animations\human\Hum_AbsStaAny_JmpFwdRfl.rtm";
+            connectTo[] = {};
+            interpolateTo[] = {
+                "AmovPercMstpSlowWrflDnon", 0.1
+            };
+        };
+        class Hum_AbsStaAny_Cli05mRfl: KH_TraversalStandBase
+        {
+            speed = 1;
+            minPlayTime = 0.9;
+            collisionShape = "x\kh\addons\main\models\SKM_HumanCollision_0_5M.p3d";
+            file = "x\kh\addons\main\animations\human\Hum_AbsStaAny_Cli05mRfl.rtm";
+            connectTo[] = {};
+            interpolateTo[] = {
+                "AmovPercMstpSlowWrflDnon", 0.1
+            };
+        };
+        class Hum_AbsStaAny_Cli1mRfl: KH_TraversalStandBase
+        {
+            speed = 0.9375;
+            minPlayTime = 0.9;
+            kh_traversalTeleport = 1;
+            collisionShape = "x\kh\addons\main\models\SKM_HumanCollision_1M.p3d";
+            file = "x\kh\addons\main\animations\human\Hum_AbsStaAny_Cli1mRfl.rtm";
+            connectTo[] = {};
+            interpolateTo[] = {
+                "AmovPercMstpSlowWrflDnon", 0.1
+            };
+        };
+        class SprintBaseDf;
+        class AmovPercMevaSrasWrflDf: SprintBaseDf
+        {
+            interpolateTo[] += {
+                "Hum_AbsStaAny_JmpFwdRfl", 0.5
+            };
+        };
+        class AmovPercMevaSlowWrflDf: AmovPercMevaSrasWrflDf
+        {
+            interpolateTo[] += {
+                "Hum_AbsStaAny_JmpFwdRfl", 0.5
+            };
+        };
+        class AmovPercMstpSlowWrflDnon: StandBase
+        {
+            interpolateTo[] += {
+                "Hum_AbsStaAny_Cli05mRfl", 0.5,
+                "Hum_AbsStaAny_Cli1mRfl", 0.5
+            };
+        };
+        class AmovPercMstpSrasWrflDnon: AmovPercMstpSlowWrflDnon
+        {
+            interpolateTo[] += {
+                "Hum_AbsStaAny_Cli05mRfl", 0.5,
+                "Hum_AbsStaAny_Cli1mRfl", 0.5
             };
         };
         class AmovPercMstpSnonWnonDnon: StandBase

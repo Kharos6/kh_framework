@@ -2505,6 +2505,23 @@
 ] call CBA_fnc_addSetting;
 
 [
+	"KH_var_allowAiMelee",
+	"CHECKBOX",   
+	[
+		"Allow AI Melee", 
+		"True allows AI units to process melee actions."
+	], 
+	[
+        "KH Melee",
+        "General"
+    ], 
+	true,
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
 	"KH_var_meleeAiCollisionDetection",
 	"CHECKBOX",   
 	[
@@ -2605,8 +2622,19 @@
 	"KH_meleeCycleAttackMode", 
 	"Cycle Attack Mode",
 	{
-		if (!dialog && !visibleMap && (isNull curatorCamera) && (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false])) then {
-			[KH_var_playerUnit, "CYCLE_ATTACK_MODE"] call KH_fnc_updateMeleeState;
+		if (!dialog && !visibleMap && (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false])) then {
+			private _continue = true;
+
+			{
+				if (((_x select 0) isNotEqualTo KH_var_playerUnit) && (_x select 2)) then {
+					_continue = false;
+					break;
+				};
+			} forEach allCameras;
+
+			if _continue then {
+				[KH_var_playerUnit, "CYCLE_ATTACK_MODE"] call KH_fnc_updateMeleeState;
+			};
 		};
 	}, 
 	{}, 
@@ -2618,8 +2646,19 @@
 	"KH_meleeDodge", 
 	"Dodge",
 	{
-		if (!dialog && !visibleMap && (isNull curatorCamera) && (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false])) then {
-			[KH_var_playerUnit, "DODGE"] call KH_fnc_updateMeleeState;
+		if (!dialog && !visibleMap && (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false])) then {
+			private _continue = true;
+
+			{
+				if (((_x select 0) isNotEqualTo KH_var_playerUnit) && (_x select 2)) then {
+					_continue = false;
+					break;
+				};
+			} forEach allCameras;
+
+			if _continue then {
+				[KH_var_playerUnit, "DODGE"] call KH_fnc_updateMeleeState;
+			};
 		};
 	}, 
 	{}, 
@@ -2631,13 +2670,35 @@
 	"KH_meleeBlock", 
 	"Block",
 	{
-		if (!dialog && !visibleMap && (isNull curatorCamera) && (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false])) then {
-			[KH_var_playerUnit, "BLOCK_IN"] call KH_fnc_updateMeleeState;
+		if (!dialog && !visibleMap && (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false])) then {
+			private _continue = true;
+
+			{
+				if (((_x select 0) isNotEqualTo KH_var_playerUnit) && (_x select 2)) then {
+					_continue = false;
+					break;
+				};
+			} forEach allCameras;
+
+			if _continue then {
+				[KH_var_playerUnit, "BLOCK_IN"] call KH_fnc_updateMeleeState;
+			};
 		};
 	},
 	{
-		if (!dialog && !visibleMap && (isNull curatorCamera) && (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false])) then {
-			[KH_var_playerUnit, "BLOCK_OUT"] call KH_fnc_updateMeleeState;
+		if (!dialog && !visibleMap && (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false])) then {
+			private _continue = true;
+
+			{
+				if (((_x select 0) isNotEqualTo KH_var_playerUnit) && (_x select 2)) then {
+					_continue = false;
+					break;
+				};
+			} forEach allCameras;
+
+			if _continue then {
+				[KH_var_playerUnit, "BLOCK_OUT"] call KH_fnc_updateMeleeState;
+			};
 		};
 	},
 	[0x10, [false, false, false]]
@@ -2648,8 +2709,19 @@
 	"KH_meleeParry", 
 	"Parry",
 	{
-		if (!dialog && !visibleMap && (isNull curatorCamera) && (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false])) then {
-			[KH_var_playerUnit, "PARRY"] call KH_fnc_updateMeleeState;
+		if (!dialog && !visibleMap && (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false])) then {
+			private _continue = true;
+
+			{
+				if (((_x select 0) isNotEqualTo KH_var_playerUnit) && (_x select 2)) then {
+					_continue = false;
+					break;
+				};
+			} forEach allCameras;
+
+			if _continue then {
+				[KH_var_playerUnit, "PARRY"] call KH_fnc_updateMeleeState;
+			};
 		};
 	}, 
 	{}, 
@@ -2661,8 +2733,19 @@
 	"KH_meleeKick", 
 	"Kick",
 	{
-		if (!dialog && !visibleMap && (isNull curatorCamera) && (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false])) then {
-			[KH_var_playerUnit, "KICK"] call KH_fnc_updateMeleeState;
+		if (!dialog && !visibleMap && (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false])) then {
+			private _continue = true;
+
+			{
+				if (((_x select 0) isNotEqualTo KH_var_playerUnit) && (_x select 2)) then {
+					_continue = false;
+					break;
+				};
+			} forEach allCameras;
+
+			if _continue then {
+				[KH_var_playerUnit, "KICK"] call KH_fnc_updateMeleeState;
+			};
 		};
 	}, 
 	{}, 
@@ -2674,12 +2757,47 @@
 	"KH_meleeTackle", 
 	"Tackle",
 	{
-		if (!dialog && !visibleMap && (isNull curatorCamera) && (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false])) then {
-			[KH_var_playerUnit, "TACKLE"] call KH_fnc_updateMeleeState;
+		if (!dialog && !visibleMap && (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false])) then {
+			private _continue = true;
+
+			{
+				if (((_x select 0) isNotEqualTo KH_var_playerUnit) && (_x select 2)) then {
+					_continue = false;
+					break;
+				};
+			} forEach allCameras;
+
+			if _continue then {
+				[KH_var_playerUnit, "TACKLE"] call KH_fnc_updateMeleeState;
+			};
 		};
 	}, 
 	{}, 
 	[0x2D, [false, false, false]]
+] call CBA_fnc_addKeybind;
+
+[
+	"KH Traversal", 
+	"KH_traversalTraverseObstacle", 
+	"Traverse Obstacle",
+	{
+		if (!dialog && !visibleMap) then {
+			private _continue = true;
+
+			{
+				if (((_x select 0) isNotEqualTo KH_var_playerUnit) && (_x select 2)) then {
+					_continue = false;
+					break;
+				};
+			} forEach allCameras;
+
+			if _continue then {
+				[KH_var_playerUnit] call KH_fnc_traverseObstacle;
+			};
+		};
+	}, 
+	{}, 
+	[0x39, [true, false, false]]
 ] call CBA_fnc_addKeybind;
 
 [

@@ -141,6 +141,13 @@ static bool get_machine_is_server() {
     return is_server;
 }
 
+static size_t hash_file(const std::string& path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) return 0;
+    std::string contents((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    return std::hash<std::string>{}(contents);
+}
+
 static void report_error(const std::string& error_message) {
     sqf::diag_log(error_message);
     sqf::throw_exception(error_message);

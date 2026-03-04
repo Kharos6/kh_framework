@@ -37,12 +37,12 @@ if _continue then {
 
             private _totalDamage = false;
 
-            private _currentDamage = if ((_context isEqualTo 0) || (_context isEqualTo 4)) then {
+            private _currentDamage = if (_selection isNotEqualTo "") then {
+                _unit getHitIndex _hitPartIndex;
+            } 
+            else {
                 _totalDamage = true;
                 damage _unit;
-            }
-            else {
-                _unit getHitPointDamage _hitPoint;
             };
 
             if (_projectile isEqualTo "") then {

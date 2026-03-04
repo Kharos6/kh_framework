@@ -13,6 +13,7 @@ class CfgKHMeleeTypes
             tacklePower = 0.5;
             cost = 0.1;
             costInfliction = 0.05;
+            rangeOffset[] = {0, 0, 0};
             class Sounds
             {
                 swing[] = {};
@@ -34,6 +35,7 @@ class CfgKHMeleeTypes
             tacklePower = 0.5;
             cost = 0.1;
             costInfliction = 0.05;
+            rangeOffset[] = {0, 0, 0};
             class Sounds
             {
                 swing[] = {};
@@ -94,6 +96,7 @@ class CfgKHMeleeTypes
             type = "KH_MeleeCleavingSharpLightLongSwing";
             blockPower = 0.15;
             parryPower = 0.15;
+            radius = 0.5;
             class Sounds
             {
                 swing[] = {"KH_MeleeSwingLight01", "KH_MeleeSwingLight02", "KH_MeleeSwingLight03", "KH_MeleeSwingLight04", "KH_MeleeSwingLight05", "KH_MeleeSwingLight06"};
@@ -109,6 +112,7 @@ class CfgKHMeleeTypes
             type = "KH_MeleeCleavingSharpLightLongThrust";
             blockPower = 0.15;
             parryPower = 0.15;
+            radius = 0.5;
             class Sounds
             {
                 swing[] = {"KH_MeleeSwingLight01", "KH_MeleeSwingLight02", "KH_MeleeSwingLight03", "KH_MeleeSwingLight04", "KH_MeleeSwingLight05", "KH_MeleeSwingLight06"};
@@ -135,6 +139,7 @@ class CfgKHMeleeTypes
             type = "KH_MeleeCleavingSharpLightShortSwing";
             blockPower = 0.15;
             parryPower = 0.15;
+            rangeOffset[] = {0, -0.075, 0};
             class Sounds
             {
                 swing[] = {"KH_MeleeSwingLight01", "KH_MeleeSwingLight02", "KH_MeleeSwingLight03", "KH_MeleeSwingLight04", "KH_MeleeSwingLight05", "KH_MeleeSwingLight06"};
@@ -150,6 +155,7 @@ class CfgKHMeleeTypes
             type = "KH_MeleeCleavingSharpLightShortThrust";
             blockPower = 0.1;
             parryPower = 0.1;
+            rangeOffset[] = {0, -0.075, 0};
             class Sounds
             {
                 swing[] = {"KH_MeleeSwingLight01", "KH_MeleeSwingLight02", "KH_MeleeSwingLight03", "KH_MeleeSwingLight04", "KH_MeleeSwingLight05", "KH_MeleeSwingLight06"};

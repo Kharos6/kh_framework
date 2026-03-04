@@ -25,8 +25,10 @@ missionNamespace setVariable [_fultonId, false];
 		{},
 		{},
 		{
-			(_this select 3) params ["_fultonEvent"];
-			[_fultonEvent, [], "SERVER", false] call KH_fnc_triggerCbaEvent;
+			isNil {
+				(_this select 3) params ["_fultonEvent"];
+				[_fultonEvent, [], "SERVER", false] call KH_fnc_triggerCbaEvent;
+			};
 		},
 		{},
 		[_fultonEvent],
@@ -171,8 +173,10 @@ missionNamespace setVariable [_fultonId, false];
 					{},
 					{},
 					{
-						_caller setVariable ["KH_var_fultonAttached", false, true];
-						["KH_eve_fultonDetached", [], true, false] call KH_fnc_triggerCbaEvent;
+						isNil {
+							_caller setVariable ["KH_var_fultonAttached", false, true];
+							["KH_eve_fultonDetached", [], true, false] call KH_fnc_triggerCbaEvent;
+						};
 					},
 					{},
 					[],
@@ -213,8 +217,10 @@ missionNamespace setVariable [_fultonId, false];
 				{},
 				{},
 				{
-					(_this select 3) params ["_objectName", "_mainFulton", "_currentFultonParticipants", "_fultonFunction"];
-					[_target, _objectName, _mainFulton, _currentFultonParticipants, _caller] call _fultonFunction;
+					isNil {
+						(_this select 3) params ["_objectName", "_mainFulton", "_currentFultonParticipants", "_fultonFunction"];
+						[_target, _objectName, _mainFulton, _currentFultonParticipants, _caller] call _fultonFunction;
+					};
 				},
 				{},
 				[_objectName, _mainFulton, _currentFultonParticipants, _fultonFunction],
@@ -259,8 +265,10 @@ missionNamespace setVariable [_fultonId, false];
 									{},
 									{},
 									{
-										(_this select 3) params ["_object", "_objectName", "_mainFulton", "_currentFultonParticipants", "_fultonFunction"];
-										[_object, _objectName, _mainFulton, _currentFultonParticipants, _target] call _fultonFunction;
+										isNil {
+											(_this select 3) params ["_object", "_objectName", "_mainFulton", "_currentFultonParticipants", "_fultonFunction"];
+											[_object, _objectName, _mainFulton, _currentFultonParticipants, _target] call _fultonFunction;
+										};
 									},
 									{},
 									[_object, _objectName, _mainFulton, _currentFultonParticipants, _fultonFunction],
@@ -287,10 +295,12 @@ missionNamespace setVariable [_fultonId, false];
 									{},
 									{},
 									{
-										_target setVariable ["KH_var_fultonAttached", false, true];
+										isNil {
+											_target setVariable ["KH_var_fultonAttached", false, true];
 
-										if (isPlayer _target) then {
-											["KH_eve_fultonDetached", [], _target, false] call KH_fnc_triggerCbaEvent;
+											if (isPlayer _target) then {
+												["KH_eve_fultonDetached", [], _target, false] call KH_fnc_triggerCbaEvent;
+											};
 										};
 									},
 									{},

@@ -41,3 +41,4 @@ class RscTitles
 #include "\x\kh\addons\main\resources\identificationCard.hpp"
 #include "\x\kh\addons\main\resources\terminal.hpp"
 #include "\x\kh\addons\main\resources\toggleMissionSuspension.hpp"
+#include "\x\kh\addons\main\resources\vehicleSpawner.hpp"

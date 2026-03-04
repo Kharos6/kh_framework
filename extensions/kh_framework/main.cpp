@@ -593,22 +593,6 @@ static FARPROC WINAPI delay_load_hook(unsigned dliNotify, PDelayLoadInfo pdli) {
     return NULL;
 }
 
-static void cleanup_delay_loaded_modules() {
-    std::lock_guard<std::mutex> lock(g_delay_load_mutex);
-    
-    for (auto& pair : g_loaded_delay_modules) {
-        try {
-            if (pair.second != NULL) {
-                FreeLibrary(pair.second);
-            }
-        } catch (...) {
-            // Ignore errors during cleanup
-        }
-    }
-    
-    g_loaded_delay_modules.clear();
-}
-
 // Set the delay-load hook
 extern "C" const PfnDliHook __pfnDliNotifyHook2 = delay_load_hook;
 extern "C" const PfnDliHook __pfnDliFailureHook2 = delay_load_hook;
@@ -666,10 +650,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
                 
                 __try { 
                     MH_Uninitialize(); 
-                } __except(EXCEPTION_EXECUTE_HANDLER) {}
-                
-                __try { 
-                    cleanup_delay_loaded_modules(); 
                 } __except(EXCEPTION_EXECUTE_HANDLER) {}
                 
                 ShutdownWatchdog::instance().shutdown(false);

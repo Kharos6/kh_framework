@@ -1452,9 +1452,7 @@ private _actionHandler = [
                     _progressDisplay,
                     _parsedIdentifier,
                     _actionExistenceId,
-                    _parent,
-                    _handleParentActionRecovery,
-                    _targetId
+                    _parent
                 ],
                 {
                     params ["_unit"];
@@ -1477,9 +1475,7 @@ private _actionHandler = [
                         "_progressDisplay",
                         "_parsedIdentifier",
                         "_actionExistenceId",
-                        "_parent",
-                        "_handleParentActionRecovery",
-                        "_targetId"
+                        "_parent"
                     ];
 
                     if !(missionNamespace getVariable _actionExistenceId) exitWith {
@@ -1494,7 +1490,7 @@ private _actionHandler = [
                         _condition, 
                         _repeatable, 
                         _exclusive,
-                        [missionNamespace getVariable _targetId, _jip],
+                        [true, false],
                         [_duration, _progressDisplay],
                         _distance,
                         _showImmediately,
@@ -1504,7 +1500,7 @@ private _actionHandler = [
                         _detection, 
                         _userInput, 
                         _parsedIdentifier,
-                        [_parent, _handleParentActionRecovery]
+                        [_parent, false]
                     ] call KH_fnc_addAction;
 
                     nil;
@@ -1730,7 +1726,7 @@ private _actionHandler = [
                             false
                         ] call KH_fnc_execute;
 
-                        ["KH_eve_actionRemoved", [_actionExistenceId],  missionNamespace getVariable _targetId] call KH_fnc_triggerCbaEvent;
+                        ["KH_eve_actionRemoved", [_actionExistenceId], missionNamespace getVariable _targetId] call KH_fnc_triggerCbaEvent;
                         ["KH_eve_handlerRemoved", _handlerId select 2] call CBA_fnc_removeEventHandler;
                     };
                 }

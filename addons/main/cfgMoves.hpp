@@ -131,19 +131,7 @@ class CfgMovesMaleSdr: CfgMovesBasic
 {
     class Actions: Actions
     {
-        class NoActions;
-        class RifleBaseLowStandActions: NoActions
-        {
-            KH_TraversalJump = "Hum_AbsStaAny_JmpFwdRfl";
-        };
-        class PistolStandActions: NoActions
-        {
-            KH_TraversalJump = "Hum_AbsStaAny_JmpFwdPtl";
-        };
-        class CivilStandActions: NoActions
-        {
-            KH_TraversalJump = "Hum_AbsStaAny_JmpFwdUna";
-        };
+        class CivilStandActions;
         class KH_MeleeTertiaryLightSwordActions: CivilStandActions
         {
             access = 3;

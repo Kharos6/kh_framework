@@ -1033,14 +1033,14 @@ isNil {
 																};
 																
 																{
-																	_x params ["_start", "_end", "_direction"];
+																	_x params ["_start", "_end", "_direction", "_dodge"];
 
 																	if !_dodgeFatigue then {
 																		_unit setFatigue (
 																			(
 																				(getFatigue _unit) + 
 																				(
-																					(getNumber ((configOf _unit) >> "kh_meleeDodgeCost")) * 
+																					(getNumber (_meleeTypeConfig >> _dodge >> "cost")) * 
 																					KH_var_meleeAbsoluteDodgeStaminaConsumptionMultiplier * 
 																					KH_var_meleeAbsoluteStaminaConsumptionMultiplier
 																				)

@@ -88,6 +88,10 @@ class CfgKHMeleeTypes
             cost = 0.1;
             costInfliction = 0.4;
         };
+        class Dodge01
+        {
+            cost = 0.15;
+        };
     };
     class KH_MeleeCleavingSharpLightLong: KH_MeleeGenericMan
     {

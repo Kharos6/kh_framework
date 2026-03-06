@@ -84,14 +84,46 @@ class CfgMovesBasic
         KH_StaggerHeavyLeftward = "";
         KH_StaggerHeavyRightward = "";
         KH_TraversalJump = "Hum_AbsStaAny_JmpFwdRfl";
-        KH_TraversalClimb0_5m = "Hum_AbsStaAny_Cli05mRfl";
-        KH_TraversalClimb1m = "Hum_AbsStaAny_Cli1mRfl";
-        KH_TraversalClimb1_5m = "Hum_AbsStaAny_Cli1mRfl";
-        KH_TraversalClimb2m = "Hum_AbsStaAny_Cli1mRfl";
-        KH_TraversalVault0_5m = "Hum_AbsStaAny_Cli05mRfl";
-        KH_TraversalVault1m = "Hum_AbsStaAny_Cli1mRfl";
-        KH_TraversalVault1_5m = "Hum_AbsStaAny_Cli1mRfl";
-        KH_TraversalVault2m = "Hum_AbsStaAny_Cli1mRfl";
+        KH_TraversalClimb0_5m = "Hum_AbsStaAny_Cli0HalMRfl";
+        KH_TraversalClimb1m = "Hum_AbsStaAny_Cli1MRfl";
+        KH_TraversalClimb1_5m = "Hum_AbsStaAny_Cli1MRfl";
+        KH_TraversalClimb2m = "Hum_AbsStaAny_Cli1MRfl";
+        KH_TraversalClimb2_5m = "";
+        KH_TraversalClimb3m = "";
+        KH_TraversalClimb3_5m = "";
+        KH_TraversalClimb4m = "";
+        KH_TraversalClimb4_5m = "";
+        KH_TraversalClimb5m = "";
+        KH_TraversalClimb5_5m = "";
+        KH_TraversalClimb6m = "";
+        KH_TraversalClimb6_5m = "";
+        KH_TraversalClimb7m = "";
+        KH_TraversalClimb7_5m = "";
+        KH_TraversalClimb8m = "";
+        KH_TraversalClimb8_5m = "";
+        KH_TraversalClimb9m = "";
+        KH_TraversalClimb9_5m = "";
+        KH_TraversalClimb10m = "";
+        KH_TraversalVault0_5m = "";
+        KH_TraversalVault1m = "";
+        KH_TraversalVault1_5m = "";
+        KH_TraversalVault2m = "";
+        KH_TraversalVault2_5m = "";
+        KH_TraversalVault3m = "";
+        KH_TraversalVault3_5m = "";
+        KH_TraversalVault4m = "";
+        KH_TraversalVault4_5m = "";
+        KH_TraversalVault5m = "";
+        KH_TraversalVault5_5m = "";
+        KH_TraversalVault6m = "";
+        KH_TraversalVault6_5m = "";
+        KH_TraversalVault7m = "";
+        KH_TraversalVault7_5m = "";
+        KH_TraversalVault8m = "";
+        KH_TraversalVault8_5m = "";
+        KH_TraversalVault9m = "";
+        KH_TraversalVault9_5m = "";
+        KH_TraversalVault10m = "";
     };
     class States;
 };
@@ -865,7 +897,7 @@ class CfgMovesMaleSdr: CfgMovesBasic
             kh_meleeHasAction = 1;
             kh_meleeMainAction = "dodge";
             kh_meleeDodgeTiming[] = {
-                {0, 0.9, 180}
+                {0, 0.9, 180, "Dodge01"}
             };
             soundOverride = "run";
             soundEdge[] = {0.5, 0.75};
@@ -930,7 +962,7 @@ class CfgMovesMaleSdr: CfgMovesBasic
             kh_meleeHasAction = 1;
             kh_meleeMainAction = "dodge";
             kh_meleeDodgeTiming[] = {
-                {0, 0.9, 0}
+                {0, 0.9, 0, "Dodge01"}
             };
             soundOverride = "run";
             soundEdge[] = {0.5, 0.75};
@@ -995,7 +1027,7 @@ class CfgMovesMaleSdr: CfgMovesBasic
             kh_meleeHasAction = 1;
             kh_meleeMainAction = "dodge";
             kh_meleeDodgeTiming[] = {
-                {0, 0.9, 270}
+                {0, 0.9, 270, "Dodge01"}
             };
             soundOverride = "run";
             soundEdge[] = {0.65, 0.85};
@@ -1060,7 +1092,7 @@ class CfgMovesMaleSdr: CfgMovesBasic
             kh_meleeHasAction = 1;
             kh_meleeMainAction = "dodge";
             kh_meleeDodgeTiming[] = {
-                {0, 0.9, 90}
+                {0, 0.9, 90, "Dodge01"}
             };
             soundOverride = "run";
             soundEdge[] = {0.65, 0.8};
@@ -3541,11 +3573,12 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaSaf_IdlLhtMel", 0.1
             };
         };
-        class KH_TraversalStandBase: StandBase
+        class KH_TraversalRifleStandBase: StandBase
         {
             canBlendStep = 1;
             canPullTrigger = 0;
             canReload = 0;
+            collisionShape = "A3\anims_f\data\geom\sdr\Perc_Wrfl_Low.p3d";
             disableWeapons = 1;
             disableWeaponsLong = 1;
             enableBinocular = 0;
@@ -3556,11 +3589,20 @@ class CfgMovesMaleSdr: CfgMovesBasic
             interpolationRestart = 1;
             interpolationSpeed = 8;
             looped = 0;
+            minPlayTime = 1;
+            upDegree = "ManPosCombat";
             kh_traversal = 1;
             connectTo[] = {};
             interpolateTo[] = {};
+            rightHandIKBeg = 1;
+            rightHandIKCurve[] = {1};
+            rightHandIKEnd = 1;
+            leftHandIKBeg = 1;
+            leftHandIKCurve[] = {1};
+            leftHandIKEnd = 1;
+            weaponIK = 1;
         };
-        class Hum_AbsStaAny_JmpFwdRfl: KH_TraversalStandBase
+        class Hum_AbsStaAny_JmpFwdRfl: KH_TraversalRifleStandBase
         {
             speed = 1.0714;
             minPlayTime = 0.9;
@@ -3568,57 +3610,100 @@ class CfgMovesMaleSdr: CfgMovesBasic
             file = "x\kh\addons\main\animations\human\Hum_AbsStaAny_JmpFwdRfl.rtm";
             connectTo[] = {};
             interpolateTo[] = {
-                "AmovPercMstpSlowWrflDnon", 0.1
+                "AmovPercMstpSlowWrflDnon", 0.5,
+                "AmovPercMstpSrasWrflDnon", 0.5
             };
         };
-        class Hum_AbsStaAny_Cli05mRfl: KH_TraversalStandBase
+        class Hum_AbsStaAny_Cli0HalMRfl: KH_TraversalRifleStandBase
         {
             speed = 1;
-            minPlayTime = 0.9;
             collisionShape = "x\kh\addons\main\models\SKM_HumanCollision_0_5M.p3d";
-            file = "x\kh\addons\main\animations\human\Hum_AbsStaAny_Cli05mRfl.rtm";
+            file = "x\kh\addons\main\animations\human\Hum_AbsStaAny_Cli0HalMRfl.rtm";
             connectTo[] = {};
             interpolateTo[] = {
-                "AmovPercMstpSlowWrflDnon", 0.1
+                "AmovPercMstpSlowWrflDnon", 0.5,
+                "AmovPercMstpSrasWrflDnon", 0.5
             };
         };
-        class Hum_AbsStaAny_Cli1mRfl: KH_TraversalStandBase
+        class Hum_AbsStaAny_Cli1MRfl: KH_TraversalRifleStandBase
         {
             speed = 0.9375;
-            minPlayTime = 0.9;
+            interpolationSpeed = 1e+10;
             kh_traversalTeleport = 1;
-            collisionShape = "x\kh\addons\main\models\SKM_HumanCollision_1M.p3d";
-            file = "x\kh\addons\main\animations\human\Hum_AbsStaAny_Cli1mRfl.rtm";
+            file = "x\kh\addons\main\animations\human\Hum_AbsStaAny_Cli1MRfl.rtm";
             connectTo[] = {};
             interpolateTo[] = {
-                "AmovPercMstpSlowWrflDnon", 0.1
+                "AmovPercMstpSlowWrflDnon", 0.5,
+                "AmovPercMstpSrasWrflDnon", 0.5
             };
         };
         class SprintBaseDf;
+        class AmovPercMstpSlowWrflDnon: StandBase
+        {
+            interpolateTo[] += {
+                "Hum_AbsStaAny_Cli0HalMRfl", 0.5,
+                "Hum_AbsStaAny_Cli1MRfl", 0.5
+            };
+        };
+        class AmovPercMstpSrasWrflDnon: AmovPercMstpSlowWrflDnon
+        {
+            interpolateTo[] += {
+                "Hum_AbsStaAny_Cli0HalMRfl", 0.5,
+                "Hum_AbsStaAny_Cli1MRfl", 0.5
+            };
+        };
+        class AmovPercMwlkSrasWrflDf: AmovPercMstpSrasWrflDnon
+        {
+            interpolateTo[] += {
+                "Hum_AbsStaAny_Cli0HalMRfl", 0.5,
+                "Hum_AbsStaAny_Cli1MRfl", 0.5
+            };
+        };
+        class AmovPercMtacSrasWrflDf: AmovPercMwlkSrasWrflDf 
+        {
+            interpolateTo[] += {
+                "Hum_AbsStaAny_Cli0HalMRfl", 0.5,
+                "Hum_AbsStaAny_Cli1MRfl", 0.5
+            };
+        };
+        class AmovPercMrunSrasWrflDf: AmovPercMstpSrasWrflDnon
+        {
+            interpolateTo[] += {
+                "Hum_AbsStaAny_Cli0HalMRfl", 0.5,
+                "Hum_AbsStaAny_Cli1MRfl", 0.5
+            };
+        };
         class AmovPercMevaSrasWrflDf: SprintBaseDf
         {
             interpolateTo[] += {
                 "Hum_AbsStaAny_JmpFwdRfl", 0.5
             };
         };
+        class AmovPercMwlkSlowWrflDf_ver2: AmovPercMstpSlowWrflDnon
+        {
+            interpolateTo[] += {
+                "Hum_AbsStaAny_Cli0HalMRfl", 0.5,
+                "Hum_AbsStaAny_Cli1MRfl", 0.5
+            };
+        };
+        class AmovPercMtacSlowWrflDf_ver2: AmovPercMwlkSlowWrflDf_ver2
+        {
+            interpolateTo[] += {
+                "Hum_AbsStaAny_Cli0HalMRfl", 0.5,
+                "Hum_AbsStaAny_Cli1MRfl", 0.5
+            };
+        };
+        class AmovPercMrunSlowWrflDf: AmovPercMstpSlowWrflDnon
+        {
+            interpolateTo[] += {
+                "Hum_AbsStaAny_Cli0HalMRfl", 0.5,
+                "Hum_AbsStaAny_Cli1MRfl", 0.5
+            };
+        };
         class AmovPercMevaSlowWrflDf: AmovPercMevaSrasWrflDf
         {
             interpolateTo[] += {
                 "Hum_AbsStaAny_JmpFwdRfl", 0.5
-            };
-        };
-        class AmovPercMstpSlowWrflDnon: StandBase
-        {
-            interpolateTo[] += {
-                "Hum_AbsStaAny_Cli05mRfl", 0.5,
-                "Hum_AbsStaAny_Cli1mRfl", 0.5
-            };
-        };
-        class AmovPercMstpSrasWrflDnon: AmovPercMstpSlowWrflDnon
-        {
-            interpolateTo[] += {
-                "Hum_AbsStaAny_Cli05mRfl", 0.5,
-                "Hum_AbsStaAny_Cli1mRfl", 0.5
             };
         };
         class AmovPercMstpSnonWnonDnon: StandBase

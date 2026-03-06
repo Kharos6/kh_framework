@@ -11,7 +11,6 @@ class CfgVehicles
 		kh_meleeType = "KH_MeleeGenericMan";
 		kh_meleeActions = "";
 		kh_meleeSoundType = "Flesh";
-		kh_meleeDodgeCost = 0.15;
 		kh_meleeSurfaceBlockPower = 0;
 		kh_meleeModes[] = {"KH_MeleeAttack01", "KH_MeleeAttack02"};
 	}; 

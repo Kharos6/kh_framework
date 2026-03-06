@@ -337,6 +337,10 @@ isNil {
 											params ["_unit", "_animation"];
 											_args params ["_animationType", "_isMove"];
 
+											if ((getNumber (configFile >> _animationType >> "states" >> _animation >> "kh_traversalTeleport")) isEqualTo 1) then {
+												_unit setPosASL (_unit getVariable ["KH_var_traversalTarget", getPosASL _unit]);
+											};
+
 											if ((getNumber (configFile >> _animationType >> "states" >> _animation >> "kh_melee")) isEqualTo 1) then {
 												_unit setVariable ["KH_var_inMeleeState", true, true];
 												if ((getNumber (configFile >> _animationType >> "states" >> _animation >> "kh_meleeHasAction")) isEqualTo 0) exitWith {};

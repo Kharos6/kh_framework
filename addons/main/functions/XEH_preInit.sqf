@@ -69,6 +69,20 @@
 ] call CBA_fnc_addSetting;
 
 [
+	"KH_var_allowPlayerObstacleTraversal",
+	"CHECKBOX",   
+	[
+		"Allow Player Obstacle Traversal", 
+		"True allows players to traverse obstacles."
+	], 
+	"KH Miscellaneous", 
+	false,
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
 	"KH_var_allowRemoteInventories",
 	"CHECKBOX",   
 	[
@@ -2781,18 +2795,20 @@
 	"KH_traversalTraverseObstacle", 
 	"Traverse Obstacle",
 	{
-		if (!dialog && !visibleMap) then {
-			private _continue = true;
+		if KH_var_allowPlayerObstacleTraversal then {
+			if (!dialog && !visibleMap) then {
+				private _continue = true;
 
-			{
-				if (((_x select 0) isNotEqualTo KH_var_playerUnit) && (_x select 2)) then {
-					_continue = false;
-					break;
+				{
+					if (((_x select 0) isNotEqualTo KH_var_playerUnit) && (_x select 2)) then {
+						_continue = false;
+						break;
+					};
+				} forEach allCameras;
+
+				if _continue then {
+					[KH_var_playerUnit] call KH_fnc_traverseObstacle;
 				};
-			} forEach allCameras;
-
-			if _continue then {
-				[KH_var_playerUnit] call KH_fnc_traverseObstacle;
 			};
 		};
 	}, 

@@ -8,9 +8,9 @@ private _unitLength = (_bounds select 1) * 0.5;
 private _unitHeight = _bounds select 2;
 
 private _obstacleIntersections = ([
-    _currentPosition vectorAdd [0, 0, 0.1], 
+    _currentPosition vectorAdd [0, 0, _unitHeight + 5.1], 
     _unit,
-    [_unitWidth, _unitLength, str -(_unitHeight + 10)],
+    [_unitWidth, _unitLength, str -(_unitHeight + 5)],
     "RECTANGLE",
     0.25,
     [_unit, "TERRAIN"] + (attachedObjects _unit),
@@ -19,7 +19,7 @@ private _obstacleIntersections = ([
     "GEOM", 
     "ROADWAY",
     true,
-    ["LASER", [], 1]
+    []
 ] call KH_fnc_raycast3d) select 0;
 
 private _maximumHeight = if (_obstacleIntersections isNotEqualTo []) then {
@@ -40,11 +40,8 @@ else {
 };
 
 if ((_maximumHeight - _unitHeight) < 0.25) exitWith {
-    if (((velocityModelSpace _unit) select 1) > 1) then {
-        _unit playActionNow "KH_TraversalJump";
-        _unit playAction "default";
-    };
-
+    _unit playActionNow "KH_TraversalJump";
+    _unit playAction "default";
     false;
 };
 
@@ -60,15 +57,12 @@ private _climbIntersections = ([
     "GEOM", 
     "ROADWAY",
     true,
-    ["LASER", [], 1]
+    []
 ] call KH_fnc_raycast3d) select 0;
 
 if (_climbIntersections isEqualTo []) exitWith {
-    if (((velocityModelSpace _unit) select 1) > 1) then {
-        _unit playActionNow "KH_TraversalJump";
-        _unit playAction "default";
-    };
-
+    _unit playActionNow "KH_TraversalJump";
+    _unit playAction "default";
     false;
 };
 
@@ -89,11 +83,8 @@ private _floorPositions = [];
 } forEach _climbIntersections;
 
 if (_floorPositions isEqualTo []) exitWith {
-    if (((velocityModelSpace _unit) select 1) > 1) then {
-        _unit playActionNow "KH_TraversalJump";
-        _unit playAction "default";
-    };
-    
+    _unit playActionNow "KH_TraversalJump";
+    _unit playAction "default";
     false;
 };
 
@@ -131,8 +122,10 @@ private _vault = ((([
     "GEOM", 
     "ROADWAY",
     true,
-    ["LASER", [], 1]
+    []
 ] call KH_fnc_raycast3d) select 0) param [0, []]) isEqualTo [];
+
+_unit setVariable ["KH_var_traversalTarget", [_chosenTraversalTarget select 0, (_unit modelToWorldVisualWorld [0, _unitLength * 2.75, 0]) select 1, _chosenTraversalTarget select 2]];
 
 _unit playActionNow (
     switch true do {
@@ -239,9 +232,4 @@ _unit playActionNow (
 );
 
 _unit playAction "default";
-
-if ((getNumber (configFile >> (getText ((configOf _unit) >> "moves")) >> "states" >> (animationState _unit) >> "kh_traversalTeleport")) isEqualTo 1) then {
-    _unit setPosASL [_chosenTraversalTarget select 0, (_unit modelToWorldVisualWorld [0, _unitLength * 2.75, 0]) select 1, _chosenTraversalTarget select 2];
-};
-
 true;

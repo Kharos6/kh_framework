@@ -18,7 +18,7 @@ class CfgMovesBasic
         kh_meleeMainAction = "";
         kh_meleeActionGestureExclusive = 0;
         kh_traversal = 0;
-        kh_traversalTeleport = 1;
+        kh_traversalTeleport = 0;
     };
     class ManActions
     {
@@ -83,11 +83,11 @@ class CfgMovesBasic
         KH_StaggerHeavyBackwardRightward = "";
         KH_StaggerHeavyLeftward = "";
         KH_StaggerHeavyRightward = "";
-        KH_TraversalJump = "Hum_AbsStaAny_JmpFwdRfl";
-        KH_TraversalClimb0_5m = "Hum_AbsStaAny_Cli0HalMRfl";
-        KH_TraversalClimb1m = "Hum_AbsStaAny_Cli1MRfl";
-        KH_TraversalClimb1_5m = "Hum_AbsStaAny_Cli1MRfl";
-        KH_TraversalClimb2m = "Hum_AbsStaAny_Cli1MRfl";
+        KH_TraversalJump = "";
+        KH_TraversalClimb0_5m = "";
+        KH_TraversalClimb1m = "";
+        KH_TraversalClimb1_5m = "";
+        KH_TraversalClimb2m = "";
         KH_TraversalClimb2_5m = "";
         KH_TraversalClimb3m = "";
         KH_TraversalClimb3_5m = "";
@@ -131,7 +131,19 @@ class CfgMovesMaleSdr: CfgMovesBasic
 {
     class Actions: Actions
     {
-        class CivilStandActions;
+        class NoActions;
+        class RifleBaseLowStandActions: NoActions
+        {
+            KH_TraversalJump = "Hum_AbsStaAny_JmpFwdRfl";
+        };
+        class PistolStandActions: NoActions
+        {
+            KH_TraversalJump = "Hum_AbsStaAny_JmpFwdPtl";
+        };
+        class CivilStandActions: NoActions
+        {
+            KH_TraversalJump = "Hum_AbsStaAny_JmpFwdUna";
+        };
         class KH_MeleeTertiaryLightSwordActions: CivilStandActions
         {
             access = 3;
@@ -3575,7 +3587,8 @@ class CfgMovesMaleSdr: CfgMovesBasic
         };
         class KH_TraversalRifleStandBase: StandBase
         {
-            canBlendStep = 1;
+            actions = "RifleStandActions";
+            canBlendStep = 0;
             canPullTrigger = 0;
             canReload = 0;
             collisionShape = "A3\anims_f\data\geom\sdr\Perc_Wrfl_Low.p3d";
@@ -3587,10 +3600,9 @@ class CfgMovesMaleSdr: CfgMovesBasic
             enableOptics = 0;
             forceAim = 1;
             interpolationRestart = 1;
-            interpolationSpeed = 8;
+            interpolationSpeed = 1e+10;
             looped = 0;
             minPlayTime = 1;
-            upDegree = "ManPosCombat";
             kh_traversal = 1;
             connectTo[] = {};
             interpolateTo[] = {};
@@ -3602,10 +3614,31 @@ class CfgMovesMaleSdr: CfgMovesBasic
             leftHandIKEnd = 1;
             weaponIK = 1;
         };
+        class KH_TraversalPistolStandBase: KH_TraversalRifleStandBase
+        {
+            actions = "PistolStandActions";
+            rightHandIKBeg = 0;
+            rightHandIKCurve[] = {0};
+            rightHandIKEnd = 0;
+            leftHandIKBeg = 0;
+            leftHandIKCurve[] = {0};
+            leftHandIKEnd = 0;
+        };
+        class KH_TraversalUnarmedStandBase: KH_TraversalRifleStandBase
+        {
+            actions = "CivilStandActions";
+            rightHandIKBeg = 0;
+            rightHandIKCurve[] = {0};
+            rightHandIKEnd = 0;
+            leftHandIKBeg = 0;
+            leftHandIKCurve[] = {0};
+            leftHandIKEnd = 0;
+        };
         class Hum_AbsStaAny_JmpFwdRfl: KH_TraversalRifleStandBase
         {
             speed = 1.0714;
             minPlayTime = 0.9;
+            interpolationSpeed = 8;
             collisionShape = "x\kh\addons\main\models\SKM_HumanCollision_0_5M.p3d";
             file = "x\kh\addons\main\animations\human\Hum_AbsStaAny_JmpFwdRfl.rtm";
             connectTo[] = {};
@@ -3614,96 +3647,55 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "AmovPercMstpSrasWrflDnon", 0.5
             };
         };
-        class Hum_AbsStaAny_Cli0HalMRfl: KH_TraversalRifleStandBase
+        class Hum_AbsStaAny_JmpFwdPtl: KH_TraversalPistolStandBase
         {
-            speed = 1;
+            speed = 1.0714;
+            minPlayTime = 0.9;
+            interpolationSpeed = 8;
             collisionShape = "x\kh\addons\main\models\SKM_HumanCollision_0_5M.p3d";
-            file = "x\kh\addons\main\animations\human\Hum_AbsStaAny_Cli0HalMRfl.rtm";
+            file = "x\kh\addons\main\animations\human\Hum_AbsStaAny_JmpFwdPtl.rtm";
             connectTo[] = {};
             interpolateTo[] = {
-                "AmovPercMstpSlowWrflDnon", 0.5,
-                "AmovPercMstpSrasWrflDnon", 0.5
+                "AmovPercMstpSrasWpstDnon", 0.5
             };
         };
-        class Hum_AbsStaAny_Cli1MRfl: KH_TraversalRifleStandBase
+        class Hum_AbsStaAny_JmpFwdUna: KH_TraversalUnarmedStandBase
         {
-            speed = 0.9375;
-            interpolationSpeed = 1e+10;
-            kh_traversalTeleport = 1;
-            file = "x\kh\addons\main\animations\human\Hum_AbsStaAny_Cli1MRfl.rtm";
+            speed = 1.0714;
+            minPlayTime = 0.9;
+            interpolationSpeed = 8;
+            collisionShape = "x\kh\addons\main\models\SKM_HumanCollision_0_5M.p3d";
+            file = "x\kh\addons\main\animations\human\Hum_AbsStaAny_JmpFwdUna.rtm";
             connectTo[] = {};
             interpolateTo[] = {
-                "AmovPercMstpSlowWrflDnon", 0.5,
-                "AmovPercMstpSrasWrflDnon", 0.5
+                "AmovPercMstpSnonWnonDnon", 0.5
             };
         };
         class SprintBaseDf;
-        class AmovPercMstpSlowWrflDnon: StandBase
-        {
-            interpolateTo[] += {
-                "Hum_AbsStaAny_Cli0HalMRfl", 0.5,
-                "Hum_AbsStaAny_Cli1MRfl", 0.5
-            };
-        };
-        class AmovPercMstpSrasWrflDnon: AmovPercMstpSlowWrflDnon
-        {
-            interpolateTo[] += {
-                "Hum_AbsStaAny_Cli0HalMRfl", 0.5,
-                "Hum_AbsStaAny_Cli1MRfl", 0.5
-            };
-        };
-        class AmovPercMwlkSrasWrflDf: AmovPercMstpSrasWrflDnon
-        {
-            interpolateTo[] += {
-                "Hum_AbsStaAny_Cli0HalMRfl", 0.5,
-                "Hum_AbsStaAny_Cli1MRfl", 0.5
-            };
-        };
-        class AmovPercMtacSrasWrflDf: AmovPercMwlkSrasWrflDf 
-        {
-            interpolateTo[] += {
-                "Hum_AbsStaAny_Cli0HalMRfl", 0.5,
-                "Hum_AbsStaAny_Cli1MRfl", 0.5
-            };
-        };
-        class AmovPercMrunSrasWrflDf: AmovPercMstpSrasWrflDnon
-        {
-            interpolateTo[] += {
-                "Hum_AbsStaAny_Cli0HalMRfl", 0.5,
-                "Hum_AbsStaAny_Cli1MRfl", 0.5
-            };
-        };
         class AmovPercMevaSrasWrflDf: SprintBaseDf
         {
             interpolateTo[] += {
                 "Hum_AbsStaAny_JmpFwdRfl", 0.5
             };
         };
-        class AmovPercMwlkSlowWrflDf_ver2: AmovPercMstpSlowWrflDnon
-        {
-            interpolateTo[] += {
-                "Hum_AbsStaAny_Cli0HalMRfl", 0.5,
-                "Hum_AbsStaAny_Cli1MRfl", 0.5
-            };
-        };
-        class AmovPercMtacSlowWrflDf_ver2: AmovPercMwlkSlowWrflDf_ver2
-        {
-            interpolateTo[] += {
-                "Hum_AbsStaAny_Cli0HalMRfl", 0.5,
-                "Hum_AbsStaAny_Cli1MRfl", 0.5
-            };
-        };
-        class AmovPercMrunSlowWrflDf: AmovPercMstpSlowWrflDnon
-        {
-            interpolateTo[] += {
-                "Hum_AbsStaAny_Cli0HalMRfl", 0.5,
-                "Hum_AbsStaAny_Cli1MRfl", 0.5
-            };
-        };
         class AmovPercMevaSlowWrflDf: AmovPercMevaSrasWrflDf
         {
             interpolateTo[] += {
                 "Hum_AbsStaAny_JmpFwdRfl", 0.5
+            };
+        };
+        class AmovPercMevaSrasWpstDf;
+        class AmovPercMevaSlowWpstDf: AmovPercMevaSrasWpstDf
+        {
+            interpolateTo[] += {
+                "Hum_AbsStaAny_JmpFwdPtl", 0.5
+            };
+        };
+        class SprintCivilBaseDf;
+        class AmovPercMevaSnonWnonDf: SprintCivilBaseDf
+        {
+            interpolateTo[] += {
+                "Hum_AbsStaAny_JmpFwdUna", 0.5
             };
         };
         class AmovPercMstpSnonWnonDnon: StandBase

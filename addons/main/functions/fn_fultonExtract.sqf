@@ -380,7 +380,7 @@ missionNamespace setVariable [_fultonId, false];
 												params ["_unit", "_vehicle", "_duration"];
 												_unit setVariable ["KH_var_fultonAttached", false, true];
 												_unit allowDamage false;
-												_unit setUnitFreefallHeight 10000;
+												_unit setUnitFreefallHeight 999999;
 
 												[
 													[_unit],

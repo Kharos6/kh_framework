@@ -1,6 +1,11 @@
 class CfgMovesBasic
 {
-    class Actions;
+    class Actions
+    {
+        class RifleBaseLowStandActions;
+        class PistolStandActions;
+        class CivilStandActions;
+    };
     class Default
     {
         kh_melee = 0;
@@ -131,7 +136,18 @@ class CfgMovesMaleSdr: CfgMovesBasic
 {
     class Actions: Actions
     {
-        class CivilStandActions;
+        class RifleBaseLowStandActions: RifleBaseLowStandActions
+        {
+            KH_TraversalJump = "Hum_AbsStaAny_JmpFwdRfl";
+        };
+        class PistolStandActions: PistolStandActions
+        {
+            KH_TraversalJump = "Hum_AbsStaAny_JmpFwdPtl";
+        };
+        class CivilStandActions: CivilStandActions
+        {
+            KH_TraversalJump = "Hum_AbsStaAny_JmpFwdUna";
+        };
         class KH_MeleeTertiaryLightSwordActions: CivilStandActions
         {
             access = 3;
@@ -3644,7 +3660,8 @@ class CfgMovesMaleSdr: CfgMovesBasic
             file = "x\kh\addons\main\animations\human\Hum_AbsStaAny_JmpFwdPtl.rtm";
             connectTo[] = {};
             interpolateTo[] = {
-                "AmovPercMstpSrasWpstDnon", 0.5
+                "AmovPercMstpSrasWpstDnon", 0.5,
+                "AmovPercMstpSlowWpstDnon", 0.5
             };
         };
         class Hum_AbsStaAny_JmpFwdUna: KH_TraversalUnarmedStandBase

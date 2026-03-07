@@ -342,7 +342,7 @@ isNil {
 											};
 
 											if ((getNumber (configFile >> _animationType >> "states" >> _animation >> "kh_melee")) isEqualTo 1) then {
-												_unit setVariable ["KH_var_inMeleeState", true, true];
+												_unit setVariable ["KH_var_inMeleeState", true];
 												if ((getNumber (configFile >> _animationType >> "states" >> _animation >> "kh_meleeHasAction")) isEqualTo 0) exitWith {};
 												private _handlerType = ["KH_var_meleeStateHandler", "KH_var_meleeGestureHandler"] select _isMove;
 
@@ -1108,7 +1108,7 @@ isNil {
 											else {
 												if _isMove then {
 													if (_unit getVariable ["KH_var_inMeleeState", false]) then {
-														_unit setVariable ["KH_var_inMeleeState", false, true];
+														_unit setVariable ["KH_var_inMeleeState", false];
 														_unit setVariable ["KH_var_meleeMoveActive", false];
 													};
 												}

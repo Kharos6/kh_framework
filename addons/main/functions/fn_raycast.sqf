@@ -47,20 +47,10 @@ if ((count _this) isEqualTo 1) then {
 
 		if (_start isEqualType objNull) then {
 			_start = _start modelToWorldVisualWorld [0, 0, 0];
-		}
-		else {
-			if ((_start select 0) isEqualType objNull) then {
-				_start = (_start select 0) modelToWorldVisualWorld (_start select 1);
-			};
 		};
 
 		if (_end isEqualType objNull) then {
 			_end = _end modelToWorldVisualWorld [0, 0, 0];
-		}
-		else {
-			if ((_end select 0) isEqualType objNull) then {
-				_end = (_end select 0) modelToWorldVisualWorld (_end select 1);
-			};
 		};
 
 		private _distance = _start vectorDistance _end;
@@ -242,20 +232,10 @@ else {
 
 	if (_start isEqualType objNull) then {
 		_start = _start modelToWorldVisualWorld [0, 0, 0];
-	}
-	else {
-		if ((_start select 0) isEqualType objNull) then {
-			_start = (_start select 0) modelToWorldVisualWorld (_start select 1);
-		};
 	};
 
 	if (_end isEqualType objNull) then {
 		_end = _end modelToWorldVisualWorld [0, 0, 0];
-	}
-	else {
-		if ((_end select 0) isEqualType objNull) then {
-			_end = (_end select 0) modelToWorldVisualWorld (_end select 1);
-		};
 	};
 
 	private _distance = _start vectorDistance _end;

@@ -297,6 +297,7 @@ class CfgVehicles
 	#include "\x\kh\addons\main\vehicles\modules\addAction.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\aiInstanceSetup.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\assignIdentificationCard.hpp"
+	#include "\x\kh\addons\main\vehicles\modules\assignRemoteController.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\assignTerminal.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\assignVehicleSpawner.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\dynamicDisguise.hpp"

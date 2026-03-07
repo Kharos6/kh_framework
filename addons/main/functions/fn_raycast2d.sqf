@@ -40,11 +40,6 @@ if (((count _ignored) <= 2) && (_ignored isEqualTypeAll objNull)) then {
 
 if (_position isEqualType objNull) then {
 	_position = _position modelToWorldVisualWorld [0, 0, 0];
-}
-else {
-	if ((_position select 0) isEqualType objNull) then {
-		_position = (_position select 0) modelToWorldVisualWorld (_position select 1);
-	};
 };
 
 private _grids = [];

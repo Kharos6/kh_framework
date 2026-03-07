@@ -118,7 +118,7 @@ class KH_Console
             wholeHeight = 0.45;
             class ComboScrollBar: Scrollbar
             {
-                color[] = {1,1,1,1};
+                color[] = {1, 1, 1, 1};
             };
             colorBackground[] = {0, 0, 0, 0.9};
         };

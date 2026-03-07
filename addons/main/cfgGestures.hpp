@@ -25,7 +25,7 @@ class CfgGesturesMale
             "LeftArm", 1,
             "LeftArmRoll", 1,
             "LeftForeArm", 1,
-            "LeftForeArmRoll",1 ,
+            "LeftForeArmRoll", 1,
             "LeftHand", 1,
             "LeftHandRing", 1,
             "LeftHandPinky1", 1,

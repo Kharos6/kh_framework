@@ -2676,7 +2676,7 @@
 		};
 	}, 
 	{}, 
-	[0x39, [false, false, false]]
+	[0x39, [true, false, false]]
 ] call CBA_fnc_addKeybind;
 
 [
@@ -2787,7 +2787,7 @@
 		};
 	}, 
 	{}, 
-	[0x2D, [false, false, false]]
+	[0x14, [false, true, false]]
 ] call CBA_fnc_addKeybind;
 
 [
@@ -2813,7 +2813,7 @@
 		};
 	}, 
 	{}, 
-	[0x39, [true, false, false]]
+	[0x14, [true, false, false]]
 ] call CBA_fnc_addKeybind;
 
 [

@@ -41,13 +41,6 @@ private "_object";
 if (_position isEqualType objNull) then {
 	_object = _position;
 	_position = _object modelToWorldVisualWorld [0, 0, 0];
-}
-else {
-	if ((_position select 0) isEqualType objNull) then {
-		_object = _position select 0;
-		private _relativePosition = _position select 1;
-		_position = _object modelToWorldVisualWorld [-(_relativePosition select 0), -(_relativePosition select 1), -(_relativePosition select 2)];
-	};
 };
 
 if (_rotation isEqualType objNull) then {
@@ -59,9 +52,7 @@ private _vectorRight = _vectorDir vectorCrossProduct _vectorUp;
 
 private _rotatePoint = {
 	params ["_position"];
-	(_vectorRight vectorMultiply (_position select 0)) vectorAdd
-	(_vectorDir vectorMultiply (_position select 1)) vectorAdd
-	(_vectorUp vectorMultiply (_position select 2))
+	(_vectorRight vectorMultiply (_position select 0)) vectorAdd (_vectorDir vectorMultiply (_position select 1)) vectorAdd (_vectorUp vectorMultiply (_position select 2));
 };
 
 private "_primaryAxis";

@@ -2217,7 +2217,6 @@ if (!isServer && !hasInterface) then {
 	KH_var_headlessPlayersLoadedStack = [];
 	KH_var_headlessMissionEndStack = [];
 
-
 	{
 		private _basePath = (getText (_x >> "path")) regexReplace ["(/)", "\\"];
 

@@ -15,7 +15,7 @@ private _projectile = createVehicle [
         ASLToATL (AGLToASL (unitAimPosition _entity));
     }
     else {
-        ASLToATL (_entity modelToWorldWorld (selectionPosition [_entity, _selection, (_lod select 0) select 0, false, "AveragePoint"]));;
+        ASLToATL (_entity modelToWorldWorld (selectionPosition [_entity, _selection, (_lod select 0) select 0, false, "AveragePoint"]));
     },
     [], 
     0, 

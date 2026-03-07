@@ -9,6 +9,7 @@ class RscListBox;
 class RscListBoxKeys;
 class RscListBoxMulti;
 class RscListNBox;
+class RscMapControl;
 class RscPicture;
 class RscSlider;
 class RscStructuredText;
@@ -39,6 +40,7 @@ class RscTitles
 #include "\x\kh\addons\main\resources\console.hpp"
 #include "\x\kh\addons\main\resources\endMission.hpp"
 #include "\x\kh\addons\main\resources\identificationCard.hpp"
+#include "\x\kh\addons\main\resources\remoteController.hpp"
 #include "\x\kh\addons\main\resources\terminal.hpp"
 #include "\x\kh\addons\main\resources\toggleMissionSuspension.hpp"
 #include "\x\kh\addons\main\resources\vehicleSpawner.hpp"

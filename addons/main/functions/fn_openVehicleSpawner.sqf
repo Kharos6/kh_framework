@@ -1,4 +1,9 @@
 params [["_types", [], [[]]], ["_position", objNull, [[], objNull]], ["_rotation", [0, 0, 0], [[], objNull]]];
+
+if (_types isEqualTo []) exitWith {
+    hint "No vehicles available.";
+};
+
 private _display = createDialog ["KH_ResourceVehicleSpawner", true];
 ctrlSetText [103, getText (configFile >> "CfgVehicles" >> (_types param [0, ""]) >> "editorPreview")];
 
@@ -16,7 +21,12 @@ _rotation = if (_rotation isEqualType objNull) then {
     [vectorDir _rotation, vectorUp _rotation];
 }
 else {
-    eulerToVector _rotation;
+	if (_rotation isEqualTypeAll 0) then {
+		eulerToVector _rotation;
+	}
+    else {
+        _rotation;
+    };
 };
 
 [
@@ -25,7 +35,6 @@ else {
     [_types, _display, _position, _rotation],
     {
         _args params ["_types", "_display", "_position", "_rotation"];
-        _display closeDisplay 2;
 
         [
             [_position, _rotation, _types param [lbCurSel 101, ""], clientOwner],
@@ -78,15 +87,17 @@ else {
             true,
             false
         ] call KH_fnc_execute;
+
+        _display closeDisplay 2;
     }
 ] call KH_fnc_addEventHandler;
 
 [
     ["CONTROL", _display displayCtrl 101],
     "LBSelChanged",
-    [_display, _types],
+    [_types],
     {
-        _args params ["_display", "_types"];
+        _args params ["_types"];
         ctrlSetText [103, getText (configFile >> "CfgVehicles" >> (_types param [lbCurSel 101, ""]) >> "editorPreview")];
     }
 ] call KH_fnc_addEventHandler;

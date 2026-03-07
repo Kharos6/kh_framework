@@ -1874,11 +1874,11 @@ isNil {
 									((_unit weaponsInfo [_primaryWeapon, false]) param [0, []]) param [0, -1];
 								}
 								else {
-									if ((getNumber (configFile >> "CfgWeapons" >> _handgunWeapon >> "kh_meleeActions")) isNotEqualTo "") then {
+									if ((getText (configFile >> "CfgWeapons" >> _handgunWeapon >> "kh_meleeActions")) isNotEqualTo "") then {
 										((_unit weaponsInfo [_handgunWeapon, false]) param [0, []]) param [0, -1];
 									}
 									else {
-										if ((getNumber (configFile >> "CfgWeapons" >> _secondaryWeapon >> "kh_meleeActions")) isNotEqualTo "") then {
+										if ((getText (configFile >> "CfgWeapons" >> _secondaryWeapon >> "kh_meleeActions")) isNotEqualTo "") then {
 											((_unit weaponsInfo [_secondaryWeapon, false]) param [0, []]) param [0, -1];
 										}
 										else {

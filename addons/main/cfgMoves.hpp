@@ -2,9 +2,19 @@ class CfgMovesBasic
 {
     class Actions
     {
-        class RifleBaseLowStandActions;
-        class PistolStandActions;
-        class CivilStandActions;
+        class NoActions;
+        class RifleBaseLowStandActions: NoActions
+        {
+            KH_TraversalJump = "Hum_AbsStaAny_JmpFwdRfl";
+        };
+        class PistolStandActions: NoActions
+        {
+            KH_TraversalJump = "Hum_AbsStaAny_JmpFwdPtl";
+        };
+        class CivilStandActions: NoActions
+        {
+            KH_TraversalJump = "Hum_AbsStaAny_JmpFwdUna";
+        };
     };
     class Default
     {
@@ -136,18 +146,6 @@ class CfgMovesMaleSdr: CfgMovesBasic
 {
     class Actions: Actions
     {
-        class RifleBaseLowStandActions: RifleBaseLowStandActions
-        {
-            KH_TraversalJump = "Hum_AbsStaAny_JmpFwdRfl";
-        };
-        class PistolStandActions: PistolStandActions
-        {
-            KH_TraversalJump = "Hum_AbsStaAny_JmpFwdPtl";
-        };
-        class CivilStandActions: CivilStandActions
-        {
-            KH_TraversalJump = "Hum_AbsStaAny_JmpFwdUna";
-        };
         class KH_MeleeTertiaryLightSwordActions: CivilStandActions
         {
             access = 3;
@@ -3621,6 +3619,7 @@ class CfgMovesMaleSdr: CfgMovesBasic
         class KH_TraversalPistolStandBase: KH_TraversalRifleStandBase
         {
             actions = "PistolStandActions";
+            showHandGun = 1;
             rightHandIKBeg = 0;
             rightHandIKCurve[] = {0};
             rightHandIKEnd = 0;
@@ -3683,20 +3682,13 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaAny_JmpFwdRfl", 0.5
             };
         };
-        class AmovPercMevaSlowWrflDf: AmovPercMevaSrasWrflDf
-        {
-            interpolateTo[] += {
-                "Hum_AbsStaAny_JmpFwdRfl", 0.5
-            };
-        };
-        class AmovPercMevaSrasWpstDf;
-        class AmovPercMevaSlowWpstDf: AmovPercMevaSrasWpstDf
+        class SprintCivilBaseDf;
+        class AmovPercMevaSrasWpstDf: SprintCivilBaseDf
         {
             interpolateTo[] += {
                 "Hum_AbsStaAny_JmpFwdPtl", 0.5
             };
         };
-        class SprintCivilBaseDf;
         class AmovPercMevaSnonWnonDf: SprintCivilBaseDf
         {
             interpolateTo[] += {
@@ -3706,7 +3698,7 @@ class CfgMovesMaleSdr: CfgMovesBasic
         class AmovPercMstpSnonWnonDnon: StandBase
         {
             interpolateTo[] += {
-                "Hum_AbsStaSaf_IdlUna_Tra_AbsStaSaf_IdlLhtMel", 0.01
+                "Hum_AbsStaSaf_IdlUna_Tra_AbsStaSaf_IdlLhtMel", 0.5
             };
         };
         class AmovPknlMstpSrasWlnrDnon_AinvPknlMstpSrasWlnrDnon;

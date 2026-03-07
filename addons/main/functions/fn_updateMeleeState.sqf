@@ -63,36 +63,51 @@ if (((currentWeapon _unit) isNotEqualTo "") || (_unit getVariable ["KH_var_rawMe
     }
     else {
         if ((_unit getVariable ["KH_var_meleeWeaponSlot", ""]) isEqualTo _currentWeaponSlot) then {
-            _unit switchAction (
-                switch _currentWeapon do {
-                    case "PRIMARY": {
-                        "PrimaryWeapon";
-                    };
+            [
+                _unit, 
+                [
+                    "ACTION_SWITCH", 
+                    switch _currentWeapon do {
+                        case "PRIMARY": {
+                            "PrimaryWeapon";
+                        };
 
-                    case "SECONDARY": {
-                        "handgunOn";
-                    };
+                        case "SECONDARY": {
+                            "handgunOn";
+                        };
 
-                    case "TERTIARY": {
-                        "SecondaryWeapon";
-                    };
+                        case "TERTIARY": {
+                            "SecondaryWeapon";
+                        };
 
-                    case "NONE": {
-                        "Civil";
-                    };
+                        case "NONE": {
+                            "Civil";
+                        };
 
-                    default {
-                        "default";  
-                    };
-                }
-            );
+                        default {
+                            "default";  
+                        };
+                    }, 
+                    true
+                ],
+                false,
+                false
+            ] call KH_fnc_setAnimation;
         };
     };
 }
 else {
     if (_unit getVariable ["KH_var_enteringMelee", false]) then {
-        _unit switchAction ([getText ((_unit getVariable ["KH_var_meleeWeaponConfig", configNull]) >> "kh_meleeActions"), "Transition"] joinString "");
-        _unit playAction (getText ((_unit getVariable ["KH_var_meleeWeaponConfig", configNull]) >> "kh_meleeActions"));
+        [
+            _unit, 
+            [
+                [0, "ACTION_SWITCH", [getText ((_unit getVariable ["KH_var_meleeWeaponConfig", configNull]) >> "kh_meleeActions"), "Transition"] joinString "", true], 
+                [0, "ACTION_PLAY", getText ((_unit getVariable ["KH_var_meleeWeaponConfig", configNull]) >> "kh_meleeActions"), true]
+            ], 
+            false,
+            false
+        ] call KH_fnc_setAnimation;
+
         _unit setVariable ["KH_var_rawMeleeStance", false];
         _unit setVariable ["KH_var_enteringMelee", false, true];
     };
@@ -119,9 +134,17 @@ if (_action isNotEqualTo "") then {
                 if (_priority isEqualTo 0) then {
                     if ((getText (configFile >> _moves >> "actions" >> (getText (configFile >> _moves >> "states" >> (animationState _unit) >> "actions")) >> _mode)) isNotEqualTo "") then {
                         _unit setVariable ["KH_var_attackGestureIndex", -1];
-                        _unit playActionNow "KH_GestureNone";
-                        _unit playActionNow _mode;
-                        _unit playAction "KH_MeleeStop";
+
+                        [
+                            _unit, 
+                            [
+                                [0, "ACTION_PLAY_NOW", "KH_GestureNone", true],
+                                [0, "ACTION_PLAY_NOW", _mode, true], 
+                                [0, "ACTION_PLAY", "KH_MeleeStop", true]
+                            ], 
+                            false,
+                            false
+                        ] call KH_fnc_setAnimation;
                     }
                     else {
                         private _gestureMode = (getArray ((_unit getVariable ["KH_var_meleeWeaponConfig", configNull]) >> "kh_meleeModesGestures")) param [(getArray ((_unit getVariable ["KH_var_meleeWeaponConfig", configNull]) >> "kh_meleeModes")) find _mode, []];
@@ -141,7 +164,7 @@ if (_action isNotEqualTo "") then {
                                 if (_gestureAction isNotEqualTo "") then {
                                     if !(_unit getVariable ["KH_var_meleeMoveActive", false]) then {
                                         _unit setVariable ["KH_var_attackGestureIndex", _newIndex];
-                                        _unit playActionNow _newMode;
+                                        [_unit, ["ACTION_PLAY_NOW", _newMode, true], false, false] call KH_fnc_setAnimation;
                                     }
                                     else {
                                         _unit setVariable ["KH_var_attackGestureIndex", -1];
@@ -158,9 +181,16 @@ if (_action isNotEqualTo "") then {
                     private _gestureMode = (getArray ((_unit getVariable ["KH_var_meleeWeaponConfig", configNull]) >> "kh_meleeModesGestures")) param [(getArray ((_unit getVariable ["KH_var_meleeWeaponConfig", configNull]) >> "kh_meleeModes")) find _mode, []];
                     
                     if (_gestureMode isEqualTo []) then {
-                        _unit playActionNow "KH_GestureNone";
-                        _unit playActionNow _mode;
-                        _unit playAction "KH_MeleeStop";
+                        [
+                            _unit, 
+                            [
+                                [0, "ACTION_PLAY_NOW", "KH_GestureNone", true],
+                                [0, "ACTION_PLAY_NOW", _mode, true], 
+                                [0, "ACTION_PLAY", "KH_MeleeStop", true]
+                            ], 
+                            false,
+                            false
+                        ] call KH_fnc_setAnimation;
                     }
                     else {
                         private _newIndex = (_unit getVariable ["KH_var_attackGestureIndex", -1]) + 1;
@@ -173,23 +203,39 @@ if (_action isNotEqualTo "") then {
 
                         if (_newMode isEqualTo "") then {
                             _unit setVariable ["KH_var_attackGestureIndex", -1];
-                            _unit playActionNow "KH_GestureNone";
-                            _unit playActionNow _mode;
-                            _unit playAction "KH_MeleeStop";
+
+                            [
+                                _unit, 
+                                [
+                                    [0, "ACTION_PLAY_NOW", "KH_GestureNone", true],
+                                    [0, "ACTION_PLAY_NOW", _mode, true], 
+                                    [0, "ACTION_PLAY", "KH_MeleeStop", true]
+                                ], 
+                                false,
+                                false
+                            ] call KH_fnc_setAnimation;
                         }
                         else {
                             private _gestureAction = (getArray (configFile >> _moves >> "actions" >> (getText (configFile >> _moves >> "states" >> (animationState _unit) >> "actions")) >> (_gestureMode param [_newIndex, []]))) select 0;
 
                             if (_gestureAction isEqualTo "") then {
                                 _unit setVariable ["KH_var_attackGestureIndex", -1];
-                                _unit playActionNow "KH_GestureNone";
-                                _unit playActionNow _mode;
-                                _unit playAction "KH_MeleeStop";
+
+                                [
+                                    _unit, 
+                                    [
+                                        [0, "ACTION_PLAY_NOW", "KH_GestureNone", true],
+                                        [0, "ACTION_PLAY_NOW", _mode, true], 
+                                        [0, "ACTION_PLAY", "KH_MeleeStop", true]
+                                    ], 
+                                    false,
+                                    false
+                                ] call KH_fnc_setAnimation;
                             }
                             else {
                                 if !(_unit getVariable ["KH_var_meleeMoveActive", false]) then {
                                     _unit setVariable ["KH_var_attackGestureIndex", _newIndex];
-                                    _unit playActionNow _newMode;
+                                    [_unit, ["ACTION_PLAY_NOW", _newMode, true], false, false] call KH_fnc_setAnimation;
                                 }
                                 else {
                                     _unit setVariable ["KH_var_attackGestureIndex", -1];
@@ -210,24 +256,38 @@ if (_action isNotEqualTo "") then {
 
                 if (_priority isEqualTo 0) then {
                     if ((getText (configFile >> _moves >> "actions" >> (getText (configFile >> _moves >> "states" >> (animationState _unit) >> "actions")) >> "KH_MeleeBlockIn")) isNotEqualTo "") then {
-                        _unit playActionNow "KH_GestureNone";
-                        _unit playActionNow "KH_MeleeBlockIn";
+                        [
+                            _unit, 
+                            [
+                                [0, "ACTION_PLAY_NOW", "KH_GestureNone", true],
+                                [0, "ACTION_PLAY_NOW", "KH_MeleeBlockIn", true]
+                            ], 
+                            false,
+                            false
+                        ] call KH_fnc_setAnimation;
                     }
                     else {
                         if !(_unit getVariable ["KH_var_meleeMoveActive", false]) then {
-                            _unit playActionNow "KH_MeleeBlockGesture";
+                            [_unit, ["ACTION_PLAY_NOW", "KH_MeleeBlockGesture", true], false, false] call KH_fnc_setAnimation;
                         };
                     };
                 }
                 else {
                     if (((getArray (configFile >> _moves >> "actions" >> (getText (configFile >> _moves >> "states" >> (animationState _unit) >> "actions")) >> "KH_MeleeBlockGesture")) select 0) isNotEqualTo "") then {
                         if !(_unit getVariable ["KH_var_meleeMoveActive", false]) then {
-                            _unit playActionNow "KH_MeleeBlockGesture";
+                            [_unit, ["ACTION_PLAY_NOW", "KH_MeleeBlockGesture", true], false, false] call KH_fnc_setAnimation;
                         };
                     }
                     else {
-                        _unit playActionNow "KH_GestureNone";
-                        _unit playActionNow "KH_MeleeBlockIn";
+                        [
+                            _unit, 
+                            [
+                                [0, "ACTION_PLAY_NOW", "KH_GestureNone", true],
+                                [0, "ACTION_PLAY_NOW", "KH_MeleeBlockIn", true]
+                            ], 
+                            false,
+                            false
+                        ] call KH_fnc_setAnimation;
                     };
                 };
             };
@@ -238,13 +298,20 @@ if (_action isNotEqualTo "") then {
             private _moves = getText ((configOf _unit) >> "moves");
             
             if ((getArray (configFile >> _moves >> "states" >> (animationState _unit) >> "kh_meleeBlockTiming")) isNotEqualTo []) then {
-                _unit playActionNow "KH_GestureNone";
-                _unit playActionNow "KH_MeleeBlockOut";
-                _unit playAction "KH_MeleeStop";
+                [
+                    _unit, 
+                    [
+                        [0, "ACTION_PLAY_NOW", "KH_GestureNone", true],
+                        [0, "ACTION_PLAY_NOW", "KH_MeleeBlockOut", true], 
+                        [0, "ACTION_PLAY", "KH_MeleeStop", true]
+                    ], 
+                    false,
+                    false
+                ] call KH_fnc_setAnimation;
             };
 
             if ((getArray (configFile >> (getText (configFile >> _moves >> "gestures")) >> "states" >> (gestureState _unit) >> "kh_meleeBlockTiming")) isNotEqualTo []) then {   
-                _unit playActionNow "KH_GestureNone";
+                [_unit, ["ACTION_PLAY_NOW", "KH_GestureNone", true], false, false] call KH_fnc_setAnimation;
             };
         };
 
@@ -255,37 +322,73 @@ if (_action isNotEqualTo "") then {
 
 			if (_priority isEqualTo 0) then {
 				if ((getText (configFile >> _moves >> "actions" >> (getText (configFile >> _moves >> "states" >> (animationState _unit) >> "actions")) >> "KH_MeleeBlockSuccess")) isNotEqualTo "") then {
-                    _unit playActionNow "KH_GestureNone";
-					_unit playActionNow "KH_MeleeBlockSuccess";
-                    _unit playAction "KH_MeleeBlockIn";
+                    [
+                        _unit, 
+                        [
+                            [0, "ACTION_PLAY_NOW", "KH_GestureNone", true],
+                            [0, "ACTION_PLAY_NOW", "KH_MeleeBlockSuccess", true], 
+                            [0, "ACTION_PLAY", "KH_MeleeBlockIn", true]
+                        ], 
+                        false,
+                        false
+                    ] call KH_fnc_setAnimation;
 				}
 				else {
                     if !(_unit getVariable ["KH_var_meleeMoveActive", false]) then {
-                        _unit playActionNow "KH_MeleeBlockSuccessGesture";
-                        _unit playAction "KH_MeleeBlockGesture";
+                        [
+                            _unit, 
+                            [
+                                [0, "ACTION_PLAY_NOW", "KH_MeleeBlockSuccessGesture", true],
+                                [0, "ACTION_PLAY", "KH_MeleeBlockGesture", true]
+                            ], 
+                            false,
+                            false
+                        ] call KH_fnc_setAnimation;
                     };
 				};
 			}
 			else {
 				if (((getArray (configFile >> _moves >> "actions" >> (getText (configFile >> _moves >> "states" >> (animationState _unit) >> "actions")) >> "KH_MeleeBlockSuccessGesture")) select 0) isNotEqualTo "") then {
                     if !(_unit getVariable ["KH_var_meleeMoveActive", false]) then {
-                        _unit playActionNow "KH_MeleeBlockSuccessGesture";
-                        _unit playAction "KH_MeleeBlockGesture";
+                        [
+                            _unit, 
+                            [
+                                [0, "ACTION_PLAY_NOW", "KH_MeleeBlockSuccessGesture", true],
+                                [0, "ACTION_PLAY", "KH_MeleeBlockGesture", true]
+                            ], 
+                            false,
+                            false
+                        ] call KH_fnc_setAnimation;
                     };
 				}
 				else {
-                    _unit playActionNow "KH_GestureNone";
-					_unit playActionNow "KH_MeleeBlockSuccess";
-                    _unit playAction "KH_MeleeBlockIn";
+                    [
+                        _unit, 
+                        [
+                            [0, "ACTION_PLAY_NOW", "KH_GestureNone", true],
+                            [0, "ACTION_PLAY_NOW", "KH_MeleeBlockSuccess", true], 
+                            [0, "ACTION_PLAY", "KH_MeleeBlockIn", true]
+                        ], 
+                        false,
+                        false
+                    ] call KH_fnc_setAnimation;
 				};
 			};
         };
 
         case "BLOCK_FAILURE": {
             _unit setVariable ["KH_var_attackGestureIndex", -1];
-            _unit playActionNow "KH_GestureNone";
-            _unit playActionNow "KH_MeleeBlockFailure";
-            _unit playAction "KH_MeleeStop";
+
+            [
+                _unit, 
+                [
+                    [0, "ACTION_PLAY_NOW", "KH_GestureNone", true],
+                    [0, "ACTION_PLAY_NOW", "KH_MeleeBlockFailure", true], 
+                    [0, "ACTION_PLAY", "KH_MeleeStop", true]
+                ], 
+                false,
+                false
+            ] call KH_fnc_setAnimation;
         };
         
         case "PARRY": {
@@ -297,26 +400,40 @@ if (_action isNotEqualTo "") then {
 
                 if (_priority isEqualTo 0) then {
                     if ((getText (configFile >> _moves >> "actions" >> (getText (configFile >> _moves >> "states" >> (animationState _unit) >> "actions")) >> "KH_MeleeParry")) isNotEqualTo "") then {
-                        _unit playActionNow "KH_GestureNone";
-                        _unit playActionNow "KH_MeleeParry";
-                        _unit playAction "KH_MeleeStop";
+                        [
+                            _unit, 
+                            [
+                                [0, "ACTION_PLAY_NOW", "KH_GestureNone", true],
+                                [0, "ACTION_PLAY_NOW", "KH_MeleeParry", true], 
+                                [0, "ACTION_PLAY", "KH_MeleeStop", true]
+                            ], 
+                            false,
+                            false
+                        ] call KH_fnc_setAnimation;
                     }
                     else {
                         if !(_unit getVariable ["KH_var_meleeMoveActive", false]) then {
-                            _unit playActionNow "KH_MeleeParryGesture";
+                            [_unit, ["ACTION_PLAY_NOW", "KH_MeleeParryGesture", true], false, false] call KH_fnc_setAnimation;
                         };
                     };
                 }
                 else {
                     if ((getArray (configFile >> _moves >> "actions" >> (getText (configFile >> _moves >> "states" >> (animationState _unit) >> "actions")) >> "KH_MeleeParryGesture")) isNotEqualTo []) then {
                         if !(_unit getVariable ["KH_var_meleeMoveActive", false]) then {
-                            _unit playActionNow "KH_MeleeParryGesture";
+                            [_unit, ["ACTION_PLAY_NOW", "KH_MeleeParryGesture", true], false, false] call KH_fnc_setAnimation;
                         };
                     }
                     else {
-                        _unit playActionNow "KH_GestureNone";
-                        _unit playActionNow "KH_MeleeParry";
-                        _unit playAction "KH_MeleeStop";
+                        [
+                            _unit, 
+                            [
+                                [0, "ACTION_PLAY_NOW", "KH_GestureNone", true],
+                                [0, "ACTION_PLAY_NOW", "KH_MeleeParry", true], 
+                                [0, "ACTION_PLAY", "KH_MeleeStop", true]
+                            ], 
+                            false,
+                            false
+                        ] call KH_fnc_setAnimation;
                     };
                 };
             };
@@ -326,9 +443,16 @@ if (_action isNotEqualTo "") then {
             _unit setVariable ["KH_var_attackGestureIndex", -1];
 
             if !(_unit getVariable ["KH_var_meleeGestureActive", false]) then {
-                _unit playActionNow "KH_GestureNone";
-                _unit playActionNow "KH_MeleeKick";
-                _unit playAction "KH_MeleeStop";
+                [
+                    _unit, 
+                    [
+                        [0, "ACTION_PLAY_NOW", "KH_GestureNone", true],
+                        [0, "ACTION_PLAY_NOW", "KH_MeleeKick", true], 
+                        [0, "ACTION_PLAY", "KH_MeleeStop", true]
+                    ], 
+                    false,
+                    false
+                ] call KH_fnc_setAnimation;
             };
         };
 
@@ -336,9 +460,16 @@ if (_action isNotEqualTo "") then {
             _unit setVariable ["KH_var_attackGestureIndex", -1];
 
             if !(_unit getVariable ["KH_var_meleeGestureActive", false]) then {
-                _unit playActionNow "KH_GestureNone";
-                _unit playActionNow "KH_MeleeTackle";
-                _unit playAction "KH_MeleeStop";
+                [
+                    _unit, 
+                    [
+                        [0, "ACTION_PLAY_NOW", "KH_GestureNone", true],
+                        [0, "ACTION_PLAY_NOW", "KH_MeleeTackle", true], 
+                        [0, "ACTION_PLAY", "KH_MeleeStop", true]
+                    ], 
+                    false,
+                    false
+                ] call KH_fnc_setAnimation;
             };
         };
 
@@ -346,63 +477,88 @@ if (_action isNotEqualTo "") then {
             _unit setVariable ["KH_var_attackGestureIndex", -1];
 
             if !(_unit getVariable ["KH_var_meleeGestureActive", false]) then {
-                _unit playActionNow "KH_GestureNone";
+                [_unit, ["ACTION_PLAY_NOW", "KH_GestureNone", true], false, false] call KH_fnc_setAnimation;
                 
                 if (isNil "_subaction") then {
-                    _unit playActionNow "KH_MeleeDodge";
+                    [_unit, ["ACTION_PLAY_NOW", "KH_MeleeDodge", true], false, false] call KH_fnc_setAnimation;
                 }
                 else {
-                    switch _subaction do {
-                        case "FORWARD": {
-                            _unit playActionNow "KH_MeleeDodgeForward";
-                        };
+                    [
+                        _unit,
+                        [
+                            "ACTION_PLAY_NOW",
+                            switch _subaction do {
+                                case "FORWARD": {
+                                    "KH_MeleeDodgeForward";
+                                };
 
-                        case "FORWARD_LEFTWARD": {
-                            _unit playActionNow "KH_MeleeDodgeForwardLeftward";
-                        };
+                                case "FORWARD_LEFTWARD": {
+                                    "KH_MeleeDodgeForwardLeftward";
+                                };
 
-                        case "FORWARD_RIGHTWARD": {
-                            _unit playActionNow "KH_MeleeDodgeForwardRightward";
-                        };
+                                case "FORWARD_RIGHTWARD": {
+                                    "KH_MeleeDodgeForwardRightward";
+                                };
 
-                        case "BACKWARD": {
-                            _unit playActionNow "KH_MeleeDodgeBackward";
-                        };
+                                case "BACKWARD": {
+                                    "KH_MeleeDodgeBackward";
+                                };
 
-                        case "BACKWARD_LEFTWARD": {
-                            _unit playActionNow "KH_MeleeDodgeBackwardLeftward";
-                        };
+                                case "BACKWARD_LEFTWARD": {
+                                    "KH_MeleeDodgeBackwardLeftward";
+                                };
 
-                        case "BACKWARD_RIGHTWARD": {
-                            _unit playActionNow "KH_MeleeDodgeBackwardRightward";
-                        };
+                                case "BACKWARD_RIGHTWARD": {
+                                    "KH_MeleeDodgeBackwardRightward";
+                                };
 
-                        case "LEFTWARD": {
-                            _unit playActionNow "KH_MeleeDodgeLeftward";
-                        };
+                                case "LEFTWARD": {
+                                    "KH_MeleeDodgeLeftward";
+                                };
 
-                        case "RIGHTWARD": {
-                            _unit playActionNow "KH_MeleeDodgeRightward";
-                        };
-                    };
+                                case "RIGHTWARD": {
+                                    "KH_MeleeDodgeRightward";
+                                };
+                            },
+                            true
+                        ],
+                        false,
+                        false
+                    ] call KH_fnc_setAnimation;                
                 };
 
-                _unit playAction "KH_MeleeStop";
+                [_unit, ["ACTION_PLAY", "KH_MeleeStop", true], false, false] call KH_fnc_setAnimation;
             };
         };
 
         case "BLOCKED": {
             _unit setVariable ["KH_var_attackGestureIndex", -1];
-            _unit playActionNow "KH_GestureNone";
-            _unit playActionNow "KH_MeleeBlocked";
-            _unit playAction "KH_MeleeStop";
+
+            [
+                _unit, 
+                [
+                    [0, "ACTION_PLAY_NOW", "KH_GestureNone", true],
+                    [0, "ACTION_PLAY_NOW", "KH_MeleeBlocked", true], 
+                    [0, "ACTION_PLAY", "KH_MeleeStop", true]
+                ], 
+                false,
+                false
+            ] call KH_fnc_setAnimation;
         };
 
         case "PARRIED": {
             _unit setVariable ["KH_var_attackGestureIndex", -1];
-            _unit playActionNow "KH_GestureNone";
-            _unit playActionNow "KH_MeleeParried";
-            _unit playAction "KH_MeleeStop";
+            
+            [
+                _unit, 
+                [
+                    [0, "ACTION_PLAY_NOW", "KH_GestureNone", true],
+                    [0, "ACTION_PLAY_NOW", "KH_MeleeParried", true], 
+                    [0, "ACTION_PLAY", "KH_MeleeStop", true]
+                ], 
+                false,
+                false
+            ] call KH_fnc_setAnimation;
         };
 
         case "CYCLE_ATTACK_MODE": {
@@ -433,16 +589,30 @@ if (_action isNotEqualTo "") then {
                     ((getNumber (configFile >> _moves >> "states" >> (animationState _unit) >> "kh_meleeAttackPhase")) isEqualTo 1) || 
                     ((getNumber (configFile >> (getText (configFile >> _moves >> "gestures")) >> "states" >> (gestureState _unit) >> "kh_meleeAttackPhase")) isEqualTo 1)
                    ) then {
-                    _unit playActionNow "KH_GestureNone";
-                    _unit playActionNow "KH_MeleeBlocked";
+                    [
+                        _unit, 
+                        [
+                            [0, "ACTION_PLAY_NOW", "KH_GestureNone", true],
+                            [0, "ACTION_PLAY_NOW", "KH_MeleeBlocked", true]
+                        ], 
+                        false,
+                        false
+                    ] call KH_fnc_setAnimation;
                 };
             };
 
             if KH_var_meleeAttacksInterruptKicks then {
                 if ((getNumber (configFile >> _moves >> "states" >> (animationState _unit) >> "kh_meleeKickPhase")) isEqualTo 1) then {
                     if (_kickPower >= (getNumber (configFile >> "CfgKHMeleeTypes" >> (_unit getVariable ["KH_var_meleeType", ""]) >> (_unit getVariable ["KH_var_currentMeleeKick", ""]) >> "power"))) then {
-                        _unit playActionNow "KH_GestureNone";
-                        _unit playActionNow "KH_StaggerLightBackward";
+                        [
+                            _unit, 
+                            [
+                                [0, "ACTION_PLAY_NOW", "KH_GestureNone", true],
+                                [0, "ACTION_PLAY_NOW", "KH_StaggerLightBackward", true]
+                            ], 
+                            false,
+                            false
+                        ] call KH_fnc_setAnimation;
                     };
                 };
             };
@@ -450,111 +620,137 @@ if (_action isNotEqualTo "") then {
             if KH_var_meleeAttacksInterruptTackles then {
                 if ((getNumber (configFile >> _moves >> "states" >> (animationState _unit) >> "kh_meleeTacklePhase")) isEqualTo 1) then {
                     if (_tacklePower >= (getNumber (configFile >> "CfgKHMeleeTypes" >> (_unit getVariable ["KH_var_meleeType", ""]) >> (_unit getVariable ["KH_var_currentMeleeTackle", ""]) >> "power"))) then {
-                        _unit playActionNow "KH_GestureNone";
-                        _unit playActionNow "KH_StaggerHeavyBackward";
+                        [
+                            _unit, 
+                            [
+                                [0, "ACTION_PLAY_NOW", "KH_GestureNone", true],
+                                [0, "ACTION_PLAY_NOW", "KH_StaggerHeavyBackward", true]
+                            ], 
+                            false,
+                            false
+                        ] call KH_fnc_setAnimation;
                     };
                 };
             };
 
-            switch true do {
-                case ((_modifier < 22.5) || (_modifier > 337.5)): {
-                    _unit playActionNow "KH_MeleeHitFrontGesture";
-                };
+            [
+                _unit,
+                [
+                    "ACTION_PLAY_NOW",
+                    switch true do {
+                        case ((_modifier < 22.5) || (_modifier > 337.5)): {
+                            "KH_MeleeHitFrontGesture";
+                        };
 
-                case ((_modifier >= 22.5) && (_modifier < 67.5)): {
-                    _unit playActionNow "KH_MeleeHitFrontRightGesture";
-                };
+                        case ((_modifier >= 22.5) && (_modifier < 67.5)): {
+                            "KH_MeleeHitFrontRightGesture";
+                        };
 
-                case ((_modifier >= 67.5) && (_modifier < 112.5)): {
-                    _unit playActionNow "KH_MeleeHitRightGesture";
-                };
+                        case ((_modifier >= 67.5) && (_modifier < 112.5)): {
+                            "KH_MeleeHitRightGesture";
+                        };
 
-                case ((_modifier >= 112.5) && (_modifier < 157.5)): {
-                    _unit playActionNow "KH_MeleeHitBackRightGesture";
-                };
+                        case ((_modifier >= 112.5) && (_modifier < 157.5)): {
+                            "KH_MeleeHitBackRightGesture";
+                        };
 
-                case ((_modifier >= 157.5) && (_modifier < 202.5)): {
-                    _unit playActionNow "KH_MeleeHitBackGesture";
-                };
+                        case ((_modifier >= 157.5) && (_modifier < 202.5)): {
+                            "KH_MeleeHitBackGesture";
+                        };
 
-                case ((_modifier >= 202.5) && (_modifier < 247.5)): {
-                    _unit playActionNow "KH_MeleeHitBackLeftGesture";
-                };
+                        case ((_modifier >= 202.5) && (_modifier < 247.5)): {
+                            "KH_MeleeHitBackLeftGesture";
+                        };
 
-                case ((_modifier >= 247.5) && (_modifier < 292.5)): {
-                    _unit playActionNow "KH_MeleeHitLeftGesture";
-                };
+                        case ((_modifier >= 247.5) && (_modifier < 292.5)): {
+                            "KH_MeleeHitLeftGesture";
+                        };
 
-                case ((_modifier >= 292.5) && (_modifier < 337.5)): {
-                    _unit playActionNow "KH_MeleeHitFrontLeftGesture";
-                };
+                        case ((_modifier >= 292.5) && (_modifier < 337.5)): {
+                            "KH_MeleeHitFrontLeftGesture";
+                        };
 
-                default {
-                    _unit playActionNow "KH_MeleeHitFrontGesture";
-                };
-            };
+                        default {
+                            "KH_MeleeHitFrontGesture";
+                        };
+                    },
+                    true
+                ],
+                false,
+                false
+            ] call KH_fnc_setAnimation;
         };
     
         case "STAGGER": {
             _unit setVariable ["KH_var_attackGestureIndex", -1];
-            _unit playActionNow "KH_GestureNone";
+            [_unit, ["ACTION_PLAY_NOW", "KH_GestureNone", true], false, false] call KH_fnc_setAnimation;
 
             if (_modifier isEqualType objNull) then {
                 _modifier = _unit getRelDir _modifier;
             };
 
-            switch true do {
-                case ((_modifier < 22.5) || (_modifier > 337.5)): {
-                    _unit playActionNow (["KH_StaggerLightBackward", "KH_StaggerHeavyBackward"] select _subaction);
-                    _unit playAction "KH_MeleeStop";
-                };
+            [
+                _unit,
+                [
+                    "ACTION_PLAY_NOW",
+                    switch true do {
+                        case ((_modifier < 22.5) || (_modifier > 337.5)): {
+                            ["KH_StaggerLightBackward", "KH_StaggerHeavyBackward"] select _subaction;
+                        };
 
-                case ((_modifier >= 22.5) && (_modifier < 67.5)): {
-                    _unit playActionNow (["KH_StaggerLightBackwardLeftward", "KH_StaggerHeavyBackwardLeftward"] select _subaction);
-                    _unit playAction "KH_MeleeStop";
-                };
+                        case ((_modifier >= 22.5) && (_modifier < 67.5)): {
+                            ["KH_StaggerLightBackwardLeftward", "KH_StaggerHeavyBackwardLeftward"] select _subaction;
+                        };
 
-                case ((_modifier >= 67.5) && (_modifier < 112.5)): {
-                    _unit playActionNow (["KH_StaggerLightLeftward", "KH_StaggerHeavyLeftward"] select _subaction);
-                    _unit playAction "KH_MeleeStop";
-                };
+                        case ((_modifier >= 67.5) && (_modifier < 112.5)): {
+                            ["KH_StaggerLightLeftward", "KH_StaggerHeavyLeftward"] select _subaction;
+                        };
 
-                case ((_modifier >= 112.5) && (_modifier < 157.5)): {
-                    _unit playActionNow (["KH_StaggerLightForwardLeftward", "KH_StaggerHeavyForwardLeftward"] select _subaction);
-                    _unit playAction "KH_MeleeStop";
-                };
+                        case ((_modifier >= 112.5) && (_modifier < 157.5)): {
+                            ["KH_StaggerLightForwardLeftward", "KH_StaggerHeavyForwardLeftward"] select _subaction;
+                        };
 
-                case ((_modifier >= 157.5) && (_modifier < 202.5)): {
-                    _unit playActionNow (["KH_StaggerLightForward", "KH_StaggerHeavyForward"] select _subaction);
-                    _unit playAction "KH_MeleeStop";
-                };
+                        case ((_modifier >= 157.5) && (_modifier < 202.5)): {
+                            ["KH_StaggerLightForward", "KH_StaggerHeavyForward"] select _subaction;
+                        };
 
-                case ((_modifier >= 202.5) && (_modifier < 247.5)): {
-                    _unit playActionNow (["KH_StaggerLightForwardRightward", "KH_StaggerHeavyForwardRightward"] select _subaction);
-                    _unit playAction "KH_MeleeStop";
-                };
+                        case ((_modifier >= 202.5) && (_modifier < 247.5)): {
+                            ["KH_StaggerLightForwardRightward", "KH_StaggerHeavyForwardRightward"] select _subaction;
+                        };
 
-                case ((_modifier >= 247.5) && (_modifier < 292.5)): {
-                    _unit playActionNow (["KH_StaggerLightRightward", "KH_StaggerHeavyRightward"] select _subaction);
-                    _unit playAction "KH_MeleeStop";
-                };
+                        case ((_modifier >= 247.5) && (_modifier < 292.5)): {
+                            ["KH_StaggerLightRightward", "KH_StaggerHeavyRightward"] select _subaction;
+                        };
 
-                case ((_modifier >= 292.5) && (_modifier < 337.5)): {
-                    _unit playActionNow (["KH_StaggerLightBackwardRightward", "KH_StaggerHeavyBackwardRightward"] select _subaction);
-                    _unit playAction "KH_MeleeStop";
-                };
+                        case ((_modifier >= 292.5) && (_modifier < 337.5)): {
+                            ["KH_StaggerLightBackwardRightward", "KH_StaggerHeavyBackwardRightward"] select _subaction;
+                        };
 
-                default {
-                    _unit playActionNow (["KH_StaggerLightBackward", "KH_StaggerHeavyBackward"] select _subaction);
-                    _unit playAction "KH_MeleeStop";
-                };
-            };
+                        default {
+                            ["KH_StaggerLightBackward", "KH_StaggerHeavyBackward"] select _subaction;
+                        };
+                    },
+                    true
+                ],
+                false,
+                false
+            ] call KH_fnc_setAnimation;
+
+            [_unit, ["ACTION_PLAY", "KH_MeleeStop", true], false, false] call KH_fnc_setAnimation;
         };
 
         case "STOP": {
             _unit setVariable ["KH_var_attackGestureIndex", -1];
-            _unit playActionNow "KH_MeleeStop";
-            _unit playActionNow "KH_GestureNone";
+
+            [
+                _unit, 
+                [
+                    [0, "ACTION_PLAY_NOW", "KH_GestureNone", true],
+                    [0, "ACTION_PLAY_NOW", "KH_MeleeStop", true]
+                ], 
+                false,
+                false
+            ] call KH_fnc_setAnimation;
         };
     };
 };

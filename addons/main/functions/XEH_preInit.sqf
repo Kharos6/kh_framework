@@ -2633,10 +2633,10 @@
 
 [
 	"KH Melee", 
-	"KH_meleeCycleAttackMode", 
-	"Cycle Attack Mode",
+	"KH_meleeAttack", 
+	"Attack",
 	{
-		if (!dialog && !visibleMap && (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false])) then {
+		if (!dialog && !visibleMap) then {
 			private _continue = true;
 
 			{
@@ -2647,7 +2647,33 @@
 			} forEach allCameras;
 
 			if _continue then {
-				[KH_var_playerUnit, "CYCLE_ATTACK_MODE"] call KH_fnc_updateMeleeState;
+				[KH_var_playerUnit, "ATTACK"] call KH_fnc_updateMeleeState;
+			};
+		};
+	}, 
+	{}, 
+	[0x05, [false, false, false]]
+] call CBA_fnc_addKeybind;
+
+[
+	"KH Melee", 
+	"KH_meleeCycleAttackMode", 
+	"Cycle Attack Mode",
+	{
+		if (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false]) then {
+			if (!dialog && !visibleMap) then {
+				private _continue = true;
+
+				{
+					if (((_x select 0) isNotEqualTo KH_var_playerUnit) && (_x select 2)) then {
+						_continue = false;
+						break;
+					};
+				} forEach allCameras;
+
+				if _continue then {
+					[KH_var_playerUnit, "CYCLE_ATTACK_MODE"] call KH_fnc_updateMeleeState;
+				};
 			};
 		};
 	}, 
@@ -2660,7 +2686,7 @@
 	"KH_meleeDodge", 
 	"Dodge",
 	{
-		if (!dialog && !visibleMap && (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false])) then {
+		if (!dialog && !visibleMap) then {
 			private _continue = true;
 
 			{
@@ -2684,34 +2710,38 @@
 	"KH_meleeBlock", 
 	"Block",
 	{
-		if (!dialog && !visibleMap && (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false])) then {
-			private _continue = true;
+		if (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false]) then {
+			if (!dialog && !visibleMap) then {
+				private _continue = true;
 
-			{
-				if (((_x select 0) isNotEqualTo KH_var_playerUnit) && (_x select 2)) then {
-					_continue = false;
-					break;
+				{
+					if (((_x select 0) isNotEqualTo KH_var_playerUnit) && (_x select 2)) then {
+						_continue = false;
+						break;
+					};
+				} forEach allCameras;
+
+				if _continue then {
+					[KH_var_playerUnit, "BLOCK_IN"] call KH_fnc_updateMeleeState;
 				};
-			} forEach allCameras;
-
-			if _continue then {
-				[KH_var_playerUnit, "BLOCK_IN"] call KH_fnc_updateMeleeState;
 			};
 		};
 	},
 	{
-		if (!dialog && !visibleMap && (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false])) then {
-			private _continue = true;
+		if (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false]) then {
+			if (!dialog && !visibleMap) then {
+				private _continue = true;
 
-			{
-				if (((_x select 0) isNotEqualTo KH_var_playerUnit) && (_x select 2)) then {
-					_continue = false;
-					break;
+				{
+					if (((_x select 0) isNotEqualTo KH_var_playerUnit) && (_x select 2)) then {
+						_continue = false;
+						break;
+					};
+				} forEach allCameras;
+
+				if _continue then {
+					[KH_var_playerUnit, "BLOCK_OUT"] call KH_fnc_updateMeleeState;
 				};
-			} forEach allCameras;
-
-			if _continue then {
-				[KH_var_playerUnit, "BLOCK_OUT"] call KH_fnc_updateMeleeState;
 			};
 		};
 	},
@@ -2723,18 +2753,20 @@
 	"KH_meleeParry", 
 	"Parry",
 	{
-		if (!dialog && !visibleMap && (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false])) then {
-			private _continue = true;
+		if (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false]) then {
+			if (!dialog && !visibleMap) then {
+				private _continue = true;
 
-			{
-				if (((_x select 0) isNotEqualTo KH_var_playerUnit) && (_x select 2)) then {
-					_continue = false;
-					break;
+				{
+					if (((_x select 0) isNotEqualTo KH_var_playerUnit) && (_x select 2)) then {
+						_continue = false;
+						break;
+					};
+				} forEach allCameras;
+
+				if _continue then {
+					[KH_var_playerUnit, "PARRY"] call KH_fnc_updateMeleeState;
 				};
-			} forEach allCameras;
-
-			if _continue then {
-				[KH_var_playerUnit, "PARRY"] call KH_fnc_updateMeleeState;
 			};
 		};
 	}, 
@@ -2747,7 +2779,7 @@
 	"KH_meleeKick", 
 	"Kick",
 	{
-		if (!dialog && !visibleMap && (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false])) then {
+		if (!dialog && !visibleMap) then {
 			private _continue = true;
 
 			{
@@ -2763,7 +2795,7 @@
 		};
 	}, 
 	{}, 
-	[0x13, [false, false, false]]
+	[0x14, [true, false, false]]
 ] call CBA_fnc_addKeybind;
 
 [
@@ -2771,7 +2803,7 @@
 	"KH_meleeTackle", 
 	"Tackle",
 	{
-		if (!dialog && !visibleMap && (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false])) then {
+		if (!dialog && !visibleMap) then {
 			private _continue = true;
 
 			{
@@ -2813,7 +2845,7 @@
 		};
 	}, 
 	{}, 
-	[0x14, [true, false, false]]
+	[0x2F, [true, false, false]]
 ] call CBA_fnc_addKeybind;
 
 [

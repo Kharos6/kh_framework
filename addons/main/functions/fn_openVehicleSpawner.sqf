@@ -56,7 +56,7 @@ else {
                             break;
                         };
                     };
-                } forEach (_position nearEntities [["Air", "LandVehicle", "Ship", "CAManBase"], 20]);
+                } forEach (_position nearEntities [["Air", "LandVehicle", "Ship", "StaticWeapon", "CAManBase"], 20]);
 
                 if _continue then {
                     [

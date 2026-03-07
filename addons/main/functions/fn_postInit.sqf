@@ -336,14 +336,18 @@ isNil {
 										{
 											params ["_unit", "_animation"];
 											_args params ["_animationType", "_isMove"];
+											private _animationConfig = configFile >> _animationType >> "states" >> _animation;
 
-											if ((getNumber (configFile >> _animationType >> "states" >> _animation >> "kh_traversalTeleport")) isEqualTo 1) then {
-												_unit setPosASL (_unit getVariable ["KH_var_traversalTarget", getPosASL _unit]);
+											if ((getNumber (_animationConfig >> "kh_traversalTeleport")) isEqualTo 1) then {
+												if ((_unit getVariable ["KH_var_traversalTarget", []]) isNotEqualTo []) then {
+													_unit setPosASL (_unit getVariable ["KH_var_traversalTarget", getPosASLVisual _unit]);
+													_unit setVariable ["KH_var_traversalTarget", []];
+												};
 											};
 
-											if ((getNumber (configFile >> _animationType >> "states" >> _animation >> "kh_melee")) isEqualTo 1) then {
+											if ((getNumber (_animationConfig >> "kh_melee")) isEqualTo 1) then {
 												_unit setVariable ["KH_var_inMeleeState", true];
-												if ((getNumber (configFile >> _animationType >> "states" >> _animation >> "kh_meleeHasAction")) isEqualTo 0) exitWith {};
+												if ((getNumber (_animationConfig >> "kh_meleeHasAction")) isEqualTo 0) exitWith {};
 												private _handlerType = ["KH_var_meleeStateHandler", "KH_var_meleeGestureHandler"] select _isMove;
 
 												if !(_unit isNil _handlerType) then {
@@ -351,7 +355,6 @@ isNil {
 												};
 												
 												private _clientType = [[clientOwner, 2], false] select isServer;
-												private _animationConfig = configFile >> _animationType >> "states" >> _animation;
 
 												if _isMove then {
 													if ((getNumber (_animationConfig >> "minPlayTime")) isNotEqualTo 0) then {

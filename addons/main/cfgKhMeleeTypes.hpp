@@ -66,7 +66,7 @@ class CfgKHMeleeTypes
             angle = 45;
             power = 0.5;
             cost = 0.2;
-            costInfliction = 0.25;
+            costInfliction = 0.5;
             costBlockInfliction = 0.75;
             class Sounds
             {

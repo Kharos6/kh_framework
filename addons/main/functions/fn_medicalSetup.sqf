@@ -439,14 +439,14 @@ if KH_var_medical then {
                                             if (_unit getVariable ["KH_var_incapacitated", false]) then {
                                                 if !(_unit getVariable ["KH_var_withstanding", false]) then {
                                                     if ((isNull (attachedTo _unit)) && (isNull (objectParent _unit)) && !("unconscious" in (animationState _unit)) && !("ainj" in (animationState _unit))) then {
-                                                        [_unit, ["MOVE_SWITCH_GLOBAL", ["Unconscious"]], false, false] call KH_fnc_setAnimation;
+                                                        [_unit, ["MOVE_SWITCH_GLOBAL", ["Unconscious"], false], false, true] call KH_fnc_setAnimation;
                                                         _unit setVariable ["KH_var_unconsciousAnimationReset", true, true];
                                                     };
                                                 };
                                             }
                                             else {
                                                 if ((isNull (objectParent _unit)) && (_unit getVariable ["KH_var_unconsciousAnimationReset", false])) then {
-                                                    [_unit, ["MOVE_SWITCH_GLOBAL", ["AmovPpneMstpSnonWnonDnon"]], false, false] call KH_fnc_setAnimation;
+                                                    [_unit, ["MOVE_SWITCH_GLOBAL", ["AmovPpneMstpSnonWnonDnon"], false], false, true] call KH_fnc_setAnimation;
                                                 };
 
                                                 _unit setVariable ["KH_var_unconsciousAnimationReset", false, true];
@@ -482,11 +482,11 @@ if KH_var_medical then {
                                                 if (isNull (objectParent _caller)) then {
                                                     if !("medic" in (animationState _caller)) then {
                                                         if (_caller isNotEqualTo _target) then {
-                                                            _caller playActionNow "MedicStart";
+                                                            [_caller, ["ACTION_PLAY_NOW", "MedicStart", true], false, false] call KH_fnc_setAnimation;
                                                         }
                                                         else {
                                                             if (_caller getVariable ["KH_var_withstanding", false]) then {
-                                                                _caller playActionNow "Medic";
+                                                                [_caller, ["ACTION_PLAY_NOW", "Medic", true], false, false] call KH_fnc_setAnimation;
                                                             };
                                                         };
                                                     };
@@ -503,11 +503,11 @@ if KH_var_medical then {
                                                 if (isNull (objectParent _caller)) then {
                                                     if !("medic" in (animationState _caller)) then {
                                                         if (_caller isNotEqualTo _target) then {
-                                                            _caller playActionNow "MedicStart";
+                                                            [_caller, ["ACTION_PLAY_NOW", "MedicStart", true], false, false] call KH_fnc_setAnimation;
                                                         }
                                                         else {
                                                             if (_caller getVariable ["KH_var_withstanding", false]) then {
-                                                                _caller playActionNow "Medic";
+                                                                [_caller, ["ACTION_PLAY_NOW", "Medic", true], false, false] call KH_fnc_setAnimation;
                                                             };
                                                         };
                                                     };
@@ -518,7 +518,7 @@ if KH_var_medical then {
                                                 _caller setVariable ["KH_var_reviving", false, true];
 
                                                 if (!(_caller getVariable ["KH_var_incapacitated", false]) && (_caller isNotEqualTo _target)) then {
-                                                    _caller switchAction "MedicStop";
+                                                    [_caller, ["ACTION_SWITCH", "MedicStop", true], false, false] call KH_fnc_setAnimation;
                                                 };
                                             },
                                             {
@@ -526,7 +526,7 @@ if KH_var_medical then {
                                                 _caller setVariable ["KH_var_reviving", false, true];
 
                                                 if (!(_caller getVariable ["KH_var_incapacitated", false]) && (_caller isNotEqualTo _target)) then {
-                                                    _caller switchAction "MedicStop";
+                                                    [_caller, ["ACTION_SWITCH", "MedicStop", true], false, false] call KH_fnc_setAnimation;
                                                 };
                                             },
                                             {
@@ -575,7 +575,7 @@ if KH_var_medical then {
                                                 _caller setVariable ["KH_var_reviving", false, true];
 
                                                 if (_caller isNotEqualTo _target) then {
-                                                    _caller switchAction "MedicStop";
+                                                    [_caller, ["ACTION_SWITCH", "MedicStop", true], false, false] call KH_fnc_setAnimation;
                                                 };
                                             },
                                             {
@@ -720,11 +720,11 @@ if KH_var_medical then {
                                                     if (isNull (objectParent _caller)) then {
                                                         if !("medic" in (animationState _caller)) then {
                                                             if (_caller isNotEqualTo _target) then {
-                                                                _caller playActionNow "MedicOther";
+                                                                [_caller, ["ACTION_PLAY_NOW", "MedicOther", true], false, false] call KH_fnc_setAnimation;
                                                             }
                                                             else {
                                                                 if (_caller getVariable ["KH_var_withstanding", false]) then {
-                                                                    _caller playActionNow "Medic";
+                                                                    [_caller, ["ACTION_PLAY_NOW", "Medic", true], false, false] call KH_fnc_setAnimation;
                                                                 };
                                                             };
                                                         };
@@ -741,11 +741,11 @@ if KH_var_medical then {
                                                     if (isNull (objectParent _caller)) then {
                                                         if !("medic" in (animationState _caller)) then {
                                                             if (_caller isNotEqualTo _target) then {
-                                                                _caller playActionNow "MedicOther";
+                                                                [_caller, ["ACTION_PLAY_NOW", "MedicOther", true], false, false] call KH_fnc_setAnimation;
                                                             }
                                                             else {
                                                                 if (_caller getVariable ["KH_var_withstanding", false]) then {
-                                                                    _caller playActionNow "Medic";
+                                                                    [_caller, ["ACTION_PLAY_NOW", "Medic", true], false, false] call KH_fnc_setAnimation;
                                                                 };
                                                             };
                                                         };
@@ -756,7 +756,7 @@ if KH_var_medical then {
                                                     _caller setVariable ["KH_var_stabilizing", false, true];
 
                                                     if (!(_caller getVariable ["KH_var_incapacitated", false]) && (_caller isNotEqualTo _target)) then {
-                                                        _caller switchAction "MedicStop";
+                                                        [_caller, ["ACTION_SWITCH", "MedicStop", true], false, false] call KH_fnc_setAnimation;
                                                     };
                                                 },
                                                 {
@@ -764,7 +764,7 @@ if KH_var_medical then {
                                                     _caller setVariable ["KH_var_stabilizing", false, true];
 
                                                     if (!(_caller getVariable ["KH_var_incapacitated", false]) && (_caller isNotEqualTo _target)) then {
-                                                        _caller switchAction "MedicStop";
+                                                        [_caller, ["ACTION_SWITCH", "MedicStop", true], false, false] call KH_fnc_setAnimation;
                                                     };
                                                 },
                                                 {
@@ -779,7 +779,7 @@ if KH_var_medical then {
                                                     _caller setVariable ["KH_var_stabilizing", false, true];
 
                                                     if (_caller isNotEqualTo _target) then {
-                                                        _caller switchAction "MedicStop";
+                                                        [_caller, ["ACTION_SWITCH", "MedicStop", true], false, false] call KH_fnc_setAnimation;
                                                     };
                                                 },
                                                 {}

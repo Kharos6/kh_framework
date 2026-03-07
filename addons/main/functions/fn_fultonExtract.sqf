@@ -381,17 +381,7 @@ missionNamespace setVariable [_fultonId, false];
 												_unit setVariable ["KH_var_fultonAttached", false, true];
 												_unit allowDamage false;
 												_unit setUnitFreefallHeight 999999;
-
-												[
-													[_unit],
-													{
-														params ["_unit"];
-														_unit switchMove ["Para_Pilot"];
-													},
-													"GLOBAL",
-													true,
-													false
-												] call KH_fnc_execute;
+												[_unit, ["MOVE_SWITCH_GLOBAL", ["Para_Pilot"], true], false, false] call KH_fnc_setAnimation;
 
 												if (isPlayer _unit) then {
 													addCamShake [2, _duration * 2, 18];
@@ -479,7 +469,7 @@ missionNamespace setVariable [_fultonId, false];
 														} 
 														else {
 															if ((animationState _unit) isNotEqualTo "Para_Pilot") then {
-																_unit switchMove ["Para_Pilot"];
+																[_unit, ["MOVE_SWITCH_GLOBAL", ["Para_Pilot"], true], false, false] call KH_fnc_setAnimation;
 															};
 
 															private _unitPosition = getPosASL _unit;

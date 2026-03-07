@@ -40,8 +40,7 @@ else {
 };
 
 if ((_maximumHeight - _unitHeight) < 0.25) exitWith {
-    _unit playActionNow "KH_TraversalJump";
-    _unit playAction "default";
+    [_unit, [[0, "ACTION_PLAY_NOW", "KH_TraversalJump", true], [0, "ACTION_PLAY", "default", true]], false, false] call KH_fnc_setAnimation;
     false;
 };
 
@@ -61,8 +60,7 @@ private _climbIntersections = ([
 ] call KH_fnc_raycast3d) select 0;
 
 if (_climbIntersections isEqualTo []) exitWith {
-    _unit playActionNow "KH_TraversalJump";
-    _unit playAction "default";
+    [_unit, [[0, "ACTION_PLAY_NOW", "KH_TraversalJump", true], [0, "ACTION_PLAY", "default", true]], false, false] call KH_fnc_setAnimation;
     false;
 };
 
@@ -83,8 +81,7 @@ private _floorPositions = [];
 } forEach _climbIntersections;
 
 if (_floorPositions isEqualTo []) exitWith {
-    _unit playActionNow "KH_TraversalJump";
-    _unit playAction "default";
+    [_unit, [[0, "ACTION_PLAY_NOW", "KH_TraversalJump", true], [0, "ACTION_PLAY", "default", true]], false, false] call KH_fnc_setAnimation;
     false;
 };
 
@@ -127,109 +124,124 @@ private _vault = ((([
 
 _unit setVariable ["KH_var_traversalTarget", [_chosenTraversalTarget select 0, (_unit modelToWorldVisualWorld [0, _unitLength * 2.75, 0]) select 1, _chosenTraversalTarget select 2]];
 
-_unit playActionNow (
-    switch true do {
-        case ((_height >= 0.25) && (_height < 0.75)): {
-            ["KH_TraversalClimb0_5m", "KH_TraversalVault0_5m"] select _vault;
-        };
+[
+    _unit, 
+    [
+        [
+            0,
+            "ACTION_PLAY_NOW", 
+            switch true do {
+                case ((_height >= 0.25) && (_height < 0.75)): {
+                    ["KH_TraversalClimb0_5m", "KH_TraversalVault0_5m"] select _vault;
+                };
 
-        case ((_height >= 0.75) && (_height < 1.25)): {
-            ["KH_TraversalClimb1m", "KH_TraversalVault1m"] select _vault;
-        };
+                case ((_height >= 0.75) && (_height < 1.25)): {
+                    ["KH_TraversalClimb1m", "KH_TraversalVault1m"] select _vault;
+                };
 
-        case ((_height >= 1.25) && (_height < 1.75)): {
-            ["KH_TraversalClimb1_5m", "KH_TraversalVault1_5m"] select _vault;
-        };
+                case ((_height >= 1.25) && (_height < 1.75)): {
+                    ["KH_TraversalClimb1_5m", "KH_TraversalVault1_5m"] select _vault;
+                };
 
-        case ((_height >= 1.75) && (_height < 2.25)): {
-            ["KH_TraversalClimb2m", "KH_TraversalVault2m"] select _vault;
-        };
+                case ((_height >= 1.75) && (_height < 2.25)): {
+                    ["KH_TraversalClimb2m", "KH_TraversalVault2m"] select _vault;
+                };
 
-        case ((_height >= 0.25) && (_height < 0.75)): {
-            ["KH_TraversalClimb0_5m", "KH_TraversalVault0_5m"] select _vault;
-        };
+                case ((_height >= 0.25) && (_height < 0.75)): {
+                    ["KH_TraversalClimb0_5m", "KH_TraversalVault0_5m"] select _vault;
+                };
 
-        case ((_height >= 0.75) && (_height < 1.25)): {
-            ["KH_TraversalClimb1m", "KH_TraversalVault1m"] select _vault;
-        };
+                case ((_height >= 0.75) && (_height < 1.25)): {
+                    ["KH_TraversalClimb1m", "KH_TraversalVault1m"] select _vault;
+                };
 
-        case ((_height >= 1.25) && (_height < 1.75)): {
-            ["KH_TraversalClimb1_5m", "KH_TraversalVault1_5m"] select _vault;
-        };
+                case ((_height >= 1.25) && (_height < 1.75)): {
+                    ["KH_TraversalClimb1_5m", "KH_TraversalVault1_5m"] select _vault;
+                };
 
-        case ((_height >= 1.75) && (_height < 2.25)): {
-            ["KH_TraversalClimb2m", "KH_TraversalVault2m"] select _vault;
-        };
+                case ((_height >= 1.75) && (_height < 2.25)): {
+                    ["KH_TraversalClimb2m", "KH_TraversalVault2m"] select _vault;
+                };
 
-        case ((_height >= 2.25) && (_height < 2.75)): {
-            ["KH_TraversalClimb2_5m", "KH_TraversalVault2_5m"] select _vault;
-        };
+                case ((_height >= 2.25) && (_height < 2.75)): {
+                    ["KH_TraversalClimb2_5m", "KH_TraversalVault2_5m"] select _vault;
+                };
 
-        case ((_height >= 2.75) && (_height < 3.25)): {
-            ["KH_TraversalClimb3m", "KH_TraversalVault3m"] select _vault;
-        };
+                case ((_height >= 2.75) && (_height < 3.25)): {
+                    ["KH_TraversalClimb3m", "KH_TraversalVault3m"] select _vault;
+                };
 
-        case ((_height >= 3.25) && (_height < 3.75)): {
-            ["KH_TraversalClimb3_5m", "KH_TraversalVault3_5m"] select _vault;
-        };
+                case ((_height >= 3.25) && (_height < 3.75)): {
+                    ["KH_TraversalClimb3_5m", "KH_TraversalVault3_5m"] select _vault;
+                };
 
-        case ((_height >= 3.75) && (_height < 4.25)): {
-            ["KH_TraversalClimb4m", "KH_TraversalVault4m"] select _vault;
-        };
+                case ((_height >= 3.75) && (_height < 4.25)): {
+                    ["KH_TraversalClimb4m", "KH_TraversalVault4m"] select _vault;
+                };
 
-        case ((_height >= 4.25) && (_height < 4.75)): {
-            ["KH_TraversalClimb4_5m", "KH_TraversalVault4_5m"] select _vault;
-        };
+                case ((_height >= 4.25) && (_height < 4.75)): {
+                    ["KH_TraversalClimb4_5m", "KH_TraversalVault4_5m"] select _vault;
+                };
 
-        case ((_height >= 4.75) && (_height < 5.25)): {
-            ["KH_TraversalClimb5m", "KH_TraversalVault5m"] select _vault;
-        };
+                case ((_height >= 4.75) && (_height < 5.25)): {
+                    ["KH_TraversalClimb5m", "KH_TraversalVault5m"] select _vault;
+                };
 
-        case ((_height >= 5.25) && (_height < 5.75)): {
-            ["KH_TraversalClimb5_5m", "KH_TraversalVault5_5m"] select _vault;
-        };
+                case ((_height >= 5.25) && (_height < 5.75)): {
+                    ["KH_TraversalClimb5_5m", "KH_TraversalVault5_5m"] select _vault;
+                };
 
-        case ((_height >= 5.75) && (_height < 6.25)): {
-            ["KH_TraversalClimb6m", "KH_TraversalVault6m"] select _vault;
-        };
+                case ((_height >= 5.75) && (_height < 6.25)): {
+                    ["KH_TraversalClimb6m", "KH_TraversalVault6m"] select _vault;
+                };
 
-        case ((_height >= 6.25) && (_height < 6.75)): {
-            ["KH_TraversalClimb6_5m", "KH_TraversalVault6_5m"] select _vault;
-        };
+                case ((_height >= 6.25) && (_height < 6.75)): {
+                    ["KH_TraversalClimb6_5m", "KH_TraversalVault6_5m"] select _vault;
+                };
 
-        case ((_height >= 6.75) && (_height < 7.25)): {
-            ["KH_TraversalClimb7m", "KH_TraversalVault7m"] select _vault;
-        };
+                case ((_height >= 6.75) && (_height < 7.25)): {
+                    ["KH_TraversalClimb7m", "KH_TraversalVault7m"] select _vault;
+                };
 
-        case ((_height >= 7.25) && (_height < 7.75)): {
-            ["KH_TraversalClimb7_5m", "KH_TraversalVault7_5m"] select _vault;
-        };
+                case ((_height >= 7.25) && (_height < 7.75)): {
+                    ["KH_TraversalClimb7_5m", "KH_TraversalVault7_5m"] select _vault;
+                };
 
-        case ((_height >= 7.75) && (_height < 8.25)): {
-            ["KH_TraversalClimb8m", "KH_TraversalVault8m"] select _vault;
-        };
+                case ((_height >= 7.75) && (_height < 8.25)): {
+                    ["KH_TraversalClimb8m", "KH_TraversalVault8m"] select _vault;
+                };
 
-        case ((_height >= 8.25) && (_height < 8.75)): {
-            ["KH_TraversalClimb8_5m", "KH_TraversalVault8_5m"] select _vault;
-        };
+                case ((_height >= 8.25) && (_height < 8.75)): {
+                    ["KH_TraversalClimb8_5m", "KH_TraversalVault8_5m"] select _vault;
+                };
 
-        case ((_height >= 8.75) && (_height < 9.25)): {
-            ["KH_TraversalClimb9m", "KH_TraversalVault9m"] select _vault;
-        };
+                case ((_height >= 8.75) && (_height < 9.25)): {
+                    ["KH_TraversalClimb9m", "KH_TraversalVault9m"] select _vault;
+                };
 
-        case ((_height >= 9.25) && (_height < 9.75)): {
-            ["KH_TraversalClimb9_5m", "KH_TraversalVault9_5m"] select _vault;
-        };
+                case ((_height >= 9.25) && (_height < 9.75)): {
+                    ["KH_TraversalClimb9_5m", "KH_TraversalVault9_5m"] select _vault;
+                };
 
-        case ((_height >= 9.75) && (_height < 10.25)): {
-            ["KH_TraversalClimb10m", "KH_TraversalVault10m"] select _vault;
-        };
-        
-        default {
-            "default";
-        };
-    }
-);
+                case ((_height >= 9.75) && (_height < 10.25)): {
+                    ["KH_TraversalClimb10m", "KH_TraversalVault10m"] select _vault;
+                };
+                
+                default {
+                    "default";
+                };
+            }, 
+            true
+        ], 
+        [
+            0,
+            "ACTION_PLAY", 
+            "default", 
+            true
+        ]
+    ], 
+    false,
+    false
+] call KH_fnc_setAnimation;
 
-_unit playAction "default";
 true;

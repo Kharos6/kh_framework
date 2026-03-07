@@ -48,13 +48,6 @@ if (_rotation isEqualType objNull) then {
 };
 
 _rotation params [["_vectorDir", [0, 1, 0], [[]]], ["_vectorUp", [0, 0, 1], [[]]]];
-private _vectorRight = _vectorDir vectorCrossProduct _vectorUp;
-
-private _rotatePoint = {
-	params ["_position"];
-	(_vectorRight vectorMultiply (_position select 0)) vectorAdd (_vectorDir vectorMultiply (_position select 1)) vectorAdd (_vectorUp vectorMultiply (_position select 2));
-};
-
 private "_primaryAxis";
 private "_primaryAxisIndex";
 private "_secondaryAxis";
@@ -79,6 +72,11 @@ private "_tertiaryAxisIndex";
 	};
 } forEach _dimensions;
 
+private _permutation = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+(_permutation select 0) set [_primaryAxisIndex, 1];
+(_permutation select 1) set [_secondaryAxisIndex, 1];
+(_permutation select 2) set [_tertiaryAxisIndex, 1];
+private _combinedMatrix = _permutation matrixMultiply [_vectorDir vectorCrossProduct _vectorUp, _vectorDir, _vectorUp];
 private _grids = [];
 private _intersectionCheckCount = 0;
 private _maxResultsOverride = [_maxResults, -1] select _allowIgnoredCheck;
@@ -87,16 +85,8 @@ switch _type do {
 	case "RECTANGLE": {
 		for "_secondaryAxisIteration" from -_secondaryAxis to _secondaryAxis step _step do {
 			for "_tertiaryAxisIteration" from -_tertiaryAxis to _tertiaryAxis step _step do {
-				private _currentPositionStart = [];
-				private _currentPositionEnd = [];
-				_currentPositionStart set [_primaryAxisIndex, _primaryAxis];
-				_currentPositionStart set [_secondaryAxisIndex, _secondaryAxisIteration];
-				_currentPositionStart set [_tertiaryAxisIndex, _tertiaryAxisIteration];
-				_currentPositionEnd set [_primaryAxisIndex, -_primaryAxis];
-				_currentPositionEnd set [_secondaryAxisIndex, _secondaryAxisIteration];
-				_currentPositionEnd set [_tertiaryAxisIndex, _tertiaryAxisIteration];
-				_currentPositionStart = [_currentPositionStart] call _rotatePoint;
-				_currentPositionEnd = [_currentPositionEnd] call _rotatePoint;
+				private _currentPositionStart = ([[_primaryAxis, _secondaryAxisIteration, _tertiaryAxisIteration]] matrixMultiply _combinedMatrix) select 0;
+				private _currentPositionEnd = ([[-_primaryAxis, _secondaryAxisIteration, _tertiaryAxisIteration]] matrixMultiply _combinedMatrix) select 0;
 
 				if !(isNil "_object") then {
 					private _relativeOffsetStart = _object modelToWorldVisualWorld _currentPositionStart;
@@ -125,16 +115,8 @@ switch _type do {
 				_secondaryAxisIteration = _secondaryAxis * (cos _phi) * (cos _theta);
 				_tertiaryAxisIteration = _tertiaryAxis * (cos _phi) * (sin _theta);
 				_primaryAxisIteration = _primaryAxis * (sin _phi);
-				private _currentPositionStart = [];
-				private _currentPositionEnd = [];
-				_currentPositionStart set [_secondaryAxisIndex, _secondaryAxisIteration];
-				_currentPositionStart set [_tertiaryAxisIndex, _tertiaryAxisIteration];
-				_currentPositionStart set [_primaryAxisIndex, _primaryAxisIteration];
-				_currentPositionEnd set [_secondaryAxisIndex, -_secondaryAxisIteration];
-				_currentPositionEnd set [_tertiaryAxisIndex, -_tertiaryAxisIteration];
-				_currentPositionEnd set [_primaryAxisIndex, -_primaryAxisIteration];
-				_currentPositionStart = [_currentPositionStart] call _rotatePoint;
-				_currentPositionEnd = [_currentPositionEnd] call _rotatePoint;
+				private _currentPositionStart = ([[_primaryAxisIteration, _secondaryAxisIteration, _tertiaryAxisIteration]] matrixMultiply _combinedMatrix) select 0;
+				private _currentPositionEnd = ([[-_primaryAxisIteration, -_secondaryAxisIteration, -_tertiaryAxisIteration]] matrixMultiply _combinedMatrix) select 0;
 				
 				if !(isNil "_object") then {
 					private _relativeOffsetStart = _object modelToWorldVisualWorld _currentPositionStart;
@@ -156,23 +138,13 @@ switch _type do {
 	case "CYLINDER": {
 		private "_secondaryAxisIteration";
 		private "_tertiaryAxisIteration";
-		private "_primaryAxisIteration";
 		
 		for "_theta" from 0 to 360 step (_step * 20) do {
 			for "_currentHeight" from -_primaryAxis to _primaryAxis step _step do {
 				_secondaryAxisIteration = _secondaryAxis * (cos _theta);
 				_tertiaryAxisIteration = _tertiaryAxis * (sin _theta);
-				_primaryAxisIteration = -_currentHeight;
-				private _currentPositionStart = [];
-				private _currentPositionEnd = [];
-				_currentPositionStart set [_secondaryAxisIndex, _secondaryAxisIteration];
-				_currentPositionStart set [_tertiaryAxisIndex, _tertiaryAxisIteration];
-				_currentPositionStart set [_primaryAxisIndex, _primaryAxisIteration];
-				_currentPositionEnd set [_secondaryAxisIndex, -_secondaryAxisIteration];
-				_currentPositionEnd set [_tertiaryAxisIndex, -_tertiaryAxisIteration];
-				_currentPositionEnd set [_primaryAxisIndex, _primaryAxisIteration];
-				_currentPositionStart = [_currentPositionStart] call _rotatePoint;
-				_currentPositionEnd = [_currentPositionEnd] call _rotatePoint;
+				private _currentPositionStart = ([[-_currentHeight, _secondaryAxisIteration, _tertiaryAxisIteration]] matrixMultiply _combinedMatrix) select 0;
+				private _currentPositionEnd = ([[-_currentHeight, -_secondaryAxisIteration, -_tertiaryAxisIteration]] matrixMultiply _combinedMatrix) select 0;
 				
 				if !(isNil "_object") then {
 					private _relativeOffsetStart = _object modelToWorldVisualWorld _currentPositionStart;
@@ -217,16 +189,8 @@ switch _type do {
 
 					_surfaceSecondary = _maxSecondaryRadius * _currentRadiusScale * (cos _theta);
 					_surfaceTertiary = _maxTertiaryRadius * _currentRadiusScale * (sin _theta);
-					private _currentPositionStart = [];
-					private _currentPositionEnd = [];
-					_currentPositionStart set [_secondaryAxisIndex, 0];
-					_currentPositionStart set [_tertiaryAxisIndex, 0];
-					_currentPositionStart set [_primaryAxisIndex, 0];
-					_currentPositionEnd set [_secondaryAxisIndex, _surfaceSecondary];
-					_currentPositionEnd set [_tertiaryAxisIndex, _surfaceTertiary];
-					_currentPositionEnd set [_primaryAxisIndex, _currentHeight];
-					_currentPositionStart = [_currentPositionStart] call _rotatePoint;
-					_currentPositionEnd = [_currentPositionEnd] call _rotatePoint;
+					private _currentPositionStart = [0, 0, 0];
+					private _currentPositionEnd = ([[_currentHeight, _surfaceSecondary, _surfaceTertiary]] matrixMultiply _combinedMatrix) select 0;
 					
 					if !(isNil "_object") then {
 						private _relativeOffsetStart = _object modelToWorldVisualWorld _currentPositionStart;

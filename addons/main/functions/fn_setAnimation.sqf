@@ -1,306 +1,107 @@
-params [["_unit", objNull, [objNull]], ["_animation", [], [[]]], ["_allowVehicle", false, [true]], ["_force", false, [true]]];
+params [["_unit", objNull, [objNull]], ["_animation", [], [[]]], ["_allowVehicle", false, [true]], ["_allowUnconscious", false, [true]]];
 
-if !_force then {
-    if (_animation isNotEqualTo []) then {
-        if !((_animation select 0) isEqualType "") then {
-            private _currentAnimationSequenceFrame = diag_frameNo;
-            _unit setVariable ["KH_var_currentAnimationSequenceFrame", _currentAnimationSequenceFrame];
-            private _totalDelay = 0;
+if (_animation isEqualTo []) exitWith {
+    false;
+};
 
-            {
-                _x params ["_delay", "_animationType", "_currentAnimation"];
-                _totalDelay = _totalDelay + _delay;
+if !((_animation select 0) isEqualType "") then {
+    private _currentAnimationSequenceId = generateUid;
+    _unit setVariable ["KH_var_currentAnimationSequenceId", _currentAnimationSequenceId];
+    private _totalDelay = 0;
+    private _valid = true;
 
-                if (_totalDelay isEqualTo 0) then {
-                    if (!_allowVehicle && !(isNull (objectParent _unit))) then {
-                        continue;
-                    }
-                    else {
-                        switch _animationType do {
-                            case "MOVE_PLAY": {
-                                _unit playMove _currentAnimation;
-                            };
+    {
+        _x params [["_delay", 0, [0]], ["_animationType", "ACTION_PLAY_NOW", [""]], ["_currentAnimation", "", ["", []]], ["_validate", true, [true]]];
+        _totalDelay = _totalDelay + _delay;
 
-                            case "MOVE_PLAY_NOW": {
-                                _unit playMoveNow _currentAnimation;
-                            };
+        if _validate then {
+            if ("ACTION" in _animationType) then {
+                private _moves = getText ((configOf _unit) >> "moves");
+                private _action = getText (configFile >> _moves >> "states" >> (animationState _unit) >> "actions");
 
-                            case "MOVE_SWITCH": {
-                                _unit switchMove _currentAnimation;
-                            };
-
-                            case "MOVE_SWITCH_GLOBAL": {
-                                _unit switchMove _currentAnimation;
-
-                                [
-                                    [_unit, _currentAnimation],
-                                    {
-                                        params ["_unit", "_currentAnimation"];
-                                        _unit switchMove _currentAnimation;
-                                    },
-                                    -clientOwner,
-                                    true,
-                                    false
-                                ] call KH_fnc_execute;
-                            };
-
-                            case "ACTION": {
-                                _unit playAction _currentAnimation;
-                            };
-
-                            case "ACTION_PLAY_NOW": {
-                                _unit playActionNow _currentAnimation;
-                            };
-
-                            case "ACTION_SWITCH": {
-                                _unit switchAction _currentAnimation;
-                            };
-                        };
-
-                        continue;
+                if ((getText (configFile >> _moves >> "Actions" >> _action >> _currentAnimation)) isEqualTo "") && (((getArray (configFile >> _moves >> "Actions" >> _action >> _currentAnimation)) param [0, ""]) isEqualTo "") then {
+                    _valid = false;
+                    break;
+                };
+            }
+            else {
+                if (_animationType isEqualTo "GESTURE_SWITCH") then {
+                    if ((getText (configFile >> (getText (configFile >> (getText ((configOf _unit) >> "moves")) >> "gestures")) >> "states" >> _currentAnimation)) isEqualTo "") then {
+                        _valid = false;
+                        break;
                     };
-                };
-
-                [
-                    [_unit, _allowVehicle, _currentAnimationSequenceFrame, _animationType, _currentAnimation],
-                    {
-                        params ["_unit", "_allowVehicle", "_currentAnimationSequenceFrame", "_animationType", "_currentAnimation"];
-                        
-                        if ((_unit getVariable ["KH_var_currentAnimationSequenceFrame", 0]) isEqualTo _currentAnimationSequenceFrame) then {
-                            if (!_allowVehicle && !(isNull (objectParent _unit))) exitWith {};
-
-                            switch _animationType do {
-                                case "MOVE_PLAY": {
-                                    _unit playMove _currentAnimation;
-                                };
-
-                                case "MOVE_PLAY_NOW": {
-                                    _unit playMoveNow _currentAnimation;
-                                };
-
-                                case "MOVE_SWITCH": {
-                                    _unit switchMove _currentAnimation;
-                                };
-
-                                case "MOVE_SWITCH_GLOBAL": {
-                                    _unit switchMove _currentAnimation;
-
-                                    [
-                                        [_unit, _currentAnimation],
-                                        {
-                                            params ["_unit", "_currentAnimation"];
-                                            _unit switchMove _currentAnimation;
-                                        },
-                                        -clientOwner,
-                                        true,
-                                        false
-                                    ] call KH_fnc_execute;
-                                };
-
-                                case "ACTION": {
-                                    _unit playAction _currentAnimation;
-                                };
-
-                                case "ACTION_PLAY_NOW": {
-                                    _unit playActionNow _currentAnimation;
-                                };
-
-                                case "ACTION_SWITCH": {
-                                    _unit switchAction _currentAnimation;
-                                };
-                            };
-                        };
-                    },
-                    true,
-                    str _totalDelay,
-                    false
-                ] call KH_fnc_execute;
-            } forEach _animation;
-        }
-        else {
-            if (!_allowVehicle && !(isNull (objectParent _unit))) exitWith {};
-            _animation params ["_animationType", "_currentAnimation"];
-
-            switch _animationType do {
-                case "MOVE_PLAY": {
-                    _unit playMove _currentAnimation;
-                };
-
-                case "MOVE_PLAY_NOW": {
-                    _unit playMoveNow _currentAnimation;
-                };
-
-                case "MOVE_SWITCH": {
-                    _unit switchMove _currentAnimation;
-                };
-
-                case "MOVE_SWITCH_GLOBAL": {
-                    _unit switchMove _currentAnimation;
-
-                    [
-                        [_unit, _currentAnimation],
-                        {
-                            params ["_unit", "_currentAnimation"];
-                            _unit switchMove _currentAnimation;
-                        },
-                        -clientOwner,
-                        true,
-                        false
-                    ] call KH_fnc_execute;
-                };
-
-                case "ACTION": {
-                    _unit playAction _currentAnimation;
-                };
-
-                case "ACTION_PLAY_NOW": {
-                    _unit playActionNow _currentAnimation;
-                };
-
-                case "ACTION_SWITCH": {
-                    _unit switchAction _currentAnimation;
+                }
+                else {
+                    if ((getText (configFile >> (getText ((configOf _unit) >> "moves")) >> "states" >> _currentAnimation)) isEqualTo "") then {
+                        _valid = false;
+                        break;
+                    };
                 };
             };
         };
-    };
-}
-else {
-    private _position = getPosATL _unit;
-    private _direction = getDir _unit;
-    private _dummyVehicle = createVehicleLocal ["B_Quadbike_01_F", _position, [], 0, "CAN_COLLIDE"];
-    _dummyVehicle hideObject true;
-    _dummyVehicle setPhysicsCollisionFlag false;
-    _unit moveInAny _dummyVehicle;
 
-    [
-        [_unit, _dummyVehicle, _position, _direction, _animation],
-        {
-            params ["_unit", "_dummyVehicle", "_position", "_direction", "_animation"];
-            unassignVehicle _unit;
-            _unit action ["Eject", objectParent _unit];
-            _unit setPosATL _position;
-            _unit setDir _direction;
-            deleteVehicle _dummyVehicle;
+        if (_totalDelay isEqualTo 0) then {
+            if ((!_allowVehicle && !(isNull (objectParent _unit))) || (!_allowUnconscious && (((lifeState _unit) isEqualTo "INCAPACITATED") || ((lifeState _unit) isEqualTo "UNCONSCIOUS")))) then {
+                _valid = false;
+                break;
+            }
+            else {
+                switch _animationType do {
+                    case "MOVE_PLAY": {
+                        _unit playMove _currentAnimation;
+                    };
 
-            if (_animation isNotEqualTo []) then {
-                if !((_animation select 0) isEqualType "") then {
-                    private _currentAnimationSequenceFrame = diag_frameNo;
-                    _unit setVariable ["KH_var_currentAnimationSequenceFrame", _currentAnimationSequenceFrame];
-                    private _totalDelay = 0;
+                    case "MOVE_PLAY_NOW": {
+                        _unit playMoveNow _currentAnimation;
+                    };
 
-                    {
-                        _x params ["_delay", "_animationType", "_currentAnimation"];
-                        _totalDelay = _totalDelay + _delay;
+                    case "MOVE_SWITCH": {
+                        _unit switchMove _currentAnimation;
+                    };
 
-                        if (_totalDelay isEqualTo 0) then {
-                            if (!_allowVehicle && !(isNull (objectParent _unit)) && ((objectParent _unit) isNotEqualTo _dummyVehicle)) then {
-                                continue;
-                            }
-                            else {
-                                switch _animationType do {
-                                    case "MOVE_PLAY": {
-                                        _unit playMove _currentAnimation;
-                                    };
-
-                                    case "MOVE_PLAY_NOW": {
-                                        _unit playMoveNow _currentAnimation;
-                                    };
-
-                                    case "MOVE_SWITCH": {
-                                        _unit switchMove _currentAnimation;
-                                    };
-
-                                    case "MOVE_SWITCH_GLOBAL": {
-                                        _unit switchMove _currentAnimation;
-
-                                        [
-                                            [_unit, _currentAnimation],
-                                            {
-                                                params ["_unit", "_currentAnimation"];
-                                                _unit switchMove _currentAnimation;
-                                            },
-                                            -clientOwner,
-                                            true,
-                                            false
-                                        ] call KH_fnc_execute;
-                                    };
-
-                                    case "ACTION": {
-                                        _unit playAction _currentAnimation;
-                                    };
-
-                                    case "ACTION_PLAY_NOW": {
-                                        _unit playActionNow _currentAnimation;
-                                    };
-
-                                    case "ACTION_SWITCH": {
-                                        _unit switchAction _currentAnimation;
-                                    };
-                                };
-
-                                continue;
-                            };
-                        };
+                    case "MOVE_SWITCH_GLOBAL": {
+                        _unit switchMove _currentAnimation;
 
                         [
-                            [_unit, _allowVehicle, _currentAnimationSequenceFrame, _animationType, _currentAnimation],
+                            [_unit, _currentAnimation],
                             {
-                                params ["_unit", "_allowVehicle", "_currentAnimationSequenceFrame", "_animationType", "_currentAnimation"];
-
-                                if ((_unit getVariable ["KH_var_currentAnimationSequenceFrame", 0]) isEqualTo _currentAnimationSequenceFrame) then {
-                                    if (!_allowVehicle && !(isNull (objectParent _unit))) exitWith {};
-
-                                    switch _animationType do {
-                                        case "MOVE_PLAY": {
-                                            _unit playMove _currentAnimation;
-                                        };
-
-                                        case "MOVE_PLAY_NOW": {
-                                            _unit playMoveNow _currentAnimation;
-                                        };
-
-                                        case "MOVE_SWITCH": {
-                                            _unit switchMove _currentAnimation;
-                                        };
-
-                                        case "MOVE_SWITCH_GLOBAL": {
-                                            _unit switchMove _currentAnimation;
-
-                                            [
-                                                [_unit, _currentAnimation],
-                                                {
-                                                    params ["_unit", "_currentAnimation"];
-                                                    _unit switchMove _currentAnimation;
-                                                },
-                                                -clientOwner,
-                                                true,
-                                                false
-                                            ] call KH_fnc_execute;
-                                        };
-
-                                        case "ACTION": {
-                                            _unit playAction _currentAnimation;
-                                        };
-
-                                        case "ACTION_PLAY_NOW": {
-                                            _unit playActionNow _currentAnimation;
-                                        };
-
-                                        case "ACTION_SWITCH": {
-                                            _unit switchAction _currentAnimation;
-                                        };
-                                    };
-                                };
+                                params ["_unit", "_currentAnimation"];
+                                _unit switchMove _currentAnimation;
                             },
+                            -clientOwner,
                             true,
-                            str _totalDelay,
                             false
                         ] call KH_fnc_execute;
-                    } forEach _animation;
-                }
-                else {
-                    if (!_allowVehicle && !(isNull (objectParent _unit)) && ((objectParent _unit) isNotEqualTo _dummyVehicle)) exitWith {};
-                    _animation params ["_animationType", "_currentAnimation"];
+                    };
+
+                    case "GESTURE_SWITCH": {
+                        _unit switchGesture _currentAnimation;
+                    };
+
+                    case "ACTION_PLAY": {
+                        _unit playAction _currentAnimation;
+                    };
+
+                    case "ACTION_PLAY_NOW": {
+                        _unit playActionNow _currentAnimation;
+                    };
+
+                    case "ACTION_SWITCH": {
+                        _unit switchAction _currentAnimation;
+                    };
+                };
+
+                continue;
+            };
+        };
+
+        [
+            [_unit, _allowVehicle, _currentAnimationSequenceId, _animationType, _currentAnimation],
+            {
+                params ["_unit", "_allowVehicle", "_currentAnimationSequenceId", "_animationType", "_currentAnimation"];
+                
+                if ((_unit getVariable ["KH_var_currentAnimationSequenceId", ""]) isEqualTo _currentAnimationSequenceId) then {
+                    if ((!_allowVehicle && !(isNull (objectParent _unit))) || (!_allowUnconscious && (((lifeState _unit) isEqualTo "INCAPACITATED") || ((lifeState _unit) isEqualTo "UNCONSCIOUS")))) exitWith {};
 
                     switch _animationType do {
                         case "MOVE_PLAY": {
@@ -330,7 +131,11 @@ else {
                             ] call KH_fnc_execute;
                         };
 
-                        case "ACTION": {
+                        case "GESTURE_SWITCH": {
+                            _unit switchGesture _currentAnimation;
+                        };
+                        
+                        case "ACTION_PLAY": {
                             _unit playAction _currentAnimation;
                         };
 
@@ -343,12 +148,87 @@ else {
                         };
                     };
                 };
-            };
-        },
-        true,
-        "-1",
-        false
-    ] call KH_fnc_execute;
-};
+            },
+            true,
+            str _totalDelay,
+            false
+        ] call KH_fnc_execute;
+    } forEach _animation;
 
-nil;
+    _valid;
+}
+else {
+    if ((!_allowVehicle && !(isNull (objectParent _unit))) || (!_allowUnconscious && (((lifeState _unit) isEqualTo "INCAPACITATED") || ((lifeState _unit) isEqualTo "UNCONSCIOUS")))) exitWith {
+        false;
+    };
+
+    _animation params [["_animationType", "ACTION_PLAY_NOW", [""]], ["_currentAnimation", "", ["", []]], ["_validate", true, [true]]];
+
+    private _valid = if _validate then {
+        if ("ACTION" in _animationType) then {
+            private _moves = getText ((configOf _unit) >> "moves");
+            private _action = getText (configFile >> _moves >> "states" >> (animationState _unit) >> "actions");
+            ((getText (configFile >> _moves >> "Actions" >> _action >> _currentAnimation)) isNotEqualTo "") || (((getArray (configFile >> _moves >> "Actions" >> _action >> _currentAnimation)) param [0, ""]) isNotEqualTo "");
+        }
+        else {
+            if (_animationType isEqualTo "GESTURE_SWITCH") then {
+                ((getText (configFile >> (getText (configFile >> (getText ((configOf _unit) >> "moves")) >> "gestures")) >> "states" >> _currentAnimation)) isNotEqualTo "");
+            }
+            else {
+                ((getText (configFile >> (getText ((configOf _unit) >> "moves")) >> "states" >> _currentAnimation)) isNotEqualTo "");
+            };
+        };
+    }
+    else {
+        true;
+    };
+
+    if _valid then {
+        switch _animationType do {
+            case "MOVE_PLAY": {
+                _unit playMove _currentAnimation;
+            };
+
+            case "MOVE_PLAY_NOW": {
+                _unit playMoveNow _currentAnimation;
+            };
+
+            case "MOVE_SWITCH": {
+                _unit switchMove _currentAnimation;
+            };
+
+            case "MOVE_SWITCH_GLOBAL": {
+                _unit switchMove _currentAnimation;
+
+                [
+                    [_unit, _currentAnimation],
+                    {
+                        params ["_unit", "_currentAnimation"];
+                        _unit switchMove _currentAnimation;
+                    },
+                    -clientOwner,
+                    true,
+                    false
+                ] call KH_fnc_execute;
+            };
+
+            case "GESTURE_SWITCH": {
+                _unit switchGesture _currentAnimation;
+            };
+
+            case "ACTION_PLAY": {
+                _unit playAction _currentAnimation;
+            };
+
+            case "ACTION_PLAY_NOW": {
+                _unit playActionNow _currentAnimation;
+            };
+
+            case "ACTION_SWITCH": {
+                _unit switchAction _currentAnimation;
+            };
+        };
+    };
+
+    _valid;
+};

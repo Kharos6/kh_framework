@@ -8,7 +8,7 @@ if !(isNil "KH_var_diagnosticsValidatePositionHelper") then {
 };
 
 if !(isNil "KH_var_diagnosticsDrawHandler") then {
-	removeMissionEventHandler ["Draw3D", KH_var_diagnosticsDrawHandler];
+	[KH_var_diagnosticsDrawHandler] call KH_fnc_removeHandler;
 	KH_var_diagnosticsDrawHandler = nil;
 };
 

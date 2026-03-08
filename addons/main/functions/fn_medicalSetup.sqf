@@ -231,7 +231,7 @@ if KH_var_medical then {
                                                 [_handlerId] call KH_fnc_removeHandler;
                                             }
                                             else {
-                                                if !(_unit getVariable ["KH_var_incapacitated", false]) then {
+                                                if (!(_unit getVariable ["KH_var_incapacitated", false]) || (_unit getVariable ["KH_var_stabilized", false])) then {
                                                     [_handlerId] call KH_fnc_removeHandler;
                                                 };
                                             };
@@ -343,6 +343,10 @@ if KH_var_medical then {
                                                                     "",
                                                                     [true, false]
                                                                 ] call KH_fnc_addAction;
+                                                            };
+
+                                                            if ("unconscious" in (animationState player)) then {
+                                                                [player, ["MOVE_SWITCH_GLOBAL", ["AmovPpneMstpSnonWnonDnon"], false], false, true] call KH_fnc_setAnimation;
                                                             };
                                                         },
                                                         [

@@ -1684,7 +1684,7 @@ isNil {
 										{
 											params ["_control", "_controlBackground"];
 
-											if ((KH_var_healthDisplay isNotEqualTo "NONE") && !visibleMap) then {
+											if ((KH_var_healthDisplay isNotEqualTo "NONE") && !visibleMap && !dialog && (isNull curatorCamera)) then {
 												if (KH_var_healthDisplayHideFullHealth && ((damage KH_var_playerUnit) isEqualTo 0)) then {
 													_control ctrlShow false;
 													_controlBackground ctrlShow false;

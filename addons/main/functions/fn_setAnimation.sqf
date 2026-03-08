@@ -19,7 +19,7 @@ if !((_animation select 0) isEqualType "") then {
                 private _moves = getText ((configOf _unit) >> "moves");
                 private _action = getText (configFile >> _moves >> "states" >> (animationState _unit) >> "actions");
 
-                if ((getText (configFile >> _moves >> "Actions" >> _action >> _currentAnimation)) isEqualTo "") && (((getArray (configFile >> _moves >> "Actions" >> _action >> _currentAnimation)) param [0, ""]) isEqualTo "") then {
+                if (((getText (configFile >> _moves >> "Actions" >> _action >> _currentAnimation)) isEqualTo "") && (((getArray (configFile >> _moves >> "Actions" >> _action >> _currentAnimation)) param [0, ""]) isEqualTo "")) then {
                     _valid = false;
                     break;
                 };

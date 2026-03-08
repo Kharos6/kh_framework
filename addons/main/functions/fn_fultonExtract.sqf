@@ -410,7 +410,7 @@ missionNamespace setVariable [_fultonId, false];
 																	]
 																}
 																else {
-																	removeMissionEventHandler [_thisEvent, _thisEventHandler];
+																	[_handlerId] call KH_fnc_removeHandler;
 																};
 															}
 														] call KH_fnc_addEventHandler;

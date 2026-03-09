@@ -333,13 +333,13 @@ isNil {
 										["ENTITY", _unit, "PERSISTENT"],
 										_x,
 										[
-											[configFile >> (getText (configFile >> (getText ((configOf _unit) >> "moves")) >> "gestures")) >> "states", configFile >> (getText ((configOf _unit) >> "moves")) >> "states"] select (_x isEqualTo "AnimStateChanged"), 
+											[getText (configFile >> (getText ((configOf _unit) >> "moves")) >> "gestures"), getText ((configOf _unit) >> "moves")] select (_x isEqualTo "AnimStateChanged"), 
 											_x isEqualTo "AnimStateChanged"
 										],
 										{
 											params ["_unit", "_animation"];
 											_args params ["_animationType", "_isMove"];
-											private _animationConfig = _animationType >> _animation;
+											private _animationConfig = configFile >> _animationType >> "states" >> _animation;
 
 											if ((getNumber (_animationConfig >> "kh_traversalTeleport")) isEqualTo 1) then {
 												if ((_unit getVariable ["KH_var_traversalTarget", []]) isNotEqualTo []) then {
@@ -1163,9 +1163,30 @@ isNil {
 				[
 					[],
 					{
+						KH_var_loadingDisplay = ["RscText", "LOADING...", [0, false, 0], [0, 0, 0, 1], [0, 0, 100, 100], false, [0, 0, 0]] call KH_fnc_draw2d;
+					},
+					true,
+					{CBA_missionTime > 0;},
+					false
+				] call KH_fnc_execute;
+
+				[
+					[],
+					{
 						if KH_var_missionStarted then {
 							KH_var_jip = true;
 						};
+
+						[
+							[],
+							{
+								ctrlDelete KH_var_loadingDisplay;
+								KH_var_loadingDisplay = nil;
+							},
+							true,
+							{!isNil "KH_var_loadingDisplay";},
+							false
+						] call KH_fnc_execute;
 
 						[
 							[],
@@ -1868,6 +1889,8 @@ isNil {
 			} forEach KH_var_postInitLuaExecutions;
 
 			[] spawn {
+				waitUntil {time > 1;};
+
 				while {true;} do {
 					sleep 0.2;
 

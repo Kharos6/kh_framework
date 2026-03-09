@@ -1218,7 +1218,7 @@ isNil {
 
 								if (isNil "_networking") exitWith {};
 								KH_var_networkingSettings = _networking;
-								networkInitialize;
+								khNetworkInitialize;
 								[_handlerId] call KH_fnc_removeHandler;
 							},
 							true,

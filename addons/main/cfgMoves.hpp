@@ -5,11 +5,24 @@ class CfgMovesBasic
         class NoActions;
         class RifleBaseLowStandActions: NoActions
         {
+            KH_MeleeAttack01AGesture[] = {"Hum_AddStaAny_AttRflMel01A", "Gesture"};
             KH_TraversalJump = "Hum_AbsStaAny_JmpFwdRfl";
+            KH_MeleeKick = "Hum_AbsStaAny_KckRfl";
+            KH_MeleeTackle = "Hum_AbsStaAny_TklRfl";
         };
         class PistolStandActions: NoActions
         {
+            KH_MeleeAttack01AGesture[] = {"Hum_AddStaAny_AttPtlMel01A", "Gesture"};
             KH_TraversalJump = "Hum_AbsStaAny_JmpFwdPtl";
+            KH_MeleeKick = "Hum_AbsStaAny_KckPtl";
+            KH_MeleeTackle = "Hum_AbsStaAny_TklPtl";
+        };
+        class LauncherKneelActions;
+        class LauncherStandActions: LauncherKneelActions
+        {
+            KH_MeleeAttack01AGesture[] = {"Hum_AddStaAny_AttLnrMel01A", "Gesture"};
+            KH_MeleeKick = "Hum_AbsStaAny_KckLnr";
+            KH_MeleeTackle = "Hum_AbsStaAny_TklLnr";
         };
         class CivilStandActions: NoActions
         {
@@ -151,8 +164,11 @@ class CfgMovesMaleSdr: CfgMovesBasic
             access = 3;
             CanNotMove = "Hum_AbsStaCom_IdlLhtMel";
             Civil = "Hum_AbsStaCom_IdlLhtMel";
+            CivilLying = "Hum_AbsStaCom_IdlLhtMel";
             Combat = "Hum_AbsStaCom_IdlLhtMel";
+            Crouch = "Hum_AbsStaCom_IdlLhtMel";
             default = "Hum_AbsStaCom_IdlLhtMel";
+            down = "Hum_AbsStaCom_IdlLhtMel";
             EvasiveLeft = "Hum_AbsStaCom_RunFwdLwdLhtMel";
             EvasiveRight = "Hum_AbsStaCom_RunFwdRwdLhtMel";
             FastB = "Hum_AbsStaCom_JogBwdLhtMel";
@@ -219,6 +235,7 @@ class CfgMovesMaleSdr: CfgMovesBasic
             leanRRot = 0.5;
             leanRShift = 0;
             limitFast = 4;
+            lying = "Hum_AbsStaCom_IdlLhtMel";
             LimpB = "Hum_AbsStaCom_WlkBwdLhtMel";
             LimpF = "Hum_AbsStaCom_WlkFwdLhtMel";
             LimpL = "Hum_AbsStaCom_WlkLwdLhtMel";
@@ -278,6 +295,7 @@ class CfgMovesMaleSdr: CfgMovesBasic
             turnR = "Hum_AbsStaCom_TrnRhtLhtMel";
             turnRRelaxed = "Hum_AbsStaCom_TrnRhtLhtMel";
             turnSpeed = 8;
+            up = "Hum_AbsStaCom_IdlLhtMel";
             WalkB = "Hum_AbsStaCom_WlkBwdLhtMel";
             WalkF = "Hum_AbsStaCom_WlkFwdLhtMel";
             WalkL = "Hum_AbsStaCom_WlkLwdLhtMel";

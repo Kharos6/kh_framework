@@ -261,31 +261,27 @@ private _specialParser = {
 
 switch (typeName _environmentType) do {
 	case "SCALAR": {
-		private _immediate = _environment param [1, true, [true]];
-		private _timeoutRules = _environment param [2, false, [true, 0, "", []]];
-		private _timeoutFunction = _environment param [3, {}, [{}]];
-		private _verboseDelta = _environment param [4, false, [true]];
-		private _unscheduled = _environment param [5, true, [true]];
+		(_environment select [1]) params [["_immediate", true, [true]], ["_timeoutRules", false, [true, 0, "", []]], ["_timeoutFunction", {}, [{}]], ["_verboseDelta", false, [true]], ["_unscheduled", true, [true]]];
 		private _handlerTickCounterId = generateUid;
 		private _iterationCount = false;
 		
 		switch (typeName _timeoutRules) do {
 			case "BOOL": {
 				if _timeoutRules then {
-					_timeoutRules = [[1], false, false, false];
+					_timeoutRules = [[1], false, false];
 				}
 				else {
-					_timeoutRules = [0, false, false, false];
+					_timeoutRules = [0, false, false];
 				};
 			};
 
 			case "SCALAR";
 			case "STRING": {
-				_timeoutRules = [_timeoutRules, false, false, false];
+				_timeoutRules = [_timeoutRules, false, false];
 			};
 		};
 
-		_timeoutRules params [["_timeout", 0, [true, 0, "", []]], ["_timeoutPriority", false, [true]], ["_timeoutOnConditionFailure", false, [true]], ["_timeoutOnDeletion", false, [true]]];
+		_timeoutRules params [["_timeout", 0, [true, 0, "", []]], ["_timeoutPriority", false, [true]], ["_timeoutOnDeletion", false, [true]]];
 
 		switch (typeName _timeout) do {
 			case "BOOL": {
@@ -330,9 +326,9 @@ switch (typeName _environmentType) do {
 		KH_var_temporalExecutionStackMonitor set [
 			_environmentId, 
 			[
-				[_arguments, _timeoutFunction, _environmentId, _return],
+				[_arguments, _timeoutFunction, _environmentType, _environmentId, _return],
 				{
-					params ["_arguments", "_timeoutFunction", "_environmentId", "_return"];
+					params ["_arguments", "_timeoutFunction", "_environmentType", "_environmentId", "_return"];
 					private _handlerId = [[["TEMPORAL"], _environmentType, _environmentId, clientOwner], _return];
 					_arguments call _timeoutFunction;
 				},
@@ -445,12 +441,15 @@ switch (typeName _environmentType) do {
 	};
 
 	case "CODE": {
-		private _immediate = _environment param [1, true, [true]];
-		private _interval = _environment param [2, 0, [0]];
-		private _timeoutRules = _environment param [3, [[1, false], false, false, false], [true, 0, "", []]];
-		private _timeoutFunction = _environment param [4, {}, [{}]];
-		private _verboseDelta = _environment param [5, false, [true]];
-		private _unscheduled = _environment param [6, true, [true]];
+		(_environment select [1]) params [
+			["_immediate", true, [true]], 
+			["_interval", 0, [0]], 
+			["_timeoutRules", [[1, false], false, false, false], [true, 0, "", []]], 
+			["_timeoutFunction", {}, [{}]], 
+			["_verboseDelta", false, [true]], 
+			["_unscheduled", true, [true]]
+		];
+
 		private _handlerTickCounterId = generateUid;
 		private _iterationCount = false;
 		private "_countConditionFailure";
@@ -617,6 +616,10 @@ switch (typeName _environmentType) do {
 						{
 							params ["_arguments", "_fedArguments", "_subfunction", "_environmentId", "_environmentType"];
 
+							if !(missionNamespace getVariable _environmentId) exitWith {
+								KH_var_temporalExecutionStackDeletions pushBackUnique _environmentId;
+							};
+
 							if (_arguments call _environmentType) then {
 								_fedArguments call _subfunction;
 								["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false], true, false] call KH_fnc_triggerCbaEvent;
@@ -629,6 +632,10 @@ switch (typeName _environmentType) do {
 					else {
 						{
 							params ["_arguments", "_fedArguments", "_subfunction", "_environmentId", "_environmentType"];
+
+							if !(missionNamespace getVariable _environmentId) exitWith {
+								KH_var_temporalExecutionStackDeletions pushBackUnique _environmentId;
+							};
 
 							if (_arguments call _environmentType) then {
 								_fedArguments call _subfunction;
@@ -645,6 +652,10 @@ switch (typeName _environmentType) do {
 						{
 							params ["_arguments", "_fedArguments", "_subfunction", "_environmentId", "_environmentType"];
 
+							if !(missionNamespace getVariable _environmentId) exitWith {
+								KH_var_temporalExecutionStackDeletions pushBackUnique _environmentId;
+							};
+
 							if (_arguments call _environmentType) then {
 								_fedArguments call _subfunction;
 								["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false], true, false] call KH_fnc_triggerCbaEvent;
@@ -657,6 +668,10 @@ switch (typeName _environmentType) do {
 					else {
 						{
 							params ["_arguments", "_fedArguments", "_subfunction", "_environmentId", "_environmentType"];
+
+							if !(missionNamespace getVariable _environmentId) exitWith {
+								KH_var_temporalExecutionStackDeletions pushBackUnique _environmentId;
+							};
 
 							if (_arguments call _environmentType) then {
 								_fedArguments call _subfunction;
@@ -671,6 +686,10 @@ switch (typeName _environmentType) do {
 					{
 						params ["_arguments", "_fedArguments", "_subfunction", "_environmentId", "_environmentType"];
 
+						if !(missionNamespace getVariable _environmentId) exitWith {
+							KH_var_temporalExecutionStackDeletions pushBackUnique _environmentId;
+						};
+						
 						if (_arguments call _environmentType) then {
 							_fedArguments call _subfunction;
 						}
@@ -682,6 +701,10 @@ switch (typeName _environmentType) do {
 				else {
 					{
 						params ["_arguments", "_fedArguments", "_subfunction", "_environmentId", "_environmentType"];
+
+						if !(missionNamespace getVariable _environmentId) exitWith {
+							KH_var_temporalExecutionStackDeletions pushBackUnique _environmentId;
+						};
 
 						if (_arguments call _environmentType) then {
 							_fedArguments call _subfunction;

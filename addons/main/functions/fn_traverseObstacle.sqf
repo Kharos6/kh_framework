@@ -5,7 +5,7 @@ private _unitPositionHeight = _currentPosition select 2;
 private _bounds = (2 boundingBoxReal _unit) select 1;
 private _unitWidth = (_bounds select 0) * 0.5;
 private _unitLength = (_bounds select 1) * 0.5;
-private _unitHeight = _bounds select 2;
+private _unitHeight = getNumber ((configOf _unit) >> "kh_unitHeight");
 
 private _obstacleIntersections = ([
     _currentPosition vectorAdd [0, 0, _unitHeight + 5.1], 

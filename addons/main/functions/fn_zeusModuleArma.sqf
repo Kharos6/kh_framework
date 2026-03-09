@@ -7,6 +7,7 @@ isNil {
 			params ["_logic"];
 			[attachedTo _logic] call KH_fnc_arma;
 			deleteVehicle _logic;
+			[_handlerId] call KH_fnc_removeHandler;
 		},
 		true,
 		[

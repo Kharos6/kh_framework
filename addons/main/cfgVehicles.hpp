@@ -8,11 +8,13 @@ class CfgVehicles
 	class Land;
 	class Man: Land
 	{
+		kh_unitHeight = 1.85;
 		kh_meleeType = "KH_MeleeGenericMan";
 		kh_meleeActions = "";
 		kh_meleeSoundType = "Flesh";
 		kh_meleeSurfaceBlockPower = 0;
-		kh_meleeModes[] = {"KH_MeleeAttack01", "KH_MeleeAttack02"};
+		kh_meleeModes[] = {};
+		kh_meleeModesGestures[] = {};
 	}; 
 	class Launcher_Base_F;
 	class KH_MeleeWeaponTertiaryBase: Launcher_Base_F

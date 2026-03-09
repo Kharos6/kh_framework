@@ -1,15 +1,35 @@
 class CfgWeapons
 {
-    class Launcher_Base_F;
+    class Rifle;
+    class Rifle_Base_F: Rifle
+    {
+        kh_meleeActions = "";
+        kh_meleeType = "KH_MeleeGenericPrimary";
+        kh_meleeModes[] = {};
+        kh_meleeModesGestures[] = {{"KH_MeleeAttack01AGesture"}};
+    };
+    class Pistol;
+    class Pistol_Base_F: Pistol
+    {
+        kh_meleeActions = "";
+        kh_meleeType = "KH_MeleeGenericSecondary";
+        kh_meleeModes[] = {};
+        kh_meleeModesGestures[] = {{"KH_MeleeAttack01AGesture"}};
+    };
+    class Launcher;
+    class Launcher_Base_F: Launcher
+    {
+        kh_meleeActions = "";
+        kh_meleeType = "KH_MeleeGenericTertiary";
+        kh_meleeModes[] = {};
+        kh_meleeModesGestures[] = {{"KH_MeleeAttack01AGesture"}};
+    };
 	class KH_MeleeWeaponTertiaryBase: Launcher_Base_F
 	{
 		author = "Kharos";
         drySound[] = {"", 1, 1, 1};
         descriptionShort = "Melee Weapon";
         value = 20;
-        kh_meleeActions = "";
-        kh_meleeType = "";
-        kh_meleeModes[] = {};
         magazines[] = {"KH_MeleeGeneric"};
         magazineWell[] = {"KH_MeleeGeneric"};
         magazineReloadTime = 0;

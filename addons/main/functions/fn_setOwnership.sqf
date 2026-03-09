@@ -44,19 +44,31 @@ private _groups = [];
 		[
 			[_owner, _x, _group, _init, _attributes],
 			{
-				(_this select [1]) params ["_unit", "_group", "_init", "_attributes"];
-				private _newUnit = _group createUnit [_attributes select 0, _unit, [], 0, "CAN_COLLIDE"];
-				deleteVehicle _unit;
-				[_newUnit, _attributes, [], true] call KH_fnc_setUnitAttributes;
-				[_newUnit] call _init;
+				params ["_owner", "_unit", "_group", "_init", "_attributes"];
+				
+				[
+					[_unit, _group, _init, _attributes],
+					{
+						params ["_unit", "_group", "_init", "_attributes"];
+						private _newUnit = _group createUnit [_attributes select 3, _unit, [], 0, "CAN_COLLIDE"];
+						deleteVehicle _unit;
+						[_newUnit, _attributes, [], true] call KH_fnc_setUnitAttributes;
+						[_newUnit] call _init;
+					},
+					_owner,
+					true,
+					false
+				] call KH_fnc_execute;
+
+				[_handlerId] call KH_fnc_removeHandler;
 			},
-			_owner,
+			true,
 			[
 				{
 					params ["_owner", "_unit"];
 					((owner _unit) isEqualTo _owner);
 				},
-				true,
+				false,
 				0,
 				30,
 				{},
@@ -70,17 +82,29 @@ private _groups = [];
 		[
 			[_owner, _x, _init, _attributes],
 			{
-				(_this select [1]) params ["_unit", "_init", "_attributes"];
-				[_unit, _attributes, [], true] call KH_fnc_setUnitAttributes;
-				[_unit] call _init;
+				params ["_owner", "_unit", "_init", "_attributes"];
+
+				[
+					[_unit, _init, _attributes],
+					{
+						params ["_unit", "_init", "_attributes"];
+						[_unit, _attributes, [], true] call KH_fnc_setUnitAttributes;
+						[_unit] call _init;
+					},
+					_owner,
+					true,
+					false
+				] call KH_fnc_execute;
+
+				[_handlerId] call KH_fnc_removeHandler;
 			},
-			_owner,
+			true,
 			[
 				{
 					params ["_owner", "_unit"];
 					((owner _unit) isEqualTo _owner);
 				},
-				true,
+				false,
 				0,
 				30,
 				{},

@@ -12,6 +12,7 @@ isNil {
             } forEach (crew (attachedTo _logic));
 
 			deleteVehicle _logic;
+			[_handlerId] call KH_fnc_removeHandler;
 		},
 		true,
 		[

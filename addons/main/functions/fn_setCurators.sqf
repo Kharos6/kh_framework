@@ -105,7 +105,14 @@ if (isNil "KH_var_curatorsSet") then {
 					};
 				},
 				true,
-				[1, true, 60, {}, false, true],
+				[
+					1, 
+					true, 
+					60, 
+					{}, 
+					false, 
+					true
+				],
 				false 
 			] call KH_fnc_execute;
 		}

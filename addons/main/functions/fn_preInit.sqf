@@ -43,6 +43,7 @@ KH_var_weaponTargetCheckFrame = 0;
 KH_var_allAddedDisplays = [];
 KH_var_playerRespawnedEventHandler = [];
 KH_var_playerKilledEventHandler = [];
+KH_var_allLocalEntities = [];
 ["CBA", "KH_eve_execution", [], KH_fnc_callSerializedFunction] call KH_fnc_addEventHandler;
 
 [
@@ -424,6 +425,19 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 			"-2",
 			false
 		] call KH_fnc_execute;
+	}
+] call KH_fnc_addEventHandler;
+
+[
+	"MISSION",
+	"EntityDeleted",
+	[], 
+	{
+		params ["_entity"];
+		
+		if (_entity in KH_var_allLocalEntities) then {
+			KH_var_allLocalEntities deleteAt (KH_var_allLocalEntities find _entity);
+		};
 	}
 ] call KH_fnc_addEventHandler;
 

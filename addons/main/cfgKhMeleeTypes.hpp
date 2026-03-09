@@ -179,4 +179,91 @@ class CfgKHMeleeTypes
             power = 0.2;
         };
     };
+    class KH_MeleeGenericPrimary: KH_MeleeGenericMan
+    {
+        class Attack01: Attack01
+        {
+            type = "KH_MeleeBluntLightSwing";
+            class Sounds
+            {
+                swing[] = {};
+                thrust[] = {};
+                generic[] = {"KH_MeleeKick01", "KH_MeleeKick02", "KH_MeleeKick03", "KH_MeleeKick04"};
+                blocked[] = {"KH_MeleeKick01", "KH_MeleeKick02", "KH_MeleeKick03", "KH_MeleeKick04"};
+                parried[] = {"KH_MeleeKick01", "KH_MeleeKick02", "KH_MeleeKick03", "KH_MeleeKick04"};
+                flesh[] = {"KH_MeleeKick01", "KH_MeleeKick02", "KH_MeleeKick03", "KH_MeleeKick04"};
+            };
+        };
+        class Attack02: Attack02
+        {
+            type = "KH_MeleeBluntLightThrust";
+            class Sounds
+            {
+                swing[] = {};
+                thrust[] = {};
+                generic[] = {"KH_MeleeKick01", "KH_MeleeKick02", "KH_MeleeKick03", "KH_MeleeKick04"};
+                blocked[] = {"KH_MeleeKick01", "KH_MeleeKick02", "KH_MeleeKick03", "KH_MeleeKick04"};
+                parried[] = {"KH_MeleeKick01", "KH_MeleeKick02", "KH_MeleeKick03", "KH_MeleeKick04"};
+                flesh[] = {"KH_MeleeKick01", "KH_MeleeKick02", "KH_MeleeKick03", "KH_MeleeKick04"};
+            };
+        };
+    };
+    class KH_MeleeGenericSecondary: KH_MeleeGenericMan
+    {
+        class Attack01: Attack01
+        {
+            type = "KH_MeleeBluntLightSwing";
+            class Sounds
+            {
+                swing[] = {};
+                thrust[] = {};
+                generic[] = {"KH_MeleeKick01", "KH_MeleeKick02", "KH_MeleeKick03", "KH_MeleeKick04"};
+                blocked[] = {"KH_MeleeKick01", "KH_MeleeKick02", "KH_MeleeKick03", "KH_MeleeKick04"};
+                parried[] = {"KH_MeleeKick01", "KH_MeleeKick02", "KH_MeleeKick03", "KH_MeleeKick04"};
+                flesh[] = {"KH_MeleeKick01", "KH_MeleeKick02", "KH_MeleeKick03", "KH_MeleeKick04"};
+            };
+        };
+        class Attack02: Attack02
+        {
+            type = "KH_MeleeBluntLightThrust";
+            class Sounds
+            {
+                swing[] = {};
+                thrust[] = {};
+                generic[] = {"KH_MeleeKick01", "KH_MeleeKick02", "KH_MeleeKick03", "KH_MeleeKick04"};
+                blocked[] = {"KH_MeleeKick01", "KH_MeleeKick02", "KH_MeleeKick03", "KH_MeleeKick04"};
+                parried[] = {"KH_MeleeKick01", "KH_MeleeKick02", "KH_MeleeKick03", "KH_MeleeKick04"};
+                flesh[] = {"KH_MeleeKick01", "KH_MeleeKick02", "KH_MeleeKick03", "KH_MeleeKick04"};
+            };
+        };
+    };
+    class KH_MeleeGenericTertiary: KH_MeleeGenericMan
+    {
+        class Attack01: Attack01
+        {
+            type = "KH_MeleeBluntLightSwing";
+            class Sounds
+            {
+                swing[] = {};
+                thrust[] = {};
+                generic[] = {"KH_MeleeKick01", "KH_MeleeKick02", "KH_MeleeKick03", "KH_MeleeKick04"};
+                blocked[] = {"KH_MeleeKick01", "KH_MeleeKick02", "KH_MeleeKick03", "KH_MeleeKick04"};
+                parried[] = {"KH_MeleeKick01", "KH_MeleeKick02", "KH_MeleeKick03", "KH_MeleeKick04"};
+                flesh[] = {"KH_MeleeKick01", "KH_MeleeKick02", "KH_MeleeKick03", "KH_MeleeKick04"};
+            };
+        };
+        class Attack02: Attack02
+        {
+            type = "KH_MeleeBluntLightThrust";
+            class Sounds
+            {
+                swing[] = {};
+                thrust[] = {};
+                generic[] = {"KH_MeleeKick01", "KH_MeleeKick02", "KH_MeleeKick03", "KH_MeleeKick04"};
+                blocked[] = {"KH_MeleeKick01", "KH_MeleeKick02", "KH_MeleeKick03", "KH_MeleeKick04"};
+                parried[] = {"KH_MeleeKick01", "KH_MeleeKick02", "KH_MeleeKick03", "KH_MeleeKick04"};
+                flesh[] = {"KH_MeleeKick01", "KH_MeleeKick02", "KH_MeleeKick03", "KH_MeleeKick04"};
+            };
+        };
+    };
 };

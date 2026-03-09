@@ -332,11 +332,14 @@ isNil {
 									[
 										["ENTITY", _unit, "PERSISTENT"],
 										_x,
-										[[getText (configFile >> (getText ((configOf _unit) >> "moves")) >> "gestures"), getText ((configOf _unit) >> "moves")] select (_x isEqualTo "AnimStateChanged"), _x isEqualTo "AnimStateChanged"],
+										[
+											[configFile >> (getText (configFile >> (getText ((configOf _unit) >> "moves")) >> "gestures")) >> "states", configFile >> (getText ((configOf _unit) >> "moves")) >> "states"] select (_x isEqualTo "AnimStateChanged"), 
+											_x isEqualTo "AnimStateChanged"
+										],
 										{
 											params ["_unit", "_animation"];
 											_args params ["_animationType", "_isMove"];
-											private _animationConfig = configFile >> _animationType >> "states" >> _animation;
+											private _animationConfig = _animationType >> _animation;
 
 											if ((getNumber (_animationConfig >> "kh_traversalTeleport")) isEqualTo 1) then {
 												if ((_unit getVariable ["KH_var_traversalTarget", []]) isNotEqualTo []) then {
@@ -1772,6 +1775,9 @@ isNil {
 						[
 							[],
 							{
+								KH_var_playerUnit = player;
+								player setVariable ["KH_var_playerUnit", KH_var_playerUnit, true];
+
 								{
 									call _x;
 								} forEach KH_var_headlessLoadStack;
@@ -1789,6 +1795,37 @@ isNil {
 					false
 				] call KH_fnc_execute;
 			};
+
+			[
+				[], 
+				["Animal"], 
+				{
+					params ["_entity"];
+
+					if (local _entity) then {
+						KH_var_allLocalEntities pushBackUnique _entity;
+					};
+
+					[
+						["ENTITY", _entity, "LOCAL"],
+						"Local",
+						[],
+						{
+							params ["_entity", "_isLocal"];
+
+							if _isLocal then {
+								KH_var_allLocalEntities pushBackUnique _entity;
+							}
+							else {
+								if (_entity in KH_var_allLocalEntities) then {
+									KH_var_allLocalEntities deleteAt (KH_var_allLocalEntities find _entity);
+								};
+							};
+						}
+					] call KH_fnc_addEventHandler;
+				}, 
+				true
+			] call KH_fnc_entityInit;
 
 			{
 				_x params ["_arguments", ["_function", {}, [{}]], ["_delay", 0, [0]]];
@@ -1836,15 +1873,8 @@ isNil {
 
 					if KH_var_allowAiMelee then {
 						{
-							private _isAgent = _x isEqualType [];
-
-							private _unit = if _isAgent then {
-								_x select 0;
-							}
-							else {
-								_x;
-							};
-
+							private _unit = _x;
+							private _isAgent = !(isNull (agent (teamMember _x)));
 							private _primaryWeapon = primaryWeapon _unit;
 							private _handgunWeapon = handgunWeapon _unit;
 							private _secondaryWeapon = secondaryWeapon _unit;
@@ -1951,15 +1981,12 @@ isNil {
 											_unit setBehaviourStrong "CARELESS";
 											_unit setUnitCombatMode "BLUE";
 											_unit setUnitPos "UP";
-
-											if _isAgent then {
-												_unit setDestination [getPosATL _unit, "DoNotPlan", true];
-											}
-											else {
-												doStop _unit;
-											};
-
 											_unit action ["SwitchWeapon", _unit, _unit, _meleeWeapon];
+										}
+										else {
+											if ((getNumber (configFile >> (getText ((configOf _unit) >> "moves")) >> "states" >> (animationState _unit) >> "kh_melee")) isNotEqualTo 1) then {
+												_unit action ["SwitchWeapon", _unit, _unit, _meleeWeapon];
+											};	
 										};
 									};
 
@@ -2036,8 +2063,6 @@ isNil {
 								}
 								else {
 									isNil {
-										params ["_unit"];
-
 										if (_unit getVariable ["KH_var_aiIsMelee", false]) then {
 											_unit setVariable ["KH_var_aiIsMelee", false, true];
 											private _aiFeatures = _unit getVariable ["KH_var_aiPreMeleeFeatures", []];
@@ -2059,7 +2084,7 @@ isNil {
 									};
 								};
 							};
-						} forEach ((allUnits select {(!(isPlayer _x) && (isNull (remoteControlled _x)) && (local _x));}) + ((agents apply {[agent _x];}) select {local (_x select 0);}));
+						} forEach ((KH_var_allLocalEntities - [KH_var_playerUnit]) select {_x isKindOf "Man";});
 					};
 				};
 			};

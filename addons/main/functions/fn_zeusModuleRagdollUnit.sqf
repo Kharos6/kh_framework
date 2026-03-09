@@ -19,6 +19,7 @@ isNil {
 			] call KH_fnc_execute;
 
 			deleteVehicle _logic;
+			[_handlerId] call KH_fnc_removeHandler;
 		},
 		true,
 		[

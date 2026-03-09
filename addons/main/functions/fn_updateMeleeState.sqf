@@ -15,28 +15,6 @@ if (
 
 if (((currentWeapon _unit) isNotEqualTo "") || (_unit getVariable ["KH_var_rawMeleeStance", false])) then {
     private _currentWeapon = currentWeapon _unit;
-    
-    private _weaponConfig = if (_unit getVariable ["KH_var_rawMeleeStance", false]) then {
-        private _config = configOf _unit;
-
-        if ((_unit getVariable ["KH_var_meleeType", ""]) isNotEqualTo (getText (_config >> "kh_meleeType"))) then {
-            _unit setVariable ["KH_var_meleeType", getText (_config >> "kh_meleeType"), true];
-        };
-
-        _config;
-    }
-    else {
-        private _config = configFile >> "CfgWeapons" >> _currentWeapon;
-
-        if ((_unit getVariable ["KH_var_meleeType", ""]) isNotEqualTo (getText (_config >> "kh_meleeType"))) then {
-            _unit setVariable ["KH_var_meleeType", getText (_config >> "kh_meleeType"), true];
-        };
-
-        _config;
-    };
-
-    _unit setVariable ["KH_var_meleeWeaponConfig", _weaponConfig];
-    _unit setVariable ["KH_var_meleeMode", (getArray (_weaponConfig >> "kh_meleeModes")) param [0, ""], true];
 
     private _currentWeaponSlot = switch _currentWeapon do {
         case (primaryWeapon _unit): {
@@ -55,6 +33,87 @@ if (((currentWeapon _unit) isNotEqualTo "") || (_unit getVariable ["KH_var_rawMe
             "NONE";  
         };
     };
+    
+    private _weaponConfig = if (_unit getVariable ["KH_var_rawMeleeStance", false]) then {
+        private _config = configNull;
+
+        {
+            private _currentConfig = configFile >> "CfgWeapons" >> _x;
+
+            if (((getText (_currentConfig >> "kh_meleeType")) isNotEqualTo "") && (((getArray (_currentConfig >> "kh_meleeModes")) isNotEqualTo []) || ((getArray (_currentConfig >> "kh_meleeModesGestures")) isNotEqualTo []))) then {
+                _config = _currentConfig;
+                break;
+            };
+        } forEach [uniform _unit, vest _unit, backpack _unit, headgear _unit, binocular _unit, hmd _unit, goggles _unit];
+        
+        if (isNull _config) then {
+            configOf _unit;
+        }
+        else {
+            _config;
+        };
+
+        if ((_unit getVariable ["KH_var_meleeType", ""]) isNotEqualTo (getText (_config >> "kh_meleeType"))) then {
+            _unit setVariable ["KH_var_meleeType", getText (_config >> "kh_meleeType"), true];
+        };
+
+        _config;
+    }
+    else {
+        private _meleeAttachments = switch _currentWeaponSlot do {
+            case "PRIMARY": {
+                primaryWeaponItems _unit;
+            };
+
+            case "SECONDARY": {
+                handgunItems _unit;
+            };
+
+            case "TERTIARY": {
+                secondaryWeaponItems _unit;
+            };
+
+            case "NONE": {
+                [];
+            };
+
+            default {
+                [];  
+            };
+        };
+
+        private _config = if ((_meleeAttachments select {_x isNotEqualTo "";}) isEqualTo []) then {
+            configFile >> "CfgWeapons" >> _currentWeapon;
+        }
+        else {
+            private _finalConfig = configNull;
+            
+            {
+                private _currentConfig = configFile >> "CfgWeapons" >> _x;
+
+                if (((getText (_currentConfig >> "kh_meleeType")) isNotEqualTo "") && (((getArray (_currentConfig >> "kh_meleeModes")) isNotEqualTo []) || ((getArray (_currentConfig >> "kh_meleeModesGestures")) isNotEqualTo []))) then {
+                    _finalConfig = _currentConfig;
+                    break;
+                };
+            } forEach _meleeAttachments;
+
+            if (isNull _finalConfig) then {
+                configFile >> "CfgWeapons" >> _currentWeapon;
+            }
+            else {
+                _finalConfig;
+            };
+        };
+
+        if ((_unit getVariable ["KH_var_meleeType", ""]) isNotEqualTo (getText (_config >> "kh_meleeType"))) then {
+            _unit setVariable ["KH_var_meleeType", getText (_config >> "kh_meleeType"), true];
+        };
+
+        _config;
+    };
+
+    _unit setVariable ["KH_var_meleeWeaponConfig", _weaponConfig];
+    _unit setVariable ["KH_var_meleeMode", (getArray (_weaponConfig >> "kh_meleeModes")) param [0, ""], true];
 
     if ((getText (_weaponConfig >> "kh_meleeActions")) isNotEqualTo "") then {
         _unit setVariable ["KH_var_enteringMelee", true];
@@ -67,7 +126,7 @@ if (((currentWeapon _unit) isNotEqualTo "") || (_unit getVariable ["KH_var_rawMe
                 _unit, 
                 [
                     "ACTION_SWITCH", 
-                    switch _currentWeapon do {
+                    switch _currentWeaponSlot do {
                         case "PRIMARY": {
                             "PrimaryWeapon";
                         };

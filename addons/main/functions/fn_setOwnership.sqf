@@ -51,8 +51,11 @@ private _groups = [];
 					{
 						params ["_unit", "_group", "_init", "_attributes"];
 						private _newUnit = _group createUnit [_attributes select 3, _unit, [], 0, "CAN_COLLIDE"];
+						private _variableName = vehicleVarName _unit;
 						deleteVehicle _unit;
 						[_newUnit, _attributes, [], true] call KH_fnc_setUnitAttributes;
+						_newUnit setVehicleVarName _variableName;
+						missionNamespace setVariable [_variableName, _newUnit, true];
 						[_newUnit] call _init;
 					},
 					_owner,

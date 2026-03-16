@@ -351,7 +351,7 @@ class Object
 					"\
 						_value params ['_toggle', '_init'];\
 						if (_toggle && !is3DEN) then {\
-							KH_var_postInitExecutions pushBack [[_this, compile _init], KH_fnc_convertToAgent];\
+							KH_var_postInitExecutions pushBack [[_this, compile _init], KH_fnc_convertToAgent, {KH_var_playersLoaded && !KH_var_missionSuspended;}];\
 						};\
 					";
 					defaultValue = "[false, '']";

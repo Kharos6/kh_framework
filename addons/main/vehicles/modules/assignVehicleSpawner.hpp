@@ -33,7 +33,7 @@ class KH_ModuleAssignVehicleSpawner: Module_F
 	{
 		description[] = {"Creates an accessible menu on the synchronized entities that allows players to spawn vehicles on the module's position. Activates only once, without a trigger, on the server."};
 		sync[] = {};
-		position = 0;
+		position = 1;
 		direction = 1;
 		optional = 0;
 		duplicate = 1;

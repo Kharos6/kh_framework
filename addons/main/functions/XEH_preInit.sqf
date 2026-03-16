@@ -2615,17 +2615,34 @@
 ] call CBA_fnc_addSetting;
 
 [
-	"KH_var_meleeAiEngageDistance",
+	"KH_var_meleeMeleeAiEngageDistance",
 	"SLIDER",   
 	[
-		"AI Engage Distance", 
-		"Distance within which melee AI will try to engage enemy units, in metres."
+		"Melee AI Engage Distance", 
+		"Distance within which melee AI will try to engage enemy units in melee, in metres."
 	], 
 	[
         "KH Melee",
         "General"
     ], 
 	[0, 1000, 100, 0],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_meleeRangedAiEngageDistance",
+	"SLIDER",   
+	[
+		"Ranged AI Engage Distance", 
+		"Distance within which ranged AI will try to engage enemy units in melee, in metres."
+	], 
+	[
+        "KH Melee",
+        "General"
+    ], 
+	[0, 300, 5, 0],
 	1,
 	{},
 	false

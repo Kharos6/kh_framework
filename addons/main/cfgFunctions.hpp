@@ -64,6 +64,7 @@ class CfgFunctions
 			class getViewTarget {headerType = -1;};
 			class getWeaponPosition {headerType = -1;};
 			class getWeaponTarget {headerType = -1;};
+			class headlessClientOffloading {headerType = -1;};
 			class initializeStt {headerType = -1;};
 			class initializeTts {headerType = -1;};
 			class limitViewDistance {headerType = -1;};

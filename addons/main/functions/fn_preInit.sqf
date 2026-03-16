@@ -1452,64 +1452,72 @@ if isServer then {
 		"KH_eve_headlessLoaded",
 		[],
 		{
-			private _headlessClientOwner = param [0];
-			private _headlessClient = param [2];
-			KH_var_allHeadlessUnits pushBackUnique _headlessClient;
-			publicVariable "KH_var_allHeadlessUnits";
-			private _arrayBuilderArray = _headlessClient getVariable ["KH_var_assignedEntityArrayBuilderArrays", []];
-
-			if (_arrayBuilderArray isNotEqualTo []) then {
+			[
+				_this,
 				{
-					private _entityArray = missionNamespace getVariable [_x, []];
+					private _headlessClientOwner = param [0];
+					private _headlessClient = param [2];
+					KH_var_allHeadlessUnits pushBackUnique _headlessClient;
+					publicVariable "KH_var_allHeadlessUnits";
+					private _arrayBuilderArray = _headlessClient getVariable ["KH_var_assignedEntityArrayBuilderArrays", []];
 
-					if !(_headlessClient in _entityArray) then {
-						_entityArray pushBackUnique _headlessClient;
-						missionNamespace setVariable [_x, _entityArray, true];
+					if (_arrayBuilderArray isNotEqualTo []) then {
+						{
+							private _entityArray = missionNamespace getVariable [_x, []];
+
+							if !(_headlessClient in _entityArray) then {
+								_entityArray pushBackUnique _headlessClient;
+								missionNamespace setVariable [_x, _entityArray, true];
+							};
+						} forEach _arrayBuilderArray;
 					};
-				} forEach _arrayBuilderArray;
-			};
 
-			private _assignedEntities = [];
-			private _assignedEntitiesRecreate = [];
+					private _assignedEntities = [];
+					private _assignedEntitiesRecreate = [];
 
-			{
-				_x params ["_unit", "_owner", "_recreate"];
-				
-				if ((vehicleVarName _headlessClient) isEqualTo _owner) then {
-					if !_recreate then {
-						_assignedEntities pushBack _unit;
-					}
-					else {
-						_assignedEntitiesRecreate pushBack _unit;
+					{
+						_x params ["_unit", "_owner", "_recreate"];
+						
+						if ((vehicleVarName _headlessClient) isEqualTo _owner) then {
+							if !_recreate then {
+								_assignedEntities pushBack _unit;
+							}
+							else {
+								_assignedEntitiesRecreate pushBack _unit;
+							};
+						};
+					} forEach KH_var_headlessClientTransfers;
+					
+					_unit setVariable ["KH_var_headlessClientTransferInit", _unit getVariable ["KH_var_headlessClientTransferInit", {}], _headlessClientOwner];
+
+					if (_assignedEntities isNotEqualTo []) then {
+						[
+							_assignedEntities, 
+							_headlessClientOwner, 
+							false, 
+							{
+								params ["_unit"];
+								[_unit] call (_unit getVariable "KH_var_headlessClientTransferInit");
+							}
+						] call KH_fnc_setOwnership;
 					};
-				};
-			} forEach KH_var_headlessClientTransfers;
-			
-			_unit setVariable ["KH_var_headlessClientTransferInit", _unit getVariable ["KH_var_headlessClientTransferInit", {}], _headlessClientOwner];
 
-			if (_assignedEntities isNotEqualTo []) then {
-				[
-					_assignedEntities, 
-					_headlessClientOwner, 
-					false, 
-					{
-						params ["_unit"];
-						[_unit] call (_unit getVariable "KH_var_headlessClientTransferInit");
-					}
-				] call KH_fnc_setOwnership;
-			};
-
-			if (_assignedEntitiesRecreate isNotEqualTo []) then {
-				[
-					_assignedEntitiesRecreate, 
-					_headlessClientOwner, 
-					true, 
-					{
-						params ["_unit"];
-						[_unit] call (_unit getVariable "KH_var_headlessClientTransferInit");
-					}
-				] call KH_fnc_setOwnership;
-			};
+					if (_assignedEntitiesRecreate isNotEqualTo []) then {
+						[
+							_assignedEntitiesRecreate, 
+							_headlessClientOwner, 
+							true, 
+							{
+								params ["_unit"];
+								[_unit] call (_unit getVariable "KH_var_headlessClientTransferInit");
+							}
+						] call KH_fnc_setOwnership;
+					};
+				},
+				true,
+				{KH_var_playersLoaded && !KH_var_missionSuspended;},
+				false
+			] call KH_fnc_execute;
 		}
 	] call KH_fnc_addEventHandler;
 	
@@ -1697,7 +1705,7 @@ if isServer then {
 		{
 			if KH_var_diagnosticsState then {
 				missionNamespace setVariable ["KH_var_diagnosticsFramerateServer", parseNumber (diag_fps toFixed 0), KH_var_adminMachine];
-				missionNamespace setVariable ["KH_var_diagnosticsLocalUnitsServer", {local _x;} count allUnits, KH_var_adminMachine];
+				missionNamespace setVariable ["KH_var_diagnosticsLocalUnitsServer", KH_var_allLocalEntities select {_x isKindOf "Man";}, KH_var_adminMachine];
 			};
 
 			{
@@ -1718,7 +1726,6 @@ if isServer then {
 					_x setVariable ["KH_var_playerAspectRatio", _x getVariable "KH_var_playerAspectRatio", KH_var_adminMachine];
 					_x setVariable ["KH_var_playerCameraPosition", _x getVariable "KH_var_playerCameraPosition", KH_var_adminMachine];
 					_x setVariable ["KH_var_playerCameraDirection", _x getVariable "KH_var_playerCameraDirection", KH_var_adminMachine];
-					_x setVariable ["KH_var_playerUnit", _x getVariable "KH_var_playerUnit", KH_var_adminMachine];
 				} forEach KH_var_allPlayerUnits;
 			};
 		},
@@ -1850,7 +1857,7 @@ if hasInterface then {
 				[],
 				{
 					params ["_unit", "_corpse"];
-					_corpse setVariable ["KH_var_playerUnit", _unit];
+					_corpse setVariable ["KH_var_playerUnit", _unit, true];
 					_corpse setVehicleVarName "";
 
 					[
@@ -2265,7 +2272,7 @@ if (!isServer && !hasInterface) then {
 		{
 			if KH_var_diagnosticsState then {
 				player setVariable ["KH_var_diagnosticsFramerate", parseNumber (diag_fps toFixed 0), KH_var_adminMachine];
-				player setVariable ["KH_var_diagnosticsLocalUnits", {local _x;} count allUnits, KH_var_adminMachine];
+				player setVariable ["KH_var_diagnosticsLocalUnits", count (KH_var_allLocalEntities select {_x isKindOf "Man";}), KH_var_adminMachine];
 			};
 		},
 		true,

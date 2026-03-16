@@ -95,7 +95,7 @@ class CfgGesturesMale
             looped = 0;
             speed = 1e+10;
         };
-        class KH_MeleeTertiaryGestureBase: Default
+        class KH_MeleeGestureBase: Default
         {
             actions = "NoActions";
             canPullTrigger = 0;
@@ -129,9 +129,9 @@ class CfgGesturesMale
             ragdoll = 0;
             relSpeedMax = 1;
             relSpeedMin = 1;
-            rightHandIKBeg = 1;
-            rightHandIKCurve[] = {1};
-            rightHandIKEnd = 1;
+            rightHandIKBeg = 0;
+            rightHandIKCurve[] = {0};
+            rightHandIKEnd = 0;
             showHandGun = 0;
             showItemInHand = 0;
             showItemInRightHand = 0;
@@ -143,6 +143,27 @@ class CfgGesturesMale
             static = 0;
             terminal = 0;
             Walkcycles = 1;
+            WeaponIK = 0;
+        };
+        class KH_MeleePrimaryGestureBase: KH_MeleeGestureBase
+        {
+            leftHandIKBeg = 1;
+            leftHandIKCurve[] = {1};
+            leftHandIKEnd = 1;
+            rightHandIKBeg = 1;
+            rightHandIKCurve[] = {1};
+            rightHandIKEnd = 1;
+            WeaponIK = 1;
+        };
+        class KH_MeleeTertiaryGestureBase: KH_MeleeGestureBase
+        {
+            leftHandIKBeg = 0;
+            leftHandIKCurve[] = {0};
+            leftHandIKEnd = 0;
+            rightHandIKBeg = 1;
+            rightHandIKCurve[] = {1};
+            rightHandIKEnd = 1;
+            WeaponIK = 4;
         };
         class Hum_AddStaCom_BloLhtMel: KH_MeleeTertiaryGestureBase
         {

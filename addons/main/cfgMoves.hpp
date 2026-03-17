@@ -7,22 +7,11 @@ class CfgMovesBasic
         {
             KH_MeleeAttack01AGesture[] = {"Hum_AddStaAny_AttRflMel01A", "Gesture"};
             KH_TraversalJump = "Hum_AbsStaAny_JmpFwdRfl";
-            KH_MeleeKick = "Hum_AbsStaAny_KckRfl";
-            KH_MeleeTackle = "Hum_AbsStaAny_TklRfl";
         };
         class PistolStandActions: NoActions
         {
             KH_MeleeAttack01AGesture[] = {"Hum_AddStaAny_AttPtlMel01A", "Gesture"};
             KH_TraversalJump = "Hum_AbsStaAny_JmpFwdPtl";
-            KH_MeleeKick = "Hum_AbsStaAny_KckPtl";
-            KH_MeleeTackle = "Hum_AbsStaAny_TklPtl";
-        };
-        class LauncherKneelActions;
-        class LauncherStandActions: LauncherKneelActions
-        {
-            KH_MeleeAttack01AGesture[] = {"Hum_AddStaAny_AttLnrMel01A", "Gesture"};
-            KH_MeleeKick = "Hum_AbsStaAny_KckLnr";
-            KH_MeleeTackle = "Hum_AbsStaAny_TklLnr";
         };
         class CivilStandActions: NoActions
         {
@@ -491,8 +480,6 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_ParLhtMel", 0.1,
                 "Hum_AbsStaCom_KckLhtMel", 0.1,
                 "Hum_AbsStaCom_TklLhtMel", 0.1,
-                "Hum_AbsStaCom_AttLhtMelCbo01", 0.1,
-                "Hum_AbsStaCom_AttLhtMelCbo02", 0.1,
                 "Hum_AbsStaCom_IdlLhtMel_Tra_AbsStaSaf_IdlLhtMel", 0.1
             };
             interpolateTo[] += {
@@ -835,24 +822,6 @@ class CfgMovesMaleSdr: CfgMovesBasic
                 "Hum_AbsStaCom_ParLhtMel", 0.1,
                 "Hum_AbsStaCom_BloLhtMel", 0.1
             };
-        };
-        class Hum_AbsStaCom_AttLhtMelCbo01: KH_MeleeBespokeBase
-        {
-            speed = 0.267857;
-            file = "x\kh\addons\main\animations\human\Hum_AbsStaCom_AttLhtMelCbo01.rtm";
-            connectTo[] = {
-                "Hum_AbsStaCom_IdlLhtMel", 0.1
-            };
-            interpolateTo[] = {};
-        };
-        class Hum_AbsStaCom_AttLhtMelCbo02: KH_MeleeBespokeBase
-        {
-            speed = 0.230769;
-            file = "x\kh\addons\main\animations\human\Hum_AbsStaCom_AttLhtMelCbo02.rtm";
-            connectTo[] = {
-                "Hum_AbsStaCom_IdlLhtMel", 0.1
-            };
-            interpolateTo[] = {};
         };
         class Hum_AbsStaCom_BloLhtMel: KH_MeleeBase
         {

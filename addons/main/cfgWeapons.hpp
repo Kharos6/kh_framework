@@ -5,7 +5,7 @@ class CfgWeapons
     {
         kh_meleeActions = "";
         kh_meleeType = "KH_MeleeGenericPrimary";
-        kh_meleeModes[] = {};
+        kh_meleeModes[] = {"KH_MeleeAttack01"};
         kh_meleeModesGestures[] = {{"KH_MeleeAttack01AGesture"}};
     };
     class Pistol;
@@ -13,7 +13,7 @@ class CfgWeapons
     {
         kh_meleeActions = "";
         kh_meleeType = "KH_MeleeGenericSecondary";
-        kh_meleeModes[] = {};
+        kh_meleeModes[] = {"KH_MeleeAttack01"};
         kh_meleeModesGestures[] = {{"KH_MeleeAttack01AGesture"}};
     };
     class Launcher;
@@ -21,7 +21,7 @@ class CfgWeapons
     {
         kh_meleeActions = "";
         kh_meleeType = "KH_MeleeGenericTertiary";
-        kh_meleeModes[] = {};
+        kh_meleeModes[] = {"KH_MeleeAttack01"};
         kh_meleeModesGestures[] = {{"KH_MeleeAttack01AGesture"}};
     };
 	class KH_MeleeWeaponTertiaryBase: Launcher_Base_F

@@ -168,7 +168,7 @@ else {
         ] call KH_fnc_setAnimation;
 
         _unit setVariable ["KH_var_rawMeleeStance", false];
-        _unit setVariable ["KH_var_enteringMelee", false, true];
+        _unit setVariable ["KH_var_enteringMelee", false];
     };
 };
 

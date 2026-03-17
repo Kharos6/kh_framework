@@ -155,6 +155,10 @@ class CfgGesturesMale
             rightHandIKEnd = 1;
             WeaponIK = 1;
         };
+        class KH_MeleeSecondaryGestureBase: KH_MeleeGestureBase
+        {
+            showHandGun = 1;
+        };
         class KH_MeleeTertiaryGestureBase: KH_MeleeGestureBase
         {
             leftHandIKBeg = 0;
@@ -185,6 +189,38 @@ class CfgGesturesMale
                 {0, 1, "Parry01"}
             };
             file = "x\kh\addons\main\animations\human\Hum_AddStaCom_ParLhtMel.rtm";
+        };
+        class Hum_AddStaAny_AttRflMel01A: KH_MeleePrimaryGestureBase
+        {
+            minPlayTime = 0.75;
+            kh_meleeAttackPhase = 1;
+            kh_meleeHasAction = 1;
+            kh_meleeMainAction = "attack";
+            kh_meleeHitTiming[] = {
+                {0.3611, "weapon", {0.132319, 0.670151, 1.34033}, "Attack01", 0},
+                {0.3888, "weapon", {0, 0.799708, 1.31993}, "Attack01", 0}
+            };
+            kh_meleeSoundTiming[] = {
+                {0.3611, "weapon", "Attack01", "swing"}
+            };
+            speed = 0.83333;
+            file = "x\kh\addons\main\animations\human\Hum_AddStaAny_AttRflMel01A.rtm";
+        };
+        class Hum_AddStaAny_AttPtlMel01A: KH_MeleeSecondaryGestureBase
+        {
+            minPlayTime = 0.75;
+            kh_meleeAttackPhase = 1;
+            kh_meleeHasAction = 1;
+            kh_meleeMainAction = "attack";
+            kh_meleeHitTiming[] = {
+                {0.3611, "righthand", {0.132319, 0.670151, 1.34033}, "Attack01", 0},
+                {0.3888, "righthand", {0, 0.799708, 1.31993}, "Attack01", 0}
+            };
+            kh_meleeSoundTiming[] = {
+                {0.3611, "righthand", "Attack01", "swing"}
+            };
+            speed = 0.83333;
+            file = "x\kh\addons\main\animations\human\Hum_AddStaAny_AttPtlMel01A.rtm";
         };
         class Hum_AddStaCom_AttLhtMel01A: KH_MeleeTertiaryGestureBase
         {

@@ -15,171 +15,8 @@ params [
 	["_special", false, [true, [], createHashMap]]
 ];
 
-_function = [_function, false] call KH_fnc_serializeFunction;
 private _basic = (_target isEqualTo true) && (_special isEqualTo false);
-
-private _subfunction = if _basic then {
-	KH_fnc_callSerializedFunction;
-}
-else {
-	{
-		params ["_arguments", "_function", "_target", "_special", "_specialIdOverride", "_unscheduled"];
-
-		if (_special isEqualTo false) exitWith {
-			["KH_eve_execution", [_arguments, _function, clientOwner, _unscheduled], _target, false] call KH_fnc_triggerCbaEvent;
-		};
-
-		if (_special isEqualType createHashMap) exitWith {
-			private _argumentsId = generateUid;
-			missionNamespace setVariable [_argumentsId, _arguments];
-
-			[
-				"KH_eve_execution", 
-				[
-					_arguments, 
-					[compile ([_special, " call ['", _function, "', missionNamespace getVariable '", _argumentsId, "'];"] joinString ""), false] call KH_fnc_serializeFunction, 
-					clientOwner, 
-					true
-				], 
-				_target, 
-				false
-			] call KH_fnc_triggerCbaEvent;
-		};
-
-		private _specialType = _special param [0, "", [""]];
-
-		switch _specialType do {
-			case "JIP": {
-				private _dependency = _special param [1, true, [true, 0, "", [], {}, objNull, teamMemberNull, grpNull]];
-				private _unitRequired = _special param [2, false, [true]];
-				private _jipId = _special param [3, "", [""]];
-
-				_jipId = if (_jipId isNotEqualTo "") then {
-					_jipId;
-				}
-				else {
-					if (_specialIdOverride isNotEqualTo "") then {
-						_specialIdOverride;
-					}
-					else {
-						generateUid;
-					};
-				};
-
-				missionNamespace setVariable [_jipId, true, 2];
-
-				[
-					"KH_eve_execution", 
-					[_arguments, _function, clientOwner, _unscheduled],
-					_target, 
-					[_dependency, _unitRequired, _jipId]
-				] call KH_fnc_triggerCbaEvent;
-			};
-
-			case "CALLBACK": {
-				private _callbackArguments = _special param [1, []];
-				private _callbackFunction = _special param [2, {}, ["", {}]];
-				private _callbackId = generateUid;
-
-				[
-					"CBA",
-					_callbackId,
-					[_arguments, _function, _unscheduled],
-					{
-						_args params ["_arguments", "_function", "_unscheduled"];
-						private _argsCallback = _this;
-
-						if _unscheduled then {
-							if (isNil "_arguments") then {
-								call (missionNamespace getVariable _function);
-							}
-							else {
-								_arguments call (missionNamespace getVariable _function);
-							};
-						}
-						else {
-							if (isNil "_arguments") then {
-								[] spawn (missionNamespace getVariable _function);
-							}
-							else {
-								_arguments spawn (missionNamespace getVariable _function);
-							};
-						};
-
-						[_handlerId] call KH_fnc_removeHandler;
-					}
-				] call KH_fnc_addEventHandler;
-
-				[
-					"KH_eve_registerCallback", 
-					[_callbackArguments, [_callbackFunction, false] call KH_fnc_serializeFunction, clientOwner, _unscheduled, _callbackId], 
-					_target, 
-					false
-				] call KH_fnc_triggerCbaEvent;
-			};
-
-			case "PERSISTENT": {
-				private _entity = _special param [1, objNull, [objNull, grpNull]];
-				private _sendoffArguments = _special param [2];
-				private _sendoffFunction = _special param [3, {}, ["", {}]];
-				private _persistentExecutionId = _special param [4, "", [""]];
-
-				_persistentExecutionId = if (_persistentExecutionId isNotEqualTo "") then {
-					_persistentExecutionId;
-				}
-				else {
-					if (_specialIdOverride isNotEqualTo "") then {
-						_specialIdOverride;
-					}
-					else {
-						generateUid;
-					};
-				};
-
-				_entity setVariable [_persistentExecutionId, true, true];
-				["KH_eve_execution", [_arguments, _function, clientOwner, _unscheduled], _target, false] call KH_fnc_triggerCbaEvent;
-
-				[
-					"KH_eve_persistentExecutionSetup", 
-					[_arguments, _function, _entity, _sendoffArguments, [_sendoffFunction, false] call KH_fnc_serializeFunction, clientOwner, _unscheduled, _persistentExecutionId],
-					"SERVER",
-					false
-				] call KH_fnc_triggerCbaEvent;
-
-				[_entity, _persistentExecutionId, true];
-			};
-
-			case "PLAYER_PRESENCE": {
-				private _object = _special param [1, objNull, [objNull]];
-				private _present = _special param [2, true, [true]];
-				private _distance = _special param [3, 0, [0]];
-				private _jip = _special param [4, true, [true]];
-				private _nearId = _special param [5, "", [""]];
-				
-				_nearId = if (_nearId isNotEqualTo "") then {
-					_nearId;
-				}
-				else {
-					if (_specialIdOverride isNotEqualTo "") then {
-						_specialIdOverride;
-					}
-					else {
-						generateUid;
-					};
-				};
-
-				missionNamespace setVariable [_nearId, true, 2];
-				["KH_eve_execution", [_arguments, _function, clientOwner, _unscheduled], _target, false] call KH_fnc_triggerCbaEvent;
-				["KH_eve_playerPresenceExecutionSetup", [_arguments, _function, clientOwner, _unscheduled, _object, _present, _distance, _nearId, +KH_var_allPlayerControlledUnits, _jip], "SERVER", false] call KH_fnc_triggerCbaEvent;
-				[missionNamespace, _nearId, 2];
-			};
-
-			default {
-				nil;
-			};
-		};
-	};
-};
+private _subfunction = [KH_fnc_processExecution, KH_fnc_callSerializedFunction] select _basic;
 
 if (_special isEqualTo true) then {
 	_special = ["JIP", true, false, ""];
@@ -187,10 +24,10 @@ if (_special isEqualTo true) then {
 
 if (_environment isEqualType true) exitWith {
 	if _basic then {
-		[_arguments, _function, clientOwner, _environment] call _subfunction;
+		[_arguments, [_function, false] call KH_fnc_serializeFunction, clientOwner, _environment] call _subfunction;
 	}
 	else {
-		[_arguments, _function, _target, _special, "", _environment] call _subfunction;
+		[_arguments, [_function, false] call KH_fnc_serializeFunction, _target, _special, "", _environment] call _subfunction;
 	};
 };
 
@@ -201,63 +38,6 @@ if !(_environment isEqualType []) then {
 private _environmentType = _environment param [0, "", [0, "", {}]];
 private _environmentId = generateUid;
 missionNamespace setVariable [_environmentId, true];
-
-private _specialParser = {
-	params ["_special", "_target"];
-
-	if ((_special isNotEqualTo false) && !(_special isEqualType createHashMap)) then {
-		private _specialType = _special param [0, "", [""]];
-		private _specialIdOverride = "";
-
-		switch _specialType do {
-			case "JIP": {
-				private _specialId = _special param [3, "", [""]];
-
-				if (_specialId isNotEqualTo "") then {
-					_specialIdOverride = _specialId;
-				}
-				else {
-					_specialIdOverride = generateUid;
-				};
-
-				[[missionNamespace, _specialIdOverride, 2], _specialIdOverride];
-			};
-
-			case "PLAYER_PRESENCE": {
-				private _specialId = _special param [5, "", [""]];
-
-				if (_specialId isNotEqualTo "") then {
-					_specialIdOverride = _specialId;
-				}
-				else {
-					_specialIdOverride = generateUid;
-				};
-
-				[[missionNamespace, _specialIdOverride, 2], _specialIdOverride];
-			};
-
-			case "PERSISTENT": {
-				private _specialId = _special param [4, "", [""]];
-
-				if (_specialId isNotEqualTo "") then {
-					_specialIdOverride = _specialId;
-				}
-				else {
-					_specialIdOverride = generateUid;
-				};
-
-				[[_target, _specialIdOverride, true], _specialIdOverride];
-			};
-
-			default {
-				[[], ""];
-			};
-		};
-	}
-	else {
-		[[], ""];
-	};
-};
 
 switch (typeName _environmentType) do {
 	case "SCALAR": {
@@ -308,7 +88,7 @@ switch (typeName _environmentType) do {
 			};
 		};
 
-		([_special, _target] call _specialParser) params ["_return", "_specialIdOverride"];
+		([_special, _target] call KH_fnc_parseSpecialExecution) params ["_return", "_specialIdOverride"];
 		private "_previousReturn";
 		private _continue = true;
 
@@ -317,10 +97,10 @@ switch (typeName _environmentType) do {
 		};
 
 		private _fedArguments = if _basic then {
-			[_arguments, _function, clientOwner, _unscheduled];
+			[_arguments, [_function, false] call KH_fnc_serializeFunction, clientOwner, _unscheduled];
 		}
 		else {
-			[_arguments, _function, _target, _special, _specialIdOverride, _unscheduled];
+			[_arguments, [_function, false] call KH_fnc_serializeFunction, _target, _special, _specialIdOverride, _unscheduled];
 		};
 
 		KH_var_temporalExecutionStackMonitor set [
@@ -499,7 +279,7 @@ switch (typeName _environmentType) do {
 			};
 		};
 
-		([_special, _target] call _specialParser) params ["_return", "_specialIdOverride"];
+		([_special, _target] call KH_fnc_parseSpecialExecution) params ["_return", "_specialIdOverride"];
 		_environmentType = missionNamespace getVariable ([_environmentType, false] call KH_fnc_serializeFunction);
 		private "_previousReturn";
 		private _continue = true;
@@ -509,10 +289,10 @@ switch (typeName _environmentType) do {
 		};
 
 		private _fedArguments = if _basic then {
-			[_arguments, _function, clientOwner, _unscheduled];
+			[_arguments, [_function, false] call KH_fnc_serializeFunction, clientOwner, _unscheduled];
 		}
 		else {
-			[_arguments, _function, _target, _special, _specialIdOverride, _unscheduled];
+			[_arguments, [_function, false] call KH_fnc_serializeFunction, _target, _special, _specialIdOverride, _unscheduled];
 		};
 
 		KH_var_temporalExecutionStackMonitor set [
@@ -773,14 +553,14 @@ switch (typeName _environmentType) do {
 
 	case "STRING": {
 		private _unscheduled = _environment param [1, true, [true]];
-		([_special, _target] call _specialParser) params ["_return", "_specialIdOverride"];
+		([_special, _target] call KH_fnc_parseSpecialExecution) params ["_return", "_specialIdOverride"];
 		_environmentType = parseNumber _environmentType;
 
 		private _fedArguments = if _basic then {
-			[_arguments, _function, clientOwner, _unscheduled];
+			[_arguments, [_function, false] call KH_fnc_serializeFunction, clientOwner, _unscheduled];
 		}
 		else {
-			[_arguments, _function, _target, _special, _specialIdOverride, _unscheduled];
+			[_arguments, [_function, false] call KH_fnc_serializeFunction, _target, _special, _specialIdOverride, _unscheduled];
 		};
 
 		if (_environmentType isEqualTo 0) exitWith {

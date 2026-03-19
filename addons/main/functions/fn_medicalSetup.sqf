@@ -345,7 +345,7 @@ if KH_var_medical then {
                                                                 ] call KH_fnc_addAction;
                                                             };
 
-                                                            if ("unconscious" in (animationState player)) then {
+                                                            if ((isNull (objectParent player)) && ((player getVariable ["KH_var_unconsciousAnimationReset", false]) || ((animationState player) isEqualTo "unconscious"))) then {
                                                                 [player, ["MOVE_SWITCH_GLOBAL", ["AmovPpneMstpSnonWnonDnon"], false], false, true] call KH_fnc_setAnimation;
                                                             };
                                                         },
@@ -449,7 +449,7 @@ if KH_var_medical then {
                                                 };
                                             }
                                             else {
-                                                if ((isNull (objectParent _unit)) && (_unit getVariable ["KH_var_unconsciousAnimationReset", false])) then {
+                                                if ((isNull (objectParent _unit)) && ((_unit getVariable ["KH_var_unconsciousAnimationReset", false]) || ((animationState _unit) isEqualTo "unconscious"))) then {
                                                     [_unit, ["MOVE_SWITCH_GLOBAL", ["AmovPpneMstpSnonWnonDnon"], false], false, true] call KH_fnc_setAnimation;
                                                 };
 

@@ -1575,7 +1575,16 @@ static void update_cached_effects() {
     }
     
     if (g_effect_config == nullptr || g_mutex_handle == nullptr) {
-        // Try to reconnect
+        // Rate-limit reconnection attempts
+        static DWORD last_reconnect_attempt = 0;
+        DWORD now = GetTickCount();
+
+        if (now - last_reconnect_attempt < 2000) {
+            return;
+        }
+
+        last_reconnect_attempt = now;
+        
         if (!init_shared_memory()) {
             return;
         }
@@ -1624,7 +1633,7 @@ static void update_plugin_status() {
     }
     
     if (g_plugin_status == nullptr || g_mutex_handle == nullptr) return;
-    DWORD wait_result = WaitForSingleObject(g_mutex_handle, 10);
+    DWORD wait_result = WaitForSingleObject(g_mutex_handle, 0);
 
     if (wait_result == WAIT_OBJECT_0 || wait_result == WAIT_ABANDONED) {
         g_plugin_status->plugin_active = 1;
@@ -1698,34 +1707,12 @@ static void check_tail_completion() {
     }
 }
 
-static bool process_audio(short* samples, int sample_count, int channels) {
-    // Acquire audio mutex to synchronize with shutdown
+static bool process_audio(short* samples, int sample_count, int channels, const TSVoiceEffectConfig& effects) {
     std::lock_guard<std::mutex> audio_lock(g_audio_state_mutex);
 
     if (!g_plugin_initialized.load(std::memory_order_acquire)) {
         return false;
     }
-    
-    check_tail_completion();
-    update_cached_effects();
-    static std::atomic<DWORD> last_status_update{0};
-    DWORD now = GetTickCount();
-
-    if (now - last_status_update.load(std::memory_order_relaxed) > 100) {
-        update_plugin_status();
-        last_status_update.store(now, std::memory_order_relaxed);
-    }
-    
-    // Get current effects
-    TSVoiceEffectConfig effects;
-
-    {
-        std::lock_guard<std::mutex> lock(g_effect_mutex);
-        effects = g_cached_effects;
-    }
-    
-    // Check if effects are enabled
-    if (!effects.effects_enabled || effects.effect_chain_count == 0) return false;
     
     // Pre-extract paired parameters
     float tremolo_depth_value = 0.5f;
@@ -2065,7 +2052,22 @@ void ts3plugin_onConnectStatusChangeEvent(uint64 serverConnectionHandlerID, int 
 // Voice processing - this is called for outgoing voice data
 void ts3plugin_onEditCapturedVoiceDataEvent(uint64 serverConnectionHandlerID, short* samples, int sampleCount, int channels, int* edited) {
     if (!g_plugin_initialized.load(std::memory_order_acquire)) return;
-    bool was_modified = process_audio(samples, sampleCount, channels);
+    
+    // Update IPC outside of audio processing — non-blocking only
+    update_cached_effects();
+    check_tail_completion();
+    
+    // Get current effects snapshot
+    TSVoiceEffectConfig effects;
+
+    {
+        std::lock_guard<std::mutex> lock(g_effect_mutex);
+        effects = g_cached_effects;
+    }
+    
+    // Early out if nothing to do
+    if (!effects.effects_enabled || effects.effect_chain_count == 0) return;
+    bool was_modified = process_audio(samples, sampleCount, channels, effects);
 
     if (was_modified) {
         *edited |= 0x1;
@@ -2112,6 +2114,10 @@ void ts3plugin_onEditMixedPlaybackVoiceDataEvent(uint64 serverConnectionHandlerI
         return;
     }
     
+    if (!g_local_test_mode.load(std::memory_order_acquire)) {
+        return;
+    }
+    
     std::lock_guard<std::mutex> lock(g_loopback_mutex);
 
     if (!g_plugin_initialized.load(std::memory_order_acquire) || 
@@ -2144,8 +2150,7 @@ void ts3plugin_onEditMixedPlaybackVoiceDataEvent(uint64 serverConnectionHandlerI
     g_loopback_available.store(available - samples_to_read, std::memory_order_release);
 }
 
-// Provide plugin commands
-// REPLACE LINES 1775-1804 WITH:
+// If this is causing issues should get rid of it, no real functionality lost
 int ts3plugin_processCommand(uint64 serverConnectionHandlerID, const char* command) {
     char msg[2048];
     char debug[256];

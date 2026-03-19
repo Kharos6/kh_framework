@@ -486,7 +486,8 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 							(
 								_cost * 
 								KH_var_meleeAbsoluteBlockStaminaConsumptionMultiplier * 
-								KH_var_meleeAbsoluteStaminaConsumptionMultiplier
+								KH_var_meleeAbsoluteStaminaConsumptionMultiplier *
+								([KH_var_meleeAbsoluteAiStaminaConsumptionMultiplier, KH_var_meleeAbsolutePlayerStaminaConsumptionMultiplier] select (isPlayer _unit))
 							)
 						) min 1
 					);
@@ -560,7 +561,12 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 					_unit setFatigue (
 						(
 							(getFatigue _unit) + 
-							(_costInfliction * KH_var_meleeAbsoluteAttackStaminaExhaustionMultiplier * KH_var_meleeAbsoluteStaminaExhaustionMultiplier)
+							(
+								_costInfliction * 
+								KH_var_meleeAbsoluteAttackStaminaExhaustionMultiplier * 
+								KH_var_meleeAbsoluteStaminaExhaustionMultiplier * 
+								([KH_var_meleeAbsoluteAiStaminaExhaustionMultiplier, KH_var_meleeAbsolutePlayerStaminaExhaustionMultiplier] select (isPlayer _unit))
+							)
 						) min 1
 					);
 				},
@@ -592,7 +598,12 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 					_instigator setFatigue (
 						(
 							(getFatigue _instigator) + 
-							(_costInfliction * ([KH_var_meleeAbsoluteBlockStaminaExhaustionMultiplier, KH_var_meleeAbsoluteParryStaminaExhaustionMultiplier] select _parried) * KH_var_meleeAbsoluteStaminaExhaustionMultiplier)
+							(
+								_costInfliction * 
+								([KH_var_meleeAbsoluteBlockStaminaExhaustionMultiplier, KH_var_meleeAbsoluteParryStaminaExhaustionMultiplier] select _parried) * 
+								KH_var_meleeAbsoluteStaminaExhaustionMultiplier *
+								([KH_var_meleeAbsoluteAiStaminaExhaustionMultiplier, KH_var_meleeAbsolutePlayerStaminaExhaustionMultiplier] select (isPlayer _instigator))
+							)
 						) min 1
 					);
 
@@ -659,7 +670,8 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 							(
 								_cost * 
 								KH_var_meleeAbsoluteBlockStaminaConsumptionMultiplier * 
-								KH_var_meleeAbsoluteStaminaConsumptionMultiplier
+								KH_var_meleeAbsoluteStaminaConsumptionMultiplier *
+								([KH_var_meleeAbsoluteAiStaminaConsumptionMultiplier, KH_var_meleeAbsolutePlayerStaminaConsumptionMultiplier] select (isPlayer _unit))
 							)
 						) min 1
 					);
@@ -709,7 +721,12 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 					_unit setFatigue (
 						(
 							(getFatigue _unit) + 
-							(_costInfliction * KH_var_meleeAbsoluteKickStaminaExhaustionMultiplier * KH_var_meleeAbsoluteStaminaExhaustionMultiplier)
+							(
+								_costInfliction * 
+								KH_var_meleeAbsoluteKickStaminaExhaustionMultiplier * 
+								KH_var_meleeAbsoluteStaminaExhaustionMultiplier * 
+								([KH_var_meleeAbsoluteAiStaminaExhaustionMultiplier, KH_var_meleeAbsolutePlayerStaminaExhaustionMultiplier] select (isPlayer _unit))
+							)
 						) min 1
 					);
 				},
@@ -778,7 +795,8 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 								_cost * 
 								KH_var_meleeAbsoluteBlockStaminaConsumptionMultiplier *
 								KH_var_meleeAbsoluteTackleBlockStaminaExhaustionMultiplier *  
-								KH_var_meleeAbsoluteStaminaConsumptionMultiplier
+								KH_var_meleeAbsoluteStaminaConsumptionMultiplier *
+								([KH_var_meleeAbsoluteAiStaminaConsumptionMultiplier, KH_var_meleeAbsolutePlayerStaminaConsumptionMultiplier] select (isPlayer _unit))
 							)
 						) min 1
 					);
@@ -828,7 +846,12 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 					_unit setFatigue (
 						(
 							(getFatigue _unit) + 
-							(_costInfliction * KH_var_meleeAbsoluteTackleStaminaExhaustionMultiplier * KH_var_meleeAbsoluteStaminaExhaustionMultiplier)
+							(
+								_costInfliction * 
+								KH_var_meleeAbsoluteTackleStaminaExhaustionMultiplier * 
+								KH_var_meleeAbsoluteStaminaExhaustionMultiplier *
+								([KH_var_meleeAbsoluteAiStaminaExhaustionMultiplier, KH_var_meleeAbsolutePlayerStaminaExhaustionMultiplier] select (isPlayer _unit))
+							)
 						) min 1
 					);
 				},

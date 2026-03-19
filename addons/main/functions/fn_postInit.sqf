@@ -562,7 +562,8 @@ isNil {
 																				(
 																					(getNumber (_meleeTypeConfig >> _attack >> "cost")) * 
 																					KH_var_meleeAbsoluteAttackStaminaConsumptionMultiplier * 
-																					KH_var_meleeAbsoluteStaminaConsumptionMultiplier
+																					KH_var_meleeAbsoluteStaminaConsumptionMultiplier *
+																					([KH_var_meleeAbsoluteAiStaminaConsumptionMultiplier, KH_var_meleeAbsolutePlayerStaminaConsumptionMultiplier] select (isPlayer _unit))
 																				)
 																			) min 1
 																		);
@@ -592,7 +593,7 @@ isNil {
 																			true, 
 																			-1, 
 																			"FIRE", 
-																			"NONE", 
+																			["NONE", "GEOM"] select KH_var_allowGeometryHitDetection, 
 																			true,
 																			[[], ["LINE", [], 1]] select KH_var_meleeDebugMode
 																		] call KH_fnc_raycast;
@@ -615,7 +616,7 @@ isNil {
 																		if (_hitRadius isNotEqualTo 0) then {
 																			private _radiusIntersections = ([
 																				_point, 
-																				[[0, 1, 0], [0, 0, 1]],
+																				[vectorDir _unit, vectorUp _unit],
 																				[_hitRadius, _hitRadius, str _hitRadius],
 																				"OVAL",
 																				6,
@@ -623,7 +624,7 @@ isNil {
 																				true, 
 																				-1, 
 																				"FIRE", 
-																				"NONE",
+																				["NONE", "GEOM"] select KH_var_allowGeometryHitDetection,
 																				true,
 																				[[], ["LINE", [], 1]] select KH_var_meleeDebugMode
 																			] call KH_fnc_raycast3d) select 0;
@@ -754,7 +755,8 @@ isNil {
 																				(
 																					(getNumber (_meleeTypeConfig >> _parry >> "cost")) * 
 																					KH_var_meleeAbsoluteParryStaminaConsumptionMultiplier * 
-																					KH_var_meleeAbsoluteStaminaConsumptionMultiplier
+																					KH_var_meleeAbsoluteStaminaConsumptionMultiplier *
+																					([KH_var_meleeAbsoluteAiStaminaConsumptionMultiplier, KH_var_meleeAbsolutePlayerStaminaConsumptionMultiplier] select (isPlayer _unit))
 																				)
 																			) min 1
 																		);
@@ -835,7 +837,8 @@ isNil {
 																				(
 																					(getNumber (_meleeTypeConfig >> _kick >> "cost")) * 
 																					KH_var_meleeAbsoluteKickStaminaConsumptionMultiplier * 
-																					KH_var_meleeAbsoluteStaminaConsumptionMultiplier
+																					KH_var_meleeAbsoluteStaminaConsumptionMultiplier *
+																					([KH_var_meleeAbsoluteAiStaminaConsumptionMultiplier, KH_var_meleeAbsolutePlayerStaminaConsumptionMultiplier] select (isPlayer _unit))
 																				)
 																			) min 1
 																		);
@@ -851,7 +854,7 @@ isNil {
 																			else {
 																				_unit modelToWorldVisualWorld (_unit selectionPosition _point);
 																			},
-																			[[0, 1, 0], [0, 0, 1]],
+																			[vectorDir _unit, vectorUp _unit],
 																			[0.3, 0.3, "0.3"],
 																			"OVAL",
 																			6,
@@ -859,7 +862,7 @@ isNil {
 																			true, 
 																			-1, 
 																			"FIRE", 
-																			"NONE",
+																			["NONE", "GEOM"] select KH_var_allowGeometryHitDetection,
 																			true,
 																			[[], ["LINE", [], 1]] select KH_var_meleeDebugMode
 																		] call KH_fnc_raycast3d) select 0;
@@ -931,7 +934,8 @@ isNil {
 																				(
 																					(getNumber (_meleeTypeConfig >> _tackle >> "cost")) * 
 																					KH_var_meleeAbsoluteTackleStaminaConsumptionMultiplier * 
-																					KH_var_meleeAbsoluteStaminaConsumptionMultiplier
+																					KH_var_meleeAbsoluteStaminaConsumptionMultiplier *
+																					([KH_var_meleeAbsoluteAiStaminaConsumptionMultiplier, KH_var_meleeAbsolutePlayerStaminaConsumptionMultiplier] select (isPlayer _unit))
 																				)
 																			) min 1
 																		);
@@ -969,7 +973,7 @@ isNil {
 
 																		private _tackleIntersections = ([
 																			_aimPosition, 
-																			[[0, 1, 0], [0, 0, 1]],
+																			[vectorDir _unit, vectorUp _unit],
 																			[0.5, 0.5, "0.75"],
 																			"OVAL",
 																			6,
@@ -1052,7 +1056,8 @@ isNil {
 																				(
 																					(getNumber (_meleeTypeConfig >> _dodge >> "cost")) * 
 																					KH_var_meleeAbsoluteDodgeStaminaConsumptionMultiplier * 
-																					KH_var_meleeAbsoluteStaminaConsumptionMultiplier
+																					KH_var_meleeAbsoluteStaminaConsumptionMultiplier *
+																					([KH_var_meleeAbsoluteAiStaminaConsumptionMultiplier, KH_var_meleeAbsolutePlayerStaminaConsumptionMultiplier] select (isPlayer _unit))
 																				)
 																			) min 1
 																		);
@@ -1927,60 +1932,61 @@ isNil {
 										_unit doFollow (leader (group _unit));
 										_unit action ["SwitchWeapon", _unit, _unit, 299];
 									}
-									else {
-										private _closestTarget = _unit findNearestEnemy (getPosATL _unit);
+								};
 
-										if !(isNull _closestTarget) then {
-											if ((_unit distance _closestTarget) <= KH_var_meleeRangedAiEngageDistance) then {
-												_unit lookAt _closestTarget;
+								if KH_var_allowRangedMelee then {
+									private _closestTarget = _unit findNearestEnemy (getPosATL _unit);
 
-												if ((_unit distance _closestTarget) <= (selectRandom [3, 2.5, 2])) then {
-													if _isAgent then {
-														_unit setDestination [getPosATL _unit, "DoNotPlan", true];
-													}
-													else {
-														doStop _unit;
-													};
-													
-													if ((abs ((((_unit getRelDir _closestTarget) + 180) % 360) - 180)) <= (selectRandom [22.5, 11.25])) then {
-														private _moves = getText ((configOf _closestTarget) >> "moves");
-														private _moveAction = getText (configFile >> _moves >> "states" >> (animationState _closestTarget) >> "kh_meleeMainAction");
-														private _gestureAction = getText (configFile >> (getText (configFile >> _moves >> "gestures")) >> "states" >> (gestureState _closestTarget) >> "kh_meleeMainAction");
-														private _finalAction = [_gestureAction, _moveAction] select (_moveAction isNotEqualTo "");
+									if !(isNull _closestTarget) then {
+										if ((_unit distance _closestTarget) <= KH_var_meleeRangedAiEngageDistance) then {
+											_unit lookAt _closestTarget;
 
-														isNil {
-															if (_finalAction isNotEqualTo "") then {
-																switch _finalAction do {
-																	case "attack": {
-																		[_unit, selectRandomWeighted ["ATTACK", 0.75, "KICK", 0.25, "TACKLE", 0.25, selectRandom [["DODGE", "LEFTWARD"], ["DODGE", "RIGHTWARD"], ["DODGE", "BACKWARD"], ["DODGE", "BACKWARD_RIGHTWARD"], ["DODGE", "BACKWARD_LEFTWARD"]], 0.25]] call KH_fnc_updateMeleeState;
-																	};
-
-																	case "dodge": {
-																		[_unit, selectRandomWeighted ["ATTACK", 1, "TACKLE", 0.5, "STOP", 0.25]] call KH_fnc_updateMeleeState;
-																	};
-
-																	case "kick": {
-																		[_unit, selectRandomWeighted ["ATTACK", 0.25, selectRandom [["DODGE", "LEFTWARD"], ["DODGE", "RIGHTWARD"], ["DODGE", "BACKWARD"], ["DODGE", "BACKWARD_RIGHTWARD"], ["DODGE", "BACKWARD_LEFTWARD"]], 1]] call KH_fnc_updateMeleeState;
-																	};
-
-																	case "tackle": {
-																		[_unit, selectRandomWeighted ["ATTACK", 0.5, selectRandom [["DODGE", "LEFTWARD"], ["DODGE", "RIGHTWARD"], ["DODGE", "BACKWARD"], ["DODGE", "BACKWARD_RIGHTWARD"], ["DODGE", "BACKWARD_LEFTWARD"]], 1]] call KH_fnc_updateMeleeState;
-																	};
-																};
-															}
-															else {
-																[_unit, selectRandomWeighted ["ATTACK", 1, "KICK", 0.5, "TACKLE", 0.3, selectRandom [["DODGE", "LEFTWARD"], ["DODGE", "RIGHTWARD"], ["DODGE", "BACKWARD"], ["DODGE", "BACKWARD_RIGHTWARD"], ["DODGE", "BACKWARD_LEFTWARD"]], 0.5]] call KH_fnc_updateMeleeState;
-															};
-														};
-													};
+											if ((_unit distance _closestTarget) <= (selectRandom [3, 2.5, 2])) then {
+												if _isAgent then {
+													_unit setDestination [getPosATL _unit, "DoNotPlan", true];
 												}
 												else {
-													if _isAgent then {
-														_unit setDestination [getPosATL _closestTarget, "LEADER PLANNED", true];
-													}
-													else {
-														_unit doMove (getPosATL _closestTarget);
+													doStop _unit;
+												};
+												
+												if ((abs ((((_unit getRelDir _closestTarget) + 180) % 360) - 180)) <= (selectRandom [22.5, 11.25])) then {
+													private _moves = getText ((configOf _closestTarget) >> "moves");
+													private _moveAction = getText (configFile >> _moves >> "states" >> (animationState _closestTarget) >> "kh_meleeMainAction");
+													private _gestureAction = getText (configFile >> (getText (configFile >> _moves >> "gestures")) >> "states" >> (gestureState _closestTarget) >> "kh_meleeMainAction");
+													private _finalAction = [_gestureAction, _moveAction] select (_moveAction isNotEqualTo "");
+
+													isNil {
+														if (_finalAction isNotEqualTo "") then {
+															switch _finalAction do {
+																case "attack": {
+																	[_unit, selectRandomWeighted ["ATTACK", 0.75, "KICK", 0.25, "TACKLE", 0.25, selectRandom [["DODGE", "LEFTWARD"], ["DODGE", "RIGHTWARD"], ["DODGE", "BACKWARD"], ["DODGE", "BACKWARD_RIGHTWARD"], ["DODGE", "BACKWARD_LEFTWARD"]], 0.25]] call KH_fnc_updateMeleeState;
+																};
+
+																case "dodge": {
+																	[_unit, selectRandomWeighted ["ATTACK", 1, "TACKLE", 0.5, "STOP", 0.25]] call KH_fnc_updateMeleeState;
+																};
+
+																case "kick": {
+																	[_unit, selectRandomWeighted ["ATTACK", 0.25, selectRandom [["DODGE", "LEFTWARD"], ["DODGE", "RIGHTWARD"], ["DODGE", "BACKWARD"], ["DODGE", "BACKWARD_RIGHTWARD"], ["DODGE", "BACKWARD_LEFTWARD"]], 1]] call KH_fnc_updateMeleeState;
+																};
+
+																case "tackle": {
+																	[_unit, selectRandomWeighted ["ATTACK", 0.5, selectRandom [["DODGE", "LEFTWARD"], ["DODGE", "RIGHTWARD"], ["DODGE", "BACKWARD"], ["DODGE", "BACKWARD_RIGHTWARD"], ["DODGE", "BACKWARD_LEFTWARD"]], 1]] call KH_fnc_updateMeleeState;
+																};
+															};
+														}
+														else {
+															[_unit, selectRandomWeighted ["ATTACK", 1, "KICK", 0.5, "TACKLE", 0.3, selectRandom [["DODGE", "LEFTWARD"], ["DODGE", "RIGHTWARD"], ["DODGE", "BACKWARD"], ["DODGE", "BACKWARD_RIGHTWARD"], ["DODGE", "BACKWARD_LEFTWARD"]], 0.5]] call KH_fnc_updateMeleeState;
+														};
 													};
+												};
+											}
+											else {
+												if _isAgent then {
+													_unit setDestination [getPosATL _closestTarget, "LEADER PLANNED", true];
+												}
+												else {
+													_unit doMove (getPosATL _closestTarget);
 												};
 											};
 										};
@@ -2168,58 +2174,60 @@ isNil {
 										};
 									};
 
-									private _closestTarget = _unit findNearestEnemy (getPosATL _unit);
+									if KH_var_allowRangedMelee then {
+										private _closestTarget = _unit findNearestEnemy (getPosATL _unit);
 
-									if !(isNull _closestTarget) then {
-										if ((_unit distance _closestTarget) <= KH_var_meleeRangedAiEngageDistance) then {
-											_unit lookAt _closestTarget;
+										if !(isNull _closestTarget) then {
+											if ((_unit distance _closestTarget) <= KH_var_meleeRangedAiEngageDistance) then {
+												_unit lookAt _closestTarget;
 
-											if ((_unit distance _closestTarget) <= (selectRandom [3, 2.5, 2])) then {
-												if _isAgent then {
-													_unit setDestination [getPosATL _unit, "DoNotPlan", true];
-												}
-												else {
-													doStop _unit;
-												};
-												
-												if ((abs ((((_unit getRelDir _closestTarget) + 180) % 360) - 180)) <= (selectRandom [22.5, 11.25])) then {
-													private _moves = getText ((configOf _closestTarget) >> "moves");
-													private _moveAction = getText (configFile >> _moves >> "states" >> (animationState _closestTarget) >> "kh_meleeMainAction");
-													private _gestureAction = getText (configFile >> (getText (configFile >> _moves >> "gestures")) >> "states" >> (gestureState _closestTarget) >> "kh_meleeMainAction");
-													private _finalAction = [_gestureAction, _moveAction] select (_moveAction isNotEqualTo "");
+												if ((_unit distance _closestTarget) <= (selectRandom [3, 2.5, 2])) then {
+													if _isAgent then {
+														_unit setDestination [getPosATL _unit, "DoNotPlan", true];
+													}
+													else {
+														doStop _unit;
+													};
+													
+													if ((abs ((((_unit getRelDir _closestTarget) + 180) % 360) - 180)) <= (selectRandom [22.5, 11.25])) then {
+														private _moves = getText ((configOf _closestTarget) >> "moves");
+														private _moveAction = getText (configFile >> _moves >> "states" >> (animationState _closestTarget) >> "kh_meleeMainAction");
+														private _gestureAction = getText (configFile >> (getText (configFile >> _moves >> "gestures")) >> "states" >> (gestureState _closestTarget) >> "kh_meleeMainAction");
+														private _finalAction = [_gestureAction, _moveAction] select (_moveAction isNotEqualTo "");
 
-													isNil {
-														if (_finalAction isNotEqualTo "") then {
-															switch _finalAction do {
-																case "attack": {
-																	[_unit, selectRandomWeighted ["ATTACK", 0.75, "KICK", 0.25, "TACKLE", 0.25, selectRandom [["DODGE", "LEFTWARD"], ["DODGE", "RIGHTWARD"], ["DODGE", "BACKWARD"], ["DODGE", "BACKWARD_RIGHTWARD"], ["DODGE", "BACKWARD_LEFTWARD"]], 0.25]] call KH_fnc_updateMeleeState;
+														isNil {
+															if (_finalAction isNotEqualTo "") then {
+																switch _finalAction do {
+																	case "attack": {
+																		[_unit, selectRandomWeighted ["ATTACK", 0.75, "KICK", 0.25, "TACKLE", 0.25, selectRandom [["DODGE", "LEFTWARD"], ["DODGE", "RIGHTWARD"], ["DODGE", "BACKWARD"], ["DODGE", "BACKWARD_RIGHTWARD"], ["DODGE", "BACKWARD_LEFTWARD"]], 0.25]] call KH_fnc_updateMeleeState;
+																	};
+
+																	case "dodge": {
+																		[_unit, selectRandomWeighted ["ATTACK", 1, "TACKLE", 0.5, "STOP", 0.25]] call KH_fnc_updateMeleeState;
+																	};
+
+																	case "kick": {
+																		[_unit, selectRandomWeighted ["ATTACK", 0.25, selectRandom [["DODGE", "LEFTWARD"], ["DODGE", "RIGHTWARD"], ["DODGE", "BACKWARD"], ["DODGE", "BACKWARD_RIGHTWARD"], ["DODGE", "BACKWARD_LEFTWARD"]], 1]] call KH_fnc_updateMeleeState;
+																	};
+
+																	case "tackle": {
+																		[_unit, selectRandomWeighted ["ATTACK", 0.5, selectRandom [["DODGE", "LEFTWARD"], ["DODGE", "RIGHTWARD"], ["DODGE", "BACKWARD"], ["DODGE", "BACKWARD_RIGHTWARD"], ["DODGE", "BACKWARD_LEFTWARD"]], 1]] call KH_fnc_updateMeleeState;
+																	};
 																};
-
-																case "dodge": {
-																	[_unit, selectRandomWeighted ["ATTACK", 1, "TACKLE", 0.5, "STOP", 0.25]] call KH_fnc_updateMeleeState;
-																};
-
-																case "kick": {
-																	[_unit, selectRandomWeighted ["ATTACK", 0.25, selectRandom [["DODGE", "LEFTWARD"], ["DODGE", "RIGHTWARD"], ["DODGE", "BACKWARD"], ["DODGE", "BACKWARD_RIGHTWARD"], ["DODGE", "BACKWARD_LEFTWARD"]], 1]] call KH_fnc_updateMeleeState;
-																};
-
-																case "tackle": {
-																	[_unit, selectRandomWeighted ["ATTACK", 0.5, selectRandom [["DODGE", "LEFTWARD"], ["DODGE", "RIGHTWARD"], ["DODGE", "BACKWARD"], ["DODGE", "BACKWARD_RIGHTWARD"], ["DODGE", "BACKWARD_LEFTWARD"]], 1]] call KH_fnc_updateMeleeState;
-																};
+															}
+															else {
+																[_unit, selectRandomWeighted ["ATTACK", 1, "KICK", 0.5, "TACKLE", 0.3, selectRandom [["DODGE", "LEFTWARD"], ["DODGE", "RIGHTWARD"], ["DODGE", "BACKWARD"], ["DODGE", "BACKWARD_RIGHTWARD"], ["DODGE", "BACKWARD_LEFTWARD"]], 0.5]] call KH_fnc_updateMeleeState;
 															};
-														}
-														else {
-															[_unit, selectRandomWeighted ["ATTACK", 1, "KICK", 0.5, "TACKLE", 0.3, selectRandom [["DODGE", "LEFTWARD"], ["DODGE", "RIGHTWARD"], ["DODGE", "BACKWARD"], ["DODGE", "BACKWARD_RIGHTWARD"], ["DODGE", "BACKWARD_LEFTWARD"]], 0.5]] call KH_fnc_updateMeleeState;
 														};
 													};
-												};
-											}
-											else {
-												if _isAgent then {
-													_unit setDestination [getPosATL _closestTarget, "LEADER PLANNED", true];
 												}
 												else {
-													_unit doMove (getPosATL _closestTarget);
+													if _isAgent then {
+														_unit setDestination [getPosATL _closestTarget, "LEADER PLANNED", true];
+													}
+													else {
+														_unit doMove (getPosATL _closestTarget);
+													};
 												};
 											};
 										};

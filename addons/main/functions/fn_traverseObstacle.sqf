@@ -9,7 +9,7 @@ private _unitHeight = getNumber ((configOf _unit) >> "kh_unitHeight");
 
 private _obstacleIntersections = ([
     _currentPosition vectorAdd [0, 0, _unitHeight + 5.1], 
-    _unit,
+    [vectorDir _unit, vectorUp _unit],
     [_unitWidth, _unitLength, str -(_unitHeight + 5)],
     "RECTANGLE",
     0.25,
@@ -46,7 +46,7 @@ if ((_maximumHeight - _unitHeight) < 0.25) exitWith {
 
 private _climbIntersections = ([
     _unit modelToWorldVisualWorld [0, _unitLength * 1.75, _maximumHeight], 
-    _unit,
+    [vectorDir _unit, vectorUp _unit],
     [_unitWidth, _unitLength, str _maximumHeight],
     "RECTANGLE",
     0.25,
@@ -109,7 +109,7 @@ private _height = (_chosenTraversalTarget select 2) - _unitPositionHeight;
 
 private _vault = ((([
     _unit modelToWorldVisualWorld [0, _unitLength * 2.75, _height], 
-    _unit,
+    [vectorDir _unit, vectorUp _unit],
     [_unitWidth, _unitLength, str _unitHeight],
     "RECTANGLE",
     0.25,

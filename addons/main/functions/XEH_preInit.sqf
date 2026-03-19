@@ -2179,6 +2179,40 @@
 ] call CBA_fnc_addSetting;
 
 [
+	"KH_var_meleeAbsolutePlayerStaminaConsumptionMultiplier",
+	"SLIDER",   
+	[
+		"Player Stamina Consumption Multiplier", 
+		"Player Stamina consumption from all actions is multiplied by this value."
+	], 
+	[
+        "KH Melee",
+        "Stamina Multipliers"
+    ], 
+	[0.000, 10.000, 1.000, 3],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_meleeAbsoluteAiStaminaConsumptionMultiplier",
+	"SLIDER",   
+	[
+		"AI Stamina Consumption Multiplier", 
+		"AI Stamina consumption from all actions is multiplied by this value."
+	], 
+	[
+        "KH Melee",
+        "Stamina Multipliers"
+    ], 
+	[0.000, 10.000, 1.000, 3],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
 	"KH_var_meleeAbsoluteAttackStaminaConsumptionMultiplier",
 	"SLIDER",   
 	[
@@ -2298,6 +2332,40 @@
 ] call CBA_fnc_addSetting;
 
 [
+	"KH_var_meleeAbsolutePlayerStaminaExhaustionMultiplier",
+	"SLIDER",   
+	[
+		"Player Stamina Exhaustion Multiplier", 
+		"Player Stamina exhaustion from all incoming actions is multiplied by this value."
+	], 
+	[
+        "KH Melee",
+        "Stamina Multipliers"
+    ], 
+	[0.000, 10.000, 1.000, 3],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_meleeAbsoluteAiStaminaExhaustionMultiplier",
+	"SLIDER",   
+	[
+		"AI Stamina Exhaustion Multiplier", 
+		"AI Stamina exhaustion from all incoming actions is multiplied by this value."
+	], 
+	[
+        "KH Melee",
+        "Stamina Multipliers"
+    ], 
+	[0.000, 10.000, 1.000, 3],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
 	"KH_var_meleeAbsoluteAttackStaminaExhaustionMultiplier",
 	"SLIDER",   
 	[
@@ -2394,6 +2462,23 @@
         "Stamina Multipliers"
     ], 
 	[0.000, 10.000, 1.000, 3],
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_allowRangedMelee",
+	"CHECKBOX",   
+	[
+		"Ranged Melee", 
+		"True allows melee actions with ranged weapons."
+	], 
+	[
+        "KH Melee",
+        "General"
+    ], 
+	true,
 	1,
 	{},
 	false
@@ -2519,34 +2604,17 @@
 ] call CBA_fnc_addSetting;
 
 [
-	"KH_var_allowAiMelee",
+	"KH_var_allowGeometryHitDetection",
 	"CHECKBOX",   
 	[
-		"Allow AI Melee", 
-		"True allows AI units to process melee actions."
+		"Geometry Hit Detection", 
+		"True allows the Geometry LOD to be used in hit detection, making hit detection more likely but less precise for individual hit points."
 	], 
 	[
         "KH Melee",
         "General"
     ], 
-	true,
-	1,
-	{},
-	false
-] call CBA_fnc_addSetting;
-
-[
-	"KH_var_meleeAiCollisionDetection",
-	"CHECKBOX",   
-	[
-		"AI Collision Detection", 
-		"True enables a system that tries its best to avoid AI clipping into other AI during melee actions."
-	], 
-	[
-        "KH Melee",
-        "General"
-    ], 
-	true,
+	false,
 	1,
 	{},
 	false
@@ -2615,6 +2683,40 @@
 ] call CBA_fnc_addSetting;
 
 [
+	"KH_var_allowAiMelee",
+	"CHECKBOX",   
+	[
+		"Allow AI Melee", 
+		"True allows AI units to process melee actions."
+	], 
+	[
+        "KH Melee",
+        "General"
+    ], 
+	true,
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_meleeAiCollisionDetection",
+	"CHECKBOX",   
+	[
+		"AI Collision Detection", 
+		"True enables a system that tries its best to avoid AI clipping into other AI during melee actions."
+	], 
+	[
+        "KH Melee",
+        "General"
+    ], 
+	true,
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
 	"KH_var_meleeMeleeAiEngageDistance",
 	"SLIDER",   
 	[
@@ -2665,7 +2767,9 @@
 				} forEach allCameras;
 
 				if _continue then {
-					[KH_var_playerUnit, "ATTACK"] call KH_fnc_updateMeleeState;
+					if (KH_var_allowRangedMelee || (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false])) then {
+						[KH_var_playerUnit, "ATTACK"] call KH_fnc_updateMeleeState;
+					};
 				};
 			};
 		};
@@ -2716,7 +2820,9 @@
 			} forEach allCameras;
 
 			if _continue then {
-				[KH_var_playerUnit, "DODGE"] call KH_fnc_updateMeleeState;
+				if (KH_var_allowRangedMelee || (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false])) then {
+					[KH_var_playerUnit, "DODGE"] call KH_fnc_updateMeleeState;
+				};
 			};
 		};
 	}, 
@@ -2809,7 +2915,9 @@
 			} forEach allCameras;
 
 			if _continue then {
-				[KH_var_playerUnit, "KICK"] call KH_fnc_updateMeleeState;
+				if (KH_var_allowRangedMelee || (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false])) then {
+					[KH_var_playerUnit, "KICK"] call KH_fnc_updateMeleeState;
+				};
 			};
 		};
 	}, 
@@ -2833,7 +2941,9 @@
 			} forEach allCameras;
 
 			if _continue then {
-				[KH_var_playerUnit, "TACKLE"] call KH_fnc_updateMeleeState;
+				if (KH_var_allowRangedMelee || (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false])) then {
+					[KH_var_playerUnit, "TACKLE"] call KH_fnc_updateMeleeState;
+				};
 			};
 		};
 	}, 

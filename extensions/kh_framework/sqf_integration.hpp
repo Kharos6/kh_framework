@@ -1118,29 +1118,73 @@ static game_value set_rotation_euler_sqf(game_value_parameter entity, game_value
 static game_value vector_to_euler_sqf(game_value_parameter vectors) {
     try {
         auto& vec_array = vectors.to_array();
-        
+
         if (vec_array.size() != 2) {
             report_error("vectorToEuler requires an array of 2 vectors [[dirX, dirY, dirZ], [upX, upY, upZ]]");
             return game_value();
         }
-        
+
         auto& dir_array = vec_array[0].to_array();
         auto& up_array = vec_array[1].to_array();
-        
+
         if (dir_array.size() != 3 || up_array.size() != 3) {
-            report_error("vectorToEuler requires vectors with 3 components each");
+            report_error("vectorToEuler requires three components per vector");
             return game_value();
         }
-        
+
         constexpr float RAD_TO_DEG = 180.0f / 3.14159265359f;
+        constexpr float EPSILON = 0.0001f;
+
+        auto make_zero_result = []() {
+            auto_array<game_value> r;
+            r.reserve(3);
+            r.push_back(game_value(0.0f));
+            r.push_back(game_value(0.0f));
+            r.push_back(game_value(0.0f));
+            return game_value(std::move(r));
+        };
+
         float dirX = static_cast<float>(dir_array[0]);
         float dirY = static_cast<float>(dir_array[1]);
         float dirZ = static_cast<float>(dir_array[2]);
+        float dirLen = std::sqrt(dirX * dirX + dirY * dirY + dirZ * dirZ);
+        if (dirLen < EPSILON) return make_zero_result();
+        dirX /= dirLen; dirY /= dirLen; dirZ /= dirLen;
+
+        // Extract and normalize up vector
         float upX = static_cast<float>(up_array[0]);
+        float upY = static_cast<float>(up_array[1]);
         float upZ = static_cast<float>(up_array[2]);
-        float aroundX = std::fmod(std::atan2(-dirZ, std::sqrt(dirX * dirX + dirY * dirY)) * RAD_TO_DEG + 360.0f, 360.0f);
-        float aroundY = std::fmod(360.0f - std::atan2(upX, upZ) * RAD_TO_DEG, 360.0f);
-        float aroundZ = std::fmod(std::atan2(dirX, dirY) * RAD_TO_DEG + 360.0f, 360.0f);
+        float upLen = std::sqrt(upX * upX + upY * upY + upZ * upZ);
+        if (upLen < EPSILON) return make_zero_result();
+        upX /= upLen; upY /= upLen; upZ /= upLen;
+
+        // Right vector = dir × up
+        float rightX = dirY * upZ - dirZ * upY;
+        float rightY = dirZ * upX - dirX * upZ;
+        float rightZ = dirX * upY - dirY * upX;
+        float rightLen = std::sqrt(rightX * rightX + rightY * rightY + rightZ * rightZ);
+        if (rightLen < EPSILON) return make_zero_result();
+        rightX /= rightLen; rightY /= rightLen; rightZ /= rightLen;
+        upX = rightY * dirZ - rightZ * dirY;
+        upY = rightZ * dirX - rightX * dirZ;
+        upZ = rightX * dirY - rightY * dirX;
+        float aroundX, aroundY, aroundZ;
+        float cosRoll = std::sqrt(rightX * rightX + rightY * rightY);
+
+        if (cosRoll > EPSILON) {
+            // Normal case
+            aroundX = std::fmod(-std::atan2(dirZ, upZ) * RAD_TO_DEG + 360.0f, 360.0f);
+            aroundY = std::fmod(std::atan2(rightZ, cosRoll) * RAD_TO_DEG + 360.0f, 360.0f);
+            aroundZ = std::fmod(-std::atan2(rightY, rightX) * RAD_TO_DEG + 360.0f, 360.0f);
+        } else {
+            // Gimbal lock
+            aroundX = 0.0f;
+            aroundY = (rightZ > 0.0f) ? 90.0f : 270.0f;
+            float coupled = std::atan2(-dirX, dirY);
+            aroundZ = std::fmod(-coupled * RAD_TO_DEG + 360.0f, 360.0f);
+        }
+
         auto_array<game_value> result;
         result.reserve(3);
         result.push_back(game_value(aroundX));

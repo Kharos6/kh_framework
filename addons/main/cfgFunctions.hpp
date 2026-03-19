@@ -106,10 +106,12 @@ class CfgFunctions
 			class openVehicleSpawner {headerType = -1;};
 			class parseBoolean {headerType = -1;};
 			class parseNormalizedScreenTransforms {headerType = -1;};
+			class parseSpecialExecution {headerType = -1;};
 			class playRecordedMission {headerType = -1;};
 			class postInit {postInit = 1;};
 			class preInit {preInit = 1;};
 			class preStart {preStart = 1;};
+			class processExecution {headerType = -1;};
 			class raycast {headerType = -1;};
 			class raycast2d {headerType = -1;};
 			class raycast3d {headerType = -1;};
@@ -154,7 +156,6 @@ class CfgFunctions
 			class updateAiInstance {headerType = -1;};
 			class updateMeleeState {headerType = -1;};
 			class updateTtsSpeakerEntity {headerType = -1;};
-			class vectorDirToPitchYaw {headerType = -1;};
 			class vehicleSequence {headerType = -1;};
 			class visualTrigger {headerType = -1;};
 			class zeusModuleArma {headerType = -1;};

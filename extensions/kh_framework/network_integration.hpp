@@ -3536,13 +3536,23 @@ private:
                 if (client_sock != INVALID_SOCKET) {
                     set_socket_options(client_sock);
                     uint8_t id_raw[4];
-                    int id_recv = 0;
-                    bool id_ok = true;
+                    uint32_t id_val = static_cast<uint32_t>(our_client_id);
+                    id_raw[0] = static_cast<uint8_t>(id_val & 0xFF);
+                    id_raw[1] = static_cast<uint8_t>((id_val >> 8) & 0xFF);
+                    id_raw[2] = static_cast<uint8_t>((id_val >> 16) & 0xFF);
+                    id_raw[3] = static_cast<uint8_t>((id_val >> 24) & 0xFF);
+                    size_t total_sent = 0;
 
-                    while (id_recv < 4) {
-                        int r = recv(client_sock, reinterpret_cast<char*>(id_raw + id_recv), 4 - id_recv, 0);
-                        if (r <= 0) { id_ok = false; break; }
-                        id_recv += r;
+                    while (total_sent < 4) {
+                        int result = send(sock, reinterpret_cast<const char*>(id_raw + total_sent),
+                                        static_cast<int>(4 - total_sent), 0);
+                                        
+                        if (result == SOCKET_ERROR || result == 0) {
+                            closesocket(sock);
+                            return false;
+                        }
+
+                        total_sent += static_cast<size_t>(result);
                     }
 
                     if (id_ok) {

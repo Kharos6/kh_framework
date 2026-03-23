@@ -36,7 +36,7 @@ if (((count _ignored) <= 2) && (_ignored isEqualTypeAll objNull)) then {
 	_allowIgnoredCheck = false;
 };
 
-private "_object";
+private _object = objNull;
 
 if (_position isEqualType objNull) then {
 	_object = _position;
@@ -45,6 +45,11 @@ if (_position isEqualType objNull) then {
 
 if (_rotation isEqualType objNull) then {
 	_rotation = [vectorDir _rotation, vectorUp _rotation];
+}
+else {
+	if (_rotation isEqualTypeAll 0) then {
+		_rotation = eulerToVector _rotation;
+	};
 };
 
 _rotation params [["_vectorDir", [0, 1, 0], [[]]], ["_vectorUp", [0, 0, 1], [[]]]];
@@ -81,24 +86,28 @@ private _grids = [];
 private _intersectionCheckCount = 0;
 private _maxResultsOverride = [_maxResults, -1] select _allowIgnoredCheck;
 
+private _positionParser = if !(isNull _object) then {
+	{
+		private _relativeOffsetStart = _object modelToWorldVisualWorld _currentPositionStart;
+		_currentPositionStart = _relativeOffsetStart vectorAdd (_relativeOffsetStart vectorDiff _position);
+		private _relativeOffsetEnd = _object modelToWorldVisualWorld _currentPositionEnd;
+		_currentPositionEnd = _relativeOffsetEnd vectorAdd (_relativeOffsetEnd vectorDiff _position);
+	};
+}
+else {
+	{
+		_currentPositionStart = _position vectorAdd _currentPositionStart;
+		_currentPositionEnd = _position vectorAdd _currentPositionEnd;
+	};
+};
+
 switch _type do {
 	case "RECTANGLE": {
 		for "_secondaryAxisIteration" from -_secondaryAxis to _secondaryAxis step _step do {
 			for "_tertiaryAxisIteration" from -_tertiaryAxis to _tertiaryAxis step _step do {
 				private _currentPositionStart = ([[_primaryAxis, _secondaryAxisIteration, _tertiaryAxisIteration]] matrixMultiply _combinedMatrix) select 0;
 				private _currentPositionEnd = ([[-_primaryAxis, _secondaryAxisIteration, _tertiaryAxisIteration]] matrixMultiply _combinedMatrix) select 0;
-
-				if !(isNil "_object") then {
-					private _relativeOffsetStart = _object modelToWorldVisualWorld _currentPositionStart;
-					_currentPositionStart = _relativeOffsetStart vectorAdd (_relativeOffsetStart vectorDiff _position);
-					private _relativeOffsetEnd = _object modelToWorldVisualWorld _currentPositionEnd;
-					_currentPositionEnd = _relativeOffsetEnd vectorAdd (_relativeOffsetEnd vectorDiff _position);
-				}
-				else {
-					_currentPositionStart = _position vectorAdd _currentPositionStart;
-					_currentPositionEnd = _position vectorAdd _currentPositionEnd;
-				};
-
+				call _positionParser;
 				_grids pushBack [_currentPositionStart, _currentPositionEnd, _ignored1, _ignored2, _sort, _maxResultsOverride, _lod1, _lod2, _returnUnique];
 				_intersectionCheckCount = _intersectionCheckCount + 1;
 			};
@@ -117,18 +126,7 @@ switch _type do {
 				_primaryAxisIteration = _primaryAxis * (sin _phi);
 				private _currentPositionStart = ([[_primaryAxisIteration, _secondaryAxisIteration, _tertiaryAxisIteration]] matrixMultiply _combinedMatrix) select 0;
 				private _currentPositionEnd = ([[-_primaryAxisIteration, -_secondaryAxisIteration, -_tertiaryAxisIteration]] matrixMultiply _combinedMatrix) select 0;
-				
-				if !(isNil "_object") then {
-					private _relativeOffsetStart = _object modelToWorldVisualWorld _currentPositionStart;
-					_currentPositionStart = _relativeOffsetStart vectorAdd (_relativeOffsetStart vectorDiff _position);
-					private _relativeOffsetEnd = _object modelToWorldVisualWorld _currentPositionEnd;
-					_currentPositionEnd = _relativeOffsetEnd vectorAdd (_relativeOffsetEnd vectorDiff _position);
-				}
-				else {
-					_currentPositionStart = _position vectorAdd _currentPositionStart;
-					_currentPositionEnd = _position vectorAdd _currentPositionEnd;
-				};
-
+				call _positionParser;
 				_grids pushBack [_currentPositionStart, _currentPositionEnd, _ignored1, _ignored2, _sort, _maxResultsOverride, _lod1, _lod2, _returnUnique];
 				_intersectionCheckCount = _intersectionCheckCount + 1;
 			};
@@ -145,18 +143,7 @@ switch _type do {
 				_tertiaryAxisIteration = _tertiaryAxis * (sin _theta);
 				private _currentPositionStart = ([[-_currentHeight, _secondaryAxisIteration, _tertiaryAxisIteration]] matrixMultiply _combinedMatrix) select 0;
 				private _currentPositionEnd = ([[-_currentHeight, -_secondaryAxisIteration, -_tertiaryAxisIteration]] matrixMultiply _combinedMatrix) select 0;
-				
-				if !(isNil "_object") then {
-					private _relativeOffsetStart = _object modelToWorldVisualWorld _currentPositionStart;
-					_currentPositionStart = _relativeOffsetStart vectorAdd (_relativeOffsetStart vectorDiff _position);
-					private _relativeOffsetEnd = _object modelToWorldVisualWorld _currentPositionEnd;
-					_currentPositionEnd = _relativeOffsetEnd vectorAdd (_relativeOffsetEnd vectorDiff _position);
-				}
-				else {
-					_currentPositionStart = _position vectorAdd _currentPositionStart;
-					_currentPositionEnd = _position vectorAdd _currentPositionEnd;
-				};
-
+				call _positionParser;
 				_grids pushBack [_currentPositionStart, _currentPositionEnd, _ignored1, _ignored2, _sort, _maxResultsOverride, _lod1, _lod2, _returnUnique];
 				_intersectionCheckCount = _intersectionCheckCount + 1;
 			};
@@ -191,18 +178,7 @@ switch _type do {
 					_surfaceTertiary = _maxTertiaryRadius * _currentRadiusScale * (sin _theta);
 					private _currentPositionStart = [0, 0, 0];
 					private _currentPositionEnd = ([[_currentHeight, _surfaceSecondary, _surfaceTertiary]] matrixMultiply _combinedMatrix) select 0;
-					
-					if !(isNil "_object") then {
-						private _relativeOffsetStart = _object modelToWorldVisualWorld _currentPositionStart;
-						_currentPositionStart = _relativeOffsetStart vectorAdd (_relativeOffsetStart vectorDiff _position);
-						private _relativeOffsetEnd = _object modelToWorldVisualWorld _currentPositionEnd;
-						_currentPositionEnd = _relativeOffsetEnd vectorAdd (_relativeOffsetEnd vectorDiff _position);
-					}
-					else {
-						_currentPositionStart = _position vectorAdd _currentPositionStart;
-						_currentPositionEnd = _position vectorAdd _currentPositionEnd;
-					};
-
+					call _positionParser;
 					_grids pushBack [_currentPositionStart, _currentPositionEnd, _ignored1, _ignored2, _sort, _maxResultsOverride, _lod1, _lod2, _returnUnique];
 					_intersectionCheckCount = _intersectionCheckCount + 1;
 				};

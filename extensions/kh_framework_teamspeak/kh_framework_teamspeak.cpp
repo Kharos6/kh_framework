@@ -9,6 +9,7 @@
 #include <cmath>
 #include <atomic>
 #include <mutex>
+#include <thread>
 #include <vector>
 #include <algorithm>
 #include <stdint.h>
@@ -897,6 +898,19 @@ static std::atomic<bool> g_tail_active{false};
 static std::atomic<DWORD> g_tail_start_time{0};
 static std::atomic<DWORD> g_tail_duration_ms{0};
 static uint64 g_current_server_connection_handler = 0;
+static std::thread g_heartbeat_thread;
+static std::atomic<bool> g_heartbeat_running{false};
+static void update_plugin_status();
+
+static void heartbeat_thread_func() {
+    while (g_heartbeat_running.load(std::memory_order_acquire)) {
+        if (g_plugin_initialized.load(std::memory_order_acquire)) {
+            update_plugin_status();
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+    }
+}
 
 // Audio effect functions
 namespace AudioEffects {
@@ -1997,6 +2011,8 @@ int ts3plugin_init() {
     // Memory barrier to ensure all initialization is visible before setting flag
     std::atomic_thread_fence(std::memory_order_release);
     g_plugin_initialized.store(true, std::memory_order_release);
+    g_heartbeat_running.store(true, std::memory_order_release);
+    g_heartbeat_thread = std::thread(heartbeat_thread_func);
     char msg[256];
     snprintf(msg, sizeof(msg), "%s initialized", PLUGIN_NAME);
     ts3Functions.logMessage(msg, LogLevel_INFO, PLUGIN_NAME, 0);
@@ -2005,6 +2021,12 @@ int ts3plugin_init() {
 
 void ts3plugin_shutdown() {
     g_plugin_initialized.store(false, std::memory_order_release);
+    g_heartbeat_running.store(false, std::memory_order_release);
+
+    if (g_heartbeat_thread.joinable()) {
+        g_heartbeat_thread.join();
+    }
+
     g_tail_active.store(false);
     
     {

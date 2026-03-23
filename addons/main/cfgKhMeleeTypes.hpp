@@ -6,7 +6,7 @@ class CfgKHMeleeTypes
         {
             type = "KH_MeleeGenericManSwing";
             damageFunction = "";
-            radius = 0.45;
+            radius[] = {0.45, 0.45, "0.75"};
             blockPower = 0.1;
             parryPower = 0.1;
             kickPower = 0.5;
@@ -28,7 +28,7 @@ class CfgKHMeleeTypes
         {
             type = "KH_MeleeGenericManThrust";
             damageFunction = "";
-            radius = 0.45;
+            radius[] = {0.45, 0.45, "0.75"};
             blockPower = 0.1;
             parryPower = 0.1;
             kickPower = 0.5;
@@ -100,7 +100,7 @@ class CfgKHMeleeTypes
             type = "KH_MeleeCleavingSharpLightLongSwing";
             blockPower = 0.15;
             parryPower = 0.15;
-            radius = 0.5;
+            radius[] = {0.5, 0.5, "0.75"};
             class Sounds
             {
                 swing[] = {"KH_MeleeSwingLight01", "KH_MeleeSwingLight02", "KH_MeleeSwingLight03", "KH_MeleeSwingLight04", "KH_MeleeSwingLight05", "KH_MeleeSwingLight06"};
@@ -116,7 +116,7 @@ class CfgKHMeleeTypes
             type = "KH_MeleeCleavingSharpLightLongThrust";
             blockPower = 0.15;
             parryPower = 0.15;
-            radius = 0.5;
+            radius[] = {0.5, 0.5, "0.75"};
             class Sounds
             {
                 swing[] = {"KH_MeleeSwingLight01", "KH_MeleeSwingLight02", "KH_MeleeSwingLight03", "KH_MeleeSwingLight04", "KH_MeleeSwingLight05", "KH_MeleeSwingLight06"};
@@ -184,7 +184,7 @@ class CfgKHMeleeTypes
         class Attack01: Attack01
         {
             type = "KH_MeleeBluntLightSwing";
-            radius = 0.55;
+            radius[] = {0.55, 0.55, "0.75"};
             class Sounds
             {
                 swing[] = {};
@@ -198,7 +198,7 @@ class CfgKHMeleeTypes
         class Attack02: Attack02
         {
             type = "KH_MeleeBluntLightThrust";
-            radius = 0.55;
+            radius[] = {0.55, 0.55, "0.75"};
             class Sounds
             {
                 swing[] = {};
@@ -215,7 +215,7 @@ class CfgKHMeleeTypes
         class Attack01: Attack01
         {
             type = "KH_MeleeBluntLightSwing";
-            radius = 0.55;
+            radius[] = {0.55, 0.55, "0.75"};
             class Sounds
             {
                 swing[] = {};
@@ -229,7 +229,7 @@ class CfgKHMeleeTypes
         class Attack02: Attack02
         {
             type = "KH_MeleeBluntLightThrust";
-            radius = 0.55;
+            radius[] = {0.55, 0.55, "0.75"};
             class Sounds
             {
                 swing[] = {};
@@ -246,7 +246,7 @@ class CfgKHMeleeTypes
         class Attack01: Attack01
         {
             type = "KH_MeleeBluntLightSwing";
-            radius = 0.55;
+            radius[] = {0.55, 0.55, "0.75"};
             class Sounds
             {
                 swing[] = {};
@@ -260,7 +260,7 @@ class CfgKHMeleeTypes
         class Attack02: Attack02
         {
             type = "KH_MeleeBluntLightThrust";
-            radius = 0.55;
+            radius[] = {0.55, 0.55, "0.75"};
             class Sounds
             {
                 swing[] = {};

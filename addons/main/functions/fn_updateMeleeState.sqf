@@ -36,15 +36,22 @@ if (((currentWeapon _unit) isNotEqualTo "") || (_unit getVariable ["KH_var_rawMe
     
     private _weaponConfig = if (_unit getVariable ["KH_var_rawMeleeStance", false]) then {
         private _config = configNull;
+        private _weaponsConfigParent = configFile >> "CfgWeapons";
 
         {
-            private _currentConfig = configFile >> "CfgWeapons" >> _x;
-
-            if (((getText (_currentConfig >> "kh_meleeType")) isNotEqualTo "") && (((getArray (_currentConfig >> "kh_meleeModes")) isNotEqualTo []) || ((getArray (_currentConfig >> "kh_meleeModesGestures")) isNotEqualTo []))) then {
-                _config = _currentConfig;
+            if (((getText (_x >> "kh_meleeType")) isNotEqualTo "") && (((getArray (_x >> "kh_meleeModes")) isNotEqualTo []) || ((getArray (_x >> "kh_meleeModesGestures")) isNotEqualTo []))) then {
+                _config = _x;
                 break;
             };
-        } forEach [uniform _unit, vest _unit, backpack _unit, headgear _unit, binocular _unit, hmd _unit, goggles _unit];
+        } forEach [
+            _weaponsConfigParent >> (uniform _unit), 
+            _weaponsConfigParent >> (vest _unit), 
+            configFile >> "CfgVehicles" >> (backpack _unit), 
+            _weaponsConfigParent >> (headgear _unit), 
+            _weaponsConfigParent >> (binocular _unit), 
+            _weaponsConfigParent >> (hmd _unit), 
+            _weaponsConfigParent >> (goggles _unit)
+        ];
         
         if (isNull _config) then {
             configOf _unit;

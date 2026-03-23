@@ -289,7 +289,7 @@ if KH_var_medical then {
                                                                         };
 
                                                                         if ((diag_tickTime >= _deadline) || !(alive player) || !(player getVariable ["KH_var_incapacitated", false])) then {
-                                                                            if (player getVariable ["KH_var_withstanding", true]) then {
+                                                                            if (player getVariable ["KH_var_withstanding", false]) then {
                                                                                 if (player getVariable ["KH_var_incapacitated", false]) then {
                                                                                     player setUnconscious true;
 

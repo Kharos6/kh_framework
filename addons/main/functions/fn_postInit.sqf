@@ -402,7 +402,7 @@ isNil {
 														"GEOM", 
 														"FIRE", 
 														true,
-														[]
+														[[], ["LINE", [], 1]] select KH_var_meleeDebugMode
 													] call KH_fnc_raycast) param [0, []];
 
 													if (_moveIntersection isNotEqualTo []) then {
@@ -572,13 +572,11 @@ isNil {
 																	};
 
 																	if (_time >= _start) then {
-																		private _rangeOffset = getArray (_meleeTypeConfig >> _attack >> "rangeOffset");
-
 																		_point = if (_point isEqualType []) then {
-																			_unit modelToWorldVisualWorld (_point vectorAdd _rangeOffset);
+																			_unit modelToWorldVisualWorld (_point vectorAdd (getArray (_meleeTypeConfig >> _attack >> "rangeOffset")));
 																		}
 																		else {
-																			_unit modelToWorldVisualWorld ((_unit selectionPosition _point) vectorAdd _rangeOffset);
+																			_unit modelToWorldVisualWorld ((_unit selectionPosition _point) vectorAdd (getArray (_meleeTypeConfig >> _attack >> "rangeOffset")));
 																		};
 
 																		private _lineIntersections = [
@@ -611,13 +609,27 @@ isNil {
 																			} forEach _lineIntersections;
 																		};
 
-																		private _hitRadius = getNumber (_meleeTypeConfig >> _attack >> "radius");
+																		private _hitRadiusConfig = _meleeTypeConfig >> _attack >> "radius";
+
+																		private _hitRadius = if (isNumber _hitRadiusConfig) then {
+																			private _radius = getNumber _hitRadiusConfig;
+
+																			if (_radius isEqualTo 0) then {
+																				[];
+																			}
+																			else {
+																				[_radius, _radius, str _radius];
+																			};
+																		}
+																		else {
+																			getArray _hitRadiusConfig;
+																		};
 																		
-																		if (_hitRadius isNotEqualTo 0) then {
+																		if (_hitRadius isNotEqualTo []) then {
 																			private _radiusIntersections = ([
 																				_point, 
 																				[vectorDir _unit, vectorUp _unit],
-																				[_hitRadius, _hitRadius, str _hitRadius],
+																				_hitRadius,
 																				"OVAL",
 																				6,
 																				[_unit, "TERRAIN"] + (attachedObjects _unit),
@@ -1168,7 +1180,9 @@ isNil {
 				[
 					[],
 					{
-						KH_var_loadingDisplay = ["RscText", "LOADING...", [0, false, 0], [0, 0, 0, 1], [0, 0, 100, 100], false, [0, 0, 0]] call KH_fnc_draw2d;
+						with uiNamespace do {
+							KH_var_loadingDisplay = ["RscText", "LOADING...", [0, false, 0], [0, 0, 0, 1], [0, 0, 100, 100], false, [0, 0, 0]] call KH_fnc_draw2d;
+						};
 					},
 					true,
 					{CBA_missionTime > 0;},
@@ -1185,11 +1199,13 @@ isNil {
 						[
 							[],
 							{
-								ctrlDelete KH_var_loadingDisplay;
-								KH_var_loadingDisplay = nil;
+								with uiNamespace do {
+									ctrlDelete KH_var_loadingDisplay;
+									KH_var_loadingDisplay = nil;
+								};
 							},
 							true,
-							{!isNil "KH_var_loadingDisplay";},
+							{!(uiNamespace isNil "KH_var_loadingDisplay");},
 							false
 						] call KH_fnc_execute;
 

@@ -293,7 +293,6 @@ class CfgMovesMaleSdr: CfgMovesBasic
             WalkR = "Hum_AbsStaCom_WlkRwdLhtMel";
             WalkRB = "Hum_AbsStaCom_WlkBwdRwdLhtMel";
             WalkRF = "Hum_AbsStaCom_WlkFwdRwdLhtMel";
-            weaponOff = "Hum_AbsStaCom_IdlLhtMel";
         };
         class KH_MeleeTertiaryLightSwordBlock: KH_MeleeTertiaryLightSwordActions
         {
@@ -310,7 +309,6 @@ class CfgMovesMaleSdr: CfgMovesBasic
             turnLRelaxed = "Hum_AbsStaCom_BloLhtMel";
             turnR = "Hum_AbsStaCom_BloLhtMel";
             turnRRelaxed = "Hum_AbsStaCom_BloLhtMel";
-            weaponOff = "Hum_AbsStaCom_BloLhtMel";
         };
         class KH_MeleeTertiaryLightSwordForward: KH_MeleeTertiaryLightSwordActions
         {

@@ -69,6 +69,20 @@
 ] call CBA_fnc_addSetting;
 
 [
+	"KH_var_allowTeamspeakVoiceEffectPresets",
+	"CHECKBOX",   
+	[
+		"Teamspeak Voice Effect Presets", 
+		"True allows Teamspeak voice effects to be applied by equipment that has a valid voice effect array. Requires restart."
+	], 
+	"KH Miscellaneous", 
+	false,
+	1,
+	{},
+	true
+] call CBA_fnc_addSetting;
+
+[
 	"KH_var_allowPlayerObstacleTraversal",
 	"CHECKBOX",   
 	[
@@ -2478,7 +2492,7 @@
         "KH Melee",
         "General"
     ], 
-	true,
+	false,
 	1,
 	{},
 	false

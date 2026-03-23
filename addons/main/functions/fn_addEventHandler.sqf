@@ -448,7 +448,7 @@ switch _eventType do {
 
 					if (_handlerStack isEqualTo []) then {
 						inGameUISetEventHandler ['", _event, "', ''];
-						_handlerStack deleteAt ", _event, ";
+						_handlerStack deleteAt '", _event, "';
 					}
 					else {
 						{

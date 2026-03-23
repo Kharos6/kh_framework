@@ -66,6 +66,9 @@
 using namespace intercept;
 using namespace intercept::types;
 
+constexpr float RAD_TO_DEG = 180.0f / 3.14159265359f;
+constexpr float DEG_TO_RAD = 3.14159265359f / 180.0f;
+constexpr float EPSILON = 0.0001f;
 static code g_compiled_sqf_trigger_cba_event;
 static code g_compiled_sqf_add_game_event_handler;
 static code g_compiled_sqf_remove_game_event_handler;

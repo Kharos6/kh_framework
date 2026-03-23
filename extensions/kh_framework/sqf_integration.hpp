@@ -49,6 +49,17 @@ static registered_sqf_function _sqf_get_rotation_euler_object_object;
 static registered_sqf_function _sqf_set_rotation_euler;
 static registered_sqf_function _sqf_vector_to_euler;
 static registered_sqf_function _sqf_euler_to_vector;
+static registered_sqf_function _sqf_euler_to_quaternion;
+static registered_sqf_function _sqf_quaternion_to_euler;
+static registered_sqf_function _sqf_vector_to_quaternion;
+static registered_sqf_function _sqf_quaternion_to_vector;
+static registered_sqf_function _sqf_quaternion_slerp;
+static registered_sqf_function _sqf_quaternion_multiply;
+static registered_sqf_function _sqf_get_rotation_quaternion_object;
+static registered_sqf_function _sqf_get_rotation_quaternion_object_object;
+static registered_sqf_function _sqf_set_rotation_quaternion;
+static registered_sqf_function _sqf_axis_angle_to_quaternion;
+static registered_sqf_function _sqf_quaternion_to_axis_angle;
 static registered_sqf_function _sqf_initialize_ai;
 static registered_sqf_function _sqf_stop_ai;
 static registered_sqf_function _sqf_stop_all_ai;
@@ -1008,10 +1019,19 @@ static game_value get_call_arguments_sqf() noexcept {
 static game_value get_rotation_euler_sqf(game_value_parameter relative, game_value_parameter entity) {
     try {
         object obj = static_cast<object>(entity);
-        constexpr float RAD_TO_DEG = 180.0f / 3.14159265359f;
+
+        auto make_zero_result = []() {
+            auto_array<game_value> r;
+            r.reserve(3);
+            r.push_back(game_value(0.0f));
+            r.push_back(game_value(0.0f));
+            r.push_back(game_value(0.0f));
+            return game_value(std::move(r));
+        };
+
         vector3 dir = sqf::vector_dir(obj);
         vector3 up = sqf::vector_up(obj);
-        
+
         // If relative object is not nil, calculate relative rotation
         if (!relative.is_nil()) {
             object rel_obj = static_cast<object>(relative);
@@ -1034,15 +1054,49 @@ static game_value get_rotation_euler_sqf(game_value_parameter relative, game_val
             up.y = 0.0f;
             up.z = 1.0f;
         }
-        
+
+        // Normalize direction vector
         float dirX = dir.x;
         float dirY = dir.y;
         float dirZ = dir.z;
+        float dirLen = std::sqrt(dirX * dirX + dirY * dirY + dirZ * dirZ);
+        if (dirLen < EPSILON) return make_zero_result();
+        dirX /= dirLen; dirY /= dirLen; dirZ /= dirLen;
+
+        // Normalize up vector
         float upX = up.x;
+        float upY = up.y;
         float upZ = up.z;
-        float aroundX = std::fmod(std::atan2(-dirZ, std::sqrt(dirX * dirX + dirY * dirY)) * RAD_TO_DEG + 360.0f, 360.0f);
-        float aroundY = std::fmod(360.0f - std::atan2(upX, upZ) * RAD_TO_DEG, 360.0f);
-        float aroundZ = std::fmod(std::atan2(dirX, dirY) * RAD_TO_DEG + 360.0f, 360.0f);
+        float upLen = std::sqrt(upX * upX + upY * upY + upZ * upZ);
+        if (upLen < EPSILON) return make_zero_result();
+        upX /= upLen; upY /= upLen; upZ /= upLen;
+
+        // Right vector = dir × up
+        float rightX = dirY * upZ - dirZ * upY;
+        float rightY = dirZ * upX - dirX * upZ;
+        float rightZ = dirX * upY - dirY * upX;
+        float rightLen = std::sqrt(rightX * rightX + rightY * rightY + rightZ * rightZ);
+        if (rightLen < EPSILON) return make_zero_result();
+        rightX /= rightLen; rightY /= rightLen; rightZ /= rightLen;
+
+        // Re-orthogonalize up = right × dir
+        upX = rightY * dirZ - rightZ * dirY;
+        upY = rightZ * dirX - rightX * dirZ;
+        upZ = rightX * dirY - rightY * dirX;
+        float aroundX, aroundY, aroundZ;
+        float cosRoll = std::sqrt(rightX * rightX + rightY * rightY);
+
+        if (cosRoll > EPSILON) {
+            aroundX = std::fmod(-std::atan2(dirZ, upZ) * RAD_TO_DEG + 360.0f, 360.0f);
+            aroundY = std::fmod(std::atan2(rightZ, cosRoll) * RAD_TO_DEG + 360.0f, 360.0f);
+            aroundZ = std::fmod(-std::atan2(rightY, rightX) * RAD_TO_DEG + 360.0f, 360.0f);
+        } else {
+            aroundX = 0.0f;
+            aroundY = (rightZ > 0.0f) ? 90.0f : 270.0f;
+            float coupled = std::atan2(-dirX, dirY);
+            aroundZ = std::fmod(-coupled * RAD_TO_DEG + 360.0f, 360.0f);
+        }
+
         auto_array<game_value> result;
         result.reserve(3);
         result.push_back(game_value(aroundX));
@@ -1065,7 +1119,6 @@ static game_value set_rotation_euler_sqf(game_value_parameter entity, game_value
             return game_value();
         }
         
-        constexpr float DEG_TO_RAD = 3.14159265359f / 180.0f;
         float aroundX = -static_cast<float>(rot[0]) * DEG_TO_RAD;
         float aroundY = -static_cast<float>(rot[1]) * DEG_TO_RAD;
         float aroundZ = -static_cast<float>(rot[2]) * DEG_TO_RAD;
@@ -1131,9 +1184,6 @@ static game_value vector_to_euler_sqf(game_value_parameter vectors) {
             report_error("vectorToEuler requires three components per vector");
             return game_value();
         }
-
-        constexpr float RAD_TO_DEG = 180.0f / 3.14159265359f;
-        constexpr float EPSILON = 0.0001f;
 
         auto make_zero_result = []() {
             auto_array<game_value> r;
@@ -1206,7 +1256,6 @@ static game_value euler_to_vector_sqf(game_value_parameter rotation) {
             return game_value();
         }
     
-        constexpr float DEG_TO_RAD = 3.14159265359f / 180.0f;
         float aroundX = -static_cast<float>(rot[0]) * DEG_TO_RAD;
         float aroundY = -static_cast<float>(rot[1]) * DEG_TO_RAD;
         float aroundZ = -static_cast<float>(rot[2]) * DEG_TO_RAD;
@@ -1263,6 +1312,659 @@ static game_value euler_to_vector_sqf(game_value_parameter rotation) {
         return game_value(std::move(result));
     } catch (const std::exception& e) {
         report_error("Failed to convert euler to vector: " + std::string(e.what()));
+        return game_value();
+    }
+}
+
+static game_value euler_to_quaternion_sqf(game_value_parameter rotation) {
+    try {
+        auto& rot = rotation.to_array();
+
+        if (rot.size() != 3) {
+            report_error("eulerToQuaternion requires an array of 3 elements [pitch, roll, yaw]");
+            return game_value();
+        }
+
+        // Negate to match eulerToVector convention: R_Z(-yaw) · R_Y(-roll) · R_X(-pitch)
+        float halfX = -static_cast<float>(rot[0]) * DEG_TO_RAD * 0.5f;
+        float halfY = -static_cast<float>(rot[1]) * DEG_TO_RAD * 0.5f;
+        float halfZ = -static_cast<float>(rot[2]) * DEG_TO_RAD * 0.5f;
+        float cx = std::cos(halfX), sx = std::sin(halfX);
+        float cy = std::cos(halfY), sy = std::sin(halfY);
+        float cz = std::cos(halfZ), sz = std::sin(halfZ);
+
+        // q = q_z * q_y * q_x (ZYX order)
+        float w = cz * cy * cx + sz * sy * sx;
+        float x = cz * cy * sx - sz * sy * cx;
+        float y = cz * sy * cx + sz * cy * sx;
+        float z = sz * cy * cx - cz * sy * sx;
+        auto_array<game_value> result;
+        result.reserve(4);
+        result.push_back(game_value(w));
+        result.push_back(game_value(x));
+        result.push_back(game_value(y));
+        result.push_back(game_value(z));
+        return game_value(std::move(result));
+    } catch (const std::exception& e) {
+        report_error("Failed to convert euler to quaternion: " + std::string(e.what()));
+        return game_value();
+    }
+}
+
+static game_value quaternion_to_euler_sqf(game_value_parameter quat) {
+    try {
+        auto& q = quat.to_array();
+
+        if (q.size() != 4) {
+            report_error("quaternionToEuler requires an array of 4 elements [w, x, y, z]");
+            return game_value();
+        }
+
+        float w = static_cast<float>(q[0]);
+        float x = static_cast<float>(q[1]);
+        float y = static_cast<float>(q[2]);
+        float z = static_cast<float>(q[3]);
+
+        // Normalize quaternion
+        float len = std::sqrt(w * w + x * x + y * y + z * z);
+
+        if (len < EPSILON) {
+            auto_array<game_value> r;
+            r.reserve(3);
+            r.push_back(game_value(0.0f));
+            r.push_back(game_value(0.0f));
+            r.push_back(game_value(0.0f));
+            return game_value(std::move(r));
+        }
+
+        w /= len; x /= len; y /= len; z /= len;
+
+        // ZYX euler extraction
+        // These extract the angles of R_Z(-yaw) R_Y(-roll) R_X(-pitch)
+        float sinRoll = 2.0f * (w * y - z * x);
+        float aroundX, aroundY, aroundZ;
+
+        if (std::abs(sinRoll) > 1.0f - EPSILON) {
+            // Gimbal lock — roll is ±90°
+            aroundX = 0.0f;
+            aroundY = (sinRoll < 0.0f) ? 90.0f : 270.0f;
+            float coupled = std::atan2(2.0f * (x * y + w * z), 1.0f - 2.0f * (y * y + z * z));
+            aroundZ = std::fmod(-coupled * RAD_TO_DEG + 360.0f, 360.0f);
+        } else {
+            // Normal case — negate extracted angles to undo the convention negation
+            float extractedX = std::atan2(2.0f * (w * x + y * z), 1.0f - 2.0f * (x * x + y * y));
+            float extractedY = std::asin(sinRoll);
+            float extractedZ = std::atan2(2.0f * (w * z + x * y), 1.0f - 2.0f * (y * y + z * z));
+            aroundX = std::fmod(-extractedX * RAD_TO_DEG + 360.0f, 360.0f);
+            aroundY = std::fmod(-extractedY * RAD_TO_DEG + 360.0f, 360.0f);
+            aroundZ = std::fmod(-extractedZ * RAD_TO_DEG + 360.0f, 360.0f);
+        }
+
+        auto_array<game_value> result;
+        result.reserve(3);
+        result.push_back(game_value(aroundX));
+        result.push_back(game_value(aroundY));
+        result.push_back(game_value(aroundZ));
+        return game_value(std::move(result));
+    } catch (const std::exception& e) {
+        report_error("Failed to convert quaternion to euler: " + std::string(e.what()));
+        return game_value();
+    }
+}
+
+static game_value vector_to_quaternion_sqf(game_value_parameter vectors) {
+    try {
+        auto& vec_array = vectors.to_array();
+
+        if (vec_array.size() != 2) {
+            report_error("vectorToQuaternion requires an array of 2 vectors [[dirX, dirY, dirZ], [upX, upY, upZ]]");
+            return game_value();
+        }
+
+        auto& dir_array = vec_array[0].to_array();
+        auto& up_array = vec_array[1].to_array();
+
+        if (dir_array.size() != 3 || up_array.size() != 3) {
+            report_error("vectorToQuaternion requires three components per vector");
+            return game_value();
+        }
+
+        auto make_identity = []() {
+            auto_array<game_value> r;
+            r.reserve(4);
+            r.push_back(game_value(1.0f));
+            r.push_back(game_value(0.0f));
+            r.push_back(game_value(0.0f));
+            r.push_back(game_value(0.0f));
+            return game_value(std::move(r));
+        };
+
+        // Normalize direction
+        float dirX = static_cast<float>(dir_array[0]);
+        float dirY = static_cast<float>(dir_array[1]);
+        float dirZ = static_cast<float>(dir_array[2]);
+        float dirLen = std::sqrt(dirX * dirX + dirY * dirY + dirZ * dirZ);
+        if (dirLen < EPSILON) return make_identity();
+        dirX /= dirLen; dirY /= dirLen; dirZ /= dirLen;
+
+        // Normalize up
+        float upX = static_cast<float>(up_array[0]);
+        float upY = static_cast<float>(up_array[1]);
+        float upZ = static_cast<float>(up_array[2]);
+        float upLen = std::sqrt(upX * upX + upY * upY + upZ * upZ);
+        if (upLen < EPSILON) return make_identity();
+        upX /= upLen; upY /= upLen; upZ /= upLen;
+
+        // Right = dir × up
+        float rightX = dirY * upZ - dirZ * upY;
+        float rightY = dirZ * upX - dirX * upZ;
+        float rightZ = dirX * upY - dirY * upX;
+        float rightLen = std::sqrt(rightX * rightX + rightY * rightY + rightZ * rightZ);
+        if (rightLen < EPSILON) return make_identity();
+        rightX /= rightLen; rightY /= rightLen; rightZ /= rightLen;
+
+        // Re-orthogonalize up = right × dir
+        upX = rightY * dirZ - rightZ * dirY;
+        upY = rightZ * dirX - rightX * dirZ;
+        upZ = rightX * dirY - rightY * dirX;
+
+        // Rotation matrix columns: [right, dir, up]
+        // m00=rightX  m01=dirX  m02=upX
+        // m10=rightY  m11=dirY  m12=upY
+        // m20=rightZ  m21=dirZ  m22=upZ
+        // Shepperd's method
+        float m00 = rightX, m11 = dirY, m22 = upZ;
+        float trace = m00 + m11 + m22;
+        float w, x, y, z;
+
+        if (trace > 0.0f) {
+            float s = std::sqrt(trace + 1.0f) * 2.0f;
+            w = 0.25f * s;
+            x = (dirZ - upY) / s;
+            y = (upX - rightZ) / s;
+            z = (rightY - dirX) / s;
+        } else if (m00 > m11 && m00 > m22) {
+            float s = std::sqrt(1.0f + m00 - m11 - m22) * 2.0f;
+            w = (dirZ - upY) / s;
+            x = 0.25f * s;
+            y = (rightY + dirX) / s;
+            z = (upX + rightZ) / s;
+        } else if (m11 > m22) {
+            float s = std::sqrt(1.0f + m11 - m00 - m22) * 2.0f;
+            w = (upX - rightZ) / s;
+            x = (rightY + dirX) / s;
+            y = 0.25f * s;
+            z = (dirZ + upY) / s;
+        } else {
+            float s = std::sqrt(1.0f + m22 - m00 - m11) * 2.0f;
+            w = (rightY - dirX) / s;
+            x = (upX + rightZ) / s;
+            y = (dirZ + upY) / s;
+            z = 0.25f * s;
+        }
+
+        auto_array<game_value> result;
+        result.reserve(4);
+        result.push_back(game_value(w));
+        result.push_back(game_value(x));
+        result.push_back(game_value(y));
+        result.push_back(game_value(z));
+        return game_value(std::move(result));
+    } catch (const std::exception& e) {
+        report_error("Failed to convert vector to quaternion: " + std::string(e.what()));
+        return game_value();
+    }
+}
+
+static game_value quaternion_to_vector_sqf(game_value_parameter quat) {
+    try {
+        auto& q = quat.to_array();
+
+        if (q.size() != 4) {
+            report_error("quaternionToVector requires an array of 4 elements [w, x, y, z]");
+            return game_value();
+        }
+
+        float w = static_cast<float>(q[0]);
+        float x = static_cast<float>(q[1]);
+        float y = static_cast<float>(q[2]);
+        float z = static_cast<float>(q[3]);
+
+        // Normalize
+        float len = std::sqrt(w * w + x * x + y * y + z * z);
+
+        if (len < EPSILON) {
+            // Identity orientation
+            auto_array<game_value> dir_arr;
+            dir_arr.reserve(3);
+            dir_arr.push_back(game_value(0.0f));
+            dir_arr.push_back(game_value(1.0f));
+            dir_arr.push_back(game_value(0.0f));
+            auto_array<game_value> up_arr;
+            up_arr.reserve(3);
+            up_arr.push_back(game_value(0.0f));
+            up_arr.push_back(game_value(0.0f));
+            up_arr.push_back(game_value(1.0f));
+            auto_array<game_value> result;
+            result.reserve(2);
+            result.push_back(game_value(std::move(dir_arr)));
+            result.push_back(game_value(std::move(up_arr)));
+            return game_value(std::move(result));
+        }
+        w /= len; x /= len; y /= len; z /= len;
+
+        // Rotation matrix from quaternion
+        // dir = R * [0,1,0] (column 1 of rotation matrix)
+        float dirX = 2.0f * (x * y - w * z);
+        float dirY = 1.0f - 2.0f * (x * x + z * z);
+        float dirZ = 2.0f * (y * z + w * x);
+
+        // up = R * [0,0,1] (column 2 of rotation matrix)
+        float upX = 2.0f * (x * z + w * y);
+        float upY = 2.0f * (y * z - w * x);
+        float upZ = 1.0f - 2.0f * (x * x + y * y);
+        auto_array<game_value> dir_arr;
+        dir_arr.reserve(3);
+        dir_arr.push_back(game_value(dirX));
+        dir_arr.push_back(game_value(dirY));
+        dir_arr.push_back(game_value(dirZ));
+        auto_array<game_value> up_arr;
+        up_arr.reserve(3);
+        up_arr.push_back(game_value(upX));
+        up_arr.push_back(game_value(upY));
+        up_arr.push_back(game_value(upZ));
+        auto_array<game_value> result;
+        result.reserve(2);
+        result.push_back(game_value(std::move(dir_arr)));
+        result.push_back(game_value(std::move(up_arr)));
+        return game_value(std::move(result));
+    } catch (const std::exception& e) {
+        report_error("Failed to convert quaternion to vector: " + std::string(e.what()));
+        return game_value();
+    }
+}
+
+static game_value quaternion_slerp_sqf(game_value_parameter right_arg) {
+    try {
+        auto& params = right_arg.to_array();
+
+        if (params.size() != 3) {
+            report_error("quaternionSlerp requires [quatA, quatB, t]");
+            return game_value();
+        }
+
+        auto& qa = params[0].to_array();
+        auto& qb = params[1].to_array();
+        float t = static_cast<float>(params[2]);
+
+        if (qa.size() != 4 || qb.size() != 4) {
+            report_error("quaternionSlerp requires quaternions with 4 components each");
+            return game_value();
+        }
+
+        float aw = static_cast<float>(qa[0]);
+        float ax = static_cast<float>(qa[1]);
+        float ay = static_cast<float>(qa[2]);
+        float az = static_cast<float>(qa[3]);
+        float bw = static_cast<float>(qb[0]);
+        float bx = static_cast<float>(qb[1]);
+        float by = static_cast<float>(qb[2]);
+        float bz = static_cast<float>(qb[3]);
+
+        // Dot product
+        float dot = aw * bw + ax * bx + ay * by + az * bz;
+
+        // Take shortest path
+        if (dot < 0.0f) {
+            bw = -bw; bx = -bx; by = -by; bz = -bz;
+            dot = -dot;
+        }
+
+        float w, x, y, z;
+
+        if (dot > 0.9995f) {
+            // Very close — linear interpolation to avoid division by near-zero sin
+            w = aw + t * (bw - aw);
+            x = ax + t * (bx - ax);
+            y = ay + t * (by - ay);
+            z = az + t * (bz - az);
+        } else {
+            float theta = std::acos(dot);
+            float sinTheta = std::sin(theta);
+            float wa = std::sin((1.0f - t) * theta) / sinTheta;
+            float wb = std::sin(t * theta) / sinTheta;
+            w = wa * aw + wb * bw;
+            x = wa * ax + wb * bx;
+            y = wa * ay + wb * by;
+            z = wa * az + wb * bz;
+        }
+
+        // Normalize result
+        float len = std::sqrt(w * w + x * x + y * y + z * z);
+
+        if (len > 0.0001f) {
+            w /= len; x /= len; y /= len; z /= len;
+        }
+
+        auto_array<game_value> result;
+        result.reserve(4);
+        result.push_back(game_value(w));
+        result.push_back(game_value(x));
+        result.push_back(game_value(y));
+        result.push_back(game_value(z));
+        return game_value(std::move(result));
+    } catch (const std::exception& e) {
+        report_error("Failed to slerp quaternions: " + std::string(e.what()));
+        return game_value();
+    }
+}
+
+static game_value quaternion_multiply_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
+    try {
+        auto& qa = left_arg.to_array();
+        auto& qb = right_arg.to_array();
+
+        if (qa.size() != 4 || qb.size() != 4) {
+            report_error("quaternionMultiply requires quaternions with 4 components each");
+            return game_value();
+        }
+
+        float aw = static_cast<float>(qa[0]);
+        float ax = static_cast<float>(qa[1]);
+        float ay = static_cast<float>(qa[2]);
+        float az = static_cast<float>(qa[3]);
+        float bw = static_cast<float>(qb[0]);
+        float bx = static_cast<float>(qb[1]);
+        float by = static_cast<float>(qb[2]);
+        float bz = static_cast<float>(qb[3]);
+        float w = aw * bw - ax * bx - ay * by - az * bz;
+        float x = aw * bx + ax * bw + ay * bz - az * by;
+        float y = aw * by - ax * bz + ay * bw + az * bx;
+        float z = aw * bz + ax * by - ay * bx + az * bw;
+        auto_array<game_value> result;
+        result.reserve(4);
+        result.push_back(game_value(w));
+        result.push_back(game_value(x));
+        result.push_back(game_value(y));
+        result.push_back(game_value(z));
+        return game_value(std::move(result));
+    } catch (const std::exception& e) {
+        report_error("Failed to multiply quaternions: " + std::string(e.what()));
+        return game_value();
+    }
+}
+
+static game_value get_quaternion_rotation_sqf(game_value_parameter relative, game_value_parameter entity) {
+    try {
+        object obj = static_cast<object>(entity);
+
+        auto make_identity = []() {
+            auto_array<game_value> r;
+            r.reserve(4);
+            r.push_back(game_value(1.0f));
+            r.push_back(game_value(0.0f));
+            r.push_back(game_value(0.0f));
+            r.push_back(game_value(0.0f));
+            return game_value(std::move(r));
+        };
+
+        vector3 dir = sqf::vector_dir(obj);
+        vector3 up = sqf::vector_up(obj);
+
+        if (!relative.is_nil()) {
+            object rel_obj = static_cast<object>(relative);
+            vector3 current_pos = sqf::get_pos_atl(obj);
+            vector3 relative_pos = sqf::get_pos_atl(rel_obj);
+            float dx = relative_pos.x - current_pos.x;
+            float dy = relative_pos.y - current_pos.y;
+            float dz = relative_pos.z - current_pos.z;
+            float distance_horizontal = std::sqrt(dx * dx + dy * dy);
+            float yaw = std::atan2(dy, dx);
+            float pitch = std::atan2(dz, distance_horizontal);
+            float cos_pitch = std::cos(pitch);
+            float sin_pitch = std::sin(pitch);
+            float cos_yaw = std::cos(yaw);
+            float sin_yaw = std::sin(yaw);
+            dir.x = cos_pitch * cos_yaw;
+            dir.y = cos_pitch * sin_yaw;
+            dir.z = sin_pitch;
+            up.x = 0.0f;
+            up.y = 0.0f;
+            up.z = 1.0f;
+        }
+
+        // Normalize direction
+        float dirX = dir.x, dirY = dir.y, dirZ = dir.z;
+        float dirLen = std::sqrt(dirX * dirX + dirY * dirY + dirZ * dirZ);
+        if (dirLen < EPSILON) return make_identity();
+        dirX /= dirLen; dirY /= dirLen; dirZ /= dirLen;
+
+        // Normalize up
+        float upX = up.x, upY = up.y, upZ = up.z;
+        float upLen = std::sqrt(upX * upX + upY * upY + upZ * upZ);
+        if (upLen < EPSILON) return make_identity();
+        upX /= upLen; upY /= upLen; upZ /= upLen;
+
+        // Right = dir × up
+        float rightX = dirY * upZ - dirZ * upY;
+        float rightY = dirZ * upX - dirX * upZ;
+        float rightZ = dirX * upY - dirY * upX;
+        float rightLen = std::sqrt(rightX * rightX + rightY * rightY + rightZ * rightZ);
+        if (rightLen < EPSILON) return make_identity();
+        rightX /= rightLen; rightY /= rightLen; rightZ /= rightLen;
+
+        // Re-orthogonalize up = right × dir
+        upX = rightY * dirZ - rightZ * dirY;
+        upY = rightZ * dirX - rightX * dirZ;
+        upZ = rightX * dirY - rightY * dirX;
+
+        // Shepperd's method
+        float m00 = rightX, m11 = dirY, m22 = upZ;
+        float trace = m00 + m11 + m22;
+        float w, x, y, z;
+
+        if (trace > 0.0f) {
+            float s = std::sqrt(trace + 1.0f) * 2.0f;
+            w = 0.25f * s;
+            x = (dirZ - upY) / s;
+            y = (upX - rightZ) / s;
+            z = (rightY - dirX) / s;
+        } else if (m00 > m11 && m00 > m22) {
+            float s = std::sqrt(1.0f + m00 - m11 - m22) * 2.0f;
+            w = (dirZ - upY) / s;
+            x = 0.25f * s;
+            y = (rightY + dirX) / s;
+            z = (upX + rightZ) / s;
+        } else if (m11 > m22) {
+            float s = std::sqrt(1.0f + m11 - m00 - m22) * 2.0f;
+            w = (upX - rightZ) / s;
+            x = (rightY + dirX) / s;
+            y = 0.25f * s;
+            z = (dirZ + upY) / s;
+        } else {
+            float s = std::sqrt(1.0f + m22 - m00 - m11) * 2.0f;
+            w = (rightY - dirX) / s;
+            x = (upX + rightZ) / s;
+            y = (dirZ + upY) / s;
+            z = 0.25f * s;
+        }
+
+        auto_array<game_value> result;
+        result.reserve(4);
+        result.push_back(game_value(w));
+        result.push_back(game_value(x));
+        result.push_back(game_value(y));
+        result.push_back(game_value(z));
+        return game_value(std::move(result));
+    } catch (const std::exception& e) {
+        report_error("Failed to get quaternion rotation: " + std::string(e.what()));
+        return game_value();
+    }
+}
+
+static game_value set_quaternion_rotation_sqf(game_value_parameter entity, game_value_parameter quat) {
+    try {
+        object obj = static_cast<object>(entity);
+        auto& q = quat.to_array();
+
+        if (q.size() != 4) {
+            report_error("setQuaternionRotation requires [w, x, y, z]");
+            return game_value();
+        }
+
+        float w = static_cast<float>(q[0]);
+        float x = static_cast<float>(q[1]);
+        float y = static_cast<float>(q[2]);
+        float z = static_cast<float>(q[3]);
+
+        // Normalize
+        float len = std::sqrt(w * w + x * x + y * y + z * z);
+
+        if (len < EPSILON) {
+            sqf::set_vector_dir_and_up(obj, vector3(0.0f, 1.0f, 0.0f), vector3(0.0f, 0.0f, 1.0f));
+            return game_value();
+        }
+
+        w /= len; x /= len; y /= len; z /= len;
+
+        // dir = R * [0,1,0]
+        float dirX = 2.0f * (x * y - w * z);
+        float dirY = 1.0f - 2.0f * (x * x + z * z);
+        float dirZ = 2.0f * (y * z + w * x);
+
+        // up = R * [0,0,1]
+        float upX = 2.0f * (x * z + w * y);
+        float upY = 2.0f * (y * z - w * x);
+        float upZ = 1.0f - 2.0f * (x * x + y * y);
+        sqf::set_vector_dir_and_up(obj, vector3(dirX, dirY, dirZ), vector3(upX, upY, upZ));
+        return game_value();
+    } catch (const std::exception& e) {
+        report_error("Failed to set quaternion rotation: " + std::string(e.what()));
+        return game_value();
+    }
+}
+
+static game_value axis_angle_to_quaternion_sqf(game_value_parameter params) {
+    try {
+        auto& arr = params.to_array();
+
+        if (arr.size() != 2) {
+            report_error("axisAngleToQuaternion requires [[axisX, axisY, axisZ], angle]");
+            return game_value();
+        }
+
+        auto& axis_array = arr[0].to_array();
+
+        if (axis_array.size() != 3) {
+            report_error("axisAngleToQuaternion requires axis with 3 components");
+            return game_value();
+        }
+
+        float axisX = static_cast<float>(axis_array[0]);
+        float axisY = static_cast<float>(axis_array[1]);
+        float axisZ = static_cast<float>(axis_array[2]);
+        float angle = static_cast<float>(arr[1]);
+
+        // Normalize axis
+        float axisLen = std::sqrt(axisX * axisX + axisY * axisY + axisZ * axisZ);
+
+        if (axisLen < EPSILON) {
+            // Zero axis — return identity
+            auto_array<game_value> r;
+            r.reserve(4);
+            r.push_back(game_value(1.0f));
+            r.push_back(game_value(0.0f));
+            r.push_back(game_value(0.0f));
+            r.push_back(game_value(0.0f));
+            return game_value(std::move(r));
+        }
+
+        axisX /= axisLen; axisY /= axisLen; axisZ /= axisLen;
+        float halfAngle = angle * DEG_TO_RAD * 0.5f;
+        float s = std::sin(halfAngle);
+        float w = std::cos(halfAngle);
+        float x = axisX * s;
+        float y = axisY * s;
+        float z = axisZ * s;
+        auto_array<game_value> result;
+        result.reserve(4);
+        result.push_back(game_value(w));
+        result.push_back(game_value(x));
+        result.push_back(game_value(y));
+        result.push_back(game_value(z));
+        return game_value(std::move(result));
+    } catch (const std::exception& e) {
+        report_error("Failed to convert axis-angle to quaternion: " + std::string(e.what()));
+        return game_value();
+    }
+}
+
+static game_value quaternion_to_axis_angle_sqf(game_value_parameter quat) {
+    try {
+        auto& q = quat.to_array();
+
+        if (q.size() != 4) {
+            report_error("quaternionToAxisAngle requires [w, x, y, z]");
+            return game_value();
+        }
+
+        float w = static_cast<float>(q[0]);
+        float x = static_cast<float>(q[1]);
+        float y = static_cast<float>(q[2]);
+        float z = static_cast<float>(q[3]);
+
+        // Normalize
+        float len = std::sqrt(w * w + x * x + y * y + z * z);
+
+        if (len < EPSILON) {
+            auto_array<game_value> axis_arr;
+            axis_arr.reserve(3);
+            axis_arr.push_back(game_value(0.0f));
+            axis_arr.push_back(game_value(1.0f));
+            axis_arr.push_back(game_value(0.0f));
+            auto_array<game_value> result;
+            result.reserve(2);
+            result.push_back(game_value(std::move(axis_arr)));
+            result.push_back(game_value(0.0f));
+            return game_value(std::move(result));
+        }
+        w /= len; x /= len; y /= len; z /= len;
+
+        // Ensure w is positive so angle is in [0, 360)
+        if (w < 0.0f) {
+            w = -w; x = -x; y = -y; z = -z;
+        }
+
+        // Clamp w to avoid NaN from acos
+        if (w > 1.0f) w = 1.0f;
+        float halfAngle = std::acos(w);
+        float angle = halfAngle * 2.0f * RAD_TO_DEG;
+        float s = std::sin(halfAngle);
+        float axisX, axisY, axisZ;
+
+        if (s > EPSILON) {
+            axisX = x / s;
+            axisY = y / s;
+            axisZ = z / s;
+        } else {
+            // Near-zero rotation — axis is arbitrary
+            axisX = 0.0f;
+            axisY = 1.0f;
+            axisZ = 0.0f;
+        }
+
+        auto_array<game_value> axis_arr;
+        axis_arr.reserve(3);
+        axis_arr.push_back(game_value(axisX));
+        axis_arr.push_back(game_value(axisY));
+        axis_arr.push_back(game_value(axisZ));
+        auto_array<game_value> result;
+        result.reserve(2);
+        result.push_back(game_value(std::move(axis_arr)));
+        result.push_back(game_value(angle));
+        return game_value(std::move(result));
+    } catch (const std::exception& e) {
+        report_error("Failed to convert quaternion to axis-angle: " + std::string(e.what()));
         return game_value();
     }
 }
@@ -2947,6 +3649,10 @@ static game_value get_rotation_euler_unary(game_value_parameter right_arg) {
     return get_rotation_euler_sqf(game_value(), right_arg);
 }
 
+static game_value get_quaternion_rotation_unary(game_value_parameter right_arg) {
+    return get_quaternion_rotation_sqf(game_value(), right_arg);
+}
+
 static game_value network_message_send_unary_sqf(game_value_parameter right_arg) {
     return network_message_send_sqf(game_value(), right_arg);
 }
@@ -3347,6 +4053,97 @@ static void initialize_sqf_integration() {
         "eulerToVector",
         "Convert Euler angles [pitch, roll, yaw] in degrees to [vectorDir, vectorUp]",
         userFunctionWrapper<euler_to_vector_sqf>,
+        game_data_type::ARRAY,
+        game_data_type::ARRAY
+    );
+
+    _sqf_euler_to_quaternion = intercept::client::host::register_sqf_command(
+        "eulerToQuaternion",
+        "Convert Euler angles [pitch, roll, yaw] in degrees to quaternion [w, x, y, z]",
+        userFunctionWrapper<euler_to_quaternion_sqf>,
+        game_data_type::ARRAY,
+        game_data_type::ARRAY
+    );
+
+    _sqf_quaternion_to_euler = intercept::client::host::register_sqf_command(
+        "quaternionToEuler",
+        "Convert quaternion [w, x, y, z] to Euler angles [pitch, roll, yaw] in degrees",
+        userFunctionWrapper<quaternion_to_euler_sqf>,
+        game_data_type::ARRAY,
+        game_data_type::ARRAY
+    );
+
+    _sqf_vector_to_quaternion = intercept::client::host::register_sqf_command(
+        "vectorToQuaternion",
+        "Convert [vectorDir, vectorUp] to quaternion [w, x, y, z]",
+        userFunctionWrapper<vector_to_quaternion_sqf>,
+        game_data_type::ARRAY,
+        game_data_type::ARRAY
+    );
+
+    _sqf_quaternion_to_vector = intercept::client::host::register_sqf_command(
+        "quaternionToVector",
+        "Convert quaternion [w, x, y, z] to [vectorDir, vectorUp]",
+        userFunctionWrapper<quaternion_to_vector_sqf>,
+        game_data_type::ARRAY,
+        game_data_type::ARRAY
+    );
+
+    _sqf_quaternion_slerp = intercept::client::host::register_sqf_command(
+        "quaternionSlerp",
+        "Spherical linear interpolation between two quaternions",
+        userFunctionWrapper<quaternion_slerp_sqf>,
+        game_data_type::ARRAY,
+        game_data_type::ARRAY
+    );
+
+    _sqf_quaternion_multiply = intercept::client::host::register_sqf_command(
+        "quaternionMultiply",
+        "Multiply two quaternions",
+        userFunctionWrapper<quaternion_multiply_sqf>,
+        game_data_type::ARRAY,
+        game_data_type::ARRAY,
+        game_data_type::ARRAY
+    );
+
+    _sqf_get_rotation_quaternion_object = intercept::client::host::register_sqf_command(
+        "getRotationQuaternion",
+        "Get object rotation as quaternion [w, x, y, z]",
+        userFunctionWrapper<get_quaternion_rotation_unary>,
+        game_data_type::ARRAY,
+        game_data_type::OBJECT
+    );
+
+    _sqf_get_rotation_quaternion_object_object = intercept::client::host::register_sqf_command(
+        "getRotationQuaternion",
+        "Get object rotation as quaternion [w, x, y, z]",
+        userFunctionWrapper<get_quaternion_rotation_sqf>,
+        game_data_type::ARRAY,
+        game_data_type::OBJECT,
+        game_data_type::OBJECT
+    );
+
+    _sqf_set_rotation_quaternion = intercept::client::host::register_sqf_command(
+        "setRotationQuaternion",
+        "Set object rotation from quaternion [w, x, y, z]",
+        userFunctionWrapper<set_quaternion_rotation_sqf>,
+        game_data_type::NOTHING,
+        game_data_type::OBJECT,
+        game_data_type::ARRAY
+    );
+
+    _sqf_axis_angle_to_quaternion = intercept::client::host::register_sqf_command(
+        "axisAngleToQuaternion",
+        "Convert [[axisX, axisY, axisZ], angle] to quaternion [w, x, y, z]",
+        userFunctionWrapper<axis_angle_to_quaternion_sqf>,
+        game_data_type::ARRAY,
+        game_data_type::ARRAY
+    );
+
+    _sqf_quaternion_to_axis_angle = intercept::client::host::register_sqf_command(
+        "quaternionToAxisAngle",
+        "Convert quaternion [w, x, y, z] to [[axisX, axisY, axisZ], angle]",
+        userFunctionWrapper<quaternion_to_axis_angle_sqf>,
         game_data_type::ARRAY,
         game_data_type::ARRAY
     );

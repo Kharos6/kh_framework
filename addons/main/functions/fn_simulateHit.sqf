@@ -1,4 +1,4 @@
-params [["_entity", objNull, [objNull]], ["_selection", "", [""]], ["_ammo", "", [""]], ["_parent", objNull, [[], objNull]]];
+params [["_entity", objNull, [objNull]], ["_selection", "", [""]], ["_ammo", "", [""]], ["_parent", objNull, [[], objNull]], ["_velocity", [], [[]]]];
 private _lod = (allLODs _entity) select {(_x select 1) isEqualTo "geometryFire";};
 
 if (_parent isEqualType objNull) then {
@@ -23,5 +23,12 @@ private _projectile = createVehicle [
 ];
 
 _projectile setShotParents _parent;
-_projectile setVelocity [0, 0, -(getNumber (configFile >> "CfgAmmo" >> _ammo >> "typicalSpeed"))];
+
+if (_velocity isEqualTo []) then {
+    _projectile setVelocity [0, 0, -(getNumber (configFile >> "CfgAmmo" >> _ammo >> "typicalSpeed"))];
+}
+else {
+    _projectile setVelocity _velocity;
+};
+
 _projectile;

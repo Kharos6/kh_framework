@@ -599,7 +599,17 @@ private:
     std::atomic<int> cached_client_id_{-1};
     std::vector<std::pair<int, SOCKET>> listen_active_clients_;
     std::vector<int> listen_clients_to_remove_;
+    std::vector<SOCKET> sockets_to_close_;
     std::vector<NetworkMessage> listen_messages_to_queue_;
+
+    struct PendingHandshake {
+        SOCKET sock;
+        uint8_t id_raw[4];
+        int bytes_received;
+        int64_t accept_time;
+    };
+
+    std::vector<PendingHandshake> pending_handshakes_;
     
     static void write_uint32(std::vector<uint8_t>& buffer, uint32_t value) {
         buffer.push_back(static_cast<uint8_t>(value & 0xFF));
@@ -3483,9 +3493,14 @@ private:
 
             {
                 std::lock_guard<std::mutex> lock(connections_mutex_);
+
+                for (SOCKET s : sockets_to_close_) {
+                    closesocket(s);
+                }
+
+                sockets_to_close_.clear();
                 listen_active_clients_.reserve(client_connections_.size());
                 
-                // Clean up recv buffers for clients disconnected by send thread
                 for (auto it = client_recv_buffers_.begin(); it != client_recv_buffers_.end(); ) {
                     if (client_connections_.find(it->first) == client_connections_.end()) {
                         it = client_recv_buffers_.erase(it);
@@ -3518,167 +3533,184 @@ private:
             tv.tv_sec = 0;
             tv.tv_usec = 1000;
             int result = select(0, &read_fds, nullptr, nullptr, &tv);
-            
-            if (result == SOCKET_ERROR) {
-                continue;
-            }
-            
-            if (result == 0) {
-                continue;
-            }
-            
-            // Check for new connections
-            if (FD_ISSET(listen_socket_, &read_fds)) {
-                struct sockaddr_in client_addr;
-                int addr_len = sizeof(client_addr);
-                SOCKET client_sock = accept(listen_socket_, reinterpret_cast<struct sockaddr*>(&client_addr), &addr_len);
+
+            if (result > 0) {
+                // Check for new connections
+                if (FD_ISSET(listen_socket_, &read_fds)) {
+                    struct sockaddr_in client_addr;
+                    int addr_len = sizeof(client_addr);
+                    SOCKET client_sock = accept(listen_socket_, reinterpret_cast<struct sockaddr*>(&client_addr), &addr_len);
+                    
+                    if (client_sock != INVALID_SOCKET) {
+                        set_socket_options(client_sock);
+                        u_long nb_mode = 1;
+                        ioctlsocket(client_sock, FIONBIO, &nb_mode);
+                        PendingHandshake hs;
+                        hs.sock = client_sock;
+                        memset(hs.id_raw, 0, 4);
+                        hs.bytes_received = 0;
+
+                        hs.accept_time = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch()).count();
+
+                        pending_handshakes_.push_back(hs);
+                    }
+                }
+
+                // Check for incoming data from clients
+                listen_clients_to_remove_.clear();
+                listen_messages_to_queue_.clear();
+                std::vector<OutgoingMessage> forward_messages;
+
+                for (size_t i = 0; i < clients_in_fdset && i < listen_active_clients_.size(); ++i) {
+                    auto& [client_id, client_sock] = listen_active_clients_[i];
+
+                    if (FD_ISSET(client_sock, &read_fds)) {
+                        auto buf_it = client_recv_buffers_.find(client_id);
+
+                        if (buf_it == client_recv_buffers_.end()) {
+                            listen_clients_to_remove_.push_back(client_id);
+                            continue;
+                        }
+
+                        RecvBuffer& recv_buf = buf_it->second;
+                        RecvNBResult recv_result = recv_nonblocking(client_sock, recv_buf);
+
+                        if (recv_result == RecvNBResult::DISCONNECTED) {
+                            listen_clients_to_remove_.push_back(client_id);
+                            continue;
+                        }
+
+                        if (recv_buf.has_protocol_error(config_max_message_size_)) {
+                            listen_clients_to_remove_.push_back(client_id);
+                            continue;
+                        }
+
+                        std::vector<uint8_t> packet;
+                        
+                        while (recv_buf.try_extract(packet, config_max_message_size_)) {
+                            std::vector<NetworkMessage> local_messages;
+                            std::vector<OutgoingMessage> fwd_messages;
+
+                            if (parse_coalesced_or_single_packet(packet, local_messages, fwd_messages)) {
+                                for (auto& msg : local_messages) {
+                                    msg.sender_client_id = client_id;
+                                    listen_messages_to_queue_.push_back(std::move(msg));
+                                }
+
+                                for (auto& msg : fwd_messages) {
+                                    msg.sender_client = client_id;
+                                    forward_messages.push_back(std::move(msg));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (!listen_messages_to_queue_.empty()) {
+                    std::lock_guard<std::mutex> inc_lock(incoming_mutex_);
+
+                    for (auto& msg : listen_messages_to_queue_) {
+                        incoming_queue_.push_back(std::move(msg));
+                    }
+                }
                 
-                if (client_sock != INVALID_SOCKET) {
-                    set_socket_options(client_sock);
-                    uint8_t id_raw[4];
-                    uint32_t id_val = static_cast<uint32_t>(our_client_id);
-                    id_raw[0] = static_cast<uint8_t>(id_val & 0xFF);
-                    id_raw[1] = static_cast<uint8_t>((id_val >> 8) & 0xFF);
-                    id_raw[2] = static_cast<uint8_t>((id_val >> 16) & 0xFF);
-                    id_raw[3] = static_cast<uint8_t>((id_val >> 24) & 0xFF);
-                    size_t total_sent = 0;
-
-                    while (total_sent < 4) {
-                        int result = send(sock, reinterpret_cast<const char*>(id_raw + total_sent),
-                                        static_cast<int>(4 - total_sent), 0);
-                                        
-                        if (result == SOCKET_ERROR || result == 0) {
-                            closesocket(sock);
-                            return false;
-                        }
-
-                        total_sent += static_cast<size_t>(result);
+                if (!forward_messages.empty()) {
+                    for (auto& msg : forward_messages) {
+                        outgoing_queue_lockfree_.push(std::move(msg));
                     }
 
-                    if (id_ok) {
-                        size_t offset = 0;
-                        int client_id = static_cast<int>(read_uint32(id_raw, offset, 4));
-                        
-                        {
-                            std::lock_guard<std::mutex> lock(connections_mutex_);
-                            auto existing = client_connections_.find(client_id);
+                    outgoing_has_data_.store(true, std::memory_order_release);
+                }
+                
+                // Remove disconnected clients
+                if (!listen_clients_to_remove_.empty()) {
+                    std::lock_guard<std::mutex> lock(connections_mutex_);
 
-                            if (existing != client_connections_.end()) {
-                                ::shutdown(existing->second, SD_BOTH);
-                                closesocket(existing->second);
-                                per_client_queues_.erase(client_id);
-                                client_stall_start_times_.erase(client_id);
-                                client_recv_buffers_.erase(client_id);
+                    for (int id : listen_clients_to_remove_) {
+                        auto it = client_connections_.find(id);
+                        
+                        if (it != client_connections_.end()) {
+                            ::shutdown(it->second, SD_BOTH);
+                            sockets_to_close_.push_back(it->second);
+                            client_pending_sends_.erase(id);
+                            client_connections_.erase(it);
+                            per_client_queues_.erase(id);
+                            client_stall_start_times_.erase(id);
+                            client_recv_buffers_.erase(id);
+
+                            MainThreadScheduler::instance().schedule([id]() {
+                                sqf::diag_log("KH Network: Client " + std::to_string(id) + " disconnected");
+                            });
+                        }
+                    }
+                }
+            }
+
+            // Process pending handshakes
+            {
+                int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
+
+                for (auto it = pending_handshakes_.begin(); it != pending_handshakes_.end(); ) {
+                    if (now - it->accept_time > config_connect_timeout_ms_) {
+                        closesocket(it->sock);
+                        it = pending_handshakes_.erase(it);
+                        continue;
+                    }
+
+                    int r = recv(it->sock, reinterpret_cast<char*>(it->id_raw + it->bytes_received),
+                                 4 - it->bytes_received, 0);
+
+                    if (r > 0) {
+                        it->bytes_received += r;
+
+                        if (it->bytes_received >= 4) {
+                            size_t offset = 0;
+                            int client_id = static_cast<int>(read_uint32(it->id_raw, offset, 4));
+                            SOCKET client_sock = it->sock;
+                            it = pending_handshakes_.erase(it);
+
+                            {
+                                std::lock_guard<std::mutex> lock(connections_mutex_);
+                                auto existing = client_connections_.find(client_id);
+
+                                if (existing != client_connections_.end()) {
+                                    ::shutdown(existing->second, SD_BOTH);
+                                    sockets_to_close_.push_back(existing->second);
+                                    per_client_queues_.erase(client_id);
+                                    client_stall_start_times_.erase(client_id);
+                                    client_recv_buffers_.erase(client_id);
+                                }
+
+                                client_connections_[client_id] = client_sock;
+                                client_recv_buffers_[client_id];
                             }
 
-                            client_connections_[client_id] = client_sock;
-                            u_long nb_mode = 1;
-                            ioctlsocket(client_sock, FIONBIO, &nb_mode);
+                            MainThreadScheduler::instance().schedule([this, client_id]() {
+                                if (running_) send_jip_messages_to_client(client_id);
+                            });
 
-                            // Initialize recv buffer for this client
-                            client_recv_buffers_[client_id];
+                            MainThreadScheduler::instance().schedule([client_id]() {
+                                sqf::diag_log("KH Network: Client " + std::to_string(client_id) + " connected");
+                            });
+
+                            continue;
                         }
-                        
-                        MainThreadScheduler::instance().schedule([this, client_id]() {
-                            if (running_) send_jip_messages_to_client(client_id);
-                        });
-                        
-                        MainThreadScheduler::instance().schedule([client_id]() {
-                            sqf::diag_log("KH Network: Client " + std::to_string(client_id) + " connected");
-                        });
+
+                        ++it;
+                    } else if (r == 0) {
+                        closesocket(it->sock);
+                        it = pending_handshakes_.erase(it);
                     } else {
-                        closesocket(client_sock);
-                    }
-                }
-            }
-            
-            // Check for incoming data from clients
-            listen_clients_to_remove_.clear();
-            listen_messages_to_queue_.clear();
-            std::vector<OutgoingMessage> forward_messages;
+                        int err = WSAGetLastError();
 
-            for (size_t i = 0; i < clients_in_fdset && i < listen_active_clients_.size(); ++i) {
-                auto& [client_id, client_sock] = listen_active_clients_[i];
-
-                if (FD_ISSET(client_sock, &read_fds)) {
-                    // Look up this client's recv buffer (must exist — created on accept)
-                    auto buf_it = client_recv_buffers_.find(client_id);
-
-                    if (buf_it == client_recv_buffers_.end()) {
-                        // Shouldn't happen, but guard against it
-                        listen_clients_to_remove_.push_back(client_id);
-                        continue;
-                    }
-
-                    RecvBuffer& recv_buf = buf_it->second;
-                    RecvNBResult recv_result = recv_nonblocking(client_sock, recv_buf);
-
-                    if (recv_result == RecvNBResult::DISCONNECTED) {
-                        listen_clients_to_remove_.push_back(client_id);
-                        continue;
-                    }
-
-                    if (recv_buf.has_protocol_error(config_max_message_size_)) {
-                        listen_clients_to_remove_.push_back(client_id);
-                        continue;
-                    }
-
-                    std::vector<uint8_t> packet;
-                    
-                    while (recv_buf.try_extract(packet, config_max_message_size_)) {
-                        std::vector<NetworkMessage> local_messages;
-                        std::vector<OutgoingMessage> fwd_messages;
-
-                        if (parse_coalesced_or_single_packet(packet, local_messages, fwd_messages)) {
-                            for (auto& msg : local_messages) {
-                                msg.sender_client_id = client_id;
-                                listen_messages_to_queue_.push_back(std::move(msg));
-                            }
-
-                            for (auto& msg : fwd_messages) {
-                                msg.sender_client = client_id;
-                                forward_messages.push_back(std::move(msg));
-                            }
+                        if (err == WSAEWOULDBLOCK) {
+                            ++it;
+                        } else {
+                            closesocket(it->sock);
+                            it = pending_handshakes_.erase(it);
                         }
-                    }
-                }
-            }
-
-            if (!listen_messages_to_queue_.empty()) {
-                std::lock_guard<std::mutex> inc_lock(incoming_mutex_);
-
-                for (auto& msg : listen_messages_to_queue_) {
-                    incoming_queue_.push_back(std::move(msg));
-                }
-            }
-            
-            if (!forward_messages.empty()) {
-                for (auto& msg : forward_messages) {
-                    outgoing_queue_lockfree_.push(std::move(msg));
-                }
-
-                outgoing_has_data_.store(true, std::memory_order_release);
-            }
-            
-            // Remove disconnected clients
-            if (!listen_clients_to_remove_.empty()) {
-                std::lock_guard<std::mutex> lock(connections_mutex_);
-
-                for (int id : listen_clients_to_remove_) {
-                    auto it = client_connections_.find(id);
-                    
-                    if (it != client_connections_.end()) {
-                        ::shutdown(it->second, SD_BOTH);
-                        closesocket(it->second);
-                        client_pending_sends_.erase(id);
-                        client_connections_.erase(it);
-                        per_client_queues_.erase(id);
-                        client_stall_start_times_.erase(id);
-                        client_recv_buffers_.erase(id);
-
-                        MainThreadScheduler::instance().schedule([id]() {
-                            sqf::diag_log("KH Network: Client " + std::to_string(id) + " disconnected");
-                        });
                     }
                 }
             }
@@ -3759,12 +3791,24 @@ private:
             return false;
         }
         
-        std::vector<uint8_t> id_packet;
-        write_uint32(id_packet, static_cast<uint32_t>(our_client_id));
-        
-        if (!send_all(sock, id_packet)) {
-            closesocket(sock);
-            return false;
+        uint8_t id_raw[4];
+        uint32_t id_val = static_cast<uint32_t>(our_client_id);
+        id_raw[0] = static_cast<uint8_t>(id_val & 0xFF);
+        id_raw[1] = static_cast<uint8_t>((id_val >> 8) & 0xFF);
+        id_raw[2] = static_cast<uint8_t>((id_val >> 16) & 0xFF);
+        id_raw[3] = static_cast<uint8_t>((id_val >> 24) & 0xFF);
+        size_t total_sent = 0;
+
+        while (total_sent < 4) {
+            int result = send(sock, reinterpret_cast<const char*>(id_raw + total_sent),
+                            static_cast<int>(4 - total_sent), 0);
+                            
+            if (result == SOCKET_ERROR || result == 0) {
+                closesocket(sock);
+                return false;
+            }
+
+            total_sent += static_cast<size_t>(result);
         }
 
         u_long nb_mode = 1;
@@ -3930,7 +3974,7 @@ private:
 
         if (it != client_connections_.end()) {
             ::shutdown(it->second, SD_BOTH);
-            closesocket(it->second);
+            sockets_to_close_.push_back(it->second);
             client_connections_.erase(it);
             per_client_queues_.erase(client_id);
             client_stall_start_times_.erase(client_id);
@@ -4612,6 +4656,12 @@ public:
             client_recv_buffers_.clear();
             client_connections_.clear();
             per_client_queues_.clear();
+
+            for (SOCKET s : sockets_to_close_) {
+                closesocket(s);
+            }
+            
+            sockets_to_close_.clear();
             client_stall_start_times_.clear();
             listen_active_clients_.clear();
             listen_active_clients_.shrink_to_fit();
@@ -4619,6 +4669,12 @@ public:
             listen_clients_to_remove_.shrink_to_fit();
             listen_messages_to_queue_.clear();
             listen_messages_to_queue_.shrink_to_fit();
+
+            for (auto& hs : pending_handshakes_) {
+                closesocket(hs.sock);
+            }
+
+            pending_handshakes_.clear();
         }
         
         {

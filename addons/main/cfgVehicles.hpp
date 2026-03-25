@@ -10,7 +10,6 @@ class CfgVehicles
 	{
 		kh_unitHeight = 1.85;
 		kh_meleeType = "KH_MeleeGenericMan";
-		kh_meleeActions = "";
 		kh_meleeSoundType = "Flesh";
 		kh_meleeSurfaceBlockPower = 0;
 		kh_meleeModes[] = {};

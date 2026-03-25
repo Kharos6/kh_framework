@@ -3,7 +3,6 @@ class CfgWeapons
     class Rifle;
     class Rifle_Base_F: Rifle
     {
-        kh_meleeActions = "";
         kh_meleeType = "KH_MeleeGenericPrimary";
         kh_meleeModes[] = {"KH_MeleeAttack01"};
         kh_meleeModesGestures[] = {{"KH_MeleeAttack01AGesture"}};
@@ -11,7 +10,6 @@ class CfgWeapons
     class Pistol;
     class Pistol_Base_F: Pistol
     {
-        kh_meleeActions = "";
         kh_meleeType = "KH_MeleeGenericSecondary";
         kh_meleeModes[] = {"KH_MeleeAttack01"};
         kh_meleeModesGestures[] = {{"KH_MeleeAttack01AGesture"}};
@@ -19,7 +17,6 @@ class CfgWeapons
     class Launcher;
     class Launcher_Base_F: Launcher
     {
-        kh_meleeActions = "";
         kh_meleeType = "KH_MeleeGenericTertiary";
         kh_meleeModes[] = {"KH_MeleeAttack01"};
         kh_meleeModesGestures[] = {{"KH_MeleeAttack01AGesture"}};
@@ -35,6 +32,7 @@ class CfgWeapons
         magazineReloadTime = 0;
         reloadAction = "";
         modes[] = {"DefaultMode"};
+        kh_meleeWeapon = 1;
         class Eventhandlers {};
         class Library
         {

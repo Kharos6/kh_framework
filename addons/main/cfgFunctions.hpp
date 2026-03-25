@@ -153,6 +153,7 @@ class CfgFunctions
 			class toggleUserInput {headerType = -1;};
 			class traverseObstacle {headerType = -1;};
 			class triggerCbaEvent {headerType = -1;};
+			class uiContextCall {headerType = -1;};
 			class updateAiInstance {headerType = -1;};
 			class updateMeleeState {headerType = -1;};
 			class updateTtsSpeakerEntity {headerType = -1;};

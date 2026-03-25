@@ -8,12 +8,12 @@ if (
     ((lifeState _unit) isEqualTo "UNCONSCIOUS")
 ) exitWith {
     _unit setVariable ["KH_var_enteringMelee", false];
+    _unit setVariable ["KH_var_inMeleeState", false, true];
     _unit setVariable ["KH_var_meleeMode", "", true];
-    _unit setVariable ["KH_var_rawMeleeStance", false];
     false;
 };
 
-if (((currentWeapon _unit) isNotEqualTo "") || (_unit getVariable ["KH_var_rawMeleeStance", false])) then {
+if ((currentWeapon _unit) isNotEqualTo "") then {
     private _currentWeapon = currentWeapon _unit;
 
     private _currentWeaponSlot = switch _currentWeapon do {
@@ -33,94 +33,59 @@ if (((currentWeapon _unit) isNotEqualTo "") || (_unit getVariable ["KH_var_rawMe
             "NONE";  
         };
     };
-    
-    private _weaponConfig = if (_unit getVariable ["KH_var_rawMeleeStance", false]) then {
-        private _config = configNull;
-        private _weaponsConfigParent = configFile >> "CfgWeapons";
 
-        {
-            if (((getText (_x >> "kh_meleeType")) isNotEqualTo "") && (((getArray (_x >> "kh_meleeModes")) isNotEqualTo []) || ((getArray (_x >> "kh_meleeModesGestures")) isNotEqualTo []))) then {
-                _config = _x;
-                break;
-            };
-        } forEach [
-            _weaponsConfigParent >> (uniform _unit), 
-            _weaponsConfigParent >> (vest _unit), 
-            configFile >> "CfgVehicles" >> (backpack _unit), 
-            _weaponsConfigParent >> (headgear _unit), 
-            _weaponsConfigParent >> (binocular _unit), 
-            _weaponsConfigParent >> (hmd _unit), 
-            _weaponsConfigParent >> (goggles _unit)
-        ];
-        
-        if (isNull _config) then {
-            configOf _unit;
-        }
-        else {
-            _config;
+    private _meleeAttachments = switch _currentWeaponSlot do {
+        case "PRIMARY": {
+            primaryWeaponItems _unit;
         };
 
-        if ((_unit getVariable ["KH_var_meleeType", ""]) isNotEqualTo (getText (_config >> "kh_meleeType"))) then {
-            _unit setVariable ["KH_var_meleeType", getText (_config >> "kh_meleeType"), true];
+        case "SECONDARY": {
+            handgunItems _unit;
         };
 
-        _config;
+        case "TERTIARY": {
+            secondaryWeaponItems _unit;
+        };
+
+        case "NONE": {
+            [];
+        };
+
+        default {
+            [];  
+        };
+    };
+
+    private _weaponConfig = if ((_meleeAttachments select {_x isNotEqualTo "";}) isEqualTo []) then {
+        configFile >> "CfgWeapons" >> _currentWeapon;
     }
     else {
-        private _meleeAttachments = switch _currentWeaponSlot do {
-            case "PRIMARY": {
-                primaryWeaponItems _unit;
-            };
+        private _finalConfig = configNull;
+        
+        {
+            private _currentConfig = configFile >> "CfgWeapons" >> _x;
 
-            case "SECONDARY": {
-                handgunItems _unit;
+            if (((getText (_currentConfig >> "kh_meleeType")) isNotEqualTo "") && (((getArray (_currentConfig >> "kh_meleeModes")) isNotEqualTo []) || ((getArray (_currentConfig >> "kh_meleeModesGestures")) isNotEqualTo []))) then {
+                _finalConfig = _currentConfig;
+                break;
             };
+        } forEach _meleeAttachments;
 
-            case "TERTIARY": {
-                secondaryWeaponItems _unit;
-            };
-
-            case "NONE": {
-                [];
-            };
-
-            default {
-                [];  
-            };
-        };
-
-        private _config = if ((_meleeAttachments select {_x isNotEqualTo "";}) isEqualTo []) then {
+        if (isNull _finalConfig) then {
             configFile >> "CfgWeapons" >> _currentWeapon;
         }
         else {
-            private _finalConfig = configNull;
-            
-            {
-                private _currentConfig = configFile >> "CfgWeapons" >> _x;
-
-                if (((getText (_currentConfig >> "kh_meleeType")) isNotEqualTo "") && (((getArray (_currentConfig >> "kh_meleeModes")) isNotEqualTo []) || ((getArray (_currentConfig >> "kh_meleeModesGestures")) isNotEqualTo []))) then {
-                    _finalConfig = _currentConfig;
-                    break;
-                };
-            } forEach _meleeAttachments;
-
-            if (isNull _finalConfig) then {
-                configFile >> "CfgWeapons" >> _currentWeapon;
-            }
-            else {
-                _finalConfig;
-            };
+            _finalConfig;
         };
+    };
 
-        if ((_unit getVariable ["KH_var_meleeType", ""]) isNotEqualTo (getText (_config >> "kh_meleeType"))) then {
-            _unit setVariable ["KH_var_meleeType", getText (_config >> "kh_meleeType"), true];
-        };
-
-        _config;
+    if ((_unit getVariable ["KH_var_meleeType", ""]) isNotEqualTo (getText (_weaponConfig >> "kh_meleeType"))) then {
+        _unit setVariable ["KH_var_meleeType", getText (_weaponConfig >> "kh_meleeType"), true];
     };
 
     _unit setVariable ["KH_var_meleeWeaponConfig", _weaponConfig];
     _unit setVariable ["KH_var_meleeMode", (getArray (_weaponConfig >> "kh_meleeModes")) param [0, ""], true];
+    _unit setVariable ["KH_var_inMeleeState", (getNumber (configFile >> "CfgWeapons" >> _currentWeapon >> "kh_meleeWeapon")) isEqualTo 1, true];
 
     if ((getText (_weaponConfig >> "kh_meleeActions")) isNotEqualTo "") then {
         _unit setVariable ["KH_var_enteringMelee", true];
@@ -174,7 +139,6 @@ else {
             false
         ] call KH_fnc_setAnimation;
 
-        _unit setVariable ["KH_var_rawMeleeStance", false];
         _unit setVariable ["KH_var_enteringMelee", false];
     };
 };
@@ -225,7 +189,7 @@ if (_action isNotEqualTo "") then {
                             };
 
                             if (_newMode isNotEqualTo "") then {
-                                private _gestureAction = (getArray (configFile >> _moves >> "actions" >> (getText (configFile >> _moves >> "states" >> (animationState _unit) >> "actions")) >> (_gestureMode param [_newIndex, []]))) select 0;
+                                private _gestureAction = (getArray (configFile >> _moves >> "actions" >> (getText (configFile >> _moves >> "states" >> (animationState _unit) >> "actions")) >> (_gestureMode param [_newIndex, ""]))) param [0, ""];
                                 
                                 if (_gestureAction isNotEqualTo "") then {
                                     if !(_unit getVariable ["KH_var_meleeMoveActive", false]) then {
@@ -282,7 +246,7 @@ if (_action isNotEqualTo "") then {
                             ] call KH_fnc_setAnimation;
                         }
                         else {
-                            private _gestureAction = (getArray (configFile >> _moves >> "actions" >> (getText (configFile >> _moves >> "states" >> (animationState _unit) >> "actions")) >> (_gestureMode param [_newIndex, []]))) select 0;
+                            private _gestureAction = (getArray (configFile >> _moves >> "actions" >> (getText (configFile >> _moves >> "states" >> (animationState _unit) >> "actions")) >> (_gestureMode param [_newIndex, ""]))) param [0, ""];
 
                             if (_gestureAction isEqualTo "") then {
                                 _unit setVariable ["KH_var_attackGestureIndex", -1];

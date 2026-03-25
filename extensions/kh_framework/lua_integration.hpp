@@ -415,10 +415,7 @@ static sol::object convert_game_value_to_lua(const game_value& value) {
                 case game_data_type::HASHMAP:
                 case game_data_type::NAMESPACE: {
                     lua_createtable(L, arr_size, 0);
-                    void* userdata = lua_newuserdata(L, sizeof(GameValueWrapper));
-                    new (userdata) GameValueWrapper(array[0]);
-                    luaL_getmetatable(L, "GameValue");
-                    lua_setmetatable(L, -2);
+                    sol::stack::push(*g_lua_state, GameValueWrapper(array[0]));
                     lua_rawseti(L, -2, 1);
                     
                     for (size_t i = 1; i < arr_size; ++i) {
@@ -427,10 +424,7 @@ static sol::object convert_game_value_to_lua(const game_value& value) {
                             goto heterogeneous_array;
                         }
 
-                        void* ud = lua_newuserdata(L, sizeof(GameValueWrapper));
-                        new (ud) GameValueWrapper(array[i]);
-                        luaL_getmetatable(L, "GameValue");
-                        lua_setmetatable(L, -2);
+                        sol::stack::push(*g_lua_state, GameValueWrapper(array[i]));
                         lua_rawseti(L, -2, i + 1);
                     }
 
@@ -599,6 +593,11 @@ static game_value convert_lua_to_game_value(const sol::object& obj) {
     }
 
     if (type == sol::type::nil) {
+        return game_value();
+    }
+
+    if (type == sol::type::function) {
+        report_error("Cannot pass a function as an SQF value");
         return game_value();
     }
 

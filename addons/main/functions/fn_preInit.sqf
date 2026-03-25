@@ -23,6 +23,7 @@ KH_var_quickFunctionsLua = createHashMap;
 uiNamespace setVariable ["KH_var_quickFunctionsLua", KH_var_quickFunctionsLua];
 KH_var_inGameUiEventHandlerStackDeletions = [];
 KH_var_temporalExecutionStack = [];
+KH_var_uiContextExecutionStack = [];
 KH_var_drawUi2dExecutionStack = [];
 KH_var_drawUi3dExecutionStack = [];
 KH_var_drawUi3dOrphanExecutionStack = [];
@@ -1726,7 +1727,7 @@ if isServer then {
 		{
 			if KH_var_diagnosticsState then {
 				missionNamespace setVariable ["KH_var_diagnosticsFramerateServer", parseNumber (diag_fps toFixed 0), KH_var_adminMachine];
-				missionNamespace setVariable ["KH_var_diagnosticsLocalUnitsServer", KH_var_allLocalEntities select {_x isKindOf "Man";}, KH_var_adminMachine];
+				missionNamespace setVariable ["KH_var_diagnosticsLocalUnitsServer", {_x isKindOf "Man";} count KH_var_allLocalEntities, KH_var_adminMachine];
 			};
 
 			{
@@ -2014,6 +2015,25 @@ if hasInterface then {
 		"Draw3D", 
 		[],
 		{
+			if (KH_var_uiContextExecutionStack isNotEqualTo []) then {
+				{
+					_x params ["_arguments", "_function", "_id"];
+					private _uiContext = true;
+
+					missionNamespace setVariable [
+						_id, 
+						if (!isNil "_arguments") then {
+							_arguments call _function;
+						}
+						else {
+							call _function;
+						}
+					];
+				} forEach KH_var_uiContextExecutionStack;
+
+				KH_var_uiContextExecutionStack resize 0;
+			};
+
 			if (KH_var_drawUi3dOrphanExecutionStack isNotEqualTo []) then {
 				{
 					_x params ["_type", "_arguments"];
@@ -2359,7 +2379,7 @@ if (!isServer && !hasInterface) then {
 		{
 			if KH_var_diagnosticsState then {
 				player setVariable ["KH_var_diagnosticsFramerate", parseNumber (diag_fps toFixed 0), KH_var_adminMachine];
-				player setVariable ["KH_var_diagnosticsLocalUnits", count (KH_var_allLocalEntities select {_x isKindOf "Man";}), KH_var_adminMachine];
+				player setVariable ["KH_var_diagnosticsLocalUnits", {_x isKindOf "Man";} count KH_var_allLocalEntities, KH_var_adminMachine];
 			};
 		},
 		true,

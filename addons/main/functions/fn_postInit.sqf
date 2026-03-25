@@ -348,9 +348,7 @@ isNil {
 												};
 											};
 
-											if ((getNumber (_animationConfig >> "kh_melee")) isEqualTo 1) then {
-												_unit setVariable ["KH_var_inMeleeState", true];
-												if ((getNumber (_animationConfig >> "kh_meleeHasAction")) isEqualTo 0) exitWith {};
+											if ((getNumber (_animationConfig >> "kh_meleeHasAction")) isEqualTo 1) then {
 												private _handlerType = ["KH_var_meleeStateHandler", "KH_var_meleeGestureHandler"] select _isMove;
 
 												if !(_unit isNil _handlerType) then {
@@ -498,7 +496,7 @@ isNil {
 																"_dodgeFatigue"
 															];
 
-															if ((_animation isNotEqualTo ([gestureState _unit, animationState _unit] select _isMove)) || !(_unit getVariable ["KH_var_inMeleeState", false])) exitWith {
+															if (_animation isNotEqualTo ([gestureState _unit, animationState _unit] select _isMove)) exitWith {
 																[_handlerId] call KH_fnc_removeHandler;
 															};
 
@@ -1129,16 +1127,10 @@ isNil {
 												];
 											}
 											else {
-												if _isMove then {
-													if (_unit getVariable ["KH_var_inMeleeState", false]) then {
-														_unit setVariable ["KH_var_inMeleeState", false];
-														_unit setVariable ["KH_var_meleeMoveActive", false];
-													};
-												}
-												else {
-													if (_unit getVariable ["KH_var_meleeGestureActive", false]) then {
-														_unit setVariable ["KH_var_meleeGestureActive", false];
-													};
+												private _activeType = ["KH_var_meleeGestureActive", "KH_var_meleeMoveActive"] select _isMove;
+
+												if (_unit getVariable [_activeType, false]) then {
+													_unit setVariable [_activeType, false];
 												};
 											};
 										}
@@ -1401,7 +1393,6 @@ isNil {
 								] call KH_fnc_addAction;
 
 								[player, "KH_var_fuelSiphonHolding", objNull, true, true] call KH_fnc_setRespawnVariable;
-								[player, "KH_var_rawMeleeStance", false, false, true] call KH_fnc_setRespawnVariable;
 
 								[
 									[false, true],

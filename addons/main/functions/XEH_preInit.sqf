@@ -2787,8 +2787,6 @@
 				};
 			};
 		};
-
-		nil;
 	}, 
 	{}, 
 	[0x05, [false, false, false]]
@@ -2815,8 +2813,6 @@
 				};
 			};
 		};
-
-		nil;
 	}, 
 	{}, 
 	[0x21, [false, false, false]]
@@ -2844,7 +2840,7 @@
 			};
 		};
 
-		nil;
+		KH_var_playerUnit getVariable ["KH_var_inMeleeState", false];
 	}, 
 	{}, 
 	[0x39, [true, false, false]]
@@ -2871,8 +2867,6 @@
 				};
 			};
 		};
-
-		nil;
 	},
 	{
 		if (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false]) then {
@@ -2891,8 +2885,6 @@
 				};
 			};
 		};
-
-		nil;
 	},
 	[0x10, [false, false, false]]
 ] call CBA_fnc_addKeybind;
@@ -2918,8 +2910,6 @@
 				};
 			};
 		};
-
-		nil;
 	}, 
 	{}, 
 	[0x12, [false, false, false]]
@@ -2947,7 +2937,7 @@
 			};
 		};
 
-		nil;
+		KH_var_playerUnit getVariable ["KH_var_inMeleeState", false];
 	}, 
 	{}, 
 	[0x14, [true, false, false]]
@@ -2975,7 +2965,7 @@
 			};
 		};
 
-		nil;
+		KH_var_playerUnit getVariable ["KH_var_inMeleeState", false];
 	}, 
 	{}, 
 	[0x14, [false, true, false]]
@@ -3002,8 +2992,6 @@
 				};
 			};
 		};
-
-		nil;
 	}, 
 	{}, 
 	[0x2F, [true, false, false]]

@@ -104,22 +104,22 @@ if _state then {
 									
 									if (
 										(_instigator getVariable ["KH_var_disguiseState", false]) && 
-										(((side (group _instigator)) isEqualTo (side (group _unit))) || (((side _instigator)) isEqualTo sideFriendly))
+										((side (group _instigator)) isEqualTo (side (group _unit)))
 									   ) then {
 										[
-											[_instigator],
+											[_unit, _instigator],
 											{
-												params ["_instigator"];	
+												params ["_unit", "_instigator"];	
 												private _instigatorVisible = false;
 												
 												{
 													if (
 														!(isPlayer _x) && 
 														(alive _x) && 
-														((side (group _x)) isEqualTo (side (group _instigator))) && 
+														((side (group _x)) isEqualTo (side (group _unit))) && 
 														(
 														 (([_instigator, "VIEW", objectParent _instigator] checkVisibility [eyePos _instigator, eyePos _x]) > 0) || 
-														 (([_instigator, "VIEW", objectParent _instigator] checkVisibility [AGLToASL (unitAimPosition _player), eyePos _x]) > 0)
+														 (([_instigator, "VIEW", objectParent _instigator] checkVisibility [AGLToASL (unitAimPositionVisual _instigator), eyePos _x]) > 0)
 														)
 													   ) then {
 														_instigatorVisible = true;
@@ -167,7 +167,7 @@ if _state then {
 												(!(isPlayer _x) && (alive _x) && (simulationEnabled _x) && ((side (group _x)) isEqualTo _currentSide)) && 
 												(
 												 (([_player, "VIEW", objectParent _player] checkVisibility [eyePos _player, eyePos _x]) > 0) || 
-												 (([_player, "VIEW", objectParent _player] checkVisibility [AGLToASL (unitAimPosition _player), eyePos _x]) > 0)
+												 (([_player, "VIEW", objectParent _player] checkVisibility [AGLToASL (unitAimPositionVisual _player), eyePos _x]) > 0)
 												)
 											   ) then {
 												_instigatorVisible = true;
@@ -229,7 +229,7 @@ if _state then {
 									 ((side (group _x)) isEqualTo _currentSide) && 
 									 (
 									  (([_player, "VIEW", objectParent _player] checkVisibility [eyePos _player, eyePos _x]) > 0) || 
-									  (([_player, "VIEW", objectParent _player] checkVisibility [AGLToASL (unitAimPosition _player), eyePos _x]) > 0)
+									  (([_player, "VIEW", objectParent _player] checkVisibility [AGLToASL (unitAimPositionVisual _player), eyePos _x]) > 0)
 									 )
 									) || 
 									(_player getVariable ["KH_var_disguiseRecoveryChecker", false])

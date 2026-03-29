@@ -1922,6 +1922,161 @@ if hasInterface then {
 	] call KH_fnc_addEventHandler;
 
 	[
+		[],
+		{
+			private _unit = player;
+			private _filteredClassItems = getArray ((configOf _unit) >> "kh_equipmentFilter");
+			if ((KH_var_filterPlayerEquipmentList isEqualTo []) && (_filteredClassItems isEqualTo [])) exitWith {};
+			private _filteredClassItemsFilter = (getNumber ((configOf _unit) >> "kh_equipmentFilterType")) isEqualTo 1;
+			private _currentLoadout = getUnitLoadout player;
+			private _currentItems = _currentLoadout param [9, []];
+			_currentLoadout deleteAt 9;
+			_currentLoadout append _currentItems;
+			private _weaponHolder = objNull;
+
+			{
+				private _currentSlotItem = if ((_forEachIndex isEqualTo 6) || (_forEachIndex isEqualTo 7) || (_forEachIndex >= 9)) then {
+					toLowerANSI _x;
+				}
+				else {
+					toLowerANSI (_x param [0, ""]);
+				};
+
+				private _forbiddenEquipment = if KH_var_filterPlayerEquipmentFilter then {
+					["", _currentSlotItem] select !(_currentSlotItem in KH_var_filterPlayerEquipmentList);
+				}
+				else {
+					["", _currentSlotItem] select (_currentSlotItem in KH_var_filterPlayerEquipmentList);
+				};
+
+				if (_forbiddenEquipment isEqualTo "") then {
+					_forbiddenEquipment = if _filteredClassItemsFilter then {
+						["", _currentSlotItem] select !(_currentSlotItem in _filteredClassItems);
+					}
+					else {
+						["", _currentSlotItem] select (_currentSlotItem in _filteredClassItems);
+					};
+				};
+
+				if (_forbiddenEquipment isNotEqualTo "") then {
+					systemChat (["FORBIDDEN EQUIPMENT: ", getText (configFile >> (["CfgWeapons", "CfgVehicles"] select (_forEachIndex isEqualTo 5)) >> _currentSlotItem >> "displayName")] joinString "");
+					_invalid = true;
+
+					if (isNull _weaponHolder) then {
+						private _potentialHolder = ((_unit nearSupplies ["GroundWeaponHolder_Scripted", 5]) select {(local _x) && (_x getVariable ["KH_var_filterGroundHolder", false]);}) param [0, objNull];
+
+						if (isNull _potentialHolder) then {
+							_weaponHolder = createVehicle ["GroundWeaponHolder_Scripted", getPosATL _unit, [], 0, "CAN_COLLIDE"];
+							_weaponHolder setVariable ["KH_var_filterGroundHolder", true];
+						}
+						else {
+							_weaponHolder = _potentialHolder;
+						};
+					};
+
+					switch _forEachIndex do {
+						case 0;
+						case 1;
+						case 2;
+						case 8: {
+							{
+								if (_x isEqualType "") then {
+									_weaponHolder addItemCargo [_x, 1];
+								}
+								else {
+									if (_x isNotEqualTo []) then {
+										_weaponHolder addMagazineAmmoCargo [_x select 0, 1, _x select 1];
+									};
+								};
+							} forEach _x;
+
+							_unit removeWeapon _currentSlotItem;
+						};
+
+						case 3;
+						case 4;
+						case 5: {
+							if (_forEachIndex isEqualTo 5) then {
+								_weaponHolder addBackpackCargo [_currentSlotItem, 1];
+							}
+							else {
+								_weaponHolder addItemCargo [_currentSlotItem, 1];
+							};
+
+							{
+								switch true do {
+									case (((count _x) isEqualTo 2) && ((_x select 1) isEqualType 0)): {
+										_weaponHolder addItemCargo _x;
+									};
+
+									case ((count _x) isEqualTo 3): {
+										_weaponHolder addMagazineAmmoCargo _x;
+									};
+
+									case ((_x select 0) isEqualType []): {
+										for "_i" from 1 to (_x select 1) do {
+											{
+												if (_x isEqualType "") then {
+													_weaponHolder addItemCargo [_x, 1];
+												}
+												else {
+													if (_x isNotEqualTo []) then {
+														_weaponHolder addMagazineAmmoCargo [_x select 0, 1, _x select 1];
+													};
+												};
+											} forEach (_x select 0);
+										};
+									};
+
+									case ((_x select 1) isEqualType true): {
+										if (_x select 1) then {
+											_weaponHolder addBackpackCargo [_x select 0, 1];
+										}
+										else {
+											_weaponHolder addItemCargo [_x select 0, 1];
+										};
+									};
+
+									default {
+										continue;
+									};
+								};
+							} forEach (_x select 1);
+
+							switch _forEachIndex do {
+								case 3: {
+									removeUniform _unit;
+								};
+
+								case 4: {
+									removeVest _unit;
+								};
+
+								case 5: {
+									removeBackpack _unit;
+								};
+							};
+						};
+
+						case 6: {
+							_weaponHolder addItemCargo [_currentSlotItem, 1];
+							removeHeadgear _unit;
+						};
+
+						default {
+							_weaponHolder addItemCargo [_currentSlotItem, 1];
+							_unit unlinkItem _currentSlotItem;
+						};
+					};
+				};
+			} forEach _currentLoadout;
+		},
+		true,
+		0,
+		false
+	] call KH_fnc_execute;
+
+	[
 		"MISSION",
 		"TeamSwitch",
 		[], 

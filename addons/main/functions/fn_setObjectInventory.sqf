@@ -1,5 +1,5 @@
 params [["_object", objNull, [objNull]], ["_inventory", [], [[]]]];
-_inventory params ["_itemInventory", "_weaponInventory", "_backpackInventory", "_aceInventory"];
+_inventory params ["_itemInventory", "_magazines", "_weaponInventory", "_backpackInventory", "_aceInventory"];
 clearItemCargoGlobal _object;
 clearWeaponCargoGlobal _object;
 clearBackpackCargoGlobal _object;
@@ -15,6 +15,10 @@ for "_i" from 0 to ((count _inventoryItems) - 1) do {
 } forEach _inventorySorted;
 
 {
+	_object addMagazineAmmoCargo [_x select 0, 1, _x select 1];
+} forEach _magazines;
+
+{
 	_object addWeaponWithAttachmentsCargoGlobal [_x, 1];
 } forEach _weaponInventory;
 
@@ -22,7 +26,7 @@ for "_i" from 0 to ((count _inventoryItems) - 1) do {
 	_object addBackpackCargoGlobal [_x, 1]
 } forEach _backpackInventory;
 
-if KH_var_aceLoaded then {	
+if KH_var_aceLoaded then {
 	{
 		[_x, _object] call ace_cargo_fnc_removeCargoItem;
 	} forEach (_object getVariable ["ace_cargo_loaded", []]);
@@ -35,7 +39,7 @@ if KH_var_aceLoaded then {
 		_currentAceCargo = _object getVariable ["ace_cargo_loaded", []];
 		_currentAceCargo = _currentAceCargo select _aceCargoCount;
 		_aceCargoCount = _aceCargoCount + 1;
-		(_x select 1) params ["_itemInventory", "_weaponInventory", "_backpackInventory"];
+		(_x select 1) params ["_itemInventory", "_magazines", "_weaponInventory", "_backpackInventory"];
 		private _object = _currentAceCargo;
 		clearItemCargoGlobal _object;
 		clearWeaponCargoGlobal _object;
@@ -50,6 +54,10 @@ if KH_var_aceLoaded then {
 		{		
 			_object addItemCargoGlobal _x;
 		} forEach _inventorySorted;
+
+		{
+			_object addMagazineAmmoCargo [_x select 0, 1, _x select 1];
+		} forEach _magazines;
 		
 		{
 			_object addWeaponWithAttachmentsCargoGlobal [_x, 1];

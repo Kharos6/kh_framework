@@ -807,45 +807,6 @@ class Mission
 					};
 				};
 			};
-			class KH_HeadlessClientOffloading
-			{
-				displayName = "KH Headless Client Offloading";
-				collapsed = 1;
-				class Attributes
-				{
-					class KH_HeadlessClientOffloadingSubcategory
-					{
-						description = "Evenly distributes units among available headless clients.";
-						data = "AttributeSystemSubcategory";
-						control = "KH_SubcategoryNoHeader1";
-					};
-					class KH_HeadlessClientOffloading
-					{
-						property = "KH_HeadlessClientOffloading";
-						control = "KH_HeadlessClientOffloading";
-						expression = 
-						"\
-							_value params ['_toggle', '_headlessClientBlacklist', '_entityBlacklist', '_includeServer', '_distributionInterval', '_recreate', '_init'];\
-							if (_toggle && !is3DEN && isServer) then {\
-								KH_var_postInitExecutions pushBack [\
-									[\
-										true,\
-										parseSimpleArray (['[', _headlessClientBlacklist, ']'] joinString ''),\
-										parseSimpleArray (['[', _entityBlacklist, ']'] joinString ''),\
-										_includeServer,\
-										parseNumber _distributionInterval,\
-										_recreate,\
-										compile _init\
-									],\
-									KH_fnc_headlessClientOffloading,\
-									{KH_var_playersLoaded && !KH_var_missionSuspended;}\
-								];\
-							};\
-						";
-						defaultValue = "[false, '', '', true, '60', false, '']";
-					};
-				};
-			};
 		};
 	};
 	class Intel

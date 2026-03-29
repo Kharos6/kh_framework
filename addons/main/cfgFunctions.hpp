@@ -40,6 +40,7 @@ class CfgFunctions
 			class entitySpawner {headerType = -1;};
 			class equipableObject {headerType = -1;};
 			class execute {headerType = -1;};
+			class filterPlayerEquipment {headerType = -1;};
 			class fultonExtract {headerType = -1;};
 			class getConfigValue {headerType = -1;};
 			class getDestinationTime {headerType = -1;};
@@ -64,7 +65,6 @@ class CfgFunctions
 			class getViewTarget {headerType = -1;};
 			class getWeaponPosition {headerType = -1;};
 			class getWeaponTarget {headerType = -1;};
-			class headlessClientOffloading {headerType = -1;};
 			class initializeStt {headerType = -1;};
 			class initializeTts {headerType = -1;};
 			class limitViewDistance {headerType = -1;};

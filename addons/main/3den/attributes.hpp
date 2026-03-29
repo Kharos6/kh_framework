@@ -231,7 +231,6 @@ class Attributes
 	#include "\x\kh\addons\main\3den\at_convertToAgent.hpp"
 	#include "\x\kh\addons\main\3den\at_curators.hpp"
 	#include "\x\kh\addons\main\3den\at_environmentAmbiance.hpp"
-	#include "\x\kh\addons\main\3den\at_headlessClientOffloading.hpp"
 	#include "\x\kh\addons\main\3den\at_khEngineeringSettings.hpp"
 	#include "\x\kh\addons\main\3den\at_khMedicalSettings.hpp"
 	#include "\x\kh\addons\main\3den\at_objectPersistencySettings.hpp"

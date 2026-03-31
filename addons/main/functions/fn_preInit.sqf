@@ -762,7 +762,7 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 		private _continue = true;
 
 		if ((_unit getVariable ["KH_var_currentMeleeDodgeDirection", -1]) isNotEqualTo -1) then {
-			private _difference = (abs ((_unit getVariable ["KH_var_currentMeleeDodgeDirection", -1]) - (_unit getDir _instigator))) mod 360;
+			private _difference = (abs ((_unit getVariable ["KH_var_currentMeleeDodgeDirection", -1]) - (_unit getRelDir _instigator))) mod 360;
 
 			if (_difference > 180) then {
 				_difference = 360 - _difference;
@@ -2115,7 +2115,7 @@ if hasInterface then {
 					] call KH_fnc_execute;
 					
 					[_corpse] call KH_fnc_playerRespawnInit;
-					["KH_eve_playerRespawned", [owner _unit, getPlayerUID _unit, getPlayerID _unit, _unit, _corpse], "GLOBAL", false] call KH_fnc_triggerCbaEvent;
+					["KH_eve_playerRespawned", [clientOwner, getPlayerUID _unit, getPlayerID _unit, _unit, _corpse], "GLOBAL", false] call KH_fnc_triggerCbaEvent;
 					nil;
 				}
 			] call KH_fnc_addEventHandler;
@@ -2131,7 +2131,7 @@ if hasInterface then {
 				{
 					params ["_unit", "_killer", "_instigator"];
 					[_killer, _instigator] call KH_fnc_playerKilledInit;
-					["KH_eve_playerKilled", [owner _unit, getPlayerUID _unit, getPlayerID _unit, _unit, _killer, _instigator], "GLOBAL", false] call KH_fnc_triggerCbaEvent;
+					["KH_eve_playerKilled", [clientOwner, getPlayerUID _unit, getPlayerID _unit, _unit, _killer, _instigator], "GLOBAL", false] call KH_fnc_triggerCbaEvent;
 				}
 			] call KH_fnc_addEventHandler;
 		}

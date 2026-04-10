@@ -2835,7 +2835,7 @@
 
 			if _continue then {
 				if (KH_var_allowRangedMelee || (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false])) then {
-					private _input = (["KH_STRING", [true, true, true]] call KH_fnc_getPlayerMoveInput) select 0;
+					private _input = (["KH_STRING", [true, true, false]] call KH_fnc_getPlayerMoveInput) select 0;
 					[KH_var_playerUnit, ["DODGE", ["DODGE", _input]] select (_input isNotEqualTo "")] call KH_fnc_updateMeleeState;
 				};
 			};

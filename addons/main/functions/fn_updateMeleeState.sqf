@@ -549,6 +549,10 @@ if (_action isNotEqualTo "") then {
                                 case "RIGHTWARD": {
                                     "KH_MeleeDodgeRightward";
                                 };
+
+                                default {
+                                    "KH_MeleeDodgeBackward";
+                                };
                             },
                             true
                         ],

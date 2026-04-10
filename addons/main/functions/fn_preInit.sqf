@@ -1839,7 +1839,7 @@ if hasInterface then {
 	] call KH_fnc_addEventHandler;
 
 	[
-		"PLAYER",
+		["PLAYER", true],
 		"unit",
 		[],
 		{

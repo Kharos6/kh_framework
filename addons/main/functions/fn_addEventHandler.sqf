@@ -466,7 +466,8 @@ switch _eventType do {
 	};
 
 	case "PLAYER": {
-		_handler = [_event, _expression] call CBA_fnc_addPlayerEventHandler;
+		private _applyRetroactively = _type param [1, true, [true]];
+		_handler = [_event, _expression, _applyRetroactively] call CBA_fnc_addPlayerEventHandler;
 	};
 
 	case "CBA": {

@@ -55,7 +55,6 @@ class CfgFunctions
 			class getNormalizedScreenTransforms {headerType = -1;};
 			class getObjectAttributes {headerType = -1;};
 			class getObjectInventory {headerType = -1;};
-			class getPlayerMoveInput {headerType = -1;};
 			class getPositionScreenRatio {headerType = -1;};
 			class getPositionVisibility {headerType = -1;};
 			class getRemoteVariable {headerType = -1;};

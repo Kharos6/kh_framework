@@ -1917,8 +1917,7 @@ if hasInterface then {
 			} forEach KH_var_playerControlledUnitChangeStack;
 
 			[_previousUnit, _unit] call KH_fnc_playerControlledUnitChangeInit;
-		},
-		true
+		}
 	] call KH_fnc_addEventHandler;
 
 	[

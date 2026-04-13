@@ -14,7 +14,11 @@ class CfgVehicles
 		kh_meleeSurfaceBlockPower = 0;
 		kh_meleeModes[] = {};
 		kh_meleeModesGestures[] = {};
-	}; 
+	};
+	class CAManBase: Man
+	{
+		kh_medical = 1;
+	};
 	class Launcher_Base_F;
 	class KH_MeleeWeaponTertiaryBase: Launcher_Base_F
 	{

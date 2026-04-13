@@ -4,6 +4,8 @@ uiNamespace setVariable ["KH_var_missionSessionId", generateUid];
 uiNamespace setVariable ["KH_var_serverGameSessionId", uiNamespace getVariable "KH_var_gameSessionId"];
 uiNamespace setVariable ["KH_var_serverMissionSessionId", uiNamespace getVariable "KH_var_missionSessionId"];
 uiNamespace setVariable ["KH_var_aceLoaded", isClass (configFile >> "CfgPatches" >> "ace_main")];
+uiNamespace setVariable ["KH_var_acreLoaded", isClass (configFile >> "CfgPatches" >> "acre_main")];
+uiNamespace setVariable ["KH_var_tfarLoaded", isClass (configFile >> "CfgPatches" >> "tfar_core")];
 uiNamespace setVariable ["KH_var_resetInitLuaExecutions", []];
 private _resetInitLuaExecutions = uiNamespace getVariable "KH_var_resetInitLuaExecutions";
 

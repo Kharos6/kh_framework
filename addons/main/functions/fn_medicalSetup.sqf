@@ -5,7 +5,7 @@ if KH_var_medical then {
         [_unit],
         {
             params ["_unit"];
-            if (_unit getVariable ["KH_var_medicalInitComplete", false]) exitWith {};
+            if ((_unit getVariable ["KH_var_medicalInitComplete", false]) || ((getNumber ((configOf _unit) >> "kh_medical")) isEqualTo 0)) exitWith {};
             _unit setVariable ["KH_var_medicalInitComplete", true, true];
             KH_var_classDamageMultipliers = createHashMapFromArray (parseSimpleArray (["[", KH_var_classDamageMultipliersRaw, "]"] joinString ""));
             KH_var_childClassDamageMultipliers = parseSimpleArray (["[", KH_var_childClassDamageMultipliersRaw, "]"] joinString "");

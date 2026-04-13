@@ -15,24 +15,7 @@ if (
 
 if ((currentWeapon _unit) isNotEqualTo "") then {
     private _currentWeapon = currentWeapon _unit;
-
-    private _currentWeaponSlot = switch _currentWeapon do {
-        case (primaryWeapon _unit): {
-            "PRIMARY";
-        };
-
-        case (handgunWeapon _unit): {
-            "SECONDARY";
-        };
-
-        case (secondaryWeapon _unit): {
-            "TERTIARY";
-        };
-
-        default {
-            "NONE";  
-        };
-    };
+    private _currentWeaponSlot = [_unit] call KH_fnc_getCurrentWeaponSlot;
 
     private _meleeAttachments = switch _currentWeaponSlot do {
         case "PRIMARY": {
@@ -45,10 +28,6 @@ if ((currentWeapon _unit) isNotEqualTo "") then {
 
         case "TERTIARY": {
             secondaryWeaponItems _unit;
-        };
-
-        case "NONE": {
-            [];
         };
 
         default {
@@ -111,12 +90,8 @@ if ((currentWeapon _unit) isNotEqualTo "") then {
                             "SecondaryWeapon";
                         };
 
-                        case "NONE": {
-                            "Civil";
-                        };
-
                         default {
-                            "default";  
+                            "Civil";  
                         };
                     }, 
                     true

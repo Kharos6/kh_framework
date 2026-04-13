@@ -6,6 +6,8 @@ KH_var_gameSessionId = uiNamespace getVariable "KH_var_gameSessionId";
 KH_var_missionSessionId = generateUid;
 uiNamespace setVariable ["KH_var_missionSessionId", KH_var_missionSessionId];
 KH_var_aceLoaded = uiNamespace getVariable "KH_var_aceLoaded";
+KH_var_acreLoaded = uiNamespace getVariable "KH_var_acreLoaded";
+KH_var_tfarLoaded = uiNamespace getVariable "KH_var_tfarLoaded";
 KH_var_missionLoaded = false;
 KH_var_jip = false;
 KH_var_playerUnit = objNull;

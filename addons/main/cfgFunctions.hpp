@@ -43,6 +43,7 @@ class CfgFunctions
 			class filterPlayerEquipment {headerType = -1;};
 			class fultonExtract {headerType = -1;};
 			class getConfigValue {headerType = -1;};
+			class getCurrentWeaponSlot {headerType = -1;};
 			class getDestinationTime {headerType = -1;};
 			class getDestinationVelocity {headerType = -1;};
 			class getEntityByIdentifier {headerType = -1;};

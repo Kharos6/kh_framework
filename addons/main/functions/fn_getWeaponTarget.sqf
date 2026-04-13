@@ -27,27 +27,9 @@ if ((KH_var_weaponTargetCheckFrame isEqualTo diag_frameNo) && (KH_var_weaponTarg
 
 KH_var_weaponTargetIgnores = _ignored;
 KH_var_weaponTargetCheckFrame = diag_frameNo;
-private _currentWeapon = currentWeapon KH_var_playerUnit;
+private _weaponType = [KH_var_playerUnit] call KH_fnc_getCurrentWeaponSlot;
 
-private _weaponType = switch _currentWeapon do {
-    case (primaryWeapon KH_var_playerUnit): {
-        "PRIMARY";
-    };
-
-    case (handgunWeapon KH_var_playerUnit): {
-        "SECONDARY";
-    };
-
-    case (secondaryWeapon KH_var_playerUnit): {
-        "TERTIARY";
-    };
-
-    default {
-        "";
-    };
-};
-
-private _weaponPosition = if (_weaponType isEqualTo "") then {
+private _weaponPosition = if (_weaponType isEqualTo "NONE") then {
     AGLToASL (positionCameraToWorld [0, 0, 0]);
 }
 else {

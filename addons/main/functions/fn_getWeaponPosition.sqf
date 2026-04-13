@@ -14,6 +14,6 @@ switch _type do {
     };
 
     default {
-        eyePos _unit;
+        ASLToAGL (eyePos _unit);
     };
 };

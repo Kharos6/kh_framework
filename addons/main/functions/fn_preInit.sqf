@@ -1521,7 +1521,7 @@ if isServer then {
 							false, 
 							{
 								params ["_unit"];
-								[_unit] call (_unit getVariable "KH_var_headlessClientTransferInit");
+								[_unit] call (_unit getVariable ["KH_var_headlessClientTransferInit", {}]);
 							}
 						] call KH_fnc_setOwnership;
 					};
@@ -1533,7 +1533,7 @@ if isServer then {
 							true, 
 							{
 								params ["_unit"];
-								[_unit] call (_unit getVariable "KH_var_headlessClientTransferInit");
+								[_unit] call (_unit getVariable ["KH_var_headlessClientTransferInit", {}]);
 							}
 						] call KH_fnc_setOwnership;
 					};
@@ -1746,10 +1746,10 @@ if isServer then {
 		{
 			if (KH_var_adminMachine isNotEqualTo clientOwner) then {
 				{
-					_x setVariable ["KH_var_playerViewDistance", _x getVariable "KH_var_playerViewDistance", KH_var_adminMachine];
-					_x setVariable ["KH_var_playerAspectRatio", _x getVariable "KH_var_playerAspectRatio", KH_var_adminMachine];
-					_x setVariable ["KH_var_playerCameraPosition", _x getVariable "KH_var_playerCameraPosition", KH_var_adminMachine];
-					_x setVariable ["KH_var_playerCameraDirection", _x getVariable "KH_var_playerCameraDirection", KH_var_adminMachine];
+					_x setVariable ["KH_var_playerViewDistance", _x getVariable ["KH_var_playerViewDistance", 999999], KH_var_adminMachine];
+					_x setVariable ["KH_var_playerAspectRatio", _x getVariable ["KH_var_playerAspectRatio", 1.77778], KH_var_adminMachine];
+					_x setVariable ["KH_var_playerCameraPosition", _x getVariable ["KH_var_playerCameraPosition", [0, 0, 0]], KH_var_adminMachine];
+					_x setVariable ["KH_var_playerCameraDirection", _x getVariable ["KH_var_playerCameraDirection", [0, 1, 0]], KH_var_adminMachine];
 				} forEach KH_var_allPlayerUnits;
 			};
 		},
@@ -1866,7 +1866,7 @@ if hasInterface then {
 						break;
 					};
 				} forEach [
-					_weaponsConfigParent >> (goggles _unit),
+					configFile >> "CfgGlasses" >> (goggles _unit),
 					_weaponsConfigParent >> (hmd _unit),
 					_weaponsConfigParent >> (headgear _unit),
 					configFile >> "CfgVehicles" >> (backpack _unit), 
@@ -1896,7 +1896,7 @@ if hasInterface then {
 								break;
 							};
 						} forEach [
-							_weaponsConfigParent >> (goggles _unit),
+							configFile >> "CfgGlasses" >> (goggles _unit),
 							_weaponsConfigParent >> (hmd _unit),
 							_weaponsConfigParent >> (headgear _unit),
 							configFile >> "CfgVehicles" >> (backpack _unit), 

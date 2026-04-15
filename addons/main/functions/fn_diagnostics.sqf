@@ -186,7 +186,7 @@ if _state then {
 			private _worldX = (worldSize * 0.0033);
 			private _worldY = (worldSize * 0.0065);
 			private _worldYInterval = (_worldY * 2.45);
-			private _serverOutput = ["SERVER - FPS: ", _serverFramerate, ", LOCAL UNITS: ", missionNamespace getVariable ["KH_var_diagnosticsLocalUnitsServer", 1]] joinString "";
+			private _serverOutput = ["SERVER - FPS: ", _serverFramerate, ", LOCAL UNITS: ", missionNamespace getVariable ["KH_var_diagnosticsLocalUnitsServer", 0]] joinString "";
 			private _markerName = "KH_mrk_diagnosticsIdServer";
 			KH_var_diagnosticsCurrentMarkers pushBackUnique _markerName;
 			KH_var_diagnosticsAllMarkers pushBackUnique _markerName;
@@ -223,7 +223,7 @@ if _state then {
 				private _framerate = _x getVariable ["KH_var_diagnosticsFramerate", 1];
 				
 				if !(_x isNil "KH_var_diagnosticsLocalUnits") then {
-					_output = [name _x, " - FPS: ", _framerate, ", LOCAL UNITS: ", _x getVariable "KH_var_diagnosticsLocalUnits"] joinString "";
+					_output = [name _x, " - FPS: ", _framerate, ", LOCAL UNITS: ", _x getVariable ["KH_var_diagnosticsLocalUnits", 0]] joinString "";
 				}
 				else {
 					_output = [name _x, " - FPS: ", _framerate] joinString "";

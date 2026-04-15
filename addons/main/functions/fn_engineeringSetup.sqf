@@ -28,7 +28,7 @@ if _continue then {
         [],
         {
             params ["_unit", "_selection", "_damage", "_source", "_projectile", "_hitPartIndex", "_instigator", "_hitPoint", "_directHit", "_context"];
-            if !(_unit getVariable "KH_var_engineeringHandling") exitWith {};
+            if !(_unit getVariable ["KH_var_engineeringHandling", false]) exitWith {};
             _hitPoint = toLowerANSI _hitPoint;
 
             if ((_context isEqualTo 0) && (_projectile isEqualTo "") && (isNull _source) && (isNull _instigator)) exitWith {
@@ -46,16 +46,16 @@ if _continue then {
             };
 
             if (_projectile isEqualTo "") then {
-                _damage = _damage * (_unit getVariable "KH_var_engineeringImpactDamageMultiplier");
+                _damage = _damage * (_unit getVariable ["KH_var_engineeringImpactDamageMultiplier", 1]);
             };
 
-            private _hitPointDamageMultiplier = (_unit getVariable "KH_var_engineeringHitPointDamageMultipliers") get _hitPoint;
+            private _hitPointDamageMultiplier = (_unit getVariable ["KH_var_engineeringHitPointDamageMultipliers", createHashMap]) get _hitPoint;
             
             if !_totalDamage then {
-                (_currentDamage + (_damage * ([1, _hitPointDamageMultiplier] select !(isNil "_hitPointDamageMultiplier")) * (_unit getVariable "KH_var_engineeringDamageMultiplier"))) min ([1, 0.75] select ((_unit getVariable "KH_var_engineeringRecoverable") && (_hitPoint isEqualTo "hithull")));
+                (_currentDamage + (_damage * ([1, _hitPointDamageMultiplier] select !(isNil "_hitPointDamageMultiplier")) * (_unit getVariable ["KH_var_engineeringDamageMultiplier", 1]))) min ([1, 0.75] select ((_unit getVariable ["KH_var_engineeringRecoverable", false]) && (_hitPoint isEqualTo "hithull")));
             }
             else {
-                (_currentDamage + (_damage * (_unit getVariable "KH_var_engineeringTotalDamageMultiplier") * (_unit getVariable "KH_var_engineeringDamageMultiplier"))) min ([1, 0.75] select (_unit getVariable "KH_var_engineeringRecoverable"));
+                (_currentDamage + (_damage * (_unit getVariable ["KH_var_engineeringTotalDamageMultiplier", 1]) * (_unit getVariable ["KH_var_engineeringDamageMultiplier", 1]))) min ([1, 0.75] select (_unit getVariable ["KH_var_engineeringRecoverable", false]));
             };
         }
     ] call KH_fnc_addEventHandler;

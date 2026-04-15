@@ -2174,7 +2174,6 @@ if hasInterface then {
 			if (KH_var_uiContextExecutionStack isNotEqualTo []) then {
 				{
 					_x params ["_arguments", "_function", "_id"];
-					private _uiContext = true;
 
 					missionNamespace setVariable [
 						_id, 

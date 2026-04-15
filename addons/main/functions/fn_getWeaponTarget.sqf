@@ -38,8 +38,8 @@ else {
 
 private _weaponTarget = ([
     _weaponPosition,
-    if (_currentWeapon isNotEqualTo "") then {
-        _weaponPosition vectorAdd ((KH_var_playerUnit weaponDirection _currentWeapon) vectorMultiply viewDistance);
+    if (_weaponType isNotEqualTo "NONE") then {
+        _weaponPosition vectorAdd ((KH_var_playerUnit weaponDirection (currentWeapon KH_var_playerUnit)) vectorMultiply viewDistance);
     }
     else {
         _weaponPosition vectorAdd ((getCameraViewDirection KH_var_playerUnit) vectorMultiply viewDistance);

@@ -3,22 +3,17 @@ params ["_arguments", ["_function", {}, [{}]]];
 if hasInterface then {
     private _id = generateUid;
 
-    if !(isNil "_uiContext") then {
-        if _uiContext then {
-            [
-                [_arguments, _function, _id],
-                {
-                    params ["_arguments", "_function", "_id"];
-                    KH_var_uiContextExecutionStack pushBack [_arguments, _function, _id];
-                },
-                true,
-                "-1",
-                false
-            ] call KH_fnc_execute;
-        }
-        else {
-            KH_var_uiContextExecutionStack pushBack [_arguments, _function, _id];
-        };
+    if isUIContext then {
+        [
+            [_arguments, _function, _id],
+            {
+                params ["_arguments", "_function", "_id"];
+                KH_var_uiContextExecutionStack pushBack [_arguments, _function, _id];
+            },
+            true,
+            "-1",
+            false
+        ] call KH_fnc_execute;
     }
     else {
         KH_var_uiContextExecutionStack pushBack [_arguments, _function, _id];

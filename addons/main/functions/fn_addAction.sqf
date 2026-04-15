@@ -168,7 +168,7 @@ if !(missionNamespace getVariable _actionExistenceId) exitWith {
 };
 
 private _parsedConditionExist = if (_firstCall && (_condition isEqualType [])) then {
-    _condition params [["_conditionExist", {}, ["", [], {}]]];
+    _condition params [["_conditionExist", {true;}, ["", [], {}]]];
 
     if (_conditionExist isNotEqualTo {}) then {
         switch (typeName _conditionExist) do {
@@ -266,15 +266,10 @@ if !_continue exitWith {
 };
 
 private _functionTerminate = if (_function isEqualType []) then {
-    if ((count _function) isEqualTo 6) then {
-        private _thisFunction = _function param [5];
-
-        if !(isNil "_thisFunction") then {
-            if (_thisFunction isNotEqualTo {}) then {
-                _thisFunction;
-            };
-        };
-    };
+    _function param [5, {}, [{}]];
+}
+else {
+    {};
 };
 
 private _actionHandler = [
@@ -1762,21 +1757,19 @@ if !(isNil "_parsedConditionExist") then {
     ] call KH_fnc_execute;
 };
 
-if !(isNil "_functionTerminate") then {
-    [
-        "CBA",
-        "KH_eve_handlerRemoved",
-        [_arguments, _functionTerminate, _actionExistenceId],
-        {
-            params ["_handler"];
-            _args params ["_arguments", "_functionTerminate", "_actionExistenceId"];
+[
+    "CBA",
+    "KH_eve_handlerRemoved",
+    [_arguments, _functionTerminate, _actionExistenceId],
+    {
+        params ["_handler"];
+        _args params ["_arguments", "_functionTerminate", "_actionExistenceId"];
 
-            if ((_handler select 1) isEqualTo _actionExistenceId) then {
-                _arguments call _functionTerminate;
-                ["KH_eve_handlerRemoved", _handlerId select 2] call CBA_fnc_removeEventHandler;
-            };
-        }
-    ] call KH_fnc_addEventHandler;
-};
+        if ((_handler select 1) isEqualTo _actionExistenceId) then {
+            _arguments call _functionTerminate;
+            ["KH_eve_handlerRemoved", _handlerId select 2] call CBA_fnc_removeEventHandler;
+        };
+    }
+] call KH_fnc_addEventHandler;
 
 [missionNamespace, _actionExistenceId, true];

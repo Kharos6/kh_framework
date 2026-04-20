@@ -35,15 +35,16 @@ if _continue then {
                 _damage;
             };
 
-            private _totalDamage = false;
+            private _totalDamage = _context isEqualTo 0;
 
-            private _currentDamage = if (_selection isNotEqualTo "") then {
-                _unit getHitIndex _hitPartIndex;
+            private _currentDamage = if _totalDamage then {
+                damage _unit;
             } 
             else {
-                _totalDamage = true;
-                damage _unit;
+                _unit getHitIndex _hitPartIndex;
             };
+
+            _damage = (_damage - _currentDamage) max 0;
 
             if (_projectile isEqualTo "") then {
                 _damage = _damage * (_unit getVariable ["KH_var_engineeringImpactDamageMultiplier", 1]);

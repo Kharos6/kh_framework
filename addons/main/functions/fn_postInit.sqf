@@ -1720,7 +1720,7 @@ isNil {
 										{
 											params ["_control", "_controlBackground"];
 
-											if ((KH_var_healthDisplay isNotEqualTo "NONE") && !visibleMap && !dialog && (isNull curatorCamera)) then {
+											if ((KH_var_healthDisplay isNotEqualTo "NONE") && (KH_var_playerUnit getVariable ["KH_var_medicalInitComplete", false]) && !visibleMap && !dialog && (isNull curatorCamera)) then {
 												if (KH_var_healthDisplayHideFullHealth && ((damage KH_var_playerUnit) isEqualTo 0)) then {
 													_control ctrlShow false;
 													_controlBackground ctrlShow false;

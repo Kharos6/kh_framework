@@ -12,10 +12,10 @@ if (_lod isEqualTo []) exitWith {
 private _projectile = createVehicle [
     _ammo, 
     if (_selection isEqualTo "") then {
-        ASLToATL (AGLToASL (unitAimPosition _entity));
+        ASLToATL (AGLToASL (unitAimPositionVisual _entity));
     }
     else {
-        ASLToATL (_entity modelToWorldWorld (selectionPosition [_entity, _selection, (_lod select 0) select 0, false, "AveragePoint"]));
+        ASLToATL (_entity modelToWorldVisualWorld (selectionPosition [_entity, _selection, (_lod select 0) select 0, false, "AveragePoint"]));
     },
     [], 
     0, 

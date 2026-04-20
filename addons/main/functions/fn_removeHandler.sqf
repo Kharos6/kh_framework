@@ -1,3 +1,11 @@
+if ((_this isEqualTypeAll []) && ((count _this) > 1)) exitWith {
+    {
+        [_x] call KH_fnc_removeHandler;
+    } forEach _this;
+    
+    nil;
+};
+
 params [["_id", [], [[]]]];
 if (_id isEqualTo []) exitWith {};
 
@@ -5,6 +13,8 @@ if (_id isEqualTypeAll []) exitWith {
     {
         [_x] call KH_fnc_removeHandler;
     } forEach _id;
+
+    nil;
 };
 
 if ((_id select 1) isEqualType []) then {

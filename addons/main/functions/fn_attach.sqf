@@ -54,7 +54,17 @@ if _softAttach exitWith {
 
     private _attachHandlerId = generateUid;
     missionNamespace setVariable [_attachHandlerId, true];
-    _entity setPhysicsCollisionFlag false;
+
+    [
+        [_entity],
+        {
+            params ["_entity"];
+            _entity setPhysicsCollisionFlag false;
+        },
+        "GLOBAL",
+        true,
+        false
+    ] call KH_fnc_execute;
 
     if (_position isEqualType true) then {
         _position = if _position then {
@@ -190,7 +200,17 @@ if _softAttach exitWith {
                     deleteVehicle _x;
                 } forEach _roadways;
         
-                _entity setPhysicsCollisionFlag true;
+                [
+                    [_entity],
+                    {
+                        params ["_entity"];
+                        _entity setPhysicsCollisionFlag true;
+                    },
+                    "GLOBAL",
+                    true,
+                    false
+                ] call KH_fnc_execute;
+
                 _entity setVariable ["KH_var_attachLocalPosition", []];
                 _entity setVariable ["KH_var_attachFallVelocity", 0];
                 _entity setVariable ["KH_var_attachCurrentAnimationState", ""];

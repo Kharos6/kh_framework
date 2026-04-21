@@ -25,7 +25,7 @@ else {
 
                 {
                     if (_unit isEqualTo (_vehicle turretUnit _x)) then {
-                        _result = [_vehicle, "TURRET", _x];
+                        _return = [_vehicle, "TURRET", _x];
                         break;
                     };
                 } forEach (allTurrets _vehicle);

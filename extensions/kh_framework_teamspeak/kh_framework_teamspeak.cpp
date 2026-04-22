@@ -1076,15 +1076,9 @@ namespace AudioEffects {
         
         const float pitch_ratio = std::pow(2.0f, semitones / 12.0f);
         
-        // Tukey window (tapered cosine) for smoother transitions than Hann
-        auto tukey_window = [](float phase, float alpha = 0.5f) -> float {
-            if (phase < alpha / 2.0f) {
-                return 0.5f * (1.0f + std::cos(TWO_PI * (phase / alpha - 0.5f)));
-            } else if (phase < 1.0f - alpha / 2.0f) {
-                return 1.0f;
-            } else {
-                return 0.5f * (1.0f + std::cos(TWO_PI * ((phase - 1.0f) / alpha + 0.5f)));
-            }
+        // Hann window for constant-sum overlap at 50%
+        auto hann_window = [](float phase) -> float {
+            return 0.5f * (1.0f - std::cos(TWO_PI * phase));
         };
         
         // Wrap position to buffer bounds
@@ -1115,41 +1109,39 @@ namespace AudioEffects {
             return ((c3 * frac + c2) * frac + c1) * frac + c0;
         };
         
-        // Reset a grain's read position with slight randomization to reduce coherent artifacts
-        auto reset_grain = [&](float& read_pos, float offset_factor) {
-            float base_offset = grain_size_f * 1.5f;
-            read_pos = wrap(write_pos_f - base_offset + offset_factor * grain_size_f * 0.25f);
+        // Reset a grain's read position to one grain behind the write head
+        auto reset_grain = [&](float& read_pos) {
+            read_pos = wrap(write_pos_f - grain_size_f);
         };
         
-        // Initialize on first use - use 4 grains at 25% phase offsets
         if (!state.pitch_initialized) {
-            reset_grain(state.pitch_read_pos_a, 0.0f);
+            reset_grain(state.pitch_read_pos_a);
             state.pitch_phase_a = 0.0f;
-            reset_grain(state.pitch_read_pos_b, 0.5f);
-            state.pitch_phase_b = 0.25f;
+            reset_grain(state.pitch_read_pos_b);
+            state.pitch_phase_b = 0.5f;
             state.pitch_initialized = true;
         }
         
-        // --- Process Grain A ---
-        float weight_a = tukey_window(state.pitch_phase_a, 0.5f);
+        // Grain A
+        float weight_a = hann_window(state.pitch_phase_a);
         float sample_a = read_cubic(state.pitch_read_pos_a);
         state.pitch_read_pos_a = wrap(state.pitch_read_pos_a + pitch_ratio);
         state.pitch_phase_a += phase_inc;
         
         if (state.pitch_phase_a >= 1.0f) {
             state.pitch_phase_a -= 1.0f;
-            reset_grain(state.pitch_read_pos_a, 0.0f);
+            reset_grain(state.pitch_read_pos_a);
         }
         
-        // --- Process Grain B (offset by 0.25 phase) ---
-        float weight_b = tukey_window(state.pitch_phase_b, 0.5f);
+        // Grain B
+        float weight_b = hann_window(state.pitch_phase_b);
         float sample_b = read_cubic(state.pitch_read_pos_b);
         state.pitch_read_pos_b = wrap(state.pitch_read_pos_b + pitch_ratio);
         state.pitch_phase_b += phase_inc;
         
         if (state.pitch_phase_b >= 1.0f) {
             state.pitch_phase_b -= 1.0f;
-            reset_grain(state.pitch_read_pos_b, 0.5f);
+            reset_grain(state.pitch_read_pos_b);
         }
 
         float total_weight = weight_a + weight_b;
@@ -1348,8 +1340,8 @@ namespace AudioEffects {
                                   int sample_rate) {
         if (amount <= 0.0f) return sample;
         
-        // Cutoff frequency scales with amount: 80Hz (subtle) to 200Hz (full)
-        float cutoff = 80.0f + amount * 120.0f;
+        // Cutoff: 150-400Hz to capture voice fundamentals
+        float cutoff = 150.0f + amount * 250.0f;
         float rc = 1.0f / (cutoff * TWO_PI);
         float dt = 1.0f / static_cast<float>(sample_rate);
         float alpha = dt / (rc + dt);
@@ -1359,13 +1351,12 @@ namespace AudioEffects {
         lp_prev2 = lp_prev2 + alpha * (lp_prev1 - lp_prev2);
         float bass = lp_prev2;
         
-        // Boost gain: 1x to 4x based on amount
-        float boost_gain = 1.0f + amount * 3.0f;
+        // Boost gain: 2x to 8x based on amount
+        float boost_gain = 2.0f + amount * 6.0f;
         float boosted_bass = bass * boost_gain;
         
-        // Soft saturation for warmth and to prevent harsh clipping
-        // tanh provides smooth limiting
-        boosted_bass = std::tanh(boosted_bass * 1.5f) / 1.5f;
+        // Gentle soft clipping
+        boosted_bass = std::tanh(boosted_bass);
         
         // Replace original bass with boosted bass
         float output = sample - bass + boosted_bass;

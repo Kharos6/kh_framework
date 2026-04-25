@@ -104,16 +104,16 @@ if _softAttach exitWith {
         [],
         {
             private _unit = param [0];
-            private _selection = param [1];
             private _projectile = param [4];
             private _hitPartIndex = param [5];
+            private _context = param [9];
 
             if (_projectile isEqualTo "") then {
-                if (_selection isNotEqualTo "") then {
-                    _unit getHitIndex _hitPartIndex;
+                if (_context isEqualTo 0) then {
+                    damage _unit;
                 } 
                 else {
-                    damage _unit;
+                    _unit getHitIndex _hitPartIndex;
                 };
             };
         }

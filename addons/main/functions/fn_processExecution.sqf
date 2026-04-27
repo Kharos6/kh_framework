@@ -119,12 +119,13 @@ switch _specialType do {
         };
 
         _entity setVariable [_persistentExecutionId, true, true];
-        ["KH_eve_execution", [[_entity], {(_this select 0) setVariable ["KH_var_initialPersistencyCall", true];}, clientOwner, _unscheduled], _target, false] call KH_fnc_triggerCbaEvent;
+        private _initialId = generateUid;
+        ["KH_eve_execution", [[_entity, _initialId], {(_this select 0) setVariable [_this select 1, true];}, clientOwner, _unscheduled], _target, false] call KH_fnc_triggerCbaEvent;
         ["KH_eve_execution", [_arguments, _function, clientOwner, _unscheduled], _target, false] call KH_fnc_triggerCbaEvent;
 
         [
             "KH_eve_persistentExecutionSetup", 
-            [_arguments, _function, _entity, _sendoffArguments, [_sendoffFunction, false] call KH_fnc_serializeFunction, clientOwner, _unscheduled, _persistentExecutionId],
+            [_arguments, _function, _entity, _sendoffArguments, [_sendoffFunction, false] call KH_fnc_serializeFunction, clientOwner, _unscheduled, _persistentExecutionId, _initialId],
             "SERVER",
             false
         ] call KH_fnc_triggerCbaEvent;

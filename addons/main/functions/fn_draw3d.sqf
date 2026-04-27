@@ -136,10 +136,6 @@ switch _type do {
                 };
             };
 
-            if (_beamMaxLength isEqualTo 0) then {
-                _beamMaxLength = _start vectorDistance _end;
-            };
-
             if (_conditionFunction isEqualTo {}) then {
                 KH_var_drawUi3dOrphanExecutionStack pushBack ["LASER", [_start, _end, _beamColor, _dotColor, _dotSize, _beamThickness, _beamMaxLength, _ir]];
             }
@@ -194,10 +190,6 @@ switch _type do {
                             else {
                                 _start vectorFromTo _end;
                             };
-                        };
-
-                        if (_beamMaxLength isEqualTo 0) then {
-                            _beamMaxLength = _start vectorDistance _end;
                         };
 
                         drawLaser [_start, _end, _beamColor, _dotColor, _dotSize, _beamThickness, _beamMaxLength, _ir];
@@ -279,7 +271,7 @@ switch _type do {
                         _args params ["_texture", "_color", "_position", "_width", "_height", "_angle", "_text", "_shadow", "_textSize", "_font", "_textAlign", "_drawSideArrows", "_offsetX", "_offsetY"];
 
                         if (_position isEqualType objNull) then {
-                            _position = _start modelToWorldVisual [0, 0, 0];
+                            _position = _position modelToWorldVisual [0, 0, 0];
                         }
                         else {
                             if ((_position select 0) isEqualType objNull) then {
@@ -299,7 +291,7 @@ switch _type do {
                     [_texture, _color, _position, _width, _height, _angle, _text, _shadow, _textSize, _font, _textAlign, _drawSideArrows, _offsetX, _offsetY],
                     {
                         if (!_drawSideArrows && ((worldToScreen _position) isEqualTo [])) exitWith {};
-                        drawLine3D _args;
+                        drawIcon3D _args;
                     }
                 ] call KH_fnc_addEventHandler;
             };

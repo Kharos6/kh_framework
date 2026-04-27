@@ -120,6 +120,7 @@ class CfgFunctions
 			class recoverDisconnectedPlayers {headerType = -1;};
 			class remoteExec {headerType = -1;};
 			class removeHandler {headerType = -1;};
+			class rotateVector {headerType = -1;};
 			class saveControlAttributes {headerType = -1;};
 			class saveGroupPersistency {headerType = -1;};
 			class saveMissionPersistency {headerType = -1;};

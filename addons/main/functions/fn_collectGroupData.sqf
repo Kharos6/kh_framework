@@ -116,7 +116,7 @@ private _result = [
                     private _object = objNull;
 
                     private _entries = if (_roadwayTaskIntersection isNotEqualTo []) then {
-                        _object = _roadwayTaskIntersection select 3;
+                        _object = (_roadwayTaskIntersection select 0) select 3;
                         private _currentEntries = [];
                         
                         for "_i" from 0 to 999 do {

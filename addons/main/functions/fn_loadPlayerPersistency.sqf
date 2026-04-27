@@ -166,7 +166,7 @@ KH_var_playerPersistencyVariableName = KH_var_khDataNamespace readKhData [["play
 
 	if !(isNil "_attributes") then {
 		if ((isNil "_initialLoadout") && (_x getVariable ["KH_var_allowPersistency", true])) then {
-			KH_var_initialPlayerLoadouts set [_uid, (_attributes select 5) select 21];
+			KH_var_initialPlayerLoadouts set [_uid, ((_attributes select 0) select 5) select 21];
 		};
 
 		if (_x getVariable ["KH_var_allowPersistency", true]) then {

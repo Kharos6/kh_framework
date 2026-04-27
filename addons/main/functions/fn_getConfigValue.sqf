@@ -49,7 +49,7 @@ if (_type isEqualTo "") then {
         };
 
         case (isText _config): {
-            getText config;
+            getText _config;
         };
 
         case (isArray _config): {

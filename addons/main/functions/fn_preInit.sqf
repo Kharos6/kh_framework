@@ -194,7 +194,7 @@ if (KH_var_remoteExecCommandsMode isEqualTo 1) then {
 	{
 		if (isNumber (_x >> "allowedTargets")) then {
 			if ((getNumber (_x >> "allowedTargets")) isNotEqualTo 0) then {
-				KH_var_remoteExecCommandspBlacklist set [toLowerANSI (configName _x), true];
+				KH_var_remoteExecCommandsBlacklist set [toLowerANSI (configName _x), true];
 			};
 		};
 
@@ -208,13 +208,13 @@ if (KH_var_remoteExecCommandsMode isEqualTo 1) then {
 	{
 		if (isNumber (_x >> "allowedTargets")) then {
 			if ((getNumber (_x >> "allowedTargets")) isNotEqualTo 0) then {
-				KH_var_remoteExecCommandspBlacklist set [toLowerANSI (configName _x), true, true];
+				KH_var_remoteExecCommandsBlacklist set [toLowerANSI (configName _x), true, true];
 			};
 		};
 
 		if (isNumber (_x >> "jip")) then {
 			if ((getNumber (_x >> "jip")) isEqualTo 0) then {
-				KH_var_remoteExecCommandsJippBlacklist set [toLowerANSI (configName _x), true, true];
+				KH_var_remoteExecCommandsJipBlacklist set [toLowerANSI (configName _x), true, true];
 			};
 		};
 	} forEach ("true" configClasses (missionConfigFile >> "CfgRemoteExec" >> "Commands"));
@@ -224,13 +224,13 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 	{
 		if (isNumber (_x >> "allowedTargets")) then {
 			if ((getNumber (_x >> "allowedTargets")) isNotEqualTo 0) then {
-				KH_var_remoteExecCommandsBlacklist set [toLowerANSI (configName _x), true];
+				KH_var_remoteExecFunctionsBlacklist set [toLowerANSI (configName _x), true];
 			};
 		};
 
 		if (isNumber (_x >> "jip")) then {
 			if ((getNumber (_x >> "jip")) isEqualTo 0) then {
-				KH_var_remoteExecCommandsJipBlacklist set [toLowerANSI (configName _x), true];
+				KH_var_remoteExecFunctionsJipBlacklist set [toLowerANSI (configName _x), true];
 			};
 		};
 	} forEach ("true" configClasses (configFile >> "CfgRemoteExec" >> "Functions"));
@@ -1229,7 +1229,7 @@ if isServer then {
 		"KH_eve_persistentExecutionSetup",
 		[],
 		{
-			params ["_arguments", "_function", "_target", "_sendoffArguments", "_sendoffFunction", "_caller", "_unscheduled", "_persistentExecutionId"];
+			params ["_arguments", "_function", "_target", "_sendoffArguments", "_sendoffFunction", "_caller", "_unscheduled", "_persistentExecutionId", "_initialId"];
 			private _persistentEventId = ["KH_var_persistentEventId", _persistentExecutionId] joinString "_";
 
 			if (_target isNil _persistentEventId) then {
@@ -1241,6 +1241,7 @@ if isServer then {
 						[
 							_target,
 							_persistentEventId,
+							_initialId,
 							[
 								["ENTITY", _target, "LOCAL"],
 								"Local",
@@ -1263,10 +1264,10 @@ if isServer then {
 							]
 						],
 						{
-							params ["_target", "_persistentEventId", "_handlerArguments"];
+							params ["_target", "_persistentEventId", "_initialId", "_handlerArguments"];
 
 							if (local _target) then {
-								if !(_target getVariable ["KH_var_initialPersistencyCall", false]) then {
+								if !(_target getVariable [_initialId, false]) then {
 									(_target getVariable _persistentEventId) params ["_arguments", "_function", "_sendoffArguments", "_sendoffFunction", "_caller", "_unscheduled"];
 									[_arguments, _function, _caller, _unscheduled] call KH_fnc_callSerializedFunction;
 								};
@@ -1396,7 +1397,7 @@ if isServer then {
 					KH_var_allIdMachines set [_id, _machineId];
 					publicVariable "KH_var_allIdMachines";
 					missionNamespace setVariable ["KH_var_steamId", _uid, _machineId];
-					missionNamespace setVariable ["KH_var_directPlayId", _directPlayId, _machineId];
+					missionNamespace setVariable ["KH_var_directPlayId", _id, _machineId];
 					break;
 				};
 			} forEach allUsers;

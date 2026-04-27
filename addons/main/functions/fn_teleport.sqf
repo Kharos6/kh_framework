@@ -21,7 +21,7 @@ if (_rotation isEqualType objNull) then {
 }
 else {
 	if (_rotation isEqualTypeAll 0) then {
-		eulerToVector _rotation;
+		_rotation = eulerToVector _rotation;
 	};
 };
 

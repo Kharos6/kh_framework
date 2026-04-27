@@ -1,5 +1,5 @@
 params [["_state", true, [true]], ["_viewDistance", 0, [0]]];
-KH_var_limitViewDistanceState = true;
+KH_var_limitViewDistanceState = _state;
 publicVariable "KH_var_limitViewDistanceState";
 KH_var_viewDistanceLimit = _viewDistance;
 publicVariable "KH_var_viewDistanceLimit";

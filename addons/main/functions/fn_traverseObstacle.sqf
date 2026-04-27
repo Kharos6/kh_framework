@@ -147,22 +147,6 @@ _unit setVariable ["KH_var_traversalTarget", [_chosenTraversalTarget select 0, (
                     ["KH_TraversalClimb2m", "KH_TraversalVault2m"] select _vault;
                 };
 
-                case ((_height >= 0.25) && (_height < 0.75)): {
-                    ["KH_TraversalClimb0_5m", "KH_TraversalVault0_5m"] select _vault;
-                };
-
-                case ((_height >= 0.75) && (_height < 1.25)): {
-                    ["KH_TraversalClimb1m", "KH_TraversalVault1m"] select _vault;
-                };
-
-                case ((_height >= 1.25) && (_height < 1.75)): {
-                    ["KH_TraversalClimb1_5m", "KH_TraversalVault1_5m"] select _vault;
-                };
-
-                case ((_height >= 1.75) && (_height < 2.25)): {
-                    ["KH_TraversalClimb2m", "KH_TraversalVault2m"] select _vault;
-                };
-
                 case ((_height >= 2.25) && (_height < 2.75)): {
                     ["KH_TraversalClimb2_5m", "KH_TraversalVault2_5m"] select _vault;
                 };

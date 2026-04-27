@@ -11,6 +11,7 @@ private _unitPersistency = KH_var_khDataNamespace readKhData [["unitPersistency_
 
             if !(isNil "_attributes") then {
                 if !(_x getVariable ["KH_var_persistencyTransforms", true]) then {
+                    _overrideAttributes = +_overrideAttributes;
                     _overrideAttributes insert [-1, [26, 27, 28], true];
                 };
 

@@ -70,9 +70,9 @@ if !(isNil "_storedFunction") exitWith {
 		if ((_caller isEqualTo 2) || (_caller isEqualTo clientOwner)) exitWith {};
 		
 		[
-			[_arguments, _function],
+			[_arguments, _function, _unscheduled],
 			{
-				params ["_arguments", "_function"];
+				params ["_arguments", "_function", "_unscheduled"];
 				_argsCallback params ["_storedFunction"];
 
 				if !(isNil "_storedFunction") then { 

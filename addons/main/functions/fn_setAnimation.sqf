@@ -96,9 +96,9 @@ if !((_animation select 0) isEqualType "") then {
         };
 
         [
-            [_unit, _allowVehicle, _currentAnimationSequenceId, _animationType, _currentAnimation],
+            [_unit, _allowVehicle, _allowUnconscious, _currentAnimationSequenceId, _animationType, _currentAnimation],
             {
-                params ["_unit", "_allowVehicle", "_currentAnimationSequenceId", "_animationType", "_currentAnimation"];
+                params ["_unit", "_allowVehicle", "_allowUnconscious", "_currentAnimationSequenceId", "_animationType", "_currentAnimation"];
                 
                 if ((_unit getVariable ["KH_var_currentAnimationSequenceId", ""]) isEqualTo _currentAnimationSequenceId) then {
                     if ((!_allowVehicle && !(isNull (objectParent _unit))) || (!_allowUnconscious && (((lifeState _unit) isEqualTo "INCAPACITATED") || ((lifeState _unit) isEqualTo "UNCONSCIOUS")))) exitWith {};

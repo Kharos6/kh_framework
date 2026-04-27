@@ -99,7 +99,7 @@ private _spawnHandler = [
 							[[0, 1, 0], [0, 0, 1]];
 						};
 						
-						_position vectorAdd [random [(_radius select 0), 0, (_negativeRadius select 0)], random [(_radius select 1), 0, (_negativeRadius select 1)], random [(_radius select 2), 0, (_negativeRadius select 2)]];
+						_position = _position vectorAdd [random [(_radius select 0), 0, (_negativeRadius select 0)], random [(_radius select 1), 0, (_negativeRadius select 1)], random [(_radius select 2), 0, (_negativeRadius select 2)]];
 
 						if !([_position, missionNamespace getVariable [_spawnerCount, 0]] call _condition) then {
 							continue;
@@ -171,7 +171,7 @@ private _spawnHandler = [
 							[[0, 1, 0], [0, 0, 1]];
 						};
 						
-						_position vectorAdd [random [(_radius select 0), 0, (_negativeRadius select 0)], random [(_radius select 1), 0, (_negativeRadius select 1)], random [(_radius select 2), 0, (_negativeRadius select 2)]];
+						_position = _position vectorAdd [random [(_radius select 0), 0, (_negativeRadius select 0)], random [(_radius select 1), 0, (_negativeRadius select 1)], random [(_radius select 2), 0, (_negativeRadius select 2)]];
 
 						if !([_position, missionNamespace getVariable [_spawnerCount, 0]] call _condition) then {
 							continue;
@@ -246,7 +246,7 @@ private _spawnHandler = [
 							[[0, 1, 0], [0, 0, 1]];
 						};
 
-						_position vectorAdd [random [(_radius select 0), 0, (_negativeRadius select 0)], random [(_radius select 1), 0, (_negativeRadius select 1)], random [(_radius select 2), 0, (_negativeRadius select 2)]];
+						_position = _position vectorAdd [random [(_radius select 0), 0, (_negativeRadius select 0)], random [(_radius select 1), 0, (_negativeRadius select 1)], random [(_radius select 2), 0, (_negativeRadius select 2)]];
 
 						if !([_position, missionNamespace getVariable [_spawnerCount, 0]] call _condition) then {
 							continue;
@@ -317,7 +317,7 @@ private _spawnHandler = [
 							[[0, 1, 0], [0, 0, 1]];
 						};
 
-						_position vectorAdd [random [(_radius select 0), 0, (_negativeRadius select 0)], random [(_radius select 1), 0, (_negativeRadius select 1)], random [(_radius select 2), 0, (_negativeRadius select 2)]];
+						_position = _position vectorAdd [random [(_radius select 0), 0, (_negativeRadius select 0)], random [(_radius select 1), 0, (_negativeRadius select 1)], random [(_radius select 2), 0, (_negativeRadius select 2)]];
 
 						if !([_position, missionNamespace getVariable [_spawnerCount, 0]] call _condition) then {
 							continue;
@@ -393,7 +393,7 @@ private _spawnHandler = [
 							[[0, 1, 0], [0, 0, 1]];
 						};
 
-						_position vectorAdd [random [(_radius select 0), 0, (_negativeRadius select 0)], random [(_radius select 1), 0, (_negativeRadius select 1)], random [(_radius select 2), 0, (_negativeRadius select 2)]];
+						_position = _position vectorAdd [random [(_radius select 0), 0, (_negativeRadius select 0)], random [(_radius select 1), 0, (_negativeRadius select 1)], random [(_radius select 2), 0, (_negativeRadius select 2)]];
 
 						if !([_position, missionNamespace getVariable [_spawnerCount, 0]] call _condition) then {
 							continue;
@@ -464,7 +464,7 @@ private _spawnHandler = [
 							[[0, 1, 0], [0, 0, 1]];
 						};
 
-						_position vectorAdd [random [(_radius select 0), 0, (_negativeRadius select 0)], random [(_radius select 1), 0, (_negativeRadius select 1)], random [(_radius select 2), 0, (_negativeRadius select 2)]];
+						_position = _position vectorAdd [random [(_radius select 0), 0, (_negativeRadius select 0)], random [(_radius select 1), 0, (_negativeRadius select 1)], random [(_radius select 2), 0, (_negativeRadius select 2)]];
 						
 						if !([_position, missionNamespace getVariable [_spawnerCount, 0]] call _condition) then {
 							continue;

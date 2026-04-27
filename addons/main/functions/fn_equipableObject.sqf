@@ -173,7 +173,7 @@ if !(isNull _unit) then {
 			
 			if (((attachedTo _object) isNotEqualTo _unit) || !(alive _unit)) then {
 				if _exclusive then {
-					_unit setVariable ["KH_var_carryingObject", false, true];
+					_unit setVariable ["KH_var_equipableObjectExclusive", false, true];
 				};
 
 				[_handlerId] call KH_fnc_removeHandler;

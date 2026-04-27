@@ -24,16 +24,13 @@ if (isNil "_currentVariableHandler") then {
             ] call KH_fnc_execute;
         }
     ] call KH_fnc_addEventHandler;
-}
-else {
-    if _set then {
-        _currentVariableHandler set [_variableName, [_value, _public]];
-    }
-    else {
-        _currentVariableHandler deleteAt _variableName;
-    };
-
-    _object setVariable ["KH_var_respawnVariableHandler", _currentVariableHandler, true];
 };
 
-nil;
+if _set then {
+    _currentVariableHandler set [_variableName, [_value, _public]];
+}
+else {
+    _currentVariableHandler deleteAt _variableName;
+};
+
+_object setVariable ["KH_var_respawnVariableHandler", _currentVariableHandler, true];

@@ -134,7 +134,7 @@ if (_minimalFov >= 360) exitWith {
 
             {
                 if ((_x select 3) isEqualTo _checkerObject) then {
-                    result = true;
+                    _result = true;
                     break;
                 };
             } forEach ([_raycasts] call KH_fnc_raycast);
@@ -229,7 +229,7 @@ if (_raycast isNotEqualTo false) then {
 
         {
             if ((_x select 3) isEqualTo _checkerObject) then {
-                result = true;
+                _result = true;
                 break;
             };
         } forEach ([_raycasts] call KH_fnc_raycast);

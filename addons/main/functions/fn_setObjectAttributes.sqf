@@ -156,19 +156,6 @@ _savedAttributes params [
         _object setPilotLight _light;
         _object setCollisionLight _collisionLight;
         _object allowService _allowedService;
-
-        {
-            _object setAmmo [_x select 3, _x select 6];
-        } forEach _weaponsInfo;
-
-        {
-            _object setPylonLoadout [_x select 0, _x select 3, true];
-        } forEach _pylonsInfo;
-
-        {
-            _object setAmmoOnPylon _x;
-        } forEach _pylonsAmmo;
-
         [_object, _loadout] call KH_fnc_setVehicleLoadout;
         _object setFuelConsumptionCoef _fuelConsumptionCoef;
         _object setWaterLeakiness _waterLeakiness;

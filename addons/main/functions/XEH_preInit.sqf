@@ -1316,10 +1316,10 @@
 ] call CBA_fnc_addSetting;
 
 [
-	"KH_var_absoluteMeleeTackleInstigatorDamageMultiplier",
+	"KH_var_absoluteMeleeTackleDamageMultiplier",
 	"SLIDER",   
 	[
-		"Melee Tackle Instigator Damage Multiplier", 
+		"Melee Tackle Damage Multiplier", 
 		"All melee damage calculations on tacklers are multiplied by this value."
 	], 
 	[
@@ -3318,7 +3318,7 @@
 					private _selectedIndex = param [1, 0];
 
 					if (_selectedIndex isNotEqualTo 0) then {
-						private _language = lbCurSel 109;
+						private _language = lbCurSel 108;
 						private _entry = ([KH_var_quickFunctionsSqf, KH_var_quickFunctionsLua] select _language) get (lbText [109, _selectedIndex]);
 
 						if !(isNil "_entry") then {

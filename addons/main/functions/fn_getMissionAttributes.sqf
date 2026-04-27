@@ -26,7 +26,7 @@
             } forEach [west, east, resistance, civilian];
 
             _allRelations;
-        }
+        },
         call {
             private _allVariables = [];
 

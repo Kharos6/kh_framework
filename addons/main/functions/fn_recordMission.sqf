@@ -143,7 +143,7 @@ if _scenario then {
             };
 
             if _scenario then {
-                _unitDataFinal = call KH_fnc_getMissionAttributes;
+                _scenarioDataFinal = call KH_fnc_getMissionAttributes;
             };
         };
 

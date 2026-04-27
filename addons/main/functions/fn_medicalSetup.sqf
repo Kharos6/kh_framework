@@ -150,11 +150,11 @@ if KH_var_medical then {
                                     KH_var_absoluteDamageMultiplierNeck;
                                 };
 
-                                case "arm": {
+                                case "arms": {
                                     KH_var_absoluteDamageMultiplierArm;
                                 };
 
-                                case "leg": {
+                                case "legs": {
                                     KH_var_absoluteDamageMultiplierLeg;
                                 };
 
@@ -774,7 +774,7 @@ if KH_var_medical then {
                                                 },
                                                 {
                                                     if !("Medikit" in (items _caller)) then {
-                                                        for "_i" from 1 to KH_var_stabilizationRequiredFirstAidKits do {
+                                                        for "_i" from 1 to ([KH_var_stabilizationRequiredFirstAidKits, KH_var_selfStabilizationRequiredFirstAidKits] select (_caller isEqualTo _target)) do {
                                                             _caller removeItem "FirstAidKit";
                                                         };
                                                     };

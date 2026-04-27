@@ -17,16 +17,13 @@ if (_position isEqualType objNull) then {
     _position = _position modelToWorld [0, 0, 0];
 };
 
-_rotation = if (_rotation isEqualType objNull) then {
-    [vectorDir _rotation, vectorUp _rotation];
+if (_rotation isEqualType objNull) then {
+    _rotation = [vectorDir _rotation, vectorUp _rotation];
 }
 else {
 	if (_rotation isEqualTypeAll 0) then {
-		eulerToVector _rotation;
-	}
-    else {
-        _rotation;
-    };
+		_rotation = eulerToVector _rotation;
+	};
 };
 
 [
@@ -43,7 +40,7 @@ else {
                 private _continue = true;
 
                 {
-                    if (_x isEqualType "CAManBase") then {
+                    if (_x isKindOf "CAManBase") then {
                         _continue = false;
                         break;
                     }

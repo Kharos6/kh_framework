@@ -33,7 +33,6 @@ class CfgMovesBasic
         kh_meleeKickPhase = 0;
         kh_meleeTacklePhase = 0;
         kh_meleeMainAction = "";
-        kh_meleeActionGestureExclusive = 0;
         kh_traversal = 0;
         kh_traversalTeleport = 0;
     };
@@ -1725,7 +1724,6 @@ class CfgMovesMaleSdr: CfgMovesBasic
             speed = 0.638298;
             kh_meleeHasAction = 1;
             minPlayTime = 0.9;
-            kh_meleeActionGestureExclusive = 1;
             soundOverride = "Walk";
             soundEdge[] = {0.21, 0.65, 0.9};
             file = "x\kh\addons\main\animations\human\Hum_AbsStaCom_RclRhtLhtMel.rtm";
@@ -1919,7 +1917,6 @@ class CfgMovesMaleSdr: CfgMovesBasic
             speed = 0.810811;
             minPlayTime = 1;
             kh_meleeHasAction = 1;
-            kh_meleeActionGestureExclusive = 1;
             soundOverride = "sprint";
             soundEdge[] = {0.62, 0.83};
             file = "x\kh\addons\main\animations\human\Hum_AbsStaCom_StgHvyBwdLhtMel.rtm";
@@ -1941,7 +1938,6 @@ class CfgMovesMaleSdr: CfgMovesBasic
             speed = 0.9375;
             minPlayTime = 1;
             kh_meleeHasAction = 1;
-            kh_meleeActionGestureExclusive = 1;
             soundOverride = "sprint";
             soundEdge[] = {0.85};
             file = "x\kh\addons\main\animations\human\Hum_AbsStaCom_StgHvyFwdLhtMel.rtm";
@@ -1963,7 +1959,6 @@ class CfgMovesMaleSdr: CfgMovesBasic
             speed = 0.810811;
             minPlayTime = 1;
             kh_meleeHasAction = 1;
-            kh_meleeActionGestureExclusive = 1;
             soundOverride = "sprint";
             soundEdge[] = {0.54, 0.78};
             file = "x\kh\addons\main\animations\human\Hum_AbsStaCom_StgHvyLwdLhtMel.rtm";
@@ -1985,7 +1980,6 @@ class CfgMovesMaleSdr: CfgMovesBasic
             speed = 0.909091;
             minPlayTime = 1;
             kh_meleeHasAction = 1;
-            kh_meleeActionGestureExclusive = 1;
             soundOverride = "sprint";
             soundEdge[] = {0.45, 0.78};
             file = "x\kh\addons\main\animations\human\Hum_AbsStaCom_StgHvyRwdLhtMel.rtm";
@@ -2007,7 +2001,6 @@ class CfgMovesMaleSdr: CfgMovesBasic
             speed = 0.588235;
             minPlayTime = 0.9;
             kh_meleeHasAction = 1;
-            kh_meleeActionGestureExclusive = 1;
             soundOverride = "Walk";
             soundEdge[] = {0.15, 0.5, 0.76};
             file = "x\kh\addons\main\animations\human\Hum_AbsStaCom_StgLhtBwdLhtMel.rtm";
@@ -2022,7 +2015,6 @@ class CfgMovesMaleSdr: CfgMovesBasic
             speed = 0.491803;
             minPlayTime = 0.9;
             kh_meleeHasAction = 1;
-            kh_meleeActionGestureExclusive = 1;
             soundOverride = "Walk";
             soundEdge[] = {0.15, 0.4, 0.65};
             file = "x\kh\addons\main\animations\human\Hum_AbsStaCom_StgLhtFwdLhtMel.rtm";
@@ -2037,7 +2029,6 @@ class CfgMovesMaleSdr: CfgMovesBasic
             speed = 0.731707;
             minPlayTime = 0.9;
             kh_meleeHasAction = 1;
-            kh_meleeActionGestureExclusive = 1;
             soundOverride = "Walk";
             soundEdge[] = {0.31, 0.58, 0.82};
             file = "x\kh\addons\main\animations\human\Hum_AbsStaCom_StgLhtLwdLhtMel.rtm";
@@ -2052,7 +2043,6 @@ class CfgMovesMaleSdr: CfgMovesBasic
             speed = 0.666667;
             minPlayTime = 0.9;
             kh_meleeHasAction = 1;
-            kh_meleeActionGestureExclusive = 1;
             soundOverride = "Walk";
             soundEdge[] = {0.26, 0.57, 0.88};
             file = "x\kh\addons\main\animations\human\Hum_AbsStaCom_StgLhtRwdLhtMel.rtm";
@@ -3449,7 +3439,6 @@ class CfgMovesMaleSdr: CfgMovesBasic
             speed = 0.348837;
             minPlayTime = 0.6976;
             kh_meleeHasAction = 1;
-            kh_meleeActionGestureExclusive = 1;
             soundOverride = "Walk";
             soundEdge[] = {0.25, 0.5, 0.81, 0.9};
             file = "x\kh\addons\main\animations\human\Hum_AbsStaCom_StgHvyBwdLhtMel_Tra_AbsStaCom_IdlLhtMel.rtm";
@@ -3472,7 +3461,6 @@ class CfgMovesMaleSdr: CfgMovesBasic
             speed = 0.319149;
             minPlayTime = 0.6808;
             kh_meleeHasAction = 1;
-            kh_meleeActionGestureExclusive = 1;
             soundOverride = "Walk";
             soundEdge[] = {0.54, 0.78, 0.93};
             file = "x\kh\addons\main\animations\human\Hum_AbsStaCom_StgHvyFwdLhtMel_Tra_AbsStaCom_IdlLhtMel.rtm";
@@ -3495,7 +3483,6 @@ class CfgMovesMaleSdr: CfgMovesBasic
             speed = 0.340909;
             minPlayTime = 0.6818;
             kh_meleeHasAction = 1;
-            kh_meleeActionGestureExclusive = 1;
             soundOverride = "Walk";
             soundEdge[] = {0.48, 0.72, 0.9};
             file = "x\kh\addons\main\animations\human\Hum_AbsStaCom_StgHvyLwdLhtMel_Tra_AbsStaCom_IdlLhtMel.rtm";
@@ -3518,7 +3505,6 @@ class CfgMovesMaleSdr: CfgMovesBasic
             speed = 0.361446;
             minPlayTime = 0.6867;
             kh_meleeHasAction = 1;
-            kh_meleeActionGestureExclusive = 1;
             soundOverride = "Walk";
             soundEdge[] = {0.6, 0.72, 0.87};
             file = "x\kh\addons\main\animations\human\Hum_AbsStaCom_StgHvyRwdLhtMel_Tra_AbsStaCom_IdlLhtMel.rtm";

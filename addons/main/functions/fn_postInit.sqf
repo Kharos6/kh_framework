@@ -118,6 +118,9 @@ isNil {
 							diag_log "KH FRAMEWORK - MISSION STARTED";
 						};
 
+						KH_var_missionInitialized = true;
+						publicVariable "KH_var_missionInitialized";
+
 						[
 							[],
 							{
@@ -327,6 +330,8 @@ isNil {
 							{
 								params ["_unit"];
 								[[_unit, ""], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
+								if (_unit getVariable ["KH_var_meleeSetupComplete", false]) exitWith {};
+								_unit setVariable ["KH_var_meleeSetupComplete", true, true];
 								
 								{
 									[
@@ -1169,6 +1174,8 @@ isNil {
 				] call KH_fnc_execute;
 			}
 			else {
+				"KH_var_displayLayer" cutRsc ["KH_ResourceKHDisplay", "PLAIN", -1, true, true];
+
 				[
 					[],
 					{
@@ -1240,7 +1247,7 @@ isNil {
 						] call KH_fnc_execute;
 					},
 					true,
-					{KH_var_clientRegistered;},
+					{KH_var_clientRegistered && KH_var_missionInitialized;},
 					false
 				] call KH_fnc_execute;
 			};
@@ -1251,8 +1258,6 @@ isNil {
 				[
 					[],
 					{
-						"KH_var_displayLayer" cutRsc ["KH_ResourceKHDisplay", "PLAIN", -1, true, true];
-
 						{
 							call _x;
 						} forEach KH_var_playerMissionLoadStack;
@@ -1788,7 +1793,7 @@ isNil {
 						] call KH_fnc_execute;
 					},
 					true,
-					{KH_var_clientRegistered;},
+					{KH_var_clientRegistered && KH_var_missionInitialized;},
 					false
 				] call KH_fnc_execute;
 			};
@@ -1824,7 +1829,7 @@ isNil {
 						] call KH_fnc_execute;
 					},
 					true,
-					{KH_var_clientRegistered;},
+					{KH_var_clientRegistered && KH_var_missionInitialized;},
 					false
 				] call KH_fnc_execute;
 			};

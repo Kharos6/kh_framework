@@ -119,6 +119,7 @@ switch _specialType do {
         };
 
         _entity setVariable [_persistentExecutionId, true, true];
+        ["KH_eve_execution", [[_entity], {(_this select 0) setVariable ["KH_var_initialPersistencyCall", true];}, clientOwner, _unscheduled], _target, false] call KH_fnc_triggerCbaEvent;
         ["KH_eve_execution", [_arguments, _function, clientOwner, _unscheduled], _target, false] call KH_fnc_triggerCbaEvent;
 
         [

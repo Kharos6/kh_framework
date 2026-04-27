@@ -2,6 +2,14 @@ params [["_curators", [], [[]]], ["_modules", allCurators, [[]]], ["_hide", true
 KH_var_curators = createHashMap;
 KH_var_curatorModules = [];
 
+if (isNil "KH_var_curatorHandlers") then {
+	KH_var_curatorHandlers = [];
+};
+
+KH_var_curatorHandlers call KH_fnc_removeHandler;
+KH_var_curatorHandlers resize 0;
+KH_var_allCuratorMachines resize 0;
+
 {
 	private _module = _modules param [_forEachIndex];
 
@@ -49,6 +57,9 @@ if (isNil "KH_var_curatorsSet") then {
 		};
 
 		if !(isNil "_module") then {
+			KH_var_allCuratorMachines pushBackUnique (owner _player);
+			publicVariable "KH_var_allCuratorMachines";
+
 			if (isNull _module) then {
 				_module = (createGroup [sideLogic, true]) createUnit ["ModuleCurator_F", [0, 0, 0], [], 0, "CAN_COLLIDE"];
 				_module setVariable ["Addons", 3, true];
@@ -66,10 +77,14 @@ if (isNil "KH_var_curatorsSet") then {
 				unassignCurator _module;
 			};
 
-			[
+			KH_var_curatorHandlers pushBack ([
 				[_player, _module],
 				{
 					params ["_player", "_module"];
+
+					if !((owner _player) in KH_var_allCuratorMachines) exitWith {
+						[_handlerId] call KH_fnc_removeHandler;
+					};
 
 					if (((getAssignedCuratorUnit _module) isNotEqualTo _player) || ((getAssignedCuratorLogic _player) isNotEqualTo _module)) then {
 						if (!(isNull (getAssignedCuratorUnit _module)) && (isNull (getAssignedCuratorLogic _player))) then {
@@ -94,27 +109,12 @@ if (isNil "KH_var_curatorsSet") then {
 								false
 							] call KH_fnc_execute;
 						};
-
-						if !((owner _player) in KH_var_allCuratorMachines) then {
-							["KH_eve_curatorAssigned", [owner _player, getPlayerUID _player, _player], "GLOBAL", false] call KH_fnc_triggerCbaEvent;
-						};
-
-						KH_var_allCuratorMachines pushBackUnique (owner _player);
-						publicVariable "KH_var_allCuratorMachines";
-						[_handlerId] call KH_fnc_removeHandler;
 					};
 				},
 				true,
-				[
-					1, 
-					true, 
-					60, 
-					{}, 
-					false, 
-					true
-				],
+				1,
 				false 
-			] call KH_fnc_execute;
+			] call KH_fnc_execute);
 		}
 		else {
 			{
@@ -126,7 +126,7 @@ if (isNil "KH_var_curatorsSet") then {
 	} forEach KH_var_allPlayerUnits;
 
 	{
-		[
+		KH_var_curatorHandlers pushBack ([
 			"CBA",
 			_x,
 			[],
@@ -140,6 +140,9 @@ if (isNil "KH_var_curatorsSet") then {
 				};
 
 				if !(isNil "_module") then {
+					KH_var_allCuratorMachines pushBackUnique (owner _player);
+					publicVariable "KH_var_allCuratorMachines";
+					
 					if (isNull _module) then {
 						_module = (createGroup [sideLogic, true]) createUnit ["ModuleCurator_F", [0, 0, 0], [], 0, "CAN_COLLIDE"];
 						_module setVariable ["Addons", 3, true];
@@ -157,10 +160,14 @@ if (isNil "KH_var_curatorsSet") then {
 						unassignCurator _module;
 					};
 
-					[
-						[_player, _module, _timeout],
+					KH_var_curatorHandlers pushBack ([
+						[_player, _module],
 						{
-							params ["_player", "_module", "_timeout"];
+							params ["_player", "_module"];
+
+							if !((owner _player) in KH_var_allCuratorMachines) exitWith {
+								[_handlerId] call KH_fnc_removeHandler;
+							};
 
 							if (((getAssignedCuratorUnit _module) isNotEqualTo _player) || ((getAssignedCuratorLogic _player) isNotEqualTo _module)) then {
 								if (!(isNull (getAssignedCuratorUnit _module)) && (isNull (getAssignedCuratorLogic _player))) then {
@@ -181,23 +188,16 @@ if (isNil "KH_var_curatorsSet") then {
 											player allowDamage false;
 										},
 										_player,
-										true
+										true,
+										false
 									] call KH_fnc_execute;
 								};
-
-								if !((owner _player) in KH_var_allCuratorMachines) then {
-									["KH_eve_curatorAssigned", [owner _player, getPlayerUID _player, _player], "GLOBAL", false] call KH_fnc_triggerCbaEvent;
-								};
-
-								KH_var_allCuratorMachines pushBackUnique (owner _player);
-								publicVariable "KH_var_allCuratorMachines";
-								[_handlerId] call KH_fnc_removeHandler;
 							};
 						},
 						true,
-						[1, true, 60, {}, false, true],
+						1,
 						false 
-					] call KH_fnc_execute;
+					] call KH_fnc_execute);
 				}
 				else {
 					{
@@ -207,10 +207,10 @@ if (isNil "KH_var_curatorsSet") then {
 					} forEach KH_var_curatorModules;
 				};
 			}
-		] call KH_fnc_addEventHandler;
+		] call KH_fnc_addEventHandler);
 	} forEach ["KH_eve_playerRespawned", "KH_eve_playerLoaded", "KH_eve_playerSwitched"];
 
-	[
+	KH_var_curatorHandlers pushBack ([
 		"CBA",
 		"KH_eve_playerDisconnected",
 		[], 
@@ -227,7 +227,7 @@ if (isNil "KH_var_curatorsSet") then {
 				unassignCurator _module;
 			};
 		}
-	] call KH_fnc_addEventHandler;
+	] call KH_fnc_addEventHandler);
 };
 
 nil;

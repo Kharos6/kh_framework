@@ -366,7 +366,7 @@ private _actionHandler = [
                 ],
                 "KH_fnc_addAction",
                 true,
-                {!(isNull KH_var_playerUnit)},
+                {!(isNull KH_var_playerUnit);},
                 false
             ] call KH_fnc_execute;
         };

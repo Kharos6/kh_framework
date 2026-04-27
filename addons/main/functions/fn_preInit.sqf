@@ -889,6 +889,8 @@ if isServer then {
 	KH_var_clientRegistered = true;
 	KH_var_missionStarted = false;
 	publicVariable "KH_var_missionStarted";
+	KH_var_missionInitialized = false;
+	publicVariable "KH_var_missionInitialized";
 	KH_var_playersLoaded = false;
 	publicVariable "KH_var_playersLoaded";
 	KH_var_disconnectedPlayerUids = [];
@@ -1237,26 +1239,41 @@ if isServer then {
 					"KH_eve_execution",
 					[
 						[
-							["ENTITY", _target, "LOCAL"],
-							"Local",
-							[_persistentExecutionId, _persistentEventId],
-							{
-								params ["_entity", "_local"];
-								_args params ["_persistentExecutionId", "_persistentEventId"];
+							_target,
+							_persistentEventId,
+							[
+								["ENTITY", _target, "LOCAL"],
+								"Local",
+								[_persistentExecutionId, _persistentEventId],
+								{
+									params ["_entity", "_local"];
+									_args params ["_persistentExecutionId", "_persistentEventId"];
 
-								if (_entity getVariable _persistentExecutionId) then {
-									(_entity getVariable _persistentEventId) params ["_arguments", "_function", "_sendoffArguments", "_sendoffFunction", "_caller", "_unscheduled"];
-									
-									if _local then {
-										[_arguments, _function, _caller, _unscheduled] call KH_fnc_callSerializedFunction;
-									}
-									else {
-										[_sendoffArguments, _sendoffFunction, _caller, _unscheduled] call KH_fnc_callSerializedFunction;
+									if (_entity getVariable _persistentExecutionId) then {
+										(_entity getVariable _persistentEventId) params ["_arguments", "_function", "_sendoffArguments", "_sendoffFunction", "_caller", "_unscheduled"];
+										
+										if _local then {
+											[_arguments, _function, _caller, _unscheduled] call KH_fnc_callSerializedFunction;
+										}
+										else {
+											[_sendoffArguments, _sendoffFunction, _caller, _unscheduled] call KH_fnc_callSerializedFunction;
+										};
 									};
+								}
+							]
+						],
+						{
+							params ["_target", "_persistentEventId", "_handlerArguments"];
+
+							if (local _target) then {
+								if !(_target getVariable ["KH_var_initialPersistencyCall", false]) then {
+									(_target getVariable _persistentEventId) params ["_arguments", "_function", "_sendoffArguments", "_sendoffFunction", "_caller", "_unscheduled"];
+									[_arguments, _function, _caller, _unscheduled] call KH_fnc_callSerializedFunction;
 								};
-							}
-						], 
-						"KH_fnc_addEventHandler", 
+							};
+
+							_handlerArguments call KH_fnc_addEventHandler;
+						}, 
 						_caller
 					],
 					"GLOBAL",
@@ -1323,10 +1340,10 @@ if isServer then {
 						};
 
 						[
-							[_arguments, _function, _caller, _unscheduled, _object, _present, _distance, _unit],
+							[_arguments, _function, _caller, _unscheduled, _object, _present, _distance, _nearId, _unit],
 							{
-								params ["_arguments", "_function", "_caller", "_unscheduled", "_object", "_present", "_distance", "_unit"];
-								_this set [7, _unit getVariable ["KH_var_playerUnit", _unit]];
+								params ["_arguments", "_function", "_caller", "_unscheduled", "_object", "_present", "_distance", "_nearId", "_unit"];
+								_this set [8, _unit getVariable ["KH_var_playerUnit", _unit]];
 
 								if !(missionNamespace getVariable _nearId) exitWith {
 									[_handlerId] call KH_fnc_removeHandler;

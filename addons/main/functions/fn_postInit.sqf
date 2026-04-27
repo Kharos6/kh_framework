@@ -1258,6 +1258,8 @@ isNil {
 				[
 					[],
 					{
+						"KH_var_displayLayer" cutRsc ["KH_ResourceKHDisplay", "PLAIN", -1, true, true];
+						
 						{
 							call _x;
 						} forEach KH_var_playerMissionLoadStack;
@@ -1943,7 +1945,7 @@ isNil {
 										_unit setUnitPos ((_unit getVariable ["KH_var_aiPreMeleeStance", "UP"]));
 										_unit doFollow (leader (group _unit));
 										_unit action ["SwitchWeapon", _unit, _unit, 299];
-									}
+									};
 								};
 
 								if KH_var_allowRangedMelee then {

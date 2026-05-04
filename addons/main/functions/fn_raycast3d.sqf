@@ -53,12 +53,7 @@ else {
 };
 
 _rotation params [["_vectorDir", [0, 1, 0], [[]]], ["_vectorUp", [0, 0, 1], [[]]]];
-private "_primaryAxis";
-private "_primaryAxisIndex";
-private "_secondaryAxis";
-private "_secondaryAxisIndex";
-private "_tertiaryAxis";
-private "_tertiaryAxisIndex";
+private ["_primaryAxis", "_primaryAxisIndex", "_secondaryAxis", "_secondaryAxisIndex", "_tertiaryAxis", "_tertiaryAxisIndex"];
 
 {
 	if (_x isEqualType "") then {
@@ -115,9 +110,7 @@ switch _type do {
 	};
 	
 	case "OVAL": {
-		private "_secondaryAxisIteration";
-		private "_tertiaryAxisIteration";
-		private "_primaryAxisIteration";
+		private ["_secondaryAxisIteration", "_tertiaryAxisIteration", "_primaryAxisIteration"];
 		
 		for "_phi" from -90 to 90 step (_step * 20) do {
 			for "_theta" from 0 to 360 step (_step * 20) do {
@@ -134,8 +127,7 @@ switch _type do {
 	};
 
 	case "CYLINDER": {
-		private "_secondaryAxisIteration";
-		private "_tertiaryAxisIteration";
+		private ["_secondaryAxisIteration", "_tertiaryAxisIteration"];
 		
 		for "_theta" from 0 to 360 step (_step * 20) do {
 			for "_currentHeight" from -_primaryAxis to _primaryAxis step _step do {
@@ -151,13 +143,7 @@ switch _type do {
 	};
 
 	case "CONE": {
-		private "_radiusRatio";
-		private "_maxSecondaryRadius";
-		private "_maxTertiaryRadius";
-		private "_maxRadius";
-		private "_currentRadiusScale";
-		private "_surfaceSecondary";
-		private "_surfaceTertiary";
+		private ["_radiusRatio", "_maxSecondaryRadius", "_maxTertiaryRadius", "_maxRadius", "_currentRadiusScale", "_surfaceSecondary", "_surfaceTertiary"];
 		
 		for "_theta" from 0 to 360 step (_step * 20) do {
 			for "_currentHeight" from 0 to _primaryAxis step _step do {

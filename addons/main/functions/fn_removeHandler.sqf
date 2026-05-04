@@ -37,7 +37,7 @@ else {
             [_type, _event, _handlerId],
             {
                 params ["_type", "_event", "_handlerId"];
-                _type params [["_eventType", "", [""]], ["_target", objNull, [true, objNull, grpNull, missionNamespace, locationNull, controlNull, displayNull]]];
+                _type params [["_eventType", "", [""]], "_target"];
 
                 switch _eventType do {
                     case "ENTITY": {

@@ -125,8 +125,7 @@ if ((isSwitchingWeapon _unit) || (((_unit weaponState (currentWeapon _unit)) sel
     false;
 };
 
-private "_subaction";
-private "_modifier";
+private ["_subaction", "_modifier"];
 
 if (_action isEqualType []) then {
     _subaction = _action param [1, false, [true, "", []]];

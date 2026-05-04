@@ -9,12 +9,7 @@ params [
 ];
 
 private _oldScale = getObjectScale _entity;
-private "_useGeometryRoadway";
-private "_type";
-private "_useGravity";
-private "_followRotation";
-private "_attachDistance";
-private "_checkCollision";
+private ["_useGeometryRoadway", "_type", "_useGravity", "_followRotation", "_attachDistance", "_checkCollision"];
 
 if (_softAttach isEqualType []) then {
     _useGeometryRoadway = _softAttach param [1, true, [true]];

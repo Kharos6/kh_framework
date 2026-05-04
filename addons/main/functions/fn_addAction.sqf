@@ -19,10 +19,7 @@ params [
     ["_parent", true, [true, objNull, []]]
 ];
 
-private "_progressDisplay";
-private "_handleObjectActionRecovery";
-private "_handleParentActionRecovery";
-private "_jip";
+private ["_progressDisplay", "_handleObjectActionRecovery", "_handleParentActionRecovery", "_jip"];
 
 if (_object isEqualType []) then {
     _handleObjectActionRecovery = _object param [1, true, [true]];
@@ -391,24 +388,27 @@ private _actionHandler = [
         missionNamespace setVariable [_allowedActivationId, true];
         private _objectId = generateUid;
         missionNamespace setVariable [_objectId, _parsedObject];
-        private "_menuName";
-        private "_windowBackgroundName";
-        private "_windowForegroundName";
-        private "_progressMenuName";
-        private "_progressWindowBackgroundName";
-        private "_progressWindowForegroundName";
-        private "_conditionShow";
-        private "_conditionStart";
-        private "_conditionProgress";
-        private "_conditionComplete";
-        private "_functionStart";
-        private "_functionProgress";
-        private "_functionInterrupt";
-        private "_functionCancel";
-        private "_functionComplete";
-        private "_detectionType";
-        private "_initialDetection";
-        private "_progressDetection";
+
+        private [
+            "_menuName",
+            "_windowBackgroundName",
+            "_windowForegroundName",
+            "_progressMenuName",
+            "_progressWindowBackgroundName",
+            "_progressWindowForegroundName",
+            "_conditionShow",
+            "_conditionStart",
+            "_conditionProgress",
+            "_conditionComplete",
+            "_functionStart",
+            "_functionProgress",
+            "_functionInterrupt",
+            "_functionCancel",
+            "_functionComplete",
+            "_detectionType",
+            "_initialDetection",
+            "_progressDetection"
+        ];
 
         if (_name isEqualType "") then {
             _menuName = _name;
@@ -628,8 +628,7 @@ private _actionHandler = [
                         _caller removeAction _actionId;
                     };
                     
-                    private "_resultStart";
-                    private "_resultProgress";
+                    private ["_resultStart", "_resultProgress"];
                     private _handlerId = [missionNamespace, _actionExistenceId, true];
                     private _resultPreviousStart = missionNamespace getVariable _resultStartId;
                     private _resultPreviousProgress = missionNamespace getVariable _resultProgressId;

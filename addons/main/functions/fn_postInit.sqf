@@ -393,8 +393,8 @@ isNil {
 													_moveVector = _unit vectorModelToWorldVisual ((_unit getUnitMovesInfo 4) vectorMultiply -1);
 													private _aimPosition = AGLToASL (unitAimPositionVisual _unit);
 													private _positionAsl = getPosASLVisual _unit;
+													_aimPosition set [0, _positionAsl select 0];
 													_aimPosition set [1, _positionAsl select 1];
-													_aimPosition set [2, _positionAsl select 2];
 
 													private _moveIntersection = ([
 														_aimPosition,

@@ -571,7 +571,7 @@ class Mission
 								];\
 							};\
 						";
-						defaultValue = "[false, str (profileNamespace getVariable ['KH_var_steamId', '']), '', true, true]";
+						defaultValue = "[false, str (profileNamespace getVariable ['KH_var_steamId', '']), '', false, false]";
 					};
 				};
 			};

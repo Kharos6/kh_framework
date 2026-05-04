@@ -2840,11 +2840,9 @@
 				};
 			};
 		};
-
-		KH_var_playerUnit getVariable ["KH_var_inMeleeState", false];
 	}, 
 	{}, 
-	[0x39, [true, false, false]]
+	[0x39, [false, true, false]]
 ] call CBA_fnc_addKeybind;
 
 [
@@ -2937,8 +2935,6 @@
 				};
 			};
 		};
-
-		KH_var_playerUnit getVariable ["KH_var_inMeleeState", false];
 	}, 
 	{}, 
 	[0x14, [true, false, false]]
@@ -2965,8 +2961,6 @@
 				};
 			};
 		};
-
-		KH_var_playerUnit getVariable ["KH_var_inMeleeState", false];
 	}, 
 	{}, 
 	[0x14, [false, true, false]]

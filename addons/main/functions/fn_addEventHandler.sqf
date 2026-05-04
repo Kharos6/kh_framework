@@ -5,12 +5,7 @@ private _eventNameId = generateUid;
 missionNamespace setVariable [_eventNameId, _event];
 private _handlerId = generateUid;
 private _previousReturnId = generateUid;
-private "_persistentEventId";
-private "_persistentExecutionId";
-private "_handler";
-private "_remoteHandler";
-private "_eventType";
-private "_expression";
+private ["_persistentEventId", "_persistentExecutionId", "_handler", "_remoteHandler", "_eventType", "_expression"];
 
 if (_type isEqualType []) then {
 	_eventType = _type param [0, "", [""]];

@@ -1383,8 +1383,7 @@ if isServer then {
 			publicVariable "KH_var_allMachines";
 			KH_var_allPlayerMachines pushBackUnique _machineId;
 			publicVariable "KH_var_allPlayerMachines";
-			private "_uid";
-			private "_id";
+			private ["_uid", "_id"];
 			
 			{
 				if ((_x getUserInfo 1) isEqualTo _machineId) then {

@@ -8,16 +8,44 @@ if (
     ((lifeState _unit) isEqualTo "UNCONSCIOUS")
 ) exitWith {
     _unit setVariable ["KH_var_enteringMelee", false];
-    _unit setVariable ["KH_var_inMeleeState", false, true];
+    _unit setVariable ["KH_var_inMeleeState", false];
     _unit setVariable ["KH_var_meleeMode", "", true];
     false;
 };
 
-if ((currentWeapon _unit) isNotEqualTo "") then {
-    private _currentWeapon = currentWeapon _unit;
-    private _currentWeaponSlot = [_unit] call KH_fnc_getCurrentWeaponSlot;
+private _currentSelectedWeapon = currentWeapon _unit;
 
-    private _meleeAttachments = switch _currentWeaponSlot do {
+if (_currentSelectedWeapon isNotEqualTo "") then {
+    private _currentWeaponSlot = [_unit] call KH_fnc_getCurrentWeaponSlot;
+    private _surrogate = getText (configFile >> "CfgWeapons" >> _currentSelectedWeapon >> "kh_meleeSurrogate");
+    private _currentSurrogateSlot = "";
+    
+    private _currentWeapon = if (_surrogate isNotEqualTo _currentWeaponSlot) then {
+        _currentSurrogateSlot = _surrogate;
+        
+        switch _surrogate do {
+            case "PRIMARY": {
+                primaryWeapon _unit;
+            };
+
+            case "SECONDARY": {
+                handgunWeapon _unit;
+            };
+
+            case "TERTIARY": {
+                secondaryWeapon _unit;
+            };
+
+            default {
+                _currentSelectedWeapon;
+            };
+        };
+    }
+    else {
+        _currentSelectedWeapon;  
+    };
+
+    private _meleeAttachments = switch _currentSurrogateSlot do {
         case "PRIMARY": {
             primaryWeaponItems _unit;
         };
@@ -62,10 +90,12 @@ if ((currentWeapon _unit) isNotEqualTo "") then {
         _unit setVariable ["KH_var_meleeType", getText (_weaponConfig >> "kh_meleeType"), true];
     };
 
-    private _meleeState = (getNumber (configFile >> "CfgWeapons" >> _currentWeapon >> "kh_meleeWeapon")) isEqualTo 1;
+    if ((_unit getVariable ["KH_var_currentMeleeWeapon", ""]) isEqualTo _currentSelectedWeapon) exitWith {};
+    _unit setVariable ["KH_var_currentMeleeWeapon", _currentSelectedWeapon];
+    private _meleeState = (getNumber (configFile >> "CfgWeapons" >> _currentSelectedWeapon >> "kh_meleeWeapon")) isEqualTo 1;
     _unit setVariable ["KH_var_meleeWeaponConfig", _weaponConfig];
     _unit setVariable ["KH_var_meleeMode", (getArray (_weaponConfig >> "kh_meleeModes")) param [0, ""], true];
-    _unit setVariable ["KH_var_inMeleeState", _meleeState, true];
+    _unit setVariable ["KH_var_inMeleeState", _meleeState];
 
     if ((getText (_weaponConfig >> "kh_meleeActions")) isNotEqualTo "") then {
         _unit setVariable ["KH_var_enteringMelee", true];
@@ -119,6 +149,8 @@ else {
 
         _unit setVariable ["KH_var_enteringMelee", false];
     };
+
+    _unit setVariable ["KH_var_currentMeleeWeapon", ""];
 };
 
 if ((isSwitchingWeapon _unit) || (((_unit weaponState (currentWeapon _unit)) select 6) > 0)) exitWith {

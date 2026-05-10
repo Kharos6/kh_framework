@@ -116,8 +116,8 @@ private _vault = ((([
     [_unit, "TERRAIN"] + (attachedObjects _unit),
     true, 
     1, 
-    "GEOM", 
-    "ROADWAY",
+    "ROADWAY", 
+    ["NONE", "GEOM"] select KH_var_anchorPlayersToGeometry,
     true,
     []
 ] call KH_fnc_raycast3d) select 0) param [0, []]) isEqualTo [];

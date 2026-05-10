@@ -1,4 +1,4 @@
-params [["_entity", objNull, [objNull]], ["_selection", "", [""]], ["_ammo", "", [""]], ["_parent", objNull, [[], objNull]], ["_velocity", [], [[]]]];
+params [["_entity", objNull, [objNull]], ["_selection", "", [""]], ["_ammo", "", [""]], ["_parent", objNull, [[], objNull]], ["_velocity", [], [[]]], ["_terminateOnHit", true, [true]]];
 private _lod = (allLODs _entity) select {(_x select 1) isEqualTo "geometryFire";};
 
 if (_parent isEqualType objNull) then {
@@ -28,7 +28,26 @@ if (_velocity isEqualTo []) then {
     _projectile setVelocity [0, 0, -(getNumber (configFile >> "CfgAmmo" >> _ammo >> "typicalSpeed"))];
 }
 else {
-    _projectile setVelocity _velocity;
+    _velocity params [["_projectileVelocity", [0, 0, 0], [[]]], ["_useProjectileMagnitude", true, [true]]];
+
+    if _useProjectileMagnitude then {
+        _projectile setVelocity (_projectileVelocity vectorMultiply ((getNumber (configFile >> "CfgAmmo" >> _ammo >> "typicalSpeed")) max 1));
+    }
+    else {
+        _projectile setVelocity _projectileVelocity;
+    };
+};
+
+if _terminateOnHit then {
+    [
+        ["ENTITY", _projectile, "LOCAL"],
+        "HitPart",
+        [],
+        {
+            params ["_projectile"];
+            deleteVehicle _projectile;
+        }
+    ] call KH_fnc_addEventHandler;
 };
 
 _projectile;

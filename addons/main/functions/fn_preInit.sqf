@@ -256,15 +256,13 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 	[], 
 	{
 		if (KH_var_entityInitializationsDeletions isNotEqualTo []) then {
-			private _entityInitializationsDeletions = [];
-
 			{
 				if ((_x select 3) in KH_var_entityInitializationsDeletions) then {
-					_entityInitializationsDeletions pushBack _forEachIndex;
+					KH_var_entityInitializationsDeletions set [KH_var_entityInitializationsDeletions find (_x select 3), _forEachIndex];
 				};
 			} forEach KH_var_entityInitializations;
 
-			KH_var_entityInitializations deleteAt _entityInitializationsDeletions;
+			KH_var_entityInitializations deleteAt (KH_var_entityInitializationsDeletions select {_x isEqualType 0;});
 			KH_var_entityInitializationsDeletions resize 0;
 		};
 
@@ -395,25 +393,29 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 
 					private _continue = true;
 
-					{
-						if (_entity isKindOf _x) then {
-							_continue = false;
-							break;
-						};
-					} forEach _typeExclude;
+					if (_typeExclude isNotEqualTo []) then {
+						{
+							if (_entity isKindOf _x) then {
+								_continue = false;
+								break;
+							};
+						} forEach _typeExclude;
+					};
 					
 					if !_continue then {
 						continue;
 					};
 
-					_continue = false;
-
-					{
-						if (_entity isKindOf _x) then {
-							_continue = true;
-							break;
-						};
-					} forEach _typeInclude;
+					if (_typeInclude isNotEqualTo []) then {
+						_continue = false;
+						
+						{
+							if (_entity isKindOf _x) then {
+								_continue = true;
+								break;
+							};
+						} forEach _typeInclude;
+					};
 
 					if !_continue then {
 						continue;
@@ -519,7 +521,7 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 			private _playSound = if (_damageFunction isNotEqualTo {}) then {
 				if ([_unit, _instigator, ["HIT", _attack, _hitBlockPower, _hitParryPower, _position, _blockPower, _parryPower]] call _damageFunction) then {
 					[[_unit, ["HIT", [getNumber (_instigatorConfig >> _attack >> "kickPower"), getNumber (_instigatorConfig >> _attack >> "tacklePower")], _unit getRelDir _instigator]], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
-					[[_unit, _selection, getText (_instigatorConfig >> _attack >> "type"), _instigator, []], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
+					[[_unit, _selection, getText (_instigatorConfig >> _attack >> "type"), _instigator, [(_unit modelToWorldVisual (_unit selectionPosition [_selection, "FireGeometry", "AveragePoint"])) vectorFromTo (unitAimPositionVisual _unit), true], true], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
 					true;
 				}
 				else {
@@ -528,7 +530,7 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 			}
 			else {
 				[[_unit, ["HIT", [getNumber (_instigatorConfig >> _attack >> "kickPower"), getNumber (_instigatorConfig >> _attack >> "tacklePower")], _unit getRelDir _instigator]], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
-				[[_unit, _selection, getText (_instigatorConfig >> _attack >> "type"), _instigator, []], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
+				[[_unit, _selection, getText (_instigatorConfig >> _attack >> "type"), _instigator, [(_unit modelToWorldVisual (_unit selectionPosition [_selection, "FireGeometry", "AveragePoint"])) vectorFromTo (unitAimPositionVisual _unit), true], true], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
 				true;
 			};
 
@@ -703,12 +705,12 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 			if (_damageFunction isNotEqualTo {}) then {
 				if ([_unit, _instigator, ["KICK", _kick, _position, _kickPower, _blockPower]] call _damageFunction) then {
 					[[_unit, ["STAGGER", false, _unit getRelDir _instigator]], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
-					[[_unit, _selection, getText (_instigatorConfig >> _kick >> "type"), _instigator, []], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
+					[[_unit, _selection, getText (_instigatorConfig >> _kick >> "type"), _instigator, [(_unit modelToWorldVisual (_unit selectionPosition [_selection, "FireGeometry", "AveragePoint"])) vectorFromTo (unitAimPositionVisual _unit), true], true], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
 				};
 			}
 			else {
 				[[_unit, ["STAGGER", false, _unit getRelDir _instigator]], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
-				[[_unit, _selection, getText (_instigatorConfig >> _kick >> "type"), _instigator, []], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
+				[[_unit, _selection, getText (_instigatorConfig >> _kick >> "type"), _instigator, [(_unit modelToWorldVisual (_unit selectionPosition [_selection, "FireGeometry", "AveragePoint"])) vectorFromTo (unitAimPositionVisual _unit), true], true], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
 			};
 
 			[
@@ -828,12 +830,14 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 			if (_damageFunction isNotEqualTo {}) then {
 				if ([_unit, _instigator, ["TACKLE", _tackle, _tacklePower, _blockPower]] call _damageFunction) then {
 					[[_unit, ["STAGGER", true, _unit getRelDir _instigator]], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
-					[[_unit, selectRandom ((_unit selectionNames "FireGeometry") select {"hit" in _x;}), getText (_instigatorConfig >> _tackle >> "type"), _instigator, []], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
+					private _selection = selectRandom (_unit selectionNames "FireGeometry") select {!("proxy" in _x);};
+					[[_unit, _selection, getText (_instigatorConfig >> _tackle >> "type"), _instigator, [(_unit modelToWorldVisual (_unit selectionPosition [_selection, "FireGeometry", "AveragePoint"])) vectorFromTo (unitAimPositionVisual _unit), true], true], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
 				};
 			}
 			else {
 				[[_unit, ["STAGGER", true, _unit getRelDir _instigator]], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
-				[[_unit, selectRandom ((_unit selectionNames "FireGeometry") select {"hit" in _x;}), getText (_instigatorConfig >> _tackle >> "type"), _instigator, []], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
+				private _selection = selectRandom (_unit selectionNames "FireGeometry") select {!("proxy" in _x);};
+				[[_unit, _selection, getText (_instigatorConfig >> _tackle >> "type"), _instigator, [(_unit modelToWorldVisual (_unit selectionPosition [_selection, "FireGeometry", "AveragePoint"])) vectorFromTo (unitAimPositionVisual _unit), true], true], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
 			};
 
 			[

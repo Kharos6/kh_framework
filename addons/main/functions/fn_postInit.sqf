@@ -607,7 +607,7 @@ isNil {
 																					continue;
 																				};
 
-																				_hitObjects pushBack [_object, ((_x select 4) select {"hit" in _x;}) param [0, selectRandom ((_object selectionNames "FireGeometry") select {"hit" in _x;})], _x select 0, _attack];
+																				_hitObjects pushBack [_object, ((_x select 4) select {!("proxy" in _x);}) param [0, selectRandom ((_object selectionNames "FireGeometry") select {!("proxy" in _x);})], _x select 0, _attack];
 																				_handledHit pushBackUnique _object;
 																			} forEach _lineIntersections;
 																		};
@@ -633,8 +633,8 @@ isNil {
 																				_point, 
 																				[vectorDir _unit, vectorUp _unit],
 																				_hitRadius,
-																				"OVAL",
-																				6,
+																				"RECTANGLE",
+																				0.25,
 																				[_unit, "TERRAIN"] + (attachedObjects _unit),
 																				true, 
 																				-1, 
@@ -652,7 +652,7 @@ isNil {
 																						continue;
 																					};
 																					
-																					_hitObjects pushBack [_object, ((_x select 4) select {"hit" in _x;}) param [0, selectRandom ((_object selectionNames "FireGeometry") select {"hit" in _x;})], _x select 0, _attack];
+																					_hitObjects pushBack [_object, ((_x select 4) select {!("proxy" in _x);}) param [0, selectRandom ((_object selectionNames "FireGeometry") select {!("proxy" in _x);})], _x select 0, _attack];
 																					_handledHit pushBackUnique _object;
 																				} forEach _radiusIntersections;
 																			};
@@ -862,6 +862,22 @@ isNil {
 																	};
 
 																	if (_time >= _start) then {
+																		private _kickRadiusConfig = _meleeTypeConfig >> _kick >> "radius";
+
+																		private _kickRadius = if (isNumber _kickRadiusConfig) then {
+																			private _radius = getNumber _kickRadiusConfig;
+
+																			if (_radius isEqualTo 0) then {
+																				[];
+																			}
+																			else {
+																				[_radius, _radius, str _radius];
+																			};
+																		}
+																		else {
+																			getArray _kickRadiusConfig;
+																		};
+
 																		private _kickIntersections = ([
 																			if (_point isEqualType []) then {
 																				_unit modelToWorldVisualWorld _point;
@@ -870,9 +886,9 @@ isNil {
 																				_unit modelToWorldVisualWorld (_unit selectionPosition _point);
 																			},
 																			[vectorDir _unit, vectorUp _unit],
-																			[0.3, 0.3, "0.3"],
-																			"OVAL",
-																			6,
+																			_kickRadius,
+																			"RECTANGLE",
+																			0.25,
 																			[_unit, "TERRAIN"] + (attachedObjects _unit),
 																			true, 
 																			-1, 
@@ -890,7 +906,7 @@ isNil {
 																					continue;
 																				};
 
-																				_kickedObjects pushBack [_object, ((_x select 4) select {"hit" in _x;}) param [0, selectRandom ((_object selectionNames "FireGeometry") select {"hit" in _x;})], _x select 0, _kick];
+																				_kickedObjects pushBack [_object, ((_x select 4) select {!("proxy" in _x);}) param [0, selectRandom ((_object selectionNames "FireGeometry") select {!("proxy" in _x);})], _x select 0, _kick];
 																				_handledKick pushBack _object;
 																			} forEach _kickIntersections;
 																		};
@@ -990,8 +1006,8 @@ isNil {
 																			_aimPosition, 
 																			[vectorDir _unit, vectorUp _unit],
 																			[0.5, 0.5, "0.75"],
-																			"OVAL",
-																			6,
+																			"RECTANGLE",
+																			0.25,
 																			[_unit, "TERRAIN"] + (attachedObjects _unit),
 																			true, 
 																			-1, 
@@ -1838,7 +1854,7 @@ isNil {
 
 			[
 				[], 
-				["Animal"], 
+				[], 
 				{
 					params ["_entity"];
 
@@ -1920,42 +1936,44 @@ isNil {
 					if KH_var_allowAiMelee then {
 						{
 							private _unit = _x;
-							private _isAgent = !(isNull (agent (teamMember _x)));
+							private _isAgent = !(isNull (agent (teamMember _unit)));
 							private _primaryWeapon = primaryWeapon _unit;
 							private _handgunWeapon = handgunWeapon _unit;
 							private _secondaryWeapon = secondaryWeapon _unit;
-							
-							if ((count ([_primaryWeapon, _handgunWeapon, _secondaryWeapon] select {_x isNotEqualTo "";})) isNotEqualTo 1) then {
-								isNil {
-									if (_unit getVariable ["KH_var_aiIsMelee", false]) then {
-										_unit setVariable ["KH_var_aiIsMelee", false, true];
-										private _aiFeatures = _unit getVariable ["KH_var_aiPreMeleeFeatures", []];
-										private _aiSkill = _unit getVariable ["KH_var_aiPreMeleeSkill", []];
+							private _weaponSurrogate = getText (configFile >> "CfgWeapons" >> (currentWeapon _unit) >> "kh_meleeSurrogate");
 
-										{
-											_unit enableAIFeature [_x, _aiFeatures param [_forEachIndex, true]];
-										} forEach ["AUTOTARGET", "AIMINGERROR", "TARGET", "WEAPONAIM", "FSM", "AUTOCOMBAT", "COVER", "SUPPRESSION", "FIREWEAPON", "RADIOPROTOCOL"];
+							_weaponSurrogate = if (_weaponSurrogate isNotEqualTo "") then {
+								switch _weaponSurrogate do {
+									case "PRIMARY": {
+										_primaryWeapon isNotEqualTo "";
+									};
 
-										{
-											_unit setSkill [_x, _aiSkill param [_forEachIndex, 1]];
-										} forEach ["aimingAccuracy", "aimingShake", "aimingSpeed", "spotDistance", "spotTime", "courage", "reloadSpeed", "commanding", "general"];
+									case "SECONDARY": {
+										_handgunWeapon isNotEqualTo "";
+									};
 
-										_unit setBehaviourStrong ((_unit getVariable ["KH_var_aiPreMeleeBehaviour", "SAFE"]));
-										_unit setUnitCombatMode ((_unit getVariable ["KH_var_aiPreMeleeCombatMode", "YELLOW"]));
-										_unit setUnitPos ((_unit getVariable ["KH_var_aiPreMeleeStance", "UP"]));
-										_unit doFollow (leader (group _unit));
-										_unit action ["SwitchWeapon", _unit, _unit, 299];
+									case "TERTIARY": {
+										_secondaryWeapon isNotEqualTo "";
+									};
+									
+									default {
+										false;
 									};
 								};
-
-								if KH_var_allowRangedMelee then {
+							}
+							else {
+								false;
+							};
+							
+							if (!_weaponSurrogate && ((count ([_primaryWeapon, _handgunWeapon, _secondaryWeapon] select {_x isNotEqualTo "";})) isNotEqualTo 1)) then {
+								private _disableMelee = if KH_var_allowRangedMelee then {
 									private _closestTarget = _unit findNearestEnemy (getPosATL _unit);
 
 									if !(isNull _closestTarget) then {
 										if ((_unit distance _closestTarget) <= KH_var_meleeRangedAiEngageDistance) then {
 											_unit lookAt _closestTarget;
 
-											if ((_unit distance _closestTarget) <= (selectRandom [3, 2.5, 2])) then {
+											if ((_unit distance _closestTarget) <= (selectRandom [1.5, 2.5, 2])) then {
 												if _isAgent then {
 													_unit setDestination [getPosATL _unit, "DoNotPlan", true];
 												}
@@ -2003,29 +2021,50 @@ isNil {
 													_unit doMove (getPosATL _closestTarget);
 												};
 											};
-										};
-									};
-								};
-							}
-							else {
-								private _meleeWeapon = if ((getText (configFile >> "CfgWeapons" >> _primaryWeapon >> "kh_meleeActions")) isNotEqualTo "") then {
-									((_unit weaponsInfo [_primaryWeapon, false]) param [0, []]) param [0, -1];
-								}
-								else {
-									if ((getText (configFile >> "CfgWeapons" >> _handgunWeapon >> "kh_meleeActions")) isNotEqualTo "") then {
-										((_unit weaponsInfo [_handgunWeapon, false]) param [0, []]) param [0, -1];
-									}
-									else {
-										if ((getText (configFile >> "CfgWeapons" >> _secondaryWeapon >> "kh_meleeActions")) isNotEqualTo "") then {
-											((_unit weaponsInfo [_secondaryWeapon, false]) param [0, []]) param [0, -1];
+
+											false;
 										}
 										else {
-											-1;
+											true;
 										};
+									}
+									else {
+										true;
 									};
+								}
+								else {
+									true;
 								};
 
-								if (_meleeWeapon isNotEqualTo -1) then {
+								if _disableMelee then {
+									isNil {
+										if (_unit getVariable ["KH_var_aiIsMelee", false]) then {
+											_unit setVariable ["KH_var_aiIsMelee", false, true];
+											private _aiFeatures = _unit getVariable ["KH_var_aiPreMeleeFeatures", []];
+											private _aiSkill = _unit getVariable ["KH_var_aiPreMeleeSkill", []];
+
+											{
+												_unit enableAIFeature [_x, _aiFeatures param [_forEachIndex, true]];
+											} forEach ["AUTOTARGET", "AIMINGERROR", "TARGET", "WEAPONAIM", "FSM", "AUTOCOMBAT", "COVER", "SUPPRESSION", "FIREWEAPON", "RADIOPROTOCOL"];
+
+											{
+												_unit setSkill [_x, _aiSkill param [_forEachIndex, 1]];
+											} forEach ["aimingAccuracy", "aimingShake", "aimingSpeed", "spotDistance", "spotTime", "courage", "reloadSpeed", "commanding", "general"];
+
+											_unit setBehaviourStrong ((_unit getVariable ["KH_var_aiPreMeleeBehaviour", "SAFE"]));
+											_unit setUnitCombatMode ((_unit getVariable ["KH_var_aiPreMeleeCombatMode", "YELLOW"]));
+											_unit setUnitPos ((_unit getVariable ["KH_var_aiPreMeleeStance", "UP"]));
+											_unit setSpeedMode (_unit getVariable ["KH_var_aiPreMeleeSpeedMode", "UNCHANGED"]);
+											_unit doFollow (leader (group _unit));
+
+											if (_unit getVariable ["KH_var_usedWeaponSurrogate", false]) then {
+												_unit setVariable ["KH_var_usedWeaponSurrogate", false];
+												_unit action ["SwitchWeapon", _unit, _unit, 299];
+											};
+										};
+									};
+								}
+								else {
 									isNil {
 										if !(_unit getVariable ["KH_var_aiIsMelee", false]) then {
 											_unit setVariable ["KH_var_aiIsMelee", true, true];
@@ -2064,6 +2103,7 @@ isNil {
 											_unit setVariable ["KH_var_aiPreMeleeBehaviour", behaviour _unit];
 											_unit setVariable ["KH_var_aiPreMeleeCombatMode", combatMode _unit];
 											_unit setVariable ["KH_var_aiPreMeleeStance", unitPos _unit];
+											_unit setVariable ["KH_var_aiPreMeleeSpeedMode", speedMode _unit];
 											_unit enableAIFeature ["AUTOTARGET", false];
 											_unit enableAIFeature ["AIMINGERROR", false];
 											_unit enableAIFeature ["TARGET", false];
@@ -2086,12 +2126,105 @@ isNil {
 											_unit setBehaviourStrong "CARELESS";
 											_unit setUnitCombatMode "BLUE";
 											_unit setUnitPos "UP";
-											_unit action ["SwitchWeapon", _unit, _unit, _meleeWeapon];
+											_unit setSpeedMode "FULL";
+										};
+									};
+								};
+							}
+							else {
+								private _meleeWeapon = if ((getText (configFile >> "CfgWeapons" >> _primaryWeapon >> "kh_meleeActions")) isNotEqualTo "") then {
+									((_unit weaponsInfo [_primaryWeapon, false]) param [0, []]) param [0, -1];
+								}
+								else {
+									if ((getText (configFile >> "CfgWeapons" >> _handgunWeapon >> "kh_meleeActions")) isNotEqualTo "") then {
+										((_unit weaponsInfo [_handgunWeapon, false]) param [0, []]) param [0, -1];
+									}
+									else {
+										if ((getText (configFile >> "CfgWeapons" >> _secondaryWeapon >> "kh_meleeActions")) isNotEqualTo "") then {
+											((_unit weaponsInfo [_secondaryWeapon, false]) param [0, []]) param [0, -1];
 										}
 										else {
-											if ((getNumber (configFile >> (getText ((configOf _unit) >> "moves")) >> "states" >> (animationState _unit) >> "kh_melee")) isNotEqualTo 1) then {
+											-1;
+										};
+									};
+								};
+
+								if (_weaponSurrogate || (_meleeWeapon isNotEqualTo -1)) then {
+									isNil {
+										if !(_unit getVariable ["KH_var_aiIsMelee", false]) then {
+											_unit setVariable ["KH_var_aiIsMelee", true, true];
+
+											_unit setVariable [
+												"KH_var_aiPreMeleeFeatures", 
+												[
+													_unit checkAIFeature "AUTOTARGET",
+													_unit checkAIFeature "AIMINGERROR",
+													_unit checkAIFeature "TARGET",
+													_unit checkAIFeature "WEAPONAIM",
+													_unit checkAIFeature "FSM",
+													_unit checkAIFeature "AUTOCOMBAT",
+													_unit checkAIFeature "COVER",
+													_unit checkAIFeature "SUPPRESSION",
+													_unit checkAIFeature "FIREWEAPON",
+													_unit checkAIFeature "RADIOPROTOCOL"
+												]
+											];
+
+											_unit setVariable [
+												"KH_var_aiPreMeleeSkill", 
+												[
+													_unit skill "aimingAccuracy",
+													_unit skill "aimingShake",
+													_unit skill "aimingSpeed",
+													_unit skill "spotDistance",
+													_unit skill "spotTime",
+													_unit skill "courage",
+													_unit skill "reloadSpeed",
+													_unit skill "commanding",
+													_unit skill "general"
+												]
+											];
+
+											_unit setVariable ["KH_var_aiPreMeleeBehaviour", behaviour _unit];
+											_unit setVariable ["KH_var_aiPreMeleeCombatMode", combatMode _unit];
+											_unit setVariable ["KH_var_aiPreMeleeStance", unitPos _unit];
+											_unit setVariable ["KH_var_aiPreMeleeSpeedMode", speedMode _unit];
+											_unit enableAIFeature ["AUTOTARGET", false];
+											_unit enableAIFeature ["AIMINGERROR", false];
+											_unit enableAIFeature ["TARGET", false];
+											_unit enableAIFeature ["WEAPONAIM", false];
+											_unit enableAIFeature ["FSM", false];
+											_unit enableAIFeature ["AUTOCOMBAT", false];
+											_unit enableAIFeature ["COVER", false];
+											_unit enableAIFeature ["SUPPRESSION", false];
+											_unit enableAIFeature ["FIREWEAPON", false];
+											_unit enableAIFeature ["RADIOPROTOCOL", false];
+											_unit setSkill ["aimingAccuracy", 0];
+											_unit setSkill ["aimingShake", 0];
+											_unit setSkill ["aimingSpeed", 1];
+											_unit setSkill ["spotDistance", 1];
+											_unit setSkill ["spotTime", 1];
+											_unit setSkill ["courage", 1];
+											_unit setSkill ["reloadSpeed", 0];
+											_unit setSkill ["commanding", 1];
+											_unit setSkill ["general", 1];
+											_unit setBehaviourStrong "CARELESS";
+											_unit setUnitCombatMode "BLUE";
+											_unit setUnitPos "UP";
+											_unit setSpeedMode "FULL";
+
+											if !_weaponSurrogate then {
+												_unit action ["SwitchWeapon", _unit, _unit, _meleeWeapon];
+											};
+										}
+										else {
+											if (!_weaponSurrogate && ((getNumber (configFile >> (getText ((configOf _unit) >> "moves")) >> "states" >> (animationState _unit) >> "kh_melee")) isNotEqualTo 1)) then {
 												_unit action ["SwitchWeapon", _unit, _unit, _meleeWeapon];
 											};	
+										};
+
+										if _weaponSurrogate then {
+											_unit setVariable ["KH_var_usedWeaponSurrogate", true];
 										};
 									};
 
@@ -2101,7 +2234,7 @@ isNil {
 										if ((_unit distance _closestTarget) <= KH_var_meleeMeleeAiEngageDistance) then {
 											_unit lookAt _closestTarget;
 
-											if ((_unit distance _closestTarget) <= (selectRandom [3, 2.5, 2])) then {
+											if ((_unit distance _closestTarget) <= (selectRandom [1.5, 2.5, 2])) then {
 												if _isAgent then {
 													_unit setDestination [getPosATL _unit, "DoNotPlan", true];
 												}
@@ -2184,18 +2317,24 @@ isNil {
 											_unit setBehaviourStrong ((_unit getVariable ["KH_var_aiPreMeleeBehaviour", "SAFE"]));
 											_unit setUnitCombatMode ((_unit getVariable ["KH_var_aiPreMeleeCombatMode", "YELLOW"]));
 											_unit setUnitPos ((_unit getVariable ["KH_var_aiPreMeleeStance", "UP"]));
-											_unit action ["SwitchWeapon", _unit, _unit, 299];
+											_unit setSpeedMode (_unit getVariable ["KH_var_aiPreMeleeSpeedMode", "UNCHANGED"]);
+											_unit doFollow (leader (group _unit));
+
+											if (_unit getVariable ["KH_var_usedWeaponSurrogate", false]) then {
+												_unit setVariable ["KH_var_usedWeaponSurrogate", false];
+												_unit action ["SwitchWeapon", _unit, _unit, 299];
+											};
 										};
 									};
 
-									if KH_var_allowRangedMelee then {
+									private _disableMelee = if KH_var_allowRangedMelee then {
 										private _closestTarget = _unit findNearestEnemy (getPosATL _unit);
 
 										if !(isNull _closestTarget) then {
 											if ((_unit distance _closestTarget) <= KH_var_meleeRangedAiEngageDistance) then {
 												_unit lookAt _closestTarget;
 
-												if ((_unit distance _closestTarget) <= (selectRandom [3, 2.5, 2])) then {
+												if ((_unit distance _closestTarget) <= (selectRandom [1.5, 2.5, 2])) then {
 													if _isAgent then {
 														_unit setDestination [getPosATL _unit, "DoNotPlan", true];
 													}
@@ -2243,12 +2382,118 @@ isNil {
 														_unit doMove (getPosATL _closestTarget);
 													};
 												};
+
+												false;
+											}
+											else {
+												true;
+											};
+										}
+										else {
+											true;
+										};
+									}
+									else {
+										true;
+									};
+
+									if _disableMelee then {
+										isNil {
+											if (_unit getVariable ["KH_var_aiIsMelee", false]) then {
+												_unit setVariable ["KH_var_aiIsMelee", false, true];
+												private _aiFeatures = _unit getVariable ["KH_var_aiPreMeleeFeatures", []];
+												private _aiSkill = _unit getVariable ["KH_var_aiPreMeleeSkill", []];
+
+												{
+													_unit enableAIFeature [_x, _aiFeatures param [_forEachIndex, true]];
+												} forEach ["AUTOTARGET", "AIMINGERROR", "TARGET", "WEAPONAIM", "FSM", "AUTOCOMBAT", "COVER", "SUPPRESSION", "FIREWEAPON", "RADIOPROTOCOL"];
+
+												{
+													_unit setSkill [_x, _aiSkill param [_forEachIndex, 1]];
+												} forEach ["aimingAccuracy", "aimingShake", "aimingSpeed", "spotDistance", "spotTime", "courage", "reloadSpeed", "commanding", "general"];
+
+												_unit setBehaviourStrong ((_unit getVariable ["KH_var_aiPreMeleeBehaviour", "SAFE"]));
+												_unit setUnitCombatMode ((_unit getVariable ["KH_var_aiPreMeleeCombatMode", "YELLOW"]));
+												_unit setUnitPos ((_unit getVariable ["KH_var_aiPreMeleeStance", "UP"]));
+												_unit setSpeedMode (_unit getVariable ["KH_var_aiPreMeleeSpeedMode", "UNCHANGED"]);
+												_unit doFollow (leader (group _unit));
+
+												if (_unit getVariable ["KH_var_usedWeaponSurrogate", false]) then {
+													_unit setVariable ["KH_var_usedWeaponSurrogate", false];
+													_unit action ["SwitchWeapon", _unit, _unit, 299];
+												};
+											};
+										};
+									}
+									else {
+										isNil {
+											if !(_unit getVariable ["KH_var_aiIsMelee", false]) then {
+												_unit setVariable ["KH_var_aiIsMelee", true, true];
+
+												_unit setVariable [
+													"KH_var_aiPreMeleeFeatures", 
+													[
+														_unit checkAIFeature "AUTOTARGET",
+														_unit checkAIFeature "AIMINGERROR",
+														_unit checkAIFeature "TARGET",
+														_unit checkAIFeature "WEAPONAIM",
+														_unit checkAIFeature "FSM",
+														_unit checkAIFeature "AUTOCOMBAT",
+														_unit checkAIFeature "COVER",
+														_unit checkAIFeature "SUPPRESSION",
+														_unit checkAIFeature "FIREWEAPON",
+														_unit checkAIFeature "RADIOPROTOCOL"
+													]
+												];
+
+												_unit setVariable [
+													"KH_var_aiPreMeleeSkill", 
+													[
+														_unit skill "aimingAccuracy",
+														_unit skill "aimingShake",
+														_unit skill "aimingSpeed",
+														_unit skill "spotDistance",
+														_unit skill "spotTime",
+														_unit skill "courage",
+														_unit skill "reloadSpeed",
+														_unit skill "commanding",
+														_unit skill "general"
+													]
+												];
+
+												_unit setVariable ["KH_var_aiPreMeleeBehaviour", behaviour _unit];
+												_unit setVariable ["KH_var_aiPreMeleeCombatMode", combatMode _unit];
+												_unit setVariable ["KH_var_aiPreMeleeStance", unitPos _unit];
+												_unit setVariable ["KH_var_aiPreMeleeSpeedMode", speedMode _unit];
+												_unit enableAIFeature ["AUTOTARGET", false];
+												_unit enableAIFeature ["AIMINGERROR", false];
+												_unit enableAIFeature ["TARGET", false];
+												_unit enableAIFeature ["WEAPONAIM", false];
+												_unit enableAIFeature ["FSM", false];
+												_unit enableAIFeature ["AUTOCOMBAT", false];
+												_unit enableAIFeature ["COVER", false];
+												_unit enableAIFeature ["SUPPRESSION", false];
+												_unit enableAIFeature ["FIREWEAPON", false];
+												_unit enableAIFeature ["RADIOPROTOCOL", false];
+												_unit setSkill ["aimingAccuracy", 0];
+												_unit setSkill ["aimingShake", 0];
+												_unit setSkill ["aimingSpeed", 1];
+												_unit setSkill ["spotDistance", 1];
+												_unit setSkill ["spotTime", 1];
+												_unit setSkill ["courage", 1];
+												_unit setSkill ["reloadSpeed", 0];
+												_unit setSkill ["commanding", 1];
+												_unit setSkill ["general", 1];
+												_unit setBehaviourStrong "CARELESS";
+												_unit setUnitCombatMode "BLUE";
+												_unit setUnitPos "UP";
+												_unit setSpeedMode "FULL";
 											};
 										};
 									};
 								};
 							};
-						} forEach ((KH_var_allLocalEntities - [KH_var_playerUnit]) select {_x isKindOf "Man";});
+						} forEach ((KH_var_allLocalEntities - [KH_var_playerUnit]) select {_x isKindOf "CAManBase";});
 					};
 				};
 			};

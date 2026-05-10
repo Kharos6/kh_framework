@@ -46,6 +46,25 @@ if !((_animation select 0) isEqualType "") then {
                 break;
             }
             else {
+                if (_currentAnimation isEqualTo "KH_GestureNone") then {
+                    private _gestureId = generateUid;
+                    _unit setVariable ["KH_var_gestureStopper", _gestureId];
+
+                    [
+                        [_unit, _gestureId],
+                        {
+                            params ["_unit", "_gestureId"];
+
+                            if ((_unit getVariable ["KH_var_gestureStopper", ""]) isEqualTo _gestureId) then {
+                                _unit switchGesture [""];
+                            };
+                        },
+                        true,
+                        "0.5",
+                        false
+                    ] call KH_fnc_execute;
+                };
+
                 switch _animationType do {
                     case "MOVE_PLAY": {
                         _unit playMove _currentAnimation;
@@ -102,6 +121,25 @@ if !((_animation select 0) isEqualType "") then {
                 
                 if ((_unit getVariable ["KH_var_currentAnimationSequenceId", ""]) isEqualTo _currentAnimationSequenceId) then {
                     if ((!_allowVehicle && !(isNull (objectParent _unit))) || (!_allowUnconscious && (((lifeState _unit) isEqualTo "INCAPACITATED") || ((lifeState _unit) isEqualTo "UNCONSCIOUS")))) exitWith {};
+
+                    if (_currentAnimation isEqualTo "KH_GestureNone") then {
+                        private _gestureId = generateUid;
+                        _unit setVariable ["KH_var_gestureStopper", _gestureId];
+
+                        [
+                            [_unit, _gestureId],
+                            {
+                                params ["_unit", "_gestureId"];
+
+                                if ((_unit getVariable ["KH_var_gestureStopper", ""]) isEqualTo _gestureId) then {
+                                    _unit switchGesture [""];
+                                };
+                            },
+                            true,
+                            "0.5",
+                            false
+                        ] call KH_fnc_execute;
+                    };
 
                     switch _animationType do {
                         case "MOVE_PLAY": {
@@ -184,6 +222,25 @@ else {
     };
 
     if _valid then {
+        if (_currentAnimation isEqualTo "KH_GestureNone") then {
+            private _gestureId = generateUid;
+            _unit setVariable ["KH_var_gestureStopper", _gestureId];
+
+            [
+                [_unit, _gestureId],
+                {
+                    params ["_unit", "_gestureId"];
+
+                    if ((_unit getVariable ["KH_var_gestureStopper", ""]) isEqualTo _gestureId) then {
+                        _unit switchGesture [""];
+                    };
+                },
+                true,
+                "0.5",
+                false
+            ] call KH_fnc_execute;
+        };
+
         switch _animationType do {
             case "MOVE_PLAY": {
                 _unit playMove _currentAnimation;

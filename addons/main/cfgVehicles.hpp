@@ -3,7 +3,7 @@ class CfgVehicles
 	class All
 	{
 		kh_meleeSoundType = "generic";
-		kh_meleeSurfaceBlockPower = 1;
+		kh_meleeSurfaceBlockPower = 999999;
 	};
 	class Land;
 	class Man: Land

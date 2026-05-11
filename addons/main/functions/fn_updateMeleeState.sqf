@@ -153,7 +153,7 @@ else {
     _unit setVariable ["KH_var_currentMeleeWeapon", ""];
 };
 
-if ((isSwitchingWeapon _unit) || (((_unit weaponState (currentWeapon _unit)) select 6) > 0)) exitWith {
+if ((isSwitchingWeapon _unit) || !(isTouchingGround _unit) || (((_unit weaponState (currentWeapon _unit)) select 6) > 0)) exitWith {
     false;
 };
 

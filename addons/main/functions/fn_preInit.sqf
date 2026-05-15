@@ -521,7 +521,7 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 			private _playSound = if (_damageFunction isNotEqualTo {}) then {
 				if ([_unit, _instigator, ["HIT", _attack, _hitBlockPower, _hitParryPower, _position, _blockPower, _parryPower]] call _damageFunction) then {
 					[[_unit, ["HIT", [getNumber (_instigatorConfig >> _attack >> "kickPower"), getNumber (_instigatorConfig >> _attack >> "tacklePower")], _unit getRelDir _instigator]], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
-					[[_unit, _selection, getText (_instigatorConfig >> _attack >> "type"), _instigator, [(_unit modelToWorldVisual (_unit selectionPosition [_selection, "FireGeometry", "AveragePoint"])) vectorFromTo (unitAimPositionVisual _unit), true], true], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
+					[[_unit, _selection, getText (_instigatorConfig >> _attack >> "type"), _instigator, true], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
 					true;
 				}
 				else {
@@ -530,7 +530,7 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 			}
 			else {
 				[[_unit, ["HIT", [getNumber (_instigatorConfig >> _attack >> "kickPower"), getNumber (_instigatorConfig >> _attack >> "tacklePower")], _unit getRelDir _instigator]], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
-				[[_unit, _selection, getText (_instigatorConfig >> _attack >> "type"), _instigator, [(_unit modelToWorldVisual (_unit selectionPosition [_selection, "FireGeometry", "AveragePoint"])) vectorFromTo (unitAimPositionVisual _unit), true], true], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
+				[[_unit, _selection, getText (_instigatorConfig >> _attack >> "type"), _instigator, true], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
 				true;
 			};
 
@@ -549,7 +549,7 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 				};
 			};
 
-			if (KH_var_meleeAttackBlockOnInsufficientStamina && ((getFatigue _instigator) >= (1 - (getNumber (_instigatorConfig >> _attack >> "cost"))))) then {
+			if (KH_var_meleeAttackBlockOnInsufficientStamina && ((getNumber ((configOf _instigator) >> "Kh_meleeNoFatigue")) isEqualTo 0) && ((getFatigue _instigator) >= (1 - (getNumber (_instigatorConfig >> _attack >> "cost"))))) then {
 				[[_instigator, "BLOCKED"], "KH_fnc_updateMeleeState", _instigator, true, false] call KH_fnc_execute;
 			};
 
@@ -705,12 +705,12 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 			if (_damageFunction isNotEqualTo {}) then {
 				if ([_unit, _instigator, ["KICK", _kick, _position, _kickPower, _blockPower]] call _damageFunction) then {
 					[[_unit, ["STAGGER", false, _unit getRelDir _instigator]], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
-					[[_unit, _selection, getText (_instigatorConfig >> _kick >> "type"), _instigator, [(_unit modelToWorldVisual (_unit selectionPosition [_selection, "FireGeometry", "AveragePoint"])) vectorFromTo (unitAimPositionVisual _unit), true], true], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
+					[[_unit, _selection, getText (_instigatorConfig >> _kick >> "type"), _instigator, true], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
 				};
 			}
 			else {
 				[[_unit, ["STAGGER", false, _unit getRelDir _instigator]], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
-				[[_unit, _selection, getText (_instigatorConfig >> _kick >> "type"), _instigator, [(_unit modelToWorldVisual (_unit selectionPosition [_selection, "FireGeometry", "AveragePoint"])) vectorFromTo (unitAimPositionVisual _unit), true], true], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
+				[[_unit, _selection, getText (_instigatorConfig >> _kick >> "type"), _instigator, true], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
 			};
 
 			[
@@ -830,14 +830,12 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 			if (_damageFunction isNotEqualTo {}) then {
 				if ([_unit, _instigator, ["TACKLE", _tackle, _tacklePower, _blockPower]] call _damageFunction) then {
 					[[_unit, ["STAGGER", true, _unit getRelDir _instigator]], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
-					private _selection = selectRandom (_unit selectionNames "FireGeometry") select {!("proxy" in _x);};
-					[[_unit, _selection, getText (_instigatorConfig >> _tackle >> "type"), _instigator, [(_unit modelToWorldVisual (_unit selectionPosition [_selection, "FireGeometry", "AveragePoint"])) vectorFromTo (unitAimPositionVisual _unit), true], true], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
+					[[_unit, selectRandom ((_unit selectionNames "FireGeometry") select {!("proxy" in _x);}), getText (_instigatorConfig >> _tackle >> "type"), _instigator, true], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
 				};
 			}
 			else {
 				[[_unit, ["STAGGER", true, _unit getRelDir _instigator]], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
-				private _selection = selectRandom (_unit selectionNames "FireGeometry") select {!("proxy" in _x);};
-				[[_unit, _selection, getText (_instigatorConfig >> _tackle >> "type"), _instigator, [(_unit modelToWorldVisual (_unit selectionPosition [_selection, "FireGeometry", "AveragePoint"])) vectorFromTo (unitAimPositionVisual _unit), true], true], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
+				[[_unit, selectRandom ((_unit selectionNames "FireGeometry") select {!("proxy" in _x);}), getText (_instigatorConfig >> _tackle >> "type"), _instigator, true], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
 			};
 
 			[
@@ -1875,34 +1873,8 @@ if hasInterface then {
 					[KH_var_playerVoiceEffectHandler] call KH_fnc_removeHandler;
 				};
 
-				private _applied = false;
-				private _weaponsConfigParent = configFile >> "CfgWeapons";
-
-				{
-					private _effects = getArray (_x >> "kh_teamspeakVoiceEffects");
-
-					if (_effects isNotEqualTo []) then {
-						tsApplyVoiceEffects _effects;
-						_applied = true;
-						break;
-					};
-				} forEach [
-					configFile >> "CfgGlasses" >> (goggles _unit),
-					_weaponsConfigParent >> (hmd _unit),
-					_weaponsConfigParent >> (headgear _unit),
-					configFile >> "CfgVehicles" >> (backpack _unit), 
-					_weaponsConfigParent >> (vest _unit),
-					_weaponsConfigParent >> (uniform _unit)
-				];
-
-				if !_applied then {
-					tsClearVoiceEffects;
-				};
-
-				KH_var_playerVoiceEffectHandler = [
-					["ENTITY", _unit, "LOCAL"],
-					"SlotItemChanged",
-					[],
+				[
+					[_unit],
 					{
 						params ["_unit"];
 						private _applied = false;
@@ -1928,6 +1900,51 @@ if hasInterface then {
 						if !_applied then {
 							tsClearVoiceEffects;
 						};
+					},
+					true,
+					"1",
+					false
+				] call KH_fnc_execute;
+
+				KH_var_playerVoiceEffectHandler = [
+					["ENTITY", _unit, "LOCAL"],
+					"SlotItemChanged",
+					[],
+					{
+						params ["_unit"];
+
+						[
+							[_unit],
+							{
+								params ["_unit"];
+								private _applied = false;
+								private _weaponsConfigParent = configFile >> "CfgWeapons";
+
+								{
+									private _effects = getArray (_x >> "kh_teamspeakVoiceEffects");
+
+									if (_effects isNotEqualTo []) then {
+										tsApplyVoiceEffects _effects;
+										_applied = true;
+										break;
+									};
+								} forEach [
+									configFile >> "CfgGlasses" >> (goggles _unit),
+									_weaponsConfigParent >> (hmd _unit),
+									_weaponsConfigParent >> (headgear _unit),
+									configFile >> "CfgVehicles" >> (backpack _unit), 
+									_weaponsConfigParent >> (vest _unit),
+									_weaponsConfigParent >> (uniform _unit)
+								];
+
+								if !_applied then {
+									tsClearVoiceEffects;
+								};
+							},
+							true,
+							"-1",
+							false
+						] call KH_fnc_execute;
 					}
 				] call KH_fnc_addEventHandler;
 			};

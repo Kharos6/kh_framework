@@ -94,7 +94,6 @@ cl /LD /arch:AVX /O2 /Ob3 /GL /MT /std:c++20 /EHsc /TP /Gy /Gw /GS- ^
     /EXPORT:ts3plugin_offersConfigure ^
     /EXPORT:ts3plugin_onConnectStatusChangeEvent ^
     /EXPORT:ts3plugin_onEditCapturedVoiceDataEvent ^
-    /EXPORT:ts3plugin_onTalkStatusChangeEvent ^
     /EXPORT:ts3plugin_processCommand ^
     /EXPORT:ts3plugin_commandKeyword ^
     user32.lib kernel32.lib advapi32.lib shell32.lib

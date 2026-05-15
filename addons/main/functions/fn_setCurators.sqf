@@ -82,7 +82,7 @@ if (isNil "KH_var_curatorsSet") then {
 				{
 					params ["_player", "_module"];
 
-					if !((owner _player) in KH_var_allCuratorMachines) exitWith {
+					if !(_player in KH_var_allPlayerUnits) exitWith {
 						[_handlerId] call KH_fnc_removeHandler;
 					};
 
@@ -112,7 +112,14 @@ if (isNil "KH_var_curatorsSet") then {
 					};
 				},
 				true,
-				1,
+				[
+					1,
+					false,
+					false,
+					{},
+					false,
+					true
+				],
 				false 
 			] call KH_fnc_execute);
 		}
@@ -165,7 +172,7 @@ if (isNil "KH_var_curatorsSet") then {
 						{
 							params ["_player", "_module"];
 
-							if !((owner _player) in KH_var_allCuratorMachines) exitWith {
+							if !(_player in KH_var_allPlayerUnits) exitWith {
 								[_handlerId] call KH_fnc_removeHandler;
 							};
 
@@ -195,7 +202,14 @@ if (isNil "KH_var_curatorsSet") then {
 							};
 						},
 						true,
-						1,
+						[
+							1,
+							false,
+							false,
+							{},
+							false,
+							true
+						],
 						false 
 					] call KH_fnc_execute);
 				}

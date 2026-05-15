@@ -1,12 +1,7 @@
-params [["_entity", objNull, [objNull]], ["_selection", "", [""]], ["_ammo", "", [""]], ["_parent", objNull, [[], objNull]], ["_velocity", [], [[]]], ["_terminateOnHit", true, [true]]];
-private _lod = (allLODs _entity) select {(_x select 1) isEqualTo "geometryFire";};
+params [["_entity", objNull, [objNull]], ["_selection", "", [""]], ["_ammo", "", [""]], ["_parent", objNull, [[], objNull]], ["_terminateOnHit", true, [true]]];
 
 if (_parent isEqualType objNull) then {
     _parent = [vehicle _parent, _parent];
-};
-
-if (_lod isEqualTo []) exitWith {
-    objNull;
 };
 
 private _projectile = createVehicle [
@@ -15,7 +10,9 @@ private _projectile = createVehicle [
         ASLToATL (AGLToASL (unitAimPositionVisual _entity));
     }
     else {
-        ASLToATL (_entity modelToWorldVisualWorld (selectionPosition [_entity, _selection, (_lod select 0) select 0, false, "AveragePoint"]));
+        private _position = _entity selectionPosition [_selection, "FireGeometry", "AveragePoint"];
+        _position set [2, (_position select 2) max 0.01];
+        ASLToATL (_entity modelToWorldVisualWorld _position);
     },
     [], 
     0, 
@@ -23,20 +20,8 @@ private _projectile = createVehicle [
 ];
 
 _projectile setShotParents _parent;
-
-if (_velocity isEqualTo []) then {
-    _projectile setVelocity [0, 0, -(getNumber (configFile >> "CfgAmmo" >> _ammo >> "typicalSpeed"))];
-}
-else {
-    _velocity params [["_projectileVelocity", [0, 0, 0], [[]]], ["_useProjectileMagnitude", true, [true]]];
-
-    if _useProjectileMagnitude then {
-        _projectile setVelocity (_projectileVelocity vectorMultiply ((getNumber (configFile >> "CfgAmmo" >> _ammo >> "typicalSpeed")) max 1));
-    }
-    else {
-        _projectile setVelocity _projectileVelocity;
-    };
-};
+_projectile setVectorUp (vectorNormalized ((unitAimPositionVisual _entity) vectorDiff (_projectile modelToWorldVisual [0, 0, 0])));
+_projectile setVelocityModelSpace [0, 0, (getNumber (configFile >> "CfgAmmo" >> _ammo >> "typicalSpeed")) max 1];
 
 if _terminateOnHit then {
     [

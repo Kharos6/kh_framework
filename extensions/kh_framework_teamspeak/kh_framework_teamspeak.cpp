@@ -643,7 +643,6 @@ enum {
 #ifdef __cplusplus
 }
 #endif
-
 // Plugin information
 static const char* PLUGIN_NAME = "KH Framework Teamspeak";
 static const char* PLUGIN_VERSION = "1.0.0";
@@ -886,31 +885,8 @@ static AudioProcessorState g_audio_state;
 static std::mutex g_audio_state_mutex;
 static std::atomic<bool> g_plugin_initialized{false};
 static std::atomic<bool> g_connected{false};
-static std::atomic<bool> g_transmitting{false};
-static std::atomic<bool> g_local_test_mode{false};
-static constexpr size_t LOOPBACK_BUFFER_SIZE = 48000; // ~1 second at 48kHz
-static std::vector<float> g_loopback_buffer;
-static size_t g_loopback_write_pos = 0;
-static size_t g_loopback_read_pos = 0;
-static std::atomic<size_t> g_loopback_available{0};
-static std::mutex g_loopback_mutex;
-static std::atomic<bool> g_tail_active{false};
-static std::atomic<DWORD> g_tail_start_time{0};
-static std::atomic<DWORD> g_tail_duration_ms{0};
-static uint64 g_current_server_connection_handler = 0;
-static std::thread g_heartbeat_thread;
-static std::atomic<bool> g_heartbeat_running{false};
-static void update_plugin_status();
-
-static void heartbeat_thread_func() {
-    while (g_heartbeat_running.load(std::memory_order_acquire)) {
-        if (g_plugin_initialized.load(std::memory_order_acquire)) {
-            update_plugin_status();
-        }
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(2000));
-    }
-}
+static std::thread g_ipc_poll_thread;
+static std::atomic<bool> g_ipc_poll_running{false};
 
 // Audio effect functions
 namespace AudioEffects {
@@ -1410,6 +1386,20 @@ static const char* get_effect_name(TSEffectType type) {
     }
 }
 
+// Forward declarations
+static void update_cached_effects();
+static void update_plugin_status();
+
+static void ipc_poll_thread_func() {
+    while (g_ipc_poll_running.load(std::memory_order_acquire)) {
+        if (g_plugin_initialized.load(std::memory_order_acquire)) {
+            update_cached_effects();
+            update_plugin_status();
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+}
+
 static bool init_shared_memory() {
     // If already initialized, don't re-initialize
     if (g_effect_config != nullptr && g_mutex_handle != nullptr) {
@@ -1643,78 +1633,17 @@ static void update_plugin_status() {
     if (wait_result == WAIT_OBJECT_0 || wait_result == WAIT_ABANDONED) {
         g_plugin_status->plugin_active = 1;
         g_plugin_status->connected = g_connected.load() ? 1 : 0;
-        g_plugin_status->capturing = g_transmitting.load() ? 1 : 0;
-        g_plugin_status->transmitting = g_transmitting.load() ? 1 : 0;
+        g_plugin_status->capturing = 0;
+        g_plugin_status->transmitting = 0;
         g_plugin_status->sample_rate = g_audio_state.sample_rate;
         g_plugin_status->last_heartbeat = GetTickCount();
         ReleaseMutex(g_mutex_handle);
     }
 }
 
-static DWORD calculate_tail_duration_ms(const TSVoiceEffectConfig& effects) {
-    DWORD max_tail_ms = 0;
-    
-    for (uint8_t i = 0; i < effects.effect_chain_count && i < TSVoiceEffectConfig::MAX_EFFECT_CHAIN; i++) {
-        TSEffectType type = static_cast<TSEffectType>(effects.effect_chain_types[i]);
-        float value = effects.effect_chain_values[i];
-        
-        switch (type) {
-            case TSEffectType::ECHO_DELAY:
-                // Echo can repeat multiple times based on decay
-                // Estimate ~3-4 audible repeats
-                max_tail_ms = std::max(max_tail_ms, static_cast<DWORD>(value * 1000.0f * 4));
-                break;
-            case TSEffectType::REVERB:
-                // Reverb tail ~500ms at full amount
-                max_tail_ms = std::max(max_tail_ms, static_cast<DWORD>(value * 500.0f));
-                break;
-            case TSEffectType::CHORUS:
-            case TSEffectType::FLANGER:
-                // Short tails ~50ms
-                max_tail_ms = std::max(max_tail_ms, static_cast<DWORD>(50));
-                break;
-            default:
-                break;
-        }
-    }
-    
-    return max_tail_ms;
-}
-
-static void start_tail_transmission(uint64 serverConnectionHandlerID) {
-    TSVoiceEffectConfig effects;
-
-    {
-        std::lock_guard<std::mutex> lock(g_effect_mutex);
-        effects = g_cached_effects;
-    }
-    
-    if (!effects.effects_enabled) return;
-    DWORD tail_ms = calculate_tail_duration_ms(effects);
-    if (tail_ms == 0) return;
-    g_current_server_connection_handler = serverConnectionHandlerID;
-    g_tail_duration_ms.store(tail_ms);
-    g_tail_start_time.store(GetTickCount());
-    g_tail_active.store(true);
-    ts3Functions.startVoiceRecording(serverConnectionHandlerID);
-}
-
-static void check_tail_completion() {
-    if (!g_tail_active.load()) return;
-    DWORD elapsed = GetTickCount() - g_tail_start_time.load();
-
-    if (elapsed >= g_tail_duration_ms.load()) {
-        g_tail_active.store(false);
-
-        if (g_current_server_connection_handler != 0) {
-            ts3Functions.stopVoiceRecording(g_current_server_connection_handler);
-        }
-    }
-}
-
 static bool process_audio(short* samples, int sample_count, int channels, const TSVoiceEffectConfig& effects) {
     std::lock_guard<std::mutex> audio_lock(g_audio_state_mutex);
-
+ 
     if (!g_plugin_initialized.load(std::memory_order_acquire)) {
         return false;
     }
@@ -1729,7 +1658,7 @@ static bool process_audio(short* samples, int sample_count, int channels, const 
     for (uint8_t j = 0; j < effects.effect_chain_count; j++) {
         TSEffectType t = static_cast<TSEffectType>(effects.effect_chain_types[j]);
         float v = effects.effect_chain_values[j];
-
+ 
         switch (t) {
             case TSEffectType::TREMOLO_DEPTH: tremolo_depth_value = v; break;
             case TSEffectType::ECHO_DECAY: echo_decay_value = v; break;
@@ -1748,7 +1677,7 @@ static bool process_audio(short* samples, int sample_count, int channels, const 
         for (int ch = 0; ch < channels; ch++) {
             mono_sample += static_cast<float>(samples[i * channels + ch]) / 32768.0f;
         }
-
+ 
         mono_sample /= static_cast<float>(channels);
         
         // Apply effects in user-specified order (on mono signal)
@@ -1763,100 +1692,86 @@ static bool process_audio(short* samples, int sample_count, int channels, const 
                     if (std::abs(value) > 0.01f) {
                         sample = AudioEffects::apply_pitch_shift(sample, value, slot, g_audio_state.sample_rate);
                     }
-                    
-                    break;
 
+                    break;
                 case TSEffectType::DISTORTION:
                     if (value > 0.0f) {
                         sample = AudioEffects::distort(sample, value);
                     }
 
                     break;
-
                 case TSEffectType::BITCRUSH:
                     if (value > 0.0f) {
                         sample = AudioEffects::bitcrush(sample, value);
                     }
 
                     break;
-
                 case TSEffectType::RING_MOD:
                     if (value > 0.0f) {
                         sample = AudioEffects::ring_mod(sample, slot.ring_mod_phase, value, g_audio_state.sample_rate);
                     }
-                    
-                    break;
 
+                    break;
                 case TSEffectType::TREMOLO_RATE:
                     if (value > 0.0f) {
                         sample = AudioEffects::apply_tremolo(sample, slot.tremolo_phase, value, tremolo_depth_value, g_audio_state.sample_rate);
                     }
 
                     break;
-
                 case TSEffectType::CHORUS:
                     if (value > 0.0f) {
                         sample = AudioEffects::apply_chorus(sample, value, chorus_rate_value, slot, g_audio_state.sample_rate);
                     }
 
                     break;
-
                 case TSEffectType::FLANGER:
                     if (value > 0.0f) {
                         sample = AudioEffects::apply_flanger(sample, value, flanger_rate_value, slot, g_audio_state.sample_rate);
                     }
 
                     break;
-
                 case TSEffectType::NOISE:
                     if (value > 0.0f) {
                         sample = AudioEffects::add_noise(sample, value, g_audio_state.rng_state);
                     }
 
                     break;
-
                 case TSEffectType::RADIO_STATIC:
                     if (value > 0.0f) {
                         sample = AudioEffects::add_radio_static(sample, value, g_audio_state.rng_state);
                     }
 
                     break;
-
                 case TSEffectType::REVERB:
                     if (value > 0.0f) {
                         sample = AudioEffects::apply_reverb(sample, value, slot);
                     }
 
                     break;
-
                 case TSEffectType::LOWPASS:
                     if (value > 0.0f && value < 1.0f) {
                         sample = AudioEffects::lowpass(sample, value, slot.lp_prev, g_audio_state.sample_rate);
                     }
 
                     break;
-
                 case TSEffectType::HIGHPASS:
                     if (value > 0.0f) {
                         sample = AudioEffects::highpass(sample, value, slot.hp_prev_in, slot.hp_prev_out, g_audio_state.sample_rate);
                     }
 
                     break;
-
                 case TSEffectType::TELEPHONE:
                     if (value > 0.0f) {
                         sample = AudioEffects::apply_telephone_filter(sample, value, slot.tel_lp_prev, slot.tel_hp_prev_in, slot.tel_hp_prev_out, g_audio_state.sample_rate);
                     }
 
                     break;
-
                 case TSEffectType::UNDERWATER:
                     if (value > 0.0f) {
                         sample = AudioEffects::apply_underwater(sample, value, slot.uw_lp_prev1, slot.uw_lp_prev2, g_audio_state.sample_rate);
                     }
 
                     break;
-
                 case TSEffectType::ECHO_DELAY:
                     if (value > 0.0f) {
                         AudioEffects::update_echo_buffer(value, g_audio_state.sample_rate, slot);
@@ -1864,28 +1779,24 @@ static bool process_audio(short* samples, int sample_count, int channels, const 
                     }
 
                     break;
-
                 case TSEffectType::RADIO_SQUELCH:
                     if (value > 0.0f) {
                         sample = AudioEffects::apply_squelch(sample, value, slot.squelch_state, g_audio_state.sample_rate);
                     }
 
                     break;
-
                 case TSEffectType::FREQUENCY_WOBBLE:
                     if (value > 0.0f) {
                         sample = AudioEffects::apply_frequency_wobble(sample, slot.wobble_phase, value, g_audio_state.sample_rate);
                     }
 
                     break;
-
                 case TSEffectType::COMPRESSOR_THRESHOLD:
                     if (value > 0.0f && compressor_ratio_value > 1.0f) {
                         sample = AudioEffects::apply_compressor(sample, value, compressor_ratio_value, slot.compressor_envelope, g_audio_state.sample_rate);
                     }
 
                     break;
-
                 case TSEffectType::AGC:
                     if (value > 0.0f) {
                         sample = AudioEffects::apply_agc(sample, value, slot.agc_gain, slot.agc_envelope, g_audio_state.sample_rate);
@@ -1899,11 +1810,9 @@ static bool process_audio(short* samples, int sample_count, int channels, const 
                     }
 
                     break;
-
                 case TSEffectType::VOLUME:
                     sample *= value;
                     break;
-
                 default:
                     break;
             }
@@ -1919,33 +1828,7 @@ static bool process_audio(short* samples, int sample_count, int channels, const 
             samples[i * channels + ch] = output_sample;
         }
     }
-
-    if (g_local_test_mode.load(std::memory_order_relaxed)) {
-        std::lock_guard<std::mutex> lock(g_loopback_mutex);
-        
-        for (int i = 0; i < sample_count; i++) {
-            // Average channels to mono for loopback
-            float mono_sample = 0.0f;
-
-            for (int ch = 0; ch < channels; ch++) {
-                mono_sample += static_cast<float>(samples[i * channels + ch]) / 32768.0f;
-            }
-
-            mono_sample /= static_cast<float>(channels);
-            g_loopback_buffer[g_loopback_write_pos] = mono_sample;
-            g_loopback_write_pos = (g_loopback_write_pos + 1) % LOOPBACK_BUFFER_SIZE;
-        }
-        
-        size_t new_available = g_loopback_available.load() + sample_count;
-
-        if (new_available > LOOPBACK_BUFFER_SIZE) {
-            new_available = LOOPBACK_BUFFER_SIZE;
-            g_loopback_read_pos = (g_loopback_write_pos + 1) % LOOPBACK_BUFFER_SIZE;
-        }
-
-        g_loopback_available.store(new_available);
-    }
-
+ 
     return true;
 }
 
@@ -1977,33 +1860,59 @@ void ts3plugin_setFunctionPointers(const struct TS3Functions funcs) {
 }
 
 int ts3plugin_init() {
-    // Mark as not initialized during setup
     g_plugin_initialized.store(false, std::memory_order_release);
     
     {
         std::lock_guard<std::mutex> lock(g_audio_state_mutex);
         g_audio_state.init(48000);
     }
-
-    {
-        std::lock_guard<std::mutex> lock(g_loopback_mutex);
-        g_loopback_buffer.resize(LOOPBACK_BUFFER_SIZE, 0.0f);
-        g_loopback_write_pos = 0;
-        g_loopback_read_pos = 0;
-        g_loopback_available.store(0);
-    }
     
     {
         std::lock_guard<std::mutex> lock(g_ipc_handle_mutex);
         g_last_sequence = 0;
-        init_shared_memory();  // May fail, that's OK - will retry in update_cached_effects
+        init_shared_memory();
     }
     
-    // Memory barrier to ensure all initialization is visible before setting flag
     std::atomic_thread_fence(std::memory_order_release);
     g_plugin_initialized.store(true, std::memory_order_release);
-    g_heartbeat_running.store(true, std::memory_order_release);
-    g_heartbeat_thread = std::thread(heartbeat_thread_func);
+    
+    // Single background thread for IPC polling and heartbeat
+    g_ipc_poll_running.store(true, std::memory_order_release);
+    g_ipc_poll_thread = std::thread(ipc_poll_thread_func);
+    
+    // Detect existing connection (plugin enabled mid-session)
+    uint64* handlerList = nullptr;
+
+    if (ts3Functions.getServerConnectionHandlerList &&
+        ts3Functions.getServerConnectionHandlerList(&handlerList) == ERROR_ok &&
+        handlerList != nullptr) {
+
+        for (int i = 0; handlerList[i] != 0; i++) {
+            int status = 0;
+
+            if (ts3Functions.getConnectionStatus &&
+                ts3Functions.getConnectionStatus(handlerList[i], &status) == ERROR_ok) {
+
+                if (status == STATUS_CONNECTION_ESTABLISHED) {
+                    g_connected.store(true, std::memory_order_release);
+
+                    char logmsg[256];
+                    snprintf(logmsg, sizeof(logmsg), 
+                        "%s: detected existing connection (handler %llu)",
+                        PLUGIN_NAME, (unsigned long long)handlerList[i]);
+                    ts3Functions.logMessage(logmsg, LogLevel_INFO, PLUGIN_NAME, 0);
+                    break;
+                }
+            }
+        }
+
+        if (ts3Functions.freeMemory) {
+            ts3Functions.freeMemory(handlerList);
+        }
+    }
+    
+    update_plugin_status();
+
     char msg[256];
     snprintf(msg, sizeof(msg), "%s initialized", PLUGIN_NAME);
     ts3Functions.logMessage(msg, LogLevel_INFO, PLUGIN_NAME, 0);
@@ -2012,20 +1921,14 @@ int ts3plugin_init() {
 
 void ts3plugin_shutdown() {
     g_plugin_initialized.store(false, std::memory_order_release);
-    g_heartbeat_running.store(false, std::memory_order_release);
+    g_ipc_poll_running.store(false, std::memory_order_release);
 
-    if (g_heartbeat_thread.joinable()) {
-        g_heartbeat_thread.join();
+    if (g_ipc_poll_thread.joinable()) {
+        g_ipc_poll_thread.join();
     }
-
-    g_tail_active.store(false);
     
     {
         std::lock_guard<std::mutex> lock(g_audio_state_mutex);
-    }
-
-    {
-        std::lock_guard<std::mutex> lock(g_loopback_mutex);
     }
     
     {
@@ -2042,35 +1945,18 @@ int ts3plugin_offersConfigure() {
     return PLUGIN_OFFERS_NO_CONFIGURE;
 }
 
-// Connection events
 void ts3plugin_onConnectStatusChangeEvent(uint64 serverConnectionHandlerID, int newStatus, unsigned int errorNumber) {
     g_connected.store(newStatus == STATUS_CONNECTION_ESTABLISHED);
     
     if (newStatus == STATUS_CONNECTION_ESTABLISHED) {
-        g_current_server_connection_handler = serverConnectionHandlerID;
-        
-        // Reset audio state on new connection
-        {
-            std::lock_guard<std::mutex> lock(g_audio_state_mutex);
-            g_audio_state.reset();
-        }
-    } else if (newStatus == STATUS_DISCONNECTED) {
-        // Clean up tail state on disconnect
-        g_tail_active.store(false);
+        std::lock_guard<std::mutex> lock(g_audio_state_mutex);
+        g_audio_state.reset();
     }
-    
-    update_plugin_status();
 }
 
-// Voice processing - this is called for outgoing voice data
 void ts3plugin_onEditCapturedVoiceDataEvent(uint64 serverConnectionHandlerID, short* samples, int sampleCount, int channels, int* edited) {
     if (!g_plugin_initialized.load(std::memory_order_acquire)) return;
     
-    // Update IPC outside of audio processing — non-blocking only
-    update_cached_effects();
-    check_tail_completion();
-    
-    // Get current effects snapshot
     TSVoiceEffectConfig effects;
 
     {
@@ -2078,8 +1964,8 @@ void ts3plugin_onEditCapturedVoiceDataEvent(uint64 serverConnectionHandlerID, sh
         effects = g_cached_effects;
     }
     
-    // Early out if nothing to do
     if (!effects.effects_enabled || effects.effect_chain_count == 0) return;
+    
     bool was_modified = process_audio(samples, sampleCount, channels, effects);
 
     if (was_modified) {
@@ -2087,102 +1973,22 @@ void ts3plugin_onEditCapturedVoiceDataEvent(uint64 serverConnectionHandlerID, sh
     }
 }
 
-// Called when starting to talk
-void ts3plugin_onTalkStatusChangeEvent(uint64 serverConnectionHandlerID, int status, int isReceivedWhisper, anyID clientID) {
-    // Check if this is the local client
-    anyID myID;
-    
-    if (ts3Functions.getClientID(serverConnectionHandlerID, &myID) == ERROR_ok) {
-        if (clientID == myID) {
-            bool was_transmitting = g_transmitting.load();
-            bool now_talking = (status == STATUS_TALKING);
-            g_transmitting.store(now_talking);
-            
-            if (now_talking) {
-                // User started talking - cancel any active tail
-                if (g_tail_active.load()) {
-                    g_tail_active.store(false);
-                    ts3Functions.stopVoiceRecording(serverConnectionHandlerID);
-                }
-                
-                // Reset some effect states on new transmission
-                std::lock_guard<std::mutex> lock(g_audio_state_mutex);
-
-                for (size_t i = 0; i < AudioProcessorState::MAX_SLOTS; i++) {
-                    g_audio_state.slots[i].ring_mod_phase = 0.0f;
-                    g_audio_state.slots[i].wobble_phase = 0.0f;
-                }
-            } else if (was_transmitting && !g_tail_active.load()) {
-                // User stopped talking naturally - start tail if needed
-                start_tail_transmission(serverConnectionHandlerID);
-            }
-            
-            update_plugin_status();
-        }
-    }
-}
-
-void ts3plugin_onEditMixedPlaybackVoiceDataEvent(uint64 serverConnectionHandlerID, short* samples, int sampleCount, int channels, const unsigned int* channelSpeakerArray, unsigned int* channelFillMask) {
-    if (!g_plugin_initialized.load(std::memory_order_acquire)) {
-        return;
-    }
-    
-    if (!g_local_test_mode.load(std::memory_order_acquire)) {
-        return;
-    }
-    
-    std::lock_guard<std::mutex> lock(g_loopback_mutex);
-
-    if (!g_plugin_initialized.load(std::memory_order_acquire) || 
-        !g_local_test_mode.load(std::memory_order_relaxed)) {
-        return;
-    }
-    
-    size_t available = g_loopback_available.load(std::memory_order_acquire);
-
-    if (available == 0) {
-        return;
-    }
-
-    size_t samples_to_read = std::min(static_cast<size_t>(sampleCount), available);
-    
-    for (size_t i = 0; i < samples_to_read; i++) {
-        float loopback_sample = g_loopback_buffer[g_loopback_read_pos];
-        g_loopback_read_pos = (g_loopback_read_pos + 1) % LOOPBACK_BUFFER_SIZE;
-        
-        // Mix into all channels
-        for (int ch = 0; ch < channels; ch++) {
-            int idx = static_cast<int>(i) * channels + ch;
-            float existing = static_cast<float>(samples[idx]) / 32768.0f;
-            float mixed = existing + loopback_sample * 0.7f;
-            mixed = std::clamp(mixed, -1.0f, 1.0f);
-            samples[idx] = static_cast<short>(mixed * 32767.0f);
-        }
-    }
-    
-    g_loopback_available.store(available - samples_to_read, std::memory_order_release);
-}
-
-// If this is causing issues should get rid of it, no real functionality lost
+// Debug commands
 int ts3plugin_processCommand(uint64 serverConnectionHandlerID, const char* command) {
     char msg[2048];
-    char debug[256];
-    snprintf(debug, sizeof(debug), "KH Plugin received command: '%s'", command);
-    ts3Functions.logMessage(debug, LogLevel_INFO, PLUGIN_NAME, 0);
     
     if (strcmp(command, "status") == 0) {
         bool shm_connected = (g_effect_config != nullptr);
         bool effects_active = g_cached_effects.effects_enabled != 0;
-        bool test_mode = g_local_test_mode.load();
         
         int offset = snprintf(msg, sizeof(msg), 
             "[b]KH Voice Modulation Status:[/b]\n"
             "IPC Connected: %s\n"
             "Effects Active: %s\n"
-            "Local Test Mode: %s\n",
+            "TS Connected: %s\n",
             shm_connected ? "Yes" : "No",
             effects_active ? "Yes" : "No",
-            test_mode ? "Enabled" : "Disabled"
+            g_connected.load() ? "Yes" : "No"
         );
         
         if (effects_active && g_cached_effects.effect_chain_count > 0) {
@@ -2194,35 +2000,26 @@ int ts3plugin_processCommand(uint64 serverConnectionHandlerID, const char* comma
                 offset += snprintf(msg + offset, sizeof(msg) - offset, "  %d. %s: %.3f\n", i + 1, get_effect_name(type), value);
                 if (offset >= static_cast<int>(sizeof(msg) - 64)) break;
             }
-        } else if (effects_active) {
-            offset += snprintf(msg + offset, sizeof(msg) - offset, "\nNo effects in chain.\n");
         }
         
         ts3Functions.printMessage(serverConnectionHandlerID, msg, PLUGIN_MESSAGE_TARGET_SERVER);
-        ts3Functions.logMessage(msg, LogLevel_INFO, PLUGIN_NAME, 0);
         return 0;
     }
     
-    if (strcmp(command, "test") == 0) {
-        bool current = g_local_test_mode.load();
-        bool new_state = !current;
-
+    if (strcmp(command, "reconnect") == 0) {
         {
-            std::lock_guard<std::mutex> lock(g_loopback_mutex);
-            g_loopback_write_pos = 0;
-            g_loopback_read_pos = 0;
-            g_loopback_available.store(0);
-            std::fill(g_loopback_buffer.begin(), g_loopback_buffer.end(), 0.0f);
+            std::lock_guard<std::mutex> lock(g_ipc_handle_mutex);
+            cleanup_shared_memory();
+            g_last_sequence = 0;
+            
+            if (init_shared_memory()) {
+                snprintf(msg, sizeof(msg), "[b]KH Voice Modulation:[/b] Reconnected to shared memory successfully.");
+            } else {
+                snprintf(msg, sizeof(msg), "[b]KH Voice Modulation:[/b] Could not connect. Is Arma 3 running with the extension?");
+            }
         }
         
-        g_local_test_mode.store(new_state);
-        
-        snprintf(msg, sizeof(msg), "[b]KH Voice Modulation:[/b] Local test mode %s. You will %shear your own voice with effects applied.",
-            new_state ? "enabled" : "disabled",
-            new_state ? "" : "no longer ");
-
         ts3Functions.printMessage(serverConnectionHandlerID, msg, PLUGIN_MESSAGE_TARGET_SERVER);
-        ts3Functions.logMessage(new_state ? "Local test mode enabled" : "Local test mode disabled", LogLevel_INFO, PLUGIN_NAME, 0);
         return 0;
     }
     
@@ -2230,7 +2027,7 @@ int ts3plugin_processCommand(uint64 serverConnectionHandlerID, const char* comma
         snprintf(msg, sizeof(msg),
             "[b]KH Voice Modulation Commands:[/b]\n"
             "  /kh status - Show connection status and active effects\n"
-            "  /kh test - Toggle local test mode (hear your own filtered voice)\n"
+            "  /kh reconnect - Force reconnect to Arma shared memory\n"
             "  /kh help - Show this help message"
         );
 
@@ -2248,7 +2045,7 @@ const char* ts3plugin_commandKeyword() {
 }
 
 int ts3plugin_requestAutoload() {
-    return 1;  // Return 1 to request autoload
+    return 1;
 }
 
 } // extern "C"

@@ -1854,7 +1854,7 @@ isNil {
 
 			[
 				[], 
-				[], 
+				["MineGeneric", "Animal"], 
 				{
 					params ["_entity"];
 
@@ -2149,7 +2149,9 @@ isNil {
 									};
 								};
 
-								if (_weaponSurrogate || (_meleeWeapon isNotEqualTo -1)) then {
+								private _closestTarget = _unit findNearestEnemy (getPosATL _unit);
+
+								if ((_weaponSurrogate && !(isNull _closestTarget) && ((_unit distance _closestTarget) <= KH_var_meleeMeleeAiEngageDistance)) || (_meleeWeapon isNotEqualTo -1)) then {
 									isNil {
 										if !(_unit getVariable ["KH_var_aiIsMelee", false]) then {
 											_unit setVariable ["KH_var_aiIsMelee", true, true];
@@ -2227,8 +2229,6 @@ isNil {
 											_unit setVariable ["KH_var_usedWeaponSurrogate", true];
 										};
 									};
-
-									private _closestTarget = _unit findNearestEnemy (getPosATL _unit);
 
 									if !(isNull _closestTarget) then {
 										if ((_unit distance _closestTarget) <= KH_var_meleeMeleeAiEngageDistance) then {

@@ -5,6 +5,8 @@ class CfgAmmo
 	{
 		airFriction = -0.00001;
 		audibleFire = 0;
+		craterEffects = "";
+		craterWaterEffects = "";
 		bulletFly[] = {};
 		bulletFly1[] = {};
 		bulletFly10[] = {};

@@ -73,7 +73,7 @@ if _objects then {
 
     [
         [], 
-        ["Man", "Logic", "EmptyDetector"],
+        ["Man", "MineGeneric", "Logic", "EmptyDetector"],
         {
             params ["_object"];
 

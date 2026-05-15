@@ -20,7 +20,7 @@ private _projectile = createVehicle [
 ];
 
 _projectile setShotParents _parent;
-_projectile setVectorUp (vectorNormalized ((unitAimPositionVisual _entity) vectorDiff (_projectile modelToWorldVisual [0, 0, 0])));
+_projectile setVectorUp ((AGLToASL (_projectile modelToWorldVisual [0, 0, 0])) vectorFromTo (AGLToASL (unitAimPositionVisual _entity)));
 _projectile setVelocityModelSpace [0, 0, (getNumber (configFile >> "CfgAmmo" >> _ammo >> "typicalSpeed")) max 1];
 
 if _terminateOnHit then {

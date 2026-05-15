@@ -1,11 +1,11 @@
 params [["_pivot", [0, 0, 0], [[], objNull]], ["_position", [0, 0, 0], [[], objNull]], ["_vectorDirUp", [[0, 1, 0], [0, 0, 1]], [[], objNull]]];
 
 if (_pivot isEqualType objNull) then {
-    _pivot = getPosATLVisual _pivot;
+    _pivot = getPosASLVisual _pivot;
 };
 
 if (_position isEqualType objNull) then {
-    _position = getPosATLVisual _position;
+    _position = getPosASLVisual _position;
 };
 
 if (_vectorDirUp isEqualType objNull) then {

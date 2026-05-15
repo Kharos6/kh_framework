@@ -23,6 +23,6 @@
 #include "\x\kh\addons\main\cfgVehicleClasses.hpp"
 #include "\x\kh\addons\main\cfgVehicles.hpp"
 #include "\x\kh\addons\main\cfgWeapons.hpp"
-#include "\x\kh\addons\main\extendedPreInitEventhandlers.hpp"
+#include "\x\kh\addons\main\extendedEventhandlers.hpp"
 #include "\x\kh\addons\main\intercept.hpp"
 #include "\x\kh\addons\main\resources.hpp"

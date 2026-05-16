@@ -15,6 +15,16 @@ class Extended_Init_Eventhandlers
         };
     };
 };
+class Extended_Respawn_Eventhandlers
+{
+    class All
+    {
+        class KH_Main
+        {
+            respawn = "call KH_fnc_entityInitHandler";
+        };
+    };
+};
 class Extended_Deleted_Eventhandlers
 {
     class All

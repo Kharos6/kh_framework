@@ -1,4 +1,4 @@
-params ["_entity"];
+params [["_entity", objNull, [objNull]], ["_respawn", false, [true]]];
 
 [
     [_entity],
@@ -46,7 +46,7 @@ params ["_entity"];
             [_entity] call _function;
         } forEach KH_var_entityInitializations;
     },
-    true,
+    [true, "GLOBAL"] select _respawn,
     "-2",
     false
 ] call KH_fnc_execute;

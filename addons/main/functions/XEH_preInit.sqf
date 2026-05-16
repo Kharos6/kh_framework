@@ -2963,7 +2963,7 @@
 		};
 	}, 
 	{}, 
-	[0x14, [false, false, false]]
+	[0x14, [false, true, false]]
 ] call CBA_fnc_addKeybind;
 
 [

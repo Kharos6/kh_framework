@@ -75,7 +75,7 @@ if KH_var_medical then {
                         if ((getNumber (configFile >> "CfgAmmo" >> _projectile >> "kh_melee")) isEqualTo 1) then {
                             _damage = _damage * KH_var_absoluteMeleeDamageMultiplier * (1 - ((getFatigue _instigator) * KH_var_meleeDamageReductionStaminaCoefficient));
 
-                            if ((side (group _instigator)) isEqualTo (side (group _unit))) then {
+                            if ([_instigator, _unit, true] call KH_fnc_getSideRelations) then {
                                 _damage = _damage * KH_var_absoluteFriendlyDamageMultiplier * KH_var_absoluteMeleeFriendlyDamageMultiplier;
                             };
 
@@ -94,7 +94,7 @@ if KH_var_medical then {
                             };
                         }
                         else {
-                            if ((side (group _instigator)) isEqualTo (side (group _unit))) then {
+                            if ([_instigator, _unit, true] call KH_fnc_getSideRelations) then {
                                 _damage = _damage * KH_var_absoluteFriendlyDamageMultiplier;
                             };
                         };

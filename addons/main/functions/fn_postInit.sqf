@@ -603,7 +603,7 @@ isNil {
 																			{
 																				private _object = _x select 3;
 
-																				if (((_object in _handledHit) && !_unique) || (((side (group _object)) isEqualTo (side (group _unit))) && KH_var_meleeAttackIgnoreFriendlies)) then {
+																				if (((_object in _handledHit) && !_unique) || (([_object, _unit, true] call KH_fnc_getSideRelations) && KH_var_meleeAttackIgnoreFriendlies)) then {
 																					continue;
 																				};
 
@@ -648,7 +648,7 @@ isNil {
 																				{
 																					private _object = _x select 3;
 
-																					if (((_object in _handledHit) && !_unique) || (((side (group _object)) isEqualTo (side (group _unit))) && KH_var_meleeAttackIgnoreFriendlies)) then {
+																					if (((_object in _handledHit) && !_unique) || (([_object, _unit, true] call KH_fnc_getSideRelations) && KH_var_meleeAttackIgnoreFriendlies)) then {
 																						continue;
 																					};
 																					
@@ -902,7 +902,7 @@ isNil {
 																			{
 																				private _object = _x select 3;
 
-																				if ((_object in _handledKick) || (((side (group _object)) isEqualTo (side (group _unit))) && KH_var_meleeKickIgnoreFriendlies)) then {
+																				if ((_object in _handledKick) || (([_object, _unit, true] call KH_fnc_getSideRelations) && KH_var_meleeKickIgnoreFriendlies)) then {
 																					continue;
 																				};
 
@@ -993,7 +993,7 @@ isNil {
 																			{
 																				private _object = _x select 3;
 
-																				if ((_object in _handledTackle) || (((side (group _object)) isEqualTo (side (group _unit))) && KH_var_meleeTackleIgnoreFriendlies)) then {
+																				if ((_object in _handledTackle) || (([_object, _unit, true] call KH_fnc_getSideRelations) && KH_var_meleeTackleIgnoreFriendlies)) then {
 																					continue;
 																				};
 
@@ -1021,7 +1021,7 @@ isNil {
 																			{
 																				private _object = _x select 3;
 
-																				if ((_object in _handledTackle) || (((side (group _object)) isEqualTo (side (group _unit))) && KH_var_meleeTackleIgnoreFriendlies)) then {
+																				if ((_object in _handledTackle) || (([_object, _unit, true] call KH_fnc_getSideRelations) && KH_var_meleeTackleIgnoreFriendlies)) then {
 																					continue;
 																				};
 

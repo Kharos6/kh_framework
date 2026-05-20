@@ -7,12 +7,10 @@ if (_animation isEqualTo []) exitWith {
 if !((_animation select 0) isEqualType "") then {
     private _currentAnimationSequenceId = generateUid;
     _unit setVariable ["KH_var_currentAnimationSequenceId", _currentAnimationSequenceId];
-    private _totalDelay = 0;
     private _valid = true;
 
     {
-        _x params [["_delay", 0, [0]], ["_animationType", "ACTION_PLAY_NOW", [""]], ["_currentAnimation", "", ["", []]], ["_validate", true, [true]]];
-        _totalDelay = _totalDelay + _delay;
+        (_x select [1]) params [["_animationType", "ACTION_PLAY_NOW", [""]], ["_currentAnimation", "", ["", []]], ["_validate", true, [true]]];
 
         if _validate then {
             if ("ACTION" in _animationType) then {
@@ -39,6 +37,17 @@ if !((_animation select 0) isEqualType "") then {
                 };
             };
         };
+    } forEach _animation;
+
+    if !_valid exitWith {
+        false;
+    };
+
+    private _totalDelay = 0;
+
+    {
+        _x params [["_delay", 0, [0]], ["_animationType", "ACTION_PLAY_NOW", [""]], ["_currentAnimation", "", ["", []]], ["_validate", true, [true]]];
+        _totalDelay = _totalDelay + _delay;
 
         if (_totalDelay isEqualTo 0) then {
             if ((!_allowVehicle && !(isNull (objectParent _unit))) || (!_allowUnconscious && (((lifeState _unit) isEqualTo "INCAPACITATED") || ((lifeState _unit) isEqualTo "UNCONSCIOUS")))) then {

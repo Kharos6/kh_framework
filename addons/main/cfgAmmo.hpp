@@ -27,7 +27,7 @@ class CfgAmmo
         cost = 999999;
 		explosive = 0;
 		hit = 1;
-		typicalSpeed = 1;
+		typicalSpeed = 0.1;
 		soundFakeFall[] = {};
 		soundImpactDefault1[] = {};
 		soundSetBulletFly[] = {};

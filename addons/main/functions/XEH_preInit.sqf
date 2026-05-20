@@ -2036,6 +2036,20 @@
 ] call CBA_fnc_addSetting;
 
 [
+	"KH_var_traversalDebugMode",
+	"CHECKBOX",   
+	[
+		"Debug Mode", 
+		"True displays debug information for traversal."
+	], 
+	"KH Traversal", 
+	false,
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
 	"KH_var_meleeDebugMode",
 	"CHECKBOX",   
 	[
@@ -2606,23 +2620,6 @@
 	[
 		"Tackle Ignore Friendlies", 
 		"True results in tackle hit detection ignoring friendlies."
-	], 
-	[
-        "KH Melee",
-        "General"
-    ], 
-	false,
-	1,
-	{},
-	false
-] call CBA_fnc_addSetting;
-
-[
-	"KH_var_allowGeometryHitDetection",
-	"CHECKBOX",   
-	[
-		"Geometry Hit Detection", 
-		"True allows the Geometry LOD to be used in hit detection, making hit detection more likely but less precise for individual hit points."
 	], 
 	[
         "KH Melee",

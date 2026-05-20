@@ -2,9 +2,9 @@ params [["_unit", objNull, [objNull]]];
 if ((getNumber (configFile >> (getText ((configOf _unit) >> "moves")) >> "states" >> (animationState _unit) >> "kh_traversal")) isEqualTo 1) exitWith {};
 private _currentPosition = getPosASLVisual _unit;
 private _unitPositionHeight = _currentPosition select 2;
-private _bounds = (2 boundingBoxReal _unit) select 1;
-private _unitWidth = (_bounds select 0) * 0.5;
-private _unitLength = (_bounds select 1) * 0.5;
+private _bounds = (boundingBoxReal [_unit, "Geometry"]) select 1;
+private _unitWidth = _bounds select 0;
+private _unitLength = _bounds select 1;
 private _unitHeight = getNumber ((configOf _unit) >> "kh_unitHeight");
 
 private _obstacleIntersections = ([
@@ -12,14 +12,14 @@ private _obstacleIntersections = ([
     [vectorDir _unit, vectorUp _unit],
     [_unitWidth, _unitLength, str -(_unitHeight + 5)],
     "RECTANGLE",
-    0.25,
+    0.5,
     [_unit, "TERRAIN"] + (attachedObjects _unit),
     true, 
     1, 
     "GEOM", 
     "ROADWAY",
     true,
-    []
+    [[], ["LINE", [], 1]] select KH_var_traversalDebugMode
 ] call KH_fnc_raycast3d) select 0;
 
 private _maximumHeight = if (_obstacleIntersections isNotEqualTo []) then {
@@ -49,14 +49,14 @@ private _climbIntersections = ([
     [vectorDir _unit, vectorUp _unit],
     [_unitWidth, _unitLength, str _maximumHeight],
     "RECTANGLE",
-    0.25,
+    0.5,
     [_unit, "TERRAIN"] + (attachedObjects _unit),
     false, 
     -1, 
     "GEOM", 
     "ROADWAY",
     true,
-    []
+    [[], ["LINE", [], 1]] select KH_var_traversalDebugMode
 ] call KH_fnc_raycast3d) select 0;
 
 if (_climbIntersections isEqualTo []) exitWith {
@@ -112,14 +112,14 @@ private _vault = ((([
     [vectorDir _unit, vectorUp _unit],
     [_unitWidth, _unitLength, str _unitHeight],
     "RECTANGLE",
-    0.25,
+    0.5,
     [_unit, "TERRAIN"] + (attachedObjects _unit),
     true, 
     1, 
     "ROADWAY", 
     ["NONE", "GEOM"] select KH_var_anchorPlayersToGeometry,
     true,
-    []
+    [[], ["LINE", [], 1]] select KH_var_traversalDebugMode
 ] call KH_fnc_raycast3d) select 0) param [0, []]) isEqualTo [];
 
 _unit setVariable ["KH_var_traversalTarget", [_chosenTraversalTarget select 0, (_unit modelToWorldVisualWorld [0, _unitLength * 2.75, 0]) select 1, _chosenTraversalTarget select 2]];

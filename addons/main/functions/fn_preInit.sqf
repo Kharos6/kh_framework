@@ -11,6 +11,7 @@ KH_var_tfarLoaded = uiNamespace getVariable "KH_var_tfarLoaded";
 KH_var_missionLoaded = false;
 KH_var_jip = false;
 KH_var_playerUnit = objNull;
+KH_var_gravity = 9.80665;
 KH_var_defaultAiSystemPrompt = uiNamespace getVariable "KH_var_defaultAiSystemPrompt";
 KH_var_remoteExecCommandsBlacklist = createHashMap;
 KH_var_remoteExecFunctionsBlacklist = createHashMap;
@@ -465,13 +466,15 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 				private _sounds = getArray (_instigatorConfig >> _attack >> "Sounds" >> (getText ((configOf _unit) >> "kh_meleeSoundType")));
 
 				if (_sounds isNotEqualTo []) then {
-					playSound3D [((getArray (configFile >> "CfgSounds" >> (selectRandom _sounds) >> "sound")) select 0) select [1], _unit, (insideBuilding _unit) >= 0.5, getPosASL _unit, 5, 1, 100, 0, false];
+					private _soundConfigArray = getArray (configFile >> "CfgSounds" >> (selectRandom _sounds) >> "sound");
+					playSound3D [(_soundConfigArray select 0) select [1], _unit, (insideBuilding _unit) >= 0.5, getPosASL _unit, _soundConfigArray select 1, _soundConfigArray select 2, 100, 0, false];
 				}
 				else {
 					_sounds = getArray (_instigatorConfig >> _attack >> "Sounds" >> "generic");
 
 					if (_sounds isNotEqualTo []) then {
-						playSound3D [((getArray (configFile >> "CfgSounds" >> (selectRandom _sounds) >> "sound")) select 0) select [1], _unit, (insideBuilding _unit) >= 0.5, getPosASL _unit, 5, 1, 100, 0, false];
+						private _soundConfigArray = getArray (configFile >> "CfgSounds" >> (selectRandom _sounds) >> "sound");
+						playSound3D [(_soundConfigArray select 0) select [1], _unit, (insideBuilding _unit) >= 0.5, getPosASL _unit, _soundConfigArray select 1, _soundConfigArray select 2, 100, 0, false];
 					};
 				};
 			};
@@ -547,13 +550,15 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 			private _sounds = getArray (_instigatorConfig >> _attack >> "Sounds" >> (["parried", "blocked"] select _blocked));
 
 			if (_sounds isNotEqualTo []) then {
-				playSound3D [((getArray (configFile >> "CfgSounds" >> (selectRandom _sounds) >> "sound")) select 0) select [1], _unit, (insideBuilding _unit) >= 0.5, getPosASL _unit, 5, 1, 100, 0, false];
+				private _soundConfigArray = getArray (configFile >> "CfgSounds" >> (selectRandom _sounds) >> "sound");
+				playSound3D [(_soundConfigArray select 0) select [1], _unit, (insideBuilding _unit) >= 0.5, getPosASL _unit, _soundConfigArray select 1, _soundConfigArray select 2, 100, 0, false];
 			}
 			else {
 				_sounds = getArray (_instigatorConfig >> _attack >> "Sounds" >> (["blocked", "parried"] select _parried));
 
 				if (_sounds isNotEqualTo []) then {
-					playSound3D [((getArray (configFile >> "CfgSounds" >> (selectRandom _sounds) >> "sound")) select 0) select [1], _unit, (insideBuilding _unit) >= 0.5, getPosASL _unit, 5, 1, 100, 0, false];
+					private _soundConfigArray = getArray (configFile >> "CfgSounds" >> (selectRandom _sounds) >> "sound");
+					playSound3D [(_soundConfigArray select 0) select [1], _unit, (insideBuilding _unit) >= 0.5, getPosASL _unit, _soundConfigArray select 1, _soundConfigArray select 2, 100, 0, false];
 				};
 			};
 		};
@@ -672,13 +677,15 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 		private _sounds = getArray (_instigatorConfig >> _kick >> "Sounds" >> (getText ((configOf _unit) >> "kh_meleeSoundType")));
 
 		if (_sounds isNotEqualTo []) then {
-			playSound3D [((getArray (configFile >> "CfgSounds" >> (selectRandom _sounds) >> "sound")) select 0) select [1], _unit, (insideBuilding _unit) >= 0.5, getPosASL _unit, 5, 1, 100, 0, false];
+			private _soundConfigArray = getArray (configFile >> "CfgSounds" >> (selectRandom _sounds) >> "sound");
+			playSound3D [(_soundConfigArray select 0) select [1], _unit, (insideBuilding _unit) >= 0.5, getPosASL _unit, _soundConfigArray select 1, _soundConfigArray select 2, 100, 0, false];
 		}
 		else {
 			_sounds = getArray (_instigatorConfig >> _kick >> "Sounds" >> "generic");
 
 			if (_sounds isNotEqualTo []) then {
-				playSound3D [((getArray (configFile >> "CfgSounds" >> (selectRandom _sounds) >> "sound")) select 0) select [1], _unit, (insideBuilding _unit) >= 0.5, getPosASL _unit, 5, 1, 100, 0, false];
+				private _soundConfigArray = getArray (configFile >> "CfgSounds" >> (selectRandom _sounds) >> "sound");
+				playSound3D [(_soundConfigArray select 0) select [1], _unit, (insideBuilding _unit) >= 0.5, getPosASL _unit, _soundConfigArray select 1, _soundConfigArray select 2, 100, 0, false];
 			};
 		};
 	}
@@ -797,13 +804,15 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 		private _sounds = getArray (_instigatorConfig >> _tackle >> "Sounds" >> (getText ((configOf _unit) >> "kh_meleeSoundType")));
 
 		if (_sounds isNotEqualTo []) then {
-			playSound3D [((getArray (configFile >> "CfgSounds" >> (selectRandom _sounds) >> "sound")) select 0) select [1], _unit, (insideBuilding _unit) >= 0.5, getPosASL _unit, 5, 1, 100, 0, false];
+			private _soundConfigArray = getArray (configFile >> "CfgSounds" >> (selectRandom _sounds) >> "sound");
+			playSound3D [(_soundConfigArray select 0) select [1], _unit, (insideBuilding _unit) >= 0.5, getPosASL _unit, _soundConfigArray select 1, _soundConfigArray select 2, 100, 0, false];
 		}
 		else {
 			_sounds = getArray (_instigatorConfig >> _tackle >> "Sounds" >> "generic");
 
 			if (_sounds isNotEqualTo []) then {
-				playSound3D [((getArray (configFile >> "CfgSounds" >> (selectRandom _sounds) >> "sound")) select 0) select [1], _unit, (insideBuilding _unit) >= 0.5, getPosASL _unit, 5, 1, 100, 0, false];
+				private _soundConfigArray = getArray (configFile >> "CfgSounds" >> (selectRandom _sounds) >> "sound");
+				playSound3D [(_soundConfigArray select 0) select [1], _unit, (insideBuilding _unit) >= 0.5, getPosASL _unit, _soundConfigArray select 1, _soundConfigArray select 2, 100, 0, false];
 			};
 		};
 	}
@@ -1795,85 +1804,83 @@ if hasInterface then {
 			private _previousUnit = KH_var_playerUnit;
 			KH_var_playerUnit = _unit;
 
-			if KH_var_allowTeamspeakVoiceEffectPresets then {
-				if (KH_var_playerVoiceEffectHandler isNotEqualTo []) then {
-					[KH_var_playerVoiceEffectHandler] call KH_fnc_removeHandler;
-				};
+			if isMultiplayer then {
+				if KH_var_allowTeamspeakVoiceEffectPresets then {
+					if (KH_var_playerVoiceEffectHandler isNotEqualTo []) then {
+						[KH_var_playerVoiceEffectHandler] call KH_fnc_removeHandler;
+					};
 
-				[
-					[_unit],
-					{
-						params ["_unit"];
-						private _applied = false;
-						private _weaponsConfigParent = configFile >> "CfgWeapons";
-
+					[
+						[],
 						{
-							private _effects = getArray (_x >> "kh_teamspeakVoiceEffects");
+							private _applied = false;
+							private _weaponsConfigParent = configFile >> "CfgWeapons";
 
-							if (_effects isNotEqualTo []) then {
-								tsApplyVoiceEffects _effects;
-								_applied = true;
-								break;
-							};
-						} forEach [
-							configFile >> "CfgGlasses" >> (goggles _unit),
-							_weaponsConfigParent >> (hmd _unit),
-							_weaponsConfigParent >> (headgear _unit),
-							configFile >> "CfgVehicles" >> (backpack _unit), 
-							_weaponsConfigParent >> (vest _unit),
-							_weaponsConfigParent >> (uniform _unit)
-						];
-
-						if !_applied then {
-							tsClearVoiceEffects;
-						};
-					},
-					true,
-					"1",
-					false
-				] call KH_fnc_execute;
-
-				KH_var_playerVoiceEffectHandler = [
-					["ENTITY", _unit, "LOCAL"],
-					"SlotItemChanged",
-					[],
-					{
-						params ["_unit"];
-
-						[
-							[_unit],
 							{
-								params ["_unit"];
-								private _applied = false;
-								private _weaponsConfigParent = configFile >> "CfgWeapons";
+								private _effects = getArray (_x >> "kh_teamspeakVoiceEffects");
 
-								{
-									private _effects = getArray (_x >> "kh_teamspeakVoiceEffects");
-
-									if (_effects isNotEqualTo []) then {
-										tsApplyVoiceEffects _effects;
-										_applied = true;
-										break;
-									};
-								} forEach [
-									configFile >> "CfgGlasses" >> (goggles _unit),
-									_weaponsConfigParent >> (hmd _unit),
-									_weaponsConfigParent >> (headgear _unit),
-									configFile >> "CfgVehicles" >> (backpack _unit), 
-									_weaponsConfigParent >> (vest _unit),
-									_weaponsConfigParent >> (uniform _unit)
-								];
-
-								if !_applied then {
-									tsClearVoiceEffects;
+								if (_effects isNotEqualTo []) then {
+									tsApplyVoiceEffects _effects;
+									_applied = true;
+									break;
 								};
-							},
-							true,
-							"-1",
-							false
-						] call KH_fnc_execute;
-					}
-				] call KH_fnc_addEventHandler;
+							} forEach [
+								configFile >> "CfgGlasses" >> (goggles KH_var_playerUnit),
+								_weaponsConfigParent >> (hmd KH_var_playerUnit),
+								_weaponsConfigParent >> (headgear KH_var_playerUnit),
+								configFile >> "CfgVehicles" >> (backpack KH_var_playerUnit), 
+								_weaponsConfigParent >> (vest KH_var_playerUnit),
+								_weaponsConfigParent >> (uniform KH_var_playerUnit)
+							];
+
+							if !_applied then {
+								tsClearVoiceEffects;
+							};
+						},
+						true,
+						"1",
+						false
+					] call KH_fnc_execute;
+
+					KH_var_playerVoiceEffectHandler = [
+						["ENTITY", KH_var_playerUnit, "LOCAL"],
+						"SlotItemChanged",
+						[],
+						{
+							[
+								[],
+								{
+									private _applied = false;
+									private _weaponsConfigParent = configFile >> "CfgWeapons";
+
+									{
+										private _effects = getArray (_x >> "kh_teamspeakVoiceEffects");
+
+										if (_effects isNotEqualTo []) then {
+											tsApplyVoiceEffects _effects;
+											_applied = true;
+											break;
+										};
+									} forEach [
+										configFile >> "CfgGlasses" >> (goggles KH_var_playerUnit),
+										_weaponsConfigParent >> (hmd KH_var_playerUnit),
+										_weaponsConfigParent >> (headgear KH_var_playerUnit),
+										configFile >> "CfgVehicles" >> (backpack KH_var_playerUnit), 
+										_weaponsConfigParent >> (vest KH_var_playerUnit),
+										_weaponsConfigParent >> (uniform KH_var_playerUnit)
+									];
+
+									if !_applied then {
+										tsClearVoiceEffects;
+									};
+								},
+								true,
+								"-1",
+								false
+							] call KH_fnc_execute;
+						}
+					] call KH_fnc_addEventHandler;
+				};
 			};
 
 			player setVariable ["KH_var_playerUnit", KH_var_playerUnit, true];

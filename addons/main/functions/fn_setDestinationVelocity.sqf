@@ -6,7 +6,7 @@ if (_position isEqualType objNull) then {
 };
 
 private _direction = _position vectorDiff (getPosASL _entity);
-private _velocity = [(_direction select 0) / _travelTime, (_direction select 1) / _travelTime, ((_direction select 2) / _travelTime) + (0.5 * 9.807 * _travelTime)];
+private _velocity = [(_direction select 0) / _travelTime, (_direction select 1) / _travelTime, ((_direction select 2) / _travelTime) + (0.5 * KH_var_gravity * _travelTime)];
 
 [
 	[_entity, _velocity],

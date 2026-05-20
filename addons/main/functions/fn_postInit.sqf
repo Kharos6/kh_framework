@@ -289,6 +289,13 @@ isNil {
 								] call KH_fnc_execute;
 							} forEach allUnits;
 						};
+						
+						if !(isNil "ace_medical") then {
+							if (ace_medical && KH_var_medical) then {
+								KH_var_medical = false;
+								diag_log "KH Framework - KH Medical disabled due to ACE Medical";
+							};
+						};
 
 						if KH_var_medical then {
 							[["CAManBase"], [], KH_fnc_medicalSetup, true] call KH_fnc_entityInit;
@@ -594,7 +601,7 @@ isNil {
 																			true, 
 																			-1, 
 																			"FIRE", 
-																			["NONE", "GEOM"] select KH_var_allowGeometryHitDetection, 
+																			"NONE", 
 																			true,
 																			[[], ["LINE", [], 1]] select KH_var_meleeDebugMode
 																		] call KH_fnc_raycast;
@@ -607,7 +614,7 @@ isNil {
 																					continue;
 																				};
 
-																				_hitObjects pushBack [_object, ((_x select 4) select {!("proxy" in _x);}) param [0, selectRandom ((_object selectionNames "FireGeometry") select {!("proxy" in _x);})], _x select 0, _attack];
+																				_hitObjects pushBack [_object, ((_x select 4) select {!("proxy" in _x) && (_x isNotEqualTo "");}) param [0, selectRandom ((_object selectionNames "FireGeometry") select {!("proxy" in _x);})], _x select 0, _attack];
 																				_handledHit pushBackUnique _object;
 																			} forEach _lineIntersections;
 																		};
@@ -634,12 +641,12 @@ isNil {
 																				[vectorDir _unit, vectorUp _unit],
 																				_hitRadius,
 																				"RECTANGLE",
-																				0.25,
+																				0.5,
 																				[_unit, "TERRAIN"] + (attachedObjects _unit),
 																				true, 
 																				-1, 
 																				"FIRE", 
-																				["NONE", "GEOM"] select KH_var_allowGeometryHitDetection,
+																				"NONE",
 																				true,
 																				[[], ["LINE", [], 1]] select KH_var_meleeDebugMode
 																			] call KH_fnc_raycast3d) select 0;
@@ -652,7 +659,7 @@ isNil {
 																						continue;
 																					};
 																					
-																					_hitObjects pushBack [_object, ((_x select 4) select {!("proxy" in _x);}) param [0, selectRandom ((_object selectionNames "FireGeometry") select {!("proxy" in _x);})], _x select 0, _attack];
+																					_hitObjects pushBack [_object, ((_x select 4) select {!("proxy" in _x) && (_x isNotEqualTo "");}) param [0, selectRandom ((_object selectionNames "FireGeometry") select {!("proxy" in _x);})], _x select 0, _attack];
 																					_handledHit pushBackUnique _object;
 																				} forEach _radiusIntersections;
 																			};
@@ -888,12 +895,12 @@ isNil {
 																			[vectorDir _unit, vectorUp _unit],
 																			_kickRadius,
 																			"RECTANGLE",
-																			0.25,
+																			0.5,
 																			[_unit, "TERRAIN"] + (attachedObjects _unit),
 																			true, 
 																			-1, 
 																			"FIRE", 
-																			["NONE", "GEOM"] select KH_var_allowGeometryHitDetection,
+																			"NONE",
 																			true,
 																			[[], ["LINE", [], 1]] select KH_var_meleeDebugMode
 																		] call KH_fnc_raycast3d) select 0;
@@ -906,7 +913,7 @@ isNil {
 																					continue;
 																				};
 
-																				_kickedObjects pushBack [_object, ((_x select 4) select {!("proxy" in _x);}) param [0, selectRandom ((_object selectionNames "FireGeometry") select {!("proxy" in _x);})], _x select 0, _kick];
+																				_kickedObjects pushBack [_object, ((_x select 4) select {!("proxy" in _x) && (_x isNotEqualTo "");}) param [0, selectRandom ((_object selectionNames "FireGeometry") select {!("proxy" in _x);})], _x select 0, _kick];
 																				_handledKick pushBack _object;
 																			} forEach _kickIntersections;
 																		};
@@ -1007,7 +1014,7 @@ isNil {
 																			[vectorDir _unit, vectorUp _unit],
 																			[0.5, 0.5, "0.75"],
 																			"RECTANGLE",
-																			0.25,
+																			0.5,
 																			[_unit, "TERRAIN"] + (attachedObjects _unit),
 																			true, 
 																			-1, 
@@ -1116,16 +1123,18 @@ isNil {
 																	_x params ["_start", "_point", "_type", "_sound"];
 
 																	if (_time >= _start) then {
-																		private _sound = getArray (_meleeTypeConfig >> _type >> "Sounds" >> _sound);
+																		private _sounds = getArray (_meleeTypeConfig >> _type >> "Sounds" >> _sound);
 
-																		if (_sound isNotEqualTo []) then {
+																		if (_sounds isNotEqualTo []) then {
+																			private _soundConfigArray = getArray (configFile >> "CfgSounds" >> (selectRandom _sounds) >> "sound");
+																			
 																			playSound3D [
-																				((getArray (configFile >> "CfgSounds" >> (selectRandom _sound) >> "sound")) select 0) select [1], 
+																				(_soundConfigArray select 0) select [1], 
 																				_unit, 
 																				(insideBuilding _unit) >= 0.5, 
 																				_unit modelToWorldVisualWorld (_unit selectionPosition _point), 
-																				1, 
-																				1, 
+																				_soundConfigArray select 1, 
+																				_soundConfigArray select 2, 
 																				100, 
 																				0, 
 																				false

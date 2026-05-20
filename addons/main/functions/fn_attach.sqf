@@ -426,7 +426,7 @@ if _softAttach exitWith {
                         };
                     }
                     else {
-                        _fallVelocity = ((_fallVelocity - (0.5 * 9.807 * _totalDelta)) min -0.01) max -60;
+                        _fallVelocity = ((_fallVelocity - (0.5 * KH_var_gravity * _totalDelta)) min -0.01) max -60;
 
                         if _velocityBased then {
                             _newVelocity set [2, ((_newVelocity select 2) + _fallVelocity) max -60];
@@ -436,7 +436,7 @@ if _softAttach exitWith {
                     };
                 }
                 else {
-                    _fallVelocity = ((_fallVelocity - (0.5 * 9.807 * _totalDelta)) min -0.01) max -60;
+                    _fallVelocity = ((_fallVelocity - (0.5 * KH_var_gravity * _totalDelta)) min -0.01) max -60;
 
                     if _velocityBased then {
                         _newVelocity set [2, ((_newVelocity select 2) + _fallVelocity) max -60];

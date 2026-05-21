@@ -11,6 +11,7 @@ KH_var_tfarLoaded = uiNamespace getVariable "KH_var_tfarLoaded";
 KH_var_missionLoaded = false;
 KH_var_jip = false;
 KH_var_playerUnit = objNull;
+KH_var_mainCamera = objNull;
 KH_var_gravity = 9.80665;
 KH_var_defaultAiSystemPrompt = uiNamespace getVariable "KH_var_defaultAiSystemPrompt";
 KH_var_remoteExecCommandsBlacklist = createHashMap;
@@ -1780,7 +1781,7 @@ if hasInterface then {
 						private _continue = true;
 
 						{
-							if (((_x select 0) isNotEqualTo KH_var_playerUnit) && (_x select 2)) then {
+							if (KH_var_mainCamera isNotEqualTo KH_var_playerUnit) then {
 								_continue = false;
 								break;
 							};
@@ -1897,6 +1898,7 @@ if hasInterface then {
 	[
 		[],
 		{
+			KH_var_mainCamera = ((allCameras select {_x select 2;}) param [0, []]) param [0, KH_var_playerUnit];
 			private _unit = player;
 			private _filteredClassItems = getArray ((configOf _unit) >> "kh_equipmentFilter");
 			if ((KH_var_filterPlayerEquipmentList isEqualTo []) && (_filteredClassItems isEqualTo [])) exitWith {};

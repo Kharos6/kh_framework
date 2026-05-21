@@ -5,7 +5,7 @@ class Extended_PreInit_EventHandlers
 		init = "call (compileScript ['\x\kh\addons\main\functions\XEH_preInit.sqf'])";
     };
 };
-class Extended_Init_Eventhandlers
+class Extended_InitPost_Eventhandlers
 {
     class All
     {

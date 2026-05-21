@@ -6,7 +6,13 @@ params [["_entity", objNull, [objNull]], ["_respawn", false, [true]]];
         params ["_entity"];
 
         {
-            _x params ["_typeInclude", "_typeExclude", "_function", "_id"];
+            _x params ["_typeInclude", "_typeExclude", "_function", "_id", "_blockerId"];
+            
+            if (_entity getVariable [_blockerId, false]) then {
+                continue;
+            };
+
+            _entity setVariable [_blockerId, true];
 
             if !(missionNamespace getVariable _id) then {
                 KH_var_entityInitializationsDeletions pushBack _id;

@@ -2771,7 +2771,7 @@
 				private _continue = true;
 
 				{
-					if (((_x select 0) isNotEqualTo KH_var_playerUnit) && (_x select 2)) then {
+					if (KH_var_mainCamera isNotEqualTo KH_var_playerUnit) then {
 						_continue = false;
 						break;
 					};
@@ -2799,7 +2799,7 @@
 				private _continue = true;
 
 				{
-					if (((_x select 0) isNotEqualTo KH_var_playerUnit) && (_x select 2)) then {
+					if (KH_var_mainCamera isNotEqualTo KH_var_playerUnit) then {
 						_continue = false;
 						break;
 					};
@@ -2824,7 +2824,7 @@
 			private _continue = true;
 
 			{
-				if (((_x select 0) isNotEqualTo KH_var_playerUnit) && (_x select 2)) then {
+				if (KH_var_mainCamera isNotEqualTo KH_var_playerUnit) then {
 					_continue = false;
 					break;
 				};
@@ -2852,7 +2852,7 @@
 				private _continue = true;
 
 				{
-					if (((_x select 0) isNotEqualTo KH_var_playerUnit) && (_x select 2)) then {
+					if (KH_var_mainCamera isNotEqualTo KH_var_playerUnit) then {
 						_continue = false;
 						break;
 					};
@@ -2870,7 +2870,7 @@
 				private _continue = true;
 
 				{
-					if (((_x select 0) isNotEqualTo KH_var_playerUnit) && (_x select 2)) then {
+					if (KH_var_mainCamera isNotEqualTo KH_var_playerUnit) then {
 						_continue = false;
 						break;
 					};
@@ -2895,7 +2895,7 @@
 				private _continue = true;
 
 				{
-					if (((_x select 0) isNotEqualTo KH_var_playerUnit) && (_x select 2)) then {
+					if (KH_var_mainCamera isNotEqualTo KH_var_playerUnit) then {
 						_continue = false;
 						break;
 					};
@@ -2920,7 +2920,7 @@
 			private _continue = true;
 
 			{
-				if (((_x select 0) isNotEqualTo KH_var_playerUnit) && (_x select 2)) then {
+				if (KH_var_mainCamera isNotEqualTo KH_var_playerUnit) then {
 					_continue = false;
 					break;
 				};
@@ -2946,7 +2946,7 @@
 			private _continue = true;
 
 			{
-				if (((_x select 0) isNotEqualTo KH_var_playerUnit) && (_x select 2)) then {
+				if (KH_var_mainCamera isNotEqualTo KH_var_playerUnit) then {
 					_continue = false;
 					break;
 				};
@@ -2973,7 +2973,7 @@
 				private _continue = true;
 
 				{
-					if (((_x select 0) isNotEqualTo KH_var_playerUnit) && (_x select 2)) then {
+					if (KH_var_mainCamera isNotEqualTo KH_var_playerUnit) then {
 						_continue = false;
 						break;
 					};

@@ -450,7 +450,11 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 			private _playSound = if (_damageFunction isNotEqualTo {}) then {
 				if ([_unit, _instigator, ["HIT", _attack, _hitBlockPower, _hitParryPower, _position, _blockPower, _parryPower]] call _damageFunction) then {
 					[[_unit, ["HIT", [getNumber (_instigatorConfig >> _attack >> "kickPower"), getNumber (_instigatorConfig >> _attack >> "tacklePower")], _unit getRelDir _instigator]], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
-					[[_unit, _selection, getText (_instigatorConfig >> _attack >> "type"), _instigator, true], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
+					
+					if (_unit isKindOf "Man") then {
+						[[_unit, _selection, getText (_instigatorConfig >> _attack >> "type"), _instigator, true], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
+					};
+
 					true;
 				}
 				else {
@@ -459,7 +463,11 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 			}
 			else {
 				[[_unit, ["HIT", [getNumber (_instigatorConfig >> _attack >> "kickPower"), getNumber (_instigatorConfig >> _attack >> "tacklePower")], _unit getRelDir _instigator]], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
-				[[_unit, _selection, getText (_instigatorConfig >> _attack >> "type"), _instigator, true], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
+				
+				if (_unit isKindOf "Man") then {
+					[[_unit, _selection, getText (_instigatorConfig >> _attack >> "type"), _instigator, true], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
+				};
+
 				true;
 			};
 
@@ -638,12 +646,18 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 			if (_damageFunction isNotEqualTo {}) then {
 				if ([_unit, _instigator, ["KICK", _kick, _position, _kickPower, _blockPower]] call _damageFunction) then {
 					[[_unit, ["STAGGER", false, _unit getRelDir _instigator]], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
-					[[_unit, _selection, getText (_instigatorConfig >> _kick >> "type"), _instigator, true], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
+
+					if (_unit isKindOf "Man") then {
+						[[_unit, _selection, getText (_instigatorConfig >> _kick >> "type"), _instigator, true], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
+					};
 				};
 			}
 			else {
 				[[_unit, ["STAGGER", false, _unit getRelDir _instigator]], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
-				[[_unit, _selection, getText (_instigatorConfig >> _kick >> "type"), _instigator, true], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
+
+				if (_unit isKindOf "Man") then {
+					[[_unit, _selection, getText (_instigatorConfig >> _kick >> "type"), _instigator, true], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
+				};
 			};
 
 			[
@@ -765,12 +779,18 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 			if (_damageFunction isNotEqualTo {}) then {
 				if ([_unit, _instigator, ["TACKLE", _tackle, _tacklePower, _blockPower]] call _damageFunction) then {
 					[[_unit, ["STAGGER", true, _unit getRelDir _instigator]], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
-					[[_unit, selectRandom ((_unit selectionNames "FireGeometry") select {!("proxy" in _x);}), getText (_instigatorConfig >> _tackle >> "type"), _instigator, true], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
+
+					if (_unit isKindOf "Man") then {
+						[[_unit, "", getText (_instigatorConfig >> _tackle >> "type"), _instigator, true], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
+					};
 				};
 			}
 			else {
 				[[_unit, ["STAGGER", true, _unit getRelDir _instigator]], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
-				[[_unit, selectRandom ((_unit selectionNames "FireGeometry") select {!("proxy" in _x);}), getText (_instigatorConfig >> _tackle >> "type"), _instigator, true], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
+				
+				if (_unit isKindOf "Man") then {
+					[[_unit, "", getText (_instigatorConfig >> _tackle >> "type"), _instigator, true], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
+				};
 			};
 
 			[

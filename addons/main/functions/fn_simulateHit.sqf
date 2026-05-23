@@ -10,9 +10,7 @@ private _projectile = createVehicle [
         ASLToATL (AGLToASL (unitAimPositionVisual _entity));
     }
     else {
-        private _position = _entity selectionPosition [_selection, "FireGeometry", "AveragePoint"];
-        _position set [2, (_position select 2) max 0.01];
-        ASLToATL (_entity modelToWorldVisualWorld _position);
+        ASLToATL (_entity modelToWorldVisualWorld (_entity selectionPosition [_selection, "FireGeometry", "AveragePoint"]));
     },
     [], 
     0, 

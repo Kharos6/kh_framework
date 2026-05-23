@@ -614,7 +614,7 @@ isNil {
 																					continue;
 																				};
 
-																				_hitObjects pushBack [_object, ((_x select 4) select {!("proxy" in _x) && (_x isNotEqualTo "");}) param [0, selectRandom ((_object selectionNames "FireGeometry") select {!("proxy" in _x);})], _x select 0, _attack];
+																				_hitObjects pushBack [_object, ((_x select 4) select {!("proxy" in _x) && !("weapon" in _x) && !("launcher" in _x);}) param [0, ""], _x select 0, _attack];
 																				_handledHit pushBackUnique _object;
 																			} forEach _lineIntersections;
 																		};
@@ -659,7 +659,7 @@ isNil {
 																						continue;
 																					};
 																					
-																					_hitObjects pushBack [_object, ((_x select 4) select {!("proxy" in _x) && (_x isNotEqualTo "");}) param [0, selectRandom ((_object selectionNames "FireGeometry") select {!("proxy" in _x);})], _x select 0, _attack];
+																					_hitObjects pushBack [_object, ((_x select 4) select {!("proxy" in _x) && !("weapon" in _x) && !("launcher" in _x);}) param [0, ""], _x select 0, _attack];
 																					_handledHit pushBackUnique _object;
 																				} forEach _radiusIntersections;
 																			};
@@ -913,7 +913,7 @@ isNil {
 																					continue;
 																				};
 
-																				_kickedObjects pushBack [_object, ((_x select 4) select {!("proxy" in _x) && (_x isNotEqualTo "");}) param [0, selectRandom ((_object selectionNames "FireGeometry") select {!("proxy" in _x);})], _x select 0, _kick];
+																				_kickedObjects pushBack [_object, ((_x select 4) select {!("proxy" in _x) && !("weapon" in _x) && !("launcher" in _x);}) param [0, ""], _x select 0, _kick];
 																				_handledKick pushBack _object;
 																			} forEach _kickIntersections;
 																		};

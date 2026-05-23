@@ -1670,7 +1670,7 @@
         "KH Medical",
         "Interface"
     ], 
-	[0.00, 100.00, 2.50, 2],
+	[0.00, 100.00, 4.50, 2],
 	0,
 	{},
 	false
@@ -2767,20 +2767,9 @@
 	"Attack",
 	{
 		if ((KH_var_playerUnit getVariable ["KH_var_meleeMode", ""]) isNotEqualTo "") then {
-			if (!dialog && !visibleMap) then {
-				private _continue = true;
-
-				{
-					if (KH_var_mainCamera isNotEqualTo KH_var_playerUnit) then {
-						_continue = false;
-						break;
-					};
-				} forEach allCameras;
-
-				if _continue then {
-					if (KH_var_allowRangedMelee || (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false])) then {
-						[KH_var_playerUnit, "ATTACK"] call KH_fnc_updateMeleeState;
-					};
+			if (!dialog && !visibleMap && (KH_var_mainCamera isEqualTo KH_var_playerUnit)) then {
+				if (KH_var_allowRangedMelee || (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false])) then {
+					[KH_var_playerUnit, "ATTACK"] call KH_fnc_updateMeleeState;
 				};
 			};
 		};
@@ -2795,19 +2784,8 @@
 	"Cycle Attack Mode",
 	{
 		if (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false]) then {
-			if (!dialog && !visibleMap) then {
-				private _continue = true;
-
-				{
-					if (KH_var_mainCamera isNotEqualTo KH_var_playerUnit) then {
-						_continue = false;
-						break;
-					};
-				} forEach allCameras;
-
-				if _continue then {
-					[KH_var_playerUnit, "CYCLE_ATTACK_MODE"] call KH_fnc_updateMeleeState;
-				};
+			if (!dialog && !visibleMap && (KH_var_mainCamera isEqualTo KH_var_playerUnit)) then {
+				[KH_var_playerUnit, "CYCLE_ATTACK_MODE"] call KH_fnc_updateMeleeState;
 			};
 		};
 	}, 
@@ -2820,21 +2798,10 @@
 	"KH_meleeDodge", 
 	"Dodge",
 	{
-		if (!dialog && !visibleMap) then {
-			private _continue = true;
-
-			{
-				if (KH_var_mainCamera isNotEqualTo KH_var_playerUnit) then {
-					_continue = false;
-					break;
-				};
-			} forEach allCameras;
-
-			if _continue then {
-				if (KH_var_allowRangedMelee || (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false])) then {
-					private _input = (["KH_STRING", [true, true, false]] call KH_fnc_getPlayerMoveInput) select 0;
-					[KH_var_playerUnit, ["DODGE", ["DODGE", _input]] select (_input isNotEqualTo "")] call KH_fnc_updateMeleeState;
-				};
+		if (!dialog && !visibleMap && (KH_var_mainCamera isEqualTo KH_var_playerUnit)) then {
+			if (KH_var_allowRangedMelee || (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false])) then {
+				private _input = (["KH_STRING", [true, true, false]] call KH_fnc_getPlayerMoveInput) select 0;
+				[KH_var_playerUnit, ["DODGE", ["DODGE", _input]] select (_input isNotEqualTo "")] call KH_fnc_updateMeleeState;
 			};
 		};
 	}, 
@@ -2848,37 +2815,15 @@
 	"Block",
 	{
 		if (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false]) then {
-			if (!dialog && !visibleMap) then {
-				private _continue = true;
-
-				{
-					if (KH_var_mainCamera isNotEqualTo KH_var_playerUnit) then {
-						_continue = false;
-						break;
-					};
-				} forEach allCameras;
-
-				if _continue then {
-					[KH_var_playerUnit, "BLOCK_IN"] call KH_fnc_updateMeleeState;
-				};
+			if (!dialog && !visibleMap && (KH_var_mainCamera isEqualTo KH_var_playerUnit)) then {
+				[KH_var_playerUnit, "BLOCK_IN"] call KH_fnc_updateMeleeState;
 			};
 		};
 	},
 	{
 		if (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false]) then {
-			if (!dialog && !visibleMap) then {
-				private _continue = true;
-
-				{
-					if (KH_var_mainCamera isNotEqualTo KH_var_playerUnit) then {
-						_continue = false;
-						break;
-					};
-				} forEach allCameras;
-
-				if _continue then {
-					[KH_var_playerUnit, "BLOCK_OUT"] call KH_fnc_updateMeleeState;
-				};
+			if (!dialog && !visibleMap && (KH_var_mainCamera isEqualTo KH_var_playerUnit)) then {
+				[KH_var_playerUnit, "BLOCK_OUT"] call KH_fnc_updateMeleeState;
 			};
 		};
 	},
@@ -2891,19 +2836,8 @@
 	"Parry",
 	{
 		if (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false]) then {
-			if (!dialog && !visibleMap) then {
-				private _continue = true;
-
-				{
-					if (KH_var_mainCamera isNotEqualTo KH_var_playerUnit) then {
-						_continue = false;
-						break;
-					};
-				} forEach allCameras;
-
-				if _continue then {
-					[KH_var_playerUnit, "PARRY"] call KH_fnc_updateMeleeState;
-				};
+			if (!dialog && !visibleMap && (KH_var_mainCamera isEqualTo KH_var_playerUnit)) then {
+				[KH_var_playerUnit, "PARRY"] call KH_fnc_updateMeleeState;
 			};
 		};
 	}, 
@@ -2916,20 +2850,9 @@
 	"KH_meleeKick", 
 	"Kick",
 	{
-		if (!dialog && !visibleMap) then {
-			private _continue = true;
-
-			{
-				if (KH_var_mainCamera isNotEqualTo KH_var_playerUnit) then {
-					_continue = false;
-					break;
-				};
-			} forEach allCameras;
-
-			if _continue then {
-				if (KH_var_allowRangedMelee || (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false])) then {
-					[KH_var_playerUnit, "KICK"] call KH_fnc_updateMeleeState;
-				};
+		if (!dialog && !visibleMap && (KH_var_mainCamera isEqualTo KH_var_playerUnit)) then {
+			if (KH_var_allowRangedMelee || (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false])) then {
+				[KH_var_playerUnit, "KICK"] call KH_fnc_updateMeleeState;
 			};
 		};
 	}, 
@@ -2942,20 +2865,9 @@
 	"KH_meleeTackle", 
 	"Tackle",
 	{
-		if (!dialog && !visibleMap) then {
-			private _continue = true;
-
-			{
-				if (KH_var_mainCamera isNotEqualTo KH_var_playerUnit) then {
-					_continue = false;
-					break;
-				};
-			} forEach allCameras;
-
-			if _continue then {
-				if (KH_var_allowRangedMelee || (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false])) then {
-					[KH_var_playerUnit, "TACKLE"] call KH_fnc_updateMeleeState;
-				};
+		if (!dialog && !visibleMap && (KH_var_mainCamera isEqualTo KH_var_playerUnit)) then {
+			if (KH_var_allowRangedMelee || (KH_var_playerUnit getVariable ["KH_var_inMeleeState", false])) then {
+				[KH_var_playerUnit, "TACKLE"] call KH_fnc_updateMeleeState;
 			};
 		};
 	}, 
@@ -2969,19 +2881,8 @@
 	"Traverse Obstacle",
 	{
 		if KH_var_allowPlayerObstacleTraversal then {
-			if (!dialog && !visibleMap) then {
-				private _continue = true;
-
-				{
-					if (KH_var_mainCamera isNotEqualTo KH_var_playerUnit) then {
-						_continue = false;
-						break;
-					};
-				} forEach allCameras;
-
-				if _continue then {
-					[KH_var_playerUnit] call KH_fnc_traverseObstacle;
-				};
+			if (!dialog && !visibleMap && (KH_var_mainCamera isEqualTo KH_var_playerUnit)) then {
+				[KH_var_playerUnit] call KH_fnc_traverseObstacle;
 			};
 		};
 	}, 

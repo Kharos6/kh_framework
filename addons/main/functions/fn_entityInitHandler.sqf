@@ -1,14 +1,14 @@
 params [["_entity", objNull, [objNull]], ["_respawn", false, [true]]];
 
 [
-    [_entity],
+    [_entity, _respawn],
     {
-        params ["_entity"];
+        params ["_entity", "_respawn"];
 
         {
             _x params ["_typeInclude", "_typeExclude", "_function", "_id", "_blockerId"];
             
-            if (_entity getVariable [_blockerId, false]) then {
+            if (!_respawn && (_entity getVariable [_blockerId, false])) then {
                 continue;
             };
 

@@ -1815,82 +1815,103 @@ if hasInterface then {
 			KH_var_playerUnit = _unit;
 
 			if isMultiplayer then {
-				if KH_var_allowTeamspeakVoiceEffectPresets then {
-					if (KH_var_playerVoiceEffectHandler isNotEqualTo []) then {
-						[KH_var_playerVoiceEffectHandler] call KH_fnc_removeHandler;
-					};
-
-					[
-						[],
-						{
-							private _applied = false;
-							private _weaponsConfigParent = configFile >> "CfgWeapons";
-
+				[
+					[],
+					{
+						[
+							[],
 							{
-								private _effects = getArray (_x >> "kh_teamspeakVoiceEffects");
+								private _voiceEffects = [missionNamespace, "KH_var_allowTeamspeakVoiceEffectPresets", "SERVER"] call KH_fnc_getRemoteVariable;
+								if (isNil "_voiceEffects") exitWith {};
 
-								if (_effects isNotEqualTo []) then {
-									tsApplyVoiceEffects _effects;
-									_applied = true;
-									break;
-								};
-							} forEach [
-								configFile >> "CfgGlasses" >> (goggles KH_var_playerUnit),
-								_weaponsConfigParent >> (hmd KH_var_playerUnit),
-								_weaponsConfigParent >> (headgear KH_var_playerUnit),
-								configFile >> "CfgVehicles" >> (backpack KH_var_playerUnit), 
-								_weaponsConfigParent >> (vest KH_var_playerUnit),
-								_weaponsConfigParent >> (uniform KH_var_playerUnit)
-							];
-
-							if !_applied then {
-								tsClearVoiceEffects;
-							};
-						},
-						true,
-						"1",
-						false
-					] call KH_fnc_execute;
-
-					KH_var_playerVoiceEffectHandler = [
-						["ENTITY", KH_var_playerUnit, "LOCAL"],
-						"SlotItemChanged",
-						[],
-						{
-							[
-								[],
-								{
-									private _applied = false;
-									private _weaponsConfigParent = configFile >> "CfgWeapons";
-
-									{
-										private _effects = getArray (_x >> "kh_teamspeakVoiceEffects");
-
-										if (_effects isNotEqualTo []) then {
-											tsApplyVoiceEffects _effects;
-											_applied = true;
-											break;
-										};
-									} forEach [
-										configFile >> "CfgGlasses" >> (goggles KH_var_playerUnit),
-										_weaponsConfigParent >> (hmd KH_var_playerUnit),
-										_weaponsConfigParent >> (headgear KH_var_playerUnit),
-										configFile >> "CfgVehicles" >> (backpack KH_var_playerUnit), 
-										_weaponsConfigParent >> (vest KH_var_playerUnit),
-										_weaponsConfigParent >> (uniform KH_var_playerUnit)
-									];
-
-									if !_applied then {
-										tsClearVoiceEffects;
+								if KH_var_allowTeamspeakVoiceEffectPresets then {
+									if (KH_var_playerVoiceEffectHandler isNotEqualTo []) then {
+										[KH_var_playerVoiceEffectHandler] call KH_fnc_removeHandler;
 									};
-								},
-								true,
-								"-1",
-								false
-							] call KH_fnc_execute;
-						}
-					] call KH_fnc_addEventHandler;
-				};
+
+									[
+										[],
+										{
+											private _applied = false;
+											private _weaponsConfigParent = configFile >> "CfgWeapons";
+
+											{
+												private _effects = getArray (_x >> "kh_teamspeakVoiceEffects");
+
+												if (_effects isNotEqualTo []) then {
+													tsApplyVoiceEffects _effects;
+													_applied = true;
+													break;
+												};
+											} forEach [
+												configFile >> "CfgGlasses" >> (goggles KH_var_playerUnit),
+												_weaponsConfigParent >> (hmd KH_var_playerUnit),
+												_weaponsConfigParent >> (headgear KH_var_playerUnit),
+												configFile >> "CfgVehicles" >> (backpack KH_var_playerUnit), 
+												_weaponsConfigParent >> (vest KH_var_playerUnit),
+												_weaponsConfigParent >> (uniform KH_var_playerUnit)
+											];
+
+											if !_applied then {
+												tsClearVoiceEffects;
+											};
+										},
+										true,
+										"1",
+										false
+									] call KH_fnc_execute;
+
+									KH_var_playerVoiceEffectHandler = [
+										["ENTITY", KH_var_playerUnit, "LOCAL"],
+										"SlotItemChanged",
+										[],
+										{
+											[
+												[],
+												{
+													private _applied = false;
+													private _weaponsConfigParent = configFile >> "CfgWeapons";
+
+													{
+														private _effects = getArray (_x >> "kh_teamspeakVoiceEffects");
+
+														if (_effects isNotEqualTo []) then {
+															tsApplyVoiceEffects _effects;
+															_applied = true;
+															break;
+														};
+													} forEach [
+														configFile >> "CfgGlasses" >> (goggles KH_var_playerUnit),
+														_weaponsConfigParent >> (hmd KH_var_playerUnit),
+														_weaponsConfigParent >> (headgear KH_var_playerUnit),
+														configFile >> "CfgVehicles" >> (backpack KH_var_playerUnit), 
+														_weaponsConfigParent >> (vest KH_var_playerUnit),
+														_weaponsConfigParent >> (uniform KH_var_playerUnit)
+													];
+
+													if !_applied then {
+														tsClearVoiceEffects;
+													};
+												},
+												true,
+												"-1",
+												false
+											] call KH_fnc_execute;
+										}
+									] call KH_fnc_addEventHandler;
+								};
+
+								[_handlerId] call KH_fnc_removeHandler;
+							},
+							true,
+							0,
+							false
+						] call KH_fnc_execute;
+					},
+					true,
+					{KH_var_clientRegistered && KH_var_missionInitialized;},
+					false
+				] call KH_fnc_execute;
 			};
 
 			player setVariable ["KH_var_playerUnit", KH_var_playerUnit, true];

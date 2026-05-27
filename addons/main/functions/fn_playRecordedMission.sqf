@@ -382,6 +382,7 @@ if (KH_var_recordedScenarioData isNotEqualTo []) then {
                 _x params ["_time"];
 
                 if (_time <= CBA_missionTime) then {
+                    unassignVehicle _unit;
                     moveOut _unit;
                 }
                 else {

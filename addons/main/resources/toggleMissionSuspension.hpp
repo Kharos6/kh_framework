@@ -39,7 +39,7 @@ class KH_ResourceToggleMissionSuspension
 			idc = 101;
             x = QUOTE(RSC_POS_X(50));
             y = QUOTE(RSC_POS_Y(40));
-            w = QUOTE(RSC_POS_W(1));
+            w = QUOTE(RSC_POS_W_SQUARE(1));
             h = QUOTE(RSC_POS_H_SQUARE(1));
         };
         class KH_SuspensionTextTitle: RscText

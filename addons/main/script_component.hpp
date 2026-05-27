@@ -12,8 +12,9 @@
 #define RSC_POS_X(N) (safeZoneX + safeZoneW * ((N) * 0.01))
 #define RSC_POS_Y(N) (safeZoneY + safeZoneH * ((N) * 0.01))
 #define RSC_POS_W(N) ((((safeZoneW / safeZoneH) * safeZoneH) * ((N) * 0.01)) + 0.00015)
+#define RSC_POS_W_SQUARE(N) ((safeZoneW * ((N) * 0.01) * (1.77778 / (getResolution select 4))) + 0.00015)
 #define RSC_POS_H(N) ((((safeZoneH / safeZoneW) * safeZoneW) * ((N) * 0.01)) + 0.00015)
-#define RSC_POS_H_SQUARE(N) ((safeZoneW * ((N) * 0.01) + 0.00015) * pixelH / pixelW)
+#define RSC_POS_H_SQUARE(N) (((safeZoneW * ((N) * 0.01) * (1.77778 / (getResolution select 4))) + 0.00015) * pixelH / pixelW)
 #define RSC_TEXT_SIZE(N) ((N) * (1 / (getResolution select 3)) * pixelGridNoUIScale)
 #define GUI_THEME_RGB_R "(profileNamespace getVariable ['GUI_BCG_RGB_R', 0.13])"
 #define GUI_THEME_RGB_G "(profileNamespace getVariable ['GUI_BCG_RGB_G', 0.54])"

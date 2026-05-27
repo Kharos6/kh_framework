@@ -31,7 +31,7 @@ class KH_ResourceVehicleSpawner
             idc = 103;
             x = QUOTE(RSC_POS_X(60.5));
             y = QUOTE(RSC_POS_Y(30));
-            w = QUOTE(RSC_POS_W(10));
+            w = QUOTE(RSC_POS_W_SQUARE(10));
             h = QUOTE(RSC_POS_H_SQUARE(10));
             colorBackground[] = {0, 0, 0, 0.9};
         };

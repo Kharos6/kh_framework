@@ -5,7 +5,6 @@ private _aspectCorrection = 1.77778 / (getResolution select 4);
 [
     (safeZoneX + safeZoneW * (_positionX * 0.01)),
     (safeZoneY + safeZoneH * (_positionY * 0.01)),
-    ((((safeZoneW / safeZoneH) * safeZoneH) * (_sizeX * 0.01)) + 0.00015),
     if _square then {
         (safeZoneW * (_sizeX * 0.01) * _aspectCorrection) + 0.00015;
     } 

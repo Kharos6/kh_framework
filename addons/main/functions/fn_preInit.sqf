@@ -1810,14 +1810,22 @@ if hasInterface then {
 		"unit",
 		[],
 		{
-			params ["_unit"];
-			private _previousUnit = KH_var_playerUnit;
-			KH_var_playerUnit = _unit;
+			[
+				_this,
+				{
+					params ["_unit"];
+					private _previousUnit = KH_var_playerUnit;
+					KH_var_playerUnit = _unit;
+					player setVariable ["KH_var_playerUnit", KH_var_playerUnit, true];
+					["KH_eve_playerControlledUnitChanged", [clientOwner, getPlayerUID player, getPlayerID player, _unit, _previousUnit, [_unit, true] call KH_fnc_getEntityVariableName], "GLOBAL", false] call KH_fnc_triggerCbaEvent;
 
-			if isMultiplayer then {
-				[
-					[],
 					{
+						[_previousUnit, _unit] call _x;
+					} forEach KH_var_playerControlledUnitChangeStack;
+
+					[_previousUnit, _unit] call KH_fnc_playerControlledUnitChangeInit;
+
+					if isMultiplayer then {
 						[
 							[],
 							{
@@ -1907,21 +1915,12 @@ if hasInterface then {
 							0,
 							false
 						] call KH_fnc_execute;
-					},
-					true,
-					{KH_var_clientRegistered && KH_var_missionInitialized;},
-					false
-				] call KH_fnc_execute;
-			};
-
-			player setVariable ["KH_var_playerUnit", KH_var_playerUnit, true];
-			["KH_eve_playerControlledUnitChanged", [clientOwner, getPlayerUID player, getPlayerID player, _unit, _previousUnit, [_unit, true] call KH_fnc_getEntityVariableName], "GLOBAL", false] call KH_fnc_triggerCbaEvent;
-
-			{
-				[_previousUnit, _unit] call _x;
-			} forEach KH_var_playerControlledUnitChangeStack;
-
-			[_previousUnit, _unit] call KH_fnc_playerControlledUnitChangeInit;
+					};
+				},
+				true,
+				{KH_var_clientRegistered && KH_var_missionInitialized && !(isNull player) && (alive player);},
+				false
+			] call KH_fnc_execute;
 		}
 	] call KH_fnc_addEventHandler;
 

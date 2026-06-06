@@ -425,12 +425,11 @@ missionNamespace setVariable [_fultonId, false];
 													{
 														params ["_unit", "_vehicle", "_duration"];
 														private _remainingTime = _unit getVariable ["KH_var_fultonRemainingTime", _duration];
-														private _timeStep = diag_deltaTime;
-														_remainingTime = _remainingTime - _timeStep;
+														_remainingTime = _remainingTime - _totalDelta;
 														_unit setVariable ["KH_var_fultonRemainingTime", _remainingTime];
 
 														if ((_remainingTime <= 0) || ((_unit distance _vehicle) < 10)) then {
-															_unit switchMove [""];
+															[_unit, ["MOVE_SWITCH", [""], false], false, false] call KH_fnc_setAnimation;
 															_unit moveInAny _vehicle;
 
 															if ((objectParent _unit) isNotEqualTo _vehicle) then {

@@ -312,7 +312,9 @@ if (KH_var_recordedScenarioData isNotEqualTo []) then {
                 _x params ["_time", "_data"];
 
                 if (_time <= CBA_missionTime) then {
-                    _unit switchMove [_data select 0];
+                    private _recordedMove = _data select 0;
+                    _unit setVariable ["KH_var_recordedMove", _recordedMove];
+                    _unit switchMove [_recordedMove];
                 }
                 else {
                     break;
@@ -439,7 +441,10 @@ if (KH_var_recordedScenarioData isNotEqualTo []) then {
 
                 if (isNull (objectParent _unit)) then {
                     if (_time <= CBA_missionTime) then {
-                        _unit setPosATL [(_data select 0) select 0, (_data select 0) select 1, _data select 1];
+                        if ((_unit getVariable ["KH_var_recordedMove", ""]) isNotEqualTo (_unit getVariable ["KH_var_previousRecordedMove", ""])) then {
+                            _unit setVariable ["KH_var_previousRecordedMove", _unit getVariable ["KH_var_recordedMove", ""]];
+                            _unit setPosATL [(_data select 0) select 0, (_data select 0) select 1, _data select 1];
+                        };
                     }
                     else {
                         break;

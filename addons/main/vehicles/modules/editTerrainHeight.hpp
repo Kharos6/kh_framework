@@ -28,7 +28,7 @@ class KH_ModuleEditTerrainHeight: Module_F
 		class KH_ModuleEditTerrainHeightCurve: EditMulti5
 		{
 			displayName = "Curve";
-			tooltip = "Arrays where the first element is an array that represents the affected area and the second element is a scalar that represents the terrain height modification magnitude. The height array must be comprised of two scalars where both are values from 0 to 1; 0 represents the edge of the area while 1 represents the center of the area. The terrain height modification magnitude scalar represents the magnitude of the terrain height modification within the affected area defined by the height array.";
+			tooltip = "Arrays where the first element is an array that represents the affected area and the second element is a scalar that represents the terrain height modification magnitude. The height array must be comprised of two scalars where both are values from 0 to 1. 0 represents the edge of the area while 1 represents the center of the area. The terrain height modification magnitude scalar represents the magnitude of the terrain height modification within the affected area defined by the height array.";
 			property = "KH_ModuleEditTerrainHeightCurve";
 			defaultValue = "''";
 		};

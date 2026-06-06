@@ -37,7 +37,7 @@ if _state then {
 						_player setVariable ["KH_var_disguiseOriginalSide", side (group _player)];
 					};
 
-					private _originalSide = _player getVariable "KH_var_disguiseOriginalSide";
+					private _originalSide = _player getVariable ["KH_var_disguiseOriginalSide", side (group _player)];
 					private _uniformIndex = -1;
 					private _vestIndex = -1;
 					private _headgearIndex = -1;

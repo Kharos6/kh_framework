@@ -653,8 +653,8 @@ private:
 
         waveOutClose(hWaveOut);
         state->finished_was_stopped = state->should_stop.load();
-        state->pending_finished_event = true;
         state->is_playing = false;
+        state->pending_finished_event = true;
     }
     
     std::deque<GenerationRequest> generation_queue;
@@ -813,7 +813,9 @@ private:
                     bool should_start_playback = false;
                     std::string speaker_id_for_event = request.speaker_id;
                     std::string text_for_event = request.text;
-                    float duration_for_event = static_cast<float>(audio->n) / static_cast<float>(current_sample_rate);
+                    float duration_for_event = (audio && current_sample_rate > 0)
+                        ? static_cast<float>(audio->n) / static_cast<float>(current_sample_rate)
+                        : 0.0f;
 
                     if (audio && audio->samples && audio->n > 0) {
                         std::unique_lock<std::shared_mutex> speaker_lock(speaker_mutex);

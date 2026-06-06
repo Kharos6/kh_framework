@@ -81,7 +81,7 @@ switch (typeName _environmentType) do {
 			};
 
 			case "ARRAY": {
-				_timeout = (_timeout select 0) max 1;
+				_timeout = (_timeout param [0, 1, [0]]) max 1;
 				_iterationCount = true;
 				_handlerTickCounterId = generateUid;
 				missionNamespace setVariable [_handlerTickCounterId, 1];
@@ -232,12 +232,13 @@ switch (typeName _environmentType) do {
 
 		private _handlerTickCounterId = generateUid;
 		private _iterationCount = false;
-		private "_countConditionFailure";
+		private _iterationTimeout = 0;
+		private _countConditionFailure = false;
 		
 		switch (typeName _timeoutRules) do {
 			case "BOOL": {
 				if _timeoutRules then {
-					_timeoutRules = [[1], false, false, false];
+					_timeoutRules = [true, false, false, false];
 				}
 				else {
 					_timeoutRules = [0, false, false, false];
@@ -272,7 +273,8 @@ switch (typeName _environmentType) do {
 
 			case "ARRAY": {
 				_countConditionFailure = _timeout param [1, false, [true]];
-				_timeout = (_timeout select 0) max 1;
+				_timeout = (_timeout param [0, 1, [0]]) max 1;
+				_iterationTimeout = _timeout param [2, 0, [0]];
 				_iterationCount = true;
 				_handlerTickCounterId = generateUid;
 				missionNamespace setVariable [_handlerTickCounterId, 1];
@@ -488,7 +490,7 @@ switch (typeName _environmentType) do {
 
 						if (_arguments call _environmentType) then {
 							_fedArguments call _subfunction;
-						}
+						};
 					};
 				};
 			},
@@ -512,8 +514,9 @@ switch (typeName _environmentType) do {
 			[0, 1] select _immediate
 		];
 
-		if (!_iterationCount && (_timeout isNotEqualTo 0)) then {
+		if ((!_iterationCount && (_timeout isNotEqualTo 0)) || (_iterationTimeout isNotEqualTo 0)) then {
 			private _timeoutId = generateUid;
+			private _trueTimeout = [_timeout, _iterationTimeout] select (_iterationTimeout isNotEqualTo 0);
 
 			KH_var_temporalExecutionStackAdditions insert [
 				[-1, 0] select _timeoutPriority,
@@ -525,16 +528,16 @@ switch (typeName _environmentType) do {
 							["KH_eve_temporalExecutionStackHandler", [_environmentId, true, true, false], true, false] call KH_fnc_triggerCbaEvent;
 							KH_var_temporalExecutionStackDeletions pushBackUnique _handlerId;
 						},
-						_timeout,
-						if (_timeout isEqualTo 0) then {
+						_trueTimeout,
+						if (_trueTimeout isEqualTo 0) then {
 							diag_frameNo + 1;
 						}
 						else {
-							if (_timeout > 0) then {
-								diag_tickTime + _timeout;
+							if (_trueTimeout > 0) then {
+								diag_tickTime + _trueTimeout;
 							}
 							else {
-								diag_frameNo + (abs _timeout);
+								diag_frameNo + (abs _trueTimeout);
 							};
 						},
 						-1,

@@ -27,6 +27,10 @@ constexpr int NET_DEFAULT_SEND_BATCH_SIZE = 64;
 constexpr const char* NET_INTERNAL_ROUTE_EVENT = "_KH_INTERNAL_ROUTE_";
 constexpr const char* NET_INTERNAL_SET_VARIABLE_EVENT = "_KH_INTERNAL_SETVAR_";
 constexpr const char* NET_INTERNAL_CONDITIONAL_EVENT = "_KH_INTERNAL_COND_";
+constexpr const char* NET_INTERNAL_UNIT_GATE_EVENT = "_KH_INTERNAL_UNITGATE_";
+constexpr const char* NET_INTERNAL_STORE_JIP_EVENT  = "_KH_INTERNAL_STOREJIP_";
+constexpr const char* NET_INTERNAL_REMOVE_JIP_EVENT = "_KH_INTERNAL_REMOVEJIP_";
+constexpr const char* NET_INTERNAL_REMOVE_HANDLER_EVENT = "_KH_INTERNAL_REMOVEHANDLER_";
 
 enum class NetworkTargetType : uint8_t {
     CLIENT_ID = 0,           // Specific client owner ID (positive)
@@ -172,8 +176,10 @@ struct JipMessage {
     std::string event_name;
     std::vector<uint8_t> payload;
     int original_sender;
-    std::string dependency_net_id;  // Empty = no dependency, otherwise netId of object/group
-    bool dependency_is_group;       // true = group, false = object
+    std::string dependency_net_id;
+    bool dependency_is_group;
+    bool unit_required = false;
+    uint64_t seq = 0;   // replay-order sequence
 };
 
 struct OutgoingMessage {
@@ -550,6 +556,7 @@ private:
     COWHandlerMap cow_handlers_;
     std::unordered_map<int, PendingSend> client_pending_sends_;
     PendingSend server_pending_send_;
+    std::deque<OutgoingMessage> client_send_queue_;
     std::unordered_map<int, std::deque<OutgoingMessage>> per_client_queues_;
     std::unordered_map<int, int64_t> client_stall_start_times_;
     std::shared_ptr<PayloadPool> payload_pool_;
@@ -593,7 +600,8 @@ private:
     // Jip
     std::unordered_map<std::string, JipMessage> jip_messages_;
     std::mutex jip_mutex_;
-
+    uint64_t jip_seq_counter_ = 0;
+    
     // Initialization
     bool wsa_initialized_{false};
     std::atomic<int> cached_client_id_{-1};
@@ -2883,7 +2891,11 @@ private:
         int sender_client_id
     ) {
         if (!running_) {
-            return false;
+            if (local_exec) {
+                queue_local_message(event_name, message, sender_client_id);
+            }
+
+            return true;
         }
         
         try {
@@ -3033,47 +3045,6 @@ private:
         lin.l_onoff = 1;
         lin.l_linger = 2;
         setsockopt(sock, SOL_SOCKET, SO_LINGER, reinterpret_cast<const char*>(&lin), sizeof(lin));
-        return true;
-    }
-    
-    bool send_all(SOCKET sock, const std::vector<uint8_t>& data) {
-        // Combine length prefix and data into single buffer to reduce syscalls
-        size_t total_size = 4 + data.size();
-        
-        // Use stack buffer for small messages, heap for large
-        constexpr size_t STACK_THRESHOLD = 8192;
-        uint8_t stack_buf[STACK_THRESHOLD];
-        std::vector<uint8_t> heap_buf;
-        uint8_t* send_buf;
-        
-        if (total_size <= STACK_THRESHOLD) {
-            send_buf = stack_buf;
-        } else {
-            heap_buf.resize(total_size);
-            send_buf = heap_buf.data();
-        }
-
-        uint32_t len = static_cast<uint32_t>(data.size());
-        send_buf[0] = static_cast<uint8_t>(len & 0xFF);
-        send_buf[1] = static_cast<uint8_t>((len >> 8) & 0xFF);
-        send_buf[2] = static_cast<uint8_t>((len >> 16) & 0xFF);
-        send_buf[3] = static_cast<uint8_t>((len >> 24) & 0xFF);
-        std::memcpy(send_buf + 4, data.data(), data.size());
-        
-        // Send all in one or more calls
-        size_t total_sent = 0;
-
-        while (total_sent < total_size) {
-            int result = send(sock, reinterpret_cast<const char*>(send_buf + total_sent),
-                            static_cast<int>(total_size - total_sent), 0);
-
-            if (result == SOCKET_ERROR || result == 0) {
-                return false;
-            }
-
-            total_sent += result;
-        }
-        
         return true;
     }
 
@@ -3484,6 +3455,73 @@ private:
         return result;
     }
 
+    void process_client_send_queue(std::vector<uint8_t>& packet_buffer,
+                                   std::vector<uint8_t>& temp_uncompressed_buffer,
+                                   std::vector<OutgoingMessage>& chunk) {
+        if (!server_pending_send_.complete()) {        // finish in-flight bytes first
+            process_pending_send_client();
+            if (!server_pending_send_.complete()) return;
+        }
+
+        if (client_send_queue_.empty()) return;
+        if (!ensure_server_connection()) return;       // leave queued, in order
+        SOCKET server_sock = INVALID_SOCKET;
+
+        {
+            std::lock_guard<std::mutex> srv_lock(server_connection_mutex_);
+            server_sock = server_connection_;
+        }
+
+        if (server_sock == INVALID_SOCKET) return;
+        const size_t max_msgs = config_coalesce_enabled_ ? config_coalesce_max_messages_ : 1;
+
+        while (!client_send_queue_.empty() && server_pending_send_.complete()) {
+            chunk.clear();
+            size_t chunk_bytes = 0;
+
+            while (!client_send_queue_.empty() && chunk.size() < max_msgs) {
+                const OutgoingMessage& front = client_send_queue_.front();
+                size_t msg_size = 14 + front.event_name.size() + front.payload->size();
+                if (!chunk.empty() && chunk_bytes + msg_size > config_coalesce_max_size_) break;
+                chunk_bytes += msg_size;
+                chunk.push_back(std::move(client_send_queue_.front()));
+                client_send_queue_.pop_front();
+            }
+
+            if (chunk.empty()) break;
+            create_coalesced_packet(packet_buffer, chunk, temp_uncompressed_buffer);  // handles 1 or N
+            server_pending_send_ = PendingSend(prepare_send_buffer(packet_buffer));
+            SendResult result = send_nonblocking(server_sock, server_pending_send_);
+
+            if (result == SendResult::SUCCESS) {
+                server_pending_send_.clear();
+                continue;
+            }
+
+            if (result == SendResult::PARTIAL || result == SendResult::WOULD_BLOCK) {
+                break;  // bytes held in server_pending_send_, flushed next iteration
+            }
+
+            {
+                std::lock_guard<std::mutex> srv_lock(server_connection_mutex_);
+
+                if (server_connection_ != INVALID_SOCKET && server_connection_ == server_sock) {
+                    ::shutdown(server_connection_, SD_BOTH);
+                    closesocket(server_connection_);
+                    server_connection_ = INVALID_SOCKET;
+                }
+            }
+
+            server_pending_send_.clear();
+
+            for (auto it = chunk.rbegin(); it != chunk.rend(); ++it) {
+                client_send_queue_.push_front(std::move(*it));
+            }
+
+            break;
+        }
+    }
+
     void listen_thread_func() {
         while (running_) {
             fd_set read_fds;
@@ -3681,6 +3719,7 @@ private:
                                     per_client_queues_.erase(client_id);
                                     client_stall_start_times_.erase(client_id);
                                     client_recv_buffers_.erase(client_id);
+                                    client_pending_sends_.erase(client_id);
                                 }
 
                                 client_connections_[client_id] = client_sock;
@@ -3769,16 +3808,30 @@ private:
         u_long mode = 1;
         ioctlsocket(sock, FIONBIO, &mode);
         connect(sock, reinterpret_cast<struct sockaddr*>(&server), sizeof(server));
-        fd_set write_fds;
-        FD_ZERO(&write_fds);
-        FD_SET(sock, &write_fds);
-        struct timeval tv;
-        tv.tv_sec = config_connect_timeout_ms_ / 1000;
-        tv.tv_usec = (config_connect_timeout_ms_ % 1000) * 1000;
-        
-        if (select(0, nullptr, &write_fds, nullptr, &tv) <= 0) {
-            closesocket(sock);
-            return false;
+        int connect_elapsed_ms = 0;
+
+        for (;;) {
+            if (!running_.load()) { closesocket(sock); return false; }
+            fd_set write_fds, err_fds;
+            FD_ZERO(&write_fds); FD_ZERO(&err_fds);
+            FD_SET(sock, &write_fds); FD_SET(sock, &err_fds);
+            struct timeval tv; 
+            tv.tv_sec = 0; 
+            tv.tv_usec = 200000;
+            int sel = select(0, nullptr, &write_fds, &err_fds, &tv);
+            if (sel > 0 && FD_ISSET(sock, &write_fds)) break;
+
+            if (sel < 0 || FD_ISSET(sock, &err_fds)) { 
+                closesocket(sock); 
+                return false; 
+            }
+
+            connect_elapsed_ms += 200;
+            
+            if (connect_elapsed_ms >= config_connect_timeout_ms_) { 
+                closesocket(sock); 
+                return false; 
+            }
         }
 
         mode = 0;
@@ -3881,7 +3934,13 @@ private:
             tv.tv_usec = 1000;
 
             if (select(0, &read_fds, nullptr, nullptr, &tv) > 0 && FD_ISSET(sock, &read_fds)) {
-                RecvNBResult recv_result = recv_nonblocking(sock, server_recv_buffer_);
+                RecvNBResult recv_result;
+                
+                {
+                    std::lock_guard<std::mutex> lock(server_connection_mutex_);
+                    if (server_connection_ != sock) continue;   // reconnected under us
+                    recv_result = recv_nonblocking(sock, server_recv_buffer_);
+                }
 
                 if (recv_result == RecvNBResult::DISCONNECTED ||
                     server_recv_buffer_.has_protocol_error(config_max_message_size_)) {
@@ -4053,27 +4112,6 @@ private:
             
             outgoing_queue_lockfree_.pop_bulk(batch, max_grab);
             
-            if (batch.empty()) {
-                outgoing_has_data_.store(false, std::memory_order_release);
-                
-                // Even with no new messages, try to complete pending sends
-                if (is_server_) {
-                    std::lock_guard<std::mutex> conn_lock(connections_mutex_);
-                    process_pending_sends_server_locked(clients_to_disconnect);
-                    
-                    // Disconnect clients that failed
-                    for (int id : clients_to_disconnect) {
-                        disconnect_client_locked(id);
-                    }
-                    
-                    clients_to_disconnect.clear();
-                } else {
-                    process_pending_send_client();
-                }
-
-                continue;
-            }
-            
             // Check if more data might be available
             if (outgoing_queue_lockfree_.empty()) {
                 outgoing_has_data_.store(false, std::memory_order_release);
@@ -4093,29 +4131,23 @@ private:
                     
                     for (auto& msg : batch) {
                         if (client_connections_.find(msg.target_client) != client_connections_.end()) {
-                            per_client_batch[msg.target_client].push_back(std::move(msg));
+                            per_client_queues_[msg.target_client].push_back(std::move(msg));
                         }
                     }
 
                     batch.clear();
-                    
-                    // Also gather from per-client queues (for requeued messages)
+
                     for (auto& [client_id, queue] : per_client_queues_) {
                         if (queue.empty()) continue;
-                        
-                        // Skip if this client has a pending partial send
                         auto pending_it = client_pending_sends_.find(client_id);
 
                         if (pending_it != client_pending_sends_.end() && !pending_it->second.complete()) {
                             continue;
                         }
-                        
+
                         auto& client_msgs = per_client_batch[client_id];
 
-                        size_t to_grab = std::min(queue.size(), 
-                            config_coalesce_max_messages_ - client_msgs.size());
-                        
-                        for (size_t i = 0; i < to_grab; ++i) {
+                        while (!queue.empty()) {
                             client_msgs.push_back(std::move(queue.front()));
                             queue.pop_front();
                         }
@@ -4345,178 +4377,12 @@ private:
                 }
                 
             } else {
-                // Client mode - send to server with coalescing
-                if (batch.empty()) continue;
-
-                if (!server_pending_send_.complete()) {
-                    process_pending_send_client();
-                    
-                    if (!server_pending_send_.complete()) {
-                        // Still have pending data - requeue all new messages
-                        for (auto& requeue_msg : batch) {
-                            outgoing_queue_lockfree_.push(std::move(requeue_msg));
-                        }
-
-                        outgoing_has_data_.store(true, std::memory_order_release);
-                        batch.clear();
-                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                        continue;
-                    }
-                }
-                
-                if (!ensure_server_connection()) {
-                    for (auto& requeue_msg : batch) {
-                        outgoing_queue_lockfree_.push(std::move(requeue_msg));
-                    }
-                    
-                    outgoing_has_data_.store(true, std::memory_order_release);
-                    batch.clear();
-                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                    continue;
-                }
-                
-                bool send_failed = false;
-                SOCKET server_sock = INVALID_SOCKET;
-                
-                {
-                    std::lock_guard<std::mutex> srv_lock(server_connection_mutex_);
-                    server_sock = server_connection_;
-                }
-                
-                if (server_sock == INVALID_SOCKET) {
-                    // Requeue all
-                    for (auto& requeue_msg : batch) {
-                        outgoing_queue_lockfree_.push(std::move(requeue_msg));
-                    }
-
-                    outgoing_has_data_.store(true, std::memory_order_release);
-                    batch.clear();
-                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                    continue;
-                }
-                
-                if (config_coalesce_enabled_ && batch.size() > 1) {
-                    // Coalesce messages to server
-                    size_t current_batch_start = 0;
-                    size_t current_batch_size = 0;
-                    
-                    for (size_t i = 0; i <= batch.size(); ++i) {
-                        size_t msg_size = (i < batch.size()) ? 
-                            14 + batch[i].event_name.size() + batch[i].payload->size() : 0;
-                        
-                        bool should_flush = (i == batch.size()) ||
-                                           (i - current_batch_start >= config_coalesce_max_messages_) ||
-                                           (current_batch_size + msg_size > config_coalesce_max_size_ && 
-                                            i > current_batch_start);
-                        
-                        if (should_flush && i > current_batch_start) {
-                            client_batch.clear();
-
-                            for (size_t j = current_batch_start; j < i; ++j) {
-                                client_batch.push_back(std::move(batch[j]));
-                            }
-                            
-                            create_coalesced_packet(packet_buffer, client_batch, temp_uncompressed_buffer);
-                            
-                            server_pending_send_ = PendingSend(prepare_send_buffer(packet_buffer));
-                            SendResult result = send_nonblocking(server_sock, server_pending_send_);
-                            
-                            if (result == SendResult::ERROR_FATAL) {
-                                {
-                                    std::lock_guard<std::mutex> srv_lock(server_connection_mutex_);
-
-                                    if (server_connection_ != INVALID_SOCKET && server_connection_ == server_sock) {
-                                        ::shutdown(server_connection_, SD_BOTH);
-                                        closesocket(server_connection_);
-                                        server_connection_ = INVALID_SOCKET;
-                                    }
-                                }
-
-                                server_pending_send_.clear();
-                                send_failed = true;
-
-                                // Requeue the batch that failed (in order)
-                                for (auto& requeue_msg : client_batch) {
-                                    outgoing_queue_lockfree_.push(std::move(requeue_msg));
-                                }
-
-                                // Requeue remaining unsent messages (in order)
-                                for (size_t k = i; k < batch.size(); ++k) {
-                                    outgoing_queue_lockfree_.push(std::move(batch[k]));
-                                }
-                                
-                                outgoing_has_data_.store(true, std::memory_order_release);
-                                break;
-                            } else if (result == SendResult::PARTIAL || result == SendResult::WOULD_BLOCK) {
-                                // Partial send - requeue remaining messages, pending stays
-                                for (size_t k = i; k < batch.size(); ++k) {
-                                    outgoing_queue_lockfree_.push(std::move(batch[k]));
-                                }
-
-                                outgoing_has_data_.store(true, std::memory_order_release);
-                                send_failed = true;
-                                break;
-                            }
-                            
-                            // Success - clear pending
-                            server_pending_send_.clear();                  
-                            current_batch_start = i;
-                            current_batch_size = msg_size;
-                        } else if (i < batch.size()) {
-                            current_batch_size += msg_size;
-                        }
-                    }
-                } else {
-                    // No coalescing
-                    for (size_t i = 0; i < batch.size(); ++i) {
-                        auto& msg = batch[i];
-
-                        create_network_packet_into(packet_buffer, msg.target_client, msg.sender_client,
-                                                   msg.event_name, *msg.payload);
-                        
-                        server_pending_send_ = PendingSend(prepare_send_buffer(packet_buffer));
-                        SendResult result = send_nonblocking(server_sock, server_pending_send_);
-                        
-                        if (result == SendResult::ERROR_FATAL) {
-                            {
-                                std::lock_guard<std::mutex> srv_lock(server_connection_mutex_);
-
-                                if (server_connection_ != INVALID_SOCKET && server_connection_ == server_sock) {
-                                    ::shutdown(server_connection_, SD_BOTH);
-                                    closesocket(server_connection_);
-                                    server_connection_ = INVALID_SOCKET;
-                                }
-                            }
-
-                            server_pending_send_.clear();
-                            send_failed = true;
-
-                            for (size_t j = i; j < batch.size(); ++j) {
-                                outgoing_queue_lockfree_.push(std::move(batch[j]));
-                            }
-                            
-                            outgoing_has_data_.store(true, std::memory_order_release);
-                            break;
-                        } else if (result == SendResult::PARTIAL || result == SendResult::WOULD_BLOCK) {
-                            // Requeue remaining (current message is in pending)
-                            for (size_t j = i + 1; j < batch.size(); ++j) {
-                                outgoing_queue_lockfree_.push(std::move(batch[j]));
-                            }
-
-                            outgoing_has_data_.store(true, std::memory_order_release);
-                            send_failed = true;
-                            break;
-                        }
-                        
-                        server_pending_send_.clear();
-                    }
+                for (auto& msg : batch) {
+                    client_send_queue_.push_back(std::move(msg));
                 }
                 
                 batch.clear();
-                
-                if (send_failed) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                }
+                process_client_send_queue(packet_buffer, temp_uncompressed_buffer, client_batch);
             }
         }
     }
@@ -4688,6 +4554,7 @@ public:
 
             server_pending_send_.clear();
             server_recv_buffer_.reset();
+            client_send_queue_.clear();
         }
 
         {
@@ -4736,8 +4603,30 @@ public:
         server_ip_ = ip;
     }
 
-    void store_jip_message(const std::string& jip_key, const std::string& event_name, const game_value& message, int sender, const std::string& dependency_net_id = "", bool dependency_is_group = false) {
-        if (jip_key.empty() || !is_server_) {
+    void store_jip_message(const std::string& jip_key, const std::string& event_name, const game_value& message, int sender, const std::string& dependency_net_id = "", bool dependency_is_group = false, bool unit_required = false) {
+        if (jip_key.empty()) {
+            return;
+        }
+
+        // The server owns the JIP queue. If we're a client, forward the request
+        // so any machine can register a JIP message by key.
+        if (!is_server_) {
+            if (running_) {
+                try {
+                    auto_array<game_value> store_data;
+                    store_data.push_back(game_value(jip_key));
+                    store_data.push_back(game_value(event_name));
+                    store_data.push_back(message);
+                    store_data.push_back(game_value(dependency_net_id));
+                    store_data.push_back(game_value(dependency_is_group));
+                    store_data.push_back(game_value(unit_required));
+                    store_data.push_back(game_value(static_cast<float>(sender)));
+                    send_message(2, NET_INTERNAL_STORE_JIP_EVENT, game_value(std::move(store_data)));
+                } catch (const std::exception& e) {
+                    report_error("KH Network: Failed to forward JIP store request - " + std::string(e.what()));
+                }
+            }
+
             return;
         }
         
@@ -4778,7 +4667,9 @@ public:
             serialize_game_value(tls_buffer, message);
             std::vector<uint8_t> payload(tls_buffer.begin(), tls_buffer.end());
             std::lock_guard<std::mutex> lock(jip_mutex_);
-            jip_messages_[actual_key] = {event_name, std::move(payload), sender, dependency_net_id, dependency_is_group};
+            auto existing = jip_messages_.find(actual_key);
+            uint64_t seq = (existing != jip_messages_.end()) ? existing->second.seq : jip_seq_counter_++;
+            jip_messages_[actual_key] = {event_name, std::move(payload), sender, dependency_net_id, dependency_is_group, unit_required, seq};
         } catch (const std::exception& e) {
             report_error("KH Network: Failed to store JIP message '" + actual_key + "' - " + std::string(e.what()));
         } catch (...) {
@@ -4791,6 +4682,34 @@ public:
         jip_messages_.erase(jip_key);
     }
 
+    void request_remove_jip(const std::string& jip_key) {
+        if (jip_key.empty()) {
+            return;
+        }
+
+        if (is_server_) {
+            remove_jip_message(jip_key);
+        } else if (running_) {
+            // Forward to the server, which owns the JIP queue.
+            send_message(2, NET_INTERNAL_REMOVE_JIP_EVENT, game_value(jip_key));
+        }
+    }
+
+    void request_remove_handler(int handler_id, int owner_client_id) {
+        if (handler_id < 0) {
+            return;
+        }
+
+        if (!running_ || owner_client_id == cached_client_id_.load()) {
+            remove_message_handler(handler_id);
+            return;
+        }
+
+        auto_array<game_value> data;
+        data.push_back(game_value(static_cast<float>(handler_id)));
+        send_message(owner_client_id, NET_INTERNAL_REMOVE_HANDLER_EVENT, game_value(std::move(data)));
+    }
+    
     void clear_all_jip_messages() {
         std::lock_guard<std::mutex> lock(jip_mutex_);
         jip_messages_.clear();
@@ -4821,8 +4740,16 @@ public:
                 }
                 
                 auto pooled_payload = payload_pool_->acquire();
-                *pooled_payload = msg.payload;  // Copy from stored JIP message
-                messages_to_send.emplace_back(msg.event_name, std::move(pooled_payload), msg.original_sender);
+
+                if (msg.unit_required) {
+                    pooled_payload->clear();
+                    write_string(*pooled_payload, msg.event_name);
+                    pooled_payload->insert(pooled_payload->end(), msg.payload.begin(), msg.payload.end());
+                    messages_to_send.emplace_back(std::string(NET_INTERNAL_UNIT_GATE_EVENT), std::move(pooled_payload), msg.original_sender);
+                } else {
+                    *pooled_payload = msg.payload;
+                    messages_to_send.emplace_back(msg.event_name, std::move(pooled_payload), msg.original_sender);
+                }
             }
         }
         
@@ -4839,7 +4766,8 @@ public:
 
     bool send_message(int target_client, const std::string& event_name, const game_value& message) {
         if (!running_) {
-            return false;
+            queue_local_message(event_name, message, cached_client_id_.load());
+            return true;
         }
         
         int our_client_id = cached_client_id_;
@@ -4878,7 +4806,13 @@ public:
         const game_value& message
     ) {
         if (!running_) {
-            return false;
+            if (target_type != NetworkTargetType::DO_NOTHING &&
+                target_type != NetworkTargetType::CLIENT_ID_EXCLUDE &&
+                target_type != NetworkTargetType::STRING_REMOTE) {
+                queue_local_message(event_name, message, cached_client_id_.load());
+            }
+
+            return true;
         }
         
         int our_client_id = cached_client_id_;
@@ -5152,6 +5086,85 @@ public:
                         size_t offset = 0;
                         game_value setvar_data = deserialize_game_value(msg.payload.data(), offset, msg.payload.size());
                         process_set_variable_message(setvar_data, msg.sender_client_id);
+                    }
+
+                    continue;
+                } else if (msg.event_name == NET_INTERNAL_STORE_JIP_EVENT) {
+                    if (is_server_ && !msg.payload.empty()) {
+                        try {
+                            size_t offset = 0;
+                            game_value d = deserialize_game_value(msg.payload.data(), offset, msg.payload.size());
+                            auto& a = d.to_array();
+
+                            if (a.size() >= 7) {
+                                store_jip_message(
+                                    static_cast<std::string>(a[0]),
+                                    static_cast<std::string>(a[1]),
+                                    a[2],
+                                    static_cast<int>(static_cast<float>(a[6])),
+                                    static_cast<std::string>(a[3]),
+                                    static_cast<bool>(a[4]),
+                                    static_cast<bool>(a[5])
+                                );
+                            }
+                        } catch (const std::exception& e) {
+                            report_error("KH Network: Failed to process JIP store request - " + std::string(e.what()));
+                        }
+                    }
+
+                    continue;
+                } else if (msg.event_name == NET_INTERNAL_REMOVE_JIP_EVENT) {
+                    if (is_server_ && !msg.payload.empty()) {
+                        try {
+                            size_t offset = 0;
+                            game_value key_gv = deserialize_game_value(msg.payload.data(), offset, msg.payload.size());
+                            remove_jip_message(static_cast<std::string>(key_gv));
+                        } catch (const std::exception& e) {
+                            report_error("KH Network: Failed to process JIP removal request - " + std::string(e.what()));
+                        }
+                    }
+
+                    continue;
+                } else if (msg.event_name == NET_INTERNAL_REMOVE_HANDLER_EVENT) {
+                    if (!msg.payload.empty()) {
+                        try {
+                            size_t offset = 0;
+                            game_value d = deserialize_game_value(msg.payload.data(), offset, msg.payload.size());
+                            auto& a = d.to_array();
+
+                            if (!a.empty()) {
+                                remove_message_handler(static_cast<int>(static_cast<float>(a[0])));
+                            }
+                        } catch (const std::exception& e) {
+                            report_error("KH Network: Failed to process handler removal request - " + std::string(e.what()));
+                        }
+                    }
+
+                    continue;
+                } else if (msg.event_name == NET_INTERNAL_UNIT_GATE_EVENT) {
+                    game_value player_unit = sqf::get_variable(sqf::mission_namespace(), "kh_var_playerunit", game_value());
+
+                    bool unit_ready = (!player_unit.is_nil()) &&
+                                      (player_unit.type_enum() == game_data_type::OBJECT) &&
+                                      (!sqf::is_null(static_cast<object>(player_unit)));
+
+                    if (!unit_ready) {
+                        std::lock_guard<std::mutex> lock(incoming_mutex_);
+                        incoming_queue_.push_back(std::move(msg));
+                        continue;
+                    }
+
+                    // Unit ready: unwrap and re-inject the original message so it runs
+                    if (!msg.payload.empty()) {
+                        try {
+                            size_t offset = 0;
+                            std::string inner_event = read_string(msg.payload.data(), offset, msg.payload.size());
+                            std::vector<uint8_t> inner_payload(msg.payload.begin() + offset, msg.payload.end());
+                            std::lock_guard<std::mutex> lock(incoming_mutex_);
+                            incoming_queue_.emplace_back(inner_event, std::move(inner_payload), msg.sender_client_id);
+                        } catch (const std::exception& e) {
+                            report_error("KH Network: Failed to unwrap unit-gated JIP message - " + std::string(e.what()));
+                        }
                     }
 
                     continue;
@@ -5686,7 +5699,5 @@ static void network_pre_init() {
 }
 
 static void network_on_frame() {
-    if (NetworkFramework::instance().is_running()) {
-        NetworkFramework::instance().process_incoming_messages();
-    }
+    NetworkFramework::instance().process_incoming_messages();
 }

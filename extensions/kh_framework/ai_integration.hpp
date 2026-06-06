@@ -246,7 +246,6 @@ private:
     std::string marker_user_end;
     std::string marker_assistant_start;
     std::string marker_assistant_end;
-    std::atomic<uint64_t> current_generation_id{0};
 
     void schedule_log(const std::string& message) {
         if (!log_generation) return;
@@ -859,7 +858,6 @@ private:
 
                 if (force_terminate) break;
                 abort_generation = false;
-                current_generation_id++;  // Increment before generation so progress events use correct ID
                 std::string raw_response = generate_response();
                 if (force_terminate) break;
 
@@ -1165,7 +1163,6 @@ public:
         master_prompt_cached = false;
         master_prompt_tokens.clear();
         master_prompt_token_count = 0;
-        current_generation_id = 0;
     }
 
     void set_log_generation(bool enabled) {

@@ -43,7 +43,7 @@ if _state then {
 			},
 			"PLAYERS",
 			true,
-			["JIP", true, true, ""]
+			true
 		] call KH_fnc_execute;
 	};
 };

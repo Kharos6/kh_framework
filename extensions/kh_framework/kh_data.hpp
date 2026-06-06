@@ -477,7 +477,7 @@ private:
                     if (serialized == "east") return sqf::east();
                     if (serialized == "opfor") return sqf::opfor();
                     if (serialized == "resistance") return sqf::resistance();
-                    if (serialized == "independent") return sqf::resistance();
+                    if (serialized == "independent") return sqf::independent();
                     if (serialized == "civilian") return sqf::civilian();
                     if (serialized == "sideLogic") return sqf::side_logic();
                     if (serialized == "sideUnknown") return sqf::side_unknown();

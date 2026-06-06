@@ -609,7 +609,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
                 ShutdownWatchdog::instance().shutdown(true);
             } else {
                 ShutdownWatchdog::instance().arm(3000);
-                reset_lua_state();
                 MainThreadScheduler::instance().clear();
                 
                 __try { 

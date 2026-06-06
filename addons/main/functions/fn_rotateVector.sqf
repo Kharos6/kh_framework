@@ -1,4 +1,4 @@
-params [["_pivot", [0, 0, 0], [[], objNull]], ["_position", [0, 0, 0], [[], objNull]], ["_vectorDirUp", [[0, 1, 0], [0, 0, 1]], [[], objNull]]];
+params [["_pivot", [0, 0, 0], [[], objNull]], ["_position", [0, 0, 0], [[], objNull]], ["_vectorDirAndUp", [[0, 1, 0], [0, 0, 1]], [[], objNull]]];
 
 if (_pivot isEqualType objNull) then {
     _pivot = getPosASLVisual _pivot;
@@ -8,16 +8,16 @@ if (_position isEqualType objNull) then {
     _position = getPosASLVisual _position;
 };
 
-if (_vectorDirUp isEqualType objNull) then {
-    _vectorDirUp = [vectorDir _vectorDirUp, vectorUp _vectorDirUp];
+if (_vectorDirAndUp isEqualType objNull) then {
+    _vectorDirAndUp = [vectorDirVisual _vectorDirAndUp, vectorUpVisual _vectorDirAndUp];
 }
 else {
-    if (_vectorDirUp isEqualTypeAll 0) then {
-        _vectorDirUp = eulerToVector _vectorDirUp;
+    if (_vectorDirAndUp isEqualTypeAll 0) then {
+        _vectorDirAndUp = eulerToVector _vectorDirAndUp;
     };
 };
 
-_vectorDirUp params [["_vectorDir", [0, 1, 0], [[]]], ["_vectorUp", [0, 0, 1], [[]]]];
+_vectorDirAndUp params [["_vectorDir", [0, 1, 0], [[]]], ["_vectorUp", [0, 0, 1], [[]]]];
 private _vectorSide = _vectorDir vectorCrossProduct _vectorUp;
 private _offset = _position vectorDiff _pivot;
 

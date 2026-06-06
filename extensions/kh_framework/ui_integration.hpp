@@ -759,11 +759,11 @@ public:
         context_->Draw(4, 0);
     }
         
-    ID3D11ShaderResourceView* get_srv(const std::string& doc_id) {
+    ComPtr<ID3D11ShaderResourceView> get_srv(const std::string& doc_id) {
         std::lock_guard<std::mutex> lock(texture_mutex_);
         auto it = doc_textures_.find(doc_id);
         if (it == doc_textures_.end() || !it->second.srv) return nullptr;
-        return it->second.srv.Get();
+        return it->second.srv;   // ComPtr copy AddRefs while the lock is held
     }
 
     void remove_doc_texture(const std::string& doc_id) {
@@ -1253,7 +1253,7 @@ public:
         struct RenderItem {
             std::shared_ptr<UIDocument> doc;
             const std::string* id;
-            ID3D11ShaderResourceView* srv;
+            ComPtr<ID3D11ShaderResourceView> srv;
             int x, y, width, height;
             float opacity;
             int z_order;
@@ -1339,7 +1339,7 @@ public:
                 item.y + item.height < 0 || item.y > sh) continue;
             
             d3d_renderer_.draw_quad_with_srv(
-                item.srv,
+                item.srv.Get(),
                 sw, sh,
                 item.x, item.y,
                 item.width, item.height,
@@ -2073,45 +2073,39 @@ private:
                 }
                 
                 case WM_LBUTTONDOWN:
-                    ptr->on_mouse_button(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam), 
-                                         ultralight::MouseEvent::kButton_Left, true);
-
-                    return 0;
+                    if (ptr->on_mouse_button(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam),
+                                             ultralight::MouseEvent::kButton_Left, true)) return 0;
+                                             
                     break;
-                
+
                 case WM_LBUTTONUP:
-                    ptr->on_mouse_button(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam),
-                                         ultralight::MouseEvent::kButton_Left, false);
+                    if (ptr->on_mouse_button(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam),
+                                             ultralight::MouseEvent::kButton_Left, false)) return 0;
 
-                    return 0;
                     break;
-                
+
                 case WM_RBUTTONDOWN:
-                    ptr->on_mouse_button(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam),
-                                         ultralight::MouseEvent::kButton_Right, true);
+                    if (ptr->on_mouse_button(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam),
+                                             ultralight::MouseEvent::kButton_Right, true)) return 0;
 
-                    return 0;
                     break;
-                
+
                 case WM_RBUTTONUP:
-                    ptr->on_mouse_button(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam),
-                                         ultralight::MouseEvent::kButton_Right, false);
+                    if (ptr->on_mouse_button(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam),
+                                             ultralight::MouseEvent::kButton_Right, false)) return 0;
 
-                    return 0;
                     break;
-                
+
                 case WM_MBUTTONDOWN:
-                    ptr->on_mouse_button(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam),
-                                         ultralight::MouseEvent::kButton_Middle, true);
+                    if (ptr->on_mouse_button(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam),
+                                             ultralight::MouseEvent::kButton_Middle, true)) return 0;
 
-                    return 0;
                     break;
-                
-                case WM_MBUTTONUP:
-                    ptr->on_mouse_button(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam),
-                                         ultralight::MouseEvent::kButton_Middle, false);
 
-                    return 0;
+                case WM_MBUTTONUP:
+                    if (ptr->on_mouse_button(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam),
+                                             ultralight::MouseEvent::kButton_Middle, false)) return 0;
+
                     break;
                 
                 case WM_MOUSEWHEEL: {

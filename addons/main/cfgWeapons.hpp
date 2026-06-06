@@ -67,7 +67,7 @@ class CfgWeapons
             ffMagnitude = 0.5;
             flash = "";
             flashSize = 0;
-            maxRange = 100;
+            maxRange = 1000;
             maxRangeProbab = 0;
             midRange = 50;
             midRangeProbab = 0;
@@ -109,7 +109,7 @@ class CfgWeapons
 		handAnim[] = {"OFP2_ManSkeleton", "\x\kh\addons\main\animations\human\Hum_AbsStaSaf_IdlLhtMel.rtm"};
         overviewPicture = "\x\kh\addons\main\ui\sword_generic_01.paa";
         picture = "\x\kh\addons\main\ui\sword_generic_01.paa";
-        kh_meleeActions = "KH_MeleeInLightSword";
+        kh_specialActions = "KH_MeleeInLightSword";
         kh_meleeType = "KH_MeleeCleavingSharpLightLong";
         kh_meleeModes[] = {"KH_MeleeAttack01", "KH_MeleeAttack02"};
         kh_meleeModesGestures[] = {{"KH_MeleeAttack01AGesture", "KH_MeleeAttack01BGesture"}, {}};
@@ -136,7 +136,7 @@ class CfgWeapons
 		handAnim[] = {"OFP2_ManSkeleton", "\x\kh\addons\main\animations\human\Hum_AbsStaSaf_IdlLhtMel.rtm"};
         overviewPicture = "\x\kh\addons\main\ui\knife_m9.paa";
         picture = "\x\kh\addons\main\ui\knife_m9.paa";
-        kh_meleeActions = "KH_MeleeInLightSword";
+        kh_specialActions = "KH_MeleeInLightSword";
         kh_meleeType = "KH_MeleeCleavingSharpLightShort";
         kh_meleeModes[] = {"KH_MeleeAttack01", "KH_MeleeAttack02"};
         kh_meleeModesGestures[] = {{"KH_MeleeAttack01AGesture", "KH_MeleeAttack01BGesture"}, {}};

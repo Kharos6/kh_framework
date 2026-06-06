@@ -33,7 +33,7 @@ elseif directionFormat == "ARMA_STRING" then
         end
     end
 
-    return {table.concat(initials, "_"), tilt}
+    return {table.concat(initials), tilt}
 elseif directionFormat == "KH_STRING" then
     local filtered = filterByIncludes({axisY, axisX, axisZ})
     local parts = {}

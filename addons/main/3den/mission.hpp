@@ -432,7 +432,7 @@ class Mission
 										KH_var_quickFunctionsSqf set [_name, _function];\
 									}\
 									else {\
-										_name luaCompile (preprocessFile _function);\
+										_name luaCompile (loadFile _function);\
 										KH_var_quickFunctionsLua set [_name, _function];\
 									};\
 								} forEach (parseSimpleArray (['[', _value, ']'] joinString ''));\

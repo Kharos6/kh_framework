@@ -22,9 +22,10 @@ class CfgAmmo
 		bulletFly9[] = {};
 		cartridge = "";
 		caliber = 1;
-        aiAmmoUsageFlags = 0;
-        allowAgainstInfantry = 0;
-        cost = 999999;
+        aiAmmoUsageFlags = "64 + 128 + 256 + 512 + 1024";
+		aiAmmoUsageFlagsStrict = 1;
+        allowAgainstInfantry = 1;
+        cost = 0.1;
 		explosive = 0;
 		hit = 1;
 		typicalSpeed = 0.1;
@@ -104,5 +105,9 @@ class CfgAmmo
         explosionEffects = "";
         explosionSoundEffect = "";
         muzzleEffect = "";
+        aiAmmoUsageFlags = "64 + 128 + 256 + 512 + 1024";
+		aiAmmoUsageFlagsStrict = 1;
+        allowAgainstInfantry = 1;
+        cost = 0.1;
 	};
 };

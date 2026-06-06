@@ -62,7 +62,6 @@ class CfgMovesBasic
         KH_MeleeParried = "";
         KH_MeleeKick = "";
         KH_MeleeTackle = "";
-        KH_MeleeStop = "";
         KH_MeleeAttack01 = "";
         KH_MeleeAttack01AGesture[] = {"", "Gesture"};
         KH_MeleeAttack01BGesture[] = {"", "Gesture"};
@@ -151,8 +150,6 @@ class CfgMovesMaleSdr: CfgMovesBasic
         {
             access = 3;
             CanNotMove = "Hum_AbsStaCom_IdlLhtMel";
-            Civil = "Hum_AbsStaCom_IdlLhtMel";
-            CivilLying = "Hum_AbsStaCom_IdlLhtMel";
             Combat = "Hum_AbsStaCom_IdlLhtMel";
             Crouch = "Hum_AbsStaCom_IdlLhtMel";
             default = "Hum_AbsStaCom_IdlLhtMel";
@@ -189,7 +186,6 @@ class CfgMovesMaleSdr: CfgMovesBasic
             KH_MeleeParried = "Hum_AbsStaCom_StgLhtBwdLhtMel";
             KH_MeleeKick = "Hum_AbsStaCom_KckLhtMel";
             KH_MeleeTackle = "Hum_AbsStaCom_TklLhtMel";
-            KH_MeleeStop = "Hum_AbsStaCom_IdlLhtMel";
             KH_MeleeAttack01 = "Hum_AbsStaCom_AttLhtMel01A";
             KH_MeleeAttack01AGesture[] = {"Hum_AddStaCom_AttLhtMel01A", "Gesture"};
             KH_MeleeAttack01BGesture[] = {"Hum_AddStaCom_AttLhtMel01B", "Gesture"};
@@ -223,7 +219,7 @@ class CfgMovesMaleSdr: CfgMovesBasic
             leanRRot = 0.5;
             leanRShift = 0;
             limitFast = 4;
-            lying = "Hum_AbsStaCom_IdlLhtMel";
+            Lying = "Hum_AbsStaCom_IdlLhtMel";
             LimpB = "Hum_AbsStaCom_WlkBwdLhtMel";
             LimpF = "Hum_AbsStaCom_WlkFwdLhtMel";
             LimpL = "Hum_AbsStaCom_WlkLwdLhtMel";
@@ -242,6 +238,7 @@ class CfgMovesMaleSdr: CfgMovesBasic
             PlayerSlowRB = "Hum_AbsStaCom_TroBwdRwdLhtMel";
             PlayerSlowRF = "Hum_AbsStaCom_TroFwdRwdLhtMel";
             PlayerStand = "Hum_AbsStaCom_IdlLhtMel";
+            PlayerProne = "Hum_AbsStaCom_IdlLhtMel";
             PlayerTactB = "Hum_AbsStaCom_JogBwdLhtMel";
             PlayerTactF = "Hum_AbsStaCom_JogFwdLhtMel";
             PlayerTactL = "Hum_AbsStaCom_JogLwdLhtMel";
@@ -259,6 +256,7 @@ class CfgMovesMaleSdr: CfgMovesBasic
             PlayerWalkRB = "Hum_AbsStaCom_WlkBwdRwdLhtMel";
             PlayerWalkRF = "Hum_AbsStaCom_WlkFwdRwdLhtMel";
             Relax = "Hum_AbsStaCom_IdlLhtMel";
+            SecondaryWeapon = "Hum_AbsStaCom_IdlLhtMel";
             SlowB = "Hum_AbsStaCom_TroBwdLhtMel";
             SlowF = "Hum_AbsStaCom_TroFwdLhtMel";
             SlowL = "Hum_AbsStaCom_TroLwdLhtMel";
@@ -284,6 +282,7 @@ class CfgMovesMaleSdr: CfgMovesBasic
             turnRRelaxed = "Hum_AbsStaCom_TrnRhtLhtMel";
             turnSpeed = 8;
             up = "Hum_AbsStaCom_IdlLhtMel";
+            upDegree = "ManPosWeapon";
             WalkB = "Hum_AbsStaCom_WlkBwdLhtMel";
             WalkF = "Hum_AbsStaCom_WlkFwdLhtMel";
             WalkL = "Hum_AbsStaCom_WlkLwdLhtMel";
@@ -292,6 +291,7 @@ class CfgMovesMaleSdr: CfgMovesBasic
             WalkR = "Hum_AbsStaCom_WlkRwdLhtMel";
             WalkRB = "Hum_AbsStaCom_WlkBwdRwdLhtMel";
             WalkRF = "Hum_AbsStaCom_WlkFwdRwdLhtMel";
+            weaponOn = "Hum_AbsStaCom_IdlLhtMel";
         };
         class KH_MeleeTertiaryLightSwordBlock: KH_MeleeTertiaryLightSwordActions
         {
@@ -419,7 +419,7 @@ class CfgMovesMaleSdr: CfgMovesBasic
             leftHandIKCurve[] = {0};
             leftHandIKEnd = 0;
             legs = "legsDefault";
-            limitGunMovement = 0.25;
+            limitGunMovement = 1;
             looped = 1;
             mask = "weaponSwitching";
             minPlayTime = 0;

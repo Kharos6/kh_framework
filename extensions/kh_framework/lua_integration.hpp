@@ -915,94 +915,92 @@ namespace LuaFunctions {
 
     // Update scheduler
     static void update_scheduler() {
+        struct DueTask {
+            int task_id;
+            sol::protected_function callback;
+            bool at_timeout_boundary;
+        };
+
+        std::vector<DueTask> due;
         std::vector<int> tasks_to_remove;
-        
+
         for (auto& [task_id, task] : lua_scheduled_tasks) {
-            // Skip cancelled tasks
             if (!task.callback.valid()) {
                 tasks_to_remove.push_back(task_id);
                 continue;
             }
-            
-            // Check timeout first
+
             bool past_timeout = false;
             bool at_timeout_boundary = false;
-            
+
             if (task.has_timeout && task.repeating) {
                 if (task.use_frames) {
                     past_timeout = g_mission_frame > task.timeout_frame;
-                    
+
                     if (!task.prioritize_timeout && g_mission_frame == task.timeout_frame) {
                         int elapsed = g_mission_frame - task.start_frame;
                         at_timeout_boundary = (elapsed % task.frame_interval) == 0;
                     }
                 } else {
                     past_timeout = g_mission_time > task.timeout_time;
-                    
+
                     if (!task.prioritize_timeout) {
                         float elapsed = g_mission_time - task.start_time;
                         float epsilon = 0.01f;
-                        
+
                         if (std::abs(elapsed - task.timeout_time + task.start_time) < epsilon) {
                             float intervals = elapsed / task.interval;
                             at_timeout_boundary = std::abs(intervals - std::round(intervals)) < epsilon;
                         }
                     }
                 }
-                
+
                 if (past_timeout && !at_timeout_boundary) {
                     tasks_to_remove.push_back(task_id);
                     continue;
                 }
             }
-            
-            // Check if should execute
-            bool should_execute = false;
-            
-            if (task.use_frames) {
-                should_execute = g_mission_frame >= task.execute_frame;
-            } else {
-                should_execute = g_mission_time >= task.execute_time;
-            }
-            
+
+            bool should_execute = task.use_frames
+                ? (g_mission_frame >= task.execute_frame)
+                : (g_mission_time >= task.execute_time);
+
             if (should_execute) {
-                // Execute callback
-                sol::protected_function_result result = task.callback();
-                
-                if (!result.valid()) {
-                    sol::error err = result;
-                    report_error("Scheduled task error: " + std::string(err.what()));
-                }
-                
-                // Check if callback returned true to stop interval
-                bool should_cancel = false;
-
-                if (result.valid() && result.return_count() > 0) {
-                    sol::object ret_val = result.get<sol::object>();
-
-                    if (ret_val.is<bool>() && ret_val.as<bool>() == true) {
-                        should_cancel = true;
-                    }
-                }
-                
-                // If this was the timeout boundary execution or callback returned true, remove the task
-                if (at_timeout_boundary || should_cancel) {
-                    tasks_to_remove.push_back(task_id);
-                } else if (task.repeating) {
-                    // Reschedule
-                    if (task.use_frames) {
-                        task.execute_frame = g_mission_frame + task.frame_interval;
-                    } else {
-                        task.execute_time = g_mission_time + task.interval;
-                    }
-                } else {
-                    // Remove completed one-time task
-                    tasks_to_remove.push_back(task_id);
-                }
+                due.push_back({task_id, task.callback, at_timeout_boundary});
             }
         }
-        
-        // Remove all marked tasks (one pass)
+
+        for (auto& d : due) {
+            // An earlier callback this tick may have cancelled this task.
+            if (lua_scheduled_tasks.find(d.task_id) == lua_scheduled_tasks.end()) continue;
+            sol::protected_function_result result = d.callback();
+
+            if (!result.valid()) {
+                sol::error err = result;
+                report_error("Scheduled task error: " + std::string(err.what()));
+            }
+
+            bool should_cancel = false;
+
+            if (result.valid() && result.return_count() > 0) {
+                sol::object ret_val = result.get<sol::object>();
+                if (ret_val.is<bool>() && ret_val.as<bool>() == true) should_cancel = true;
+            }
+
+            auto it = lua_scheduled_tasks.find(d.task_id);   // re-find AFTER the callback (may have rehashed)
+            if (it == lua_scheduled_tasks.end()) continue;   // callback cancelled itself
+            ScheduledTask& task = it->second;
+
+            if (d.at_timeout_boundary || should_cancel) {
+                lua_scheduled_tasks.erase(it);
+            } else if (task.repeating) {
+                if (task.use_frames) task.execute_frame = g_mission_frame + task.frame_interval;
+                else task.execute_time = g_mission_time + task.interval;
+            } else {
+                lua_scheduled_tasks.erase(it);
+            }
+        }
+
         for (int task_id : tasks_to_remove) {
             lua_scheduled_tasks.erase(task_id);
         }
@@ -1946,108 +1944,6 @@ namespace LuaFunctions {
             return sol::nil;
         }
     }
-
-    // Terrain matrix getter
-    static sol::object get_terrain_matrix() {
-        try {
-            LuaStackGuard guard(*g_lua_state);
-            
-            // Ensure terrain matrix is initialized for current world
-            initialize_terrain_matrix();
-
-            if (g_terrain_matrix.empty()) {
-                return sol::nil;
-            }
-            
-            sol::table matrix = g_lua_state->create_table();
-
-            for (size_t y = 0; y < g_terrain_matrix.size(); y++) {
-                sol::table row = g_lua_state->create_table();
-
-                for (size_t x = 0; x < g_terrain_matrix[y].size(); x++) {
-                    row[x + 1] = g_terrain_matrix[y][x];
-                }
-
-                matrix[y + 1] = row;
-            }
-            
-            return sol::make_object(*g_lua_state, matrix);
-        } catch (const std::exception& e) {
-            report_error("Failed to get terrain matrix: " + std::string(e.what()));
-            return sol::nil;
-        }
-    }
-
-    // Get terrain height at grid coordinates
-    static sol::object get_terrain_height_at(int grid_x, int grid_y) {
-        try {
-            LuaStackGuard guard(*g_lua_state);
-            
-            // Ensure terrain matrix is initialized for current world
-            initialize_terrain_matrix();
-
-            // Convert from 1-based Lua indexing to 0-based C++ indexing
-            int x = grid_x - 1;
-            int y = grid_y - 1;
-            
-            if (g_terrain_matrix.empty() || x < 0 || y < 0 || 
-                y >= static_cast<int>(g_terrain_matrix.size()) || 
-                x >= static_cast<int>(g_terrain_matrix[y].size())) {
-                return sol::nil;
-            }
-            
-            return sol::make_object(*g_lua_state, g_terrain_matrix[y][x]);
-        } catch (const std::exception& e) {
-            report_error("Failed to get terrain height: " + std::string(e.what()));
-            return sol::nil;
-        }
-    }
-
-    // Get interpolated terrain height at world position
-    static float get_terrain_height_at_pos(float world_x, float world_y) {
-        try {
-            // Returns float, doesn't need stack guard
-            // Ensure terrain matrix is initialized for current world
-            initialize_terrain_matrix();
-            
-            if (g_terrain_matrix.empty() || g_terrain_grid_width <= 0) {
-                return 0.0f;
-            }
-            
-            // Calculate grid coordinates
-            float fx = world_x / g_terrain_grid_width;
-            float fy = world_y / g_terrain_grid_width;
-            
-            // Get integer grid coordinates
-            int x0 = static_cast<int>(std::floor(fx));
-            int y0 = static_cast<int>(std::floor(fy));
-            int x1 = x0 + 1;
-            int y1 = y0 + 1;
-            
-            // Clamp to grid bounds
-            int max_idx = static_cast<int>(g_terrain_matrix.size()) - 1;
-            x0 = std::max(0, std::min(x0, max_idx));
-            y0 = std::max(0, std::min(y0, max_idx));
-            x1 = std::max(0, std::min(x1, max_idx));
-            y1 = std::max(0, std::min(y1, max_idx));
-            
-            // Get heights at corners
-            float h00 = g_terrain_matrix[y0][x0];
-            float h10 = g_terrain_matrix[y0][x1];
-            float h01 = g_terrain_matrix[y1][x0];
-            float h11 = g_terrain_matrix[y1][x1];
-            
-            // Bilinear interpolation
-            float fx_frac = fx - std::floor(fx);
-            float fy_frac = fy - std::floor(fy);
-            float h0 = h00 * (1 - fx_frac) + h10 * fx_frac;
-            float h1 = h01 * (1 - fx_frac) + h11 * fx_frac;
-            return h0 * (1 - fy_frac) + h1 * fy_frac;
-        } catch (const std::exception& e) {
-            report_error("Failed to get terrain height at position: " + std::string(e.what()));
-            return 0.0f;
-        }
-    }
 }
 
 static void initialize_lua_state() {
@@ -2242,9 +2138,6 @@ static void initialize_lua_state() {
         temporal_table["interval"] = LuaFunctions::interval;
         temporal_table["cancel"] = LuaFunctions::cancel_task;
         network_table["emitVariable"] = LuaFunctions::emit_variable;
-        terrain_table["getTerrainMatrix"] = LuaFunctions::get_terrain_matrix;
-        terrain_table["getTerrainHeightAt"] = LuaFunctions::get_terrain_height_at;
-        terrain_table["getTerrainHeightAtPos"] = LuaFunctions::get_terrain_height_at_pos;
         util_table["profile"] = LuaFunctions::profile_code;
         util_table["execute"] = LuaFunctions::execute_lua;
         util_table["generateRandomString"] = LuaFunctions::generate_random_string;

@@ -6,7 +6,7 @@ if _input then {
 		
 		if _stop then {
 			if (isNull (objectParent player)) then {
-				player switchMove [""];
+				[player, ["MOVE_SWITCH_GLOBAL", [""], false], false, false] call KH_fnc_setAnimation;
 			};
 		};
 	};
@@ -17,7 +17,7 @@ else {
 		
 		if _stop then {
 			if (isNull (objectParent player)) then {
-				player switchMove [""];
+				[player, ["MOVE_SWITCH_GLOBAL", [""], false], false, false] call KH_fnc_setAnimation;
 			};
 		};
 	};

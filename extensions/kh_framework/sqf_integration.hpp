@@ -129,7 +129,6 @@ static registered_sqf_function _sqf_ts_clear_voice_effects;
 static registered_sqf_function _sqf_ts_is_initialized;
 static registered_sqf_function _sqf_ts_is_plugin_active;
 static registered_sqf_function _sqf_ts_is_connected;
-static registered_sqf_function _sqf_ts_is_transmitting;
 static registered_sqf_function _sqf_ts_is_plugin_installed;
 
 static game_value execute_lua_sqf(game_value_parameter args, game_value_parameter code_or_function) {    
@@ -616,7 +615,8 @@ static game_value flush_khdata_sqf() {
 static game_value delete_khdata_file_sqf(game_value_parameter filename) {
     try {
         std::string file_str = static_cast<std::string>(filename);
-        
+        std::transform(file_str.begin(), file_str.end(), file_str.begin(), ::tolower);
+
         if (KHDataManager::instance().delete_file(file_str)) {
             return game_value();
         } else {
@@ -2905,6 +2905,7 @@ static game_value network_message_send_sqf(game_value_parameter left_arg, game_v
         std::string jip_key = "";
         std::string dependency_net_id = "";
         bool dependency_is_group = false;
+        bool unit_required = false;
 
         if (arr.size() > 2) {
             game_value jip_arg = arr[2];
@@ -2914,27 +2915,19 @@ static game_value network_message_send_sqf(game_value_parameter left_arg, game_v
             } else if (jip_arg.type_enum() == game_data_type::BOOL && static_cast<bool>(jip_arg)) {
                 jip_key = UIDGenerator::generate();
             } else if (jip_arg.type_enum() == game_data_type::ARRAY) {
-                // Array format: [dependency, jip_key (optional)]
                 // dependency can be object or group - will be stored as netId
                 auto& jip_arr = jip_arg.to_array();
-                
+
                 if (!jip_arr.empty()) {
+                    // [0] dependency (object or group; null/other = no dependency gating)
                     game_value dependency = jip_arr[0];
-                    
+
                     if (dependency.type_enum() == game_data_type::OBJECT) {
                         object dep_obj = static_cast<object>(dependency);
 
                         if (!sqf::is_null(dep_obj)) {
                             dependency_net_id = static_cast<std::string>(sqf::net_id(dep_obj));
                             dependency_is_group = false;
-                            
-                            // Get jip_key from second element or generate
-                            if (jip_arr.size() > 1 && jip_arr[1].type_enum() == game_data_type::STRING) {
-                                std::string key_str = static_cast<std::string>(jip_arr[1]);
-                                jip_key = key_str.empty() ? UIDGenerator::generate() : key_str;
-                            } else {
-                                jip_key = UIDGenerator::generate();
-                            }
                         }
                     } else if (dependency.type_enum() == game_data_type::GROUP) {
                         group dep_grp = static_cast<group>(dependency);
@@ -2942,15 +2935,20 @@ static game_value network_message_send_sqf(game_value_parameter left_arg, game_v
                         if (!sqf::is_null(dep_grp)) {
                             dependency_net_id = static_cast<std::string>(sqf::net_id(dep_grp));
                             dependency_is_group = true;
-                            
-                            // Get jip_key from second element or generate
-                            if (jip_arr.size() > 1 && jip_arr[1].type_enum() == game_data_type::STRING) {
-                                std::string key_str = static_cast<std::string>(jip_arr[1]);
-                                jip_key = key_str.empty() ? UIDGenerator::generate() : key_str;
-                            } else {
-                                jip_key = UIDGenerator::generate();
-                            }
                         }
+                    }
+
+                    // unitRequired
+                    if (jip_arr.size() > 1 && jip_arr[1].type_enum() == game_data_type::BOOL) {
+                        unit_required = static_cast<bool>(jip_arr[1]);
+                    }
+
+                    // jip_key
+                    if (jip_arr.size() > 2 && jip_arr[2].type_enum() == game_data_type::STRING) {
+                        std::string key_str = static_cast<std::string>(jip_arr[2]);
+                        jip_key = key_str.empty() ? UIDGenerator::generate() : key_str;
+                    } else {
+                        jip_key = UIDGenerator::generate();
                     }
                 }
             }
@@ -2965,9 +2963,11 @@ static game_value network_message_send_sqf(game_value_parameter left_arg, game_v
 
         NetworkTargetType target_type;
         game_value target_data;
+        bool target_is_code = (!target.is_nil() && target.type_enum() == game_data_type::CODE);
 
-        if (!jip_key.empty()) {
-            NetworkFramework::instance().store_jip_message(jip_key, event_name, message, static_cast<int>(sqf::client_owner()), dependency_net_id, dependency_is_group);
+        // below stores the conditional wrapper instead (no plain-then-replace).
+        if (!jip_key.empty() && !target_is_code) {
+            NetworkFramework::instance().store_jip_message(jip_key, event_name, message, static_cast<int>(sqf::client_owner()), dependency_net_id, dependency_is_group, unit_required);
         }
 
         if (target.is_nil()) {
@@ -3069,13 +3069,6 @@ static game_value network_message_send_sqf(game_value_parameter left_arg, game_v
                     cond_payload
                 );
                 
-                // Override JIP storage for CODE - must store the conditional wrapper
-                // so JIP clients also evaluate the condition
-                if (!jip_key.empty()) {
-                    NetworkFramework::instance().remove_jip_message(jip_key);  // Remove the one stored earlier
-                    NetworkFramework::instance().store_jip_message(jip_key, NET_INTERNAL_CONDITIONAL_EVENT, cond_payload, static_cast<int>(sqf::client_owner()), dependency_net_id, dependency_is_group);
-                }
-                
                 return (!jip_key.empty()) ? game_value(jip_key) : game_value(success);
             }
                     
@@ -3150,7 +3143,7 @@ static game_value network_remove_jip_sqf(game_value_parameter jip_key_value) {
             return game_value(false);
         }
         
-        NetworkFramework::instance().remove_jip_message(jip_key);
+        NetworkFramework::instance().request_remove_jip(jip_key);
         return game_value(true);
     } catch (const std::exception& e) {
         report_error("KH Network: Error in networkMessageRemoveJip - " + std::string(e.what()));
@@ -3159,51 +3152,62 @@ static game_value network_remove_jip_sqf(game_value_parameter jip_key_value) {
 }
 
 static game_value network_message_receive_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
+    auto fail = []() {
+        auto_array<game_value> e;
+        e.push_back(game_value(-1.0f));
+        e.push_back(game_value(-1.0f));
+        return game_value(std::move(e));
+    };
+
     try {
         std::string event_name = static_cast<std::string>(left_arg);
         std::transform(event_name.begin(), event_name.end(), event_name.begin(), ::tolower);
-        
+
         if (event_name.empty()) {
             report_error("KH Network: Event name cannot be empty");
-            return game_value(-1.0f);
+            return fail();
         }
-        
+
         game_value handler_args;
         code handler_function;
-        
+
         if (right_arg.type_enum() == game_data_type::ARRAY) {
             auto& arr = right_arg.to_array();
 
             if (arr.size() < 2) {
                 report_error("KH Network: networkMessageReceive requires [arguments, function] or just function");
-                return game_value(-1.0f);
+                return fail();
             }
 
             handler_args = arr[0];
-            
+
             if (arr[1].type_enum() == game_data_type::CODE) {
                 handler_function = static_cast<code>(arr[1]);
             } else {
                 report_error("KH Network: Handler must be code");
-                return game_value(-1.0f);
+                return fail();
             }
         } else {
             handler_function = static_cast<code>(right_arg);
         }
-        
+
         // Ensure network is initialized
         if (!NetworkFramework::instance().is_initialized()) {
             if (!NetworkFramework::instance().initialize()) {
                 report_error("KH Network: Failed to initialize network framework");
-                return game_value(-1.0f);
+                return fail();
             }
         }
-        
+
         int handler_id = NetworkFramework::instance().add_message_handler(event_name, handler_function, handler_args);
-        return game_value(static_cast<float>(handler_id));
+
+        auto_array<game_value> result;
+        result.push_back(game_value(static_cast<float>(handler_id)));
+        result.push_back(game_value(static_cast<float>(sqf::client_owner())));
+        return game_value(std::move(result));
     } catch (const std::exception& e) {
         report_error("KH Network: Error in networkMessageReceive - " + std::string(e.what()));
-        return game_value(-1.0f);
+        return fail();
     }
 }
 
@@ -3211,24 +3215,34 @@ static game_value network_is_initialized_sqf() {
     return game_value(NetworkFramework::instance().is_initialized());
 }
 
-static game_value network_remove_handler_sqf(game_value_parameter handler_id_value) {
+static game_value network_remove_handler_sqf(game_value_parameter handler_value) {
     try {
-        int handler_id = static_cast<int>(static_cast<float>(handler_id_value));
-        
+        int handler_id = -1;
+        int owner_id = -1;
+
+        if (handler_value.type_enum() == game_data_type::ARRAY) {
+            auto& a = handler_value.to_array();
+
+            if (a.size() < 2) {
+                report_error("KH Network: networkRemoveHandler requires [handlerId, owner]");
+                return game_value(false);
+            }
+
+            handler_id = static_cast<int>(static_cast<float>(a[0]));
+            owner_id = static_cast<int>(static_cast<float>(a[1]));
+        } else {
+            // Back-compat: a bare handler id targets a handler owned by this machine.
+            handler_id = static_cast<int>(static_cast<float>(handler_value));
+            owner_id = static_cast<int>(sqf::client_owner());
+        }
+
         if (handler_id < 0) {
             report_error("KH Network: Invalid handler ID");
             return game_value(false);
         }
-        
-        bool success = NetworkFramework::instance().remove_message_handler(handler_id);
-        
-        if (success) {
-            sqf::diag_log("KH Network: Handler " + std::to_string(handler_id) + " removed");
-        } else {
-            sqf::diag_log("KH Network: Handler " + std::to_string(handler_id) + " not found");
-        }
-        
-        return game_value(success);
+
+        NetworkFramework::instance().request_remove_handler(handler_id, owner_id);
+        return game_value(true);
     } catch (const std::exception& e) {
         report_error("KH Network: Error in networkRemoveHandler - " + std::string(e.what()));
         return game_value(false);
@@ -3290,7 +3304,8 @@ static game_value kh_set_variable_impl(game_value_parameter left_arg, game_value
         std::string jip_key = "";
         std::string dependency_net_id = "";
         bool dependency_is_group = false;
-        
+        bool unit_required = false;
+
         if (arr.size() > 3) {
             game_value jip_arg = arr[3];
             
@@ -3300,23 +3315,16 @@ static game_value kh_set_variable_impl(game_value_parameter left_arg, game_value
                 jip_key = UIDGenerator::generate();
             } else if (jip_arg.type_enum() == game_data_type::ARRAY) {
                 auto& jip_arr = jip_arg.to_array();
-                
+
                 if (!jip_arr.empty()) {
                     game_value dependency = jip_arr[0];
-                    
+
                     if (dependency.type_enum() == game_data_type::OBJECT) {
                         object dep_obj = static_cast<object>(dependency);
 
                         if (!sqf::is_null(dep_obj)) {
                             dependency_net_id = static_cast<std::string>(sqf::net_id(dep_obj));
                             dependency_is_group = false;
-                            
-                            if (jip_arr.size() > 1 && jip_arr[1].type_enum() == game_data_type::STRING) {
-                                std::string key_str = static_cast<std::string>(jip_arr[1]);
-                                jip_key = key_str.empty() ? UIDGenerator::generate() : key_str;
-                            } else {
-                                jip_key = UIDGenerator::generate();
-                            }
                         }
                     } else if (dependency.type_enum() == game_data_type::GROUP) {
                         group dep_grp = static_cast<group>(dependency);
@@ -3324,14 +3332,20 @@ static game_value kh_set_variable_impl(game_value_parameter left_arg, game_value
                         if (!sqf::is_null(dep_grp)) {
                             dependency_net_id = static_cast<std::string>(sqf::net_id(dep_grp));
                             dependency_is_group = true;
-                            
-                            if (jip_arr.size() > 1 && jip_arr[1].type_enum() == game_data_type::STRING) {
-                                std::string key_str = static_cast<std::string>(jip_arr[1]);
-                                jip_key = key_str.empty() ? UIDGenerator::generate() : key_str;
-                            } else {
-                                jip_key = UIDGenerator::generate();
-                            }
                         }
+                    }
+
+                    // unitRequired
+                    if (jip_arr.size() > 1 && jip_arr[1].type_enum() == game_data_type::BOOL) {
+                        unit_required = static_cast<bool>(jip_arr[1]);
+                    }
+
+                    // jip_key
+                    if (jip_arr.size() > 2 && jip_arr[2].type_enum() == game_data_type::STRING) {
+                        std::string key_str = static_cast<std::string>(jip_arr[2]);
+                        jip_key = key_str.empty() ? UIDGenerator::generate() : key_str;
+                    } else {
+                        jip_key = UIDGenerator::generate();
                     }
                 }
             }
@@ -3343,15 +3357,19 @@ static game_value kh_set_variable_impl(game_value_parameter left_arg, game_value
         message_data.push_back(game_value(var_name));
         message_data.push_back(value);
         game_value message(std::move(message_data));
+        bool target_is_code = (!target.is_nil() && target.type_enum() == game_data_type::CODE);
 
-        if (!jip_key.empty()) {
+        // Store the JIP message now, unless the target is CODE — the CODE branch
+        // below stores the conditional wrapper instead (no plain-then-replace).
+        if (!jip_key.empty() && !target_is_code) {
             NetworkFramework::instance().store_jip_message(
                 jip_key, 
                 NET_INTERNAL_SET_VARIABLE_EVENT, 
                 message, 
                 static_cast<int>(sqf::client_owner()),
                 dependency_net_id,
-                dependency_is_group
+                dependency_is_group,
+                unit_required
             );
         }
 
@@ -3449,19 +3467,6 @@ static game_value kh_set_variable_impl(game_value_parameter left_arg, game_value
                     NET_INTERNAL_CONDITIONAL_EVENT,
                     cond_payload
                 );
-                
-                if (!jip_key.empty()) {
-                    NetworkFramework::instance().remove_jip_message(jip_key);
-
-                    NetworkFramework::instance().store_jip_message(
-                        jip_key, 
-                        NET_INTERNAL_CONDITIONAL_EVENT, 
-                        cond_payload, 
-                        static_cast<int>(sqf::client_owner()),
-                        dependency_net_id,
-                        dependency_is_group
-                    );
-                }
                 
                 return (!jip_key.empty()) ? game_value(jip_key) : game_value(success);
             }
@@ -3603,15 +3608,6 @@ static game_value ts_is_connected_sqf() {
         return game_value(TeamspeakFramework::instance().is_connected());
     } catch (const std::exception& e) {
         report_error("KH - TeamSpeak: Error in tsIsConnected - " + std::string(e.what()));
-        return game_value(false);
-    }
-}
-
-static game_value ts_is_transmitting_sqf() {
-    try {
-        return game_value(TeamspeakFramework::instance().is_transmitting());
-    } catch (const std::exception& e) {
-        report_error("KH - TeamSpeak: Error in tsIsTransmitting - " + std::string(e.what()));
         return game_value(false);
     }
 }
@@ -4562,7 +4558,7 @@ static void initialize_sqf_integration() {
         "khNetworkMessageReceive",
         "Register a handler for network messages",
         userFunctionWrapper<network_message_receive_sqf>,
-        game_data_type::SCALAR,
+        game_data_type::ARRAY,
         game_data_type::STRING,
         game_data_type::ARRAY
     );
@@ -4571,7 +4567,7 @@ static void initialize_sqf_integration() {
         "khNetworkMessageReceive",
         "Register a handler for network messages",
         userFunctionWrapper<network_message_receive_sqf>,
-        game_data_type::SCALAR,
+        game_data_type::ARRAY,
         game_data_type::STRING,
         game_data_type::CODE
     );
@@ -4705,13 +4701,6 @@ static void initialize_sqf_integration() {
         "tsIsConnected",
         "Check if connected to a TeamSpeak server",
         userFunctionWrapper<ts_is_connected_sqf>,
-        game_data_type::BOOL
-    );
-    
-    _sqf_ts_is_transmitting = intercept::client::host::register_sqf_command(
-        "tsIsTransmitting",
-        "Check if currently transmitting voice",
-        userFunctionWrapper<ts_is_transmitting_sqf>,
         game_data_type::BOOL
     );
     

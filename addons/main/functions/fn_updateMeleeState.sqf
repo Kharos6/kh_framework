@@ -7,150 +7,9 @@ if (
     ((lifeState _unit) isEqualTo "INCAPACITATED") || 
     ((lifeState _unit) isEqualTo "UNCONSCIOUS")
 ) exitWith {
-    _unit setVariable ["KH_var_enteringMelee", false];
     _unit setVariable ["KH_var_inMeleeState", false];
     _unit setVariable ["KH_var_meleeMode", "", true];
     false;
-};
-
-private _currentSelectedWeapon = currentWeapon _unit;
-
-if (_currentSelectedWeapon isNotEqualTo "") then {
-    private _currentWeaponSlot = [_unit] call KH_fnc_getCurrentWeaponSlot;
-    private _surrogate = getText (configFile >> "CfgWeapons" >> _currentSelectedWeapon >> "kh_meleeSurrogate");
-    private _currentSurrogateSlot = "";
-    
-    private _currentWeapon = if (_surrogate isNotEqualTo _currentWeaponSlot) then {
-        _currentSurrogateSlot = _surrogate;
-        
-        switch _surrogate do {
-            case "PRIMARY": {
-                primaryWeapon _unit;
-            };
-
-            case "SECONDARY": {
-                handgunWeapon _unit;
-            };
-
-            case "TERTIARY": {
-                secondaryWeapon _unit;
-            };
-
-            default {
-                _currentSelectedWeapon;
-            };
-        };
-    }
-    else {
-        _currentSelectedWeapon;  
-    };
-
-    private _meleeAttachments = switch _currentSurrogateSlot do {
-        case "PRIMARY": {
-            primaryWeaponItems _unit;
-        };
-
-        case "SECONDARY": {
-            handgunItems _unit;
-        };
-
-        case "TERTIARY": {
-            secondaryWeaponItems _unit;
-        };
-
-        default {
-            [];  
-        };
-    };
-
-    private _weaponConfig = if ((_meleeAttachments select {_x isNotEqualTo "";}) isEqualTo []) then {
-        configFile >> "CfgWeapons" >> _currentWeapon;
-    }
-    else {
-        private _finalConfig = configNull;
-        
-        {
-            private _currentConfig = configFile >> "CfgWeapons" >> _x;
-
-            if (((getText (_currentConfig >> "kh_meleeType")) isNotEqualTo "") && (((getArray (_currentConfig >> "kh_meleeModes")) isNotEqualTo []) || ((getArray (_currentConfig >> "kh_meleeModesGestures")) isNotEqualTo []))) then {
-                _finalConfig = _currentConfig;
-                break;
-            };
-        } forEach _meleeAttachments;
-
-        if (isNull _finalConfig) then {
-            configFile >> "CfgWeapons" >> _currentWeapon;
-        }
-        else {
-            _finalConfig;
-        };
-    };
-
-    if ((_unit getVariable ["KH_var_meleeType", ""]) isNotEqualTo (getText (_weaponConfig >> "kh_meleeType"))) then {
-        _unit setVariable ["KH_var_meleeType", getText (_weaponConfig >> "kh_meleeType"), true];
-    };
-
-    if ((_unit getVariable ["KH_var_currentMeleeWeapon", ""]) isEqualTo _currentSelectedWeapon) exitWith {};
-    _unit setVariable ["KH_var_currentMeleeWeapon", _currentSelectedWeapon];
-    private _meleeState = (getNumber (configFile >> "CfgWeapons" >> _currentSelectedWeapon >> "kh_meleeWeapon")) isEqualTo 1;
-    _unit setVariable ["KH_var_meleeWeaponConfig", _weaponConfig];
-    _unit setVariable ["KH_var_meleeMode", (getArray (_weaponConfig >> "kh_meleeModes")) param [0, ""], true];
-    _unit setVariable ["KH_var_inMeleeState", _meleeState];
-
-    if ((getText (_weaponConfig >> "kh_meleeActions")) isNotEqualTo "") then {
-        _unit setVariable ["KH_var_enteringMelee", true];
-        _unit setVariable ["KH_var_meleeWeaponSlot", _currentWeaponSlot];
-        _unit action ["SwitchWeapon", _unit, _unit, 299];
-    }
-    else {
-        if (((_unit getVariable ["KH_var_meleeWeaponSlot", ""]) isEqualTo _currentWeaponSlot) && !_meleeState) then {
-            [
-                _unit, 
-                [
-                    "ACTION_SWITCH", 
-                    switch _currentWeaponSlot do {
-                        case "PRIMARY": {
-                            "PrimaryWeapon";
-                        };
-
-                        case "SECONDARY": {
-                            "handgunOn";
-                        };
-
-                        case "TERTIARY": {
-                            "SecondaryWeapon";
-                        };
-
-                        default {
-                            "Civil";  
-                        };
-                    }, 
-                    true
-                ],
-                false,
-                false
-            ] call KH_fnc_setAnimation;
-
-            _unit setVariable ["KH_var_meleeWeaponSlot", ""];
-        };
-    };
-}
-else {
-    if (_unit getVariable ["KH_var_enteringMelee", false]) then {
-        [
-            _unit, 
-            [
-                [0, "ACTION_SWITCH", [getText ((_unit getVariable ["KH_var_meleeWeaponConfig", configNull]) >> "kh_meleeActions"), "Transition"] joinString "", true], 
-                [0, "ACTION_PLAY", getText ((_unit getVariable ["KH_var_meleeWeaponConfig", configNull]) >> "kh_meleeActions"), true]
-            ], 
-            false,
-            false
-        ] call KH_fnc_setAnimation;
-
-        _unit setVariable ["KH_var_enteringMelee", false];
-    };
-
-    _unit setVariable ["KH_var_currentMeleeWeapon", ""];
 };
 
 if ((isSwitchingWeapon _unit) || !(isTouchingGround _unit) || (((_unit weaponState (currentWeapon _unit)) select 6) > 0)) exitWith {
@@ -181,9 +40,8 @@ if (_action isNotEqualTo "") then {
                         [
                             _unit, 
                             [
-                                [0, "ACTION_PLAY_NOW", "KH_GestureNone", true],
-                                [0, "ACTION_PLAY_NOW", _mode, true], 
-                                [0, "ACTION_PLAY", "KH_MeleeStop", true]
+                                ["ACTION_PLAY_NOW", "KH_GestureNone", true],
+                                ["ACTION_PLAY_NOW", _mode, true]
                             ], 
                             false,
                             false
@@ -229,9 +87,8 @@ if (_action isNotEqualTo "") then {
                         [
                             _unit, 
                             [
-                                [0, "ACTION_PLAY_NOW", "KH_GestureNone", true],
-                                [0, "ACTION_PLAY_NOW", _mode, true], 
-                                [0, "ACTION_PLAY", "KH_MeleeStop", true]
+                                ["ACTION_PLAY_NOW", "KH_GestureNone", true],
+                                ["ACTION_PLAY_NOW", _mode, true]
                             ], 
                             false,
                             false
@@ -252,9 +109,8 @@ if (_action isNotEqualTo "") then {
                             [
                                 _unit, 
                                 [
-                                    [0, "ACTION_PLAY_NOW", "KH_GestureNone", true],
-                                    [0, "ACTION_PLAY_NOW", _mode, true], 
-                                    [0, "ACTION_PLAY", "KH_MeleeStop", true]
+                                    ["ACTION_PLAY_NOW", "KH_GestureNone", true],
+                                    ["ACTION_PLAY_NOW", _mode, true]
                                 ], 
                                 false,
                                 false
@@ -269,9 +125,8 @@ if (_action isNotEqualTo "") then {
                                 [
                                     _unit, 
                                     [
-                                        [0, "ACTION_PLAY_NOW", "KH_GestureNone", true],
-                                        [0, "ACTION_PLAY_NOW", _mode, true], 
-                                        [0, "ACTION_PLAY", "KH_MeleeStop", true]
+                                        ["ACTION_PLAY_NOW", "KH_GestureNone", true],
+                                        ["ACTION_PLAY_NOW", _mode, true]
                                     ], 
                                     false,
                                     false
@@ -305,8 +160,8 @@ if (_action isNotEqualTo "") then {
                         [
                             _unit, 
                             [
-                                [0, "ACTION_PLAY_NOW", "KH_GestureNone", true],
-                                [0, "ACTION_PLAY_NOW", "KH_MeleeBlockIn", true]
+                                ["ACTION_PLAY_NOW", "KH_GestureNone", true],
+                                ["ACTION_PLAY_NOW", "KH_MeleeBlockIn", true]
                             ], 
                             false,
                             false
@@ -334,8 +189,8 @@ if (_action isNotEqualTo "") then {
                         [
                             _unit, 
                             [
-                                [0, "ACTION_PLAY_NOW", "KH_GestureNone", true],
-                                [0, "ACTION_PLAY_NOW", "KH_MeleeBlockIn", true]
+                                ["ACTION_PLAY_NOW", "KH_GestureNone", true],
+                                ["ACTION_PLAY_NOW", "KH_MeleeBlockIn", true]
                             ], 
                             false,
                             false
@@ -353,9 +208,8 @@ if (_action isNotEqualTo "") then {
                 [
                     _unit, 
                     [
-                        [0, "ACTION_PLAY_NOW", "KH_GestureNone", true],
-                        [0, "ACTION_PLAY_NOW", "KH_MeleeBlockOut", true], 
-                        [0, "ACTION_PLAY", "KH_MeleeStop", true]
+                        ["ACTION_PLAY_NOW", "KH_GestureNone", true],
+                        ["ACTION_PLAY_NOW", "KH_MeleeBlockOut", true]
                     ], 
                     false,
                     false
@@ -380,9 +234,9 @@ if (_action isNotEqualTo "") then {
                     [
                         _unit, 
                         [
-                            [0, "ACTION_PLAY_NOW", "KH_GestureNone", true],
-                            [0, "ACTION_PLAY_NOW", "KH_MeleeBlockSuccess", true], 
-                            [0, "ACTION_PLAY", "KH_MeleeBlockIn", true]
+                            ["ACTION_PLAY_NOW", "KH_GestureNone", true],
+                            ["ACTION_PLAY_NOW", "KH_MeleeBlockSuccess", true], 
+                            ["ACTION_PLAY", "KH_MeleeBlockIn", true]
                         ], 
                         false,
                         false
@@ -393,8 +247,8 @@ if (_action isNotEqualTo "") then {
                         [
                             _unit, 
                             [
-                                [0, "ACTION_PLAY_NOW", "KH_MeleeBlockSuccessGesture", true],
-                                [0, "ACTION_PLAY", "KH_MeleeBlockGesture", true]
+                                ["ACTION_PLAY_NOW", "KH_MeleeBlockSuccessGesture", true],
+                                ["ACTION_PLAY", "KH_MeleeBlockGesture", true]
                             ], 
                             false,
                             false
@@ -411,8 +265,8 @@ if (_action isNotEqualTo "") then {
                         [
                             _unit, 
                             [
-                                [0, "ACTION_PLAY_NOW", "KH_MeleeBlockSuccessGesture", true],
-                                [0, "ACTION_PLAY", "KH_MeleeBlockGesture", true]
+                                ["ACTION_PLAY_NOW", "KH_MeleeBlockSuccessGesture", true],
+                                ["ACTION_PLAY", "KH_MeleeBlockGesture", true]
                             ], 
                             false,
                             false
@@ -426,9 +280,9 @@ if (_action isNotEqualTo "") then {
                     [
                         _unit, 
                         [
-                            [0, "ACTION_PLAY_NOW", "KH_GestureNone", true],
-                            [0, "ACTION_PLAY_NOW", "KH_MeleeBlockSuccess", true], 
-                            [0, "ACTION_PLAY", "KH_MeleeBlockIn", true]
+                            ["ACTION_PLAY_NOW", "KH_GestureNone", true],
+                            ["ACTION_PLAY_NOW", "KH_MeleeBlockSuccess", true], 
+                            ["ACTION_PLAY", "KH_MeleeBlockIn", true]
                         ], 
                         false,
                         false
@@ -443,9 +297,8 @@ if (_action isNotEqualTo "") then {
             [
                 _unit, 
                 [
-                    [0, "ACTION_PLAY_NOW", "KH_GestureNone", true],
-                    [0, "ACTION_PLAY_NOW", "KH_MeleeBlockFailure", true], 
-                    [0, "ACTION_PLAY", "KH_MeleeStop", true]
+                    ["ACTION_PLAY_NOW", "KH_GestureNone", true],
+                    ["ACTION_PLAY_NOW", "KH_MeleeBlockFailure", true]
                 ], 
                 false,
                 false
@@ -464,9 +317,8 @@ if (_action isNotEqualTo "") then {
                         [
                             _unit, 
                             [
-                                [0, "ACTION_PLAY_NOW", "KH_GestureNone", true],
-                                [0, "ACTION_PLAY_NOW", "KH_MeleeParry", true], 
-                                [0, "ACTION_PLAY", "KH_MeleeStop", true]
+                                ["ACTION_PLAY_NOW", "KH_GestureNone", true],
+                                ["ACTION_PLAY_NOW", "KH_MeleeParry", true]
                             ], 
                             false,
                             false
@@ -494,9 +346,8 @@ if (_action isNotEqualTo "") then {
                         [
                             _unit, 
                             [
-                                [0, "ACTION_PLAY_NOW", "KH_GestureNone", true],
-                                [0, "ACTION_PLAY_NOW", "KH_MeleeParry", true], 
-                                [0, "ACTION_PLAY", "KH_MeleeStop", true]
+                                ["ACTION_PLAY_NOW", "KH_GestureNone", true],
+                                ["ACTION_PLAY_NOW", "KH_MeleeParry", true]
                             ], 
                             false,
                             false
@@ -513,9 +364,8 @@ if (_action isNotEqualTo "") then {
                 [
                     _unit, 
                     [
-                        [0, "ACTION_PLAY_NOW", "KH_GestureNone", true],
-                        [0, "ACTION_PLAY_NOW", "KH_MeleeKick", true], 
-                        [0, "ACTION_PLAY", "KH_MeleeStop", true]
+                        ["ACTION_PLAY_NOW", "KH_GestureNone", true],
+                        ["ACTION_PLAY_NOW", "KH_MeleeKick", true]
                     ], 
                     false,
                     false
@@ -533,9 +383,8 @@ if (_action isNotEqualTo "") then {
                 [
                     _unit, 
                     [
-                        [0, "ACTION_PLAY_NOW", "KH_GestureNone", true],
-                        [0, "ACTION_PLAY_NOW", "KH_MeleeTackle", true], 
-                        [0, "ACTION_PLAY", "KH_MeleeStop", true]
+                        ["ACTION_PLAY_NOW", "KH_GestureNone", true],
+                        ["ACTION_PLAY_NOW", "KH_MeleeTackle", true]
                     ], 
                     false,
                     false
@@ -554,9 +403,8 @@ if (_action isNotEqualTo "") then {
                     [
                         _unit, 
                         [
-                            [0, "ACTION_PLAY_NOW", "KH_GestureNone", true],
-                            [0, "ACTION_PLAY_NOW", "KH_MeleeDodge", true], 
-                            [0, "ACTION_PLAY", "KH_MeleeStop", true]
+                            ["ACTION_PLAY_NOW", "KH_GestureNone", true],
+                            ["ACTION_PLAY_NOW", "KH_MeleeDodge", true]
                         ], 
                         false,
                         false
@@ -566,9 +414,8 @@ if (_action isNotEqualTo "") then {
                     [
                         _unit, 
                         [
-                            [0, "ACTION_PLAY_NOW", "KH_GestureNone", true],
+                            ["ACTION_PLAY_NOW", "KH_GestureNone", true],
                             [
-                                0, 
                                 "ACTION_PLAY_NOW",
                                 switch _subaction do {
                                     case "FORWARD": {
@@ -608,8 +455,7 @@ if (_action isNotEqualTo "") then {
                                     };
                                 },
                                 true
-                            ],
-                            [0, "ACTION_PLAY", "KH_MeleeStop", true]
+                            ]
                         ], 
                         false,
                         false
@@ -627,9 +473,8 @@ if (_action isNotEqualTo "") then {
             [
                 _unit, 
                 [
-                    [0, "ACTION_PLAY_NOW", "KH_GestureNone", true],
-                    [0, "ACTION_PLAY_NOW", "KH_MeleeBlocked", true], 
-                    [0, "ACTION_PLAY", "KH_MeleeStop", true]
+                    ["ACTION_PLAY_NOW", "KH_GestureNone", true],
+                    ["ACTION_PLAY_NOW", "KH_MeleeBlocked", true]
                 ], 
                 false,
                 false
@@ -642,9 +487,8 @@ if (_action isNotEqualTo "") then {
             [
                 _unit, 
                 [
-                    [0, "ACTION_PLAY_NOW", "KH_GestureNone", true],
-                    [0, "ACTION_PLAY_NOW", "KH_MeleeParried", true], 
-                    [0, "ACTION_PLAY", "KH_MeleeStop", true]
+                    ["ACTION_PLAY_NOW", "KH_GestureNone", true],
+                    ["ACTION_PLAY_NOW", "KH_MeleeParried", true]
                 ], 
                 false,
                 false
@@ -687,8 +531,8 @@ if (_action isNotEqualTo "") then {
                     [
                         _unit, 
                         [
-                            [0, "ACTION_PLAY_NOW", "KH_GestureNone", true],
-                            [0, "ACTION_PLAY_NOW", "KH_MeleeBlocked", true]
+                            ["ACTION_PLAY_NOW", "KH_GestureNone", true],
+                            ["ACTION_PLAY_NOW", "KH_MeleeBlocked", true]
                         ], 
                         false,
                         false
@@ -702,8 +546,8 @@ if (_action isNotEqualTo "") then {
                         [
                             _unit, 
                             [
-                                [0, "ACTION_PLAY_NOW", "KH_GestureNone", true],
-                                [0, "ACTION_PLAY_NOW", "KH_StaggerLightBackward", true]
+                                ["ACTION_PLAY_NOW", "KH_GestureNone", true],
+                                ["ACTION_PLAY_NOW", "KH_StaggerLightBackward", true]
                             ], 
                             false,
                             false
@@ -718,8 +562,8 @@ if (_action isNotEqualTo "") then {
                         [
                             _unit, 
                             [
-                                [0, "ACTION_PLAY_NOW", "KH_GestureNone", true],
-                                [0, "ACTION_PLAY_NOW", "KH_StaggerHeavyBackward", true]
+                                ["ACTION_PLAY_NOW", "KH_GestureNone", true],
+                                ["ACTION_PLAY_NOW", "KH_StaggerHeavyBackward", true]
                             ], 
                             false,
                             false
@@ -786,9 +630,8 @@ if (_action isNotEqualTo "") then {
             [
                 _unit, 
                 [
-                    [0, "ACTION_PLAY_NOW", "KH_GestureNone", true],
+                    ["ACTION_PLAY_NOW", "KH_GestureNone", true],
                     [
-                        0, 
                         "ACTION_PLAY_NOW",
                         switch true do {
                             case ((_modifier < 22.5) || (_modifier > 337.5)): {
@@ -828,8 +671,7 @@ if (_action isNotEqualTo "") then {
                             };
                         },
                         true
-                    ], 
-                    [0, "ACTION_PLAY", "KH_MeleeStop", true]
+                    ]
                 ], 
                 false,
                 false
@@ -841,10 +683,7 @@ if (_action isNotEqualTo "") then {
 
             [
                 _unit, 
-                [
-                    [0, "ACTION_PLAY_NOW", "KH_GestureNone", true],
-                    [0, "ACTION_PLAY_NOW", "KH_MeleeStop", true]
-                ], 
+                ["ACTION_PLAY_NOW", "KH_GestureNone", true], 
                 false,
                 false
             ] call KH_fnc_setAnimation;

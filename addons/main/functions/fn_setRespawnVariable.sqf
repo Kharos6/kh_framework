@@ -16,7 +16,7 @@ if (isNil "_currentVariableHandler") then {
 
                     {
                         _unit setVariable [_x, _y select 0, _y select 1];
-                    } forEach (_unit getVariable "KH_var_respawnVariableHandler");
+                    } forEach (_unit getVariable ["KH_var_respawnVariableHandler", createHashMap]);
                 },
                 true,
                 "-1",

@@ -247,6 +247,25 @@ isNil {
 												};
 											};
 										};
+
+										[
+											[],
+											{
+												if !KH_var_playersLoaded then {
+													with uiNamespace do {
+														if (isNull KH_var_suspensionDisplay) then {
+															KH_var_suspensionDisplay = ["RscText", "PLAYERS LOADING...", [0, false, 0], [0, 0, 0, 1], [0, 0, 100, 100], false, [0, 0, 0]] call KH_fnc_draw2d;
+														};
+													};
+												}
+												else {
+													[_handlerId] call KH_fnc_removeHandler;
+												};
+											},
+											true,
+											0,
+											false
+										] call KH_fnc_execute;
 									},
 									KH_var_allPlayerMachines - [KH_var_adminMachine],
 									true,
@@ -302,15 +321,17 @@ isNil {
 						};
 
 						[
-							["Man"], 
-							[], 
+							["Man"],
+							[],
 							{
 								params ["_unit"];
-
+								
 								[
 									[_unit], 
 									{
 										params ["_unit"];
+										[_unit] call KH_fnc_updateSpecialWeaponState;
+										[_unit, ""] call KH_fnc_updateMeleeState;
 
 										[
 											[_unit, clientOwner],
@@ -327,18 +348,10 @@ isNil {
 									true,
 									["PERSISTENT", _unit, [], {}, ""]
 								] call KH_fnc_execute;
-							}, 
-							true
-						] call KH_fnc_entityInit;
-
-						[
-							["Man"],
-							[],
-							{
-								params ["_unit"];
+								
 								[[_unit, ""], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
-								if (_unit getVariable ["KH_var_meleeSetupComplete", false]) exitWith {};
-								_unit setVariable ["KH_var_meleeSetupComplete", true, true];
+								if (_unit getVariable ["KH_var_animationSetupComplete", false]) exitWith {};
+								_unit setVariable ["KH_var_animationSetupComplete", true, true];
 								
 								{
 									[
@@ -582,20 +595,34 @@ isNil {
 																	};
 
 																	if (_time >= _start) then {
-																		_point = if (_point isEqualType []) then {
-																			_unit modelToWorldVisualWorld (_point vectorAdd (getArray (_meleeTypeConfig >> _attack >> "rangeOffset")));
-																		}
+																		private _originLocal = if (_origin isEqualType []) then {
+																			_origin;
+																		} 
 																		else {
-																			_unit modelToWorldVisualWorld ((_unit selectionPosition _point) vectorAdd (getArray (_meleeTypeConfig >> _attack >> "rangeOffset")));
+																			_unit selectionPosition _origin;
 																		};
 
+																		_origin = if (_origin isEqualType []) then {
+																			_unit modelToWorldVisualWorld _origin;
+																		}
+																		else {
+																			_unit modelToWorldVisualWorld (_unit selectionPosition _origin);
+																		};
+
+																		private _pointLocal = if (_point isEqualType []) then {
+																			_point vectorAdd (getArray (_meleeTypeConfig >> _attack >> "rangeOffset"));
+																		} 
+																		else {
+																			(_unit selectionPosition _point) vectorAdd (getArray (_meleeTypeConfig >> _attack >> "rangeOffset"));
+																		};
+
+																		private _aimDirection = getAimDirectionAndUp [_unit, true];
+																		private _aimOffset = [_unit vectorModelToWorldVisual (_aimDirection select 0), _unit vectorModelToWorldVisual (_aimDirection select 1)];
+																		private _worldOrigin = _unit modelToWorldVisualWorld _originLocal;
+																		_point = [_worldOrigin, _worldOrigin vectorAdd (_pointLocal vectorDiff _originLocal), _aimOffset] call KH_fnc_rotateVector;
+
 																		private _lineIntersections = [
-																			if (_origin isEqualType []) then {
-																				_unit modelToWorldVisualWorld _origin;
-																			}
-																			else {
-																				_unit modelToWorldVisualWorld (_unit selectionPosition _origin);
-																			}, 
+																			_origin, 
 																			_point, 
 																			[_unit, "TERRAIN"] + (attachedObjects _unit),
 																			true, 
@@ -638,7 +665,7 @@ isNil {
 																		if (_hitRadius isNotEqualTo []) then {
 																			private _radiusIntersections = ([
 																				_point, 
-																				[vectorDir _unit, vectorUp _unit],
+																				_aimOffset,
 																				_hitRadius,
 																				"RECTANGLE",
 																				0.5,
@@ -1185,6 +1212,7 @@ isNil {
 										[], 
 										{
 											params ["_unit"];
+											[_unit] call KH_fnc_updateSpecialWeaponState;
 											[_unit, ""] call KH_fnc_updateMeleeState;
 										}
 									] call KH_fnc_addEventHandler;
@@ -1210,6 +1238,25 @@ isNil {
 					},
 					true,
 					{CBA_missionTime > 0;},
+					false
+				] call KH_fnc_execute;
+
+				[
+					[],
+					{
+						if (!KH_var_clientRegistered && !KH_var_missionInitialized) then {
+							with uiNamespace do {
+								if (isNull KH_var_loadingDisplay) then {
+									KH_var_loadingDisplay = ["RscText", "LOADING...", [0, false, 0], [0, 0, 0, 1], [0, 0, 100, 100], false, [0, 0, 0]] call KH_fnc_draw2d;
+								};
+							};
+						}
+						else {
+							[_handlerId] call KH_fnc_removeHandler;
+						};
+					},
+					true,
+					0,
 					false
 				] call KH_fnc_execute;
 
@@ -2068,7 +2115,6 @@ isNil {
 
 											if (_unit getVariable ["KH_var_usedWeaponSurrogate", false]) then {
 												_unit setVariable ["KH_var_usedWeaponSurrogate", false];
-												_unit action ["SwitchWeapon", _unit, _unit, 299];
 											};
 										};
 									};
@@ -2141,15 +2187,20 @@ isNil {
 								};
 							}
 							else {
-								private _meleeWeapon = if ((getText (configFile >> "CfgWeapons" >> _primaryWeapon >> "kh_meleeActions")) isNotEqualTo "") then {
+								private _meleeWeaponName = "";
+
+								private _meleeWeapon = if (((getText (configFile >> "CfgWeapons" >> _primaryWeapon >> "kh_specialActions")) isNotEqualTo "") && ((getNumber (configFile >> "CfgWeapons" >> _primaryWeapon >> "kh_meleeWeapon")) isNotEqualTo 0)) then {
+									_meleeWeaponName = _primaryWeapon;
 									((_unit weaponsInfo [_primaryWeapon, false]) param [0, []]) param [0, -1];
 								}
 								else {
-									if ((getText (configFile >> "CfgWeapons" >> _handgunWeapon >> "kh_meleeActions")) isNotEqualTo "") then {
+									if (((getText (configFile >> "CfgWeapons" >> _handgunWeapon >> "kh_specialActions")) isNotEqualTo "") && ((getNumber (configFile >> "CfgWeapons" >> _handgunWeapon >> "kh_meleeWeapon")) isNotEqualTo 0)) then {
+										_meleeWeaponName = _handgunWeapon;
 										((_unit weaponsInfo [_handgunWeapon, false]) param [0, []]) param [0, -1];
 									}
 									else {
-										if ((getText (configFile >> "CfgWeapons" >> _secondaryWeapon >> "kh_meleeActions")) isNotEqualTo "") then {
+										if (((getText (configFile >> "CfgWeapons" >> _secondaryWeapon >> "kh_specialActions")) isNotEqualTo "") && ((getNumber (configFile >> "CfgWeapons" >> _secondaryWeapon >> "kh_meleeWeapon")) isNotEqualTo 0)) then {
+											_meleeWeaponName = _secondaryWeapon;
 											((_unit weaponsInfo [_secondaryWeapon, false]) param [0, []]) param [0, -1];
 										}
 										else {
@@ -2225,11 +2276,13 @@ isNil {
 											_unit setSpeedMode "FULL";
 
 											if !_weaponSurrogate then {
+												_unit selectWeapon _meleeWeaponName;
 												_unit action ["SwitchWeapon", _unit, _unit, _meleeWeapon];
 											};
 										}
 										else {
 											if (!_weaponSurrogate && ((getNumber (configFile >> (getText ((configOf _unit) >> "moves")) >> "states" >> (animationState _unit) >> "kh_melee")) isNotEqualTo 1)) then {
+												_unit selectWeapon _meleeWeaponName;
 												_unit action ["SwitchWeapon", _unit, _unit, _meleeWeapon];
 											};	
 										};
@@ -2331,7 +2384,6 @@ isNil {
 
 											if (_unit getVariable ["KH_var_usedWeaponSurrogate", false]) then {
 												_unit setVariable ["KH_var_usedWeaponSurrogate", false];
-												_unit action ["SwitchWeapon", _unit, _unit, 299];
 											};
 										};
 									};
@@ -2429,7 +2481,6 @@ isNil {
 
 												if (_unit getVariable ["KH_var_usedWeaponSurrogate", false]) then {
 													_unit setVariable ["KH_var_usedWeaponSurrogate", false];
-													_unit action ["SwitchWeapon", _unit, _unit, 299];
 												};
 											};
 										};

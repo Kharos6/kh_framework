@@ -24,8 +24,6 @@ struct TSVoiceEffectConfig {
 struct TSPluginStatus {
     uint32_t version;                    // Protocol version
     uint8_t plugin_active;               // Plugin is loaded and ready
-    uint8_t capturing;                   // Currently capturing voice
-    uint8_t transmitting;                // Currently transmitting
     uint8_t connected;                   // Connected to a server
     uint32_t sample_rate;                // Current sample rate
     uint32_t last_heartbeat;             // Tick count for liveness check
@@ -386,22 +384,23 @@ public:
         if (is_initialized_flag.load(std::memory_order_acquire)) {
             return true;
         }
-        
-        std::lock_guard<std::mutex> lock(ipc_mutex);
-        
-        if (is_initialized_flag.load(std::memory_order_acquire)) {
-            return true;
+
+        {
+            std::lock_guard<std::mutex> lock(ipc_mutex);
+
+            if (is_initialized_flag.load(std::memory_order_acquire)) {
+                return true;
+            }
+
+            if (!create_shared_memory()) {
+                return false;
+            }
+
+            heartbeat_running.store(true, std::memory_order_release);
+            heartbeat_thread = std::thread(&TeamspeakFramework::heartbeat_loop, this);
+            is_initialized_flag.store(true, std::memory_order_release);
         }
 
-        if (!create_shared_memory()) {
-            cleanup();
-            return false;
-        }
-        
-        // Start heartbeat monitoring thread
-        heartbeat_running.store(true, std::memory_order_release);
-        heartbeat_thread = std::thread(&TeamspeakFramework::heartbeat_loop, this);
-        is_initialized_flag.store(true, std::memory_order_release);
         reapply_stored_effects();
         return true;
     }
@@ -497,31 +496,6 @@ public:
         bool connected = active && (plugin_status->connected != 0);
         ReleaseMutex(mutex_handle);
         return connected;
-    }
-    
-    bool is_transmitting() const {
-        if (!is_initialized_flag.load(std::memory_order_acquire)) {
-            return false;
-        }
-
-        std::lock_guard<std::mutex> lock(ipc_mutex);
-        
-        if (plugin_status == nullptr || mutex_handle == nullptr) {
-            return false;
-        }
-        
-        DWORD wait_result = WaitForSingleObject(mutex_handle, 50);
-        
-        if (wait_result != WAIT_OBJECT_0 && wait_result != WAIT_ABANDONED) {
-            return false;
-        }
-        
-        uint32_t current_tick = static_cast<uint32_t>(GetTickCount());
-        uint32_t last_heartbeat = plugin_status->last_heartbeat;
-        bool active = plugin_status->plugin_active && (current_tick - last_heartbeat) < 5000;
-        bool transmitting = active && (plugin_status->transmitting != 0);
-        ReleaseMutex(mutex_handle);
-        return transmitting;
     }
 
     bool apply_voice_effects(const std::vector<std::pair<std::string, float>>& effects) {

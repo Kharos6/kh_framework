@@ -5,7 +5,7 @@ class CfgMagazines
     {
         author = "Kharos";
         ammo = "KH_MeleeDummy";
-        count = 1;
+        count = 0;
         displayName = "Melee";
         picture = "\x\kh\addons\main\ui\kh_logo_512.paa";
     };

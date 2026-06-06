@@ -64,6 +64,7 @@ class CfgFunctions
 			class getScreenVisiblePositions {headerType = -1;};
 			class getSideRelations {headerType = -1;};
 			class getUnitAttributes {headerType = -1;};
+			class getUnitMoveType {headerType = -1;};
 			class getUnitVehicleSlot {headerType = -1;};
 			class getVehicleLoadout {headerType = -1;};
 			class getViewTarget {headerType = -1;};
@@ -161,6 +162,7 @@ class CfgFunctions
 			class uiContextCall {headerType = -1;};
 			class updateAiInstance {headerType = -1;};
 			class updateMeleeState {headerType = -1;};
+			class updateSpecialWeaponState {headerType = -1;};
 			class updateTtsSpeakerEntity {headerType = -1;};
 			class vehicleSequence {headerType = -1;};
 			class visualTrigger {headerType = -1;};

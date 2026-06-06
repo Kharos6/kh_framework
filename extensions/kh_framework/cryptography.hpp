@@ -37,11 +37,10 @@ class CryptoGenerator {
 private:
     // Pre-computed lookup table for hex conversion
     static constexpr char hex_chars[] = "0123456789abcdef";
-
     template<typename T>
-
+    
     static void append_hex(std::string& result, T value) {
-        for (size_t i = 0; i < sizeof(T); i++) {
+        for (size_t i = sizeof(T); i-- > 0; ) {        // MSB first → big-endian
             uint8_t byte = (value >> (i * 8)) & 0xFF;
             result.push_back(hex_chars[byte >> 4]);
             result.push_back(hex_chars[byte & 0x0F]);
@@ -153,20 +152,12 @@ public:
         uint64_t hash = 0xcbf29ce484222325ull;
         const uint8_t* data = reinterpret_cast<const uint8_t*>(input.data());
         const uint8_t* end = data + input.size();
-        
-        while (data + 8 <= end) {
-            uint64_t chunk;
-            memcpy(&chunk, data, 8);
-            hash ^= chunk;
-            hash *= 0x100000001b3ull;
-            data += 8;
-        }
 
         while (data != end) {
             hash ^= *data++;
             hash *= 0x100000001b3ull;
         }
-        
+
         std::string result;
         result.reserve(16);
         append_hex(result, hash);
@@ -264,24 +255,17 @@ public:
         while (data + 4 <= end) {
             uint32_t k1;
             memcpy(&k1, data, 4);
-            k1 *= PRIME32_3;
-            k1 = (k1 << 17) | (k1 >> 15);
-            k1 *= PRIME32_4;
-            hash ^= k1;
-            hash = ((hash << 19) | (hash >> 13)) * PRIME32_1 + PRIME32_4;
+            hash += k1 * PRIME32_3;
+            hash = ((hash << 17) | (hash >> 15)) * PRIME32_4;
             data += 4;
         }
-        
+
         while (data < end) {
-            uint32_t k1 = *data++;
-            k1 *= PRIME32_5;
-            k1 = (k1 << 11) | (k1 >> 21);
-            k1 *= PRIME32_1;
-            hash ^= k1;
-            hash = ((hash << 15) | (hash >> 17)) * PRIME32_2 + PRIME32_3;
+            hash += (*data++) * PRIME32_5;
+            hash = ((hash << 11) | (hash >> 21)) * PRIME32_1;
         }
-        
-        hash ^= hash >> 16;
+
+        hash ^= hash >> 15;
         hash *= PRIME32_2;
         hash ^= hash >> 13;
         hash *= PRIME32_3;

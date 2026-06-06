@@ -671,8 +671,6 @@ struct TSVoiceEffectConfig {
 struct TSPluginStatus {
     uint32_t version;
     uint8_t plugin_active;
-    uint8_t capturing;
-    uint8_t transmitting;
     uint8_t connected;
     uint32_t sample_rate;
     uint32_t last_heartbeat;
@@ -1633,8 +1631,6 @@ static void update_plugin_status() {
     if (wait_result == WAIT_OBJECT_0 || wait_result == WAIT_ABANDONED) {
         g_plugin_status->plugin_active = 1;
         g_plugin_status->connected = g_connected.load() ? 1 : 0;
-        g_plugin_status->capturing = 0;
-        g_plugin_status->transmitting = 0;
         g_plugin_status->sample_rate = g_audio_state.sample_rate;
         g_plugin_status->last_heartbeat = GetTickCount();
         ReleaseMutex(g_mutex_handle);

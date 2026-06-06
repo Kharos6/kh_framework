@@ -34,7 +34,7 @@ class KH_ModuleAssignTerminal: Module_F
 			property = "KH_ModuleAssignTerminalIdentifier";
 			defaultValue = "''";
 		};
-		class KH_ModuleAssignTerminalDescription: EditMulti3
+		class KH_ModuleAssignTerminalDescription: Edit
 		{
 			displayName = "Description";
 			tooltip = "Description of the terminal. Should ideally contain instructions and possible arguments and commands.";

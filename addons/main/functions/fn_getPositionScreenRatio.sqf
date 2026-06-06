@@ -12,7 +12,7 @@ else {
 };
 
 if (_cameraPosition isEqualTo []) exitWith {
-    _cameraPosition;
+    [0, 0, 0, 0, 0];
 };
 
 _cameraPosition params ["_positionX", "_positionY"];

@@ -1,11 +1,11 @@
 params [["_vehicle", objNull, [objNull]], ["_movementData", [], ["", []]], ["_firingData", [], ["", []]], ["_disableDamage", true, [true]], ["_endPosition", true, [true, [], objNull]]];
 
 if (_movementData isEqualType "") then { 
-	_movementData = parseSimpleArray (preprocessFile _movementData);
+	_movementData = parseSimpleArray (loadFile _movementData);
 };
 
 if (_firingData isEqualType "") then { 
-	_firingData = parseSimpleArray (preprocessFile _firingData);
+	_firingData = parseSimpleArray (loadFile _firingData);
 };
 
 if (_endPosition isEqualType objNull) then {

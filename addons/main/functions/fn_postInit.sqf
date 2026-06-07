@@ -620,11 +620,12 @@ isNil {
 																		private _aimOffset = [_unit vectorModelToWorldVisual (_aimDirection select 0), _unit vectorModelToWorldVisual (_aimDirection select 1)];
 																		private _worldOrigin = _unit modelToWorldVisualWorld _originLocal;
 																		_point = [_worldOrigin, _worldOrigin vectorAdd (_pointLocal vectorDiff _originLocal), _aimOffset] call KH_fnc_rotateVector;
+																		private _attachedObjects = attachedObjects _unit;
 
 																		private _lineIntersections = [
 																			_origin, 
 																			_point, 
-																			[_unit, "TERRAIN"] + (attachedObjects _unit),
+																			[_unit, "TERRAIN"] + _attachedObjects,
 																			true, 
 																			-1, 
 																			"FIRE", 
@@ -669,7 +670,7 @@ isNil {
 																				_hitRadius,
 																				"RECTANGLE",
 																				0.5,
-																				[_unit, "TERRAIN"] + (attachedObjects _unit),
+																				[_unit, "TERRAIN"] + _attachedObjects,
 																				true, 
 																				-1, 
 																				"FIRE", 
@@ -690,6 +691,15 @@ isNil {
 																					_handledHit pushBackUnique _object;
 																				} forEach _radiusIntersections;
 																			};
+
+																			{
+																				if ((_x in _handledHit) || (([_x, _unit, true] call KH_fnc_getSideRelations) && KH_var_meleeAttackIgnoreFriendlies)) then {
+																					continue;
+																				};
+
+																				_hitObjects pushBack [_x, "", AGLToASL (unitAimPositionVisual _x), _attack];
+																				_handledHit pushBackUnique _x;
+																			} forEach (([_point select 0, _point select 1, (getPos _unit) select 2] nearEntities (((selectMax (_hitRadius select {_x isEqualType 0;})) min 2) max 1)) - ([_unit] + _attachedObjects));
 																		};
 
 																		_deletionsHit pushBack _forEachIndex;
@@ -912,18 +922,22 @@ isNil {
 																			getArray _kickRadiusConfig;
 																		};
 
+																		_point = if (_point isEqualType []) then {
+																			_unit modelToWorldVisualWorld _point;
+																		}
+																		else {
+																			_unit modelToWorldVisualWorld (_unit selectionPosition _point);
+																		};
+
+																		private _attachedObjects = attachedObjects _unit;
+
 																		private _kickIntersections = ([
-																			if (_point isEqualType []) then {
-																				_unit modelToWorldVisualWorld _point;
-																			}
-																			else {
-																				_unit modelToWorldVisualWorld (_unit selectionPosition _point);
-																			},
+																			_point,
 																			[vectorDir _unit, vectorUp _unit],
 																			_kickRadius,
 																			"RECTANGLE",
 																			0.5,
-																			[_unit, "TERRAIN"] + (attachedObjects _unit),
+																			[_unit, "TERRAIN"] + _attachedObjects,
 																			true, 
 																			-1, 
 																			"FIRE", 
@@ -944,6 +958,15 @@ isNil {
 																				_handledKick pushBack _object;
 																			} forEach _kickIntersections;
 																		};
+
+																		{
+																			if ((_x in _handledKick) || (([_x, _unit, true] call KH_fnc_getSideRelations) && KH_var_meleeKickIgnoreFriendlies)) then {
+																				continue;
+																			};
+
+																			_kickedObjects pushBack [_x, "", AGLToASL (unitAimPositionVisual _x), _kick];
+																			_handledKick pushBackUnique _x;
+																		} forEach (([_point select 0, _point select 1, (getPos _unit) select 2] nearEntities (((selectMax (_kickRadius select {_x isEqualType 0;})) min 2) max 1)) - ([_unit] + _attachedObjects));
 
 																		if ((_unit getVariable ["KH_var_currentMeleeKick", ""]) isNotEqualTo _kick) then {
 																			_unit setVariable ["KH_var_currentMeleeKick", _kick, _clientType];
@@ -1010,11 +1033,12 @@ isNil {
 
 																	if ((_time >= _start) && (_time <= _end)) then {
 																		private _aimPosition = (AGLToASL (unitAimPositionVisual _unit)) vectorAdd ((vectorDir _unit) vectorMultiply 0.25);
+																		private _attachedObjects = attachedObjects _unit;
 
 																		private _lineIntersections = [
 																			_aimPosition, 
 																			_aimPosition vectorAdd ((vectorDir _unit) vectorMultiply 0.5), 
-																			[_unit, "TERRAIN"] + (attachedObjects _unit),
+																			[_unit, "TERRAIN"] + _attachedObjects,
 																			true, 
 																			-1, 
 																			"FIRE", 
@@ -1042,7 +1066,7 @@ isNil {
 																			[0.5, 0.5, "0.75"],
 																			"RECTANGLE",
 																			0.5,
-																			[_unit, "TERRAIN"] + (attachedObjects _unit),
+																			[_unit, "TERRAIN"] + _attachedObjects,
 																			true, 
 																			-1, 
 																			"FIRE", 

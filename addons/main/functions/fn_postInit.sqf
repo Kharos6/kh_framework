@@ -699,7 +699,7 @@ isNil {
 
 																				_hitObjects pushBack [_x, "", AGLToASL (unitAimPositionVisual _x), _attack];
 																				_handledHit pushBackUnique _x;
-																			} forEach (([_point select 0, _point select 1, (getPos _unit) select 2] nearEntities (((selectMax (_hitRadius select {_x isEqualType 0;})) min 2) max 1)) - ([_unit] + _attachedObjects));
+																			} forEach (([_point select 0, _point select 1, (_unit modelToWorldVisual [0, 0, 0]) select 2] nearEntities (((selectMax (_hitRadius select {_x isEqualType 0;})) min 2) max 1)) - ([_unit] + _attachedObjects));
 																		};
 
 																		_deletionsHit pushBack _forEachIndex;
@@ -966,7 +966,7 @@ isNil {
 
 																			_kickedObjects pushBack [_x, "", AGLToASL (unitAimPositionVisual _x), _kick];
 																			_handledKick pushBackUnique _x;
-																		} forEach (([_point select 0, _point select 1, (getPos _unit) select 2] nearEntities (((selectMax (_kickRadius select {_x isEqualType 0;})) min 2) max 1)) - ([_unit] + _attachedObjects));
+																		} forEach (([_point select 0, _point select 1, (_unit modelToWorldVisual [0, 0, 0]) select 2] nearEntities (((selectMax (_kickRadius select {_x isEqualType 0;})) min 2) max 1)) - ([_unit] + _attachedObjects));
 
 																		if ((_unit getVariable ["KH_var_currentMeleeKick", ""]) isNotEqualTo _kick) then {
 																			_unit setVariable ["KH_var_currentMeleeKick", _kick, _clientType];

@@ -1625,7 +1625,33 @@ static void update_plugin_status() {
         return;
     }
     
-    if (g_plugin_status == nullptr || g_mutex_handle == nullptr) return;
+    if (g_mutex_handle == nullptr) return;
+
+    if (g_plugin_status == nullptr) {                     // lost it somehow -> rebuild just status
+        if (g_status_memory_handle == nullptr) {
+            g_status_memory_handle = OpenFileMappingA(FILE_MAP_ALL_ACCESS, FALSE, TS_STATUS_MEMORY_NAME);
+
+            if (g_status_memory_handle == nullptr)
+                g_status_memory_handle = CreateFileMappingA(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0,
+                                                            sizeof(TSPluginStatus), TS_STATUS_MEMORY_NAME);
+        }
+
+        if (g_status_memory_handle != nullptr)
+            g_plugin_status = static_cast<TSPluginStatus*>(
+                MapViewOfFile(g_status_memory_handle, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(TSPluginStatus)));
+
+        if (g_plugin_status == nullptr) {
+            if (g_status_memory_handle != nullptr) {       // don't leak the handle on partial failure
+                CloseHandle(g_status_memory_handle);
+                g_status_memory_handle = nullptr;
+            }
+
+            return;                                        // next tick starts clean
+        }
+        
+        g_plugin_status->version = TS_IPC_VERSION;
+    }
+
     DWORD wait_result = WaitForSingleObject(g_mutex_handle, 0);
 
     if (wait_result == WAIT_OBJECT_0 || wait_result == WAIT_ABANDONED) {

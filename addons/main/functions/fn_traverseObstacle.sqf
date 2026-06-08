@@ -210,7 +210,7 @@ _unit setVariable ["KH_var_traversalTarget", [_chosenTraversalTarget select 0, (
             };
             
             default {
-                "default";
+                "stop";
             };
         }, 
         true

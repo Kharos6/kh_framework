@@ -235,19 +235,33 @@ private:
     }
     
     void heartbeat_loop() {
+        uint32_t last_seen_beat = 0;
+        uint32_t last_change_tick = static_cast<uint32_t>(GetTickCount());
+        bool have_seen = false;
+        bool lost_reported = false;
+
         while (heartbeat_running.load(std::memory_order_acquire)) {
-            // Check plugin status periodically
             if (plugin_status != nullptr && mutex_handle != nullptr) {
                 DWORD wait_result = WaitForSingleObject(mutex_handle, 50);
-                
+
                 if (wait_result == WAIT_OBJECT_0 || wait_result == WAIT_ABANDONED) {
-                    uint32_t current_tick = static_cast<uint32_t>(GetTickCount());
-                    uint32_t last_heartbeat = plugin_status->last_heartbeat;
-                    bool plugin_active_flag = plugin_status->plugin_active;
+                    uint8_t  active = plugin_status->plugin_active;
+                    uint32_t beat   = plugin_status->last_heartbeat;
                     ReleaseMutex(mutex_handle);
-                    bool plugin_alive = (current_tick - last_heartbeat) < 5000;
-                    
-                    if (!plugin_alive && plugin_active_flag) {
+                    uint32_t now = static_cast<uint32_t>(GetTickCount());
+
+                    if (!have_seen || beat != last_seen_beat) {
+                        last_seen_beat = beat;
+                        last_change_tick = now;          // extension's OWN clock
+                        have_seen = true;
+                        lost_reported = false;            // advancing => healthy / recovered
+                    }
+
+                    bool plugin_alive = (now - last_change_tick) < 5000;
+
+                    if (active && !plugin_alive && !lost_reported) {
+                        lost_reported = true;             // report once, not every second
+
                         MainThreadScheduler::instance().schedule([]() {
                             report_error("KH - TeamSpeak: Plugin connection lost");
                         });

@@ -300,6 +300,7 @@ if (_result && (_finalAnimation isNotEqualTo "") && (_unit isEqualTo KH_var_play
     private _interruptableId = generateUid;
     _unit setVariable ["KH_var_interruptableAnimationId", _interruptableId];
     _unit setVariable ["KH_var_currentInterruptableAnimation", ""];
+    _unit setVariable ["KH_var_currentInterruptableAnimationPeriod", 0];
 
     [
         [_unit, _finalAnimation, _interruptableId, false, 0],
@@ -313,9 +314,11 @@ if (_result && (_finalAnimation isNotEqualTo "") && (_unit isEqualTo KH_var_play
                 (_unit isNotEqualTo KH_var_playerUnit) ||
                 !(isNull (objectParent _unit)) ||
                 (((lifeState _unit) isEqualTo "INCAPACITATED") || ((lifeState _unit) isEqualTo "UNCONSCIOUS")) ||
+                !(isTouchingGround _unit) ||
                 (_animationReached && (_animationState isNotEqualTo _finalAnimation) && (_currentInterruptableAnimation isEqualTo "") && ((flatten (getAnimationsQueue _unit)) isEqualTo []))
                ) exitWith {
                 _unit setVariable ["KH_var_currentInterruptableAnimation", ""];
+                _unit setVariable ["KH_var_currentInterruptableAnimationPeriod", 0];
                 [_handlerId] call KH_fnc_removeHandler;
             };
 
@@ -328,13 +331,30 @@ if (_result && (_finalAnimation isNotEqualTo "") && (_unit isEqualTo KH_var_play
                             _unit playActionNow "Stop";
                             _unit setVariable ["KH_var_interruptableAnimationId", ""];
                             _unit setVariable ["KH_var_currentInterruptableAnimation", ""];
+                            _unit setVariable ["KH_var_currentInterruptableAnimationPeriod", 0];
                             [_handlerId] call KH_fnc_removeHandler;
                         };
                     }
                     else {
                         private _moves = getText ((configOf _unit) >> "moves");
-                        _unit setVariable ["KH_var_currentInterruptableAnimation", getText (configFile >> _moves >> "Actions" >> (getText (configFile >> _moves >> "states" >> _animationState >> "actions")) >> _moveType)];
-                        _unit playActionNow _moveType;
+                        private _move = toLowerANSI (getText (configFile >> _moves >> "Actions" >> (getText (configFile >> _moves >> "states" >> _animationState >> "actions")) >> _moveType));
+
+                        if ((_unit getVariable ["KH_var_currentInterruptableAnimation", ""]) isNotEqualTo _move) then {
+                            _unit setVariable ["KH_var_currentInterruptableAnimation", _move];
+                            _unit setVariable ["KH_var_currentInterruptableAnimationPeriod", 0];
+                            _unit playActionNow _moveType;
+                        };
+
+                        if (_animationState isEqualTo _currentInterruptableAnimation) then {
+                            _unit setVariable ["KH_var_currentInterruptableAnimationPeriod", (_unit getVariable ["KH_var_currentInterruptableAnimationPeriod", 0]) + _totalDelta];
+
+                            if ((_unit getVariable ["KH_var_currentInterruptableAnimationPeriod", 0]) >= (_unit getUnitMovesInfo 2)) then {
+                                _unit setVariable ["KH_var_interruptableAnimationId", ""];
+                                _unit setVariable ["KH_var_currentInterruptableAnimation", ""];
+                                _unit setVariable ["KH_var_currentInterruptableAnimationPeriod", 0];
+                                [_handlerId] call KH_fnc_removeHandler;
+                            };
+                        };
                     };
                 };
             }

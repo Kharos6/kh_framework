@@ -7,6 +7,7 @@ class CfgFunctions
 		{
 			file = "\x\kh\addons\main\functions";
 			class addAction {headerType = -1;};
+			class addActionCondition {headerType = -1;};
 			class addEventHandler {headerType = -1;};
 			class aiInstanceSetup {headerType = -1;};
 			class arma {headerType = -1;};
@@ -16,7 +17,8 @@ class CfgFunctions
 			class attach {headerType = -1;};
 			class breakDisguise {headerType = -1;};
 			class callSerializedFunction {headerType = -1;};
-			class cameraSequence {headerType = -1;};		
+			class cameraSequence {headerType = -1;};
+			class canUnitFireWeapon {headerType = -1;};
 			class closeInterface {headerType = -1;};
 			class collectGroupData {headerType = -1;};
 			class collectObjectData {headerType = -1;};

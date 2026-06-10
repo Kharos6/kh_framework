@@ -12,7 +12,7 @@ if (
     false;
 };
 
-if ((isSwitchingWeapon _unit) || !(isTouchingGround _unit) || (((_unit weaponState (currentWeapon _unit)) select 6) > 0)) exitWith {
+if ((isSwitchingWeapon _unit) || !(isTouchingGround _unit) || (((weaponState _unit) select 6) > 0)) exitWith {
     false;
 };
 

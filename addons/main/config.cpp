@@ -8,6 +8,7 @@
 #include "\x\kh\addons\main\cfgFunctions.hpp"
 #include "\x\kh\addons\main\cfgGestures.hpp"
 #include "\x\kh\addons\main\cfgIrLaserSettings.hpp"
+#include "\x\kh\addons\main\cfgKhAnimationEvents.hpp"
 #include "\x\kh\addons\main\cfgKhInitFunctions.hpp"
 #include "\x\kh\addons\main\cfgKhMeleeTypes.hpp"
 #include "\x\kh\addons\main\cfgLuaFunctions.hpp"

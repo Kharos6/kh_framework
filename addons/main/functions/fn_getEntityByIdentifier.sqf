@@ -10,32 +10,14 @@ if (_type isNotEqualTo "") then {
 };
 
 switch _type do {
-    case "OBJECT": {
-        private _allEntities = entities "";
-        private _index = _allEntities findIf {_identifier isEqualTo (vehicleVarName _x);};
-        
-        if (_index isNotEqualTo -1) then {
-            _allEntities select _index;
-        }
-        else {
-            objNull;
-        };
-    };
-
+    case "OBJECT";
     case "TEAM_MEMBER": {
-        private _allAgents = agents;
-        private _index = _allAgents findIf {_identifier isEqualTo (vehicleVarName (agent _x));};
-        
-        if (_index isNotEqualTo -1) then {
-            _allAgents select _index;
-        }
-        else {
-            teamMemberNull;
-        };
+        missionNamespace getVariable [_identifier, objNull];
     };
 
     case "GROUP": {
         private _allGroups = allGroups;
+
         private _index = _allGroups findIf {
             if (_identifier isEqualTo ([side _x, groupId _x] joinString "_")) then {
                 true;

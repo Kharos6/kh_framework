@@ -1,6 +1,6 @@
 params [["_unit", objNull, [objNull]], ["_animation", [], [[]]], ["_allowVehicle", false, [true]], ["_allowUnconscious", false, [true]]];
 
-if (_animation isEqualTo []) exitWith {
+if ((_animation isEqualTo []) || (_unit getVariable ["KH_var_lockedAnimation", false])) exitWith {
     false;
 };
 
@@ -296,7 +296,15 @@ else {
     true;
 };
 
-if (_result && (_finalAnimation isNotEqualTo "") && (_unit isEqualTo KH_var_playerUnit)) then {
+if (
+    _result && 
+    (_finalAnimation isNotEqualTo "") && 
+    (_unit isEqualTo KH_var_playerUnit) && 
+    (isNull (objectParent _unit)) && 
+    (isTouchingGround _unit) && 
+    ((lifeState _unit) isNotEqualTo "INCAPACITATED") && 
+    ((lifeState _unit) isNotEqualTo "UNCONSCIOUS")
+   ) then {
     private _interruptableId = generateUid;
     _unit setVariable ["KH_var_interruptableAnimationId", _interruptableId];
     _unit setVariable ["KH_var_currentInterruptableAnimation", ""];
@@ -324,6 +332,144 @@ if (_result && (_finalAnimation isNotEqualTo "") && (_unit isEqualTo KH_var_play
 
             if _animationReached then {
                 if (diag_tickTime > _delay) then {
+                    private _switchPrimary = (inputAction "SwitchPrimary") isNotEqualTo 0;
+                    private _switchSecondary = (inputAction "SwitchHandgun") isNotEqualTo 0;
+                    private _switchTertiary = (inputAction "SwitchSecondary") isNotEqualTo 0;
+                    private _switchBinocular = (inputAction "binocular") isNotEqualTo 0;
+                    private _raiseWeapon = (inputAction "toggleRaiseWeapon") isNotEqualTo 0;
+                    private _throw = (inputAction "throw") isNotEqualTo 0;
+                    private _reload = (inputAction "reloadMagazine") isNotEqualTo 0;
+                    private _prone = (inputAction "MoveDown") isNotEqualTo 0;
+                    private _crouch = (inputAction "MoveUp") isNotEqualTo 0;
+                    private _fire = ((inputAction "defaultAction") isNotEqualTo 0) && !(_unit getVariable ["KH_var_inMeleeState", false]) && ((_unit getVariable ["KH_var_meleeMode", ""]) isEqualTo "");
+
+                    if ((_currentInterruptableAnimation isNotEqualTo "") && (_switchPrimary || _switchSecondary || _switchTertiary || _switchBinocular || _raiseWeapon || _throw || _reload || _prone || _crouch || _fire)) exitWith {
+                        _unit playActionNow "Stop";
+                        _unit setVariable ["KH_var_lockedAnimation", true];
+                        private _moves = getText ((configOf _unit) >> "moves");
+
+                        if (_raiseWeapon || _prone || _crouch) then {
+                            [
+                                [
+                                    _unit, 
+                                    toLowerANSI (getText (configFile >> _moves >> "Actions" >> (getText (configFile >> _moves >> "states" >> _animationState >> "actions")) >> "stop")),
+                                    [["down", "up"] select _crouch, "Stand"] select _raiseWeapon
+                                ],
+                                {
+                                    params ["_unit", "_state", "_newState"];
+
+                                    if (
+                                        (_unit isNotEqualTo KH_var_playerUnit) ||
+                                        !(isNull (objectParent _unit)) ||
+                                        (((lifeState _unit) isEqualTo "INCAPACITATED") || ((lifeState _unit) isEqualTo "UNCONSCIOUS")) ||
+                                        !(isTouchingGround _unit)
+                                    ) exitWith {
+                                        _unit setVariable ["KH_var_lockedAnimation", false];
+                                        [_handlerId] call KH_fnc_removeHandler;
+                                    };
+
+                                    private _queue = flatten (getAnimationsQueue _unit);
+
+                                    if (((animationState _unit) isEqualTo _state) || !(_state in _queue) || (_queue isEqualTo [])) then {
+                                        _unit playActionNow _newState;
+                                        _unit setVariable ["KH_var_lockedAnimation", false];
+                                        [_handlerId] call KH_fnc_removeHandler;
+                                    };
+                                },
+                                true,
+                                [
+                                    0,
+                                    false,
+                                    false,
+                                    {},
+                                    false,
+                                    true
+                                ],
+                                false
+                            ] call KH_fnc_execute;
+                        }
+                        else {
+                            [
+                                [
+                                    _unit, 
+                                    toLowerANSI (getText (configFile >> _moves >> "Actions" >> (getText (configFile >> _moves >> "states" >> _animationState >> "actions")) >> "stop")),
+                                    _switchPrimary,
+                                    _switchSecondary,
+                                    _switchTertiary,
+                                    _switchBinocular,
+                                    _throw,
+                                    _reload,
+                                    _fire
+                                ],
+                                {
+                                    params ["_unit", "_state", "_switchPrimary", "_switchSecondary", "_switchTertiary", "_switchBinocular", "_throw", "_reload", "_fire"];
+
+                                    if (
+                                        (_unit isNotEqualTo KH_var_playerUnit) ||
+                                        !(isNull (objectParent _unit)) ||
+                                        (((lifeState _unit) isEqualTo "INCAPACITATED") || ((lifeState _unit) isEqualTo "UNCONSCIOUS")) ||
+                                        !(isTouchingGround _unit)
+                                    ) exitWith {
+                                        _unit setVariable ["KH_var_lockedAnimation", false];
+                                        [_handlerId] call KH_fnc_removeHandler;
+                                    };
+
+                                    private _queue = flatten (getAnimationsQueue _unit);
+
+                                    if (((animationState _unit) isEqualTo _state) || !(_state in _queue) || (_queue isEqualTo [])) then {
+                                        switch true do {
+                                            case _switchPrimary: {
+                                                _unit action ["SwitchWeapon", _unit, _unit, ((_unit weaponsInfo [primaryWeapon _unit, false]) param [0, []]) param [0, -1]];
+                                            };
+                                            
+                                            case _switchSecondary: {
+                                                _unit action ["SwitchWeapon", _unit, _unit, ((_unit weaponsInfo [handgunWeapon _unit, false]) param [0, []]) param [0, -1]];
+                                            };
+
+                                            case _switchTertiary: {
+                                                _unit action ["SwitchWeapon", _unit, _unit, ((_unit weaponsInfo [secondaryWeapon _unit, false]) param [0, []]) param [0, -1]];
+                                            };
+                                            
+                                            case _switchBinocular: {
+                                                _unit action ["SwitchWeapon", _unit, _unit, ((_unit weaponsInfo [binocular _unit, false]) param [0, []]) param [0, -1]];
+                                            };
+                                            
+                                            case _throw: {
+                                                _unit action ["UseWeapon", _unit, _unit, ((_unit weaponsInfo [currentThrowable _unit, false]) param [0, []]) param [0, -1]];
+                                            };
+
+                                            case _reload: {
+                                                reload _unit;
+                                            };
+                                        
+                                            case _fire: {
+                                                _unit action ["UseWeapon", _unit, _unit, ((_unit weaponsInfo [currentMuzzle _unit, false]) param [0, []]) param [0, -1]];
+                                            };
+                                        };
+
+                                        _unit setVariable ["KH_var_lockedAnimation", false];
+                                        [_handlerId] call KH_fnc_removeHandler;
+                                    };
+                                },
+                                true,
+                                [
+                                    0,
+                                    false,
+                                    false,
+                                    {},
+                                    false,
+                                    true
+                                ],
+                                false
+                            ] call KH_fnc_execute;
+                        };
+
+                        _unit setVariable ["KH_var_interruptableAnimationId", ""];
+                        _unit setVariable ["KH_var_currentInterruptableAnimation", ""];
+                        _unit setVariable ["KH_var_currentInterruptableAnimationPeriod", 0];
+                        [_handlerId] call KH_fnc_removeHandler;
+                    };
+
                     private _moveType = [[_unit] call KH_fnc_getUnitMoveType, (["ARMA_STRING", [true, true, false]] call KH_fnc_getPlayerMoveInput) select 0] joinString "";
 
                     if (_moveType isEqualTo "STOP") then {

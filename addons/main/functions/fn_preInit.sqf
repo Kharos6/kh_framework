@@ -21,6 +21,7 @@ KH_var_remoteExecFunctionsJipBlacklist = createHashMap;
 KH_var_inGameUiEventHandlerStack = createHashMap;
 KH_var_temporalExecutionStackMonitor = createHashMap;
 KH_var_drawUiExecutionStackMonitor = createHashMap;
+KH_var_animationEvents = createHashMap;
 KH_var_quickFunctionsSqf = createHashMap;
 uiNamespace setVariable ["KH_var_quickFunctionsSqf", KH_var_quickFunctionsSqf];
 KH_var_quickFunctionsLua = createHashMap;
@@ -251,6 +252,23 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 		};
 	} forEach ("true" configClasses (missionConfigFile >> "CfgRemoteExec" >> "Functions"));
 };
+
+{
+	private _events = [];
+
+	{
+		private _timing = _x >> "timing";
+
+		_events pushBack [
+			configName _x,
+			getArray _timing,
+			(getNumber (_x >> "start")) isEqualTo 1,
+			(getNumber (_x >> "end")) isEqualTo 1	
+		];
+	} forEach ("true" configClasses _x);
+
+	KH_var_animationEvents set [toLowerANSI (configName _x), _events];
+} forEach ("true" configClasses (configFile >> "CfgKhAnimationEvents"));
 
 [
 	"MISSION",
@@ -1817,7 +1835,7 @@ if hasInterface then {
 					private _previousUnit = KH_var_playerUnit;
 					KH_var_playerUnit = _unit;
 					player setVariable ["KH_var_playerUnit", KH_var_playerUnit, true];
-					["KH_eve_playerControlledUnitChanged", [clientOwner, getPlayerUID player, getPlayerID player, _unit, _previousUnit, [_unit, true] call KH_fnc_getEntityVariableName], "GLOBAL", false] call KH_fnc_triggerCbaEvent;
+					["KH_eve_playerControlledUnitChanged", [clientOwner, getPlayerUID player, getPlayerID player, _unit, _previousUnit], "GLOBAL", false] call KH_fnc_triggerCbaEvent;
 
 					{
 						[_previousUnit, _unit] call _x;
@@ -2104,20 +2122,7 @@ if hasInterface then {
 				[],
 				{
 					params ["_unit", "_corpse"];
-					_corpse setVariable ["KH_var_playerUnit", _unit, true];
-					_corpse setVehicleVarName "";
-
-					[
-						[_corpse],
-						{
-							params ["_corpse"];
-							_corpse setVehicleVarName "";
-						},
-						"GLOBAL",
-						true,
-						true
-					] call KH_fnc_execute;
-					
+					_corpse setVariable ["KH_var_playerUnit", _unit, true];					
 					[_corpse] call KH_fnc_playerRespawnInit;
 					["KH_eve_playerRespawned", [clientOwner, getPlayerUID _unit, getPlayerID _unit, _unit, _corpse], "GLOBAL", false] call KH_fnc_triggerCbaEvent;
 					nil;

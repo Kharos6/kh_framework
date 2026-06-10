@@ -1214,6 +1214,50 @@ isNil {
 													_unit setVariable [_activeType, false];
 												};
 											};
+
+											if !(isNil (KH_var_animationEvents get _animation)) then {
+												private _events = KH_var_animationEvents get _animation;
+												
+												{
+													if (_x select 2) then {
+														[_x select 0, [_unit, _animation, [_unit getUnitMovesInfo 5, _unit getUnitMovesInfo 0] select _isMove], true, false] call KH_fnc_triggerCbaEvent;
+													};
+												} forEach _events;
+
+												[
+													[_unit, _animation, _events, _isMove],
+													{
+														params ["_unit", "_animation", "_events", "_isMove"];
+
+														if (([gestureState _unit, animationState _unit] select _isMove) isNotEqualTo _animation) exitWith {
+															{
+																if (_x select 3) then {
+																	[_x select 0, [_unit, _animation, [_unit getUnitMovesInfo 5, _unit getUnitMovesInfo 0] select _isMove], true, false] call KH_fnc_triggerCbaEvent;
+																};
+															} forEach _events;
+
+															[_handlerId] call KH_fnc_removeHandler;
+														};
+
+														{
+															_x params ["_event", "_timing"];
+															private _deletions = [];
+
+															{
+																if (([_unit getUnitMovesInfo 5, _unit getUnitMovesInfo 0] select _isMove) >= _x) then {
+																	[_event, [_unit, _animation, [_unit getUnitMovesInfo 5, _unit getUnitMovesInfo 0] select _isMove], true, false] call KH_fnc_triggerCbaEvent;
+																	_deletions pushBack _forEachIndex;
+																};
+															} forEach _timing;
+
+															_timing deleteAt _deletions;
+														} forEach _events;
+													},
+													true,
+													0,
+													false
+												] call KH_fnc_execute;
+											};
 										}
 									] call KH_fnc_addEventHandler;
 								} forEach ["AnimStateChanged", "GestureChanged"];
@@ -1370,7 +1414,7 @@ isNil {
 								} forEach KH_var_playerLoadStack;
 
 								call KH_fnc_playerLoadInit;
-								["KH_eve_playerLoaded", [clientOwner, getPlayerUID player, getPlayerID player, player, [player, true] call KH_fnc_getEntityVariableName], "GLOBAL", false] call KH_fnc_triggerCbaEvent;				
+								["KH_eve_playerLoaded", [clientOwner, getPlayerUID player, getPlayerID player, player], "GLOBAL", false] call KH_fnc_triggerCbaEvent;				
 
 								if (KH_var_playerRespawnedEventHandler isNotEqualTo []) then {
 									[KH_var_playerRespawnedEventHandler] call KH_fnc_removeHandler;
@@ -1383,18 +1427,6 @@ isNil {
 									{
 										params ["_unit", "_corpse"];
 										_corpse setVariable ["KH_var_playerUnit", _unit, true];
-										_corpse setVehicleVarName "";
-
-										[
-											[_corpse],
-											{
-												params ["_corpse"];
-												_corpse setVehicleVarName "";
-											},
-											"GLOBAL",
-											true,
-											true
-										] call KH_fnc_execute;
 
 										{
 											[_corpse] call _x;
@@ -1919,7 +1951,7 @@ isNil {
 								} forEach KH_var_headlessLoadStack;
 
 								call KH_fnc_headlessLoadInit;
-								["KH_eve_headlessLoaded", [clientOwner, getPlayerID player, player, [player, true] call KH_fnc_getEntityVariableName], "GLOBAL", false] call KH_fnc_triggerCbaEvent;
+								["KH_eve_headlessLoaded", [clientOwner, getPlayerID player, player], "GLOBAL", false] call KH_fnc_triggerCbaEvent;
 							},
 							true,
 							{(!(isNull player) && (alive player));},

@@ -1945,7 +1945,13 @@ if hasInterface then {
 	[
 		[],
 		{
-			KH_var_mainCamera = ((allCameras select {_x select 2;}) param [0, []]) param [0, KH_var_playerUnit];
+			if (isNull curatorCamera) then {
+				KH_var_mainCamera = ((allCameras select {_x select 2;}) param [0, []]) param [0, KH_var_playerUnit];
+			}
+			else {
+				KH_var_mainCamera = curatorCamera;
+			};
+
 			private _unit = player;
 			private _filteredClassItems = getArray ((configOf _unit) >> "kh_equipmentFilter");
 			if ((KH_var_filterPlayerEquipmentList isEqualTo []) && (_filteredClassItems isEqualTo [])) exitWith {};

@@ -435,7 +435,7 @@ if (
                                             };
                                             
                                             case _throw: {
-                                                _unit action ["UseWeapon", _unit, _unit, ((_unit weaponsInfo [currentThrowable _unit, false]) param [0, []]) param [0, -1]];
+                                                _unit action ["UseWeapon", _unit, _unit, ((_unit weaponsInfo [(currentThrowable _unit) select 0, false]) param [0, []]) param [0, -1]];
                                             };
 
                                             case _reload: {

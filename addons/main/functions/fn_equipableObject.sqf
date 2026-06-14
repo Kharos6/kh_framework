@@ -12,11 +12,11 @@ params [
 ];
 
 if (_object isNil "KH_var_equipableObjectSet") then {
+	_object setVariable ["KH_var_equipableObjectSet", true, true];
+	
 	if (_name isEqualTo "") then {
 		_name = getText ((configOf _object) >> "displayName");
 	};
-
-	_object setVariable ["KH_var_equipableObjectSet", true, true];
 
 	[
 		[_object, false],

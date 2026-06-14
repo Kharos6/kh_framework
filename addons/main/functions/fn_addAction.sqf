@@ -685,7 +685,7 @@ private _actionHandler = [
                         private _interactionHelper = createSimpleObject ["KH_HelperSquare", getPosASL _caller, true];
                         missionNamespace setVariable [_lastProgressId, 0];
 
-                        private _durationhandler = [
+                        private _durationHandler = [
                             [
                                 _target,
                                 _menuName,
@@ -1508,7 +1508,6 @@ private _actionHandler = [
         };
 
         (missionNamespace getVariable _actionStorageId) pushBack [_parsedParent, _action];
-        nil;
     },
     [_target, false] select ((_target isEqualTo "PLAYERS") && !(_object isEqualType true)),
     true,

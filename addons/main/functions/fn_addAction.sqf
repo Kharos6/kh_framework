@@ -126,7 +126,9 @@ else {
         }
         else {
             if (_drawHint isNotEqualTo []) then {
-                _drawHint = ["ICON", _drawHint, true, [], {}];
+                if ((_drawHint param [0, ""]) isNotEqualTo "ICON") then {
+                    _drawHint = ["ICON", _drawHint, true, [], {}];
+                };
             };
         };
     };

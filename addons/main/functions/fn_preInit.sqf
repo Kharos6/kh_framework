@@ -421,7 +421,7 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 		private _surfaceBlockPower = getNumber ((configOf _unit) >> "kh_meleeSurfaceBlockPower");
 		_blockPower = _blockPower + _surfaceBlockPower;
 		private _isBlocking = (_instigator in (_unit getVariable ["KH_var_meleeBlockedUnits", []])) || (_surfaceBlockPower >= _hitBlockPower);
-		private _blocked = _isBlocking && (_blockPower >= _hitBlockPower);
+		private _blocked = _isBlocking && (_blockPower >= _hitBlockPower) && (((_position select 2) > (((getPosASLVisual _instigator) select 2) + 0.5)) || (_unit isKindOf "Man"));
 		private _parried = (_instigator in (_unit getVariable ["KH_var_meleeParriedUnits", []])) && (_parryPower >= _hitParryPower);
 
 		if _isBlocking then {
@@ -1321,21 +1321,22 @@ if isServer then {
 							[_arguments, _function, _caller, _unscheduled, _object, _present, _distance, _nearId, _unit],
 							{
 								params ["_arguments", "_function", "_caller", "_unscheduled", "_object", "_present", "_distance", "_nearId", "_unit"];
-								_this set [8, _unit getVariable ["KH_var_playerUnit", _unit]];
+								_unit = _unit getVariable ["KH_var_playerUnit", _unit];
+								_this set [8, _unit];
 
-								if !(missionNamespace getVariable _nearId) exitWith {
+								if ((isNull _object) || !(missionNamespace getVariable _nearId)) exitWith {
 									[_handlerId] call KH_fnc_removeHandler;
 								};
 								
 								if _present then {
 									if ((_unit distance _object) <= _distance) then {
-										["KH_eve_execution", [_arguments, _function, _caller, _unscheduled], _x, false] call KH_fnc_triggerCbaEvent;
+										["KH_eve_execution", [_arguments, _function, _caller, _unscheduled], _unit, false] call KH_fnc_triggerCbaEvent;
 										[_handlerId] call KH_fnc_removeHandler;
 									};
 								}
 								else {
 									if ((_unit distance _object) > _distance) then {
-										["KH_eve_execution", [_arguments, _function, _caller, _unscheduled], _x, false] call KH_fnc_triggerCbaEvent;
+										["KH_eve_execution", [_arguments, _function, _caller, _unscheduled], _unit, false] call KH_fnc_triggerCbaEvent;
 										[_handlerId] call KH_fnc_removeHandler;
 									};
 								};

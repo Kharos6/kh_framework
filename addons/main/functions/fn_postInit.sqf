@@ -333,17 +333,7 @@ isNil {
 										params ["_unit"];
 										[_unit] call KH_fnc_updateSpecialWeaponState;
 										[_unit, ""] call KH_fnc_updateMeleeState;
-
-										[
-											[_unit, clientOwner],
-											{
-												params ["_unit", "_clientOwner"];
-												_unit setVariable ["KH_var_owner", _clientOwner, true];
-											},
-											"SERVER",
-											true,
-											false
-										] call KH_fnc_execute;
+										_unit setVariable ["KH_var_owner", clientOwner, true];
 									},
 									_unit,
 									true,
@@ -1967,7 +1957,7 @@ isNil {
 
 			[
 				[], 
-				["MineGeneric", "Animal"],
+				["MineGeneric"],
 				[],
 				{
 					params ["_entity"];

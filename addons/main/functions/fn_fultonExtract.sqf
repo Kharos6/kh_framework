@@ -317,7 +317,7 @@ missionNamespace setVariable [_fultonId, false];
 								["JIP", _x, false, ""]
 							] call KH_fnc_execute;
 						};
-					} forEach (_object nearEntities ["Man", 15]);
+					} forEach (_object nearEntities ["CAManBase", 15]);
 				}
 				else {
 					[_handlerId] call KH_fnc_removeHandler;

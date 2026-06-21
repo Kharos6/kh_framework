@@ -125,7 +125,7 @@ if _state then {
 														_instigatorVisible = true;
 														break;
 													};
-												} forEach (_instigator nearEntities ["Man", 1000]);
+												} forEach (_instigator nearEntities ["CAManBase", 1000]);
 												
 												if _instigatorVisible then {
 													_instigator setVariable ["KH_var_disguiseState", false];
@@ -173,7 +173,7 @@ if _state then {
 												_instigatorVisible = true;
 												break;
 											};
-										} forEach (_player nearEntities ["Man", 1000]);
+										} forEach (_player nearEntities ["CAManBase", 1000]);
 										
 										if !_instigatorVisible then {
 											_player setVariable ["KH_var_disguiseDetected", false];
@@ -237,7 +237,7 @@ if _state then {
 									_playerVisible = true;
 									break;
 								};
-							} forEach (_player nearEntities ["Man", 1000]);
+							} forEach (_player nearEntities ["CAManBase", 1000]);
 
 							if !_playerVisible then {
 								[_player] joinSilent (createGroup [_currentSide, true]);

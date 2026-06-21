@@ -1,4 +1,9 @@
-params [["_event", "", [""]], "_arguments", ["_target", true, [true, 0, "", [], {}, objNull, teamMemberNull, grpNull, sideUnknown, locationNull]], ["_jip", false, [true, []]]];
+params [["_event", "", ["", []]], "_arguments", ["_target", true, [true, 0, "", [], {}, objNull, teamMemberNull, grpNull, sideUnknown, locationNull]], ["_jip", false, [true, []]]];
+
+if (_event isEqualType []) then {
+    _event params [["_eventName", "", [""]], ["_entity", objNull, [objNull, grpNull]]];
+    _event = ["KH_eve_entityCbaEvent", hashValue _entity, _eventName] joinString "_";
+};
 
 private _return = switch (typeName _target) do {
     case "BOOL": {

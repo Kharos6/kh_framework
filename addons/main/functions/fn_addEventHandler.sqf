@@ -34,6 +34,11 @@ if (_type isEqualType []) then {
 		_function = [_function, false] call KH_fnc_serializeFunction;
 
 		if (_eventType isNotEqualTo "DRAW_UI") then {
+			if ((_eventType isEqualTo "CBA") && !(isNil {_type param [1];})) then {
+				private _entity = _type param [1, objNull, [objNull, grpNull]];
+				_event = ["KH_eve_entityCbaEvent", hashValue _entity, _event] joinString "_";
+			};
+
 			_expression = compile ([
 				"private _args = missionNamespace getVariable '", _argumentsId, "';
 				private _eventName = missionNamespace getVariable '", _eventNameId, "';

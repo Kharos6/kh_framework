@@ -7,7 +7,7 @@ KH_var_recordedScenarioData = [];
 if _units then {
     [
         ["Man"], 
-        ["Animal"],
+        [],
         [],
         {
             params ["_unit"];

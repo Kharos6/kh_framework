@@ -19,7 +19,7 @@ if (isNil "_currentVariableHandler") then {
                     } forEach (_unit getVariable ["KH_var_respawnVariableHandler", createHashMap]);
                 },
                 true,
-                "-1",
+                "-2",
                 false
             ] call KH_fnc_execute;
         }

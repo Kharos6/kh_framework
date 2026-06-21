@@ -11,7 +11,7 @@ class Extended_InitPost_Eventhandlers
     {
         class KH_Main
         {
-            init = "[param [0], false] call KH_fnc_entityInitHandler";
+            init = "[param [0], false, objNull] call KH_fnc_entityInitHandler";
         };
     };
 };
@@ -21,7 +21,7 @@ class Extended_Respawn_Eventhandlers
     {
         class KH_Main
         {
-            respawn = "[param [0], true] call KH_fnc_entityInitHandler";
+            respawn = "[param [0], true, param [1]] call KH_fnc_entityInitHandler";
         };
     };
 };

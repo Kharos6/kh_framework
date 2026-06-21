@@ -317,11 +317,12 @@ isNil {
 						};
 
 						if KH_var_medical then {
-							[["CAManBase"], [], KH_fnc_medicalSetup, true] call KH_fnc_entityInit;
+							[["CAManBase"], [], [], KH_fnc_medicalSetup, true] call KH_fnc_entityInit;
 						};
 
 						[
 							["Man"],
+							[],
 							[],
 							{
 								params ["_unit"];
@@ -1966,7 +1967,8 @@ isNil {
 
 			[
 				[], 
-				["MineGeneric", "Animal"], 
+				["MineGeneric", "Animal"],
+				[],
 				{
 					params ["_entity"];
 

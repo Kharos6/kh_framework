@@ -8,6 +8,7 @@ if _units then {
     [
         ["Man"], 
         ["Animal"],
+        [],
         {
             params ["_unit"];
 
@@ -74,6 +75,7 @@ if _objects then {
     [
         [], 
         ["Man", "MineGeneric", "Logic", "EmptyDetector"],
+        [],
         {
             params ["_object"];
 

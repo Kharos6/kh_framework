@@ -1,12 +1,12 @@
-params [["_entity", objNull, [objNull]], ["_respawn", false, [true]]];
+params [["_entity", objNull, [objNull]], ["_respawn", false, [true]], ["_previousEntity", objNull, [objNull]]];
 
 [
-    [_entity, _respawn],
+    [_entity, _respawn, _previousEntity],
     {
-        params ["_entity", "_respawn"];
+        params ["_entity", "_respawn", "_previousEntity"];
 
         {
-            _x params ["_typeInclude", "_typeExclude", "_function", "_id", "_blockerId"];
+            _x params ["_typeInclude", "_typeExclude", "_args", "_function", "_id", "_blockerId"];
             
             if (!_respawn && (_entity getVariable [_blockerId, false])) then {
                 continue;
@@ -49,7 +49,7 @@ params [["_entity", objNull, [objNull]], ["_respawn", false, [true]]];
                 continue;
             };
 
-            [_entity] call _function;
+            [_entity, _respawn, _previousEntity] call _function;
         } forEach KH_var_entityInitializations;
     },
     [true, "GLOBAL"] select _respawn,

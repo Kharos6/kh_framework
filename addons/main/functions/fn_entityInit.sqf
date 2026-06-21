@@ -1,8 +1,8 @@
-params [["_typeInclude", [], [[]]], ["_typeExclude", [], [[]]], ["_function", {}, [{}]], ["_applyRetroactively", true, [true]]];
+params [["_typeInclude", [], [[]]], ["_typeExclude", [], [[]]], "_args", ["_function", {}, [{}]], ["_applyRetroactively", true, [true]]];
 private _initId = generateUid;
 private _blockerId = generateUid;
 missionNamespace setVariable [_initId, true];
-KH_var_entityInitializations pushBack [_typeInclude, _typeExclude, _function, _initId, _blockerId];
+KH_var_entityInitializations pushBack [_typeInclude, _typeExclude, _args, _function, _initId, _blockerId];
 
 if _applyRetroactively then {
     {
@@ -11,7 +11,7 @@ if _applyRetroactively then {
         };
 
         _x setVariable [_blockerId, true];
-        [_x] call _function;
+        [_x, false, objNull] call _function;
     } forEach (entities [_typeInclude, _typeExclude, true, false]);
 };
 

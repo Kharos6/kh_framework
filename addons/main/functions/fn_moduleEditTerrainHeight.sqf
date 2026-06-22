@@ -1,16 +1,18 @@
 isNil {
     params [["_mode", "", [""]], ["_input", [], [[]]]];
 
-    if (isNil "KH_var_allModifiedTerrain") then {
-        KH_var_allModifiedTerrain = createHashMap;
-    };
+    if is3DEN then {
+        if (isNil "KH_var_allModifiedTerrain") then {
+            KH_var_allModifiedTerrain = createHashMap;
+        };
 
-    if (isNil "KH_var_allTerrainModifierModules") then {
-        KH_var_allTerrainModifierModules = [];
-    };
+        if (isNil "KH_var_allTerrainModifierModules") then {
+            KH_var_allTerrainModifierModules = [];
+        };
 
-    if !((_input select 0) in KH_var_allTerrainModifierModules) then {
-        KH_var_allTerrainModifierModules pushBack (_input select 0);
+        if !((_input select 0) in KH_var_allTerrainModifierModules) then {
+            KH_var_allTerrainModifierModules pushBack (_input select 0);
+        };
     };
 
     switch _mode do {

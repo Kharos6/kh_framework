@@ -27,6 +27,9 @@ class CfgFunctions
 			class conditionalPresence {headerType = -1;};
 			class convertToAgent {headerType = -1;};
 			class convertToSimpleObject {headerType = -1;};
+			class createAudioEmitter {headerType = -1;};
+			class createLightEmitter {headerType = -1;};
+			class createParticleEmitter {headerType = -1;};
 			class deleteArrayElements {headerType = -1;};
 			class diagnostics {headerType = -1;};
 			class displaySubtitle {headerType = -1;};
@@ -46,6 +49,7 @@ class CfgFunctions
 			class execute {headerType = -1;};
 			class filterPlayerEquipment {headerType = -1;};
 			class fultonExtract {headerType = -1;};
+			class getCloudletParameters {headerType = -1;};
 			class getConfigValue {headerType = -1;};
 			class getCurrentWeaponSlot {headerType = -1;};
 			class getDestinationTime {headerType = -1;};
@@ -55,6 +59,7 @@ class CfgFunctions
 			class getGroupAttributes {headerType = -1;};
 			class getHeadViewTarget {headerType = -1;};
 			class getLatency {headerType = -1;};
+			class getLightParameters {headerType = -1;};
 			class getMissionAttributes {headerType = -1;};
 			class getMouseTarget {headerType = -1;};
 			class getNormalizedScreenTransforms {headerType = -1;};
@@ -101,6 +106,7 @@ class CfgFunctions
 			class moduleFultonExtract {headerType = -1;};
 			class moduleInitializeStt {headerType = -1;};
 			class moduleInitializeTts {headerType = -1;};
+			class moduleParticleEmitter {headerType = -1;};
 			class modulePlayRecordedMission {headerType = -1;};
 			class moduleRecordMission {headerType = -1;};
 			class moduleTeleporter {headerType = -1;};

@@ -1,7 +1,7 @@
 class KH_VisualTriggerScreenPercentage: Slider
 {
 	attributeLoad = "[_this controlsgroupctrl 100, _this controlsgroupctrl 101, '%', _value] call BIS_fnc_initSliderValue;";
-	attributeSave = "sliderposition (_this controlsGroupCtrl 100)";
+	attributeSave = "sliderposition (_this controlsGroupCtrl 100);";
     onLoad = "_ctrlGroup = _this select 0; [_ctrlGroup controlsgroupctrl 100, _ctrlGroup controlsgroupctrl 101, '%'] call BIS_fnc_initSliderValue;";
 	h = QUOTE(CTRL_DEFAULT_H + 2 * pixelH);
 	class Controls: Controls

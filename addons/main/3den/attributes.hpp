@@ -15,6 +15,13 @@ class Attributes
 			class Title;
 		};
 	};
+	class Combo: Title
+	{
+		class Controls
+		{
+			class Title;
+		};
+	};
 	class SubCategoryNoHeader1: Default
 	{
 		class Controls
@@ -234,6 +241,7 @@ class Attributes
 	#include "\x\kh\addons\main\3den\at_khEngineeringSettings.hpp"
 	#include "\x\kh\addons\main\3den\at_khMedicalSettings.hpp"
 	#include "\x\kh\addons\main\3den\at_objectPersistencySettings.hpp"
+	#include "\x\kh\addons\main\3den\at_particleEmitterDropdown.hpp"
 	#include "\x\kh\addons\main\3den\at_persistency.hpp"
 	#include "\x\kh\addons\main\3den\at_persistentInit.hpp"
 	#include "\x\kh\addons\main\3den\at_sideRelations.hpp"

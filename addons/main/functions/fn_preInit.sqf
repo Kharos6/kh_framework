@@ -48,6 +48,14 @@ KH_var_viewTargetCheckFrame = 0;
 KH_var_weaponTargetCheckFrame = 0;
 KH_var_allAddedDisplays = [];
 KH_var_allLocalEntities = [];
+KH_var_cloudletParameterCache = createHashMap;
+KH_var_lightParameterCache = createHashMap;
+
+KH_var_particleClassCache = (("true" configClasses (configFile >> "CfgCloudlets")) + (("true" configClasses configFile) select {
+	(isText (_x >> "simulation")) && (isText (_x >> "type")) && (isNumber (_x >> "intensity")) && (isNumber (_x >> "lifeTime")) && (isNumber (_x >> "interval")) && (isArray (_x >> "position"));
+}));
+
+KH_var_particleClassCache sort true;
 ["CBA", "KH_eve_execution", [], KH_fnc_callSerializedFunction] call KH_fnc_addEventHandler;
 
 [

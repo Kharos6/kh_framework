@@ -20,6 +20,13 @@ class KH_ModuleParticleEmitter: Module_F
 	icon = "iconmodule";
 	class Attributes: AttributesBase
 	{
+		class KH_ModuleParticleEmitterShow: Checkbox
+		{
+			displayName = "Show";
+			tooltip = "True shows the particle in the editor.";
+			property = "KH_ModuleParticleEmitterShow";
+			defaultValue = "true";
+		};
 		class KH_ModuleParticleEmitterParticle: Default
 		{
 			control = "KH_ParticleEmitterDropdown";

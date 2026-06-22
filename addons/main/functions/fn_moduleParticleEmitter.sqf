@@ -2,10 +2,6 @@ isNil {
     params [["_mode", "", [""]], ["_input", [], [[]]]];
     
     if is3DEN then {
-        if (isNil "KH_var_allTiedEntities") then {
-            KH_var_allTiedEntities = [];
-        };
-
         if (isNil "KH_var_cloudletParameterCache") then {
             KH_var_cloudletParameterCache = createHashMap;
         };
@@ -38,42 +34,48 @@ isNil {
             _input params [["_logic", objNull, [objNull]]];
             
             {
-                _x params ["_entity", "_tiedEntity"];
-                
-                if (_entity isEqualTo _logic) then {
-                    deleteVehicle _tiedEntity;
-                };
-            } forEach KH_var_allTiedEntities;
+                deleteVehicle _x;
+            } forEach (_logic getVariable ["KH_var_allTiedEntities", []]);
         };
 
         default {
             _input params [["_logic", objNull, [objNull]]];
+
+            if (_logic isNil "KH_var_allTiedEntities") then {
+                _logic setVariable ["KH_var_allTiedEntities", []];
+            };
+
+            private _show = (_logic get3DENAttribute "KH_ModuleParticleEmitterShow") select 0;
+
+            if !_show exitWith {
+                _logic setVariable ["KH_var_particleShow", _show];
+                
+                {
+                    deleteVehicle _x;
+                } forEach (_logic getVariable ["KH_var_allTiedEntities", []]);
+            };
+
             private _particle = ((_logic get3DENAttribute "KH_ModuleParticleEmitterParticle") select 0) select 0;
+            private _duration = parseNumber ((_logic get3DENAttribute "KH_ModuleParticleEmitterDuration") select 0);
             private _position = getPosATL _logic;
 
             {
-                _x params ["_entity", "_tiedEntity"];
-                
-                if (_entity isEqualTo _logic) then {
-                    _tiedEntity setPosATL _position;
-                };
-            } forEach KH_var_allTiedEntities;
+                _x setPosATL _position;
+            } forEach (_logic getVariable ["KH_var_allTiedEntities", []]);
 
-            if ((_logic getVariable ["KH_var_particleClass", ""]) isNotEqualTo _particle) then {
+            if (((_logic getVariable ["KH_var_particleClass", ""]) isNotEqualTo _particle) || (_duration isNotEqualTo (_logic getVariable ["KH_var_particleDuration", 0])) || (_show isNotEqualTo (_logic getVariable ["KH_var_particleShow", false]))) then {
+                _logic setVariable ["KH_var_particleShow", _show];
                 _logic setVariable ["KH_var_particleClass", _particle];
+                _logic setVariable ["KH_var_particleDuration", _duration];
 
                 {
-                    _x params ["_entity", "_tiedEntity"];
-                    
-                    if (_entity isEqualTo _logic) then {
-                        deleteVehicle _tiedEntity;
-                    };
-                } forEach KH_var_allTiedEntities;
+                    deleteVehicle _x;
+                } forEach (_logic getVariable ["KH_var_allTiedEntities", []]);
 
                 if (isClass (configFile >> "CfgCloudlets" >> _particle)) then {
                     private _parameters = [configFile >> "CfgCloudlets" >> _particle] call KH_fnc_getCloudletParameters;
                     private _particleEffect = createVehicleLocal ["#particlesource", _position, [], 0, "CAN_COLLIDE"];
-                    KH_var_allTiedEntities pushBack [_logic, _particleEffect];
+                    (_logic getVariable ["KH_var_allTiedEntities", []]) pushBack _particleEffect;
                     (_parameters select 0) set [18, _particleEffect];
                     _particleEffect setParticleParams (_parameters select 0);
                     _particleEffect setParticleRandom (_parameters select 1);
@@ -85,7 +87,7 @@ isNil {
                         if ((toLowerANSI (getText (_x >> "simulation"))) isEqualTo "particles") then {
                             private _parameters = [configFile >> "CfgCloudlets" >> (getText (_x >> "type"))] call KH_fnc_getCloudletParameters;
                             private _particleEffect = createVehicleLocal ["#particlesource", _position, [], 0, "CAN_COLLIDE"];
-                            KH_var_allTiedEntities pushBack [_logic, _particleEffect];
+                            (_logic getVariable ["KH_var_allTiedEntities", []]) pushBack _particleEffect;
                             (_parameters select 0) set [18, _particleEffect];
                             _particleEffect setParticleParams (_parameters select 0);
                             _particleEffect setParticleRandom (_parameters select 1);
@@ -95,7 +97,7 @@ isNil {
                         else {
                             private _parameters = [configFile >> "CfgLights" >> (getText (_x >> "type"))] call KH_fnc_getLightParameters;
                             private _light = createVehicleLocal ["#lightpoint", _position, [], 0, "CAN_COLLIDE"];
-                            KH_var_allTiedEntities pushBack [_logic, _light];
+                            (_logic getVariable ["KH_var_allTiedEntities", []]) pushBack _light;
                             _light setLightColor (_parameters select 0);
                             _light setLightAmbient ((_parameters select 1) select [0, 3]);
                             _light setLightIntensity (_parameters select 2);
@@ -107,6 +109,17 @@ isNil {
                             _light setLightAttenuation (_parameters select 8);
                         };
                     } forEach ("true" configClasses (configFile >> _particle));
+                };
+
+                if (_duration isNotEqualTo 0) then {
+                    [_logic, _duration, +(_logic getVariable ["KH_var_allTiedEntities", []])] spawn {
+                        params ["_logic", "_duration", "_entities"];
+                        sleep _duration;
+
+                        {
+                            deleteVehicle _x;
+                        } forEach _entities;
+                    };
                 };
             };
         };

@@ -23,7 +23,7 @@ missionNamespace setVariable [_particleId, true, true];
             params ["_source", "_particle", "_duration", "_circleParameters", "_conditionArguments", "_conditionFunction", "_particleId"];
             if (!(missionNamespace getVariable _particleId) || !(_conditionArguments call _conditionFunction)) exitWith {};
             private _startingPosition = _source;
-            private _entity = objNull;;
+            private _entity = objNull;
             private _selection = "";
             private _trackingPosition = [0, 0, 0];
 

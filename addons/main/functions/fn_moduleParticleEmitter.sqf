@@ -2,14 +2,6 @@ isNil {
     params [["_mode", "", [""]], ["_input", [], [[]]]];
     
     if is3DEN then {
-        if (isNil "KH_var_particleClassCache") then {
-            KH_var_particleClassCache = (("true" configClasses (configFile >> "CfgCloudlets")) + (("true" configClasses configFile) select {
-                (isText (_x >> "simulation")) && (isText (_x >> "type")) && (isNumber (_x >> "intensity")) && (isNumber (_x >> "lifeTime")) && (isNumber (_x >> "interval")) && (isArray (_x >> "position"));
-            })); 
-
-            KH_var_particleClassCache sort true;
-        };
-
         if (isNil "KH_var_allTiedEntities") then {
             KH_var_allTiedEntities = [];
         };
@@ -31,7 +23,7 @@ isNil {
             if _activated then {
                 [
                     _logic, 
-                    configName (KH_var_particleClassCache select (_logic getVariable ["KH_ModuleParticleEmitterParticle", 0])),
+                    (_logic getVariable ["KH_ModuleParticleEmitterParticle", []]) select 0,
                     parseNumber (_logic getVariable ["KH_ModuleParticleEmitterDuration", "0"]),
                     [],
                     [_logic],
@@ -56,8 +48,7 @@ isNil {
 
         default {
             _input params [["_logic", objNull, [objNull]]];
-            private _particle = (_logic get3DENAttribute "KH_ModuleParticleEmitterParticle") select 0;
-            _particle = configName (KH_var_particleClassCache select _particle);
+            private _particle = ((_logic get3DENAttribute "KH_ModuleParticleEmitterParticle") select 0) select 0;
             private _position = getPosATL _logic;
 
             {

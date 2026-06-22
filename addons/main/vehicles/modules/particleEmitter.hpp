@@ -26,7 +26,7 @@ class KH_ModuleParticleEmitter: Module_F
 			displayName = "";
 			tooltip = "";
 			property = "KH_ModuleParticleEmitterParticle";
-			defaultValue = "";
+			defaultValue = "['', 0]";
 		};
 		class KH_ModuleParticleEmitterDuration: Edit
 		{

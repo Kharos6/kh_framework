@@ -169,91 +169,82 @@ static game_value execute_lua_sqf(game_value_parameter args, game_value_paramete
             return raw_call_sqf_args_native(g_compiled_sqf_execute_lua, game_value(std::move(sqf_params)));
         }
         
-        // Local execution - handle CODE or STRING type
-        std::string code_str;
-        
-        if (code_or_function.type_enum() == game_data_type::CODE) {
-            auto code_data = code_or_function.get_as<game_data_code>();
-            code_str = static_cast<std::string>(code_data->code_string);
+        sol::protected_function func;
+        auto* source_ptr = code_or_function.data.get();
+        uintptr_t source_key = reinterpret_cast<uintptr_t>(source_ptr);
+        auto exec_it = source_ptr ? g_local_exec_cache.find(source_key) : g_local_exec_cache.end();
+
+        if (exec_it != g_local_exec_cache.end()) {
+            func = exec_it->second.func;
         } else {
-            code_str = static_cast<std::string>(code_or_function);
+            std::string code_str;
+
+            if (code_or_function.type_enum() == game_data_type::CODE) {
+                auto code_data = code_or_function.get_as<game_data_code>();
+                code_str = static_cast<std::string>(code_data->code_string);
+            } else {
+                code_str = static_cast<std::string>(code_or_function);
+            }
+
+            // Bare global function name vs. arbitrary code.
+            if (code_str.find(' ') == std::string::npos && code_str.find('(') == std::string::npos) {
+                auto cache_it = g_call_cache.find(code_str);
+
+                if (cache_it != g_call_cache.end()) {
+                    func = cache_it->second.func;
+                } else {
+                    func = (*g_lua_state)[code_str];
+
+                    if (!func.valid()) {
+                        report_error("Function '" + code_str + "' not found");
+                        return game_value();
+                    }
+
+                    g_call_cache[code_str] = {code_str, func, true};
+                }
+            } else {
+                size_t code_hash = std::hash<std::string>{}(code_str);
+                auto code_it = g_code_cache.find(code_hash);
+
+                if (code_it != g_code_cache.end()) {
+                    func = code_it->second;
+                } else {
+                    code_str = Lua_Compilation::preprocess_lua_operators(code_str);
+                    sol::load_result load_res = g_lua_state->load("return function(...) " + code_str + " end");
+
+                    if (!load_res.valid()) {
+                        sol::error err = load_res;
+                        report_error(std::string(err.what()));
+                        return game_value();
+                    }
+
+                    sol::protected_function factory = load_res;
+                    auto factory_result = factory();
+
+                    if (!factory_result.valid()) {
+                        sol::error err = factory_result;
+                        report_error("Failed to create function: " + std::string(err.what()));
+                        return game_value();
+                    }
+
+                    func = factory_result;
+                    g_code_cache[code_hash] = func;
+                }
+            }
+
+            if (source_ptr && g_local_exec_cache.size() < LUA_LOCAL_EXEC_CACHE_MAX) {
+                g_local_exec_cache[source_key] = LuaLocalExecCache{ func, code_or_function };
+            }
         }
 
-        // Check if it's a function call or arbitrary code execution
         sol::protected_function_result result;
-        
-        if (code_str.find(' ') == std::string::npos && code_str.find('(') == std::string::npos) {
-            // Try to get the function from cache or global namespace
-            auto cache_it = g_call_cache.find(code_str);
-            sol::protected_function func;
-            
-            if (cache_it != g_call_cache.end()) {
-                func = cache_it->second.func;
-            } else {
-                func = (*g_lua_state)[code_str];
 
-                if (!func.valid()) {
-                    report_error("Function '" + code_str + "' not found");
-                    return game_value();
-                }
-                
-                g_call_cache[code_str] = {code_str, func, true};
-            }
-            
-            if (args.type_enum() == game_data_type::ARRAY) {
-                // Unpack array
-                auto& arr = args.to_array();
-                std::vector<sol::object> arg_vec;
-                arg_vec.reserve(arr.size());
+        if (args.type_enum() == game_data_type::ARRAY) {
+            auto& arr = args.to_array();
 
-                for (size_t i = 0; i < arr.size(); i++) {
-                    arg_vec.push_back(convert_game_value_to_lua(arr[i]));
-                }
-
-                if (arg_vec.empty()) {
-                    result = func();
-                } else {
-                    result = func(sol::as_args(arg_vec));
-                }
-            } else if (args.is_nil()) {
+            if (arr.empty()) {
                 result = func();
             } else {
-                result = func(convert_game_value_to_lua(args));
-            }
-        } else {
-            // Execute code with arguments in scope
-            size_t code_hash = std::hash<std::string>{}(code_str);
-            auto code_it = g_code_cache.find(code_hash);
-            sol::protected_function compiled_code;
-            
-            if (code_it != g_code_cache.end()) {
-                compiled_code = code_it->second;
-            } else {
-                code_str = Lua_Compilation::preprocess_lua_operators(code_str);
-                sol::load_result load_res = g_lua_state->load("return function(...) " + code_str + " end");
-
-                if (!load_res.valid()) {
-                    sol::error err = load_res;
-                    report_error(std::string(err.what()));
-                    return game_value();
-                }
-                
-                sol::protected_function factory = load_res;
-                auto factory_result = factory();
-
-                if (!factory_result.valid()) {
-                    sol::error err = factory_result;
-                    report_error("Failed to create function: " + std::string(err.what()));
-                    return game_value();
-                }
-                
-                compiled_code = factory_result;
-                g_code_cache[code_hash] = compiled_code;
-            }
-            
-            if (args.type_enum() == game_data_type::ARRAY) {
-                // Unpack array
-                auto& arr = args.to_array();
                 std::vector<sol::object> arg_vec;
                 arg_vec.reserve(arr.size());
 
@@ -261,16 +252,12 @@ static game_value execute_lua_sqf(game_value_parameter args, game_value_paramete
                     arg_vec.push_back(convert_game_value_to_lua(arr[i]));
                 }
 
-                if (arg_vec.empty()) {
-                    result = compiled_code();
-                } else {
-                    result = compiled_code(sol::as_args(arg_vec));
-                }
-            } else if (args.is_nil()) {
-                result = compiled_code();
-            } else {
-                result = compiled_code(convert_game_value_to_lua(args));
+                result = func(sol::as_args(arg_vec));
             }
+        } else if (args.is_nil()) {
+            result = func();
+        } else {
+            result = func(convert_game_value_to_lua(args));
         }
         
         if (!result.valid()) {

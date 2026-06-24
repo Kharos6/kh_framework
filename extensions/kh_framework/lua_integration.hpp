@@ -9,6 +9,13 @@ struct LuaCallCache {
     bool is_valid;
 };
 
+struct LuaLocalExecCache {
+    sol::protected_function func;
+    game_value source;
+};
+
+static constexpr size_t LUA_LOCAL_EXEC_CACHE_MAX = 65536;
+static std::unordered_map<uintptr_t, LuaLocalExecCache> g_local_exec_cache;
 static std::unique_ptr<sol::state> g_lua_state;
 static std::unordered_map<std::string, LuaCallCache> g_call_cache;
 static std::unordered_map<size_t, sol::protected_function> g_code_cache;
@@ -2316,6 +2323,7 @@ static void initialize_lua_state() {
 
 static void clean_lua_state() {
     g_call_cache.clear();
+    g_local_exec_cache.clear();
     g_code_cache.clear();
     g_sqf_compiled_cache.clear();
     g_sqf_function_cache.clear();

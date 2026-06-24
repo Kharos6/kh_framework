@@ -1,11 +1,11 @@
 local array = ...
-local result = 0
+local result = 1
 
 for i, value in pairs(array) do
     if type(value) == "number" then
-        result = result + value
+        result = result * value
     elseif type(value) == "table" then
-        result = result + KH_arraySum(value)
+        result = result * KH_arrayProduct(value)
     end
 end
 

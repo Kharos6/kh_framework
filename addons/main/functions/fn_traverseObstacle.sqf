@@ -1,5 +1,5 @@
 params [["_unit", objNull, [objNull]]];
-if ((getNumber (configFile >> (getText ((configOf _unit) >> "moves")) >> "states" >> (animationState _unit) >> "kh_traversal")) isEqualTo 1) exitWith {};
+if ((getNumber ((_unit getVariable ["KH_var_movesStatesConfig", configNull]) >> (animationState _unit) >> "kh_traversal")) isEqualTo 1) exitWith {};
 private _currentPosition = getPosASLVisual _unit;
 private _unitPositionHeight = _currentPosition select 2;
 private _bounds = (boundingBoxReal [_unit, "Geometry"]) select 1;

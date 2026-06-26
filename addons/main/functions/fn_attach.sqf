@@ -229,7 +229,7 @@ if _softAttach exitWith {
                 private _currentMovementVelocity = _entity vectorModelToWorldVisual ((_movesInfo select 4) vectorMultiply (-1 / (_movesInfo select 2)));
                 
                 if ((animationState _entity) isEqualTo (_entity getVariable ["KH_var_attachCurrentAnimationState", ""])) then {
-                    _entity setVariable ["KH_var_attachAnimationBlend", ((_entity getVariable ["KH_var_attachAnimationBlend", 0]) + (_totalDelta * (getNumber (configFile >> (getText ((configOf _entity) >> "moves")) >> "states" >> (animationState _entity) >> "interpolationSpeed")))) min 1];
+                    _entity setVariable ["KH_var_attachAnimationBlend", ((_entity getVariable ["KH_var_attachAnimationBlend", 0]) + (_totalDelta * (getNumber ((_entity getVariable ["KH_var_movesStatesConfig", configNull]) >> (animationState _entity) >> "interpolationSpeed")))) min 1];
                 }
                 else {
                     _entity setVariable ["KH_var_attachCurrentAnimationState", animationState _entity];

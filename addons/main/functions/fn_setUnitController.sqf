@@ -44,7 +44,6 @@ _unit setVariable ["KH_var_unitControllerId", _id, true];
 
             _unit setVariable ["KH_var_preUnitControllerAnimationFeature", _unit checkAIFeature "ANIM"];
             _unit enableAIFeature ["ANIM", false];
-            private _moves = getText ((configOf _unit) >> "moves");
 
             _unit setVariable [
                 "KH_var_unitControllerHandler",
@@ -57,8 +56,8 @@ _unit setVariable ["KH_var_unitControllerId", _id, true];
                         "",
                         false,
                         true,
-                        configFile >> _moves >> "Actions", 
-                        configFile >> _moves >> "states",
+                        (_unit getVariable ["KH_var_movesActionsConfig", configNull]), 
+                        (_unit getVariable ["KH_var_movesStatesConfig", configNull]),
                         _turningSpeed, 
                         _stopTurnThreshold,
                         _acceptedDeviationAngle, 

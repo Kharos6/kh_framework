@@ -2077,9 +2077,8 @@ isNil {
 												};
 												
 												if ((abs ((((_unit getRelDir _closestTarget) + 180) % 360) - 180)) <= 2.5) then {
-													private _moves = getText ((configOf _closestTarget) >> "moves");
-													private _moveAction = getText (configFile >> _moves >> "states" >> (animationState _closestTarget) >> "kh_meleeMainAction");
-													private _gestureAction = getText (configFile >> (getText (configFile >> _moves >> "gestures")) >> "states" >> (gestureState _closestTarget) >> "kh_meleeMainAction");
+													private _moveAction = getText ((_closestTarget getVariable ["KH_var_movesStatesConfig", configNull]) >> (animationState _closestTarget) >> "kh_meleeMainAction");
+													private _gestureAction = getText ((_closestTarget getVariable ["KH_var_gesturesStatesConfig", configNull]) >> (gestureState _closestTarget) >> "kh_meleeMainAction");
 													private _finalAction = [_gestureAction, _moveAction] select (_moveAction isNotEqualTo "");
 
 													isNil {
@@ -2371,9 +2370,8 @@ isNil {
 														};
 													};
 
-													private _moves = getText ((configOf _closestTarget) >> "moves");
-													private _moveAction = getText (configFile >> _moves >> "states" >> (animationState _closestTarget) >> "kh_meleeMainAction");
-													private _gestureAction = getText (configFile >> (getText (configFile >> _moves >> "gestures")) >> "states" >> (gestureState _closestTarget) >> "kh_meleeMainAction");
+													private _moveAction = getText ((_closestTarget getVariable ["KH_var_movesStatesConfig", configNull]) >> (animationState _closestTarget) >> "kh_meleeMainAction");
+													private _gestureAction = getText ((_closestTarget getVariable ["KH_var_gesturesStatesConfig", configNull]) >> (gestureState _closestTarget) >> "kh_meleeMainAction");
 													private _finalAction = [_gestureAction, _moveAction] select (_moveAction isNotEqualTo "");
 
 													isNil {
@@ -2471,9 +2469,8 @@ isNil {
 													};
 													
 													if ((abs ((((_unit getRelDir _closestTarget) + 180) % 360) - 180)) <= 2.5) then {
-														private _moves = getText ((configOf _closestTarget) >> "moves");
-														private _moveAction = getText (configFile >> _moves >> "states" >> (animationState _closestTarget) >> "kh_meleeMainAction");
-														private _gestureAction = getText (configFile >> (getText (configFile >> _moves >> "gestures")) >> "states" >> (gestureState _closestTarget) >> "kh_meleeMainAction");
+														private _moveAction = getText ((_closestTarget getVariable ["KH_var_movesStatesConfig", configNull]) >> (animationState _closestTarget) >> "kh_meleeMainAction");
+														private _gestureAction = getText ((_closestTarget getVariable ["KH_var_gesturesStatesConfig", configNull]) >> (gestureState _closestTarget) >> "kh_meleeMainAction");
 														private _finalAction = [_gestureAction, _moveAction] select (_moveAction isNotEqualTo "");
 
 														isNil {

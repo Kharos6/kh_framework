@@ -11,5 +11,5 @@ if (
     false;
 }
 else {
-    (getNumber (configFile >> (getText ((configOf _unit) >> "moves")) >> "states" >> (animationState _unit) >> "disableWeaponsLong")) isEqualTo 0;
+    (getNumber ((_unit getVariable ["KH_var_movesStatesConfig", configNull]) >> (animationState _unit) >> "disableWeaponsLong")) isEqualTo 0;
 };

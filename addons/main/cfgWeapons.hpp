@@ -33,6 +33,7 @@ class CfgWeapons
         reloadAction = "";
         modes[] = {"DefaultMode"};
         kh_meleeWeapon = 1;
+        kh_meleeController = 1;
         class Eventhandlers {};
         class Library
         {

@@ -470,7 +470,7 @@ if (
                         [_handlerId] call KH_fnc_removeHandler;
                     };
 
-                    private _moveType = [[_unit] call KH_fnc_getUnitMoveType, (["ARMA_STRING", [true, true, false]] call KH_fnc_getPlayerMoveInput) select 0] joinString "";
+                    private _moveType = [[_unit, true] call KH_fnc_getUnitMoveType, (["ARMA_STRING", [true, true, false]] call KH_fnc_getPlayerMoveInput) select 0] joinString "";
 
                     if (_moveType isEqualTo "STOP") then {
                         if ((_animationState isNotEqualTo _finalAnimation) && (_currentInterruptableAnimation isNotEqualTo "")) then {

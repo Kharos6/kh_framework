@@ -1794,44 +1794,6 @@ namespace LuaFunctions {
         }
     }
 
-    static sol::object switch_case(sol::object value, sol::table cases) {
-        try {
-            LuaStackGuard guard(*g_lua_state);
-            sol::state_view lua(value.lua_state());
-            
-            // Try to find exact match first
-            sol::object case_handler = cases[value];
-            
-            if (case_handler.valid() && case_handler.get_type() == sol::type::function) {
-                sol::protected_function func = case_handler;
-                auto result = func();
-
-                if (result.valid()) {
-                    return result.get<sol::object>();
-                }
-
-                return sol::nil;
-            }
-            
-            // No match found, try default
-            sol::object default_handler = cases["default"];
-
-            if (default_handler.valid() && default_handler.get_type() == sol::type::function) {
-                sol::protected_function func = default_handler;
-                auto result = func();
-
-                if (result.valid()) {
-                    return result.get<sol::object>();
-                }
-            }
-            
-            return sol::nil;
-        } catch (const std::exception& e) {
-            report_error("Failed to switch statement: " + std::string(e.what()));
-            return sol::nil;
-        }
-    }
-
     static std::string generate_random_string(int length, sol::optional<bool> use_numbers, 
                                              sol::optional<bool> use_letters, 
                                              sol::optional<bool> use_symbols) {
@@ -1976,8 +1938,8 @@ static void initialize_lua_state() {
                 for (auto arg : args) {
                     if (!first) ss << "\t";
                     first = false;
-                    
                     sol::object obj = arg;
+                    
                     switch (obj.get_type()) {
                         case sol::type::nil:
                             ss << "nil";
@@ -2151,7 +2113,6 @@ static void initialize_lua_state() {
         util_table["generateUid"] = LuaFunctions::generate_uid;
         util_table["getDataType"] = LuaFunctions::get_data_type;
         util_table["withSqf"] = LuaFunctions::with_sqf;
-        util_table["switch"] = LuaFunctions::switch_case;
         util_table["removeHandler"] = LuaFunctions::remove_handler;
         
         kh_data_table["write"] = sol::overload(

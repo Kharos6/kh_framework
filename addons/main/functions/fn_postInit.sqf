@@ -454,7 +454,6 @@ isNil {
 															_isMove,
 															_moveVector,
 															_moveThreshold,
-															getPosWorldVisual _unit,
 															_avoidCollision,
 															false,
 															configFile >> "CfgKHMeleeTypes" >> (_unit getVariable ["KH_var_meleeType", ""]),
@@ -487,7 +486,6 @@ isNil {
 																"_isMove",
 																"_moveVector",
 																"_moveThreshold",
-																"_correctedPosition",
 																"_avoidCollision",
 																"_collided",
 																"_meleeTypeConfig",
@@ -545,17 +543,14 @@ isNil {
 																if !_vectorCorrected then {
 																	if _avoidCollision then {
 																		if _collided then {
-																			_unit setPosWorld _correctedPosition;
+																			_unit setVelocity [0, 0, 0];
 																		}
 																		else {
 																			private _currentPosition = getPosWorldVisual _unit;
 
 																			if (((_currentPosition vectorDiff _moveThreshold) vectorDotProduct (vectorNormalized _moveVector)) >= 0) then {
-																				private _direction = vectorNormalized _moveVector;
-																				private _correction = _currentPosition vectorAdd (_direction vectorMultiply -((_currentPosition vectorDiff _moveThreshold) vectorDotProduct _direction));
-																				_unit setPosWorld _correction;
-																				_this set [9, true];
-																				_this set [7, _correction];
+																				_this set [8, true];
+																				_unit setVelocity [0, 0, 0];
 																			};
 																		};
 
@@ -582,7 +577,7 @@ isNil {
 																			) min 1
 																		);
 
-																		_this set [25, true];
+																		_this set [24, true];
 																	};
 
 																	if (_time >= _start) then {
@@ -713,17 +708,14 @@ isNil {
 																if !_vectorCorrected then {
 																	if _avoidCollision then {
 																		if _collided then {
-																			_unit setPosWorld _correctedPosition;
+																			_unit setVelocity [0, 0, 0];
 																		}
 																		else {
 																			private _currentPosition = getPosWorldVisual _unit;
 
 																			if (((_currentPosition vectorDiff _moveThreshold) vectorDotProduct (vectorNormalized _moveVector)) >= 0) then {
-																				private _direction = vectorNormalized _moveVector;
-																				private _correction = _currentPosition vectorAdd (_direction vectorMultiply -((_currentPosition vectorDiff _moveThreshold) vectorDotProduct _direction));
-																				_unit setPosWorld _correction;
-																				_this set [9, true];
-																				_this set [7, _correction];
+																				_this set [8, true];
+																				_unit setVelocity [0, 0, 0];
 																			};
 																		};
 
@@ -777,17 +769,14 @@ isNil {
 																if !_vectorCorrected then {
 																	if _avoidCollision then {
 																		if _collided then {
-																			_unit setPosWorld _correctedPosition;
+																			_unit setVelocity [0, 0, 0];
 																		}
 																		else {
 																			private _currentPosition = getPosWorldVisual _unit;
 
 																			if (((_currentPosition vectorDiff _moveThreshold) vectorDotProduct (vectorNormalized _moveVector)) >= 0) then {
-																				private _direction = vectorNormalized _moveVector;
-																				private _correction = _currentPosition vectorAdd (_direction vectorMultiply -((_currentPosition vectorDiff _moveThreshold) vectorDotProduct _direction));
-																				_unit setPosWorld _correction;
-																				_this set [9, true];
-																				_this set [7, _correction];
+																				_this set [8, true];
+																				_unit setVelocity [0, 0, 0];
 																			};
 																		};
 
@@ -811,7 +800,7 @@ isNil {
 																			) min 1
 																		);
 
-																		_this set [26, true];
+																		_this set [25, true];
 																	};
 
 																	if ((_time >= _start) && (_time <= _end)) then {
@@ -857,17 +846,14 @@ isNil {
 																if !_vectorCorrected then {
 																	if _avoidCollision then {
 																		if _collided then {
-																			_unit setPosWorld _correctedPosition;
+																			_unit setVelocity [0, 0, 0];
 																		}
 																		else {
 																			private _currentPosition = getPosWorldVisual _unit;
 
 																			if (((_currentPosition vectorDiff _moveThreshold) vectorDotProduct (vectorNormalized _moveVector)) >= 0) then {
-																				private _direction = vectorNormalized _moveVector;
-																				private _correction = _currentPosition vectorAdd (_direction vectorMultiply -((_currentPosition vectorDiff _moveThreshold) vectorDotProduct _direction));
-																				_unit setPosWorld _correction;
-																				_this set [9, true];
-																				_this set [7, _correction];
+																				_this set [8, true];
+																				_unit setVelocity [0, 0, 0];
 																			};
 																		};
 
@@ -893,7 +879,7 @@ isNil {
 																			) min 1
 																		);
 
-																		_this set [27, true];
+																		_this set [26, true];
 																	};
 
 																	if (_time >= _start) then {
@@ -983,17 +969,14 @@ isNil {
 																if !_vectorCorrected then {
 																	if _avoidCollision then {
 																		if _collided then {
-																			_unit setPosWorld _correctedPosition;
+																			_unit setVelocity [0, 0, 0];
 																		}
 																		else {
 																			private _currentPosition = getPosWorldVisual _unit;
 
 																			if (((_currentPosition vectorDiff _moveThreshold) vectorDotProduct (vectorNormalized _moveVector)) >= 0) then {
-																				private _direction = vectorNormalized _moveVector;
-																				private _correction = _currentPosition vectorAdd (_direction vectorMultiply -((_currentPosition vectorDiff _moveThreshold) vectorDotProduct _direction));
-																				_unit setPosWorld _correction;
-																				_this set [9, true];
-																				_this set [7, _correction];
+																				_this set [8, true];
+																				_unit setVelocity [0, 0, 0];
 																			};
 																		};
 
@@ -1019,7 +1002,7 @@ isNil {
 																			) min 1
 																		);
 
-																		_this set [28, true];
+																		_this set [27, true];
 																	};
 
 																	if ((_time >= _start) && (_time <= _end)) then {
@@ -1108,17 +1091,14 @@ isNil {
 																if !_vectorCorrected then {
 																	if _avoidCollision then {
 																		if _collided then {
-																			_unit setPosWorld _correctedPosition;
+																			_unit setVelocity [0, 0, 0];
 																		}
 																		else {
 																			private _currentPosition = getPosWorldVisual _unit;
 
 																			if (((_currentPosition vectorDiff _moveThreshold) vectorDotProduct (vectorNormalized _moveVector)) >= 0) then {
-																				private _direction = vectorNormalized _moveVector;
-																				private _correction = _currentPosition vectorAdd (_direction vectorMultiply -((_currentPosition vectorDiff _moveThreshold) vectorDotProduct _direction));
-																				_unit setPosWorld _correction;
-																				_this set [9, true];
-																				_this set [7, _correction];
+																				_this set [8, true];
+																				_unit setVelocity [0, 0, 0];
 																			};
 																		};
 
@@ -1142,7 +1122,7 @@ isNil {
 																			) min 1
 																		);
 																		
-																		_this set [29, true];
+																		_this set [28, true];
 																	};
 
 																	if ((_time >= _start) && (_time <= _end)) then {
@@ -1962,6 +1942,17 @@ isNil {
 				{
 					params ["_entity"];
 
+					if (_entity isKindOf "Man") then {
+						private _config = configOf _entity;
+						private _movesConfig = configFile >> (getText (_config >> "moves"));
+						private _gesturesConfig = configFile >> (getText (_config >> "gestures"));
+						_entity setVariable ["KH_var_movesConfig", _movesConfig];
+						_entity setVariable ["KH_var_movesActionsConfig", _movesConfig >> "Actions"];
+						_entity setVariable ["KH_var_movesStatesConfig", _movesConfig >> "States"];
+						_entity setVariable ["KH_var_gesturesConfig", _gesturesConfig];
+						_entity setVariable ["KH_var_gesturesStatesConfig", _gesturesConfig >> "States"];
+					};
+
 					if (local _entity) then {
 						KH_var_allLocalEntities pushBackUnique _entity;
 					};
@@ -2035,7 +2026,7 @@ isNil {
 				waitUntil {time > 1;};
 
 				while {true;} do {
-					sleep 0.2;
+					sleep 0.25;
 
 					if KH_var_allowAiMelee then {
 						{
@@ -2077,7 +2068,7 @@ isNil {
 										if ((_unit distance _closestTarget) <= KH_var_meleeRangedAiEngageDistance) then {
 											_unit lookAt _closestTarget;
 
-											if ((_unit distance _closestTarget) <= (selectRandom [1.5, 2.5, 2])) then {
+											if ((_unit distance _closestTarget) <= 2) then {
 												if _isAgent then {
 													_unit setDestination [getPosATL _unit, "DoNotPlan", true];
 												}
@@ -2085,7 +2076,7 @@ isNil {
 													doStop _unit;
 												};
 												
-												if ((abs ((((_unit getRelDir _closestTarget) + 180) % 360) - 180)) <= (selectRandom [22.5, 11.25])) then {
+												if ((abs ((((_unit getRelDir _closestTarget) + 180) % 360) - 180)) <= 2.5) then {
 													private _moves = getText ((configOf _closestTarget) >> "moves");
 													private _moveAction = getText (configFile >> _moves >> "states" >> (animationState _closestTarget) >> "kh_meleeMainAction");
 													private _gestureAction = getText (configFile >> (getText (configFile >> _moves >> "gestures")) >> "states" >> (gestureState _closestTarget) >> "kh_meleeMainAction");
@@ -2249,6 +2240,7 @@ isNil {
 									else {
 										if (((getText (configFile >> "CfgWeapons" >> _secondaryWeapon >> "kh_specialActions")) isNotEqualTo "") && ((getNumber (configFile >> "CfgWeapons" >> _secondaryWeapon >> "kh_meleeWeapon")) isNotEqualTo 0)) then {
 											_meleeWeaponName = _secondaryWeapon;
+											_useControl = true;
 											((_unit weaponsInfo [_secondaryWeapon, false]) param [0, []]) param [0, -1];
 										}
 										else {
@@ -2257,12 +2249,32 @@ isNil {
 									};
 								};
 
+								private _useControl = (getNumber (configFile >> "CfgWeapons" >> _secondaryWeapon >> "kh_meleeController")) isEqualTo 1;
 								private _closestTarget = _unit findNearestEnemy (getPosATL _unit);
 
 								if ((_weaponSurrogate && !(isNull _closestTarget) && ((_unit distance _closestTarget) <= KH_var_meleeMeleeAiEngageDistance)) || (_meleeWeapon isNotEqualTo -1)) then {
 									isNil {
 										if !(_unit getVariable ["KH_var_aiIsMelee", false]) then {
 											_unit setVariable ["KH_var_aiIsMelee", true, true];
+												
+											if _useControl then {
+												[
+													_unit, 
+													150, 
+													22.5, 
+													0.5,
+													1.5,
+													5,
+													10,
+													{
+														params ["_unit"];
+														_unit getVariable ["KH_var_aiIsMelee", false];
+													},
+													{
+														(getNumber ((_unit getVariable ["KH_var_movesStatesConfig", configNull]) >> (animationState _unit) >> "kh_meleeHasAction")) isEqualTo 0;
+													}
+												] call KH_fnc_setUnitController;
+											};
 
 											_unit setVariable [
 												"KH_var_aiPreMeleeFeatures", 
@@ -2344,7 +2356,7 @@ isNil {
 										if ((_unit distance _closestTarget) <= KH_var_meleeMeleeAiEngageDistance) then {
 											_unit lookAt _closestTarget;
 
-											if ((_unit distance _closestTarget) <= (selectRandom [1.5, 2.5, 2])) then {
+											if ((_unit distance _closestTarget) <= 2) then {
 												if _isAgent then {
 													_unit setDestination [getPosATL _unit, "DoNotPlan", true];
 												}
@@ -2352,7 +2364,7 @@ isNil {
 													doStop _unit;
 												};
 												
-												if ((abs ((((_unit getRelDir _closestTarget) + 180) % 360) - 180)) <= (selectRandom [22.5, 11.25])) then {
+												if ((abs ((((_unit getRelDir _closestTarget) + 180) % 360) - 180)) <= 2.5) then {
 													if ((random 1) <= 0.2) then {
 														isNil {
 															[_unit, "CYCLE_ATTACK_MODE"] call KH_fnc_updateMeleeState;
@@ -2399,11 +2411,18 @@ isNil {
 												};
 											}
 											else {
-												if _isAgent then {
-													_unit setDestination [getPosATL _closestTarget, "LEADER PLANNED", true];
-												}
-												else {
-													_unit doMove (getPosATL _closestTarget);
+												_unit setVariable ["KH_var_pathObjectDestination", _closestTarget];
+												private _destinationAsl = getPosASL _closestTarget;
+
+												if ((_destinationAsl vectorDistance (_unit getVariable ["KH_var_meleeDestination", [0, 0, 0]])) >= 0.25) then {
+													_unit setVariable ["KH_var_meleeDestination", _destinationAsl];
+
+													if _isAgent then {
+														_unit setDestination [getPosATL _closestTarget, "LEADER PLANNED", true];
+													}
+													else {
+														_unit doMove (getPosATL _closestTarget);
+													};
 												};
 											};
 										};
@@ -2443,7 +2462,7 @@ isNil {
 											if ((_unit distance _closestTarget) <= KH_var_meleeRangedAiEngageDistance) then {
 												_unit lookAt _closestTarget;
 
-												if ((_unit distance _closestTarget) <= (selectRandom [1.5, 2.5, 2])) then {
+												if ((_unit distance _closestTarget) <= 2) then {
 													if _isAgent then {
 														_unit setDestination [getPosATL _unit, "DoNotPlan", true];
 													}
@@ -2451,7 +2470,7 @@ isNil {
 														doStop _unit;
 													};
 													
-													if ((abs ((((_unit getRelDir _closestTarget) + 180) % 360) - 180)) <= (selectRandom [22.5, 11.25])) then {
+													if ((abs ((((_unit getRelDir _closestTarget) + 180) % 360) - 180)) <= 2.5) then {
 														private _moves = getText ((configOf _closestTarget) >> "moves");
 														private _moveAction = getText (configFile >> _moves >> "states" >> (animationState _closestTarget) >> "kh_meleeMainAction");
 														private _gestureAction = getText (configFile >> (getText (configFile >> _moves >> "gestures")) >> "states" >> (gestureState _closestTarget) >> "kh_meleeMainAction");
@@ -2484,11 +2503,18 @@ isNil {
 													};
 												}
 												else {
-													if _isAgent then {
-														_unit setDestination [getPosATL _closestTarget, "LEADER PLANNED", true];
-													}
-													else {
-														_unit doMove (getPosATL _closestTarget);
+													_unit setVariable ["KH_var_pathObjectDestination", _closestTarget];
+													private _destinationAsl = getPosASL _closestTarget;
+
+													if ((_destinationAsl vectorDistance (_unit getVariable ["KH_var_meleeDestination", [0, 0, 0]])) >= 0.25) then {
+														_unit setVariable ["KH_var_meleeDestination", _destinationAsl];
+
+														if _isAgent then {
+															_unit setDestination [getPosATL _closestTarget, "LEADER PLANNED", true];
+														}
+														else {
+															_unit doMove (getPosATL _closestTarget);
+														};
 													};
 												};
 
@@ -2537,6 +2563,25 @@ isNil {
 										isNil {
 											if !(_unit getVariable ["KH_var_aiIsMelee", false]) then {
 												_unit setVariable ["KH_var_aiIsMelee", true, true];
+
+												if _useControl then {
+													[
+														_unit, 
+														150, 
+														22.5, 
+														0.5,
+														1.5,
+														5,
+														10,
+														{
+															params ["_unit"];
+															_unit getVariable ["KH_var_aiIsMelee", false];
+														},
+														{
+															(getNumber ((_unit getVariable ["KH_var_movesStatesConfig", configNull]) >> (animationState _unit) >> "kh_meleeHasAction")) isEqualTo 0;
+														}
+													] call KH_fnc_setUnitController;
+												};
 
 												_unit setVariable [
 													"KH_var_aiPreMeleeFeatures", 

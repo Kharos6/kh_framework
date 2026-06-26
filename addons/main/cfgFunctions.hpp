@@ -70,8 +70,10 @@ class CfgFunctions
 			class getRemoteVariable {headerType = -1;};
 			class getScreenVisiblePositions {headerType = -1;};
 			class getSideRelations {headerType = -1;};
+			class getUnitActionState {headerType = -1;};
 			class getUnitAttributes {headerType = -1;};
 			class getUnitMoveType {headerType = -1;};
+			class getUnitStateAction {headerType = -1;};
 			class getUnitVehicleSlot {headerType = -1;};
 			class getVehicleLoadout {headerType = -1;};
 			class getViewTarget {headerType = -1;};
@@ -159,6 +161,7 @@ class CfgFunctions
 			class setSideRelations {headerType = -1;};
 			class setTerminalText {headerType = -1;};
 			class setUnitAttributes {headerType = -1;};
+			class setUnitController {headerType = -1;};
 			class setUnitVehicleSlot {headerType = -1;};
 			class setVehicleLoadout {headerType = -1;};
 			class setVideoTexture {headerType = -1;};

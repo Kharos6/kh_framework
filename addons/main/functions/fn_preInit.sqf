@@ -278,13 +278,15 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 	[], 
 	{
 		if (KH_var_entityInitializationsDeletions isNotEqualTo []) then {
+			private _deletions = [];
+
 			{
 				if ((_x select 3) in KH_var_entityInitializationsDeletions) then {
-					KH_var_entityInitializationsDeletions set [KH_var_entityInitializationsDeletions find (_x select 3), _forEachIndex];
+					_deletions pushBack _forEachIndex;
 				};
 			} forEach KH_var_entityInitializations;
 
-			KH_var_entityInitializations deleteAt (KH_var_entityInitializationsDeletions select {_x isEqualType 0;});
+			KH_var_entityInitializations deleteAt _deletions;
 			KH_var_entityInitializationsDeletions resize 0;
 		};
 
@@ -294,13 +296,15 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 		};
 
 		if (KH_var_temporalExecutionStackDeletions isNotEqualTo []) then {
+			private _deletions = [];
+			
 			{
 				if ((_x select 6) in KH_var_temporalExecutionStackDeletions) then {
-					KH_var_temporalExecutionStackDeletions set [KH_var_temporalExecutionStackDeletions find (_x select 6), _forEachIndex];
+					_deletions pushBack _forEachIndex;
 				};
 			} forEach KH_var_temporalExecutionStack;
 
-			KH_var_temporalExecutionStack deleteAt (KH_var_temporalExecutionStackDeletions select {_x isEqualType 0;});
+			KH_var_temporalExecutionStack deleteAt _deletions;
 			KH_var_temporalExecutionStackDeletions resize 0;
 		};
 
@@ -2160,13 +2164,15 @@ if hasInterface then {
 			};
 
 			if (KH_var_drawUi2dExecutionStackDeletions isNotEqualTo []) then {
+				private _deletions = [];
+
 				{
 					if ((_x select 3) in KH_var_drawUi2dExecutionStackDeletions) then {
-						KH_var_drawUi2dExecutionStackDeletions set [KH_var_drawUi2dExecutionStackDeletions find (_x select 3), _forEachIndex];
+						_deletions pushBack _forEachIndex;
 					};
 				} forEach KH_var_drawUi2dExecutionStack;
 
-				KH_var_drawUi2dExecutionStack deleteAt (KH_var_drawUi2dExecutionStackDeletions select {_x isEqualType 0;});
+				KH_var_drawUi2dExecutionStack deleteAt _deletions;
 				KH_var_drawUi2dExecutionStackDeletions resize 0;
 			};
 
@@ -2228,13 +2234,15 @@ if hasInterface then {
 			};
 
 			if (KH_var_drawUi3dExecutionStackDeletions isNotEqualTo []) then {
+				private _deletions = [];
+				
 				{
 					if ((_x select 3) in KH_var_drawUi3dExecutionStackDeletions) then {
-						KH_var_drawUi3dExecutionStackDeletions set [KH_var_drawUi3dExecutionStackDeletions find (_x select 3), _forEachIndex];
+						_deletions pushBack _forEachIndex;
 					};
 				} forEach KH_var_drawUi3dExecutionStack;
 
-				KH_var_drawUi3dExecutionStack deleteAt (KH_var_drawUi3dExecutionStackDeletions select {_x isEqualType 0;});
+				KH_var_drawUi3dExecutionStack deleteAt _deletions;
 				KH_var_drawUi3dExecutionStackDeletions resize 0;
 			};
 

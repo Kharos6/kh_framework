@@ -436,13 +436,15 @@ switch _eventType do {
 					private _handlerStackDeletions = missionNamespace getVariable 'KH_var_inGameUiEventHandlerStackDeletions';
 					
 					if (_handlerStackDeletions isNotEqualTo []) then {
+						private _deletions = [];
+
 						{
 							if ((_x select 0) in _handlerStackDeletions) then {
-								_handlerStackDeletions set [_handlerStack find (_x select 0), _forEachIndex];
+								_deletions pushBack _forEachIndex;
 							};
 						} forEach _handlerStack;
 
-						_handlerStack deleteAt (_handlerStackDeletions select {_x isEqualType 0;});
+						_handlerStack deleteAt _deletions;
 						_handlerStackDeletions resize 0;
 					};
 

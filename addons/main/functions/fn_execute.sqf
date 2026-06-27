@@ -567,7 +567,7 @@ switch (typeName _environmentType) do {
 		};
 
 		if (_environmentType isEqualTo 0) exitWith {
-			_fedArguments call _subFunction;
+			_fedArguments call _subfunction;
 			[[missionNamespace, _environmentId, clientOwner], _return];
 		};
 
@@ -576,7 +576,7 @@ switch (typeName _environmentType) do {
 			{
 				params ["_fedArguments", "_subfunction", "_environmentId"];
 
-				if !(missionNamespace getVariable _environmentId) exitWith {																											
+				if !(missionNamespace getVariable _environmentId) exitWith {
 					KH_var_temporalExecutionStackDeletions pushBackUnique _environmentId;
 				};
 												

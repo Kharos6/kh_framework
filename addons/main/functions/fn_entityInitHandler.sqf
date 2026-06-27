@@ -15,7 +15,7 @@ params [["_entity", objNull, [objNull]], ["_respawn", false, [true]], ["_previou
             _entity setVariable [_blockerId, true];
 
             if !(missionNamespace getVariable _id) then {
-                KH_var_entityInitializationsDeletions pushBack _id;
+                KH_var_entityInitializationsDeletions pushBackUnique _id;
                 continue;
             };
 

@@ -81,7 +81,7 @@ switch _specialType do {
                 }
                 else {
                     if (isNil "_arguments") then {
-                        [] spawn (missionNamespace getVariable _function);
+                        spawn (missionNamespace getVariable _function);
                     }
                     else {
                         _arguments spawn (missionNamespace getVariable _function);

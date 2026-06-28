@@ -143,7 +143,6 @@ class CfgFunctions
 			class savePlayerPersistency {headerType = -1;};
 			class saveUnitPersistency {headerType = -1;};
 			class screenToWorld {headerType = -1;};
-			class serializeFunction {headerType = -1;};
 			class setAnimation {headerType = -1;};
 			class setCameraTexture {headerType = -1;};
 			class setCurators {headerType = -1;};

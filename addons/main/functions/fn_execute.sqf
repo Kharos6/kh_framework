@@ -1,18 +1,9 @@
-if canSuspend exitWith {
-	isNil {
-		setCallArguments _this;
-		setReturnValue (getCallArguments call KH_fnc_execute);
-	};
-
-	getReturnValue;
-};
-
 params [
 	"_arguments", 
 	["_function", {}, ["", {}]], 
 	["_target", true, [true, 0, "", [], {}, objNull, teamMemberNull, grpNull, sideUnknown, locationNull]], 
 	["_environment", true, [true, 0, "", [], {}]],
-	["_special", false, [true, [], createHashMap]]
+	["_special", false, [true, []]]
 ];
 
 private _basic = (_target isEqualTo true) && (_special isEqualTo false);
@@ -24,10 +15,10 @@ if (_special isEqualTo true) then {
 
 if (_environment isEqualType true) exitWith {
 	if _basic then {
-		[_arguments, [_function, false] call KH_fnc_serializeFunction, clientOwner, _environment] call _subfunction;
+		[_arguments, false serializeFunction _function, clientOwner, _environment] call _subfunction;
 	}
 	else {
-		[_arguments, [_function, false] call KH_fnc_serializeFunction, _target, _special, "", _environment] call _subfunction;
+		[_arguments, false serializeFunction _function, _target, _special, "", _environment] call _subfunction;
 	};
 };
 
@@ -97,10 +88,10 @@ switch (typeName _environmentType) do {
 		};
 
 		private _fedArguments = if _basic then {
-			[_arguments, [_function, false] call KH_fnc_serializeFunction, clientOwner, _unscheduled];
+			[_arguments, false serializeFunction _function, clientOwner, _unscheduled];
 		}
 		else {
-			[_arguments, [_function, false] call KH_fnc_serializeFunction, _target, _special, _specialIdOverride, _unscheduled];
+			[_arguments, false serializeFunction _function, _target, _special, _specialIdOverride, _unscheduled];
 		};
 
 		KH_var_temporalExecutionStackMonitor set [
@@ -282,7 +273,7 @@ switch (typeName _environmentType) do {
 		};
 
 		([_special, _target] call KH_fnc_parseSpecialExecution) params ["_return", "_specialIdOverride"];
-		_environmentType = missionNamespace getVariable ([_environmentType, false] call KH_fnc_serializeFunction);
+		_environmentType = missionNamespace getVariable (false serializeFunction _environmentType);
 		private "_previousReturn";
 		private _continue = true;
 
@@ -291,10 +282,10 @@ switch (typeName _environmentType) do {
 		};
 
 		private _fedArguments = if _basic then {
-			[_arguments, [_function, false] call KH_fnc_serializeFunction, clientOwner, _unscheduled];
+			[_arguments, false serializeFunction _function, clientOwner, _unscheduled];
 		}
 		else {
-			[_arguments, [_function, false] call KH_fnc_serializeFunction, _target, _special, _specialIdOverride, _unscheduled];
+			[_arguments, false serializeFunction _function, _target, _special, _specialIdOverride, _unscheduled];
 		};
 
 		KH_var_temporalExecutionStackMonitor set [
@@ -560,10 +551,10 @@ switch (typeName _environmentType) do {
 		_environmentType = parseNumber _environmentType;
 
 		private _fedArguments = if _basic then {
-			[_arguments, [_function, false] call KH_fnc_serializeFunction, clientOwner, _unscheduled];
+			[_arguments, false serializeFunction _function, clientOwner, _unscheduled];
 		}
 		else {
-			[_arguments, [_function, false] call KH_fnc_serializeFunction, _target, _special, _specialIdOverride, _unscheduled];
+			[_arguments, false serializeFunction _function, _target, _special, _specialIdOverride, _unscheduled];
 		};
 
 		if (_environmentType isEqualTo 0) exitWith {

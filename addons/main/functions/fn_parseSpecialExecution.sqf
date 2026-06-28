@@ -1,6 +1,6 @@
-params [["_special", false, [true, [], createHashMap]], ["_target", true, [true, 0, "", [], {}, objNull, teamMemberNull, grpNull, sideUnknown, locationNull]]];
+params [["_special", false, [true, []]], ["_target", true, [true, 0, "", [], {}, objNull, teamMemberNull, grpNull, sideUnknown, locationNull]]];
 
-if ((_special isNotEqualTo false) && !(_special isEqualType createHashMap)) then {
+if (_special isNotEqualTo false) then {
     private _specialType = _special param [0, "", [""]];
     private _specialIdOverride = "";
 

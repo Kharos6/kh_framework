@@ -132,7 +132,7 @@ else {
 
         case "CODE": {
             if (isText _config) then {
-                missionNamespace getVariable ([getText _config, false] call KH_fnc_serializeFunction);
+                missionNamespace getVariable (false serializeFunction (getText _config));
             }
             else {
                 _default;

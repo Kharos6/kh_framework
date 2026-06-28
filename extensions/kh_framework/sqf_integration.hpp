@@ -130,6 +130,10 @@ static registered_sqf_function _sqf_ts_is_initialized;
 static registered_sqf_function _sqf_ts_is_plugin_active;
 static registered_sqf_function _sqf_ts_is_connected;
 static registered_sqf_function _sqf_ts_is_plugin_installed;
+static registered_sqf_function _sqf_serialize_function_code;
+static registered_sqf_function _sqf_serialize_function_string;
+static registered_sqf_function _sqf_serialize_function_bool_code;
+static registered_sqf_function _sqf_serialize_function_bool_string;
 
 static game_value execute_lua_sqf(game_value_parameter args, game_value_parameter code_or_function) {    
     try {
@@ -3608,6 +3612,78 @@ static game_value ts_is_plugin_installed_sqf() {
     }
 }
 
+static game_value serialize_function_impl(const game_value& function, bool is_public) {
+    try {
+        bool is_string = (function.type_enum() == game_data_type::STRING);
+        std::string func_str;
+        bool has_space = false;
+        bool is_sqf_path = false;
+
+        if (is_string) {
+            func_str = static_cast<std::string>(function);
+            has_space = (func_str.find(' ') != std::string::npos);
+            is_sqf_path = (func_str.find(".sqf") != std::string::npos);
+
+            // _parse == false: a bare global function name is returned unchanged, no engine calls.
+            if (!has_space && !is_sqf_path) {
+                return function;
+            }
+        }
+
+        rv_namespace ns = sqf::mission_namespace();
+        std::string hash_str = static_cast<std::string>(sqf::hash_value(function));
+        std::string public_marker = "kh_var_publicfunction_" + hash_str;
+
+        auto compile_function = [&]() -> game_value {
+            if (is_sqf_path && !has_space) {
+                auto_array<game_value> cs;
+                cs.push_back(function);
+                cs.push_back(game_value(false));
+                cs.push_back(game_value(std::string()));
+                return game_value(sqf::compile_script(game_value(std::move(cs))));
+            }
+
+            return game_value(sqf::compile(func_str));
+        };
+
+        if (sqf::get_variable(ns, hash_str).is_nil()) {
+            game_value compiled_function = is_string ? compile_function() : function;
+
+            if (is_public && sqf::get_variable(ns, public_marker).is_nil()) {
+                sqf::set_variable(ns, public_marker, game_value(true), game_value(true));
+                sqf::set_variable(ns, hash_str, compiled_function, game_value(true));
+            } else {
+                sqf::set_variable(ns, hash_str, compiled_function);
+
+                if (!sqf::is_server()) {
+                    sqf::set_variable(ns, hash_str, compiled_function, game_value(2)); // push to server
+                }
+            }
+        } else if (is_public && sqf::get_variable(ns, public_marker).is_nil()) {
+            sqf::set_variable(ns, public_marker, game_value(true), game_value(true));
+            game_value compiled_function = is_string ? compile_function() : function;
+            sqf::set_variable(ns, hash_str, compiled_function, game_value(true));
+        }
+
+        return game_value(hash_str);
+    } catch (const std::exception& e) {
+        report_error(std::string(e.what()));
+        return game_value();
+    } catch (...) {
+        report_error("Failed to serialize function");
+        return game_value();
+    }
+}
+
+static game_value serialize_function_unary(game_value_parameter function) {
+    return serialize_function_impl(function, false);
+}
+
+static game_value serialize_function_binary(game_value_parameter is_public, game_value_parameter function) {
+    bool pub = (is_public.type_enum() == game_data_type::BOOL) && static_cast<bool>(is_public);
+    return serialize_function_impl(function, pub);
+}
+
 static game_value execute_lua_sqf_unary(game_value_parameter code_or_function) {
     return execute_lua_sqf(game_value(), code_or_function);
 }
@@ -4696,6 +4772,40 @@ static void initialize_sqf_integration() {
         "Check if TeamSpeak plugin is installed",
         userFunctionWrapper<ts_is_plugin_installed_sqf>,
         game_data_type::BOOL
+    );
+
+    _sqf_serialize_function_code = intercept::client::host::register_sqf_command(
+        "serializeFunction", 
+        "Serialize a function for execution/transfer",
+        userFunctionWrapper<serialize_function_unary>,
+        game_data_type::STRING, 
+        game_data_type::CODE
+    );
+
+    _sqf_serialize_function_string = intercept::client::host::register_sqf_command(
+        "serializeFunction", 
+        "Serialize a function for execution/transfer",
+        userFunctionWrapper<serialize_function_unary>,
+        game_data_type::STRING, 
+        game_data_type::STRING
+    );
+
+    _sqf_serialize_function_bool_code = intercept::client::host::register_sqf_command(
+        "serializeFunction", 
+        "Serialize a function for execution/transfer",
+        userFunctionWrapper<serialize_function_binary>,
+        game_data_type::STRING, 
+        game_data_type::BOOL, 
+        game_data_type::CODE
+    );
+
+    _sqf_serialize_function_bool_string = intercept::client::host::register_sqf_command(
+        "serializeFunction", 
+        "Serialize a function for execution/transfer",
+        userFunctionWrapper<serialize_function_binary>,
+        game_data_type::STRING, 
+        game_data_type::BOOL, 
+        game_data_type::STRING
     );
     
     g_compiled_sqf_trigger_cba_event = sqf::compile(R"(setReturnValue (getCallArguments call KH_fnc_triggerCbaEvent);)");

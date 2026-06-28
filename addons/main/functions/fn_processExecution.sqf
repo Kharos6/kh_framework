@@ -2,30 +2,13 @@ params [
 	"_arguments", 
 	["_function", {}, ["", {}]], 
 	["_target", true, [true, 0, "", [], {}, objNull, teamMemberNull, grpNull, sideUnknown, locationNull]],
-	["_special", false, [true, [], createHashMap]],
+	["_special", false, [true, []]],
     ["_specialIdOverride", "", [""]],
     ["_unscheduled", true, [true]]
 ];
 
 if (_special isEqualTo false) exitWith {
     ["KH_eve_execution", [_arguments, _function, clientOwner, _unscheduled], _target, false] call KH_fnc_triggerCbaEvent;
-};
-
-if (_special isEqualType createHashMap) exitWith {
-    private _argumentsId = generateUid;
-    missionNamespace setVariable [_argumentsId, _arguments];
-
-    [
-        "KH_eve_execution", 
-        [
-            _arguments, 
-            [compile ([_special, " call ['", _function, "', missionNamespace getVariable '", _argumentsId, "'];"] joinString ""), false] call KH_fnc_serializeFunction, 
-            clientOwner, 
-            true
-        ], 
-        _target, 
-        false
-    ] call KH_fnc_triggerCbaEvent;
 };
 
 private _specialType = _special param [0, "", [""]];
@@ -94,7 +77,7 @@ switch _specialType do {
 
         [
             "KH_eve_registerCallback", 
-            [_callbackArguments, [_callbackFunction, false] call KH_fnc_serializeFunction, clientOwner, _unscheduled, _callbackId], 
+            [_callbackArguments, false serializeFunction _callbackFunction, clientOwner, _unscheduled, _callbackId], 
             _target, 
             false
         ] call KH_fnc_triggerCbaEvent;
@@ -125,7 +108,7 @@ switch _specialType do {
 
         [
             "KH_eve_persistentExecutionSetup", 
-            [_arguments, _function, _entity, _sendoffArguments, [_sendoffFunction, false] call KH_fnc_serializeFunction, clientOwner, _unscheduled, _persistentExecutionId, _initialId],
+            [_arguments, _function, _entity, _sendoffArguments, false serializeFunction _sendoffFunction, clientOwner, _unscheduled, _persistentExecutionId, _initialId],
             "SERVER",
             false
         ] call KH_fnc_triggerCbaEvent;

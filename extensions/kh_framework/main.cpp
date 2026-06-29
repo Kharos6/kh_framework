@@ -193,7 +193,8 @@ void intercept::on_frame() {
                 UIFramework::instance().set_mouse_enabled(sqf::dialog());
             }
         }
-        
+
+        process_temporal_execution_stack();        
         MainThreadScheduler::instance().process_frame();
         LuaStackGuard guard(*g_lua_state);
         float current_delta = sqf::diag_delta_time();

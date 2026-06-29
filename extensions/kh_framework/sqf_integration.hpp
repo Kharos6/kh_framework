@@ -134,6 +134,7 @@ static registered_sqf_function _sqf_serialize_function_code;
 static registered_sqf_function _sqf_serialize_function_string;
 static registered_sqf_function _sqf_serialize_function_bool_code;
 static registered_sqf_function _sqf_serialize_function_bool_string;
+static registered_sqf_function _sqf_call_serialized_function;
 
 static game_value execute_lua_sqf(game_value_parameter args, game_value_parameter code_or_function) {    
     try {
@@ -3675,6 +3676,99 @@ static game_value serialize_function_impl(const game_value& function, bool is_pu
     }
 }
 
+static game_value call_serialized_function_sqf(game_value_parameter arguments, game_value_parameter params) {
+    try {
+        auto& arr = params.to_array();
+        game_value function = arr.size() > 0 ? arr[0] : game_value();
+        bool unscheduled = arr.size() > 2 ? static_cast<bool>(arr[2]) : true;
+        const bool args_nil = arguments.is_nil();
+
+        // Case 1: _function is CODE -> run it directly
+        if (!function.is_nil() && function.type_enum() == game_data_type::CODE) {
+            code fnc = static_cast<code>(function);
+
+            if (unscheduled) {
+                if (args_nil) {
+                    g_call_arguments = game_value(fnc);
+                    return raw_call_sqf_native(g_compiled_sqf_generic_call);
+                } else {
+                    auto_array<game_value> call_arguments;
+                    call_arguments.push_back(arguments);
+                    call_arguments.push_back(fnc);
+                    g_call_arguments = game_value(call_arguments);
+                    return raw_call_sqf_native(g_compiled_sqf_generic_call_args);
+                }
+            } else {
+                if (args_nil) {
+                    return sqf::spawn(game_value(auto_array<game_value>()), fnc);
+                } else {
+                    return sqf::spawn(arguments, fnc);
+                }
+            }
+        }
+
+        // Case 2: _function is a string name -> resolve from missionNamespace
+        if (!function.is_nil() && function.type_enum() == game_data_type::STRING) {
+            rv_namespace ns = sqf::mission_namespace();
+            std::string fname = static_cast<std::string>(function);
+            std::transform(fname.begin(), fname.end(), fname.begin(), ::tolower);
+            game_value stored = sqf::get_variable(ns, fname);
+
+            if (!stored.is_nil() && stored.type_enum() == game_data_type::CODE) {
+                code fnc = static_cast<code>(stored);
+
+                if (unscheduled) {
+                    if (args_nil) {
+                        g_call_arguments = game_value(fnc);
+                        return raw_call_sqf_native(g_compiled_sqf_generic_call);
+                    } else {
+                        auto_array<game_value> call_arguments;
+                        call_arguments.push_back(arguments);
+                        call_arguments.push_back(fnc);
+                        g_call_arguments = game_value(call_arguments);
+                        return raw_call_sqf_native(g_compiled_sqf_generic_call_args);
+                    }
+                } else {
+                    if (args_nil) {
+                        return sqf::spawn(game_value(auto_array<game_value>()), fnc);
+                    } else {
+                        return sqf::spawn(arguments, fnc);
+                    }
+                }
+            }
+        }
+
+        // Case 3: fallback -> remote KH_fnc_execute call
+        game_value caller = arr.size() > 1 ? arr[1] : game_value(2);
+        auto_array<game_value> special;
+        special.push_back(game_value(std::string("CALLBACK")));
+        auto_array<game_value> fn_wrap;
+        fn_wrap.push_back(function);
+        special.push_back(game_value(std::move(fn_wrap)));
+        special.push_back(game_value(std::string("KH_fnc_retrieveSerializedFunction")));
+        auto_array<game_value> inner;
+        inner.push_back(arguments);
+        inner.push_back(function);
+        inner.push_back(caller);
+        inner.push_back(game_value(unscheduled));
+        auto_array<game_value> exec_args;
+        exec_args.push_back(game_value(std::move(inner)));
+        exec_args.push_back(game_value(std::string("KH_fnc_processRemoteSerializedFunction")));
+        exec_args.push_back(game_value(std::string("SERVER")));
+        exec_args.push_back(game_value(true));
+        exec_args.push_back(game_value(std::move(special)));
+        game_value exec_gv(std::move(exec_args));
+        auto_array<game_value> call_arguments;
+        call_arguments.push_back(exec_gv);
+        call_arguments.push_back(g_compiled_sqf_execute_args_sqf);
+        g_call_arguments = game_value(call_arguments);
+        return raw_call_sqf_native(g_compiled_sqf_generic_call_args);
+    } catch (const std::exception& e) {
+        report_error(std::string(e.what()));
+        return game_value();
+    }
+}
+
 static game_value serialize_function_unary(game_value_parameter function) {
     return serialize_function_impl(function, false);
 }
@@ -3734,6 +3828,183 @@ static game_value kh_set_variable_location(game_value_parameter left_arg, game_v
 
 static game_value kh_set_variable_display(game_value_parameter left_arg, game_value_parameter right_arg) {
     return kh_set_variable_impl(left_arg, right_arg);
+}
+
+static bool kh_gv_equals(const game_value& a, const game_value& b) {
+    auto ta = a.type_enum();
+    if (ta != b.type_enum()) return false;
+
+    switch (ta) {
+        case game_data_type::STRING: return static_cast<std::string>(a) == static_cast<std::string>(b);
+        case game_data_type::SCALAR: return static_cast<float>(a) == static_cast<float>(b);
+        case game_data_type::BOOL:   return static_cast<bool>(a) == static_cast<bool>(b);
+        default: return false;
+    }
+}
+
+static bool kh_gv_in_array(const game_value& needle, const auto_array<game_value>& haystack) {
+    for (size_t i = 0; i < haystack.size(); ++i) {
+        if (kh_gv_equals(needle, haystack[i])) return true;
+    }
+
+    return false;
+}
+
+static std::unordered_set<std::string> kh_build_string_set(const auto_array<game_value>& arr) {
+    std::unordered_set<std::string> set;
+    set.reserve(arr.size());
+
+    for (size_t i = 0; i < arr.size(); ++i) {
+        if (arr[i].type_enum() == game_data_type::STRING) {
+            set.insert(static_cast<std::string>(arr[i]));
+        }
+    }
+
+    return set;
+}
+
+static bool kh_set_contains(const std::unordered_set<std::string>& set, const game_value& v) {
+    return v.type_enum() == game_data_type::STRING && set.find(static_cast<std::string>(v)) != set.end();
+}
+
+static void process_temporal_execution_stack() {
+    rv_namespace ns = sqf::mission_namespace();
+    game_value stack_gv = sqf::get_variable(ns, "kh_var_temporalexecutionstack");
+
+    if (stack_gv.is_nil() || stack_gv.type_enum() != game_data_type::ARRAY) {
+        return;
+    }
+
+    auto& stack = stack_gv.to_array();
+
+    // Entity initialization deletions
+    game_value entity_deletions_gv = sqf::get_variable(ns, "kh_var_entityinitializationsdeletions");
+
+    if (!entity_deletions_gv.is_nil() && entity_deletions_gv.type_enum() == game_data_type::ARRAY) {
+        auto& entity_deletions = entity_deletions_gv.to_array();
+
+        if (entity_deletions.size() > 0) {
+            game_value entity_init_gv = sqf::get_variable(ns, "kh_var_entityinitializations");
+
+            if (!entity_init_gv.is_nil() && entity_init_gv.type_enum() == game_data_type::ARRAY) {
+                auto& entity_init = entity_init_gv.to_array();
+                size_t w = 0;
+                const std::unordered_set<std::string> entity_deletion_set = kh_build_string_set(entity_deletions);
+
+                for (size_t r = 0; r < entity_init.size(); ++r) {
+                    auto& e = entity_init[r].to_array();
+                    bool del = (e.size() > 4 && kh_set_contains(entity_deletion_set, e[4]));
+
+                    if (!del) {
+                        if (w != r) entity_init[w] = entity_init[r];
+                        ++w;
+                    }
+                }
+
+                entity_init.resize(w);
+            }
+
+            entity_deletions.resize(0);
+        }
+    }
+
+    // Temporal execution stack additions
+    game_value additions_gv = sqf::get_variable(ns, "kh_var_temporalexecutionstackadditions");
+
+    if (!additions_gv.is_nil() && additions_gv.type_enum() == game_data_type::ARRAY) {
+        auto& additions = additions_gv.to_array();
+
+        if (additions.size() > 0) {
+            for (size_t i = 0; i < additions.size(); ++i) {
+                stack.push_back(additions[i]);
+            }
+
+            additions.resize(0);
+        }
+    }
+
+    // Temporal execution stack deletions
+    game_value deletions_gv = sqf::get_variable(ns, "kh_var_temporalexecutionstackdeletions");
+    auto_array<game_value>* deletions = nullptr;
+
+    if (!deletions_gv.is_nil() && deletions_gv.type_enum() == game_data_type::ARRAY) {
+        deletions = &deletions_gv.to_array();
+    }
+
+    std::unordered_set<std::string> deletion_set;
+
+    if (deletions != nullptr && deletions->size() > 0) {
+        deletion_set = kh_build_string_set(*deletions);
+        size_t w = 0;
+
+        for (size_t r = 0; r < stack.size(); ++r) {
+            auto& e = stack[r].to_array();
+            bool del = (e.size() > 6 && kh_set_contains(deletion_set, e[6]));
+
+            if (!del) {
+                if (w != r) stack[w] = stack[r];
+                ++w;
+            }
+        }
+
+        stack.resize(w);
+        deletions->resize(0);
+    }
+
+    // Execute due entries
+    const float tick = sqf::diag_ticktime();
+    const float frame = sqf::diag_frameno();
+    const size_t n = stack.size();
+    static const r_string n_arguments("_this");
+    static const r_string n_function("_thisfunction");
+    static const r_string n_total_delta("_totaldelta");
+    static const r_string n_handler_id("_handlerid");
+    static const r_string n_event_name("_eventname");
+    static const r_string n_previous_return("_previousreturn");
+    static const r_string n_execution_time("_executiontime");
+    static const r_string n_execution_count("_executioncount");
+    auto game_state = (intercept::client::host::functions.get_engine_allocator())->gameState;
+
+    for (size_t i = 0; i < n; ++i) {
+        auto& e = stack[i].to_array();
+
+        if (deletions != nullptr && !deletions->empty() && kh_gv_in_array(e[6], *deletions)) {
+            continue;
+        }
+
+        const float delay = static_cast<float>(e[2]);
+        const float delta = static_cast<float>(e[3]);
+        const bool tick_based = delay > 0.0f;
+        const float clock = tick_based ? tick : frame;
+
+        if (clock >= delta) {
+            const game_value old_total_delta = e[4];
+            const float execution_count = static_cast<float>(e[9]);
+            game_value total_delta;
+            const bool is_minus_one = (old_total_delta.type_enum() == game_data_type::SCALAR && static_cast<float>(old_total_delta) == -1.0f);
+
+            if (is_minus_one) {
+                total_delta = game_value(sqf::diag_delta_time());
+            } else {
+                e[4] = get_epoch_sqf();
+                total_delta = get_epoch_delta_sqf(old_total_delta);
+            }
+
+            // Inject the loop locals so the executed function inherits them (call shares scope)
+            game_state->set_local_variable(n_arguments, e[0]);
+            game_state->set_local_variable(n_function, static_cast<code>(e[1]));
+            game_state->set_local_variable(n_total_delta, total_delta);
+            game_state->set_local_variable(n_handler_id, e[5]);
+            game_state->set_local_variable(n_event_name, e[6]);
+            game_state->set_local_variable(n_previous_return, e[7]);
+            game_state->set_local_variable(n_execution_time, e[8]);
+            game_state->set_local_variable(n_execution_count, e[9]);
+            e[7] = raw_call_sqf_native(g_compiled_sqf_generic_call);
+            const float step = tick_based ? delay : (delay < 0.0f ? -delay : delay);
+            e[3] = game_value(delta + step);
+            e[9] = game_value(execution_count + 1.0f);
+        }
+    }
 }
 
 static void initialize_sqf_integration() {
@@ -4808,6 +5079,17 @@ static void initialize_sqf_integration() {
         game_data_type::STRING
     );
     
+    _sqf_call_serialized_function = intercept::client::host::register_sqf_command(
+        "callSerializedFunction",
+        "Call a serialized function",
+        userFunctionWrapper<call_serialized_function_sqf>,
+        game_data_type::ANY,
+        game_data_type::ANY,
+        game_data_type::ARRAY
+    );
+
+    g_compiled_sqf_generic_call = sqf::compile(R"(setReturnValue (call getCallArguments);)");
+    g_compiled_sqf_generic_call_args = sqf::compile(R"(setReturnValue ((getCallArguments select 0) call (getCallArguments select 1));)");
     g_compiled_sqf_trigger_cba_event = sqf::compile(R"(setReturnValue (getCallArguments call KH_fnc_triggerCbaEvent);)");
     g_compiled_sqf_add_game_event_handler = sqf::compile(R"(setReturnValue (getCallArguments call KH_fnc_addEventHandler);)");
     g_compiled_sqf_remove_game_event_handler = sqf::compile(R"(setReturnValue (getCallArguments call KH_fnc_removeHandler);)");
@@ -4835,6 +5117,7 @@ static void initialize_sqf_integration() {
     )");
 
     g_compiled_sqf_execute_sqf = sqf::compile(R"(setReturnValue (getCallArguments call KH_fnc_execute);)");
+    g_compiled_sqf_execute_args_sqf = sqf::compile(R"(setReturnValue (getCallArguments call KH_fnc_execute);)");
     g_compiled_sqf_remove_handler = sqf::compile(R"(setReturnValue (getCallArguments call KH_fnc_removeHandler);)");
     g_compiled_sqf_create_hash_map_from_array = sqf::compile(R"(setReturnValue (createHashMapFromArray getCallArguments);)");
     g_compiled_sqf_create_hash_map = sqf::compile(R"(setReturnValue createHashMap;)");

@@ -2022,7 +2022,7 @@ isNil {
 				luaExecute _x;
 			} forEach KH_var_postInitLuaExecutions;
 
-			spawn {
+			[] spawn {
 				waitUntil {time > 1;};
 
 				while {true;} do {

@@ -7,7 +7,7 @@ params [
 ];
 
 private _basic = (_target isEqualTo true) && (_special isEqualTo false);
-private _subfunction = [KH_fnc_processExecution, KH_fnc_callSerializedFunction] select _basic;
+private _subfunction = [KH_fnc_processExecution, {(_this select 0) callSerializedFunction (_this select [1]);}] select _basic;
 
 if (_special isEqualTo true) then {
 	_special = ["JIP", true, false, ""];

@@ -14,10 +14,6 @@ KH_var_playerUnit = objNull;
 KH_var_mainCamera = objNull;
 KH_var_gravity = 9.80665;
 KH_var_defaultAiSystemPrompt = uiNamespace getVariable "KH_var_defaultAiSystemPrompt";
-KH_var_remoteExecCommandsBlacklist = createHashMap;
-KH_var_remoteExecFunctionsBlacklist = createHashMap;
-KH_var_remoteExecCommandsJipBlacklist = createHashMap;
-KH_var_remoteExecFunctionsJipBlacklist = createHashMap;
 KH_var_inGameUiEventHandlerStack = createHashMap;
 KH_var_temporalExecutionStackMonitor = createHashMap;
 KH_var_drawUiExecutionStackMonitor = createHashMap;
@@ -50,7 +46,7 @@ KH_var_allAddedDisplays = [];
 KH_var_allLocalEntities = [];
 KH_var_cloudletParameterCache = createHashMap;
 KH_var_lightParameterCache = createHashMap;
-["CBA", "KH_eve_execution", [], KH_fnc_callSerializedFunction] call KH_fnc_addEventHandler;
+["CBA", "KH_eve_execution", [], {(_this select 0) callSerializedFunction (_this select [1]);}] call KH_fnc_addEventHandler;
 
 [
 	"CBA",
@@ -190,71 +186,6 @@ KH_var_lightParameterCache = createHashMap;
 	}
 ] call KH_fnc_addEventHandler;
 
-KH_var_remoteExecCommandsMode = ["SCALAR", ["'CfgRemoteExec' >> 'Commands' >> 'mode'", true]] call KH_fnc_getConfigValue;
-KH_var_remoteExecFunctionsMode = ["SCALAR", ["'CfgRemoteExec' >> 'Functions' >> 'mode'", true]] call KH_fnc_getConfigValue;
-KH_var_remoteExecCommandsJipMode = ["SCALAR", ["'CfgRemoteExec' >> 'Commands' >> 'jip'", true]] call KH_fnc_getConfigValue;
-KH_var_remoteExecFunctionsJipMode = ["SCALAR", ["'CfgRemoteExec' >> 'Functions' >> 'jip'", true]] call KH_fnc_getConfigValue;
-
-if (KH_var_remoteExecCommandsMode isEqualTo 1) then {
-	{
-		if (isNumber (_x >> "allowedTargets")) then {
-			if ((getNumber (_x >> "allowedTargets")) isNotEqualTo 0) then {
-				KH_var_remoteExecCommandsBlacklist set [toLowerANSI (configName _x), true];
-			};
-		};
-
-		if (isNumber (_x >> "jip")) then {
-			if ((getNumber (_x >> "jip")) isEqualTo 0) then {
-				KH_var_remoteExecCommandsJipBlacklist set [toLowerANSI (configName _x), true];
-			};
-		};
-	} forEach ("true" configClasses (configFile >> "CfgRemoteExec" >> "Commands"));
-
-	{
-		if (isNumber (_x >> "allowedTargets")) then {
-			if ((getNumber (_x >> "allowedTargets")) isNotEqualTo 0) then {
-				KH_var_remoteExecCommandsBlacklist set [toLowerANSI (configName _x), true, true];
-			};
-		};
-
-		if (isNumber (_x >> "jip")) then {
-			if ((getNumber (_x >> "jip")) isEqualTo 0) then {
-				KH_var_remoteExecCommandsJipBlacklist set [toLowerANSI (configName _x), true, true];
-			};
-		};
-	} forEach ("true" configClasses (missionConfigFile >> "CfgRemoteExec" >> "Commands"));
-};
-
-if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
-	{
-		if (isNumber (_x >> "allowedTargets")) then {
-			if ((getNumber (_x >> "allowedTargets")) isNotEqualTo 0) then {
-				KH_var_remoteExecFunctionsBlacklist set [toLowerANSI (configName _x), true];
-			};
-		};
-
-		if (isNumber (_x >> "jip")) then {
-			if ((getNumber (_x >> "jip")) isEqualTo 0) then {
-				KH_var_remoteExecFunctionsJipBlacklist set [toLowerANSI (configName _x), true];
-			};
-		};
-	} forEach ("true" configClasses (configFile >> "CfgRemoteExec" >> "Functions"));
-
-	{
-		if (isNumber (_x >> "allowedTargets")) then {
-			if ((getNumber (_x >> "allowedTargets")) isNotEqualTo 0) then {
-				KH_var_remoteExecFunctionsBlacklist set [toLowerANSI (configName _x), true, true];
-			};
-		};
-
-		if (isNumber (_x >> "jip")) then {
-			if ((getNumber (_x >> "jip")) isEqualTo 0) then {
-				KH_var_remoteExecFunctionsJipBlacklist set [toLowerANSI (configName _x), true, true];
-			};
-		};
-	} forEach ("true" configClasses (missionConfigFile >> "CfgRemoteExec" >> "Functions"));
-};
-
 {
 	private _events = [];
 
@@ -271,83 +202,6 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 
 	KH_var_animationEvents set [toLowerANSI (configName _x), _events];
 } forEach ("true" configClasses (configFile >> "CfgKhAnimationEvents"));
-
-[
-	"MISSION",
-	"EachFrame",
-	[], 
-	{
-		if (KH_var_entityInitializationsDeletions isNotEqualTo []) then {
-			private _deletions = [];
-
-			{
-				if ((_x select 3) in KH_var_entityInitializationsDeletions) then {
-					_deletions pushBack _forEachIndex;
-				};
-			} forEach KH_var_entityInitializations;
-
-			KH_var_entityInitializations deleteAt _deletions;
-			KH_var_entityInitializationsDeletions resize 0;
-		};
-
-		if (KH_var_temporalExecutionStackAdditions isNotEqualTo []) then {
-			KH_var_temporalExecutionStack append KH_var_temporalExecutionStackAdditions;
-			KH_var_temporalExecutionStackAdditions resize 0;
-		};
-
-		if (KH_var_temporalExecutionStackDeletions isNotEqualTo []) then {
-			private _deletions = [];
-			
-			{
-				if ((_x select 6) in KH_var_temporalExecutionStackDeletions) then {
-					_deletions pushBack _forEachIndex;
-				};
-			} forEach KH_var_temporalExecutionStack;
-
-			KH_var_temporalExecutionStack deleteAt _deletions;
-			KH_var_temporalExecutionStackDeletions resize 0;
-		};
-
-		{
-			_x params ["_args", "_function", "_delay", "_delta", "_totalDelta", "_handlerId", "_eventName", "_previousReturn", "_executionTime", "_executionCount"];
-
-			if (_eventName in KH_var_temporalExecutionStackDeletions) then {
-				continue;
-			};
-
-			if (_delay > 0) then {
-				if (diag_tickTime >= _delta) then {
-					_totalDelta = if (_totalDelta isEqualTo -1) then {
-						diag_deltaTime;
-					}
-					else {
-						_x set [4, getEpoch];
-						getEpochDelta _totalDelta;
-					};
-
-					_x set [7, _args call _function];
-					_x set [3, _delta + _delay];
-					_x set [9, _executionCount + 1];
-				};
-			}
-			else {
-				if (diag_frameNo >= _delta) then {
-					_totalDelta = if (_totalDelta isEqualTo -1) then {
-						diag_deltaTime;
-					}
-					else {
-						_x set [4, getEpoch];
-						getEpochDelta _totalDelta;
-					};
-
-					_x set [7, _args call _function];
-					_x set [3, _delta + (abs _delay)];
-					_x set [9, _executionCount + 1];
-				};
-			};
-		} forEach KH_var_temporalExecutionStack;
-	}
-] call KH_fnc_addEventHandler;
 
 [
 	"CBA",
@@ -393,7 +247,7 @@ if (KH_var_remoteExecFunctionsMode isEqualTo 1) then {
 	[], 
 	{
 		params ["_arguments", ["_function", "", [""]], ["_caller", 2, [0]], ["_unscheduled", true, [true]], ["_callbackId", "", [""]]];
-		[_callbackId, [_arguments, _function, _caller, _unscheduled] call KH_fnc_callSerializedFunction, _caller, false] call KH_fnc_triggerCbaEvent;		
+		[_callbackId, _arguments callSerializedFunction [_function, _caller, _unscheduled], _caller, false] call KH_fnc_triggerCbaEvent;		
 	}
 ] call KH_fnc_addEventHandler;
 
@@ -1221,44 +1075,10 @@ if isServer then {
 				[
 					"KH_eve_execution",
 					[
-						[
-							_target,
-							_persistentEventId,
-							_initialId,
-							[
-								["ENTITY", _target, "LOCAL"],
-								"Local",
-								[_persistentExecutionId, _persistentEventId],
-								{
-									params ["_entity", "_local"];
-									_args params ["_persistentExecutionId", "_persistentEventId"];
-
-									if (_entity getVariable _persistentExecutionId) then {
-										(_entity getVariable _persistentEventId) params ["_arguments", "_function", "_sendoffArguments", "_sendoffFunction", "_caller", "_unscheduled"];
-										
-										if _local then {
-											[_arguments, _function, _caller, _unscheduled] call KH_fnc_callSerializedFunction;
-										}
-										else {
-											[_sendoffArguments, _sendoffFunction, _caller, _unscheduled] call KH_fnc_callSerializedFunction;
-										};
-									};
-								}
-							]
-						],
-						{
-							params ["_target", "_persistentEventId", "_initialId", "_handlerArguments"];
-
-							if (local _target) then {
-								if !(_target getVariable [_initialId, false]) then {
-									(_target getVariable _persistentEventId) params ["_arguments", "_function", "_sendoffArguments", "_sendoffFunction", "_caller", "_unscheduled"];
-									[_arguments, _function, _caller, _unscheduled] call KH_fnc_callSerializedFunction;
-								};
-							};
-
-							_handlerArguments call KH_fnc_addEventHandler;
-						}, 
-						_caller
+						[_target, _persistentEventId, _persistentExecutionId, _initialId],
+						"KH_fnc_persistentExecutionSetup", 
+						_caller,
+						true
 					],
 					"GLOBAL",
 					[_target, false, _persistentExecutionId]

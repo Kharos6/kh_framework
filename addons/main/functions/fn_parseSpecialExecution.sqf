@@ -1,18 +1,15 @@
 params [["_special", false, [true, []]], ["_target", true, [true, 0, "", [], {}, objNull, teamMemberNull, grpNull, sideUnknown, locationNull]]];
 
 if (_special isNotEqualTo false) then {
-    private _specialType = _special param [0, "", [""]];
-    private _specialIdOverride = "";
-
-    switch _specialType do {
+    switch (_special param [0, "", [""]]) do {
         case "JIP": {
             private _specialId = _special param [3, "", [""]];
 
-            if (_specialId isNotEqualTo "") then {
-                _specialIdOverride = _specialId;
+            private _specialIdOverride = if (_specialId isNotEqualTo "") then {
+                _specialId;
             }
             else {
-                _specialIdOverride = generateUid;
+                generateUid;
             };
 
             [[missionNamespace, _specialIdOverride, 2], _specialIdOverride];
@@ -21,11 +18,11 @@ if (_special isNotEqualTo false) then {
         case "PLAYER_PRESENCE": {
             private _specialId = _special param [5, "", [""]];
 
-            if (_specialId isNotEqualTo "") then {
-                _specialIdOverride = _specialId;
+            private _specialIdOverride = if (_specialId isNotEqualTo "") then {
+                _specialId;
             }
             else {
-                _specialIdOverride = generateUid;
+                generateUid;
             };
 
             [[missionNamespace, _specialIdOverride, 2], _specialIdOverride];
@@ -34,11 +31,11 @@ if (_special isNotEqualTo false) then {
         case "PERSISTENT": {
             private _specialId = _special param [4, "", [""]];
 
-            if (_specialId isNotEqualTo "") then {
-                _specialIdOverride = _specialId;
+            private _specialIdOverride = if (_specialId isNotEqualTo "") then {
+                _specialId;
             }
             else {
-                _specialIdOverride = generateUid;
+                generateUid;
             };
 
             [[_target, _specialIdOverride, true], _specialIdOverride];

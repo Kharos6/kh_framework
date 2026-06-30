@@ -1225,6 +1225,7 @@ if isServer then {
 					};
 
 					KH_var_clientRegistered = true;
+					nil;
 				},
 				_machineId,
 				true,

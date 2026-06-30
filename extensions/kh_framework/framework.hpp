@@ -77,7 +77,6 @@ static code g_compiled_sqf_remove_game_event_handler;
 static code g_compiled_sqf_game_event_handler_lua_bridge;
 static code g_compiled_sqf_execute_lua;
 static code g_compiled_sqf_execute_sqf;
-static code g_compiled_sqf_execute_args_sqf;
 static code g_compiled_sqf_remove_handler;
 static code g_compiled_sqf_create_hash_map_from_array;
 static code g_compiled_sqf_create_hash_map;

@@ -26,7 +26,7 @@ if !(_environment isEqualType []) then {
 	_environment = [_environment];
 };
 
-private _environmentType = _environment param [0, "", [0, "", {}]];
+private _environmentType = _environment param [0, "0", [0, "", {}]];
 private _environmentId = generateUid;
 missionNamespace setVariable [_environmentId, true];
 

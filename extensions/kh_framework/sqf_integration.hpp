@@ -3682,6 +3682,9 @@ static game_value call_serialized_function_sqf(game_value_parameter arguments, g
         game_value function = arr.size() > 0 ? arr[0] : game_value();
         bool unscheduled = arr.size() > 2 ? static_cast<bool>(arr[2]) : true;
         const bool args_nil = arguments.is_nil();
+        static const r_string n_arguments("_thisarguments");
+        static const r_string n_function("_thisfunction");
+        auto game_state = (intercept::client::host::functions.get_engine_allocator())->gameState;
 
         // Case 1: _function is CODE -> run it directly
         if (!function.is_nil() && function.type_enum() == game_data_type::CODE) {
@@ -3689,13 +3692,11 @@ static game_value call_serialized_function_sqf(game_value_parameter arguments, g
 
             if (unscheduled) {
                 if (args_nil) {
-                    g_call_arguments = game_value(fnc);
+                    game_state->set_local_variable(n_function, fnc);
                     return raw_call_sqf_native(g_compiled_sqf_generic_call);
                 } else {
-                    auto_array<game_value> call_arguments;
-                    call_arguments.push_back(arguments);
-                    call_arguments.push_back(fnc);
-                    g_call_arguments = game_value(call_arguments);
+                    game_state->set_local_variable(n_arguments, arguments);
+                    game_state->set_local_variable(n_function, fnc);
                     return raw_call_sqf_native(g_compiled_sqf_generic_call_args);
                 }
             } else {
@@ -3711,7 +3712,6 @@ static game_value call_serialized_function_sqf(game_value_parameter arguments, g
         if (!function.is_nil() && function.type_enum() == game_data_type::STRING) {
             rv_namespace ns = sqf::mission_namespace();
             std::string fname = static_cast<std::string>(function);
-            std::transform(fname.begin(), fname.end(), fname.begin(), ::tolower);
             game_value stored = sqf::get_variable(ns, fname);
 
             if (!stored.is_nil() && stored.type_enum() == game_data_type::CODE) {
@@ -3719,13 +3719,11 @@ static game_value call_serialized_function_sqf(game_value_parameter arguments, g
 
                 if (unscheduled) {
                     if (args_nil) {
-                        g_call_arguments = game_value(fnc);
+                        game_state->set_local_variable(n_function, fnc);
                         return raw_call_sqf_native(g_compiled_sqf_generic_call);
                     } else {
-                        auto_array<game_value> call_arguments;
-                        call_arguments.push_back(arguments);
-                        call_arguments.push_back(fnc);
-                        g_call_arguments = game_value(call_arguments);
+                        game_state->set_local_variable(n_arguments, arguments);
+                        game_state->set_local_variable(n_function, fnc);
                         return raw_call_sqf_native(g_compiled_sqf_generic_call_args);
                     }
                 } else {
@@ -3758,10 +3756,8 @@ static game_value call_serialized_function_sqf(game_value_parameter arguments, g
         exec_args.push_back(game_value(true));
         exec_args.push_back(game_value(std::move(special)));
         game_value exec_gv(std::move(exec_args));
-        auto_array<game_value> call_arguments;
-        call_arguments.push_back(exec_gv);
-        call_arguments.push_back(g_compiled_sqf_execute_args_sqf);
-        g_call_arguments = game_value(call_arguments);
+        game_state->set_local_variable(n_arguments, exec_gv);
+        game_state->set_local_variable(n_function, sqf::get_variable(sqf::mission_namespace(), "kh_fnc_execute"));
         return raw_call_sqf_native(g_compiled_sqf_generic_call_args);
     } catch (const std::exception& e) {
         report_error(std::string(e.what()));
@@ -3955,7 +3951,7 @@ static void process_temporal_execution_stack() {
     const float tick = sqf::diag_ticktime();
     const float frame = sqf::diag_frameno();
     const size_t n = stack.size();
-    static const r_string n_arguments("_this");
+    static const r_string n_arguments("_thisarguments");
     static const r_string n_function("_thisfunction");
     static const r_string n_total_delta("_totaldelta");
     static const r_string n_handler_id("_handlerid");
@@ -3999,7 +3995,7 @@ static void process_temporal_execution_stack() {
             game_state->set_local_variable(n_previous_return, e[7]);
             game_state->set_local_variable(n_execution_time, e[8]);
             game_state->set_local_variable(n_execution_count, e[9]);
-            e[7] = raw_call_sqf_native(g_compiled_sqf_generic_call);
+            e[7] = raw_call_sqf_native(g_compiled_sqf_generic_call_args);
             const float step = tick_based ? delay : (delay < 0.0f ? -delay : delay);
             e[3] = game_value(delta + step);
             e[9] = game_value(execution_count + 1.0f);
@@ -5088,8 +5084,8 @@ static void initialize_sqf_integration() {
         game_data_type::ARRAY
     );
 
-    g_compiled_sqf_generic_call = sqf::compile(R"(setReturnValue (call getCallArguments);)");
-    g_compiled_sqf_generic_call_args = sqf::compile(R"(setReturnValue ((getCallArguments select 0) call (getCallArguments select 1));)");
+    g_compiled_sqf_generic_call = sqf::compile(R"(setReturnValue (call _thisFunction);)");
+    g_compiled_sqf_generic_call_args = sqf::compile(R"(setReturnValue (_thisArguments call _thisFunction);)");
     g_compiled_sqf_trigger_cba_event = sqf::compile(R"(setReturnValue (getCallArguments call KH_fnc_triggerCbaEvent);)");
     g_compiled_sqf_add_game_event_handler = sqf::compile(R"(setReturnValue (getCallArguments call KH_fnc_addEventHandler);)");
     g_compiled_sqf_remove_game_event_handler = sqf::compile(R"(setReturnValue (getCallArguments call KH_fnc_removeHandler);)");
@@ -5117,7 +5113,6 @@ static void initialize_sqf_integration() {
     )");
 
     g_compiled_sqf_execute_sqf = sqf::compile(R"(setReturnValue (getCallArguments call KH_fnc_execute);)");
-    g_compiled_sqf_execute_args_sqf = sqf::compile(R"(setReturnValue (getCallArguments call KH_fnc_execute);)");
     g_compiled_sqf_remove_handler = sqf::compile(R"(setReturnValue (getCallArguments call KH_fnc_removeHandler);)");
     g_compiled_sqf_create_hash_map_from_array = sqf::compile(R"(setReturnValue (createHashMapFromArray getCallArguments);)");
     g_compiled_sqf_create_hash_map = sqf::compile(R"(setReturnValue createHashMap;)");

@@ -16,7 +16,6 @@ class CfgFunctions
 			class assignTerminal {headerType = -1;};
 			class attach {headerType = -1;};
 			class breakDisguise {headerType = -1;};
-			class callSerializedFunction {headerType = -1;};
 			class cameraSequence {headerType = -1;};
 			class canUnitFireWeapon {headerType = -1;};
 			class closeInterface {headerType = -1;};

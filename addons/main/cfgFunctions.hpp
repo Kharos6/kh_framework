@@ -148,6 +148,7 @@ class CfgFunctions
 			class setCameraTexture {headerType = -1;};
 			class setCurators {headerType = -1;};
 			class setDestinationVelocity {headerType = -1;};
+			class setDynamicVariable {headerType = -1;};
 			class setEntityVariableName {headerType = -1;};
 			class setGroupAttributes {headerType = -1;};
 			class setMissionAttributes {headerType = -1;};

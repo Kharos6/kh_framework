@@ -46,7 +46,7 @@ KH_var_allAddedDisplays = [];
 KH_var_allLocalEntities = [];
 KH_var_cloudletParameterCache = createHashMap;
 KH_var_lightParameterCache = createHashMap;
-["CBA", "KH_eve_execution", [], {(_this select 0) callSerializedFunction (_this select [1]);}] call KH_fnc_addEventHandler;
+["KH_eve_execution", {(_this select 0) callSerializedFunction (_this select [1]);}] call CBA_fnc_addEventHandler;
 
 [
 	"CBA",
@@ -2015,11 +2015,11 @@ if hasInterface then {
 
 					missionNamespace setVariable [
 						_id, 
-						if (!isNil "_arguments") then {
-							_arguments call _function;
+						if (isNil "_arguments") then {
+							call _function;
 						}
 						else {
-							call _function;
+							_arguments call _function;
 						}
 					];
 				} forEach KH_var_uiContextExecutionStack;

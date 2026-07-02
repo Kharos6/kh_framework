@@ -66,8 +66,9 @@
 using namespace intercept;
 using namespace intercept::types;
 
-constexpr float RAD_TO_DEG = 180.0f / 3.14159265359f;
-constexpr float DEG_TO_RAD = 3.14159265359f / 180.0f;
+constexpr float PI = 3.14159265359f;
+constexpr float RAD_TO_DEG = 180.0f / PI;
+constexpr float DEG_TO_RAD = PI / 180.0f;
 constexpr float EPSILON = 0.0001f;
 static code g_compiled_sqf_generic_call;
 static code g_compiled_sqf_generic_call_args;
@@ -180,6 +181,128 @@ static game_value raw_call_sqf_args_native_no_return(const code& code_obj, const
     game_state->set_local_variable(args_name, args);
     intercept::client::host::functions.invoke_raw_unary(intercept::client::__sqf::unary__isnil__code_string__ret__bool, code_obj);
     return game_value();
+}
+
+static float bezier_shape(float t, const std::vector<float>& interior) {
+    const size_t n = interior.size() + 1;              // degree
+    
+    // binomial C(n,k) iteratively; n is tiny here
+    float shaped = 0.0f;
+    float c = 1.0f;                                    // C(n,0)
+
+    for (size_t k = 0; k <= n; ++k) {
+        const float p = (k == 0) ? 0.0f : (k == n ? 1.0f : interior[k - 1]);
+        const float term = c * std::pow(1.0f - t, static_cast<float>(n - k)) * std::pow(t, static_cast<float>(k)) * p;
+        shaped += term;
+        // C(n,k+1) = C(n,k) * (n-k)/(k+1)
+        c = c * static_cast<float>(n - k) / static_cast<float>(k + 1);
+    }
+
+    return shaped;
+}
+
+static float invert_bezier(float target, const std::vector<float>& interior) {
+    float lo = 0.0f, hi = 1.0f;
+    
+    for (int i = 0; i < 40; ++i) {
+        const float mid = 0.5f * (lo + hi);
+        if (bezier_shape(mid, interior) < target) lo = mid; else hi = mid;
+    }
+
+    return 0.5f * (lo + hi);
+}
+
+static float invert_shape_numeric(float target, float (*shape)(float)) {
+    // shapes here are monotonic on [0,1]; bisection is robust and cheap
+    float lo = 0.0f, hi = 1.0f;
+
+    for (int i = 0; i < 40; ++i) {
+        const float mid = 0.5f * (lo + hi);
+        if (shape(mid) < target) lo = mid; else hi = mid;
+    }
+    
+    return 0.5f * (lo + hi);
+}
+
+// shape functions reused for numeric inversion
+static float s_smootherstep(float t) { return t * t * t * (t * (t * 6.0f - 15.0f) + 10.0f); }
+
+static float curve_shape(const std::string& curve, bool is_bezier, float t, const std::vector<float>& bezier_interior) {
+    if (curve == "linear") return t;
+    if (curve == "smoothstep") return t * t * (3.0f - 2.0f * t);
+    if (curve == "smootherstep") return t * t * t * (t * (t * 6.0f - 15.0f) + 10.0f);
+    if (curve == "easein") return t * t;
+    if (curve == "easeout") return t * (2.0f - t);
+    if (curve == "sine") return 0.5f * (1.0f - std::cos(t * PI));
+    if (curve == "exponentialin") return (t <= 0.0f) ? 0.0f : std::pow(2.0f, 10.0f * (t - 1.0f));
+    if (curve == "exponentialout")  return (t >= 1.0f) ? 1.0f : 1.0f - std::pow(2.0f, -10.0f * t);
+
+    if (curve == "circular") {
+        if (t < 0.5f) return 0.5f * (1.0f - std::sqrt(1.0f - 4.0f * t * t));
+        const float u = 2.0f * t - 2.0f;
+        return 0.5f * (std::sqrt(1.0f - u * u) + 1.0f);
+    }
+
+    if (is_bezier) return bezier_shape(t, bezier_interior);
+    return t;
+}
+
+static float curve_slope(const std::string& curve, bool is_bezier, float t, const std::vector<float>& bezier_interior) {
+    if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f;
+    const float ln2 = 0.69314718056f;
+    if (curve == "linear") return 1.0f;
+    if (curve == "smoothstep") return 6.0f * t * (1.0f - t);
+    if (curve == "smootherstep") return 30.0f * t * t * (1.0f - t) * (1.0f - t);
+    if (curve == "easein") return 2.0f * t;
+    if (curve == "easeout") return 2.0f - 2.0f * t;
+    if (curve == "sine") return 0.5f * PI * std::sin(t * PI);
+    if (curve == "exponentialin") return 10.0f * ln2 * std::pow(2.0f, 10.0f * (t - 1.0f));
+    if (curve == "exponentialout") return 10.0f * ln2 * std::pow(2.0f, -10.0f * t);
+
+    // circular and bezier: central finite difference (no clean/stable closed form near joins/arbitrary points)
+    const float h = 0.001f;
+    float p0 = t - h; if (p0 < 0.0f) p0 = 0.0f;
+    float p1 = t + h; if (p1 > 1.0f) p1 = 1.0f;
+    const float span = (p1 - p0); 
+    const float denom = (span > 1e-6f) ? span : 1e-6f;
+    const float f0 = curve_shape(curve, is_bezier, p0, bezier_interior);
+    const float f1 = curve_shape(curve, is_bezier, p1, bezier_interior);
+    return (f1 - f0) / denom;
+}
+
+static float curve_inverse_shape(const std::string& curve, bool is_bezier, float shaped, const std::vector<float>& bezier_interior) {
+    float t;
+    if (curve == "linear") t = shaped;
+    else if (curve == "smoothstep") t = 0.5f - std::sin(std::asin(1.0f - 2.0f * shaped) / 3.0f);
+    else if (curve == "smootherstep") t = invert_shape_numeric(shaped, s_smootherstep);
+    else if (curve == "easein") t = (shaped <= 0.0f) ? 0.0f : std::sqrt(shaped);
+    else if (curve == "easeout") t = 1.0f - std::sqrt(1.0f - shaped);
+    else if (curve == "sine") t = std::acos(1.0f - 2.0f * shaped) / PI;
+    else if (curve == "exponentialin") t = (shaped <= 0.0f) ? 0.0f : 1.0f + std::log2(shaped) / 10.0f;
+    else if (curve == "exponentialout") t = (shaped >= 1.0f) ? 1.0f : -std::log2(1.0f - shaped) / 10.0f;
+
+    else if (curve == "circular") {
+        if (shaped < 0.5f) { const float v = 1.0f - 2.0f * shaped; t = 0.5f * std::sqrt(1.0f - v * v); }
+        else { const float v = 2.0f * shaped - 1.0f; t = 1.0f - 0.5f * std::sqrt(1.0f - v * v); }
+    }
+    
+    else if (is_bezier) t = invert_bezier(shaped, bezier_interior);
+    else t = shaped;
+    if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f;
+    return t;
+}
+
+static std::vector<float> read_bezier_interior(const game_value& slot) {
+    std::vector<float> interior;
+
+    if (slot.type_enum() == game_data_type::ARRAY) {
+        auto& pts = slot.to_array();
+        interior.reserve(pts.size());
+        for (size_t i = 0; i < pts.size(); ++i) interior.push_back(static_cast<float>(pts[i]));
+    }
+    
+    if (interior.empty()) { interior.push_back(0.0f); interior.push_back(1.0f); } // default -> classic cubic
+    return interior;
 }
 
 class RandomStringGenerator {

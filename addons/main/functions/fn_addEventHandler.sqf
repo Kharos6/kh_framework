@@ -337,6 +337,10 @@ switch _eventType do {
 		if (isNil "_arguments") then {
 			_arguments = [];
 		};
+
+		if (isNil "_timeoutArguments") then {
+			_timeoutArguments = [];
+		};
 		
 		_drawType pushBack [
 			_arguments,

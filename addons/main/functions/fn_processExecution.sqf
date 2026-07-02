@@ -11,6 +11,10 @@ if (_special isEqualTo false) exitWith {
     ["KH_eve_execution", [_arguments, _function, clientOwner, _unscheduled], _target, false] call KH_fnc_triggerCbaEvent;
 };
 
+if (_special isEqualTo true) then {
+	_special = ["JIP", true, false, ""];
+};
+
 private _specialType = _special param [0, "", [""]];
 
 switch _specialType do {

@@ -135,6 +135,12 @@ static registered_sqf_function _sqf_serialize_function_string;
 static registered_sqf_function _sqf_serialize_function_bool_code;
 static registered_sqf_function _sqf_serialize_function_bool_string;
 static registered_sqf_function _sqf_call_serialized_function;
+static registered_sqf_function _sqf_curve_conversion;
+static registered_sqf_function _sqf_inverse_curve_conversion;
+static registered_sqf_function _sqf_vector_curve_conversion;
+static registered_sqf_function _sqf_inverse_vector_curve_conversion;
+static registered_sqf_function _sqf_curve_slope;
+static registered_sqf_function _sqf_vector_curve_slope;
 
 static game_value execute_lua_sqf(game_value_parameter args, game_value_parameter code_or_function) {    
     try {
@@ -3765,6 +3771,220 @@ static game_value call_serialized_function_sqf(game_value_parameter arguments, g
     }
 }
 
+static game_value curve_conversion_sqf(game_value_parameter type, game_value_parameter params) {
+    if (type.type_enum() != game_data_type::STRING) return game_value(0.0f);
+    auto& a = params.to_array();
+    if (a.size() < 5) return game_value(0.0f);
+    const float min_from = static_cast<float>(a[0]);
+    const float max_from = static_cast<float>(a[1]);
+    const float value = static_cast<float>(a[2]);
+    const float min_to = static_cast<float>(a[3]);
+    const float max_to = static_cast<float>(a[4]);
+    std::string curve = static_cast<std::string>(type);
+    std::transform(curve.begin(), curve.end(), curve.begin(), ::tolower);
+    const bool is_bezier = (curve == "bezier");
+    std::vector<float> interior;
+    size_t clip_index;
+
+    if (is_bezier) {
+        interior = read_bezier_interior(a.size() > 5 ? a[5] : game_value());
+        clip_index = 6;
+    } else {
+        clip_index = 5;
+    }
+
+    const bool clip = a.size() > clip_index && a[clip_index].type_enum() == game_data_type::BOOL && static_cast<bool>(a[clip_index]);
+    const float span = max_from - min_from;
+    float t = (span == 0.0f) ? 0.0f : (value - min_from) / span;
+    if (clip) { if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f; }
+    const float shaped = curve_shape(curve, is_bezier, t, interior);
+    return game_value(min_to + (max_to - min_to) * shaped);
+}
+
+static game_value inverse_curve_conversion_sqf(game_value_parameter type, game_value_parameter params) {
+    auto_array<game_value> result;
+    auto fail = [&]() { result.push_back(game_value(0.0f)); result.push_back(game_value(0.0f)); return game_value(std::move(result)); };
+    if (type.type_enum() != game_data_type::STRING) return fail();
+    auto& a = params.to_array();
+    if (a.size() < 5) return fail();
+    const float min_from = static_cast<float>(a[0]);
+    const float max_from = static_cast<float>(a[1]);
+    const float out = static_cast<float>(a[2]);
+    const float min_to = static_cast<float>(a[3]);
+    const float max_to = static_cast<float>(a[4]);
+    std::string curve = static_cast<std::string>(type);
+    std::transform(curve.begin(), curve.end(), curve.begin(), ::tolower);
+    const bool is_bezier = (curve == "bezier");
+    std::vector<float> interior;
+    if (is_bezier) interior = read_bezier_interior(a.size() > 5 ? a[5] : game_value());
+    const float to_span = max_to - min_to;
+    float shaped = (to_span == 0.0f) ? 0.0f : (out - min_to) / to_span;
+    if (shaped < 0.0f) shaped = 0.0f; else if (shaped > 1.0f) shaped = 1.0f;
+    const float t = curve_inverse_shape(curve, is_bezier, shaped, interior);
+    const float value = min_from + t * (max_from - min_from);
+    result.push_back(game_value(value));
+    result.push_back(game_value(t));
+    return game_value(std::move(result));
+}
+
+static game_value vector_curve_conversion_sqf(game_value_parameter type, game_value_parameter params) {
+    if (type.type_enum() != game_data_type::STRING) return game_value(auto_array<game_value>());
+    auto& a = params.to_array();
+    if (a.size() < 5) return game_value(auto_array<game_value>());
+
+    if (a[3].type_enum() != game_data_type::ARRAY || a[4].type_enum() != game_data_type::ARRAY) {
+        return game_value(auto_array<game_value>());
+    }
+
+    const float min_from = static_cast<float>(a[0]);
+    const float max_from = static_cast<float>(a[1]);
+    const float value = static_cast<float>(a[2]);
+    auto& from_vec = a[3].to_array();
+    auto& to_vec = a[4].to_array();
+    const size_t dim = from_vec.size() < to_vec.size() ? from_vec.size() : to_vec.size(); // 2 or 3 (min of both)
+    std::string curve = static_cast<std::string>(type);
+    std::transform(curve.begin(), curve.end(), curve.begin(), ::tolower);
+    const bool is_bezier = (curve == "bezier");
+    std::vector<float> interior;
+    size_t clip_index;
+
+    if (is_bezier) {
+        interior = read_bezier_interior(a.size() > 5 ? a[5] : game_value());
+        clip_index = 6;
+    } else {
+        clip_index = 5;
+    }
+
+    const bool clip = a.size() > clip_index && a[clip_index].type_enum() == game_data_type::BOOL && static_cast<bool>(a[clip_index]);
+    const float span = max_from - min_from;
+    float t = (span == 0.0f) ? 0.0f : (value - min_from) / span;
+    if (clip) { if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f; }
+    const float shaped = curve_shape(curve, is_bezier, t, interior);
+    auto_array<game_value> result;
+
+    for (size_t i = 0; i < dim; ++i) {
+        const float f = static_cast<float>(from_vec[i]);
+        const float to = static_cast<float>(to_vec[i]);
+        result.push_back(game_value(f + (to - f) * shaped));
+    }
+
+    return game_value(std::move(result));
+}
+
+static game_value inverse_vector_curve_conversion_sqf(game_value_parameter type, game_value_parameter params) {
+    auto_array<game_value> fail;
+    fail.push_back(game_value(0.0f));
+    fail.push_back(game_value(0.0f));
+    if (type.type_enum() != game_data_type::STRING) return game_value(std::move(fail));
+    auto& a = params.to_array();
+    if (a.size() < 5) return game_value(std::move(fail));
+
+    if (a[2].type_enum() != game_data_type::ARRAY || a[3].type_enum() != game_data_type::ARRAY || a[4].type_enum() != game_data_type::ARRAY) {
+        return game_value(std::move(fail));
+    }
+
+    const float min_from = static_cast<float>(a[0]);
+    const float max_from = static_cast<float>(a[1]);
+    auto& out_vec = a[2].to_array();   // desired output vector (old curve's current result)
+    auto& from_vec = a[3].to_array();
+    auto& to_vec = a[4].to_array();
+    size_t dim = from_vec.size();
+    if (to_vec.size() < dim) dim = to_vec.size();
+    if (out_vec.size() < dim) dim = out_vec.size();
+    std::string curve = static_cast<std::string>(type);
+    std::transform(curve.begin(), curve.end(), curve.begin(), ::tolower);
+    const bool is_bezier = (curve == "bezier");
+    std::vector<float> interior;
+    if (is_bezier) interior = read_bezier_interior(a.size() > 5 ? a[5] : game_value());
+
+    // recover shaped from the component with the largest span (most stable); shared t means any non-degenerate axis works
+    float best_span_abs = 0.0f;
+    float shaped = 0.0f;
+    
+    for (size_t i = 0; i < dim; ++i) {
+        const float f = static_cast<float>(from_vec[i]);
+        const float to = static_cast<float>(to_vec[i]);
+        const float comp_span = to - f;
+        const float comp_span_abs = comp_span < 0.0f ? -comp_span : comp_span;
+
+        if (comp_span_abs > best_span_abs) {
+            best_span_abs = comp_span_abs;
+            shaped = (static_cast<float>(out_vec[i]) - f) / comp_span;
+        }
+    }
+
+    // if all components are degenerate (from == to), shaped stays 0 -> t = 0
+    if (shaped < 0.0f) shaped = 0.0f; else if (shaped > 1.0f) shaped = 1.0f;
+    const float t = curve_inverse_shape(curve, is_bezier, shaped, interior);
+    const float value = min_from + t * (max_from - min_from);
+    auto_array<game_value> result;
+    result.push_back(game_value(value));
+    result.push_back(game_value(t));
+    return game_value(std::move(result));
+}
+
+static game_value curve_slope_sqf(game_value_parameter type, game_value_parameter params) {
+    if (type.type_enum() != game_data_type::STRING) return game_value(0.0f);
+    auto& a = params.to_array();
+    if (a.size() < 5) return game_value(0.0f);
+    const float min_from = static_cast<float>(a[0]);
+    const float max_from = static_cast<float>(a[1]);
+    const float value    = static_cast<float>(a[2]);
+    std::string curve = static_cast<std::string>(type);
+    std::transform(curve.begin(), curve.end(), curve.begin(), ::tolower);
+    const bool is_bezier = (curve == "bezier");
+    std::vector<float> interior;
+    size_t floor_index;
+    if (is_bezier) { interior = read_bezier_interior(a.size() > 5 ? a[5] : game_value()); floor_index = 6; }
+    else { floor_index = 5; }
+    const float floor_val = (a.size() > floor_index && a[floor_index].type_enum() == game_data_type::SCALAR) ? static_cast<float>(a[floor_index]) : 0.0f;
+    const float span = max_from - min_from;
+    float t = (span == 0.0f) ? 0.0f : (value - min_from) / span;
+    if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f;
+    float slope = curve_slope(curve, is_bezier, t, interior);
+    if (slope < floor_val) slope = floor_val;
+    return game_value(slope);
+}
+
+static game_value vector_curve_slope_sqf(game_value_parameter type, game_value_parameter params) {
+    if (type.type_enum() != game_data_type::STRING) return game_value(auto_array<game_value>());
+    auto& a = params.to_array();
+    if (a.size() < 5) return game_value(auto_array<game_value>());
+
+    if (a[3].type_enum() != game_data_type::ARRAY || a[4].type_enum() != game_data_type::ARRAY) {
+        return game_value(auto_array<game_value>());
+    }
+
+    const float min_from = static_cast<float>(a[0]);
+    const float max_from = static_cast<float>(a[1]);
+    const float value = static_cast<float>(a[2]);
+    auto& from_vec = a[3].to_array();
+    auto& to_vec = a[4].to_array();
+    const size_t dim = from_vec.size() < to_vec.size() ? from_vec.size() : to_vec.size();
+    std::string curve = static_cast<std::string>(type);
+    std::transform(curve.begin(), curve.end(), curve.begin(), ::tolower);
+    const bool is_bezier = (curve == "bezier");
+    std::vector<float> interior;
+    size_t floor_index;
+    if (is_bezier) { interior = read_bezier_interior(a.size() > 5 ? a[5] : game_value()); floor_index = 6; }
+    else { floor_index = 5; }
+    const float floor_val = (a.size() > floor_index && a[floor_index].type_enum() == game_data_type::SCALAR) ? static_cast<float>(a[floor_index]) : 0.0f;
+    const float span = max_from - min_from;
+    float t = (span == 0.0f) ? 0.0f : (value - min_from) / span;
+    if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f;
+    float slope = curve_slope(curve, is_bezier, t, interior);
+    if (slope < floor_val) slope = floor_val;
+    auto_array<game_value> result;
+
+    for (size_t i = 0; i < dim; ++i) {
+        const float f = static_cast<float>(from_vec[i]);
+        const float to = static_cast<float>(to_vec[i]);
+        result.push_back(game_value((to - f) * slope));
+    }
+
+    return game_value(std::move(result));
+}
+
 static game_value serialize_function_unary(game_value_parameter function) {
     return serialize_function_impl(function, false);
 }
@@ -3865,13 +4085,6 @@ static bool kh_set_contains(const std::unordered_set<std::string>& set, const ga
 
 static void process_temporal_execution_stack() {
     rv_namespace ns = sqf::mission_namespace();
-    game_value stack_gv = sqf::get_variable(ns, "kh_var_temporalexecutionstack");
-
-    if (stack_gv.is_nil() || stack_gv.type_enum() != game_data_type::ARRAY) {
-        return;
-    }
-
-    auto& stack = stack_gv.to_array();
 
     // Entity initialization deletions
     game_value entity_deletions_gv = sqf::get_variable(ns, "kh_var_entityinitializationsdeletions");
@@ -3903,6 +4116,14 @@ static void process_temporal_execution_stack() {
             entity_deletions.resize(0);
         }
     }
+
+    game_value stack_gv = sqf::get_variable(ns, "kh_var_temporalexecutionstack");
+
+    if (stack_gv.is_nil() || stack_gv.type_enum() != game_data_type::ARRAY) {
+        return;
+    }
+
+    auto& stack = stack_gv.to_array();
 
     // Temporal execution stack additions
     game_value additions_gv = sqf::get_variable(ns, "kh_var_temporalexecutionstackadditions");
@@ -3959,6 +4180,7 @@ static void process_temporal_execution_stack() {
     static const r_string n_previous_return("_previousreturn");
     static const r_string n_execution_time("_executiontime");
     static const r_string n_execution_count("_executioncount");
+    game_value frame_delta = game_value(sqf::diag_delta_time());
     auto game_state = (intercept::client::host::functions.get_engine_allocator())->gameState;
 
     for (size_t i = 0; i < n; ++i) {
@@ -3980,7 +4202,7 @@ static void process_temporal_execution_stack() {
             const bool is_minus_one = (old_total_delta.type_enum() == game_data_type::SCALAR && static_cast<float>(old_total_delta) == -1.0f);
 
             if (is_minus_one) {
-                total_delta = game_value(sqf::diag_delta_time());
+                total_delta = frame_delta;
             } else {
                 e[4] = get_epoch_sqf();
                 total_delta = get_epoch_delta_sqf(old_total_delta);
@@ -5081,6 +5303,60 @@ static void initialize_sqf_integration() {
         userFunctionWrapper<call_serialized_function_sqf>,
         game_data_type::ANY,
         game_data_type::ANY,
+        game_data_type::ARRAY
+    );
+
+    _sqf_curve_conversion = intercept::client::host::register_sqf_command(
+        "curveConversion",
+        "Remaps value through an easing curve; linear, smoothstep, smootherstep, easeIn, easeOut, sine, exponentialIn, exponentialOut, circular all take [minFrom, maxFrom, value, minTo, maxTo, clip]; bezier takes [minFrom, maxFrom, value, minTo, maxTo, points, clip] where points is an array of interior control ordinates (endpoints 0 and 1 are implicit; omit or [] for a classic cubic ease)",
+        userFunctionWrapper<curve_conversion_sqf>,
+        game_data_type::SCALAR,
+        game_data_type::STRING,
+        game_data_type::ARRAY
+    );
+
+    _sqf_inverse_curve_conversion = intercept::client::host::register_sqf_command(
+        "inverseCurveConversion",
+        "Returns [value, t] where value is the input this curve needs to produce desiredOutput and 't' is the normalized progress (0..1) at that point. Useful to swap curve type/ranges mid-animation without snapping by feeding the old curve's current output and the new curve's params. Format [minFrom, maxFrom, desiredOutput, minTo, maxTo]; bezier takes [minFrom, maxFrom, desiredOutput, minTo, maxTo, points]",
+        userFunctionWrapper<inverse_curve_conversion_sqf>,
+        game_data_type::ARRAY,
+        game_data_type::STRING,
+        game_data_type::ARRAY
+    );
+
+    _sqf_vector_curve_conversion = intercept::client::host::register_sqf_command(
+        "vectorCurveConversion",
+        "Eases a single progress value along a path between fromVec and toVec (2D or 3D), returning the eased vector with one shared curve parameter across components. Curves linear, smoothstep, smootherstep, easeIn, easeOut, sine, exponentialIn, exponentialOut, circular take [minFrom, maxFrom, value, fromVec, toVec, clip]; bezier takes [minFrom, maxFrom, value, fromVec, toVec, points, clip] where points is an array of interior control ordinates (omit or [] for a classic cubic ease)",
+        userFunctionWrapper<vector_curve_conversion_sqf>,
+        game_data_type::ARRAY,
+        game_data_type::STRING,
+        game_data_type::ARRAY
+    );
+
+    _sqf_inverse_vector_curve_conversion = intercept::client::host::register_sqf_command(
+        "inverseVectorCurveConversion",
+        "Returns [value, t] that are the scalar progress input and normalized t (0..1) that make this curve output desiredOutputVec along the fromVec->toVec path. Useful to swap curve type/endpoints mid-animation without snapping. Format [minFrom, maxFrom, desiredOutputVec, fromVec, toVec]; bezier takes [minFrom, maxFrom, desiredOutputVec, fromVec, toVec, points]",
+        userFunctionWrapper<inverse_vector_curve_conversion_sqf>,
+        game_data_type::ARRAY,
+        game_data_type::STRING,
+        game_data_type::ARRAY
+    );
+
+    _sqf_curve_slope = intercept::client::host::register_sqf_command(
+        "curveSlope",
+        "Format [minFrom, maxFrom, value, minTo, maxTo, floor]. Returns the curve's normalized rate of change (slope) at the position of value within minFrom..maxFrom. Use as a speed multiplier: linear gives constant 1, easeIn accelerates, easeOut decelerates, smoothstep is slow-fast-slow. Optional floor sets a minimum slope so flat regions still progress. For bezier: [minFrom, maxFrom, value, minTo, maxTo, points, floor].",
+        userFunctionWrapper<curve_slope_sqf>,
+        game_data_type::SCALAR,
+        game_data_type::STRING,
+        game_data_type::ARRAY
+    );
+
+    _sqf_vector_curve_slope = intercept::client::host::register_sqf_command(
+        "vectorCurveSlope",
+        "Format [minFrom, maxFrom, value, fromVec, toVec, floor]. Returns the per-component rate-of-change vector slope*(toVec-fromVec) at the shared progress of value, i.e. the velocity direction/magnitude along the path. Optional floor sets a minimum slope. For bezier: [minFrom, maxFrom, value, fromVec, toVec, points, floor].",
+        userFunctionWrapper<vector_curve_slope_sqf>,
+        game_data_type::ARRAY,
+        game_data_type::STRING,
         game_data_type::ARRAY
     );
 

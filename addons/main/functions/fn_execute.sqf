@@ -22,6 +22,10 @@ if (_environment isEqualType true) exitWith {
 	};
 };
 
+if (isNil "_arguments") then {
+	_arguments = [];
+};
+
 if !(_environment isEqualType []) then {
 	_environment = [_environment];
 };
@@ -82,10 +86,6 @@ switch (typeName _environmentType) do {
 		([_special, _target] call KH_fnc_parseSpecialExecution) params ["_return", "_specialIdOverride"];
 		private "_previousReturn";
 		private _continue = true;
-
-		if (isNil "_arguments") then {
-			_arguments = [];
-		};
 
 		private _fedArguments = if _basic then {
 			[_arguments, false serializeFunction _function, clientOwner, _unscheduled];
@@ -215,7 +215,7 @@ switch (typeName _environmentType) do {
 		(_environment select [1]) params [
 			["_immediate", true, [true]], 
 			["_interval", 0, [0]], 
-			["_timeoutRules", [[1, false], false, false, false], [true, 0, "", []]], 
+			["_timeoutRules", [[1, false, 0], false, false, false], [true, 0, "", []]], 
 			["_timeoutFunction", {}, [{}]], 
 			["_verboseDelta", false, [true]], 
 			["_unscheduled", true, [true]]
@@ -264,8 +264,8 @@ switch (typeName _environmentType) do {
 
 			case "ARRAY": {
 				_countConditionFailure = _timeout param [1, false, [true]];
-				_timeout = (_timeout param [0, 1, [0]]) max 1;
 				_iterationTimeout = _timeout param [2, 0, [0]];
+				_timeout = (_timeout param [0, 1, [0]]) max 1;
 				_iterationCount = true;
 				_handlerTickCounterId = generateUid;
 				missionNamespace setVariable [_handlerTickCounterId, 1];
@@ -276,10 +276,6 @@ switch (typeName _environmentType) do {
 		_environmentType = missionNamespace getVariable (false serializeFunction _environmentType);
 		private "_previousReturn";
 		private _continue = true;
-
-		if (isNil "_arguments") then {
-			_arguments = [];
-		};
 
 		private _fedArguments = if _basic then {
 			[_arguments, false serializeFunction _function, clientOwner, _unscheduled];

@@ -140,7 +140,8 @@ _unit setVariable ["KH_var_unitControllerId", _id, true];
                                 private _relativeDirection = _unit getRelDir _currentStep;
                                 private _correctedDirection = abs (((_relativeDirection + 180) % 360) - 180);
                                 private _direction = _relativeDirection < 180;
-                                private _heading = ((getDir _unit) + (([-_turningSpeed, _turningSpeed] select _direction) * _totalDelta)) % 360;
+                                private _turnAmount = ((_turningSpeed * _totalDelta) min _correctedDirection);
+                                private _heading = ((getDir _unit) + ([-_turnAmount, _turnAmount] select _direction)) % 360;
                                 private _headingCorrect = _correctedDirection <= _acceptedDeviationAngle;
 
                                 if !_headingCorrect then {

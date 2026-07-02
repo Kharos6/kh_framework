@@ -1,5 +1,9 @@
 params [["_special", false, [true, []]], ["_target", true, [true, 0, "", [], {}, objNull, teamMemberNull, grpNull, sideUnknown, locationNull]]];
 
+if (_special isEqualTo true) then {
+	_special = ["JIP", true, false, ""];
+};
+
 if (_special isNotEqualTo false) then {
     switch (_special param [0, "", [""]]) do {
         case "JIP": {

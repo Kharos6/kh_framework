@@ -215,7 +215,7 @@ switch (typeName _environmentType) do {
 		(_environment select [1]) params [
 			["_immediate", true, [true]], 
 			["_interval", 0, [0]], 
-			["_timeoutRules", [[1, false, 0], false, false, false], [true, 0, "", []]], 
+			["_timeoutRules", [true, false, false, false], [true, 0, "", []]], 
 			["_timeoutFunction", {}, [{}]], 
 			["_verboseDelta", false, [true]], 
 			["_unscheduled", true, [true]]

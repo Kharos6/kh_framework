@@ -141,6 +141,7 @@ static registered_sqf_function _sqf_vector_curve_conversion;
 static registered_sqf_function _sqf_inverse_vector_curve_conversion;
 static registered_sqf_function _sqf_curve_slope;
 static registered_sqf_function _sqf_vector_curve_slope;
+static registered_sqf_function _sqf_get_unit_yaw_speed;
 
 static game_value execute_lua_sqf(game_value_parameter args, game_value_parameter code_or_function) {    
     try {
@@ -3985,6 +3986,42 @@ static game_value vector_curve_slope_sqf(game_value_parameter type, game_value_p
     return game_value(std::move(result));
 }
 
+static game_value get_unit_yaw_speed_sqf(game_value_parameter obj) {
+    game_data_object* gd = (game_data_object*)obj.data.get();
+    if (gd == nullptr || gd->object == nullptr || gd->object->object == nullptr) return game_value(0.0f);
+    void* key = (void*)gd->object->object;
+    auto it = g_unit_states.find(key);
+    if (it == g_unit_states.end()) return game_value(0.0f);
+    const auto& st = it->second;
+    if (st.count < 2) return game_value(0.0f);
+    const float newest_time = st.time[st.head];
+    const float newest_head = st.heading[st.head];
+
+    // walk backwards accumulating wrap-corrected delta until we cover the window (or run out of samples)
+    int idx = st.head;
+    float accum_delta = 0.0f;
+    float prev_head = newest_head;
+    float oldest_time = newest_time;
+
+    for (int n = 1; n < st.count; ++n) {
+        int prev_idx = idx - 1; if (prev_idx < 0) prev_idx += YAW_MAXSAMPLES;
+        const float h = st.heading[prev_idx];
+        const float t = st.time[prev_idx];
+        float step = prev_head - h;
+        if (step > 180.0f) step -= 360.0f;
+        else if (step < -180.0f) step += 360.0f;
+        accum_delta += step;
+        oldest_time = t;
+        prev_head = h;
+        idx = prev_idx;
+        if (newest_time - t >= YAW_WINDOW) break;   // covered the window
+    }
+
+    const float span = newest_time - oldest_time;
+    if (span < 1e-6f) return game_value(0.0f);
+    return game_value(accum_delta / span);
+}
+
 static game_value serialize_function_unary(game_value_parameter function) {
     return serialize_function_impl(function, false);
 }
@@ -4222,6 +4259,32 @@ static void process_temporal_execution_stack() {
             e[3] = game_value(delta + step);
             e[9] = game_value(execution_count + 1.0f);
         }
+    }
+}
+
+static void update_unit_states() {
+    auto units = sqf::get_variable(sqf::mission_namespace(), "kh_var_allmen");
+    const float now = static_cast<float>(sqf::diag_ticktime());
+    for (auto& kv : g_unit_states) kv.second.seen_this_frame = false;
+
+    for (size_t i = 0; i < units.size(); ++i) {
+        const auto& unit = units[i];
+        game_data_object* gd = (game_data_object*)unit.data.get();
+        if (gd == nullptr || gd->object == nullptr || gd->object->object == nullptr) continue;
+        void* key = (void*)gd->object->object;
+        float heading = static_cast<float>(sqf::get_dir_visual(unit));
+        auto& st = g_unit_states[key];
+        st.seen_this_frame = true;
+        st.head = (st.head + 1) % YAW_MAXSAMPLES;
+        st.heading[st.head] = heading;
+        st.time[st.head] = now;
+        if (st.count < YAW_MAXSAMPLES) st.count++;
+    }
+
+    // prune units no longer present
+    for (auto it = g_unit_states.begin(); it != g_unit_states.end(); ) {
+        if (!it->second.seen_this_frame) it = g_unit_states.erase(it);
+        else ++it;
     }
 }
 
@@ -5358,6 +5421,14 @@ static void initialize_sqf_integration() {
         game_data_type::ARRAY,
         game_data_type::STRING,
         game_data_type::ARRAY
+    );
+
+    _sqf_get_unit_yaw_speed = intercept::client::host::register_sqf_command(
+        "getUnitYawSpeed",
+        "Returns the unit's yaw rotation speed in degrees/second, measured over a 100ms window",
+        userFunctionWrapper<get_unit_yaw_speed_sqf>,
+        game_data_type::SCALAR,
+        game_data_type::OBJECT
     );
 
     g_compiled_sqf_generic_call = sqf::compile(R"(setReturnValue (call _thisFunction);)");

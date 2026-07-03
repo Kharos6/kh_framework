@@ -31,10 +31,7 @@ isNil {
                     [_visualTriggers],
                     {
                         _args params ["_visualTriggers"];
-                        
-                        {
-                            [_x] call KH_fnc_removeHandler;
-                        } forEach _visualTriggers;
+                        _visualTriggers call KH_fnc_removeHandler;
                     }
                 ] call KH_fnc_addEventHandler;
             };

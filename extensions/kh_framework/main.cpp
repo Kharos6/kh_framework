@@ -194,6 +194,7 @@ void intercept::on_frame() {
             }
         }
 
+        update_unit_states();
         process_temporal_execution_stack();        
         MainThreadScheduler::instance().process_frame();
         LuaStackGuard guard(*g_lua_state);

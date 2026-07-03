@@ -200,10 +200,7 @@ isNil {
                             [_actionHandlers],
                             {
                                 _args params ["_actionHandlers"];
-                                
-                                {
-                                    [_x] call KH_fnc_removeHandler;
-                                } forEach _actionHandlers;
+                                _actionHandlers call KH_fnc_removeHandler;
                             }
                         ] call KH_fnc_addEventHandler;
                     },

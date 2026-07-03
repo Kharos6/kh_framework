@@ -23,11 +23,8 @@ switch _specialType do {
         private _unitRequired = _special param [2, false, [true]];
         private _jipId = _special param [3, "", [""]];
 
-        _jipId = if (_jipId isNotEqualTo "") then {
-            _jipId;
-        }
-        else {
-            if (_specialIdOverride isNotEqualTo "") then {
+        if (_jipId isEqualTo "") then {
+            _jipId = if (_specialIdOverride isNotEqualTo "") then {
                 _specialIdOverride;
             }
             else {
@@ -93,11 +90,8 @@ switch _specialType do {
         private _sendoffFunction = _special param [3, {}, ["", {}]];
         private _persistentExecutionId = _special param [4, "", [""]];
 
-        _persistentExecutionId = if (_persistentExecutionId isNotEqualTo "") then {
-            _persistentExecutionId;
-        }
-        else {
-            if (_specialIdOverride isNotEqualTo "") then {
+        if (_persistentExecutionId isEqualTo "") then {
+            _persistentExecutionId = if (_specialIdOverride isNotEqualTo "") then {
                 _specialIdOverride;
             }
             else {
@@ -127,11 +121,8 @@ switch _specialType do {
         private _jip = _special param [4, true, [true]];
         private _nearId = _special param [5, "", [""]];
         
-        _nearId = if (_nearId isNotEqualTo "") then {
-            _nearId;
-        }
-        else {
-            if (_specialIdOverride isNotEqualTo "") then {
+        if (_nearId isEqualTo "") then {
+            _nearId = if (_specialIdOverride isNotEqualTo "") then {
                 _specialIdOverride;
             }
             else {

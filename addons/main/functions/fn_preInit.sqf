@@ -43,7 +43,10 @@ KH_var_mouseTargetCheckFrame = 0;
 KH_var_viewTargetCheckFrame = 0;
 KH_var_weaponTargetCheckFrame = 0;
 KH_var_allAddedDisplays = [];
+KH_var_allEntities = [];
 KH_var_allLocalEntities = [];
+KH_var_allMen = [];
+KH_var_allLocalMen = [];
 KH_var_cloudletParameterCache = createHashMap;
 KH_var_lightParameterCache = createHashMap;
 ["KH_eve_execution", {(_this select 0) callSerializedFunction (_this select [1]);}] call CBA_fnc_addEventHandler;
@@ -779,6 +782,7 @@ if isServer then {
 	KH_var_missionSuspended = false;
 	publicVariable "KH_var_missionSuspended";
 	KH_var_jipHandlers = createHashMap;
+	KH_var_playerPresenceHandlers = createHashMap;
 	KH_var_headlessClientTransfers = [];
 	KH_var_entityArrayBuilderArrays = [];
 	KH_var_groupArrayBuilderArrays = [];
@@ -885,20 +889,18 @@ if isServer then {
 			private _continue = true;
 
 			if !(isNil "_currentHandler") then {
-				if ((_currentHandler select 4) isEqualTo _unitRequired) then {
-					KH_var_jipHandlers set [_jipId, [["JIP_HANDLER", _jipId], _name, _arguments, _dependency, _unitRequired, []]];
+				if ((_currentHandler select 3) isEqualTo _unitRequired) then {
+					KH_var_jipHandlers set [_jipId, [_name, _arguments, _dependency, _unitRequired, _currentHandler select 4]];
 					_continue = false;
 				}
 				else {
-					{
-						[_x] call KH_fnc_removeHandler;
-					} forEach (_currentHandler select 5);
+					(_currentHandler select 4) call KH_fnc_removeHandler;
 				};
 			};
 
 			if !_continue exitWith {};
 			private _jipHandlers = [];
-			KH_var_jipHandlers set [_jipId, [["JIP_HANDLER", _jipId], _name, _arguments, _dependency, _unitRequired, _jipHandlers]];
+			KH_var_jipHandlers set [_jipId, [_name, _arguments, _dependency, _unitRequired, _jipHandlers]];
 			
 			private _joinType = if _unitRequired then {
 				["KH_eve_playerLoaded", "KH_eve_headlessLoaded"];
@@ -923,7 +925,7 @@ if isServer then {
 
 						private _currentHandler = KH_var_jipHandlers get _jipId;
 						if (isNil "_currentHandler") exitWith {};
-						private _dependency = _currentHandler select 3;
+						private _dependency = _currentHandler select 2;
 						private _condition = true;
 
 						switch (typeName _dependency) do {
@@ -1053,7 +1055,7 @@ if isServer then {
 						};
 
 						if _condition then {
-							[_currentHandler select 1, _currentHandler select 2, _joiningMachine, false] call KH_fnc_triggerCbaEvent;
+							[_currentHandler select 0, _currentHandler select 1, _joiningMachine, false] call KH_fnc_triggerCbaEvent;
 						};
 					}
 				] call KH_fnc_addEventHandler);
@@ -1071,7 +1073,7 @@ if isServer then {
 
 			if (_target isNil _persistentEventId) then {
 				_target setVariable [_persistentEventId, [_arguments, _function, _sendoffArguments, _sendoffFunction, _caller, _unscheduled], true];
-				
+
 				[
 					"KH_eve_execution",
 					[
@@ -1083,6 +1085,9 @@ if isServer then {
 					"GLOBAL",
 					[_target, false, _persistentExecutionId]
 				] call KH_fnc_triggerCbaEvent;
+			}
+			else {
+				_target setVariable [_persistentEventId, [_arguments, _function, _sendoffArguments, _sendoffFunction, _caller, _unscheduled], true];
 			};
 		}
 	] call KH_fnc_addEventHandler;
@@ -1093,8 +1098,16 @@ if isServer then {
 		[],
 		{
 			params ["_arguments", "_function", "_caller", "_unscheduled", "_object", "_present", "_distance", "_nearId", "_units", "_jip"];
+			private _currentHandler = KH_var_playerPresenceHandlers get _nearId;
 
-			[
+			if !(isNil "_currentHandler") then {
+				_currentHandler call KH_fnc_removeHandler;
+			};
+
+			private _playerPresenceHandlers = [];
+			KH_var_playerPresenceHandlers set [_nearId, _playerPresenceHandlers];
+
+			_playerPresenceHandlers pushBack ([
 				[_arguments, _function, _caller, _unscheduled, _object, _present, _distance, _nearId, _units],
 				{
 					params ["_arguments", "_function", "_caller", "_unscheduled", "_object", "_present", "_distance", "_nearId", "_units"];
@@ -1128,22 +1141,22 @@ if isServer then {
 				true,
 				0,
 				false
-			] call KH_fnc_execute;
+			] call KH_fnc_execute);
 
 			if _jip then {
-				[
+				_playerPresenceHandlers pushBack ([
 					"CBA",
 					"KH_eve_playerLoaded",
-					[_arguments, _function, _caller, _unscheduled, _object, _present, _distance, _nearId],
+					[_arguments, _function, _caller, _unscheduled, _object, _present, _distance, _nearId, _playerPresenceHandlers],
 					{
 						private _unit = param [3];
-						_args params ["_arguments", "_function", "_caller", "_unscheduled", "_object", "_present", "_distance", "_nearId"];
+						_args params ["_arguments", "_function", "_caller", "_unscheduled", "_object", "_present", "_distance", "_nearId", "_playerPresenceHandlers"];
 
 						if !(missionNamespace getVariable _nearId) exitWith {
 							[_handlerId] call KH_fnc_removeHandler;
 						};
 
-						[
+						_playerPresenceHandlers pushBack ([
 							[_arguments, _function, _caller, _unscheduled, _object, _present, _distance, _nearId, _unit],
 							{
 								params ["_arguments", "_function", "_caller", "_unscheduled", "_object", "_present", "_distance", "_nearId", "_unit"];
@@ -1170,9 +1183,9 @@ if isServer then {
 							true,
 							0,
 							false
-						] call KH_fnc_execute;
+						] call KH_fnc_execute);
 					}
-				] call KH_fnc_addEventHandler;
+				] call KH_fnc_addEventHandler);
 			};
 		}
 	] call KH_fnc_addEventHandler;
@@ -1551,7 +1564,7 @@ if isServer then {
 		{
 			if KH_var_diagnosticsState then {
 				missionNamespace setVariable ["KH_var_diagnosticsFramerateServer", parseNumber (diag_fps toFixed 0), KH_var_adminMachine];
-				missionNamespace setVariable ["KH_var_diagnosticsLocalUnitsServer", {_x isKindOf "Man";} count KH_var_allLocalEntities, KH_var_adminMachine];
+				missionNamespace setVariable ["KH_var_diagnosticsLocalUnitsServer", count KH_var_allLocalMen, KH_var_adminMachine];
 			};
 
 			{
@@ -2374,7 +2387,7 @@ if (!isServer && !hasInterface) then {
 		{
 			if KH_var_diagnosticsState then {
 				player setVariable ["KH_var_diagnosticsFramerate", parseNumber (diag_fps toFixed 0), KH_var_adminMachine];
-				player setVariable ["KH_var_diagnosticsLocalUnits", {_x isKindOf "Man";} count KH_var_allLocalEntities, KH_var_adminMachine];
+				player setVariable ["KH_var_diagnosticsLocalUnits", count KH_var_allLocalMen, KH_var_adminMachine];
 			};
 		},
 		true,

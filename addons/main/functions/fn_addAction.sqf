@@ -1709,9 +1709,7 @@ private _actionHandler = [
                     _args params ["_actionCleanupHandlerId", "_actionExistenceId", "_targetId", "_actionStorageId"];
 
                     if ((_handler select 1) isEqualTo _actionExistenceId) then {
-                        {
-                            [_x] call KH_fnc_removeHandler;
-                        } forEach (missionNamespace getVariable _actionCleanupHandlerId);
+                        (missionNamespace getVariable _actionCleanupHandlerId) call KH_fnc_removeHandler;
 
                         [
                             [_actionStorageId],

@@ -1,4 +1,4 @@
-params [["_identifier", "", [""]], ["_units", allUnits + allDeadMen, []]];
+params [["_identifier", "", [""]], ["_units", KH_var_allMen, []]];
 
 if (_identifier isEqualTo "") exitWith {
 	createHashMap;

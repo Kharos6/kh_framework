@@ -637,7 +637,7 @@ class Mission
 											[_identifier, entities [[], ['Man'], false, true]] call KH_fnc_saveObjectPersistency;\
 										};\
 										if _units then {\
-											[_identifier, allUnits + allDeadMen] call KH_fnc_saveUnitPersistency;\
+											[_identifier, KH_var_allMen] call KH_fnc_saveUnitPersistency;\
 										};\
 										if _players then {\
 											[_identifier, KH_var_allPlayerUnits] call KH_fnc_savePlayerPersistency;\

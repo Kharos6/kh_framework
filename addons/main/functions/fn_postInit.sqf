@@ -209,7 +209,7 @@ isNil {
 									};
 									
 									KH_var_missionSuspensionEntities insert [-1, [_x, _parent], true];
-								} forEach ([KH_var_allPlayerUnits, allUnits] select (KH_var_missionStartSuspension isEqualTo 2));
+								} forEach ([KH_var_allPlayerUnits, allUnits + (agents apply {agent _x;})] select (KH_var_missionStartSuspension isEqualTo 2));
 
 								private _playerLoadHandler = [
 									"CBA",
@@ -306,7 +306,7 @@ isNil {
 									{KH_var_playersLoaded;},
 									false
 								] call KH_fnc_execute;
-							} forEach allUnits;
+							} forEach (allUnits + (agents apply {agent _x;}));
 						};
 						
 						if !(isNil "ace_medical") then {
@@ -1941,8 +1941,11 @@ isNil {
 				[],
 				{
 					params ["_entity"];
+					KH_var_allEntities pushBackUnique _entity;
+					private _isMan = _entity isKindOf "Man";
 
-					if (_entity isKindOf "Man") then {
+					if _isMan then {
+						KH_var_allMen pushBackUnique _entity;
 						private _config = configOf _entity;
 						private _movesConfig = configFile >> (getText (_config >> "moves"));
 						private _gesturesConfig = configFile >> (getText (_config >> "gestures"));
@@ -1954,6 +1957,10 @@ isNil {
 					};
 
 					if (local _entity) then {
+						if _isMan then {
+							KH_var_allLocalMen pushBackUnique _entity;
+						};
+
 						KH_var_allLocalEntities pushBackUnique _entity;
 					};
 
@@ -1963,13 +1970,24 @@ isNil {
 						[],
 						{
 							params ["_entity", "_isLocal"];
+							private _isMan = _entity isKindOf "Man";
 
 							if _isLocal then {
+								if _isMan then {
+									KH_var_allLocalMen pushBackUnique _entity;
+								};
+
 								KH_var_allLocalEntities pushBackUnique _entity;
 							}
 							else {
 								if (_entity in KH_var_allLocalEntities) then {
 									KH_var_allLocalEntities deleteAt (KH_var_allLocalEntities find _entity);
+								};
+
+								if _isMan then {
+									if (_entity in KH_var_allLocalMen) then {
+										KH_var_allLocalMen deleteAt (KH_var_allLocalMen find _entity);
+									};
 								};
 							};
 						}
@@ -2262,7 +2280,7 @@ isNil {
 													150, 
 													22.5, 
 													0.5,
-													1.5,
+													1,
 													5,
 													10,
 													{
@@ -2567,7 +2585,7 @@ isNil {
 														150, 
 														22.5, 
 														0.5,
-														1.5,
+														1,
 														5,
 														10,
 														{
@@ -2643,7 +2661,7 @@ isNil {
 									};
 								};
 							};
-						} forEach ((KH_var_allLocalEntities - [KH_var_playerUnit]) select {_x isKindOf "CAManBase";});
+						} forEach ((KH_var_allMen - [KH_var_playerUnit]) select {_x isKindOf "CAManBase";});
 					};
 				};
 			};

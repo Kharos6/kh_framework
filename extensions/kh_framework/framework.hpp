@@ -70,6 +70,8 @@ constexpr float PI = 3.14159265359f;
 constexpr float RAD_TO_DEG = 180.0f / PI;
 constexpr float DEG_TO_RAD = PI / 180.0f;
 constexpr float EPSILON = 0.0001f;
+constexpr float YAW_WINDOW = 0.1f;    // 100ms measurement window
+constexpr const int YAW_MAXSAMPLES = 32;  // ring capacity (enough for very high fps over 100ms)
 static code g_compiled_sqf_generic_call;
 static code g_compiled_sqf_generic_call_args;
 static code g_compiled_sqf_trigger_cba_event;
@@ -126,6 +128,16 @@ std::string get_backend_name() {
         default: return "CPU";
     }
 }
+
+struct unit_states {
+    float heading[YAW_MAXSAMPLES];
+    float time[YAW_MAXSAMPLES];
+    int head = 0;
+    int count = 0;
+    bool seen_this_frame = false;
+};
+
+static std::unordered_map<void*, unit_states> g_unit_states;
 
 // Detect explicitly dedicated server
 static bool get_machine_is_server() {

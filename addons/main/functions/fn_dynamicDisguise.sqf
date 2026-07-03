@@ -140,7 +140,7 @@ if _state then {
 								}
 							] call KH_fnc_addEventHandler;
 						};
-					} forEach allUnits;
+					} forEach KH_var_allMen;
 
 					if !(_player getVariable ["KH_var_disguiseDetected", false]) then {
 						if (_currentSide isNotEqualTo sideUnknown) then {

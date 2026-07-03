@@ -22,10 +22,10 @@ if hasInterface then {
     _id;
 }
 else {
-    if !(isNil "_arguments") then {
-        _arguments call _function;
+    if (isNil "_arguments") then {
+        call _function;
     }
     else {
-        call _function;
+        _arguments call _function;
     };
 };

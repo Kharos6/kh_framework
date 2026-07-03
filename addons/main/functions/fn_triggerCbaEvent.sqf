@@ -582,7 +582,7 @@ private _return = switch (typeName _target) do {
                                         };
                                     };                                      
                                 },
-                                KH_var_allMachines,
+                                "GLOBAL",
                                 true,
                                 [
                                     "CALLBACK",

@@ -32,7 +32,7 @@ isNil {
                             };
                             
                             KH_var_missionSuspensionEntities insert [-1, [_x, _parent], true];
-                        } forEach ([KH_var_allPlayerUnits, allUnits] select _unitType);
+                        } forEach ([KH_var_allPlayerUnits, KH_var_allMen] select _unitType);
 
                         private _playerLoadHandler = [
                             "CBA",

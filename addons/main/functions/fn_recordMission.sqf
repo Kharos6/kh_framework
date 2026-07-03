@@ -129,7 +129,7 @@ if _scenario then {
             if _units then {
                 {
                     _unitDataFinal set [netId _x, [_x] call KH_fnc_getUnitAttributes];
-                } forEach (allUnits + allDeadMen);
+                } forEach KH_var_allMen;
             };
 
             if _groups then {

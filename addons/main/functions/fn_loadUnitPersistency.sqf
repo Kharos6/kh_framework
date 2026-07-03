@@ -19,6 +19,6 @@ private _unitPersistency = KH_var_khDataNamespace readKhData [["unitPersistency_
             };
         };
     };
-} forEach (allUnits select {!(isPlayer _x);});
+} forEach (KH_var_allMen select {!(isPlayer _x);});
 
 nil;

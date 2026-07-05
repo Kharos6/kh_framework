@@ -9,7 +9,7 @@ if (isNil "_currentVariableHandler") then {
         "Respawn",
         [],
         {
-            [
+            execute [
                 _this,
                 {
                     params ["_unit"];
@@ -21,7 +21,7 @@ if (isNil "_currentVariableHandler") then {
                 true,
                 "-2",
                 false
-            ] call KH_fnc_execute;
+            ];
         }
     ] call KH_fnc_addEventHandler;
 };

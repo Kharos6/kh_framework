@@ -3,7 +3,7 @@ params [["_object", objNull, [objNull]], ["_event", "", ["", objNull]], ["_init"
 if (_event isEqualType objNull) then {
 	_event setVariable ["KH_var_conditionalPresenceActivation", triggerActivated _event];
 	
-	[
+	execute [
 		[_object, _event, _init, _invert],
 		{
 			params ["_object", "_event", "_init", "_invert"];
@@ -33,7 +33,7 @@ if (_event isEqualType objNull) then {
 					};
 				};
 				
-				[
+				execute [
 					[_object, triggerActivated _event, _init],
 					{
 						params ["_object", "_state", "_init"];
@@ -42,13 +42,13 @@ if (_event isEqualType objNull) then {
 					_object,
 					true,
 					false
-				] call KH_fnc_execute;
+				];
 			};
 		},
 		true,
 		triggerInterval _event,
 		false
-	] call KH_fnc_execute;
+	];
 }
 else {
 	[
@@ -80,7 +80,7 @@ else {
 				};
 			};
 			
-			[
+			execute [
 				[_object, _state, _init],
 				{
 					params ["_object", "_state", "_init"];
@@ -89,7 +89,7 @@ else {
 				_object,
 				true,
 				false
-			] call KH_fnc_execute;
+			];
 		}
 	] call KH_fnc_addEventHandler;
 };

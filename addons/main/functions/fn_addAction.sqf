@@ -276,7 +276,7 @@ private _functionTerminate = if (_function isEqualType []) then {
     };
 };
 
-private _actionHandler = [
+private _actionHandler = execute [
     [
         _object, 
         _name, 
@@ -342,7 +342,7 @@ private _actionHandler = [
         if (!hasInterface || (_parent isEqualTo objNull) || (_object isEqualTo objNull) || !(missionNamespace getVariable _actionExistenceId) || (missionNamespace getVariable _completionId)) exitWith {};
 
         if (isNull KH_var_playerUnit) exitWith {
-            [
+            execute [
                 [
                     [_object, _handleObjectActionRecovery],
                     _name, 
@@ -367,7 +367,7 @@ private _actionHandler = [
                 true,
                 {!(isNull KH_var_playerUnit);},
                 false
-            ] call KH_fnc_execute;
+            ];
         };
         
         private _parsedObject = [_object, [KH_var_playerUnit, player] select (_object isEqualTo true)] select _visiblePerPlayer;
@@ -687,7 +687,7 @@ private _actionHandler = [
                         private _interactionHelper = createSimpleObject ["KH_HelperSquare", getPosASL _caller, true];
                         missionNamespace setVariable [_lastProgressId, 0];
 
-                        private _durationHandler = [
+                        private _durationHandler = execute [
                             [
                                 _target,
                                 _menuName,
@@ -1029,7 +1029,7 @@ private _actionHandler = [
                                 true
                             ],
                             false
-                        ] call KH_fnc_execute;
+                        ];
 
                         _target setVariable [["KH_var_activeAction", _actionId] joinString "_", _durationHandler];
                     };
@@ -1514,9 +1514,9 @@ private _actionHandler = [
     [_target, false] select ((_target isEqualTo "PLAYERS") && !(_object isEqualType true)),
     true,
     [[false, ["JIP", _object, true, ""]] select _jip, ["PLAYER_PRESENCE", _object, true, _distance + 100, _jip, ""]] select ((_target isEqualTo "PLAYERS") && !(_object isEqualType true))
-] call KH_fnc_execute;
+];
 
-[
+execute [
     [
         _object,
         _name, 
@@ -1711,7 +1711,7 @@ private _actionHandler = [
                     if ((_handler select 1) isEqualTo _actionExistenceId) then {
                         (missionNamespace getVariable _actionCleanupHandlerId) call KH_fnc_removeHandler;
 
-                        [
+                        execute [
                             [_actionStorageId],
                             {
                                 params ["_actionStorageId"];
@@ -1722,7 +1722,7 @@ private _actionHandler = [
                             missionNamespace getVariable _targetId,
                             true,
                             false
-                        ] call KH_fnc_execute;
+                        ];
 
                         ["KH_eve_actionRemoved", [_actionExistenceId], missionNamespace getVariable _targetId] call KH_fnc_triggerCbaEvent;
                         ["KH_eve_handlerRemoved", _handlerId select 2] call CBA_fnc_removeEventHandler;
@@ -1734,10 +1734,10 @@ private _actionHandler = [
     "SERVER",
     true,
     false
-] call KH_fnc_execute;
+];
 
 if !(isNil "_parsedConditionExist") then {
-    [
+    execute [
         [
             _arguments, 
             _parsedConditionExist,
@@ -1757,7 +1757,7 @@ if !(isNil "_parsedConditionExist") then {
             (!(_arguments call _parsedConditionExist) || !(missionNamespace getVariable _actionExistenceId));
         },
         false
-    ] call KH_fnc_execute;
+    ];
 };
 
 if !(isNil "_functionTerminate") then {

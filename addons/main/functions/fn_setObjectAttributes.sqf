@@ -60,7 +60,7 @@ _savedAttributes params [
     "_variables"
 ];
 
-[
+execute [
 	[
         _object,
 		_simulation,
@@ -91,9 +91,9 @@ _savedAttributes params [
 	"SERVER", 
 	true, 
 	false
-] call KH_fnc_execute;
+];
 
-[
+execute [
 	[
 		_object,
         _damageAllowed,
@@ -172,9 +172,9 @@ _savedAttributes params [
 	_object, 
 	true, 
 	false
-] call KH_fnc_execute;
+];
 
-[
+execute [
 	[
 		_object,
         _dynamicSimulation,
@@ -199,6 +199,6 @@ _savedAttributes params [
 	"GLOBAL", 
 	true, 
 	["JIP", _object, false, ["KH_var_savedUnitAttributes_", [_object, true] call KH_fnc_getEntityVariableName] joinString ""]
-] call KH_fnc_execute;
+];
 
 _object;

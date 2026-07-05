@@ -1,13 +1,13 @@
 isNil {
 	params [["_logic", objNull, [objNull]]];
 
-	[
+	execute [
 		[_logic],
 		{
 			params ["_logic"];
 			private _unit = attachedTo _logic;
 
-			[
+			execute [
 				[_unit],
 				{
 					params ["_unit"];
@@ -16,7 +16,7 @@ isNil {
 				_unit,
 				true,
 				false
-			] call KH_fnc_execute;
+			];
 
 			deleteVehicle _logic;
 			[_handlerId] call KH_fnc_removeHandler;
@@ -35,7 +35,7 @@ isNil {
 			true
 		],
 		false
-	] call KH_fnc_execute;
+	];
 };
 
 nil;

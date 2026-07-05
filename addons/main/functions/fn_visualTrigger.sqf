@@ -25,12 +25,12 @@ _entity setVariable [_firstTrigger, false];
 _entity setVariable [_entityVariable, false];
 _entity setVariable [_conditionReference, createHashMap];
 	
-private _triggerHandler = [
+private _triggerHandler = execute [
 	[_entity, _maximumDistance, _conditionPlayer, _interval, _event, _triggerId], 
 	{
 		params ["_entity", "_maximumDistance", "_conditionPlayer", "_interval", "_event", "_triggerId"];
 		
-		[
+		execute [
 			[_entity, _maximumDistance, _conditionPlayer, _event, _triggerId],
 			{
 				params ["_entity", "_maximumDistance", "_conditionPlayer", "_event", "_triggerId"];
@@ -57,12 +57,12 @@ private _triggerHandler = [
 			true,
 			_interval,
 			false 
-		] call KH_fnc_execute;
+		];
 	},
 	"PLAYERS",
 	true,
 	["JIP", _entity, true, ""]
-] call KH_fnc_execute;
+];
 
 private _eventHandler = [
 	"CBA",
@@ -133,14 +133,14 @@ private _eventHandler = [
 					if !(_entity getVariable _entityVariable) then {
 						_entity setVariable [_firstTrigger, true];
 						[_currentPlayer, _entity] call _trueFunctionServer;
-						[[_entity], _trueFunctionPlayer, _currentPlayer, true, false] call KH_fnc_execute;
+						execute [[_entity], _trueFunctionPlayer, _currentPlayer, true, false];
 					};
 				}
 				else {
 					if (_entity getVariable _entityVariable) then {
 						if (_entity getVariable [_firstTrigger, false]) then {
 							[_currentPlayer, _entity] call _falseFunctionServer;
-							[[_entity], _falseFunctionPlayer, _currentPlayer, true, false] call KH_fnc_execute;
+							execute [[_entity], _falseFunctionPlayer, _currentPlayer, true, false];
 						};
 						
 						if !_repeatable then {
@@ -155,14 +155,14 @@ private _eventHandler = [
 					if !(_currentPlayer getVariable _playerVariable) then {
 						_entity setVariable [_firstTrigger, true];
 						[_currentPlayer, _entity] call _trueFunctionServer;
-						[[_entity], _trueFunctionPlayer, _currentPlayer, true, false] call KH_fnc_execute;
+						execute [[_entity], _trueFunctionPlayer, _currentPlayer, true, false];
 					};
 				}
 				else {
 					if (_currentPlayer getVariable _playerVariable) then {
 						if (_entity getVariable [_firstTrigger, false]) then {
 							[_currentPlayer, _entity] call _falseFunctionServer;
-							[[_entity], _falseFunctionPlayer, _currentPlayer, true, false] call KH_fnc_execute;
+							execute [[_entity], _falseFunctionPlayer, _currentPlayer, true, false];
 						};
 						
 						if !_repeatable then {

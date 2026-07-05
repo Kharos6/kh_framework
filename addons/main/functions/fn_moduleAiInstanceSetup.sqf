@@ -94,7 +94,7 @@ isNil {
                     ] call KH_fnc_aiInstanceSetup;                
                 }
                 else {
-                    [
+                    execute [
                         [
                             _owner,
                             _name, 
@@ -145,7 +145,7 @@ isNil {
                             _this set [10, call (_this select 10)];
                             _this set [11, call (_this select 11)];
                             _this deleteAt 0;
-                            [_this, "KH_fnc_aiInstanceSetup", [missionNamespace getVariable _owner, KH_var_allPlayerUidMachines get _owner] select ((_owner select [0, 1]) isNotEqualTo 0), true, false] call KH_fnc_execute;
+                            execute [_this, "KH_fnc_aiInstanceSetup", [missionNamespace getVariable _owner, KH_var_allPlayerUidMachines get _owner] select ((_owner select [0, 1]) isNotEqualTo 0), true, false];
                         },
                         true,
                         {
@@ -162,7 +162,7 @@ isNil {
                             };
                         },
                         false
-                    ] call KH_fnc_execute;
+                    ];
                 };
             };
         }

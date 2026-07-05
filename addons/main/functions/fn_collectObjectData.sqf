@@ -165,7 +165,7 @@ private _result = [
                 (_data get "Reload") pushBack [(CBA_missionTime - ([_object, false] call KH_fnc_getLatency)) max 0, [_weapon, _muzzle, _newMagazine]];
             }
         ] call KH_fnc_addEventHandler,
-        [
+        execute [
             [_object, _data],
             {
                 params ["_object", "_data"];
@@ -267,7 +267,7 @@ private _result = [
             true,
             0.1,
             false
-        ] call KH_fnc_execute
+        ]
     ]
 ];
 

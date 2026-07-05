@@ -79,7 +79,6 @@ static code g_compiled_sqf_add_game_event_handler;
 static code g_compiled_sqf_remove_game_event_handler;
 static code g_compiled_sqf_game_event_handler_lua_bridge;
 static code g_compiled_sqf_execute_lua;
-static code g_compiled_sqf_execute_sqf;
 static code g_compiled_sqf_remove_handler;
 static code g_compiled_sqf_create_hash_map_from_array;
 static code g_compiled_sqf_create_hash_map;
@@ -91,8 +90,29 @@ static code g_compiled_tts_generated_event;
 static code g_compiled_tts_finished_event;
 static code g_compiled_stt_transcription_event;
 static code g_compiled_html_js_event;
+static code g_compiled_kh_empty_code;
+static code g_compiled_kh_subfunction_basic;
+static code g_compiled_kh_subfunction_process;
+static code g_compiled_kh_monitor_set;
+static code g_compiled_kh_monitor_wrapper_scalar;
+static code g_compiled_kh_monitor_wrapper_code;
+static code g_compiled_kh_handler_scalar_iteration;
+static code g_compiled_kh_handler_scalar;
+static code g_compiled_kh_handler_timeout;
+static code g_compiled_kh_handler_code_iteration_hard_fail;
+static code g_compiled_kh_handler_code_iteration_soft_fail;
+static code g_compiled_kh_handler_code_iteration;
+static code g_compiled_kh_handler_code_hard_fail;
+static code g_compiled_kh_handler_code;
+static code g_compiled_kh_handler_string;
+static code g_compiled_kh_callback_handler;
+static code g_compiled_kh_persistent_marker;
+static code g_compiled_kh_immediate_call;
 static game_value g_return_value;
 static game_value g_call_arguments;
+static game_value g_kh_cached_temporal_stack;
+static game_value g_kh_cached_temporal_additions;
+static game_value g_kh_cached_temporal_deletions;
 static bool g_is_menu = false;
 static bool g_is_server = false;
 static bool g_is_dedicated_server = false;
@@ -157,6 +177,14 @@ static bool get_machine_is_server() {
     }
 
     return is_server;
+}
+
+static float parse_number(const std::string& str) {
+    try {
+        return std::stof(str);
+    } catch (...) {
+        return 0.0f;
+    }
 }
 
 static size_t hash_file(const std::string& path) {

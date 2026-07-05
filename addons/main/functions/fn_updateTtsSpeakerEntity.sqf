@@ -12,7 +12,7 @@ params [
     ["_override", false, [true]]
 ];
 
-[
+execute [
     [_entity, _text, _volume, _speed, _speakerId, _maximumDistance, _effectChain, _functionGenerated, _functionFinished, _subtitleName, _override],
     {
         params ["_entity", "_text", "_volume", "_speed", "_speakerId", "_maximumDistance", "_effectChain", "_functionGenerated", "_functionFinished", "_subtitleName", "_override"];
@@ -65,7 +65,7 @@ params [
                     if (_speakerId isEqualTo _speaker) then {
                         missionNamespace setVariable [
                             _speaker,
-                            [
+                            execute [
                                 [_entity, _speaker, _argumentsId],
                                 {
                                     params ["_entity", "_speaker", "_argumentsId"];
@@ -97,7 +97,7 @@ params [
                                 true,
                                 0,
                                 false
-                            ] call KH_fnc_execute
+                            ]
                         ];
 
                         if ((_subtitleName isNotEqualTo "") && (((positionCameraToWorld [0, 0, 0]) vectorDistance (unitAimPositionVisual _entity)) < _maximumDistance)) then {
@@ -145,4 +145,4 @@ params [
     "PLAYERS",
     true,
     false
-] call KH_fnc_execute;
+];

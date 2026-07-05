@@ -32,7 +32,6 @@ if !(_environment isEqualType []) then {
 
 private _environmentType = _environment param [0, "0", [0, "", {}]];
 private _environmentId = generateUid;
-missionNamespace setVariable [_environmentId, true];
 
 switch (typeName _environmentType) do {
 	case "SCALAR": {
@@ -143,12 +142,7 @@ switch (typeName _environmentType) do {
 			}
 			else {
 				{
-					params ["_fedArguments", "_subfunction", "_environmentId"];
-
-					if !(missionNamespace getVariable _environmentId) exitWith {
-						KH_var_temporalExecutionStackDeletions pushBackUnique _environmentId;
-					};
-														
+					params ["_fedArguments", "_subfunction"];								
 					_fedArguments call _subfunction;
 				};
 			},
@@ -384,10 +378,6 @@ switch (typeName _environmentType) do {
 					{
 						params ["_arguments", "_fedArguments", "_subfunction", "_environmentId", "_environmentType"];
 
-						if !(missionNamespace getVariable _environmentId) exitWith {
-							KH_var_temporalExecutionStackDeletions pushBackUnique _environmentId;
-						};
-
 						if (_arguments call _environmentType) then {
 							_fedArguments call _subfunction;
 							["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false], true, false] call KH_fnc_triggerCbaEvent;
@@ -402,10 +392,6 @@ switch (typeName _environmentType) do {
 						{
 							params ["_arguments", "_fedArguments", "_subfunction", "_environmentId", "_environmentType"];
 
-							if !(missionNamespace getVariable _environmentId) exitWith {
-								KH_var_temporalExecutionStackDeletions pushBackUnique _environmentId;
-							};
-
 							if (_arguments call _environmentType) then {
 								_fedArguments call _subfunction;
 								["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false], true, false] call KH_fnc_triggerCbaEvent;
@@ -418,10 +404,6 @@ switch (typeName _environmentType) do {
 					else {
 						{
 							params ["_arguments", "_fedArguments", "_subfunction", "_environmentId", "_environmentType"];
-
-							if !(missionNamespace getVariable _environmentId) exitWith {
-								KH_var_temporalExecutionStackDeletions pushBackUnique _environmentId;
-							};
 
 							if (_arguments call _environmentType) then {
 								_fedArguments call _subfunction;
@@ -436,10 +418,6 @@ switch (typeName _environmentType) do {
 					{
 						params ["_arguments", "_fedArguments", "_subfunction", "_environmentId", "_environmentType"];
 
-						if !(missionNamespace getVariable _environmentId) exitWith {
-							KH_var_temporalExecutionStackDeletions pushBackUnique _environmentId;
-						};
-						
 						if (_arguments call _environmentType) then {
 							_fedArguments call _subfunction;
 						}
@@ -451,10 +429,6 @@ switch (typeName _environmentType) do {
 				else {
 					{
 						params ["_arguments", "_fedArguments", "_subfunction", "_environmentId", "_environmentType"];
-
-						if !(missionNamespace getVariable _environmentId) exitWith {
-							KH_var_temporalExecutionStackDeletions pushBackUnique _environmentId;
-						};
 
 						if (_arguments call _environmentType) then {
 							_fedArguments call _subfunction;
@@ -536,20 +510,27 @@ switch (typeName _environmentType) do {
 
 		if (_environmentType isEqualTo 0) exitWith {
 			_fedArguments call _subfunction;
-			[[missionNamespace, _environmentId, clientOwner], _return];
+			[[["TEMPORAL"], _environmentType, _environmentId, clientOwner], _return];
 		};
+
+		KH_var_temporalExecutionStackMonitor set [
+			_environmentId, 
+			[
+				[[], {}, _environmentType, _environmentId, _return],
+				{},
+				_environmentId,
+				0,
+				false
+			]
+		];
 
 		KH_var_temporalExecutionStackAdditions pushBack [
 			[_fedArguments, _subfunction, _environmentId],
 			{
-				params ["_fedArguments", "_subfunction", "_environmentId"];
-
-				if !(missionNamespace getVariable _environmentId) exitWith {
-					KH_var_temporalExecutionStackDeletions pushBackUnique _environmentId;
-				};
-												
+				params ["_fedArguments", "_subfunction", "_environmentId"];							
 				_fedArguments call _subfunction;
 				KH_var_temporalExecutionStackDeletions pushBackUnique _environmentId;
+				KH_var_temporalExecutionStackMonitor deleteAt _environmentId;
 			},
 			_environmentType,
 			if (_environmentType > 0) then {
@@ -559,14 +540,14 @@ switch (typeName _environmentType) do {
 				diag_frameNo + (abs _environmentType);
 			},
 			-1,
-			[[missionNamespace, _environmentId, clientOwner], _return],
+			[[["TEMPORAL"], _environmentType, _environmentId, clientOwner], _return],
 			_environmentId,
 			nil,
 			CBA_missionTime,
 			0
 		];
 
-		[[missionNamespace, _environmentId, clientOwner], _return];
+		[[["TEMPORAL"], _environmentType, _environmentId, clientOwner], _return];
 	};
 
 	default {

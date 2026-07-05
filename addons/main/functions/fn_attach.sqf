@@ -35,7 +35,7 @@ if _softAttach exitWith {
     if ((missionNamespace getVariable [_attachHandlerEntityId, []]) isNotEqualTo []) then {
         [missionNamespace getVariable [_attachHandlerEntityId, []]] call KH_fnc_removeHandler;
         
-        [
+        execute [
             [_entity, velocity _entity],
             {
                 params ["_entity", "_velocity"];
@@ -44,13 +44,13 @@ if _softAttach exitWith {
             true,
             "-1",
             false
-        ] call KH_fnc_execute;
+        ];
     };
 
     private _attachHandlerId = generateUid;
     missionNamespace setVariable [_attachHandlerId, true];
 
-    [
+    execute [
         [_entity],
         {
             params ["_entity"];
@@ -59,7 +59,7 @@ if _softAttach exitWith {
         "GLOBAL",
         true,
         false
-    ] call KH_fnc_execute;
+    ];
 
     if (_position isEqualType true) then {
         _position = if _position then {
@@ -133,7 +133,7 @@ if _softAttach exitWith {
     _entity setVariable ["KH_var_targetAttachVelocity", []];
     _entity setVariable ["KH_var_targetAttachDirection", getDir _target];
 
-    private _attachHandler = [
+    private _attachHandler = execute [
         [_entity, _target, _scale, _oldScale, _attachHandlerId, _healthHandler, _roadways, _useGeometryRoadway, _type, _useGravity, _followRotation, _attachDistance, _checkCollision],
         {
             params ["_entity", "_target", "_scale", "_oldScale", "_attachHandlerId", "_healthHandler", "_roadways", "_useGeometryRoadway", "_type", "_useGravity", "_followRotation", "_attachDistance", "_checkCollision"];
@@ -195,7 +195,7 @@ if _softAttach exitWith {
                     deleteVehicle _x;
                 } forEach _roadways;
         
-                [
+                execute [
                     [_entity],
                     {
                         params ["_entity"];
@@ -204,7 +204,7 @@ if _softAttach exitWith {
                     "GLOBAL",
                     true,
                     false
-                ] call KH_fnc_execute;
+                ];
 
                 _entity setVariable ["KH_var_attachLocalPosition", []];
                 _entity setVariable ["KH_var_attachFallVelocity", 0];
@@ -494,7 +494,7 @@ if _softAttach exitWith {
         true,
         0,
         false
-    ] call KH_fnc_execute;
+    ];
 
     missionNamespace setVariable [_attachHandlerEntityId, [_healthHandler, _attachHandler]];
     [missionNamespace, _attachHandlerId, clientOwner];

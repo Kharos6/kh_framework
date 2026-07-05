@@ -5,7 +5,7 @@ isNil {
             params [["_logic", objNull, [objNull]], ["_units", [], [[]]], ["_activated", true, [true]]];
 
             if _activated then {
-                [
+                execute [
                     [_logic, _units],
                     {
                         params ["_logic", "_units"];
@@ -207,7 +207,7 @@ isNil {
                     true,
                     {KH_var_playersLoaded;},
                     false
-                ] call KH_fnc_execute;
+                ];
             };
         }
     ];

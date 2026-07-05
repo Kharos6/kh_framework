@@ -8,7 +8,7 @@ isNil {
 		{
 			_args params ["_display"];
 
-            [
+            execute [
                 [cbChecked (_display displayCtrl 101), ctrlText (_display displayCtrl 102), clientOwner],
                 {
                     params ["_unitType", "_suspensionText", "_caller"];
@@ -57,7 +57,7 @@ isNil {
                             }
                         ] call KH_fnc_addEventHandler;
 
-                        [
+                        execute [
                             [_playerLoadHandler],
                             {
                                 params ["_playerLoadHandler"];
@@ -66,9 +66,9 @@ isNil {
                             true,
                             {!KH_var_missionSuspended;},
                             false
-                        ] call KH_fnc_execute;
+                        ];
 
-                        [
+                        execute [
                             [_suspensionText],
                             {
                                 params ["_suspensionText"];
@@ -87,7 +87,7 @@ isNil {
                             KH_var_allPlayerMachines - [KH_var_adminMachine, _caller],
                             true,
                             false
-                        ] call KH_fnc_execute;
+                        ];
                     }
                     else {
                         KH_var_missionSuspended = false;
@@ -97,7 +97,7 @@ isNil {
                             _x enableSimulationGlobal (_x getVariable ["KH_var_originalSimulationState", true]);
                         } forEach KH_var_missionSuspensionEntities;
 
-                        [
+                        execute [
                             [],
                             {
                                 with uiNamespace do {
@@ -110,13 +110,13 @@ isNil {
                             "PLAYERS",
                             true,
                             false
-                        ] call KH_fnc_execute;
+                        ];
                     };
                 },
                 "SERVER",
                 true,
                 false
-            ] call KH_fnc_execute;
+            ];
 
             deleteVehicle _logic;
             [_handlerId] call KH_fnc_removeHandler;

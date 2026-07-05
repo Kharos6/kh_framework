@@ -20,13 +20,13 @@ isNil {
 
 			private _isVictory = cbChecked (_display displayCtrl 101);
 
-			[
+			execute [
 				[["KH_MissionFailed", "KH_MissionCompleted"] select _isVictory, _isVictory, _fadeType, 1, []],
 				"KH_fnc_endMission",
 				"SERVER",
 				true,
 				false
-			] call KH_fnc_execute;
+			];
 
 			deleteVehicle _logic;
 			[_handlerId] call KH_fnc_removeHandler;

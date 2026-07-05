@@ -1,7 +1,7 @@
 isNil {
 	params [["_logic", objNull, [objNull]]];
 
-	[
+	execute [
 		[_logic],
 		{
 			params ["_logic"];
@@ -23,7 +23,7 @@ isNil {
 			true
 		],
 		false
-	] call KH_fnc_execute;
+	];
 };
 
 nil;

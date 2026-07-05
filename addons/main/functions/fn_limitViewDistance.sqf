@@ -9,10 +9,10 @@ if _state then {
 		KH_var_viewDistanceSet = true;
 		publicVariable "KH_var_viewDistanceSet";
 		
-		[
+		execute [
 			[], 
 			{
-				[
+				execute [
 					[],
 					{
 						if KH_var_limitViewDistanceState then {
@@ -39,12 +39,12 @@ if _state then {
 					true,
 					0,
 					false
-				] call KH_fnc_execute;
+				];
 			},
 			"PLAYERS",
 			true,
 			true
-		] call KH_fnc_execute;
+		];
 	};
 };
 

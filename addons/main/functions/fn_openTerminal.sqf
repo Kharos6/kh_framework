@@ -14,7 +14,7 @@ ctrlSetText [101, _description];
 ctrlSetText [102, missionNamespace getVariable [_identifierOutput, ctrlText 102]];
 ctrlSetText [103, missionNamespace getVariable [_identifierInput, ctrlText 103]];
 
-[
+execute [
 	[_identifierOutput, _identifierInput],
 	{
 		params ["_identifierOutput", "_identifierInput"];
@@ -26,7 +26,7 @@ ctrlSetText [103, missionNamespace getVariable [_identifierInput, ctrlText 103]]
 			ctrlSetText [102, missionNamespace getVariable [_identifierOutput, ctrlText 102]];
 			private _input = ctrlText 103;
 
-			[
+			execute [
 				[_identifierInput, _input],
 				{
 					params ["_identifierInput", "_input"];
@@ -35,13 +35,13 @@ ctrlSetText [103, missionNamespace getVariable [_identifierInput, ctrlText 103]]
 				"SERVER",
 				true,
 				false
-			] call KH_fnc_execute;
+			];
 		};
 	},
 	true,
 	0,
 	false
-] call KH_fnc_execute;
+];
 
 [
 	["CONTROL", _display displayCtrl 104],
@@ -50,7 +50,7 @@ ctrlSetText [103, missionNamespace getVariable [_identifierInput, ctrlText 103]]
 	{
 		_args params ["_identifierOutput", "_function"];
 
-		[
+		execute [
 			[_identifierOutput, _function, ctrlText 103],
 			{
 				params ["_identifierOutput", "_function", "_input"];
@@ -64,7 +64,7 @@ ctrlSetText [103, missionNamespace getVariable [_identifierInput, ctrlText 103]]
 			"SERVER",
 			true,
 			false
-		] call KH_fnc_execute;
+		];
 
 		ctrlSetText [103, ""];
 		nil;
@@ -79,7 +79,7 @@ ctrlSetText [103, missionNamespace getVariable [_identifierInput, ctrlText 103]]
 		params ["_control"];
 		_args params ["_identifier"];
 
-		[
+		execute [
 			[_identifier],
 			{
 				params ["_identifier"];
@@ -88,7 +88,7 @@ ctrlSetText [103, missionNamespace getVariable [_identifierInput, ctrlText 103]]
 			"SERVER",
 			true,
 			false
-		] call KH_fnc_execute;
+		];
 		
 		[_handlerId] call KH_fnc_removeHandler;
 		nil;
@@ -104,7 +104,7 @@ ctrlSetText [103, missionNamespace getVariable [_identifierInput, ctrlText 103]]
 		_args params ["_identifierOutput", "_function"];
 
 		if ((_key isEqualTo 0x1C) && !_shift) then {
-			[
+			execute [
 				[_identifierOutput, _function, ctrlText 103],
 				{
 					params ["_identifierOutput", "_function", "_input"];
@@ -118,7 +118,7 @@ ctrlSetText [103, missionNamespace getVariable [_identifierInput, ctrlText 103]]
 				"SERVER",
 				true,
 				false
-			] call KH_fnc_execute;
+			];
 
 			ctrlSetText [103, ""];
 			true;
@@ -126,19 +126,19 @@ ctrlSetText [103, missionNamespace getVariable [_identifierInput, ctrlText 103]]
 	}
 ] call KH_fnc_addEventHandler;
 
-[
+execute [
 	[player, _entity, _identifier],
 	{
 		params ["_player", "_entity", "_identifier"];
 
-		[
+		execute [
 			[_player, _entity, _identifier], 
 			{
 				private _player = param [0];
 				private _identifier = param [2];
 				missionNamespace setVariable [_identifier, false, true];
 
-				[
+				execute [
 					[],
 					{
 						if dialog then {
@@ -148,7 +148,7 @@ ctrlSetText [103, missionNamespace getVariable [_identifierInput, ctrlText 103]]
 					_player,
 					true,
 					false
-				] call KH_fnc_execute;
+				];
 			},
 			true,
 			{
@@ -156,14 +156,14 @@ ctrlSetText [103, missionNamespace getVariable [_identifierInput, ctrlText 103]]
 				(!(alive _player) || !(alive _entity) || ((_entity distance _player) > 4) || (isNull _entity) || (isNull _player));
 			},
 			false
-		] call KH_fnc_execute;
+		];
 	},
 	"SERVER",
 	true,
 	false
-] call KH_fnc_execute;
+];
 
-[
+execute [
 	[_identifier],
 	{
 		params ["_identifier"];
@@ -172,6 +172,6 @@ ctrlSetText [103, missionNamespace getVariable [_identifierInput, ctrlText 103]]
 	true,
 	{!dialog},
 	false
-] call KH_fnc_execute;
+];
 
 _display;

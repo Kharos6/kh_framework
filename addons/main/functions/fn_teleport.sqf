@@ -34,13 +34,13 @@ else {
 	false;
 };
 
-[
+execute [
 	[_entity, _position, _rotation, _eject, _init],
 	{
 		params ["_entity", "_position", "_rotation", "_eject", "_init"];
 
 		if _eject then {
-			[
+			execute [
 				[_entity, _position, _rotation, _init],
 				{
 					params ["_entity", "_position", "_rotation", "_init"];
@@ -66,7 +66,7 @@ else {
 				true,
 				0,
 				false
-			] call KH_fnc_execute;
+			];
 		}
 		else {
 			_entity setPosATL _position;
@@ -84,6 +84,6 @@ else {
 	true,
 	[true, str _transition] select _useTransition,
 	false
-] call KH_fnc_execute;
+];
 
 nil;

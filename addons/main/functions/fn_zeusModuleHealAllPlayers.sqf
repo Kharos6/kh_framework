@@ -9,7 +9,7 @@ isNil {
             _unit setHitPointDamage [_x, 0];
         } forEach ((getAllHitPointsDamage _unit) select 0);
 
-        [
+        execute [
             [_unit],
             {
                 params ["_unit"];
@@ -39,7 +39,7 @@ isNil {
             _unit,
             true,
             false
-        ] call KH_fnc_execute;
+        ];
         
         if KH_var_medical then {
             _unit setVariable ["KH_var_incapacitated", false, true];

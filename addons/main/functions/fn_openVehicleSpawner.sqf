@@ -33,7 +33,7 @@ else {
     {
         _args params ["_types", "_display", "_position", "_rotation"];
 
-        [
+        execute [
             [_position, _rotation, _types param [lbCurSel 101, ""], clientOwner],
             {
                 params ["_position", "_rotation", "_selection", "_caller"];
@@ -56,7 +56,7 @@ else {
                 } forEach (_position nearEntities [["Air", "LandVehicle", "Ship", "StaticWeapon", "CAManBase"], 20]);
 
                 if _continue then {
-                    [
+                    execute [
                         [_position, _rotation, _selection],
                         {
                             params ["_position", "_rotation", "_selection"];
@@ -66,10 +66,10 @@ else {
                         true,
                         "0.5",
                         false
-                    ] call KH_fnc_execute;
+                    ];
                 }
                 else {
-                    [
+                    execute [
                         [],
                         {
                             hint "SPAWN POSITION OCCUPIED";
@@ -77,13 +77,13 @@ else {
                         _caller,
                         true,
                         false
-                    ] call KH_fnc_execute;
+                    ];
                 };
             },
             "SERVER",
             true,
             false
-        ] call KH_fnc_execute;
+        ];
 
         _display closeDisplay 2;
     }

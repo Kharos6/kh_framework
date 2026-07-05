@@ -86,7 +86,7 @@ if (_currentSelectedWeapon isNotEqualTo "") then {
     if ((getText (_weaponConfig >> "kh_specialActions")) isNotEqualTo "") then {
         _unit setVariable ["KH_var_meleeWeaponSlot", _currentWeaponSlot];
         
-        [
+        execute [
             [
                 _unit, 
                 [
@@ -101,7 +101,7 @@ if (_currentSelectedWeapon isNotEqualTo "") then {
             true,
             "-1",
             false
-        ] call KH_fnc_execute;
+        ];
     }
     else {
         if (((_unit getVariable ["KH_var_meleeWeaponSlot", ""]) isEqualTo _currentWeaponSlot) && !_meleeState) then {

@@ -498,7 +498,7 @@ class Mission
 								KH_var_postInitExecutions pushBack [\
 									[_parsedPositions, _parsedTargets, parseSimpleArray _fovs, parseSimpleArray _commitTimes, parseSimpleArray _durations, parseSimpleArray _visionTypes, _cinematicBorders, _disableUserInput, _jip],\
 									{\
-										[\
+										execute [\
 											_this,\
 											{\
 												[\
@@ -509,11 +509,11 @@ class Mission
 														params ['_clientOwner'];\
 														_args params ['_positions', '_targets', '_fovs', '_commitTimes', '_durations', '_visionTypes', '_cinematicBorders', '_disableUserInput', '_jip'];\
 														if _jip then {\
-															[[_positions, _targets, _fovs, _commitTimes, _durations, _visionTypes, _cinematicBorders, _disableUserInput], 'KH_fnc_cameraSequence', _clientOwner, true, false] call KH_fnc_execute;\
+															execute [[_positions, _targets, _fovs, _commitTimes, _durations, _visionTypes, _cinematicBorders, _disableUserInput], 'KH_fnc_cameraSequence', _clientOwner, true, false];\
 														}\
 														else {\
 															if !KH_var_playersLoaded then {\
-																[[_positions, _targets, _fovs, _commitTimes, _durations, _visionTypes, _cinematicBorders, _disableUserInput], 'KH_fnc_cameraSequence', _clientOwner, true, false] call KH_fnc_execute;\
+																execute [[_positions, _targets, _fovs, _commitTimes, _durations, _visionTypes, _cinematicBorders, _disableUserInput], 'KH_fnc_cameraSequence', _clientOwner, true, false];\
 															}\
 															else {\
 																[_handlerId] call KH_fnc_removeHandler;\
@@ -525,7 +525,7 @@ class Mission
 											true,\
 											[{KH_var_playersLoaded;}, true] select (isNil 'KH_var_missionStartSuspension'),\
 											false\
-										] call KH_fnc_execute;\
+										];\
 									}\
 								];\
 							};\

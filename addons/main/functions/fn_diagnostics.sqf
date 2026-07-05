@@ -141,7 +141,7 @@ if _state then {
 		}
 	] call KH_fnc_addEventHandler;
 
-	KH_var_diagnosticsHandler = [
+	KH_var_diagnosticsHandler = execute [
 		[],
 		{
 			KH_var_diagnosticsInformation resize 0;
@@ -273,7 +273,7 @@ if _state then {
 		true, 
 		0,
 		false
-	] call KH_fnc_execute;
+	];
 };
 
 nil;

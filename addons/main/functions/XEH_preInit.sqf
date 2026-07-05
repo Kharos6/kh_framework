@@ -242,7 +242,7 @@
     ],
 	1,
 	{
-		[
+		execute [
 			[],
 			{
 				switch KH_var_incapacitationAvailability do {
@@ -273,7 +273,7 @@
 			"SERVER",
 			"1",
 			false
-		] call KH_fnc_execute;
+		];
 	},
 	false
 ] call CBA_fnc_addSetting;
@@ -2679,7 +2679,7 @@
 	[0, 360, 90, 0],
 	1,
 	{
-		[
+		execute [
 			[],
 			{
 				KH_var_meleeDodgeFailureAngleRange = KH_var_meleeDodgeFailureAngleRange / 2;
@@ -2688,7 +2688,7 @@
 			"SERVER",
 			"1",
 			false
-		] call KH_fnc_execute;
+		];
 	},
 	false
 ] call CBA_fnc_addSetting;
@@ -2918,7 +2918,7 @@
 			if (missionNamespace isNil "KH_var_sttHandler") then {
 				missionNamespace setVariable [
 					"KH_var_sttHandler",
-					[
+					execute [
 						[],
 						{
 							if sttIsInitialized then {
@@ -2933,7 +2933,7 @@
 						true,
 						0,
 						false
-					] call KH_fnc_execute
+					]
 				];
 			};
 		};
@@ -2964,7 +2964,7 @@
 			if (missionNamespace isNil "KH_var_sttHandler") then {
 				missionNamespace setVariable [
 					"KH_var_sttHandler",
-					[
+					execute [
 						[],
 						{
 							if sttIsInitialized then {
@@ -2979,7 +2979,7 @@
 						true,
 						0,
 						false
-					] call KH_fnc_execute
+					]
 				];
 			};
 		};

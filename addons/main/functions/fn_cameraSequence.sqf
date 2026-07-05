@@ -29,13 +29,13 @@ private _playerParent = objectParent player;
 
 if !(isNull _playerParent) then {
 	if ((driver _playerParent) isEqualTo player) then {
-		[
+		execute [
 			[_playerParent, _totalDuration],
 			{
 				params ["_vehicle", "_totalDuration"];
 				_vehicle enableSimulationGlobal false;
 
-				[
+				execute [
 					[_vehicle],
 					{
 						params ["_vehicle"];
@@ -44,12 +44,12 @@ if !(isNull _playerParent) then {
 					true, 
 					str _totalDuration,
 					false
-				] call KH_fnc_execute;
+				];
 			},
 			"SERVER",
 			true,
 			false
-		] call KH_fnc_execute;
+		];
 	};
 };
 
@@ -77,7 +77,7 @@ for "_i" from 0 to _cameraCount do {
 		_duration = [_durations select [0, _i]] call KH_fnc_arraySum;
 	};
 
-	[
+	execute [
 		[_positions, _targets, _fovs, _commitTimes, _visionTypes, _camera, _i],
 		{
 			params ["_positions", "_targets", "_fovs", "_commitTimes", "_visionTypes", "_camera", "_i"];
@@ -126,10 +126,10 @@ for "_i" from 0 to _cameraCount do {
 		true,
 		str _duration,
 		false
-	] call KH_fnc_execute;
+	];
 };
 
-[
+execute [
 	[_disableUserInput, _camera],
 	{
 		params ["_disableUserInput", "_camera"];
@@ -143,6 +143,6 @@ for "_i" from 0 to _cameraCount do {
 	true, 
 	str _totalDuration,
 	false
-] call KH_fnc_execute;
+];
 
 _camera;

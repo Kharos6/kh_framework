@@ -77,7 +77,7 @@ if (isNil "KH_var_curatorsSet") then {
 				unassignCurator _module;
 			};
 
-			KH_var_curatorHandlers pushBack ([
+			KH_var_curatorHandlers pushBack (execute [
 				[_player, _module],
 				{
 					params ["_player", "_module"];
@@ -99,7 +99,7 @@ if (isNil "KH_var_curatorsSet") then {
 						};
 
 						if KH_var_curatorsDamageDisabled then {
-							[
+							execute [
 								[],
 								{
 									player allowDamage false;
@@ -107,7 +107,7 @@ if (isNil "KH_var_curatorsSet") then {
 								_player,
 								true,
 								false
-							] call KH_fnc_execute;
+							];
 						};
 					};
 				},
@@ -121,7 +121,7 @@ if (isNil "KH_var_curatorsSet") then {
 					true
 				],
 				false 
-			] call KH_fnc_execute);
+			]);
 		}
 		else {
 			{
@@ -167,7 +167,7 @@ if (isNil "KH_var_curatorsSet") then {
 						unassignCurator _module;
 					};
 
-					KH_var_curatorHandlers pushBack ([
+					KH_var_curatorHandlers pushBack (execute [
 						[_player, _module],
 						{
 							params ["_player", "_module"];
@@ -189,7 +189,7 @@ if (isNil "KH_var_curatorsSet") then {
 								};
 
 								if KH_var_curatorsDamageDisabled then {
-									[
+									execute [
 										[],
 										{
 											player allowDamage false;
@@ -197,7 +197,7 @@ if (isNil "KH_var_curatorsSet") then {
 										_player,
 										true,
 										false
-									] call KH_fnc_execute;
+									];
 								};
 							};
 						},
@@ -211,7 +211,7 @@ if (isNil "KH_var_curatorsSet") then {
 							true
 						],
 						false 
-					] call KH_fnc_execute);
+					]);
 				}
 				else {
 					{

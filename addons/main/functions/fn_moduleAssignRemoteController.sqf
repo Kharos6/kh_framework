@@ -6,7 +6,7 @@ isNil {
 
             if _activated then {
                 {
-                    [
+                    execute [
                         [
                             _x,
                             "Access Remote Controller",
@@ -33,7 +33,7 @@ isNil {
                         "PLAYERS",
                         true,
                         ["JIP", _x, false, ""]
-                    ] call KH_fnc_execute;
+                    ];
                 } forEach _units;
             };
         }

@@ -91,7 +91,7 @@ private _result = [
                 (_data get "UnitLeft") pushBack [(CBA_missionTime - ([_group, false] call KH_fnc_getLatency)) max 0, netId _unit];
             }
         ] call KH_fnc_addEventHandler,
-        [
+        execute [
             [_group, _data],
             {
                 params ["_group", "_data"];
@@ -203,7 +203,7 @@ private _result = [
             true,
             0.1,
             false
-        ] call KH_fnc_execute
+        ]
     ]
 ];
 

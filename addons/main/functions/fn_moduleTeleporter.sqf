@@ -6,7 +6,7 @@ isNil {
 
             if _activated then {
                 {
-                    [
+                    execute [
                         [
                             getPosATL _logic,
                             [vectorDir _logic, vectorUp _logic],
@@ -46,7 +46,7 @@ isNil {
                         "PLAYERS",
                         true,
                         ["JIP", _x, false, ""]
-                    ] call KH_fnc_execute;
+                    ];
                 } forEach _units;
             };
         }

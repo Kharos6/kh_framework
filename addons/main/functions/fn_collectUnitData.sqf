@@ -117,7 +117,7 @@ private _result = [
                         params ["_projectile", "_position", "_velocity"];
                         _args params ["_unit", "_collector", "_name"];
 
-                        [
+                        execute [
                             [_projectile, _position, _velocity, _unit],
                             {
                                 params ["_projectile", "_position", "_velocity", "_unit"];
@@ -126,7 +126,7 @@ private _result = [
                             _collector,
                             true,
                             false
-                        ] call KH_fnc_execute;
+                        ];
                     }
                 ] call KH_fnc_addEventHandler;
 
@@ -141,7 +141,7 @@ private _result = [
                         private _velocity = param [4];
                         _args params ["_unit", "_collector", "_name"];
 
-                        [
+                        execute [
                             [_projectile, _hitEntity, _position, _velocity, _unit],
                             {
                                 params ["_projectile", "_hitEntity", "_position", "_velocity", "_unit"];
@@ -150,7 +150,7 @@ private _result = [
                             _collector,
                             true,
                             false
-                        ] call KH_fnc_execute;
+                        ];
                     }
                 ] call KH_fnc_addEventHandler;
 
@@ -162,7 +162,7 @@ private _result = [
                         params ["_projectile", "_hitEntity"];
                         _args params ["_unit", "_collector", "_name"];
 
-                        [
+                        execute [
                             [_projectile, _hitEntity, _unit],
                             {
                                 params ["_projectile", "_hitEntity", "_unit"];
@@ -171,11 +171,11 @@ private _result = [
                             _collector,
                             true,
                             false
-                        ] call KH_fnc_execute;
+                        ];
                     }
                 ] call KH_fnc_addEventHandler;
                 
-                [
+                execute [
                     [_unit, _name, _weapon, _muzzle, _mode, _ammo, _magazine, _projectile, _vehicle],
                     {
                         params ["_unit", "_name", "_weapon", "_muzzle", "_mode", "_ammo", "_magazine", "_projectile", "_vehicle"];
@@ -184,7 +184,7 @@ private _result = [
                     _collector,
                     true,
                     false
-                ] call KH_fnc_execute;
+                ];
 
                 nil;
             }
@@ -382,7 +382,7 @@ private _result = [
                 (_data get "Weapon") pushBack [(CBA_missionTime - ([_unit, false] call KH_fnc_getLatency)) max 0, [_newWeapon, _newMode, _newMuzzle, _turretIndex]];
             }
         ] call KH_fnc_addEventHandler,
-        [
+        execute [
             [_unit, _data],
             {
                 params ["_unit", "_data"];
@@ -727,7 +727,7 @@ private _result = [
             true,
             0.1,
             false
-        ] call KH_fnc_execute
+        ]
     ]
 ];
 

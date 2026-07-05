@@ -46,14 +46,14 @@ else {
 if (_duration >= 0) then {
     private _totalDuration = _duration + _fadeIn;
 
-    [
+    execute [
         [_control, _fadeOut],
         {
             params ["_control", "_fadeOut"];
             _control ctrlSetFade 1;
             _control ctrlCommit _fadeOut;
 
-            [
+            execute [
                 [_control],
                 {
                     params ["_control"];
@@ -67,7 +67,7 @@ if (_duration >= 0) then {
                     true;
                 },
                 false
-            ] call KH_fnc_execute;
+            ];
         },
         true,
         if (_totalDuration isNotEqualTo 0) then {
@@ -77,7 +77,7 @@ if (_duration >= 0) then {
             true;
         },
         false
-    ] call KH_fnc_execute;
+    ];
 };
 
 KH_var_allAddedDisplays pushBack _control;

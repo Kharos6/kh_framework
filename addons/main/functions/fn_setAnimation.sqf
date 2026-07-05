@@ -63,7 +63,7 @@ private _result = if !((_animation select 0) isEqualType "") then {
         false;
     };
 
-    [
+    execute [
         [
             [_unit, _animation],
             {
@@ -76,7 +76,7 @@ private _result = if !((_animation select 0) isEqualType "") then {
                         private _gestureId = generateUid;
                         _unit setVariable ["KH_var_gestureStopper", _gestureId];
 
-                        [
+                        execute [
                             [_unit, _gestureId],
                             {
                                 params ["_unit", "_gestureId"];
@@ -88,7 +88,7 @@ private _result = if !((_animation select 0) isEqualType "") then {
                             true,
                             "0.5",
                             false
-                        ] call KH_fnc_execute;
+                        ];
                     };
 
                     switch _animationType do {
@@ -107,7 +107,7 @@ private _result = if !((_animation select 0) isEqualType "") then {
                         case "MOVE_SWITCH_GLOBAL": {
                             _unit switchMove _currentAnimation;
 
-                            [
+                            execute [
                                 [_unit, _currentAnimation],
                                 {
                                     params ["_unit", "_currentAnimation"];
@@ -116,7 +116,7 @@ private _result = if !((_animation select 0) isEqualType "") then {
                                 -clientOwner,
                                 true,
                                 false
-                            ] call KH_fnc_execute;
+                            ];
                         };
 
                         case "GESTURE_SWITCH": {
@@ -148,7 +148,7 @@ private _result = if !((_animation select 0) isEqualType "") then {
         },
         true,
         false
-    ] call KH_fnc_execute;
+    ];
 
     _valid;
 }
@@ -189,7 +189,7 @@ else {
         private _gestureId = generateUid;
         _unit setVariable ["KH_var_gestureStopper", _gestureId];
 
-        [
+        execute [
             [_unit, _gestureId],
             {
                 params ["_unit", "_gestureId"];
@@ -201,7 +201,7 @@ else {
             true,
             "0.5",
             false
-        ] call KH_fnc_execute;
+        ];
     };
 
     switch _animationType do {
@@ -242,7 +242,7 @@ else {
                 _unit switchMove _currentAnimation;
             };
 
-            [
+            execute [
                 [_unit, _currentAnimation],
                 {
                     params ["_unit", "_currentAnimation"];
@@ -251,7 +251,7 @@ else {
                 -clientOwner,
                 true,
                 false
-            ] call KH_fnc_execute;
+            ];
         };
 
         case "GESTURE_SWITCH": {
@@ -310,7 +310,7 @@ if (
     _unit setVariable ["KH_var_currentInterruptableAnimation", ""];
     _unit setVariable ["KH_var_currentInterruptableAnimationPeriod", 0];
 
-    [
+    execute [
         [_unit, _finalAnimation, _interruptableId, false, 0],
         {
             params ["_unit", "_finalAnimation", "_interruptableId", "_animationReached", "_delay"];
@@ -349,7 +349,7 @@ if (
                         private _moves = getText ((configOf _unit) >> "moves");
 
                         if (_raiseWeapon || _prone || _crouch) then {
-                            [
+                            execute [
                                 [
                                     _unit, 
                                     toLowerANSI (getText (configFile >> _moves >> "Actions" >> (getText (configFile >> _moves >> "states" >> _animationState >> "actions")) >> "stop")),
@@ -386,10 +386,10 @@ if (
                                     true
                                 ],
                                 false
-                            ] call KH_fnc_execute;
+                            ];
                         }
                         else {
-                            [
+                            execute [
                                 [
                                     _unit, 
                                     toLowerANSI (getText (configFile >> _moves >> "Actions" >> (getText (configFile >> _moves >> "states" >> _animationState >> "actions")) >> "stop")),
@@ -461,7 +461,7 @@ if (
                                     true
                                 ],
                                 false
-                            ] call KH_fnc_execute;
+                            ];
                         };
 
                         _unit setVariable ["KH_var_interruptableAnimationId", ""];
@@ -519,7 +519,7 @@ if (
             true
         ],
         false
-    ] call KH_fnc_execute;
+    ];
 };
 
 _result;

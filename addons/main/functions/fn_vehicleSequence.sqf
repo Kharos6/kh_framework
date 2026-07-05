@@ -30,7 +30,7 @@ _vehicle engineOn true;
 private _movementSequence = [_vehicle, _movementData, [], _disableDamage] spawn BIS_fnc_UnitPlay;
 private _firingSequence = [_vehicle, _firingData, _disableDamage] spawn BIS_fnc_UnitPlayFiring;
 
-[
+execute [
 	[_movementSequence, _firingSequence, _vehicle, _disableDamage, _endPosition], 
 	{
 		(_this select [2]) params ["_vehicle", "_disableDamage", "_endPosition"];
@@ -49,6 +49,6 @@ private _firingSequence = [_vehicle, _firingData, _disableDamage] spawn BIS_fnc_
 		((scriptDone _movementSequence) && (scriptDone _firingSequence));
 	},
 	false
-] call KH_fnc_execute;
+];
 
 [_movementSequence, _firingSequence];

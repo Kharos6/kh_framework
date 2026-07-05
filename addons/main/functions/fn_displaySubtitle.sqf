@@ -26,7 +26,7 @@ _control ctrlCommit 0;
 private _toggleState = true;
 uiNamespace setVariable ["KH_var_subtitle", _control];
 
-[
+execute [
 	[_control],
 	{
 		params ["_control"];
@@ -38,6 +38,6 @@ uiNamespace setVariable ["KH_var_subtitle", _control];
 	true,
 	str _duration,
 	false
-] call KH_fnc_execute;
+];
 
 _duration;

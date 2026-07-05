@@ -1,7 +1,7 @@
 isNil {
 	if KH_var_isMenu exitWith {};
 
-	[
+	execute [
 		[],
 		{
 			KH_var_missionLoaded = true;
@@ -65,13 +65,13 @@ isNil {
 				call KH_fnc_serverMissionLoadInit;
 
 				if isMultiplayer then {
-					[[], {systemChat "KH FRAMEWORK - MISSION LOADED"; diag_log "KH FRAMEWORK - MISSION LOADED";}, ["SERVER", "ADMIN"], true, false] call KH_fnc_execute;
+					execute [[], {systemChat "KH FRAMEWORK - MISSION LOADED"; diag_log "KH FRAMEWORK - MISSION LOADED";}, ["SERVER", "ADMIN"], true, false];
 				}
 				else {
 					diag_log "KH FRAMEWORK - MISSION LOADED";
 				};
 
-				[
+				execute [
 					[],
 					{
 						KH_var_missionStarted = true;
@@ -83,7 +83,7 @@ isNil {
 
 						call KH_fnc_serverMissionStartInit;
 
-						[
+						execute [
 							[],
 							{
 								{
@@ -95,9 +95,9 @@ isNil {
 							"PLAYERS",
 							true,
 							false
-						] call KH_fnc_execute;
+						];
 
-						[
+						execute [
 							[],
 							{
 								{
@@ -109,10 +109,10 @@ isNil {
 							"HEADLESS",
 							true,
 							false
-						] call KH_fnc_execute;
+						];
 
 						if isMultiplayer then {
-							[[], {systemChat "KH FRAMEWORK - MISSION STARTED"; diag_log "KH FRAMEWORK - MISSION STARTED";}, ["SERVER", "ADMIN"], true, false] call KH_fnc_execute;
+							execute [[], {systemChat "KH FRAMEWORK - MISSION STARTED"; diag_log "KH FRAMEWORK - MISSION STARTED";}, ["SERVER", "ADMIN"], true, false];
 						}
 						else {
 							diag_log "KH FRAMEWORK - MISSION STARTED";
@@ -121,7 +121,7 @@ isNil {
 						KH_var_missionInitialized = true;
 						publicVariable "KH_var_missionInitialized";
 
-						[
+						execute [
 							[],
 							{
 								KH_var_initialPlayerUnits = +KH_var_allPlayerUnits;
@@ -137,7 +137,7 @@ isNil {
 
 								call KH_fnc_serverPlayersLoadedInit;
 
-								[
+								execute [
 									[],
 									{
 										{
@@ -149,9 +149,9 @@ isNil {
 									"PLAYERS",
 									true,
 									false
-								] call KH_fnc_execute;
+								];
 
-								[
+								execute [
 									[],
 									{
 										{
@@ -163,12 +163,12 @@ isNil {
 									"HEADLESS",
 									true,
 									false
-								] call KH_fnc_execute;
+								];
 
 								["KH_eve_playersLoaded", [], "GLOBAL", false] call KH_fnc_triggerCbaEvent;
 
 								if isMultiplayer then {
-									[[], {systemChat "KH FRAMEWORK - PLAYERS LOADED"; diag_log "KH FRAMEWORK - PLAYERS LOADED";}, ["SERVER", "ADMIN"], true, false] call KH_fnc_execute;
+									execute [[], {systemChat "KH FRAMEWORK - PLAYERS LOADED"; diag_log "KH FRAMEWORK - PLAYERS LOADED";}, ["SERVER", "ADMIN"], true, false];
 								}
 								else {
 									diag_log "KH FRAMEWORK - PLAYERS LOADED";
@@ -187,7 +187,7 @@ isNil {
 								((((count KH_var_allPlayerMachines) >= _initialPlayerCount)) && ((count KH_var_allPlayerUnits) >= _initialPlayerCount)) || (CBA_missionTime > 60);
 							},
 							false
-						] call KH_fnc_execute;
+						];
 
 						if !(isNil "KH_var_missionStartSuspension") then {
 							{
@@ -234,7 +234,7 @@ isNil {
 									}
 								] call KH_fnc_addEventHandler;
 
-								[
+								execute [
 									[],
 									{
 										with uiNamespace do {
@@ -248,7 +248,7 @@ isNil {
 											};
 										};
 
-										[
+										execute [
 											[],
 											{
 												if !KH_var_playersLoaded then {
@@ -265,14 +265,14 @@ isNil {
 											true,
 											0,
 											false
-										] call KH_fnc_execute;
+										];
 									},
 									KH_var_allPlayerMachines - [KH_var_adminMachine],
 									true,
 									["JIP", {!KH_var_playersLoaded;}, true, ""]
-								] call KH_fnc_execute;
+								];
 
-								[
+								execute [
 									[_timeMultiplier, _playerLoadHandler],
 									{
 										params ["_timeMultiplier", "_playerLoadHandler"];
@@ -283,7 +283,7 @@ isNil {
 
 										setTimeMultiplier _timeMultiplier;
 
-										[
+										execute [
 											[],
 											{
 												with uiNamespace do {
@@ -296,7 +296,7 @@ isNil {
 											"PLAYERS",
 											true,
 											false
-										] call KH_fnc_execute;
+										];
 
 										[_playerLoadHandler] call KH_fnc_removeHandler;
 										KH_var_missionSuspended = false;
@@ -305,7 +305,7 @@ isNil {
 									true,
 									{KH_var_playersLoaded;},
 									false
-								] call KH_fnc_execute;
+								];
 							} forEach (allUnits + (agents apply {agent _x;}));
 						};
 						
@@ -327,7 +327,7 @@ isNil {
 							{
 								params ["_unit"];
 								
-								[
+								execute [
 									[_unit], 
 									{
 										params ["_unit"];
@@ -338,9 +338,9 @@ isNil {
 									_unit,
 									true,
 									["PERSISTENT", _unit, [], {}, ""]
-								] call KH_fnc_execute;
+								];
 								
-								[[_unit, ""], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
+								execute [[_unit, ""], "KH_fnc_updateMeleeState", _unit, true, false];
 								if (_unit getVariable ["KH_var_animationSetupComplete", false]) exitWith {};
 								_unit setVariable ["KH_var_animationSetupComplete", true, true];
 								
@@ -445,7 +445,7 @@ isNil {
 
 												_unit setVariable [
 													_handlerType,
-													[
+													execute [
 														[
 															_unit,
 															_animation,
@@ -1175,7 +1175,7 @@ isNil {
 														true,
 														0,
 														false
-													] call KH_fnc_execute
+													]
 												];
 											}
 											else {
@@ -1195,7 +1195,7 @@ isNil {
 													};
 												} forEach _events;
 
-												[
+												execute [
 													[_unit, _animation, _events, _isMove],
 													{
 														params ["_unit", "_animation", "_events", "_isMove"];
@@ -1227,7 +1227,7 @@ isNil {
 													true,
 													0,
 													false
-												] call KH_fnc_execute;
+												];
 											};
 										}
 									] call KH_fnc_addEventHandler;
@@ -1263,12 +1263,12 @@ isNil {
 					true,
 					{time > 0;},
 					false
-				] call KH_fnc_execute;
+				];
 			}
 			else {
 				"KH_var_displayLayer" cutRsc ["KH_ResourceKHDisplay", "PLAIN", -1, true, true];
 
-				[
+				execute [
 					[],
 					{
 						with uiNamespace do {
@@ -1278,9 +1278,9 @@ isNil {
 					true,
 					{CBA_missionTime > 0;},
 					false
-				] call KH_fnc_execute;
+				];
 
-				[
+				execute [
 					[],
 					{
 						if (!KH_var_clientRegistered && !KH_var_missionInitialized) then {
@@ -1297,16 +1297,16 @@ isNil {
 					true,
 					0,
 					false
-				] call KH_fnc_execute;
+				];
 
-				[
+				execute [
 					[],
 					{
 						if KH_var_missionStarted then {
 							KH_var_jip = true;
 						};
 
-						[
+						execute [
 							[],
 							{
 								with uiNamespace do {
@@ -1317,9 +1317,9 @@ isNil {
 							true,
 							{!(uiNamespace isNil "KH_var_loadingDisplay");},
 							false
-						] call KH_fnc_execute;
+						];
 
-						[
+						execute [
 							[],
 							{
 								if (isNil "KH_var_serverAddress") exitWith {};
@@ -1355,18 +1355,18 @@ isNil {
 							true,
 							0,
 							false
-						] call KH_fnc_execute;
+						];
 					},
 					true,
 					{KH_var_clientRegistered && KH_var_missionInitialized;},
 					false
-				] call KH_fnc_execute;
+				];
 			};
 			
 			if hasInterface then {
 				["KH_eve_playerMissionPreloaded", [clientOwner], "SERVER", false] call KH_fnc_triggerCbaEvent;
 				
-				[
+				execute [
 					[],
 					{
 						"KH_var_displayLayer" cutRsc ["KH_ResourceKHDisplay", "PLAIN", -1, true, true];
@@ -1377,7 +1377,7 @@ isNil {
 
 						call KH_fnc_playerMissionLoadInit;
 
-						[
+						execute [
 							[],
 							{
 								{
@@ -1445,7 +1445,7 @@ isNil {
 
 										missionNamespace setVariable [
 											"KH_var_remoteInventoryHandler",
-											[
+											execute [
 												[_caller, _currentTarget, false],
 												{
 													params ["_caller", "_currentTarget", "_inventoryOpened"];
@@ -1470,7 +1470,7 @@ isNil {
 												true,
 												0,
 												false
-											] call KH_fnc_execute
+											]
 										];
 									},
 									{
@@ -1565,13 +1565,13 @@ isNil {
 																private _nozzleTip = createVehicle ["Land_Can_V1_F", _currentTarget, [], 0, "CAN_COLLIDE"];
 																private _nozzle = ropeCreate [_currentTarget, _currentTarget worldToModelVisual (unitAimPositionVisual _currentTarget), _nozzleTip, [0, 0, 0], 15, ["", [0, 0, -1]], ["", [0, 0, -1]], "KH_FuelSiphon", 63];
 
-																[
+																execute [
 																	[_caller, _currentTarget, _nozzleTip, _nozzle],
 																	{
 																		params ["_caller", "_currentTarget", "_nozzleTip", "_nozzle"];
 																		_nozzleTip hideObjectGlobal true;
 
-																		[
+																		execute [
 																			_this,
 																			{
 																				params ["_caller", "_currentTarget", "_nozzleTip", "_nozzle"];
@@ -1592,12 +1592,12 @@ isNil {
 																			true,
 																			0,
 																			false
-																		] call KH_fnc_execute;
+																		];
 																	},
 																	"SERVER",
 																	true,
 																	false
-																] call KH_fnc_execute;
+																];
 
 																_nozzleTip attachTo [_caller, [0, 0, 0], "rightHand", true];
 																_currentTarget setVariable ["KH_var_fuelSiphonNozzle", [_nozzleTip, _nozzle], true];
@@ -1619,14 +1619,14 @@ isNil {
 										{},
 										{
 											if !(_resultStart isEqualType objNull) then {
-												[
+												execute [
 													_resultStart,
 													{
 														params ["_siphonedTarget", "_currentTarget"];
 														private _nozzleTip = (_siphonedTarget getVariable ["KH_var_fuelSiphonNozzle", []]) param [0, objNull]; 
 														_nozzleTip attachTo [_currentTarget, _currentTarget worldToModelVisual (unitAimPositionVisual _currentTarget), "", false];
 
-														[
+														execute [
 															[_siphonedTarget, _currentTarget],
 															{
 																params ["_siphonedTarget", "_currentTarget"];
@@ -1642,7 +1642,7 @@ isNil {
 																	private _siphonedFuel = ((KH_var_fuelSiphoningSpeed * _totalDelta) min (fuel _siphonedTarget)) min (1 - (fuel _currentTarget));
 
 																	if (_siphonedFuel isNotEqualTo 0) then {
-																		[
+																		execute [
 																			[_siphonedTarget, _siphonedFuel],
 																			{
 																				params ["_siphonedTarget", "_siphonedFuel"];
@@ -1651,9 +1651,9 @@ isNil {
 																			_siphonedTarget,
 																			true,
 																			false
-																		] call KH_fnc_execute;
+																		];
 
-																		[
+																		execute [
 																			[_currentTarget, _siphonedFuel],
 																			{
 																				params ["_currentTarget", "_siphonedFuel"];
@@ -1662,7 +1662,7 @@ isNil {
 																			_currentTarget,
 																			true,
 																			false
-																		] call KH_fnc_execute;
+																		];
 																	};
 																}
 																else {
@@ -1694,12 +1694,12 @@ isNil {
 																true
 															],
 															false
-														] call KH_fnc_execute;
+														];
 													},
 													"SERVER",
 													true,
 													false
-												] call KH_fnc_execute;
+												];
 											}
 											else {
 												if !(isNull _resultStart) then {
@@ -1805,9 +1805,9 @@ isNil {
 							true,
 							{(!(isNull player) && (alive player));},
 							false
-						] call KH_fnc_execute;
+						];
 
-						[
+						execute [
 							[],
 							{
 								private _medical = [missionNamespace, "KH_var_medical", "SERVER"] call KH_fnc_getRemoteVariable;
@@ -1821,7 +1821,7 @@ isNil {
 									_medicalControlBackground ctrlSetBackgroundColor KH_var_uiBackgroundColor;
 									_medicalControlBackground ctrlCommit 0;
 
-									[
+									execute [
 										[_medicalControl, _medicalControlBackground],
 										{
 											params ["_control", "_controlBackground"];
@@ -1883,7 +1883,7 @@ isNil {
 										true,
 										0,
 										false
-									] call KH_fnc_execute;
+									];
 								};
 
 								[_handlerId] call KH_fnc_removeHandler;
@@ -1891,18 +1891,18 @@ isNil {
 							true,
 							0,
 							false
-						] call KH_fnc_execute;
+						];
 					},
 					true,
 					{KH_var_clientRegistered && KH_var_missionInitialized;},
 					false
-				] call KH_fnc_execute;
+				];
 			};
 
 			if (!isServer && !hasInterface) then {
 				["KH_eve_headlessMissionPreloaded", [clientOwner], "SERVER", false] call KH_fnc_triggerCbaEvent;
 
-				[
+				execute [
 					[],
 					{
 						{
@@ -1911,7 +1911,7 @@ isNil {
 
 						call KH_fnc_headlessMissionLoadInit;
 
-						[
+						execute [
 							[],
 							{
 								KH_var_playerUnit = player;
@@ -1927,12 +1927,12 @@ isNil {
 							true,
 							{(!(isNull player) && (alive player));},
 							false
-						] call KH_fnc_execute;
+						];
 					},
 					true,
 					{KH_var_clientRegistered && KH_var_missionInitialized;},
 					false
-				] call KH_fnc_execute;
+				];
 			};
 
 			[
@@ -2017,7 +2017,7 @@ isNil {
 						};
 					};
 
-					[
+					execute [
 						_arguments,
 						{
 							(_this select [1]) params ["_arguments", "_function"];
@@ -2032,7 +2032,7 @@ isNil {
 						true, 
 						_delay, 
 						false
-					] call KH_fnc_execute;
+					];
 				};
 			} forEach KH_var_postInitExecutions;
 
@@ -2669,7 +2669,7 @@ isNil {
 		true,
 		"-1",
 		false
-	] call KH_fnc_execute;
+	];
 };
 
 nil;

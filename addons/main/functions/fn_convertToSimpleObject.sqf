@@ -6,7 +6,7 @@ private _currentObject = (getModelInfo _object) select 1;
 deleteVehicle _object;
 
 if _local then {
-	[
+	execute [
 		[_init, _position, _vectorDirAndUp, _currentObject], 
 		{
 			params ["_init", "_position", "_vectorDirAndUp", "_currentObject"];	
@@ -17,7 +17,7 @@ if _local then {
 		"GLOBAL",
 		true,
 		true
-	] call KH_fnc_execute;
+	];
 }
 else {
 	_simpleObject = createSimpleObject [_currentObject, _position, false];

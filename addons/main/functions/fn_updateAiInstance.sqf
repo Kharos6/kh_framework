@@ -23,7 +23,7 @@ missionNamespace setVariable [_aiInstanceTriggerId, _triggerInference];
 if (missionNamespace isNil _aiInstanceHandlerId) then {
     missionNamespace setVariable [_aiInstanceHandlerId, false];
 
-    [
+    execute [
         [_name, _aiInstanceHandlerId, _aiInstanceArgumentsId, _aiInstanceTriggerId, _aiInstanceResponseProgressHandlerId, _aiInstanceResponseHandlerId],
         {
             params ["_name", "_aiInstanceHandlerId", "_aiInstanceArgumentsId", "_aiInstanceTriggerId", "_aiInstanceResponseProgressHandlerId", "_aiInstanceResponseHandlerId"];
@@ -141,7 +141,7 @@ if (missionNamespace isNil _aiInstanceHandlerId) then {
         true,
         0,
         false
-    ] call KH_fnc_execute;
+    ];
 }
 else {
     missionNamespace setVariable [_aiInstanceHandlerId, false];

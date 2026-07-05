@@ -28,7 +28,7 @@ if !(isNil "_storedFunction") exitWith {
 
 if (!_firstAttempt || (_caller isEqualTo 2) || (_caller isEqualTo clientOwner)) exitWith {};
 
-[
+execute [
     [_arguments, _function, _caller, _unscheduled, false],
     "KH_fnc_processRemoteSerializedFunction",
     _caller,
@@ -38,4 +38,4 @@ if (!_firstAttempt || (_caller isEqualTo 2) || (_caller isEqualTo clientOwner)) 
         [_function],
         "KH_fnc_retrieveSerializedFunction"
     ]
-] call KH_fnc_execute;
+];

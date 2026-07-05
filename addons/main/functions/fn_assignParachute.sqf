@@ -29,7 +29,7 @@ else {
 		_backpackItems = backpackItems _unit;
 	};
 
-	[
+	execute [
 		[_steerable, _unit, _backpackPresent, _backpack, _backpackItems],
 		{
 			params ["_steerable", "_unit", "_backpackPresent", "_backpack", "_backpackItems"];
@@ -50,7 +50,7 @@ else {
 				};
 
 				if _backpackPresent then {
-					[
+					execute [
 						[_unit, _backpack, _backpackItems],
 						{
 							params ["_unit", "_backpack", "_backpackItems"];
@@ -80,14 +80,14 @@ else {
 						true,
 						"-1",
 						false
-					] call KH_fnc_execute;
+					];
 				};
 			};
 		},
 		_unit,
 		true,
 		false
-	] call KH_fnc_execute;
+	];
 
 	objNull;
 };

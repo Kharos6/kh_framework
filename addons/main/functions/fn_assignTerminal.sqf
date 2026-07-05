@@ -6,7 +6,7 @@ missionNamespace setVariable [_identifierInput, "", true];
 _identifier = ["KH_var_terminalAccessed_", _identifier] joinString "";
 missionNamespace setVariable [_identifier, false, true];
 
-[
+execute [
 	[
 		_object,
 		["Access ", _name] joinString "",
@@ -35,7 +35,7 @@ missionNamespace setVariable [_identifier, false, true];
 				private _args = param [3];
 				_args params ["_entity", "_identifier", "_identifierOutput", "_identifierInput", "_name", "_description", "_function"];
 
-				[
+				execute [
 					[_identifier],
 					{
 						params ["_identifier"];
@@ -44,7 +44,7 @@ missionNamespace setVariable [_identifier, false, true];
 					"SERVER",
 					true,
 					false
-				] call KH_fnc_execute;
+				];
 
 				[_entity, _identifier, _identifierOutput, _identifierInput, _name, _description, _function] call KH_fnc_openTerminal;
 			};
@@ -61,6 +61,6 @@ missionNamespace setVariable [_identifier, false, true];
 	"PLAYERS",
 	true,
 	["JIP", _object, false, ""]
-] call KH_fnc_execute;
+];
 
 [_identifier, _identifierOutput];

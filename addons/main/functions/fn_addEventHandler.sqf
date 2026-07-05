@@ -80,7 +80,7 @@ switch _eventType do {
 			case "CURRENT_LOCAL": {
 				_handler = _entity addEventHandler [_event, _expression];
 
-				[
+				execute [
 					[
 						["ENTITY", _entity, "LOCAL"],
 						"Local",
@@ -89,7 +89,7 @@ switch _eventType do {
 							params ["_entity"];
 							_args params ["_event", "_handler", "_eventOwner"];
 
-							[
+							execute [
 								[_entity, _event, _handler],
 								{
 									params ["_entity", "_event", "_handler"];
@@ -98,7 +98,7 @@ switch _eventType do {
 								_eventOwner,
 								true,
 								false
-							] call KH_fnc_execute;
+							];
 
 							_entity removeEventHandler [_thisEvent, _thisEventHandler];
 						}
@@ -107,7 +107,7 @@ switch _eventType do {
 					_entity,
 					true,
 					false
-				] call KH_fnc_execute;
+				];
 			};
 
 			case "REMOTE": {
@@ -146,7 +146,7 @@ switch _eventType do {
 					}
 				] call KH_fnc_addEventHandler;
 
-				_handler = [
+				_handler = execute [
 					[_entity, _event, _persistentEventId, _persistentExecutionId, _persistentEntityId, _entityOwnerId, clientOwner], 
 					{
 						params ["_entity", "_event", "_persistentEventId", "_persistentExecutionId", "_persistentEntityId", "_entityOwnerId", "_eventOwner"];
@@ -184,7 +184,7 @@ switch _eventType do {
 						},
 						""
 					]
-				] call KH_fnc_execute;
+				];
 			};
 			
 			case "PERSISTENT": {
@@ -193,7 +193,7 @@ switch _eventType do {
 				private _persistentEntityId = generateUid;
 				missionNamespace setVariable [_persistentEntityId, _entity, true];
 
-				_handler = [
+				_handler = execute [
 					[_entity, _event, _arguments, _function, _argumentsId, _eventNameId, _handlerId, _previousReturnId, _persistentEventId, _persistentExecutionId, _persistentEntityId], 
 					{
 						params ["_entity", "_event", "_arguments", "_function", "_argumentsId", "_eventNameId", "_handlerId", "_previousReturnId", "_persistentEventId", "_persistentExecutionId", "_persistentEntityId"];
@@ -235,7 +235,7 @@ switch _eventType do {
 						},
 						""
 					]
-				] call KH_fnc_execute;
+				];
 			};
 		};
 	};

@@ -21,7 +21,7 @@ if !(missionNamespace isNil _variableId) exitWith {
 if (missionNamespace isNil _variableHandlerId) then {
     missionNamespace setVariable [_variableHandlerId, true];
 
-    [
+    execute [
         [_variableId],
         {
             params ["_variableId"];
@@ -43,7 +43,7 @@ if (missionNamespace isNil _variableHandlerId) then {
                 };
             }
         ]
-    ] call KH_fnc_execute;
+    ];
 };
 
 nil;

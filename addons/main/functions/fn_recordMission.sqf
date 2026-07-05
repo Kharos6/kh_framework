@@ -12,7 +12,7 @@ if _units then {
         {
             params ["_unit"];
 
-            [
+            execute [
                 [_unit],
                 {
                     params ["_unit"];
@@ -24,7 +24,7 @@ if _units then {
                 true,
                 "-2",
                 false
-            ] call KH_fnc_execute;
+            ];
         }, 
         true
     ] call KH_fnc_entityInit;
@@ -32,7 +32,7 @@ if _units then {
 
 if _groups then {
     {
-        [
+        execute [
             [_x],
             {
                 params ["_group"];
@@ -44,7 +44,7 @@ if _groups then {
             true,
             "-2",
             false
-        ] call KH_fnc_execute;
+        ];
     } forEach allGroups;
 };
 
@@ -56,7 +56,7 @@ if _objects then {
         {
             params ["_group"];
 
-            [
+            execute [
                 [_group],
                 {
                     params ["_group"];
@@ -68,7 +68,7 @@ if _objects then {
                 true,
                 "-2",
                 false
-            ] call KH_fnc_execute;
+            ];
         }
     ] call KH_fnc_addEventHandler;
 
@@ -79,7 +79,7 @@ if _objects then {
         {
             params ["_object"];
 
-            [
+            execute [
                 [_object],
                 {
                     params ["_object"];
@@ -91,14 +91,14 @@ if _objects then {
                 true,
                 "-2",
                 false
-            ] call KH_fnc_execute;
+            ];
         }, 
         true
     ] call KH_fnc_entityInit;
 };
 
 if _scenario then {
-    [
+    execute [
         [],
         {
             KH_var_recordedScenarioData = (call KH_fnc_collectScenarioData) select 0;
@@ -106,7 +106,7 @@ if _scenario then {
         true,
         "-2",
         false
-    ] call KH_fnc_execute;
+    ];
 };
 
 [

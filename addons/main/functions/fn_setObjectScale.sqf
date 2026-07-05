@@ -1,6 +1,6 @@
 params [["_object", objNull, [objNull]], ["_scale", 1, [0]]];
 
-[
+execute [
     [_object, _scale],
     {
         params ["_object", "_scale"];
@@ -10,4 +10,4 @@ params [["_object", objNull, [objNull]], ["_scale", 1, [0]]];
     _object,
     true,
     false
-] call KH_fnc_execute;
+];

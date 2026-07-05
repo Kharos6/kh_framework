@@ -14,7 +14,7 @@ private _fultonEvent = generateUid;
 private _fultonId = generateUid;
 missionNamespace setVariable [_fultonId, false];
 
-[
+execute [
 	[
 		_object,
 		["Prime Fulton ", _objectName] joinString "",
@@ -42,7 +42,7 @@ missionNamespace setVariable [_fultonId, false];
 	"PLAYERS",
 	true,
 	["JIP", _object, false, ""]
-] call KH_fnc_execute;
+];
 
 [
 	"CBA",
@@ -74,7 +74,7 @@ missionNamespace setVariable [_fultonId, false];
 			params ["_object", "_objectName", "_mainFulton", "_currentFultonParticipants", "_participant"];
 			_participant setVariable ["KH_var_fultonAttached", true, true];
 
-			[
+			execute [
 				[_object, _mainFulton, _currentFultonParticipants, _participant],
 				{
 					params ["_object", "_mainFulton", "_currentFultonParticipants", "_participant"];
@@ -99,7 +99,7 @@ missionNamespace setVariable [_fultonId, false];
 					missionNamespace setVariable [_currentFultonParticipants, _currentParticipants, true];
 					private _anchorEnd = createVehicle ["Land_Can_V2_F", _participant, [], 0, "CAN_COLLIDE"];
 
-					[
+					execute [
 						[_anchorEnd],
 						{
 							params ["_anchorEnd"];
@@ -108,14 +108,14 @@ missionNamespace setVariable [_fultonId, false];
 						"SERVER",
 						true,
 						false
-					] call KH_fnc_execute;
+					];
 
 					_anchorEnd allowDamage false;
 					_anchorEnd attachTo [_participant, [0, 0, 0], "Spine3"];
 					private _rope = ropeCreate [_mainFulton, [0, 0, 0], _anchorEnd, [0, 0, 0], 100];
 					_rope allowDamage false;
 
-					[
+					execute [
 						[_object, _participant, _mainFulton, _currentFultonParticipants, _anchorEnd, _rope],
 						{
 							private _participant = _this select 1;
@@ -155,12 +155,12 @@ missionNamespace setVariable [_fultonId, false];
 							);
 						},
 						false
-					] call KH_fnc_execute;
+					];
 				},
 				"SERVER",
 				true,
 				false
-			] call KH_fnc_execute;
+			];
 
 			if (isPlayer _participant) then {
 				private _detachAction = [
@@ -200,7 +200,7 @@ missionNamespace setVariable [_fultonId, false];
 			};
 		};
 
-		[
+		execute [
 			[
 				_object,
 				["Attach Self To Fulton ", _objectName] joinString "",
@@ -234,9 +234,9 @@ missionNamespace setVariable [_fultonId, false];
 			"PLAYERS",
 			true,
 			["JIP", _object, false, ""]
-		] call KH_fnc_execute;
+		];
 
-		[
+		execute [
 			[_object, _maximumParticipants, _objectName, _mainFulton, _fultonActive, _currentFultonParticipants, _fultonFunction, _fultonRemoteActions, _fultonBox],
 			{
 				params ["_object", "_maximumParticipants", "_objectName", "_mainFulton", "_fultonActive", "_currentFultonParticipants", "_fultonFunction", "_fultonRemoteActions", "_fultonBox"];
@@ -246,7 +246,7 @@ missionNamespace setVariable [_fultonId, false];
 						if !(_x getVariable [_fultonRemoteActions, false]) then {
 							_x setVariable [_fultonRemoteActions, true];
 
-							[
+							execute [
 								[
 									_x,
 									["Attach ", name _x, " To Fulton ", _objectName] joinString "",
@@ -282,9 +282,9 @@ missionNamespace setVariable [_fultonId, false];
 								"PLAYERS",
 								true,
 								["JIP", _x, false, ""]
-							] call KH_fnc_execute;
+							];
 
-							[
+							execute [
 								[
 									_x,
 									["Detach ", name _x, " From Fulton ", _objectName] joinString "",
@@ -315,7 +315,7 @@ missionNamespace setVariable [_fultonId, false];
 								"PLAYERS",
 								true,
 								["JIP", _x, false, ""]
-							] call KH_fnc_execute;
+							];
 						};
 					} forEach (_object nearEntities ["CAManBase", 15]);
 				}
@@ -326,14 +326,14 @@ missionNamespace setVariable [_fultonId, false];
 			true,
 			1,
 			false
-		] call KH_fnc_execute;
+		];
 
-		[
+		execute [
 			[_object, _vehicles, _height, _distance, _duration, _mainFulton, _fultonActive, _currentFultonParticipants, _mainFultonVelocity, _fultonAnchor, _fultonRope],
 			{
 				params ["_object", "_vehicles", "_height", "_distance", "_duration", "_mainFulton", "_fultonActive", "_currentFultonParticipants", "_mainFultonVelocity", "_fultonAnchor", "_fultonRope"];
 
-				[
+				execute [
 					[_object, _vehicles, _height, _distance, _duration, _mainFulton, _fultonActive, _currentFultonParticipants, _mainFultonVelocity, _fultonAnchor, _fultonRope],
 					{
 						params [
@@ -374,7 +374,7 @@ missionNamespace setVariable [_fultonId, false];
 									private _vehicle = _x;
 									
 									{
-										[
+										execute [
 											[_x, _vehicle, _duration],
 											{
 												params ["_unit", "_vehicle", "_duration"];
@@ -389,7 +389,7 @@ missionNamespace setVariable [_fultonId, false];
 
 												private _targetTime = CBA_missionTime + _duration;
 
-												[
+												execute [
 													[_unit, _vehicle, _targetTime],
 													{
 														params ["_unit", "_vehicle", "_targetTime"];
@@ -418,9 +418,9 @@ missionNamespace setVariable [_fultonId, false];
 													"GLOBAL",
 													true,
 													false
-												] call KH_fnc_execute;
+												];
 
-												[
+												execute [
 													[_unit, _vehicle, _duration],
 													{
 														params ["_unit", "_vehicle", "_duration"];
@@ -435,7 +435,7 @@ missionNamespace setVariable [_fultonId, false];
 															if ((objectParent _unit) isNotEqualTo _vehicle) then {
 																private _timeout = CBA_missionTime + 15;
 
-																[
+																execute [
 																	[_unit, _vehicle, _timeout],
 																	{
 																		params ["_unit", "_vehicle", "_timeout"];
@@ -460,7 +460,7 @@ missionNamespace setVariable [_fultonId, false];
 																	true,
 																	0,
 																	false
-																] call KH_fnc_execute;
+																];
 															};
 
 															_unit setVariable ["KH_var_fultonRemainingTime", nil];
@@ -484,12 +484,12 @@ missionNamespace setVariable [_fultonId, false];
 													true,
 													0,
 													false
-												] call KH_fnc_execute;
+												];
 											},
 											_x,
 											true,
 											false
-										] call KH_fnc_execute;
+										];
 									} forEach (missionNamespace getVariable [_currentFultonParticipants, []]);
 
 									missionNamespace setVariable [_fultonActive, true, true];
@@ -521,11 +521,11 @@ missionNamespace setVariable [_fultonId, false];
 					true,
 					0,
 					false
-				] call KH_fnc_execute;
+				];
 			},
 			true,
 			"3",
 			false
-		] call KH_fnc_execute;
+		];
 	}
 ] call KH_fnc_addEventHandler;

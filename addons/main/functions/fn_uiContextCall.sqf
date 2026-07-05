@@ -4,7 +4,7 @@ if hasInterface then {
     private _id = generateUid;
 
     if isUIContext then {
-        [
+        execute [
             [_arguments, _function, _id],
             {
                 params ["_arguments", "_function", "_id"];
@@ -13,7 +13,7 @@ if hasInterface then {
             true,
             "-1",
             false
-        ] call KH_fnc_execute;
+        ];
     }
     else {
         KH_var_uiContextExecutionStack pushBack [_arguments, _function, _id];

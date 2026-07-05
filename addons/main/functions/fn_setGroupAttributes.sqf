@@ -29,7 +29,7 @@ _savedAttributes params [
 
 _group setGroupIdGlobal [_groupId];
 
-[
+execute [
 	[
 		_group,
 		_leader,
@@ -99,6 +99,6 @@ _group setGroupIdGlobal [_groupId];
 	_group,
 	true,
 	false
-] call KH_fnc_execute;
+];
 
 nil;

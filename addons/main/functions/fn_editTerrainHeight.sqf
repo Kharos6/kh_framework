@@ -192,7 +192,7 @@ if (_changeDuration isEqualTo 0) then {
     setTerrainHeight [_targetHeights, _adjustObjectHeight];
 }
 else {
-    [
+    execute [
         [_originalHeights, _targetHeights, _changeDuration, _animationCurveType, _adjustObjectHeight, diag_tickTime],
         {
             params ["_originalHeights", "_targetHeights", "_changeDuration", "_animationCurveType", "_adjustObjectHeight", "_startTime"];
@@ -233,7 +233,7 @@ else {
         true,
         0,
         false
-    ] call KH_fnc_execute;
+    ];
 };
 
 {

@@ -1,6 +1,6 @@
 params [["_vehicle", objNull, [objNull]]];
 
-[
+execute [
 	[_vehicle],
 	{
 		params ["_vehicle"];
@@ -9,4 +9,4 @@ params [["_vehicle", objNull, [objNull]]];
 	_vehicle,
 	true,
 	false
-] call KH_fnc_execute;
+];

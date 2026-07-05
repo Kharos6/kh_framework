@@ -7,7 +7,7 @@ _delay = _delay max 1;
 
 call KH_fnc_serverMissionEndInit;
 
-[
+execute [
 	[],
 	{
 		{
@@ -19,9 +19,9 @@ call KH_fnc_serverMissionEndInit;
 	"PLAYERS",
 	true,
 	false
-] call KH_fnc_execute;
+];
 
-[
+execute [
 	[],
 	{
 		{
@@ -33,17 +33,17 @@ call KH_fnc_serverMissionEndInit;
 	"HEADLESS",
 	true,
 	false
-] call KH_fnc_execute;
+];
 
 ["KH_eve_missionEnded", [_isVictory, _nextMission], "GLOBAL", false] call KH_fnc_triggerCbaEvent;
 
-[
+execute [
 	[_endName, _isVictory, _fadeType, _nextMission],
 	{
 		params ["_endName", "_isVictory", "_fadeType", "_nextMission"];
 		
 		if (_nextMission isEqualTo []) then {
-			[[_endName, _isVictory, _fadeType, true, false], "BIS_fnc_endMission", "GLOBAL", true, false] call KH_fnc_execute;
+			execute [[_endName, _isVictory, _fadeType, true, false], "BIS_fnc_endMission", "GLOBAL", true, false];
 		}
 		else {
 			_nextMission params [["_password", "", [""]], ["_mission", "", [""]]];
@@ -53,4 +53,4 @@ call KH_fnc_serverMissionEndInit;
 	true,
 	str _delay,
 	false
-] call KH_fnc_execute;
+];

@@ -5,7 +5,7 @@ isNil {
             params [["_logic", objNull, [objNull]], ["_units", [], [[]]], ["_activated", true, [true]]];
 
             if _activated then {
-                [
+                execute [
                     [
                         _logic getVariable ["KH_ModuleInitializeTTSModel", ""],
                         parseNumber (_logic getVariable ["KH_ModuleInitializeTTSCPUThreads", "2"]),
@@ -19,7 +19,7 @@ isNil {
                     "PLAYERS",
                     true,
                     true
-                ] call KH_fnc_execute;
+                ];
             };
         }
     ];

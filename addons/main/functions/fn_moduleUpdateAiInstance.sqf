@@ -19,14 +19,14 @@ isNil {
             [_name, call _systemPrompt, call _masterPrompt, call _userPrompt, _responseProgressFunction, _responseFunction, _triggerInference, _abortGeneration, _resetContext, _logGeneration, _stop] call KH_fnc_updateAiInstance;
         }
         else {
-            [
+            execute [
                 [_owner, _name, _systemPrompt, _masterPrompt, _userPrompt, _responseProgressFunction, _responseFunction, _triggerInference, _abortGeneration, _resetContext, _logGeneration, _stop],
                 {
                     _this set [2, call (_this select 2)];
                     _this set [3, call (_this select 3)];
                     _this set [4, call (_this select 4)];
                     _this deleteAt 0;
-                    [_this, "KH_fnc_updateAiInstance", missionNamespace getVariable _owner, true, false] call KH_fnc_execute;
+                    execute [_this, "KH_fnc_updateAiInstance", missionNamespace getVariable _owner, true, false];
                 },
                 true,
                 {
@@ -43,7 +43,7 @@ isNil {
                     };
                 },
                 false
-            ] call KH_fnc_execute;
+            ];
         };
 
         if (_logic getVariable ["KH_ModuleUpdateAIInstanceActivateOnce", true]) then {

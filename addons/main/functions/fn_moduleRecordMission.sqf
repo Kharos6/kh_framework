@@ -13,11 +13,11 @@ isNil {
             [_identifier, _units, _groups, _objects, _scenario] call KH_fnc_recordMission;
         }
         else {
-            [
+            execute [
                 [_owner, [_identifier, _units, _groups, _objects, _scenario]],
                 {
                     params ["_owner", "_arguments"];
-                    [_arguments, "KH_fnc_recordMission", missionNamespace getVariable _owner, true, false] call KH_fnc_execute;
+                    execute [_arguments, "KH_fnc_recordMission", missionNamespace getVariable _owner, true, false];
                 },
                 true,
                 {
@@ -29,7 +29,7 @@ isNil {
                     };
                 },
                 false
-            ] call KH_fnc_execute;
+            ];
         };
     };
 };

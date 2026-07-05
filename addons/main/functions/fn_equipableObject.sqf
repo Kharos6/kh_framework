@@ -144,7 +144,7 @@ if !(isNull _unit) then {
 		};
 	};
 
-	[
+	execute [
 		[_object, _rotation],
 		{
 			params ["_object", "_rotation"];
@@ -164,9 +164,9 @@ if !(isNull _unit) then {
 		_object,
 		true,
 		false
-	] call KH_fnc_execute;
+	];
 
-	[
+	execute [
 		[_unit, _object, _exclusive],
 		{
 			params ["_unit", "_object", "_exclusive"];
@@ -182,23 +182,23 @@ if !(isNull _unit) then {
 		true,
 		0,
 		false
-	] call KH_fnc_execute;
+	];
 
 	if (_hideInVehicles || _disableCollision) then {	
-		[
+		execute [
 			[_object, _hideInVehicles, _disableCollision],
 			{
 				params ["_object", "_hideInVehicles", "_disableCollision"];
 				
 				if (_object isNil "KH_var_equipableObjectHandler") then { 
-					private _handler = [
+					private _handler = execute [
 						[_object, _hideInVehicles, _disableCollision],
 						{
 							params ["_object", "_hideInVehicles", "_disableCollision"];
 
 							if _disableCollision then {
 								if ((getPhysicsCollisionFlag _object) select 0) then {
-									[
+									execute [
 										[_object],
 										{
 											params ["_object"];
@@ -207,10 +207,10 @@ if !(isNull _unit) then {
 										"GLOBAL",
 										true,
 										["JIP", _object, false, ["KH_var_equipableObjectCollision", _object] joinString "_"]
-									] call KH_fnc_execute;
+									];
 								}
 								else {
-									[
+									execute [
 										[_object],
 										{
 											params ["_object"];
@@ -219,7 +219,7 @@ if !(isNull _unit) then {
 										"GLOBAL",
 										true,
 										["JIP", _object, false, ["KH_var_equipableObjectCollision", _object] joinString "_"]
-									] call KH_fnc_execute;
+									];
 								};
 							};
 
@@ -235,7 +235,7 @@ if !(isNull _unit) then {
 						true,
 						0,
 						false
-					] call KH_fnc_execute;
+					];
 
 					_object setVariable ["KH_var_equipableObjectHandler", _handler];
 				};
@@ -243,7 +243,7 @@ if !(isNull _unit) then {
 			"SERVER",
 			true,
 			false
-		] call KH_fnc_execute;
+		];
 	};
 };
 

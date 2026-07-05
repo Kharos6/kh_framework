@@ -35,7 +35,7 @@ if _state then {
 					};
 
 					if KH_var_recoverDisconnectedPlayersDeleteUnit then {
-						[
+						execute [
 							[_unit],	
 							{
 								params ["_unit"];
@@ -50,7 +50,7 @@ if _state then {
 							true,
 							0,
 							false
-						] call KH_fnc_execute;
+						];
 					};
 				};
 			}

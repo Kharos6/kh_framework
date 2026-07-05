@@ -145,7 +145,7 @@ KH_var_dynamicVariables set [
     ]
 ];
 
-[
+execute [
     [_namespace, _name, _existenceId],
     {
         params ["_namespace", "_name"];
@@ -372,6 +372,6 @@ KH_var_dynamicVariables set [
         true
     ],
     false
-] call KH_fnc_execute;
+];
 
 [missionNamespace, _existenceId, clientOwner];

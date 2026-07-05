@@ -23,7 +23,7 @@ if (_entity isEqualType objNull) then {
 	missionNamespace setVariable [_name, _entity, true];
 	_entity setVehicleVarName _name;
 
-	[
+	execute [
 		[_entity, _name],
 		{
 			params ["_entity", "_name"];
@@ -32,7 +32,7 @@ if (_entity isEqualType objNull) then {
 		"GLOBAL",
 		true,
 		true
-	] call KH_fnc_execute;
+	];
 }
 else {
 	if (_name isEqualTo "") then {

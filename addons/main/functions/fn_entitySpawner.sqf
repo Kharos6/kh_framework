@@ -27,7 +27,7 @@ private _entityHandler = [
 	}
 ] call KH_fnc_addEventHandler;
 
-private _spawnHandler = [
+private _spawnHandler = execute [
 	[_entityTypes, _transforms, _radius, _amount, _maximum, _condition, _init, _type, _countKilled, _validatePosition, _minimumPlayerDistance, _maximumPlayerDistance, _spawnerCount],
 	{
 		params ["_entityTypes", "_transforms", "_radius", "_amount", "_maximum", "_condition", "_init", "_type", "_countKilled", "_validatePosition", "_minimumPlayerDistance", "_maximumPlayerDistance", "_spawnerCount"];
@@ -546,6 +546,6 @@ private _spawnHandler = [
 	true,
 	_interval,
 	false
-] call KH_fnc_execute;
+];
 
 [_entityHandler, _spawnHandler];

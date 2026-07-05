@@ -15,7 +15,7 @@ missionNamespace setVariable [_id, true, true];
 _unit setVariable ["KH_var_unitControllerId", _id, true];
 
 [
-    [
+    execute [
         [
             _unit, 
             _id,
@@ -47,7 +47,7 @@ _unit setVariable ["KH_var_unitControllerId", _id, true];
 
             _unit setVariable [
                 "KH_var_unitControllerHandler",
-                [
+                execute [
                     [
                         _unit, 
                         _id, 
@@ -266,7 +266,7 @@ _unit setVariable ["KH_var_unitControllerId", _id, true];
                     true,
                     0,
                     false
-                ] call KH_fnc_execute
+                ]
             ];
         },
         _unit,
@@ -282,7 +282,7 @@ _unit setVariable ["KH_var_unitControllerId", _id, true];
             }, 
             ""
         ]
-    ] call KH_fnc_execute,
+    ],
     [
         ["ENTITY", _unit, "PERSISTENT"],
         "PathCalculated",

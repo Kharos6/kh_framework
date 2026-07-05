@@ -17,7 +17,7 @@ private _particleId = generateUid;
 missionNamespace setVariable [_particleId, true, true];
 
 [
-    [
+    execute [
         [_source, _particle, _duration, _circleParameters, _conditionArguments, _conditionFunction, _particleId],
         {
             params ["_source", "_particle", "_duration", "_circleParameters", "_conditionArguments", "_conditionFunction", "_particleId"];
@@ -104,7 +104,7 @@ missionNamespace setVariable [_particleId, true, true];
                 };
             };
 
-            [
+            execute [
                 [_conditionArguments, _conditionFunction, _particleId, _particles, _lights, diag_tickTime + _duration],
                 {
                     params ["_conditionArguments", "_conditionFunction", "_particleId", "_particles", "_lights", "_timeout"];
@@ -142,13 +142,13 @@ missionNamespace setVariable [_particleId, true, true];
                 true,
                 0,
                 false
-            ] call KH_fnc_execute;
+            ];
 
             nil;
         },
         _target,
         true,
         _jip
-    ] call KH_fnc_execute,
+    ],
     [missionNamespace, _particleId, true]
 ];

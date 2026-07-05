@@ -2,7 +2,7 @@ isNil {
     params [["_logic", objNull, [objNull]], ["_units", [], [[]]], ["_activated", true, [true]]];
 
     if _activated then {
-        [
+        execute [
             [
                 _units,
                 compile (_logic getVariable ["KH_ModuleUpdateTTSSpeakerEntityText", ""]),
@@ -26,7 +26,7 @@ isNil {
             "PLAYERS",
             true,
             false
-        ] call KH_fnc_execute;
+        ];
 
         if (_logic getVariable ["KH_ModuleUpdateTTSSpeakerEntityActivateOnce", true]) then {
             deleteVehicle _logic;

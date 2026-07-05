@@ -45,7 +45,7 @@ private _result = [
                 (_data get "BuildingChanged") pushBack [CBA_missionTime, [typeOf _from, getPosATLVisual _from, netId _to, _isRuin]];
             }
         ] call KH_fnc_addEventHandler,
-        [
+        execute [
             [_data],
             {
                 params ["_data"];
@@ -64,7 +64,7 @@ private _result = [
             true,
             0.1,
             false
-        ] call KH_fnc_execute
+        ]
     ]
 ];
 

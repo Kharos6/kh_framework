@@ -1,6 +1,6 @@
 params [["_audio", [], [[]]], ["_condition", {true;}, [{}]], ["_interval", 0, [0]], ["_chance", 1, [0]]];
 
-[
+execute [
 	[_audio, _condition, _chance],
 	{
 		params ["_audio", "_condition", "_chance"];
@@ -10,7 +10,7 @@ params [["_audio", [], [[]]], ["_condition", {true;}, [{}]], ["_interval", 0, [0
 
 			{
 				if ([_x, _selectedAudio] call _condition) then {
-					[
+					execute [
 						[_selectedAudio],
 						{
 							params ["_selectedAudio"];
@@ -19,7 +19,7 @@ params [["_audio", [], [[]]], ["_condition", {true;}, [{}]], ["_interval", 0, [0
 						_x,
 						true,
 						false
-					] call KH_fnc_execute;
+					];
 				};
 			} forEach KH_var_allPlayerUnits;
 		};
@@ -27,4 +27,4 @@ params [["_audio", [], [[]]], ["_condition", {true;}, [{}]], ["_interval", 0, [0
 	true,
 	_interval,
 	false
-] call KH_fnc_execute;
+];

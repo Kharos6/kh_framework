@@ -47,7 +47,7 @@ setHumidity _humidity;
 0 setWaves _waves;
 forceWeatherChange;
 
-[
+execute [
     [_environmentEnabled],
     {   
         params ["_environmentEnabled"];
@@ -56,7 +56,7 @@ forceWeatherChange;
     true,
     {time > 1;},
     false
-] call KH_fnc_execute;
+];
 
 {
     _x params ["_side1", "_side2", "_relationship"];
@@ -67,7 +67,7 @@ forceWeatherChange;
     missionNamespace setVariable _x;
 } forEach _variables;
 
-[
+execute [
 	[
         _environmentEnabled,
         _date,
@@ -92,7 +92,7 @@ forceWeatherChange;
             "_waves"
 		];
         
-		[
+		execute [
 			[_environmentEnabled],
 			{   
                 params ["_environmentEnabled"];
@@ -101,7 +101,7 @@ forceWeatherChange;
 			true,
 			{time > 1;},
 			false
-		] call KH_fnc_execute;
+		];
 
         setDate _date;
         0 setGusts _gusts;
@@ -115,6 +115,6 @@ forceWeatherChange;
 	"REMOTE", 
 	true, 
 	false
-] call KH_fnc_execute;
+];
 
 nil;

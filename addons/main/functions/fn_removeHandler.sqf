@@ -33,7 +33,7 @@ else {
     if ((_id select 0) isEqualType []) then {
         _id params [["_type", [], [[]]], ["_event", "", [true, 0, ""]], ["_handlerId", 0, [0, "", []]], ["_eventOwner", 2, [0]]];
 
-        [
+        execute [
             [_type, _event, _handlerId],
             {
                 params ["_type", "_event", "_handlerId"];
@@ -103,7 +103,7 @@ else {
             _eventOwner,
             true,
             false
-        ] call KH_fnc_execute;
+        ];
     }
     else {
         _id params [

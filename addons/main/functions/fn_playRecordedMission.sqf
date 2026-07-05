@@ -54,7 +54,7 @@ if (KH_var_recordedScenarioData isNotEqualTo []) then {
     [(((KH_var_recordedScenarioData select 0) select 1) get "Header") select 2, []] call KH_fnc_setMissionAttributes;
 };
 
-[
+execute [
     [],
     {
         private _currentRecordedScenarioData = KH_var_recordedScenarioData select (missionNamespace getVariable ["KH_var_currentRecordingIndex", 0]);
@@ -570,4 +570,4 @@ if (KH_var_recordedScenarioData isNotEqualTo []) then {
     true,
     0,
     false
-] call KH_fnc_execute;
+];

@@ -16,7 +16,7 @@ private _lightId = generateUid;
 missionNamespace setVariable [_lightId, true, true];
 
 [
-    [
+    execute [
         [_source, _light, _duration, _conditionArguments, _conditionFunction, _lightId],
         {
             params ["_source", "_light", "_duration", "_conditionArguments", "_conditionFunction", "_lightId"];
@@ -61,7 +61,7 @@ missionNamespace setVariable [_lightId, true, true];
                 objNull;
             };
 
-            [
+            execute [
                 [_conditionArguments, _conditionFunction, _emitter, diag_tickTime + _duration, _lightId],
                 {
                     params ["_conditionArguments", "_conditionFunction", "_emitter", "_timeout", "_lightId"];
@@ -74,13 +74,13 @@ missionNamespace setVariable [_lightId, true, true];
                 true,
                 0,
                 false
-            ] call KH_fnc_execute;
+            ];
 
             nil;
         },
         _target,
         true,
         _jip
-    ] call KH_fnc_execute,
+    ],
     [missionNamespace, _lightId, true]
 ];

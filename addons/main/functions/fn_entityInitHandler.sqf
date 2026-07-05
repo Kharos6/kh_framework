@@ -1,6 +1,6 @@
 params [["_entity", objNull, [objNull]], ["_respawn", false, [true]], ["_previousEntity", objNull, [objNull]]];
 
-[
+execute [
     [_entity, _respawn, _previousEntity],
     {
         params ["_entity", "_respawn", "_previousEntity"];
@@ -55,4 +55,4 @@ params [["_entity", objNull, [objNull]], ["_respawn", false, [true]], ["_previou
     [true, "GLOBAL"] select _respawn,
     "-2",
     false
-] call KH_fnc_execute;
+];

@@ -57,7 +57,7 @@ private _return = switch (typeName _target) do {
                 [_event, _arguments, _target] call CBA_fnc_targetEvent;
             }   
             else {
-                [
+                execute [
                     [_event, _arguments, _target],
                     {
                         params ["_event", "_arguments", "_target"];
@@ -74,7 +74,7 @@ private _return = switch (typeName _target) do {
                     "SERVER",
                     true,
                     false
-                ] call KH_fnc_execute;
+                ];
             };
         };
     };
@@ -192,7 +192,7 @@ private _return = switch (typeName _target) do {
                                                         [_event, _arguments, _target] call CBA_fnc_targetEvent;
                                                     }   
                                                     else {
-                                                        [
+                                                        execute [
                                                             [_event, _arguments, _target],
                                                             {
                                                                 params ["_event", "_arguments", "_target"];
@@ -209,7 +209,7 @@ private _return = switch (typeName _target) do {
                                                             "SERVER",
                                                             true,
                                                             false
-                                                        ] call KH_fnc_execute;
+                                                        ];
                                                     };
                                                 };
                                             } forEach _groupTargets;
@@ -246,7 +246,7 @@ private _return = switch (typeName _target) do {
                                         [_event, _arguments, _target] call CBA_fnc_targetEvent;
                                     }   
                                     else {
-                                        [
+                                        execute [
                                             [_event, _arguments, _target],
                                             {
                                                 params ["_event", "_arguments", "_target"];
@@ -263,7 +263,7 @@ private _return = switch (typeName _target) do {
                                             "SERVER",
                                             true,
                                             false
-                                        ] call KH_fnc_execute;
+                                        ];
                                     };
                                 };
                             }
@@ -289,7 +289,7 @@ private _return = switch (typeName _target) do {
                                                     [_event, _arguments, _target] call CBA_fnc_targetEvent;
                                                 }   
                                                 else {
-                                                    [
+                                                    execute [
                                                         [_event, _arguments, _target],
                                                         {
                                                             params ["_event", "_arguments", "_target"];
@@ -306,7 +306,7 @@ private _return = switch (typeName _target) do {
                                                         "SERVER",
                                                         true,
                                                         false
-                                                    ] call KH_fnc_execute;
+                                                    ];
                                                 };
                                             };
                                         } forEach _groupTargets;
@@ -343,7 +343,7 @@ private _return = switch (typeName _target) do {
                                         [_event, _arguments, _target] call CBA_fnc_targetEvent;
                                     }   
                                     else {
-                                        [
+                                        execute [
                                             [_event, _arguments, _target],
                                             {
                                                 params ["_event", "_arguments", "_target"];
@@ -360,7 +360,7 @@ private _return = switch (typeName _target) do {
                                             "SERVER",
                                             true,
                                             false
-                                        ] call KH_fnc_execute;
+                                        ];
                                     };
                                 };
                             } forEach _groupTargets;
@@ -377,7 +377,7 @@ private _return = switch (typeName _target) do {
     };
 
     case "ARRAY": {
-        [
+        execute [
             [_event, _arguments, flatten _target, clientOwner],
             {
                 params ["_event", "_arguments", "_targets", "_caller"];
@@ -569,7 +569,7 @@ private _return = switch (typeName _target) do {
                         };
 
                         case "CODE": {
-                            [
+                            execute [
                                 [_event, _arguments, _parsedTargets],
                                 {
                                     params ["_event", "_arguments", "_parsedTargets"];
@@ -598,7 +598,7 @@ private _return = switch (typeName _target) do {
                                         };						
                                     }
                                 ]
-                            ] call KH_fnc_execute;
+                            ];
                         };
 
                         case "LOCATION": {
@@ -614,11 +614,11 @@ private _return = switch (typeName _target) do {
             "SERVER",
             true,
             false
-        ] call KH_fnc_execute;
+        ];
     };
 
     case "CODE": {
-        [
+        execute [
             [_event, _arguments, _target],
             {
                 params ["_event", ["_arguments", []], "_function"];
@@ -630,7 +630,7 @@ private _return = switch (typeName _target) do {
             "GLOBAL",
             true,
             false
-        ] call KH_fnc_execute;
+        ];
     };
 
     case "LOCATION": {

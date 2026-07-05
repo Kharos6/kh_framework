@@ -23,7 +23,7 @@ if (isNil "KH_var_assignIdentificationCardSet") then {
 			private _oldEntity = param [4];
 
 			if !(_oldEntity isNil "KH_var_identificationCardInformation") then {
-				[
+				execute [
 					[_newEntity],
 					{
 						params ["_newEntity"];
@@ -70,7 +70,7 @@ if (isNil "KH_var_assignIdentificationCardSet") then {
 					"PLAYERS",
 					true,
 					["JIP", _newEntity, false, ""]
-				] call KH_fnc_execute;
+				];
 			};
 		}
 	] call KH_fnc_addEventHandler;
@@ -475,7 +475,7 @@ if (_dateOfExpiry isEqualTo "") then {
 
 _unit setVariable ["KH_var_identificationCardInformation", [_name, _gender, _race, _dateOfBirth, _profession, _ethnos, _cardNumber, _dateOfIssue, _dateOfExpiry], true];
 
-[
+execute [
 	[_unit],
 	{
 		params ["_unit"];
@@ -522,4 +522,4 @@ _unit setVariable ["KH_var_identificationCardInformation", [_name, _gender, _rac
 	"PLAYERS",
 	true,
 	["JIP", true, true, ""]
-] call KH_fnc_execute;
+];

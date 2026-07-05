@@ -41,12 +41,12 @@ private _groups = [];
 	private _attributes = [_x] call KH_fnc_getUnitAttributes;
 	
 	if _recreate then {
-		[
+		execute [
 			[_owner, _x, _group, _init, _attributes],
 			{
 				params ["_owner", "_unit", "_group", "_init", "_attributes"];
 				
-				[
+				execute [
 					[_unit, _group, _init, _attributes],
 					{
 						params ["_unit", "_group", "_init", "_attributes"];
@@ -61,7 +61,7 @@ private _groups = [];
 					_owner,
 					true,
 					false
-				] call KH_fnc_execute;
+				];
 
 				[_handlerId] call KH_fnc_removeHandler;
 			},
@@ -79,15 +79,15 @@ private _groups = [];
 				true
 			],
 			false
-		] call KH_fnc_execute;
+		];
 	}
 	else {
-		[
+		execute [
 			[_owner, _x, _init, _attributes],
 			{
 				params ["_owner", "_unit", "_init", "_attributes"];
 
-				[
+				execute [
 					[_unit, _init, _attributes],
 					{
 						params ["_unit", "_init", "_attributes"];
@@ -97,7 +97,7 @@ private _groups = [];
 					_owner,
 					true,
 					false
-				] call KH_fnc_execute;
+				];
 
 				[_handlerId] call KH_fnc_removeHandler;
 			},
@@ -115,7 +115,7 @@ private _groups = [];
 				true
 			],
 			false
-		] call KH_fnc_execute;
+		];
 	};
 } forEach _parsedUnits;
 

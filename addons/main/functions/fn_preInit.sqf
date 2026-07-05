@@ -23,15 +23,25 @@ uiNamespace setVariable ["KH_var_quickFunctionsSqf", KH_var_quickFunctionsSqf];
 KH_var_quickFunctionsLua = createHashMap;
 uiNamespace setVariable ["KH_var_quickFunctionsLua", KH_var_quickFunctionsLua];
 KH_var_inGameUiEventHandlerStackDeletions = [];
-KH_var_temporalExecutionStack = [];
+
+if (isNil "KH_var_temporalExecutionStack") then {
+	KH_var_temporalExecutionStack = [];
+};
+
+if (isNil "KH_var_temporalExecutionStackAdditions") then {
+	KH_var_temporalExecutionStackAdditions = [];
+};
+
+if (isNil "KH_var_temporalExecutionStackDeletions") then {
+	KH_var_temporalExecutionStackDeletions = [];
+};
+
 KH_var_uiContextExecutionStack = [];
 KH_var_drawUi2dExecutionStack = [];
 KH_var_drawUi3dExecutionStack = [];
 KH_var_drawUi3dOrphanExecutionStack = [];
-KH_var_temporalExecutionStackAdditions = [];
 KH_var_drawUi2dExecutionStackAdditions = [];
 KH_var_drawUi3dExecutionStackAdditions = [];
-KH_var_temporalExecutionStackDeletions = [];
 KH_var_drawUi2dExecutionStackDeletions = [];
 KH_var_drawUi3dExecutionStackDeletions = [];
 KH_var_postInitExecutions = [];
@@ -288,7 +298,7 @@ KH_var_lightParameterCache = createHashMap;
 		private _parried = (_instigator in (_unit getVariable ["KH_var_meleeParriedUnits", []])) && (_parryPower >= _hitParryPower);
 
 		if _isBlocking then {
-			[
+			execute [
 				[_unit, getNumber (_unitConfig >> (_unit getVariable ["KH_var_currentMeleeBlock", ""]) >> "cost")],
 				{
 					params ["_unit", "_cost"];
@@ -308,7 +318,7 @@ KH_var_lightParameterCache = createHashMap;
 				_unit,
 				true,
 				false
-			] call KH_fnc_execute;
+			];
 		};
 
 		[
@@ -330,10 +340,10 @@ KH_var_lightParameterCache = createHashMap;
 
 			private _playSound = if (_damageFunction isNotEqualTo {}) then {
 				if ([_unit, _instigator, ["HIT", _attack, _hitBlockPower, _hitParryPower, _position, _blockPower, _parryPower]] call _damageFunction) then {
-					[[_unit, ["HIT", [getNumber (_instigatorConfig >> _attack >> "kickPower"), getNumber (_instigatorConfig >> _attack >> "tacklePower")], _unit getRelDir _instigator]], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
+					execute [[_unit, ["HIT", [getNumber (_instigatorConfig >> _attack >> "kickPower"), getNumber (_instigatorConfig >> _attack >> "tacklePower")], _unit getRelDir _instigator]], "KH_fnc_updateMeleeState", _unit, true, false];
 					
 					if (_unit isKindOf "Man") then {
-						[[_unit, _selection, getText (_instigatorConfig >> _attack >> "type"), _instigator, true], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
+						execute [[_unit, _selection, getText (_instigatorConfig >> _attack >> "type"), _instigator, true], "KH_fnc_simulateHit", "SERVER", true, false];
 					};
 
 					true;
@@ -343,10 +353,10 @@ KH_var_lightParameterCache = createHashMap;
 				};
 			}
 			else {
-				[[_unit, ["HIT", [getNumber (_instigatorConfig >> _attack >> "kickPower"), getNumber (_instigatorConfig >> _attack >> "tacklePower")], _unit getRelDir _instigator]], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
+				execute [[_unit, ["HIT", [getNumber (_instigatorConfig >> _attack >> "kickPower"), getNumber (_instigatorConfig >> _attack >> "tacklePower")], _unit getRelDir _instigator]], "KH_fnc_updateMeleeState", _unit, true, false];
 				
 				if (_unit isKindOf "Man") then {
-					[[_unit, _selection, getText (_instigatorConfig >> _attack >> "type"), _instigator, true], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
+					execute [[_unit, _selection, getText (_instigatorConfig >> _attack >> "type"), _instigator, true], "KH_fnc_simulateHit", "SERVER", true, false];
 				};
 
 				true;
@@ -370,10 +380,10 @@ KH_var_lightParameterCache = createHashMap;
 			};
 
 			if (KH_var_meleeAttackBlockOnInsufficientStamina && ((getNumber ((configOf _instigator) >> "Kh_meleeNoFatigue")) isEqualTo 0) && ((getFatigue _instigator) >= (1 - (getNumber (_instigatorConfig >> _attack >> "cost"))))) then {
-				[[_instigator, "BLOCKED"], "KH_fnc_updateMeleeState", _instigator, true, false] call KH_fnc_execute;
+				execute [[_instigator, "BLOCKED"], "KH_fnc_updateMeleeState", _instigator, true, false];
 			};
 
-			[
+			execute [
 				[
 					_unit,
 					getNumber (_instigatorConfig >> _attack >> "costInfliction")
@@ -396,14 +406,14 @@ KH_var_lightParameterCache = createHashMap;
 				_unit,
 				true,
 				false
-			] call KH_fnc_execute;
+			];
 		}
 		else {
 			if _blocked then {
-				[[_unit, "BLOCK_SUCCESS"], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
+				execute [[_unit, "BLOCK_SUCCESS"], "KH_fnc_updateMeleeState", _unit, true, false];
 			};
 
-			[
+			execute [
 				[
 					_instigator,
 					["BLOCKED", "PARRIED"] select _parried,
@@ -435,7 +445,7 @@ KH_var_lightParameterCache = createHashMap;
 				_instigator,
 				true,
 				false
-			] call KH_fnc_execute;
+			];
 
 			private _sounds = getArray (_instigatorConfig >> _attack >> "Sounds" >> (["parried", "blocked"] select _blocked));
 
@@ -484,7 +494,7 @@ KH_var_lightParameterCache = createHashMap;
 		private _blocked = _isBlocking && (_blockPower >= _kickPower);
 
 		if _isBlocking then {
-			[
+			execute [
 				[_unit, getNumber (_unitConfig >> (_unit getVariable ["KH_var_currentMeleeBlock", ""]) >> "cost")],
 				{
 					params ["_unit", "_cost"];
@@ -504,7 +514,7 @@ KH_var_lightParameterCache = createHashMap;
 				_unit,
 				true,
 				false
-			] call KH_fnc_execute;
+			];
 		};
 
 		[
@@ -526,22 +536,22 @@ KH_var_lightParameterCache = createHashMap;
 
 			if (_damageFunction isNotEqualTo {}) then {
 				if ([_unit, _instigator, ["KICK", _kick, _position, _kickPower, _blockPower]] call _damageFunction) then {
-					[[_unit, ["STAGGER", false, _unit getRelDir _instigator]], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
+					execute [[_unit, ["STAGGER", false, _unit getRelDir _instigator]], "KH_fnc_updateMeleeState", _unit, true, false];
 
 					if (_unit isKindOf "Man") then {
-						[[_unit, _selection, getText (_instigatorConfig >> _kick >> "type"), _instigator, true], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
+						execute [[_unit, _selection, getText (_instigatorConfig >> _kick >> "type"), _instigator, true], "KH_fnc_simulateHit", "SERVER", true, false];
 					};
 				};
 			}
 			else {
-				[[_unit, ["STAGGER", false, _unit getRelDir _instigator]], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
+				execute [[_unit, ["STAGGER", false, _unit getRelDir _instigator]], "KH_fnc_updateMeleeState", _unit, true, false];
 
 				if (_unit isKindOf "Man") then {
-					[[_unit, _selection, getText (_instigatorConfig >> _kick >> "type"), _instigator, true], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
+					execute [[_unit, _selection, getText (_instigatorConfig >> _kick >> "type"), _instigator, true], "KH_fnc_simulateHit", "SERVER", true, false];
 				};
 			};
 
-			[
+			execute [
 				[
 					_unit,
 					getNumber (_instigatorConfig >> _kick >> "costInfliction")
@@ -564,10 +574,10 @@ KH_var_lightParameterCache = createHashMap;
 				_unit,
 				true,
 				false
-			] call KH_fnc_execute;
+			];
 		}
 		else {
-			[[_unit, "BLOCK_SUCCESS"], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
+			execute [[_unit, "BLOCK_SUCCESS"], "KH_fnc_updateMeleeState", _unit, true, false];
 		};
 
 		private _sounds = getArray (_instigatorConfig >> _kick >> "Sounds" >> (getText ((configOf _unit) >> "kh_meleeSoundType")));
@@ -616,7 +626,7 @@ KH_var_lightParameterCache = createHashMap;
 		private _blocked = _isBlocking && (_blockPower >= _tacklePower);
 
 		if _isBlocking then {
-			[
+			execute [
 				[_unit, ((getNumber (_unitConfig >> (_unit getVariable ["KH_var_currentMeleeBlock", ""]) >> "cost")) + (getNumber (_instigatorConfig >> _tackle >> "costBlockInfliction"))) min 1],
 				{
 					params ["_unit", "_cost"];
@@ -637,7 +647,7 @@ KH_var_lightParameterCache = createHashMap;
 				_unit,
 				true,
 				false
-			] call KH_fnc_execute;
+			];
 		};
 
 		[
@@ -659,22 +669,22 @@ KH_var_lightParameterCache = createHashMap;
 
 			if (_damageFunction isNotEqualTo {}) then {
 				if ([_unit, _instigator, ["TACKLE", _tackle, _tacklePower, _blockPower]] call _damageFunction) then {
-					[[_unit, ["STAGGER", true, _unit getRelDir _instigator]], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
+					execute [[_unit, ["STAGGER", true, _unit getRelDir _instigator]], "KH_fnc_updateMeleeState", _unit, true, false];
 
 					if (_unit isKindOf "Man") then {
-						[[_unit, "", getText (_instigatorConfig >> _tackle >> "type"), _instigator, true], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
+						execute [[_unit, "", getText (_instigatorConfig >> _tackle >> "type"), _instigator, true], "KH_fnc_simulateHit", "SERVER", true, false];
 					};
 				};
 			}
 			else {
-				[[_unit, ["STAGGER", true, _unit getRelDir _instigator]], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
+				execute [[_unit, ["STAGGER", true, _unit getRelDir _instigator]], "KH_fnc_updateMeleeState", _unit, true, false];
 				
 				if (_unit isKindOf "Man") then {
-					[[_unit, "", getText (_instigatorConfig >> _tackle >> "type"), _instigator, true], "KH_fnc_simulateHit", "SERVER", true, false] call KH_fnc_execute;
+					execute [[_unit, "", getText (_instigatorConfig >> _tackle >> "type"), _instigator, true], "KH_fnc_simulateHit", "SERVER", true, false];
 				};
 			};
 
-			[
+			execute [
 				[
 					_unit,
 					getNumber (_instigatorConfig >> _tackle >> "costInfliction")
@@ -697,10 +707,10 @@ KH_var_lightParameterCache = createHashMap;
 				_unit,
 				true,
 				false
-			] call KH_fnc_execute;
+			];
 		}
 		else {
-			[[_unit, "BLOCK_SUCCESS"], "KH_fnc_updateMeleeState", _unit, true, false] call KH_fnc_execute;
+			execute [[_unit, "BLOCK_SUCCESS"], "KH_fnc_updateMeleeState", _unit, true, false];
 		};
 
 		private _sounds = getArray (_instigatorConfig >> _tackle >> "Sounds" >> (getText ((configOf _unit) >> "kh_meleeSoundType")));
@@ -823,7 +833,7 @@ if isServer then {
 		} forEach ("true" configClasses _x);
 	} forEach (("true" configClasses (configFile >> "CfgKhInitFunctions")) + ("true" configClasses (missionConfigFile >> "CfgKhInitFunctions")));
 
-	[
+	execute [
 		[],
 		{
 			KH_var_networkingSettings = [
@@ -869,7 +879,7 @@ if isServer then {
 			);
 		},
 		false
-	] call KH_fnc_execute;
+	];
 
 	{
 		if ((_x getUserInfo 8) isNotEqualTo 0) then {
@@ -1107,7 +1117,7 @@ if isServer then {
 			private _playerPresenceHandlers = [];
 			KH_var_playerPresenceHandlers set [_nearId, _playerPresenceHandlers];
 
-			_playerPresenceHandlers pushBack ([
+			_playerPresenceHandlers pushBack (execute [
 				[_arguments, _function, _caller, _unscheduled, _object, _present, _distance, _nearId, _units],
 				{
 					params ["_arguments", "_function", "_caller", "_unscheduled", "_object", "_present", "_distance", "_nearId", "_units"];
@@ -1141,7 +1151,7 @@ if isServer then {
 				true,
 				0,
 				false
-			] call KH_fnc_execute);
+			]);
 
 			if _jip then {
 				_playerPresenceHandlers pushBack ([
@@ -1156,7 +1166,7 @@ if isServer then {
 							[_handlerId] call KH_fnc_removeHandler;
 						};
 
-						_playerPresenceHandlers pushBack ([
+						_playerPresenceHandlers pushBack (execute [
 							[_arguments, _function, _caller, _unscheduled, _object, _present, _distance, _nearId, _unit],
 							{
 								params ["_arguments", "_function", "_caller", "_unscheduled", "_object", "_present", "_distance", "_nearId", "_unit"];
@@ -1183,7 +1193,7 @@ if isServer then {
 							true,
 							0,
 							false
-						] call KH_fnc_execute);
+						]);
 					}
 				] call KH_fnc_addEventHandler);
 			};
@@ -1228,7 +1238,7 @@ if isServer then {
 				publicVariable "KH_var_adminMachine";
 			};
 
-			[
+			execute [
 				[_uid],
 				{
 					params ["_uid"];
@@ -1243,7 +1253,7 @@ if isServer then {
 				_machineId,
 				true,
 				false
-			] call KH_fnc_execute;
+			];
 
 			["KH_eve_playerMissionLoaded", [_machineId, _uid, _id], "GLOBAL", false] call KH_fnc_triggerCbaEvent;
 		}
@@ -1311,7 +1321,7 @@ if isServer then {
 		"KH_eve_headlessLoaded",
 		[],
 		{
-			[
+			execute [
 				_this,
 				{
 					private _headlessClientOwner = param [0];
@@ -1376,7 +1386,7 @@ if isServer then {
 				true,
 				{KH_var_playersLoaded && !KH_var_missionSuspended;},
 				false
-			] call KH_fnc_execute;
+			];
 		}
 	] call KH_fnc_addEventHandler;
 	
@@ -1559,7 +1569,7 @@ if isServer then {
 		}
 	] call KH_fnc_addEventHandler;
 
-	[
+	execute [
 		[],
 		{
 			if KH_var_diagnosticsState then {
@@ -1574,9 +1584,9 @@ if isServer then {
 		true,
 		1,
 		false
-	] call KH_fnc_execute;
+	];
 
-	[
+	execute [
 		[],
 		{
 			if (KH_var_adminMachine isNotEqualTo clientOwner) then {
@@ -1591,7 +1601,7 @@ if isServer then {
 		true,
 		0,
 		false
-	] call KH_fnc_execute;
+	];
 }
 else {
 	KH_var_clientRegistered = false;
@@ -1669,7 +1679,7 @@ if hasInterface then {
 		"unit",
 		[],
 		{
-			[
+			execute [
 				_this,
 				{
 					params ["_unit"];
@@ -1685,7 +1695,7 @@ if hasInterface then {
 					[_previousUnit, _unit] call KH_fnc_playerControlledUnitChangeInit;
 
 					if isMultiplayer then {
-						[
+						execute [
 							[],
 							{
 								private _voiceEffects = [missionNamespace, "KH_var_allowTeamspeakVoiceEffectPresets", "SERVER"] call KH_fnc_getRemoteVariable;
@@ -1696,7 +1706,7 @@ if hasInterface then {
 										[KH_var_playerVoiceEffectHandler] call KH_fnc_removeHandler;
 									};
 
-									[
+									execute [
 										[],
 										{
 											private _applied = false;
@@ -1726,14 +1736,14 @@ if hasInterface then {
 										true,
 										"1",
 										false
-									] call KH_fnc_execute;
+									];
 
 									KH_var_playerVoiceEffectHandler = [
 										["ENTITY", KH_var_playerUnit, "LOCAL"],
 										"SlotItemChanged",
 										[],
 										{
-											[
+											execute [
 												[],
 												{
 													private _applied = false;
@@ -1763,7 +1773,7 @@ if hasInterface then {
 												true,
 												"-1",
 												false
-											] call KH_fnc_execute;
+											];
 										}
 									] call KH_fnc_addEventHandler;
 								};
@@ -1773,17 +1783,17 @@ if hasInterface then {
 							true,
 							0,
 							false
-						] call KH_fnc_execute;
+						];
 					};
 				},
 				true,
 				{KH_var_clientRegistered && KH_var_missionInitialized && !(isNull player) && (alive player);},
 				false
-			] call KH_fnc_execute;
+			];
 		}
 	] call KH_fnc_addEventHandler;
 
-	[
+	execute [
 		[],
 		{
 			KH_var_mainCamera = ((allCameras select {_x select 2;}) param [0, []]) param [0, KH_var_playerUnit];
@@ -1937,7 +1947,7 @@ if hasInterface then {
 		true,
 		0,
 		false
-	] call KH_fnc_execute;
+	];
 
 	[
 		"MISSION",
@@ -2111,7 +2121,7 @@ if hasInterface then {
 		}
 	] call KH_fnc_addEventHandler;
 
-	[
+	execute [
 		[],
 		{
 			if KH_var_diagnosticsState then {
@@ -2121,9 +2131,9 @@ if hasInterface then {
 		true,
 		1,
 		false
-	] call KH_fnc_execute;
+	];
 
-	[
+	execute [
 		[],
 		{
 			player setVariable ["KH_var_playerViewDistance", viewDistance, 2];
@@ -2340,7 +2350,7 @@ if hasInterface then {
 		true,
 		0,
 		false
-	] call KH_fnc_execute;
+	];
 };
 
 if (!isServer && !hasInterface) then {
@@ -2382,7 +2392,7 @@ if (!isServer && !hasInterface) then {
 		} forEach ("true" configClasses _x);
 	} forEach (("true" configClasses (configFile >> "CfgKhInitFunctions")) + ("true" configClasses (missionConfigFile >> "CfgKhInitFunctions")));
 
-	[
+	execute [
 		[],
 		{
 			if KH_var_diagnosticsState then {
@@ -2393,7 +2403,7 @@ if (!isServer && !hasInterface) then {
 		true,
 		1,
 		false
-	] call KH_fnc_execute;
+	];
 };
 
 {

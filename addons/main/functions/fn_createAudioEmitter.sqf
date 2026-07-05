@@ -25,7 +25,7 @@ private _effectId = generateUid;
 missionNamespace setVariable [_effectId, true, true];
 
 [
-    [
+    execute [
         [_source, _parameters, _duration, _looped, _loopInterval, _conditionArguments, _conditionFunction, _effectId],
         {
             params ["_source", "_parameters", "_duration", "_looped", "_loopInterval", "_conditionArguments", "_conditionFunction", "_effectId"];
@@ -61,7 +61,7 @@ missionNamespace setVariable [_effectId, true, true];
                 };
             };
 
-            [
+            execute [
                 [
                     _conditionArguments, 
                     _conditionFunction, 
@@ -136,13 +136,13 @@ missionNamespace setVariable [_effectId, true, true];
                 true,
                 0,
                 false
-            ] call KH_fnc_execute;
+            ];
 
             nil;
         },
         _target,
         true,
         _jip
-    ] call KH_fnc_execute,
+    ],
     [missionNamespace, _effectId, true]
 ];

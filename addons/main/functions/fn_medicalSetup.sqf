@@ -1,7 +1,7 @@
 params [["_unit", objNull, [objNull]]];
 
 if KH_var_medical then {
-    [
+    execute [
         [_unit],
         {
             params ["_unit"];
@@ -219,7 +219,7 @@ if KH_var_medical then {
                                         KH_var_incapacitationFade ppEffectCommit KH_var_incapacitationDeathTime;
                                     };
 
-                                    [
+                                    execute [
                                         [_unit, diag_tickTime + KH_var_incapacitationDeathTime],
                                         {
                                             params ["_unit", "_maximumTime"];
@@ -240,11 +240,11 @@ if KH_var_medical then {
                                         true,
                                         0,
                                         false
-                                    ] call KH_fnc_execute;
+                                    ];
 
                                     if (_unit isEqualTo player) then {
                                         if KH_var_withstandingAllowed then {
-                                            [
+                                            execute [
                                                 [],
                                                 {
                                                     if (!(player getVariable ["KH_var_incapacitated", false]) || !(alive player)) exitWith {};
@@ -280,7 +280,7 @@ if KH_var_medical then {
                                                             KH_var_withstandingEffectWet ppEffectCommit 1;
 
                                                             if (KH_var_withstandDuration isNotEqualTo 0) then {
-                                                                [
+                                                                execute [
                                                                     [diag_tickTime + KH_var_withstandDuration],
                                                                     {
                                                                         params ["_deadline"];
@@ -308,7 +308,7 @@ if KH_var_medical then {
                                                                     true,
                                                                     0,
                                                                     false
-                                                                ] call KH_fnc_execute;
+                                                                ];
                                                             };
 
                                                             if KH_var_withstandingAllowCancel then {
@@ -376,7 +376,7 @@ if KH_var_medical then {
                                                 true,
                                                 str KH_var_withstandDelay,
                                                 false
-                                            ] call KH_fnc_execute;
+                                            ];
                                         };
 
                                         if KH_var_allowGivingUp then {
@@ -413,7 +413,7 @@ if KH_var_medical then {
                                             ] call KH_fnc_addAction;
                                         };
 
-                                        [
+                                        execute [
                                             [],
                                             {
                                                 if (!(isNil "KH_var_withstandingEffectRadial") && !(isNil "KH_var_withstandingEffectChromatic") && !(isNil "KH_var_withstandingEffectWet")) then {
@@ -433,10 +433,10 @@ if KH_var_medical then {
                                                 (!(player getVariable ["KH_var_incapacitated", false]) || !(alive player));
                                             },
                                             false
-                                        ] call KH_fnc_execute;
+                                        ];
                                     };
 
-                                    [
+                                    execute [
                                         [_unit],
                                         {
                                             params ["_unit"];
@@ -468,7 +468,7 @@ if KH_var_medical then {
                                             true
                                         ],
                                         false
-                                    ] call KH_fnc_execute;
+                                    ];
 
                                     [
                                         [_unit, false],
@@ -551,7 +551,7 @@ if KH_var_medical then {
                                                     _target setHitPointDamage [_x, (((_damages select 2) select _forEachIndex) - _damageOffset) max 0];
                                                 } forEach (_damages select 0);
 
-                                                [
+                                                execute [
                                                     [_target, _caller],
                                                     {
                                                         params ["_target", "_caller"];
@@ -564,7 +564,7 @@ if KH_var_medical then {
                                                     _target,
                                                     true,
                                                     false
-                                                ] call KH_fnc_execute;
+                                                ];
 
                                                 if !("Medikit" in (items _caller)) then {
                                                     for "_i" from 1 to ([KH_var_reviveRequiredFirstAidKits, KH_var_selfReviveRequiredFirstAidKits] select (_caller isEqualTo _target)) do {
@@ -874,7 +874,7 @@ if KH_var_medical then {
                 }
             ] call KH_fnc_addEventHandler;
 
-            [
+            execute [
                 [_unit],
                 {
                     params ["_unit"];
@@ -889,7 +889,7 @@ if KH_var_medical then {
                                 _injured setVariable ["KH_var_beingTreated", true, true];
                                 _healer setVariable ["KH_var_treating", true, true];
 
-                                [
+                                execute [
                                     [_injured, _healer, _isMedic, _atVehicle, _isSelfHeal, damage _injured],
                                     {
                                         params ["_injured", "_healer", "_isMedic", "_atVehicle", "_isSelfHeal", "_oldDamage"];
@@ -960,7 +960,7 @@ if KH_var_medical then {
                                         ((damage _injured) isNotEqualTo _oldDamage);
                                     },
                                     false
-                                ] call KH_fnc_execute;
+                                ];
 
                                 nil;
                             }
@@ -973,7 +973,7 @@ if KH_var_medical then {
                 "GLOBAL",
                 true,
                 false
-            ] call KH_fnc_execute;
+            ];
 
             [
                 ["ENTITY", _unit, "PERSISTENT"],
@@ -1003,5 +1003,5 @@ if KH_var_medical then {
         true,
         "1",
         false
-    ] call KH_fnc_execute;
+    ];
 };

@@ -14,5 +14,5 @@ if (time > 1) then {
     };
 }
 else {
-    [[_unit, _scores], "KH_fnc_setPlayerScores", true, {time > 1;}, false] call KH_fnc_execute;
+    execute [[_unit, _scores], "KH_fnc_setPlayerScores", true, {time > 1;}, false];
 };

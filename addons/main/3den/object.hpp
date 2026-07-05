@@ -20,7 +20,7 @@ class Object
 							KH_var_postInitExecutions pushBack [\
 								[_this, _value],\
 								{\
-									[\
+									execute [\
 										_this,\
 										{\
 											params ['_unit', '_aim'];\
@@ -29,7 +29,7 @@ class Object
 										'GLOBAL',\
 										true,\
 										['JIP', _this select 0, true, '']\
-									] call KH_fnc_execute;\
+									];\
 								}\
 							];\
 						};\
@@ -51,7 +51,7 @@ class Object
 							KH_var_postInitExecutions pushBack [\
 								[_this, _value],\
 								{\
-									[\
+									execute [\
 										_this,\
 										{\
 											params ['_unit', '_speed'];\
@@ -60,7 +60,7 @@ class Object
 										'GLOBAL',\
 										true,\
 										['JIP', _this select 0, true, '']\
-									] call KH_fnc_execute;\
+									];\
 								}\
 							];\
 						};\
@@ -103,7 +103,7 @@ class Object
 					"\
 						if ((_value isNotEqualTo -1) && !is3DEN) then {\
 							_this setUnitFreefallHeight _value;\
-							[\
+							execute [\
 								[_this, _value],\
 								{\
 									params ['_entity', '_value'];\
@@ -118,7 +118,7 @@ class Object
 									{},\
 									''\
 								]\
-							] call KH_fnc_execute;\
+							];\
 						};\
 					";
 					defaultValue = "-1";
@@ -147,7 +147,7 @@ class Object
 											private _unit = param [3];\
 											_args params ['_entity', '_function'];\
 											if (_unit isEqualTo _entity) then {\
-												[[_entity], _function, _unit, true, false] call KH_fnc_execute;\
+												execute [[_entity], _function, _unit, true, false];\
 											};\
 										}\
 									] call KH_fnc_addEventHandler;\
@@ -206,7 +206,7 @@ class Object
 							KH_var_postInitExecutions pushBack [\
 								[_this],\
 								{\
-									[\
+									execute [\
 										_this,\
 										{\
 											params ['_entity'];\
@@ -215,7 +215,7 @@ class Object
 										'GLOBAL',\
 										true,\
 										['JIP', _this select 0, false, '']\
-									] call KH_fnc_execute;\
+									];\
 								}\
 							];\
 						};\
@@ -231,7 +231,7 @@ class Object
 					expression = 
 					"\
 						if (_value && !is3DEN) then {\
-							[\
+							execute [\
 								[_this],\
 								{\
 									params ['_entity'];\
@@ -246,7 +246,7 @@ class Object
 									{},\
 									''\
 								]\
-							] call KH_fnc_execute;\
+							];\
 						};\
 					";
 					defaultValue = "false";
@@ -488,7 +488,7 @@ class Object
 								[_this, compile _localFunction, compile _remoteFunction],\
 								{\
 									params ['_entity', '_localFunction', '_remoteFunction'];\
-									[\
+									execute [\
 										[_entity, _localFunction],\
 										{\
 											params ['_entity', '_localFunction'];\
@@ -506,7 +506,7 @@ class Object
 											},\
 											''\
 										]\
-									] call KH_fnc_execute;\
+									];\
 								}\
 							];\
 						};\

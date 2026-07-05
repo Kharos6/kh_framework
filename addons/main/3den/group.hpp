@@ -74,7 +74,7 @@ class Group
 											private _unit = param [3];\
 											_args params ['_group', '_function'];\
 											if ((group _unit) isEqualTo _group) then {\
-												[[_group], _function, _unit, true, false] call KH_fnc_execute;\
+												execute [[_group], _function, _unit, true, false];\
 											};\
 										}\
 									] call KH_fnc_addEventHandler;\

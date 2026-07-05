@@ -9,7 +9,7 @@ if !_verboseFormat then {
 	}
 	else {
 		if !isServer then {
-			[
+			execute [
 				[_header, _message],
 				{
 					params ["_header", "_message"];
@@ -18,7 +18,7 @@ if !_verboseFormat then {
 				"SERVER",
 				true,
 				false
-			] call KH_fnc_execute;
+			];
 
 			diag_log (text ([_header, _message] joinString ""));
 		}
@@ -39,7 +39,7 @@ else {
 	}
 	else {
 		if !isServer then {
-			[
+			execute [
 				[_header, _message],
 				{
 					params ["_header", "_message"];
@@ -52,7 +52,7 @@ else {
 				"SERVER",
 				true,
 				false
-			] call KH_fnc_execute;
+			];
 
 			diag_log (text _header);
 			

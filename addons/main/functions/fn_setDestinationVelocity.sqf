@@ -8,7 +8,7 @@ if (_position isEqualType objNull) then {
 private _direction = _position vectorDiff (getPosASL _entity);
 private _velocity = [(_direction select 0) / _travelTime, (_direction select 1) / _travelTime, ((_direction select 2) / _travelTime) + (0.5 * KH_var_gravity * _travelTime)];
 
-[
+execute [
 	[_entity, _velocity],
 	{
 		params ["_entity", "_velocity"];
@@ -17,6 +17,6 @@ private _velocity = [(_direction select 0) / _travelTime, (_direction select 1) 
 	_entity,
 	true,
 	false
-] call KH_fnc_execute;
+];
 
 _velocity;

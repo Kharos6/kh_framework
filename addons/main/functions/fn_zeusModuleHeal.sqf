@@ -1,7 +1,7 @@
 isNil {
 	params [["_logic", objNull, [objNull]]];
 
-	[
+	execute [
 		[_logic],
 		{
 			params ["_logic"];
@@ -12,7 +12,7 @@ isNil {
                 _unit setHitPointDamage [_x, 0];
             } forEach ((getAllHitPointsDamage _unit) select 0);
 
-            [
+            execute [
                 [_unit],
                 {
                     params ["_unit"];
@@ -42,7 +42,7 @@ isNil {
                 _unit,
                 true,
                 false
-            ] call KH_fnc_execute;
+            ];
 
             if KH_var_medical then {
                 _unit setVariable ["KH_var_incapacitated", false, true];
@@ -69,7 +69,7 @@ isNil {
 			true
 		],
 		false
-	] call KH_fnc_execute;
+	];
 };
 
 nil;

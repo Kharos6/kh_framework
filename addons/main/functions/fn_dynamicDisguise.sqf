@@ -25,7 +25,7 @@ if _state then {
 	if (isNil "KH_var_dynamicDisguiseSet") then {
 		KH_var_dynamicDisguiseSet = true;
 
-		[
+		execute [
 			[],
 			{
 				if !KH_var_dynamicDisguiseState exitWith {};
@@ -106,7 +106,7 @@ if _state then {
 										(_instigator getVariable ["KH_var_disguiseState", false]) && 
 										((side (group _instigator)) isEqualTo (side (group _unit)))
 									   ) then {
-										[
+										execute [
 											[_unit, _instigator],
 											{
 												params ["_unit", "_instigator"];	
@@ -135,7 +135,7 @@ if _state then {
 											true,
 											"3",
 											false
-										] call KH_fnc_execute;
+										];
 									};
 								}
 							] call KH_fnc_addEventHandler;
@@ -151,7 +151,7 @@ if _state then {
 						if !(_player getVariable ["KH_var_disguiseRecoveryChecker", false]) then {
 							_player setVariable ["KH_var_disguiseRecoveryChecker", true];
 							
-							[
+							execute [
 								[_player, _currentSide],
 								{
 									params ["_player", "_currentSide"];
@@ -185,7 +185,7 @@ if _state then {
 								true,
 								60,
 								false
-							] call KH_fnc_execute;
+							];
 						};
 					};
 					
@@ -193,7 +193,7 @@ if _state then {
 						if ((side (group _player)) isNotEqualTo _originalSide) then {
 							[_player] joinSilent (createGroup [_originalSide, true]);
 
-							[
+							execute [
 								[],
 								{
 									systemChat "Someone saw me. I am no longer disguised.";
@@ -201,10 +201,10 @@ if _state then {
 								_player,
 								true,
 								false
-							] call KH_fnc_execute;
+							];
 							
 							if KH_var_disguiseSetCaptive then {
-								[
+								execute [
 									[],
 									{
 										player setCaptive false;
@@ -212,7 +212,7 @@ if _state then {
 									_player,
 									true,
 									false
-								] call KH_fnc_execute;
+								];
 							};
 						};
 					}
@@ -242,7 +242,7 @@ if _state then {
 							if !_playerVisible then {
 								[_player] joinSilent (createGroup [_currentSide, true]);
 
-								[
+								execute [
 									[_currentSide],
 									{
 										params ["_currentSide"];
@@ -251,10 +251,10 @@ if _state then {
 									_player,
 									true,
 									false
-								] call KH_fnc_execute;
+								];
 								
 								if KH_var_disguiseSetCaptive then {
-									[
+									execute [
 										[],
 										{
 											player setCaptive true;
@@ -262,7 +262,7 @@ if _state then {
 										_player,
 										true,
 										false
-									] call KH_fnc_execute;
+									];
 								};
 							};
 						};
@@ -272,7 +272,7 @@ if _state then {
 			true,
 			1,
 			false
-		] call KH_fnc_execute;
+		];
 	};
 };
 

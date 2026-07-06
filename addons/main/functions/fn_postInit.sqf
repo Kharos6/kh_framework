@@ -165,7 +165,7 @@ isNil {
 									false
 								];
 
-								["KH_eve_playersLoaded", [], "GLOBAL", false] call KH_fnc_triggerCbaEvent;
+								triggerCbaEvent ["KH_eve_playersLoaded", [], "GLOBAL", false];
 
 								if isMultiplayer then {
 									execute [[], {systemChat "KH FRAMEWORK - PLAYERS LOADED"; diag_log "KH FRAMEWORK - PLAYERS LOADED";}, ["SERVER", "ADMIN"], true, false];
@@ -695,12 +695,12 @@ isNil {
 																{
 																	_x params ["_object", "_selection", "_position", "_attack"];
 
-																	[
+																	triggerCbaEvent [
 																		"KH_eve_meleeInternalGotHit", 
 																		[_object, _unit, _selection, _position, _attack],
 																		[_object, "SERVER"] select (isPlayer _object),
 																		false
-																	] call KH_fnc_triggerCbaEvent;
+																	];
 																} forEach _hitObjects;
 															};
 
@@ -956,12 +956,12 @@ isNil {
 																{
 																	_x params ["_object", "_selection", "_position", "_kick"];
 
-																	[
+																	triggerCbaEvent [
 																		"KH_eve_meleeInternalGotKicked", 
 																		[_object, _unit, _selection, _position, _kick],
 																		[_object, "SERVER"] select (isPlayer _object),
 																		false
-																	] call KH_fnc_triggerCbaEvent;
+																	];
 																} forEach _kickedObjects;
 															};
 
@@ -1078,12 +1078,12 @@ isNil {
 																{
 																	_x params ["_object", "_tackle"];
 
-																	[
+																	triggerCbaEvent [
 																		"KH_eve_meleeInternalGotTackled", 
 																		[_object, _unit, _tackle],
 																		[_object, "SERVER"] select (isPlayer _object),
 																		false
-																	] call KH_fnc_triggerCbaEvent;
+																	];
 																} forEach _tackledObjects;
 															};
 
@@ -1191,7 +1191,7 @@ isNil {
 												
 												{
 													if (_x select 2) then {
-														[_x select 0, [_unit, _animation, [_unit getUnitMovesInfo 5, _unit getUnitMovesInfo 0] select _isMove], true, false] call KH_fnc_triggerCbaEvent;
+														triggerCbaEvent [_x select 0, [_unit, _animation, [_unit getUnitMovesInfo 5, _unit getUnitMovesInfo 0] select _isMove], true, false];
 													};
 												} forEach _events;
 
@@ -1203,7 +1203,7 @@ isNil {
 														if (([gestureState _unit, animationState _unit] select _isMove) isNotEqualTo _animation) exitWith {
 															{
 																if (_x select 3) then {
-																	[_x select 0, [_unit, _animation, [_unit getUnitMovesInfo 5, _unit getUnitMovesInfo 0] select _isMove], true, false] call KH_fnc_triggerCbaEvent;
+																	triggerCbaEvent [_x select 0, [_unit, _animation, [_unit getUnitMovesInfo 5, _unit getUnitMovesInfo 0] select _isMove], true, false];
 																};
 															} forEach _events;
 
@@ -1216,7 +1216,7 @@ isNil {
 
 															{
 																if (([_unit getUnitMovesInfo 5, _unit getUnitMovesInfo 0] select _isMove) >= _x) then {
-																	[_event, [_unit, _animation, [_unit getUnitMovesInfo 5, _unit getUnitMovesInfo 0] select _isMove], true, false] call KH_fnc_triggerCbaEvent;
+																	triggerCbaEvent [_event, [_unit, _animation, [_unit getUnitMovesInfo 5, _unit getUnitMovesInfo 0] select _isMove], true, false];
 																	_deletions pushBack _forEachIndex;
 																};
 															} forEach _timing;
@@ -1364,7 +1364,7 @@ isNil {
 			};
 			
 			if hasInterface then {
-				["KH_eve_playerMissionPreloaded", [clientOwner], "SERVER", false] call KH_fnc_triggerCbaEvent;
+				triggerCbaEvent ["KH_eve_playerMissionPreloaded", [clientOwner], "SERVER", false];
 				
 				execute [
 					[],
@@ -1385,7 +1385,7 @@ isNil {
 								} forEach KH_var_playerLoadStack;
 
 								call KH_fnc_playerLoadInit;
-								["KH_eve_playerLoaded", [clientOwner, getPlayerUID player, getPlayerID player, player], "GLOBAL", false] call KH_fnc_triggerCbaEvent;				
+								triggerCbaEvent ["KH_eve_playerLoaded", [clientOwner, getPlayerUID player, getPlayerID player, player], "GLOBAL", false];				
 
 								if (KH_var_playerRespawnedEventHandler isNotEqualTo []) then {
 									[KH_var_playerRespawnedEventHandler] call KH_fnc_removeHandler;
@@ -1404,7 +1404,7 @@ isNil {
 										} forEach KH_var_playerRespawnStack;
 
 										[_corpse] call KH_fnc_playerRespawnInit;
-										["KH_eve_playerRespawned", [owner _unit, getPlayerUID _unit, getPlayerID _unit, _unit, _corpse], "GLOBAL", false] call KH_fnc_triggerCbaEvent;
+										triggerCbaEvent ["KH_eve_playerRespawned", [owner _unit, getPlayerUID _unit, getPlayerID _unit, _unit, _corpse], "GLOBAL", false];
 										nil;
 									}
 								] call KH_fnc_addEventHandler;
@@ -1425,7 +1425,7 @@ isNil {
 										} forEach KH_var_playerKilledStack;
 
 										[_killer, _instigator] call KH_fnc_playerKilledInit;
-										["KH_eve_playerKilled", [owner _unit, getPlayerUID _unit, getPlayerID _unit, _unit, _killer, _instigator], "GLOBAL", false] call KH_fnc_triggerCbaEvent;
+										triggerCbaEvent ["KH_eve_playerKilled", [owner _unit, getPlayerUID _unit, getPlayerID _unit, _unit, _killer, _instigator], "GLOBAL", false];
 									}
 								] call KH_fnc_addEventHandler;
 
@@ -1900,7 +1900,7 @@ isNil {
 			};
 
 			if (!isServer && !hasInterface) then {
-				["KH_eve_headlessMissionPreloaded", [clientOwner], "SERVER", false] call KH_fnc_triggerCbaEvent;
+				triggerCbaEvent ["KH_eve_headlessMissionPreloaded", [clientOwner], "SERVER", false];
 
 				execute [
 					[],
@@ -1922,7 +1922,7 @@ isNil {
 								} forEach KH_var_headlessLoadStack;
 
 								call KH_fnc_headlessLoadInit;
-								["KH_eve_headlessLoaded", [clientOwner, getPlayerID player, player], "GLOBAL", false] call KH_fnc_triggerCbaEvent;
+								triggerCbaEvent ["KH_eve_headlessLoaded", [clientOwner, getPlayerID player, player], "GLOBAL", false];
 							},
 							true,
 							{(!(isNull player) && (alive player));},
@@ -2257,7 +2257,6 @@ isNil {
 									else {
 										if (((getText (configFile >> "CfgWeapons" >> _secondaryWeapon >> "kh_specialActions")) isNotEqualTo "") && ((getNumber (configFile >> "CfgWeapons" >> _secondaryWeapon >> "kh_meleeWeapon")) isNotEqualTo 0)) then {
 											_meleeWeaponName = _secondaryWeapon;
-											_useControl = true;
 											((_unit weaponsInfo [_secondaryWeapon, false]) param [0, []]) param [0, -1];
 										}
 										else {
@@ -2430,7 +2429,7 @@ isNil {
 												_unit setVariable ["KH_var_pathObjectDestination", _closestTarget];
 												private _destinationAsl = getPosASL _closestTarget;
 
-												if ((_destinationAsl vectorDistance (_unit getVariable ["KH_var_meleeDestination", [0, 0, 0]])) >= 0.25) then {
+												if ((_destinationAsl vectorDistance (_unit getVariable ["KH_var_meleeDestination", [0, 0, 0]])) >= 0.01) then {
 													_unit setVariable ["KH_var_meleeDestination", _destinationAsl];
 
 													if _isAgent then {
@@ -2521,7 +2520,7 @@ isNil {
 													_unit setVariable ["KH_var_pathObjectDestination", _closestTarget];
 													private _destinationAsl = getPosASL _closestTarget;
 
-													if ((_destinationAsl vectorDistance (_unit getVariable ["KH_var_meleeDestination", [0, 0, 0]])) >= 0.25) then {
+													if ((_destinationAsl vectorDistance (_unit getVariable ["KH_var_meleeDestination", [0, 0, 0]])) >= 0.01) then {
 														_unit setVariable ["KH_var_meleeDestination", _destinationAsl];
 
 														if _isAgent then {

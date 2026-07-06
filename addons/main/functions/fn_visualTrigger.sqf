@@ -46,7 +46,7 @@ private _triggerHandler = execute [
 							(alive player) && 
 							(isNull curatorCamera)
 						   ) then {
-							[_event, [player], "SERVER", false] call KH_fnc_triggerCbaEvent;
+							triggerCbaEvent [_event, [player], "SERVER", false];
 						};
 					}
 					else {

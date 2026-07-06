@@ -436,13 +436,15 @@ private:
         wfx.nAvgBytesPerSec = wfx.nSamplesPerSec * wfx.nBlockAlign;
 
         if (waveOutOpen(&hWaveOut, WAVE_MAPPER, &wfx, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR) {
-            state->is_playing = false;
             std::string speaker_id_copy = state->speaker_id;
 
             MainThreadScheduler::instance().schedule([speaker_id_copy]() {
                 report_error("KH - TTS Framework: Failed to open audio output device for speaker: " + speaker_id_copy);
             });
-            
+
+            state->finished_was_stopped = true;
+            state->is_playing = false;
+            state->pending_finished_event = true;
             return;
         }
 
@@ -455,7 +457,9 @@ private:
 
         if (audio_copy.empty()) {
             waveOutClose(hWaveOut);
+            state->finished_was_stopped = true;
             state->is_playing = false;
+            state->pending_finished_event = true;
             return;
         }
 
@@ -1260,6 +1264,11 @@ public:
         std::vector<std::string> speakers_that_were_playing;
         std::vector<std::thread> threads_to_join;
         std::vector<std::unique_ptr<SpeakerState>> states_to_keep_alive;
+        
+        {
+            std::lock_guard<std::mutex> lock(queue_mutex);
+            generation_queue.clear();
+        }
         
         {
             std::unique_lock<std::shared_mutex> lock(speaker_mutex);

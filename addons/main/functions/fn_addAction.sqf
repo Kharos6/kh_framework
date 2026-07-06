@@ -1724,7 +1724,7 @@ execute [
                             false
                         ];
 
-                        ["KH_eve_actionRemoved", [_actionExistenceId], missionNamespace getVariable _targetId] call KH_fnc_triggerCbaEvent;
+                        triggerCbaEvent ["KH_eve_actionRemoved", [_actionExistenceId], missionNamespace getVariable _targetId];
                         ["KH_eve_handlerRemoved", _handlerId select 2] call CBA_fnc_removeEventHandler;
                     };
                 }

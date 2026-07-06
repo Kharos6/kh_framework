@@ -23,10 +23,10 @@ if ((_id select 1) isEqualType []) then {
 	[_handlerId] call KH_fnc_removeHandler;
 
 	if (isNil "_eventOwner") then {
-		["KH_eve_handlerRemoved", [_id], "GLOBAL", false] call KH_fnc_triggerCbaEvent;
+		triggerCbaEvent ["KH_eve_handlerRemoved", [_id], "GLOBAL", false];
 	}
 	else {
-		["KH_eve_handlerRemoved", [_id], _eventOwner, false] call KH_fnc_triggerCbaEvent;
+		triggerCbaEvent ["KH_eve_handlerRemoved", [_id], _eventOwner, false];
 	};
 }
 else {
@@ -78,11 +78,11 @@ else {
                     };
 
                     case "TEMPORAL": {
-                        ["KH_eve_temporalExecutionStackHandler", [_handlerId, true, false, false], true, false] call KH_fnc_triggerCbaEvent;
+                        triggerCbaEvent ["KH_eve_temporalExecutionStackHandler", [_handlerId, true, false, false], true, false];
                     };
 
                     case "DRAW_UI": {
-                        ["KH_eve_drawUiExecutionStackHandler", [_handlerId, false, false], true, false] call KH_fnc_triggerCbaEvent;
+                        triggerCbaEvent ["KH_eve_drawUiExecutionStackHandler", [_handlerId, false, false], true, false];
                     };
 
                     case "IN_GAME_UI": {
@@ -98,7 +98,7 @@ else {
                     };
                 };
 
-                ["KH_eve_handlerRemoved", [_id], true, false] call KH_fnc_triggerCbaEvent;
+                triggerCbaEvent ["KH_eve_handlerRemoved", [_id], true, false];
             },
             _eventOwner,
             true,
@@ -116,10 +116,10 @@ else {
         _namespace setVariable [_variable, _valueOverride, _target];
 
         if (_target isEqualType true) then {
-            ["KH_eve_handlerRemoved", [_id], [true, "GLOBAL"] select _target, false] call KH_fnc_triggerCbaEvent;
+            triggerCbaEvent ["KH_eve_handlerRemoved", [_id], [true, "GLOBAL"] select _target, false];
         }
         else {
-            ["KH_eve_handlerRemoved", [_id], _target, false] call KH_fnc_triggerCbaEvent;
+            triggerCbaEvent ["KH_eve_handlerRemoved", [_id], _target, false];
         };
     };
 };

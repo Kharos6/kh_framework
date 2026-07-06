@@ -98,6 +98,17 @@ _unit setVariable ["KH_var_unitControllerId", _id, true];
                                 _unit enableAIFeature ["ANIM", false];
                             };
 
+                            private _formationLeader = formLeader _unit;
+
+                            if (((count (units (group _unit))) isNotEqualTo 1) && (_formationLeader isNotEqualTo _unit)) then {
+                                private _formationPosition = ((expectedDestination _formationLeader) select 0) vectorAdd ((formationPosition _unit) vectorDiff (_formationLeader modelToWorld [0, 0, 0]));
+
+                                if (((_unit getVariable ["KH_var_unitControllerFormationPosition", [0, 0, 0]]) vectorDistance _formationPosition) > 1) then {
+                                    _unit setDestination [_formationPosition, "LEADER PLANNED", true];
+                                    _unit setVariable ["KH_var_unitControllerFormationPosition", _formationPosition];
+                                };
+                            };
+
                             _moveGracePeriod = if (((_unit getUnitMovesInfo 0) isEqualTo 1) && ((getNumber (_states >> (animationState _unit) >> "looped")) isNotEqualTo 1)) then {
                                 if _moveGracePeriod then {
                                     _unit playActionNow "Stop";
@@ -212,16 +223,21 @@ _unit setVariable ["KH_var_unitControllerId", _id, true];
                                 }
                                 else {
                                     if (_correctedDirection <= _stopTurnThreshold) then {
-                                        private _currentAction = if (_stepDistance <= _forcedWalkDistanceThreshold) then {
-                                            "WALKF";
-                                        }
-                                        else {
-                                            if (_stepDistance <= _forcedJogDistanceThreshold) then {
-                                                "TACTF";
+                                        private _currentAction = if ((count _currentPath) isEqualTo 1) then {
+                                            if (_stepDistance <= _forcedWalkDistanceThreshold) then {
+                                                "WALKF";
                                             }
                                             else {
-                                                [[_unit, false] call KH_fnc_getUnitMoveType, "F"] joinString "";
+                                                if (_stepDistance <= _forcedJogDistanceThreshold) then {
+                                                    "TACTF";
+                                                }
+                                                else {
+                                                    [[_unit, false] call KH_fnc_getUnitMoveType, "F"] joinString "";
+                                                };
                                             };
+                                        }
+                                        else {
+                                            [[_unit, false] call KH_fnc_getUnitMoveType, "F"] joinString "";
                                         };
 
                                         if ((_stepDistance <= 5) && ("FAST" in _currentAction)) then {

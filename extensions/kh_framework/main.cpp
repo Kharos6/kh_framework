@@ -42,20 +42,24 @@ void intercept::pre_start() {
 
     initialize_sqf_integration();
     initialize_lua_state();
-    LuaStackGuard guard(*g_lua_state);
-    sol::table game = (*g_lua_state)["game"];
-    sol::table mission = (*g_lua_state)["mission"];
-    game["preInit"] = false;
-    game["postInit"] = false;
-    game["frame"] = g_game_frame;
-    game["time"] = g_game_time;
-    game["server"] = g_is_server;
-    game["dedicated"] = g_is_dedicated_server;
-    game["headless"] = g_is_headless;
-    game["player"] = g_is_player;
-    mission["frame"] = g_mission_frame;
-    mission["time"] = g_mission_time;
-    mission["active"] = false;
+
+    if (g_lua_state) {
+        LuaStackGuard guard(*g_lua_state);
+        sol::table game = (*g_lua_state)["game"];
+        sol::table mission = (*g_lua_state)["mission"];
+        game["preInit"] = false;
+        game["postInit"] = false;
+        game["frame"] = g_game_frame;
+        game["time"] = g_game_time;
+        game["server"] = g_is_server;
+        game["dedicated"] = g_is_dedicated_server;
+        game["headless"] = g_is_headless;
+        game["player"] = g_is_player;
+        mission["frame"] = g_mission_frame;
+        mission["time"] = g_mission_time;
+        mission["active"] = false;
+    }
+
     KHDataManager::instance().initialize();
 
     if (g_has_cuda) {
@@ -112,18 +116,22 @@ void intercept::pre_init() {
         g_is_player = sqf::has_interface();
         g_mission_time = 0.0f;
         g_mission_frame = 0;
-        LuaStackGuard guard(*g_lua_state);
-        sol::table game = (*g_lua_state)["game"];
-        sol::table mission = (*g_lua_state)["mission"];
-        game["preInit"] = true;
-        game["postInit"] = false;
-        game["server"] = g_is_server;
-        game["dedicated"] = g_is_dedicated_server;
-        game["headless"] = g_is_headless;
-        game["player"] = g_is_player;
-        mission["frame"] = g_mission_frame;
-        mission["time"] = g_mission_time;
-        mission["active"] = true;
+
+        if (g_lua_state) {
+            LuaStackGuard guard(*g_lua_state);
+            sol::table game = (*g_lua_state)["game"];
+            sol::table mission = (*g_lua_state)["mission"];
+            game["preInit"] = true;
+            game["postInit"] = false;
+            game["server"] = g_is_server;
+            game["dedicated"] = g_is_dedicated_server;
+            game["headless"] = g_is_headless;
+            game["player"] = g_is_player;
+            mission["frame"] = g_mission_frame;
+            mission["time"] = g_mission_time;
+            mission["active"] = true;
+        }
+        
         clean_lua_state();
         KHDataManager::instance().flush_all();
         MainThreadScheduler::instance().clear();
@@ -194,9 +202,12 @@ void intercept::pre_init() {
 
 void intercept::post_init() {
     if (!g_is_menu) {
-        LuaStackGuard guard(*g_lua_state);
-        sol::table game = (*g_lua_state)["game"];
-        game["postInit"] = true;
+        if (g_lua_state) {
+            LuaStackGuard guard(*g_lua_state);
+            sol::table game = (*g_lua_state)["game"];
+            game["postInit"] = true;
+        }
+        
         sqf::diag_log("KH Framework Extension - Post-init");
     }
 }
@@ -224,19 +235,23 @@ void intercept::on_frame() {
         update_unit_states();
         process_temporal_execution_stack();        
         MainThreadScheduler::instance().process_frame();
-        LuaStackGuard guard(*g_lua_state);
         float current_delta = sqf::diag_delta_time();
-        sol::table game = (*g_lua_state)["game"];
-        sol::table mission = (*g_lua_state)["mission"];
         g_game_time += current_delta;
         g_game_frame++;
-        game["frame"] = g_game_frame;
-        game["time"] = g_game_time;
         g_mission_time += current_delta;
         g_mission_frame++;
-        mission["frame"] = g_mission_frame;
-        mission["time"] = g_mission_time;
-        LuaFunctions::update_scheduler();
+
+        if (g_lua_state) {
+            LuaStackGuard guard(*g_lua_state);
+            sol::table game = (*g_lua_state)["game"];
+            sol::table mission = (*g_lua_state)["mission"];
+            game["frame"] = g_game_frame;
+            game["time"] = g_game_time;
+            mission["frame"] = g_mission_frame;
+            mission["time"] = g_mission_time;
+            LuaFunctions::update_scheduler();
+        }
+
         network_on_frame();
     }
 }
@@ -245,23 +260,27 @@ void intercept::mission_ended() {
     g_kh_cached_temporal_stack = game_value(auto_array<game_value>());
     g_kh_cached_temporal_additions = game_value(auto_array<game_value>());
     g_kh_cached_temporal_deletions = game_value(auto_array<game_value>());
-    reset_lua_state();
     g_mission_time = 0.0f;
     g_mission_frame = 0;
-    LuaStackGuard guard(*g_lua_state);
-    sol::table game = (*g_lua_state)["game"];
-    sol::table mission = (*g_lua_state)["mission"];
-    game["preInit"] = false;
-    game["postInit"] = false;
-    game["frame"] = g_game_frame;
-    game["time"] = g_game_time;
-    game["server"] = g_is_server;
-    game["dedicated"] = g_is_dedicated_server;
-    game["headless"] = g_is_headless;
-    game["player"] = g_is_player;
-    mission["frame"] = g_mission_frame;
-    mission["time"] = g_mission_time;
-    mission["active"] = false;
+    reset_lua_state();
+
+    if (g_lua_state) {
+        LuaStackGuard guard(*g_lua_state);
+        sol::table game = (*g_lua_state)["game"];
+        sol::table mission = (*g_lua_state)["mission"];
+        game["preInit"] = false;
+        game["postInit"] = false;
+        game["frame"] = g_game_frame;
+        game["time"] = g_game_time;
+        game["server"] = g_is_server;
+        game["dedicated"] = g_is_dedicated_server;
+        game["headless"] = g_is_headless;
+        game["player"] = g_is_player;
+        mission["frame"] = g_mission_frame;
+        mission["time"] = g_mission_time;
+        mission["active"] = false;
+    }
+    
     KHDataManager::instance().flush_all();
     MainThreadScheduler::instance().clear();
     
@@ -425,11 +444,13 @@ static void detect_gpu_backends() {
 
 static FARPROC WINAPI delay_load_hook(unsigned dliNotify, PDelayLoadInfo pdli) {
     std::lock_guard<std::mutex> lock(g_delay_load_mutex);
-    HMODULE hModule;
+    HMODULE hModule = nullptr;
 
-    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | 
-                     GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                     (LPCSTR)&delay_load_hook, &hModule);
+    if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            (LPCSTR)&delay_load_hook, &hModule) || hModule == nullptr) {
+        return NULL;
+    }
     
     char dllPath[MAX_PATH];
 
@@ -485,7 +506,11 @@ static FARPROC WINAPI delay_load_hook(unsigned dliNotify, PDelayLoadInfo pdli) {
                             }
                         }
 
-                        sqf::diag_log("KH Framework Extension - " + dll_name + " not found in standard locations");
+                        OutputDebugStringA(("KH Framework Extension - " + dll_name + " failed/not found\n").c_str());
+                        
+                        MainThreadScheduler::instance().schedule([msg = "KH Framework Extension - " + dll_name + " not found in standard locations"]() {
+                            sqf::diag_log(msg);
+                        });
                     } else if (_stricmp(dll_name.c_str(), "vulkan-1.dll") == 0) {
                         std::vector<std::string> vulkan_paths_to_try;
                         char vulkanPath[MAX_PATH];
@@ -521,7 +546,11 @@ static FARPROC WINAPI delay_load_hook(unsigned dliNotify, PDelayLoadInfo pdli) {
                             }
                         }
 
-                        sqf::diag_log("KH Framework Extension - " + dll_name + " not found in standard locations");
+                        OutputDebugStringA(("KH Framework Extension - " + dll_name + " failed/not found\n").c_str());
+
+                        MainThreadScheduler::instance().schedule([msg = "KH Framework Extension - " + dll_name + " not found in standard locations"]() {
+                            sqf::diag_log(msg);
+                        });
                     } else if (_stricmp(dll_name.c_str(), "sherpa-onnx-c-api.dll") == 0) {
                         std::string directml_path = modDir + "\\DirectML.dll";
                         std::string onnxruntime_path = modDir + "\\onnxruntime.dll";
@@ -544,10 +573,19 @@ static FARPROC WINAPI delay_load_hook(unsigned dliNotify, PDelayLoadInfo pdli) {
                             return (FARPROC)hDll;
                         } else {
                             DWORD error = GetLastError();
-                            report_error("KH Framework Extension - Failed to load " + dll_name + " from " + dllFullPath + " - error code: " + std::to_string(error));
+
+                            {
+                                std::string msg = "KH Framework Extension - Failed to load " + dll_name + " from " + dllFullPath + " - error code: " + std::to_string(error);
+                                OutputDebugStringA((msg + "\n").c_str());
+                                MainThreadScheduler::instance().schedule([msg]() { sqf::diag_log(msg); });
+                            }
                         }
 
-                        sqf::diag_log("KH Framework Extension - " + dll_name + " not found in standard locations");
+                        OutputDebugStringA(("KH Framework Extension - " + dll_name + " failed/not found\n").c_str());
+                        
+                        MainThreadScheduler::instance().schedule([msg = "KH Framework Extension - " + dll_name + " not found in standard locations"]() {
+                            sqf::diag_log(msg);
+                        });
                     } else if (_stricmp(dll_name.c_str(), "Ultralight.dll") == 0) {
                         std::string core_path = modDir + "\\UltralightCore.dll";
                         std::string webcore_path = modDir + "\\WebCore.dll";
@@ -570,10 +608,19 @@ static FARPROC WINAPI delay_load_hook(unsigned dliNotify, PDelayLoadInfo pdli) {
                             return (FARPROC)hDll;
                         } else {
                             DWORD error = GetLastError();
-                            report_error("KH Framework Extension - Failed to load " + dll_name + " from " + dllFullPath + " - error code: " + std::to_string(error));
+                            
+                            {
+                                std::string msg = "KH Framework Extension - Failed to load " + dll_name + " from " + dllFullPath + " - error code: " + std::to_string(error);
+                                OutputDebugStringA((msg + "\n").c_str());
+                                MainThreadScheduler::instance().schedule([msg]() { sqf::diag_log(msg); });
+                            }
                         }
 
-                        sqf::diag_log("KH Framework Extension - " + dll_name + " not found in standard locations");
+                        OutputDebugStringA(("KH Framework Extension - " + dll_name + " failed/not found\n").c_str());
+                        
+                        MainThreadScheduler::instance().schedule([msg = "KH Framework Extension - " + dll_name + " not found in standard locations"]() {
+                            sqf::diag_log(msg);
+                        });
                     } else if (_stricmp(dll_name.c_str(), "WebCore.dll") == 0) {
                         std::string core_path = modDir + "\\UltralightCore.dll";
                         HMODULE hCore = LoadLibraryA(core_path.c_str());
@@ -589,10 +636,19 @@ static FARPROC WINAPI delay_load_hook(unsigned dliNotify, PDelayLoadInfo pdli) {
                             return (FARPROC)hDll;
                         } else {
                             DWORD error = GetLastError();
-                            report_error("KH Framework Extension - Failed to load " + dll_name + " from " + dllFullPath + " - error code: " + std::to_string(error));
+
+                            {
+                                std::string msg = "KH Framework Extension - Failed to load " + dll_name + " from " + dllFullPath + " - error code: " + std::to_string(error);
+                                OutputDebugStringA((msg + "\n").c_str());
+                                MainThreadScheduler::instance().schedule([msg]() { sqf::diag_log(msg); });
+                            }
                         }
 
-                        sqf::diag_log("KH Framework Extension - " + dll_name + " not found in standard locations");
+                        OutputDebugStringA(("KH Framework Extension - " + dll_name + " failed/not found\n").c_str());
+                        
+                        MainThreadScheduler::instance().schedule([msg = "KH Framework Extension - " + dll_name + " not found in standard locations"]() {
+                            sqf::diag_log(msg);
+                        });
                     } else if (_stricmp(dll_name.c_str(), "lua51.dll") == 0) {
                         HMODULE hDll = LoadLibraryA(dllFullPath.c_str());
                         
@@ -601,10 +657,19 @@ static FARPROC WINAPI delay_load_hook(unsigned dliNotify, PDelayLoadInfo pdli) {
                             return (FARPROC)hDll;
                         } else {
                             DWORD error = GetLastError();
-                            report_error("KH Framework Extension - Failed to load " + dll_name + " from " + dllFullPath + " - error code: " + std::to_string(error));
+                            
+                            {
+                                std::string msg = "KH Framework Extension - Failed to load " + dll_name + " from " + dllFullPath + " - error code: " + std::to_string(error);
+                                OutputDebugStringA((msg + "\n").c_str());
+                                MainThreadScheduler::instance().schedule([msg]() { sqf::diag_log(msg); });
+                            }
                         }
 
-                        report_error("KH Framework Extension - CRITICAL - " + dll_name + " failed to load - extension cannot function");
+                        {
+                            std::string msg = "KH Framework Extension - CRITICAL - " + dll_name + " failed to load - extension cannot function";
+                            OutputDebugStringA((msg + "\n").c_str());
+                            MainThreadScheduler::instance().schedule([msg]() { sqf::diag_log(msg); });
+                        }
                     } else {
                         return NULL;
                     }
@@ -616,9 +681,17 @@ static FARPROC WINAPI delay_load_hook(unsigned dliNotify, PDelayLoadInfo pdli) {
         std::string dll_name = pdli->szDll;
         
         if (_stricmp(dll_name.c_str(), "lua51.dll") == 0) {
-            report_error("KH Framework Extension - CRITICAL - " + dll_name + " failed to load - extension cannot function");
+            {
+                std::string msg = "KH Framework Extension - CRITICAL - " + dll_name + " failed to load - extension cannot function";
+                OutputDebugStringA((msg + "\n").c_str());
+                MainThreadScheduler::instance().schedule([msg]() { sqf::diag_log(msg); });
+            }
         } else {
-            report_error("KH Framework Extension - " + dll_name + " failed to load");
+            {
+                std::string msg = "KH Framework Extension - " + dll_name + " failed to load";
+                OutputDebugStringA((msg + "\n").c_str());
+                MainThreadScheduler::instance().schedule([msg]() { sqf::diag_log(msg); });
+            }
         }
     }
     

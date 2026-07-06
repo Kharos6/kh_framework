@@ -143,6 +143,10 @@ static registered_sqf_function _sqf_curve_slope;
 static registered_sqf_function _sqf_vector_curve_slope;
 static registered_sqf_function _sqf_get_unit_yaw_speed;
 static registered_sqf_function _sqf_process_execution;
+static registered_sqf_function _sqf_trigger_cba_event_array;
+static registered_sqf_function _sqf_process_cba_group_event;
+static registered_sqf_function _sqf_process_cba_array_event;
+static registered_sqf_function _sqf_process_cba_code_event;
 
 static game_value execute_lua_sqf(game_value_parameter args, game_value_parameter code_or_function) {    
     try {
@@ -582,7 +586,7 @@ static game_value write_khdata_sqf(game_value_parameter filename, game_value_par
             cba_params.push_back(game_value(std::move(value_array)));
             cba_params.push_back(target);
             cba_params.push_back(jip);
-            raw_call_sqf_args_native(g_compiled_sqf_trigger_cba_event, game_value(std::move(cba_params)));
+            trigger_cba_event_sqf(game_value(std::move(cba_params)));
             return game_value();
         } else {
             auto* file = KHDataManager::instance().get_or_create_file(file_str);
@@ -701,7 +705,7 @@ static game_value trigger_lua_event_sqf(game_value_parameter left_arg, game_valu
             cba_params.push_back(game_value(std::move(cba_event_data)));
             cba_params.push_back(target);
             cba_params.push_back(jip);
-            return raw_call_sqf_args_native(g_compiled_sqf_trigger_cba_event, game_value(std::move(cba_params)));
+            trigger_cba_event_sqf(game_value(std::move(cba_params)));
         } else {
             LuaStackGuard guard(*g_lua_state);
             
@@ -824,7 +828,7 @@ static game_value emit_lua_variable_sqf(game_value_parameter params) {
         cba_params.push_back(game_value(std::move(emission_data)));
         cba_params.push_back(target);
         cba_params.push_back(jip);
-        raw_call_sqf_args_native(g_compiled_sqf_trigger_cba_event, game_value(std::move(cba_params)));
+        trigger_cba_event_sqf(game_value(std::move(cba_params)));
         return game_value();
     } catch (const std::exception& e) {
         report_error("Failed to emit variable: " + std::string(e.what()));
@@ -886,7 +890,7 @@ static game_value lua_set_variable_sqf(game_value_parameter params) {
             cba_params.push_back(game_value(std::move(emission_data)));
             cba_params.push_back(target);
             cba_params.push_back(jip);
-            raw_call_sqf_args_native(g_compiled_sqf_trigger_cba_event, game_value(std::move(cba_params)));
+            trigger_cba_event_sqf(game_value(std::move(cba_params)));
             return game_value();
         } else {
             // Set directly in Lua global namespace
@@ -3799,13 +3803,820 @@ static game_value kh_make_array(std::initializer_list<game_value> values) {
     return game_value(std::move(arr));
 }
 
+static game_value kh_hashmap_get(const game_value& map, const game_value& key) {
+    if (map.is_nil() || map.type_enum() != game_data_type::HASHMAP || key.type_enum() != game_data_type::STRING) {
+        return game_value();
+    }
+
+    std::string key_str = static_cast<std::string>(key);
+    auto& hashmap = map.to_hashmap();
+
+    for (const auto& pair : hashmap) {
+        if (pair.key.type_enum() == game_data_type::STRING && static_cast<std::string>(pair.key) == key_str) {
+            return pair.value;
+        }
+    }
+
+    return game_value();
+}
+
+static game_value kh_cba_local_event(const game_value& event_name, const game_value& arguments) {
+    auto_array<game_value> event_params;
+    event_params.push_back(event_name);
+    event_params.push_back(arguments);
+    return raw_call_sqf_args_native(g_compiled_kh_cba_local_event, game_value(std::move(event_params)));
+}
+
+static game_value kh_cba_server_event(const game_value& event_name, const game_value& arguments) {
+    auto_array<game_value> event_params;
+    event_params.push_back(event_name);
+    event_params.push_back(arguments);
+    return raw_call_sqf_args_native(g_compiled_kh_cba_server_event, game_value(std::move(event_params)));
+}
+
+static game_value kh_cba_owner_event(const game_value& event_name, const game_value& arguments, const game_value& owner_machine) {
+    auto_array<game_value> event_params;
+    event_params.push_back(event_name);
+    event_params.push_back(arguments);
+    event_params.push_back(owner_machine);
+    return raw_call_sqf_args_native(g_compiled_kh_cba_owner_event, game_value(std::move(event_params)));
+}
+
+static game_value kh_cba_target_event(const game_value& event_name, const game_value& arguments, const game_value& event_target) {
+    auto_array<game_value> event_params;
+    event_params.push_back(event_name);
+    event_params.push_back(arguments);
+    event_params.push_back(event_target);
+    return raw_call_sqf_args_native(g_compiled_kh_cba_target_event, game_value(std::move(event_params)));
+}
+
+// Native equivalent of SQF 'flatten'; nils are preserved as elements
+static void kh_flatten_into(const game_value& value, auto_array<game_value>& out) {
+    if (!value.is_nil() && value.type_enum() == game_data_type::ARRAY) {
+        auto& arr = value.to_array();
+
+        for (size_t i = 0; i < arr.size(); ++i) {
+            kh_flatten_into(arr[i], out);
+        }
+    } else {
+        out.push_back(value);
+    }
+}
+
+// Dispatches a compiled dispatcher shim through the native KH_fnc_execute equivalent: execute [_arguments, _function, _target, true, false]
+static game_value kh_cba_execute_remote(const game_value& execute_arguments, const code& function, const char* execute_target) {
+    auto_array<game_value> exec_args;
+    exec_args.push_back(execute_arguments);
+    exec_args.push_back(game_value(function));
+    exec_args.push_back(game_value(std::string(execute_target)));
+    exec_args.push_back(game_value(true));
+    exec_args.push_back(game_value(false));
+    return kh_execute_impl(game_value(std::move(exec_args)));
+}
+
+static game_value kh_cba_owner_event_broadcast(const game_value& event_name, const game_value& arguments, const char* machines_variable, bool has_excluded_machine, float excluded_machine) {
+    game_value machines = sqf::get_variable(sqf::mission_namespace(), machines_variable);
+
+    if (!machines.is_nil() && machines.type_enum() == game_data_type::ARRAY) {
+        auto& machine_list = machines.to_array();
+
+        for (size_t i = 0; i < machine_list.size(); ++i) {
+            if (machine_list[i].is_nil()) {
+                continue;
+            }
+
+            if (has_excluded_machine && machine_list[i].type_enum() == game_data_type::SCALAR && static_cast<float>(machine_list[i]) == excluded_machine) {
+                continue;
+            }
+
+            kh_cba_owner_event(event_name, arguments, machine_list[i]);
+        }
+    }
+
+    return game_value();
+}
+
+static game_value kh_cba_dispatch_machine(const game_value& event_name, const game_value& arguments, const game_value& machine) {
+    if (machine.type_enum() == game_data_type::SCALAR && static_cast<float>(machine) == static_cast<float>(sqf::client_owner())) {
+        return kh_cba_local_event(event_name, arguments);
+    }
+
+    return kh_cba_owner_event(event_name, arguments, machine);
+}
+
+// Fires CBA_fnc_targetEvent at the subset of KH_var_allPlayerUnits matching the predicate; the event fires unconditionally, even on an empty selection, mirroring the original
+template <typename Predicate>
+static game_value kh_cba_target_event_player_units(const game_value& event_name, const game_value& arguments, Predicate predicate) {
+    auto_array<game_value> selected_units;
+    game_value player_units = sqf::get_variable(sqf::mission_namespace(), "kh_var_allplayerunits");
+
+    if (!player_units.is_nil() && player_units.type_enum() == game_data_type::ARRAY) {
+        auto& units = player_units.to_array();
+
+        for (size_t i = 0; i < units.size(); ++i) {
+            if (units[i].is_nil() || units[i].type_enum() != game_data_type::OBJECT) {
+                continue;
+            }
+
+            if (predicate(static_cast<object>(units[i]))) {
+                selected_units.push_back(units[i]);
+            }
+        }
+    }
+
+    return kh_cba_target_event(event_name, arguments, game_value(std::move(selected_units)));
+}
+
+// Mirrors the SQF group dispatch: a local group with no involved player units fires locally, groups without player units use targetEvent, otherwise the server fans out per-owner events
+static game_value kh_cba_dispatch_group(const game_value& event_name, const game_value& arguments, const game_value& target_group) {
+    group grp = static_cast<group>(target_group);
+    auto_array<game_value> group_player_units;
+    game_value player_units = sqf::get_variable(sqf::mission_namespace(), "kh_var_allplayerunits");
+
+    if (!player_units.is_nil() && player_units.type_enum() == game_data_type::ARRAY) {
+        auto& units = player_units.to_array();
+
+        for (size_t i = 0; i < units.size(); ++i) {
+            if (units[i].is_nil() || units[i].type_enum() != game_data_type::OBJECT) {
+                continue;
+            }
+
+            if (sqf::is_equal_to(game_value(sqf::get_group(static_cast<object>(units[i]))), target_group)) {
+                group_player_units.push_back(units[i]);
+            }
+        }
+    }
+
+    bool group_local = sqf::local(grp);
+    bool player_in_group = false;
+    game_value player_unit = game_value(sqf::player());
+
+    for (size_t i = 0; i < group_player_units.size(); ++i) {
+        if (sqf::is_equal_to(group_player_units[i], player_unit)) {
+            player_in_group = true;
+            break;
+        }
+    }
+
+    if ((group_local && group_player_units.empty()) || (group_local && player_in_group && group_player_units.size() <= 1)) {
+        return kh_cba_local_event(event_name, arguments);
+    }
+
+    if (group_player_units.empty()) {
+        return kh_cba_target_event(event_name, arguments, target_group);
+    }
+
+    return kh_cba_execute_remote(kh_make_array({event_name, arguments, target_group}), g_compiled_kh_cba_group_owner_dispatch, "SERVER");
+}
+
+// Shared local fallback for string targets: player name/roleDescription match -> targetEvent; groupId match -> per-group dispatch; marker match -> targetEvent on units in area
+static game_value kh_cba_dispatch_named_target(const game_value& event_name, const game_value& arguments, const std::string& target_string) {
+    auto_array<game_value> player_targets;
+    game_value player_units = sqf::get_variable(sqf::mission_namespace(), "kh_var_allplayerunits");
+
+    if (!player_units.is_nil() && player_units.type_enum() == game_data_type::ARRAY) {
+        auto& units = player_units.to_array();
+
+        for (size_t i = 0; i < units.size(); ++i) {
+            if (units[i].is_nil() || units[i].type_enum() != game_data_type::OBJECT) {
+                continue;
+            }
+
+            object unit = static_cast<object>(units[i]);
+
+            if (sqf::name(unit) == target_string || sqf::role_description(unit) == target_string) {
+                player_targets.push_back(units[i]);
+            }
+        }
+    }
+
+    if (!player_targets.empty()) {
+        return kh_cba_target_event(event_name, arguments, game_value(std::move(player_targets)));
+    }
+
+    auto groups = sqf::all_groups();
+    bool group_matched = false;
+    game_value group_return;
+
+    for (auto& current_group : groups) {
+        if (sqf::group_id(current_group) == target_string) {
+            group_matched = true;
+            group_return = kh_cba_dispatch_group(event_name, arguments, game_value(current_group));
+        }
+    }
+
+    if (group_matched) {
+        return group_return;
+    }
+
+    auto markers = sqf::all_map_markers();
+
+    for (size_t i = 0; i < markers.size(); ++i) {
+        if (markers[i] == target_string) {
+            return kh_cba_target_event_player_units(event_name, arguments, [&](const object& unit) {
+                return sqf::in_area(unit, target_string);
+            });
+        }
+    }
+
+    return game_value();
+}
+
+// Native KH_fnc_triggerCbaEvent, registered as the unary 'triggerCbaEvent' command; right arg is [_event, _arguments, _target, _jip]
+static game_value trigger_cba_event_sqf(game_value_parameter params) {
+    try {
+        if (params.type_enum() != game_data_type::ARRAY) return game_value();
+        auto& p = params.to_array();
+        game_value event = kh_param(p, 0, game_value(std::string()), {game_data_type::STRING, game_data_type::ARRAY});
+        game_value arguments = p.size() > 1 ? p[1] : game_value();
+        game_value target = kh_param(p, 2, game_value(true), {game_data_type::BOOL, game_data_type::SCALAR, game_data_type::STRING, game_data_type::ARRAY, game_data_type::CODE, game_data_type::OBJECT, game_data_type::TEAM_MEMBER, game_data_type::GROUP, game_data_type::SIDE, game_data_type::LOCATION});
+        game_value jip = kh_param(p, 3, game_value(false), {game_data_type::BOOL, game_data_type::ARRAY});
+
+        // _event as [_eventName, _entity] -> ["KH_eve_entityCbaEvent", hashValue _entity, _eventName] joinString "_"
+        if (event.type_enum() == game_data_type::ARRAY) {
+            auto& ev = event.to_array();
+            std::string event_name = static_cast<std::string>(kh_param(ev, 0, game_value(std::string()), {game_data_type::STRING}));
+            game_value entity = kh_param(ev, 1, game_value(sqf::obj_null()), {game_data_type::OBJECT, game_data_type::GROUP});
+            event = game_value("KH_eve_entityCbaEvent_" + static_cast<std::string>(sqf::hash_value(entity)) + "_" + event_name);
+        }
+
+        game_value return_value;
+
+        switch (target.type_enum()) {
+            case game_data_type::BOOL: {
+                if (static_cast<bool>(target)) {
+                    return_value = kh_cba_local_event(event, arguments);
+                }
+
+                break;
+            }
+
+            case game_data_type::SCALAR: {
+                float target_machine = static_cast<float>(target);
+
+                if (target_machine == static_cast<float>(sqf::client_owner())) {
+                    return_value = kh_cba_local_event(event, arguments);
+                } else if (target_machine >= 0.0f) {
+                    return_value = kh_cba_owner_event(event, arguments, target);
+                } else {
+                    kh_cba_owner_event_broadcast(event, arguments, "kh_var_allmachines", true, std::fabs(target_machine));
+                }
+
+                break;
+            }
+
+            case game_data_type::OBJECT: {
+                if (sqf::local(static_cast<object>(target))) {
+                    return_value = kh_cba_local_event(event, arguments);
+                } else {
+                    return_value = kh_cba_target_event(event, arguments, target);
+                }
+
+                break;
+            }
+
+            case game_data_type::TEAM_MEMBER: {
+                object agent_unit = sqf::agent(static_cast<team_member>(target));
+
+                if (sqf::local(agent_unit)) {
+                    return_value = kh_cba_local_event(event, arguments);
+                } else {
+                    return_value = kh_cba_target_event(event, arguments, game_value(agent_unit));
+                }
+
+                break;
+            }
+
+            case game_data_type::GROUP: {
+                return_value = kh_cba_dispatch_group(event, arguments, target);
+                break;
+            }
+
+            case game_data_type::SIDE: {
+                return_value = kh_cba_target_event_player_units(event, arguments, [&](const object& unit) {
+                    return sqf::is_equal_to(game_value(sqf::get_side(sqf::get_group(unit))), target);
+                });
+
+                break;
+            }
+
+            case game_data_type::STRING: {
+                std::string target_string = static_cast<std::string>(target);
+
+                if (target_string == "LOCAL") {
+                    return_value = kh_cba_local_event(event, arguments);
+                } else if (target_string == "SERVER") {
+                    if (sqf::is_server()) {
+                        return_value = kh_cba_local_event(event, arguments);
+                    } else {
+                        return_value = kh_cba_server_event(event, arguments);
+                    }
+                } else if (target_string == "GLOBAL") {
+                    kh_cba_owner_event_broadcast(event, arguments, "kh_var_allmachines", false, 0.0f);
+                } else if (target_string == "REMOTE") {
+                    kh_cba_owner_event_broadcast(event, arguments, "kh_var_allmachines", true, static_cast<float>(sqf::client_owner()));
+                } else if (target_string == "PLAYERS") {
+                    kh_cba_owner_event_broadcast(event, arguments, "kh_var_allplayermachines", false, 0.0f);
+                } else if (target_string == "ADMIN") {
+                    game_value admin_machine = sqf::get_variable(sqf::mission_namespace(), "kh_var_adminmachine");
+
+                    if (!admin_machine.is_nil() && admin_machine.type_enum() == game_data_type::SCALAR && static_cast<float>(admin_machine) == static_cast<float>(sqf::client_owner())) {
+                        return_value = kh_cba_local_event(event, arguments);
+                    } else {
+                        return_value = kh_cba_owner_event(event, arguments, admin_machine);
+                    }
+                } else if (target_string == "CURATORS") {
+                    return_value = kh_cba_target_event_player_units(event, arguments, [](const object& unit) {
+                        return !sqf::is_null(sqf::get_assigned_curator_logic(unit));
+                    });
+                } else if (target_string == "HEADLESS") {
+                    kh_cba_owner_event_broadcast(event, arguments, "kh_var_allheadlessmachines", false, 0.0f);
+                } else {
+                    // parseNumber on a non-numeric first character yields 0, which is the fault check; owner ids, uids and net ids never start with 0
+                    if (!target_string.empty() && parse_number(target_string.substr(0, 1)) != 0.0f) {
+                        if (target_string.find(':') == std::string::npos) {
+                            const char* machine_maps[] = {"kh_var_allplayeruidmachines", "kh_var_allplayeridmachines", "kh_var_allheadlessidmachines"};
+                            bool dispatched = false;
+
+                            for (const char* map_name : machine_maps) {
+                                game_value machine_map = sqf::get_variable(sqf::mission_namespace(), map_name);
+
+                                if (machine_map.is_nil()) {
+                                    continue;
+                                }
+
+                                game_value client = kh_hashmap_get(machine_map, target);
+
+                                if (!client.is_nil()) {
+                                    return_value = kh_cba_dispatch_machine(event, arguments, client);
+                                    dispatched = true;
+                                    break;
+                                }
+                            }
+
+                            if (!dispatched) {
+                                return_value = kh_cba_dispatch_named_target(event, arguments, target_string);
+                            }
+                        } else {
+                            object net_object = sqf::object_from_net_id(target_string);
+
+                            if (!sqf::is_null(net_object)) {
+                                if (sqf::local(net_object)) {
+                                    return_value = kh_cba_local_event(event, arguments);
+                                } else {
+                                    return_value = kh_cba_target_event(event, arguments, game_value(net_object));
+                                }
+                            } else {
+                                group net_group = sqf::group_from_net_id(target_string);
+
+                                if (!sqf::is_null(net_group)) {
+                                    return_value = kh_cba_dispatch_group(event, arguments, game_value(net_group));
+                                } else {
+                                    return_value = kh_cba_dispatch_named_target(event, arguments, target_string);
+                                }
+                            }
+                        }
+                    } else {
+                        return_value = kh_cba_dispatch_named_target(event, arguments, target_string);
+                    }
+                }
+
+                break;
+            }
+
+            case game_data_type::ARRAY: {
+                auto_array<game_value> flattened_targets;
+                kh_flatten_into(target, flattened_targets);
+                return_value = kh_cba_execute_remote(
+                    kh_make_array({event, arguments, game_value(std::move(flattened_targets)), game_value(static_cast<float>(sqf::client_owner()))}),
+                    g_compiled_kh_cba_array_target_dispatch,
+                    "SERVER"
+                );
+
+                break;
+            }
+
+            case game_data_type::CODE: {
+                return_value = kh_cba_execute_remote(
+                    kh_make_array({event, arguments, target}),
+                    g_compiled_kh_cba_code_target_dispatch,
+                    "GLOBAL"
+                );
+
+                break;
+            }
+
+            case game_data_type::LOCATION: {
+                location target_location = static_cast<location>(target);
+                return_value = kh_cba_target_event_player_units(event, arguments, [&](const object& unit) {
+                    return sqf::in_area(unit, target_location);
+                });
+
+                break;
+            }
+
+            default: {
+                break;
+            }
+        }
+
+        // _jip isNotEqualTo false
+        if (!(jip.type_enum() == game_data_type::BOOL && !static_cast<bool>(jip))) {
+            game_value dependency = game_value(true);
+            game_value unit_required = game_value(false);
+            std::string jip_id;
+
+            if (jip.type_enum() == game_data_type::ARRAY) {
+                auto& j = jip.to_array();
+                dependency = kh_param(j, 0, game_value(true), {game_data_type::BOOL, game_data_type::SCALAR, game_data_type::STRING, game_data_type::ARRAY, game_data_type::CODE, game_data_type::OBJECT, game_data_type::TEAM_MEMBER, game_data_type::GROUP});
+                unit_required = kh_param(j, 1, game_value(false), {game_data_type::BOOL});
+                jip_id = static_cast<std::string>(kh_param(j, 2, game_value(std::string()), {game_data_type::STRING}));
+            }
+
+            if (jip_id.empty()) {
+                jip_id = UIDGenerator::generate();
+            }
+
+            kh_cba_server_event(game_value("KH_eve_jipSetup"), kh_make_array({event, arguments, dependency, unit_required, game_value(jip_id)}));
+            return kh_make_array({game_value(sqf::mission_namespace()), game_value(jip_id), game_value(2.0f)});
+        }
+
+        return return_value;
+    } catch (const std::exception& e) {
+        report_error(std::string(e.what()));
+        return game_value();
+    } catch (...) {
+        report_error("An unknown error occurred in triggerCbaEvent");
+        return game_value();
+    }
+}
+
+// pushBackUnique with SQF isEqualTo semantics
+static void kh_push_back_unique(auto_array<game_value>& arr, const game_value& value) {
+    for (size_t i = 0; i < arr.size(); ++i) {
+        if (sqf::is_equal_to(arr[i], value)) {
+            return;
+        }
+    }
+
+    arr.push_back(value);
+}
+
+// _parsedTargets insert [-1, KH_var_allPlayerUnits select {...}, true]
+template <typename Predicate>
+static void kh_insert_unique_player_unit_owners(auto_array<game_value>& out, Predicate predicate) {
+    game_value player_units = sqf::get_variable(sqf::mission_namespace(), "kh_var_allplayerunits");
+
+    if (!player_units.is_nil() && player_units.type_enum() == game_data_type::ARRAY) {
+        auto& units = player_units.to_array();
+
+        for (size_t i = 0; i < units.size(); ++i) {
+            if (units[i].is_nil() || units[i].type_enum() != game_data_type::OBJECT) {
+                continue;
+            }
+
+            object unit = static_cast<object>(units[i]);
+
+            if (predicate(unit)) {
+                kh_push_back_unique(out, game_value(sqf::owner(unit)));
+            }
+        }
+    }
+}
+
+// Unique-inserts a KH machine list, optionally excluding one machine (KH_var_allMachines - [_caller] semantics)
+static void kh_insert_unique_machines(auto_array<game_value>& parsed_targets, const char* machines_variable, const game_value* excluded_machine) {
+    game_value machines = sqf::get_variable(sqf::mission_namespace(), machines_variable);
+
+    if (!machines.is_nil() && machines.type_enum() == game_data_type::ARRAY) {
+        auto& machine_list = machines.to_array();
+
+        for (size_t i = 0; i < machine_list.size(); ++i) {
+            if (machine_list[i].is_nil()) {
+                continue;
+            }
+
+            if (excluded_machine && sqf::is_equal_to(machine_list[i], *excluded_machine)) {
+                continue;
+            }
+
+            kh_push_back_unique(parsed_targets, machine_list[i]);
+        }
+    }
+}
+
+// Server-side named-target fallback for the array dispatcher: name/roleDescription -> unit targets; groupId -> unit owners; marker -> units in area
+static void kh_cba_array_collect_named_target(auto_array<game_value>& parsed_targets, const std::string& target_string) {
+    auto_array<game_value> player_matches;
+    game_value player_units = sqf::get_variable(sqf::mission_namespace(), "kh_var_allplayerunits");
+
+    if (!player_units.is_nil() && player_units.type_enum() == game_data_type::ARRAY) {
+        auto& units = player_units.to_array();
+
+        for (size_t i = 0; i < units.size(); ++i) {
+            if (units[i].is_nil() || units[i].type_enum() != game_data_type::OBJECT) {
+                continue;
+            }
+
+            object unit = static_cast<object>(units[i]);
+
+            if (sqf::name(unit) == target_string || sqf::role_description(unit) == target_string) {
+                player_matches.push_back(game_value(sqf::owner(unit)));
+            }
+        }
+    }
+
+    if (!player_matches.empty()) {
+        for (size_t i = 0; i < player_matches.size(); ++i) {
+            kh_push_back_unique(parsed_targets, player_matches[i]);
+        }
+
+        return;
+    }
+
+    auto groups = sqf::all_groups();
+    bool group_matched = false;
+
+    for (auto& current_group : groups) {
+        if (sqf::group_id(current_group) == target_string) {
+            group_matched = true;
+            auto units = sqf::units(current_group);
+
+            for (auto& unit : units) {
+                kh_push_back_unique(parsed_targets, game_value(sqf::owner(unit)));
+            }
+        }
+    }
+
+    if (group_matched) {
+        return;
+    }
+
+    auto markers = sqf::all_map_markers();
+
+    for (size_t i = 0; i < markers.size(); ++i) {
+        if (markers[i] == target_string) {
+            kh_insert_unique_player_unit_owners(parsed_targets, [&](const object& unit) {
+                return sqf::in_area(unit, target_string);
+            });
+
+            return;
+        }
+    }
+}
+
+// Native group fan-out, registered as 'processCbaGroupEvent'; runs on the server via the dispatch shim. Format [event, arguments, group]
+static game_value process_cba_group_event_sqf(game_value_parameter params) {
+    try {
+        if (params.type_enum() != game_data_type::ARRAY) return game_value();
+        auto& p = params.to_array();
+        game_value event = p.size() > 0 ? p[0] : game_value();
+        game_value arguments = p.size() > 1 ? p[1] : game_value();
+        game_value target = kh_param(p, 2, game_value(), {game_data_type::GROUP});
+
+        if (target.is_nil()) {
+            return game_value();
+        }
+
+        auto units = sqf::units(static_cast<group>(target));
+        auto_array<game_value> owners;
+
+        for (auto& unit : units) {
+            kh_push_back_unique(owners, game_value(sqf::owner(unit)));
+        }
+
+        for (size_t i = 0; i < owners.size(); ++i) {
+            kh_cba_owner_event(event, arguments, owners[i]);
+        }
+
+        return game_value();
+    } catch (const std::exception& e) {
+        report_error(std::string(e.what()));
+        return game_value();
+    } catch (...) {
+        report_error("An unknown error occurred in processCbaGroupEvent");
+        return game_value();
+    }
+}
+
+// Native predicate dispatch, registered as 'processCbaCodeEvent'; runs on every machine via the dispatch shim. Format [event, arguments, function]
+static game_value process_cba_code_event_sqf(game_value_parameter params) {
+    try {
+        if (params.type_enum() != game_data_type::ARRAY) return game_value();
+        auto& p = params.to_array();
+        game_value event = p.size() > 0 ? p[0] : game_value();
+        game_value arguments = kh_param(p, 1, game_value(auto_array<game_value>()), {});
+        game_value function = kh_param(p, 2, game_value(g_compiled_kh_empty_code), {game_data_type::CODE});
+        static const r_string n_arguments("_thisarguments");
+        static const r_string n_function("_thisfunction");
+        auto game_state = (intercept::client::host::functions.get_engine_allocator())->gameState;
+        game_state->set_local_variable(n_arguments, arguments);
+        game_state->set_local_variable(n_function, function);
+        game_value result = raw_call_sqf_native(g_compiled_sqf_generic_call_args);
+
+        if (!result.is_nil() && result.type_enum() == game_data_type::BOOL && static_cast<bool>(result)) {
+            return kh_cba_local_event(event, arguments);
+        }
+
+        return game_value();
+    } catch (const std::exception& e) {
+        report_error(std::string(e.what()));
+        return game_value();
+    } catch (...) {
+        report_error("An unknown error occurred in processCbaCodeEvent");
+        return game_value();
+    }
+}
+
+// Native array target parser, registered as 'processCbaArrayEvent'; runs on the server via the dispatch shim. Format [event, arguments, flattenedTargets, caller]
+static game_value process_cba_array_event_sqf(game_value_parameter params) {
+    try {
+        if (params.type_enum() != game_data_type::ARRAY) return game_value();
+        auto& p = params.to_array();
+        game_value event = p.size() > 0 ? p[0] : game_value();
+        game_value arguments = p.size() > 1 ? p[1] : game_value();
+        game_value targets = kh_param(p, 2, game_value(auto_array<game_value>()), {game_data_type::ARRAY});
+        game_value caller = kh_param(p, 3, game_value(static_cast<float>(sqf::client_owner())), {game_data_type::SCALAR});
+
+        // Built inside a game_value from the start so the CODE-case callback closure shares the same live array for deduplication, mirroring SQF reference semantics
+        game_value parsed_targets_value = game_value(auto_array<game_value>());
+        auto& parsed_targets = parsed_targets_value.to_array();
+        auto& target_list = targets.to_array();
+
+        for (size_t i = 0; i < target_list.size(); ++i) {
+            const game_value& element = target_list[i];
+
+            if (element.is_nil()) {
+                continue;
+            }
+
+            switch (element.type_enum()) {
+                case game_data_type::BOOL: {
+                    if (static_cast<bool>(element)) {
+                        kh_push_back_unique(parsed_targets, caller);
+                    }
+
+                    break;
+                }
+
+                case game_data_type::SCALAR: {
+                    kh_push_back_unique(parsed_targets, element);
+                    break;
+                }
+
+                case game_data_type::OBJECT: {
+                    kh_push_back_unique(parsed_targets, game_value(sqf::owner(static_cast<object>(element))));
+                    break;
+                }
+
+                case game_data_type::TEAM_MEMBER: {
+                    kh_push_back_unique(parsed_targets, game_value(sqf::owner(sqf::agent(static_cast<team_member>(element)))));
+                    break;
+                }
+
+                case game_data_type::GROUP: {
+                    auto units = sqf::units(static_cast<group>(element));
+
+                    for (auto& unit : units) {
+                        kh_push_back_unique(parsed_targets, game_value(sqf::owner(unit)));
+                    }
+
+                    break;
+                }
+
+                case game_data_type::SIDE: {
+                    kh_insert_unique_player_unit_owners(parsed_targets, [&](const object& unit) {
+                        return sqf::is_equal_to(game_value(sqf::get_side(sqf::get_group(unit))), element);
+                    });
+
+                    break;
+                }
+
+                case game_data_type::STRING: {
+                    std::string target_string = static_cast<std::string>(element);
+
+                    if (target_string == "LOCAL") {
+                        kh_push_back_unique(parsed_targets, caller);
+                    } else if (target_string == "SERVER") {
+                        kh_push_back_unique(parsed_targets, game_value(2.0f));
+                    } else if (target_string == "GLOBAL") {
+                        kh_insert_unique_machines(parsed_targets, "kh_var_allmachines", nullptr);
+                    } else if (target_string == "REMOTE") {
+                        kh_insert_unique_machines(parsed_targets, "kh_var_allmachines", &caller);
+                    } else if (target_string == "PLAYERS") {
+                        kh_insert_unique_machines(parsed_targets, "kh_var_allplayermachines", nullptr);
+                    } else if (target_string == "ADMIN") {
+                        kh_push_back_unique(parsed_targets, sqf::get_variable(sqf::mission_namespace(), "kh_var_adminmachine"));
+                    } else if (target_string == "CURATORS") {
+                        kh_insert_unique_player_unit_owners(parsed_targets, [](const object& unit) {
+                            return !sqf::is_null(sqf::get_assigned_curator_logic(unit));
+                        });
+                    } else if (target_string == "HEADLESS") {
+                        kh_insert_unique_machines(parsed_targets, "kh_var_allheadlessmachines", nullptr);
+                    } else {
+                        // parseNumber fault check; a non-numeric first character means it cannot be an id, uid or net id
+                        if (!target_string.empty() && parse_number(target_string.substr(0, 1)) != 0.0f) {
+                            if (target_string.find(':') == std::string::npos) {
+                                const char* machine_maps[] = {"kh_var_allplayeruidmachines", "kh_var_allplayeridmachines", "kh_var_allheadlessidmachines"};
+                                bool matched = false;
+
+                                for (const char* map_name : machine_maps) {
+                                    game_value machine_map = sqf::get_variable(sqf::mission_namespace(), map_name);
+
+                                    if (machine_map.is_nil()) {
+                                        continue;
+                                    }
+
+                                    game_value client = kh_hashmap_get(machine_map, element);
+
+                                    if (!client.is_nil()) {
+                                        kh_push_back_unique(parsed_targets, client);
+                                        matched = true;
+                                        break;
+                                    }
+                                }
+
+                                if (!matched) {
+                                    kh_cba_array_collect_named_target(parsed_targets, target_string);
+                                }
+                            } else {
+                                object net_object = sqf::object_from_net_id(target_string);
+
+                                if (!sqf::is_null(net_object)) {
+                                    kh_push_back_unique(parsed_targets, game_value(sqf::owner(net_object)));
+                                } else {
+                                    group net_group = sqf::group_from_net_id(target_string);
+
+                                    if (!sqf::is_null(net_group)) {
+                                        auto units = sqf::units(net_group);
+
+                                        for (auto& unit : units) {
+                                            kh_push_back_unique(parsed_targets, game_value(sqf::owner(unit)));
+                                        }
+                                    } else {
+                                        kh_cba_array_collect_named_target(parsed_targets, target_string);
+                                    }
+                                }
+                            }
+                        } else {
+                            kh_cba_array_collect_named_target(parsed_targets, target_string);
+                        }
+                    }
+
+                    break;
+                }
+
+                case game_data_type::CODE: {
+                    auto_array<game_value> callback_special;
+                    callback_special.push_back(game_value(std::string("CALLBACK")));
+                    callback_special.push_back(kh_make_array({arguments, element}));
+                    callback_special.push_back(game_value(g_compiled_kh_cba_callback_predicate));
+                    auto_array<game_value> exec_args;
+                    exec_args.push_back(kh_make_array({event, arguments, parsed_targets_value}));
+                    exec_args.push_back(game_value(g_compiled_kh_cba_callback_receiver));
+                    exec_args.push_back(game_value(std::string("GLOBAL")));
+                    exec_args.push_back(game_value(true));
+                    exec_args.push_back(game_value(std::move(callback_special)));
+                    kh_execute_impl(game_value(std::move(exec_args)));
+                    break;
+                }
+
+                case game_data_type::LOCATION: {
+                    location target_location = static_cast<location>(element);
+                    kh_insert_unique_player_unit_owners(parsed_targets, [&](const object& unit) {
+                        return sqf::in_area(unit, target_location);
+                    });
+
+                    break;
+                }
+
+                default: {
+                    break;
+                }
+            }
+        }
+
+        for (size_t i = 0; i < parsed_targets.size(); ++i) {
+            kh_cba_owner_event(event, arguments, parsed_targets[i]);
+        }
+
+        return game_value();
+    } catch (const std::exception& e) {
+        report_error(std::string(e.what()));
+        return game_value();
+    } catch (...) {
+        report_error("An unknown error occurred in processCbaArrayEvent");
+        return game_value();
+    }
+}
+
 static game_value kh_trigger_cba_event_native(game_value event_name, game_value args, game_value target, game_value jip) {
     auto_array<game_value> cba_params;
     cba_params.push_back(std::move(event_name));
     cba_params.push_back(std::move(args));
     cba_params.push_back(std::move(target));
     cba_params.push_back(std::move(jip));
-    return raw_call_sqf_args_native(g_compiled_sqf_trigger_cba_event, game_value(std::move(cba_params)));
+    return trigger_cba_event_sqf(game_value(std::move(cba_params)));
 }
 
 static void kh_trigger_stack_handler(const std::string& environment_id, bool delete_handler, bool override_timeout_on_deletion, bool condition_failure) {
@@ -6147,9 +6958,71 @@ static void initialize_sqf_integration() {
         game_data_type::ARRAY
     );
 
+    _sqf_trigger_cba_event_array = intercept::client::host::register_sqf_command(
+        "triggerCbaEvent",
+        "Triggers a CBA event through the KH target resolution model. Format [event, arguments, target, jip], where event is either a string or [eventName, entity] for entity events. Returns the JIP handler id array when jip is requested",
+        userFunctionWrapper<trigger_cba_event_sqf>,
+        game_data_type::ANY,
+        game_data_type::ARRAY
+    );
+
+    _sqf_process_cba_group_event = intercept::client::host::register_sqf_command(
+        "processCbaGroupEvent",
+        "Internal KH CBA dispatcher - fires an owner event on every machine owning a unit of the given group. Format [event, arguments, group]",
+        userFunctionWrapper<process_cba_group_event_sqf>,
+        game_data_type::ANY,
+        game_data_type::ARRAY
+    );
+
+    _sqf_process_cba_array_event = intercept::client::host::register_sqf_command(
+        "processCbaArrayEvent",
+        "Internal KH CBA dispatcher - resolves an array of mixed targets to owner machines and fires per-owner events. Format [event, arguments, flattenedTargets, caller]",
+        userFunctionWrapper<process_cba_array_event_sqf>,
+        game_data_type::ANY,
+        game_data_type::ARRAY
+    );
+
+    _sqf_process_cba_code_event = intercept::client::host::register_sqf_command(
+        "processCbaCodeEvent",
+        "Internal KH CBA dispatcher - calls the predicate with the arguments and fires a local event if it returns true. Format [event, arguments, function]",
+        userFunctionWrapper<process_cba_code_event_sqf>,
+        game_data_type::ANY,
+        game_data_type::ARRAY
+    );
+
     g_compiled_sqf_generic_call = sqf::compile(R"(setReturnValue (call _thisFunction);)");
     g_compiled_sqf_generic_call_args = sqf::compile(R"(setReturnValue (_thisArguments call _thisFunction);)");
-    g_compiled_sqf_trigger_cba_event = sqf::compile(R"(setReturnValue (getCallArguments call KH_fnc_triggerCbaEvent);)");
+    g_compiled_kh_cba_local_event = sqf::compile(R"(setReturnValue (getCallArguments call CBA_fnc_localEvent);)");
+    g_compiled_kh_cba_server_event = sqf::compile(R"(setReturnValue (getCallArguments call CBA_fnc_serverEvent);)");
+    g_compiled_kh_cba_owner_event = sqf::compile(R"(setReturnValue (getCallArguments call CBA_fnc_ownerEvent);)");
+    g_compiled_kh_cba_target_event = sqf::compile(R"(setReturnValue (getCallArguments call CBA_fnc_targetEvent);)");
+    g_compiled_kh_cba_group_owner_dispatch = sqf::compile(R"(processCbaGroupEvent _this;)");
+    g_compiled_kh_cba_array_target_dispatch = sqf::compile(R"(processCbaArrayEvent _this;)");
+    g_compiled_kh_cba_code_target_dispatch = sqf::compile(R"(processCbaCodeEvent _this;)");
+
+    g_compiled_kh_cba_callback_receiver = sqf::compile(R"(
+        params ["_event", "_arguments", "_parsedTargets"];
+        _argsCallback params ["_eventReceiver"];
+
+        if !(isNil "_eventReceiver") then {
+            if !(_eventReceiver in _parsedTargets) then {
+                _parsedTargets pushBackUnique _eventReceiver;
+                [_event, _arguments, _eventReceiver] call CBA_fnc_ownerEvent;
+            };
+        };
+    )");
+
+    g_compiled_kh_cba_callback_predicate = sqf::compile(R"(
+        params [["_arguments", []], "_function"];
+
+        if (_arguments call _function) then {
+            [clientOwner];
+        }
+        else {
+            [];
+        };
+    )");
+    
     g_compiled_sqf_add_game_event_handler = sqf::compile(R"(setReturnValue (getCallArguments call KH_fnc_addEventHandler);)");
     g_compiled_sqf_remove_game_event_handler = sqf::compile(R"(setReturnValue (getCallArguments call KH_fnc_removeHandler);)");
     g_compiled_sqf_game_event_handler_lua_bridge = sqf::compile(R"(_this luaTriggerEvent _args;)");
@@ -6206,7 +7079,7 @@ static void initialize_sqf_integration() {
     g_compiled_kh_handler_scalar_iteration = sqf::compile(R"(
         params ["_fedArguments", "_subfunction", "_environmentId"];
         _fedArguments call _subfunction;
-        ["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false], true, false] call KH_fnc_triggerCbaEvent;
+        triggerCbaEvent ["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false], true, false];
     )");
 
     g_compiled_kh_handler_scalar = sqf::compile(R"(
@@ -6216,7 +7089,7 @@ static void initialize_sqf_integration() {
 
     g_compiled_kh_handler_timeout = sqf::compile(R"(
         params ["_environmentId", "_timeoutId"];
-        ["KH_eve_temporalExecutionStackHandler", [_environmentId, true, true, false], true, false] call KH_fnc_triggerCbaEvent;
+        triggerCbaEvent ["KH_eve_temporalExecutionStackHandler", [_environmentId, true, true, false], true, false];
         KH_var_temporalExecutionStackDeletions pushBackUnique _timeoutId;
     )");
 
@@ -6225,10 +7098,10 @@ static void initialize_sqf_integration() {
 
         if (_arguments call _environmentType) then {
             _fedArguments call _subfunction;
-            ["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false], true, false] call KH_fnc_triggerCbaEvent;
+            triggerCbaEvent ["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false], true, false];
         }
         else {
-            ["KH_eve_temporalExecutionStackHandler", [_environmentId, true, true, true], true, false] call KH_fnc_triggerCbaEvent;
+            triggerCbaEvent ["KH_eve_temporalExecutionStackHandler", [_environmentId, true, true, true], true, false];
         };
     )");
 
@@ -6237,10 +7110,10 @@ static void initialize_sqf_integration() {
 
         if (_arguments call _environmentType) then {
             _fedArguments call _subfunction;
-            ["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false], true, false] call KH_fnc_triggerCbaEvent;
+            triggerCbaEvent ["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false], true, false];
         }
         else {
-            ["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, true], true, false] call KH_fnc_triggerCbaEvent;
+            triggerCbaEvent ["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, true], true, false];
         };
     )");
 
@@ -6249,7 +7122,7 @@ static void initialize_sqf_integration() {
 
         if (_arguments call _environmentType) then {
             _fedArguments call _subfunction;
-            ["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false], true, false] call KH_fnc_triggerCbaEvent;
+            triggerCbaEvent ["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false], true, false];
         };
     )");
 
@@ -6260,7 +7133,7 @@ static void initialize_sqf_integration() {
             _fedArguments call _subfunction;
         }
         else {
-            ["KH_eve_temporalExecutionStackHandler", [_environmentId, true, true, true], true, false] call KH_fnc_triggerCbaEvent;
+            triggerCbaEvent ["KH_eve_temporalExecutionStackHandler", [_environmentId, true, true, true], true, false];
         };
     )");
 

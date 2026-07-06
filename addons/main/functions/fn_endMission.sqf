@@ -35,7 +35,7 @@ execute [
 	false
 ];
 
-["KH_eve_missionEnded", [_isVictory, _nextMission], "GLOBAL", false] call KH_fnc_triggerCbaEvent;
+triggerCbaEvent ["KH_eve_missionEnded", [_isVictory, _nextMission], "GLOBAL", false];
 
 execute [
 	[_endName, _isVictory, _fadeType, _nextMission],

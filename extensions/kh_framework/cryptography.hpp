@@ -4,8 +4,7 @@ class CryptoProvider {
 private:
     HCRYPTPROV hProv = 0;
     bool initialized = false;
-    static CryptoProvider instance;
-    
+
     CryptoProvider() {
         if (CryptAcquireContextW(&hProv, NULL, MS_ENH_RSA_AES_PROV_W, PROV_RSA_AES, CRYPT_VERIFYCONTEXT) ||
             CryptAcquireContextW(&hProv, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT) ||
@@ -22,16 +21,19 @@ public:
         }
     }
     
-    static HCRYPTPROV get() {
-        return instance.hProv;
+    static CryptoProvider& get_instance() {
+        static CryptoProvider inst;
+        return inst;
     }
-    
+
+    static HCRYPTPROV get() {
+        return get_instance().hProv;
+    }
+
     static bool is_initialized() {
-        return instance.initialized;
+        return get_instance().initialized;
     }
 };
-
-CryptoProvider CryptoProvider::instance;
 
 class CryptoGenerator {
 private:

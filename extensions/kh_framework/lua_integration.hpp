@@ -1129,7 +1129,7 @@ namespace LuaFunctions {
             cba_params.push_back(game_value(std::move(cba_event_data)));
             cba_params.push_back(target_gv);
             cba_params.push_back(jip_gv);
-            return convert_game_value_to_lua(raw_call_sqf_args_native(g_compiled_sqf_trigger_cba_event, game_value(std::move(cba_params))));
+            return convert_game_value_to_lua(trigger_cba_event_sqf(game_value(std::move(cba_params))));
         } catch (const std::exception& e) {
             report_error("Failed to trigger event: " + std::string(e.what()));
             return sol::nil;
@@ -1458,7 +1458,7 @@ namespace LuaFunctions {
             cba_params.push_back(args_gv);
             cba_params.push_back(target_gv);
             cba_params.push_back(jip_gv);
-            return convert_game_value_to_lua(raw_call_sqf_args_native(g_compiled_sqf_trigger_cba_event, game_value(std::move(cba_params))));
+            return convert_game_value_to_lua(trigger_cba_event_sqf(game_value(std::move(cba_params))));
         } catch (const std::exception& e) {
             report_error("Failed to trigger CBA event: " + std::string(e.what()));
             return sol::nil;
@@ -1496,7 +1496,7 @@ namespace LuaFunctions {
             cba_params.push_back(game_value(std::move(emission_data)));
             cba_params.push_back(target);
             cba_params.push_back(jip);
-            return convert_game_value_to_lua(raw_call_sqf_args_native(g_compiled_sqf_trigger_cba_event, game_value(std::move(cba_params))));
+            return convert_game_value_to_lua(trigger_cba_event_sqf(game_value(std::move(cba_params))));
         } catch (const std::exception& e) {
             report_error("Failed to emit variable: " + std::string(e.what()));
             return sol::nil;
@@ -1837,7 +1837,7 @@ namespace LuaFunctions {
                 cba_params.push_back(game_value(std::move(value_array)));
                 cba_params.push_back(target);
                 cba_params.push_back(jip);
-                return convert_game_value_to_lua(raw_call_sqf_args_native(g_compiled_sqf_trigger_cba_event, game_value(std::move(cba_params))));
+                return convert_game_value_to_lua(trigger_cba_event_sqf(game_value(std::move(cba_params))));
             } else {
                 auto* file = KHDataManager::instance().get_or_create_file(filename);
 

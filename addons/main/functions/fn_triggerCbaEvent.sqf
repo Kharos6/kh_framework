@@ -416,7 +416,7 @@ private _return = switch (typeName _target) do {
                         };
 
                         case "SIDE": {
-                            _parsedTargets insert [-1, (KH_var_allPlayerUnits select {(side (group _x)) isEqualTo _target;}), true];
+                            _parsedTargets insert [-1, (KH_var_allPlayerUnits select {(side (group _x)) isEqualTo _target;}) apply {owner _x;}, true];
                         };
                         
                         case "STRING": {
@@ -446,7 +446,7 @@ private _return = switch (typeName _target) do {
                                 };
 
                                 case "CURATORS": {
-                                    _parsedTargets insert [-1, KH_var_allPlayerUnits select {!(isNull (getAssignedCuratorLogic _x));}, true];
+                                    _parsedTargets insert [-1, (KH_var_allPlayerUnits select {!(isNull (getAssignedCuratorLogic _x));}) apply {owner _x;}, true];
                                 };
 
                                 case "HEADLESS": {
@@ -474,7 +474,7 @@ private _return = switch (typeName _target) do {
                                                         _parsedTargets pushBackUnique _client;
                                                     }
                                                     else {
-                                                        private _playerTargets = KH_var_allPlayerUnits select {(((name _x) isEqualTo _target) || ((roleDescription _x) isEqualTo _target));};
+                                                        private _playerTargets = (KH_var_allPlayerUnits select {(((name _x) isEqualTo _target) || ((roleDescription _x) isEqualTo _target));}) apply {owner _x;};
 
                                                         if (_playerTargets isNotEqualTo []) then {
                                                             _parsedTargets insert [-1, _playerTargets, true];
@@ -493,7 +493,7 @@ private _return = switch (typeName _target) do {
                                                             }
                                                             else {
                                                                 if (_target in allMapMarkers) then {
-                                                                    _parsedTargets insert [-1, KH_var_allPlayerUnits select {_x inArea _target;}, true];
+                                                                    _parsedTargets insert [-1, (KH_var_allPlayerUnits select {_x inArea _target;}) apply {owner _x;}, true];
                                                                 };
                                                             };
                                                         };
@@ -512,7 +512,7 @@ private _return = switch (typeName _target) do {
                                                     } forEach (units (groupFromNetId _target));
                                                 }
                                                 else {
-                                                    private _playerTargets = KH_var_allPlayerUnits select {(((name _x) isEqualTo _target) || ((roleDescription _x) isEqualTo _target));};
+                                                    private _playerTargets = (KH_var_allPlayerUnits select {(((name _x) isEqualTo _target) || ((roleDescription _x) isEqualTo _target));}) apply {owner _x;};
 
                                                     if (_playerTargets isNotEqualTo []) then {
                                                         _parsedTargets insert [-1, _playerTargets, true];
@@ -531,7 +531,7 @@ private _return = switch (typeName _target) do {
                                                         }
                                                         else {
                                                             if (_target in allMapMarkers) then {
-                                                                _parsedTargets insert [-1, KH_var_allPlayerUnits select {_x inArea _target;}, true];
+                                                                _parsedTargets insert [-1, (KH_var_allPlayerUnits select {_x inArea _target;}) apply {owner _x;}, true];
                                                             };
                                                         };
                                                     };
@@ -540,7 +540,7 @@ private _return = switch (typeName _target) do {
                                         };
                                     }
                                     else {
-                                        private _playerTargets = KH_var_allPlayerUnits select {(((name _x) isEqualTo _target) || ((roleDescription _x) isEqualTo _target));};
+                                        private _playerTargets = (KH_var_allPlayerUnits select {(((name _x) isEqualTo _target) || ((roleDescription _x) isEqualTo _target));}) apply {owner _x;};
 
                                         if (_playerTargets isNotEqualTo []) then {
                                             _parsedTargets insert [-1, _playerTargets, true];
@@ -559,7 +559,7 @@ private _return = switch (typeName _target) do {
                                             }
                                             else {
                                                 if (_target in allMapMarkers) then {
-                                                    _parsedTargets insert [-1, KH_var_allPlayerUnits select {_x inArea _target;}, true];
+                                                    _parsedTargets insert [-1, (KH_var_allPlayerUnits select {_x inArea _target;}) apply {owner _x;}, true];
                                                 };
                                             };
                                         };
@@ -602,7 +602,7 @@ private _return = switch (typeName _target) do {
                         };
 
                         case "LOCATION": {
-                            _parsedTargets insert [-1, KH_var_allPlayerUnits select {_x inArea _target;}, true];
+                            _parsedTargets insert [-1, (KH_var_allPlayerUnits select {_x inArea _target;}) apply {owner _x;}, true];
                         };
                     };
                 } forEach _targets;

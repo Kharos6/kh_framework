@@ -27,7 +27,7 @@ execute [
 		{
 			isNil {
 				(_this select 3) params ["_fultonEvent"];
-				[_fultonEvent, [], "SERVER", false] call KH_fnc_triggerCbaEvent;
+				triggerCbaEvent [_fultonEvent, [], "SERVER", false];
 			};
 		},
 		{},
@@ -89,7 +89,7 @@ execute [
 							{
 								params ["_unit"];
 								_unit setVariable ["KH_var_fultonAttached", false, true];
-								["KH_eve_fultonDetached", [], _unit, false] call KH_fnc_triggerCbaEvent;
+								triggerCbaEvent ["KH_eve_fultonDetached", [], _unit, false];
 							}
 						] call KH_fnc_addEventHandler;		
 					};
@@ -134,7 +134,7 @@ execute [
 							deleteVehicle _anchorEnd;
 
 							if (isPlayer _participant) then {
-								["KH_eve_fultonDetached", [], _participant, false] call KH_fnc_triggerCbaEvent;
+								triggerCbaEvent ["KH_eve_fultonDetached", [], _participant, false];
 							};
 						},
 						true,
@@ -175,7 +175,7 @@ execute [
 					{
 						isNil {
 							_caller setVariable ["KH_var_fultonAttached", false, true];
-							["KH_eve_fultonDetached", [], true, false] call KH_fnc_triggerCbaEvent;
+							triggerCbaEvent ["KH_eve_fultonDetached", [], true, false];
 						};
 					},
 					{},
@@ -299,7 +299,7 @@ execute [
 											_target setVariable ["KH_var_fultonAttached", false, true];
 
 											if (isPlayer _target) then {
-												["KH_eve_fultonDetached", [], _target, false] call KH_fnc_triggerCbaEvent;
+												triggerCbaEvent ["KH_eve_fultonDetached", [], _target, false];
 											};
 										};
 									},

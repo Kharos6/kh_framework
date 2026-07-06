@@ -8,7 +8,7 @@ params [
 ];
 
 if (_special isEqualTo false) exitWith {
-    ["KH_eve_execution", [_arguments, _function, clientOwner, _unscheduled], _target, false] call KH_fnc_triggerCbaEvent;
+    triggerCbaEvent ["KH_eve_execution", [_arguments, _function, clientOwner, _unscheduled], _target, false];
 };
 
 if (_special isEqualTo true) then {
@@ -34,12 +34,12 @@ switch _specialType do {
 
         missionNamespace setVariable [_jipId, true, 2];
 
-        [
+        triggerCbaEvent [
             "KH_eve_execution", 
             [_arguments, _function, clientOwner, _unscheduled],
             _target, 
             [_dependency, _unitRequired, _jipId]
-        ] call KH_fnc_triggerCbaEvent;
+        ];
     };
 
     case "CALLBACK": {
@@ -76,12 +76,12 @@ switch _specialType do {
             }
         ] call KH_fnc_addEventHandler;
 
-        [
+        triggerCbaEvent [
             "KH_eve_registerCallback", 
             [_callbackArguments, false serializeFunction _callbackFunction, clientOwner, _unscheduled, _callbackId], 
             _target, 
             false
-        ] call KH_fnc_triggerCbaEvent;
+        ];
     };
 
     case "PERSISTENT": {
@@ -101,15 +101,15 @@ switch _specialType do {
 
         _entity setVariable [_persistentExecutionId, true, true];
         private _initialId = generateUid;
-        ["KH_eve_execution", [[_entity, _initialId], {(_this select 0) setVariable [_this select 1, true];}, clientOwner, _unscheduled], _target, false] call KH_fnc_triggerCbaEvent;
-        ["KH_eve_execution", [_arguments, _function, clientOwner, _unscheduled], _target, false] call KH_fnc_triggerCbaEvent;
+        triggerCbaEvent ["KH_eve_execution", [[_entity, _initialId], {(_this select 0) setVariable [_this select 1, true];}, clientOwner, _unscheduled], _target, false];
+        triggerCbaEvent ["KH_eve_execution", [_arguments, _function, clientOwner, _unscheduled], _target, false];
 
-        [
+        triggerCbaEvent [
             "KH_eve_persistentExecutionSetup", 
             [_arguments, _function, _entity, _sendoffArguments, false serializeFunction _sendoffFunction, clientOwner, _unscheduled, _persistentExecutionId, _initialId],
             "SERVER",
             false
-        ] call KH_fnc_triggerCbaEvent;
+        ];
 
         [_entity, _persistentExecutionId, true];
     };
@@ -131,8 +131,8 @@ switch _specialType do {
         };
 
         missionNamespace setVariable [_nearId, true, 2];
-        ["KH_eve_execution", [_arguments, _function, clientOwner, _unscheduled], _target, false] call KH_fnc_triggerCbaEvent;
-        ["KH_eve_playerPresenceExecutionSetup", [_arguments, _function, clientOwner, _unscheduled, _object, _present, _distance, _nearId, +KH_var_allPlayerControlledUnits, _jip], "SERVER", false] call KH_fnc_triggerCbaEvent;
+        triggerCbaEvent ["KH_eve_execution", [_arguments, _function, clientOwner, _unscheduled], _target, false];
+        triggerCbaEvent ["KH_eve_playerPresenceExecutionSetup", [_arguments, _function, clientOwner, _unscheduled, _object, _present, _distance, _nearId, +KH_var_allPlayerControlledUnits, _jip], "SERVER", false];
         [missionNamespace, _nearId, 2];
     };
 

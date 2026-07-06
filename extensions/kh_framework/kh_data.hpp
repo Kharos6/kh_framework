@@ -1235,29 +1235,7 @@ public:
                 }
             }
             
-            // Delete old file if it exists, then rename temp
             std::error_code ec;
-
-            if (std::filesystem::exists(file->get_filepath())) {
-                std::filesystem::remove(file->get_filepath(), ec);
-
-                if (ec) {
-                    // Couldn't delete old file, try copy+replace instead
-                    std::filesystem::copy_file(temp_path, file->get_filepath(), 
-                        std::filesystem::copy_options::overwrite_existing, ec);
-
-                    if (ec) {
-                        file->mark_save_failed();
-                        report_error("Failed to replace file: " + ec.message());
-                        return false;
-                    }
-
-                    std::filesystem::remove(temp_path);
-                    temp_guard.should_delete = false;
-                    file->clear_dirty();
-                    return true;
-                }
-            }
             
             // Old file deleted (or didn't exist), now rename should work
             std::filesystem::rename(temp_path, file->get_filepath(), ec);

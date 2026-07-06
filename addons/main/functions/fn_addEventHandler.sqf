@@ -158,7 +158,7 @@ switch _eventType do {
 								_event, 
 								compile ([
 									"if (missionNamespace getVariable ['", _persistentExecutionId, "', true]) then {
-										['", _remoteEventId, "', _this, ", _eventOwner, ", false] call KH_fnc_triggerCbaEvent;
+										triggerCbaEvent ['", _remoteEventId, "', _this, ", _eventOwner, ", false];
 									}
 									else {
 										(missionNamespace getVariable ['", _persistentEntityId, "', objNull]) removeEventHandler [_thisEvent, _thisEventHandler];
@@ -356,7 +356,7 @@ switch _eventType do {
 							call (missionNamespace getVariable '", _function, "');
 						}
 						else {
-							['KH_eve_drawUiExecutionStackHandler', ['", _handler, "', true, true], true, false] call KH_fnc_triggerCbaEvent;
+							triggerCbaEvent ['KH_eve_drawUiExecutionStackHandler', ['", _handler, "', true, true], true, false];
 						};"
 					] joinString "");
 				}
@@ -401,7 +401,7 @@ switch _eventType do {
 				[_handler],
 				{
 					params ["_handler"];
-					["KH_eve_drawUiExecutionStackHandler", [_handler, true, false], true, false] call KH_fnc_triggerCbaEvent;
+					triggerCbaEvent ["KH_eve_drawUiExecutionStackHandler", [_handler, true, false], true, false];
 					KH_var_temporalExecutionStackDeletions pushBackUnique _handlerId;
 				},
 				_timeout,
@@ -454,13 +454,11 @@ switch _eventType do {
 
 					if (_handlerStack isEqualTo []) then {
 						inGameUISetEventHandler ['", _event, "', ''];
-						_handlerStack deleteAt '", _event, "';
+						KH_var_inGameUiEventHandlerStack deleteAt '", _event, "';
 					}
 					else {
 						{
-							if !((_x select 0) in _handlerStackDeletions) then {
-								call (_x select 1);
-							};
+							call (_x select 1);
 						} forEach _handlerStack;
 					};"
 				] joinString ""
@@ -487,7 +485,7 @@ if !(_type isEqualType []) then {
 
 if (isNil "_persistentEventId") then {
 	missionNamespace setVariable [_handlerId, [_type, _event, _handler, clientOwner]];
-	["KH_eve_eventHandlerAdded", [[_type, _event, _handler, clientOwner]], true, false] call KH_fnc_triggerCbaEvent;
+	triggerCbaEvent ["KH_eve_eventHandlerAdded", [[_type, _event, _handler, clientOwner]], true, false];
 	[_type, _event, _handler, clientOwner];
 }
 else {
@@ -498,6 +496,6 @@ else {
 	};
 
 	missionNamespace setVariable [_handlerId, [_type, _handler, _persistentExecutionId, _eventOwner], true];
-	["KH_eve_eventHandlerAdded", [[_type, _handler, _persistentExecutionId, _eventOwner]], "GLOBAL", false] call KH_fnc_triggerCbaEvent;
+	triggerCbaEvent ["KH_eve_eventHandlerAdded", [[_type, _handler, _persistentExecutionId, _eventOwner]], "GLOBAL", false];
 	[_type, _handler, _persistentExecutionId, _eventOwner];
 };

@@ -2675,209 +2675,167 @@ private:
         std::vector<int> targets;
         local_exec = false;
         int our_client_id = cached_client_id_;
-        
-        // Check for colon - netId format
-        if (target_str.find(':') != std::string::npos) {
-            // Try object first
-            object obj = sqf::object_from_net_id(target_str);
-            
-            if (!sqf::is_null(obj)) {
-                int owner_id = static_cast<int>(sqf::owner(obj));
-                
-                if (owner_id == our_client_id || owner_id == 2) {
-                    local_exec = true;
-                } else {
-                    targets.push_back(owner_id);
-                }
-                
-                return targets;
-            }
-            
-            // Try group
-            group grp = sqf::group_from_net_id(target_str);
-            
-            if (!sqf::is_null(grp)) {
-                auto units = sqf::units(grp);
-                std::vector<int> owner_ids;
-                
-                for (const auto& unit : units) {
-                    owner_ids.push_back(static_cast<int>(sqf::owner(unit)));
-                }
-                
-                auto unique_ids = get_unique_client_ids(owner_ids);
-                
-                for (int id : unique_ids) {
-                    if (id == our_client_id || id == 2) {
-                        local_exec = true;
-                    } else {
-                        targets.push_back(id);
-                    }
-                }
-                
-                return targets;
-            }
-            
-            // NetId format but nothing found
-            return targets;
-        }
-        
-        // Check UID/ID hashmaps
-        game_value uid_machines_gv = sqf::get_variable(sqf::mission_namespace(), "kh_var_allplayeruidmachines", game_value());
 
-        if (!uid_machines_gv.is_nil() && uid_machines_gv.type_enum() == game_data_type::HASHMAP) {
-            auto& map = uid_machines_gv.to_hashmap();
-            
-            for (const auto& pair : map) {
-                if (pair.key.type_enum() == game_data_type::STRING) {
-                    std::string key_str = static_cast<std::string>(pair.key);
-                    
-                    if (key_str == target_str && pair.value.type_enum() == game_data_type::SCALAR) {
-                        int client_id = static_cast<int>(static_cast<float>(pair.value));
-                        
-                        if (client_id == our_client_id || client_id == 2) {
-                            local_exec = true;
-                        } else {
-                            targets.push_back(client_id);
+        auto dispatch_id = [&](int client_id) {
+            if (client_id == our_client_id || client_id == 2) {
+                local_exec = true;
+            } else {
+                targets.push_back(client_id);
+            }
+        };
+
+        // parseNumber on a non-numeric first character yields 0, which is the fault check; owner ids, uids and net ids never start with 0
+        bool identifier_like = !target_str.empty() && parse_number(target_str.substr(0, 1)) != 0.0f;
+
+        if (identifier_like) {
+            if (target_str.find(':') == std::string::npos) {
+                // Check UID/ID hashmaps
+                game_value uid_machines_gv = sqf::get_variable(sqf::mission_namespace(), "kh_var_allplayeruidmachines", game_value());
+
+                if (!uid_machines_gv.is_nil() && uid_machines_gv.type_enum() == game_data_type::HASHMAP) {
+                    auto& map = uid_machines_gv.to_hashmap();
+
+                    for (const auto& pair : map) {
+                        if (pair.key.type_enum() == game_data_type::STRING) {
+                            std::string key_str = static_cast<std::string>(pair.key);
+
+                            if (key_str == target_str && pair.value.type_enum() == game_data_type::SCALAR) {
+                                dispatch_id(static_cast<int>(static_cast<float>(pair.value)));
+                                return targets;
+                            }
                         }
-                        
-                        return targets;
                     }
                 }
-            }
-        }
 
-        game_value id_machines_gv = sqf::get_variable(sqf::mission_namespace(), "kh_var_allidmachines", game_value());
+                game_value id_machines_gv = sqf::get_variable(sqf::mission_namespace(), "kh_var_allidmachines", game_value());
 
-        if (!id_machines_gv.is_nil() && id_machines_gv.type_enum() == game_data_type::HASHMAP) {
-            auto& map = id_machines_gv.to_hashmap();
-            
-            for (const auto& pair : map) {
-                if (pair.key.type_enum() == game_data_type::STRING) {
-                    std::string key_str = static_cast<std::string>(pair.key);
-                    
-                    if (key_str == target_str && pair.value.type_enum() == game_data_type::SCALAR) {
-                        int client_id = static_cast<int>(static_cast<float>(pair.value));
-                        
-                        if (client_id == our_client_id || client_id == 2) {
-                            local_exec = true;
-                        } else {
-                            targets.push_back(client_id);
+                if (!id_machines_gv.is_nil() && id_machines_gv.type_enum() == game_data_type::HASHMAP) {
+                    auto& map = id_machines_gv.to_hashmap();
+
+                    for (const auto& pair : map) {
+                        if (pair.key.type_enum() == game_data_type::STRING) {
+                            std::string key_str = static_cast<std::string>(pair.key);
+
+                            if (key_str == target_str && pair.value.type_enum() == game_data_type::SCALAR) {
+                                dispatch_id(static_cast<int>(static_cast<float>(pair.value)));
+                                return targets;
+                            }
                         }
-                        
-                        return targets;
                     }
                 }
+            } else {
+                // netId format - try object first
+                object obj = sqf::object_from_net_id(target_str);
+
+                if (!sqf::is_null(obj)) {
+                    dispatch_id(static_cast<int>(sqf::owner(obj)));
+                    return targets;
+                }
+
+                // Try group
+                group grp = sqf::group_from_net_id(target_str);
+
+                if (!sqf::is_null(grp)) {
+                    auto units = sqf::units(grp);
+                    std::vector<int> owner_ids;
+
+                    for (const auto& unit : units) {
+                        owner_ids.push_back(static_cast<int>(sqf::owner(unit)));
+                    }
+
+                    for (int id : get_unique_client_ids(owner_ids)) {
+                        dispatch_id(id);
+                    }
+
+                    return targets;
+                }
+
+                // netId format but nothing found - fall through to named matching below
             }
         }
-        
-        // Check player units by role_description and name
+
+        // Check player units by name and role_description, targeting all matches
         game_value all_players_gv = sqf::get_variable(sqf::mission_namespace(), "kh_var_allplayerunits", game_value());
-        
+
         if (!all_players_gv.is_nil() && all_players_gv.type_enum() == game_data_type::ARRAY) {
             auto& all_players = all_players_gv.to_array();
-            object matched_unit;
-            bool found_role_desc = false;
-            
+            std::vector<int> owner_ids;
+
             for (const auto& player_gv : all_players) {
                 object player_unit = static_cast<object>(player_gv);
-                
+
                 if (sqf::is_null(player_unit)) {
                     continue;
                 }
-                
-                std::string role_desc = static_cast<std::string>(sqf::role_description(player_unit));
-                
-                if (role_desc == target_str) {
-                    matched_unit = player_unit;
-                    found_role_desc = true;
-                    break; // Role description takes priority
-                }
-                
-                if (!found_role_desc) {
-                    std::string unit_name = static_cast<std::string>(sqf::name(player_unit));
-                    
-                    if (unit_name == target_str) {
-                        matched_unit = player_unit;
-                    }
+
+                if (static_cast<std::string>(sqf::name(player_unit)) == target_str ||
+                    static_cast<std::string>(sqf::role_description(player_unit)) == target_str) {
+                    owner_ids.push_back(static_cast<int>(sqf::owner(player_unit)));
                 }
             }
-            
-            if (!sqf::is_null(matched_unit)) {
-                int owner_id = static_cast<int>(sqf::owner(matched_unit));
-                
-                if (owner_id == our_client_id || owner_id == 2) {
-                    local_exec = true;
-                } else {
-                    targets.push_back(owner_id);
+
+            if (!owner_ids.empty()) {
+                for (int id : get_unique_client_ids(owner_ids)) {
+                    dispatch_id(id);
                 }
-                
+
                 return targets;
             }
         }
-        
-        // Check all groups by group_id
+
+        // Check all groups by group_id, targeting all matching groups
         auto all_groups = sqf::all_groups();
-        
+        std::vector<int> group_owner_ids;
+        bool group_matched = false;
+
         for (const auto& grp : all_groups) {
-            std::string grp_id = static_cast<std::string>(sqf::group_id(grp));
-            
-            if (grp_id == target_str) {
+            if (static_cast<std::string>(sqf::group_id(grp)) == target_str) {
+                group_matched = true;
                 auto units = sqf::units(grp);
-                std::vector<int> owner_ids;
-                
+
                 for (const auto& unit : units) {
-                    owner_ids.push_back(static_cast<int>(sqf::owner(unit)));
+                    group_owner_ids.push_back(static_cast<int>(sqf::owner(unit)));
                 }
-                
-                auto unique_ids = get_unique_client_ids(owner_ids);
-                
-                for (int id : unique_ids) {
-                    if (id == our_client_id || id == 2) {
-                        local_exec = true;
-                    } else {
-                        targets.push_back(id);
-                    }
-                }
-                
-                return targets;
             }
         }
-        
+
+        if (group_matched) {
+            for (int id : get_unique_client_ids(group_owner_ids)) {
+                dispatch_id(id);
+            }
+
+            return targets;
+        }
+
         // Check map markers
         auto all_markers = sqf::all_map_markers();
-        
+
         for (const auto& marker : all_markers) {
             std::string marker_name = static_cast<std::string>(marker);
-            
+
             if (marker_name == target_str) {
                 std::vector<int> owner_ids;
-                
+
                 if (!all_players_gv.is_nil() && all_players_gv.type_enum() == game_data_type::ARRAY) {
                     auto& all_players = all_players_gv.to_array();
-                    
+
                     for (const auto& player_gv : all_players) {
                         object player_unit = static_cast<object>(player_gv);
-                        
+
                         if (!sqf::is_null(player_unit) && sqf::in_area(player_unit, marker_name)) {
                             owner_ids.push_back(static_cast<int>(sqf::owner(player_unit)));
                         }
                     }
                 }
-                
-                auto unique_ids = get_unique_client_ids(owner_ids);
-                
-                for (int id : unique_ids) {
-                    if (id == our_client_id || id == 2) {
-                        local_exec = true;
-                    } else {
-                        targets.push_back(id);
-                    }
+
+                for (int id : get_unique_client_ids(owner_ids)) {
+                    dispatch_id(id);
                 }
-                
+
                 return targets;
             }
         }
-        
+
         // Nothing matched - do nothing
         return targets;
     }

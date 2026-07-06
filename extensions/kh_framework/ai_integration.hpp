@@ -88,6 +88,7 @@ struct SharedModel {
     llama_model* model;
     std::atomic<int> ref_count{0};
     std::string model_path;
+    std::string cache_key;
     llama_model_params model_params;
     
     SharedModel(llama_model* m, const std::string& path, const llama_model_params& params)
@@ -156,6 +157,7 @@ public:
         }
         
         auto shared_model = std::make_shared<SharedModel>(model, model_path, model_params);
+        shared_model->cache_key = key;
         shared_models[key] = shared_model;        
         return shared_model;
     }
@@ -166,8 +168,7 @@ public:
         int remaining_refs = shared_model->ref_count.fetch_sub(1) - 1;
         
         if (remaining_refs <= 0) {
-            std::string key = create_key(shared_model->model_path, shared_model->model_params);
-            shared_models.erase(key);
+            shared_models.erase(shared_model->cache_key);
         }
     }
     
@@ -1148,9 +1149,30 @@ public:
         
         // Final join - this will block until thread actually exits
         if (ai_thread.joinable()) {
+            if (is_generating) {
+                ai_thread.detach();
+                std::string name = ai_name;
+
+                MainThreadScheduler::instance().schedule([name]() {
+                    report_error("KH - AI Framework: AI Controller (" + name + "): thread unresponsive, detached; resources intentionally leaked");
+                });
+
+                sampler = nullptr;
+                ctx = nullptr;
+                shared_model.reset();
+                model = nullptr;
+                vocab = nullptr;
+                initialized = false;
+                should_stop = false;
+                force_terminate = false;
+                abort_generation = false;
+                running = false;
+                return;
+            }
+
             ai_thread.join();
         }
-            
+                    
         cleanup_resources();
         should_stop = false;
         force_terminate = false;

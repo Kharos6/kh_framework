@@ -72,9 +72,18 @@ constexpr float DEG_TO_RAD = PI / 180.0f;
 constexpr float EPSILON = 0.0001f;
 constexpr float YAW_WINDOW = 0.1f;    // 100ms measurement window
 constexpr const int YAW_MAXSAMPLES = 32;  // ring capacity (enough for very high fps over 100ms)
+static game_value trigger_cba_event_sqf(game_value_parameter params);
 static code g_compiled_sqf_generic_call;
 static code g_compiled_sqf_generic_call_args;
-static code g_compiled_sqf_trigger_cba_event;
+static code g_compiled_kh_cba_local_event;
+static code g_compiled_kh_cba_server_event;
+static code g_compiled_kh_cba_owner_event;
+static code g_compiled_kh_cba_target_event;
+static code g_compiled_kh_cba_group_owner_dispatch;
+static code g_compiled_kh_cba_array_target_dispatch;
+static code g_compiled_kh_cba_code_target_dispatch;
+static code g_compiled_kh_cba_callback_receiver;
+static code g_compiled_kh_cba_callback_predicate;
 static code g_compiled_sqf_add_game_event_handler;
 static code g_compiled_sqf_remove_game_event_handler;
 static code g_compiled_sqf_game_event_handler_lua_bridge;
@@ -137,11 +146,11 @@ static std::atomic<GPUBackend> g_active_backend{GPUBackend::CPU};
 static bool g_has_cuda = false;
 static bool g_has_vulkan = false;
 
-bool g_gpu_available() {
+inline bool g_gpu_available() {
     return g_active_backend != GPUBackend::CPU;
 }
 
-std::string get_backend_name() {
+inline std::string get_backend_name() {
     switch (g_active_backend) {
         case GPUBackend::CUDA: return "CUDA";
         case GPUBackend::VULKAN: return "Vulkan";
@@ -200,14 +209,20 @@ static void report_error(const std::string& error_message) {
 }
 
 static game_value raw_call_sqf_native(const code& code_obj) noexcept {
+    g_return_value = game_value();
     intercept::client::host::functions.invoke_raw_unary(intercept::client::__sqf::unary__isnil__code_string__ret__bool, code_obj);
-    return g_return_value;
+    game_value result = g_return_value;
+    g_return_value = game_value();
+    return result;
 }
 
 static game_value raw_call_sqf_args_native(const code& code_obj, const game_value& args) noexcept {
+    g_return_value = game_value();
     g_call_arguments = args;
     intercept::client::host::functions.invoke_raw_unary(intercept::client::__sqf::unary__isnil__code_string__ret__bool, code_obj);
-    return g_return_value;
+    game_value result = g_return_value;
+    g_return_value = game_value();
+    return result;
 }
 
 static game_value raw_call_sqf_native_no_return(const code& code_obj) noexcept {
@@ -838,7 +853,10 @@ public:
         
         // Normal DLL unload - wait and cleanup
         if (thread_handle_ != nullptr) {
-            WaitForSingleObject(thread_handle_, 1000);
+            if (WaitForSingleObject(thread_handle_, 150) == WAIT_TIMEOUT) {
+                TerminateThread(thread_handle_, 0);
+            }
+
             CloseHandle(thread_handle_);
             thread_handle_ = nullptr;
         }

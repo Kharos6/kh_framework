@@ -36,8 +36,7 @@ class CfgPatches
 			"KH_SwordGeneric01",
 			"KH_KnifeM9"
 		};
-		requiredVersion = 2.20;
+		requiredVersion = 2.22;
 		requiredAddons[] = {"cba_main", "Intercept_Core"};
-		skipWhenMissingDependencies = 1;
 	};
 };

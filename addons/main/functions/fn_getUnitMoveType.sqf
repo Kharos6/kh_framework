@@ -17,12 +17,7 @@ if (_unit isEqualTo KH_var_playerUnit) then {
                     "FAST";
                 }
                 else {
-                    if ((_unit combatPace []) isNotEqualTo "None") then {
-                        "TACT";
-                    }
-                    else {
-                        "SLOW";
-                    };
+                    ["SLOW", "TACT"] select ((_unit combatPace []) isNotEqualTo "None");
                 };
             };
         };
@@ -45,12 +40,7 @@ else {
                     "FAST";
                 }
                 else {
-                    if ((_unit combatPace []) isNotEqualTo "None") then {
-                        "TACT";
-                    }
-                    else {
-                        "SLOW";
-                    };
+                    ["SLOW", "TACT"] select ((_unit combatPace []) isNotEqualTo "None");
                 };
             };
         };

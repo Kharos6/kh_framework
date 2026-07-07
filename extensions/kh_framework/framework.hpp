@@ -51,6 +51,7 @@
 #include <wrl/client.h>
 #include <dwrite.h>
 #include <ksmedia.h>
+#include <d3dcompiler.h>
 
 #include "intercept/include/intercept.hpp"
 #include "intercept/include/client/sqf/sqf.hpp"
@@ -75,6 +76,7 @@ constexpr const int YAW_MAXSAMPLES = 32;  // ring capacity (enough for very high
 static game_value trigger_cba_event_sqf(game_value_parameter params);
 static code g_compiled_sqf_generic_call;
 static code g_compiled_sqf_generic_call_args;
+static code g_compiled_kh_set_variable_generic;
 static code g_compiled_kh_cba_local_event;
 static code g_compiled_kh_cba_server_event;
 static code g_compiled_kh_cba_owner_event;
@@ -358,6 +360,36 @@ static std::vector<float> read_bezier_interior(const game_value& slot) {
     
     if (interior.empty()) { interior.push_back(0.0f); interior.push_back(1.0f); } // default -> classic cubic
     return interior;
+}
+
+// Replicates SQF params/param semantics: nil, missing, or type-mismatched values yield the default. Empty type list accepts anything.
+static game_value kh_param(const auto_array<game_value>& arr, size_t index, game_value default_value, std::initializer_list<game_data_type> allowed_types = {}) {
+    if (index >= arr.size()) return default_value;
+    const game_value& value = arr[index];
+    if (value.is_nil()) return default_value;
+
+    if (allowed_types.size() > 0) {
+        const game_data_type type = value.type_enum();
+
+        for (game_data_type allowed : allowed_types) {
+            if (type == allowed) return value;
+        }
+
+        return default_value;
+    }
+
+    return value;
+}
+
+static game_value kh_make_array(std::initializer_list<game_value> values) {
+    auto_array<game_value> arr;
+    arr.reserve(values.size());
+
+    for (const game_value& value : values) {
+        arr.push_back(value);
+    }
+
+    return game_value(std::move(arr));
 }
 
 class RandomStringGenerator {

@@ -147,6 +147,16 @@ static registered_sqf_function _sqf_trigger_cba_event_array;
 static registered_sqf_function _sqf_process_cba_group_event;
 static registered_sqf_function _sqf_process_cba_array_event;
 static registered_sqf_function _sqf_process_cba_code_event;
+static registered_sqf_function _sqf_sample_scene_depth_array;
+static registered_sqf_function _sqf_gpu_visibility_array;
+static registered_sqf_function _sqf_add_render3d_array;
+static registered_sqf_function _sqf_update_render3d_array;
+static registered_sqf_function _sqf_remove_render_handler_scalar;
+static registered_sqf_function _sqf_queue_visibility_array;
+static registered_sqf_function _sqf_get_visibility_results;
+static registered_sqf_function _sqf_add_postfx_array;
+static registered_sqf_function _sqf_add_local_postfx_array;
+static registered_sqf_function _sqf_get_render_stats;
 
 static game_value execute_lua_sqf(game_value_parameter args, game_value_parameter code_or_function) {    
     try {
@@ -3668,7 +3678,7 @@ static game_value serialize_function_impl(const game_value& function, bool is_pu
                 sqf::set_variable(ns, hash_str, compiled_function);
 
                 if (!sqf::is_server()) {
-                    sqf::set_variable(ns, hash_str, compiled_function, game_value(2)); // push to server
+                    raw_call_sqf_args_native(g_compiled_kh_set_variable_generic, kh_make_array({game_value(ns), game_value(hash_str), game_value(compiled_function), game_value(2)}));
                 }
             }
         } else if (is_public && sqf::get_variable(ns, public_marker).is_nil()) {
@@ -3771,36 +3781,6 @@ static game_value call_serialized_function_sqf(game_value_parameter arguments, g
         report_error(std::string(e.what()));
         return game_value();
     }
-}
-
-// Replicates SQF params/param semantics: nil, missing, or type-mismatched values yield the default. Empty type list accepts anything.
-static game_value kh_param(const auto_array<game_value>& arr, size_t index, game_value default_value, std::initializer_list<game_data_type> allowed_types = {}) {
-    if (index >= arr.size()) return default_value;
-    const game_value& value = arr[index];
-    if (value.is_nil()) return default_value;
-
-    if (allowed_types.size() > 0) {
-        const game_data_type type = value.type_enum();
-
-        for (game_data_type allowed : allowed_types) {
-            if (type == allowed) return value;
-        }
-
-        return default_value;
-    }
-
-    return value;
-}
-
-static game_value kh_make_array(std::initializer_list<game_value> values) {
-    auto_array<game_value> arr;
-    arr.reserve(values.size());
-
-    for (const game_value& value : values) {
-        arr.push_back(value);
-    }
-
-    return game_value(std::move(arr));
 }
 
 static game_value kh_hashmap_get(const game_value& map, const game_value& key) {
@@ -4238,7 +4218,7 @@ static game_value trigger_cba_event_sqf(game_value_parameter params) {
             }
 
             kh_cba_server_event(game_value("KH_eve_jipSetup"), kh_make_array({event, arguments, dependency, unit_required, game_value(jip_id)}));
-            return kh_make_array({game_value(sqf::mission_namespace()), game_value(jip_id), game_value(2.0f)});
+            return kh_make_array({game_value(sqf::mission_namespace()), game_value(jip_id), game_value(2)});
         }
 
         return return_value;
@@ -4498,7 +4478,7 @@ static game_value process_cba_array_event_sqf(game_value_parameter params) {
                     if (target_string == "LOCAL") {
                         kh_push_back_unique(parsed_targets, caller);
                     } else if (target_string == "SERVER") {
-                        kh_push_back_unique(parsed_targets, game_value(2.0f));
+                        kh_push_back_unique(parsed_targets, game_value(2));
                     } else if (target_string == "GLOBAL") {
                         kh_insert_unique_machines(parsed_targets, "kh_var_allmachines", nullptr);
                     } else if (target_string == "REMOTE") {
@@ -4691,7 +4671,7 @@ static KHSpecialParseResult kh_parse_special_execution(const game_value& special
         const size_t id_index = (special_type == "JIP") ? 3 : 5;
         std::string special_id = static_cast<std::string>(kh_param(sp, id_index, game_value(std::string()), {game_data_type::STRING}));
         result.special_id_override = special_id.empty() ? UIDGenerator::generate() : special_id;
-        result.return_value = kh_make_array({game_value(sqf::mission_namespace()), game_value(result.special_id_override), game_value(2.0f)});
+        result.return_value = kh_make_array({game_value(sqf::mission_namespace()), game_value(result.special_id_override), game_value(2)});
     } else if (special_type == "PERSISTENT") {
         std::string special_id = static_cast<std::string>(kh_param(sp, 4, game_value(std::string()), {game_data_type::STRING}));
         result.special_id_override = special_id.empty() ? UIDGenerator::generate() : special_id;
@@ -4740,7 +4720,7 @@ static game_value process_execution_sqf(game_value_parameter execute_params) {
                 jip_id = special_id_override.empty() ? UIDGenerator::generate() : special_id_override;
             }
 
-            sqf::set_variable(sqf::mission_namespace(), jip_id, game_value(true), game_value(2.0f));
+            raw_call_sqf_args_native(g_compiled_kh_set_variable_generic, kh_make_array({game_value(sqf::mission_namespace()), game_value(jip_id), game_value(true), game_value(2)}));
 
             return kh_trigger_cba_event_native(
                 game_value("KH_eve_execution"),
@@ -4822,7 +4802,7 @@ static game_value process_execution_sqf(game_value_parameter execute_params) {
                 near_id = special_id_override.empty() ? UIDGenerator::generate() : special_id_override;
             }
 
-            sqf::set_variable(sqf::mission_namespace(), near_id, game_value(true), game_value(2.0f));
+            raw_call_sqf_args_native(g_compiled_kh_set_variable_generic, kh_make_array({game_value(sqf::mission_namespace()), game_value(near_id), game_value(true), game_value(2.0f)}));
 
             kh_trigger_cba_event_native(
                 game_value("KH_eve_execution"),
@@ -4851,7 +4831,7 @@ static game_value process_execution_sqf(game_value_parameter execute_params) {
                 game_value(false)
             );
 
-            return kh_make_array({game_value(sqf::mission_namespace()), game_value(near_id), game_value(2.0f)});
+            return kh_make_array({game_value(sqf::mission_namespace()), game_value(near_id), game_value(2)});
         }
 
         return game_value();
@@ -6990,8 +6970,92 @@ static void initialize_sqf_integration() {
         game_data_type::ARRAY
     );
 
+    _sqf_sample_scene_depth_array = intercept::client::host::register_sqf_command(
+        "sampleSceneDepth",
+        "Read the engine depth buffer at screen position [u, v] (0..1, top-left origin) via compute shader. Returns [sceneDistanceMeters, rawDepth] or a status string. Call from Draw3D.",
+        userFunctionWrapper<sample_scene_depth_sqf>,
+        game_data_type::ANY,
+        game_data_type::ARRAY
+    );
+
+    _sqf_gpu_visibility_array = intercept::client::host::register_sqf_command(
+        "gpuVisibility",
+        "Test up to 1024 world points [[x,y,zASL], ...] against the engine depth buffer in one GPU dispatch. Returns [[status, pointDistM, sceneDistM], ...]; status 1 = visible, 0 = occluded, -1 = offscreen. Call from Draw3D.",
+        userFunctionWrapper<gpu_visibility_sqf>,
+        game_data_type::ANY,
+        game_data_type::ARRAY
+    );
+
+    _sqf_remove_render_handler_scalar = intercept::client::host::register_sqf_command(
+        "removeRenderHandler",
+        "Remove a persistent 3D object by handle. Pass -1 to clear all. Returns BOOL.",
+        userFunctionWrapper<remove_render_handler_sqf>,
+        game_data_type::BOOL,
+        game_data_type::SCALAR
+    );
+
+    _sqf_queue_visibility_array = intercept::client::host::register_sqf_command(
+        "queueVisibility",
+        "Queue up to 1024 world points [[x,y,zASL], ...] for an async GPU depth-visibility test (no stall; results 1-2 frames later via getVisibilityResults). Returns SCALAR accepted count.",
+        userFunctionWrapper<queue_visibility_sqf>,
+        game_data_type::ANY,
+        game_data_type::ARRAY
+    );
+
+    _sqf_get_visibility_results = intercept::client::host::register_sqf_command(
+        "getVisibilityResults",
+        "Fetch the latest completed async visibility batch: [ageInFrames, [[status, pointDistM, sceneDistM], ...]]. status: 1 visible, 0 occluded, -1 offscreen.",
+        userFunctionWrapper<get_visibility_results_sqf>,
+        game_data_type::ARRAY
+    );
+
+    _sqf_add_render3d_array = intercept::client::host::register_sqf_command(
+        "addRender3D",
+        "Add a persistent 3D box drawn every frame until removed. [[x,y,zASL], size, [r,g,b,a]?, mode?, sceneRead?, effect?, params?, band?]; mode: 0=depth test (default), 1=test+write, 2=overlay; effect (string/scalar) applies a screen-space effect inside the box footprint ('invert','colorgrade','vignette','chromatic','grain','sharpen','blur','bloom','distortion','outline','pulse','halation','fog'); params effect-specific; band [minDist,maxDist,falloff?] confines the effect to a camera-distance range (maxDist<=0 = unbounded incl. sky). Callable from any context. Returns SCALAR handle or STRING error.",
+        userFunctionWrapper<add_render3d_sqf>,
+        game_data_type::ANY,
+        game_data_type::ARRAY
+    );
+ 
+    _sqf_update_render3d_array = intercept::client::host::register_sqf_command(
+        "updateRender3D",
+        "Update a persistent 3D object or post-processing pass: [handle, property, value]. Properties: 'position' [x,y,zASL] (also moves a localized pass's sphere center), 'size' scalar, 'color' [r,g,b,a], 'mode' 0..2, 'visible' bool, 'effect' string/scalar, 'params' array (omitted entries reset to effect defaults), 'radius' scalar, 'falloff' scalar, 'band' [minDist,maxDist,falloff?] ([] clears), 'localsphere' [radius,falloff?] (world-space sphere mask centered on the object's position; [] clears), 'sceneread' bool (legacy invert). Returns BOOL.",
+        userFunctionWrapper<update_render3d_sqf>,
+        game_data_type::BOOL,
+        game_data_type::ARRAY
+    );
+ 
+    _sqf_add_postfx_array = intercept::client::host::register_sqf_command(
+        "addPostFX",
+        "Create a persistent fullscreen post-processing pass: [effect, params?, [r,g,b,a]?, band?]. Effects: 'invert','colorgrade','vignette','chromatic','grain','sharpen','blur','bloom','distortion','outline','pulse','halation','fog'. params are effect-specific (defaults if omitted); color alpha = overall intensity; band [minDist,maxDist,falloff?] confines the pass to a camera-distance range (maxDist<=0 = unbounded incl. sky) for layered distance grading. Passes chain in creation order and compose. Manage with updateRender3D / removeRenderHandler. Returns SCALAR handle or STRING error.",
+        userFunctionWrapper<add_postfx_sqf>,
+        game_data_type::ANY,
+        game_data_type::ARRAY
+    );
+ 
+    _sqf_add_local_postfx_array = intercept::client::host::register_sqf_command(
+        "addLocalPostFX",
+        "Create a persistent post-processing effect confined to a world-space sphere: [[x,y,zASL], radius, falloff, effect, params?, [r,g,b,a]?]. Full strength within radius meters, fading to zero over falloff meters; mask follows geometry via the depth buffer. Same effect table as addPostFX. Manage via updateRender3D ('position','radius','falloff','effect','params','color','visible','band') and removeRenderHandler. Returns SCALAR handle or STRING error.",
+        userFunctionWrapper<add_local_postfx_sqf>,
+        game_data_type::ANY,
+        game_data_type::ARRAY
+    );
+
+    _sqf_get_render_stats = intercept::client::host::register_sqf_command(
+        "getRenderStats",
+        "Render health counters (cumulative): [[name, value], ...] with flushes, gatePassed, lockRetries, lockFailedFrames, skipNoDsv, skipWrongPass, effectSetupFails, mainSceneW/H. A skipped flush is a frame rendered without effects (flicker).",
+        userFunctionWrapper<get_render_stats_sqf>,
+        game_data_type::ARRAY
+    );
+
     g_compiled_sqf_generic_call = sqf::compile(R"(setReturnValue (call _thisFunction);)");
     g_compiled_sqf_generic_call_args = sqf::compile(R"(setReturnValue (_thisArguments call _thisFunction);)");
+
+    g_compiled_kh_set_variable_generic = sqf::compile(R"(
+        getCallArguments params ["_khNamespace", "_khVariable", "_khValue", "_khTarget"];
+        _khNamespace setVariable [_khVariable, _khValue, _khTarget];
+    )");
+
     g_compiled_kh_cba_local_event = sqf::compile(R"(setReturnValue (getCallArguments call CBA_fnc_localEvent);)");
     g_compiled_kh_cba_server_event = sqf::compile(R"(setReturnValue (getCallArguments call CBA_fnc_serverEvent);)");
     g_compiled_kh_cba_owner_event = sqf::compile(R"(setReturnValue (getCallArguments call CBA_fnc_ownerEvent);)");

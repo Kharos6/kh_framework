@@ -185,7 +185,6 @@ execute [
             _variable = [_variable];
         };
 
-        private _variableIsArray = _variable isEqualType [];
         private _currentBaseValue = 0;
         private _currentChangingValue = 1;
         private _currentMinimumValue = 0;
@@ -197,7 +196,7 @@ execute [
         };
 
         for "_i" from 0 to (((count _variable) - 1) min ((count _baseValue) - 1)) do {
-            if _variableIsArray then {
+            if _baseValueIsArray then {
                 _currentBaseValue = _baseValue param [_i, _currentBaseValue];
                 _currentChangingValue = _changingValue param [_i, _currentChangingValue];
                 _currentMinimumValue = _minimumValue param [_i, _currentMinimumValue];

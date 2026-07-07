@@ -10,6 +10,7 @@
 #include "speech_to_text_integration.hpp"
 #include "ui_integration.hpp"
 #include "network_integration.hpp"
+#include "rendering_integration.hpp"
 #include "sqf_integration.hpp"
 
 using namespace intercept;
@@ -135,6 +136,7 @@ void intercept::pre_init() {
         clean_lua_state();
         KHDataManager::instance().flush_all();
         MainThreadScheduler::instance().clear();
+        RenderIntegration::on_mission_start();
         
         if (AIFramework::instance().is_initialized()) {
             try {
@@ -283,6 +285,7 @@ void intercept::mission_ended() {
     
     KHDataManager::instance().flush_all();
     MainThreadScheduler::instance().clear();
+    RenderIntegration::on_mission_end();
     
     if (AIFramework::instance().is_initialized()) {
         try {

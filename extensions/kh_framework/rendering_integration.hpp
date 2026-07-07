@@ -21,7 +21,7 @@ struct Resources {
     ID3D11DepthStencilState* dss_test = nullptr;         // LESS_EQUAL, no write
     ID3D11DepthStencilState* dss_test_write = nullptr;   // LESS_EQUAL, write
     ID3D11DepthStencilState* dss_off = nullptr;          // depth disabled
-    ID3D11BlendState*        blend = nullptr;            // standard alpha
+    ID3D11BlendState*        blend_modes[6] = {};       // normal, additive, multiply, screen, lighten, darken
     ID3D11RasterizerState*   rasterizer = nullptr;       // CullNone, MSAA, depth bias
     bool                     initialized = false;
 
@@ -86,7 +86,7 @@ struct Resources {
         KH_SAFE_RELEASE(dss_test);
         KH_SAFE_RELEASE(dss_test_write);
         KH_SAFE_RELEASE(dss_off);
-        KH_SAFE_RELEASE(blend);
+        for (int i = 0; i < 6; ++i) KH_SAFE_RELEASE(blend_modes[i]);
         KH_SAFE_RELEASE(rasterizer);
         KH_SAFE_RELEASE(cs_constant_buffer);
         KH_SAFE_RELEASE(points_buffer);
@@ -116,14 +116,16 @@ struct RenderObject {
     float fx[8] = {};           // effect parameters (effect-specific, see set_effect_params)
     bool  fullscreen = false;   // true = fullscreen triangle (post-processing pass), size unused
     bool  localized = false;    // fullscreen pass masked to a world-space sphere around pos
-    float local_radius = 25.0f; // full-strength radius (m)
+    float local_radius[3] = { 25.0f, 25.0f, 25.0f }; // full-strength radii per SQF axis [x, y, z] (m)
+    int   local_shape = 0;      // 0 = sphere/ellipsoid, 1 = cube/box mask
     float local_falloff = 10.0f;// fade-to-zero band beyond the radius (m)
     bool  banded = false;       // effect confined to a camera-distance band
     float band_min = 0.0f;      // band start (m); fades in over band_falloff before it
     float band_max = 0.0f;      // band end (m); <= 0 = unbounded (includes sky)
     float band_falloff = 10.0f; // fade width at both band edges (m)
     float pos[3] = {};          // SQF coords [x, y, zASL]; converted at draw
-    float size = 1.0f;
+    float size[3] = { 1.0f, 1.0f, 1.0f };  // box edge lengths per SQF axis [x, y, z] (m)
+    int   blend_mode = 0;       // 0 normal, 1 additive, 2 multiply, 3 screen, 4 lighten, 5 darken
     float color[4] = { 1, 1, 1, 1 };
     DepthMode mode = DepthMode::TestOnly;
     bool  visible = true;
@@ -201,8 +203,10 @@ cbuffer CB : register(b0)
     float4 fxParams1;    // effect parameters [4..7]
     float4 fxMeta;       // x = effect id, y = time (s), z = screen width, w = screen height
     float4 depthParams;  // x = proj m22, y = proj m32, z = viewport MinDepth, w = MaxDepth
-    float4 localParams0; // xyz = mask center (engine space), w = radius (m)
-    float4 localParams1; // x = falloff (m), y = localized flag
+    float4 sizeAxes;     // xyz = box edge lengths (engine axes), w = blend mode id
+    float4 localParams0; // xyz = mask center (engine space), w = shape (0 sphere, 1 cube)
+    float4 localParams1; // x = falloff (normalized to mean radius), y = localized flag
+    float4 localRadii;   // xyz = mask radii (engine axes)
     float4 bandParams;   // x = band min (m), y = band max (m, <=0 unbounded), z = falloff (m), w = banded flag
 };
 
@@ -215,7 +219,7 @@ static const char* g_hlsl_static = R"HLSL(
 VSOut VSMain(VSIn i)
 {
     VSOut o;
-    float3 wp = centerSize.xyz + i.pos * centerSize.w;
+    float3 wp = centerSize.xyz + i.pos * sizeAxes.xyz;
     o.pos = mul(float4(wp, 1.0f), viewProj);
     return o;
 }
@@ -231,6 +235,10 @@ VSOut VSFullscreen(uint vid : SV_VertexID)
 
 float4 PSMain(VSOut i) : SV_Target
 {
+    int bm = (int)sizeAxes.w;
+    if (bm == 1 || bm == 3) return float4(color.rgb * color.a, 1.0f);
+    if (bm == 2) return float4(lerp(float3(1.0f, 1.0f, 1.0f), color.rgb, color.a), 1.0f);
+    if (bm == 4 || bm == 5) return float4(color.rgb, 1.0f);
     return color;
 }
 )HLSL";
@@ -398,9 +406,12 @@ float4 PSEffect(VSOut i) : SV_Target
     // positions and mask out naturally.
     if (localParams1.y > 0.5f)
     {
-        float dist = distance(WorldPos(px, uv), localParams0.xyz);
-        float mask = 1.0f - smoothstep(localParams0.w,
-                                       localParams0.w + max(localParams1.x, 0.01f), dist);
+        float3 nd3 = abs(WorldPos(px, uv) - localParams0.xyz) / max(localRadii.xyz, 0.01f);
+        // normalized distance: 1.0 = the mask surface (ellipsoid or box)
+        float nd = (localParams0.w > 0.5f)
+                 ? max(nd3.x, max(nd3.y, nd3.z))   // cube (Chebyshev)
+                 : length(nd3);                    // sphere/ellipsoid
+        float mask = 1.0f - smoothstep(1.0f, 1.0f + max(localParams1.x, 0.001f), nd);
         outc = lerp(scene, outc, mask);
     }
 
@@ -418,7 +429,14 @@ float4 PSEffect(VSOut i) : SV_Target
         outc = lerp(scene, outc, mask);
     }
 
-    return float4(outc, color.a);
+    // Blend-mode output packing. The hardware blend state combines this with
+    // the live framebuffer; intensity (color.a) is pre-applied here for the
+    // modes whose blend factors cannot express it.
+    int bm = (int)sizeAxes.w;
+    if (bm == 1 || bm == 3) return float4(outc * color.a, 1.0f);              // additive, screen
+    if (bm == 2) return float4(lerp(float3(1.0f, 1.0f, 1.0f), outc, color.a), 1.0f); // multiply
+    if (bm == 4 || bm == 5) return float4(lerp(scene, outc, color.a), 1.0f);  // lighten, darken (MAX/MIN op)
+    return float4(outc, color.a);                                             // normal (alpha lerp)
 }
 )HLSL";
 
@@ -515,8 +533,10 @@ struct alignas(16) ConstantData {
     float fx1[4];
     float fx_meta[4];      // effect id, time (s), screen width, screen height
     float depth_params[4]; // proj m22, proj m32, viewport MinDepth, MaxDepth
-    float local0[4];       // xyz = mask center (engine space), w = radius (m)
-    float local1[4];       // x = falloff (m), y = localized flag, zw unused
+    float size_axes[4];    // xyz = box edge lengths (engine axes), w = blend mode id
+    float local0[4];       // xyz = mask center (engine space), w = shape (0 sphere, 1 cube)
+    float local1[4];       // x = falloff (normalized to mean radius), y = localized flag
+    float local_radii[4];  // xyz = mask radii (engine axes)
     float band0[4];        // x = band min (m), y = band max (m, <=0 unbounded), z = falloff (m), w = banded flag
 };
 
@@ -706,17 +726,31 @@ inline std::string ensure_resources(ID3D11Device* dev) {
     }
 
     {
-        D3D11_BLEND_DESC bd = {};
-        bd.RenderTarget[0].BlendEnable = TRUE;
-        bd.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;
-        bd.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
-        bd.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
-        bd.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
-        bd.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
-        bd.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
-        bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
-        hr = dev->CreateBlendState(&bd, &g_res.blend);
-        if (FAILED(hr)) { g_res.release(); return "Create blend " + hr_str(hr); }
+        // One blend state per mixing mode. MIN/MAX ignore the blend factors.
+        struct BlendSpec { D3D11_BLEND src, dst; D3D11_BLEND_OP op; };
+        
+        const BlendSpec specs[6] = {
+            { D3D11_BLEND_SRC_ALPHA, D3D11_BLEND_INV_SRC_ALPHA, D3D11_BLEND_OP_ADD }, // 0 normal
+            { D3D11_BLEND_ONE,       D3D11_BLEND_ONE,           D3D11_BLEND_OP_ADD }, // 1 additive
+            { D3D11_BLEND_ZERO,      D3D11_BLEND_SRC_COLOR,     D3D11_BLEND_OP_ADD }, // 2 multiply
+            { D3D11_BLEND_ONE,       D3D11_BLEND_INV_SRC_COLOR, D3D11_BLEND_OP_ADD }, // 3 screen
+            { D3D11_BLEND_ONE,       D3D11_BLEND_ONE,           D3D11_BLEND_OP_MAX }, // 4 lighten
+            { D3D11_BLEND_ONE,       D3D11_BLEND_ONE,           D3D11_BLEND_OP_MIN }, // 5 darken
+        };
+
+        for (int i = 0; i < 6; ++i) {
+            D3D11_BLEND_DESC bd = {};
+            bd.RenderTarget[0].BlendEnable = TRUE;
+            bd.RenderTarget[0].SrcBlend = specs[i].src;
+            bd.RenderTarget[0].DestBlend = specs[i].dst;
+            bd.RenderTarget[0].BlendOp = specs[i].op;
+            bd.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+            bd.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+            bd.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+            bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+            hr = dev->CreateBlendState(&bd, &g_res.blend_modes[i]);
+            if (FAILED(hr)) { g_res.release(); return "Create blend " + hr_str(hr); }
+        }
     }
 
     {
@@ -1255,6 +1289,61 @@ inline float effect_time_seconds() {
 
 // Maps an SQF effect designator (name string or numeric id) to an EffectId.
 // Returns -1 if unknown.
+// Maps a blend-mode designator (name or id) to 0..5; -1 if unknown.
+inline int blend_id_from_gv(const game_value& gv) {
+    if (gv.type_enum() == game_data_type::SCALAR) {
+        int id = static_cast<int>(static_cast<float>(gv));
+        return (id >= 0 && id <= 5) ? id : -1;
+    }
+
+    if (gv.type_enum() != game_data_type::STRING) return -1;
+    std::string s = static_cast<std::string>(gv);
+    std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+    if (s == "normal")   return 0;
+    if (s == "additive") return 1;
+    if (s == "multiply") return 2;
+    if (s == "screen")   return 3;
+    if (s == "lighten")  return 4;
+    if (s == "darken")   return 5;
+    return -1;
+}
+
+// Maps a mask-shape designator to 0 (sphere) / 1 (cube); -1 if unknown.
+inline int shape_id_from_gv(const game_value& gv) {
+    if (gv.type_enum() == game_data_type::SCALAR) {
+        int id = static_cast<int>(static_cast<float>(gv));
+        return (id == 0 || id == 1) ? id : -1;
+    }
+
+    if (gv.type_enum() != game_data_type::STRING) return -1;
+    std::string s = static_cast<std::string>(gv);
+    std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+    if (s == "sphere" || s == "ellipsoid") return 0;
+    if (s == "cube" || s == "box")         return 1;
+    return -1;
+}
+
+// Reads a scalar (uniform) or [x, y, z] array into out[3]. Returns false on
+// a malformed value.
+inline bool read_vec3_or_uniform(const game_value& gv, float out[3]) {
+    if (gv.type_enum() == game_data_type::SCALAR) {
+        const float v = static_cast<float>(gv);
+        out[0] = v; out[1] = v; out[2] = v;
+        return true;
+    }
+
+    if (gv.type_enum() == game_data_type::ARRAY) {
+        auto& a = gv.to_array();
+        if (a.size() < 3) return false;
+        out[0] = static_cast<float>(a[0]);
+        out[1] = static_cast<float>(a[1]);
+        out[2] = static_cast<float>(a[2]);
+        return true;
+    }
+
+    return false;
+}
+
 inline int effect_id_from_gv(const game_value& gv) {
     if (gv.type_enum() == game_data_type::SCALAR) {
         int id = static_cast<int>(static_cast<float>(gv));
@@ -1632,7 +1721,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
     auto group_of = [](const RenderObject& o) {
         if (o.mode == DepthMode::Off) return 2;
-        return (o.color[3] >= 0.999f && o.effect == 0) ? 0 : 1;
+        return (o.color[3] >= 0.999f && o.effect == 0 && o.blend_mode == 0) ? 0 : 1;
     };
 
     std::sort(boxes.begin(), boxes.end(),
@@ -1678,7 +1767,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
     ctx->PSSetShaderResources(0, 2, ps_srvs);
     const FLOAT bf[4] = { 0, 0, 0, 0 };
-    ctx->OMSetBlendState(g_res.blend, bf, 0xFFFFFFFF);
+    ctx->OMSetBlendState(g_res.blend_modes[0], bf, 0xFFFFFFFF);
     ctx->RSSetState(g_res.rasterizer);
 
     auto upload_cb = [&](const RenderObject& o) -> bool {
@@ -1688,7 +1777,11 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         cbd.center_size[0] = o.pos[0];
         cbd.center_size[1] = o.pos[2];   // SQF [x,y,zASL] -> engine [x,zASL,y]
         cbd.center_size[2] = o.pos[1];
-        cbd.center_size[3] = o.size;
+        cbd.center_size[3] = 0.0f;
+        cbd.size_axes[0] = o.size[0];    // SQF [x,y,z] sizes -> engine [x,z,y]
+        cbd.size_axes[1] = o.size[2];
+        cbd.size_axes[2] = o.size[1];
+        cbd.size_axes[3] = static_cast<float>(o.blend_mode);
         memcpy(cbd.color, o.color, sizeof(cbd.color));
         memcpy(cbd.fx0, o.fx, sizeof(cbd.fx0));
         memcpy(cbd.fx1, o.fx + 4, sizeof(cbd.fx1));
@@ -1703,8 +1796,12 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         cbd.local0[0] = o.pos[0];
         cbd.local0[1] = o.pos[2];   // SQF [x,y,zASL] -> engine [x,zASL,y]
         cbd.local0[2] = o.pos[1];
-        cbd.local0[3] = o.local_radius;
-        cbd.local1[0] = o.local_falloff;
+        cbd.local0[3] = static_cast<float>(o.local_shape);
+        cbd.local_radii[0] = o.local_radius[0];   // SQF [x,y,z] radii -> engine [x,z,y]
+        cbd.local_radii[1] = o.local_radius[2];
+        cbd.local_radii[2] = o.local_radius[1];
+        const float mean_r = (o.local_radius[0] + o.local_radius[1] + o.local_radius[2]) / 3.0f;
+        cbd.local1[0] = o.local_falloff / (mean_r > 0.01f ? mean_r : 0.01f);   // normalized falloff
         cbd.local1[1] = o.localized ? 1.0f : 0.0f;
         cbd.band0[0] = o.band_min;
         cbd.band0[1] = o.band_max;
@@ -1721,6 +1818,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     for (const auto& o : boxes) {
         if (!upload_cb(o)) continue;
         ctx->PSSetShader(o.effect > 0 ? g_res.ps_effect : g_res.ps, nullptr, 0);
+        ctx->OMSetBlendState(g_res.blend_modes[o.blend_mode], bf, 0xFFFFFFFF);
 
         ID3D11DepthStencilState* dss =
             (o.mode == DepthMode::Off)       ? g_res.dss_off :
@@ -1747,6 +1845,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             if (!ensure_scene_capture(dev, ctx).empty()) { g_stats.effect_setup_fails++; break; }
             ctx->PSSetShaderResources(0, 1, &g_res.scene_srv);   // rebind: capture may have been recreated
             if (!upload_cb(f.second)) continue;
+            ctx->OMSetBlendState(g_res.blend_modes[f.second.blend_mode], bf, 0xFFFFFFFF);
             ctx->Draw(3, 0);
         }
     }
@@ -1995,7 +2094,10 @@ static game_value add_render3d_sqf(game_value_parameter args) {
         obj.pos[0] = static_cast<float>(pos[0]);
         obj.pos[1] = static_cast<float>(pos[1]);
         obj.pos[2] = static_cast<float>(pos[2]);
-        obj.size = static_cast<float>(arr[1]);
+        
+        if (!RenderIntegration::read_vec3_or_uniform(arr[1], obj.size)) {
+            return game_value("size must be a number or [x, y, z]");
+        }
 
         if (arr.size() > 2 && arr[2].type_enum() == game_data_type::ARRAY) {
             auto& col = arr[2].to_array();
@@ -2035,6 +2137,12 @@ static game_value add_render3d_sqf(game_value_parameter args) {
             }
         }
 
+        if (arr.size() > 8) {
+            const int bm = RenderIntegration::blend_id_from_gv(arr[8]);
+            if (bm < 0) return game_value("unknown blend mode");
+            obj.blend_mode = bm;
+        }
+
         return game_value(static_cast<float>(RenderIntegration::add_render_object(obj)));
     } catch (const std::exception& e) {
         report_error(std::string("addRender3D: ") + e.what());
@@ -2045,7 +2153,7 @@ static game_value add_render3d_sqf(game_value_parameter args) {
     }
 }
 
-// updateRender3D [handle, property, value] -> BOOL
+// updatePostFX [handle, property, value] -> BOOL
 // properties: "position" [x,y,zASL] | "size" scalar | "color" [r,g,b,a] |
 //             "mode" 0..2 | "visible" bool | "sceneread" bool (legacy invert) |
 //             "effect" string/scalar | "params" array (resets omitted entries
@@ -2055,7 +2163,7 @@ static game_value add_render3d_sqf(game_value_parameter args) {
 //             falloff?] (camera-distance confinement; [] clears it) |
 //             "localsphere" [radius, falloff?] (enables the world-space
 //             sphere mask on any object, centered on its position; [] clears)
-static game_value update_render3d_sqf(game_value_parameter args) {
+static game_value update_post_fx_sqf(game_value_parameter args) {
     try {
         auto& arr = args.to_array();
         if (arr.size() < 3) return game_value(false);
@@ -2074,7 +2182,7 @@ static game_value update_render3d_sqf(game_value_parameter args) {
             obj.pos[1] = static_cast<float>(pos[1]);
             obj.pos[2] = static_cast<float>(pos[2]);
         } else if (prop == "size") {
-            obj.size = static_cast<float>(arr[2]);
+            if (!RenderIntegration::read_vec3_or_uniform(arr[2], obj.size)) return game_value(false);
         } else if (prop == "color") {
             auto& col = arr[2].to_array();
             for (size_t i = 0; i < 4 && i < col.size(); ++i) obj.color[i] = static_cast<float>(col[i]);
@@ -2096,7 +2204,7 @@ static game_value update_render3d_sqf(game_value_parameter args) {
             if (arr[2].type_enum() != game_data_type::ARRAY) return game_value(false);
             RenderIntegration::set_effect_params(obj, &arr[2].to_array());
         } else if (prop == "radius") {
-            obj.local_radius = static_cast<float>(arr[2]);
+            if (!RenderIntegration::read_vec3_or_uniform(arr[2], obj.local_radius)) return game_value(false);
         } else if (prop == "falloff") {
             obj.local_falloff = static_cast<float>(arr[2]);
         } else if (prop == "localsphere") {
@@ -2106,9 +2214,17 @@ static game_value update_render3d_sqf(game_value_parameter args) {
                 obj.localized = false;
             } else {
                 obj.localized = true;
-                obj.local_radius = static_cast<float>(sp[0]);
+                if (!RenderIntegration::read_vec3_or_uniform(sp[0], obj.local_radius)) return game_value(false);
                 if (sp.size() >= 2) obj.local_falloff = static_cast<float>(sp[1]);
             }
+        } else if (prop == "shape") {
+            const int sh = RenderIntegration::shape_id_from_gv(arr[2]);
+            if (sh < 0) return game_value(false);
+            obj.local_shape = sh;
+        } else if (prop == "blend") {
+            const int bm = RenderIntegration::blend_id_from_gv(arr[2]);
+            if (bm < 0) return game_value(false);
+            obj.blend_mode = bm;
         } else if (prop == "band") {
             if (arr[2].type_enum() != game_data_type::ARRAY) return game_value(false);
             auto& band = arr[2].to_array();
@@ -2126,10 +2242,10 @@ static game_value update_render3d_sqf(game_value_parameter args) {
 
         return game_value(true);
     } catch (const std::exception& e) {
-        report_error(std::string("updateRender3D: ") + e.what());
+        report_error(std::string("updatePostFX: ") + e.what());
         return game_value(false);
     } catch (...) {
-        report_error("updateRender3D: unknown exception");
+        report_error("updatePostFX: unknown exception");
         return game_value(false);
     }
 }
@@ -2218,13 +2334,14 @@ static game_value get_visibility_results_sqf() {
 // addPostFX [effect, params?, color?, band?]
 // Creates a persistent FULLSCREEN post-processing pass, applied to the whole
 // scene every frame until removed. Shares the handle space with addRender3D:
-// removeRenderHandler and updateRender3D ("effect", "params", "color",
+// removeRenderHandler and updatePostFX ("effect", "params", "color",
 // "visible") work on it. Multiple passes chain in creation (handle) order and
 // compose - each pass sees the output of the previous ones.
 //
 //   effect: STRING or SCALAR (same table as addRender3D):
 //           "invert" | "colorgrade" | "vignette" | "chromatic" | "grain" |
-//           "sharpen" | "blur" | "bloom" | "distortion" | "outline" | "pulse"
+//           "sharpen" | "blur" | "bloom" | "distortion" | "outline" | "pulse" |
+//           "halation" | "fog"
 //   params: ARRAY of up to 8 numbers, effect-specific; omitted = defaults:
 //           colorgrade [saturation 1, contrast 1, brightness 1, gamma 1]
 //           vignette   [startRadius 0.5, softness 0.5]
@@ -2236,6 +2353,8 @@ static game_value get_visibility_results_sqf() {
 //           distortion [amplitudePx 6, frequency 6, speed 2]
 //           outline    [depthEdgeScale 4, lumEdgeScale 2, sceneDarken 0.25, glowBoost 1.5]
 //           pulse      [x, y, zASL, radius 50, bandWidth 3, intensity 2]
+//           halation   [threshold 1, intensity 1.2, radiusPx 5]
+//           fog        [startDist 200, endDist 1200, skyAmount 1]
 //   color:  [r,g,b,a] - effect tint/edge/ring color; ALPHA = overall effect
 //           intensity (blends the effect over the untouched scene)
 //   band:   [minDist, maxDist, falloff?] - confines the effect to a camera-
@@ -2283,6 +2402,12 @@ static game_value add_postfx_sqf(game_value_parameter args) {
             }
         }
 
+        if (arr.size() > 4) {
+            const int bm = RenderIntegration::blend_id_from_gv(arr[4]);
+            if (bm < 0) return game_value("unknown blend mode");
+            obj.blend_mode = bm;
+        }
+
         return game_value(static_cast<float>(RenderIntegration::add_render_object(obj)));
     } catch (const std::exception& e) {
         report_error(std::string("addPostFX: ") + e.what());
@@ -2328,7 +2453,7 @@ static game_value get_render_stats_sqf() {
 // The mask is computed per pixel from the depth buffer, so it hugs geometry:
 // a localized colorgrade desaturates the buildings inside the sphere and
 // nothing behind them. Shares the handle space with addRender3D/addPostFX;
-// manage via updateRender3D ("position" moves the center, "radius",
+// manage via updatePostFX ("position" moves the center, "radius",
 // "falloff", "effect", "params", "color", "visible") and removeRenderHandler.
 // Localized passes always sample the depth buffer (read-only DSV phase rules
 // apply). Returns SCALAR handle or a STRING error.
@@ -2345,7 +2470,11 @@ static game_value add_local_postfx_sqf(game_value_parameter args) {
         obj.pos[0] = static_cast<float>(pos[0]);
         obj.pos[1] = static_cast<float>(pos[1]);
         obj.pos[2] = static_cast<float>(pos[2]);
-        obj.local_radius = static_cast<float>(arr[1]);
+
+        if (!RenderIntegration::read_vec3_or_uniform(arr[1], obj.local_radius)) {
+            return game_value("radius must be a number or [x, y, z]");
+        }
+        
         obj.local_falloff = static_cast<float>(arr[2]);
         const int e = RenderIntegration::effect_id_from_gv(arr[3]);
         if (e <= 0) return game_value("unknown or non-fullscreen effect");
@@ -2361,6 +2490,18 @@ static game_value add_local_postfx_sqf(game_value_parameter args) {
         if (arr.size() > 5 && arr[5].type_enum() == game_data_type::ARRAY) {
             auto& col = arr[5].to_array();
             for (size_t i = 0; i < 4 && i < col.size(); ++i) obj.color[i] = static_cast<float>(col[i]);
+        }
+
+        if (arr.size() > 6) {
+            const int sh = RenderIntegration::shape_id_from_gv(arr[6]);
+            if (sh < 0) return game_value("unknown shape (sphere | cube)");
+            obj.local_shape = sh;
+        }
+
+        if (arr.size() > 7) {
+            const int bm = RenderIntegration::blend_id_from_gv(arr[7]);
+            if (bm < 0) return game_value("unknown blend mode");
+            obj.blend_mode = bm;
         }
 
         return game_value(static_cast<float>(RenderIntegration::add_render_object(obj)));

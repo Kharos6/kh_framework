@@ -150,7 +150,7 @@ static registered_sqf_function _sqf_process_cba_code_event;
 static registered_sqf_function _sqf_sample_scene_depth_array;
 static registered_sqf_function _sqf_gpu_visibility_array;
 static registered_sqf_function _sqf_add_render3d_array;
-static registered_sqf_function _sqf_update_render3d_array;
+static registered_sqf_function _sqf_update_post_fx_array;
 static registered_sqf_function _sqf_remove_render_handler_scalar;
 static registered_sqf_function _sqf_queue_visibility_array;
 static registered_sqf_function _sqf_get_visibility_results;
@@ -7011,23 +7011,23 @@ static void initialize_sqf_integration() {
 
     _sqf_add_render3d_array = intercept::client::host::register_sqf_command(
         "addRender3D",
-        "Add a persistent 3D box drawn every frame until removed. [[x,y,zASL], size, [r,g,b,a]?, mode?, sceneRead?, effect?, params?, band?]; mode: 0=depth test (default), 1=test+write, 2=overlay; effect (string/scalar) applies a screen-space effect inside the box footprint ('invert','colorgrade','vignette','chromatic','grain','sharpen','blur','bloom','distortion','outline','pulse','halation','fog'); params effect-specific; band [minDist,maxDist,falloff?] confines the effect to a camera-distance range (maxDist<=0 = unbounded incl. sky). Callable from any context. Returns SCALAR handle or STRING error.",
+        "Add a persistent 3D box drawn every frame until removed. [[x,y,zASL], size, [r,g,b,a]?, mode?, sceneRead?, effect?, params?, band?, blend?]; size: number or [x,y,z] per-axis edge lengths; mode: 0=depth test (default), 1=test+write, 2=overlay; effect (string/scalar): 'invert','colorgrade','vignette','chromatic','grain','sharpen','blur','bloom','distortion','outline','pulse','halation','fog'; band [minDist,maxDist,falloff?]; blend: 'normal','additive','multiply','screen','lighten','darken'. Callable from any context. Returns SCALAR handle or STRING error.",
         userFunctionWrapper<add_render3d_sqf>,
         game_data_type::ANY,
         game_data_type::ARRAY
     );
  
-    _sqf_update_render3d_array = intercept::client::host::register_sqf_command(
-        "updateRender3D",
-        "Update a persistent 3D object or post-processing pass: [handle, property, value]. Properties: 'position' [x,y,zASL] (also moves a localized pass's sphere center), 'size' scalar, 'color' [r,g,b,a], 'mode' 0..2, 'visible' bool, 'effect' string/scalar, 'params' array (omitted entries reset to effect defaults), 'radius' scalar, 'falloff' scalar, 'band' [minDist,maxDist,falloff?] ([] clears), 'localsphere' [radius,falloff?] (world-space sphere mask centered on the object's position; [] clears), 'sceneread' bool (legacy invert). Returns BOOL.",
-        userFunctionWrapper<update_render3d_sqf>,
+    _sqf_update_post_fx_array = intercept::client::host::register_sqf_command(
+        "updatePostFX",
+        "Update a persistent 3D object or post-processing pass: [handle, property, value]. Properties: 'position' [x,y,zASL], 'size' number|[x,y,z], 'color' [r,g,b,a], 'mode' 0..2, 'visible' bool, 'effect' string/scalar, 'params' array, 'radius' number|[x,y,z], 'falloff' scalar, 'shape' 'sphere'|'cube', 'blend' 'normal'|'additive'|'multiply'|'screen'|'lighten'|'darken', 'band' [minDist,maxDist,falloff?] ([] clears), 'localsphere' [radius,falloff?] ([] clears), 'sceneread' bool (legacy invert). Returns BOOL.",
+        userFunctionWrapper<update_post_fx_sqf>,
         game_data_type::BOOL,
         game_data_type::ARRAY
     );
  
     _sqf_add_postfx_array = intercept::client::host::register_sqf_command(
         "addPostFX",
-        "Create a persistent fullscreen post-processing pass: [effect, params?, [r,g,b,a]?, band?]. Effects: 'invert','colorgrade','vignette','chromatic','grain','sharpen','blur','bloom','distortion','outline','pulse','halation','fog'. params are effect-specific (defaults if omitted); color alpha = overall intensity; band [minDist,maxDist,falloff?] confines the pass to a camera-distance range (maxDist<=0 = unbounded incl. sky) for layered distance grading. Passes chain in creation order and compose. Manage with updateRender3D / removeRenderHandler. Returns SCALAR handle or STRING error.",
+        "Create a persistent fullscreen post-processing pass: [effect, params?, [r,g,b,a]?, band?, blend?]. Effects: 'invert','colorgrade','vignette','chromatic','grain','sharpen','blur','bloom','distortion','outline','pulse','halation','fog'; color alpha = intensity; band [minDist,maxDist,falloff?] (maxDist<=0 = unbounded incl. sky); blend: 'normal','additive','multiply','screen','lighten','darken'. Passes chain in creation order. Manage with updatePostFX / removeRenderHandler. Returns SCALAR handle or STRING error.",
         userFunctionWrapper<add_postfx_sqf>,
         game_data_type::ANY,
         game_data_type::ARRAY
@@ -7035,7 +7035,7 @@ static void initialize_sqf_integration() {
  
     _sqf_add_local_postfx_array = intercept::client::host::register_sqf_command(
         "addLocalPostFX",
-        "Create a persistent post-processing effect confined to a world-space sphere: [[x,y,zASL], radius, falloff, effect, params?, [r,g,b,a]?]. Full strength within radius meters, fading to zero over falloff meters; mask follows geometry via the depth buffer. Same effect table as addPostFX. Manage via updateRender3D ('position','radius','falloff','effect','params','color','visible','band') and removeRenderHandler. Returns SCALAR handle or STRING error.",
+        "Create a persistent post-processing effect confined to a world-space volume: [[x,y,zASL], radius, falloff, effect, params?, [r,g,b,a]?, shape?, blend?]. radius: number or [x,y,z] per-axis (ellipsoid/box); shape: 'sphere' (default) or 'cube'; falloff in meters (scaled by mean radius); blend as addPostFX. Mask follows geometry via the depth buffer. Manage via updatePostFX and removeRenderHandler. Returns SCALAR handle or STRING error.",
         userFunctionWrapper<add_local_postfx_sqf>,
         game_data_type::ANY,
         game_data_type::ARRAY

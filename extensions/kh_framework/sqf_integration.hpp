@@ -6989,7 +6989,7 @@ static void initialize_sqf_integration() {
 
     _sqf_remove_render_handler_scalar = intercept::client::host::register_sqf_command(
         "removeRenderHandler",
-        "Remove a persistent 3D object by handle. Pass -1 to clear all. Returns BOOL.",
+        "Remove an effect or persistent 3D object by handle. Pass -1 to clear all. Returns BOOL.",
         userFunctionWrapper<remove_render_handler_sqf>,
         game_data_type::BOOL,
         game_data_type::SCALAR
@@ -7020,7 +7020,7 @@ static void initialize_sqf_integration() {
  
     _sqf_update_post_fx_array = intercept::client::host::register_sqf_command(
         "updatePostFX",
-        "Update a persistent 3D object or post-processing pass: [handle, property, value]. Properties: 'position' [x,y,zASL], 'size' number|[x,y,z], 'color' [r,g,b,a], 'mode' 0..2, 'visible' bool, 'effect' string/scalar, 'params' array, 'radius' number|[x,y,z], 'falloff' scalar, 'shape' 'sphere'|'cube', 'blend' 'normal'|'additive'|'multiply'|'screen'|'lighten'|'darken', 'band' [minDist,maxDist,falloff?] ([] clears), 'localsphere' [radius,falloff?] ([] clears), 'sceneread' bool, 'duration' number or [fadein,duration,fadeout]. Returns BOOL.",
+        "Update a persistent 3D object or post-processing pass: [handle, property, value]. Properties: 'position' [x,y,zASL], 'size' number|[x,y,z], 'color' [r,g,b,a], 'mode' 0..2, 'visible' bool, 'effect' string/scalar, 'params' array, 'ui' bool, 'radius' number|[x,y,z], 'falloff' scalar, 'shape' 'sphere'|'cube', 'blend' 'normal'|'additive'|'multiply'|'screen'|'lighten'|'darken', 'band' [minDist,maxDist,falloff?] ([] clears), 'localsphere' [radius,falloff?] ([] clears), 'sceneread' bool, 'duration' number or [fadein,duration,fadeout]. Returns BOOL.",
         userFunctionWrapper<update_post_fx_sqf>,
         game_data_type::BOOL,
         game_data_type::ARRAY
@@ -7044,7 +7044,7 @@ static void initialize_sqf_integration() {
 
     _sqf_get_render_stats = intercept::client::host::register_sqf_command(
         "getRenderStats",
-        "Render health counters (cumulative): [[name, value], ...] with flushes, gatePassed, lockRetries, lockFailedFrames, skipNoDsv, skipWrongPass, effectSetupFails, mainSceneW/H. A skipped flush is a frame rendered without effects (flicker).",
+        "Render health counters (cumulative): [[name, value], ...] with flushes, gatePassed, lockRetries, lockFailedFrames, skipNoDsv, skipWrongPass, effectSetupFails, uiFlushes, uiGatePassed, uiGateSkips, uiDriverPolls, uiDriverCtrl, mainSceneW/H. A skipped flush is a frame rendered without effects (flicker).",
         userFunctionWrapper<get_render_stats_sqf>,
         game_data_type::ARRAY
     );

@@ -2806,7 +2806,7 @@ static game_value add_render3d_sqf(game_value_parameter args) {
         }
 
         if (arr.size() > 4 && arr[4].type_enum() == game_data_type::BOOL) {
-            obj.effect = static_cast<bool>(arr[4]) ? 1 : 0;   // sceneRead = tinted scene-read (colorgrade defaults)
+            obj.effect = static_cast<bool>(arr[4]) ? 2 : 0;   // sceneRead = tinted scene-read (colorgrade defaults)
         }
 
         const auto_array<game_value>* fx_params = nullptr;
@@ -2895,7 +2895,7 @@ static game_value update_post_fx_sqf(game_value_parameter args) {
         } else if (prop == "visible") {
             obj.visible = static_cast<bool>(arr[2]);
         } else if (prop == "sceneread") {
-            obj.effect = static_cast<bool>(arr[2]) ? 1 : 0;
+            obj.effect = static_cast<bool>(arr[2]) ? 2 : 0;
             RenderIntegration::set_effect_params(obj, nullptr);
         } else if (prop == "effect") {
             const int e = RenderIntegration::effect_id_from_gv(arr[2]);

@@ -1875,7 +1875,6 @@ private:
     static PresentFn original_present_;
     static void* hooked_present_addr_;
     static std::atomic<bool> hook_installed_;
-    static std::atomic<bool> minhook_initialized_;
     static std::mutex hook_mutex_;
 
     std::vector<std::filesystem::path> find_html_ui_directories() {
@@ -1991,17 +1990,13 @@ private:
         void* present_addr = vtable[8];
 
         // Only initialize MinHook once
-        if (!minhook_initialized_.load(std::memory_order_acquire)) {
-            if (MH_Initialize() != MH_OK) {
-                MainThreadScheduler::instance().schedule([]() {
-                    report_error("KH - UI Framework: MinHook init failed");
-                });
+        if (!ensure_minhook()) {
+            MainThreadScheduler::instance().schedule([]() {
+                report_error("KH - UI Framework: MinHook init failed");
+            });
 
-                instance_ptr_.store(nullptr, std::memory_order_release);
-                return false;
-            }
-            
-            minhook_initialized_.store(true, std::memory_order_release);
+            instance_ptr_.store(nullptr, std::memory_order_release);
+            return false;
         }
 
         if (MH_CreateHook(present_addr, &hooked_present, (void**)&original_present_) != MH_OK) {
@@ -2676,7 +2671,6 @@ std::atomic<UIFramework*> UIFramework::instance_ptr_{nullptr};
 UIFramework::PresentFn UIFramework::original_present_ = nullptr;
 void* UIFramework::hooked_present_addr_ = nullptr;
 std::atomic<bool> UIFramework::hook_installed_{false};
-std::atomic<bool> UIFramework::minhook_initialized_{false};
 std::mutex UIFramework::hook_mutex_;
 std::atomic<WNDPROC> UIFramework::original_wndproc_{nullptr};
 std::atomic<HWND> UIFramework::game_hwnd_{nullptr};

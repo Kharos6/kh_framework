@@ -7012,7 +7012,7 @@ static void initialize_sqf_integration() {
 
     _sqf_add_render3d_array = intercept::client::host::register_sqf_command(
         "addRender3D",
-        "Add a persistent 3D box drawn every frame until removed. [[x,y,zASL], size, [r,g,b,a]?, mode?, sceneRead?, effect?, params?, band?, blend?, duration?]; size: number or [x,y,z] per-axis edge lengths; mode: 0=depth test (default), 1=test+write, 2=overlay; effect (string/scalar): 'invert','colorgrade','vignette','chromatic','grain','sharpen','blur','bloom','distortion','outline','pulse','halation','fog','lensflare','anamorphic','sunflare','glitch'; band [minDist,maxDist,falloff?]; blend: 'normal','additive','multiply','screen','lighten','darken'; duration: ARRAY or SCALAR (default 0) defines how long the effect will last, optionally as an array with [fadein,duration,fadeout]. Callable from any context. Returns SCALAR handle or STRING error.",
+        "Add a persistent 3D box drawn every frame until removed. [[x,y,zASL], size, [r,g,b,a]?, mode?, sceneRead?, effect?, params?, band?, blend?, duration?]; size: number or [x,y,z] per-axis edge lengths; mode: 0=depth test (default), 1=test+write, 2=overlay; effect (string/scalar): 'invert','colorgrade','vignette','chromatic','grain','sharpen','blur','bloom','distortion','outline','pulse','halation','fog','lensflare','anamorphic','sunflare','glitch'; band [minDist,maxDist,falloff?]; blend: 'normal','additive','multiply','screen','lighten','darken'; duration: ARRAY or SCALAR (default 0) defines how long the effect will last, optionally as an array with [fadein,duration,fadeout]; Solid non-overlay boxes are always composited: injected into the frame BEFORE the engine's translucent passes with depth written, so the engine itself composites smoke and particles against them pixel-perfectly (falls back to the post-scene flush automatically if the draw hook is unavailable). Callable from any context. Returns SCALAR handle or STRING error.",
         userFunctionWrapper<add_render3d_sqf>,
         game_data_type::ANY,
         game_data_type::ARRAY
@@ -7044,7 +7044,7 @@ static void initialize_sqf_integration() {
 
     _sqf_get_render_stats = intercept::client::host::register_sqf_command(
         "getRenderStats",
-        "Render health counters (cumulative): [[name, value], ...] with flushes, gatePassed, lockRetries, lockFailedFrames, skipNoDsv, skipWrongPass, effectSetupFails, uiFlushes, uiGatePassed, uiGateSkips, uiDriverPolls, uiDriverCtrl, mainSceneW/H. A skipped flush is a frame rendered without effects (flicker).",
+        "Render health counters (cumulative): [[name, value], ...] with flushes, gatePassed, lockRetries, lockFailedFrames, skipNoDsv, skipWrongPass, effectSetupFails, uiFlushes, uiGatePassed, uiGateSkips, compositeInjections, compositeBoxes, compositeSkips, compositeAmbiguous, compositeProjLock, compositeRearms, compositeRejSpan, compositeRejVerify, compositeRejFloor, reorderHook, uiDriverPolls, uiDriverCtrl, mainSceneW/H. A skipped flush is a frame rendered without effects (flicker).",
         userFunctionWrapper<get_render_stats_sqf>,
         game_data_type::ARRAY
     );

@@ -1,3 +1,7 @@
+// COM release helper used throughout this header. Defined once here and
+// undefined at the end of the file so it never leaks into later includes.
+#define KH_SAFE_RELEASE(p) if (p) { (p)->Release(); (p) = nullptr; }
+
 namespace RenderIntegration {
 
 enum class DepthMode : int {
@@ -15,14 +19,38 @@ struct Resources {
     ID3D11VertexShader*      vs_fullscreen = nullptr;   // SV_VertexID fullscreen triangle
     ID3D11PixelShader*       ps_effect = nullptr;       // uber effect shader (boxes + fullscreen)
     UINT                     ps_effect_samples = 0;     // depth MSAA count it was compiled for
+    ID3D11VertexShader*      vs_composite = nullptr;    // injected-path VS (adds world position)
+    ID3D11PixelShader*       ps_composite = nullptr;    // injected-path PS: PSMain + the opaque
+                                                        // punch-through guard against the copied
+                                                        // scene depth (the HYBRID: hardware depth
+                                                        // handles marginal ties, the guard vetoes
+                                                        // fragments CLEARLY behind opaque geometry
+                                                        // so matrix races can never punch the box
+                                                        // through a wall)
+    UINT                     ps_composite_samples = 0;  // depth MSAA count it was compiled for
+    ID3D11Texture2D*          comp_depth_tex = nullptr; // owned mid-frame copy of the scene depth
+    ID3D11ShaderResourceView* comp_depth_srv = nullptr; // (the live depth is bound as a writable
+                                                        // DSV during injection - sampling it
+                                                        // directly is a bind hazard)
+    void*                    comp_depth_identity = nullptr;
+    UINT                     comp_depth_w = 0, comp_depth_h = 0, comp_depth_samples = 1;
     ID3D11InputLayout*       input_layout = nullptr;
     ID3D11Buffer*            vertex_buffer = nullptr;    // static unit cube
-    ID3D11Buffer*            constant_buffer = nullptr;  // dynamic, per draw
+    ID3D11Buffer*            constant_buffer = nullptr;  // dynamic, per draw (game-thread flush)
+    ID3D11Buffer*            composite_cb = nullptr;     // dynamic, per draw (render-thread injection)
+                                                         // - separate from constant_buffer so the two
+                                                         // paths never share a mapped resource
     ID3D11DepthStencilState* dss_test = nullptr;         // LESS_EQUAL, no write
     ID3D11DepthStencilState* dss_test_write = nullptr;   // LESS_EQUAL, write
     ID3D11DepthStencilState* dss_off = nullptr;          // depth disabled
     ID3D11BlendState*        blend_modes[6] = {};       // normal, additive, multiply, screen, lighten, darken
-    ID3D11RasterizerState*   rasterizer = nullptr;       // CullNone, MSAA, depth bias
+    ID3D11RasterizerState*   rasterizer = nullptr;       // CullNone, MSAA, depth bias. The -32/-1
+                                                         // near-pull bias applies to the INJECTED
+                                                         // path too: it suppresses the marginal-tie
+                                                         // shimmer from the sim PV being one frame
+                                                         // ahead (removing it for the injection was
+                                                         // tried and measurably WORSENED close-range
+                                                         // flicker)
     bool                     initialized = false;
 
     // --- Scene HDR color capture (resolved copy of the bound RTV) ---
@@ -69,19 +97,15 @@ struct Resources {
 
     void release_fx_chain() {
         for (int i = 0; i < 2; ++i) {
-            #define KH_SAFE_RELEASE(p) if (p) { (p)->Release(); (p) = nullptr; }
             KH_SAFE_RELEASE(chain_tex[i]);
             KH_SAFE_RELEASE(chain_rtv[i]);
             KH_SAFE_RELEASE(chain_srv[i]);
-            #undef KH_SAFE_RELEASE
         }
     }
 
     void release_scene_capture() {
-        #define KH_SAFE_RELEASE(p) if (p) { (p)->Release(); (p) = nullptr; }
         KH_SAFE_RELEASE(scene_tex);
         KH_SAFE_RELEASE(scene_srv);
-        #undef KH_SAFE_RELEASE
         scene_w = 0; scene_h = 0; scene_fmt = DXGI_FORMAT_UNKNOWN;
     }
 
@@ -93,23 +117,29 @@ struct Resources {
     }
 
     void release_compute_shaders() {
-        #define KH_SAFE_RELEASE(p) if (p) { (p)->Release(); (p) = nullptr; }
         KH_SAFE_RELEASE(cs_visibility);
         KH_SAFE_RELEASE(cs_sample_depth);
-        #undef KH_SAFE_RELEASE
         cs_compiled_for_samples = 0;
     }
 
     void release() {
-        #define KH_SAFE_RELEASE(p) if (p) { (p)->Release(); (p) = nullptr; }
         KH_SAFE_RELEASE(vs);
         KH_SAFE_RELEASE(ps);
         KH_SAFE_RELEASE(vs_fullscreen);
         KH_SAFE_RELEASE(ps_effect);
         ps_effect_samples = 0;
+        KH_SAFE_RELEASE(vs_composite);
+        KH_SAFE_RELEASE(ps_composite);
+        ps_composite_samples = 0;
+        KH_SAFE_RELEASE(comp_depth_tex);
+        KH_SAFE_RELEASE(comp_depth_srv);
+        comp_depth_identity = nullptr;
+        comp_depth_w = comp_depth_h = 0;
+        comp_depth_samples = 1;
         KH_SAFE_RELEASE(input_layout);
         KH_SAFE_RELEASE(vertex_buffer);
         KH_SAFE_RELEASE(constant_buffer);
+        KH_SAFE_RELEASE(composite_cb);
         KH_SAFE_RELEASE(dss_test);
         KH_SAFE_RELEASE(dss_test_write);
         KH_SAFE_RELEASE(dss_off);
@@ -123,7 +153,6 @@ struct Resources {
         KH_SAFE_RELEASE(staging_buffer);
         KH_SAFE_RELEASE(staging_async[0]);
         KH_SAFE_RELEASE(staging_async[1]);
-        #undef KH_SAFE_RELEASE
         release_bb_capture();
         release_fx_chain();
         release_scene_capture();
@@ -159,6 +188,15 @@ struct RenderObject {
     float color[4] = { 1, 1, 1, 1 };
     DepthMode mode = DepthMode::TestOnly;
     bool  visible = true;
+    // Reordered compositing is ALWAYS ON for solid, non-overlay boxes: they
+    // are drawn by the D3D hook immediately BEFORE the engine's first
+    // translucent scene draw, with depth written - the ENGINE then
+    // composites every particle/translucent against them (smoke in front
+    // blends over the box, smoke behind is rejected), pixel-perfect. The
+    // Draw3D flush covers them only while the hook is unavailable. Notes:
+    // composited boxes write depth even in mode 0, and a translucent
+    // composited box fully occludes engine translucents behind it. Effect
+    // boxes and overlays always render on the flush path.
     // Lifetime: all zero = infinite (removed only by removeRenderHandler).
     // Otherwise the object fades in over fade_in s, holds for hold_dur s,
     // fades out over fade_out s, then auto-removes itself. The envelope
@@ -168,6 +206,7 @@ struct RenderObject {
     float fade_in = 0.0f;
     float hold_dur = 0.0f;
     float fade_out = 0.0f;
+
 };
 
 // Effect ids shared by boxes (localized, clipped to the box's screen footprint)
@@ -201,6 +240,7 @@ static UINT     g_vis_result_count = 0;
 static uint64_t g_vis_result_frame = 0;
 static uint64_t g_flush_frame = 0;
 
+
 // ===========================================================================
 // Render health statistics (cumulative; exposed via getRenderStats). Every
 // early-exit of the flush is counted by reason - a frame the flush skips is
@@ -218,6 +258,17 @@ struct RenderStats {
     uint64_t ui_flushes = 0;         // UI-phase flush attempts with work queued
     uint64_t ui_gate_passed = 0;     // UI-phase flushes that reached the draw path
     uint64_t ui_gate_skips = 0;      // UI-phase skips (scene pass active / wrong target)
+    uint64_t composite_injections = 0; // pre-translucent injection events (once per scene frame)
+    uint64_t composite_boxes = 0;      // boxes drawn through the composited path
+    uint64_t composite_skips = 0;      // injections aborted (resources/PV unavailable)
+    uint64_t composite_ambiguous = 0;  // frames where the sim republished matrices mid-cycle
+                                       // (diagnostic only - the clear-time latch is retained)
+    uint64_t composite_proj_lock = 0;  // cycles where the engine's true projection depth
+                                       // coefficients were captured and applied
+    uint64_t composite_rearms = 0;     // mid-cycle partition changes that re-armed the injection
+    uint64_t composite_rej_span = 0;   // triggers rejected: partition does not span the broad middle
+    uint64_t composite_rej_verify = 0; // triggers rejected: live DSV verification mismatch
+    uint64_t composite_rej_floor = 0;  // triggers rejected: opaque evidence below the floor
 };
 static RenderStats g_stats;
 
@@ -259,8 +310,41 @@ cbuffer CB : register(b0)
     float4 bandParams;   // x = band min (m), y = band max (m, <=0 unbounded), z = falloff (m), w = banded flag
 };
 
+// Solid-box band / local-volume mask (PSMain and PSComposite): the same
+// semantics as the effect-path masks, evaluated on the BOX FRAGMENT's own
+// world position (for solid boxes fxParams0.xyz carries the camera).
+// Returns an intensity multiplier in [0, 1]; 1 when neither mask is set.
+// NOTE: solid boxes previously IGNORED these masks on every path - the
+// mask logic lived only in PSEffect, which the flush selects strictly for
+// effect > 0. This closes that silent gap for both render paths at once.
+float SolidMask(float3 wpos)
+{
+    float m = 1.0f;
+
+    if (bandParams.w > 0.5f)
+    {
+        float d = distance(wpos, fxParams0.xyz);
+        float fall = max(bandParams.z, 0.01f);
+        float bm = smoothstep(bandParams.x - fall, bandParams.x, d);
+        if (bandParams.y > 0.0f)
+            bm *= 1.0f - smoothstep(bandParams.y, bandParams.y + fall, d);
+        m *= bm;
+    }
+
+    if (localParams1.y > 0.5f)
+    {
+        float3 nd3 = abs(wpos - localParams0.xyz) / max(localRadii.xyz, 0.01f);
+        float nd = (localParams0.w > 0.5f)
+                 ? max(nd3.x, max(nd3.y, nd3.z))   // cube (Chebyshev)
+                 : length(nd3);                    // sphere/ellipsoid
+        m *= 1.0f - smoothstep(1.0f, 1.0f + max(localParams1.x, 0.001f), nd);
+    }
+
+    return m;
+}
+
 struct VSIn  { float3 pos : POSITION; };
-struct VSOut { float4 pos : SV_Position; };
+struct VSOut { float4 pos : SV_Position; float3 wpos : TEXCOORD0; };
 )HLSL";
 
 // Static entry points (no depth access): compiled once
@@ -270,6 +354,7 @@ VSOut VSMain(VSIn i)
     VSOut o;
     float3 wp = centerSize.xyz + i.pos * sizeAxes.xyz;
     o.pos = mul(float4(wp, 1.0f), viewProj);
+    o.wpos = wp;
     return o;
 }
 
@@ -279,16 +364,82 @@ VSOut VSFullscreen(uint vid : SV_VertexID)
     VSOut o;
     float2 uv = float2((vid << 1) & 2, vid & 2);
     o.pos = float4(uv * float2(2.0f, -2.0f) + float2(-1.0f, 1.0f), 0.0f, 1.0f);
+    o.wpos = float3(0.0f, 0.0f, 0.0f);
     return o;
 }
 
 float4 PSMain(VSOut i) : SV_Target
 {
     int bm = (int)sizeAxes.w;
-    if (bm == 1 || bm == 3) return float4(color.rgb * color.a, 1.0f);
-    if (bm == 2) return float4(lerp(float3(1.0f, 1.0f, 1.0f), color.rgb, color.a), 1.0f);
-    if (bm == 4 || bm == 5) return float4(color.rgb, 1.0f);
-    return color;
+    // Intensity (color.a, which carries the lifetime envelope) applies to
+    // every blend mode; the band/local mask folds into it. Lighten/darken
+    // cannot express intensity through hardware blend factors (MAX/MIN
+    // ignore alpha), so they fade toward their respective neutral element
+    // instead: black for MAX, a large value for MIN - both leave the
+    // scene untouched.
+    float a = color.a * SolidMask(i.wpos);
+    if (bm == 1 || bm == 3) return float4(color.rgb * a, 1.0f);
+    if (bm == 2) return float4(lerp(float3(1.0f, 1.0f, 1.0f), color.rgb, a), 1.0f);
+    if (bm == 4) return float4(color.rgb * a, 1.0f);
+    if (bm == 5) return float4(lerp(float3(65504.0f, 65504.0f, 65504.0f), color.rgb, a), 1.0f);
+    return float4(color.rgb, a);
+}
+)HLSL";
+
+// Injected-path shaders (the HYBRID): identical box transform and blend
+// packing, plus a per-pixel punch-through guard. The fragment's TRUE
+// camera distance (world-space, matrix-independent) is compared against
+// the scene distance reconstructed from a mid-frame copy of the depth
+// buffer; a fragment CLEARLY behind opaque geometry - beyond a margin
+// generous enough to absorb any near-plane/coefficient uncertainty - is
+// discarded. Hardware depth (with the shimmer bias) still resolves the
+// marginal ties; the guard only vetoes the gross violations that show up
+// as the box punching through walls. Compiled per depth MSAA count.
+static const char* g_hlsl_composite = R"HLSL(
+#if MSAA_DEPTH
+Texture2DMS<float> depthTex : register(t0);
+float LoadDepthC(int2 px) { return depthTex.Load(px, 0); }
+#else
+Texture2D<float> depthTex : register(t0);
+float LoadDepthC(int2 px) { return depthTex.Load(int3(px, 0)); }
+#endif
+
+float LinDepthC(float raw)
+{
+    float ndcZ = (raw - depthParams.z) / max(depthParams.w - depthParams.z, 1e-6f);
+    float denom = ndcZ - depthParams.x;
+    if (denom > -1e-7f) return 1e9f;   // at/beyond far plane (sky/clear): very far
+    float d = depthParams.y / denom;
+    return d > 0.0f ? d : 1e9f;
+}
+
+struct VSOutC { float4 pos : SV_Position; float3 wpos : TEXCOORD0; };
+
+VSOutC VSComposite(VSIn i)
+{
+    VSOutC o;
+    float3 wp = centerSize.xyz + i.pos * sizeAxes.xyz;
+    o.pos = mul(float4(wp, 1.0f), viewProj);
+    o.wpos = wp;
+    return o;
+}
+
+float4 PSComposite(VSOutC i) : SV_Target
+{
+    // Punch-through guard: fxParams0.xyz = camera (engine space),
+    // fxParams1.x = base margin (m), fxParams1.y = relative margin.
+    int2 px = clamp(int2(i.pos.xy), int2(0, 0), int2((int)fxMeta.z - 1, (int)fxMeta.w - 1));
+    float sceneD = LinDepthC(LoadDepthC(px));
+    float fragD = distance(i.wpos, fxParams0.xyz);
+    if (fragD > sceneD * (1.0f + fxParams1.y) + fxParams1.x) discard;
+
+    int bm = (int)sizeAxes.w;
+    float a = color.a * SolidMask(i.wpos);
+    if (bm == 1 || bm == 3) return float4(color.rgb * a, 1.0f);
+    if (bm == 2) return float4(lerp(float3(1.0f, 1.0f, 1.0f), color.rgb, a), 1.0f);
+    if (bm == 4) return float4(color.rgb * a, 1.0f);
+    if (bm == 5) return float4(lerp(float3(65504.0f, 65504.0f, 65504.0f), color.rgb, a), 1.0f);
+    return float4(color.rgb, a);
 }
 )HLSL";
 
@@ -889,6 +1040,8 @@ inline std::string ensure_resources(ID3D11Device* dev) {
         bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
         hr = dev->CreateBuffer(&bd, nullptr, &g_res.constant_buffer);
         if (FAILED(hr)) { g_res.release(); return "Create CB " + hr_str(hr); }
+        hr = dev->CreateBuffer(&bd, nullptr, &g_res.composite_cb);
+        if (FAILED(hr)) { g_res.release(); return "Create composite CB " + hr_str(hr); }
     }
 
     {
@@ -1234,6 +1387,119 @@ inline std::string ensure_effect_shader(ID3D11Device* dev) {
     return "";
 }
 
+// Injected-path shaders, compiled for the current depth MSAA count
+// (mirrors ensure_effect_shader).
+inline std::string ensure_composite_shader(ID3D11Device* dev) {
+    if (g_res.vs_composite && g_res.ps_composite &&
+        g_res.ps_composite_samples == g_res.comp_depth_samples) {
+        return "";
+    }
+
+    if (g_res.vs_composite) { g_res.vs_composite->Release(); g_res.vs_composite = nullptr; }
+    if (g_res.ps_composite) { g_res.ps_composite->Release(); g_res.ps_composite = nullptr; }
+
+    const D3D_SHADER_MACRO defines[] = {
+        { "MSAA_DEPTH", g_res.comp_depth_samples > 1 ? "1" : "0" },
+        { nullptr, nullptr },
+    };
+
+    const std::string comp_src = std::string(g_cb_hlsl) + g_hlsl_composite;
+    ID3DBlob* vs_blob = nullptr;
+    ID3DBlob* ps_blob = nullptr;
+    std::string err = compile_shader(comp_src.c_str(), "VSComposite", "vs_5_0", defines, &vs_blob);
+    if (!err.empty()) return "composite VS: " + err;
+    err = compile_shader(comp_src.c_str(), "PSComposite", "ps_5_0", defines, &ps_blob);
+    if (!err.empty()) { vs_blob->Release(); return "composite PS: " + err; }
+    HRESULT hr = dev->CreateVertexShader(vs_blob->GetBufferPointer(), vs_blob->GetBufferSize(), nullptr, &g_res.vs_composite);
+    vs_blob->Release();
+    if (FAILED(hr)) { ps_blob->Release(); return "Create composite VS " + hr_str(hr); }
+    hr = dev->CreatePixelShader(ps_blob->GetBufferPointer(), ps_blob->GetBufferSize(), nullptr, &g_res.ps_composite);
+    ps_blob->Release();
+    if (FAILED(hr)) return "Create composite PS " + hr_str(hr);
+    g_res.ps_composite_samples = g_res.comp_depth_samples;
+    return "";
+}
+
+// Copies the CURRENT (mid-frame, opaques-complete) scene depth into an
+// owned texture and keeps an SRV over the copy. The live depth is bound as
+// a writable DSV during injection, so sampling it directly is a bind
+// hazard; copying while bound follows the same pattern as the production
+// scene-color capture. Returns false when unavailable (the injection then
+// runs without the guard).
+inline bool ensure_composite_depth(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
+    ID3D11DepthStencilView* dsv = nullptr;
+    ctx->OMGetRenderTargets(0, nullptr, &dsv);
+    if (!dsv) return false;
+    ID3D11Resource* res = nullptr;
+    dsv->GetResource(&res);
+    dsv->Release();
+    if (!res) return false;
+    ID3D11Texture2D* tex = nullptr;
+    HRESULT hr = res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&tex));
+    res->Release();
+    if (FAILED(hr) || !tex) return false;
+    D3D11_TEXTURE2D_DESC td = {};
+    tex->GetDesc(&td);
+
+    const bool matches = g_res.comp_depth_tex &&
+        g_res.comp_depth_identity == static_cast<void*>(tex) &&
+        g_res.comp_depth_w == td.Width && g_res.comp_depth_h == td.Height &&
+        g_res.comp_depth_samples == td.SampleDesc.Count;
+
+    if (!matches) {
+        if (g_res.comp_depth_srv) { g_res.comp_depth_srv->Release(); g_res.comp_depth_srv = nullptr; }
+        if (g_res.comp_depth_tex) { g_res.comp_depth_tex->Release(); g_res.comp_depth_tex = nullptr; }
+        DXGI_FORMAT srv_fmt;
+
+        switch (td.Format) {
+            case DXGI_FORMAT_R24G8_TYPELESS:    srv_fmt = DXGI_FORMAT_R24_UNORM_X8_TYPELESS; break;
+            case DXGI_FORMAT_R32_TYPELESS:      srv_fmt = DXGI_FORMAT_R32_FLOAT; break;
+            case DXGI_FORMAT_R32G8X24_TYPELESS: srv_fmt = DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS; break;
+            case DXGI_FORMAT_R16_TYPELESS:      srv_fmt = DXGI_FORMAT_R16_UNORM; break;
+            default:
+                tex->Release();
+                return false;
+        }
+
+        D3D11_TEXTURE2D_DESC cd = td;
+        cd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        cd.Usage = D3D11_USAGE_DEFAULT;
+        cd.CPUAccessFlags = 0;
+        cd.MiscFlags = 0;
+
+        if (FAILED(dev->CreateTexture2D(&cd, nullptr, &g_res.comp_depth_tex))) {
+            tex->Release();
+            return false;
+        }
+
+        D3D11_SHADER_RESOURCE_VIEW_DESC sd = {};
+        sd.Format = srv_fmt;
+
+        if (td.SampleDesc.Count > 1) {
+            sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DMS;
+        } else {
+            sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+            sd.Texture2D.MipLevels = 1;
+        }
+
+        if (FAILED(dev->CreateShaderResourceView(g_res.comp_depth_tex, &sd, &g_res.comp_depth_srv))) {
+            g_res.comp_depth_tex->Release();
+            g_res.comp_depth_tex = nullptr;
+            tex->Release();
+            return false;
+        }
+
+        g_res.comp_depth_identity = static_cast<void*>(tex);
+        g_res.comp_depth_w = td.Width;
+        g_res.comp_depth_h = td.Height;
+        g_res.comp_depth_samples = td.SampleDesc.Count;
+    }
+
+    ctx->CopyResource(g_res.comp_depth_tex, tex);
+    tex->Release();
+    return true;
+}
+
 inline std::string ensure_compute_shaders(ID3D11Device* dev) {
     if (g_res.cs_visibility && g_res.cs_compiled_for_samples == g_res.depth_sample_count) return "";
     g_res.release_compute_shaders();
@@ -1319,7 +1585,6 @@ struct StateBackup {
         ctx->OMSetDepthStencilState(dss, stencil_ref);
         ctx->OMSetBlendState(blend, blend_factor, sample_mask);
         ctx->RSSetState(rasterizer);
-        #define KH_SAFE_RELEASE(p) if (p) { (p)->Release(); (p) = nullptr; }
         KH_SAFE_RELEASE(input_layout);
         KH_SAFE_RELEASE(vb);
         KH_SAFE_RELEASE(vs);
@@ -1336,7 +1601,6 @@ struct StateBackup {
         KH_SAFE_RELEASE(dss);
         KH_SAFE_RELEASE(blend);
         KH_SAFE_RELEASE(rasterizer);
-        #undef KH_SAFE_RELEASE
     }
 };
 
@@ -1364,7 +1628,6 @@ struct ComputeStateBackup {
         ctx->CSSetUnorderedAccessViews(0, 1, &uav, counts);
         ctx->CSSetConstantBuffers(0, 1, &cb0);
         ctx->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtvs, dsv);
-        #define KH_SAFE_RELEASE(p) if (p) { (p)->Release(); (p) = nullptr; }
         KH_SAFE_RELEASE(cs);
         KH_SAFE_RELEASE(srvs[0]);
         KH_SAFE_RELEASE(srvs[1]);
@@ -1372,7 +1635,6 @@ struct ComputeStateBackup {
         KH_SAFE_RELEASE(cb0);
         for (UINT i = 0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++i) KH_SAFE_RELEASE(rtvs[i]);
         KH_SAFE_RELEASE(dsv);
-        #undef KH_SAFE_RELEASE
     }
 };
 
@@ -1745,6 +2007,1024 @@ inline void extract_camera_pos(const float view[4][4], float out[3]) {
     }
 }
 
+
+// ===========================================================================
+// Reordered compositing: pre-translucent depth injection.
+//
+// The engine composites its translucents (particles, smoke, glass, water)
+// by depth-testing them against whatever is in the depth buffer and alpha-
+// blending over the color target. Nothing our post-scene flush draws can
+// participate in that - which is why depth-tested boxes paint OVER smoke.
+// The fix is ordering, not measurement: hook the immediate context's draw
+// calls (MinHook, shared via framework's ensure_minhook), watch the output-
+// merger state, and the moment the engine issues its FIRST translucent draw
+// of the scene (alpha blending on, depth test on / write off, main scene
+// depth bound), draw our eligible boxes right there with DEPTH WRITES.
+// Every translucent the engine draws afterwards then composites against
+// them natively: smoke in front blends over the box, smoke behind it is
+// depth-rejected. Pixel-perfect, zero rays, zero estimation.
+//
+// Mechanics:
+//  - State hooks (OMSetBlendState / OMSetDepthStencilState /
+//    OMSetRenderTargets) maintain three booleans; classification of the
+//    immutable state objects is memoized by pointer, so the per-draw hook
+//    cost is a pointer compare and a few flag loads.
+//  - ClearDepthStencilView on the main scene depth marks the new frame
+//    (injection re-arms).
+//  - Deferred contexts share the vtable: every hook first checks that the
+//    calling context IS the tracked immediate context and passes straight
+//    through otherwise. Injection recursion is excluded with a flag, so
+//    our own state sets/draws never disturb the tracking.
+//  - Eligibility: solid (effect 0), non-overlay, composite (default true)
+//    boxes. Effect boxes need the mid-flush scene capture and overlays are
+//    post-scene by definition - both stay on the flush path.
+//  - Health: each injection stamps a timestamp; the flush only stands
+//    down for eligible boxes while an injection happened within the last
+//    half second. If the hook never engages (install failure,
+//    unrecognized pipeline), boxes degrade to the flush path
+//    automatically.
+//  - Engine reset: a generation counter tells the render thread to drop
+//    its memoized state-object classifications (pointers may be reused).
+// ===========================================================================
+
+static std::atomic<bool>     g_reorder_hook_active{false};
+static bool                  g_reorder_hook_failed = false;      // game thread only
+static std::atomic<void*>    g_reorder_target_ctx{nullptr};      // immediate context to act on
+static std::atomic<uint64_t> g_composite_last_inject_ms{0};
+
+inline uint64_t steady_now_ms() {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+// The composited path counts as healthy while injections are actually
+// happening; outside that window (menus, install failure, pipeline change)
+// eligible boxes revert to the post-scene flush path.
+inline bool composite_path_healthy() {
+    const uint64_t last = g_composite_last_inject_ms.load(std::memory_order_relaxed);
+    return last != 0 && (steady_now_ms() - last) < 500;
+}
+
+inline bool is_composite_eligible(const RenderObject& o) {
+    return !o.fullscreen && o.effect == 0 && o.mode != DepthMode::Off;
+}
+
+// A genuine scene issues a large number of opaque draws between its depth
+// clear and its first translucent; anomaly passes (late re-clears, preview
+// renders, UI-phase blending) issue almost none. Requiring this many opaque
+// main-scene draws before an injection can fire rejects those single-frame
+// mistimings outright.
+static constexpr uint32_t KH_REORDER_MIN_OPAQUE_DRAWS = 128;
+// Punch-through guard margins: a fragment is discarded only when its true
+// camera distance exceeds the reconstructed scene distance by base +
+// relative * sceneDistance. The relative term must exceed the worst-case
+// reconstruction error from near-plane coefficient uncertainty (d_est =
+// d_true * n_used / n_true - relative, not absolute), so the guard can
+// never falsely clip a box that is genuinely in front.
+static constexpr float KH_COMPOSITE_GUARD_BASE = 0.5f;
+static constexpr float KH_COMPOSITE_GUARD_REL = 0.25f;
+// With MEASURED coefficients (projection sniffer) the reconstruction is
+// exact up to precision, so the guard collapses to a tight backstop.
+static constexpr float KH_COMPOSITE_GUARD_BASE_MEASURED = 0.25f;
+static constexpr float KH_COMPOSITE_GUARD_REL_MEASURED = 0.02f;
+
+// Injection attempts per scene frame: the live-DSV verification can
+// transiently mismatch; retrying on subsequent translucent draws (instead
+// of standing down for the frame) prevents single-frame blink-outs, and
+// the cap bounds the retry cost.
+static constexpr uint32_t KH_REORDER_MAX_INJECT_ATTEMPTS = 16;
+
+// NOTE - inject at the FIRST qualifying translucent draw, deliberately
+// without any consecutive-run requirement. A run gate was tried and caused
+// the very flicker it meant to prevent: the engine interleaves depth-
+// writing/alpha-tested draws INSIDE its translucent phase, which reset the
+// run counter and pushed the injection mid-phase - everything blended
+// before it got overdrawn by the boxes for that frame (and a fully starved
+// frame lost the boxes entirely). Triggering early on an isolated blended
+// draw amid the opaques is harmless by comparison: opaque ordering is
+// depth-resolved regardless of when the boxes land, subsequent translucents
+// still composite against them, and the only residue is a translucent box
+// briefly blending over a not-yet-complete background. Determinism beats
+// cleverness here.
+
+// --- ID3D11DeviceContext vtable slots (d3d11.h declaration order) ---
+static constexpr int KH_VT_DRAWINDEXED           = 12;
+static constexpr int KH_VT_DRAW                  = 13;
+static constexpr int KH_VT_MAP                   = 14;
+static constexpr int KH_VT_UNMAP                 = 15;
+static constexpr int KH_VT_DRAWINDEXEDINSTANCED  = 20;
+static constexpr int KH_VT_DRAWINSTANCED         = 21;
+static constexpr int KH_VT_OMSETRENDERTARGETS    = 33;
+static constexpr int KH_VT_OMSETRTS_AND_UAVS     = 34;
+static constexpr int KH_VT_OMSETBLENDSTATE       = 35;
+static constexpr int KH_VT_OMSETDEPTHSTENCIL     = 36;
+static constexpr int KH_VT_UPDATESUBRESOURCE     = 48;
+static constexpr int KH_VT_CLEARDEPTHSTENCIL     = 53;
+
+typedef void (STDMETHODCALLTYPE* FnDrawIndexed)(ID3D11DeviceContext*, UINT, UINT, INT);
+typedef void (STDMETHODCALLTYPE* FnDraw)(ID3D11DeviceContext*, UINT, UINT);
+typedef void (STDMETHODCALLTYPE* FnDrawIndexedInstanced)(ID3D11DeviceContext*, UINT, UINT, UINT, INT, UINT);
+typedef void (STDMETHODCALLTYPE* FnDrawInstanced)(ID3D11DeviceContext*, UINT, UINT, UINT, UINT);
+typedef void (STDMETHODCALLTYPE* FnOMSetRenderTargets)(ID3D11DeviceContext*, UINT, ID3D11RenderTargetView* const*, ID3D11DepthStencilView*);
+typedef void (STDMETHODCALLTYPE* FnOMSetRTsAndUAVs)(ID3D11DeviceContext*, UINT, ID3D11RenderTargetView* const*, ID3D11DepthStencilView*, UINT, UINT, ID3D11UnorderedAccessView* const*, const UINT*);
+typedef void (STDMETHODCALLTYPE* FnOMSetBlendState)(ID3D11DeviceContext*, ID3D11BlendState*, const FLOAT[4], UINT);
+typedef void (STDMETHODCALLTYPE* FnOMSetDepthStencilState)(ID3D11DeviceContext*, ID3D11DepthStencilState*, UINT);
+typedef void (STDMETHODCALLTYPE* FnClearDepthStencilView)(ID3D11DeviceContext*, ID3D11DepthStencilView*, UINT, FLOAT, UINT8);
+typedef HRESULT (STDMETHODCALLTYPE* FnMap)(ID3D11DeviceContext*, ID3D11Resource*, UINT, D3D11_MAP, UINT, D3D11_MAPPED_SUBRESOURCE*);
+typedef void (STDMETHODCALLTYPE* FnUnmap)(ID3D11DeviceContext*, ID3D11Resource*, UINT);
+typedef void (STDMETHODCALLTYPE* FnUpdateSubresource)(ID3D11DeviceContext*, ID3D11Resource*, UINT, const D3D11_BOX*, const void*, UINT, UINT);
+
+static FnDrawIndexed             g_orig_draw_indexed = nullptr;
+static FnDraw                    g_orig_draw = nullptr;
+static FnDrawIndexedInstanced    g_orig_draw_indexed_instanced = nullptr;
+static FnDrawInstanced           g_orig_draw_instanced = nullptr;
+static FnOMSetRenderTargets      g_orig_omset_rendertargets = nullptr;
+static FnOMSetRTsAndUAVs         g_orig_omset_rts_and_uavs = nullptr;
+static FnOMSetBlendState         g_orig_omset_blendstate = nullptr;
+static FnOMSetDepthStencilState  g_orig_omset_depthstencil = nullptr;
+static FnClearDepthStencilView   g_orig_clear_depthstencil = nullptr;
+static FnMap                     g_orig_map = nullptr;
+static FnUnmap                   g_orig_unmap = nullptr;
+static FnUpdateSubresource       g_orig_updatesubresource = nullptr;
+
+// CRITICAL - which thread is which:
+// The hooks fire for EVERY caller of the immediate context - the engine's
+// render thread AND our own extension's game-thread work (the Draw3D flush,
+// compute dispatches, the UI pass all drive this context under the bridge's
+// graphics lock, which parks the render thread while held). The flush's own
+// box draws carry the exact translucent signature (alpha blend, no-write
+// depth, main DSV), so if the hooks tracked them, the game thread would
+// pollute the render thread's phase state and could even trigger a second,
+// post-scene injection - boxes over everything for a frame. Every hook
+// therefore gates its tracking to the RENDER THREAD, identified as the
+// thread that clears the main scene depth (captured in the clear hook).
+// Consequently ReorderState is single-threaded by construction.
+//
+// Equally critical: the injection must NEVER acquire the bridge graphics
+// lock. Acquisition parks the render thread; acquiring FROM the render
+// thread while the game thread holds it (and waits for the park) deadlocks
+// the game - verified the hard way. No lock is needed either: game-thread
+// context use only ever happens while the render thread is parked, so the
+// two can never actually overlap; the dedicated composite constant buffer
+// removes the last shared-resource concern.
+//
+// Deliberately NO pointer memoization anywhere in this machinery: state
+// objects and views get destroyed and reallocated (PiP toggles, settings
+// changes), and a new object at a reused address would inherit a stale
+// classification - misattributed depth clears and misclassified blend
+// states produce exactly the rare, single-frame, both-direction glitches
+// this path must not have. GetDesc/GetResource are refcount-level calls at
+// a few hundred per frame; correctness is free here.
+static std::atomic<uint32_t> g_reorder_render_tid{0};
+
+inline bool reorder_on_render_thread() {
+    const uint32_t tid = g_reorder_render_tid.load(std::memory_order_relaxed);
+    return tid != 0 && tid == GetCurrentThreadId();
+}
+
+struct ReorderState {
+    bool injected = false;           // this scene frame already got its injection
+    bool in_injection = false;       // our own draws in flight: bypass tracking
+    bool blend_translucent = false;  // current blend state alpha-blends
+    bool dss_nowrite = false;        // current DSS tests but does not write depth
+    bool dsv_main = false;           // the main scene depth is bound
+    uint32_t opaque_draws = 0;       // opaque main-scene draws since the last main depth clear
+    uint32_t inject_attempts = 0;    // injection attempts this scene frame (retry bound)
+    // Viewport depth range sampled every 16th opaque draw - used ONLY to
+    // detect mid-cycle partition changes (the re-arm). It is deliberately
+    // NOT a trigger gate or an encode source anymore: gating on it
+    // required identity with the translucent phase's range, and a single
+    // poisoned sample (the cadence landing on an oddball draw) could not
+    // heal during the phase - no opaques run there - so entire frames
+    // were rejected and the box blinked out. The world-shape SPAN test on
+    // the trigger's own live range does all the legitimate cycle
+    // discrimination on its own.
+    float cycle_vp_min = 0.0f;
+    float cycle_vp_max = 1.0f;
+    bool  cycle_vp_valid = false;
+    // Encode range for the injection: the TRIGGER draw's own live viewport
+    // range - definitionally the range the world's translucents run under,
+    // captured at the moment the trigger passes the world-shape test.
+    float trig_vp_min = 0.0f;
+    float trig_vp_max = 1.0f;
+    bool  trig_vp_valid = false;
+    // Projection-view transform latched AT THE MAIN DEPTH CLEAR - i.e., in
+    // lockstep with the engine's own per-frame matrix snapshot. The engine
+    // uses a DYNAMIC NEAR PLANE re-evaluated per frame; the sim thread runs
+    // a frame ahead, so fetching the bridge PV mid-frame (at the translucent
+    // phase, milliseconds after frame setup) frequently returns the NEXT
+    // frame's projection. A near-plane difference skews the boxes' stored
+    // depth hyperbolically: negligible for far fragments, enormous for near
+    // ones - which is why the resulting flicker scales inversely with the
+    // distance to the box. Latching at the clear keeps the boxes' depth
+    // encoding synchronous with the geometry they are tested against.
+    RVExtBridge::ProjectionViewTransform cycle_pv = {};
+    bool  cycle_pv_valid = false;
+    // The engine's TRUE projection depth coefficients for this cycle,
+    // sniffed from its constant-buffer uploads (see the projection sniffer
+    // below). Everything left of the flicker problem reduces to one
+    // scalar - the dynamic near plane of the frame actually being
+    // rendered, which no bridge fetch can pin down (publication races) -
+    // and m32 IS that scalar (m32 ~= -n). Unlike the combined VP (which a
+    // camera-relative renderer never uploads in world space), the
+    // projection matrix survives camera-relative rendering intact and has
+    // a near-unmistakable structural signature.
+    float engine_m22 = 0.0f;
+    float engine_m32 = 0.0f;
+    bool  engine_proj_valid = false;
+};
+static ReorderState g_ro;
+
+// Resolves a depth view to its underlying resource identity, live - never
+// cached (see the note above).
+inline void* reorder_dsv_identity(ID3D11DepthStencilView* dsv) {
+    void* id = nullptr;
+    ID3D11Resource* res = nullptr;
+    dsv->GetResource(&res);
+
+    if (res) {
+        ID3D11Texture2D* tex = nullptr;
+
+        if (SUCCEEDED(res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&tex))) && tex) {
+            id = static_cast<void*>(tex);
+            tex->Release();
+        }
+
+        res->Release();
+    }
+
+    return id;
+}
+
+
+
+// ===========================================================================
+// Projection sniffer (v2 - depth coefficients only).
+//
+// A v1 sniffer hunted the engine's combined view-projection and found
+// nothing: a camera-relative renderer never uploads that matrix in world
+// space. The PROJECTION, however, survives camera-relative rendering
+// unchanged, and a D3D perspective projection is structurally unmistakable
+// inside arbitrary constant data: a dozen exact zeros, a literal one in a
+// fixed slot, FOV scales matching the latch to a couple of percent, a
+// stable m22 - and m32, the one volatile element (m32 ~= -nearPlane),
+// exactly the scalar every remaining depth artifact hinges on. Matching is
+// therefore TIGHT on structure and the stable elements and deliberately
+// LOOSE on m32, since m32 is what is being measured.
+//
+// Cost control: scanning stops for the cycle once captured; a cached
+// buffer + offset + orientation makes subsequent frames a single windowed
+// test; unknown-locator scans reject almost every window on the first
+// zero-check. All hooks are immediate-context + render-thread gated and
+// injection-guarded like the rest of the machinery.
+// ===========================================================================
+
+struct ProjLocator {
+    ID3D11Resource* buf = nullptr;   // identity only - never dereferenced
+    uint32_t float_offset = 0;
+    bool transposed = false;
+    bool valid = false;
+};
+static ProjLocator g_proj_locator;   // render thread only
+
+struct ProjPendingMap {
+    ID3D11Resource* res = nullptr;
+    void* data = nullptr;
+    uint32_t bytes = 0;
+};
+static ProjPendingMap g_proj_pending[8];   // render thread only
+
+inline bool proj_near_zero(float v) { return fabsf(v) < 1e-6f; }
+
+// Persisted last captured m32: the continuity anchor for measurement-mode
+// acceptance (see below).
+static float g_proj_last_m32 = 0.0f;   // render thread only
+
+// Tests a 16-float window for the row-vector D3D perspective layout
+// [ sx 0 0 0 / 0 sy 0 0 / jx jy m22 1 / 0 0 m32 0 ] and its transpose.
+// Structure, sx, sy and m22 must always match the latch tightly (stable
+// frame to frame). m32 acceptance depends on the MODE, and getting this
+// wrong caused a full cycle of regressions:
+//  - DISCOVERY (scanning unknown buffers): m32 must be within 10% of the
+//    latch. Discovery overwhelmingly happens on stable frames, and this is
+//    what keeps the locator off the engine's OTHER projections (the
+//    weapon slice's near plane is far outside 10% of the world's).
+//  - MEASUREMENT (reading the locked location): the latch must NOT veto
+//    m32 - on the very frames the sniffer exists for (a near-plane change
+//    in flight) the true value DIFFERS from the latch by definition;
+//    validating against it rejected the truth and blinked the box exactly
+//    on those frames. Instead, accept when within 10% of the latch OR 25%
+//    of the previously captured value (continuity): genuine per-frame
+//    changes pass, a repurposed buffer (foreign near plane) fails both
+//    and forces rediscovery.
+inline bool proj_try_window(const float* w, bool discovery) {
+    const float sx = g_ro.cycle_pv.projection[0][0];
+    const float sy = g_ro.cycle_pv.projection[1][1];
+    const float m22_l = g_ro.cycle_pv.projection[2][2];
+    const float m32_l = g_ro.cycle_pv.projection[3][2];
+    if (fabsf(m32_l) < 1e-9f) return false;
+
+    auto close = [](float a, float b, float rel) {
+        return fabsf(a - b) <= rel * (fabsf(a) > fabsf(b) ? fabsf(a) : fabsf(b)) + 1e-5f;
+    };
+
+    auto m32_ok = [&](float v) {
+        if (close(v, m32_l, 0.10f)) return true;
+        if (discovery) return false;
+        return g_proj_last_m32 != 0.0f && close(v, g_proj_last_m32, 0.25f);
+    };
+
+    // Row-vector, row-major upload.
+    if (proj_near_zero(w[1]) && proj_near_zero(w[2]) && proj_near_zero(w[3]) &&
+        proj_near_zero(w[4]) && proj_near_zero(w[6]) && proj_near_zero(w[7]) &&
+        proj_near_zero(w[12]) && proj_near_zero(w[13]) && proj_near_zero(w[15]) &&
+        fabsf(w[11] - 1.0f) < 1e-4f &&
+        close(w[0], sx, 0.02f) && close(w[5], sy, 0.02f) && close(w[10], m22_l, 0.02f) &&
+        m32_ok(w[14])) {
+        g_ro.engine_m22 = w[10];
+        g_ro.engine_m32 = w[14];
+        g_proj_last_m32 = w[14];
+        g_ro.engine_proj_valid = true;
+        g_proj_locator.transposed = false;
+        return true;
+    }
+
+    // Transposed (HLSL column_major) upload.
+    if (proj_near_zero(w[1]) && proj_near_zero(w[3]) &&
+        proj_near_zero(w[4]) && proj_near_zero(w[6]) && proj_near_zero(w[7]) &&
+        proj_near_zero(w[8]) && proj_near_zero(w[9]) && proj_near_zero(w[12]) && proj_near_zero(w[13]) &&
+        fabsf(w[14] - 1.0f) < 1e-4f &&
+        close(w[0], sx, 0.02f) && close(w[5], sy, 0.02f) && close(w[10], m22_l, 0.02f) &&
+        m32_ok(w[11])) {
+        g_ro.engine_m22 = w[10];
+        g_ro.engine_m32 = w[11];
+        g_proj_last_m32 = w[11];
+        g_ro.engine_proj_valid = true;
+        g_proj_locator.transposed = true;
+        return true;
+    }
+
+    return false;
+}
+
+inline void proj_scan_upload(ID3D11Resource* res, const void* data, uint32_t bytes) {
+    if (!g_ro.cycle_pv_valid || g_ro.engine_proj_valid) return;
+    if (bytes < 16 * sizeof(float)) return;
+    if (bytes > 16384) bytes = 16384;   // per-frame CBs are small; cap the scan
+    const float* f = static_cast<const float*>(data);
+    const uint32_t nfloats = bytes / 4;
+
+    if (g_proj_locator.valid && g_proj_locator.buf == res) {
+        if (g_proj_locator.float_offset + 16 <= nfloats &&
+            proj_try_window(f + g_proj_locator.float_offset, false)) {
+            g_stats.composite_proj_lock++;
+            return;
+        }
+
+        g_proj_locator.valid = false;   // buffer repurposed: rescan
+    }
+
+    for (uint32_t off = 0; off + 16 <= nfloats; off += 4) {
+        if (proj_try_window(f + off, true)) {
+            g_proj_locator.buf = res;
+            g_proj_locator.float_offset = off;
+            g_proj_locator.valid = true;
+            g_stats.composite_proj_lock++;
+            return;
+        }
+    }
+}
+
+// Returns the buffer's byte width when it is a plausibly-sized constant
+// buffer, 0 otherwise.
+inline uint32_t proj_upload_byte_width(ID3D11Resource* res) {
+    ID3D11Buffer* buf = nullptr;
+
+    if (FAILED(res->QueryInterface(__uuidof(ID3D11Buffer), reinterpret_cast<void**>(&buf))) || !buf) {
+        return 0;
+    }
+
+    D3D11_BUFFER_DESC bd = {};
+    buf->GetDesc(&bd);
+    buf->Release();
+
+    if ((bd.BindFlags & D3D11_BIND_CONSTANT_BUFFER) == 0 || bd.ByteWidth < 16 * sizeof(float)) {
+        return 0;
+    }
+
+    return bd.ByteWidth;
+}
+
+static HRESULT STDMETHODCALLTYPE hooked_map(ID3D11DeviceContext* self, ID3D11Resource* res, UINT sub, D3D11_MAP type, UINT flags, D3D11_MAPPED_SUBRESOURCE* mapped) {
+    const HRESULT hr = g_orig_map(self, res, sub, type, flags, mapped);
+
+    if (SUCCEEDED(hr) && mapped && mapped->pData && sub == 0 &&
+        (type == D3D11_MAP_WRITE_DISCARD || type == D3D11_MAP_WRITE_NO_OVERWRITE) &&
+        self == g_reorder_target_ctx.load(std::memory_order_relaxed) &&
+        reorder_on_render_thread() && !g_ro.in_injection &&
+        !g_ro.engine_proj_valid && g_ro.cycle_pv_valid) {
+        const uint32_t bytes = proj_upload_byte_width(res);
+
+        if (bytes != 0) {
+            for (auto& p : g_proj_pending) {
+                if (!p.res) {
+                    p.res = res;
+                    p.data = mapped->pData;
+                    p.bytes = bytes;
+                    break;
+                }
+            }
+        }
+    }
+
+    return hr;
+}
+
+static void STDMETHODCALLTYPE hooked_unmap(ID3D11DeviceContext* self, ID3D11Resource* res, UINT sub) {
+    if (sub == 0 && self == g_reorder_target_ctx.load(std::memory_order_relaxed) &&
+        reorder_on_render_thread() && !g_ro.in_injection) {
+        for (auto& p : g_proj_pending) {
+            if (p.res == res) {
+                // The engine has finished writing; the pointer is valid
+                // until the original Unmap below runs.
+                proj_scan_upload(res, p.data, p.bytes);
+                p = ProjPendingMap{};
+                break;
+            }
+        }
+    }
+
+    g_orig_unmap(self, res, sub);
+}
+
+static void STDMETHODCALLTYPE hooked_updatesubresource(ID3D11DeviceContext* self, ID3D11Resource* res, UINT sub, const D3D11_BOX* box, const void* data, UINT row_pitch, UINT depth_pitch) {
+    if (sub == 0 && !box && data &&
+        self == g_reorder_target_ctx.load(std::memory_order_relaxed) &&
+        reorder_on_render_thread() && !g_ro.in_injection &&
+        !g_ro.engine_proj_valid && g_ro.cycle_pv_valid) {
+        const uint32_t bytes = proj_upload_byte_width(res);
+        if (bytes != 0) proj_scan_upload(res, data, bytes);
+    }
+
+    g_orig_updatesubresource(self, res, sub, box, data, row_pitch, depth_pitch);
+}
+
+// Draws every eligible box into the CURRENT scene targets with depth
+// writes, back-to-front, so the engine's subsequent translucent passes
+// composite against them. Runs on the render thread inside a hooked draw;
+// full pipeline state is snapshotted and restored around it.
+//
+// CONCURRENCY: no lock, deliberately. The bridge's graphics lock parks the
+// render thread while the game thread uses the context, so game-thread
+// context use can never overlap this function's execution; acquiring that
+// lock FROM the render thread deadlocks the game (the holder is waiting
+// for this very thread to park). The injection writes only its own
+// dedicated constant buffer, so nothing is shared with the flush anyway.
+inline void inject_composited_boxes(ID3D11DeviceContext* ctx) {
+    const float snapshot_now = effect_time_seconds();
+    static std::vector<RenderObject> boxes;   // render-thread scratch
+    boxes.clear();
+
+    {
+        std::lock_guard<std::mutex> g(g_draw_list_mutex);
+
+        for (const auto& kv : g_draw_list) {
+            const RenderObject& o = kv.second;
+            if (!o.visible || !is_composite_eligible(o)) continue;
+            bool expired = false;
+            const float env = lifetime_envelope(o, snapshot_now, expired);
+            if (expired) continue;   // the Draw3D flush owns the erasure
+            boxes.push_back(o);
+            boxes.back().color[3] *= env;
+        }
+    }
+
+    // The path is alive even when the eligible set is momentarily empty -
+    // stamping here keeps the flush from flapping over.
+    g_composite_last_inject_ms.store(steady_now_ms(), std::memory_order_relaxed);
+    if (boxes.empty()) return;
+    ID3D11Device* dev = RVExtBridge::get_d3d_device();
+    if (!dev) { g_stats.composite_skips++; return; }
+    if (!ensure_resources(dev).empty()) { g_stats.composite_skips++; return; }
+
+    // Matrices: the CYCLE'S latched PV (captured at the main depth clear,
+    // synchronous with the engine's own frame-setup snapshot - see the
+    // cycle_pv note in ReorderState). A mid-frame bridge fetch is the LAST
+    // resort only: by the translucent phase the sim thread has often
+    // published the NEXT frame's projection, whose dynamic near plane can
+    // differ - skewing the boxes' stored depth worst at close range.
+    static RVExtBridge::ProjectionViewTransform s_last_pv = {};
+    static uint64_t s_last_pv_ms = 0;
+    RVExtBridge::ProjectionViewTransform pv = {};
+
+    if (g_ro.cycle_pv_valid) {
+        pv = g_ro.cycle_pv;
+
+        // TRUST THE LATCH. A live re-fetch differing from the latch means
+        // the sim republished MID-CYCLE, i.e., AFTER the clear - in which
+        // case the latch captured the pre-publication value, which is what
+        // the engine's frame data was fixed to at handover: the latch is
+        // CORRECT by construction in exactly the case this detector
+        // detects. (An earlier revision "conservatively" overrode the
+        // latch here and thereby manufactured a visible one-frame skew on
+        // ambiguous frames - the flickers correlated 1:1 with this
+        // counter. Diagnosis, not intervention.) The genuinely losing race
+        // - publication BEFORE the clear - makes latch == live and is
+        // undetectable from here; it is at most one frame per near-plane
+        // change event.
+        RVExtBridge::ProjectionViewTransform live = {};
+
+        if (RVExtBridge::get_projection_view_transform(live)) {
+            const float m22_latch = pv.projection[2][2];
+            const float m32_latch = pv.projection[3][2];
+            const float m22_live = live.projection[2][2];
+            const float m32_live = live.projection[3][2];
+            const float n_latch = (fabsf(m22_latch) > 1e-9f) ? (-m32_latch / m22_latch) : 0.0f;
+            const float n_live  = (fabsf(m22_live)  > 1e-9f) ? (-m32_live  / m22_live)  : 0.0f;
+            if (fabsf(n_latch - n_live) > 1e-4f) g_stats.composite_ambiguous++;
+        }
+    } else if (RVExtBridge::get_projection_view_transform(pv)) {
+        s_last_pv = pv;
+        s_last_pv_ms = steady_now_ms();
+    } else if (s_last_pv_ms != 0 && steady_now_ms() - s_last_pv_ms < 250) {
+        pv = s_last_pv;
+    } else {
+        g_stats.composite_skips++;
+        return;   // no usable matrices anywhere this frame
+    }
+
+    // MEASURED depth coefficients: when the projection sniffer captured the
+    // engine's own m22/m32 this cycle, overwrite the bridge values. The
+    // boxes then rasterize with the TRUE dynamic near plane of the frame
+    // being rendered - the one scalar the bridge can never pin down - and
+    // the guard reconstructs scene distance with the same truth, so its
+    // margins tighten from race-absorbing to precision-absorbing.
+    const bool measured = g_ro.engine_proj_valid;
+
+    if (measured) {
+        pv.projection[2][2] = g_ro.engine_m22;
+        pv.projection[3][2] = g_ro.engine_m32;
+    }
+
+    float view_proj[4][4];
+    mul_4x4(pv.view, pv.projection, view_proj);
+    float cam[3];
+    extract_camera_pos(pv.view, cam);
+
+    // Translucent-correct ordering among our own boxes: back to front.
+    std::sort(boxes.begin(), boxes.end(), [&cam](const RenderObject& a, const RenderObject& b) {
+        auto d2 = [&cam](const RenderObject& o) {
+            const float ex = o.pos[0] - cam[0];
+            const float ey = o.pos[2] - cam[1];
+            const float ez = o.pos[1] - cam[2];
+            return ex * ex + ey * ey + ez * ez;
+        };
+        return d2(a) > d2(b);
+    });
+
+    StateBackup backup;
+    backup.capture(ctx);
+
+    // CRITICAL - viewport depth range: the engine renders in depth
+    // PARTITIONS, remapping each pass's NDC z through the viewport
+    // MinDepth/MaxDepth of its slice. The boxes' stored depth must be
+    // encoded through the SAME range the surrounding scene geometry used,
+    // or every comparison skews - the box beats opaque walls it sits
+    // behind, or loses to the skydome it sits in front of, worst for NEAR
+    // fragments where a min-depth offset is a huge world-space error
+    // (hence flicker worsening close to the box). The authoritative range
+    // is the CURRENT CYCLE'S, captured from its own opaque phase on this
+    // very thread (g_ro.cycle_vp_*) - deliberately not the flush-probed
+    // globals, which the flush can poison by parking the render thread
+    // inside a secondary pass. Keep the engine's viewport rectangle, force
+    // the range, restore afterwards - StateBackup does not cover viewports.
+    UINT n_saved_vp = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+    D3D11_VIEWPORT saved_vp[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
+    ctx->RSGetViewports(&n_saved_vp, saved_vp);
+
+    {
+        D3D11_VIEWPORT vp = {};
+
+        if (n_saved_vp >= 1) {
+            vp = saved_vp[0];
+        } else {
+            vp.Width = static_cast<FLOAT>(g_main_depth_w);
+            vp.Height = static_cast<FLOAT>(g_main_depth_h);
+        }
+
+        vp.MinDepth = g_ro.trig_vp_valid ? g_ro.trig_vp_min : g_scene_vp_min_d;
+        vp.MaxDepth = g_ro.trig_vp_valid ? g_ro.trig_vp_max : g_scene_vp_max_d;
+        ctx->RSSetViewports(1, &vp);
+    }
+
+    // The HYBRID: hardware depth (with the shimmer bias) resolves marginal
+    // ties exactly as the months-stable flush path always did, and the
+    // pixel-shader guard vetoes fragments clearly behind opaque geometry
+    // using a mid-frame depth copy - matrix races can then never punch the
+    // box through a wall. When the copy or shader is unavailable the plain
+    // pipeline runs, which is simply the previous behavior.
+    const bool guard = ensure_composite_depth(dev, ctx) &&
+                       ensure_composite_shader(dev).empty();
+
+    UINT stride = sizeof(float) * 3, offset = 0;
+    ctx->IASetInputLayout(g_res.input_layout);
+    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ctx->IASetVertexBuffers(0, 1, &g_res.vertex_buffer, &stride, &offset);
+    ctx->VSSetShader(guard ? g_res.vs_composite : g_res.vs, nullptr, 0);
+    ctx->PSSetShader(guard ? g_res.ps_composite : g_res.ps, nullptr, 0);
+    ctx->GSSetShader(nullptr, nullptr, 0);
+    ctx->HSSetShader(nullptr, nullptr, 0);
+    ctx->DSSetShader(nullptr, nullptr, 0);
+    ctx->VSSetConstantBuffers(0, 1, &g_res.composite_cb);
+    ctx->PSSetConstantBuffers(0, 1, &g_res.composite_cb);
+    if (guard) ctx->PSSetShaderResources(0, 1, &g_res.comp_depth_srv);
+    // Depth WRITE is the whole point: the engine's translucents must be
+    // able to depth-reject against these boxes.
+    ctx->OMSetDepthStencilState(g_res.dss_test_write, 0);
+    ctx->RSSetState(g_res.rasterizer);
+    const FLOAT bf[4] = { 0, 0, 0, 0 };
+
+    for (const auto& o : boxes) {
+        ConstantData cbd = {};
+        memcpy(cbd.view_proj, view_proj, sizeof(cbd.view_proj));
+        cbd.center_size[0] = o.pos[0];
+        cbd.center_size[1] = o.pos[2];   // SQF [x,y,zASL] -> engine [x,zASL,y]
+        cbd.center_size[2] = o.pos[1];
+        cbd.size_axes[0] = o.size[0];    // SQF [x,y,z] sizes -> engine [x,z,y]
+        cbd.size_axes[1] = o.size[2];
+        cbd.size_axes[2] = o.size[1];
+        cbd.size_axes[3] = static_cast<float>(o.blend_mode);
+        memcpy(cbd.color, o.color, sizeof(cbd.color));
+        // The camera (engine space) serves both the guard's true fragment
+        // distance AND the solid band mask, so it is filled regardless.
+        cbd.fx0[0] = cam[0];
+        cbd.fx0[1] = cam[1];
+        cbd.fx0[2] = cam[2];
+        // Band / local-volume mask inputs (same conversion as the flush).
+        cbd.local0[0] = o.pos[0];
+        cbd.local0[1] = o.pos[2];   // SQF [x,y,zASL] -> engine [x,zASL,y]
+        cbd.local0[2] = o.pos[1];
+        cbd.local0[3] = static_cast<float>(o.local_shape);
+        cbd.local_radii[0] = o.local_radius[0];   // SQF [x,y,z] radii -> engine [x,z,y]
+        cbd.local_radii[1] = o.local_radius[2];
+        cbd.local_radii[2] = o.local_radius[1];
+        const float mean_r = (o.local_radius[0] + o.local_radius[1] + o.local_radius[2]) / 3.0f;
+        cbd.local1[0] = o.local_falloff / (mean_r > 0.01f ? mean_r : 0.01f);
+        cbd.local1[1] = o.localized ? 1.0f : 0.0f;
+        cbd.band0[0] = o.band_min;
+        cbd.band0[1] = o.band_max;
+        cbd.band0[2] = o.band_falloff;
+        cbd.band0[3] = o.banded ? 1.0f : 0.0f;
+
+        if (guard) {
+            // Guard inputs: reconstruction coefficients + the encode range
+            // of the copied depth, the copy's pixel dimensions, and the
+            // margins.
+            cbd.depth_params[0] = pv.projection[2][2];
+            cbd.depth_params[1] = pv.projection[3][2];
+            cbd.depth_params[2] = g_ro.trig_vp_valid ? g_ro.trig_vp_min : g_scene_vp_min_d;
+            cbd.depth_params[3] = g_ro.trig_vp_valid ? g_ro.trig_vp_max : g_scene_vp_max_d;
+            cbd.fx_meta[2] = static_cast<float>(g_res.comp_depth_w);
+            cbd.fx_meta[3] = static_cast<float>(g_res.comp_depth_h);
+            cbd.fx1[0] = measured ? KH_COMPOSITE_GUARD_BASE_MEASURED : KH_COMPOSITE_GUARD_BASE;
+            cbd.fx1[1] = measured ? KH_COMPOSITE_GUARD_REL_MEASURED : KH_COMPOSITE_GUARD_REL;
+        }
+
+        D3D11_MAPPED_SUBRESOURCE mapped = {};
+        if (FAILED(ctx->Map(g_res.composite_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) continue;
+        memcpy(mapped.pData, &cbd, sizeof(cbd));
+        ctx->Unmap(g_res.composite_cb, 0);
+        ctx->OMSetBlendState(g_res.blend_modes[o.blend_mode], bf, 0xFFFFFFFF);
+        ctx->Draw(36, 0);
+        g_stats.composite_boxes++;
+    }
+
+    if (n_saved_vp > 0) ctx->RSSetViewports(n_saved_vp, saved_vp);
+    backup.restore(ctx);
+    g_stats.composite_injections++;
+}
+
+inline void reorder_pre_draw(ID3D11DeviceContext* self) {
+    if (self != g_reorder_target_ctx.load(std::memory_order_relaxed)) return;
+    if (!reorder_on_render_thread()) return;   // our own game-thread draws must not be tracked
+    if (g_ro.in_injection || g_ro.injected) return;
+
+    if (!g_ro.blend_translucent || !g_ro.dss_nowrite) {
+        if (g_ro.dsv_main) {
+            // An opaque draw against the main scene depth: evidence that a
+            // genuine scene pass is in progress, and the source of this
+            // cycle's authoritative viewport depth range.
+            ++g_ro.opaque_draws;
+
+            if ((g_ro.opaque_draws & 15) == 0) {
+                UINT n_vp = 1;
+                D3D11_VIEWPORT vp = {};
+                self->RSGetViewports(&n_vp, &vp);
+
+                if (n_vp >= 1) {
+                    // PARTITION CHANGE RE-ARM: a single depth clear can
+                    // cover MULTIPLE render partitions - far terrain and
+                    // clouds first, the near world after, each under its
+                    // own viewport depth range. The far partition can
+                    // qualify entirely on its own (its opaques sample its
+                    // own range, clouds provide the translucent trigger)
+                    // and would SPEND the injection, leaving the near
+                    // world's translucent phase - where the boxes actually
+                    // matter - with nothing: the box blinks out for the
+                    // frame. When the range shifts between opaque samples,
+                    // a new partition has begun: re-arm so it gets its own
+                    // injection (an earlier far-partition draw of the box
+                    // is simply corrected by the nearer re-draw).
+                    if (g_ro.cycle_vp_valid &&
+                        (fabsf(vp.MinDepth - g_ro.cycle_vp_min) > 0.002f ||
+                         fabsf(vp.MaxDepth - g_ro.cycle_vp_max) > 0.002f)) {
+                        g_ro.injected = false;
+                        g_ro.inject_attempts = 0;
+                        // The opaque count deliberately SURVIVES the
+                        // re-arm. Resetting it (an earlier weapon-slice
+                        // fix, since superseded by the span gate's
+                        // MaxDepth test) starved whole frames: when close
+                        // to large geometry the engine's partition
+                        // boundaries drift per frame, a late-phase range
+                        // change re-armed with a zeroed count, and the
+                        // world's translucents arrived against a floor
+                        // that cannot refill mid-phase - multi-frame
+                        // blink-out bursts at close range.
+                        g_stats.composite_rearms++;
+                    }
+
+                    g_ro.cycle_vp_min = vp.MinDepth;
+                    g_ro.cycle_vp_max = vp.MaxDepth;
+                    g_ro.cycle_vp_valid = true;
+                }
+            }
+        }
+
+        return;
+    }
+
+    if (!g_ro.dsv_main) return;
+
+    // Mistiming rejection: a real scene issues a wall of opaque draws
+    // between its depth clear and its translucent phase; late re-clears
+    // and preview/overlay passes mostly do not - without this, such passes
+    // could pull the injection into a completed frame and paint the boxes
+    // over everything. Beyond that, the FIRST qualifying translucent draw
+    // is the trigger (see the run-gate note above the vtable slots).
+    if (g_ro.opaque_draws < KH_REORDER_MIN_OPAQUE_DRAWS) {
+        g_stats.composite_rej_floor++;
+        return;
+    }
+
+    // CYCLE DISCRIMINATION - the decisive gate. The engine runs MORE THAN
+    // ONE clear->draw cycle on the same main depth resource per frame
+    // (weapon/hands pass, reflection or overlay renders); each mid-frame
+    // clear re-arms this state machine, and a secondary cycle that happens
+    // to contain enough opaque draws plus one blended draw would either
+    // fire a SECOND injection over the completed frame - box over opaques,
+    // translucents AND particles at once - or, if it runs before the world,
+    // SPEND the injection so the real scene gets no box at all. The
+    // fingerprint is the viewport DEPTH RANGE: this cycle's translucent
+    // phase must run under the SAME range its own opaque phase used
+    // (captured above on this thread, this cycle). A mismatch means the
+    // engine moved on to a different partition or pass: pass through
+    // without consuming an attempt, leaving the injection armed for a
+    // draw that matches. Comparing against the cycle's OWN capture -
+    // rather than any cross-thread probe - is what makes this immune to
+    // the flush parking the render thread inside a secondary pass and
+    // recording the wrong range.
+    {
+        // WORLD-SHAPE test on the trigger draw's OWN live range - the sole
+        // range gate, by design. Only a partition spanning the BROAD
+        // MIDDLE of [0, 1] is the world pass: a range starting deep is a
+        // far partition (distant terrain, clouds); one that never reaches
+        // the far side is the weapon/hands slice (rendered AFTER the
+        // world - injecting there paints the box over the completed
+        // frame). An earlier revision ALSO required identity with the
+        // cycle's opaque-phase sample; that gate was redundant where it
+        // was right and unrecoverable where it was wrong (a poisoned
+        // sample cannot heal during the translucent phase - no opaques
+        // run there to refresh it), silently rejecting whole frames.
+        UINT n_vp = 1;
+        D3D11_VIEWPORT vp = {};
+        self->RSGetViewports(&n_vp, &vp);
+        if (n_vp < 1) return;
+
+        if (vp.MinDepth > 0.3f || vp.MaxDepth < 0.7f) {
+            g_stats.composite_rej_span++;
+            return;
+        }
+
+        // The passing trigger's range IS the encode range: the world's
+        // translucents depth-test correctly through it against the
+        // opaque-written depth, so the boxes must encode through it too.
+        g_ro.trig_vp_min = vp.MinDepth;
+        g_ro.trig_vp_max = vp.MaxDepth;
+        g_ro.trig_vp_valid = true;
+    }
+
+    if (g_ro.inject_attempts >= KH_REORDER_MAX_INJECT_ATTEMPTS) return;
+    ++g_ro.inject_attempts;
+
+    // Authoritative verification at each attempt: confirm the LIVE depth
+    // binding is the main scene's before committing. On mismatch, correct
+    // the tracking and RETRY on a later qualifying draw this frame -
+    // standing down entirely would blank the boxes for the whole frame
+    // over a transient.
+    {
+        ID3D11DepthStencilView* live_dsv = nullptr;
+        self->OMGetRenderTargets(0, nullptr, &live_dsv);
+        void* id = nullptr;
+
+        if (live_dsv) {
+            id = reorder_dsv_identity(live_dsv);
+            live_dsv->Release();
+        }
+
+        if (!id || id != g_main_depth_identity) {
+            g_ro.dsv_main = false;
+            g_stats.composite_rej_verify++;
+            return;
+        }
+    }
+
+    g_ro.injected = true;
+    g_ro.in_injection = true;
+    inject_composited_boxes(self);
+    g_ro.in_injection = false;
+}
+
+static void STDMETHODCALLTYPE hooked_draw_indexed(ID3D11DeviceContext* self, UINT ic, UINT sil, INT bvl) {
+    reorder_pre_draw(self);
+    g_orig_draw_indexed(self, ic, sil, bvl);
+}
+
+static void STDMETHODCALLTYPE hooked_draw(ID3D11DeviceContext* self, UINT vc, UINT svl) {
+    reorder_pre_draw(self);
+    g_orig_draw(self, vc, svl);
+}
+
+static void STDMETHODCALLTYPE hooked_draw_indexed_instanced(ID3D11DeviceContext* self, UINT icpi, UINT ic, UINT sil, INT bvl, UINT sil2) {
+    reorder_pre_draw(self);
+    g_orig_draw_indexed_instanced(self, icpi, ic, sil, bvl, sil2);
+}
+
+static void STDMETHODCALLTYPE hooked_draw_instanced(ID3D11DeviceContext* self, UINT vcpi, UINT ic, UINT svl, UINT sil) {
+    reorder_pre_draw(self);
+    g_orig_draw_instanced(self, vcpi, ic, svl, sil);
+}
+
+static void STDMETHODCALLTYPE hooked_omset_blendstate(ID3D11DeviceContext* self, ID3D11BlendState* bs, const FLOAT bf[4], UINT mask) {
+    if (self == g_reorder_target_ctx.load(std::memory_order_relaxed) && !g_ro.in_injection &&
+        reorder_on_render_thread()) {
+        if (!bs) {
+            g_ro.blend_translucent = false;   // default blend state: opaque
+        } else {
+            D3D11_BLEND_DESC d = {};
+            bs->GetDesc(&d);
+            // Translucent = blending enabled with a destination term:
+            // covers alpha (INV_SRC_ALPHA), additive (ONE) and the rest.
+            g_ro.blend_translucent = d.RenderTarget[0].BlendEnable &&
+                                     d.RenderTarget[0].DestBlend != D3D11_BLEND_ZERO;
+        }
+    }
+
+    g_orig_omset_blendstate(self, bs, bf, mask);
+}
+
+static void STDMETHODCALLTYPE hooked_omset_depthstencil(ID3D11DeviceContext* self, ID3D11DepthStencilState* dss, UINT ref) {
+    if (self == g_reorder_target_ctx.load(std::memory_order_relaxed) && !g_ro.in_injection &&
+        reorder_on_render_thread()) {
+        if (!dss) {
+            g_ro.dss_nowrite = false;   // default DSS: depth test + write
+        } else {
+            D3D11_DEPTH_STENCIL_DESC d = {};
+            dss->GetDesc(&d);
+            g_ro.dss_nowrite = d.DepthEnable && d.DepthWriteMask == D3D11_DEPTH_WRITE_MASK_ZERO;
+        }
+    }
+
+    g_orig_omset_depthstencil(self, dss, ref);
+}
+
+static void STDMETHODCALLTYPE hooked_omset_rendertargets(ID3D11DeviceContext* self, UINT n, ID3D11RenderTargetView* const* rtvs, ID3D11DepthStencilView* dsv) {
+    if (self == g_reorder_target_ctx.load(std::memory_order_relaxed) && !g_ro.in_injection &&
+        reorder_on_render_thread()) {
+        g_ro.dsv_main = dsv && g_main_depth_identity &&
+                        reorder_dsv_identity(dsv) == g_main_depth_identity;
+    }
+
+    g_orig_omset_rendertargets(self, n, rtvs, dsv);
+}
+
+static void STDMETHODCALLTYPE hooked_omset_rts_and_uavs(ID3D11DeviceContext* self, UINT n, ID3D11RenderTargetView* const* rtvs, ID3D11DepthStencilView* dsv, UINT uav_start, UINT n_uavs, ID3D11UnorderedAccessView* const* uavs, const UINT* counts) {
+    if (self == g_reorder_target_ctx.load(std::memory_order_relaxed) && !g_ro.in_injection &&
+        reorder_on_render_thread() && n != D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL) {
+        // The DSV changes through this path too; leaving it untracked lets
+        // the flag go stale (n == KEEP leaves the current bindings alone).
+        g_ro.dsv_main = dsv && g_main_depth_identity &&
+                        reorder_dsv_identity(dsv) == g_main_depth_identity;
+    }
+
+    g_orig_omset_rts_and_uavs(self, n, rtvs, dsv, uav_start, n_uavs, uavs, counts);
+}
+
+static void STDMETHODCALLTYPE hooked_clear_depthstencil(ID3D11DeviceContext* self, ID3D11DepthStencilView* dsv, UINT flags, FLOAT depth, UINT8 stencil) {
+    if (self == g_reorder_target_ctx.load(std::memory_order_relaxed) && !g_ro.in_injection &&
+        dsv && (flags & D3D11_CLEAR_DEPTH)) {
+        if (g_main_depth_identity && reorder_dsv_identity(dsv) == g_main_depth_identity) {
+            // The engine clears the main scene depth on its render thread:
+            // this is where that thread is identified for the tracking gate.
+            g_reorder_render_tid.store(GetCurrentThreadId(), std::memory_order_relaxed);
+
+            // A depth clear of the main scene buffer marks the new frame:
+            // injection re-arms and the phase evidence resets.
+            g_ro.injected = false;
+            g_ro.opaque_draws = 0;
+            g_ro.inject_attempts = 0;
+            g_ro.cycle_vp_valid = false;
+            g_ro.trig_vp_valid = false;
+            g_ro.engine_proj_valid = false;
+
+            // Latch this frame's matrices NOW, in lockstep with the engine's
+            // own frame-setup snapshot (see the cycle_pv note above). On a
+            // transient fetch failure the previous cycle's latch is kept -
+            // one frame stale beats the mid-frame fetch this replaces.
+            RVExtBridge::ProjectionViewTransform pv = {};
+
+            if (RVExtBridge::get_projection_view_transform(pv)) {
+                g_ro.cycle_pv = pv;
+                g_ro.cycle_pv_valid = true;
+            }
+        }
+    }
+
+    g_orig_clear_depthstencil(self, dsv, flags, depth, stencil);
+}
+
+// Installs the reorder hooks on the immediate context's vtable. Called every
+// flush (cheap early-out): retries until the bridge exposes the context,
+// refreshes the tracked context pointer across device resets, and gives up
+// permanently only on a definitive MinHook failure - in which case the
+// post-scene flush path carries on as before.
+inline void ensure_reorder_hook() {
+    ID3D11DeviceContext* ctx = RVExtBridge::get_d3d_device_context();
+    if (ctx) g_reorder_target_ctx.store(static_cast<void*>(ctx), std::memory_order_relaxed);
+    if (g_reorder_hook_active.load(std::memory_order_acquire) || g_reorder_hook_failed) return;
+    if (!ctx) return;   // bridge not ready: retry next flush
+
+    if (!ensure_minhook()) {
+        g_reorder_hook_failed = true;
+        report_error("KH RenderIntegration: MinHook init failed; composited rendering disabled");
+        return;
+    }
+
+    void** vt = *reinterpret_cast<void***>(ctx);
+    struct HookSpec { int slot; void* detour; void** original; };
+
+    const HookSpec specs[] = {
+        { KH_VT_DRAWINDEXED,          reinterpret_cast<void*>(&hooked_draw_indexed),           reinterpret_cast<void**>(&g_orig_draw_indexed) },
+        { KH_VT_DRAW,                 reinterpret_cast<void*>(&hooked_draw),                   reinterpret_cast<void**>(&g_orig_draw) },
+        { KH_VT_DRAWINDEXEDINSTANCED, reinterpret_cast<void*>(&hooked_draw_indexed_instanced), reinterpret_cast<void**>(&g_orig_draw_indexed_instanced) },
+        { KH_VT_DRAWINSTANCED,        reinterpret_cast<void*>(&hooked_draw_instanced),         reinterpret_cast<void**>(&g_orig_draw_instanced) },
+        { KH_VT_OMSETRENDERTARGETS,   reinterpret_cast<void*>(&hooked_omset_rendertargets),    reinterpret_cast<void**>(&g_orig_omset_rendertargets) },
+        { KH_VT_OMSETRTS_AND_UAVS,    reinterpret_cast<void*>(&hooked_omset_rts_and_uavs),     reinterpret_cast<void**>(&g_orig_omset_rts_and_uavs) },
+        { KH_VT_OMSETBLENDSTATE,      reinterpret_cast<void*>(&hooked_omset_blendstate),       reinterpret_cast<void**>(&g_orig_omset_blendstate) },
+        { KH_VT_OMSETDEPTHSTENCIL,    reinterpret_cast<void*>(&hooked_omset_depthstencil),     reinterpret_cast<void**>(&g_orig_omset_depthstencil) },
+        { KH_VT_CLEARDEPTHSTENCIL,    reinterpret_cast<void*>(&hooked_clear_depthstencil),     reinterpret_cast<void**>(&g_orig_clear_depthstencil) },
+        { KH_VT_MAP,                  reinterpret_cast<void*>(&hooked_map),                     reinterpret_cast<void**>(&g_orig_map) },
+        { KH_VT_UNMAP,                reinterpret_cast<void*>(&hooked_unmap),                   reinterpret_cast<void**>(&g_orig_unmap) },
+        { KH_VT_UPDATESUBRESOURCE,    reinterpret_cast<void*>(&hooked_updatesubresource),      reinterpret_cast<void**>(&g_orig_updatesubresource) },
+    };
+
+    size_t created = 0;
+
+    for (const auto& s : specs) {
+        if (MH_CreateHook(vt[s.slot], s.detour, s.original) != MH_OK) break;
+        ++created;
+    }
+
+    if (created == sizeof(specs) / sizeof(specs[0])) {
+        size_t enabled = 0;
+
+        for (const auto& s : specs) {
+            if (MH_EnableHook(vt[s.slot]) != MH_OK) break;
+            ++enabled;
+        }
+
+        if (enabled == created) {
+            g_reorder_hook_active.store(true, std::memory_order_release);
+            return;
+        }
+
+        for (size_t i = 0; i < enabled; ++i) MH_DisableHook(vt[specs[i].slot]);
+    }
+
+    for (size_t i = 0; i < created; ++i) MH_RemoveHook(vt[specs[i].slot]);
+    g_reorder_hook_failed = true;
+    report_error("KH RenderIntegration: draw hook install failed; composited rendering disabled");
+}
+
 // ===========================================================================
 // Flush-internal async visibility dispatch. Assumes the graphics lock is
 // ALREADY HELD by the caller (flush_frame) - deliberately does not call
@@ -1756,6 +3036,7 @@ inline bool flush_dispatch_visibility(ID3D11Device* dev, ID3D11DeviceContext* ct
     UINT depth_w = 0, depth_h = 0;
     if (!ensure_depth_srv(dev, ctx, &depth_w, &depth_h).empty()) return false;
     if (!ensure_compute_shaders(dev).empty()) return false;
+
     const UINT count = static_cast<UINT>(g_query_points_pending.size() / 3);
     if (count == 0) return false;
 
@@ -1939,6 +3220,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     // Boxes and fullscreen passes are split; fullscreen passes run last, in
     // handle (creation) order so chained effects compose deterministically.
     const float snapshot_now = effect_time_seconds();
+    const bool comp_healthy = composite_path_healthy();
     std::vector<RenderObject> boxes;
     std::vector<std::pair<uint32_t, RenderObject>> fullscreen;
 
@@ -1961,7 +3243,10 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
                 if (o.fullscreen) {
                     if (!o.affect_ui) fullscreen.emplace_back(it->first, o);
-                } else {
+                } else if (!(comp_healthy && is_composite_eligible(o))) {
+                    // Composited boxes are drawn pre-translucent by the
+                    // reorder hook; the flush stands down for them while
+                    // injections are actually happening.
                     boxes.push_back(o);
                 }
             }
@@ -2010,8 +3295,17 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             screen_h = vp.Height;
             vp_min_d = vp.MinDepth;
             vp_max_d = vp.MaxDepth;
-            g_scene_vp_min_d = vp.MinDepth;
-            g_scene_vp_max_d = vp.MaxDepth;
+
+            // The Draw3D park point can land inside a SECONDARY render
+            // cycle whose viewport range is a narrow slice; recording that
+            // would poison the UI-phase depth linearization. Only accept a
+            // range that spans the bulk of [0, 1] - the scene range does,
+            // sub-passes do not. (The injection path no longer depends on
+            // these globals at all; see the reorder machinery.)
+            if (vp.MinDepth < 0.5f && vp.MaxDepth > 0.5f) {
+                g_scene_vp_min_d = vp.MinDepth;
+                g_scene_vp_max_d = vp.MaxDepth;
+            }
         }
     }
 
@@ -2143,6 +3437,15 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         memcpy(cbd.color, o.color, sizeof(cbd.color));
         memcpy(cbd.fx0, o.fx, sizeof(cbd.fx0));
         memcpy(cbd.fx1, o.fx + 4, sizeof(cbd.fx1));
+
+        // Solid boxes repurpose fx0.xyz (unused effect params at effect 0)
+        // for the camera, which SolidMask's band term measures against.
+        if (o.effect == 0) {
+            cbd.fx0[0] = cam[0];
+            cbd.fx0[1] = cam[1];
+            cbd.fx0[2] = cam[2];
+        }
+
         cbd.fx_meta[0] = static_cast<float>(o.effect);
         cbd.fx_meta[1] = now;
         cbd.fx_meta[2] = screen_w;
@@ -2165,6 +3468,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         cbd.band0[1] = o.band_max;
         cbd.band0[2] = o.band_falloff;
         cbd.band0[3] = o.banded ? 1.0f : 0.0f;
+
         D3D11_MAPPED_SUBRESOURCE mapped = {};
         if (FAILED(ctx->Map(g_res.constant_buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return false;
         memcpy(mapped.pData, &cbd, sizeof(cbd));
@@ -2276,6 +3580,7 @@ inline void flush_frame() {
 
     if (!has_work) return;
     if (!RVExtBridge::is_initialized()) return;
+    ensure_reorder_hook();   // cheap early-out once installed; refreshes the tracked context
     ID3D11Device* dev = RVExtBridge::get_d3d_device();
     ID3D11DeviceContext* ctx = RVExtBridge::get_d3d_device_context();
     if (!dev || !ctx) return;
@@ -2479,6 +3784,16 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         memcpy(cbd.color, o.color, sizeof(cbd.color));
         memcpy(cbd.fx0, o.fx, sizeof(cbd.fx0));
         memcpy(cbd.fx1, o.fx + 4, sizeof(cbd.fx1));
+
+        // Overlay solid boxes need the camera for SolidMask's band term.
+        if (o.effect == 0) {
+            float ui_cam[3];
+            extract_camera_pos(pv.view, ui_cam);
+            cbd.fx0[0] = ui_cam[0];
+            cbd.fx0[1] = ui_cam[1];
+            cbd.fx0[2] = ui_cam[2];
+        }
+
         cbd.fx_meta[0] = static_cast<float>(o.effect);
         cbd.fx_meta[1] = now;
         cbd.fx_meta[2] = static_cast<float>(td.Width);
@@ -2669,6 +3984,8 @@ inline size_t clear_render_objects() {
 
 } // namespace RenderIntegration
 
+#undef KH_SAFE_RELEASE
+
 // ---------------------------------------------------------------------------
 // SQF entry points
 // ---------------------------------------------------------------------------
@@ -2778,6 +4095,11 @@ static game_value gpu_visibility_sqf(game_value_parameter args) {
 //              for meanings and defaults; omitted entries take defaults)
 //   band:      [minDist, maxDist, falloff?] - additionally confines the box's
 //              effect to a camera-distance band (maxDist <= 0 = unbounded)
+// Solid, non-overlay boxes are ALWAYS composited: injected into the frame
+// BEFORE the engine draws its translucents, with depth written, so the
+// engine itself composites smoke/particles against them pixel-perfectly
+// (automatic fallback to the post-scene flush if the draw hook is
+// unavailable). Effect and overlay boxes render on the flush path.
 // Returns SCALAR handle (>= 1) or a STRING error.
 
 static game_value add_render3d_sqf(game_value_parameter args) {
@@ -3126,6 +4448,16 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("uiFlushes", RenderIntegration::g_stats.ui_flushes));
         out.push_back(kv("uiGatePassed", RenderIntegration::g_stats.ui_gate_passed));
         out.push_back(kv("uiGateSkips", RenderIntegration::g_stats.ui_gate_skips));
+        out.push_back(kv("compositeInjections", RenderIntegration::g_stats.composite_injections));
+        out.push_back(kv("compositeBoxes", RenderIntegration::g_stats.composite_boxes));
+        out.push_back(kv("compositeSkips", RenderIntegration::g_stats.composite_skips));
+        out.push_back(kv("compositeAmbiguous", RenderIntegration::g_stats.composite_ambiguous));
+        out.push_back(kv("compositeProjLock", RenderIntegration::g_stats.composite_proj_lock));
+        out.push_back(kv("compositeRearms", RenderIntegration::g_stats.composite_rearms));
+        out.push_back(kv("compositeRejSpan", RenderIntegration::g_stats.composite_rej_span));
+        out.push_back(kv("compositeRejVerify", RenderIntegration::g_stats.composite_rej_verify));
+        out.push_back(kv("compositeRejFloor", RenderIntegration::g_stats.composite_rej_floor));
+        out.push_back(kv("reorderHook", RenderIntegration::g_reorder_hook_active.load(std::memory_order_acquire) ? 1 : 0));
         out.push_back(kv("uiDriverPolls", RenderIntegration::g_ui_poll_attempts));
         out.push_back(kv("uiDriverCtrl", RenderIntegration::g_ui_ctrl_created ? 1 : 0));
         out.push_back(kv("mainSceneW", RenderIntegration::g_main_depth_w));

@@ -170,6 +170,17 @@ struct unit_states {
 };
 
 static std::unordered_map<void*, unit_states> g_unit_states;
+static std::atomic<bool> g_minhook_initialized{false};
+static std::mutex g_minhook_mutex;
+
+static bool ensure_minhook() {
+    if (g_minhook_initialized.load(std::memory_order_acquire)) return true;
+    std::lock_guard<std::mutex> lock(g_minhook_mutex);
+    if (g_minhook_initialized.load(std::memory_order_acquire)) return true;
+    if (MH_Initialize() != MH_OK) return false;
+    g_minhook_initialized.store(true, std::memory_order_release);
+    return true;
+}
 
 // Detect explicitly dedicated server
 static bool get_machine_is_server() {

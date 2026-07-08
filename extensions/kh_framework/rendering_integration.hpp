@@ -167,10 +167,10 @@ enum class EffectId : int {
     Solid = 0, Invert = 1, ColorGrade = 2, Vignette = 3, Chromatic = 4,
     Grain = 5, Sharpen = 6, Blur = 7, Bloom = 8, Distortion = 9,
     Outline = 10, Pulse = 11, Halation = 12, Fog = 13,
-    LensFlare = 14, Anamorphic = 15, SunFlare = 16,
+    LensFlare = 14, Anamorphic = 15, SunFlare = 16, Glitch = 17,
 };
 
-static constexpr int KH_MAX_EFFECT = 16;
+static constexpr int KH_MAX_EFFECT = 17;
 static std::unordered_map<uint32_t, RenderObject> g_draw_list;
 static std::mutex g_draw_list_mutex;
 static uint32_t g_next_handle = 1;
@@ -499,7 +499,8 @@ float4 PSEffect(VSOut i) : SV_Target
         acc += max(SampleScene(int2(saturate(huv) * float2(fxMeta.z, fxMeta.w))) - fxParams0.x, 0.0f) * hw * fxParams1.y;
         outc = scene + acc * color.rgb * fxParams0.y;
     }
-    else if (effect == 15)    // Anamorphic streak: [threshold, intensity, lengthPx, falloffPow] + [vertical 0/1]; color = tint
+)HLSL"
+    R"HLSL(    else if (effect == 15)    // Anamorphic streak: [threshold, intensity, lengthPx, falloffPow] + [vertical 0/1]; color = tint
     {
         float3 acc = 0.0f;
         float total = 0.0f;
@@ -560,6 +561,62 @@ float4 PSEffect(VSOut i) : SV_Target
         }
     }
 
+        else if (effect == 17)    // Glitch: [intensity, speed, sliceAmountPx, sliceBands] + [colorSplitPx, blockAmount, noiseAmount, burstiness]
+    {
+        // Digital damage: horizontal slice tears, block corruption, RGB
+        // split, and interference noise, driven by a burst gate so the
+        // glitches strike intermittently rather than boiling constantly.
+        // burstiness 0 = continuous corruption, 1 = calm with hard spikes.
+        // Runs until the pass is removed; animate params (intensity ramp-
+        // down) for a "system recovering" feel. color.rgb tints the static.
+        float speed = max(fxParams0.y, 0.1f);
+        float tf = floor(t * speed);
+
+        float burst = Hash(float2(tf * 0.0131f, 7.31f));
+        burst = pow(burst, 1.0f + fxParams1.w * 6.0f);
+        float drive = lerp(1.0f, burst, saturate(fxParams1.w)) * fxParams0.x;
+
+        float2 suv = i.pos.xy;
+
+        // Horizontal slice displacement: few large tears, many small ones
+        float bands = max(fxParams0.w, 1.0f);
+        float band = floor(uv.y * bands);
+        float bh = (Hash(float2(band, tf)) - 0.5f) * 2.0f;
+        bh = sign(bh) * pow(abs(bh), 3.0f);
+        suv.x += bh * fxParams0.z * drive;
+
+        // Block corruption: coarse grid cells randomly displaced
+        if (fxParams1.y > 0.001f)
+        {
+            float2 cell = floor(uv * float2(24.0f, 14.0f));
+            float ch = Hash(cell + tf * 1.7f);
+            if (ch > 1.0f - 0.15f * saturate(fxParams1.y) * saturate(drive))
+            {
+                float2 off = (float2(Hash(cell + 3.1f + tf), Hash(cell + 5.7f + tf)) - 0.5f) * 80.0f * drive;
+                suv += off;
+            }
+        }
+
+        // RGB channel split along the tear axis
+        float split = fxParams1.x * drive;
+        float3 col;
+        col.r = SampleScene(int2(suv + float2(split, 0.0f))).r;
+        col.g = SampleScene(int2(suv)).g;
+        col.b = SampleScene(int2(suv - float2(split, 0.0f))).b;
+
+        // Interference lines + static
+        if (fxParams1.z > 0.001f)
+        {
+            float ln = Hash(float2(floor(i.pos.y * 0.5f), tf * 2.3f));
+            float lineHit = step(1.0f - 0.2f * saturate(fxParams1.z) * saturate(drive), ln);
+            float n = Hash(i.pos.xy * 0.37f + tf * 13.7f);
+            col = lerp(col, color.rgb * n, lineHit * 0.85f);
+            col += (n - 0.5f) * fxParams1.z * drive * 0.35f;
+        }
+
+        outc = max(col, 0.0f);
+    }
+
     // World-space localization mask: full strength within radius, fading to
     // zero over the falloff band. Sky/far pixels resolve to distant world
     // positions and mask out naturally.
@@ -617,8 +674,6 @@ float4 PSEffect(VSOut i) : SV_Target
 }
 )HLSL";
 
-// Compute kernels. Compiled twice: with MSAA_DEPTH=1 (Texture2DMS) or =0
-// (Texture2D), selected by the engine depth buffer's current sample count.
 static const char* g_cs_hlsl = R"HLSL(
 #if MSAA_DEPTH
 Texture2DMS<float> depthTex : register(t0);
@@ -1578,6 +1633,7 @@ inline int effect_id_from_gv(const game_value& gv) {
     if (s == "lensflare")  return 14;
     if (s == "anamorphic") return 15;
     if (s == "sunflare")   return 16;
+    if (s == "glitch")     return 17;
     return -1;
 }
 
@@ -1603,6 +1659,7 @@ inline void set_effect_params(RenderObject& obj, const auto_array<game_value>* p
         { 1.1f, 0.7f, 5.0f, 0.35f, 0.45f, 0.6f, 3.0f },  // 14 lensflare: threshold, intensity, ghosts, spacing, haloRadius, haloIntensity, chromaPx
         { 1.2f, 1.2f, 220.0f, 2.0f, 0.0f },              // 15 anamorphic: threshold, intensity, lengthPx, falloffPow, vertical
         { 0.0f, 0.5f, 0.8f, 0.15f, 4.0f, 0.6f, 1.2f },   // 16 sunflare: dirX, dirY, dirZ (SQF axes), size, ghostDots, ringIntensity, starburst
+        { 1.0f, 8.0f, 24.0f, 12.0f, 6.0f, 0.5f, 0.35f, 0.7f },  // 17 glitch: intensity, speed, sliceAmountPx, sliceBands, colorSplitPx, blockAmount, noiseAmount, burstiness
     };
 
     const int e = (obj.effect >= 0 && obj.effect <= KH_MAX_EFFECT) ? obj.effect : 0;
@@ -2923,6 +2980,7 @@ static game_value get_visibility_results_sqf() {
 //           pulse      [x, y, zASL, radius 50, bandWidth 3, intensity 2]
 //           halation   [threshold 1, intensity 1.2, radiusPx 5]
 //           fog        [startDist 200, endDist 1200, skyAmount 1]
+//           glitch [intensity 1, speed 8, sliceAmountPx 24, sliceBands 12, colorSplitPx 6, blockAmount 0.5, noiseAmount 0.35, burstiness 0.7]
 //   color:  [r,g,b,a] - effect tint/edge/ring color; ALPHA = overall effect
 //           intensity (blends the effect over the untouched scene)
 //   band:   [minDist, maxDist, falloff?] - confines the effect to a camera-

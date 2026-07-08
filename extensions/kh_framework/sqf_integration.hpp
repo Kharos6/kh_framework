@@ -7012,7 +7012,7 @@ static void initialize_sqf_integration() {
 
     _sqf_add_render3d_array = intercept::client::host::register_sqf_command(
         "addRender3D",
-        "Add a persistent 3D box drawn every frame until removed. [[x,y,zASL], size, [r,g,b,a]?, mode?, sceneRead?, effect?, params?, band?, blend?]; size: number or [x,y,z] per-axis edge lengths; mode: 0=depth test (default), 1=test+write, 2=overlay; effect (string/scalar): 'invert','colorgrade','vignette','chromatic','grain','sharpen','blur','bloom','distortion','outline','pulse','halation','fog'; band [minDist,maxDist,falloff?]; blend: 'normal','additive','multiply','screen','lighten','darken'. Callable from any context. Returns SCALAR handle or STRING error.",
+        "Add a persistent 3D box drawn every frame until removed. [[x,y,zASL], size, [r,g,b,a]?, mode?, sceneRead?, effect?, params?, band?, blend?]; size: number or [x,y,z] per-axis edge lengths; mode: 0=depth test (default), 1=test+write, 2=overlay; effect (string/scalar): 'invert','colorgrade','vignette','chromatic','grain','sharpen','blur','bloom','distortion','outline','pulse','halation','fog','lensflare','anamorphic','sunflare','glitch'; band [minDist,maxDist,falloff?]; blend: 'normal','additive','multiply','screen','lighten','darken'. Callable from any context. Returns SCALAR handle or STRING error.",
         userFunctionWrapper<add_render3d_sqf>,
         game_data_type::ANY,
         game_data_type::ARRAY
@@ -7028,7 +7028,7 @@ static void initialize_sqf_integration() {
  
     _sqf_add_postfx_array = intercept::client::host::register_sqf_command(
         "addPostFX",
-        "Create a persistent fullscreen post-processing pass: [effect, params?, [r,g,b,a]?, band?, blend?, affectUI?]. Effects: 'invert','colorgrade','vignette','chromatic','grain','sharpen','blur','bloom','distortion','outline','pulse','halation','fog','lensflare','anamorphic','sunflare'; color alpha = intensity; band [minDist,maxDist,falloff?]; blend: 'normal','additive','multiply','screen','lighten','darken'; affectUI: BOOL (default false) - true renders the pass post-tonemap over the composited frame INCLUDING the UI. Passes chain in creation order per phase. Manage with updatePostFX / removeRenderHandler. Returns SCALAR handle or STRING error.",
+        "Create a persistent fullscreen post-processing pass: [effect, params?, [r,g,b,a]?, band?, blend?, affectUI?]. Effects: 'invert','colorgrade','vignette','chromatic','grain','sharpen','blur','bloom','distortion','outline','pulse','halation','fog','lensflare','anamorphic','sunflare','glitch'; color alpha = intensity; band [minDist,maxDist,falloff?]; blend: 'normal','additive','multiply','screen','lighten','darken'; affectUI: BOOL (default false) - true renders the pass post-tonemap over the composited frame INCLUDING the UI. Passes chain in creation order per phase. Manage with updatePostFX / removeRenderHandler. Returns SCALAR handle or STRING error.",
         userFunctionWrapper<add_postfx_sqf>,
         game_data_type::ANY,
         game_data_type::ARRAY

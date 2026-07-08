@@ -2051,6 +2051,7 @@ static std::atomic<bool>     g_reorder_hook_active{false};
 static bool                  g_reorder_hook_failed = false;      // game thread only
 static std::atomic<void*>    g_reorder_target_ctx{nullptr};      // immediate context to act on
 static std::atomic<uint64_t> g_composite_last_inject_ms{0};
+static std::atomic<uint64_t> g_composite_inject_serial{0};
 
 inline uint64_t steady_now_ms() {
     return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -2702,6 +2703,8 @@ inline void inject_composited_boxes(ID3D11DeviceContext* ctx) {
     if (n_saved_vp > 0) ctx->RSSetViewports(n_saved_vp, saved_vp);
     backup.restore(ctx);
     g_stats.composite_injections++;
+    g_stats.composite_injections++;
+    g_composite_inject_serial.fetch_add(1, std::memory_order_relaxed);
 }
 
 inline void reorder_pre_draw(ID3D11DeviceContext* self) {
@@ -3220,7 +3223,19 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     // Boxes and fullscreen passes are split; fullscreen passes run last, in
     // handle (creation) order so chained effects compose deterministically.
     const float snapshot_now = effect_time_seconds();
-    const bool comp_healthy = composite_path_healthy();
+    
+    // A single missed injection inside the 500 ms health window used to
+    // leave composited boxes undrawn for that frame - the visible blink
+    // when a gate transiently rejects during a camera sweep. The flush now
+    // stands down only when an injection actually LANDED since the previous
+    // flush; a missed frame falls back to the post-scene draw instead of
+    // vanishing. Double-draw on phase misalignment is benign: identical
+    // opaque geometry at equal depth resolves to the same pixels.
+    static uint64_t s_prev_inject_serial = 0;   // flush runs on the game thread only
+    const uint64_t inject_serial = g_composite_inject_serial.load(std::memory_order_relaxed);
+    const bool injected_since_last_flush = inject_serial != s_prev_inject_serial;
+    s_prev_inject_serial = inject_serial;
+    const bool comp_healthy = composite_path_healthy() && injected_since_last_flush;
     std::vector<RenderObject> boxes;
     std::vector<std::pair<uint32_t, RenderObject>> fullscreen;
 

@@ -119,6 +119,7 @@ static code g_compiled_kh_handler_string;
 static code g_compiled_kh_callback_handler;
 static code g_compiled_kh_persistent_marker;
 static code g_compiled_kh_immediate_call;
+static code g_compiled_kh_ui_render_init;
 static game_value g_return_value;
 static game_value g_call_arguments;
 static game_value g_kh_cached_temporal_stack;

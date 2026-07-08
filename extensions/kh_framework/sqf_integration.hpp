@@ -157,6 +157,7 @@ static registered_sqf_function _sqf_get_visibility_results;
 static registered_sqf_function _sqf_add_postfx_array;
 static registered_sqf_function _sqf_add_local_postfx_array;
 static registered_sqf_function _sqf_get_render_stats;
+static registered_sqf_function _sqf_flush_ui_render;
 
 static game_value execute_lua_sqf(game_value_parameter args, game_value_parameter code_or_function) {    
     try {
@@ -7027,7 +7028,7 @@ static void initialize_sqf_integration() {
  
     _sqf_add_postfx_array = intercept::client::host::register_sqf_command(
         "addPostFX",
-        "Create a persistent fullscreen post-processing pass: [effect, params?, [r,g,b,a]?, band?, blend?]. Effects: 'invert','colorgrade','vignette','chromatic','grain','sharpen','blur','bloom','distortion','outline','pulse','halation','fog'; color alpha = intensity; band [minDist,maxDist,falloff?] (maxDist<=0 = unbounded incl. sky); blend: 'normal','additive','multiply','screen','lighten','darken'. Passes chain in creation order. Manage with updatePostFX / removeRenderHandler. Returns SCALAR handle or STRING error.",
+        "Create a persistent fullscreen post-processing pass: [effect, params?, [r,g,b,a]?, band?, blend?, affectUI?]. Effects: 'invert','colorgrade','vignette','chromatic','grain','sharpen','blur','bloom','distortion','outline','pulse','halation','fog','lensflare','anamorphic','sunflare'; color alpha = intensity; band [minDist,maxDist,falloff?]; blend: 'normal','additive','multiply','screen','lighten','darken'; affectUI: BOOL (default false) - true renders the pass post-tonemap over the composited frame INCLUDING the UI. Passes chain in creation order per phase. Manage with updatePostFX / removeRenderHandler. Returns SCALAR handle or STRING error.",
         userFunctionWrapper<add_postfx_sqf>,
         game_data_type::ANY,
         game_data_type::ARRAY
@@ -7046,6 +7047,13 @@ static void initialize_sqf_integration() {
         "Render health counters (cumulative): [[name, value], ...] with flushes, gatePassed, lockRetries, lockFailedFrames, skipNoDsv, skipWrongPass, effectSetupFails, mainSceneW/H. A skipped flush is a frame rendered without effects (flicker).",
         userFunctionWrapper<get_render_stats_sqf>,
         game_data_type::ARRAY
+    );
+
+    _sqf_flush_ui_render = intercept::client::host::register_sqf_command(
+        "flushUIRender",
+        "Renders all UI-affecting passes (addPostFX with affectUI true) into the frame being composed. Driven automatically by the internal overlay control; also callable from a Draw EH on a custom display. Returns BOOL.",
+        userFunctionWrapper<flush_ui_render_sqf>,
+        game_data_type::BOOL
     );
 
     g_compiled_sqf_generic_call = sqf::compile(R"(setReturnValue (call _thisFunction);)");
@@ -7250,5 +7258,42 @@ static void initialize_sqf_integration() {
         private _executionCount = 0;
         private "_previousReturn";
         setReturnValue ((_khImmediate select 0) call (_khImmediate select 1));
+    )");
+
+    g_compiled_kh_ui_render_init = sqf::compile(R"(
+        private _display = findDisplay 46;
+
+        if (isNull _display) exitWith { 
+            setReturnValue false;
+        };
+
+        private _old = uiNamespace getVariable ["kh_uiDriverControl", controlNull];
+
+        if (!isNull _old) then { 
+            ctrlDelete _old;
+        };
+
+        private _control = _display ctrlCreate ["RscMapControlEmpty", -1];
+
+        if (isNull _control) then { 
+            _control = _display ctrlCreate ["RscMapControlEmpty", -1] 
+        };
+
+        if (isNull _control) exitWith { 
+            setReturnValue false;
+        };
+
+        _control ctrlSetPosition [0, 0, 0.000001, 0.000001];
+        _control ctrlCommit 0;
+
+        _control ctrlAddEventHandler [
+            "Draw", 
+            { 
+                flushUIRender;
+            }
+        ];
+
+        uiNamespace setVariable ["kh_uiDriverControl", _control];
+        setReturnValue true;
     )");
 }

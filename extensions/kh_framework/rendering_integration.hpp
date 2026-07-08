@@ -26,6 +26,12 @@ struct Resources {
     bool                     initialized = false;
 
     // --- Scene HDR color capture (resolved copy of the bound RTV) ---
+    // --- Post-tonemap backbuffer capture (UI-affecting passes) ---
+    ID3D11Texture2D*          bb_tex = nullptr;
+    ID3D11ShaderResourceView* bb_srv = nullptr;
+    UINT                      bb_w = 0, bb_h = 0;
+    DXGI_FORMAT               bb_fmt = DXGI_FORMAT_UNKNOWN;
+
     // --- Fullscreen-chain ping-pong targets (single-sample, scene format).
     //     The chain runs on these instead of re-resolving the MSAA scene per
     //     pass: one resolve per frame regardless of pass count. ---
@@ -54,6 +60,12 @@ struct Resources {
     ID3D11UnorderedAccessView* output_uav = nullptr;
     ID3D11Buffer*             staging_buffer = nullptr;    // synchronous readback (immediate commands)
     ID3D11Buffer*             staging_async[2] = {};       // double-buffered async readback
+
+    void release_bb_capture() {
+        if (bb_tex) { bb_tex->Release(); bb_tex = nullptr; }
+        if (bb_srv) { bb_srv->Release(); bb_srv = nullptr; }
+        bb_w = 0; bb_h = 0; bb_fmt = DXGI_FORMAT_UNKNOWN;
+    }
 
     void release_fx_chain() {
         for (int i = 0; i < 2; ++i) {
@@ -112,6 +124,7 @@ struct Resources {
         KH_SAFE_RELEASE(staging_async[0]);
         KH_SAFE_RELEASE(staging_async[1]);
         #undef KH_SAFE_RELEASE
+        release_bb_capture();
         release_fx_chain();
         release_scene_capture();
         release_depth_srv();
@@ -131,6 +144,7 @@ struct RenderObject {
     int   effect = 0;           // 0 = solid color; >0 = screen-space effect (see EffectId)
     float fx[8] = {};           // effect parameters (effect-specific, see set_effect_params)
     bool  fullscreen = false;   // true = fullscreen triangle (post-processing pass), size unused
+    bool  affect_ui = false;    // fullscreen passes: true = render post-tonemap over the composited frame (UI included) instead of the 3D scene phase
     bool  localized = false;    // fullscreen pass masked to a world-space sphere around pos
     float local_radius[3] = { 25.0f, 25.0f, 25.0f }; // full-strength radii per SQF axis [x, y, z] (m)
     int   local_shape = 0;      // 0 = sphere/ellipsoid, 1 = cube/box mask
@@ -153,9 +167,10 @@ enum class EffectId : int {
     Solid = 0, Invert = 1, ColorGrade = 2, Vignette = 3, Chromatic = 4,
     Grain = 5, Sharpen = 6, Blur = 7, Bloom = 8, Distortion = 9,
     Outline = 10, Pulse = 11, Halation = 12, Fog = 13,
+    LensFlare = 14, Anamorphic = 15, SunFlare = 16,
 };
 
-static constexpr int KH_MAX_EFFECT = 13;
+static constexpr int KH_MAX_EFFECT = 16;
 static std::unordered_map<uint32_t, RenderObject> g_draw_list;
 static std::mutex g_draw_list_mutex;
 static uint32_t g_next_handle = 1;
@@ -191,6 +206,9 @@ struct RenderStats {
     uint64_t skip_no_dsv = 0;        // no depth target bound (not a scene moment)
     uint64_t skip_wrong_pass = 0;    // a DSV was bound, but not the main scene's (PiP/mirror/UAV)
     uint64_t effect_setup_fails = 0; // capture/shader setup failed; effects demoted that frame
+    uint64_t ui_flushes = 0;         // UI-phase flush attempts with work queued
+    uint64_t ui_gate_passed = 0;     // UI-phase flushes that reached the draw path
+    uint64_t ui_gate_skips = 0;      // UI-phase skips (scene pass active / wrong target)
 };
 static RenderStats g_stats;
 
@@ -203,6 +221,12 @@ static void* g_main_depth_identity = nullptr;
 static UINT  g_main_depth_w = 0, g_main_depth_h = 0;
 static UINT  g_wrong_pass_streak = 0;
 static constexpr UINT KH_WRONG_PASS_READOPT = 120;
+
+// Depth values were written through the SCENE viewport depth range; UI-phase
+// shaders must linearize with the same range. Updated by the scene flush;
+// initialized to the empirically probed defaults.
+static float g_scene_vp_min_d = 0.011f;
+static float g_scene_vp_max_d = 0.999f;
 
 // ---------------------------------------------------------------------------
 // Shaders convention: row_major, clip = p * viewProj
@@ -261,7 +285,8 @@ float4 PSMain(VSOut i) : SV_Target
 
 // Effect uber-shader: samples the captured scene (t0) and, for effects 10/11,
 // the engine depth buffer (t1). Compiled per depth MSAA count.
-static const char* g_hlsl_effect = R"HLSL(
+static const char* g_hlsl_effect =
+    R"HLSL(
 Texture2D<float4> sceneColor : register(t0);
 
 #if MSAA_DEPTH
@@ -340,10 +365,38 @@ float4 PSEffect(VSOut i) : SV_Target
         float b = SampleScene(int2(i.pos.xy - off)).b;
         outc = float3(r, scene.g, b);
     }
-    else if (effect == 5)     // Grain: [amount, speed]
+    else if (effect == 5)     // Film grain: [amount, fps, grainSizePx, lumaResponse, chroma]
     {
-        float n = Hash(uv * fxMeta.z + frac(t * fxParams0.y) * 61.7f);
-        outc = scene + (n - 0.5f) * fxParams0.x;
+        // Filmic grain: smooth value noise with spatial extent (not per-pixel
+        // salt), triangular amplitude distribution, response peaking in the
+        // mid-shadows and protecting highlights, optional chroma, and time
+        // quantized to a frame rate for the discrete film-frame feel.
+        float fps = max(fxParams0.y, 1.0f);
+        float seed = floor(t * fps) * 61.7f;
+        float2 gp = i.pos.xy / max(fxParams0.z, 1.0f);
+        float2 ip = floor(gp);
+        float2 fp = frac(gp);
+        fp = fp * fp * (3.0f - 2.0f * fp);
+
+        float n00 = Hash(ip + seed);
+        float n10 = Hash(ip + float2(1, 0) + seed);
+        float n01 = Hash(ip + float2(0, 1) + seed);
+        float n11 = Hash(ip + float2(1, 1) + seed);
+        float nv = lerp(lerp(n00, n10, fp.x), lerp(n01, n11, fp.x), fp.y);
+        float nf = Hash(gp * 2.13f + seed + 17.0f);
+        float g = (nv + nf) * 0.5f - 0.5f;   // triangular-ish, signed
+
+        float3 gc = g.xxx;
+        if (fxParams1.x > 0.001f)
+        {
+            float gr = (lerp(Hash(ip + seed + 31.0f), Hash(ip + float2(1, 1) + seed + 31.0f), fp.x) + Hash(gp * 1.71f + seed + 47.0f)) * 0.5f - 0.5f;
+            float gb = (lerp(Hash(ip + seed + 73.0f), Hash(ip + float2(1, 1) + seed + 73.0f), fp.x) + Hash(gp * 2.71f + seed + 89.0f)) * 0.5f - 0.5f;
+            gc = lerp(gc, float3(gr, g, gb), fxParams1.x);
+        }
+
+        float luma = saturate(Luma(scene));
+        float resp = lerp(1.0f, 4.0f * luma * (1.0f - luma) * 0.9f + 0.1f, fxParams0.w);
+        outc = scene + gc * fxParams0.x * resp;
     }
     else if (effect == 6)     // Sharpen: [strength]
     {
@@ -377,7 +430,8 @@ float4 PSEffect(VSOut i) : SV_Target
                             cos(uv.x * fxParams0.y * 6.2832f + t * fxParams0.z)) * fxParams0.x;
         outc = SampleScene(int2(i.pos.xy + off));
     }
-    else if (effect == 10)    // Outline: [depthEdgeScale, lumEdgeScale, sceneDarken, glowBoost], color = edge
+)HLSL"
+    R"HLSL(    else if (effect == 10)    // Outline: [depthEdgeScale, lumEdgeScale, sceneDarken, glowBoost], color = edge
     {
         float dC = LinDepth(LoadDepthPS(px));
         float dX = LinDepth(LoadDepthPS(px + int2(1, 0))) - dC;
@@ -415,6 +469,95 @@ float4 PSEffect(VSOut i) : SV_Target
         float f = saturate((d - fxParams0.x) / max(fxParams0.y - fxParams0.x, 1.0f));
         if (d > 1e8f) f = saturate(fxParams0.z);   // sky/far-plane pixels
         outc = lerp(scene, color.rgb, f);
+    }
+    else if (effect == 14)    // Lens flare, image-based: [threshold, intensity, ghostCount, ghostSpacing] + [haloRadius, haloIntensity, chromaPx]
+    {
+        // Bright pixels anywhere in the capture spawn a "ghost" train mirrored
+        // through screen center, plus a halo ring - the sun, headlights and
+        // explosions all flare automatically. The HDR capture makes the
+        // threshold physically meaningful (sun >> white walls).
+        float2 cuv = float2(0.5f, 0.5f);
+        float2 ghostVec = (cuv - uv) * fxParams0.w;
+        int nGhosts = clamp((int)fxParams0.z, 1, 8);
+        float3 acc = 0.0f;
+        for (int g = 1; g <= nGhosts; ++g)
+        {
+            float2 suv = uv + ghostVec * (float)g;
+            float w = 1.0f - saturate(length(suv - cuv) * 1.6f);
+            w = w * w;
+            float2 spf = saturate(suv) * float2(fxMeta.z, fxMeta.w);
+            float2 cdir = normalize(ghostVec + 1e-5f) * fxParams1.z;
+            float3 s;
+            s.r = max(SampleScene(int2(spf + cdir)).r - fxParams0.x, 0.0f);
+            s.g = max(SampleScene(int2(spf)).g        - fxParams0.x, 0.0f);
+            s.b = max(SampleScene(int2(spf - cdir)).b - fxParams0.x, 0.0f);
+            acc += s * w;
+        }
+        float rC = length(uv - cuv);
+        float hw = 1.0f - saturate(abs(rC - fxParams1.x) * 8.0f);
+        float2 huv = uv + normalize(cuv - uv + 1e-5f) * fxParams1.x;
+        acc += max(SampleScene(int2(saturate(huv) * float2(fxMeta.z, fxMeta.w))) - fxParams0.x, 0.0f) * hw * fxParams1.y;
+        outc = scene + acc * color.rgb * fxParams0.y;
+    }
+    else if (effect == 15)    // Anamorphic streak: [threshold, intensity, lengthPx, falloffPow] + [vertical 0/1]; color = tint
+    {
+        float3 acc = 0.0f;
+        float total = 0.0f;
+        [unroll] for (int k = 1; k <= 16; ++k)
+        {
+            float t = (float)k / 16.0f;
+            float w = pow(1.0f - t, max(fxParams0.w, 0.1f));
+            int off = (int)(t * fxParams0.z);
+            int2 d = (fxParams1.x > 0.5f) ? int2(0, off) : int2(off, 0);
+            acc += (max(SampleScene(px + d) - fxParams0.x, 0.0f)
+                  + max(SampleScene(px - d) - fxParams0.x, 0.0f)) * w;
+            total += 2.0f * w;
+        }
+        acc /= max(total, 1.0f);
+        outc = scene + acc * color.rgb * fxParams0.y;
+    }
+    else if (effect == 16)    // Sun flare, source-aware: p0.xyz = direction (engine space), p0.w = size; p1 = [ghostDots, ringIntensity, starburst]
+    {
+        // The direction projects as a point at infinity (w component 0); the
+        // flare fades via per-pixel depth occlusion at the source: sky =
+        // visible, geometry = blocked, partial coverage = smooth fade.
+        float4 clip = mul(float4(fxParams0.xyz, 0.0f), viewProj);
+        if (clip.w > 0.01f)
+        {
+            float2 sndc = clip.xy / clip.w;
+            if (all(abs(sndc) < 1.3f))
+            {
+                float2 spos = float2(sndc.x * 0.5f + 0.5f, 0.5f - sndc.y * 0.5f);
+                int2 sp = int2(saturate(spos) * float2(fxMeta.z, fxMeta.w));
+                float vis = 0.0f;
+                [unroll] for (int oy = -2; oy <= 2; ++oy)
+                [unroll] for (int ox = -2; ox <= 2; ++ox)
+                    vis += (LinDepth(LoadDepthPS(sp + int2(ox, oy) * 3)) > 1e8f) ? 1.0f : 0.0f;
+                vis /= 25.0f;
+                if (vis > 0.001f)
+                {
+                    float aspect = fxMeta.z / fxMeta.w;
+                    float2 d = uv - spos;
+                    d.x *= aspect;
+                    float r = length(d) / max(fxParams0.w, 0.01f);
+                    float ang = atan2(d.y, d.x);
+                    float star = pow(abs(sin(ang * 6.0f)), 8.0f) * fxParams1.z;
+                    float core = exp(-r * 18.0f) * 2.0f + exp(-r * 3.0f) * (0.35f + star * saturate(1.0f - r));
+                    float2 axis = float2((0.5f - spos.x) * aspect, 0.5f - spos.y);
+                    float glow = 0.0f;
+                    [unroll] for (int g = 1; g <= 4; ++g)
+                    {
+                        if ((float)g <= fxParams1.x)
+                        {
+                            float2 gp = d - axis * (0.5f * (float)g);
+                            glow += exp(-length(gp) * (30.0f + (float)g * 14.0f)) * (0.5f / (float)g);
+                        }
+                    }
+                    glow += exp(-abs(r - 1.0f) * 9.0f) * fxParams1.y * 0.4f;
+                    outc = scene + color.rgb * (core + glow) * vis;
+                }
+            }
+        }
     }
 
     // World-space localization mask: full strength within radius, fading to
@@ -1432,6 +1575,9 @@ inline int effect_id_from_gv(const game_value& gv) {
     if (s == "pulse")      return 11;
     if (s == "halation")   return 12;
     if (s == "fog")        return 13;
+    if (s == "lensflare")  return 14;
+    if (s == "anamorphic") return 15;
+    if (s == "sunflare")   return 16;
     return -1;
 }
 
@@ -1445,7 +1591,7 @@ inline void set_effect_params(RenderObject& obj, const auto_array<game_value>* p
         { 1.0f, 1.0f, 1.0f, 1.0f },                  // 2 colorgrade: sat, contrast, brightness, gamma
         { 0.5f, 0.5f },                              // 3 vignette: startRadius, softness
         { 3.0f },                                    // 4 chromatic: strengthPx
-        { 0.08f, 10.0f },                            // 5 grain: amount, speed
+        { 0.06f, 24.0f, 1.5f, 0.7f, 0.3f },                            // 5 grain: amount, fps, grainSizePx, lumaResponse, chroma
         { 0.5f },                                    // 6 sharpen: strength
         { 2.0f },                                    // 7 blur: radiusPx
         { 1.0f, 0.8f, 2.0f },                        // 8 bloom: threshold, intensity, radiusPx
@@ -1454,6 +1600,9 @@ inline void set_effect_params(RenderObject& obj, const auto_array<game_value>* p
         { 0.0f, 0.0f, 0.0f, 50.0f, 3.0f, 2.0f },     // 11 pulse: x, y, zASL, radius, bandWidth, intensity
         { 1.0f, 1.2f, 5.0f },                        // 12 halation: threshold, intensity, radiusPx
         { 200.0f, 1200.0f, 1.0f },                   // 13 fog: startDist, endDist, skyAmount
+        { 1.1f, 0.7f, 5.0f, 0.35f, 0.45f, 0.6f, 3.0f },  // 14 lensflare: threshold, intensity, ghosts, spacing, haloRadius, haloIntensity, chromaPx
+        { 1.2f, 1.2f, 220.0f, 2.0f, 0.0f },              // 15 anamorphic: threshold, intensity, lengthPx, falloffPow, vertical
+        { 0.0f, 0.5f, 0.8f, 0.15f, 4.0f, 0.6f, 1.2f },   // 16 sunflare: dirX, dirY, dirZ (SQF axes), size, ghostDots, ringIntensity, starburst
     };
 
     const int e = (obj.effect >= 0 && obj.effect <= KH_MAX_EFFECT) ? obj.effect : 0;
@@ -1465,7 +1614,7 @@ inline void set_effect_params(RenderObject& obj, const auto_array<game_value>* p
         }
     }
 
-    if (e == static_cast<int>(EffectId::Pulse)) {
+    if (e == static_cast<int>(EffectId::Pulse) || e == static_cast<int>(EffectId::SunFlare)) {
         // SQF [x, y, zASL] -> engine [x, zASL, y]
         const float sx = obj.fx[0], sy = obj.fx[1], sz = obj.fx[2];
         obj.fx[0] = sx;
@@ -1689,8 +1838,12 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
         for (const auto& kv : g_draw_list) {
             if (!kv.second.visible) continue;
-            if (kv.second.fullscreen) fullscreen.emplace_back(kv.first, kv.second);
-            else boxes.push_back(kv.second);
+
+            if (kv.second.fullscreen) {
+                if (!kv.second.affect_ui) fullscreen.emplace_back(kv.first, kv.second);
+            } else {
+                boxes.push_back(kv.second);
+            }
         }
     }
 
@@ -1734,6 +1887,8 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             screen_h = vp.Height;
             vp_min_d = vp.MinDepth;
             vp_max_d = vp.MaxDepth;
+            g_scene_vp_min_d = vp.MinDepth;
+            g_scene_vp_max_d = vp.MaxDepth;
         }
     }
 
@@ -1747,7 +1902,8 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         return o.localized || o.banded ||
                o.effect == static_cast<int>(EffectId::Outline) ||
                o.effect == static_cast<int>(EffectId::Pulse) ||
-               o.effect == static_cast<int>(EffectId::Fog);
+               o.effect == static_cast<int>(EffectId::Fog) ||
+               o.effect == static_cast<int>(EffectId::SunFlare);
     };
 
     bool any_effect = !fullscreen.empty();
@@ -2018,6 +2174,286 @@ inline void flush_frame() {
 }
 
 // ===========================================================================
+// UI-affecting passes: post-tonemap backbuffer phase.
+// EMPIRICAL (verified in-game): mission-EH moments (EachFrame) can READ the
+// completed frame but writes are overwritten before Present; the write window
+// is DURING UI rendering, i.e. a control "Draw" event handler. The flush is
+// therefore driven by the flushUIRender command, called every frame by a Draw
+// EH on an invisible control that ensure_ui_driver() self-hosts on display
+// 46. The bound RTV at that moment is the LDR backbuffer (single-sample
+// RGBA8/BGRA8, no DSV) - the INVERSE of the scene-pass signature. Passes
+// with affect_ui render here over the composited frame, UI included; depth
+// remains readable (no DSV bound = no hazard), with UI pixels carrying the
+// depth of the scene behind them.
+// ===========================================================================
+
+inline std::string ensure_backbuffer_capture(ID3D11Device* dev, ID3D11DeviceContext* ctx,
+                                             ID3D11Texture2D* src_tex, const D3D11_TEXTURE2D_DESC& td) {
+    if (!g_res.bb_tex || g_res.bb_w != td.Width || g_res.bb_h != td.Height || g_res.bb_fmt != td.Format) {
+        g_res.release_bb_capture();
+        D3D11_TEXTURE2D_DESC bd = {};
+        bd.Width = td.Width;
+        bd.Height = td.Height;
+        bd.MipLevels = 1;
+        bd.ArraySize = 1;
+        bd.Format = td.Format;
+        bd.SampleDesc.Count = 1;
+        bd.Usage = D3D11_USAGE_DEFAULT;
+        bd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        HRESULT hr = dev->CreateTexture2D(&bd, nullptr, &g_res.bb_tex);
+        if (FAILED(hr)) return "Create bb tex " + hr_str(hr);
+        hr = dev->CreateShaderResourceView(g_res.bb_tex, nullptr, &g_res.bb_srv);
+        if (FAILED(hr)) { g_res.release_bb_capture(); return "Create bb SRV " + hr_str(hr); }
+        g_res.bb_w = td.Width;
+        g_res.bb_h = td.Height;
+        g_res.bb_fmt = td.Format;
+    }
+
+    ctx->CopyResource(g_res.bb_tex, src_tex);
+    return "";
+}
+
+inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
+    std::vector<std::pair<uint32_t, RenderObject>> passes;
+
+    {
+        std::lock_guard<std::mutex> g(g_draw_list_mutex);
+
+        for (const auto& kv : g_draw_list) {
+            if (kv.second.visible && kv.second.fullscreen && kv.second.affect_ui) {
+                passes.emplace_back(kv.first, kv.second);
+            }
+        }
+    }
+
+    if (passes.empty()) return;
+
+    std::sort(passes.begin(), passes.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+
+    // Inverse scene gate: RTV bound, NO DSV, single-sample, 8-bit RGBA/BGRA
+    ID3D11RenderTargetView* rtv = nullptr;
+    ID3D11DepthStencilView* dsv = nullptr;
+    ctx->OMGetRenderTargets(1, &rtv, &dsv);
+
+    if (dsv) {
+        dsv->Release();
+        if (rtv) rtv->Release();
+        g_stats.ui_gate_skips++;
+        return;
+    }
+
+    if (!rtv) { g_stats.ui_gate_skips++; return; }
+    ID3D11Resource* res = nullptr;
+    rtv->GetResource(&res);
+    rtv->Release();
+    if (!res) { g_stats.ui_gate_skips++; return; }
+    ID3D11Texture2D* bb = nullptr;
+    HRESULT hr = res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&bb));
+    res->Release();
+    if (FAILED(hr) || !bb) { g_stats.ui_gate_skips++; return; }
+    D3D11_TEXTURE2D_DESC td = {};
+    bb->GetDesc(&td);
+    bool fmt_ok;
+
+    switch (td.Format) {
+        case DXGI_FORMAT_R8G8B8A8_UNORM:
+        case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+        case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+        case DXGI_FORMAT_B8G8R8A8_UNORM:
+        case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+        case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+            fmt_ok = true; break;
+        default:
+            fmt_ok = false; break;
+    }
+
+    if (!fmt_ok || td.SampleDesc.Count > 1) {
+        bb->Release();
+        g_stats.ui_gate_skips++;
+        return;
+    }
+
+    if (!ensure_resources(dev).empty()) { bb->Release(); return; }
+    if (!ensure_effect_shader(dev).empty()) { bb->Release(); return; }
+    g_stats.ui_gate_passed++;
+    RVExtBridge::ProjectionViewTransform pv = {};
+    if (!RVExtBridge::get_projection_view_transform(pv)) { bb->Release(); return; }
+    float view_proj[4][4];
+    mul_4x4(pv.view, pv.projection, view_proj);
+    float inv_view_proj[4][4] = {};
+    bool need_inverse = false;
+
+    for (const auto& f : passes) {
+        if (f.second.localized || f.second.effect == static_cast<int>(EffectId::Pulse)) { need_inverse = true; break; }
+    }
+
+    const bool has_inverse = need_inverse && inverse_4x4(view_proj, inv_view_proj);
+    const float now = effect_time_seconds();
+    const bool depth_ok = g_res.depth_srv != nullptr;
+    StateBackup backup;
+    backup.capture(ctx);
+    ctx->IASetInputLayout(nullptr);
+    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ctx->VSSetShader(g_res.vs_fullscreen, nullptr, 0);
+    ctx->PSSetShader(g_res.ps_effect, nullptr, 0);
+    ctx->GSSetShader(nullptr, nullptr, 0);
+    ctx->HSSetShader(nullptr, nullptr, 0);
+    ctx->DSSetShader(nullptr, nullptr, 0);
+    ctx->VSSetConstantBuffers(0, 1, &g_res.constant_buffer);
+    ctx->PSSetConstantBuffers(0, 1, &g_res.constant_buffer);
+    ctx->OMSetDepthStencilState(g_res.dss_off, 0);
+    ctx->RSSetState(g_res.rasterizer);
+    const FLOAT bf[4] = { 0, 0, 0, 0 };
+
+    // The viewport at a control-Draw moment is the CONTROL's rectangle (our
+    // driver control is 1px) - a fullscreen triangle through it rasterizes
+    // to nothing. Own the viewport explicitly: full target for our passes,
+    // engine state restored after.
+    UINT n_saved_vp = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+    D3D11_VIEWPORT saved_vp[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
+    ctx->RSGetViewports(&n_saved_vp, saved_vp);
+    
+    {
+        D3D11_VIEWPORT full = {};
+        full.Width = static_cast<FLOAT>(td.Width);
+        full.Height = static_cast<FLOAT>(td.Height);
+        full.MinDepth = 0.0f;
+        full.MaxDepth = 1.0f;
+        ctx->RSSetViewports(1, &full);
+    }
+
+    for (const auto& f : passes) {
+        const RenderObject& o = f.second;
+        if (o.effect <= 0) continue;
+
+        const bool wants_depth = o.localized || o.banded ||
+            o.effect == static_cast<int>(EffectId::Outline) ||
+            o.effect == static_cast<int>(EffectId::Pulse) ||
+            o.effect == static_cast<int>(EffectId::Fog) ||
+            o.effect == static_cast<int>(EffectId::SunFlare);
+
+        if (wants_depth && !depth_ok) continue;
+        if ((o.localized || o.effect == static_cast<int>(EffectId::Pulse)) && !has_inverse) continue;
+
+        // Per-pass re-capture so UI-phase passes chain (LDR copy - cheap)
+        if (!ensure_backbuffer_capture(dev, ctx, bb, td).empty()) { g_stats.effect_setup_fails++; break; }
+        ID3D11ShaderResourceView* srvs[2] = { g_res.bb_srv, depth_ok ? g_res.depth_srv : nullptr };
+        ctx->PSSetShaderResources(0, 2, srvs);
+        ConstantData cbd = {};
+        memcpy(cbd.view_proj, view_proj, sizeof(view_proj));
+        memcpy(cbd.inv_view_proj, inv_view_proj, sizeof(inv_view_proj));
+        cbd.center_size[0] = o.pos[0];
+        cbd.center_size[1] = o.pos[2];
+        cbd.center_size[2] = o.pos[1];
+        cbd.center_size[3] = 0.0f;   // hardware blending against the live backbuffer
+        cbd.size_axes[3] = static_cast<float>(o.blend_mode);
+        memcpy(cbd.color, o.color, sizeof(cbd.color));
+        memcpy(cbd.fx0, o.fx, sizeof(cbd.fx0));
+        memcpy(cbd.fx1, o.fx + 4, sizeof(cbd.fx1));
+        cbd.fx_meta[0] = static_cast<float>(o.effect);
+        cbd.fx_meta[1] = now;
+        cbd.fx_meta[2] = static_cast<float>(td.Width);
+        cbd.fx_meta[3] = static_cast<float>(td.Height);
+        cbd.depth_params[0] = pv.projection[2][2];
+        cbd.depth_params[1] = pv.projection[3][2];
+        cbd.depth_params[2] = g_scene_vp_min_d;   // depth was written through the SCENE viewport
+        cbd.depth_params[3] = g_scene_vp_max_d;
+        cbd.local0[0] = o.pos[0];
+        cbd.local0[1] = o.pos[2];
+        cbd.local0[2] = o.pos[1];
+        cbd.local0[3] = static_cast<float>(o.local_shape);
+        cbd.local_radii[0] = o.local_radius[0];
+        cbd.local_radii[1] = o.local_radius[2];
+        cbd.local_radii[2] = o.local_radius[1];
+        const float mean_r = (o.local_radius[0] + o.local_radius[1] + o.local_radius[2]) / 3.0f;
+        cbd.local1[0] = o.local_falloff / (mean_r > 0.01f ? mean_r : 0.01f);
+        cbd.local1[1] = o.localized ? 1.0f : 0.0f;
+        cbd.band0[0] = o.band_min;
+        cbd.band0[1] = o.band_max;
+        cbd.band0[2] = o.band_falloff;
+        cbd.band0[3] = o.banded ? 1.0f : 0.0f;
+        D3D11_MAPPED_SUBRESOURCE mapped = {};
+        if (FAILED(ctx->Map(g_res.constant_buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) continue;
+        memcpy(mapped.pData, &cbd, sizeof(cbd));
+        ctx->Unmap(g_res.constant_buffer, 0);
+        ctx->OMSetBlendState(g_res.blend_modes[o.blend_mode], bf, 0xFFFFFFFF);
+        ctx->Draw(3, 0);
+    }
+
+    if (n_saved_vp > 0) ctx->RSSetViewports(n_saved_vp, saved_vp);
+    backup.restore(ctx);
+    bb->Release();
+}
+
+inline bool flush_ui_frame() {
+    bool has_work = false;
+
+    {
+        std::lock_guard<std::mutex> g(g_draw_list_mutex);
+        for (const auto& kv : g_draw_list) {
+            if (kv.second.visible && kv.second.fullscreen && kv.second.affect_ui) { has_work = true; break; }
+        }
+    }
+
+    if (!has_work) return false;
+    if (!RVExtBridge::is_initialized()) return false;
+    ID3D11Device* dev = RVExtBridge::get_d3d_device();
+    ID3D11DeviceContext* ctx = RVExtBridge::get_d3d_device_context();
+    if (!dev || !ctx) return false;
+    g_stats.ui_flushes++;
+
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        RVExtBridge::ScopedGraphicsLock lock;
+
+        if (!lock.acquired()) {
+            g_stats.lock_retries++;
+            continue;
+        }
+
+        flush_ui_locked(dev, ctx);
+        return true;
+    }
+
+    g_stats.lock_failed_frames++;
+    return false;
+}
+
+// ===========================================================================
+// Internal UI-flush driver: self-hosts the control "Draw" callsite. Display
+// 46 does not exist at pre_init, so an EachFrame poller waits for it, creates
+// an invisible 1px map control once, attaches a compiled-SQF Draw handler
+// invoking the flushUIRender command, then idles (one flag check per frame).
+// ===========================================================================
+
+static intercept::client::EHIdentifierHandle g_ui_poll_eh;
+static bool g_ui_driver_registered = false;
+static bool g_ui_ctrl_created = false;
+static uint64_t g_ui_poll_attempts = 0;
+
+inline void ensure_ui_driver() {
+    if (g_ui_driver_registered) return;
+    g_ui_driver_registered = true;
+    g_ui_ctrl_created = false;
+
+    g_ui_poll_eh = intercept::client::addMissionEventHandler<
+        intercept::client::eventhandlers_mission::EachFrame>([]() {
+        if (g_ui_ctrl_created) return;
+        g_ui_poll_attempts++;
+
+        try {
+            game_value result = raw_call_sqf_native(g_compiled_kh_ui_render_init);
+
+            if (result.type_enum() == game_data_type::BOOL && static_cast<bool>(result)) {
+                g_ui_ctrl_created = true;
+            }
+        } catch (...) {
+            // display transitioning or call context unavailable - retry next frame
+        }
+    });
+}
+
+// ===========================================================================
 // C++ Draw3D event handler lifecycle.
 // Mission EHs die with the mission: call on_mission_start() from
 // intercept::pre_init() and on_mission_end() from intercept::mission_ended().
@@ -2042,6 +2478,7 @@ inline void ensure_draw_eh() {
         }
     });
 
+    ensure_ui_driver();
     g_draw3d_eh_active = true;
 }
 
@@ -2061,12 +2498,19 @@ inline void reset_retained_state() {
 inline void on_mission_start() {
     g_draw3d_eh_active = false;
     g_draw3d_eh = {};
+    g_ui_driver_registered = false;
+    g_ui_ctrl_created = false;
+    g_ui_poll_eh = {};
+    ensure_ui_driver();
     reset_retained_state();
 }
 
 inline void on_mission_end() {
     g_draw3d_eh_active = false;
     g_draw3d_eh = {};
+    g_ui_driver_registered = false;
+    g_ui_ctrl_created = false;
+    g_ui_poll_eh = {};
     reset_retained_state();
 }
 
@@ -2169,8 +2613,8 @@ static game_value gpu_visibility_sqf(game_value_parameter args) {
         std::vector<float> results(count * 4);
         status = RenderIntegration::run_depth_compute(RenderIntegration::ComputeKernel::Visibility, count, 0.0f, 0.0f,
                                                       results.data(), count * 4);
+                                                    
         if (status != "OK") return game_value(status);
-
         auto_array<game_value> out;
         out.reserve(count);
         for (UINT i = 0; i < count; ++i) {
@@ -2346,9 +2790,12 @@ static game_value update_post_fx_sqf(game_value_parameter args) {
             const int bm = RenderIntegration::blend_id_from_gv(arr[2]);
             if (bm < 0) return game_value(false);
             obj.blend_mode = bm;
+        } else if (prop == "ui") {
+            obj.affect_ui = static_cast<bool>(arr[2]);
         } else if (prop == "band") {
             if (arr[2].type_enum() != game_data_type::ARRAY) return game_value(false);
             auto& band = arr[2].to_array();
+            
             if (band.size() < 2) {
                 obj.banded = false;   // empty/short array clears the band
             } else {
@@ -2529,6 +2976,10 @@ static game_value add_postfx_sqf(game_value_parameter args) {
             obj.blend_mode = bm;
         }
 
+        if (arr.size() > 5 && arr[5].type_enum() == game_data_type::BOOL) {
+            obj.affect_ui = static_cast<bool>(arr[5]);
+        }
+
         return game_value(static_cast<float>(RenderIntegration::add_render_object(obj)));
     } catch (const std::exception& e) {
         report_error(std::string("addPostFX: ") + e.what());
@@ -2558,6 +3009,11 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("skipNoDsv", RenderIntegration::g_stats.skip_no_dsv));
         out.push_back(kv("skipWrongPass", RenderIntegration::g_stats.skip_wrong_pass));
         out.push_back(kv("effectSetupFails", RenderIntegration::g_stats.effect_setup_fails));
+        out.push_back(kv("uiFlushes", RenderIntegration::g_stats.ui_flushes));
+        out.push_back(kv("uiGatePassed", RenderIntegration::g_stats.ui_gate_passed));
+        out.push_back(kv("uiGateSkips", RenderIntegration::g_stats.ui_gate_skips));
+        out.push_back(kv("uiDriverPolls", RenderIntegration::g_ui_poll_attempts));
+        out.push_back(kv("uiDriverCtrl", RenderIntegration::g_ui_ctrl_created ? 1 : 0));
         out.push_back(kv("mainSceneW", RenderIntegration::g_main_depth_w));
         out.push_back(kv("mainSceneH", RenderIntegration::g_main_depth_h));
         return game_value(std::move(out));
@@ -2632,5 +3088,23 @@ static game_value add_local_postfx_sqf(game_value_parameter args) {
     } catch (...) {
         report_error("addLocalPostFX: unknown exception");
         return game_value("EXCEPTION: unknown");
+    }
+}
+
+// flushUIRender
+// Renders all UI-affecting passes (addPostFX with affectUI = true) into the
+// frame being composed. Driven automatically by the internal overlay control
+// created by ensure_ui_driver(); also callable from a Draw EH on a custom
+// display. Cheap no-op when no UI-affecting passes exist. Returns BOOL: true
+// if passes were queued this call.
+static game_value flush_ui_render_sqf() {
+    try {
+        return game_value(RenderIntegration::flush_ui_frame());
+    } catch (const std::exception& e) {
+        report_error(std::string("flushUIRender: ") + e.what());
+        return game_value(false);
+    } catch (...) {
+        report_error("flushUIRender: unknown exception");
+        return game_value(false);
     }
 }

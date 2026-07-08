@@ -26,6 +26,12 @@ struct Resources {
     bool                     initialized = false;
 
     // --- Scene HDR color capture (resolved copy of the bound RTV) ---
+    // --- Fullscreen-chain ping-pong targets (single-sample, scene format).
+    //     The chain runs on these instead of re-resolving the MSAA scene per
+    //     pass: one resolve per frame regardless of pass count. ---
+    ID3D11Texture2D*          chain_tex[2] = {};
+    ID3D11RenderTargetView*   chain_rtv[2] = {};
+    ID3D11ShaderResourceView* chain_srv[2] = {};
     ID3D11Texture2D*          scene_tex = nullptr;
     ID3D11ShaderResourceView* scene_srv = nullptr;
     UINT                      scene_w = 0, scene_h = 0;
@@ -36,7 +42,6 @@ struct Resources {
     ID3D11DepthStencilView*   depth_dsv_ro = nullptr;   // read-only view: lets PS sample depth while depth-testing
     void*                     depth_res_identity = nullptr; // identity only, never dereferenced
     UINT                      depth_sample_count = 0;
-
 
     // --- Compute (depth queries / visibility) ---
     ID3D11ComputeShader*      cs_visibility = nullptr;
@@ -49,6 +54,16 @@ struct Resources {
     ID3D11UnorderedAccessView* output_uav = nullptr;
     ID3D11Buffer*             staging_buffer = nullptr;    // synchronous readback (immediate commands)
     ID3D11Buffer*             staging_async[2] = {};       // double-buffered async readback
+
+    void release_fx_chain() {
+        for (int i = 0; i < 2; ++i) {
+            #define KH_SAFE_RELEASE(p) if (p) { (p)->Release(); (p) = nullptr; }
+            KH_SAFE_RELEASE(chain_tex[i]);
+            KH_SAFE_RELEASE(chain_rtv[i]);
+            KH_SAFE_RELEASE(chain_srv[i]);
+            #undef KH_SAFE_RELEASE
+        }
+    }
 
     void release_scene_capture() {
         #define KH_SAFE_RELEASE(p) if (p) { (p)->Release(); (p) = nullptr; }
@@ -97,6 +112,7 @@ struct Resources {
         KH_SAFE_RELEASE(staging_async[0]);
         KH_SAFE_RELEASE(staging_async[1]);
         #undef KH_SAFE_RELEASE
+        release_fx_chain();
         release_scene_capture();
         release_depth_srv();
         release_compute_shaders();
@@ -429,10 +445,28 @@ float4 PSEffect(VSOut i) : SV_Target
         outc = lerp(scene, outc, mask);
     }
 
-    // Blend-mode output packing. The hardware blend state combines this with
-    // the live framebuffer; intensity (color.a) is pre-applied here for the
-    // modes whose blend factors cannot express it.
+    // Chained-fullscreen composite packing: for chain passes (centerSize.w =
+    // 1) the destination IS the scene texture we already sampled, so every
+    // blend mode is computed exactly in-shader and written opaquely - this is
+    // what allows the chain to run on single-sample ping-pong targets with
+    // ONE MSAA resolve per frame instead of one per pass.
     int bm = (int)sizeAxes.w;
+    if (centerSize.w > 0.5f)
+    {
+        float a = color.a;
+        float3 mixed = lerp(scene, outc, a);
+        float3 comp;
+        if (bm == 1)      comp = scene + outc * a;                                   // additive
+        else if (bm == 2) comp = scene * lerp(float3(1.0f, 1.0f, 1.0f), outc, a);    // multiply
+        else if (bm == 3) comp = scene + outc * a - scene * outc * a;                // screen
+        else if (bm == 4) comp = max(scene, mixed);                                  // lighten
+        else if (bm == 5) comp = min(scene, mixed);                                  // darken
+        else              comp = mixed;                                              // normal
+        return float4(comp, 1.0f);
+    }
+
+    // Blend-mode output packing (boxes: hardware blend against the live
+    // framebuffer; intensity pre-applied where blend factors cannot express it)
     if (bm == 1 || bm == 3) return float4(outc * color.a, 1.0f);              // additive, screen
     if (bm == 2) return float4(lerp(float3(1.0f, 1.0f, 1.0f), outc, color.a), 1.0f); // multiply
     if (bm == 4 || bm == 5) return float4(lerp(scene, outc, color.a), 1.0f);  // lighten, darken (MAX/MIN op)
@@ -784,6 +818,37 @@ inline std::string ensure_resources(ID3D11Device* dev) {
 // Called once per flush when any scene-read object exists; if scene-reading
 // common, hoist to one capture per frame.
 // ---------------------------------------------------------------------------
+
+// Creates (or recreates on size/format change) the two single-sample chain
+// targets. Called after ensure_scene_capture, which establishes dimensions.
+inline std::string ensure_fx_chain(ID3D11Device* dev) {
+    if (!g_res.scene_tex) return "no scene capture";
+
+    D3D11_TEXTURE2D_DESC sd = {};
+    g_res.scene_tex->GetDesc(&sd);
+
+    if (g_res.chain_tex[0]) {
+        D3D11_TEXTURE2D_DESC cd = {};
+        g_res.chain_tex[0]->GetDesc(&cd);
+        if (cd.Width == sd.Width && cd.Height == sd.Height && cd.Format == sd.Format) return "";
+        g_res.release_fx_chain();
+    }
+
+    for (int i = 0; i < 2; ++i) {
+        D3D11_TEXTURE2D_DESC td = sd;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+        td.SampleDesc.Count = 1;
+        td.SampleDesc.Quality = 0;
+        HRESULT hr = dev->CreateTexture2D(&td, nullptr, &g_res.chain_tex[i]);
+        if (FAILED(hr)) { g_res.release_fx_chain(); return "Create chain tex " + hr_str(hr); }
+        hr = dev->CreateRenderTargetView(g_res.chain_tex[i], nullptr, &g_res.chain_rtv[i]);
+        if (FAILED(hr)) { g_res.release_fx_chain(); return "Create chain RTV " + hr_str(hr); }
+        hr = dev->CreateShaderResourceView(g_res.chain_tex[i], nullptr, &g_res.chain_srv[i]);
+        if (FAILED(hr)) { g_res.release_fx_chain(); return "Create chain SRV " + hr_str(hr); }
+    }
+
+    return "";
+}
 
 inline std::string ensure_scene_capture(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     ID3D11RenderTargetView* rtv = nullptr;
@@ -1638,8 +1703,22 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     if (!RVExtBridge::get_projection_view_transform(pv)) return;
     float view_proj[4][4];
     mul_4x4(pv.view, pv.projection, view_proj);
+    bool need_inverse = false;
+
+    for (const auto& o : boxes) {
+        if (o.localized || o.effect == static_cast<int>(EffectId::Pulse)) { need_inverse = true; break; }
+    }
+
+    if (!need_inverse) {
+        for (const auto& f : fullscreen) {
+            if (f.second.localized || f.second.effect == static_cast<int>(EffectId::Pulse)) { need_inverse = true; break; }
+        }
+    }
+
     float inv_view_proj[4][4] = {};
-    const bool has_inverse = inverse_4x4(view_proj, inv_view_proj);
+    const bool has_inverse = need_inverse && inverse_4x4(view_proj, inv_view_proj);
+    // has_inverse is only consulted by objects that need it, so skipping the
+    // inverse when nothing does is behavior-identical.
     float cam[3];
     extract_camera_pos(pv.view, cam);
 
@@ -1770,14 +1849,14 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     ctx->OMSetBlendState(g_res.blend_modes[0], bf, 0xFFFFFFFF);
     ctx->RSSetState(g_res.rasterizer);
 
-    auto upload_cb = [&](const RenderObject& o) -> bool {
+    auto upload_cb = [&](const RenderObject& o, bool chain_pass) -> bool {
         ConstantData cbd = {};
         memcpy(cbd.view_proj, view_proj, sizeof(view_proj));
         memcpy(cbd.inv_view_proj, inv_view_proj, sizeof(inv_view_proj));
         cbd.center_size[0] = o.pos[0];
         cbd.center_size[1] = o.pos[2];   // SQF [x,y,zASL] -> engine [x,zASL,y]
         cbd.center_size[2] = o.pos[1];
-        cbd.center_size[3] = 0.0f;
+        cbd.center_size[3] = chain_pass ? 1.0f : 0.0f;
         cbd.size_axes[0] = o.size[0];    // SQF [x,y,z] sizes -> engine [x,z,y]
         cbd.size_axes[1] = o.size[2];
         cbd.size_axes[2] = o.size[1];
@@ -1816,7 +1895,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
     // --- Box pass ---
     for (const auto& o : boxes) {
-        if (!upload_cb(o)) continue;
+        if (!upload_cb(o, false)) continue;
         ctx->PSSetShader(o.effect > 0 ? g_res.ps_effect : g_res.ps, nullptr, 0);
         ctx->OMSetBlendState(g_res.blend_modes[o.blend_mode], bf, 0xFFFFFFFF);
 
@@ -1829,24 +1908,66 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         ctx->Draw(36, 0);
     }
 
-    // --- Fullscreen chain ---
-    // Each pass RE-CAPTURES the scene first, so it sees the output of the
-    // boxes and of every previous fullscreen pass: chained effects compose
-    // (e.g. colorgrade -> vignette -> grain). Cost: one MSAA resolve per
-    // fullscreen pass per frame.
+    // --- Fullscreen chain (single-resolve ping-pong) ---
+    // The scene is resolved ONCE (re-resolved here only so the chain sees the
+    // boxes just drawn); every pass then reads one single-sample chain target
+    // and writes its fully composited output opaquely to the other - the
+    // blend arithmetic happens in-shader (see the chain packing in PSEffect),
+    // which is exact because for a fullscreen pass the blend destination and
+    // the sampled scene are the same image. A final opaque blit paints the
+    // chain result onto the engine's MSAA target. Bandwidth: one resolve +
+    // F single-sample draws + one blit, instead of F resolves + F MSAA draws.
     if (!fullscreen.empty() && effects_ready) {
-        ctx->IASetInputLayout(nullptr);
-        ctx->VSSetShader(g_res.vs_fullscreen, nullptr, 0);
-        ctx->PSSetShader(g_res.ps_effect, nullptr, 0);
-        ctx->OMSetDepthStencilState(g_res.dss_off, 0);
+        std::string chain_err = boxes.empty() ? "" : ensure_scene_capture(dev, ctx);
+        if (chain_err.empty()) chain_err = ensure_fx_chain(dev);
 
-        for (const auto& f : fullscreen) {
-            if (f.second.effect <= 0) continue;
-            if (!ensure_scene_capture(dev, ctx).empty()) { g_stats.effect_setup_fails++; break; }
-            ctx->PSSetShaderResources(0, 1, &g_res.scene_srv);   // rebind: capture may have been recreated
-            if (!upload_cb(f.second)) continue;
-            ctx->OMSetBlendState(g_res.blend_modes[f.second.blend_mode], bf, 0xFFFFFFFF);
-            ctx->Draw(3, 0);
+        if (!chain_err.empty()) {
+            g_stats.effect_setup_fails++;
+        } else {
+            ID3D11RenderTargetView* saved_chain_rtv = nullptr;
+            ID3D11DepthStencilView* saved_chain_dsv = nullptr;
+            ctx->OMGetRenderTargets(1, &saved_chain_rtv, &saved_chain_dsv);
+            ctx->IASetInputLayout(nullptr);
+            ctx->VSSetShader(g_res.vs_fullscreen, nullptr, 0);
+            ctx->PSSetShader(g_res.ps_effect, nullptr, 0);
+            ctx->OMSetDepthStencilState(g_res.dss_off, 0);
+            ctx->OMSetBlendState(nullptr, bf, 0xFFFFFFFF);   // opaque: compositing is in-shader
+            ID3D11ShaderResourceView* src_srv = g_res.scene_srv;
+            int write_idx = 0;
+
+            for (const auto& f : fullscreen) {
+                if (f.second.effect <= 0) continue;
+                if (!upload_cb(f.second, true)) continue;
+
+                // Unbind the source slot before binding it as RTV next round
+                ID3D11ShaderResourceView* null_srv = nullptr;
+                ctx->PSSetShaderResources(0, 1, &null_srv);
+                ctx->OMSetRenderTargets(1, &g_res.chain_rtv[write_idx], nullptr);
+                ctx->PSSetShaderResources(0, 1, &src_srv);
+                ctx->Draw(3, 0);
+                src_srv = g_res.chain_srv[write_idx];
+                write_idx ^= 1;
+            }
+
+            // Blit the chain result onto the engine target: effect 0 passes
+            // the sampled scene through; chain packing returns it opaquely.
+            if (src_srv != g_res.scene_srv) {
+                RenderObject blit;
+                blit.effect = 0;
+
+                if (upload_cb(blit, true)) {
+                    ID3D11ShaderResourceView* null_srv = nullptr;
+                    ctx->PSSetShaderResources(0, 1, &null_srv);
+                    ctx->OMSetRenderTargets(1, &saved_chain_rtv, saved_chain_dsv);
+                    ctx->PSSetShaderResources(0, 1, &src_srv);
+                    ctx->Draw(3, 0);
+                }
+            } else {
+                ctx->OMSetRenderTargets(1, &saved_chain_rtv, saved_chain_dsv);
+            }
+
+            if (saved_chain_rtv) saved_chain_rtv->Release();
+            if (saved_chain_dsv) saved_chain_dsv->Release();
         }
     }
 

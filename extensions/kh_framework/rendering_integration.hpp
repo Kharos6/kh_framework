@@ -159,6 +159,15 @@ struct RenderObject {
     float color[4] = { 1, 1, 1, 1 };
     DepthMode mode = DepthMode::TestOnly;
     bool  visible = true;
+    // Lifetime: all zero = infinite (removed only by removeRenderHandler).
+    // Otherwise the object fades in over fade_in s, holds for hold_dur s,
+    // fades out over fade_out s, then auto-removes itself. The envelope
+    // multiplies the effective color alpha (the universal intensity).
+    bool  timed = false;
+    float birth_time = 0.0f;
+    float fade_in = 0.0f;
+    float hold_dur = 0.0f;
+    float fade_out = 0.0f;
 };
 
 // Effect ids shared by boxes (localized, clipped to the box's screen footprint)
@@ -1680,6 +1689,49 @@ inline void set_effect_params(RenderObject& obj, const auto_array<game_value>* p
     }
 }
 
+// Parses a duration designator into the object's lifetime fields:
+// SCALAR seconds -> hold that long, no fades; ARRAY [fadeIn, hold, fadeOut].
+// 0 / all-zero = infinite (default). Returns false on a malformed value.
+inline bool parse_duration_gv(const game_value& gv, RenderObject& obj) {
+    float fi = 0.0f, hd = 0.0f, fo = 0.0f;
+
+    if (gv.type_enum() == game_data_type::SCALAR) {
+        hd = static_cast<float>(gv);
+    } else if (gv.type_enum() == game_data_type::ARRAY) {
+        auto& a = gv.to_array();
+        if (a.size() >= 1) fi = static_cast<float>(a[0]);
+        if (a.size() >= 2) hd = static_cast<float>(a[1]);
+        if (a.size() >= 3) fo = static_cast<float>(a[2]);
+    } else {
+        return false;
+    }
+    
+    fi = fi < 0.0f ? 0.0f : fi;
+    hd = hd < 0.0f ? 0.0f : hd;
+    fo = fo < 0.0f ? 0.0f : fo;
+    obj.fade_in = fi;
+    obj.hold_dur = hd;
+    obj.fade_out = fo;
+    obj.timed = (fi + hd + fo) > 0.0f;
+    return true;
+}
+
+// Lifetime envelope at time 'now': 0..1 intensity multiplier; sets 'expired'
+// once the fade-out has completed.
+inline float lifetime_envelope(const RenderObject& o, float now, bool& expired) {
+    expired = false;
+    if (!o.timed) return 1.0f;
+    float age = now - o.birth_time;
+    if (age < 0.0f) age = 0.0f;
+    if (age < o.fade_in) return age / (o.fade_in > 0.001f ? o.fade_in : 0.001f);
+    age -= o.fade_in;
+    if (age < o.hold_dur) return 1.0f;
+    age -= o.hold_dur;
+    if (age < o.fade_out) return 1.0f - age / (o.fade_out > 0.001f ? o.fade_out : 0.001f);
+    expired = true;
+    return 0.0f;
+}
+
 // ===========================================================================
 // Camera position in engine space, extracted from the view matrix
 // (row-vector convention: eye_i = -sum_j T_j * R[i][j])
@@ -1886,6 +1938,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     // Snapshot the visible objects under the mutex, draw without holding it.
     // Boxes and fullscreen passes are split; fullscreen passes run last, in
     // handle (creation) order so chained effects compose deterministically.
+    const float snapshot_now = effect_time_seconds();
     std::vector<RenderObject> boxes;
     std::vector<std::pair<uint32_t, RenderObject>> fullscreen;
 
@@ -1893,14 +1946,27 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         std::lock_guard<std::mutex> g(g_draw_list_mutex);
         boxes.reserve(g_draw_list.size());
 
-        for (const auto& kv : g_draw_list) {
-            if (!kv.second.visible) continue;
+        for (auto it = g_draw_list.begin(); it != g_draw_list.end(); ) {
+            bool expired = false;
+            const float env = lifetime_envelope(it->second, snapshot_now, expired);
 
-            if (kv.second.fullscreen) {
-                if (!kv.second.affect_ui) fullscreen.emplace_back(kv.first, kv.second);
-            } else {
-                boxes.push_back(kv.second);
+            if (expired) {
+                it = g_draw_list.erase(it);   // lifetime over: auto-remove
+                continue;
             }
+
+            if (it->second.visible) {
+                RenderObject o = it->second;
+                o.color[3] *= env;   // envelope = universal intensity
+
+                if (o.fullscreen) {
+                    if (!o.affect_ui) fullscreen.emplace_back(it->first, o);
+                } else {
+                    boxes.push_back(o);
+                }
+            }
+
+            ++it;
         }
     }
 
@@ -2271,15 +2337,20 @@ inline std::string ensure_backbuffer_capture(ID3D11Device* dev, ID3D11DeviceCont
 }
 
 inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
+    const float snapshot_now = effect_time_seconds();
     std::vector<std::pair<uint32_t, RenderObject>> passes;
 
     {
         std::lock_guard<std::mutex> g(g_draw_list_mutex);
 
         for (const auto& kv : g_draw_list) {
-            if (kv.second.visible && kv.second.fullscreen && kv.second.affect_ui) {
-                passes.emplace_back(kv.first, kv.second);
-            }
+            if (!(kv.second.visible && kv.second.fullscreen && kv.second.affect_ui)) continue;
+            bool expired = false;
+            const float env = lifetime_envelope(kv.second, snapshot_now, expired);
+            if (expired) continue;   // the scene flush owns the erasure
+            RenderObject o = kv.second;
+            o.color[3] *= env;
+            passes.emplace_back(kv.first, o);
         }
     }
 
@@ -2580,6 +2651,7 @@ inline uint32_t add_render_object(const RenderObject& obj) {
     std::lock_guard<std::mutex> g(g_draw_list_mutex);
     const uint32_t handle = g_next_handle++;
     g_draw_list[handle] = obj;
+    g_draw_list[handle].birth_time = effect_time_seconds();
     return handle;
 }
 
@@ -2695,7 +2767,9 @@ static game_value gpu_visibility_sqf(game_value_parameter args) {
 // Adds a persistent box drawn every frame by the internal Draw3D EH until
 // removed. Callable from ANY context (scheduled, unscheduled, callbacks).
 //   mode:      0 = depth test (default), 1 = test + depth write, 2 = overlay
-//   sceneRead: BOOL, legacy shorthand for effect "invert"
+//   sceneRead: BOOL, shorthand for a tinted scene-read surface
+//              (effect "colorgrade" at neutral defaults: scene through the
+//              box, tinted by color.rgb, blended by color.a)
 //   effect:    STRING or SCALAR - screen-space effect applied inside the
 //              box's footprint: "solid" 0, "invert" 1, "colorgrade" 2,
 //              "vignette" 3, "chromatic" 4, "grain" 5, "sharpen" 6,
@@ -2732,7 +2806,7 @@ static game_value add_render3d_sqf(game_value_parameter args) {
         }
 
         if (arr.size() > 4 && arr[4].type_enum() == game_data_type::BOOL) {
-            obj.effect = static_cast<bool>(arr[4]) ? 1 : 0;   // legacy sceneRead = invert
+            obj.effect = static_cast<bool>(arr[4]) ? 1 : 0;   // sceneRead = tinted scene-read (colorgrade defaults)
         }
 
         const auto_array<game_value>* fx_params = nullptr;
@@ -2765,6 +2839,12 @@ static game_value add_render3d_sqf(game_value_parameter args) {
             obj.blend_mode = bm;
         }
 
+        if (arr.size() > 9) {
+            if (!RenderIntegration::parse_duration_gv(arr[9], obj)) {
+                return game_value("duration must be seconds or [fadeIn, hold, fadeOut]");
+            }
+        }
+
         return game_value(static_cast<float>(RenderIntegration::add_render_object(obj)));
     } catch (const std::exception& e) {
         report_error(std::string("addRender3D: ") + e.what());
@@ -2777,7 +2857,7 @@ static game_value add_render3d_sqf(game_value_parameter args) {
 
 // updatePostFX [handle, property, value] -> BOOL
 // properties: "position" [x,y,zASL] | "size" scalar | "color" [r,g,b,a] |
-//             "mode" 0..2 | "visible" bool | "sceneread" bool (legacy invert) |
+//             "mode" 0..2 | "visible" bool | "sceneread" bool |
 //             "effect" string/scalar | "params" array (resets omitted entries
 //             to the effect's defaults) | "radius" scalar | "falloff" scalar
 //             (radius/falloff apply to addLocalPostFX passes; "position"
@@ -2849,6 +2929,9 @@ static game_value update_post_fx_sqf(game_value_parameter args) {
             obj.blend_mode = bm;
         } else if (prop == "ui") {
             obj.affect_ui = static_cast<bool>(arr[2]);
+        } else if (prop == "duration") {
+            if (!RenderIntegration::parse_duration_gv(arr[2], obj)) return game_value(false);
+            obj.birth_time = RenderIntegration::effect_time_seconds();   // re-arm from now
         } else if (prop == "band") {
             if (arr[2].type_enum() != game_data_type::ARRAY) return game_value(false);
             auto& band = arr[2].to_array();
@@ -2957,39 +3040,6 @@ static game_value get_visibility_results_sqf() {
 }
 
 // addPostFX [effect, params?, color?, band?]
-// Creates a persistent FULLSCREEN post-processing pass, applied to the whole
-// scene every frame until removed. Shares the handle space with addRender3D:
-// removeRenderHandler and updatePostFX ("effect", "params", "color",
-// "visible") work on it. Multiple passes chain in creation (handle) order and
-// compose - each pass sees the output of the previous ones.
-//
-//   effect: STRING or SCALAR (same table as addRender3D):
-//           "invert" | "colorgrade" | "vignette" | "chromatic" | "grain" |
-//           "sharpen" | "blur" | "bloom" | "distortion" | "outline" | "pulse" |
-//           "halation" | "fog"
-//   params: ARRAY of up to 8 numbers, effect-specific; omitted = defaults:
-//           colorgrade [saturation 1, contrast 1, brightness 1, gamma 1]
-//           vignette   [startRadius 0.5, softness 0.5]
-//           chromatic  [strengthPx 3]
-//           grain      [amount 0.08, speed 10]
-//           sharpen    [strength 0.5]
-//           blur       [radiusPx 2]
-//           bloom      [threshold 1, intensity 0.8, radiusPx 2]
-//           distortion [amplitudePx 6, frequency 6, speed 2]
-//           outline    [depthEdgeScale 4, lumEdgeScale 2, sceneDarken 0.25, glowBoost 1.5]
-//           pulse      [x, y, zASL, radius 50, bandWidth 3, intensity 2]
-//           halation   [threshold 1, intensity 1.2, radiusPx 5]
-//           fog        [startDist 200, endDist 1200, skyAmount 1]
-//           glitch [intensity 1, speed 8, sliceAmountPx 24, sliceBands 12, colorSplitPx 6, blockAmount 0.5, noiseAmount 0.35, burstiness 0.7]
-//   color:  [r,g,b,a] - effect tint/edge/ring color; ALPHA = overall effect
-//           intensity (blends the effect over the untouched scene)
-//   band:   [minDist, maxDist, falloff?] - confines the effect to a camera-
-//           distance band: full strength for scene distances within
-//           [minDist, maxDist] meters, fading over falloff meters (default
-//           10) at both edges. maxDist <= 0 = unbounded far (sky included).
-//           Enables layered whole-screen effects by distance, e.g. one grade
-//           for the foreground and another for the far terrain.
-//
 // Notes: runs pre-tonemap, so the engine's eye adaptation applies on top.
 // Outline and Pulse sample the engine depth buffer per pixel; on frames where
 // they are active, mode-1 boxes do not write depth (read-only DSV phase).
@@ -3036,6 +3086,12 @@ static game_value add_postfx_sqf(game_value_parameter args) {
 
         if (arr.size() > 5 && arr[5].type_enum() == game_data_type::BOOL) {
             obj.affect_ui = static_cast<bool>(arr[5]);
+        }
+
+        if (arr.size() > 6) {
+            if (!RenderIntegration::parse_duration_gv(arr[6], obj)) {
+                return game_value("duration must be seconds or [fadeIn, hold, fadeOut]");
+            }
         }
 
         return game_value(static_cast<float>(RenderIntegration::add_render_object(obj)));
@@ -3137,6 +3193,12 @@ static game_value add_local_postfx_sqf(game_value_parameter args) {
             const int bm = RenderIntegration::blend_id_from_gv(arr[7]);
             if (bm < 0) return game_value("unknown blend mode");
             obj.blend_mode = bm;
+        }
+
+        if (arr.size() > 8) {
+            if (!RenderIntegration::parse_duration_gv(arr[8], obj)) {
+                return game_value("duration must be seconds or [fadeIn, hold, fadeOut]");
+            }
         }
 
         return game_value(static_cast<float>(RenderIntegration::add_render_object(obj)));

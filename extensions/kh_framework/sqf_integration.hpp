@@ -149,11 +149,11 @@ static registered_sqf_function _sqf_process_cba_array_event;
 static registered_sqf_function _sqf_process_cba_code_event;
 static registered_sqf_function _sqf_sample_scene_depth_array;
 static registered_sqf_function _sqf_gpu_visibility_array;
-static registered_sqf_function _sqf_add_render3d_array;
-static registered_sqf_function _sqf_update_post_fx_array;
 static registered_sqf_function _sqf_remove_render_handler_scalar;
 static registered_sqf_function _sqf_queue_visibility_array;
 static registered_sqf_function _sqf_get_visibility_results;
+static registered_sqf_function _sqf_add_render3d_array;
+static registered_sqf_function _sqf_update_post_fx_array;
 static registered_sqf_function _sqf_add_postfx_array;
 static registered_sqf_function _sqf_add_local_postfx_array;
 static registered_sqf_function _sqf_get_render_stats;
@@ -6971,7 +6971,7 @@ static void initialize_sqf_integration() {
         game_data_type::ARRAY
     );
 
-    _sqf_sample_scene_depth_array = intercept::client::host::register_sqf_command(
+_sqf_sample_scene_depth_array = intercept::client::host::register_sqf_command(
         "sampleSceneDepth",
         "Read the engine depth buffer at screen position [u, v] (0..1, top-left origin) via compute shader. Returns [sceneDistanceMeters, rawDepth] or a status string. Call from Draw3D.",
         userFunctionWrapper<sample_scene_depth_sqf>,
@@ -7012,28 +7012,28 @@ static void initialize_sqf_integration() {
 
     _sqf_add_render3d_array = intercept::client::host::register_sqf_command(
         "addRender3D",
-        "Add a persistent 3D box drawn every frame until removed. [[x,y,zASL], size, [r,g,b,a]?, mode?, sceneRead?, effect?, params?, band?, blend?, duration?]; size: number or [x,y,z] per-axis edge lengths; mode: 0=depth test (default), 1=test+write, 2=overlay; effect (string/scalar): 'invert','colorgrade','vignette','chromatic','grain','sharpen','blur','bloom','distortion','outline','pulse','halation','fog','lensflare','anamorphic','sunflare','glitch'; band [minDist,maxDist,falloff?]; blend: 'normal','additive','multiply','screen','lighten','darken'; duration: ARRAY or SCALAR (default 0) defines how long the effect will last, optionally as an array with [fadein,duration,fadeout]; Solid non-overlay boxes are always composited: injected into the frame BEFORE the engine's translucent passes with depth written, so the engine itself composites smoke and particles against them pixel-perfectly (falls back to the post-scene flush automatically if the draw hook is unavailable). Callable from any context. Returns SCALAR handle or STRING error.",
+        "Add a persistent 3D box drawn every frame until removed. [[x,y,zASL], size, [r,g,b,a]?, mode?, sceneRead?, effect?, params?, band?, blend?, duration?, lit?]; size: number or [x,y,z] per-axis edge lengths; mode: 0=depth test (default), 1=test+write, 2=overlay; effect (string/scalar): 'invert','colorgrade','vignette','chromatic','grain','sharpen','blur','bloom','distortion','outline','pulse','halation','fog','lensflare','anamorphic','sunflare','glitch'; band [minDist,maxDist,falloff?]; blend: 'normal','additive','multiply','screen','lighten','darken'; duration: ARRAY or SCALAR (default 0), optionally [fadein,duration,fadeout]; lit: BOOL or [ambient, diffuse, shadowMode] - true enables the full shadow system: sun/moon shading from getLighting (fetched internally), per-pixel received world shadows (band-captured cascade atlas, deferred same-frame view), and an analytic cast shadow written into the engine's own shadow mask (MIN-blended, colored by the engine's lighting pass exactly like native shadows). shadowMode: 0 = no occlusion rays, 1 = center ray (default), 2 = center + 8 corners. Everything is automatic: no shadow commands, tuning, or per-frame calls exist or are needed. Solid non-overlay boxes are always composited: injected into the frame BEFORE the engine's translucent passes with depth written, so the engine itself composites smoke and particles against them pixel-perfectly (falls back to the post-scene flush automatically if the draw hook is unavailable). Callable from any context. Returns SCALAR handle or STRING error.",
         userFunctionWrapper<add_render3d_sqf>,
         game_data_type::ANY,
         game_data_type::ARRAY
     );
- 
+
     _sqf_update_post_fx_array = intercept::client::host::register_sqf_command(
         "updatePostFX",
-        "Update a persistent 3D object or post-processing pass: [handle, property, value]. Properties: 'position' [x,y,zASL], 'size' number|[x,y,z], 'color' [r,g,b,a], 'mode' 0..2, 'visible' bool, 'effect' string/scalar, 'params' array, 'ui' bool, 'radius' number|[x,y,z], 'falloff' scalar, 'shape' 'sphere'|'cube', 'blend' 'normal'|'additive'|'multiply'|'screen'|'lighten'|'darken', 'band' [minDist,maxDist,falloff?] ([] clears), 'localsphere' [radius,falloff?] ([] clears), 'sceneread' bool, 'duration' number or [fadein,duration,fadeout]. Returns BOOL.",
+        "Update a persistent 3D object or post-processing pass: [handle, property, value]. Properties: 'position' [x,y,zASL], 'size' number|[x,y,z], 'color' [r,g,b,a], 'mode' 0..2, 'visible' bool, 'effect' string/scalar, 'params' array, 'ui' bool, 'radius' number|[x,y,z], 'falloff' scalar, 'shape' 'sphere'|'cube', 'blend' 'normal'|'additive'|'multiply'|'screen'|'lighten'|'darken', 'band' [minDist,maxDist,falloff?] ([] clears), 'localsphere' [radius,falloff?] ([] clears), 'sceneread' bool, 'lit' bool or [ambient, diffuse, shadowMode?] (toggles the shadow system per object), 'duration' number or [fadein,duration,fadeout]. Returns BOOL.",
         userFunctionWrapper<update_post_fx_sqf>,
         game_data_type::BOOL,
         game_data_type::ARRAY
     );
- 
+
     _sqf_add_postfx_array = intercept::client::host::register_sqf_command(
         "addPostFX",
-        "Create a persistent fullscreen post-processing pass: [effect, params?, [r,g,b,a]?, band?, blend?, affectUI?, duration?]. Effects: 'invert','colorgrade','vignette','chromatic','grain','sharpen','blur','bloom','distortion','outline','pulse','halation','fog','lensflare','anamorphic','sunflare','glitch'; color alpha = intensity; band [minDist,maxDist,falloff?]; blend: 'normal','additive','multiply','screen','lighten','darken'; affectUI: BOOL (default false) - true renders the pass post-tonemap over the composited frame INCLUDING the UI; duration: ARRAY or SCALAR (default 0) defines how long the effect will last, optionally as an array with [fadein,duration,fadeout]. Passes chain in creation order per phase. Manage with updatePostFX / removeRenderHandler. Returns SCALAR handle or STRING error.",
+        "Create a persistent fullscreen post-processing pass: [effect, params?, [r,g,b,a]?, band?, blend?, affectUI?, duration?]. Effects: 'invert','colorgrade','vignette','chromatic','grain','sharpen','blur','bloom','distortion','outline','pulse','halation','fog','lensflare','anamorphic','sunflare','glitch'; color alpha = intensity; band [minDist,maxDist,falloff?]; blend: 'normal','additive','multiply','screen','lighten','darken'; affectUI: BOOL (default false) - true renders the pass post-tonemap over the composited frame INCLUDING the UI; duration: ARRAY or SCALAR (default 0), optionally [fadein,duration,fadeout]. Passes chain in creation order per phase. Manage with updatePostFX / removeRenderHandler. Returns SCALAR handle or STRING error.",
         userFunctionWrapper<add_postfx_sqf>,
         game_data_type::ANY,
         game_data_type::ARRAY
     );
- 
+
     _sqf_add_local_postfx_array = intercept::client::host::register_sqf_command(
         "addLocalPostFX",
         "Create a persistent post-processing effect confined to a world-space volume: [[x,y,zASL], radius, falloff, effect, params?, [r,g,b,a]?, shape?, blend?, duration?]. radius: number or [x,y,z] per-axis (ellipsoid/box); shape: 'sphere' (default) or 'cube'; falloff in meters (scaled by mean radius); blend as addPostFX; duration as addPostFX. Mask follows geometry via the depth buffer. Manage via updatePostFX and removeRenderHandler. Returns SCALAR handle or STRING error.",
@@ -7044,7 +7044,7 @@ static void initialize_sqf_integration() {
 
     _sqf_get_render_stats = intercept::client::host::register_sqf_command(
         "getRenderStats",
-        "Render health counters (cumulative): [[name, value], ...] with flushes, gatePassed, lockRetries, lockFailedFrames, skipNoDsv, skipWrongPass, effectSetupFails, uiFlushes, uiGatePassed, uiGateSkips, compositeInjections, compositeBoxes, compositeSkips, compositeAmbiguous, compositeProjLock, compositeRearms, compositeRejSpan, compositeRejVerify, compositeRejFloor, reorderHook, uiDriverPolls, uiDriverCtrl, mainSceneW/H. A skipped flush is a frame rendered without effects (flicker).",
+        "Render health counters (cumulative): [[name, value], ...]. Composite path: flushes, gatePassed, compositeInjections (should track flushes), compositeBoxes, compositeSkips, compositeAmbiguous, compositeProjLock, compositeRearms, compositeRejSpan, compositeRejFloor. Shadow receive: shadowLiveLatches, shadowLiveCascades, bandCaptures, band0/1 Near/Far/Copies, sealCompletions (healthy = equals bandCaptures), viewLocks, viewSrcValid, frameViewHits, resolveHits. Shadow cast: analyticCasts (healthy = roughly flushes, more on depth-partitioned frames), castMisses (0 = firing; nonzero names the first failed guard). Lighting: sunDirValid, sunDirEngine*, sunBrightness. A skipped flush is a frame rendered without effects (flicker).",
         userFunctionWrapper<get_render_stats_sqf>,
         game_data_type::ARRAY
     );

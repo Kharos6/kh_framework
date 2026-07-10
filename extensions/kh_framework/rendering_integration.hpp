@@ -20,6 +20,8 @@ struct Resources {
     ID3D11PixelShader*       ps_effect = nullptr;       // uber effect shader (boxes + fullscreen)
     UINT                     ps_effect_samples = 0;     // depth MSAA count it was compiled for
     ID3D11VertexShader*      vs_composite = nullptr;    // injected-path VS (adds world position)
+    ID3D11PixelShader*       ps_maskcast = nullptr;     // analytic mask cast
+    ID3D11PixelShader*       ps_maskapply = nullptr;    // composite factor onto scene
     ID3D11PixelShader*       ps_composite = nullptr;    // injected-path PS: PSMain + the opaque
                                                         // punch-through guard against the copied
                                                         // scene depth (the HYBRID: hardware depth
@@ -186,6 +188,19 @@ struct RenderObject {
     float size[3] = { 1.0f, 1.0f, 1.0f };  // box edge lengths per SQF axis [x, y, z] (m)
     int   blend_mode = 0;       // 0 normal, 1 additive, 2 multiply, 3 screen, 4 lighten, 5 darken
     float color[4] = { 1, 1, 1, 1 };
+    // --- World-lighting interaction (opt-in via 'lit') ---
+    // Shaded per pixel against the sun/moon (getLighting) in ApplyLighting;
+    // the direct term is additionally attenuated by shadow_factor - the
+    // per-object "does the world shadow this box" answer, measured on the
+    // game thread each flush with checkVisibility rays toward the sun.
+    bool  lit = false;
+    float light_ambient = 0.40f;   // base-color fraction kept in full shadow
+    float light_diffuse = 0.60f;   // N.L-scaled fraction (ambient + diffuse ~ 1
+                                   // preserves the unlit look in full sun)
+    int   shadow_mode = 1;         // 0 = no occlusion rays, 1 = center ray,
+                                   // 2 = center + 8 corners (soft edges)
+    float shadow_factor = 1.0f;    // smoothed occlusion result (0 shadowed .. 1 lit)
+    float shadow_update_time = -1.0f;
     DepthMode mode = DepthMode::TestOnly;
     bool  visible = true;
     // Reordered compositing is ALWAYS ON for solid, non-overlay boxes: they
@@ -269,6 +284,24 @@ struct RenderStats {
     uint64_t composite_rej_span = 0;   // triggers rejected: partition does not span the broad middle
     uint64_t composite_rej_verify = 0; // triggers rejected: live DSV verification mismatch
     uint64_t composite_rej_floor = 0;  // triggers rejected: opaque evidence below the floor
+    // --- Shadow-pass recon diagnostics (setShadowRecon; see the recon
+    //     section for what each number decides) ---
+    uint64_t shadow_affine44 = 0;                 // affine-shaped 4x4 windows seen (either orientation)
+    uint64_t shadow_live_latches = 0;             // live cascade transforms captured (cumulative)
+    uint64_t shadow_live_cascades = 0;            // cascade table size in the last completed frame
+    uint64_t shadow_srv_failed = 0;               // atlas SRV creation failures
+    uint64_t live_rej_ortho = 0;                  // live latch rejections, by filter
+    uint64_t live_rej_scale = 0;
+    uint64_t live_rej_iso = 0;
+    uint64_t live_rej_ratio = 0;
+    uint64_t live_rej_trans = 0;
+    uint64_t live_accepts = 0;
+    uint64_t shadow_copies = 0;                   // fine-copy executions
+    uint64_t commits_large = 0;                   // cycle commits won by a >=512B CB
+    uint64_t commits_small = 0;                   // ... by a smaller CB
+    uint64_t same_size_conflicts = 0;             // same-size upload with a DIFFERENT matrix
+                                                  // arrived after the pending one in a cycle
+    uint64_t sun_distinct_translations_max = 0;   // max distinct candidate translations in one cycle
 };
 static RenderStats g_stats;
 
@@ -308,6 +341,36 @@ cbuffer CB : register(b0)
     float4 localParams1; // x = falloff (normalized to mean radius), y = localized flag
     float4 localRadii;   // xyz = mask radii (engine axes)
     float4 bandParams;   // x = band min (m), y = band max (m, <=0 unbounded), z = falloff (m), w = banded flag
+    float4 lighting0;    // x = lit flag, y = sun-occlusion factor (0 shadowed .. 1 lit), z = ambient, w = diffuse
+    float4 lighting1;    // xyz = unit vector TOWARD the sun/moon (engine axes), w = lighting valid flag
+    float4 lighting2;    // rgb = light color (max-component normalized), w = shadow-map strength
+    float4 shadowMeta;   // x = cascade count, y = depth compare sign, z = bias, w = atlas size (px)
+    float4 shadowTiles[8];   // per-cascade atlas rect in UV: x0, y0, x1, y1
+    float4 shadowMats[24];   // per-cascade world->atlasUV+depth 4x3: 3 rows of [a, b, c, t]
+    float4 shadowMeta2;      // x = debug mode (0 off, 1 occlusion viz, 2 cascade viz);
+                             // yzw = the table's OWN camera origin (engine axes)
+    float4 shadowSrc;        // x = table index sampling the FINE COPY texture (t2), -1 = none;
+                             // yzw = (du, dv, dz) correction added to the copy entry's uvz
+    float4 shadowFix2;       // uv ROTATION for the copy entry (spun-fit correction):
+                             // x = cos, y = sin, zw = pivot (u, v). Depth is along the
+                             // light axis and invariant under light-axis spin.
+    // View-paired bands: the engine's decoded receiver contract.
+    // bandView rows are the view matrix COLUMNS (world->view, row-vector
+    // convention): viewPos.k = dot(float4(wpos,1), bandView[slot*3+k]).
+    // bandMat rows are PSC_ShadowmapMatrix rows: uvz.k = dot(float4(vp,1), row).
+    float4 bandMat[24];
+    float4 bandView[24];
+    float4 bandBorder[8];    // x = near, y = far, z = fade, w = 0 invalid / 1+texIndex
+    // Cast pass: draw the boxes depth-only INTO the engine's shadow atlas
+    // at each cascade pass end, so the world receives THEIR shadows.
+    float4 castMat[3];       // this cascade's sampling matrix rows
+    float4 castView[3];      // matching view columns
+    float4 castVp;           // atlas-tile viewport: x, y, w, h (pixels)
+    float4 castMeta;         // x = atlas size, y = enable
+    float4 maskMeta;         // x = enable, y = channel (0-3), z = invert, w = unused
+    float4 maskDims;         // xy = mask w/h, zw = viewport w/h at injection
+    float4 fogParams;        // x = fogValue, y = fogDecay, z = fogBase, w = enable
+    float4 fogColor;         // rgb = fog color, w = camera altitude ASL
 };
 
 // Solid-box band / local-volume mask (PSMain and PSComposite): the same
@@ -343,6 +406,38 @@ float SolidMask(float3 wpos)
     return m;
 }
 
+// Sun/moon shading for solid boxes (PSMain and PSComposite), opt-in per
+// object via lighting0.x. Face normals come from screen-space derivatives
+// of the interpolated world position - mesh-agnostic, so this carries over
+// unchanged when the unit cube grows into arbitrary meshes - oriented
+// outward via the camera in fxParams0.xyz (both solid paths always fill it).
+// N.L on a convex shape is also the correct SELF-shading term; true cast
+// self-shadows arrive with the shadow-map capture (see the recon section).
+// lighting0.y is the world-occlusion factor (checkVisibility toward the
+// sun, measured on the game thread): it attenuates ONLY the direct term,
+// so a box standing in a building's shadow drops to its ambient level the
+// way the world around it does.
+// smf: per-pixel shadow-map factor from the caller (1.0 where the path has
+// no atlas access). Combined with the object-level ray factor by min - they
+// answer the same question at different granularities and must not stack.
+float3 ApplyLighting(float3 base, float3 wpos, float smf)
+{
+    if (lighting0.x < 0.5f || lighting1.w < 0.5f) return base;
+    // Analytic axis-aligned box normal: exact and noise-free, unlike
+    // ddx/ddy of kilometer-scale world positions (float32 steps there are
+    // centimeter-sized, which reads as per-pixel shading noise).
+    float3 rel = (wpos - centerSize.xyz) / max(sizeAxes.xyz * 0.5f, 1e-4f);
+    float3 a = abs(rel);
+    float3 n;
+    if (a.x >= a.y && a.x >= a.z)      n = float3(rel.x >= 0.0f ? 1.0f : -1.0f, 0.0f, 0.0f);
+    else if (a.y >= a.z)               n = float3(0.0f, rel.y >= 0.0f ? 1.0f : -1.0f, 0.0f);
+    else                               n = float3(0.0f, 0.0f, rel.z >= 0.0f ? 1.0f : -1.0f);
+    float ndl = saturate(dot(n, lighting1.xyz));
+    float shadow = min(saturate(lighting0.y), smf);
+    float3 direct = lighting2.rgb * (ndl * lighting0.w * shadow);
+    return base * (lighting0.z + direct);
+}
+
 struct VSIn  { float3 pos : POSITION; };
 struct VSOut { float4 pos : SV_Position; float3 wpos : TEXCOORD0; };
 )HLSL";
@@ -356,6 +451,100 @@ VSOut VSMain(VSIn i)
     o.pos = mul(float4(wp, 1.0f), viewProj);
     o.wpos = wp;
     return o;
+}
+
+// Analytic mask cast: per-pixel ray-vs-box toward the sun, drawn into
+// the engine's screen-space shadow mask with multiply blending.
+// castMat[0..2] = view rows 0..2; castView[0] = view row 3 (translation);
+// castView[1] = (fov.x, fov.y, maskW, maskH); castView[2] = sunDir.xyz +
+// strength in w. Scene linear depth at t0.
+Texture2D<float> sceneDepthTex : register(t0);
+
+float4 PSMaskCast(VSOut i) : SV_Target
+{
+    int3 px = int3(int2(i.pos.xy), 0);
+    float zl = sceneDepthTex.Load(px);
+    float2 dims = float2(castView[1].z, castView[1].w);
+    float2 ndc = float2(i.pos.x / dims.x * 2.0f - 1.0f, 1.0f - i.pos.y / dims.y * 2.0f);
+    float3 vp = float3(ndc.x * castView[1].x, ndc.y * castView[1].y, 1.0f) * zl;
+    float3 q = vp - castView[0].xyz;
+    float3 pw;
+    pw.x = q.x * castMat[0].x + q.y * castMat[0].y + q.z * castMat[0].z;
+    pw.y = q.x * castMat[1].x + q.y * castMat[1].y + q.z * castMat[1].z;
+    pw.z = q.x * castMat[2].x + q.y * castMat[2].y + q.z * castMat[2].z;
+    float3 sd = castView[2].xyz;
+    float3 sds = float3(
+        abs(sd.x) > 1e-6f ? sd.x : 1e-6f,
+        abs(sd.y) > 1e-6f ? sd.y : 1e-6f,
+        abs(sd.z) > 1e-6f ? sd.z : 1e-6f);
+    float3 inv = 1.0f / sds;
+    float3 bmin = centerSize.xyz - sizeAxes.xyz * 0.5f;
+    float3 bmax = centerSize.xyz + sizeAxes.xyz * 0.5f;
+    float3 ta = (bmin - pw) * inv;
+    float3 tb = (bmax - pw) * inv;
+    float3 tmn = min(ta, tb);
+    float3 tmx = max(ta, tb);
+    float tn = max(max(tmn.x, tmn.y), tmn.z);
+    float tf = min(min(tmx.x, tmx.y), tmx.z);
+
+    // LOCALITY CLAMP: a ground point can only be shadowed by a box
+    // within plausible shadow reach of it. Boxes beyond the captured
+    // depth's valid range reconstruct GARBAGE world positions at
+    // far-plane pixels; the slab test then hit pseudo-randomly across
+    // the whole screen and MIN-darkened the world's mask wholesale (the
+    // 'overcast world' when the distant fog array spawned). Reach =
+    // a few box diagonals stretched by sun elevation (low sun = long
+    // shadows); beyond it, geometrically impossible - never darken.
+    float boxR = length(sizeAxes.xyz) * 0.5f;
+    float reach = boxR * (2.0f + 3.0f / max(abs(castView[2].y), 0.15f));
+    float3 toBox = centerSize.xyz - pw;
+    float near_enough = (dot(toBox, toBox) < reach * reach) ? 1.0f : 0.0f;
+    float hit = (tf >= max(tn, 0.05f) && zl > 0.01f && near_enough > 0.5f) ? 1.0f : 0.0f;
+
+    // Screen path only (castMeta.x = 1): if the CAMERA's ray to this
+    // pixel passes through the box first, the pixel shows the box face -
+    // the scene-end apply runs after the boxes draw, so shading it would
+    // paint the ground's shadow ONTO the box (the see-through bug).
+    if (castMeta.x > 0.5f && hit > 0.5f) {
+        float3 cq = -castView[0].xyz;
+        float3 cam;
+        cam.x = cq.x * castMat[0].x + cq.y * castMat[0].y + cq.z * castMat[0].z;
+        cam.y = cq.x * castMat[1].x + cq.y * castMat[1].y + cq.z * castMat[1].z;
+        cam.z = cq.x * castMat[2].x + cq.y * castMat[2].y + cq.z * castMat[2].z;
+        float3 vd = pw - cam;
+        float3 vds = float3(
+            abs(vd.x) > 1e-6f ? vd.x : 1e-6f,
+            abs(vd.y) > 1e-6f ? vd.y : 1e-6f,
+            abs(vd.z) > 1e-6f ? vd.z : 1e-6f);
+        float3 vinv = 1.0f / vds;
+        float3 va = (bmin - cam) * vinv;
+        float3 vb = (bmax - cam) * vinv;
+        float3 vmn = min(va, vb);
+        float3 vmx = max(va, vb);
+        float vtn = max(max(vmn.x, vmn.y), vmn.z);
+        float vtf = min(min(vmx.x, vmx.y), vmx.z);
+        if (vtf >= max(vtn, 0.0f) && vtn < 0.99f) hit = 0.0f;   // box face in front
+    }
+
+    // Full occlusion here; the APPLY colors the shadow by the ambient
+    // floor (amb/(amb+sun)) - depth and hue both derive from the sky.
+    float shade = 1.0f - hit * saturate(castView[2].w);
+    return float4(shade, shade, shade, 1.0f);
+}
+
+// Composite our shadow-factor texture onto the scene (multiply).
+Texture2D<float> khShadowFactor : register(t10);
+
+float4 PSMaskApply(VSOut i) : SV_Target
+{
+    float v = khShadowFactor.Load(int3(int2(i.pos.xy), 0));
+    // v = 1 lit, 0 fully occluded. Shadow tint: lit = ambient + sun,
+    // shadowed = ambient, so the per-channel floor is amb/(amb+sun)
+    // (precomputed on the CPU into maskMeta.xyz). The factor texture
+    // interpolates toward that floor instead of black.
+    float3 floorRGB = maskMeta.xyz;
+    float3 outRGB = lerp(floorRGB, float3(1.0f, 1.0f, 1.0f), v);
+    return float4(outRGB, 1.0f);
 }
 
 // Fullscreen triangle from SV_VertexID: no vertex buffer, no input layout
@@ -377,12 +566,13 @@ float4 PSMain(VSOut i) : SV_Target
     // ignore alpha), so they fade toward their respective neutral element
     // instead: black for MAX, a large value for MIN - both leave the
     // scene untouched.
+    float3 lc = ApplyLighting(color.rgb, i.wpos, 1.0f);
     float a = color.a * SolidMask(i.wpos);
-    if (bm == 1 || bm == 3) return float4(color.rgb * a, 1.0f);
-    if (bm == 2) return float4(lerp(float3(1.0f, 1.0f, 1.0f), color.rgb, a), 1.0f);
-    if (bm == 4) return float4(color.rgb * a, 1.0f);
-    if (bm == 5) return float4(lerp(float3(65504.0f, 65504.0f, 65504.0f), color.rgb, a), 1.0f);
-    return float4(color.rgb, a);
+    if (bm == 1 || bm == 3) return float4(lc * a, 1.0f);
+    if (bm == 2) return float4(lerp(float3(1.0f, 1.0f, 1.0f), lc, a), 1.0f);
+    if (bm == 4) return float4(lc * a, 1.0f);
+    if (bm == 5) return float4(lerp(float3(65504.0f, 65504.0f, 65504.0f), lc, a), 1.0f);
+    return float4(lc, a);
 }
 )HLSL";
 
@@ -403,6 +593,197 @@ float LoadDepthC(int2 px) { return depthTex.Load(px, 0); }
 Texture2D<float> depthTex : register(t0);
 float LoadDepthC(int2 px) { return depthTex.Load(int3(px, 0)); }
 #endif
+
+// The engine's shadow atlas (the depth texture its cascade passes render
+// into), sampled with the engine's OWN per-cascade world->atlasUV+depth
+// transforms harvested from its constant uploads - so this compare is the
+// same one the engine performs for its own geometry.
+Texture2D<float> shadowAtlas : register(t1);
+// Our OWN copy of the atlas, grabbed the moment the FINEST cascade finished
+// rendering - the engine reuses one map for all cascades sequentially, so
+// the fine content only exists in it transiently. The copy plus its stored
+// transform is a permanently correct pair.
+Texture2D<float> shadowAtlasFine : register(t2);
+// The engine's screen-space shadow mask (its shadow resolve output). Read
+// at this pixel's own screen position: registration-exact by construction.
+Texture2D<float4> shadowMask : register(t3);
+Texture2D<float> shadowBand0 : register(t4);
+Texture2D<float> shadowBand1 : register(t5);
+Texture2D<float> shadowBand2 : register(t6);
+Texture2D<float> shadowBand3 : register(t7);
+Texture2D<float> shadowBand4 : register(t8);
+Texture2D<float> shadowBand5 : register(t9);
+Texture2D<float> shadowBand6 : register(t12);   // slots 6-7: t10 is the
+Texture2D<float> shadowBand7 : register(t13);   // screen path's factor
+
+// rel: CAMERA-RELATIVE position (wpos - fxParams0.xyz). The engine renders
+// camera-relative for float precision, and its shadow sampling transforms
+// consume that same space - evaluated at absolute world coordinates they
+// produce UVs off by tens of atlas widths (which is exactly how this was
+// diagnosed: at the camera the transform yields its own translation, dead
+// center in a tile).
+// Core sample: which cascade contains this camera-relative point, and is
+// it occluded there. cascade -1 = no cascade contains the point.
+void ShadowMapSample(float3 rel, out int cascade, out float occluded)
+{
+    cascade = -1;
+    occluded = 0.0f;
+    int n = (int)shadowMeta.x;
+    if (n <= 0) return;
+
+    for (int c = 0; c < n; ++c) {
+        float4 r0 = shadowMats[c * 3 + 0];
+        float4 r1 = shadowMats[c * 3 + 1];
+        float4 r2 = shadowMats[c * 3 + 2];
+        float u = dot(r0.xyz, rel) + r0.w;
+        float v = dot(r1.xyz, rel) + r1.w;
+        float z = dot(r2.xyz, rel) + r2.w;
+
+        if (c == (int)shadowSrc.x) {
+            float ru = u - shadowFix2.z;
+            float rv = v - shadowFix2.w;
+            u = shadowFix2.z + shadowFix2.x * ru - shadowFix2.y * rv;
+            v = shadowFix2.w + shadowFix2.y * ru + shadowFix2.x * rv;
+            u += shadowSrc.y;
+            v += shadowSrc.z;
+            z += shadowSrc.w;
+        }
+
+        float4 t = shadowTiles[c];
+        // Tiles are sorted finest-first; the first cascade whose tile and
+        // depth range contain the point decides.
+        if (u < t.x || u > t.z || v < t.y || v > t.w) continue;
+        if (z <= 0.001f || z >= 0.999f) continue;
+        int3 px = int3(int2(float2(u, v) * shadowMeta.w), 0);
+        float mapZ = (c == (int)shadowSrc.x) ? shadowAtlasFine.Load(px) : shadowAtlas.Load(px);
+        cascade = c;
+        occluded = ((z - mapZ) * shadowMeta.y > shadowMeta.z) ? 1.0f : 0.0f;
+        return;
+    }
+}
+
+float ShadowMapFactor(float3 rel)
+{
+    int cascade;
+    float occluded;
+    ShadowMapSample(rel, cascade, occluded);
+    return 1.0f - occluded * saturate(lighting2.w);
+}
+
+// The engine's receiver contract, replicated verbatim from its resolve
+// shader: view-space position, band selection by view depth against
+// PSC_ShadowmapLayerBorder, PSC_ShadowmapMatrix as three dot products
+// with w = 1, comparison against stored depth. Each band's view matrix
+// was frozen WITH its matrix and content, so rotation is exact.
+float ShadowBandFactor(float3 wpos)
+{
+    // Straight-line evaluation (no [unroll]/continue/break: X4575 in
+    // this unit). Slots arrive finest-first; the first containing band
+    // wins; bandBorder.w-1 names the physical texture.
+    float4 p = float4(wpos, 1.0f);
+    float occ = -1.0f;
+    int done = 0;
+
+    for (int s = 0; s < 8; ++s) {
+        if (done != 0) break;
+        if (bandBorder[s].w < 0.5f) { done = 0; }
+        else {
+            float vz = dot(p, bandView[s * 3 + 2]);
+
+            if (vz >= bandBorder[s].x && vz < bandBorder[s].y) {
+                float4 vp4 = float4(dot(p, bandView[s * 3 + 0]), dot(p, bandView[s * 3 + 1]), vz, 1.0f);
+                float u = dot(vp4, bandMat[s * 3 + 0]);
+                float v = dot(vp4, bandMat[s * 3 + 1]);
+                float z = dot(vp4, bandMat[s * 3 + 2]);
+
+                if (u > 0.001f && u < 0.999f && v > 0.001f && v < 0.999f && z > 0.001f && z < 0.999f) {
+                    int t = (int)(bandBorder[s].w + 0.5f) - 1;   // w = 1 + texIndex
+                    // Rotated-poisson PCF, the engine's own recipe: a
+                    // per-pixel random disk rotation turns fixed-offset
+                    // banding into fine noise. Hash from WORLD position so
+                    // the pattern doesn't swim with the camera.
+                    float ang = frac(sin(dot(wpos.xz, float2(12.9898f, 78.233f))) * 43758.5469f) * 6.2831853f;
+                    float ca = cos(ang);
+                    float sa = sin(ang);
+                    float r = 2.0f;
+                    float2 base = float2(u, v) * shadowMeta.w;
+                    float acc = 0.0f;
+
+                    for (int k = 0; k < 8; ++k) {
+                        float2 d0 =
+                            (k == 0) ? float2( 0.974844f, 0.756484f)
+                          : (k == 1) ? float2(-0.814100f, 0.914376f)
+                          : (k == 2) ? float2( 0.945586f,-0.768907f)
+                          : (k == 3) ? float2(-0.815442f,-0.879125f)
+                          : (k == 4) ? float2( 0.443233f,-0.975116f)
+                          : (k == 5) ? float2(-0.241888f, 0.997065f)
+                          : (k == 6) ? float2(-0.915886f, 0.457714f)
+                                     : float2( 0.143832f,-0.141008f);
+                        float2 off = float2(d0.x * ca - d0.y * sa, d0.x * sa + d0.y * ca);
+                        int3 px = int3(int2(base + off * r + 0.5f), 0);
+                        float stored = (t == 0) ? shadowBand0.Load(px)
+                                     : (t == 1) ? shadowBand1.Load(px)
+                                     : (t == 2) ? shadowBand2.Load(px)
+                                     : (t == 3) ? shadowBand3.Load(px)
+                                     : (t == 4) ? shadowBand4.Load(px)
+                                     : (t == 5) ? shadowBand5.Load(px)
+                                     : (t == 6) ? shadowBand6.Load(px)
+                                                : shadowBand7.Load(px);
+                        acc += ((z - stored) * shadowMeta.y > shadowMeta.z) ? 1.0f : 0.0f;
+                    }
+
+                    occ = acc * 0.125f;
+                    done = 1;
+                }
+            }
+        }
+    }
+
+    if (occ < 0.0f) return 1.0f;   // no band covers this depth: lit
+    return 1.0f - occ * saturate(lighting2.w);
+}
+
+float ShadowMaskValue(float4 svpos)
+{
+    float2 scale = maskDims.xy / max(maskDims.zw, float2(1.0f, 1.0f));
+    int2 px = int2(svpos.xy * scale);
+    float4 m = shadowMask.Load(int3(px, 0));
+    float v = m.x;
+    if (maskMeta.y > 0.5f && maskMeta.y < 1.5f) v = m.y;
+    else if (maskMeta.y > 1.5f && maskMeta.y < 2.5f) v = m.z;
+    else if (maskMeta.y > 2.5f) v = m.w;
+    if (maskMeta.z > 0.5f) v = 1.0f - v;
+    return v;
+}
+
+float ShadowMaskFactor(float4 svpos)
+{
+    float v = ShadowMaskValue(svpos);
+    return 1.0f - (1.0f - v) * saturate(lighting2.w);
+}
+
+// Debug palettes: mode 1 paints occlusion (red = occluded, green = lit,
+// blue = no cascade contains the pixel); mode 2 paints the selected
+// cascade index (gray = none). Both replace the box color outright - the
+// point is reading the shadow path's decisions off the geometry.
+float4 ShadowMapDebug(float3 rel)
+{
+    int cascade;
+    float occluded;
+    ShadowMapSample(rel, cascade, occluded);
+
+    if (shadowMeta2.x < 1.5f) {
+        if (cascade < 0) return float4(0.1f, 0.2f, 1.0f, 1.0f);
+        return float4(occluded, 1.0f - occluded, 0.0f, 1.0f);
+    }
+
+    if (cascade < 0) return float4(0.4f, 0.4f, 0.4f, 1.0f);
+    float3 pal[8] = {
+        float3(1, 0, 0),   float3(1, 0.5f, 0), float3(1, 1, 0), float3(0, 1, 0),
+        float3(0, 1, 1),   float3(0, 0.4f, 1), float3(0.6f, 0, 1), float3(1, 0, 1)
+    };
+    return float4(pal[cascade & 7], 1.0f);
+}
 
 float LinDepthC(float raw)
 {
@@ -429,17 +810,86 @@ float4 PSComposite(VSOutC i) : SV_Target
     // Punch-through guard: fxParams0.xyz = camera (engine space),
     // fxParams1.x = base margin (m), fxParams1.y = relative margin.
     int2 px = clamp(int2(i.pos.xy), int2(0, 0), int2((int)fxMeta.z - 1, (int)fxMeta.w - 1));
-    float sceneD = LinDepthC(LoadDepthC(px));
-    float fragD = distance(i.wpos, fxParams0.xyz);
-    if (fragD > sceneD * (1.0f + fxParams1.y) + fxParams1.x) discard;
+    // Same-metric compare: LinDepthC returns VIEW-AXIS scene depth, and
+    // SV_Position.w is this fragment's own view-axis depth (clip-space w).
+    // The old compare put Euclidean camera distance against view-axis
+    // depth, overstating the fragment by 1/cos(view angle) - up to tens of
+    // percent at screen edges - so edge fragments sitting close in front
+    // of world geometry were wrongly discarded (world bleeding through
+    // with no flicker: a guard discard, not a depth-test loss).
+    float sceneZ = LinDepthC(LoadDepthC(px));
+    float fragZ = i.pos.w;
+    if (fragZ > sceneZ * (1.0f + fxParams1.y) + fxParams1.x) discard;
 
     int bm = (int)sizeAxes.w;
+
+    if (lighting0.x >= 0.5f && shadowMeta2.x >= 2.5f && maskMeta.x >= 0.5f) {
+        float mv = ShadowMaskValue(i.pos);
+        return float4(mv, mv, mv, 1.0f);   // debug 3: raw mask grayscale
+    }
+
+    if (lighting0.x >= 0.5f && shadowMeta2.x >= 3.5f && maskMeta.w >= 0.5f) {
+        // debug 4: which band covers this pixel (green = 0, blue = 1, red = none)
+        // Straight-line: [unroll] + continue + return-of-loop-var trips
+        // fxc's flow analysis (X4575 uninitialized read).
+        float4 p4 = float4(i.wpos, 1.0f);
+        float4 dbg = float4(0.9f, 0.1f, 0.1f, 1.0f);   // red = uncovered
+
+        for (int s = 7; s >= 0; --s) {
+            if (bandBorder[s].w >= 0.5f) {
+                float vz = dot(p4, bandView[s * 3 + 2]);
+
+                if (vz >= bandBorder[s].x && vz < bandBorder[s].y) {
+                    dbg = (s == 0) ? float4(0.1f, 0.8f, 0.1f, 1.0f)   // green: finest
+                        : (s == 1) ? float4(0.1f, 0.1f, 0.9f, 1.0f)   // blue
+                        : (s == 2) ? float4(0.8f, 0.8f, 0.1f, 1.0f)   // yellow
+                        : (s == 3) ? float4(0.8f, 0.1f, 0.8f, 1.0f)   // magenta
+                        : (s == 4) ? float4(0.1f, 0.8f, 0.8f, 1.0f)   // cyan
+                                   : float4(0.9f, 0.5f, 0.1f, 1.0f);  // orange
+                }
+            }
+        }
+
+        return dbg;
+    }
+
+    if (lighting0.x >= 0.5f && shadowMeta2.x >= 0.5f && shadowMeta2.x < 2.5f) return ShadowMapDebug(i.wpos - shadowMeta2.yzw);
+    float smf = 1.0f;
+
+    if (lighting0.x >= 0.5f) {
+        if (maskMeta.x >= 0.5f)      smf = ShadowMaskFactor(i.pos);
+        else if (maskMeta.w >= 0.5f) smf = ShadowBandFactor(i.wpos);
+        else                         smf = ShadowMapFactor(i.wpos - shadowMeta2.yzw);
+
+    }
+    float3 lc = ApplyLighting(color.rgb, i.wpos, smf);
+
+    // FOG OCCLUSION: RV's height-decay exponential. Density at height h:
+    // d(h) = fogValue * exp(-fogDecay * (h - fogBase)). Transmittance over
+    // the ray uses the density at the FRAGMENT's height (single-sample
+    // approximation - exact for level sight lines, visually right for
+    // slanted ones), distance from the camera in meters.
+    // FOG OCCLUSION (final form; the red-tracer run proved the chain).
+    // RV semantics: full density at and below fogBase, exponential decay
+    // above it at fogDecay per meter - the original bug attenuated BELOW
+    // base too (fogStagedBase=111 m with terrain lower killed nothing,
+    // but earlier defaults with base 0 gutted the density at any
+    // altitude). max(hgt - base, 0) keeps full density below base.
+    // Extinction calibrated to RV visibility: fog 1.0 = ~90% obscured at
+    // 150 m, fog 0.5 = at ~600 m (lambda = dens^2 * 0.0153 / m).
+    if (fogParams.w >= 0.5f) {
+        float distM = i.pos.w;
+        float hgt = i.wpos.y;
+        float dens = fogParams.x * exp(-fogParams.y * max(hgt - fogParams.z, 0.0f));
+        float trans = exp(-distM * dens * dens * 0.0153f);
+        lc = lerp(fogColor.rgb, lc, saturate(trans));
+    }
     float a = color.a * SolidMask(i.wpos);
-    if (bm == 1 || bm == 3) return float4(color.rgb * a, 1.0f);
-    if (bm == 2) return float4(lerp(float3(1.0f, 1.0f, 1.0f), color.rgb, a), 1.0f);
-    if (bm == 4) return float4(color.rgb * a, 1.0f);
-    if (bm == 5) return float4(lerp(float3(65504.0f, 65504.0f, 65504.0f), color.rgb, a), 1.0f);
-    return float4(color.rgb, a);
+    if (bm == 1 || bm == 3) return float4(lc * a, 1.0f);
+    if (bm == 2) return float4(lerp(float3(1.0f, 1.0f, 1.0f), lc, a), 1.0f);
+    if (bm == 4) return float4(lc * a, 1.0f);
+    if (bm == 5) return float4(lerp(float3(65504.0f, 65504.0f, 65504.0f), lc, a), 1.0f);
+    return float4(lc, a);
 }
 )HLSL";
 
@@ -930,6 +1380,29 @@ struct alignas(16) ConstantData {
     float local1[4];       // x = falloff (normalized to mean radius), y = localized flag
     float local_radii[4];  // xyz = mask radii (engine axes)
     float band0[4];        // x = band min (m), y = band max (m, <=0 unbounded), z = falloff (m), w = banded flag
+    float lighting0[4];    // x = lit flag, y = sun-occlusion factor, z = ambient, w = diffuse
+    float lighting1[4];    // xyz = unit vector TOWARD the light (engine axes), w = valid flag
+    float lighting2[4];    // rgb = light color (max-component normalized), w = shadow-map strength
+    float shadow_meta[4];      // count, compare sign, bias, atlas size
+    float shadow_tiles[8][4];  // per-cascade atlas UV rects
+    float shadow_mats[24][4];  // per-cascade 4x3 sampling transforms
+    float shadow_meta2[4];     // x = debug mode
+    float shadow_src[4];       // x = fine-copy entry index or -1
+    float shadow_fix2[4];
+    float band_mat[24][4];
+    float band_view[24][4];
+    float band_border[8][4];
+    float cast_mat[3][4];
+    float cast_view[3][4];
+    float cast_vp[4];
+    float cast_meta[4];
+    float mask_meta[4];
+    float mask_dims[4];
+    // --- appended (fog + engine-mask receive); append-only so no
+    // existing register shifts ---
+    float fog_params[4];   // x = fogValue, y = fogDecay, z = fogBase, w = enable
+    float fog_color[4];    // rgb = fog color approximation, w = camera altitude ASL
+                           // (relative), z/w = mask w/h for texel math
 };
 
 struct alignas(16) CSConstantData {
@@ -1005,6 +1478,30 @@ inline std::string ensure_resources(ID3D11Device* dev) {
     if (!err.empty()) { vs_blob->Release(); return err; }
     err = compile_shader(static_src.c_str(), "PSMain", "ps_5_0", nullptr, &ps_blob);
     if (!err.empty()) { vs_blob->Release(); vs_fs_blob->Release(); return err; }
+
+    {   // analytic mask cast PS: non-fatal
+        ID3DBlob* mc_blob = nullptr;
+        const std::string mc_err = compile_shader(static_src.c_str(), "PSMaskCast", "ps_5_0", nullptr, &mc_blob);
+
+        if (mc_err.empty() && mc_blob) {
+            dev->CreatePixelShader(mc_blob->GetBufferPointer(), mc_blob->GetBufferSize(), nullptr, &g_res.ps_maskcast);
+            mc_blob->Release();
+        } else if (!mc_err.empty()) {
+            report_error("KH maskcast shader: " + mc_err);
+        }
+    }
+
+    {   // apply PS: non-fatal
+        ID3DBlob* ma_blob = nullptr;
+        const std::string ma_err = compile_shader(static_src.c_str(), "PSMaskApply", "ps_5_0", nullptr, &ma_blob);
+
+        if (ma_err.empty() && ma_blob) {
+            dev->CreatePixelShader(ma_blob->GetBufferPointer(), ma_blob->GetBufferSize(), nullptr, &g_res.ps_maskapply);
+            ma_blob->Release();
+        } else if (!ma_err.empty()) {
+            report_error("KH maskapply shader: " + ma_err);
+        }
+    }
     hr = dev->CreateVertexShader(vs_blob->GetBufferPointer(), vs_blob->GetBufferSize(), nullptr, &g_res.vs);
     if (FAILED(hr)) { vs_blob->Release(); vs_fs_blob->Release(); ps_blob->Release(); g_res.release(); return "CreateVertexShader " + hr_str(hr); }
     hr = dev->CreateVertexShader(vs_fs_blob->GetBufferPointer(), vs_fs_blob->GetBufferSize(), nullptr, &g_res.vs_fullscreen);
@@ -1161,7 +1658,14 @@ inline std::string ensure_resources(ID3D11Device* dev) {
         // more negative = more suppression, but the cut line sinks further
         // into scene geometry.
         rd.DepthBias = -32;                 // units of 1/2^24 for D24 buffers
-        rd.SlopeScaledDepthBias = -1.0f;
+        // -1.0 overcorrected at grazing angles (box faces near edge-on to
+        // the camera): the slope-scaled offset gets large and varies per
+        // pixel, so intersection contours with world geometry crawled.
+        // The constant -32 term carries the anti-shimmer duty; keep only
+        // a light slope component. If intersections still shimmer under
+        // camera motion, prefer deepening DepthBias (e.g. -48) over
+        // raising this again.
+        rd.SlopeScaledDepthBias = -0.25f;
         rd.DepthBiasClamp = 0.0f;
         hr = dev->CreateRasterizerState(&rd, &g_res.rasterizer);
         if (FAILED(hr)) { g_res.release(); return "Create rasterizer " + hr_str(hr); }
@@ -1389,11 +1893,29 @@ inline std::string ensure_effect_shader(ID3D11Device* dev) {
 
 // Injected-path shaders, compiled for the current depth MSAA count
 // (mirrors ensure_effect_shader).
+static uint64_t g_comp_compiles = 0;        // full compile attempts (diagnostic)
+static uint64_t g_comp_fail_streak = 0;     // consecutive failures
+static float    g_comp_next_retry = 0.0f;   // backoff: a failed compile must
+                                            // NOT retry per injection - a
+                                            // ~170 ms D3DCompile every frame
+                                            // IS a framerate collapse, and
+                                            // the silent guard=false fallback
+                                            // removes shadow shading too.
+static std::string g_comp_last_err;
+
 inline std::string ensure_composite_shader(ID3D11Device* dev) {
     if (g_res.vs_composite && g_res.ps_composite &&
         g_res.ps_composite_samples == g_res.comp_depth_samples) {
         return "";
     }
+
+    // self-contained clock: effect_time_seconds() is defined later in the file
+    LARGE_INTEGER _bo_q, _bo_f;
+    QueryPerformanceCounter(&_bo_q);
+    QueryPerformanceFrequency(&_bo_f);
+    const float now_bo = static_cast<float>(static_cast<double>(_bo_q.QuadPart) / static_cast<double>(_bo_f.QuadPart));
+    if (g_comp_fail_streak > 0 && now_bo < g_comp_next_retry) return g_comp_last_err;
+    g_comp_compiles++;
 
     if (g_res.vs_composite) { g_res.vs_composite->Release(); g_res.vs_composite = nullptr; }
     if (g_res.ps_composite) { g_res.ps_composite->Release(); g_res.ps_composite = nullptr; }
@@ -1406,10 +1928,20 @@ inline std::string ensure_composite_shader(ID3D11Device* dev) {
     const std::string comp_src = std::string(g_cb_hlsl) + g_hlsl_composite;
     ID3DBlob* vs_blob = nullptr;
     ID3DBlob* ps_blob = nullptr;
+    auto comp_fail = [&](const std::string& e) {
+        g_comp_last_err = e;
+        if (g_comp_fail_streak == 0) report_error("KH composite shader: " + e);
+        g_comp_fail_streak++;
+        g_comp_next_retry = now_bo + 2.0f;
+        g_stats.effect_setup_fails++;
+        return e;
+    };
+
     std::string err = compile_shader(comp_src.c_str(), "VSComposite", "vs_5_0", defines, &vs_blob);
-    if (!err.empty()) return "composite VS: " + err;
+    if (!err.empty()) return comp_fail("composite VS: " + err);
     err = compile_shader(comp_src.c_str(), "PSComposite", "ps_5_0", defines, &ps_blob);
-    if (!err.empty()) { vs_blob->Release(); return "composite PS: " + err; }
+    if (!err.empty()) { vs_blob->Release(); return comp_fail("composite PS: " + err); }
+    g_comp_fail_streak = 0;
     HRESULT hr = dev->CreateVertexShader(vs_blob->GetBufferPointer(), vs_blob->GetBufferSize(), nullptr, &g_res.vs_composite);
     vs_blob->Release();
     if (FAILED(hr)) { ps_blob->Release(); return "Create composite VS " + hr_str(hr); }
@@ -1545,7 +2077,7 @@ struct StateBackup {
     ID3D11DomainShader*      ds = nullptr;
     ID3D11Buffer*            vs_cb0 = nullptr;
     ID3D11Buffer*            ps_cb0 = nullptr;
-    ID3D11ShaderResourceView* ps_srvs[2] = {};
+    ID3D11ShaderResourceView* ps_srvs[14] = {};   // t0-t13: bands t4-t9 + t12-t13
     ID3D11DepthStencilState* dss = nullptr;
     UINT                     stencil_ref = 0;
     ID3D11BlendState*        blend = nullptr;
@@ -1564,7 +2096,7 @@ struct StateBackup {
         ctx->DSGetShader(&ds, nullptr, nullptr);
         ctx->VSGetConstantBuffers(0, 1, &vs_cb0);
         ctx->PSGetConstantBuffers(0, 1, &ps_cb0);
-        ctx->PSGetShaderResources(0, 2, ps_srvs);
+        ctx->PSGetShaderResources(0, 14, ps_srvs);
         ctx->OMGetDepthStencilState(&dss, &stencil_ref);
         ctx->OMGetBlendState(&blend, blend_factor, &sample_mask);
         ctx->RSGetState(&rasterizer);
@@ -1581,7 +2113,7 @@ struct StateBackup {
         ctx->DSSetShader(ds, nullptr, 0);
         ctx->VSSetConstantBuffers(0, 1, &vs_cb0);
         ctx->PSSetConstantBuffers(0, 1, &ps_cb0);
-        ctx->PSSetShaderResources(0, 2, ps_srvs);
+        ctx->PSSetShaderResources(0, 14, ps_srvs);
         ctx->OMSetDepthStencilState(dss, stencil_ref);
         ctx->OMSetBlendState(blend, blend_factor, sample_mask);
         ctx->RSSetState(rasterizer);
@@ -1598,6 +2130,18 @@ struct StateBackup {
         KH_SAFE_RELEASE(ps_cb0);
         KH_SAFE_RELEASE(ps_srvs[0]);
         KH_SAFE_RELEASE(ps_srvs[1]);
+        KH_SAFE_RELEASE(ps_srvs[2]);
+        KH_SAFE_RELEASE(ps_srvs[3]);
+        KH_SAFE_RELEASE(ps_srvs[4]);
+        KH_SAFE_RELEASE(ps_srvs[5]);
+        KH_SAFE_RELEASE(ps_srvs[6]);
+        KH_SAFE_RELEASE(ps_srvs[7]);
+        KH_SAFE_RELEASE(ps_srvs[8]);
+        KH_SAFE_RELEASE(ps_srvs[9]);
+        KH_SAFE_RELEASE(ps_srvs[10]);
+        KH_SAFE_RELEASE(ps_srvs[11]);
+        KH_SAFE_RELEASE(ps_srvs[12]);
+        KH_SAFE_RELEASE(ps_srvs[13]);
         KH_SAFE_RELEASE(dss);
         KH_SAFE_RELEASE(blend);
         KH_SAFE_RELEASE(rasterizer);
@@ -2109,6 +2653,7 @@ static constexpr uint32_t KH_REORDER_MAX_INJECT_ATTEMPTS = 16;
 // cleverness here.
 
 // --- ID3D11DeviceContext vtable slots (d3d11.h declaration order) ---
+static constexpr int KH_VT_PSSETSHADERRESOURCES  = 8;
 static constexpr int KH_VT_DRAWINDEXED           = 12;
 static constexpr int KH_VT_DRAW                  = 13;
 static constexpr int KH_VT_MAP                   = 14;
@@ -2122,6 +2667,7 @@ static constexpr int KH_VT_OMSETDEPTHSTENCIL     = 36;
 static constexpr int KH_VT_UPDATESUBRESOURCE     = 48;
 static constexpr int KH_VT_CLEARDEPTHSTENCIL     = 53;
 
+typedef void (STDMETHODCALLTYPE* FnPSSetShaderResources)(ID3D11DeviceContext*, UINT, UINT, ID3D11ShaderResourceView* const*);
 typedef void (STDMETHODCALLTYPE* FnDrawIndexed)(ID3D11DeviceContext*, UINT, UINT, INT);
 typedef void (STDMETHODCALLTYPE* FnDraw)(ID3D11DeviceContext*, UINT, UINT);
 typedef void (STDMETHODCALLTYPE* FnDrawIndexedInstanced)(ID3D11DeviceContext*, UINT, UINT, UINT, INT, UINT);
@@ -2135,6 +2681,7 @@ typedef HRESULT (STDMETHODCALLTYPE* FnMap)(ID3D11DeviceContext*, ID3D11Resource*
 typedef void (STDMETHODCALLTYPE* FnUnmap)(ID3D11DeviceContext*, ID3D11Resource*, UINT);
 typedef void (STDMETHODCALLTYPE* FnUpdateSubresource)(ID3D11DeviceContext*, ID3D11Resource*, UINT, const D3D11_BOX*, const void*, UINT, UINT);
 
+static FnPSSetShaderResources    g_orig_pssetshaderresources = nullptr;
 static FnDrawIndexed             g_orig_draw_indexed = nullptr;
 static FnDraw                    g_orig_draw = nullptr;
 static FnDrawIndexedInstanced    g_orig_draw_indexed_instanced = nullptr;
@@ -2342,6 +2889,20 @@ inline bool proj_try_window(const float* w, bool discovery) {
         fabsf(w[11] - 1.0f) < 1e-4f &&
         close(w[0], sx, 0.02f) && close(w[5], sy, 0.02f) && close(w[10], m22_l, 0.02f) &&
         m32_ok(w[14])) {
+        {
+            const float n_prev = fabsf(g_ro.engine_m22) > 1e-9f ? (-g_ro.engine_m32 / g_ro.engine_m22) : 0.0f;
+            const float n_new  = fabsf(w[10]) > 1e-9f ? (-w[14] / w[10]) : 0.0f;
+
+            // near-plane shift mid-frame: a partition boundary the
+            // viewport-range check misses (the look-up slice: one
+            // injection spent in the far partition, the near partition -
+            // whose near plane clips less - never got its own draw).
+            if (g_ro.engine_proj_valid && g_ro.injected &&
+                n_prev > 1e-4f && fabsf(n_new - n_prev) > 0.05f * n_prev) {
+                g_ro.injected = false;
+                g_stats.composite_rearms++;
+            }
+        }
         g_ro.engine_m22 = w[10];
         g_ro.engine_m32 = w[14];
         g_proj_last_m32 = w[14];
@@ -2357,6 +2918,16 @@ inline bool proj_try_window(const float* w, bool discovery) {
         fabsf(w[14] - 1.0f) < 1e-4f &&
         close(w[0], sx, 0.02f) && close(w[5], sy, 0.02f) && close(w[10], m22_l, 0.02f) &&
         m32_ok(w[11])) {
+        {
+            const float n_prev = fabsf(g_ro.engine_m22) > 1e-9f ? (-g_ro.engine_m32 / g_ro.engine_m22) : 0.0f;
+            const float n_new  = fabsf(w[10]) > 1e-9f ? (-w[11] / w[10]) : 0.0f;
+
+            if (g_ro.engine_proj_valid && g_ro.injected &&
+                n_prev > 1e-4f && fabsf(n_new - n_prev) > 0.05f * n_prev) {
+                g_ro.injected = false;
+                g_stats.composite_rearms++;
+            }
+        }
         g_ro.engine_m22 = w[10];
         g_ro.engine_m32 = w[11];
         g_proj_last_m32 = w[11];
@@ -2416,6 +2987,2596 @@ inline uint32_t proj_upload_byte_width(ID3D11Resource* res) {
     return bd.ByteWidth;
 }
 
+// ===========================================================================
+// World lighting (sun/moon) + shadow-pass recon.
+//
+// LIGHTING (live now): the sun state is knowable from the game thread -
+// getLighting supplies the light color, brightness and direction. Once per
+// flush the game thread STAGES that state (stage_world_lighting), casts the
+// per-object occlusion rays (update_shadow_rays - checkVisibility from the
+// box toward the sun answers "does the world shadow our box" at object
+// granularity, today, with zero render-thread involvement), and PUBLISHES
+// the staged state inside flush_locked, where the graphics lock parks the
+// render thread - the same invariant the injection already relies on for
+// lock-free context use - so the render-thread consumers (composited-path
+// shading, the recon scan) read plain globals that can never be observed
+// mid-write. Shading itself is per pixel in ApplyLighting (see the shader).
+//
+// SHADOW RECON (evidence before a build is gambled): per-pixel shadows in
+// BOTH remaining directions - sampling the engine's shadow maps so the
+// world shadows our pixels, and injecting our geometry into the shadow
+// passes so our objects shadow the world - hinge on ONE unknown: does the
+// engine upload a SEPARABLE light view-projection, or only combined
+// per-object World x LightVP matrices? The discovery template is the
+// projection sniffer's, transplanted: a light VP's clip-Z axis is, by
+// construction, the light direction, and the sun direction is
+// independently known from the game thread - so a candidate 4x4 in a
+// shadow-pass constant upload validates by its depth axis normalizing to
+// within a couple of degrees of the published sun vector. The one failure
+// mode the direction test CANNOT see is the combined-matrix case (a
+// translation-only World preserves the rotation, so the axis still aligns
+// while the translation is per-object garbage) - which is exactly what the
+// DISTINCT-TRANSLATION counter measures: a separable light VP yields one
+// translation per cascade (expect 1-4 distinct per cycle, and the count IS
+// the cascade count), per-object combined matrices yield one per draw (the
+// counter saturates at the cap). Enable with setShadowRecon and read
+// shadowCyclesSeen / shadowScanUploads / sunAlignedCandidates /
+// sunAlignedLastCycle / sunDistinctTranslationsMax off getRenderStats over
+// a normal test scene: that one monitor run decides whether the shadow-map
+// route is viable. Zero cost while disabled; while enabled the scan is
+// bounded like the projection sniffer's (structural zero checks reject
+// almost every window before any arithmetic).
+//
+// A shadow pass is fingerprinted as depth-only output: a DSV that is NOT
+// the main scene's with no color target bound, plus a floor of draws (a
+// depth pre-pass would bind the MAIN depth and is excluded by identity).
+// ===========================================================================
+
+
+
+
+
+typedef HRESULT (WINAPI* FnD3DDisassemble)(const void*, SIZE_T, UINT, const char*, void**);
+
+
+static bool  g_sun_valid = false;
+static float g_sun_dir_engine[3] = { 0.0f, 1.0f, 0.0f };  // unit vector TOWARD the light, engine axes
+static float g_sun_color[3] = { 1.0f, 1.0f, 1.0f };       // light color, max-component normalized
+// Ambient light (SQF-staged alongside the sun, elems 4-5 of the lighting
+// command: [r,g,b] color and brightness). The shadow's color/depth derive
+// from it: lit = ambient + sun, shadowed = ambient, so the per-channel
+// factor is amb/(amb+sun).
+static float g_amb_staged_color[3] = { 0.5f, 0.6f, 0.8f };
+static float g_amb_staged_brightness = 0.35f;
+static float g_amb_color[3] = { 0.5f, 0.6f, 0.8f };
+static float g_amb_brightness = 0.35f;
+static bool  g_amb_brightness_staged_flag = false;   // SQF actually provided it
+static float g_sun_brightness = 0.0f;                     // raw getLighting brightness (diagnostic)
+
+// --- Game-thread staging (written and read on the game thread only) ---
+static bool  g_sun_staged_valid = false;
+static float g_sun_staged_dir_engine[3] = { 0.0f, 1.0f, 0.0f };
+static float g_sun_staged_dir_sqf[3] = { 0.0f, 0.0f, 1.0f };  // SQF axes, for the occlusion rays
+static float g_sun_staged_color[3] = { 1.0f, 1.0f, 1.0f };
+static float g_sun_staged_brightness = 0.0f;
+// Fog: fetched on the game thread alongside getLighting (fogParams is an
+// SQF-side getter; the extension self-fetches - no user SQF involved).
+// RV's fog: density decays exponentially with height above fogBase.
+static bool  g_fog_staged_valid = false;
+static float g_fog_staged[3] = { 0.0f, 0.0f, 0.0f };   // value, decay, base
+static bool  g_fog_valid = false;
+static float g_fog[3] = { 0.0f, 0.0f, 0.0f };
+// Sun direction derived from the engine's own cascade matrices (the SM's
+// depth row is the light axis in view space; fold through the view
+// rotation's transpose to world). Preferred over the script-fetched
+// direction when fresh: pure engine truth, no SQF in the loop.
+static bool  g_sun_dir_derived_valid = false;
+static float g_sun_dir_derived[3] = { 0.0f, 1.0f, 0.0f };
+
+
+inline void publish_world_lighting() {
+    g_sun_valid = g_sun_staged_valid;
+    g_fog_valid = g_fog_staged_valid;
+    g_fog[0] = g_fog_staged[0];
+    g_fog[1] = g_fog_staged[1];
+    g_fog[2] = g_fog_staged[2];
+    g_sun_dir_engine[0] = g_sun_staged_dir_engine[0];
+    g_sun_dir_engine[1] = g_sun_staged_dir_engine[1];
+    g_sun_dir_engine[2] = g_sun_staged_dir_engine[2];
+    g_sun_color[0] = g_sun_staged_color[0];
+    g_sun_color[1] = g_sun_staged_color[1];
+    g_sun_color[2] = g_sun_staged_color[2];
+    g_amb_color[0] = g_amb_staged_color[0];
+    g_amb_color[1] = g_amb_staged_color[1];
+    g_amb_color[2] = g_amb_staged_color[2];
+    g_amb_brightness = g_amb_staged_brightness;
+    g_sun_brightness = g_sun_staged_brightness;
+}
+
+// ===========================================================================
+// LIVE shadow-map capture: the recon's verdict, promoted to infrastructure.
+// The engine renders its cascades as depth-only cycles into one SRV-capable
+// atlas (one cycle per cascade, distinguished by viewport), and uploads the
+// cascade's world->atlasUV+depth 4x3 into a constant block during that
+// cycle. Per frame, per cascade cycle: latch that matrix from the upload
+// (locator-cached offset, recon-style rediscovery on miss), snapshot the
+// bound viewport at the cycle's next draw as the cascade's atlas tile, and
+// hand the table to the composited box shader, which then performs the
+// engine's own shadow compare for our pixels. Render-thread owned; the
+// flush path reads it only while the render thread is parked.
+// ===========================================================================
+static constexpr uint32_t KH_LIVE_MAX_CASCADES = 8;
+
+struct LiveShadowEntry {
+    float    m[12];
+    float    tile[4];
+    float    cam[3];     // the camera origin THIS entry's transform is
+                         // relative to (entries persist across frames, so
+                         // each carries its own; folded into the
+                         // translation at fill time -> the shader consumes
+                         // absolute world positions and staleness is
+                         // mathematically irrelevant)
+    uint64_t stamp;      // finalize order; the newest entry IS the atlas
+};
+
+struct LiveShadowState {
+    std::atomic<bool> wanted{ false };        // game thread: any lit object exists
+    // Atlas tracking (render thread)
+    void*    atlas_identity = nullptr;
+    ID3D11Texture2D*          atlas_tex = nullptr;   // AddRef'd
+    ID3D11ShaderResourceView* atlas_srv = nullptr;
+    uint32_t atlas_size = 0;
+    uint32_t atlas_fmt = 0;
+    bool     srv_failed = false;
+    bool     phase_on_atlas = false;
+    // Per-cycle latch
+    bool     pending_valid = false;
+    bool     cycle_latched = false;   // one DISTINCT entry per cascade cycle
+    uint32_t pending_bytes = 0;       // source-CB size of the pending matrix
+    bool     pending_vp_valid = false;
+    float    pending_vp[4] = {};      // TopLeftX, TopLeftY, Width, Height
+    float    pending_m[12] = {};
+    // Decoded from the SMALL block per commit: its second 4x3 is a pure
+    // camera-YAW rotation R with translation t2 = (0.30, -1.59, 0.01) - an
+    // eye-height-shaped origin offset applied in yaw-rotated space. The
+    // world-space equivalent R^T * t2 is the fold correction candidate.
+    // GATED COMMITS: the engine's light-space fit can SPIN about the light
+    // axis between refits, so a mispaired commit is offset PLUS rotated -
+    // uncorrectable by translation. Static occluders make frozen pairs
+    // valid forever, so once a pair is BLESSED (visually verified, via
+    // setShadowBless), every candidate commit is cross-checked against it:
+    // caster texels from the trusted copy, unprojected to world through
+    // the trusted pair, reprojected through the candidate into the live
+    // atlas - depths must agree. Mismatched candidates are DISCARDED and
+    // the trusted pair kept. Registration becomes permanent.
+    // RESOLVE-PAIRED CAPTURE: the engine's resolve draw (detected by the
+    // atlas bound as a PS SRV) consumes the atlas with the CB it has bound
+    // AT THAT DRAW - the transform<->content pairing stated by the engine
+    // itself, at the consumption site. No timing heuristics, no spin
+    // ambiguity, no blessing: valid from the first resolve of any session.
+    struct CbRecord { void* buf = nullptr; uint32_t floats = 0; uint64_t seq = 0; float data[512]; };
+    CbRecord cb_reg[16];
+    uint32_t cb_reg_next = 0;
+    uint64_t cb_reg_seq = 0;   // recency: which record was written last
+    // Pass-scoped stash of the last window-shaped matrix ACCEPTED during
+    // an atlas pass: the engine's cascade CB exceeds the registry's size
+    // gate, so the registry never held it (castDraws==shadowLiveLatches
+    // was the tell: only the small 48-float block ever matched). The
+    // test-window choke point sees every candidate at ANY size.
+    // Keyed by WINDOW SCALE (row-0 norm, unique per cascade): a single
+    // unkeyed slot paired resolves with whichever cascade uploaded last -
+    // sticky-phase ordering made that a coin flip (wrong-window casts:
+    // per-direction shadow pop-in/out, close-range jitter).
+    float    resolve_best_n0 = 0.0f;   // finest uv scale seen at resolves
+    uint64_t resolve_hits = 0;
+    uint64_t resolve_draws = 0;        // resolve-target draws examined
+    uint64_t resolve_cb_found = 0;     // bound CBs matched in the registry
+    float    align_last[3] = {};       // last solved (du, dv, dz) correction
+    // SHADER-INPUT TRACKER: mirrors every CB field the copy path consumes,
+    // per frame, and counts which one changed - plus the sampled uv of the
+    // staged probe point through the EXACT shader math. uv changing while
+    // copy_stamp is unchanged = a per-frame varying input (impossible slide
+    // source named directly); uv changing only at reseals = alignment gap.
+    bool     trk_valid = false;
+    float    trk_mats[12] = {};
+    float    trk_tile[4] = {};
+    float    trk_src[4] = {};
+    float    trk_fix2[4] = {};
+    float    trk_uv[3] = {};
+    uint64_t trk_stamp = 0;
+                                          // only then does hold-on-unverifiable engage
+                                          // (otherwise the blind first pair - possibly
+                                          // coarse or mispaired - freezes forever)
+    ID3D11Texture2D* align_staging = nullptr;   // 480x480: the shift search must
+                                                // cover METERS (hundreds of texels),
+                                                // not the verifier's 160-window
+    ID3D11Texture2D* verify_staging = nullptr;   // 160x160 R32F reads
+    uint64_t verify_offwindow = 0;     // candidate doesn't cover trusted casters
+    // PERSISTENT cascade table: the engine re-renders (and re-uploads the
+    // transform for) a cascade only when it needs updating - round-robin,
+    // on demand - so a per-frame table is empty on most frames. Entries are
+    // keyed by scale (each cascade has a distinct extent) and replaced in
+    // place when their cascade re-renders.
+    LiveShadowEntry entries[KH_LIVE_MAX_CASCADES] = {};
+    uint32_t count = 0;
+    uint64_t stamp_counter = 0;
+    int      newest = -1;          // entry index of the last finalize
+    // Fine-cascade copy: pending is armed at finalize when the finished
+    // cascade is the finest known; the copy executes on the cycle's exit
+    // (its draws must be complete), pairing the grabbed content with the
+    // transform stashed here.
+    // VIEW-PAIRED BANDS (pair mode 2, default): the engine's own resolve
+    // contract, decoded from its shader - the sampling matrix consumes
+    // VIEW-SPACE position, cascades are selected by VIEW DEPTH band
+    // (PSC_ShadowmapLayerBorder), and freezing (SM, view matrix, border,
+    // content) together registers the static world exactly, rotation
+    // included. Two slots cover the two nearest bands.
+    struct BandSlot {
+        bool  valid = false;
+        bool  pending_view = false;   // sealed content+SM awaiting this frame's view
+        float pending_since = 0.0f;   // fallback: complete from the bridge after 100 ms
+        float sm[12] = {};        // PSC_ShadowmapMatrix rows (float4x3)
+        float vcol[12] = {};      // view matrix columns 0..2 (world->view, row-vector conv)
+        float border[4] = {};     // x = near, y = far, z = 1/(y-x) fade
+        float last_time = 0.0f;
+        ID3D11Texture2D*          tex = nullptr;
+        ID3D11ShaderResourceView* srv = nullptr;
+        uint64_t copies = 0;
+    };
+    BandSlot band[8];   // all 8 engine cascades: full-range receive
+    uint64_t band_captures = 0;
+    uint64_t band_bail_pv = 0;       // no cycle view available
+    uint64_t band_bail_off = 0;      // window too close to CB end (no border lanes)
+    uint64_t band_bail_border = 0;   // border lanes not a sane depth band
+    uint64_t band_bail_slot = 0;     // both slots hold nearer bands
+    uint64_t band_bail_time = 0;     // throttled (healthy)
+    // Depth-partitioned frames (the look-down case) run resolves PER
+    // PARTITION, and each batch REWRITES the mask - a single early write
+    // was erased by the next partition's resolve. Set at every gated
+    // resolve; the fire consumes it, so the mask is re-shadowed after
+    // every batch. MIN blending makes repeated writes idempotent.
+    bool resolve_seen_since_cast = false;
+    bool view_published_this_frame = false;
+    uint64_t band_bail_view = 0;     // no same-frame view latched: reseal skipped
+    float band_last_reject[4] = {};  // last border quad rejected by sanity
+    // Cast tables: SM/V per RESOLVE ORDER within a frame. The cascade
+    // render precedes its resolve, so at each atlas-pass end the k-th
+    // pass uses the PREVIOUS frame's k-th captured matrices (the cascade
+    // sequence is stable; one frame of latency is the v1 tradeoff).
+    uint64_t casts = 0;
+    uint64_t cast_misses = 0;   // passes with no matching cast entry
+    ID3D11DepthStencilView* atlas_dsv = nullptr;   // our own DSV on the atlas
+    bool atlas_dsv_failed = false;
+    // A GENUINE shadow resolve is the screen-sized single-channel draw
+    // that FOLLOWS its cascade's atlas pass. PSCB_PostProcess (cb13) is
+    // bound across the engine's whole postprocess chain, so matching the
+    // block alone admits every R8-target postprocess draw - casting with
+    // its stale matrix lanes splatted the box across the atlas and
+    // shadowed the world. Sequencing is the discriminator we own.
+    uint32_t resolve_window = 0;   // qualifying draws remaining after an atlas-pass exit
+    uint64_t resolve_gated = 0;    // sweeps skipped outside the window (diagnostic)
+    // Freshest engine VIEW matrix, latched from render-thread uploads
+    // (same-frame with the resolves by construction). cycle_pv is the
+    // game-thread snapshot and runs a frame AHEAD during movement - the
+    // exact source of motion-proportional slide when frozen into bands.
+    // Frame-consistent bridge view: snapshotted ONCE at the frame
+    // boundary so every seal and cast in a frame uses the IDENTICAL
+    // view - no mid-frame sampling of a value another thread updates.
+    float frame_view[16] = {};
+    bool  frame_view_valid = false;
+    float frame_view_time = -1.0f;
+    // SUPERVISED VIEW-SOURCE LEARNING. The injection holds the PROVEN
+    // per-frame view (the box renders pixel-registered with it, every
+    // frame) but only LATE in the frame; the resolves run EARLY, when the
+    // bridge can still hold LAST frame's camera - an error proportional
+    // to angular velocity (rotation jitter; linear motion hides it).
+    // During each frame, view-shaped uploads are recorded with their
+    // LOCATION; at injection, whichever location matched the proven view
+    // is locked. From then on the view is read from that exact location -
+    // early, same-frame, zero tolerance-matching (the retired latch's
+    // three pathologies were all its fuzzy family selection; its PHASE
+    // was the thing it had right).
+    struct ViewCand { ID3D11Resource* res; uint32_t off; float m[16]; };
+    ViewCand vc_ring[16];
+    uint32_t vc_n = 0;
+    ID3D11Resource* view_src_res = nullptr;   // learned location (weak key)
+    uint32_t view_src_off = 0;
+    int  view_src_orient = 0;                 // 1 direct, 2 transposed
+    bool view_src_relative = false;           // engine view is camera-relative (t ~ 0)
+    bool view_src_valid = false;
+    uint32_t view_src_miss = 0;
+    uint64_t view_locks = 0;
+    uint64_t frame_view_hits = 0;
+    float view_best_rot = -1.0f;    // best candidate's rotation error at last injection
+    float view_best_trans = -1.0f;  // and its translation error (diagnosis when unlocked)
+    float prev_view[16] = {};       // previous accepted view (rotation extrapolation)
+    bool  prev_view_valid = false;
+    uint64_t seal_completions = 0;  // deferred seals finished by an arriving view
+    float copy_stash_m[12] = {};
+    float    copy_scale_n0 = 0.0f;    // n0 of the copied cascade's transform
+    uint64_t copy_stamp = 0;          // stamp_counter at copy time
+    // Depth probe: a KNOWN sunlit ground point (its depth is its own entry
+    // in the map). Registration error = offset between where the copy's
+    // transform SAYS its depth is and where the readback FINDS it.
+    ID3D11Texture2D* probe_staging = nullptr;   // 64x64 R32F CPU-read
+    float probe_last_time = 0.0f;
+    // results (render thread writes, game thread reads - diagnostics)
+    // Plane-fit outputs: on locally planar sunlit ground the map depth is
+    // d(x,y) = a x + b y + c. One plane yields ONE constraint on the
+    // translation error (-a du - b dv + dz = e); THREE differently sloped
+    // planes make (du, dv, dz) solvable exactly - no physical landmark
+    // needed (units are stencil-volume shadows and never enter the buffer).
+                                      // mostly sky (fit skipped; center still valid),
+                                      // 3 measured, 4 map failed
+    float probe_uvz[3] = {};          // the probe point through the copy pair
+                                      // map holds OBJECT CASTERS ONLY (terrain
+                                      // is not buffer-rendered - open ground is
+                                      // far plane), so the occlusion VERDICT
+                                      // (centerZ < expected) vs a CPU
+                                      // checkVisibility truth at the same point
+                                      // is the edge-scan calibration signal.
+    // Upload locator cache
+    bool     cache_valid = false;
+    uint32_t cache_bytes = 0;
+    uint32_t cache_offset = 0;
+    uint64_t latches = 0;
+    float    cam[3] = {};      // the frame's render camera (engine axes),
+                               // recorded at injection - the shadow space origin
+};
+static LiveShadowState g_ls;
+
+// Tunables (setShadowMapParams): benign cross-thread plain floats.
+static float g_shadow_map_strength = 1.0f;    // 0 disables the map term
+static float g_shadow_map_bias = 0.0015f;     // in the transform's depth units
+static float g_shadow_map_sign = 1.0f;        // +1 standard depth, -1 reversed
+static float g_shadow_map_debug = 0.0f;       // 0 off, 1 occlusion viz, 2 cascade viz
+// Which latched transform to sample with. The engine renders its cascades
+// SEQUENTIALLY into the same full-atlas map (full-viewport tiles, one
+// screen-space apply per cascade), so at injection time the atlas holds
+// only the LAST cascade rendered - sampling with any other cascade's
+// transform gives shadows that swing with camera rotation as the cascade
+// fits track the frustum. -1 = last latched (matches atlas content;
+// default), k >= 0 = force entry k (live probing), -2 = all entries
+// finest-first (the multi-cascade behavior, correct only for tiled
+// atlases).
+static float g_shadow_map_cascade = -1.0f;
+// The live-atlas fallback samples UNVERIFIED content: a cascade that
+// re-renders with an unchanged transform skips the CB upload, so 'newest'
+// cannot track it. The fine copy is a frozen verified pair and can never
+// misregister. Default: fallback only when no copy exists yet.
+static float g_shadow_map_fallback = 0.0f;    // 1 = always add live-atlas entries after the copy
+// Same-size pick order within a cycle. The receiver transform for the
+// cascade being rendered plausibly uploads at the cycle's TAIL (for the
+// apply pass that follows), while an early same-size upload can still hold
+// the PREVIOUS cascade's constants - first-wins then commits a crossed
+// pair. Live-togglable so the truth costs ten seconds, not a rebuild.
+static float g_shadow_map_pick = 1.0f;        // 1 = last same-size upload wins, 0 = first
+// Copy shift: which cycle's CONTENT pairs with the latched transform. 0 =
+// the latch cycle itself (transform describes the cascade being rendered);
+// 1 = the NEXT atlas cycle (the upload is one-cycle-early prep for the
+// apply pass, so the content it describes renders in the following cycle).
+// Live-togglable: if shadows lock at 1, the prep hypothesis is the truth.
+static float g_shadow_map_shift = 0.0f;
+// Fold origin for the copy pair. The dumped source CB carries a STATIC
+// world-magnitude triple at floats [344..346] in engine axis order (x,
+// altitude, y) - the signature of RV's REBASED rendering origin. If the
+// shadow transforms are relative to that snapped origin rather than the
+// exact render eye, folding the eye explains every measured symptom:
+// meter-scale error, constant while standing, jumping on re-snap.
+// 0 = fold render eye (default), 1 = fold CB[344..346] (DISPROVEN: that
+// triple sits kilometers from the play area - a static map constant, and
+// folding it maps every pixel outside the cascade -> no shadows at all),
+// 2 = fold eye - CB[352..354], 3 = fold eye + CB[352..354]. [352..354] is
+// the only camera-magnitude PER-COMMIT triple in the block (changed with
+// player movement between dumps) - candidate origin-to-camera offset.
+// Direct UV-depth correction for the copy entry: the error lives in the
+// cascade's output space, so correct it there - no origin guessing. Set
+// via setShadowUvFix [du, dv, dz]; visible immediately (du of 0.01 slides
+// the shadow ~24 cm at the fine cascade).
+static float g_shadow_uvfix[4] = { 0.0f, 0.0f, 0.0f, 0.0f };   // du, dv, dz, ROTATION degrees
+// 1 = resolve-paired capture (default): the fine pair is sealed AT THE
+// ENGINE'S OWN RESOLVE DRAW - pairing by construction. 0 = legacy
+// cycle-exit pairing (heuristic).
+// 2 = VIEW-PAIRED BANDS (default): the engine's decoded receiver
+// contract - SM matrix consumes view-space position, band selected by
+// view depth, view matrix frozen with each band. 1 = resolve-paired
+// world-relative (legacy). 0 = cycle-exit heuristic (legacy).
+static float g_shadow_pair_mode = 2.0f;
+// 0 (default) = the bridge PV, demonstrated same-frame correct by the
+// box's own registration every frame. 1 = opt-in experimental upload
+// latch (historically pathological: promiscuity, lockout, wrong-family).
+static float g_shadow_freshview = 0.0f;
+// Boxes CAST shadows onto the world: depth-only draws into the engine's
+// shadow atlas at each cascade pass end. setShadowMapParams elem 14.
+static float g_shadow_cast = 1.0f;
+// Order of cast vs receive-copy at the resolve. 1 (default) = cast first:
+// receive copies CONTAIN the box (self-shadowing via bands), but any cast
+// imprecision then dances ON the box itself, indistinguishable from world
+// shadows. 0 = copy first: the receive path never sees the box's depth -
+// no band self-shadow, but world shadows on the box are provably pure.
+// setShadowMapParams elem 16.
+// 0 (new default): the atlas cast is OFF - the analytic mask cast is the
+// world-facing shadow now (per-pixel exact, jitter impossible by
+// construction), and running both double-darkens with the atlas cast's
+// jittery copy visible as a fringe. 1 restores the atlas cast (and with
+// it band-copy self-shadowing) for A/B. setShadowMapParams elem 16.
+// EXPERIMENTAL cast via the live-latched cascade-RENDER transforms
+// (world-relative, zero view). Correct family, wrong freshness as-is:
+// the table finalizes ONE latch per cycle, so entries run up to ~8
+// frames stale - and a stale window map under rotation aims the cast at
+// where the window USED to be (the shadow that 'slid away and whizzed
+// past'). Receiving tolerates stale entries because each pairs with its
+// own-era content; casting needs THIS frame's map. Re-enable (elem 17)
+// only together with per-pass latching. Default off.
+// 0 (default): cast with the extrapolated same-frame view - the best
+// measured behavior. 1: experimental world-relative stash cast. The
+// recon counters (sunAligned43/44 == 0 in EVERY session) say the pure
+// world-space cascade map likely never appears in the upload stream -
+// the engine renders cascades via per-object combined transforms - so
+// the stash only ever catches the view-space twin at varying camera
+// alignments (the slide-and-flicker). Chase ended on that evidence.
+// Cast output: 0 (default) = ENGINE-MASK hybrid (analytic position, the
+// engine's own coloring); 1 = screen-multiply fallback (self-contained,
+// ambient-approximated). setShadowMapParams elem 18.
+static float g_shadow_cast_screen = 0.0f;
+// Armed by the view latch (defined before g_mask, which lives later in
+// the file); consumed by mask_cast_fire.
+static bool g_mask_cast_arm = false;
+static bool g_mask_cast_fired = false;   // one analytic pass per frame:
+// the engine re-uploads its view ~240x/frame and firing at every publish
+// stacked 240 fullscreen multiplies (shade^240 -> mask annihilated,
+// frame time doubled). analyticCasts == frameViewHits was the tell.
+
+inline bool shadow_live_wanted() {
+    return g_ls.wanted.load(std::memory_order_relaxed) && g_sun_valid && g_shadow_map_strength > 0.0f;
+}
+
+// Fills the lighting slots of a draw constant block from an object and the
+// published sun state. Called by both solid-box paths (flush and injection);
+// both run either on the game thread with the lock held or on the parked-
+// exclusive render thread, so plain reads of the published globals are safe.
+inline void fill_lighting_cb(ConstantData& cbd, const RenderObject& o) {
+    cbd.lighting0[0] = o.lit ? 1.0f : 0.0f;
+    cbd.lighting0[1] = o.shadow_factor;
+    cbd.lighting0[2] = o.light_ambient;
+    cbd.lighting0[3] = o.light_diffuse;
+    // derived-from-matrices measured ~9 deg off the engine's reported
+    // direction (SM depth-row bias/oblique skew) and moves per seal.
+    // FALLBACK only: script-free operation survives a lighting-fetch
+    // failure, but exactness steers when both exist.
+    const float* sunp = g_sun_valid ? g_sun_dir_engine :
+                        (g_sun_dir_derived_valid ? g_sun_dir_derived : g_sun_dir_engine);
+    cbd.lighting1[0] = sunp[0];
+    cbd.lighting1[1] = sunp[1];
+    cbd.lighting1[2] = sunp[2];
+    cbd.lighting1[3] = g_sun_valid ? 1.0f : 0.0f;
+    cbd.lighting2[0] = g_sun_color[0];
+    cbd.lighting2[1] = g_sun_color[1];
+    cbd.lighting2[2] = g_sun_color[2];
+    cbd.lighting2[3] = g_shadow_map_strength;
+
+    // Cascade table, finest scale first (first containing tile decides in
+    // the shader). The PUBLISHED table is used - the engine renders its
+    // cascades BEFORE the main depth clear, so the building table is
+    // already reset by injection time; the published one is this frame's
+    // completed set (or at worst last frame's, which its embedded camera
+    // origin keeps correct). Skipped entirely for unlit objects.
+    if (!o.lit || g_ls.count == 0 || g_ls.newest < 0) return;
+
+    uint32_t order[KH_LIVE_MAX_CASCADES];
+    const uint32_t avail = g_ls.count <= KH_LIVE_MAX_CASCADES ? g_ls.count : KH_LIVE_MAX_CASCADES;
+    uint32_t n;
+    const float sel = g_shadow_map_cascade;
+
+    if (sel <= -1.5f) {
+        // -2: every entry, finest scale first (tiled-atlas semantics).
+        n = avail;
+        for (uint32_t i = 0; i < n; ++i) order[i] = i;
+
+        auto scale_of = [&](uint32_t i) {
+            const float* r0 = g_ls.entries[i].m;
+            return r0[0] * r0[0] + r0[1] * r0[1] + r0[2] * r0[2];
+        };
+
+        for (uint32_t i = 1; i < n; ++i) {      // tiny insertion sort, n <= 8
+            const uint32_t v = order[i];
+            uint32_t j = i;
+            while (j > 0 && scale_of(order[j - 1]) < scale_of(v)) { order[j] = order[j - 1]; --j; }
+            order[j] = v;
+        }
+    } else if (sel < 0.0f) {
+        // -1: the most recently RE-RENDERED cascade = what the atlas holds.
+        n = 1;
+        order[0] = static_cast<uint32_t>(g_ls.newest);
+    } else {
+        // Forced index (clamped): live probing of which entry matches.
+        uint32_t k = static_cast<uint32_t>(sel);
+        if (k >= avail) k = avail - 1;
+        n = 1;
+        order[0] = k;
+    }
+
+    // The fine copy, when live, samples FIRST (index 0 -> t2); the entries
+    // selected above follow as the wide-area fallback on the live atlas.
+    // shadow_meta[0] (the count) is written LAST, after both parts land.
+    uint32_t out_i = 0;
+    cbd.shadow_src[0] = -1.0f;
+    cbd.shadow_fix2[0] = 1.0f;   // identity rotation unless the copy path sets it
+
+    cbd.shadow_meta[1] = g_shadow_map_sign;
+    cbd.shadow_meta[2] = g_shadow_map_bias;
+    cbd.shadow_meta[3] = static_cast<float>(g_ls.atlas_size);
+    cbd.shadow_meta2[0] = g_shadow_map_debug;
+    // shadowMeta2.yzw stays zero: each entry's camera origin is folded into
+    // its translation below, so the shader's (wpos - meta2.yzw) consumes
+    // ABSOLUTE world positions and per-entry staleness cannot misregister.
+    cbd.shadow_meta2[1] = 0.0f;
+    cbd.shadow_meta2[2] = 0.0f;
+    cbd.shadow_meta2[3] = 0.0f;
+
+    for (uint32_t i = 0; i < n && out_i < KH_LIVE_MAX_CASCADES; ++i, ++out_i) {
+        const LiveShadowEntry& e = g_ls.entries[order[i]];
+        memcpy(cbd.shadow_tiles[out_i], e.tile, sizeof(e.tile));
+
+        for (int r = 0; r < 3; ++r) {
+            float* dst = cbd.shadow_mats[out_i * 3 + r];
+            const float* row = e.m + r * 4;
+            dst[0] = row[0];
+            dst[1] = row[1];
+            dst[2] = row[2];
+            // t' = t - M.row . cam_entry: uvz = M*(p - cam) + t = M*p + t'
+            dst[3] = row[3] - (row[0] * e.cam[0] + row[1] * e.cam[1] + row[2] * e.cam[2]);
+        }
+    }
+
+    cbd.shadow_meta[0] = static_cast<float>(out_i);
+
+}
+
+// --- Recon state: render thread only, like ReorderState. ---
+static constexpr uint32_t KH_SHADOW_CYCLE_MIN_DRAWS = 8;    // draws before a depth-only phase counts
+static constexpr float    KH_SHADOW_AXIS_COS_TOL   = 0.995f; // ~5.7 degrees off the sun vector
+static constexpr float    KH_SHADOW_ORTHO_TOL      = 0.02f;  // orthonormality slack for the 3x3 test
+
+// Distance-to-success watermarks (render thread writes, game thread reads;
+// aligned 32-bit floats - torn reads impossible on x86, and the values are
+// diagnostics). Reset when the recon is armed.
+static float g_sr_best_dot44 = 0.0f;   // best |cos(zAxis, sun)| among affine 4x4 windows
+static float g_sr_best_dot43 = 0.0f;   // best |cos(basisVec, sun)| among orthogonal 3x3 bases
+
+// Capture of the best sun-aligned orthogonal 4x3 seen while armed. If the
+// engine uploads the COMPLETE light VP in RV's native affine form, this is
+// the whole prize: the row norms are the ortho scale factors (extents), the
+// fourth-element column is the translation, and the aligned axis is the
+// light. Render-thread writes; read from the game thread via
+// getShadowCapture after disarming (or accept a frame of skew - it is a
+// diagnostic).
+static constexpr uint32_t KH_SHADOW_CTX_BEFORE = 8;    // floats captured before the matrix
+static constexpr uint32_t KH_SHADOW_CTX_AFTER  = 28;   // floats captured after it
+static constexpr uint32_t KH_SHADOW_CTX_TOTAL  = KH_SHADOW_CTX_BEFORE + 12 + KH_SHADOW_CTX_AFTER;
+
+struct ShadowCapture43 {
+    bool     valid = false;
+    bool     in_phase = false;
+    float    dot = 0.0f;         // |cos| of the best-aligned normalized axis
+    int      axis = -1;          // 0-2 = row, 3-5 = column index of that axis
+    float    norms[3] = {};      // row lengths (scale factors; 1,1,1 = pure view)
+    float    m[12] = {};         // the raw window: rows w[0..3], w[4..7], w[8..11]
+    // The matrix's surroundings in its upload: the ortho scale/offset a bare
+    // view implies MUST be uploaded somewhere, and "the adjacent constants
+    // in the same CB" is the overwhelmingly likely somewhere. ctx holds
+    // [KH_SHADOW_CTX_BEFORE floats before | the 12 | KH_SHADOW_CTX_AFTER
+    // after], zero-padded at upload edges; ctx_start is how many of the
+    // BEFORE floats were actually available.
+    float    ctx[KH_SHADOW_CTX_TOTAL] = {};
+    uint32_t ctx_start = 0;
+    uint32_t upload_floats = 0;  // total floats in the upload
+    uint32_t offset_floats = 0;  // matrix offset within it
+};
+// Two independent slots: the best UNIFORM-norm hit (a bare light view - the
+// rotation is the light, projection elsewhere) and the best SCALED hit (an
+// affine VP or a world->shadowUV sampling transform - projection INCLUDED).
+static ShadowCapture43 g_sr_cap_view;
+static ShadowCapture43 g_sr_cap_vp;
+
+// Snapshot of the translation table from the last closed cycle that had
+// aligned candidates: the cascade structure, readable after disarming.
+static float    g_sr_last_trans[16][3] = {};
+static uint32_t g_sr_last_trans_count = 0;
+
+// The full cascade FAMILY: every scaled sun-aligned 4x3 found in a single
+// upload, offsets and all. The engine packs the per-cascade sampling
+// transforms into one constant block; whichever upload yields the most of
+// them is that block, and this set is the shader-ready cascade table the
+// sampling build will consume.
+struct ShadowCascadeSet {
+    uint32_t upload_floats = 0;
+    uint32_t count = 0;
+    uint32_t offsets[8] = {};
+    float    m[8][12] = {};
+};
+static ShadowCascadeSet g_sr_cascades;           // best-so-far published set
+static ShadowCascadeSet g_sr_cascades_scratch;   // per-upload collection
+
+// Topology of the depth targets bound during classified shadow phases:
+// dimensions, format, array shape and the DSV's slice - the difference
+// between one atlas, a texture array, and separate per-cascade maps, which
+// decides how the sampling SRV must be built.
+struct ShadowTargetInfo {
+    void*    tex_identity = nullptr;
+    uint32_t width = 0, height = 0;
+    uint32_t format = 0;             // DXGI_FORMAT of the texture
+    uint32_t array_size = 0;
+    uint32_t first_slice = 0;        // from the DSV desc (array DSVs)
+    uint32_t bind_flags = 0;
+    uint64_t cycles = 0;             // shadow cycles that used this target
+};
+
+// Forward: defined with the live-capture group below.
+inline void shadow_live_consider_atlas(ID3D11Texture2D* tex, const D3D11_TEXTURE2D_DESC& td);
+
+static constexpr uint32_t KH_SHADOW_MAX_TRANSLATIONS = 16;   // distinct-translation cap per cycle
+
+struct ShadowReconState {
+    bool     phase_active = false;    // depth-only, non-main DSV currently bound
+    void*    target_identity = nullptr;
+    uint32_t draws_this_cycle = 0;
+    uint32_t candidates_this_cycle = 0;
+    float    trans[KH_SHADOW_MAX_TRANSLATIONS][3] = {};   // quantized candidate translations
+    uint32_t trans_count = 0;
+};
+static ShadowReconState g_sr;   // render thread only
+
+// Folds the finished cycle into the cumulative stats and resets the
+// per-cycle evidence. Called on target changes, phase exits, and the main
+// depth clear (frame boundary).
+inline void shadow_close_cycle() {
+    if (g_sr.candidates_this_cycle > 0) {
+        if (g_sr.trans_count > g_stats.sun_distinct_translations_max) {
+            g_stats.sun_distinct_translations_max = g_sr.trans_count;
+        }
+
+        if (g_sr.trans_count > 0) {
+            memcpy(g_sr_last_trans, g_sr.trans, sizeof(g_sr_last_trans));
+            g_sr_last_trans_count = g_sr.trans_count;
+        }
+    }
+
+    g_sr.draws_this_cycle = 0;
+    g_sr.candidates_this_cycle = 0;
+    g_sr.trans_count = 0;
+}
+
+inline void shadow_record_translation(float tx, float ty, float tz) {
+    g_sr.candidates_this_cycle++;
+    // Saturated = one translation per draw = combined per-object matrices.
+    if (g_sr.trans_count >= KH_SHADOW_MAX_TRANSLATIONS) return;
+    // Half-meter quantization: cascades re-center per frame but not per draw.
+    const float qx = floorf(tx * 2.0f), qy = floorf(ty * 2.0f), qz = floorf(tz * 2.0f);
+
+    for (uint32_t i = 0; i < g_sr.trans_count; ++i) {
+        if (g_sr.trans[i][0] == qx && g_sr.trans[i][1] == qy && g_sr.trans[i][2] == qz) return;
+    }
+
+    g_sr.trans[g_sr.trans_count][0] = qx;
+    g_sr.trans[g_sr.trans_count][1] = qy;
+    g_sr.trans[g_sr.trans_count][2] = qz;
+    ++g_sr.trans_count;
+}
+
+// Dedupes a 4x3 candidate's translation into the shared per-cycle table
+// WITHOUT touching the 4x4 candidate counters - the distinct-translation
+// verdict is representation-agnostic, the counters are not.
+inline void shadow_record_translation43(float tx, float ty, float tz) {
+    g_sr.candidates_this_cycle++;
+    if (g_sr.trans_count >= KH_SHADOW_MAX_TRANSLATIONS) return;
+    const float qx = floorf(tx * 2.0f), qy = floorf(ty * 2.0f), qz = floorf(tz * 2.0f);
+
+    for (uint32_t i = 0; i < g_sr.trans_count; ++i) {
+        if (g_sr.trans[i][0] == qx && g_sr.trans[i][1] == qy && g_sr.trans[i][2] == qz) return;
+    }
+
+    g_sr.trans[g_sr.trans_count][0] = qx;
+    g_sr.trans[g_sr.trans_count][1] = qy;
+    g_sr.trans[g_sr.trans_count][2] = qz;
+    ++g_sr.trans_count;
+}
+
+// Tests a 16-float window for an AFFINE 4x4 (a light VP is orthographic -
+// no perspective terms, unlike the scene projection the other sniffer
+// hunts) whose clip-Z axis aligns with the published sun direction. Both
+// upload orientations are covered; sign is irrelevant (|dot|), which also
+// makes the test agnostic to whether the engine's light vector points to
+// or from the sun.
+// Absolute cosine between a (possibly scaled) axis and the published sun.
+inline float shadow_axis_abs_cos(float ax, float ay, float az) {
+    const float len2 = ax * ax + ay * ay + az * az;
+    if (len2 < 1e-12f) return 0.0f;
+    const float d = ax * g_sun_dir_engine[0] + ay * g_sun_dir_engine[1] + az * g_sun_dir_engine[2];
+    return fabsf(d) / sqrtf(len2);
+}
+
+// One 16-float window, both 4x4 orientations. Measures as it tests: every
+// affine-SHAPED window bumps shadow_affine44 and pushes its z-axis
+// alignment into the best-dot watermark, so a run that finds no candidates
+// still reports how close the closest miss came - the difference between
+// "loosen the tolerance" and "wrong representation entirely".
+inline void shadow_try_window(const float* w, bool in_phase) {
+    // Reject identity-shaped windows: they pass the axis test whenever the
+    // sun happens to align with a world axis, and engines upload identity
+    // constantly.
+    if (fabsf(w[0] - 1.0f) < 1e-6f && fabsf(w[5] - 1.0f) < 1e-6f &&
+        fabsf(w[10] - 1.0f) < 1e-6f && proj_near_zero(w[1]) && proj_near_zero(w[2]) &&
+        proj_near_zero(w[4]) && proj_near_zero(w[6])) {
+        return;
+    }
+
+    auto consider = [&](float c, const float* t) {
+        if (c > g_sr_best_dot44) g_sr_best_dot44 = c;
+        if (c < KH_SHADOW_AXIS_COS_TOL) return;
+
+        if (in_phase) {
+            shadow_record_translation(t[0], t[1], t[2]);
+        } else {
+        }
+    };
+
+    // Row-vector, row-major upload: affine column at w[3,7,11,15], clip-Z
+    // axis (w[2], w[6], w[10]), translation row (w[12..14]).
+    if (proj_near_zero(w[3]) && proj_near_zero(w[7]) && proj_near_zero(w[11]) &&
+        fabsf(w[15] - 1.0f) < 1e-4f) {
+        g_stats.shadow_affine44++;
+        const float t[3] = { w[12], w[13], w[14] };
+        consider(shadow_axis_abs_cos(w[2], w[6], w[10]), t);
+    }
+
+    // Transposed upload (column_major HLSL - equivalently a column-vector
+    // convention stored row-major): affine row at w[12..15], z axis
+    // (w[8], w[9], w[10]), translation column (w[3], w[7], w[11]).
+    if (proj_near_zero(w[12]) && proj_near_zero(w[13]) && proj_near_zero(w[14]) &&
+        fabsf(w[15] - 1.0f) < 1e-4f) {
+        g_stats.shadow_affine44++;
+        const float t[3] = { w[3], w[7], w[11] };
+        consider(shadow_axis_abs_cos(w[8], w[9], w[10]), t);
+    }
+}
+
+// 12-float window as a 3x4 affine (rows w[0..2], w[4..6], w[8..10] = a 3x3
+// basis; w[3], w[7], w[11] = translation) - the shape RV's native 4x3
+// Matrix4 takes under cbuffer packing. A light VIEW matrix never passes the
+// 4x4 affine test (no projective row at all), but its rotation is
+// orthonormal and one basis vector IS the light direction - in EITHER
+// storage orientation that vector is a row or a column of the 3x3, so all
+// six are tested against the sun. Watermark + counter only: this detector
+// exists to tell the next run WHERE the light transform lives, not to
+// harvest translations.
+inline void shadow_try_window43(const float* base, uint32_t nfloats, uint32_t off, bool in_phase) {
+    const float* w = base + off;
+    const float* r0 = w + 0;
+    const float* r1 = w + 4;
+    const float* r2 = w + 8;
+
+    const float n0 = r0[0] * r0[0] + r0[1] * r0[1] + r0[2] * r0[2];
+    const float n1 = r1[0] * r1[0] + r1[1] * r1[1] + r1[2] * r1[2];
+    const float n2 = r2[0] * r2[0] + r2[1] * r2[1] + r2[2] * r2[2];
+    if (n0 < 1e-12f || n1 < 1e-12f || n2 < 1e-12f) return;
+
+    // Mutual orthogonality, scale-aware (normalized by the pair's norms):
+    // an affine ORTHO VP is a rotation with per-axis scale - rows stay
+    // orthogonal but their norms are the projection's scale factors. The
+    // orthonormal case (equal norms ~ a bare view/rotation) is the special
+    // case norms ~= n0.
+    const float d01 = r0[0] * r1[0] + r0[1] * r1[1] + r0[2] * r1[2];
+    const float d02 = r0[0] * r2[0] + r0[1] * r2[1] + r0[2] * r2[2];
+    const float d12 = r1[0] * r2[0] + r1[1] * r2[1] + r1[2] * r2[2];
+    const float t01 = KH_SHADOW_ORTHO_TOL * sqrtf(n0 * n1);
+    const float t02 = KH_SHADOW_ORTHO_TOL * sqrtf(n0 * n2);
+    const float t12 = KH_SHADOW_ORTHO_TOL * sqrtf(n1 * n2);
+    if (fabsf(d01) > t01 || fabsf(d02) > t02 || fabsf(d12) > t12) return;
+
+    const float tol_n = KH_SHADOW_ORTHO_TOL * n0;
+    const bool uniform = fabsf(n1 - n0) <= tol_n && fabsf(n2 - n0) <= tol_n;
+
+    // Axis-aligned diagonal basis (scaled identity): the false-positive
+    // class that dominates uploads. Rejecting it costs nothing real - a sun
+    // exactly on a world axis is a measure-zero scene.
+    if (fabsf(r0[0] * r0[0] - n0) < KH_SHADOW_ORTHO_TOL * n0 &&
+        fabsf(r1[1] * r1[1] - n1) < KH_SHADOW_ORTHO_TOL * n1 &&
+        fabsf(r2[2] * r2[2] - n2) < KH_SHADOW_ORTHO_TOL * n2) {
+        return;
+    }
+
+
+    float axes[6][3] = {
+        { r0[0], r0[1], r0[2] }, { r1[0], r1[1], r1[2] }, { r2[0], r2[1], r2[2] },   // rows
+        { r0[0], r1[0], r2[0] }, { r0[1], r1[1], r2[1] }, { r0[2], r1[2], r2[2] },   // columns
+    };
+    float best = 0.0f;
+    int best_axis = -1;
+
+    for (int i = 0; i < 6; ++i) {
+        const float c = shadow_axis_abs_cos(axes[i][0], axes[i][1], axes[i][2]);
+        if (c > best) { best = c; best_axis = i; }
+    }
+
+    if (best > g_sr_best_dot43) g_sr_best_dot43 = best;
+
+    if (best >= KH_SHADOW_AXIS_COS_TOL) {
+        if (in_phase) {
+            shadow_record_translation43(w[3], w[7], w[11]);
+
+            // Scaled = projection-bearing: collect the whole family found in
+            if (!uniform && g_sr_cascades_scratch.count < 8) {
+                ShadowCascadeSet& cs = g_sr_cascades_scratch;
+                cs.offsets[cs.count] = off;
+                memcpy(cs.m[cs.count], w, sizeof(cs.m[cs.count]));
+                cs.count++;
+            }
+        }
+
+        // Each shape class keeps its own best: the uniform hit is the light
+        // VIEW, the scaled hit carries the PROJECTION (an affine VP, or the
+        // main pass's world->shadowUV sampling transform). In-phase wins
+        // over out-of-phase at equal alignment.
+        ShadowCapture43& slot = uniform ? g_sr_cap_view : g_sr_cap_vp;
+        const bool better =
+            !slot.valid ||
+            best > slot.dot + 1e-6f ||
+            (best >= slot.dot - 1e-6f && in_phase && !slot.in_phase);
+
+        if (better) {
+            slot.valid = true;
+            slot.in_phase = in_phase;
+            slot.dot = best;
+            slot.axis = best_axis;
+            slot.norms[0] = sqrtf(n0);
+            slot.norms[1] = sqrtf(n1);
+            slot.norms[2] = sqrtf(n2);
+            memcpy(slot.m, w, sizeof(slot.m));
+            slot.upload_floats = nfloats;
+            slot.offset_floats = off;
+
+            const uint32_t avail_before = off < KH_SHADOW_CTX_BEFORE ? off : KH_SHADOW_CTX_BEFORE;
+            uint32_t avail_after = nfloats - off - 12;
+            if (avail_after > KH_SHADOW_CTX_AFTER) avail_after = KH_SHADOW_CTX_AFTER;
+            memset(slot.ctx, 0, sizeof(slot.ctx));
+            slot.ctx_start = avail_before;
+
+            memcpy(slot.ctx + (KH_SHADOW_CTX_BEFORE - avail_before),
+                   base + off - avail_before,
+                   (avail_before + 12 + avail_after) * sizeof(float));
+        }
+    }
+}
+
+
+// --- Live capture pieces --------------------------------------------------
+
+// Atlas candidacy: SRV-capable square depth texture, generously sized. The
+// engine's cascade passes dominate cycle counts on exactly one such target;
+// keeping the LARGEST candidate resolves ties in its favor.
+inline void shadow_live_consider_atlas(ID3D11Texture2D* tex, const D3D11_TEXTURE2D_DESC& td) {
+    if ((td.BindFlags & D3D11_BIND_SHADER_RESOURCE) == 0) return;
+    if (td.Width != td.Height || td.Width < 1024) return;
+    if (td.SampleDesc.Count > 1 || td.ArraySize != 1) return;
+
+    if (td.Format != DXGI_FORMAT_R32_TYPELESS && td.Format != DXGI_FORMAT_R24G8_TYPELESS &&
+        td.Format != DXGI_FORMAT_R16_TYPELESS && td.Format != DXGI_FORMAT_R32G8X24_TYPELESS) {
+        return;
+    }
+
+    void* id = static_cast<void*>(tex);
+    if (id == g_ls.atlas_identity) return;
+    if (g_ls.atlas_tex && td.Width <= g_ls.atlas_size) return;   // keep the largest
+
+    if (g_ls.atlas_srv) { g_ls.atlas_srv->Release(); g_ls.atlas_srv = nullptr; }
+    if (g_ls.atlas_tex) { g_ls.atlas_tex->Release(); }
+    tex->AddRef();
+    g_ls.atlas_tex = tex;
+
+    g_ls.atlas_identity = id;
+    g_ls.atlas_size = td.Width;
+    g_ls.atlas_fmt = static_cast<uint32_t>(td.Format);
+    g_ls.srv_failed = false;
+    g_ls.cache_valid = false;   // new atlas: relearn the upload locator
+}
+
+// SAMPLING-transform test - stricter than the recon's generic scaled-
+// orthogonal detector, because the cascade cycles also upload the light
+// VIEW (a unit-norm rotation), and a first-match latch grabs that instead
+// (diagnosed by a table of metersPerUV ~ 1 and view-space uvz in the
+// dump). The sampling transform's shape signature, consistent across every
+// capture: mutually orthogonal rows, ISOTROPIC u/v scales, and all scales
+// far below 1 (they are 1/extent for extents of meters to kilometers).
+inline bool shadow_live_test_window(const float* w) {
+    const float* r0 = w + 0;
+    const float* r1 = w + 4;
+    const float* r2 = w + 8;
+    const float n0 = r0[0] * r0[0] + r0[1] * r0[1] + r0[2] * r0[2];
+    const float n1 = r1[0] * r1[0] + r1[1] * r1[1] + r1[2] * r1[2];
+    const float n2 = r2[0] * r2[0] + r2[1] * r2[1] + r2[2] * r2[2];
+    if (n0 < 1e-12f || n1 < 1e-12f || n2 < 1e-12f) return false;
+
+    // Scale window: every genuine sampling transform observed sits at
+    // 1/160 .. 1/24 per meter (plus a 1/600 long-range one); [1/1000, 1/8]
+    // keeps that family with margin and rejects the 1/2.2-scale look-alikes
+    // that slipped under a bare <0.5 ceiling.
+    if (n0 > 0.015625f || n1 > 0.015625f) { g_stats.live_rej_scale++; return false; }                 // uv scale <= 1/8
+    if (n0 < 1e-7f || n1 < 1e-7f) { g_stats.live_rej_scale++; return false; }   // floor 1/3162: LOW sun stretches extents                         // uv scale >= 1/1000
+    // Depth scale within a factor ~20 of the uv scale (observed ~0.5-2x).
+    if (n2 < 0.0025f * n0 || n2 > 400.0f * n0) { g_stats.live_rej_ratio++; return false; }
+    // u/v isotropy (norms-squared within ~10% = norms within ~5%).
+    if (fabsf(n1 - n0) > 0.1f * n0) { g_stats.live_rej_iso++; return false; }
+    // THE discriminator: the translation IS the transform's output at the
+    // camera, and the output space is atlas-UV + normalized depth - all
+    // three components of every genuine capture lie in [0,1] ((0.47, 0.18,
+    // 0.71), (0.82, 0.48, 0.45), ...), while view-shaped impostors carry
+    // meters (47, -38, 66). Range padded for a camera near a tile edge.
+    if (w[3] < -8.0f || w[3] > 9.0f) { g_stats.live_rej_trans++; return false; }
+    if (w[7] < -8.0f || w[7] > 9.0f) { g_stats.live_rej_trans++; return false; }
+    if (w[11] < -8.0f || w[11] > 9.0f) { g_stats.live_rej_trans++; return false; }
+    const float d01 = r0[0] * r1[0] + r0[1] * r1[1] + r0[2] * r1[2];
+    const float d02 = r0[0] * r2[0] + r0[1] * r2[1] + r0[2] * r2[2];
+    const float d12 = r1[0] * r2[0] + r1[1] * r2[1] + r1[2] * r2[2];
+
+    if (fabsf(d01) > KH_SHADOW_ORTHO_TOL * sqrtf(n0 * n1) ||
+        fabsf(d02) > KH_SHADOW_ORTHO_TOL * sqrtf(n0 * n2) ||
+        fabsf(d12) > KH_SHADOW_ORTHO_TOL * sqrtf(n1 * n2)) {
+        g_stats.live_rej_ortho++;
+        return false;
+    }
+
+    if (fabsf(r0[0] * r0[0] - n0) < KH_SHADOW_ORTHO_TOL * n0 &&
+        fabsf(r1[1] * r1[1] - n1) < KH_SHADOW_ORTHO_TOL * n1 &&
+        fabsf(r2[2] * r2[2] - n2) < KH_SHADOW_ORTHO_TOL * n2) {
+        return false;   // scaled-identity false positives
+    }
+
+    for (int a = 0; a < 6; ++a) {
+        float x, y, z;
+        if (a < 3)  { const float* r = w + a * 4; x = r[0]; y = r[1]; z = r[2]; }
+        else        { const int c = a - 3; x = r0[c]; y = r1[c]; z = r2[c]; }
+        if (shadow_axis_abs_cos(x, y, z) >= KH_SHADOW_AXIS_COS_TOL) {
+            g_stats.live_accepts++;
+
+            return true;
+        }
+    }
+
+    return false;
+}
+
+// Upload scan on the atlas cycle: locator-cached offset first, full window
+// scan to (re)learn it. One latch per cycle; the tile arrives at the next
+// draw.
+// Remember recent CB uploads by BUFFER identity so the resolve draw can
+// look up what its bound constants contain without any GPU readback.
+// Match a 4x4 against the bridge view loosely: same rotation family
+// (rows within tolerance), translation within a few meters - the engine
+// upload is the SAME camera, possibly one frame fresher.
+// Match a candidate 4x4 against a reference view (rows layout).
+// 0 = no, 1 = direct, 2 = transposed. Tight tolerance: the loose matcher
+// admitted multiple different view-family uploads per frame, and WHICH
+// one had been latched last varied while moving - the cast wobble.
+inline int shadow_view_match(const float* w, const float* v, float tol, float trans_tol) {
+    if (fabsf(w[15] - 1.0f) > 1e-3f) return 0;
+    float e_direct = 0.0f, e_trans = 0.0f;
+
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            e_direct += fabsf(w[r * 4 + c] - v[r * 4 + c]);
+            e_trans += fabsf(w[c * 4 + r] - v[r * 4 + c]);
+        }
+    }
+
+    if (e_direct < tol) {
+        for (int c = 0; c < 3; ++c) {
+            if (fabsf(w[12 + c] - v[12 + c]) > trans_tol) return 0;
+        }
+
+        return 1;
+    }
+
+    if (e_trans < tol) {
+        for (int r = 0; r < 3; ++r) {
+            if (fabsf(w[r * 4 + 3] - v[12 + r]) > trans_tol) return 0;
+        }
+
+        return 2;
+    }
+
+    return 0;
+}
+
+inline bool shadow_view_shaped(const float* w) {
+    if (fabsf(w[15] - 1.0f) > 1e-3f) return false;
+    const float n0 = w[0] * w[0] + w[1] * w[1] + w[2] * w[2];
+    const float n1 = w[4] * w[4] + w[5] * w[5] + w[6] * w[6];
+    if (n0 < 0.9f || n0 > 1.1f || n1 < 0.9f || n1 > 1.1f) return false;
+    const float d01 = w[0] * w[4] + w[1] * w[5] + w[2] * w[6];
+    return fabsf(d01) < 0.1f;
+}
+
+inline void shadow_view_scan(ID3D11Resource* res, const void* data, uint32_t bytes) {
+    if (!reorder_on_render_thread() || bytes < 64 || !res) return;
+    const float* f = static_cast<const float*>(data);
+    const uint32_t nf = bytes / 4;
+
+    for (uint32_t off = 0; off + 16 <= nf && off <= 192; off += 4) {
+        const float* w = f + off;
+
+        if (g_ls.view_src_valid && res == g_ls.view_src_res && off == g_ls.view_src_off) {
+            // The locked location is a STREAMING buffer: the engine maps
+            // the same dynamic CB ~1,600x per frame for per-object
+            // uploads (1.93M reads/session taught us this). Location
+            // alone identifies a firehose; the true view is fished out
+            // of it by its unfakeable fingerprint: translation EXACTLY
+            // zero (camera-relative: eye at origin) AND rotation within
+            // a frame of the bridge's. Unrotated world objects match the
+            // rotation but sit meters away; camera-attached items sit at
+            // zero but are counter-rotated. Nothing matches both.
+            float fv[16];
+
+            if (g_ls.view_src_orient == 1) {
+                memcpy(fv, w, sizeof(fv));
+            } else {
+                for (int r = 0; r < 4; ++r) {
+                    for (int c = 0; c < 4; ++c) {
+                        fv[r * 4 + c] = w[c * 4 + r];
+                    }
+                }
+            }
+
+            if (g_ls.view_src_relative) {
+                const float tmag = fabsf(fv[12]) + fabsf(fv[13]) + fabsf(fv[14]);
+                if (tmag > 0.05f) continue;   // an object, not the view
+
+                if (g_ro.cycle_pv_valid) {
+                    const float* bv = &g_ro.cycle_pv.view[0][0];
+                    float e_rot = 0.0f;
+
+                    for (int r = 0; r < 3; ++r) {
+                        for (int c = 0; c < 3; ++c) {
+                            e_rot += fabsf(fv[r * 4 + c] - bv[r * 4 + c]);
+                        }
+                    }
+
+                    // Family filter only: non-view families differ by >>1.
+                    // 0.15 was speed-fragile (the bridge lags a frame; a
+                    // fast spin exceeded it, reads stalled, the health
+                    // check evicted the lock, and seals fell to the skewed
+                    // fallback until relearn - the mid-session received
+                    // drift that 'calmed down halfway through').
+                    if (e_rot > 0.35f) continue;
+                }
+            }
+
+            if (g_ls.view_src_relative && g_ro.cycle_pv_valid) {
+                // HYBRID: rotation from the engine's same-frame upload
+                // (the phase-critical part); translation rebuilt as
+                // -cam * R_fresh, camera extracted from the bridge's own
+                // consistent pair (cam = -t_bridge * R_bridge^T). A one-
+                // frame-late camera is centimeters under motion - the
+                // component the eye demonstrably cannot see.
+                const float* bv = &g_ro.cycle_pv.view[0][0];
+                float cam[3];
+
+                for (int j = 0; j < 3; ++j) {
+                    cam[j] = -(bv[12] * bv[j * 4 + 0] + bv[13] * bv[j * 4 + 1] + bv[14] * bv[j * 4 + 2]);
+                }
+
+                for (int c = 0; c < 3; ++c) {
+                    fv[12 + c] = -(cam[0] * fv[0 * 4 + c] + cam[1] * fv[1 * 4 + c] + cam[2] * fv[2 * 4 + c]);
+                }
+
+                fv[15] = 1.0f;
+            }
+
+            if (g_ls.frame_view_valid) {
+                memcpy(g_ls.prev_view, g_ls.frame_view, sizeof(g_ls.prev_view));
+                g_ls.prev_view_valid = true;
+            }
+
+            memcpy(g_ls.frame_view, fv, sizeof(g_ls.frame_view));
+            g_ls.frame_view_valid = true;
+            g_ls.frame_view_time = effect_time_seconds();
+            g_ls.frame_view_hits++;
+            g_ls.view_published_this_frame = true;
+            if (!g_mask_cast_fired) g_mask_cast_arm = true;   // once per frame (engine-mask path)
+
+            // complete any seals waiting for this frame's view
+            for (int bi = 0; bi < 8; ++bi) {
+                auto& bs = g_ls.band[bi];
+                if (!bs.valid || !bs.pending_view) continue;
+
+                for (int c = 0; c < 3; ++c) {
+                    for (int r = 0; r < 4; ++r) {
+                        bs.vcol[c * 4 + r] = fv[r * 4 + c];
+                    }
+                }
+
+                bs.pending_view = false;
+                g_ls.seal_completions++;
+
+            }
+
+            return;
+        }
+
+        if (!g_ls.view_src_valid && shadow_view_shaped(w)) {
+            // RELATIVE FINGERPRINT at admission: ~1,600 streaming object
+            // uploads per frame flood a 16-slot ring in microseconds -
+            // after an eviction (e.g. a tab-out stalls uploads past the
+            // health limit) the true view could never survive in the
+            // ring long enough to relearn, and everything downstream
+            // froze (camera-following cast, 91% incomplete seals).
+            // Objects sit meters away; the view's translation is ~0.
+            const float tmag_r = fabsf(w[12]) + fabsf(w[13]) + fabsf(w[14]);
+            const float tmag_c = fabsf(w[3]) + fabsf(w[7]) + fabsf(w[11]);
+
+            if (tmag_r < 10.0f || tmag_c < 10.0f) {
+                const uint32_t i = g_ls.vc_n & 15;
+                g_ls.vc_ring[i].res = res;
+                g_ls.vc_ring[i].off = off;
+                memcpy(g_ls.vc_ring[i].m, w, 64);
+                g_ls.vc_n++;
+            }
+        }
+    }
+}
+
+inline void shadow_register_upload(ID3D11Resource* res, const void* data, uint32_t bytes) {
+    if (!res || !data || bytes < 48) return;   // cap removed: big CBs hold the maps
+
+    for (uint32_t i = 0; i < 16; ++i) {
+        if (g_ls.cb_reg[i].buf == res) {
+            g_ls.cb_reg[i].floats = bytes / 4 <= 512 ? bytes / 4 : 512;
+            g_ls.cb_reg[i].seq = ++g_ls.cb_reg_seq;
+            memcpy(g_ls.cb_reg[i].data, data, g_ls.cb_reg[i].floats * sizeof(float));
+            return;
+        }
+    }
+
+    CbRegSlot:
+    {
+        auto& r = g_ls.cb_reg[g_ls.cb_reg_next];
+        g_ls.cb_reg_next = (g_ls.cb_reg_next + 1) & 15;
+        r.seq = ++g_ls.cb_reg_seq;
+        r.buf = res;
+        r.floats = bytes / 4 <= 512 ? bytes / 4 : 512;
+        memcpy(r.data, data, r.floats * sizeof(float));
+    }
+}
+
+inline void shadow_live_upload(const void* data, uint32_t bytes) {
+    // No table-fullness gate here: the table is PERSISTENT and a full one
+    // is its normal steady state - uploads must keep flowing so entries
+    // REPLACE in place as cascades re-render. (A leftover per-frame-era
+    // cap here froze the whole pipeline after the first eight latches:
+    // transforms, the newest pointer, and the fine copy all fossilized.)
+    // pending_valid does NOT gate: TWO constant blocks carry sampling-family
+    // transforms (the 1696-byte general per-cascade block and a 192-byte
+    // specialized one), and first-upload-wins made the (transform, content)
+    // pairing a per-cycle coin flip - the residual "occasional drift". A
+    // candidate from a LARGER upload upgrades the pending latch: the big
+    // block is the cycle's own cascade constants.
+    if (!shadow_live_wanted() || !g_ls.phase_on_atlas) return;
+    if (bytes < 12 * sizeof(float)) return;
+    if (bytes > 16384) bytes = 16384;
+    const float* f = static_cast<const float*>(data);
+    const uint32_t nfloats = bytes / 4;
+
+    // STASH-ONLY scan once the cycle has latched: the once-per-cycle gate
+    // also silenced test_window (whose accept feeds the pass-end cast
+    // stash) for every pass after the first - the stash starved and
+    // castDraws pinned to shadowLiveLatches three builds running. The
+    // latch bookkeeping below stays once-per-cycle; the SCAN does not.
+    if (g_ls.cycle_latched) {
+        for (uint32_t off = 0; off + 12 <= nfloats && off <= 128; off += 4) {
+            if (shadow_live_test_window(f + off)) break;   // accept stashes internally
+        }
+
+        return;
+    }
+
+    // Keep the small sampling block of the cycle regardless of who wins
+    // the pending race - it complements the big block per commit.
+    if (bytes <= 256) {
+        const float* ff = static_cast<const float*>(data);
+        const uint32_t nf = static_cast<uint32_t>(bytes / 4);
+
+        for (uint32_t off = 0; off + 12 <= nf && off <= 8; off += 4) {
+            if (shadow_live_test_window(ff + off)) {
+                break;
+            }
+        }
+    }
+
+    if (g_ls.pending_valid) {
+        if (bytes < g_ls.pending_bytes) return;   // never downgrade
+
+        if (bytes == g_ls.pending_bytes) {
+            // Detect whether a same-size successor even differs (conflict
+            // accounting), and honor the pick order.
+            bool differs = false;
+
+            if (g_ls.cache_valid && bytes == g_ls.cache_bytes && g_ls.cache_offset + 12 <= nfloats) {
+                const float* cand = f + g_ls.cache_offset;
+                differs = fabsf(cand[3] - g_ls.pending_m[3]) > 1e-6f ||
+                          fabsf(cand[7] - g_ls.pending_m[7]) > 1e-6f ||
+                          fabsf(cand[11] - g_ls.pending_m[11]) > 1e-6f;
+                if (differs) g_stats.same_size_conflicts++;
+            }
+
+            if (g_shadow_map_pick < 0.5f) return;   // first wins: keep pending
+        }
+    }
+
+    if (g_ls.cache_valid && bytes == g_ls.cache_bytes && g_ls.cache_offset + 12 <= nfloats) {
+        if (shadow_live_test_window(f + g_ls.cache_offset)) {
+            memcpy(g_ls.pending_m, f + g_ls.cache_offset, sizeof(g_ls.pending_m));
+            g_ls.pending_valid = true;
+            g_ls.pending_bytes = static_cast<uint32_t>(bytes);
+            return;
+        }
+    }
+
+    for (uint32_t off = 0; off + 12 <= nfloats; off += 4) {
+        if (shadow_live_test_window(f + off)) {
+            g_ls.cache_valid = true;
+            g_ls.cache_bytes = static_cast<uint32_t>(bytes);
+            g_ls.cache_offset = off;
+            memcpy(g_ls.pending_m, f + off, sizeof(g_ls.pending_m));
+            g_ls.pending_valid = true;
+            g_ls.pending_bytes = static_cast<uint32_t>(bytes);
+            return;
+        }
+    }
+}
+
+// A draw inside the atlas cycle has the cascade's viewport bound: snapshot
+// it ONCE per cycle. The pending matrix is NOT committed here - the engine
+// interleaves uploads and draws, and committing at the first draw let a
+// small specialized CB win the latch before the big per-cascade block ever
+// uploaded (the preference existed but the finalize raced it - the exact
+// mechanism behind pairs that were internally crossed). Commit happens at
+// CYCLE EXIT, after every upload had its chance to upgrade the pending.
+inline void shadow_live_on_draw(ID3D11DeviceContext* ctx) {
+    if (!g_ls.pending_valid || g_ls.pending_vp_valid || !g_ls.phase_on_atlas || !ctx || g_ls.atlas_size == 0) return;
+    UINT nvp = 1;
+    D3D11_VIEWPORT vp = {};
+    ctx->RSGetViewports(&nvp, &vp);
+    if (nvp == 0 || vp.Width <= 0.0f || vp.Height <= 0.0f) return;
+    g_ls.pending_vp[0] = vp.TopLeftX;
+    g_ls.pending_vp[1] = vp.TopLeftY;
+    g_ls.pending_vp[2] = vp.Width;
+    g_ls.pending_vp[3] = vp.Height;
+    g_ls.pending_vp_valid = true;
+}
+
+// Cycle exit: the fully-upgraded pending latch becomes a table entry, and
+// arms the fine copy when its cascade is the finest known.
+inline void shadow_live_finalize_cycle() {
+    if (!g_ls.pending_valid || !g_ls.pending_vp_valid || g_ls.atlas_size == 0) {
+        g_ls.pending_valid = false;
+        g_ls.pending_bytes = 0;
+        g_ls.pending_vp_valid = false;
+        return;
+    }
+
+    const uint32_t winner_bytes = g_ls.pending_bytes;
+    g_ls.pending_valid = false;
+    g_ls.pending_bytes = 0;
+    g_ls.pending_vp_valid = false;
+    if (winner_bytes >= 512) g_stats.commits_large++;
+    else                     g_stats.commits_small++;
+
+    D3D11_VIEWPORT vp = {};
+    vp.TopLeftX = g_ls.pending_vp[0];
+    vp.TopLeftY = g_ls.pending_vp[1];
+    vp.Width = g_ls.pending_vp[2];
+    vp.Height = g_ls.pending_vp[3];
+
+    // Slot selection: same cascade = same scale (each cascade's extent is
+    // distinct); a re-render replaces its entry in place. New scales append;
+    // a full table evicts the stalest entry.
+    const float* pm = g_ls.pending_m;
+    const float pn0 = pm[0] * pm[0] + pm[1] * pm[1] + pm[2] * pm[2];
+    int slot = -1;
+
+    for (uint32_t i = 0; i < g_ls.count; ++i) {
+        const float* m = g_ls.entries[i].m;
+        const float n0 = m[0] * m[0] + m[1] * m[1] + m[2] * m[2];
+        if (fabsf(n0 - pn0) <= 0.2f * n0) { slot = static_cast<int>(i); break; }
+    }
+
+    if (slot < 0) {
+        if (g_ls.count < KH_LIVE_MAX_CASCADES) {
+            slot = static_cast<int>(g_ls.count++);
+        } else {
+            uint64_t oldest = ~0ull;
+
+            for (uint32_t i = 0; i < g_ls.count; ++i) {
+                if (g_ls.entries[i].stamp < oldest) { oldest = g_ls.entries[i].stamp; slot = static_cast<int>(i); }
+            }
+        }
+    }
+
+    const float inv = 1.0f / static_cast<float>(g_ls.atlas_size);
+    const float texel = inv;
+    LiveShadowEntry& e = g_ls.entries[slot];
+    memcpy(e.m, g_ls.pending_m, sizeof(e.m));
+    e.tile[0] = vp.TopLeftX * inv + texel;
+    e.tile[1] = vp.TopLeftY * inv + texel;
+    e.tile[2] = (vp.TopLeftX + vp.Width) * inv - texel;
+    e.tile[3] = (vp.TopLeftY + vp.Height) * inv - texel;
+    if (e.tile[2] <= e.tile[0] || e.tile[3] <= e.tile[1]) return;
+    e.cam[0] = g_ls.cam[0];   // last injection's camera ~ this frame's origin
+    e.cam[1] = g_ls.cam[1];
+    e.cam[2] = g_ls.cam[2];
+    e.stamp = ++g_ls.stamp_counter;
+    g_ls.newest = slot;
+    g_ls.cycle_latched = true;
+    g_stats.shadow_live_latches++;
+
+}
+
+inline bool shadow_probe_target(ID3D11DepthStencilView* dsv) {
+    if (!dsv) return false;
+    ID3D11Resource* res = nullptr;
+    dsv->GetResource(&res);
+    if (!res) return false;
+
+    ID3D11Texture2D* tex = nullptr;
+    res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&tex));
+    res->Release();
+    if (!tex) return false;
+
+    D3D11_TEXTURE2D_DESC td = {};
+    tex->GetDesc(&td);
+    shadow_live_consider_atlas(tex, td);
+    const bool is_atlas = static_cast<void*>(tex) == g_ls.atlas_identity;
+
+    D3D11_DEPTH_STENCIL_VIEW_DESC vd = {};
+    dsv->GetDesc(&vd);
+    uint32_t slice = 0;
+
+    if (vd.ViewDimension == D3D11_DSV_DIMENSION_TEXTURE2DARRAY) {
+        slice = vd.Texture2DArray.FirstArraySlice;
+    } else if (vd.ViewDimension == D3D11_DSV_DIMENSION_TEXTURE2DMSARRAY) {
+        slice = vd.Texture2DMSArray.FirstArraySlice;
+    }
+
+    void* id = static_cast<void*>(tex);
+    tex->Release();   // identity only; the desc is already copied out
+
+    return is_atlas;   // (recon-era target census removed)
+}
+
+// Frame boundary (main depth clear): publish the size, start a new table.
+inline void shadow_live_frame_reset() {
+    // The table PERSISTS - entries stay valid until their cascade
+    // re-renders and replaces them. Frame boundary is statistics only.
+    g_stats.shadow_live_cascades = g_ls.count;
+    g_ls.pending_valid = false;
+    g_ls.pending_bytes = 0;
+}
+
+// Depth probe: 64x64 texel readback around the probe point's UV in the
+// FINE COPY, searching for the texel whose depth best matches the expected
+// value. dx/dy of that argmin IS the registration error in texels. Runs on
+// the render thread from the injection, throttled; the Map(READ) stall on
+// a 16 KB staging copy is negligible at 1 Hz.
+static constexpr int KH_PROBE_R = 80;   // half-size: 160x160 texel window
+                                        // (~0.5 m at the fine cascade - a
+                                        // player-torso landmark fits, and a
+                                        // compact blob defeats the flat-
+                                        // ground isodepth degeneracy that
+                                        // pinned the old 64x64 argmin to a
+                                        // corner)
+
+// --- Screen-space shadow mask -----------------------------------------
+// The engine's shadow-RESOLVE pass is the draw that SAMPLES the atlas; the
+// render target it writes at that moment is the full-screen shadow mask
+// (the engine's finished answer). Sampling that mask at our own pixel's
+// screen position is registration-exact BY CONSTRUCTION - no transforms,
+// no origins, no cascades.
+struct MaskCandidate {
+    void*    key = nullptr;        // texture identity (weak)
+    uint32_t w = 0, h = 0, fmt = 0;
+    uint64_t draws = 0;
+};
+
+struct ShadowMaskState {
+    bool atlas_bound = false;          // atlas seen in PS SRVs since last target change
+    bool  rt_is_resolve = false;       // current RT0 is the screen-sized single-channel resolve target
+    void* rt_key = nullptr;            // current RT0 resource (weak, for candidate draw counts)
+    MaskCandidate cands[8];
+    uint32_t cand_count = 0;
+    ID3D11Texture2D*          tex = nullptr;   // chosen mask (AddRef held)
+    ID3D11ShaderResourceView* srv = nullptr;
+    void* chosen_key = nullptr;
+    float dims[2] = {};                // chosen mask w, h
+    // --- Analytic mask cast: the box's shadow drawn INTO the engine's
+    // screen-space mask, per-pixel, with the true same-frame view (the
+    // supervised latch fires at the main pass, BEFORE the mask is
+    // consumed). Depth-reconstruct (Nsight recipe: linear depth t0,
+    // vpos = (ndc*PSC_FOV,1)*z), fold to world, ray-vs-box toward the
+    // sun. No atlas, no cascades, no prediction: jitter is impossible.
+    // OUR OWN offscreen shadow factor texture. Writing into engine-owned
+    // buffers is over: rt_is_resolve matches a SIGNATURE (screen-sized
+    // single-channel) that RV's AO and cloud-shadow buffers share - only
+    // a human eye ever discriminated them (candidate 0). Engine buffers
+    // are read-only to us now; the darkening composites onto the scene
+    // at OUR injection, where the target is known because we already
+    // draw into it.
+    ID3D11Texture2D*          own_tex = nullptr;
+    ID3D11RenderTargetView*   own_rtv = nullptr;
+    ID3D11ShaderResourceView* own_srv = nullptr;
+    bool own_failed = false;
+    bool own_written = false;   // this frame's factor is ready to composite
+    // ENGINE-MASK path (the hybrid): the analytic shadow written into the
+    // engine's own R8 resolve output - the field-verified candidate-0
+    // texture, discriminated by atlas-sampling evidence - with MIN
+    // (darken-only) blending. The ENGINE then colors it with its exact
+    // ambient and tonemapping: analytic position, engine-perfect color.
+    ID3D11RenderTargetView* engine_mask_rtv = nullptr;   // captured at the gated resolve sweep
+    uint64_t mask_rtv_swaps = 0;    // capture-time target CHANGES (>: partitions use separate masks)
+    uint64_t cast_batches = 0;      // resolve-batch re-arms
+    // cold chain, reborn lean: seconds from the first boxed flush to
+    // each milestone (-1 until reached), plus the leading rejection
+    // streak - the spawn-delay question answered in one log.
+    double cold_t0 = -1.0;
+    float  cold_first_inject = -1.0f;   // first SUCCESSFUL injection
+    float  cold_first_cast = -1.0f;     // first analytic mask write
+    uint32_t cold_lead_ambiguous = 0;   // ambiguous rejections before the first injection
+    float  cold_first_stage = -1.0f;    // first flush that staged >= 1 box for injection
+    float  cold_first_trigger = -1.0f;  // first entry into the trigger body (past silent guards)
+    uint32_t cold_g_nodsv = 0;          // cold exits: no main DSV this cycle
+    uint32_t cold_g_floor = 0;          // cold exits: opaque floor
+    uint32_t cold_g_sparse = 0;         // cold exits: sparse frame off main depth
+    uint32_t cold_cast_miss = 0;        // sticky: last castMisses code seen while the first cast was pending
+    float last_inject_near = -1.0f;     // the near plane of the LAST injection (slice forensics)
+    ID3D11BlendState*       min_blend = nullptr;         // out = min(dst, src)
+    bool engine_mask_failed = false;
+    ID3D11ShaderResourceView* cast_depth = nullptr;   // scene linear depth (AddRef)
+    float cast_dims[2] = {};
+    float cast_fov[4] = {};
+    bool  cast_fov_valid = false;
+    ID3D11BlendState*        cast_blend = nullptr;    // dst *= src
+    ID3D11DepthStencilState* cast_dss = nullptr;      // depth off
+    bool  cast_states_failed = false;
+    uint64_t analytic_casts = 0;
+    uint64_t mask_applies = 0;    // scene-end composites actually drawn
+    // Scene-end apply: the injection's position among the translucent
+    // draws MOVES as the gate rearms - some frames before the road
+    // decals, some after - so applying at the injection let decals paint
+    // over the shadow on alternating frames (the flicker; the user's
+    // under/over-decal observation was the smoking gun). Instead: hold
+    // the scene RTV (identity known - we just drew boxes into it) and
+    // apply when the engine UNBINDS it. Post-everything, deterministic.
+    ID3D11RenderTargetView* scene_rtv = nullptr;   // AddRef at injection
+    void* scene_key = nullptr;
+    bool  scene_apply_armed = false;
+    // SQF-set params (game thread writes, plain floats)
+    // Mask mode is the DEFAULT shadow path: candidate 0 in the field test
+    // (3840x2160 R8_UNORM, channel 0) proved to be the engine's shadow
+    // resolve, and sampling it at each pixel's own screen position is
+    // registration-exact by construction. The cascade path remains the
+    // automatic fallback whenever no mask candidate exists yet.
+    float enable = 1.0f;
+    float index = -1.0f;               // -1 = auto
+    float channel = 0.0f;
+    float invert = 0.0f;
+};
+
+static ShadowMaskState g_mask;
+
+// View-paired band capture: at this band's resolve, freeze SM + border
+// (from the resolve CB, at fixed offsets relative to the found matrix) +
+// this frame's view matrix + the atlas content, together.
+inline void band_capture(ID3D11DeviceContext* ctx, const float* cb, uint32_t off, uint32_t nf) {
+    if (!g_ro.cycle_pv_valid || !g_ls.atlas_tex) { g_ls.band_bail_pv++; return; }
+    if (off + 20 > nf) { g_ls.band_bail_off++; return; }   // need matrix + border
+    const float* sm = cb + off;
+    const float* border = cb + off + 16;
+
+    if (!(border[1] > border[0]) || border[0] < 0.0f || border[1] > 4000.0f) {
+        g_ls.band_bail_border++;
+        memcpy(g_ls.band_last_reject, border, sizeof(g_ls.band_last_reject));
+        return;
+    }
+    // slot: match an existing band by near edge, else take invalid/oldest,
+    // preferring to keep the two NEAREST bands
+    int slot = -1;
+
+    for (int i = 0; i < 8; ++i) {
+        if (g_ls.band[i].valid && fabsf(g_ls.band[i].border[0] - border[0]) < 0.5f) { slot = i; break; }
+    }
+
+    if (slot < 0) {
+        for (int i = 0; i < 8; ++i) {
+            if (!g_ls.band[i].valid) { slot = i; break; }
+        }
+    }
+
+    if (slot < 0) {   // all valid, different bands: replace the farthest if nearer
+        int far_i = 0;
+
+        for (int i = 1; i < 8; ++i) {
+            if (g_ls.band[i].border[0] > g_ls.band[far_i].border[0]) far_i = i;
+        }
+
+        if (border[0] < g_ls.band[far_i].border[0]) slot = far_i;
+        else { g_ls.band_bail_slot++; return; }
+    }
+
+    BandSlotRef:
+    {
+        auto& b = g_ls.band[slot];
+        const float now = effect_time_seconds();
+        // View source: the BRIDGE PV. The strongest evidence in every log
+        // is the box itself - it renders pixel-registered to the world
+        // every frame from this same transform, so it is same-frame
+        // correct by demonstration. The upload-matching latch (three
+        // designs, three pathologies: promiscuity, lockout, wrong-family
+        // tracking) remains available as an opt-in experiment (elem 13)
+        // and is used only when actually fresh - NEVER by skipping work:
+        // the skips were the cast flicker and the reseal starvation.
+        if (!g_ro.cycle_pv_valid && !g_ls.frame_view_valid) { g_ls.band_bail_view++; return; }
+        // Big-jump bypass: a large window move (look-away/look-back) must
+        // reseal IMMEDIATELY - the sub-second "shadow appears late" was
+        // the throttle serving 0.25 s stale windows after a view swing.
+        const bool big_jump = b.valid &&
+            (fabsf(sm[3] - b.sm[3]) > 0.08f || fabsf(sm[7] - b.sm[7]) > 0.08f);
+        // ROTATION-DELTA reseal: the cascade grid ROTATES with the view;
+        // a frozen copy requantizes shadow edges by up to a texel at each
+        // reseal - at 4 Hz that is a visible discrete hop proportional to
+        // turn rate (the received-side "step-dance"; the engine never
+        // freezes, so it spreads the same shimmer into per-frame dust).
+        // Dense reseals while the grid turns convert the hop into the
+        // same dust; a 0.05 s floor bounds the copy bandwidth.
+        bool grid_turned = false;
+
+        if (b.valid) {
+            float n_new = sqrtf(sm[0] * sm[0] + sm[1] * sm[1] + sm[2] * sm[2]);
+            float n_old = sqrtf(b.sm[0] * b.sm[0] + b.sm[1] * b.sm[1] + b.sm[2] * b.sm[2]);
+
+            if (n_new > 1e-12f && n_old > 1e-12f) {
+                const float d = (sm[0] * b.sm[0] + sm[1] * b.sm[1] + sm[2] * b.sm[2]) / (n_new * n_old);
+                grid_turned = d < 0.9999995f;   // ~0.06 deg of grid rotation
+            }
+        }
+        // TIME-ONLY seal: a view-space SM changes EVERY frame (the camera
+        // is baked in), so any 'moved' bypass degenerates into full-rate
+        // 67 MB copies against an in-flight SRV - a hazard-stall storm.
+        // A frozen pair registers the static world perfectly by the
+        // contract; 4 Hz reseals keep dynamic casters fresh enough.
+        // TIERED reseal cadence. The dancing foliage taught us the frozen-
+        // copy truth: received content can never be fresher than the
+        // reseal rate, and RV vegetation both animates (wind) and
+        // RE-ORIENTS WITH THE CAMERA (leaf planes are partially camera-
+        // facing) - so its shadows genuinely evolve per frame, and copies
+        // serve that evolution in steps. Near bands (magnified, where the
+        // player looks) reseal at 20 Hz permanently; far bands stay calm,
+        // stepping up while the grid turns. Bandwidth ~2-3 GB/s worst
+        // case - an order below the copy storm that once cost the frame.
+        const bool near_band = border[0] < 10.0f;
+        const float min_interval = near_band ? 0.05f : (grid_turned ? 0.10f : 0.25f);
+        if (b.valid && !big_jump && now - b.last_time < min_interval) { g_ls.band_bail_time++; return; }
+
+        if (!b.tex) {
+            // Batch: create ALL six slots' textures now - staggering six
+            // 67 MB allocations across the first seals was the seconds of
+            // shadow-less box at spawn.
+            D3D11_TEXTURE2D_DESC td = {};
+            g_ls.atlas_tex->GetDesc(&td);
+            td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            td.Usage = D3D11_USAGE_DEFAULT;
+            td.CPUAccessFlags = 0;
+            td.MiscFlags = 0;
+            ID3D11Device* dev = nullptr;
+            g_ls.atlas_tex->GetDevice(&dev);
+            if (!dev) return;
+
+            for (int bi = 0; bi < 8; ++bi) {
+                auto& bb = g_ls.band[bi];
+                if (bb.tex) continue;
+
+                if (SUCCEEDED(dev->CreateTexture2D(&td, nullptr, &bb.tex)) && bb.tex) {
+                    D3D11_SHADER_RESOURCE_VIEW_DESC sd = {};
+                    sd.Format = DXGI_FORMAT_R32_FLOAT;
+                    sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+                    sd.Texture2D.MipLevels = 1;
+
+                    if (FAILED(dev->CreateShaderResourceView(bb.tex, &sd, &bb.srv))) {
+                        bb.srv = nullptr;
+                        bb.tex->Release();
+                        bb.tex = nullptr;
+                    }
+                }
+            }
+
+            dev->Release();
+            if (!b.tex || !b.srv) { g_stats.shadow_srv_failed++; return; }
+        }
+
+        memcpy(b.sm, sm, sizeof(b.sm));
+        memcpy(b.border, border, sizeof(b.border));
+
+        // DEFERRED VIEW: the main-scene view of THIS frame uploads only
+        // after the resolves. Fill vcol provisionally (previous view -
+        // exactly the transient we are killing) and mark pending: the
+        // arriving upload completes the seal with the true same-frame V.
+        const bool fv = g_ls.frame_view_valid && g_ls.frame_view_time >= 0.0f &&
+                        now - g_ls.frame_view_time < 0.05f;
+
+        for (int c = 0; c < 3; ++c) {
+            for (int r = 0; r < 4; ++r) {
+                b.vcol[c * 4 + r] = fv ? g_ls.frame_view[r * 4 + c]
+                                       : g_ro.cycle_pv.view[r][c];
+            }
+        }
+
+        b.pending_view = true;
+        b.pending_since = now;
+
+        ctx->CopyResource(b.tex, g_ls.atlas_tex);
+        b.last_time = now;
+        b.valid = true;
+        b.copies++;
+        g_ls.band_captures++;
+
+        // sun direction from the engine's own matrices: SM depth row
+        // (light axis, view space) through the view rotation transpose.
+        if (g_ls.frame_view_valid) {
+            const float* r2 = sm + 8;                  // view-space light axis
+            const float* V = g_ls.frame_view;          // world->view (row-major rows = world axes in view space)
+            float wdir[3];
+
+            for (int c = 0; c < 3; ++c) {              // R^T * r2
+                wdir[c] = V[c * 4 + 0] * r2[0] + V[c * 4 + 1] * r2[1] + V[c * 4 + 2] * r2[2];
+            }
+
+            const float n2 = sqrtf(wdir[0] * wdir[0] + wdir[1] * wdir[1] + wdir[2] * wdir[2]);
+
+            if (n2 > 1e-6f) {
+                for (int c = 0; c < 3; ++c) wdir[c] /= n2;
+                if (wdir[1] < 0.0f) { wdir[0] = -wdir[0]; wdir[1] = -wdir[1]; wdir[2] = -wdir[2]; }   // skyward
+                g_sun_dir_derived[0] = wdir[0];
+                g_sun_dir_derived[1] = wdir[1];
+                g_sun_dir_derived[2] = wdir[2];
+                g_sun_dir_derived_valid = true;
+            }
+        }
+
+    }
+}
+
+// At a resolve draw: the bound PS CBs are looked up in the registry; a
+// sampling-family matrix found there IS the transform for the atlas
+// content this very draw samples. If it's the finest scale, seal the pair
+// right here: copy the atlas and store the matrix together.
+inline void resolve_pair_capture(ID3D11DeviceContext* ctx) {
+    if (g_shadow_pair_mode < 0.5f || !shadow_live_wanted() || !g_ls.atlas_tex) return;
+    g_ls.resolve_draws++;
+    // RV binds constants at varying slots: scan PS b0..b7 AND VS b0..b3.
+    // The engine binds PSCB_PostProcess - the resolve's OWN constant
+    // block, with the sampling matrix at [180] and the layer borders at
+    // [196] - at slot cb13 (from its shader's own binding table). The
+    // original 0..7 query never saw it: every 'resolve hit' this code has
+    // ever processed came from the small VS-side block instead.
+    ID3D11Buffer* bufs[18] = {};
+    ctx->PSGetConstantBuffers(0, 14, bufs);
+    ctx->VSGetConstantBuffers(0, 4, bufs + 14);
+    if (g_shadow_pair_mode >= 1.5f) {
+        if (g_ls.resolve_window == 0) {
+            g_ls.resolve_gated++;
+
+            for (int b = 0; b < 18; ++b) { if (bufs[b]) bufs[b]->Release(); }
+
+            return;
+        }
+
+        g_ls.resolve_window--;
+        // The mode-2 sweep must NOT sit behind the legacy first-hit gate:
+        // that gate fails on most resolves (its window test rejects many
+        // sun geometries), which starved the cast table to 0-1 entries a
+        // frame while 4-8 cascade passes consumed indices - sparse,
+        // misaligned cast matrices (jitter, angle-dependent vanishing).
+        bool any_capture = false;
+
+        for (int b = 0; b < 18; ++b) {
+            if (!bufs[b]) continue;
+
+            for (uint32_t i = 0; i < 16; ++i) {
+                if (g_ls.cb_reg[i].buf != static_cast<ID3D11Resource*>(bufs[b])) continue;
+                g_ls.resolve_cb_found++;
+                const float* f = g_ls.cb_reg[i].data;
+                const uint32_t nf = g_ls.cb_reg[i].floats;
+
+                if (nf >= 200 && nf <= 512) {
+                    const float* m180 = f + 180;
+                    const float n0 = m180[0] * m180[0] + m180[1] * m180[1] + m180[2] * m180[2];
+                    const float n1 = m180[4] * m180[4] + m180[5] * m180[5] + m180[6] * m180[6];
+
+                    if (n0 > 1e-10f && n0 < 1.0f && n1 > 1e-10f && n1 < 1.0f) {
+                        g_ls.resolve_seen_since_cast = true;   // partition's resolves ran: re-arm the mask write
+                        // analytic-cast inputs: mask RTV, depth SRV, FOV.
+                        // GATED on the proven resolve classifier: the 424
+                        // block rides cb13 across the whole postprocess
+                        // chain, and ungated capture latched cloud/AO/
+                        // lighting buffers (also screen-sized single-
+                        // channel) - our multiply-draw then stomped them
+                        // (black clouds, flickering exposure, no visible
+                        // cast). rt_is_resolve identified candidate 0 in
+                        // the mask-mode field test; trust it.
+                        if (!g_mask_cast_fired && g_ls.frame_view_valid && g_ls.view_published_this_frame) g_mask_cast_arm = true;
+                        if (g_mask.rt_is_resolve) {
+                        if (nf >= 180) {
+                            memcpy(g_mask.cast_fov, f + 176, sizeof(g_mask.cast_fov));
+                            g_mask.cast_fov_valid = true;
+                        }
+
+                        {
+                            // dims from the RTV desc (READ only; no latch)
+                            ID3D11RenderTargetView* rtv0 = nullptr;
+                            ctx->OMGetRenderTargets(1, &rtv0, nullptr);
+
+                            if (rtv0) {
+                                ID3D11Resource* rr = nullptr;
+                                rtv0->GetResource(&rr);
+
+                                if (rr) {
+                                    ID3D11Texture2D* rt = nullptr;
+                                    rr->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&rt));
+
+                                    if (rt) {
+                                        D3D11_TEXTURE2D_DESC rd = {};
+                                        rt->GetDesc(&rd);
+                                        g_mask.cast_dims[0] = static_cast<float>(rd.Width);
+                                        g_mask.cast_dims[1] = static_cast<float>(rd.Height);
+                                        rt->Release();
+                                    }
+
+                                    rr->Release();
+                                }
+
+                                // hold the mask RTV for the engine-mask
+                                // hybrid: we are AT the resolve, behind
+                                // both proven gates - this IS the mask.
+                                if (g_mask.engine_mask_rtv != rtv0) {
+                                    if (g_mask.engine_mask_rtv) {
+                                        g_mask.engine_mask_rtv->Release();
+                                        g_mask.mask_rtv_swaps++;   // target CHANGED mid-session
+                                    }
+                                    g_mask.engine_mask_rtv = rtv0;   // keep the ref
+                                } else {
+                                    rtv0->Release();
+                                }
+                            }
+
+                            ID3D11ShaderResourceView* d0 = nullptr;
+                            ctx->PSGetShaderResources(0, 1, &d0);
+
+                            if (d0) {
+                                // must be a screen-sized single-channel
+                                // float texture (the linear depth)
+                                bool depth_ok = false;
+                                ID3D11Resource* dr = nullptr;
+                                d0->GetResource(&dr);
+
+                                if (dr) {
+                                    ID3D11Texture2D* dt = nullptr;
+                                    dr->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&dt));
+
+                                    if (dt) {
+                                        D3D11_TEXTURE2D_DESC dd2 = {};
+                                        dt->GetDesc(&dd2);
+                                        const int df = static_cast<int>(dd2.Format);
+                                        depth_ok = dd2.Width == static_cast<UINT>(g_mask.cast_dims[0]) &&
+                                                   (df == 39 || df == 40 || df == 41 || df == 46 || df == 54);
+                                        dt->Release();
+                                    }
+
+                                    dr->Release();
+                                }
+
+                                if (depth_ok && g_mask.cast_depth != d0) {
+                                    if (g_mask.cast_depth) g_mask.cast_depth->Release();
+                                    g_mask.cast_depth = d0;   // keep the ref
+                                } else {
+                                    d0->Release();
+                                }
+                            }
+                        }
+                        }   // rt_is_resolve gate
+
+                        const uint64_t before = g_ls.band_captures + g_ls.band_bail_time + g_ls.band_bail_slot;
+                        band_capture(ctx, f, 180, nf);
+                        if (g_ls.band_captures + g_ls.band_bail_time + g_ls.band_bail_slot != before) any_capture = true;
+                    }
+                }
+            }
+        }
+
+        if (any_capture) g_ls.resolve_hits++;
+
+        for (int b = 0; b < 18; ++b) { if (bufs[b]) bufs[b]->Release(); }
+
+        return;
+    }
+
+    const float* hit = nullptr;
+    const float* hit_cb = nullptr;
+    uint32_t hit_off = 0, hit_nf = 0;
+    float hit_n0 = 0.0f;
+
+    for (int b = 0; b < 18; ++b) {
+        if (!bufs[b] || hit) { continue; }
+
+        for (uint32_t i = 0; i < 16 && !hit; ++i) {
+            if (g_ls.cb_reg[i].buf != static_cast<ID3D11Resource*>(bufs[b])) continue;
+            g_ls.resolve_cb_found++;
+            const float* f = g_ls.cb_reg[i].data;
+            const uint32_t nf = g_ls.cb_reg[i].floats;
+
+            for (uint32_t off = 0; off + 12 <= nf; off += 4) {
+                if (shadow_live_test_window(f + off)) {
+                    hit = f + off;
+                    hit_cb = f;
+                    hit_off = off;
+                    hit_nf = nf;
+                    hit_n0 = f[off] * f[off] + f[off + 1] * f[off + 1] + f[off + 2] * f[off + 2];
+                    break;
+                }
+            }
+        }
+    }
+
+    for (int b = 0; b < 18; ++b) { if (bufs[b]) bufs[b]->Release(); }
+    if (!hit) return;
+    g_ls.resolve_hits++;
+
+
+    if (hit_n0 > g_ls.resolve_best_n0) g_ls.resolve_best_n0 = hit_n0;
+    if (hit_n0 < 0.8f * g_ls.resolve_best_n0) return;   // not the finest cascade's resolve
+}
+
+// Per-RT-change classification: runs at OMSet rate (dozens/frame),
+// NOT per draw: the per-draw OMGet/QueryInterface/GetDesc chain ran for
+// every atlas-sampling forward draw (tens of thousands/frame) and cost a
+// measured ~170 ms/frame - the entire framerate collapse.
+inline void mask_classify_rt(UINT n, ID3D11RenderTargetView* const* rtvs) {
+    g_mask.rt_is_resolve = false;
+    g_mask.rt_key = nullptr;
+    if (!n || !rtvs || !rtvs[0]) return;
+    ID3D11Resource* res = nullptr;
+    rtvs[0]->GetResource(&res);
+    if (!res) return;
+    ID3D11Texture2D* tex = nullptr;
+    res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&tex));
+    res->Release();
+    if (!tex) return;
+    D3D11_TEXTURE2D_DESC td = {};
+    tex->GetDesc(&td);
+    g_mask.rt_key = tex;
+
+    bool known = false;
+
+    for (uint32_t i = 0; i < g_mask.cand_count; ++i) {
+        if (g_mask.cands[i].key == tex) { known = true; break; }
+    }
+
+    if (!known && g_mask.cand_count < 8) {
+        MaskCandidate& c = g_mask.cands[g_mask.cand_count++];
+        c.key = tex;
+        c.w = td.Width;
+        c.h = td.Height;
+        c.fmt = static_cast<uint32_t>(td.Format);
+        c.draws = 0;
+    }
+
+    g_mask.rt_is_resolve =
+        td.Width >= 1280 &&
+        (td.Format == DXGI_FORMAT_R8_UNORM || td.Format == DXGI_FORMAT_R8_TYPELESS ||
+         td.Format == DXGI_FORMAT_R16_UNORM || td.Format == DXGI_FORMAT_R16_TYPELESS ||
+         td.Format == DXGI_FORMAT_R16_FLOAT);
+    tex->Release();
+}
+
+// Per-draw path: two boolean tests and (rarely) the capture.
+// Draw the boxes' analytic shadows into the engine's mask. Fires once
+// per frame, at the first draw after the view latch publishes - after
+// every resolve, before the mask is consumed.
+inline void mask_cast_fire(ID3D11DeviceContext* ctx) {
+    if (!ctx) return;   // called from the injection, once per frame
+    if (g_shadow_cast < 0.5f) return;
+    if (!g_res.initialized || !g_res.ps_maskcast || !g_res.vs_fullscreen || !g_res.composite_cb) return;
+    if (!g_mask.cast_depth || !g_mask.cast_fov_valid || g_mask.own_failed) return;
+    if (!g_ls.frame_view_valid || g_mask.cast_dims[0] < 1.0f) return;
+
+    if (!g_mask.own_tex) {
+        ID3D11Device* dev0 = nullptr;
+        ctx->GetDevice(&dev0);
+        if (!dev0) { g_mask.own_failed = true; return; }
+        D3D11_TEXTURE2D_DESC td0 = {};
+        td0.Width = static_cast<UINT>(g_mask.cast_dims[0]);
+        td0.Height = static_cast<UINT>(g_mask.cast_dims[1]);
+        td0.MipLevels = 1;
+        td0.ArraySize = 1;
+        td0.Format = DXGI_FORMAT_R8_UNORM;
+        td0.SampleDesc.Count = 1;
+        td0.Usage = D3D11_USAGE_DEFAULT;
+        td0.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+
+        if (FAILED(dev0->CreateTexture2D(&td0, nullptr, &g_mask.own_tex)) ||
+            FAILED(dev0->CreateRenderTargetView(g_mask.own_tex, nullptr, &g_mask.own_rtv)) ||
+            FAILED(dev0->CreateShaderResourceView(g_mask.own_tex, nullptr, &g_mask.own_srv))) {
+            g_mask.own_failed = true;
+            dev0->Release();
+            return;
+        }
+
+        dev0->Release();
+    }
+
+    if (!g_mask.cast_blend && !g_mask.cast_states_failed) {
+        ID3D11Device* dev = nullptr;
+        ctx->GetDevice(&dev);
+        if (!dev) { g_mask.cast_states_failed = true; return; }
+        D3D11_BLEND_DESC bd = {};
+        bd.RenderTarget[0].BlendEnable = TRUE;
+        bd.RenderTarget[0].SrcBlend = D3D11_BLEND_ZERO;
+        bd.RenderTarget[0].DestBlend = D3D11_BLEND_SRC_COLOR;   // dst *= src
+        bd.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+        bd.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+        bd.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ZERO;
+        bd.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+        bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+        D3D11_DEPTH_STENCIL_DESC dd = {};
+        dd.DepthEnable = FALSE;
+
+        if (FAILED(dev->CreateBlendState(&bd, &g_mask.cast_blend)) ||
+            FAILED(dev->CreateDepthStencilState(&dd, &g_mask.cast_dss))) {
+            g_mask.cast_states_failed = true;
+            dev->Release();
+            return;
+        }
+
+        dev->Release();
+    }
+
+    if (!g_mask.cast_blend || !g_mask.cast_dss) return;
+    struct CastBox { float pos[3]; float size[3]; };
+    CastBox cboxes[64];   // 16 starved the stress test's 31st box
+    uint32_t ncb = 0;
+
+    {
+        std::lock_guard<std::mutex> lk(g_draw_list_mutex);
+
+        for (const auto& kv2 : g_draw_list) {
+            if (ncb >= 64) break;
+            const auto& o = kv2.second;
+            memcpy(cboxes[ncb].pos, o.pos, 12);
+            memcpy(cboxes[ncb].size, o.size, 12);
+            ncb++;
+        }
+    }
+
+    if (ncb == 0) return;
+    g_ro.in_injection = true;
+    ID3D11RenderTargetView* old_rtvs[4] = {};
+    ID3D11DepthStencilView* old_dsv = nullptr;
+    ctx->OMGetRenderTargets(4, old_rtvs, &old_dsv);
+    UINT old_nvp = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+    D3D11_VIEWPORT old_vps[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
+    ctx->RSGetViewports(&old_nvp, old_vps);
+    ID3D11VertexShader* old_vs = nullptr;
+    ID3D11PixelShader* old_ps = nullptr;
+    ID3D11InputLayout* old_il = nullptr;
+    D3D11_PRIMITIVE_TOPOLOGY old_topo = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
+    ID3D11Buffer* old_cb = nullptr;
+    ID3D11BlendState* old_blend = nullptr;
+    FLOAT old_bf[4] = {};
+    UINT old_bmask = 0xFFFFFFFF;
+    ID3D11DepthStencilState* old_dss = nullptr;
+    UINT old_sref = 0;
+    ID3D11ShaderResourceView* old_t0 = nullptr;
+    ctx->VSGetShader(&old_vs, nullptr, nullptr);
+    ctx->PSGetShader(&old_ps, nullptr, nullptr);
+    ctx->IAGetInputLayout(&old_il);
+    ctx->IAGetPrimitiveTopology(&old_topo);
+    ctx->VSGetConstantBuffers(0, 1, &old_cb);
+    ctx->OMGetBlendState(&old_blend, old_bf, &old_bmask);
+    ctx->OMGetDepthStencilState(&old_dss, &old_sref);
+    ctx->PSGetShaderResources(0, 1, &old_t0);
+    const FLOAT white[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+    ctx->ClearRenderTargetView(g_mask.own_rtv, white);
+    ctx->OMSetRenderTargets(1, &g_mask.own_rtv, nullptr);
+    D3D11_VIEWPORT vpn = {};
+    vpn.Width = g_mask.cast_dims[0];
+    vpn.Height = g_mask.cast_dims[1];
+    vpn.MaxDepth = 1.0f;
+    ctx->RSSetViewports(1, &vpn);
+    ctx->IASetInputLayout(nullptr);
+    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ctx->VSSetShader(g_res.vs_fullscreen, nullptr, 0);
+    ctx->PSSetShader(g_res.ps_maskcast, nullptr, 0);
+    ctx->VSSetConstantBuffers(0, 1, &g_res.composite_cb);
+    ctx->PSSetConstantBuffers(0, 1, &g_res.composite_cb);
+    const FLOAT bf[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+    ctx->OMSetBlendState(g_mask.cast_blend, bf, 0xFFFFFFFF);
+    ctx->OMSetDepthStencilState(g_mask.cast_dss, 0);
+    ctx->PSSetShaderResources(0, 1, &g_mask.cast_depth);
+
+    for (uint32_t bi = 0; bi < ncb; ++bi) {
+        D3D11_MAPPED_SUBRESOURCE mapped = {};
+        if (FAILED(ctx->Map(g_res.composite_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) break;
+        ConstantData cbd = {};
+        cbd.center_size[0] = cboxes[bi].pos[0];
+        cbd.center_size[1] = cboxes[bi].pos[2];   // SQF -> engine axes
+        cbd.center_size[2] = cboxes[bi].pos[1];
+        cbd.size_axes[0] = cboxes[bi].size[0];
+        cbd.size_axes[1] = cboxes[bi].size[2];
+        cbd.size_axes[2] = cboxes[bi].size[1];
+
+        for (int r = 0; r < 3; ++r) {
+            memcpy(cbd.cast_mat[r], g_ls.frame_view + r * 4, 16);
+        }
+
+        memcpy(cbd.cast_view[0], g_ls.frame_view + 12, 16);
+        cbd.cast_view[1][0] = g_mask.cast_fov[0];
+        cbd.cast_view[1][1] = g_mask.cast_fov[1];
+        cbd.cast_view[1][2] = g_mask.cast_dims[0];
+        cbd.cast_view[1][3] = g_mask.cast_dims[1];
+        const float* csun = g_sun_valid ? g_sun_dir_engine :
+                            (g_sun_dir_derived_valid ? g_sun_dir_derived : g_sun_dir_engine);
+        cbd.cast_view[2][0] = csun[0];
+        cbd.cast_view[2][1] = csun[1];
+        cbd.cast_view[2][2] = csun[2];
+        cbd.cast_view[2][3] = g_shadow_map_strength;
+        cbd.cast_meta[0] = 1.0f;   // screen path: camera-occlusion ON
+        memcpy(mapped.pData, &cbd, sizeof(cbd));
+        ctx->Unmap(g_res.composite_cb, 0);
+        ctx->Draw(3, 0);
+        g_mask.analytic_casts++;
+    }
+
+    g_mask.own_written = true;
+
+    ctx->OMSetRenderTargets(4, old_rtvs, old_dsv);
+    if (old_nvp > 0) ctx->RSSetViewports(old_nvp, old_vps);
+    ctx->VSSetShader(old_vs, nullptr, 0);
+    ctx->PSSetShader(old_ps, nullptr, 0);
+    ctx->IASetInputLayout(old_il);
+    ctx->IASetPrimitiveTopology(old_topo);
+    ctx->VSSetConstantBuffers(0, 1, &old_cb);
+    ctx->OMSetBlendState(old_blend, old_bf, old_bmask);
+    ctx->OMSetDepthStencilState(old_dss, old_sref);
+    ctx->PSSetShaderResources(0, 1, &old_t0);
+    g_ro.in_injection = false;
+
+    for (int r = 0; r < 4; ++r) KH_SAFE_RELEASE(old_rtvs[r]);
+
+    KH_SAFE_RELEASE(old_dsv);
+    KH_SAFE_RELEASE(old_vs);
+    KH_SAFE_RELEASE(old_ps);
+    KH_SAFE_RELEASE(old_il);
+    KH_SAFE_RELEASE(old_cb);
+    KH_SAFE_RELEASE(old_blend);
+    KH_SAFE_RELEASE(old_dss);
+    KH_SAFE_RELEASE(old_t0);
+}
+
+// Apply the shadow onto the LDR backbuffer the moment the engine binds
+// it (signature: single-sample RGBA8/BGRA8, NO DSV - the inverse of the
+// scene pass; see the UI-phase notes). Post-everything: no partition, no
+// post-process, nothing can draw over the shadow afterwards except UI.
+inline void mask_apply_at_backbuffer(ID3D11DeviceContext* ctx, UINT n,
+                                     ID3D11RenderTargetView* const* rtvs,
+                                     ID3D11DepthStencilView* dsv) {
+    // A bound DSV no longer disqualifies: the engine may keep one
+    // attached at the backbuffer bind; our depth-disabled draw ignores
+    // it, and format+samplecount+size carry the discrimination.
+    // Repurposed: SCENE-END apply. Fires when the scene RT (held since
+    // the injection) is no longer among the incoming targets: the scene
+    // is complete - decals, translucents, all of it - and the shadow
+    // goes on last. rtvs/n here are the NEW targets being bound.
+    if (g_mask.scene_apply_armed && g_mask.scene_rtv && g_mask.own_srv &&
+        g_res.ps_maskapply && g_res.vs_fullscreen && g_mask.cast_blend &&
+        g_mask.cast_dss && g_shadow_cast >= 0.5f && ctx) {
+        bool still_bound = false;
+
+        for (UINT i = 0; i < n && rtvs; ++i) {
+            if (rtvs[i] == g_mask.scene_rtv) { still_bound = true; break; }
+        }
+
+        if (!still_bound) {
+            g_mask.scene_apply_armed = false;
+            g_ro.in_injection = true;
+            ID3D11VertexShader* svs = nullptr;
+            ID3D11PixelShader* sps = nullptr;
+            ID3D11InputLayout* sil = nullptr;
+            D3D11_PRIMITIVE_TOPOLOGY stp = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
+            ID3D11Buffer* scb = nullptr;
+            ID3D11BlendState* sbl = nullptr;
+            FLOAT sbf[4] = {};
+            UINT sbm = 0xFFFFFFFF;
+            ID3D11DepthStencilState* sds = nullptr;
+            UINT ssr = 0;
+            UINT snv = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+            D3D11_VIEWPORT svp[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
+            ctx->RSGetViewports(&snv, svp);
+            ctx->VSGetShader(&svs, nullptr, nullptr);
+            ctx->PSGetShader(&sps, nullptr, nullptr);
+            ctx->IAGetInputLayout(&sil);
+            ctx->IAGetPrimitiveTopology(&stp);
+            ctx->PSGetConstantBuffers(0, 1, &scb);
+            ctx->OMGetBlendState(&sbl, sbf, &sbm);
+            ctx->OMGetDepthStencilState(&sds, &ssr);
+            ctx->OMSetRenderTargets(1, &g_mask.scene_rtv, nullptr);
+
+            {
+                D3D11_MAPPED_SUBRESOURCE mm = {};
+
+                if (SUCCEEDED(ctx->Map(g_res.composite_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mm))) {
+                    ConstantData cbm = {};
+                    const float sb2 = g_sun_brightness > 0.0f ? g_sun_brightness : 1.0f;
+                    const bool amb_ok = g_amb_brightness_staged_flag;
+                    const float ab2 = amb_ok && g_amb_brightness > 0.0f ? g_amb_brightness : sb2 * 0.8f;
+
+                    for (int c = 0; c < 3; ++c) {
+                        const float amb = g_amb_color[c] * ab2;
+                        const float sun = g_sun_color[c] * sb2;
+                        cbm.mask_meta[c] = amb / (amb + sun > 1e-4f ? amb + sun : 1e-4f);
+                    }
+
+                    memcpy(mm.pData, &cbm, sizeof(cbm));
+                    ctx->Unmap(g_res.composite_cb, 0);
+                }
+            }
+
+            D3D11_VIEWPORT vps2 = {};
+            vps2.Width = g_mask.cast_dims[0] > 1.0f ? g_mask.cast_dims[0] : static_cast<FLOAT>(g_main_depth_w);
+            vps2.Height = g_mask.cast_dims[1] > 1.0f ? g_mask.cast_dims[1] : static_cast<FLOAT>(g_main_depth_h);
+            vps2.MaxDepth = 1.0f;
+            ctx->RSSetViewports(1, &vps2);
+            ctx->IASetInputLayout(nullptr);
+            ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            ctx->VSSetShader(g_res.vs_fullscreen, nullptr, 0);
+            ctx->PSSetShader(g_res.ps_maskapply, nullptr, 0);
+            ctx->PSSetConstantBuffers(0, 1, &g_res.composite_cb);
+            ctx->PSSetShaderResources(10, 1, &g_mask.own_srv);
+            const FLOAT bfa2[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+            ctx->OMSetBlendState(g_mask.cast_blend, bfa2, 0xFFFFFFFF);
+            ctx->OMSetDepthStencilState(g_mask.cast_dss, 0);
+            ctx->Draw(3, 0);
+            g_mask.mask_applies++;
+            ID3D11ShaderResourceView* nl = nullptr;
+            ctx->PSSetShaderResources(10, 1, &nl);
+            if (snv > 0) ctx->RSSetViewports(snv, svp);
+            ctx->VSSetShader(svs, nullptr, 0);
+            ctx->PSSetShader(sps, nullptr, 0);
+            ctx->IASetInputLayout(sil);
+            ctx->IASetPrimitiveTopology(stp);
+            ctx->PSSetConstantBuffers(0, 1, &scb);
+            ctx->OMSetBlendState(sbl, sbf, sbm);
+            ctx->OMSetDepthStencilState(sds, ssr);
+            // the caller's OMSet proceeds after us, binding the new targets
+            g_ro.in_injection = false;
+            KH_SAFE_RELEASE(svs);
+            KH_SAFE_RELEASE(sps);
+            KH_SAFE_RELEASE(sil);
+            KH_SAFE_RELEASE(scb);
+            KH_SAFE_RELEASE(sbl);
+            KH_SAFE_RELEASE(sds);
+        }
+    }
+
+}
+
+inline bool mask_ensure_srv(ID3D11DeviceContext* ctx);   // defined below
+
+// The hybrid: analytic ray-vs-box written into the ENGINE'S mask at the
+// view-publish moment (after all resolves, before the mask is consumed),
+// MIN-blended so it can only darken. No clear - the engine's content
+// stays; we contribute our boxes' occlusion and the engine's lighting
+// pass colors everything identically.
+inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
+    // cast_misses = FIRST failed guard: 1 arm/fired never satisfied (set
+    // once armed, cleared on entry), 2 mode, 3 resources, 41 depth,
+    // 42 fov, 43 rtv-failed, 5 view, 61 ensure_srv, 62 tex; post-guard:
+    // 7 states, 8 no boxes, 9 Map; 0 = full success.
+    if (!ctx) return;
+    if (g_mask_cast_arm && !g_mask_cast_fired) g_ls.cast_misses = 1;
+
+    if (g_mask.cold_t0 >= 0.0 && g_mask.cold_first_cast < 0.0f && g_ls.cast_misses != 0) {
+        g_mask.cold_cast_miss = g_ls.cast_misses;   // sticky while cold
+    }
+    // fired-once-per-frame relaxed to fired-once-per-RESOLVE-BATCH: on
+    // partitioned frames each batch rewrites the mask, so each needs its
+    // own re-shadowing write (idempotent under MIN).
+    // (No phase gate here: the field-verified baseline fired at the first
+    // armed pre-draw regardless of phase, and a later gate - added on a
+    // partition-rewrite theory the maskRtvSwaps=0 measurement refuted -
+    // starved the fire on look-down frames. Baseline semantics restored.)
+    if (g_mask_cast_fired && g_ls.resolve_seen_since_cast && g_ls.frame_view_valid) {
+        g_mask_cast_arm = true;
+        g_mask_cast_fired = false;
+        g_mask.cast_batches++;
+    }
+
+    if (!g_mask_cast_arm || g_mask_cast_fired) return;
+    g_ls.resolve_seen_since_cast = false;
+    if (g_shadow_cast < 0.5f || g_shadow_cast_screen >= 0.5f) { g_ls.cast_misses = 2; return; }
+    if (!g_res.initialized || !g_res.ps_maskcast || !g_res.vs_fullscreen || !g_res.composite_cb) { g_ls.cast_misses = 3; return; }
+    if (!g_mask.cast_depth) { g_ls.cast_misses = 41; return; }
+    if (!g_mask.cast_fov_valid) { g_ls.cast_misses = 42; return; }
+    if (g_mask.engine_mask_failed) { g_ls.cast_misses = 43; return; }
+    if (!g_ls.frame_view_valid) { g_ls.cast_misses = 5; return; }
+    if (!g_mask.engine_mask_rtv) { g_ls.cast_misses = 61; return; }   // captured at the gated resolve sweep
+    g_ls.cast_misses = 0;
+    g_mask_cast_arm = false;
+    g_mask_cast_fired = true;
+
+    if (g_mask.cold_t0 >= 0.0 && g_mask.cold_first_cast < 0.0f) {
+        g_mask.cold_first_cast = static_cast<float>(effect_time_seconds() - g_mask.cold_t0);
+    }
+
+    if (!g_mask.cast_dss && !g_mask.cast_states_failed) {
+        ID3D11Device* dv2 = nullptr;
+        ctx->GetDevice(&dv2);
+
+        if (dv2) {
+            D3D11_DEPTH_STENCIL_DESC dd2 = {};
+            dd2.DepthEnable = FALSE;
+            if (FAILED(dv2->CreateDepthStencilState(&dd2, &g_mask.cast_dss))) g_mask.cast_states_failed = true;
+            dv2->Release();
+        }
+    }
+
+    if (!g_mask.min_blend) {
+        ID3D11Device* dev = nullptr;
+        ctx->GetDevice(&dev);
+        if (!dev) { g_mask.engine_mask_failed = true; g_ls.cast_misses = 7; return; }
+
+        if (!g_mask.min_blend) {
+            D3D11_BLEND_DESC bd = {};
+            bd.RenderTarget[0].BlendEnable = TRUE;
+            bd.RenderTarget[0].SrcBlend = D3D11_BLEND_ONE;
+            bd.RenderTarget[0].DestBlend = D3D11_BLEND_ONE;
+            bd.RenderTarget[0].BlendOp = D3D11_BLEND_OP_MIN;   // darken-only
+            bd.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+            bd.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ONE;
+            bd.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_MIN;
+            bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+
+            if (FAILED(dev->CreateBlendState(&bd, &g_mask.min_blend))) {
+                g_mask.engine_mask_failed = true;
+                dev->Release();
+                return;
+            }
+        }
+
+        dev->Release();
+    }
+
+    struct CastBox { float pos[3]; float size[3]; };
+    CastBox cboxes[64];   // 16 starved the stress test's 31st box
+    uint32_t ncb = 0;
+
+    {
+        std::lock_guard<std::mutex> lk(g_draw_list_mutex);
+
+        for (const auto& kv2 : g_draw_list) {
+            if (ncb >= 64) break;
+            const auto& o = kv2.second;
+            memcpy(cboxes[ncb].pos, o.pos, 12);
+            memcpy(cboxes[ncb].size, o.size, 12);
+            ncb++;
+        }
+    }
+
+    if (ncb == 0) { g_ls.cast_misses = 8; return; }
+    g_ro.in_injection = true;
+    ID3D11RenderTargetView* old_rtvs[4] = {};
+    ID3D11DepthStencilView* old_dsv = nullptr;
+    ctx->OMGetRenderTargets(4, old_rtvs, &old_dsv);
+    UINT old_nvp = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+    D3D11_VIEWPORT old_vps[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
+    ctx->RSGetViewports(&old_nvp, old_vps);
+    ID3D11VertexShader* old_vs = nullptr;
+    ID3D11PixelShader* old_ps = nullptr;
+    ID3D11InputLayout* old_il = nullptr;
+    D3D11_PRIMITIVE_TOPOLOGY old_topo = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
+    ID3D11Buffer* old_cb = nullptr;
+    ID3D11BlendState* old_blend = nullptr;
+    FLOAT old_bf[4] = {};
+    UINT old_bmask = 0xFFFFFFFF;
+    ID3D11DepthStencilState* old_dss = nullptr;
+    UINT old_sref = 0;
+    ID3D11ShaderResourceView* old_t0 = nullptr;
+    ctx->VSGetShader(&old_vs, nullptr, nullptr);
+    ctx->PSGetShader(&old_ps, nullptr, nullptr);
+    ctx->IAGetInputLayout(&old_il);
+    ctx->IAGetPrimitiveTopology(&old_topo);
+    ctx->PSGetConstantBuffers(0, 1, &old_cb);
+    ctx->OMGetBlendState(&old_blend, old_bf, &old_bmask);
+    ctx->OMGetDepthStencilState(&old_dss, &old_sref);
+    ctx->PSGetShaderResources(0, 1, &old_t0);
+    ctx->OMSetRenderTargets(1, &g_mask.engine_mask_rtv, nullptr);
+    D3D11_VIEWPORT vpn = {};
+    vpn.Width = g_mask.cast_dims[0];
+    vpn.Height = g_mask.cast_dims[1];
+    vpn.MaxDepth = 1.0f;
+    ctx->RSSetViewports(1, &vpn);
+    ctx->IASetInputLayout(nullptr);
+    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ctx->VSSetShader(g_res.vs_fullscreen, nullptr, 0);
+    ctx->PSSetShader(g_res.ps_maskcast, nullptr, 0);
+    ctx->VSSetConstantBuffers(0, 1, &g_res.composite_cb);
+    ctx->PSSetConstantBuffers(0, 1, &g_res.composite_cb);
+    const FLOAT bfm[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+    ctx->OMSetBlendState(g_mask.min_blend, bfm, 0xFFFFFFFF);
+    ctx->OMSetDepthStencilState(g_mask.cast_dss, 0);
+    ctx->PSSetShaderResources(0, 1, &g_mask.cast_depth);
+
+    for (uint32_t bi = 0; bi < ncb; ++bi) {
+        D3D11_MAPPED_SUBRESOURCE mapped = {};
+        if (FAILED(ctx->Map(g_res.composite_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) { g_ls.cast_misses = 9; break; }
+        ConstantData cbd = {};
+        cbd.center_size[0] = cboxes[bi].pos[0];
+        cbd.center_size[1] = cboxes[bi].pos[2];
+        cbd.center_size[2] = cboxes[bi].pos[1];
+        cbd.size_axes[0] = cboxes[bi].size[0];
+        cbd.size_axes[1] = cboxes[bi].size[2];
+        cbd.size_axes[2] = cboxes[bi].size[1];
+
+        for (int r = 0; r < 3; ++r) {
+            memcpy(cbd.cast_mat[r], g_ls.frame_view + r * 4, 16);
+        }
+
+        memcpy(cbd.cast_view[0], g_ls.frame_view + 12, 16);
+        cbd.cast_view[1][0] = g_mask.cast_fov[0];
+        cbd.cast_view[1][1] = g_mask.cast_fov[1];
+        cbd.cast_view[1][2] = g_mask.cast_dims[0];
+        cbd.cast_view[1][3] = g_mask.cast_dims[1];
+        const float* csun = g_sun_valid ? g_sun_dir_engine :
+                            (g_sun_dir_derived_valid ? g_sun_dir_derived : g_sun_dir_engine);
+        cbd.cast_view[2][0] = csun[0];
+        cbd.cast_view[2][1] = csun[1];
+        cbd.cast_view[2][2] = csun[2];
+        cbd.cast_view[2][3] = g_shadow_map_strength;   // 1 = full: engine handles ambient
+        memcpy(mapped.pData, &cbd, sizeof(cbd));
+        ctx->Unmap(g_res.composite_cb, 0);
+        ctx->Draw(3, 0);
+        g_mask.analytic_casts++;
+    }
+
+    ctx->OMSetRenderTargets(4, old_rtvs, old_dsv);
+    if (old_nvp > 0) ctx->RSSetViewports(old_nvp, old_vps);
+    ctx->VSSetShader(old_vs, nullptr, 0);
+    ctx->PSSetShader(old_ps, nullptr, 0);
+    ctx->IASetInputLayout(old_il);
+    ctx->IASetPrimitiveTopology(old_topo);
+    ctx->PSSetConstantBuffers(0, 1, &old_cb);
+    ctx->OMSetBlendState(old_blend, old_bf, old_bmask);
+    ctx->OMSetDepthStencilState(old_dss, old_sref);
+    ctx->PSSetShaderResources(0, 1, &old_t0);
+    g_ro.in_injection = false;
+
+    for (int r = 0; r < 4; ++r) KH_SAFE_RELEASE(old_rtvs[r]);
+
+    KH_SAFE_RELEASE(old_dsv);
+    KH_SAFE_RELEASE(old_vs);
+    KH_SAFE_RELEASE(old_ps);
+    KH_SAFE_RELEASE(old_il);
+    KH_SAFE_RELEASE(old_cb);
+    KH_SAFE_RELEASE(old_blend);
+    KH_SAFE_RELEASE(old_dss);
+    KH_SAFE_RELEASE(old_t0);
+}
+
+inline void mask_note_draw(ID3D11DeviceContext* ctx) {
+    if (!g_mask.atlas_bound || !ctx) return;
+    g_mask.atlas_bound = false;   // one record per pass segment is plenty
+
+    if (g_mask.rt_key) {
+        for (uint32_t i = 0; i < g_mask.cand_count; ++i) {
+            if (g_mask.cands[i].key == g_mask.rt_key) { g_mask.cands[i].draws++; break; }
+        }
+    }
+
+    if (g_mask.rt_is_resolve) {
+        resolve_pair_capture(ctx);
+    }
+}
+
+// Choose + hold the mask texture and its SRV. Render thread (injection).
+inline bool mask_ensure_srv(ID3D11DeviceContext* ctx) {
+    if (g_mask.enable < 0.5f || g_mask.cand_count == 0 || !ctx) return false;
+    int pick = -1;
+
+    if (g_mask.index >= 0.0f && static_cast<uint32_t>(g_mask.index) < g_mask.cand_count) {
+        pick = static_cast<int>(g_mask.index);
+    } else {
+        // Auto-pick: the shadow resolve is a SCREEN-SIZED SINGLE-CHANNEL
+        // target (field-confirmed: R8_UNORM). Most-draws alone grabbed the
+        // HDR scene color, which also samples the atlas.
+        uint64_t best = 0;
+
+        for (uint32_t i = 0; i < g_mask.cand_count; ++i) {
+            const MaskCandidate& c = g_mask.cands[i];
+            if (c.w < 1280) continue;
+            const bool single =
+                c.fmt == DXGI_FORMAT_R8_UNORM || c.fmt == DXGI_FORMAT_R8_TYPELESS ||
+                c.fmt == DXGI_FORMAT_R16_UNORM || c.fmt == DXGI_FORMAT_R16_TYPELESS ||
+                c.fmt == DXGI_FORMAT_R16_FLOAT;
+            if (!single) continue;
+
+            if (c.draws > best) {
+                best = c.draws;
+                pick = static_cast<int>(i);
+            }
+        }
+
+        if (pick < 0) {   // no single-channel candidate yet: most draws
+            for (uint32_t i = 0; i < g_mask.cand_count; ++i) {
+                if (g_mask.cands[i].w >= 640 && g_mask.cands[i].draws > best) {
+                    best = g_mask.cands[i].draws;
+                    pick = static_cast<int>(i);
+                }
+            }
+        }
+    }
+
+    if (pick < 0) return false;
+
+    if (g_mask.chosen_key != g_mask.cands[pick].key) {
+        if (g_mask.srv) { g_mask.srv->Release(); g_mask.srv = nullptr; }
+        if (g_mask.tex) { g_mask.tex->Release(); g_mask.tex = nullptr; }
+        g_mask.chosen_key = nullptr;
+    }
+
+    if (g_mask.srv) return true;
+    // Re-acquire the texture pointer via the stored key: the key IS the
+    // texture pointer recorded while alive; the engine keeps these
+    // persistent, but guard creation failures anyway.
+    ID3D11Texture2D* tex = static_cast<ID3D11Texture2D*>(g_mask.cands[pick].key);
+    D3D11_TEXTURE2D_DESC td = {};
+    tex->GetDesc(&td);
+    DXGI_FORMAT fmt = td.Format;
+
+    switch (td.Format) {
+        case DXGI_FORMAT_R8G8B8A8_TYPELESS:     fmt = DXGI_FORMAT_R8G8B8A8_UNORM; break;
+        case DXGI_FORMAT_B8G8R8A8_TYPELESS:     fmt = DXGI_FORMAT_B8G8R8A8_UNORM; break;
+        case DXGI_FORMAT_R16G16B16A16_TYPELESS: fmt = DXGI_FORMAT_R16G16B16A16_FLOAT; break;
+        case DXGI_FORMAT_R8_TYPELESS:           fmt = DXGI_FORMAT_R8_UNORM; break;
+        case DXGI_FORMAT_R16_TYPELESS:          fmt = DXGI_FORMAT_R16_UNORM; break;
+        default: break;
+    }
+
+    D3D11_SHADER_RESOURCE_VIEW_DESC sd = {};
+    sd.Format = fmt;
+    sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    sd.Texture2D.MipLevels = 1;
+    ID3D11Device* dev = nullptr;
+    tex->GetDevice(&dev);
+    if (!dev) return false;
+    HRESULT hr = dev->CreateShaderResourceView(tex, &sd, &g_mask.srv);
+    dev->Release();
+    if (FAILED(hr) || !g_mask.srv) {
+        g_mask.srv = nullptr;
+        g_mask.enable = 0.0f;   // cache the failure: stop per-frame retries
+        g_stats.shadow_srv_failed++;
+        return false;
+    }
+    tex->AddRef();
+    g_mask.tex = tex;
+    g_mask.chosen_key = g_mask.cands[pick].key;
+    g_mask.dims[0] = static_cast<float>(g_mask.cands[pick].w);
+    g_mask.dims[1] = static_cast<float>(g_mask.cands[pick].h);
+    return true;
+}
+
+// Lazy SRV over the atlas; typeless depth formats map to their color-read
+// equivalents. Render thread (injection) only.
+inline bool shadow_live_ensure_srv() {
+    if (g_ls.atlas_srv) return true;
+    if (!g_ls.atlas_tex || g_ls.srv_failed) return false;
+
+    DXGI_FORMAT fmt = DXGI_FORMAT_UNKNOWN;
+
+    switch (static_cast<DXGI_FORMAT>(g_ls.atlas_fmt)) {
+        case DXGI_FORMAT_R32_TYPELESS:    fmt = DXGI_FORMAT_R32_FLOAT; break;
+        case DXGI_FORMAT_R24G8_TYPELESS:  fmt = DXGI_FORMAT_R24_UNORM_X8_TYPELESS; break;
+        case DXGI_FORMAT_R16_TYPELESS:    fmt = DXGI_FORMAT_R16_UNORM; break;
+        case DXGI_FORMAT_R32G8X24_TYPELESS: fmt = DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS; break;
+        default: break;
+    }
+
+    if (fmt == DXGI_FORMAT_UNKNOWN) { g_ls.srv_failed = true; g_stats.shadow_srv_failed++; return false; }
+
+    ID3D11Device* dev = nullptr;
+    g_ls.atlas_tex->GetDevice(&dev);
+    if (!dev) { g_ls.srv_failed = true; g_stats.shadow_srv_failed++; return false; }
+
+    D3D11_SHADER_RESOURCE_VIEW_DESC sd = {};
+    sd.Format = fmt;
+    sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    sd.Texture2D.MipLevels = 1;
+    const HRESULT hr = dev->CreateShaderResourceView(g_ls.atlas_tex, &sd, &g_ls.atlas_srv);
+    dev->Release();
+
+    if (FAILED(hr) || !g_ls.atlas_srv) {
+        g_ls.atlas_srv = nullptr;
+        g_ls.srv_failed = true;
+        g_stats.shadow_srv_failed++;
+        return false;
+    }
+
+    return true;
+}
+
+// OM-binding tracking for the recon: keeps phase_active / target_identity
+// current. Called from the OMSet hooks on the render thread, injection
+// excluded, with the freshly computed main-DSV verdict.
+inline void shadow_track_targets(ID3D11DeviceContext* ctx, ID3D11DepthStencilView* dsv, bool dsv_is_main,
+                                 UINT n, ID3D11RenderTargetView* const* rtvs) {
+    if (!shadow_live_wanted()) {
+        if (g_sr.phase_active) {
+            shadow_close_cycle();
+            g_sr.phase_active = false;
+            g_sr.target_identity = nullptr;
+        }
+
+        g_ls.phase_on_atlas = false;
+        g_ls.pending_valid = false;
+    g_ls.pending_bytes = 0;
+        return;
+    }
+
+    const bool depth_only = dsv && !dsv_is_main && (n == 0 || !rtvs || !rtvs[0]);
+    void* id = depth_only ? reorder_dsv_identity(dsv) : nullptr;
+    bool is_atlas = false;
+
+    if (depth_only && (!g_sr.phase_active || g_sr.target_identity != id)) {
+        is_atlas = shadow_probe_target(dsv);
+    } else if (depth_only) {
+        is_atlas = g_ls.phase_on_atlas;   // unchanged target within the phase
+    }
+
+    if (g_sr.phase_active && (!depth_only || id != g_sr.target_identity)) {
+        shadow_close_cycle();
+    }
+
+    const bool atlas_cycle_start =
+        is_atlas && (!g_ls.phase_on_atlas || id != g_sr.target_identity);
+
+    // Cycle boundary on the atlas: commit the cycle's fully-upgraded latch
+    // then grab per-cycle state; the cascade's draws are complete here.
+    if (g_ls.phase_on_atlas && (!is_atlas || atlas_cycle_start)) {
+        shadow_live_finalize_cycle();
+
+    }
+
+    g_sr.phase_active = depth_only;
+    g_sr.target_identity = id;
+    g_ls.phase_on_atlas = is_atlas;
+
+    if (atlas_cycle_start) g_ls.cycle_latched = false;   // new cascade cycle, new latch
+    if (!is_atlas) { g_ls.pending_valid = false; g_ls.pending_bytes = 0; g_ls.pending_vp_valid = false; }
+}
+
+// Per-draw recon accounting; a depth-only cycle counts once it clears the
+// draw floor (rejects tiny utility clears/copies masquerading as passes).
+inline void shadow_note_draw(ID3D11DeviceContext* ctx) {
+    if (g_ls.pending_valid) shadow_live_on_draw(ctx);
+    return;   // (recon-era per-draw census removed; live latching runs above)
+}
+
+
 static HRESULT STDMETHODCALLTYPE hooked_map(ID3D11DeviceContext* self, ID3D11Resource* res, UINT sub, D3D11_MAP type, UINT flags, D3D11_MAPPED_SUBRESOURCE* mapped) {
     const HRESULT hr = g_orig_map(self, res, sub, type, flags, mapped);
 
@@ -2423,7 +5584,7 @@ static HRESULT STDMETHODCALLTYPE hooked_map(ID3D11DeviceContext* self, ID3D11Res
         (type == D3D11_MAP_WRITE_DISCARD || type == D3D11_MAP_WRITE_NO_OVERWRITE) &&
         self == g_reorder_target_ctx.load(std::memory_order_relaxed) &&
         reorder_on_render_thread() && !g_ro.in_injection &&
-        !g_ro.engine_proj_valid && g_ro.cycle_pv_valid) {
+        ((!g_ro.engine_proj_valid && g_ro.cycle_pv_valid) || shadow_live_wanted())) {
         const uint32_t bytes = proj_upload_byte_width(res);
 
         if (bytes != 0) {
@@ -2449,6 +5610,11 @@ static void STDMETHODCALLTYPE hooked_unmap(ID3D11DeviceContext* self, ID3D11Reso
                 // The engine has finished writing; the pointer is valid
                 // until the original Unmap below runs.
                 proj_scan_upload(res, p.data, p.bytes);
+                shadow_live_upload(p.data, p.bytes);
+                if (!g_ro.in_injection) {   // our own CBs carry view columns
+                    shadow_register_upload(res, p.data, p.bytes);   // and window rows:
+                    shadow_view_scan(res, p.data, p.bytes);         // never self-learn
+                }
                 p = ProjPendingMap{};
                 break;
             }
@@ -2462,9 +5628,17 @@ static void STDMETHODCALLTYPE hooked_updatesubresource(ID3D11DeviceContext* self
     if (sub == 0 && !box && data &&
         self == g_reorder_target_ctx.load(std::memory_order_relaxed) &&
         reorder_on_render_thread() && !g_ro.in_injection &&
-        !g_ro.engine_proj_valid && g_ro.cycle_pv_valid) {
+        ((!g_ro.engine_proj_valid && g_ro.cycle_pv_valid) || shadow_live_wanted())) {
         const uint32_t bytes = proj_upload_byte_width(res);
-        if (bytes != 0) proj_scan_upload(res, data, bytes);
+
+        if (bytes != 0) {
+            proj_scan_upload(res, data, bytes);
+            shadow_live_upload(data, bytes);
+            if (!g_ro.in_injection) {
+                shadow_register_upload(res, data, bytes);
+                shadow_view_scan(res, data, bytes);
+            }
+        }
     }
 
     g_orig_updatesubresource(self, res, sub, box, data, row_pitch, depth_pitch);
@@ -2481,8 +5655,86 @@ static void STDMETHODCALLTYPE hooked_updatesubresource(ID3D11DeviceContext* self
 // lock FROM the render thread deadlocks the game (the holder is waiting
 // for this very thread to park). The injection writes only its own
 // dedicated constant buffer, so nothing is shared with the flush anyway.
+// Cold-start pre-warm: the view lock's argmin only ran at the injection,
+// which needs boxes - so a freshly spawned box's first frames ran
+// lockless (frame_view invalid, the hybrid's small spawn delay). The
+// same attempt, run at the frame boundary against the bridge cycle PV,
+// acquires the lock BEFORE any box exists. Does not clear the ring and
+// never runs once locked; the injection block stays authoritative.
+inline void shadow_view_prewarm() {
+    if (g_ls.view_src_valid || !g_ro.cycle_pv_valid) return;
+    const uint32_t vcn = g_ls.vc_n < 16 ? g_ls.vc_n : 16;
+    if (vcn == 0) return;
+    const float* truth = &g_ro.cycle_pv.view[0][0];
+    int best_i = -1, best_k = 0;
+    float best_rot = 1e9f;
+
+    for (uint32_t i = 0; i < vcn; ++i) {
+        const float* m = g_ls.vc_ring[i].m;
+
+        for (int orient = 1; orient <= 2; ++orient) {
+            float e_rot = 0.0f;
+
+            for (int r = 0; r < 3; ++r) {
+                for (int c = 0; c < 3; ++c) {
+                    const float mv = orient == 1 ? m[r * 4 + c] : m[c * 4 + r];
+                    e_rot += fabsf(mv - truth[r * 4 + c]);
+                }
+            }
+
+            if (e_rot < best_rot) {
+                best_rot = e_rot;
+                best_i = static_cast<int>(i);
+                best_k = orient;
+            }
+        }
+    }
+
+    // 0.15, not 0.05: the truth here is the BRIDGE view, one frame stale,
+    // so camera motion held the 0.05 match just over the line for seconds
+    // (coldLock=8 caught it). Family separation is >1; the relative-
+    // fingerprint commit rule and the health loop carry the safety.
+    if (best_i < 0 || best_rot >= 0.15f) return;
+    const float* m = g_ls.vc_ring[best_i].m;
+    float tmag = 0.0f;
+
+    for (int c = 0; c < 3; ++c) {
+        const float tv = best_k == 1 ? m[12 + c] : m[c * 4 + 3];
+        tmag += fabsf(tv);
+    }
+
+    if (tmag >= 10.0f) return;   // relative only (same rule as the injection)
+
+    // CONFIRM before committing: the motion-relaxed 0.15 threshold can
+    // crown a one-frame fluke, and a wrong cold lock made the cast
+    // shadow lag camera rotation for ~1 s until the health monitor's
+    // 30-miss window kicked it (viewLocks = 2 was the tell). The same
+    // candidate must win two consecutive boundary attempts.
+    static ID3D11Resource* s_prev_cand_res = nullptr;
+    static uint32_t s_prev_cand_off = 0;
+
+    if (g_ls.vc_ring[best_i].res != s_prev_cand_res ||
+        g_ls.vc_ring[best_i].off != s_prev_cand_off) {
+        s_prev_cand_res = g_ls.vc_ring[best_i].res;
+        s_prev_cand_off = g_ls.vc_ring[best_i].off;
+        return;   // first sighting: confirm next boundary
+    }
+
+    g_ls.view_src_res = g_ls.vc_ring[best_i].res;
+    g_ls.view_src_off = g_ls.vc_ring[best_i].off;
+    g_ls.view_src_orient = best_k;
+    g_ls.view_src_relative = true;
+    g_ls.view_src_valid = true;
+    g_ls.view_src_miss = 0;
+    g_ls.view_locks++;
+}
+
 inline void inject_composited_boxes(ID3D11DeviceContext* ctx) {
     const float snapshot_now = effect_time_seconds();
+
+    if (g_mask.cold_t0 >= 0.0 && g_mask.cold_first_trigger < 0.0f) {
+        g_mask.cold_first_trigger = static_cast<float>(snapshot_now - g_mask.cold_t0);
+    }
     static std::vector<RenderObject> boxes;   // render-thread scratch
     boxes.clear();
 
@@ -2497,6 +5749,10 @@ inline void inject_composited_boxes(ID3D11DeviceContext* ctx) {
             if (expired) continue;   // the Draw3D flush owns the erasure
             boxes.push_back(o);
             boxes.back().color[3] *= env;
+        }
+
+        if (!boxes.empty() && g_mask.cold_t0 >= 0.0 && g_mask.cold_first_stage < 0.0f) {
+            g_mask.cold_first_stage = static_cast<float>(snapshot_now - g_mask.cold_t0);
         }
     }
 
@@ -2535,6 +5791,7 @@ inline void inject_composited_boxes(ID3D11DeviceContext* ctx) {
         // change event.
         RVExtBridge::ProjectionViewTransform live = {};
 
+
         if (RVExtBridge::get_projection_view_transform(live)) {
             const float m22_latch = pv.projection[2][2];
             const float m32_latch = pv.projection[3][2];
@@ -2542,7 +5799,20 @@ inline void inject_composited_boxes(ID3D11DeviceContext* ctx) {
             const float m32_live = live.projection[3][2];
             const float n_latch = (fabsf(m22_latch) > 1e-9f) ? (-m32_latch / m22_latch) : 0.0f;
             const float n_live  = (fabsf(m22_live)  > 1e-9f) ? (-m32_live  / m22_live)  : 0.0f;
-            if (fabsf(n_latch - n_live) > 1e-4f) g_stats.composite_ambiguous++;
+
+            // On disagreement the LATCH is the suspect: on sky-heavy
+            // frames it belongs to a partition/aux pass whose huge near
+            // plane SLICED the injected box (the look-up clip). Keep the
+            // latch when it agrees (frame-exact); use the live bridge
+            // values when it does not (correct near, one frame soft).
+            // Count-only otherwise: ambiguity is chronic (56% of frames
+            // at noon) and must never reject or switch AUTHORS - the
+            // flicker lesson. This switches only two projection scalars.
+            if (fabsf(n_latch - n_live) > 1e-4f) {
+                g_stats.composite_ambiguous++;
+                pv.projection[2][2] = m22_live;
+                pv.projection[3][2] = m32_live;
+            }
         }
     } else if (RVExtBridge::get_projection_view_transform(pv)) {
         s_last_pv = pv;
@@ -2567,10 +5837,131 @@ inline void inject_composited_boxes(ID3D11DeviceContext* ctx) {
         pv.projection[3][2] = g_ro.engine_m32;
     }
 
+    {
+        // forensics only. The abnormal-near handoff is DEAD: near = 10 is
+        // this scene's CHRONIC normal (partition-far latch on most
+        // frames; the box is fine there - the near only bites when box
+        // fragments come within ~10 m of the camera, the extreme
+        // look-up). The >1 m threshold rejected 96% of ALL frames,
+        // resurrected the author-alternation flicker, and the fallback
+        // sliced identically anyway (the bridge projection is ALSO the
+        // partition's on those frames - no authorship choice escapes a
+        // near plane both paths inherit). See CONTINUATION.md for the
+        // real design options.
+        const float m22n = pv.projection[2][2];
+        const float m32n = pv.projection[3][2];
+        g_mask.last_inject_near = fabsf(m22n) > 1e-9f ? (-m32n / m22n) : -1.0f;
+    }
+
     float view_proj[4][4];
     mul_4x4(pv.view, pv.projection, view_proj);
+    // supervise the view source: lock the upload location whose contents
+    // equal the PROVEN view used for the boxes this frame
+    {
+        const float* truth = &pv.view[0][0];
+        const uint32_t vcn = g_ls.vc_n < 16 ? g_ls.vc_n : 16;
+
+        if (!g_ls.view_src_valid && vcn > 0) {
+            // ARGMIN, not first-passing: pick the closest candidate and
+            // report its error - zero-lock runs then tell us the true
+            // convention gap instead of guessing tolerances.
+            int best_i = -1, best_k = 0;
+            float best_rot = 1e9f, best_tr = 1e9f;
+
+            for (uint32_t i = 0; i < vcn; ++i) {
+                const float* m = g_ls.vc_ring[i].m;
+
+                for (int orient = 1; orient <= 2; ++orient) {
+                    float e_rot = 0.0f, e_tr = 0.0f;
+
+                    for (int r = 0; r < 3; ++r) {
+                        for (int c = 0; c < 3; ++c) {
+                            const float mv = orient == 1 ? m[r * 4 + c] : m[c * 4 + r];
+                            e_rot += fabsf(mv - truth[r * 4 + c]);
+                        }
+                    }
+
+                    for (int c = 0; c < 3; ++c) {
+                        const float mv = orient == 1 ? m[12 + c] : m[c * 4 + 3];
+                        e_tr += fabsf(mv - truth[12 + c]);
+                    }
+
+                    if (e_rot < best_rot) {
+                        best_rot = e_rot;
+                        best_tr = e_tr;
+                        best_i = static_cast<int>(i);
+                        best_k = orient;
+                    }
+                }
+            }
+
+            g_ls.view_best_rot = best_rot;
+            g_ls.view_best_trans = best_tr;
+
+            if (best_i >= 0 && best_rot < 0.05f) {
+                // Convention classification (measured: engine uploads the
+                // view CAMERA-RELATIVE - rotation identical to the bridge,
+                // translation ~0 vs the bridge's world-absolute -cam*R).
+                const float* m = g_ls.vc_ring[best_i].m;
+                float tmag = 0.0f;
+
+                for (int c = 0; c < 3; ++c) {
+                    const float tv = best_k == 1 ? m[12 + c] : m[c * 4 + 3];
+                    tmag += fabsf(tv);
+                }
+
+                const bool relative = tmag < 10.0f;
+
+                // RELATIVE ONLY: the engine's view is camera-relative
+                // (measured); an absolute-exact candidate is an echo of
+                // our own uploads (bandView columns) - locking onto it
+                // made frame_view read back our own half-filled CB
+                // (garbage seals: both shadow paths vanished).
+                if (relative) {
+                    g_ls.view_src_res = g_ls.vc_ring[best_i].res;
+                    g_ls.view_src_off = g_ls.vc_ring[best_i].off;
+                    g_ls.view_src_orient = best_k;
+                    g_ls.view_src_relative = true;
+                    g_ls.view_src_valid = true;
+
+                    g_ls.view_src_miss = 0;
+                    g_ls.view_locks++;
+                }
+            }
+        }
+
+        g_ls.vc_n = 0;   // fresh ring per injection: stale entries can't win
+
+        if (g_ls.view_src_valid) {
+            // health: rotation agreement is the signal (the hybrid's
+            // translation is bridge-derived by construction)
+            bool healthy = false;
+
+            if (g_ls.frame_view_valid && g_ls.frame_view_time >= 0.0f) {
+                float e_rot = 0.0f;
+
+                for (int r = 0; r < 3; ++r) {
+                    for (int c = 0; c < 3; ++c) {
+                        e_rot += fabsf(g_ls.frame_view[r * 4 + c] - truth[r * 4 + c]);
+                    }
+                }
+
+                healthy = e_rot < 0.10f;
+            }
+
+            if (healthy) {
+                g_ls.view_src_miss = 0;
+            } else if (++g_ls.view_src_miss > 30) {
+                g_ls.view_src_valid = false;
+                g_ls.vc_n = 0;
+            }
+        }
+    }
     float cam[3];
     extract_camera_pos(pv.view, cam);
+    g_ls.cam[0] = cam[0];   // shadow-space origin for the CPU-side diagnostic
+    g_ls.cam[1] = cam[1];
+    g_ls.cam[2] = cam[2];
 
     // Translucent-correct ordering among our own boxes: back to front.
     std::sort(boxes.begin(), boxes.end(), [&cam](const RenderObject& a, const RenderObject& b) {
@@ -2585,6 +5976,108 @@ inline void inject_composited_boxes(ID3D11DeviceContext* ctx) {
 
     StateBackup backup;
     backup.capture(ctx);
+
+    // Render the analytic shadow factor NOW (view is frame-fresh; the
+    // injection runs every frame - no mid-pipeline interruption, no
+    // missed frames), then composite it onto the scene BEFORE the boxes
+    // draw: world darkens under the shadow, boxes stay unaffected.
+    // Screen-multiply path only when elem 18 = 1; the default is the
+    // ENGINE-MASK hybrid (fired at the pre-draw), whose color and alpha
+    // are the engine's own - the baseline quality, by the same pipeline.
+    if (g_shadow_cast_screen >= 0.5f) mask_cast_fire(ctx);
+
+    // Apply AT THE INJECTION - the configuration that was SEEN working
+    // ("both shadows present", stable). The backbuffer route drew every
+    // frame (maskApplies == flushes) yet nothing reached the screen: the
+    // signature-matched target is an intermediate LDR buffer, discarded
+    // before present. The injection's RT is proven visible - we draw
+    // boxes into it.
+    if (g_shadow_cast_screen >= 0.5f &&
+        g_mask.own_srv && g_res.ps_maskapply && g_res.vs_fullscreen &&
+        g_mask.cast_blend && g_mask.cast_dss && g_shadow_cast >= 0.5f) {
+        g_mask.own_written = false;
+        // hold the scene RT identity; the apply happens at its UNBIND
+        ID3D11RenderTargetView* rtv_now[1] = {};
+        ctx->OMGetRenderTargets(1, rtv_now, nullptr);
+
+        if (rtv_now[0]) {
+            if (g_mask.scene_rtv != rtv_now[0]) {
+                if (g_mask.scene_rtv) g_mask.scene_rtv->Release();
+                g_mask.scene_rtv = rtv_now[0];   // keep the ref
+                ID3D11Resource* sr = nullptr;
+                rtv_now[0]->GetResource(&sr);
+                g_mask.scene_key = sr;
+                if (sr) sr->Release();
+            } else {
+                rtv_now[0]->Release();
+            }
+
+            g_mask.scene_apply_armed = true;
+        }
+    }
+
+    if (false) {
+        g_mask.own_written = false;
+        // BIND RT0 ONLY: with independent blend off, D3D applies our
+        // multiply to EVERY bound target - the engine binds auxiliary
+        // RTs alongside the scene here, and stomping them was the fog/
+        // sky/lighting corruption. Backup restores the full set after.
+        ID3D11RenderTargetView* cur_rtvs[4] = {};
+        ID3D11DepthStencilView* cur_dsv = nullptr;
+        ctx->OMGetRenderTargets(4, cur_rtvs, &cur_dsv);
+
+        if (cur_rtvs[0]) {
+            ctx->OMSetRenderTargets(1, &cur_rtvs[0], cur_dsv);
+            ctx->IASetInputLayout(nullptr);
+            ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            // amb/(amb+sun) per channel: the physically-derived shadow
+            // floor. Brightness scalars weight the normalized colors.
+            {
+                D3D11_MAPPED_SUBRESOURCE mm = {};
+
+                if (SUCCEEDED(ctx->Map(g_res.composite_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mm))) {
+                    ConstantData cbm = {};
+                    const float sb = g_sun_brightness > 0.0f ? g_sun_brightness : 1.0f;
+                    // Ambient default is RELATIVE to the sun (35%): the
+                    // raw sun brightness is exposure-coupled (~10), and
+                    // an absolute ambient default divided against it
+                    // collapsed the floor to ~0.02 - the pitch black.
+                    // SQF-provided ambient (getLighting units, matching
+                    // the sun's) is used as-is.
+                    const bool amb_staged = g_amb_brightness_staged_flag;
+                    const float ab = amb_staged && g_amb_brightness > 0.0f
+                                   ? g_amb_brightness
+                                   : sb * 0.8f;   // RV daytime ambient is strong
+
+                    for (int c = 0; c < 3; ++c) {
+                        const float amb = g_amb_color[c] * ab;
+                        const float sun = g_sun_color[c] * sb;
+                        cbm.mask_meta[c] = amb / (amb + sun > 1e-4f ? amb + sun : 1e-4f);
+                    }
+
+                    cbm.mask_meta[3] = 0.0f;
+                    memcpy(mm.pData, &cbm, sizeof(cbm));
+                    ctx->Unmap(g_res.composite_cb, 0);
+                }
+            }
+
+            ctx->VSSetShader(g_res.vs_fullscreen, nullptr, 0);
+            ctx->PSSetShader(g_res.ps_maskapply, nullptr, 0);
+            ctx->PSSetConstantBuffers(0, 1, &g_res.composite_cb);
+            ctx->PSSetShaderResources(10, 1, &g_mask.own_srv);
+            const FLOAT bfa[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+            ctx->OMSetBlendState(g_mask.cast_blend, bfa, 0xFFFFFFFF);
+            ctx->OMSetDepthStencilState(g_mask.cast_dss, 0);
+            ctx->Draw(3, 0);
+            ID3D11ShaderResourceView* nul10 = nullptr;
+            ctx->PSSetShaderResources(10, 1, &nul10);
+            ctx->OMSetRenderTargets(4, cur_rtvs, cur_dsv);
+        }
+
+        for (int r4 = 0; r4 < 4; ++r4) KH_SAFE_RELEASE(cur_rtvs[r4]);
+
+        KH_SAFE_RELEASE(cur_dsv);
+    }
 
     // CRITICAL - viewport depth range: the engine renders in depth
     // PARTITIONS, remapping each pass's NDC z through the viewport
@@ -2639,11 +6132,26 @@ inline void inject_composited_boxes(ID3D11DeviceContext* ctx) {
     ctx->VSSetConstantBuffers(0, 1, &g_res.composite_cb);
     ctx->PSSetConstantBuffers(0, 1, &g_res.composite_cb);
     if (guard) ctx->PSSetShaderResources(0, 1, &g_res.comp_depth_srv);
+    // Shadow atlas for the per-pixel map compare (harmless when the table
+    // is empty: shadowMeta.x = 0 short-circuits the shader). Slot t1 is
+    // inside the StateBackup's saved SRV range.
+    if (guard && shadow_live_ensure_srv()) ctx->PSSetShaderResources(1, 1, &g_ls.atlas_srv);
+    if (mask_ensure_srv(ctx)) ctx->PSSetShaderResources(3, 1, &g_mask.srv);
+    // engine shadow mask (captured at the resolve sweep): the depth-gated
+    // receive samples it where box surfaces hug world geometry - unit
+    // stencil shadows land on our boxes through the engine's own factor.
+    for (UINT bslot = 0; bslot < 8; ++bslot) {
+        if (g_ls.band[bslot].valid && g_ls.band[bslot].srv) {
+            const UINT treg = bslot < 6 ? 4 + bslot : 12 + (bslot - 6);   // t4-t9, t12-t13
+            ctx->PSSetShaderResources(treg, 1, &g_ls.band[bslot].srv);
+        }
+    }
     // Depth WRITE is the whole point: the engine's translucents must be
     // able to depth-reject against these boxes.
     ctx->OMSetDepthStencilState(g_res.dss_test_write, 0);
     ctx->RSSetState(g_res.rasterizer);
     const FLOAT bf[4] = { 0, 0, 0, 0 };
+
 
     for (const auto& o : boxes) {
         ConstantData cbd = {};
@@ -2676,6 +6184,104 @@ inline void inject_composited_boxes(ID3D11DeviceContext* ctx) {
         cbd.band0[1] = o.band_max;
         cbd.band0[2] = o.band_falloff;
         cbd.band0[3] = o.banded ? 1.0f : 0.0f;
+        fill_lighting_cb(cbd, o);
+        cbd.mask_meta[0] = (g_mask.enable > 0.5f && g_mask.srv) ? 1.0f : 0.0f;
+        cbd.mask_meta[1] = g_mask.channel;
+        cbd.mask_meta[2] = g_mask.invert;
+        cbd.mask_meta[3] = 0.0f;
+
+        if (g_shadow_pair_mode >= 1.5f) {
+            bool band_any = false;
+            // FINEST-FIRST: order slots by near edge ascending, so the
+            // shader's first containing band holds the finest content in
+            // the engine's overlap (crossfade) zones. bandBorder.w encodes
+            // valid + which PHYSICAL texture slot to sample (1 + index).
+            int order[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
+
+            for (int a = 0; a < 7; ++a) {
+                for (int b2 = a + 1; b2 < 8; ++b2) {
+                    const float na = g_ls.band[order[a]].valid ? g_ls.band[order[a]].border[0] : 1e9f;
+                    const float nb = g_ls.band[order[b2]].valid ? g_ls.band[order[b2]].border[0] : 1e9f;
+
+                    if (nb < na) {
+                        const int t = order[a];
+                        order[a] = order[b2];
+                        order[b2] = t;
+                    }
+                }
+            }
+
+            float prev_far = -1e9f;
+
+            for (int b = 0; b < 8; ++b) {
+                const auto& bs = g_ls.band[order[b]];
+                cbd.band_border[b][3] = 0.0f;
+                if (!bs.valid || !bs.srv) continue;
+
+                // twin dedupe: near inside the previous band's range and
+                // far not meaningfully beyond it = a partition duplicate
+                // of the same range; two twins alternate seal content and
+                // the shader's winner flip-flops (the range flicker).
+                if (bs.border[0] < prev_far - 0.5f && bs.border[1] < prev_far * 1.25f + 1.0f) continue;
+                prev_far = bs.border[1];
+                memcpy(cbd.band_mat[b * 3 + 0], bs.sm + 0, 16);
+                memcpy(cbd.band_mat[b * 3 + 1], bs.sm + 4, 16);
+                memcpy(cbd.band_mat[b * 3 + 2], bs.sm + 8, 16);
+                memcpy(cbd.band_view[b * 3 + 0], bs.vcol + 0, 16);
+                memcpy(cbd.band_view[b * 3 + 1], bs.vcol + 4, 16);
+                memcpy(cbd.band_view[b * 3 + 2], bs.vcol + 8, 16);
+                cbd.band_border[b][0] = bs.border[0];
+                cbd.band_border[b][1] = bs.border[1];
+                cbd.band_border[b][2] = bs.border[2];
+                cbd.band_border[b][3] = 1.0f + static_cast<float>(order[b]);
+                band_any = true;
+            }
+
+            if (band_any) cbd.mask_meta[3] = 1.0f;
+
+            // engine-mask depth-gated receive: registration-exact shadows
+            // (units, clouds, everything the engine resolves) on box
+            // surfaces within the depth margin of world geometry.
+
+            // fog occlusion (self-fetched fogParams; RV's height-decay
+            // exponential). Color: the staged ambient tint is the closest
+            // engine-truth horizon approximation available without the
+            // sky pipeline's own constants.
+            if (g_fog_valid && g_fog[0] > 1e-4f) {
+                cbd.fog_params[0] = g_fog[0];
+                cbd.fog_params[1] = g_fog[1];
+                cbd.fog_params[2] = g_fog[2];
+                cbd.fog_params[3] = 1.0f;
+                // RAW scene-lighting units - the same HDR space ApplyLighting
+                // shades the box in. Normalizing to unit peak made the fog
+                // white; on a white box that is invisible by construction
+                // (the red tracer showed for exactly this reason). Horizon
+                // approximation: ambient plus a quarter of the sun term.
+                const float ab = g_amb_brightness > 0.0f ? g_amb_brightness :
+                                 (g_sun_brightness > 0.0f ? g_sun_brightness * 0.8f : 1.0f);
+                const float sb = g_sun_brightness > 0.0f ? g_sun_brightness : 1.0f;
+
+                for (int c = 0; c < 3; ++c) {
+                    // ambient-anchored haze: 0.25*sun made far boxes GLOW
+                    // (sunBrightness 6-9 in HDR units). 0.9*amb + 0.06*sun
+                    // sits at the engine's own horizon level; adjust these
+                    // two constants if box haze drifts from terrain haze.
+                    cbd.fog_color[c] = g_amb_color[c] * ab * 0.9f + g_sun_color[c] * sb * 0.06f;
+                }
+
+                cbd.fog_color[3] = g_ls.cam[1];   // camera altitude (engine Y-up)
+            }
+        }
+        cbd.mask_dims[0] = g_mask.dims[0];
+        cbd.mask_dims[1] = g_mask.dims[1];
+
+        {
+            UINT nvp = 1;
+            D3D11_VIEWPORT vvp = {};
+            ctx->RSGetViewports(&nvp, &vvp);
+            cbd.mask_dims[2] = nvp && vvp.Width > 0 ? vvp.Width : g_mask.dims[0];
+            cbd.mask_dims[3] = nvp && vvp.Height > 0 ? vvp.Height : g_mask.dims[1];
+        }
 
         if (guard) {
             // Guard inputs: reconstruction coefficients + the encode range
@@ -2701,15 +6307,37 @@ inline void inject_composited_boxes(ID3D11DeviceContext* ctx) {
     }
 
     if (n_saved_vp > 0) ctx->RSSetViewports(n_saved_vp, saved_vp);
-    backup.restore(ctx);
-    g_stats.composite_injections++;
+
+    {
+        backup.restore(ctx);
+    }
     g_stats.composite_injections++;
     g_composite_inject_serial.fetch_add(1, std::memory_order_relaxed);
+
+    if (g_mask.cold_t0 >= 0.0 && g_mask.cold_first_inject < 0.0f) {
+        g_mask.cold_first_inject = static_cast<float>(effect_time_seconds() - g_mask.cold_t0);
+    }
+
 }
 
 inline void reorder_pre_draw(ID3D11DeviceContext* self) {
+    // Vtable hooks intercept EVERY context: Arma's worker threads record
+    // draws through deferred contexts at enormous rates, and anything
+    // placed before these two loads (a QPC timer + a shared atomic, in
+    // the first profiler build) becomes a cross-core cache-line storm -
+    // a measured 172 ms/frame of self-inflicted contention. Foreign
+    // contexts and threads must bail on relaxed loads only.
     if (self != g_reorder_target_ctx.load(std::memory_order_relaxed)) return;
     if (!reorder_on_render_thread()) return;   // our own game-thread draws must not be tracked
+
+    if (!g_ro.in_injection) {
+        shadow_note_draw(self);
+        mask_note_draw(self);
+        // The hybrid's earlier no-fire was the latch collapse (bisected
+        // and fixed): its arm/reset chain rides the finalize cycle,
+        // which is healthy again. castMisses instruments every bail.
+        mask_cast_engine(self);
+    }
     if (g_ro.in_injection || g_ro.injected) return;
 
     if (!g_ro.blend_translucent || !g_ro.dss_nowrite) {
@@ -2766,7 +6394,10 @@ inline void reorder_pre_draw(ID3D11DeviceContext* self) {
         return;
     }
 
-    if (!g_ro.dsv_main) return;
+    if (!g_ro.dsv_main) {
+        if (g_mask.cold_t0 >= 0.0 && g_mask.cold_first_trigger < 0.0f) g_mask.cold_g_nodsv++;
+        return;
+    }
 
     // Mistiming rejection: a real scene issues a wall of opaque draws
     // between its depth clear and its translucent phase; late re-clears
@@ -2774,8 +6405,32 @@ inline void reorder_pre_draw(ID3D11DeviceContext* self) {
     // could pull the injection into a completed frame and paint the boxes
     // over everything. Beyond that, the FIRST qualifying translucent draw
     // is the trigger (see the run-gate note above the vtable slots).
-    if (g_ro.opaque_draws < KH_REORDER_MIN_OPAQUE_DRAWS) {
+    // Terrain-only frames (looking straight down) issue only a few dozen
+    // opaque draws - the original threshold never qualified, no injection
+    // landed all frame, and the fallback path drew the boxes UNSHADOWED
+    // (both shadows 'vanishing' on look-down). A proven projection lock
+    // is stronger mistiming evidence than draw count alone: with it, a
+    // much lower floor suffices; previews/overlays still fail both.
+    const uint32_t min_opaques = g_ro.engine_proj_valid
+                               ? KH_REORDER_MIN_OPAQUE_DRAWS / 8
+                               : KH_REORDER_MIN_OPAQUE_DRAWS;
+
+    if (g_ro.opaque_draws < min_opaques) {
         g_stats.composite_rej_floor++;
+        if (g_mask.cold_t0 >= 0.0 && g_mask.cold_first_trigger < 0.0f) g_mask.cold_g_floor++;
+        return;
+    }
+
+    // Floor-relaxed frames (sparse: look-down terrain, look-up sky) must
+    // ALSO be on the frame's true main depth: a sparse cycle passing the
+    // low floor can be a preview/aux pass whose output is discarded -
+    // injection lands, the serial reports success, the box vanishes at
+    // exactly those camera angles. dsv_main is identity-matched; the
+    // real scene always qualifies, previews never do. Dense frames keep
+    // the draw-count evidence alone, as always.
+    if (g_ro.opaque_draws < KH_REORDER_MIN_OPAQUE_DRAWS && !g_ro.dsv_main) {
+        g_stats.composite_rej_floor++;
+        if (g_mask.cold_t0 >= 0.0 && g_mask.cold_first_trigger < 0.0f) g_mask.cold_g_sparse++;
         return;
     }
 
@@ -2857,6 +6512,51 @@ inline void reorder_pre_draw(ID3D11DeviceContext* self) {
     g_ro.in_injection = false;
 }
 
+// Known atlas SRV pointer cache: the engine reuses view objects, so after
+// first identification the check is pointer-compare only - no COM calls.
+static void* g_atlas_srv_cache[8] = {};
+static uint32_t g_atlas_srv_count = 0;
+
+static void STDMETHODCALLTYPE hooked_pssetshaderresources(ID3D11DeviceContext* self, UINT start, UINT n, ID3D11ShaderResourceView* const* srvs) {
+    if (reorder_on_render_thread() && !g_ro.in_injection && g_ls.atlas_tex && srvs) {
+        // The engine binds the shadow atlas at t15 (from its own resolve
+        // shader) - inspect ONLY that slot. The previous per-SRV
+        // GetResource scan over every binding call was the framerate.
+        if (start <= 15 && start + n > 15) {
+            ID3D11ShaderResourceView* srv = srvs[15 - start];
+
+            if (srv) {
+                bool known = false;
+
+                for (uint32_t i = 0; i < g_atlas_srv_count; ++i) {
+                    if (g_atlas_srv_cache[i] == srv) { known = true; break; }
+                }
+
+                if (known) {
+                    g_mask.atlas_bound = true;
+                } else {
+                    ID3D11Resource* res = nullptr;
+                    srv->GetResource(&res);
+
+                    if (res) {
+                        if (res == static_cast<ID3D11Resource*>(g_ls.atlas_tex)) {
+                            g_mask.atlas_bound = true;
+
+                            if (g_atlas_srv_count < 8) {
+                                g_atlas_srv_cache[g_atlas_srv_count++] = srv;
+                            }
+                        }
+
+                        res->Release();
+                    }
+                }
+            }
+        }
+    }
+
+    g_orig_pssetshaderresources(self, start, n, srvs);
+}
+
 static void STDMETHODCALLTYPE hooked_draw_indexed(ID3D11DeviceContext* self, UINT ic, UINT sil, INT bvl) {
     reorder_pre_draw(self);
     g_orig_draw_indexed(self, ic, sil, bvl);
@@ -2910,11 +6610,25 @@ static void STDMETHODCALLTYPE hooked_omset_depthstencil(ID3D11DeviceContext* sel
     g_orig_omset_depthstencil(self, dss, ref);
 }
 
+
 static void STDMETHODCALLTYPE hooked_omset_rendertargets(ID3D11DeviceContext* self, UINT n, ID3D11RenderTargetView* const* rtvs, ID3D11DepthStencilView* dsv) {
     if (self == g_reorder_target_ctx.load(std::memory_order_relaxed) && !g_ro.in_injection &&
         reorder_on_render_thread()) {
         g_ro.dsv_main = dsv && g_main_depth_identity &&
                         reorder_dsv_identity(dsv) == g_main_depth_identity;
+        const bool was_on_atlas = g_ls.phase_on_atlas;
+        shadow_track_targets(self, dsv, g_ro.dsv_main, n, rtvs);
+        mask_apply_at_backbuffer(self, n, rtvs, dsv);
+
+        if (was_on_atlas && !g_ls.phase_on_atlas) {
+            g_ls.resolve_window = 4;
+            // (pass-end cast retired: the phase exit is NOT a per-cascade
+            // boundary - it fires ~1.3x/frame. Casting now happens at the
+            // resolves, the true per-cascade cadence, with the stashed
+            // world-relative map.)
+        }
+
+        mask_classify_rt(n, rtvs);
     }
 
     g_orig_omset_rendertargets(self, n, rtvs, dsv);
@@ -2927,6 +6641,7 @@ static void STDMETHODCALLTYPE hooked_omset_rts_and_uavs(ID3D11DeviceContext* sel
         // the flag go stale (n == KEEP leaves the current bindings alone).
         g_ro.dsv_main = dsv && g_main_depth_identity &&
                         reorder_dsv_identity(dsv) == g_main_depth_identity;
+        shadow_track_targets(self, dsv, g_ro.dsv_main, n, rtvs);
     }
 
     g_orig_omset_rts_and_uavs(self, n, rtvs, dsv, uav_start, n_uavs, uavs, counts);
@@ -2948,6 +6663,17 @@ static void STDMETHODCALLTYPE hooked_clear_depthstencil(ID3D11DeviceContext* sel
             g_ro.cycle_vp_valid = false;
             g_ro.trig_vp_valid = false;
             g_ro.engine_proj_valid = false;
+            shadow_close_cycle();   // frame boundary: fold the recon cycle into the stats
+            shadow_live_frame_reset();
+            shadow_view_prewarm();   // lock can exist before the first box does
+            g_mask_cast_fired = false;   // new frame: one analytic pass allowed
+            g_mask_cast_arm = false;   // don't arm at the boundary: this frame's gated
+                                    // capture hasn't run yet, so the fire would use
+                                    // the PREVIOUS frame's depth snapshot - on
+                                    // partitioned look-down frames near the box that
+                                    // stale close-range depth MIN-darkened the whole
+                                    // screen (the overcast). The capture arms instead.
+            g_ls.view_published_this_frame = false;
 
             // Latch this frame's matrices NOW, in lockstep with the engine's
             // own frame-setup snapshot (see the cycle_pv note above). On a
@@ -2986,6 +6712,7 @@ inline void ensure_reorder_hook() {
     struct HookSpec { int slot; void* detour; void** original; };
 
     const HookSpec specs[] = {
+        { KH_VT_PSSETSHADERRESOURCES, reinterpret_cast<void*>(&hooked_pssetshaderresources),  reinterpret_cast<void**>(&g_orig_pssetshaderresources) },
         { KH_VT_DRAWINDEXED,          reinterpret_cast<void*>(&hooked_draw_indexed),           reinterpret_cast<void**>(&g_orig_draw_indexed) },
         { KH_VT_DRAW,                 reinterpret_cast<void*>(&hooked_draw),                   reinterpret_cast<void**>(&g_orig_draw) },
         { KH_VT_DRAWINDEXEDINSTANCED, reinterpret_cast<void*>(&hooked_draw_indexed_instanced), reinterpret_cast<void**>(&g_orig_draw_indexed_instanced) },
@@ -3060,7 +6787,13 @@ inline bool flush_dispatch_visibility(ID3D11Device* dev, ID3D11DeviceContext* ct
     }
 
     RVExtBridge::ProjectionViewTransform pv = {};
-    if (!RVExtBridge::get_projection_view_transform(pv)) return false;
+    bool _pv_ok;
+
+    {
+        _pv_ok = RVExtBridge::get_projection_view_transform(pv);
+    }
+
+    if (!_pv_ok) return false;
     CSConstantData cbd = {};
     mul_4x4(pv.view, pv.projection, cbd.view_proj);
     cbd.depth_params[0] = pv.projection[2][2];
@@ -3121,6 +6854,13 @@ inline bool flush_dispatch_visibility(ID3D11Device* dev, ID3D11DeviceContext* ct
 // caller (flush_frame). Returns after counting the skip reason if the bound
 // targets are not the main scene's.
 inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
+    // Publish this frame's staged world lighting for the render-thread
+    // consumers (composited-path shading, shadow recon). The graphics lock
+    // is held for all of flush_locked, which PARKS the render thread - the
+    // same invariant the injection relies on for lock-free context use - so
+    // these plain stores can never be observed mid-write.
+    publish_world_lighting();
+
     bool has_objects;
 
     {
@@ -3223,7 +6963,6 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     // Boxes and fullscreen passes are split; fullscreen passes run last, in
     // handle (creation) order so chained effects compose deterministically.
     const float snapshot_now = effect_time_seconds();
-    
     // A single missed injection inside the 500 ms health window used to
     // leave composited boxes undrawn for that frame - the visible blink
     // when a gate transiently rejects during a camera sweep. The flush now
@@ -3483,6 +7222,104 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         cbd.band0[1] = o.band_max;
         cbd.band0[2] = o.band_falloff;
         cbd.band0[3] = o.banded ? 1.0f : 0.0f;
+        fill_lighting_cb(cbd, o);
+        cbd.mask_meta[0] = (g_mask.enable > 0.5f && g_mask.srv) ? 1.0f : 0.0f;
+        cbd.mask_meta[1] = g_mask.channel;
+        cbd.mask_meta[2] = g_mask.invert;
+        cbd.mask_meta[3] = 0.0f;
+
+        if (g_shadow_pair_mode >= 1.5f) {
+            bool band_any = false;
+            // FINEST-FIRST: order slots by near edge ascending, so the
+            // shader's first containing band holds the finest content in
+            // the engine's overlap (crossfade) zones. bandBorder.w encodes
+            // valid + which PHYSICAL texture slot to sample (1 + index).
+            int order[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
+
+            for (int a = 0; a < 7; ++a) {
+                for (int b2 = a + 1; b2 < 8; ++b2) {
+                    const float na = g_ls.band[order[a]].valid ? g_ls.band[order[a]].border[0] : 1e9f;
+                    const float nb = g_ls.band[order[b2]].valid ? g_ls.band[order[b2]].border[0] : 1e9f;
+
+                    if (nb < na) {
+                        const int t = order[a];
+                        order[a] = order[b2];
+                        order[b2] = t;
+                    }
+                }
+            }
+
+            float prev_far = -1e9f;
+
+            for (int b = 0; b < 8; ++b) {
+                const auto& bs = g_ls.band[order[b]];
+                cbd.band_border[b][3] = 0.0f;
+                if (!bs.valid || !bs.srv) continue;
+
+                // twin dedupe: near inside the previous band's range and
+                // far not meaningfully beyond it = a partition duplicate
+                // of the same range; two twins alternate seal content and
+                // the shader's winner flip-flops (the range flicker).
+                if (bs.border[0] < prev_far - 0.5f && bs.border[1] < prev_far * 1.25f + 1.0f) continue;
+                prev_far = bs.border[1];
+                memcpy(cbd.band_mat[b * 3 + 0], bs.sm + 0, 16);
+                memcpy(cbd.band_mat[b * 3 + 1], bs.sm + 4, 16);
+                memcpy(cbd.band_mat[b * 3 + 2], bs.sm + 8, 16);
+                memcpy(cbd.band_view[b * 3 + 0], bs.vcol + 0, 16);
+                memcpy(cbd.band_view[b * 3 + 1], bs.vcol + 4, 16);
+                memcpy(cbd.band_view[b * 3 + 2], bs.vcol + 8, 16);
+                cbd.band_border[b][0] = bs.border[0];
+                cbd.band_border[b][1] = bs.border[1];
+                cbd.band_border[b][2] = bs.border[2];
+                cbd.band_border[b][3] = 1.0f + static_cast<float>(order[b]);
+                band_any = true;
+            }
+
+            if (band_any) cbd.mask_meta[3] = 1.0f;
+
+            // engine-mask depth-gated receive: registration-exact shadows
+            // (units, clouds, everything the engine resolves) on box
+            // surfaces within the depth margin of world geometry.
+
+            // fog occlusion (self-fetched fogParams; RV's height-decay
+            // exponential). Color: the staged ambient tint is the closest
+            // engine-truth horizon approximation available without the
+            // sky pipeline's own constants.
+            if (g_fog_valid && g_fog[0] > 1e-4f) {
+                cbd.fog_params[0] = g_fog[0];
+                cbd.fog_params[1] = g_fog[1];
+                cbd.fog_params[2] = g_fog[2];
+                cbd.fog_params[3] = 1.0f;
+                // RAW scene-lighting units - the same HDR space ApplyLighting
+                // shades the box in. Normalizing to unit peak made the fog
+                // white; on a white box that is invisible by construction
+                // (the red tracer showed for exactly this reason). Horizon
+                // approximation: ambient plus a quarter of the sun term.
+                const float ab = g_amb_brightness > 0.0f ? g_amb_brightness :
+                                 (g_sun_brightness > 0.0f ? g_sun_brightness * 0.8f : 1.0f);
+                const float sb = g_sun_brightness > 0.0f ? g_sun_brightness : 1.0f;
+
+                for (int c = 0; c < 3; ++c) {
+                    // ambient-anchored haze: 0.25*sun made far boxes GLOW
+                    // (sunBrightness 6-9 in HDR units). 0.9*amb + 0.06*sun
+                    // sits at the engine's own horizon level; adjust these
+                    // two constants if box haze drifts from terrain haze.
+                    cbd.fog_color[c] = g_amb_color[c] * ab * 0.9f + g_sun_color[c] * sb * 0.06f;
+                }
+
+                cbd.fog_color[3] = g_ls.cam[1];   // camera altitude (engine Y-up)
+            }
+        }
+        cbd.mask_dims[0] = g_mask.dims[0];
+        cbd.mask_dims[1] = g_mask.dims[1];
+
+        {
+            UINT nvp = 1;
+            D3D11_VIEWPORT vvp = {};
+            ctx->RSGetViewports(&nvp, &vvp);
+            cbd.mask_dims[2] = nvp && vvp.Width > 0 ? vvp.Width : g_mask.dims[0];
+            cbd.mask_dims[3] = nvp && vvp.Height > 0 ? vvp.Height : g_mask.dims[1];
+        }
 
         D3D11_MAPPED_SUBRESOURCE mapped = {};
         if (FAILED(ctx->Map(g_res.constant_buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return false;
@@ -3578,6 +7415,248 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     backup.restore(ctx);
 }
 
+
+// ===========================================================================
+// Game-thread lighting staging + per-object sun-occlusion rays. Both run
+// from flush_frame BEFORE the graphics lock is taken: they are SQF/engine
+// calls and must not extend the render-thread park. The rays use THIS
+// frame's staged direction; publication to the render-thread-visible
+// globals happens inside flush_locked.
+// ===========================================================================
+
+inline void stage_world_lighting() {
+    g_sun_staged_valid = false;
+    bool lit_exists = false;
+
+    {
+        std::lock_guard<std::mutex> g(g_draw_list_mutex);
+
+        for (const auto& kv : g_draw_list) {
+            const RenderObject& o = kv.second;
+
+            if (o.lit && o.visible && !o.fullscreen) {
+                lit_exists = true;
+                break;
+            }
+        }
+    }
+
+    // Live shadow-map capture follows lit objects; the recon keeps the sun
+    // published even without any.
+    g_ls.wanted.store(lit_exists, std::memory_order_relaxed);
+    if (!lit_exists) return;
+
+    try {
+        // Parsed from the raw getLighting array - [color, brightness,
+        // direction, starsVisibility] - rather than through a typed
+        // wrapper, so this file does not depend on the wrapper's field
+        // naming. Compiled once, on this (game) thread. raw_call_sqf_native
+        // only returns what the code hands to setReturnValue (the
+        // g_return_value channel) - the expression's own result is
+        // discarded - so the value must be routed explicitly.
+        static game_value s_compiled_get_lighting;
+
+        if (s_compiled_get_lighting.is_nil()) {
+            s_compiled_get_lighting = sqf::compile("setReturnValue getLighting");
+        }
+
+        // fog, same channel: [fogValue, fogDecay, fogBase]
+        static game_value s_compiled_fog;
+
+        if (s_compiled_fog.is_nil()) {
+            s_compiled_fog = sqf::compile("setReturnValue fogParams");
+        }
+
+        g_fog_staged_valid = false;
+        game_value fr = raw_call_sqf_native(s_compiled_fog);
+
+        if (fr.type_enum() == game_data_type::ARRAY) {
+            auto& fa = fr.to_array();
+
+            if (fa.size() >= 3) {
+                g_fog_staged[0] = static_cast<float>(fa[0]);
+                g_fog_staged[1] = static_cast<float>(fa[1]);
+                g_fog_staged[2] = static_cast<float>(fa[2]);
+                g_fog_staged_valid = true;
+            }
+        }
+
+        game_value r = raw_call_sqf_native(s_compiled_get_lighting);
+        if (r.type_enum() != game_data_type::ARRAY) return;
+        auto& a = r.to_array();
+        if (a.size() < 3) return;
+        if (a[0].type_enum() != game_data_type::ARRAY || a[2].type_enum() != game_data_type::ARRAY) return;
+        auto& col = a[0].to_array();
+        auto& dir = a[2].to_array();
+        if (col.size() < 3 || dir.size() < 3) return;
+
+        float d[3] = { static_cast<float>(dir[0]), static_cast<float>(dir[1]), static_cast<float>(dir[2]) };
+        const float len = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+        if (len < 1e-6f) return;
+        d[0] /= len; d[1] /= len; d[2] /= len;
+
+        // getLighting's direction is the direction the light TRAVELS
+        // (downward during the day). Shading and recon both want the vector
+        // TOWARD the light: flip into the sky-side hemisphere. (The recon's
+        // axis test uses |dot| and is sign-agnostic regardless.)
+        if (d[2] < 0.0f) { d[0] = -d[0]; d[1] = -d[1]; d[2] = -d[2]; }
+
+        g_sun_staged_dir_sqf[0] = d[0];
+        g_sun_staged_dir_sqf[1] = d[1];
+        g_sun_staged_dir_sqf[2] = d[2];
+        // SQF [x, y, z-up] -> engine [x, up, y]
+        g_sun_staged_dir_engine[0] = d[0];
+        g_sun_staged_dir_engine[1] = d[2];
+        g_sun_staged_dir_engine[2] = d[1];
+
+        float c[3] = { static_cast<float>(col[0]), static_cast<float>(col[1]), static_cast<float>(col[2]) };
+        float m = c[0];
+        if (c[1] > m) m = c[1];
+        if (c[2] > m) m = c[2];
+        if (m < 1e-4f) m = 1e-4f;
+        // Max-component normalization: the light modulates the box color's
+        // HUE without changing its magnitude, so a lit box in full sun
+        // keeps the months-stable unlit look (getLighting's raw brightness
+        // is exposure-coupled and would blow the color out; it is kept only
+        // as a diagnostic).
+        g_sun_staged_color[0] = c[0] / m;
+        g_sun_staged_color[1] = c[1] / m;
+        g_sun_staged_color[2] = c[2] / m;
+
+        g_sun_staged_brightness =
+            (a.size() > 1 && a[1].type_enum() == game_data_type::SCALAR) ? static_cast<float>(a[1]) : 0.0f;
+
+        // optional ambient: elem 4 = [r,g,b], elem 5 = brightness
+        if (a.size() > 4 && a[4].type_enum() == game_data_type::ARRAY) {
+            auto& ac = a[4].to_array();
+
+            if (ac.size() >= 3) {
+                float am = static_cast<float>(ac[0]);
+                if (static_cast<float>(ac[1]) > am) am = static_cast<float>(ac[1]);
+                if (static_cast<float>(ac[2]) > am) am = static_cast<float>(ac[2]);
+                if (am < 1e-4f) am = 1e-4f;
+                RenderIntegration::g_amb_staged_color[0] = static_cast<float>(ac[0]) / am;
+                RenderIntegration::g_amb_staged_color[1] = static_cast<float>(ac[1]) / am;
+                RenderIntegration::g_amb_staged_color[2] = static_cast<float>(ac[2]) / am;
+            }
+        }
+
+        if (a.size() > 5 && a[5].type_enum() == game_data_type::SCALAR) {
+            RenderIntegration::g_amb_staged_brightness = static_cast<float>(a[5]);
+            RenderIntegration::g_amb_brightness_staged_flag = true;
+        }
+
+        g_sun_staged_valid = true;
+    } catch (...) {
+        // lighting unavailable this frame: lit objects fall back to unlit
+    }
+}
+
+static constexpr uint32_t KH_SHADOW_RAYS_PER_FRAME = 64;   // engine raycast budget per frame
+static constexpr float    KH_SHADOW_RAY_LENGTH = 2000.0f;  // toward the sun (m)
+static constexpr float    KH_SHADOW_SMOOTH_RATE = 10.0f;   // 1/s; ~100 ms settle across a shadow edge
+
+inline void update_shadow_rays() {
+    if (!g_sun_staged_valid) return;
+
+    struct RayJob {
+        uint32_t handle;
+        float pos[3];
+        float half[3];
+        int   mode;
+        float factor;
+        float update_time;
+    };
+
+    static std::vector<RayJob> jobs;   // game-thread scratch
+    jobs.clear();
+
+    {
+        std::lock_guard<std::mutex> g(g_draw_list_mutex);
+
+        for (const auto& kv : g_draw_list) {
+            const RenderObject& o = kv.second;
+            if (!o.lit || o.fullscreen || !o.visible || o.shadow_mode <= 0) continue;
+            RayJob j;
+            j.handle = kv.first;
+            j.pos[0] = o.pos[0]; j.pos[1] = o.pos[1]; j.pos[2] = o.pos[2];
+            j.half[0] = o.size[0] * 0.5f; j.half[1] = o.size[1] * 0.5f; j.half[2] = o.size[2] * 0.5f;
+            j.mode = o.shadow_mode;
+            j.factor = o.shadow_factor;
+            j.update_time = o.shadow_update_time;
+            jobs.push_back(j);
+        }
+    }
+
+    if (jobs.empty()) return;
+
+    // The rays run WITHOUT the draw-list mutex: checkVisibility is an
+    // engine call, and the injection takes this mutex on the render thread
+    // - holding it across a batch of raycasts would stall a hooked draw.
+    const float now = effect_time_seconds();
+    const object ignore = sqf::obj_null();
+    const float sx = g_sun_staged_dir_sqf[0];
+    const float sy = g_sun_staged_dir_sqf[1];
+    const float sz = g_sun_staged_dir_sqf[2];
+    uint32_t budget = KH_SHADOW_RAYS_PER_FRAME;
+
+    for (auto& j : jobs) {
+        if (budget == 0) break;
+        float acc = 0.0f;
+        uint32_t n = 0;
+
+        auto cast = [&](float ox, float oy, float oz) {
+            if (budget == 0) return;
+            --budget;
+            const vector3 begin(j.pos[0] + ox, j.pos[1] + oy, j.pos[2] + oz);
+
+            const vector3 end(begin.x + sx * KH_SHADOW_RAY_LENGTH,
+                              begin.y + sy * KH_SHADOW_RAY_LENGTH,
+                              begin.z + sz * KH_SHADOW_RAY_LENGTH);
+
+            // "VIEW" so vegetation and view geometry occlude the sun the
+            // way they visually do; returns 0..1 (partial through glass).
+            acc += sqf::check_visibility(ignore, "VIEW", begin, end);
+            ++n;
+        };
+
+        cast(0.0f, 0.0f, 0.0f);
+
+        if (j.mode >= 2) {
+            for (int cx = -1; cx <= 1; cx += 2)
+            for (int cy = -1; cy <= 1; cy += 2)
+            for (int cz = -1; cz <= 1; cz += 2) {
+                cast(j.half[0] * cx, j.half[1] * cy, j.half[2] * cz);
+            }
+        }
+
+        if (n == 0) continue;
+        const float target = acc / static_cast<float>(n);
+        // Exponential settle instead of a hard pop when crossing an edge.
+        float sf = target;
+
+        if (j.update_time >= 0.0f) {
+            const float dt = now - j.update_time;
+            const float alpha = 1.0f - expf(-KH_SHADOW_SMOOTH_RATE * (dt > 0.0f ? dt : 0.0f));
+            sf = j.factor + (target - j.factor) * alpha;
+        }
+
+        j.factor = sf;
+        j.update_time = now;
+    }
+
+    {
+        std::lock_guard<std::mutex> g(g_draw_list_mutex);
+
+        for (const auto& j : jobs) {
+            auto it = g_draw_list.find(j.handle);
+            if (it == g_draw_list.end()) continue;
+            it->second.shadow_factor = j.factor;
+            it->second.shadow_update_time = j.update_time;
+        }
+    }
+}
+
 // Per-frame entry point from the Draw3D EH: checks for work, then acquires
 // the graphics lock with bounded retries - a transiently contended lock is a
 // dropped (effect-less, visibly flickering) frame, so one immediate retry is
@@ -3595,6 +7674,19 @@ inline void flush_frame() {
 
     if (!has_work) return;
     if (!RVExtBridge::is_initialized()) return;
+    // cold_t0: first flush whose draw list holds a composite-eligible box
+    if (g_mask.cold_t0 < 0.0) {
+        std::lock_guard<std::mutex> g(g_draw_list_mutex);
+
+        for (const auto& kv : g_draw_list) {
+            if (kv.second.visible && is_composite_eligible(kv.second)) {
+                g_mask.cold_t0 = static_cast<double>(effect_time_seconds());
+                break;
+            }
+        }
+    }
+    stage_world_lighting();   // game thread: getLighting -> staged sun state (pre-lock)
+    update_shadow_rays();     // game thread: per-object sun-occlusion rays (pre-lock)
     ensure_reorder_hook();   // cheap early-out once installed; refreshes the tracked context
     ID3D11Device* dev = RVExtBridge::get_d3d_device();
     ID3D11DeviceContext* ctx = RVExtBridge::get_d3d_device_context();
@@ -4110,6 +8202,13 @@ static game_value gpu_visibility_sqf(game_value_parameter args) {
 //              for meanings and defaults; omitted entries take defaults)
 //   band:      [minDist, maxDist, falloff?] - additionally confines the box's
 //              effect to a camera-distance band (maxDist <= 0 = unbounded)
+//   lit:       (index 10) BOOL, or ARRAY [ambient, diffuse, shadowMode] -
+//              shade the box with the world's sun/moon light (getLighting)
+//              and attenuate the direct term by per-object sun-occlusion
+//              rays (checkVisibility). shadowMode: 0 = no rays, 1 = center
+//              ray (default), 2 = center + 8 corners (softer). Defaults
+//              ambient 0.4 / diffuse 0.6, which preserves the unlit look
+//              in full sun.
 // Solid, non-overlay boxes are ALWAYS composited: injected into the frame
 // BEFORE the engine draws its translucents, with depth written, so the
 // engine itself composites smoke/particles against them pixel-perfectly
@@ -4148,7 +8247,9 @@ static game_value add_render3d_sqf(game_value_parameter args) {
 
         const auto_array<game_value>* fx_params = nullptr;
 
-        if (arr.size() > 5) {
+        if (arr.size() > 5 &&
+            !(arr[5].type_enum() == game_data_type::STRING && static_cast<std::string>(arr[5]).empty())) {
+            // empty string = slot skipped (placeholder to reach later args)
             const int e = RenderIntegration::effect_id_from_gv(arr[5]);
             if (e < 0) return game_value("unknown effect");
             obj.effect = e;
@@ -4182,6 +8283,23 @@ static game_value add_render3d_sqf(game_value_parameter args) {
             }
         }
 
+        if (arr.size() > 10) {
+            if (arr[10].type_enum() == game_data_type::BOOL) {
+                obj.lit = static_cast<bool>(arr[10]);
+            } else if (arr[10].type_enum() == game_data_type::ARRAY) {
+                auto& la = arr[10].to_array();
+                obj.lit = true;
+                if (la.size() >= 1) obj.light_ambient = static_cast<float>(la[0]);
+                if (la.size() >= 2) obj.light_diffuse = static_cast<float>(la[1]);
+
+                if (la.size() >= 3) {
+                    const int sm = static_cast<int>(static_cast<float>(la[2]));
+                    if (sm < 0 || sm > 2) return game_value("shadowMode must be 0, 1 or 2");
+                    obj.shadow_mode = sm;
+                }
+            }
+        }
+
         return game_value(static_cast<float>(RenderIntegration::add_render_object(obj)));
     } catch (const std::exception& e) {
         report_error(std::string("addRender3D: ") + e.what());
@@ -4201,7 +8319,10 @@ static game_value add_render3d_sqf(game_value_parameter args) {
 //             moves their world-space center) | "band" [minDist, maxDist,
 //             falloff?] (camera-distance confinement; [] clears it) |
 //             "localsphere" [radius, falloff?] (enables the world-space
-//             sphere mask on any object, centered on its position; [] clears)
+//             sphere mask on any object, centered on its position; [] clears) |
+//             "lit" bool (sun/moon shading with current lighting params) |
+//             "lighting" [ambient, diffuse, shadowMode?] (enables lit and
+//             sets the parameters; [] disables)
 static game_value update_post_fx_sqf(game_value_parameter args) {
     try {
         auto& arr = args.to_array();
@@ -4280,6 +8401,25 @@ static game_value update_post_fx_sqf(game_value_parameter args) {
                 obj.band_min = static_cast<float>(band[0]);
                 obj.band_max = static_cast<float>(band[1]);
                 if (band.size() >= 3) obj.band_falloff = static_cast<float>(band[2]);
+            }
+        } else if (prop == "lit") {
+            obj.lit = static_cast<bool>(arr[2]);
+        } else if (prop == "lighting") {
+            if (arr[2].type_enum() != game_data_type::ARRAY) return game_value(false);
+            auto& la = arr[2].to_array();
+
+            if (la.size() < 1) {
+                obj.lit = false;   // empty array disables the shading
+            } else {
+                obj.lit = true;
+                obj.light_ambient = static_cast<float>(la[0]);
+                if (la.size() >= 2) obj.light_diffuse = static_cast<float>(la[1]);
+
+                if (la.size() >= 3) {
+                    const int sm = static_cast<int>(static_cast<float>(la[2]));
+                    if (sm < 0 || sm > 2) return game_value(false);
+                    obj.shadow_mode = sm;
+                }
             }
         } else {
             return game_value(false);
@@ -4452,6 +8592,13 @@ static game_value get_render_stats_sqf() {
             pair.push_back(game_value(static_cast<float>(v)));
             return game_value(std::move(pair));
         };
+        auto kvf = [](const char* k, float v) {
+            auto_array<game_value> pair;
+            pair.push_back(game_value(k));
+            pair.push_back(game_value(v));
+            return game_value(std::move(pair));
+        };
+
         auto_array<game_value> out;
         out.push_back(kv("flushes", RenderIntegration::g_stats.flushes));
         out.push_back(kv("gatePassed", RenderIntegration::g_stats.gate_passed));
@@ -4477,6 +8624,74 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("uiDriverCtrl", RenderIntegration::g_ui_ctrl_created ? 1 : 0));
         out.push_back(kv("mainSceneW", RenderIntegration::g_main_depth_w));
         out.push_back(kv("mainSceneH", RenderIntegration::g_main_depth_h));
+        out.push_back(kv("shadowLiveLatches", RenderIntegration::g_stats.shadow_live_latches));
+        out.push_back(kv("shadowLiveCascades", RenderIntegration::g_stats.shadow_live_cascades));
+        out.push_back(kv("shadowSrvFailed", RenderIntegration::g_stats.shadow_srv_failed));
+        out.push_back(kv("liveRejOrtho", RenderIntegration::g_stats.live_rej_ortho));
+        out.push_back(kv("liveRejScale", RenderIntegration::g_stats.live_rej_scale));
+        out.push_back(kv("liveRejIso", RenderIntegration::g_stats.live_rej_iso));
+        out.push_back(kv("liveRejRatio", RenderIntegration::g_stats.live_rej_ratio));
+        out.push_back(kv("liveRejTrans", RenderIntegration::g_stats.live_rej_trans));
+        out.push_back(kv("liveAccepts", RenderIntegration::g_stats.live_accepts));
+        out.push_back(kv("shadowAtlasSize", RenderIntegration::g_ls.atlas_size));
+        out.push_back(kvf("sunBestDot44", RenderIntegration::g_sr_best_dot44));
+        out.push_back(kvf("sunBestDot43", RenderIntegration::g_sr_best_dot43));
+        out.push_back(kv("resolveHits", RenderIntegration::g_ls.resolve_hits));
+        out.push_back(kv("resolveDraws", RenderIntegration::g_ls.resolve_draws));
+        out.push_back(kv("resolveCbFound", RenderIntegration::g_ls.resolve_cb_found));
+        out.push_back(kv("bandCaptures", RenderIntegration::g_ls.band_captures));
+        out.push_back(kvf("band0Near", RenderIntegration::g_ls.band[0].valid ? RenderIntegration::g_ls.band[0].border[0] : -1.0f));
+        out.push_back(kvf("band0Far", RenderIntegration::g_ls.band[0].valid ? RenderIntegration::g_ls.band[0].border[1] : -1.0f));
+        out.push_back(kv("band0Copies", RenderIntegration::g_ls.band[0].copies));
+        out.push_back(kvf("band1Near", RenderIntegration::g_ls.band[1].valid ? RenderIntegration::g_ls.band[1].border[0] : -1.0f));
+        out.push_back(kvf("band1Far", RenderIntegration::g_ls.band[1].valid ? RenderIntegration::g_ls.band[1].border[1] : -1.0f));
+        out.push_back(kv("band1Copies", RenderIntegration::g_ls.band[1].copies));
+        out.push_back(kv("compCompiles", RenderIntegration::g_comp_compiles));
+        out.push_back(kv("compFailStreak", RenderIntegration::g_comp_fail_streak));
+        out.push_back(kv("bandBailPv", RenderIntegration::g_ls.band_bail_pv));
+        out.push_back(kv("bandBailOff", RenderIntegration::g_ls.band_bail_off));
+        out.push_back(kv("bandBailBorder", RenderIntegration::g_ls.band_bail_border));
+        out.push_back(kv("bandBailSlot", RenderIntegration::g_ls.band_bail_slot));
+        out.push_back(kv("bandBailTime", RenderIntegration::g_ls.band_bail_time));
+        out.push_back(kvf("bandRejB0", RenderIntegration::g_ls.band_last_reject[0]));
+        out.push_back(kvf("bandRejB1", RenderIntegration::g_ls.band_last_reject[1]));
+        out.push_back(kvf("bandRejB2", RenderIntegration::g_ls.band_last_reject[2]));
+        out.push_back(kvf("bandRejB3", RenderIntegration::g_ls.band_last_reject[3]));
+        out.push_back(kv("castMisses", RenderIntegration::g_ls.cast_misses));
+        out.push_back(kv("resolveGated", RenderIntegration::g_ls.resolve_gated));
+        out.push_back(kv("analyticCasts", RenderIntegration::g_mask.analytic_casts));
+        out.push_back(kv("maskRtvSwaps", RenderIntegration::g_mask.mask_rtv_swaps));
+        out.push_back(kv("castBatches", RenderIntegration::g_mask.cast_batches));
+        out.push_back(kvf("coldFirstInject", RenderIntegration::g_mask.cold_first_inject));
+        out.push_back(kvf("coldFirstCast", RenderIntegration::g_mask.cold_first_cast));
+        out.push_back(kv("coldLeadAmbiguous", RenderIntegration::g_mask.cold_lead_ambiguous));
+        out.push_back(kvf("coldFirstTrigger", RenderIntegration::g_mask.cold_first_trigger));
+        out.push_back(kvf("coldFirstBoxes", RenderIntegration::g_mask.cold_first_stage));
+        out.push_back(kv("coldGNoDsv", RenderIntegration::g_mask.cold_g_nodsv));
+        out.push_back(kv("coldGFloor", RenderIntegration::g_mask.cold_g_floor));
+        out.push_back(kv("coldGSparse", RenderIntegration::g_mask.cold_g_sparse));
+        out.push_back(kv("coldCastMiss", RenderIntegration::g_mask.cold_cast_miss));
+        out.push_back(kvf("lastInjectNear", RenderIntegration::g_mask.last_inject_near));
+        out.push_back(kvf("fogStagedValue", RenderIntegration::g_fog_valid ? RenderIntegration::g_fog[0] : -1.0f));
+        out.push_back(kvf("fogStagedDecay", RenderIntegration::g_fog_valid ? RenderIntegration::g_fog[1] : -1.0f));
+        out.push_back(kvf("fogStagedBase", RenderIntegration::g_fog_valid ? RenderIntegration::g_fog[2] : -1.0f));
+        out.push_back(kv("sunDirDerivedValid", RenderIntegration::g_sun_dir_derived_valid ? 1u : 0u));
+        out.push_back(kvf("sunDirDerivedX", RenderIntegration::g_sun_dir_derived[0]));
+        out.push_back(kvf("sunDirDerivedY", RenderIntegration::g_sun_dir_derived[1]));
+        out.push_back(kvf("sunDirDerivedZ", RenderIntegration::g_sun_dir_derived[2]));
+        out.push_back(kv("maskApplies", RenderIntegration::g_mask.mask_applies));
+        out.push_back(kv("bandBailView", RenderIntegration::g_ls.band_bail_view));
+        out.push_back(kv("viewLocks", RenderIntegration::g_ls.view_locks));
+        out.push_back(kv("viewSrcValid", RenderIntegration::g_ls.view_src_valid ? 1u : 0u));
+        out.push_back(kv("frameViewHits", RenderIntegration::g_ls.frame_view_hits));
+        out.push_back(kvf("viewBestRot", RenderIntegration::g_ls.view_best_rot));
+        out.push_back(kvf("viewBestTrans", RenderIntegration::g_ls.view_best_trans));
+        out.push_back(kv("sealCompletions", RenderIntegration::g_ls.seal_completions));
+        out.push_back(kv("sunDirValid", RenderIntegration::g_sun_valid ? 1 : 0));
+        out.push_back(kvf("sunDirEngineX", RenderIntegration::g_sun_dir_engine[0]));
+        out.push_back(kvf("sunDirEngineY", RenderIntegration::g_sun_dir_engine[1]));
+        out.push_back(kvf("sunDirEngineZ", RenderIntegration::g_sun_dir_engine[2]));
+        out.push_back(kvf("sunBrightness", RenderIntegration::g_sun_brightness));
         return game_value(std::move(out));
     } catch (...) {
         report_error("getRenderStats: unknown exception");

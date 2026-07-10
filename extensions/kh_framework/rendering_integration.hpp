@@ -36,6 +36,7 @@ struct Resources {
                                                         // directly is a bind hazard)
     void*                    comp_depth_identity = nullptr;
     UINT                     comp_depth_w = 0, comp_depth_h = 0, comp_depth_samples = 1;
+    float                    comp_depth_time = -1.0f;   // last snapshot copy (overlay freshness gate)
     ID3D11InputLayout*       input_layout = nullptr;
     ID3D11Buffer*            vertex_buffer = nullptr;    // static unit cube
     ID3D11Buffer*            constant_buffer = nullptr;  // dynamic, per draw (game-thread flush)
@@ -1958,6 +1959,9 @@ inline std::string ensure_composite_shader(ID3D11Device* dev) {
 // hazard; copying while bound follows the same pattern as the production
 // scene-color capture. Returns false when unavailable (the injection then
 // runs without the guard).
+
+inline float effect_time_seconds();   // defined below; the snapshot
+                                      // timestamp at the depth copy needs it
 inline bool ensure_composite_depth(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     ID3D11DepthStencilView* dsv = nullptr;
     ctx->OMGetRenderTargets(0, nullptr, &dsv);
@@ -2028,6 +2032,7 @@ inline bool ensure_composite_depth(ID3D11Device* dev, ID3D11DeviceContext* ctx) 
     }
 
     ctx->CopyResource(g_res.comp_depth_tex, tex);
+    g_res.comp_depth_time = effect_time_seconds();
     tex->Release();
     return true;
 }
@@ -3236,7 +3241,8 @@ struct LiveShadowState {
     // resolve; the fire consumes it, so the mask is re-shadowed after
     // every batch. MIN blending makes repeated writes idempotent.
     bool resolve_seen_since_cast = false;
-    bool view_published_this_frame = false;
+    bool view_published_this_frame = false;   // dual gate for the cast arm
+    float last_publish_rot_err = 1.0f;        // rot agreement of the last accepted publish
     uint64_t band_bail_view = 0;     // no same-frame view latched: reseal skipped
     float band_last_reject[4] = {};  // last border quad rejected by sanity
     // Cast tables: SM/V per RESOLVE ORDER within a frame. The cascade
@@ -4048,6 +4054,7 @@ inline void shadow_view_scan(ID3D11Resource* res, const void* data, uint32_t byt
                     // fallback until relearn - the mid-session received
                     // drift that 'calmed down halfway through').
                     if (e_rot > 0.35f) continue;
+                    g_ls.last_publish_rot_err = e_rot;   // cold fire quality gate
                 }
             }
 
@@ -4437,6 +4444,10 @@ struct ShadowMaskState {
     uint32_t cold_g_sparse = 0;         // cold exits: sparse frame off main depth
     uint32_t cold_cast_miss = 0;        // sticky: last castMisses code seen while the first cast was pending
     float last_inject_near = -1.0f;     // the near plane of the LAST injection (slice forensics)
+    // overlay trisection gauges (per latest flush, not cumulative)
+    uint32_t ov_listed = 0;    // mode-2 solids in the flush's box list
+    uint32_t ov_skipped = 0;   // skipped by the comp_healthy gate (must stay 0 for mode-2)
+    uint32_t ov_drawn = 0;     // Draw() actually issued
     ID3D11BlendState*       min_blend = nullptr;         // out = min(dst, src)
     bool engine_mask_failed = false;
     ID3D11ShaderResourceView* cast_depth = nullptr;   // scene linear depth (AddRef)
@@ -4702,6 +4713,13 @@ inline void resolve_pair_capture(ID3D11DeviceContext* ctx) {
 
                     if (n0 > 1e-10f && n0 < 1.0f && n1 > 1e-10f && n1 < 1.0f) {
                         g_ls.resolve_seen_since_cast = true;   // partition's resolves ran: re-arm the mask write
+
+                        // dual-gated arm: fire only when BOTH this frame's
+                        // capture (here) and this frame's view publish have
+                        // happened. Capture-only arming dragged the shadow a
+                        // frame behind the camera; boundary arming used stale
+                        // depth (the overcast). Field-verified.
+                        if (!g_mask_cast_fired && g_ls.frame_view_valid && g_ls.view_published_this_frame) g_mask_cast_arm = true;
                         // analytic-cast inputs: mask RTV, depth SRV, FOV.
                         // GATED on the proven resolve classifier: the 424
                         // block rides cb13 across the whole postprocess
@@ -4711,7 +4729,6 @@ inline void resolve_pair_capture(ID3D11DeviceContext* ctx) {
                         // (black clouds, flickering exposure, no visible
                         // cast). rt_is_resolve identified candidate 0 in
                         // the mask-mode field test; trust it.
-                        if (!g_mask_cast_fired && g_ls.frame_view_valid && g_ls.view_published_this_frame) g_mask_cast_arm = true;
                         if (g_mask.rt_is_resolve) {
                         if (nf >= 180) {
                             memcpy(g_mask.cast_fov, f + 176, sizeof(g_mask.cast_fov));
@@ -5215,6 +5232,15 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
     if (!g_mask.cast_fov_valid) { g_ls.cast_misses = 42; return; }
     if (g_mask.engine_mask_failed) { g_ls.cast_misses = 43; return; }
     if (!g_ls.frame_view_valid) { g_ls.cast_misses = 5; return; }
+
+    // cold view-quality gate: within 2 s of the first box, require TIGHT
+    // rot agreement (0.05) before firing - the 0.35 family filter can
+    // pass a still-settling view at spawn, and a ~20-degree-off view
+    // reconstructs badly enough to MIN-darken the screen briefly (the
+    // short cold overcast). Steady state is unaffected.
+    if (g_mask.cold_t0 >= 0.0 &&
+        static_cast<double>(effect_time_seconds()) - g_mask.cold_t0 < 2.0 &&
+        g_ls.last_publish_rot_err > 0.05f) { g_ls.cast_misses = 51; return; }
     if (!g_mask.engine_mask_rtv) { g_ls.cast_misses = 61; return; }   // captured at the gated resolve sweep
     g_ls.cast_misses = 0;
     g_mask_cast_arm = false;
@@ -5302,6 +5328,13 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
     ctx->IAGetInputLayout(&old_il);
     ctx->IAGetPrimitiveTopology(&old_topo);
     ctx->PSGetConstantBuffers(0, 1, &old_cb);
+    ID3D11Buffer* old_vs_cb = nullptr;
+    ctx->VSGetConstantBuffers(0, 1, &old_vs_cb);   // the fire sets VS b0
+    // and never restored it: every engine VERTEX shader after the fire
+    // read our box cbd as its constants - the last-fired box's COLOR
+    // tinted all particles (blue, from the fog array). The dual-gated
+    // arm exposed it by moving the fire later in the frame, past the
+    // engine's last natural VS-b0 rebind before the particle pass.
     ctx->OMGetBlendState(&old_blend, old_bf, &old_bmask);
     ctx->OMGetDepthStencilState(&old_dss, &old_sref);
     ctx->PSGetShaderResources(0, 1, &old_t0);
@@ -5361,10 +5394,12 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
     ctx->IASetInputLayout(old_il);
     ctx->IASetPrimitiveTopology(old_topo);
     ctx->PSSetConstantBuffers(0, 1, &old_cb);
+    ctx->VSSetConstantBuffers(0, 1, &old_vs_cb);
     ctx->OMSetBlendState(old_blend, old_bf, old_bmask);
     ctx->OMSetDepthStencilState(old_dss, old_sref);
     ctx->PSSetShaderResources(0, 1, &old_t0);
     g_ro.in_injection = false;
+    KH_SAFE_RELEASE(old_vs_cb);
 
     for (int r = 0; r < 4; ++r) KH_SAFE_RELEASE(old_rtvs[r]);
 
@@ -5694,7 +5729,11 @@ inline void shadow_view_prewarm() {
     // so camera motion held the 0.05 match just over the line for seconds
     // (coldLock=8 caught it). Family separation is >1; the relative-
     // fingerprint commit rule and the health loop carry the safety.
-    if (best_i < 0 || best_rot >= 0.15f) return;
+    // 0.06: true locks score ~0.00; a STABLE impostor family at ~0.13
+    // beat the double-confirmation twice running (viewLocks=2 with
+    // viewBestRot=0.132 - the recurring cold drift). The injection-time
+    // argmin remains the backstop if truth scores poorly at first.
+    if (best_i < 0 || best_rot >= 0.03f) return;   // impostors measured at 0.048 and 0.132; truth scores ~0.00
     const float* m = g_ls.vc_ring[best_i].m;
     float tmag = 0.0f;
 
@@ -5837,21 +5876,14 @@ inline void inject_composited_boxes(ID3D11DeviceContext* ctx) {
         pv.projection[3][2] = g_ro.engine_m32;
     }
 
-    {
-        // forensics only. The abnormal-near handoff is DEAD: near = 10 is
-        // this scene's CHRONIC normal (partition-far latch on most
-        // frames; the box is fine there - the near only bites when box
-        // fragments come within ~10 m of the camera, the extreme
-        // look-up). The >1 m threshold rejected 96% of ALL frames,
-        // resurrected the author-alternation flicker, and the fallback
-        // sliced identically anyway (the bridge projection is ALSO the
-        // partition's on those frames - no authorship choice escapes a
-        // near plane both paths inherit). See CONTINUATION.md for the
-        // real design options.
-        const float m22n = pv.projection[2][2];
-        const float m32n = pv.projection[3][2];
-        g_mask.last_inject_near = fabsf(m22n) > 1e-9f ? (-m32n / m22n) : -1.0f;
-    }
+    // near = 10 is this scene's CHRONIC normal (partition-far latch);
+    // it only bites when box fragments come within ~near of the camera
+    // (the look-up slice - open design item, see CONTINUATION.md).
+    // Forensics only; the near-draw attempt was reverted after causing
+    // see-through on ordinary-near frames.
+    const float inject_near = fabsf(pv.projection[2][2]) > 1e-9f
+                            ? (-pv.projection[3][2] / pv.projection[2][2]) : -1.0f;
+    g_mask.last_inject_near = inject_near;
 
     float view_proj[4][4];
     mul_4x4(pv.view, pv.projection, view_proj);
@@ -6667,12 +6699,13 @@ static void STDMETHODCALLTYPE hooked_clear_depthstencil(ID3D11DeviceContext* sel
             shadow_live_frame_reset();
             shadow_view_prewarm();   // lock can exist before the first box does
             g_mask_cast_fired = false;   // new frame: one analytic pass allowed
-            g_mask_cast_arm = false;   // don't arm at the boundary: this frame's gated
-                                    // capture hasn't run yet, so the fire would use
-                                    // the PREVIOUS frame's depth snapshot - on
-                                    // partitioned look-down frames near the box that
-                                    // stale close-range depth MIN-darkened the whole
-                                    // screen (the overcast). The capture arms instead.
+            g_mask_cast_arm = false;   // don't arm at the boundary: this frame's
+                                       // gated capture hasn't run yet, so the fire
+                                       // would use the PREVIOUS frame's depth
+                                       // snapshot - on partitioned look-down frames
+                                       // near the box that stale close-range depth
+                                       // MIN-darkened the screen (the overcast).
+                                       // The capture arms instead (dual-gated).
             g_ls.view_published_this_frame = false;
 
             // Latch this frame's matrices NOW, in lockstep with the engine's
@@ -7082,7 +7115,17 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
     for (const auto& o : boxes) {
         if (o.effect > 0) any_effect = true;
-        if (needs_depth(o)) any_depth_fx = true;
+
+        // overlay boxes (mode 2, no hardware depth test) occlude via the
+        // shader guard, which needs REAL depth: a solid overlay box must
+        // keep the depth machinery alive even with no effects present
+        // (with both dormant, t0 read null -> sceneZ 0 -> the zero-margin
+        // guard discarded every fragment: the box despawned once the
+        // engine's stale t0 leftovers drifted to zero).
+        if (needs_depth(o) || (o.effect == 0 && o.mode == DepthMode::Off)) {
+            any_effect = true;
+            any_depth_fx = true;
+        }
     }
 
     for (const auto& f : fullscreen) if (needs_depth(f.second)) any_depth_fx = true;
@@ -7198,6 +7241,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             cbd.fx0[0] = cam[0];
             cbd.fx0[1] = cam[1];
             cbd.fx0[2] = cam[2];
+
         }
 
         cbd.fx_meta[0] = static_cast<float>(o.effect);
@@ -7208,6 +7252,42 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         cbd.depth_params[1] = pv.projection[3][2];
         cbd.depth_params[2] = vp_min_d;
         cbd.depth_params[3] = vp_max_d;
+
+        // SOLID BOXES: align the guard's inputs to the INJECTION's
+        // field-proven fill, VERBATIM - reconstruction coefficients from
+        // the MEASURED engine projection (the bridge's convention fed
+        // the guard wrong sceneZ), the SCENE's depth-encode range (the
+        // snapshot was written under it; the flush-time viewport range
+        // was not it), the SNAPSHOT's pixel dims (the earlier override
+        // sat above the general fx_meta fill and was silently
+        // overwritten - LoadDepthC scaled by screen dims read out of
+        // bounds), and the injection's own guard margin constants.
+        // Without a fresh snapshot: guard stands down. Unoccluded,
+        // never invisible.
+        if (o.effect == 0) {
+            const bool snap_fresh = g_res.comp_depth_srv &&
+                                    g_res.comp_depth_time >= 0.0f &&
+                                    now - g_res.comp_depth_time < 0.5f;
+
+            if (snap_fresh) {
+                const bool measured = g_ro.engine_proj_valid;
+
+                if (measured) {
+                    cbd.depth_params[0] = g_ro.engine_m22;
+                    cbd.depth_params[1] = g_ro.engine_m32;
+                }
+
+                cbd.depth_params[2] = g_ro.trig_vp_valid ? g_ro.trig_vp_min : g_scene_vp_min_d;
+                cbd.depth_params[3] = g_ro.trig_vp_valid ? g_ro.trig_vp_max : g_scene_vp_max_d;
+                cbd.fx_meta[2] = static_cast<float>(g_res.comp_depth_w);
+                cbd.fx_meta[3] = static_cast<float>(g_res.comp_depth_h);
+                cbd.fx1[0] = measured ? KH_COMPOSITE_GUARD_BASE_MEASURED : KH_COMPOSITE_GUARD_BASE;
+                cbd.fx1[1] = measured ? KH_COMPOSITE_GUARD_REL_MEASURED : KH_COMPOSITE_GUARD_REL;
+            } else {
+                cbd.fx1[0] = 1e9f;
+                cbd.fx1[1] = 0.0f;
+            }
+        }
         cbd.local0[0] = o.pos[0];
         cbd.local0[1] = o.pos[2];   // SQF [x,y,zASL] -> engine [x,zASL,y]
         cbd.local0[2] = o.pos[1];
@@ -7330,8 +7410,22 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
     // --- Box pass ---
     for (const auto& o : boxes) {
-        if (!upload_cb(o, false)) continue;
+        const bool ov = (o.effect == 0 && o.mode == DepthMode::Off);
+        if (ov) g_mask.ov_listed++;      // reached the draw loop
+        if (!upload_cb(o, false)) { if (ov) g_mask.ov_skipped++; continue; }
+        if (ov) g_mask.ov_drawn++;       // Draw() will be issued below
         ctx->PSSetShader(o.effect > 0 ? g_res.ps_effect : g_res.ps, nullptr, 0);
+
+        // PSComposite reads depth at t0; the flush's default pair puts
+        // scene color there (for effect shaders). EVERY solid box swaps
+        // the composite path's PROVEN depth snapshot into t0 for its
+        // draw; the pair returns for effect boxes.
+        if (o.effect == 0 && g_res.comp_depth_srv) {
+            ctx->PSSetShaderResources(0, 1, &g_res.comp_depth_srv);
+        } else {
+            ctx->PSSetShaderResources(0, 2, ps_srvs);
+        }
+
         ctx->OMSetBlendState(g_res.blend_modes[o.blend_mode], bf, 0xFFFFFFFF);
 
         ID3D11DepthStencilState* dss =
@@ -7685,6 +7779,7 @@ inline void flush_frame() {
             }
         }
     }
+    g_mask.ov_listed = g_mask.ov_skipped = g_mask.ov_drawn = 0;
     stage_world_lighting();   // game thread: getLighting -> staged sun state (pre-lock)
     update_shadow_rays();     // game thread: per-object sun-occlusion rays (pre-lock)
     ensure_reorder_hook();   // cheap early-out once installed; refreshes the tracked context
@@ -8672,6 +8767,9 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("coldGSparse", RenderIntegration::g_mask.cold_g_sparse));
         out.push_back(kv("coldCastMiss", RenderIntegration::g_mask.cold_cast_miss));
         out.push_back(kvf("lastInjectNear", RenderIntegration::g_mask.last_inject_near));
+        out.push_back(kv("ovListed", RenderIntegration::g_mask.ov_listed));
+        out.push_back(kv("ovSkipped", RenderIntegration::g_mask.ov_skipped));
+        out.push_back(kv("ovDrawn", RenderIntegration::g_mask.ov_drawn));
         out.push_back(kvf("fogStagedValue", RenderIntegration::g_fog_valid ? RenderIntegration::g_fog[0] : -1.0f));
         out.push_back(kvf("fogStagedDecay", RenderIntegration::g_fog_valid ? RenderIntegration::g_fog[1] : -1.0f));
         out.push_back(kvf("fogStagedBase", RenderIntegration::g_fog_valid ? RenderIntegration::g_fog[2] : -1.0f));

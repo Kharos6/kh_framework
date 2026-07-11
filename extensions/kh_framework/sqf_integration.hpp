@@ -153,6 +153,7 @@ static registered_sqf_function _sqf_remove_render_handler_scalar;
 static registered_sqf_function _sqf_queue_visibility_array;
 static registered_sqf_function _sqf_get_visibility_results;
 static registered_sqf_function _sqf_add_render3d_array;
+static registered_sqf_function _sqf_update_render3d_array;
 static registered_sqf_function _sqf_update_post_fx_array;
 static registered_sqf_function _sqf_add_postfx_array;
 static registered_sqf_function _sqf_add_local_postfx_array;
@@ -6971,7 +6972,7 @@ static void initialize_sqf_integration() {
         game_data_type::ARRAY
     );
 
-_sqf_sample_scene_depth_array = intercept::client::host::register_sqf_command(
+    _sqf_sample_scene_depth_array = intercept::client::host::register_sqf_command(
         "sampleSceneDepth",
         "Read the engine depth buffer at screen position [u, v] (0..1, top-left origin) via compute shader. Returns [sceneDistanceMeters, rawDepth] or a status string. Call from Draw3D.",
         userFunctionWrapper<sample_scene_depth_sqf>,
@@ -6989,7 +6990,7 @@ _sqf_sample_scene_depth_array = intercept::client::host::register_sqf_command(
 
     _sqf_remove_render_handler_scalar = intercept::client::host::register_sqf_command(
         "removeRenderHandler",
-        "Remove an effect or persistent 3D object by handle. Pass -1 to clear all. Returns BOOL.",
+        "Remove an effect or persistent 3D mesh object by handle. Pass -1 to clear all. Returns BOOL.",
         userFunctionWrapper<remove_render_handler_sqf>,
         game_data_type::BOOL,
         game_data_type::SCALAR
@@ -7012,15 +7013,23 @@ _sqf_sample_scene_depth_array = intercept::client::host::register_sqf_command(
 
     _sqf_add_render3d_array = intercept::client::host::register_sqf_command(
         "addRender3D",
-        "Add a persistent 3D box drawn every frame until removed. [[x,y,zASL], size, [r,g,b,a]?, mode?, sceneRead?, effect?, params?, band?, blend?, duration?, lit?]; size: number or [x,y,z] per-axis edge lengths; mode: 0=depth test (default), 1=test+write, 2=overlay; effect (string/scalar): 'invert','colorgrade','vignette','chromatic','grain','sharpen','blur','bloom','distortion','outline','pulse','halation','fog','lensflare','anamorphic','sunflare','glitch'; band [minDist,maxDist,falloff?]; blend: 'normal','additive','multiply','screen','lighten','darken'; duration: ARRAY or SCALAR (default 0), optionally [fadein,duration,fadeout]; lit: BOOL or [ambient, diffuse, shadowMode] - true enables the full shadow system: sun/moon shading from getLighting (fetched internally), per-pixel received world shadows (band-captured cascade atlas, deferred same-frame view), and an analytic cast shadow written into the engine's own shadow mask (MIN-blended, colored by the engine's lighting pass exactly like native shadows). shadowMode: 0 = no occlusion rays, 1 = center ray (default), 2 = center + 8 corners. Everything is automatic: no shadow commands, tuning, or per-frame calls exist or are needed. Solid non-overlay boxes are always composited: injected into the frame BEFORE the engine's translucent passes with depth written, so the engine itself composites smoke and particles against them pixel-perfectly (falls back to the post-scene flush automatically if the draw hook is unavailable). Callable from any context. Returns SCALAR handle or STRING error.",
+        "Add a persistent 3D mesh drawn every frame until removed. [[x,y,zASL], size, [r,g,b,a]?, mode?, sceneRead?, effect?, params?, band?, blend?, duration?, lit?, mesh?]; size: number or [x,y,z] per-axis extents; mode: 0=depth test (default), 1=test+write, 2=overlay; effect (string/scalar): 'invert','colorgrade','vignette','chromatic','grain','sharpen','blur','bloom','distortion','outline','pulse','halation','fog','lensflare','anamorphic','sunflare','glitch'; band [minDist,maxDist,falloff?]; blend: 'normal','additive','multiply','screen','lighten','darken'; duration: ARRAY or SCALAR (default 0), optionally [fadein,duration,fadeout]; lit: BOOL or [ambient, diffuse, shadowMode] - true enables the full shadow system: sun/moon shading on the mesh's own per-vertex normals, per-pixel received world shadows (band-captured cascade atlas), per-pixel SELF-shadowing from a private sun-depth map (concave meshes shade their own faces), and a MESH-SHAPED cast shadow written into the engine's own shadow mask (MIN-blended, colored by the engine's lighting pass exactly like native shadows). shadowMode: 0 = no occlusion rays, 1 = single ray (default), 2 = the mesh's full sample-point set. mesh (index 11): STRING or SCALAR - 'box'/'cube' (0, default) or 'steps'/'test' (1, a concave test staircase); mesh local space is normalized to [-0.5,0.5]^3 and scaled per axis by size. Everything is automatic: no shadow commands, tuning, or per-frame calls exist or are needed. Solid non-overlay meshes are always composited: injected into the frame BEFORE the engine's translucent passes with depth written, so the engine itself composites smoke and particles against them pixel-perfectly (falls back to the post-scene flush automatically if the draw hook is unavailable). Callable from any context. Manage with updateRender3D / removeRenderHandler. Returns SCALAR handle or STRING error.",
         userFunctionWrapper<add_render3d_sqf>,
         game_data_type::ANY,
         game_data_type::ARRAY
     );
 
+    _sqf_update_render3d_array = intercept::client::host::register_sqf_command(
+        "updateRender3D",
+        "Update a persistent 3D mesh object (addRender3D handles ONLY; fullscreen passes belong to updatePostFX): [handle, property, value]. Properties: 'position' [x,y,zASL], 'size' number|[x,y,z], 'mesh' string/scalar ('box'/'cube' 0, 'steps'/'test' 1), 'color' [r,g,b,a], 'mode' 0..2, 'visible' bool, 'sceneread' bool, 'effect' string/scalar, 'params' array, 'blend' string, 'band' [minDist,maxDist,falloff?] ([] clears), 'lit' bool or [ambient, diffuse, shadowMode?] ('lighting' accepted as alias), 'duration' number or [fadein,duration,fadeout]. Returns BOOL (false for unknown handles, fullscreen handles, unknown properties, or invalid values).",
+        userFunctionWrapper<update_render3d_sqf>,
+        game_data_type::BOOL,
+        game_data_type::ARRAY
+    );
+
     _sqf_update_post_fx_array = intercept::client::host::register_sqf_command(
         "updatePostFX",
-        "Update a persistent 3D object or post-processing pass: [handle, property, value]. Properties: 'position' [x,y,zASL], 'size' number|[x,y,z], 'color' [r,g,b,a], 'mode' 0..2, 'visible' bool, 'effect' string/scalar, 'params' array, 'ui' bool, 'radius' number|[x,y,z], 'falloff' scalar, 'shape' 'sphere'|'cube', 'blend' 'normal'|'additive'|'multiply'|'screen'|'lighten'|'darken', 'band' [minDist,maxDist,falloff?] ([] clears), 'localsphere' [radius,falloff?] ([] clears), 'sceneread' bool, 'lit' bool or [ambient, diffuse, shadowMode?] (toggles the shadow system per object), 'duration' number or [fadein,duration,fadeout]. Returns BOOL.",
+        "Update a fullscreen post-processing pass (addPostFX / addLocalPostFX handles ONLY; 3D mesh objects belong to updateRender3D): [handle, property, value]. Properties: 'effect' string/scalar (fullscreen effects only), 'params' array, 'color' [r,g,b,a], 'blend' string, 'band' [minDist,maxDist,falloff?] ([] clears), 'visible' bool, 'ui' bool (post-tonemap phase over the composited frame), 'duration' number or [fadein,duration,fadeout], 'position' [x,y,zASL] (localized volume center), 'radius' number|[x,y,z], 'falloff' scalar, 'shape' 'sphere'|'cube', 'localsphere' [radius,falloff?] ([] clears). Returns BOOL (false for unknown handles, 3D-object handles, unknown properties, or invalid values).",
         userFunctionWrapper<update_post_fx_sqf>,
         game_data_type::BOOL,
         game_data_type::ARRAY
@@ -7044,7 +7053,7 @@ _sqf_sample_scene_depth_array = intercept::client::host::register_sqf_command(
 
     _sqf_get_render_stats = intercept::client::host::register_sqf_command(
         "getRenderStats",
-        "Render health counters (cumulative): [[name, value], ...]. Composite path: flushes, gatePassed, compositeInjections (should track flushes), compositeBoxes, compositeSkips, compositeAmbiguous, compositeProjLock, compositeRearms, compositeRejSpan, compositeRejFloor. Shadow receive: shadowLiveLatches, shadowLiveCascades, bandCaptures, band0/1 Near/Far/Copies, sealCompletions (healthy = equals bandCaptures), viewLocks, viewSrcValid, frameViewHits, resolveHits. Shadow cast: analyticCasts (healthy = roughly flushes, more on depth-partitioned frames), castMisses (0 = firing; nonzero names the first failed guard). Lighting: sunDirValid, sunDirEngine*, sunBrightness. A skipped flush is a frame rendered without effects (flicker).",
+        "Render health counters (cumulative): [[name, value], ...]. Composite path: flushes, gatePassed, compositeInjections (should track flushes), compositeMeshes, compositeSkips, compositeAmbiguous, compositeProjLock, compositeRearms, compositeRejSpan, compositeRejFloor. Sun-depth map (mesh-shaped cast + self-shadowing): sunDepthPasses (healthy = roughly flushes while meshes exist), sunDepthCasters. Shadow receive: shadowLiveLatches, shadowLiveCascades, bandCaptures, band0/1 Near/Far/Copies, sealCompletions (healthy = equals bandCaptures), viewLocks, viewSrcValid, frameViewHits, resolveHits. Shadow cast: analyticCasts (one per fire on the sun-map path, one per caster on the slab fallback), castMisses (0 = firing; nonzero names the first failed guard). Cold chain: coldFirstStaged, coldFirstTrigger, coldFirstInject, coldFirstCast, coldGNoDsv, coldGFloor, coldGTid, coldPubRejects (render-thread-identification bails while cold). Lighting: sunDirValid, sunDirEngine*, sunBrightness. A skipped flush is a frame rendered without effects (flicker).",
         userFunctionWrapper<get_render_stats_sqf>,
         game_data_type::ARRAY
     );

@@ -149,7 +149,7 @@ static registered_sqf_function _sqf_process_cba_array_event;
 static registered_sqf_function _sqf_process_cba_code_event;
 static registered_sqf_function _sqf_sample_scene_depth_array;
 static registered_sqf_function _sqf_gpu_visibility_array;
-static registered_sqf_function _sqf_remove_render_handler_scalar;
+static registered_sqf_function _sqf_remove_render_handler_string;
 static registered_sqf_function _sqf_queue_visibility_array;
 static registered_sqf_function _sqf_get_visibility_results;
 static registered_sqf_function _sqf_add_render3d_array;
@@ -6988,12 +6988,12 @@ static void initialize_sqf_integration() {
         game_data_type::ARRAY
     );
 
-    _sqf_remove_render_handler_scalar = intercept::client::host::register_sqf_command(
+    _sqf_remove_render_handler_string = intercept::client::host::register_sqf_command(
         "removeRenderHandler",
-        "Remove an effect or persistent 3D mesh object by handle. Pass -1 to clear all. Returns BOOL.",
+        "Remove a mesh or post-processing pass by its STRING handle. Pass \"\" or \"all\" to clear everything. Returns BOOL (false for unknown handles).",
         userFunctionWrapper<remove_render_handler_sqf>,
         game_data_type::BOOL,
-        game_data_type::SCALAR
+        game_data_type::STRING
     );
 
     _sqf_queue_visibility_array = intercept::client::host::register_sqf_command(
@@ -7013,7 +7013,7 @@ static void initialize_sqf_integration() {
 
     _sqf_add_render3d_array = intercept::client::host::register_sqf_command(
         "addRender3D",
-        "Add a persistent 3D mesh drawn every frame until removed. [[x,y,zASL], size, [r,g,b,a]?, mode?, sceneRead?, effect?, params?, band?, blend?, duration?, lit?, mesh?]; size: number or [x,y,z] per-axis extents; mode: 0=depth test (default), 1=test+write, 2=overlay; effect (string/scalar): 'invert','colorgrade','vignette','chromatic','grain','sharpen','blur','bloom','distortion','outline','pulse','halation','fog','lensflare','anamorphic','sunflare','glitch'; band [minDist,maxDist,falloff?]; blend: 'normal','additive','multiply','screen','lighten','darken'; duration: ARRAY or SCALAR (default 0), optionally [fadein,duration,fadeout]; lit: BOOL or [ambient, diffuse, shadowMode] - true enables the full shadow system: sun/moon shading on the mesh's own per-vertex normals, per-pixel received world shadows (band-captured cascade atlas), per-pixel SELF-shadowing from a private sun-depth map (concave meshes shade their own faces), and a MESH-SHAPED cast shadow written into the engine's own shadow mask (MIN-blended, colored by the engine's lighting pass exactly like native shadows). shadowMode: 0 = no occlusion rays, 1 = single ray (default), 2 = the mesh's full sample-point set. mesh (index 11): STRING or SCALAR - 'box'/'cube' (0, default) or 'steps'/'test' (1, a concave test staircase); mesh local space is normalized to [-0.5,0.5]^3 and scaled per axis by size; farvis (index 12): BOOL (default false) - keep the mesh visible beyond max view distance (clip z is clamped just inside the far plane; nearer world geometry still occludes and engine fog still applies). Everything is automatic: no shadow commands, tuning, or per-frame calls exist or are needed. Solid non-overlay meshes are always composited: injected into the frame BEFORE the engine's translucent passes with depth written, so the engine itself composites smoke and particles against them pixel-perfectly (falls back to the post-scene flush automatically if the draw hook is unavailable). Callable from any context. Manage with updateRender3D / removeRenderHandler. Returns STRING handle (always prefixed 'khr_') or STRING error.",
+        "Add a persistent 3D mesh drawn every frame until removed. [[x,y,zASL], size, [r,g,b,a]?, mode?, sceneRead?, effect?, params?, band?, blend?, duration?, lit?, mesh?]; size: number or [x,y,z] per-axis extents; mode: 0=depth test (default), 1=test+write, 2=overlay; effect (string/scalar): 'invert','colorgrade','vignette','chromatic','grain','sharpen','blur','bloom','distortion','outline','pulse','halation','fog','lensflare','anamorphic','sunflare','glitch'; band [minDist,maxDist,falloff?]; blend: 'normal','additive','multiply','screen','lighten','darken'; duration: ARRAY or SCALAR (default 0), optionally [fadein,duration,fadeout]; lit: BOOL or [ambient, diffuse] - true enables the full shadow system: sun/moon shading on the mesh's own per-vertex normals, per-pixel received world shadows (band-captured cascade atlas), per-pixel SELF-shadowing from a private sun-depth map (concave meshes shade their own faces), and a MESH-SHAPED cast shadow written into the engine's own shadow mask (MIN-blended, colored by the engine's lighting pass exactly like native shadows). mesh (index 11): STRING or SCALAR - 'box'/'cube' (0, default) or 'steps'/'test' (1, a concave test staircase); mesh local space is normalized to [-0.5,0.5]^3 and scaled per axis by size; farvis (index 12): BOOL (default false) - keep the mesh visible beyond max view distance (clip z is clamped just inside the far plane; nearer world geometry still occludes and engine fog still applies). Everything is automatic: no shadow commands, tuning, or per-frame calls exist or are needed. Solid non-overlay meshes are always composited: injected into the frame BEFORE the engine's translucent passes with depth written, so the engine itself composites smoke and particles against them pixel-perfectly (falls back to the post-scene flush automatically if the draw hook is unavailable). Callable from any context. Manage with updateRender3D / removeRenderHandler. Returns STRING handle (always prefixed 'khr_') or STRING error.",
         userFunctionWrapper<add_render3d_sqf>,
         game_data_type::ANY,
         game_data_type::ARRAY
@@ -7021,7 +7021,7 @@ static void initialize_sqf_integration() {
 
     _sqf_update_render3d_array = intercept::client::host::register_sqf_command(
         "updateRender3D",
-        "Update a persistent 3D mesh object (addRender3D handles ONLY; fullscreen passes belong to updatePostFX): [handle, property, value]. Properties: 'position' [x,y,zASL], 'size' number|[x,y,z], 'mesh' string/scalar ('box'/'cube' 0, 'steps'/'test' 1), 'color' [r,g,b,a], 'mode' 0..2, 'visible' bool, 'sceneread' bool, 'effect' string/scalar, 'params' array, 'blend' string, 'band' [minDist,maxDist,falloff?] ([] clears), 'lit' bool or [ambient, diffuse] ('lighting' accepted as alias), 'farvis' bool (visible beyond max view distance), 'duration' number or [fadein,duration,fadeout]. Returns BOOL (false for unknown handles, fullscreen handles, unknown properties, or invalid values).",
+        "Update a persistent 3D mesh object (addRender3D handles ONLY; fullscreen passes belong to updatePostFX, decals to updateDecal3D): [handle, property, value]. Properties: 'position' [x,y,zASL], 'size' number|[x,y,z], 'mesh' string/scalar ('box'/'cube' 0, 'steps'/'test' 1), 'color' [r,g,b,a], 'mode' 0..2, 'visible' bool, 'sceneread' bool, 'effect' string/scalar, 'params' array, 'blend' string, 'band' [minDist,maxDist,falloff?] ([] clears), 'lit' bool or [ambient, diffuse] ('lighting' accepted as alias), 'farvis' bool (visible beyond max view distance), 'duration' number or [fadein,duration,fadeout]. Returns BOOL (false for unknown handles, fullscreen/decal handles, unknown properties, or invalid values).",
         userFunctionWrapper<update_render3d_sqf>,
         game_data_type::BOOL,
         game_data_type::ARRAY

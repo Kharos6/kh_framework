@@ -382,6 +382,13 @@ struct RenderObject {
     float light_ambient = 0.40f;   // base-color fraction kept in full shadow
     float light_diffuse = 0.60f;   // N.L-scaled fraction (ambient + diffuse ~ 1
                                    // preserves the unlit look in full sun)
+    // Far-visibility (opt-in): clamp clip z inside the engine far plane so
+    // the mesh stays drawn beyond max view distance. In-range depth
+    // semantics are untouched - the clamp only engages past the far plane,
+    // where the depth buffer holds nothing but the clear value. Carried to
+    // the shaders through shadowMeta2.x.
+    bool  far_vis = false;
+    uint64_t seq = 0;           // creation order (fullscreen pass chaining)
     DepthMode mode = DepthMode::TestOnly;
     bool  visible = true;
     // Reordered compositing is ALWAYS ON for solid, non-overlay meshes: they
@@ -415,9 +422,22 @@ enum class EffectId : int {
 };
 
 static constexpr int KH_MAX_EFFECT = 17;
-static std::unordered_map<uint32_t, RenderObject> g_draw_list;
+static std::unordered_map<std::string, RenderObject> g_draw_list;
 static std::mutex g_draw_list_mutex;
-static uint32_t g_next_handle = 1;
+
+// STRING UID HANDLES: SQF scalars are 32-bit floats - integer-exact only to
+// 2^24 - so a numeric handle eventually collides with itself in a long
+// process. Handles are opaque strings from the framework's own UID
+// generator, prefixed "khr_" - command errors are plain sentences and never
+// carry the prefix, so callers distinguish success by it. g_next_seq is the
+// CREATION-ORDER key only (fullscreen passes chain by it; string order is
+// lexicographic and useless for that); it never resets, so ordering also
+// survives missions.
+static uint64_t g_next_seq = 0;
+
+inline std::string make_render_uid() {
+    return std::string("khr_") + UIDGenerator::generate();
+}
 
 // ===========================================================================
 // Async visibility query state. Pump runs inside the per-frame flush:
@@ -467,7 +487,6 @@ struct RenderStats {
     uint64_t composite_rej_floor = 0;  // triggers rejected: opaque evidence below the floor
     // --- Shadow-pass recon diagnostics (setShadowRecon; see the recon
     //     section for what each number decides) ---
-    uint64_t shadow_affine44 = 0;                 // affine-shaped 4x4 windows seen (either orientation)
     uint64_t shadow_live_latches = 0;             // live cascade transforms captured (cumulative)
     uint64_t shadow_live_cascades = 0;            // cascade table size in the last completed frame
     uint64_t shadow_srv_failed = 0;               // atlas SRV creation failures
@@ -477,11 +496,6 @@ struct RenderStats {
     uint64_t live_rej_ratio = 0;
     uint64_t live_rej_trans = 0;
     uint64_t live_accepts = 0;
-    uint64_t shadow_copies = 0;                   // fine-copy executions
-    uint64_t commits_large = 0;                   // cycle commits won by a >=512B CB
-    uint64_t commits_small = 0;                   // ... by a smaller CB
-                                                  // arrived after the pending one in a cycle
-    uint64_t sun_distinct_translations_max = 0;   // max distinct candidate translations in one cycle
     // --- Private sun-depth map (mesh-shaped cast + self-shadowing) ---
     uint64_t sun_depth_passes = 0;                // per-frame map renders completed
     uint64_t sun_depth_casters = 0;               // caster draws across all passes
@@ -491,6 +505,14 @@ struct RenderStats {
                                                   // poisoning occurred this session at all
 };
 static RenderStats g_stats;
+
+// getRenderStats is OPT-IN (operator requirement): the FIRST call ARMS the
+// diagnostics - zeroing every pure-diagnostic counter so later dumps are
+// session-scoped from the arm - and returns [["status", "armed"]]; real
+// stats come from the second call on. Functional counters that drive
+// containment (view_locks and its lockWipes pairing, probe hits, streaks)
+// are not touched by the arm; they die only with the mission.
+static std::atomic<bool> g_stats_armed{ false };
 
 // Main-scene identification: the main depth resource is stable across frames;
 // PiP/mirror sub-passes bind a DIFFERENT depth resource. First adoption is
@@ -528,13 +550,13 @@ cbuffer CB : register(b0)
     float4 localParams1; // x = falloff (normalized to mean radius), y = localized flag
     float4 localRadii;   // xyz = mask radii (engine axes)
     float4 bandParams;   // x = band min (m), y = band max (m, <=0 unbounded), z = falloff (m), w = banded flag
-    float4 lighting0;    // x = lit flag, y = sun-occlusion factor (0 shadowed .. 1 lit), z = ambient, w = diffuse
+    float4 lighting0;    // x = lit flag, y = unused, z = ambient, w = diffuse
     float4 lighting1;    // xyz = unit vector TOWARD the sun/moon (engine axes), w = lighting valid flag
     float4 lighting2;    // rgb = light color (max-component normalized), w = shadow-map strength
     float4 shadowMeta;   // x = cascade count, y = depth compare sign, z = bias, w = atlas size (px)
     float4 shadowTiles[8];   // per-cascade atlas rect in UV: x0, y0, x1, y1
     float4 shadowMats[24];   // per-cascade world->atlasUV+depth 4x3: 3 rows of [a, b, c, t]
-    float4 shadowMeta2;      // x reserved (always 0);
+    float4 shadowMeta2;      // x = far-visibility clamp flag (VSMain/VSComposite);
                              // yzw = the table's OWN camera origin (engine axes)
     float4 shadowSrc;        // x = table index sampling the FINE COPY texture (t2), -1 = none;
                              // yzw = (du, dv, dz) correction added to the copy entry's uvz
@@ -572,9 +594,6 @@ cbuffer CB : register(b0)
                                 // located lighting block (last-known lanes between
                                 // confirmations), or (1,1,1) in the sub-second cold
                                 // before the first lock; w = engine-mode flag
-    float4 fogConv;             // RESERVED (append-only): the retired fog
-                                // convergence enable; the verbatim sky-CB
-                                // gradient color replaced the capture
     float4 fogEngine;           // THE ENGINE'S OWN FOG TERMS (read from its
                                 // disassembly, values from the located block):
                                 // x = density scale (lane 41), y = fog end
@@ -763,6 +782,11 @@ VSOut VSMain(VSIn i)
     VSOut o;
     float3 wp = centerSize.xyz + i.pos * sizeAxes.xyz;
     o.pos = mul(float4(wp, 1.0f), viewProj);
+    // Far-visibility clamp (opt-in, shadowMeta2.x): pull clip z just inside
+    // the far plane so max view distance stops hard-clipping the mesh. Past
+    // the far plane the depth buffer holds only the clear value / sky, so
+    // ordering cannot break; the guard compares SV_Position.w, untouched.
+    if (shadowMeta2.x > 0.5f && o.pos.z > o.pos.w * 0.9999f) o.pos.z = o.pos.w * 0.9999f;
     o.wpos = wp;
     // Per-axis scale is non-uniform: normals transform by the inverse
     // scale. (Rotation arrives with the FBX model matrix later; add its
@@ -830,7 +854,7 @@ void GSCascadeSlice(triangle GSSliceIn i[3], inout TriangleStream<GSSliceOut> s)
 Texture2D<float4> sceneDepthTex : register(t0);
 float KhSceneLoad(int2 p) { return sceneDepthTex.Load(int3(p, 0)).x; }
 
-float4 PSMaskCast(VSOut i) : SV_Target
+)HLSL" R"HLSL(float4 PSMaskCast(VSOut i) : SV_Target
 {
     // t0 is the engine's own linearized scene depth, registered against
     // the published view + the sweep's fov/dims (frozen at the frame's
@@ -1296,7 +1320,16 @@ float ShadowBandFactor(float3 wpos)
                     float ang = frac(sin(dot(wpos.xz, float2(12.9898f, 78.233f))) * 43758.5469f) * 6.2831853f;
                     float ca = cos(ang);
                     float sa = sin(ang);
-                    float r = 3.0f;   // engine: 1.3 x cb0[6].y; three texels lands its visual
+                    // ENGINE-EXACT RADIUS (PS-17 disassembly closes the
+                    // last named deviation): 'mul r0.y, l(1.3), cb0[6].y'
+                    // where cb0 = PSCB_NonFrequent and register 6 is
+                    // PSC_SBTSize_invSBTSize - the engine's radius is
+                    // 1.3 x invSBTSize in UV, i.e. 1.3 TEXELS of the very
+                    // atlas these seals copy. This loop works in texel
+                    // space against the same atlas size, so the constant
+                    // transfers directly; the former 3.0 was a by-eye tune
+                    // from before the constant was decoded.
+                    float r = 1.3f;
                     float2 base = float2(u, v) * shadowMeta.w;
                     float acc = 0.0f;
 
@@ -1384,13 +1417,18 @@ VSOutC VSComposite(VSIn i)
     VSOutC o;
     float3 wp = centerSize.xyz + i.pos * sizeAxes.xyz;
     o.pos = mul(float4(wp, 1.0f), viewProj);
+    // Far-visibility clamp (opt-in, shadowMeta2.x): pull clip z just inside
+    // the far plane so max view distance stops hard-clipping the mesh. Past
+    // the far plane the depth buffer holds only the clear value / sky, so
+    // ordering cannot break; the guard compares SV_Position.w, untouched.
+    if (shadowMeta2.x > 0.5f && o.pos.z > o.pos.w * 0.9999f) o.pos.z = o.pos.w * 0.9999f;
     o.wpos = wp;
     // Inverse per-axis scale for the normal (see VSMain).
     o.nrm = normalize(i.nrm / max(sizeAxes.xyz, float3(1e-4f, 1e-4f, 1e-4f)));
     return o;
 }
 
-float4 PSComposite(VSOutC i) : SV_Target
+)HLSL" R"HLSL(float4 PSComposite(VSOutC i) : SV_Target
 {
     // Punch-through guard: fxParams0.xyz = camera (engine space),
     // fxParams1.x = base margin (m), fxParams1.y = relative margin.
@@ -2004,13 +2042,13 @@ struct alignas(16) ConstantData {
     float local1[4];       // x = falloff (normalized to mean radius), y = localized flag
     float local_radii[4];  // xyz = mask radii (engine axes)
     float band0[4];        // x = band min (m), y = band max (m, <=0 unbounded), z = falloff (m), w = banded flag
-    float lighting0[4];    // x = lit flag, y = sun-occlusion factor, z = ambient, w = diffuse
+    float lighting0[4];    // x = lit flag, y = unused, z = ambient, w = diffuse
     float lighting1[4];    // xyz = unit vector TOWARD the light (engine axes), w = valid flag
     float lighting2[4];    // rgb = light color (max-component normalized), w = shadow-map strength
     float shadow_meta[4];      // count, compare sign, bias, atlas size
     float shadow_tiles[8][4];  // per-cascade atlas UV rects
     float shadow_mats[24][4];  // per-cascade 4x3 sampling transforms
-    float shadow_meta2[4];     // x = debug mode
+    float shadow_meta2[4];     // x = far-visibility clamp flag; yzw = live-table camera origin
     float shadow_src[4];       // x = fine-copy entry index or -1
     float shadow_fix2[4];
     float band_mat[24][4];
@@ -2037,7 +2075,6 @@ struct alignas(16) ConstantData {
     // --- appended (engine lighting block); append-only, mirrors lightAmb
     // at the end of the HLSL cbuffer ---
     float light_amb[4];        // rgb = engine ambient (HDR) or (1,1,1) cold; w = engine mode
-    float fog_conv[4];         // RESERVED (append-only): retired convergence enable
     float fog_engine[4];       // x = density scale (blk 41), y = fog end (blk 48),
                                // z = inv ramp range (blk 49), w = valid
     float fog_sky[4];          // sky row 17 gradient points; w = sky probe valid
@@ -3333,6 +3370,11 @@ static std::atomic<void*>    g_reorder_target_ctx{nullptr};      // immediate co
 static std::atomic<uint64_t> g_composite_last_inject_ms{0};
 static std::atomic<uint64_t> g_composite_inject_serial{0};
 
+// Injection bridge-PV memory (formerly function statics; hoisted so the
+// mission-end session destroy can reset them). Render thread only.
+static RVExtBridge::ProjectionViewTransform g_last_pv = {};
+static uint64_t g_last_pv_ms = 0;
+
 inline uint64_t steady_now_ms() {
     return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count());
@@ -3713,15 +3755,18 @@ inline void proj_scan_upload(ID3D11Resource* res, const void* data, uint32_t byt
 // Returns the buffer's byte width when it is a plausibly-sized constant
 // buffer, 0 otherwise.
 inline uint32_t proj_upload_byte_width(ID3D11Resource* res) {
-    ID3D11Buffer* buf = nullptr;
-
-    if (FAILED(res->QueryInterface(__uuidof(ID3D11Buffer), reinterpret_cast<void**>(&buf))) || !buf) {
-        return 0;
-    }
+    // GetType instead of QueryInterface: this runs on EVERY tracked
+    // map/unmap - ~1,600 per frame with lit meshes - and QI adds an
+    // AddRef/Release round trip on top of the lookup. The dimension enum
+    // guarantees the static_cast; GetDesc stays (the width must be truth,
+    // never a cache: a recycled buffer pointer with a stale cached width
+    // would let the scanners read past a smaller mapping).
+    D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+    res->GetType(&dim);
+    if (dim != D3D11_RESOURCE_DIMENSION_BUFFER) return 0;
 
     D3D11_BUFFER_DESC bd = {};
-    buf->GetDesc(&bd);
-    buf->Release();
+    static_cast<ID3D11Buffer*>(res)->GetDesc(&bd);
 
     // 16-float floor RESTORED: a one-session 8-float floor let tiny CBs
     // compete for the pending capture slots and starved the view CB's
@@ -3831,6 +3876,13 @@ static uint64_t g_sun_jump_refused = 0;   // candidate jumps refused by the engi
 // the reported sun bounds the worst-case cast error at 4 deg instead.
 static uint32_t g_sun_derived_samples = 0;   // derivation warm-up meter
 
+// Sun debounce latch (formerly publish_world_lighting statics; hoisted so
+// the mission-end session destroy can reset them). Game thread only.
+static bool  g_pub_valid = false;
+static float g_pub_dir[3] = {};
+static float g_cand_dir[3] = {};
+static int   g_cand_hold = 0;
+
 inline const float* kh_shadow_sun() {
     // The DEBOUNCED published direction, not the raw latch: the sun map
     // and the fire flapping on raw derived was the cast-flicker symptom
@@ -3866,51 +3918,46 @@ inline void publish_world_lighting() {
         // before it is adopted and fires exactly one jump - a real
         // skipTime still snaps promptly, oscillation between two readings
         // adopts neither and the published direction stays put.
-        static bool  s_pub_valid = false;
-        static float s_pub_dir[3] = {};
-        static float s_cand_dir[3] = {};
-        static int   s_cand_hold = 0;
-
-        if (!s_pub_valid) {
-            s_pub_dir[0] = g_sun_dir_derived[0];
-            s_pub_dir[1] = g_sun_dir_derived[1];
-            s_pub_dir[2] = g_sun_dir_derived[2];
-            s_pub_valid = true;
+        if (!g_pub_valid) {
+            g_pub_dir[0] = g_sun_dir_derived[0];
+            g_pub_dir[1] = g_sun_dir_derived[1];
+            g_pub_dir[2] = g_sun_dir_derived[2];
+            g_pub_valid = true;
         } else {
-            const float dp = s_pub_dir[0] * g_sun_dir_derived[0] +
-                             s_pub_dir[1] * g_sun_dir_derived[1] +
-                             s_pub_dir[2] * g_sun_dir_derived[2];
+            const float dp = g_pub_dir[0] * g_sun_dir_derived[0] +
+                             g_pub_dir[1] * g_sun_dir_derived[1] +
+                             g_pub_dir[2] * g_sun_dir_derived[2];
 
             if (dp >= 0.99863f) {
                 // within ~3 deg: glide, no jump machinery
-                s_cand_hold = 0;
-                s_pub_dir[0] += (g_sun_dir_derived[0] - s_pub_dir[0]) * 0.25f;
-                s_pub_dir[1] += (g_sun_dir_derived[1] - s_pub_dir[1]) * 0.25f;
-                s_pub_dir[2] += (g_sun_dir_derived[2] - s_pub_dir[2]) * 0.25f;
-                const float pl = sqrtf(s_pub_dir[0] * s_pub_dir[0] +
-                                       s_pub_dir[1] * s_pub_dir[1] +
-                                       s_pub_dir[2] * s_pub_dir[2]);
+                g_cand_hold = 0;
+                g_pub_dir[0] += (g_sun_dir_derived[0] - g_pub_dir[0]) * 0.25f;
+                g_pub_dir[1] += (g_sun_dir_derived[1] - g_pub_dir[1]) * 0.25f;
+                g_pub_dir[2] += (g_sun_dir_derived[2] - g_pub_dir[2]) * 0.25f;
+                const float pl = sqrtf(g_pub_dir[0] * g_pub_dir[0] +
+                                       g_pub_dir[1] * g_pub_dir[1] +
+                                       g_pub_dir[2] * g_pub_dir[2]);
 
                 if (pl > 1e-6f) {
-                    s_pub_dir[0] /= pl;
-                    s_pub_dir[1] /= pl;
-                    s_pub_dir[2] /= pl;
+                    g_pub_dir[0] /= pl;
+                    g_pub_dir[1] /= pl;
+                    g_pub_dir[2] /= pl;
                 }
             } else {
-                const float dc = s_cand_dir[0] * g_sun_dir_derived[0] +
-                                 s_cand_dir[1] * g_sun_dir_derived[1] +
-                                 s_cand_dir[2] * g_sun_dir_derived[2];
+                const float dc = g_cand_dir[0] * g_sun_dir_derived[0] +
+                                 g_cand_dir[1] * g_sun_dir_derived[1] +
+                                 g_cand_dir[2] * g_sun_dir_derived[2];
 
-                if (s_cand_hold > 0 && dc >= 0.99863f) {
-                    s_cand_hold++;
+                if (g_cand_hold > 0 && dc >= 0.99863f) {
+                    g_cand_hold++;
                 } else {
-                    s_cand_dir[0] = g_sun_dir_derived[0];
-                    s_cand_dir[1] = g_sun_dir_derived[1];
-                    s_cand_dir[2] = g_sun_dir_derived[2];
-                    s_cand_hold = 1;
+                    g_cand_dir[0] = g_sun_dir_derived[0];
+                    g_cand_dir[1] = g_sun_dir_derived[1];
+                    g_cand_dir[2] = g_sun_dir_derived[2];
+                    g_cand_hold = 1;
                 }
 
-                if (s_cand_hold >= 8) {
+                if (g_cand_hold >= 8) {
                     // ENGINE CONFIRMATION (the false-jump lesson: 21
                     // wipes on a static sun, keyed to look direction -
                     // the derivation settles into VIEW-DEPENDENT stable
@@ -3923,29 +3970,29 @@ inline void publish_world_lighting() {
                     bool engine_confirms = true;
 
                     if (g_skysun_ref_valid) {
-                        const float de = g_skysun_ref[0] * s_pub_dir[0] +
-                                         g_skysun_ref[1] * s_pub_dir[1] +
-                                         g_skysun_ref[2] * s_pub_dir[2];
+                        const float de = g_skysun_ref[0] * g_pub_dir[0] +
+                                         g_skysun_ref[1] * g_pub_dir[1] +
+                                         g_skysun_ref[2] * g_pub_dir[2];
                         if (de >= 0.99863f) engine_confirms = false;
                     }
 
                     if (engine_confirms) {
-                        s_pub_dir[0] = s_cand_dir[0];
-                        s_pub_dir[1] = s_cand_dir[1];
-                        s_pub_dir[2] = s_cand_dir[2];
-                        s_cand_hold = 0;
+                        g_pub_dir[0] = g_cand_dir[0];
+                        g_pub_dir[1] = g_cand_dir[1];
+                        g_pub_dir[2] = g_cand_dir[2];
+                        g_cand_hold = 0;
                         g_sun_jump_pending = true;   // exactly one jump per real move
                     } else {
-                        s_cand_hold = 0;
+                        g_cand_hold = 0;
                         g_sun_jump_refused++;
                     }
                 }
             }
         }
 
-        g_sun_dir_engine[0] = s_pub_dir[0];
-        g_sun_dir_engine[1] = s_pub_dir[1];
-        g_sun_dir_engine[2] = s_pub_dir[2];
+        g_sun_dir_engine[0] = g_pub_dir[0];
+        g_sun_dir_engine[1] = g_pub_dir[1];
+        g_sun_dir_engine[2] = g_pub_dir[2];
     }
 
     g_sun_valid = sun_ok;
@@ -4214,26 +4261,6 @@ static CbColorProbe g_sky_probe;
 // bounded, 16 = row14 sane, 32 = row17 EXACT (0.25, 0.75, 3.5)); the
 // best scorer's first 96 floats are mirrored. One dump names the failing
 // condition - or proves no candidate of that size exists in the funnel.
-static uint32_t g_sky_cand_cond = 0;      // best bitmask seen (unlocked scans)
-static uint32_t g_sky_cand_bits = 0;      // popcount of the best
-static uint32_t g_sky_cand_floats = 0;    // its full size
-static uint64_t g_sky_scan_72 = 0;        // nf >= 72 uploads scanned
-static float    g_sky_cand_nb[96] = {};
-
-inline uint32_t locator_sky_score(const float* f, uint32_t nf) {
-    if (nf < 72) return 0;
-    uint32_t m = 0;
-    const float* ray = f + 60;
-    if (ray[0] > 0.0f && ray[1] > 0.0f && ray[2] > 0.0f && ray[2] < 1.0f) m |= 1;
-    if (ray[2] >= ray[0]) m |= 2;
-    const float* grad = f + 68;
-    if (grad[0] >= 0.0f && grad[1] >= grad[0] && grad[2] > grad[1]) m |= 4;
-    if (grad[2] > grad[0] && grad[2] < 32.0f) m |= 8;
-    const float* lay = f + 56;
-    if (fabsf(lay[0]) < 5000.0f && lay[1] >= 0.0f && lay[2] > 0.0f && lay[2] < 0.5f) m |= 16;
-    if (f[68] == 0.25f && f[69] == 0.75f && f[70] == 3.5f) m |= 32;
-    return m;
-}
 
 inline bool locator_sky_anchor(const float* f, uint32_t nf) {
     if (nf < 72) return false;
@@ -4302,6 +4329,15 @@ static uint64_t g_recv_wipes = 0;         // sun-jump boundary wipes of the live
 static uint64_t g_view_relock_forced = 0; // locks dropped by the publish-reject streak
 static uint64_t g_lock_wipes = 0;         // live-table wipes at view-lock adoption
 static uint32_t g_stage_rej_exp = 0;      // rejected: lifetime expired
+static float    g_pub_first = -1.0f;       // cold publish-window epoch (hoisted static; session-reset)
+static ID3D11Resource* g_prewarm_cand_res = nullptr;   // prewarm double-confirmation memory
+static uint32_t g_prewarm_cand_off = 0;
+static ID3D11Resource* g_coldlock_cand_res = nullptr;  // injection cold-adoption double-confirmation memory
+static uint32_t g_coldlock_cand_off = 0;
+static uint64_t g_inj_guard_off = 0;       // injections drawn WITHOUT the punch-through guard
+                                           // (the see-through / overlay correlate for field dumps)
+static uint64_t g_flush_fallback_draws = 0;// composite-eligible meshes drawn on the LATE flush path
+                                           // (injection missed the frame: the other rare-artifact correlate)
 static uint64_t g_skybind_offs_seen = 0;   // slots observed with nonzero offsets
 
 inline void skybind_release() {
@@ -4325,25 +4361,6 @@ inline void skybind_step(ID3D11DeviceContext* ctx) {
         g_skybind_reads++;
         const float* f = static_cast<const float*>(ms.pData);
         const uint32_t nf = g_skybind.bytes[i] / 4;
-
-        if (nf >= 72) {
-            // same near-miss forensics as the upload scan: the best-
-            // scoring readback's contents land in the candidate mirror
-            const uint32_t m = locator_sky_score(f, nf);
-            uint32_t bits = m;
-            bits = bits - ((bits >> 1) & 0x55555555u);
-            bits = (bits & 0x33333333u) + ((bits >> 2) & 0x33333333u);
-            bits = (bits + (bits >> 4)) & 0x0F0F0F0Fu;
-            bits = (bits * 0x01010101u) >> 24;
-
-            if (bits >= g_sky_cand_bits) {
-                g_sky_cand_bits = bits;
-                g_sky_cand_cond = m;
-                g_sky_cand_floats = nf;
-                const uint32_t n96 = nf < 96 ? nf : 96;
-                memcpy(g_sky_cand_nb, f, n96 * sizeof(float));
-            }
-        }
 
         if (nf >= 72 && locator_sky_anchor(f, nf)) {
             g_skybind_hits++;
@@ -4541,6 +4558,8 @@ static bool  g_sun_map_no_local = false;       // casters exist, none within the
                                                // slab fallback must not fire
 static float g_sun_map_vp[16] = {};            // row-vector world -> sun clip
 static float g_sun_map_bias = 0.0f;            // compare bias, normalized depth units
+static uint64_t g_sun_map_hash = 0;            // last rendered input hash (unchanged-input skip)
+static uint64_t g_sun_map_skips = 0;           // passes skipped on identical inputs (perf forensics)
 static float g_sun_map_bounds[6] = {};         // combined caster AABB: center xyz, HALF extents xyz (engine axes)
 // FROZEN FIRE INPUTS: latched at the frame's FIRST fire, replayed by
 // every same-frame re-fire. Re-fires with per-batch inputs produced the
@@ -4569,9 +4588,6 @@ static float g_sun_local_bounds[16][6] = {};   // up to 16 in-map casters: cente
 static int   g_sun_local_count = 0;            // valid entries above (render thread, like the rest)
 
 static bool g_mask_cast_arm = false;
-static uint64_t g_cast_regime_skips = 0;   // casts refused outside the
-                                           // calibrated near regime (the
-                                           // overcast hardening)
 static uint64_t g_cast_frozen_fires = 0;   // frozen-replay fallback fires
 static uint64_t g_rt_resolve_true = 0;     // rt_is_resolve verdicts at the sweep
 static uint64_t g_rt_resolve_false = 0;
@@ -4597,8 +4613,7 @@ inline bool shadow_live_wanted() {
 // exclusive render thread, so plain reads of the published globals are safe.
 inline void fill_lighting_cb(ConstantData& cbd, const RenderObject& o) {
     cbd.lighting0[0] = o.lit ? 1.0f : 0.0f;
-    cbd.lighting0[1] = 1.0f;   // reserved (was the checkVisibility ray factor:
-                               // the per-pixel receive path owns world shadow now)
+    cbd.lighting0[1] = 1.0f;   // unused lane (float4 packing)
     cbd.lighting0[2] = o.light_ambient;
     cbd.lighting0[3] = o.light_diffuse;
     // Direction: the published derived latch, the single source now (the
@@ -4710,7 +4725,7 @@ inline void fill_lighting_cb(ConstantData& cbd, const RenderObject& o) {
     cbd.shadow_meta[1] = g_shadow_map_sign;
     cbd.shadow_meta[2] = g_shadow_map_bias;
     cbd.shadow_meta[3] = static_cast<float>(g_ls.atlas_size);
-    cbd.shadow_meta2[0] = 0.0f;
+    cbd.shadow_meta2[0] = o.far_vis ? 1.0f : 0.0f;   // far-visibility clamp (see far_vis)
     // shadowMeta2.yzw stays zero: each entry's camera origin is folded into
     // its translation below, so the shader's (wpos - meta2.yzw) consumes
     // ABSOLUTE world positions and per-entry staleness cannot misregister.
@@ -4836,10 +4851,6 @@ static ShadowReconState g_sr;   // render thread only
 // depth clear (frame boundary).
 inline void shadow_close_cycle() {
     if (g_sr.candidates_this_cycle > 0) {
-        if (g_sr.trans_count > g_stats.sun_distinct_translations_max) {
-            g_stats.sun_distinct_translations_max = g_sr.trans_count;
-        }
-
         if (g_sr.trans_count > 0) {
             memcpy(g_sr_last_trans, g_sr.trans, sizeof(g_sr_last_trans));
             g_sr_last_trans_count = g_sr.trans_count;
@@ -4901,7 +4912,7 @@ inline float shadow_axis_abs_cos(float ax, float ay, float az) {
 }
 
 // One 16-float window, both 4x4 orientations. Measures as it tests: every
-// affine-SHAPED window bumps shadow_affine44 and pushes its z-axis
+// affine-SHAPED window pushes its z-axis
 // alignment into the best-dot watermark, so a run that finds no candidates
 // still reports how close the closest miss came - the difference between
 // "loosen the tolerance" and "wrong representation entirely".
@@ -4929,7 +4940,6 @@ inline void shadow_try_window(const float* w, bool in_phase) {
     // axis (w[2], w[6], w[10]), translation row (w[12..14]).
     if (proj_near_zero(w[3]) && proj_near_zero(w[7]) && proj_near_zero(w[11]) &&
         fabsf(w[15] - 1.0f) < 1e-4f) {
-        g_stats.shadow_affine44++;
         const float t[3] = { w[12], w[13], w[14] };
         consider(shadow_axis_abs_cos(w[2], w[6], w[10]), t);
     }
@@ -4939,7 +4949,6 @@ inline void shadow_try_window(const float* w, bool in_phase) {
     // (w[8], w[9], w[10]), translation column (w[3], w[7], w[11]).
     if (proj_near_zero(w[12]) && proj_near_zero(w[13]) && proj_near_zero(w[14]) &&
         fabsf(w[15] - 1.0f) < 1e-4f) {
-        g_stats.shadow_affine44++;
         const float t[3] = { w[3], w[7], w[11] };
         consider(shadow_axis_abs_cos(w[8], w[9], w[10]), t);
     }
@@ -5251,6 +5260,13 @@ inline void shadow_view_scan(ID3D11Resource* res, const void* data, uint32_t byt
     // session while the injections proved the bridge correct). The
     // binding cannot go dark: the buffer is bound at every world draw.
     if (!reorder_on_render_thread() || bytes < 64 || !res) return;
+
+    // LOCKED FAST PATH: with a source locked, the publish branch requires
+    // res == view_src_res and the admission branch requires the lock to be
+    // ABSENT - for every foreign resource the whole offset loop is already
+    // a guaranteed no-op (~1,600 uploads x 49 compares per frame of pure
+    // waste). One pointer compare is the identical no-op, cheaper.
+    if (g_ls.view_src_valid && res != g_ls.view_src_res) return;
     const float* f = static_cast<const float*>(data);
     const uint32_t nf = bytes / 4;
 
@@ -5350,11 +5366,10 @@ inline void shadow_view_scan(ID3D11Resource* res, const void* data, uint32_t byt
             // moment the camera rests - the stationary wrong-slot
             // protection is unchanged.
             {
-                static float s_pub_first = -1.0f;
                 const float pub_now = effect_time_seconds();
-                if (s_pub_first < 0.0f) s_pub_first = pub_now;
+                if (g_pub_first < 0.0f) g_pub_first = pub_now;
 
-                if (pub_now - s_pub_first < 3.0f) {
+                if (pub_now - g_pub_first < 3.0f) {
                     RVExtBridge::ProjectionViewTransform bpv = {};
 
                     if (RVExtBridge::get_projection_view_transform(bpv)) {
@@ -5579,22 +5594,6 @@ inline void locator_note_upload(ID3D11Resource* res, const void* data, uint32_t 
     // anchor-passing upload refreshes the mirror, wherever it lives, and
     // the mirror is the sole carrier - no lock, no expiry death spiral.)
     if (nf >= 72) {
-        g_sky_scan_72++;
-        const uint32_t m = locator_sky_score(f, nf);
-        uint32_t bits = m;
-        bits = bits - ((bits >> 1) & 0x55555555u);
-        bits = (bits & 0x33333333u) + ((bits >> 2) & 0x33333333u);
-        bits = (bits + (bits >> 4)) & 0x0F0F0F0Fu;
-        bits = (bits * 0x01010101u) >> 24;
-
-        if (bits >= g_sky_cand_bits) {
-            g_sky_cand_bits = bits;
-            g_sky_cand_cond = m;
-            g_sky_cand_floats = nf_full;
-            const uint32_t n96 = nf < 96 ? nf : 96;
-            memcpy(g_sky_cand_nb, f, n96 * sizeof(float));
-        }
-
         if (locator_sky_anchor(f, nf)) {
             g_sky_probe.buf = res;                 // last host (diagnostic only)
             g_sky_probe.off = 0;
@@ -5733,12 +5732,9 @@ inline void shadow_live_finalize_cycle() {
         return;
     }
 
-    const uint32_t winner_bytes = g_ls.pending_bytes;
     g_ls.pending_valid = false;
     g_ls.pending_bytes = 0;
     g_ls.pending_vp_valid = false;
-    if (winner_bytes >= 512) g_stats.commits_large++;
-    else                     g_stats.commits_small++;
 
     D3D11_VIEWPORT vp = {};
     vp.TopLeftX = g_ls.pending_vp[0];
@@ -6045,6 +6041,9 @@ struct ShadowMaskState {
     uint64_t mask_rtv_swaps = 0;    // capture-time target CHANGES (>: partitions use separate masks)
     uint64_t cast_batches = 0;      // resolve-batch re-arms
     uint64_t cast_arms_lost = 0;    // re-arms that died unfired at a frame boundary
+    uint64_t arms_lost_miss = 0;    // the cast_misses guard code active at the LAST
+                                    // lost arm - names the starving gate if the
+                                    // castArmsLost census ever grows into a chase
     float    last_fire_fov[2] = {}; // reconstruction inputs at the LAST fire -
     float    last_fire_dims[2] = {};// an overcast-moment dump shows directly
     float    last_fire_rot_err = 0; // whether the fire was fed garbage
@@ -6095,7 +6094,6 @@ struct ShadowMaskState {
     ID3D11DepthStencilState* cast_dss = nullptr;      // depth off
     bool  cast_states_failed = false;
     uint64_t analytic_casts = 0;
-    uint64_t mask_applies = 0;    // retired screen-multiply applies: permanently 0 (kept for dump-format stability)
     // SQF-set params (game thread writes, plain floats)
     // Mask mode is the DEFAULT shadow path: candidate 0 in the field test
     // (3840x2160 R8_UNORM, channel 0) proved to be the engine's shadow
@@ -6208,6 +6206,7 @@ inline void release_shadow_device_state() {
     g_sun_map_valid = false;
     g_sun_map_rendered_frame = false;
     g_sun_map_no_local = false;
+    g_sun_map_hash = 0;
     g_sun_local_count = 0;
 
     // --- weak identities the render hooks compare against ---
@@ -6838,6 +6837,45 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
 
     if (!casters.empty()) g_sun_map_no_local = false;   // at least one local caster
     if (casters.empty()) return false;
+
+    // UNCHANGED-INPUT SKIP: the map is a pure function of the caster set
+    // (camera inclusion already folded into the snapshot) and the derived
+    // sun; identical inputs were re-rendering an identical 2048^2 depth
+    // pass, its clear and a full state save/restore every frame. Hash
+    // both; on a match the previous map IS this frame's map - refresh its
+    // clock and keep everything (bounds, VP, locality exports are equally
+    // unchanged). Any float delta re-renders. The hash commits ONLY at
+    // render success below, so a failed render can never let a stale map
+    // vouch for new inputs. (Failure-exonerated re-application: this block
+    // sits after the derived-sun guard and provably never executed in the
+    // corrupted sessions.)
+    uint64_t input_hash = 1469598103934665603ull;
+
+    {
+        auto fnv = [&input_hash](const void* p, size_t n) {
+            const unsigned char* b = static_cast<const unsigned char*>(p);
+
+            for (size_t i = 0; i < n; ++i) {
+                input_hash ^= b[i];
+                input_hash *= 1099511628211ull;
+            }
+        };
+
+        for (const auto& c : casters) {
+            fnv(c.pos, sizeof(c.pos));
+            fnv(c.size, sizeof(c.size));
+            fnv(&c.mesh, sizeof(c.mesh));
+        }
+
+        fnv(sun, 12);
+
+        if (g_sun_map_valid && input_hash == g_sun_map_hash) {
+            g_sun_map_time = effect_time_seconds();
+            g_sun_map_skips++;
+            return true;
+        }
+    }
+
     ID3D11Device* dev = nullptr;
     ctx->GetDevice(&dev);
     if (!dev) return false;
@@ -7100,6 +7138,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
     }
 
     memcpy(g_sun_map_vp, lvp, sizeof(g_sun_map_vp));
+    g_sun_map_hash = input_hash;   // commit-on-success only (see the skip above)
     g_sun_map_bias = bias_world / D;
     g_sun_map_bounds[0] = ctr[0];
     g_sun_map_bounds[1] = ctr[1];
@@ -7881,13 +7920,10 @@ inline void shadow_view_prewarm() {
     // shadow lag camera rotation for ~1 s until the health monitor's
     // 30-miss window kicked it (viewLocks = 2 was the tell). The same
     // candidate must win two consecutive boundary attempts.
-    static ID3D11Resource* s_prev_cand_res = nullptr;
-    static uint32_t s_prev_cand_off = 0;
-
-    if (g_ls.vc_ring[best_i].res != s_prev_cand_res ||
-        g_ls.vc_ring[best_i].off != s_prev_cand_off) {
-        s_prev_cand_res = g_ls.vc_ring[best_i].res;
-        s_prev_cand_off = g_ls.vc_ring[best_i].off;
+    if (g_ls.vc_ring[best_i].res != g_prewarm_cand_res ||
+        g_ls.vc_ring[best_i].off != g_prewarm_cand_off) {
+        g_prewarm_cand_res = g_ls.vc_ring[best_i].res;
+        g_prewarm_cand_off = g_ls.vc_ring[best_i].off;
         return;   // first sighting: confirm next boundary
     }
 
@@ -7972,8 +8008,6 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     // resort only: by the translucent phase the sim thread has often
     // published the NEXT frame's projection, whose dynamic near plane can
     // differ - skewing the meshes' stored depth worst at close range.
-    static RVExtBridge::ProjectionViewTransform s_last_pv = {};
-    static uint64_t s_last_pv_ms = 0;
     RVExtBridge::ProjectionViewTransform pv = {};
 
     if (g_ro.cycle_pv_valid) {
@@ -8017,10 +8051,10 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             }
         }
     } else if (RVExtBridge::get_projection_view_transform(pv)) {
-        s_last_pv = pv;
-        s_last_pv_ms = steady_now_ms();
-    } else if (s_last_pv_ms != 0 && steady_now_ms() - s_last_pv_ms < 250) {
-        pv = s_last_pv;
+        g_last_pv = pv;
+        g_last_pv_ms = steady_now_ms();
+    } else if (g_last_pv_ms != 0 && steady_now_ms() - g_last_pv_ms < 250) {
+        pv = g_last_pv;
     } else {
         g_stats.composite_skips++;
         return;   // no usable matrices anywhere this frame
@@ -8114,12 +8148,31 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
 
                 const bool relative = tmag < 10.0f;
 
+                // FIRST-ADOPTION CONFIRMATION (watch item #1's cure,
+                // promoted from containment): the prewarm already demands
+                // the same candidate win two consecutive frame boundaries;
+                // the injection-site COLD adoption (no prior lock) now
+                // demands the same two-consecutive-injection agreement, so
+                // a one-frame fluke that squeaks under the 0.05 cold bar
+                // can no longer become the spawn lock. Cost is one frame
+                // of delay - delay-class by the acceptance criteria. RE-
+                // locks keep the tighter 0.02 bar and adopt immediately (a
+                // lock dropped mid-flight must not wait an extra frame).
+                bool cold_confirmed = true;
+
+                if (g_ls.view_locks == 0) {
+                    cold_confirmed = g_ls.vc_ring[best_i].res == g_coldlock_cand_res &&
+                                     g_ls.vc_ring[best_i].off == g_coldlock_cand_off;
+                    g_coldlock_cand_res = g_ls.vc_ring[best_i].res;
+                    g_coldlock_cand_off = g_ls.vc_ring[best_i].off;
+                }
+
                 // RELATIVE ONLY: the engine's view is camera-relative
                 // (measured); an absolute-exact candidate is an echo of
                 // our own uploads (bandView columns) - locking onto it
                 // made frame_view read back our own half-filled CB
                 // (garbage seals: both shadow paths vanished).
-                if (relative) {
+                if (relative && cold_confirmed) {
                     g_ls.view_src_res = g_ls.vc_ring[best_i].res;
                     g_ls.view_src_off = g_ls.vc_ring[best_i].off;
                     g_ls.view_src_orient = best_k;
@@ -8251,6 +8304,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     // discard through a phantom far plane.)
     const bool guard = ensure_composite_depth(dev, ctx) &&
                        ensure_composite_shader(dev).empty();
+    if (!guard) g_inj_guard_off++;   // guardless injection: the rare see-through/overlay correlate
 
     UINT stride = sizeof(MeshVertex), offset = 0;
     int bound_mesh = 0;
@@ -8395,8 +8449,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             // exponential). Color: the staged ambient tint is the closest
             // engine-truth horizon approximation available without the
             // sky pipeline's own constants.
-            if (g_fog_valid && g_fog[0] > 1e-4f &&
-                g_light_probe.hits > 0 && g_light_probe.meta == 40) {
+            if (g_fog_valid && g_fog[0] > 1e-4f) {
                 cbd.fog_params[0] = g_fog[0];
                 cbd.fog_params[1] = g_fog[1];
                 cbd.fog_params[2] = g_fog[2];
@@ -8420,18 +8473,35 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
                 // blue-shift lives in the journey there. tint x sky is
                 // retired: it baked sky hue into the TARGET and still
                 // read white once tonemapped.
-                const float* e = g_light_probe.nb + 36;
+                // FOG DECOUPLED FROM THE BLOCK LOCK (settings-
+                // independence): the whole fill used to be gated on the
+                // light-probe lock, so a degenerate staged decay (setFog
+                // with decay 0 can never anchor the probe) or the pre-lock
+                // cold window left the mesh UNFOGGED in a fogged world - a
+                // mismatch, not a delay. Density is params-faithful and
+                // needs no block; only the verbatim tint and the engine
+                // transmittance terms do. Unlocked frames run the legacy
+                // exponential (the shader's fogEngine.w = 0 branch) toward
+                // a neutral whiteout target - the engine's own extreme-fog
+                // convergence color - until the mirrors supply verbatim.
+                if (g_light_probe.hits > 0 && g_light_probe.meta == 40) {
+                    const float* e = g_light_probe.nb + 36;
 
-                for (int c = 0; c < 3; ++c) cbd.fog_color[c] = e[c];
+                    for (int c = 0; c < 3; ++c) cbd.fog_color[c] = e[c];
 
-                // Engine transmittance terms from the block mirror: the
-                // density scale, the linear ramp's end + inverse range.
-                cbd.fog_engine[0] = g_light_probe.nb[41];
-                cbd.fog_engine[1] = g_light_probe.nb[48];
-                cbd.fog_engine[2] = g_light_probe.nb[49];
-                cbd.fog_engine[3] = (g_light_probe.nb[48] > 1.0f &&
-                                     g_light_probe.nb[49] > 0.0f &&
-                                     g_light_probe.nb[41] >= 0.0f) ? 1.0f : 0.0f;
+                    // Engine transmittance terms from the block mirror: the
+                    // density scale, the linear ramp's end + inverse range.
+                    cbd.fog_engine[0] = g_light_probe.nb[41];
+                    cbd.fog_engine[1] = g_light_probe.nb[48];
+                    cbd.fog_engine[2] = g_light_probe.nb[49];
+                    cbd.fog_engine[3] = (g_light_probe.nb[48] > 1.0f &&
+                                         g_light_probe.nb[49] > 0.0f &&
+                                         g_light_probe.nb[41] >= 0.0f) ? 1.0f : 0.0f;
+                } else {
+                    cbd.fog_color[0] = 1.0f;
+                    cbd.fog_color[1] = 1.0f;
+                    cbd.fog_color[2] = 1.0f;
+                }
 
                 // Verbatim fog COLOR, corrected branch: world geometry
                 // takes the engine's HEIGHT-fog path, which fogs toward
@@ -8949,7 +9019,10 @@ static void STDMETHODCALLTYPE hooked_clear_depthstencil(ID3D11DeviceContext* sel
                                                 // previous frame's map (staleness is
                                                 // bounded by g_sun_map_time, and a sun
                                                 // jump wipes validity below)
-            if (g_mask_cast_arm) g_mask.cast_arms_lost++;   // re-arm died unfired at the boundary
+            if (g_mask_cast_arm) {
+                g_mask.cast_arms_lost++;   // re-arm died unfired at the boundary
+                g_mask.arms_lost_miss = g_ls.cast_misses;   // which guard starved it (watch item #2 forensics)
+            }
             if (g_fire_lock) { g_fire_lock->Release(); g_fire_lock = nullptr; }
             g_fire_lock_valid = false;   // new frame: first fire re-freezes
             g_mask_cast_fired = false;   // new frame: one analytic pass allowed
@@ -9263,7 +9336,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     s_prev_inject_serial = inject_serial;
     const bool comp_healthy = composite_path_healthy() && injected_since_last_flush;
     std::vector<RenderObject> meshes;
-    std::vector<std::pair<uint32_t, RenderObject>> fullscreen;
+    std::vector<std::pair<uint64_t, RenderObject>> fullscreen;   // key = creation seq
 
     {
         std::lock_guard<std::mutex> g(g_draw_list_mutex);
@@ -9283,11 +9356,14 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                 o.color[3] *= env;   // envelope = universal intensity
 
                 if (o.fullscreen) {
-                    if (!o.affect_ui) fullscreen.emplace_back(it->first, o);
+                    if (!o.affect_ui) fullscreen.emplace_back(o.seq, o);
                 } else if (!(comp_healthy && is_composite_eligible(o))) {
                     // Composited meshes are drawn pre-translucent by the
                     // reorder hook; the flush stands down for them while
                     // injections are actually happening.
+                    if (is_composite_eligible(o)) g_flush_fallback_draws++;   // injection missed the
+                                                   // frame: the LATE post-scene draw carries it
+                                                   // (the other rare-artifact correlate)
                     meshes.push_back(o);
                 }
             }
@@ -9666,8 +9742,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             // exponential). Color: the staged ambient tint is the closest
             // engine-truth horizon approximation available without the
             // sky pipeline's own constants.
-            if (g_fog_valid && g_fog[0] > 1e-4f &&
-                g_light_probe.hits > 0 && g_light_probe.meta == 40) {
+            if (g_fog_valid && g_fog[0] > 1e-4f) {
                 cbd.fog_params[0] = g_fog[0];
                 cbd.fog_params[1] = g_fog[1];
                 cbd.fog_params[2] = g_fog[2];
@@ -9691,18 +9766,35 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                 // blue-shift lives in the journey there. tint x sky is
                 // retired: it baked sky hue into the TARGET and still
                 // read white once tonemapped.
-                const float* e = g_light_probe.nb + 36;
+                // FOG DECOUPLED FROM THE BLOCK LOCK (settings-
+                // independence): the whole fill used to be gated on the
+                // light-probe lock, so a degenerate staged decay (setFog
+                // with decay 0 can never anchor the probe) or the pre-lock
+                // cold window left the mesh UNFOGGED in a fogged world - a
+                // mismatch, not a delay. Density is params-faithful and
+                // needs no block; only the verbatim tint and the engine
+                // transmittance terms do. Unlocked frames run the legacy
+                // exponential (the shader's fogEngine.w = 0 branch) toward
+                // a neutral whiteout target - the engine's own extreme-fog
+                // convergence color - until the mirrors supply verbatim.
+                if (g_light_probe.hits > 0 && g_light_probe.meta == 40) {
+                    const float* e = g_light_probe.nb + 36;
 
-                for (int c = 0; c < 3; ++c) cbd.fog_color[c] = e[c];
+                    for (int c = 0; c < 3; ++c) cbd.fog_color[c] = e[c];
 
-                // Engine transmittance terms from the block mirror: the
-                // density scale, the linear ramp's end + inverse range.
-                cbd.fog_engine[0] = g_light_probe.nb[41];
-                cbd.fog_engine[1] = g_light_probe.nb[48];
-                cbd.fog_engine[2] = g_light_probe.nb[49];
-                cbd.fog_engine[3] = (g_light_probe.nb[48] > 1.0f &&
-                                     g_light_probe.nb[49] > 0.0f &&
-                                     g_light_probe.nb[41] >= 0.0f) ? 1.0f : 0.0f;
+                    // Engine transmittance terms from the block mirror: the
+                    // density scale, the linear ramp's end + inverse range.
+                    cbd.fog_engine[0] = g_light_probe.nb[41];
+                    cbd.fog_engine[1] = g_light_probe.nb[48];
+                    cbd.fog_engine[2] = g_light_probe.nb[49];
+                    cbd.fog_engine[3] = (g_light_probe.nb[48] > 1.0f &&
+                                         g_light_probe.nb[49] > 0.0f &&
+                                         g_light_probe.nb[41] >= 0.0f) ? 1.0f : 0.0f;
+                } else {
+                    cbd.fog_color[0] = 1.0f;
+                    cbd.fog_color[1] = 1.0f;
+                    cbd.fog_color[2] = 1.0f;
+                }
 
                 // Verbatim fog COLOR, corrected branch: world geometry
                 // takes the engine's HEIGHT-fog path, which fogs toward
@@ -9884,7 +9976,11 @@ inline void stage_world_lighting() {
     // Live shadow-map capture follows lit objects; the recon keeps the sun
     // published even without any.
     g_ls.wanted.store(lit_exists, std::memory_order_relaxed);
-    if (!lit_exists) return;
+
+    // FOG IS NOT LIGHTING (settings-independence): staging used to bail
+    // without a lit object, so an UNLIT mesh stood unfogged in a fogged
+    // world. Atmospheric occlusion applies to every world-space mesh;
+    // stage it whenever the flush runs.
 
     try {
         // Typed fogParams wrapper - the LAST scripted lighting fetch: the
@@ -9997,7 +10093,7 @@ inline std::string ensure_backbuffer_capture(ID3D11Device* dev, ID3D11DeviceCont
 
 inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     const float snapshot_now = effect_time_seconds();
-    std::vector<std::pair<uint32_t, RenderObject>> passes;
+    std::vector<std::pair<uint64_t, RenderObject>> passes;   // key = creation seq
 
     {
         std::lock_guard<std::mutex> g(g_draw_list_mutex);
@@ -10009,7 +10105,7 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             if (expired) continue;   // the scene flush owns the erasure
             RenderObject o = kv.second;
             o.color[3] *= env;
-            passes.emplace_back(kv.first, o);
+            passes.emplace_back(o.seq, o);
         }
     }
 
@@ -10275,8 +10371,105 @@ inline void ensure_draw_eh() {
         }
     });
 
-    ensure_ui_driver();
     g_draw3d_eh_active = true;
+}
+
+// Pure-diagnostic counter reset: the stats ARM (first getRenderStats call)
+// and the mission-end session destroy both zero these. Functional counters
+// (view_locks / lock_wipes / relock_forced pairing, probe hits, streaks,
+// backoff) are deliberately excluded here - resetting them mid-session
+// would re-open the loose cold lock bar or kill mirror consumers; they
+// reset only in reset_session_state below.
+inline void reset_stat_counters() {
+    g_stats = RenderStats{};
+    g_stage_total = 0; g_stage_rej_vis = 0; g_stage_rej_exp = 0;
+    g_recv_term_skips = 0; g_recv_wipes = 0;
+    g_sun_jump_refused = 0;
+    g_cast_frozen_fires = 0;
+    g_rt_resolve_true = 0; g_rt_resolve_false = 0;
+    g_rt_half_accepts = 0; g_sweep_gap_resets = 0; g_rt_last_rej_w = 0;
+    g_inj_guard_off = 0; g_flush_fallback_draws = 0;
+    g_sun_map_skips = 0;
+    g_skybind_reads = 0; g_skybind_hits = 0; g_skybind_minbw = 0;
+    g_skybind_maxbw = 0; g_skybind_slots = 0; g_skybind_off1 = 0;
+    g_skybind_maxbw_vs = 0; g_skybind_offs_seen = 0;
+    g_viewbind_scans = 0; g_cascbind_scans = 0;
+    g_loc_scan_uploads = 0; g_loc_max_cb_floats = 0;
+    g_comp_compiles = 0;
+    g_ui_poll_attempts = 0;
+    g_ls.latches = 0; g_ls.resolve_hits = 0; g_ls.resolve_draws = 0;
+    g_ls.resolve_cb_found = 0; g_ls.resolve_gated = 0;
+    g_ls.band_captures = 0; g_ls.band_bail_pv = 0; g_ls.band_bail_off = 0;
+    g_ls.band_bail_border = 0; g_ls.band_bail_slot = 0; g_ls.band_bail_time = 0;
+    g_ls.band_bail_view = 0; g_ls.seal_completions = 0;
+    g_ls.cold_pub_rejects = 0; g_ls.frame_view_hits = 0;
+
+    for (int b = 0; b < 8; ++b) g_ls.band[b].copies = 0;
+
+    g_mask.cast_arms_lost = 0; g_mask.arms_lost_miss = 0;
+    g_mask.analytic_casts = 0; g_mask.cast_batches = 0; g_mask.mask_rtv_swaps = 0;
+}
+
+// FULL SESSION DESTROY (operator requirement): everything learned,
+// published, staged, counted or derived dies with the mission - the next
+// mission starts from the same nothing a fresh process would. Device
+// objects and locator/probe state go through release_shadow_device_state()
+// + g_res.release() (the caller runs those first, under the graphics lock);
+// this resets what those don't. Must run with the render thread PARKED:
+// g_ro, the mask/live structs and the hoisted memories are render-thread
+// state.
+inline void reset_session_state() {
+    reset_stat_counters();
+    g_stats_armed.store(false, std::memory_order_relaxed);
+    // the lifetime pairing trio is session-scoped under full destroy
+    g_view_relock_forced = 0; g_lock_wipes = 0; g_ls.view_locks = 0;
+    g_ls.pub_rej_streak = 0; g_ls.view_src_miss = 0;
+    g_ls.last_publish_rot_err = 1.0f;
+    g_ls.view_best_rot = -1.0f; g_ls.view_best_trans = -1.0f;
+    g_ls.cam[0] = g_ls.cam[1] = g_ls.cam[2] = 0.0f;
+    g_ls.stamp_counter = 0;
+    // published / staged / derived lighting and its debounce latch
+    g_sun_valid = false;
+    g_sun_dir_engine[0] = 0.0f; g_sun_dir_engine[1] = 1.0f; g_sun_dir_engine[2] = 0.0f;
+    g_sun_dir_derived_valid = false;
+    g_sun_dir_derived[0] = 0.0f; g_sun_dir_derived[1] = 1.0f; g_sun_dir_derived[2] = 0.0f;
+    g_sun_derived_samples = 0;
+    g_sun_jump_pending = false;
+    g_skysun_ref_valid = false;
+    g_skysun_ref[0] = g_skysun_ref[1] = g_skysun_ref[2] = 0.0f;
+    g_pub_valid = false; g_cand_hold = 0;
+    g_fog_staged_valid = false; g_fog_valid = false;
+
+    for (int k = 0; k < 3; ++k) { g_fog[k] = 0.0f; g_fog_staged[k] = 0.0f; }
+
+    // hoisted lock memories
+    g_pub_first = -1.0f;
+    g_prewarm_cand_res = nullptr; g_prewarm_cand_off = 0;
+    g_coldlock_cand_res = nullptr; g_coldlock_cand_off = 0;
+    g_last_pv_ms = 0;
+    // render-thread cycle state (the caller's graphics lock parks that thread)
+    // Hook DISARM: with the tracked context cleared, every installed hook
+    // bails at its very first pointer compare on every context - the whole
+    // pipeline is a single relaxed load per call until the next render
+    // command re-stores the context via ensure_reorder_hook.
+    g_reorder_target_ctx.store(nullptr, std::memory_order_relaxed);
+    g_ro = ReorderState{};
+    g_sr = ShadowReconState{};
+    g_sr_cap_view = ShadowCapture43{};
+    g_sr_cap_vp = ShadowCapture43{};
+    g_sr_cascades = ShadowCascadeSet{};
+    g_sr_cascades_scratch = ShadowCascadeSet{};
+    memset(g_sr_last_trans, 0, sizeof(g_sr_last_trans));
+    g_sr_last_trans_count = 0;
+    g_sr_best_dot44 = 0.0f; g_sr_best_dot43 = 0.0f;
+    g_reorder_render_tid.store(0, std::memory_order_relaxed);
+    g_main_depth_w = 0; g_main_depth_h = 0; g_wrong_pass_streak = 0;
+    g_proj_last_m32 = 0.0f;
+    g_mask = ShadowMaskState{};   // device pointers already nulled by the release
+    g_trig_rej_vp[0] = g_trig_rej_vp[1] = -1.0f;
+    g_trig_acc_vp[0] = g_trig_acc_vp[1] = -1.0f;
+    g_fog_dbg[0] = g_fog_dbg[1] = g_fog_dbg[2] = g_fog_dbg[3] = 0.0f;
+    g_comp_fail_streak = 0; g_comp_next_retry = 0.0f; g_comp_last_err.clear();
 }
 
 inline void reset_retained_state() {
@@ -10293,12 +10486,15 @@ inline void reset_retained_state() {
 }
 
 inline void on_mission_start() {
+    // NOTHING ACTIVATES HERE (operator requirement: state stays dead until
+    // a command demands it). Draw3D registers at the first addRender3D /
+    // addPostFX; the UI overlay driver registers at the first UI-phase
+    // demand (affectUI pass or flushUIRender). This only clears leftovers.
     g_draw3d_eh_active = false;
     g_draw3d_eh = {};
     g_ui_driver_registered = false;
     g_ui_ctrl_created = false;
     g_ui_poll_eh = {};
-    ensure_ui_driver();
     reset_retained_state();
 }
 
@@ -10309,22 +10505,45 @@ inline void on_mission_end() {
     g_ui_ctrl_created = false;
     g_ui_poll_eh = {};
     reset_retained_state();
+
+    // FULL SESSION DESTROY: device objects, learned locations, probes,
+    // mirrors, published lighting, stats - everything - dies with the
+    // mission. The render thread must be PARKED before device objects and
+    // render-thread state are touched; the graphics lock is that
+    // invariant. The draw list is already empty, so the injection is a
+    // no-op even before the lock lands - a transiently contended lock only
+    // delays the release by a retry. The vtable hooks stay installed
+    // (uninstalling live draw hooks is the one genuinely dangerous
+    // teardown; disarmed they cost a pointer compare per draw) - but
+    // everything they FEED is destroyed, and nothing re-arms until a
+    // command re-creates work.
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        RVExtBridge::ScopedGraphicsLock lock;
+
+        if (!lock.acquired()) continue;
+        release_shadow_device_state();
+        g_res.release();
+        reset_session_state();
+        break;
+    }
 }
 
 // ===========================================================================
 // Retained-mode API (called by the SQF wrappers)
 // ===========================================================================
 
-inline uint32_t add_render_object(const RenderObject& obj) {
+inline std::string add_render_object(const RenderObject& obj) {
     ensure_draw_eh();
     std::lock_guard<std::mutex> g(g_draw_list_mutex);
-    const uint32_t handle = g_next_handle++;
-    g_draw_list[handle] = obj;
-    g_draw_list[handle].birth_time = effect_time_seconds();
+    const std::string handle = make_render_uid();
+    RenderObject& stored = g_draw_list[handle];
+    stored = obj;
+    stored.seq = ++g_next_seq;   // creation order (fullscreen pass chaining)
+    stored.birth_time = effect_time_seconds();
     return handle;
 }
 
-inline bool remove_render_object(uint32_t handle) {
+inline bool remove_render_object(const std::string& handle) {
     std::lock_guard<std::mutex> g(g_draw_list_mutex);
     return g_draw_list.erase(handle) > 0;
 }
@@ -10543,8 +10762,6 @@ static game_value add_render3d_sqf(game_value_parameter args) {
                 if (la.size() >= 1) obj.light_ambient = static_cast<float>(la[0]);
                 if (la.size() >= 2) obj.light_diffuse = static_cast<float>(la[1]);
 
-                // la[2] (the retired shadowMode) is accepted and ignored:
-                // world shadowing is per pixel now, no rays to configure.
             }
         }
 
@@ -10554,7 +10771,11 @@ static game_value add_render3d_sqf(game_value_parameter args) {
             obj.mesh = mid;
         }
 
-        return game_value(static_cast<float>(RenderIntegration::add_render_object(obj)));
+        if (arr.size() > 12 && arr[12].type_enum() == game_data_type::BOOL) {
+            obj.far_vis = static_cast<bool>(arr[12]);   // visible beyond max view distance
+        }
+
+        return game_value(RenderIntegration::add_render_object(obj));
     } catch (const std::exception& e) {
         report_error(std::string("addRender3D: ") + e.what());
         return game_value(std::string("EXCEPTION: ") + e.what());
@@ -10644,7 +10865,8 @@ static game_value update_render3d_sqf(game_value_parameter args) {
     try {
         auto& arr = args.to_array();
         if (arr.size() < 3) return game_value(false);
-        const uint32_t handle = static_cast<uint32_t>(static_cast<float>(arr[0]));
+        if (arr[0].type_enum() != game_data_type::STRING) return game_value(false);
+        const std::string handle = static_cast<std::string>(arr[0]);
         std::string prop = static_cast<std::string>(arr[1]);
         std::transform(prop.begin(), prop.end(), prop.begin(), ::tolower);
         std::lock_guard<std::mutex> g(RenderIntegration::g_draw_list_mutex);
@@ -10692,12 +10914,12 @@ static game_value update_render3d_sqf(game_value_parameter args) {
                     obj.light_ambient = static_cast<float>(la[0]);
                     if (la.size() >= 2) obj.light_diffuse = static_cast<float>(la[1]);
 
-                    // la[2] (the retired shadowMode) is accepted and
-                    // ignored: world shadowing is per pixel now.
                 }
             } else {
                 obj.lit = static_cast<bool>(arr[2]);
             }
+        } else if (prop == "farvis") {
+            obj.far_vis = static_cast<bool>(arr[2]);   // visible beyond max view distance
         } else {
             return game_value(false);
         }
@@ -10728,7 +10950,8 @@ static game_value update_post_fx_sqf(game_value_parameter args) {
     try {
         auto& arr = args.to_array();
         if (arr.size() < 3) return game_value(false);
-        const uint32_t handle = static_cast<uint32_t>(static_cast<float>(arr[0]));
+        if (arr[0].type_enum() != game_data_type::STRING) return game_value(false);
+        const std::string handle = static_cast<std::string>(arr[0]);
         std::string prop = static_cast<std::string>(arr[1]);
         std::transform(prop.begin(), prop.end(), prop.begin(), ::tolower);
         std::lock_guard<std::mutex> g(RenderIntegration::g_draw_list_mutex);
@@ -10753,6 +10976,7 @@ static game_value update_post_fx_sqf(game_value_parameter args) {
             RenderIntegration::set_effect_params(obj, nullptr);
         } else if (prop == "ui") {
             obj.affect_ui = static_cast<bool>(arr[2]);
+            if (obj.affect_ui) RenderIntegration::ensure_ui_driver();   // UI phase demanded
         } else if (prop == "radius") {
             if (!RenderIntegration::read_vec3_or_uniform(arr[2], obj.local_radius)) return game_value(false);
         } else if (prop == "falloff") {
@@ -10791,14 +11015,15 @@ static game_value update_post_fx_sqf(game_value_parameter args) {
 // removeRenderHandler -1     -> BOOL (clears the entire draw list)
 static game_value remove_render_handler_sqf(game_value_parameter arg) {
     try {
-        const float raw = static_cast<float>(arg);
+        if (arg.type_enum() != game_data_type::STRING) return game_value(false);
+        const std::string handle = static_cast<std::string>(arg);
 
-        if (raw < 0.0f) {
+        if (handle.empty() || handle == "all") {
             RenderIntegration::clear_render_objects();
             return game_value(true);
         }
-        
-        return game_value(RenderIntegration::remove_render_object(static_cast<uint32_t>(raw)));
+
+        return game_value(RenderIntegration::remove_render_object(handle));
     } catch (const std::exception& e) {
         report_error(std::string("removeRenderHandler: ") + e.what());
         return game_value(false);
@@ -10917,13 +11142,17 @@ static game_value add_postfx_sqf(game_value_parameter args) {
             obj.affect_ui = static_cast<bool>(arr[5]);
         }
 
+        // UI phase demanded: start the overlay control driver (state stays
+        // dead otherwise - the operator's no-passive-activation rule)
+        if (obj.affect_ui) RenderIntegration::ensure_ui_driver();
+
         if (arr.size() > 6) {
             if (!RenderIntegration::parse_duration_gv(arr[6], obj)) {
                 return game_value("duration must be seconds or [fadeIn, hold, fadeOut]");
             }
         }
 
-        return game_value(static_cast<float>(RenderIntegration::add_render_object(obj)));
+        return game_value(RenderIntegration::add_render_object(obj));
     } catch (const std::exception& e) {
         report_error(std::string("addPostFX: ") + e.what());
         return game_value(std::string("EXCEPTION: ") + e.what());
@@ -10938,6 +11167,18 @@ static game_value add_postfx_sqf(game_value_parameter args) {
 // frame rendered without our draws.
 static game_value get_render_stats_sqf() {
     try {
+        // OPT-IN (see g_stats_armed): first call arms + zeroes the pure
+        // diagnostics and returns a status pair; stats flow from call two.
+        if (!RenderIntegration::g_stats_armed.exchange(true, std::memory_order_relaxed)) {
+            RenderIntegration::reset_stat_counters();
+            auto_array<game_value> pair;
+            pair.push_back(game_value("status"));
+            pair.push_back(game_value("armed"));
+            auto_array<game_value> armed_out;
+            armed_out.push_back(game_value(std::move(pair)));
+            return game_value(std::move(armed_out));
+        }
+
         auto kv = [](const char* k, uint64_t v) {
             auto_array<game_value> pair;
             pair.push_back(game_value(k));
@@ -11057,7 +11298,6 @@ static game_value get_render_stats_sqf() {
         out.push_back(kvf("sunDirDerivedX", RenderIntegration::g_sun_dir_derived[0]));
         out.push_back(kvf("sunDirDerivedY", RenderIntegration::g_sun_dir_derived[1]));
         out.push_back(kvf("sunDirDerivedZ", RenderIntegration::g_sun_dir_derived[2]));
-        out.push_back(kv("maskApplies", RenderIntegration::g_mask.mask_applies));
         out.push_back(kv("bandBailView", RenderIntegration::g_ls.band_bail_view));
         out.push_back(kv("viewLocks", RenderIntegration::g_ls.view_locks));
         out.push_back(kv("viewSrcValid", RenderIntegration::g_ls.view_src_valid ? 1u : 0u));
@@ -11114,12 +11354,15 @@ static game_value get_render_stats_sqf() {
 
 
 
-        out.push_back(kv("castRegimeSkips", RenderIntegration::g_cast_regime_skips));
         out.push_back(kv("castFrozenFires", RenderIntegration::g_cast_frozen_fires));
         out.push_back(kv("castRtResolveTrue", RenderIntegration::g_rt_resolve_true));
         out.push_back(kv("castRtResolveFalse", RenderIntegration::g_rt_resolve_false));
         out.push_back(kv("castRtHalfAccepts", RenderIntegration::g_rt_half_accepts));
         out.push_back(kv("sweepGapResets", RenderIntegration::g_sweep_gap_resets));
+        out.push_back(kv("injGuardOff", RenderIntegration::g_inj_guard_off));
+        out.push_back(kv("flushFallbackDraws", RenderIntegration::g_flush_fallback_draws));
+        out.push_back(kv("castArmsLostMiss", RenderIntegration::g_mask.arms_lost_miss));
+        out.push_back(kv("sunMapSkips", RenderIntegration::g_sun_map_skips));
         out.push_back(kv("rtLastRejW", static_cast<uint64_t>(RenderIntegration::g_rt_last_rej_w)));
         out.push_back(kvf("fogColR", RenderIntegration::g_fog_dbg[0]));
         out.push_back(kvf("fogColG", RenderIntegration::g_fog_dbg[1]));
@@ -11227,7 +11470,7 @@ static game_value add_local_postfx_sqf(game_value_parameter args) {
             }
         }
 
-        return game_value(static_cast<float>(RenderIntegration::add_render_object(obj)));
+        return game_value(RenderIntegration::add_render_object(obj));
     } catch (const std::exception& e) {
         report_error(std::string("addLocalPostFX: ") + e.what());
         return game_value(std::string("EXCEPTION: ") + e.what());
@@ -11245,6 +11488,7 @@ static game_value add_local_postfx_sqf(game_value_parameter args) {
 // if passes were queued this call.
 static game_value flush_ui_render_sqf() {
     try {
+        RenderIntegration::ensure_ui_driver();   // explicit UI-render demand is an enabling command
         return game_value(RenderIntegration::flush_ui_frame());
     } catch (const std::exception& e) {
         report_error(std::string("flushUIRender: ") + e.what());

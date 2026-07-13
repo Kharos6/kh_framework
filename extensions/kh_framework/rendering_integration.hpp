@@ -3319,9 +3319,11 @@ inline void extract_camera_pos(const float view[4][4], float out[3]) {
 //
 // Mechanics:
 //  - State hooks (OMSetBlendState / OMSetDepthStencilState /
-//    OMSetRenderTargets) maintain three booleans; classification of the
-//    immutable state objects is memoized by pointer, so the per-draw hook
-//    cost is a pointer compare and a few flag loads.
+//    OMSetRenderTargets) maintain three booleans; state objects are
+//    classified LIVE via GetDesc on every set - deliberately never
+//    memoized by pointer (see the no-memoization note below: reused
+//    addresses would inherit stale classifications). Per-draw cost is
+//    still just a few flag loads; GetDesc runs only at state SETS.
 //  - ClearDepthStencilView on the main scene depth marks the new frame
 //    (injection re-arms).
 //  - Deferred contexts share the vtable: every hook first checks that the
@@ -4241,6 +4243,17 @@ struct LiveShadowState {
     bool resolve_seen_since_cast = false;
     bool view_published_this_frame = false;   // dual gate for the cast arm
     float last_publish_rot_err = 1.0f;        // rot agreement of the last accepted publish
+    // Stamp of the last EXACT-CLASS (<= 1e-3) publication - the cast
+    // gate's input. e_rot is measured against the bridge latch, which
+    // lags +-1 frame, so camera motion pushes single publications above
+    // 1e-3 under a perfectly healthy lock (field: castArmsLost
+    // 2,694->3,978 in one session against a 0-7 norm, castBatches at
+    // ~43% of resolveHits, viewBestRot 0.0 throughout - roughly half
+    // the resolve batches starved by measurement jitter, not lock
+    // quality). A healthy lock re-proves exactness within the window
+    // continuously; a genuinely off-axis era never does and still
+    // starves - at most one window late. Exported as viewPubExactAgeS.
+    uint64_t pub_exact_ms = 0;                // 0 = no exact publication yet
     uint64_t cold_pub_rejects = 0;            // cold-guard publishes rejected (full no-ops; forensic)
     uint64_t band_bail_view = 0;     // no same-frame view latched: reseal skipped
     uint64_t band_bail_quality = 0;  // seal pairings withheld: publication not exact-class
@@ -4915,7 +4928,6 @@ inline void fill_lighting_cb(ConstantData& cbd, const RenderObject& o) {
 }
 
 // --- Recon state: render thread only, like ReorderState. ---
-static constexpr uint32_t KH_SHADOW_CYCLE_MIN_DRAWS = 8;    // draws before a depth-only phase counts
 static constexpr float    KH_SHADOW_AXIS_COS_TOL   = 0.995f; // ~5.7 degrees off the sun vector
 static constexpr float    KH_SHADOW_ORTHO_TOL      = 0.02f;  // orthonormality slack for the 3x3 test
 
@@ -5479,6 +5491,11 @@ inline void shadow_view_scan(ID3D11Resource* res, const void* data, uint32_t byt
                     // drift that 'calmed down halfway through').
                     if (e_rot > 0.35f) continue;
                     g_ls.last_publish_rot_err = e_rot;   // cold fire quality gate
+                    // Exact-class stamp (the cast gate's recent-exact
+                    // input; see pub_exact_ms). Same 1e-3 bar as the
+                    // gates - the bar is unchanged, only WHERE it is
+                    // evaluated moved.
+                    if (e_rot <= 1e-3f) g_ls.pub_exact_ms = steady_now_ms();
                 }
             }
 
@@ -7384,7 +7401,22 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
     // the exact-lock preference's own threshold) is required ALWAYS; the
     // cold-overcast case is covered a fortiori. On a session that never
     // reaches exact quality, the cast simply never fires - by directive.
-    if (g_ls.last_publish_rot_err > 1e-3f) { g_ls.cast_misses = 51; return; }
+    // RECENT-EXACT recalibration (field conviction, one session): the
+    // raw per-publication e_rot compares against the +-1-frame-lagged
+    // bridge latch, so camera motion breaches 1e-3 on a perfectly
+    // healthy lock - castBatches ran at ~43% of resolveHits (8,902 vs
+    // 20,856), castArmsLost 2,694->3,978 against a 0-7 norm, with
+    // viewBestRot 0.0 the whole session. The bar stays 1e-3; the gate
+    // now passes while an exact-class publication exists within the
+    // trailing 250 ms (~15 publications at 60 fps - a healthy lock
+    // re-proves exactness within a frame or two in every measured
+    // session, so jitter passes; an off-axis era never stamps and
+    // starves at most 250 ms later than before). The SEAL-PAIRING gate
+    // is deliberately unchanged: a seal bakes ONE specific publication
+    // into a frozen band, so that publication's own error remains the
+    // correct input there.
+    if (g_ls.pub_exact_ms == 0 ||
+        steady_now_ms() - g_ls.pub_exact_ms > 250) { g_ls.cast_misses = 51; return; }
     // Transition hold: fire only into a SETTLED capture stream (see the
     // sweep_settle note). Steady state saturates this within one frame.
     if (g_mask.sweep_settle < g_mask.sweep_need) { g_ls.cast_misses = 52; return; }
@@ -10913,6 +10945,7 @@ inline void reset_session_state() {
     g_view_relock_forced = 0; g_lock_wipes = 0; g_ls.view_locks = 0;
     g_ls.pub_rej_streak = 0; g_ls.view_src_miss = 0;
     g_ls.last_publish_rot_err = 1.0f;
+    g_ls.pub_exact_ms = 0;
     g_ls.view_best_rot = -1.0f; g_ls.view_best_trans = -1.0f;
     g_ls.cam[0] = g_ls.cam[1] = g_ls.cam[2] = 0.0f;
     g_ls.stamp_counter = 0;
@@ -11891,6 +11924,7 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("viewSrcMisses", static_cast<uint64_t>(RenderIntegration::g_ls.view_src_miss)));
         out.push_back(kv("viewCandN", static_cast<uint64_t>(RenderIntegration::g_ls.vc_n)));
         out.push_back(kvf("viewPubRotErr", RenderIntegration::g_ls.last_publish_rot_err));
+        out.push_back(kvf("viewPubExactAgeS", age_s(RenderIntegration::g_ls.pub_exact_ms)));
         out.push_back(kvf("missLastAgeS", age_s(RenderIntegration::g_ms_ms)));
         out.push_back(kv("rtLastRejW", static_cast<uint64_t>(RenderIntegration::g_rt_last_rej_w)));
         out.push_back(kvf("fogColR", RenderIntegration::g_fog_dbg[0]));

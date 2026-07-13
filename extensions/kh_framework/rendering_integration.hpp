@@ -5752,9 +5752,52 @@ inline void locator_note_upload(ID3D11Resource* res, const void* data, uint32_t 
         }
     }
 
-    // --- attempt window (~120 ms each second): expiry, then the
-    //     unlocked scan (hundreds of uploads per attempt, negligible) ---
     const float now = effect_time_seconds();
+
+    // SKY CAPTURE, VALUE-BASED, FULL-RATE (field conviction, the fog-lag
+    // hunt): this block used to live BELOW the attempt-window gate, so
+    // despite its own charter ('every anchor-passing upload refreshes
+    // the mirror') it actually refreshed at a 12% duty cycle - the
+    // mirror froze for up to ~0.88 s each second while the engine's
+    // live sky/atmosphere block evolved with the camera, and the mesh
+    // fog target (fogSkyCol = mirror rows) snapped to current only when
+    // the window reopened: the reported 'fog color takes about a second
+    // to lock in place' on every move through fog. Dump signature that
+    // convicted it: skyLocAge 0.71 / 0.36 at random moments (uniform in
+    // the gap) with lightLocAge 0.011 (the light probe's locked path
+    // runs above the gate - the asymmetry named the gate), and
+    // skyLocHits/flushes = 1.27 and 1.35 across two sessions - both
+    // implying the SAME ~11 anchor-passing uploads/frame at full rate
+    // through a 0.12 window. The gate's cost rationale never applied
+    // here: the anchor's fast path is three float compares at fixed
+    // offsets per nf>=72 upload, and a hit is a 384-byte memcpy
+    // (~4 KB/frame at the measured rate). The ring-CB lesson stands
+    // unchanged below: identity is meaningless, the mirror is the sole
+    // carrier - it is now simply fed at the rate its charter always
+    // claimed. (The skybind readback path keeps its >5 s staleness
+    // trigger: it remains the upload-dark-session fallback, parked as a
+    // follow-up if such a session ever shows this residual again.)
+    if (nf >= 72) {
+        if (g_sky_probe.valid && now - g_sky_probe.last_confirm > 60.0f) {
+            g_sky_probe.valid = false;   // freshness flag only: the mirror and
+                                         // hits persist - consumption is
+                                         // mirror-based (hits > 0)
+        }
+
+        if (locator_sky_anchor(f, nf)) {
+            g_sky_probe.buf = res;                 // last host (diagnostic only)
+            g_sky_probe.off = 0;
+            g_sky_probe.floats = nf_full;
+            g_sky_probe.valid = true;
+            g_sky_probe.hits++;
+            g_sky_probe.last_confirm = now;
+            locator_capture(g_sky_probe, f, nf, 96);
+        }
+    }
+
+    // --- attempt window (~120 ms each second): expiry, then the
+    //     unlocked LIGHT scan (hundreds of uploads per attempt,
+    //     negligible) ---
     if (now - floorf(now) >= 0.12f) return;
 
     // TIME-based expiry: a lock survives any miss rate and expires only
@@ -5767,40 +5810,13 @@ inline void locator_note_upload(ID3D11Resource* res, const void* data, uint32_t 
         g_light_probe.misses = 0;
     }
 
-    if (g_sky_probe.valid && now - g_sky_probe.last_confirm > 60.0f) {
-        g_sky_probe.valid = false;   // freshness flag only: the mirror and
-                                     // hits persist - consumption is
-                                     // mirror-based (hits > 0)
-    }
-
+    // (The sky value-based capture that lived here moved ABOVE the gate
+    // - see the full-rate ledger at the hoist. The ring-CB lesson it
+    // carried moved with it. From here down the window is light-only;
+    // locScanUploads counts light-discovery window uploads now.)
     const bool want_light = !g_light_probe.valid && ref_ok;
-    if (!want_light && nf < 72) return;
+    if (!want_light) return;
     g_loc_scan_uploads++;
-
-    // SKY CAPTURE, VALUE-BASED (the ring-CB lesson: the buffer-identity
-    // lock caught the content ONCE at t=0, then 1837 foreign uploads on
-    // the same resource starved the maintenance, the expiry killed the
-    // lock, and the frozen mirror drifted away from the light - 'proper
-    // fogging initially, then it went away'. The sky CONTENT wanders
-    // across shared ring buffers; identity is meaningless. Every
-    // anchor-passing upload refreshes the mirror, wherever it lives, and
-    // the mirror is the sole carrier - no lock, no expiry death spiral.)
-    if (nf >= 72) {
-        if (locator_sky_anchor(f, nf)) {
-            g_sky_probe.buf = res;                 // last host (diagnostic only)
-            g_sky_probe.off = 0;
-            g_sky_probe.floats = nf_full;
-            g_sky_probe.valid = true;
-            g_sky_probe.hits++;
-            g_sky_probe.last_confirm = now;
-            locator_capture(g_sky_probe, f, nf, 96);
-        }
-    }
-
-    if (!want_light) return;
-
-
-    if (!want_light) return;
 
     for (uint32_t i = 0; i + 16 <= nf; ++i) {
         if (locator_light_anchor(f, i, nf, decay, cam_alt)) {
@@ -11931,6 +11947,9 @@ static game_value get_render_stats_sqf() {
         out.push_back(kvf("fogColG", RenderIntegration::g_fog_dbg[1]));
         out.push_back(kvf("fogColB", RenderIntegration::g_fog_dbg[2]));
         out.push_back(kvf("fogEnabled", RenderIntegration::g_fog_dbg[3]));
+        out.push_back(kvf("fogTgtR", RenderIntegration::g_sky_probe.nb[4]));
+        out.push_back(kvf("fogTgtG", RenderIntegration::g_sky_probe.nb[5]));
+        out.push_back(kvf("fogTgtB", RenderIntegration::g_sky_probe.nb[6]));
         out.push_back(kvf("trigRejMin", RenderIntegration::g_trig_rej_vp[0]));
         out.push_back(kvf("trigRejMax", RenderIntegration::g_trig_rej_vp[1]));
         out.push_back(kvf("trigAccMin", RenderIntegration::g_trig_acc_vp[0]));

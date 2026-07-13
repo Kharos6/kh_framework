@@ -52,6 +52,7 @@
 #include <dwrite.h>
 #include <ksmedia.h>
 #include <d3dcompiler.h>
+#include <d3d11_1.h>
 
 #include "intercept/include/intercept.hpp"
 #include "intercept/include/client/sqf/sqf.hpp"

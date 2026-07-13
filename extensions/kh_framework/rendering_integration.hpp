@@ -679,13 +679,55 @@ float SunShadowOcclusionSelf(float3 wpos, float3 nrm)
     // [-1, 1], and column 0 of sunVP has length 1/R.
     float invR = length(float3(sunVP[0].x, sunVP[1].x, sunVP[2].x));
     float texelWorld = 2.0f / (max(sunMeta.y, 1.0f) * max(invR, 1e-6f));
-    float occ = SunShadowOcclusionPCF(wpos + n * texelWorld * 1.5f);
+    // EDGE-SPARKLE FIX (dotted lit flicker along a box edge when a
+    // face is viewed head-on): the pure lateral normal offset pokes
+    // past the silhouette at edges - within ~1.5 texels of a corner
+    // the sample lands BESIDE the box and the compare flips per map
+    // texel (the dotted column, flickering with subpixel motion).
+    // The receiver now lifts mostly TOWARD THE SUN - a lateral-free
+    // anti-acne bias with the same escape-the-own-depth-ramp property
+    // that fixed the rising bands - keeping only a small slope-scaled
+    // normal nudge: zero at sun-facing incidence (no acne possible),
+    // grown toward grazing where the ramp aliasing lives.
+    // NOON-BANDING FIX (the 'rising bands' returning): the firefly-era
+    // rework slope-scaled the lateral component to 0.5*(1-ndl), which
+    // under-escapes the face's own depth ramp at moderate-grazing sun
+    // (near-zenith sun on vertical faces - this class's home). The
+    // lateral shrink existed to avoid edge pokes, but ClipEdgeSliver
+    // now owns the edge geometrically - so the ORIGINAL proven 1.5
+    // lateral magnitude returns, with the sun-ward 1.25 kept as
+    // open-face acne insurance.
+    float3 selfOfs = (lighting1.xyz * 1.25f + n * 1.5f) * texelWorld;
+    float occ = SunShadowOcclusionPCF(wpos + selfOfs);
     return occ * smoothstep(0.02f, 0.20f, ndl);
 }
 
 float SunShadowFactorSelf(float3 wpos, float3 nrm)
 {
     return 1.0f - SunShadowOcclusionSelf(wpos, nrm) * saturate(sunMeta.w);
+}
+
+// DEGENERATE-SLIVER CLIP (the edge fireflies, third and final aim): at
+// exactly edge-on the rasterizer emits fragments whose interpolated
+// attributes go wild across the near-zero-area face - fog computes for
+// a wrong distance (the unfogged BRIGHT WHITE blobs) and every shading
+// term, including any grazing fade, computes from the same garbage:
+// shading-side stabilizers cannot reach them (field-proven twice). The
+// only complete fix is geometric: kill the fragment. The clip band is
+// ~0.3 deg of edge-on - a sub-pixel sliver, visually nothing.
+// fxParams0.xyz carries the camera on the solid-mesh paths.
+void ClipEdgeSliver(float3 wpos, float3 nrm)
+{
+    // FAIL-SAFE GUARD (the flicker-priority audit): the clip trusts
+    // fxParams0.xyz as the camera; if any path ever leaves it zeroed,
+    // nv would compute against a garbage direction and could discard
+    // whole face regions - the partial-object flicker class, which
+    // outranks fireflies absolutely. A zero-ish vector cannot be a
+    // world camera on RV terrain: skip the clip instead. The failure
+    // direction is now 'fireflies possible', never 'geometry lost'.
+    if (dot(fxParams0.xyz, fxParams0.xyz) < 1.0f) return;
+    float nv = abs(dot(normalize(nrm), normalize(fxParams0.xyz - wpos)));
+    clip(nv - 0.005f);
 }
 
 // Solid-mesh band / local-volume mask (PSMain and PSComposite): the same
@@ -992,6 +1034,7 @@ VSOut VSFullscreen(uint vid : SV_VertexID)
 
 float4 PSMain(VSOut i) : SV_Target
 {
+    ClipEdgeSliver(i.wpos, i.nrm);   // degenerate edge-on fragments (fireflies)
     // Punch-through / overlay-occlusion guard, flush-path edition: the
     // same contract as PSComposite's. t0 (sceneDepthTex) holds the
     // mid-frame scene-depth snapshot when the CPU armed tight margins in
@@ -1406,6 +1449,7 @@ VSOutC VSComposite(VSIn i)
 
 )HLSL" R"HLSL(float4 PSComposite(VSOutC i) : SV_Target
 {
+    ClipEdgeSliver(i.wpos, i.nrm);   // degenerate edge-on fragments (fireflies)
     // Punch-through guard: fxParams0.xyz = camera (engine space),
     // fxParams1.x = base margin (m), fxParams1.y = relative margin.
     int2 px = clamp(int2(i.pos.xy), int2(0, 0), int2((int)fxMeta.z - 1, (int)fxMeta.w - 1));
@@ -2716,7 +2760,13 @@ inline bool ensure_composite_depth(ID3D11Device* dev, ID3D11DeviceContext* ctx) 
 
 // Private sun-depth map target: single-sample R32 depth, DSV to render,
 // SRV to sample. Non-fatal - every consumer stands down when absent.
-static constexpr UINT KH_SUN_DEPTH_SIZE = 2048;
+// 4096 (was 2048): the map is ONE ortho fitted over ALL casters -
+// spread-out sets blow the footprint up (sunMapHalfDiag measured 5 m
+// with two boxes, 103 m with seven) and texel density falls with it.
+// The resolution bump buys 2x linear density everywhere (64 MB depth
+// texture). The PROPER fix - a camera-near footprint cap with slab
+// routing for excluded casters - is specced in the continuation doc.
+static constexpr UINT KH_SUN_DEPTH_SIZE = 4096;
 // Casters beyond this camera radius stay OUT of the sun-depth fit (no
 // self-shadow, no cast) - the same distance behavior the engine's own
 // object shadows have. Bounding the fit is what bounds the texel size,
@@ -3529,15 +3579,7 @@ struct ReorderState {
     // encoding synchronous with the geometry they are tested against.
     RVExtBridge::ProjectionViewTransform cycle_pv = {};
     bool  cycle_pv_valid = false;
-    // The engine's TRUE projection depth coefficients for this cycle,
-    // sniffed from its constant-buffer uploads (see the projection sniffer
-    // below). Everything left of the flicker problem reduces to one
-    // scalar - the dynamic near plane of the frame actually being
-    // rendered, which no bridge fetch can pin down (publication races) -
-    // and m32 IS that scalar (m32 ~= -n). Unlike the combined VP (which a
-    // camera-relative renderer never uploads in world space), the
-    // projection matrix survives camera-relative rendering intact and has
-    // a near-unmistakable structural signature.
+    bool  cycle_pv_stale = false;   // this cycle's fetch failed; pv is the KEPT
     float engine_m22 = 0.0f;
     float engine_m32 = 0.0f;
     bool  engine_proj_valid = false;
@@ -4040,7 +4082,20 @@ inline void publish_world_lighting() {
                              g_pub_dir[2] * g_sun_dir_derived[2];
 
             if (dp >= 0.99863f) {
-                // within ~3 deg: glide, no jump machinery
+                // within ~3 deg: glide, no jump machinery.
+                // SLEW-LIMITER LESSON (tried, REVERTED - a field
+                // regression): capping this pursuit at ~0.02 deg/s
+                // crushed the measured derivation churn 400x
+                // (sunChurnMaxDeg 2.19 -> 0.0057) but produced ZERO
+                // symptom benefit, and it converted the cold-start
+                // convergence (the derivation refines by a degree or
+                // three while spawn cascades settle) from an invisible
+                // sub-second snap into ~100 s of visible shadow SLIDE.
+                // The 25%-per-flush pursuit is the correct design:
+                // fast convergence everywhere, and the churn it admits
+                // was proven symptom-irrelevant. sunChurnMaxDeg stays
+                // as the measurement of that churn (healthy raw
+                // readings are 1-2.5 deg under camera motion).
                 g_cand_hold = 0;
                 g_pub_dir[0] += (g_sun_dir_derived[0] - g_pub_dir[0]) * 0.25f;
                 g_pub_dir[1] += (g_sun_dir_derived[1] - g_pub_dir[1]) * 0.25f;
@@ -4149,6 +4204,7 @@ struct LiveShadowState {
     uint32_t atlas_size = 0;
     uint32_t atlas_fmt = 0;
     float    atlas_last_seen = 0.0f;   // last t15 consumption of the HELD atlas (stamped in mask_note_draw)
+    float    first_capture_time = -1.0f;   // first band capture (receive warm-up gate)
     bool     srv_failed = false;
     bool     phase_on_atlas = false;
     // Per-cycle latch
@@ -4715,6 +4771,28 @@ inline void locator_capture(CbColorProbe& pr, const float* f, uint32_t nf, uint3
 
 
 static float g_shadow_map_strength = 1.0f;    // 0 disables the map term
+// ROUND-8 FIELD VERDICT: the pool-offset theory is FALSIFIED BY ITS
+// OWN CENSUS (fireCbOffFires 0 through a live artifact - the engine's
+// b0 carries no offsets at the fire; the offset-aware restore stays
+// as hygiene). The elimination now lands on a SIDE EFFECT, not a
+// Set/Restore pair: binding the engine's mask as OUR RTV triggers
+// D3D11 read-write hazard resolution, which FORCE-NULLS any SRV
+// binding of that texture across EVERY shader stage - and the fire
+// saved/restored only PS t0/t11. If the engine holds its mask
+// SRV-bound (the apply/lighting read) when our fire interposes, the
+// RTV bind strips it; the engine's apply then samples a NULL SRV -
+// zero mask = fully shadowed - across exactly the shadow-receiving
+// range. Draw-independent (the BIND is the trigger: bit 8 kept it),
+// invisible to every restore shipped so far (wrong slots), and
+// regime-correct (per-pass rebinds hide it on normal frames;
+// partitioned frames trust bindings across batches). FIX: FULL PS+VS
+// SRV TABLE save before our binds and restore ordered AFTER the OM
+// restore (self-consistent in both hazard directions because the
+// table restored is exactly the table captured). CENSUS: fires where
+// the mask RESOURCE was SRV-bound at the interposition, by resource
+// identity - proves the mechanism in the validating dump.
+static uint64_t g_fire_mask_srv_fires = 0; // fires with the engine mask SRV-bound at the save
+static uint32_t g_fire_mask_srv_last = 0;  // last sighting: stage*100 + slot (PS=0, VS=1)
 static float g_shadow_map_bias = 0.0015f;     // in the transform's depth units
 static float g_shadow_map_sign = 1.0f;        // +1 standard depth, -1 reversed
 // --- Private sun-depth map state (render thread writes at its pass; the
@@ -4758,6 +4836,101 @@ static float g_fire_sun2[3] = {};     // LIVE per re-fire while it re-publishes
 static bool  g_fire_lock_valid = false;
 // The per-frame frozen replay below is the accepted design (a sticky
 // cross-frame texture lock cold-latches the wrong partition: falsified).
+
+static float    g_fov_max_delta = 0.0f;    // max |live - frozen| fovX at freezes
+// TRACE ROUND 2 (the retry-vs-freeze contradiction): latchRetryOk and
+// fireLatchStale BOTH tick per frame, yet a draw-1499 freeze after a
+// draw-0 retry success should read clean. The serial stamps below
+// resolve whether the two events share a frame at all, and what the
+// freeze actually observed. (Also entered from trace round 1: publish
+// lands at opaque draw 1 - the deferred-view ledger is WRONG for the
+// current engine, the view uploads at frame start and ~10x during the
+// frame; fires ~1499 and copies ~1508 sit at the opaque stream's end;
+// seal pairing is 99.9% same-SERIAL, so the disarmed rotation gate
+// was rejecting same-frame pairs: the engine's repeated view uploads
+// carry EVOLVING rotations within one frame - same frame is not same
+// rotation in this engine, and compositeAmbiguous ~70% has been
+// saying so all along.)
+// TRACE ROUND 3 (the impossible combination): one-clear-per-frame +
+// same-thread program order cannot produce 'retry ok at draw 0' AND
+// 'fire at draw 1516 observing stale' in the same frame - yet both
+// tick per frame and ordFireStale reads 1. The strongest surviving
+// model: MORE THAN ONE main-identity clear per frame (a partition or
+// viewmodel re-clear re-marking stale after the retry, late enough
+// for the resolve-region fire to observe). Counted directly below:
+// clears per rolled frame, retry attempts/successes per rolled frame.
+// TRACE ROUND 4 - CLOSURE. ordClears 1, retry attempts 0, fire/publish
+// at draws 3-12, fireLatchStale 0 all session, sealCrossFrame 100%:
+// the intra-frame topology is CONFIGURATION-DEPENDENT. The operator's
+// settings changed (atlas 4096, 8 cascades, overlapping band ranges)
+// and EVERY prior 'contradiction' dissolves: shadow passes render at
+// frame start in this config (vs after ~1,500 opaques before), the
+// clear-time bridge fetch SUCCEEDS here (the phase-lock was config-
+// bound; the retry correctly idles), and completions pair cross-frame
+// here vs same-frame before. STANDING DESIGN LAW, paid for in two
+// regressions: NOTHING MAY ASSUME A FIXED INTRA-FRAME EVENT ORDER -
+// every ordering-sensitive mechanism must gate on measured state
+// (serials, stamps, staleness flags), never on a topology model.
+// The stationary receive jitter in this config: bandProvSkips is
+// FROZEN between dumps (spawn-only - acquitted); the consumed band
+// set carries genuine OVERLAPS (band0 0-7.9, band1 5.5-15.5) that
+// the twin dedupe correctly does not collapse, and in the overlap
+// zones the per-pixel winner flip-flops as the bands reseal on
+// independent cadences - the ledgered 'range flicker' class in the
+// 8-cascade regime. bandOverlapPairs below confirms overlap presence
+// in the consumed set; the fix (deterministic overlap-zone selection
+// in the receive shader) is the next session's item.
+static uint64_t g_band_overlap_pairs = 0; // consumed adjacent bands with range overlap
+// 8-CASCADE LOCK-DEATH HUNT (operator constraint: ALL quality presets
+// must work - no settings reverts). The dump: lock wiped, relock scan
+// best 0.318 rad (cascade-family), ring admissions ~45/s, the binding
+// rescue running 1,878 scans with ZERO valid stagings. Two suspects
+// for why the true main view never re-admits in this config: (a)
+// upload-dark AND binding-rescue-blind (the head ledger's 'sky
+// disease' with a new blind spot), or (b) WORLD-ABSOLUTE view uploads
+// (translation ~9,800) rejected by the camera-relative tmag<10
+// admission fingerprint by design. The census below splits them: a
+// steady vaTmagMin ~9,800 among shape-passing candidates convicts
+// (b) - the admission needs an absolute-convention path (the publish
+// machinery already supports view_src_relative=false); vaShaped ~0
+// convicts (a) - the coverage hunt moves to the binding probe's
+// size/slot assumptions in this config.
+static uint64_t g_va_shaped = 0;          // admission: shape-passing candidates seen
+static float    g_va_tmag_min = 1e9f;     // min translation magnitude among
+// FIFTH FALSIFICATION + THE CONVERGENCE: the single-epoch gate
+// engaged fully (span cut to [711,1388], 17,004 skips) - duplicate
+// unchanged in character. Falsified on the cast: basis (full-frame
+// swap), per-batch pairing, fov, depth content, paint-epoch timing;
+// attribution: both copies are the MAP paints. The only remaining
+// determinant of the map shadow's position is the SUN SIDE: the
+// sunVP baked at each hash-gated map render (~0.85 s cadence) and
+// the cascade-DERIVED sun feeding it - and cascades FOLLOW THE
+// CAMERA. A motion-churned derivation through a slow-rehashing map
+// oscillates the shadow position during motion and settles at rest
+// (the duplicate's envelope); cumulative rotation bias = the
+// permanent offset; degenerate look-down cascade geometry = the
+// temporary pitch offset. One root, three symptoms, the one
+// subsystem never measured under motion. The gauges below measure
+// it continuously: sunChurnMaxDeg = the published sun's largest
+// 1-second angular movement since arm (legitimate solar motion is
+// ~0.004 deg/s; churn reads whole degrees); sunMapSunDeg = the
+// live angle between the published sun and the sun BAKED into the
+// current private map (map staleness under churn).
+static float    g_sun_churn_prev[3] = {};    // published sun ~1 s ago
+static uint64_t g_sun_churn_prev_ms = 0;
+static float    g_sun_churn_max_deg = 0.0f;
+static uint64_t g_atlas_srv_evicts = 0;      // reused SRV pointers evicted (cold-latch census)
+// STARTUP-SLOT HYGIENE (field: bandMaxFar read 4.24e9 in a VALID slot
+// - the capture sanity check caps far at 4000, so slots survive the
+// warm-up window with corrupt/uninitialized state marked valid; the
+// receive consumes them until reseals bury them: the startup 'wrong,
+// drifting, flickering until it settles'. Insane-border slots are now
+// skipped at consumption and invalidated on sight - the next resolve
+// reseals them sanely. atlasSrvEvicts 0 acquitted the pointer-reuse
+// path per its table; adoption invalidation stands (the class now
+// self-heals instead of requiring a view switch).
+static uint64_t g_band_insane_skips = 0;     // consumed slots with corrupt borders
+static uint64_t g_band_warmup_skips = 0;     // receive stand-down during engine warm-up
 
 static float g_sun_local_bounds[16][6] = {};   // up to 16 in-map casters: center xyz + half extents xyz (engine)
 static int   g_sun_local_count = 0;            // valid entries above (render thread, like the rest)
@@ -5285,6 +5458,7 @@ inline void shadow_live_consider_atlas(ID3D11Texture2D* tex, const D3D11_TEXTURE
     g_ls.atlas_identity = id;
     g_ls.atlas_size = td.Width;
     g_ls.atlas_fmt = static_cast<uint32_t>(td.Format);
+    g_atlas_srv_count = 0;   // the cache attested a different identity (cold-latch fix)
     g_ls.atlas_last_seen = now_at;   // adoption grace: displaceable only after 3 s unseen
     g_ls.srv_failed = false;
     g_ls.cache_valid = false;   // new atlas: relearn the upload locator
@@ -5609,13 +5783,6 @@ inline void shadow_view_scan(ID3D11Resource* res, const void* data, uint32_t byt
                 auto& bs = g_ls.band[bi];
                 if (!bs.valid || !bs.pending_view) continue;
 
-                // PAIRING QUALITY GATE (operator directive, the receive
-                // half): a publication that is not exact-class must not
-                // pair a seal - an off-axis view baked into a frozen band
-                // is a PERMANENT receive offset until reseal. Withheld
-                // pairings stay pending; the epoch guard below retires
-                // them cleanly and the next resolve reseals under a
-                // better publication. Absent beats offset, as ever.
                 if (g_ls.last_publish_rot_err > 1e-3f) {
                     g_ls.band_bail_quality++;
                     continue;
@@ -5658,6 +5825,12 @@ inline void shadow_view_scan(ID3D11Resource* res, const void* data, uint32_t byt
             // Objects sit meters away; the view's translation is ~0.
             const float tmag_r = fabsf(w[12]) + fabsf(w[13]) + fabsf(w[14]);
             const float tmag_c = fabsf(w[3]) + fabsf(w[7]) + fabsf(w[11]);
+            g_va_shaped++;   // hunt census
+
+            if (tmag_r >= 10.0f && tmag_c >= 10.0f) {
+                const float khv_t = tmag_r < tmag_c ? tmag_r : tmag_c;
+                if (khv_t < g_va_tmag_min) g_va_tmag_min = khv_t;
+            }
 
             if (tmag_r < 10.0f || tmag_c < 10.0f) {
                 const uint32_t i = g_ls.vc_n & 15;
@@ -6368,6 +6541,7 @@ inline void release_shadow_device_state() {
     g_ls.atlas_size = 0;
     g_ls.atlas_fmt = 0;
     g_ls.atlas_last_seen = 0.0f;
+    g_ls.first_capture_time = -1.0f;
     g_ls.srv_failed = false;
     g_ls.phase_on_atlas = false;
     g_ls.pending_valid = false;
@@ -6409,6 +6583,9 @@ inline void release_shadow_device_state() {
     // --- frozen fire + private sun map ---
     if (g_fire_lock) { g_fire_lock->Release(); g_fire_lock = nullptr; }
     g_fire_lock_valid = false;
+
+
+
     g_mask_cast_arm = false;
     g_mask_cast_fired = false;
     g_sun_map_valid = false;
@@ -6577,7 +6754,7 @@ inline void band_capture(ID3D11DeviceContext* ctx, const float* cb, uint32_t off
         b.pending_view = true;
         b.vcol_bridge = !fv;
         b.pending_since = now;
-
+        if (g_ls.first_capture_time < 0.0f) g_ls.first_capture_time = now;
         ctx->CopyResource(b.tex, g_ls.atlas_tex);
         b.last_time = now;
         b.valid = true;
@@ -7361,6 +7538,64 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
     return true;
 }
 
+// ===========================================================================
+// FLICKER/SHADOW CAMPAIGN LEDGER (consolidated at wrap-up). Validated fixes
+// kept in this file: the cast-gate recent-exact recalibration; the sky
+// value-capture hoist (fog color lock-in); the PS-t15 mask-SRV restore (the
+// overcast world-darkening root - the fire's mask RTV bind hazard-nulled the
+// engine's own mask SRV at PS slot 15, held bound essentially always; the
+// full 16-slot PS+VS SRV table save/restore repairs it, and
+// fireMaskSrvFires/Last is the PERMANENT regression tripwire); the
+// UAV-complete 8-wide OM save/restore and offset-aware b0 save/restore
+// (censuses read zero in the field - kept as correctness hygiene); the
+// wholesale-latch fire basis (field-noted reduction of the permanent Zeus
+// drift); the atlas SRV-cache cold-latch fix (verify-on-hit + adoption
+// invalidation; atlasSrvEvicts is its tripwire); the band startup-slot
+// hygiene (insane borders invalidate on sight; bandInsaneSkips); the
+// clear-latch retry at early opaque draws (the clear-time bridge fetch
+// fails PHASE-LOCKED in some configs - cycle_pv_stale marks kept-previous
+// cycles). The sun SLEW LIMITER was tried and REVERTED (see the ledger in
+// publish_world_lighting): it crushed the measured derivation churn 400x
+// with zero symptom benefit and regressed the cold start into ~100 s of
+// visible shadow slide. sunChurnMaxDeg remains as the churn measurement
+// (healthy raw readings 1-2.5 deg/s under camera motion).
+//
+// STANDING LAWS, paid for in two field regressions: (1) the engine's
+// intra-frame event topology is CONFIGURATION-DEPENDENT (shadow passes at
+// frame start in one preset, after ~1,500 opaques in another; seal pairing
+// same-frame in one, cross-frame in the other) - nothing may assume a fixed
+// order; gate on measured state only. (2) The engine's ~10 view uploads per
+// frame carry EVOLVING rotations (the sim advances mid-frame;
+// compositeAmbiguous ~70% is this phenomenon) - same frame is not same
+// rotation; any pairing must key on recent-exact windows, never instant
+// equality. (3) The engine builds its shadow-map matrices FOR THE VIEW THAT
+// CONSUMES THEM - completion-frame pairing is correct; copy-time pairing
+// regressed in the field.
+//
+// THE ZEUS/SPECTATOR MOTION FAMILY (cast duplicate under motion, transient
+// opposite-to-motion cast/receive offsets, rotation-accumulating permanent
+// offset) is documented as a KNOWN LIMITATION after an exhaustive hunt:
+// mute-protocol attribution proved both duplicate copies are this file's
+// MAP-BRANCH paints, and then FIVE clean falsifications eliminated every
+// controllable input at the point of consumption - the frozen view basis
+// (swapped by a full frame: imperceptible), per-batch depth-paired bases,
+// the fov (measured 0.006 divergence max), the depth content (probed
+// plausible), paint-epoch timing (fire window cut from [21,1385] to
+// [711,1388]: unchanged), and finally the published sun (churn crushed
+// 400x by the slew limiter, gauge-verified: symptoms unchanged). Every
+// mechanism this code can observe or control is measured clean while the
+// symptoms persist; the remainder lives in the engine's own mask/apply
+// behavior for the spectator camera and needs offline GPU capture analysis
+// (a RenderDoc pair, moving vs still), not further in-code instrumentation.
+// Player-view gameplay is materially unaffected.
+//
+// OPEN, INSTRUMENTED WATCHES: the 8-cascade candidate flood can kill the
+// view lock in heavy fog (viewCandN ~762, best 0.318 - the admission census
+// vaShaped/vaTmagMin splits upload-dark vs convention-rejected when it
+// recurs); the wide-band configs (132 m bands seen once) break the receive
+// decode's 8-35 m assumptions (bandMaxFar/bandWidest/bandValidN and
+// bandOverlapPairs characterize the layout).
+// ===========================================================================
 inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
     // cast_misses = FIRST failed guard: 1 arm/fired never satisfied (set
     // once armed, cleared on entry), 3 resources, 41 depth, 42 fov,
@@ -7369,6 +7604,8 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
     // (distance rule, not a failure); post-guard:
     // 7 states, 8 no meshes, 9 Map; 0 = full success.
     if (!ctx) return;
+
+
     if (g_mask_cast_arm && !g_mask_cast_fired) g_ls.cast_misses = 1;
 
     // (The NEAR-REGIME GATE lived here through two versions and is
@@ -7554,9 +7791,24 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
     // pass refuses to render without any) - no snapshot needed.
     if (!sun_map && ncb == 0) { g_ls.cast_misses = 8; return; }
     g_ro.in_injection = true;
-    ID3D11RenderTargetView* old_rtvs[4] = {};
+    // UAV-COMPLETE OM SAVE - the overcast root fix (see the round-6
+    // ledger): capture all 8 RTV slots, the DSV, AND the UAVs the
+    // engine binds alongside them, so the restore below is identity
+    // for the partitioned resolve our fire interposes into.
+    ID3D11RenderTargetView* old_rtvs[8] = {};
     ID3D11DepthStencilView* old_dsv = nullptr;
-    ctx->OMGetRenderTargets(4, old_rtvs, &old_dsv);
+    ID3D11UnorderedAccessView* old_uavs[8] = {};
+    ctx->OMGetRenderTargets(8, old_rtvs, &old_dsv);
+    ctx->OMGetRenderTargetsAndUnorderedAccessViews(0, nullptr, nullptr, 0, 8, old_uavs);
+    int khf_uav_n = 0, khf_uav_lo = 8;
+
+    for (int ui = 0; ui < 8; ++ui) {
+        if (old_uavs[ui]) {
+            khf_uav_n++;
+            if (ui < khf_uav_lo) khf_uav_lo = ui;
+        }
+    }
+
     UINT old_nvp = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
     D3D11_VIEWPORT old_vps[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
     ctx->RSGetViewports(&old_nvp, old_vps);
@@ -7570,14 +7822,28 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
     UINT old_bmask = 0xFFFFFFFF;
     ID3D11DepthStencilState* old_dss = nullptr;
     UINT old_sref = 0;
-    ID3D11ShaderResourceView* old_t0 = nullptr;
     ctx->VSGetShader(&old_vs, nullptr, nullptr);
     ctx->PSGetShader(&old_ps, nullptr, nullptr);
     ctx->IAGetInputLayout(&old_il);
     ctx->IAGetPrimitiveTopology(&old_topo);
-    ctx->PSGetConstantBuffers(0, 1, &old_cb);
+    // OFFSET-AWARE b0 SAVE - the round-7 root fix: capture the pool
+    // offsets the plain getters cannot see. num == 0 marks a
+    // non-offset bind (restored with the plain setter, identical to
+    // the historical path); ctx1 unavailable degrades to historical.
+    UINT old_cb_first = 0, old_cb_num = 0;
+    UINT old_vs_cb_first = 0, old_vs_cb_num = 0;
+    ID3D11DeviceContext1* khf_ctx1 = nullptr;
+    ctx->QueryInterface(__uuidof(ID3D11DeviceContext1), reinterpret_cast<void**>(&khf_ctx1));
     ID3D11Buffer* old_vs_cb = nullptr;
-    ctx->VSGetConstantBuffers(0, 1, &old_vs_cb);   // the fire sets VS b0
+
+    if (khf_ctx1) {
+        khf_ctx1->PSGetConstantBuffers1(0, 1, &old_cb, &old_cb_first, &old_cb_num);
+        khf_ctx1->VSGetConstantBuffers1(0, 1, &old_vs_cb, &old_vs_cb_first, &old_vs_cb_num);
+
+    } else {
+        ctx->PSGetConstantBuffers(0, 1, &old_cb);
+        ctx->VSGetConstantBuffers(0, 1, &old_vs_cb);   // the fire sets VS b0
+    }
     // and never restored it: every engine VERTEX shader after the fire
     // read our mesh cbd as its constants - the last-fired mesh's COLOR
     // tinted all particles (blue, from the fog array). The dual-gated
@@ -7585,9 +7851,43 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
     // engine's last natural VS-b0 rebind before the particle pass.
     ctx->OMGetBlendState(&old_blend, old_bf, &old_bmask);
     ctx->OMGetDepthStencilState(&old_dss, &old_sref);
-    ctx->PSGetShaderResources(0, 1, &old_t0);
-    ID3D11ShaderResourceView* old_t11 = nullptr;
-    ctx->PSGetShaderResources(11, 1, &old_t11);   // sun-map slot (Get/Set/Restore rule)
+    // FULL SRV TABLE SAVE - the round-8 root fix (see the ledger): our
+    // mask RTV bind hazard-nulls SRV bindings of the mask in slots we
+    // never saved; capture BOTH stages' full tables so the restore
+    // below is binding-identity for the engine.
+    ID3D11ShaderResourceView* old_ps_srvs[16] = {};
+    ID3D11ShaderResourceView* old_vs_srvs[16] = {};
+    ctx->PSGetShaderResources(0, 16, old_ps_srvs);
+    ctx->VSGetShaderResources(0, 16, old_vs_srvs);
+
+    // Census (round-8 conviction): is the engine's mask RESOURCE
+    // SRV-bound at our interposition point?
+    if (g_mask.engine_mask_rtv) {
+        ID3D11Resource* khf_mask_res = nullptr;
+        g_mask.engine_mask_rtv->GetResource(&khf_mask_res);
+
+        if (khf_mask_res) {
+            for (int si = 0; si < 32; ++si) {
+                ID3D11ShaderResourceView* sv = si < 16 ? old_ps_srvs[si]
+                                                       : old_vs_srvs[si - 16];
+                if (!sv) continue;
+                ID3D11Resource* sr = nullptr;
+                sv->GetResource(&sr);
+
+                if (sr == khf_mask_res) {
+                    g_fire_mask_srv_fires++;
+                    g_fire_mask_srv_last = static_cast<uint32_t>(
+                        (si < 16 ? 0 : 100) + (si < 16 ? si : si - 16));
+                    if (sr) sr->Release();
+                    break;
+                }
+
+                if (sr) sr->Release();
+            }
+
+            khf_mask_res->Release();
+        }
+    }
     // GS/HS/DS + rasterizer parity (the state-leak ledger, closed): every
     // other foreign draw site nulls the geometry stages before drawing
     // (sun-depth pass, injection, both flushes - all via StateBackup or an
@@ -7635,12 +7935,47 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
         g_fire_dims2[0] = g_mask.cast_dims[0];
         g_fire_dims2[1] = g_mask.cast_dims[1];
         memcpy(g_fire_view2, g_ls.frame_view, sizeof(g_fire_view2));
+
+        // WHOLESALE LATCH BASIS - kept from the Zeus hunt as its one
+        // field-validated improvement: replacing the hybrid frozen view
+        // (engine rotation + bridge-rebuilt translation, epochs mixed)
+        // with the injection's latch transform measurably REDUCED the
+        // permanent Zeus drift. The latch is the basis the injection
+        // composites with pixel-perfectly in every configuration.
+        if (g_ro.cycle_pv_valid) {
+            memcpy(g_fire_view2, &g_ro.cycle_pv.view[0][0], sizeof(g_fire_view2));
+        }
         const float* fsun = kh_shadow_sun();
         if (!fsun) fsun = g_sun_dir_engine;
         g_fire_sun2[0] = fsun[0];
         g_fire_sun2[1] = fsun[1];
         g_fire_sun2[2] = fsun[2];
+
+        // Sun-churn gauge (see the convergence ledger): the published
+        // sun's per-second angular movement, max since arm.
+        {
+            const uint64_t khs_now = steady_now_ms();
+
+            if (g_sun_churn_prev_ms == 0) {
+                g_sun_churn_prev[0] = fsun[0];
+                g_sun_churn_prev[1] = fsun[1];
+                g_sun_churn_prev[2] = fsun[2];
+                g_sun_churn_prev_ms = khs_now;
+            } else if (khs_now - g_sun_churn_prev_ms >= 1000) {
+                float d = fsun[0] * g_sun_churn_prev[0] +
+                          fsun[1] * g_sun_churn_prev[1] +
+                          fsun[2] * g_sun_churn_prev[2];
+                d = d > 1.0f ? 1.0f : (d < -1.0f ? -1.0f : d);
+                const float khs_deg = acosf(d) * 57.29578f;
+                if (khs_deg > g_sun_churn_max_deg) g_sun_churn_max_deg = khs_deg;
+                g_sun_churn_prev[0] = fsun[0];
+                g_sun_churn_prev[1] = fsun[1];
+                g_sun_churn_prev[2] = fsun[2];
+                g_sun_churn_prev_ms = khs_now;
+            }
+        }
         g_fire_lock_valid = true;
+
     }
 
     // FROZEN REPLAY, RESTORED as the fire's input mode - the live-input
@@ -7672,6 +8007,7 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
         cbd.cast_view[2][1] = g_fire_sun2[1];
         cbd.cast_view[2][2] = g_fire_sun2[2];
         cbd.cast_view[2][3] = g_shadow_map_strength;   // 1 = full: engine handles ambient
+                                                       // mute = A/B no-op write (round 4)
     };
 
     if (sun_map) {
@@ -7736,18 +8072,72 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
         }
     }
 
-    ctx->OMSetRenderTargets(4, old_rtvs, old_dsv);
+    // UAV-complete restore (the root fix): rebind the engine's exact
+    // RTV+DSV+UAV layout. The engine's own layout satisfies the API's
+    // slot rule (UAV start >= RTV count); a driver-rejected call would
+    // degrade to the historical behavior, never worse.
+    if (khf_uav_n > 0) {
+        int khf_uav_hi = 0;
+
+        for (int ui = 7; ui >= 0; --ui) {
+            if (old_uavs[ui]) { khf_uav_hi = ui; break; }
+        }
+
+        UINT khf_rt_n = 0;
+
+        for (int ri = 7; ri >= 0; --ri) {
+            if (old_rtvs[ri]) { khf_rt_n = static_cast<UINT>(ri) + 1; break; }
+        }
+
+        static const UINT khf_keep[8] = {
+            0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu,
+            0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu,
+        };
+        ctx->OMSetRenderTargetsAndUnorderedAccessViews(
+            khf_rt_n, old_rtvs, old_dsv,
+            static_cast<UINT>(khf_uav_lo),
+            static_cast<UINT>(khf_uav_hi - khf_uav_lo + 1),
+            old_uavs + khf_uav_lo, khf_keep);
+    } else {
+        ctx->OMSetRenderTargets(8, old_rtvs, old_dsv);
+    }
+
     if (old_nvp > 0) ctx->RSSetViewports(old_nvp, old_vps);
     ctx->VSSetShader(old_vs, nullptr, 0);
     ctx->PSSetShader(old_ps, nullptr, 0);
     ctx->IASetInputLayout(old_il);
     ctx->IASetPrimitiveTopology(old_topo);
-    ctx->PSSetConstantBuffers(0, 1, &old_cb);
-    ctx->VSSetConstantBuffers(0, 1, &old_vs_cb);
+    // Offset-aware b0 restore (round-7 root fix): rebind the engine's
+    // pool windows exactly. Our composite_cb is bound here, so the
+    // buffer always CHANGES at this call - the same-buffer offset-only
+    // SetConstantBuffers1 runtime bug cannot drop it.
+    if (khf_ctx1) {
+        if (old_cb && old_cb_num > 0) {
+            khf_ctx1->PSSetConstantBuffers1(0, 1, &old_cb, &old_cb_first, &old_cb_num);
+        } else {
+            ctx->PSSetConstantBuffers(0, 1, &old_cb);
+        }
+
+        if (old_vs_cb && old_vs_cb_num > 0) {
+            khf_ctx1->VSSetConstantBuffers1(0, 1, &old_vs_cb, &old_vs_cb_first, &old_vs_cb_num);
+        } else {
+            ctx->VSSetConstantBuffers(0, 1, &old_vs_cb);
+        }
+
+        khf_ctx1->Release();
+    } else {
+        ctx->PSSetConstantBuffers(0, 1, &old_cb);
+        ctx->VSSetConstantBuffers(0, 1, &old_vs_cb);
+    }
+
     ctx->OMSetBlendState(old_blend, old_bf, old_bmask);
     ctx->OMSetDepthStencilState(old_dss, old_sref);
-    ctx->PSSetShaderResources(0, 1, &old_t0);
-    ctx->PSSetShaderResources(11, 1, &old_t11);
+    // Full-table restore (round-8 root fix): rebind BOTH stages' exact
+    // SRV tables - this runs after the OM restore, so any mask SRV in
+    // the captured table is legal to rebind again (the RTV set that
+    // nulled it has been reverted). Covers t0/t11 by construction.
+    ctx->PSSetShaderResources(0, 16, old_ps_srvs);
+    ctx->VSSetShaderResources(0, 16, old_vs_srvs);
     ctx->GSSetShader(old_gs, nullptr, 0);
     ctx->HSSetShader(old_hs, nullptr, 0);
     ctx->DSSetShader(old_ds2, nullptr, 0);
@@ -7755,7 +8145,9 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
     g_ro.in_injection = false;
     KH_SAFE_RELEASE(old_vs_cb);
 
-    for (int r = 0; r < 4; ++r) KH_SAFE_RELEASE(old_rtvs[r]);
+    for (int r = 0; r < 8; ++r) KH_SAFE_RELEASE(old_rtvs[r]);
+
+    for (int u = 0; u < 8; ++u) KH_SAFE_RELEASE(old_uavs[u]);
 
     KH_SAFE_RELEASE(old_dsv);
     KH_SAFE_RELEASE(old_vs);
@@ -7764,8 +8156,11 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
     KH_SAFE_RELEASE(old_cb);
     KH_SAFE_RELEASE(old_blend);
     KH_SAFE_RELEASE(old_dss);
-    KH_SAFE_RELEASE(old_t0);
-    KH_SAFE_RELEASE(old_t11);
+
+    for (int s16 = 0; s16 < 16; ++s16) {
+        KH_SAFE_RELEASE(old_ps_srvs[s16]);
+        KH_SAFE_RELEASE(old_vs_srvs[s16]);
+    }
     KH_SAFE_RELEASE(old_gs);
     KH_SAFE_RELEASE(old_hs);
     KH_SAFE_RELEASE(old_ds2);
@@ -8806,6 +9201,19 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
                 cbd.band_border[b][3] = 0.0f;
                 if (!bs.valid || !bs.srv) continue;
 
+                // RECEIVE WARM-UP GATE (the startup garbage class the
+                // local fixes could not cover: the ENGINE's own early
+                // atlas content is mid-stream garbage - our seals copy
+                // and decode it faithfully, and reseal churn makes it
+                // slide until the engine settles). Absent beats offset:
+                // the receive term stands down for the first 2 s after
+                // the first capture.
+                if (g_ls.first_capture_time < 0.0f ||
+                    effect_time_seconds() - g_ls.first_capture_time < 2.0f) {
+                    g_band_warmup_skips++;
+                    continue;
+                }
+
                 // SPAWN-WINDOW GUARD: a pending band whose provisional
                 // view is the bridge fallback pairs cross-convention -
                 // the initial-shadow drift. Absent beats offset; the
@@ -8816,7 +9224,15 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
                 // far not meaningfully beyond it = a partition duplicate
                 // of the same range; two twins alternate seal content and
                 // the shader's winner flip-flops (the range flicker).
+                if (!(bs.border[1] > bs.border[0]) || bs.border[0] < 0.0f ||
+                    bs.border[1] > 4000.0f) {   // startup-slot hygiene: invalidate,
+                    g_ls.band[order[b]].valid = false;   // the next resolve reseals sanely
+                    g_band_insane_skips++;
+                    continue;
+                }
+
                 if (bs.border[0] < prev_far - 0.5f && bs.border[1] < prev_far * 1.25f + 1.0f) continue;
+                if (bs.border[0] < prev_far - 0.5f) g_band_overlap_pairs++;   // consumed overlap census
                 prev_far = bs.border[1];
                 memcpy(cbd.band_mat[b * 3 + 0], bs.sm + 0, 16);
                 memcpy(cbd.band_mat[b * 3 + 1], bs.sm + 4, 16);
@@ -9039,9 +9455,34 @@ inline void reorder_pre_draw(ID3D11DeviceContext* self) {
 
     if (!g_ro.blend_translucent || !g_ro.dss_nowrite) {
         if (g_ro.dsv_main) {
-            // An opaque draw against the main scene depth: evidence that a
-            // genuine scene pass is in progress, and the source of this
-            // cycle's authoritative viewport depth range.
+            // LATCH RETRY (the phase-lock root fix, see the regression
+            // ledger): the clear-time fetch fails phase-locked; a few
+            // microseconds later the contention window has passed.
+            // Retry until the first success, capped at the first 8
+            // opaque draws - all latch consumers (publish rebuild,
+            // freeze re-anchor, seal references, injection) run after
+            // this point in the frame.
+            if (g_ro.cycle_pv_stale && g_ro.opaque_draws < 8) {
+                RVExtBridge::ProjectionViewTransform khl_pv = {};
+
+                if (RVExtBridge::get_projection_view_transform(khl_pv)) {
+                    // VIEW-ONLY REFRESH (the whole-mesh flicker guard):
+                    // a mid-frame fetch can carry the NEXT frame's
+                    // PROJECTION (the sim republishes mid-cycle) - the
+                    // exact poison the retry's own ledger flagged for
+                    // the encode fallbacks. The fresh VIEW is what every
+                    // consumer needs; the kept-previous projection stays.
+                    if (g_ro.cycle_pv_valid) {
+                        memcpy(&khl_pv.projection[0][0], &g_ro.cycle_pv.projection[0][0],
+                               sizeof(khl_pv.projection));
+                    }
+
+                    g_ro.cycle_pv = khl_pv;
+                    g_ro.cycle_pv_valid = true;
+                    g_ro.cycle_pv_stale = false;
+                }
+            }
+
             ++g_ro.opaque_draws;
             ++g_ro.opaques_since_inject;
 
@@ -9239,14 +9680,35 @@ static void STDMETHODCALLTYPE hooked_pssetshaderresources(ID3D11DeviceContext* s
             ID3D11ShaderResourceView* srv = srvs[15 - start];
 
             if (srv) {
-                bool known = false;
+                // COLD-LATCH FIX (the startup wrong-atlas class, healed
+                // only by a view switch): the engine recreates its atlas
+                // at the spawn draw-distance ramp, frees its SRVs, and
+                // the runtime REUSES those pointers over the NEW atlas -
+                // a raw-pointer cache hit then stamps the DEAD held
+                // atlas alive forever, blocking the 3 s recovery while
+                // the receive copies orphaned VRAM ('entire trees that
+                // should not be possible'). The cache now verifies the
+                // RESOURCE on every hit and evicts reused pointers;
+                // adoption clears it wholesale.
+                int known_at = -1;
 
                 for (uint32_t i = 0; i < g_atlas_srv_count; ++i) {
-                    if (g_atlas_srv_cache[i] == srv) { known = true; break; }
+                    if (g_atlas_srv_cache[i] == srv) { known_at = static_cast<int>(i); break; }
                 }
 
-                if (known) {
-                    g_mask.atlas_bound = true;
+                if (known_at >= 0) {
+                    ID3D11Resource* kres = nullptr;
+                    srv->GetResource(&kres);
+
+                    if (kres == static_cast<ID3D11Resource*>(g_ls.atlas_tex)) {
+                        g_mask.atlas_bound = true;
+                    } else {
+                        g_atlas_srv_cache[known_at] =
+                            g_atlas_srv_cache[--g_atlas_srv_count];   // evict reused pointer
+                        g_atlas_srv_evicts++;
+                    }
+
+                    if (kres) kres->Release();
                 } else {
                     ID3D11Resource* res = nullptr;
                     srv->GetResource(&res);
@@ -9455,16 +9917,19 @@ static void STDMETHODCALLTYPE hooked_clear_depthstencil(ID3D11DeviceContext* sel
                                        // The capture arms instead (dual-gated).
             g_ls.view_published_this_frame = false;
 
-            // Latch this frame's matrices NOW, in lockstep with the engine's
-            // own frame-setup snapshot (see the cycle_pv note above). On a
-            // transient fetch failure the previous cycle's latch is kept -
-            // one frame stale beats the mid-frame fetch this replaces.
             RVExtBridge::ProjectionViewTransform pv = {};
 
             if (RVExtBridge::get_projection_view_transform(pv)) {
                 g_ro.cycle_pv = pv;
                 g_ro.cycle_pv_valid = true;
+                g_ro.cycle_pv_stale = false;
+            } else {
+                // Kept-previous latch: correct for the injection's own
+                // uses, but the fire's re-anchor must know (see the
+                // duplicate-shadow ledger at the freeze).
+                g_ro.cycle_pv_stale = true;
             }
+
         }
     }
 
@@ -10223,6 +10688,19 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                 cbd.band_border[b][3] = 0.0f;
                 if (!bs.valid || !bs.srv) continue;
 
+                // RECEIVE WARM-UP GATE (the startup garbage class the
+                // local fixes could not cover: the ENGINE's own early
+                // atlas content is mid-stream garbage - our seals copy
+                // and decode it faithfully, and reseal churn makes it
+                // slide until the engine settles). Absent beats offset:
+                // the receive term stands down for the first 2 s after
+                // the first capture.
+                if (g_ls.first_capture_time < 0.0f ||
+                    effect_time_seconds() - g_ls.first_capture_time < 2.0f) {
+                    g_band_warmup_skips++;
+                    continue;
+                }
+
                 // SPAWN-WINDOW GUARD: a pending band whose provisional
                 // view is the bridge fallback pairs cross-convention -
                 // the initial-shadow drift. Absent beats offset; the
@@ -10233,7 +10711,15 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                 // far not meaningfully beyond it = a partition duplicate
                 // of the same range; two twins alternate seal content and
                 // the shader's winner flip-flops (the range flicker).
+                if (!(bs.border[1] > bs.border[0]) || bs.border[0] < 0.0f ||
+                    bs.border[1] > 4000.0f) {   // startup-slot hygiene: invalidate,
+                    g_ls.band[order[b]].valid = false;   // the next resolve reseals sanely
+                    g_band_insane_skips++;
+                    continue;
+                }
+
                 if (bs.border[0] < prev_far - 0.5f && bs.border[1] < prev_far * 1.25f + 1.0f) continue;
+                if (bs.border[0] < prev_far - 0.5f) g_band_overlap_pairs++;   // consumed overlap census
                 prev_far = bs.border[1];
                 memcpy(cbd.band_mat[b * 3 + 0], bs.sm + 0, 16);
                 memcpy(cbd.band_mat[b * 3 + 1], bs.sm + 4, 16);
@@ -10913,6 +11399,13 @@ inline void reset_stat_counters() {
     g_recv_term_skips = 0; g_recv_wipes = 0;
     g_sun_jump_refused = 0;
     g_cast_frozen_fires = 0;
+    g_fire_mask_srv_fires = 0; g_fire_mask_srv_last = 0;
+    g_sun_churn_max_deg = 0.0f; g_sun_churn_prev_ms = 0;
+    g_atlas_srv_evicts = 0;
+    g_band_insane_skips = 0;
+    g_band_warmup_skips = 0;
+    g_band_overlap_pairs = 0;
+    g_va_shaped = 0; g_va_tmag_min = 1e9f;
     g_rt_resolve_true = 0; g_rt_resolve_false = 0;
     g_rt_half_accepts = 0; g_sweep_gap_resets = 0; g_rt_last_rej_w = 0;
     g_inj_guard_off = 0; g_flush_fallback_draws = 0; g_flush_latch_pvs = 0;
@@ -11783,8 +12276,6 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("maskFailFmt", RenderIntegration::g_mask.fail_fmt));
         out.push_back(kvf("fireFovX", RenderIntegration::g_mask.last_fire_fov[0]));
         out.push_back(kvf("fireFovY", RenderIntegration::g_mask.last_fire_fov[1]));
-        out.push_back(kvf("fireDimsW", RenderIntegration::g_mask.last_fire_dims[0]));
-        out.push_back(kvf("fireDimsH", RenderIntegration::g_mask.last_fire_dims[1]));
         out.push_back(kvf("fireRotErr", RenderIntegration::g_mask.last_fire_rot_err));
         out.push_back(kv("encVpRejects", RenderIntegration::g_stats.enc_vp_rejects));
         out.push_back(kv("reorderHook", RenderIntegration::g_reorder_hook_active.load(std::memory_order_acquire) ? 1 : 0));
@@ -11937,6 +12428,41 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("keepStampRejects", RenderIntegration::g_keep_stamp_rejects));
         out.push_back(kv("keepStaleSkips", RenderIntegration::g_keep_stale_skips));
         out.push_back(kvf("castArmLostAgeS", age_s(RenderIntegration::g_cast_arm_lost_ms)));
+        out.push_back(kv("sunLocalCount", static_cast<uint64_t>(RenderIntegration::g_sun_local_count)));
+        out.push_back(kvf("sunMapHalfDiag", sqrtf(
+            RenderIntegration::g_sun_map_bounds[3] * RenderIntegration::g_sun_map_bounds[3] +
+            RenderIntegration::g_sun_map_bounds[4] * RenderIntegration::g_sun_map_bounds[4] +
+            RenderIntegration::g_sun_map_bounds[5] * RenderIntegration::g_sun_map_bounds[5])));
+        out.push_back(kv("fireMaskSrvFires", RenderIntegration::g_fire_mask_srv_fires));
+        out.push_back(kv("fireMaskSrvLast", static_cast<uint64_t>(RenderIntegration::g_fire_mask_srv_last)));
+        out.push_back(kvf("fireFovMaxDelta", RenderIntegration::g_fov_max_delta));
+        out.push_back(kvf("sunChurnMaxDeg", RenderIntegration::g_sun_churn_max_deg));
+        out.push_back(kv("atlasSrvEvicts", RenderIntegration::g_atlas_srv_evicts));
+        out.push_back(kv("bandInsaneSkips", RenderIntegration::g_band_insane_skips));
+        out.push_back(kv("bandWarmupSkips", RenderIntegration::g_band_warmup_skips));
+        out.push_back(kv("bandOverlapPairs", RenderIntegration::g_band_overlap_pairs));
+        {
+            // Band-layout census (the 132 m band session): the widest
+            // valid band's span and the layout's total reach - the
+            // receive decode was built against 8-35 m bands.
+            float khb_max_far = 0.0f, khb_widest = 0.0f;
+            int khb_valid = 0;
+
+            for (int bi = 0; bi < 8; ++bi) {
+                const auto& kb = RenderIntegration::g_ls.band[bi];
+                if (!kb.valid) continue;
+                khb_valid++;
+                if (kb.border[1] > khb_max_far) khb_max_far = kb.border[1];
+                const float w = kb.border[1] - kb.border[0];
+                if (w > khb_widest) khb_widest = w;
+            }
+
+            out.push_back(kvf("bandMaxFar", khb_max_far));
+            out.push_back(kvf("bandWidest", khb_widest));
+            out.push_back(kv("bandValidN", static_cast<uint64_t>(khb_valid)));
+        }
+        out.push_back(kv("vaShaped", RenderIntegration::g_va_shaped));
+        out.push_back(kvf("vaTmagMin", RenderIntegration::g_va_tmag_min));
         out.push_back(kv("viewSrcMisses", static_cast<uint64_t>(RenderIntegration::g_ls.view_src_miss)));
         out.push_back(kv("viewCandN", static_cast<uint64_t>(RenderIntegration::g_ls.vc_n)));
         out.push_back(kvf("viewPubRotErr", RenderIntegration::g_ls.last_publish_rot_err));

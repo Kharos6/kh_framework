@@ -7053,7 +7053,7 @@ static void initialize_sqf_integration() {
 
     _sqf_get_render_stats = intercept::client::host::register_sqf_command(
         "getRenderStats",
-        "Render health counters, OPT-IN: the FIRST call arms recording (zeroing the diagnostic counters so dumps are session-scoped) and returns [['status','armed']]; subsequent calls return [[name, value], ...]. Composite path: flushes, gatePassed, compositeInjections (should track flushes), compositeMeshes, compositeSkips, compositeAmbiguous, compositeProjLock, compositeRearms, compositeRejSpan, compositeRejFloor. Sun-depth map (mesh-shaped cast + self-shadowing): sunDepthPasses (healthy = roughly flushes while meshes exist), sunDepthCasters. Shadow receive: shadowLiveLatches, shadowLiveCascades, bandCaptures, band0/1 Near/Far/Copies, sealCompletions (healthy = equals bandCaptures), viewLocks, viewSrcValid, frameViewHits, resolveHits. Shadow cast: analyticCasts (one per fire on the sun-map path, one per caster on the slab fallback), castMisses (0 = firing; nonzero names the first failed guard). Cold chain: coldFirstStaged, coldFirstTrigger, coldFirstInject, coldFirstCast, coldGNoDsv, coldGFloor, coldGTid, coldPubRejects (render-thread-identification bails while cold). Lighting: sunDirValid, sunDirEngine*, sunBrightness. A skipped flush is a frame rendered without effects (flicker).",
+        "Render health counters, OPT-IN: the FIRST call arms recording (zeroing the diagnostic counters so dumps are session-scoped) and returns [['status','armed']]; subsequent calls return [[name, value], ...]. A skipped flush is a frame rendered without effects (flicker).",
         userFunctionWrapper<get_render_stats_sqf>,
         game_data_type::ARRAY
     );

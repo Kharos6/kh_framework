@@ -461,6 +461,8 @@ struct RenderStats {
     uint64_t composite_rej_floor = 0;  // triggers rejected: opaque evidence below the floor
     uint64_t composite_slot_encodes = 0;    // injections encoded with the live slot pair (engine-verbatim)
     uint64_t composite_far_phase_skips = 0; // injections withheld while a far partition is the live phase
+    uint64_t composite_far_injects = 0;     // far-phase injections that PROCEEDED (all meshes clear of the far near plane)
+    uint64_t composite_keep_encodes = 0;    // injections encoded with the PERSISTED slot pair (silent cycle, fresh keep)
     uint64_t composite_anomaly_skips = 0;   // injections withheld from anomalous cycles
     // --- Shadow-pass recon diagnostics (setShadowRecon; see the recon
     //     section for what each number decides) ---
@@ -3564,6 +3566,22 @@ struct ReorderState {
     bool anomaly_seen = false;
 };
 static ReorderState g_ro;
+// PERSISTED SLOT PAIR: the last LIVE camera-class telltale values, stamped
+// at the probe site with a timestamp. The flush's carried draw prefers
+// these when the live slot is silent and the stamp is fresh - the field
+// convicted a near-0.01 (viewmodel-window) latch reaching the carry
+// through exactly that blind spot (missLastNear 0.01, whole-box-gone).
+// Render-thread writes; game-thread reads are park-ordered by the flush's
+// graphics lock, the same contract as every other g_ro consumer.
+static float    g_slot_keep_m22 = 0.0f;
+static float    g_slot_keep_m32 = 0.0f;
+static float    g_slot_keep_near = -1.0f;
+static uint64_t g_slot_keep_ms = 0;
+static uint64_t g_keep_stamp_rejects = 0;   // probe-accepted pairs the keep's band refused
+static uint64_t g_keep_stale_skips = 0;     // keep deferred to a fresher in-band pv
+                                            // (the moving-camera silent frame)
+static uint64_t g_cast_arm_lost_ms = 0;     // stamp of the LAST cast arm lost at the
+                                            // boundary (the ACCEPTED baseline blink class)
 // Trigger-range forensics (render thread writes, stats read): the last
 // span-REJECTED viewport depth range and the last ACCEPTED one.
 static float g_trig_rej_vp[2] = { -1.0f, -1.0f };
@@ -3790,6 +3808,27 @@ inline void proj_scan_upload(ID3D11Resource* res, const void* data, uint32_t byt
                 g_ro.slot_near_live = pnear;
                 g_ro.slot_m22 = p22;
                 g_ro.slot_m32 = p32;
+
+                // KEEP SANITIZATION (field conviction: flushSlotKeeps moved
+                // in LOCKSTEP with missFrames while missLastNear read 0.01
+                // across three dumps - the keep branch took on the flicker
+                // frames and delivered the poison). The probe passes
+                // viewmodel-class windows by design (m32 free, fov and m22
+                // match the scene's), so the keep cached a late-frame
+                // viewmodel upload and fed it to every silent frame for
+                // 250 ms - a poison reservoir the per-cycle slot never
+                // was. The slot's semantics stay untouched (the far-phase
+                // test NEEDS far values); the KEEP accepts only ordinary-
+                // play camera nears (documented sweep 0.09-0.96, banded
+                // with margin: 0.05-5.0).
+                if (pnear >= 0.05f && pnear <= 5.0f) {
+                    g_slot_keep_m22 = p22;
+                    g_slot_keep_m32 = p32;
+                    g_slot_keep_near = pnear;
+                    g_slot_keep_ms = steady_now_ms();
+                } else {
+                    g_keep_stamp_rejects++;
+                }
             }
         }
     }
@@ -4204,6 +4243,7 @@ struct LiveShadowState {
     float last_publish_rot_err = 1.0f;        // rot agreement of the last accepted publish
     uint64_t cold_pub_rejects = 0;            // cold-guard publishes rejected (full no-ops; forensic)
     uint64_t band_bail_view = 0;     // no same-frame view latched: reseal skipped
+    uint64_t band_bail_quality = 0;  // seal pairings withheld: publication not exact-class
     uint64_t band_prov_skips = 0;    // pending bridge-provisional bands withheld from receive
     float band_last_reject[4] = {};  // last border quad rejected by sanity
     uint64_t cast_misses = 0;   // FIRST failed fire guard this frame (0 = firing; see mask_cast_engine)
@@ -4420,8 +4460,47 @@ static uint64_t g_flush_latch_pvs = 0;     // flushes transformed with the cycle
 static uint64_t g_flush_pv_repairs = 0;    // degenerate cycle-state reads repaired from the live bridge
 static uint64_t g_flush_repaint_saves = 0; // frames whose world redrew after the injection
 static uint64_t g_flush_anomaly_carries = 0; // hybrid late copies drawn on anomalous frames
+static uint64_t g_flush_slot_keeps = 0;    // carried draws encoded with the PERSISTED slot pair
                                            // (injection missed the frame: the other rare-artifact correlate)
 static uint64_t g_skybind_offs_seen = 0;   // slots observed with nonzero offsets
+
+// Flush serial (game thread, under the graphics lock): once-per-flush key
+// for the miss latch and the flush-side census stamps. (The inter-clear
+// window census that once lived here was FIELD-FALSIFIED - clears == 
+// flushes exactly in every measured session - and removed; the post-flush
+// redraw census below is the surviving, field-proven detector.)
+static std::atomic<uint64_t> g_cc_flush_serial{0};   // ticks once per flush_locked
+
+// FLICKER SAFETY LOGGING (permanent): dump-on-flicker ages for the two
+// live carry correlates. A fresh flAgeFallbackS/flAgeAnomSkipS at a
+// visible flicker names a carried frame; castArmLostAgeS (stamped at the
+// boundary) names the accepted baseline blink class.
+static uint64_t g_fl_fallback_ms = 0;     // flush drew a composite mesh LATE
+static uint64_t g_fl_anom_skip_ms = 0;    // injection skipped a silent (anomalous) cycle
+// POST-FLUSH REDRAW CENSUS (permanent; field-proven - it photographed the
+// real clear-less repaint twice, 33/34 opaques): a world redraw AFTER the
+// flush shows up as opaques drawn past the flush's stamp. The class is an
+// accepted residual at natural rarity; this is its detector.
+static std::atomic<uint32_t> g_cc_flush_opaques{0xFFFFFFFFu};   // sentinel = no flush yet
+static uint64_t g_cc_postflush_redraws = 0;   // windows with >=32 opaques after the flush
+static uint32_t g_cc_pf_last_draws = 0;       // forensics: last such delta
+static uint64_t g_cc_pf_last_ms = 0;          // stamp (age at dump)
+
+// MISS-REASON LATCH (pure diagnostics): the flicker is CONVICTED as the
+// fallback-carried frame itself (4-for-4 sub-second lineup coincidence;
+// both repaint census variants zero) - the late post-scene draw lands
+// over the translucents for one frame. What remains is WHY the injection
+// missed: no trigger (attempts 0), anomalous skip (silent slot - possibly
+// the engine skipping redundant CB uploads on static sky frames), or the
+// pv race. Latched once per missed frame at the first fallback mesh.
+static uint64_t g_ms_frames = 0;         // frames carried by the fallback
+static uint64_t g_ms_flush_serial = 0;   // once-per-flush latch key
+static uint64_t g_ms_ms = 0;             // stamp (age at dump)
+// Carried-draw encode forensics (permanent flicker safety): the near of
+// the flush's chosen pv on the last carried frame. Camera-class (~0.8-1.3)
+// is healthy; 0.01/10-class convicts an encode poison (both classes were
+// convicted and fixed in the artifact campaign - this is the tripwire).
+static float g_ms_near = -1.0f;          // -m32/m22 of the flush's chosen pv
 
 inline void skybind_release() {
     for (int i = 0; i < 16; ++i) {
@@ -5512,6 +5591,18 @@ inline void shadow_view_scan(ID3D11Resource* res, const void* data, uint32_t byt
             for (int bi = 0; bi < 8; ++bi) {
                 auto& bs = g_ls.band[bi];
                 if (!bs.valid || !bs.pending_view) continue;
+
+                // PAIRING QUALITY GATE (operator directive, the receive
+                // half): a publication that is not exact-class must not
+                // pair a seal - an off-axis view baked into a frozen band
+                // is a PERMANENT receive offset until reseal. Withheld
+                // pairings stay pending; the epoch guard below retires
+                // them cleanly and the next resolve reseals under a
+                // better publication. Absent beats offset, as ever.
+                if (g_ls.last_publish_rot_err > 1e-3f) {
+                    g_ls.band_bail_quality++;
+                    continue;
+                }
 
                 // RECEIVE-V2 EPOCH GUARD: a pending seal older than this
                 // frame would pair a CROSS-FRAME view - the permanent
@@ -7284,14 +7375,16 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
     if (g_mask.engine_mask_failed) { g_ls.cast_misses = 43; return; }
     if (!g_ls.frame_view_valid) { g_ls.cast_misses = 5; return; }
 
-    // cold view-quality gate: within 2 s of the first mesh, require TIGHT
-    // rot agreement (0.05) before firing - the 0.35 family filter can
-    // pass a still-settling view at spawn, and a ~20-degree-off view
-    // reconstructs badly enough to MIN-darken the screen briefly (the
-    // short cold overcast). Steady state is unaffected.
-    if (g_mask.cold_t0 >= 0.0 &&
-        static_cast<double>(effect_time_seconds()) - g_mask.cold_t0 < 2.0 &&
-        g_ls.last_publish_rot_err > 0.05f) { g_ls.cast_misses = 51; return; }
+    // STANDING view-quality gate (operator directive: no cast unless the
+    // shadow is PRECISE - delayed shadowing beats broken shadowing). This
+    // supersedes the cold-only 0.05 gate: steady state previously had NO
+    // quality gate at all, which is how the bar-passing lock sessions
+    // (viewBestRot 0.0077 / 0.0119, the off-axis world-drift class) cast
+    // drifting shadows for their whole duration. The exact class (1e-3,
+    // the exact-lock preference's own threshold) is required ALWAYS; the
+    // cold-overcast case is covered a fortiori. On a session that never
+    // reaches exact quality, the cast simply never fires - by directive.
+    if (g_ls.last_publish_rot_err > 1e-3f) { g_ls.cast_misses = 51; return; }
     // Transition hold: fire only into a SETTLED capture stream (see the
     // sweep_settle note). Steady state saturates this within one frame.
     if (g_mask.sweep_settle < g_mask.sweep_need) { g_ls.cast_misses = 52; return; }
@@ -8179,28 +8272,86 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     // directions the latch can be poisoned (a mid-publication foreign
     // window, or a stale far value), so when it is live this cycle it IS
     // the encode. Measured, then bridge, remain the fallbacks.
+    // PERSISTED-PAIR FALLBACK (the injection side of the flush's fix): a
+    // silent slot with a fresh keep means the engine skipped a redundant
+    // upload - the last live values remain this camera's truth, and they
+    // shield the encode from a poisoned latch on exactly the frames the
+    // arbitration is otherwise blind.
+    const bool khr_keep_fresh = g_slot_keep_near > 0.0f && g_slot_keep_ms != 0 &&
+                                steady_now_ms() - g_slot_keep_ms < 250;
+
     if (snap_slot_near > 0.0f) {
         pv.projection[2][2] = snap_slot_m22;
         pv.projection[3][2] = snap_slot_m32;
         g_stats.composite_slot_encodes++;
+    } else if (khr_keep_fresh) {
+        // KEEP ARBITRATION (field: a rescued flicker carried keep near
+        // 0.544 against a frame near ~0.86 - the keep goes stale the
+        // moment the camera moves through a silent frame, while the
+        // latch/live arbitration above already holds the frame's camera.
+        // The keep's proven job is the out-of-band poison shield; an
+        // IN-BAND pv that disagrees is fresher by construction and wins.
+        const float khr_pv_near = fabsf(pv.projection[2][2]) > 1e-9f
+                                ? (-pv.projection[3][2] / pv.projection[2][2]) : -1.0f;
+        const bool khr_pv_in_band = khr_pv_near >= 0.05f && khr_pv_near <= 5.0f;
+        const bool khr_keep_agrees = khr_pv_in_band &&
+            fabsf(khr_pv_near - g_slot_keep_near) <= 0.25f * khr_pv_near;
+
+        if (khr_keep_agrees || !khr_pv_in_band) {
+            pv.projection[2][2] = g_slot_keep_m22;
+            pv.projection[3][2] = g_slot_keep_m32;
+            g_stats.composite_keep_encodes++;
+        } else {
+            g_keep_stale_skips++;
+        }
     }
 
-    // FAR-PHASE SKIP: the telltale tracking the CURRENT phase is exactly
-    // right for the encode - and exactly why an injection must not land
-    // while a far partition (the look-up/look-down slice, near ~10) is
-    // the phase: a nearby mesh sits INSIDE that partition's near plane
-    // and clips to nothing (or degenerates into the fog term). When the
-    // slot reads far-class against the camera near, skip and stay armed:
-    // the camera partition's own trigger takes the frame. One-sided by
-    // design - the probe's fov anchors already reject nearer foreign
-    // windows. A repaint-invoked call landing here gets its one-shot
-    // refunded, so a genuine repaint later the same cycle still fires.
+    // FAR-PHASE SKIP, refined by field conviction (miss-reason latch,
+    // 4-for-4 lineup coincidence): the blanket skip assumed "the camera
+    // partition's own trigger takes the frame", but on sky/horizon frames
+    // the far partition IS the frame - no later trigger arrives, the
+    // frame goes uninjected, and the flush's late carry over the
+    // translucents is itself the visible flicker. The skip's one genuine
+    // protective case is a mesh at or inside the far partition's near
+    // plane (clips to nothing / degenerates into the fog term) - so
+    // MEASURE it: when every staged mesh sits comfortably beyond that
+    // near plane, the slot (far) pair selected above is simply the
+    // CORRECT encode for this phase, and the injection proceeds. A
+    // following camera partition still gets its own injection via the
+    // partition-change re-arm ("an earlier far-partition draw is
+    // corrected by the nearer re-draw"). One-sided as before - the
+    // probe's fov anchors already reject nearer foreign windows.
     if (snap_slot_near > 0.0f && khr_bridge_near > 1e-4f &&
         snap_slot_near > 1.5f * khr_bridge_near) {
-        g_stats.composite_far_phase_skips++;
-        g_ro.injected = false;      // stay armed for the camera partition
-        g_ro.inject_attempts = 0;
-        return;
+        float khr_cam[3];
+        extract_camera_pos(pv.view, khr_cam);
+        float khr_min_clear = 1e9f;
+
+        for (const auto& m : meshes) {
+            const float me[3] = { m.pos[0], m.pos[2], m.pos[1] };   // SQF -> engine axes
+            const float dx = me[0] - khr_cam[0];
+            const float dy = me[1] - khr_cam[1];
+            const float dz = me[2] - khr_cam[2];
+            const float r = 0.5f * sqrtf(m.size[0] * m.size[0] +
+                                         m.size[1] * m.size[1] +
+                                         m.size[2] * m.size[2]);
+            const float d = sqrtf(dx * dx + dy * dy + dz * dz) - r;
+
+            if (d < khr_min_clear) khr_min_clear = d;
+        }
+
+        if (khr_min_clear < 1.5f * snap_slot_near) {
+            // Clip risk is real for at least one mesh: the protective
+            // skip, unchanged. A repaint-invoked call landing here gets
+            // its one-shot refunded, so a genuine repaint later the same
+            // cycle still fires.
+            g_stats.composite_far_phase_skips++;
+            g_ro.injected = false;      // stay armed for the camera partition
+            g_ro.inject_attempts = 0;
+            return;
+        }
+
+        g_stats.composite_far_injects++;   // proceed: far pair is this phase's truth
     }
 
     // ANOMALOUS CYCLE: a proven locator with a silent slot means the
@@ -8209,11 +8360,29 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     // reliably reach presentation. Injections placed anywhere inside it
     // are wasted at best; attempts SKIP and stay armed - a clean cycle's
     // own trigger or the hybrid guarantee below carries the frame.
+    // SILENT-SLOT RESCUE - PERMANENTLY FALSIFIED (do not re-derive, do
+    // not retry; full trial history): (1) first trial: 1:1 whole-frame
+    // flicker correlation, reverted; (2) evidence contaminated by the
+    // keep poison (probe repoisons ~28x/frame; band fixed it); (3)
+    // isolated retry on the sanitized keep: flickers at moving-camera
+    // rescues, keep near 0.544 vs frame ~0.86 - the stale-keep class,
+    // fixed by the pv-agreement arbitration; (4) FINAL trial with the
+    // arbitration: a flicker with rescueLastAgeS 0.748, rescueLastNear
+    // 0.869 vs frame 0.889 - fresh, agreeing, correctly encoded, and
+    // STILL not presented. Every alternative explanation is exhausted:
+    // output injected into a slot-silent (no-upload) cycle does not
+    // reliably reach presentation, on calm sparse frames and heavy fog
+    // alike. Silent cycles SKIP and the flush carries them late with the
+    // arbitrated keep encode - the pop is the architecture's floor on
+    // no-upload frames absent an upload-independent injection design.
+    // The counter and forensics below remain as a passive overlap census.
     const bool khr_anomalous = g_proj_locator_ever && snap_slot_near <= 0.0f;
+
     if (khr_anomalous) g_ro.anomaly_seen = true;   // flush carries this frame
 
     if (khr_anomalous) {
         g_stats.composite_anomaly_skips++;
+        g_fl_anom_skip_ms = steady_now_ms();
         g_ro.injected = false;      // stay armed
         g_ro.inject_attempts = 0;
         return;
@@ -8907,7 +9076,9 @@ inline void reorder_pre_draw(ID3D11DeviceContext* self) {
     // (both shadows 'vanishing' on look-down). A proven projection lock
     // is stronger mistiming evidence than draw count alone: with it, a
     // much lower floor suffices; previews/overlays still fail both.
-    const uint32_t min_opaques = g_ro.engine_proj_valid
+    const bool khr_floor_keep = g_slot_keep_near > 0.0f && g_slot_keep_ms != 0 &&
+                                steady_now_ms() - g_slot_keep_ms < 250;
+    const uint32_t min_opaques = (g_ro.engine_proj_valid || khr_floor_keep)
                                ? KH_REORDER_MIN_OPAQUE_DRAWS / 8
                                : KH_REORDER_MIN_OPAQUE_DRAWS;
 
@@ -9148,6 +9319,23 @@ static void STDMETHODCALLTYPE hooked_clear_depthstencil(ID3D11DeviceContext* sel
             // this is where that thread is identified for the tracking gate.
             g_reorder_render_tid.store(GetCurrentThreadId(), std::memory_order_relaxed);
 
+            // POST-FLUSH REDRAW CENSUS: a clear-less world redraw AFTER
+            // the flush shows up as opaques drawn past the flush's stamp
+            // (normal frames end at ~the stamp: translucents draw after
+            // the flush, opaques do not). Field-proven detector for the
+            // accepted repaint residual. Counters only.
+            {
+                const uint32_t cc_fo = g_cc_flush_opaques.load(std::memory_order_relaxed);
+
+                if (cc_fo != 0xFFFFFFFFu && g_ro.opaque_draws >= cc_fo + 32u) {
+                    g_cc_postflush_redraws++;
+                    g_cc_pf_last_draws = g_ro.opaque_draws - cc_fo;
+                    g_cc_pf_last_ms = steady_now_ms();
+                }
+
+                g_cc_flush_opaques.store(0xFFFFFFFFu, std::memory_order_relaxed);
+            }
+
             // A depth clear of the main scene buffer marks the new frame:
             // injection re-arms and the phase evidence resets.
             g_ro.injected = false;
@@ -9203,6 +9391,9 @@ static void STDMETHODCALLTYPE hooked_clear_depthstencil(ID3D11DeviceContext* sel
             if (g_mask_cast_arm) {
                 g_mask.cast_arms_lost++;   // re-arm died unfired at the boundary
                 g_mask.arms_lost_miss = g_ls.cast_misses;   // which guard starved it (watch item #2 forensics)
+                g_cast_arm_lost_ms = steady_now_ms();   // the accepted baseline blink class:
+                                                        // its age at a flicker dump closes
+                                                        // (or reopens) the campaign
             }
             if (g_fire_lock) { g_fire_lock->Release(); g_fire_lock = nullptr; }
             g_fire_lock_valid = false;   // new frame: first fire re-freezes
@@ -9402,6 +9593,11 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     // these plain stores can never be observed mid-write.
     publish_world_lighting();
 
+    // Flush stamps: the serial keys the miss latch (once per flush); the
+    // opaque count feeds the post-flush redraw census at the next clear.
+    g_cc_flush_serial.fetch_add(1, std::memory_order_relaxed);
+    g_cc_flush_opaques.store(g_ro.opaque_draws, std::memory_order_relaxed);
+
     bool has_objects;
 
     {
@@ -9555,9 +9751,19 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                     // Composited meshes are drawn pre-translucent by the
                     // reorder hook; the flush stands down for them while
                     // injections are actually happening.
-                    if (is_composite_eligible(o)) g_flush_fallback_draws++;   // injection missed the
-                                                   // frame: the LATE post-scene draw carries it
-                                                   // (the other rare-artifact correlate)
+                    if (is_composite_eligible(o)) {
+                        // injection missed the frame: the LATE post-scene
+                        // draw carries it (the other rare-artifact correlate)
+                        g_flush_fallback_draws++;
+                        g_fl_fallback_ms = steady_now_ms();
+                        const uint64_t ms_fs = g_cc_flush_serial.load(std::memory_order_relaxed);
+
+                        if (g_ms_flush_serial != ms_fs) {
+                            g_ms_flush_serial = ms_fs;
+                            g_ms_frames++;
+                            g_ms_ms = steady_now_ms();
+                        }
+                    }
                     meshes.push_back(o);
                 }
             }
@@ -9597,6 +9803,24 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     if (g_ro.slot_near_live > 0.0f) {
         pv.projection[2][2] = g_ro.slot_m22;
         pv.projection[3][2] = g_ro.slot_m32;
+    } else if (g_slot_keep_near > 0.0f && g_slot_keep_ms != 0 &&
+               steady_now_ms() - g_slot_keep_ms < 250) {
+        // Slot silent this cycle: the keep is the poison shield, but an
+        // IN-BAND pv that disagrees with it is fresher (the moving-camera
+        // silent frame) and wins - same arbitration as the injection side.
+        const float khf_pv_near = fabsf(pv.projection[2][2]) > 1e-9f
+                                ? (-pv.projection[3][2] / pv.projection[2][2]) : -1.0f;
+        const bool khf_pv_in_band = khf_pv_near >= 0.05f && khf_pv_near <= 5.0f;
+        const bool khf_keep_agrees = khf_pv_in_band &&
+            fabsf(khf_pv_near - g_slot_keep_near) <= 0.25f * khf_pv_near;
+
+        if (khf_keep_agrees || !khf_pv_in_band) {
+            pv.projection[2][2] = g_slot_keep_m22;
+            pv.projection[3][2] = g_slot_keep_m32;
+            g_flush_slot_keeps++;
+        } else {
+            g_keep_stale_skips++;
+        }
     }
 
     float view_proj[4][4];
@@ -9647,6 +9871,16 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     }
 
     const float now = effect_time_seconds();
+
+    // Encode forensics for a miss latched THIS flush (the early latch runs
+    // in the snapshot loop, before the transform inputs exist): fill them
+    // here, where pv is final (post repair + slot) and the live viewport
+    // range has been sampled. Serial equality identifies this-flush misses.
+    if (g_ms_ms != 0 &&
+        g_ms_flush_serial == g_cc_flush_serial.load(std::memory_order_relaxed)) {
+        g_ms_near = fabsf(pv.projection[2][2]) > 1e-9f
+                  ? (-pv.projection[3][2] / pv.projection[2][2]) : -1.0f;
+    }
 
     // Capability gating per frame:
     //  - effects need the scene capture and the effect shader
@@ -10094,9 +10328,21 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
         ctx->OMSetBlendState(g_res.blend_modes[o.blend_mode], bf, 0xFFFFFFFF);
 
+        // FALLBACK DEPTH-WRITE PARITY (screenshot conviction: a carried
+        // frame showed a distant box THROUGH a near box and the concave
+        // staircase with jumbled faces - both are the same defect). The
+        // injection depth-writes every composite-eligible solid by
+        // contract; the late fallback drew mode-0 solids test-only, so on
+        // exactly the carried frames our meshes could occlude neither
+        // each other nor themselves. Mirror the injection's contract
+        // here: composite-eligible solids write depth on the fallback
+        // too. Late depth writes are as valid as late color writes - the
+        // mesh IS at that depth - and mode-1 meshes have exercised this
+        // very path since the beginning.
         ID3D11DepthStencilState* dss =
             (o.mode == DepthMode::Off)       ? g_res.dss_off :
             (o.mode == DepthMode::TestWrite) ? g_res.dss_test_write :
+            is_composite_eligible(o)         ? g_res.dss_test_write :
                                                g_res.dss_test;
 
         ctx->OMSetDepthStencilState(dss, 0);
@@ -10624,6 +10870,13 @@ inline void reset_stat_counters() {
     g_inj_guard_off = 0; g_flush_fallback_draws = 0; g_flush_latch_pvs = 0;
     g_flush_pv_repairs = 0; g_flush_repaint_saves = 0; g_flush_anomaly_carries = 0;
     g_sun_map_skips = 0;
+    g_fl_fallback_ms = 0; g_fl_anom_skip_ms = 0;
+    g_flush_slot_keeps = 0;
+    g_keep_stamp_rejects = 0;
+    g_keep_stale_skips = 0;
+    g_cast_arm_lost_ms = 0;
+    g_cc_postflush_redraws = 0; g_cc_pf_last_draws = 0; g_cc_pf_last_ms = 0;
+    g_ms_frames = 0; g_ms_ms = 0; g_ms_near = -1.0f;
     g_skybind_reads = 0; g_skybind_hits = 0; g_skybind_minbw = 0;
     g_skybind_maxbw = 0; g_skybind_slots = 0; g_skybind_off1 = 0;
     g_skybind_maxbw_vs = 0; g_skybind_offs_seen = 0;
@@ -10636,6 +10889,7 @@ inline void reset_stat_counters() {
     g_ls.band_captures = 0; g_ls.band_bail_pv = 0; g_ls.band_bail_off = 0;
     g_ls.band_bail_border = 0; g_ls.band_bail_slot = 0; g_ls.band_bail_time = 0;
     g_ls.band_bail_view = 0; g_ls.seal_completions = 0; g_ls.band_prov_skips = 0;
+    g_ls.band_bail_quality = 0;
     g_ls.cold_pub_rejects = 0; g_ls.frame_view_hits = 0;
 
     for (int b = 0; b < 8; ++b) g_ls.band[b].copies = 0;
@@ -10681,6 +10935,9 @@ inline void reset_session_state() {
     g_prewarm_cand_res = nullptr; g_prewarm_cand_off = 0;
     g_coldlock_cand_res = nullptr; g_coldlock_cand_off = 0;
     g_last_pv_ms = 0;
+    g_cc_flush_opaques.store(0xFFFFFFFFu, std::memory_order_relaxed);
+    g_slot_keep_m22 = 0.0f; g_slot_keep_m32 = 0.0f;
+    g_slot_keep_near = -1.0f; g_slot_keep_ms = 0;
     // render-thread cycle state (the caller's graphics lock parks that thread)
     // Hook DISARM: with the tracked context cleared, every installed hook
     // bails at its very first pointer compare on every context - the whole
@@ -11456,6 +11713,8 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("compositeRejFloor", RenderIntegration::g_stats.composite_rej_floor));
         out.push_back(kv("compositeSlotEncodes", RenderIntegration::g_stats.composite_slot_encodes));
         out.push_back(kv("compositeFarPhaseSkips", RenderIntegration::g_stats.composite_far_phase_skips));
+        out.push_back(kv("compositeFarInjects", RenderIntegration::g_stats.composite_far_injects));
+        out.push_back(kv("compositeKeepEncodes", RenderIntegration::g_stats.composite_keep_encodes));
         out.push_back(kv("compositeAnomalySkips", RenderIntegration::g_stats.composite_anomaly_skips));
         out.push_back(kv("sunDepthPasses", RenderIntegration::g_stats.sun_depth_passes));
         out.push_back(kv("sunDepthCasters", RenderIntegration::g_stats.sun_depth_casters));
@@ -11544,6 +11803,7 @@ static game_value get_render_stats_sqf() {
         out.push_back(kvf("sunDirDerivedY", RenderIntegration::g_sun_dir_derived[1]));
         out.push_back(kvf("sunDirDerivedZ", RenderIntegration::g_sun_dir_derived[2]));
         out.push_back(kv("bandBailView", RenderIntegration::g_ls.band_bail_view));
+        out.push_back(kv("bandBailQuality", RenderIntegration::g_ls.band_bail_quality));
         out.push_back(kv("bandProvSkips", RenderIntegration::g_ls.band_prov_skips));
         out.push_back(kv("viewLocks", RenderIntegration::g_ls.view_locks));
         out.push_back(kv("viewSrcValid", RenderIntegration::g_ls.view_src_valid ? 1u : 0u));
@@ -11613,6 +11873,25 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("flushAnomalyCarries", RenderIntegration::g_flush_anomaly_carries));
         out.push_back(kv("castArmsLostMiss", RenderIntegration::g_mask.arms_lost_miss));
         out.push_back(kv("sunMapSkips", RenderIntegration::g_sun_map_skips));
+        auto age_s = [](uint64_t ms) {
+            return ms == 0 ? -1.0f :
+                static_cast<float>(RenderIntegration::steady_now_ms() - ms) * 0.001f;
+        };
+        out.push_back(kvf("flAgeFallbackS", age_s(RenderIntegration::g_fl_fallback_ms)));
+        out.push_back(kvf("flAgeAnomSkipS", age_s(RenderIntegration::g_fl_anom_skip_ms)));
+        out.push_back(kv("ccPostFlushRedraws", RenderIntegration::g_cc_postflush_redraws));
+        out.push_back(kv("ccPfLastDraws", static_cast<uint64_t>(RenderIntegration::g_cc_pf_last_draws)));
+        out.push_back(kvf("ccPfLastAgeS", age_s(RenderIntegration::g_cc_pf_last_ms)));
+        out.push_back(kv("missFrames", RenderIntegration::g_ms_frames));
+        out.push_back(kvf("missLastNear", RenderIntegration::g_ms_near));
+        out.push_back(kv("flushSlotKeeps", RenderIntegration::g_flush_slot_keeps));
+        out.push_back(kv("keepStampRejects", RenderIntegration::g_keep_stamp_rejects));
+        out.push_back(kv("keepStaleSkips", RenderIntegration::g_keep_stale_skips));
+        out.push_back(kvf("castArmLostAgeS", age_s(RenderIntegration::g_cast_arm_lost_ms)));
+        out.push_back(kv("viewSrcMisses", static_cast<uint64_t>(RenderIntegration::g_ls.view_src_miss)));
+        out.push_back(kv("viewCandN", static_cast<uint64_t>(RenderIntegration::g_ls.vc_n)));
+        out.push_back(kvf("viewPubRotErr", RenderIntegration::g_ls.last_publish_rot_err));
+        out.push_back(kvf("missLastAgeS", age_s(RenderIntegration::g_ms_ms)));
         out.push_back(kv("rtLastRejW", static_cast<uint64_t>(RenderIntegration::g_rt_last_rej_w)));
         out.push_back(kvf("fogColR", RenderIntegration::g_fog_dbg[0]));
         out.push_back(kvf("fogColG", RenderIntegration::g_fog_dbg[1]));

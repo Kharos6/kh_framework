@@ -583,6 +583,23 @@ cbuffer CB : register(b0)
                                 // confirmed static (0.25, 0.75, 3.5)); w = valid
     float4 fogSkyCol;           // the sky CB's fog base color (row 7; tracks
                                 // time of day - the verbatim fog color)
+    // --- appended (dynamic lights mirror); append-only: no register
+    // shifts. Engine cb10/cb11 packing VERBATIM (night-capture
+    // disassembly; see the DYNLIGHTS ledger in the C++ section) ---
+    float4 dlCtl;         // x = mode (0 off, 1 camera-relative world,
+                          // 2 view space), y = point count, z = spot
+                          // count, w = global distance scale (cb10[2].x)
+    float4 dlGlobal;      // xyz = global diffuse multiplier (cb10[3]),
+                          // w = operator intensity scale
+    float4 dlView[3];     // view matrix COLUMNS (world->view rotation)
+                          // for mode 2, captured WITH the light list
+    float4 dlLights[192]; // 32 lights x 6 float4, cb11 layout verbatim:
+                          // +0 position.xyz; +1 spot dir.xyz + cone
+                          // cos-threshold.w; +2 diffuse.rgb + cone
+                          // inv-width.w; +3 per-light ambient.rgb (no
+                          // N.L) + cone exponent.w; +4 distance offset.x
+                          // + attenuation a0/a1/a2.yzw; +5 range-fade
+                          // start.x + inv-width.y
 };
 
 // Shared raw-depth -> view-axis distance (m): inverts the viewport depth
@@ -763,6 +780,74 @@ float SolidMask(float3 wpos)
     return m;
 }
 
+// Dynamic (point/spot) lights: the engine's own light list, mirrored one
+// frame late from its cb10/cb11 uploads (validated CPU-side; see the
+// DYNLIGHTS ledger). Math is the lit-material disassembly VERBATIM -
+// distance attenuation 1/(a0 + a1*d + a2*d^2) on the offset, scaled
+// distance, the hard range fade, the spot cone pow, and the per-light
+// AMBIENT term accumulated without N.L (the away-facing glow that makes
+// A3 lights read on surfaces). Specular omitted: the engine's term needs
+// material exponents flat-color surfaces don't carry. Dynamic lights cast
+// no shadows - the engine's own don't either, so smf never touches this.
+// dlCtl.x selects the position decode: 3 = ABSOLUTE world (engine axes;
+// the origin-recovered pool - the production mode; the plant sessions
+// proved the engine's lists are LIST-LOCAL, world minus a grid-snapped
+// per-list origin with verbatim ASL heights), 1 = camera-relative world
+// and 2 = view space (the original hypotheses, kept as diagnostics;
+// mode 2 rotates positions AND normals by the dlView columns, since N.L
+// in a rotated space needs the normal rotated with it).
+float3 DynLights(float3 wpos, float3 nrm)
+{
+    if (dlCtl.x < 0.5f) return float3(0.0f, 0.0f, 0.0f);
+    int pointN = (int)dlCtl.y;
+    int totalN = pointN + (int)dlCtl.z;
+    float3 n = normalize(nrm);
+    float3 p;
+
+    if (dlCtl.x >= 2.5f) {
+        // mode 3: ABSOLUTE world positions (engine axes) - no camera
+        // dependency at all; the CPU merged the pool in world space.
+        p = wpos;
+    } else {
+        // modes 1/2 (diagnostics): camera-origin decodes. fxParams0.xyz
+        // carries the camera on the solid-mesh paths (the ClipEdgeSliver
+        // contract); a zeroed camera cannot decode camera-origin lights -
+        // stand down rather than shade garbage.
+        if (dot(fxParams0.xyz, fxParams0.xyz) < 1.0f) return float3(0.0f, 0.0f, 0.0f);
+        p = wpos - fxParams0.xyz;
+
+        if (dlCtl.x >= 1.5f) {
+            p = float3(dot(p, dlView[0].xyz), dot(p, dlView[1].xyz), dot(p, dlView[2].xyz));
+            n = float3(dot(n, dlView[0].xyz), dot(n, dlView[1].xyz), dot(n, dlView[2].xyz));
+        }
+    }
+
+    float3 acc = float3(0.0f, 0.0f, 0.0f);
+
+    [loop] for (int i = 0; i < totalN; ++i) {
+        int b = i * 6;
+        float3 L = dlLights[b + 0].xyz - p;
+        float dist = length(L);
+        L /= dist + 1e-4f;
+        float d = max(dist * dlCtl.w - dlLights[b + 4].x, 0.0f);
+        float att = saturate(1.0f / (dot(dlLights[b + 4].yzw, float3(1.0f, d, d * d)) + 1e-4f));
+        att *= 1.0f - saturate((dist * dlCtl.w - dlLights[b + 5].x) * dlLights[b + 5].y);
+
+        if (i >= pointN) {
+            // spot cone: the engine's log/mul/exp pow; the (c > 0) guard
+            // stands in for log(0) = -inf -> exp -> 0, and dodges the
+            // pow(0, 0) NaN a degenerate exponent would mint.
+            float c = saturate((dot(-dlLights[b + 1].xyz, L) - dlLights[b + 1].w) * dlLights[b + 2].w);
+            att *= (c > 0.0f) ? pow(c, dlLights[b + 3].w) : 0.0f;
+        }
+
+        float ndl = max(dot(n, L), 0.0f);
+        acc += (dlGlobal.xyz * dlLights[b + 2].xyz * ndl + dlLights[b + 3].xyz) * att;
+    }
+
+    return acc * dlGlobal.w;
+}
+
 // Sun/moon shading for solid meshes (PSMain and PSComposite), opt-in per
 // object via lighting0.x. The normal is the mesh's OWN, carried per vertex
 // and interpolated: exact on flat faces (no dominant-axis flips at edges
@@ -775,7 +860,7 @@ float SolidMask(float3 wpos)
 // smf: per-pixel shadow factor from the caller (received world shadows and
 // the private sun-depth self term, min-combined - they answer the same
 // question at different granularities and must not stack).
-float3 ApplyLighting(float3 base, float3 nrm, float smf)
+float3 ApplyLighting(float3 base, float3 wpos, float3 nrm, float smf)
 {
     if (lighting0.x < 0.5f || lighting1.w < 0.5f) return base;
     float3 n = normalize(nrm);
@@ -786,7 +871,9 @@ float3 ApplyLighting(float3 base, float3 nrm, float smf)
     // (moonlight included - the engine zeroes the sun lane at night and
     // routes the moon here), or (1,1,1) in the sub-second cold before
     // the first lock so lighting0.z alone shades.
-    return base * (lightAmb.rgb * lighting0.z + direct);
+    // Dynamic lights add alongside the direct term, unshadowed (the
+    // engine's dynamic lights cast no shadows); dormant at mode 0.
+    return base * (lightAmb.rgb * lighting0.z + direct + DynLights(wpos, nrm));
 }
 
 struct VSIn  { float3 pos : POSITION; float3 nrm : NORMAL; };
@@ -1060,7 +1147,7 @@ float4 PSMain(VSOut i) : SV_Target
     // early-out: no direct term, no shadow samples.
     float smf = (lighting0.x >= 0.5f && dot(i.nrm, lighting1.xyz) > 0.01f)
               ? SunShadowFactorSelf(i.wpos, i.nrm) : 1.0f;
-    float3 lc = ApplyLighting(color.rgb, i.nrm, smf);
+    float3 lc = ApplyLighting(color.rgb, i.wpos, i.nrm, smf);
 
     // Fog parity with the composite path (this shader serves the
     // fallback draw on injection-miss frames): the engine's verbatim
@@ -1482,7 +1569,7 @@ VSOutC VSComposite(VSIn i)
         // darker answer wins without stacking.
         smf = min(smf, SunShadowFactorSelf(i.wpos, i.nrm));
     }
-    float3 lc = ApplyLighting(color.rgb, i.nrm, smf);
+    float3 lc = ApplyLighting(color.rgb, i.wpos, i.nrm, smf);
 
     // FOG OCCLUSION: RV's height-decay exponential. Density at height h:
     // d(h) = fogValue * exp(-fogDecay * (h - fogBase)). Transmittance over
@@ -2099,6 +2186,15 @@ struct alignas(16) ConstantData {
                                // z = inv ramp range (blk 49), w = valid
     float fog_sky[4];          // sky row 17 gradient points; w = sky probe valid
     float fog_sky_col[4];      // sky row 7 base color (verbatim fog color)
+    // --- appended (dynamic lights mirror); append-only, mirrors dlCtl/
+    // dlGlobal/dlView/dlLights at the end of the HLSL cbuffer ---
+    float dl_ctl[4];           // x = mode (0 off / 1 camera-relative world /
+                               // 2 view space), y = point count, z = spot
+                               // count, w = global distance scale (cb10[2].x)
+    float dl_global[4];        // xyz = global diffuse multiplier (cb10[3]),
+                               // w = operator intensity scale
+    float dl_view[3][4];       // view matrix COLUMNS for the mode-2 rotation
+    float dl_lights[192][4];   // 32 lights x 6 float4, engine cb11 verbatim
 };
 
 struct alignas(16) CSConstantData {
@@ -5179,6 +5275,2069 @@ inline bool shadow_live_wanted() {
     return g_ls.wanted.load(std::memory_order_relaxed) && g_shadow_map_strength > 0.0f;
 }
 
+// ===========================================================================
+// DYNAMIC LIGHTS MIRROR (point lights + reflectors/spots + environment
+// lamps - the engine packs all three through one machinery).
+//
+// PROVENANCE (night-capture disassembly, PS-PixelShader_194/195 + 22
+// siblings; DYNAMIC_LIGHTS_RECON.md holds the dossier): the engine's
+// non-sun lighting is per-pixel in the lit material shaders, driven by two
+// PS constant buffers - cb10[4] (control: [0].x point count and [1].x spot
+// count as RAW INT BIT PATTERNS - the loop bound compare is ige, an
+// integer op - [2].x global distance scale, [3].xyz global diffuse
+// multiplier) and cb11[192] (32 lights x 6 float4, points first, spots
+// appended; per-record layout in the HLSL cbuffer comment). The shading
+// math is reproduced verbatim in the shader's DynLights.
+//
+// ACQUISITION - the one deliberate architecture decision: NEVER trust the
+// live slot bindings at OUR draw (the carry-encode poison was exactly a
+// blindly-trusted live slot). At each ACCEPTED injection the render thread
+// reads PS slots 10/11 via PSGetConstantBuffers1 (offset-aware: the engine
+// binds through pool buffers + per-slot offsets), GPU-copies those windows
+// into an owned double-buffered STAGING pair, harvests a completed copy at
+// a later injection (DO_NOT_WAIT - never a stall), VALIDATES on the CPU
+// (int counts in range, finite scale/positions: garbage from a foreign
+// pass's slot reuse dies here, never in a frame), and publishes a mirror
+// both draw paths consume through fill_lighting_cb. One frame of light
+// latency; identical light state on injected and carried frames.
+// Anomalous (rescue) cycles never acquire - safety paths are not training
+// paths, and a foreign pass's slots are exactly the poisoned case.
+//
+// POSITION SPACE + ORIGINS (CLOSED; the full campaign, seven field
+// rounds): light positions are LIST-LOCAL - absolute heights (Y
+// verbatim ASL) with X/Z offset by a per-list origin on a 100 m grid,
+// NOT camera-anchored; lists are CULLED PER DRAW (4-6 distinct
+// scratch-buffer windows per frame). Mode 3 - ON BY DEFAULT - samples
+// every distinct slot-11 window plus the same draw's VS constants and
+// recovers each window's origin through a SELF-BOOTSTRAPPING chain:
+//   1. DERIVATION (the seed): the vertex pipeline is NOT rebased (W
+//      matrices translate models to TRUE world) while light data rides
+//      the grid frame; the link is a per-draw VS constant - the field
+//      winner is the object-position-in-light-frame triple against the
+//      true-world W (kind 3; exact combos live in a MINORITY of shader
+//      families, at this map's locations slot 0 vs wslot 1/4/10).
+//   2. ANCHOR TABLE: exact-derivation lights become LONG-LIVED
+//      surveying knowledge (positions stay true while the lamp stands;
+//      decoupled from shading expiry - the burst-collapse lesson),
+//      admission ULP-class only (0.005 m).
+//   3. POOL-VOTE PROPAGATION: unresolved windows vote their records
+//      against the anchor table (never its own output - the lattice
+//      lesson) under an unambiguous-majority gate.
+// FIVE VALIDATORS, each earned by a field failure, arbitrate every
+// candidate: the Y ~ 0 + 100 m-grid proof, the 0.03 m residual ceiling
+// (impostor combos are loose), the zero-origin degeneracy rule (the
+// true-world self-pair), the RANGE ARBITER (structural impostors are
+// exact but only the true origin places the camera-culled list NEAR
+// the camera - applied at candidacy and in the hint, with the merge
+// backstop retained), and vote majority. Records merge into a
+// persistent ABSOLUTE-WORLD pool (cadence-adaptive expiry, main/aux
+// pass classification against the max-luminance reference) and the
+// nearest lights per mesh recreate the engine's own culling. Failure
+// posture is dark-safe by construction: unresolved windows author
+// nothing, wrong origins convict themselves in a counter, never in a
+// frame. dumpDynamicLights (windows, anchors, candRing, vote
+// forensics, pool, censuses) is the permanent diagnostic surface -
+// see KH_DYNAMIC_LIGHTS.md for the full ledger.
+//
+// THREADING: acquisition/harvest/publication render thread (inside the
+// injection); fill_lighting_cb reads the mirror on both threads under the
+// park invariant every other g_ro consumer rides; the SQF config is
+// atomic; the dump copies under the graphics lock and formats after.
+// ===========================================================================
+
+static constexpr uint32_t KH_DL_MAX_LIGHTS = 32;            // cb11 capacity (192 / 6)
+static constexpr uint32_t KH_DL_LIGHT_BYTES = 6 * 16;       // one record: 6 float4
+static constexpr uint32_t KH_DL_CTL_BYTES = 4 * 16;         // cb10: 4 float4
+static constexpr uint32_t KH_DL_ARR_BYTES = KH_DL_MAX_LIGHTS * KH_DL_LIGHT_BYTES;
+static constexpr uint32_t KH_DL_STAGE_BYTES = KH_DL_CTL_BYTES + KH_DL_ARR_BYTES;
+static constexpr uint32_t KH_DL_RING = 16;
+static constexpr uint64_t KH_DL_STALE_MS = 500;             // mirror expiry: fills stand down
+static constexpr uint32_t KH_DL_WIN_MAX = 8;                // distinct per-draw windows captured per frame
+// Engine-derived origins (the anchor-retirement campaign): the VS of the
+// SAME sampled draw carries the pass's view matrix built in the SAME
+// list-local frame the light positions use - its embedded camera,
+// subtracted from the bridge's TRUE-world camera, IS the window's origin.
+static constexpr uint32_t KH_DL_VS_SLOTS = 13;              // VS cb slots captured (0..12)
+static constexpr uint32_t KH_DL_VS_CONSTS = 80;             // constants per slot (view fits anywhere in 80)
+static constexpr uint32_t KH_DL_VS_BYTES = KH_DL_VS_CONSTS * 16;
+static constexpr uint32_t KH_DL_WIN_VS_BYTES = KH_DL_VS_SLOTS * KH_DL_VS_BYTES;
+static constexpr float    KH_DL_DERIVE_Y_TOL = 1.5f;        // heights are absolute in the list frame
+static constexpr float    KH_DL_DERIVE_GRID_TOL = 1.0f;     // origin must sit on the 100 m grid
+static constexpr float    KH_DL_DERIVE_ROT_TOL = 0.03f;     // candidate rotation vs the frame view
+// Authorship ceiling (the origin-flap session): the TRUE frame constants
+// produce post-snap residuals of ~0.002 m; impostor combos that squeak
+// through the per-route validators sit at 0.05-0.3 and, being per-object
+// values, derive a DIFFERENT origin per sampled draw - the
+// poolUpdated==0 full-churn signature. A hard ceiling 10x above the true
+// class and below every observed impostor separates them; windows with
+// only loose candidates go UNRESOLVED (dark-safe), never flapping.
+static constexpr float    KH_DL_ORIGIN_RES_MAX = 0.03f;
+// Anchor table (the burst-collapse session: anchor truth stored INSIDE
+// the shading pool inherited the cadence TTL and evaporated ~250 ms
+// after each derivation burst, while derivations arrive only every
+// ~150-300 ms - poolDerivedN 0 with the pool oscillating 2..21 was the
+// signature). Anchors are SURVEYING KNOWLEDGE, not shading state: a
+// lamp's position stays true while the lamp stands, lit or not, sampled
+// or not. Written ONLY by exact derivations (recursion stays severed),
+// long-lived (the TTL bounds only the scripted-mover case).
+static constexpr uint32_t KH_DL_ANCHOR_N = 64;
+static constexpr uint64_t KH_DL_ANCHOR_TTL_MS = 60000;
+// Anchor ADMISSION class (the polluted-table session: a full 64-anchor
+// table in a ~39-light neighborhood + flat 7-8-candidate vote histograms
+// proved sub-0.03 impostor derivations exist and accumulate for the
+// anchor TTL). Admission demands the ULP class - the golden session's
+// real signature (~0.002) - while shading authorship keeps 0.03: a
+// mediocre origin may light a frame, but only near-perfect ones testify.
+static constexpr float    KH_DL_ANCHOR_RES = 0.005f;
+static constexpr uint32_t KH_DL_WIN_BYTES = KH_DL_STAGE_BYTES + KH_DL_WIN_VS_BYTES;
+                                    // per-window arena stride: ctl + lights + VS constants
+static constexpr uint32_t KH_DL_ARENA_BYTES = KH_DL_WIN_MAX * KH_DL_WIN_BYTES;
+static constexpr uint32_t KH_DL_POOL = 64;                  // merged absolute-world pool capacity
+static constexpr float    KH_DL_ORIGIN_Q = 100.0f;          // origin grid (3500/4500/3300 all fit)
+static constexpr uint64_t KH_DL_POOL_STALE_MS = 500;        // no-harvest expiry: mode-3 fills stand down
+// CADENCE-ADAPTIVE persistence (the transient-tail finale; supersedes
+// the flat and the age-class TTLs): expiry cannot distinguish 'light
+// off' from 'light missed by this frame's random sample' except by
+// time - but each entry's OWN observed re-sight cadence prices that
+// time correctly. TTL = KH_DL_GAP_MULT x the entry's worst observed
+// gap: densely-observed lights (re-sighted every frame or two - which
+// is exactly what muzzle flashes and lightning are, being in every
+// nearby list) earn the fast floor, so their tails drop from ~0.4 s to
+// ~0.1; sparsely-observed entries keep the safety floor (expiry
+// DESTROYS gap history, so the floor must exceed any plausible first
+// re-sight gap or a sparse light strobes forever); everything caps at
+// the disco-proven ceiling. Bonus: a shot-out lamp now fades in ~0.2 s.
+static constexpr uint64_t KH_DL_TTL_CAP_MS = 1500;          // proven ceiling (sparse worst case)
+static constexpr uint64_t KH_DL_TTL_FLOOR_MS = 250;         // safety floor (unproven cadence)
+static constexpr uint64_t KH_DL_TTL_DENSE_FLOOR_MS = 80;    // dense-evidence fast lane
+static constexpr uint64_t KH_DL_GAP_MULT = 6;               // TTL = mult x worst observed gap
+static constexpr uint32_t KH_DL_DENSE_GAP_MS = 40;          // 'dense' = gaps within ~2 frames...
+static constexpr uint32_t KH_DL_DENSE_SIGHTS = 4;           // ...across at least this many sightings
+static constexpr float    KH_DL_MATCH_M = 1.0f;             // pool update match radius (same light re-sighted)
+
+// FINALIZED (the anchor-retirement campaign closed): dynamic lights are
+// ON BY DEFAULT for lit objects - mode 3, the engine-derived
+// absolute-world pool, no operator setup. The mode variable remains the
+// internal gate every path checks (and what a future kill-switch would
+// flip); modes 1/2 were the retired camera-origin hypotheses.
+// dumpDynamicLights stays as the standing diagnostic surface.
+static std::atomic<int>      g_dl_mode{3};
+static std::atomic<uint32_t> g_dl_intensity_bits{0x3F800000u};   // float bits, default 1.0
+static std::atomic<bool>     g_dl_recon{false};     // armed by the first dumpDynamicLights
+static std::atomic<bool>     g_dl_census_on{false}; // per-draw variability sampling
+
+struct DlWindowMeta {
+    void*    buf = nullptr;       // weak identity (dedupe key with first)
+    uint32_t first = 0;           // firstConstant (16-byte units)
+    uint32_t num = 0;             // bound window size (constants)
+    uint32_t bytes11 = 0;         // lights bytes actually copied
+    uint16_t vs_bytes[KH_DL_VS_SLOTS] = {};   // VS constants copied per slot (0 = absent)
+};
+
+struct DlWinReport {              // last harvest's per-window verdicts (dump)
+    uint64_t buf = 0;
+    uint32_t first = 0;
+    uint32_t point_n = 0, spot_n = 0;
+    uint8_t  origin_ok = 0;
+    float    ox = 0.0f, oz = 0.0f;
+    float    scale = 0.0f;        // this window's cb10[2].x (fold forensics)
+    float    gdiff[3] = {};       // this window's cb10[3].xyz
+    uint8_t  derived_ok = 0;      // engine-derived origin found and validated
+    float    d_ox = 0.0f, d_oz = 0.0f;
+    float    d_res = -1.0f;       // post-snap residual of the derived origin
+    int32_t  d_slot = -1;         // VS slot of the model-view (or pure view)
+    int32_t  d_wslot = -1;        // VS slot of the world matrix (-1 = pure route)
+    uint8_t  pool_vote = 0;       // origin recovered by voting against the pool
+    uint16_t v_best = 0;          // winning origin's vote count
+    uint16_t v_runner = 0;        // runner-up's vote count (margin forensics)
+    uint16_t v_cands = 0;         // distinct candidate origins seen
+    float    v_res = -1.0f;       // winning vote's residual
+};
+
+struct DlCandRec {                // derivation-candidate recon (the landscape ring)
+    uint64_t t_ms = 0;
+    uint32_t buf_lo = 0;          // window buffer identity (low 32)
+    uint8_t  kind = 0;            // 0 pure, 1 pair, 2 cam-triple, 3 obj-triple
+    int8_t   slot = -1;
+    uint16_t off = 0;
+    float    ox = 0.0f, oz = 0.0f;
+    float    res = -1.0f;         // post-snap residual (loose candidates included)
+    float    ydelta = 0.0f;
+};
+
+struct DlM3Ring {                 // mode-3 harvest ring (flicker forensics)
+    uint64_t t_ms = 0;
+    uint16_t pool_n = 0;
+    uint16_t anchored = 0;        // windows with resolved origins this harvest
+    uint16_t added = 0, updated = 0, expired = 0;
+    uint16_t spot_flips = 0;      // classification changed on update
+    float    gdiff[3] = {};       // last anchored window's RAW cb10[3]
+    float    scale = 0.0f;        // last anchored window's RAW cb10[2].x
+};
+
+struct DlPoolLight {
+    float    rec[24] = {};        // the 6-float4 record VERBATIM (producer side),
+                                  // +0 rewritten to absolute world
+    uint8_t  spot = 0;            // index >= its list's pointN
+    uint8_t  aux = 0;             // content authored by an AUX-pass window only
+    uint8_t  derived = 0;         // authored/confirmed by an exact derivation
+                                  // (ONLY these anchor pool votes - the vote
+                                  // must never trust its own output)
+    uint64_t stamp = 0;           // last re-sight (persistence TTL)
+    uint16_t gap_max_ms = 0;      // worst observed re-sight gap (cadence evidence)
+    uint16_t sightings = 0;       // saturating sighting count
+};
+
+struct DlRingEntry {
+    uint32_t serial = 0;          // harvest ordinal
+    uint64_t t_ms = 0;
+    uint32_t point_n = 0, spot_n = 0;
+    float    dist_scale = 0.0f;
+    uint32_t hash32 = 0;          // list-content hash (change cadence)
+    float    cam[3] = {};         // capture camera (engine axes)
+    uint64_t b10 = 0, b11 = 0;    // slot buffer weak identities (integer form)
+    uint32_t f10 = 0, f11 = 0;    // firstConstant offsets (16-byte units)
+    uint32_t n10 = 0, n11 = 0;    // bound window sizes (constants)
+    float    l0[8] = {};          // first light: pos.xyz, diffuse.rgb, fadeStart, coneCos
+    uint8_t  counts_as_float = 0; // counts arrived float-written (census)
+};
+
+struct DynLightsState {
+    // --- published mirror (render thread writes at harvest; both draw
+    //     paths read under the park invariant) ---
+    bool     valid = false;
+    uint32_t point_n = 0, spot_n = 0;
+    float    ctl[16] = {};                              // cb10 verbatim
+    float    lights[KH_DL_MAX_LIGHTS * 24] = {};        // cb11 verbatim (active prefix)
+    float    view_cols[12] = {};                        // 3 float4 view columns
+    bool     view_valid = false;
+    float    cam[3] = {};                               // capture camera (engine axes)
+    uint64_t stamp_ms = 0;
+    uint32_t serial = 0;                                // harvest count
+    uint64_t hash = 0;
+    // --- staging machinery (render thread only) ---
+    ID3D11Buffer* staging[2] = {};
+    uint8_t  inflight[2] = {};
+    uint32_t issue_serial = 0;
+    uint32_t slot_bytes11[2] = {};                      // lights bytes actually copied
+    float    pending_view[2][12] = {};
+    float    pending_cam[2][3] = {};
+    uint8_t  pending_view_ok[2] = {};
+    // --- per-draw window arena (render thread only): every distinct
+    //     slot-11 window sampled during the frame is copied here with its
+    //     control block; harvest at the next injection recovers each
+    //     list's origin and merges the union into the mode-3 pool ---
+    ID3D11Buffer* arena[2] = {};
+    uint8_t  arena_inflight[2] = {};
+    int      arena_write = 0;
+    DlWindowMeta win_meta[2][KH_DL_WIN_MAX] = {};
+    uint32_t win_count[2] = {};
+    float    arena_view[2][12] = {};   // frame view COLUMNS latched at the side's first capture
+    float    arena_cam[2][3] = {};     // bridge TRUE-world camera, same latch
+    uint8_t  arena_view_ok[2] = {};
+    // --- merged absolute-world pool (render thread writes at harvest;
+    //     both draw paths read under the park invariant) ---
+    DlPoolLight pool[KH_DL_POOL] = {};
+    uint32_t pool_n = 0;
+    // --- anchor table (derived-provenance light positions; the vote's
+    //     ground truth, decoupled from shading persistence) ---
+    float    anchor_pos[KH_DL_ANCHOR_N][3] = {};
+    uint64_t anchor_stamp[KH_DL_ANCHOR_N] = {};
+    uint32_t anchor_n = 0;
+    uint64_t anchor_admits = 0;      // ULP-class derivations admitted to the table
+    uint64_t anchor_res_rejects = 0; // derived origins good enough to shade, not to testify
+    // --- derivation-candidate recon ring (every validate-pass from the
+    //     full scans, LOOSE ones included: the constant landscape) ---
+    DlCandRec cand_ring[256] = {};
+    uint32_t cand_head = 0;
+    uint64_t pool_stamp = 0;
+    float    pool_scale = 1.0f;          // cb10[2].x consensus (last valid window)
+    float    pool_gdiff[3] = { 1.0f, 1.0f, 1.0f };
+    // Robust main-pass reference (the poisoned-trigger session: a
+    // session's injection trigger bound the DARKENED pass, so the
+    // trigger-window mirror reported gdiff ~0.029, branding the real
+    // main windows AUX and crushing every light 17x at the fill). The
+    // main pass is identified by its DEFINING property instead: it is
+    // the BRIGHT one - aux passes are darkened by construction - so the
+    // reference is the max-luminance window ctl seen each harvest.
+    float    main_gdiff[3] = { 1.0f, 1.0f, 1.0f };
+    float    main_scale = 1.0f;
+    uint8_t  main_ref_valid = 0;
+    DlWinReport win_report[KH_DL_WIN_MAX] = {};
+    uint32_t win_report_n = 0;
+    DlM3Ring m3_ring[KH_DL_RING] = {};
+    uint32_t m3_ring_head = 0;
+    // fill census (mode 3): how many lights each fill packed - a flap
+    // between 0 and k here convicts selection/staleness, a steady k
+    // acquits it (park-ordered single-writer like the pool itself)
+    uint64_t fill_calls = 0;
+    uint32_t fill_last_n = 0;
+    uint32_t fill_min_n = 0xFFFFFFFFu;
+    uint32_t fill_max_n = 0;
+    uint64_t pool_spot_flips = 0;   // point<->spot reclassification on update
+    uint64_t win_aux = 0;           // windows classified AUX (divergent pass globals)
+    uint64_t aux_adds = 0;          // lights first seen only through an aux window
+    uint64_t aux_refreshes = 0;     // aux sightings that refreshed a stamp only
+    // --- engine-derived origin census ---
+    uint64_t vs_copies = 0;         // VS slot windows copied into the arena
+    uint64_t vs_scans = 0;          // windows scanned for a view candidate
+    uint64_t vs_hint_hits = 0;      // memoized (slot, offset, form) hit first try
+    uint64_t vs_ortho_pass = 0;     // candidates passing the structural test
+    uint64_t vs_rot_rejects = 0;    // rotation != the frame view (model-view / aux pass)
+    uint64_t vs_y_rejects = 0;      // |Y delta| beyond tolerance
+    uint64_t vs_grid_rejects = 0;   // origin off the 100 m grid
+    uint64_t vs_noref = 0;          // no frame view latched for the side
+    uint64_t vs_valid = 0;          // validated derived origins
+    uint64_t vs_pair_tries = 0;     // MV x W pairings attempted
+    uint64_t vs_pair_valid = 0;     // pairings that passed the Y + grid proof
+    uint64_t vs_pair_y_rejects = 0; // pair route Y failures
+    uint64_t vs_pair_grid_rejects = 0;   // pair route grid failures
+    float    vs_last_ydelta = 0.0f; // most recent Y-reject delta (either route)
+    uint64_t vs_triple_valid = 0;   // bare-triple candidates passing the proof
+    uint64_t vs_zero_origins = 0;   // the true-world degeneracy won (nothing non-zero)
+    uint64_t vs_nonzero_origins = 0;// a light-frame origin won
+    uint64_t origin_range_rejects = 0;   // decoded records implausibly far from the camera
+    uint64_t origin_pool_votes = 0;      // windows resolved by pool voting (propagation)
+    uint64_t origin_vote_ambiguous = 0;  // votes refused for lattice ambiguity (no clear majority)
+    uint64_t vs_range_prunes = 0;        // candidates pruned by the range arbiter at selection
+    uint8_t  vs_hint_kind = 0;      // winning route: 0 pure, 1 pair, 2 cam-triple, 3 obj-triple
+    int32_t  vs_hint_slot = -1;     // memoized MODEL-VIEW find (session-scoped)
+    uint32_t vs_hint_off = 0;       // float offset within the slot block
+    uint8_t  vs_hint_form = 0;      // 0 = file convention, 1 = transposed storage
+    int32_t  vs_hint_wslot = -1;    // memoized WORLD-matrix find (-1 = pure view)
+    uint32_t vs_hint_woff = 0;
+    uint8_t  vs_hint_wform = 0;
+    // --- window / origin / pool counters ---
+    uint64_t win_captured = 0;      // window copies issued into the arena
+    uint64_t win_table_full = 0;    // ninth+ distinct window in one frame
+    uint64_t lists_anchored = 0;    // windows whose origin resolved (derivation)
+    uint64_t lists_unanchored = 0;  // windows with no resolvable origin (dropped)
+    uint64_t pool_added = 0;        // new lights entering the pool
+    uint64_t pool_updated = 0;      // re-sighted lights refreshed in place
+    uint64_t pool_expired = 0;      // TTL expiries (light off / gone / moved away)
+    uint64_t pool_overflow = 0;     // pool capacity exceeded
+    // --- binding census (weak identities; never dereferenced) ---
+    void*    slot10_buf = nullptr; void* slot11_buf = nullptr;
+    uint32_t slot10_first = 0, slot11_first = 0;
+    uint32_t slot10_num = 0, slot11_num = 0;
+    uint32_t bw10 = 0, bw11 = 0;                        // buffer byte widths
+    // --- counters (render thread writes; dump/stats read) ---
+    uint64_t acquires = 0;        // acquisition entries (armed injections)
+    uint64_t copies = 0;          // copy pairs issued
+    uint64_t still_drawing = 0;   // harvest retries (GPU not done)
+    uint64_t no_ctx1 = 0;         // ID3D11DeviceContext1 unavailable
+    uint64_t slot_nulls = 0;      // slot 10 or 11 unbound at the injection
+    uint64_t issue_skips = 0;     // both staging slots in flight
+    uint64_t bounds_rejects = 0;  // window outside the buffer
+    uint64_t window_clamps = 0;   // bound window smaller than 32 lights
+    uint64_t val_rejects = 0;     // CPU validation refused a harvest
+    uint64_t counts_float = 0;    // counts arrived float-written
+    uint64_t clamped_counts = 0;  // pointN+spotN exceeded capacity
+    uint64_t zero_lists = 0;      // valid harvests with zero lights
+    uint64_t hash_changes = 0;    // list content changed between harvests
+    uint64_t stale_skips = 0;     // fill stood down on an expired mirror
+    uint64_t view_miss_skips = 0; // mode-2 fill without view columns
+    uint64_t pool_offset_binds = 0;  // slot bound with firstConstant != 0
+    uint64_t shared_pool_binds = 0;  // slots 10 and 11 share one buffer
+    float    last_rej[4] = {};    // forensic: the values that failed + reason id
+    // --- ring ---
+    DlRingEntry ring[KH_DL_RING];
+    uint32_t ring_head = 0;
+};
+static DynLightsState g_dl;
+
+// Per-draw variability census (render thread; armed by the dump): sampled
+// slot-11 window identities per frame - the distinct (buffer, offset) count
+// answers the per-draw culling question (one global visible list vs lists
+// culled per draw), folded at the frame boundary (main clear).
+static uint32_t g_dl_cd_ctr = 0;
+static void*    g_dl_cd_bufs[8] = {};
+static uint32_t g_dl_cd_first[8] = {};
+static uint32_t g_dl_cd_n = 0;
+static uint32_t g_dl_cd_null = 0, g_dl_cd_samples = 0;
+static uint32_t g_dl_cd_distinct_last = 0, g_dl_cd_distinct_max = 0;
+static uint32_t g_dl_cd_null_last = 0, g_dl_cd_samples_last = 0;
+
+inline bool dl_finite(float v) { return v == v && v < 1.0e30f && v > -1.0e30f; }
+
+// Per-draw sampler (render thread, engine draws only, every 16th draw
+// while lights are enabled or recon is armed): maintains the per-frame
+// distinct-window census AND copies each NEW distinct slot-11 window
+// (control block + lights) into the frame's arena side for the mode-3
+// origin recovery + merge. The capture dedupes against the arena side's
+// own metadata (not the census table), so the census fold at the clear
+// and the arena flip at the injection stay independent.
+inline void dynlights_sample_draw(ID3D11DeviceContext* ctx) {
+    ID3D11DeviceContext1* khd_c1 = nullptr;
+    ctx->QueryInterface(__uuidof(ID3D11DeviceContext1), reinterpret_cast<void**>(&khd_c1));
+    if (!khd_c1) return;
+    ID3D11Buffer* khd_b11 = nullptr;
+    UINT khd_f11 = 0, khd_n11 = 0;
+    khd_c1->PSGetConstantBuffers1(11, 1, &khd_b11, &khd_f11, &khd_n11);
+    g_dl_cd_samples++;
+
+    if (!khd_b11) {
+        g_dl_cd_null++;
+        khd_c1->Release();
+        return;
+    }
+
+    {   // census: distinct (buffer, offset) pairs this frame
+        bool khd_seen = false;
+
+        for (uint32_t i = 0; i < g_dl_cd_n; ++i) {
+            if (g_dl_cd_bufs[i] == static_cast<void*>(khd_b11) && g_dl_cd_first[i] == khd_f11) {
+                khd_seen = true;
+                break;
+            }
+        }
+
+        if (!khd_seen && g_dl_cd_n < 8) {
+            g_dl_cd_bufs[g_dl_cd_n] = static_cast<void*>(khd_b11);
+            g_dl_cd_first[g_dl_cd_n] = khd_f11;
+            g_dl_cd_n++;
+        }
+    }
+
+    // arena capture: only when this window is new to the WRITE side
+    const int khd_w = g_dl.arena_write;
+    bool khd_have = false;
+
+    for (uint32_t i = 0; i < g_dl.win_count[khd_w]; ++i) {
+        if (g_dl.win_meta[khd_w][i].buf == static_cast<void*>(khd_b11) &&
+            g_dl.win_meta[khd_w][i].first == khd_f11) {
+            khd_have = true;
+            break;
+        }
+    }
+
+    if (khd_have) {
+        khd_b11->Release();
+        khd_c1->Release();
+        return;
+    }
+
+    if (g_dl.win_count[khd_w] >= KH_DL_WIN_MAX) {
+        g_dl.win_table_full++;
+        khd_b11->Release();
+        khd_c1->Release();
+        return;
+    }
+
+    if (!g_dl.arena[khd_w]) {
+        ID3D11Device* khd_dev = nullptr;
+        ctx->GetDevice(&khd_dev);
+
+        if (khd_dev) {
+            D3D11_BUFFER_DESC khd_sd = {};
+            khd_sd.ByteWidth = KH_DL_ARENA_BYTES;
+            khd_sd.Usage = D3D11_USAGE_STAGING;
+            khd_sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            khd_dev->CreateBuffer(&khd_sd, nullptr, &g_dl.arena[khd_w]);
+            khd_dev->Release();
+        }
+    }
+
+    ID3D11Buffer* khd_b10 = nullptr;
+    UINT khd_f10 = 0, khd_n10 = 0;
+    khd_c1->PSGetConstantBuffers1(10, 1, &khd_b10, &khd_f10, &khd_n10);
+    // Engine-derived origin capture: the SAME draw's VS constants hold
+    // the pass's view matrix built in the SAME list-local frame the
+    // light positions use (this VS produces the fragment positions the
+    // lit PS subtracts). Copied alongside the window; the harvest scans
+    // them for the view and derives the origin with no anchors at all.
+    ID3D11Buffer* khd_vsb[KH_DL_VS_SLOTS] = {};
+    UINT khd_vsf[KH_DL_VS_SLOTS] = {}, khd_vsn[KH_DL_VS_SLOTS] = {};
+    khd_c1->VSGetConstantBuffers1(0, KH_DL_VS_SLOTS, khd_vsb, khd_vsf, khd_vsn);
+    khd_c1->Release();
+
+    if (g_dl.arena[khd_w] && khd_b10) {
+        D3D11_BUFFER_DESC khd_d10 = {}, khd_d11 = {};
+        khd_b10->GetDesc(&khd_d10);
+        khd_b11->GetDesc(&khd_d11);
+        const uint32_t khd_off10 = khd_f10 * 16u;
+        const uint32_t khd_off11 = khd_f11 * 16u;
+        uint32_t khd_want11 = KH_DL_ARR_BYTES;
+        if (khd_n11 > 0 && khd_n11 * 16u < khd_want11) khd_want11 = khd_n11 * 16u;
+
+        if (khd_off10 + KH_DL_CTL_BYTES <= khd_d10.ByteWidth && khd_off11 < khd_d11.ByteWidth) {
+            if (khd_off11 + khd_want11 > khd_d11.ByteWidth) khd_want11 = khd_d11.ByteWidth - khd_off11;
+            khd_want11 -= khd_want11 % KH_DL_LIGHT_BYTES;   // whole records only
+
+            if (g_dl.win_count[khd_w] == 0) {
+                // first capture of this side: latch the FRAME's bridge
+                // view (rotation reference + TRUE-world camera for the
+                // origin subtraction; all main-pass draws share it)
+                if (g_ro.cycle_pv_valid) {
+                    for (int khd_k = 0; khd_k < 3; ++khd_k) {
+                        g_dl.arena_view[khd_w][khd_k * 4 + 0] = g_ro.cycle_pv.view[0][khd_k];
+                        g_dl.arena_view[khd_w][khd_k * 4 + 1] = g_ro.cycle_pv.view[1][khd_k];
+                        g_dl.arena_view[khd_w][khd_k * 4 + 2] = g_ro.cycle_pv.view[2][khd_k];
+                        g_dl.arena_view[khd_w][khd_k * 4 + 3] = 0.0f;
+                    }
+
+                    extract_camera_pos(g_ro.cycle_pv.view, g_dl.arena_cam[khd_w]);
+                    g_dl.arena_view_ok[khd_w] = 1;
+                } else {
+                    g_dl.arena_view_ok[khd_w] = 0;
+                }
+            }
+
+            const uint32_t khd_slot = g_dl.win_count[khd_w];
+            const uint32_t khd_dst = khd_slot * KH_DL_WIN_BYTES;
+            D3D11_BOX khd_box10 = { khd_off10, 0, 0, khd_off10 + KH_DL_CTL_BYTES, 1, 1 };
+            ctx->CopySubresourceRegion(g_dl.arena[khd_w], 0, khd_dst, 0, 0, khd_b10, 0, &khd_box10);
+
+            if (khd_want11 > 0) {
+                D3D11_BOX khd_box11 = { khd_off11, 0, 0, khd_off11 + khd_want11, 1, 1 };
+                ctx->CopySubresourceRegion(g_dl.arena[khd_w], 0, khd_dst + KH_DL_CTL_BYTES, 0, 0,
+                                           khd_b11, 0, &khd_box11);
+            }
+
+            DlWindowMeta& khd_meta = g_dl.win_meta[khd_w][khd_slot];
+            khd_meta.buf = static_cast<void*>(khd_b11);
+            khd_meta.first = khd_f11;
+            khd_meta.num = khd_n11;
+            khd_meta.bytes11 = khd_want11;
+            uint32_t khd_vs_dst = khd_dst + KH_DL_STAGE_BYTES;
+
+            for (uint32_t khd_vs = 0; khd_vs < KH_DL_VS_SLOTS; ++khd_vs) {
+                khd_meta.vs_bytes[khd_vs] = 0;
+
+                if (khd_vsb[khd_vs]) {
+                    D3D11_BUFFER_DESC khd_vd = {};
+                    khd_vsb[khd_vs]->GetDesc(&khd_vd);
+                    const uint32_t khd_voff = khd_vsf[khd_vs] * 16u;
+
+                    if (khd_voff < khd_vd.ByteWidth) {
+                        uint32_t khd_vwant = KH_DL_VS_BYTES;
+                        if (khd_vsn[khd_vs] > 0 && khd_vsn[khd_vs] * 16u < khd_vwant) khd_vwant = khd_vsn[khd_vs] * 16u;
+                        if (khd_voff + khd_vwant > khd_vd.ByteWidth) khd_vwant = khd_vd.ByteWidth - khd_voff;
+                        khd_vwant &= ~15u;
+
+                        if (khd_vwant >= 64u) {   // at least one 4x4
+                            D3D11_BOX khd_vbox = { khd_voff, 0, 0, khd_voff + khd_vwant, 1, 1 };
+                            ctx->CopySubresourceRegion(g_dl.arena[khd_w], 0, khd_vs_dst, 0, 0,
+                                                       khd_vsb[khd_vs], 0, &khd_vbox);
+                            khd_meta.vs_bytes[khd_vs] = static_cast<uint16_t>(khd_vwant);
+                            g_dl.vs_copies++;
+                        }
+                    }
+                }
+
+                khd_vs_dst += KH_DL_VS_BYTES;
+            }
+
+            g_dl.win_count[khd_w] = khd_slot + 1;
+            g_dl.win_captured++;
+        } else {
+            g_dl.bounds_rejects++;
+        }
+    }
+
+    if (khd_b10) khd_b10->Release();
+    for (uint32_t khd_vs = 0; khd_vs < KH_DL_VS_SLOTS; ++khd_vs) {
+        if (khd_vsb[khd_vs]) khd_vsb[khd_vs]->Release();
+    }
+    khd_b11->Release();
+}
+
+inline void dynlights_census_fold() {
+    g_dl_cd_distinct_last = g_dl_cd_n;
+    if (g_dl_cd_n > g_dl_cd_distinct_max) g_dl_cd_distinct_max = g_dl_cd_n;
+    g_dl_cd_null_last = g_dl_cd_null;
+    g_dl_cd_samples_last = g_dl_cd_samples;
+    g_dl_cd_n = 0;
+    g_dl_cd_null = 0;
+    g_dl_cd_samples = 0;
+}
+
+// Structural affine test shared by the derivation, in FOUR packings (the
+// 4x3 forms joined after a field census found ZERO world-matrix
+// candidates: the engine packs transforms the way this file's own shadow
+// matrices are packed - '3 rows of [a, b, c, t]' - which a 4x4-with-
+// (0,0,0,1)-lane test can never see; the same census identified the
+// rotation-matching 4x4s as translation-STRIPPED view rotations, their
+// Y-reject delta equal to the camera's full height):
+//   0 = 4x4, the file's row-vector convention ((0,0,0,1) column checked)
+//   1 = 4x4 transposed / HLSL column-major default (lane checked)
+//   2 = 4x3 in 3 registers, column-major rows [a, b, c, t] - the
+//       shadow_mats convention: V[i][k] = reg_k[i], V[3][k] = reg_k[3]
+//   3 = 4 row registers with LIVE xyz and dead w lanes (row-major 3x4)
+// Forms 2/3 have no lane to check; the orthonormal rotation here and the
+// Y + grid proof downstream carry the discrimination.
+inline uint32_t dl_form_floats(uint8_t khd_form) { return khd_form == 2 ? 12u : 16u; }
+
+inline bool dl_cand_structure(const float* khd_mf, uint8_t khd_form, float (&khd_v)[4][4]) {
+    if (khd_form <= 1) {
+        for (int i = 0; i < 4; ++i) {
+            for (int k = 0; k < 4; ++k) {
+                khd_v[i][k] = khd_form == 0 ? khd_mf[i * 4 + k] : khd_mf[k * 4 + i];
+            }
+        }
+
+        if (fabsf(khd_v[0][3]) > 0.001f || fabsf(khd_v[1][3]) > 0.001f ||
+            fabsf(khd_v[2][3]) > 0.001f || fabsf(khd_v[3][3] - 1.0f) > 0.001f) {
+            return false;
+        }
+    } else if (khd_form == 2) {
+        for (int k = 0; k < 3; ++k) {
+            khd_v[0][k] = khd_mf[k * 4 + 0];
+            khd_v[1][k] = khd_mf[k * 4 + 1];
+            khd_v[2][k] = khd_mf[k * 4 + 2];
+            khd_v[3][k] = khd_mf[k * 4 + 3];
+            khd_v[k][3] = 0.0f;
+        }
+
+        khd_v[3][3] = 1.0f;
+    } else {
+        for (int i = 0; i < 4; ++i) {
+            khd_v[i][0] = khd_mf[i * 4 + 0];
+            khd_v[i][1] = khd_mf[i * 4 + 1];
+            khd_v[i][2] = khd_mf[i * 4 + 2];
+            khd_v[i][3] = 0.0f;
+        }
+
+        khd_v[3][3] = 1.0f;
+    }
+
+    for (int r = 0; r < 3; ++r) {
+        const float khd_n2 = khd_v[r][0] * khd_v[r][0] + khd_v[r][1] * khd_v[r][1] +
+                             khd_v[r][2] * khd_v[r][2];
+        if (khd_n2 < 0.96f || khd_n2 > 1.04f) return false;
+    }
+
+    for (int a = 0; a < 3; ++a) {
+        for (int b = a + 1; b < 3; ++b) {
+            const float khd_d = khd_v[a][0] * khd_v[b][0] + khd_v[a][1] * khd_v[b][1] +
+                                khd_v[a][2] * khd_v[b][2];
+            if (fabsf(khd_d) > 0.02f) return false;
+        }
+    }
+
+    return true;
+}
+
+inline bool dl_rot_matches(const float (&khd_v)[4][4], const float* khd_cols) {
+    for (int j = 0; j < 3; ++j) {
+        for (int k = 0; k < 3; ++k) {
+            if (fabsf(khd_v[j][k] - khd_cols[k * 4 + j]) > KH_DL_DERIVE_ROT_TOL) return false;
+        }
+    }
+
+    return true;
+}
+
+inline bool dl_rot_identity(const float (&khd_v)[4][4]) {
+    for (int j = 0; j < 3; ++j) {
+        for (int k = 0; k < 3; ++k) {
+            const float khd_want = j == k ? 1.0f : 0.0f;
+            if (fabsf(khd_v[j][k] - khd_want) > KH_DL_DERIVE_ROT_TOL) return false;
+        }
+    }
+
+    return true;
+}
+
+// The frame-structure proof shared by every route: Y delta ~ 0 (heights
+// are absolute in the list frame) and X/Z on the 100 m grid, with
+// per-route tolerances (matrix pairs inherit lamp-class slack; bare
+// triples must be near-exact - a random constant must not fake a
+// camera). Rejects log the Y delta.
+inline bool dl_origin_validate(float khd_ex, float khd_ey, float khd_ez, bool khd_pair,
+                               float khd_ytol, float khd_gtol,
+                               float& khd_ox, float& khd_oz, float& khd_res) {
+    if (fabsf(khd_ey) > khd_ytol) {
+        if (khd_pair) g_dl.vs_pair_y_rejects++; else g_dl.vs_y_rejects++;
+        g_dl.vs_last_ydelta = khd_ey;
+        return false;
+    }
+
+    const float khd_sx = floorf(khd_ex / KH_DL_ORIGIN_Q + 0.5f) * KH_DL_ORIGIN_Q;
+    const float khd_sz = floorf(khd_ez / KH_DL_ORIGIN_Q + 0.5f) * KH_DL_ORIGIN_Q;
+    const float khd_rx = fabsf(khd_ex - khd_sx);
+    const float khd_rz = fabsf(khd_ez - khd_sz);
+
+    if (khd_rx > khd_gtol || khd_rz > khd_gtol) {
+        if (khd_pair) g_dl.vs_pair_grid_rejects++; else g_dl.vs_grid_rejects++;
+        return false;
+    }
+
+    khd_ox = khd_sx;
+    khd_oz = khd_sz;
+    khd_res = khd_rx > khd_rz ? khd_rx : khd_rz;
+    return true;
+}
+
+inline void dl_cand_record(const DlWindowMeta& khd_m, uint8_t khd_kind, int32_t khd_slot,
+                           uint32_t khd_off, float khd_ox, float khd_oz, float khd_res,
+                           float khd_yd) {
+    DlCandRec& khd_c = g_dl.cand_ring[g_dl.cand_head++ % 256u];
+    khd_c.t_ms = steady_now_ms();
+    khd_c.buf_lo = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(khd_m.buf));
+    khd_c.kind = khd_kind;
+    khd_c.slot = static_cast<int8_t>(khd_slot);
+    khd_c.off = static_cast<uint16_t>(khd_off);
+    khd_c.ox = khd_ox;
+    khd_c.oz = khd_oz;
+    khd_c.res = khd_res;
+    khd_c.ydelta = khd_yd;
+}
+
+// Scan one window's captured VS constants and derive its LIGHT-FRAME
+// origin. THE TRUE-WORLD FINDING (the (0,0) poisoning session): the pair
+// route reconstructed origin (0,0) to millimeters - the VERTEX pipeline
+// is NOT rebased at all (W translates models to TRUE world, the MV's
+// camera is the TRUE camera); only the LIGHT data rides the grid frame,
+// so the origin link is some OTHER per-draw VS constant. Routes, all
+// through the Y + grid proof:
+//   kind 0  PURE   - a standalone list-world->view (absent on this
+//                    build; free to keep testing)
+//   kind 1  PAIR   - MV x identity-rotation W. The TRUE-world W yields
+//                    the degenerate (0,0); a LIGHT-FRAME W' yields the
+//                    origin (t_W true minus t_W' light = origin)
+//   kind 2  CAMTRIP- a bare float triple as the camera in the light
+//                    frame: origin = cam_true - T
+//   kind 3  OBJTRIP- a bare triple as the object position in the light
+//                    frame, paired with a true-world W: origin = t_W - T
+// SELECTION: every validating candidate competes; (0,0) is the known
+// true-world degeneracy and only wins when NOTHING non-zero validates.
+// Matrix evidence outranks triples; residual breaks ties. Only non-zero
+// winners memoize (a zero hint could lock the degeneracy back in).
+inline bool dynlights_derive_origin(const uint8_t* khd_win, const DlWindowMeta& khd_m, int khd_side,
+                                    const float* khd_recs, uint32_t khd_rec_n,
+                                    float& khd_ox, float& khd_oz, float& khd_res,
+                                    int32_t& khd_slot_out, int32_t& khd_wslot_out) {
+    if (!g_dl.arena_view_ok[khd_side]) {
+        g_dl.vs_noref++;
+        return false;
+    }
+
+    g_dl.vs_scans++;
+    const float* khd_bcols = g_dl.arena_view[khd_side];
+    const float* khd_bcam = g_dl.arena_cam[khd_side];
+    const uint8_t* khd_vs_base = khd_win + KH_DL_STAGE_BYTES;
+
+    auto khd_block = [&](int32_t khd_s) {
+        return reinterpret_cast<const float*>(khd_vs_base + khd_s * KH_DL_VS_BYTES);
+    };
+
+    // THE RANGE ARBITER (the exact-impostor session: a structural combo
+    // deriving origin (0,-2000) at residual 0.000 OUTRANKED the true
+    // origin's 0.002 and, being stable, locked the hint forever while
+    // the downstream backstop vetoed every window - residual cannot
+    // arbitrate between truth and a structural impostor, both are
+    // exact). The true origin's unfakeable property: engine light lists
+    // are culled around the CAMERA, so only it places this window's
+    // records nearby. Applied at candidate SELECTION and in the hint -
+    // impostors die at candidacy and can never lock in.
+    const float* khd_rec0 = nullptr;
+
+    for (uint32_t i = 0; i < khd_rec_n; ++i) {
+        const float* khd_rr = khd_recs + i * 24;
+
+        if (dl_finite(khd_rr[0]) && dl_finite(khd_rr[1]) && dl_finite(khd_rr[2])) {
+            khd_rec0 = khd_rr;
+            break;
+        }
+    }
+
+    auto khd_range_ok = [&](float khd_cox, float khd_coz) {
+        if (!khd_rec0) return true;
+        const float khd_rx = khd_cox + khd_rec0[0] - khd_bcam[0];
+        const float khd_rz = khd_coz + khd_rec0[2] - khd_bcam[2];
+
+        if (khd_rx * khd_rx + khd_rz * khd_rz > 3000.0f * 3000.0f) {
+            g_dl.vs_range_prunes++;
+            return false;
+        }
+
+        return true;
+    };
+
+    // best-candidate accumulators: RESIDUAL is the rank (the origin-flap
+    // lesson: the matrix-over-triple preference let 0.29 m impostors
+    // outrank 0.002 m truth); the authorship ceiling gates every offer;
+    // zero-origin tracked separately (the degeneracy bin).
+    float khd_b_ox = 0.0f, khd_b_oz = 0.0f, khd_b_res = 1.0e9f;
+    int32_t khd_b_slot = -1, khd_b_wslot = -1;
+    uint32_t khd_b_off = 0, khd_b_woff = 0;
+    uint8_t khd_b_form = 0, khd_b_wform = 0, khd_b_kind = 0;
+    bool khd_have_nz = false, khd_have_z = false;
+    float khd_z_res = 1.0e9f;
+
+    auto khd_offer = [&](float ox, float oz, float res, uint8_t kind,
+                         int32_t slot, uint32_t off, uint8_t form,
+                         int32_t wslot, uint32_t woff, uint8_t wform) {
+        if (res > KH_DL_ORIGIN_RES_MAX) return;   // impostor class: never authors
+        if (!khd_range_ok(ox, oz)) return;        // structural impostors die here
+
+        if (ox == 0.0f && oz == 0.0f) {
+            khd_have_z = true;
+            if (res < khd_z_res) khd_z_res = res;
+            return;
+        }
+
+        if (!khd_have_nz || res < khd_b_res) {
+            khd_have_nz = true;
+            khd_b_ox = ox; khd_b_oz = oz; khd_b_res = res;
+            khd_b_kind = kind;
+            khd_b_slot = slot; khd_b_off = off; khd_b_form = form;
+            khd_b_wslot = wslot; khd_b_woff = woff; khd_b_wform = wform;
+        }
+    };
+
+    float khd_tox, khd_toz, khd_tres;
+
+    // memoized fast path (non-zero winners only ever memoize)
+    if (g_dl.vs_hint_slot >= 0 && g_dl.vs_hint_slot < static_cast<int32_t>(KH_DL_VS_SLOTS)) {
+        const uint32_t khd_mfl = khd_m.vs_bytes[g_dl.vs_hint_slot] / 4u;
+        bool khd_hit = false;
+
+        if (g_dl.vs_hint_kind == 2) {
+            if (g_dl.vs_hint_off + 4 <= khd_mfl) {
+                const float* khd_t = khd_block(g_dl.vs_hint_slot) + g_dl.vs_hint_off;
+
+                if (dl_finite(khd_t[0]) && dl_finite(khd_t[1]) && dl_finite(khd_t[2]) &&
+                    dl_origin_validate(khd_bcam[0] - khd_t[0], khd_bcam[1] - khd_t[1],
+                                       khd_bcam[2] - khd_t[2], true, 0.5f, 0.25f,
+                                       khd_tox, khd_toz, khd_tres) &&
+                    khd_tres <= KH_DL_ORIGIN_RES_MAX &&
+                    khd_range_ok(khd_tox, khd_toz) &&
+                    !(khd_tox == 0.0f && khd_toz == 0.0f)) {
+                    khd_hit = true;
+                }
+            }
+        } else if (g_dl.vs_hint_kind == 3 && g_dl.vs_hint_wslot >= 0 &&
+                   g_dl.vs_hint_wslot < static_cast<int32_t>(KH_DL_VS_SLOTS)) {
+            // the field-winning route (obj-in-light-frame triple against
+            // the true-world W) - previously scanned in full every window
+            const uint32_t khd_wfl = khd_m.vs_bytes[g_dl.vs_hint_wslot] / 4u;
+
+            if (g_dl.vs_hint_off + 4 <= khd_mfl &&
+                g_dl.vs_hint_woff + dl_form_floats(g_dl.vs_hint_wform) <= khd_wfl) {
+                const float* khd_t = khd_block(g_dl.vs_hint_slot) + g_dl.vs_hint_off;
+                float khd_vw[4][4];
+
+                if (dl_finite(khd_t[0]) && dl_finite(khd_t[1]) && dl_finite(khd_t[2]) &&
+                    dl_cand_structure(khd_block(g_dl.vs_hint_wslot) + g_dl.vs_hint_woff,
+                                      g_dl.vs_hint_wform, khd_vw) &&
+                    dl_rot_identity(khd_vw) &&
+                    dl_origin_validate(khd_vw[3][0] - khd_t[0], khd_vw[3][1] - khd_t[1],
+                                       khd_vw[3][2] - khd_t[2], true, 0.5f, 0.25f,
+                                       khd_tox, khd_toz, khd_tres) &&
+                    khd_tres <= KH_DL_ORIGIN_RES_MAX &&
+                    khd_range_ok(khd_tox, khd_toz) &&
+                    !(khd_tox == 0.0f && khd_toz == 0.0f)) {
+                    khd_hit = true;
+                }
+            }
+        } else if (g_dl.vs_hint_kind == 1 && g_dl.vs_hint_wslot >= 0 &&
+                   g_dl.vs_hint_wslot < static_cast<int32_t>(KH_DL_VS_SLOTS)) {
+            const uint32_t khd_wfl = khd_m.vs_bytes[g_dl.vs_hint_wslot] / 4u;
+
+            if (g_dl.vs_hint_off + dl_form_floats(g_dl.vs_hint_form) <= khd_mfl &&
+                g_dl.vs_hint_woff + dl_form_floats(g_dl.vs_hint_wform) <= khd_wfl) {
+                float khd_vm[4][4], khd_vw[4][4];
+
+                if (dl_cand_structure(khd_block(g_dl.vs_hint_slot) + g_dl.vs_hint_off,
+                                      g_dl.vs_hint_form, khd_vm) &&
+                    dl_rot_matches(khd_vm, khd_bcols) &&
+                    dl_cand_structure(khd_block(g_dl.vs_hint_wslot) + g_dl.vs_hint_woff,
+                                      g_dl.vs_hint_wform, khd_vw) &&
+                    dl_rot_identity(khd_vw)) {
+                    float khd_cam[3];
+                    extract_camera_pos(khd_vm, khd_cam);
+
+                    if (dl_finite(khd_cam[0]) && dl_finite(khd_cam[1]) && dl_finite(khd_cam[2]) &&
+                        dl_origin_validate(khd_bcam[0] - khd_cam[0] - khd_vw[3][0],
+                                           khd_bcam[1] - khd_cam[1] - khd_vw[3][1],
+                                           khd_bcam[2] - khd_cam[2] - khd_vw[3][2],
+                                           true, KH_DL_DERIVE_Y_TOL, KH_DL_DERIVE_GRID_TOL,
+                                           khd_tox, khd_toz, khd_tres) &&
+                        khd_tres <= KH_DL_ORIGIN_RES_MAX &&
+                        khd_range_ok(khd_tox, khd_toz) &&
+                        !(khd_tox == 0.0f && khd_toz == 0.0f)) {
+                        khd_hit = true;
+                    }
+                }
+            }
+        }
+
+        if (khd_hit) {
+            khd_ox = khd_tox;
+            khd_oz = khd_toz;
+            khd_res = khd_tres;
+            khd_slot_out = g_dl.vs_hint_slot;
+            khd_wslot_out = g_dl.vs_hint_wslot;
+            g_dl.vs_hint_hits++;
+            g_dl.vs_valid++;
+            return true;
+        }
+    }
+
+    // full scan: matrices first
+    struct DlMvCand { float cam[3]; int32_t slot; uint32_t off; uint8_t form; };
+    struct DlWCand { float t[3]; int32_t slot; uint32_t off; uint8_t form; };
+    DlMvCand khd_mv[8];
+    DlWCand khd_wm[8];
+    uint32_t khd_mv_n = 0, khd_wm_n = 0;
+
+    for (uint32_t khd_s = 0; khd_s < KH_DL_VS_SLOTS; ++khd_s) {
+        const uint32_t khd_fl = khd_m.vs_bytes[khd_s] / 4u;
+        if (khd_fl < 12) continue;
+        const float* khd_base = khd_block(static_cast<int32_t>(khd_s));
+
+        for (uint32_t khd_off = 0; khd_off + 12 <= khd_fl; khd_off += 4) {
+            for (uint8_t khd_form = 0; khd_form < 4; ++khd_form) {
+                if (khd_off + dl_form_floats(khd_form) > khd_fl) continue;
+                float khd_v[4][4];
+                if (!dl_cand_structure(khd_base + khd_off, khd_form, khd_v)) continue;
+                g_dl.vs_ortho_pass++;
+
+                if (dl_rot_matches(khd_v, khd_bcols)) {
+                    float khd_cam[3];
+                    extract_camera_pos(khd_v, khd_cam);
+
+                    if (!dl_finite(khd_cam[0]) || !dl_finite(khd_cam[1]) || !dl_finite(khd_cam[2])) {
+                        continue;
+                    }
+
+                    if (dl_origin_validate(khd_bcam[0] - khd_cam[0], khd_bcam[1] - khd_cam[1],
+                                           khd_bcam[2] - khd_cam[2], false,
+                                           KH_DL_DERIVE_Y_TOL, KH_DL_DERIVE_GRID_TOL,
+                                           khd_tox, khd_toz, khd_tres)) {
+                        dl_cand_record(khd_m, 0, static_cast<int32_t>(khd_s), khd_off,
+                                       khd_tox, khd_toz, khd_tres, 0.0f);
+                        khd_offer(khd_tox, khd_toz, khd_tres, static_cast<uint8_t>(0),
+                                  static_cast<int32_t>(khd_s), khd_off, khd_form, -1, 0, 0);
+                    }
+
+                    if (khd_mv_n < 8) {
+                        khd_mv[khd_mv_n].cam[0] = khd_cam[0];
+                        khd_mv[khd_mv_n].cam[1] = khd_cam[1];
+                        khd_mv[khd_mv_n].cam[2] = khd_cam[2];
+                        khd_mv[khd_mv_n].slot = static_cast<int32_t>(khd_s);
+                        khd_mv[khd_mv_n].off = khd_off;
+                        khd_mv[khd_mv_n].form = khd_form;
+                        khd_mv_n++;
+                    }
+                } else if (dl_rot_identity(khd_v)) {
+                    if (dl_finite(khd_v[3][0]) && dl_finite(khd_v[3][1]) && dl_finite(khd_v[3][2]) &&
+                        fabsf(khd_v[3][0]) < 1.0e7f && fabsf(khd_v[3][1]) < 1.0e7f &&
+                        fabsf(khd_v[3][2]) < 1.0e7f && khd_wm_n < 8) {
+                        khd_wm[khd_wm_n].t[0] = khd_v[3][0];
+                        khd_wm[khd_wm_n].t[1] = khd_v[3][1];
+                        khd_wm[khd_wm_n].t[2] = khd_v[3][2];
+                        khd_wm[khd_wm_n].slot = static_cast<int32_t>(khd_s);
+                        khd_wm[khd_wm_n].off = khd_off;
+                        khd_wm[khd_wm_n].form = khd_form;
+                        khd_wm_n++;
+                    }
+                } else {
+                    g_dl.vs_rot_rejects++;
+                }
+            }
+        }
+    }
+
+    // kind 1: MV x W pairs (W' light-frame yields the origin; W true
+    // yields the tracked (0,0) degeneracy)
+    for (uint32_t a = 0; a < khd_mv_n; ++a) {
+        for (uint32_t b = 0; b < khd_wm_n; ++b) {
+            g_dl.vs_pair_tries++;
+
+            if (dl_origin_validate(khd_bcam[0] - khd_mv[a].cam[0] - khd_wm[b].t[0],
+                                   khd_bcam[1] - khd_mv[a].cam[1] - khd_wm[b].t[1],
+                                   khd_bcam[2] - khd_mv[a].cam[2] - khd_wm[b].t[2],
+                                   true, KH_DL_DERIVE_Y_TOL, KH_DL_DERIVE_GRID_TOL,
+                                   khd_tox, khd_toz, khd_tres)) {
+                g_dl.vs_pair_valid++;
+                dl_cand_record(khd_m, 1, khd_mv[a].slot, khd_mv[a].off,
+                               khd_tox, khd_toz, khd_tres, 0.0f);
+                khd_offer(khd_tox, khd_toz, khd_tres, 1,
+                          khd_mv[a].slot, khd_mv[a].off, khd_mv[a].form,
+                          khd_wm[b].slot, khd_wm[b].off, khd_wm[b].form);
+            }
+        }
+    }
+
+    // kinds 2/3: bare float triples (tight tolerances - a round constant
+    // must not fake a camera or an object position)
+    for (uint32_t khd_s = 0; khd_s < KH_DL_VS_SLOTS; ++khd_s) {
+        const uint32_t khd_fl = khd_m.vs_bytes[khd_s] / 4u;
+        if (khd_fl < 4) continue;
+        const float* khd_base = khd_block(static_cast<int32_t>(khd_s));
+
+        for (uint32_t khd_off = 0; khd_off + 4 <= khd_fl; khd_off += 4) {
+            const float* khd_t = khd_base + khd_off;
+
+            if (!dl_finite(khd_t[0]) || !dl_finite(khd_t[1]) || !dl_finite(khd_t[2])) continue;
+            if (fabsf(khd_t[0]) > 1.0e7f || fabsf(khd_t[1]) > 1.0e7f || fabsf(khd_t[2]) > 1.0e7f) continue;
+
+            // kind 2: T = camera in the light frame
+            if (dl_origin_validate(khd_bcam[0] - khd_t[0], khd_bcam[1] - khd_t[1],
+                                   khd_bcam[2] - khd_t[2], true, 0.5f, 0.25f,
+                                   khd_tox, khd_toz, khd_tres)) {
+                g_dl.vs_triple_valid++;
+                dl_cand_record(khd_m, 2, static_cast<int32_t>(khd_s), khd_off,
+                               khd_tox, khd_toz, khd_tres, 0.0f);
+                khd_offer(khd_tox, khd_toz, khd_tres, 2,
+                          static_cast<int32_t>(khd_s), khd_off, 0, -1, 0, 0);
+            }
+
+            // kind 3: T = object position in the light frame, against
+            // each true-world W translation
+            for (uint32_t b = 0; b < khd_wm_n; ++b) {
+                if (dl_origin_validate(khd_wm[b].t[0] - khd_t[0], khd_wm[b].t[1] - khd_t[1],
+                                       khd_wm[b].t[2] - khd_t[2], true, 0.5f, 0.25f,
+                                       khd_tox, khd_toz, khd_tres)) {
+                    g_dl.vs_triple_valid++;
+                    dl_cand_record(khd_m, 3, static_cast<int32_t>(khd_s), khd_off,
+                                   khd_tox, khd_toz, khd_tres, 0.0f);
+                    khd_offer(khd_tox, khd_toz, khd_tres, 3,
+                              static_cast<int32_t>(khd_s), khd_off, 0,
+                              khd_wm[b].slot, khd_wm[b].off, khd_wm[b].form);
+                }
+            }
+        }
+    }
+
+    if (khd_have_nz) {
+        khd_ox = khd_b_ox;
+        khd_oz = khd_b_oz;
+        khd_res = khd_b_res;
+        khd_slot_out = khd_b_slot;
+        khd_wslot_out = khd_b_wslot;
+        g_dl.vs_hint_kind = khd_b_kind;
+        g_dl.vs_hint_slot = khd_b_slot;
+        g_dl.vs_hint_off = khd_b_off;
+        g_dl.vs_hint_form = khd_b_form;
+        g_dl.vs_hint_wslot = khd_b_wslot;
+        g_dl.vs_hint_woff = khd_b_woff;
+        g_dl.vs_hint_wform = khd_b_wform;
+        g_dl.vs_nonzero_origins++;
+        g_dl.vs_valid++;
+        return true;
+    }
+
+    if (khd_have_z && khd_range_ok(0.0f, 0.0f)) {
+        // the true-world degeneracy: accepted only alone, never memoized,
+        // and only when it places this list near the camera like any
+        // other candidate (the range arbiter applies to everyone)
+        khd_ox = 0.0f;
+        khd_oz = 0.0f;
+        khd_res = khd_z_res;
+        khd_slot_out = -1;
+        khd_wslot_out = -1;
+        g_dl.vs_zero_origins++;
+        g_dl.vs_valid++;
+        return true;
+    }
+
+    return false;
+}
+
+// Anchor-table upsert: exact-derivation lights become long-lived
+// surveying knowledge. Match-in-place refresh; oldest evicted when full.
+inline void dynlights_anchor_upsert(float khd_x, float khd_y, float khd_z, uint64_t khd_now) {
+    int khd_oldest = 0;
+
+    for (uint32_t a = 0; a < g_dl.anchor_n; ++a) {
+        if (fabsf(g_dl.anchor_pos[a][0] - khd_x) < KH_DL_MATCH_M &&
+            fabsf(g_dl.anchor_pos[a][1] - khd_y) < KH_DL_MATCH_M &&
+            fabsf(g_dl.anchor_pos[a][2] - khd_z) < KH_DL_MATCH_M) {
+            g_dl.anchor_pos[a][0] = khd_x;
+            g_dl.anchor_pos[a][1] = khd_y;
+            g_dl.anchor_pos[a][2] = khd_z;
+            g_dl.anchor_stamp[a] = khd_now;
+            return;
+        }
+
+        if (g_dl.anchor_stamp[a] < g_dl.anchor_stamp[khd_oldest]) khd_oldest = static_cast<int>(a);
+    }
+
+    uint32_t khd_slot;
+
+    if (g_dl.anchor_n < KH_DL_ANCHOR_N) {
+        khd_slot = g_dl.anchor_n++;
+    } else {
+        khd_slot = static_cast<uint32_t>(khd_oldest);
+    }
+
+    g_dl.anchor_pos[khd_slot][0] = khd_x;
+    g_dl.anchor_pos[khd_slot][1] = khd_y;
+    g_dl.anchor_pos[khd_slot][2] = khd_z;
+    g_dl.anchor_stamp[khd_slot] = khd_now;
+}
+
+// Pool-anchored origin vote: THE PROPAGATION LAYER (the resolution-rate
+// session: only ~3.5% of sampled windows carry the exact derivation
+// constants - evidently one shader family among the draws - so most
+// windows starved under the authorship ceiling and the pool oscillated).
+// Lists OVERLAP - the same lamp appears in many objects' lists - and
+// pool entries are absolute-world TRUTH (only exact-class origins ever
+// author), so an unresolved window's origin is pool_light - raw for any
+// shared light, snapped to the grid, with ULP-CLASS residual (the same
+// physical light's coordinates differ only by the origin). This is the
+// campaign's proven SQF anchor voting reborn with the pool as the
+// anchor set: the derivation SEEDS truth, this PROPAGATES it, fully
+// automatic. Acceptance mirrors the proven gate: two agreeing votes, or
+// one at near-ULP residual (a lone plant-class list).
+inline bool dynlights_pool_vote(const float* khd_l, uint32_t khd_total,
+                                float& khd_ox, float& khd_oz, DlWinReport& khd_rep) {
+    if (g_dl.anchor_n == 0 || khd_total == 0) return false;
+    float khd_cox[8], khd_coz[8], khd_cres[8];
+    uint32_t khd_cv[8], khd_cn = 0;
+
+    for (uint32_t i = 0; i < khd_total; ++i) {
+        const float* khd_r = khd_l + i * 24;
+        if (!dl_finite(khd_r[0]) || !dl_finite(khd_r[1]) || !dl_finite(khd_r[2])) continue;
+
+        for (uint32_t d = 0; d < g_dl.anchor_n; ++d) {
+            // THE LATTICE LESSON stands: anchors are derivation-written
+            // only - exogenous truth, never the vote's own output - now
+            // in a dedicated LONG-LIVED table (surveying knowledge),
+            // decoupled from the shading pool's cadence expiry.
+            if (fabsf(g_dl.anchor_pos[d][1] - khd_r[1]) > 0.25f) continue;   // same light: identical Y
+            const float khd_ex = g_dl.anchor_pos[d][0] - khd_r[0];
+            const float khd_ez = g_dl.anchor_pos[d][2] - khd_r[2];
+            const float khd_sx = floorf(khd_ex / KH_DL_ORIGIN_Q + 0.5f) * KH_DL_ORIGIN_Q;
+            const float khd_sz = floorf(khd_ez / KH_DL_ORIGIN_Q + 0.5f) * KH_DL_ORIGIN_Q;
+            const float khd_rx = fabsf(khd_ex - khd_sx);
+            const float khd_rz = fabsf(khd_ez - khd_sz);
+            if (khd_rx > KH_DL_ORIGIN_RES_MAX || khd_rz > KH_DL_ORIGIN_RES_MAX) continue;
+            const float khd_res = khd_rx > khd_rz ? khd_rx : khd_rz;
+            bool khd_found = false;
+
+            for (uint32_t c = 0; c < khd_cn; ++c) {
+                if (khd_cox[c] == khd_sx && khd_coz[c] == khd_sz) {
+                    khd_cv[c]++;
+                    if (khd_res < khd_cres[c]) khd_cres[c] = khd_res;
+                    khd_found = true;
+                    break;
+                }
+            }
+
+            if (!khd_found && khd_cn < 8) {
+                khd_cox[khd_cn] = khd_sx;
+                khd_coz[khd_cn] = khd_sz;
+                khd_cres[khd_cn] = khd_res;
+                khd_cv[khd_cn] = 1;
+                khd_cn++;
+            }
+        }
+    }
+
+    int khd_best = -1;
+
+    for (uint32_t c = 0; c < khd_cn; ++c) {
+        if (khd_best < 0 ||
+            khd_cv[c] > khd_cv[khd_best] ||
+            (khd_cv[c] == khd_cv[khd_best] && khd_cres[c] < khd_cres[khd_best])) {
+            khd_best = static_cast<int>(c);
+        }
+    }
+
+    if (khd_best < 0) return false;
+    uint32_t khd_runner = 0;
+
+    for (uint32_t c = 0; c < khd_cn; ++c) {
+        if (static_cast<int>(c) != khd_best && khd_cv[c] > khd_runner) khd_runner = khd_cv[c];
+    }
+
+    khd_rep.v_best = static_cast<uint16_t>(khd_cv[khd_best]);
+    khd_rep.v_runner = static_cast<uint16_t>(khd_runner);
+    khd_rep.v_cands = static_cast<uint16_t>(khd_cn);
+    khd_rep.v_res = khd_cres[khd_best];
+
+    // unambiguous majority, or a lone near-ULP candidate (plant-class)
+    const bool khd_clear = khd_cv[khd_best] >= 2 && khd_cv[khd_best] >= khd_runner + 2;
+    const bool khd_lone = khd_cn == 1 && khd_cres[khd_best] <= 0.005f;
+
+    if (!khd_clear && !khd_lone) {
+        g_dl.origin_vote_ambiguous++;
+        return false;
+    }
+
+    khd_ox = khd_cox[khd_best];
+    khd_oz = khd_coz[khd_best];
+    return true;
+}
+
+// Origin recovery + PERSISTENT union merge for one harvested arena side.
+// THE SCRATCH-BUFFER FINDING (the disco-flicker session): the slot-11
+// buffers are size-classed TRANSPORTS, re-uploaded with a different
+// object's culled list before each draw batch - the ~50% content-hash
+// churn on one buffer identity was the tell. A per-frame arena capture
+// therefore holds ~5 RANDOM objects' lists, and a pool rebuilt from
+// scratch each frame flickered exactly as a random sample does. The pool
+// is now PERSISTENT: each harvest merges INTO it - re-sighted lights
+// refresh in place (which also keeps engine-animated fires flickering
+// naturally, since their live record replaces the old one), new lights
+// append, and entries expire on a CADENCE-ADAPTIVE leash (see the TTL
+// constants' ledger): each entry's own worst observed re-sight gap
+// prices its absence - densely-observed lights (lamps AND transients
+// alike) fade within ~0.1-0.2 s of truly going dark, sparse entries
+// keep a safety floor, nothing exceeds the disco-proven cap. Random
+// sampling converges to the full neighborhood set within a second.
+//
+// Origins per window come from dynlights_derive_origin - the engine's
+// own VS constants, no operator input (the SQF anchor-voting system
+// that bootstrapped this campaign is retired and excised; its lessons -
+// the below-sea-level coincidental-vote origin, the (0,0) degeneracy
+// poisoning - live on as the derivation's validators and the range
+// backstop below). Unresolved windows are dropped and counted - never
+// guessed.
+inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side) {
+    g_dl.win_report_n = 0;
+    const uint64_t khd_now = steady_now_ms();
+    const uint64_t khd_anchored0 = g_dl.lists_anchored;
+    float khd_best_lum = -1.0f;
+    float khd_best_g[3] = { 1.0f, 1.0f, 1.0f };
+    float khd_best_s = 1.0f;
+    const uint64_t khd_added0 = g_dl.pool_added;
+    const uint64_t khd_updated0 = g_dl.pool_updated;
+    const uint64_t khd_expired0 = g_dl.pool_expired;
+    const uint64_t khd_flips0 = g_dl.pool_spot_flips;
+
+    {   // anchor-table sweep: long TTL, movers-only concern
+        uint32_t khd_ak = 0;
+
+        for (uint32_t a = 0; a < g_dl.anchor_n; ++a) {
+            if (khd_now - g_dl.anchor_stamp[a] > KH_DL_ANCHOR_TTL_MS) continue;
+
+            if (khd_ak != a) {
+                g_dl.anchor_pos[khd_ak][0] = g_dl.anchor_pos[a][0];
+                g_dl.anchor_pos[khd_ak][1] = g_dl.anchor_pos[a][1];
+                g_dl.anchor_pos[khd_ak][2] = g_dl.anchor_pos[a][2];
+                g_dl.anchor_stamp[khd_ak] = g_dl.anchor_stamp[a];
+            }
+
+            khd_ak++;
+        }
+
+        g_dl.anchor_n = khd_ak;
+    }
+
+    {   // TTL sweep first: compact out entries not re-sighted in time
+        uint32_t khd_keep = 0;
+
+        for (uint32_t i = 0; i < g_dl.pool_n; ++i) {
+            const DlPoolLight& khd_e = g_dl.pool[i];
+            uint64_t khd_ttl;
+
+            if (khd_e.gap_max_ms == 0) {
+                khd_ttl = KH_DL_TTL_FLOOR_MS;   // single sighting: no cadence evidence yet
+            } else {
+                khd_ttl = KH_DL_GAP_MULT * static_cast<uint64_t>(khd_e.gap_max_ms);
+                const uint64_t khd_floor = (khd_e.sightings >= KH_DL_DENSE_SIGHTS &&
+                                            khd_e.gap_max_ms <= KH_DL_DENSE_GAP_MS)
+                                         ? KH_DL_TTL_DENSE_FLOOR_MS : KH_DL_TTL_FLOOR_MS;
+                if (khd_ttl < khd_floor) khd_ttl = khd_floor;
+                if (khd_ttl > KH_DL_TTL_CAP_MS) khd_ttl = KH_DL_TTL_CAP_MS;
+            }
+
+            if (khd_now - khd_e.stamp > khd_ttl) {
+                g_dl.pool_expired++;
+                continue;
+            }
+
+            if (khd_keep != i) g_dl.pool[khd_keep] = g_dl.pool[i];
+            khd_keep++;
+        }
+
+        g_dl.pool_n = khd_keep;
+    }
+
+    const uint32_t khd_wn = g_dl.win_count[khd_side];
+
+    for (uint32_t w = 0; w < khd_wn && w < KH_DL_WIN_MAX; ++w) {
+        const DlWindowMeta& khd_m = g_dl.win_meta[khd_side][w];
+        const uint8_t* khd_p = khd_base + w * KH_DL_WIN_BYTES;
+        float khd_ctl[16];
+        memcpy(khd_ctl, khd_p, sizeof(khd_ctl));
+        int32_t khd_pc_i = 0, khd_sc_i = 0;
+        memcpy(&khd_pc_i, khd_p + 0, 4);
+        memcpy(&khd_sc_i, khd_p + 16, 4);
+
+        if (khd_pc_i < 0 || khd_pc_i > 1024 || khd_sc_i < 0 || khd_sc_i > 1024 ||
+            !dl_finite(khd_ctl[8]) || khd_ctl[8] <= 1.0e-6f || khd_ctl[8] >= 1.0e6f) {
+            g_dl.val_rejects++;
+            continue;
+        }
+
+        uint32_t khd_pc = static_cast<uint32_t>(khd_pc_i);
+        uint32_t khd_sc = static_cast<uint32_t>(khd_sc_i);
+        uint32_t khd_total = khd_pc + khd_sc;
+
+        if (khd_total > KH_DL_MAX_LIGHTS) {
+            g_dl.clamped_counts++;
+            if (khd_pc > KH_DL_MAX_LIGHTS) khd_pc = KH_DL_MAX_LIGHTS;
+            khd_sc = KH_DL_MAX_LIGHTS - khd_pc;
+            khd_total = KH_DL_MAX_LIGHTS;
+        }
+
+        const uint32_t khd_avail = khd_m.bytes11 / KH_DL_LIGHT_BYTES;
+
+        if (khd_total > khd_avail) {
+            if (khd_pc > khd_avail) khd_pc = khd_avail;
+            khd_sc = khd_avail - khd_pc;
+            khd_total = khd_avail;
+        }
+
+        DlWinReport& khd_rep = g_dl.win_report[g_dl.win_report_n < KH_DL_WIN_MAX
+                                             ? g_dl.win_report_n++ : KH_DL_WIN_MAX - 1];
+        khd_rep = DlWinReport{};
+        khd_rep.buf = reinterpret_cast<uint64_t>(khd_m.buf);
+        khd_rep.first = khd_m.first;
+        khd_rep.point_n = khd_pc;
+        khd_rep.spot_n = khd_sc;
+        khd_rep.scale = khd_ctl[8];
+        khd_rep.gdiff[0] = khd_ctl[12];
+        khd_rep.gdiff[1] = khd_ctl[13];
+        khd_rep.gdiff[2] = khd_ctl[14];
+        {   // main-pass reference candidates: brightest ctl this harvest
+            const float khd_lum = khd_ctl[12] + khd_ctl[13] + khd_ctl[14];
+
+            if (dl_finite(khd_lum) && khd_lum > khd_best_lum) {
+                khd_best_lum = khd_lum;
+                khd_best_g[0] = khd_ctl[12];
+                khd_best_g[1] = khd_ctl[13];
+                khd_best_g[2] = khd_ctl[14];
+                khd_best_s = khd_ctl[8];
+            }
+        }
+
+        if (khd_total == 0) continue;
+        const float* khd_l = reinterpret_cast<const float*>(khd_p + KH_DL_CTL_BYTES);
+
+        // ENGINE-DERIVED origin from the window's own VS constants: the
+        // SEED of the self-bootstrapping chain (derivation -> anchor
+        // table -> pool-vote propagation). Only a minority of shader
+        // families carry the exact constants, and structural impostors
+        // exist - the five-validator stack below is what seven field
+        // rounds proved necessary and sufficient.
+        float khd_dox = 0.0f, khd_doz = 0.0f, khd_dres = -1.0f;
+        int32_t khd_dslot = -1, khd_dwslot = -1;
+        const bool khd_derived_ok = dynlights_derive_origin(khd_p, khd_m, khd_side,
+                                                            khd_l, khd_total,
+                                                            khd_dox, khd_doz, khd_dres,
+                                                            khd_dslot, khd_dwslot);
+        khd_rep.derived_ok = khd_derived_ok ? 1 : 0;
+        khd_rep.d_ox = khd_dox;
+        khd_rep.d_oz = khd_doz;
+        khd_rep.d_res = khd_dres;
+        khd_rep.d_slot = khd_dslot;
+        khd_rep.d_wslot = khd_dwslot;
+
+        float khd_o_x = khd_dox;
+        float khd_o_z = khd_doz;
+
+        if (!khd_derived_ok) {
+            // propagation: vote this window's records against the pool
+            if (dynlights_pool_vote(khd_l, khd_total, khd_o_x, khd_o_z, khd_rep)) {
+                g_dl.origin_pool_votes++;
+                khd_rep.pool_vote = 1;
+            } else {
+                g_dl.lists_unanchored++;   // origin unresolved: authors nothing
+                continue;
+            }
+        }
+
+        // RANGE BACKSTOP (the (0,0) poisoning lesson): visible-light lists
+        // are camera-culled by construction, so a decoded record landing
+        // kilometers from the capture camera convicts the ORIGIN, whatever
+        // route produced it. Applied to both routes; anchors cannot
+        // normally trip it, and a tripped window authors nothing.
+        if (khd_total > 0 && g_dl.arena_view_ok[khd_side]) {
+            const float khd_r0x = khd_o_x + khd_l[0] - g_dl.arena_cam[khd_side][0];
+            const float khd_r0z = khd_o_z + khd_l[2] - g_dl.arena_cam[khd_side][2];
+
+            if (khd_r0x * khd_r0x + khd_r0z * khd_r0z > 3000.0f * 3000.0f) {
+                g_dl.origin_range_rejects++;
+                continue;
+            }
+        }
+
+        g_dl.lists_anchored++;   // origin resolved (name kept; source is the derivation)
+        khd_rep.origin_ok = 1;
+        khd_rep.ox = khd_o_x;
+        khd_rep.oz = khd_o_z;
+        g_dl.pool_scale = khd_ctl[8];      // census of the last anchored window's
+        g_dl.pool_gdiff[0] = khd_ctl[12];  // RAW globals (the dump/ring read these)
+        g_dl.pool_gdiff[1] = khd_ctl[13];
+        g_dl.pool_gdiff[2] = khd_ctl[14];
+
+        // MAIN/AUX classification (the disco root cause, second edition):
+        // cb10's globals are properties of the CONSUMING PASS, not of the
+        // lights - the forensics ring caught a PiP/reflection-class pass
+        // binding the SAME lights with cb10[3] ~ (0, 0.025, 0.02) at half
+        // cadence against the main pass's ~0.5 grey. Any single choice of
+        // globals folded into shared records therefore flaps (the fold
+        // experiment proved it per-light). The trigger-window mirror is
+        // main-pass BY CONSTRUCTION (the injection triggers inside the
+        // main pass); a window whose globals diverge from that reference
+        // is AUX: alive for persistence, never an author of content.
+        bool khd_main = true;
+
+        if (g_dl.main_ref_valid) {   // vs the max-luminance reference (one
+                                     // harvest of lag; brightness moves slowly)
+            for (int khd_k = 0; khd_k < 3 && khd_main; ++khd_k) {
+                const float khd_mref = g_dl.main_gdiff[khd_k];
+                const float khd_tol = 0.5f * (fabsf(khd_mref) > 0.02f ? fabsf(khd_mref) : 0.02f);
+                if (fabsf(khd_ctl[12 + khd_k] - khd_mref) > khd_tol) khd_main = false;
+            }
+
+            if (khd_main && fabsf(khd_ctl[8] - g_dl.main_scale) > 0.25f * fabsf(g_dl.main_scale)) {
+                khd_main = false;
+            }
+        }
+
+        if (!khd_main) g_dl.win_aux++;
+
+        for (uint32_t i = 0; i < khd_total; ++i) {
+            const float* khd_r = khd_l + i * 24;
+            const float khd_wx = khd_rep.ox + khd_r[0];
+            const float khd_wy = khd_r[1];
+            const float khd_wz = khd_rep.oz + khd_r[2];
+            if (!dl_finite(khd_wx) || !dl_finite(khd_wy) || !dl_finite(khd_wz)) continue;
+            int khd_hit = -1;
+
+            for (uint32_t d = 0; d < g_dl.pool_n; ++d) {
+                if (fabsf(g_dl.pool[d].rec[0] - khd_wx) < KH_DL_MATCH_M &&
+                    fabsf(g_dl.pool[d].rec[1] - khd_wy) < KH_DL_MATCH_M &&
+                    fabsf(g_dl.pool[d].rec[2] - khd_wz) < KH_DL_MATCH_M) {
+                    khd_hit = static_cast<int>(d);
+                    break;
+                }
+            }
+
+            if (khd_hit < 0) {
+                if (g_dl.pool_n >= KH_DL_POOL) {
+                    g_dl.pool_overflow++;
+                    continue;
+                }
+
+                khd_hit = static_cast<int>(g_dl.pool_n++);
+                g_dl.pool[khd_hit] = DlPoolLight{};   // the slot may hold a
+                                                      // compacted-out ghost's stamps
+                g_dl.pool_added++;
+                if (!khd_main) g_dl.aux_adds++;   // provisional: main upgrades it
+            } else if (!khd_main) {
+                // AUX SIGHTING: keeps the entry alive (stamp + cadence),
+                // never authors content - pass-darkened values must not
+                // overwrite main-pass records (the fold era's flap).
+                DlPoolLight& khd_ax = g_dl.pool[khd_hit];
+                const uint64_t khd_gap = khd_now - khd_ax.stamp;
+                if (khd_gap > khd_ax.gap_max_ms && khd_gap < 60000) khd_ax.gap_max_ms = static_cast<uint16_t>(khd_gap);
+                if (khd_ax.sightings < 0xFFFF) khd_ax.sightings++;
+                khd_ax.stamp = khd_now;
+                g_dl.aux_refreshes++;
+                continue;
+            } else {
+                g_dl.pool_updated++;
+            }
+
+            // Re-sight (main-pass, or first sight via aux) writes the
+            // WHOLE record VERBATIM - live color/attenuation (animated
+            // fires keep flickering), freshest position, and NO folded
+            // globals: the fold era proved that baking any pass's cb10
+            // into shared records makes the pass alternation flap
+            // per-light. Producer side stays verbatim; the consumer-side
+            // globals are the fill's job (main-pass reference).
+            DlPoolLight& khd_pl = g_dl.pool[khd_hit];
+            const uint8_t khd_spot_new = i >= khd_pc ? 1 : 0;
+
+            if (khd_pl.stamp != 0) {
+                if (khd_pl.spot != khd_spot_new) g_dl.pool_spot_flips++;
+                const uint64_t khd_gap = khd_now - khd_pl.stamp;
+                if (khd_gap > khd_pl.gap_max_ms && khd_gap < 60000) khd_pl.gap_max_ms = static_cast<uint16_t>(khd_gap);
+                if (khd_pl.sightings < 0xFFFF) khd_pl.sightings++;
+            } else {
+                khd_pl.gap_max_ms = 0;
+                khd_pl.sightings = 1;
+            }
+            memcpy(khd_pl.rec, khd_r, sizeof(khd_pl.rec));
+            khd_pl.rec[0] = khd_wx;   // +0 rewritten to absolute world
+            khd_pl.rec[1] = khd_wy;
+            khd_pl.rec[2] = khd_wz;
+            khd_pl.spot = khd_spot_new;
+            khd_pl.aux = khd_main ? 0 : 1;   // a main sighting upgrades aux content
+            if (khd_derived_ok) {
+                khd_pl.derived = 1;   // upgrade-only provenance (diagnostics)
+
+                if (khd_dres >= 0.0f && khd_dres <= KH_DL_ANCHOR_RES) {
+                    dynlights_anchor_upsert(khd_wx, khd_wy, khd_wz, khd_now);
+                    g_dl.anchor_admits++;
+                } else {
+                    g_dl.anchor_res_rejects++;
+                }
+            }
+
+            khd_pl.stamp = khd_now;
+        }
+    }
+
+    if (khd_best_lum > 0.0f) {   // adopt; empty harvests keep the last reference
+        g_dl.main_gdiff[0] = khd_best_g[0];
+        g_dl.main_gdiff[1] = khd_best_g[1];
+        g_dl.main_gdiff[2] = khd_best_g[2];
+        g_dl.main_scale = khd_best_s;
+        g_dl.main_ref_valid = 1;
+    }
+
+    g_dl.pool_stamp = khd_now;
+
+    {   // mode-3 harvest ring (flicker forensics): per-harvest deltas +
+        // the last anchored window's RAW globals. The gdiff alternation
+        // this ring caught (main ~0.5 grey vs a PiP/reflection pass's
+        // near-zero blue at half cadence) named the pass structure the
+        // MAIN/AUX classification now encodes.
+        DlM3Ring& khd_mr = g_dl.m3_ring[g_dl.m3_ring_head++ % KH_DL_RING];
+        khd_mr.t_ms = khd_now;
+        khd_mr.pool_n = static_cast<uint16_t>(g_dl.pool_n);
+        khd_mr.anchored = static_cast<uint16_t>(khd_anchored0 <= g_dl.lists_anchored
+                        ? g_dl.lists_anchored - khd_anchored0 : 0);
+        khd_mr.added = static_cast<uint16_t>(khd_added0 <= g_dl.pool_added
+                     ? g_dl.pool_added - khd_added0 : 0);
+        khd_mr.updated = static_cast<uint16_t>(khd_updated0 <= g_dl.pool_updated
+                       ? g_dl.pool_updated - khd_updated0 : 0);
+        khd_mr.expired = static_cast<uint16_t>(khd_expired0 <= g_dl.pool_expired
+                       ? g_dl.pool_expired - khd_expired0 : 0);
+        khd_mr.spot_flips = static_cast<uint16_t>(khd_flips0 <= g_dl.pool_spot_flips
+                          ? g_dl.pool_spot_flips - khd_flips0 : 0);
+        khd_mr.gdiff[0] = g_dl.pool_gdiff[0];
+        khd_mr.gdiff[1] = g_dl.pool_gdiff[1];
+        khd_mr.gdiff[2] = g_dl.pool_gdiff[2];
+        khd_mr.scale = g_dl.win_report_n > 0
+                     ? g_dl.win_report[g_dl.win_report_n - 1].scale : 0.0f;
+    }
+}
+
+// Arena lifecycle at the injection: harvest the PREVIOUS frame's
+// captures (DO_NOT_WAIT; a stall retries next injection WITHOUT
+// flipping, so un-harvested copies are never overwritten), then flip
+// sides so this frame's sampler writes the freshly drained buffer.
+inline void dynlights_harvest_arena(ID3D11DeviceContext* ctx) {
+    const int khd_r = g_dl.arena_write ^ 1;
+
+    if (g_dl.arena_inflight[khd_r] && g_dl.arena[khd_r]) {
+        D3D11_MAPPED_SUBRESOURCE khd_m = {};
+        const HRESULT khd_hr = ctx->Map(g_dl.arena[khd_r], 0, D3D11_MAP_READ,
+                                        D3D11_MAP_FLAG_DO_NOT_WAIT, &khd_m);
+
+        if (FAILED(khd_hr)) {
+            g_dl.still_drawing++;
+            return;   // retry next injection; no flip
+        }
+
+        dynlights_merge_windows(static_cast<const uint8_t*>(khd_m.pData), khd_r);
+        ctx->Unmap(g_dl.arena[khd_r], 0);
+        g_dl.arena_inflight[khd_r] = 0;
+    }
+
+    // flip: the side the sampler filled this frame goes in flight; the
+    // drained side becomes the new write target
+    g_dl.arena_inflight[g_dl.arena_write] = g_dl.win_count[g_dl.arena_write] > 0 ? 1 : 0;
+    g_dl.arena_write = khd_r;
+    g_dl.win_count[khd_r] = 0;
+    memset(g_dl.win_meta[khd_r], 0, sizeof(g_dl.win_meta[khd_r]));
+}
+
+// Parse + validate + publish one completed staging readback. Counts read
+// as INT BIT PATTERNS first (the disassembly's ige compare), with an
+// integral-float fallback recorded by the census - the dump names which
+// convention the engine actually used, so a wrong guess can never hide.
+inline void dynlights_publish(const uint8_t* khd_p, int khd_s) {
+    float khd_ctl[16];
+    memcpy(khd_ctl, khd_p, sizeof(khd_ctl));
+    int32_t khd_pc_i = 0, khd_sc_i = 0;
+    memcpy(&khd_pc_i, khd_p + 0, 4);    // cb10[0].x
+    memcpy(&khd_sc_i, khd_p + 16, 4);   // cb10[1].x
+    uint32_t khd_pc = 0, khd_sc = 0;
+    uint8_t khd_as_float = 0;
+
+    if (khd_pc_i >= 0 && khd_pc_i <= 1024 && khd_sc_i >= 0 && khd_sc_i <= 1024) {
+        khd_pc = static_cast<uint32_t>(khd_pc_i);
+        khd_sc = static_cast<uint32_t>(khd_sc_i);
+    } else {
+        const float khd_pf = khd_ctl[0], khd_sf = khd_ctl[4];
+
+        if (dl_finite(khd_pf) && dl_finite(khd_sf) &&
+            khd_pf >= 0.0f && khd_pf <= 1024.0f && khd_sf >= 0.0f && khd_sf <= 1024.0f &&
+            khd_pf == floorf(khd_pf) && khd_sf == floorf(khd_sf)) {
+            khd_pc = static_cast<uint32_t>(khd_pf);
+            khd_sc = static_cast<uint32_t>(khd_sf);
+            khd_as_float = 1;
+            g_dl.counts_float++;
+        } else {
+            g_dl.val_rejects++;
+            g_dl.last_rej[0] = khd_ctl[0];
+            g_dl.last_rej[1] = khd_ctl[4];
+            g_dl.last_rej[2] = khd_ctl[8];
+            g_dl.last_rej[3] = 1.0f;   // reason: counts
+            return;
+        }
+    }
+
+    // Scale / global-diffuse sanity: a poisoned scale garbles every
+    // light's attenuation - refuse the harvest rather than shade with it.
+    if (!dl_finite(khd_ctl[8]) || khd_ctl[8] <= 1.0e-6f || khd_ctl[8] >= 1.0e6f ||
+        !dl_finite(khd_ctl[12]) || !dl_finite(khd_ctl[13]) || !dl_finite(khd_ctl[14])) {
+        g_dl.val_rejects++;
+        g_dl.last_rej[0] = khd_ctl[0];
+        g_dl.last_rej[1] = khd_ctl[4];
+        g_dl.last_rej[2] = khd_ctl[8];
+        g_dl.last_rej[3] = 2.0f;   // reason: scale/diffuse
+        return;
+    }
+
+    uint32_t khd_total = khd_pc + khd_sc;
+
+    if (khd_total > KH_DL_MAX_LIGHTS) {
+        g_dl.clamped_counts++;
+        if (khd_pc > KH_DL_MAX_LIGHTS) khd_pc = KH_DL_MAX_LIGHTS;
+        khd_sc = KH_DL_MAX_LIGHTS - khd_pc;
+        khd_total = KH_DL_MAX_LIGHTS;
+    }
+
+    const uint32_t khd_avail = g_dl.slot_bytes11[khd_s] / KH_DL_LIGHT_BYTES;
+
+    if (khd_total > khd_avail) {   // the copied window undercuts the count
+        if (khd_pc > khd_avail) khd_pc = khd_avail;
+        khd_sc = khd_avail - khd_pc;
+        khd_total = khd_avail;
+    }
+
+    const float* khd_l = reinterpret_cast<const float*>(khd_p + KH_DL_CTL_BYTES);
+
+    if (khd_total > 0 &&
+        (!dl_finite(khd_l[0]) || !dl_finite(khd_l[1]) || !dl_finite(khd_l[2]))) {
+        g_dl.val_rejects++;
+        g_dl.last_rej[0] = khd_l[0];
+        g_dl.last_rej[1] = khd_l[1];
+        g_dl.last_rej[2] = khd_l[2];
+        g_dl.last_rej[3] = 3.0f;   // reason: position
+        return;
+    }
+
+    if (khd_total == 0) g_dl.zero_lists++;
+
+    // publish (render thread; readers are park-ordered)
+    g_dl.point_n = khd_pc;
+    g_dl.spot_n = khd_sc;
+    memcpy(g_dl.ctl, khd_ctl, sizeof(g_dl.ctl));
+    if (khd_total > 0) memcpy(g_dl.lights, khd_l, static_cast<size_t>(khd_total) * KH_DL_LIGHT_BYTES);
+    memcpy(g_dl.view_cols, g_dl.pending_view[khd_s], sizeof(g_dl.view_cols));
+    g_dl.view_valid = g_dl.pending_view_ok[khd_s] != 0;
+    memcpy(g_dl.cam, g_dl.pending_cam[khd_s], sizeof(g_dl.cam));
+    g_dl.stamp_ms = steady_now_ms();
+    g_dl.serial++;
+    g_dl.valid = true;
+
+    uint64_t khd_h = 1469598103934665603ull;   // FNV-1a over counts + active records
+    khd_h = (khd_h ^ khd_pc) * 1099511628211ull;
+    khd_h = (khd_h ^ khd_sc) * 1099511628211ull;
+    const uint8_t* khd_hb = khd_p + KH_DL_CTL_BYTES;
+    const size_t khd_hn = static_cast<size_t>(khd_total) * KH_DL_LIGHT_BYTES;
+    for (size_t i = 0; i < khd_hn; ++i) khd_h = (khd_h ^ khd_hb[i]) * 1099511628211ull;
+    if (khd_h != g_dl.hash) { g_dl.hash_changes++; g_dl.hash = khd_h; }
+
+    DlRingEntry& khd_r = g_dl.ring[g_dl.ring_head++ % KH_DL_RING];
+    khd_r.serial = g_dl.serial;
+    khd_r.t_ms = g_dl.stamp_ms;
+    khd_r.point_n = khd_pc;
+    khd_r.spot_n = khd_sc;
+    khd_r.dist_scale = khd_ctl[8];
+    khd_r.hash32 = static_cast<uint32_t>(khd_h);
+    memcpy(khd_r.cam, g_dl.cam, sizeof(khd_r.cam));
+    khd_r.b10 = reinterpret_cast<uint64_t>(g_dl.slot10_buf);
+    khd_r.b11 = reinterpret_cast<uint64_t>(g_dl.slot11_buf);
+    khd_r.f10 = g_dl.slot10_first;
+    khd_r.f11 = g_dl.slot11_first;
+    khd_r.n10 = g_dl.slot10_num;
+    khd_r.n11 = g_dl.slot11_num;
+    khd_r.counts_as_float = khd_as_float;
+
+    if (khd_total > 0) {
+        khd_r.l0[0] = khd_l[0];  khd_r.l0[1] = khd_l[1];  khd_r.l0[2] = khd_l[2];   // +0 position
+        khd_r.l0[3] = khd_l[8];  khd_r.l0[4] = khd_l[9];  khd_r.l0[5] = khd_l[10];  // +2 diffuse
+        khd_r.l0[6] = khd_l[20];                                                    // +5 fade start
+        khd_r.l0[7] = khd_l[7];                                                     // +1 cone cos
+    } else {
+        memset(khd_r.l0, 0, sizeof(khd_r.l0));
+    }
+}
+
+// Runs inside an ACCEPTED injection on the render thread (never on
+// anomalous/rescue cycles - the caller gates). Harvest first, so a
+// completed copy publishes before this frame's cbd fills read the mirror;
+// then census the live slot bindings and issue this frame's copy into a
+// free staging slot. Copies touch no pipeline state; the hooks ignore our
+// own calls (in_injection).
+inline void dynlights_acquire(ID3D11DeviceContext* ctx, const float view[4][4]) {
+    if (g_dl_mode.load(std::memory_order_relaxed) <= 0 &&
+        !g_dl_recon.load(std::memory_order_relaxed)) return;   // fully dormant
+    g_dl.acquires++;
+
+    // (0) arena lifecycle: harvest the previous frame's per-draw window
+    // captures (origin recovery + pool merge for mode 3), then flip.
+    dynlights_harvest_arena(ctx);
+
+    // (1) harvest completed copies (DO_NOT_WAIT: a stalled copy retries
+    // at the next injection; the hash census flags any ordering surprise)
+    for (int khd_s = 0; khd_s < 2; ++khd_s) {
+        if (!g_dl.inflight[khd_s] || !g_dl.staging[khd_s]) continue;
+        D3D11_MAPPED_SUBRESOURCE khd_m = {};
+        const HRESULT khd_hr = ctx->Map(g_dl.staging[khd_s], 0, D3D11_MAP_READ,
+                                        D3D11_MAP_FLAG_DO_NOT_WAIT, &khd_m);
+        if (FAILED(khd_hr)) { g_dl.still_drawing++; continue; }
+        dynlights_publish(static_cast<const uint8_t*>(khd_m.pData), khd_s);
+        ctx->Unmap(g_dl.staging[khd_s], 0);
+        g_dl.inflight[khd_s] = 0;
+    }
+
+    // (2) live slot census + this frame's copy
+    ID3D11DeviceContext1* khd_c1 = nullptr;
+    ctx->QueryInterface(__uuidof(ID3D11DeviceContext1), reinterpret_cast<void**>(&khd_c1));
+    if (!khd_c1) { g_dl.no_ctx1++; return; }
+    ID3D11Buffer* khd_b10 = nullptr;
+    UINT khd_f10 = 0, khd_n10 = 0;
+    ID3D11Buffer* khd_b11 = nullptr;
+    UINT khd_f11 = 0, khd_n11 = 0;
+    khd_c1->PSGetConstantBuffers1(10, 1, &khd_b10, &khd_f10, &khd_n10);
+    khd_c1->PSGetConstantBuffers1(11, 1, &khd_b11, &khd_f11, &khd_n11);
+    khd_c1->Release();
+
+    g_dl.slot10_buf = static_cast<void*>(khd_b10);
+    g_dl.slot11_buf = static_cast<void*>(khd_b11);
+    g_dl.slot10_first = khd_f10;
+    g_dl.slot11_first = khd_f11;
+    g_dl.slot10_num = khd_n10;
+    g_dl.slot11_num = khd_n11;
+
+    if (!khd_b10 || !khd_b11) {
+        // unbound light slots are the normal DAY state (lists exist but
+        // hold zero lights, or the slots go stale between lit passes) -
+        // counted, mirror simply expires
+        g_dl.slot_nulls++;
+        if (khd_b10) khd_b10->Release();
+        if (khd_b11) khd_b11->Release();
+        return;
+    }
+
+    if (khd_f10 != 0 || khd_f11 != 0) g_dl.pool_offset_binds++;
+    if (khd_b10 == khd_b11) g_dl.shared_pool_binds++;
+
+    int khd_w = -1;
+    for (int khd_s = 0; khd_s < 2; ++khd_s) {
+        if (!g_dl.inflight[khd_s]) { khd_w = khd_s; break; }
+    }
+
+    if (khd_w < 0) {
+        g_dl.issue_skips++;
+        khd_b10->Release();
+        khd_b11->Release();
+        return;
+    }
+
+    if (!g_dl.staging[khd_w]) {
+        ID3D11Device* khd_dev = nullptr;
+        ctx->GetDevice(&khd_dev);
+
+        if (khd_dev) {
+            D3D11_BUFFER_DESC khd_sd = {};
+            khd_sd.ByteWidth = KH_DL_STAGE_BYTES;
+            khd_sd.Usage = D3D11_USAGE_STAGING;
+            khd_sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            khd_dev->CreateBuffer(&khd_sd, nullptr, &g_dl.staging[khd_w]);
+            khd_dev->Release();
+        }
+
+        if (!g_dl.staging[khd_w]) {
+            khd_b10->Release();
+            khd_b11->Release();
+            return;
+        }
+    }
+
+    D3D11_BUFFER_DESC khd_d10 = {}, khd_d11 = {};
+    khd_b10->GetDesc(&khd_d10);
+    khd_b11->GetDesc(&khd_d11);
+    g_dl.bw10 = khd_d10.ByteWidth;
+    g_dl.bw11 = khd_d11.ByteWidth;
+    const uint32_t khd_off10 = khd_f10 * 16u;   // firstConstant is in 16-byte constants
+    const uint32_t khd_off11 = khd_f11 * 16u;
+    uint32_t khd_want11 = KH_DL_ARR_BYTES;
+
+    if (khd_n11 > 0 && khd_n11 * 16u < khd_want11) {
+        khd_want11 = khd_n11 * 16u;   // the engine bound a smaller window
+        g_dl.window_clamps++;
+    }
+
+    if (khd_off10 + KH_DL_CTL_BYTES > khd_d10.ByteWidth || khd_off11 >= khd_d11.ByteWidth) {
+        g_dl.bounds_rejects++;
+        khd_b10->Release();
+        khd_b11->Release();
+        return;
+    }
+
+    if (khd_off11 + khd_want11 > khd_d11.ByteWidth) khd_want11 = khd_d11.ByteWidth - khd_off11;
+    khd_want11 -= khd_want11 % KH_DL_LIGHT_BYTES;   // whole records only
+
+    D3D11_BOX khd_box10 = { khd_off10, 0, 0, khd_off10 + KH_DL_CTL_BYTES, 1, 1 };
+    ctx->CopySubresourceRegion(g_dl.staging[khd_w], 0, 0, 0, 0, khd_b10, 0, &khd_box10);
+
+    if (khd_want11 > 0) {
+        D3D11_BOX khd_box11 = { khd_off11, 0, 0, khd_off11 + khd_want11, 1, 1 };
+        ctx->CopySubresourceRegion(g_dl.staging[khd_w], 0, KH_DL_CTL_BYTES, 0, 0, khd_b11, 0, &khd_box11);
+    }
+
+    g_dl.slot_bytes11[khd_w] = khd_want11;
+    g_dl.inflight[khd_w] = 1;
+    g_dl.issue_serial++;
+    g_dl.copies++;
+
+    // View columns + camera captured WITH the list: the space decode and
+    // the plant comparison must use the FRAME'S OWN view, not a later one.
+    if (view) {
+        for (int khd_k = 0; khd_k < 3; ++khd_k) {
+            g_dl.pending_view[khd_w][khd_k * 4 + 0] = view[0][khd_k];
+            g_dl.pending_view[khd_w][khd_k * 4 + 1] = view[1][khd_k];
+            g_dl.pending_view[khd_w][khd_k * 4 + 2] = view[2][khd_k];
+            g_dl.pending_view[khd_w][khd_k * 4 + 3] = 0.0f;
+        }
+
+        extract_camera_pos(view, g_dl.pending_cam[khd_w]);
+        g_dl.pending_view_ok[khd_w] = 1;
+    } else {
+        g_dl.pending_view_ok[khd_w] = 0;
+    }
+
+    khd_b10->Release();
+    khd_b11->Release();
+}
+
+// Fills the dynamic-lights lanes of a draw constant block. Zeroed lanes
+// (mode 0 / stale / empty / rejected) stand the shader down - cbd is
+// zero-initialized by both callers, so standing down is the default,
+// never an action.
+// Mode 3 (production): PER-MESH selection from the absolute-world pool -
+// hard-fade reach cull, then the nearest up-to-32, points packed before
+// spots (the engine loop contract). Modes 1/2 (diagnostics): the legacy
+// trigger-window mirror, camera-origin decodes.
+inline void fill_dynlights_cb(ConstantData& cbd, const RenderObject& o) {
+    const int khd_mode = g_dl_mode.load(std::memory_order_relaxed);
+    if (khd_mode <= 0) return;
+    const uint32_t khd_bits = g_dl_intensity_bits.load(std::memory_order_relaxed);
+    float khd_int = 1.0f;
+    memcpy(&khd_int, &khd_bits, sizeof(khd_int));
+
+    if (khd_mode == 3) {
+        if (g_dl.pool_n == 0) return;
+        if (steady_now_ms() - g_dl.pool_stamp > KH_DL_POOL_STALE_MS) { g_dl.stale_skips++; return; }
+        // mesh center + half diagonal, engine axes (SQF [x,y,zASL] ->
+        // engine [x, zASL, y])
+        const float khd_c[3] = { o.pos[0], o.pos[2], o.pos[1] };
+        const float khd_half = 0.5f * sqrtf(o.size[0] * o.size[0] +
+                                            o.size[1] * o.size[1] +
+                                            o.size[2] * o.size[2]);
+        // consumer-side globals come from the ROBUST main-pass reference
+        // (the max-luminance window ctl per harvest - the poisoned-trigger
+        // session retired the trigger-mirror reference: one dark-pass
+        // trigger draw crushed every light 17x); records stay verbatim
+        // producer-side, and the reference tracks exposure adaptation.
+        const float khd_scale = (g_dl.main_ref_valid && g_dl.main_scale > 1.0e-6f)
+                              ? g_dl.main_scale : 1.0f;
+        uint32_t khd_sel[KH_DL_MAX_LIGHTS];
+        float khd_dst[KH_DL_MAX_LIGHTS];
+        uint32_t khd_n = 0;
+
+        for (uint32_t i = 0; i < g_dl.pool_n; ++i) {
+            const DlPoolLight& khd_pl = g_dl.pool[i];
+            const float khd_dx = khd_pl.rec[0] - khd_c[0];
+            const float khd_dy = khd_pl.rec[1] - khd_c[1];
+            const float khd_dz = khd_pl.rec[2] - khd_c[2];
+            const float khd_d = sqrtf(khd_dx * khd_dx + khd_dy * khd_dy + khd_dz * khd_dz);
+            // hard-fade reach: fade zeroes at dist*scale >= start + 1/invW
+            const float khd_inv = khd_pl.rec[21];
+            const float khd_reach = (khd_pl.rec[20] + (khd_inv > 1.0e-6f ? 1.0f / khd_inv : 0.0f))
+                                  / khd_scale;
+            if (khd_d > khd_reach + khd_half) continue;   // contributes exactly zero
+            uint32_t khd_j = khd_n < KH_DL_MAX_LIGHTS ? khd_n : KH_DL_MAX_LIGHTS;
+
+            while (khd_j > 0 && khd_dst[khd_j - 1] > khd_d) {
+                if (khd_j < KH_DL_MAX_LIGHTS) {
+                    khd_dst[khd_j] = khd_dst[khd_j - 1];
+                    khd_sel[khd_j] = khd_sel[khd_j - 1];
+                }
+
+                --khd_j;
+            }
+
+            if (khd_j < KH_DL_MAX_LIGHTS) {
+                khd_dst[khd_j] = khd_d;
+                khd_sel[khd_j] = i;
+                if (khd_n < KH_DL_MAX_LIGHTS) khd_n++;
+            }
+        }
+
+        if (khd_n == 0) return;
+        // points first, then spots - two packing passes
+        uint32_t khd_out = 0, khd_pn = 0;
+
+        for (int khd_pass = 0; khd_pass < 2; ++khd_pass) {
+            for (uint32_t k = 0; k < khd_n; ++k) {
+                const DlPoolLight& khd_pl = g_dl.pool[khd_sel[k]];
+                if ((khd_pl.spot != 0) != (khd_pass == 1)) continue;
+                memcpy(cbd.dl_lights[khd_out * 6], khd_pl.rec, KH_DL_LIGHT_BYTES);
+                khd_out++;
+                if (khd_pass == 0) khd_pn++;
+            }
+        }
+
+        cbd.dl_ctl[0] = 3.0f;
+        cbd.dl_ctl[1] = static_cast<float>(khd_pn);
+        cbd.dl_ctl[2] = static_cast<float>(khd_out - khd_pn);
+        cbd.dl_ctl[3] = khd_scale;
+
+        if (g_dl.main_ref_valid &&
+            (g_dl.main_gdiff[0] > 0.0f || g_dl.main_gdiff[1] > 0.0f || g_dl.main_gdiff[2] > 0.0f)) {
+            cbd.dl_global[0] = g_dl.main_gdiff[0];   // the MAIN pass's cb10[3]
+            cbd.dl_global[1] = g_dl.main_gdiff[1];
+            cbd.dl_global[2] = g_dl.main_gdiff[2];
+        } else {
+            cbd.dl_global[0] = 1.0f;   // cold / degenerate reference
+            cbd.dl_global[1] = 1.0f;
+            cbd.dl_global[2] = 1.0f;
+        }
+
+        cbd.dl_global[3] = khd_int;
+        g_dl.fill_calls++;
+        g_dl.fill_last_n = khd_out;
+        if (khd_out < g_dl.fill_min_n) g_dl.fill_min_n = khd_out;
+        if (khd_out > g_dl.fill_max_n) g_dl.fill_max_n = khd_out;
+        return;
+    }
+
+    // modes 1/2: the legacy trigger-window mirror
+    if (!g_dl.valid) return;
+    if (steady_now_ms() - g_dl.stamp_ms > KH_DL_STALE_MS) { g_dl.stale_skips++; return; }
+    const uint32_t khd_n = g_dl.point_n + g_dl.spot_n;
+    if (khd_n == 0) return;
+    if (khd_mode == 2 && !g_dl.view_valid) { g_dl.view_miss_skips++; return; }
+    cbd.dl_ctl[0] = static_cast<float>(khd_mode);
+    cbd.dl_ctl[1] = static_cast<float>(g_dl.point_n);
+    cbd.dl_ctl[2] = static_cast<float>(g_dl.spot_n);
+    cbd.dl_ctl[3] = g_dl.ctl[8];        // global distance scale (cb10[2].x)
+    cbd.dl_global[0] = g_dl.ctl[12];    // global diffuse multiplier (cb10[3].xyz)
+    cbd.dl_global[1] = g_dl.ctl[13];
+    cbd.dl_global[2] = g_dl.ctl[14];
+    cbd.dl_global[3] = khd_int;
+    memcpy(cbd.dl_view, g_dl.view_cols, sizeof(cbd.dl_view));
+    memcpy(cbd.dl_lights, g_dl.lights, static_cast<size_t>(khd_n) * KH_DL_LIGHT_BYTES);
+}
+
+// Session reset for the mirror (device objects are release_shadow_device_
+// state's job; this clears the PODs, the censuses and the ring).
+inline void dynlights_reset_session() {
+    g_dl.valid = false;
+    g_dl.point_n = g_dl.spot_n = 0;
+    memset(g_dl.ctl, 0, sizeof(g_dl.ctl));
+    g_dl.view_valid = false;
+    g_dl.cam[0] = g_dl.cam[1] = g_dl.cam[2] = 0.0f;
+    g_dl.stamp_ms = 0;
+    g_dl.serial = 0;
+    g_dl.hash = 0;
+    g_dl.inflight[0] = g_dl.inflight[1] = 0;
+    g_dl.issue_serial = 0;
+    g_dl.slot_bytes11[0] = g_dl.slot_bytes11[1] = 0;
+    g_dl.pending_view_ok[0] = g_dl.pending_view_ok[1] = 0;
+    g_dl.slot10_buf = nullptr;
+    g_dl.slot11_buf = nullptr;
+    g_dl.slot10_first = g_dl.slot11_first = 0;
+    g_dl.slot10_num = g_dl.slot11_num = 0;
+    g_dl.bw10 = g_dl.bw11 = 0;
+    g_dl.acquires = 0; g_dl.copies = 0; g_dl.still_drawing = 0;
+    g_dl.no_ctx1 = 0; g_dl.slot_nulls = 0; g_dl.issue_skips = 0;
+    g_dl.bounds_rejects = 0; g_dl.window_clamps = 0; g_dl.val_rejects = 0;
+    g_dl.counts_float = 0; g_dl.clamped_counts = 0; g_dl.zero_lists = 0;
+    g_dl.hash_changes = 0; g_dl.stale_skips = 0; g_dl.view_miss_skips = 0;
+    g_dl.pool_offset_binds = 0; g_dl.shared_pool_binds = 0;
+    g_dl.lists_anchored = 0; g_dl.lists_unanchored = 0;
+    memset(g_dl.last_rej, 0, sizeof(g_dl.last_rej));
+    memset(g_dl.ring, 0, sizeof(g_dl.ring));
+    g_dl.ring_head = 0;
+    g_dl_cd_ctr = 0; g_dl_cd_n = 0; g_dl_cd_null = 0; g_dl_cd_samples = 0;
+    g_dl_cd_distinct_last = 0; g_dl_cd_distinct_max = 0;
+    g_dl_cd_null_last = 0; g_dl_cd_samples_last = 0;
+    memset(g_dl_cd_bufs, 0, sizeof(g_dl_cd_bufs));
+    memset(g_dl_cd_first, 0, sizeof(g_dl_cd_first));
+    // arena / pool / origin machinery (device objects stay with
+    // release_shadow_device_state)
+    g_dl.arena_inflight[0] = g_dl.arena_inflight[1] = 0;
+    g_dl.arena_write = 0;
+    memset(g_dl.win_meta, 0, sizeof(g_dl.win_meta));
+    g_dl.win_count[0] = g_dl.win_count[1] = 0;
+    memset(g_dl.pool, 0, sizeof(g_dl.pool));
+    g_dl.pool_n = 0;
+    g_dl.pool_stamp = 0;
+    g_dl.pool_scale = 1.0f;
+    g_dl.pool_gdiff[0] = g_dl.pool_gdiff[1] = g_dl.pool_gdiff[2] = 1.0f;
+    g_dl.main_gdiff[0] = g_dl.main_gdiff[1] = g_dl.main_gdiff[2] = 1.0f;
+    g_dl.main_scale = 1.0f;
+    g_dl.main_ref_valid = 0;
+    memset(g_dl.win_report, 0, sizeof(g_dl.win_report));
+    g_dl.win_report_n = 0;
+    g_dl.origin_range_rejects = 0;
+    g_dl.origin_pool_votes = 0;
+    g_dl.origin_vote_ambiguous = 0;
+    g_dl.vs_range_prunes = 0;
+    memset(g_dl.anchor_pos, 0, sizeof(g_dl.anchor_pos));
+    memset(g_dl.anchor_stamp, 0, sizeof(g_dl.anchor_stamp));
+    g_dl.anchor_n = 0;
+    g_dl.anchor_admits = 0;
+    g_dl.anchor_res_rejects = 0;
+    memset(g_dl.cand_ring, 0, sizeof(g_dl.cand_ring));
+    g_dl.cand_head = 0;
+    memset(g_dl.m3_ring, 0, sizeof(g_dl.m3_ring));
+    g_dl.m3_ring_head = 0;
+    g_dl.fill_calls = 0;
+    g_dl.fill_last_n = 0;
+    g_dl.fill_min_n = 0xFFFFFFFFu;
+    g_dl.fill_max_n = 0;
+    g_dl.pool_spot_flips = 0;
+    g_dl.win_aux = 0;
+    g_dl.aux_adds = 0;
+    g_dl.aux_refreshes = 0;
+    memset(g_dl.arena_view, 0, sizeof(g_dl.arena_view));
+    memset(g_dl.arena_cam, 0, sizeof(g_dl.arena_cam));
+    g_dl.arena_view_ok[0] = g_dl.arena_view_ok[1] = 0;
+    g_dl.vs_copies = 0; g_dl.vs_scans = 0; g_dl.vs_hint_hits = 0;
+    g_dl.vs_ortho_pass = 0; g_dl.vs_rot_rejects = 0; g_dl.vs_y_rejects = 0;
+    g_dl.vs_grid_rejects = 0; g_dl.vs_noref = 0; g_dl.vs_valid = 0;
+    g_dl.vs_pair_tries = 0;
+    g_dl.vs_pair_valid = 0;
+    g_dl.vs_pair_y_rejects = 0;
+    g_dl.vs_pair_grid_rejects = 0;
+    g_dl.vs_last_ydelta = 0.0f;
+    g_dl.vs_triple_valid = 0;
+    g_dl.vs_zero_origins = 0;
+    g_dl.vs_nonzero_origins = 0;
+    g_dl.vs_hint_kind = 0;
+    g_dl.vs_hint_slot = -1;
+    g_dl.vs_hint_off = 0;
+    g_dl.vs_hint_form = 0;
+    g_dl.vs_hint_wslot = -1;
+    g_dl.vs_hint_woff = 0;
+    g_dl.vs_hint_wform = 0;
+    g_dl.win_captured = 0; g_dl.win_table_full = 0;
+    g_dl.pool_added = 0; g_dl.pool_updated = 0; g_dl.pool_expired = 0;
+    g_dl.pool_overflow = 0;
+
+}
+
 // Fills the lighting slots of a draw constant block from an object and the
 // published sun state. Called by both solid-mesh paths (flush and injection);
 // both run either on the game thread with the lock held or on the parked-
@@ -5237,6 +7396,11 @@ inline void fill_lighting_cb(ConstantData& cbd, const RenderObject& o) {
     // completed set (or at worst last frame's, which its embedded camera
     // origin keeps correct). Skipped entirely for unlit objects.
     if (!o.lit) return;
+
+    // Dynamic lights (points/spots/environment lamps): the validated
+    // engine mirror - one call covers both render paths, and unlit
+    // objects skipped with the rest. Dormant at mode 0 (the default).
+    fill_dynlights_cb(cbd, o);
 
     // Received-term outage forensics: the world-shadows-on-mesh term
     // vanishes whenever this early-out fires on a LIT object. Three
@@ -6433,6 +8597,26 @@ inline void ffr_fold_late_deltas() {
 // identities could silently false-match recycled allocations.
 // ===========================================================================
 inline void release_shadow_device_state() {
+    // --- dynamic-lights mirror machinery (device objects + weak
+    //     identities; the POD censuses survive until the session reset) ---
+    for (int khd_s = 0; khd_s < 2; ++khd_s) {
+        if (g_dl.staging[khd_s]) { g_dl.staging[khd_s]->Release(); g_dl.staging[khd_s] = nullptr; }
+        g_dl.inflight[khd_s] = 0;
+    }
+
+    for (int khd_s = 0; khd_s < 2; ++khd_s) {
+        if (g_dl.arena[khd_s]) { g_dl.arena[khd_s]->Release(); g_dl.arena[khd_s] = nullptr; }
+        g_dl.arena_inflight[khd_s] = 0;
+        g_dl.win_count[khd_s] = 0;
+    }
+
+    memset(g_dl.win_meta, 0, sizeof(g_dl.win_meta));   // weak identities
+    g_dl.pool_n = 0;   // pool positions are POD but the stamp must not lie
+    g_dl.pool_stamp = 0;
+    g_dl.slot10_buf = nullptr;
+    g_dl.slot11_buf = nullptr;
+    g_dl.valid = false;   // consumers gate on valid; a fresh harvest re-arms
+
     // --- screen-mask machinery ---
     if (g_mask.srv) { g_mask.srv->Release(); g_mask.srv = nullptr; }
     if (g_mask.tex) { g_mask.tex->Release(); g_mask.tex = nullptr; }
@@ -7857,16 +10041,6 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
         g_fire_dims2[0] = g_mask.cast_dims[0];
         g_fire_dims2[1] = g_mask.cast_dims[1];
         memcpy(g_fire_view2, g_ls.frame_view, sizeof(g_fire_view2));
-
-        // WHOLESALE LATCH BASIS - kept from the Zeus hunt as its one
-        // field-validated improvement: replacing the hybrid frozen view
-        // (engine rotation + bridge-rebuilt translation, epochs mixed)
-        // with the injection's latch transform measurably REDUCED the
-        // permanent Zeus drift. The latch is the basis the injection
-        // composites with pixel-perfectly in every configuration.
-        if (g_ro.cycle_pv_valid) {
-            memcpy(g_fire_view2, &g_ro.cycle_pv.view[0][0], sizeof(g_fire_view2));
-        }
         const float* fsun = kh_shadow_sun();
         if (!fsun) fsun = g_sun_dir_engine;
         g_fire_sun2[0] = fsun[0];
@@ -8784,6 +10958,12 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
                             ? (-pv.projection[3][2] / pv.projection[2][2]) : -1.0f;
     g_mask.last_inject_near = inject_near;
 
+    // Dynamic-lights acquisition: ACCEPTED injections only. Rescue
+    // (anomalous) cycles are quarantined - a foreign pass's slot bindings
+    // are exactly the poison the CPU validation exists to keep out, and
+    // safety paths are not training paths.
+    if (!khr_anomalous) dynlights_acquire(ctx, pv.view);
+
     float view_proj[4][4];
     mul_4x4(pv.view, pv.projection, view_proj);
     // supervise the view source: lock the upload location whose contents
@@ -9397,6 +11577,17 @@ inline void reorder_pre_draw(ID3D11DeviceContext* self) {
         shadow_note_draw(self);
         mask_note_draw(self);
         mask_cast_engine(self);
+
+        // Dynamic-lights per-draw sampler: every 16th engine draw reads
+        // the slot-11 window identity - the distinct-window census, and,
+        // for the mode-3 merge, a copy of each NEW distinct window into
+        // the frame's arena side. Relaxed loads + a mask when idle.
+        if ((g_dl_census_on.load(std::memory_order_relaxed) ||
+             g_dl_recon.load(std::memory_order_relaxed) ||
+             g_dl_mode.load(std::memory_order_relaxed) > 0) &&
+            ((++g_dl_cd_ctr & 15u) == 0)) {
+            dynlights_sample_draw(self);
+        }
     }
     if (g_ro.in_injection || g_ro.injected) return;
 
@@ -9865,6 +12056,7 @@ static void STDMETHODCALLTYPE hooked_clear_depthstencil(ID3D11DeviceContext* sel
                 g_stats.sun_jump_flushes++;
             }
 
+            if (g_dl_census_on.load(std::memory_order_relaxed)) dynlights_census_fold();
             shadow_live_frame_reset();
             shadow_view_prewarm();   // lock can exist before the first mesh does
             g_sun_map_rendered_frame = false;   // new frame: the injection re-renders;
@@ -11548,6 +13740,17 @@ inline void reset_session_state() {
     g_ffr_head = 0; g_ffr_serial = 0;
     memset(g_ffr_snap, 0, sizeof(g_ffr_snap));
     g_ffr_lockfails.store(0, std::memory_order_relaxed);
+    // Dynamic lights: mirror, censuses and ring die with the session;
+    // the MODE persists at 3 - the finalized default (lit objects
+    // receive the engine's dynamic lights automatically; the derivation
+    // needs no operator setup, and a dark-safe failure posture - the
+    // degeneracy rule + range backstop - is what made default-on
+    // responsible).
+    g_dl_mode.store(3, std::memory_order_relaxed);
+    g_dl_intensity_bits.store(0x3F800000u, std::memory_order_relaxed);
+    g_dl_recon.store(false, std::memory_order_relaxed);
+    g_dl_census_on.store(false, std::memory_order_relaxed);
+    dynlights_reset_session();
     g_ffr_any_eligible.store(false, std::memory_order_relaxed);
     g_ffr_dark_frames = 0; g_ffr_dark_ms = 0;
     g_ffr_erased_frames = 0; g_ffr_erased_ms = 0;
@@ -12513,6 +14716,32 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("rescueRefShield", RenderIntegration::g_rescue_ref_shield));
         out.push_back(kv("flushSlotBandRejects", RenderIntegration::g_flush_slot_band_rejects));
         out.push_back(kvf("flushSlotRejNear", RenderIntegration::g_flush_slot_rej_near));
+        out.push_back(kv("dlMode", static_cast<uint64_t>(RenderIntegration::g_dl_mode.load(std::memory_order_relaxed))));
+        out.push_back(kv("dlAcquires", RenderIntegration::g_dl.acquires));
+        out.push_back(kv("dlCopies", RenderIntegration::g_dl.copies));
+        out.push_back(kv("dlHarvests", static_cast<uint64_t>(RenderIntegration::g_dl.serial)));
+        out.push_back(kv("dlLastPointN", static_cast<uint64_t>(RenderIntegration::g_dl.point_n)));
+        out.push_back(kv("dlLastSpotN", static_cast<uint64_t>(RenderIntegration::g_dl.spot_n)));
+        out.push_back(kvf("dlListAgeS", age_s(RenderIntegration::g_dl.stamp_ms)));
+        out.push_back(kv("dlHashChanges", RenderIntegration::g_dl.hash_changes));
+        out.push_back(kv("dlValRejects", RenderIntegration::g_dl.val_rejects));
+        out.push_back(kv("dlSlotNulls", RenderIntegration::g_dl.slot_nulls));
+        out.push_back(kv("dlStillDrawing", RenderIntegration::g_dl.still_drawing));
+        out.push_back(kv("dlBoundsRejects", RenderIntegration::g_dl.bounds_rejects));
+        out.push_back(kv("dlPerDrawDistinct", static_cast<uint64_t>(RenderIntegration::g_dl_cd_distinct_last)));
+        out.push_back(kv("dlPerDrawDistinctMax", static_cast<uint64_t>(RenderIntegration::g_dl_cd_distinct_max)));
+        out.push_back(kv("dlPoolN", static_cast<uint64_t>(RenderIntegration::g_dl.pool_n)));
+        out.push_back(kv("dlWinCaptured", RenderIntegration::g_dl.win_captured));
+        out.push_back(kv("dlListsAnchored", RenderIntegration::g_dl.lists_anchored));
+        out.push_back(kv("dlListsUnanchored", RenderIntegration::g_dl.lists_unanchored));
+        out.push_back(kv("dlPoolExpired", RenderIntegration::g_dl.pool_expired));
+        out.push_back(kv("dlFillLastN", static_cast<uint64_t>(RenderIntegration::g_dl.fill_last_n)));
+        out.push_back(kv("dlSpotFlips", RenderIntegration::g_dl.pool_spot_flips));
+        out.push_back(kv("dlWinAux", RenderIntegration::g_dl.win_aux));
+        out.push_back(kv("dlOriginRangeRejects", RenderIntegration::g_dl.origin_range_rejects));
+        out.push_back(kv("dlOriginPoolVotes", RenderIntegration::g_dl.origin_pool_votes));
+        out.push_back(kv("dlOriginVoteAmbiguous", RenderIntegration::g_dl.origin_vote_ambiguous));
+        out.push_back(kv("dlAnchorTableN", static_cast<uint64_t>(RenderIntegration::g_dl.anchor_n)));
         {
             // Band-layout census (the 132 m band session): the widest
             // valid band's span and the layout's total reach - the
@@ -12707,6 +14936,431 @@ static game_value dump_render_trace_sqf() {
         return game_value(std::move(out));
     } catch (...) {
         report_error("dumpRenderTrace: unknown exception");
+        return game_value(auto_array<game_value>());
+    }
+}
+
+// dumpDynamicLights -> ARRAY. The standing diagnostic for the finalized
+// dynamic-lights system (ON by default, engine-derived origins). OPT-IN
+// like getRenderStats: the FIRST call arms the per-draw census + zeroes
+// the counters and returns [["status","armed"]]; subsequent calls return
+// the full picture - mirror age/counts, the raw cb10 control block, the
+// binding census, per-window origin verdicts (route kind, slots,
+// residuals), the derivation censuses (route mix, degeneracy wins, range
+// rejects), the absolute-world pool, the harvest rings and the fill
+// census. State is copied under the graphics lock (parking the render
+// thread, the mirror's write invariant) and formatted after release.
+static game_value dump_dynamic_lights_sqf() {
+    try {
+        if (!RenderIntegration::g_dl_recon.exchange(true, std::memory_order_relaxed)) {
+            // Arm: census on; counters/mirror zeroed under the lock so the
+            // session starts clean. A failed lock still arms - the state
+            // then zeroes lazily at the next successful call instead.
+            RenderIntegration::g_dl_census_on.store(true, std::memory_order_relaxed);
+
+            for (int attempt = 0; attempt < 4; ++attempt) {
+                RVExtBridge::ScopedGraphicsLock lock;
+                if (!lock.acquired()) continue;
+                RenderIntegration::dynlights_reset_session();
+                break;
+            }
+
+            auto_array<game_value> pair;
+            pair.push_back(game_value("status"));
+            pair.push_back(game_value("armed"));
+            auto_array<game_value> armed_out;
+            armed_out.push_back(game_value(std::move(pair)));
+            return game_value(std::move(armed_out));
+        }
+
+        // Copy under the lock, format after release (dumpRenderTrace's
+        // pattern). The struct copy includes raw device pointers used only
+        // as printed identities - never dereferenced.
+        static RenderIntegration::DynLightsState khd_snap;
+        uint32_t khd_cd_last = 0, khd_cd_max = 0, khd_cd_null = 0, khd_cd_samples = 0;
+        bool khd_got = false;
+
+        for (int attempt = 0; attempt < 4 && !khd_got; ++attempt) {
+            RVExtBridge::ScopedGraphicsLock lock;
+            if (!lock.acquired()) continue;
+            khd_snap = RenderIntegration::g_dl;
+            khd_cd_last = RenderIntegration::g_dl_cd_distinct_last;
+            khd_cd_max = RenderIntegration::g_dl_cd_distinct_max;
+            khd_cd_null = RenderIntegration::g_dl_cd_null_last;
+            khd_cd_samples = RenderIntegration::g_dl_cd_samples_last;
+            khd_got = true;
+        }
+
+        if (!khd_got) {
+            auto_array<game_value> pair;
+            pair.push_back(game_value("status"));
+            pair.push_back(game_value("lockFailed"));
+            auto_array<game_value> fail_out;
+            fail_out.push_back(game_value(std::move(pair)));
+            return game_value(std::move(fail_out));
+        }
+
+        auto kv = [](const char* k, float v) {
+            auto_array<game_value> pair;
+            pair.push_back(game_value(k));
+            pair.push_back(game_value(v));
+            return game_value(std::move(pair));
+        };
+        auto kvs = [](const char* k, const char* v) {
+            auto_array<game_value> pair;
+            pair.push_back(game_value(k));
+            pair.push_back(game_value(v));
+            return game_value(std::move(pair));
+        };
+        auto kva = [](const char* k, auto_array<game_value>&& v) {
+            auto_array<game_value> pair;
+            pair.push_back(game_value(k));
+            pair.push_back(game_value(std::move(v)));
+            return game_value(std::move(pair));
+        };
+        auto hex64 = [](uint64_t v) {
+            // dependency-free formatter (no <cstdio> in the include chain)
+            char buf[17];
+            const char* khd_dig = "0123456789ABCDEF";
+            for (int i = 15; i >= 0; --i) { buf[i] = khd_dig[v & 0xF]; v >>= 4; }
+            buf[16] = 0;
+            return game_value(buf);
+        };
+        const uint64_t khd_now = RenderIntegration::steady_now_ms();
+
+        auto_array<game_value> out;
+        out.push_back(kvs("status", "ok"));
+        out.push_back(kv("mode", static_cast<float>(RenderIntegration::g_dl_mode.load(std::memory_order_relaxed))));
+
+        {
+            const uint32_t khd_bits = RenderIntegration::g_dl_intensity_bits.load(std::memory_order_relaxed);
+            float khd_int = 1.0f;
+            memcpy(&khd_int, &khd_bits, sizeof(khd_int));
+            out.push_back(kv("intensity", khd_int));
+        }
+
+        out.push_back(kv("mirrorValid", khd_snap.valid ? 1.0f : 0.0f));
+        out.push_back(kv("listAgeS", khd_snap.stamp_ms != 0
+                                   ? static_cast<float>(khd_now - khd_snap.stamp_ms) / 1000.0f : -1.0f));
+        out.push_back(kv("harvests", static_cast<float>(khd_snap.serial)));
+        out.push_back(kv("pointN", static_cast<float>(khd_snap.point_n)));
+        out.push_back(kv("spotN", static_cast<float>(khd_snap.spot_n)));
+
+        {   // cb10 verbatim + the count lanes' int interpretations
+            auto_array<game_value> ctl;
+            for (int i = 0; i < 16; ++i) ctl.push_back(game_value(khd_snap.ctl[i]));
+            out.push_back(kva("ctlRaw", std::move(ctl)));
+            int32_t khd_pc_i = 0, khd_sc_i = 0;
+            memcpy(&khd_pc_i, &khd_snap.ctl[0], 4);
+            memcpy(&khd_sc_i, &khd_snap.ctl[4], 4);
+            auto_array<game_value> ints;
+            ints.push_back(game_value(static_cast<float>(khd_pc_i)));
+            ints.push_back(game_value(static_cast<float>(khd_sc_i)));
+            out.push_back(kva("ctlCountInts", std::move(ints)));
+        }
+
+        out.push_back(kv("distScale", khd_snap.ctl[8]));
+
+        {
+            auto_array<game_value> gd;
+            gd.push_back(game_value(khd_snap.ctl[12]));
+            gd.push_back(game_value(khd_snap.ctl[13]));
+            gd.push_back(game_value(khd_snap.ctl[14]));
+            out.push_back(kva("globalDiffuse", std::move(gd)));
+        }
+
+        {   // binding census: identities, offsets, window sizes, widths
+            auto_array<game_value> b10;
+            b10.push_back(hex64(reinterpret_cast<uint64_t>(khd_snap.slot10_buf)));
+            b10.push_back(game_value(static_cast<float>(khd_snap.slot10_first)));
+            b10.push_back(game_value(static_cast<float>(khd_snap.slot10_num)));
+            b10.push_back(game_value(static_cast<float>(khd_snap.bw10)));
+            out.push_back(kva("bind10", std::move(b10)));
+            auto_array<game_value> b11;
+            b11.push_back(hex64(reinterpret_cast<uint64_t>(khd_snap.slot11_buf)));
+            b11.push_back(game_value(static_cast<float>(khd_snap.slot11_first)));
+            b11.push_back(game_value(static_cast<float>(khd_snap.slot11_num)));
+            b11.push_back(game_value(static_cast<float>(khd_snap.bw11)));
+            out.push_back(kva("bind11", std::move(b11)));
+        }
+
+        out.push_back(kv("acquires", static_cast<float>(khd_snap.acquires)));
+        out.push_back(kv("copies", static_cast<float>(khd_snap.copies)));
+        out.push_back(kv("stillDrawing", static_cast<float>(khd_snap.still_drawing)));
+        out.push_back(kv("noCtx1", static_cast<float>(khd_snap.no_ctx1)));
+        out.push_back(kv("slotNulls", static_cast<float>(khd_snap.slot_nulls)));
+        out.push_back(kv("issueSkips", static_cast<float>(khd_snap.issue_skips)));
+        out.push_back(kv("boundsRejects", static_cast<float>(khd_snap.bounds_rejects)));
+        out.push_back(kv("windowClamps", static_cast<float>(khd_snap.window_clamps)));
+        out.push_back(kv("valRejects", static_cast<float>(khd_snap.val_rejects)));
+        out.push_back(kv("countsFloat", static_cast<float>(khd_snap.counts_float)));
+        out.push_back(kv("clampedCounts", static_cast<float>(khd_snap.clamped_counts)));
+        out.push_back(kv("zeroLists", static_cast<float>(khd_snap.zero_lists)));
+        out.push_back(kv("hashChanges", static_cast<float>(khd_snap.hash_changes)));
+        out.push_back(kv("staleSkips", static_cast<float>(khd_snap.stale_skips)));
+        out.push_back(kv("viewMissSkips", static_cast<float>(khd_snap.view_miss_skips)));
+        out.push_back(kv("poolOffsetBinds", static_cast<float>(khd_snap.pool_offset_binds)));
+        out.push_back(kv("sharedPoolBinds", static_cast<float>(khd_snap.shared_pool_binds)));
+
+        {
+            auto_array<game_value> rej;
+            for (int i = 0; i < 4; ++i) rej.push_back(game_value(khd_snap.last_rej[i]));
+            out.push_back(kva("lastReject", std::move(rej)));
+        }
+
+        {   // per-draw variability: [distinct last frame, max, null samples, samples]
+            auto_array<game_value> pd;
+            pd.push_back(game_value(static_cast<float>(khd_cd_last)));
+            pd.push_back(game_value(static_cast<float>(khd_cd_max)));
+            pd.push_back(game_value(static_cast<float>(khd_cd_null)));
+            pd.push_back(game_value(static_cast<float>(khd_cd_samples)));
+            out.push_back(kva("perDraw", std::move(pd)));
+        }
+
+        {   // capture-frame camera + view columns (the space-decode inputs)
+            auto_array<game_value> cam;
+            for (int i = 0; i < 3; ++i) cam.push_back(game_value(khd_snap.cam[i]));
+            out.push_back(kva("camera", std::move(cam)));
+            auto_array<game_value> vc;
+            for (int i = 0; i < 12; ++i) vc.push_back(game_value(khd_snap.view_cols[i]));
+            out.push_back(kva("viewCols", std::move(vc)));
+            out.push_back(kv("viewValid", khd_snap.view_valid ? 1.0f : 0.0f));
+        }
+
+        {   // every active light record, 24 floats each, engine-verbatim
+            auto_array<game_value> lights;
+            uint32_t khd_n = khd_snap.point_n + khd_snap.spot_n;
+            if (khd_n > RenderIntegration::KH_DL_MAX_LIGHTS) khd_n = RenderIntegration::KH_DL_MAX_LIGHTS;
+
+            for (uint32_t i = 0; i < khd_n; ++i) {
+                auto_array<game_value> rec;
+                for (int f = 0; f < 24; ++f) rec.push_back(game_value(khd_snap.lights[i * 24 + f]));
+                lights.push_back(game_value(std::move(rec)));
+            }
+
+            out.push_back(kva("lights", std::move(lights)));
+        }
+
+        {   // acquisition ring, oldest-first
+            auto_array<game_value> ring;
+
+            for (uint32_t k = 0; k < RenderIntegration::KH_DL_RING; ++k) {
+                const auto& r = khd_snap.ring[(khd_snap.ring_head + k) % RenderIntegration::KH_DL_RING];
+                if (r.serial == 0) continue;
+                auto_array<game_value> e;
+                e.push_back(game_value(static_cast<float>(r.serial)));
+                e.push_back(game_value(r.t_ms != 0 ? static_cast<float>(khd_now - r.t_ms) / 1000.0f : -1.0f));
+                e.push_back(game_value(static_cast<float>(r.point_n)));
+                e.push_back(game_value(static_cast<float>(r.spot_n)));
+                e.push_back(game_value(r.dist_scale));
+                e.push_back(game_value(static_cast<float>(r.hash32)));
+                e.push_back(game_value(r.cam[0]));
+                e.push_back(game_value(r.cam[1]));
+                e.push_back(game_value(r.cam[2]));
+                e.push_back(hex64(r.b10));
+                e.push_back(game_value(static_cast<float>(r.f10)));
+                e.push_back(game_value(static_cast<float>(r.n10)));
+                e.push_back(hex64(r.b11));
+                e.push_back(game_value(static_cast<float>(r.f11)));
+                e.push_back(game_value(static_cast<float>(r.n11)));
+                e.push_back(game_value(static_cast<float>(r.counts_as_float)));
+                for (int f = 0; f < 8; ++f) e.push_back(game_value(r.l0[f]));
+                ring.push_back(game_value(std::move(e)));
+            }
+
+            out.push_back(kva("ring", std::move(ring)));
+        }
+
+        {   // last harvest's per-window origin verdicts
+            auto_array<game_value> wins;
+
+            for (uint32_t w = 0; w < khd_snap.win_report_n && w < RenderIntegration::KH_DL_WIN_MAX; ++w) {
+                const auto& r = khd_snap.win_report[w];
+                auto_array<game_value> e;
+                e.push_back(hex64(r.buf));
+                e.push_back(game_value(static_cast<float>(r.first)));
+                e.push_back(game_value(static_cast<float>(r.point_n)));
+                e.push_back(game_value(static_cast<float>(r.spot_n)));
+                e.push_back(game_value(static_cast<float>(r.origin_ok)));
+                e.push_back(game_value(r.ox));
+                e.push_back(game_value(r.oz));
+                e.push_back(game_value(r.scale));
+                e.push_back(game_value(r.gdiff[0]));
+                e.push_back(game_value(r.gdiff[1]));
+                e.push_back(game_value(r.gdiff[2]));
+                e.push_back(game_value(static_cast<float>(r.derived_ok)));
+                e.push_back(game_value(r.d_ox));
+                e.push_back(game_value(r.d_oz));
+                e.push_back(game_value(r.d_res));
+                e.push_back(game_value(static_cast<float>(r.d_slot)));
+                e.push_back(game_value(static_cast<float>(r.d_wslot)));
+                e.push_back(game_value(static_cast<float>(r.pool_vote)));
+                e.push_back(game_value(static_cast<float>(r.v_best)));
+                e.push_back(game_value(static_cast<float>(r.v_runner)));
+                e.push_back(game_value(static_cast<float>(r.v_cands)));
+                e.push_back(game_value(r.v_res));
+                wins.push_back(game_value(std::move(e)));
+            }
+
+            out.push_back(kva("windows", std::move(wins)));
+        }
+
+        {   // the merged absolute-world pool: [x, y, z, spot] per light
+            auto_array<game_value> pool;
+
+            for (uint32_t i = 0; i < khd_snap.pool_n && i < RenderIntegration::KH_DL_POOL; ++i) {
+                const auto& p = khd_snap.pool[i];
+                auto_array<game_value> e;
+                e.push_back(game_value(p.rec[0]));
+                e.push_back(game_value(p.rec[1]));
+                e.push_back(game_value(p.rec[2]));
+                e.push_back(game_value(static_cast<float>(p.spot)));
+                e.push_back(game_value(static_cast<float>(p.aux)));
+                e.push_back(game_value(static_cast<float>(p.derived)));
+                pool.push_back(game_value(std::move(e)));
+            }
+
+            out.push_back(kva("pool", std::move(pool)));
+        }
+
+        {   // mode-3 harvest ring, oldest-first: [ageS, poolN, anchored,
+            // added, updated, expired, spotFlips, gdiffR, gdiffG, gdiffB, scale]
+            auto_array<game_value> m3;
+
+            for (uint32_t k = 0; k < RenderIntegration::KH_DL_RING; ++k) {
+                const auto& r = khd_snap.m3_ring[(khd_snap.m3_ring_head + k) % RenderIntegration::KH_DL_RING];
+                if (r.t_ms == 0) continue;
+                auto_array<game_value> e;
+                e.push_back(game_value(static_cast<float>(khd_now - r.t_ms) / 1000.0f));
+                e.push_back(game_value(static_cast<float>(r.pool_n)));
+                e.push_back(game_value(static_cast<float>(r.anchored)));
+                e.push_back(game_value(static_cast<float>(r.added)));
+                e.push_back(game_value(static_cast<float>(r.updated)));
+                e.push_back(game_value(static_cast<float>(r.expired)));
+                e.push_back(game_value(static_cast<float>(r.spot_flips)));
+                e.push_back(game_value(r.gdiff[0]));
+                e.push_back(game_value(r.gdiff[1]));
+                e.push_back(game_value(r.gdiff[2]));
+                e.push_back(game_value(r.scale));
+                m3.push_back(game_value(std::move(e)));
+            }
+
+            out.push_back(kva("m3Ring", std::move(m3)));
+        }
+
+        out.push_back(kv("fillCalls", static_cast<float>(khd_snap.fill_calls)));
+        out.push_back(kv("fillLastN", static_cast<float>(khd_snap.fill_last_n)));
+        out.push_back(kv("fillMinN", khd_snap.fill_min_n == 0xFFFFFFFFu
+                                   ? -1.0f : static_cast<float>(khd_snap.fill_min_n)));
+        out.push_back(kv("fillMaxN", static_cast<float>(khd_snap.fill_max_n)));
+        out.push_back(kv("spotFlips", static_cast<float>(khd_snap.pool_spot_flips)));
+        out.push_back(kv("winAux", static_cast<float>(khd_snap.win_aux)));
+        out.push_back(kv("auxAdds", static_cast<float>(khd_snap.aux_adds)));
+        out.push_back(kv("auxRefreshes", static_cast<float>(khd_snap.aux_refreshes)));
+        out.push_back(kv("vsCopies", static_cast<float>(khd_snap.vs_copies)));
+        out.push_back(kv("vsScans", static_cast<float>(khd_snap.vs_scans)));
+        out.push_back(kv("vsHintHits", static_cast<float>(khd_snap.vs_hint_hits)));
+        out.push_back(kv("vsOrthoPass", static_cast<float>(khd_snap.vs_ortho_pass)));
+        out.push_back(kv("vsRotRejects", static_cast<float>(khd_snap.vs_rot_rejects)));
+        out.push_back(kv("vsYRejects", static_cast<float>(khd_snap.vs_y_rejects)));
+        out.push_back(kv("vsGridRejects", static_cast<float>(khd_snap.vs_grid_rejects)));
+        out.push_back(kv("vsNoRef", static_cast<float>(khd_snap.vs_noref)));
+        out.push_back(kv("vsValid", static_cast<float>(khd_snap.vs_valid)));
+        out.push_back(kv("vsHintSlot", static_cast<float>(khd_snap.vs_hint_slot)));
+        out.push_back(kv("vsHintWSlot", static_cast<float>(khd_snap.vs_hint_wslot)));
+        out.push_back(kv("vsHintForm", static_cast<float>(khd_snap.vs_hint_form)));
+        out.push_back(kv("vsHintWForm", static_cast<float>(khd_snap.vs_hint_wform)));
+        out.push_back(kv("vsHintKind", static_cast<float>(khd_snap.vs_hint_kind)));
+        out.push_back(kv("vsTripleValid", static_cast<float>(khd_snap.vs_triple_valid)));
+        out.push_back(kv("vsZeroOrigins", static_cast<float>(khd_snap.vs_zero_origins)));
+        out.push_back(kv("vsNonzeroOrigins", static_cast<float>(khd_snap.vs_nonzero_origins)));
+        out.push_back(kv("originRangeRejects", static_cast<float>(khd_snap.origin_range_rejects)));
+        out.push_back(kv("originPoolVotes", static_cast<float>(khd_snap.origin_pool_votes)));
+        out.push_back(kv("originVoteAmbiguous", static_cast<float>(khd_snap.origin_vote_ambiguous)));
+        out.push_back(kv("vsRangePrunes", static_cast<float>(khd_snap.vs_range_prunes)));
+
+        {
+            uint32_t khd_dn = 0;
+
+            for (uint32_t i = 0; i < khd_snap.pool_n && i < RenderIntegration::KH_DL_POOL; ++i) {
+                if (khd_snap.pool[i].derived) khd_dn++;
+            }
+
+            out.push_back(kv("poolDerivedN", static_cast<float>(khd_dn)));
+        }
+
+        out.push_back(kv("anchorTableN", static_cast<float>(khd_snap.anchor_n)));
+        out.push_back(kv("anchorAdmits", static_cast<float>(khd_snap.anchor_admits)));
+        out.push_back(kv("anchorResRejects", static_cast<float>(khd_snap.anchor_res_rejects)));
+
+        {   // the anchor table verbatim: [x, y, z, ageS] - pollution is
+            // visible at a glance (more anchors than real lights, or
+            // positions off the known lamp set)
+            auto_array<game_value> an;
+
+            for (uint32_t a = 0; a < khd_snap.anchor_n && a < RenderIntegration::KH_DL_ANCHOR_N; ++a) {
+                auto_array<game_value> e;
+                e.push_back(game_value(khd_snap.anchor_pos[a][0]));
+                e.push_back(game_value(khd_snap.anchor_pos[a][1]));
+                e.push_back(game_value(khd_snap.anchor_pos[a][2]));
+                e.push_back(game_value(khd_snap.anchor_stamp[a] != 0
+                          ? static_cast<float>(khd_now - khd_snap.anchor_stamp[a]) / 1000.0f : -1.0f));
+                an.push_back(game_value(std::move(e)));
+            }
+
+            out.push_back(kva("anchors", std::move(an)));
+        }
+
+        {   // derivation-candidate recon ring, oldest-first:
+            // [ageS, bufLo, kind, slot, off, ox, oz, res, ydelta]
+            auto_array<game_value> cr;
+
+            for (uint32_t k = 0; k < 256u; ++k) {
+                const auto& c = khd_snap.cand_ring[(khd_snap.cand_head + k) % 256u];
+                if (c.t_ms == 0) continue;
+                auto_array<game_value> e;
+                e.push_back(game_value(static_cast<float>(khd_now - c.t_ms) / 1000.0f));
+                e.push_back(game_value(static_cast<float>(c.buf_lo)));
+                e.push_back(game_value(static_cast<float>(c.kind)));
+                e.push_back(game_value(static_cast<float>(c.slot)));
+                e.push_back(game_value(static_cast<float>(c.off)));
+                e.push_back(game_value(c.ox));
+                e.push_back(game_value(c.oz));
+                e.push_back(game_value(c.res));
+                e.push_back(game_value(c.ydelta));
+                cr.push_back(game_value(std::move(e)));
+            }
+
+            out.push_back(kva("candRing", std::move(cr)));
+        }
+        out.push_back(kv("mainRefValid", static_cast<float>(khd_snap.main_ref_valid)));
+        out.push_back(kv("mainRefScale", khd_snap.main_scale));
+
+        {
+            auto_array<game_value> mg;
+            mg.push_back(game_value(khd_snap.main_gdiff[0]));
+            mg.push_back(game_value(khd_snap.main_gdiff[1]));
+            mg.push_back(game_value(khd_snap.main_gdiff[2]));
+            out.push_back(kva("mainRefGdiff", std::move(mg)));
+        }
+        out.push_back(kv("vsPairTries", static_cast<float>(khd_snap.vs_pair_tries)));
+        out.push_back(kv("vsPairValid", static_cast<float>(khd_snap.vs_pair_valid)));
+        out.push_back(kv("vsPairYRejects", static_cast<float>(khd_snap.vs_pair_y_rejects)));
+        out.push_back(kv("vsPairGridRejects", static_cast<float>(khd_snap.vs_pair_grid_rejects)));
+        out.push_back(kv("vsLastYDelta", khd_snap.vs_last_ydelta));
+        out.push_back(kv("poolN", static_cast<float>(khd_snap.pool_n)));
+        out.push_back(kv("winCaptured", static_cast<float>(khd_snap.win_captured)));
+        out.push_back(kv("winTableFull", static_cast<float>(khd_snap.win_table_full)));
+        out.push_back(kv("listsAnchored", static_cast<float>(khd_snap.lists_anchored)));
+        out.push_back(kv("listsUnanchored", static_cast<float>(khd_snap.lists_unanchored)));
+        out.push_back(kv("poolAdded", static_cast<float>(khd_snap.pool_added)));
+        out.push_back(kv("poolUpdated", static_cast<float>(khd_snap.pool_updated)));
+        out.push_back(kv("poolExpired", static_cast<float>(khd_snap.pool_expired)));
+        out.push_back(kv("poolOverflow", static_cast<float>(khd_snap.pool_overflow)));
+
+        return game_value(std::move(out));
+    } catch (...) {
+        report_error("dumpDynamicLights: unknown exception");
         return game_value(auto_array<game_value>());
     }
 }

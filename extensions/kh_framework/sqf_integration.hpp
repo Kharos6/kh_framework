@@ -159,6 +159,7 @@ static registered_sqf_function _sqf_add_postfx_array;
 static registered_sqf_function _sqf_add_local_postfx_array;
 static registered_sqf_function _sqf_get_render_stats;
 static registered_sqf_function _sqf_flush_ui_render;
+static registered_sqf_function _sqf_dump_render_trace;
 
 static game_value execute_lua_sqf(game_value_parameter args, game_value_parameter code_or_function) {    
     try {
@@ -7063,6 +7064,13 @@ static void initialize_sqf_integration() {
         "Renders all UI-affecting passes (addPostFX with affectUI true) into the frame being composed. Driven automatically by the internal overlay control; also callable from a Draw EH on a custom display. Returns BOOL.",
         userFunctionWrapper<flush_ui_render_sqf>,
         game_data_type::BOOL
+    );
+    
+    _sqf_dump_render_trace = intercept::client::host::register_sqf_command(
+        "dumpRenderTrace",
+        "Dump the render flight recorder: [['status','ok'], ['fields', [names...]], ['frames', [[values...], ...]]] - one entry per scene frame (oldest first, newest last), each frame's values aligned 1:1 with 'fields'. Call within ~10 s of witnessing a mesh flicker. Returns [['status','lockFailed']] if the graphics lock could not be taken.",
+        userFunctionWrapper<dump_render_trace_sqf>,
+        game_data_type::ARRAY
     );
 
     g_compiled_sqf_generic_call = sqf::compile(R"(setReturnValue (call _thisFunction);)");

@@ -464,8 +464,8 @@ struct RenderStats {
     uint64_t composite_far_injects = 0;     // far-phase injections that PROCEEDED (all meshes clear of the far near plane)
     uint64_t composite_keep_encodes = 0;    // injections encoded with the PERSISTED slot pair (silent cycle, fresh keep)
     uint64_t composite_anomaly_skips = 0;   // injections withheld from anomalous cycles
-    // --- Shadow-pass recon diagnostics (setShadowRecon; see the recon
-    //     section for what each number decides) ---
+    // --- Live shadow-map capture diagnostics (see the live-capture
+    //     section) ---
     uint64_t shadow_live_latches = 0;             // live cascade transforms captured (cumulative)
     uint64_t shadow_live_cascades = 0;            // cascade table size in the last completed frame
     uint64_t shadow_srv_failed = 0;               // atlas SRV creation failures
@@ -3946,30 +3946,14 @@ inline uint32_t proj_upload_byte_width(ID3D11Resource* res) {
 // shading, the recon scan) read plain globals that can never be observed
 // mid-write. Shading itself is per pixel in ApplyLighting (see the shader).
 //
-// SHADOW RECON (evidence before a build is gambled): per-pixel shadows in
-// BOTH remaining directions - sampling the engine's shadow maps so the
-// world shadows our pixels, and injecting our geometry into the shadow
-// passes so our objects shadow the world - hinge on ONE unknown: does the
-// engine upload a SEPARABLE light view-projection, or only combined
-// per-object World x LightVP matrices? The discovery template is the
-// projection sniffer's, transplanted: a light VP's clip-Z axis is, by
-// construction, the light direction, and the sun direction is
-// independently known from the game thread - so a candidate 4x4 in a
-// shadow-pass constant upload validates by its depth axis normalizing to
-// within a couple of degrees of the published sun vector. The one failure
-// mode the direction test CANNOT see is the combined-matrix case (a
-// translation-only World preserves the rotation, so the axis still aligns
-// while the translation is per-object garbage) - which is exactly what the
-// DISTINCT-TRANSLATION counter measures: a separable light VP yields one
-// translation per cascade (expect 1-4 distinct per cycle, and the count IS
-// the cascade count), per-object combined matrices yield one per draw (the
-// counter saturates at the cap). Enable with setShadowRecon and read
-// shadowCyclesSeen / shadowScanUploads / sunAlignedCandidates /
-// sunAlignedLastCycle / sunDistinctTranslationsMax off getRenderStats over
-// a normal test scene: that one monitor run decides whether the shadow-map
-// route is viable. Zero cost while disabled; while enabled the scan is
-// bounded like the projection sniffer's (structural zero checks reject
-// almost every window before any arithmetic).
+// SHADOW RECON (historical): the discovery hunt that established the
+// engine uploads SEPARABLE, sun-aligned light transforms in its shadow
+// passes. Its verdict was promoted wholesale into the LIVE capture below;
+// the scan/watermark/translation-harvest machinery itself (try-window
+// detectors, capture slots, sunBestDot watermarks) was excised post-
+// wrap-up as dead weight. What survives is the phase fingerprint (next
+// paragraph) and the per-target cycle tracking (g_sr), which drive the
+// live capture.
 //
 // A shadow pass is fingerprinted as depth-only output: a DSV that is NOT
 // the main scene's with no color target bound, plus a floor of draws (a
@@ -4194,6 +4178,12 @@ struct LiveShadowEntry {
     uint64_t stamp;      // finalize order; the newest entry IS the atlas
     float    time = 0.0f; // seal wall-clock (staleness expiry; see frame_reset)
 };
+
+// Receive warm-up: the receive term stands down this long after the FIRST
+// band capture (the engine's own early atlas content is mid-stream garbage
+// at spawn; absent beats offset - see the ledger). Both receive gates
+// consume this constant.
+static constexpr float KH_RECEIVE_WARMUP_S = 2.0f;
 
 struct LiveShadowState {
     std::atomic<bool> wanted{ false };        // game thread: any lit object exists
@@ -4562,6 +4552,8 @@ static uint64_t g_cc_pf_last_ms = 0;          // stamp (age at dump)
 // missed: no trigger (attempts 0), anomalous skip (silent slot - possibly
 // the engine skipping redundant CB uploads on static sky frames), or the
 // pv race. Latched once per missed frame at the first fallback mesh.
+static uint64_t g_flush_slot_band_rejects = 0;   // flush slot pairs refused out-of-band
+static float    g_flush_slot_rej_near = -1.0f;    // last refused slot near (forensic)
 static uint64_t g_ms_frames = 0;         // frames carried by the fallback
 static uint64_t g_ms_flush_serial = 0;   // once-per-flush latch key
 static uint64_t g_ms_ms = 0;             // stamp (age at dump)
@@ -4570,6 +4562,238 @@ static uint64_t g_ms_ms = 0;             // stamp (age at dump)
 // is healthy; 0.01/10-class convicts an encode poison (both classes were
 // convicted and fixed in the artifact campaign - this is the tripwire).
 static float g_ms_near = -1.0f;          // -m32/m22 of the flush's chosen pv
+
+// ===========================================================================
+// FLICKER FLIGHT RECORDER (pure diagnostics; the whole-mesh-absence hunt).
+// One compact record per scene frame in a fixed ring, written race-free by
+// construction: the render thread owns the ring between flushes (frame
+// boundary at the main depth clear, injection landing, latch retry); the
+// game thread writes the flush-verdict fields only inside flush_locked,
+// where the graphics lock PARKS the render thread - the same invariant
+// every other cross-thread plain store in this file rides. dumpRenderTrace
+// copies the ring under that lock and formats after release. Per-frame
+// counter DELTAS are computed once at the boundary against a single running
+// snapshot, so the hot paths carry no new per-draw instrumentation.
+//
+// The two synchronous tripwires this feeds (their verdict table is
+// pre-committed in the CONTINUATION doc):
+//   meshDarkFrames    - composite-eligible meshes existed, the injection
+//                       never landed, and the flush painted nothing: a
+//                       frame in which NOTHING drew the meshes.
+//   carryErasedFrames - the flush carried meshes late (fallback) and the
+//                       world redrew >= 32 opaques AFTER the flush: the
+//                       carry was painted over (depth parity cannot defend
+//                       across a foreign-projection partition). Counted
+//                       only when no rescue repaint landed afterwards.
+// Their age stamps pair a witnessed blink with a ring record the same way
+// flAgeFallbackS pairs the ordering artifact. Field notes: attempts and
+// opqAtInject reflect the LAST arm of a re-armed frame (dRearms flags
+// multi-partition frames); on hook-dead installs the boundary is forced
+// once per flush from flush_locked, so records still accrue (injection
+// fields inert, flush verdict live).
+// ===========================================================================
+static constexpr uint32_t KH_FFR_RING = 1024;    // ~8-17 s at 60-120 fps
+static constexpr uint32_t KH_FFR_NDELTA_EARLY = 29;   // read by ffr_read_counters
+static constexpr uint32_t KH_FFR_NDELTA = 31;         // + the LATE cast-path fold
+
+struct FfrRecord {
+    uint32_t serial = 0;            // monotonic frame number (0 = unused slot)
+    uint64_t t_ms = 0;              // steady ms at the opening boundary
+    // latch state as the frame CONSUMED it (written at finalize)
+    uint8_t  pv_valid = 0, pv_stale = 0, retry_fixed = 0;
+    // injection landing (render thread)
+    uint16_t attempts = 0;          // g_ro.inject_attempts at finalize
+    uint32_t opq_at_inject = 0xFFFFFFFFu;   // sentinel = never landed
+    // finalize (render thread, at the next boundary)
+    uint32_t opq_final = 0;
+    uint32_t pf_delta = 0xFFFFFFFFu;   // opaques past the flush stamp (sentinel = no stamp)
+    uint16_t lockfail_folded = 0;   // flush frames lost to lock exhaustion, folded here
+    // flush verdict (game thread, under the graphics lock)
+    uint8_t  stage = 0;             // 0 none 1 entered 2 skipNoDsv 3 skipWrongPass
+                                    // 4 skipResources 5 pvFail 6 geometry
+    uint8_t  had_objects = 0;
+    uint8_t  comp_healthy = 0, inj_since_flush = 0, repainted = 0, anomaly = 0;
+    uint8_t  pv_src = 0;            // 0 latch 1 live 2 live-repair
+    uint16_t eligible = 0;          // composite-eligible visible meshes at snapshot
+    uint16_t meshes_snap = 0;       // meshes taken by the flush path this frame
+    uint16_t fs_snap = 0;           // fullscreen passes taken
+    float    pv_near = -1.0f;       // -m32/m22 of the flush's FINAL encode pv
+    float    cam_ls_delta = -1.0f;  // |flush pv camera - staged lighting camera| (m)
+    float    rej_vp_min = -1.0f;    // last span-REJECTED viewport range (sticky;
+    float    rej_vp_max = -1.0f;    //  dRejSpan > 0 marks the frame it changed)
+    // tripwires (render thread, finalize)
+    uint8_t  dark = 0, erased = 0, rescues = 0;
+    uint16_t d[KH_FFR_NDELTA] = {}; // per-frame counter deltas (saturating)
+};
+
+static FfrRecord g_ffr[KH_FFR_RING];
+static uint32_t  g_ffr_head = 0;    // render thread; game thread only under the lock
+static uint32_t  g_ffr_serial = 0;
+static uint64_t  g_ffr_snap[KH_FFR_NDELTA_EARLY] = {};
+static std::atomic<uint16_t> g_ffr_lockfails{0};        // flush_frame writes with NO lock held
+static std::atomic<bool>     g_ffr_any_eligible{false}; // last known: any eligible mesh exists
+static uint64_t g_ffr_dark_frames = 0;      // tripwire counters + stamps (zeroed at the arm)
+static uint64_t g_ffr_dark_ms = 0;
+static uint64_t g_ffr_erased_frames = 0;
+static uint64_t g_ffr_erased_ms = 0;
+
+// CARRY-ERASE RESCUE state (the fix the flight recorder convicted; the full
+// ledger sits at the anomaly gate in the injection path). Serial-matched
+// carry latch: the flush stores its serial when it carries a missed frame;
+// the rescue window is exactly that frame's post-flush tail, self-closing
+// when the next flush ticks the serial.
+static std::atomic<uint64_t> g_carry_pending_serial{0};
+static uint64_t g_composite_rescues = 0;   // rescue repaints performed (render thread)
+static uint64_t g_rescue_last_ms = 0;
+// Per-gate refusal censuses (field round 3: rescues == 0 hid WHICH gate
+// starved the window - never again). First failing gate counts.
+static uint64_t g_rescue_ref_carried = 0;   // not this flush's carried frame
+static uint64_t g_rescue_ref_preflush = 0;  // carried, but the flush has not run yet
+static uint64_t g_rescue_ref_shield = 0;    // keep shield stale or out of band
+
+// True exactly while the carry-erase rescue may fire: THIS frame was
+// fallback-carried (serial-matched miss latch), the frame's flush has
+// already run (its stamp is live), and the keep shield is fresh and
+// camera-band. Shared verbatim by the span gate (which must let a rescue
+// trigger through the world-shape rejection) and by the anomaly gate
+// (which admits it). Deliberately re-derives the keep freshness so both
+// gates agree by construction.
+//
+// POST-FLUSH PRESENCE is the condition, not a redraw SIZE (field round 3:
+// the [1,1] far-pinned partition burned all 29 of its triggers inside the
+// first 32 post-flush opaques, so the census-borrowed >= 32 threshold
+// refused every one while the erase proceeded). The flush stamp is
+// sentinel until the flush runs and resets at the clear - its presence IS
+// "this carried frame's post-flush tail". Healthy frames are never
+// carried, so no size floor is needed; a rescue that fires early in the
+// repainting partition writes WORLD-range depth, which defends against
+// far-pinned partitions outright and yields only where a near-pinned
+// partition genuinely drew.
+inline bool ffr_rescue_window_open() {
+    const uint64_t khr_cfs = g_cc_flush_serial.load(std::memory_order_relaxed);
+
+    if (g_carry_pending_serial.load(std::memory_order_relaxed) != khr_cfs) {
+        g_rescue_ref_carried++;
+        return false;
+    }
+
+    if (g_cc_flush_opaques.load(std::memory_order_relaxed) == 0xFFFFFFFFu) {
+        g_rescue_ref_preflush++;
+        return false;
+    }
+
+    const bool khr_keep_ok = g_slot_keep_near > 0.0f && g_slot_keep_ms != 0 &&
+                             steady_now_ms() - g_slot_keep_ms < 250 &&
+                             g_slot_keep_near >= 0.05f && g_slot_keep_near <= 5.0f;
+
+    if (!khr_keep_ok) {
+        g_rescue_ref_shield++;
+        return false;
+    }
+
+    return true;
+}
+
+static const char* const KH_FFR_DELTA_NAMES[KH_FFR_NDELTA] = {
+    "dInjections", "dCompMeshes", "dRejSpan", "dRejVerify", "dRejFloor",
+    "dAnomalySkips", "dFarPhaseSkips", "dFarInjects", "dSlotEncodes",
+    "dKeepEncodes", "dKeepStaleSkips", "dKeepStampRejects", "dAmbiguous",
+    "dRearms", "dCompSkips", "dFlushes", "dGatePassed", "dSkipNoDsv",
+    "dSkipWrongPass", "dSetupFails", "dLockRetries", "dLockFailedFrames",
+    "dFallbackDraws", "dRepaintSaves", "dAnomalyCarries", "dMissFrames",
+    "dPostflushRedraws",
+    // dark-flash forensics (field round 2): repair/lighting vs cast-path
+    "dPvRepairs", "dSunMapPasses",
+    // LATE-fold indices (owned by ffr_fold_late_deltas, defined after g_mask)
+    "dCastBatches", "dCastFrozen",
+};
+
+// Counter reads cross threads without the lock only HERE (boundary +
+// baseline). All are aligned 64-bit monotonic diagnostics: a torn read is
+// impossible on x64 and a stale one is a one-frame delta smear - benign.
+inline void ffr_read_counters(uint64_t* v) {
+    v[0]  = g_stats.composite_injections;      v[1]  = g_stats.composite_meshes;
+    v[2]  = g_stats.composite_rej_span;        v[3]  = g_stats.composite_rej_verify;
+    v[4]  = g_stats.composite_rej_floor;       v[5]  = g_stats.composite_anomaly_skips;
+    v[6]  = g_stats.composite_far_phase_skips; v[7]  = g_stats.composite_far_injects;
+    v[8]  = g_stats.composite_slot_encodes;    v[9]  = g_stats.composite_keep_encodes;
+    v[10] = g_keep_stale_skips;                v[11] = g_keep_stamp_rejects;
+    v[12] = g_stats.composite_ambiguous;       v[13] = g_stats.composite_rearms;
+    v[14] = g_stats.composite_skips;           v[15] = g_stats.flushes;
+    v[16] = g_stats.gate_passed;               v[17] = g_stats.skip_no_dsv;
+    v[18] = g_stats.skip_wrong_pass;           v[19] = g_stats.effect_setup_fails;
+    v[20] = g_stats.lock_retries;              v[21] = g_stats.lock_failed_frames;
+    v[22] = g_flush_fallback_draws;            v[23] = g_flush_repaint_saves;
+    v[24] = g_flush_anomaly_carries;           v[25] = g_ms_frames;
+    v[26] = g_cc_postflush_redraws;            v[27] = g_flush_pv_repairs;
+    v[28] = g_stats.sun_depth_passes;
+}
+
+inline FfrRecord& ffr_head() { return g_ffr[g_ffr_head]; }
+inline void ffr_flush_stage(uint8_t s) { ffr_head().stage = s; }
+
+// Finalize the closing frame's record and open the next. Render thread at
+// the main depth clear; also called from flush_locked (render thread
+// parked) when the clear hook never advanced the ring - hook-dead installs
+// then still produce one record per flush.
+inline void ffr_frame_boundary() {
+    FfrRecord& r = ffr_head();
+
+    if (r.serial != 0) {
+        r.opq_final = g_ro.opaque_draws;
+        r.attempts = static_cast<uint16_t>(
+            g_ro.inject_attempts > 0xFFFFu ? 0xFFFFu : g_ro.inject_attempts);
+        r.pv_valid = g_ro.cycle_pv_valid ? 1 : 0;
+        r.pv_stale = g_ro.cycle_pv_stale ? 1 : 0;
+        const uint32_t khr_cc_fo = g_cc_flush_opaques.load(std::memory_order_relaxed);
+        r.pf_delta = (khr_cc_fo != 0xFFFFFFFFu && g_ro.opaque_draws >= khr_cc_fo)
+                   ? (g_ro.opaque_draws - khr_cc_fo) : 0xFFFFFFFFu;
+        r.lockfail_folded = g_ffr_lockfails.exchange(0, std::memory_order_relaxed);
+        r.rej_vp_min = g_trig_rej_vp[0];
+        r.rej_vp_max = g_trig_rej_vp[1];
+
+        uint64_t khr_now_c[KH_FFR_NDELTA_EARLY];
+        ffr_read_counters(khr_now_c);
+
+        for (uint32_t i = 0; i < KH_FFR_NDELTA_EARLY; ++i) {
+            // A stats ARM zeroes counters but not this snapshot: a smaller
+            // "now" means a reset happened - reseed with a zero delta
+            // instead of a wrapped saturation.
+            const uint64_t dd = khr_now_c[i] >= g_ffr_snap[i]
+                              ? khr_now_c[i] - g_ffr_snap[i] : 0;
+            r.d[i] = static_cast<uint16_t>(dd > 0xFFFFu ? 0xFFFFu : dd);
+            g_ffr_snap[i] = khr_now_c[i];
+        }
+
+        const bool khr_painted_by_flush = r.stage == 6 && r.meshes_snap > 0;
+        const bool khr_injected_frame = r.opq_at_inject != 0xFFFFFFFFu;
+
+        if (g_ffr_any_eligible.load(std::memory_order_relaxed) &&
+            !khr_injected_frame && !khr_painted_by_flush) {
+            r.dark = 1;
+            g_ffr_dark_frames++;
+            g_ffr_dark_ms = steady_now_ms();
+        }
+
+        // d[22] = fallback draws this frame: the carry ran, a >=32-opaque
+        // world redraw after the flush painted over it, and no rescue
+        // repaint landed afterwards - the likely-visible-blink condition.
+        if (r.stage == 6 && r.d[22] > 0 && r.rescues == 0 &&
+            r.pf_delta != 0xFFFFFFFFu && r.pf_delta >= 32u) {
+            r.erased = 1;
+            g_ffr_erased_frames++;
+            g_ffr_erased_ms = steady_now_ms();
+        }
+    }
+
+    g_ffr_head = (g_ffr_head + 1u) % KH_FFR_RING;
+    FfrRecord& khr_n = g_ffr[g_ffr_head];
+    khr_n = FfrRecord{};
+    khr_n.serial = ++g_ffr_serial;
+    khr_n.t_ms = steady_now_ms();
+
+    if (g_ffr_serial == 1) ffr_read_counters(g_ffr_snap);   // first boundary seeds the baseline
+}
 
 inline void skybind_release() {
     for (int i = 0; i < 16; ++i) {
@@ -5100,156 +5324,19 @@ inline void fill_lighting_cb(ConstantData& cbd, const RenderObject& o) {
 
 }
 
-// --- Recon state: render thread only, like ReorderState. ---
+// --- Shadow phase tracking (render thread only, like ReorderState). ---
 static constexpr float    KH_SHADOW_AXIS_COS_TOL   = 0.995f; // ~5.7 degrees off the sun vector
 static constexpr float    KH_SHADOW_ORTHO_TOL      = 0.02f;  // orthonormality slack for the 3x3 test
-
-// Distance-to-success watermarks (render thread writes, game thread reads;
-// aligned 32-bit floats - torn reads impossible on x86, and the values are
-// diagnostics). Reset when the recon is armed.
-static float g_sr_best_dot44 = 0.0f;   // best |cos(zAxis, sun)| among affine 4x4 windows
-static float g_sr_best_dot43 = 0.0f;   // best |cos(basisVec, sun)| among orthogonal 3x3 bases
-
-// Capture of the best sun-aligned orthogonal 4x3 seen while armed. If the
-// engine uploads the COMPLETE light VP in RV's native affine form, this is
-// the whole prize: the row norms are the ortho scale factors (extents), the
-// fourth-element column is the translation, and the aligned axis is the
-// light. Render-thread writes; read from the game thread via
-// getShadowCapture after disarming (or accept a frame of skew - it is a
-// diagnostic).
-static constexpr uint32_t KH_SHADOW_CTX_BEFORE = 8;    // floats captured before the matrix
-static constexpr uint32_t KH_SHADOW_CTX_AFTER  = 28;   // floats captured after it
-static constexpr uint32_t KH_SHADOW_CTX_TOTAL  = KH_SHADOW_CTX_BEFORE + 12 + KH_SHADOW_CTX_AFTER;
-
-struct ShadowCapture43 {
-    bool     valid = false;
-    bool     in_phase = false;
-    float    dot = 0.0f;         // |cos| of the best-aligned normalized axis
-    int      axis = -1;          // 0-2 = row, 3-5 = column index of that axis
-    float    norms[3] = {};      // row lengths (scale factors; 1,1,1 = pure view)
-    float    m[12] = {};         // the raw window: rows w[0..3], w[4..7], w[8..11]
-    // The matrix's surroundings in its upload: the ortho scale/offset a bare
-    // view implies MUST be uploaded somewhere, and "the adjacent constants
-    // in the same CB" is the overwhelmingly likely somewhere. ctx holds
-    // [KH_SHADOW_CTX_BEFORE floats before | the 12 | KH_SHADOW_CTX_AFTER
-    // after], zero-padded at upload edges; ctx_start is how many of the
-    // BEFORE floats were actually available.
-    float    ctx[KH_SHADOW_CTX_TOTAL] = {};
-    uint32_t ctx_start = 0;
-    uint32_t upload_floats = 0;  // total floats in the upload
-    uint32_t offset_floats = 0;  // matrix offset within it
-};
-// Two independent slots: the best UNIFORM-norm hit (a bare light view - the
-// rotation is the light, projection elsewhere) and the best SCALED hit (an
-// affine VP or a world->shadowUV sampling transform - projection INCLUDED).
-static ShadowCapture43 g_sr_cap_view;
-static ShadowCapture43 g_sr_cap_vp;
-
-// Snapshot of the translation table from the last closed cycle that had
-// aligned candidates: the cascade structure, readable after disarming.
-static float    g_sr_last_trans[16][3] = {};
-static uint32_t g_sr_last_trans_count = 0;
-
-// The full cascade FAMILY: every scaled sun-aligned 4x3 found in a single
-// upload, offsets and all. The engine packs the per-cascade sampling
-// transforms into one constant block; whichever upload yields the most of
-// them is that block, and this set is the shader-ready cascade table the
-// sampling build will consume.
-struct ShadowCascadeSet {
-    uint32_t upload_floats = 0;
-    uint32_t count = 0;
-    uint32_t offsets[8] = {};
-    float    m[8][12] = {};
-};
-static ShadowCascadeSet g_sr_cascades;           // best-so-far published set
-static ShadowCascadeSet g_sr_cascades_scratch;   // per-upload collection
-
-// Topology of the depth targets bound during classified shadow phases:
-// dimensions, format, array shape and the DSV's slice - the difference
-// between one atlas, a texture array, and separate per-cascade maps, which
-// decides how the sampling SRV must be built.
-struct ShadowTargetInfo {
-    void*    tex_identity = nullptr;
-    uint32_t width = 0, height = 0;
-    uint32_t format = 0;             // DXGI_FORMAT of the texture
-    uint32_t array_size = 0;
-    uint32_t first_slice = 0;        // from the DSV desc (array DSVs)
-    uint32_t bind_flags = 0;
-    uint64_t cycles = 0;             // shadow cycles that used this target
-};
 
 // Forward: defined with the live-capture group below.
 inline void shadow_live_consider_atlas(ID3D11Texture2D* tex, const D3D11_TEXTURE2D_DESC& td);
 
-static constexpr uint32_t KH_SHADOW_MAX_TRANSLATIONS = 16;   // distinct-translation cap per cycle
-
 struct ShadowReconState {
     bool     phase_active = false;    // depth-only, non-main DSV currently bound
     void*    target_identity = nullptr;
-    uint32_t draws_this_cycle = 0;
-    uint32_t candidates_this_cycle = 0;
-    float    trans[KH_SHADOW_MAX_TRANSLATIONS][3] = {};   // quantized candidate translations
-    uint32_t trans_count = 0;
 };
 static ShadowReconState g_sr;   // render thread only
 
-// Folds the finished cycle into the cumulative stats and resets the
-// per-cycle evidence. Called on target changes, phase exits, and the main
-// depth clear (frame boundary).
-inline void shadow_close_cycle() {
-    if (g_sr.candidates_this_cycle > 0) {
-        if (g_sr.trans_count > 0) {
-            memcpy(g_sr_last_trans, g_sr.trans, sizeof(g_sr_last_trans));
-            g_sr_last_trans_count = g_sr.trans_count;
-        }
-    }
-
-    g_sr.draws_this_cycle = 0;
-    g_sr.candidates_this_cycle = 0;
-    g_sr.trans_count = 0;
-}
-
-inline void shadow_record_translation(float tx, float ty, float tz) {
-    g_sr.candidates_this_cycle++;
-    // Saturated = one translation per draw = combined per-object matrices.
-    if (g_sr.trans_count >= KH_SHADOW_MAX_TRANSLATIONS) return;
-    // Half-meter quantization: cascades re-center per frame but not per draw.
-    const float qx = floorf(tx * 2.0f), qy = floorf(ty * 2.0f), qz = floorf(tz * 2.0f);
-
-    for (uint32_t i = 0; i < g_sr.trans_count; ++i) {
-        if (g_sr.trans[i][0] == qx && g_sr.trans[i][1] == qy && g_sr.trans[i][2] == qz) return;
-    }
-
-    g_sr.trans[g_sr.trans_count][0] = qx;
-    g_sr.trans[g_sr.trans_count][1] = qy;
-    g_sr.trans[g_sr.trans_count][2] = qz;
-    ++g_sr.trans_count;
-}
-
-// Dedupes a 4x3 candidate's translation into the shared per-cycle table
-// WITHOUT touching the 4x4 candidate counters - the distinct-translation
-// verdict is representation-agnostic, the counters are not.
-inline void shadow_record_translation43(float tx, float ty, float tz) {
-    g_sr.candidates_this_cycle++;
-    if (g_sr.trans_count >= KH_SHADOW_MAX_TRANSLATIONS) return;
-    const float qx = floorf(tx * 2.0f), qy = floorf(ty * 2.0f), qz = floorf(tz * 2.0f);
-
-    for (uint32_t i = 0; i < g_sr.trans_count; ++i) {
-        if (g_sr.trans[i][0] == qx && g_sr.trans[i][1] == qy && g_sr.trans[i][2] == qz) return;
-    }
-
-    g_sr.trans[g_sr.trans_count][0] = qx;
-    g_sr.trans[g_sr.trans_count][1] = qy;
-    g_sr.trans[g_sr.trans_count][2] = qz;
-    ++g_sr.trans_count;
-}
-
-// Tests a 16-float window for an AFFINE 4x4 (a light VP is orthographic -
-// no perspective terms, unlike the scene projection the other sniffer
-// hunts) whose clip-Z axis aligns with the published sun direction. Both
-// upload orientations are covered; sign is irrelevant (|dot|), which also
-// makes the test agnostic to whether the engine's light vector points to
-// or from the sun.
 // Absolute cosine between a (possibly scaled) axis and the published sun.
 inline float shadow_axis_abs_cos(float ax, float ay, float az) {
     const float len2 = ax * ax + ay * ay + az * az;
@@ -5257,158 +5344,6 @@ inline float shadow_axis_abs_cos(float ax, float ay, float az) {
     const float d = ax * g_sun_dir_engine[0] + ay * g_sun_dir_engine[1] + az * g_sun_dir_engine[2];
     return fabsf(d) / sqrtf(len2);
 }
-
-// One 16-float window, both 4x4 orientations. Measures as it tests: every
-// affine-SHAPED window pushes its z-axis
-// alignment into the best-dot watermark, so a run that finds no candidates
-// still reports how close the closest miss came - the difference between
-// "loosen the tolerance" and "wrong representation entirely".
-inline void shadow_try_window(const float* w, bool in_phase) {
-    // Reject identity-shaped windows: they pass the axis test whenever the
-    // sun happens to align with a world axis, and engines upload identity
-    // constantly.
-    if (fabsf(w[0] - 1.0f) < 1e-6f && fabsf(w[5] - 1.0f) < 1e-6f &&
-        fabsf(w[10] - 1.0f) < 1e-6f && proj_near_zero(w[1]) && proj_near_zero(w[2]) &&
-        proj_near_zero(w[4]) && proj_near_zero(w[6])) {
-        return;
-    }
-
-    auto consider = [&](float c, const float* t) {
-        if (c > g_sr_best_dot44) g_sr_best_dot44 = c;
-        if (c < KH_SHADOW_AXIS_COS_TOL) return;
-
-        if (in_phase) {
-            shadow_record_translation(t[0], t[1], t[2]);
-        } else {
-        }
-    };
-
-    // Row-vector, row-major upload: affine column at w[3,7,11,15], clip-Z
-    // axis (w[2], w[6], w[10]), translation row (w[12..14]).
-    if (proj_near_zero(w[3]) && proj_near_zero(w[7]) && proj_near_zero(w[11]) &&
-        fabsf(w[15] - 1.0f) < 1e-4f) {
-        const float t[3] = { w[12], w[13], w[14] };
-        consider(shadow_axis_abs_cos(w[2], w[6], w[10]), t);
-    }
-
-    // Transposed upload (column_major HLSL - equivalently a column-vector
-    // convention stored row-major): affine row at w[12..15], z axis
-    // (w[8], w[9], w[10]), translation column (w[3], w[7], w[11]).
-    if (proj_near_zero(w[12]) && proj_near_zero(w[13]) && proj_near_zero(w[14]) &&
-        fabsf(w[15] - 1.0f) < 1e-4f) {
-        const float t[3] = { w[3], w[7], w[11] };
-        consider(shadow_axis_abs_cos(w[8], w[9], w[10]), t);
-    }
-}
-
-// 12-float window as a 3x4 affine (rows w[0..2], w[4..6], w[8..10] = a 3x3
-// basis; w[3], w[7], w[11] = translation) - the shape RV's native 4x3
-// Matrix4 takes under cbuffer packing. A light VIEW matrix never passes the
-// 4x4 affine test (no projective row at all), but its rotation is
-// orthonormal and one basis vector IS the light direction - in EITHER
-// storage orientation that vector is a row or a column of the 3x3, so all
-// six are tested against the sun. Watermark + counter only: this detector
-// exists to tell the next run WHERE the light transform lives, not to
-// harvest translations.
-inline void shadow_try_window43(const float* base, uint32_t nfloats, uint32_t off, bool in_phase) {
-    const float* w = base + off;
-    const float* r0 = w + 0;
-    const float* r1 = w + 4;
-    const float* r2 = w + 8;
-
-    const float n0 = r0[0] * r0[0] + r0[1] * r0[1] + r0[2] * r0[2];
-    const float n1 = r1[0] * r1[0] + r1[1] * r1[1] + r1[2] * r1[2];
-    const float n2 = r2[0] * r2[0] + r2[1] * r2[1] + r2[2] * r2[2];
-    if (n0 < 1e-12f || n1 < 1e-12f || n2 < 1e-12f) return;
-
-    // Mutual orthogonality, scale-aware (normalized by the pair's norms):
-    // an affine ORTHO VP is a rotation with per-axis scale - rows stay
-    // orthogonal but their norms are the projection's scale factors. The
-    // orthonormal case (equal norms ~ a bare view/rotation) is the special
-    // case norms ~= n0.
-    const float d01 = r0[0] * r1[0] + r0[1] * r1[1] + r0[2] * r1[2];
-    const float d02 = r0[0] * r2[0] + r0[1] * r2[1] + r0[2] * r2[2];
-    const float d12 = r1[0] * r2[0] + r1[1] * r2[1] + r1[2] * r2[2];
-    const float t01 = KH_SHADOW_ORTHO_TOL * sqrtf(n0 * n1);
-    const float t02 = KH_SHADOW_ORTHO_TOL * sqrtf(n0 * n2);
-    const float t12 = KH_SHADOW_ORTHO_TOL * sqrtf(n1 * n2);
-    if (fabsf(d01) > t01 || fabsf(d02) > t02 || fabsf(d12) > t12) return;
-
-    const float tol_n = KH_SHADOW_ORTHO_TOL * n0;
-    const bool uniform = fabsf(n1 - n0) <= tol_n && fabsf(n2 - n0) <= tol_n;
-
-    // Axis-aligned diagonal basis (scaled identity): the false-positive
-    // class that dominates uploads. Rejecting it costs nothing real - a sun
-    // exactly on a world axis is a measure-zero scene.
-    if (fabsf(r0[0] * r0[0] - n0) < KH_SHADOW_ORTHO_TOL * n0 &&
-        fabsf(r1[1] * r1[1] - n1) < KH_SHADOW_ORTHO_TOL * n1 &&
-        fabsf(r2[2] * r2[2] - n2) < KH_SHADOW_ORTHO_TOL * n2) {
-        return;
-    }
-
-
-    float axes[6][3] = {
-        { r0[0], r0[1], r0[2] }, { r1[0], r1[1], r1[2] }, { r2[0], r2[1], r2[2] },   // rows
-        { r0[0], r1[0], r2[0] }, { r0[1], r1[1], r2[1] }, { r0[2], r1[2], r2[2] },   // columns
-    };
-    float best = 0.0f;
-    int best_axis = -1;
-
-    for (int i = 0; i < 6; ++i) {
-        const float c = shadow_axis_abs_cos(axes[i][0], axes[i][1], axes[i][2]);
-        if (c > best) { best = c; best_axis = i; }
-    }
-
-    if (best > g_sr_best_dot43) g_sr_best_dot43 = best;
-
-    if (best >= KH_SHADOW_AXIS_COS_TOL) {
-        if (in_phase) {
-            shadow_record_translation43(w[3], w[7], w[11]);
-
-            // Scaled = projection-bearing: collect the whole family found in
-            if (!uniform && g_sr_cascades_scratch.count < 8) {
-                ShadowCascadeSet& cs = g_sr_cascades_scratch;
-                cs.offsets[cs.count] = off;
-                memcpy(cs.m[cs.count], w, sizeof(cs.m[cs.count]));
-                cs.count++;
-            }
-        }
-
-        // Each shape class keeps its own best: the uniform hit is the light
-        // VIEW, the scaled hit carries the PROJECTION (an affine VP, or the
-        // main pass's world->shadowUV sampling transform). In-phase wins
-        // over out-of-phase at equal alignment.
-        ShadowCapture43& slot = uniform ? g_sr_cap_view : g_sr_cap_vp;
-        const bool better =
-            !slot.valid ||
-            best > slot.dot + 1e-6f ||
-            (best >= slot.dot - 1e-6f && in_phase && !slot.in_phase);
-
-        if (better) {
-            slot.valid = true;
-            slot.in_phase = in_phase;
-            slot.dot = best;
-            slot.axis = best_axis;
-            slot.norms[0] = sqrtf(n0);
-            slot.norms[1] = sqrtf(n1);
-            slot.norms[2] = sqrtf(n2);
-            memcpy(slot.m, w, sizeof(slot.m));
-            slot.upload_floats = nfloats;
-            slot.offset_floats = off;
-
-            const uint32_t avail_before = off < KH_SHADOW_CTX_BEFORE ? off : KH_SHADOW_CTX_BEFORE;
-            uint32_t avail_after = nfloats - off - 12;
-            if (avail_after > KH_SHADOW_CTX_AFTER) avail_after = KH_SHADOW_CTX_AFTER;
-            memset(slot.ctx, 0, sizeof(slot.ctx));
-            slot.ctx_start = avail_before;
-
-            memcpy(slot.ctx + (KH_SHADOW_CTX_BEFORE - avail_before),
-                   base + off - avail_before,
-                   (avail_before + 12 + avail_after) * sizeof(float));
-        }
-    }
-}
-
 
 // --- Live capture pieces --------------------------------------------------
 
@@ -5545,48 +5480,6 @@ inline bool shadow_live_test_window(const float* w) {
     }
 
     return false;
-}
-
-// Upload scan on the atlas cycle: locator-cached offset first, full window
-// scan to (re)learn it. One latch per cycle; the tile arrives at the next
-// draw.
-// Remember recent CB uploads by BUFFER identity so the resolve draw can
-// look up what its bound constants contain without any GPU readback.
-// Match a 4x4 against the bridge view loosely: same rotation family
-// (rows within tolerance), translation within a few meters - the engine
-// upload is the SAME camera, possibly one frame fresher.
-// Match a candidate 4x4 against a reference view (rows layout).
-// 0 = no, 1 = direct, 2 = transposed. Tight tolerance: the loose matcher
-// admitted multiple different view-family uploads per frame, and WHICH
-// one had been latched last varied while moving - the cast wobble.
-inline int shadow_view_match(const float* w, const float* v, float tol, float trans_tol) {
-    if (fabsf(w[15] - 1.0f) > 1e-3f) return 0;
-    float e_direct = 0.0f, e_trans = 0.0f;
-
-    for (int r = 0; r < 3; ++r) {
-        for (int c = 0; c < 3; ++c) {
-            e_direct += fabsf(w[r * 4 + c] - v[r * 4 + c]);
-            e_trans += fabsf(w[c * 4 + r] - v[r * 4 + c]);
-        }
-    }
-
-    if (e_direct < tol) {
-        for (int c = 0; c < 3; ++c) {
-            if (fabsf(w[12 + c] - v[12 + c]) > trans_tol) return 0;
-        }
-
-        return 1;
-    }
-
-    if (e_trans < tol) {
-        for (int r = 0; r < 3; ++r) {
-            if (fabsf(w[r * 4 + 3] - v[12 + r]) > trans_tol) return 0;
-        }
-
-        return 2;
-    }
-
-    return 0;
 }
 
 inline bool shadow_view_shaped(const float* w) {
@@ -6498,6 +6391,35 @@ struct ShadowMaskState {
 };
 
 static ShadowMaskState g_mask;
+
+// Flight recorder, LATE delta fold: the cast-path counters are declared
+// after the recorder section (g_mask, g_cast_frozen_fires), so
+// ffr_read_counters cannot read them. This fold owns delta indices
+// [KH_FFR_NDELTA_EARLY, KH_FFR_NDELTA) and ACCUMULATES into the open head
+// record, which keeps it correct when both boundary sites (the clear hook
+// and the flush's forced boundary) call it. Runs on the render thread, or
+// on the game thread under the graphics lock - the ring's write invariant.
+inline void ffr_fold_late_deltas() {
+    static uint64_t khr_late_snap[KH_FFR_NDELTA - KH_FFR_NDELTA_EARLY] = {};
+    const uint64_t khr_now_c[KH_FFR_NDELTA - KH_FFR_NDELTA_EARLY] = {
+        g_mask.cast_batches,
+        g_cast_frozen_fires,
+    };
+    FfrRecord& r = ffr_head();
+
+    for (uint32_t i = 0; i < KH_FFR_NDELTA - KH_FFR_NDELTA_EARLY; ++i) {
+        // Reset-tolerant (session destroy zeroes the counters, not this
+        // snapshot): a smaller "now" reseeds with a zero delta.
+        const uint64_t dd = khr_now_c[i] >= khr_late_snap[i]
+                          ? khr_now_c[i] - khr_late_snap[i] : 0;
+        khr_late_snap[i] = khr_now_c[i];
+        const uint32_t khr_sum =
+            static_cast<uint32_t>(r.d[KH_FFR_NDELTA_EARLY + i]) +
+            static_cast<uint32_t>(dd > 0xFFFFu ? 0xFFFFu : dd);
+        r.d[KH_FFR_NDELTA_EARLY + i] =
+            static_cast<uint16_t>(khr_sum > 0xFFFFu ? 0xFFFFu : khr_sum);
+    }
+}
 
 // ===========================================================================
 // DEVICE RESET: release every shadow/mask/fire device object held outside
@@ -8339,7 +8261,6 @@ inline void shadow_track_targets(ID3D11DeviceContext* ctx, ID3D11DepthStencilVie
                                  UINT n, ID3D11RenderTargetView* const* rtvs) {
     if (!shadow_live_wanted()) {
         if (g_sr.phase_active) {
-            shadow_close_cycle();
             g_sr.phase_active = false;
             g_sr.target_identity = nullptr;
         }
@@ -8358,10 +8279,6 @@ inline void shadow_track_targets(ID3D11DeviceContext* ctx, ID3D11DepthStencilVie
         is_atlas = shadow_probe_target(dsv);
     } else if (depth_only) {
         is_atlas = g_ls.phase_on_atlas;   // unchanged target within the phase
-    }
-
-    if (g_sr.phase_active && (!depth_only || id != g_sr.target_identity)) {
-        shadow_close_cycle();
     }
 
     const bool atlas_cycle_start =
@@ -8816,19 +8733,46 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     // output injected into a slot-silent (no-upload) cycle does not
     // reliably reach presentation, on calm sparse frames and heavy fog
     // alike. Silent cycles SKIP and the flush carries them late with the
-    // arbitrated keep encode - the pop is the architecture's floor on
-    // no-upload frames absent an upload-independent injection design.
+    // arbitrated keep encode - the pop WAS the architecture's floor on
+    // no-upload frames absent an upload-independent injection design;
+    // the CARRY-ERASE RESCUE below is that design, bounded to the one
+    // subclass the flight recorder convicted.
     // The counter and forensics below remain as a passive overlap census.
     const bool khr_anomalous = g_proj_locator_ever && snap_slot_near <= 0.0f;
 
     if (khr_anomalous) g_ro.anomaly_seen = true;   // flush carries this frame
 
     if (khr_anomalous) {
-        g_stats.composite_anomaly_skips++;
-        g_fl_anom_skip_ms = steady_now_ms();
-        g_ro.injected = false;      // stay armed
-        g_ro.inject_attempts = 0;
-        return;
+        // CARRY-ERASE RESCUE (flight-recorder conviction, the 2286/2293
+        // class): on a miss-carried frame a post-flush foreign-projection
+        // partition repaints the world OVER the late carry - depth parity
+        // cannot defend across a projection remap, so the only defense is
+        // to be the LAST painter. When (a) THIS flush already carried the
+        // meshes (serial-matched miss latch), (b) the frame is in its
+        // post-flush tail (the flush stamp is live - see the window
+        // helper for why presence, not redraw size, is the condition),
+        // and (c) the keep shield is fresh and camera-band (the very
+        // encode the carry itself painted correctly with),
+        // the repainting partition's own trigger re-paints the meshes
+        // instead of skipping. This is NOT the falsified silent-cycle
+        // injection (ledger above): that design injected every silent
+        // trigger as the frame's PRIMARY paint and lost to later repaints;
+        // the rescue fires only after the repaint exists, on frames
+        // already carried and already blinking, with depth writes, as
+        // late as the frame allows. Failure direction: an even-later
+        // partition erases it again (today's blink, unchanged) - never a
+        // new artifact on healthy frames, which cannot satisfy (a) or (b).
+        if (!ffr_rescue_window_open()) {
+            g_stats.composite_anomaly_skips++;
+            g_fl_anom_skip_ms = steady_now_ms();
+            g_ro.injected = false;      // stay armed
+            g_ro.inject_attempts = 0;
+            return;
+        }
+        // Rescue proceeds: khr_anomalous stays true, so the view-source
+        // supervisor quarantine below holds (safety paths are not
+        // training paths) and the end-of-draw bookkeeping counts this as
+        // a rescue, not an injection.
     }
 
     // near = 10 is this scene's CHRONIC normal (partition-far latch);
@@ -9206,10 +9150,10 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
                 // atlas content is mid-stream garbage - our seals copy
                 // and decode it faithfully, and reseal churn makes it
                 // slide until the engine settles). Absent beats offset:
-                // the receive term stands down for the first 2 s after
+                // the receive term stands down for KH_RECEIVE_WARMUP_S after
                 // the first capture.
                 if (g_ls.first_capture_time < 0.0f ||
-                    effect_time_seconds() - g_ls.first_capture_time < 2.0f) {
+                    effect_time_seconds() - g_ls.first_capture_time < KH_RECEIVE_WARMUP_S) {
                     g_band_warmup_skips++;
                     continue;
                 }
@@ -9406,11 +9350,21 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     {
         backup.restore(ctx);
     }
-    g_stats.composite_injections++;
-    g_composite_inject_serial.fetch_add(1, std::memory_order_relaxed);
+    if (khr_anomalous) {
+        // Rescue bookkeeping: NOT an injection for the hybrid guarantee's
+        // serial (the next flush must judge the next frame on its own
+        // injection, not this frame's rescue) and not a cold-start metric.
+        g_composite_rescues++;
+        g_rescue_last_ms = steady_now_ms();
+        if (ffr_head().rescues != 0xFF) ffr_head().rescues++;
+    } else {
+        g_stats.composite_injections++;
+        g_composite_inject_serial.fetch_add(1, std::memory_order_relaxed);
+    }
+    ffr_head().opq_at_inject = g_ro.opaque_draws;   // flight recorder: landing forensics
     g_ro.opaques_since_inject = 0;   // the flush's repaint check counts from this landing
 
-    if (g_mask.cold_t0 >= 0.0 && g_mask.cold_first_inject < 0.0f) {
+    if (!khr_anomalous && g_mask.cold_t0 >= 0.0 && g_mask.cold_first_inject < 0.0f) {
         g_mask.cold_first_inject = static_cast<float>(effect_time_seconds() - g_mask.cold_t0);
     }
 
@@ -9480,6 +9434,7 @@ inline void reorder_pre_draw(ID3D11DeviceContext* self) {
                     g_ro.cycle_pv = khl_pv;
                     g_ro.cycle_pv_valid = true;
                     g_ro.cycle_pv_stale = false;
+                    ffr_head().retry_fixed = 1;   // flight recorder: started stale, repaired
                 }
             }
 
@@ -9627,17 +9582,32 @@ inline void reorder_pre_draw(ID3D11DeviceContext* self) {
             // dump names the partition layout up there.
             g_trig_rej_vp[0] = vp.MinDepth;
             g_trig_rej_vp[1] = vp.MaxDepth;
-            return;
-        }
 
-        // The passing trigger's range IS the encode range: the world's
-        // translucents depth-test correctly through it against the
-        // opaque-written depth, so the meshes must encode through it too.
-        g_ro.trig_vp_min = vp.MinDepth;
-        g_ro.trig_vp_max = vp.MaxDepth;
-        g_ro.trig_vp_valid = true;
-        g_trig_acc_vp[0] = vp.MinDepth;
-        g_trig_acc_vp[1] = vp.MaxDepth;
+            // CARRY-ERASE RESCUE reachability (field round 2: rescues == 0
+            // across three carried-and-erased frames convicted exactly this
+            // starvation). The repainting partition is span-foreign BY
+            // FINGERPRINT - a [0.003, 0.01] near-sliver whose viewport
+            // depth remap makes its fragments nearest-possible, which is
+            // also the mechanism that defeated the carry's depth parity.
+            // Its triggers died here, so the anomaly-gate rescue was
+            // structurally unreachable. While the rescue window is open,
+            // fall through WITHOUT adopting the sliver's range: trig_vp
+            // still holds this frame's ACCEPTED world range (it resets
+            // only at the clear), so the rescue draws AND encodes through
+            // the world range, and the sliver's own later fragments
+            // (nearest-possible by remap) still correctly occlude the mesh
+            // where they draw. Window closed: reject exactly as always.
+            if (!ffr_rescue_window_open()) return;
+        } else {
+            // The passing trigger's range IS the encode range: the world's
+            // translucents depth-test correctly through it against the
+            // opaque-written depth, so the meshes must encode through it too.
+            g_ro.trig_vp_min = vp.MinDepth;
+            g_ro.trig_vp_max = vp.MaxDepth;
+            g_ro.trig_vp_valid = true;
+            g_trig_acc_vp[0] = vp.MinDepth;
+            g_trig_acc_vp[1] = vp.MaxDepth;
+        }
     }
 
     if (g_ro.inject_attempts >= KH_REORDER_MAX_INJECT_ATTEMPTS) return;
@@ -9829,6 +9799,12 @@ static void STDMETHODCALLTYPE hooked_clear_depthstencil(ID3D11DeviceContext* sel
             // this is where that thread is identified for the tracking gate.
             g_reorder_render_tid.store(GetCurrentThreadId(), std::memory_order_relaxed);
 
+            // Flight recorder: finalize the closing frame, open the next.
+            // Runs BEFORE the census (which consumes and resets the flush
+            // stamp) and before the re-arm resets the evidence it records.
+            ffr_fold_late_deltas();
+            ffr_frame_boundary();
+
             // POST-FLUSH REDRAW CENSUS: a clear-less world redraw AFTER
             // the flush shows up as opaques drawn past the flush's stamp
             // (normal frames end at ~the stamp: translucents draw after
@@ -9855,7 +9831,6 @@ static void STDMETHODCALLTYPE hooked_clear_depthstencil(ID3D11DeviceContext* sel
             g_ro.trig_vp_valid = false;
             g_ro.engine_proj_valid = false;
             g_ro.slot_near_live = -1.0f;
-            shadow_close_cycle();   // frame boundary: fold the recon cycle into the stats
 
             if (g_sun_jump_pending) {
                 // The sun moved discontinuously (skipTime / setDate /
@@ -10111,12 +10086,24 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     g_cc_flush_serial.fetch_add(1, std::memory_order_relaxed);
     g_cc_flush_opaques.store(g_ro.opaque_draws, std::memory_order_relaxed);
 
+    // Flight recorder: if the clear hook never advanced the ring (hook-dead
+    // install, or a first frame), force the boundary here - the render
+    // thread is parked, so the game thread may run it. Then mark entry.
+    if (ffr_head().stage != 0 || ffr_head().serial == 0) {
+        ffr_fold_late_deltas();
+        ffr_frame_boundary();
+    }
+
+    ffr_flush_stage(1);
+
     bool has_objects;
 
     {
         std::lock_guard<std::mutex> g(g_draw_list_mutex);
         has_objects = !g_draw_list.empty();
     }
+
+    ffr_head().had_objects = has_objects ? 1 : 0;
 
     const UINT read_idx = g_async_write_idx ^ 1;
     const bool async_read_due = g_async_inflight_count[read_idx] > 0;
@@ -10132,6 +10119,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
         if (!dsv) {
             g_stats.skip_no_dsv++;
+            ffr_flush_stage(2);
             return;
         }
 
@@ -10141,6 +10129,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
         if (!res) {
             g_stats.skip_no_dsv++;
+            ffr_flush_stage(2);
             return;
         }
 
@@ -10150,6 +10139,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
         if (FAILED(hr) || !tex) {
             g_stats.skip_no_dsv++;
+            ffr_flush_stage(2);
             return;
         }
 
@@ -10171,13 +10161,14 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         } else if (identity != g_main_depth_identity) {
             g_stats.skip_wrong_pass++;
             g_wrong_pass_streak++;
+            ffr_flush_stage(3);
             return;
         } else {
             g_wrong_pass_streak = 0;
         }
     }
 
-    if (!ensure_resources(dev).empty()) return;
+    if (!ensure_resources(dev).empty()) { ffr_flush_stage(4); return; }
     g_flush_frame++;
     g_stats.gate_passed++;
 
@@ -10238,6 +10229,16 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     if (anomaly_this_frame && injected_since_last_flush) g_flush_anomaly_carries++;
     const bool comp_healthy = composite_path_healthy() && injected_since_last_flush &&
                               !repainted_since_inject && !anomaly_this_frame;
+
+    {   // flight recorder: the flush verdict, verbatim
+        FfrRecord& khf_r = ffr_head();
+        khf_r.comp_healthy = comp_healthy ? 1 : 0;
+        khf_r.inj_since_flush = injected_since_last_flush ? 1 : 0;
+        khf_r.repainted = repainted_since_inject ? 1 : 0;
+        khf_r.anomaly = anomaly_this_frame ? 1 : 0;
+    }
+    uint32_t khf_ffr_eligible = 0;
+
     std::vector<RenderObject> meshes;
     std::vector<std::pair<uint64_t, RenderObject>> fullscreen;   // key = creation seq
 
@@ -10257,6 +10258,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             if (it->second.visible) {
                 RenderObject o = it->second;
                 o.color[3] *= env;   // envelope = universal intensity
+                if (is_composite_eligible(o)) ++khf_ffr_eligible;   // flight recorder census
 
                 if (o.fullscreen) {
                     if (!o.affect_ui) fullscreen.emplace_back(o.seq, o);
@@ -10275,6 +10277,9 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                             g_ms_flush_serial = ms_fs;
                             g_ms_frames++;
                             g_ms_ms = steady_now_ms();
+                            // Arm the carry-erase rescue for THIS frame's
+                            // post-flush tail (render thread is parked).
+                            g_carry_pending_serial.store(ms_fs, std::memory_order_relaxed);
                         }
                     }
                     meshes.push_back(o);
@@ -10283,6 +10288,14 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
             ++it;
         }
+    }
+
+    {   // flight recorder: snapshot census + the dark tripwire's eligibility latch
+        FfrRecord& khf_r = ffr_head();
+        khf_r.eligible = static_cast<uint16_t>(khf_ffr_eligible > 0xFFFFu ? 0xFFFFu : khf_ffr_eligible);
+        khf_r.meshes_snap = static_cast<uint16_t>(meshes.size() > 0xFFFFu ? 0xFFFFu : meshes.size());
+        khf_r.fs_snap = static_cast<uint16_t>(fullscreen.size() > 0xFFFFu ? 0xFFFFu : fullscreen.size());
+        g_ffr_any_eligible.store(khf_ffr_eligible > 0, std::memory_order_relaxed);
     }
 
     if (meshes.empty() && fullscreen.empty()) return;
@@ -10300,20 +10313,41 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     if (g_ro.cycle_pv_valid) {
         pv = g_ro.cycle_pv;
         g_flush_latch_pvs++;
+        ffr_head().pv_src = 0;
     } else if (!RVExtBridge::get_projection_view_transform(pv)) {
+        ffr_flush_stage(5);   // flight recorder: no transform, nothing drawn
         return;
+    } else {
+        ffr_head().pv_src = 1;
     }
 
     // Cycle state can be read mid-reset from another thread; never
     // transform with a degenerate projection - the live bridge repairs.
     if (fabsf(pv.projection[2][2]) < 1e-6f) {
         RVExtBridge::ProjectionViewTransform live_fix = {};
-        if (!RVExtBridge::get_projection_view_transform(live_fix)) return;
+        if (!RVExtBridge::get_projection_view_transform(live_fix)) { ffr_flush_stage(5); return; }
         pv = live_fix;
         g_flush_pv_repairs++;
+        ffr_head().pv_src = 2;
     }
 
-    if (g_ro.slot_near_live > 0.0f) {
+    // CARRY ENCODE BAND GATE (field round 3, partial-vanish conviction:
+    // missLastNear read 0.01 on a carried frame - the live slot held a
+    // FOREIGN partition's pair and the flush trusted it blindly, so the
+    // carry drew through a poisoned depth encode and partially depth-
+    // vanished. The injection side arbitrates slot poison; the flush now
+    // does too: an out-of-band slot defers to the keep arbitration below,
+    // whose own in-band checks guard the same classes, and with neither
+    // the latch/live pv's camera-class near stands.
+    const bool khf_slot_band = g_ro.slot_near_live >= 0.05f &&
+                               g_ro.slot_near_live <= 5.0f;
+
+    if (g_ro.slot_near_live > 0.0f && !khf_slot_band) {
+        g_flush_slot_band_rejects++;
+        g_flush_slot_rej_near = g_ro.slot_near_live;
+    }
+
+    if (khf_slot_band) {
         pv.projection[2][2] = g_ro.slot_m22;
         pv.projection[3][2] = g_ro.slot_m32;
     } else if (g_slot_keep_near > 0.0f && g_slot_keep_ms != 0 &&
@@ -10393,6 +10427,21 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         g_ms_flush_serial == g_cc_flush_serial.load(std::memory_order_relaxed)) {
         g_ms_near = fabsf(pv.projection[2][2]) > 1e-9f
                   ? (-pv.projection[3][2] / pv.projection[2][2]) : -1.0f;
+    }
+
+    {   // flight recorder: the FINAL encode pv (post repair + slot/keep),
+        // plus the dark-flash forensic: how far the flush's draw camera
+        // sits from the STAGED LIGHTING camera the shading terms assume.
+        FfrRecord& khf_r = ffr_head();
+        khf_r.pv_near = fabsf(pv.projection[2][2]) > 1e-9f
+                      ? (-pv.projection[3][2] / pv.projection[2][2]) : -1.0f;
+        float khf_cam[3];
+        extract_camera_pos(pv.view, khf_cam);
+        const float khf_dx = khf_cam[0] - g_ls.cam[0];
+        const float khf_dy = khf_cam[1] - g_ls.cam[1];
+        const float khf_dz = khf_cam[2] - g_ls.cam[2];
+        khf_r.cam_ls_delta = sqrtf(khf_dx * khf_dx + khf_dy * khf_dy + khf_dz * khf_dz);
+        khf_r.stage = 6;   // geometry reached (setup failures show as dSetupFails)
     }
 
     // Capability gating per frame:
@@ -10693,10 +10742,10 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                 // atlas content is mid-stream garbage - our seals copy
                 // and decode it faithfully, and reseal churn makes it
                 // slide until the engine settles). Absent beats offset:
-                // the receive term stands down for the first 2 s after
+                // the receive term stands down for KH_RECEIVE_WARMUP_S after
                 // the first capture.
                 if (g_ls.first_capture_time < 0.0f ||
-                    effect_time_seconds() - g_ls.first_capture_time < 2.0f) {
+                    effect_time_seconds() - g_ls.first_capture_time < KH_RECEIVE_WARMUP_S) {
                     g_band_warmup_skips++;
                     continue;
                 }
@@ -11062,6 +11111,7 @@ inline void flush_frame() {
     }
 
     g_stats.lock_failed_frames++;
+    g_ffr_lockfails.fetch_add(1, std::memory_order_relaxed);   // flight recorder: folded at the next boundary
 }
 
 // ===========================================================================
@@ -11425,6 +11475,11 @@ inline void reset_stat_counters() {
     g_loc_scan_uploads = 0; g_loc_max_cb_floats = 0;
     g_comp_compiles = 0;
     g_ui_poll_attempts = 0;
+    g_ffr_dark_frames = 0; g_ffr_dark_ms = 0;
+    g_ffr_erased_frames = 0; g_ffr_erased_ms = 0;
+    g_composite_rescues = 0; g_rescue_last_ms = 0;
+    g_rescue_ref_carried = 0; g_rescue_ref_preflush = 0; g_rescue_ref_shield = 0;
+    g_flush_slot_band_rejects = 0; g_flush_slot_rej_near = -1.0f;
     g_ls.latches = 0; g_ls.resolve_hits = 0; g_ls.resolve_draws = 0;
     g_ls.resolve_cb_found = 0; g_ls.resolve_gated = 0;
     g_ls.band_captures = 0; g_ls.band_bail_pv = 0; g_ls.band_bail_off = 0;
@@ -11487,14 +11542,20 @@ inline void reset_session_state() {
     // command re-stores the context via ensure_reorder_hook.
     g_reorder_target_ctx.store(nullptr, std::memory_order_relaxed);
     g_ro = ReorderState{};
+    // Flight recorder dies with the session; the serial restart keeps
+    // dump epochs unambiguous across missions.
+    memset(g_ffr, 0, sizeof(g_ffr));
+    g_ffr_head = 0; g_ffr_serial = 0;
+    memset(g_ffr_snap, 0, sizeof(g_ffr_snap));
+    g_ffr_lockfails.store(0, std::memory_order_relaxed);
+    g_ffr_any_eligible.store(false, std::memory_order_relaxed);
+    g_ffr_dark_frames = 0; g_ffr_dark_ms = 0;
+    g_ffr_erased_frames = 0; g_ffr_erased_ms = 0;
+    g_composite_rescues = 0; g_rescue_last_ms = 0;
+    g_rescue_ref_carried = 0; g_rescue_ref_preflush = 0; g_rescue_ref_shield = 0;
+    g_flush_slot_band_rejects = 0; g_flush_slot_rej_near = -1.0f;
+    g_carry_pending_serial.store(0, std::memory_order_relaxed);
     g_sr = ShadowReconState{};
-    g_sr_cap_view = ShadowCapture43{};
-    g_sr_cap_vp = ShadowCapture43{};
-    g_sr_cascades = ShadowCascadeSet{};
-    g_sr_cascades_scratch = ShadowCascadeSet{};
-    memset(g_sr_last_trans, 0, sizeof(g_sr_last_trans));
-    g_sr_last_trans_count = 0;
-    g_sr_best_dot44 = 0.0f; g_sr_best_dot43 = 0.0f;
     g_reorder_render_tid.store(0, std::memory_order_relaxed);
     g_main_depth_w = 0; g_main_depth_h = 0; g_wrong_pass_streak = 0;
     g_proj_last_m32 = 0.0f;
@@ -11576,6 +11637,9 @@ inline void on_mission_end() {
 
 inline std::string add_render_object(const RenderObject& obj) {
     ensure_draw_eh();
+    // Flight recorder: a just-added eligible mesh must count for the dark
+    // tripwire even if the next flush skips before its snapshot runs.
+    if (is_composite_eligible(obj)) g_ffr_any_eligible.store(true, std::memory_order_relaxed);
     std::lock_guard<std::mutex> g(g_draw_list_mutex);
     const std::string handle = make_render_uid();
     RenderObject& stored = g_draw_list[handle];
@@ -11725,7 +11789,6 @@ static game_value gpu_visibility_sqf(game_value_parameter args) {
 // engine itself composites smoke/particles against them pixel-perfectly
 // (automatic fallback to the post-scene flush if the draw hook is
 // unavailable). Effect and overlay meshes render on the flush path.
-// Returns SCALAR handle (>= 1) or a STRING error.
 
 static game_value add_render3d_sqf(game_value_parameter args) {
     try {
@@ -12138,7 +12201,6 @@ static game_value get_visibility_results_sqf() {
 // Notes: runs pre-tonemap, so the engine's eye adaptation applies on top.
 // Outline and Pulse sample the engine depth buffer per pixel; on frames where
 // they are active, mode-1 meshes do not write depth (read-only DSV phase).
-// Returns SCALAR handle or a STRING error.
 static game_value add_postfx_sqf(game_value_parameter args) {
     try {
         auto& arr = args.to_array();
@@ -12293,8 +12355,6 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("liveRejTrans", RenderIntegration::g_stats.live_rej_trans));
         out.push_back(kv("liveAccepts", RenderIntegration::g_stats.live_accepts));
         out.push_back(kv("shadowAtlasSize", RenderIntegration::g_ls.atlas_size));
-        out.push_back(kvf("sunBestDot44", RenderIntegration::g_sr_best_dot44));
-        out.push_back(kvf("sunBestDot43", RenderIntegration::g_sr_best_dot43));
         out.push_back(kv("resolveHits", RenderIntegration::g_ls.resolve_hits));
         out.push_back(kv("resolveDraws", RenderIntegration::g_ls.resolve_draws));
         out.push_back(kv("resolveCbFound", RenderIntegration::g_ls.resolve_cb_found));
@@ -12441,6 +12501,18 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("bandInsaneSkips", RenderIntegration::g_band_insane_skips));
         out.push_back(kv("bandWarmupSkips", RenderIntegration::g_band_warmup_skips));
         out.push_back(kv("bandOverlapPairs", RenderIntegration::g_band_overlap_pairs));
+        out.push_back(kv("meshDarkFrames", RenderIntegration::g_ffr_dark_frames));
+        out.push_back(kv("carryErasedFrames", RenderIntegration::g_ffr_erased_frames));
+        out.push_back(kvf("ffrDarkAgeS", age_s(RenderIntegration::g_ffr_dark_ms)));
+        out.push_back(kvf("ffrErasedAgeS", age_s(RenderIntegration::g_ffr_erased_ms)));
+        out.push_back(kv("ffrFrames", static_cast<uint64_t>(RenderIntegration::g_ffr_serial)));
+        out.push_back(kv("compositeRescues", RenderIntegration::g_composite_rescues));
+        out.push_back(kvf("rescueLastAgeS", age_s(RenderIntegration::g_rescue_last_ms)));
+        out.push_back(kv("rescueRefCarried", RenderIntegration::g_rescue_ref_carried));
+        out.push_back(kv("rescueRefPreflush", RenderIntegration::g_rescue_ref_preflush));
+        out.push_back(kv("rescueRefShield", RenderIntegration::g_rescue_ref_shield));
+        out.push_back(kv("flushSlotBandRejects", RenderIntegration::g_flush_slot_band_rejects));
+        out.push_back(kvf("flushSlotRejNear", RenderIntegration::g_flush_slot_rej_near));
         {
             // Band-layout census (the 132 m band session): the widest
             // valid band's span and the layout's total reach - the
@@ -12514,6 +12586,131 @@ static game_value get_render_stats_sqf() {
     }
 }
 
+// dumpRenderTrace -> the flight recorder ring, oldest-first, newest last:
+// [["status","ok"], ["fields", [names...]], ["frames", [[values...], ...]]]
+// Each frame's values align 1:1 with "fields". The ring is copied under the
+// graphics lock (parking the render thread - the ring's write invariant)
+// and formatted after release; the newest 256 populated records are dumped.
+static game_value dump_render_trace_sqf() {
+    try {
+        constexpr uint32_t KHT_MAX = 512;
+        static RenderIntegration::FfrRecord khtr_snap[RenderIntegration::KH_FFR_RING];
+        uint32_t khtr_head = 0;
+        uint32_t khtr_serial = 0;
+        bool khtr_got = false;
+
+        for (int attempt = 0; attempt < 4 && !khtr_got; ++attempt) {
+            RVExtBridge::ScopedGraphicsLock lock;
+
+            if (!lock.acquired()) continue;
+            memcpy(khtr_snap, RenderIntegration::g_ffr, sizeof(khtr_snap));
+            khtr_head = RenderIntegration::g_ffr_head;
+            khtr_serial = RenderIntegration::g_ffr_serial;
+            khtr_got = true;
+        }
+
+        auto_array<game_value> out;
+
+        if (!khtr_got) {
+            auto_array<game_value> pair;
+            pair.push_back(game_value("status"));
+            pair.push_back(game_value("lockFailed"));
+            out.push_back(game_value(std::move(pair)));
+            return game_value(std::move(out));
+        }
+
+        static const char* const KHT_FIELDS[] = {
+            "serial", "ageS", "pvValid", "pvStale", "retryFixed",
+            "attempts", "opqAtInject", "opqFinal", "pfDelta", "lockFolds",
+            "stage", "hadObjects", "compHealthy", "injSinceFlush",
+            "repainted", "anomaly", "pvSrc", "eligible", "meshesSnap",
+            "fsSnap", "pvNear", "dark", "erased", "rescues",
+            "camLsDelta", "rejVpMin", "rejVpMax",
+        };
+        constexpr uint32_t KHT_NFIX = sizeof(KHT_FIELDS) / sizeof(KHT_FIELDS[0]);
+
+        auto_array<game_value> names;
+
+        for (uint32_t i = 0; i < KHT_NFIX; ++i) names.push_back(game_value(KHT_FIELDS[i]));
+
+        for (uint32_t i = 0; i < RenderIntegration::KH_FFR_NDELTA; ++i) {
+            names.push_back(game_value(RenderIntegration::KH_FFR_DELTA_NAMES[i]));
+        }
+
+        const uint64_t khtr_now = RenderIntegration::steady_now_ms();
+        auto_array<game_value> frames;
+
+        for (uint32_t k = 0; k < RenderIntegration::KH_FFR_RING; ++k) {
+            const uint32_t idx = (khtr_head + 1u + k) % RenderIntegration::KH_FFR_RING;
+            const RenderIntegration::FfrRecord& r = khtr_snap[idx];
+
+            if (r.serial == 0) continue;
+            if (khtr_serial > KHT_MAX && r.serial + KHT_MAX <= khtr_serial) continue;
+
+            auto_array<game_value> f;
+            f.push_back(game_value(static_cast<float>(r.serial)));
+            f.push_back(game_value(r.t_ms ? static_cast<float>(khtr_now - r.t_ms) / 1000.0f : -1.0f));
+            f.push_back(game_value(static_cast<float>(r.pv_valid)));
+            f.push_back(game_value(static_cast<float>(r.pv_stale)));
+            f.push_back(game_value(static_cast<float>(r.retry_fixed)));
+            f.push_back(game_value(static_cast<float>(r.attempts)));
+            f.push_back(game_value(r.opq_at_inject == 0xFFFFFFFFu ? -1.0f : static_cast<float>(r.opq_at_inject)));
+            f.push_back(game_value(static_cast<float>(r.opq_final)));
+            f.push_back(game_value(r.pf_delta == 0xFFFFFFFFu ? -1.0f : static_cast<float>(r.pf_delta)));
+            f.push_back(game_value(static_cast<float>(r.lockfail_folded)));
+            f.push_back(game_value(static_cast<float>(r.stage)));
+            f.push_back(game_value(static_cast<float>(r.had_objects)));
+            f.push_back(game_value(static_cast<float>(r.comp_healthy)));
+            f.push_back(game_value(static_cast<float>(r.inj_since_flush)));
+            f.push_back(game_value(static_cast<float>(r.repainted)));
+            f.push_back(game_value(static_cast<float>(r.anomaly)));
+            f.push_back(game_value(static_cast<float>(r.pv_src)));
+            f.push_back(game_value(static_cast<float>(r.eligible)));
+            f.push_back(game_value(static_cast<float>(r.meshes_snap)));
+            f.push_back(game_value(static_cast<float>(r.fs_snap)));
+            f.push_back(game_value(r.pv_near));
+            f.push_back(game_value(static_cast<float>(r.dark)));
+            f.push_back(game_value(static_cast<float>(r.erased)));
+            f.push_back(game_value(static_cast<float>(r.rescues)));
+            f.push_back(game_value(r.cam_ls_delta));
+            f.push_back(game_value(r.rej_vp_min));
+            f.push_back(game_value(r.rej_vp_max));
+
+            for (uint32_t i = 0; i < RenderIntegration::KH_FFR_NDELTA; ++i) {
+                f.push_back(game_value(static_cast<float>(r.d[i])));
+            }
+
+            frames.push_back(game_value(std::move(f)));
+        }
+
+        {
+            auto_array<game_value> pair;
+            pair.push_back(game_value("status"));
+            pair.push_back(game_value("ok"));
+            out.push_back(game_value(std::move(pair)));
+        }
+
+        {
+            auto_array<game_value> pair;
+            pair.push_back(game_value("fields"));
+            pair.push_back(game_value(std::move(names)));
+            out.push_back(game_value(std::move(pair)));
+        }
+
+        {
+            auto_array<game_value> pair;
+            pair.push_back(game_value("frames"));
+            pair.push_back(game_value(std::move(frames)));
+            out.push_back(game_value(std::move(pair)));
+        }
+
+        return game_value(std::move(out));
+    } catch (...) {
+        report_error("dumpRenderTrace: unknown exception");
+        return game_value(auto_array<game_value>());
+    }
+}
+
 // addLocalPostFX [[x,y,zASL], radius, falloff, effect, params?, color?]
 // Same effect table and parameters as addPostFX, but the effect is confined
 // to a world-space sphere: full strength within 'radius' meters of the
@@ -12524,7 +12721,7 @@ static game_value get_render_stats_sqf() {
 // manage via updatePostFX ("position" moves the center, "radius",
 // "falloff", "effect", "params", "color", "visible") and removeRenderHandler.
 // Localized passes always sample the depth buffer (read-only DSV phase rules
-// apply). Returns SCALAR handle or a STRING error.
+// apply).
 static game_value add_local_postfx_sqf(game_value_parameter args) {
     try {
         auto& arr = args.to_array();

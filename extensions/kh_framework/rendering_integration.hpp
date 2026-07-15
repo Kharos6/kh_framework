@@ -12496,17 +12496,16 @@ static void STDMETHODCALLTYPE hooked_copysubresourceregion(ID3D11DeviceContext* 
     g_orig_copysubresourceregion(self, dst, dst_sub, dx, dy, dz, src, src_sub, box);
 }
 
-// RESOLVE-POINT TAIL COMPOSITE. Three field rounds proved: nothing ever
-// reads the latched MSAA scene texture by SRV or copy, yet the tail
-// write is visible - the engine's one consumption channel is the MSAA
-// RESOLVE, whose single-sample OUTPUT (a different identity) feeds the
-// postprocess chain. The moment the engine resolves the scene target,
-// the frame is complete BY CONSTRUCTION - it is the image about to be
-// shown. Compositing here, before passing the resolve through, is
-// same-frame and pre-consumption; the old sweep fire (one frame late
-// via the NEXT resolve - the fog-cutout mechanism) remains only as the
-// fallback for configs that never resolve. Own captures excluded via
-// in_injection (the tail itself resolves the scene into its capture).
+// RESOLVE-POINT SCENE-TEXTURE CENSUS (tail composite RETIRED/PARKED). Three
+// field rounds proved: nothing ever reads the latched MSAA scene texture by
+// SRV or copy, yet a tail write here WAS visible - the engine's one
+// consumption channel is the MSAA RESOLVE, whose single-sample OUTPUT (a
+// different identity) feeds the postprocess chain. A composite fired at this
+// point was same-frame and pre-consumption; that fire is now RETIRED (see
+// the body note below and the parked-translucency post-mortem). This hook is
+// census-only: it stamps the resolve draw indices when armed and passes the
+// resolve through - it never composites. (When the tail was live, own
+// captures were excluded via in_injection.)
 static void STDMETHODCALLTYPE hooked_resolvesubresource(ID3D11DeviceContext* self, ID3D11Resource* dst, UINT dst_sub, ID3D11Resource* src, UINT src_sub, DXGI_FORMAT fmt) {
     if (src && g_topo_scene_tex_id &&
         static_cast<void*>(src) == g_topo_scene_tex_id &&
@@ -12586,18 +12585,17 @@ static void STDMETHODCALLTYPE hooked_pssetshaderresources(ID3D11DeviceContext* s
         }
     }
 
-    // Consumption census v4 + the CONSUMPTION-POINT FIRE. Why three trap
+    // Consumption census v4 (tail fire RETIRED/PARKED). Why three trap
     // generations read zero: v3's cycle-wide budget (2048 calls from the
     // boundary) exhausts during the scene phase, ~1500 binds before the
     // postprocess head (~draw 2205 vs scene end 2204). The scan is now
     // SHAPE-SCOPED - foreign RT0, no DSV: scene-phase binds never pay
     // the GetResource loop - slots 0-15, its own small budget. On the
-    // hit: stamp the census + capability, and FIRE THE TAIL before
-    // passing the bind through - the scene is complete BY CONSTRUCTION
-    // (the engine is about to read it), and the consuming draw then
-    // samples the texture WITH the composite in it. Same-frame, pre-
-    // consumption, angle-independent. The fire path must work unarmed;
-    // the pure-census half stays behind the arm.
+    // hit this WAS the consumption point where the tail fired before
+    // passing the bind through (same-frame, pre-consumption, angle-
+    // independent); that fire is now removed with the parked translucency
+    // campaign. What remains is census-only: stamp the scene-SRV draw
+    // index and slot, then pass through - the whole block is behind the arm.
     if (srvs && g_topo_scene_tex_id &&
         g_stats_armed.load(std::memory_order_relaxed) && g_topo.d_scene_srv == 0 &&
         !g_topo_has_dsv && !(g_topo_rt0_valid && g_topo_rt0_scene) &&

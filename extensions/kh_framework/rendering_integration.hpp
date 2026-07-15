@@ -18,15 +18,23 @@ enum class DepthMode : int {
 static constexpr UINT KH_MAX_QUERY_POINTS = 1024;
 
 // ===========================================================================
-// Mesh registry: every drawable 3D object references a mesh by id. Meshes
-// are defined in LOCAL ENGINE AXES (x right, y up, z forward), normalized
-// to fit [-0.5, 0.5]^3 so that world AABB = center +- sizeAxes * 0.5 stays
-// exact for every downstream consumer (cast reach clamp, sort bounds). The
-// FBX importer slots in here later: normalize on import, keep the original
-// extent as a default size, and draw, lighting, sun-depth casting and
-// sorting all work unchanged.
-// Vertices carry a position and an outward normal; winding is irrelevant
-// (every rasterizer state in this file is CullNone).
+// Mesh registry: every drawable 3D object references a mesh by id. The
+// registry is the single source of truth for mesh count, names and
+// geometry - no consumer hardcodes either; a future FBX importer only
+// appends MeshDef entries here (normalize on import, then meshgen::bake)
+// and draw, lighting, sun-depth casting and sorting all work unchanged.
+// AUTHORING SPACE is ARMA'S OWN AXES - x east, y north, z up, exactly the
+// coordinate space every SQF-facing position/size/rotation uses - and
+// meshgen::bake converts to the engine's runtime axes (x, z, y) once at
+// registry construction. Meshes are normalized to fit [-0.5, 0.5]^3 so
+// that world AABB = center +- sizeAxes * 0.5 stays exact for every
+// downstream consumer (cast reach clamp, sort bounds); rotated objects
+// substitute the enclosing bound from kh_world_half_extents everywhere.
+// Vertices carry a position and an outward normal; bake also normalizes
+// triangle winding against the stored normal so the optional back-face
+// culling rasterizer (twoSided = false) culls interior faces correctly.
+// UV / material lanes are the FBX integration's extension point: add them
+// to MeshVertex and the input layouts together when the importer lands.
 // ===========================================================================
 
 struct MeshVertex { float pos[3]; float nrm[3]; };
@@ -37,12 +45,10 @@ struct MeshDef {
     std::vector<MeshVertex> verts;
 };
 
-static constexpr int KH_MESH_COUNT = 2;   // 0 = "box", 1 = "steps"
-
 namespace meshgen {
 
-// One quad = two triangles with an explicit outward normal. Winding is
-// free (CullNone), so corners may arrive in any perimeter order.
+// One quad = two triangles with an explicit outward normal. Corners may
+// arrive in any perimeter order; bake() normalizes the winding.
 inline void quad(std::vector<MeshVertex>& v,
                  const float a[3], const float b[3],
                  const float c[3], const float d[3], const float n[3]) {
@@ -77,15 +83,53 @@ inline void block(std::vector<MeshVertex>& v, const float mn[3], const float mx[
     quad(v, p000, p010, p110, p100, nzn);   // -z
 }
 
+// Bake an authored (ARMA-axes) mesh into the engine's runtime layout:
+// 1) axis conversion - ARMA local [x, y, z] (east, north, up) becomes
+//    engine local [x, z, y], the same swap every SQF position/size fill
+//    performs - and 2) winding normalization: the two-axis swap flips
+//    handedness, so each triangle is reordered until cross(b-a, c-a)
+//    points along its stored outward normal. Under the D3D11 default
+//    front-face convention (FrontCounterClockwise = FALSE) that makes
+//    outward faces the front faces, which is what the optional back-face
+//    culling rasterizer (twoSided = false) relies on; CullNone paths are
+//    winding-agnostic, so baking is behavior-neutral for them.
+inline void bake(std::vector<MeshVertex>& v) {
+    for (auto& mv : v) {
+        const float py = mv.pos[1]; mv.pos[1] = mv.pos[2]; mv.pos[2] = py;
+        const float ny = mv.nrm[1]; mv.nrm[1] = mv.nrm[2]; mv.nrm[2] = ny;
+    }
+
+    for (size_t i = 0; i + 2 < v.size(); i += 3) {
+        const float* a = v[i].pos;
+        const float* b = v[i + 1].pos;
+        const float* c = v[i + 2].pos;
+        const float e1[3] = { b[0] - a[0], b[1] - a[1], b[2] - a[2] };
+        const float e2[3] = { c[0] - a[0], c[1] - a[1], c[2] - a[2] };
+        const float g[3] = {
+            e1[1] * e2[2] - e1[2] * e2[1],
+            e1[2] * e2[0] - e1[0] * e2[2],
+            e1[0] * e2[1] - e1[1] * e2[0],
+        };
+        const float* n = v[i].nrm;
+
+        if (g[0] * n[0] + g[1] * n[1] + g[2] * n[2] < 0.0f) {
+            const MeshVertex tmp = v[i + 1];
+            v[i + 1] = v[i + 2];
+            v[i + 2] = tmp;
+        }
+    }
+}
+
 }   // namespace meshgen
 
 inline const std::vector<MeshDef>& mesh_registry() {
     static const std::vector<MeshDef> reg = [] {
-        std::vector<MeshDef> r(KH_MESH_COUNT);
+        std::vector<MeshDef> r;
 
         // --- mesh 0: "box" - the original unit cube, per-face normals ---
         {
-            MeshDef& m = r[0];
+            r.emplace_back();
+            MeshDef& m = r.back();
             m.name = "box";
             m.alias = "cube";
             const float mn[3] = { -0.5f, -0.5f, -0.5f };
@@ -93,43 +137,46 @@ inline const std::vector<MeshDef>& mesh_registry() {
             meshgen::block(m.verts, mn, mx);
         }
 
-        // --- mesh 1: "steps" - a 3-step staircase ascending toward +z.
-        //     CONCAVE on purpose: with a low sun from the open side each
-        //     riser shadows the tread below it - the self-shadowing test
-        //     case the private sun-depth map exists for. ---
+        // --- mesh 1: "steps" - a 3-step staircase ascending toward +y
+        //     (north). CONCAVE on purpose: with a low sun from the open
+        //     side each riser shadows the tread below it - the
+        //     self-shadowing test case the private sun-depth map exists
+        //     for. ARMA axes: x east, y north, z up. ---
         {
-            MeshDef& m = r[1];
+            r.emplace_back();
+            MeshDef& m = r.back();
             m.name = "steps";
             m.alias = "test";
             const float t = 1.0f / 3.0f;
-            const float z0 = -0.5f, z1 = -0.5f + t, z2 = -0.5f + 2.0f * t, z3 = 0.5f;
             const float y0 = -0.5f, y1 = -0.5f + t, y2 = -0.5f + 2.0f * t, y3 = 0.5f;
-            const float nyp[3] = { 0.0f, 1.0f, 0.0f }, nyn[3] = { 0.0f, -1.0f, 0.0f };
+            const float z0 = -0.5f, z1 = -0.5f + t, z2 = -0.5f + 2.0f * t, z3 = 0.5f;
             const float nzp[3] = { 0.0f, 0.0f, 1.0f }, nzn[3] = { 0.0f, 0.0f, -1.0f };
+            const float nyp[3] = { 0.0f, 1.0f, 0.0f }, nyn[3] = { 0.0f, -1.0f, 0.0f };
             const float nxp[3] = { 1.0f, 0.0f, 0.0f }, nxn[3] = { -1.0f, 0.0f, 0.0f };
 
-            // bottom
-            { const float a[3] = { -0.5f, y0, z0 }, b[3] = { 0.5f, y0, z0 }, c[3] = { 0.5f, y0, z3 }, d[3] = { -0.5f, y0, z3 }; meshgen::quad(m.verts, a, b, c, d, nyn); }
-            // back (the tall face at z3)
-            { const float a[3] = { -0.5f, y0, z3 }, b[3] = { 0.5f, y0, z3 }, c[3] = { 0.5f, y3, z3 }, d[3] = { -0.5f, y3, z3 }; meshgen::quad(m.verts, a, b, c, d, nzp); }
-            // risers (facing -z, the open side)
-            { const float a[3] = { -0.5f, y0, z0 }, b[3] = { 0.5f, y0, z0 }, c[3] = { 0.5f, y1, z0 }, d[3] = { -0.5f, y1, z0 }; meshgen::quad(m.verts, a, b, c, d, nzn); }
-            { const float a[3] = { -0.5f, y1, z1 }, b[3] = { 0.5f, y1, z1 }, c[3] = { 0.5f, y2, z1 }, d[3] = { -0.5f, y2, z1 }; meshgen::quad(m.verts, a, b, c, d, nzn); }
-            { const float a[3] = { -0.5f, y2, z2 }, b[3] = { 0.5f, y2, z2 }, c[3] = { 0.5f, y3, z2 }, d[3] = { -0.5f, y3, z2 }; meshgen::quad(m.verts, a, b, c, d, nzn); }
-            // treads (facing +y)
-            { const float a[3] = { -0.5f, y1, z0 }, b[3] = { 0.5f, y1, z0 }, c[3] = { 0.5f, y1, z1 }, d[3] = { -0.5f, y1, z1 }; meshgen::quad(m.verts, a, b, c, d, nyp); }
-            { const float a[3] = { -0.5f, y2, z1 }, b[3] = { 0.5f, y2, z1 }, c[3] = { 0.5f, y2, z2 }, d[3] = { -0.5f, y2, z2 }; meshgen::quad(m.verts, a, b, c, d, nyp); }
-            { const float a[3] = { -0.5f, y3, z2 }, b[3] = { 0.5f, y3, z2 }, c[3] = { 0.5f, y3, z3 }, d[3] = { -0.5f, y3, z3 }; meshgen::quad(m.verts, a, b, c, d, nyp); }
+            // bottom (facing -z: down)
+            { const float a[3] = { -0.5f, y0, z0 }, b[3] = { 0.5f, y0, z0 }, c[3] = { 0.5f, y3, z0 }, d[3] = { -0.5f, y3, z0 }; meshgen::quad(m.verts, a, b, c, d, nzn); }
+            // back (the tall face at y3)
+            { const float a[3] = { -0.5f, y3, z0 }, b[3] = { 0.5f, y3, z0 }, c[3] = { 0.5f, y3, z3 }, d[3] = { -0.5f, y3, z3 }; meshgen::quad(m.verts, a, b, c, d, nyp); }
+            // risers (facing -y, the open side)
+            { const float a[3] = { -0.5f, y0, z0 }, b[3] = { 0.5f, y0, z0 }, c[3] = { 0.5f, y0, z1 }, d[3] = { -0.5f, y0, z1 }; meshgen::quad(m.verts, a, b, c, d, nyn); }
+            { const float a[3] = { -0.5f, y1, z1 }, b[3] = { 0.5f, y1, z1 }, c[3] = { 0.5f, y1, z2 }, d[3] = { -0.5f, y1, z2 }; meshgen::quad(m.verts, a, b, c, d, nyn); }
+            { const float a[3] = { -0.5f, y2, z2 }, b[3] = { 0.5f, y2, z2 }, c[3] = { 0.5f, y2, z3 }, d[3] = { -0.5f, y2, z3 }; meshgen::quad(m.verts, a, b, c, d, nyn); }
+            // treads (facing +z: up)
+            { const float a[3] = { -0.5f, y0, z1 }, b[3] = { 0.5f, y0, z1 }, c[3] = { 0.5f, y1, z1 }, d[3] = { -0.5f, y1, z1 }; meshgen::quad(m.verts, a, b, c, d, nzp); }
+            { const float a[3] = { -0.5f, y1, z2 }, b[3] = { 0.5f, y1, z2 }, c[3] = { 0.5f, y2, z2 }, d[3] = { -0.5f, y2, z2 }; meshgen::quad(m.verts, a, b, c, d, nzp); }
+            { const float a[3] = { -0.5f, y2, z3 }, b[3] = { 0.5f, y2, z3 }, c[3] = { 0.5f, y3, z3 }, d[3] = { -0.5f, y3, z3 }; meshgen::quad(m.verts, a, b, c, d, nzp); }
 
-            // sides: one column per z segment, floor to that segment's tread
+            // sides: one column per y segment, floor to that segment's tread
             for (int s = 0; s < 3; ++s) {
-                const float za = -0.5f + s * t, zb = -0.5f + (s + 1) * t;
-                const float yt = -0.5f + (s + 1) * t;
-                { const float a[3] = { 0.5f, y0, za }, b[3] = { 0.5f, y0, zb }, c[3] = { 0.5f, yt, zb }, d[3] = { 0.5f, yt, za }; meshgen::quad(m.verts, a, b, c, d, nxp); }
-                { const float a[3] = { -0.5f, y0, za }, b[3] = { -0.5f, y0, zb }, c[3] = { -0.5f, yt, zb }, d[3] = { -0.5f, yt, za }; meshgen::quad(m.verts, a, b, c, d, nxn); }
+                const float ya = -0.5f + s * t, yb = -0.5f + (s + 1) * t;
+                const float zt = -0.5f + (s + 1) * t;
+                { const float a[3] = { 0.5f, ya, z0 }, b[3] = { 0.5f, yb, z0 }, c[3] = { 0.5f, yb, zt }, d[3] = { 0.5f, ya, zt }; meshgen::quad(m.verts, a, b, c, d, nxp); }
+                { const float a[3] = { -0.5f, ya, z0 }, b[3] = { -0.5f, yb, z0 }, c[3] = { -0.5f, yb, zt }, d[3] = { -0.5f, ya, zt }; meshgen::quad(m.verts, a, b, c, d, nxn); }
             }
         }
 
+        for (auto& m : r) meshgen::bake(m.verts);   // ARMA axes -> engine axes + winding
         return r;
     }();
 
@@ -140,6 +187,12 @@ inline UINT mesh_vertex_count(int id) {
     const auto& reg = mesh_registry();
     if (id < 0 || id >= static_cast<int>(reg.size())) id = 0;
     return static_cast<UINT>(reg[id].verts.size());
+}
+
+// Registry-bounds clamp shared by every draw path: an out-of-range id
+// (stale handle data) degrades to mesh 0 instead of reading past the end.
+inline int mesh_id_clamp(int id) {
+    return (id >= 0 && id < static_cast<int>(mesh_registry().size())) ? id : 0;
 }
 
 struct Resources {
@@ -167,7 +220,9 @@ struct Resources {
     UINT                     comp_depth_w = 0, comp_depth_h = 0, comp_depth_samples = 1;
     float                    comp_depth_time = -1.0f;   // last snapshot copy (overlay freshness gate)
     ID3D11InputLayout*       input_layout = nullptr;
-    ID3D11Buffer*            mesh_vb[KH_MESH_COUNT] = {}; // static registry meshes (pos + normal)
+    ID3D11RasterizerState*   rasterizer_cull = nullptr;  // back-face-culling twin of 'rasterizer'
+                                                         // (twoSided = false objects; same biases)
+    std::vector<ID3D11Buffer*> mesh_vb;                  // one VB per registry mesh (pos + normal)
     ID3D11Buffer*            constant_buffer = nullptr;  // dynamic, per draw (game-thread flush)
     ID3D11Buffer*            composite_cb = nullptr;     // dynamic, per draw (render-thread injection)
                                                          // - separate from constant_buffer so the two
@@ -190,7 +245,6 @@ struct Resources {
     ID3D11ShaderResourceView* sun_srv = nullptr;
     ID3D11RasterizerState*    rast_sun = nullptr;   // CullNone, NO scene depth bias
     ID3D11VertexShader*       vs_sundepth = nullptr;     // instanced depth-only transform
-    ID3D11GeometryShader*     gs_cascade = nullptr;      // slice router for cascade injection
     ID3D11InputLayout*        layout_sundepth = nullptr; // mesh slot 0 + per-instance slot 1
     ID3D11Buffer*             sun_instance_vb = nullptr; // dynamic per-instance center/extents
     UINT                      sun_instance_cap = 0;      // instances the buffer holds
@@ -280,12 +334,12 @@ struct Resources {
         comp_depth_w = comp_depth_h = 0;
         comp_depth_samples = 1;
         KH_SAFE_RELEASE(input_layout);
-        for (int i = 0; i < KH_MESH_COUNT; ++i) KH_SAFE_RELEASE(mesh_vb[i]);
+        for (auto& khr_mb : mesh_vb) KH_SAFE_RELEASE(khr_mb);
+        mesh_vb.clear();
         KH_SAFE_RELEASE(sun_tex);
         KH_SAFE_RELEASE(sun_dsv);
         KH_SAFE_RELEASE(sun_srv);
         KH_SAFE_RELEASE(rast_sun);
-        KH_SAFE_RELEASE(gs_cascade);
         KH_SAFE_RELEASE(vs_sundepth);
         KH_SAFE_RELEASE(layout_sundepth);
         KH_SAFE_RELEASE(sun_instance_vb);
@@ -297,6 +351,7 @@ struct Resources {
         KH_SAFE_RELEASE(dss_off);
         for (int i = 0; i < 6; ++i) KH_SAFE_RELEASE(blend_modes[i]);
         KH_SAFE_RELEASE(rasterizer);
+        KH_SAFE_RELEASE(rasterizer_cull);
         KH_SAFE_RELEASE(cs_constant_buffer);
         KH_SAFE_RELEASE(points_buffer);
         KH_SAFE_RELEASE(points_srv);
@@ -323,7 +378,30 @@ static bool g_reset_hook_installed = false;
 // g_res.release(), under the same quiescence guarantee.
 inline void release_shadow_device_state();
 
+// Forward: the render-thread identity check lives with the reorder state.
+inline bool reorder_on_render_thread();
+
+// DEVICE-RESET RELEASE, lock-gated (field-review fix): every other
+// releaser of device objects runs under the graphics lock; this hook ran
+// bare on an ENGINE-CHOSEN thread, so a hook landing mid-flush-draw could
+// release objects in use. Two cases:
+//  - hook on the RENDER thread: acquiring the lock here risks self-park
+//    deadlock, and is unnecessary - a game-thread flush draws only while
+//    holding the lock, whose contract parks this very thread; if this
+//    thread is running the hook, no lock holder is mid-draw.
+//  - hook on any other thread: the scoped lock parks the render thread
+//    (quiescing injection) and serializes against flush acquisition.
+// Best-effort by design: resources are released even if acquisition
+// fails mid-teardown - leaking device objects across a reset is the
+// worse failure, and matches the hook's previous (bare) behavior.
 static void __stdcall on_engine_reset() {
+    if (reorder_on_render_thread()) {
+        g_res.release();
+        release_shadow_device_state();
+        return;
+    }
+
+    RVExtBridge::ScopedGraphicsLock khr_reset_lock;
     g_res.release();
     release_shadow_device_state();
 }
@@ -343,15 +421,37 @@ struct RenderObject {
     float band_falloff = 10.0f; // fade width at both band edges (m)
     float pos[3] = {};          // SQF coords [x, y, zASL]; converted at draw
     float size[3] = { 1.0f, 1.0f, 1.0f };  // mesh edge lengths per SQF axis [x, y, z] (m)
+    float rot[3] = {};          // [pitch, yaw, roll] degrees, ARMA sense (yaw
+                                // clockwise from north about z-up, pitch
+                                // nose-up about x-east, roll clockwise about
+                                // y-north; heading applied outermost). Set
+                                // ONLY via kh_set_rotation, which keeps the
+                                // precomputed matrix below in step.
+    float rot_m[9] = { 1.0f, 0.0f, 0.0f,
+                       0.0f, 1.0f, 0.0f,
+                       0.0f, 0.0f, 1.0f };
+                                // engine-axes rotation matrix ROWS (row-
+                                // vector: world = local * R); identity when
+                                // unrotated
+    bool  rotated = false;      // false = identity (skip the matrix math)
+    bool  two_sided = true;     // true (default) = CullNone: faces visible
+                                // from inside too, winding-agnostic - the
+                                // historical behavior. false = back-face
+                                // culling: interior faces dropped (meshes
+                                // bake outward-front winding for exactly
+                                // this). Draw paths only; the sun-depth and
+                                // analytic cast passes stay CullNone so
+                                // open meshes still cast full shadows.
     int   blend_mode = 0;       // 0 normal, 1 additive, 2 multiply, 3 screen, 4 lighten, 5 darken
-    int   mesh = 0;             // mesh_registry() index (0 = "box"). Local
-                                // space is normalized to [-0.5, 0.5]^3,
-                                // scaled per axis by 'size', moved to 'pos'.
+    int   mesh = 0;             // mesh_registry() index (0 = "box"). Meshes
+                                // are authored in ARMA axes, normalized to
+                                // [-0.5, 0.5]^3, scaled per axis by 'size',
+                                // rotated by 'rot', moved to 'pos'.
     float color[4] = { 1, 1, 1, 1 };
     // --- World-lighting interaction (opt-in via 'lit') ---
     // Shaded per pixel against the sun/moon (derived direction + located
     // lighting block) in ApplyLighting; world shadowing is per pixel too
-    // (band/live/mask receive + the private sun-depth self term).
+    // (band/live receive + the private sun-depth self term).
     bool  lit = false;
     float light_ambient = 0.40f;   // base-color fraction kept in full shadow
     float light_diffuse = 0.60f;   // N.L-scaled fraction (ambient + diffuse ~ 1
@@ -386,6 +486,118 @@ struct RenderObject {
 
 };
 
+// ---------------------------------------------------------------------------
+// Object rotation. SQF-facing Euler angles [pitch, yaw, roll] in degrees,
+// ARMA sense: yaw clockwise from north about the up axis, pitch nose-up
+// about the east axis, roll clockwise (right side down) about the north
+// axis - composed local -> roll -> pitch -> yaw -> world, the aircraft
+// convention Arma's own dir/pitch/bank decompose to. The matrix is built
+// in ARMA axes and permuted into ENGINE axes (swap the y/z rows AND
+// columns - the matrix form of the [x, y, z] -> [x, z, y] swap every
+// position fill performs), stored as rows for the row-vector transform
+// world = local * R. Pure rotation: normals use the SAME matrix after the
+// inverse per-axis scale (n' = (n / size) * R - the inverse-transpose of
+// scale-then-rotate collapses to exactly that for orthonormal R).
+// ---------------------------------------------------------------------------
+inline void kh_set_rotation(RenderObject& o, float pitch_deg, float yaw_deg, float roll_deg) {
+    o.rot[0] = pitch_deg;
+    o.rot[1] = yaw_deg;
+    o.rot[2] = roll_deg;
+    o.rotated = pitch_deg != 0.0f || yaw_deg != 0.0f || roll_deg != 0.0f;
+
+    if (!o.rotated) {
+        const float khr_id[9] = { 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f };
+        memcpy(o.rot_m, khr_id, sizeof(o.rot_m));
+        return;
+    }
+
+    const float khr_d2r = 0.017453292519943295f;
+    const float cp = cosf(pitch_deg * khr_d2r), sp = sinf(pitch_deg * khr_d2r);
+    const float cy = cosf(yaw_deg * khr_d2r),  sy = sinf(yaw_deg * khr_d2r);
+    const float cr = cosf(roll_deg * khr_d2r), sr = sinf(roll_deg * khr_d2r);
+    // ARMA-axes factors, rows = images of the x/y/z basis vectors:
+    const float khr_roll[3][3]  = { { cr, 0.0f, -sr }, { 0.0f, 1.0f, 0.0f }, { sr, 0.0f, cr } };
+    const float khr_pitch[3][3] = { { 1.0f, 0.0f, 0.0f }, { 0.0f, cp, sp }, { 0.0f, -sp, cp } };
+    const float khr_yaw[3][3]   = { { cy, -sy, 0.0f }, { sy, cy, 0.0f }, { 0.0f, 0.0f, 1.0f } };
+    float khr_rp[3][3];
+    float khr_ma[3][3];
+
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            khr_rp[r][c] = khr_roll[r][0] * khr_pitch[0][c] +
+                           khr_roll[r][1] * khr_pitch[1][c] +
+                           khr_roll[r][2] * khr_pitch[2][c];
+        }
+    }
+
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            khr_ma[r][c] = khr_rp[r][0] * khr_yaw[0][c] +
+                           khr_rp[r][1] * khr_yaw[1][c] +
+                           khr_rp[r][2] * khr_yaw[2][c];
+        }
+    }
+
+    // ARMA -> engine similarity: engine index i reads ARMA index p(i),
+    // p = (0, 2, 1) and p is its own inverse.
+    const int khr_p[3] = { 0, 2, 1 };
+
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            o.rot_m[r * 3 + c] = khr_ma[khr_p[r]][khr_p[c]];
+        }
+    }
+}
+
+// Enclosing half extents (engine axes) of a rotated, per-axis-scaled mesh
+// cube: he_k = sum_j |R[j][k]| * hl_j, the standard OBB -> AABB bound -
+// exact for axis-aligned rotations, conservative otherwise. hl = engine-
+// local half extents.
+inline void kh_rot_half_extents(const float hl[3], const float* rot_m, bool rotated, float he[3]) {
+    if (!rotated) {
+        he[0] = hl[0];
+        he[1] = hl[1];
+        he[2] = hl[2];
+        return;
+    }
+
+    for (int k = 0; k < 3; ++k) {
+        he[k] = fabsf(rot_m[k]) * hl[0] + fabsf(rot_m[3 + k]) * hl[1] + fabsf(rot_m[6 + k]) * hl[2];
+    }
+}
+
+// RenderObject wrapper: SQF [x, y, z] sizes -> engine-local half extents
+// -> enclosing WORLD half extents (engine axes). Every axis-aligned bound
+// consumer (sort metrics, sun-map fit, cast slabs, locality) goes through
+// here so rotated objects stay conservatively contained; sphere-based
+// tests (far-phase clearance, camera-local fit, cast reach) use the half
+// diagonal, which rotation leaves invariant, and are untouched.
+inline void kh_world_half_extents(const RenderObject& o, float he[3]) {
+    const float hl[3] = { o.size[0] * 0.5f, o.size[2] * 0.5f, o.size[1] * 0.5f };
+    kh_rot_half_extents(hl, o.rot_m, o.rotated, he);
+}
+
+// Shared draw-order metric (injection sort + flush sort - one truth):
+// squared camera distance to the nearest point of the object's enclosing
+// AABB, computed in SQF axes. cam arrives in ENGINE axes.
+inline float kh_mesh_dist_sq(const RenderObject& o, const float cam[3]) {
+    const float c[3] = { cam[0], cam[2], cam[1] };   // engine -> SQF axes
+    float khs_he[3];
+    kh_world_half_extents(o, khs_he);                // engine axes
+    const float hs[3] = { khs_he[0], khs_he[2], khs_he[1] };   // -> SQF axes
+    float acc = 0.0f;
+
+    for (int k = 0; k < 3; ++k) {
+        const float lo = o.pos[k] - hs[k];
+        const float hi = o.pos[k] + hs[k];
+        const float p = c[k] < lo ? lo : (c[k] > hi ? hi : c[k]);
+        const float d = c[k] - p;
+        acc += d * d;
+    }
+
+    return acc;
+}
+
 // Effect ids shared by meshes (localized, clipped to the mesh's screen footprint)
 // and fullscreen passes. 10 and 11 sample the engine depth buffer per pixel.
 enum class EffectId : int {
@@ -405,8 +617,9 @@ static std::mutex g_draw_list_mutex;
 // generator, prefixed "khr_" - command errors are plain sentences and never
 // carry the prefix, so callers distinguish success by it. g_next_seq is the
 // CREATION-ORDER key only (fullscreen passes chain by it; string order is
-// lexicographic and useless for that); it never resets, so ordering also
-// survives missions.
+// lexicographic and useless for that); it resets WITH the draw list at
+// mission boundaries (reset_retained_state) - ordering is only meaningful
+// within the list it orders, and full state destroy is the contract.
 static uint64_t g_next_seq = 0;
 
 inline std::string make_render_uid() {
@@ -445,6 +658,7 @@ struct RenderStats {
     uint64_t skip_no_dsv = 0;        // no depth target bound (not a scene moment)
     uint64_t skip_wrong_pass = 0;    // a DSV was bound, but not the main scene's (PiP/mirror/UAV)
     uint64_t effect_setup_fails = 0; // capture/shader setup failed; effects demoted that frame
+    uint64_t perceptual_captures = 0; // pre-mesh scene captures for translucent compositing
     uint64_t ui_flushes = 0;         // UI-phase flush attempts with work queued
     uint64_t ui_gate_passed = 0;     // UI-phase flushes that reached the draw path
     uint64_t ui_gate_skips = 0;      // UI-phase skips (scene pass active / wrong target)
@@ -493,6 +707,48 @@ static RenderStats g_stats;
 // are not touched by the arm; they die only with the mission.
 static std::atomic<bool> g_stats_armed{ false };
 
+// DEBUG VISUALS (setRenderDebug): one uniform shader branch, zero cost
+// while 0. 1 = coverage (solid magenta: true rasterized coverage,
+// blended-away fragments included), 2 = scene-vs-mesh depth (green =
+// hugging world geometry within 0.25 m, blue = metres in front, RED =
+// visible yet BEHIND the scene surface: the depth-anomaly detector),
+// 3 = blend layers (each layer adds ~15% white: overdraw made countable),
+// 4 = SELF-FOG KILL: shade normally but skip the mesh shaders' own fog
+// term - the translucency-forensics discriminator (a haze that survives
+// mode 4 cannot be ours; one that dies with it is our staged fog model),
+// 8 = perceptual-composite transit probe (PSComposite only: R = blendCtl
+// as read in-shader, G = scene-capture luminance, B = final alpha),
+// 5 = raw CB albedo (is the color even what was spawned?), 6 = lit color
+// pre-fog at alpha 1 (isolates ApplyLighting: multiplicative on base, so
+// its hue can never leave the albedo's), 7 = channel probe (R = alpha as
+// filled incl. envelope, G = SolidMask, B = combined shadow factor).
+// Mesh paths only - effect/fire/UI fills leave dbg_ctl zeroed. Purely
+// diagnostic: nothing else reads it; reset at session destroy.
+static std::atomic<int> g_dbg_mode{ 0 };
+
+// ---------------------------------------------------------------------------
+// Render-thread-safe error reporting. report_error logs through SQF and
+// throws - both game-thread-only acts - yet several compile paths run on
+// the RENDER thread (ensure_resources and the composite compile inside the
+// D3D hook). kh_report_error queues the message onto the main-thread
+// scheduler (pumped every frame by on_frame, each command in its own
+// try/catch) and dedupes per distinct message per session, so a per-frame
+// retry path cannot flood the RPT. Dedupe list is cleared at session
+// destroy.
+// ---------------------------------------------------------------------------
+static std::mutex g_err_once_mutex;
+static std::vector<std::string> g_err_once;
+
+inline void kh_report_error(const std::string& msg) {
+    {
+        std::lock_guard<std::mutex> g(g_err_once_mutex);
+        if (std::find(g_err_once.begin(), g_err_once.end(), msg) != g_err_once.end()) return;
+        g_err_once.push_back(msg);
+    }
+
+    MainThreadScheduler::instance().schedule([msg]() { report_error(msg); });
+}
+
 // Main-scene identification: the main depth resource is stable across frames;
 // PiP/mirror sub-passes bind a DIFFERENT depth resource. First adoption is
 // the first DSV seen; a larger one replaces it (covers bootstrap ordering);
@@ -537,11 +793,6 @@ cbuffer CB : register(b0)
     float4 shadowMats[24];   // per-cascade world->atlasUV+depth 4x3: 3 rows of [a, b, c, t]
     float4 shadowMeta2;      // x = far-visibility clamp flag (VSMain/VSComposite);
                              // yzw = the table's OWN camera origin (engine axes)
-    float4 shadowSrc;        // x = table index sampling the FINE COPY texture (t2), -1 = none;
-                             // yzw = (du, dv, dz) correction added to the copy entry's uvz
-    float4 shadowFix2;       // uv ROTATION for the copy entry (spun-fit correction):
-                             // x = cos, y = sin, zw = pivot (u, v). Depth is along the
-                             // light axis and invariant under light-axis spin.
     // View-paired bands: the engine's decoded receiver contract.
     // bandView rows are the view matrix COLUMNS (world->view, row-vector
     // convention): viewPos.k = dot(float4(wpos,1), bandView[slot*3+k]).
@@ -553,10 +804,7 @@ cbuffer CB : register(b0)
     // at each cascade pass end, so the world receives THEIR shadows.
     float4 castMat[3];       // this cascade's sampling matrix rows
     float4 castView[3];      // matching view columns
-    float4 castVp;           // atlas-tile viewport: x, y, w, h (pixels)
-    float4 castMeta;         // x = atlas size, y = enable
-    float4 maskMeta;         // x = enable, y = channel (0-3), z = invert, w = unused
-    float4 maskDims;         // xy = mask w/h, zw = viewport w/h at injection
+    float4 maskMeta;         // x = view-paired band table valid; yzw = float4 padding
     float4 fogParams;        // x = fogValue, y = fogDecay, z = fogBase, w = enable
     float4 fogColor;         // rgb = fog color, w = camera altitude ASL
     // --- appended (private sun-depth map); append-only: no register shifts ---
@@ -600,6 +848,28 @@ cbuffer CB : register(b0)
                           // N.L) + cone exponent.w; +4 distance offset.x
                           // + attenuation a0/a1/a2.yzw; +5 range-fade
                           // start.x + inv-width.y
+    // --- appended (object rotation); append-only: no register shifts ---
+    float4 objRot0;       // engine-axes rotation rows (row-vector: world =
+    float4 objRot1;       // center + local.x*R0 + local.y*R1 + local.z*R2).
+    float4 objRot2;       // objRot0.w = 1 marks a filled matrix; 0 (the
+                          // zeroed-CB default) reads as identity, so fill
+                          // sites that never rotate stay correct untouched.
+    // --- appended (debug visuals); append-only: no register shifts ---
+    float4 dbgCtl;        // x = debug visual mode (setRenderDebug): 0 off
+                          // (uniform branch, free), 1 coverage, 2 scene-
+                          // vs-mesh depth, 3 blend layers; yzw padding.
+                          // Mesh fill sites only - everywhere else the
+                          // zeroed default keeps the branch cold.
+    // --- appended (perceptual composite); append-only ---
+    float4 blendCtl;      // x = 1: normal-blend translucent mesh with the
+                          // scene capture bound this inject - the packing
+                          // composites in Reinhard space against t3 and
+                          // writes opaque. 0 (zeroed default: capture
+                          // miss, alpha 1, non-normal blends) = legacy
+                          // hardware blend. BOTH mesh shaders carry the
+                          // packing: the flush REPAINTS every mesh every
+                          // frame (PSMain), so a single-path conversion
+                          // gets legacy-overdrawn - field-proven.
 };
 
 // Shared raw-depth -> view-axis distance (m): inverts the viewport depth
@@ -612,6 +882,14 @@ float KhLinDepth(float raw)
     if (denom > -1e-7f) return 1e9f;
     float d = depthParams.y / denom;
     return d > 0.0f ? d : 1e9f;
+}
+
+// Shared object rotation (see objRot0): identity while unfilled, so only
+// the mesh-transform fill sites carry the matrix.
+float3 KhRotate(float3 p)
+{
+    if (objRot0.w < 0.5f) return p;
+    return p.x * objRot0.xyz + p.y * objRot1.xyz + p.z * objRot2.xyz;
 }
 
 // Private single-caster sun-depth map: OUR meshes rendered depth-only from
@@ -885,7 +1163,7 @@ static const char* g_hlsl_static = R"HLSL(
 VSOut VSMain(VSIn i)
 {
     VSOut o;
-    float3 wp = centerSize.xyz + i.pos * sizeAxes.xyz;
+    float3 wp = centerSize.xyz + KhRotate(i.pos * sizeAxes.xyz);
     o.pos = mul(float4(wp, 1.0f), viewProj);
     // Far-visibility clamp (opt-in, shadowMeta2.x): pull clip z just inside
     // the far plane so max view distance stops hard-clipping the mesh. Past
@@ -893,10 +1171,10 @@ VSOut VSMain(VSIn i)
     // ordering cannot break; the guard compares SV_Position.w, untouched.
     if (shadowMeta2.x > 0.5f && o.pos.z > o.pos.w * 0.9999f) o.pos.z = o.pos.w * 0.9999f;
     o.wpos = wp;
-    // Per-axis scale is non-uniform: normals transform by the inverse
-    // scale. (Rotation arrives with the FBX model matrix later; add its
-    // inverse-transpose here when it does.)
-    o.nrm = normalize(i.nrm / max(sizeAxes.xyz, float3(1e-4f, 1e-4f, 1e-4f)));
+    // Per-axis scale is non-uniform: normals take the inverse scale, then
+    // the object rotation (the inverse-transpose of scale-then-rotate for
+    // orthonormal R - see kh_set_rotation).
+    o.nrm = normalize(KhRotate(i.nrm / max(sizeAxes.xyz, float3(1e-4f, 1e-4f, 1e-4f))));
     return o;
 }
 
@@ -904,51 +1182,23 @@ VSOut VSMain(VSIn i)
 // DrawInstanced per mesh type regardless of object count - the per-object
 // constant uploads (and with them the caster cap) are gone. Slot-1
 // per-instance data: TEXCOORD4 = engine-space center, TEXCOORD5 =
-// engine-space extents.
+// engine-space extents, TEXCOORD6..8 = engine-axes rotation rows (w lanes
+// are float4-stride padding).
 struct VSInSun {
     float3 pos : POSITION;
     float3 nrm : NORMAL;
     float4 ipos : TEXCOORD4;
     float4 isize : TEXCOORD5;
+    float4 irot0 : TEXCOORD6;
+    float4 irot1 : TEXCOORD7;
+    float4 irot2 : TEXCOORD8;
 };
 
 float4 VSSunDepth(VSInSun i) : SV_Position
 {
-    float3 wp = i.ipos.xyz + i.pos * i.isize.xyz;
-    float4 cp = mul(float4(wp, 1.0f), viewProj);
-
-    // Cascade tile remap (localityMeta.w = 1, cascade injection only):
-    // the engine places tiles INSIDE its VS - clip.xy scaled into the
-    // tile's sub-rect. localityMeta = (scale, offsetX, offsetY, flag).
-    // The sun-map pass never sets the flag; its path is unchanged.
-    if (localityMeta.w > 0.5f) {
-        cp.x = cp.x * localityMeta.x + localityMeta.y * cp.w;
-        cp.y = cp.y * localityMeta.x + localityMeta.z * cp.w;
-    }
-
-    return cp;
-}
-
-// Cascade-slice router: the engine's shadow atlas is an ARRAY target with
-// per-draw slice routing (field census: hundreds of cascade draws share
-// one DSV pointer and one viewport corner). A plain VS pipeline lands in
-// slice 0 only; this pass-through GS routes our triangles to the tile the
-// injected matrix belongs to. localityMeta.y carries the slice index.
-struct GSSliceIn  { float4 pos : SV_Position; };
-struct GSSliceOut { float4 pos : SV_Position; uint rt : SV_RenderTargetArrayIndex; uint vp : SV_ViewportArrayIndex; };
-
-[maxvertexcount(3)]
-void GSCascadeSlice(triangle GSSliceIn i[3], inout TriangleStream<GSSliceOut> s)
-{
-    GSSliceOut o;
-    o.rt = 0;                          // non-array DSV: RT index is a no-op
-    o.vp = (uint)localityMeta.y;       // VIEWPORT ARRAY routing - the tile scheme
-    o.pos = i[0].pos;
-    s.Append(o);
-    o.pos = i[1].pos;
-    s.Append(o);
-    o.pos = i[2].pos;
-    s.Append(o);
+    float3 lp = i.pos * i.isize.xyz;
+    float3 wp = i.ipos.xyz + lp.x * i.irot0.xyz + lp.y * i.irot1.xyz + lp.z * i.irot2.xyz;
+    return mul(float4(wp, 1.0f), viewProj);
 }
 
 // Analytic mask cast: per-pixel ray-vs-AABB toward the sun, drawn into
@@ -958,6 +1208,9 @@ void GSCascadeSlice(triangle GSSliceIn i[3], inout TriangleStream<GSSliceOut> s)
 // strength in w. Scene linear depth at t0.
 Texture2D<float4> sceneDepthTex : register(t0);
 float KhSceneLoad(int2 p) { return sceneDepthTex.Load(int3(p, 0)).x; }
+// Pre-mesh scene COLOR capture (t3, single-sample) - the perceptual-
+// composite blend source for the FLUSH mesh pass; see PSMain's packing.
+Texture2D<float4> sceneColorTex : register(t3);
 
 )HLSL" R"HLSL(float4 PSMaskCast(VSOut i) : SV_Target
 {
@@ -988,9 +1241,7 @@ float KhSceneLoad(int2 p) { return sceneDepthTex.Load(int3(p, 0)).x; }
     float4 zt = sceneDepthTex.Load(int3(px, 0));
     float zl = zt.y > 0.0f ? zt.y : zt.x;
 
-    // PER-BAND write confinement - castMeta.y/z carry the batch's own
-    float2 dims = dimsM;
-    float2 ndc = float2(i.pos.x / dims.x * 2.0f - 1.0f, 1.0f - i.pos.y / dims.y * 2.0f);
+    float2 ndc = float2(i.pos.x / dimsM.x * 2.0f - 1.0f, 1.0f - i.pos.y / dimsM.y * 2.0f);
     float3 vp = float3(ndc.x * castView[1].x, ndc.y * castView[1].y, 1.0f) * zl;
     float3 q = vp - castView[0].xyz;
     float3 pw;
@@ -1074,32 +1325,6 @@ float KhSceneLoad(int2 p) { return sceneDepthTex.Load(int3(p, 0)).x; }
         float3 toCast = centerSize.xyz - pw;
         float near_enough = (dot(toCast, toCast) < reach * reach) ? 1.0f : 0.0f;
         hit = (tf >= max(tn, 0.05f) && zl > 1.2f && near_enough > 0.5f) ? 1.0f : 0.0f;   // zl floor: see the map branch
-
-        // Screen path only (castMeta.x = 1): if the CAMERA's ray to this
-        // pixel passes through the mesh bounds first, the pixel shows the
-        // mesh face - the scene-end apply runs after the meshes draw, so
-        // shading it would paint the ground's shadow ONTO the mesh (the
-        // see-through bug).
-        if (castMeta.x > 0.5f && hit > 0.5f) {
-            float3 cq = -castView[0].xyz;
-            float3 cam;
-            cam.x = cq.x * castMat[0].x + cq.y * castMat[0].y + cq.z * castMat[0].z;
-            cam.y = cq.x * castMat[1].x + cq.y * castMat[1].y + cq.z * castMat[1].z;
-            cam.z = cq.x * castMat[2].x + cq.y * castMat[2].y + cq.z * castMat[2].z;
-            float3 vd = pw - cam;
-            float3 vds = float3(
-                abs(vd.x) > 1e-6f ? vd.x : 1e-6f,
-                abs(vd.y) > 1e-6f ? vd.y : 1e-6f,
-                abs(vd.z) > 1e-6f ? vd.z : 1e-6f);
-            float3 vinv = 1.0f / vds;
-            float3 va = (bmin - cam) * vinv;
-            float3 vb = (bmax - cam) * vinv;
-            float3 vmn = min(va, vb);
-            float3 vmx = max(va, vb);
-            float vtn = max(max(vmn.x, vmn.y), vmn.z);
-            float vtf = min(min(vmx.x, vmx.y), vmx.z);
-            if (vtf >= max(vtn, 0.0f) && vtn < 0.99f) hit = 0.0f;   // mesh face in front
-        }
     }
 
     // Full occlusion here; the APPLY colors the shadow by the ambient
@@ -1135,6 +1360,29 @@ float4 PSMain(VSOut i) : SV_Target
         if (i.pos.w > sceneZ * (1.0f + fxParams1.y) + fxParams1.x) discard;
     }
 
+    // DEBUG VISUAL (dbgCtl.x, setRenderDebug): coverage / depth-delta /
+    // blend-layer output in place of shading. Mode 2 colors: green =
+    // hugging the scene surface (|dz| < 0.25 m), blue = metres in front,
+    // RED = visible yet BEHIND the scene surface (a depth anomaly).
+    // Modes 1-3 ONLY: 4 falls through to normal shading (its fog-kill
+    // gate lives at the fog blocks) and 5-7 to the isolation branch
+    // after lc. The original >= 0.5f catch-all swallowed every mode
+    // above 3 into the blend-layer return - the previous field run's
+    // 'mode 4' screenshot was white@0.15 over sky, not a fog verdict.
+    if (dbgCtl.x >= 0.5f && dbgCtl.x < 3.5f) {
+        if (dbgCtl.x < 1.5f) return float4(1.0f, 0.0f, 1.0f, 1.0f);
+
+        if (dbgCtl.x < 2.5f) {
+            int2 dpx = clamp(int2(i.pos.xy), int2(0, 0), int2((int)fxMeta.z - 1, (int)fxMeta.w - 1));
+            float dz = KhLinDepth(KhSceneLoad(dpx)) - i.pos.w;
+            if (abs(dz) < 0.25f) return float4(0.0f, 1.0f, 0.0f, 1.0f);
+            if (dz < 0.0f) return float4(1.0f, 0.0f, 0.0f, 1.0f);
+            return float4(0.0f, 0.0f, 0.2f + 0.8f * saturate(dz * 0.02f), 1.0f);
+        }
+
+        return float4(1.0f, 1.0f, 1.0f, 0.15f);
+    }
+
     int bm = (int)sizeAxes.w;
     // Intensity (color.a, which carries the lifetime envelope) applies to
     // every blend mode; the band/local mask folds into it. Lighten/darken
@@ -1149,10 +1397,25 @@ float4 PSMain(VSOut i) : SV_Target
               ? SunShadowFactorSelf(i.wpos, i.nrm) : 1.0f;
     float3 lc = ApplyLighting(color.rgb, i.wpos, i.nrm, smf);
 
+    // DEBUG VISUAL, term isolation (modes 5-7, setRenderDebug; see the
+    // g_dbg_mode catalog): 5 = raw CB albedo, 6 = lit color pre-fog
+    // (alpha 1: no blend, no envelope), 7 = channel probe - R = alpha
+    // as filled (lifetime envelope included), G = SolidMask, B = the
+    // combined shadow factor (a background-silhouette pattern HERE
+    // convicts the receive decode).
+    // Modes 5-7 ONLY (the mode-8 transit probe lives in the packing;
+    // the previous >= 4.5f catch-all swallowed mode 8 into the mode-7
+    // channel return - the second routing bug of the same shape).
+    if (dbgCtl.x >= 4.5f && dbgCtl.x < 7.5f) {
+        if (dbgCtl.x < 5.5f) return float4(color.rgb, 1.0f);
+        if (dbgCtl.x < 6.5f) return float4(lc, 1.0f);
+        return float4(color.a, SolidMask(i.wpos), smf, 1.0f);
+    }
+
     // Fog parity with the composite path (this shader serves the
     // fallback draw on injection-miss frames): the engine's verbatim
     // transmittance, constant color target (no scene capture here).
-    if (fogParams.w >= 0.5f) {
+    if (fogParams.w >= 0.5f && dbgCtl.x < 3.5f) {   // mode 4 kills self-fog (see g_dbg_mode)
         float distM = i.pos.w;
         float hgt = i.wpos.y;
         float camY = fogColor.w;
@@ -1194,6 +1457,35 @@ float4 PSMain(VSOut i) : SV_Target
     if (bm == 2) return float4(lerp(float3(1.0f, 1.0f, 1.0f), lc, a), 1.0f);
     if (bm == 4) return float4(lc * a, 1.0f);
     if (bm == 5) return float4(lerp(float3(65504.0f, 65504.0f, 65504.0f), lc, a), 1.0f);
+
+    // DEBUG VISUAL mode 8: the perceptual-composite transit probe (see
+    // PSComposite's note - same channels, this path's own capture read).
+    if (dbgCtl.x >= 7.5f) {
+        float3 pscn = sceneColorTex.Load(int3(int2(i.pos.xy), 0)).rgb;
+        float plum = dot(pscn / (1.0f + pscn), float3(0.333f, 0.333f, 0.334f));
+        return float4(blendCtl.x, plum, a, 1.0f);
+    }
+
+    // PERCEPTUAL COMPOSITE, flush edition (see PSComposite's packing
+    // note for the derivation). The flush mesh pass draws EVERY mesh
+    // EVERY flush - it is the hybrid's repaint, not a rare fallback -
+    // so with only the injected path converted, the flush's legacy
+    // hardware blend re-painted the radiance bleed over the fix each
+    // frame (LESS_EQUAL depth admits the identical geometry). Field:
+    // 'nothing changed' with every transit input verified good.
+    if (blendCtl.x >= 0.5f) {
+        // BACKGROUND TRUST: see PSComposite's note - same rule, this
+        // path's own scene distance.
+        int2 kpx = clamp(int2(i.pos.xy), int2(0, 0), int2((int)fxMeta.z - 1, (int)fxMeta.w - 1));
+        float kscene = KhLinDepth(KhSceneLoad(kpx));
+        float khb_a = (kscene > blendCtl.y) ? 1.0f : a;
+        float3 scn = sceneColorTex.Load(int3(int2(i.pos.xy), 0)).rgb;
+        float3 ts = scn / (1.0f + scn);
+        float3 tl = lc / (1.0f + lc);
+        float3 tm = lerp(ts, tl, khb_a);
+        return float4(tm / max(1.0f - tm, 0.0039f), 1.0f);   // cap ~HDR 255
+    }
+
     return float4(lc, a);
 }
 )HLSL";
@@ -1249,19 +1541,16 @@ float GuardSceneDist(int2 px)
 }
 #endif
 
+// Pre-mesh scene COLOR capture (always single-sample: the capture path
+// resolves MSAA) - the perceptual-composite blend source. Bound at t3
+// only on frames that need it; see the PSComposite packing note.
+Texture2D<float4> sceneColorTex : register(t3);
+
 // The engine's shadow atlas (the depth texture its cascade passes render
 // into), sampled with the engine's OWN per-cascade world->atlasUV+depth
 // transforms harvested from its constant uploads - so this compare is the
 // same one the engine performs for its own geometry.
 Texture2D<float> shadowAtlas : register(t1);
-// Our OWN copy of the atlas, grabbed the moment the FINEST cascade finished
-// rendering - the engine reuses one map for all cascades sequentially, so
-// the fine content only exists in it transiently. The copy plus its stored
-// transform is a permanently correct pair.
-Texture2D<float> shadowAtlasFine : register(t2);
-// The engine's screen-space shadow mask (its shadow resolve output). Read
-// at this pixel's own screen position: registration-exact by construction.
-Texture2D<float4> shadowMask : register(t3);
 Texture2D<float> shadowBand0 : register(t4);
 Texture2D<float> shadowBand1 : register(t5);
 Texture2D<float> shadowBand2 : register(t6);
@@ -1294,16 +1583,6 @@ void ShadowMapSample(float3 rel, out int cascade, out float occluded)
         float v = dot(r1.xyz, rel) + r1.w;
         float z = dot(r2.xyz, rel) + r2.w;
 
-        if (c == (int)shadowSrc.x) {
-            float ru = u - shadowFix2.z;
-            float rv = v - shadowFix2.w;
-            u = shadowFix2.z + shadowFix2.x * ru - shadowFix2.y * rv;
-            v = shadowFix2.w + shadowFix2.y * ru + shadowFix2.x * rv;
-            u += shadowSrc.y;
-            v += shadowSrc.z;
-            z += shadowSrc.w;
-        }
-
         float4 t = shadowTiles[c];
         // Tiles are sorted finest-first; the first cascade whose tile and
         // depth range contain the point decides.
@@ -1323,11 +1602,10 @@ void ShadowMapSample(float3 rel, out int cascade, out float occluded)
         float2 fpx = uv * shadowMeta.w - 0.5f;
         int2 p0 = int2(floor(fpx));
         float2 fr = frac(fpx);
-        bool fine = (c == (int)shadowSrc.x);
-        float d00 = fine ? shadowAtlasFine.Load(int3(p0, 0)) : shadowAtlas.Load(int3(p0, 0));
-        float d10 = fine ? shadowAtlasFine.Load(int3(p0 + int2(1, 0), 0)) : shadowAtlas.Load(int3(p0 + int2(1, 0), 0));
-        float d01 = fine ? shadowAtlasFine.Load(int3(p0 + int2(0, 1), 0)) : shadowAtlas.Load(int3(p0 + int2(0, 1), 0));
-        float d11 = fine ? shadowAtlasFine.Load(int3(p0 + int2(1, 1), 0)) : shadowAtlas.Load(int3(p0 + int2(1, 1), 0));
+        float d00 = shadowAtlas.Load(int3(p0, 0));
+        float d10 = shadowAtlas.Load(int3(p0 + int2(1, 0), 0));
+        float d01 = shadowAtlas.Load(int3(p0 + int2(0, 1), 0));
+        float d11 = shadowAtlas.Load(int3(p0 + int2(1, 1), 0));
         float o00 = ((z - d00) * shadowMeta.y > shadowMeta.z) ? 1.0f : 0.0f;
         float o10 = ((z - d10) * shadowMeta.y > shadowMeta.z) ? 1.0f : 0.0f;
         float o01 = ((z - d01) * shadowMeta.y > shadowMeta.z) ? 1.0f : 0.0f;
@@ -1488,25 +1766,6 @@ float ShadowBandFactor(float3 wpos)
 // (split: MSVC C2026 caps a single literal at ~16 KB - the fog additions
 // crossed it; the two halves are joined at the compile site)
 static const char* g_hlsl_composite2 = R"HLSL(
-float ShadowMaskValue(float4 svpos)
-{
-    float2 scale = maskDims.xy / max(maskDims.zw, float2(1.0f, 1.0f));
-    int2 px = int2(svpos.xy * scale);
-    float4 m = shadowMask.Load(int3(px, 0));
-    float v = m.x;
-    if (maskMeta.y > 0.5f && maskMeta.y < 1.5f) v = m.y;
-    else if (maskMeta.y > 1.5f && maskMeta.y < 2.5f) v = m.z;
-    else if (maskMeta.y > 2.5f) v = m.w;
-    if (maskMeta.z > 0.5f) v = 1.0f - v;
-    return v;
-}
-
-float ShadowMaskFactor(float4 svpos)
-{
-    float v = ShadowMaskValue(svpos);
-    return 1.0f - (1.0f - v) * saturate(lighting2.w);
-}
-
 float LinDepthC(float raw)
 {
     float ndcZ = (raw - depthParams.z) / max(depthParams.w - depthParams.z, 1e-6f);
@@ -1521,7 +1780,7 @@ struct VSOutC { float4 pos : SV_Position; float3 wpos : TEXCOORD0; float3 nrm : 
 VSOutC VSComposite(VSIn i)
 {
     VSOutC o;
-    float3 wp = centerSize.xyz + i.pos * sizeAxes.xyz;
+    float3 wp = centerSize.xyz + KhRotate(i.pos * sizeAxes.xyz);
     o.pos = mul(float4(wp, 1.0f), viewProj);
     // Far-visibility clamp (opt-in, shadowMeta2.x): pull clip z just inside
     // the far plane so max view distance stops hard-clipping the mesh. Past
@@ -1529,8 +1788,9 @@ VSOutC VSComposite(VSIn i)
     // ordering cannot break; the guard compares SV_Position.w, untouched.
     if (shadowMeta2.x > 0.5f && o.pos.z > o.pos.w * 0.9999f) o.pos.z = o.pos.w * 0.9999f;
     o.wpos = wp;
-    // Inverse per-axis scale for the normal (see VSMain).
-    o.nrm = normalize(i.nrm / max(sizeAxes.xyz, float3(1e-4f, 1e-4f, 1e-4f)));
+    // Inverse per-axis scale, then object rotation, for the normal (see
+    // VSMain).
+    o.nrm = normalize(KhRotate(i.nrm / max(sizeAxes.xyz, float3(1e-4f, 1e-4f, 1e-4f))));
     return o;
 }
 
@@ -1551,6 +1811,26 @@ VSOutC VSComposite(VSIn i)
     float fragZ = i.pos.w;
     if (fragZ > sceneZ * (1.0f + fxParams1.y) + fxParams1.x) discard;
 
+    // DEBUG VISUAL (dbgCtl.x, setRenderDebug): see PSMain's note - same
+    // modes, same colors, this path's own scene distance.
+    // Modes 1-3 ONLY: 4 falls through to normal shading (its fog-kill
+    // gate lives at the fog blocks) and 5-7 to the isolation branch
+    // after lc. The original >= 0.5f catch-all swallowed every mode
+    // above 3 into the blend-layer return - the previous field run's
+    // 'mode 4' screenshot was white@0.15 over sky, not a fog verdict.
+    if (dbgCtl.x >= 0.5f && dbgCtl.x < 3.5f) {
+        if (dbgCtl.x < 1.5f) return float4(1.0f, 0.0f, 1.0f, 1.0f);
+
+        if (dbgCtl.x < 2.5f) {
+            float dz = sceneZ - fragZ;
+            if (abs(dz) < 0.25f) return float4(0.0f, 1.0f, 0.0f, 1.0f);
+            if (dz < 0.0f) return float4(1.0f, 0.0f, 0.0f, 1.0f);
+            return float4(0.0f, 0.0f, 0.2f + 0.8f * saturate(dz * 0.02f), 1.0f);
+        }
+
+        return float4(1.0f, 1.0f, 1.0f, 0.15f);
+    }
+
     int bm = (int)sizeAxes.w;
 
     float smf = 1.0f;
@@ -1560,9 +1840,8 @@ VSOutC VSComposite(VSIn i)
     // PCF taps and the sun-map samples outright. On typical meshes this
     // halves the shadow work.
     if (lighting0.x >= 0.5f && dot(i.nrm, lighting1.xyz) > 0.01f) {
-        if (maskMeta.x >= 0.5f)      smf = ShadowMaskFactor(i.pos);
-        else if (maskMeta.w >= 0.5f) smf = ShadowBandFactor(i.wpos);
-        else                         smf = ShadowMapFactor(i.wpos - shadowMeta2.yzw);
+        if (maskMeta.x >= 0.5f) smf = ShadowBandFactor(i.wpos);
+        else                    smf = ShadowMapFactor(i.wpos - shadowMeta2.yzw);
 
         // Concave SELF-shadowing from the private sun-depth map: min with
         // the received term - same question, different occluders, and the
@@ -1570,6 +1849,21 @@ VSOutC VSComposite(VSIn i)
         smf = min(smf, SunShadowFactorSelf(i.wpos, i.nrm));
     }
     float3 lc = ApplyLighting(color.rgb, i.wpos, i.nrm, smf);
+
+    // DEBUG VISUAL, term isolation (modes 5-7, setRenderDebug; see the
+    // g_dbg_mode catalog): 5 = raw CB albedo, 6 = lit color pre-fog
+    // (alpha 1: no blend, no envelope), 7 = channel probe - R = alpha
+    // as filled (lifetime envelope included), G = SolidMask, B = the
+    // combined shadow factor (a background-silhouette pattern HERE
+    // convicts the receive decode).
+    // Modes 5-7 ONLY (the mode-8 transit probe lives in the packing;
+    // the previous >= 4.5f catch-all swallowed mode 8 into the mode-7
+    // channel return - the second routing bug of the same shape).
+    if (dbgCtl.x >= 4.5f && dbgCtl.x < 7.5f) {
+        if (dbgCtl.x < 5.5f) return float4(color.rgb, 1.0f);
+        if (dbgCtl.x < 6.5f) return float4(lc, 1.0f);
+        return float4(color.a, SolidMask(i.wpos), smf, 1.0f);
+    }
 
     // FOG OCCLUSION: RV's height-decay exponential. Density at height h:
     // d(h) = fogValue * exp(-fogDecay * (h - fogBase)). Transmittance over
@@ -1592,7 +1886,7 @@ VSOutC VSComposite(VSIn i)
     // the fog-1.0 endpoint and matches the terrain rate at mid values -
     // verified by direct engine-geometry comparison, the only calibration
     // source that counts.
-    if (fogParams.w >= 0.5f) {
+    if (fogParams.w >= 0.5f && dbgCtl.x < 3.5f) {   // mode 4 kills self-fog (see g_dbg_mode)
         float distM = i.pos.w;
         float hgt = i.wpos.y;
         float camY = fogColor.w;
@@ -1658,6 +1952,48 @@ VSOutC VSComposite(VSIn i)
     if (bm == 2) return float4(lerp(float3(1.0f, 1.0f, 1.0f), lc, a), 1.0f);
     if (bm == 4) return float4(lc * a, 1.0f);
 )HLSL" R"HLSL(    if (bm == 5) return float4(lerp(float3(65504.0f, 65504.0f, 65504.0f), lc, a), 1.0f);
+
+    // PERCEPTUAL COMPOSITE (the radiance-bleed fix, normal blend only):
+    // hardware SrcAlpha blending runs in RAW HDR radiance, where 10% of
+    // an HDR sky (10-40) numerically buries 90% of an LDR-ish surface -
+    // field-proven: the lavender wash scaled exactly with (1 - a), was
+    // absent at alpha 1, and every shading term upstream checked clean
+    // (debug modes 5-7). Simple transparency per the spec is a DISPLAY-
+    // space mix, so: sample the pre-mesh scene capture at this pixel,
+    // blend in Reinhard space, invert, write OPAQUE - the destination
+    // can never dominate again. Compositing against the CAPTURE also
+    // means interior faces of two-sided translucents no longer double-
+    // tint: every face mixes with the scene, one clean layer.
+    // DEBUG VISUAL mode 8 (setRenderDebug): the perceptual-composite
+    // transit probe - R = blendCtl.x AS THE SHADER SEES IT (0 = the flag
+    // died between the CPU fill and this read), G = capture luminance at
+    // this pixel (0 = capture black / bind lost), B = the final alpha.
+    if (dbgCtl.x >= 7.5f) {
+        float3 pscn = sceneColorTex.Load(int3(int2(i.pos.xy), 0)).rgb;
+        float plum = dot(pscn / (1.0f + pscn), float3(0.333f, 0.333f, 0.334f));
+        return float4(blendCtl.x, plum, a, 1.0f);
+    }
+
+    if (blendCtl.x >= 0.5f) {
+        // BACKGROUND TRUST (the angle-consistency rule): the capture is
+        // only reliable where the CURRENT partition has already drawn -
+        // content the engine finishes AFTER this injection point (later
+        // partition's objects, sky) still holds the atmosphere base, and
+        // no blend against a not-yet-drawn pixel can look right. The
+        // depth snapshot IS complete, so untrustworthy pixels are
+        // detectable: beyond the trust range (blendCtl.y, m; sky's 1e9
+        // sentinel always beyond) the mesh goes honestly OPAQUE instead
+        // of tinting a phantom. The resolve-sweep session retires this
+        // by compositing where the frame is complete - trust then spans
+        // everything and full transparency returns with no rework.
+        float khb_a = (sceneZ > blendCtl.y) ? 1.0f : a;
+        float3 scn = sceneColorTex.Load(int3(int2(i.pos.xy), 0)).rgb;
+        float3 ts = scn / (1.0f + scn);
+        float3 tl = lc / (1.0f + lc);
+        float3 tm = lerp(ts, tl, khb_a);
+        return float4(tm / max(1.0f - tm, 0.0039f), 1.0f);   // cap ~HDR 255
+    }
+
     return float4(lc, a);
 }
 )HLSL";
@@ -2156,17 +2492,19 @@ struct alignas(16) ConstantData {
     float shadow_tiles[8][4];  // per-cascade atlas UV rects
     float shadow_mats[24][4];  // per-cascade 4x3 sampling transforms
     float shadow_meta2[4];     // x = far-visibility clamp flag; yzw = live-table camera origin
-    float shadow_src[4];       // x = fine-copy entry index or -1
-    float shadow_fix2[4];
     float band_mat[24][4];
     float band_view[24][4];
     float band_border[8][4];
     float cast_mat[3][4];
     float cast_view[3][4];
-    float cast_vp[4];
-    float cast_meta[4];
-    float mask_meta[4];
-    float mask_dims[4];
+    // RECEIVE LEDGER (do not re-derive): reading the engine's screen-space
+    // shadow-resolve mask for the receive term was field-falsified - that
+    // mask is computed from WORLD depth before our meshes inject, so at
+    // our pixels it holds the background's shadowing, and mesh shadows
+    // appeared/vanished with camera angle. Bands (then the live table)
+    // are the receive truth; the mask machinery that remains serves the
+    // CAST write only, which is registration-exact by construction.
+    float mask_meta[4];    // x = view-paired band table valid
     // --- appended (fog + engine-mask receive); append-only so no
     // existing register shifts ---
     float fog_params[4];   // x = fogValue, y = fogDecay, z = fogBase, w = enable
@@ -2195,7 +2533,28 @@ struct alignas(16) ConstantData {
                                // w = operator intensity scale
     float dl_view[3][4];       // view matrix COLUMNS for the mode-2 rotation
     float dl_lights[192][4];   // 32 lights x 6 float4, engine cb11 verbatim
+    // --- appended (object rotation); append-only, mirrors objRot0..2 ---
+    float obj_rot[3][4];       // engine-axes rotation rows; [0][3] = 1 marks
+                               // filled (the zeroed default reads as identity
+                               // in-shader - auxiliary fills stay correct)
+    // --- appended (debug visuals); append-only, mirrors dbgCtl ---
+    float dbg_ctl[4];          // x = setRenderDebug mode; mesh fill sites only
+    // --- appended (perceptual composite); append-only, mirrors blendCtl ---
+    float blend_ctl[4];        // x = perceptual-composite enable (inject fill only)
 };
+
+// Shared mesh-CB rotation fill (injection, flush, sun fallback - one
+// truth). rot_m = engine-axes rows (RenderObject::rot_m or SunCaster::rot).
+inline void kh_fill_obj_rot(ConstantData& cbd, const float* rot_m) {
+    for (int rr = 0; rr < 3; ++rr) {
+        cbd.obj_rot[rr][0] = rot_m[rr * 3 + 0];
+        cbd.obj_rot[rr][1] = rot_m[rr * 3 + 1];
+        cbd.obj_rot[rr][2] = rot_m[rr * 3 + 2];
+    }
+
+    cbd.obj_rot[0][3] = 1.0f;   // filled: KhRotate engages (identity matrix
+                                // when the object is unrotated)
+}
 
 struct alignas(16) CSConstantData {
     float view_proj[4][4];
@@ -2263,7 +2622,7 @@ inline std::string ensure_resources(ID3D11Device* dev) {
             dev->CreatePixelShader(mc_blob->GetBufferPointer(), mc_blob->GetBufferSize(), nullptr, &g_res.ps_maskcast);
             mc_blob->Release();
         } else if (!mc_err.empty()) {
-            report_error("KH maskcast shader: " + mc_err);
+            kh_report_error("KH maskcast shader: " + mc_err);   // render-thread-reachable
         }
     }
 
@@ -2278,28 +2637,19 @@ inline std::string ensure_resources(ID3D11Device* dev) {
                     { "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT,    0, 12, D3D11_INPUT_PER_VERTEX_DATA,   0 },
                     { "TEXCOORD", 4, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 0,  D3D11_INPUT_PER_INSTANCE_DATA, 1 },
                     { "TEXCOORD", 5, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 16, D3D11_INPUT_PER_INSTANCE_DATA, 1 },
+                    { "TEXCOORD", 6, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 32, D3D11_INPUT_PER_INSTANCE_DATA, 1 },
+                    { "TEXCOORD", 7, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 48, D3D11_INPUT_PER_INSTANCE_DATA, 1 },
+                    { "TEXCOORD", 8, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 64, D3D11_INPUT_PER_INSTANCE_DATA, 1 },
                 };
 
-                if (FAILED(dev->CreateInputLayout(sl, 4, sd_blob->GetBufferPointer(), sd_blob->GetBufferSize(), &g_res.layout_sundepth))) {
+                if (FAILED(dev->CreateInputLayout(sl, 7, sd_blob->GetBufferPointer(), sd_blob->GetBufferSize(), &g_res.layout_sundepth))) {
                     KH_SAFE_RELEASE(g_res.vs_sundepth);
                 }
             }
 
             sd_blob->Release();
         } else if (!sd_err.empty()) {
-            report_error("KH sun-depth shader: " + sd_err);
-        }
-    }
-
-    {   // cascade slice-router GS: non-fatal (injection stands down without it)
-        ID3DBlob* gs_blob = nullptr;
-        const std::string gs_err = compile_shader(static_src.c_str(), "GSCascadeSlice", "gs_5_0", nullptr, &gs_blob);
-
-        if (gs_err.empty() && gs_blob) {
-            dev->CreateGeometryShader(gs_blob->GetBufferPointer(), gs_blob->GetBufferSize(), nullptr, &g_res.gs_cascade);
-            gs_blob->Release();
-        } else if (!gs_err.empty()) {
-            report_error("KH cascade GS: " + gs_err);
+            kh_report_error("KH sun-depth shader: " + sd_err);   // render-thread-reachable
         }
     }
 
@@ -2323,8 +2673,9 @@ inline std::string ensure_resources(ID3D11Device* dev) {
 
     {
         const auto& reg = mesh_registry();
+        g_res.mesh_vb.assign(reg.size(), nullptr);
 
-        for (int m = 0; m < KH_MESH_COUNT; ++m) {
+        for (size_t m = 0; m < reg.size(); ++m) {
             D3D11_BUFFER_DESC bd = {};
             bd.ByteWidth = static_cast<UINT>(reg[m].verts.size() * sizeof(MeshVertex));
             bd.Usage = D3D11_USAGE_IMMUTABLE;
@@ -2475,9 +2826,19 @@ inline std::string ensure_resources(ID3D11Device* dev) {
         rd.DepthBiasClamp = 0.0f;
         hr = dev->CreateRasterizerState(&rd, &g_res.rasterizer);
         if (FAILED(hr)) { g_res.release(); return "Create rasterizer " + hr_str(hr); }
+        // Back-face-culling twin for twoSided = false objects: identical
+        // biases (same engine-depth tie duty), only the cull mode differs.
+        // Meshes bake outward-front winding, so CULL_BACK drops exactly
+        // the interior-facing triangles.
+        rd.CullMode = D3D11_CULL_BACK;
+        hr = dev->CreateRasterizerState(&rd, &g_res.rasterizer_cull);
+        if (FAILED(hr)) { g_res.release(); return "Create cull rasterizer " + hr_str(hr); }
         // Sun-depth pass rasterizer: the scene bias above exists to win
         // marginal ties against ENGINE depth; in our own private map it
-        // would only carve the acne band deeper. Plain CullNone.
+        // would only carve the acne band deeper. Plain CullNone - and it
+        // STAYS CullNone regardless of twoSided: an open (culled) mesh
+        // must still cast the full closed-surface shadow.
+        rd.CullMode = D3D11_CULL_NONE;
         rd.DepthBias = 0;
         rd.SlopeScaledDepthBias = 0.0f;
         hr = dev->CreateRasterizerState(&rd, &g_res.rast_sun);
@@ -2527,15 +2888,18 @@ inline std::string ensure_fx_chain(ID3D11Device* dev) {
     return "";
 }
 
-inline std::string ensure_scene_capture(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
-    ID3D11RenderTargetView* rtv = nullptr;
-    ctx->OMGetRenderTargets(1, &rtv, nullptr);
-    if (!rtv) return "no RTV bound";
+// Capture core, parameterized on the SOURCE RTV: the flush/injection call
+// it through the wrapper below with the bound target; the tail composite
+// calls it directly with the LATCHED scene RTV, because the bound target
+// at the sweep is the engine's shadow mask, not the scene. The caller
+// keeps ownership of the RTV reference.
+inline std::string ensure_scene_capture_from(ID3D11Device* dev, ID3D11DeviceContext* ctx,
+                                             ID3D11RenderTargetView* rtv) {
+    if (!rtv) return "no RTV";
     ID3D11Resource* res = nullptr;
     rtv->GetResource(&res);
     D3D11_RENDER_TARGET_VIEW_DESC rtv_desc = {};
     rtv->GetDesc(&rtv_desc);
-    rtv->Release();
     if (!res) return "RTV has no resource";
     ID3D11Texture2D* src_tex = nullptr;
     HRESULT hr = res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&src_tex));
@@ -2577,6 +2941,15 @@ inline std::string ensure_scene_capture(ID3D11Device* dev, ID3D11DeviceContext* 
 
     src_tex->Release();
     return "";
+}
+
+inline std::string ensure_scene_capture(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
+    ID3D11RenderTargetView* rtv = nullptr;
+    ctx->OMGetRenderTargets(1, &rtv, nullptr);
+    if (!rtv) return "no RTV bound";
+    const std::string err = ensure_scene_capture_from(dev, ctx, rtv);
+    rtv->Release();
+    return err;
 }
 
 // ---------------------------------------------------------------------------
@@ -2748,7 +3121,7 @@ inline std::string ensure_composite_shader(ID3D11Device* dev) {
     ID3DBlob* ps_blob = nullptr;
     auto comp_fail = [&](const std::string& e) {
         g_comp_last_err = e;
-        if (g_comp_fail_streak == 0) report_error("KH composite shader: " + e);
+        if (g_comp_fail_streak == 0) kh_report_error("KH composite shader: " + e);   // render-thread-reachable
         g_comp_fail_streak++;
         g_comp_next_retry = now_bo + 2.0f;
         g_stats.effect_setup_fails++;
@@ -3267,7 +3640,7 @@ inline int blend_id_from_gv(const game_value& gv) {
 inline int mesh_id_from_gv(const game_value& gv) {
     if (gv.type_enum() == game_data_type::SCALAR) {
         const int id = static_cast<int>(static_cast<float>(gv));
-        return (id >= 0 && id < KH_MESH_COUNT) ? id : -1;
+        return (id >= 0 && id < static_cast<int>(mesh_registry().size())) ? id : -1;
     }
 
     if (gv.type_enum() != game_data_type::STRING) return -1;
@@ -3571,6 +3944,9 @@ static constexpr int KH_VT_OMSETRENDERTARGETS    = 33;
 static constexpr int KH_VT_OMSETRTS_AND_UAVS     = 34;
 static constexpr int KH_VT_OMSETBLENDSTATE       = 35;
 static constexpr int KH_VT_OMSETDEPTHSTENCIL     = 36;
+static constexpr int KH_VT_COPYSUBRESOURCEREGION = 46;
+static constexpr int KH_VT_COPYRESOURCE          = 47;
+static constexpr int KH_VT_RESOLVESUBRESOURCE    = 57;
 static constexpr int KH_VT_UPDATESUBRESOURCE     = 48;
 static constexpr int KH_VT_CLEARDEPTHSTENCIL     = 53;
 
@@ -3601,6 +3977,12 @@ static FnClearDepthStencilView   g_orig_clear_depthstencil = nullptr;
 static FnMap                     g_orig_map = nullptr;
 static FnUnmap                   g_orig_unmap = nullptr;
 static FnUpdateSubresource       g_orig_updatesubresource = nullptr;
+typedef void (STDMETHODCALLTYPE* FnCopyResource)(ID3D11DeviceContext*, ID3D11Resource*, ID3D11Resource*);
+typedef void (STDMETHODCALLTYPE* FnCopySubresourceRegion)(ID3D11DeviceContext*, ID3D11Resource*, UINT, UINT, UINT, UINT, ID3D11Resource*, UINT, const D3D11_BOX*);
+static FnCopyResource            g_orig_copyresource = nullptr;
+static FnCopySubresourceRegion   g_orig_copysubresourceregion = nullptr;
+typedef void (STDMETHODCALLTYPE* FnResolveSubresource)(ID3D11DeviceContext*, ID3D11Resource*, UINT, ID3D11Resource*, UINT, DXGI_FORMAT);
+static FnResolveSubresource      g_orig_resolvesubresource = nullptr;
 
 // CRITICAL - which thread is which:
 // The hooks fire for EVERY caller of the immediate context - the engine's
@@ -4116,6 +4498,60 @@ static float g_pub_dir[3] = {};
 static float g_cand_dir[3] = {};
 static int   g_cand_hold = 0;
 
+// ===========================================================================
+// SUN-SETTLE GATE (operator directive, the startup-shadow session): a
+// shadow that is ABSENT beats a shadow that swings with the camera. The
+// publish arbiter stamps g_sun_unstable_ms whenever the PUBLISHED
+// direction steps more than KH_SUN_SETTLE_STEP_DEG in one flush: the
+// cold-start glide (the derivation refining "a degree or three" while
+// spawn cascades settle, at 25%/flush pursuit = 0.25+ deg steps) and
+// adopted jumps (the 66.93 deg wrong-sun event on record) both trip it;
+// healthy steady churn (1-2.5 deg/s ~= 0.04 deg/flush at 60 fps) stays
+// an order of magnitude under, so settled sessions pay nothing, and a
+// derivation that converges before the 120-sample warm-up completes
+// delays the first shadow by NOTHING. Consumers - the cast fire (miss
+// 53), the private sun map / self term, both band-receive fills - stand
+// down until the direction holds for KH_SUN_SETTLE_MS. This is a GATE,
+// not a limiter: the reverted slew limiter slowed convergence itself
+// (the ~100 s slide regression); this hides output while convergence
+// runs at full speed. Lit SHADING stays live throughout - dimming
+// whole meshes would flicker worse than a moving highlight.
+// Written on the game thread inside flush_locked (render thread
+// parked); render-thread reads ride the standing park invariant.
+// ===========================================================================
+static constexpr float    KH_SUN_SETTLE_STEP_DEG = 0.15f;
+static constexpr uint64_t KH_SUN_SETTLE_MS = 400;
+static float    g_sun_pub_prev[3] = {};   // published dir at the previous flush
+static bool     g_sun_pub_prev_valid = false;
+static uint64_t g_sun_unstable_ms = 0;    // last publish step beyond the threshold
+static uint64_t g_sun_settle_holds = 0;   // stamps (forensics)
+static constexpr uint64_t KH_SUN_JUMP_COOLDOWN_MS = 5000;
+static uint64_t g_sun_last_jump_ms = 0;       // last ADOPTED jump (rate limiter)
+static uint64_t g_sun_jump_rate_refused = 0;  // storm refusals (forensics)
+
+// COLD HOLD (round 2 of the settle campaign): the per-step detector is
+// structurally blind to a slow slide - the post-validity convergence
+// creeps in steps UNDER 0.15 deg/flush that sum to visible degrees
+// (sunSettleHolds 0 while the slide was witnessed). Determinism per the
+// operator directive instead: nothing sun-shaped renders until the
+// direction has been valid for KH_SUN_COLD_HOLD_MS, restarted by an
+// adopted jump. A validity FLAP shorter than KH_SUN_FLAP_GRACE_MS does
+// NOT restart the hold (castArmsLost 87 mid-session showed brief
+// invalid dips; converting those into 1.25 s retractions would be a
+// new flicker class).
+static constexpr uint64_t KH_SUN_COLD_HOLD_MS = 1250;
+static constexpr uint64_t KH_SUN_FLAP_GRACE_MS = 500;
+static uint64_t g_sun_valid_ms = 0;   // last (graced) validity rise / adopted jump
+static uint64_t g_sun_fell_ms = 0;    // last validity fall (flap grace)
+static bool     g_sun_ok_prev = false;
+
+inline bool kh_sun_settled() {
+    const uint64_t khs_now = steady_now_ms();
+    if (g_sun_valid_ms == 0 || khs_now - g_sun_valid_ms < KH_SUN_COLD_HOLD_MS) return false;
+    return g_sun_unstable_ms == 0 ||
+           khs_now - g_sun_unstable_ms >= KH_SUN_SETTLE_MS;
+}
+
 inline const float* kh_shadow_sun() {
     // The DEBOUNCED published direction, not the raw latch: the sun map
     // and the fire flapping on raw derived was the cast-flicker symptom
@@ -4213,24 +4649,45 @@ inline void publish_world_lighting() {
                     // published direction; otherwise the candidate is
                     // refused and the cascade table lives. Fails open
                     // when the sky mirror is unavailable.
-                    bool engine_confirms = true;
-
-                    if (g_skysun_ref_valid) {
-                        const float de = g_skysun_ref[0] * g_pub_dir[0] +
-                                         g_skysun_ref[1] * g_pub_dir[1] +
-                                         g_skysun_ref[2] * g_pub_dir[2];
-                        if (de >= 0.99863f) engine_confirms = false;
-                    }
-
-                    if (engine_confirms) {
-                        g_pub_dir[0] = g_cand_dir[0];
-                        g_pub_dir[1] = g_cand_dir[1];
-                        g_pub_dir[2] = g_cand_dir[2];
+                    // JUMP-STORM RATE LIMITER (the no-shadow regression
+                    // session: 22 adoptions in one session, each wiping
+                    // the cascade table and restarting the cold hold -
+                    // shadows never existed and the swinging published
+                    // sun lit meshes 'randomly'). The engine confirmation
+                    // below has ALWAYS failed open - skyBindHits 0 in
+                    // every session on record - so view-dependent flap
+                    // candidates adopt freely when conditions produce
+                    // them. One adoption per cooldown: a real skipTime is
+                    // ONE jump and passes; storm refusals KEEP the
+                    // published direction (holding beats flapping) and
+                    // neither wipe nor restart the hold. The sky-mirror
+                    // confirmation repair is its own logged campaign.
+                    if (g_sun_last_jump_ms != 0 &&
+                        steady_now_ms() - g_sun_last_jump_ms < KH_SUN_JUMP_COOLDOWN_MS) {
                         g_cand_hold = 0;
-                        g_sun_jump_pending = true;   // exactly one jump per real move
+                        g_sun_jump_rate_refused++;
                     } else {
-                        g_cand_hold = 0;
-                        g_sun_jump_refused++;
+                        bool engine_confirms = true;
+
+                        if (g_skysun_ref_valid) {
+                            const float de = g_skysun_ref[0] * g_pub_dir[0] +
+                                             g_skysun_ref[1] * g_pub_dir[1] +
+                                             g_skysun_ref[2] * g_pub_dir[2];
+                            if (de >= 0.99863f) engine_confirms = false;
+                        }
+
+                        if (engine_confirms) {
+                            g_pub_dir[0] = g_cand_dir[0];
+                            g_pub_dir[1] = g_cand_dir[1];
+                            g_pub_dir[2] = g_cand_dir[2];
+                            g_cand_hold = 0;
+                            g_sun_jump_pending = true;   // exactly one jump per real move
+                            g_sun_last_jump_ms = steady_now_ms();
+                            g_sun_valid_ms = g_sun_last_jump_ms;   // cold hold restarts: the new direction re-settles
+                        } else {
+                            g_cand_hold = 0;
+                            g_sun_jump_refused++;
+                        }
                     }
                 }
             }
@@ -4239,7 +4696,41 @@ inline void publish_world_lighting() {
         g_sun_dir_engine[0] = g_pub_dir[0];
         g_sun_dir_engine[1] = g_pub_dir[1];
         g_sun_dir_engine[2] = g_pub_dir[2];
+
+        // SUN-SETTLE stamp: a published step beyond the threshold marks
+        // the direction unstable; consumers hold until it stays put for
+        // KH_SUN_SETTLE_MS (see the gate's state block).
+        if (g_sun_pub_prev_valid) {
+            float khs_sp = g_pub_dir[0] * g_sun_pub_prev[0] +
+                           g_pub_dir[1] * g_sun_pub_prev[1] +
+                           g_pub_dir[2] * g_sun_pub_prev[2];
+            khs_sp = khs_sp > 1.0f ? 1.0f : (khs_sp < -1.0f ? -1.0f : khs_sp);
+
+            if (acosf(khs_sp) * 57.29578f > KH_SUN_SETTLE_STEP_DEG) {
+                g_sun_unstable_ms = steady_now_ms();
+                g_sun_settle_holds++;
+            }
+        }
+
+        g_sun_pub_prev[0] = g_pub_dir[0];
+        g_sun_pub_prev[1] = g_pub_dir[1];
+        g_sun_pub_prev[2] = g_pub_dir[2];
+        g_sun_pub_prev_valid = true;
     }
+
+    // COLD-HOLD edge tracking: stamp the (graced) validity rise; a fall
+    // only notes its time - a sub-grace flap keeps the running hold.
+    if (sun_ok && !g_sun_ok_prev) {
+        const uint64_t khs_now = steady_now_ms();
+
+        if (!(g_sun_fell_ms != 0 && khs_now - g_sun_fell_ms < KH_SUN_FLAP_GRACE_MS)) {
+            g_sun_valid_ms = khs_now;
+        }
+    } else if (!sun_ok && g_sun_ok_prev) {
+        g_sun_fell_ms = steady_now_ms();
+    }
+
+    g_sun_ok_prev = sun_ok;
 
     g_sun_valid = sun_ok;
     g_fog_valid = g_fog_staged_valid;
@@ -4343,10 +4834,6 @@ struct LiveShadowState {
     uint32_t count = 0;
     uint64_t stamp_counter = 0;
     int      newest = -1;          // entry index of the last finalize
-    // Fine-cascade copy: pending is armed at finalize when the finished
-    // cascade is the finest known; the copy executes on the cycle's exit
-    // (its draws must be complete), pairing the grabbed content with the
-    // transform stashed here.
     // VIEW-PAIRED BANDS (pair mode 2, default): the engine's own resolve
     // contract, decoded from its shader - the sampling matrix consumes
     // VIEW-SPACE position, cascades are selected by VIEW DEPTH band
@@ -4442,6 +4929,7 @@ struct LiveShadowState {
     uint32_t pub_rej_streak = 0;     // consecutive bridge-truth publish rejections
     uint32_t view_src_miss = 0;
     uint64_t view_locks = 0;
+    uint64_t view_relocks = 0;   // source-memory relocks (dropped lock re-validated exact)
     uint64_t frame_view_hits = 0;
     float view_best_rot = -1.0f;    // best candidate's rotation error at last injection
     // Exactness-preference wait: time of the first bar-passing but
@@ -4725,6 +5213,16 @@ struct FfrRecord {
 static FfrRecord g_ffr[KH_FFR_RING];
 static uint32_t  g_ffr_head = 0;    // render thread; game thread only under the lock
 static uint32_t  g_ffr_serial = 0;
+// DIAGNOSTICS ARMING: the flight recorder (ring finalize + advance,
+// per-frame delta folds, flush verdicts, snapshot censuses, tripwires)
+// runs only after the FIRST getRenderStats or dumpRenderTrace call arms
+// it. Until then every FFR entry point returns at one relaxed atomic
+// load, the ring never advances (all slots stay serial 0, which the dump
+// already skips), and an idle session pays nothing measurable per frame.
+// Plain g_stats counters stay always-on by design: single increments,
+// and the first stats call should already carry history. Disarmed again
+// at session destroy.
+static std::atomic<bool> g_diag_armed{false};
 static uint64_t  g_ffr_snap[KH_FFR_NDELTA_EARLY] = {};
 static std::atomic<uint16_t> g_ffr_lockfails{0};        // flush_frame writes with NO lock held
 static std::atomic<bool>     g_ffr_any_eligible{false}; // last known: any eligible mesh exists
@@ -4826,13 +5324,15 @@ inline void ffr_read_counters(uint64_t* v) {
 }
 
 inline FfrRecord& ffr_head() { return g_ffr[g_ffr_head]; }
-inline void ffr_flush_stage(uint8_t s) { ffr_head().stage = s; }
+inline bool ffr_armed() { return g_diag_armed.load(std::memory_order_relaxed); }
+inline void ffr_flush_stage(uint8_t s) { if (ffr_armed()) ffr_head().stage = s; }
 
 // Finalize the closing frame's record and open the next. Render thread at
 // the main depth clear; also called from flush_locked (render thread
 // parked) when the clear hook never advanced the ring - hook-dead installs
 // then still produce one record per flush.
 inline void ffr_frame_boundary() {
+    if (!ffr_armed()) return;   // diagnostics arming: see g_diag_armed
     FfrRecord& r = ffr_head();
 
     if (r.serial != 0) {
@@ -5262,6 +5762,94 @@ static uint64_t g_rt_resolve_false = 0;
 static uint64_t g_rt_half_accepts = 0;     // half-res resolve acceptances (fog economy)
 static uint64_t g_sweep_gap_resets = 0;    // settle resets from capture-stream gaps
 static uint32_t g_rt_last_rej_w = 0;       // width of the last REJECTED resolve target
+
+// ===========================================================================
+// FRAME TOPOLOGY CENSUS (pure diagnostics; the resolve-sweep verification).
+// The translucency fix plan proposes moving the perceptual composite to the
+// engine's resolve sweep on the premise that the sweep is LATE (scene
+// composed). The code's own evidence points the other way: the sweep is
+// detected at the atlas-CONSUMING resolve draw, whose mask output feeds the
+// lit pass that FOLLOWS it - within a partition the sweep heads the color
+// pass. Whether the frame's LAST sweep lands after all color is a topology
+// fact, and standing law #1 forbids assuming topology: measure it. Per
+// scene cycle (main-depth clear to clear) this census stamps the draw
+// ordinal of every event the decision needs; the last INJECTED cycle is
+// published at the boundary and read by getRenderStats. Armed with the
+// stats (g_stats_armed); costs one relaxed load per draw when off.
+// Render-thread owned like the rest of g_ro; game-thread reads are
+// diagnostic-tolerant plain loads, the existing counter contract.
+// ===========================================================================
+struct FrameTopo {
+    uint32_t draws = 0;            // tracked draws this cycle (outside injection)
+    uint32_t sweeps = 0;           // gated resolve-sweep verdicts (rt_resolve_ok)
+    uint32_t d_first_sweep = 0;    // draw ordinal at the first sweep
+    uint32_t d_last_sweep = 0;     // draw ordinal at the last sweep
+    uint32_t injects = 0;          // accepted injections this cycle
+    uint32_t d_inject = 0;         // ordinal at the LAST accepted injection
+    uint32_t d_last_main_dsv = 0;  // last draw with the main scene depth bound
+    uint32_t d_last_scene_rt = 0;  // last draw with the latched scene color as RT0
+    uint32_t d_pp_head = 0;        // first post-injection draw into a foreign
+                                   // screen-sized non-mask color target with no
+                                   // DSV (postprocess-head candidate)
+    uint32_t pp_w = 0;             // that target's width
+    uint32_t pp_fmt = 0;           // that target's DXGI_FORMAT
+    uint32_t d_scene_srv = 0;      // first post-injection PS bind of the scene
+                                   // color as an SRV (consumption moment)
+    // --- v2 (the missing-content hunt); append-only ---
+    uint32_t d_last_color = 0;     // last draw into ANY screen-sized non-mask
+                                   // color RT0, latched identity or not
+    uint32_t d_last_foreign = 0;   // same, identity != the latched scene RT
+    uint32_t color_ids = 0;        // distinct color-RT identities this cycle
+    uint32_t srv_slot = 0;         // PS slot of the first scene-SRV consumption
+    uint32_t d_scene_copy = 0;     // first engine copy FROM the latched scene tex
+    uint32_t d_resolve_first = 0;  // first engine RESOLVE of the latched scene tex
+    uint32_t d_resolve_last = 0;   // last one (multi-resolve cycles: refire forensics)
+};
+static FrameTopo g_topo;           // live cycle (render thread)
+static FrameTopo g_topo_pub;       // last completed INJECTED cycle (boundary copy)
+static void* g_topo_scene_rt_id = nullptr;   // scene color RT0 identity, latched at
+                                             // the injection accept - never dereferenced
+static bool  g_topo_rt0_scene = false;   // current RT0 IS the latched scene color
+static bool  g_topo_rt0_valid = false;   // current RT0 classified (mask_classify_rt ran)
+static bool  g_topo_has_dsv = false;     // a DSV accompanied the current RT set
+static uint32_t g_topo_rt0_fmt = 0;      // current RT0 DXGI_FORMAT
+
+// ===========================================================================
+// TRANSLUCENT TAIL COMPOSITE: PARKED (operator decision, full campaign on
+// record). The design - inject translucent normal-blend meshes DEPTH-ONLY,
+// composite their color late against a completed-scene capture - was built,
+// verified firing 1:1 with injections, and moved across FOUR fire points:
+// the post-scene sweep, the (mid-scene, refraction-class) scene resolve,
+// the shape-scoped consumption bind, and finally the final-write RT0
+// transition at the measured watermark (topoTail == topoLastSceneRt).
+// The on-screen result was PIXEL-IDENTICAL at every point, fog-independent,
+// and the mode-8 transit probe showed nothing: the tail's pixels never
+// reach the presented image through the latched target, and the scene
+// texture's consumption is invisible to every hookable channel (PS SRV
+// slots 0-15 shape-scoped per-window, CopyResource, CopySubresourceRegion,
+// ResolveSubresource - all zero across five instrumented field rounds; the
+// one observed resolve is the mid-scene utility resolve feeding the R32F
+// pass). Conclusion for the next attempt: the presentation path for this
+// target is not reachable from the immediate-context hook surface; an
+// offline GPU capture (RenderDoc) of one frame is the required next step,
+// not further in-code instrumentation. The frame-topology census (below,
+// armed-only) and the passive copy/resolve observer hooks remain as the
+// permanent monitoring surface; the legacy perceptual path (capture at the
+// injection, Reinhard composite, 150 m background trust) is the default
+// again, byte-identical to the pre-campaign baseline.
+// ===========================================================================
+
+// Census v2/v3 state (the monitoring surface the park retains; the tail
+// state that used to sit alongside it is gone with the machinery).
+static FrameTopo g_topo_pub_after;        // first cycle after the injected one
+static bool      g_topo_want_after = false;
+static uint64_t  g_topo_cycles = 0;       // main-depth clears since stat arm
+static void*     g_topo_rt0_id = nullptr; // current RT0 identity (classify-time)
+static void*     g_topo_color_seen[8] = {};   // per-cycle distinct color identities
+static uint32_t  g_topo_color_seen_n = 0;
+static uint32_t  g_topo_srv_scans = 0;    // per-window scan budget (the 172 ms lesson)
+static void*     g_topo_scene_tex_id = nullptr;   // latched scene TEXTURE identity
+                                                  // (copy/resolve-hook source compares)
 static bool g_mask_cast_fired = false;   // one analytic pass per frame:
 // the engine re-uploads its view ~240x/frame and firing at every publish
 // stacked 240 fullscreen multiplies (shade^240 -> mask annihilated,
@@ -7354,7 +7942,19 @@ inline void fill_lighting_cb(ConstantData& cbd, const RenderObject& o) {
     cbd.lighting1[0] = g_sun_dir_engine[0];
     cbd.lighting1[1] = g_sun_dir_engine[1];
     cbd.lighting1[2] = g_sun_dir_engine[2];
-    cbd.lighting1[3] = g_sun_valid ? 1.0f : 0.0f;
+    // LIT TRUST GATE (operator directive: unlit - the warmup look - until
+    // the lighting stack is healthy, instead of dancing light). Three
+    // terms, all measured: the debounced sun valid, the settle hold
+    // elapsed, and an EXACT-class view publication within the last
+    // second - the flood sessions read viewPubExactAgeS 13.5 s while
+    // the derivation Z-flipped and the light danced; healthy sessions
+    // read ~5 ms, so the gate is invisible in normal play and the 1 s
+    // grace debounces transient lock hiccups. (The sky probe cannot be
+    // a term: it has never captured in any session on record - its
+    // repair is the logged confirmation campaign.)
+    cbd.lighting1[3] = (g_sun_valid && kh_sun_settled() &&
+                        g_ls.pub_exact_ms != 0 &&
+                        steady_now_ms() - g_ls.pub_exact_ms < 1000) ? 1.0f : 0.0f;
     // Colors: the located lighting block is the ONLY source (getLighting
     // retired). Ever-locked -> the mirrored lanes (fresh or last-known:
     // the block drifts slowly and the mirror survives expiry); never
@@ -7451,12 +8051,15 @@ inline void fill_lighting_cb(ConstantData& cbd, const RenderObject& o) {
 
     if (n == 0) return;
 
-    // The fine copy, when live, samples FIRST (index 0 -> t2); the entries
-    // selected above follow as the wide-area fallback on the live atlas.
-    // shadow_meta[0] (the count) is written LAST, after both parts land.
+    // SUN-SETTLE GATE (round 3): the live-table receive was the last
+    // UNGATED shadow term - a cold mispaired cascade matrix reads as
+    // the "zoomed-out wrong mapping" (wrong scale by construction).
+    // The zeroed count short-circuits the shader; the table re-enters
+    // the frame the hold expires.
+    if (!kh_sun_settled()) return;
+
+    // shadow_meta[0] (the count) is written LAST, after the table lands.
     uint32_t out_i = 0;
-    cbd.shadow_src[0] = -1.0f;
-    cbd.shadow_fix2[0] = 1.0f;   // identity rotation unless the copy path sets it
 
     cbd.shadow_meta[1] = g_shadow_map_sign;
     cbd.shadow_meta[2] = g_shadow_map_bias;
@@ -7677,6 +8280,68 @@ inline void shadow_view_scan(ID3D11Resource* res, const void* data, uint32_t byt
 
     for (uint32_t off = 0; off + 16 <= nf && off <= 192; off += 4) {
         const float* w = f + off;
+
+        // SOURCE-MEMORY RELOCK PROBE (shadow re-initialization), v2: a
+        // lock that was RIGHT can be dropped by a transient reject burst
+        // (the cold guard's 40-streak fired on a spawn camera cut) and,
+        // under view-shaped upload flood, the ring relearn can then
+        // starve for the rest of the session (field: viewBestRot ~pi,
+        // 1.94M candidates, seals 93% incomplete, fire on guard 51,
+        // derived sun 50+ deg off). The probe re-validates the
+        // remembered source on the unfakeable exact-class fingerprint
+        // (translation exactly zero AND rotation within 1e-3 of the
+        // bridge) - a genuinely wrong first lock never passes it. v1
+        // implemented this INSIDE the publish branch and its failure
+        // path continued past the ring hunt, excluding the remembered
+        // window from relearn - the one window the true view lives in
+        // when the buffer never moved. Field: the baseline's
+        // few-frame ring relock never happened, the pairing stayed
+        // dead 20 s, seals fell to 2.2% - 'shadows never initialize'.
+        // The probe is now STRICTLY non-blocking: pass relocks, fail
+        // falls through to the ring hunt exactly as before it existed.
+        if (!g_ls.view_src_valid && res == g_ls.view_src_res &&
+            off + base_off == g_ls.view_src_off &&
+            g_ls.view_src_relative && g_ro.cycle_pv_valid) {
+            float pf[16];
+
+            if (g_ls.view_src_orient == 1) {
+                memcpy(pf, w, sizeof(pf));
+            } else {
+                for (int r = 0; r < 4; ++r) {
+                    for (int c = 0; c < 4; ++c) {
+                        pf[r * 4 + c] = w[c * 4 + r];
+                    }
+                }
+            }
+
+            const float khr_tmag = fabsf(pf[12]) + fabsf(pf[13]) + fabsf(pf[14]);
+
+            if (khr_tmag <= 0.05f) {
+                const float* bv = &g_ro.cycle_pv.view[0][0];
+                float khr_er = 0.0f;
+
+                for (int r = 0; r < 3; ++r) {
+                    for (int c = 0; c < 3; ++c) {
+                        khr_er += fabsf(pf[r * 4 + c] - bv[r * 4 + c]);
+                    }
+                }
+
+                if (khr_er <= 1e-3f) {
+                    // Relock: restore the source; entries latched while
+                    // the pairing was dead were paired against garbage -
+                    // boundary-wipe semantics (delay-class: the table
+                    // rebuilds from live latches within a second).
+                    g_ls.view_src_valid = true;
+                    g_ls.view_src_miss = 0;
+                    g_ls.pub_rej_streak = 0;
+                    g_ls.view_relocks++;
+                    g_ls.count = 0;
+                    g_ls.newest = -1;
+                    g_lock_wipes++;
+                    g_ls.pub_exact_ms = steady_now_ms();
+                }
+            }
+        }
 
         if (g_ls.view_src_valid && res == g_ls.view_src_res && off + base_off == g_ls.view_src_off) {
             // The locked location is a STREAMING buffer: the engine maps
@@ -8077,7 +8742,7 @@ inline void shadow_live_upload(const void* data, uint32_t bytes) {
     // is its normal steady state - uploads must keep flowing so entries
     // REPLACE in place as cascades re-render. (A leftover per-frame-era
     // cap here froze the whole pipeline after the first eight latches:
-    // transforms, the newest pointer, and the fine copy all fossilized.)
+    // transforms and the newest pointer fossilized.)
     // pending_valid does NOT gate: TWO constant blocks carry sampling-family
     // transforms (the 1696-byte general per-cascade block and a 192-byte
     // specialized one), and first-upload-wins made the (transform, content)
@@ -8160,8 +8825,7 @@ inline void shadow_live_on_draw(ID3D11DeviceContext* ctx) {
     g_ls.pending_vp_valid = true;
 }
 
-// Cycle exit: the fully-upgraded pending latch becomes a table entry, and
-// arms the fine copy when its cascade is the finest known.
+// Cycle exit: the fully-upgraded pending latch becomes a table entry.
 inline void shadow_live_finalize_cycle() {
     if (!g_ls.pending_valid || !g_ls.pending_vp_valid || g_ls.atlas_size == 0) {
         g_ls.pending_valid = false;
@@ -8446,24 +9110,11 @@ inline void shadow_live_frame_reset() {
 // (the engine's finished answer). Sampling that mask at our own pixel's
 // screen position is registration-exact BY CONSTRUCTION - no transforms,
 // no origins, no cascades.
-struct MaskCandidate {
-    void*    key = nullptr;        // texture identity (weak)
-    uint32_t w = 0, h = 0, fmt = 0;
-    uint64_t draws = 0;
-};
-
 struct ShadowMaskState {
     bool atlas_bound = false;          // atlas seen in PS SRVs since last target change
     bool  rt_is_resolve = false;       // current RT0 is the screen-sized single-channel resolve target
     bool  rt_fmt_ok = false;           // current RT0 has a mask-family format (any size)
     uint32_t rt_w = 0;                 // current RT0 width
-    void* rt_key = nullptr;            // current RT0 resource (weak, for candidate draw counts)
-    MaskCandidate cands[8];
-    uint32_t cand_count = 0;
-    ID3D11Texture2D*          tex = nullptr;   // chosen mask (AddRef held)
-    ID3D11ShaderResourceView* srv = nullptr;
-    void* chosen_key = nullptr;
-    float dims[2] = {};                // chosen mask w, h
     // --- Analytic mask cast: the mesh's shadow drawn INTO the engine's
     // screen-space mask, per-pixel, with the true same-frame view (the
     // supervised latch fires at the main pass, BEFORE the mask is
@@ -8532,26 +9183,6 @@ struct ShadowMaskState {
     ID3D11DepthStencilState* cast_dss = nullptr;      // depth off
     bool  cast_states_failed = false;
     uint64_t analytic_casts = 0;
-    // SQF-set params (game thread writes, plain floats)
-    // Mask mode is the DEFAULT shadow path: candidate 0 in the field test
-    // (3840x2160 R8_UNORM, channel 0) proved to be the engine's shadow
-    // resolve, and sampling it at each pixel's own screen position is
-    // registration-exact by construction. The cascade path remains the
-    // automatic fallback whenever no mask candidate exists yet.
-    float enable = 1.0f;
-    float index = -1.0f;               // -1 = auto
-    // SRV-failure blacklist: a failed candidate is SKIPPED; the mode stays
-    // alive. (One transient cold failure used to zero 'enable' permanently
-    // - shadowSrvFailed=1 in every field log - silently demoting every
-    // session to the band fallback, which is exactly the path that can
-    // drift on sun changes. The mask path is the registration-exact one
-    // and must survive one bad candidate.)
-    void*    failed_keys[4] = {};
-    uint32_t failed_count = 0;
-    uint32_t fail_fmt = 0;             // last failed candidate's DXGI format (diagnostic:
-                                       // the recurring shadowSrvFailed=1 needs a name)
-    float channel = 0.0f;
-    float invert = 0.0f;
 };
 
 static ShadowMaskState g_mask;
@@ -8564,6 +9195,7 @@ static ShadowMaskState g_mask;
 // and the flush's forced boundary) call it. Runs on the render thread, or
 // on the game thread under the graphics lock - the ring's write invariant.
 inline void ffr_fold_late_deltas() {
+    if (!ffr_armed()) return;   // diagnostics arming: see g_diag_armed
     static uint64_t khr_late_snap[KH_FFR_NDELTA - KH_FFR_NDELTA_EARLY] = {};
     const uint64_t khr_now_c[KH_FFR_NDELTA - KH_FFR_NDELTA_EARLY] = {
         g_mask.cast_batches,
@@ -8617,21 +9249,20 @@ inline void release_shadow_device_state() {
     g_dl.slot11_buf = nullptr;
     g_dl.valid = false;   // consumers gate on valid; a fresh harvest re-arms
 
-    // --- screen-mask machinery ---
-    if (g_mask.srv) { g_mask.srv->Release(); g_mask.srv = nullptr; }
-    if (g_mask.tex) { g_mask.tex->Release(); g_mask.tex = nullptr; }
+    // --- screen-mask machinery (cast write) ---
     if (g_mask.engine_mask_rtv) { g_mask.engine_mask_rtv->Release(); g_mask.engine_mask_rtv = nullptr; }
     if (g_mask.cast_depth) { g_mask.cast_depth->Release(); g_mask.cast_depth = nullptr; }
     if (g_mask.min_blend) { g_mask.min_blend->Release(); g_mask.min_blend = nullptr; }
     if (g_mask.cast_dss) { g_mask.cast_dss->Release(); g_mask.cast_dss = nullptr; }
-    g_mask.chosen_key = nullptr;
-    g_mask.rt_key = nullptr;
     g_mask.rt_is_resolve = false;
+    g_topo_scene_rt_id = nullptr;   // weak identity: recycled allocations must not false-match
+    g_topo_rt0_scene = false;
+    g_topo_rt0_valid = false;
+    g_topo_rt0_id = nullptr;
+    g_topo_scene_tex_id = nullptr;
+    g_topo_color_seen_n = 0;
+    memset(g_topo_color_seen, 0, sizeof(g_topo_color_seen));
     g_mask.atlas_bound = false;
-    memset(g_mask.cands, 0, sizeof(g_mask.cands));
-    g_mask.cand_count = 0;
-    memset(g_mask.failed_keys, 0, sizeof(g_mask.failed_keys));
-    g_mask.failed_count = 0;
     g_mask.engine_mask_failed = false;
     g_mask.cast_states_failed = false;
     g_mask.cast_fov_valid = false;
@@ -9019,6 +9650,12 @@ inline void resolve_pair_capture(ID3D11DeviceContext* ctx) {
 
                         if (rt_resolve_ok) g_rt_resolve_true++;
                         else { g_rt_resolve_false++; g_rt_last_rej_w = g_mask.rt_w; }
+                        // Frame-topology census: stamp the gated sweep.
+                        if (rt_resolve_ok) {
+                            if (g_topo.sweeps == 0) g_topo.d_first_sweep = g_topo.draws;
+                            g_topo.d_last_sweep = g_topo.draws;
+                            ++g_topo.sweeps;
+                        }
                         if (rt_resolve_ok && !g_mask.rt_is_resolve) g_rt_half_accepts++;
 
                         if (rt_resolve_ok) {
@@ -9189,45 +9826,38 @@ inline void resolve_pair_capture(ID3D11DeviceContext* ctx) {
 // measured ~170 ms/frame - the entire framerate collapse.
 inline void mask_classify_rt(UINT n, ID3D11RenderTargetView* const* rtvs) {
     g_mask.rt_is_resolve = false;
-    g_mask.rt_key = nullptr;
+    g_topo_rt0_valid = false;
+    g_topo_rt0_scene = false;
     if (!n || !rtvs || !rtvs[0]) return;
     ID3D11Resource* res = nullptr;
     rtvs[0]->GetResource(&res);
     if (!res) return;
     ID3D11Texture2D* tex = nullptr;
     res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&tex));
+    g_topo_rt0_scene = (static_cast<void*>(res) == g_topo_scene_rt_id);
+    g_topo_rt0_id = static_cast<void*>(res);   // census v2: identity churn
+
+    // PER-WINDOW scan budget (round 4 of the consumption hunt): a single
+    // per-cycle budget died inside the INTERLEAVED foreign windows three
+    // rounds running - the 1402-2107 span burns any flat cap before the
+    // true postprocess head (~2040, after the last scene draw). Each
+    // scene RE-ENTRY resets the budget, so the FINAL foreign window -
+    // the one that actually consumes - always scans fresh.
+    if (g_topo_rt0_scene) g_topo_srv_scans = 0;
     res->Release();
     if (!tex) return;
     D3D11_TEXTURE2D_DESC td = {};
     tex->GetDesc(&td);
-    g_mask.rt_key = tex;
-
-    bool known = false;
-
-    for (uint32_t i = 0; i < g_mask.cand_count; ++i) {
-        if (g_mask.cands[i].key == tex) { known = true; break; }
-    }
-
-    if (!known && g_mask.cand_count < 8) {
-        MaskCandidate& c = g_mask.cands[g_mask.cand_count++];
-        c.key = tex;
-        c.w = td.Width;
-        c.h = td.Height;
-        c.fmt = static_cast<uint32_t>(td.Format);
-        c.draws = 0;
-    }
-
     g_mask.rt_fmt_ok =
         (td.Format == DXGI_FORMAT_R8_UNORM || td.Format == DXGI_FORMAT_R8_TYPELESS ||
          td.Format == DXGI_FORMAT_R16_UNORM || td.Format == DXGI_FORMAT_R16_TYPELESS ||
          td.Format == DXGI_FORMAT_R16_FLOAT);
     g_mask.rt_w = td.Width;
     g_mask.rt_is_resolve = td.Width >= 1280 && g_mask.rt_fmt_ok;
+    g_topo_rt0_fmt = static_cast<uint32_t>(td.Format);
+    g_topo_rt0_valid = true;
     tex->Release();
 }
-
-inline bool mask_ensure_srv(ID3D11DeviceContext* ctx);   // defined below
-
 
 // The hybrid: analytic ray-vs-AABB written into the ENGINE'S mask at the
 // view-publish moment (after all resolves, before the mask is consumed),
@@ -9250,6 +9880,15 @@ inline bool mask_ensure_srv(ID3D11DeviceContext* ctx);   // defined below
 inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
     if (g_sun_map_rendered_frame) return g_sun_map_valid;
     g_sun_map_rendered_frame = true;
+
+    // SUN-SETTLE GATE: no self/cast map from a moving sun - absent beats
+    // swinging (see the gate's state block). Validity drops so frozen
+    // consumers stand down too; the map re-renders the frame after the
+    // direction settles.
+    if (!kh_sun_settled()) {
+        g_sun_map_valid = false;
+        return false;
+    }
     // NOTE: validity is NOT cleared here - the previous frame's map stays
     // consumable (the fire runs before this frame's injection renders a
     // new one); a failed render simply leaves the old map to age out of
@@ -9292,7 +9931,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
         }
     }
 
-    struct SunCaster { float pos[3]; float size[3]; int mesh; };
+    struct SunCaster { float pos[3]; float size[3]; float rot[9]; bool rotated; int mesh; };
     static std::vector<SunCaster> casters;   // render-thread scratch
     casters.clear();
 
@@ -9322,7 +9961,9 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
             SunCaster c;
             memcpy(c.pos, o.pos, sizeof(c.pos));
             memcpy(c.size, o.size, sizeof(c.size));
-            c.mesh = (o.mesh >= 0 && o.mesh < KH_MESH_COUNT) ? o.mesh : 0;
+            memcpy(c.rot, o.rot_m, sizeof(c.rot));
+            c.rotated = o.rotated;
+            c.mesh = mesh_id_clamp(o.mesh);
             casters.push_back(c);
         }
     }
@@ -9356,6 +9997,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
         for (const auto& c : casters) {
             fnv(c.pos, sizeof(c.pos));
             fnv(c.size, sizeof(c.size));
+            fnv(c.rot, sizeof(c.rot));   // rotating a caster re-renders
             fnv(&c.mesh, sizeof(c.mesh));
         }
 
@@ -9375,8 +10017,9 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
     bool instanced = res_ok && g_res.vs_sundepth && g_res.layout_sundepth;
 
     if (instanced) {
-        // Grow-only dynamic instance buffer: 8 floats per caster
-        // (engine-space center, engine-space extents).
+        // Grow-only dynamic instance buffer: 20 floats per caster
+        // (engine-space center, engine-space extents, three engine-axes
+        // rotation rows - float4-strided to match the input layout).
         const UINT need = static_cast<UINT>(casters.size());
 
         if (need > g_res.sun_instance_cap) {
@@ -9384,7 +10027,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
             UINT cap = g_res.sun_instance_cap > 64 ? g_res.sun_instance_cap : 64;
             while (cap < need) cap *= 2;
             D3D11_BUFFER_DESC bd = {};
-            bd.ByteWidth = cap * sizeof(float) * 8;
+            bd.ByteWidth = cap * sizeof(float) * 20;
             bd.Usage = D3D11_USAGE_DYNAMIC;
             bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
             bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
@@ -9407,7 +10050,9 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
 
     for (const auto& c : casters) {
         const float ce[3] = { c.pos[0], c.pos[2], c.pos[1] };
-        const float he[3] = { c.size[0] * 0.5f, c.size[2] * 0.5f, c.size[1] * 0.5f };
+        const float hl[3] = { c.size[0] * 0.5f, c.size[2] * 0.5f, c.size[1] * 0.5f };
+        float he[3];
+        kh_rot_half_extents(hl, c.rot, c.rotated, he);   // enclosing (rotation-safe)
 
         for (int k = 0; k < 3; ++k) {
             if (ce[k] - he[k] < mn[k]) mn[k] = ce[k] - he[k];
@@ -9539,7 +10184,15 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                 outp[5] = c.size[2];
                 outp[6] = c.size[1];
                 outp[7] = 0.0f;
-                outp += 8;
+
+                for (int rr = 0; rr < 3; ++rr) {   // engine-axes rotation rows
+                    outp[8 + rr * 4 + 0] = c.rot[rr * 3 + 0];
+                    outp[8 + rr * 4 + 1] = c.rot[rr * 3 + 1];
+                    outp[8 + rr * 4 + 2] = c.rot[rr * 3 + 2];
+                    outp[8 + rr * 4 + 3] = 0.0f;
+                }
+
+                outp += 20;
             }
 
             ctx->Unmap(g_res.sun_instance_vb, 0);
@@ -9555,7 +10208,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
             ctx->Unmap(g_res.composite_cb, 0);
 
             ID3D11Buffer* vbs[2] = { nullptr, g_res.sun_instance_vb };
-            UINT strides[2] = { sizeof(MeshVertex), sizeof(float) * 8 };
+            UINT strides[2] = { sizeof(MeshVertex), sizeof(float) * 20 };
             UINT offsets[2] = { 0, 0 };
             size_t first = 0;
 
@@ -9594,6 +10247,8 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
             cbd.size_axes[0] = c.size[0];    // SQF [x,y,z] sizes -> engine [x,z,y]
             cbd.size_axes[1] = c.size[2];
             cbd.size_axes[2] = c.size[1];
+
+            kh_fill_obj_rot(cbd, c.rot);         // object rotation (VSMain path)
             memcpy(mapped.pData, &cbd, sizeof(cbd));
             ctx->Unmap(g_res.composite_cb, 0);
             ctx->Draw(mesh_vertex_count(c.mesh), 0);
@@ -9623,9 +10278,8 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
         lb[0] = c.pos[0];
         lb[1] = c.pos[2];   // SQF -> engine axes
         lb[2] = c.pos[1];
-        lb[3] = c.size[0] * 0.5f;
-        lb[4] = c.size[2] * 0.5f;
-        lb[5] = c.size[1] * 0.5f;
+        const float hl[3] = { c.size[0] * 0.5f, c.size[2] * 0.5f, c.size[1] * 0.5f };
+        kh_rot_half_extents(hl, c.rot, c.rotated, lb + 3);   // enclosing (rotation-safe)
         g_sun_local_count++;
     }
 
@@ -9706,7 +10360,10 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
     // cast_misses = FIRST failed guard: 1 arm/fired never satisfied (set
     // once armed, cleared on entry), 3 resources, 41 depth, 42 fov,
     // 43 rtv-failed, 5 view, 51 cold view-quality, 52 unsettled capture
-    // stream, 61 ensure_srv, 81 all casters beyond the fit radius
+    // stream, 53 sun unsettled (the settle gate), 54 no valid published
+    // sun (the default-direction cast: the 66.93 deg cold swing), 61
+    // ensure_srv, 81 all
+    // casters beyond the fit radius
     // (distance rule, not a failure); post-guard:
     // 7 states, 8 no meshes, 9 Map; 0 = full success.
     if (!ctx) return;
@@ -9779,6 +10436,20 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
     // Transition hold: fire only into a SETTLED capture stream (see the
     // sweep_settle note). Steady state saturates this within one frame.
     if (g_mask.sweep_settle < g_mask.sweep_need) { g_ls.cast_misses = 52; return; }
+    // SUN-SETTLE GATE (operator directive): the analytic cast rides the
+    // published sun; while that direction is still converging (the cold
+    // glide) or has just jumped (the 66.93 deg wrong-sun event), a fired
+    // shadow SWINGS with the camera. Absent beats swinging: hold until
+    // the publish arbiter reports the direction stable.
+    if (!kh_sun_settled()) { g_ls.cast_misses = 53; return; }
+    // NO-DEFAULT-SUN GATE (the 66.93 deg conviction: acos(0.392) is the
+    // exact angle between the (0,1,0) default and this map's real sun -
+    // the cold swing was casts fired through the pre-validity fallback
+    // in the freeze block below, which the sun MAP never had; its own
+    // null-sun refusal is why only the CAST swung). The fire now waits
+    // for the debounced published direction; the fallback line in the
+    // freeze is retained inert (fsun can no longer be null there).
+    if (!kh_shadow_sun()) { g_ls.cast_misses = 54; return; }
     // Falsified at this site: a hard fire-gate on the near-plane latch
     // (elevated on ordinary frames too - starved the fire) and a
     // same-frame depth copy at the fire (predates the view-model's
@@ -9888,7 +10559,14 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
             // depth. Effect meshes remain casters - they are real volumes.
             if (o.fullscreen || !o.visible || o.mode == DepthMode::Off) continue;
             memcpy(centries[ncb].pos, o.pos, 12);
-            memcpy(centries[ncb].size, o.size, 12);
+            // Slab entries stay SQF-ordered (the fill below swaps); a
+            // rotated mesh contributes its ENCLOSING extents so the
+            // analytic AABB slab remains conservative.
+            float khc_he[3];
+            kh_world_half_extents(o, khc_he);                 // engine axes
+            centries[ncb].size[0] = khc_he[0] * 2.0f;         // -> SQF order
+            centries[ncb].size[1] = khc_he[2] * 2.0f;
+            centries[ncb].size[2] = khc_he[1] * 2.0f;
             ncb++;
         }
     }
@@ -10267,126 +10945,9 @@ inline void mask_note_draw(ID3D11DeviceContext* ctx) {
     if (!g_mask.atlas_bound || !ctx) return;
     g_mask.atlas_bound = false;   // one record per pass segment is plenty
     g_ls.atlas_last_seen = effect_time_seconds();   // the engine just consumed the held atlas: it is alive
-
-    if (g_mask.rt_key) {
-        for (uint32_t i = 0; i < g_mask.cand_count; ++i) {
-            if (g_mask.cands[i].key == g_mask.rt_key) { g_mask.cands[i].draws++; break; }
-        }
-    }
-
     if (g_mask.rt_is_resolve) {
         resolve_pair_capture(ctx);
     }
-}
-
-// Choose + hold the mask texture and its SRV. Render thread (injection).
-inline bool mask_ensure_srv(ID3D11DeviceContext* ctx) {
-    if (g_mask.enable < 0.5f || g_mask.cand_count == 0 || !ctx) return false;
-    int pick = -1;
-
-    if (g_mask.index >= 0.0f && static_cast<uint32_t>(g_mask.index) < g_mask.cand_count) {
-        pick = static_cast<int>(g_mask.index);
-    } else {
-        // Auto-pick: the shadow resolve is a SCREEN-SIZED SINGLE-CHANNEL
-        // target (field-confirmed: R8_UNORM). Most-draws alone grabbed the
-        // HDR scene color, which also samples the atlas.
-        uint64_t best = 0;
-        bool single_seen = false;
-
-        for (uint32_t i = 0; i < g_mask.cand_count; ++i) {
-            const MaskCandidate& c = g_mask.cands[i];
-            if (c.w < 1280) continue;
-            const bool single =
-                c.fmt == DXGI_FORMAT_R8_UNORM || c.fmt == DXGI_FORMAT_R8_TYPELESS ||
-                c.fmt == DXGI_FORMAT_R16_UNORM || c.fmt == DXGI_FORMAT_R16_TYPELESS ||
-                c.fmt == DXGI_FORMAT_R16_FLOAT;
-            if (!single) continue;
-            single_seen = true;
-            bool failed = false;
-
-            for (uint32_t fk = 0; fk < g_mask.failed_count; ++fk) {
-                if (g_mask.failed_keys[fk] == c.key) { failed = true; break; }
-            }
-
-            if (failed) continue;
-
-            if (c.draws > best) {
-                best = c.draws;
-                pick = static_cast<int>(i);
-            }
-        }
-
-        // Pre-identification bootstrap ONLY: fires while NO single-channel
-        // candidate has ever appeared. A blacklisted single-channel
-        // candidate must NOT fall through here - picking the most-drawn
-        // any-format target read the HDR scene as a shadow mask (the
-        // 'received shadows shifting with scene content' field report).
-        if (pick < 0 && !single_seen) {
-            for (uint32_t i = 0; i < g_mask.cand_count; ++i) {
-                if (g_mask.cands[i].w < 640 || g_mask.cands[i].draws <= best) continue;
-                bool failed = false;
-
-                for (uint32_t fk = 0; fk < g_mask.failed_count; ++fk) {
-                    if (g_mask.failed_keys[fk] == g_mask.cands[i].key) { failed = true; break; }
-                }
-
-                if (failed) continue;
-                best = g_mask.cands[i].draws;
-                pick = static_cast<int>(i);
-            }
-        }
-    }
-
-    if (pick < 0) return false;
-
-    if (g_mask.chosen_key != g_mask.cands[pick].key) {
-        if (g_mask.srv) { g_mask.srv->Release(); g_mask.srv = nullptr; }
-        if (g_mask.tex) { g_mask.tex->Release(); g_mask.tex = nullptr; }
-        g_mask.chosen_key = nullptr;
-    }
-
-    if (g_mask.srv) return true;
-    // Re-acquire the texture pointer via the stored key: the key IS the
-    // texture pointer recorded while alive; the engine keeps these
-    // persistent, but guard creation failures anyway.
-    ID3D11Texture2D* tex = static_cast<ID3D11Texture2D*>(g_mask.cands[pick].key);
-    D3D11_TEXTURE2D_DESC td = {};
-    tex->GetDesc(&td);
-    DXGI_FORMAT fmt = td.Format;
-
-    switch (td.Format) {
-        case DXGI_FORMAT_R8G8B8A8_TYPELESS:     fmt = DXGI_FORMAT_R8G8B8A8_UNORM; break;
-        case DXGI_FORMAT_B8G8R8A8_TYPELESS:     fmt = DXGI_FORMAT_B8G8R8A8_UNORM; break;
-        case DXGI_FORMAT_R16G16B16A16_TYPELESS: fmt = DXGI_FORMAT_R16G16B16A16_FLOAT; break;
-        case DXGI_FORMAT_R8_TYPELESS:           fmt = DXGI_FORMAT_R8_UNORM; break;
-        case DXGI_FORMAT_R16_TYPELESS:          fmt = DXGI_FORMAT_R16_UNORM; break;
-        default: break;
-    }
-
-    D3D11_SHADER_RESOURCE_VIEW_DESC sd = {};
-    sd.Format = fmt;
-    sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-    sd.Texture2D.MipLevels = 1;
-    ID3D11Device* dev = nullptr;
-    tex->GetDevice(&dev);
-    if (!dev) return false;
-    HRESULT hr = dev->CreateShaderResourceView(tex, &sd, &g_mask.srv);
-    dev->Release();
-    if (FAILED(hr) || !g_mask.srv) {
-        g_mask.srv = nullptr;
-        // Blacklist THIS candidate only (bounded, so no per-frame retry
-        // storm on it); the mode stays alive for the other candidates.
-        if (g_mask.failed_count < 4) g_mask.failed_keys[g_mask.failed_count++] = g_mask.cands[pick].key;
-        g_mask.fail_fmt = static_cast<uint32_t>(fmt);
-        g_stats.shadow_srv_failed++;
-        return false;
-    }
-    tex->AddRef();
-    g_mask.tex = tex;
-    g_mask.chosen_key = g_mask.cands[pick].key;
-    g_mask.dims[0] = static_cast<float>(g_mask.cands[pick].w);
-    g_mask.dims[1] = static_cast<float>(g_mask.cands[pick].h);
-    return true;
 }
 
 // Lazy SRV over the atlas; typeless depth formats map to their color-read
@@ -11143,21 +11704,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     // faces reach far closer than their centers - exactly the error that
     // grows with mesh size.
     std::sort(meshes.begin(), meshes.end(), [&cam](const RenderObject& a, const RenderObject& b) {
-        auto d2 = [&cam](const RenderObject& o) {
-            const float c[3] = { cam[0], cam[2], cam[1] };   // engine -> SQF axes
-            float acc = 0.0f;
-
-            for (int k = 0; k < 3; ++k) {
-                const float lo = o.pos[k] - o.size[k] * 0.5f;
-                const float hi = o.pos[k] + o.size[k] * 0.5f;
-                const float p = c[k] < lo ? lo : (c[k] > hi ? hi : c[k]);
-                const float d = c[k] - p;
-                acc += d * d;
-            }
-
-            return acc;
-        };
-        return d2(a) > d2(b);
+        return kh_mesh_dist_sq(a, cam) > kh_mesh_dist_sq(b, cam);
     });
 
     StateBackup backup;
@@ -11232,10 +11779,6 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     // is empty: shadowMeta.x = 0 short-circuits the shader). Slot t1 is
     // inside the StateBackup's saved SRV range.
     if (guard && shadow_live_ensure_srv()) ctx->PSSetShaderResources(1, 1, &g_ls.atlas_srv);
-    if (mask_ensure_srv(ctx)) ctx->PSSetShaderResources(3, 1, &g_mask.srv);
-    // engine shadow mask (captured at the resolve sweep): the depth-gated
-    // receive samples it where mesh surfaces hug world geometry - unit
-    // stencil shadows land on our meshes through the engine's own factor.
     for (UINT bslot = 0; bslot < 8; ++bslot) {
         if (g_ls.band[bslot].valid && g_ls.band[bslot].srv) {
             const UINT treg = bslot < 6 ? 4 + bslot : 12 + (bslot - 6);   // t4-t9, t12-t13
@@ -11246,8 +11789,42 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     if (g_sun_map_valid && g_res.sun_srv) ctx->PSSetShaderResources(11, 1, &g_res.sun_srv);
     // Depth WRITE is the whole point: the engine's translucents must be
     // able to depth-reject against these meshes.
+    // PERCEPTUAL-COMPOSITE CAPTURE (see the PSComposite packing note):
+    // one pre-mesh snapshot of the scene target per injected frame, taken
+    // only when some normal-blend mesh is actually translucent (the staged
+    // copy's alpha already carries the lifetime envelope). Failure demotes
+    // to the legacy hardware blend for the frame - counted, never fatal.
+    bool khr_perceptual = false;
+
+    for (const auto& o : meshes) {
+        if (o.blend_mode == 0 && o.color[3] < 0.999f) { khr_perceptual = true; break; }
+    }
+
+    // TAIL DEFERRAL DECISION (measured capability only, law #1): defer
+    // the translucent color to the post-scene sweep when a post-injection
+    // sweep was sighted recently, the last arm did not die unfired, this
+    // is not a rescue cycle (safety paths are not training paths), the
+    // guard pipeline is live (the tail runs PSComposite), and the tail's
+    // own resources exist. Otherwise: the legacy perceptual path,
+    // unchanged - dark-safe fallback by construction.
+    if (khr_perceptual) {
+        ID3D11Device* khr_dev = nullptr;
+        ctx->GetDevice(&khr_dev);
+        std::string khr_cap_err = khr_dev ? ensure_scene_capture(khr_dev, ctx) : std::string("no device");
+        if (khr_dev) khr_dev->Release();
+
+        if (khr_cap_err.empty()) {
+            ctx->PSSetShaderResources(3, 1, &g_res.scene_srv);
+            g_stats.perceptual_captures++;
+        } else {
+            khr_perceptual = false;
+            g_stats.effect_setup_fails++;
+        }
+    }
+
     ctx->OMSetDepthStencilState(g_res.dss_test_write, 0);
     ctx->RSSetState(g_res.rasterizer);
+    ID3D11RasterizerState* khr_bound_rs = g_res.rasterizer;   // per-object twoSided switch
     const FLOAT bf[4] = { 0, 0, 0, 0 };
 
 
@@ -11261,6 +11838,10 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         cbd.size_axes[1] = o.size[2];
         cbd.size_axes[2] = o.size[1];
         cbd.size_axes[3] = static_cast<float>(o.blend_mode);
+        kh_fill_obj_rot(cbd, o.rot_m);
+        cbd.dbg_ctl[0] = static_cast<float>(g_dbg_mode.load(std::memory_order_relaxed));
+        cbd.blend_ctl[0] = (khr_perceptual && o.blend_mode == 0 && o.color[3] < 0.999f) ? 1.0f : 0.0f;
+        cbd.blend_ctl[1] = 150.0f;   // background-trust range (m); see the shader note
         memcpy(cbd.color, o.color, sizeof(cbd.color));
         // The camera (engine space) serves both the guard's true fragment
         // distance AND the solid band mask, so it is filled regardless.
@@ -11283,19 +11864,9 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         cbd.band0[2] = o.band_falloff;
         cbd.band0[3] = o.banded ? 1.0f : 0.0f;
         fill_lighting_cb(cbd, o);
-        // RECEIVE PATH: never the screen mask. The engine's shadow-resolve
-        // mask is computed from WORLD depth before our meshes inject; at
-        // our pixels it holds the shadowing of whatever the mesh occludes
-        // - view-dependent background values, not the mesh's. Reading it
-        // only became possible when the SRV blacklist un-killed the mode,
-        // and the field result was shadows on the mesh appearing and
-        // vanishing with camera angle. Bands (then the live table) are the
-        // receive truth; the mask machinery stays alive for the CAST
-        // write, which is registration-exact by construction.
-        cbd.mask_meta[0] = 0.0f;
-        cbd.mask_meta[1] = g_mask.channel;
-        cbd.mask_meta[2] = g_mask.invert;
-        cbd.mask_meta[3] = 0.0f;
+        // Screen-mask receive retired: see the RECEIVE LEDGER at
+        // ConstantData::mask_meta. mask_meta.x commits below iff any
+        // view-paired band seal is consumable this frame.
 
         {
             bool band_any = false;
@@ -11371,7 +11942,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
                 band_any = true;
             }
 
-            if (band_any) cbd.mask_meta[3] = 1.0f;
+            if (band_any && kh_sun_settled()) cbd.mask_meta[0] = 1.0f;   // sun-settle gate: receive stands down while the shadow system converges
 
             // engine-mask depth-gated receive: registration-exact shadows
             // (units, clouds, everything the engine resolves) on mesh
@@ -11461,17 +12032,6 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
                 cbd.fog_color[3] = g_ls.cam[1];   // camera altitude (engine Y-up)
             }
         }
-        cbd.mask_dims[0] = g_mask.dims[0];
-        cbd.mask_dims[1] = g_mask.dims[1];
-
-        {
-            UINT nvp = 1;
-            D3D11_VIEWPORT vvp = {};
-            ctx->RSGetViewports(&nvp, &vvp);
-            cbd.mask_dims[2] = nvp && vvp.Width > 0 ? vvp.Width : g_mask.dims[0];
-            cbd.mask_dims[3] = nvp && vvp.Height > 0 ? vvp.Height : g_mask.dims[1];
-        }
-
         if (guard) {
             // Guard inputs: reconstruction coefficients + the encode range
             // of the copied depth, the copy's pixel dimensions, and the
@@ -11513,7 +12073,14 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         if (FAILED(ctx->Map(g_res.composite_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) continue;
         memcpy(mapped.pData, &cbd, sizeof(cbd));
         ctx->Unmap(g_res.composite_cb, 0);
-        const int mid = (o.mesh >= 0 && o.mesh < KH_MESH_COUNT) ? o.mesh : 0;
+        ID3D11RasterizerState* khr_want_rs = o.two_sided ? g_res.rasterizer : g_res.rasterizer_cull;
+
+        if (khr_want_rs != khr_bound_rs) {
+            ctx->RSSetState(khr_want_rs);
+            khr_bound_rs = khr_want_rs;
+        }
+
+        const int mid = mesh_id_clamp(o.mesh);
 
         if (mid != bound_mesh) {
             ctx->IASetVertexBuffers(0, 1, &g_res.mesh_vb[mid], &stride, &offset);
@@ -11521,6 +12088,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         }
 
         ctx->OMSetBlendState(g_res.blend_modes[o.blend_mode], bf, 0xFFFFFFFF);
+
         ctx->Draw(mesh_vertex_count(mid), 0);
         g_stats.composite_meshes++;
     }
@@ -11536,12 +12104,12 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         // injection, not this frame's rescue) and not a cold-start metric.
         g_composite_rescues++;
         g_rescue_last_ms = steady_now_ms();
-        if (ffr_head().rescues != 0xFF) ffr_head().rescues++;
+        if (ffr_armed() && ffr_head().rescues != 0xFF) ffr_head().rescues++;
     } else {
         g_stats.composite_injections++;
         g_composite_inject_serial.fetch_add(1, std::memory_order_relaxed);
     }
-    ffr_head().opq_at_inject = g_ro.opaque_draws;   // flight recorder: landing forensics
+    if (ffr_armed()) ffr_head().opq_at_inject = g_ro.opaque_draws;   // flight recorder: landing forensics
     g_ro.opaques_since_inject = 0;   // the flush's repaint check counts from this landing
 
     if (!khr_anomalous && g_mask.cold_t0 >= 0.0 && g_mask.cold_first_inject < 0.0f) {
@@ -11549,6 +12117,42 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     }
 
 }
+
+// Frame-topology census, per tracked draw (armed only - see FrameTopo).
+inline void topo_note_draw() {
+    ++g_topo.draws;
+    if (g_ro.dsv_main) g_topo.d_last_main_dsv = g_topo.draws;
+    if (g_topo_rt0_valid && g_topo_rt0_scene) g_topo.d_last_scene_rt = g_topo.draws;
+    if (g_topo.injects != 0 && g_topo.d_pp_head == 0 &&
+        g_topo_rt0_valid && !g_topo_rt0_scene && !g_topo_has_dsv &&
+        !g_mask.rt_fmt_ok && g_main_depth_w != 0 &&
+        g_mask.rt_w >= g_main_depth_w / 2) {
+        // Foreign screen-sized multi-channel color target, no depth,
+        // after the injection: the postprocess-head candidate.
+        g_topo.d_pp_head = g_topo.draws;
+        g_topo.pp_w = g_mask.rt_w;
+        g_topo.pp_fmt = g_topo_rt0_fmt;
+    }
+
+    // v2: any-identity color activity + the distinct-identity census.
+    if (g_topo_rt0_valid && !g_mask.rt_fmt_ok && g_main_depth_w != 0 &&
+        g_mask.rt_w >= g_main_depth_w / 2) {
+        g_topo.d_last_color = g_topo.draws;
+        if (!g_topo_rt0_scene) g_topo.d_last_foreign = g_topo.draws;
+        bool khc_known = false;
+
+        for (uint32_t khc_i = 0; khc_i < g_topo_color_seen_n; ++khc_i) {
+            if (g_topo_color_seen[khc_i] == g_topo_rt0_id) { khc_known = true; break; }
+        }
+
+        if (!khc_known && g_topo_color_seen_n < 8) {
+            g_topo_color_seen[g_topo_color_seen_n++] = g_topo_rt0_id;
+        }
+
+        g_topo.color_ids = g_topo_color_seen_n;
+    }
+}
+
 
 inline void reorder_pre_draw(ID3D11DeviceContext* self) {
     // Vtable hooks intercept EVERY context: Arma's worker threads record
@@ -11577,6 +12181,9 @@ inline void reorder_pre_draw(ID3D11DeviceContext* self) {
         shadow_note_draw(self);
         mask_note_draw(self);
         mask_cast_engine(self);
+
+        // Frame-topology census (armed diagnostics only; see FrameTopo).
+        if (g_stats_armed.load(std::memory_order_relaxed)) topo_note_draw();
 
         // Dynamic-lights per-draw sampler: every 16th engine draw reads
         // the slot-11 window identity - the distinct-window census, and,
@@ -11625,7 +12232,7 @@ inline void reorder_pre_draw(ID3D11DeviceContext* self) {
                     g_ro.cycle_pv = khl_pv;
                     g_ro.cycle_pv_valid = true;
                     g_ro.cycle_pv_stale = false;
-                    ffr_head().retry_fixed = 1;   // flight recorder: started stale, repaired
+                    if (ffr_armed()) ffr_head().retry_fixed = 1;   // flight recorder: started stale, repaired
                 }
             }
 
@@ -11827,9 +12434,98 @@ inline void reorder_pre_draw(ID3D11DeviceContext* self) {
     }
 
     g_ro.injected = true;
+
+    // Frame-topology census: stamp the accept and latch the scene color
+    // RT0 identity (the injection draws into it - the one moment it is
+    // KNOWN to be bound). Identity only, never dereferenced; forgotten at
+    // device reset with the other weak identities. Unconditional so the
+    // identity is warm before the stats arm.
+    if (g_stats_armed.load(std::memory_order_relaxed)) {
+        g_topo.d_inject = g_topo.draws;
+        ++g_topo.injects;
+    }
+
+    {
+        ID3D11RenderTargetView* kht_rtv = nullptr;
+        self->OMGetRenderTargets(1, &kht_rtv, nullptr);
+
+        if (kht_rtv) {
+            ID3D11Resource* kht_res = nullptr;
+            kht_rtv->GetResource(&kht_res);
+
+            if (kht_res) {
+                g_topo_scene_rt_id = static_cast<void*>(kht_res);
+                g_topo_scene_tex_id = static_cast<void*>(kht_res);   // copy-hook compare
+                kht_res->Release();
+            }
+
+            kht_rtv->Release();
+        }
+    }
+
     g_ro.in_injection = true;
     inject_composited_meshes(self);
     g_ro.in_injection = false;
+}
+
+// Consumption census: copy-based reads of the latched scene texture. Pure
+// pass-through observers - armed only, once per cycle, own captures
+// excluded via in_injection (the tail/legacy capture copies FROM the
+// scene texture and must not stamp itself).
+static void STDMETHODCALLTYPE hooked_copyresource(ID3D11DeviceContext* self, ID3D11Resource* dst, ID3D11Resource* src) {
+    if (src && g_topo_scene_tex_id && g_topo.d_scene_copy == 0 &&
+        static_cast<void*>(src) == g_topo_scene_tex_id &&
+        self == g_reorder_target_ctx.load(std::memory_order_relaxed) &&
+        !g_ro.in_injection && reorder_on_render_thread() &&
+        g_stats_armed.load(std::memory_order_relaxed)) {
+        g_topo.d_scene_copy = g_topo.draws;
+    }
+
+    g_orig_copyresource(self, dst, src);
+}
+
+static void STDMETHODCALLTYPE hooked_copysubresourceregion(ID3D11DeviceContext* self, ID3D11Resource* dst, UINT dst_sub, UINT dx, UINT dy, UINT dz, ID3D11Resource* src, UINT src_sub, const D3D11_BOX* box) {
+    if (src && g_topo_scene_tex_id && g_topo.d_scene_copy == 0 &&
+        static_cast<void*>(src) == g_topo_scene_tex_id &&
+        self == g_reorder_target_ctx.load(std::memory_order_relaxed) &&
+        !g_ro.in_injection && reorder_on_render_thread() &&
+        g_stats_armed.load(std::memory_order_relaxed)) {
+        g_topo.d_scene_copy = g_topo.draws;
+    }
+
+    g_orig_copysubresourceregion(self, dst, dst_sub, dx, dy, dz, src, src_sub, box);
+}
+
+// RESOLVE-POINT TAIL COMPOSITE. Three field rounds proved: nothing ever
+// reads the latched MSAA scene texture by SRV or copy, yet the tail
+// write is visible - the engine's one consumption channel is the MSAA
+// RESOLVE, whose single-sample OUTPUT (a different identity) feeds the
+// postprocess chain. The moment the engine resolves the scene target,
+// the frame is complete BY CONSTRUCTION - it is the image about to be
+// shown. Compositing here, before passing the resolve through, is
+// same-frame and pre-consumption; the old sweep fire (one frame late
+// via the NEXT resolve - the fog-cutout mechanism) remains only as the
+// fallback for configs that never resolve. Own captures excluded via
+// in_injection (the tail itself resolves the scene into its capture).
+static void STDMETHODCALLTYPE hooked_resolvesubresource(ID3D11DeviceContext* self, ID3D11Resource* dst, UINT dst_sub, ID3D11Resource* src, UINT src_sub, DXGI_FORMAT fmt) {
+    if (src && g_topo_scene_tex_id &&
+        static_cast<void*>(src) == g_topo_scene_tex_id &&
+        self == g_reorder_target_ctx.load(std::memory_order_relaxed) &&
+        !g_ro.in_injection && reorder_on_render_thread()) {
+        if (g_stats_armed.load(std::memory_order_relaxed)) {
+            if (g_topo.d_resolve_first == 0) g_topo.d_resolve_first = g_topo.draws;
+            g_topo.d_resolve_last = g_topo.draws;
+        }
+
+        // (The resolve-point FIRE is RETIRED after one field round: the
+        // single per-cycle resolve lands at ~draw 1526 while the scene
+        // target keeps drawing to ~2204 - a MID-SCENE utility resolve,
+        // immediately consumed by the R32F pass at 1527, not the final
+        // consumption. The census stamps above stay; the fire moved to
+        // the true consumption bind in hooked_pssetshaderresources.)
+    }
+
+    g_orig_resolvesubresource(self, dst, dst_sub, src, src_sub, fmt);
 }
 
 static void STDMETHODCALLTYPE hooked_pssetshaderresources(ID3D11DeviceContext* self, UINT start, UINT n, ID3D11ShaderResourceView* const* srvs) {
@@ -11885,6 +12581,48 @@ static void STDMETHODCALLTYPE hooked_pssetshaderresources(ID3D11DeviceContext* s
 
                         res->Release();
                     }
+                }
+            }
+        }
+    }
+
+    // Consumption census v4 + the CONSUMPTION-POINT FIRE. Why three trap
+    // generations read zero: v3's cycle-wide budget (2048 calls from the
+    // boundary) exhausts during the scene phase, ~1500 binds before the
+    // postprocess head (~draw 2205 vs scene end 2204). The scan is now
+    // SHAPE-SCOPED - foreign RT0, no DSV: scene-phase binds never pay
+    // the GetResource loop - slots 0-15, its own small budget. On the
+    // hit: stamp the census + capability, and FIRE THE TAIL before
+    // passing the bind through - the scene is complete BY CONSTRUCTION
+    // (the engine is about to read it), and the consuming draw then
+    // samples the texture WITH the composite in it. Same-frame, pre-
+    // consumption, angle-independent. The fire path must work unarmed;
+    // the pure-census half stays behind the arm.
+    if (srvs && g_topo_scene_tex_id &&
+        g_stats_armed.load(std::memory_order_relaxed) && g_topo.d_scene_srv == 0 &&
+        !g_topo_has_dsv && !(g_topo_rt0_valid && g_topo_rt0_scene) &&
+        g_topo_srv_scans < 1024 &&
+        reorder_on_render_thread() && !g_ro.in_injection) {
+        ++g_topo_srv_scans;
+        const UINT kht_n = n < 16 ? n : 16;
+
+        for (UINT kht_i = 0; kht_i < kht_n; ++kht_i) {
+            if (!srvs[kht_i]) continue;
+            ID3D11Resource* kht_res = nullptr;
+            srvs[kht_i]->GetResource(&kht_res);
+
+            if (kht_res) {
+                const bool kht_hit = (static_cast<void*>(kht_res) == g_topo_scene_tex_id);
+                kht_res->Release();
+
+                if (kht_hit) {
+                    if (g_topo.d_scene_srv == 0 &&
+                        g_stats_armed.load(std::memory_order_relaxed)) {
+                        g_topo.d_scene_srv = g_topo.draws;
+                        g_topo.srv_slot = start + kht_i;
+                    }
+
+                    break;
                 }
             }
         }
@@ -11963,6 +12701,7 @@ static void STDMETHODCALLTYPE hooked_omset_rendertargets(ID3D11DeviceContext* se
             // world-relative map.)
         }
 
+        g_topo_has_dsv = dsv != nullptr;
         mask_classify_rt(n, rtvs);
     }
 
@@ -11977,6 +12716,11 @@ static void STDMETHODCALLTYPE hooked_omset_rts_and_uavs(ID3D11DeviceContext* sel
         g_ro.dsv_main = dsv && g_main_depth_identity &&
                         reorder_dsv_identity(dsv) == g_main_depth_identity;
         shadow_track_targets(self, dsv, g_ro.dsv_main, n, rtvs);
+        // The RTVs changed unclassified through this path: the census
+        // flags must not carry a stale verdict onto the new targets.
+        g_topo_has_dsv = dsv != nullptr;
+        g_topo_rt0_valid = false;
+        g_topo_rt0_scene = false;
     }
 
     g_orig_omset_rts_and_uavs(self, n, rtvs, dsv, uav_start, n_uavs, uavs, counts);
@@ -12012,6 +12756,23 @@ static void STDMETHODCALLTYPE hooked_clear_depthstencil(ID3D11DeviceContext* sel
 
                 g_cc_flush_opaques.store(0xFFFFFFFFu, std::memory_order_relaxed);
             }
+
+            // Frame-topology census: publish the closing cycle if it
+            // carried an injection (arming the after-record), else - if
+            // the previous cycle was the injected one - publish this
+            // cycle as the AFTER record (the missing-content hunt).
+            if (g_topo.injects != 0 && g_topo.draws != 0) {
+                g_topo_pub = g_topo;
+                g_topo_want_after = true;
+            } else if (g_topo_want_after && g_topo.draws != 0) {
+                g_topo_pub_after = g_topo;
+                g_topo_want_after = false;
+            }
+
+            g_topo = FrameTopo{};
+            g_topo_color_seen_n = 0;
+            g_topo_srv_scans = 0;
+            g_topo_cycles++;
 
             // A depth clear of the main scene buffer marks the new frame:
             // injection re-arms and the phase evidence resets.
@@ -12137,6 +12898,9 @@ inline void ensure_reorder_hook() {
         { KH_VT_MAP,                  reinterpret_cast<void*>(&hooked_map),                     reinterpret_cast<void**>(&g_orig_map) },
         { KH_VT_UNMAP,                reinterpret_cast<void*>(&hooked_unmap),                   reinterpret_cast<void**>(&g_orig_unmap) },
         { KH_VT_UPDATESUBRESOURCE,    reinterpret_cast<void*>(&hooked_updatesubresource),      reinterpret_cast<void**>(&g_orig_updatesubresource) },
+        { KH_VT_COPYRESOURCE,         reinterpret_cast<void*>(&hooked_copyresource),           reinterpret_cast<void**>(&g_orig_copyresource) },
+        { KH_VT_COPYSUBRESOURCEREGION, reinterpret_cast<void*>(&hooked_copysubresourceregion), reinterpret_cast<void**>(&g_orig_copysubresourceregion) },
+        { KH_VT_RESOLVESUBRESOURCE,   reinterpret_cast<void*>(&hooked_resolvesubresource),     reinterpret_cast<void**>(&g_orig_resolvesubresource) },
     };
 
     size_t created = 0;
@@ -12295,7 +13059,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         has_objects = !g_draw_list.empty();
     }
 
-    ffr_head().had_objects = has_objects ? 1 : 0;
+    if (ffr_armed()) ffr_head().had_objects = has_objects ? 1 : 0;
 
     const UINT read_idx = g_async_write_idx ^ 1;
     const bool async_read_due = g_async_inflight_count[read_idx] > 0;
@@ -12422,7 +13186,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     const bool comp_healthy = composite_path_healthy() && injected_since_last_flush &&
                               !repainted_since_inject && !anomaly_this_frame;
 
-    {   // flight recorder: the flush verdict, verbatim
+    if (ffr_armed()) {   // flight recorder: the flush verdict, verbatim
         FfrRecord& khf_r = ffr_head();
         khf_r.comp_healthy = comp_healthy ? 1 : 0;
         khf_r.inj_since_flush = injected_since_last_flush ? 1 : 0;
@@ -12482,7 +13246,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         }
     }
 
-    {   // flight recorder: snapshot census + the dark tripwire's eligibility latch
+    if (ffr_armed()) {   // flight recorder: snapshot census + the dark tripwire's eligibility latch
         FfrRecord& khf_r = ffr_head();
         khf_r.eligible = static_cast<uint16_t>(khf_ffr_eligible > 0xFFFFu ? 0xFFFFu : khf_ffr_eligible);
         khf_r.meshes_snap = static_cast<uint16_t>(meshes.size() > 0xFFFFu ? 0xFFFFu : meshes.size());
@@ -12505,12 +13269,12 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     if (g_ro.cycle_pv_valid) {
         pv = g_ro.cycle_pv;
         g_flush_latch_pvs++;
-        ffr_head().pv_src = 0;
+        if (ffr_armed()) ffr_head().pv_src = 0;
     } else if (!RVExtBridge::get_projection_view_transform(pv)) {
         ffr_flush_stage(5);   // flight recorder: no transform, nothing drawn
         return;
     } else {
-        ffr_head().pv_src = 1;
+        if (ffr_armed()) ffr_head().pv_src = 1;
     }
 
     // Cycle state can be read mid-reset from another thread; never
@@ -12520,7 +13284,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         if (!RVExtBridge::get_projection_view_transform(live_fix)) { ffr_flush_stage(5); return; }
         pv = live_fix;
         g_flush_pv_repairs++;
-        ffr_head().pv_src = 2;
+        if (ffr_armed()) ffr_head().pv_src = 2;
     }
 
     // CARRY ENCODE BAND GATE (field round 3, partial-vanish conviction:
@@ -12621,7 +13385,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                   ? (-pv.projection[3][2] / pv.projection[2][2]) : -1.0f;
     }
 
-    {   // flight recorder: the FINAL encode pv (post repair + slot/keep),
+    if (ffr_armed()) {   // flight recorder: the FINAL encode pv (post repair + slot/keep),
         // plus the dark-flash forensic: how far the flush's draw camera
         // sits from the STAGED LIGHTING camera the shading terms assume.
         FfrRecord& khf_r = ffr_head();
@@ -12672,9 +13436,16 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     if (any_effect) {
         UINT dw = 0, dh = 0;
 
-        effects_ready = ensure_depth_srv(dev, ctx, &dw, &dh).empty() &&
-                        ensure_effect_shader(dev).empty() &&
-                        ensure_scene_capture(dev, ctx).empty();
+        {
+            std::string khf_fx_err = ensure_depth_srv(dev, ctx, &dw, &dh);
+            if (khf_fx_err.empty()) khf_fx_err = ensure_effect_shader(dev);
+            if (khf_fx_err.empty()) khf_fx_err = ensure_scene_capture(dev, ctx);
+            effects_ready = khf_fx_err.empty();
+            // Once per distinct message: effect setup failures used to be
+            // COUNTED only (effectSetupFails), which named the symptom but
+            // never the cause.
+            if (!effects_ready) kh_report_error("KH effect setup: " + khf_fx_err);
+        }
 
         depth_fx_ready = effects_ready && any_depth_fx &&
                          g_res.depth_srv && g_res.depth_dsv_ro;
@@ -12703,20 +13474,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     // object's world BOUNDS (nearest point of the AABB), not its center -
     // large meshes reach far closer than their centers, and the center
     // metric misordered exactly those.
-    auto dist_sq = [&cam](const RenderObject& o) {
-        const float c[3] = { cam[0], cam[2], cam[1] };   // engine -> SQF axes
-        float acc = 0.0f;
-
-        for (int k = 0; k < 3; ++k) {
-            const float lo = o.pos[k] - o.size[k] * 0.5f;
-            const float hi = o.pos[k] + o.size[k] * 0.5f;
-            const float p = c[k] < lo ? lo : (c[k] > hi ? hi : c[k]);
-            const float d = c[k] - p;
-            acc += d * d;
-        }
-
-        return acc;
-    };
+    auto dist_sq = [&cam](const RenderObject& o) { return kh_mesh_dist_sq(o, cam); };
 
     auto group_of = [](const RenderObject& o) {
         if (o.mode == DepthMode::Off) return 2;
@@ -12772,6 +13530,10 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     const FLOAT bf[4] = { 0, 0, 0, 0 };
     ctx->OMSetBlendState(g_res.blend_modes[0], bf, 0xFFFFFFFF);
     ctx->RSSetState(g_res.rasterizer);
+    ID3D11RasterizerState* khr_bound_rs = g_res.rasterizer;   // per-object twoSided switch
+    // Declared BEFORE the upload lambda so its [&] capture can see it;
+    // the capture block just before the mesh pass sets the verdict.
+    bool khf_perceptual = false;   // flush-edition perceptual-composite gate
 
     auto upload_cb = [&](const RenderObject& o, bool chain_pass) -> bool {
         ConstantData cbd = {};
@@ -12785,6 +13547,10 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         cbd.size_axes[1] = o.size[2];
         cbd.size_axes[2] = o.size[1];
         cbd.size_axes[3] = static_cast<float>(o.blend_mode);
+        kh_fill_obj_rot(cbd, o.rot_m);
+        cbd.dbg_ctl[0] = static_cast<float>(g_dbg_mode.load(std::memory_order_relaxed));
+        cbd.blend_ctl[0] = (khf_perceptual && !o.fullscreen && o.blend_mode == 0 && o.color[3] < 0.999f) ? 1.0f : 0.0f;
+        cbd.blend_ctl[1] = 150.0f;   // background-trust range (m); see the shader note
         memcpy(cbd.color, o.color, sizeof(cbd.color));
         memcpy(cbd.fx0, o.fx, sizeof(cbd.fx0));
         memcpy(cbd.fx1, o.fx + 4, sizeof(cbd.fx1));
@@ -12887,19 +13653,9 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         cbd.band0[2] = o.band_falloff;
         cbd.band0[3] = o.banded ? 1.0f : 0.0f;
         fill_lighting_cb(cbd, o);
-        // RECEIVE PATH: never the screen mask. The engine's shadow-resolve
-        // mask is computed from WORLD depth before our meshes inject; at
-        // our pixels it holds the shadowing of whatever the mesh occludes
-        // - view-dependent background values, not the mesh's. Reading it
-        // only became possible when the SRV blacklist un-killed the mode,
-        // and the field result was shadows on the mesh appearing and
-        // vanishing with camera angle. Bands (then the live table) are the
-        // receive truth; the mask machinery stays alive for the CAST
-        // write, which is registration-exact by construction.
-        cbd.mask_meta[0] = 0.0f;
-        cbd.mask_meta[1] = g_mask.channel;
-        cbd.mask_meta[2] = g_mask.invert;
-        cbd.mask_meta[3] = 0.0f;
+        // Screen-mask receive retired: see the RECEIVE LEDGER at
+        // ConstantData::mask_meta. mask_meta.x commits below iff any
+        // view-paired band seal is consumable this frame.
 
         {
             bool band_any = false;
@@ -12975,7 +13731,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                 band_any = true;
             }
 
-            if (band_any) cbd.mask_meta[3] = 1.0f;
+            if (band_any && kh_sun_settled()) cbd.mask_meta[0] = 1.0f;   // sun-settle gate: receive stands down while the shadow system converges
 
             // engine-mask depth-gated receive: registration-exact shadows
             // (units, clouds, everything the engine resolves) on mesh
@@ -13065,23 +13821,33 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                 cbd.fog_color[3] = g_ls.cam[1];   // camera altitude (engine Y-up)
             }
         }
-        cbd.mask_dims[0] = g_mask.dims[0];
-        cbd.mask_dims[1] = g_mask.dims[1];
-
-        {
-            UINT nvp = 1;
-            D3D11_VIEWPORT vvp = {};
-            ctx->RSGetViewports(&nvp, &vvp);
-            cbd.mask_dims[2] = nvp && vvp.Width > 0 ? vvp.Width : g_mask.dims[0];
-            cbd.mask_dims[3] = nvp && vvp.Height > 0 ? vvp.Height : g_mask.dims[1];
-        }
-
         D3D11_MAPPED_SUBRESOURCE mapped = {};
         if (FAILED(ctx->Map(g_res.constant_buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return false;
         memcpy(mapped.pData, &cbd, sizeof(cbd));
         ctx->Unmap(g_res.constant_buffer, 0);
         return true;
     };
+
+    // PERCEPTUAL-COMPOSITE CAPTURE, flush edition (see the inject twin):
+    // the flush repaints every mesh every frame, so it needs its own
+    // pre-mesh snapshot - taken at flush time it also contains the
+    // injected output, which composites idempotently (mixing lc over
+    // pixels already showing lc-composited scene drifts negligibly).
+    khf_perceptual = false;
+
+    for (const auto& o : meshes) {
+        if (!o.fullscreen && o.blend_mode == 0 && o.color[3] < 0.999f) { khf_perceptual = true; break; }
+    }
+
+    if (khf_perceptual) {
+        if (ensure_scene_capture(dev, ctx).empty()) {
+            ctx->PSSetShaderResources(3, 1, &g_res.scene_srv);
+            g_stats.perceptual_captures++;
+        } else {
+            khf_perceptual = false;
+            g_stats.effect_setup_fails++;
+        }
+    }
 
     // --- Mesh pass ---
     for (const auto& o : meshes) {
@@ -13121,7 +13887,14 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                                                g_res.dss_test;
 
         ctx->OMSetDepthStencilState(dss, 0);
-        const int mid = (o.mesh >= 0 && o.mesh < KH_MESH_COUNT) ? o.mesh : 0;
+        ID3D11RasterizerState* khr_want_rs = o.two_sided ? g_res.rasterizer : g_res.rasterizer_cull;
+
+        if (khr_want_rs != khr_bound_rs) {
+            ctx->RSSetState(khr_want_rs);
+            khr_bound_rs = khr_want_rs;
+        }
+
+        const int mid = mesh_id_clamp(o.mesh);
 
         if (mid != bound_mesh) {
             ctx->IASetVertexBuffers(0, 1, &g_res.mesh_vb[mid], &stride, &offset);
@@ -13130,6 +13903,9 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
         ctx->Draw(mesh_vertex_count(mid), 0);
     }
+
+    // Chain passes below assume the ambient (CullNone) rasterizer.
+    if (khr_bound_rs != g_res.rasterizer) ctx->RSSetState(g_res.rasterizer);
 
     // --- Fullscreen chain (single-resolve ping-pong) ---
     // The scene is resolved ONCE (re-resolved here only so the chain sees the
@@ -13650,6 +14426,10 @@ inline void reset_stat_counters() {
     g_va_shaped = 0; g_va_tmag_min = 1e9f;
     g_rt_resolve_true = 0; g_rt_resolve_false = 0;
     g_rt_half_accepts = 0; g_sweep_gap_resets = 0; g_rt_last_rej_w = 0;
+    g_topo = FrameTopo{}; g_topo_pub = FrameTopo{};
+    g_sun_settle_holds = 0;
+    g_topo_pub_after = FrameTopo{}; g_topo_want_after = false;
+    g_topo_cycles = 0;
     g_inj_guard_off = 0; g_flush_fallback_draws = 0; g_flush_latch_pvs = 0;
     g_flush_pv_repairs = 0; g_flush_repaint_saves = 0; g_flush_anomaly_carries = 0;
     g_sun_map_skips = 0;
@@ -13696,9 +14476,25 @@ inline void reset_stat_counters() {
 // state.
 inline void reset_session_state() {
     reset_stat_counters();
+    g_sun_pub_prev_valid = false;   // the settle tracker restarts with the session
+    g_sun_unstable_ms = 0;
+    g_sun_valid_ms = 0;
+    g_sun_last_jump_ms = 0;
+    g_sun_jump_rate_refused = 0;
+    g_sun_fell_ms = 0;
+    g_sun_ok_prev = false;
     g_stats_armed.store(false, std::memory_order_relaxed);
+    g_diag_armed.store(false, std::memory_order_relaxed);   // recorder re-arms on demand
+    g_dbg_mode.store(0, std::memory_order_relaxed);         // debug visuals off
+
+    {   // error dedupe dies with the session (a fresh session re-reports)
+        std::lock_guard<std::mutex> g(g_err_once_mutex);
+        g_err_once.clear();
+    }
+
     // the lifetime pairing trio is session-scoped under full destroy
     g_view_relock_forced = 0; g_lock_wipes = 0; g_ls.view_locks = 0;
+    g_ls.view_relocks = 0;
     g_ls.pub_rej_streak = 0; g_ls.view_src_miss = 0;
     g_ls.last_publish_rot_err = 1.0f;
     g_ls.pub_exact_ms = 0;
@@ -13774,6 +14570,7 @@ inline void reset_retained_state() {
     {
         std::lock_guard<std::mutex> g(g_draw_list_mutex);
         g_draw_list.clear();
+        g_next_seq = 0;   // creation order restarts with the list it orders
     }
 
     g_query_pending = false;
@@ -13872,10 +14669,23 @@ inline size_t clear_render_objects() {
 // SQF entry points
 // ---------------------------------------------------------------------------
 
+// Uniform ARRAY error shape for the array-returning query commands (the
+// same pair-in-array idiom as [["status","armed"]]): success returns the
+// data array, failure returns [["error", <sentence>]] - one return type
+// per command, message preserved. Callers key on element 0's first field.
+static game_value kh_error_pairs(const std::string& msg) {
+    auto_array<game_value> pair;
+    pair.push_back(game_value("error"));
+    pair.push_back(game_value(msg));
+    auto_array<game_value> out;
+    out.push_back(game_value(std::move(pair)));
+    return game_value(std::move(out));
+}
+
 static game_value sample_scene_depth_sqf(game_value_parameter args) {
     try {
         auto& arr = args.to_array();
-        if (arr.size() < 2) return game_value("usage: sampleSceneDepth [u, v]");
+        if (arr.size() < 2) return kh_error_pairs("usage: sampleSceneDepth [u, v]");
         float u = static_cast<float>(arr[0]);
         float v = static_cast<float>(arr[1]);
 
@@ -13899,17 +14709,17 @@ static game_value sample_scene_depth_sqf(game_value_parameter args) {
             return RenderIntegration::run_depth_compute(RenderIntegration::ComputeKernel::SampleDepth, 0, px, py, results, 4);
         }();
 
-        if (status != "OK") return game_value(status);
+        if (status != "OK") return kh_error_pairs(status);
         auto_array<game_value> out;
         out.push_back(game_value(results[2]));  // scene distance, meters
         out.push_back(game_value(results[3]));  // raw depth buffer value
         return game_value(std::move(out));
     } catch (const std::exception& e) {
         report_error(std::string("sampleSceneDepth: ") + e.what());
-        return game_value(std::string("EXCEPTION: ") + e.what());
+        return kh_error_pairs(std::string("EXCEPTION: ") + e.what());
     } catch (...) {
         report_error("sampleSceneDepth: unknown exception");
-        return game_value("EXCEPTION: unknown");
+        return kh_error_pairs("EXCEPTION: unknown");
     }
 }
 
@@ -13929,20 +14739,20 @@ static game_value gpu_visibility_sqf(game_value_parameter args) {
         std::vector<float> pts(count * 3);
         for (UINT i = 0; i < count; ++i) {
             auto& p = arr[i].to_array();
-            if (p.size() < 3) return game_value("each point must be [x, y, zASL]");
+            if (p.size() < 3) return kh_error_pairs("each point must be [x, y, zASL]");
             pts[i * 3 + 0] = static_cast<float>(p[0]);
             pts[i * 3 + 1] = static_cast<float>(p[1]);
             pts[i * 3 + 2] = static_cast<float>(p[2]);
         }
 
         std::string status = RenderIntegration::upload_query_points(pts.data(), count);
-        if (!status.empty()) return game_value(status);
+        if (!status.empty()) return kh_error_pairs(status);
 
         std::vector<float> results(count * 4);
         status = RenderIntegration::run_depth_compute(RenderIntegration::ComputeKernel::Visibility, count, 0.0f, 0.0f,
                                                       results.data(), count * 4);
                                                     
-        if (status != "OK") return game_value(status);
+        if (status != "OK") return kh_error_pairs(status);
         auto_array<game_value> out;
         out.reserve(count);
         for (UINT i = 0; i < count; ++i) {
@@ -13955,10 +14765,10 @@ static game_value gpu_visibility_sqf(game_value_parameter args) {
         return game_value(std::move(out));
     } catch (const std::exception& e) {
         report_error(std::string("gpuVisibility: ") + e.what());
-        return game_value(std::string("EXCEPTION: ") + e.what());
+        return kh_error_pairs(std::string("EXCEPTION: ") + e.what());
     } catch (...) {
         report_error("gpuVisibility: unknown exception");
-        return game_value("EXCEPTION: unknown");
+        return kh_error_pairs("EXCEPTION: unknown");
     }
 }
 
@@ -13996,7 +14806,7 @@ static game_value gpu_visibility_sqf(game_value_parameter args) {
 static game_value add_render3d_sqf(game_value_parameter args) {
     try {
         auto& arr = args.to_array();
-        if (arr.size() < 2) return game_value("usage: addRender3D [[x,y,zASL], size, [r,g,b,a]?, mode?, sceneRead?]");
+        if (arr.size() < 2) return game_value("usage: addRender3D [[x,y,zASL], size, [r,g,b,a]?, mode?, sceneRead?, effect?, fxParams?, band?, blend?, duration?, lit?, mesh?, farVis?, rotation?, twoSided?]");
         RenderIntegration::RenderObject obj;
         auto& pos = arr[0].to_array();
         if (pos.size() < 3) return game_value("position must be [x, y, zASL]");
@@ -14080,6 +14890,27 @@ static game_value add_render3d_sqf(game_value_parameter args) {
 
         if (arr.size() > 12 && arr[12].type_enum() == game_data_type::BOOL) {
             obj.far_vis = static_cast<bool>(arr[12]);   // visible beyond max view distance
+        }
+
+        if (arr.size() > 13) {
+            float khr_p = 0.0f, khr_y = 0.0f, khr_r = 0.0f;
+
+            if (arr[13].type_enum() == game_data_type::SCALAR) {
+                khr_y = static_cast<float>(arr[13]);   // bare number = heading (yaw)
+            } else if (arr[13].type_enum() == game_data_type::ARRAY) {
+                auto& ra = arr[13].to_array();
+                if (ra.size() >= 1) khr_p = static_cast<float>(ra[0]);
+                if (ra.size() >= 2) khr_y = static_cast<float>(ra[1]);
+                if (ra.size() >= 3) khr_r = static_cast<float>(ra[2]);
+            } else {
+                return game_value("rotation must be a number (yaw) or [pitch, yaw, roll] degrees");
+            }
+
+            RenderIntegration::kh_set_rotation(obj, khr_p, khr_y, khr_r);
+        }
+
+        if (arr.size() > 14 && arr[14].type_enum() == game_data_type::BOOL) {
+            obj.two_sided = static_cast<bool>(arr[14]);   // false = back-face culling
         }
 
         return game_value(RenderIntegration::add_render_object(obj));
@@ -14191,8 +15022,23 @@ static game_value update_render3d_sqf(game_value_parameter args) {
             obj.pos[0] = static_cast<float>(pos[0]);
             obj.pos[1] = static_cast<float>(pos[1]);
             obj.pos[2] = static_cast<float>(pos[2]);
-        } else if (prop == "size") {
+        } else if (prop == "size" || prop == "scale") {
             if (!RenderIntegration::read_vec3_or_uniform(arr[2], obj.size)) return game_value(false);
+        } else if (prop == "rotation") {
+            float khr_p = 0.0f, khr_y = 0.0f, khr_r = 0.0f;
+
+            if (arr[2].type_enum() == game_data_type::SCALAR) {
+                khr_y = static_cast<float>(arr[2]);   // bare number = heading (yaw)
+            } else if (arr[2].type_enum() == game_data_type::ARRAY) {
+                auto& ra = arr[2].to_array();
+                if (ra.size() >= 1) khr_p = static_cast<float>(ra[0]);
+                if (ra.size() >= 2) khr_y = static_cast<float>(ra[1]);
+                if (ra.size() >= 3) khr_r = static_cast<float>(ra[2]);
+            } else {
+                return game_value(false);
+            }
+
+            RenderIntegration::kh_set_rotation(obj, khr_p, khr_y, khr_r);
         } else if (prop == "mesh") {
             const int mid = RenderIntegration::mesh_id_from_gv(arr[2]);
             if (mid < 0) return game_value(false);
@@ -14225,6 +15071,8 @@ static game_value update_render3d_sqf(game_value_parameter args) {
             } else {
                 obj.lit = static_cast<bool>(arr[2]);
             }
+        } else if (prop == "twosided") {
+            obj.two_sided = static_cast<bool>(arr[2]);   // false = back-face culling
         } else if (prop == "farvis") {
             obj.far_vis = static_cast<bool>(arr[2]);   // visible beyond max view distance
         } else {
@@ -14344,6 +15192,7 @@ static game_value remove_render_handler_sqf(game_value_parameter arg) {
 // Dispatched during the next flush; results readable 1-2 frames later via
 // getVisibilityResults (no GPU stall, unlike the synchronous gpuVisibility).
 // Queueing again before the flush overwrites the pending batch.
+// Returns the queued point count (SCALAR); -1 = invalid input or exception.
 static game_value queue_visibility_sqf(game_value_parameter args) {
     try {
         auto& arr = args.to_array();
@@ -14353,7 +15202,7 @@ static game_value queue_visibility_sqf(game_value_parameter args) {
 
         for (UINT i = 0; i < count; ++i) {
             auto& p = arr[i].to_array();
-            if (p.size() < 3) return game_value("each point must be [x, y, zASL]");
+            if (p.size() < 3) return game_value(-1.0f);   // invalid point shape
             RenderIntegration::g_query_points_pending[i * 3 + 0] = static_cast<float>(p[0]);
             RenderIntegration::g_query_points_pending[i * 3 + 1] = static_cast<float>(p[1]);
             RenderIntegration::g_query_points_pending[i * 3 + 2] = static_cast<float>(p[2]);
@@ -14364,10 +15213,10 @@ static game_value queue_visibility_sqf(game_value_parameter args) {
         return game_value(static_cast<float>(count));
     } catch (const std::exception& e) {
         report_error(std::string("queueVisibility: ") + e.what());
-        return game_value(std::string("EXCEPTION: ") + e.what());
+        return game_value(-1.0f);
     } catch (...) {
         report_error("queueVisibility: unknown exception");
-        return game_value("EXCEPTION: unknown");
+        return game_value(-1.0f);
     }
 }
 
@@ -14471,10 +15320,28 @@ static game_value add_postfx_sqf(game_value_parameter args) {
 // getRenderStats -> ARRAY of [name, value] pairs (cumulative since load).
 // Skip counters name the reason for any effect flicker: a skipped flush is a
 // frame rendered without our draws.
+// Debug visual selector for the solid-mesh pixel shaders (see g_dbg_mode
+// for the mode catalog). Diagnostic-only, defaults off, survives nothing
+// past session destroy.
+static game_value set_render_debug_sqf(game_value_parameter arg) {
+    try {
+        if (arg.type_enum() != game_data_type::SCALAR) return game_value(false);
+        const int khd_m = static_cast<int>(static_cast<float>(arg));
+        if (khd_m < 0 || khd_m > 8) return game_value(false);   // valid modes: 0-8
+        RenderIntegration::g_dbg_mode.store(khd_m, std::memory_order_relaxed);
+        return game_value(true);
+    } catch (...) {
+        return game_value(false);
+    }
+}
+
 static game_value get_render_stats_sqf() {
     try {
         // OPT-IN (see g_stats_armed): first call arms + zeroes the pure
         // diagnostics and returns a status pair; stats flow from call two.
+        // Arms the flight recorder as well (see g_diag_armed).
+        RenderIntegration::g_diag_armed.store(true, std::memory_order_relaxed);
+
         if (!RenderIntegration::g_stats_armed.exchange(true, std::memory_order_relaxed)) {
             RenderIntegration::reset_stat_counters();
             auto_array<game_value> pair;
@@ -14538,7 +15405,6 @@ static game_value get_render_stats_sqf() {
             out.push_back(kv("bandSlotsValid", bsv));
         }
 
-        out.push_back(kv("maskFailFmt", RenderIntegration::g_mask.fail_fmt));
         out.push_back(kvf("fireFovX", RenderIntegration::g_mask.last_fire_fov[0]));
         out.push_back(kvf("fireFovY", RenderIntegration::g_mask.last_fire_fov[1]));
         out.push_back(kvf("fireRotErr", RenderIntegration::g_mask.last_fire_rot_err));
@@ -14559,6 +15425,37 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("liveAccepts", RenderIntegration::g_stats.live_accepts));
         out.push_back(kv("shadowAtlasSize", RenderIntegration::g_ls.atlas_size));
         out.push_back(kv("resolveHits", RenderIntegration::g_ls.resolve_hits));
+        out.push_back(kv("topoDraws", RenderIntegration::g_topo_pub.draws));
+        out.push_back(kv("topoSweeps", RenderIntegration::g_topo_pub.sweeps));
+        out.push_back(kv("topoFirstSweep", RenderIntegration::g_topo_pub.d_first_sweep));
+        out.push_back(kv("topoLastSweep", RenderIntegration::g_topo_pub.d_last_sweep));
+        out.push_back(kv("topoInjects", RenderIntegration::g_topo_pub.injects));
+        out.push_back(kv("topoInject", RenderIntegration::g_topo_pub.d_inject));
+        out.push_back(kv("topoLastMainDsv", RenderIntegration::g_topo_pub.d_last_main_dsv));
+        out.push_back(kv("topoLastSceneRt", RenderIntegration::g_topo_pub.d_last_scene_rt));
+        out.push_back(kv("topoPpHead", RenderIntegration::g_topo_pub.d_pp_head));
+        out.push_back(kv("topoPpW", RenderIntegration::g_topo_pub.pp_w));
+        out.push_back(kv("topoPpFmt", RenderIntegration::g_topo_pub.pp_fmt));
+        out.push_back(kv("topoSceneSrv", RenderIntegration::g_topo_pub.d_scene_srv));
+        out.push_back(kv("topoCycles", RenderIntegration::g_topo_cycles));
+        out.push_back(kv("topoLastColor", RenderIntegration::g_topo_pub.d_last_color));
+        out.push_back(kv("topoForeignColor", RenderIntegration::g_topo_pub.d_last_foreign));
+        out.push_back(kv("topoColorIds", RenderIntegration::g_topo_pub.color_ids));
+        out.push_back(kv("topoAfterDraws", RenderIntegration::g_topo_pub_after.draws));
+        out.push_back(kv("topoAfterMainDsv", RenderIntegration::g_topo_pub_after.d_last_main_dsv));
+        out.push_back(kv("topoAfterSceneRt", RenderIntegration::g_topo_pub_after.d_last_scene_rt));
+        out.push_back(kv("topoAfterColor", RenderIntegration::g_topo_pub_after.d_last_color));
+        out.push_back(kv("topoAfterForeign", RenderIntegration::g_topo_pub_after.d_last_foreign));
+        out.push_back(kv("topoAfterColorIds", RenderIntegration::g_topo_pub_after.color_ids));
+        out.push_back(kv("topoAfterSweeps", RenderIntegration::g_topo_pub_after.sweeps));
+        out.push_back(kv("topoSceneSrvSlot", RenderIntegration::g_topo_pub.srv_slot));
+        out.push_back(kv("topoSceneCopy", RenderIntegration::g_topo_pub.d_scene_copy));
+        out.push_back(kv("topoResolveFirst", RenderIntegration::g_topo_pub.d_resolve_first));
+        out.push_back(kv("topoResolveLast", RenderIntegration::g_topo_pub.d_resolve_last));
+        out.push_back(kv("sunHoldArmed", RenderIntegration::g_sun_valid_ms != 0 ? 1 : 0));
+        out.push_back(kv("sunJumpRateRefused", RenderIntegration::g_sun_jump_rate_refused));
+        out.push_back(kv("sunSettleHolds", RenderIntegration::g_sun_settle_holds));
+        out.push_back(kv("sunSettled", RenderIntegration::kh_sun_settled() ? 1 : 0));
         out.push_back(kv("resolveDraws", RenderIntegration::g_ls.resolve_draws));
         out.push_back(kv("resolveCbFound", RenderIntegration::g_ls.resolve_cb_found));
         out.push_back(kv("bandCaptures", RenderIntegration::g_ls.band_captures));
@@ -14609,6 +15506,9 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("bandBailQuality", RenderIntegration::g_ls.band_bail_quality));
         out.push_back(kv("bandProvSkips", RenderIntegration::g_ls.band_prov_skips));
         out.push_back(kv("viewLocks", RenderIntegration::g_ls.view_locks));
+        out.push_back(kv("viewRelocks", RenderIntegration::g_ls.view_relocks));
+        out.push_back(kv("debugMode", static_cast<uint64_t>(RenderIntegration::g_dbg_mode.load(std::memory_order_relaxed))));
+        out.push_back(kv("perceptualCaptures", RenderIntegration::g_stats.perceptual_captures));
         out.push_back(kv("viewSrcValid", RenderIntegration::g_ls.view_src_valid ? 1u : 0u));
         out.push_back(kv("frameViewHits", RenderIntegration::g_ls.frame_view_hits));
         out.push_back(kvf("viewBestRot", RenderIntegration::g_ls.view_best_rot));
@@ -14822,6 +15722,18 @@ static game_value get_render_stats_sqf() {
 // and formatted after release; the newest 256 populated records are dumped.
 static game_value dump_render_trace_sqf() {
     try {
+        // OPT-IN (see g_diag_armed): the recorder is idle until armed, so
+        // the first call starts it and reports that; frames flow from the
+        // next call on.
+        if (!RenderIntegration::g_diag_armed.exchange(true, std::memory_order_relaxed)) {
+            auto_array<game_value> pair;
+            pair.push_back(game_value("status"));
+            pair.push_back(game_value("armed"));
+            auto_array<game_value> armed_out;
+            armed_out.push_back(game_value(std::move(pair)));
+            return game_value(std::move(armed_out));
+        }
+
         constexpr uint32_t KHT_MAX = 512;
         static RenderIntegration::FfrRecord khtr_snap[RenderIntegration::KH_FFR_RING];
         uint32_t khtr_head = 0;

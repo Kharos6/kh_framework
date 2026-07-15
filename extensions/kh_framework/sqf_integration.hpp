@@ -158,6 +158,7 @@ static registered_sqf_function _sqf_update_post_fx_array;
 static registered_sqf_function _sqf_add_postfx_array;
 static registered_sqf_function _sqf_add_local_postfx_array;
 static registered_sqf_function _sqf_get_render_stats;
+static registered_sqf_function _sqf_set_render_debug;
 static registered_sqf_function _sqf_flush_ui_render;
 static registered_sqf_function _sqf_dump_render_trace;
 static registered_sqf_function _sqf_dump_dynamic_lights;
@@ -6976,23 +6977,23 @@ static void initialize_sqf_integration() {
 
     _sqf_sample_scene_depth_array = intercept::client::host::register_sqf_command(
         "sampleSceneDepth",
-        "Read the engine depth buffer at screen position [u, v] (0..1, top-left origin) via compute shader. Returns [sceneDistanceMeters, rawDepth] or a status string. Call from Draw3D.",
+        "Read the engine depth buffer at screen position [u, v]. Returns [sceneDistM, rawDepth]; on failure [[\"error\", reason]]",
         userFunctionWrapper<sample_scene_depth_sqf>,
-        game_data_type::ANY,
+        game_data_type::ARRAY,
         game_data_type::ARRAY
     );
 
     _sqf_gpu_visibility_array = intercept::client::host::register_sqf_command(
         "gpuVisibility",
-        "Test up to 1024 world points [[x,y,zASL], ...] against the engine depth buffer in one GPU dispatch. Returns [[status, pointDistM, sceneDistM], ...]; status 1 = visible, 0 = occluded, -1 = offscreen. Call from Draw3D.",
+        "Test up to 1024 world points [[x,y,zASL], ...]. Returns [[status, pointDistM, sceneDistM], ...]; on failure [[\"error\", reason]]",
         userFunctionWrapper<gpu_visibility_sqf>,
-        game_data_type::ANY,
+        game_data_type::ARRAY,
         game_data_type::ARRAY
     );
 
     _sqf_remove_render_handler_string = intercept::client::host::register_sqf_command(
         "removeRenderHandler",
-        "Remove a mesh or post-processing pass by its STRING handle. Pass \"\" or \"all\" to clear everything. Returns BOOL (false for unknown handles).",
+        "Remove a render pass",
         userFunctionWrapper<remove_render_handler_sqf>,
         game_data_type::BOOL,
         game_data_type::STRING
@@ -7000,30 +7001,30 @@ static void initialize_sqf_integration() {
 
     _sqf_queue_visibility_array = intercept::client::host::register_sqf_command(
         "queueVisibility",
-        "Queue up to 1024 world points [[x,y,zASL], ...] for an async GPU depth-visibility test (no stall; results 1-2 frames later via getVisibilityResults). Returns SCALAR accepted count.",
+        "Queue up to 1024 world points [[x,y,zASL], ...] for an async GPU depth-visibility test. Returns the queued count; -1 = invalid input",
         userFunctionWrapper<queue_visibility_sqf>,
-        game_data_type::ANY,
+        game_data_type::SCALAR,
         game_data_type::ARRAY
     );
 
     _sqf_get_visibility_results = intercept::client::host::register_sqf_command(
         "getVisibilityResults",
-        "Fetch the latest completed async visibility batch: [ageInFrames, [[status, pointDistM, sceneDistM], ...]]. status: 1 visible, 0 occluded, -1 offscreen.",
+        "Fetch the latest completed async visibility batch",
         userFunctionWrapper<get_visibility_results_sqf>,
         game_data_type::ARRAY
     );
 
     _sqf_add_render3d_array = intercept::client::host::register_sqf_command(
         "addRender3D",
-        "Add a persistent 3D mesh drawn every frame until removed. [[x,y,zASL], size, [r,g,b,a]?, mode?, sceneRead?, effect?, params?, band?, blend?, duration?, lit?, mesh?]; size: number or [x,y,z] per-axis extents; mode: 0=depth test (default), 1=test+write, 2=overlay; effect (string/scalar): 'invert','colorgrade','vignette','chromatic','grain','sharpen','blur','bloom','distortion','outline','pulse','halation','fog','lensflare','anamorphic','sunflare','glitch'; band [minDist,maxDist,falloff?]; blend: 'normal','additive','multiply','screen','lighten','darken'; duration: ARRAY or SCALAR (default 0), optionally [fadein,duration,fadeout]; lit: BOOL or [ambient, diffuse] - true enables the full shadow system: sun/moon shading on the mesh's own per-vertex normals, per-pixel received world shadows (band-captured cascade atlas), per-pixel SELF-shadowing from a private sun-depth map (concave meshes shade their own faces), and a MESH-SHAPED cast shadow written into the engine's own shadow mask (MIN-blended, colored by the engine's lighting pass exactly like native shadows). mesh (index 11): STRING or SCALAR - 'box'/'cube' (0, default) or 'steps'/'test' (1, a concave test staircase); mesh local space is normalized to [-0.5,0.5]^3 and scaled per axis by size; farvis (index 12): BOOL (default false) - keep the mesh visible beyond max view distance (clip z is clamped just inside the far plane; nearer world geometry still occludes and engine fog still applies). Everything is automatic: no shadow commands, tuning, or per-frame calls exist or are needed. Solid non-overlay meshes are always composited: injected into the frame BEFORE the engine's translucent passes with depth written, so the engine itself composites smoke and particles against them pixel-perfectly (falls back to the post-scene flush automatically if the draw hook is unavailable). Callable from any context. Manage with updateRender3D / removeRenderHandler. Returns STRING handle (always prefixed 'khr_') or STRING error.",
+        "[[x,y,zASL], size, [r,g,b,a]?, mode?, sceneRead?, effect?, fxParams?, band?, blend?, duration?, lit?, mesh?, farVis?, rotation?, twoSided?]. Returns the khr_ handle, or a plain error sentence",
         userFunctionWrapper<add_render3d_sqf>,
-        game_data_type::ANY,
+        game_data_type::STRING,
         game_data_type::ARRAY
     );
 
     _sqf_update_render3d_array = intercept::client::host::register_sqf_command(
         "updateRender3D",
-        "Update a persistent 3D mesh object (addRender3D handles ONLY; fullscreen passes belong to updatePostFX, decals to updateDecal3D): [handle, property, value]. Properties: 'position' [x,y,zASL], 'size' number|[x,y,z], 'mesh' string/scalar ('box'/'cube' 0, 'steps'/'test' 1), 'color' [r,g,b,a], 'mode' 0..2, 'visible' bool, 'sceneread' bool, 'effect' string/scalar, 'params' array, 'blend' string, 'band' [minDist,maxDist,falloff?] ([] clears), 'lit' bool or [ambient, diffuse] ('lighting' accepted as alias), 'farvis' bool (visible beyond max view distance), 'duration' number or [fadein,duration,fadeout]. Returns BOOL (false for unknown handles, fullscreen/decal handles, unknown properties, or invalid values).",
+        "Update a persistent 3D mesh object",
         userFunctionWrapper<update_render3d_sqf>,
         game_data_type::BOOL,
         game_data_type::ARRAY
@@ -7031,7 +7032,7 @@ static void initialize_sqf_integration() {
 
     _sqf_update_post_fx_array = intercept::client::host::register_sqf_command(
         "updatePostFX",
-        "Update a fullscreen post-processing pass (addPostFX / addLocalPostFX handles ONLY; 3D mesh objects belong to updateRender3D): [handle, property, value]. Properties: 'effect' string/scalar (fullscreen effects only), 'params' array, 'color' [r,g,b,a], 'blend' string, 'band' [minDist,maxDist,falloff?] ([] clears), 'visible' bool, 'ui' bool (post-tonemap phase over the composited frame), 'duration' number or [fadein,duration,fadeout], 'position' [x,y,zASL] (localized volume center), 'radius' number|[x,y,z], 'falloff' scalar, 'shape' 'sphere'|'cube', 'localsphere' [radius,falloff?] ([] clears). Returns BOOL (false for unknown handles, 3D-object handles, unknown properties, or invalid values).",
+        "Update a fullscreen post-processing pass",
         userFunctionWrapper<update_post_fx_sqf>,
         game_data_type::BOOL,
         game_data_type::ARRAY
@@ -7039,44 +7040,52 @@ static void initialize_sqf_integration() {
 
     _sqf_add_postfx_array = intercept::client::host::register_sqf_command(
         "addPostFX",
-        "Create a persistent fullscreen post-processing pass: [effect, params?, [r,g,b,a]?, band?, blend?, affectUI?, duration?]. Effects: 'invert','colorgrade','vignette','chromatic','grain','sharpen','blur','bloom','distortion','outline','pulse','halation','fog','lensflare','anamorphic','sunflare','glitch'; color alpha = intensity; band [minDist,maxDist,falloff?]; blend: 'normal','additive','multiply','screen','lighten','darken'; affectUI: BOOL (default false) - true renders the pass post-tonemap over the composited frame INCLUDING the UI; duration: ARRAY or SCALAR (default 0), optionally [fadein,duration,fadeout]. Passes chain in creation order per phase. Manage with updatePostFX / removeRenderHandler. Returns STRING handle (always prefixed 'khr_') or STRING error.",
+        "Create a persistent fullscreen post-processing pass. Returns the khr_ handle, or a plain error sentence",
         userFunctionWrapper<add_postfx_sqf>,
-        game_data_type::ANY,
+        game_data_type::STRING,
         game_data_type::ARRAY
     );
 
     _sqf_add_local_postfx_array = intercept::client::host::register_sqf_command(
         "addLocalPostFX",
-        "Create a persistent post-processing effect confined to a world-space volume: [[x,y,zASL], radius, falloff, effect, params?, [r,g,b,a]?, shape?, blend?, duration?]. radius: number or [x,y,z] per-axis (ellipsoid/box); shape: 'sphere' (default) or 'cube'; falloff in meters (scaled by mean radius); blend as addPostFX; duration as addPostFX. Mask follows geometry via the depth buffer. Manage via updatePostFX and removeRenderHandler. Returns STRING handle (always prefixed 'khr_') or STRING error.",
+        "Create a persistent post-processing effect confined to a world-space volume. Returns the khr_ handle, or a plain error sentence",
         userFunctionWrapper<add_local_postfx_sqf>,
-        game_data_type::ANY,
+        game_data_type::STRING,
         game_data_type::ARRAY
     );
 
     _sqf_get_render_stats = intercept::client::host::register_sqf_command(
         "getRenderStats",
-        "Render health counters, OPT-IN: the FIRST call arms recording (zeroing the diagnostic counters so dumps are session-scoped) and returns [['status','armed']]; subsequent calls return [[name, value], ...]. A skipped flush is a frame rendered without effects (flicker).",
+        "Render health counters. First call arms + zeroes the diagnostics (and the flight recorder) and returns [[\"status\",\"armed\"]]",
         userFunctionWrapper<get_render_stats_sqf>,
         game_data_type::ARRAY
     );
 
+    _sqf_set_render_debug = intercept::client::host::register_sqf_command(
+        "setRenderDebug",
+        "Mesh debug visuals",
+        userFunctionWrapper<set_render_debug_sqf>,
+        game_data_type::BOOL,
+        game_data_type::SCALAR
+    );
+
     _sqf_flush_ui_render = intercept::client::host::register_sqf_command(
         "flushUIRender",
-        "Renders all UI-affecting passes (addPostFX with affectUI true) into the frame being composed. Driven automatically by the internal overlay control; also callable from a Draw EH on a custom display. Returns BOOL.",
+        "Renders all UI-affecting passes",
         userFunctionWrapper<flush_ui_render_sqf>,
         game_data_type::BOOL
     );
-    
+
     _sqf_dump_render_trace = intercept::client::host::register_sqf_command(
         "dumpRenderTrace",
-        "Dump the render flight recorder: [['status','ok'], ['fields', [names...]], ['frames', [[values...], ...]]] - one entry per scene frame (oldest first, newest last), each frame's values aligned 1:1 with 'fields'. Call within ~10 s of witnessing a mesh flicker. Returns [['status','lockFailed']] if the graphics lock could not be taken.",
+        "Dump the render flight recorder. First call arms recording and returns [[\"status\",\"armed\"]]; frames flow from the next call",
         userFunctionWrapper<dump_render_trace_sqf>,
         game_data_type::ARRAY
     );
 
     _sqf_dump_dynamic_lights = intercept::client::host::register_sqf_command(
         "dumpDynamicLights",
-        "Dynamic-lights recon, OPT-IN: the FIRST call arms (acquisition without shading, per-draw census, zeroed counters); subsequent calls return the full mirror - raw control block with int interpretations, binding identities/offsets, all censuses, capture camera + view columns, every active light record (24 floats), and the acquisition ring. Run at night near active lights.",
+        "Dynamic light recon",
         userFunctionWrapper<dump_dynamic_lights_sqf>,
         intercept::types::game_data_type::ARRAY
     );

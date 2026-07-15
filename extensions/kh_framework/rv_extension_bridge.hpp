@@ -1,5 +1,8 @@
 #pragma once
 
+#include <cmath>
+#include <cstring>
+
 namespace RVExtBridge {
 
 enum TextureFormat : uint32_t {
@@ -340,9 +343,54 @@ inline bool has_projection_view_transform() {
     return g_fn_has_pv_transform();
 }
 
+inline bool pv_transform_usable(const ProjectionViewTransform& pv) {
+    const float* f = &pv.projection[0][0];
+
+    for (int i = 0; i < 32; ++i) {
+        if (!std::isfinite(f[i])) return false;
+    }
+
+    const float ax = std::fabs(pv.projection[0][0]);
+    const float ay = std::fabs(pv.projection[1][1]);
+    if (ax < 1e-4f || ax > 1e5f || ay < 1e-4f || ay > 1e5f) return false;
+    const float w2 = std::fabs(pv.projection[2][3]);
+    const float w3 = std::fabs(pv.projection[3][3]);
+    const bool persp = std::fabs(w2 - 1.0f) < 1e-3f && w3 < 1e-3f;
+    const bool ortho = w2 < 1e-3f && std::fabs(w3 - 1.0f) < 1e-3f;
+    if (!persp && !ortho) return false;
+
+    for (int r = 0; r < 3; ++r) {
+        const float* a = pv.view[r];
+        const float n = a[0] * a[0] + a[1] * a[1] + a[2] * a[2];
+        if (std::fabs(n - 1.0f) > 5e-2f) return false;
+
+        for (int s = r + 1; s < 3; ++s) {
+            const float* b = pv.view[s];
+            const float d = a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+
+            if (std::fabs(d) > 5e-2f) return false;
+        }
+    }
+
+    return true;
+}
+
 inline bool get_projection_view_transform(ProjectionViewTransform& pvTransform) {
     if (!g_initialized || !g_fn_get_pv_transform) return false;
-    return g_fn_get_pv_transform(&pvTransform);
+
+    std::memset(&pvTransform, 0xFF, sizeof(pvTransform));   // NaN poison: unwritten fails finiteness
+
+    if (!g_fn_get_pv_transform(&pvTransform)) {
+        std::memset(&pvTransform, 0, sizeof(pvTransform));
+        return false;
+    }
+
+    if (!pv_transform_usable(pvTransform)) {
+        std::memset(&pvTransform, 0, sizeof(pvTransform));
+        return false;
+    }
+
+    return true;
 }
 
 inline bool has_window_hook() {

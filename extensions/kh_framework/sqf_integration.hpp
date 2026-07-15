@@ -7078,7 +7078,7 @@ static void initialize_sqf_integration() {
 
     _sqf_dump_render_trace = intercept::client::host::register_sqf_command(
         "dumpRenderTrace",
-        "Dump the render flight recorder. First call arms recording and returns [[\"status\",\"armed\"]]; frames flow from the next call",
+        "Dump the render flight recorder. First call arms recording and returns [['status', 'armed']]; frames flow from the next call",
         userFunctionWrapper<dump_render_trace_sqf>,
         game_data_type::ARRAY
     );

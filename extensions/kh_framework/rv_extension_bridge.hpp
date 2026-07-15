@@ -378,7 +378,7 @@ inline bool pv_transform_usable(const ProjectionViewTransform& pv) {
 inline bool get_projection_view_transform(ProjectionViewTransform& pvTransform) {
     if (!g_initialized || !g_fn_get_pv_transform) return false;
 
-    std::memset(&pvTransform, 0xFF, sizeof(pvTransform));   // NaN poison: unwritten fails finiteness
+    std::memset(&pvTransform, 0xFF, sizeof(pvTransform));
 
     if (!g_fn_get_pv_transform(&pvTransform)) {
         std::memset(&pvTransform, 0, sizeof(pvTransform));

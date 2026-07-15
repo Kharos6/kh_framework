@@ -696,6 +696,33 @@ struct RenderStats {
     uint64_t enc_vp_rejects = 0;
                                                   // containment - STICKY: any dump shows whether
                                                   // poisoning occurred this session at all
+
+    // --- BLACK-BOX-AT-DISTANCE INSTRUMENTATION (honest read-only diagnostics;
+    //     relaxed cross-thread like the counters above - torn reads harmless).
+    //     Latched at EACH path's CB-fill site for the last LIT mesh that path
+    //     drew this frame, so a dump shows exactly what that mesh's shader
+    //     received. Kept SEPARATE per path: injection repaints, then the flush
+    //     repaints every mesh every frame - a shared latch would lose one, and
+    //     the stationary/moving black split is suspected to be path-dependent.
+    //     amb = light_amb.rgb as uploaded (the term ndl<=0 faces collapse to,
+    //     NOT the sun lane); amb_scalar = lighting0.z (o.light_ambient);
+    //     guard_base = fx1[0] (>=1e8 => punch-through guard STOOD DOWN => buried
+    //     faces no longer depth-rejected; authoritative for effect==0 meshes).
+    //     ndl<=0 face brightness before base-multiply = max(amb)*amb_scalar; ~0
+    //     with guard_base 1e9 proves the leading hypothesis. valid = the path
+    //     drew a lit mesh since the arm; effect = that mesh's effect id. ---
+    float inj_box_amb[3]      = { -1.0f, -1.0f, -1.0f };
+    float inj_box_amb_scalar  = -1.0f;
+    float inj_box_guard_base  = -1.0f;
+    int   inj_box_effect      = -1;
+    int   inj_box_valid       = 0;
+    float flush_box_amb[3]     = { -1.0f, -1.0f, -1.0f };
+    float flush_box_amb_scalar = -1.0f;
+    float flush_box_guard_base = -1.0f;
+    int   flush_box_effect     = -1;
+    int   flush_box_valid      = 0;
+    float inj_box_sun[3]       = { -1.0f, -1.0f, -1.0f };
+    float flush_box_sun[3]     = { -1.0f, -1.0f, -1.0f };
 };
 static RenderStats g_stats;
 
@@ -4498,6 +4525,21 @@ static float g_pub_dir[3] = {};
 static float g_cand_dir[3] = {};
 static int   g_cand_hold = 0;
 
+
+// PUBLISHED BLOCK COLORS (black-box campaign): the located lighting block's
+// ambient (nb[8..10]), sun/moon color (nb[16..18]) and fog color (nb[36..38]),
+// snapshotted under the flush_locked park where the render-written mirror is
+// stable - the same invariant the sun direction and fog already publish under.
+// PHASE 1: populated but NOT yet consumed (fill_lighting_cb and the two fog
+// fills still read g_light_probe.nb live). The dump lane blockStaged* vs the
+// live injBox* read proves whether repointing the consumers here (phase 2)
+// supplies the healthy block the injection path misses at draw time. Render-
+// visible; plain stores under the park.
+static bool  g_pub_block_valid = false;
+static float g_pub_block_amb[3] = {};
+static float g_pub_block_sun[3] = {};
+static float g_pub_block_fog[3] = {};
+
 // ===========================================================================
 // SUN-SETTLE GATE (operator directive, the startup-shadow session): a
 // shadow that is ABSENT beats a shadow that swings with the camera. The
@@ -7955,18 +7997,22 @@ inline void fill_lighting_cb(ConstantData& cbd, const RenderObject& o) {
     cbd.lighting1[3] = (g_sun_valid && kh_sun_settled() &&
                         g_ls.pub_exact_ms != 0 &&
                         steady_now_ms() - g_ls.pub_exact_ms < 1000) ? 1.0f : 0.0f;
-    // Colors: the located lighting block is the ONLY source (getLighting
-    // retired). Ever-locked -> the mirrored lanes (fresh or last-known:
-    // the block drifts slowly and the mirror survives expiry); never
-    // locked (sub-second cold) -> flat white sun over scalar ambient,
-    // which the direction warm-up makes near-unreachable in practice.
-    if (g_light_probe.hits > 0 && g_light_probe.meta == 40) {
-        cbd.lighting2[0] = g_light_probe.nb[16];
-        cbd.lighting2[1] = g_light_probe.nb[17];
-        cbd.lighting2[2] = g_light_probe.nb[18];
-        cbd.light_amb[0] = g_light_probe.nb[8];
-        cbd.light_amb[1] = g_light_probe.nb[9];
-        cbd.light_amb[2] = g_light_probe.nb[10];
+    // Colors: the PUBLISHED block snapshot (getLighting retired). BLACK-BOX
+    // FIX - was the live g_light_probe mirror, which the injection path samples
+    // at draw ~108 mid-frame where the engine's per-frame re-uploads leave it
+    // holding a DARK transitional block (dump: injBoxSunMax 0 + injBoxAmbTermMax
+    // 0.015 while the parked snapshot read sun 5.82 / amb 0.42). g_pub_block_*
+    // is snapshotted in flush_locked under the render park - this-frame-or-last-
+    // frame settled, the same invariant the sun direction and fog publish under.
+    // Same lock gate, evaluated once at publish time. Never-published (sub-
+    // second cold) -> flat white sun over scalar ambient, as before.
+    if (g_pub_block_valid) {
+        cbd.lighting2[0] = g_pub_block_sun[0];
+        cbd.lighting2[1] = g_pub_block_sun[1];
+        cbd.lighting2[2] = g_pub_block_sun[2];
+        cbd.light_amb[0] = g_pub_block_amb[0];
+        cbd.light_amb[1] = g_pub_block_amb[1];
+        cbd.light_amb[2] = g_pub_block_amb[2];
         cbd.light_amb[3] = 1.0f;
     } else {
         cbd.lighting2[0] = 1.0f;
@@ -12069,6 +12115,18 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             cbd.fx1[0] = 1e9f;
         }
 
+        if (cbd.lighting0[0] >= 0.5f) {   // black-box instrumentation: what this lit mesh's shader received (injection path)
+            g_stats.inj_box_amb[0]     = cbd.light_amb[0];
+            g_stats.inj_box_amb[1]     = cbd.light_amb[1];
+            g_stats.inj_box_amb[2]     = cbd.light_amb[2];
+            g_stats.inj_box_sun[0]     = cbd.lighting2[0];
+            g_stats.inj_box_sun[1]     = cbd.lighting2[1];
+            g_stats.inj_box_sun[2]     = cbd.lighting2[2];
+            g_stats.inj_box_amb_scalar = cbd.lighting0[2];
+            g_stats.inj_box_guard_base = cbd.fx1[0];
+            g_stats.inj_box_effect     = static_cast<int>(o.effect);
+            g_stats.inj_box_valid      = 1;
+        }
         D3D11_MAPPED_SUBRESOURCE mapped = {};
         if (FAILED(ctx->Map(g_res.composite_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) continue;
         memcpy(mapped.pData, &cbd, sizeof(cbd));
@@ -13035,6 +13093,22 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     // these plain stores can never be observed mid-write.
     publish_world_lighting();
 
+    // BLACK-BOX campaign: snapshot the located block colors under the park
+    // (the render-written mirror is stable here, exactly as the sun/fog
+    // publish above relies on) for phase-2 consumption by fill_lighting_cb
+    // and the two fog fills. Placed here rather than in publish_world_lighting
+    // because g_light_probe is declared later in the TU. Read-only for now -
+    // see the g_pub_block_* declaration. Unlocked at publish time => valid
+    // stays false and phase-2 consumers fall to their existing cold path.
+    g_pub_block_valid = (g_light_probe.hits > 0 && g_light_probe.meta == 40);
+    if (g_pub_block_valid) {
+        for (int khc = 0; khc < 3; ++khc) {
+            g_pub_block_amb[khc] = g_light_probe.nb[8 + khc];
+            g_pub_block_sun[khc] = g_light_probe.nb[16 + khc];
+            g_pub_block_fog[khc] = g_light_probe.nb[36 + khc];
+        }
+    }
+
     // Flush stamps: the serial keys the miss latch (once per flush); the
     // opaque count feeds the post-flush redraw census at the next clear.
     g_cc_flush_serial.fetch_add(1, std::memory_order_relaxed);
@@ -13818,6 +13892,18 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
                 cbd.fog_color[3] = g_ls.cam[1];   // camera altitude (engine Y-up)
             }
+        }
+        if (cbd.lighting0[0] >= 0.5f) {   // black-box instrumentation: what this lit mesh's shader received (flush path)
+            g_stats.flush_box_amb[0]     = cbd.light_amb[0];
+            g_stats.flush_box_amb[1]     = cbd.light_amb[1];
+            g_stats.flush_box_amb[2]     = cbd.light_amb[2];
+            g_stats.flush_box_sun[0]     = cbd.lighting2[0];
+            g_stats.flush_box_sun[1]     = cbd.lighting2[1];
+            g_stats.flush_box_sun[2]     = cbd.lighting2[2];
+            g_stats.flush_box_amb_scalar = cbd.lighting0[2];
+            g_stats.flush_box_guard_base = cbd.fx1[0];
+            g_stats.flush_box_effect     = static_cast<int>(o.effect);
+            g_stats.flush_box_valid      = 1;
         }
         D3D11_MAPPED_SUBRESOURCE mapped = {};
         if (FAILED(ctx->Map(g_res.constant_buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return false;
@@ -15533,6 +15619,68 @@ static game_value get_render_stats_sqf() {
         out.push_back(kvf("lightLocErr", RenderIntegration::g_light_probe.last_err));
         out.push_back(kvf("lightLocAge", RenderIntegration::effect_time_seconds() - RenderIntegration::g_light_probe.last_confirm));
         out.push_back(kvf("lightLocMode", RenderIntegration::g_light_probe.last_mode));
+        {   // BLACK-BOX (see the campaign): the engine block AMBIENT color
+            //   nb[8..10] -> lightAmb.rgb, the term ndl<=0 faces collapse to -
+            //   distinct from the sun lane (sunBrightness reads nb[16..18]).
+            //   -1 = block not locked this frame (matches fill_lighting_cb).
+            const bool amb_locked = RenderIntegration::g_light_probe.hits > 0 &&
+                                    RenderIntegration::g_light_probe.meta == 40;
+            const float* amb = RenderIntegration::g_light_probe.nb + 8;
+            out.push_back(kvf("ambHDR_R", amb_locked ? amb[0] : -1.0f));
+            out.push_back(kvf("ambHDR_G", amb_locked ? amb[1] : -1.0f));
+            out.push_back(kvf("ambHDR_B", amb_locked ? amb[2] : -1.0f));
+        }
+        {   // BLACK-BOX: what the last LIT mesh each path actually received.
+            //   AmbTermMax = max(amb)*amb_scalar = the ndl<=0 face brightness
+            //   before the base-multiply; ~0 with GuardBase 1e9 convicts the
+            //   ambient-zero + guard-stood-down root. Path valid=0 => that path
+            //   drew no lit mesh since the arm (its lanes read the -1 sentinel).
+            auto termmax = [](const float* a, float s) -> float {
+                if (s < 0.0f || a[0] < 0.0f) return -1.0f;
+                float m = a[0] > a[1] ? (a[0] > a[2] ? a[0] : a[2])
+                                      : (a[1] > a[2] ? a[1] : a[2]);
+                return m * s;
+            };
+            const RenderIntegration::RenderStats& S = RenderIntegration::g_stats;
+            out.push_back(kv ("injBoxValid",       static_cast<uint64_t>(S.inj_box_valid)));
+            out.push_back(kv ("injBoxEffect",      static_cast<uint64_t>(S.inj_box_effect < 0 ? 0 : S.inj_box_effect)));
+            out.push_back(kvf("injBoxAmbR",        S.inj_box_amb[0]));
+            out.push_back(kvf("injBoxAmbG",        S.inj_box_amb[1]));
+            out.push_back(kvf("injBoxAmbB",        S.inj_box_amb[2]));
+            out.push_back(kvf("injBoxAmbScalar",   S.inj_box_amb_scalar));
+            out.push_back(kvf("injBoxAmbTermMax",  termmax(S.inj_box_amb, S.inj_box_amb_scalar)));
+            out.push_back(kvf("injBoxGuardBase",   S.inj_box_guard_base));
+            out.push_back(kv ("flushBoxValid",     static_cast<uint64_t>(S.flush_box_valid)));
+            out.push_back(kv ("flushBoxEffect",    static_cast<uint64_t>(S.flush_box_effect < 0 ? 0 : S.flush_box_effect)));
+            out.push_back(kvf("flushBoxAmbR",       S.flush_box_amb[0]));
+            out.push_back(kvf("flushBoxAmbG",       S.flush_box_amb[1]));
+            out.push_back(kvf("flushBoxAmbB",       S.flush_box_amb[2]));
+            out.push_back(kvf("flushBoxAmbScalar",  S.flush_box_amb_scalar));
+            out.push_back(kvf("flushBoxAmbTermMax", termmax(S.flush_box_amb, S.flush_box_amb_scalar)));
+            out.push_back(kvf("flushBoxGuardBase",  S.flush_box_guard_base));
+            out.push_back(kvf("injBoxSunMax",       termmax(S.inj_box_sun, 1.0f)));
+            out.push_back(kvf("flushBoxSunMax",     termmax(S.flush_box_sun, 1.0f)));
+        }
+        {   // BLACK-BOX phase 1: the block colors snapshotted under the park in
+            //   publish_world_lighting - what phase 2 would feed BOTH draw paths.
+            //   Compare blockStagedAmb* against the live injBoxAmb* (dark) and
+            //   ambHDR* (healthy): if these read healthy, repointing the consumers
+            //   here fixes the injection's stale read. SunMax vs injBoxSunMax says
+            //   whether the direct term is starved at injection too. valid=0 =>
+            //   block unlocked at publish time.
+            const float* bs = RenderIntegration::g_pub_block_sun;
+            const bool bv = RenderIntegration::g_pub_block_valid;
+            float bsm = bs[0] > bs[1] ? (bs[0] > bs[2] ? bs[0] : bs[2])
+                                      : (bs[1] > bs[2] ? bs[1] : bs[2]);
+            out.push_back(kv ("blockStagedValid",  bv ? 1ull : 0ull));
+            out.push_back(kvf("blockStagedAmbR",   RenderIntegration::g_pub_block_amb[0]));
+            out.push_back(kvf("blockStagedAmbG",   RenderIntegration::g_pub_block_amb[1]));
+            out.push_back(kvf("blockStagedAmbB",   RenderIntegration::g_pub_block_amb[2]));
+            out.push_back(kvf("blockStagedSunMax", bv ? bsm : -1.0f));
+            out.push_back(kvf("blockStagedFogR",   RenderIntegration::g_pub_block_fog[0]));
+            out.push_back(kvf("blockStagedFogG",   RenderIntegration::g_pub_block_fog[1]));
+            out.push_back(kvf("blockStagedFogB",   RenderIntegration::g_pub_block_fog[2]));
+        }
 
 
         out.push_back(kv("skyLocValid", RenderIntegration::g_sky_probe.valid ? 1u : 0u));

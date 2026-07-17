@@ -205,6 +205,7 @@ struct Resources {
     ID3D11VertexShader*      vs_composite = nullptr;    // injected-path VS (adds world position)
     ID3D11PixelShader*       ps_maskcast = nullptr;     // analytic mask cast (single-sample t0)
     ID3D11PixelShader*       ps_composite = nullptr;    // injected-path PS: PSMain + the opaque
+    ID3D11PixelShader*       ps_composite_arb = nullptr; // arb variant: + SV_Depth analytic terrain clamp
                                                         // punch-through guard against the copied
                                                         // scene depth (the HYBRID: hardware depth
                                                         // handles marginal ties, the guard vetoes
@@ -236,8 +237,11 @@ struct Resources {
     ID3D11RasterizerState*   rasterizer_cull = nullptr;  // back-face-culling twin of 'rasterizer'
                                                          // (twoSided = false objects; same biases)
     std::vector<ID3D11Buffer*> mesh_vb;                  // one VB per registry mesh (pos + normal)
-    ID3D11Buffer*            constant_buffer = nullptr;  // dynamic, per draw (game-thread flush)
-    ID3D11Buffer*            composite_cb = nullptr;     // dynamic, per draw (render-thread injection)
+    ID3D11Buffer*            constant_buffer = nullptr;  // dynamic, per draw (game-thread flush): CBObj b0
+    ID3D11Buffer*            composite_cb = nullptr;     // dynamic, per draw (render-thread injection): CBObj b0
+    // CB-split frame twins (b1): one per thread, same separation logic
+    ID3D11Buffer*            frame_cb = nullptr;           // game thread (flush + UI driver)
+    ID3D11Buffer*            composite_frame_cb = nullptr; // render thread (injection, sun depth, mask cast)
                                                          // - separate from constant_buffer so the two
                                                          // paths never share a mapped resource
     ID3D11DepthStencilState* dss_test = nullptr;         // LESS_EQUAL, no write
@@ -340,6 +344,7 @@ struct Resources {
         ps_effect_samples = 0;
         KH_SAFE_RELEASE(vs_composite);
         KH_SAFE_RELEASE(ps_composite);
+        KH_SAFE_RELEASE(ps_composite_arb);
         ps_composite_samples = 0;
         KH_SAFE_RELEASE(comp_depth_tex);
         KH_SAFE_RELEASE(comp_depth_srv);
@@ -364,6 +369,8 @@ struct Resources {
         sun_instance_cap = 0;
         KH_SAFE_RELEASE(constant_buffer);
         KH_SAFE_RELEASE(composite_cb);
+        KH_SAFE_RELEASE(frame_cb);
+        KH_SAFE_RELEASE(composite_frame_cb);
         KH_SAFE_RELEASE(dss_test);
         KH_SAFE_RELEASE(dss_test_write);
         KH_SAFE_RELEASE(dss_off);
@@ -694,6 +701,10 @@ struct RenderStats {
     uint64_t composite_slot_encodes = 0;    // injections encoded with the live slot pair (engine-verbatim)
     uint64_t composite_far_phase_skips = 0; // injections withheld while a far partition is the live phase
     uint64_t composite_far_injects = 0;     // far-phase injections that PROCEEDED (all meshes clear of the far near plane)
+    uint64_t composite_far_arbs = 0;        // far injections drawn under analytic arbitration (round 6: LESS_EQUAL + thm terrain + the arb PS's SV_Depth clamp)
+    uint64_t composite_far_arb_denied = 0;  // far injections that proceeded on the STOCK path (heightfield or arb shader down)
+    uint64_t flush_fx_arbs = 0;             // flush effect-mesh draws under analytic arbitration (dss_off + thm endpoint + snapshot guard)
+    uint64_t composite_transl_defers = 0;   // non-opaque meshes deferred from the injection to the post-scene flush (round 9)
     uint64_t composite_keep_encodes = 0;    // injections encoded with the PERSISTED slot pair (silent cycle, fresh keep)
     uint64_t composite_anomaly_skips = 0;   // injections withheld from anomalous cycles
     // --- Live shadow-map capture diagnostics (see the live-capture
@@ -828,29 +839,86 @@ static float g_scene_vp_max_d = 0.999f;
 // ---------------------------------------------------------------------------
 
 static const char* g_cb_hlsl = R"HLSL(
-cbuffer CB : register(b0)
+// CB SPLIT: the historic single cbuffer is now TWO. CBObj (b0) is
+// per-object, uploaded per draw (trimmed to the used dynamic-light
+// prefix); CBFrame (b1) is per-frame/pass, uploaded once per mesh pass
+// and per call at the auxiliary sites. Field order in EACH block
+// mirrors the C++ ConstantData block VERBATIM - the historic contract,
+// now per buffer. Append-only WITHIN a block; dlLights stays LAST in
+// CBObj (the upload trim depends on it).
+cbuffer CBObj : register(b0)
 {
-    row_major float4x4 viewProj;
-    row_major float4x4 invViewProj;   // clip -> world (row-vector convention)
     float4 centerSize;   // xyz = world center (engine space), w = edge length
+    // FP32 JITTER REBASE: xyz = center MINUS the pass's rebase origin
+    // (the camera), double-subtracted on the CPU; w = 1 arms the
+    // rebased vertex transform in VSMain/VSComposite, whose viewProj
+    // is then the REBASED matrix. The zeroed default (w = 0) keeps
+    // every non-rebasing fill site on the absolute path.
+    float4 centerRel;
     float4 color;
     float4 fxParams0;    // effect parameters [0..3]
     float4 fxParams1;    // effect parameters [4..7]
     float4 fxMeta;       // x = effect id, y = time (s), z = screen width, w = screen height
     float4 depthParams;  // x = proj m22, y = proj m32, z = viewport MinDepth, w = MaxDepth
+                         // (per-object: the flush's mode-Off solids carry the
+                         // snapshot's encode pair, effects the live pair)
     float4 sizeAxes;     // xyz = mesh edge lengths (engine axes), w = blend mode id
     float4 localParams0; // xyz = mask center (engine space), w = shape (0 sphere, 1 cube)
     float4 localParams1; // x = falloff (normalized to mean radius), y = localized flag
     float4 localRadii;   // xyz = mask radii (engine axes)
     float4 bandParams;   // x = band min (m), y = band max (m, <=0 unbounded), z = falloff (m), w = banded flag
     float4 lighting0;    // x = lit flag, y = unused, z = ambient, w = diffuse
+    float4 shadowMeta2;      // x = far-visibility clamp flag (VSMain/VSComposite; PER OBJECT);
+                             // yzw = the table's OWN camera origin (engine axes)
+    float4 objRot0;       // engine-axes rotation rows (row-vector: world =
+    float4 objRot1;       // center + local.x*R0 + local.y*R1 + local.z*R2).
+    float4 objRot2;       // objRot0.w = 1 marks a filled matrix; 0 (the
+                          // zeroed-CB default) reads as identity, so fill
+                          // sites that never rotate stay correct untouched.
+    float4 dbgCtl;        // x = debug visual mode (setRenderDebug): 0 off
+                          // (uniform branch, free), 1 coverage, 2 scene-
+                          // vs-mesh depth, 3 blend layers; yzw padding.
+                          // Mesh fill sites only - everywhere else the
+                          // zeroed default keeps the branch cold.
+    float4 blendCtl;      // x = 1: normal-blend translucent mesh with the
+                          // scene capture bound this inject - the packing
+                          // composites in Reinhard space against t3 and
+                          // writes opaque. 0 (zeroed default: capture
+                          // miss, alpha 1, non-normal blends) = legacy
+                          // hardware blend. BOTH mesh shaders carry the
+                          // packing: the flush REPAINTS every mesh every
+                          // frame (PSMain), so a single-path conversion
+                          // gets legacy-overdrawn - field-proven.
+    // Dynamic lights mirror: engine cb10/cb11 packing VERBATIM (night-
+    // capture disassembly; see the DYNLIGHTS ledger in the C++ section).
+    // PER OBJECT: mode 3 culls the pool to this mesh's nearest set.
+    float4 dlCtl;         // x = mode (0 off, 1 camera-relative world,
+                          // 2 view space), y = point count, z = spot
+                          // count, w = global distance scale (cb10[2].x)
+    float4 dlGlobal;      // xyz = global diffuse multiplier (cb10[3]),
+                          // w = operator intensity scale
+    float4 dlView[3];     // view matrix COLUMNS (world->view rotation)
+                          // for mode 2, captured WITH the light list
+    float4 dlLights[192]; // 32 lights x 6 float4, cb11 layout verbatim:
+                          // +0 position.xyz; +1 spot dir.xyz + cone
+                          // cos-threshold.w; +2 diffuse.rgb + cone
+                          // inv-width.w; +3 per-light ambient.rgb (no
+                          // N.L) + cone exponent.w; +4 distance offset.x
+                          // + attenuation a0/a1/a2.yzw; +5 range-fade
+                          // start.x + inv-width.y
+};
+
+cbuffer CBFrame : register(b1)
+{
+    row_major float4x4 viewProj;      // REBASED on the two mesh passes
+                                      // (see centerRel); absolute elsewhere
+    row_major float4x4 invViewProj;   // clip -> world (row-vector convention);
+                                      // ALWAYS the absolute live-encode inverse
     float4 lighting1;    // xyz = unit vector TOWARD the sun/moon (engine axes), w = lighting valid flag
     float4 lighting2;    // rgb = light color (max-component normalized), w = shadow-map strength
     float4 shadowMeta;   // x = cascade count, y = depth compare sign, z = bias, w = atlas size (px)
     float4 shadowTiles[8];   // per-cascade atlas rect in UV: x0, y0, x1, y1
     float4 shadowMats[24];   // per-cascade world->atlasUV+depth 4x3: 3 rows of [a, b, c, t]
-    float4 shadowMeta2;      // x = far-visibility clamp flag (VSMain/VSComposite);
-                             // yzw = the table's OWN camera origin (engine axes)
     // View-paired bands: the engine's decoded receiver contract.
     // bandView rows are the view matrix COLUMNS (world->view, row-vector
     // convention): viewPos.k = dot(float4(wpos,1), bandView[slot*3+k]).
@@ -865,14 +933,13 @@ cbuffer CB : register(b0)
     float4 maskMeta;         // x = view-paired band table valid; yzw = float4 padding
     float4 fogParams;        // x = fogValue, y = fogDecay, z = fogBase, w = enable
     float4 fogColor;         // rgb = fog color, w = camera altitude ASL
-    // --- appended (private sun-depth map); append-only: no register shifts ---
     row_major float4x4 sunVP;   // world -> private sun-depth clip (row-vector)
     float4 sunMeta;             // x = valid, y = map size (px), z = compare bias
                                 // (normalized depth units), w = strength
-    // Per-caster locality list for the map-path cast (append-only): the
-    // combined-bounds sphere let reconstruction noise anywhere within
-    // hundreds of meters MIN-darken the world; per-caster reach restores
-    // the slab era's proven tube-tight rejection. x = pair count.
+    // Per-caster locality list for the map-path cast: the combined-bounds
+    // sphere let reconstruction noise anywhere within hundreds of meters
+    // MIN-darken the world; per-caster reach restores the slab era's
+    // proven tube-tight rejection. x = pair count.
     float4 localityMeta;
     float4 locality[32];        // [2i] = center.xyz (engine), [2i+1] = half extents.xyz
     float4 lightAmb;            // rgb = engine ambient color (HDR scene units) from the
@@ -889,46 +956,6 @@ cbuffer CB : register(b0)
                                 // confirmed static (0.25, 0.75, 3.5)); w = valid
     float4 fogSkyCol;           // the sky CB's fog base color (row 7; tracks
                                 // time of day - the verbatim fog color)
-    // --- appended (dynamic lights mirror); append-only: no register
-    // shifts. Engine cb10/cb11 packing VERBATIM (night-capture
-    // disassembly; see the DYNLIGHTS ledger in the C++ section) ---
-    float4 dlCtl;         // x = mode (0 off, 1 camera-relative world,
-                          // 2 view space), y = point count, z = spot
-                          // count, w = global distance scale (cb10[2].x)
-    float4 dlGlobal;      // xyz = global diffuse multiplier (cb10[3]),
-                          // w = operator intensity scale
-    float4 dlView[3];     // view matrix COLUMNS (world->view rotation)
-                          // for mode 2, captured WITH the light list
-    float4 dlLights[192]; // 32 lights x 6 float4, cb11 layout verbatim:
-                          // +0 position.xyz; +1 spot dir.xyz + cone
-                          // cos-threshold.w; +2 diffuse.rgb + cone
-                          // inv-width.w; +3 per-light ambient.rgb (no
-                          // N.L) + cone exponent.w; +4 distance offset.x
-                          // + attenuation a0/a1/a2.yzw; +5 range-fade
-                          // start.x + inv-width.y
-    // --- appended (object rotation); append-only: no register shifts ---
-    float4 objRot0;       // engine-axes rotation rows (row-vector: world =
-    float4 objRot1;       // center + local.x*R0 + local.y*R1 + local.z*R2).
-    float4 objRot2;       // objRot0.w = 1 marks a filled matrix; 0 (the
-                          // zeroed-CB default) reads as identity, so fill
-                          // sites that never rotate stay correct untouched.
-    // --- appended (debug visuals); append-only: no register shifts ---
-    float4 dbgCtl;        // x = debug visual mode (setRenderDebug): 0 off
-                          // (uniform branch, free), 1 coverage, 2 scene-
-                          // vs-mesh depth, 3 blend layers; yzw padding.
-                          // Mesh fill sites only - everywhere else the
-                          // zeroed default keeps the branch cold.
-    // --- appended (perceptual composite); append-only ---
-    float4 blendCtl;      // x = 1: normal-blend translucent mesh with the
-                          // scene capture bound this inject - the packing
-                          // composites in Reinhard space against t3 and
-                          // writes opaque. 0 (zeroed default: capture
-                          // miss, alpha 1, non-normal blends) = legacy
-                          // hardware blend. BOTH mesh shaders carry the
-                          // packing: the flush REPAINTS every mesh every
-                          // frame (PSMain), so a single-path conversion
-                          // gets legacy-overdrawn - field-proven.
-    // --- appended (occlusion-guard campaign, settled residue) ---
     // --- ANALYTIC TERRAIN OCCLUSION (the depth-independent authority).
     // The engine rewrites scene depth after the opaque phase through
     // paths no hook can see (field-proven: the injection's own depth
@@ -946,18 +973,6 @@ cbuffer CB : register(b0)
                           // dips this far below terrain), w = min
                           // fragment distance (m) to run the march
 };
-
-// Shared raw-depth -> view-axis distance (m): inverts the viewport depth
-// range remap, then the projection (z' = m22 + m32 / z). At/beyond the far
-// plane (sky / depth-clear) the denominator crosses zero: treat as very far.
-float KhLinDepth(float raw)
-{
-    float ndcZ = (raw - depthParams.z) / max(depthParams.w - depthParams.z, 1e-6f);
-    float denom = ndcZ - depthParams.x;
-    if (denom > -1e-7f) return 1e9f;
-    float d = depthParams.y / denom;
-    return d > 0.0f ? d : 1e9f;
-}
 
 // Raw depth -> view-axis meters (the guard's linearization), SETTLED:
 // the buffer's stored values are viewport-remapped, so the decode
@@ -1086,11 +1101,6 @@ float SunShadowOcclusionPCF(float3 wpos)
     o += SunShadowCompareBilin(uv + float2( 0.75f, -0.75f) * px, z) * 0.15f;
     o += SunShadowCompareBilin(uv + float2(-0.75f, -0.75f) * px, z) * 0.15f;
     return o;
-}
-
-float SunShadowFactor(float3 wpos)
-{
-    return 1.0f - SunShadowOcclusion(wpos) * saturate(sunMeta.w);
 }
 
 // SELF-term variant: receiver-normal offset + grazing fade. A surface
@@ -1303,7 +1313,18 @@ VSOut VSMain(VSIn i)
 {
     VSOut o;
     float3 wp = centerSize.xyz + KhRotate(i.pos * sizeAxes.xyz);
-    o.pos = mul(float4(wp, 1.0f), viewProj);
+    // FP32 JITTER REBASE (see centerRel): when armed, transform the
+    // CAMERA-RELATIVE position through the REBASED viewProj - the
+    // world-absolute fp32 cancellation (the stationary micro-jitter's
+    // reducible term) never enters the position path. wpos and every
+    // shading consumer (masks, thm, fog altitude, lighting) stay
+    // ABSOLUTE and byte-identical: the jitter was geometric, not
+    // shading. Unarmed (centerRel.w = 0, every auxiliary fill site):
+    // wp against an absolute viewProj - the historic path verbatim.
+    float3 khvTp = (centerRel.w > 0.5f)
+                 ? (centerRel.xyz + KhRotate(i.pos * sizeAxes.xyz))
+                 : wp;
+    o.pos = mul(float4(khvTp, 1.0f), viewProj);
     // Far-visibility clamp (opt-in, shadowMeta2.x): pull clip z just inside
     // the far plane so max view distance stops hard-clipping the mesh. Past
     // the far plane the depth buffer holds only the clear value / sky, so
@@ -1745,7 +1766,6 @@ float4 PSMain(VSOut i) : SV_Target
 static const char* g_hlsl_composite = R"HLSL(
 #if MSAA_DEPTH
 Texture2DMS<float> depthTex : register(t0);
-float LoadDepthC(int2 px) { return depthTex.Load(px, 0); }
 // RAW guard read, MSAA edition - RETAINED FOR COMPILE PARITY ONLY: the
 // snapshot pipeline resolves the scene depth to single-sample R32 before
 // the guard ever samples (comp_depth_samples is pinned to 1), so this
@@ -1764,7 +1784,6 @@ float GuardSceneRaw(int2 px)
 }
 #else
 Texture2D<float> depthTex : register(t0);
-float LoadDepthC(int2 px) { return depthTex.Load(int3(px, 0)); }
 // RAW guard read: the snapshot value at the pixel.
 float GuardSceneRaw(int2 px)
 {
@@ -1772,19 +1791,15 @@ float GuardSceneRaw(int2 px)
 }
 #endif
 
-// Guard-side scene distance in METERS. CLEAR-VALUE = NO SCENE (the
-// see-through root): a narrow render partition's depth copy holds the
-// clear value at every pixel the partition did not draw - which
-// linearizes not to 'infinitely far' but to THAT PARTITION'S far plane,
-// a phantom wall that discarded every mesh fragment beyond it on
-// partition-churn cycles. Raw depth at either clear extreme (standard
-// far = 1, reversed = 0) can never discard - nothing legitimate needs
-// occluding at the clear planes themselves.
-float GuardSceneDist(int2 px)
-{
-    float r = GuardSceneRaw(px);
-    return (r <= 0.000001f || r >= 0.999999f) ? 1.0e9f : KhSceneMeters(r);
-}
+// CLEAR-VALUE = NO SCENE (the see-through root; enforced at the guard's
+// consumption site - PSComposite's sceneClear skip over GuardSceneRaw):
+// a narrow render partition's depth copy holds the clear value at every
+// pixel the partition did not draw - which linearizes not to
+// 'infinitely far' but to THAT PARTITION'S far plane, a phantom wall
+// that discarded every mesh fragment beyond it on partition-churn
+// cycles. Raw depth at either clear extreme (standard far = 1,
+// reversed = 0) can never discard - nothing legitimate needs occluding
+// at the clear planes themselves.
 
 
 // Pre-mesh scene COLOR capture (always single-sample: the capture path
@@ -2012,22 +2027,24 @@ float ShadowBandFactor(float3 wpos)
 // (split: MSVC C2026 caps a single literal at ~16 KB - the fog additions
 // crossed it; the two halves are joined at the compile site)
 static const char* g_hlsl_composite2 = R"HLSL(
-float LinDepthC(float raw)
-{
-    float ndcZ = (raw - depthParams.z) / max(depthParams.w - depthParams.z, 1e-6f);
-    float denom = ndcZ - depthParams.x;
-    if (denom > -1e-7f) return 1e9f;   // at/beyond far plane (sky/clear): very far
-    float d = depthParams.y / denom;
-    return d > 0.0f ? d : 1e9f;
-}
-
 struct VSOutC { float4 pos : SV_Position; float3 wpos : TEXCOORD0; float3 nrm : TEXCOORD1; };
 
 VSOutC VSComposite(VSIn i)
 {
     VSOutC o;
     float3 wp = centerSize.xyz + KhRotate(i.pos * sizeAxes.xyz);
-    o.pos = mul(float4(wp, 1.0f), viewProj);
+    // FP32 JITTER REBASE (see centerRel): when armed, transform the
+    // CAMERA-RELATIVE position through the REBASED viewProj - the
+    // world-absolute fp32 cancellation (the stationary micro-jitter's
+    // reducible term) never enters the position path. wpos and every
+    // shading consumer (masks, thm, fog altitude, lighting) stay
+    // ABSOLUTE and byte-identical: the jitter was geometric, not
+    // shading. Unarmed (centerRel.w = 0, every auxiliary fill site):
+    // wp against an absolute viewProj - the historic path verbatim.
+    float3 khvTp = (centerRel.w > 0.5f)
+                 ? (centerRel.xyz + KhRotate(i.pos * sizeAxes.xyz))
+                 : wp;
+    o.pos = mul(float4(khvTp, 1.0f), viewProj);
     // Far-visibility clamp (opt-in, shadowMeta2.x): pull clip z just inside
     // the far plane so max view distance stops hard-clipping the mesh. Past
     // the far plane the depth buffer holds only the clear value / sky, so
@@ -2054,7 +2071,12 @@ VSOutC VSComposite(VSIn i)
     return o;
 }
 
-)HLSL" R"HLSL(float4 PSComposite(VSOutC i) : SV_Target
+)HLSL" R"HLSL(
+#if KH_ARB_DEPTH
+float4 PSComposite(VSOutC i, out float khaODepth : SV_Depth) : SV_Target
+#else
+float4 PSComposite(VSOutC i) : SV_Target
+#endif
 {
     ClipEdgeSliver(i.wpos, i.nrm);   // degenerate edge-on fragments (fireflies)
     // Punch-through guard, campaign-settled: METRIC compare in the
@@ -2101,6 +2123,36 @@ VSOutC VSComposite(VSIn i)
 
         if (khtClear < 1.5e9f && khtClear < -thmMeta.z) occ = true;
     }
+
+#if KH_ARB_DEPTH
+    // ANALYTIC DEPTH CLAMP (round 6; the terrain method transposed to
+    // the depth VALUE). LESS_EQUAL is back: objects compare raw-exact.
+    // Only fragments the analytic terrain calls VISIBLE, and only
+    // inside the contact band (clearance ramp), are pulled forward by
+    // the LOD margin - so the rendered terrain LOD (which sits within
+    // that margin of the TRUE surface) loses exactly where it used to
+    // eat the band, and nothing else in the frame feels the offset.
+    // Assigned HERE, before every return path below: SV_Depth, once
+    // declared, is mandatory output on all branches.
+    {
+        float khaD = i.pos.w;
+
+        if (thmParams.w >= 0.5f && khtClear < 1.0e8f) {
+            // Distance-proportional LOD margin (round 7): 0.06 mirrors
+            // KH_FAR_ARB_OFF_REL; fxParams1.z remains the absolute cap.
+            float khaOff = min(fxParams1.z, i.pos.w * 0.06f) *
+                saturate((fxParams1.w - khtClear) / max(0.3f * fxParams1.w, 1.0f));
+            khaD = max(khaD - khaOff, 0.05f);
+        }
+
+        // PS-written depth bypasses the rasterizer bias; carry its
+        // anti-shimmer tie duty metrically (0.01% toward the camera).
+        khaD *= (1.0f - 1.0e-4f);
+        float khaNdc = depthParams.x + depthParams.y / max(khaD, 0.01f);
+        khaODepth = clamp(depthParams.z + (depthParams.w - depthParams.z) * khaNdc,
+                          depthParams.z, depthParams.w);
+    }
+#endif
 
     // DEBUG VISUAL 9 (setRenderDebug; PRE-discard - the verdict is
     // painted, never enforced, so occluded regions stay inspectable):
@@ -2364,6 +2416,15 @@ Texture2D<float> depthTex : register(t1);
 float LoadDepthPS(int2 px) { return depthTex.Load(int3(px, 0)); }
 #endif
 
+// FAR-FRAME ANALYTIC ARBITRATION (flush/effect edition): the proven
+// flush-time depth snapshot, ALWAYS single-sample R32 (the snapshot
+// pipeline resolves MSAA before this binds - independent of the
+// MSAA_DEPTH define above). Armed via local1.z (see the CPU fill);
+// local0 carries the snapshot's own reconstruction pair + encode
+// range, because depthParams must stay the LIVE-depth pair for
+// LinDepth / WorldPos.
+Texture2D<float> khArbSnap : register(t2);
+
 float3 SampleScene(int2 px)
 {
     px = clamp(px, int2(0, 0), int2((int)fxMeta.z - 1, (int)fxMeta.w - 1));
@@ -2405,6 +2466,38 @@ float4 PSEffect(VSOut i) : SV_Target
     float t = fxMeta.y;
     float3 scene = SampleScene(px);
     float3 outc = scene;
+
+    // FAR-FRAME ANALYTIC ARBITRATION (flush/effect edition; the sec 2.4
+    // mirror). An effect mesh previously had NO shader occlusion at
+    // all (fxParams are its effect parameters) and its hardware test
+    // ran against the post-scene buffer - the same grazing-incidence
+    // LOD fight the injected path settled, plus cross-window parity,
+    // whose error SIGN flips with the defender's window: objects punch
+    // through the volume from outside, the volume covers nearer
+    // objects from inside. When armed (local1.z carries the wide guard
+    // base), the hardware test is OFF and occlusion is decided here:
+    // objects by the snapshot guard, terrain burial by the thm
+    // endpoint (the ray march needs the camera, which this path's CB
+    // cannot spare - the snapshot guard covers behind-the-ridge at
+    // the margin instead).
+    if (local1.z >= 0.5f) {
+        int2 khaPx = clamp(int2(i.pos.xy), int2(0, 0),
+                           int2((int)fxMeta.z - 1, (int)fxMeta.w - 1));
+        float khaRaw = khArbSnap.Load(int3(khaPx, 0));
+
+        if (khaRaw > 0.000001f && khaRaw < 0.999999f) {
+            float khaNdc = (khaRaw - local0.z) / max(local0.w - local0.z, 1e-6f);
+            float khaDen = khaNdc - local0.x;
+            float khaScene = (khaDen > -1e-7f) ? 1.0e9f : local0.y / khaDen;
+            if (khaScene <= 0.0f) khaScene = 1.0e9f;
+            if (i.pos.w > khaScene * (1.0f + local1.w) + local1.z) discard;
+        }
+
+        if (thmParams.w >= 0.5f) {
+            float khaHe = KhThmHeight(i.wpos.xz);
+            if (khaHe > -1.0e5f && (i.wpos.y - khaHe) < -thmMeta.z) discard;
+        }
+    }
 
     if (effect == 1)          // Invert: (1 - scene) * tint
     {
@@ -2823,27 +2916,75 @@ void CSSampleDepth(uint3 id : SV_DispatchThreadID)
 }
 )HLSL";
 
+// ---------------------------------------------------------------------------
+// CB SPLIT (the capacity campaign): ONE flat struct, TWO GPU buffers.
+// The PER-OBJECT block (b0, HLSL CBObj) comes first; the PER-FRAME
+// block (b1, HLSL CBFrame) second. Fill sites keep writing one flat
+// ConstantData; the upload helpers slice it - kh_upload_obj_cb writes
+// [0, KH_CBOBJ_BYTES) trimmed to the used dynamic-light prefix, and
+// kh_upload_frame_cb writes [KH_CBOBJ_BYTES, sizeof). RULES:
+//  - Field order here mirrors the matching HLSL cbuffer's field order
+//    VERBATIM (the historic single-CB contract, now PER BLOCK).
+//    Append-only WITHIN each block; dl_lights stays the LAST
+//    per-object field (the upload trim depends on it).
+//  - The two mesh passes fill the frame block ONCE per pass. Frame
+//    fields consumed by per-object gates (the unlit cascade-table
+//    case) are shader-gated behind lighting0.x - the enumeration
+//    lives at fill_lighting_frame_cb.
+// ---------------------------------------------------------------------------
 struct alignas(16) ConstantData {
-    float view_proj[4][4];
-    float inv_view_proj[4][4];
+    // --- PER-OBJECT BLOCK (b0) ---
     float center_size[4];
+    // FP32 JITTER REBASE (the Part-4 stationary-micro-jitter fix, built
+    // with the split): xyz = center MINUS the pass's rebase origin (the
+    // camera), subtracted in DOUBLE on the CPU - the world-absolute
+    // fp32 cancellation leaves the vertex transform. w = 1 arms the
+    // shader's rebased path; the zeroed default keeps every
+    // non-rebasing fill site on the absolute path with an absolute
+    // viewProj, so auxiliary fills stay correct untouched. ARMED ONLY
+    // when the pass also rebased viewProj (kh_rebase_vp returned true);
+    // arming one without the other is the wrong-space landmine.
+    float center_rel[4];
     float color[4];
     float fx0[4];
     float fx1[4];
     float fx_meta[4];      // effect id, time (s), screen width, screen height
     float depth_params[4]; // proj m22, proj m32, viewport MinDepth, MaxDepth
+                           // (PER-OBJECT by field evidence: the flush's
+                           // mode-Off solids swap in the snapshot's encode
+                           // pair while effect meshes keep the live pair -
+                           // same pass, different values)
     float size_axes[4];    // xyz = mesh edge lengths (engine axes), w = blend mode id
     float local0[4];       // xyz = mask center (engine space), w = shape (0 sphere, 1 cube)
     float local1[4];       // x = falloff (normalized to mean radius), y = localized flag
     float local_radii[4];  // xyz = mask radii (engine axes)
     float band0[4];        // x = band min (m), y = band max (m, <=0 unbounded), z = falloff (m), w = banded flag
     float lighting0[4];    // x = lit flag, y = unused, z = ambient, w = diffuse
+    float shadow_meta2[4];     // x = far-visibility clamp flag (PER OBJECT); yzw = live-table camera origin (zeroed - origins fold per entry)
+    float obj_rot[3][4];       // engine-axes rotation rows; [0][3] = 1 marks
+                               // filled (the zeroed default reads as identity
+                               // in-shader - auxiliary fills stay correct)
+    float dbg_ctl[4];          // x = setRenderDebug mode; mesh fill sites only
+    float blend_ctl[4];        // x = perceptual-composite enable (inject fill only)
+    float dl_ctl[4];           // x = mode (0 off / 1 camera-relative world /
+                               // 2 view space / 3 absolute pool), y = point
+                               // count, z = spot count, w = distance scale
+    float dl_global[4];        // xyz = global diffuse multiplier (cb10[3]),
+                               // w = operator intensity scale
+    float dl_view[3][4];       // view matrix COLUMNS for the mode-2 rotation
+    float dl_lights[192][4];   // 32 lights x 6 float4, engine cb11 verbatim.
+                               // LAST per-object field BY CONTRACT: the obj
+                               // upload trims to the used-light prefix.
+    // --- PER-FRAME BLOCK (b1) ---
+    float view_proj[4][4];     // REBASED on the two mesh passes (see
+                               // center_rel); ABSOLUTE at every other site
+    float inv_view_proj[4][4]; // ALWAYS the absolute inverse of the live
+                               // encode (WorldPos depth reconstruction)
     float lighting1[4];    // xyz = unit vector TOWARD the light (engine axes), w = valid flag
     float lighting2[4];    // rgb = light color (max-component normalized), w = shadow-map strength
     float shadow_meta[4];      // count, compare sign, bias, atlas size
     float shadow_tiles[8][4];  // per-cascade atlas UV rects
     float shadow_mats[24][4];  // per-cascade 4x3 sampling transforms
-    float shadow_meta2[4];     // x = far-visibility clamp flag; yzw = live-table camera origin
     float band_mat[24][4];
     float band_view[24][4];
     float band_border[8][4];
@@ -2857,46 +2998,33 @@ struct alignas(16) ConstantData {
     // are the receive truth; the mask machinery that remains serves the
     // CAST write only, which is registration-exact by construction.
     float mask_meta[4];    // x = view-paired band table valid
-    // --- appended (fog + engine-mask receive); append-only so no
-    // existing register shifts ---
+    // --- fog + engine-mask receive ---
     float fog_params[4];   // x = fogValue, y = fogDecay, z = fogBase, w = enable
     float fog_color[4];    // rgb = fog color approximation, w = camera altitude ASL
                            // (relative), z/w = mask w/h for texel math
-    // --- appended (private sun-depth map); append-only, mirrors sunVP/
-    // sunMeta at the end of the HLSL cbuffer ---
+    // --- private sun-depth map (mirrors sunVP/sunMeta in CBFrame) ---
     float sun_vp[4][4];    // row-vector world -> sun-depth clip
     float sun_meta[4];     // x = valid, y = map size (px), z = compare bias
                            // (normalized depth units), w = strength
     float locality_meta[4];    // x = per-caster locality pair count
     float locality[32][4];     // [2i] = center.xyz, [2i+1] = half extents.xyz
-    // --- appended (engine lighting block); append-only, mirrors lightAmb
-    // at the end of the HLSL cbuffer ---
     float light_amb[4];        // rgb = engine ambient (HDR) or (1,1,1) cold; w = engine mode
     float fog_engine[4];       // x = density scale (blk 41), y = fog end (blk 48),
                                // z = inv ramp range (blk 49), w = valid
     float fog_sky[4];          // sky row 17 gradient points; w = sky probe valid
     float fog_sky_col[4];      // sky row 7 base color (verbatim fog color)
-    // --- appended (dynamic lights mirror); append-only, mirrors dlCtl/
-    // dlGlobal/dlView/dlLights at the end of the HLSL cbuffer ---
-    float dl_ctl[4];           // x = mode (0 off / 1 camera-relative world /
-                               // 2 view space), y = point count, z = spot
-                               // count, w = global distance scale (cb10[2].x)
-    float dl_global[4];        // xyz = global diffuse multiplier (cb10[3]),
-                               // w = operator intensity scale
-    float dl_view[3][4];       // view matrix COLUMNS for the mode-2 rotation
-    float dl_lights[192][4];   // 32 lights x 6 float4, engine cb11 verbatim
-    // --- appended (object rotation); append-only, mirrors objRot0..2 ---
-    float obj_rot[3][4];       // engine-axes rotation rows; [0][3] = 1 marks
-                               // filled (the zeroed default reads as identity
-                               // in-shader - auxiliary fills stay correct)
-    // --- appended (debug visuals); append-only, mirrors dbgCtl ---
-    float dbg_ctl[4];          // x = setRenderDebug mode; mesh fill sites only
-    // --- appended (perceptual composite); append-only, mirrors blendCtl ---
-    float blend_ctl[4];        // x = perceptual-composite enable (inject fill only)
-    // --- appended (occlusion-guard campaign, settled residue) ---
     float thm_params[4];          // heightfield origin/cell/valid
     float thm_meta[4];            // heightfield dims/bias/minDist
 };
+
+// CB-split slice geometry: the object block ends where view_proj (the
+// first frame field) begins; dl_lights must close the object block.
+static constexpr size_t KH_CBOBJ_BYTES      = offsetof(ConstantData, view_proj);
+static constexpr size_t KH_CBOBJ_HEAD_BYTES = offsetof(ConstantData, dl_lights);
+static constexpr size_t KH_CBFRAME_BYTES    = sizeof(ConstantData) - KH_CBOBJ_BYTES;
+static_assert(KH_CBOBJ_BYTES == KH_CBOBJ_HEAD_BYTES + sizeof(ConstantData::dl_lights),
+              "dl_lights must be the LAST per-object field (the upload trim depends on it)");
+static_assert(KH_CBOBJ_BYTES % 16 == 0 && KH_CBFRAME_BYTES % 16 == 0, "CB blocks must be float4-aligned");
 
 // Shared mesh-CB rotation fill (injection, flush, sun fallback - one
 // truth). rot_m = engine-axes rows (RenderObject::rot_m or SunCaster::rot).
@@ -2909,6 +3037,74 @@ inline void kh_fill_obj_rot(ConstantData& cbd, const float* rot_m) {
 
     cbd.obj_rot[0][3] = 1.0f;   // filled: KhRotate engages (identity matrix
                                 // when the object is unrotated)
+}
+
+// --- CB-SPLIT UPLOAD HELPERS (one truth for every fill site) ---
+// Per-object slice (b0): Map DISCARD + write the head plus the USED
+// dynamic-light prefix only. The shader's light loop is bounded by the
+// dlCtl.y + dlCtl.z counts written IN the head, so the unwritten tail
+// is unread by construction - the one sanctioned exception to
+// write-what-you-bind, and the reason dl_lights must stay LAST.
+// Typical (no dynamic lights): 384 bytes against the historic 5,888.
+inline bool kh_upload_obj_cb(ID3D11DeviceContext* ctx, ID3D11Buffer* buf, const ConstantData& cbd) {
+    D3D11_MAPPED_SUBRESOURCE mapped = {};
+    if (FAILED(ctx->Map(buf, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return false;
+    const int khu_cap = static_cast<int>(sizeof(cbd.dl_lights) / (6 * 16));
+    int khu_n = static_cast<int>(cbd.dl_ctl[1] + cbd.dl_ctl[2] + 0.5f);
+    if (khu_n < 0) khu_n = 0;
+    if (khu_n > khu_cap) khu_n = khu_cap;
+    memcpy(mapped.pData, &cbd, KH_CBOBJ_HEAD_BYTES + static_cast<size_t>(khu_n) * 6u * 16u);
+    ctx->Unmap(buf, 0);
+    return true;
+}
+
+// Per-frame slice (b1): the tail region - once per mesh pass, and per
+// call at the auxiliary single-draw sites (sun-depth, mask cast, UI
+// driver), which keep filling one flat cbd and upload both slices.
+inline bool kh_upload_frame_cb(ID3D11DeviceContext* ctx, ID3D11Buffer* buf, const ConstantData& cbd) {
+    D3D11_MAPPED_SUBRESOURCE mapped = {};
+    if (FAILED(ctx->Map(buf, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return false;
+    memcpy(mapped.pData, reinterpret_cast<const uint8_t*>(&cbd) + KH_CBOBJ_BYTES, KH_CBFRAME_BYTES);
+    ctx->Unmap(buf, 0);
+    return true;
+}
+
+// --- FP32 JITTER REBASE (the Part-4 designed fix, built with the CB
+// split because it touches the same surfaces). Rebase the pass's
+// viewProj so vertices transform CAMERA-RELATIVE:
+//   clip = [p_rel + R, 1] * M = [p_rel, 1] * M'
+// with row3' = row3 + Rx*row0 + Ry*row1 + Rz*row2, computed in DOUBLE
+// from the float inputs - exact to those inputs, and the per-vertex
+// products then run at small magnitudes, so the world-absolute fp32
+// cancellation (the stationary micro-jitter's reducible term) is gone
+// from the position path. Everything else - wpos, masks, thm, fog,
+// lighting, the depth guards - stays ABSOLUTE and untouched.
+// Returns whether the rebase armed; the caller MUST mirror the verdict
+// into every object's center_rel (kh_fill_center_rel) - a rebased
+// matrix with an unarmed object (or vice versa) is the wrong-space
+// landmine. A near-zero camera cannot be a real world camera on RV
+// terrain (the ClipEdgeSliver rule): stand down, absolute path.
+inline bool kh_rebase_vp(ConstantData& cbd, const float* cam3) {
+    if (cam3[0] * cam3[0] + cam3[1] * cam3[1] + cam3[2] * cam3[2] < 1.0f) return false;
+    const double khr_r[3] = { cam3[0], cam3[1], cam3[2] };
+    for (int j = 0; j < 4; ++j) {
+        const double khr3 = static_cast<double>(cbd.view_proj[3][j])
+                          + khr_r[0] * static_cast<double>(cbd.view_proj[0][j])
+                          + khr_r[1] * static_cast<double>(cbd.view_proj[1][j])
+                          + khr_r[2] * static_cast<double>(cbd.view_proj[2][j]);
+        cbd.view_proj[3][j] = static_cast<float>(khr3);
+    }
+    return true;
+}
+
+// Per-object rebase twin: center MINUS the pass camera, subtracted in
+// DOUBLE (both operands promote exactly; the difference rounds once).
+// Requires center_size already filled with the engine-axes center.
+inline void kh_fill_center_rel(ConstantData& cbd, const float* cam3) {
+    cbd.center_rel[0] = static_cast<float>(static_cast<double>(cbd.center_size[0]) - static_cast<double>(cam3[0]));
+    cbd.center_rel[1] = static_cast<float>(static_cast<double>(cbd.center_size[1]) - static_cast<double>(cam3[1]));
+    cbd.center_rel[2] = static_cast<float>(static_cast<double>(cbd.center_size[2]) - static_cast<double>(cam3[2]));
+    cbd.center_rel[3] = 1.0f;   // armed (matches the pass's rebased viewProj)
 }
 
 struct alignas(16) CSConstantData {
@@ -3043,7 +3239,7 @@ inline std::string ensure_resources(ID3D11Device* dev) {
 
     {
         D3D11_BUFFER_DESC bd = {};
-        bd.ByteWidth = sizeof(ConstantData);
+        bd.ByteWidth = static_cast<UINT>(KH_CBOBJ_BYTES);   // CB split: b0 carries the object block only
         bd.Usage = D3D11_USAGE_DYNAMIC;
         bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
@@ -3051,6 +3247,11 @@ inline std::string ensure_resources(ID3D11Device* dev) {
         if (FAILED(hr)) { g_res.release(); return "Create CB " + hr_str(hr); }
         hr = dev->CreateBuffer(&bd, nullptr, &g_res.composite_cb);
         if (FAILED(hr)) { g_res.release(); return "Create composite CB " + hr_str(hr); }
+        bd.ByteWidth = static_cast<UINT>(KH_CBFRAME_BYTES); // frame twins (b1)
+        hr = dev->CreateBuffer(&bd, nullptr, &g_res.frame_cb);
+        if (FAILED(hr)) { g_res.release(); return "Create frame CB " + hr_str(hr); }
+        hr = dev->CreateBuffer(&bd, nullptr, &g_res.composite_frame_cb);
+        if (FAILED(hr)) { g_res.release(); return "Create composite frame CB " + hr_str(hr); }
     }
 
     {
@@ -3445,7 +3646,7 @@ static float    g_comp_next_retry = 0.0f;   // backoff: a failed compile must
 static std::string g_comp_last_err;
 
 inline std::string ensure_composite_shader(ID3D11Device* dev) {
-    if (g_res.vs_composite && g_res.ps_composite &&
+    if (g_res.vs_composite && g_res.ps_composite && g_res.ps_composite_arb &&
         g_res.ps_composite_samples == g_res.comp_depth_samples) {
         return "";
     }
@@ -3460,6 +3661,7 @@ inline std::string ensure_composite_shader(ID3D11Device* dev) {
 
     if (g_res.vs_composite) { g_res.vs_composite->Release(); g_res.vs_composite = nullptr; }
     if (g_res.ps_composite) { g_res.ps_composite->Release(); g_res.ps_composite = nullptr; }
+    if (g_res.ps_composite_arb) { g_res.ps_composite_arb->Release(); g_res.ps_composite_arb = nullptr; }
 
     // SAMPLE_COUNT feeds the guard's across-samples loop; the shader
     // already recompiles whenever the depth MSAA count changes.
@@ -3468,6 +3670,13 @@ inline std::string ensure_composite_shader(ID3D11Device* dev) {
     const D3D_SHADER_MACRO defines[] = {
         { "MSAA_DEPTH", g_res.comp_depth_samples > 1 ? "1" : "0" },
         { "SAMPLE_COUNT", sc.c_str() },
+        { "KH_ARB_DEPTH", "0" },
+        { nullptr, nullptr },
+    };
+    const D3D_SHADER_MACRO defines_arb[] = {
+        { "MSAA_DEPTH", g_res.comp_depth_samples > 1 ? "1" : "0" },
+        { "SAMPLE_COUNT", sc.c_str() },
+        { "KH_ARB_DEPTH", "1" },
         { nullptr, nullptr },
     };
 
@@ -3494,6 +3703,14 @@ inline std::string ensure_composite_shader(ID3D11Device* dev) {
     hr = dev->CreatePixelShader(ps_blob->GetBufferPointer(), ps_blob->GetBufferSize(), nullptr, &g_res.ps_composite);
     ps_blob->Release();
     if (FAILED(hr)) return "Create composite PS " + hr_str(hr);
+    // Arb variant: same source, KH_ARB_DEPTH=1 switches the SV_Depth
+    // output signature + the analytic clamp block on.
+    ID3DBlob* psa_blob = nullptr;
+    err = compile_shader(comp_src.c_str(), "PSComposite", "ps_5_0", defines_arb, &psa_blob);
+    if (!err.empty()) return comp_fail("composite PS(arb): " + err);
+    hr = dev->CreatePixelShader(psa_blob->GetBufferPointer(), psa_blob->GetBufferSize(), nullptr, &g_res.ps_composite_arb);
+    psa_blob->Release();
+    if (FAILED(hr)) return "Create composite PS(arb) " + hr_str(hr);
     g_res.ps_composite_samples = g_res.comp_depth_samples;
     return "";
 }
@@ -3660,8 +3877,9 @@ struct StateBackup {
     ID3D11GeometryShader*    gs = nullptr;
     ID3D11HullShader*        hs = nullptr;
     ID3D11DomainShader*      ds = nullptr;
-    ID3D11Buffer*            vs_cb0 = nullptr;
-    ID3D11Buffer*            ps_cb0 = nullptr;
+    // CB split: our passes bind b0 AND b1, so both slots save/restore
+    ID3D11Buffer*            vs_cbs[2] = { nullptr, nullptr };
+    ID3D11Buffer*            ps_cbs[2] = { nullptr, nullptr };
     ID3D11ShaderResourceView* ps_srvs[14] = {};   // t0-t13: bands t4-t9 + t12-t13
     ID3D11DepthStencilState* dss = nullptr;
     UINT                     stencil_ref = 0;
@@ -3679,8 +3897,8 @@ struct StateBackup {
         ctx->GSGetShader(&gs, nullptr, nullptr);
         ctx->HSGetShader(&hs, nullptr, nullptr);
         ctx->DSGetShader(&ds, nullptr, nullptr);
-        ctx->VSGetConstantBuffers(0, 1, &vs_cb0);
-        ctx->PSGetConstantBuffers(0, 1, &ps_cb0);
+        ctx->VSGetConstantBuffers(0, 2, vs_cbs);
+        ctx->PSGetConstantBuffers(0, 2, ps_cbs);
         ctx->PSGetShaderResources(0, 14, ps_srvs);
         ctx->OMGetDepthStencilState(&dss, &stencil_ref);
         ctx->OMGetBlendState(&blend, blend_factor, &sample_mask);
@@ -3696,8 +3914,8 @@ struct StateBackup {
         ctx->GSSetShader(gs, nullptr, 0);
         ctx->HSSetShader(hs, nullptr, 0);
         ctx->DSSetShader(ds, nullptr, 0);
-        ctx->VSSetConstantBuffers(0, 1, &vs_cb0);
-        ctx->PSSetConstantBuffers(0, 1, &ps_cb0);
+        ctx->VSSetConstantBuffers(0, 2, vs_cbs);
+        ctx->PSSetConstantBuffers(0, 2, ps_cbs);
         ctx->PSSetShaderResources(0, 14, ps_srvs);
         ctx->OMSetDepthStencilState(dss, stencil_ref);
         ctx->OMSetBlendState(blend, blend_factor, sample_mask);
@@ -3711,8 +3929,10 @@ struct StateBackup {
         KH_SAFE_RELEASE(gs);
         KH_SAFE_RELEASE(hs);
         KH_SAFE_RELEASE(ds);
-        KH_SAFE_RELEASE(vs_cb0);
-        KH_SAFE_RELEASE(ps_cb0);
+        KH_SAFE_RELEASE(vs_cbs[0]);
+        KH_SAFE_RELEASE(vs_cbs[1]);
+        KH_SAFE_RELEASE(ps_cbs[0]);
+        KH_SAFE_RELEASE(ps_cbs[1]);
         KH_SAFE_RELEASE(ps_srvs[0]);
         KH_SAFE_RELEASE(ps_srvs[1]);
         KH_SAFE_RELEASE(ps_srvs[2]);
@@ -4332,7 +4552,31 @@ inline bool composite_path_healthy() {
 }
 
 inline bool is_composite_eligible(const RenderObject& o) {
-    return !o.fullscreen && o.effect == 0 && o.mode != DepthMode::Off;
+    // ROUND-9 OWNERSHIP TERMS (the orphaned-translucent fix, convicted by
+    // the CB-split field round's log): this predicate and the injection's
+    // translucent deferral are the SAME ownership verdict read from
+    // opposite sides, and they disagreed. The deferral pops every
+    // non-opaque presentation from the injection ("render at the
+    // post-scene flush"), but this predicate - which the flush's
+    // healthy-frame stand-down consumes - still claimed those meshes for
+    // the injection: with any opaque mesh keeping injections healthy, a
+    // translucent (or non-normal-blend) mesh was popped by the injection
+    // AND excluded by the flush - drawn by NEITHER, while its separate
+    // caster staging kept casting. Field signature (reproduced): visible
+    // alone (miss-frame fallback owned it), vanished the instant an
+    // opaque spawned (the first injection stamped composite health),
+    // debug mode 5 showed nothing (no draw call at all).
+    // The blend/alpha terms below mirror the deferral's test verbatim.
+    // Envelope note: the flush filter evaluates this POST-envelope (env
+    // multiplies alpha before the filter) while the injection staging
+    // evaluates PRE-envelope - so a fading opaque stays staged and the
+    // round-9 deferral (post-envelope, unchanged) still owns the fade
+    // class; at the 0.999 crossing the two threads' envelope samples can
+    // disagree for one frame (a one-frame blink or an idempotent
+    // double-draw - strictly better than the orphaning, and only at the
+    // crossing).
+    return !o.fullscreen && o.effect == 0 && o.mode != DepthMode::Off &&
+           o.blend_mode == 0 && o.color[3] >= 0.999f;
 }
 
 // A genuine scene issues a large number of opaque draws between its depth
@@ -4353,6 +4597,82 @@ static constexpr float KH_COMPOSITE_GUARD_REL = 0.25f;
 // exact up to precision, so the guard collapses to a tight backstop.
 static constexpr float KH_COMPOSITE_GUARD_BASE_MEASURED = 0.25f;
 static constexpr float KH_COMPOSITE_GUARD_REL_MEASURED = 0.02f;
+// FAR-FRAME ANALYTIC TERRAIN ARBITRATION margins (HANDOFF2 sec 2.4). On
+// far-encoded injection frames the depth test is ALWAYS and the guard
+// re-arms WIDE as the OBJECT-occlusion authority: ~2x the largest
+// observed terrain-LOD gap (~4.6 m in the Nsight pixel-history frame,
+// band 8-15 m by design), so a genuine occluder still kills fragments
+// clearly behind it while the grazing-incidence LOD bulge can no
+// longer eat the contact band. The relative term stays at the measured
+// tier: far frames encode with the engine-verbatim slot pair, so the
+// reconstruction is exact up to precision. Stated cost, accepted at
+// design time: a shell of the mesh within the margin behind a genuine
+// OBJECT occluder ghosts through it on far frames; surfaces deeper
+// than the margin stay hidden. Measure before judging.
+// Base raised 12 -> 15 (the design band's top) in field round 5: the
+// grazing LOD deficit RAMPS to 10+ m at the ground/box horizon line
+// (sec 2.3), and with same-frame defenders the ramp is the guard's
+// only remaining discard-error source - push the residual bite line
+// as tight to the exact horizon as the band allows.
+static constexpr float KH_FAR_ARB_GUARD_BASE = 15.0f;
+// FIELD ROUND 6 - THE TERRAIN METHOD, COMPLETED (operator direction).
+// The reconstruction guard is RETIRED from the arb path: falsified
+// with stale self-inclusive defenders (rounds 1-4), falsified again
+// with same-frame self-free defenders (round 5: snapFresh 3461/3461,
+// holds 0, artifact unchanged), and the snapshot ledger's own Nsight
+// record already convicted injection-time copies as INCOMPLETE (the
+// injection fires mid-scene). Object defenders in the buffer are not
+// reliably decodable through one reconstruction pair - stop decoding.
+// The honest hardware LESS_EQUAL test returns as the OBJECT authority
+// (it carried object occlusion correctly for months; only terrain LOD
+// ever beat it wrongly), and terrain is beaten the way the thm lane
+// beats it - ANALYTICALLY: the arb pixel shader writes SV_Depth,
+// pulling the fragment in front of the terrain-LOD band ONLY where
+// the analytic terrain says the fragment is visible AND only within
+// the contact band below (clearance-ramped: zero offset above the
+// band, so object comparisons stay raw-exact everywhere it matters).
+// Cost, same accepted class as sec 2.4's shell: an object within the
+// offset in FRONT of the mesh, inside the contact band only, loses
+// wrongly - a thin strip at the ground line, bounded by design.
+static constexpr float KH_FAR_ARB_CONTACT_H = 25.0f;   // clearance (m) below which the LOD fight exists
+// FIELD ROUND 7 (the parked look-up log): the clamp offset must be
+// DISTANCE-PROPORTIONAL, not constant - the LOD deficit it covers is
+// a ramp that scales with distance/grazing (sec 2.3: ray-terrain
+// intersections compress). A flat 15 m is ~6-9% of the chronic pose's
+// 160-240 m standoff (proportionate, covers the measured 4.6-10+ m
+// gap) but 30-75% at the 20-50 m standoff of the close look-up pose -
+// where it wrongly beat every object within 15 m in front of the
+// contact band (poles, wall tops, the tree - all sky-backed; terrain-
+// backed pixels were rescued only by nearer terrain). The offset is
+// now min(base, distance * REL): 9.5 m at 158 m, 14.4 m at 240 m,
+// 1.8 m at 30 m. REL is mirrored VERBATIM as the 0.06 literal in the
+// PSComposite KH_ARB_DEPTH clamp (HLSL cannot see this constant).
+static constexpr float KH_FAR_ARB_OFF_REL = 0.06f;
+static constexpr float KH_FAR_ARB_GUARD_REL  = 0.02f;
+// FAR-FRAME CLASSIFICATION FLOOR, applied to the encode near the
+// injection arbitration itself ACCEPTED this frame (injection-site
+// source - NOT a probe sighting, so the round-16 absolute-floor
+// flood trap does not apply; the flood window lives at the CB probe).
+// Camera windows observed live at injection top out ~1.4 (glide);
+// the far class glides 9.9965-10.0019: 5.0 splits them with >3x
+// margin both ways. Known trade, accepted: a genuine high-altitude
+// camera near above 5 (the band was widened to 15 for the altitude
+// ledger) arms the arbitration too - an elevated camera is the bite
+// geometry anyway, and the cost is the same margin ghost shell,
+// never a new artifact class.
+static constexpr float KH_FAR_ARB_NEAR_MIN = 5.0f;
+// HYSTERESIS HOLD FLOOR (field round 2, the 3991-frame dump): the
+// frame-global near GLIDES WITH THE VIEW - the recorder caught
+// 7.26 -> 6.43 -> 5.63 -> 4.90 -> 4.18 -> 3.51 -> 3.11 -> back to 10
+// across a camera turn. A hard 5.0 floor flip-flopped those frames
+// between the arbitrated and stock paths, and the stock frames still
+// carry the bite - the alternation IS the "world through parts of
+// it" rotation flicker (3670 arb / 321 stock in one parked session).
+// Once armed, the arbitration holds down to 2.0: the glide bottomed
+// at 3.10 on record, while genuine live camera windows top out ~1.4.
+static constexpr float KH_FAR_ARB_NEAR_HOLD = 2.0f;
+// Motion-hold trigger constants (rot/speed/drift/linger): REMOVED in
+// round 10 with the hold machinery they served (see the arb gate).
 
 // ===========================================================================
 // OCCLUSION-GUARD SNAPSHOT STATE + RUNTIME CONFIG (the overhaul; see
@@ -9105,11 +9425,22 @@ inline void dynlights_reset_session() {
 // published sun state. Called by both solid-mesh paths (flush and injection);
 // both run either on the game thread with the lock held or on the parked-
 // exclusive render thread, so plain reads of the published globals are safe.
-inline void fill_lighting_cb(ConstantData& cbd, const RenderObject& o) {
-    cbd.lighting0[0] = o.lit ? 1.0f : 0.0f;
-    cbd.lighting0[1] = 1.0f;   // unused lane (float4 packing)
-    cbd.lighting0[2] = o.light_ambient;
-    cbd.lighting0[3] = o.light_diffuse;
+// CB-SPLIT (frame half): everything in this function is FRAME-GLOBAL -
+// the sun direction + gate, the published block colors, the private sun
+// map, and the live cascade table - filled ONCE per mesh pass into the
+// b1 slice. The per-object half (lighting0, the far-vis flag, the
+// per-object culled dynamic lights) lives in fill_lighting_obj_cb; the
+// fill_lighting_cb wrapper below keeps the historic one-call shape for
+// the single-draw sites.
+// LEDGER - the o.lit early-return is GONE from the table fill: unlit
+// objects now share the pass's live table bytes. Every consumer sits
+// behind the shader's lighting0.x gate (ApplyLighting's first test, the
+// smf receive block's first test, debug mode 17's first test), so
+// PIXELS are unchanged - only CB bytes are. Counters that ticked per
+// OBJECT here (recvStreamSkips, recvTermSkips) and the pass fills' band
+// lanes now tick per PASS - update any parsing tooling that compared
+// them against per-object rates.
+inline void fill_lighting_frame_cb(ConstantData& cbd) {
     // Direction: the published derived latch, the single source now (the
     // getLighting-era ~9-deg-divergence note is retired with it; see
     // kh_shadow_sun's sunset lesson - the divergence was the engine
@@ -9239,13 +9570,8 @@ inline void fill_lighting_cb(ConstantData& cbd, const RenderObject& o) {
     // cascades BEFORE the main depth clear, so the building table is
     // already reset by injection time; the published one is this frame's
     // completed set (or at worst last frame's, which its embedded camera
-    // origin keeps correct). Skipped entirely for unlit objects.
-    if (!o.lit) return;
-
-    // Dynamic lights (points/spots/environment lamps): the validated
-    // engine mirror - one call covers both render paths, and unlit
-    // objects skipped with the rest. Dormant at mode 0 (the default).
-    fill_dynlights_cb(cbd, o);
+    // origin keeps correct). Unlit objects are SHADER-gated now, not
+    // fill-gated (the CB-SPLIT ledger above).
 
     // Received-term outage forensics: the world-shadows-on-mesh term
     // vanishes whenever this early-out fires on a LIT object. Three
@@ -9321,13 +9647,11 @@ inline void fill_lighting_cb(ConstantData& cbd, const RenderObject& o) {
     cbd.shadow_meta[1] = g_shadow_map_sign;
     cbd.shadow_meta[2] = g_shadow_map_bias;
     cbd.shadow_meta[3] = static_cast<float>(g_ls.atlas_size);
-    cbd.shadow_meta2[0] = o.far_vis ? 1.0f : 0.0f;   // far-visibility clamp (see far_vis)
-    // shadowMeta2.yzw stays zero: each entry's camera origin is folded into
-    // its translation below, so the shader's (wpos - meta2.yzw) consumes
-    // ABSOLUTE world positions and per-entry staleness cannot misregister.
-    cbd.shadow_meta2[1] = 0.0f;
-    cbd.shadow_meta2[2] = 0.0f;
-    cbd.shadow_meta2[3] = 0.0f;
+    // shadowMeta2 is PER-OBJECT (the far-vis flag) and fills in
+    // fill_lighting_obj_cb. Its yzw stays zero: each entry's camera
+    // origin is folded into its translation below, so the shader's
+    // (wpos - meta2.yzw) consumes ABSOLUTE world positions and
+    // per-entry staleness cannot misregister.
 
     for (uint32_t i = 0; i < n && out_i < KH_LIVE_MAX_CASCADES; ++i, ++out_i) {
         const LiveShadowEntry& e = g_ls.entries[order[i]];
@@ -9346,6 +9670,42 @@ inline void fill_lighting_cb(ConstantData& cbd, const RenderObject& o) {
 
     cbd.shadow_meta[0] = static_cast<float>(out_i);
 
+}
+
+// CB-SPLIT (object half): the per-object lighting lanes the frame fill
+// above surrendered.
+// FAR-VIS FIX (found during the split): shadowMeta2.x used to fill deep
+// inside the lit/table path - behind the o.lit early-out AND the
+// atlas-liveness / cascade-count / sun-settle gates. So an UNLIT farVis
+// object NEVER received its far clamp (permanently hard-clipped at max
+// view distance - the feature silently dead for unlit spawns), and lit
+// ones LOST it on every atlas-outage or settle-hold frame (a far
+// blink). The flag is object identity, not lighting state; it fills
+// unconditionally here. Behavior change, deliberate, field-checkable:
+// spawn an unlit farVis object beyond the far plane - visible now,
+// absent before.
+inline void fill_lighting_obj_cb(ConstantData& cbd, const RenderObject& o) {
+    cbd.lighting0[0] = o.lit ? 1.0f : 0.0f;
+    cbd.lighting0[1] = 1.0f;   // unused lane (float4 packing)
+    cbd.lighting0[2] = o.light_ambient;
+    cbd.lighting0[3] = o.light_diffuse;
+    cbd.shadow_meta2[0] = o.far_vis ? 1.0f : 0.0f;   // far-visibility clamp (see far_vis)
+    // Dynamic lights (points/spots/environment lamps): the validated
+    // engine mirror, culled PER OBJECT (mode 3's nearest-set selection
+    // is a per-mesh verdict). Unlit objects skip - the historic gate,
+    // preserved on the object side of the split. Dormant at mode 0.
+    if (o.lit) fill_dynlights_cb(cbd, o);
+}
+
+// Historic one-call shape, both halves into one flat cbd. NO CURRENT
+// CALLERS after the split (the mesh passes call the halves; chain
+// passes ride the pass frame build; UI passes fill no lighting) - kept
+// as the sanctioned one-call form for future single-draw fill sites.
+// NOTE the frame half fills the cascade table for unlit objects too -
+// shader-gated, see the frame-half ledger.
+inline void fill_lighting_cb(ConstantData& cbd, const RenderObject& o) {
+    fill_lighting_frame_cb(cbd);
+    fill_lighting_obj_cb(cbd, o);
 }
 
 // --- Shadow phase tracking (render thread only, like ReorderState). ---
@@ -9854,6 +10214,8 @@ inline void locator_note_upload(ID3D11Resource* res, const void* data, uint32_t 
     // never self-learn: our own CBs carry the staged fog and camera too
     if (res == static_cast<ID3D11Resource*>(g_res.composite_cb)) return;
     if (res == static_cast<ID3D11Resource*>(g_res.constant_buffer)) return;
+    if (res == static_cast<ID3D11Resource*>(g_res.frame_cb)) return;
+    if (res == static_cast<ID3D11Resource*>(g_res.composite_frame_cb)) return;
 
     const float* f = static_cast<const float*>(data);
     const uint32_t nf_full = bytes / 4;
@@ -11420,7 +11782,17 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
     ctx->GSSetShader(nullptr, nullptr, 0);
     ctx->HSSetShader(nullptr, nullptr, 0);
     ctx->DSSetShader(nullptr, nullptr, 0);
-    ctx->VSSetConstantBuffers(0, 1, &g_res.composite_cb);
+    // CB SPLIT: viewProj is FRAME data (b1). One frame upload covers
+    // both branches (the matrix is the pass's sun ortho either way);
+    // the instanced branch's object slice uploads once, zeroed
+    // (VSSunDepth reads instance streams + viewProj only), and the
+    // fallback uploads it per caster. No rebase: sun-space magnitudes
+    // are footprint-relative already.
+    ID3D11Buffer* khsd_cbs[2] = { g_res.composite_cb, g_res.composite_frame_cb };
+    ctx->VSSetConstantBuffers(0, 2, khsd_cbs);
+    ConstantData khsd_cbf = {};
+    memcpy(khsd_cbf.view_proj, lvp, sizeof(khsd_cbf.view_proj));
+    const bool khsd_frame_ok = kh_upload_frame_cb(ctx, g_res.composite_frame_cb, khsd_cbf);
     ctx->OMSetDepthStencilState(g_res.dss_test_write, 0);
     ctx->RSSetState(g_res.rast_sun);
     if (instanced) {
@@ -11460,13 +11832,9 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
             filled = true;
         }
 
-        D3D11_MAPPED_SUBRESOURCE mapped = {};
+        ConstantData khsd_obj = {};   // zeroed object slice (unread by VSSunDepth)
 
-        if (filled && SUCCEEDED(ctx->Map(g_res.composite_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
-            ConstantData cbd = {};
-            memcpy(cbd.view_proj, lvp, sizeof(cbd.view_proj));
-            memcpy(mapped.pData, &cbd, sizeof(cbd));
-            ctx->Unmap(g_res.composite_cb, 0);
+        if (filled && khsd_frame_ok && kh_upload_obj_cb(ctx, g_res.composite_cb, khsd_obj)) {
 
             ID3D11Buffer* vbs[2] = { nullptr, g_res.sun_instance_vb };
             UINT strides[2] = { sizeof(MeshVertex), sizeof(float) * 20 };
@@ -11498,10 +11866,8 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                 bound_mesh = c.mesh;
             }
 
-            D3D11_MAPPED_SUBRESOURCE mapped = {};
-            if (FAILED(ctx->Map(g_res.composite_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) break;
+            if (!khsd_frame_ok) break;
             ConstantData cbd = {};
-            memcpy(cbd.view_proj, lvp, sizeof(cbd.view_proj));
             cbd.center_size[0] = c.pos[0];
             cbd.center_size[1] = c.pos[2];   // SQF [x,y,zASL] -> engine [x,zASL,y]
             cbd.center_size[2] = c.pos[1];
@@ -11510,8 +11876,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
             cbd.size_axes[2] = c.size[1];
 
             kh_fill_obj_rot(cbd, c.rot);         // object rotation (VSMain path)
-            memcpy(mapped.pData, &cbd, sizeof(cbd));
-            ctx->Unmap(g_res.composite_cb, 0);
+            if (!kh_upload_obj_cb(ctx, g_res.composite_cb, cbd)) break;   // CB SPLIT: object slice
             ctx->Draw(mesh_vertex_count(c.mesh), 0);
             g_stats.sun_depth_casters++;
         }
@@ -11877,6 +12242,12 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
     // the historical path); ctx1 unavailable degrades to historical.
     UINT old_cb_first = 0, old_cb_num = 0;
     UINT old_vs_cb_first = 0, old_vs_cb_num = 0;
+    // CB SPLIT: we bind b1 too now, so the fire's manual save set
+    // covers BOTH slots (same offset-aware discipline as b0).
+    ID3D11Buffer* old_cb1 = nullptr;
+    ID3D11Buffer* old_vs_cb1 = nullptr;
+    UINT old_cb1_first = 0, old_cb1_num = 0;
+    UINT old_vs_cb1_first = 0, old_vs_cb1_num = 0;
     ID3D11DeviceContext1* khf_ctx1 = nullptr;
     ctx->QueryInterface(__uuidof(ID3D11DeviceContext1), reinterpret_cast<void**>(&khf_ctx1));
     ID3D11Buffer* old_vs_cb = nullptr;
@@ -11884,10 +12255,14 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
     if (khf_ctx1) {
         khf_ctx1->PSGetConstantBuffers1(0, 1, &old_cb, &old_cb_first, &old_cb_num);
         khf_ctx1->VSGetConstantBuffers1(0, 1, &old_vs_cb, &old_vs_cb_first, &old_vs_cb_num);
+        khf_ctx1->PSGetConstantBuffers1(1, 1, &old_cb1, &old_cb1_first, &old_cb1_num);
+        khf_ctx1->VSGetConstantBuffers1(1, 1, &old_vs_cb1, &old_vs_cb1_first, &old_vs_cb1_num);
 
     } else {
         ctx->PSGetConstantBuffers(0, 1, &old_cb);
         ctx->VSGetConstantBuffers(0, 1, &old_vs_cb);   // the fire sets VS b0
+        ctx->PSGetConstantBuffers(1, 1, &old_cb1);
+        ctx->VSGetConstantBuffers(1, 1, &old_vs_cb1);
     }
     // and never restored it: every engine VERTEX shader after the fire
     // read our mesh cbd as its constants - the last-fired mesh's COLOR
@@ -11967,8 +12342,11 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
     // fullscreen triangle is clockwise in render-target space - the default
     // front face - so CullBack never rejects it; DepthClip is moot at z = 0.
     ctx->RSSetState(nullptr);
-    ctx->VSSetConstantBuffers(0, 1, &g_res.composite_cb);
-    ctx->PSSetConstantBuffers(0, 1, &g_res.composite_cb);
+    // CB SPLIT: b0 = per-object, b1 = per-frame; both slices upload per
+    // fire below (the ad-hoc backup saves/restores BOTH slots).
+    ID3D11Buffer* khmc_cbs[2] = { g_res.composite_cb, g_res.composite_frame_cb };
+    ctx->VSSetConstantBuffers(0, 2, khmc_cbs);
+    ctx->PSSetConstantBuffers(0, 2, khmc_cbs);
     const FLOAT bfm[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
     ctx->OMSetBlendState(g_mask.min_blend, bfm, 0xFFFFFFFF);
     ctx->OMSetDepthStencilState(g_mask.cast_dss, 0);
@@ -12059,11 +12437,7 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
         // covers EVERY caster at once - the map already holds them all.
         // centerSize/sizeAxes carry the COMBINED caster bounds (already
         // engine axes) for the shader's locality clamp.
-        D3D11_MAPPED_SUBRESOURCE mapped = {};
-
-        if (FAILED(ctx->Map(g_res.composite_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
-            g_ls.cast_misses = 9;
-        } else {
+        {
             ConstantData cbd = {};
             fill_frame(cbd);
             cbd.center_size[0] = g_sun_map_bounds[0];
@@ -12090,17 +12464,20 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
                 cbd.locality[li * 2 + 1][2] = g_sun_local_bounds[li][5];
             }
 
-            memcpy(mapped.pData, &cbd, sizeof(cbd));
-            ctx->Unmap(g_res.composite_cb, 0);
-            ctx->Draw(3, 0);
-            g_mask.analytic_casts++;
+            // CB SPLIT: both slices (centerSize/sizeAxes ride b0; the
+            // cast matrices, sun map + locality list ride b1)
+            if (!kh_upload_obj_cb(ctx, g_res.composite_cb, cbd) ||
+                !kh_upload_frame_cb(ctx, g_res.composite_frame_cb, cbd)) {
+                g_ls.cast_misses = 9;
+            } else {
+                ctx->Draw(3, 0);
+                g_mask.analytic_casts++;
+            }
         }
     } else {
         // AABB slab fallback: one fullscreen test per caster, exactly the
         // pre-map behavior (zeroed sunMeta selects the shader's slab path).
         for (uint32_t bi = 0; bi < ncb; ++bi) {
-            D3D11_MAPPED_SUBRESOURCE mapped = {};
-            if (FAILED(ctx->Map(g_res.composite_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) { g_ls.cast_misses = 9; break; }
             ConstantData cbd = {};
             fill_frame(cbd);
             cbd.center_size[0] = centries[bi].pos[0];
@@ -12109,8 +12486,9 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
             cbd.size_axes[0] = centries[bi].size[0];
             cbd.size_axes[1] = centries[bi].size[2];
             cbd.size_axes[2] = centries[bi].size[1];
-            memcpy(mapped.pData, &cbd, sizeof(cbd));
-            ctx->Unmap(g_res.composite_cb, 0);
+            // CB SPLIT: both slices per caster (slab path - rare)
+            if (!kh_upload_obj_cb(ctx, g_res.composite_cb, cbd) ||
+                !kh_upload_frame_cb(ctx, g_res.composite_frame_cb, cbd)) { g_ls.cast_misses = 9; break; }
             ctx->Draw(3, 0);
             g_mask.analytic_casts++;
         }
@@ -12168,10 +12546,25 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
             ctx->VSSetConstantBuffers(0, 1, &old_vs_cb);
         }
 
+        // Slot 1 (CB split): same offset-aware restore discipline
+        if (old_cb1 && old_cb1_num > 0) {
+            khf_ctx1->PSSetConstantBuffers1(1, 1, &old_cb1, &old_cb1_first, &old_cb1_num);
+        } else {
+            ctx->PSSetConstantBuffers(1, 1, &old_cb1);
+        }
+
+        if (old_vs_cb1 && old_vs_cb1_num > 0) {
+            khf_ctx1->VSSetConstantBuffers1(1, 1, &old_vs_cb1, &old_vs_cb1_first, &old_vs_cb1_num);
+        } else {
+            ctx->VSSetConstantBuffers(1, 1, &old_vs_cb1);
+        }
+
         khf_ctx1->Release();
     } else {
         ctx->PSSetConstantBuffers(0, 1, &old_cb);
         ctx->VSSetConstantBuffers(0, 1, &old_vs_cb);
+        ctx->PSSetConstantBuffers(1, 1, &old_cb1);
+        ctx->VSSetConstantBuffers(1, 1, &old_vs_cb1);
     }
 
     ctx->OMSetBlendState(old_blend, old_bf, old_bmask);
@@ -12188,6 +12581,7 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
     ctx->RSSetState(old_rs);
     g_ro.in_injection = false;
     KH_SAFE_RELEASE(old_vs_cb);
+    KH_SAFE_RELEASE(old_vs_cb1);
 
     for (int r = 0; r < 8; ++r) KH_SAFE_RELEASE(old_rtvs[r]);
 
@@ -12198,6 +12592,7 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
     KH_SAFE_RELEASE(old_ps);
     KH_SAFE_RELEASE(old_il);
     KH_SAFE_RELEASE(old_cb);
+    KH_SAFE_RELEASE(old_cb1);
     KH_SAFE_RELEASE(old_blend);
     KH_SAFE_RELEASE(old_dss);
 
@@ -12526,6 +12921,36 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             if (expired) { g_stage_rej_exp++; continue; }   // the Draw3D flush owns the erasure
             meshes.push_back(o);
             meshes.back().color[3] *= env;
+
+            // FIELD ROUND 9 - TRANSLUCENT DEFERRAL (the grey-window log:
+            // perceptualCaptures == injections; background fog-grey with
+            // angle-dependent coverage; sky ALWAYS grey). A non-opaque
+            // mesh cannot be composed at the injection: the injection
+            // fires MID-SCENE (Nsight, the snapshot ledger), so its
+            // scene capture is an INCOMPLETE frame - and its depth write
+            // kills everything the engine would have drawn behind it
+            // after the trigger, so the true background never exists at
+            // those pixels for any later pass to recover (the flush's
+            // "idempotent" recompose faithfully re-tints the stale grey).
+            // Which passes precede the trigger varies with the view (the
+            // angle-dependent terrain/objects split) and the skydome is
+            // late (the always-grey sky). Non-opaque presentations (any
+            // blend mode, or alpha below opaque - POST-envelope, so
+            // fades defer too) therefore SKIP the injection and render
+            // at the post-scene flush against the COMPLETE frame - the
+            // deferral the TAIL DEFERRAL ledger designed and never got.
+            // Disclosed trades: engine translucents IN FRONT of the mesh
+            // mis-layer behind it on flush-painted pixels (the
+            // pre-existing flush-carry class), and the far-frame terrain
+            // arbitration does not cover flush draws - a translucent
+            // mesh parked at the chronic grazing pose may re-show the
+            // contact-band bite. Measure before extending the SV_Depth
+            // clamp to PSMain; do not extend it speculatively.
+            if (!(meshes.back().blend_mode == 0 && meshes.back().color[3] >= 0.999f)) {
+                meshes.pop_back();
+                g_stats.composite_transl_defers++;
+                continue;
+            }
         }
 
         if (!meshes.empty() && g_mask.cold_t0 >= 0.0 && g_mask.cold_first_stage < 0.0f) {
@@ -12540,6 +12965,14 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     ID3D11Device* dev = RVExtBridge::get_d3d_device();
     if (!dev) { g_stats.composite_skips++; return; }
     if (!ensure_resources(dev).empty()) { g_stats.composite_skips++; return; }
+
+    // ROUND-5 SAME-FRAME SNAPSHOT: REMOVED (round 10 housekeeping). It
+    // re-created the Nsight-falsified design the snapshot ledger warns
+    // about (injection-time copies are MID-SCENE and incomplete) and it
+    // overwrote the flush's complete snapshot every frame - the one the
+    // no-heightfield backstop guard consumes. The FLUSH is the sole
+    // snapshot producer again; round 6 removed the arb path's need for
+    // any snapshot at all.
 
     // Render this frame's private sun-depth map HERE - the one place a
     // foreign pass is proven safe (post-resolve, inside our own injection
@@ -12659,6 +13092,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     const bool khr_slot_band = snap_slot_near >= KH_INJ_SLOT_NEAR_MIN;
     bool khr_inj_band_rej = false;
     uint8_t khr_enc_src = measured ? 1 : 0;   // encode-author forensic (flight recorder)
+    bool khr_far_phase = false;               // far pair is this phase's truth (set at the far-inject branch)
 
     if (snap_slot_near > 0.0f && !khr_slot_band) {
         g_inj_slot_band_rejects++;
@@ -12740,6 +13174,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         }
 
         g_stats.composite_far_injects++;   // proceed: far pair is this phase's truth
+        khr_far_phase = true;              // arms the analytic arbitration below
     }
 
     // ANOMALOUS CYCLE: a proven locator with a silent slot means the
@@ -12811,6 +13246,27 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     const float inject_near = fabsf(pv.projection[2][2]) > 1e-9f
                             ? (-pv.projection[3][2] / pv.projection[2][2]) : -1.0f;
     g_mask.last_inject_near = inject_near;
+
+    // FAR-FRAME CLASSIFICATION BY THE ACCEPTED ENCODE (field correction,
+    // the 968-frame parked-bite dump: every frame slot-encoded at
+    // 10.0012 while dFarInjects stayed 0 for the whole session). At the
+    // chronic pose the far pair is the FRAME-GLOBAL near - slot,
+    // measured and bridge ALL carry the 10-class - so the slot-vs-
+    // bridge ratio branch above is structurally blind to it: it was
+    // built for MIXED frames where a camera bridge coexists with a far
+    // slot. The frame-global case is classified here instead, by the
+    // one value that is injection-verified by construction: the encode
+    // near this frame actually rasterizes with. HYSTERESIS (field
+    // round 2): the near glides continuously with the view, so a hard
+    // floor alternated arb/stock frame-to-frame under rotation and
+    // re-exposed the bite on every stock frame - the part-flicker.
+    // Arm at the floor, hold to the hold floor once armed.
+    static bool khr_arb_prev_armed = false;   // injection site is render-thread-only
+
+    if (inject_near >= KH_FAR_ARB_NEAR_MIN ||
+        (khr_arb_prev_armed && inject_near >= KH_FAR_ARB_NEAR_HOLD)) {
+        khr_far_phase = true;
+    }
 
     // Dynamic-lights acquisition: ACCEPTED injections only. Rescue
     // (anomalous) cycles are quarantined - a foreign pass's slot bindings
@@ -13051,7 +13507,8 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     // (A rearm-cycle guard standdown lived here for one build and is
     // REMOVED by the acceptance criteria: an unguarded frame is the
     // same artifact class as a hollow one. The see-through root is
-    // fixed at the source instead - GuardSceneDist treats clear-value
+    // fixed at the source instead - the guard's clear-extreme skip
+    // (PSComposite's sceneClear over GuardSceneRaw) treats clear-value
     // depth as no-scene, so partition-churn frames can no longer
     // discard through a phantom far plane.)
     const uint64_t khs_inj_now = steady_now_ms();
@@ -13060,6 +13517,42 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
                              (khs_inj_now - g_snap_ms) < KH_SNAP_MAX_AGE_MS;
     const bool guard = khs_snap_ok && ensure_composite_shader(dev).empty();
     if (!guard) g_inj_guard_off++;   // guardless injection: the rare see-through/overlay correlate
+
+    // ANALYTIC TERRAIN ARBITRATION GATE (HANDOFF2 sec 2.4; the grazing-
+    // incidence terrain bite). The bite lives on far-encoded frames: the
+    // rendered terrain LOD mesh sits METERS in front of the analytic
+    // surface along grazing rays and legitimately wins the depth test
+    // against the mesh's ground-contact band (Nsight pixel history:
+    // defender 153.2 m vs our 157.8 m, ~4.6 m LOD gap). No rasterizer
+    // bias can fix a variable meters-scale geometric disagreement -
+    // field-falsified twice, sec 2.3, do not retry. On exactly these
+    // frames occlusion is decided by authorities exact at the contact
+    // (round 6, the settled shape - the ALWAYS + reconstruction-guard
+    // family of rounds 1-5 is falsified and excised): the honest
+    // hardware LESS_EQUAL test owns OBJECTS in raw space (months-
+    // stable), the thm lane owns terrain (TRUE surface, LOD-immune),
+    // and the arb PS variant's SV_Depth clamp beats the terrain LOD
+    // analytically - distance-proportional, contact-band-gated (round
+    // 7). Camera frames keep the stock path untouched. Fail-safe
+    // direction: heightfield or arb shader down => stock LESS_EQUAL
+    // path (the bite, never a new artifact).
+    // Round 6: the arb no longer depends on the snapshot guard - it
+    // needs only the heightfield and the compiled arb shader. The
+    // guard bool remains for the stock path's own machinery.
+    const bool khr_far_arb = khr_far_phase && g_thm_valid &&
+                             ensure_composite_shader(dev).empty() &&
+                             g_res.ps_composite_arb != nullptr;
+
+    if (khr_far_phase) {
+        if (khr_far_arb) g_stats.composite_far_arbs++;
+        else g_stats.composite_far_arb_denied++;
+    }
+
+    khr_arb_prev_armed = khr_far_arb;   // hysteresis latch (drawn state, not classification)
+
+    // MOTION GUARD-HOLDS: REMOVED (round 10). They compensated the
+    // reconstruction guard's snapshot staleness; round 6 retired that
+    // guard from the arb path, leaving the holds without a consumer.
 
     if (guard) {
         const float khs_age = static_cast<float>(khs_inj_now - g_snap_ms);
@@ -13073,8 +13566,10 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     ctx->IASetInputLayout(g_res.input_layout);
     ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     ctx->IASetVertexBuffers(0, 1, &g_res.mesh_vb[0], &stride, &offset);
-    ctx->VSSetShader(guard ? g_res.vs_composite : g_res.vs, nullptr, 0);
-    ctx->PSSetShader(guard ? g_res.ps_composite : g_res.ps, nullptr, 0);
+    ctx->VSSetShader((guard || khr_far_arb) ? g_res.vs_composite : g_res.vs, nullptr, 0);
+    ctx->PSSetShader(khr_far_arb ? g_res.ps_composite_arb
+                     : guard     ? g_res.ps_composite
+                                 : g_res.ps, nullptr, 0);
     ctx->GSSetShader(nullptr, nullptr, 0);
     ctx->HSSetShader(nullptr, nullptr, 0);
     ctx->DSSetShader(nullptr, nullptr, 0);
@@ -13082,8 +13577,10 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     // survival). Runs when either wants; idles when both are satisfied.
     if ((g_fog_valid && g_fog[0] > 1e-4f) || !g_ls.view_src_valid) skybind_step(ctx);
 
-    ctx->VSSetConstantBuffers(0, 1, &g_res.composite_cb);
-    ctx->PSSetConstantBuffers(0, 1, &g_res.composite_cb);
+    // CB SPLIT: b0 = per-object, b1 = per-frame (StateBackup saves both slots)
+    ID3D11Buffer* khr_cbs[2] = { g_res.composite_cb, g_res.composite_frame_cb };
+    ctx->VSSetConstantBuffers(0, 2, khr_cbs);
+    ctx->PSSetConstantBuffers(0, 2, khr_cbs);
     if (guard) ctx->PSSetShaderResources(0, 1, &g_res.comp_depth_srv);
     // Shadow atlas for the per-pixel map compare (harmless when the table
     // is empty: shadowMeta.x = 0 short-circuits the shader). Slot t1 is
@@ -13135,18 +13632,219 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         }
     }
 
+    // Round 6: LESS_EQUAL + write for BOTH arms. The honest raw-space
+    // test is the object authority again (months-stable); the arb
+    // variant beats terrain LOD via its SV_Depth clamp, not ALWAYS.
     ctx->OMSetDepthStencilState(g_res.dss_test_write, 0);
     ctx->RSSetState(g_res.rasterizer);
     ID3D11RasterizerState* khr_bound_rs = g_res.rasterizer;   // per-object twoSided switch
+    // IDEMPOTENT-SET ELISION (the khr_bound_rs / bound_mesh pattern,
+    // completed): consecutive identical OMSetBlendState calls are
+    // semantically inert, and our own injection-window sets are
+    // hook-invisible by the in_injection gate - eliding repeats
+    // changes no state the GPU or the trackers can observe. Post-
+    // round-9 every staged mesh here is blend 0 (translucents defer),
+    // so the run collapses to ONE set. Sentinel forces the first set
+    // verbatim (the pre-loop bound blend is the engine's, unknown).
+    int khr_bound_bm = -1;
     const FLOAT bf[4] = { 0, 0, 0, 0 };
 
+    // CB SPLIT - PER-PASS FRAME BUILD (injection edition). Everything
+    // frame-global the per-object loop used to fill and upload once per
+    // MESH now fills once per PASS: the lighting frame half, the
+    // view-paired band table + receive commit + fog (the block below,
+    // moved verbatim from the loop), the heightfield lanes, and the
+    // (rebased) viewProj. Each object then starts from this template -
+    // the frame region rides along for the CPU-side echoes, but only
+    // the OBJECT slice uploads per draw.
+    ConstantData khr_cbf = {};
+    memcpy(khr_cbf.view_proj, view_proj, sizeof(khr_cbf.view_proj));
+    const bool khr_rebase_on = kh_rebase_vp(khr_cbf, cam);
+    fill_lighting_frame_cb(khr_cbf);
+    {
+        bool band_any = false;
+        // FINEST-FIRST: order slots by near edge ascending, so the
+        // shader's first containing band holds the finest content in
+        // the engine's overlap (crossfade) zones. bandBorder.w encodes
+        // valid + which PHYSICAL texture slot to sample (1 + index).
+        int order[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
+
+        for (int a = 0; a < 7; ++a) {
+            for (int b2 = a + 1; b2 < 8; ++b2) {
+                const float na = g_ls.band[order[a]].valid ? g_ls.band[order[a]].border[0] : 1e9f;
+                const float nb = g_ls.band[order[b2]].valid ? g_ls.band[order[b2]].border[0] : 1e9f;
+
+                if (nb < na) {
+                    const int t = order[a];
+                    order[a] = order[b2];
+                    order[b2] = t;
+                }
+            }
+        }
+
+        float prev_far = -1e9f;
+
+        for (int b = 0; b < 8; ++b) {
+            const auto& bs = g_ls.band[order[b]];
+            khr_cbf.band_border[b][3] = 0.0f;
+            if (!bs.valid || !bs.srv) continue;
+
+            // RECEIVE WARM-UP GATE (the startup garbage class the
+            // local fixes could not cover: the ENGINE's own early
+            // atlas content is mid-stream garbage - our seals copy
+            // and decode it faithfully, and reseal churn makes it
+            // slide until the engine settles). Absent beats offset:
+            // the receive term stands down for KH_RECEIVE_WARMUP_S after
+            // the first capture.
+            if (g_ls.first_capture_time < 0.0f ||
+                effect_time_seconds() - g_ls.first_capture_time < KH_RECEIVE_WARMUP_S) {
+                g_band_warmup_skips++;
+                continue;
+            }
+
+            // SPAWN-WINDOW GUARD: a pending band whose provisional
+            // view is the bridge fallback pairs cross-convention -
+            // the initial-shadow drift. Absent beats offset; the
+            // band re-enters the moment its seal completes.
+            if (bs.pending_view && bs.vcol_bridge) { g_ls.band_prov_skips++; continue; }
+
+            // twin dedupe: near inside the previous band's range and
+            // far not meaningfully beyond it = a partition duplicate
+            // of the same range; two twins alternate seal content and
+            // the shader's winner flip-flops (the range flicker).
+            if (!(bs.border[1] > bs.border[0]) || bs.border[0] < 0.0f ||
+                bs.border[1] > 4000.0f) {   // startup-slot hygiene: invalidate,
+                g_ls.band[order[b]].valid = false;   // the next resolve reseals sanely
+                g_band_insane_skips++;
+                continue;
+            }
+
+            if (bs.border[0] < prev_far - 0.5f && bs.border[1] < prev_far * 1.25f + 1.0f) continue;
+            if (bs.border[0] < prev_far - 0.5f) g_band_overlap_pairs++;   // consumed overlap census
+            prev_far = bs.border[1];
+            memcpy(khr_cbf.band_mat[b * 3 + 0], bs.sm + 0, 16);
+            memcpy(khr_cbf.band_mat[b * 3 + 1], bs.sm + 4, 16);
+            memcpy(khr_cbf.band_mat[b * 3 + 2], bs.sm + 8, 16);
+            memcpy(khr_cbf.band_view[b * 3 + 0], bs.vcol + 0, 16);
+            memcpy(khr_cbf.band_view[b * 3 + 1], bs.vcol + 4, 16);
+            memcpy(khr_cbf.band_view[b * 3 + 2], bs.vcol + 8, 16);
+            khr_cbf.band_border[b][0] = bs.border[0];
+            khr_cbf.band_border[b][1] = bs.border[1];
+            khr_cbf.band_border[b][2] = bs.border[2];
+            khr_cbf.band_border[b][3] = 1.0f + static_cast<float>(order[b]);
+            band_any = true;
+        }
+
+        if (band_any && kh_sun_settled() &&
+            (g_atlas_frame_cur || g_atlas_frame_prev)) {   // sun-settle gate + atlas
+            khr_cbf.mask_meta[0] = 1.0f;   // stream liveness (round 7): the receive
+        }                              // stands down while the system converges
+                                       // OR the cascade stream is dead
+        g_band_on_last = khr_cbf.mask_meta[0] >= 0.5f ? 1 : 0;   // film strip
+
+        // engine-mask depth-gated receive: registration-exact shadows
+        // (units, clouds, everything the engine resolves) on mesh
+        // surfaces within the depth margin of world geometry.
+
+        // fog occlusion (self-fetched fogParams; RV's height-decay
+        // exponential). Color: the staged ambient tint is the closest
+        // engine-truth horizon approximation available without the
+        // sky pipeline's own constants.
+        if (g_fog_valid && g_fog[0] > 1e-4f) {
+            khr_cbf.fog_params[0] = g_fog[0];
+            khr_cbf.fog_params[1] = g_fog[1];
+            khr_cbf.fog_params[2] = g_fog[2];
+            khr_cbf.fog_params[3] = 1.0f;
+
+            // (A lane-41 density calibration lived here briefly and is
+            // RETIRED: lane 41 matched the density formula exactly in
+            // the base=113 session but read a flat 0.05 across 239 m
+            // and 981 m with base=0 - an unmodeled regime - and the
+            // resulting 4x clamp at altitude over-fogged ground boxes
+            // to the dim tint. Density is params-faithful again; the
+            // extinction constant is the operator's knob.)
+
+            // FOG COLOR = RAW TINT, final: the blue belongs to the
+            // EXTINCTION, not the target (see the spectral term in the
+            // shader - the engine's altitude block volunteered its
+            // red-dominant extinction coefficients, closing the
+            // ladder). The tint is the convergence color at full
+            // optical depth - near-neutral by day, exactly like the
+            // engine's own total whiteout in extreme fog - while the
+            // blue-shift lives in the journey there. tint x sky is
+            // retired: it baked sky hue into the TARGET and still
+            // read white once tonemapped.
+            // FOG DECOUPLED FROM THE BLOCK LOCK (settings-
+            // independence): the whole fill used to be gated on the
+            // light-probe lock, so a degenerate staged decay (setFog
+            // with decay 0 can never anchor the probe) or the pre-lock
+            // cold window left the mesh UNFOGGED in a fogged world - a
+            // mismatch, not a delay. Density is params-faithful and
+            // needs no block; only the verbatim tint and the engine
+            // transmittance terms do. Unlocked frames run the legacy
+            // exponential (the shader's fogEngine.w = 0 branch) toward
+            // a neutral whiteout target - the engine's own extreme-fog
+            // convergence color - until the mirrors supply verbatim.
+            if (g_light_probe.hits > 0 && g_light_probe.meta == 40) {
+                const float* e = g_light_probe.nb + 36;
+
+                for (int c = 0; c < 3; ++c) khr_cbf.fog_color[c] = e[c];
+
+                // Engine transmittance terms from the block mirror: the
+                // density scale, the linear ramp's end + inverse range.
+                khr_cbf.fog_engine[0] = g_light_probe.nb[41];
+                khr_cbf.fog_engine[1] = g_light_probe.nb[48];
+                khr_cbf.fog_engine[2] = g_light_probe.nb[49];
+                khr_cbf.fog_engine[3] = (g_light_probe.nb[48] > 1.0f &&
+                                     g_light_probe.nb[49] > 0.0f &&
+                                     g_light_probe.nb[41] >= 0.0f) ? 1.0f : 0.0f;
+            } else {
+                khr_cbf.fog_color[0] = 1.0f;
+                khr_cbf.fog_color[1] = 1.0f;
+                khr_cbf.fog_color[2] = 1.0f;
+            }
+
+            // Verbatim fog COLOR, corrected branch: world geometry
+            // takes the engine's HEIGHT-fog path, which fogs toward
+            // ROW 1, FLAT - (0.94, 1.37, 2.31) at the last decode,
+            // B/R 2.5, the strong blue of the vanilla comparison.
+            // Row 7 x gradient is the sky/far branch and was the
+            // wrong target for meshes. Gradient points fill as
+            // (1,1,1): the shader's g collapses to 1 - flat - with
+            // zero shader changes.
+            if (g_sky_probe.hits > 0) {
+                khr_cbf.fog_sky[0] = 1.0f;
+                khr_cbf.fog_sky[1] = 1.0f;
+                khr_cbf.fog_sky[2] = 1.0f;
+                khr_cbf.fog_sky[3] = 1.0f;
+                khr_cbf.fog_sky_col[0] = g_sky_probe.nb[4];
+                khr_cbf.fog_sky_col[1] = g_sky_probe.nb[5];
+                khr_cbf.fog_sky_col[2] = g_sky_probe.nb[6];
+            }
+
+            g_fog_dbg[0] = khr_cbf.fog_color[0];
+            g_fog_dbg[1] = khr_cbf.fog_color[1];
+            g_fog_dbg[2] = khr_cbf.fog_color[2];
+            g_fog_dbg[3] = khr_cbf.fog_params[3];
+
+            khr_cbf.fog_color[3] = g_ls.cam[1];   // camera altitude (engine Y-up)
+        }
+    }
+    // Heightfield lanes, BOTH arms - the terrain lane never depends on
+    // the depth lane's arming state, and now arms at the PASS level
+    // (guardless injections included, as before).
+    kh_fill_occ(khr_cbf);
+    const bool khr_frame_ok = kh_upload_frame_cb(ctx, g_res.composite_frame_cb, khr_cbf);
 
     for (const auto& o : meshes) {
-        ConstantData cbd = {};
-        memcpy(cbd.view_proj, view_proj, sizeof(cbd.view_proj));
+        ConstantData cbd = khr_cbf;
         cbd.center_size[0] = o.pos[0];
         cbd.center_size[1] = o.pos[2];   // SQF [x,y,zASL] -> engine [x,zASL,y]
         cbd.center_size[2] = o.pos[1];
+        // FP32 JITTER REBASE: per-object arm mirrors the pass verdict
+        // (see kh_rebase_vp - one without the other is the wrong-space
+        // landmine).
+        if (khr_rebase_on) kh_fill_center_rel(cbd, cam);
         cbd.size_axes[0] = o.size[0];    // SQF [x,y,z] sizes -> engine [x,z,y]
         cbd.size_axes[1] = o.size[2];
         cbd.size_axes[2] = o.size[1];
@@ -13177,181 +13875,19 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         cbd.band0[1] = o.band_max;
         cbd.band0[2] = o.band_falloff;
         cbd.band0[3] = o.banded ? 1.0f : 0.0f;
-        fill_lighting_cb(cbd, o);
+        fill_lighting_obj_cb(cbd, o);
         // Screen-mask receive retired: see the RECEIVE LEDGER at
-        // ConstantData::mask_meta. mask_meta.x commits below iff any
-        // view-paired band seal is consumable this frame.
-
-        {
-            bool band_any = false;
-            // FINEST-FIRST: order slots by near edge ascending, so the
-            // shader's first containing band holds the finest content in
-            // the engine's overlap (crossfade) zones. bandBorder.w encodes
-            // valid + which PHYSICAL texture slot to sample (1 + index).
-            int order[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
-
-            for (int a = 0; a < 7; ++a) {
-                for (int b2 = a + 1; b2 < 8; ++b2) {
-                    const float na = g_ls.band[order[a]].valid ? g_ls.band[order[a]].border[0] : 1e9f;
-                    const float nb = g_ls.band[order[b2]].valid ? g_ls.band[order[b2]].border[0] : 1e9f;
-
-                    if (nb < na) {
-                        const int t = order[a];
-                        order[a] = order[b2];
-                        order[b2] = t;
-                    }
-                }
-            }
-
-            float prev_far = -1e9f;
-
-            for (int b = 0; b < 8; ++b) {
-                const auto& bs = g_ls.band[order[b]];
-                cbd.band_border[b][3] = 0.0f;
-                if (!bs.valid || !bs.srv) continue;
-
-                // RECEIVE WARM-UP GATE (the startup garbage class the
-                // local fixes could not cover: the ENGINE's own early
-                // atlas content is mid-stream garbage - our seals copy
-                // and decode it faithfully, and reseal churn makes it
-                // slide until the engine settles). Absent beats offset:
-                // the receive term stands down for KH_RECEIVE_WARMUP_S after
-                // the first capture.
-                if (g_ls.first_capture_time < 0.0f ||
-                    effect_time_seconds() - g_ls.first_capture_time < KH_RECEIVE_WARMUP_S) {
-                    g_band_warmup_skips++;
-                    continue;
-                }
-
-                // SPAWN-WINDOW GUARD: a pending band whose provisional
-                // view is the bridge fallback pairs cross-convention -
-                // the initial-shadow drift. Absent beats offset; the
-                // band re-enters the moment its seal completes.
-                if (bs.pending_view && bs.vcol_bridge) { g_ls.band_prov_skips++; continue; }
-
-                // twin dedupe: near inside the previous band's range and
-                // far not meaningfully beyond it = a partition duplicate
-                // of the same range; two twins alternate seal content and
-                // the shader's winner flip-flops (the range flicker).
-                if (!(bs.border[1] > bs.border[0]) || bs.border[0] < 0.0f ||
-                    bs.border[1] > 4000.0f) {   // startup-slot hygiene: invalidate,
-                    g_ls.band[order[b]].valid = false;   // the next resolve reseals sanely
-                    g_band_insane_skips++;
-                    continue;
-                }
-
-                if (bs.border[0] < prev_far - 0.5f && bs.border[1] < prev_far * 1.25f + 1.0f) continue;
-                if (bs.border[0] < prev_far - 0.5f) g_band_overlap_pairs++;   // consumed overlap census
-                prev_far = bs.border[1];
-                memcpy(cbd.band_mat[b * 3 + 0], bs.sm + 0, 16);
-                memcpy(cbd.band_mat[b * 3 + 1], bs.sm + 4, 16);
-                memcpy(cbd.band_mat[b * 3 + 2], bs.sm + 8, 16);
-                memcpy(cbd.band_view[b * 3 + 0], bs.vcol + 0, 16);
-                memcpy(cbd.band_view[b * 3 + 1], bs.vcol + 4, 16);
-                memcpy(cbd.band_view[b * 3 + 2], bs.vcol + 8, 16);
-                cbd.band_border[b][0] = bs.border[0];
-                cbd.band_border[b][1] = bs.border[1];
-                cbd.band_border[b][2] = bs.border[2];
-                cbd.band_border[b][3] = 1.0f + static_cast<float>(order[b]);
-                band_any = true;
-            }
-
-            if (band_any && kh_sun_settled() &&
-                (g_atlas_frame_cur || g_atlas_frame_prev)) {   // sun-settle gate + atlas
-                cbd.mask_meta[0] = 1.0f;   // stream liveness (round 7): the receive
-            }                              // stands down while the system converges
-                                           // OR the cascade stream is dead
-            g_band_on_last = cbd.mask_meta[0] >= 0.5f ? 1 : 0;   // film strip
-
-            // engine-mask depth-gated receive: registration-exact shadows
-            // (units, clouds, everything the engine resolves) on mesh
-            // surfaces within the depth margin of world geometry.
-
-            // fog occlusion (self-fetched fogParams; RV's height-decay
-            // exponential). Color: the staged ambient tint is the closest
-            // engine-truth horizon approximation available without the
-            // sky pipeline's own constants.
-            if (g_fog_valid && g_fog[0] > 1e-4f) {
-                cbd.fog_params[0] = g_fog[0];
-                cbd.fog_params[1] = g_fog[1];
-                cbd.fog_params[2] = g_fog[2];
-                cbd.fog_params[3] = 1.0f;
-
-                // (A lane-41 density calibration lived here briefly and is
-                // RETIRED: lane 41 matched the density formula exactly in
-                // the base=113 session but read a flat 0.05 across 239 m
-                // and 981 m with base=0 - an unmodeled regime - and the
-                // resulting 4x clamp at altitude over-fogged ground boxes
-                // to the dim tint. Density is params-faithful again; the
-                // extinction constant is the operator's knob.)
-
-                // FOG COLOR = RAW TINT, final: the blue belongs to the
-                // EXTINCTION, not the target (see the spectral term in the
-                // shader - the engine's altitude block volunteered its
-                // red-dominant extinction coefficients, closing the
-                // ladder). The tint is the convergence color at full
-                // optical depth - near-neutral by day, exactly like the
-                // engine's own total whiteout in extreme fog - while the
-                // blue-shift lives in the journey there. tint x sky is
-                // retired: it baked sky hue into the TARGET and still
-                // read white once tonemapped.
-                // FOG DECOUPLED FROM THE BLOCK LOCK (settings-
-                // independence): the whole fill used to be gated on the
-                // light-probe lock, so a degenerate staged decay (setFog
-                // with decay 0 can never anchor the probe) or the pre-lock
-                // cold window left the mesh UNFOGGED in a fogged world - a
-                // mismatch, not a delay. Density is params-faithful and
-                // needs no block; only the verbatim tint and the engine
-                // transmittance terms do. Unlocked frames run the legacy
-                // exponential (the shader's fogEngine.w = 0 branch) toward
-                // a neutral whiteout target - the engine's own extreme-fog
-                // convergence color - until the mirrors supply verbatim.
-                if (g_light_probe.hits > 0 && g_light_probe.meta == 40) {
-                    const float* e = g_light_probe.nb + 36;
-
-                    for (int c = 0; c < 3; ++c) cbd.fog_color[c] = e[c];
-
-                    // Engine transmittance terms from the block mirror: the
-                    // density scale, the linear ramp's end + inverse range.
-                    cbd.fog_engine[0] = g_light_probe.nb[41];
-                    cbd.fog_engine[1] = g_light_probe.nb[48];
-                    cbd.fog_engine[2] = g_light_probe.nb[49];
-                    cbd.fog_engine[3] = (g_light_probe.nb[48] > 1.0f &&
-                                         g_light_probe.nb[49] > 0.0f &&
-                                         g_light_probe.nb[41] >= 0.0f) ? 1.0f : 0.0f;
-                } else {
-                    cbd.fog_color[0] = 1.0f;
-                    cbd.fog_color[1] = 1.0f;
-                    cbd.fog_color[2] = 1.0f;
-                }
-
-                // Verbatim fog COLOR, corrected branch: world geometry
-                // takes the engine's HEIGHT-fog path, which fogs toward
-                // ROW 1, FLAT - (0.94, 1.37, 2.31) at the last decode,
-                // B/R 2.5, the strong blue of the vanilla comparison.
-                // Row 7 x gradient is the sky/far branch and was the
-                // wrong target for meshes. Gradient points fill as
-                // (1,1,1): the shader's g collapses to 1 - flat - with
-                // zero shader changes.
-                if (g_sky_probe.hits > 0) {
-                    cbd.fog_sky[0] = 1.0f;
-                    cbd.fog_sky[1] = 1.0f;
-                    cbd.fog_sky[2] = 1.0f;
-                    cbd.fog_sky[3] = 1.0f;
-                    cbd.fog_sky_col[0] = g_sky_probe.nb[4];
-                    cbd.fog_sky_col[1] = g_sky_probe.nb[5];
-                    cbd.fog_sky_col[2] = g_sky_probe.nb[6];
-                }
-
-                g_fog_dbg[0] = cbd.fog_color[0];
-                g_fog_dbg[1] = cbd.fog_color[1];
-                g_fog_dbg[2] = cbd.fog_color[2];
-                g_fog_dbg[3] = cbd.fog_params[3];
-
-                cbd.fog_color[3] = g_ls.cam[1];   // camera altitude (engine Y-up)
-            }
-        }
-        if (guard) {
+        // ConstantData::mask_meta. CB SPLIT: the view-paired band table,
+        // the receive commit (mask_meta.x), and the fog fills are FRAME
+        // data now - filled ONCE at this pass's frame-CB build (the
+        // block moved there verbatim). The band-slot insane-
+        // invalidation runs once per pass instead of per object: the
+        // skipped-slot verdict is identical either way, one object
+        // earlier at worst.
+        // Round 6: the arb shader consumes depthParams (the SV_Depth
+        // clamp encodes through them) and fxParams1.zw regardless of
+        // the snapshot guard, so the fill must run for arb frames too.
+        if (guard || khr_far_arb) {
             // Guard inputs: reconstruction coefficients + the encode range
             // of the copied depth, the copy's pixel dimensions, and the
             // margins.
@@ -13385,7 +13921,23 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             // post-scene snapshot is a mixed-encode, rewrite-alternating
             // soup - full autopsy in the notes doc). The classic tiers
             // return only as the no-heightfield terrain backstop.
-            if (g_thm_valid) {
+            if (khr_far_arb) {
+                // Far-frame arbitration, round-6 form: hardware
+                // LESS_EQUAL is the object authority (dss_test_write,
+                // both arms - the honest raw-space test) and the
+                // reconstruction guard is DORMANT here (1e9 margins).
+                // The rounds-1-5 ALWAYS-DSS + wide-guard family this
+                // comment once described is FALSIFIED AND EXCISED
+                // (HANDOFF3 Part 2 / trap list - do not re-derive).
+                // fxParams1.zw carry the analytic depth clamp
+                // instead - offset cap (the LOD margin) + the
+                // contact-band height its ramp closes over; thm owns
+                // terrain in the same shader pass.
+                cbd.fx1[0] = 1e9f;
+                cbd.fx1[1] = 0.0f;
+                cbd.fx1[2] = KH_FAR_ARB_GUARD_BASE;
+                cbd.fx1[3] = KH_FAR_ARB_CONTACT_H;
+            } else if (g_thm_valid) {
                 cbd.fx1[0] = 1e9f;
                 cbd.fx1[1] = 0.0f;
             } else {
@@ -13406,10 +13958,10 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             // landmine.
             cbd.fx1[0] = 1e9f;
         }
-        // Heightfield lanes, BOTH arms - hoisted so the terrain lane arms
-        // on guardless injections too; a depth-lane stand-down never
-        // implies unguarded terrain paint.
-        kh_fill_occ(cbd);
+        // Heightfield lanes: FRAME data now - armed once at the pass
+        // frame build (both arms, guardless injections included, as
+        // before; a depth-lane stand-down never implies unguarded
+        // terrain paint).
 
         if (cbd.lighting0[0] >= 0.5f) {   // black-box instrumentation: what this lit mesh's shader received (injection path)
             g_stats.inj_box_amb[0]     = cbd.light_amb[0];
@@ -13423,11 +13975,44 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             g_stats.inj_box_effect     = static_cast<int>(o.effect);
             g_stats.inj_box_valid      = 1;
         }
-        D3D11_MAPPED_SUBRESOURCE mapped = {};
-        if (FAILED(ctx->Map(g_res.composite_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) continue;
-        memcpy(mapped.pData, &cbd, sizeof(cbd));
-        ctx->Unmap(g_res.composite_cb, 0);
-        ID3D11RasterizerState* khr_want_rs = o.two_sided ? g_res.rasterizer : g_res.rasterizer_cull;
+        // CB SPLIT: object slice only (the frame slice went up before
+        // the loop). A failed pass-level frame upload stands every draw
+        // down - fail dark, never stale-frame draws.
+        if (!khr_frame_ok || !kh_upload_obj_cb(ctx, g_res.composite_cb, cbd)) continue;
+        // Under depth func ALWAYS, draw order wins WITHIN the mesh:
+        // with CULL_NONE the interior (far-wall) faces paint over the
+        // exterior - the "insides through itself" smear of field
+        // round 2. Field round 3 corrected the round-2 fix: the flat
+        // CULL_BACK force cured the smear but ERASED twoSided
+        // semantics on arb frames (interior faces never drew, and at
+        // the chronic pose nearly every frame is an arb frame).
+        // Restored as an ORDERED TWO-PASS: interiors first
+        // (CULL_FRONT), exteriors second (CULL_BACK). Under ALWAYS
+        // the last writer wins, and for a closed mesh the exterior
+        // surface is the nearer hit from outside, while from inside
+        // the exterior pass rasterizes nothing (every face is back-
+        // facing there) - deterministic, both viewpoints correct,
+        // one extra draw per twoSided mesh on arb frames only.
+        // Round 6: with LESS_EQUAL restored, hardware depth orders the
+        // mesh's own faces again - the ALWAYS-era two-pass is retired
+        // and the stock twoSided selection returns (months-stable).
+        // FIELD ROUND 8 (the interior-edge stipple): on camera-window
+        // frames (near 0.07 - foreground objects pull the frame there)
+        // D24 resolution at the box's range collapses to ~1 lsb per
+        // METER, so a twoSided box's own faces tie along their interior
+        // edges: ordered stipple bands, stationary until the camera
+        // moves, worst far away. Interior faces are unconditionally
+        // invisible from OUTSIDE a closed mesh, so for the closed
+        // built-in box the interior does not rasterize while the camera
+        // is outside its (rotation-enclosing, conservative) bounds +3 m:
+        // no second face, no tie, at every encode. twoSided semantics
+        // are preserved exactly where they are observable - inside.
+        // Open/registry meshes keep verbatim twoSided (a plane's back
+        // side IS its content).
+        const bool khr_cam_outside = mesh_id_clamp(o.mesh) == 0 &&
+                                     kh_mesh_dist_sq(o, cam) > 9.0f;
+        ID3D11RasterizerState* khr_want_rs =
+            (o.two_sided && !khr_cam_outside) ? g_res.rasterizer : g_res.rasterizer_cull;
 
         if (khr_want_rs != khr_bound_rs) {
             ctx->RSSetState(khr_want_rs);
@@ -13441,7 +14026,10 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             bound_mesh = mid;
         }
 
-        ctx->OMSetBlendState(g_res.blend_modes[o.blend_mode], bf, 0xFFFFFFFF);
+        if (o.blend_mode != khr_bound_bm) {
+            ctx->OMSetBlendState(g_res.blend_modes[o.blend_mode], bf, 0xFFFFFFFF);
+            khr_bound_bm = o.blend_mode;
+        }
 
         ctx->Draw(mesh_vertex_count(mid), 0);
         g_stats.composite_meshes++;
@@ -15142,8 +15730,10 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     ctx->GSSetShader(nullptr, nullptr, 0);
     ctx->HSSetShader(nullptr, nullptr, 0);
     ctx->DSSetShader(nullptr, nullptr, 0);
-    ctx->VSSetConstantBuffers(0, 1, &g_res.constant_buffer);
-    ctx->PSSetConstantBuffers(0, 1, &g_res.constant_buffer);
+    // CB SPLIT: b0 = per-object, b1 = per-frame (StateBackup saves both slots)
+    ID3D11Buffer* khf_cbs[2] = { g_res.constant_buffer, g_res.frame_cb };
+    ctx->VSSetConstantBuffers(0, 2, khf_cbs);
+    ctx->PSSetConstantBuffers(0, 2, khf_cbs);
 
     ID3D11ShaderResourceView* ps_srvs[2] = {
         effects_ready ? g_res.scene_srv : nullptr,
@@ -15151,6 +15741,12 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     };
 
     ctx->PSSetShaderResources(0, 2, ps_srvs);
+    // Flush-time proven depth snapshot for the effect-mesh arbitration
+    // (t2, inside the StateBackup saved range; harmless when nothing
+    // arms - PSEffect reads it only behind the local1.z gate).
+    if (g_res.comp_depth_srv && g_res.comp_depth_samples == 1) {
+        ctx->PSSetShaderResources(2, 1, &g_res.comp_depth_srv);
+    }
     // Private sun-depth map (self term in PSMain), rendered by the render
     // thread earlier this frame - t11, inside StateBackup's saved range.
     if (g_sun_map_valid && g_res.sun_srv) ctx->PSSetShaderResources(11, 1, &g_res.sun_srv);
@@ -15164,14 +15760,223 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     // the capture block just before the mesh pass sets the verdict.
     bool khf_perceptual = false;   // flush-edition perceptual-composite gate
 
+    // FAR-FRAME ANALYTIC ARBITRATION classification, flush/effect
+    // edition (see the injection's twin at the KH_FAR_ARB ledger).
+    // Same floor/hold hysteresis on the flush's FINAL encode near;
+    // requires the same-flush snapshot (fresh by construction on
+    // every healthy flush) and the live heightfield. Fail-safe
+    // direction: either down => stock path, today's behavior.
+    bool khf_fx_arb_this = false;
+    static bool khf_fx_arb_prev = false;
+    const float khf_arb_near = fabsf(pv.projection[2][2]) > 1e-9f
+                             ? (-pv.projection[3][2] / pv.projection[2][2]) : -1.0f;
+    const bool khf_arb_snap_ok = g_res.comp_depth_srv && g_res.comp_depth_samples == 1 &&
+                                 g_res.comp_depth_time >= 0.0f &&
+                                 now - g_res.comp_depth_time < 0.5f;
+    const bool khf_fx_arb_frame = khf_arb_snap_ok && g_thm_valid &&
+        (khf_arb_near >= KH_FAR_ARB_NEAR_MIN ||
+         (khf_fx_arb_prev && khf_arb_near >= KH_FAR_ARB_NEAR_HOLD));
+
+    khf_fx_arb_prev = khf_fx_arb_frame;
+
+    // CB SPLIT - PER-PASS FRAME BUILD (flush edition; the injection's
+    // twin). One frame slice serves the mesh pass AND the fullscreen
+    // chain: the chain reads only invViewProj (absolute here) and
+    // viewProj's direction rows (the rebase touches the translation row
+    // only - a w=0 transform is unchanged), everything else it needs is
+    // per-object. The band table's insane-invalidation and the fog
+    // film-strip lanes now run once per pass (verdict-identical).
+    ConstantData khf_cbf = {};
+    memcpy(khf_cbf.view_proj, view_proj, sizeof(khf_cbf.view_proj));
+    memcpy(khf_cbf.inv_view_proj, inv_view_proj, sizeof(khf_cbf.inv_view_proj));
+    const bool khf_rebase_on = kh_rebase_vp(khf_cbf, cam);
+    fill_lighting_frame_cb(khf_cbf);
+    {
+        bool band_any = false;
+        // FINEST-FIRST: order slots by near edge ascending, so the
+        // shader's first containing band holds the finest content in
+        // the engine's overlap (crossfade) zones. bandBorder.w encodes
+        // valid + which PHYSICAL texture slot to sample (1 + index).
+        int order[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
+
+        for (int a = 0; a < 7; ++a) {
+            for (int b2 = a + 1; b2 < 8; ++b2) {
+                const float na = g_ls.band[order[a]].valid ? g_ls.band[order[a]].border[0] : 1e9f;
+                const float nb = g_ls.band[order[b2]].valid ? g_ls.band[order[b2]].border[0] : 1e9f;
+
+                if (nb < na) {
+                    const int t = order[a];
+                    order[a] = order[b2];
+                    order[b2] = t;
+                }
+            }
+        }
+
+        float prev_far = -1e9f;
+
+        for (int b = 0; b < 8; ++b) {
+            const auto& bs = g_ls.band[order[b]];
+            khf_cbf.band_border[b][3] = 0.0f;
+            if (!bs.valid || !bs.srv) continue;
+
+            // RECEIVE WARM-UP GATE (the startup garbage class the
+            // local fixes could not cover: the ENGINE's own early
+            // atlas content is mid-stream garbage - our seals copy
+            // and decode it faithfully, and reseal churn makes it
+            // slide until the engine settles). Absent beats offset:
+            // the receive term stands down for KH_RECEIVE_WARMUP_S after
+            // the first capture.
+            if (g_ls.first_capture_time < 0.0f ||
+                effect_time_seconds() - g_ls.first_capture_time < KH_RECEIVE_WARMUP_S) {
+                g_band_warmup_skips++;
+                continue;
+            }
+
+            // SPAWN-WINDOW GUARD: a pending band whose provisional
+            // view is the bridge fallback pairs cross-convention -
+            // the initial-shadow drift. Absent beats offset; the
+            // band re-enters the moment its seal completes.
+            if (bs.pending_view && bs.vcol_bridge) { g_ls.band_prov_skips++; continue; }
+
+            // twin dedupe: near inside the previous band's range and
+            // far not meaningfully beyond it = a partition duplicate
+            // of the same range; two twins alternate seal content and
+            // the shader's winner flip-flops (the range flicker).
+            if (!(bs.border[1] > bs.border[0]) || bs.border[0] < 0.0f ||
+                bs.border[1] > 4000.0f) {   // startup-slot hygiene: invalidate,
+                g_ls.band[order[b]].valid = false;   // the next resolve reseals sanely
+                g_band_insane_skips++;
+                continue;
+            }
+
+            if (bs.border[0] < prev_far - 0.5f && bs.border[1] < prev_far * 1.25f + 1.0f) continue;
+            if (bs.border[0] < prev_far - 0.5f) g_band_overlap_pairs++;   // consumed overlap census
+            prev_far = bs.border[1];
+            memcpy(khf_cbf.band_mat[b * 3 + 0], bs.sm + 0, 16);
+            memcpy(khf_cbf.band_mat[b * 3 + 1], bs.sm + 4, 16);
+            memcpy(khf_cbf.band_mat[b * 3 + 2], bs.sm + 8, 16);
+            memcpy(khf_cbf.band_view[b * 3 + 0], bs.vcol + 0, 16);
+            memcpy(khf_cbf.band_view[b * 3 + 1], bs.vcol + 4, 16);
+            memcpy(khf_cbf.band_view[b * 3 + 2], bs.vcol + 8, 16);
+            khf_cbf.band_border[b][0] = bs.border[0];
+            khf_cbf.band_border[b][1] = bs.border[1];
+            khf_cbf.band_border[b][2] = bs.border[2];
+            khf_cbf.band_border[b][3] = 1.0f + static_cast<float>(order[b]);
+            band_any = true;
+        }
+
+        if (band_any && kh_sun_settled() &&
+            (g_atlas_frame_cur || g_atlas_frame_prev)) {   // sun-settle gate + atlas
+            khf_cbf.mask_meta[0] = 1.0f;   // stream liveness (round 7): the receive
+        }                              // stands down while the system converges
+                                       // OR the cascade stream is dead
+        g_band_on_last = khf_cbf.mask_meta[0] >= 0.5f ? 1 : 0;   // film strip
+
+        // engine-mask depth-gated receive: registration-exact shadows
+        // (units, clouds, everything the engine resolves) on mesh
+        // surfaces within the depth margin of world geometry.
+
+        // fog occlusion (self-fetched fogParams; RV's height-decay
+        // exponential). Color: the staged ambient tint is the closest
+        // engine-truth horizon approximation available without the
+        // sky pipeline's own constants.
+        if (g_fog_valid && g_fog[0] > 1e-4f) {
+            khf_cbf.fog_params[0] = g_fog[0];
+            khf_cbf.fog_params[1] = g_fog[1];
+            khf_cbf.fog_params[2] = g_fog[2];
+            khf_cbf.fog_params[3] = 1.0f;
+
+            // (A lane-41 density calibration lived here briefly and is
+            // RETIRED: lane 41 matched the density formula exactly in
+            // the base=113 session but read a flat 0.05 across 239 m
+            // and 981 m with base=0 - an unmodeled regime - and the
+            // resulting 4x clamp at altitude over-fogged ground boxes
+            // to the dim tint. Density is params-faithful again; the
+            // extinction constant is the operator's knob.)
+
+            // FOG COLOR = RAW TINT, final: the blue belongs to the
+            // EXTINCTION, not the target (see the spectral term in the
+            // shader - the engine's altitude block volunteered its
+            // red-dominant extinction coefficients, closing the
+            // ladder). The tint is the convergence color at full
+            // optical depth - near-neutral by day, exactly like the
+            // engine's own total whiteout in extreme fog - while the
+            // blue-shift lives in the journey there. tint x sky is
+            // retired: it baked sky hue into the TARGET and still
+            // read white once tonemapped.
+            // FOG DECOUPLED FROM THE BLOCK LOCK (settings-
+            // independence): the whole fill used to be gated on the
+            // light-probe lock, so a degenerate staged decay (setFog
+            // with decay 0 can never anchor the probe) or the pre-lock
+            // cold window left the mesh UNFOGGED in a fogged world - a
+            // mismatch, not a delay. Density is params-faithful and
+            // needs no block; only the verbatim tint and the engine
+            // transmittance terms do. Unlocked frames run the legacy
+            // exponential (the shader's fogEngine.w = 0 branch) toward
+            // a neutral whiteout target - the engine's own extreme-fog
+            // convergence color - until the mirrors supply verbatim.
+            if (g_light_probe.hits > 0 && g_light_probe.meta == 40) {
+                const float* e = g_light_probe.nb + 36;
+
+                for (int c = 0; c < 3; ++c) khf_cbf.fog_color[c] = e[c];
+
+                // Engine transmittance terms from the block mirror: the
+                // density scale, the linear ramp's end + inverse range.
+                khf_cbf.fog_engine[0] = g_light_probe.nb[41];
+                khf_cbf.fog_engine[1] = g_light_probe.nb[48];
+                khf_cbf.fog_engine[2] = g_light_probe.nb[49];
+                khf_cbf.fog_engine[3] = (g_light_probe.nb[48] > 1.0f &&
+                                     g_light_probe.nb[49] > 0.0f &&
+                                     g_light_probe.nb[41] >= 0.0f) ? 1.0f : 0.0f;
+            } else {
+                khf_cbf.fog_color[0] = 1.0f;
+                khf_cbf.fog_color[1] = 1.0f;
+                khf_cbf.fog_color[2] = 1.0f;
+            }
+
+            // Verbatim fog COLOR, corrected branch: world geometry
+            // takes the engine's HEIGHT-fog path, which fogs toward
+            // ROW 1, FLAT - (0.94, 1.37, 2.31) at the last decode,
+            // B/R 2.5, the strong blue of the vanilla comparison.
+            // Row 7 x gradient is the sky/far branch and was the
+            // wrong target for meshes. Gradient points fill as
+            // (1,1,1): the shader's g collapses to 1 - flat - with
+            // zero shader changes.
+            if (g_sky_probe.hits > 0) {
+                khf_cbf.fog_sky[0] = 1.0f;
+                khf_cbf.fog_sky[1] = 1.0f;
+                khf_cbf.fog_sky[2] = 1.0f;
+                khf_cbf.fog_sky[3] = 1.0f;
+                khf_cbf.fog_sky_col[0] = g_sky_probe.nb[4];
+                khf_cbf.fog_sky_col[1] = g_sky_probe.nb[5];
+                khf_cbf.fog_sky_col[2] = g_sky_probe.nb[6];
+            }
+
+            g_fog_dbg[0] = khf_cbf.fog_color[0];
+            g_fog_dbg[1] = khf_cbf.fog_color[1];
+            g_fog_dbg[2] = khf_cbf.fog_color[2];
+            g_fog_dbg[3] = khf_cbf.fog_params[3];
+
+            khf_cbf.fog_color[3] = g_ls.cam[1];   // camera altitude (engine Y-up)
+        }
+    }
+    // Heightfield lanes, BOTH arms - pass-level now: solids always
+    // carried them; effect meshes read them only behind the local1.z
+    // arb arm (PSEffect's gate), so the always-live frame fill is
+    // pixel-inert for unarmed effects; chain passes never arm.
+    kh_fill_occ(khf_cbf);
+    const bool khf_frame_ok = kh_upload_frame_cb(ctx, g_res.frame_cb, khf_cbf);
+
     auto upload_cb = [&](const RenderObject& o, bool chain_pass) -> bool {
-        ConstantData cbd = {};
-        memcpy(cbd.view_proj, view_proj, sizeof(view_proj));
-        memcpy(cbd.inv_view_proj, inv_view_proj, sizeof(inv_view_proj));
+        ConstantData cbd = khf_cbf;   // CB SPLIT: frame template (matrices ride for the echoes)
         cbd.center_size[0] = o.pos[0];
         cbd.center_size[1] = o.pos[2];   // SQF [x,y,zASL] -> engine [x,zASL,y]
         cbd.center_size[2] = o.pos[1];
         cbd.center_size[3] = chain_pass ? 1.0f : 0.0f;
+        // FP32 JITTER REBASE: per-object arm mirrors the pass verdict
+        // (see kh_rebase_vp - one without the other is the wrong-space
+        // landmine). Chain passes carry it inertly (VSFullscreen).
+        if (khf_rebase_on) kh_fill_center_rel(cbd, cam);
         cbd.size_axes[0] = o.size[0];    // SQF [x,y,z] sizes -> engine [x,z,y]
         cbd.size_axes[1] = o.size[2];
         cbd.size_axes[2] = o.size[1];
@@ -15202,6 +16007,12 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         cbd.depth_params[1] = pv.projection[3][2];
         cbd.depth_params[2] = vp_min_d;
         cbd.depth_params[3] = vp_max_d;
+
+        // FAR-FRAME ANALYTIC ARBITRATION fill, flush/effect edition:
+        // RELOCATED below the local/band mask fills (the ORDER-BUG fix,
+        // ledgered there). depthParams above stays the live-depth pair
+        // for LinDepth/WorldPos; local0/local1.zw carry the guard's
+        // channel once the masks have written.
 
         // SOLID MESHES: align the guard's inputs to the INJECTION's
         // field-proven fill, VERBATIM - reconstruction coefficients from
@@ -15263,9 +16074,9 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                 cbd.fx1[0] = 1e9f;
                 cbd.fx1[1] = 0.0f;
             }
-            // Heightfield lanes (both arms - the terrain lane never
+            // Heightfield lanes: FRAME data now - armed once at the
+            // pass frame build (both arms; the terrain lane never
             // depends on the depth lane's arming state).
-            kh_fill_occ(cbd);
         }
         cbd.local0[0] = o.pos[0];
         cbd.local0[1] = o.pos[2];   // SQF [x,y,zASL] -> engine [x,zASL,y]
@@ -15281,180 +16092,52 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         cbd.band0[1] = o.band_max;
         cbd.band0[2] = o.band_falloff;
         cbd.band0[3] = o.banded ? 1.0f : 0.0f;
-        fill_lighting_cb(cbd, o);
-        // Screen-mask receive retired: see the RECEIVE LEDGER at
-        // ConstantData::mask_meta. mask_meta.x commits below iff any
-        // view-paired band seal is consumable this frame.
+        // FAR-FRAME ANALYTIC ARBITRATION fill, flush/effect edition
+        // (field round 4: the 300 m scene-read volume - objects punched
+        // through it outside, it covered nearer objects inside, at the
+        // bite's grazing geometry). local0/local1.zw carry the guard's
+        // channel - the DESIGN sacrifices the localization mask on
+        // armed effect meshes. Reconstruction mirrors the solid fill
+        // VERBATIM: measured/slot coefficients + the SCENE's encode
+        // range (the snapshot was written under it; the flush viewport
+        // range was not). The thm lanes arm at the pass frame build.
+        // ORDER-BUG FIX (found during the CB split): this block used to
+        // sit ABOVE the unconditional local0 mask fill, which
+        // OVERWROTE the reconstruction pair with the mesh position -
+        // the armed snapshot guard decoded garbage every armed frame.
+        // For typical map coordinates the garbage degenerated to
+        // never-discard (the guard silently dead; the thm endpoint
+        // carried the round-4 acceptance alone), but small-easting +
+        // below-sea origins could decode a tiny positive scene
+        // distance and discard the WHOLE volume (a vanish edge).
+        // Below the mask fills, the pair survives to the shader and
+        // the documented design is operative for the first time.
+        khf_fx_arb_this = false;
 
-        {
-            bool band_any = false;
-            // FINEST-FIRST: order slots by near edge ascending, so the
-            // shader's first containing band holds the finest content in
-            // the engine's overlap (crossfade) zones. bandBorder.w encodes
-            // valid + which PHYSICAL texture slot to sample (1 + index).
-            int order[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
+        if (o.effect > 0 && khf_fx_arb_frame && !o.fullscreen) {
+            float kha_m22 = pv.projection[2][2];
+            float kha_m32 = pv.projection[3][2];
 
-            for (int a = 0; a < 7; ++a) {
-                for (int b2 = a + 1; b2 < 8; ++b2) {
-                    const float na = g_ls.band[order[a]].valid ? g_ls.band[order[a]].border[0] : 1e9f;
-                    const float nb = g_ls.band[order[b2]].valid ? g_ls.band[order[b2]].border[0] : 1e9f;
-
-                    if (nb < na) {
-                        const int t = order[a];
-                        order[a] = order[b2];
-                        order[b2] = t;
-                    }
-                }
-            }
-
-            float prev_far = -1e9f;
-
-            for (int b = 0; b < 8; ++b) {
-                const auto& bs = g_ls.band[order[b]];
-                cbd.band_border[b][3] = 0.0f;
-                if (!bs.valid || !bs.srv) continue;
-
-                // RECEIVE WARM-UP GATE (the startup garbage class the
-                // local fixes could not cover: the ENGINE's own early
-                // atlas content is mid-stream garbage - our seals copy
-                // and decode it faithfully, and reseal churn makes it
-                // slide until the engine settles). Absent beats offset:
-                // the receive term stands down for KH_RECEIVE_WARMUP_S after
-                // the first capture.
-                if (g_ls.first_capture_time < 0.0f ||
-                    effect_time_seconds() - g_ls.first_capture_time < KH_RECEIVE_WARMUP_S) {
-                    g_band_warmup_skips++;
-                    continue;
-                }
-
-                // SPAWN-WINDOW GUARD: a pending band whose provisional
-                // view is the bridge fallback pairs cross-convention -
-                // the initial-shadow drift. Absent beats offset; the
-                // band re-enters the moment its seal completes.
-                if (bs.pending_view && bs.vcol_bridge) { g_ls.band_prov_skips++; continue; }
-
-                // twin dedupe: near inside the previous band's range and
-                // far not meaningfully beyond it = a partition duplicate
-                // of the same range; two twins alternate seal content and
-                // the shader's winner flip-flops (the range flicker).
-                if (!(bs.border[1] > bs.border[0]) || bs.border[0] < 0.0f ||
-                    bs.border[1] > 4000.0f) {   // startup-slot hygiene: invalidate,
-                    g_ls.band[order[b]].valid = false;   // the next resolve reseals sanely
-                    g_band_insane_skips++;
-                    continue;
-                }
-
-                if (bs.border[0] < prev_far - 0.5f && bs.border[1] < prev_far * 1.25f + 1.0f) continue;
-                if (bs.border[0] < prev_far - 0.5f) g_band_overlap_pairs++;   // consumed overlap census
-                prev_far = bs.border[1];
-                memcpy(cbd.band_mat[b * 3 + 0], bs.sm + 0, 16);
-                memcpy(cbd.band_mat[b * 3 + 1], bs.sm + 4, 16);
-                memcpy(cbd.band_mat[b * 3 + 2], bs.sm + 8, 16);
-                memcpy(cbd.band_view[b * 3 + 0], bs.vcol + 0, 16);
-                memcpy(cbd.band_view[b * 3 + 1], bs.vcol + 4, 16);
-                memcpy(cbd.band_view[b * 3 + 2], bs.vcol + 8, 16);
-                cbd.band_border[b][0] = bs.border[0];
-                cbd.band_border[b][1] = bs.border[1];
-                cbd.band_border[b][2] = bs.border[2];
-                cbd.band_border[b][3] = 1.0f + static_cast<float>(order[b]);
-                band_any = true;
-            }
-
-            if (band_any && kh_sun_settled() &&
-                (g_atlas_frame_cur || g_atlas_frame_prev)) {   // sun-settle gate + atlas
-                cbd.mask_meta[0] = 1.0f;   // stream liveness (round 7): the receive
-            }                              // stands down while the system converges
-                                           // OR the cascade stream is dead
-            g_band_on_last = cbd.mask_meta[0] >= 0.5f ? 1 : 0;   // film strip
-
-            // engine-mask depth-gated receive: registration-exact shadows
-            // (units, clouds, everything the engine resolves) on mesh
-            // surfaces within the depth margin of world geometry.
-
-            // fog occlusion (self-fetched fogParams; RV's height-decay
-            // exponential). Color: the staged ambient tint is the closest
-            // engine-truth horizon approximation available without the
-            // sky pipeline's own constants.
-            if (g_fog_valid && g_fog[0] > 1e-4f) {
-                cbd.fog_params[0] = g_fog[0];
-                cbd.fog_params[1] = g_fog[1];
-                cbd.fog_params[2] = g_fog[2];
-                cbd.fog_params[3] = 1.0f;
-
-                // (A lane-41 density calibration lived here briefly and is
-                // RETIRED: lane 41 matched the density formula exactly in
-                // the base=113 session but read a flat 0.05 across 239 m
-                // and 981 m with base=0 - an unmodeled regime - and the
-                // resulting 4x clamp at altitude over-fogged ground boxes
-                // to the dim tint. Density is params-faithful again; the
-                // extinction constant is the operator's knob.)
-
-                // FOG COLOR = RAW TINT, final: the blue belongs to the
-                // EXTINCTION, not the target (see the spectral term in the
-                // shader - the engine's altitude block volunteered its
-                // red-dominant extinction coefficients, closing the
-                // ladder). The tint is the convergence color at full
-                // optical depth - near-neutral by day, exactly like the
-                // engine's own total whiteout in extreme fog - while the
-                // blue-shift lives in the journey there. tint x sky is
-                // retired: it baked sky hue into the TARGET and still
-                // read white once tonemapped.
-                // FOG DECOUPLED FROM THE BLOCK LOCK (settings-
-                // independence): the whole fill used to be gated on the
-                // light-probe lock, so a degenerate staged decay (setFog
-                // with decay 0 can never anchor the probe) or the pre-lock
-                // cold window left the mesh UNFOGGED in a fogged world - a
-                // mismatch, not a delay. Density is params-faithful and
-                // needs no block; only the verbatim tint and the engine
-                // transmittance terms do. Unlocked frames run the legacy
-                // exponential (the shader's fogEngine.w = 0 branch) toward
-                // a neutral whiteout target - the engine's own extreme-fog
-                // convergence color - until the mirrors supply verbatim.
-                if (g_light_probe.hits > 0 && g_light_probe.meta == 40) {
-                    const float* e = g_light_probe.nb + 36;
-
-                    for (int c = 0; c < 3; ++c) cbd.fog_color[c] = e[c];
-
-                    // Engine transmittance terms from the block mirror: the
-                    // density scale, the linear ramp's end + inverse range.
-                    cbd.fog_engine[0] = g_light_probe.nb[41];
-                    cbd.fog_engine[1] = g_light_probe.nb[48];
-                    cbd.fog_engine[2] = g_light_probe.nb[49];
-                    cbd.fog_engine[3] = (g_light_probe.nb[48] > 1.0f &&
-                                         g_light_probe.nb[49] > 0.0f &&
-                                         g_light_probe.nb[41] >= 0.0f) ? 1.0f : 0.0f;
-                } else {
-                    cbd.fog_color[0] = 1.0f;
-                    cbd.fog_color[1] = 1.0f;
-                    cbd.fog_color[2] = 1.0f;
-                }
-
-                // Verbatim fog COLOR, corrected branch: world geometry
-                // takes the engine's HEIGHT-fog path, which fogs toward
-                // ROW 1, FLAT - (0.94, 1.37, 2.31) at the last decode,
-                // B/R 2.5, the strong blue of the vanilla comparison.
-                // Row 7 x gradient is the sky/far branch and was the
-                // wrong target for meshes. Gradient points fill as
-                // (1,1,1): the shader's g collapses to 1 - flat - with
-                // zero shader changes.
-                if (g_sky_probe.hits > 0) {
-                    cbd.fog_sky[0] = 1.0f;
-                    cbd.fog_sky[1] = 1.0f;
-                    cbd.fog_sky[2] = 1.0f;
-                    cbd.fog_sky[3] = 1.0f;
-                    cbd.fog_sky_col[0] = g_sky_probe.nb[4];
-                    cbd.fog_sky_col[1] = g_sky_probe.nb[5];
-                    cbd.fog_sky_col[2] = g_sky_probe.nb[6];
-                }
-
-                g_fog_dbg[0] = cbd.fog_color[0];
-                g_fog_dbg[1] = cbd.fog_color[1];
-                g_fog_dbg[2] = cbd.fog_color[2];
-                g_fog_dbg[3] = cbd.fog_params[3];
-
-                cbd.fog_color[3] = g_ls.cam[1];   // camera altitude (engine Y-up)
-            }
+            if (g_ro.engine_proj_valid) { kha_m22 = g_ro.engine_m22; kha_m32 = g_ro.engine_m32; }
+            if (g_ro.slot_near_live > 0.0f) { kha_m22 = g_ro.slot_m22; kha_m32 = g_ro.slot_m32; }
+            cbd.local0[0] = kha_m22;
+            cbd.local0[1] = kha_m32;
+            cbd.local0[2] = g_ro.trig_vp_valid ? g_ro.trig_vp_min : g_scene_vp_min_d;
+            cbd.local0[3] = g_ro.trig_vp_valid ? g_ro.trig_vp_max : g_scene_vp_max_d;
+            cbd.local1[2] = KH_FAR_ARB_GUARD_BASE;   // arm flag + base, one lane
+            cbd.local1[3] = KH_FAR_ARB_GUARD_REL;
+            khf_fx_arb_this = true;
+            g_stats.flush_fx_arbs++;
         }
+        fill_lighting_obj_cb(cbd, o);
+        // Screen-mask receive retired: see the RECEIVE LEDGER at
+        // ConstantData::mask_meta. CB SPLIT: the view-paired band table,
+        // the receive commit (mask_meta.x), and the fog fills are FRAME
+        // data now - filled ONCE at this pass's frame-CB build (the
+        // block moved there verbatim). The band-slot insane-
+        // invalidation runs once per pass instead of per object: the
+        // skipped-slot verdict is identical either way, one object
+        // earlier at worst.
         if (cbd.lighting0[0] >= 0.5f) {   // black-box instrumentation: what this lit mesh's shader received (flush path)
             g_stats.flush_box_amb[0]     = cbd.light_amb[0];
             g_stats.flush_box_amb[1]     = cbd.light_amb[1];
@@ -15467,11 +16150,11 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             g_stats.flush_box_effect     = static_cast<int>(o.effect);
             g_stats.flush_box_valid      = 1;
         }
-        D3D11_MAPPED_SUBRESOURCE mapped = {};
-        if (FAILED(ctx->Map(g_res.constant_buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return false;
-        memcpy(mapped.pData, &cbd, sizeof(cbd));
-        ctx->Unmap(g_res.constant_buffer, 0);
-        return true;
+        // CB SPLIT: object slice only - the frame slice went up once at
+        // the pass build, and the chain rides the same slice (see the
+        // build's ledger). A failed frame upload stands every draw down:
+        // fail dark, never stale-frame draws.
+        return khf_frame_ok && kh_upload_obj_cb(ctx, g_res.constant_buffer, cbd);
     };
 
     // PERCEPTUAL-COMPOSITE CAPTURE, flush edition (see the inject twin):
@@ -15496,24 +16179,51 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     }
 
     // --- Mesh pass ---
+    // IDEMPOTENT-SET ELISION (the khr_bound_rs / bound_mesh pattern,
+    // completed): PS shader, the t0 SRV swap, blend and depth-stencil
+    // are functions of per-object fields that repeat run-length in
+    // practice (solids are the bulk). Consecutive identical sets are
+    // semantically inert - same pointer, same slots, same ref - and
+    // our own game-thread sets are hook-invisible by the
+    // reorder_on_render_thread gate, so eliding repeats changes no
+    // state the GPU or the trackers can observe. Category transitions
+    // bind exactly what the unconditional code bound (solid binds t0
+    // only, leaving t1 as-is - unchanged). Sentinels force the first
+    // object's sets verbatim. Loop-local: the fullscreen chain below
+    // re-sets its own pipeline unconditionally, as before.
+    int khf_ps_cat = -1;                          // 0 = solid PS, 1 = effect PS
+    int khf_srv_cat = -1;                         // 0 = comp-depth t0, 1 = scene/depth pair
+    int khf_bound_bm = -1;                        // blend mode last set
+    ID3D11DepthStencilState* khf_bound_dss = nullptr;
+
     for (const auto& o : meshes) {
         const bool ov = (o.effect == 0 && o.mode == DepthMode::Off);
         if (ov) g_mask.ov_listed++;      // reached the draw loop
         if (!upload_cb(o, false)) { if (ov) g_mask.ov_skipped++; continue; }
         if (ov) g_mask.ov_drawn++;       // Draw() will be issued below
-        ctx->PSSetShader(o.effect > 0 ? g_res.ps_effect : g_res.ps, nullptr, 0);
+        const int khf_ps_want = o.effect > 0 ? 1 : 0;
+
+        if (khf_ps_want != khf_ps_cat) {
+            ctx->PSSetShader(khf_ps_want ? g_res.ps_effect : g_res.ps, nullptr, 0);
+            khf_ps_cat = khf_ps_want;
+        }
 
         // PSComposite reads depth at t0; the flush's default pair puts
         // scene color there (for effect shaders). EVERY solid mesh swaps
         // the composite path's PROVEN depth snapshot into t0 for its
         // draw; the pair returns for effect meshes.
-        if (o.effect == 0 && g_res.comp_depth_srv) {
-            ctx->PSSetShaderResources(0, 1, &g_res.comp_depth_srv);
-        } else {
-            ctx->PSSetShaderResources(0, 2, ps_srvs);
+        const int khf_srv_want = (o.effect == 0 && g_res.comp_depth_srv) ? 0 : 1;
+
+        if (khf_srv_want != khf_srv_cat) {
+            if (khf_srv_want == 0) ctx->PSSetShaderResources(0, 1, &g_res.comp_depth_srv);
+            else                   ctx->PSSetShaderResources(0, 2, ps_srvs);
+            khf_srv_cat = khf_srv_want;
         }
 
-        ctx->OMSetBlendState(g_res.blend_modes[o.blend_mode], bf, 0xFFFFFFFF);
+        if (o.blend_mode != khf_bound_bm) {
+            ctx->OMSetBlendState(g_res.blend_modes[o.blend_mode], bf, 0xFFFFFFFF);
+            khf_bound_bm = o.blend_mode;
+        }
 
         // FALLBACK DEPTH-WRITE PARITY (screenshot conviction: a carried
         // frame showed a distant box THROUGH a near box and the concave
@@ -15526,14 +16236,28 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         // too. Late depth writes are as valid as late color writes - the
         // mesh IS at that depth - and mode-1 meshes have exercised this
         // very path since the beginning.
+        // Arbitrated effect meshes skip the hardware test outright: the
+        // post-scene comparison is the convicted mechanism (LOD fight +
+        // cross-window parity); PSEffect's guard + thm own occlusion.
+        // No depth-write change - effect meshes never wrote depth.
         ID3D11DepthStencilState* dss =
+            (khf_fx_arb_this)                ? g_res.dss_off :
             (o.mode == DepthMode::Off)       ? g_res.dss_off :
             (o.mode == DepthMode::TestWrite) ? g_res.dss_test_write :
             is_composite_eligible(o)         ? g_res.dss_test_write :
                                                g_res.dss_test;
 
-        ctx->OMSetDepthStencilState(dss, 0);
-        ID3D11RasterizerState* khr_want_rs = o.two_sided ? g_res.rasterizer : g_res.rasterizer_cull;
+        if (dss != khf_bound_dss) {
+            ctx->OMSetDepthStencilState(dss, 0);
+            khf_bound_dss = dss;
+        }
+        // Round 8: outside-cull mirror of the injection's stipple fix
+        // (see the injection loop's ledger) - the flush repaints the
+        // same geometry and must not reintroduce the interior face.
+        const bool khf_cam_outside = mesh_id_clamp(o.mesh) == 0 &&
+                                     kh_mesh_dist_sq(o, cam) > 9.0f;
+        ID3D11RasterizerState* khr_want_rs =
+            (o.two_sided && !khf_cam_outside) ? g_res.rasterizer : g_res.rasterizer_cull;
 
         if (khr_want_rs != khr_bound_rs) {
             ctx->RSSetState(khr_want_rs);
@@ -15861,8 +16585,12 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     ctx->GSSetShader(nullptr, nullptr, 0);
     ctx->HSSetShader(nullptr, nullptr, 0);
     ctx->DSSetShader(nullptr, nullptr, 0);
-    ctx->VSSetConstantBuffers(0, 1, &g_res.constant_buffer);
-    ctx->PSSetConstantBuffers(0, 1, &g_res.constant_buffer);
+    // CB SPLIT: b0 = per-object, b1 = per-frame; UI passes fill one
+    // flat cbd per pass and upload both slices (few passes, all
+    // fullscreen - the per-pass frame upload is noise here).
+    ID3D11Buffer* khui_cbs[2] = { g_res.constant_buffer, g_res.frame_cb };
+    ctx->VSSetConstantBuffers(0, 2, khui_cbs);
+    ctx->PSSetConstantBuffers(0, 2, khui_cbs);
     ctx->OMSetDepthStencilState(g_res.dss_off, 0);
     ctx->RSSetState(g_res.rasterizer);
     const FLOAT bf[4] = { 0, 0, 0, 0 };
@@ -15944,10 +16672,9 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         cbd.band0[1] = o.band_max;
         cbd.band0[2] = o.band_falloff;
         cbd.band0[3] = o.banded ? 1.0f : 0.0f;
-        D3D11_MAPPED_SUBRESOURCE mapped = {};
-        if (FAILED(ctx->Map(g_res.constant_buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) continue;
-        memcpy(mapped.pData, &cbd, sizeof(cbd));
-        ctx->Unmap(g_res.constant_buffer, 0);
+        // CB SPLIT: both slices per UI pass
+        if (!kh_upload_obj_cb(ctx, g_res.constant_buffer, cbd) ||
+            !kh_upload_frame_cb(ctx, g_res.frame_cb, cbd)) continue;
         ctx->OMSetBlendState(g_res.blend_modes[o.blend_mode], bf, 0xFFFFFFFF);
         ctx->Draw(3, 0);
     }
@@ -17086,6 +17813,10 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("compositeSlotEncodes", RenderIntegration::g_stats.composite_slot_encodes));
         out.push_back(kv("compositeFarPhaseSkips", RenderIntegration::g_stats.composite_far_phase_skips));
         out.push_back(kv("compositeFarInjects", RenderIntegration::g_stats.composite_far_injects));
+        out.push_back(kv("compositeFarArbs", RenderIntegration::g_stats.composite_far_arbs));
+        out.push_back(kv("compositeFarArbDenied", RenderIntegration::g_stats.composite_far_arb_denied));
+        out.push_back(kv("flushFxArbs", RenderIntegration::g_stats.flush_fx_arbs));
+        out.push_back(kv("compositeTranslDefers", RenderIntegration::g_stats.composite_transl_defers));
         out.push_back(kv("compositeKeepEncodes", RenderIntegration::g_stats.composite_keep_encodes));
         out.push_back(kv("compositeAnomalySkips", RenderIntegration::g_stats.composite_anomaly_skips));
         out.push_back(kv("sunDepthPasses", RenderIntegration::g_stats.sun_depth_passes));

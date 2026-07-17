@@ -815,6 +815,14 @@ inline void kh_report_error(const std::string& msg) {
     {
         std::lock_guard<std::mutex> g(g_err_once_mutex);
         if (std::find(g_err_once.begin(), g_err_once.end(), msg) != g_err_once.end()) return;
+        // BOUNDED (analysis item): an error path that varies its message
+        // (an HRESULT, a pointer, a size) defeats the dedupe and grows
+        // this list - and the linear scan above - without limit for the
+        // session. 256 distinct messages is far beyond any legitimate
+        // session's variety; past it, new VARIANTS go silent (the first
+        // 256 keep reporting), which is the flood the dedupe exists to
+        // stop wearing a different coat.
+        if (g_err_once.size() >= 256) return;
         g_err_once.push_back(msg);
     }
 
@@ -1553,25 +1561,18 @@ VSOut VSMain(VSIn i)
                  ? (centerRel.xyz + KhRotate(i.pos * sizeAxes.xyz))
                  : wp;
     o.pos = mul(float4(khvTp, 1.0f), viewProj);
-    // Far-visibility clamp (opt-in, shadowMeta2.x): pull clip z just inside
-    // the far plane so max view distance stops hard-clipping the mesh. Past
-    // the far plane the depth buffer holds only the clear value / sky, so
-    // ordering cannot break; the guard compares SV_Position.w, untouched.
-    if (shadowMeta2.x > 0.5f && o.pos.z > o.pos.w * 0.9999f) o.pos.z = o.pos.w * 0.9999f;
-    // NEAR-VISIBILITY CLAMP (always-on; the LOOK-UP SLICE fix - the open
-    // design item, convicted by the night look-up class: on far-phase
-    // frames the encode's near plane sits at ~10 m and a mesh fragment
-    // closer than it hard-clips to nothing on BOTH paths). Symmetric
-    // mechanism to the far clamp above: pull clip z just inside the NEAR
-    // plane, so the fragment renders at the nearest depth with its
-    // correct screen position - and nearest IS correct ordering for
-    // geometry between the camera and everything else. In-range
-    // fragments never satisfy the condition; w <= 0 stays with the
-    // hardware (behind-camera clipping is not ours to relax). The
-    // reverted 'near-draw attempt' substituted the ENCODE and broke
-    // ordinary frames; this touches only fragments that today are
-    // invisible.
-    if (o.pos.w > 0.0f && o.pos.z < o.pos.w * 1.0e-4f) o.pos.z = o.pos.w * 1.0e-4f;
+    // CLIP-Z CLAMPS RETIRED (log_new6 conviction; ledger at the mesh
+    // rasterizer creation): both the far-vis clamp and the per-vertex
+    // near clamp that lived here bent the interpolated depth of any
+    // triangle SPANNING the clamped plane - the near form was the
+    // screen-edge contact-bite and the close look-up disappearance.
+    // The mesh rasterizers now run DepthClipEnable FALSE: fragments
+    // outside [near, far] rasterize with EXACT interpolation and their
+    // depth clamps per fragment to the viewport range - nearest for
+    // in-front-of-near (correct ordering by construction), the old
+    // 0.9999 far-clamp value for beyond-far. The farVis-off pop at max
+    // view distance is enforced per fragment in the PS (FAR CONTRACT
+    // block) instead of here.
     o.wpos = wp;
     // Per-axis scale is non-uniform: normals take the inverse scale, then
     // the object rotation (the inverse-transpose of scale-then-rotate for
@@ -1793,6 +1794,18 @@ VSOut VSFullscreen(uint vid : SV_VertexID)
 float4 PSMain(VSOut i) : SV_Target
 {
     ClipEdgeSliver(i.wpos, i.nrm);   // degenerate edge-on fragments (fireflies)
+    // FAR CONTRACT (depth-clip-off edition; ledger at the rasterizer
+    // creation): the mesh rasterizers no longer z-clip, so the far plane
+    // is enforced HERE per fragment. Forward encode: ndc = m22 + m32/d;
+    // ndc > 1 = beyond the engine far plane -> farVis-off objects pop
+    // exactly as the old hardware clip did; farVis objects skip the test
+    // (their beyond-far depth clamps to the viewport max - the retired
+    // VS clamp's value, minus its interpolation distortion). The m32
+    // sanity gate stands the test down for auxiliary zeroed depthParams
+    // fills (sun fallback and friends), and fullscreen passes are safe
+    // by construction (w = 1 puts ndc far below 1).
+    if (shadowMeta2.x < 0.5f && depthParams.y < -1.0e-3f &&
+        depthParams.x + depthParams.y / max(i.pos.w, 1.0e-4f) > 1.0f) discard;
     // Punch-through / overlay-occlusion guard, flush-path edition: the
     // same contract as PSComposite's. t0 (sceneDepthTex) holds the
     // mid-frame scene-depth snapshot when the CPU armed tight margins in
@@ -2082,25 +2095,11 @@ VSOutC VSComposite(VSIn i)
                  ? (centerRel.xyz + KhRotate(i.pos * sizeAxes.xyz))
                  : wp;
     o.pos = mul(float4(khvTp, 1.0f), viewProj);
-    // Far-visibility clamp (opt-in, shadowMeta2.x): pull clip z just inside
-    // the far plane so max view distance stops hard-clipping the mesh. Past
-    // the far plane the depth buffer holds only the clear value / sky, so
-    // ordering cannot break; the guard compares SV_Position.w, untouched.
-    if (shadowMeta2.x > 0.5f && o.pos.z > o.pos.w * 0.9999f) o.pos.z = o.pos.w * 0.9999f;
-    // NEAR-VISIBILITY CLAMP (always-on; the LOOK-UP SLICE fix - the open
-    // design item, convicted by the night look-up class: on far-phase
-    // frames the encode's near plane sits at ~10 m and a mesh fragment
-    // closer than it hard-clips to nothing on BOTH paths). Symmetric
-    // mechanism to the far clamp above: pull clip z just inside the NEAR
-    // plane, so the fragment renders at the nearest depth with its
-    // correct screen position - and nearest IS correct ordering for
-    // geometry between the camera and everything else. In-range
-    // fragments never satisfy the condition; w <= 0 stays with the
-    // hardware (behind-camera clipping is not ours to relax). The
-    // reverted 'near-draw attempt' substituted the ENCODE and broke
-    // ordinary frames; this touches only fragments that today are
-    // invisible.
-    if (o.pos.w > 0.0f && o.pos.z < o.pos.w * 1.0e-4f) o.pos.z = o.pos.w * 1.0e-4f;
+    // CLIP-Z CLAMPS RETIRED (log_new6 conviction; full ledger in VSMain
+    // and at the mesh rasterizer creation): DepthClipEnable FALSE now
+    // owns both boundaries per fragment; the retired per-vertex forms
+    // bent spanning triangles' depth (the contact bite / look-up
+    // disappearance). FarVis-off far pop enforced in the PS.
     o.wpos = wp;
     // Inverse per-axis scale, then object rotation, for the normal (see
     // VSMain).
@@ -2116,6 +2115,11 @@ float4 PSComposite(VSOutC i) : SV_Target
 #endif
 {
     ClipEdgeSliver(i.wpos, i.nrm);   // degenerate edge-on fragments (fireflies)
+    // FAR CONTRACT (depth-clip-off edition; see PSMain's twin + the
+    // rasterizer ledger): per-fragment far-plane parity for farVis-off
+    // objects now that the mesh rasterizers no longer z-clip.
+    if (shadowMeta2.x < 0.5f && depthParams.y < -1.0e-3f &&
+        depthParams.x + depthParams.y / max(i.pos.w, 1.0e-4f) > 1.0f) discard;
     // Punch-through guard, campaign-settled: METRIC compare in the
     // remap-decode space against the flush-time snapshot. Dormant
     // (fxParams1.x = 1e9) whenever the heightfield is live - the
@@ -2497,6 +2501,14 @@ float3 WorldPos(int2 px, float2 uv)
 
 float4 PSEffect(VSOut i) : SV_Target
 {
+    // FAR CONTRACT (depth-clip-off edition; see PSMain's twin + the
+    // rasterizer ledger): effect MESHES rasterize through the same
+    // non-clipping states, so farVis-off parity with the old hardware
+    // far clip lives here too. Fullscreen passes are inert by
+    // construction (w = 1 -> ndc far below 1), and zeroed/degenerate
+    // depthParams stand the test down via the m32 gate.
+    if (shadowMeta2.x < 0.5f && depthParams.y < -1.0e-3f &&
+        depthParams.x + depthParams.y / max(i.pos.w, 1.0e-4f) > 1.0f) discard;
     int2  px = int2(i.pos.xy);
     float2 uv = i.pos.xy / float2(fxMeta.z, fxMeta.w);
     int   effect = (int)fxMeta.x;
@@ -3412,7 +3424,8 @@ inline std::string ensure_resources(ID3D11Device* dev) {
         D3D11_RASTERIZER_DESC rd = {};
         rd.FillMode = D3D11_FILL_SOLID;
         rd.CullMode = D3D11_CULL_NONE;      // visible from inside too
-        rd.DepthClipEnable = TRUE;
+        // (DepthClipEnable is set per state below: FALSE for the three
+        // mesh rasterizers - the depth-clamp ledger - TRUE for rast_sun.)
         rd.MultisampleEnable = TRUE;        // scene targets are MSAA per video settings
         // Small negative bias pulls our fragments toward the camera so they
         // consistently win the depth test in the ambiguous band where our
@@ -3431,6 +3444,33 @@ inline std::string ensure_resources(ID3D11Device* dev) {
         // raising this again.
         rd.SlopeScaledDepthBias = -0.25f;
         rd.DepthBiasClamp = 0.0f;
+        // DEPTH-CLAMP RASTERIZATION (log_new6, issues 2+3 - the look-up
+        // disappearance and the screen-edge contact bite share one root):
+        // the engine's DYNAMIC near plane is computed from ITS OWN scene
+        // content and can sit meters beyond our meshes (pvNear read 4.94
+        // on the sky-look-up tail, 10 on far-partition frames, while a
+        // 3 m box stood 1-3 m from the camera). The per-VERTEX near
+        // clamp in the VSs rescued only all-in-front faces and BROKE
+        // spanning ones: raising one vertex's clip z bends the whole
+        // triangle's interpolated depth (fragments near the clamped
+        // corner computed FARTHER than truth -> terrain won the depth
+        // test: the bottom-of-face bite, angle- and edge-specific
+        // because it keys on a corner crossing the near plane), and a
+        // vertex behind the camera plane (w <= 0, the close look-up
+        // posture) skipped the clamp entirely, so the z=0 clip landed
+        // at the clamped neighbor and shaved the face to a sliver: the
+        // disappearance. The FIX is the hardware's own per-FRAGMENT
+        // form: DepthClipEnable FALSE skips the 0<=z<=w clip and clamps
+        // rasterized depth to the viewport range - fragments in front
+        // of the near plane draw at nearest depth (correct ordering:
+        // nothing in the buffer is nearer), interpolation stays exact,
+        // spanning and behind-camera cases are handled by construction.
+        // The VS near clamp is retired (the distortion source); the far
+        // plane's contract moves to a per-fragment PS test (see the FAR
+        // CONTRACT block in PSMain/PSComposite/PSEffect) so farVis-off
+        // objects still pop at max view distance exactly as before.
+        // x/y guard-band and w clipping are unaffected by this flag.
+        rd.DepthClipEnable = FALSE;
         hr = dev->CreateRasterizerState(&rd, &g_res.rasterizer);
         if (FAILED(hr)) { g_res.release(); return "Create rasterizer " + hr_str(hr); }
         // Back-face-culling twin for twoSided = false objects: identical
@@ -3454,6 +3494,11 @@ inline std::string ensure_resources(ID3D11Device* dev) {
         rd.CullMode = D3D11_CULL_NONE;
         rd.DepthBias = 0;
         rd.SlopeScaledDepthBias = 0.0f;
+        // The private sun map keeps ORDINARY clipping: its ortho volume
+        // is fitted around the casters, so nothing legitimate crosses
+        // its near/far planes - and clamped out-of-volume depth would
+        // silently corrupt the self-shadow compares.
+        rd.DepthClipEnable = TRUE;
         hr = dev->CreateRasterizerState(&rd, &g_res.rast_sun);
         if (FAILED(hr)) { g_res.release(); return "Create sun rasterizer " + hr_str(hr); }
     }
@@ -4336,6 +4381,25 @@ inline float effect_time_seconds() {
 // Maps an SQF effect designator (name string or numeric id) to an EffectId.
 // Returns -1 if unknown.
 // Maps a blend-mode designator (name or id) to 0..5; -1 if unknown.
+// COLOR SANITIZATION (analysis item, the ownership no-man's-land): SQF
+// scalars arrive unchecked, and a NaN alpha fails BOTH perceptual-scan
+// comparisons (>= 0.999f and < 0.999f are each false for NaN) - the
+// object is then neither composite-eligible nor translucent-armed and
+// shades garbage through every alpha consumer. NaN never compares equal
+// to itself (the dl_finite trick), so non-finite channels reset to the
+// opaque-white defaults; alpha clamps to [0, 1] (the envelope/ownership
+// domain), rgb to [0, 65504] (the half-float ceiling the bm==5 branch
+// already uses - deliberate HDR headroom, negatives excluded).
+inline void kh_sanitize_color(float c[4]) {
+    for (int i = 0; i < 4; ++i) if (!(c[i] == c[i])) c[i] = 1.0f;
+    for (int i = 0; i < 3; ++i) {
+        if (c[i] < 0.0f) c[i] = 0.0f;
+        if (c[i] > 65504.0f) c[i] = 65504.0f;
+    }
+    if (c[3] < 0.0f) c[3] = 0.0f;
+    if (c[3] > 1.0f) c[3] = 1.0f;
+}
+
 inline int blend_id_from_gv(const game_value& gv) {
     if (gv.type_enum() == game_data_type::SCALAR) {
         int id = static_cast<int>(static_cast<float>(gv));
@@ -6410,6 +6474,25 @@ static uint64_t g_cc_pf_last_ms = 0;          // stamp (age at dump)
 // pv race. Latched once per missed frame at the first fallback mesh.
 static uint64_t g_flush_slot_band_rejects = 0;   // flush slot pairs refused out-of-band
 static float    g_flush_slot_rej_near = -1.0f;    // last refused slot near (forensic)
+// SAME-FRAME INJECTION ENCODE PAIR (log_new6 conviction, frames
+// 2170/2173/2240/2243/2381 - the translucent flicker + the look-up
+// class's translucent half): single-frame FAR-partition latches
+// (near 10 - IN the camera band, which was widened to 15 for the
+// altitude far-vis truth) reached the flush's carry through the keep
+// arbitration's in-band-pv-wins rule (keepStaleSkips fired, the raw
+// near-10 latch encoded the carry) while the injection's own
+// latch-vs-live resolve had already picked the correct 0.07 pair for
+// the SAME frame's depth writes. The injection now PUBLISHES its
+// arbitrated pair; the flush adopts it whenever an injection landed
+// this frame - the two paths then agree by construction, which is
+// also the depth-parity requirement between the injected opaques'
+// depth writes and the carried translucents' tests. Render-thread
+// writes, game-thread reads under the flush's park, the g_ro contract.
+static float    g_inj_enc_m22 = 0.0f;
+static float    g_inj_enc_m32 = 0.0f;
+static float    g_inj_enc_near = -1.0f;
+static uint64_t g_inj_enc_ms = 0;
+static uint64_t g_flush_inj_encodes = 0;   // carries encoded with the injection's pair
 // INJECTION-SIDE SLOT BAND (odd-angle campaign, trace conviction): the
 // live-slot telltale passes viewmodel-class windows BY DESIGN (m32 free,
 // fov/m22 match the scene's - the keep-sanitization ledger), and the
@@ -13340,6 +13423,19 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
                             ? (-pv.projection[3][2] / pv.projection[2][2]) : -1.0f;
     g_mask.last_inject_near = inject_near;
 
+    // PUBLISH the arbitrated encode pair (see the g_inj_enc ledger by
+    // the flush counters): final at this point - only the far-phase
+    // CLASSIFICATION below still runs; nothing later mutates
+    // pv.projection[2][2]/[3][2]. Deliberately BELOW the far-phase and
+    // anomalous skip returns, so an ABORTED attempt can never
+    // re-publish over a real landing's pair - and re-published by any
+    // later proceeding attempt/repaint this frame, so the flush always
+    // carries with the LAST painter's encode.
+    g_inj_enc_m22 = pv.projection[2][2];
+    g_inj_enc_m32 = pv.projection[3][2];
+    g_inj_enc_near = inject_near;
+    g_inj_enc_ms = steady_now_ms();
+
     // FAR-FRAME CLASSIFICATION BY THE ACCEPTED ENCODE (field correction,
     // the 968-frame parked-bite dump: every frame slot-encoded at
     // 10.0012 while dFarInjects stayed 0 for the whole session). At the
@@ -15576,7 +15672,25 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         g_flush_slot_rej_near = g_ro.slot_near_live;
     }
 
-    if (khf_slot_band) {
+    // SAME-FRAME INJECTION PAIR, first rung (log_new6 conviction; full
+    // ledger at the g_inj_enc globals): when an injection LANDED this
+    // frame its arbitrated pair is the frame's world encode by
+    // construction - the trigger world-shape test, the slot band and
+    // the latch-vs-live resolve all passed on the render thread - and
+    // the carried translucents must depth-test through the SAME encode
+    // the injected opaques wrote with. This closes the one gap the
+    // slot/keep ladder could not: a far-partition latch that is
+    // in-band (near 10) yet foreign to the frame's depth writes. The
+    // ladder below remains the authority for uninjected frames.
+    const bool khf_inj_pair = injected_since_last_flush && g_inj_enc_ms != 0 &&
+                              g_inj_enc_near > 0.0f &&
+                              steady_now_ms() - g_inj_enc_ms < 250;
+
+    if (khf_inj_pair) {
+        pv.projection[2][2] = g_inj_enc_m22;
+        pv.projection[3][2] = g_inj_enc_m32;
+        g_flush_inj_encodes++;
+    } else if (khf_slot_band) {
         pv.projection[2][2] = g_ro.slot_m22;
         pv.projection[3][2] = g_ro.slot_m32;
     } else if (g_slot_keep_near > 0.0f && g_slot_keep_ms != 0 &&
@@ -16193,7 +16307,14 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
                 // Slot pair preferred, mirroring the injection's encode
                 // arbitration (engine-verbatim beats sniffer-anchored).
-                if (g_ro.slot_near_live > 0.0f) {
+                // CAMERA-BAND GATED (log_new6: slot_near_live read 0.01 -
+                // a foreign partition's pair - on 2602/2629 flushes; the
+                // ungated preference here fed that pair to the mode-Off
+                // guard decode AND, since the depth-clip-off round, to
+                // the PS far-contract test, whose ndc>1 verdict under a
+                // 0.01-near pair discards overlays a few meters out).
+                if (g_ro.slot_near_live >= KH_CAM_NEAR_MIN &&
+                    g_ro.slot_near_live <= KH_CAM_NEAR_MAX) {
                     cbd.depth_params[0] = g_ro.slot_m22;
                     cbd.depth_params[1] = g_ro.slot_m32;
                 }
@@ -16202,7 +16323,9 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                 cbd.depth_params[3] = g_ro.trig_vp_valid ? g_ro.trig_vp_max : g_scene_vp_max_d;
                 cbd.fx_meta[2] = static_cast<float>(g_res.comp_depth_w);
                 cbd.fx_meta[3] = static_cast<float>(g_res.comp_depth_h);
-                const bool exact_flush = measured || g_ro.slot_near_live > 0.0f;
+                const bool exact_flush = measured ||
+                    (g_ro.slot_near_live >= KH_CAM_NEAR_MIN &&
+                     g_ro.slot_near_live <= KH_CAM_NEAR_MAX);
                 cbd.fx1[0] = exact_flush ? KH_COMPOSITE_GUARD_BASE_MEASURED : KH_COMPOSITE_GUARD_BASE;
                 cbd.fx1[1] = exact_flush ? KH_COMPOSITE_GUARD_REL_MEASURED : KH_COMPOSITE_GUARD_REL;
             } else {
@@ -16254,7 +16377,11 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             float kha_m32 = pv.projection[3][2];
 
             if (g_ro.engine_proj_valid) { kha_m22 = g_ro.engine_m22; kha_m32 = g_ro.engine_m32; }
-            if (g_ro.slot_near_live > 0.0f) { kha_m22 = g_ro.slot_m22; kha_m32 = g_ro.slot_m32; }
+            // Camera-band gated, same conviction as the solid fill above
+            // (the foreign 0.01 pair must not reach the arb decode or
+            // the PS far-contract test).
+            if (g_ro.slot_near_live >= KH_CAM_NEAR_MIN &&
+                g_ro.slot_near_live <= KH_CAM_NEAR_MAX) { kha_m22 = g_ro.slot_m22; kha_m32 = g_ro.slot_m32; }
             cbd.local0[0] = kha_m22;
             cbd.local0[1] = kha_m32;
             cbd.local0[2] = g_ro.trig_vp_valid ? g_ro.trig_vp_min : g_scene_vp_min_d;
@@ -17050,6 +17177,7 @@ inline void reset_stat_counters() {
     g_sun_map_skips = 0;
     g_fl_fallback_ms = 0; g_fl_anom_skip_ms = 0;
     g_flush_slot_keeps = 0;
+    g_flush_inj_encodes = 0;
     g_keep_stamp_rejects = 0;
     g_keep_stale_skips = 0;
     g_cast_arm_lost_ms = 0;
@@ -17067,6 +17195,7 @@ inline void reset_stat_counters() {
     g_composite_rescues = 0; g_rescue_last_ms = 0; g_rescue_cap_stops = 0;
     g_rescue_ref_carried = 0; g_rescue_ref_preflush = 0; g_rescue_ref_shield = 0;
     g_flush_slot_band_rejects = 0; g_flush_slot_rej_near = -1.0f;
+    g_inj_enc_m22 = 0.0f; g_inj_enc_m32 = 0.0f; g_inj_enc_near = -1.0f; g_inj_enc_ms = 0;
     g_inj_slot_band_rejects = 0; g_inj_slot_rej_near = -1.0f;
     g_latch_holds = 0; g_latch_hold_dist = -1.0f; g_latch_jump_adopts = 0;
     g_ls.latches = 0; g_ls.resolve_hits = 0; g_ls.resolve_draws = 0;
@@ -17186,6 +17315,7 @@ inline void reset_session_state() {
     g_composite_rescues = 0; g_rescue_last_ms = 0; g_rescue_cap_stops = 0;
     g_rescue_ref_carried = 0; g_rescue_ref_preflush = 0; g_rescue_ref_shield = 0;
     g_flush_slot_band_rejects = 0; g_flush_slot_rej_near = -1.0f;
+    g_inj_enc_m22 = 0.0f; g_inj_enc_m32 = 0.0f; g_inj_enc_near = -1.0f; g_inj_enc_ms = 0;
     g_inj_slot_band_rejects = 0; g_inj_slot_rej_near = -1.0f;
     g_latch_holds = 0; g_latch_hold_dist = -1.0f; g_latch_jump_adopts = 0;
     g_carry_pending_serial.store(0, std::memory_order_relaxed);
@@ -17477,6 +17607,7 @@ static game_value add_render3d_sqf(game_value_parameter args) {
         if (arr.size() > 2 && arr[2].type_enum() == game_data_type::ARRAY) {
             auto& col = arr[2].to_array();
             for (size_t i = 0; i < 4 && i < col.size(); ++i) obj.color[i] = static_cast<float>(col[i]);
+            RenderIntegration::kh_sanitize_color(obj.color);
         }
 
         if (arr.size() > 3 && arr[3].type_enum() == game_data_type::SCALAR) {
@@ -17598,6 +17729,7 @@ static int kh_apply_shared_prop(RenderIntegration::RenderObject& obj,
         if (val.type_enum() != game_data_type::ARRAY) return 0;
         auto& col = val.to_array();
         for (size_t i = 0; i < 4 && i < col.size(); ++i) obj.color[i] = static_cast<float>(col[i]);
+        RenderIntegration::kh_sanitize_color(obj.color);
         return 1;
     }
 
@@ -17930,6 +18062,7 @@ static game_value add_postfx_sqf(game_value_parameter args) {
         if (arr.size() > 2 && arr[2].type_enum() == game_data_type::ARRAY) {
             auto& col = arr[2].to_array();
             for (size_t i = 0; i < 4 && i < col.size(); ++i) obj.color[i] = static_cast<float>(col[i]);
+            RenderIntegration::kh_sanitize_color(obj.color);
         }
 
         if (arr.size() > 3 && arr[3].type_enum() == game_data_type::ARRAY) {
@@ -18345,6 +18478,7 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("missFrames", RenderIntegration::g_ms_frames));
         out.push_back(kvf("missLastNear", RenderIntegration::g_ms_near));
         out.push_back(kv("flushSlotKeeps", RenderIntegration::g_flush_slot_keeps));
+        out.push_back(kv("flushInjEncodes", RenderIntegration::g_flush_inj_encodes));
         out.push_back(kv("keepStampRejects", RenderIntegration::g_keep_stamp_rejects));
         out.push_back(kv("keepStaleSkips", RenderIntegration::g_keep_stale_skips));
         out.push_back(kvf("castArmLostAgeS", age_s(RenderIntegration::g_cast_arm_lost_ms)));
@@ -19118,6 +19252,7 @@ static game_value add_local_postfx_sqf(game_value_parameter args) {
         if (arr.size() > 5 && arr[5].type_enum() == game_data_type::ARRAY) {
             auto& col = arr[5].to_array();
             for (size_t i = 0; i < 4 && i < col.size(); ++i) obj.color[i] = static_cast<float>(col[i]);
+            RenderIntegration::kh_sanitize_color(obj.color);
         }
 
         if (arr.size() > 6) {

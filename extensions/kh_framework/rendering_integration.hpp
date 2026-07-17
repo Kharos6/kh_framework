@@ -5229,6 +5229,25 @@ static float    g_slot_keep_m22 = 0.0f;
 static float    g_slot_keep_m32 = 0.0f;
 static float    g_slot_keep_near = -1.0f;
 static uint64_t g_slot_keep_ms = 0;
+// FAR KEEP (log_new14 conviction - clouds through farVis boxes at LOW
+// camera): with the camera near the ground the accepted encode is the
+// CAMERA partition's pair, whose far can sit well short of a high farVis
+// mesh - the mesh's rasterized depth then clamps to the viewport max
+// while the FAR partition's content (clouds included, encoded with
+// headroom to the real view distance) legitimately writes LESS: clouds
+// FARTHER than the mesh punched through it. Camera level/high, the
+// far-class pair IS the frame encode (the far arb) and ordering held -
+// the height correlation, verbatim from the field. The far keep caches
+// the DEEPEST sane world-class pair seen recently (celestial excluded
+// by KH_ENC_FAR_MAX at the write); beyond-accepted-far farVis meshes
+// route per-mesh through the SV_Depth arb shader with THIS pair, so
+// their depth lands in the far partition's own encode space. Render-
+// thread writes, same g_ro read contract as the slot keep.
+static float    g_far_keep_m22 = 0.0f;
+static float    g_far_keep_m32 = 0.0f;
+static float    g_far_keep_far = -1.0f;
+static uint64_t g_far_keep_ms = 0;
+static uint64_t g_farkeep_mesh_draws = 0;   // per-mesh far-keep routings (both paths)
 static uint64_t g_keep_stamp_rejects = 0;   // probe-accepted pairs the keep's band refused
 static uint64_t g_keep_stale_skips = 0;     // keep deferred to a fresher in-band pv
                                             // (the moving-camera silent frame)
@@ -5245,6 +5264,36 @@ static uint64_t g_keep_stale_skips = 0;     // keep deferred to a fresher in-ban
 // observed) stays excluded by the MIN edge.
 static constexpr float KH_CAM_NEAR_MIN = 0.05f;
 static constexpr float KH_CAM_NEAR_MAX = 15.0f;
+
+// ENCODE FAR CEILING (log_new13 conviction - the box-beyond-view-distance
+// residue): the engine runs a CELESTIAL/deep partition whose projection
+// shares the world pair's NEAR (10-class at altitude) while its FAR runs
+// two orders deeper (injDpM22 1.00006 / m32 -10.0006 decoded to far
+// ~167 km against the world pair's ~2 km) - no near-based band, keep
+// sanitization or pv-agreement rule can tell the two apart, and at
+// certain heights the trigger-time slot carries the deep pair, so the
+// INJECTION itself encoded through it: the PS far-contract boundary
+// moved to 167 km and the non-farVis box drew far beyond the view
+// distance. The discriminator is absolute: the engine's overall view
+// distance caps at 40 km, the celestial partition runs far beyond it.
+// Any pair whose derived far exceeds this ceiling is refused at every
+// ENCODE acceptance point (injection slot rung + far-phase arming, the
+// keep's write sanitization, the flush slot rung, and as referee
+// hygiene in the flush far-drift test and the injection's latch-vs-live
+// resolve). The raw slot keeps flowing to the far-phase distance test
+// and anomaly classification exactly as ledgered - only encode
+// AUTHORSHIP is gated.
+static constexpr float KH_ENC_FAR_MAX = 50000.0f;
+
+// Far plane from a forward-encode pair (ndc = m22 + m32/d): far is where
+// ndc reaches 1. Degenerate (infinite-far class) and non-physical pairs
+// return 1e9 - always above the ceiling, i.e. refused.
+inline float kh_enc_far(float m22, float m32) {
+    const float khd = 1.0f - m22;
+    if (fabsf(khd) < 1e-7f) return 1e9f;
+    const float khf = m32 / khd;
+    return khf > 0.0f ? khf : 1e9f;
+}
 
 // LATCH CONTINUITY GATE (odd-angle campaign, round 2 - trace conviction):
 // camLsDelta read 183-245 m on the caught-vanish frames against a 0.02-
@@ -5540,11 +5589,35 @@ inline void proj_scan_upload(ID3D11Resource* res, const void* data, uint32_t byt
                 // the altitude far-vis near of 10 (see the shared
                 // KH_CAM_NEAR band ledger - the 5.0 cap starved the keep
                 // at altitude and with it the rescue shield).
-                if (pnear >= KH_CAM_NEAR_MIN && pnear <= KH_CAM_NEAR_MAX) {
+                if (pnear >= KH_CAM_NEAR_MIN && pnear <= KH_CAM_NEAR_MAX &&
+                    kh_enc_far(p22, p32) <= KH_ENC_FAR_MAX) {
+                    // (Far ceiling: log_new13 - the celestial partition
+                    // shares the world near, so without it the keep
+                    // cached a ~167 km-far pair and fed it downstream;
+                    // see the KH_ENC_FAR_MAX ledger.)
                     g_slot_keep_m22 = p22;
                     g_slot_keep_m32 = p32;
                     g_slot_keep_near = pnear;
                     g_slot_keep_ms = steady_now_ms();
+                    // FAR KEEP (ledger at the globals): deepest sane
+                    // world-class pair, 250 ms decay. Re-adoption at
+                    // >= 0.999x keeps the stamp fresh while the deep
+                    // partition still uploads; once it stops (view
+                    // distance reduced, weather change), the hold goes
+                    // stale and the next in-band pair - however shallow
+                    // - takes over, so the keep can never serve a far
+                    // the engine no longer runs.
+                    {
+                        const float khfk_far = kh_enc_far(p22, p32);
+                        if (khfk_far >= g_far_keep_far * 0.999f ||
+                            g_far_keep_ms == 0 ||
+                            steady_now_ms() - g_far_keep_ms > 250) {
+                            g_far_keep_m22 = p22;
+                            g_far_keep_m32 = p32;
+                            g_far_keep_far = khfk_far;
+                            g_far_keep_ms = steady_now_ms();
+                        }
+                    }
                 } else {
                     g_keep_stamp_rejects++;
                 }
@@ -6493,6 +6566,8 @@ static float    g_inj_enc_m32 = 0.0f;
 static float    g_inj_enc_near = -1.0f;
 static uint64_t g_inj_enc_ms = 0;
 static uint64_t g_flush_inj_encodes = 0;   // carries encoded with the injection's pair
+static uint64_t g_flush_inj_pair_holds = 0; // ...of which: miss-run holds (full-pair agreement persisted)
+static uint64_t g_flush_pub_far_rejects = 0; // publish refused: far drifted under an agreeing near (latch pair stood)
 // INJECTION-SIDE SLOT BAND (odd-angle campaign, trace conviction): the
 // live-slot telltale passes viewmodel-class windows BY DESIGN (m32 free,
 // fov/m22 match the scene's - the keep-sanitization ledger), and the
@@ -13201,7 +13276,13 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             // Count-only otherwise: ambiguity is chronic (56% of frames
             // at noon) and must never reject or switch AUTHORS - the
             // flicker lesson. This switches only two projection scalars.
-            if (fabsf(n_latch - n_live) > 1e-4f) {
+            // FAR-CEILING TERM (log_new13; KH_ENC_FAR_MAX ledger): a
+            // celestial-partition latch shares the world NEAR, so the
+            // near test alone passes it - an insane latch far with a
+            // sane live far is the same suspect class and swaps too.
+            if (fabsf(n_latch - n_live) > 1e-4f ||
+                (kh_enc_far(m22_latch, m32_latch) > KH_ENC_FAR_MAX &&
+                 kh_enc_far(m22_live, m32_live) <= KH_ENC_FAR_MAX)) {
                 g_stats.composite_ambiguous++;
                 pv.projection[2][2] = m22_live;
                 pv.projection[3][2] = m32_live;
@@ -13266,17 +13347,25 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     // keeps flowing to the far-phase test and the anomaly classification
     // below - their semantics need the unfiltered telltale.
     const bool khr_slot_band = snap_slot_near >= KH_INJ_SLOT_NEAR_MIN;
+    // FAR CEILING (log_new13; KH_ENC_FAR_MAX ledger): the celestial
+    // partition's pair shares the world NEAR - the band above cannot see
+    // it - and its ~167 km far moved the whole encode (and with it the
+    // PS far-contract boundary) two orders out at certain heights. An
+    // insane-far slot is refused for encode AUTHORSHIP exactly like an
+    // out-of-band near; the raw values still feed the far-phase distance
+    // test and anomaly classification below, unchanged.
+    const bool khr_slot_sane_far = kh_enc_far(snap_slot_m22, snap_slot_m32) <= KH_ENC_FAR_MAX;
     bool khr_inj_band_rej = false;
     uint8_t khr_enc_src = measured ? 1 : 0;   // encode-author forensic (flight recorder)
     bool khr_far_phase = false;               // far pair is this phase's truth (set at the far-inject branch)
 
-    if (snap_slot_near > 0.0f && !khr_slot_band) {
+    if (snap_slot_near > 0.0f && !(khr_slot_band && khr_slot_sane_far)) {
         g_inj_slot_band_rejects++;
         g_inj_slot_rej_near = snap_slot_near;
         khr_inj_band_rej = true;
     }
 
-    if (snap_slot_near > 0.0f && khr_slot_band) {
+    if (snap_slot_near > 0.0f && khr_slot_band && khr_slot_sane_far) {
         pv.projection[2][2] = snap_slot_m22;
         pv.projection[3][2] = snap_slot_m32;
         g_stats.composite_slot_encodes++;
@@ -13320,6 +13409,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     // corrected by the nearer re-draw"). One-sided as before - the
     // probe's fov anchors already reject nearer foreign windows.
     if (snap_slot_near > 0.0f && khr_bridge_near > 1e-4f &&
+        khr_slot_sane_far &&   // celestial-class slots never arm the far phase (KH_ENC_FAR_MAX ledger)
         snap_slot_near > 1.5f * khr_bridge_near) {
         float khr_cam[3];
         extract_camera_pos(pv.view, khr_cam);
@@ -13759,6 +13849,24 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     ctx->PSSetShader(khr_far_arb ? g_res.ps_composite_arb
                      : guard     ? g_res.ps_composite
                                  : g_res.ps, nullptr, 0);
+    // PER-MESH FAR-KEEP ROUTING, pass constants (log_new14; full ledger
+    // at the g_far_keep globals): a farVis mesh BEYOND the accepted
+    // pair's far plane routes through the SV_Depth arb shader with the
+    // far keep's pair, so its depth lands in the far partition's own
+    // encode space instead of pinning at the viewport max - which is
+    // what let clouds FARTHER than the mesh punch through it at low
+    // camera. SV_Depth replaces the rasterized depth entirely, so the
+    // shared per-frame viewProj stays untouched: the override is two
+    // per-object scalars plus the PS pick.
+    ID3D11PixelShader* khr_bound_ps = khr_far_arb ? g_res.ps_composite_arb
+                                    : guard      ? g_res.ps_composite
+                                                 : g_res.ps;
+    const float khr_acc_far = kh_enc_far(pv.projection[2][2], pv.projection[3][2]);
+    const bool khr_fk_fresh = g_res.ps_composite_arb != nullptr &&
+                              g_far_keep_ms != 0 && g_far_keep_far > 0.0f &&
+                              steady_now_ms() - g_far_keep_ms < 250 &&
+                              khr_acc_far > 0.0f && khr_acc_far < 1.0e8f &&
+                              g_far_keep_far > khr_acc_far * 1.05f;
     ctx->GSSetShader(nullptr, nullptr, 0);
     ctx->HSSetShader(nullptr, nullptr, 0);
     ctx->DSSetShader(nullptr, nullptr, 0);
@@ -14049,6 +14157,33 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         cbd.fx0[0] = cam[0];
         cbd.fx0[1] = cam[1];
         cbd.fx0[2] = cam[2];
+        // PER-MESH FAR-KEEP ROUTING verdict (pass constants above): this
+        // farVis mesh sits beyond the accepted pair's far and a deeper
+        // sane pair is current - encode IT through the far keep via the
+        // arb shader (PS pick below, depthParams override in the fill).
+        // RADIUS-AWARE (log_new15, the boundary-crossing bite: a MASSIVE
+        // box's far extent hangs beyond the far plane while its CENTER
+        // is still inside - those fragments clamped to the viewport max
+        // and lost to far-partition content until the center crossed:
+        // 'clipped from behind until it settles'. Route when ANY part
+        // of the mesh reaches the far plane, not the center.)
+        const float khr_mesh_r = 0.5f * sqrtf(o.size[0] * o.size[0] +
+                                              o.size[1] * o.size[1] +
+                                              o.size[2] * o.size[2]);
+        const float khr_fk_edge = fmaxf(khr_acc_far - khr_mesh_r, 0.0f);
+        const bool khr_mesh_farkeep = khr_fk_fresh && o.far_vis &&
+            kh_mesh_dist_sq(o, cam) > khr_fk_edge * khr_fk_edge;
+        {
+            ID3D11PixelShader* khr_want_ps =
+                (khr_far_arb || khr_mesh_farkeep) ? g_res.ps_composite_arb
+                : guard                           ? g_res.ps_composite
+                                                  : g_res.ps;
+            if (khr_want_ps != khr_bound_ps) {
+                ctx->PSSetShader(khr_want_ps, nullptr, 0);
+                khr_bound_ps = khr_want_ps;
+            }
+        }
+        if (khr_mesh_farkeep) g_farkeep_mesh_draws++;
         // Band / local-volume mask inputs (same conversion as the flush).
         cbd.local0[0] = o.pos[0];
         cbd.local0[1] = o.pos[2];   // SQF [x,y,zASL] -> engine [x,zASL,y]
@@ -14076,7 +14211,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         // Round 6: the arb shader consumes depthParams (the SV_Depth
         // clamp encodes through them) and fxParams1.zw regardless of
         // the snapshot guard, so the fill must run for arb frames too.
-        if (guard || khr_far_arb) {
+        if (guard || khr_far_arb || khr_mesh_farkeep) {
             // Guard inputs: reconstruction coefficients + the encode range
             // of the copied depth, the copy's pixel dimensions, and the
             // margins.
@@ -14132,6 +14267,18 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             } else {
                 cbd.fx1[0] = exact_encode ? KH_COMPOSITE_GUARD_BASE_MEASURED : KH_COMPOSITE_GUARD_BASE;
                 cbd.fx1[1] = exact_encode ? KH_COMPOSITE_GUARD_REL_MEASURED : KH_COMPOSITE_GUARD_REL;
+            }
+            // PER-MESH FAR-KEEP override (pass constants at the PS bind;
+            // AFTER every standard fill so it wins): the far keep's pair
+            // for the encode, guard dormant, arb clamp lanes armed - the
+            // arb PS writes SV_Depth from exactly these.
+            if (khr_mesh_farkeep) {
+                cbd.depth_params[0] = g_far_keep_m22;
+                cbd.depth_params[1] = g_far_keep_m32;
+                cbd.fx1[0] = 1e9f;
+                cbd.fx1[1] = 0.0f;
+                cbd.fx1[2] = KH_FAR_ARB_GUARD_BASE;
+                cbd.fx1[3] = KH_FAR_ARB_CONTACT_H;
             }
             // CPU echo: the exact reconstruction coefficients this guard
             // received (probe-independent m22/m32/vp forensics).
@@ -15665,7 +15812,10 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     // observed in the wild sit at ~1 m and remain inside the band by
     // necessity - the keep arbitration below still guards those.
     const bool khf_slot_band = g_ro.slot_near_live >= KH_CAM_NEAR_MIN &&
-                               g_ro.slot_near_live <= KH_CAM_NEAR_MAX;
+                               g_ro.slot_near_live <= KH_CAM_NEAR_MAX &&
+                               kh_enc_far(g_ro.slot_m22, g_ro.slot_m32) <= KH_ENC_FAR_MAX;
+                               // (far ceiling: log_new13 - the celestial pair
+                               // shares the world near; KH_ENC_FAR_MAX ledger)
 
     if (g_ro.slot_near_live > 0.0f && !khf_slot_band) {
         g_flush_slot_band_rejects++;
@@ -15680,16 +15830,89 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     // the carried translucents must depth-test through the SAME encode
     // the injected opaques wrote with. This closes the one gap the
     // slot/keep ladder could not: a far-partition latch that is
-    // in-band (near 10) yet foreign to the frame's depth writes. The
-    // ladder below remains the authority for uninjected frames.
-    const bool khf_inj_pair = injected_since_last_flush && g_inj_enc_ms != 0 &&
-                              g_inj_enc_near > 0.0f &&
-                              steady_now_ms() - g_inj_enc_ms < 250;
+    // in-band (near 10) yet foreign to the frame's depth writes.
+    // MISS-RUN PERSISTENCE (log_new8, the parked far-pose conviction):
+    // at the chronic near-10 pose the sparse scene drops below the
+    // opaque floor for whole camera-angle REGIONS - miss RUNS of 146
+    // and 96 consecutive frames measured, far beyond any freshness
+    // timer - and the flush-time live slot there is PARTITION-
+    // AMBIGUOUS: several in-band pairs share the near-10 class while
+    // their FAR planes differ (the trigger's world pair ran far ~2039;
+    // a far/celestial partition's pair runs much deeper). Crossing the
+    // regime boundary as the camera rotated therefore flipped the
+    // frame encode's far plane: the non-farVis box popped in and out
+    // AT the view-distance boundary (the PS far-contract verdict
+    // flipped), and the farVis boxes flipped sides against the cloud
+    // layer (rasterized depth crossed the clouds' buffer values). The
+    // publish therefore PERSISTS across miss frames for as long as the
+    // frame's pv still AGREES with its near (the keep's own 25% rule -
+    // expiry by disagreement, not wall clock, because near-agreement
+    // is exactly the evidence that the camera partition has not
+    // moved). A disagreeing in-band pv falls through to the slot/keep
+    // ladder, which remains the authority wherever no world-verified
+    // pair is current.
+    const bool khf_pub_valid = g_inj_enc_ms != 0 && g_inj_enc_near > 0.0f;
+    bool khf_inj_pair = khf_pub_valid && injected_since_last_flush;
+    bool khf_inj_hold = false;
+    bool khf_latch_far = false;
+
+    if (!khf_inj_pair && khf_pub_valid) {
+        const float khf_pubv_near = fabsf(pv.projection[2][2]) > 1e-9f
+                                  ? (-pv.projection[3][2] / pv.projection[2][2]) : -1.0f;
+        const bool khf_near_agree = khf_pubv_near >= KH_CAM_NEAR_MIN &&
+                                    khf_pubv_near <= KH_CAM_NEAR_MAX &&
+                                    fabsf(khf_pubv_near - g_inj_enc_near) <= 0.25f * khf_pubv_near;
+
+        if (khf_near_agree) {
+            // FAR-DRIFT TEST (log_new12 conviction - the height/fog
+            // symptoms): near-agreement alone cannot certify the pair.
+            // The engine pins near at 10 across a whole ALTITUDE band
+            // while its far plane follows height and fog - a held
+            // publish then serves a STALE FAR for the entire miss run:
+            // the PS far-contract discards at the old boundary (the
+            // non-farVis box visible beyond the current view distance)
+            // and beyond-far farVis fragments clamp against a boundary
+            // the cloud layer no longer straddles the same way (the
+            // in-front/behind flip that tracked height). m22 - 1 =
+            // near/(far - near), so with near already agreed, comparing
+            // (m22 - 1) compares the FARS: within 25% the publish
+            // stands (injection parity); outside it the world far
+            // MOVED since the last landing, and the frame's own latch
+            // pair - clear-time, main-depth-anchored, camera-gated,
+            // and the only same-class source whose far is THIS
+            // frame's - stands unoverridden instead (counted).
+            const float khf_pv_m221 = pv.projection[2][2] - 1.0f;
+            const float khf_pub_m221 = g_inj_enc_m22 - 1.0f;
+            // REFEREE HYGIENE (log_new13; KH_ENC_FAR_MAX ledger): a
+            // celestial-class latch shares the world near, so it reaches
+            // this test - but its insane far cannot referee a drift
+            // verdict; the (world-class) publish stands over it.
+            const bool khf_pv_far_sane =
+                kh_enc_far(pv.projection[2][2], pv.projection[3][2]) <= KH_ENC_FAR_MAX;
+            const bool khf_far_agree = !khf_pv_far_sane ||
+                fabsf(khf_pub_m221 - khf_pv_m221) <=
+                0.25f * fmaxf(fabsf(khf_pv_m221), 1e-6f);
+
+            if (khf_far_agree) {
+                khf_inj_hold = true;
+                khf_inj_pair = true;
+            } else {
+                khf_latch_far = true;
+            }
+        }
+    }
 
     if (khf_inj_pair) {
         pv.projection[2][2] = g_inj_enc_m22;
         pv.projection[3][2] = g_inj_enc_m32;
         g_flush_inj_encodes++;
+        if (khf_inj_hold) g_flush_inj_pair_holds++;
+    } else if (khf_latch_far) {
+        // Far drifted under an agreeing near: the latch pair IS the
+        // encode this flush (no override) - deliberately ahead of the
+        // slot rung, whose flush-time value is the partition-ambiguity
+        // the publish path exists to avoid (log_new8).
+        g_flush_pub_far_rejects++;
     } else if (khf_slot_band) {
         pv.projection[2][2] = g_ro.slot_m22;
         pv.projection[3][2] = g_ro.slot_m32;
@@ -15715,6 +15938,21 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
     float view_proj[4][4];
     mul_4x4(pv.view, pv.projection, view_proj);
+
+    // PER-MESH FAR-KEEP ROUTING, flush edition (log_new14; ledger at the
+    // g_far_keep globals + the injection's twin): miss frames carry the
+    // same beyond-far farVis meshes and must resolve against far-
+    // partition content the same way - the arb PS's SV_Depth (which
+    // participates in the depth TEST for translucent no-write draws
+    // too) through the far keep's pair. Verdict computed per mesh in
+    // upload_cb; PS pick at the loop's category switch.
+    const float khf_acc_far = kh_enc_far(pv.projection[2][2], pv.projection[3][2]);
+    const bool khf_fk_fresh = g_res.ps_composite_arb != nullptr &&
+                              g_far_keep_ms != 0 && g_far_keep_far > 0.0f &&
+                              steady_now_ms() - g_far_keep_ms < 250 &&
+                              khf_acc_far > 0.0f && khf_acc_far < 1.0e8f &&
+                              g_far_keep_far > khf_acc_far * 1.05f;
+    bool khf_farkeep_draw = false;   // per-mesh verdict (written by upload_cb)
 
     // --- OCCLUSION SNAPSHOT (the overhaul's producer). Captured HERE -
     // the Draw3D park point, post-scene, AFTER the frame's last depth
@@ -16217,6 +16455,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     const bool khf_frame_ok = kh_upload_frame_cb(ctx, g_res.frame_cb, khf_cbf);
 
     auto upload_cb = [&](const RenderObject& o, bool chain_pass) -> bool {
+        khf_farkeep_draw = false;   // per-call default; solid section may set it
         ConstantData cbd = khf_cbf;   // CB SPLIT: frame template (matrices ride for the echoes)
         cbd.center_size[0] = o.pos[0];
         cbd.center_size[1] = o.pos[2];   // SQF [x,y,zASL] -> engine [x,zASL,y]
@@ -16275,6 +16514,14 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         // Without a fresh snapshot: guard stands down. Unoccluded,
         // never invisible.
         if (o.effect == 0) {
+            // PER-MESH FAR-KEEP verdict (pass constants above the lambda).
+            // Radius-aware threshold: the injection twin's ledger applies.
+            const float khf_mesh_r = 0.5f * sqrtf(o.size[0] * o.size[0] +
+                                                  o.size[1] * o.size[1] +
+                                                  o.size[2] * o.size[2]);
+            const float khf_fk_edge = fmaxf(khf_acc_far - khf_mesh_r, 0.0f);
+            khf_farkeep_draw = !chain_pass && khf_fk_fresh && o.far_vis &&
+                kh_mesh_dist_sq(o, cam) > khf_fk_edge * khf_fk_edge;
             // GUARD ARMING POLICY (flush path), third edition. The
             // all-solids arming (second edition) removed the staleness
             // objection via the same-flush snapshot - but the field then
@@ -16314,7 +16561,8 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                 // the PS far-contract test, whose ndc>1 verdict under a
                 // 0.01-near pair discards overlays a few meters out).
                 if (g_ro.slot_near_live >= KH_CAM_NEAR_MIN &&
-                    g_ro.slot_near_live <= KH_CAM_NEAR_MAX) {
+                    g_ro.slot_near_live <= KH_CAM_NEAR_MAX &&
+                    kh_enc_far(g_ro.slot_m22, g_ro.slot_m32) <= KH_ENC_FAR_MAX) {
                     cbd.depth_params[0] = g_ro.slot_m22;
                     cbd.depth_params[1] = g_ro.slot_m32;
                 }
@@ -16325,12 +16573,44 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                 cbd.fx_meta[3] = static_cast<float>(g_res.comp_depth_h);
                 const bool exact_flush = measured ||
                     (g_ro.slot_near_live >= KH_CAM_NEAR_MIN &&
-                     g_ro.slot_near_live <= KH_CAM_NEAR_MAX);
+                     g_ro.slot_near_live <= KH_CAM_NEAR_MAX &&
+                     kh_enc_far(g_ro.slot_m22, g_ro.slot_m32) <= KH_ENC_FAR_MAX);
                 cbd.fx1[0] = exact_flush ? KH_COMPOSITE_GUARD_BASE_MEASURED : KH_COMPOSITE_GUARD_BASE;
                 cbd.fx1[1] = exact_flush ? KH_COMPOSITE_GUARD_REL_MEASURED : KH_COMPOSITE_GUARD_REL;
             } else {
                 cbd.fx1[0] = 1e9f;
                 cbd.fx1[1] = 0.0f;
+            }
+            // PER-MESH FAR-KEEP override (AFTER every fill above so it
+            // wins; injection twin's ledger applies): far keep pair for
+            // the SV_Depth encode, SCENE vp range (the mesh pass draws
+            // under it since the viewport round), guard dormant, arb
+            // clamp lanes armed.
+            if (khf_farkeep_draw) {
+                cbd.depth_params[0] = g_far_keep_m22;
+                cbd.depth_params[1] = g_far_keep_m32;
+                cbd.depth_params[2] = g_ro.trig_vp_valid ? g_ro.trig_vp_min : g_scene_vp_min_d;
+                cbd.depth_params[3] = g_ro.trig_vp_valid ? g_ro.trig_vp_max : g_scene_vp_max_d;
+                cbd.fx1[0] = 1e9f;
+                cbd.fx1[1] = 0.0f;
+                cbd.fx1[2] = KH_FAR_ARB_GUARD_BASE;
+                cbd.fx1[3] = KH_FAR_ARB_CONTACT_H;
+                // BACKGROUND TRUST, flush semantics (the translucent-
+                // farVis opacity regression): PSComposite's trust rule
+                // (blendCtl.y) exists because the INJECTION's mid-frame
+                // capture is incomplete - beyond it the shader goes
+                // honestly opaque rather than tint a phantom. The
+                // flush's capture is the COMPLETE frame (post-scene),
+                // so trust spans everything here; the 150 m fill above
+                // was inert for PSMain and ACTIVATED when this routing
+                // began binding the composite twin - past the view
+                // distance the sky sentinel (sceneZ 1e9) sat beyond
+                // 150 m and forced every translucent farVis mesh
+                // opaque. 1e9 keeps even the sentinel inside trust
+                // (strict >), so sky-backed pixels blend against the
+                // captured sky exactly as PSMain always did.
+                cbd.blend_ctl[1] = 1.0e9f;
+                g_farkeep_mesh_draws++;
             }
             // Heightfield lanes: FRAME data now - armed once at the
             // pass frame build (both arms; the terrain lane never
@@ -16381,7 +16661,8 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             // (the foreign 0.01 pair must not reach the arb decode or
             // the PS far-contract test).
             if (g_ro.slot_near_live >= KH_CAM_NEAR_MIN &&
-                g_ro.slot_near_live <= KH_CAM_NEAR_MAX) { kha_m22 = g_ro.slot_m22; kha_m32 = g_ro.slot_m32; }
+                g_ro.slot_near_live <= KH_CAM_NEAR_MAX &&
+                kh_enc_far(g_ro.slot_m22, g_ro.slot_m32) <= KH_ENC_FAR_MAX) { kha_m22 = g_ro.slot_m22; kha_m32 = g_ro.slot_m32; }
             cbd.local0[0] = kha_m22;
             cbd.local0[1] = kha_m32;
             cbd.local0[2] = g_ro.trig_vp_valid ? g_ro.trig_vp_min : g_scene_vp_min_d;
@@ -16487,6 +16768,44 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     int khf_bound_bm = -1;                        // blend mode last set
     ID3D11DepthStencilState* khf_bound_dss = nullptr;
 
+    // FLUSH VIEWPORT DEPTH RANGE (log_new11 conviction - the all-
+    // translucent invisibility, and retroactively log_new8's farVis
+    // half): the flush draws under whatever viewport is bound at the
+    // Draw3D park - a POST-PROCESS range, not the scene's [0.011,
+    // 0.999]. Historically that only skewed in-range depth slightly
+    // (the -32 bias absorbed it) and beyond-far was hard-clipped
+    // anyway; since the depth-clamp round, beyond-far fragments CLAMP
+    // TO THE BOUND VIEWPORT'S MaxDepth - 1.0 under the pp range -
+    // which loses LESS_EQUAL against everything the scene wrote (max
+    // 0.999): a farVis mesh past the far plane became structurally
+    // invisible on exactly this path (visible when the injection drew
+    // it under the scene range - log_new8's "indecisive vs clouds"
+    // was the two paths alternating; log_new11's all-translucent set
+    // had ONLY this path and the boxes never appeared). The fix is
+    // the injection's own discipline (see its viewport block): keep
+    // the bound rectangle, force the scene depth range, restore after
+    // the mesh pass - the fullscreen chain below runs under the
+    // restored original exactly as before. In-range depth gains exact
+    // encode parity with the scene as a side effect.
+    UINT khf_n_saved_vp = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+    D3D11_VIEWPORT khf_saved_vp[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
+    ctx->RSGetViewports(&khf_n_saved_vp, khf_saved_vp);
+
+    {
+        D3D11_VIEWPORT khf_vp = {};
+
+        if (khf_n_saved_vp >= 1) {
+            khf_vp = khf_saved_vp[0];
+        } else {
+            khf_vp.Width = static_cast<FLOAT>(g_main_depth_w);
+            khf_vp.Height = static_cast<FLOAT>(g_main_depth_h);
+        }
+
+        khf_vp.MinDepth = g_ro.trig_vp_valid ? g_ro.trig_vp_min : g_scene_vp_min_d;
+        khf_vp.MaxDepth = g_ro.trig_vp_valid ? g_ro.trig_vp_max : g_scene_vp_max_d;
+        ctx->RSSetViewports(1, &khf_vp);
+    }
+
     for (const auto& o : meshes) {
         const bool ov = (o.effect == 0 && o.mode == DepthMode::Off);
         if (ov) g_mask.ov_listed++;      // reached the draw loop
@@ -16509,10 +16828,12 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         if (!upload_cb(o, false)) { if (ov) g_mask.ov_skipped++; continue; }
         if (ov) g_mask.ov_drawn++;       // Draw() will be issued below
         if (khf_o_perc) khf_perc_seen = true;
-        const int khf_ps_want = o.effect > 0 ? 1 : 0;
+        const int khf_ps_want = o.effect > 0 ? 1 : (khf_farkeep_draw ? 2 : 0);
 
         if (khf_ps_want != khf_ps_cat) {
-            ctx->PSSetShader(khf_ps_want ? g_res.ps_effect : g_res.ps, nullptr, 0);
+            ctx->PSSetShader(khf_ps_want == 1 ? g_res.ps_effect
+                           : khf_ps_want == 2 ? g_res.ps_composite_arb
+                                              : g_res.ps, nullptr, 0);
             khf_ps_cat = khf_ps_want;
         }
 
@@ -16626,6 +16947,11 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             ctx->Draw(mesh_vertex_count(mid), 0);
         }
     }
+
+    // Restore the parked pass's own viewport (the scene depth-range
+    // override above covered only the mesh draws; the chain and every
+    // later consumer see the original binding).
+    if (khf_n_saved_vp > 0) ctx->RSSetViewports(khf_n_saved_vp, khf_saved_vp);
 
     // Chain passes below assume the ambient (CullNone) rasterizer.
     if (khr_bound_rs != g_res.rasterizer) ctx->RSSetState(g_res.rasterizer);
@@ -17178,6 +17504,9 @@ inline void reset_stat_counters() {
     g_fl_fallback_ms = 0; g_fl_anom_skip_ms = 0;
     g_flush_slot_keeps = 0;
     g_flush_inj_encodes = 0;
+    g_flush_inj_pair_holds = 0;
+    g_flush_pub_far_rejects = 0;
+    g_farkeep_mesh_draws = 0;
     g_keep_stamp_rejects = 0;
     g_keep_stale_skips = 0;
     g_cast_arm_lost_ms = 0;
@@ -17196,6 +17525,7 @@ inline void reset_stat_counters() {
     g_rescue_ref_carried = 0; g_rescue_ref_preflush = 0; g_rescue_ref_shield = 0;
     g_flush_slot_band_rejects = 0; g_flush_slot_rej_near = -1.0f;
     g_inj_enc_m22 = 0.0f; g_inj_enc_m32 = 0.0f; g_inj_enc_near = -1.0f; g_inj_enc_ms = 0;
+    g_far_keep_m22 = 0.0f; g_far_keep_m32 = 0.0f; g_far_keep_far = -1.0f; g_far_keep_ms = 0;
     g_inj_slot_band_rejects = 0; g_inj_slot_rej_near = -1.0f;
     g_latch_holds = 0; g_latch_hold_dist = -1.0f; g_latch_jump_adopts = 0;
     g_ls.latches = 0; g_ls.resolve_hits = 0; g_ls.resolve_draws = 0;
@@ -17316,6 +17646,7 @@ inline void reset_session_state() {
     g_rescue_ref_carried = 0; g_rescue_ref_preflush = 0; g_rescue_ref_shield = 0;
     g_flush_slot_band_rejects = 0; g_flush_slot_rej_near = -1.0f;
     g_inj_enc_m22 = 0.0f; g_inj_enc_m32 = 0.0f; g_inj_enc_near = -1.0f; g_inj_enc_ms = 0;
+    g_far_keep_m22 = 0.0f; g_far_keep_m32 = 0.0f; g_far_keep_far = -1.0f; g_far_keep_ms = 0;
     g_inj_slot_band_rejects = 0; g_inj_slot_rej_near = -1.0f;
     g_latch_holds = 0; g_latch_hold_dist = -1.0f; g_latch_jump_adopts = 0;
     g_carry_pending_serial.store(0, std::memory_order_relaxed);
@@ -18479,6 +18810,9 @@ static game_value get_render_stats_sqf() {
         out.push_back(kvf("missLastNear", RenderIntegration::g_ms_near));
         out.push_back(kv("flushSlotKeeps", RenderIntegration::g_flush_slot_keeps));
         out.push_back(kv("flushInjEncodes", RenderIntegration::g_flush_inj_encodes));
+        out.push_back(kv("flushInjPairHolds", RenderIntegration::g_flush_inj_pair_holds));
+        out.push_back(kv("flushPubFarRejects", RenderIntegration::g_flush_pub_far_rejects));
+        out.push_back(kv("farKeepMeshDraws", RenderIntegration::g_farkeep_mesh_draws));
         out.push_back(kv("keepStampRejects", RenderIntegration::g_keep_stamp_rejects));
         out.push_back(kv("keepStaleSkips", RenderIntegration::g_keep_stale_skips));
         out.push_back(kvf("castArmLostAgeS", age_s(RenderIntegration::g_cast_arm_lost_ms)));

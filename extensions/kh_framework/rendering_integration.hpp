@@ -236,6 +236,8 @@ struct Resources {
     ID3D11InputLayout*       input_layout = nullptr;
     ID3D11RasterizerState*   rasterizer_cull = nullptr;  // back-face-culling twin of 'rasterizer'
                                                          // (twoSided = false objects; same biases)
+    ID3D11RasterizerState*   rasterizer_front = nullptr; // FRONT-culling twin: pass 1 of the
+                                                         // two-sided-translucent ordered draw
     std::vector<ID3D11Buffer*> mesh_vb;                  // one VB per registry mesh (pos + normal)
     ID3D11Buffer*            constant_buffer = nullptr;  // dynamic, per draw (game-thread flush): CBObj b0
     ID3D11Buffer*            composite_cb = nullptr;     // dynamic, per draw (render-thread injection): CBObj b0
@@ -377,6 +379,7 @@ struct Resources {
         for (int i = 0; i < 6; ++i) KH_SAFE_RELEASE(blend_modes[i]);
         KH_SAFE_RELEASE(rasterizer);
         KH_SAFE_RELEASE(rasterizer_cull);
+        KH_SAFE_RELEASE(rasterizer_front);
         KH_SAFE_RELEASE(cs_constant_buffer);
         KH_SAFE_RELEASE(points_buffer);
         KH_SAFE_RELEASE(points_srv);
@@ -1305,6 +1308,231 @@ float3 ApplyLighting(float3 base, float3 wpos, float3 nrm, float smf)
 
 struct VSIn  { float3 pos : POSITION; float3 nrm : NORMAL; };
 struct VSOut { float4 pos : SV_Position; float3 wpos : TEXCOORD0; float3 nrm : TEXCOORD1; };
+
+// SHARED RECEIVE BLOCK (relocated from the composite unit for the
+// translucent-receive fix): PSMain and PSComposite both consume the
+// band/atlas receive now, and shared shadow code lives in this
+// prelude by convention (SunShadowFactorSelf above). Guarded so the
+// effect unit - whose depthTex owns register t1 - never sees the
+// atlas declaration: only the static and composite compiles pass
+// KH_RECEIVE_TEX.
+#ifdef KH_RECEIVE_TEX
+// The engine's shadow atlas (the depth texture its cascade passes render
+// into), sampled with the engine's OWN per-cascade world->atlasUV+depth
+// transforms harvested from its constant uploads - so this compare is the
+// same one the engine performs for its own geometry.
+Texture2D<float> shadowAtlas : register(t1);
+Texture2D<float> shadowBand0 : register(t4);
+Texture2D<float> shadowBand1 : register(t5);
+Texture2D<float> shadowBand2 : register(t6);
+Texture2D<float> shadowBand3 : register(t7);
+Texture2D<float> shadowBand4 : register(t8);
+Texture2D<float> shadowBand5 : register(t9);
+Texture2D<float> shadowBand6 : register(t12);   // slots 6-7; t10 is free
+Texture2D<float> shadowBand7 : register(t13);   // (convergence retired)
+
+// rel: CAMERA-RELATIVE position (wpos - fxParams0.xyz). The engine renders
+// camera-relative for float precision, and its shadow sampling transforms
+// consume that same space - evaluated at absolute world coordinates they
+// produce UVs off by tens of atlas widths (which is exactly how this was
+// diagnosed: at the camera the transform yields its own translation, dead
+// center in a tile).
+// Core sample: which cascade contains this camera-relative point, and is
+// it occluded there. cascade -1 = no cascade contains the point.
+void ShadowMapSample(float3 rel, out int cascade, out float occluded)
+{
+    cascade = -1;
+    occluded = 0.0f;
+    int n = (int)shadowMeta.x;
+    if (n <= 0) return;
+
+    for (int c = 0; c < n; ++c) {
+        float4 r0 = shadowMats[c * 3 + 0];
+        float4 r1 = shadowMats[c * 3 + 1];
+        float4 r2 = shadowMats[c * 3 + 2];
+        float u = dot(r0.xyz, rel) + r0.w;
+        float v = dot(r1.xyz, rel) + r1.w;
+        float z = dot(r2.xyz, rel) + r2.w;
+
+        float4 t = shadowTiles[c];
+        // Tiles are sorted finest-first; the first cascade whose tile and
+        // depth range contain the point decides.
+        if (u < t.x || u > t.z || v < t.y || v > t.w) continue;
+        if (z <= 0.001f || z >= 0.999f) continue;
+
+        // TILE-INTERIOR CLAMP (the circle-with-dot artifact): the atlas
+        // holds more than sun cascades - round proxy-blob tiles among
+        // them - and taps near the cascade tile's border read across
+        // into neighbors. Every tap stays one texel inside the rect.
+        // 2x2 BILINEAR PCF (the 'slightly smoothed' checklist row): four
+        // compares blended by the sample's subtexel position replace the
+        // hard one-texel step - the stipple at grazing incidence softens
+        // into the same ~1-texel ramp the self term uses.
+        float px1 = 1.0f / shadowMeta.w;
+        float2 uv = clamp(float2(u, v), t.xy + px1, t.zw - px1);
+        float2 fpx = uv * shadowMeta.w - 0.5f;
+        int2 p0 = int2(floor(fpx));
+        float2 fr = frac(fpx);
+        float d00 = shadowAtlas.Load(int3(p0, 0));
+        float d10 = shadowAtlas.Load(int3(p0 + int2(1, 0), 0));
+        float d01 = shadowAtlas.Load(int3(p0 + int2(0, 1), 0));
+        float d11 = shadowAtlas.Load(int3(p0 + int2(1, 1), 0));
+        float o00 = ((z - d00) * shadowMeta.y > shadowMeta.z) ? 1.0f : 0.0f;
+        float o10 = ((z - d10) * shadowMeta.y > shadowMeta.z) ? 1.0f : 0.0f;
+        float o01 = ((z - d01) * shadowMeta.y > shadowMeta.z) ? 1.0f : 0.0f;
+        float o11 = ((z - d11) * shadowMeta.y > shadowMeta.z) ? 1.0f : 0.0f;
+        cascade = c;
+        occluded = lerp(lerp(o00, o10, fr.x), lerp(o01, o11, fr.x), fr.y);
+        return;
+    }
+}
+
+float ShadowMapFactor(float3 rel)
+{
+    int cascade;
+    float occluded;
+    ShadowMapSample(rel, cascade, occluded);
+    return 1.0f - occluded * saturate(lighting2.w);
+}
+
+// The engine's receiver contract, replicated verbatim from its resolve
+// shader: view-space position, band selection by view depth against
+// PSC_ShadowmapLayerBorder, PSC_ShadowmapMatrix as three dot products
+// with w = 1, comparison against stored depth. Each band's view matrix
+// was frozen WITH its matrix and content, so rotation is exact.
+float BandLoad(int t, int2 px)
+{
+    return (t == 0) ? shadowBand0.Load(int3(px, 0))
+         : (t == 1) ? shadowBand1.Load(int3(px, 0))
+         : (t == 2) ? shadowBand2.Load(int3(px, 0))
+         : (t == 3) ? shadowBand3.Load(int3(px, 0))
+         : (t == 4) ? shadowBand4.Load(int3(px, 0))
+         : (t == 5) ? shadowBand5.Load(int3(px, 0))
+         : (t == 6) ? shadowBand6.Load(int3(px, 0))
+                    : shadowBand7.Load(int3(px, 0));
+}
+
+// BILINEAR COMPARE per tap - the engine's sample_c equivalent (the
+// quality verdict from the path tint: the band path owns 100% of the
+// shading, and its POINT taps printed the shadow map's dithered foliage
+// raw - the stipple, and each dither cluster as a circle-with-dot. A
+)HLSL" R"HLSL(// 2x2 weighted compare resolves every dither cell to its smooth
+// coverage fraction, exactly like the engine's 16-tap sample_c tier).
+float BandCmpBilin(int t, float2 pos, float z)
+{
+    // ZERO shader-side bias, per PS-17: the engine's sample_c compares
+    // the projected depth RAW - its bias is baked into the shadow-map
+    // RENDER (slope-scaled at rasterization), and these seals are
+    // copies of that same pre-biased content. The shadowMeta.z bias on
+    // top was DOUBLE-biasing: washed contact shadows, lightened thin
+    // occluders. (shadowMeta.z remains in the LIVE-atlas path, whose
+    // transforms are harvested rather than engine-published and need
+    // the registration slack.)
+    float2 f = pos - 0.5f;
+    int2 p0 = int2(floor(f));
+    float2 fr = frac(f);
+    float b00 = ((z - BandLoad(t, p0)) * shadowMeta.y > 0.0f) ? 1.0f : 0.0f;
+    float b10 = ((z - BandLoad(t, p0 + int2(1, 0))) * shadowMeta.y > 0.0f) ? 1.0f : 0.0f;
+    float b01 = ((z - BandLoad(t, p0 + int2(0, 1))) * shadowMeta.y > 0.0f) ? 1.0f : 0.0f;
+    float b11 = ((z - BandLoad(t, p0 + int2(1, 1))) * shadowMeta.y > 0.0f) ? 1.0f : 0.0f;
+    return lerp(lerp(b00, b10, fr.x), lerp(b01, b11, fr.x), fr.y);
+}
+
+float ShadowBandFactor(float3 wpos)
+{
+    // Straight-line evaluation (no [unroll]/continue/break: X4575 in
+    // this unit). Slots arrive finest-first; the first containing band
+    // wins; bandBorder.w-1 names the physical texture.
+    float4 p = float4(wpos, 1.0f);
+    float occ = -1.0f;
+    int done = 0;
+
+    for (int s = 0; s < 8; ++s) {
+        if (done != 0) break;
+        if (bandBorder[s].w < 0.5f) { done = 0; }
+        else {
+            float vz = dot(p, bandView[s * 3 + 2]);
+
+            if (vz >= bandBorder[s].x && vz < bandBorder[s].y) {
+                float4 vp4 = float4(dot(p, bandView[s * 3 + 0]), dot(p, bandView[s * 3 + 1]), vz, 1.0f);
+                float u = dot(vp4, bandMat[s * 3 + 0]);
+                float v = dot(vp4, bandMat[s * 3 + 1]);
+                float z = dot(vp4, bandMat[s * 3 + 2]);
+
+                if (u > 0.001f && u < 0.999f && v > 0.001f && v < 0.999f && z > 0.001f && z < 0.999f) {
+                    int t = (int)(bandBorder[s].w + 0.5f) - 1;   // w = 1 + texIndex
+                    // Rotated-poisson PCF, the engine's own recipe: a
+                    // per-pixel random disk rotation turns fixed-offset
+                    // banding into fine noise. Hash from WORLD position so
+                    // the pattern doesn't swim with the camera.
+                    // PS-17 VERBATIM, the full recipe (the 8-tap set was
+                    // a SUBSET of the engine's own table - offsets 1-7
+                    // plus 16): sixteen poisson offsets, adaptive
+                    // early-out after four (the extra twelve run only in
+                    // the indecisive penumbra - exactly where the
+                    // dithered foliage lives), bilinear compare per tap
+                    // (sample_c equivalent), per-pixel disk rotation.
+                    float ang = frac(sin(dot(wpos.xz, float2(12.9898f, 78.233f))) * 43758.5469f) * 6.2831853f;
+                    float ca = cos(ang);
+                    float sa = sin(ang);
+                    // ENGINE-EXACT RADIUS (PS-17 disassembly closes the
+                    // last named deviation): 'mul r0.y, l(1.3), cb0[6].y'
+                    // where cb0 = PSCB_NonFrequent and register 6 is
+                    // PSC_SBTSize_invSBTSize - the engine's radius is
+                    // 1.3 x invSBTSize in UV, i.e. 1.3 TEXELS of the very
+                    // atlas these seals copy. This loop works in texel
+                    // space against the same atlas size, so the constant
+                    // transfers directly; the former 3.0 was a by-eye tune
+                    // from before the constant was decoded.
+                    float r = 1.3f;
+                    float2 base = float2(u, v) * shadowMeta.w;
+                    float acc = 0.0f;
+
+                    for (int k = 0; k < 4; ++k) {
+                        float2 d0 =
+                            (k == 0) ? float2( 0.974844f, 0.756484f)
+                          : (k == 1) ? float2(-0.814100f, 0.914376f)
+                          : (k == 2) ? float2( 0.945586f,-0.768907f)
+                                     : float2(-0.815442f,-0.879125f);
+                        float2 off = float2(d0.x * ca - d0.y * sa, d0.x * sa + d0.y * ca);
+                        acc += BandCmpBilin(t, base + off * r, z);
+                    }
+
+                    if (acc >= 3.999f || acc <= 0.001f) {
+                        occ = acc >= 3.999f ? 1.0f : 0.0f;   // decisive: engine's early-out
+                    } else {
+                        for (int k2 = 0; k2 < 12; ++k2) {
+                            float2 d0 =
+                                (k2 ==  0) ? float2( 0.443233f,-0.975116f)
+                              : (k2 ==  1) ? float2(-0.241888f, 0.997065f)
+                              : (k2 ==  2) ? float2(-0.915886f, 0.457714f)
+                              : (k2 ==  3) ? float2(-0.942016f,-0.399062f)
+                              : (k2 ==  4) ? float2(-0.094184f,-0.929389f)
+                              : (k2 ==  5) ? float2( 0.791975f, 0.190902f)
+                              : (k2 ==  6) ? float2( 0.199841f, 0.786414f)
+                              : (k2 ==  7) ? float2( 0.537430f,-0.473734f)
+                              : (k2 ==  8) ? float2(-0.264969f,-0.418930f)
+                              : (k2 ==  9) ? float2(-0.382775f, 0.276768f)
+                              : (k2 == 10) ? float2( 0.344959f, 0.293878f)
+                                           : float2( 0.143832f,-0.141008f);
+                            float2 off = float2(d0.x * ca - d0.y * sa, d0.x * sa + d0.y * ca);
+                            acc += BandCmpBilin(t, base + off * r, z);
+                        }
+
+                        occ = acc * 0.0625f;   // /16, the engine's own weight
+                    }
+
+                    done = 1;
+                }
+            }
+        }
+    }
+
+    if (occ < 0.0f) return 1.0f;   // no band covers this depth: lit
+    return 1.0f - occ * saturate(lighting2.w);
+}
+#endif
+
 )HLSL";
 
 // Static entry points (no depth access): compiled once
@@ -1651,11 +1879,24 @@ float4 PSMain(VSOut i) : SV_Target
     // ignore alpha), so they fade toward their respective neutral element
     // instead: black for MAX, a large value for MIN - both leave the
     // scene untouched.
-    // Self/cast term from the private sun-depth map: this path has no
-    // atlas access, but the sun map is ours and path-agnostic. N.L
-    // early-out: no direct term, no shadow samples.
-    float smf = (lighting0.x >= 0.5f && dot(i.nrm, lighting1.xyz) > 0.01f)
-              ? SunShadowFactorSelf(i.wpos, i.nrm) : 1.0f;
+    // WORLD RECEIVE (the translucent-receive fix): the composite path's
+    // recipe verbatim - band-sealed receive while the stream commit is
+    // live, live-atlas fallback otherwise, MIN-combined with the private
+    // sun-map self term. This path historically sampled only the self
+    // term ('no atlas access'); the pass now binds the bands and the
+    // atlas (see the flush bind ledger), and the frame CB has carried
+    // the tables since the split - flush-drawn meshes finally sit IN
+    // the world's shadows instead of floating above them. Unlit meshes
+    // and grazing N.L skip all shadow work, as on the composite path;
+    // cold frames degrade exactly as the composite does (empty band
+    // borders fall through, shadowMeta.x = 0 short-circuits the map).
+    float smf = 1.0f;
+
+    if (lighting0.x >= 0.5f && dot(i.nrm, lighting1.xyz) > 0.01f) {
+        if (maskMeta.x >= 0.5f) smf = ShadowBandFactor(i.wpos);
+        else                    smf = ShadowMapFactor(i.wpos - shadowMeta2.yzw);
+        smf = min(smf, SunShadowFactorSelf(i.wpos, i.nrm));
+    }
     float3 lc = ApplyLighting(color.rgb, i.wpos, i.nrm, smf);
 
     // DEBUG VISUAL, term isolation (modes 5-7, setRenderDebug; see the
@@ -1738,15 +1979,26 @@ float4 PSMain(VSOut i) : SV_Target
     // frame (LESS_EQUAL depth admits the identical geometry). Field:
     // 'nothing changed' with every transit input verified good.
     if (blendCtl.x >= 0.5f) {
-        // BACKGROUND TRUST: see PSComposite's note - same rule, this
-        // path's own scene distance.
-        int2 kpx = clamp(int2(i.pos.xy), int2(0, 0), int2((int)fxMeta.z - 1, (int)fxMeta.w - 1));
-        float kscene = KhSceneMeters(KhSceneLoad(kpx));
-        float khb_a = (kscene > blendCtl.y) ? 1.0f : a;
+        // BACKGROUND TRUST: RETIRED ON THIS PATH (the distant-tint fix).
+        // The rule guards the INJECTION's packing, where the mid-frame
+        // capture lacks later partitions and sky - but THIS path runs
+        // POST-SCENE: its capture is the COMPLETE frame (the whole
+        // reason round 9 defers translucents here), so trust spans
+        // everything - the composite ledger's own retirement condition,
+        // already true on the flush. The copied rule was worse than
+        // unnecessary here: this path's t0 is the MID-FRAME depth
+        // snapshot, whose far/sky pixels decode beyond the trust range
+        // even though the COLOR capture holds them perfectly - so
+        // everything past the range seen THROUGH a translucent painted
+        // honest-opaque mesh color (the field report: distant objects,
+        // terrain and sky fully tinted beyond ~300 m). Full
+        // transparency returns with no rework, exactly as that ledger
+        // predicted. PSComposite's rule stands untouched - mid-frame is
+        // still mid-frame there.
         float3 scn = sceneColorTex.Load(int3(int2(i.pos.xy), 0)).rgb;
         float3 ts = scn / (1.0f + scn);
         float3 tl = lc / (1.0f + lc);
-        float3 tm = lerp(ts, tl, khb_a);
+        float3 tm = lerp(ts, tl, a);
         return float4(tm / max(1.0f - tm, 0.0039f), 1.0f);   // cap ~HDR 255
     }
 
@@ -1806,221 +2058,6 @@ float GuardSceneRaw(int2 px)
 // resolves MSAA) - the perceptual-composite blend source. Bound at t3
 // only on frames that need it; see the PSComposite packing note.
 Texture2D<float4> sceneColorTex : register(t3);
-
-// The engine's shadow atlas (the depth texture its cascade passes render
-// into), sampled with the engine's OWN per-cascade world->atlasUV+depth
-// transforms harvested from its constant uploads - so this compare is the
-// same one the engine performs for its own geometry.
-Texture2D<float> shadowAtlas : register(t1);
-Texture2D<float> shadowBand0 : register(t4);
-Texture2D<float> shadowBand1 : register(t5);
-Texture2D<float> shadowBand2 : register(t6);
-Texture2D<float> shadowBand3 : register(t7);
-Texture2D<float> shadowBand4 : register(t8);
-Texture2D<float> shadowBand5 : register(t9);
-Texture2D<float> shadowBand6 : register(t12);   // slots 6-7; t10 is free
-Texture2D<float> shadowBand7 : register(t13);   // (convergence retired)
-
-// rel: CAMERA-RELATIVE position (wpos - fxParams0.xyz). The engine renders
-// camera-relative for float precision, and its shadow sampling transforms
-// consume that same space - evaluated at absolute world coordinates they
-// produce UVs off by tens of atlas widths (which is exactly how this was
-// diagnosed: at the camera the transform yields its own translation, dead
-// center in a tile).
-// Core sample: which cascade contains this camera-relative point, and is
-// it occluded there. cascade -1 = no cascade contains the point.
-void ShadowMapSample(float3 rel, out int cascade, out float occluded)
-{
-    cascade = -1;
-    occluded = 0.0f;
-    int n = (int)shadowMeta.x;
-    if (n <= 0) return;
-
-    for (int c = 0; c < n; ++c) {
-        float4 r0 = shadowMats[c * 3 + 0];
-        float4 r1 = shadowMats[c * 3 + 1];
-        float4 r2 = shadowMats[c * 3 + 2];
-        float u = dot(r0.xyz, rel) + r0.w;
-        float v = dot(r1.xyz, rel) + r1.w;
-        float z = dot(r2.xyz, rel) + r2.w;
-
-        float4 t = shadowTiles[c];
-        // Tiles are sorted finest-first; the first cascade whose tile and
-        // depth range contain the point decides.
-        if (u < t.x || u > t.z || v < t.y || v > t.w) continue;
-        if (z <= 0.001f || z >= 0.999f) continue;
-
-        // TILE-INTERIOR CLAMP (the circle-with-dot artifact): the atlas
-        // holds more than sun cascades - round proxy-blob tiles among
-        // them - and taps near the cascade tile's border read across
-        // into neighbors. Every tap stays one texel inside the rect.
-        // 2x2 BILINEAR PCF (the 'slightly smoothed' checklist row): four
-        // compares blended by the sample's subtexel position replace the
-        // hard one-texel step - the stipple at grazing incidence softens
-        // into the same ~1-texel ramp the self term uses.
-        float px1 = 1.0f / shadowMeta.w;
-        float2 uv = clamp(float2(u, v), t.xy + px1, t.zw - px1);
-        float2 fpx = uv * shadowMeta.w - 0.5f;
-        int2 p0 = int2(floor(fpx));
-        float2 fr = frac(fpx);
-        float d00 = shadowAtlas.Load(int3(p0, 0));
-        float d10 = shadowAtlas.Load(int3(p0 + int2(1, 0), 0));
-        float d01 = shadowAtlas.Load(int3(p0 + int2(0, 1), 0));
-        float d11 = shadowAtlas.Load(int3(p0 + int2(1, 1), 0));
-        float o00 = ((z - d00) * shadowMeta.y > shadowMeta.z) ? 1.0f : 0.0f;
-        float o10 = ((z - d10) * shadowMeta.y > shadowMeta.z) ? 1.0f : 0.0f;
-        float o01 = ((z - d01) * shadowMeta.y > shadowMeta.z) ? 1.0f : 0.0f;
-        float o11 = ((z - d11) * shadowMeta.y > shadowMeta.z) ? 1.0f : 0.0f;
-        cascade = c;
-        occluded = lerp(lerp(o00, o10, fr.x), lerp(o01, o11, fr.x), fr.y);
-        return;
-    }
-}
-
-float ShadowMapFactor(float3 rel)
-{
-    int cascade;
-    float occluded;
-    ShadowMapSample(rel, cascade, occluded);
-    return 1.0f - occluded * saturate(lighting2.w);
-}
-
-// The engine's receiver contract, replicated verbatim from its resolve
-// shader: view-space position, band selection by view depth against
-// PSC_ShadowmapLayerBorder, PSC_ShadowmapMatrix as three dot products
-// with w = 1, comparison against stored depth. Each band's view matrix
-// was frozen WITH its matrix and content, so rotation is exact.
-float BandLoad(int t, int2 px)
-{
-    return (t == 0) ? shadowBand0.Load(int3(px, 0))
-         : (t == 1) ? shadowBand1.Load(int3(px, 0))
-         : (t == 2) ? shadowBand2.Load(int3(px, 0))
-         : (t == 3) ? shadowBand3.Load(int3(px, 0))
-         : (t == 4) ? shadowBand4.Load(int3(px, 0))
-         : (t == 5) ? shadowBand5.Load(int3(px, 0))
-         : (t == 6) ? shadowBand6.Load(int3(px, 0))
-                    : shadowBand7.Load(int3(px, 0));
-}
-
-// BILINEAR COMPARE per tap - the engine's sample_c equivalent (the
-// quality verdict from the path tint: the band path owns 100% of the
-// shading, and its POINT taps printed the shadow map's dithered foliage
-// raw - the stipple, and each dither cluster as a circle-with-dot. A
-)HLSL" R"HLSL(// 2x2 weighted compare resolves every dither cell to its smooth
-// coverage fraction, exactly like the engine's 16-tap sample_c tier).
-float BandCmpBilin(int t, float2 pos, float z)
-{
-    // ZERO shader-side bias, per PS-17: the engine's sample_c compares
-    // the projected depth RAW - its bias is baked into the shadow-map
-    // RENDER (slope-scaled at rasterization), and these seals are
-    // copies of that same pre-biased content. The shadowMeta.z bias on
-    // top was DOUBLE-biasing: washed contact shadows, lightened thin
-    // occluders. (shadowMeta.z remains in the LIVE-atlas path, whose
-    // transforms are harvested rather than engine-published and need
-    // the registration slack.)
-    float2 f = pos - 0.5f;
-    int2 p0 = int2(floor(f));
-    float2 fr = frac(f);
-    float b00 = ((z - BandLoad(t, p0)) * shadowMeta.y > 0.0f) ? 1.0f : 0.0f;
-    float b10 = ((z - BandLoad(t, p0 + int2(1, 0))) * shadowMeta.y > 0.0f) ? 1.0f : 0.0f;
-    float b01 = ((z - BandLoad(t, p0 + int2(0, 1))) * shadowMeta.y > 0.0f) ? 1.0f : 0.0f;
-    float b11 = ((z - BandLoad(t, p0 + int2(1, 1))) * shadowMeta.y > 0.0f) ? 1.0f : 0.0f;
-    return lerp(lerp(b00, b10, fr.x), lerp(b01, b11, fr.x), fr.y);
-}
-
-float ShadowBandFactor(float3 wpos)
-{
-    // Straight-line evaluation (no [unroll]/continue/break: X4575 in
-    // this unit). Slots arrive finest-first; the first containing band
-    // wins; bandBorder.w-1 names the physical texture.
-    float4 p = float4(wpos, 1.0f);
-    float occ = -1.0f;
-    int done = 0;
-
-    for (int s = 0; s < 8; ++s) {
-        if (done != 0) break;
-        if (bandBorder[s].w < 0.5f) { done = 0; }
-        else {
-            float vz = dot(p, bandView[s * 3 + 2]);
-
-            if (vz >= bandBorder[s].x && vz < bandBorder[s].y) {
-                float4 vp4 = float4(dot(p, bandView[s * 3 + 0]), dot(p, bandView[s * 3 + 1]), vz, 1.0f);
-                float u = dot(vp4, bandMat[s * 3 + 0]);
-                float v = dot(vp4, bandMat[s * 3 + 1]);
-                float z = dot(vp4, bandMat[s * 3 + 2]);
-
-                if (u > 0.001f && u < 0.999f && v > 0.001f && v < 0.999f && z > 0.001f && z < 0.999f) {
-                    int t = (int)(bandBorder[s].w + 0.5f) - 1;   // w = 1 + texIndex
-                    // Rotated-poisson PCF, the engine's own recipe: a
-                    // per-pixel random disk rotation turns fixed-offset
-                    // banding into fine noise. Hash from WORLD position so
-                    // the pattern doesn't swim with the camera.
-                    // PS-17 VERBATIM, the full recipe (the 8-tap set was
-                    // a SUBSET of the engine's own table - offsets 1-7
-                    // plus 16): sixteen poisson offsets, adaptive
-                    // early-out after four (the extra twelve run only in
-                    // the indecisive penumbra - exactly where the
-                    // dithered foliage lives), bilinear compare per tap
-                    // (sample_c equivalent), per-pixel disk rotation.
-                    float ang = frac(sin(dot(wpos.xz, float2(12.9898f, 78.233f))) * 43758.5469f) * 6.2831853f;
-                    float ca = cos(ang);
-                    float sa = sin(ang);
-                    // ENGINE-EXACT RADIUS (PS-17 disassembly closes the
-                    // last named deviation): 'mul r0.y, l(1.3), cb0[6].y'
-                    // where cb0 = PSCB_NonFrequent and register 6 is
-                    // PSC_SBTSize_invSBTSize - the engine's radius is
-                    // 1.3 x invSBTSize in UV, i.e. 1.3 TEXELS of the very
-                    // atlas these seals copy. This loop works in texel
-                    // space against the same atlas size, so the constant
-                    // transfers directly; the former 3.0 was a by-eye tune
-                    // from before the constant was decoded.
-                    float r = 1.3f;
-                    float2 base = float2(u, v) * shadowMeta.w;
-                    float acc = 0.0f;
-
-                    for (int k = 0; k < 4; ++k) {
-                        float2 d0 =
-                            (k == 0) ? float2( 0.974844f, 0.756484f)
-                          : (k == 1) ? float2(-0.814100f, 0.914376f)
-                          : (k == 2) ? float2( 0.945586f,-0.768907f)
-                                     : float2(-0.815442f,-0.879125f);
-                        float2 off = float2(d0.x * ca - d0.y * sa, d0.x * sa + d0.y * ca);
-                        acc += BandCmpBilin(t, base + off * r, z);
-                    }
-
-                    if (acc >= 3.999f || acc <= 0.001f) {
-                        occ = acc >= 3.999f ? 1.0f : 0.0f;   // decisive: engine's early-out
-                    } else {
-                        for (int k2 = 0; k2 < 12; ++k2) {
-                            float2 d0 =
-                                (k2 ==  0) ? float2( 0.443233f,-0.975116f)
-                              : (k2 ==  1) ? float2(-0.241888f, 0.997065f)
-                              : (k2 ==  2) ? float2(-0.915886f, 0.457714f)
-                              : (k2 ==  3) ? float2(-0.942016f,-0.399062f)
-                              : (k2 ==  4) ? float2(-0.094184f,-0.929389f)
-                              : (k2 ==  5) ? float2( 0.791975f, 0.190902f)
-                              : (k2 ==  6) ? float2( 0.199841f, 0.786414f)
-                              : (k2 ==  7) ? float2( 0.537430f,-0.473734f)
-                              : (k2 ==  8) ? float2(-0.264969f,-0.418930f)
-                              : (k2 ==  9) ? float2(-0.382775f, 0.276768f)
-                              : (k2 == 10) ? float2( 0.344959f, 0.293878f)
-                                           : float2( 0.143832f,-0.141008f);
-                            float2 off = float2(d0.x * ca - d0.y * sa, d0.x * sa + d0.y * ca);
-                            acc += BandCmpBilin(t, base + off * r, z);
-                        }
-
-                        occ = acc * 0.0625f;   // /16, the engine's own weight
-                    }
-
-                    done = 1;
-                }
-            }
-        }
-    }
-
-    if (occ < 0.0f) return 1.0f;   // no band covers this depth: lit
-    return 1.0f - occ * saturate(lighting2.w);
-}
 
 )HLSL";
 
@@ -2474,23 +2511,30 @@ float4 PSEffect(VSOut i) : SV_Target
     // LOD fight the injected path settled, plus cross-window parity,
     // whose error SIGN flips with the defender's window: objects punch
     // through the volume from outside, the volume covers nearer
-    // objects from inside. When armed (local1.z carries the wide guard
-    // base), the hardware test is OFF and occlusion is decided here:
+    // objects from inside. When armed (localParams1.z carries the wide
+    // guard base), the hardware test is OFF and occlusion is decided here:
     // objects by the snapshot guard, terrain burial by the thm
     // endpoint (the ray march needs the camera, which this path's CB
     // cannot spare - the snapshot guard covers behind-the-ridge at
     // the margin instead).
-    if (local1.z >= 0.5f) {
+    // (Identifier fix: this block shipped with the C++ struct's field
+    // names - local0/local1 - which no HLSL unit declares; the cbuffer
+    // names are localParams0/localParams1. It never compiled: the effect
+    // shader builds LAZILY and no effect mesh had spawned since the arb
+    // round landed, so the X3004 surfaced only when the perceptual path
+    // first requested the chain. C++ fills cbd.local0/local1, which map
+    // to these slots - the data was always correct, only the names.)
+    if (localParams1.z >= 0.5f) {
         int2 khaPx = clamp(int2(i.pos.xy), int2(0, 0),
                            int2((int)fxMeta.z - 1, (int)fxMeta.w - 1));
         float khaRaw = khArbSnap.Load(int3(khaPx, 0));
 
         if (khaRaw > 0.000001f && khaRaw < 0.999999f) {
-            float khaNdc = (khaRaw - local0.z) / max(local0.w - local0.z, 1e-6f);
-            float khaDen = khaNdc - local0.x;
-            float khaScene = (khaDen > -1e-7f) ? 1.0e9f : local0.y / khaDen;
+            float khaNdc = (khaRaw - localParams0.z) / max(localParams0.w - localParams0.z, 1e-6f);
+            float khaDen = khaNdc - localParams0.x;
+            float khaScene = (khaDen > -1e-7f) ? 1.0e9f : localParams0.y / khaDen;
             if (khaScene <= 0.0f) khaScene = 1.0e9f;
-            if (i.pos.w > khaScene * (1.0f + local1.w) + local1.z) discard;
+            if (i.pos.w > khaScene * (1.0f + localParams1.w) + localParams1.z) discard;
         }
 
         if (thmParams.w >= 0.5f) {
@@ -3158,16 +3202,23 @@ inline std::string ensure_resources(ID3D11Device* dev) {
 
     // Shared cbuffer declaration is prepended to every compilation unit
     const std::string static_src = std::string(g_cb_hlsl) + g_hlsl_static;
-    std::string err = compile_shader(static_src.c_str(), "VSMain", "vs_5_0", nullptr, &vs_blob);
+    // The shared receive block (band/atlas textures + samplers-free
+    // compare functions) arms for this unit: PSMain consumes it since
+    // the translucent-receive fix. The effect unit compiles WITHOUT it
+    // (its depthTex owns t1).
+    static const D3D_SHADER_MACRO khcb_rx_defines[] = {
+        { "KH_RECEIVE_TEX", "1" }, { nullptr, nullptr },
+    };
+    std::string err = compile_shader(static_src.c_str(), "VSMain", "vs_5_0", khcb_rx_defines, &vs_blob);
     if (!err.empty()) return err;
-    err = compile_shader(static_src.c_str(), "VSFullscreen", "vs_5_0", nullptr, &vs_fs_blob);
+    err = compile_shader(static_src.c_str(), "VSFullscreen", "vs_5_0", khcb_rx_defines, &vs_fs_blob);
     if (!err.empty()) { vs_blob->Release(); return err; }
-    err = compile_shader(static_src.c_str(), "PSMain", "ps_5_0", nullptr, &ps_blob);
+    err = compile_shader(static_src.c_str(), "PSMain", "ps_5_0", khcb_rx_defines, &ps_blob);
     if (!err.empty()) { vs_blob->Release(); vs_fs_blob->Release(); return err; }
 
     {   // analytic mask cast PS: non-fatal
         ID3DBlob* mc_blob = nullptr;
-        const std::string mc_err = compile_shader(static_src.c_str(), "PSMaskCast", "ps_5_0", nullptr, &mc_blob);
+        const std::string mc_err = compile_shader(static_src.c_str(), "PSMaskCast", "ps_5_0", khcb_rx_defines, &mc_blob);
 
         if (mc_err.empty() && mc_blob) {
             dev->CreatePixelShader(mc_blob->GetBufferPointer(), mc_blob->GetBufferSize(), nullptr, &g_res.ps_maskcast);
@@ -3179,7 +3230,7 @@ inline std::string ensure_resources(ID3D11Device* dev) {
 
     {   // instanced sun-depth VS + layout: non-fatal (per-caster loop covers)
         ID3DBlob* sd_blob = nullptr;
-        const std::string sd_err = compile_shader(static_src.c_str(), "VSSunDepth", "vs_5_0", nullptr, &sd_blob);
+        const std::string sd_err = compile_shader(static_src.c_str(), "VSSunDepth", "vs_5_0", khcb_rx_defines, &sd_blob);
 
         if (sd_err.empty() && sd_blob) {
             if (SUCCEEDED(dev->CreateVertexShader(sd_blob->GetBufferPointer(), sd_blob->GetBufferSize(), nullptr, &g_res.vs_sundepth))) {
@@ -3389,6 +3440,12 @@ inline std::string ensure_resources(ID3D11Device* dev) {
         rd.CullMode = D3D11_CULL_BACK;
         hr = dev->CreateRasterizerState(&rd, &g_res.rasterizer_cull);
         if (FAILED(hr)) { g_res.release(); return "Create cull rasterizer " + hr_str(hr); }
+        // Front-culling twin (identical biases): pass 1 of the two-sided-
+        // translucent ordered draw - back faces first, front faces second
+        // (see the flush draw ledger).
+        rd.CullMode = D3D11_CULL_FRONT;
+        hr = dev->CreateRasterizerState(&rd, &g_res.rasterizer_front);
+        if (FAILED(hr)) { g_res.release(); return "Create front rasterizer " + hr_str(hr); }
         // Sun-depth pass rasterizer: the scene bias above exists to win
         // marginal ties against ENGINE depth; in our own private map it
         // would only carve the acne band deeper. Plain CullNone - and it
@@ -3671,12 +3728,14 @@ inline std::string ensure_composite_shader(ID3D11Device* dev) {
         { "MSAA_DEPTH", g_res.comp_depth_samples > 1 ? "1" : "0" },
         { "SAMPLE_COUNT", sc.c_str() },
         { "KH_ARB_DEPTH", "0" },
+        { "KH_RECEIVE_TEX", "1" },
         { nullptr, nullptr },
     };
     const D3D_SHADER_MACRO defines_arb[] = {
         { "MSAA_DEPTH", g_res.comp_depth_samples > 1 ? "1" : "0" },
         { "SAMPLE_COUNT", sc.c_str() },
         { "KH_ARB_DEPTH", "1" },
+        { "KH_RECEIVE_TEX", "1" },
         { nullptr, nullptr },
     };
 
@@ -12961,7 +13020,41 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     // The path is alive even when the eligible set is momentarily empty -
     // stamping here keeps the flush from flapping over.
     g_composite_last_inject_ms.store(steady_now_ms(), std::memory_order_relaxed);
-    if (meshes.empty()) return;
+    // CASTER-ONLY PASS (the translucent-first cold fix): since the
+    // ownership fix, translucents never stage for COLOR - but they still
+    // CAST (the sun-depth caster census reads the draw list directly,
+    // which is why they cast fine once the machinery is warm). The old
+    // empty-return made the ENTIRE pass - sun map, cast staging, the
+    // cold sequence - contingent on an opaque being staged: a
+    // translucent-first session had no shadows anywhere until the first
+    // opaque spawned and 'triggered' the machinery (the field report,
+    // verbatim). v1 of this fix exited right after the sun map - and
+    // the field log showed the WHOLE observation ecosystem still dead
+    // (frameViewHits 0, locMaxCbFloats 48, locator stale, fog staged
+    // white): the view harvest, the locator scans, dynlights and the
+    // camera reference are all SERVICED FROM THIS PASS's later spans -
+    // the injection window is the one proven-safe place for those
+    // foreign reads. The pass therefore now runs IN FULL whenever the
+    // draw list holds any visible shadow-capable solid; the color loop
+    // simply iterates an empty list, and the inject serial below is
+    // gated on an actual color landing, keeping the hybrid guarantee's
+    // 'an injection actually LANDED' semantics untouched.
+    if (meshes.empty()) {
+        bool khc_any_caster = false;
+        std::lock_guard<std::mutex> g(g_draw_list_mutex);
+
+        for (const auto& khc_kv : g_draw_list) {
+            const RenderObject& khc_o = khc_kv.second;
+
+            if (khc_o.visible && !khc_o.fullscreen && khc_o.effect == 0 &&
+                khc_o.mode != DepthMode::Off) {
+                khc_any_caster = true;
+                break;
+            }
+        }
+
+        if (!khc_any_caster) return;
+    }
     ID3D11Device* dev = RVExtBridge::get_d3d_device();
     if (!dev) { g_stats.composite_skips++; return; }
     if (!ensure_resources(dev).empty()) { g_stats.composite_skips++; return; }
@@ -14011,8 +14104,19 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         // side IS its content).
         const bool khr_cam_outside = mesh_id_clamp(o.mesh) == 0 &&
                                      kh_mesh_dist_sq(o, cam) > 9.0f;
+        // TWO-SIDED TRANSLUCENT ORDERING (flush-loop twin; full ledger
+        // there): the injection paints the SAME geometry as the flush,
+        // and a normal-blend translucent's faces are order-dependent
+        // here too - so the injected path must match the flush's ordered
+        // two-pass or the inner face reappears on injected frames. Any
+        // shader kind (scene-read effect 2 included: it alpha-lerps on
+        // normal blend just like PSMain).
+        const bool khr_ts_ordered = o.two_sided &&
+                                    o.blend_mode == 0 && o.color[3] < 0.999f &&
+                                    g_res.rasterizer_front != nullptr;
         ID3D11RasterizerState* khr_want_rs =
-            (o.two_sided && !khr_cam_outside) ? g_res.rasterizer : g_res.rasterizer_cull;
+            khr_ts_ordered                     ? g_res.rasterizer_front :
+            (o.two_sided && !khr_cam_outside)  ? g_res.rasterizer : g_res.rasterizer_cull;
 
         if (khr_want_rs != khr_bound_rs) {
             ctx->RSSetState(khr_want_rs);
@@ -14033,6 +14137,13 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
 
         ctx->Draw(mesh_vertex_count(mid), 0);
         g_stats.composite_meshes++;
+
+        if (khr_ts_ordered) {   // pass 2: front faces over the interior
+            ctx->RSSetState(g_res.rasterizer_cull);
+            khr_bound_rs = g_res.rasterizer_cull;
+            ctx->Draw(mesh_vertex_count(mid), 0);
+            g_stats.composite_meshes++;
+        }
     }
 
     if (n_saved_vp > 0) ctx->RSSetViewports(n_saved_vp, saved_vp);
@@ -14058,7 +14169,9 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         } else {
             g_rescue_cap_stops++;
         }
-    } else {
+    } else if (!meshes.empty()) {
+        // Caster-only passes (empty color list) advance neither counter:
+        // the serial means 'a COLOR injection landed' to the flush.
         g_stats.composite_injections++;
         g_composite_inject_serial.fetch_add(1, std::memory_order_relaxed);
     }
@@ -15752,6 +15865,28 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     if (g_sun_map_valid && g_res.sun_srv) ctx->PSSetShaderResources(11, 1, &g_res.sun_srv);
     // Analytic terrain heightfield (t10, saved range) - the flush twin.
     if (g_thm_valid && g_res.thm_srv) ctx->PSSetShaderResources(10, 1, &g_res.thm_srv);
+    // WORLD-SHADOW RECEIVE, flush edition (the translucent-receive fix):
+    // PSMain has carried the full band/live receive code since round 7,
+    // but this pass never bound its textures - so every flush-drawn mesh
+    // (historically the rare miss-frame fallback; since the ownership
+    // fix, EVERY translucent) received only the private sun-map self
+    // term: lit translucents floated shadowless inside shadowed world.
+    // The frame CB already carries the band table, the live cascade
+    // table and the receive commit (the CB split moved all three to the
+    // pass frame build), so the textures were the only missing link.
+    // The bands are our own sealed copies (t4-t9, t12-t13; PSEffect's
+    // unit declares nothing there, so the pass-level bind is safe for
+    // both shader kinds). The engine is parked under the graphics lock,
+    // so reading the render thread's band/atlas state here follows the
+    // same contract as every other flush read of it. The atlas (t1)
+    // collides with the effect pair's depth slot and binds per-solid
+    // in the draw loop's swap instead.
+    for (UINT khf_bslot = 0; khf_bslot < 8; ++khf_bslot) {
+        if (g_ls.band[khf_bslot].valid && g_ls.band[khf_bslot].srv) {
+            const UINT khf_treg = khf_bslot < 6 ? 4 + khf_bslot : 12 + (khf_bslot - 6);   // t4-t9, t12-t13
+            ctx->PSSetShaderResources(khf_treg, 1, &g_ls.band[khf_bslot].srv);
+        }
+    }
     const FLOAT bf[4] = { 0, 0, 0, 0 };
     ctx->OMSetBlendState(g_res.blend_modes[0], bf, 0xFFFFFFFF);
     ctx->RSSetState(g_res.rasterizer);
@@ -16215,8 +16350,20 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         const int khf_srv_want = (o.effect == 0 && g_res.comp_depth_srv) ? 0 : 1;
 
         if (khf_srv_want != khf_srv_cat) {
-            if (khf_srv_want == 0) ctx->PSSetShaderResources(0, 1, &g_res.comp_depth_srv);
-            else                   ctx->PSSetShaderResources(0, 2, ps_srvs);
+            if (khf_srv_want == 0) {
+                ctx->PSSetShaderResources(0, 1, &g_res.comp_depth_srv);
+                // Live-atlas receive for the map fallback path (see the
+                // pass bind ledger): t1 is the effect pair's depth slot,
+                // so solids own it for the atlas and the effect branch
+                // rebinds the pair. Null when no atlas exists - the
+                // shader's shadowMeta.x = 0 short-circuit protects, and
+                // a stale depth SRV must never masquerade as the atlas.
+                ID3D11ShaderResourceView* khf_atlas =
+                    shadow_live_ensure_srv() ? g_ls.atlas_srv : nullptr;
+                ctx->PSSetShaderResources(1, 1, &khf_atlas);
+            } else {
+                ctx->PSSetShaderResources(0, 2, ps_srvs);
+            }
             khf_srv_cat = khf_srv_want;
         }
 
@@ -16256,7 +16403,34 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         // same geometry and must not reintroduce the interior face.
         const bool khf_cam_outside = mesh_id_clamp(o.mesh) == 0 &&
                                      kh_mesh_dist_sq(o, cam) > 9.0f;
+        // TWO-SIDED TRANSLUCENT ORDERING (the inconsistent-inner-face
+        // fix): a single CullNone draw blends both faces in TRIANGLE
+        // order, so whether the inner face reads through the outer
+        // depended on facing-vs-buffer order - visible at some angles,
+        // absent at others; and the round-8 outside cull (an OPAQUE
+        // self-stipple fix) removed the interior entirely from outside.
+        // For NORMAL-blend translucents the interior is the point, and
+        // normal blending is the one order-DEPENDENT mode (additive/
+        // lighten/darken commute and keep the single pass), so these
+        // draw as two ordered cull passes - back faces first, front
+        // faces over them - correct and stable at every angle, inside
+        // and out (from inside, the front-cull pass paints the interior
+        // walls and the back-cull pass has nothing camera-facing).
+        // Alpha is POST-envelope: a fading opaque adopts the ordered
+        // path as it crosses 0.999, seamlessly (opaque needs no order).
+        // Effect kind is IRRELEVANT to face ordering: a scene-read
+        // worldspace mesh (effect 2, the SQF 5th-arg 'true') returns
+        // float4(outc, color.a) on normal blend - hardware alpha-lerp
+        // against the framebuffer, exactly like PSMain's translucent -
+        // so its two faces have the identical order-dependence. The
+        // original effect==0 guard left it on the single CullNone draw:
+        // the same inner-face-at-some-angles report, now for scene-read
+        // meshes. The predicate is the BLEND, not the shader.
+        const bool khf_ts_ordered = o.two_sided &&
+                                    o.blend_mode == 0 && o.color[3] < 0.999f &&
+                                    g_res.rasterizer_front != nullptr;
         ID3D11RasterizerState* khr_want_rs =
+            khf_ts_ordered                    ? g_res.rasterizer_front :
             (o.two_sided && !khf_cam_outside) ? g_res.rasterizer : g_res.rasterizer_cull;
 
         if (khr_want_rs != khr_bound_rs) {
@@ -16272,6 +16446,12 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         }
 
         ctx->Draw(mesh_vertex_count(mid), 0);
+
+        if (khf_ts_ordered) {   // pass 2: front faces over the interior
+            ctx->RSSetState(g_res.rasterizer_cull);
+            khr_bound_rs = g_res.rasterizer_cull;
+            ctx->Draw(mesh_vertex_count(mid), 0);
+        }
     }
 
     // Chain passes below assume the ambient (CullNone) rasterizer.
@@ -16417,12 +16597,18 @@ inline void flush_frame() {
 
     if (!has_work) return;
     if (!RVExtBridge::is_initialized()) return;
-    // cold_t0: first flush whose draw list holds a composite-eligible mesh
+    // cold_t0: first flush whose draw list holds a SHADOW-CAPABLE mesh.
+    // (Was is_composite_eligible - which, since the ownership fix,
+    // excludes translucents: a translucent-first session never opened
+    // the cold window, the other half of the translucent-first fix.)
     if (g_mask.cold_t0 < 0.0) {
         std::lock_guard<std::mutex> g(g_draw_list_mutex);
 
         for (const auto& kv : g_draw_list) {
-            if (kv.second.visible && is_composite_eligible(kv.second)) {
+            const RenderObject& khc_o = kv.second;
+
+            if (khc_o.visible && !khc_o.fullscreen && khc_o.effect == 0 &&
+                khc_o.mode != DepthMode::Off) {
                 g_mask.cold_t0 = static_cast<double>(effect_time_seconds());
                 break;
             }

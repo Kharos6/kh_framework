@@ -16297,11 +16297,39 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     // pre-mesh snapshot - taken at flush time it also contains the
     // injected output, which composites idempotently (mixing lc over
     // pixels already showing lc-composited scene drifts negligibly).
-    khf_perceptual = false;
+    // TRANSLUCENT MUTUAL VISIBILITY (the see-through-each-other fix).
+    // The perceptual composite reads a SINGLE pre-mesh capture and writes
+    // OPAQUE (float4(.,1) - it must, so the HDR destination can never
+    // dominate; see the packing ledger). So two overlapping perceptual
+    // translucents each ignore the other: both read the same backdrop,
+    // both stamp opaque, and the later draw overwrites the earlier -
+    // mutual full occlusion, exactly the field report (opaques, which
+    // write real color+depth and are not perceptual, show through both).
+    // Two coordinated fixes: (a) draw back-to-front so the compositing
+    // order is correct, and (b) RE-CAPTURE the scene before each
+    // perceptual translucent after the first, so each later one compares
+    // against a backdrop that already contains the earlier ones - the
+    // opaque stamp then layers correctly instead of erasing. The
+    // re-capture is a full-frame copy, so it is gated hard: only when 2+
+    // perceptual translucents exist, only before perceptual draws, and
+    // the sort keeps the count of transitions minimal. Opaques self-
+    // resolve by depth regardless of order, so the shared sort is free
+    // for them.
+    std::sort(meshes.begin(), meshes.end(),
+              [&cam](const RenderObject& a, const RenderObject& b) {
+                  return kh_mesh_dist_sq(a, cam) > kh_mesh_dist_sq(b, cam);   // far first
+              });
+
+    uint32_t khf_perc_count = 0;
 
     for (const auto& o : meshes) {
-        if (!o.fullscreen && o.blend_mode == 0 && o.color[3] < 0.999f) { khf_perceptual = true; break; }
+        if (!o.fullscreen && o.blend_mode == 0 && o.color[3] < 0.999f) khf_perc_count++;
     }
+
+    khf_perceptual = khf_perc_count > 0;
+    // Per-draw re-capture arms only with an overlap-capable set (2+);
+    // a lone translucent keeps the single pre-mesh capture (no cost).
+    const bool khf_perc_recapture = khf_perc_count >= 2;
 
     if (khf_perceptual) {
         if (ensure_scene_capture(dev, ctx).empty()) {
@@ -16327,6 +16355,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     // object's sets verbatim. Loop-local: the fullscreen chain below
     // re-sets its own pipeline unconditionally, as before.
     int khf_ps_cat = -1;                          // 0 = solid PS, 1 = effect PS
+    bool khf_perc_seen = false;                   // a perceptual translucent has already drawn
     int khf_srv_cat = -1;                         // 0 = comp-depth t0, 1 = scene/depth pair
     int khf_bound_bm = -1;                        // blend mode last set
     ID3D11DepthStencilState* khf_bound_dss = nullptr;
@@ -16334,8 +16363,25 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     for (const auto& o : meshes) {
         const bool ov = (o.effect == 0 && o.mode == DepthMode::Off);
         if (ov) g_mask.ov_listed++;      // reached the draw loop
+        // TRANSLUCENT RE-CAPTURE (ledger at the arm above): this mesh is
+        // a perceptual translucent and one already drew - refresh the
+        // capture so this one composites over the earlier result instead
+        // of erasing it. Before upload_cb (which may skip): a skipped
+        // mesh drew nothing, so no refresh is owed. The RTV is the live
+        // scene target (the same source the pre-mesh capture used), now
+        // carrying every mesh drawn so far this pass.
+        const bool khf_o_perc = !o.fullscreen && o.blend_mode == 0 && o.color[3] < 0.999f;
+
+        if (khf_perc_recapture && khf_o_perc && khf_perc_seen) {
+            if (ensure_scene_capture(dev, ctx).empty()) {
+                ctx->PSSetShaderResources(3, 1, &g_res.scene_srv);
+                g_stats.perceptual_captures++;
+                khf_srv_cat = -1;   // t0/t1 pair may have been rebound; force re-swap below
+            }
+        }
         if (!upload_cb(o, false)) { if (ov) g_mask.ov_skipped++; continue; }
         if (ov) g_mask.ov_drawn++;       // Draw() will be issued below
+        if (khf_o_perc) khf_perc_seen = true;
         const int khf_ps_want = o.effect > 0 ? 1 : 0;
 
         if (khf_ps_want != khf_ps_cat) {

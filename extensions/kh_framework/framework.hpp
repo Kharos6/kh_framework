@@ -1,6 +1,7 @@
 #pragma once
 
 #define NOMINMAX
+#define STB_IMAGE_IMPLEMENTATION
 #define FD_SETSIZE 256
 
 #include <winsock2.h>
@@ -64,6 +65,9 @@
 #include "ultralight/include/Ultralight/Ultralight.h"
 #include "minhook/include/MinHook.h"
 #include "lz4/include/lz4.h"
+#include "rendering/stb_image.h"
+#include "rendering/ufbx.c"        // pulls in ufbx.h itself
+#include "rendering/mikktspace.c"  // pulls in mikktspace.h itself
 
 using namespace intercept;
 using namespace intercept::types;

@@ -6985,7 +6985,7 @@ static void initialize_sqf_integration() {
 
     _sqf_gpu_visibility_array = intercept::client::host::register_sqf_command(
         "gpuVisibility",
-        "Test up to 1024 world points [[x,y,zASL], ...]. Returns [[status, pointDistM, sceneDistM], ...]; on failure [[\"error\", reason]]",
+        "Test world points [[x,y,zASL], ...]. Returns [[status, pointDistM, sceneDistM], ...]; on failure [[\"error\", reason]]",
         userFunctionWrapper<gpu_visibility_sqf>,
         game_data_type::ARRAY,
         game_data_type::ARRAY
@@ -7001,7 +7001,7 @@ static void initialize_sqf_integration() {
 
     _sqf_queue_visibility_array = intercept::client::host::register_sqf_command(
         "queueVisibility",
-        "Queue up to 1024 world points [[x,y,zASL], ...] for an async GPU depth-visibility test. Returns the queued count; -1 = invalid input",
+        "Queue world points [[x,y,zASL], ...] for an async GPU depth-visibility test. Returns the queued count; -1 = invalid input",
         userFunctionWrapper<queue_visibility_sqf>,
         game_data_type::SCALAR,
         game_data_type::ARRAY

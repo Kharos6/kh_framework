@@ -2,6 +2,9 @@
 
 #define KH_SAFE_RELEASE(p) if (p) { (p)->Release(); (p) = nullptr; }
 
+// FBX/texture third-party units (ufbx, mikktspace, stb_image) + <fstream>/
+// <memory>: included by the FRAMEWORK header ahead of this file.
+
 // D3D11.1 context interface: the sky binding probe reads constant-buffer
 // OFFSETS via PSGetConstantBuffers1 (the engine binds the scene's
 // constants through pool buffers with per-slot offsets - plain
@@ -15,49 +18,198 @@ enum class DepthMode : int {
     Off = 2,        // overlay
 };
 
-static constexpr UINT KH_MAX_QUERY_POINTS = 1024;
+static constexpr UINT KH_QUERY_POINTS_BASE = 1024;   // initial GPU capacity;
+                                                     // the query set grows on
+                                                     // demand (no point cap)
 
 // ===========================================================================
 // Mesh registry: every drawable 3D object references a mesh by id. The
 // registry is the single source of truth for mesh count, names and
-// geometry - no consumer hardcodes either; a future FBX importer only
-// appends MeshDef entries here (normalize on import, then meshgen::bake)
-// and draw, lighting, sun-depth casting and sorting all work unchanged.
+// geometry - no consumer hardcodes either; the FBX importer appends
+// MeshDef entries here (normalize on import, then meshgen::bake) and
+// draw, lighting, sun-depth casting and sorting all work unchanged.
 // AUTHORING SPACE is ARMA'S OWN AXES - x east, y north, z up, exactly the
 // coordinate space every SQF-facing position/size/rotation uses - and
 // meshgen::bake converts to the engine's runtime axes (x, z, y) once at
-// registry construction. Meshes are normalized to fit [-0.5, 0.5]^3 so
-// that world AABB = center +- sizeAxes * 0.5 stays exact for every
-// downstream consumer (cast reach clamp, sort bounds); rotated objects
-// substitute the enclosing bound from kh_world_half_extents everywhere.
-// Vertices carry a position and an outward normal; bake also normalizes
-// triangle winding against the stored normal so the optional back-face
-// culling rasterizer (twoSided = false) culls interior faces correctly.
-// UV / material lanes are the FBX integration's extension point: add them
-// to MeshVertex and the input layouts together when the importer lands.
+// registration. Meshes are normalized to fit [-0.5, 0.5]^3 so that world
+// AABB = center +- sizeAxes * 0.5 stays exact for every downstream
+// consumer (cast reach clamp, sort bounds); rotated objects substitute
+// the enclosing bound from kh_world_half_extents everywhere. Vertices
+// carry the FBX-ready 48-byte format - position, outward normal, uv,
+// tangent - with the pos/nrm offsets unchanged from the 24-byte era, so
+// every input layout element and shader keeps working verbatim; only the
+// stride, taken from sizeof(MeshVertex) at every bind site, widened.
+// bake also normalizes triangle winding against the stored normal so the
+// optional back-face culling rasterizer (twoSided = false) culls
+// interior faces correctly.
+//
+// DYNAMIC-REGISTRATION CONTRACT (FBX phase-1 groundwork; plan section 2):
+//  - STORAGE: a block-chained pointer-slot table (KH_MESH_ROOT blocks
+//    of KH_MESH_BLOCK entries, allocated on demand) - append-only,
+//    with STABLE addresses AND stable indices for the whole session.
+//    Slots are heap MeshDefs, IMMUTABLE after publication (readers take
+//    verts.data()/size() lock-free); v1 never unregisters, so they live
+//    until process exit by contract (the sanctioned "leak").
+//  - PUBLICATION: a mesh id becomes VISIBLE only through the
+//    release-store of 'published' in kh_mesh_publish(); every reader
+//    (mesh_count) loads it with acquire, which makes the prior slot
+//    store visible. kh_mesh_append may run on any game/worker thread;
+//    kh_mesh_publish MUST run only while the render thread is parked
+//    (the flush park - the same safe point GenerateMips will use), so
+//    the count bump and the GPU-buffer top-up (ensure_mesh_vbs, routed
+//    through every ensure_resources call) land in one serialized window.
+//  - CONSUMERS: mesh_id_clamp / mesh_vertex_count / mesh_id_from_gv all
+//    read the PUBLISHED count, never the raw append count.
+//  - GPU BUFFERS: g_res.mesh_vb grows in step inside ensure_mesh_vbs,
+//    which every draw path reaches through ensure_resources before
+//    indexing it - and which doubles as the DEVICE-RESET rebuild:
+//    g_res.release() empties mesh_vb while this CPU store survives, so
+//    the next ensure re-creates every buffer, builtins and registered
+//    meshes alike, through one path.
 // ===========================================================================
 
-struct MeshVertex { float pos[3]; float nrm[3]; };
+struct MeshVertex {
+    float pos[3];   // offset 0  (contract: never moves - both input layouts)
+    float nrm[3];   // offset 12 (contract: never moves)
+    float uv[2];    // offset 24 - texture lane (builtins carry usable UVs)
+    float tan[4];   // offset 32 - tangent xyz, handedness w (mikktspace);
+                    //             builtins: zeroed xyz, w = 1 (unused until
+                    //             KH_TEXTURED samples normal maps)
+};
+static_assert(sizeof(MeshVertex) == 48, "48-byte textured-vertex stride contract");
+static_assert(offsetof(MeshVertex, nrm) == 12 && offsetof(MeshVertex, uv) == 24 &&
+              offsetof(MeshVertex, tan) == 32,
+              "MeshVertex field offsets are a layout contract (see the input layouts)");
+
+// Per-material vertex range (expanded, non-indexed). Builtins carry one
+// full-range "default" entry so the FBX-era per-submesh consumers
+// (material binds, ranged draws) need no builtin special case; today's
+// draw loops still draw the full vertex count and ignore the table.
+struct MeshSubmesh {
+    std::string name;
+    uint32_t vertex_start = 0;
+    uint32_t vertex_count = 0;
+};
 
 struct MeshDef {
-    const char* name = "";    // primary name (SQF mesh selector)
-    const char* alias = "";   // accepted alternative ("" = none)
+    std::string name;    // primary name (SQF mesh selector, lower-case)
+    std::string alias;   // accepted alternative ("" = none)
     std::vector<MeshVertex> verts;
+    std::vector<MeshSubmesh> submeshes;
+    // Native (pre-normalization) dimensions, ARMA axes - the FBX load
+    // result returns these so scripts can pass them back as 'size' for
+    // true scale (plan section 0). Builtins are authored at unit size.
+    float native_size[3] = { 1.0f, 1.0f, 1.0f };
 };
 
 namespace meshgen {
 
 // One quad = two triangles with an explicit outward normal. Corners may
-// arrive in any perimeter order; bake() normalizes the winding.
+// arrive in any perimeter order; bake() normalizes the winding. UVs are
+// face-local (a->b->c->d = (0,0)(1,0)(1,1)(0,1)) so flat builtins are
+// texture-ready per face.
 inline void quad(std::vector<MeshVertex>& v,
                  const float a[3], const float b[3],
                  const float c[3], const float d[3], const float n[3]) {
+    static const float uvs[4][2] = { { 0.0f, 0.0f }, { 1.0f, 0.0f },
+                                     { 1.0f, 1.0f }, { 0.0f, 1.0f } };
     const float* corners[6] = { a, b, c, a, c, d };
+    const int    uvi[6]     = { 0, 1, 2, 0, 2, 3 };
+
+    // Analytic tangent: the uv u axis runs a->b, the v axis a->d, so
+    // T = normalize(b - a) and the handedness sign is the agreement of
+    // cross(N, T) with the v direction - flat builtins carry a proper
+    // TBN and normal maps decode on them exactly as on FBX imports.
+    float khq_t[3] = { b[0] - a[0], b[1] - a[1], b[2] - a[2] };
+    const float khq_tl = sqrtf(khq_t[0] * khq_t[0] + khq_t[1] * khq_t[1] + khq_t[2] * khq_t[2]);
+
+    if (khq_tl > 1e-8f) {
+        khq_t[0] /= khq_tl; khq_t[1] /= khq_tl; khq_t[2] /= khq_tl;
+    } else {
+        khq_t[0] = 1.0f; khq_t[1] = 0.0f; khq_t[2] = 0.0f;
+    }
+
+    const float khq_bx[3] = {
+        n[1] * khq_t[2] - n[2] * khq_t[1],
+        n[2] * khq_t[0] - n[0] * khq_t[2],
+        n[0] * khq_t[1] - n[1] * khq_t[0],
+    };
+    const float khq_w = (khq_bx[0] * (d[0] - a[0]) + khq_bx[1] * (d[1] - a[1]) +
+                         khq_bx[2] * (d[2] - a[2])) >= 0.0f ? 1.0f : -1.0f;
 
     for (int i = 0; i < 6; ++i) {
-        MeshVertex mv;
+        MeshVertex mv = {};
         memcpy(mv.pos, corners[i], sizeof(mv.pos));
         memcpy(mv.nrm, n, sizeof(mv.nrm));
+        mv.uv[0] = uvs[uvi[i]][0];
+        mv.uv[1] = uvs[uvi[i]][1];
+        memcpy(mv.tan, khq_t, sizeof(khq_t));
+        mv.tan[3] = khq_w;
+        v.push_back(mv);
+    }
+}
+
+// One triangle with PER-VERTEX normals and UVs - the smooth-shaded
+// generators (sphere/cylinder/cone) build from this. bake()'s winding
+// test reads the FIRST vertex's normal, which agrees in sign with the
+// face normal for any sane smooth tessellation.
+inline void tri(std::vector<MeshVertex>& v,
+                const float a[3], const float na[3], const float ua[2],
+                const float b[3], const float nb[3], const float ub[2],
+                const float c[3], const float nc[3], const float uc[2]) {
+    const float* p[3] = { a, b, c };
+    const float* n[3] = { na, nb, nc };
+    const float* u[3] = { ua, ub, uc };
+
+    // Per-face uv-delta tangent (the standard derivation), shared by all
+    // three vertices; degenerate uv area falls back to any vector
+    // perpendicular to the first normal.
+    const float khe1[3] = { b[0] - a[0], b[1] - a[1], b[2] - a[2] };
+    const float khe2[3] = { c[0] - a[0], c[1] - a[1], c[2] - a[2] };
+    const float khdu1 = ub[0] - ua[0], khdv1 = ub[1] - ua[1];
+    const float khdu2 = uc[0] - ua[0], khdv2 = uc[1] - ua[1];
+    const float khr = khdu1 * khdv2 - khdu2 * khdv1;
+    float kht_t[3];
+    float kht_w = 1.0f;
+
+    if (khr > 1e-10f || khr < -1e-10f) {
+        const float khir = 1.0f / khr;
+        kht_t[0] = (khe1[0] * khdv2 - khe2[0] * khdv1) * khir;
+        kht_t[1] = (khe1[1] * khdv2 - khe2[1] * khdv1) * khir;
+        kht_t[2] = (khe1[2] * khdv2 - khe2[2] * khdv1) * khir;
+        const float khb[3] = {
+            (khe2[0] * khdu1 - khe1[0] * khdu2) * khir,
+            (khe2[1] * khdu1 - khe1[1] * khdu2) * khir,
+            (khe2[2] * khdu1 - khe1[2] * khdu2) * khir,
+        };
+        const float khcx[3] = {
+            na[1] * kht_t[2] - na[2] * kht_t[1],
+            na[2] * kht_t[0] - na[0] * kht_t[2],
+            na[0] * kht_t[1] - na[1] * kht_t[0],
+        };
+        kht_w = (khcx[0] * khb[0] + khcx[1] * khb[1] + khcx[2] * khb[2]) >= 0.0f ? 1.0f : -1.0f;
+    } else {
+        // uv-degenerate: any perpendicular to the first normal
+        if (na[0] * na[0] < 0.9f) { kht_t[0] = 0.0f; kht_t[1] = -na[2]; kht_t[2] = na[1]; }
+        else                      { kht_t[0] = -na[2]; kht_t[1] = 0.0f; kht_t[2] = na[0]; }
+    }
+
+    const float kht_l = sqrtf(kht_t[0] * kht_t[0] + kht_t[1] * kht_t[1] + kht_t[2] * kht_t[2]);
+
+    if (kht_l > 1e-8f) {
+        kht_t[0] /= kht_l; kht_t[1] /= kht_l; kht_t[2] /= kht_l;
+    } else {
+        kht_t[0] = 1.0f; kht_t[1] = 0.0f; kht_t[2] = 0.0f;
+    }
+
+    for (int i = 0; i < 3; ++i) {
+        MeshVertex mv = {};
+        memcpy(mv.pos, p[i], sizeof(mv.pos));
+        memcpy(mv.nrm, n[i], sizeof(mv.nrm));
+        mv.uv[0] = u[i][0];
+        mv.uv[1] = u[i][1];
+        memcpy(mv.tan, kht_t, sizeof(kht_t));
+        mv.tan[3] = kht_w;
         v.push_back(mv);
     }
 }
@@ -83,6 +235,127 @@ inline void block(std::vector<MeshVertex>& v, const float mn[3], const float mx[
     quad(v, p000, p010, p110, p100, nzn);   // -z
 }
 
+// --- Parametric builtins (ARMA axes: x east, y north, z up; every one
+//     fits [-0.5, 0.5]^3 exactly, preserving the size contract). Smooth
+//     surfaces carry per-vertex normals, caps and flat faces carry face
+//     normals; UVs are the conventional wraps. ---
+
+// UV sphere, radius 0.5. Pole rows emit one zero-area triangle per slice;
+// bake()'s winding test sees a zero cross product there and leaves them -
+// harmless, never rasterized.
+inline void uv_sphere(std::vector<MeshVertex>& v, int stacks, int slices) {
+    const float khms_pi = 3.14159265358979f;
+
+    for (int st = 0; st < stacks; ++st) {
+        const float t0 = static_cast<float>(st) / static_cast<float>(stacks);
+        const float t1 = static_cast<float>(st + 1) / static_cast<float>(stacks);
+
+        for (int sl = 0; sl < slices; ++sl) {
+            const float s0 = static_cast<float>(sl) / static_cast<float>(slices);
+            const float s1 = static_cast<float>(sl + 1) / static_cast<float>(slices);
+            const float ts[2] = { t0, t1 }, ss[2] = { s0, s1 };
+            // corner order: (s0,t0) (s1,t0) (s1,t1) (s0,t1)
+            const int ci[4][2] = { { 0, 0 }, { 1, 0 }, { 1, 1 }, { 0, 1 } };
+            float p[4][3], n[4][3], u[4][2];
+
+            for (int k = 0; k < 4; ++k) {
+                const float la = (ts[ci[k][1]] - 0.5f) * khms_pi;        // -pi/2..pi/2
+                const float lo = ss[ci[k][0]] * 2.0f * khms_pi;
+                n[k][0] = cosf(la) * cosf(lo);
+                n[k][1] = cosf(la) * sinf(lo);
+                n[k][2] = sinf(la);
+                p[k][0] = n[k][0] * 0.5f;
+                p[k][1] = n[k][1] * 0.5f;
+                p[k][2] = n[k][2] * 0.5f;
+                u[k][0] = ss[ci[k][0]];
+                u[k][1] = ts[ci[k][1]];
+            }
+
+            tri(v, p[0], n[0], u[0], p[1], n[1], u[1], p[2], n[2], u[2]);
+            tri(v, p[0], n[0], u[0], p[2], n[2], u[2], p[3], n[3], u[3]);
+        }
+    }
+}
+
+// Cylinder: axis z-up, radius 0.5, height 1, capped. Smooth radial side
+// normals, flat cap fans (disc UVs).
+inline void cylinder(std::vector<MeshVertex>& v, int slices) {
+    const float khms_pi = 3.14159265358979f;
+    const float top[3] = { 0.0f, 0.0f,  0.5f }, bot[3] = { 0.0f, 0.0f, -0.5f };
+    const float nzp[3] = { 0.0f, 0.0f,  1.0f }, nzn[3] = { 0.0f, 0.0f, -1.0f };
+    const float ucc[2] = { 0.5f, 0.5f };
+
+    for (int sl = 0; sl < slices; ++sl) {
+        const float s0 = static_cast<float>(sl) / static_cast<float>(slices);
+        const float s1 = static_cast<float>(sl + 1) / static_cast<float>(slices);
+        const float a0 = s0 * 2.0f * khms_pi, a1 = s1 * 2.0f * khms_pi;
+        const float r0[3] = { cosf(a0), sinf(a0), 0.0f };
+        const float r1[3] = { cosf(a1), sinf(a1), 0.0f };
+        const float p00[3] = { r0[0] * 0.5f, r0[1] * 0.5f, -0.5f };
+        const float p10[3] = { r1[0] * 0.5f, r1[1] * 0.5f, -0.5f };
+        const float p01[3] = { r0[0] * 0.5f, r0[1] * 0.5f,  0.5f };
+        const float p11[3] = { r1[0] * 0.5f, r1[1] * 0.5f,  0.5f };
+        const float u00[2] = { s0, 0.0f }, u10[2] = { s1, 0.0f };
+        const float u01[2] = { s0, 1.0f }, u11[2] = { s1, 1.0f };
+        tri(v, p00, r0, u00, p10, r1, u10, p11, r1, u11);   // side
+        tri(v, p00, r0, u00, p11, r1, u11, p01, r0, u01);
+        const float ud0[2] = { 0.5f + r0[0] * 0.5f, 0.5f + r0[1] * 0.5f };
+        const float ud1[2] = { 0.5f + r1[0] * 0.5f, 0.5f + r1[1] * 0.5f };
+        tri(v, top, nzp, ucc, p01, nzp, ud0, p11, nzp, ud1);   // caps
+        tri(v, bot, nzn, ucc, p10, nzn, ud1, p00, nzn, ud0);
+    }
+}
+
+// Cone: apex at z = +0.5, base disc radius 0.5 at z = -0.5. Smooth slant
+// normals normalize(cos, sin, r/h) with r/h = 0.5; the apex takes the
+// face's mid-angle normal (the standard degenerate-pole treatment).
+inline void cone(std::vector<MeshVertex>& v, int slices) {
+    const float khms_pi = 3.14159265358979f;
+    const float apex[3] = { 0.0f, 0.0f, 0.5f }, bot[3] = { 0.0f, 0.0f, -0.5f };
+    const float nzn[3] = { 0.0f, 0.0f, -1.0f };
+    const float ucc[2] = { 0.5f, 0.5f };
+    const float khms_l = sqrtf(1.25f);   // |(cos, sin, 0.5)|
+
+    for (int sl = 0; sl < slices; ++sl) {
+        const float s0 = static_cast<float>(sl) / static_cast<float>(slices);
+        const float s1 = static_cast<float>(sl + 1) / static_cast<float>(slices);
+        const float a0 = s0 * 2.0f * khms_pi, a1 = s1 * 2.0f * khms_pi;
+        const float am = 0.5f * (a0 + a1);
+        const float p0[3] = { cosf(a0) * 0.5f, sinf(a0) * 0.5f, -0.5f };
+        const float p1[3] = { cosf(a1) * 0.5f, sinf(a1) * 0.5f, -0.5f };
+        const float n0[3] = { cosf(a0) / khms_l, sinf(a0) / khms_l, 0.5f / khms_l };
+        const float n1[3] = { cosf(a1) / khms_l, sinf(a1) / khms_l, 0.5f / khms_l };
+        const float na[3] = { cosf(am) / khms_l, sinf(am) / khms_l, 0.5f / khms_l };
+        const float u0[2] = { s0, 0.0f }, u1[2] = { s1, 0.0f };
+        const float ua[2] = { 0.5f * (s0 + s1), 1.0f };
+        tri(v, p0, n0, u0, p1, n1, u1, apex, na, ua);   // slant
+        const float ud0[2] = { 0.5f + cosf(a0) * 0.5f, 0.5f + sinf(a0) * 0.5f };
+        const float ud1[2] = { 0.5f + cosf(a1) * 0.5f, 0.5f + sinf(a1) * 0.5f };
+        tri(v, bot, nzn, ucc, p1, nzn, ud1, p0, nzn, ud0);   // base cap
+    }
+}
+
+// Square pyramid: base at z = -0.5, apex at (0, 0, +0.5). Flat faces.
+inline void pyramid(std::vector<MeshVertex>& v) {
+    const float apex[3] = { 0.0f, 0.0f, 0.5f };
+    const float b[4][3] = { { -0.5f, -0.5f, -0.5f }, {  0.5f, -0.5f, -0.5f },
+                            {  0.5f,  0.5f, -0.5f }, { -0.5f,  0.5f, -0.5f } };
+    const float nzn[3] = { 0.0f, 0.0f, -1.0f };
+    quad(v, b[0], b[1], b[2], b[3], nzn);   // base
+    // Side face normals: normalize(outward edge normal, rise) - the cross
+    // product of (base edge, base corner -> apex) is (edge_out, 0.5)/L.
+    const float khms_l = sqrtf(1.25f);
+    const float ns[4][3] = { {  0.0f,          -1.0f / khms_l, 0.5f / khms_l },   // -y face (b0-b1)
+                             {  1.0f / khms_l,  0.0f,          0.5f / khms_l },   // +x face (b1-b2)
+                             {  0.0f,           1.0f / khms_l, 0.5f / khms_l },   // +y face (b2-b3)
+                             { -1.0f / khms_l,  0.0f,          0.5f / khms_l } }; // -x face (b3-b0)
+    const float u0[2] = { 0.0f, 0.0f }, u1[2] = { 1.0f, 0.0f }, ua[2] = { 0.5f, 1.0f };
+
+    for (int f = 0; f < 4; ++f) {
+        tri(v, b[f], ns[f], u0, b[(f + 1) & 3], ns[f], u1, apex, ns[f], ua);
+    }
+}
+
 // Bake an authored (ARMA-axes) mesh into the engine's runtime layout:
 // 1) axis conversion - ARMA local [x, y, z] (east, north, up) becomes
 //    engine local [x, z, y], the same swap every SQF position/size fill
@@ -97,6 +370,13 @@ inline void bake(std::vector<MeshVertex>& v) {
     for (auto& mv : v) {
         const float py = mv.pos[1]; mv.pos[1] = mv.pos[2]; mv.pos[2] = py;
         const float ny = mv.nrm[1]; mv.nrm[1] = mv.nrm[2]; mv.nrm[2] = ny;
+        const float ty = mv.tan[1]; mv.tan[1] = mv.tan[2]; mv.tan[2] = ty;
+        // The y/z swap is an IMPROPER transform (det -1): cross products
+        // flip sign under it, so the shader's bitangent reconstruction
+        // B = w * cross(N, T) needs the handedness sign NEGATED to keep
+        // pointing along +v. Applies uniformly - builtin analytic
+        // tangents and mikktspace output both author pre-bake.
+        mv.tan[3] = -mv.tan[3];
     }
 
     for (size_t i = 0; i + 2 < v.size(); i += 3) {
@@ -122,19 +402,66 @@ inline void bake(std::vector<MeshVertex>& v) {
 
 }   // namespace meshgen
 
-inline const std::vector<MeshDef>& mesh_registry() {
-    static const std::vector<MeshDef> reg = [] {
-        std::vector<MeshDef> r;
+// --- Mesh store (contract in the header block above): BLOCK-CHAINED slot
+//     table, append-only, release-published count. Blocks of pointers
+//     hang off a fixed root, so published entries NEVER move (the
+//     lock-free reader contract holds verbatim) while capacity is
+//     effectively unbounded: KH_MESH_ROOT x KH_MESH_BLOCK = 1,048,576
+//     registrations - geometry memory exhausts long before the table.
+//     Ordering: a block-pointer store sequences before the publish
+//     release-store that first covers it, so every reader that can see
+//     an id (acquire on the count) sees its block. ---
+static constexpr uint32_t KH_MESH_BLOCK_SHIFT = 8;
+static constexpr uint32_t KH_MESH_BLOCK = 1u << KH_MESH_BLOCK_SHIFT;   // 256 meshes per block
+static constexpr uint32_t KH_MESH_ROOT = 4096;
+
+struct MeshStore {
+    MeshDef** root[KH_MESH_ROOT] = {};    // on-demand blocks; entries stable for the session
+    std::atomic<uint32_t> published{ 0 }; // visibility edge (release/acquire)
+    std::mutex append_mx;                 // append/publish only - READERS NEVER TAKE IT
+    uint32_t appended = 0;                // guarded by append_mx
+
+    // Append-side slot fetch: allocates the covering block on first
+    // touch (session lifetime, like the MeshDefs). Caller holds
+    // append_mx or is the store's single-threaded static init.
+    MeshDef*& slot(uint32_t id) {
+        MeshDef**& b = root[id >> KH_MESH_BLOCK_SHIFT];
+        if (!b) b = new MeshDef*[KH_MESH_BLOCK]();
+        return b[id & (KH_MESH_BLOCK - 1u)];
+    }
+};
+
+inline MeshStore& mesh_store() {
+    static MeshStore s;
+    // Builtins register inside this second static's one-time init: it runs
+    // exactly once (thread-safe by the language) and happens-before every
+    // return, so no lock is needed here and no consumer can observe a
+    // partial table. Do NOT call kh_mesh_append from this lambda - it
+    // re-enters mesh_store() mid-init.
+    static const bool khms_init = []() {   // 's' has static storage: no capture needed
+        auto khms_add = [](const char* khms_name, const char* khms_alias,
+                             std::vector<MeshVertex>&& khms_verts) {
+            meshgen::bake(khms_verts);   // ARMA axes -> engine axes + winding
+            MeshDef* khms_d = new MeshDef();
+            khms_d->name = khms_name;
+            khms_d->alias = khms_alias;
+            khms_d->verts = std::move(khms_verts);
+            MeshSubmesh khms_sm;
+            khms_sm.name = "default";
+            khms_sm.vertex_start = 0;
+            khms_sm.vertex_count = static_cast<uint32_t>(khms_d->verts.size());
+            khms_d->submeshes.push_back(std::move(khms_sm));
+            s.slot(s.appended) = khms_d;
+            s.appended++;
+        };
 
         // --- mesh 0: "box" - the original unit cube, per-face normals ---
         {
-            r.emplace_back();
-            MeshDef& m = r.back();
-            m.name = "box";
-            m.alias = "cube";
+            std::vector<MeshVertex> v;
             const float mn[3] = { -0.5f, -0.5f, -0.5f };
             const float mx[3] = {  0.5f,  0.5f,  0.5f };
-            meshgen::block(m.verts, mn, mx);
+            meshgen::block(v, mn, mx);
+            khms_add("box", "cube", std::move(v));
         }
 
         // --- mesh 1: "steps" - a 3-step staircase ascending toward +y
@@ -143,10 +470,7 @@ inline const std::vector<MeshDef>& mesh_registry() {
         //     self-shadowing test case the private sun-depth map exists
         //     for. ARMA axes: x east, y north, z up. ---
         {
-            r.emplace_back();
-            MeshDef& m = r.back();
-            m.name = "steps";
-            m.alias = "test";
+            std::vector<MeshVertex> v;
             const float t = 1.0f / 3.0f;
             const float y0 = -0.5f, y1 = -0.5f + t, y2 = -0.5f + 2.0f * t, y3 = 0.5f;
             const float z0 = -0.5f, z1 = -0.5f + t, z2 = -0.5f + 2.0f * t, z3 = 0.5f;
@@ -155,44 +479,157 @@ inline const std::vector<MeshDef>& mesh_registry() {
             const float nxp[3] = { 1.0f, 0.0f, 0.0f }, nxn[3] = { -1.0f, 0.0f, 0.0f };
 
             // bottom (facing -z: down)
-            { const float a[3] = { -0.5f, y0, z0 }, b[3] = { 0.5f, y0, z0 }, c[3] = { 0.5f, y3, z0 }, d[3] = { -0.5f, y3, z0 }; meshgen::quad(m.verts, a, b, c, d, nzn); }
+            { const float a[3] = { -0.5f, y0, z0 }, b[3] = { 0.5f, y0, z0 }, c[3] = { 0.5f, y3, z0 }, d[3] = { -0.5f, y3, z0 }; meshgen::quad(v, a, b, c, d, nzn); }
             // back (the tall face at y3)
-            { const float a[3] = { -0.5f, y3, z0 }, b[3] = { 0.5f, y3, z0 }, c[3] = { 0.5f, y3, z3 }, d[3] = { -0.5f, y3, z3 }; meshgen::quad(m.verts, a, b, c, d, nyp); }
+            { const float a[3] = { -0.5f, y3, z0 }, b[3] = { 0.5f, y3, z0 }, c[3] = { 0.5f, y3, z3 }, d[3] = { -0.5f, y3, z3 }; meshgen::quad(v, a, b, c, d, nyp); }
             // risers (facing -y, the open side)
-            { const float a[3] = { -0.5f, y0, z0 }, b[3] = { 0.5f, y0, z0 }, c[3] = { 0.5f, y0, z1 }, d[3] = { -0.5f, y0, z1 }; meshgen::quad(m.verts, a, b, c, d, nyn); }
-            { const float a[3] = { -0.5f, y1, z1 }, b[3] = { 0.5f, y1, z1 }, c[3] = { 0.5f, y1, z2 }, d[3] = { -0.5f, y1, z2 }; meshgen::quad(m.verts, a, b, c, d, nyn); }
-            { const float a[3] = { -0.5f, y2, z2 }, b[3] = { 0.5f, y2, z2 }, c[3] = { 0.5f, y2, z3 }, d[3] = { -0.5f, y2, z3 }; meshgen::quad(m.verts, a, b, c, d, nyn); }
+            { const float a[3] = { -0.5f, y0, z0 }, b[3] = { 0.5f, y0, z0 }, c[3] = { 0.5f, y0, z1 }, d[3] = { -0.5f, y0, z1 }; meshgen::quad(v, a, b, c, d, nyn); }
+            { const float a[3] = { -0.5f, y1, z1 }, b[3] = { 0.5f, y1, z1 }, c[3] = { 0.5f, y1, z2 }, d[3] = { -0.5f, y1, z2 }; meshgen::quad(v, a, b, c, d, nyn); }
+            { const float a[3] = { -0.5f, y2, z2 }, b[3] = { 0.5f, y2, z2 }, c[3] = { 0.5f, y2, z3 }, d[3] = { -0.5f, y2, z3 }; meshgen::quad(v, a, b, c, d, nyn); }
             // treads (facing +z: up)
-            { const float a[3] = { -0.5f, y0, z1 }, b[3] = { 0.5f, y0, z1 }, c[3] = { 0.5f, y1, z1 }, d[3] = { -0.5f, y1, z1 }; meshgen::quad(m.verts, a, b, c, d, nzp); }
-            { const float a[3] = { -0.5f, y1, z2 }, b[3] = { 0.5f, y1, z2 }, c[3] = { 0.5f, y2, z2 }, d[3] = { -0.5f, y2, z2 }; meshgen::quad(m.verts, a, b, c, d, nzp); }
-            { const float a[3] = { -0.5f, y2, z3 }, b[3] = { 0.5f, y2, z3 }, c[3] = { 0.5f, y3, z3 }, d[3] = { -0.5f, y3, z3 }; meshgen::quad(m.verts, a, b, c, d, nzp); }
+            { const float a[3] = { -0.5f, y0, z1 }, b[3] = { 0.5f, y0, z1 }, c[3] = { 0.5f, y1, z1 }, d[3] = { -0.5f, y1, z1 }; meshgen::quad(v, a, b, c, d, nzp); }
+            { const float a[3] = { -0.5f, y1, z2 }, b[3] = { 0.5f, y1, z2 }, c[3] = { 0.5f, y2, z2 }, d[3] = { -0.5f, y2, z2 }; meshgen::quad(v, a, b, c, d, nzp); }
+            { const float a[3] = { -0.5f, y2, z3 }, b[3] = { 0.5f, y2, z3 }, c[3] = { 0.5f, y3, z3 }, d[3] = { -0.5f, y3, z3 }; meshgen::quad(v, a, b, c, d, nzp); }
 
             // sides: one column per y segment, floor to that segment's tread
-            for (int s = 0; s < 3; ++s) {
-                const float ya = -0.5f + s * t, yb = -0.5f + (s + 1) * t;
-                const float zt = -0.5f + (s + 1) * t;
-                { const float a[3] = { 0.5f, ya, z0 }, b[3] = { 0.5f, yb, z0 }, c[3] = { 0.5f, yb, zt }, d[3] = { 0.5f, ya, zt }; meshgen::quad(m.verts, a, b, c, d, nxp); }
-                { const float a[3] = { -0.5f, ya, z0 }, b[3] = { -0.5f, yb, z0 }, c[3] = { -0.5f, yb, zt }, d[3] = { -0.5f, ya, zt }; meshgen::quad(m.verts, a, b, c, d, nxn); }
+            for (int s2 = 0; s2 < 3; ++s2) {
+                const float ya = -0.5f + s2 * t, yb = -0.5f + (s2 + 1) * t;
+                const float zt = -0.5f + (s2 + 1) * t;
+                { const float a[3] = { 0.5f, ya, z0 }, b[3] = { 0.5f, yb, z0 }, c[3] = { 0.5f, yb, zt }, d[3] = { 0.5f, ya, zt }; meshgen::quad(v, a, b, c, d, nxp); }
+                { const float a[3] = { -0.5f, ya, z0 }, b[3] = { -0.5f, yb, z0 }, c[3] = { -0.5f, yb, zt }, d[3] = { -0.5f, ya, zt }; meshgen::quad(v, a, b, c, d, nxn); }
             }
+
+            khms_add("steps", "test", std::move(v));
         }
 
-        for (auto& m : r) meshgen::bake(m.verts);   // ARMA axes -> engine axes + winding
-        return r;
-    }();
+        // --- meshes 2-5: the basic parametric set (pre-FBX) ---
+        { std::vector<MeshVertex> v; meshgen::uv_sphere(v, 16, 32); khms_add("sphere", "ball", std::move(v)); }
+        { std::vector<MeshVertex> v; meshgen::cylinder(v, 32);      khms_add("cylinder", "cyl", std::move(v)); }
+        { std::vector<MeshVertex> v; meshgen::cone(v, 32);          khms_add("cone", "", std::move(v)); }
+        { std::vector<MeshVertex> v; meshgen::pyramid(v);           khms_add("pyramid", "", std::move(v)); }
 
-    return reg;
+        s.published.store(s.appended, std::memory_order_release);
+        return true;
+    }();
+    (void)khms_init;
+    return s;
+}
+
+// The published mesh count - THE bound every consumer uses (never the
+// raw append count, never a container size).
+inline uint32_t mesh_count() {
+    return mesh_store().published.load(std::memory_order_acquire);
+}
+
+// Slot access. id MUST already be bounded by the published count
+// (mesh_id_clamp / mesh_id_from_gv) - this does not re-check.
+inline const MeshDef& mesh_def(int id) {
+    const uint32_t khmd_id = static_cast<uint32_t>(id);
+    return *mesh_store().root[khmd_id >> KH_MESH_BLOCK_SHIFT][khmd_id & (KH_MESH_BLOCK - 1u)];
+}
+
+// Append a fully built (ARMA-axes-authored, meshgen::bake'd, normalized)
+// mesh. Any game/worker thread. Returns the provisional id - stable for
+// the whole session - or -1 when the slot table is full. INVISIBLE to
+// every consumer until kh_mesh_publish. The MeshDef must be complete and
+// non-empty; it is immutable after publication by contract.
+inline int kh_mesh_append(MeshDef&& def) {
+    MeshStore& s = mesh_store();
+    std::lock_guard<std::mutex> g(s.append_mx);
+    if (s.appended >= KH_MESH_ROOT * KH_MESH_BLOCK) return -1;   // structurally unreachable in practice
+    s.slot(s.appended) = new MeshDef(std::move(def));   // session lifetime (v1: no unregistration)
+    return static_cast<int>(s.appended++);
+}
+
+// Publish every append so far. MUST run only while the render thread is
+// parked (the flush park): the release-store here is the visibility edge
+// mesh_count()'s acquire pairs with, and the park guarantees the GPU
+// top-up (ensure_mesh_vbs, reached through ensure_resources) lands in
+// the same serialized window before any draw indexes the new id.
+inline uint32_t kh_mesh_publish() {
+    MeshStore& s = mesh_store();
+    std::lock_guard<std::mutex> g(s.append_mx);
+    s.published.store(s.appended, std::memory_order_release);
+    return s.appended;
 }
 
 inline UINT mesh_vertex_count(int id) {
-    const auto& reg = mesh_registry();
-    if (id < 0 || id >= static_cast<int>(reg.size())) id = 0;
-    return static_cast<UINT>(reg[id].verts.size());
+    if (id < 0 || static_cast<uint32_t>(id) >= mesh_count()) id = 0;
+    return static_cast<UINT>(mesh_def(id).verts.size());
 }
 
 // Registry-bounds clamp shared by every draw path: an out-of-range id
-// (stale handle data) degrades to mesh 0 instead of reading past the end.
+// (stale handle data / a not-yet-published registration) degrades to
+// mesh 0 instead of reading past the published range.
 inline int mesh_id_clamp(int id) {
-    return (id >= 0 && id < static_cast<int>(mesh_registry().size())) ? id : 0;
+    return (id >= 0 && static_cast<uint32_t>(id) < mesh_count()) ? id : 0;
+}
+
+// ===========================================================================
+// FBX MATERIALS (updateRender3D "material"): per-submesh material slots.
+// One shader for now ("pbr" - compact GGX; see KhApplyPBR in the shader
+// header). Materials receive the sun/moon AND the engine's dynamic
+// lights (flashlights, headlights, fires): Lambert diffuse at the
+// untextured path's energy plus per-light GGX specular glints
+// (KhDynLightsPBR), metal- and spec/gloss-workflow correct, unshadowed
+// like the engine's own. Five physical texture slots at fixed registers:
+//   0 diffuse/albedo  t14  sRGB   (rgb = albedo, a = alpha by default)
+//   1 normal          t15  linear (tangent-space, +Y up ["OpenGL"];
+//                                  flip green upstream for -Y bakes)
+//   2 orm             t16  linear (defaults r = occlusion, g = roughness,
+//                                  b = metallic - the glTF convention)
+//   3 emissive        t17  sRGB
+//   4 specular        t18  sRGB   (spec/gloss workflow: rgb = F0,
+//                                  a = gloss; presence selects the
+//                                  workflow over metal/rough)
+// CHANNEL FREEDOM: the scalar inputs (occlusion / roughness / metallic /
+// alpha / gloss) each carry a ROUTE - which slot and channel feeds them -
+// encoded slot*4+channel, -1 = the slot conventions above (or the scalar
+// param when the conventional map is absent). Any image may be bound to
+// any slot, so e.g. a lone roughness texture bound to "orm" routed
+// [["roughness", "r"]] works, as does roughness read from the diffuse
+// map's alpha.
+// ===========================================================================
+
+struct KhMaterialMap {
+    std::string path;          // RESOLVED disk path ("" = slot empty)
+};
+
+struct KhMaterial {
+    bool used = false;         // slot carries an assignment
+    int shader = 0;            // 0 = "pbr" (the only shader for now)
+    KhMaterialMap maps[5];     // diffuse, normal, orm, emissive, specular
+    float base_color[3] = { 1.0f, 1.0f, 1.0f };
+    float roughness = 0.8f;
+    float metalness = 0.0f;
+    float emissive_intensity = 1.0f;
+    float normal_strength = 1.0f;
+    float cutoff = 0.5f;       // cutout alpha threshold
+    int alpha_mode = 0;        // 0 = opaque, 1 = cutout (clip in the PS)
+    // User channel routes (slot*4+chan; -1 = slot-convention default):
+    int route_occ = -1, route_rough = -1, route_metal = -1;
+    int route_alpha = -1, route_gloss = -1;
+};
+
+// Immutable per-object snapshot: updates build a NEW set and swap the
+// shared_ptr under g_draw_list_mutex (copy-on-write); the per-frame
+// staging copies the pointer, so the draw threads read a stable set
+// without any lock of their own.
+struct KhMaterialSet {
+    std::vector<KhMaterial> slots;   // indexed by submesh
+    bool any = false;                // at least one used slot
+};
+
+inline bool kh_ends_with_ci(const std::string& s, const char* suffix) {
+    const size_t sl = strlen(suffix);
+    if (s.size() < sl) return false;
+
+    for (size_t i = 0; i < sl; ++i) {
+        if (::tolower(static_cast<unsigned char>(s[s.size() - sl + i])) !=
+            ::tolower(static_cast<unsigned char>(suffix[i]))) return false;
+    }
+
+    return true;
 }
 
 struct Resources {
@@ -238,7 +675,20 @@ struct Resources {
                                                          // (twoSided = false objects; same biases)
     ID3D11RasterizerState*   rasterizer_front = nullptr; // FRONT-culling twin: pass 1 of the
                                                          // two-sided-translucent ordered draw
-    std::vector<ID3D11Buffer*> mesh_vb;                  // one VB per registry mesh (pos + normal)
+    // --- KH_TEXTURED twins (FBX materials): the same shader sources
+    //     compiled once more with KH_TEXTURED=1. NON-FATAL: any of these
+    //     null => textured objects fall back to the untextured draw. ---
+    ID3D11VertexShader*      vs_tex = nullptr;          // VSMain twin (flush)
+    ID3D11PixelShader*       ps_tex = nullptr;          // PSMain twin
+    ID3D11VertexShader*      vs_comp_tex = nullptr;     // VSComposite twin (injection)
+    ID3D11PixelShader*       ps_comp_tex = nullptr;     // PSComposite twin (per MSAA)
+    ID3D11PixelShader*       ps_comp_arb_tex = nullptr; // arb twin (per MSAA)
+    ID3D11InputLayout*       layout_tex = nullptr;      // pos/nrm/uv/tangent (48-byte stride)
+    ID3D11SamplerState*      mat_sampler = nullptr;     // s0: anisotropic wrap
+    std::vector<ID3D11Buffer*> mesh_vb;                  // one VB per PUBLISHED registry mesh
+                                                         // (48-byte textured vertex format; grows
+                                                         // in step via ensure_mesh_vbs - see the
+                                                         // dynamic-registration contract)
     ID3D11Buffer*            constant_buffer = nullptr;  // dynamic, per draw (game-thread flush): CBObj b0
     ID3D11Buffer*            composite_cb = nullptr;     // dynamic, per draw (render-thread injection): CBObj b0
     // CB-split frame twins (b1): one per thread, same separation logic
@@ -267,6 +717,9 @@ struct Resources {
     ID3D11InputLayout*        layout_sundepth = nullptr; // mesh slot 0 + per-instance slot 1
     ID3D11Buffer*             sun_instance_vb = nullptr; // dynamic per-instance center/extents
     UINT                      sun_instance_cap = 0;      // instances the buffer holds
+    ID3D11Buffer*             locality_buf = nullptr;    // extended (>16) caster reach list
+    ID3D11ShaderResourceView* locality_srv = nullptr;    // t2 at the mask cast fire
+    UINT                      locality_cap = 0;          // casters the list holds
     bool                     initialized = false;
 
     // --- Scene HDR color capture (resolved copy of the bound RTV) ---
@@ -300,6 +753,8 @@ struct Resources {
     ID3D11Buffer*             cs_constant_buffer = nullptr;
     ID3D11Buffer*             points_buffer = nullptr;     // dynamic structured, CPU write
     ID3D11ShaderResourceView* points_srv = nullptr;
+    UINT                      query_cap = 0;              // points the query set holds
+                                                          // (grows via ensure_query_buffers)
     ID3D11Buffer*             output_buffer = nullptr;     // default structured, UAV
     ID3D11UnorderedAccessView* output_uav = nullptr;
     ID3D11Buffer*             staging_buffer = nullptr;    // synchronous readback (immediate commands)
@@ -359,6 +814,13 @@ struct Resources {
         comp_depth_w = comp_depth_h = 0;
         comp_depth_samples = 1;
         KH_SAFE_RELEASE(input_layout);
+        KH_SAFE_RELEASE(vs_tex);
+        KH_SAFE_RELEASE(ps_tex);
+        KH_SAFE_RELEASE(vs_comp_tex);
+        KH_SAFE_RELEASE(ps_comp_tex);
+        KH_SAFE_RELEASE(ps_comp_arb_tex);
+        KH_SAFE_RELEASE(layout_tex);
+        KH_SAFE_RELEASE(mat_sampler);
         for (auto& khr_mb : mesh_vb) KH_SAFE_RELEASE(khr_mb);
         mesh_vb.clear();
         KH_SAFE_RELEASE(sun_tex);
@@ -369,6 +831,9 @@ struct Resources {
         KH_SAFE_RELEASE(layout_sundepth);
         KH_SAFE_RELEASE(sun_instance_vb);
         sun_instance_cap = 0;
+        KH_SAFE_RELEASE(locality_srv);
+        KH_SAFE_RELEASE(locality_buf);
+        locality_cap = 0;
         KH_SAFE_RELEASE(constant_buffer);
         KH_SAFE_RELEASE(composite_cb);
         KH_SAFE_RELEASE(frame_cb);
@@ -388,6 +853,7 @@ struct Resources {
         KH_SAFE_RELEASE(staging_buffer);
         KH_SAFE_RELEASE(staging_async[0]);
         KH_SAFE_RELEASE(staging_async[1]);
+        query_cap = 0;
         release_bb_capture();
         release_fx_chain();
         release_scene_capture();
@@ -422,16 +888,20 @@ inline bool reorder_on_render_thread();
 // Best-effort by design: resources are released even if acquisition
 // fails mid-teardown - leaking device objects across a reset is the
 // worse failure, and matches the hook's previous (bare) behavior.
+inline void kh_tex_cache_release();   // material-texture cache (defined with the loader)
+
 static void __stdcall on_engine_reset() {
     if (reorder_on_render_thread()) {
         g_res.release();
         release_shadow_device_state();
+        kh_tex_cache_release();
         return;
     }
 
     RVExtBridge::ScopedGraphicsLock khr_reset_lock;
     g_res.release();
     release_shadow_device_state();
+    kh_tex_cache_release();
 }
 
 struct RenderObject {
@@ -471,7 +941,12 @@ struct RenderObject {
                                 // analytic cast passes stay CullNone so
                                 // open meshes still cast full shadows.
     int   blend_mode = 0;       // 0 normal, 1 additive, 2 multiply, 3 screen, 4 lighten, 5 darken
-    int   mesh = 0;             // mesh_registry() index (0 = "box"). Meshes
+    // FBX materials (updateRender3D "material"): immutable snapshot,
+    // swapped copy-on-write under g_draw_list_mutex. Null = untextured
+    // path, verbatim.
+    std::shared_ptr<const KhMaterialSet> materials;
+    int   mesh = 0;             // mesh registry id (0 = "box"; PUBLISHED
+                                // ids only - see mesh_id_clamp). Meshes
                                 // are authored in ARMA axes, normalized to
                                 // [-0.5, 0.5]^3, scaled per axis by 'size',
                                 // rotated by 'rot', moved to 'pos'.
@@ -692,6 +1167,9 @@ struct RenderStats {
     uint64_t ui_gate_skips = 0;      // UI-phase skips (scene pass active / wrong target)
     uint64_t composite_injections = 0; // pre-translucent injection events (once per scene frame)
     uint64_t composite_meshes = 0;      // meshes drawn through the composited path
+    uint64_t textured_draws = 0;        // per-submesh textured draws issued (KH_TEXTURED)
+    uint64_t tex_loads = 0;             // material textures loaded from disk (cache misses)
+    uint64_t fbx_imports = 0;           // .fbx files parsed + registered (cache misses)
     uint64_t composite_skips = 0;      // injections aborted (resources/PV unavailable)
     uint64_t composite_ambiguous = 0;  // frames where the sim republished matrices mid-cycle
                                        // (diagnostic only - the clear-time latch is retained)
@@ -900,6 +1378,12 @@ cbuffer CBObj : register(b0)
                           // packing: the flush REPAINTS every mesh every
                           // frame (PSMain), so a single-path conversion
                           // gets legacy-overdrawn - field-proven.
+    float4 matParams0;    // KH_TEXTURED material head: map-bound flags,
+    float4 matParams1;    // alpha mode, cutoff, normal strength / base
+    float4 matParams2;    // color + roughness / metalness, emissive
+    float4 matParams3;    // intensity + channel routes (see the material
+                          // block after ApplyLighting). Zeroed and unread
+                          // on every untextured fill site.
     // Dynamic lights mirror: engine cb10/cb11 packing VERBATIM (night-
     // capture disassembly; see the DYNLIGHTS ledger in the C++ section).
     // PER OBJECT: mode 3 culls the pool to this mesh's nearest set.
@@ -950,7 +1434,8 @@ cbuffer CBFrame : register(b1)
     // Per-caster locality list for the map-path cast: the combined-bounds
     // sphere let reconstruction noise anywhere within hundreds of meters
     // MIN-darken the world; per-caster reach restores the slab era's
-    // proven tube-tight rejection. x = pair count.
+    // proven tube-tight rejection. x = pair count; y = 1 arms the
+    // UNCAPPED t2 structured-buffer twin (>16 casters).
     float4 localityMeta;
     float4 locality[32];        // [2i] = center.xyz (engine), [2i+1] = half extents.xyz
     float4 lightAmb;            // rgb = engine ambient color (HDR scene units) from the
@@ -1181,8 +1666,66 @@ void ClipEdgeSliver(float3 wpos, float3 nrm)
     // world camera on RV terrain: skip the clip instead. The failure
     // direction is now 'fireflies possible', never 'geometry lost'.
     if (dot(fxParams0.xyz, fxParams0.xyz) < 1.0f) return;
-    float nv = abs(dot(normalize(nrm), normalize(fxParams0.xyz - wpos)));
-    clip(nv - 0.005f);
+    // SMOOTH-MESH CORRECTION (the FBX round's camera-tracking seam): the
+    // test normal is the FACE normal from screen-space derivatives now,
+    // not the interpolated vertex normal. Smooth shading sweeps the
+    // interpolated normal through edge-on at the silhouette tangent - on
+    // INTERIOR pixels of the spanning triangles - so the old test cut a
+    // thin see-through band that followed the camera across any curved
+    // mesh (field screenshot: a vertical slit tracking the view along a
+    // cylindrical FBX). The derivative normal is what the rasterized
+    // GEOMETRY is doing: a degenerate sliver's face IS edge-on (still
+    // clipped - the firefly contract holds; flat-face builtins behave
+    // byte-identically, interpolated == face there), while a curved
+    // surface's triangles face the camera at their interior pixels. A
+    // near-parallel derivative pair (the truly degenerate fragment)
+    // collapses the ratio to ~0 and clips - the intended verdict.
+    float3 khes_dx = ddx(wpos);
+    float3 khes_dy = ddy(wpos);
+    // FP32 QUANTIZATION GUARD (the close-up noise round; renderstats5 +
+    // field report: path-tracer-like per-pixel sparkle at close range,
+    // and the NEAREST region of the mesh 'near-clipped' in patches -
+    // reaching farther when zoomed, angle-dependent, inconsistent).
+    // ROOT: the interpolated wpos is world-ABSOLUTE by design (the
+    // FP32 rebase covers only the TRANSFORM path - 'the jitter was
+    // geometric, not shading'), so its interpolant carries the map
+    // coordinate's ulp (~0.25-2 mm at RV map ranges). Up close - and
+    // doubly so zoomed, on a 4K target - the per-pixel world step
+    // falls TO that ulp: the derivatives quantize to 0-2 steps per
+    // component, the cross product points anywhere, and this clip
+    // fires as noise (the sparkle) or in contiguous patches where the
+    // quantized pair degenerates (the false 'near clip') - over
+    // exactly the closest, most magnified region. A REAL sliver's
+    // derivative pair spans many ulps along its long axis at any
+    // distance where fireflies are visible at all, so a pair at the
+    // quantization floor cannot be sliver evidence. Follow this
+    // block's own failure-direction rule (fail toward 'fireflies
+    // possible', never 'geometry lost'): stand the clip down when
+    // either derivative sits within ~4 ulps of the coordinate
+    // magnitude (2^-23 = 1.2e-7; 16 = 4 ulps squared).
+    float khes_ulp = max(max(abs(wpos.x), abs(wpos.y)), abs(wpos.z)) * 1.2e-7f;
+    float khes_q2 = khes_ulp * khes_ulp * 16.0f;
+    if (dot(khes_dx, khes_dx) < khes_q2 || dot(khes_dy, khes_dy) < khes_q2) return;
+    // CLOSE-RANGE STAND-DOWN (renderstats18 + the corner discriminator:
+    // 'looking up clips at a corner edge, not at a side' - face-on nv~1
+    // never clips, but standing near a face's own PLANE, the natural
+    // corner posture, puts a LARGE REAL face at true grazing incidence,
+    // and this clip carried no distance qualification: a firefly test
+    // built for DISTANT degenerate slivers ate close-up geometry that
+    // merely shares the sliver's angle. Fireflies are a subpixel-
+    // triangle phenomenon; within metric range a grazing face subtends
+    // real screen area and must draw. 10 m: fireflies live far beyond
+    // it, every reported clip posture well inside it. The quantization
+    // guard above covers the extreme-close ulp regime; this covers the
+    // metric one - both fail toward 'fireflies possible', never
+    // 'geometry lost'.
+    float3 khes_v = fxParams0.xyz - wpos;
+    float khes_vl = length(khes_v);
+    if (khes_vl < 10.0f) return;
+    float3 khes_fn = cross(khes_dx, khes_dy);
+    float khes_nv = abs(dot(khes_fn, khes_v / max(khes_vl, 1.0e-6f)))
+                  / max(length(khes_fn), 1.0e-12f);
+    clip(khes_nv - 0.005f);
 }
 
 // Solid-mesh band / local-volume mask (PSMain and PSComposite): the same
@@ -1314,8 +1857,234 @@ float3 ApplyLighting(float3 base, float3 wpos, float3 nrm, float smf)
     return base * (lightAmb.rgb * lighting0.z + direct + DynLights(wpos, nrm));
 }
 
-struct VSIn  { float3 pos : POSITION; float3 nrm : NORMAL; };
-struct VSOut { float4 pos : SV_Position; float3 wpos : TEXCOORD0; float3 nrm : TEXCOORD1; };
+)HLSL" R"HLSL(
+#if KH_TEXTURED
+// ===========================================================================
+// KH_TEXTURED (FBX materials): five fixed material maps + one sampler.
+// t14-t18 sit INSIDE StateBackup's widened save range; s0 is saved too.
+// matParams packing (kh_bind_material is the single CPU fill):
+//   matParams0: x = bound-map bit flags (1 dif, 2 nrm, 4 orm, 8 emi,
+//               16 spec), y = alpha mode (0 opaque / 1 cutout),
+//               z = cutout threshold, w = normal strength
+//   matParams1: xyz = base color multiplier, w = roughness constant
+//   matParams2: x = metalness constant, y = emissive intensity,
+//               z = occlusion route, w = roughness route
+//   matParams3: x = metallic route, y = alpha route, z = gloss route,
+//               w = spec/gloss workflow flag
+// Routes encode slot*4+channel; -1 = use the fallback argument. The CPU
+// fill already folded the slot conventions and the bound flags into the
+// effective routes, so this side is mechanical.
+// ===========================================================================
+Texture2D<float4> matDiffuse  : register(t14);
+Texture2D<float4> matNormal   : register(t15);
+Texture2D<float4> matOrm      : register(t16);
+Texture2D<float4> matEmissive : register(t17);
+Texture2D<float4> matSpecular : register(t18);
+SamplerState matSamp : register(s0);
+
+float4 KhMatFetch(int slot, float2 uv)
+{
+    if (slot == 0) return matDiffuse.Sample(matSamp, uv);
+    if (slot == 1) return matNormal.Sample(matSamp, uv);
+    if (slot == 2) return matOrm.Sample(matSamp, uv);
+    if (slot == 3) return matEmissive.Sample(matSamp, uv);
+    return matSpecular.Sample(matSamp, uv);
+}
+
+float KhMatRoute(float route, float fallback, float2 uv)
+{
+    int r = (int)route;
+    if (r < 0) return fallback;
+    float4 s = KhMatFetch(r >> 2, uv);
+    int c = r & 3;
+    return c == 0 ? s.r : c == 1 ? s.g : c == 2 ? s.b : s.a;
+}
+
+struct KhMatSurf {
+    float3 albedo; float alpha; float3 nrmT; float occ; float rough;
+    float metal; float3 emissive; float3 specF0; float gloss; float specOn;
+};
+
+KhMatSurf KhSampleMat(float2 uv)
+{
+    KhMatSurf s;
+    int flags = (int)matParams0.x;
+    float4 dif = (flags & 1) ? matDiffuse.Sample(matSamp, uv) : float4(1.0f, 1.0f, 1.0f, 1.0f);
+    s.albedo = dif.rgb * matParams1.xyz;
+    s.alpha = KhMatRoute(matParams3.y, 1.0f, uv);
+    s.nrmT = (flags & 2) ? (matNormal.Sample(matSamp, uv).xyz * 2.0f - 1.0f) : float3(0.0f, 0.0f, 1.0f);
+    s.nrmT.xy *= matParams0.w;
+    s.occ = KhMatRoute(matParams2.z, 1.0f, uv);
+    s.rough = KhMatRoute(matParams2.w, matParams1.w, uv);
+    s.metal = KhMatRoute(matParams3.x, matParams2.x, uv);
+    s.emissive = ((flags & 8) ? matEmissive.Sample(matSamp, uv).rgb : float3(0.0f, 0.0f, 0.0f)) * matParams2.y;
+    s.specOn = matParams3.w;
+    float4 spc = (flags & 16) ? matSpecular.Sample(matSamp, uv) : float4(0.0f, 0.0f, 0.0f, 0.0f);
+    s.specF0 = spc.rgb;
+    s.gloss = KhMatRoute(matParams3.z, spc.a, uv);
+    return s;
+}
+
+// Shared compact GGX core (Cook-Torrance D * G * F / (4 ndv ndl)): ONE
+// implementation for the sun term (KhApplyPBR) and the engine dynamic
+// lights (KhDynLightsPBR). Arithmetic and clamps are the sun path's
+// original lines VERBATIM - factoring must not drift the sun result.
+// outF returns the Fresnel term so the sun path derives its
+// kd = (1 - F) * (1 - metal) energy split without recomputing vdh.
+float3 KhGGXSpec(float3 n, float3 v, float3 l, float rough, float3 F0, out float3 outF)
+{
+    float3 h = normalize(l + v);
+    float ndl = saturate(dot(n, l));
+    float ndv = max(dot(n, v), 1.0e-4f);
+    float ndh = saturate(dot(n, h));
+    float vdh = saturate(dot(v, h));
+    float aa = rough * rough;
+    float a2 = aa * aa;
+    float dd = ndh * ndh * (a2 - 1.0f) + 1.0f;
+    float D = a2 / max(3.14159265f * dd * dd, 1.0e-6f);
+    float kk = (rough + 1.0f) * (rough + 1.0f) * 0.125f;
+    float gl = max(ndl, 1.0e-4f);
+    float G = (ndv / (ndv * (1.0f - kk) + kk)) * (gl / (gl * (1.0f - kk) + kk));
+    outF = F0 + (1.0f - F0) * pow(1.0f - vdh, 5.0f);
+    return D * G * outF / max(4.0f * ndv * gl, 1.0e-4f);
+}
+
+// Engine dynamic lights on the PBR path (the specular-glints round):
+// DynLights' per-light loop VERBATIM - position decode (mode 3 absolute
+// pool / 1 camera-relative world / 2 view space), offset + a0/a1/a2
+// attenuation on the scaled distance, the spot cone log/mul/exp pow with
+// its degenerate-exponent guard, and the hard range fade - any drift
+// here is a wrong-direction glint at night. What changes is the RETURN:
+// full radiance instead of an albedo multiplier. Per light:
+//   albedo * (diffuse_i * ndl * (1 - metal) + ambient_i)  [the old
+//     energy: at metal 0 the Lambert lane is numerically the historic
+//     albedo * DynLights(...) term - the parity anchor; the no-N.L
+//     per-light ambient stays albedo-tinted (the away-facing glow that
+//     makes A3 lights read on surfaces)]
+// + KhGGXSpec(...) * diffuse_i * ndl  [the glint, in the light's own
+//     color; ndl kills below-horizon energy exactly as the sun term's
+//     ndl factor does]
+// all * att, summed, * dlGlobal.w.
+// VIEW VECTOR SPACE: modes 1/2 decode CAMERA-AT-ORIGIN (p = fragment
+// minus camera, mode 2 then rotated - with the normal - by the dlView
+// columns), so v = -normalize(p) is exact IN THE DECODE SPACE and no
+// separate transform exists to mismatch. Mode 3 is absolute world: v
+// needs the camera from fxParams0.xyz (the solid-path contract), and a
+// zeroed camera cannot make a view vector - specular stands down to
+// diffuse-only there rather than minting glints from garbage (DynLights
+// itself never reads the camera in mode 3, so diffuse survives).
+// Dynamic lights are unshadowed engine-wide; smf never touches this.
+float3 KhDynLightsPBR(float3 wpos, float3 nrm, float3 albedo, float3 F0, float rough, float metal)
+{
+    if (dlCtl.x < 0.5f) return float3(0.0f, 0.0f, 0.0f);
+    int pointN = (int)dlCtl.y;
+    int totalN = pointN + (int)dlCtl.z;
+    float3 n = normalize(nrm);
+    float3 p;
+    float specOn = 1.0f;
+    float3 v = float3(0.0f, 0.0f, 1.0f);
+
+    if (dlCtl.x >= 2.5f) {
+        // mode 3: ABSOLUTE world positions (engine axes) - no camera
+        // dependency for the diffuse decode; the view vector alone
+        // consumes fxParams0 (zeroed camera = diffuse-only, see above).
+        p = wpos;
+        if (dot(fxParams0.xyz, fxParams0.xyz) < 1.0f) specOn = 0.0f;
+        else v = normalize(fxParams0.xyz - wpos);
+    } else {
+        // modes 1/2 (diagnostics): camera-origin decodes; a zeroed
+        // camera cannot decode camera-origin lights - stand down rather
+        // than shade garbage (DynLights' own rule).
+        if (dot(fxParams0.xyz, fxParams0.xyz) < 1.0f) return float3(0.0f, 0.0f, 0.0f);
+        p = wpos - fxParams0.xyz;
+
+        if (dlCtl.x >= 1.5f) {
+            p = float3(dot(p, dlView[0].xyz), dot(p, dlView[1].xyz), dot(p, dlView[2].xyz));
+            n = float3(dot(n, dlView[0].xyz), dot(n, dlView[1].xyz), dot(n, dlView[2].xyz));
+        }
+
+        // camera-at-origin: the fragment sits at p, the camera at 0.
+        v = -p / max(length(p), 1.0e-4f);
+    }
+
+    float kdM = 1.0f - saturate(metal);
+    float3 acc = float3(0.0f, 0.0f, 0.0f);
+
+    [loop] for (int i = 0; i < totalN; ++i) {
+        int b = i * 6;
+        float3 L = dlLights[b + 0].xyz - p;
+        float dist = length(L);
+        L /= dist + 1e-4f;
+        float d = max(dist * dlCtl.w - dlLights[b + 4].x, 0.0f);
+        float att = saturate(1.0f / (dot(dlLights[b + 4].yzw, float3(1.0f, d, d * d)) + 1e-4f));
+        att *= 1.0f - saturate((dist * dlCtl.w - dlLights[b + 5].x) * dlLights[b + 5].y);
+
+        if (i >= pointN) {
+            // spot cone: the engine's log/mul/exp pow; the (c > 0) guard
+            // stands in for log(0) = -inf -> exp -> 0, and dodges the
+            // pow(0, 0) NaN a degenerate exponent would mint.
+            float c = saturate((dot(-dlLights[b + 1].xyz, L) - dlLights[b + 1].w) * dlLights[b + 2].w);
+            att *= (c > 0.0f) ? pow(c, dlLights[b + 3].w) : 0.0f;
+        }
+
+        float ndl = max(dot(n, L), 0.0f);
+        float3 diffI = dlGlobal.xyz * dlLights[b + 2].xyz * ndl;
+        float3 lit = albedo * (diffI * kdM + dlLights[b + 3].xyz);
+
+        if (specOn >= 0.5f) {   // uniform branch (mode verdict, not per-light)
+            float3 khsF;
+            lit += KhGGXSpec(n, v, L, rough, F0, khsF) * diffI;
+        }
+
+        acc += lit * att;
+    }
+
+    return acc * dlGlobal.w;
+}
+
+)HLSL" R"HLSL(// Compact GGX (Cook-Torrance specular + Lambert diffuse) fed IDENTICAL
+// inputs to ApplyLighting: the same sun dir/color lanes, the published
+// ambient block, the min-combined shadow factor, and the same engine
+// dynamic-light list (per-light GGX glints via KhDynLightsPBR since the
+// specular round; the Lambert lane keeps the untextured path's energy) -
+// a textured mesh sits in exactly the light an untextured one does. Diffuse is NOT divided by pi, matching the Lambert path's
+// energy convention, so rough dielectrics land at the field-proven
+// brightness. View dir comes from fxParams0.xyz - the camera on every
+// effect-0 solid fill (the SolidMask contract), the only path materials
+// run on. Emissive adds unshadowed, pre-fog (it fogs like everything).
+float3 KhApplyPBR(KhMatSurf m, float3 wpos, float3 n, float smf)
+{
+    if (lighting0.x < 0.5f || lighting1.w < 0.5f) return m.albedo * m.occ + m.emissive;
+    float rough = m.specOn >= 0.5f ? saturate(1.0f - m.gloss) : saturate(m.rough);
+    rough = max(rough, 0.045f);
+    float3 F0 = m.specOn >= 0.5f ? m.specF0
+              : lerp(float3(0.04f, 0.04f, 0.04f), m.albedo, saturate(m.metal));
+    float metal = m.specOn >= 0.5f ? 0.0f : saturate(m.metal);
+    float3 l = lighting1.xyz;
+    float3 v = normalize(fxParams0.xyz - wpos);
+    float ndl = saturate(dot(n, l));
+    float3 F;
+    float3 spec = KhGGXSpec(n, v, l, rough, F0, F);
+    float3 kd = (1.0f - F) * (1.0f - metal);
+    float3 direct = lighting2.rgb * (lighting0.w * ndl * smf) * (kd * m.albedo + spec);
+    float3 amb = lightAmb.rgb * lighting0.z * m.occ;
+    // Dynamic lights: full radiance from KhDynLightsPBR (specular round)
+    // - the Lambert lane inside is numerically the retired
+    // m.albedo * DynLights(wpos, n) term at metal 0 (the parity anchor).
+    return m.albedo * amb + KhDynLightsPBR(wpos, n, m.albedo, F0, rough, metal) + direct + m.emissive;
+}
+#endif
+
+struct VSIn  { float3 pos : POSITION; float3 nrm : NORMAL;
+#if KH_TEXTURED
+    float2 uv : TEXCOORD0; float4 tan : TANGENT;   // 48-byte lanes (layout_tex)
+#endif
+};
+struct VSOut { float4 pos : SV_Position; float3 wpos : TEXCOORD0; float3 nrm : TEXCOORD1;
+#if KH_TEXTURED
+    float2 uv : TEXCOORD2; float4 tanw : TEXCOORD3;   // world tangent + handedness
+#endif
+};
 
 // SHARED RECEIVE BLOCK (relocated from the composite unit for the
 // translucent-receive fix): PSMain and PSComposite both consume the
@@ -1578,6 +2347,13 @@ VSOut VSMain(VSIn i)
     // the object rotation (the inverse-transpose of scale-then-rotate for
     // orthonormal R - see kh_set_rotation).
     o.nrm = normalize(KhRotate(i.nrm / max(sizeAxes.xyz, float3(1e-4f, 1e-4f, 1e-4f))));
+#if KH_TEXTURED
+    o.uv = i.uv;
+    // Tangents are COVARIANT (transform like positions, not normals):
+    // per-axis scale then the object rotation, renormalized. The
+    // handedness sign rides untouched in w.
+    o.tanw = float4(normalize(KhRotate(i.tan.xyz * sizeAxes.xyz)), i.tan.w);
+#endif
     return o;
 }
 
@@ -1614,6 +2390,11 @@ float KhSceneLoad(int2 p) { return sceneDepthTex.Load(int3(p, 0)).x; }
 // Pre-mesh scene COLOR capture (t3, single-sample) - the perceptual-
 // composite blend source for the FLUSH mesh pass; see PSMain's packing.
 Texture2D<float4> sceneColorTex : register(t3);
+// Extended per-caster locality list (localityMeta.y arms): 2 float4
+// per caster, [2i] center / [2i+1] half extents, engine axes - the
+// UNCAPPED twin of the 16-pair CB list below. Bound only at the mask
+// cast fire; compiled out of every entry that never reads it.
+StructuredBuffer<float4> khrLocalityExt : register(t2);
 
 )HLSL" R"HLSL(float4 PSMaskCast(VSOut i) : SV_Target
 {
@@ -1715,7 +2496,19 @@ Texture2D<float4> sceneColorTex : register(t3);
         bool near_ok = false;
         float stretch = 2.0f + 3.0f / max(abs(castView[2].y), 0.15f);
 
-        if (localityMeta.x >= 0.5f) {
+        if (localityMeta.y >= 0.5f) {
+            // EXTENDED list (t2, uncapped): same tube-tight test, the
+            // caster count is no longer bounded by the CB layout.
+            int lc = (int)localityMeta.x;
+
+            [loop] for (int li = 0; li < lc && !near_ok; ++li) {
+                float3 lce = khrLocalityExt[li * 2].xyz;
+                float3 lhe = khrLocalityExt[li * 2 + 1].xyz;
+                float lr = min(length(lhe) * stretch, 600.0f);
+                float3 ld = lce - pw;
+                if (dot(ld, ld) < lr * lr) near_ok = true;
+            }
+        } else if (localityMeta.x >= 0.5f && localityMeta.x <= 16.5f) {
             int lc = (int)localityMeta.x;
 
             [loop] for (int li = 0; li < lc && !near_ok; ++li) {
@@ -1884,6 +2677,7 @@ float4 PSMain(VSOut i) : SV_Target
 
         return float4(1.0f, 1.0f, 1.0f, 0.15f);
     }
+)HLSL" R"HLSL(
 
     int bm = (int)sizeAxes.w;
     // Intensity (color.a, which carries the lifetime envelope) applies to
@@ -1903,6 +2697,35 @@ float4 PSMain(VSOut i) : SV_Target
     // and grazing N.L skip all shadow work, as on the composite path;
     // cold frames degrade exactly as the composite does (empty band
     // borders fall through, shadowMeta.x = 0 short-circuits the map).
+#if KH_TEXTURED
+    // KH_TEXTURED: sample BELOW the FAR CONTRACT + guard blocks (the
+    // section-4 checkpoint - the textured twin adds no return/discard
+    // above them), cutout-clip, then build the mapped shading normal.
+    // The GEOMETRIC normal keeps owning the receive gating below -
+    // shadow behavior stays in parity with the untextured twin.
+    KhMatSurf khtxS = KhSampleMat(i.uv);
+    if (matParams0.y >= 0.5f) clip(khtxS.alpha - matParams0.z);   // cutout kill
+    // OPAQUE ALPHA CONTRACT (the whitish-see-through fix): sampled alpha
+    // NEVER reaches the blend - survivors draw at alpha 1 in BOTH modes.
+    // Source PNGs routinely carry alpha channels; letting diffuse.a leak
+    // into per-pixel translucency re-created the raw-HDR radiance bleed
+    // on the opaque path, BELOW the perceptual packing's per-object
+    // color.a arming gate. Until per-material blend exists, sampled
+    // alpha means cutout thresholding ONLY; object-level color.a keeps
+    // its packed translucency path untouched.
+    khtxS.alpha = 1.0f;
+    float3 khtxN;
+    {
+        float3 khtn = normalize(i.nrm);
+        float3 khtt = i.tanw.xyz - khtn * dot(khtn, i.tanw.xyz);
+        float khttl = length(khtt);
+        if (khttl > 1.0e-5f) {
+            khtt /= khttl;
+            float3 khtb = cross(khtn, khtt) * i.tanw.w;
+            khtxN = normalize(khtt * khtxS.nrmT.x + khtb * khtxS.nrmT.y + khtn * khtxS.nrmT.z);
+        } else khtxN = khtn;   // degenerate tangent: geometric normal
+    }
+#endif
     float smf = 1.0f;
 
     if (lighting0.x >= 0.5f && dot(i.nrm, lighting1.xyz) > 0.01f) {
@@ -1910,7 +2733,12 @@ float4 PSMain(VSOut i) : SV_Target
         else                    smf = ShadowMapFactor(i.wpos - shadowMeta2.yzw);
         smf = min(smf, SunShadowFactorSelf(i.wpos, i.nrm));
     }
+#if KH_TEXTURED
+    khtxS.albedo *= color.rgb;   // the object color tints the albedo lane only
+    float3 lc = KhApplyPBR(khtxS, i.wpos, khtxN, smf);
+#else
     float3 lc = ApplyLighting(color.rgb, i.wpos, i.nrm, smf);
+#endif
 
     // DEBUG VISUAL, term isolation (modes 5-7, setRenderDebug; see the
     // g_dbg_mode catalog): 5 = raw CB albedo, 6 = lit color pre-fog
@@ -1967,7 +2795,11 @@ float4 PSMain(VSOut i) : SV_Target
         lc = lerp(fog_target, lc, trans);
     }
 
+#if KH_TEXTURED
+    float a = color.a * khtxS.alpha * SolidMask(i.wpos);
+#else
     float a = color.a * SolidMask(i.wpos);
+#endif
     if (bm == 1 || bm == 3) return float4(lc * a, 1.0f);
     if (bm == 2) return float4(lerp(float3(1.0f, 1.0f, 1.0f), lc, a), 1.0f);
     if (bm == 4) return float4(lc * a, 1.0f);
@@ -2077,7 +2909,11 @@ Texture2D<float4> sceneColorTex : register(t3);
 // (split: MSVC C2026 caps a single literal at ~16 KB - the fog additions
 // crossed it; the two halves are joined at the compile site)
 static const char* g_hlsl_composite2 = R"HLSL(
-struct VSOutC { float4 pos : SV_Position; float3 wpos : TEXCOORD0; float3 nrm : TEXCOORD1; };
+struct VSOutC { float4 pos : SV_Position; float3 wpos : TEXCOORD0; float3 nrm : TEXCOORD1;
+#if KH_TEXTURED
+    float2 uv : TEXCOORD2; float4 tanw : TEXCOORD3;   // world tangent + handedness
+#endif
+};
 
 VSOutC VSComposite(VSIn i)
 {
@@ -2104,6 +2940,13 @@ VSOutC VSComposite(VSIn i)
     // Inverse per-axis scale, then object rotation, for the normal (see
     // VSMain).
     o.nrm = normalize(KhRotate(i.nrm / max(sizeAxes.xyz, float3(1e-4f, 1e-4f, 1e-4f))));
+#if KH_TEXTURED
+    o.uv = i.uv;
+    // Tangents are COVARIANT (transform like positions, not normals):
+    // per-axis scale then the object rotation, renormalized. The
+    // handedness sign rides untouched in w.
+    o.tanw = float4(normalize(KhRotate(i.tan.xyz * sizeAxes.xyz)), i.tan.w);
+#endif
     return o;
 }
 
@@ -2192,6 +3035,18 @@ float4 PSComposite(VSOutC i) : SV_Target
         float khaNdc = depthParams.x + depthParams.y / max(khaD, 0.01f);
         khaODepth = clamp(depthParams.z + (depthParams.w - depthParams.z) * khaNdc,
                           depthParams.z, depthParams.w);
+        // NEAR-GAP RAMP (build 26001; full ledger at KH_NEARZ_GAP_FRAC):
+        // fragments nearer than the engine near plane order into the
+        // partition gap below the world floor instead of collapsing
+        // onto it. fxMeta.x carries the near estimate (> 0 arms; every
+        // other solid-mesh fill leaves it zero - effect meshes never
+        // compile this shader), fxMeta.y the widened floor the routed
+        // draw's viewport opened. Monotone in metric depth and equal
+        // to the world encode at the near plane - continuous, no pop.
+        if (fxMeta.x > 0.0f && khaD < fxMeta.x) {
+            khaODepth = fxMeta.y + (depthParams.z - fxMeta.y) *
+                        saturate(khaD / fxMeta.x);
+        }
     }
 #endif
 
@@ -2277,6 +3132,35 @@ float4 PSComposite(VSOutC i) : SV_Target
 
     int bm = (int)sizeAxes.w;
 
+#if KH_TEXTURED
+    // KH_TEXTURED: sample BELOW the FAR CONTRACT + guard blocks (the
+    // section-4 checkpoint - the textured twin adds no return/discard
+    // above them), cutout-clip, then build the mapped shading normal.
+    // The GEOMETRIC normal keeps owning the receive gating below -
+    // shadow behavior stays in parity with the untextured twin.
+    KhMatSurf khtxS = KhSampleMat(i.uv);
+    if (matParams0.y >= 0.5f) clip(khtxS.alpha - matParams0.z);   // cutout kill
+    // OPAQUE ALPHA CONTRACT (the whitish-see-through fix): sampled alpha
+    // NEVER reaches the blend - survivors draw at alpha 1 in BOTH modes.
+    // Source PNGs routinely carry alpha channels; letting diffuse.a leak
+    // into per-pixel translucency re-created the raw-HDR radiance bleed
+    // on the opaque path, BELOW the perceptual packing's per-object
+    // color.a arming gate. Until per-material blend exists, sampled
+    // alpha means cutout thresholding ONLY; object-level color.a keeps
+    // its packed translucency path untouched.
+    khtxS.alpha = 1.0f;
+    float3 khtxN;
+    {
+        float3 khtn = normalize(i.nrm);
+        float3 khtt = i.tanw.xyz - khtn * dot(khtn, i.tanw.xyz);
+        float khttl = length(khtt);
+        if (khttl > 1.0e-5f) {
+            khtt /= khttl;
+            float3 khtb = cross(khtn, khtt) * i.tanw.w;
+            khtxN = normalize(khtt * khtxS.nrmT.x + khtb * khtxS.nrmT.y + khtn * khtxS.nrmT.z);
+        } else khtxN = khtn;   // degenerate tangent: geometric normal
+    }
+#endif
     float smf = 1.0f;
 
     // N.L early-out: a face pointing away from (or grazing) the light has
@@ -2292,7 +3176,12 @@ float4 PSComposite(VSOutC i) : SV_Target
         // darker answer wins without stacking.
         smf = min(smf, SunShadowFactorSelf(i.wpos, i.nrm));
     }
+#if KH_TEXTURED
+    khtxS.albedo *= color.rgb;   // the object color tints the albedo lane only
+    float3 lc = KhApplyPBR(khtxS, i.wpos, khtxN, smf);
+#else
     float3 lc = ApplyLighting(color.rgb, i.wpos, i.nrm, smf);
+#endif
 
     // DEBUG VISUAL, term isolation (modes 5-7, setRenderDebug; see the
     // g_dbg_mode catalog): 5 = raw CB albedo, 6 = lit color pre-fog
@@ -2391,7 +3280,11 @@ float4 PSComposite(VSOutC i) : SV_Target
         // permanently live mirror.)
         lc = lerp(fog_target, lc, trans);
     }
+#if KH_TEXTURED
+    float a = color.a * khtxS.alpha * SolidMask(i.wpos);
+#else
     float a = color.a * SolidMask(i.wpos);
+#endif
     if (bm == 1 || bm == 3) return float4(lc * a, 1.0f);
     if (bm == 2) return float4(lerp(float3(1.0f, 1.0f, 1.0f), lc, a), 1.0f);
     if (bm == 4) return float4(lc * a, 1.0f);
@@ -3022,6 +3915,13 @@ struct alignas(16) ConstantData {
                                // in-shader - auxiliary fills stay correct)
     float dbg_ctl[4];          // x = setRenderDebug mode; mesh fill sites only
     float blend_ctl[4];        // x = perceptual-composite enable (inject fill only)
+    // KH_TEXTURED material head (kh_bind_material is the ONLY fill; the
+    // zeroed default is unread by every untextured shader). LOCKSTEP
+    // with the HLSL matParams0-3 - the mirror contract, per block.
+    float mat_params0[4];      // map flags / alpha mode / cutoff / normal strength
+    float mat_params1[4];      // base color rgb / roughness
+    float mat_params2[4];      // metalness / emissive intensity / occ route / rough route
+    float mat_params3[4];      // metal route / alpha route / gloss route / spec workflow
     float dl_ctl[4];           // x = mode (0 off / 1 camera-relative world /
                                // 2 view space / 3 absolute pool), y = point
                                // count, z = spot count, w = distance scale
@@ -3062,7 +3962,8 @@ struct alignas(16) ConstantData {
     float sun_vp[4][4];    // row-vector world -> sun-depth clip
     float sun_meta[4];     // x = valid, y = map size (px), z = compare bias
                            // (normalized depth units), w = strength
-    float locality_meta[4];    // x = per-caster locality pair count
+    float locality_meta[4];    // x = per-caster locality pair count; y = 1 -> the
+                               // uncapped t2 structured-buffer list carries them
     float locality[32][4];     // [2i] = center.xyz, [2i+1] = half extents.xyz
     float light_amb[4];        // rgb = engine ambient (HDR) or (1,1,1) cold; w = engine mode
     float fog_engine[4];       // x = density scale (blk 41), y = fog end (blk 48),
@@ -3199,8 +4100,984 @@ inline std::string compile_shader(const char* src, const char* entry, const char
     return "";
 }
 
+// GPU vertex-buffer top-up: create a VB for every PUBLISHED mesh that
+// has none yet. Reached through EVERY ensure_resources call (the
+// initialized fast path included), i.e. always inside a serialized
+// graphics window - injection (render thread) or a lock-held flush
+// (render thread parked) - which is the only place g_res.mesh_vb ever
+// grows, so the draw loops' unlocked indexing races nothing. Device
+// CreateBuffer is free-threaded, so the creating thread is irrelevant.
+// Doubles as the DEVICE-RESET rebuild: g_res.release() empties mesh_vb
+// while the CPU mesh store survives, so the next ensure re-creates every
+// buffer - builtins and dynamically registered meshes alike - through
+// this one path. On failure the partial progress is kept (created VBs
+// stay), the error is returned and the caller skips the frame, so
+// mesh_vb.size() always equals the VBs actually created and no draw path
+// can index a hole; the next ensure retries from where it stopped.
+inline std::string ensure_mesh_vbs(ID3D11Device* dev) {
+    const uint32_t khmv_n = mesh_count();
+
+    while (g_res.mesh_vb.size() < khmv_n) {
+        const MeshDef& khmv_md = mesh_def(static_cast<int>(g_res.mesh_vb.size()));
+        // Empty geometry cannot make a buffer; registration must reject it
+        // (phase-2 contract) - fail loudly rather than publish a hole.
+        if (khmv_md.verts.empty()) return "mesh '" + khmv_md.name + "': empty geometry";
+        D3D11_BUFFER_DESC bd = {};
+        bd.ByteWidth = static_cast<UINT>(khmv_md.verts.size() * sizeof(MeshVertex));
+        bd.Usage = D3D11_USAGE_IMMUTABLE;
+        bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+        D3D11_SUBRESOURCE_DATA init = { khmv_md.verts.data(), 0, 0 };
+        ID3D11Buffer* khmv_vb = nullptr;
+        const HRESULT khmv_hr = dev->CreateBuffer(&bd, &init, &khmv_vb);
+        if (FAILED(khmv_hr)) return "Create mesh VB " + hr_str(khmv_hr);
+        g_res.mesh_vb.push_back(khmv_vb);
+    }
+
+    return "";
+}
+
+
+// ===========================================================================
+// RENDER ASSET DISCOVERY: the AI-framework search recipe, "rendering"
+// edition. Priority 1 is Documents\Arma 3\kh_framework\rendering, priority
+// 2 every active mod's "rendering" folder (ModFolderSearcher - its header
+// precedes this one). A request may be a bare filename OR a relative path
+// ("props\crate.fbx"): the relative form is tried verbatim under each
+// root first, then the bare-filename scan runs as the fallback, exactly
+// like the .gguf discovery. Resolutions are memoized: SQF-side updates
+// re-send paths every call and the scan walks mod folders on disk.
+// ===========================================================================
+class RenderAssetDiscovery {
+public:
+    static std::vector<std::filesystem::path> find_all_render_directories() {
+        return ModFolderSearcher::find_directories_in_mods("rendering");
+    }
+
+    static std::string find_asset_file(const std::string& request) {
+        if (request.empty()) return "";
+        {
+            std::lock_guard<std::mutex> g(cache_mx());
+            auto it = cache().find(request);
+            if (it != cache().end()) return it->second;
+        }
+        std::vector<std::filesystem::path> search_paths;
+
+        // Priority 1: Documents folder
+        try {
+            char docs_path[MAX_PATH];
+
+            if (SHGetFolderPathA(NULL, CSIDL_MYDOCUMENTS, NULL, SHGFP_TYPE_CURRENT, docs_path) == S_OK) {
+                search_paths.push_back(std::filesystem::path(docs_path) / "Arma 3" / "kh_framework" / "rendering");
+            }
+        } catch (...) {}
+
+        // Priority 2: mod folders
+        try {
+            auto mod_dirs = find_all_render_directories();
+            search_paths.insert(search_paths.end(), mod_dirs.begin(), mod_dirs.end());
+        } catch (...) {}
+
+        std::string resolved;
+
+        // Relative-path form first: root / request as given.
+        for (const auto& root : search_paths) {
+            try {
+                std::filesystem::path p = root / request;
+                if (std::filesystem::exists(p) && std::filesystem::is_regular_file(p)) { resolved = p.string(); break; }
+            } catch (...) {}
+        }
+
+        // Bare-filename fallback (the .gguf behavior): scan every root
+        // recursively for the name alone.
+        if (resolved.empty()) {
+            try {
+                const std::string fname = std::filesystem::path(request).filename().string();
+                auto found = ModFolderSearcher::find_file_by_name(search_paths, fname);
+                if (!found.empty()) resolved = found.string();
+            } catch (...) {}
+        }
+
+        if (!resolved.empty()) {
+            std::lock_guard<std::mutex> g(cache_mx());
+            cache()[request] = resolved;
+        }
+
+        return resolved;
+    }
+
+private:
+    static std::mutex& cache_mx() { static std::mutex m; return m; }
+    static std::unordered_map<std::string, std::string>& cache() {
+        static std::unordered_map<std::string, std::string> c;
+        return c;
+    }
+};
+
+// ===========================================================================
+// MATERIAL TEXTURE CACHE + LOADERS. Cache key = lowercased resolved path +
+// the sRGB flag (one image may legitimately load both ways). THREADING
+// CONTRACT: resolution happens ONLY inside the serialized graphics
+// windows (the injection on the render thread, or a lock-held flush with
+// the render thread parked) - the same mutual exclusion every g_res
+// mutation relies on - so the map needs no lock of its own; entries hold
+// device objects, released by kh_tex_cache_release from the engine-reset
+// hook AND at the mission-end full destroy (the CPU-side map survives
+// nothing: reloads come from disk, which is the correct source after a
+// device loss and matches the fresh-process contract across missions). A failed load latches
+// (reported once) so a broken file costs one disk hit, not one per draw.
+// ===========================================================================
+struct KhTexEntry {
+    ID3D11ShaderResourceView* srv = nullptr;
+    bool failed = false;
+};
+
+static std::unordered_map<std::string, KhTexEntry> g_tex_cache;
+
+inline void kh_tex_cache_release() {
+    for (auto& kv : g_tex_cache) KH_SAFE_RELEASE(kv.second.srv);
+    g_tex_cache.clear();
+}
+
+// Minimal native DDS: BC1/BC2/BC3 (classic FourCC or DX10 header) and
+// 32-bit uncompressed RGBA/BGRA, with whatever mip chain the file
+// carries, uploaded IMMUTABLE. Pre-compressed + pre-mipped is the
+// performance path for real assets; everything else goes through stb.
+inline ID3D11ShaderResourceView* kh_load_dds(ID3D11Device* dev, const std::vector<uint8_t>& f,
+                                             bool srgb, std::string& err) {
+    auto rd32 = [&](size_t off) { uint32_t v; memcpy(&v, f.data() + off, 4); return v; };
+    if (f.size() < 128 || rd32(0) != 0x20534444u) { err = "not a DDS file"; return nullptr; }
+    const uint32_t height = rd32(12), width = rd32(16);
+    uint32_t mips = rd32(28);
+    const uint32_t pf_flags = rd32(80), fourcc = rd32(84);
+    const uint32_t bitcount = rd32(88), rmask = rd32(92), amask = rd32(104);
+    if (width == 0 || height == 0 || width > 16384 || height > 16384) { err = "bad dimensions"; return nullptr; }
+    if (mips == 0) mips = 1;
+    if (mips > 16) mips = 16;
+
+    DXGI_FORMAT fmt = DXGI_FORMAT_UNKNOWN;
+    bool bc = false;
+    uint32_t blk = 16;
+    size_t data_off = 128;
+    const uint32_t FOURCC_DX10 = 0x30315844u;
+
+    if ((pf_flags & 0x4u) && fourcc == FOURCC_DX10) {           // DX10 extension header
+        if (f.size() < 148) { err = "truncated DX10 header"; return nullptr; }
+        const uint32_t dxgi = rd32(128);
+        data_off = 148;
+
+        switch (dxgi) {
+            case 71: case 72: fmt = srgb ? DXGI_FORMAT_BC1_UNORM_SRGB : DXGI_FORMAT_BC1_UNORM; bc = true; blk = 8;  break;
+            case 74: case 75: fmt = srgb ? DXGI_FORMAT_BC2_UNORM_SRGB : DXGI_FORMAT_BC2_UNORM; bc = true; blk = 16; break;
+            case 77: case 78: fmt = srgb ? DXGI_FORMAT_BC3_UNORM_SRGB : DXGI_FORMAT_BC3_UNORM; bc = true; blk = 16; break;
+            case 98: case 99: fmt = srgb ? DXGI_FORMAT_BC7_UNORM_SRGB : DXGI_FORMAT_BC7_UNORM; bc = true; blk = 16; break;
+            case 28: case 29: fmt = srgb ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM; break;
+            case 87: case 91: fmt = srgb ? DXGI_FORMAT_B8G8R8A8_UNORM_SRGB : DXGI_FORMAT_B8G8R8A8_UNORM; break;
+            default: err = "unsupported DXGI format " + std::to_string(dxgi); return nullptr;
+        }
+    } else if (pf_flags & 0x4u) {                               // classic FourCC
+        const uint32_t DXT1 = 0x31545844u, DXT3 = 0x33545844u, DXT5 = 0x35545844u;
+        if      (fourcc == DXT1) { fmt = srgb ? DXGI_FORMAT_BC1_UNORM_SRGB : DXGI_FORMAT_BC1_UNORM; bc = true; blk = 8; }
+        else if (fourcc == DXT3) { fmt = srgb ? DXGI_FORMAT_BC2_UNORM_SRGB : DXGI_FORMAT_BC2_UNORM; bc = true; }
+        else if (fourcc == DXT5) { fmt = srgb ? DXGI_FORMAT_BC3_UNORM_SRGB : DXGI_FORMAT_BC3_UNORM; bc = true; }
+        else { err = "unsupported FourCC"; return nullptr; }
+    } else if ((pf_flags & 0x40u) && bitcount == 32) {          // uncompressed 32-bit
+        const bool has_a = amask != 0;
+        if      (rmask == 0x00ff0000u) fmt = srgb ? DXGI_FORMAT_B8G8R8A8_UNORM_SRGB : DXGI_FORMAT_B8G8R8A8_UNORM;
+        else if (rmask == 0x000000ffu) fmt = srgb ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM;
+        else { err = "unsupported 32-bit masks"; return nullptr; }
+        (void)has_a;   // X8 variants read alpha 255 through the A8 formats; harmless
+    } else {
+        err = "unsupported pixel format (BC1/2/3/7 or 32-bit RGBA expected)";
+        return nullptr;
+    }
+
+    D3D11_SUBRESOURCE_DATA init[16] = {};
+    size_t off = data_off;
+
+    for (uint32_t m = 0; m < mips; ++m) {
+        const uint32_t mw = width >> m ? width >> m : 1;
+        const uint32_t mh = height >> m ? height >> m : 1;
+        const size_t pitch = bc ? static_cast<size_t>((mw + 3) / 4) * blk : static_cast<size_t>(mw) * 4;
+        const size_t rows = bc ? (mh + 3) / 4 : mh;
+        const size_t bytes = pitch * rows;
+        if (off + bytes > f.size()) {
+            if (m == 0) { err = "truncated pixel data"; return nullptr; }
+            mips = m;   // short chain: use what the file actually holds
+            break;
+        }
+        init[m].pSysMem = f.data() + off;
+        init[m].SysMemPitch = static_cast<UINT>(pitch);
+        off += bytes;
+    }
+
+    D3D11_TEXTURE2D_DESC td = {};
+    td.Width = width; td.Height = height;
+    td.MipLevels = mips; td.ArraySize = 1;
+    td.Format = fmt;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_IMMUTABLE;
+    td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    ID3D11Texture2D* tex = nullptr;
+    HRESULT hr = dev->CreateTexture2D(&td, init, &tex);
+    if (FAILED(hr)) { err = "CreateTexture2D " + hr_str(hr); return nullptr; }
+    ID3D11ShaderResourceView* srv = nullptr;
+    hr = dev->CreateShaderResourceView(tex, nullptr, &srv);
+    tex->Release();
+    if (FAILED(hr)) { err = "CreateSRV " + hr_str(hr); return nullptr; }
+    return srv;
+}
+
+// stb path: decode to RGBA8; with a context available (always true inside
+// the serialized draw windows) build a full mip chain via GenerateMips -
+// the windows are exactly the sanctioned safe points for context work.
+inline ID3D11ShaderResourceView* kh_load_stb(ID3D11Device* dev, ID3D11DeviceContext* ctx,
+                                             const std::string& path, bool srgb, std::string& err) {
+    int w = 0, h = 0, comp = 0;
+    stbi_uc* px = stbi_load(path.c_str(), &w, &h, &comp, 4);
+    if (!px) { err = std::string("decode failed: ") + (stbi_failure_reason() ? stbi_failure_reason() : "?"); return nullptr; }
+    const DXGI_FORMAT fmt = srgb ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM;
+    ID3D11ShaderResourceView* srv = nullptr;
+
+    if (ctx) {
+        D3D11_TEXTURE2D_DESC td = {};
+        td.Width = static_cast<UINT>(w); td.Height = static_cast<UINT>(h);
+        td.MipLevels = 0;                 // full chain
+        td.ArraySize = 1;
+        td.Format = fmt;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+        td.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
+        ID3D11Texture2D* tex = nullptr;
+        HRESULT hr = dev->CreateTexture2D(&td, nullptr, &tex);
+        if (SUCCEEDED(hr)) {
+            ctx->UpdateSubresource(tex, 0, nullptr, px, static_cast<UINT>(w) * 4, 0);
+            hr = dev->CreateShaderResourceView(tex, nullptr, &srv);
+            if (SUCCEEDED(hr)) ctx->GenerateMips(srv);
+            else err = "CreateSRV " + hr_str(hr);
+            tex->Release();
+        } else err = "CreateTexture2D " + hr_str(hr);
+    } else {
+        D3D11_TEXTURE2D_DESC td = {};
+        td.Width = static_cast<UINT>(w); td.Height = static_cast<UINT>(h);
+        td.MipLevels = 1; td.ArraySize = 1;
+        td.Format = fmt;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_IMMUTABLE;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        D3D11_SUBRESOURCE_DATA init = { px, static_cast<UINT>(w) * 4, 0 };
+        ID3D11Texture2D* tex = nullptr;
+        HRESULT hr = dev->CreateTexture2D(&td, &init, &tex);
+        if (SUCCEEDED(hr)) {
+            hr = dev->CreateShaderResourceView(tex, nullptr, &srv);
+            if (FAILED(hr)) err = "CreateSRV " + hr_str(hr);
+            tex->Release();
+        } else err = "CreateTexture2D " + hr_str(hr);
+    }
+
+    stbi_image_free(px);
+    return srv;
+}
+
+// Cache front door: resolved path -> SRV (loading on the first miss).
+// Serialized-window contract above; nullptr = missing/failed (latched).
+inline ID3D11ShaderResourceView* kh_tex_resolve(ID3D11Device* dev, ID3D11DeviceContext* ctx,
+                                                const std::string& path, bool srgb) {
+    if (path.empty() || !dev) return nullptr;
+    std::string key = path;
+    std::transform(key.begin(), key.end(), key.begin(), ::tolower);
+    key += srgb ? "|s" : "|l";
+    auto it = g_tex_cache.find(key);
+    if (it != g_tex_cache.end()) return it->second.srv;
+
+    KhTexEntry e;
+    std::string err;
+
+    if (kh_ends_with_ci(path, ".dds")) {
+        std::vector<uint8_t> bytes;
+        try {
+            std::ifstream fs(path, std::ios::binary | std::ios::ate);
+            if (fs) {
+                const std::streamsize n = fs.tellg();
+                if (n > 0 && n < (std::streamsize)256u * 1024u * 1024u) {
+                    bytes.resize(static_cast<size_t>(n));
+                    fs.seekg(0);
+                    fs.read(reinterpret_cast<char*>(bytes.data()), n);
+                }
+            }
+        } catch (...) {}
+        if (bytes.empty()) err = "read failed";
+        else e.srv = kh_load_dds(dev, bytes, srgb, err);
+    } else {
+        e.srv = kh_load_stb(dev, ctx, path, srgb, err);
+    }
+
+    if (e.srv) {
+        g_stats.tex_loads++;
+    } else {
+        e.failed = true;
+        // TGA triage hint (the verification round): stb decodes both
+        // origins (the descriptor flip bit), RLE and uncompressed
+        // true-color 15/16/24/32-bit, grayscale, and 8-bit color-mapped
+        // TGAs - so a decode failure on a .tga is an exotic variant, a
+        // truncated file, or an extension-vs-content mismatch. Name the
+        // universal fix in the same breath as the stbi reason: the error
+        // channel is SQF-side and the re-export advice saves a round trip.
+        if (kh_ends_with_ci(path, ".tga")) {
+            err += " - if the file opens elsewhere, re-export as uncompressed true-color 24/32-bit TGA";
+        }
+        kh_report_error("KH texture '" + path + "': " + err);
+    }
+
+    g_tex_cache[key] = e;
+    return e.srv;
+}
+
+// ===========================================================================
+// FBX IMPORT (ufbx). Pipeline per the plan: load with target axes =
+// right-handed z-up at 1 m units and MODIFY_GEOMETRY space conversion, so
+// vertices arrive directly in ARMA's OWN authoring axes (x east, y north,
+// z up - the registry's authoring contract); triangulate; bucket
+// triangles by MATERIAL NAME (merged across nodes - each bucket becomes
+// one submesh, the unit "material" updates address); per-axis normalize
+// into [-0.5, 0.5]^3 recording the native extents; mikktspace tangents
+// (when UVs exist) in ARMA space; then meshgen::bake exactly like a
+// builtin (axis swap, tangent handedness flip, winding normalization).
+// Registration follows the section-2 contract LITERALLY: append
+// (invisible), then publish + GPU top-up under ScopedGraphicsLock - the
+// render thread is parked, which IS the required park point - so the new
+// id is fully drawable the moment the SQF command returns. The parse
+// itself runs unlocked (only the publish window blocks the renderer).
+// SYNCHRONOUS BY DESIGN (v1): a large file hitches the calling script's
+// frame once; the path cache makes every later spawn free.
+// ===========================================================================
+static std::unordered_map<std::string, int> g_fbx_cache;   // lower(resolved path) -> mesh id
+static std::mutex g_fbx_cache_mutex;                       // game/worker threads
+
+namespace khmk {   // mikktspace callbacks over the expanded triangle list
+    inline std::vector<MeshVertex>& V(const SMikkTSpaceContext* c) {
+        return *static_cast<std::vector<MeshVertex>*>(c->m_pUserData);
+    }
+    inline int get_num_faces(const SMikkTSpaceContext* c) { return static_cast<int>(V(c).size() / 3); }
+    inline int get_num_verts(const SMikkTSpaceContext*, const int) { return 3; }
+    inline void get_pos(const SMikkTSpaceContext* c, float out[], const int f, const int v) {
+        memcpy(out, V(c)[f * 3 + v].pos, 12);
+    }
+    inline void get_nrm(const SMikkTSpaceContext* c, float out[], const int f, const int v) {
+        memcpy(out, V(c)[f * 3 + v].nrm, 12);
+    }
+    inline void get_uv(const SMikkTSpaceContext* c, float out[], const int f, const int v) {
+        memcpy(out, V(c)[f * 3 + v].uv, 8);
+    }
+    inline void set_tspace(const SMikkTSpaceContext* c, const float t[], const float sign,
+                           const int f, const int v) {
+        MeshVertex& mv = V(c)[f * 3 + v];
+        memcpy(mv.tan, t, 12);
+        mv.tan[3] = sign;
+    }
+}
+
+inline void kh_gen_tangents(std::vector<MeshVertex>& v) {
+    SMikkTSpaceInterface itf = {};
+    itf.m_getNumFaces = khmk::get_num_faces;
+    itf.m_getNumVerticesOfFace = khmk::get_num_verts;
+    itf.m_getPosition = khmk::get_pos;
+    itf.m_getNormal = khmk::get_nrm;
+    itf.m_getTexCoord = khmk::get_uv;
+    itf.m_setTSpaceBasic = khmk::set_tspace;
+    SMikkTSpaceContext ctx = {};
+    ctx.m_pInterface = &itf;
+    ctx.m_pUserData = &v;
+    genTangSpaceDefault(&ctx);
+}
+
+// Vert count is UNCAPPED by policy (performance is the operator's to
+// manage); the only guard is arithmetic - a vertex buffer's ByteWidth
+// is a UINT, and CreateBuffer already fails loudly on sizes the device
+// cannot honor.
+static constexpr size_t KH_FBX_VERT_CEIL = 0xFFFFFFFFull / sizeof(MeshVertex);
+
+inline bool kh_fbx_import(const std::string& path, int& out_id, std::string& err) {
+    ufbx_load_opts opts = {};
+    opts.target_axes = ufbx_axes_right_handed_z_up;    // = ARMA authoring axes
+    opts.target_unit_meters = 1.0f;
+    opts.space_conversion = UFBX_SPACE_CONVERSION_MODIFY_GEOMETRY;
+    opts.generate_missing_normals = true;
+    opts.load_external_files = false;                  // geometry only; textures are SQF-side
+    ufbx_error uerr;
+    ufbx_scene* scene = ufbx_load_file(path.c_str(), &opts, &uerr);
+
+    if (!scene) {
+        char buf[512];
+        ufbx_format_error(buf, sizeof(buf), &uerr);
+        err = buf;
+        return false;
+    }
+
+    // Buckets keyed by material name, merged across nodes; first-seen
+    // order becomes the submesh order.
+    std::vector<std::string> bucket_names;
+    std::vector<std::vector<MeshVertex>> buckets;
+    std::unordered_map<std::string, size_t> bucket_ix;
+    bool has_uv = false;
+    size_t total = 0;
+    std::vector<uint32_t> tri_ix;
+
+    for (size_t ni = 0; ni < scene->nodes.count && err.empty(); ++ni) {
+        ufbx_node* node = scene->nodes.data[ni];
+        if (!node || !node->mesh) continue;
+        ufbx_mesh* mesh = node->mesh;
+        const ufbx_matrix g2w = node->geometry_to_world;
+        const ufbx_matrix nmat = ufbx_matrix_for_normals(&g2w);
+        tri_ix.resize(mesh->max_face_triangles * 3);
+
+        for (size_t fi = 0; fi < mesh->faces.count; ++fi) {
+            const ufbx_face face = mesh->faces.data[fi];
+            const size_t ntri = ufbx_triangulate_face(tri_ix.data(), tri_ix.size(), mesh, face);
+            if (!ntri) continue;
+
+            // Material name for this face (per-face index into the
+            // mesh's material list; absent list = one "default" bucket).
+            const char* mname = "default";
+
+            if (mesh->face_material.count > fi && mesh->materials.count > 0) {
+                const uint32_t mi = mesh->face_material.data[fi];
+                if (mi < mesh->materials.count && mesh->materials.data[mi] &&
+                    mesh->materials.data[mi]->name.length > 0) {
+                    mname = mesh->materials.data[mi]->name.data;
+                }
+            }
+
+            auto bit = bucket_ix.find(mname);
+            size_t bi;
+
+            if (bit == bucket_ix.end()) {
+                bi = buckets.size();
+                bucket_ix.emplace(mname, bi);
+                bucket_names.push_back(mname);
+                buckets.emplace_back();
+            } else bi = bit->second;
+
+            std::vector<MeshVertex>& bv = buckets[bi];
+
+            for (size_t k = 0; k < ntri * 3; ++k) {
+                const uint32_t ix = tri_ix[k];
+                MeshVertex mv = {};
+                const ufbx_vec3 p = ufbx_transform_position(&g2w, ufbx_get_vertex_vec3(&mesh->vertex_position, ix));
+                mv.pos[0] = static_cast<float>(p.x);
+                mv.pos[1] = static_cast<float>(p.y);
+                mv.pos[2] = static_cast<float>(p.z);
+
+                if (mesh->vertex_normal.exists) {
+                    const ufbx_vec3 n = ufbx_transform_direction(&nmat, ufbx_get_vertex_vec3(&mesh->vertex_normal, ix));
+                    const float nl = sqrtf(static_cast<float>(n.x * n.x + n.y * n.y + n.z * n.z));
+                    if (nl > 1e-8f) {
+                        mv.nrm[0] = static_cast<float>(n.x) / nl;
+                        mv.nrm[1] = static_cast<float>(n.y) / nl;
+                        mv.nrm[2] = static_cast<float>(n.z) / nl;
+                    } else mv.nrm[2] = 1.0f;
+                } else mv.nrm[2] = 1.0f;   // generate_missing_normals should prevent this
+
+                if (mesh->vertex_uv.exists) {
+                    const ufbx_vec2 uv = ufbx_get_vertex_vec2(&mesh->vertex_uv, ix);
+                    mv.uv[0] = static_cast<float>(uv.x);
+                    mv.uv[1] = 1.0f - static_cast<float>(uv.y);   // FBX bottom-left -> D3D top-left
+                    has_uv = true;
+                }
+
+                mv.tan[3] = 1.0f;
+                bv.push_back(mv);
+                if (++total > KH_FBX_VERT_CEIL) { err = "mesh exceeds the D3D11 vertex buffer size limit"; break; }
+            }
+
+            if (!err.empty()) break;
+        }
+    }
+
+    ufbx_free_scene(scene);
+    if (!err.empty()) return false;
+    if (total == 0) { err = "no triangle geometry found"; return false; }
+
+    // AABB over everything -> per-axis normalization into [-0.5, 0.5]^3.
+    // 'size' then scales per axis, so size = nativeSize (or any component
+    // <= 0, see kh_apply_native_size) reproduces true scale.
+    float mn[3] = { 1e30f, 1e30f, 1e30f }, mx[3] = { -1e30f, -1e30f, -1e30f };
+
+    for (const auto& b : buckets) {
+        for (const auto& mv : b) {
+            for (int k = 0; k < 3; ++k) {
+                if (mv.pos[k] < mn[k]) mn[k] = mv.pos[k];
+                if (mv.pos[k] > mx[k]) mx[k] = mv.pos[k];
+            }
+        }
+    }
+
+    MeshDef d;
+    float ctr[3], ext[3];
+
+    for (int k = 0; k < 3; ++k) {
+        ctr[k] = 0.5f * (mn[k] + mx[k]);
+        ext[k] = mx[k] - mn[k];
+        d.native_size[k] = ext[k] > 1e-4f ? ext[k] : 1e-4f;
+        if (ext[k] < 1e-6f) ext[k] = 1.0f;   // flat axis: leave centered at 0
+    }
+
+    d.verts.reserve(total);
+
+    for (size_t bi = 0; bi < buckets.size(); ++bi) {
+        MeshSubmesh sm;
+        sm.name = bucket_names[bi];
+        sm.vertex_start = static_cast<uint32_t>(d.verts.size());
+        sm.vertex_count = static_cast<uint32_t>(buckets[bi].size());
+        d.submeshes.push_back(std::move(sm));
+
+        for (auto& mv : buckets[bi]) {
+            for (int k = 0; k < 3; ++k) mv.pos[k] = (mv.pos[k] - ctr[k]) / ext[k];
+            d.verts.push_back(mv);
+        }
+
+        buckets[bi].clear();
+        buckets[bi].shrink_to_fit();
+    }
+
+    if (has_uv) kh_gen_tangents(d.verts);   // ARMA space; bake flips handedness
+    meshgen::bake(d.verts);
+    d.name = path;
+    std::transform(d.name.begin(), d.name.end(), d.name.begin(), ::tolower);
+    d.alias = "";
+
+    // Section-2 publication: append (invisible) unlocked, then publish +
+    // GPU top-up with the render thread PARKED - the contract's required
+    // safe point, so no draw can race the count/buffer pair.
+    const int id = kh_mesh_append(std::move(d));
+    if (id < 0) { err = "mesh registry full"; return false; }
+    {
+        RVExtBridge::ScopedGraphicsLock khfb_lock;
+        kh_mesh_publish();
+        ID3D11Device* dev = RVExtBridge::get_d3d_device();
+
+        if (dev) {
+            const std::string ve = ensure_mesh_vbs(dev);
+            // Failure is non-fatal here: the id is published and every
+            // draw path re-runs ensure_mesh_vbs (and skips the frame on
+            // error) - report and let the retry own it.
+            if (!ve.empty()) kh_report_error("KH fbx '" + path + "': " + ve);
+        }
+    }
+    g_stats.fbx_imports++;
+    out_id = id;
+    return true;
+}
+
+// The mesh-slot front door for ".fbx" strings: resolve via the rendering
+// asset search, then import-or-reuse (cache by resolved path).
+inline int kh_fbx_mesh_id(const std::string& request, std::string& err) {
+    const std::string resolved = RenderAssetDiscovery::find_asset_file(request);
+
+    if (resolved.empty()) {
+        err = "'" + request + "' not found (searched Documents\\Arma 3\\kh_framework\\rendering, then every mod's 'rendering' folder)";
+        return -1;
+    }
+
+    std::string key = resolved;
+    std::transform(key.begin(), key.end(), key.begin(), ::tolower);
+    {
+        std::lock_guard<std::mutex> g(g_fbx_cache_mutex);
+        auto it = g_fbx_cache.find(key);
+        if (it != g_fbx_cache.end()) return it->second;
+    }
+    int id = -1;
+    if (!kh_fbx_import(resolved, id, err)) return -1;
+    {
+        std::lock_guard<std::mutex> g(g_fbx_cache_mutex);
+        g_fbx_cache[key] = id;
+    }
+    return id;
+}
+
+// ===========================================================================
+// MATERIAL DRAW SUPPORT (both loops share these).
+// ===========================================================================
+
+// 'size' native substitution: any component <= 0 reads the mesh's native
+// (pre-normalization) dimension - 0 = native, negative = |value| x native
+// (so -1 is true scale, -2 double). Builtins author at native 1, so the
+// rule is uniform across every mesh kind.
+inline void kh_apply_native_size(RenderObject& o) {
+    const MeshDef& md = mesh_def(mesh_id_clamp(o.mesh));
+
+    for (int k = 0; k < 3; ++k) {
+        if (o.size[k] <= 0.0f) {
+            o.size[k] = md.native_size[k] * (o.size[k] < 0.0f ? -o.size[k] : 1.0f);
+        }
+    }
+}
+
+// The textured-path gate shared by both loops: solid (effect 0),
+// non-fullscreen, and carrying at least one used material slot.
+inline const KhMaterialSet* kh_obj_textured(const RenderObject& o) {
+    return (o.effect == 0 && !o.fullscreen && o.materials && o.materials->any)
+         ? o.materials.get() : nullptr;
+}
+
+// Fill the matParams CB block + bind t14-t18 for one material. Flags
+// reflect what actually RESOLVED (a missing/broken texture drops its
+// bit, and every route degrades to the same no-map default the shader
+// uses), so the shader never samples a null view. sRGB per slot:
+// diffuse/emissive/specular color data, normal/orm linear.
+inline void kh_bind_material(ID3D11DeviceContext* ctx, ID3D11Device* dev,
+                             ConstantData& cbd, const KhMaterial& m) {
+    ID3D11ShaderResourceView* srvs[5] = {};
+    int flags = 0;
+
+    for (int s = 0; s < 5; ++s) {
+        if (m.maps[s].path.empty()) continue;
+        srvs[s] = kh_tex_resolve(dev, ctx, m.maps[s].path, s == 0 || s == 3 || s == 4);
+        if (srvs[s]) flags |= 1 << s;
+    }
+
+    auto route_eff = [&](int user, int def_slot, int def_chan) -> float {
+        if (user >= 0 && (flags & (1 << (user >> 2)))) return static_cast<float>(user);
+        if (def_slot >= 0 && (flags & (1 << def_slot))) return static_cast<float>(def_slot * 4 + def_chan);
+        return -1.0f;
+    };
+
+    cbd.mat_params0[0] = static_cast<float>(flags);
+    cbd.mat_params0[1] = m.alpha_mode == 1 ? 1.0f : 0.0f;
+    cbd.mat_params0[2] = m.cutoff;
+    cbd.mat_params0[3] = m.normal_strength;
+    cbd.mat_params1[0] = m.base_color[0];
+    cbd.mat_params1[1] = m.base_color[1];
+    cbd.mat_params1[2] = m.base_color[2];
+    cbd.mat_params1[3] = m.roughness;
+    cbd.mat_params2[0] = m.metalness;
+    cbd.mat_params2[1] = m.emissive_intensity;
+    cbd.mat_params2[2] = route_eff(m.route_occ,   2, 0);   // orm.r
+    cbd.mat_params2[3] = route_eff(m.route_rough, 2, 1);   // orm.g
+    cbd.mat_params3[0] = route_eff(m.route_metal, 2, 2);   // orm.b
+    cbd.mat_params3[1] = route_eff(m.route_alpha, 0, 3);   // diffuse.a
+    cbd.mat_params3[2] = route_eff(m.route_gloss, 4, 3);   // specular.a
+    cbd.mat_params3[3] = (flags & 16) ? 1.0f : 0.0f;       // spec/gloss workflow
+    ctx->PSSetShaderResources(14, 5, srvs);
+}
+
+// Per-submesh textured draws for one object. PRECONDITIONS (the caller's
+// duty): textured VS/PS/layout bound, VB + blend + DSS set, cbd fully
+// filled for the object, textured StateBackup range live. Fills
+// matParams + binds maps per submesh, re-uploads the object slice, and
+// draws the range - honoring the ordered two-pass when asked. Returns
+// draws issued.
+inline uint32_t kh_draw_textured(ID3D11DeviceContext* ctx, ID3D11Device* dev,
+                                 ConstantData& cbd, ID3D11Buffer* obj_cb,
+                                 const KhMaterialSet& ms, int mid, bool ts_ordered,
+                                 ID3D11RasterizerState*& bound_rs) {
+    static const KhMaterial khtx_default;   // unset slots draw with defaults
+    const MeshDef& md = mesh_def(mid);
+    uint32_t draws = 0;
+
+    for (size_t si = 0; si < md.submeshes.size(); ++si) {
+        const MeshSubmesh& sm = md.submeshes[si];
+        if (sm.vertex_count == 0) continue;
+        const KhMaterial& mat = (si < ms.slots.size() && ms.slots[si].used)
+                              ? ms.slots[si] : khtx_default;
+        kh_bind_material(ctx, dev, cbd, mat);
+        if (!kh_upload_obj_cb(ctx, obj_cb, cbd)) break;
+
+        if (ts_ordered) {   // interiors first, exteriors over them (the ordered contract)
+            if (bound_rs != g_res.rasterizer_front) {
+                ctx->RSSetState(g_res.rasterizer_front);
+                bound_rs = g_res.rasterizer_front;
+            }
+            ctx->Draw(sm.vertex_count, sm.vertex_start);
+            ++draws;
+            ctx->RSSetState(g_res.rasterizer_cull);
+            bound_rs = g_res.rasterizer_cull;
+            ctx->Draw(sm.vertex_count, sm.vertex_start);
+            ++draws;
+        } else {
+            ctx->Draw(sm.vertex_count, sm.vertex_start);
+            ++draws;
+        }
+    }
+
+    return draws;
+}
+
+// ===========================================================================
+// updateRender3D "material" parser. Value shape (arrays of arrays):
+//   [ [selector, "pbr", textures?, params?], ... ]
+//     selector: submesh name (STRING, case-insensitive - FBX material
+//               name, builtins "default") | submesh index (SCALAR) |
+//               -1 or "*" = every submesh
+//     textures: [ [path, slot, routing?], ... ]
+//               slot: "diffuse"/"albedo" | "normal" | "orm" | "emissive"
+//                     | "specular"
+//               routing: [ [input, channel], ... ] with input "occlusion"
+//                     | "roughness" | "metallic" | "alpha" | "gloss" and
+//                     channel "r"/"g"/"b"/"a" - reads that channel OF
+//                     THIS SLOT'S TEXTURE into the input
+//     params:   [ [key, value], ... ] - "basecolor" [r,g,b], "roughness",
+//               "metalness", "emissiveintensity", "normalstrength",
+//               "cutoff", "alphamode" ("opaque"|"cutout")
+// Paths resolve through the same Documents-then-mods "rendering" search
+// as .fbx models. Runs under g_draw_list_mutex (the caller's lock); the
+// first resolution of a new path walks mod folders on disk - a one-time
+// cost the discovery cache then retires.
+// ===========================================================================
+inline bool kh_apply_material_update(RenderObject& obj, const game_value& val, std::string& err) {
+    if (val.type_enum() != game_data_type::ARRAY) { err = "value must be an array of material entries"; return false; }
+    const MeshDef& md = mesh_def(mesh_id_clamp(obj.mesh));
+
+    // Copy-on-write base: the existing set (if any), sized to this mesh.
+    KhMaterialSet next;
+    if (obj.materials) next = *obj.materials;
+    next.slots.resize(md.submeshes.size());
+
+    auto lower = [](std::string s) { std::transform(s.begin(), s.end(), s.begin(), ::tolower); return s; };
+    auto slot_id = [&](const std::string& s) -> int {
+        if (s == "diffuse" || s == "albedo") return 0;
+        if (s == "normal") return 1;
+        if (s == "orm") return 2;
+        if (s == "emissive") return 3;
+        if (s == "specular") return 4;
+        return -1;
+    };
+    auto chan_id = [](const std::string& s) -> int {
+        if (s == "r") return 0;
+        if (s == "g") return 1;
+        if (s == "b") return 2;
+        if (s == "a") return 3;
+        return -1;
+    };
+
+    auto& entries = val.to_array();
+
+    for (size_t ei = 0; ei < entries.size(); ++ei) {
+        if (entries[ei].type_enum() != game_data_type::ARRAY) { err = "material entry must be an array"; return false; }
+        auto& ent = entries[ei].to_array();
+        if (ent.size() < 2) { err = "material entry needs [selector, shader, ...]"; return false; }
+
+        // --- selector -> submesh indices ---
+        std::vector<size_t> targets;
+
+        if (ent[0].type_enum() == game_data_type::SCALAR) {
+            const int si = static_cast<int>(static_cast<float>(ent[0]));
+            if (si == -1) { for (size_t s = 0; s < md.submeshes.size(); ++s) targets.push_back(s); }
+            else if (si >= 0 && si < static_cast<int>(md.submeshes.size())) targets.push_back(static_cast<size_t>(si));
+            else { err = "submesh index " + std::to_string(si) + " out of range (mesh has " + std::to_string(md.submeshes.size()) + ")"; return false; }
+        } else if (ent[0].type_enum() == game_data_type::STRING) {
+            const std::string want = lower(static_cast<std::string>(ent[0]));
+            if (want == "*" || want.empty()) { for (size_t s = 0; s < md.submeshes.size(); ++s) targets.push_back(s); }
+            else {
+                for (size_t s = 0; s < md.submeshes.size(); ++s) {
+                    if (lower(md.submeshes[s].name) == want) targets.push_back(s);
+                }
+                if (targets.empty()) {
+                    err = "no submesh named '" + want + "' (";
+                    for (size_t s = 0; s < md.submeshes.size(); ++s) {
+                        if (s) err += ", ";
+                        err += "'" + md.submeshes[s].name + "'";
+                    }
+                    err += ")";
+                    return false;
+                }
+            }
+        } else { err = "selector must be a submesh name, index, or -1/\"*\""; return false; }
+
+        // --- shader ---
+        if (ent[1].type_enum() != game_data_type::STRING) { err = "shader must be a string (\"pbr\")"; return false; }
+        if (lower(static_cast<std::string>(ent[1])) != "pbr") {
+            err = "unknown shader '" + static_cast<std::string>(ent[1]) + "' (only \"pbr\" exists for now)";
+            return false;
+        }
+
+        // --- build the material once, assign to every target ---
+        KhMaterial mat;
+        mat.used = true;
+        mat.shader = 0;
+
+        if (ent.size() > 2 && ent[2].type_enum() == game_data_type::ARRAY) {
+            auto& texes = ent[2].to_array();
+
+            for (size_t ti = 0; ti < texes.size(); ++ti) {
+                if (texes[ti].type_enum() != game_data_type::ARRAY) { err = "texture entry must be [path, slot, routing?]"; return false; }
+                auto& te = texes[ti].to_array();
+                if (te.size() < 2 || te[0].type_enum() != game_data_type::STRING ||
+                    te[1].type_enum() != game_data_type::STRING) {
+                    err = "texture entry must be [path, slot, routing?]";
+                    return false;
+                }
+                const std::string tpath = static_cast<std::string>(te[0]);
+                const int slot = slot_id(lower(static_cast<std::string>(te[1])));
+                if (slot < 0) { err = "unknown texture slot '" + static_cast<std::string>(te[1]) + "' (diffuse|normal|orm|emissive|specular)"; return false; }
+                if (!(kh_ends_with_ci(tpath, ".png") || kh_ends_with_ci(tpath, ".jpg") ||
+                      kh_ends_with_ci(tpath, ".jpeg") || kh_ends_with_ci(tpath, ".tga") ||
+                      kh_ends_with_ci(tpath, ".bmp") || kh_ends_with_ci(tpath, ".dds"))) {
+                    err = "texture '" + tpath + "': unsupported extension (png|jpg|jpeg|tga|bmp|dds)";
+                    return false;
+                }
+                const std::string resolved = RenderAssetDiscovery::find_asset_file(tpath);
+                if (resolved.empty()) {
+                    err = "texture '" + tpath + "' not found (searched Documents\\Arma 3\\kh_framework\\rendering, then every mod's 'rendering' folder)";
+                    return false;
+                }
+                mat.maps[slot].path = resolved;
+
+                if (te.size() > 2 && te[2].type_enum() == game_data_type::ARRAY) {
+                    auto& routes = te[2].to_array();
+
+                    for (size_t ri = 0; ri < routes.size(); ++ri) {
+                        if (routes[ri].type_enum() != game_data_type::ARRAY) { err = "routing entry must be [input, channel]"; return false; }
+                        auto& re = routes[ri].to_array();
+                        if (re.size() < 2 || re[0].type_enum() != game_data_type::STRING ||
+                            re[1].type_enum() != game_data_type::STRING) {
+                            err = "routing entry must be [input, channel]";
+                            return false;
+                        }
+                        const std::string input = lower(static_cast<std::string>(re[0]));
+                        const int chan = chan_id(lower(static_cast<std::string>(re[1])));
+                        if (chan < 0) { err = "routing channel must be r|g|b|a"; return false; }
+                        const int route = slot * 4 + chan;
+                        if      (input == "occlusion")  mat.route_occ = route;
+                        else if (input == "roughness")  mat.route_rough = route;
+                        else if (input == "metallic" || input == "metalness") mat.route_metal = route;
+                        else if (input == "alpha")      mat.route_alpha = route;
+                        else if (input == "gloss")      mat.route_gloss = route;
+                        else { err = "unknown routing input '" + input + "' (occlusion|roughness|metallic|alpha|gloss)"; return false; }
+                    }
+                }
+            }
+        }
+
+        if (ent.size() > 3 && ent[3].type_enum() == game_data_type::ARRAY) {
+            auto& params = ent[3].to_array();
+
+            for (size_t pi = 0; pi < params.size(); ++pi) {
+                if (params[pi].type_enum() != game_data_type::ARRAY) { err = "param entry must be [key, value]"; return false; }
+                auto& pe = params[pi].to_array();
+                if (pe.size() < 2 || pe[0].type_enum() != game_data_type::STRING) { err = "param entry must be [key, value]"; return false; }
+                const std::string key = lower(static_cast<std::string>(pe[0]));
+
+                if (key == "basecolor" || key == "color") {
+                    if (pe[1].type_enum() != game_data_type::ARRAY) { err = "basecolor must be [r, g, b]"; return false; }
+                    auto& c = pe[1].to_array();
+                    for (size_t k = 0; k < 3 && k < c.size(); ++k) mat.base_color[k] = static_cast<float>(c[k]);
+                } else if (key == "roughness") {
+                    mat.roughness = static_cast<float>(pe[1]);
+                } else if (key == "metalness" || key == "metallic") {
+                    mat.metalness = static_cast<float>(pe[1]);
+                } else if (key == "emissiveintensity" || key == "emissive") {
+                    mat.emissive_intensity = static_cast<float>(pe[1]);
+                } else if (key == "normalstrength") {
+                    mat.normal_strength = static_cast<float>(pe[1]);
+                } else if (key == "cutoff") {
+                    mat.cutoff = static_cast<float>(pe[1]);
+                } else if (key == "alphamode") {
+                    const std::string am = lower(static_cast<std::string>(pe[1]));
+                    if (am == "opaque") mat.alpha_mode = 0;
+                    else if (am == "cutout") mat.alpha_mode = 1;
+                    else if (am == "blend") {
+                        err = "alphaMode \"blend\" is not supported per-material yet - use the object color alpha for whole-object translucency";
+                        return false;
+                    } else { err = "alphaMode must be \"opaque\" or \"cutout\""; return false; }
+                } else {
+                    err = "unknown material param '" + key + "'";
+                    return false;
+                }
+            }
+        }
+
+        for (size_t t : targets) next.slots[t] = mat;
+    }
+
+    next.any = false;
+    for (const auto& s : next.slots) if (s.used) { next.any = true; break; }
+    obj.materials = std::make_shared<const KhMaterialSet>(std::move(next));
+    return true;
+}
+
+// Query-point GPU set, grow-on-demand: the points SRV, the results
+// UAV and the synchronous + async staging twins are sized TOGETHER so
+// every dispatch path sees one capacity. Base capacity
+// KH_QUERY_POINTS_BASE, doubling to fit - there is no point cap by
+// policy (performance is the operator's to manage). Growth releases
+// and re-creates under the caller's serialized window (every caller
+// holds the graphics lock); an async batch in flight across a growth
+// frame is dropped, which the async contract already tolerates
+// (missed batches simply age). Failure zeroes the capacity so the
+// next ensure rebuilds from the base - the fail direction is the
+// stock error path, never a half-sized set.
+inline std::string ensure_query_buffers(ID3D11Device* dev, UINT need) {
+    if (need == 0) need = 1;
+    if (g_res.query_cap >= need && g_res.points_buffer) return "";
+    UINT khqb_cap = KH_QUERY_POINTS_BASE;
+    while (khqb_cap < need) khqb_cap *= 2;
+    KH_SAFE_RELEASE(g_res.points_srv);
+    KH_SAFE_RELEASE(g_res.points_buffer);
+    KH_SAFE_RELEASE(g_res.output_uav);
+    KH_SAFE_RELEASE(g_res.output_buffer);
+    KH_SAFE_RELEASE(g_res.staging_buffer);
+    KH_SAFE_RELEASE(g_res.staging_async[0]);
+    KH_SAFE_RELEASE(g_res.staging_async[1]);
+    g_async_inflight_count[0] = g_async_inflight_count[1] = 0;   // in-flight copies died with the buffers
+    g_res.query_cap = 0;
+    HRESULT khqb_hr = S_OK;
+
+    {   // Points input: dynamic structured buffer, CPU-writable, SRV
+        D3D11_BUFFER_DESC bd = {};
+        bd.ByteWidth = sizeof(float) * 4 * khqb_cap;
+        bd.Usage = D3D11_USAGE_DYNAMIC;
+        bd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+        bd.StructureByteStride = sizeof(float) * 4;
+        khqb_hr = dev->CreateBuffer(&bd, nullptr, &g_res.points_buffer);
+        if (FAILED(khqb_hr)) return "Create points buffer " + hr_str(khqb_hr);
+        D3D11_SHADER_RESOURCE_VIEW_DESC sd = {};
+        sd.Format = DXGI_FORMAT_UNKNOWN;
+        sd.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+        sd.Buffer.NumElements = khqb_cap;
+        khqb_hr = dev->CreateShaderResourceView(g_res.points_buffer, &sd, &g_res.points_srv);
+        if (FAILED(khqb_hr)) return "Create points SRV " + hr_str(khqb_hr);
+    }
+
+    {   // Results output: default structured buffer with UAV + staging twins
+        D3D11_BUFFER_DESC bd = {};
+        bd.ByteWidth = sizeof(float) * 4 * khqb_cap;
+        bd.Usage = D3D11_USAGE_DEFAULT;
+        bd.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+        bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+        bd.StructureByteStride = sizeof(float) * 4;
+        khqb_hr = dev->CreateBuffer(&bd, nullptr, &g_res.output_buffer);
+        if (FAILED(khqb_hr)) return "Create output buffer " + hr_str(khqb_hr);
+        D3D11_UNORDERED_ACCESS_VIEW_DESC ud = {};
+        ud.Format = DXGI_FORMAT_UNKNOWN;
+        ud.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+        ud.Buffer.NumElements = khqb_cap;
+        khqb_hr = dev->CreateUnorderedAccessView(g_res.output_buffer, &ud, &g_res.output_uav);
+        if (FAILED(khqb_hr)) return "Create output UAV " + hr_str(khqb_hr);
+        bd.Usage = D3D11_USAGE_STAGING;
+        bd.BindFlags = 0;
+        bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        bd.MiscFlags = 0;
+        bd.StructureByteStride = 0;
+        khqb_hr = dev->CreateBuffer(&bd, nullptr, &g_res.staging_buffer);
+        if (FAILED(khqb_hr)) return "Create staging buffer " + hr_str(khqb_hr);
+        khqb_hr = dev->CreateBuffer(&bd, nullptr, &g_res.staging_async[0]);
+        if (FAILED(khqb_hr)) return "Create staging async 0 " + hr_str(khqb_hr);
+        khqb_hr = dev->CreateBuffer(&bd, nullptr, &g_res.staging_async[1]);
+        if (FAILED(khqb_hr)) return "Create staging async 1 " + hr_str(khqb_hr);
+    }
+
+    g_res.query_cap = khqb_cap;
+    return "";
+}
+
 inline std::string ensure_resources(ID3D11Device* dev) {
-    if (g_res.initialized) return "";
+    // Initialized fast path still tops up mesh VBs: after kh_mesh_publish
+    // (park-scoped by contract) the very next ensure - which every draw
+    // path performs before indexing mesh_vb - creates the new buffers.
+    if (g_res.initialized) return ensure_mesh_vbs(dev);
 
     if (!g_reset_hook_installed && RVExtBridge::has_reset_hook()) {
         RVExtBridge::set_reset_hook(&on_engine_reset);
@@ -3286,18 +5163,64 @@ inline std::string ensure_resources(ID3D11Device* dev) {
     if (FAILED(hr)) { g_res.release(); return "CreateInputLayout " + hr_str(hr); }
 
     {
-        const auto& reg = mesh_registry();
-        g_res.mesh_vb.assign(reg.size(), nullptr);
+        const std::string khmv_err = ensure_mesh_vbs(dev);
+        if (!khmv_err.empty()) { g_res.release(); return khmv_err; }
+    }
 
-        for (size_t m = 0; m < reg.size(); ++m) {
-            D3D11_BUFFER_DESC bd = {};
-            bd.ByteWidth = static_cast<UINT>(reg[m].verts.size() * sizeof(MeshVertex));
-            bd.Usage = D3D11_USAGE_IMMUTABLE;
-            bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-            D3D11_SUBRESOURCE_DATA init = { reg[m].verts.data(), 0, 0 };
-            hr = dev->CreateBuffer(&bd, &init, &g_res.mesh_vb[m]);
-            if (FAILED(hr)) { g_res.release(); return "Create mesh VB " + hr_str(hr); }
+    // --- KH_TEXTURED static twins (NON-FATAL): the SAME static source
+    //     with KH_TEXTURED=1 gives the VSMain/PSMain material variants.
+    //     The 4-element layout is validated against the textured VS blob
+    //     and serves BOTH textured VS's (identical input signatures).
+    //     Any failure reports once and leaves the twins null: textured
+    //     objects then draw through the untextured path (visible, solid
+    //     color) instead of failing the whole pipeline. ---
+    {
+        static const D3D_SHADER_MACRO khtx_defines[] = {
+            { "KH_RECEIVE_TEX", "1" }, { "KH_TEXTURED", "1" }, { nullptr, nullptr },
+        };
+        ID3DBlob* khtx_vsb = nullptr;
+        ID3DBlob* khtx_psb = nullptr;
+        std::string khtx_err = compile_shader(static_src.c_str(), "VSMain", "vs_5_0", khtx_defines, &khtx_vsb);
+        if (khtx_err.empty()) khtx_err = compile_shader(static_src.c_str(), "PSMain", "ps_5_0", khtx_defines, &khtx_psb);
+
+        if (khtx_err.empty()) {
+            HRESULT khtx_hr = dev->CreateVertexShader(khtx_vsb->GetBufferPointer(), khtx_vsb->GetBufferSize(), nullptr, &g_res.vs_tex);
+            if (SUCCEEDED(khtx_hr)) khtx_hr = dev->CreatePixelShader(khtx_psb->GetBufferPointer(), khtx_psb->GetBufferSize(), nullptr, &g_res.ps_tex);
+
+            if (SUCCEEDED(khtx_hr)) {
+                const D3D11_INPUT_ELEMENT_DESC khtx_il[] = {
+                    { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT,    0,  0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+                    { "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT,    0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+                    { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,       0, 24, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+                    { "TANGENT",  0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 32, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+                };
+                khtx_hr = dev->CreateInputLayout(khtx_il, 4, khtx_vsb->GetBufferPointer(), khtx_vsb->GetBufferSize(), &g_res.layout_tex);
+            }
+
+            if (SUCCEEDED(khtx_hr) && !g_res.mat_sampler) {
+                D3D11_SAMPLER_DESC khtx_sd = {};
+                khtx_sd.Filter = D3D11_FILTER_ANISOTROPIC;
+                khtx_sd.MaxAnisotropy = 8;
+                khtx_sd.AddressU = D3D11_TEXTURE_ADDRESS_WRAP;
+                khtx_sd.AddressV = D3D11_TEXTURE_ADDRESS_WRAP;
+                khtx_sd.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+                khtx_sd.ComparisonFunc = D3D11_COMPARISON_NEVER;
+                khtx_sd.MaxLOD = D3D11_FLOAT32_MAX;
+                khtx_hr = dev->CreateSamplerState(&khtx_sd, &g_res.mat_sampler);
+            }
+
+            if (FAILED(khtx_hr)) {
+                KH_SAFE_RELEASE(g_res.vs_tex);
+                KH_SAFE_RELEASE(g_res.ps_tex);
+                KH_SAFE_RELEASE(g_res.layout_tex);
+                kh_report_error("KH textured shaders: create " + hr_str(khtx_hr));
+            }
+        } else {
+            kh_report_error("KH textured shaders: " + khtx_err);
         }
+
+        if (khtx_vsb) khtx_vsb->Release();
+        if (khtx_psb) khtx_psb->Release();
     }
 
     {
@@ -3327,52 +5250,12 @@ inline std::string ensure_resources(ID3D11Device* dev) {
         if (FAILED(hr)) { g_res.release(); return "Create CS CB " + hr_str(hr); }
     }
 
-    // Points input: dynamic structured buffer, CPU-writable, SRV
+    // Query-point GPU set (points SRV + results UAV + staging twins):
+    // created at the base capacity here, grown on demand by the same
+    // helper from the dispatch paths (no point cap).
     {
-        D3D11_BUFFER_DESC bd = {};
-        bd.ByteWidth = sizeof(float) * 4 * KH_MAX_QUERY_POINTS;
-        bd.Usage = D3D11_USAGE_DYNAMIC;
-        bd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-        bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-        bd.StructureByteStride = sizeof(float) * 4;
-        hr = dev->CreateBuffer(&bd, nullptr, &g_res.points_buffer);
-        if (FAILED(hr)) { g_res.release(); return "Create points buffer " + hr_str(hr); }
-        D3D11_SHADER_RESOURCE_VIEW_DESC sd = {};
-        sd.Format = DXGI_FORMAT_UNKNOWN;
-        sd.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
-        sd.Buffer.NumElements = KH_MAX_QUERY_POINTS;
-        hr = dev->CreateShaderResourceView(g_res.points_buffer, &sd, &g_res.points_srv);
-        if (FAILED(hr)) { g_res.release(); return "Create points SRV " + hr_str(hr); }
-    }
-
-    // Results output: default structured buffer with UAV + staging twin
-    {
-        D3D11_BUFFER_DESC bd = {};
-        bd.ByteWidth = sizeof(float) * 4 * KH_MAX_QUERY_POINTS;
-        bd.Usage = D3D11_USAGE_DEFAULT;
-        bd.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
-        bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-        bd.StructureByteStride = sizeof(float) * 4;
-        hr = dev->CreateBuffer(&bd, nullptr, &g_res.output_buffer);
-        if (FAILED(hr)) { g_res.release(); return "Create output buffer " + hr_str(hr); }
-        D3D11_UNORDERED_ACCESS_VIEW_DESC ud = {};
-        ud.Format = DXGI_FORMAT_UNKNOWN;
-        ud.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
-        ud.Buffer.NumElements = KH_MAX_QUERY_POINTS;
-        hr = dev->CreateUnorderedAccessView(g_res.output_buffer, &ud, &g_res.output_uav);
-        if (FAILED(hr)) { g_res.release(); return "Create output UAV " + hr_str(hr); }
-        bd.Usage = D3D11_USAGE_STAGING;
-        bd.BindFlags = 0;
-        bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        bd.MiscFlags = 0;
-        bd.StructureByteStride = 0;
-        hr = dev->CreateBuffer(&bd, nullptr, &g_res.staging_buffer);
-        if (FAILED(hr)) { g_res.release(); return "Create staging buffer " + hr_str(hr); }
-        hr = dev->CreateBuffer(&bd, nullptr, &g_res.staging_async[0]);
-        if (FAILED(hr)) { g_res.release(); return "Create staging async 0 " + hr_str(hr); }
-        hr = dev->CreateBuffer(&bd, nullptr, &g_res.staging_async[1]);
-        if (FAILED(hr)) { g_res.release(); return "Create staging async 1 " + hr_str(hr); }
+        const std::string khqb_err = ensure_query_buffers(dev, KH_QUERY_POINTS_BASE);
+        if (!khqb_err.empty()) { g_res.release(); return khqb_err; }
     }
 
     {
@@ -3815,6 +5698,56 @@ inline std::string ensure_composite_shader(ID3D11Device* dev) {
     hr = dev->CreatePixelShader(psa_blob->GetBufferPointer(), psa_blob->GetBufferSize(), nullptr, &g_res.ps_composite_arb);
     psa_blob->Release();
     if (FAILED(hr)) return "Create composite PS(arb) " + hr_str(hr);
+    // --- KH_TEXTURED composite twins (NON-FATAL; the static twins'
+    //     ledger applies): VSComposite + PSComposite (+ arb) with
+    //     KH_TEXTURED=1, recompiled per MSAA count with their bases.
+    //     Released first: this point is only reached on a (re)compile. ---
+    KH_SAFE_RELEASE(g_res.vs_comp_tex);
+    KH_SAFE_RELEASE(g_res.ps_comp_tex);
+    KH_SAFE_RELEASE(g_res.ps_comp_arb_tex);
+    {
+        const D3D_SHADER_MACRO khtx_defines[] = {
+            { "MSAA_DEPTH", g_res.comp_depth_samples > 1 ? "1" : "0" },
+            { "SAMPLE_COUNT", sc.c_str() },
+            { "KH_RECEIVE_TEX", "1" },
+            { "KH_TEXTURED", "1" },
+            { nullptr, nullptr },
+        };
+        const D3D_SHADER_MACRO khtx_defines_arb[] = {
+            { "MSAA_DEPTH", g_res.comp_depth_samples > 1 ? "1" : "0" },
+            { "SAMPLE_COUNT", sc.c_str() },
+            { "KH_ARB_DEPTH", "1" },
+            { "KH_RECEIVE_TEX", "1" },
+            { "KH_TEXTURED", "1" },
+            { nullptr, nullptr },
+        };
+        ID3DBlob* khtx_vsb = nullptr;
+        ID3DBlob* khtx_psb = nullptr;
+        ID3DBlob* khtx_pab = nullptr;
+        std::string khtx_err = compile_shader(comp_src.c_str(), "VSComposite", "vs_5_0", khtx_defines, &khtx_vsb);
+        if (khtx_err.empty()) khtx_err = compile_shader(comp_src.c_str(), "PSComposite", "ps_5_0", khtx_defines, &khtx_psb);
+        if (khtx_err.empty()) khtx_err = compile_shader(comp_src.c_str(), "PSComposite", "ps_5_0", khtx_defines_arb, &khtx_pab);
+
+        if (khtx_err.empty()) {
+            HRESULT khtx_hr = dev->CreateVertexShader(khtx_vsb->GetBufferPointer(), khtx_vsb->GetBufferSize(), nullptr, &g_res.vs_comp_tex);
+            if (SUCCEEDED(khtx_hr)) khtx_hr = dev->CreatePixelShader(khtx_psb->GetBufferPointer(), khtx_psb->GetBufferSize(), nullptr, &g_res.ps_comp_tex);
+            if (SUCCEEDED(khtx_hr)) khtx_hr = dev->CreatePixelShader(khtx_pab->GetBufferPointer(), khtx_pab->GetBufferSize(), nullptr, &g_res.ps_comp_arb_tex);
+
+            if (FAILED(khtx_hr)) {
+                KH_SAFE_RELEASE(g_res.vs_comp_tex);
+                KH_SAFE_RELEASE(g_res.ps_comp_tex);
+                KH_SAFE_RELEASE(g_res.ps_comp_arb_tex);
+                kh_report_error("KH textured composite: create " + hr_str(khtx_hr));
+            }
+        } else {
+            kh_report_error("KH textured composite: " + khtx_err);
+        }
+
+        if (khtx_vsb) khtx_vsb->Release();
+        if (khtx_psb) khtx_psb->Release();
+        if (khtx_pab) khtx_pab->Release();
+    }
+
     g_res.ps_composite_samples = g_res.comp_depth_samples;
     return "";
 }
@@ -3984,7 +5917,11 @@ struct StateBackup {
     // CB split: our passes bind b0 AND b1, so both slots save/restore
     ID3D11Buffer*            vs_cbs[2] = { nullptr, nullptr };
     ID3D11Buffer*            ps_cbs[2] = { nullptr, nullptr };
-    ID3D11ShaderResourceView* ps_srvs[14] = {};   // t0-t13: bands t4-t9 + t12-t13
+    // t0-t18: bands t4-t9 + t12-t13 AND the material maps t14-t18 (the
+    // texture round exercised the widening contract: this array size IS
+    // the save range - get/set/release all take _countof).
+    ID3D11ShaderResourceView* ps_srvs[19] = {};
+    ID3D11SamplerState*      ps_samps[1] = {};   // s0: the material sampler bind
     ID3D11DepthStencilState* dss = nullptr;
     UINT                     stencil_ref = 0;
     ID3D11BlendState*        blend = nullptr;
@@ -4003,7 +5940,8 @@ struct StateBackup {
         ctx->DSGetShader(&ds, nullptr, nullptr);
         ctx->VSGetConstantBuffers(0, 2, vs_cbs);
         ctx->PSGetConstantBuffers(0, 2, ps_cbs);
-        ctx->PSGetShaderResources(0, 14, ps_srvs);
+        ctx->PSGetShaderResources(0, _countof(ps_srvs), ps_srvs);
+        ctx->PSGetSamplers(0, _countof(ps_samps), ps_samps);
         ctx->OMGetDepthStencilState(&dss, &stencil_ref);
         ctx->OMGetBlendState(&blend, blend_factor, &sample_mask);
         ctx->RSGetState(&rasterizer);
@@ -4020,7 +5958,8 @@ struct StateBackup {
         ctx->DSSetShader(ds, nullptr, 0);
         ctx->VSSetConstantBuffers(0, 2, vs_cbs);
         ctx->PSSetConstantBuffers(0, 2, ps_cbs);
-        ctx->PSSetShaderResources(0, 14, ps_srvs);
+        ctx->PSSetShaderResources(0, _countof(ps_srvs), ps_srvs);
+        ctx->PSSetSamplers(0, _countof(ps_samps), ps_samps);
         ctx->OMSetDepthStencilState(dss, stencil_ref);
         ctx->OMSetBlendState(blend, blend_factor, sample_mask);
         ctx->RSSetState(rasterizer);
@@ -4037,20 +5976,8 @@ struct StateBackup {
         KH_SAFE_RELEASE(vs_cbs[1]);
         KH_SAFE_RELEASE(ps_cbs[0]);
         KH_SAFE_RELEASE(ps_cbs[1]);
-        KH_SAFE_RELEASE(ps_srvs[0]);
-        KH_SAFE_RELEASE(ps_srvs[1]);
-        KH_SAFE_RELEASE(ps_srvs[2]);
-        KH_SAFE_RELEASE(ps_srvs[3]);
-        KH_SAFE_RELEASE(ps_srvs[4]);
-        KH_SAFE_RELEASE(ps_srvs[5]);
-        KH_SAFE_RELEASE(ps_srvs[6]);
-        KH_SAFE_RELEASE(ps_srvs[7]);
-        KH_SAFE_RELEASE(ps_srvs[8]);
-        KH_SAFE_RELEASE(ps_srvs[9]);
-        KH_SAFE_RELEASE(ps_srvs[10]);
-        KH_SAFE_RELEASE(ps_srvs[11]);
-        KH_SAFE_RELEASE(ps_srvs[12]);
-        KH_SAFE_RELEASE(ps_srvs[13]);
+        for (UINT khsb_i = 0; khsb_i < _countof(ps_srvs); ++khsb_i) KH_SAFE_RELEASE(ps_srvs[khsb_i]);
+        for (UINT khsb_j = 0; khsb_j < _countof(ps_samps); ++khsb_j) KH_SAFE_RELEASE(ps_samps[khsb_j]);
         KH_SAFE_RELEASE(dss);
         KH_SAFE_RELEASE(blend);
         KH_SAFE_RELEASE(rasterizer);
@@ -4325,6 +6252,8 @@ inline std::string upload_query_points(const float* xyz_sqf, UINT count) {
     if (!lock.acquired()) return "SKIP: graphics lock not acquired";
     std::string err = ensure_resources(dev);
     if (!err.empty()) return err;
+    err = ensure_query_buffers(dev, count);   // grow-on-demand: no point cap
+    if (!err.empty()) return err;
     D3D11_MAPPED_SUBRESOURCE mapped = {};
     HRESULT hr = ctx->Map(g_res.points_buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
     if (FAILED(hr)) return "points map " + hr_str(hr);
@@ -4422,18 +6351,20 @@ inline int blend_id_from_gv(const game_value& gv) {
 // Mesh selector: STRING name/alias (case-insensitive) or SCALAR registry
 // index. Returns -1 for anything unknown.
 inline int mesh_id_from_gv(const game_value& gv) {
+    const int n = static_cast<int>(mesh_count());   // PUBLISHED count (the section-2 contract)
+
     if (gv.type_enum() == game_data_type::SCALAR) {
         const int id = static_cast<int>(static_cast<float>(gv));
-        return (id >= 0 && id < static_cast<int>(mesh_registry().size())) ? id : -1;
+        return (id >= 0 && id < n) ? id : -1;
     }
 
     if (gv.type_enum() != game_data_type::STRING) return -1;
     std::string s = static_cast<std::string>(gv);
     std::transform(s.begin(), s.end(), s.begin(), ::tolower);
-    const auto& reg = mesh_registry();
 
-    for (int i = 0; i < static_cast<int>(reg.size()); ++i) {
-        if (s == reg[i].name || (reg[i].alias[0] != '\0' && s == reg[i].alias)) return i;
+    for (int i = 0; i < n; ++i) {
+        const MeshDef& md = mesh_def(i);
+        if (s == md.name || (!md.alias.empty() && s == md.alias)) return i;
     }
 
     return -1;
@@ -5248,6 +7179,46 @@ static float    g_far_keep_m32 = 0.0f;
 static float    g_far_keep_far = -1.0f;
 static uint64_t g_far_keep_ms = 0;
 static uint64_t g_farkeep_mesh_draws = 0;   // per-mesh far-keep routings (both paths)
+// BUILD TAG (doctrine: bump on EVERY delivered build; stats-visible so a
+// field log names the binary it came from).
+static constexpr int KH_BUILD_TAG = 26003;
+// NEAR-GAP RAMP (build 26001; the RenderDoc conviction). ROOT, proven by
+// pixel history + depth-window plateaus: the world partition's viewport
+// floor (0.011 in the convicting capture) collapses EVERY fragment nearer
+// than the engine's dynamic near plane (2.27 m there; up to ~5.5 m seen)
+// onto ONE depth value - DepthClipEnable FALSE clamps rasterized depth to
+// the viewport range, and a w-spanning triangle's clip-vertex plane pins
+// its whole area there too. Intra-mesh ordering dies in that band:
+// LESS_EQUAL ties resolve by primitive order (the interior-top-face
+// paint-over, renderstats21), and sane-depth faces lose to pinned ones
+// (the cut; history row: shaderOut 0.317 depthTestFailed vs 0.011).
+// This is also why 25002/25003 failed: their per-fragment SV_Depth was
+// correct and the output-merger viewport clamp re-collapsed it. A close
+// game object "suppressing" the clip was the near plane dropping to
+// ~0.3 m - the band shrinking, not a proxy.
+// THE FIX: the engine leaves an unoccupied gap between the weapon
+// partition ([0.003, 0.01] surveyed) and the world floor (0.011).
+// Close meshes route through the arb SV_Depth shader with a piecewise
+// encode - engine-exact for z >= near, a monotone ramp mapping [0, near)
+// into [floor x KH_NEARZ_GAP_FRAC, floor) below it - and draw under a
+// viewport whose MinDepth is widened to that gap floor so the ramp
+// survives the clamp. Sub-near content orders among itself again, still
+// beats all world content (it IS nearer than the near plane), and stays
+// behind every weapon-partition write. Continuous at the near plane, so
+// routing on/off never pops a fragment.
+static constexpr float KH_NEARZ_GAP_FRAC = 0.92f;
+static uint64_t g_nearz_gap_draws = 0;      // near-gap routings (injection path)
+static float    g_nearz_last_near = 0.0f;   // last armed pass's near estimate (0 = disarmed)
+static float    g_nearz_last_floor = 0.0f;  // last armed pass's widened viewport floor
+// NEAR-SLICE OBSERVER (ledger at the probe-site hook): the sub-band world
+// slice's pair as sighted - last values, extremes, liveness. Render-thread
+// writes at the probe; stats reads under the usual export contract.
+static float    g_slice_seen_near = -1.0f;
+static float    g_slice_seen_far = -1.0f;
+static float    g_slice_seen_far_min = -1.0f;
+static float    g_slice_seen_far_max = -1.0f;
+static uint64_t g_slice_seen_ms = 0;
+static uint64_t g_slice_seen_count = 0;
 static uint64_t g_keep_stamp_rejects = 0;   // probe-accepted pairs the keep's band refused
 static uint64_t g_keep_stale_skips = 0;     // keep deferred to a fresher in-band pv
                                             // (the moving-camera silent frame)
@@ -5572,6 +7543,36 @@ inline void proj_scan_upload(ID3D11Resource* res, const void* data, uint32_t byt
 
             if (pnear > 0.0f) {
                 g_ro.slot_near_live = pnear;
+                // NEAR-SLICE OBSERVER (renderstats12/17, the clip
+                // campaign): the sub-camera-band world slice (near
+                // ~0.07, the injNear floor in every trace) is the
+                // population the near keep arbitrates against, and its
+                // FAR plane is the remap's one unverified assumption
+                // (slice far == accepted near, the abutting-partitions
+                // premise). Record every sighting of a sub-band pair
+                // with a sane hyperbolic shape; the export answers the
+                // premise from the field before any fourth remap
+                // edition is derived. Observation only - nothing
+                // consumes these yet.
+                // WINDOW CORRECTION (renderstats18: sliceSeenCount 0 -
+                // the 0.07 slice class sits INSIDE the camera band, so
+                // [0.02, KH_CAM_NEAR_MIN=0.05) was empty by
+                // construction). Slice class = near in [0.02, 0.12]:
+                // the 0.0700001 floor is session-constant, main-pair
+                // glide bottoms at ~0.19 in every trace - the window
+                // splits them with margin both ways.
+                if (pnear >= 0.02f && pnear <= 0.12f) {
+                    const float khsl_far = kh_enc_far(p22, p32);
+                    if (khsl_far > pnear && khsl_far < 1.0e6f) {
+                        g_slice_seen_near = pnear;
+                        g_slice_seen_far = khsl_far;
+                        g_slice_seen_ms = steady_now_ms();
+                        g_slice_seen_count++;
+                        if (khsl_far > g_slice_seen_far_max) g_slice_seen_far_max = khsl_far;
+                        if (g_slice_seen_far_min <= 0.0f || khsl_far < g_slice_seen_far_min)
+                            g_slice_seen_far_min = khsl_far;
+                    }
+                }
                 g_ro.slot_m22 = p22;
                 g_ro.slot_m32 = p32;
 
@@ -6359,6 +8360,160 @@ struct LiveShadowState {
 static LiveShadowState g_ls;
 
 // ===========================================================================
+// SAME-FRAME VIEW ADOPTION for the mesh transform (the close-range
+// look-flick clip; renderstats6 + field: within ~5 m, fast pitch,
+// part of the mesh depth-clipped - instant on flicks, gradual with
+// motion; debug 1 full coverage, debug 2's one-frame blue delta band
+// matching the clip shape). ROOT, in frame_view's own ledger words:
+// cycle_pv 'is the game-thread snapshot and runs a frame AHEAD during
+// movement' - and the mesh transform (injection + the flush's latched
+// FIDELITY copy) rendered with exactly that. One frame of rotation at
+// close range displaces the mesh many pixels onto engine content of
+// comparable/nearer depth (the ground under a fast look-down), where
+// hardware LESS_EQUAL honestly rejects it: the clip. The near-plane
+// ambiguity arbitration already swaps the PROJECTION scalars to live
+// on disagreement; the VIEW had no such truth to swap to - until the
+// shadow campaign built one: g_ls.frame_view, the engine's OWN
+// same-frame view (rotation from the locked upload, family-filtered
+// at publish). ROTATION ONLY: the mesh passes adopt fv's rotation
+// whenever it is frame-fresh; the latch remains the authority when it
+// is not (cold start, lock dropped, no publish this frame).
+// TRANSLATION AUTHORITY = THE LATCH CAMERA (field round 2 of this
+// fix - 'jitters like crazy'): fv's own translation is the publish
+// path's bridge-camera hybrid, rebuilt in fp32 from whichever bridge
+// value the LAST accepted publish saw - and the sim republishes
+// MID-CYCLE (the ambiguity ledger), so under motion that value
+// alternates between this frame's and the next frame's camera. Frozen
+// into shadow bands, centimeters were 'the component the eye
+// demonstrably cannot see'; driving the MESH TRANSFORM every frame,
+// the alternation is a per-frame positional dither the eye very much
+// can see, worst exactly at the close range this fix targets. The
+// adoption therefore rebuilds the translation from the latch's own
+// camera - fixed at the clear, unreachable by mid-frame
+// republication - through fv's adopted rotation, in DOUBLE (the
+// rebase's own precision discipline): rotation frame-exact (the clip
+// cure), position race-free (the jitter cure), and a one-frame-late
+// camera position under motion stays the centimeters-class error the
+// shadow ledger already accepted. The static case is a numerical
+// no-op either way.
+// The supervisor's truth/health reference stays the PRE-adoption
+// latch (independence: a wrong lock must not self-certify through
+// its own adopted publishes). The DepthBias anti-shimmer tie duty is
+// unchanged - it covers the residual sub-frame races this adoption
+// cannot see.
+// ===========================================================================
+static uint64_t g_view_adopts = 0;        // mesh passes transformed with the same-frame view
+static uint64_t g_view_adopt_stale = 0;   // fv present but not frame-fresh: latch kept
+static uint64_t g_view_adopt_family = 0;  // family-gate refusals (expected ~0; wrong-lock forensic)
+static float    g_view_adopt_last_rot = 0.0f;  // latch-vs-adopted rotation delta (the measured skew)
+static float    g_view_adopt_max_rot = 0.0f;
+// The view the last mesh pass actually painted with (the FLUSH FIDELITY
+// twin of g_inj_enc_*): render-thread writes at the injection, flush
+// reads under the park - the same contract as every other keep.
+static float    g_inj_view[16] = {};
+static uint64_t g_inj_view_ms = 0;
+
+inline bool kh_adopt_frame_view(RVExtBridge::ProjectionViewTransform& pv) {
+    if (!g_ls.frame_view_valid || g_ls.frame_view_time < 0.0f) return false;
+
+    // HEALTHY-LOCK REQUIREMENT (renderstats20 hardening, layered under
+    // the family gate): adopt only while the lock's publishes pass the
+    // supervisor's own 0.20 health bar (pub_fresh_ms - the HEALTHY-
+    // class stamp). A wrong or drifting lock fails that bar within a
+    // window and its publishes then cannot reach the mesh transform at
+    // all, whatever the per-frame family delta reads. Cold, dropped,
+    // or unhealthy locks fall to the latch - today's behavior.
+    if (g_ls.pub_fresh_ms == 0 ||
+        steady_now_ms() - g_ls.pub_fresh_ms > 1000) {
+        g_view_adopt_stale++;
+        return false;
+    }
+
+    // Frame-fresh only: one frame's age at any playable rate. Stale =
+    // the lock died or the engine skipped publishing - the latch is
+    // then the best (and today's) truth.
+    if (effect_time_seconds() - g_ls.frame_view_time > 0.15f) {
+        g_view_adopt_stale++;
+        return false;
+    }
+
+    const float* fv = g_ls.frame_view;
+    float khav_rot = 0.0f;
+
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            khav_rot += fabsf(fv[r * 4 + c] - pv.view[r][c]);
+        }
+    }
+
+    // Family sanity vs THIS pv, 0.75 RESTORED (renderstats20 massive-
+    // regression conviction: the 1.2 widening admitted near-family
+    // WRONG-LOCK publishes during a churning lock session - lockWipes 2,
+    // relockForced 1, coldPubRejects 40, viewAdoptFamily 0 = every
+    // refusal became an admission - and meshes tracked the camera until
+    // the locks settled. The renderstats18 'three genuine flicks
+    // refused' reading was unproven; the 0.7349 max may itself have
+    // been a wrong-lock publish. 0.75 is the field-tested value: do
+    // not widen again without an independent legitimacy signal for the
+    // candidates in the 0.75-1.2 band.)
+    if (khav_rot > 0.75f) {
+        g_view_adopt_family++;
+        return false;
+    }
+
+    // BIT-MIRROR SNAP (renderstats15: viewAdoptMaxRot 0.0 across 3042
+    // adoptions - the session's lock sat on the engine's ORIGIN-REBASED
+    // view, whose rotation bit-mirrors the latch publication; the
+    // translation rebuild below then contributed only its fp32
+    // round-trip noise, t.(R^T.R - I) ~ mm at map |t| and VARYING with
+    // every head-sway lsb of R: the residual jitter). Identical
+    // authorities need no rebuild: below the threshold the latch view
+    // IS the adopted view, verbatim - a bit-exact no-op, counted as an
+    // adopt (the ledger's 'static case is a numerical no-op', now
+    // enforced rather than approximated).
+    if (khav_rot < 1.0e-5f) {
+        g_view_adopts++;
+        g_view_adopt_last_rot = khav_rot;
+        return true;
+    }
+
+    // Latch camera FIRST - extracted before any mutation, in double
+    // (the publish path's own cam = -t.R^T convention, verbatim).
+    const double khav_cam[3] = {
+        -(static_cast<double>(pv.view[3][0]) * pv.view[0][0] +
+          static_cast<double>(pv.view[3][1]) * pv.view[0][1] +
+          static_cast<double>(pv.view[3][2]) * pv.view[0][2]),
+        -(static_cast<double>(pv.view[3][0]) * pv.view[1][0] +
+          static_cast<double>(pv.view[3][1]) * pv.view[1][1] +
+          static_cast<double>(pv.view[3][2]) * pv.view[1][2]),
+        -(static_cast<double>(pv.view[3][0]) * pv.view[2][0] +
+          static_cast<double>(pv.view[3][1]) * pv.view[2][1] +
+          static_cast<double>(pv.view[3][2]) * pv.view[2][2])
+    };
+
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) pv.view[r][c] = fv[r * 4 + c];
+        pv.view[r][3] = 0.0f;   // enforce the affine column (harvested lane hygiene)
+    }
+
+    // Translation rebuilt through the ADOPTED rotation from the LATCH
+    // camera (t' = -cam.R_fv; the publish path's rebuild convention,
+    // in double): see the translation-authority ledger above.
+    for (int c = 0; c < 3; ++c) {
+        pv.view[3][c] = static_cast<float>(
+            -(khav_cam[0] * fv[0 * 4 + c] +
+              khav_cam[1] * fv[1 * 4 + c] +
+              khav_cam[2] * fv[2 * 4 + c]));
+    }
+
+    pv.view[3][3] = 1.0f;
+    g_view_adopts++;
+    g_view_adopt_last_rot = khav_rot;
+    if (khav_rot > g_view_adopt_max_rot) g_view_adopt_max_rot = khav_rot;
+    return true;
+}
+
+// ===========================================================================
 // LIGHTING-BLOCK LOCATOR, v4: read-only forensics.
 // The v2/v3 fingerprint hunts ended with a decisive accident: during a
 // setFog transition, the base needle froze a 56-float CB that IS the
@@ -6386,6 +8541,9 @@ struct CbColorProbe {
                                      // (different lane semantics - black-box
                                      // green-flicker lesson; mirror refresh
                                      // is gated on mode 1)
+    float    last_std_time = -1.0f;  // stamp of the last mode-1 CAPTURE (the
+                                     // mirror's own refresh; renderstats17
+                                     // ledger at the adoption's mode gate)
     ID3D11Resource* buf = nullptr;   // locked upload location (weak identity)
     uint32_t off = 0;                // float index of the DECAY anchor lane
     uint32_t floats = 0;             // CB size (floats) at lock time
@@ -7399,7 +9557,8 @@ static uint64_t g_atlas_srv_evicts = 0;      // reused SRV pointers evicted (col
 static uint64_t g_band_insane_skips = 0;     // consumed slots with corrupt borders
 static uint64_t g_band_warmup_skips = 0;     // receive stand-down during engine warm-up
 
-static float g_sun_local_bounds[16][6] = {};   // up to 16 in-map casters: center xyz + half extents xyz (engine)
+static std::vector<float> g_sun_locals;        // in-map casters, 6 floats each: center xyz +
+                                               // half extents xyz (engine axes) - UNCAPPED
 static int   g_sun_local_count = 0;            // valid entries above (render thread, like the rest)
 
 static bool g_mask_cast_arm = false;
@@ -7627,7 +9786,8 @@ static constexpr float    KH_DL_ANCHOR_RES = 0.005f;
 static constexpr uint32_t KH_DL_WIN_BYTES = KH_DL_STAGE_BYTES + KH_DL_WIN_VS_BYTES;
                                     // per-window arena stride: ctl + lights + VS constants
 static constexpr uint32_t KH_DL_ARENA_BYTES = KH_DL_WIN_MAX * KH_DL_WIN_BYTES;
-static constexpr uint32_t KH_DL_POOL = 64;                  // merged absolute-world pool capacity
+// (The old fixed pool capacity is RETIRED: the merged absolute-world
+// pool grows without bound - the TTL sweep keeps it at the live set.)
 static constexpr float    KH_DL_ORIGIN_Q = 100.0f;          // origin grid (3500/4500/3300 all fit)
 static constexpr uint64_t KH_DL_POOL_STALE_MS = 500;        // no-harvest expiry: mode-3 fills stand down
 // REFERENCE CONTINUITY (white-flood conviction, round 3): the max-
@@ -7785,7 +9945,7 @@ struct DynLightsState {
     uint8_t  arena_view_ok[2] = {};
     // --- merged absolute-world pool (render thread writes at harvest;
     //     both draw paths read under the park invariant) ---
-    DlPoolLight pool[KH_DL_POOL] = {};
+    std::vector<DlPoolLight> pool;   // UNCAPPED; grows at harvest, TTL-swept
     uint32_t pool_n = 0;
     // --- anchor table (derived-provenance light positions; the vote's
     //     ground truth, decoupled from shading persistence) ---
@@ -7870,7 +10030,6 @@ struct DynLightsState {
     uint64_t pool_added = 0;        // new lights entering the pool
     uint64_t pool_updated = 0;      // re-sighted lights refreshed in place
     uint64_t pool_expired = 0;      // TTL expiries (light off / gone / moved away)
-    uint64_t pool_overflow = 0;     // pool capacity exceeded
     // --- binding census (weak identities; never dereferenced) ---
     void*    slot10_buf = nullptr; void* slot11_buf = nullptr;
     uint32_t slot10_first = 0, slot11_first = 0;
@@ -8969,9 +11128,8 @@ inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side) {
             }
 
             if (khd_hit < 0) {
-                if (g_dl.pool_n >= KH_DL_POOL) {
-                    g_dl.pool_overflow++;
-                    continue;
+                if (g_dl.pool_n >= static_cast<uint32_t>(g_dl.pool.size())) {
+                    g_dl.pool.push_back(DlPoolLight{});   // UNCAPPED growth
                 }
 
                 khd_hit = static_cast<int>(g_dl.pool_n++);
@@ -9577,7 +11735,8 @@ inline void dynlights_reset_session() {
     g_dl.arena_write = 0;
     memset(g_dl.win_meta, 0, sizeof(g_dl.win_meta));
     g_dl.win_count[0] = g_dl.win_count[1] = 0;
-    memset(g_dl.pool, 0, sizeof(g_dl.pool));
+    g_dl.pool.clear();
+    g_dl.pool.shrink_to_fit();
     g_dl.pool_n = 0;
     g_dl.pool_stamp = 0;
     g_dl.pool_scale = 1.0f;
@@ -9634,7 +11793,6 @@ inline void dynlights_reset_session() {
     g_dl.vs_hint_wform = 0;
     g_dl.win_captured = 0; g_dl.win_table_full = 0;
     g_dl.pool_added = 0; g_dl.pool_updated = 0; g_dl.pool_expired = 0;
-    g_dl.pool_overflow = 0;
 
 }
 
@@ -10481,6 +12639,7 @@ inline void locator_note_upload(ID3D11Resource* res, const void* data, uint32_t 
             if (mode_i < nf && f[mode_i] == 1.0f) {
                 locator_capture(g_light_probe, f, nf, 56);
                 g_light_probe.meta = static_cast<int>(g_light_probe.off - g_light_probe.nb_base);
+                g_light_probe.last_std_time = effect_time_seconds();
             }
         } else {
             g_light_probe.misses++;   // shared/ring CBs make misses normal
@@ -10571,6 +12730,7 @@ inline void locator_note_upload(ID3D11Resource* res, const void* data, uint32_t 
             if (mode_i2 < nf && f[mode_i2] == 1.0f) {
                 locator_capture(g_light_probe, f, nf, 56);
                 g_light_probe.meta = static_cast<int>(g_light_probe.off - g_light_probe.nb_base);
+                g_light_probe.last_std_time = now;
             }
             break;
         }
@@ -11170,6 +13330,8 @@ inline void release_shadow_device_state() {
     g_sun_map_no_local = false;
     g_sun_map_hash = 0;
     g_sun_local_count = 0;
+    g_sun_locals.clear();
+    g_sun_locals.shrink_to_fit();
 
     // --- weak identities the render hooks compare against ---
     g_main_depth_identity = nullptr;
@@ -12110,21 +14272,23 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
     KH_SAFE_RELEASE(old_dsv);
     g_ro.in_injection = prev_inj;
 
-    // Locality export: up to 16 casters for the fire's per-pixel reach
-    // test (engine axes; more than 16 falls back to the combined bounds,
-    // which is still capped - just looser).
-    g_sun_local_count = 0;
+    // Locality export: EVERY in-map caster for the fire's per-pixel
+    // reach test (engine axes; no count cap - <=16 rides the CB list,
+    // more ride the t2 structured-buffer twin at the fire).
+    g_sun_locals.clear();
 
     for (const auto& c : casters) {
-        if (g_sun_local_count >= 16) { g_sun_local_count = 0; break; }
-        float* lb = g_sun_local_bounds[g_sun_local_count];
+        const size_t khsl_b = g_sun_locals.size();
+        g_sun_locals.resize(khsl_b + 6);
+        float* lb = g_sun_locals.data() + khsl_b;
         lb[0] = c.pos[0];
         lb[1] = c.pos[2];   // SQF -> engine axes
         lb[2] = c.pos[1];
         const float hl[3] = { c.size[0] * 0.5f, c.size[2] * 0.5f, c.size[1] * 0.5f };
         kh_rot_half_extents(hl, c.rot, c.rotated, lb + 3);   // enclosing (rotation-safe)
-        g_sun_local_count++;
     }
+
+    g_sun_local_count = static_cast<int>(casters.size());
 
     memcpy(g_sun_map_vp, lvp, sizeof(g_sun_map_vp));
     g_sun_map_hash = input_hash;   // commit-on-success only (see the skip above)
@@ -12199,6 +14363,67 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
 // decode's 8-35 m assumptions (bandMaxFar/bandWidest/bandValidN and
 // bandOverlapPairs characterize the layout).
 // ===========================================================================
+// Extended locality upload (the >16-caster path): grows the dynamic
+// structured buffer to fit (doubling, base 64), then writes the whole
+// list - 2 float4 per caster - with a DISCARD map. Render thread
+// inside the fire's serialized window, mirroring the sun instance
+// VB's grow-only pattern. Returns false on any failure; the caller
+// leaves localityMeta.y at 0 and the shader falls back to the
+// combined-bounds reach - the pre-extension behavior, never a new one.
+inline bool kh_upload_locality_ext(ID3D11DeviceContext* ctx) {
+    const UINT khle_n = static_cast<UINT>(g_sun_locals.size() / 6);
+    if (khle_n == 0) return false;
+
+    if (khle_n > g_res.locality_cap || !g_res.locality_buf) {
+        ID3D11Device* khle_dev = nullptr;
+        ctx->GetDevice(&khle_dev);
+        if (!khle_dev) return false;
+        KH_SAFE_RELEASE(g_res.locality_srv);
+        KH_SAFE_RELEASE(g_res.locality_buf);
+        g_res.locality_cap = 0;
+        UINT khle_cap = 64;
+        while (khle_cap < khle_n) khle_cap *= 2;
+        D3D11_BUFFER_DESC bd = {};
+        bd.ByteWidth = khle_cap * 2 * sizeof(float) * 4;
+        bd.Usage = D3D11_USAGE_DYNAMIC;
+        bd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+        bd.StructureByteStride = sizeof(float) * 4;
+        const bool khle_ok =
+            SUCCEEDED(khle_dev->CreateBuffer(&bd, nullptr, &g_res.locality_buf));
+        D3D11_SHADER_RESOURCE_VIEW_DESC sd = {};
+        sd.Format = DXGI_FORMAT_UNKNOWN;
+        sd.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+        sd.Buffer.NumElements = khle_cap * 2;
+        if (khle_ok &&
+            SUCCEEDED(khle_dev->CreateShaderResourceView(g_res.locality_buf, &sd,
+                                                         &g_res.locality_srv))) {
+            g_res.locality_cap = khle_cap;
+        } else {
+            KH_SAFE_RELEASE(g_res.locality_srv);
+            KH_SAFE_RELEASE(g_res.locality_buf);
+        }
+        khle_dev->Release();
+        if (g_res.locality_cap == 0) return false;
+    }
+
+    D3D11_MAPPED_SUBRESOURCE khle_m = {};
+    if (FAILED(ctx->Map(g_res.locality_buf, 0, D3D11_MAP_WRITE_DISCARD, 0, &khle_m))) return false;
+    float* khle_d = static_cast<float*>(khle_m.pData);
+
+    for (UINT i = 0; i < khle_n; ++i) {
+        const float* lb = g_sun_locals.data() + static_cast<size_t>(i) * 6;
+        khle_d[i * 8 + 0] = lb[0]; khle_d[i * 8 + 1] = lb[1];
+        khle_d[i * 8 + 2] = lb[2]; khle_d[i * 8 + 3] = 0.0f;
+        khle_d[i * 8 + 4] = lb[3]; khle_d[i * 8 + 5] = lb[4];
+        khle_d[i * 8 + 6] = lb[5]; khle_d[i * 8 + 7] = 0.0f;
+    }
+
+    ctx->Unmap(g_res.locality_buf, 0);
+    return true;
+}
+
 inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
     // cast_misses = FIRST failed guard: 1 arm/fired never satisfied (set
     // once armed, cleared on entry), 3 resources, 41 depth, 42 fov,
@@ -12670,15 +14895,25 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
             cbd.sun_meta[3] = g_shadow_map_strength;
             cbd.locality_meta[0] = static_cast<float>(g_sun_local_count);
 
-            for (int li = 0; li < g_sun_local_count; ++li) {
-                cbd.locality[li * 2][0] = g_sun_local_bounds[li][0];
-                cbd.locality[li * 2][1] = g_sun_local_bounds[li][1];
-                cbd.locality[li * 2][2] = g_sun_local_bounds[li][2];
-                // (reach tightening under the partition latch is falsified:
-                // it INCREASED the Zeus-view overcast)
-                cbd.locality[li * 2 + 1][0] = g_sun_local_bounds[li][3];
-                cbd.locality[li * 2 + 1][1] = g_sun_local_bounds[li][4];
-                cbd.locality[li * 2 + 1][2] = g_sun_local_bounds[li][5];
+            if (g_sun_local_count > 0 && g_sun_local_count <= 16) {
+                // CB list, the field-proven path, verbatim.
+                for (int li = 0; li < g_sun_local_count; ++li) {
+                    const float* lb = g_sun_locals.data() + static_cast<size_t>(li) * 6;
+                    cbd.locality[li * 2][0] = lb[0];
+                    cbd.locality[li * 2][1] = lb[1];
+                    cbd.locality[li * 2][2] = lb[2];
+                    // (reach tightening under the partition latch is falsified:
+                    // it INCREASED the Zeus-view overcast)
+                    cbd.locality[li * 2 + 1][0] = lb[3];
+                    cbd.locality[li * 2 + 1][1] = lb[4];
+                    cbd.locality[li * 2 + 1][2] = lb[5];
+                }
+            } else if (g_sun_local_count > 16 && kh_upload_locality_ext(ctx)) {
+                // UNCAPPED t2 twin; failure leaves meta.y = 0 and the
+                // shader takes the combined-bounds fallback (the
+                // pre-extension >16 behavior).
+                cbd.locality_meta[1] = 1.0f;
+                ctx->PSSetShaderResources(2, 1, &g_res.locality_srv);
             }
 
             // CB SPLIT: both slices (centerSize/sizeAxes ride b0; the
@@ -13298,6 +15533,16 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         return;   // no usable matrices anywhere this frame
     }
 
+    // SAME-FRAME VIEW ADOPTION (full ledger at kh_adopt_frame_view): the
+    // latch view is saved FIRST - the supervisor below keeps it as its
+    // independent truth - then the engine's same-frame view takes the
+    // transform when frame-fresh. Projection arbitration (measured/slot,
+    // below) is untouched: it owns the two encode scalars, this owns the
+    // view, and the two compose.
+    float khav_latch_view[16];
+    memcpy(khav_latch_view, &pv.view[0][0], sizeof(khav_latch_view));
+    kh_adopt_frame_view(pv);
+
     // MEASURED depth coefficients: when the projection sniffer captured the
     // engine's own m22/m32 this cycle, overwrite the bridge values. The
     // meshes then rasterize with the TRUE dynamic near plane of the frame
@@ -13525,6 +15770,10 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     g_inj_enc_m32 = pv.projection[3][2];
     g_inj_enc_near = inject_near;
     g_inj_enc_ms = steady_now_ms();
+    // FLUSH FIDELITY, view lane (the adoption ledger): the flush repaints
+    // pixel-registered with the exact view this pass paints with.
+    memcpy(g_inj_view, &pv.view[0][0], sizeof(g_inj_view));
+    g_inj_view_ms = g_inj_enc_ms;
 
     // FAR-FRAME CLASSIFICATION BY THE ACCEPTED ENCODE (field correction,
     // the 968-frame parked-bite dump: every frame slot-encoded at
@@ -13562,7 +15811,11 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     // mis-locks (world-sliding shadows). Safety paths are not training
     // paths.
     if (!khr_anomalous) {
-        const float* truth = &pv.view[0][0];
+        // Pre-adoption latch (see the adoption ledger): the supervisor's
+        // reference must stay independent of the adopted publishes, or a
+        // wrong lock would grade its own homework - acquisition argmin
+        // and the 0.20 health bar keep exactly their historic inputs.
+        const float* truth = khav_latch_view;
         const uint32_t vcn = g_ls.vc_n < 16 ? g_ls.vc_n : 16;
 
         if (!g_ls.view_src_valid && vcn > 0) {
@@ -13755,6 +16008,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     D3D11_VIEWPORT saved_vp[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
     ctx->RSGetViewports(&n_saved_vp, saved_vp);
 
+    D3D11_VIEWPORT khr_pass_vp = {};   // NEAR-GAP (26001): filled below
     {
         D3D11_VIEWPORT vp = {};
 
@@ -13768,7 +16022,8 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         vp.MinDepth = g_ro.trig_vp_valid ? g_ro.trig_vp_min : g_scene_vp_min_d;
         vp.MaxDepth = g_ro.trig_vp_valid ? g_ro.trig_vp_max : g_scene_vp_max_d;
         ctx->RSSetViewports(1, &vp);
-    }
+        khr_pass_vp = vp;   // NEAR-GAP (26001): the world-range viewport,
+    }                       // pass-scope for the per-draw gap swap
 
     // The HYBRID (snapshot overhauled): hardware depth (with the shimmer
     // bias) resolves marginal ties exactly as the months-stable flush
@@ -13861,12 +16116,37 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     ID3D11PixelShader* khr_bound_ps = khr_far_arb ? g_res.ps_composite_arb
                                     : guard      ? g_res.ps_composite
                                                  : g_res.ps;
+    ID3D11VertexShader* khr_bound_vs = (guard || khr_far_arb) ? g_res.vs_composite : g_res.vs;
+    ID3D11InputLayout* khr_bound_il = g_res.input_layout;
+    // s0 for the textured per-submesh path; StateBackup's sampler slot restores.
+    if (g_res.mat_sampler) ctx->PSSetSamplers(0, 1, &g_res.mat_sampler);
     const float khr_acc_far = kh_enc_far(pv.projection[2][2], pv.projection[3][2]);
     const bool khr_fk_fresh = g_res.ps_composite_arb != nullptr &&
                               g_far_keep_ms != 0 && g_far_keep_far > 0.0f &&
                               steady_now_ms() - g_far_keep_ms < 250 &&
                               khr_acc_far > 0.0f && khr_acc_far < 1.0e8f &&
                               g_far_keep_far > khr_acc_far * 1.05f;
+    // NEAR-GAP ROUTING, pass constants (build 26001; full ledger at
+    // KH_NEARZ_GAP_FRAC). Near estimate from the engine-verbatim z
+    // column: n = -m32/m22 (cross-checked in the convicting capture
+    // against the clip-space w=0 crossing - identical to 4 digits).
+    // Arms only with the arb shader compiled, a sane near, and a real
+    // sub-floor gap to open (MinDepth 0 has none). Fail direction:
+    // disarmed = the stock path, the known artifact, never a new one.
+    const float khr_nz_A = pv.projection[2][2];
+    const float khr_nz_B = pv.projection[3][2];
+    const float khr_nz_near = (khr_nz_A > 1.0e-6f) ? (-khr_nz_B / khr_nz_A) : 0.0f;
+    const bool khr_nz_on = g_res.ps_composite_arb != nullptr &&
+        khr_nz_near > KH_CAM_NEAR_MIN && khr_nz_near < 50.0f &&
+        khr_pass_vp.MinDepth > 1.0e-5f &&
+        khr_pass_vp.MinDepth < khr_pass_vp.MaxDepth &&
+        khr_pass_vp.MaxDepth <= 1.0f;
+    D3D11_VIEWPORT khr_nz_vp = khr_pass_vp;
+    const float khr_nz_gap_lo = khr_pass_vp.MinDepth * KH_NEARZ_GAP_FRAC;
+    if (khr_nz_on) khr_nz_vp.MinDepth = khr_nz_gap_lo;
+    g_nearz_last_near = khr_nz_on ? khr_nz_near : 0.0f;
+    g_nearz_last_floor = khr_nz_on ? khr_nz_gap_lo : 0.0f;
+    bool khr_gapvp_bound = false;   // per-draw swap state (khr_bound_rs pattern)
     ctx->GSSetShader(nullptr, nullptr, 0);
     ctx->HSSetShader(nullptr, nullptr, 0);
     ctx->DSSetShader(nullptr, nullptr, 0);
@@ -14173,17 +16453,59 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         const float khr_fk_edge = fmaxf(khr_acc_far - khr_mesh_r, 0.0f);
         const bool khr_mesh_farkeep = khr_fk_fresh && o.far_vis &&
             kh_mesh_dist_sq(o, cam) > khr_fk_edge * khr_fk_edge;
+        // NEAR-GAP ROUTING verdict (build 26001; ledger at
+        // KH_NEARZ_GAP_FRAC): a mesh whose AABB reaches within the
+        // engine near plane (+2 m cm-sway margin) takes the arb
+        // SV_Depth path with the piecewise encode and the widened
+        // viewport floor. For z >= near the encode equals the world
+        // mapping, so routing on/off never pops. Farkeep excluded:
+        // disjoint by construction (beyond-far vs inside-near), and
+        // precedence keeps depthParams coherent.
+        const bool khr_mesh_nearz = khr_nz_on && !khr_mesh_farkeep &&
+            kh_mesh_dist_sq(o, cam) <
+                (khr_nz_near + 2.0f) * (khr_nz_near + 2.0f);
+        // KH_TEXTURED routing: a material-carrying solid takes the
+        // textured twin of EXACTLY the variant this draw would have used
+        // (plain / guard / arb+farkeep) - the guard, FAR CONTRACT and
+        // SV_Depth machinery ride along by the same-source-one-define
+        // contract. Twins missing (compile failure) => untextured
+        // fallback: the mesh stays visible in its solid color.
+        const KhMaterialSet* khr_txm = kh_obj_textured(o);
+        const bool khr_tx_arb = khr_far_arb || khr_mesh_farkeep || khr_mesh_nearz;
+        const bool khr_tx_on = khr_txm != nullptr &&
+            g_res.layout_tex && g_res.mat_sampler &&
+            (khr_tx_arb ? g_res.ps_comp_arb_tex != nullptr :
+             guard      ? g_res.ps_comp_tex != nullptr :
+                          g_res.ps_tex != nullptr) &&
+            ((guard || khr_far_arb) ? g_res.vs_comp_tex != nullptr
+                                    : g_res.vs_tex != nullptr);
         {
             ID3D11PixelShader* khr_want_ps =
-                (khr_far_arb || khr_mesh_farkeep) ? g_res.ps_composite_arb
-                : guard                           ? g_res.ps_composite
-                                                  : g_res.ps;
+                khr_tx_on ? (khr_tx_arb ? g_res.ps_comp_arb_tex
+                             : guard    ? g_res.ps_comp_tex
+                                        : g_res.ps_tex)
+                : (khr_far_arb || khr_mesh_farkeep || khr_mesh_nearz) ? g_res.ps_composite_arb
+                : guard                             ? g_res.ps_composite
+                                                    : g_res.ps;
             if (khr_want_ps != khr_bound_ps) {
                 ctx->PSSetShader(khr_want_ps, nullptr, 0);
                 khr_bound_ps = khr_want_ps;
             }
+            ID3D11VertexShader* khr_want_vs =
+                khr_tx_on ? ((guard || khr_far_arb) ? g_res.vs_comp_tex : g_res.vs_tex)
+                          : ((guard || khr_far_arb) ? g_res.vs_composite : g_res.vs);
+            if (khr_want_vs != khr_bound_vs) {
+                ctx->VSSetShader(khr_want_vs, nullptr, 0);
+                khr_bound_vs = khr_want_vs;
+            }
+            ID3D11InputLayout* khr_want_il = khr_tx_on ? g_res.layout_tex : g_res.input_layout;
+            if (khr_want_il != khr_bound_il) {
+                ctx->IASetInputLayout(khr_want_il);
+                khr_bound_il = khr_want_il;
+            }
         }
         if (khr_mesh_farkeep) g_farkeep_mesh_draws++;
+        if (khr_mesh_nearz) g_nearz_gap_draws++;
         // Band / local-volume mask inputs (same conversion as the flush).
         cbd.local0[0] = o.pos[0];
         cbd.local0[1] = o.pos[2];   // SQF [x,y,zASL] -> engine [x,zASL,y]
@@ -14211,7 +16533,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         // Round 6: the arb shader consumes depthParams (the SV_Depth
         // clamp encodes through them) and fxParams1.zw regardless of
         // the snapshot guard, so the fill must run for arb frames too.
-        if (guard || khr_far_arb || khr_mesh_farkeep) {
+        if (guard || khr_far_arb || khr_mesh_farkeep || khr_mesh_nearz) {
             // Guard inputs: reconstruction coefficients + the encode range
             // of the copied depth, the copy's pixel dimensions, and the
             // margins.
@@ -14279,6 +16601,16 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
                 cbd.fx1[1] = 0.0f;
                 cbd.fx1[2] = KH_FAR_ARB_GUARD_BASE;
                 cbd.fx1[3] = KH_FAR_ARB_CONTACT_H;
+            }
+            // NEAR-GAP carrier lanes (build 26001): fxMeta.x/.y are
+            // unread on every solid-mesh path (x = effect id and y =
+            // time serve PSEffect only; z/w still carry the guard's
+            // copy dimensions above). x arms the shader ramp with the
+            // near estimate, y carries the widened floor; the zeroed
+            // template keeps every other fill site disarmed.
+            if (khr_mesh_nearz) {
+                cbd.fx_meta[0] = khr_nz_near;
+                cbd.fx_meta[1] = khr_nz_gap_lo;
             }
             // CPU echo: the exact reconstruction coefficients this guard
             // received (probe-independent m22/m32/vp forensics).
@@ -14366,6 +16698,17 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             khr_bound_rs = khr_want_rs;
         }
 
+        // NEAR-GAP viewport swap (build 26001): routed draws run under
+        // the widened floor so the shader's sub-near ramp survives the
+        // output-merger clamp; everything else keeps the pass's world
+        // range bit-exact. Idempotent-set elision, the khr_bound_rs
+        // pattern; the end-of-pass restore reinstates the engine's
+        // full viewport set unconditionally.
+        if (khr_mesh_nearz != khr_gapvp_bound) {
+            ctx->RSSetViewports(1, khr_mesh_nearz ? &khr_nz_vp : &khr_pass_vp);
+            khr_gapvp_bound = khr_mesh_nearz;
+        }
+
         const int mid = mesh_id_clamp(o.mesh);
 
         if (mid != bound_mesh) {
@@ -14378,14 +16721,23 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             khr_bound_bm = o.blend_mode;
         }
 
-        ctx->Draw(mesh_vertex_count(mid), 0);
-        g_stats.composite_meshes++;
-
-        if (khr_ts_ordered) {   // pass 2: front faces over the interior
-            ctx->RSSetState(g_res.rasterizer_cull);
-            khr_bound_rs = g_res.rasterizer_cull;
+        if (khr_tx_on) {
+            // Per-submesh textured draws: matParams filled + t14-t18
+            // rebound + the object slice re-uploaded per material range.
+            const uint32_t khr_txd = kh_draw_textured(ctx, dev, cbd, g_res.composite_cb,
+                                                      *khr_txm, mid, khr_ts_ordered, khr_bound_rs);
+            g_stats.composite_meshes += khr_txd;
+            g_stats.textured_draws += khr_txd;
+        } else {
             ctx->Draw(mesh_vertex_count(mid), 0);
             g_stats.composite_meshes++;
+
+            if (khr_ts_ordered) {   // pass 2: front faces over the interior
+                ctx->RSSetState(g_res.rasterizer_cull);
+                khr_bound_rs = g_res.rasterizer_cull;
+                ctx->Draw(mesh_vertex_count(mid), 0);
+                g_stats.composite_meshes++;
+            }
         }
     }
 
@@ -15318,6 +17670,7 @@ inline bool flush_dispatch_visibility(ID3D11Device* dev, ID3D11DeviceContext* ct
 
     const UINT count = static_cast<UINT>(g_query_points_pending.size() / 3);
     if (count == 0) return false;
+    if (!ensure_query_buffers(dev, count).empty()) return false;   // grow-on-demand: no point cap
 
     // Upload points (SQF -> engine space)
     {
@@ -15432,8 +17785,30 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     // to the cold path. Dies with the session like the rest.
     {
         const bool khb_geom_ok = g_light_probe.hits > 0 && g_light_probe.meta == 40;
-        const bool khb_mode_ok = g_light_probe.last_mode >= 0.5f &&
-                                 g_light_probe.last_mode < 1.5f;   // standard layout only
+        // MODE GATE, MIRROR-FRESHNESS EDITION (renderstats17 conviction:
+        // 1385/1420 mode rejects with adoption firing ONLY inside a
+        // 31-frame third-person window - the field report 'sunlight
+        // didn't appear until I went into third person', and the
+        // occasional sun+ambient darkening, are both this gate). The
+        // MIRROR only ever refreshes on mode-1 uploads (the capture
+        // sites' own ledger: 'every consumer keeps the last-known
+        // standard lanes'), so nb[] is standard BY CONSTRUCTION - but
+        // this gate tested last_mode, which the LATEST anchor-passing
+        // upload overwrites, and in first person the engine's last
+        // writer each frame is chronically the atmospheric variant: a
+        // valid standard mirror was rejected for its neighbor's flavor.
+        // Gate on the mirror's OWN refresh recency instead; last_mode
+        // stays as the fast path. Variant-lane adoption remains
+        // impossible (the capture never runs on mode 2 - the round-9
+        // green-flicker/black-box protection is untouched), and the
+        // continuity band + err gate + confirm window keep guarding
+        // content. 2 s: a live standard stream refreshes every frame;
+        // a genuinely absent one (pure-sky altitude) goes stale and
+        // holds the standing values exactly as before.
+        const bool khb_mode_ok = (g_light_probe.last_mode >= 0.5f &&
+                                  g_light_probe.last_mode < 1.5f) ||
+                                 (g_light_probe.last_std_time >= 0.0f &&
+                                  effect_time_seconds() - g_light_probe.last_std_time < 2.0f);
         const bool khb_err_ok = g_light_probe.last_err >= 0.0f &&
                                 g_light_probe.last_err <= KH_BLK_ERR_MAX;
 
@@ -15793,6 +18168,18 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         pv = live_fix;
         g_flush_pv_repairs++;
         if (ffr_armed()) ffr_head().pv_src = 2;
+    }
+
+    // SAME-FRAME VIEW, flush edition (FLUSH FIDELITY + the adoption
+    // ledger): repaint with the EXACT view the injection painted this
+    // frame, so the repaint lands on its own depth pixel-registered.
+    // Window ~one frame; carried (miss) frames beyond it keep the
+    // latch's own freshness and take the injection's adoption verdict
+    // for themselves.
+    if (g_inj_view_ms != 0 && steady_now_ms() - g_inj_view_ms < 100) {
+        memcpy(&pv.view[0][0], g_inj_view, sizeof(g_inj_view));
+    } else {
+        kh_adopt_frame_view(pv);
     }
 
     // CARRY ENCODE BAND GATE (field round 3, partial-vanish conviction:
@@ -16199,6 +18586,8 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     ID3D11Buffer* khf_cbs[2] = { g_res.constant_buffer, g_res.frame_cb };
     ctx->VSSetConstantBuffers(0, 2, khf_cbs);
     ctx->PSSetConstantBuffers(0, 2, khf_cbs);
+    // s0 for the textured per-submesh path; StateBackup's sampler slot restores.
+    if (g_res.mat_sampler) ctx->PSSetSamplers(0, 1, &g_res.mat_sampler);
 
     ID3D11ShaderResourceView* ps_srvs[2] = {
         effects_ready ? g_res.scene_srv : nullptr,
@@ -16454,9 +18843,15 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     kh_fill_occ(khf_cbf);
     const bool khf_frame_ok = kh_upload_frame_cb(ctx, g_res.frame_cb, khf_cbf);
 
+    // Hoisted per-object CB: the textured per-submesh path refills the
+    // matParams lanes and re-uploads AFTER upload_cb returns, so the
+    // object slice must outlive the lambda.
+    ConstantData khf_obj_cbd = {};
+
     auto upload_cb = [&](const RenderObject& o, bool chain_pass) -> bool {
         khf_farkeep_draw = false;   // per-call default; solid section may set it
-        ConstantData cbd = khf_cbf;   // CB SPLIT: frame template (matrices ride for the echoes)
+        ConstantData& cbd = khf_obj_cbd;
+        cbd = khf_cbf;   // CB SPLIT: frame template (matrices ride for the echoes)
         cbd.center_size[0] = o.pos[0];
         cbd.center_size[1] = o.pos[2];   // SQF [x,y,zASL] -> engine [x,zASL,y]
         cbd.center_size[2] = o.pos[1];
@@ -16762,7 +19157,9 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     // only, leaving t1 as-is - unchanged). Sentinels force the first
     // object's sets verbatim. Loop-local: the fullscreen chain below
     // re-sets its own pipeline unconditionally, as before.
-    int khf_ps_cat = -1;                          // 0 = solid PS, 1 = effect PS
+    int khf_ps_cat = -1;                          // 0 solid / 1 effect / 2 arb / 3 textured
+    ID3D11VertexShader* khf_bound_vs = g_res.vs;
+    ID3D11InputLayout* khf_bound_il = g_res.input_layout;
     bool khf_perc_seen = false;                   // a perceptual translucent has already drawn
     int khf_srv_cat = -1;                         // 0 = comp-depth t0, 1 = scene/depth pair
     int khf_bound_bm = -1;                        // blend mode last set
@@ -16828,13 +19225,35 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         if (!upload_cb(o, false)) { if (ov) g_mask.ov_skipped++; continue; }
         if (ov) g_mask.ov_drawn++;       // Draw() will be issued below
         if (khf_o_perc) khf_perc_seen = true;
-        const int khf_ps_want = o.effect > 0 ? 1 : (khf_farkeep_draw ? 2 : 0);
+        // KH_TEXTURED routing (flush edition): textured solids take the
+        // PSMain/VSMain twins + the 4-element layout. Far-keep draws stay
+        // untextured by design (the mesh sits at the accepted far plane -
+        // no texel resolves there; the arb twin remains an injection
+        // concern). Twins missing => untextured fallback. Evaluated
+        // AFTER upload_cb: khf_farkeep_draw is set there.
+        const KhMaterialSet* khf_txm = kh_obj_textured(o);
+        const bool khf_tx_on = khf_txm != nullptr && !khf_farkeep_draw &&
+            g_res.ps_tex && g_res.vs_tex && g_res.layout_tex && g_res.mat_sampler;
+        const int khf_ps_want = o.effect > 0 ? 1 : (khf_farkeep_draw ? 2 : (khf_tx_on ? 3 : 0));
 
         if (khf_ps_want != khf_ps_cat) {
             ctx->PSSetShader(khf_ps_want == 1 ? g_res.ps_effect
                            : khf_ps_want == 2 ? g_res.ps_composite_arb
+                           : khf_ps_want == 3 ? g_res.ps_tex
                                               : g_res.ps, nullptr, 0);
             khf_ps_cat = khf_ps_want;
+        }
+        {
+            ID3D11VertexShader* khf_want_vs = khf_tx_on ? g_res.vs_tex : g_res.vs;
+            if (khf_want_vs != khf_bound_vs) {
+                ctx->VSSetShader(khf_want_vs, nullptr, 0);
+                khf_bound_vs = khf_want_vs;
+            }
+            ID3D11InputLayout* khf_want_il = khf_tx_on ? g_res.layout_tex : g_res.input_layout;
+            if (khf_want_il != khf_bound_il) {
+                ctx->IASetInputLayout(khf_want_il);
+                khf_bound_il = khf_want_il;
+            }
         }
 
         // PSComposite reads depth at t0; the flush's default pair puts
@@ -16939,12 +19358,18 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             bound_mesh = mid;
         }
 
-        ctx->Draw(mesh_vertex_count(mid), 0);
-
-        if (khf_ts_ordered) {   // pass 2: front faces over the interior
-            ctx->RSSetState(g_res.rasterizer_cull);
-            khr_bound_rs = g_res.rasterizer_cull;
+        if (khf_tx_on) {
+            const uint32_t khf_txd = kh_draw_textured(ctx, dev, khf_obj_cbd, g_res.constant_buffer,
+                                                      *khf_txm, mid, khf_ts_ordered, khr_bound_rs);
+            g_stats.textured_draws += khf_txd;
+        } else {
             ctx->Draw(mesh_vertex_count(mid), 0);
+
+            if (khf_ts_ordered) {   // pass 2: front faces over the interior
+                ctx->RSSetState(g_res.rasterizer_cull);
+                khr_bound_rs = g_res.rasterizer_cull;
+                ctx->Draw(mesh_vertex_count(mid), 0);
+            }
         }
     }
 
@@ -17507,6 +19932,11 @@ inline void reset_stat_counters() {
     g_flush_inj_pair_holds = 0;
     g_flush_pub_far_rejects = 0;
     g_farkeep_mesh_draws = 0;
+    g_nearz_gap_draws = 0;
+    g_nearz_last_near = 0.0f; g_nearz_last_floor = 0.0f;
+    g_slice_seen_near = -1.0f; g_slice_seen_far = -1.0f;
+    g_slice_seen_far_min = -1.0f; g_slice_seen_far_max = -1.0f;
+    g_slice_seen_ms = 0; g_slice_seen_count = 0;
     g_keep_stamp_rejects = 0;
     g_keep_stale_skips = 0;
     g_cast_arm_lost_ms = 0;
@@ -17570,6 +20000,8 @@ inline void reset_session_state() {
 
     // the lifetime pairing trio is session-scoped under full destroy
     g_view_relock_forced = 0; g_lock_wipes = 0; g_ls.view_locks = 0;
+    g_view_adopts = 0; g_view_adopt_stale = 0; g_view_adopt_family = 0;
+    g_view_adopt_last_rot = 0.0f; g_view_adopt_max_rot = 0.0f;
     g_ls.view_relocks = 0;
     g_ls.pub_rej_streak = 0; g_ls.view_src_miss = 0;
     g_ls.last_publish_rot_err = 1.0f;
@@ -17735,6 +20167,9 @@ inline void on_mission_end() {
         if (!lock.acquired()) continue;
         release_shadow_device_state();
         g_res.release();
+        kh_tex_cache_release();   // material-texture SRVs are device objects too:
+                                  // the next mission re-resolves through the same
+                                  // cold first-bind path a fresh process would
         reset_session_state();
         break;
     }
@@ -17840,7 +20275,7 @@ static game_value sample_scene_depth_sqf(game_value_parameter args) {
     }
 }
 
-// gpuVisibility [[x,y,zASL], [x,y,zASL], ...]   (max 1024 points)
+// gpuVisibility [[x,y,zASL], [x,y,zASL], ...]   (any count; the GPU set grows to fit)
 // Tests every point against the engine depth buffer in ONE GPU dispatch.
 // Returns one entry per point: [status, pointDistM, sceneDistM]
 //   status: 1 = visible, 0 = occluded by scene geometry, -1 = offscreen/behind camera
@@ -17851,7 +20286,6 @@ static game_value gpu_visibility_sqf(game_value_parameter args) {
         auto& arr = args.to_array();
         UINT count = static_cast<UINT>(arr.size());
         if (count == 0) return game_value(auto_array<game_value>());
-        if (count > RenderIntegration::KH_MAX_QUERY_POINTS) count = RenderIntegration::KH_MAX_QUERY_POINTS;
 
         std::vector<float> pts(count * 3);
         for (UINT i = 0; i < count; ++i) {
@@ -17889,7 +20323,9 @@ static game_value gpu_visibility_sqf(game_value_parameter args) {
     }
 }
 
-// addRender3D [[x,y,zASL], size, [r,g,b,a]?, mode?, sceneRead?, effect?, params?, band?]
+// addRender3D [[x,y,zASL], size, [r,g,b,a]?, mode?, sceneRead?, effect?,
+//              fxParams?, band?, blend?, duration?, lit?, mesh?, farVis?,
+//              rotation?, twoSided?]
 // Adds a persistent mesh drawn every frame by the internal Draw3D EH until
 // removed. Callable from ANY context (scheduled, unscheduled, callbacks).
 //   mode:      0 = depth test (default), 1 = test + depth write, 2 = overlay
@@ -17910,10 +20346,20 @@ static game_value gpu_visibility_sqf(game_value_parameter args) {
 //              shadowing. Defaults ambient 0.4 / diffuse 0.6; with the
 //              lighting block live,
 //              [1, 1] is engine-true brightness.
-//   mesh:      (index 11) STRING or SCALAR - registry mesh: "box"/"cube"
-//              (0, default) or "steps"/"test" (1, a concave 3-step
-//              staircase for exercising self-shadowing). Local space is
-//              normalized to [-0.5, 0.5]^3 and scaled per axis by 'size'.
+//   mesh:      (index 11) STRING or SCALAR - registry mesh: builtins
+//              "box"/"cube" (0, default), "steps"/"test" (1, concave
+//              self-shadowing exercise), "sphere"/"ball" (2),
+//              "cylinder"/"cyl" (3), "cone" (4), "pyramid" (5), a
+//              registry index - or a PATH ENDING ".fbx" (case-
+//              insensitive suffix required): resolved against
+//              Documents\Arma 3\kh_framework\rendering first, then
+//              every active mod's "rendering" folder (subfolders
+//              searched; relative paths honored), imported once and
+//              cached. Local space is normalized to [-0.5, 0.5]^3 and
+//              scaled per axis by 'size'; any size component <= 0
+//              substitutes the mesh's NATIVE dimension (0 = native,
+//              -2 = twice native, ...). Textures/shaders attach via
+//              updateRender3D "material".
 // Solid, non-overlay meshes are ALWAYS composited: injected into the frame
 // BEFORE the engine draws its translucents, with depth written, so the
 // engine itself composites smoke/particles against them pixel-perfectly
@@ -17976,7 +20422,10 @@ static game_value add_render3d_sqf(game_value_parameter args) {
             }
         }
 
-        if (arr.size() > 8) {
+        if (arr.size() > 8 &&
+            !(arr[8].type_enum() == game_data_type::STRING && static_cast<std::string>(arr[8]).empty())) {
+            // empty string = slot skipped (the positional-placeholder
+            // convention, matching the effect slot): blend stays default
             const int bm = RenderIntegration::blend_id_from_gv(arr[8]);
             if (bm < 0) return game_value("unknown blend mode");
             obj.blend_mode = bm;
@@ -18001,10 +20450,29 @@ static game_value add_render3d_sqf(game_value_parameter args) {
         }
 
         if (arr.size() > 11) {
-            const int mid = RenderIntegration::mesh_id_from_gv(arr[11]);
-            if (mid < 0) return game_value("unknown mesh (box | steps, or a registry index)");
+            int mid = -1;
+
+            if (arr[11].type_enum() == game_data_type::STRING &&
+                RenderIntegration::kh_ends_with_ci(static_cast<std::string>(arr[11]), ".fbx")) {
+                // A ".fbx" path (case-insensitive suffix REQUIRED) in the
+                // mesh slot: resolved Documents-first then mod "rendering"
+                // folders, imported once (synchronous - the first spawn of
+                // a model pays the parse), cached thereafter.
+                std::string khfb_err;
+                mid = RenderIntegration::kh_fbx_mesh_id(static_cast<std::string>(arr[11]), khfb_err);
+                if (mid < 0) return game_value("fbx: " + khfb_err);
+            } else {
+                mid = RenderIntegration::mesh_id_from_gv(arr[11]);
+                if (mid < 0) return game_value("unknown mesh (builtin name, registry index, or a path ending .fbx)");
+            }
+
             obj.mesh = mid;
         }
+
+        // Native-size substitution AFTER the mesh is known: any size
+        // component <= 0 reads the mesh's native dimension (0 = native,
+        // negative = |value| x native) - the true-scale path for FBX.
+        RenderIntegration::kh_apply_native_size(obj);
 
         if (arr.size() > 12 && arr[12].type_enum() == game_data_type::BOOL) {
             obj.far_vis = static_cast<bool>(arr[12]);   // visible beyond max view distance
@@ -18109,12 +20577,28 @@ static int kh_apply_shared_prop(RenderIntegration::RenderObject& obj,
 
 // updateRender3D [handle, property, value] -> BOOL
 // 3D mesh objects ONLY (addRender3D handles); fullscreen passes belong to
-// updatePostFX. Properties: "position" [x,y,zASL] | "size" number|[x,y,z] |
-// "mesh" string/scalar ("box"/"cube" 0, "steps"/"test" 1) | "color"
-// [r,g,b,a] | "mode" 0..2 | "visible" bool | "sceneread" bool | "effect"
-// string/scalar | "params" array (resets omitted entries to the effect's
-// defaults) | "blend" string | "band" [minDist, maxDist, falloff?] ([]
-// clears) | "lit" bool or [ambient, diffuse] ("lighting"
+// updatePostFX. Properties: "position" [x,y,zASL] | "size" number|[x,y,z]
+// (components <= 0 read the mesh's native dimensions) | "mesh"
+// string/scalar (builtin name, registry index, or a ".fbx" path - same
+// resolution as addRender3D) | "material" array - per-submesh shader +
+// texture assignments:
+//   [ [selector, "pbr", textures?, params?], ... ]
+//   selector: FBX material / submesh name (case-insensitive; builtins
+//             have one submesh, "default") | submesh index | -1 or "*"
+//             for all
+//   textures: [ [path, slot, routing?], ... ] with slot "diffuse"|
+//             "normal"|"orm"|"emissive"|"specular" (png/jpg/tga/bmp/dds,
+//             resolved like .fbx paths) and optional routing
+//             [ [input, channel], ... ] - input "occlusion"|"roughness"|
+//             "metallic"|"alpha"|"gloss", channel "r"|"g"|"b"|"a" - to
+//             read any channel of that texture into that shader input
+//   params:   [ [key, value], ... ] - "baseColor" [r,g,b] | "roughness" |
+//             "metalness" | "emissiveIntensity" | "normalStrength" |
+//             "cutoff" | "alphaMode" ("opaque"|"cutout")
+// | "color" [r,g,b,a] | "mode" 0..2 | "visible" bool | "sceneread" bool |
+// "effect" string/scalar | "params" array (resets omitted entries to the
+// effect's defaults) | "blend" string | "band" [minDist, maxDist,
+// falloff?] ([] clears) | "lit" bool or [ambient, diffuse] ("lighting"
 // accepted as an alias) | "duration" number or [fadeIn, hold, fadeOut].
 // Returns false for unknown handles, fullscreen handles, unknown
 // properties, or invalid values.
@@ -18143,6 +20627,7 @@ static game_value update_render3d_sqf(game_value_parameter args) {
             obj.pos[2] = static_cast<float>(pos[2]);
         } else if (prop == "size" || prop == "scale") {
             if (!RenderIntegration::read_vec3_or_uniform(arr[2], obj.size)) return game_value(false);
+            RenderIntegration::kh_apply_native_size(obj);   // <= 0 components read native dims
         } else if (prop == "rotation") {
             float khr_p = 0.0f, khr_y = 0.0f, khr_r = 0.0f;
 
@@ -18159,9 +20644,30 @@ static game_value update_render3d_sqf(game_value_parameter args) {
 
             RenderIntegration::kh_set_rotation(obj, khr_p, khr_y, khr_r);
         } else if (prop == "mesh") {
-            const int mid = RenderIntegration::mesh_id_from_gv(arr[2]);
-            if (mid < 0) return game_value(false);
+            int mid = -1;
+
+            if (arr[2].type_enum() == game_data_type::STRING &&
+                RenderIntegration::kh_ends_with_ci(static_cast<std::string>(arr[2]), ".fbx")) {
+                std::string khfb_err;
+                mid = RenderIntegration::kh_fbx_mesh_id(static_cast<std::string>(arr[2]), khfb_err);
+                if (mid < 0) { report_error("updateRender3D mesh: " + khfb_err); return game_value(false); }
+            } else {
+                mid = RenderIntegration::mesh_id_from_gv(arr[2]);
+                if (mid < 0) return game_value(false);
+            }
+
             obj.mesh = mid;
+            RenderIntegration::kh_apply_native_size(obj);
+        } else if (prop == "material") {
+            // "material" update: per-submesh shader + texture + channel
+            // assignments (format at kh_apply_material_update). Errors
+            // report the reason and return false.
+            std::string khmt_err;
+
+            if (!RenderIntegration::kh_apply_material_update(obj, arr[2], khmt_err)) {
+                report_error("updateRender3D material: " + khmt_err);
+                return game_value(false);
+            }
         } else if (prop == "mode") {
             int m = static_cast<int>(static_cast<float>(arr[2]));
             if (m < 0 || m > 2) return game_value(false);
@@ -18316,7 +20822,6 @@ static game_value queue_visibility_sqf(game_value_parameter args) {
     try {
         auto& arr = args.to_array();
         UINT count = static_cast<UINT>(arr.size());
-        if (count > RenderIntegration::KH_MAX_QUERY_POINTS) count = RenderIntegration::KH_MAX_QUERY_POINTS;
         RenderIntegration::g_query_points_pending.resize(static_cast<size_t>(count) * 3);
 
         for (UINT i = 0; i < count; ++i) {
@@ -18368,14 +20873,14 @@ static game_value get_visibility_results_sqf() {
     }
 }
 
-// addPostFX [effect, params?, color?, band?]
+// addPostFX [effect, params?, color?, band?, blend?, affectUI?, duration?]
 // Notes: runs pre-tonemap, so the engine's eye adaptation applies on top.
 // Outline and Pulse sample the engine depth buffer per pixel; on frames where
 // they are active, mode-1 meshes do not write depth (read-only DSV phase).
 static game_value add_postfx_sqf(game_value_parameter args) {
     try {
         auto& arr = args.to_array();
-        if (arr.size() < 1) return game_value("usage: addPostFX [effect, params?, [r,g,b,a]?]");
+        if (arr.size() < 1) return game_value("usage: addPostFX [effect, params?, [r,g,b,a]?, band?, blend?, affectUI?, duration?]");
         RenderIntegration::RenderObject obj;
         obj.fullscreen = true;
         obj.mode = RenderIntegration::DepthMode::Off;
@@ -18407,7 +20912,10 @@ static game_value add_postfx_sqf(game_value_parameter args) {
             }
         }
 
-        if (arr.size() > 4) {
+        if (arr.size() > 4 &&
+            !(arr[4].type_enum() == game_data_type::STRING && static_cast<std::string>(arr[4]).empty())) {
+            // empty string = slot skipped (the positional-placeholder
+            // convention, matching the effect slot): blend stays default
             const int bm = RenderIntegration::blend_id_from_gv(arr[4]);
             if (bm < 0) return game_value("unknown blend mode");
             obj.blend_mode = bm;
@@ -18437,7 +20945,8 @@ static game_value add_postfx_sqf(game_value_parameter args) {
     }
 }
 
-// getRenderStats -> ARRAY of [name, value] pairs (cumulative since load).
+// getRenderStats -> ARRAY of [name, value] pairs (cumulative since the
+// arming call: the first call arms + zeroes and returns a status pair).
 // Skip counters name the reason for any effect flicker: a skipped flush is a
 // frame rendered without our draws.
 // Debug visual selector for the solid-mesh pixel shaders (see g_dbg_mode
@@ -18513,6 +21022,10 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("compositeFarArbDenied", RenderIntegration::g_stats.composite_far_arb_denied));
         out.push_back(kv("flushFxArbs", RenderIntegration::g_stats.flush_fx_arbs));
         out.push_back(kv("compositeTranslDefers", RenderIntegration::g_stats.composite_transl_defers));
+        out.push_back(kv("texturedDraws", RenderIntegration::g_stats.textured_draws));
+        out.push_back(kv("texLoads", RenderIntegration::g_stats.tex_loads));
+        out.push_back(kv("fbxImports", RenderIntegration::g_stats.fbx_imports));
+        out.push_back(kv("registeredMeshes", static_cast<uint64_t>(RenderIntegration::mesh_count())));
         out.push_back(kv("compositeKeepEncodes", RenderIntegration::g_stats.composite_keep_encodes));
         out.push_back(kv("compositeAnomalySkips", RenderIntegration::g_stats.composite_anomaly_skips));
         out.push_back(kv("sunDepthPasses", RenderIntegration::g_stats.sun_depth_passes));
@@ -18637,6 +21150,11 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("perceptualCaptures", RenderIntegration::g_stats.perceptual_captures));
         out.push_back(kv("viewSrcValid", RenderIntegration::g_ls.view_src_valid ? 1u : 0u));
         out.push_back(kv("frameViewHits", RenderIntegration::g_ls.frame_view_hits));
+        out.push_back(kv("viewAdopts", RenderIntegration::g_view_adopts));
+        out.push_back(kv("viewAdoptStale", RenderIntegration::g_view_adopt_stale));
+        out.push_back(kv("viewAdoptFamily", RenderIntegration::g_view_adopt_family));
+        out.push_back(kvf("viewAdoptLastRot", RenderIntegration::g_view_adopt_last_rot));
+        out.push_back(kvf("viewAdoptMaxRot", RenderIntegration::g_view_adopt_max_rot));
         out.push_back(kvf("viewBestRot", RenderIntegration::g_ls.view_best_rot));
         out.push_back(kvf("viewBestTrans", RenderIntegration::g_ls.view_best_trans));
         out.push_back(kv("sealCompletions", RenderIntegration::g_ls.seal_completions));
@@ -18813,6 +21331,19 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("flushInjPairHolds", RenderIntegration::g_flush_inj_pair_holds));
         out.push_back(kv("flushPubFarRejects", RenderIntegration::g_flush_pub_far_rejects));
         out.push_back(kv("farKeepMeshDraws", RenderIntegration::g_farkeep_mesh_draws));
+        out.push_back(kv("khBuildTag", static_cast<uint64_t>(RenderIntegration::KH_BUILD_TAG)));
+        out.push_back(kv("nearzGapDraws", RenderIntegration::g_nearz_gap_draws));
+        out.push_back(kvf("nearzNearEst", RenderIntegration::g_nearz_last_near));
+        out.push_back(kvf("nearzGapFloor", RenderIntegration::g_nearz_last_floor));
+        out.push_back(kvf("sliceSeenNear", RenderIntegration::g_slice_seen_near));
+        out.push_back(kvf("sliceSeenFar", RenderIntegration::g_slice_seen_far));
+        out.push_back(kvf("sliceSeenFarMin", RenderIntegration::g_slice_seen_far_min));
+        out.push_back(kvf("sliceSeenFarMax", RenderIntegration::g_slice_seen_far_max));
+        out.push_back(kvf("sliceSeenAgeS", RenderIntegration::g_slice_seen_ms == 0 ? -1.0f
+            : (RenderIntegration::steady_now_ms() - RenderIntegration::g_slice_seen_ms) / 1000.0f));
+        out.push_back(kv("sliceSeenCount", RenderIntegration::g_slice_seen_count));
+        out.push_back(kvf("lightLocStdAgeS", RenderIntegration::g_light_probe.last_std_time < 0.0f ? -1.0f
+            : RenderIntegration::effect_time_seconds() - RenderIntegration::g_light_probe.last_std_time));
         out.push_back(kv("keepStampRejects", RenderIntegration::g_keep_stamp_rejects));
         out.push_back(kv("keepStaleSkips", RenderIntegration::g_keep_stale_skips));
         out.push_back(kvf("castArmLostAgeS", age_s(RenderIntegration::g_cast_arm_lost_ms)));
@@ -19380,7 +21911,7 @@ static game_value dump_dynamic_lights_sqf() {
         {   // the merged absolute-world pool: [x, y, z, spot] per light
             auto_array<game_value> pool;
 
-            for (uint32_t i = 0; i < khd_snap.pool_n && i < RenderIntegration::KH_DL_POOL; ++i) {
+            for (uint32_t i = 0; i < khd_snap.pool_n; ++i) {
                 const auto& p = khd_snap.pool[i];
                 auto_array<game_value> e;
                 e.push_back(game_value(p.rec[0]));
@@ -19454,7 +21985,7 @@ static game_value dump_dynamic_lights_sqf() {
         {
             uint32_t khd_dn = 0;
 
-            for (uint32_t i = 0; i < khd_snap.pool_n && i < RenderIntegration::KH_DL_POOL; ++i) {
+            for (uint32_t i = 0; i < khd_snap.pool_n; ++i) {
                 if (khd_snap.pool[i].derived) khd_dn++;
             }
 
@@ -19533,7 +22064,6 @@ static game_value dump_dynamic_lights_sqf() {
         out.push_back(kv("poolAdded", static_cast<float>(khd_snap.pool_added)));
         out.push_back(kv("poolUpdated", static_cast<float>(khd_snap.pool_updated)));
         out.push_back(kv("poolExpired", static_cast<float>(khd_snap.pool_expired)));
-        out.push_back(kv("poolOverflow", static_cast<float>(khd_snap.pool_overflow)));
 
         return game_value(std::move(out));
     } catch (...) {
@@ -19556,7 +22086,7 @@ static game_value dump_dynamic_lights_sqf() {
 static game_value add_local_postfx_sqf(game_value_parameter args) {
     try {
         auto& arr = args.to_array();
-        if (arr.size() < 4) return game_value("usage: addLocalPostFX [[x,y,zASL], radius, falloff, effect, params?, [r,g,b,a]?]");
+        if (arr.size() < 4) return game_value("usage: addLocalPostFX [[x,y,zASL], radius, falloff, effect, params?, [r,g,b,a]?, shape?, blend?, duration?]");
         RenderIntegration::RenderObject obj;
         obj.fullscreen = true;
         obj.localized = true;
@@ -19595,7 +22125,10 @@ static game_value add_local_postfx_sqf(game_value_parameter args) {
             obj.local_shape = sh;
         }
 
-        if (arr.size() > 7) {
+        if (arr.size() > 7 &&
+            !(arr[7].type_enum() == game_data_type::STRING && static_cast<std::string>(arr[7]).empty())) {
+            // empty string = slot skipped (the positional-placeholder
+            // convention, matching the effect slot): blend stays default
             const int bm = RenderIntegration::blend_id_from_gv(arr[7]);
             if (bm < 0) return game_value("unknown blend mode");
             obj.blend_mode = bm;

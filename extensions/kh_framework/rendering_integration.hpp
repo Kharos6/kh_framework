@@ -7267,7 +7267,7 @@ static uint64_t g_far_keep_ms = 0;
 static uint64_t g_farkeep_mesh_draws = 0;   // per-mesh far-keep routings (both paths)
 // BUILD TAG (doctrine: bump on EVERY delivered build; stats-visible so a
 // field log names the binary it came from).
-static constexpr int KH_BUILD_TAG = 26028;
+static constexpr int KH_BUILD_TAG = 26030;
 // NEAR-GAP RAMP (build 26001; the RenderDoc conviction). ROOT, proven by
 // pixel history + depth-window plateaus: the world partition's viewport
 // floor (0.011 in the convicting capture) collapses EVERY fragment nearer
@@ -8025,10 +8025,49 @@ inline bool kh_sun_settled() {
 // 20+ s in the campaign-5 field round (coldFirstCast 24.2 s).
 static float    g_sun_snap_cand[3] = {};
 static uint32_t g_sun_snap_hold = 0;
-static uint64_t g_sun_snap_adopts = 0;      // confirmed snaps (real jumps)
+static uint64_t g_sun_snap_adopts = 0;      // confirmed snaps (all classes)
 static uint64_t g_sun_snap_refusals = 0;    // held-out big-move samples
+static uint64_t g_sun_snap_neutral = 0;     // confirmed snaps classified PUBLISH-NEUTRAL
+                                            // (relock to the already-published direction;
+                                            // the readiness clock does NOT stamp - see
+                                            // the classification at the adoption site)
 static float    g_sun_snap_last_deg = -1.0f;
-static uint64_t g_sun_snap_ms = 0;          // last confirmed snap (age in stats)
+static uint64_t g_sun_snap_ms = 0;          // last PUBLISH-DIVERGENT confirmed snap
+                                            // (FORENSICS since 26030: ages sunDerivedSnapAgeS
+                                            // in the stats; the readiness latch keyed on this
+                                            // through 26029 and now keys on PUBLISHED-sun
+                                            // motion - see g_sun_pub_travel_ms below)
+// PUBLISH-TRAVEL DETECTOR (26030; the lognew4 conviction). The 26029
+// neutral classification worked (sunDerivedSnaps 11 / neutral 5) but 6
+// snaps still classified DIVERGENT (last 8.56 deg) and dropped the latch
+// (castReadyDrops 3, coldFirstCast 18.41 s vs the 7-8.5 s norm) while
+// the PUBLISHED sun never moved at all: sunChurnMaxDeg 0.0,
+// sunSettleHolds 0, sunGlideClamps 0 - and sunJumpRefused 3. Mechanism:
+// a look-away's degraded cascade stream can feed the estimator a
+// SELF-CONSISTENT wrong direction (5 agreeing samples satisfy the
+// snap-confirmation hold), the derived latch adopts it, but the publish
+// jump arbiter in publish_world_lighting REFUSES the jump - so the
+// cast's consumed sun (g_pub_dir -> g_sun_dir_engine) stays put and the
+// snap is publish-neutral IN EFFECT. Adoption-time classification
+// against the current publish cannot know the arbiter's later verdict;
+// no snap-side fix can. THE RE-KEY: the readiness latch's sun term
+// reads the PUBLISHED direction's own motion. g_pub_dir is sampled at
+// >= KH_SUN_PUB_TRAVEL_WIN_MS intervals below the publish; a window
+// whose angular displacement exceeds KH_SUN_PUB_TRAVEL_DEG stamps
+// g_sun_pub_travel_ms (re-stamping every tripping window, so an
+// in-progress glide holds the latch continuously). A post-snap glide
+// travels ~0.12 deg/flush (~7 deg/s) and trips the first window closed
+// over it; measured steady drift (churn 0.02-0.04 deg/s) displaces
+// ~0.01-0.02 deg per window and never trips. Adopted publish JUMPS are
+// read directly from g_sun_last_jump_ms in the latch (the drop must be
+// immediate, not one window late). Derived-snap stamps stay as
+// forensics only; the estimator, arbiter, gates 53/54, churn quiet,
+// dwell and sun-jump wipes are untouched.
+static constexpr uint64_t KH_SUN_PUB_TRAVEL_WIN_MS = 500;
+static constexpr float    KH_SUN_PUB_TRAVEL_DEG = 0.3f;
+static float    g_sun_pub_travel_ref[3] = {};   // published dir at the window open
+static uint64_t g_sun_pub_travel_ref_ms = 0;    // window-open stamp (0 = no window yet)
+static uint64_t g_sun_pub_travel_ms = 0;        // last tripping window (the latch's sun quiet term)
 static uint64_t g_sun_derived_view_skips = 0;   // derivation samples refused on a
                                                 // stale or unhealthy pairing view
                                                 // (round 3; the wrong-angle root)
@@ -8273,6 +8312,35 @@ inline void publish_world_lighting() {
         g_sun_pub_prev[1] = g_pub_dir[1];
         g_sun_pub_prev[2] = g_pub_dir[2];
         g_sun_pub_prev_valid = true;
+
+        // PUBLISH-TRAVEL sampling (26030; full ledger at the
+        // g_sun_pub_travel_* declarations): the readiness latch's sun
+        // term reads the stamp this window detector maintains. Runs
+        // under the park like every other publish consumer.
+        {
+            const uint64_t kht_now = steady_now_ms();
+
+            if (g_sun_pub_travel_ref_ms == 0) {
+                g_sun_pub_travel_ref[0] = g_pub_dir[0];
+                g_sun_pub_travel_ref[1] = g_pub_dir[1];
+                g_sun_pub_travel_ref[2] = g_pub_dir[2];
+                g_sun_pub_travel_ref_ms = kht_now;
+            } else if (kht_now - g_sun_pub_travel_ref_ms >= KH_SUN_PUB_TRAVEL_WIN_MS) {
+                float kht_dp = g_pub_dir[0] * g_sun_pub_travel_ref[0] +
+                               g_pub_dir[1] * g_sun_pub_travel_ref[1] +
+                               g_pub_dir[2] * g_sun_pub_travel_ref[2];
+                kht_dp = kht_dp > 1.0f ? 1.0f : (kht_dp < -1.0f ? -1.0f : kht_dp);
+
+                if (acosf(kht_dp) * 57.29578f > KH_SUN_PUB_TRAVEL_DEG) {
+                    g_sun_pub_travel_ms = kht_now;
+                }
+
+                g_sun_pub_travel_ref[0] = g_pub_dir[0];
+                g_sun_pub_travel_ref[1] = g_pub_dir[1];
+                g_sun_pub_travel_ref[2] = g_pub_dir[2];
+                g_sun_pub_travel_ref_ms = kht_now;
+            }
+        }
     }
 
     // COLD-HOLD edge tracking: stamp the (graced) validity rise; a fall
@@ -9662,7 +9730,17 @@ static uint64_t g_fire_view_era_rejects = 0;    // bridges refused by the era gu
 // casts until every stability term has been quiet for a full dwell -
 // absent beats a wrong shadow, a gliding shadow, or a rectangle. Ledger
 // at the gate in mask_cast_engine).
-static constexpr uint64_t KH_CAST_READY_QUIET_MS = 1500;   // churn/snap quiet floor
+static constexpr uint64_t KH_CAST_READY_QUIET_MS = 1500;   // churn/publish-travel quiet floor
+static constexpr float KH_CAST_READY_SNAP_PUB_DEG = 1.0f;  // snap classification bar: a
+                                            // confirmed snap whose target sits within this
+                                            // angle of the CURRENT PUBLISHED sun is a
+                                            // publish-neutral relock (the estimator finding
+                                            // its way back after a cascade re-layout).
+                                            // FORENSIC since 26030: the latch keys on
+                                            // published-sun motion, and a divergent stamp
+                                            // only ages sunDerivedSnapAgeS - if a divergent
+                                            // snap is real, the publish GLIDES and the
+                                            // travel detector converts that into the drop
 static constexpr uint64_t KH_CAST_READY_DWELL_MS = 1500;   // continuous-health dwell before the latch
 static bool     g_cast_ready = false;           // the latch: casts allowed
 static uint64_t g_cast_ready_since_ms = 0;      // dwell start (0 = dwell not running)
@@ -13957,7 +14035,46 @@ inline void band_capture(ID3D11DeviceContext* ctx, const float* cb, uint32_t off
                                         wdir[2] * g_sun_dir_derived[2];
                         khsn_dp = khsn_dp > 1.0f ? 1.0f : (khsn_dp < -1.0f ? -1.0f : khsn_dp);
                         g_sun_snap_last_deg = acosf(khsn_dp) * 57.29578f;
-                        g_sun_snap_ms = steady_now_ms();
+                        // PUBLISH-NEUTRAL SNAP CLASSIFICATION (lognew3, the
+                        // look-away/look-back blink): 44 confirmed snaps at
+                        // ~9.4 deg in one session while the PUBLISHED sun
+                        // never moved (sunSettleHolds 0, sunChurnMaxDeg
+                        // 0.17) - camera turns re-lay the engine cascades,
+                        // the derived latch wanders on the degraded stream,
+                        // and the snap merely RELOCKS it to the direction
+                        // the publish already points at. Each such relock
+                        // stamped the readiness clock and cost exactly
+                        // QUIET+DWELL = 3.0 s of no shadow (castReadyAgeS
+                        // 0.744 = sunDerivedSnapAgeS 3.744 - 3.0, dump-
+                        // exact). The cast consumes the PUBLISHED sun, so
+                        // the latch clock stamps only when the snap target
+                        // DIVERGES from the current publish (a real
+                        // direction change: the glide that follows is the
+                        // converging state the latch exists to hide).
+                        // A publish-invalid moment classifies divergent -
+                        // conservative, matches the pre-fix behavior.
+                        // (26030: the readiness latch no longer reads the
+                        // divergent stamp at all - it keys on published-sun
+                        // travel; the classification and both stamps below
+                        // are forensics. Lognew4: a divergent-classified
+                        // snap whose jump the publish arbiter then REFUSES
+                        // is publish-neutral in effect, unknowable here.)
+                        bool khsn_neutral = false;
+
+                        if (g_pub_valid) {
+                            float khsn_pp = wdir[0] * g_pub_dir[0] +
+                                            wdir[1] * g_pub_dir[1] +
+                                            wdir[2] * g_pub_dir[2];
+                            khsn_pp = khsn_pp > 1.0f ? 1.0f : (khsn_pp < -1.0f ? -1.0f : khsn_pp);
+                            khsn_neutral = acosf(khsn_pp) * 57.29578f < KH_CAST_READY_SNAP_PUB_DEG;
+                        }
+
+                        if (khsn_neutral) {
+                            g_sun_snap_neutral++;
+                        } else {
+                            g_sun_snap_ms = steady_now_ms();
+                        }
+
                         g_sun_snap_adopts++;
                         g_sun_snap_hold = 0;
                         g_sun_dir_derived[0] = wdir[0];
@@ -15100,11 +15217,12 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
     // (2) the RECTANGLE (the 'cut-off shadow') - the AABB slab fallback
     // firing whenever the private sun map is stale, indistinguishable
     // from a warm-up state by design. THE LATCH: casts require every
-    // stability term (lock churn AND confirmed derived snaps quiet for
+    // stability term (lock churn AND published-sun motion - the travel
+    // detector plus adopted jumps - quiet for
     // KH_CAST_READY_QUIET_MS; sun settled and non-default via the gates
     // above, which now RESET the dwell when they trip) to hold
     // continuously for KH_CAST_READY_DWELL_MS before the first fire is
-    // allowed, and any churn / snap / sun loss DROPS the latch - the
+    // allowed, and any churn / published-sun motion / sun loss DROPS the latch - the
     // shadow disappears cleanly and returns only after a full re-dwell,
     // never showing a converging state. THE SLAB IS RETIRED on the
     // gated path: a stale map holds the fire (miss 58) instead of
@@ -15117,11 +15235,22 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
     // healthy cold: the dwell adds ~1.5 s to a first cast (~8.5 s
     // total against 7.0 measured) - the price of never showing the
     // converging state, per directive.
+    // 26030 RE-KEY (lognew4; full ledger at the g_sun_pub_travel_*
+    // declarations): the sun term reads PUBLISHED-sun motion
+    // (g_sun_pub_travel_ms + g_sun_last_jump_ms), not derived-snap
+    // events - 6 divergent-classified snaps dropped the latch while the
+    // publish never moved a degree (sunChurnMaxDeg 0.0; the arbiter
+    // refused every jump, sunJumpRefused 3), and warm-up divergent
+    // snaps stretched coldFirstCast to 18.41 s. Snap stamps remain as
+    // forensics. The directive is preserved: any ACTUAL published-sun
+    // motion - jump or glide - still drops the latch and re-dwells in
+    // full.
     if (g_dbg_mode.load(std::memory_order_relaxed) != 21) {
         const uint64_t khcr_now = steady_now_ms();
         const bool khcr_stable =
             (g_lock_churn_ms_v == 0 || khcr_now - g_lock_churn_ms_v >= KH_CAST_READY_QUIET_MS) &&
-            (g_sun_snap_ms == 0 || khcr_now - g_sun_snap_ms >= KH_CAST_READY_QUIET_MS);
+            (g_sun_pub_travel_ms == 0 || khcr_now - g_sun_pub_travel_ms >= KH_CAST_READY_QUIET_MS) &&
+            (g_sun_last_jump_ms == 0 || khcr_now - g_sun_last_jump_ms >= KH_CAST_READY_QUIET_MS);
 
         if (!khcr_stable) {
             if (g_cast_ready) g_cast_ready_drops++;
@@ -20773,7 +20902,8 @@ inline void reset_stat_counters() {
     g_cast_ready_holds = 0; g_cast_map_holds = 0; g_cast_ready_drops = 0;
     g_live_rej_sun_axis = 0; g_live_rej_sun_axis_deg = -1.0f;
     g_band_rej_sun_axis = 0; g_band_rej_sun_axis_deg = -1.0f;
-    g_sun_snap_adopts = 0; g_sun_snap_refusals = 0; g_sun_snap_last_deg = -1.0f;
+    g_sun_snap_adopts = 0; g_sun_snap_refusals = 0; g_sun_snap_neutral = 0;
+    g_sun_snap_last_deg = -1.0f;
     g_sun_derived_view_skips = 0;
     g_sun_derived_bridge = 0;
     g_mask_rt_binds_f = 0; g_mask_last_bind_d = -1.0f;
@@ -20857,6 +20987,9 @@ inline void reset_session_state() {
     g_sun_unstable_ms = 0;
     g_sun_valid_ms = 0;
     g_sun_last_jump_ms = 0;
+    g_sun_pub_travel_ref[0] = g_sun_pub_travel_ref[1] = g_sun_pub_travel_ref[2] = 0.0f;
+    g_sun_pub_travel_ref_ms = 0;   // publish-travel detector restarts with the session
+    g_sun_pub_travel_ms = 0;
     g_sun_jump_rate_refused = 0;
     g_sun_fell_ms = 0;
     g_sun_ok_prev = false;

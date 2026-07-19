@@ -5792,6 +5792,10 @@ static void update_unit_states() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// SQF entry points
+// ---------------------------------------------------------------------------
+
 // Uniform ARRAY error shape for the array-returning query commands (the
 // same pair-in-array idiom as [["status","armed"]]): success returns the
 // data array, failure returns [["error", <sentence>]] - one return type
@@ -7044,9 +7048,11 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("bandRejSunAxis", RenderIntegration::g_band_rej_sun_axis));
         out.push_back(kvf("bandRejSunAxisLastDeg", RenderIntegration::g_band_rej_sun_axis_deg));
         out.push_back(kv("sunDerivedSnaps", RenderIntegration::g_sun_snap_adopts));
+        out.push_back(kv("sunDerivedSnapNeutral", RenderIntegration::g_sun_snap_neutral));
         out.push_back(kv("sunDerivedSnapHolds", RenderIntegration::g_sun_snap_refusals));
         out.push_back(kvf("sunDerivedSnapLastDeg", RenderIntegration::g_sun_snap_last_deg));
         out.push_back(kvf("sunDerivedSnapAgeS", age_s(RenderIntegration::g_sun_snap_ms)));
+        out.push_back(kvf("sunPubTravelAgeS", age_s(RenderIntegration::g_sun_pub_travel_ms)));
         out.push_back(kv("sunDerivedViewSkips", RenderIntegration::g_sun_derived_view_skips));
         out.push_back(kv("sunDerivedBridgeSamples", RenderIntegration::g_sun_derived_bridge));
         // COLD TIMELINE (campaign 5 round 2): stage times relative to

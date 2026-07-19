@@ -1405,6 +1405,13 @@ cbuffer CBObj : register(b0)
     float4 matParams3;    // intensity + channel routes (see the material
                           // block after ApplyLighting). Zeroed and unread
                           // on every untextured fill site.
+    float4 khFarSplit;    // FAR-KEEP SPLIT (26046): xy = the FRAME pair
+                          // (m22/m32) for in-far fragments of a far-keep-
+                          // routed mesh, w = armed; z (26049) = this
+                          // mesh's own 1+slot id in the fkVeto list (0 =
+                          // not listed) for the veto's self-exclusion.
+                          // Zeroed on every unrouted fill site. Ledger at
+                          // the C++ routing.
     // Dynamic lights mirror: engine cb10/cb11 packing VERBATIM (night-
     // capture disassembly; see the DYNLIGHTS ledger in the C++ section).
     // PER OBJECT: mode 3 culls the pool to this mesh's nearest set.
@@ -1489,6 +1496,23 @@ cbuffer CBFrame : register(b1)
                           // z = burial bias (m; occlude when the ray
                           // dips this far below terrain), w = min
                           // fragment distance (m) to run the march
+    // --- C8 (26049) IN-FAR OWN-OCCLUDER VETO (Symptom A: beyond-far
+    // farVis punch-through of OUR OWN meshes). The mixed-encode soup
+    // makes the hardware comparison structurally unreliable across the
+    // far boundary (keep-encoded beyond-far values numerically undercut
+    // frame-encoded in-far values in the overlap band), so visibility
+    // against our own staged meshes is decided METRICALLY: every in-far
+    // fragment is nearer than every beyond-far fragment by construction,
+    // so coverage alone decides. Camera->fragment ray vs the nearest
+    // staged in-far mesh OBBs - exact for box meshes (meshes normalize
+    // to [-0.5, 0.5]^3 x size), conservative (over-hide) for concave
+    // registry meshes. Filled only on far-keep-fresh mesh passes; the
+    // zeroed template disarms every other site. Full ledger at
+    // kh_fill_fk_veto (C++). ---
+    float4 fkVetoMeta;    // x = OBB count (0 = veto dark), yzw unused
+    float4 fkVeto[40];    // 8 OBBs x 5 float4: [center.xyz, 1+slot],
+                          // [half.xyz, 0], then the 3 rotation rows
+                          // (engine axes; identity when unrotated)
 };
 
 // Raw depth -> view-axis meters (the guard's linearization), SETTLED:
@@ -1505,6 +1529,48 @@ float KhSceneMeters(float raw)
     if (denom > -1e-7f) return 1e9f;
     float d = depthParams.y / denom;
     return d > 0.0f ? d : 1e9f;
+}
+
+// C8 (26049) IN-FAR OWN-OCCLUDER VETO: does the camera->wpos ray pass
+// through any staged in-far mesh OBB in front of the fragment? Slab
+// test in each OBB's local frame (the rows transform world offsets to
+// local - the same row-vector convention as KhRotate). selfId
+// (khFarSplit.z = 1+slot) skips the routed mesh's own entry: a mesh
+// never vetoes its own beyond-far faces (its fragments sit ON the slab
+// boundary, and in-far self-coverage already resolves in one encode
+// space through the hardware test). The 0.5 m entry slack keeps
+// touching geometry from vetoing across a shared face.
+bool KhFkVetoHit(float3 cam, float3 wpos, float selfId)
+{
+    float3 kfvV = wpos - cam;
+    float kfvTf = length(kfvV);
+    if (kfvTf < 1.0f) return false;
+    float3 kfvRd = kfvV / kfvTf;
+    int kfvN = (int)(fkVetoMeta.x + 0.5f);
+    [loop] for (int kfvI = 0; kfvI < 8; ++kfvI) {
+        if (kfvI >= kfvN) break;
+        float4 kfvC = fkVeto[kfvI * 5 + 0];
+        if (abs(kfvC.w - selfId) < 0.5f) continue;
+        float3 kfvH = fkVeto[kfvI * 5 + 1].xyz;
+        float3 kfvA0 = fkVeto[kfvI * 5 + 2].xyz;
+        float3 kfvA1 = fkVeto[kfvI * 5 + 3].xyz;
+        float3 kfvA2 = fkVeto[kfvI * 5 + 4].xyz;
+        float3 kfvRo = cam - kfvC.xyz;
+        float3 kfvO = float3(dot(kfvRo, kfvA0), dot(kfvRo, kfvA1), dot(kfvRo, kfvA2));
+        float3 kfvD = float3(dot(kfvRd, kfvA0), dot(kfvRd, kfvA1), dot(kfvRd, kfvA2));
+        float3 kfvSd = float3(kfvD.x >= 0.0f ? 1.0f : -1.0f,
+                              kfvD.y >= 0.0f ? 1.0f : -1.0f,
+                              kfvD.z >= 0.0f ? 1.0f : -1.0f);
+        float3 kfvInv = kfvSd / max(abs(kfvD), 1.0e-6f);
+        float3 kfvT0 = (-kfvH - kfvO) * kfvInv;
+        float3 kfvT1 = ( kfvH - kfvO) * kfvInv;
+        float3 kfvMn = min(kfvT0, kfvT1);
+        float3 kfvMx = max(kfvT0, kfvT1);
+        float kfvIn  = max(max(kfvMn.x, kfvMn.y), kfvMn.z);
+        float kfvOut = min(min(kfvMx.x, kfvMx.y), kfvMx.z);
+        if (kfvIn <= kfvOut && kfvOut > 0.0f && kfvIn < kfvTf - 0.5f) return true;
+    }
+    return false;
 }
 )HLSL" R"HLSL(
 // --- ANALYTIC TERRAIN OCCLUSION (see the thmParams ledger) ---
@@ -3112,6 +3178,32 @@ float4 PSComposite(VSOutC i) : SV_Target
         // anti-shimmer tie duty metrically (0.01% toward the camera).
         khaD *= (1.0f - 1.0e-4f);
         float khaNdc = depthParams.x + depthParams.y / max(khaD, 0.01f);
+        // FAR-KEEP SPLIT (26046; lognew16 conviction): a far-keep-routed
+        // mesh takes the keep pair ONLY beyond the frame far. The
+        // whole-mesh override let an in-far face at 1500 m encode through
+        // the deep keep pair and test ~11 m equivalent against
+        // frame-encoded content ((10, 20199) keep vs the fogged frame's
+        // (0.07, 2542)) - punching over the world. In-far fragments now
+        // encode with the frame pair (khFarSplit.xy); beyond-far
+        // fragments keep today's routed values verbatim (the clouds
+        // ordering the routing exists for). 26049 adds the in-far
+        // own-occluder veto to the beyond-far side - visibility only;
+        // surviving fragments' values are unchanged.
+        if (khFarSplit.w > 0.5f) {
+            float khaF = khFarSplit.x + khFarSplit.y / max(khaD, 0.01f);
+            if (khaF <= 1.0f) {
+                khaNdc = khaF;
+            } else if (fkVetoMeta.x > 0.5f &&
+                       KhFkVetoHit(fxParams0.xyz, i.wpos, khFarSplit.z)) {
+                // C8 (26049) IN-FAR OWN-OCCLUDER VETO (ledger at the
+                // helper): a beyond-far fragment covered by one of our
+                // own in-far meshes is metrically behind it no matter
+                // what either encode says - drop it before the soup
+                // comparison can resolve it wrong. Uncovered beyond-far
+                // fragments keep the routed keep-space values verbatim.
+                clip(-1.0f);
+            }
+        }
         khaODepth = clamp(depthParams.z + (depthParams.w - depthParams.z) * khaNdc,
                           depthParams.z, depthParams.w);
         // NEAR-GAP RAMP (build 26001; full ledger at KH_NEARZ_GAP_FRAC):
@@ -4005,6 +4097,13 @@ struct alignas(16) ConstantData {
     float mat_params1[4];      // base color rgb / roughness
     float mat_params2[4];      // metalness / emissive intensity / occ route / rough route
     float mat_params3[4];      // metal route / alpha route / gloss route / spec workflow
+    float kh_far_split[4];     // FAR-KEEP SPLIT (26046): x/y = frame pair
+                               // (m22/m32) for in-far fragments of a routed
+                               // mesh, w = armed; z (26049) = the mesh's
+                               // own 1+slot id in the veto list (0 = not
+                               // listed) for the veto's self-exclusion;
+                               // zeroed everywhere else. HLSL twin:
+                               // khFarSplit (same relative slot).
     float dl_ctl[4];           // x = mode (0 off / 1 camera-relative world /
                                // 2 view space / 3 absolute pool), y = point
                                // count, z = spot count, w = distance scale
@@ -4055,6 +4154,10 @@ struct alignas(16) ConstantData {
     float fog_sky_col[4];      // sky row 7 base color (verbatim fog color)
     float thm_params[4];          // heightfield origin/cell/valid
     float thm_meta[4];            // heightfield dims/bias/minDist
+    // C8 (26049) IN-FAR OWN-OCCLUDER VETO - HLSL twins fkVetoMeta /
+    // fkVeto (mirror contract; ledger there and at kh_fill_fk_veto).
+    float fk_veto_meta[4];        // x = OBB count (0 = veto dark)
+    float fk_veto[40][4];         // 8 x 5 float4 per-OBB records
 };
 
 // CB-split slice geometry: the object block ends where view_proj (the
@@ -4146,6 +4249,126 @@ inline void kh_fill_center_rel(ConstantData& cbd, const float* cam3) {
     cbd.center_rel[2] = static_cast<float>(static_cast<double>(cbd.center_size[2]) - static_cast<double>(cam3[2]));
     cbd.center_rel[3] = 1.0f;   // armed (matches the pass's rebased viewProj)
 }
+
+// ===========================================================================
+// C8 (26049) IN-FAR OWN-OCCLUDER VETO (Symptom A - beyond-far farVis
+// punch-through of OUR OWN meshes; operator repro: a size-3000 farVis box
+// straddling the fogged ~2.4 km far shows its beyond-far corner THROUGH a
+// two-sided box the camera stands inside).
+// ROOT (static conviction; the operator's A/B already eliminated the
+// symptom with farVis FALSE): BOTH boxes write depth (mode-0 composited
+// solids write by the FALLBACK DEPTH-WRITE PARITY ledger), but through
+// DIFFERENT encode spaces - the routed corner keep-encodes ((10, ~20199):
+// NDC ~0.9965-0.998 across 2.5-20 km) while the near box frame-encodes
+// ((0.07, ~2542): ~0.9997 at 250 m). Under LESS_EQUAL the beyond-far
+// corner is NUMERICALLY NEARER than any frame-encoded fragment past
+// ~25 m (1 - near/d crosses the keep band at d ~ 12-25 m for near 0.07),
+// so it wins the buffer regardless of draw order - the mixed-encode soup
+// the depth ledgers already name. No single output value can order
+// correctly against BOTH far-partition content (needs keep space -
+// log_new14's field conviction) and our frame-encoded meshes (needs
+// frame space), so visibility against our own meshes is decided
+// METRICALLY in the arb PS instead:
+//   every in-far fragment is metrically nearer than every beyond-far
+//   fragment BY CONSTRUCTION (d <= accFar < D), so coverage alone
+//   decides - if the camera->fragment ray passes through any staged
+//   in-far mesh volume in front of the fragment, the fragment loses.
+// Candidates: every visible, non-expired, depth-participating geometry
+// mesh (effect 0, mode != Off, not fullscreen, envelope alpha > 0.02) -
+// TRANSLUCENTS INCLUDED by choice: a translucent surface depth-TESTS,
+// and leaving it out re-creates the corner-shaped hole through deferred
+// translucents (the same artifact class, just inverted). Disclosed
+// trade: the corner is dropped rather than tinted behind our own glass.
+// Entries must REACH in-far (nearest bound < accFar): a fully-beyond-far
+// non-routed mesh is invisible (far contract) and must not veto from the
+// dark. The routed mesh never vetoes itself (khFarSplit.z carries its
+// own slot id). Bounds are the TIGHT scaled OBB (meshes normalize to
+// [-0.5, 0.5]^3): exact for boxes, conservative (over-hide behind empty
+// AABB regions) for concave registry meshes. NEAREST 8 by bounds
+// distance - a FLAGGED CAP (requirement-list exception, dynamic-light-
+// cap class): with more than 8 in-far meshes near a routed giant the
+// 9th onward degrade to today's behavior. Fail-open at every seam: the
+// fill runs only on far-keep-fresh passes, the zeroed template keeps
+// every other site dark, and a dark veto is behavior-identical to 26048.
+// ===========================================================================
+struct KhFkVetoCand {
+    uint64_t seq = 0;      // RenderObject.seq (slot identity for self-exclusion)
+    float c[3] = {};       // engine-axes center
+    float h[3] = {};       // engine-axes TIGHT half extents (pre-rotation)
+    float ax[9] = {};      // rotation rows (engine axes; identity unrotated)
+    float he[3] = {};      // enclosing WORLD half extents (reach + distance)
+    float d2 = 0.0f;       // nearest-bound distance^2 (filled by the fill)
+};
+
+inline void kh_fk_veto_collect(std::vector<KhFkVetoCand>& list, const RenderObject& o) {
+    KhFkVetoCand kfc;
+    kfc.seq = o.seq;
+    kfc.c[0] = o.pos[0];
+    kfc.c[1] = o.pos[2];   // SQF [x, y, zASL] -> engine [x, zASL, y]
+    kfc.c[2] = o.pos[1];
+    kfc.h[0] = 0.5f * o.size[0];   // SQF [x, y, z] sizes -> engine [x, z, y]
+    kfc.h[1] = 0.5f * o.size[2];
+    kfc.h[2] = 0.5f * o.size[1];
+    memcpy(kfc.ax, o.rot_m, sizeof(kfc.ax));
+    kh_world_half_extents(o, kfc.he);
+    list.push_back(kfc);
+}
+
+// Fill the frame template's veto block from the pass's candidates:
+// nearest-bound distances against the pass camera (engine axes - the
+// same AABB metric as kh_mesh_dist_sq with the axes already permuted),
+// keep entries that REACH in-far, take the nearest 8. slot_seq[8]
+// reports which seq landed in which slot so the per-draw fill can hand
+// the routed mesh its own id (khFarSplit.z). Returns the entry count
+// (also written to fk_veto_meta.x); a 0 return leaves the veto dark.
+inline int kh_fill_fk_veto(ConstantData& cbf, std::vector<KhFkVetoCand>& list,
+                           const float cam[3], float acc_far, uint64_t slot_seq[8]) {
+    for (int s = 0; s < 8; ++s) slot_seq[s] = 0;
+    if (list.empty() || !(acc_far > 0.0f)) return 0;
+
+    for (auto& kfc : list) {
+        float acc = 0.0f;
+        for (int k = 0; k < 3; ++k) {
+            const float lo = kfc.c[k] - kfc.he[k];
+            const float hi = kfc.c[k] + kfc.he[k];
+            const float p = cam[k] < lo ? lo : (cam[k] > hi ? hi : cam[k]);
+            const float dd = cam[k] - p;
+            acc += dd * dd;
+        }
+        kfc.d2 = acc;
+    }
+
+    std::sort(list.begin(), list.end(),
+              [](const KhFkVetoCand& a, const KhFkVetoCand& b) { return a.d2 < b.d2; });
+    int n = 0;
+
+    for (const auto& kfc : list) {
+        if (n >= 8) break;
+        if (kfc.d2 >= acc_far * acc_far) continue;   // must REACH in-far (ledger)
+        float* v0 = cbf.fk_veto[n * 5 + 0];
+        float* v1 = cbf.fk_veto[n * 5 + 1];
+        v0[0] = kfc.c[0]; v0[1] = kfc.c[1]; v0[2] = kfc.c[2];
+        v0[3] = static_cast<float>(n + 1);
+        v1[0] = kfc.h[0]; v1[1] = kfc.h[1]; v1[2] = kfc.h[2];
+        v1[3] = 0.0f;
+        for (int r = 0; r < 3; ++r) {
+            float* vr = cbf.fk_veto[n * 5 + 2 + r];
+            vr[0] = kfc.ax[r * 3 + 0];
+            vr[1] = kfc.ax[r * 3 + 1];
+            vr[2] = kfc.ax[r * 3 + 2];
+            vr[3] = 0.0f;
+        }
+        slot_seq[n] = kfc.seq;
+        ++n;
+    }
+
+    cbf.fk_veto_meta[0] = static_cast<float>(n);
+    return n;
+}
+
+// Game-thread veto scratch for the flush (collected in flush_locked's
+// staging under the draw-list mutex, consumed before its frame upload).
+static std::vector<KhFkVetoCand> g_khf_veto_cands;
 
 struct alignas(16) CSConstantData {
     float view_proj[4][4];
@@ -7672,6 +7895,13 @@ struct ReorderState {
     float cycle_vp_min = 0.0f;
     float cycle_vp_max = 1.0f;
     bool  cycle_vp_valid = false;
+    // C8 (26049) cycle viewport-range census (pure lanes): extremes of
+    // the sampled MinDepth/MaxDepth across this cycle's opaque samples -
+    // names whether a far partition ran a different depth sub-range this
+    // frame (the cloud-quadrant discriminator). lo starts above the
+    // valid range; lo > 1.5 at finalize reads as the -1 sentinel.
+    float cyc_vp_lo = 2.0f;
+    float cyc_vp_hi = -1.0f;
     // Encode range for the injection: the TRIGGER draw's own live viewport
     // range - definitionally the range the world's translucents run under,
     // captured at the moment the trigger passes the world-shape test.
@@ -7708,6 +7938,20 @@ struct ReorderState {
     float slot_near_live = -1.0f;
     float slot_m22 = 0.0f;
     float slot_m32 = 0.0f;
+    // WORLD-PHASE PAIR LATCH (26045; conviction lognew15): the slot pair
+    // as it stood at the LAST world-class opaque draw of this cycle -
+    // the projection the world's own opaques most recently rendered
+    // under, i.e. the exact encode our depth writes must share to test
+    // correctly against world content. The raw slot ("latest upload")
+    // hands the injection a FOREIGN partition's pair on look-up frames
+    // where sky/foreground uploads interleave after the world phase
+    // (committed (0.07, ~2500) vs the world's (10, 20199): side faces
+    // beat world objects in-bucket, and a 3000 m mesh straddling the
+    // foreign 2.5 km far turned to depth garbage over the near mesh).
+    // Band- and ceiling-checked at capture; per-cycle validity.
+    float world_m22 = 0.0f;
+    float world_m32 = 0.0f;
+    bool  world_pair_valid = false;
     // Opaque draws since the last landed injection, counted ACROSS
     // clears: a foreign cycle repainting the world over an injected
     // frame reads scene-scale here while we sit uninjected - and that
@@ -7746,14 +7990,21 @@ static uint64_t g_slot_keep_ms = 0;
 // route per-mesh through the SV_Depth arb shader with THIS pair, so
 // their depth lands in the far partition's own encode space. Render-
 // thread writes, same g_ro read contract as the slot keep.
+// C8 (26049): beyond-far fragments now additionally clip under the
+// in-far own-occluder veto (ledger at kh_fill_fk_veto) - the keep-space
+// value is unchanged wherever they survive.
 static float    g_far_keep_m22 = 0.0f;
 static float    g_far_keep_m32 = 0.0f;
 static float    g_far_keep_far = -1.0f;
 static uint64_t g_far_keep_ms = 0;
 static uint64_t g_farkeep_mesh_draws = 0;   // per-mesh far-keep routings (both paths)
+// C8 (26049) veto forensics (session-cumulative, farkeep siblings -
+// deliberately outside reset_stat_counters like g_farkeep_mesh_draws).
+static uint64_t g_fk_veto_fills = 0;        // far-keep-fresh frame fills that armed the veto
+static uint32_t g_fk_veto_last_n = 0;       // OBB count of the last armed fill
 // BUILD TAG (doctrine: bump on EVERY delivered build; stats-visible so a
 // field log names the binary it came from).
-static constexpr int KH_BUILD_TAG = 26037;
+static constexpr int KH_BUILD_TAG = 26051;
 // NEAR-GAP RAMP (build 26001; the RenderDoc conviction). ROOT, proven by
 // pixel history + depth-window plateaus: the world partition's viewport
 // floor (0.011 in the convicting capture) collapses EVERY fragment nearer
@@ -7887,6 +8138,65 @@ static float    g_fire_cam_delta_m = -1.0f;  // |live bridge camera at the FREEZ
                                              // and fire); ~zero acquits it and points
                                              // the residual lag at the capture side.
 static float    g_fire_cam_delta_max = 0.0f;
+// DENSE-CLOUD TRACKING PROBE maxima (armed census, like the FFR lanes
+// they summarize): worst injection-time latch-vs-live camera gap and
+// worst latch refresh age since the arm. getRenderStats mirrors both so
+// a spike is visible without the full trace.
+static float    g_latch_live_delta_max = 0.0f;   // m
+static float    g_latch_age_max_ms = 0.0f;       // ms
+// FAST-CAMERA LIVE-VIEW ADOPTION forensics (26040): injections whose
+// consumed latch camera sat beyond the continuity gate's own bound and
+// therefore painted with the live bridge view instead.
+static uint64_t g_inj_view_live_adopts = 0;
+static float    g_inj_view_live_last_m = -1.0f;  // delta at the last swap (m)
+// CLEAR-TIME BOUNDARY SAMPLE (26041): the RAW bridge pv fetched at this
+// cycle's main-depth clear, stored BEFORE the continuity gate rules on
+// it. The gate's verdict governs latch ADOPTION only; the sample itself
+// is the frame-setup-synchronous camera (the latch's own charter) and
+// is what the fast-camera view adoption paints with. lognew9 @ 26040:
+// swap frames painted the MID-FRAME live bridge instead, which runs ~one
+// frame AHEAD of the engine's frame at speed - the residual tracking.
+// Render-thread written at the boundary, render-thread read at the
+// injection - the same single-thread contract as the latch itself.
+static RVExtBridge::ProjectionViewTransform g_boundary_pv = {};
+static bool     g_boundary_pv_valid = false;
+static uint64_t g_inj_view_clear_adopts = 0;   // swaps served by the boundary sample
+static float    g_inj_rot_delta_max = 0.0f;    // worst painted-vs-live rotation gap (deg, armed)
+// FRAME-ANCHORED ADOPTION FRESHNESS (26043; conviction lognew13): the
+// effect-time stamp of this cycle's main-depth clear. The same-frame
+// view adoption's 150 ms bar admitted rotations up to nine frames old;
+// the lognew13 lanes showed fvAgeMs aging in lockstep with the latch
+// hold (9.6 -> 100 ms) while injRotDeltaDeg ramped 2 -> 14.8 deg on
+// exactly the adopted (fvAdopt 1) runs, snapping to the 0.65 deg
+// baseline at each accept - and the REFUSED (fvAdopt 0) control runs
+// held rot flat at 0.64 through identical staleness. Adoption is now
+// gated on the harvest postdating THIS frame's boundary; the 150 ms
+// check remains only as the cold backstop. Boundary-written (render
+// thread); the flush's game-thread read is a benign one-frame smear,
+// the ffr_read_counters contract.
+static float    g_boundary_t = -1.0f;
+// DEBOUNCED LIVE-NEAR REFERENCE (26043; conviction lognew12): the world
+// camera's near as witnessed by glide-consistent live bridge samples at
+// the injection. Exclusive-persistence shape (kh_probe_std_refresh's
+// proven design): an in-band sample refreshes the reference and kills
+// any pending; an out-of-band value adopts only after 500 ms of
+// exclusivity - a mid-frame foreign publication (the 0.07 window the
+// bridge occasionally hands the injection) can never confirm, while a
+// real partition change adopts in half a second. Feeds the one-sided
+// terminal encode gate at the commit: a committed near more than 4x
+// NEARER than the reference is structurally foreign (the celestial /
+// viewmodel class is always nearer; far-phase encodes are LARGER and
+// never trip the one-sided test) and the reference pair is committed
+// instead. Render thread only.
+static float    g_live_near_ref = -1.0f;
+static float    g_live_ref_m22 = 0.0f;
+static float    g_live_ref_m32 = 0.0f;
+static uint64_t g_live_ref_ms = 0;
+static float    g_live_near_pend = -1.0f;
+static uint64_t g_live_pend_ms = 0;
+static uint64_t g_live_ref_adopts = 0;         // out-of-band adoptions (real partition changes)
+static uint64_t g_inj_enc_live_overrides = 0;  // terminal-gate commits of the reference pair
+static uint64_t g_world_pair_encodes = 0;      // injections encoded by the world-phase pair latch (26045)
 // (A 5-deep boundary-camera delay ring and its delay-selectable rebase
 // lived here across the ghost campaign. Falsified and removed: k=0 (no
 // rebase) pinned the shadow, k=1..4 drifted monotonically worse, and
@@ -7917,6 +8227,10 @@ static float g_trig_acc_vp[2] = { -1.0f, -1.0f };
 // Fog forensics: the LAST fog color/enable actually written into a CB
 // (game or render thread writes at fill; stats read - diagnostics).
 static float g_fog_dbg[4] = { 0.0f, 0.0f, 0.0f, 0.0f };   // rgb + enable
+// LOOK-UP FOG CAMPAIGN probe (26041): the engine-transmittance lanes the
+// injection fill actually consumed (nb[41]/nb[48]/nb[49] + the armed
+// verdict), echoed into getRenderStats. -1 = never filled since load.
+static float g_fog_eng_dbg[4] = { -1.0f, -1.0f, -1.0f, -1.0f };
 
 // Resolves a depth view to its underlying resource identity, live - never
 // cached (see the note above).
@@ -8436,6 +8750,23 @@ static uint64_t g_blk_pend_ms = 0;
 static uint64_t g_blk_holds = 0;            // candidates held out (forensics)
 static uint64_t g_blk_mode_rejects = 0;     // variant-layout refusals
 static uint64_t g_blk_err_rejects = 0;      // residual refusals
+// COLLAPSE-CLASS HOLD (26050; lognew19 conviction): a pending lighting
+// jump whose sun luminance collapses below 10% of a healthy standing
+// value is EXACTLY the black-box family - near the cloud deck the
+// engine interleaves transitional/atmospheric block content whose
+// mode lane still reads 1.0 on some frames while the amb/sun lanes
+// already carry attenuated blend values ((0.048, 0) vs the standing
+// (0.82, 9.59) in the convicting log; stats mode lane 1.08 at dump =
+// mid-blend), and the persistence arbitration then adopted it as a
+// 'real level change'. A REAL discontinuous lighting change (skipTime,
+// setDate, sun<->moon) announces itself through the sun-jump machinery
+// (g_sun_last_jump_ms stamps every adopted real sun move; the log
+// shows ZERO jumps across the collapse) - so collapse-class adoption
+// now requires that witness within 15 s, in BOTH persistence layers
+// (capture regime + publish confirm). Gradual dusk drifts in-band and
+// never enters the jump path; cloud transitions hold the standing
+// values indefinitely - boxes stay lit, exactly the wanted outcome.
+static uint64_t g_blk_collapse_holds = 0;  // collapse-class jumps held (no sun-jump witness)
 static uint64_t g_blk_jump_adopts = 0;      // confirmed persistent jumps
 
 // Luminance-band agreement with an absolute epsilon so night-small values
@@ -9136,6 +9467,7 @@ static LiveShadowState g_ls;
 // ===========================================================================
 static uint64_t g_view_adopts = 0;        // mesh passes transformed with the same-frame view
 static uint64_t g_view_adopt_stale = 0;   // fv present but not frame-fresh: latch kept
+static uint64_t g_view_adopt_preframe = 0; // fv predates this frame's boundary (26043 gate)
 static uint64_t g_view_adopt_family = 0;  // family-gate refusals (expected ~0; wrong-lock forensic)
 static float    g_view_adopt_last_rot = 0.0f;  // latch-vs-adopted rotation delta (the measured skew)
 static float    g_view_adopt_max_rot = 0.0f;
@@ -9145,8 +9477,14 @@ static float    g_view_adopt_max_rot = 0.0f;
 static float    g_inj_view[16] = {};
 static uint64_t g_inj_view_ms = 0;
 
-inline bool kh_adopt_frame_view(RVExtBridge::ProjectionViewTransform& pv) {
+inline bool kh_adopt_frame_view(RVExtBridge::ProjectionViewTransform& pv,
+                                uint8_t* khav_out_path = nullptr,
+                                float* khav_out_age_ms = nullptr) {
+    if (khav_out_path) *khav_out_path = 0;
     if (!g_ls.frame_view_valid || g_ls.frame_view_time < 0.0f) return false;
+    if (khav_out_age_ms) {
+        *khav_out_age_ms = (effect_time_seconds() - g_ls.frame_view_time) * 1000.0f;
+    }
 
     // HEALTHY-LOCK REQUIREMENT (renderstats20 hardening, layered under
     // the family gate): adopt only while the lock's publishes pass the
@@ -9161,9 +9499,19 @@ inline bool kh_adopt_frame_view(RVExtBridge::ProjectionViewTransform& pv) {
         return false;
     }
 
-    // Frame-fresh only: one frame's age at any playable rate. Stale =
-    // the lock died or the engine skipped publishing - the latch is
-    // then the best (and today's) truth.
+    // FRAME-ANCHORED FRESHNESS (26043; full ledger at g_boundary_t):
+    // the harvested view must postdate THIS frame's boundary - the
+    // literal reading of the adoption's own same-frame charter. A
+    // harvest from any earlier frame carries an earlier rotation; on
+    // starved (held) frames that staleness reached 100+ ms and painted
+    // the meshes 2-15 deg behind the camera (the move+rotate tracking).
+    if (g_boundary_t >= 0.0f && g_ls.frame_view_time < g_boundary_t) {
+        g_view_adopt_preframe++;
+        return false;
+    }
+
+    // Wall-clock backstop (pre-26043 bar), now reachable only in the
+    // cold window before the first boundary stamp.
     if (effect_time_seconds() - g_ls.frame_view_time > 0.15f) {
         g_view_adopt_stale++;
         return false;
@@ -9206,6 +9554,7 @@ inline bool kh_adopt_frame_view(RVExtBridge::ProjectionViewTransform& pv) {
     if (khav_rot < 1.0e-5f) {
         g_view_adopts++;
         g_view_adopt_last_rot = khav_rot;
+        if (khav_out_path) *khav_out_path = 2;
         return true;
     }
 
@@ -9242,6 +9591,7 @@ inline bool kh_adopt_frame_view(RVExtBridge::ProjectionViewTransform& pv) {
     g_view_adopts++;
     g_view_adopt_last_rot = khav_rot;
     if (khav_rot > g_view_adopt_max_rot) g_view_adopt_max_rot = khav_rot;
+    if (khav_out_path) *khav_out_path = 1;
     return true;
 }
 
@@ -9565,6 +9915,47 @@ struct FfrRecord {
     float    mask_last_bind_d = -1.0f;   // topo draw index of the last such bind
     float    fire_first_d = -1.0f;       // topo draw indices of the frame's first / last fire
     float    fire_last_d = -1.0f;
+    // FAST-CAMERA CAMPAIGN LANES (closed 26040-26043; verdict at the
+    // injection's adoption block): consumed-latch camera vs the live
+    // bridge camera at the injection, and the latch's refresh age -
+    // the pair that convicted the continuity-gate glue (camLsDelta is
+    // blind to the class by construction). Permanent forensics.
+    float    latch_live_delta_m = -1.0f; // |cycle-latch cam - live bridge cam| at the injection (m)
+    float    latch_age_ms = -1.0f;       // now - g_latch_accept_ms at the injection
+    uint8_t  inj_view_src = 0;           // 0 = latch view, 1 = mid-frame live bridge (fallback),
+                                         // 2 = clear-time boundary sample (26041 fast-camera adoption)
+    // ROUND-26042 CONVICTION LANES, two campaigns:
+    // (A) move+rotate residual (lognew10): does the same-frame view
+    //     adoption pull a STALE harvested rotation into the transform?
+    //     fvAdopt 0 = refused/absent, 1 = adopted (rebuild), 2 = adopted
+    //     (bit-mirror no-op); fvAgeMs = harvested view age at the
+    //     decision; injRotDeltaDeg = angle between the view the meshes
+    //     actually painted with and the LIVE bridge view at the
+    //     injection - the direct "how far from the engine's current
+    //     rotation did we paint" ruler.
+    // (B) look-up displacement (lognew11): liveNearInj = the live
+    //     bridge's near at the injection, against the committed injNear
+    //     - separates a foreign slot pair (live ~world, committed 0.07)
+    //     from a legitimately collapsed engine near (both 0.07);
+    //     injFovY = consumed projection m11 (a foreign window's fov
+    //     displaces screen positions).
+    uint8_t  fv_adopt = 0;
+    float    fv_age_ms = -1.0f;
+    float    inj_rot_delta_deg = -1.0f;
+    float    inj_fov_y = -1.0f;
+    float    live_near_inj = -1.0f;
+    // CAMERA-WINDOW ROUND (26044; look-up campaign): the far side of the
+    // committed / live / slot pairs plus the injection's viewport depth
+    // range - the near lanes alone could not separate a foreign window
+    // from the engine's legitimate camera-window floor (FIELD ROUND 8
+    // ledger at the rasterizer selection: near 0.07 with foreground
+    // objects in frame, D24 ~1 lsb/m at box range). These complete the
+    // committed-encode record for that discrimination.
+    float    inj_far = -1.0f;       // kh_enc_far of the committed pair
+    float    live_far = -1.0f;      // kh_enc_far of the live bridge pair
+    float    slot_far = -1.0f;      // kh_enc_far of the slot pair
+    float    inj_vp_min = -1.0f;    // viewport depth range the injection drew with
+    float    inj_vp_max = -1.0f;
     float    rej_vp_min = -1.0f;    // last span-REJECTED viewport range (sticky;
     float    rej_vp_max = -1.0f;    //  dRejSpan > 0 marks the frame it changed)
     // ENCODE FORENSICS (render thread, stamped at the injection landing
@@ -9602,8 +9993,22 @@ struct FfrRecord {
     float    pub_fresh_age_s = -1.0f;   // round-11 health-stamp age
     float    inj_near = -1.0f;      // -m32/m22 of the committed encode (-1 = never landed)
     float    slot_near_inj = -1.0f; // snap_slot_near verbatim (-1 = slot silent)
-    uint8_t  enc_src = 0;           // 0 latch/bridge, 1 measured, 2 slot, 3 keep
+    uint8_t  enc_src = 0;           // 0 latch/bridge, 1 measured, 2 slot, 3 keep,
+                                    // 4 live-ref terminal override, 5 world-phase pair (26045)
     uint8_t  inj_band_rej = 0;      // live slot present but refused for the encode
+    // CAMPAIGN-8 LANES (26049; append-only tail in the dump): far-keep
+    // routing census + far-keep far at the landing, veto fill size, the
+    // near-slice pair echo, and the cycle's viewport-range extremes -
+    // the cloud quadrant matrix reads these to name which encode
+    // arrangement each fog/cloud regime commits.
+    uint8_t  fk_routed = 0;         // far-keep-routed mesh draws this injection
+    uint8_t  fk_veto_n = 0;         // veto OBBs armed at the injection fill
+    float    fk_far = -1.0f;        // g_far_keep_far at the landing
+    float    slc_near = -1.0f;      // g_slice_seen_near echo at finalize
+    float    slc_far = -1.0f;       // g_slice_seen_far echo at finalize
+    float    cyc_vp_lo = -1.0f;     // cycle viewport extremes (-1 = unsampled)
+    float    cyc_vp_hi = -1.0f;
+    uint8_t  sky_trigs = 0;         // degenerate sky-window triggers seen (26051 census)
     // tripwires (render thread, finalize)
     uint8_t  dark = 0, erased = 0, rescues = 0;
     uint16_t d[KH_FFR_NDELTA] = {}; // per-frame counter deltas (saturating)
@@ -9759,6 +10164,10 @@ inline void ffr_frame_boundary() {
         r.lockfail_folded = g_ffr_lockfails.exchange(0, std::memory_order_relaxed);
         r.rej_vp_min = g_trig_rej_vp[0];
         r.rej_vp_max = g_trig_rej_vp[1];
+        r.slc_near = g_slice_seen_near;   // C8 lanes (ledger at FfrRecord)
+        r.slc_far = g_slice_seen_far;
+        r.cyc_vp_lo = g_ro.cyc_vp_lo <= 1.5f ? g_ro.cyc_vp_lo : -1.0f;
+        r.cyc_vp_hi = g_ro.cyc_vp_lo <= 1.5f ? g_ro.cyc_vp_hi : -1.0f;
 
         uint64_t khr_now_c[KH_FFR_NDELTA_EARLY];
         ffr_read_counters(khr_now_c);
@@ -13503,6 +13912,16 @@ inline void kh_probe_std_refresh(CbColorProbe& khp, const float* f, uint32_t nf,
             } else if (khp_now - khp.pend_t < 0.5f) {
                 khp_apply = false;
                 khp.regime_rejects++;
+            } else if (khp.std_sun_l > 1.0f && khp_sl < 0.1f * khp.std_sun_l &&
+                       !(g_sun_last_jump_ms != 0 &&
+                         steady_now_ms() - g_sun_last_jump_ms < 15000)) {
+                // COLLAPSE-CLASS HOLD (26050): ledger at
+                // g_blk_collapse_holds. Persistence alone cannot split
+                // a skipTime night from the cloud-deck blend; the
+                // sun-jump witness can.
+                khp_apply = false;
+                khp.regime_rejects++;
+                g_blk_collapse_holds++;
             } else {
                 khp.regime_adopts++;   // exclusive for 500 ms: a real level change
             }
@@ -16956,6 +17375,8 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     }
     static std::vector<RenderObject> meshes;   // render-thread scratch
     meshes.clear();
+    static std::vector<KhFkVetoCand> khr_veto_cands;   // C8 (26049) veto scratch
+    khr_veto_cands.clear();
 
     {
         std::lock_guard<std::mutex> g(g_draw_list_mutex);
@@ -16973,7 +17394,20 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         for (const auto& kv : g_draw_list) {
             const RenderObject& o = kv.second;
 
-            if (!o.visible || !is_composite_eligible(o)) { g_stage_rej_vis++; continue; }
+            if (!o.visible) { g_stage_rej_vis++; continue; }
+            // C8 (26049) veto candidates: every depth-participating
+            // geometry mesh, TRANSLUCENTS INCLUDED (ledger at
+            // kh_fill_fk_veto) - collected here because deferred
+            // translucents never reach the staged list below. Both
+            // rejection arms keep g_stage_rej_vis's historic meaning.
+            if (!o.fullscreen && o.effect == 0 && o.mode != DepthMode::Off) {
+                bool khv_expired = false;
+                const float khv_env = lifetime_envelope(o, snapshot_now, khv_expired);
+                if (!khv_expired && o.color[3] * khv_env > 0.02f) {
+                    kh_fk_veto_collect(khr_veto_cands, o);
+                }
+            }
+            if (!is_composite_eligible(o)) { g_stage_rej_vis++; continue; }
             bool expired = false;
             const float env = lifetime_envelope(o, snapshot_now, expired);
             if (expired) { g_stage_rej_exp++; continue; }   // the Draw3D flush owns the erasure
@@ -17082,6 +17516,13 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     // published the NEXT frame's projection, whose dynamic near plane can
     // differ - skewing the meshes' stored depth worst at close range.
     RVExtBridge::ProjectionViewTransform pv = {};
+    // 26042 conviction-lane stash: the live bridge rotation + near at the
+    // injection, captured inside the existing fetch; consumed after the
+    // adoption for the injRotDeltaDeg / liveNearInj lanes.
+    float khiv_live[9];
+    float khiv_live_near = -1.0f;
+    float khiv_live_far = -1.0f;
+    bool  khiv_live_ok = false;
 
     if (g_ro.cycle_pv_valid) {
         pv = g_ro.cycle_pv;
@@ -17102,6 +17543,108 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
 
 
         if (RVExtBridge::get_projection_view_transform(live)) {
+            // DENSE-CLOUD TRACKING PROBE (step 1; ledger at the FfrRecord
+            // lanes): pv here IS the consumed latch, live IS the bridge at
+            // this instant, and the fetch above already existed - the probe
+            // adds no bridge traffic and costs two camera extractions only
+            // while armed. Render thread throughout: g_latch_accept_ms is
+            // boundary-written on this same thread.
+            float khlp_lc[3], khlp_vc[3];
+            extract_camera_pos(pv.view, khlp_lc);
+            extract_camera_pos(live.view, khlp_vc);
+            const float khlp_d2 = latch_cam_dist_sq(khlp_lc, khlp_vc);
+
+            for (int khiv_r = 0; khiv_r < 3; ++khiv_r) {
+                for (int khiv_c = 0; khiv_c < 3; ++khiv_c) {
+                    khiv_live[khiv_r * 3 + khiv_c] = live.view[khiv_r][khiv_c];
+                }
+            }
+            khiv_live_near = (fabsf(live.projection[2][2]) > 1.0e-9f)
+                           ? (-live.projection[3][2] / live.projection[2][2]) : -1.0f;
+            khiv_live_far = kh_enc_far(live.projection[2][2], live.projection[3][2]);
+            khiv_live_ok = true;
+
+            // LIVE-NEAR REFERENCE maintenance (26043; ledger at the
+            // statics). In-band refresh / exclusive-pending adoption.
+            if (khiv_live_near > 0.0f) {
+                const uint64_t khlr_now = steady_now_ms();
+                const float khlr_hi = fmaxf(khiv_live_near, g_live_near_ref);
+
+                if (g_live_near_ref > 0.0f &&
+                    fabsf(khiv_live_near - g_live_near_ref) <= 0.15f * khlr_hi) {
+                    g_live_near_ref = khiv_live_near;
+                    g_live_ref_m22 = live.projection[2][2];
+                    g_live_ref_m32 = live.projection[3][2];
+                    g_live_ref_ms = khlr_now;
+                    g_live_near_pend = -1.0f;
+                } else {
+                    const float khlr_ph = fmaxf(khiv_live_near, g_live_near_pend);
+                    const bool khlr_agree = g_live_near_pend > 0.0f &&
+                        fabsf(khiv_live_near - g_live_near_pend) <= 0.15f * khlr_ph;
+
+                    if (!khlr_agree) {
+                        g_live_near_pend = khiv_live_near;
+                        g_live_pend_ms = khlr_now;
+                    } else if (khlr_now - g_live_pend_ms >= 500) {
+                        g_live_near_ref = khiv_live_near;
+                        g_live_ref_m22 = live.projection[2][2];
+                        g_live_ref_m32 = live.projection[3][2];
+                        g_live_ref_ms = khlr_now;
+                        g_live_near_pend = -1.0f;
+                        g_live_ref_adopts++;
+                    }
+                }
+            }
+
+            if (ffr_armed()) {
+                const float khlp_d = sqrtf(khlp_d2);
+                const float khlp_age = (g_latch_accept_ms != 0)
+                    ? static_cast<float>(steady_now_ms() - g_latch_accept_ms)
+                    : -1.0f;
+                FfrRecord& khlp_r = ffr_head();
+                khlp_r.latch_live_delta_m = khlp_d;
+                khlp_r.latch_age_ms = khlp_age;
+                if (khlp_d > g_latch_live_delta_max) g_latch_live_delta_max = khlp_d;
+                if (khlp_age > g_latch_age_max_ms) g_latch_age_max_ms = khlp_age;
+            }
+
+            // FAST-CAMERA VIEW ADOPTION - CAMPAIGN CLOSED (26040-26043,
+            // verdict). Sustained camera speed beyond KH_LATCH_JUMP_M per
+            // frame reads as a teleport storm to the boundary continuity
+            // gate; the frozen latch glued every mesh to the camera
+            // (lognew8: delta ramps 50 -> 3440 m with latchAgeMs to 998,
+            // camLsDelta blind by construction). Fixed in three convicted
+            // steps: paint with the live view beyond the gate's own bound
+            // (26040), prefer the CLEAR-TIME boundary sample over the
+            // mid-frame bridge - one frame ahead at speed (26041,
+            // lognew9), and frame-anchor the same-frame adoption's
+            // freshness so a starved harvest can never re-import a stale
+            // rotation (26043, lognew13: fvAgeMs aging with the hold while
+            // injRotDeltaDeg ramped 2 -> 14.8 deg on adopted runs only).
+            // Field-verified resolved (lognew14 round). Below the bound,
+            // all of normal play stands byte-identical; the boundary
+            // latch machinery, ring debounce, and projection authority
+            // chain are untouched; the supervisor's truth and the flush
+            // repaint compose as before. The conviction lanes
+            // (latchLiveDeltaM/latchAgeMs/injViewSrc/fvAdopt/fvAgeMs/
+            // injRotDeltaDeg) stand as permanent forensics.
+            if (khlp_d2 > KH_LATCH_JUMP_M * KH_LATCH_JUMP_M) {
+                // 26041: prefer the CLEAR-TIME boundary sample - frame-
+                // setup-synchronous, the latch's own charter restored at
+                // speed. The mid-frame live fetch (~one frame ahead; the
+                // lognew9 residual) remains only as the fallback for the
+                // rare cycle whose boundary fetch failed.
+                if (g_boundary_pv_valid) {
+                    memcpy(&pv.view[0][0], &g_boundary_pv.view[0][0], sizeof(pv.view));
+                    g_inj_view_clear_adopts++;
+                    if (ffr_armed()) ffr_head().inj_view_src = 2;
+                } else {
+                    memcpy(&pv.view[0][0], &live.view[0][0], sizeof(pv.view));
+                    g_inj_view_live_adopts++;
+                    if (ffr_armed()) ffr_head().inj_view_src = 1;
+                }
+                g_inj_view_live_last_m = sqrtf(khlp_d2);
+            }
             const float m22_latch = pv.projection[2][2];
             const float m32_latch = pv.projection[3][2];
             const float m22_live = live.projection[2][2];
@@ -17147,7 +17690,40 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     // view, and the two compose.
     float khav_latch_view[16];
     memcpy(khav_latch_view, &pv.view[0][0], sizeof(khav_latch_view));
-    kh_adopt_frame_view(pv);
+    {
+        uint8_t khav_path = 0;
+        float khav_age_ms = -1.0f;
+        kh_adopt_frame_view(pv, &khav_path, &khav_age_ms);
+
+        if (ffr_armed()) {
+            FfrRecord& khiv_r2 = ffr_head();
+            khiv_r2.fv_adopt = khav_path;
+            khiv_r2.fv_age_ms = khav_age_ms;
+            khiv_r2.inj_fov_y = pv.projection[1][1];
+            khiv_r2.live_near_inj = khiv_live_near;
+
+            if (khiv_live_ok) {
+                // trace(R_consumed * R_live^T) = Frobenius inner product
+                // of the two 3x3s; the angle between the painted view's
+                // rotation and the engine's live view rotation.
+                float khiv_tr = 0.0f;
+
+                for (int khiv_r3 = 0; khiv_r3 < 3; ++khiv_r3) {
+                    for (int khiv_c3 = 0; khiv_c3 < 3; ++khiv_c3) {
+                        khiv_tr += pv.view[khiv_r3][khiv_c3] *
+                                   khiv_live[khiv_r3 * 3 + khiv_c3];
+                    }
+                }
+
+                float khiv_ca = (khiv_tr - 1.0f) * 0.5f;
+                if (khiv_ca > 1.0f) khiv_ca = 1.0f;
+                if (khiv_ca < -1.0f) khiv_ca = -1.0f;
+                const float khiv_deg = acosf(khiv_ca) * 57.29578f;
+                khiv_r2.inj_rot_delta_deg = khiv_deg;
+                if (khiv_deg > g_inj_rot_delta_max) g_inj_rot_delta_max = khiv_deg;
+            }
+        }
+    }
 
     // MEASURED depth coefficients: when the projection sniffer captured the
     // engine's own m22/m32 this cycle, overwrite the bridge values. The
@@ -17164,6 +17740,9 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     const float snap_slot_near = g_ro.slot_near_live;
     const float snap_slot_m22 = g_ro.slot_m22;
     const float snap_slot_m32 = g_ro.slot_m32;
+    const bool  snap_world_valid = g_ro.world_pair_valid;
+    const float snap_world_m22 = g_ro.world_m22;
+    const float snap_world_m32 = g_ro.world_m32;
 
     if (measured) {
         pv.projection[2][2] = g_ro.engine_m22;
@@ -17216,7 +17795,19 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         khr_inj_band_rej = true;
     }
 
-    if (snap_slot_near > 0.0f && khr_slot_band && khr_slot_sane_far) {
+    if (snap_world_valid) {
+        // WORLD-PHASE PAIR - the primary encode authority (26045; full
+        // ledger at the ReorderState fields). Parity by construction:
+        // this is the pair the world opaques we depth-test against last
+        // rendered under. The raw slot keeps feeding the far-phase test
+        // and anomaly classification below, unchanged; cold or opaque-
+        // free cycles (no world draws to latch from) fall through to
+        // the historic slot/keep/measured/bridge chain.
+        pv.projection[2][2] = snap_world_m22;
+        pv.projection[3][2] = snap_world_m32;
+        g_world_pair_encodes++;
+        khr_enc_src = 5;
+    } else if (snap_slot_near > 0.0f && khr_slot_band && khr_slot_sane_far) {
         pv.projection[2][2] = snap_slot_m22;
         pv.projection[3][2] = snap_slot_m32;
         g_stats.composite_slot_encodes++;
@@ -17360,6 +17951,39 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     // (the look-up slice - open design item, see CONTINUATION.md).
     // Forensics only; the near-draw attempt was reverted after causing
     // see-through on ordinary-near frames.
+    // TERMINAL ENCODE GATE, one-sided (26043; conviction lognew12:
+    // injNear 0.07 committed against liveNearInj 10 - the latch and the
+    // latch-anchored slot sitting together on a foreign equal-fov
+    // near-0.07 window that no absolute band or fov anchor can see,
+    // while the engine's depth-reading post chain turned the wrong
+    // encode into the displaced/darkened/hazed face, mode-15 orange).
+    // A committed near more than 4x NEARER than the debounced live
+    // reference is structurally foreign - glides move ~1-10% per frame,
+    // far-phase encodes are LARGER and pass the one-sided test - and
+    // the reference pair is committed instead. Reference stale (> 1 s
+    // without a live sample) or cold: gate inactive, today's behavior.
+    {
+        const float khtg_near = fabsf(pv.projection[2][2]) > 1e-9f
+                              ? (-pv.projection[3][2] / pv.projection[2][2]) : -1.0f;
+
+        // SUBORDINATED TO THE WORLD LATCH (26047; conviction lognew19):
+        // with the world-phase pair committed (encSrc 5) the gate's
+        // debounced reference is the WEAKER witness - the three-family
+        // publication stream starved it stale at a transitional 0.71 and
+        // 62/512 overrides re-poisoned correct 0.07 commits to ~20 m
+        // equivalent (the occasional side-face punch-over). The gate
+        // remains only as the backstop for latch-cold cycles.
+        if (khr_enc_src != 5 &&
+            g_live_near_ref > 0.0f && khtg_near > 0.0f &&
+            g_live_ref_ms != 0 && steady_now_ms() - g_live_ref_ms < 1000 &&
+            khtg_near < 0.25f * g_live_near_ref) {
+            pv.projection[2][2] = g_live_ref_m22;
+            pv.projection[3][2] = g_live_ref_m32;
+            g_inj_enc_live_overrides++;
+            khr_enc_src = 4;
+        }
+    }
+
     const float inject_near = fabsf(pv.projection[2][2]) > 1e-9f
                             ? (-pv.projection[3][2] / pv.projection[2][2]) : -1.0f;
     g_mask.last_inject_near = inject_near;
@@ -18010,6 +18634,10 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             g_fog_dbg[1] = khr_cbf.fog_color[1];
             g_fog_dbg[2] = khr_cbf.fog_color[2];
             g_fog_dbg[3] = khr_cbf.fog_params[3];
+            g_fog_eng_dbg[0] = khr_cbf.fog_engine[0];   // density scale (nb 41)
+            g_fog_eng_dbg[1] = khr_cbf.fog_engine[1];   // fog end (nb 48)
+            g_fog_eng_dbg[2] = khr_cbf.fog_engine[2];   // inverse range (nb 49)
+            g_fog_eng_dbg[3] = khr_cbf.fog_engine[3];   // engine-branch armed
 
             khr_cbf.fog_color[3] = g_ls.cam[1];   // camera altitude (engine Y-up)
         }
@@ -18018,6 +18646,18 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     // the depth lane's arming state, and now arms at the PASS level
     // (guardless injections included, as before).
     kh_fill_occ(khr_cbf);
+    // C8 (26049) IN-FAR OWN-OCCLUDER VETO fill - once per pass into the
+    // frame template BEFORE its upload (ledger at kh_fill_fk_veto). Far-
+    // keep-cold passes leave the zeroed template: veto dark, behavior
+    // identical to 26048.
+    uint32_t khr_fk_count = 0;   // C8 lane: routed draws this injection
+    uint64_t khr_fk_slot_seq[8] = {};
+    if (khr_fk_fresh) {
+        const int khr_veto_n = kh_fill_fk_veto(khr_cbf, khr_veto_cands, cam,
+                                               khr_acc_far, khr_fk_slot_seq);
+        g_fk_veto_last_n = static_cast<uint32_t>(khr_veto_n);
+        if (khr_veto_n > 0) g_fk_veto_fills++;
+    }
     const bool khr_frame_ok = kh_upload_frame_cb(ctx, g_res.composite_frame_cb, khr_cbf);
 
     for (const auto& o : meshes) {
@@ -18117,7 +18757,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
                 khr_bound_il = khr_want_il;
             }
         }
-        if (khr_mesh_farkeep) g_farkeep_mesh_draws++;
+        if (khr_mesh_farkeep) { g_farkeep_mesh_draws++; ++khr_fk_count; }   // C8: + frame lane
         if (khr_mesh_nearz) g_nearz_gap_draws++;
         // Band / local-volume mask inputs (same conversion as the flush).
         cbd.local0[0] = o.pos[0];
@@ -18208,6 +18848,21 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             // for the encode, guard dormant, arb clamp lanes armed - the
             // arb PS writes SV_Depth from exactly these.
             if (khr_mesh_farkeep) {
+                // FAR-KEEP SPLIT (26046): the frame pair rides along so
+                // in-far fragments stay engine-exact; the keep pair owns
+                // only the beyond-far side. Ledger at the shader branch.
+                cbd.kh_far_split[0] = cbd.depth_params[0];
+                cbd.kh_far_split[1] = cbd.depth_params[1];
+                cbd.kh_far_split[3] = 1.0f;
+                // C8 (26049): the veto's self-exclusion id (0 = not in
+                // the fkVeto list; ledger at kh_fill_fk_veto).
+                cbd.kh_far_split[2] = 0.0f;
+                for (int khv_s = 0; khv_s < 8; ++khv_s) {
+                    if (khr_fk_slot_seq[khv_s] == o.seq) {
+                        cbd.kh_far_split[2] = static_cast<float>(khv_s + 1);
+                        break;
+                    }
+                }
                 cbd.depth_params[0] = g_far_keep_m22;
                 cbd.depth_params[1] = g_far_keep_m32;
                 cbd.fx1[0] = 1e9f;
@@ -18391,6 +19046,16 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         khr_fr.slot_near_inj = snap_slot_near > 0.0f ? snap_slot_near : -1.0f;
         khr_fr.enc_src = khr_enc_src;
         khr_fr.inj_band_rej = khr_inj_band_rej ? 1 : 0;
+        khr_fr.inj_far = kh_enc_far(pv.projection[2][2], pv.projection[3][2]);
+        khr_fr.live_far = khiv_live_far;
+        khr_fr.slot_far = snap_slot_near > 0.0f
+                        ? kh_enc_far(snap_slot_m22, snap_slot_m32) : -1.0f;
+        khr_fr.inj_vp_min = g_ro.trig_vp_valid ? g_ro.trig_vp_min : g_scene_vp_min_d;
+        khr_fr.inj_vp_max = g_ro.trig_vp_valid ? g_ro.trig_vp_max : g_scene_vp_max_d;
+        khr_fr.fk_routed = static_cast<uint8_t>(khr_fk_count > 255u ? 255u : khr_fk_count);
+        khr_fr.fk_veto_n = static_cast<uint8_t>(g_fk_veto_last_n > 255u ? 255u
+                                                : g_fk_veto_last_n);
+        khr_fr.fk_far = g_far_keep_far;   // C8 lanes (ledger at FfrRecord)
     }
     g_ro.opaques_since_inject = 0;   // the flush's repaint check counts from this landing
 
@@ -18525,6 +19190,24 @@ inline void reorder_pre_draw(ID3D11DeviceContext* self) {
             ++g_ro.opaque_draws;
             ++g_ro.opaques_since_inject;
 
+            // WORLD-PHASE PAIR LATCH capture (26045; ledger at the
+            // ReorderState fields): this draw IS a world-class opaque,
+            // so the slot's current content is the pair the world phase
+            // runs under. Change-gated (the common case is a no-op
+            // compare); band + ceiling refuse foreign-class values at
+            // the source.
+            if (g_ro.slot_near_live > 0.0f &&
+                (!g_ro.world_pair_valid ||
+                 g_ro.slot_m22 != g_ro.world_m22 ||
+                 g_ro.slot_m32 != g_ro.world_m32) &&
+                g_ro.slot_near_live >= KH_CAM_NEAR_MIN &&
+                g_ro.slot_near_live <= KH_CAM_NEAR_MAX &&
+                kh_enc_far(g_ro.slot_m22, g_ro.slot_m32) <= KH_ENC_FAR_MAX) {
+                g_ro.world_m22 = g_ro.slot_m22;
+                g_ro.world_m32 = g_ro.slot_m32;
+                g_ro.world_pair_valid = true;
+            }
+
             // Sky binding probe, opaque-phase sampling, v2: every 8th
             // draw. v1's every-64th clustered in each partition's EARLY
             // draws (the counter resets per depth-clear cycle) and only
@@ -18546,6 +19229,9 @@ inline void reorder_pre_draw(ID3D11DeviceContext* self) {
                 self->RSGetViewports(&n_vp, &vp);
 
                 if (n_vp >= 1) {
+                    // C8 (26049) cycle vp census (ledger at cyc_vp_lo).
+                    if (vp.MinDepth < g_ro.cyc_vp_lo) g_ro.cyc_vp_lo = vp.MinDepth;
+                    if (vp.MaxDepth > g_ro.cyc_vp_hi) g_ro.cyc_vp_hi = vp.MaxDepth;
                     // PARTITION CHANGE RE-ARM: a single depth clear can
                     // cover MULTIPLE render partitions - far terrain and
                     // clouds first, the near world after, each under its
@@ -18666,6 +19352,22 @@ inline void reorder_pre_draw(ID3D11DeviceContext* self) {
             // dump names the partition layout up there.
             g_trig_rej_vp[0] = vp.MinDepth;
             g_trig_rej_vp[1] = vp.MaxDepth;
+
+            // SKY-WINDOW CENSUS (26051): a DEGENERATE deep range
+            // ([~1, ~1]) is the cloud/sky partition (Symptom B root;
+            // lognew19/20). The 26050 sky-phase compositing attempt is
+            // REVERTED: the skydome shares the window's draw-only-over-
+            // clear contract and overdrew the early paint (the sky
+            // smear over the box), and the window carries no per-cloud
+            // depth, so clouds BEHIND the box composited over it -
+            // strictly worse than the punch-through it replaced. No
+            // correct box/cloud layering exists from inside a depthless
+            // window; Symptom B stands OPEN as an engine-structural
+            // limit. The census lane stays: it names the window per
+            // frame for any future attempt.
+            if (vp.MinDepth >= 0.995f && vp.MaxDepth - vp.MinDepth < 0.001f) {
+                if (ffr_armed() && ffr_head().sky_trigs != 0xFF) ffr_head().sky_trigs++;
+            }
 
             // CARRY-ERASE RESCUE reachability (field round 2: rescues == 0
             // across three carried-and-erased frames convicted exactly this
@@ -19023,6 +19725,7 @@ static void STDMETHODCALLTYPE hooked_clear_depthstencil(ID3D11DeviceContext* sel
             // stamp) and before the re-arm resets the evidence it records.
             ffr_fold_late_deltas();
             ffr_frame_boundary();
+            g_boundary_t = effect_time_seconds();   // 26043 adoption frame anchor
 
             // POST-FLUSH REDRAW CENSUS: a clear-less world redraw AFTER
             // the flush shows up as opaques drawn past the flush's stamp
@@ -19071,6 +19774,9 @@ static void STDMETHODCALLTYPE hooked_clear_depthstencil(ID3D11DeviceContext* sel
             g_ro.trig_vp_valid = false;
             g_ro.engine_proj_valid = false;
             g_ro.slot_near_live = -1.0f;
+            g_ro.world_pair_valid = false;   // world-phase pair latch is per-cycle (26045)
+            g_ro.cyc_vp_lo = 2.0f;    // C8 (26049) vp census re-arms per cycle
+            g_ro.cyc_vp_hi = -1.0f;
 
             if (g_sun_jump_pending) {
                 // The sun moved discontinuously (skipTime / setDate /
@@ -19142,6 +19848,10 @@ static void STDMETHODCALLTYPE hooked_clear_depthstencil(ID3D11DeviceContext* sel
             RVExtBridge::ProjectionViewTransform pv = {};
 
             if (RVExtBridge::get_projection_view_transform(pv)) {
+                // CLEAR-TIME BOUNDARY SAMPLE (26041, ledger at the
+                // statics): stored raw, pre-gate, every successful fetch.
+                g_boundary_pv = pv;
+                g_boundary_pv_valid = true;
                 // LATCH CONTINUITY GATE (full ledger at the g_latch_*
                 // block): adopt only camera-continuous latches; hold
                 // foreign ones out and let the previous accepted latch
@@ -19207,6 +19917,7 @@ static void STDMETHODCALLTYPE hooked_clear_depthstencil(ID3D11DeviceContext* sel
                 // uses, but the fire's re-anchor must know (see the
                 // duplicate-shadow ledger at the freeze).
                 g_ro.cycle_pv_stale = true;
+                g_boundary_pv_valid = false;   // no clear-time sample this cycle
             }
 
         }
@@ -19477,10 +20188,22 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                     kh_blk_in_band(khb_al, g_blk_pend_amb_l) &&
                     kh_blk_in_band(khb_sl, g_blk_pend_sun_l);
 
-                if (khb_agree && khb_now - g_blk_pend_ms >= KH_BLK_CONFIRM_MS) {
+                // COLLAPSE-CLASS HOLD (26050): publish twin of the
+                // capture-side guard (ledger at g_blk_collapse_holds).
+                const bool khb_collapse = khb_ref_sl > 1.0f &&
+                                          khb_sl < 0.1f * khb_ref_sl;
+                const bool khb_jump_wit = g_sun_last_jump_ms != 0 &&
+                    khb_now - g_sun_last_jump_ms < 15000;
+
+                if (khb_agree && khb_now - g_blk_pend_ms >= KH_BLK_CONFIRM_MS &&
+                    (!khb_collapse || khb_jump_wit)) {
                     khb_adopt = true;   // a persistent new lighting level (skipTime class)
                     g_blk_jump_adopts++;
                 } else {
+                    if (khb_collapse && !khb_jump_wit && khb_agree &&
+                        khb_now - g_blk_pend_ms >= KH_BLK_CONFIRM_MS) {
+                        g_blk_collapse_holds++;   // would have adopted; witness absent
+                    }
                     if (!khb_agree) {
                         g_blk_pend_amb_l = khb_al;
                         g_blk_pend_sun_l = khb_sl;
@@ -19707,6 +20430,8 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         std::lock_guard<std::mutex> g(g_draw_list_mutex);
         meshes.reserve(g_draw_list.size());
 
+        g_khf_veto_cands.clear();   // C8 (26049) veto scratch re-arms per flush
+
         for (auto it = g_draw_list.begin(); it != g_draw_list.end(); ) {
             bool expired = false;
             const float env = lifetime_envelope(it->second, snapshot_now, expired);
@@ -19719,6 +20444,14 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             if (it->second.visible) {
                 RenderObject o = it->second;
                 o.color[3] *= env;   // envelope = universal intensity
+                // C8 (26049) veto candidates - injection twin's ledger
+                // applies. Collected from the FULL list: composite-
+                // eligible solids are absent from the flush's own mesh
+                // set on healthy frames and must still veto.
+                if (!o.fullscreen && o.effect == 0 && o.mode != DepthMode::Off &&
+                    o.color[3] > 0.02f) {
+                    kh_fk_veto_collect(g_khf_veto_cands, o);
+                }
                 if (is_composite_eligible(o)) ++khf_ffr_eligible;   // flight recorder census
                 if (o.lit && !o.fullscreen) khf_any_lit = true;   // sun-map carry gate
 
@@ -20523,6 +21256,14 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     // arb arm (PSEffect's gate), so the always-live frame fill is
     // pixel-inert for unarmed effects; chain passes never arm.
     kh_fill_occ(khf_cbf);
+    // C8 (26049) veto fill - flush twin (injection ledger applies).
+    uint64_t khf_fk_slot_seq[8] = {};
+    if (khf_fk_fresh) {
+        const int khf_veto_n = kh_fill_fk_veto(khf_cbf, g_khf_veto_cands, cam,
+                                               khf_acc_far, khf_fk_slot_seq);
+        g_fk_veto_last_n = static_cast<uint32_t>(khf_veto_n);
+        if (khf_veto_n > 0) g_fk_veto_fills++;
+    }
     const bool khf_frame_ok = kh_upload_frame_cb(ctx, g_res.frame_cb, khf_cbf);
 
     // Hoisted per-object CB: the textured per-submesh path refills the
@@ -20670,6 +21411,18 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             // under it since the viewport round), guard dormant, arb
             // clamp lanes armed.
             if (khf_farkeep_draw) {
+                // FAR-KEEP SPLIT (26046): injection twin's ledger applies.
+                cbd.kh_far_split[0] = cbd.depth_params[0];
+                cbd.kh_far_split[1] = cbd.depth_params[1];
+                cbd.kh_far_split[3] = 1.0f;
+                // C8 (26049): self-exclusion id (injection twin's ledger).
+                cbd.kh_far_split[2] = 0.0f;
+                for (int khv_s = 0; khv_s < 8; ++khv_s) {
+                    if (khf_fk_slot_seq[khv_s] == o.seq) {
+                        cbd.kh_far_split[2] = static_cast<float>(khv_s + 1);
+                        break;
+                    }
+                }
                 cbd.depth_params[0] = g_far_keep_m22;
                 cbd.depth_params[1] = g_far_keep_m32;
                 cbd.depth_params[2] = g_ro.trig_vp_valid ? g_ro.trig_vp_min : g_scene_vp_min_d;
@@ -21635,6 +22388,11 @@ inline void reset_stat_counters() {
     g_sun_churn_max_deg = 0.0f; g_sun_churn_prev_ms = 0;
     g_cam_step_max = 0.0f; g_cam_step_m = -1.0f;
     g_fire_cam_delta_max = 0.0f; g_fire_cam_delta_m = -1.0f;
+    g_latch_live_delta_max = 0.0f; g_latch_age_max_ms = 0.0f;
+    g_inj_view_live_adopts = 0; g_inj_view_live_last_m = -1.0f;
+    g_inj_view_clear_adopts = 0; g_inj_rot_delta_max = 0.0f;
+    g_view_adopt_preframe = 0; g_inj_enc_live_overrides = 0; g_live_ref_adopts = 0;
+    g_world_pair_encodes = 0;
     g_fire_dims_div_max = 0.0f; g_fire_dims_div_px = -1.0f;
     g_fire_dims_incoh_total = 0; g_fire_dims_incoh = 0;
     g_cast_dims_foreign = 0; g_cast_lock_settle_holds = 0;
@@ -21836,6 +22594,10 @@ inline void reset_session_state() {
     g_far_keep_m22 = 0.0f; g_far_keep_m32 = 0.0f; g_far_keep_far = -1.0f; g_far_keep_ms = 0;
     g_inj_slot_band_rejects = 0; g_inj_slot_rej_near = -1.0f;
     g_latch_holds = 0; g_latch_hold_dist = -1.0f; g_latch_jump_adopts = 0;
+    g_boundary_pv_valid = false;   // session teardown: no stale cross-mission sample
+    g_boundary_t = -1.0f;
+    g_live_near_ref = -1.0f; g_live_ref_m22 = 0.0f; g_live_ref_m32 = 0.0f;
+    g_live_ref_ms = 0; g_live_near_pend = -1.0f; g_live_pend_ms = 0;
     g_carry_pending_serial.store(0, std::memory_order_relaxed);
     g_sr = ShadowReconState{};
     g_reorder_render_tid.store(0, std::memory_order_relaxed);

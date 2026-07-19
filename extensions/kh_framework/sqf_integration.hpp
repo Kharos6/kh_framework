@@ -7024,6 +7024,12 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("flushInjPairHolds", RenderIntegration::g_flush_inj_pair_holds));
         out.push_back(kv("flushPubFarRejects", RenderIntegration::g_flush_pub_far_rejects));
         out.push_back(kv("farKeepMeshDraws", RenderIntegration::g_farkeep_mesh_draws));
+        out.push_back(kv("fkVetoFills", RenderIntegration::g_fk_veto_fills));
+        out.push_back(kv("fkVetoLastN", static_cast<uint64_t>(RenderIntegration::g_fk_veto_last_n)));
+        out.push_back(kv("blkCollapseHolds", RenderIntegration::g_blk_collapse_holds));
+        out.push_back(kv("blkRegimeAdopts", RenderIntegration::g_light_probe.regime_adopts));
+        out.push_back(kv("blkRegimeRejects", RenderIntegration::g_light_probe.regime_rejects));
+        out.push_back(kv("blkJumpAdopts", RenderIntegration::g_blk_jump_adopts));
         out.push_back(kv("khBuildTag", static_cast<uint64_t>(RenderIntegration::KH_BUILD_TAG)));
         out.push_back(kv("nearzGapDraws", RenderIntegration::g_nearz_gap_draws));
         out.push_back(kvf("nearzNearEst", RenderIntegration::g_nearz_last_near));
@@ -7124,6 +7130,22 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("injSlotBandRejects", RenderIntegration::g_inj_slot_band_rejects));
         out.push_back(kvf("injSlotRejNear", RenderIntegration::g_inj_slot_rej_near));
         out.push_back(kv("latchHolds", RenderIntegration::g_latch_holds));
+        out.push_back(kvf("latchLiveDeltaMaxM", RenderIntegration::g_latch_live_delta_max));
+        out.push_back(kvf("latchAgeMaxMs", RenderIntegration::g_latch_age_max_ms));
+        out.push_back(kv("injViewLiveAdopts", RenderIntegration::g_inj_view_live_adopts));
+        out.push_back(kvf("injViewLiveLastM", RenderIntegration::g_inj_view_live_last_m));
+        out.push_back(kv("injViewClearAdopts", RenderIntegration::g_inj_view_clear_adopts));
+        out.push_back(kvf("injRotDeltaMaxDeg", RenderIntegration::g_inj_rot_delta_max));
+        out.push_back(kv("viewAdoptPreframe", RenderIntegration::g_view_adopt_preframe));
+        out.push_back(kv("injEncLiveOverrides", RenderIntegration::g_inj_enc_live_overrides));
+        out.push_back(kv("liveNearRefAdopts", RenderIntegration::g_live_ref_adopts));
+        out.push_back(kv("worldPairEncodes", RenderIntegration::g_world_pair_encodes));
+        out.push_back(kvf("farKeepFar", RenderIntegration::g_far_keep_far));
+        out.push_back(kvf("liveNearRef", RenderIntegration::g_live_near_ref));
+        out.push_back(kvf("fogEngX", RenderIntegration::g_fog_eng_dbg[0]));
+        out.push_back(kvf("fogEngEnd", RenderIntegration::g_fog_eng_dbg[1]));
+        out.push_back(kvf("fogEngInv", RenderIntegration::g_fog_eng_dbg[2]));
+        out.push_back(kvf("fogEngOn", RenderIntegration::g_fog_eng_dbg[3]));
         out.push_back(kvf("latchHoldLastDist", RenderIntegration::g_latch_hold_dist));
         out.push_back(kv("latchJumpAdopts", RenderIntegration::g_latch_jump_adopts));
         out.push_back(kv("dlMode", static_cast<uint64_t>(RenderIntegration::g_dl_mode.load(std::memory_order_relaxed))));
@@ -7307,6 +7329,27 @@ static game_value dump_render_trace_sqf() {
         names.push_back(game_value("maskLastBindD"));
         names.push_back(game_value("fireFirstD"));
         names.push_back(game_value("fireLastD"));
+        names.push_back(game_value("latchLiveDeltaM"));
+        names.push_back(game_value("latchAgeMs"));
+        names.push_back(game_value("injViewSrc"));
+        names.push_back(game_value("fvAdopt"));
+        names.push_back(game_value("fvAgeMs"));
+        names.push_back(game_value("injRotDeltaDeg"));
+        names.push_back(game_value("injFovY"));
+        names.push_back(game_value("liveNearInj"));
+        names.push_back(game_value("injFar"));
+        names.push_back(game_value("liveFar"));
+        names.push_back(game_value("slotFar"));
+        names.push_back(game_value("injVpMin"));
+        names.push_back(game_value("injVpMax"));
+        names.push_back(game_value("fkRouted"));     // C8 (26049) lanes
+        names.push_back(game_value("fkVetoN"));
+        names.push_back(game_value("fkFar"));
+        names.push_back(game_value("slcNear"));
+        names.push_back(game_value("slcFar"));
+        names.push_back(game_value("cycVpLo"));
+        names.push_back(game_value("cycVpHi"));
+        names.push_back(game_value("skyTrigs"));     // sky-window census (26051)
 
         const uint64_t khtr_now = RenderIntegration::steady_now_ms();
         auto_array<game_value> frames;
@@ -7379,6 +7422,27 @@ static game_value dump_render_trace_sqf() {
             f.push_back(game_value(r.mask_last_bind_d));
             f.push_back(game_value(r.fire_first_d));
             f.push_back(game_value(r.fire_last_d));
+            f.push_back(game_value(r.latch_live_delta_m));
+            f.push_back(game_value(r.latch_age_ms));
+            f.push_back(game_value(static_cast<float>(r.inj_view_src)));
+            f.push_back(game_value(static_cast<float>(r.fv_adopt)));
+            f.push_back(game_value(r.fv_age_ms));
+            f.push_back(game_value(r.inj_rot_delta_deg));
+            f.push_back(game_value(r.inj_fov_y));
+            f.push_back(game_value(r.live_near_inj));
+            f.push_back(game_value(r.inj_far));
+            f.push_back(game_value(r.live_far));
+            f.push_back(game_value(r.slot_far));
+            f.push_back(game_value(r.inj_vp_min));
+            f.push_back(game_value(r.inj_vp_max));
+            f.push_back(game_value(static_cast<float>(r.fk_routed)));   // C8 (26049) lanes
+            f.push_back(game_value(static_cast<float>(r.fk_veto_n)));
+            f.push_back(game_value(r.fk_far));
+            f.push_back(game_value(r.slc_near));
+            f.push_back(game_value(r.slc_far));
+            f.push_back(game_value(r.cyc_vp_lo));
+            f.push_back(game_value(r.cyc_vp_hi));
+            f.push_back(game_value(static_cast<float>(r.sky_trigs)));   // sky-window census (26051)
             frames.push_back(game_value(std::move(f)));
         }
 

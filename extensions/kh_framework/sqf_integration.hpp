@@ -6631,6 +6631,13 @@ static game_value add_postfx_sqf(game_value_parameter args) {
 // arming call: the first call arms + zeroes and returns a status pair).
 // Skip counters name the reason for any effect flicker: a skipped flush is a
 // frame rendered without our draws.
+// 26052: also carries instantaneous state sections read at call time -
+// draw-list census (obj*), mesh registry totals, texture / user-shader /
+// mesh-VB cache census, async visibility pump state, sun-map geometry,
+// heightfield origin, far-keep echoes, camera echo and time anchors. All
+// are plain reads of standing state; only the cache census takes the
+// graphics lock briefly (its keys read -1 if the lock is unavailable
+// this call - just call again).
 // Debug visual selector for the solid-mesh pixel shaders (see g_dbg_mode
 // for the mode catalog). Diagnostic-only, defaults off, survives nothing
 // past session destroy.
@@ -7244,6 +7251,177 @@ static game_value get_render_stats_sqf() {
 
         out.push_back(kv("locScanUploads", RenderIntegration::g_loc_scan_uploads));
         out.push_back(kv("locMaxCbFloats", RenderIntegration::g_loc_max_cb_floats));
+
+        // ===== 26052 DEBUG DEEPENING: instantaneous state sections. Every
+        // key below is a plain read of standing state at call time - no new
+        // per-frame cost anywhere; the one lock taken (cache census) parks
+        // the render thread exactly like dumpDynamicLights' snapshot does.
+
+        // Collapse-guard forensics: the standing reference pair, the
+        // pending jump's age in both layers' terms, and the witness
+        // recency the guard tests against (15 s bar).
+        out.push_back(kv("fkVetoCandLast", static_cast<uint64_t>(RenderIntegration::g_fk_veto_cand_n)));
+        out.push_back(kvf("stdAmbLum", RenderIntegration::g_light_probe.std_amb_l));
+        out.push_back(kvf("stdSunLum", RenderIntegration::g_light_probe.std_sun_l));
+        out.push_back(kvf("blkPendAgeS", age_s(RenderIntegration::g_blk_pend_ms)));
+        out.push_back(kvf("sunLastJumpAgeS", age_s(RenderIntegration::g_sun_last_jump_ms)));
+
+        {   // MESH REGISTRY CENSUS: published-contract reads (lock-free by
+            // the registry's acquire/release design) - registration health
+            // and CPU footprint at a glance.
+            uint64_t khm_verts = 0, khm_max = 0;
+            const uint32_t khm_n = RenderIntegration::mesh_count();
+
+            for (uint32_t khm_i = 0; khm_i < khm_n; ++khm_i) {
+                const uint64_t khm_vc = RenderIntegration::mesh_def(static_cast<int>(khm_i)).verts.size();
+                khm_verts += khm_vc;
+                if (khm_vc > khm_max) khm_max = khm_vc;
+            }
+
+            out.push_back(kv("meshVertsTotal", khm_verts));
+            out.push_back(kv("meshVertsMax", khm_max));
+            out.push_back(kv("meshBytesCpu", khm_verts * static_cast<uint64_t>(sizeof(RenderIntegration::MeshVertex))));
+        }
+
+        {   // DRAW-LIST CENSUS: the live retained-object mix under the list
+            // mutex (the same lock every SQF mutator takes; game thread, so
+            // no render-side contention) - names the workload shape any
+            // capture ran under, feature by feature.
+            std::lock_guard<std::mutex> khdl_g(RenderIntegration::g_draw_list_mutex);
+            uint64_t khdl_vis = 0, khdl_solid = 0, khdl_fx = 0, khdl_fs = 0,
+                     khdl_ui = 0, khdl_overlay = 0, khdl_write = 0, khdl_lit = 0,
+                     khdl_farvis = 0, khdl_rot = 0, khdl_cull = 0, khdl_tex = 0,
+                     khdl_ushdr = 0, khdl_blend = 0, khdl_band = 0, khdl_loc = 0,
+                     khdl_timed = 0, khdl_mesh = 0;
+
+            for (const auto& khdl_kv : RenderIntegration::g_draw_list) {
+                const RenderIntegration::RenderObject& khdl_o = khdl_kv.second;
+                if (khdl_o.visible) khdl_vis++;
+                if (khdl_o.fullscreen) { khdl_fs++; if (khdl_o.affect_ui) khdl_ui++; }
+                else if (khdl_o.effect != 0) khdl_fx++;
+                else khdl_solid++;
+                if (khdl_o.mode == RenderIntegration::DepthMode::Off) khdl_overlay++;
+                if (khdl_o.mode == RenderIntegration::DepthMode::TestWrite) khdl_write++;
+                if (khdl_o.lit) khdl_lit++;
+                if (khdl_o.far_vis) khdl_farvis++;
+                if (khdl_o.rotated) khdl_rot++;
+                if (!khdl_o.two_sided) khdl_cull++;
+                if (khdl_o.materials) khdl_tex++;
+                if (!khdl_o.fx_shader.empty()) khdl_ushdr++;
+                if (khdl_o.blend_mode != 0) khdl_blend++;
+                if (khdl_o.banded) khdl_band++;
+                if (khdl_o.localized) khdl_loc++;
+                if (khdl_o.timed) khdl_timed++;
+                if (khdl_o.mesh != 0) khdl_mesh++;
+            }
+
+            out.push_back(kv("objTotal", static_cast<uint64_t>(RenderIntegration::g_draw_list.size())));
+            out.push_back(kv("objVisible", khdl_vis));
+            out.push_back(kv("objSolid", khdl_solid));
+            out.push_back(kv("objEffect", khdl_fx));
+            out.push_back(kv("objFullscreen", khdl_fs));
+            out.push_back(kv("objAffectUi", khdl_ui));
+            out.push_back(kv("objOverlay", khdl_overlay));
+            out.push_back(kv("objDepthWrite", khdl_write));
+            out.push_back(kv("objLit", khdl_lit));
+            out.push_back(kv("objFarVis", khdl_farvis));
+            out.push_back(kv("objRotated", khdl_rot));
+            out.push_back(kv("objBackfaceCull", khdl_cull));
+            out.push_back(kv("objTextured", khdl_tex));
+            out.push_back(kv("objCustomShader", khdl_ushdr));
+            out.push_back(kv("objBlendNonNormal", khdl_blend));
+            out.push_back(kv("objBanded", khdl_band));
+            out.push_back(kv("objLocalized", khdl_loc));
+            out.push_back(kv("objTimed", khdl_timed));
+            out.push_back(kv("objNonBoxMesh", khdl_mesh));
+        }
+
+        {   // RESOURCE + CACHE CENSUS: the caches are written only inside
+            // serialized graphics windows, so the read parks the render
+            // thread through the graphics lock (dumpDynamicLights'
+            // snapshot pattern). -1 everywhere = lock unavailable this
+            // call; the keys heal on the next call.
+            float khrc_tex = -1.0f, khrc_tex_fail = -1.0f;
+            float khrc_ps = -1.0f, khrc_ps_fail = -1.0f, khrc_vb = -1.0f;
+
+            for (int khrc_a = 0; khrc_a < 4; ++khrc_a) {
+                RVExtBridge::ScopedGraphicsLock khrc_lock;
+                if (!khrc_lock.acquired()) continue;
+                khrc_tex = 0.0f; khrc_tex_fail = 0.0f;
+
+                for (const auto& khrc_e : RenderIntegration::g_tex_cache) {
+                    khrc_tex += 1.0f;
+                    if (khrc_e.second.failed) khrc_tex_fail += 1.0f;
+                }
+
+                khrc_ps = 0.0f; khrc_ps_fail = 0.0f;
+
+                for (const auto& khrc_e : RenderIntegration::g_user_ps_cache) {
+                    khrc_ps += 1.0f;
+                    if (khrc_e.second.failed) khrc_ps_fail += 1.0f;
+                }
+
+                khrc_vb = static_cast<float>(RenderIntegration::g_res.mesh_vb.size());
+                break;
+            }
+
+            out.push_back(kvf("texCacheEntries", khrc_tex));
+            out.push_back(kvf("texCacheFailed", khrc_tex_fail));
+            out.push_back(kvf("userShaderEntries", khrc_ps));
+            out.push_back(kvf("userShaderFailed", khrc_ps_fail));
+            out.push_back(kvf("meshVbCount", khrc_vb));
+        }
+
+        // ASYNC VISIBILITY PIPELINE: queue depth + result freshness (the
+        // queueVisibility / getVisibilityResults pump; all game-thread
+        // state, same thread as this call).
+        out.push_back(kv("visQueuePending", RenderIntegration::g_query_pending ? 1u : 0u));
+        out.push_back(kv("visQueuePoints", static_cast<uint64_t>(RenderIntegration::g_query_points_pending.size() / 3)));
+        out.push_back(kv("visResultPoints", static_cast<uint64_t>(RenderIntegration::g_vis_result_count)));
+        out.push_back(kvf("visResultLagFrames", RenderIntegration::g_vis_result_frame != 0
+            ? static_cast<float>(RenderIntegration::g_flush_frame - RenderIntegration::g_vis_result_frame)
+            : -1.0f));
+        out.push_back(kv("visInflightA", static_cast<uint64_t>(RenderIntegration::g_async_inflight_count[0])));
+        out.push_back(kv("visInflightB", static_cast<uint64_t>(RenderIntegration::g_async_inflight_count[1])));
+        out.push_back(kv("flushFrameOrdinal", RenderIntegration::g_flush_frame));
+
+        // PRIVATE SUN-DEPTH MAP: validity, age and geometry (sunMapHalfDiag
+        // above reads the same bounds; this names the rest).
+        out.push_back(kv("sunMapValid", RenderIntegration::g_sun_map_valid ? 1u : 0u));
+        out.push_back(kvf("sunMapAgeS", RenderIntegration::g_sun_map_time >= 0.0f
+            ? RenderIntegration::effect_time_seconds() - RenderIntegration::g_sun_map_time
+            : -1.0f));
+        out.push_back(kv("sunMapSizePx", static_cast<uint64_t>(RenderIntegration::KH_SUN_DEPTH_SIZE)));
+        out.push_back(kvf("sunMapCenterX", RenderIntegration::g_sun_map_bounds[0]));
+        out.push_back(kvf("sunMapCenterY", RenderIntegration::g_sun_map_bounds[1]));
+        out.push_back(kvf("sunMapCenterZ", RenderIntegration::g_sun_map_bounds[2]));
+
+        // HEIGHTFIELD ORIGIN: completes the world mapping next to thmW/H/
+        // thmCell above (cross-checkable against getTerrainMatrix).
+        out.push_back(kvf("thmOriginX", RenderIntegration::g_thml_origin[0]));
+        out.push_back(kvf("thmOriginZ", RenderIntegration::g_thml_origin[1]));
+
+        // INJECTION HEALTH + ACCEPTED ENCODE: age of the last
+        // pre-translucent injection (the flush's stand-down bar is 0.5 s)
+        // and the last committed pair's far in meters (injDpM22/M32 above
+        // are the raw coefficients; this is the derived number).
+        out.push_back(kvf("injLastAgeS", age_s(RenderIntegration::g_composite_last_inject_ms.load(std::memory_order_relaxed))));
+        out.push_back(kvf("injAccFarM", RenderIntegration::g_inj_dp_valid
+            ? RenderIntegration::kh_enc_far(RenderIntegration::g_inj_dp[0], RenderIntegration::g_inj_dp[1])
+            : -1.0f));
+
+        // CAMERA ECHO: the injection-recorded render camera (engine axes;
+        // Y = altitude ASL) - locates every distance- and altitude-tuned
+        // gate in the same dump that reports them.
+        out.push_back(kvf("camEngX", RenderIntegration::g_ls.cam[0]));
+        out.push_back(kvf("camEngAltY", RenderIntegration::g_ls.cam[1]));
+        out.push_back(kvf("camEngZ", RenderIntegration::g_ls.cam[2]));
+
+        // RING GEOMETRY + TIME ANCHORS: lets a paired stats + trace read be
+        // aligned without guessing (ffrFrames above is the serial; the
+        // ring capacity here says how far back a dump can reach).
+        out.push_back(kv("ffrRingFrames", static_cast<uint64_t>(RenderIntegration::KH_FFR_RING)));
+        out.push_back(kvf("effectTimeS", RenderIntegration::effect_time_seconds()));
         return game_value(std::move(out));
     } catch (...) {
         report_error("getRenderStats: unknown exception");
@@ -7252,7 +7430,9 @@ static game_value get_render_stats_sqf() {
 }
 
 // dumpRenderTrace -> the flight recorder ring, oldest-first, newest last:
-// [["status","ok"], ["fields", [names...]], ["frames", [[values...], ...]]]
+// [["status","ok"], ["buildTag", N], ["fields", [names...]],
+//  ["frames", [[values...], ...]]] (buildTag added 26052: the field
+// protocol's build verification rides every dump, not just stats).
 // Each frame's values align 1:1 with "fields". The ring is copied under the
 // graphics lock (parking the render thread - the ring's write invariant)
 // and formatted after release; the newest 256 populated records are dumped.
@@ -7350,6 +7530,11 @@ static game_value dump_render_trace_sqf() {
         names.push_back(game_value("cycVpLo"));
         names.push_back(game_value("cycVpHi"));
         names.push_back(game_value("skyTrigs"));     // sky-window census (26051)
+        names.push_back(game_value("vetoCandN"));    // 26052 lanes (ledger at FfrRecord)
+        names.push_back(game_value("camAltM"));
+        names.push_back(game_value("stdAmbLum"));
+        names.push_back(game_value("stdSunLum"));
+        names.push_back(game_value("blkPendAgeS"));
 
         const uint64_t khtr_now = RenderIntegration::steady_now_ms();
         auto_array<game_value> frames;
@@ -7443,6 +7628,11 @@ static game_value dump_render_trace_sqf() {
             f.push_back(game_value(r.cyc_vp_lo));
             f.push_back(game_value(r.cyc_vp_hi));
             f.push_back(game_value(static_cast<float>(r.sky_trigs)));   // sky-window census (26051)
+            f.push_back(game_value(static_cast<float>(r.veto_cand_n)));  // 26052 lanes
+            f.push_back(game_value(r.cam_alt_m));
+            f.push_back(game_value(r.std_amb_lum));
+            f.push_back(game_value(r.std_sun_lum));
+            f.push_back(game_value(r.blk_pend_age_s));
             frames.push_back(game_value(std::move(f)));
         }
 
@@ -7450,6 +7640,13 @@ static game_value dump_render_trace_sqf() {
             auto_array<game_value> pair;
             pair.push_back(game_value("status"));
             pair.push_back(game_value("ok"));
+            out.push_back(game_value(std::move(pair)));
+        }
+
+        {   // 26052: build verification in-band (field protocol step 1).
+            auto_array<game_value> pair;
+            pair.push_back(game_value("buildTag"));
+            pair.push_back(game_value(static_cast<float>(RenderIntegration::KH_BUILD_TAG)));
             out.push_back(game_value(std::move(pair)));
         }
 
@@ -7564,6 +7761,7 @@ static game_value dump_dynamic_lights_sqf() {
 
         auto_array<game_value> out;
         out.push_back(kvs("status", "ok"));
+        out.push_back(kv("buildTag", static_cast<float>(RenderIntegration::KH_BUILD_TAG)));   // 26052
         out.push_back(kv("mode", static_cast<float>(RenderIntegration::g_dl_mode.load(std::memory_order_relaxed))));
 
         {

@@ -8002,9 +8002,13 @@ static uint64_t g_farkeep_mesh_draws = 0;   // per-mesh far-keep routings (both 
 // deliberately outside reset_stat_counters like g_farkeep_mesh_draws).
 static uint64_t g_fk_veto_fills = 0;        // far-keep-fresh frame fills that armed the veto
 static uint32_t g_fk_veto_last_n = 0;       // OBB count of the last armed fill
+static uint32_t g_fk_veto_cand_n = 0;       // candidates staged at the last pass BEFORE the
+                                            // nearest-8 cap (26052 census: cap headroom -
+                                            // cand_n > 8 means the flagged degradation class
+                                            // is live in this scene)
 // BUILD TAG (doctrine: bump on EVERY delivered build; stats-visible so a
 // field log names the binary it came from).
-static constexpr int KH_BUILD_TAG = 26051;
+static constexpr int KH_BUILD_TAG = 26052;
 // NEAR-GAP RAMP (build 26001; the RenderDoc conviction). ROOT, proven by
 // pixel history + depth-window plateaus: the world partition's viewport
 // floor (0.011 in the convicting capture) collapses EVERY fragment nearer
@@ -10009,6 +10013,19 @@ struct FfrRecord {
     float    cyc_vp_lo = -1.0f;     // cycle viewport extremes (-1 = unsampled)
     float    cyc_vp_hi = -1.0f;
     uint8_t  sky_trigs = 0;         // degenerate sky-window triggers seen (26051 census)
+    // 26052 DIAGNOSTIC LANES (append-only tail; filled at the frame
+    // boundary from standing globals - zero cost beyond the stores, and
+    // only while the recorder is armed like every other lane): the veto
+    // pre-cap census (nearest-8 headroom in-band with fkVetoN), the
+    // render camera altitude (the 26033 altitude-relative error class
+    // correlates on it), and the collapse-guard reference pair with the
+    // publish layer's pending age - block-adoption forensics readable
+    // frame-by-frame instead of only as stats totals.
+    uint8_t  veto_cand_n = 0;       // veto candidates staged (BEFORE the nearest-8 cap)
+    float    cam_alt_m = 0.0f;      // render camera altitude at the boundary (engine Y, ASL)
+    float    std_amb_lum = -1.0f;   // capture-arbitration standing ambient luminance
+    float    std_sun_lum = -1.0f;   // standing sun luminance (the collapse guard's reference)
+    float    blk_pend_age_s = -1.0f;// publish-layer pending-jump age (s; -1 = no pending)
     // tripwires (render thread, finalize)
     uint8_t  dark = 0, erased = 0, rescues = 0;
     uint16_t d[KH_FFR_NDELTA] = {}; // per-frame counter deltas (saturating)
@@ -10168,6 +10185,16 @@ inline void ffr_frame_boundary() {
         r.slc_far = g_slice_seen_far;
         r.cyc_vp_lo = g_ro.cyc_vp_lo <= 1.5f ? g_ro.cyc_vp_lo : -1.0f;
         r.cyc_vp_hi = g_ro.cyc_vp_lo <= 1.5f ? g_ro.cyc_vp_hi : -1.0f;
+        // 26052 lanes (ledger at FfrRecord). All sources are declared
+        // earlier in the TU and written render-side or under the park;
+        // reads here follow the same benign-smear contract as the
+        // counter deltas below.
+        r.veto_cand_n = static_cast<uint8_t>(g_fk_veto_cand_n > 255u ? 255u : g_fk_veto_cand_n);
+        r.cam_alt_m = g_ls.cam[1];
+        r.std_amb_lum = g_light_probe.std_amb_l;
+        r.std_sun_lum = g_light_probe.std_sun_l;
+        r.blk_pend_age_s = g_blk_pend_ms != 0
+            ? static_cast<float>(steady_now_ms() - g_blk_pend_ms) / 1000.0f : -1.0f;
 
         uint64_t khr_now_c[KH_FFR_NDELTA_EARLY];
         ffr_read_counters(khr_now_c);
@@ -18652,6 +18679,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     // identical to 26048.
     uint32_t khr_fk_count = 0;   // C8 lane: routed draws this injection
     uint64_t khr_fk_slot_seq[8] = {};
+    g_fk_veto_cand_n = static_cast<uint32_t>(khr_veto_cands.size());   // 26052 pre-cap census
     if (khr_fk_fresh) {
         const int khr_veto_n = kh_fill_fk_veto(khr_cbf, khr_veto_cands, cam,
                                                khr_acc_far, khr_fk_slot_seq);
@@ -21258,6 +21286,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     kh_fill_occ(khf_cbf);
     // C8 (26049) veto fill - flush twin (injection ledger applies).
     uint64_t khf_fk_slot_seq[8] = {};
+    g_fk_veto_cand_n = static_cast<uint32_t>(g_khf_veto_cands.size()); // 26052 pre-cap census
     if (khf_fk_fresh) {
         const int khf_veto_n = kh_fill_fk_veto(khf_cbf, g_khf_veto_cands, cam,
                                                khf_acc_far, khf_fk_slot_seq);
@@ -22381,6 +22410,8 @@ inline void reset_stat_counters() {
     g_blk_holds = 0; g_blk_mode_rejects = 0; g_blk_err_rejects = 0;
     g_lit_grace_saves = 0;
     g_blk_jump_adopts = 0;
+    g_blk_collapse_holds = 0;   // 26052: the 26050 counter joins its siblings here
+    g_fk_veto_fills = 0; g_fk_veto_last_n = 0; g_fk_veto_cand_n = 0;   // 26052: veto census
     g_sun_jump_refused = 0;
     g_sun_jump_stream_refused = 0;
     g_cast_frozen_fires = 0;

@@ -5792,6 +5792,2121 @@ static void update_unit_states() {
     }
 }
 
+// Uniform ARRAY error shape for the array-returning query commands (the
+// same pair-in-array idiom as [["status","armed"]]): success returns the
+// data array, failure returns [["error", <sentence>]] - one return type
+// per command, message preserved. Callers key on element 0's first field.
+static game_value kh_error_pairs(const std::string& msg) {
+    auto_array<game_value> pair;
+    pair.push_back(game_value("error"));
+    pair.push_back(game_value(msg));
+    auto_array<game_value> out;
+    out.push_back(game_value(std::move(pair)));
+    return game_value(std::move(out));
+}
+
+static game_value sample_scene_depth_sqf(game_value_parameter args) {
+    try {
+        auto& arr = args.to_array();
+        if (arr.size() < 2) return kh_error_pairs("usage: sampleSceneDepth [u, v]");
+        if (arr[0].type_enum() != game_data_type::SCALAR ||
+            arr[1].type_enum() != game_data_type::SCALAR) return kh_error_pairs("u and v must be numbers");
+        float u = static_cast<float>(arr[0]);
+        float v = static_cast<float>(arr[1]);
+
+        // Convert uv (0..1) to pixel coords against the live depth buffer
+        // dimensions, then run the single-pixel compute sample.
+        float results[4] = {};
+
+        std::string status = [&]() -> std::string {
+            ID3D11Device* dev = RVExtBridge::get_d3d_device();
+            ID3D11DeviceContext* ctx = RVExtBridge::get_d3d_device_context();
+            if (!dev || !ctx) return "device/context null";
+            UINT w = 0, h = 0;
+            {
+                RVExtBridge::ScopedGraphicsLock lock;
+                if (!lock.acquired()) return "SKIP: graphics lock not acquired";
+                std::string e = RenderIntegration::ensure_depth_srv(dev, ctx, &w, &h);
+                if (!e.empty()) return "depth SRV: " + e;
+            }
+            float px = u * static_cast<float>(w);
+            float py = v * static_cast<float>(h);
+            return RenderIntegration::run_depth_compute(RenderIntegration::ComputeKernel::SampleDepth, 0, px, py, results, 4);
+        }();
+
+        if (status != "OK") return kh_error_pairs(status);
+        auto_array<game_value> out;
+        out.push_back(game_value(results[2]));  // scene distance, meters
+        out.push_back(game_value(results[3]));  // raw depth buffer value
+        return game_value(std::move(out));
+    } catch (const std::exception& e) {
+        report_error(std::string("sampleSceneDepth: ") + e.what());
+        return kh_error_pairs(std::string("EXCEPTION: ") + e.what());
+    } catch (...) {
+        report_error("sampleSceneDepth: unknown exception");
+        return kh_error_pairs("EXCEPTION: unknown");
+    }
+}
+
+// gpuVisibility [[x,y,zASL], [x,y,zASL], ...]   (any count; the GPU set grows to fit)
+// Tests every point against the engine depth buffer in ONE GPU dispatch.
+// Returns one entry per point: [status, pointDistM, sceneDistM]
+//   status: 1 = visible, 0 = occluded by scene geometry, -1 = offscreen/behind camera
+// Note: like all depth-based tests, cannot account for particles (they do not
+// write depth). Call from Draw3D.
+static game_value gpu_visibility_sqf(game_value_parameter args) {
+    try {
+        auto& arr = args.to_array();
+        UINT count = static_cast<UINT>(arr.size());
+        if (count == 0) return game_value(auto_array<game_value>());
+
+        std::vector<float> pts(count * 3);
+        for (UINT i = 0; i < count; ++i) {
+            if (arr[i].type_enum() != game_data_type::ARRAY) return kh_error_pairs("each point must be [x, y, zASL]");
+            auto& p = arr[i].to_array();
+            if (p.size() < 3 ||
+                p[0].type_enum() != game_data_type::SCALAR ||
+                p[1].type_enum() != game_data_type::SCALAR ||
+                p[2].type_enum() != game_data_type::SCALAR) return kh_error_pairs("each point must be [x, y, zASL]");
+            pts[i * 3 + 0] = static_cast<float>(p[0]);
+            pts[i * 3 + 1] = static_cast<float>(p[1]);
+            pts[i * 3 + 2] = static_cast<float>(p[2]);
+        }
+
+        std::string status = RenderIntegration::upload_query_points(pts.data(), count);
+        if (!status.empty()) return kh_error_pairs(status);
+
+        std::vector<float> results(count * 4);
+        status = RenderIntegration::run_depth_compute(RenderIntegration::ComputeKernel::Visibility, count, 0.0f, 0.0f,
+                                                      results.data(), count * 4);
+                                                    
+        if (status != "OK") return kh_error_pairs(status);
+        auto_array<game_value> out;
+        out.reserve(count);
+        for (UINT i = 0; i < count; ++i) {
+            auto_array<game_value> e;
+            e.push_back(game_value(results[i * 4 + 0]));  // status
+            e.push_back(game_value(results[i * 4 + 1]));  // point distance, m
+            e.push_back(game_value(results[i * 4 + 2]));  // scene distance at pixel, m
+            out.push_back(game_value(std::move(e)));
+        }
+        return game_value(std::move(out));
+    } catch (const std::exception& e) {
+        report_error(std::string("gpuVisibility: ") + e.what());
+        return kh_error_pairs(std::string("EXCEPTION: ") + e.what());
+    } catch (...) {
+        report_error("gpuVisibility: unknown exception");
+        return kh_error_pairs("EXCEPTION: unknown");
+    }
+}
+
+// addRender3D [[x,y,zASL], size, [r,g,b,a]?, mode?, sceneRead?, effect?,
+//              fxParams?, band?, blend?, duration?, lit?, mesh?, farVis?,
+//              rotation?, twoSided?]
+// Adds a persistent mesh drawn every frame by the internal Draw3D EH until
+// removed. Callable from ANY context (scheduled, unscheduled, callbacks).
+//   mode:      0 = depth test (default), 1 = test + depth write, 2 = overlay
+//   sceneRead: BOOL, shorthand for a tinted scene-read surface
+//              (effect "colorgrade" at neutral defaults: scene through the
+//              mesh, tinted by color.rgb, blended by color.a)
+//   effect:    STRING or SCALAR - screen-space effect applied inside the
+//              mesh's footprint: "solid" 0, "invert" 1, "colorgrade" 2,
+//              "vignette" 3, "chromatic" 4, "grain" 5, "sharpen" 6,
+//              "blur" 7, "bloom" 8, "distortion" 9, "outline" 10, "pulse" 11
+//   params:    ARRAY of up to 8 numbers, effect-specific (see set_effect_params
+//              for meanings and defaults; omitted entries take defaults)
+//   band:      [minDist, maxDist, falloff?] - additionally confines the mesh's
+//              effect to a camera-distance band (maxDist <= 0 = unbounded)
+//   lit:       (index 10) BOOL, or ARRAY [ambient, diffuse] - shade the
+//              mesh with the engine's own sun/moon light (cascade-derived
+//              direction, located-block colors) and per-pixel world
+//              shadowing. Defaults ambient 0.4 / diffuse 0.6; with the
+//              lighting block live,
+//              [1, 1] is engine-true brightness.
+//   mesh:      (index 11) STRING or SCALAR - registry mesh: builtins
+//              "box"/"cube" (0, default), "steps"/"test" (1, concave
+//              self-shadowing exercise), "sphere"/"ball" (2),
+//              "cylinder"/"cyl" (3), "cone" (4), "pyramid" (5), a
+//              registry index - or a PATH ENDING ".fbx" (case-
+//              insensitive suffix required): resolved against
+//              Documents\Arma 3\kh_framework\rendering first, then
+//              every active mod's "rendering" folder (subfolders
+//              searched; relative paths honored), imported once and
+//              cached. Local space is normalized to [-0.5, 0.5]^3 and
+//              scaled per axis by 'size'; any size component <= 0
+//              substitutes the mesh's NATIVE dimension (0 = native,
+//              -2 = twice native, ...). Textures/shaders attach via
+//              updateRender3D "material".
+// Solid, non-overlay meshes are ALWAYS composited: injected into the frame
+// BEFORE the engine draws its translucents, with depth written, so the
+// engine itself composites smoke/particles against them pixel-perfectly
+// (automatic fallback to the post-scene flush if the draw hook is
+// unavailable). Effect and overlay meshes render on the flush path.
+
+static game_value add_render3d_sqf(game_value_parameter args) {
+    try {
+        auto& arr = args.to_array();
+        if (arr.size() < 2) return game_value("usage: addRender3D [[x,y,zASL], size, [r,g,b,a]?, mode?, sceneRead?, effect?, fxParams?, band?, blend?, duration?, lit?, mesh?, farVis?, rotation?, twoSided?]");
+        RenderIntegration::RenderObject obj;
+        if (arr[0].type_enum() != game_data_type::ARRAY) return game_value("position must be [x, y, zASL]");
+        auto& pos = arr[0].to_array();
+        if (pos.size() < 3 ||
+            pos[0].type_enum() != game_data_type::SCALAR ||
+            pos[1].type_enum() != game_data_type::SCALAR ||
+            pos[2].type_enum() != game_data_type::SCALAR) return game_value("position must be [x, y, zASL]");
+        obj.pos[0] = static_cast<float>(pos[0]);
+        obj.pos[1] = static_cast<float>(pos[1]);
+        obj.pos[2] = static_cast<float>(pos[2]);
+        
+        if (!RenderIntegration::read_vec3_or_uniform(arr[1], obj.size)) {
+            return game_value("size must be a number or [x, y, z]");
+        }
+
+        if (arr.size() > 2 && !arr[2].is_nil()) {
+            if (arr[2].type_enum() != game_data_type::ARRAY) return game_value("color must be [r, g, b, a] numbers");
+            auto& col = arr[2].to_array();
+            if ((col.size() > 0 && col[0].type_enum() != game_data_type::SCALAR) ||
+                (col.size() > 1 && col[1].type_enum() != game_data_type::SCALAR) ||
+                (col.size() > 2 && col[2].type_enum() != game_data_type::SCALAR) ||
+                (col.size() > 3 && col[3].type_enum() != game_data_type::SCALAR)) return game_value("color must be [r, g, b, a] numbers");
+            for (size_t i = 0; i < 4 && i < col.size(); ++i) obj.color[i] = static_cast<float>(col[i]);
+            RenderIntegration::kh_sanitize_color(obj.color);
+        }
+
+        if (arr.size() > 3 && !arr[3].is_nil()) {
+            if (arr[3].type_enum() != game_data_type::SCALAR) return game_value("mode must be a number (0 = test, 1 = test + write, 2 = overlay)");
+            int m = static_cast<int>(static_cast<float>(arr[3]));
+            if (m >= 0 && m <= 2) obj.mode = static_cast<RenderIntegration::DepthMode>(m);
+        }
+
+        if (arr.size() > 4 && !arr[4].is_nil()) {
+            if (arr[4].type_enum() != game_data_type::BOOL) return game_value("sceneRead must be a boolean");
+            obj.effect = static_cast<bool>(arr[4]) ? 2 : 0;   // sceneRead = tinted scene-read (colorgrade defaults)
+        }
+
+        const auto_array<game_value>* fx_params = nullptr;
+
+        if (arr.size() > 5 &&
+            !(arr[5].type_enum() == game_data_type::STRING && static_cast<std::string>(arr[5]).empty())) {
+            // empty string = slot skipped (placeholder to reach later args)
+            const int e = RenderIntegration::effect_id_from_gv(arr[5]);
+            if (e < 0) return game_value("unknown effect");
+            obj.effect = e;
+        }
+        if (arr.size() > 6 && !arr[6].is_nil()) {
+            if (arr[6].type_enum() != game_data_type::ARRAY) return game_value("fxParams must be an array of numbers");
+            fx_params = &arr[6].to_array();
+        }
+
+        if (!RenderIntegration::set_effect_params(obj, fx_params)) return game_value("fxParams entries must be numbers");
+
+        if (arr.size() > 7 && !arr[7].is_nil()) {
+            if (arr[7].type_enum() != game_data_type::ARRAY) return game_value("band must be [minDist, maxDist, falloff?] numbers");
+            auto& band = arr[7].to_array();
+            if ((band.size() > 0 && band[0].type_enum() != game_data_type::SCALAR) ||
+                (band.size() > 1 && band[1].type_enum() != game_data_type::SCALAR) ||
+                (band.size() > 2 && band[2].type_enum() != game_data_type::SCALAR)) return game_value("band must be [minDist, maxDist, falloff?] numbers");
+
+            if (band.size() >= 2) {
+                obj.banded = true;
+                obj.band_min = static_cast<float>(band[0]);
+                obj.band_max = static_cast<float>(band[1]);
+                if (band.size() >= 3) obj.band_falloff = static_cast<float>(band[2]);
+            }
+        }
+
+        if (arr.size() > 8 &&
+            !(arr[8].type_enum() == game_data_type::STRING && static_cast<std::string>(arr[8]).empty())) {
+            // empty string = slot skipped (the positional-placeholder
+            // convention, matching the effect slot): blend stays default
+            const int bm = RenderIntegration::blend_id_from_gv(arr[8]);
+            if (bm < 0) return game_value("unknown blend mode");
+            obj.blend_mode = bm;
+        }
+
+        if (arr.size() > 9) {
+            if (!RenderIntegration::parse_duration_gv(arr[9], obj)) {
+                return game_value("duration must be seconds or [fadeIn, hold, fadeOut]");
+            }
+        }
+
+        if (arr.size() > 10 && !arr[10].is_nil()) {
+            if (arr[10].type_enum() == game_data_type::BOOL) {
+                obj.lit = static_cast<bool>(arr[10]);
+            } else if (arr[10].type_enum() == game_data_type::ARRAY) {
+                auto& la = arr[10].to_array();
+                if ((la.size() > 0 && la[0].type_enum() != game_data_type::SCALAR) ||
+                    (la.size() > 1 && la[1].type_enum() != game_data_type::SCALAR)) return game_value("lit must be a boolean or [ambient, diffuse] numbers");
+                obj.lit = true;
+                if (la.size() >= 1) obj.light_ambient = static_cast<float>(la[0]);
+                if (la.size() >= 2) obj.light_diffuse = static_cast<float>(la[1]);
+
+            } else {
+                return game_value("lit must be a boolean or [ambient, diffuse] numbers");
+            }
+        }
+
+        if (arr.size() > 11) {
+            int mid = -1;
+
+            if (arr[11].type_enum() == game_data_type::STRING &&
+                RenderIntegration::kh_ends_with_ci(static_cast<std::string>(arr[11]), ".fbx")) {
+                // A ".fbx" path (case-insensitive suffix REQUIRED) in the
+                // mesh slot: resolved Documents-first then mod "rendering"
+                // folders, imported once (synchronous - the first spawn of
+                // a model pays the parse), cached thereafter.
+                std::string khfb_err;
+                mid = RenderIntegration::kh_fbx_mesh_id(static_cast<std::string>(arr[11]), khfb_err);
+                if (mid < 0) return game_value("fbx: " + khfb_err);
+            } else {
+                mid = RenderIntegration::mesh_id_from_gv(arr[11]);
+                if (mid < 0) return game_value("unknown mesh (builtin name, registry index, or a path ending .fbx)");
+            }
+
+            obj.mesh = mid;
+        }
+
+        // Native-size substitution AFTER the mesh is known: any size
+        // component <= 0 reads the mesh's native dimension (0 = native,
+        // negative = |value| x native) - the true-scale path for FBX.
+        RenderIntegration::kh_apply_native_size(obj);
+
+        if (arr.size() > 12 && !arr[12].is_nil()) {
+            if (arr[12].type_enum() != game_data_type::BOOL) return game_value("farVis must be a boolean");
+            obj.far_vis = static_cast<bool>(arr[12]);   // visible beyond max view distance
+        }
+
+        if (arr.size() > 13) {
+            float khr_p = 0.0f, khr_y = 0.0f, khr_r = 0.0f;
+
+            if (arr[13].type_enum() == game_data_type::SCALAR) {
+                khr_y = static_cast<float>(arr[13]);   // bare number = heading (yaw)
+            } else if (arr[13].type_enum() == game_data_type::ARRAY) {
+                auto& ra = arr[13].to_array();
+                if ((ra.size() > 0 && ra[0].type_enum() != game_data_type::SCALAR) ||
+                    (ra.size() > 1 && ra[1].type_enum() != game_data_type::SCALAR) ||
+                    (ra.size() > 2 && ra[2].type_enum() != game_data_type::SCALAR)) return game_value("rotation must be a number (yaw) or [pitch, yaw, roll] degrees");
+                if (ra.size() >= 1) khr_p = static_cast<float>(ra[0]);
+                if (ra.size() >= 2) khr_y = static_cast<float>(ra[1]);
+                if (ra.size() >= 3) khr_r = static_cast<float>(ra[2]);
+            } else {
+                return game_value("rotation must be a number (yaw) or [pitch, yaw, roll] degrees");
+            }
+
+            RenderIntegration::kh_set_rotation(obj, khr_p, khr_y, khr_r);
+        }
+
+        if (arr.size() > 14 && !arr[14].is_nil()) {
+            if (arr[14].type_enum() != game_data_type::BOOL) return game_value("twoSided must be a boolean");
+            obj.two_sided = static_cast<bool>(arr[14]);   // false = back-face culling
+        }
+
+        return game_value(RenderIntegration::add_render_object(obj));
+    } catch (const std::exception& e) {
+        report_error(std::string("addRender3D: ") + e.what());
+        return game_value(std::string("EXCEPTION: ") + e.what());
+    } catch (...) {
+        report_error("addRender3D: unknown exception");
+        return game_value("EXCEPTION: unknown");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Update commands, SPLIT by object kind. 3D mesh objects (addRender3D) and
+// fullscreen passes (addPostFX / addLocalPostFX) share a handle space and
+// several properties, but their non-shared properties must not overlap:
+// each command owns exactly its kind, rejects the other's handles, and the
+// genuinely common set lives in ONE helper so the two can never drift.
+// ---------------------------------------------------------------------------
+
+// Property set BOTH kinds own. Returns 1 = applied, 0 = recognized but the
+// value was invalid, -1 = not a shared property (fall through to the
+// caller's kind-specific set).
+static int kh_apply_shared_prop(RenderIntegration::RenderObject& obj,
+                                const std::string& prop, const game_value& val) {
+    using namespace RenderIntegration;
+
+    if (prop == "color") {
+        if (val.type_enum() != game_data_type::ARRAY) return 0;
+        auto& col = val.to_array();
+        if ((col.size() > 0 && col[0].type_enum() != game_data_type::SCALAR) ||
+            (col.size() > 1 && col[1].type_enum() != game_data_type::SCALAR) ||
+            (col.size() > 2 && col[2].type_enum() != game_data_type::SCALAR) ||
+            (col.size() > 3 && col[3].type_enum() != game_data_type::SCALAR)) return 0;
+        for (size_t i = 0; i < 4 && i < col.size(); ++i) obj.color[i] = static_cast<float>(col[i]);
+        RenderIntegration::kh_sanitize_color(obj.color);
+        return 1;
+    }
+
+    if (prop == "visible") {
+        if (val.type_enum() != game_data_type::BOOL) return 0;
+        obj.visible = static_cast<bool>(val);
+        return 1;
+    }
+
+    if (prop == "params") {
+        if (val.type_enum() != game_data_type::ARRAY) return 0;
+        return set_effect_params(obj, &val.to_array()) ? 1 : 0;
+    }
+
+    if (prop == "blend") {
+        const int bm = blend_id_from_gv(val);
+        if (bm < 0) return 0;
+        obj.blend_mode = bm;
+        return 1;
+    }
+
+    if (prop == "band") {
+        if (val.type_enum() != game_data_type::ARRAY) return 0;
+        auto& band = val.to_array();
+        if ((band.size() > 0 && band[0].type_enum() != game_data_type::SCALAR) ||
+            (band.size() > 1 && band[1].type_enum() != game_data_type::SCALAR) ||
+            (band.size() > 2 && band[2].type_enum() != game_data_type::SCALAR)) return 0;
+
+        if (band.size() < 2) {
+            obj.banded = false;   // empty/short array clears the band
+        } else {
+            obj.banded = true;
+            obj.band_min = static_cast<float>(band[0]);
+            obj.band_max = static_cast<float>(band[1]);
+            if (band.size() >= 3) obj.band_falloff = static_cast<float>(band[2]);
+        }
+
+        return 1;
+    }
+
+    if (prop == "duration") {
+        if (!parse_duration_gv(val, obj)) return 0;
+        obj.birth_time = effect_time_seconds();   // re-arm from now
+        return 1;
+    }
+
+    return -1;
+}
+
+// updateRender3D [handle, property, value] -> BOOL
+// 3D mesh objects ONLY (addRender3D handles); fullscreen passes belong to
+// updatePostFX. Properties: "position" [x,y,zASL] | "size" number|[x,y,z]
+// (components <= 0 read the mesh's native dimensions) | "mesh"
+// string/scalar (builtin name, registry index, or a ".fbx" path - same
+// resolution as addRender3D) | "material" array - per-submesh shader +
+// texture assignments:
+//   [ [selector, "pbr", textures?, params?], ... ]
+//   selector: FBX material / submesh name (case-insensitive; builtins
+//             have one submesh, "default") | submesh index | -1 or "*"
+//             for all
+//   textures: [ [path, slot, routing?], ... ] with slot "diffuse"|
+//             "normal"|"orm"|"emissive"|"specular" (png/jpg/tga/bmp/dds,
+//             resolved like .fbx paths) and optional routing
+//             [ [input, channel], ... ] - input "occlusion"|"roughness"|
+//             "metallic"|"alpha"|"gloss", channel "r"|"g"|"b"|"a" - to
+//             read any channel of that texture into that shader input
+//   params:   [ [key, value], ... ] - "baseColor" [r,g,b] | "roughness" |
+//             "metalness" | "emissiveIntensity" | "normalStrength" |
+//             "cutoff" | "alphaMode" ("opaque"|"cutout")
+// | "color" [r,g,b,a] | "mode" 0..2 | "visible" bool | "sceneread" bool |
+// "effect" string/scalar | "params" array (resets omitted entries to the
+// effect's defaults) | "blend" string | "band" [minDist, maxDist,
+// falloff?] ([] clears) | "lit" bool or [ambient, diffuse] ("lighting"
+// accepted as an alias) | "duration" number or [fadeIn, hold, fadeOut].
+// Returns false for unknown handles, fullscreen handles, unknown
+// properties, or invalid values.
+static game_value update_render3d_sqf(game_value_parameter args) {
+    try {
+        auto& arr = args.to_array();
+        if (arr.size() < 3) return game_value(false);
+        if (arr[0].type_enum() != game_data_type::STRING) return game_value(false);
+        if (arr[1].type_enum() != game_data_type::STRING) return game_value(false);
+        const std::string handle = static_cast<std::string>(arr[0]);
+        std::string prop = static_cast<std::string>(arr[1]);
+        std::transform(prop.begin(), prop.end(), prop.begin(), ::tolower);
+        std::lock_guard<std::mutex> g(RenderIntegration::g_draw_list_mutex);
+        auto it = RenderIntegration::g_draw_list.find(handle);
+        if (it == RenderIntegration::g_draw_list.end()) return game_value(false);
+        auto& obj = it->second;
+        if (obj.fullscreen) return game_value(false);   // that handle belongs to updatePostFX
+
+        const int shared = kh_apply_shared_prop(obj, prop, arr[2]);
+        if (shared >= 0) return game_value(shared == 1);
+
+        if (prop == "position") {
+            if (arr[2].type_enum() != game_data_type::ARRAY) return game_value(false);
+            auto& pos = arr[2].to_array();
+            if (pos.size() < 3 ||
+                pos[0].type_enum() != game_data_type::SCALAR ||
+                pos[1].type_enum() != game_data_type::SCALAR ||
+                pos[2].type_enum() != game_data_type::SCALAR) return game_value(false);
+            obj.pos[0] = static_cast<float>(pos[0]);
+            obj.pos[1] = static_cast<float>(pos[1]);
+            obj.pos[2] = static_cast<float>(pos[2]);
+        } else if (prop == "size" || prop == "scale") {
+            if (!RenderIntegration::read_vec3_or_uniform(arr[2], obj.size)) return game_value(false);
+            RenderIntegration::kh_apply_native_size(obj);   // <= 0 components read native dims
+        } else if (prop == "rotation") {
+            float khr_p = 0.0f, khr_y = 0.0f, khr_r = 0.0f;
+
+            if (arr[2].type_enum() == game_data_type::SCALAR) {
+                khr_y = static_cast<float>(arr[2]);   // bare number = heading (yaw)
+            } else if (arr[2].type_enum() == game_data_type::ARRAY) {
+                auto& ra = arr[2].to_array();
+                if ((ra.size() > 0 && ra[0].type_enum() != game_data_type::SCALAR) ||
+                    (ra.size() > 1 && ra[1].type_enum() != game_data_type::SCALAR) ||
+                    (ra.size() > 2 && ra[2].type_enum() != game_data_type::SCALAR)) return game_value(false);
+                if (ra.size() >= 1) khr_p = static_cast<float>(ra[0]);
+                if (ra.size() >= 2) khr_y = static_cast<float>(ra[1]);
+                if (ra.size() >= 3) khr_r = static_cast<float>(ra[2]);
+            } else {
+                return game_value(false);
+            }
+
+            RenderIntegration::kh_set_rotation(obj, khr_p, khr_y, khr_r);
+        } else if (prop == "mesh") {
+            int mid = -1;
+
+            if (arr[2].type_enum() == game_data_type::STRING &&
+                RenderIntegration::kh_ends_with_ci(static_cast<std::string>(arr[2]), ".fbx")) {
+                std::string khfb_err;
+                mid = RenderIntegration::kh_fbx_mesh_id(static_cast<std::string>(arr[2]), khfb_err);
+                if (mid < 0) { report_error("updateRender3D mesh: " + khfb_err); return game_value(false); }
+            } else {
+                mid = RenderIntegration::mesh_id_from_gv(arr[2]);
+                if (mid < 0) return game_value(false);
+            }
+
+            obj.mesh = mid;
+            RenderIntegration::kh_apply_native_size(obj);
+        } else if (prop == "material") {
+            // "material" update: per-submesh shader + texture + channel
+            // assignments (format at kh_apply_material_update). Errors
+            // report the reason and return false.
+            std::string khmt_err;
+
+            if (!RenderIntegration::kh_apply_material_update(obj, arr[2], khmt_err)) {
+                report_error("updateRender3D material: " + khmt_err);
+                return game_value(false);
+            }
+        } else if (prop == "mode") {
+            if (arr[2].type_enum() != game_data_type::SCALAR) return game_value(false);
+            int m = static_cast<int>(static_cast<float>(arr[2]));
+            if (m < 0 || m > 2) return game_value(false);
+            obj.mode = static_cast<RenderIntegration::DepthMode>(m);
+        } else if (prop == "sceneread") {
+            if (arr[2].type_enum() != game_data_type::BOOL) return game_value(false);
+            obj.effect = static_cast<bool>(arr[2]) ? 2 : 0;
+            RenderIntegration::set_effect_params(obj, nullptr);
+        } else if (prop == "effect") {
+            const int e = RenderIntegration::effect_id_from_gv(arr[2]);
+            if (e < 0) return game_value(false);
+            obj.effect = e;
+            RenderIntegration::set_effect_params(obj, nullptr);
+        } else if (prop == "lit" || prop == "lighting") {
+            // BOOL toggles, ARRAY [ambient, diffuse] configures.
+            if (arr[2].type_enum() == game_data_type::ARRAY) {
+                auto& la = arr[2].to_array();
+
+                if ((la.size() > 0 && la[0].type_enum() != game_data_type::SCALAR) ||
+                    (la.size() > 1 && la[1].type_enum() != game_data_type::SCALAR)) return game_value(false);
+
+                if (la.size() < 1) {
+                    obj.lit = false;   // empty array disables the shading
+                } else {
+                    obj.lit = true;
+                    obj.light_ambient = static_cast<float>(la[0]);
+                    if (la.size() >= 2) obj.light_diffuse = static_cast<float>(la[1]);
+
+                }
+            } else if (arr[2].type_enum() == game_data_type::BOOL) {
+                obj.lit = static_cast<bool>(arr[2]);
+            } else {
+                return game_value(false);
+            }
+        } else if (prop == "twosided") {
+            if (arr[2].type_enum() != game_data_type::BOOL) return game_value(false);
+            obj.two_sided = static_cast<bool>(arr[2]);   // false = back-face culling
+        } else if (prop == "farvis") {
+            if (arr[2].type_enum() != game_data_type::BOOL) return game_value(false);
+            obj.far_vis = static_cast<bool>(arr[2]);   // visible beyond max view distance
+        } else {
+            return game_value(false);
+        }
+
+        return game_value(true);
+    } catch (const std::exception& e) {
+        report_error(std::string("updateRender3D: ") + e.what());
+        return game_value(false);
+    } catch (...) {
+        report_error("updateRender3D: unknown exception");
+        return game_value(false);
+    }
+}
+
+// updatePostFX [handle, property, value] -> BOOL
+// Fullscreen post-processing passes ONLY (addPostFX / addLocalPostFX
+// handles); 3D mesh objects belong to updateRender3D. Properties:
+// "effect" string/scalar (fullscreen effects only, id > 0) | "params"
+// array | "color" [r,g,b,a] | "blend" string | "band" [minDist, maxDist,
+// falloff?] ([] clears) | "visible" bool | "ui" bool (post-tonemap phase)
+// | "duration" number or [fadeIn, hold, fadeOut] | "position" [x,y,zASL]
+// (the localized volume's center) | "radius" number|[x,y,z] | "falloff"
+// scalar | "shape" "sphere"|"cube" | "localsphere" [radius, falloff?]
+// (enables the world-space volume mask; [] clears it). Returns false for
+// unknown handles, 3D-object handles, unknown properties, or invalid
+// values.
+static game_value update_post_fx_sqf(game_value_parameter args) {
+    try {
+        auto& arr = args.to_array();
+        if (arr.size() < 3) return game_value(false);
+        if (arr[0].type_enum() != game_data_type::STRING) return game_value(false);
+        if (arr[1].type_enum() != game_data_type::STRING) return game_value(false);
+        const std::string handle = static_cast<std::string>(arr[0]);
+        std::string prop = static_cast<std::string>(arr[1]);
+        std::transform(prop.begin(), prop.end(), prop.begin(), ::tolower);
+        std::lock_guard<std::mutex> g(RenderIntegration::g_draw_list_mutex);
+        auto it = RenderIntegration::g_draw_list.find(handle);
+        if (it == RenderIntegration::g_draw_list.end()) return game_value(false);
+        auto& obj = it->second;
+        if (!obj.fullscreen) return game_value(false);   // that handle belongs to updateRender3D
+
+        const int shared = kh_apply_shared_prop(obj, prop, arr[2]);
+        if (shared >= 0) return game_value(shared == 1);
+
+        if (prop == "position") {
+            if (arr[2].type_enum() != game_data_type::ARRAY) return game_value(false);
+            auto& pos = arr[2].to_array();
+            if (pos.size() < 3 ||
+                pos[0].type_enum() != game_data_type::SCALAR ||
+                pos[1].type_enum() != game_data_type::SCALAR ||
+                pos[2].type_enum() != game_data_type::SCALAR) return game_value(false);
+            obj.pos[0] = static_cast<float>(pos[0]);
+            obj.pos[1] = static_cast<float>(pos[1]);
+            obj.pos[2] = static_cast<float>(pos[2]);
+        } else if (prop == "effect") {
+            const int e = RenderIntegration::effect_id_from_gv(arr[2]);
+            if (e <= 0) return game_value(false);   // a fullscreen pass without an effect is meaningless
+            obj.effect = e;
+            RenderIntegration::set_effect_params(obj, nullptr);
+        } else if (prop == "ui") {
+            if (arr[2].type_enum() != game_data_type::BOOL) return game_value(false);
+            obj.affect_ui = static_cast<bool>(arr[2]);
+            if (obj.affect_ui) RenderIntegration::ensure_ui_driver();   // UI phase demanded
+        } else if (prop == "radius") {
+            if (!RenderIntegration::read_vec3_or_uniform(arr[2], obj.local_radius)) return game_value(false);
+        } else if (prop == "falloff") {
+            if (arr[2].type_enum() != game_data_type::SCALAR) return game_value(false);
+            obj.local_falloff = static_cast<float>(arr[2]);
+        } else if (prop == "localsphere") {
+            if (arr[2].type_enum() != game_data_type::ARRAY) return game_value(false);
+            auto& sp = arr[2].to_array();
+
+            if (sp.size() < 1) {
+                obj.localized = false;
+            } else {
+                obj.localized = true;
+                if (!RenderIntegration::read_vec3_or_uniform(sp[0], obj.local_radius)) return game_value(false);
+                if (sp.size() >= 2 && sp[1].type_enum() != game_data_type::SCALAR) return game_value(false);
+                if (sp.size() >= 2) obj.local_falloff = static_cast<float>(sp[1]);
+            }
+        } else if (prop == "shape") {
+            const int sh = RenderIntegration::shape_id_from_gv(arr[2]);
+            if (sh < 0) return game_value(false);
+            obj.local_shape = sh;
+        } else {
+            return game_value(false);
+        }
+
+        return game_value(true);
+    } catch (const std::exception& e) {
+        report_error(std::string("updatePostFX: ") + e.what());
+        return game_value(false);
+    } catch (...) {
+        report_error("updatePostFX: unknown exception");
+        return game_value(false);
+    }
+}
+
+
+// removeRenderHandler handle -> BOOL (true if an object was removed)
+// removeRenderHandler "" or "all" -> BOOL (clears the entire draw list)
+static game_value remove_render_handler_sqf(game_value_parameter arg) {
+    try {
+        if (arg.type_enum() != game_data_type::STRING) return game_value(false);
+        const std::string handle = static_cast<std::string>(arg);
+
+        if (handle.empty() || handle == "all") {
+            RenderIntegration::clear_render_objects();
+            return game_value(true);
+        }
+
+        return game_value(RenderIntegration::remove_render_object(handle));
+    } catch (const std::exception& e) {
+        report_error(std::string("removeRenderHandler: ") + e.what());
+        return game_value(false);
+    } catch (...) {
+        report_error("removeRenderHandler: unknown exception");
+        return game_value(false);
+    }
+}
+
+// queueVisibility [[x,y,zASL], ...] -> SCALAR accepted count
+// Dispatched during the next flush; results readable 1-2 frames later via
+// getVisibilityResults (no GPU stall, unlike the synchronous gpuVisibility).
+// Queueing again before the flush overwrites the pending batch.
+// Returns the queued point count (SCALAR); -1 = invalid input or exception.
+static game_value queue_visibility_sqf(game_value_parameter args) {
+    try {
+        auto& arr = args.to_array();
+        UINT count = static_cast<UINT>(arr.size());
+        RenderIntegration::g_query_points_pending.resize(static_cast<size_t>(count) * 3);
+
+        for (UINT i = 0; i < count; ++i) {
+            if (arr[i].type_enum() != game_data_type::ARRAY) return game_value(-1.0f);   // invalid point shape
+            auto& p = arr[i].to_array();
+            if (p.size() < 3 ||
+                p[0].type_enum() != game_data_type::SCALAR ||
+                p[1].type_enum() != game_data_type::SCALAR ||
+                p[2].type_enum() != game_data_type::SCALAR) return game_value(-1.0f);   // invalid point shape
+            RenderIntegration::g_query_points_pending[i * 3 + 0] = static_cast<float>(p[0]);
+            RenderIntegration::g_query_points_pending[i * 3 + 1] = static_cast<float>(p[1]);
+            RenderIntegration::g_query_points_pending[i * 3 + 2] = static_cast<float>(p[2]);
+        }
+
+        RenderIntegration::g_query_pending = count > 0;
+        if (count > 0) RenderIntegration::ensure_draw_eh();   // the flush performs the dispatch
+        return game_value(static_cast<float>(count));
+    } catch (const std::exception& e) {
+        report_error(std::string("queueVisibility: ") + e.what());
+        return game_value(-1.0f);
+    } catch (...) {
+        report_error("queueVisibility: unknown exception");
+        return game_value(-1.0f);
+    }
+}
+
+// getVisibilityResults -> [ageInFrames, [[status, pointDistM, sceneDistM], ...]]
+// status: 1 visible, 0 occluded, -1 offscreen/behind camera.
+// Results array is empty until the first queued batch completes.
+static game_value get_visibility_results_sqf() {
+    try {
+        auto_array<game_value> results;
+        results.reserve(RenderIntegration::g_vis_result_count);
+
+        for (UINT i = 0; i < RenderIntegration::g_vis_result_count; ++i) {
+            auto_array<game_value> e;
+            e.push_back(game_value(RenderIntegration::g_vis_results_cpu[i * 4 + 0]));
+            e.push_back(game_value(RenderIntegration::g_vis_results_cpu[i * 4 + 1]));
+            e.push_back(game_value(RenderIntegration::g_vis_results_cpu[i * 4 + 2]));
+            results.push_back(game_value(std::move(e)));
+        }
+
+        const float age = static_cast<float>(
+            RenderIntegration::g_flush_frame - RenderIntegration::g_vis_result_frame);
+
+        auto_array<game_value> out;
+        out.push_back(game_value(age));
+        out.push_back(game_value(std::move(results)));
+        return game_value(std::move(out));
+    } catch (...) {
+        report_error("getVisibilityResults: unknown exception");
+        return game_value(auto_array<game_value>());
+    }
+}
+
+// addPostFX [effect, params?, color?, band?, blend?, affectUI?, duration?]
+// Notes: runs pre-tonemap, so the engine's eye adaptation applies on top.
+// Outline and Pulse sample the engine depth buffer per pixel; on frames where
+// they are active, mode-1 meshes do not write depth (read-only DSV phase).
+static game_value add_postfx_sqf(game_value_parameter args) {
+    try {
+        auto& arr = args.to_array();
+        if (arr.size() < 1) return game_value("usage: addPostFX [effect, params?, [r,g,b,a]?, band?, blend?, affectUI?, duration?]");
+        RenderIntegration::RenderObject obj;
+        obj.fullscreen = true;
+        obj.mode = RenderIntegration::DepthMode::Off;
+        const int e = RenderIntegration::effect_id_from_gv(arr[0]);
+        if (e <= 0) return game_value("unknown or non-fullscreen effect");
+        obj.effect = e;
+        const auto_array<game_value>* fx_params = nullptr;
+
+        if (arr.size() > 1 && !arr[1].is_nil()) {
+            if (arr[1].type_enum() != game_data_type::ARRAY) return game_value("params must be an array of numbers");
+            fx_params = &arr[1].to_array();
+        }
+
+        if (!RenderIntegration::set_effect_params(obj, fx_params)) return game_value("params entries must be numbers");
+
+        if (arr.size() > 2 && !arr[2].is_nil()) {
+            if (arr[2].type_enum() != game_data_type::ARRAY) return game_value("color must be [r, g, b, a] numbers");
+            auto& col = arr[2].to_array();
+            if ((col.size() > 0 && col[0].type_enum() != game_data_type::SCALAR) ||
+                (col.size() > 1 && col[1].type_enum() != game_data_type::SCALAR) ||
+                (col.size() > 2 && col[2].type_enum() != game_data_type::SCALAR) ||
+                (col.size() > 3 && col[3].type_enum() != game_data_type::SCALAR)) return game_value("color must be [r, g, b, a] numbers");
+            for (size_t i = 0; i < 4 && i < col.size(); ++i) obj.color[i] = static_cast<float>(col[i]);
+            RenderIntegration::kh_sanitize_color(obj.color);
+        }
+
+        if (arr.size() > 3 && !arr[3].is_nil()) {
+            if (arr[3].type_enum() != game_data_type::ARRAY) return game_value("band must be [minDist, maxDist, falloff?] numbers");
+            auto& band = arr[3].to_array();
+            if ((band.size() > 0 && band[0].type_enum() != game_data_type::SCALAR) ||
+                (band.size() > 1 && band[1].type_enum() != game_data_type::SCALAR) ||
+                (band.size() > 2 && band[2].type_enum() != game_data_type::SCALAR)) return game_value("band must be [minDist, maxDist, falloff?] numbers");
+
+            if (band.size() >= 2) {
+                obj.banded = true;
+                obj.band_min = static_cast<float>(band[0]);
+                obj.band_max = static_cast<float>(band[1]);
+                if (band.size() >= 3) obj.band_falloff = static_cast<float>(band[2]);
+            }
+        }
+
+        if (arr.size() > 4 &&
+            !(arr[4].type_enum() == game_data_type::STRING && static_cast<std::string>(arr[4]).empty())) {
+            // empty string = slot skipped (the positional-placeholder
+            // convention, matching the effect slot): blend stays default
+            const int bm = RenderIntegration::blend_id_from_gv(arr[4]);
+            if (bm < 0) return game_value("unknown blend mode");
+            obj.blend_mode = bm;
+        }
+
+        if (arr.size() > 5 && !arr[5].is_nil()) {
+            if (arr[5].type_enum() != game_data_type::BOOL) return game_value("affectUI must be a boolean");
+            obj.affect_ui = static_cast<bool>(arr[5]);
+        }
+
+        // UI phase demanded: start the overlay control driver (state stays
+        // dead otherwise - the operator's no-passive-activation rule)
+        if (obj.affect_ui) RenderIntegration::ensure_ui_driver();
+
+        if (arr.size() > 6) {
+            if (!RenderIntegration::parse_duration_gv(arr[6], obj)) {
+                return game_value("duration must be seconds or [fadeIn, hold, fadeOut]");
+            }
+        }
+
+        return game_value(RenderIntegration::add_render_object(obj));
+    } catch (const std::exception& e) {
+        report_error(std::string("addPostFX: ") + e.what());
+        return game_value(std::string("EXCEPTION: ") + e.what());
+    } catch (...) {
+        report_error("addPostFX: unknown exception");
+        return game_value("EXCEPTION: unknown");
+    }
+}
+
+// getRenderStats -> ARRAY of [name, value] pairs (cumulative since the
+// arming call: the first call arms + zeroes and returns a status pair).
+// Skip counters name the reason for any effect flicker: a skipped flush is a
+// frame rendered without our draws.
+// Debug visual selector for the solid-mesh pixel shaders (see g_dbg_mode
+// for the mode catalog). Diagnostic-only, defaults off, survives nothing
+// past session destroy.
+static game_value set_render_debug_sqf(game_value_parameter arg) {
+    try {
+        if (arg.type_enum() != game_data_type::SCALAR) return game_value(false);
+        const int khd_m = static_cast<int>(static_cast<float>(arg));
+        const bool khd_ok = (khd_m >= 0 && khd_m <= 17) ||   // shader visuals (10-14 retired: normal shading)
+                            khd_m == 20 ||                    // cast ownership kill switch
+                            khd_m == 21 ||                    // cast readiness latch + slab retirement OFF (pristine A/B)
+                            khd_m == 24 ||                    // terrain snap off (diagnostic)
+                            khd_m == 25 ||                    // cast viewport A/B: live grid (pristine) instead of frozen
+                            khd_m == 26;                      // lock-settle cast hold off (diagnostic)
+        if (!khd_ok) return game_value(false);
+        RenderIntegration::g_dbg_mode.store(khd_m, std::memory_order_relaxed);
+        return game_value(true);
+    } catch (...) {
+        return game_value(false);
+    }
+}
+
+
+static game_value get_render_stats_sqf() {
+    try {
+        // OPT-IN (see g_stats_armed): first call arms + zeroes the pure
+        // diagnostics and returns a status pair; stats flow from call two.
+        // Arms the flight recorder as well (see g_diag_armed).
+        RenderIntegration::g_diag_armed.store(true, std::memory_order_relaxed);
+
+        if (!RenderIntegration::g_stats_armed.exchange(true, std::memory_order_relaxed)) {
+            RenderIntegration::reset_stat_counters();
+            auto_array<game_value> pair;
+            pair.push_back(game_value("status"));
+            pair.push_back(game_value("armed"));
+            auto_array<game_value> armed_out;
+            armed_out.push_back(game_value(std::move(pair)));
+            return game_value(std::move(armed_out));
+        }
+
+        auto kv = [](const char* k, uint64_t v) {
+            auto_array<game_value> pair;
+            pair.push_back(game_value(k));
+            pair.push_back(game_value(static_cast<float>(v)));
+            return game_value(std::move(pair));
+        };
+        auto kvf = [](const char* k, float v) {
+            auto_array<game_value> pair;
+            pair.push_back(game_value(k));
+            pair.push_back(game_value(v));
+            return game_value(std::move(pair));
+        };
+
+        auto_array<game_value> out;
+        out.push_back(kv("flushes", RenderIntegration::g_stats.flushes));
+        out.push_back(kv("gatePassed", RenderIntegration::g_stats.gate_passed));
+        out.push_back(kv("lockRetries", RenderIntegration::g_stats.lock_retries));
+        out.push_back(kv("lockFailedFrames", RenderIntegration::g_stats.lock_failed_frames));
+        out.push_back(kv("skipNoDsv", RenderIntegration::g_stats.skip_no_dsv));
+        out.push_back(kv("skipWrongPass", RenderIntegration::g_stats.skip_wrong_pass));
+        out.push_back(kv("effectSetupFails", RenderIntegration::g_stats.effect_setup_fails));
+        out.push_back(kv("uiFlushes", RenderIntegration::g_stats.ui_flushes));
+        out.push_back(kv("uiGatePassed", RenderIntegration::g_stats.ui_gate_passed));
+        out.push_back(kv("uiGateSkips", RenderIntegration::g_stats.ui_gate_skips));
+        out.push_back(kv("compositeInjections", RenderIntegration::g_stats.composite_injections));
+        out.push_back(kv("compositeMeshes", RenderIntegration::g_stats.composite_meshes));
+        out.push_back(kv("compositeSkips", RenderIntegration::g_stats.composite_skips));
+        out.push_back(kv("compositeAmbiguous", RenderIntegration::g_stats.composite_ambiguous));
+        out.push_back(kv("compositeProjLock", RenderIntegration::g_stats.composite_proj_lock));
+        out.push_back(kv("compositeRearms", RenderIntegration::g_stats.composite_rearms));
+        out.push_back(kv("compositeRejSpan", RenderIntegration::g_stats.composite_rej_span));
+        out.push_back(kv("compositeRejVerify", RenderIntegration::g_stats.composite_rej_verify));
+        out.push_back(kv("compositeRejFloor", RenderIntegration::g_stats.composite_rej_floor));
+        out.push_back(kv("compositeSlotEncodes", RenderIntegration::g_stats.composite_slot_encodes));
+        out.push_back(kv("compositeFarPhaseSkips", RenderIntegration::g_stats.composite_far_phase_skips));
+        out.push_back(kv("compositeFarInjects", RenderIntegration::g_stats.composite_far_injects));
+        out.push_back(kv("compositeFarArbs", RenderIntegration::g_stats.composite_far_arbs));
+        out.push_back(kv("compositeFarArbDenied", RenderIntegration::g_stats.composite_far_arb_denied));
+        out.push_back(kv("flushFxArbs", RenderIntegration::g_stats.flush_fx_arbs));
+        out.push_back(kv("compositeTranslDefers", RenderIntegration::g_stats.composite_transl_defers));
+        out.push_back(kv("texturedDraws", RenderIntegration::g_stats.textured_draws));
+        out.push_back(kv("texLoads", RenderIntegration::g_stats.tex_loads));
+        out.push_back(kv("fbxImports", RenderIntegration::g_stats.fbx_imports));
+        out.push_back(kv("registeredMeshes", static_cast<uint64_t>(RenderIntegration::mesh_count())));
+        out.push_back(kv("compositeKeepEncodes", RenderIntegration::g_stats.composite_keep_encodes));
+        out.push_back(kv("compositeAnomalySkips", RenderIntegration::g_stats.composite_anomaly_skips));
+        out.push_back(kv("sunDepthPasses", RenderIntegration::g_stats.sun_depth_passes));
+        out.push_back(kv("sunDepthCasters", RenderIntegration::g_stats.sun_depth_casters));
+        out.push_back(kv("sunJumpFlushes", RenderIntegration::g_stats.sun_jump_flushes));
+        out.push_back(kv("castArmsLost", RenderIntegration::g_mask.cast_arms_lost));
+
+        {
+            uint32_t bsv = 0;
+
+            for (int b = 0; b < 8; ++b) {
+                if (RenderIntegration::g_ls.band[b].valid) ++bsv;
+            }
+
+            out.push_back(kv("bandSlotsValid", bsv));
+        }
+
+        out.push_back(kvf("fireFovX", RenderIntegration::g_mask.last_fire_fov[0]));
+        out.push_back(kvf("fireFovY", RenderIntegration::g_mask.last_fire_fov[1]));
+        out.push_back(kvf("fireRotErr", RenderIntegration::g_mask.last_fire_rot_err));
+        out.push_back(kv("encVpRejects", RenderIntegration::g_stats.enc_vp_rejects));
+        out.push_back(kv("reorderHook", RenderIntegration::g_reorder_hook_active.load(std::memory_order_acquire) ? 1 : 0));
+        out.push_back(kv("uiDriverPolls", RenderIntegration::g_ui_poll_attempts));
+        out.push_back(kv("uiDriverCtrl", RenderIntegration::g_ui_ctrl_created ? 1 : 0));
+        out.push_back(kv("mainSceneW", RenderIntegration::g_main_depth_w));
+        out.push_back(kv("mainSceneH", RenderIntegration::g_main_depth_h));
+        out.push_back(kv("shadowLiveLatches", RenderIntegration::g_stats.shadow_live_latches));
+        out.push_back(kv("shadowLiveCascades", RenderIntegration::g_stats.shadow_live_cascades));
+        out.push_back(kv("shadowSrvFailed", RenderIntegration::g_stats.shadow_srv_failed));
+        out.push_back(kv("liveRejOrtho", RenderIntegration::g_stats.live_rej_ortho));
+        out.push_back(kv("liveRejScale", RenderIntegration::g_stats.live_rej_scale));
+        out.push_back(kv("liveRejIso", RenderIntegration::g_stats.live_rej_iso));
+        out.push_back(kv("liveRejRatio", RenderIntegration::g_stats.live_rej_ratio));
+        out.push_back(kv("liveRejTrans", RenderIntegration::g_stats.live_rej_trans));
+        out.push_back(kv("liveAccepts", RenderIntegration::g_stats.live_accepts));
+        out.push_back(kv("shadowAtlasSize", RenderIntegration::g_ls.atlas_size));
+        out.push_back(kv("resolveHits", RenderIntegration::g_ls.resolve_hits));
+        out.push_back(kv("topoDraws", RenderIntegration::g_topo_pub.draws));
+        out.push_back(kv("topoSweeps", RenderIntegration::g_topo_pub.sweeps));
+        out.push_back(kv("topoFirstSweep", RenderIntegration::g_topo_pub.d_first_sweep));
+        out.push_back(kv("topoLastSweep", RenderIntegration::g_topo_pub.d_last_sweep));
+        out.push_back(kv("topoInjects", RenderIntegration::g_topo_pub.injects));
+        out.push_back(kv("topoInject", RenderIntegration::g_topo_pub.d_inject));
+        out.push_back(kv("topoLastMainDsv", RenderIntegration::g_topo_pub.d_last_main_dsv));
+        out.push_back(kv("topoLastSceneRt", RenderIntegration::g_topo_pub.d_last_scene_rt));
+        out.push_back(kv("topoPpHead", RenderIntegration::g_topo_pub.d_pp_head));
+        out.push_back(kv("topoPpW", RenderIntegration::g_topo_pub.pp_w));
+        out.push_back(kv("topoPpFmt", RenderIntegration::g_topo_pub.pp_fmt));
+        out.push_back(kv("topoSceneSrv", RenderIntegration::g_topo_pub.d_scene_srv));
+        out.push_back(kv("topoCycles", RenderIntegration::g_topo_cycles));
+        out.push_back(kv("topoLastColor", RenderIntegration::g_topo_pub.d_last_color));
+        out.push_back(kv("topoForeignColor", RenderIntegration::g_topo_pub.d_last_foreign));
+        out.push_back(kv("topoColorIds", RenderIntegration::g_topo_pub.color_ids));
+        out.push_back(kv("topoAfterDraws", RenderIntegration::g_topo_pub_after.draws));
+        out.push_back(kv("topoAfterMainDsv", RenderIntegration::g_topo_pub_after.d_last_main_dsv));
+        out.push_back(kv("topoAfterSceneRt", RenderIntegration::g_topo_pub_after.d_last_scene_rt));
+        out.push_back(kv("topoAfterColor", RenderIntegration::g_topo_pub_after.d_last_color));
+        out.push_back(kv("topoAfterForeign", RenderIntegration::g_topo_pub_after.d_last_foreign));
+        out.push_back(kv("topoAfterColorIds", RenderIntegration::g_topo_pub_after.color_ids));
+        out.push_back(kv("topoAfterSweeps", RenderIntegration::g_topo_pub_after.sweeps));
+        out.push_back(kv("topoSceneSrvSlot", RenderIntegration::g_topo_pub.srv_slot));
+        out.push_back(kv("topoSceneCopy", RenderIntegration::g_topo_pub.d_scene_copy));
+        out.push_back(kv("topoResolveFirst", RenderIntegration::g_topo_pub.d_resolve_first));
+        out.push_back(kv("topoResolveLast", RenderIntegration::g_topo_pub.d_resolve_last));
+        out.push_back(kv("sunHoldArmed", RenderIntegration::g_sun_valid_ms != 0 ? 1 : 0));
+        out.push_back(kv("sunJumpRateRefused", RenderIntegration::g_sun_jump_rate_refused));
+        out.push_back(kv("sunSettleHolds", RenderIntegration::g_sun_settle_holds));
+        out.push_back(kv("sunGlideClamps", RenderIntegration::g_sun_glide_clamps));
+        out.push_back(kv("sunSettled", RenderIntegration::kh_sun_settled() ? 1 : 0));
+        out.push_back(kv("resolveDraws", RenderIntegration::g_ls.resolve_draws));
+        out.push_back(kv("resolveCbFound", RenderIntegration::g_ls.resolve_cb_found));
+        out.push_back(kv("bandCaptures", RenderIntegration::g_ls.band_captures));
+        out.push_back(kvf("band0Near", RenderIntegration::g_ls.band[0].valid ? RenderIntegration::g_ls.band[0].border[0] : -1.0f));
+        out.push_back(kvf("band0Far", RenderIntegration::g_ls.band[0].valid ? RenderIntegration::g_ls.band[0].border[1] : -1.0f));
+        out.push_back(kv("band0Copies", RenderIntegration::g_ls.band[0].copies));
+        out.push_back(kvf("band1Near", RenderIntegration::g_ls.band[1].valid ? RenderIntegration::g_ls.band[1].border[0] : -1.0f));
+        out.push_back(kvf("band1Far", RenderIntegration::g_ls.band[1].valid ? RenderIntegration::g_ls.band[1].border[1] : -1.0f));
+        out.push_back(kv("band1Copies", RenderIntegration::g_ls.band[1].copies));
+        out.push_back(kv("compCompiles", RenderIntegration::g_comp_compiles));
+        out.push_back(kv("compFailStreak", RenderIntegration::g_comp_fail_streak));
+        out.push_back(kv("bandBailPv", RenderIntegration::g_ls.band_bail_pv));
+        out.push_back(kv("bandBailOff", RenderIntegration::g_ls.band_bail_off));
+        out.push_back(kv("bandBailBorder", RenderIntegration::g_ls.band_bail_border));
+        out.push_back(kv("bandBailSlot", RenderIntegration::g_ls.band_bail_slot));
+        out.push_back(kv("bandBailTime", RenderIntegration::g_ls.band_bail_time));
+        out.push_back(kvf("bandRejB0", RenderIntegration::g_ls.band_last_reject[0]));
+        out.push_back(kvf("bandRejB1", RenderIntegration::g_ls.band_last_reject[1]));
+        out.push_back(kvf("bandRejB2", RenderIntegration::g_ls.band_last_reject[2]));
+        out.push_back(kvf("bandRejB3", RenderIntegration::g_ls.band_last_reject[3]));
+        out.push_back(kv("castMisses", RenderIntegration::g_ls.cast_misses));
+        out.push_back(kv("resolveGated", RenderIntegration::g_ls.resolve_gated));
+        out.push_back(kv("analyticCasts", RenderIntegration::g_mask.analytic_casts));
+        out.push_back(kv("maskRtvSwaps", RenderIntegration::g_mask.mask_rtv_swaps));
+        out.push_back(kv("castBatches", RenderIntegration::g_mask.cast_batches));
+        out.push_back(kvf("coldFirstInject", RenderIntegration::g_mask.cold_first_inject));
+        out.push_back(kvf("coldFirstCast", RenderIntegration::g_mask.cold_first_cast));
+        out.push_back(kv("coldLeadAmbiguous", RenderIntegration::g_mask.cold_lead_ambiguous));
+        out.push_back(kvf("coldFirstTrigger", RenderIntegration::g_mask.cold_first_trigger));
+        out.push_back(kvf("coldFirstStaged", RenderIntegration::g_mask.cold_first_stage));
+        out.push_back(kv("coldGNoDsv", RenderIntegration::g_mask.cold_g_nodsv));
+        out.push_back(kv("coldGFloor", RenderIntegration::g_mask.cold_g_floor));
+        out.push_back(kv("coldGTid", RenderIntegration::g_mask.cold_g_tid));
+        out.push_back(kv("coldCastMiss", RenderIntegration::g_mask.cold_cast_miss));
+        out.push_back(kv("coldPubRejects", RenderIntegration::g_ls.cold_pub_rejects));
+        out.push_back(kvf("lastInjectNear", RenderIntegration::g_mask.last_inject_near));
+        out.push_back(kv("ovListed", RenderIntegration::g_mask.ov_listed));
+        out.push_back(kv("ovSkipped", RenderIntegration::g_mask.ov_skipped));
+        out.push_back(kv("ovDrawn", RenderIntegration::g_mask.ov_drawn));
+        out.push_back(kvf("fogStagedValue", RenderIntegration::g_fog_valid ? RenderIntegration::g_fog[0] : -1.0f));
+        out.push_back(kvf("fogStagedDecay", RenderIntegration::g_fog_valid ? RenderIntegration::g_fog[1] : -1.0f));
+        out.push_back(kvf("fogStagedBase", RenderIntegration::g_fog_valid ? RenderIntegration::g_fog[2] : -1.0f));
+        out.push_back(kv("sunDirDerivedValid", RenderIntegration::g_sun_dir_derived_valid ? 1u : 0u));
+        out.push_back(kvf("sunDirDerivedX", RenderIntegration::g_sun_dir_derived[0]));
+        out.push_back(kvf("sunDirDerivedY", RenderIntegration::g_sun_dir_derived[1]));
+        out.push_back(kvf("sunDirDerivedZ", RenderIntegration::g_sun_dir_derived[2]));
+        out.push_back(kv("bandBailView", RenderIntegration::g_ls.band_bail_view));
+        out.push_back(kv("bandBailQuality", RenderIntegration::g_ls.band_bail_quality));
+        out.push_back(kv("bandProvSkips", RenderIntegration::g_ls.band_prov_skips));
+        out.push_back(kv("viewLocks", RenderIntegration::g_ls.view_locks));
+        out.push_back(kv("viewRelocks", RenderIntegration::g_ls.view_relocks));
+        out.push_back(kv("debugMode", static_cast<uint64_t>(RenderIntegration::g_dbg_mode.load(std::memory_order_relaxed))));
+        out.push_back(kv("perceptualCaptures", RenderIntegration::g_stats.perceptual_captures));
+        out.push_back(kv("viewSrcValid", RenderIntegration::g_ls.view_src_valid ? 1u : 0u));
+        out.push_back(kv("frameViewHits", RenderIntegration::g_ls.frame_view_hits));
+        out.push_back(kv("viewAdopts", RenderIntegration::g_view_adopts));
+        out.push_back(kv("viewAdoptStale", RenderIntegration::g_view_adopt_stale));
+        out.push_back(kv("viewAdoptFamily", RenderIntegration::g_view_adopt_family));
+        out.push_back(kvf("viewAdoptLastRot", RenderIntegration::g_view_adopt_last_rot));
+        out.push_back(kvf("viewAdoptMaxRot", RenderIntegration::g_view_adopt_max_rot));
+        out.push_back(kvf("viewBestRot", RenderIntegration::g_ls.view_best_rot));
+        out.push_back(kvf("viewBestTrans", RenderIntegration::g_ls.view_best_trans));
+        out.push_back(kv("sealCompletions", RenderIntegration::g_ls.seal_completions));
+        out.push_back(kv("sunDirValid", RenderIntegration::g_sun_valid ? 1 : 0));
+        out.push_back(kvf("sunDirEngineX", RenderIntegration::g_sun_dir_engine[0]));
+        out.push_back(kvf("sunDirEngineY", RenderIntegration::g_sun_dir_engine[1]));
+        out.push_back(kvf("sunDirEngineZ", RenderIntegration::g_sun_dir_engine[2]));
+        {   // engine HDR sun magnitude (getLighting retired): peak of the
+            // located block's sun lane; zero under moonlight by design
+            const float* sl = RenderIntegration::g_light_probe.nb + 16;
+            const float sm = sl[0] > sl[1] ? (sl[0] > sl[2] ? sl[0] : sl[2]) : (sl[1] > sl[2] ? sl[1] : sl[2]);
+            out.push_back(kvf("sunBrightness", sm));
+        }
+        out.push_back(kv("lightLocValid", RenderIntegration::g_light_probe.valid ? 1u : 0u));
+        out.push_back(kv("lightLocOff", RenderIntegration::g_light_probe.off));
+        out.push_back(kv("lightLocFloats", RenderIntegration::g_light_probe.floats));
+        out.push_back(kv("lightLocMeta", static_cast<uint64_t>(RenderIntegration::g_light_probe.meta)));
+        out.push_back(kv("lightLocHits", RenderIntegration::g_light_probe.hits));
+        out.push_back(kv("lightLocMisses", RenderIntegration::g_light_probe.misses));
+        out.push_back(kv("lightLocRelocs", RenderIntegration::g_light_probe.relocs));
+        out.push_back(kv("lightLocNbBase", RenderIntegration::g_light_probe.nb_base));
+        out.push_back(kvf("lightLocErr", RenderIntegration::g_light_probe.last_err));
+        out.push_back(kv("blockHolds", RenderIntegration::g_blk_holds));
+        out.push_back(kv("blockModeRejects", RenderIntegration::g_blk_mode_rejects));
+        out.push_back(kv("blockErrRejects", RenderIntegration::g_blk_err_rejects));
+        out.push_back(kv("blockJumpAdopts", RenderIntegration::g_blk_jump_adopts));
+        out.push_back(kvf("lightLocAge", RenderIntegration::effect_time_seconds() - RenderIntegration::g_light_probe.last_confirm));
+        out.push_back(kvf("lightLocMode", RenderIntegration::g_light_probe.last_mode));
+        {   // BLACK-BOX (see the campaign): the engine block AMBIENT color
+            //   nb[8..10] -> lightAmb.rgb, the term ndl<=0 faces collapse to -
+            //   distinct from the sun lane (sunBrightness reads nb[16..18]).
+            //   -1 = block not locked this frame (matches fill_lighting_frame_cb).
+            const bool amb_locked = RenderIntegration::g_light_probe.hits > 0 &&
+                                    RenderIntegration::g_light_probe.meta == 40;
+            const float* amb = RenderIntegration::g_light_probe.nb + 8;
+            out.push_back(kvf("ambHDR_R", amb_locked ? amb[0] : -1.0f));
+            out.push_back(kvf("ambHDR_G", amb_locked ? amb[1] : -1.0f));
+            out.push_back(kvf("ambHDR_B", amb_locked ? amb[2] : -1.0f));
+        }
+        {   // BLACK-BOX: what the last LIT mesh each path actually received.
+            //   AmbTermMax = max(amb)*amb_scalar = the ndl<=0 face brightness
+            //   before the base-multiply; ~0 with GuardBase 1e9 convicts the
+            //   ambient-zero + guard-stood-down root. Path valid=0 => that path
+            //   drew no lit mesh since the arm (its lanes read the -1 sentinel).
+            auto termmax = [](const float* a, float s) -> float {
+                if (s < 0.0f || a[0] < 0.0f) return -1.0f;
+                float m = a[0] > a[1] ? (a[0] > a[2] ? a[0] : a[2])
+                                      : (a[1] > a[2] ? a[1] : a[2]);
+                return m * s;
+            };
+            const RenderIntegration::RenderStats& S = RenderIntegration::g_stats;
+            out.push_back(kv ("injBoxValid",       static_cast<uint64_t>(S.inj_box_valid)));
+            out.push_back(kv ("injBoxEffect",      static_cast<uint64_t>(S.inj_box_effect < 0 ? 0 : S.inj_box_effect)));
+            out.push_back(kvf("injBoxAmbR",        S.inj_box_amb[0]));
+            out.push_back(kvf("injBoxAmbG",        S.inj_box_amb[1]));
+            out.push_back(kvf("injBoxAmbB",        S.inj_box_amb[2]));
+            out.push_back(kvf("injBoxAmbScalar",   S.inj_box_amb_scalar));
+            out.push_back(kvf("injBoxAmbTermMax",  termmax(S.inj_box_amb, S.inj_box_amb_scalar)));
+            out.push_back(kvf("injBoxGuardBase",   S.inj_box_guard_base));
+            out.push_back(kv ("flushBoxValid",     static_cast<uint64_t>(S.flush_box_valid)));
+            out.push_back(kv ("flushBoxEffect",    static_cast<uint64_t>(S.flush_box_effect < 0 ? 0 : S.flush_box_effect)));
+            out.push_back(kvf("flushBoxAmbR",       S.flush_box_amb[0]));
+            out.push_back(kvf("flushBoxAmbG",       S.flush_box_amb[1]));
+            out.push_back(kvf("flushBoxAmbB",       S.flush_box_amb[2]));
+            out.push_back(kvf("flushBoxAmbScalar",  S.flush_box_amb_scalar));
+            out.push_back(kvf("flushBoxAmbTermMax", termmax(S.flush_box_amb, S.flush_box_amb_scalar)));
+            out.push_back(kvf("flushBoxGuardBase",  S.flush_box_guard_base));
+            out.push_back(kvf("injBoxSunMax",       termmax(S.inj_box_sun, 1.0f)));
+            out.push_back(kvf("flushBoxSunMax",     termmax(S.flush_box_sun, 1.0f)));
+        }
+        {   // BLACK-BOX phase 1: the block colors snapshotted under the park in
+            //   publish_world_lighting - what phase 2 would feed BOTH draw paths.
+            //   Compare blockStagedAmb* against the live injBoxAmb* (dark) and
+            //   ambHDR* (healthy): if these read healthy, repointing the consumers
+            //   here fixes the injection's stale read. SunMax vs injBoxSunMax says
+            //   whether the direct term is starved at injection too. valid=0 =>
+            //   block unlocked at publish time.
+            const float* bs = RenderIntegration::g_pub_block_sun;
+            const bool bv = RenderIntegration::g_pub_block_valid;
+            float bsm = bs[0] > bs[1] ? (bs[0] > bs[2] ? bs[0] : bs[2])
+                                      : (bs[1] > bs[2] ? bs[1] : bs[2]);
+            out.push_back(kv ("blockStagedValid",  bv ? 1ull : 0ull));
+            out.push_back(kvf("blockStagedAmbR",   RenderIntegration::g_pub_block_amb[0]));
+            out.push_back(kvf("blockStagedAmbG",   RenderIntegration::g_pub_block_amb[1]));
+            out.push_back(kvf("blockStagedAmbB",   RenderIntegration::g_pub_block_amb[2]));
+            out.push_back(kvf("blockStagedSunMax", bv ? bsm : -1.0f));
+            out.push_back(kvf("blockStagedFogR",   RenderIntegration::g_pub_block_fog[0]));
+            out.push_back(kvf("blockStagedFogG",   RenderIntegration::g_pub_block_fog[1]));
+            out.push_back(kvf("blockStagedFogB",   RenderIntegration::g_pub_block_fog[2]));
+        }
+
+
+        out.push_back(kv("skyLocValid", RenderIntegration::g_sky_probe.valid ? 1u : 0u));
+        out.push_back(kv("skyLocFloats", RenderIntegration::g_sky_probe.floats));
+        out.push_back(kv("skyLocHits", RenderIntegration::g_sky_probe.hits));
+        out.push_back(kv("skyLocMisses", RenderIntegration::g_sky_probe.misses));
+        out.push_back(kvf("skyLocAge", RenderIntegration::effect_time_seconds() - RenderIntegration::g_sky_probe.last_confirm));
+        out.push_back(kv("skyBindReads", RenderIntegration::g_skybind_reads));
+        out.push_back(kv("skyBindHits", RenderIntegration::g_skybind_hits));
+        out.push_back(kv("skyBindMinBw", static_cast<uint64_t>(RenderIntegration::g_skybind_minbw)));
+        out.push_back(kv("skyBindMaxBw", static_cast<uint64_t>(RenderIntegration::g_skybind_maxbw)));
+        out.push_back(kv("skyBindSlots", static_cast<uint64_t>(RenderIntegration::g_skybind_slots)));
+        out.push_back(kv("skyBindOff1", static_cast<uint64_t>(RenderIntegration::g_skybind_off1)));
+        out.push_back(kv("skyBindMaxBwVs", static_cast<uint64_t>(RenderIntegration::g_skybind_maxbw_vs)));
+        out.push_back(kv("viewBindScans", RenderIntegration::g_viewbind_scans));
+        out.push_back(kv("stageTotal", static_cast<uint64_t>(RenderIntegration::g_stage_total)));
+        out.push_back(kv("stageRejVis", static_cast<uint64_t>(RenderIntegration::g_stage_rej_vis)));
+        out.push_back(kv("recvTermSkips", RenderIntegration::g_recv_term_skips));
+        out.push_back(kv("recvStreamSkips", RenderIntegration::g_recv_stream_skips));
+        out.push_back(kv("recvWipes", RenderIntegration::g_recv_wipes));
+        out.push_back(kv("sunJumpRefused", RenderIntegration::g_sun_jump_refused));
+        out.push_back(kv("sunJumpStreamRefused", RenderIntegration::g_sun_jump_stream_refused));
+        out.push_back(kv("viewRelockForced", RenderIntegration::g_view_relock_forced));
+        out.push_back(kv("lockWipes", RenderIntegration::g_lock_wipes));
+        out.push_back(kv("stageRejExp", static_cast<uint64_t>(RenderIntegration::g_stage_rej_exp)));
+        out.push_back(kv("cascBindScans", RenderIntegration::g_cascbind_scans));
+        out.push_back(kv("skyBindOffsSeen", RenderIntegration::g_skybind_offs_seen));
+
+
+
+        out.push_back(kv("castFrozenFires", RenderIntegration::g_cast_frozen_fires));
+        out.push_back(kv("castRtResolveTrue", RenderIntegration::g_rt_resolve_true));
+        out.push_back(kv("castRtResolveFalse", RenderIntegration::g_rt_resolve_false));
+        out.push_back(kv("castRtHalfAccepts", RenderIntegration::g_rt_half_accepts));
+        out.push_back(kv("sweepGapResets", RenderIntegration::g_sweep_gap_resets));
+        out.push_back(kv("injGuardOff", RenderIntegration::g_inj_guard_off));
+        {   // OCCLUSION-GUARD OVERHAUL diagnostics + config echo
+            out.push_back(kv("snapSerial", RenderIntegration::g_snap_serial));
+            out.push_back(kv("snapFails", RenderIntegration::g_snap_fails));
+            out.push_back(kv("snapConsumed", RenderIntegration::g_snap_consumed));
+            out.push_back(kvf("snapAgeNowMs", RenderIntegration::g_snap_ms != 0
+                ? static_cast<float>(RenderIntegration::steady_now_ms() - RenderIntegration::g_snap_ms)
+                : -1.0f));
+            out.push_back(kvf("snapAgeInjMs", RenderIntegration::g_snap_age_last));
+            out.push_back(kvf("snapAgeInjMaxMs", RenderIntegration::g_snap_age_max));
+            // (Campaign diagnostics - jitter probe, config echo, GPU
+            // pixel autopsy - retired with the settled model; the notes
+            // doc records their findings.)
+            out.push_back(kv("thmValid", RenderIntegration::g_thm_valid ? 1u : 0u));
+            out.push_back(kv("thmW", RenderIntegration::g_thml_w));
+            out.push_back(kv("thmH", RenderIntegration::g_thml_h));
+            out.push_back(kvf("thmCell", RenderIntegration::g_thml_cell));
+            out.push_back(kv("thmFilled", static_cast<uint64_t>(RenderIntegration::g_thm_filled)));
+            out.push_back(kv("thmUploads", RenderIntegration::g_thm_uploads));
+            out.push_back(kv("thmAutoState", static_cast<uint64_t>(RenderIntegration::g_thm_auto_state)));
+            out.push_back(kv("thmAutoSrc", static_cast<uint64_t>(RenderIntegration::g_thm_auto_src)));
+            out.push_back(kv("thmAutoSamples", RenderIntegration::g_thm_auto_samples));
+            out.push_back(kv("injDpValid", RenderIntegration::g_inj_dp_valid ? 1u : 0u));
+            out.push_back(kvf("injDpM22", RenderIntegration::g_inj_dp[0]));
+            out.push_back(kvf("injDpM32", RenderIntegration::g_inj_dp[1]));
+            out.push_back(kvf("injDpVpMin", RenderIntegration::g_inj_dp[2]));
+            out.push_back(kvf("injDpVpMax", RenderIntegration::g_inj_dp[3]));
+        }
+        out.push_back(kv("flushFallbackDraws", RenderIntegration::g_flush_fallback_draws));
+        out.push_back(kv("flushLatchPvs", RenderIntegration::g_flush_latch_pvs));
+        out.push_back(kv("flushPvRepairs", RenderIntegration::g_flush_pv_repairs));
+        out.push_back(kv("flushRepaintSaves", RenderIntegration::g_flush_repaint_saves));
+        out.push_back(kv("flushAnomalyCarries", RenderIntegration::g_flush_anomaly_carries));
+        out.push_back(kv("castArmsLostMiss", RenderIntegration::g_mask.arms_lost_miss));
+        out.push_back(kv("sunMapSkips", RenderIntegration::g_sun_map_skips));
+        auto age_s = [](uint64_t ms) {
+            return ms == 0 ? -1.0f :
+                static_cast<float>(RenderIntegration::steady_now_ms() - ms) * 0.001f;
+        };
+        out.push_back(kvf("flAgeFallbackS", age_s(RenderIntegration::g_fl_fallback_ms)));
+        out.push_back(kvf("flAgeAnomSkipS", age_s(RenderIntegration::g_fl_anom_skip_ms)));
+        out.push_back(kv("ccPostFlushRedraws", RenderIntegration::g_cc_postflush_redraws));
+        out.push_back(kv("ccPfLastDraws", static_cast<uint64_t>(RenderIntegration::g_cc_pf_last_draws)));
+        out.push_back(kvf("ccPfLastAgeS", age_s(RenderIntegration::g_cc_pf_last_ms)));
+        out.push_back(kv("missFrames", RenderIntegration::g_ms_frames));
+        out.push_back(kvf("missLastNear", RenderIntegration::g_ms_near));
+        out.push_back(kv("flushSlotKeeps", RenderIntegration::g_flush_slot_keeps));
+        out.push_back(kv("flushInjEncodes", RenderIntegration::g_flush_inj_encodes));
+        out.push_back(kv("flushInjPairHolds", RenderIntegration::g_flush_inj_pair_holds));
+        out.push_back(kv("flushPubFarRejects", RenderIntegration::g_flush_pub_far_rejects));
+        out.push_back(kv("farKeepMeshDraws", RenderIntegration::g_farkeep_mesh_draws));
+        out.push_back(kv("khBuildTag", static_cast<uint64_t>(RenderIntegration::KH_BUILD_TAG)));
+        out.push_back(kv("nearzGapDraws", RenderIntegration::g_nearz_gap_draws));
+        out.push_back(kvf("nearzNearEst", RenderIntegration::g_nearz_last_near));
+        out.push_back(kvf("nearzGapFloor", RenderIntegration::g_nearz_last_floor));
+        out.push_back(kvf("sliceSeenNear", RenderIntegration::g_slice_seen_near));
+        out.push_back(kvf("sliceSeenFar", RenderIntegration::g_slice_seen_far));
+        out.push_back(kvf("sliceSeenFarMin", RenderIntegration::g_slice_seen_far_min));
+        out.push_back(kvf("sliceSeenFarMax", RenderIntegration::g_slice_seen_far_max));
+        out.push_back(kvf("sliceSeenAgeS", RenderIntegration::g_slice_seen_ms == 0 ? -1.0f
+            : (RenderIntegration::steady_now_ms() - RenderIntegration::g_slice_seen_ms) / 1000.0f));
+        out.push_back(kv("sliceSeenCount", RenderIntegration::g_slice_seen_count));
+        out.push_back(kvf("lightLocStdAgeS", RenderIntegration::g_light_probe.last_std_time < 0.0f ? -1.0f
+            : RenderIntegration::effect_time_seconds() - RenderIntegration::g_light_probe.last_std_time));
+        out.push_back(kv("keepStampRejects", RenderIntegration::g_keep_stamp_rejects));
+        out.push_back(kv("keepStaleSkips", RenderIntegration::g_keep_stale_skips));
+        out.push_back(kvf("castArmLostAgeS", age_s(RenderIntegration::g_cast_arm_lost_ms)));
+        out.push_back(kv("sunLocalCount", static_cast<uint64_t>(RenderIntegration::g_sun_local_count)));
+        out.push_back(kvf("sunMapHalfDiag", sqrtf(
+            RenderIntegration::g_sun_map_bounds[3] * RenderIntegration::g_sun_map_bounds[3] +
+            RenderIntegration::g_sun_map_bounds[4] * RenderIntegration::g_sun_map_bounds[4] +
+            RenderIntegration::g_sun_map_bounds[5] * RenderIntegration::g_sun_map_bounds[5])));
+        out.push_back(kv("fireMaskSrvFires", RenderIntegration::g_fire_mask_srv_fires));
+        out.push_back(kv("fireMaskSrvLast", static_cast<uint64_t>(RenderIntegration::g_fire_mask_srv_last)));
+        out.push_back(kvf("fireFovMaxDelta", RenderIntegration::g_fov_max_delta));
+        out.push_back(kvf("sunChurnMaxDeg", RenderIntegration::g_sun_churn_max_deg));
+        out.push_back(kvf("camStepMaxM", RenderIntegration::g_cam_step_max));
+        out.push_back(kvf("fireCamDeltaMaxM", RenderIntegration::g_fire_cam_delta_max));
+        // GRID-COHERENCE CENSUS (campaign 5): the S4 conviction numbers.
+        out.push_back(kv("fireDimsIncoherent", RenderIntegration::g_fire_dims_incoh_total));
+        out.push_back(kvf("fireDimsDivMaxPx", RenderIntegration::g_fire_dims_div_max));
+        out.push_back(kv("castDimsForeign", RenderIntegration::g_cast_dims_foreign));
+        out.push_back(kv("fireVpMode", static_cast<uint64_t>(RenderIntegration::g_fire_vp_mode)));
+        out.push_back(kvf("castDimsLiveW", RenderIntegration::g_mask.cast_dims[0]));
+        out.push_back(kvf("castDimsLiveH", RenderIntegration::g_mask.cast_dims[1]));
+        out.push_back(kvf("fireDims2W", RenderIntegration::g_fire_dims2[0]));
+        out.push_back(kvf("fireDims2H", RenderIntegration::g_fire_dims2[1]));
+        // LOCK-SETTLE GATE (campaign 5): churn recency + fires held.
+        out.push_back(kvf("lockChurnAgeS", age_s(RenderIntegration::g_lock_churn_ms_v)));
+        out.push_back(kv("castLockSettleHolds", RenderIntegration::g_cast_lock_settle_holds));
+        // BRIDGE-EPOCH FREEZE health: bridge adoption is the norm;
+        // pub fires / era rejects / repairs are anomaly counters.
+        out.push_back(kv("fireViewBridgeFires", RenderIntegration::g_fire_view_bridge_fires));
+        out.push_back(kv("fireViewPubFires", RenderIntegration::g_fire_view_pub_fires));
+        out.push_back(kv("fireViewBridgeRepairs", RenderIntegration::g_fire_view_repairs));
+        out.push_back(kv("fireViewEraRejects", RenderIntegration::g_fire_view_era_rejects));
+        // CAST READINESS LATCH (26026): ready state + age, holds by
+        // class (57 readiness, 58 stale-map), and latch drops.
+        out.push_back(kv("castReady", static_cast<uint64_t>(RenderIntegration::g_cast_ready ? 1 : 0)));
+        out.push_back(kvf("castReadyAgeS", age_s(RenderIntegration::g_cast_ready_ms)));
+        out.push_back(kv("castReadyHolds", RenderIntegration::g_cast_ready_holds));
+        out.push_back(kv("castMapHolds", RenderIntegration::g_cast_map_holds));
+        out.push_back(kv("castReadyDrops", RenderIntegration::g_cast_ready_drops));
+        // SUN-AXIS PROVENANCE + SNAP CONFIRMATION (campaign 5 round 2).
+        out.push_back(kv("liveRejSunAxis", RenderIntegration::g_live_rej_sun_axis));
+        out.push_back(kvf("liveRejSunAxisLastDeg", RenderIntegration::g_live_rej_sun_axis_deg));
+        out.push_back(kv("bandRejSunAxis", RenderIntegration::g_band_rej_sun_axis));
+        out.push_back(kvf("bandRejSunAxisLastDeg", RenderIntegration::g_band_rej_sun_axis_deg));
+        out.push_back(kv("sunDerivedSnaps", RenderIntegration::g_sun_snap_adopts));
+        out.push_back(kv("sunDerivedSnapHolds", RenderIntegration::g_sun_snap_refusals));
+        out.push_back(kvf("sunDerivedSnapLastDeg", RenderIntegration::g_sun_snap_last_deg));
+        out.push_back(kvf("sunDerivedSnapAgeS", age_s(RenderIntegration::g_sun_snap_ms)));
+        out.push_back(kv("sunDerivedViewSkips", RenderIntegration::g_sun_derived_view_skips));
+        out.push_back(kv("sunDerivedBridgeSamples", RenderIntegration::g_sun_derived_bridge));
+        // COLD TIMELINE (campaign 5 round 2): stage times relative to
+        // cold_t0; -1 = never happened; negative = happened before this
+        // cold window opened (a later cold in a warm session).
+        {
+            auto khcold = [](float khc_t) {
+                return khc_t >= 0.0f && RenderIntegration::g_mask.cold_t0 >= 0.0
+                    ? khc_t - static_cast<float>(RenderIntegration::g_mask.cold_t0)
+                    : -1.0f;
+            };
+            out.push_back(kvf("coldSunValidS", khcold(RenderIntegration::g_first_sun_valid_t)));
+            out.push_back(kvf("coldSunSettledS", khcold(RenderIntegration::g_first_sun_settled_t)));
+            out.push_back(kvf("coldDerived120S", khcold(RenderIntegration::g_first_derived120_t)));
+            out.push_back(kvf("coldFirstBandCapS", khcold(RenderIntegration::g_first_bandcap_t)));
+            out.push_back(kvf("coldFirstLiveLatchS", khcold(RenderIntegration::g_first_livelatch_t)));
+        }
+        out.push_back(kv("atlasSrvEvicts", RenderIntegration::g_atlas_srv_evicts));
+        out.push_back(kv("bandInsaneSkips", RenderIntegration::g_band_insane_skips));
+        out.push_back(kv("bandWarmupSkips", RenderIntegration::g_band_warmup_skips));
+        out.push_back(kv("bandOverlapPairs", RenderIntegration::g_band_overlap_pairs));
+        out.push_back(kv("meshDarkFrames", RenderIntegration::g_ffr_dark_frames));
+        out.push_back(kv("carryErasedFrames", RenderIntegration::g_ffr_erased_frames));
+        out.push_back(kvf("ffrDarkAgeS", age_s(RenderIntegration::g_ffr_dark_ms)));
+        out.push_back(kvf("ffrErasedAgeS", age_s(RenderIntegration::g_ffr_erased_ms)));
+        out.push_back(kv("ffrFrames", static_cast<uint64_t>(RenderIntegration::g_ffr_serial)));
+        out.push_back(kv("compositeRescues", RenderIntegration::g_composite_rescues));
+        out.push_back(kvf("rescueLastAgeS", age_s(RenderIntegration::g_rescue_last_ms)));
+        out.push_back(kv("rescueRefCarried", RenderIntegration::g_rescue_ref_carried));
+        out.push_back(kv("rescueRefPreflush", RenderIntegration::g_rescue_ref_preflush));
+        out.push_back(kv("rescueRefShield", RenderIntegration::g_rescue_ref_shield));
+        out.push_back(kv("rescueCapStops", RenderIntegration::g_rescue_cap_stops));
+        out.push_back(kv("flushSlotBandRejects", RenderIntegration::g_flush_slot_band_rejects));
+        out.push_back(kvf("flushSlotRejNear", RenderIntegration::g_flush_slot_rej_near));
+        out.push_back(kv("injSlotBandRejects", RenderIntegration::g_inj_slot_band_rejects));
+        out.push_back(kvf("injSlotRejNear", RenderIntegration::g_inj_slot_rej_near));
+        out.push_back(kv("latchHolds", RenderIntegration::g_latch_holds));
+        out.push_back(kvf("latchHoldLastDist", RenderIntegration::g_latch_hold_dist));
+        out.push_back(kv("latchJumpAdopts", RenderIntegration::g_latch_jump_adopts));
+        out.push_back(kv("dlMode", static_cast<uint64_t>(RenderIntegration::g_dl_mode.load(std::memory_order_relaxed))));
+        out.push_back(kv("dlAcquires", RenderIntegration::g_dl.acquires));
+        out.push_back(kv("dlCopies", RenderIntegration::g_dl.copies));
+        out.push_back(kv("dlHarvests", static_cast<uint64_t>(RenderIntegration::g_dl.serial)));
+        out.push_back(kv("dlLastPointN", static_cast<uint64_t>(RenderIntegration::g_dl.point_n)));
+        out.push_back(kv("dlLastSpotN", static_cast<uint64_t>(RenderIntegration::g_dl.spot_n)));
+        out.push_back(kvf("dlListAgeS", age_s(RenderIntegration::g_dl.stamp_ms)));
+        out.push_back(kv("dlHashChanges", RenderIntegration::g_dl.hash_changes));
+        out.push_back(kv("dlValRejects", RenderIntegration::g_dl.val_rejects));
+        out.push_back(kv("dlSlotNulls", RenderIntegration::g_dl.slot_nulls));
+        out.push_back(kv("dlStillDrawing", RenderIntegration::g_dl.still_drawing));
+        out.push_back(kv("dlBoundsRejects", RenderIntegration::g_dl.bounds_rejects));
+        out.push_back(kv("dlPerDrawDistinct", static_cast<uint64_t>(RenderIntegration::g_dl_cd_distinct_last)));
+        out.push_back(kv("dlPerDrawDistinctMax", static_cast<uint64_t>(RenderIntegration::g_dl_cd_distinct_max)));
+        out.push_back(kv("dlPoolN", static_cast<uint64_t>(RenderIntegration::g_dl.pool_n)));
+        out.push_back(kv("dlWinCaptured", RenderIntegration::g_dl.win_captured));
+        out.push_back(kv("dlListsAnchored", RenderIntegration::g_dl.lists_anchored));
+        out.push_back(kv("dlListsUnanchored", RenderIntegration::g_dl.lists_unanchored));
+        out.push_back(kv("dlPoolExpired", RenderIntegration::g_dl.pool_expired));
+        out.push_back(kv("dlFillLastN", static_cast<uint64_t>(RenderIntegration::g_dl.fill_last_n)));
+        out.push_back(kv("dlSpotFlips", RenderIntegration::g_dl.pool_spot_flips));
+        out.push_back(kv("dlWinAux", RenderIntegration::g_dl.win_aux));
+        out.push_back(kv("dlOriginRangeRejects", RenderIntegration::g_dl.origin_range_rejects));
+        out.push_back(kv("dlOriginPoolVotes", RenderIntegration::g_dl.origin_pool_votes));
+        out.push_back(kv("dlOriginVoteAmbiguous", RenderIntegration::g_dl.origin_vote_ambiguous));
+        out.push_back(kv("dlAnchorTableN", static_cast<uint64_t>(RenderIntegration::g_dl.anchor_n)));
+        {
+            // Band-layout census (the 132 m band session): the widest
+            // valid band's span and the layout's total reach - the
+            // receive decode was built against 8-35 m bands.
+            float khb_max_far = 0.0f, khb_widest = 0.0f;
+            int khb_valid = 0;
+
+            for (int bi = 0; bi < 8; ++bi) {
+                const auto& kb = RenderIntegration::g_ls.band[bi];
+                if (!kb.valid) continue;
+                khb_valid++;
+                if (kb.border[1] > khb_max_far) khb_max_far = kb.border[1];
+                const float w = kb.border[1] - kb.border[0];
+                if (w > khb_widest) khb_widest = w;
+            }
+
+            out.push_back(kvf("bandMaxFar", khb_max_far));
+            out.push_back(kvf("bandWidest", khb_widest));
+            out.push_back(kv("bandValidN", static_cast<uint64_t>(khb_valid)));
+        }
+        out.push_back(kv("vaShaped", RenderIntegration::g_va_shaped));
+        out.push_back(kvf("vaTmagMin", RenderIntegration::g_va_tmag_min));
+        out.push_back(kv("viewSrcMisses", static_cast<uint64_t>(RenderIntegration::g_ls.view_src_miss)));
+        out.push_back(kv("viewCandN", static_cast<uint64_t>(RenderIntegration::g_ls.vc_n)));
+        out.push_back(kvf("viewPubRotErr", RenderIntegration::g_ls.last_publish_rot_err));
+        out.push_back(kvf("viewPubExactAgeS", age_s(RenderIntegration::g_ls.pub_exact_ms)));
+        out.push_back(kvf("viewPubAnyAgeS", age_s(RenderIntegration::g_ls.pub_any_ms)));
+        out.push_back(kvf("viewPubFreshAgeS", age_s(RenderIntegration::g_ls.pub_fresh_ms)));
+        out.push_back(kv("litGraceSaves", RenderIntegration::g_lit_grace_saves));
+        out.push_back(kvf("litGateSinceAgeS", age_s(RenderIntegration::g_lit_gate_since_ms)));
+        out.push_back(kvf("missLastAgeS", age_s(RenderIntegration::g_ms_ms)));
+        out.push_back(kv("rtLastRejW", static_cast<uint64_t>(RenderIntegration::g_rt_last_rej_w)));
+        out.push_back(kvf("fogColR", RenderIntegration::g_fog_dbg[0]));
+        out.push_back(kvf("fogColG", RenderIntegration::g_fog_dbg[1]));
+        out.push_back(kvf("fogColB", RenderIntegration::g_fog_dbg[2]));
+        out.push_back(kvf("fogEnabled", RenderIntegration::g_fog_dbg[3]));
+        out.push_back(kvf("fogTgtR", RenderIntegration::g_sky_probe.nb[4]));
+        out.push_back(kvf("fogTgtG", RenderIntegration::g_sky_probe.nb[5]));
+        out.push_back(kvf("fogTgtB", RenderIntegration::g_sky_probe.nb[6]));
+        out.push_back(kvf("trigRejMin", RenderIntegration::g_trig_rej_vp[0]));
+        out.push_back(kvf("trigRejMax", RenderIntegration::g_trig_rej_vp[1]));
+        out.push_back(kvf("trigAccMin", RenderIntegration::g_trig_acc_vp[0]));
+        out.push_back(kvf("trigAccMax", RenderIntegration::g_trig_acc_vp[1]));
+
+        {   // finest published cascade, world meters per shadow texel: the
+            // receive-resolution question in one number (compare across
+            // sessions; if it grew, fine cascades stopped entering the
+            // table). Diagnostic read of render-written state, like the
+            // rest of the stats.
+            float finest = -1.0f;
+            int   valid = 0;
+
+            for (uint32_t i = 0; i < RenderIntegration::KH_LIVE_MAX_CASCADES; ++i) {
+                const auto& e = RenderIntegration::g_ls.entries[i];
+                if (e.tile[2] <= 0.0f || e.stamp == 0) continue;
+                valid++;
+                const float ilen = sqrtf(e.m[0] * e.m[0] + e.m[3] * e.m[3] + e.m[6] * e.m[6]);
+                if (ilen <= 1e-9f) continue;
+                const float texels = e.tile[2] * static_cast<float>(RenderIntegration::g_ls.atlas_size);
+                if (texels <= 0.0f) continue;
+                const float wpt = (2.0f / ilen) / texels;
+                if (finest < 0.0f || wpt < finest) finest = wpt;
+            }
+
+            out.push_back(kvf("liveFinestWpt", finest));
+            out.push_back(kv("liveValidEntries", static_cast<uint64_t>(valid)));
+        }
+
+        out.push_back(kv("locScanUploads", RenderIntegration::g_loc_scan_uploads));
+        out.push_back(kv("locMaxCbFloats", RenderIntegration::g_loc_max_cb_floats));
+        return game_value(std::move(out));
+    } catch (...) {
+        report_error("getRenderStats: unknown exception");
+        return game_value(auto_array<game_value>());
+    }
+}
+
+// dumpRenderTrace -> the flight recorder ring, oldest-first, newest last:
+// [["status","ok"], ["fields", [names...]], ["frames", [[values...], ...]]]
+// Each frame's values align 1:1 with "fields". The ring is copied under the
+// graphics lock (parking the render thread - the ring's write invariant)
+// and formatted after release; the newest 256 populated records are dumped.
+static game_value dump_render_trace_sqf() {
+    try {
+        // OPT-IN (see g_diag_armed): the recorder is idle until armed, so
+        // the first call starts it and reports that; frames flow from the
+        // next call on.
+        if (!RenderIntegration::g_diag_armed.exchange(true, std::memory_order_relaxed)) {
+            auto_array<game_value> pair;
+            pair.push_back(game_value("status"));
+            pair.push_back(game_value("armed"));
+            auto_array<game_value> armed_out;
+            armed_out.push_back(game_value(std::move(pair)));
+            return game_value(std::move(armed_out));
+        }
+
+        constexpr uint32_t KHT_MAX = 512;
+        static RenderIntegration::FfrRecord khtr_snap[RenderIntegration::KH_FFR_RING];
+        uint32_t khtr_head = 0;
+        uint32_t khtr_serial = 0;
+        bool khtr_got = false;
+
+        for (int attempt = 0; attempt < 4 && !khtr_got; ++attempt) {
+            RVExtBridge::ScopedGraphicsLock lock;
+
+            if (!lock.acquired()) continue;
+            memcpy(khtr_snap, RenderIntegration::g_ffr, sizeof(khtr_snap));
+            khtr_head = RenderIntegration::g_ffr_head;
+            khtr_serial = RenderIntegration::g_ffr_serial;
+            khtr_got = true;
+        }
+
+        auto_array<game_value> out;
+
+        if (!khtr_got) {
+            auto_array<game_value> pair;
+            pair.push_back(game_value("status"));
+            pair.push_back(game_value("lockFailed"));
+            out.push_back(game_value(std::move(pair)));
+            return game_value(std::move(out));
+        }
+
+        static const char* const KHT_FIELDS[] = {
+            "serial", "ageS", "pvValid", "pvStale", "retryFixed",
+            "attempts", "opqAtInject", "opqFinal", "pfDelta", "lockFolds",
+            "stage", "hadObjects", "compHealthy", "injSinceFlush",
+            "repainted", "anomaly", "pvSrc", "eligible", "meshesSnap",
+            "fsSnap", "pvNear", "dark", "erased", "rescues",
+            "camLsDelta", "rejVpMin", "rejVpMax",
+            "injNear", "slotNearInj", "encSrc", "injBandRej",
+            "litGate", "sunOk", "mapOk", "bandOn", "dlN", "relock",
+            "packOn", "mapAgeS", "pubExactAgeS", "pubAnyAgeS",
+            "blkValid", "blkMode", "blkErr", "blkAmbLum", "blkSunLum",
+            "pubFreshAgeS",
+        };
+        constexpr uint32_t KHT_NFIX = sizeof(KHT_FIELDS) / sizeof(KHT_FIELDS[0]);
+
+        auto_array<game_value> names;
+
+        for (uint32_t i = 0; i < KHT_NFIX; ++i) names.push_back(game_value(KHT_FIELDS[i]));
+
+        for (uint32_t i = 0; i < RenderIntegration::KH_FFR_NDELTA; ++i) {
+            names.push_back(game_value(RenderIntegration::KH_FFR_DELTA_NAMES[i]));
+        }
+
+        // append-only past the deltas (shadow-jitter campaign): keep in
+        // step with the per-frame pushes after the delta loop below.
+        names.push_back(game_value("camStepM"));
+        names.push_back(game_value("fireCamDeltaM"));
+        names.push_back(game_value("fireDimsDivPx"));
+        names.push_back(game_value("fireVpMode"));
+        names.push_back(game_value("maskRtBinds"));
+        names.push_back(game_value("maskLastBindD"));
+        names.push_back(game_value("fireFirstD"));
+        names.push_back(game_value("fireLastD"));
+
+        const uint64_t khtr_now = RenderIntegration::steady_now_ms();
+        auto_array<game_value> frames;
+
+        for (uint32_t k = 0; k < RenderIntegration::KH_FFR_RING; ++k) {
+            const uint32_t idx = (khtr_head + 1u + k) % RenderIntegration::KH_FFR_RING;
+            const RenderIntegration::FfrRecord& r = khtr_snap[idx];
+
+            if (r.serial == 0) continue;
+            if (khtr_serial > KHT_MAX && r.serial + KHT_MAX <= khtr_serial) continue;
+
+            auto_array<game_value> f;
+            f.push_back(game_value(static_cast<float>(r.serial)));
+            f.push_back(game_value(r.t_ms ? static_cast<float>(khtr_now - r.t_ms) / 1000.0f : -1.0f));
+            f.push_back(game_value(static_cast<float>(r.pv_valid)));
+            f.push_back(game_value(static_cast<float>(r.pv_stale)));
+            f.push_back(game_value(static_cast<float>(r.retry_fixed)));
+            f.push_back(game_value(static_cast<float>(r.attempts)));
+            f.push_back(game_value(r.opq_at_inject == 0xFFFFFFFFu ? -1.0f : static_cast<float>(r.opq_at_inject)));
+            f.push_back(game_value(static_cast<float>(r.opq_final)));
+            f.push_back(game_value(r.pf_delta == 0xFFFFFFFFu ? -1.0f : static_cast<float>(r.pf_delta)));
+            f.push_back(game_value(static_cast<float>(r.lockfail_folded)));
+            f.push_back(game_value(static_cast<float>(r.stage)));
+            f.push_back(game_value(static_cast<float>(r.had_objects)));
+            f.push_back(game_value(static_cast<float>(r.comp_healthy)));
+            f.push_back(game_value(static_cast<float>(r.inj_since_flush)));
+            f.push_back(game_value(static_cast<float>(r.repainted)));
+            f.push_back(game_value(static_cast<float>(r.anomaly)));
+            f.push_back(game_value(static_cast<float>(r.pv_src)));
+            f.push_back(game_value(static_cast<float>(r.eligible)));
+            f.push_back(game_value(static_cast<float>(r.meshes_snap)));
+            f.push_back(game_value(static_cast<float>(r.fs_snap)));
+            f.push_back(game_value(r.pv_near));
+            f.push_back(game_value(static_cast<float>(r.dark)));
+            f.push_back(game_value(static_cast<float>(r.erased)));
+            f.push_back(game_value(static_cast<float>(r.rescues)));
+            f.push_back(game_value(r.cam_ls_delta));
+            f.push_back(game_value(r.rej_vp_min));
+            f.push_back(game_value(r.rej_vp_max));
+            f.push_back(game_value(r.inj_near));
+            f.push_back(game_value(r.slot_near_inj));
+            f.push_back(game_value(static_cast<float>(r.enc_src)));
+            f.push_back(game_value(static_cast<float>(r.inj_band_rej)));
+            f.push_back(game_value(static_cast<float>(r.lit_gate)));
+            f.push_back(game_value(static_cast<float>(r.sun_ok)));
+            f.push_back(game_value(static_cast<float>(r.map_ok)));
+            f.push_back(game_value(static_cast<float>(r.band_on)));
+            f.push_back(game_value(static_cast<float>(r.dl_n_fill)));
+            f.push_back(game_value(static_cast<float>(r.relock_tick)));
+            f.push_back(game_value(static_cast<float>(r.pack_on)));
+            f.push_back(game_value(r.map_age_s));
+            f.push_back(game_value(r.pub_exact_age_s));
+            f.push_back(game_value(r.pub_any_age_s));
+            f.push_back(game_value(static_cast<float>(r.blk_valid)));
+            f.push_back(game_value(static_cast<float>(r.blk_mode)));
+            f.push_back(game_value(r.blk_err));
+            f.push_back(game_value(r.blk_amb_lum));
+            f.push_back(game_value(r.blk_sun_lum));
+            f.push_back(game_value(r.pub_fresh_age_s));
+
+            for (uint32_t i = 0; i < RenderIntegration::KH_FFR_NDELTA; ++i) {
+                f.push_back(game_value(static_cast<float>(r.d[i])));
+            }
+
+            f.push_back(game_value(r.cam_step_m));
+            f.push_back(game_value(r.fire_cam_delta_m));
+            f.push_back(game_value(r.fire_dims_div_px));
+            f.push_back(game_value(static_cast<float>(r.fire_vp_mode)));
+            f.push_back(game_value(static_cast<float>(r.mask_rt_binds)));
+            f.push_back(game_value(r.mask_last_bind_d));
+            f.push_back(game_value(r.fire_first_d));
+            f.push_back(game_value(r.fire_last_d));
+            frames.push_back(game_value(std::move(f)));
+        }
+
+        {
+            auto_array<game_value> pair;
+            pair.push_back(game_value("status"));
+            pair.push_back(game_value("ok"));
+            out.push_back(game_value(std::move(pair)));
+        }
+
+        {
+            auto_array<game_value> pair;
+            pair.push_back(game_value("fields"));
+            pair.push_back(game_value(std::move(names)));
+            out.push_back(game_value(std::move(pair)));
+        }
+
+        {
+            auto_array<game_value> pair;
+            pair.push_back(game_value("frames"));
+            pair.push_back(game_value(std::move(frames)));
+            out.push_back(game_value(std::move(pair)));
+        }
+
+        return game_value(std::move(out));
+    } catch (...) {
+        report_error("dumpRenderTrace: unknown exception");
+        return game_value(auto_array<game_value>());
+    }
+}
+
+// dumpDynamicLights -> ARRAY. The standing diagnostic for the finalized
+// dynamic-lights system (ON by default, engine-derived origins). OPT-IN
+// like getRenderStats: the FIRST call arms the per-draw census + zeroes
+// the counters and returns [["status","armed"]]; subsequent calls return
+// the full picture - mirror age/counts, the raw cb10 control block, the
+// binding census, per-window origin verdicts (route kind, slots,
+// residuals), the derivation censuses (route mix, degeneracy wins, range
+// rejects), the absolute-world pool, the harvest rings and the fill
+// census. State is copied under the graphics lock (parking the render
+// thread, the mirror's write invariant) and formatted after release.
+static game_value dump_dynamic_lights_sqf() {
+    try {
+        if (!RenderIntegration::g_dl_recon.exchange(true, std::memory_order_relaxed)) {
+            // Arm: census on; counters/mirror zeroed under the lock so the
+            // session starts clean. A failed lock still arms - the state
+            // then zeroes lazily at the next successful call instead.
+            RenderIntegration::g_dl_census_on.store(true, std::memory_order_relaxed);
+
+            for (int attempt = 0; attempt < 4; ++attempt) {
+                RVExtBridge::ScopedGraphicsLock lock;
+                if (!lock.acquired()) continue;
+                RenderIntegration::dynlights_reset_session();
+                break;
+            }
+
+            auto_array<game_value> pair;
+            pair.push_back(game_value("status"));
+            pair.push_back(game_value("armed"));
+            auto_array<game_value> armed_out;
+            armed_out.push_back(game_value(std::move(pair)));
+            return game_value(std::move(armed_out));
+        }
+
+        // Copy under the lock, format after release (dumpRenderTrace's
+        // pattern). The struct copy includes raw device pointers used only
+        // as printed identities - never dereferenced.
+        static RenderIntegration::DynLightsState khd_snap;
+        uint32_t khd_cd_last = 0, khd_cd_max = 0, khd_cd_null = 0, khd_cd_samples = 0;
+        bool khd_got = false;
+
+        for (int attempt = 0; attempt < 4 && !khd_got; ++attempt) {
+            RVExtBridge::ScopedGraphicsLock lock;
+            if (!lock.acquired()) continue;
+            khd_snap = RenderIntegration::g_dl;
+            khd_cd_last = RenderIntegration::g_dl_cd_distinct_last;
+            khd_cd_max = RenderIntegration::g_dl_cd_distinct_max;
+            khd_cd_null = RenderIntegration::g_dl_cd_null_last;
+            khd_cd_samples = RenderIntegration::g_dl_cd_samples_last;
+            khd_got = true;
+        }
+
+        if (!khd_got) {
+            auto_array<game_value> pair;
+            pair.push_back(game_value("status"));
+            pair.push_back(game_value("lockFailed"));
+            auto_array<game_value> fail_out;
+            fail_out.push_back(game_value(std::move(pair)));
+            return game_value(std::move(fail_out));
+        }
+
+        auto kv = [](const char* k, float v) {
+            auto_array<game_value> pair;
+            pair.push_back(game_value(k));
+            pair.push_back(game_value(v));
+            return game_value(std::move(pair));
+        };
+        auto kvs = [](const char* k, const char* v) {
+            auto_array<game_value> pair;
+            pair.push_back(game_value(k));
+            pair.push_back(game_value(v));
+            return game_value(std::move(pair));
+        };
+        auto kva = [](const char* k, auto_array<game_value>&& v) {
+            auto_array<game_value> pair;
+            pair.push_back(game_value(k));
+            pair.push_back(game_value(std::move(v)));
+            return game_value(std::move(pair));
+        };
+        auto hex64 = [](uint64_t v) {
+            // dependency-free formatter (no <cstdio> in the include chain)
+            char buf[17];
+            const char* khd_dig = "0123456789ABCDEF";
+            for (int i = 15; i >= 0; --i) { buf[i] = khd_dig[v & 0xF]; v >>= 4; }
+            buf[16] = 0;
+            return game_value(buf);
+        };
+        const uint64_t khd_now = RenderIntegration::steady_now_ms();
+
+        auto_array<game_value> out;
+        out.push_back(kvs("status", "ok"));
+        out.push_back(kv("mode", static_cast<float>(RenderIntegration::g_dl_mode.load(std::memory_order_relaxed))));
+
+        {
+            const uint32_t khd_bits = RenderIntegration::g_dl_intensity_bits.load(std::memory_order_relaxed);
+            float khd_int = 1.0f;
+            memcpy(&khd_int, &khd_bits, sizeof(khd_int));
+            out.push_back(kv("intensity", khd_int));
+        }
+
+        out.push_back(kv("mirrorValid", khd_snap.valid ? 1.0f : 0.0f));
+        out.push_back(kv("listAgeS", khd_snap.stamp_ms != 0
+                                   ? static_cast<float>(khd_now - khd_snap.stamp_ms) / 1000.0f : -1.0f));
+        out.push_back(kv("harvests", static_cast<float>(khd_snap.serial)));
+        out.push_back(kv("pointN", static_cast<float>(khd_snap.point_n)));
+        out.push_back(kv("spotN", static_cast<float>(khd_snap.spot_n)));
+
+        {   // cb10 verbatim + the count lanes' int interpretations
+            auto_array<game_value> ctl;
+            for (int i = 0; i < 16; ++i) ctl.push_back(game_value(khd_snap.ctl[i]));
+            out.push_back(kva("ctlRaw", std::move(ctl)));
+            int32_t khd_pc_i = 0, khd_sc_i = 0;
+            memcpy(&khd_pc_i, &khd_snap.ctl[0], 4);
+            memcpy(&khd_sc_i, &khd_snap.ctl[4], 4);
+            auto_array<game_value> ints;
+            ints.push_back(game_value(static_cast<float>(khd_pc_i)));
+            ints.push_back(game_value(static_cast<float>(khd_sc_i)));
+            out.push_back(kva("ctlCountInts", std::move(ints)));
+        }
+
+        out.push_back(kv("distScale", khd_snap.ctl[8]));
+
+        {
+            auto_array<game_value> gd;
+            gd.push_back(game_value(khd_snap.ctl[12]));
+            gd.push_back(game_value(khd_snap.ctl[13]));
+            gd.push_back(game_value(khd_snap.ctl[14]));
+            out.push_back(kva("globalDiffuse", std::move(gd)));
+        }
+
+        {   // binding census: identities, offsets, window sizes, widths
+            auto_array<game_value> b10;
+            b10.push_back(hex64(reinterpret_cast<uint64_t>(khd_snap.slot10_buf)));
+            b10.push_back(game_value(static_cast<float>(khd_snap.slot10_first)));
+            b10.push_back(game_value(static_cast<float>(khd_snap.slot10_num)));
+            b10.push_back(game_value(static_cast<float>(khd_snap.bw10)));
+            out.push_back(kva("bind10", std::move(b10)));
+            auto_array<game_value> b11;
+            b11.push_back(hex64(reinterpret_cast<uint64_t>(khd_snap.slot11_buf)));
+            b11.push_back(game_value(static_cast<float>(khd_snap.slot11_first)));
+            b11.push_back(game_value(static_cast<float>(khd_snap.slot11_num)));
+            b11.push_back(game_value(static_cast<float>(khd_snap.bw11)));
+            out.push_back(kva("bind11", std::move(b11)));
+        }
+
+        out.push_back(kv("acquires", static_cast<float>(khd_snap.acquires)));
+        out.push_back(kv("copies", static_cast<float>(khd_snap.copies)));
+        out.push_back(kv("stillDrawing", static_cast<float>(khd_snap.still_drawing)));
+        out.push_back(kv("noCtx1", static_cast<float>(khd_snap.no_ctx1)));
+        out.push_back(kv("slotNulls", static_cast<float>(khd_snap.slot_nulls)));
+        out.push_back(kv("issueSkips", static_cast<float>(khd_snap.issue_skips)));
+        out.push_back(kv("boundsRejects", static_cast<float>(khd_snap.bounds_rejects)));
+        out.push_back(kv("windowClamps", static_cast<float>(khd_snap.window_clamps)));
+        out.push_back(kv("valRejects", static_cast<float>(khd_snap.val_rejects)));
+        out.push_back(kv("countsFloat", static_cast<float>(khd_snap.counts_float)));
+        out.push_back(kv("clampedCounts", static_cast<float>(khd_snap.clamped_counts)));
+        out.push_back(kv("zeroLists", static_cast<float>(khd_snap.zero_lists)));
+        out.push_back(kv("hashChanges", static_cast<float>(khd_snap.hash_changes)));
+        out.push_back(kv("staleSkips", static_cast<float>(khd_snap.stale_skips)));
+        out.push_back(kv("viewMissSkips", static_cast<float>(khd_snap.view_miss_skips)));
+        out.push_back(kv("poolOffsetBinds", static_cast<float>(khd_snap.pool_offset_binds)));
+        out.push_back(kv("sharedPoolBinds", static_cast<float>(khd_snap.shared_pool_binds)));
+
+        {
+            auto_array<game_value> rej;
+            for (int i = 0; i < 4; ++i) rej.push_back(game_value(khd_snap.last_rej[i]));
+            out.push_back(kva("lastReject", std::move(rej)));
+        }
+
+        {   // per-draw variability: [distinct last frame, max, null samples, samples]
+            auto_array<game_value> pd;
+            pd.push_back(game_value(static_cast<float>(khd_cd_last)));
+            pd.push_back(game_value(static_cast<float>(khd_cd_max)));
+            pd.push_back(game_value(static_cast<float>(khd_cd_null)));
+            pd.push_back(game_value(static_cast<float>(khd_cd_samples)));
+            out.push_back(kva("perDraw", std::move(pd)));
+        }
+
+        {   // capture-frame camera + view columns (the space-decode inputs)
+            auto_array<game_value> cam;
+            for (int i = 0; i < 3; ++i) cam.push_back(game_value(khd_snap.cam[i]));
+            out.push_back(kva("camera", std::move(cam)));
+            auto_array<game_value> vc;
+            for (int i = 0; i < 12; ++i) vc.push_back(game_value(khd_snap.view_cols[i]));
+            out.push_back(kva("viewCols", std::move(vc)));
+            out.push_back(kv("viewValid", khd_snap.view_valid ? 1.0f : 0.0f));
+        }
+
+        {   // every active light record, 24 floats each, engine-verbatim
+            auto_array<game_value> lights;
+            uint32_t khd_n = khd_snap.point_n + khd_snap.spot_n;
+            if (khd_n > RenderIntegration::KH_DL_MAX_LIGHTS) khd_n = RenderIntegration::KH_DL_MAX_LIGHTS;
+
+            for (uint32_t i = 0; i < khd_n; ++i) {
+                auto_array<game_value> rec;
+                for (int f = 0; f < 24; ++f) rec.push_back(game_value(khd_snap.lights[i * 24 + f]));
+                lights.push_back(game_value(std::move(rec)));
+            }
+
+            out.push_back(kva("lights", std::move(lights)));
+        }
+
+        {   // acquisition ring, oldest-first
+            auto_array<game_value> ring;
+
+            for (uint32_t k = 0; k < RenderIntegration::KH_DL_RING; ++k) {
+                const auto& r = khd_snap.ring[(khd_snap.ring_head + k) % RenderIntegration::KH_DL_RING];
+                if (r.serial == 0) continue;
+                auto_array<game_value> e;
+                e.push_back(game_value(static_cast<float>(r.serial)));
+                e.push_back(game_value(r.t_ms != 0 ? static_cast<float>(khd_now - r.t_ms) / 1000.0f : -1.0f));
+                e.push_back(game_value(static_cast<float>(r.point_n)));
+                e.push_back(game_value(static_cast<float>(r.spot_n)));
+                e.push_back(game_value(r.dist_scale));
+                e.push_back(game_value(static_cast<float>(r.hash32)));
+                e.push_back(game_value(r.cam[0]));
+                e.push_back(game_value(r.cam[1]));
+                e.push_back(game_value(r.cam[2]));
+                e.push_back(hex64(r.b10));
+                e.push_back(game_value(static_cast<float>(r.f10)));
+                e.push_back(game_value(static_cast<float>(r.n10)));
+                e.push_back(hex64(r.b11));
+                e.push_back(game_value(static_cast<float>(r.f11)));
+                e.push_back(game_value(static_cast<float>(r.n11)));
+                e.push_back(game_value(static_cast<float>(r.counts_as_float)));
+                for (int f = 0; f < 8; ++f) e.push_back(game_value(r.l0[f]));
+                ring.push_back(game_value(std::move(e)));
+            }
+
+            out.push_back(kva("ring", std::move(ring)));
+        }
+
+        {   // last harvest's per-window origin verdicts
+            auto_array<game_value> wins;
+
+            for (uint32_t w = 0; w < khd_snap.win_report_n && w < RenderIntegration::KH_DL_WIN_MAX; ++w) {
+                const auto& r = khd_snap.win_report[w];
+                auto_array<game_value> e;
+                e.push_back(hex64(r.buf));
+                e.push_back(game_value(static_cast<float>(r.first)));
+                e.push_back(game_value(static_cast<float>(r.point_n)));
+                e.push_back(game_value(static_cast<float>(r.spot_n)));
+                e.push_back(game_value(static_cast<float>(r.origin_ok)));
+                e.push_back(game_value(r.ox));
+                e.push_back(game_value(r.oz));
+                e.push_back(game_value(r.scale));
+                e.push_back(game_value(r.gdiff[0]));
+                e.push_back(game_value(r.gdiff[1]));
+                e.push_back(game_value(r.gdiff[2]));
+                e.push_back(game_value(static_cast<float>(r.derived_ok)));
+                e.push_back(game_value(r.d_ox));
+                e.push_back(game_value(r.d_oz));
+                e.push_back(game_value(r.d_res));
+                e.push_back(game_value(static_cast<float>(r.d_slot)));
+                e.push_back(game_value(static_cast<float>(r.d_wslot)));
+                e.push_back(game_value(static_cast<float>(r.pool_vote)));
+                e.push_back(game_value(static_cast<float>(r.v_best)));
+                e.push_back(game_value(static_cast<float>(r.v_runner)));
+                e.push_back(game_value(static_cast<float>(r.v_cands)));
+                e.push_back(game_value(r.v_res));
+                wins.push_back(game_value(std::move(e)));
+            }
+
+            out.push_back(kva("windows", std::move(wins)));
+        }
+
+        {   // the merged absolute-world pool: [x, y, z, spot] per light
+            auto_array<game_value> pool;
+
+            for (uint32_t i = 0; i < khd_snap.pool_n; ++i) {
+                const auto& p = khd_snap.pool[i];
+                auto_array<game_value> e;
+                e.push_back(game_value(p.rec[0]));
+                e.push_back(game_value(p.rec[1]));
+                e.push_back(game_value(p.rec[2]));
+                e.push_back(game_value(static_cast<float>(p.spot)));
+                e.push_back(game_value(static_cast<float>(p.aux)));
+                e.push_back(game_value(static_cast<float>(p.derived)));
+                pool.push_back(game_value(std::move(e)));
+            }
+
+            out.push_back(kva("pool", std::move(pool)));
+        }
+
+        {   // mode-3 harvest ring, oldest-first: [ageS, poolN, anchored,
+            // added, updated, expired, spotFlips, gdiffR, gdiffG, gdiffB, scale]
+            auto_array<game_value> m3;
+
+            for (uint32_t k = 0; k < RenderIntegration::KH_DL_RING; ++k) {
+                const auto& r = khd_snap.m3_ring[(khd_snap.m3_ring_head + k) % RenderIntegration::KH_DL_RING];
+                if (r.t_ms == 0) continue;
+                auto_array<game_value> e;
+                e.push_back(game_value(static_cast<float>(khd_now - r.t_ms) / 1000.0f));
+                e.push_back(game_value(static_cast<float>(r.pool_n)));
+                e.push_back(game_value(static_cast<float>(r.anchored)));
+                e.push_back(game_value(static_cast<float>(r.added)));
+                e.push_back(game_value(static_cast<float>(r.updated)));
+                e.push_back(game_value(static_cast<float>(r.expired)));
+                e.push_back(game_value(static_cast<float>(r.spot_flips)));
+                e.push_back(game_value(r.gdiff[0]));
+                e.push_back(game_value(r.gdiff[1]));
+                e.push_back(game_value(r.gdiff[2]));
+                e.push_back(game_value(r.scale));
+                m3.push_back(game_value(std::move(e)));
+            }
+
+            out.push_back(kva("m3Ring", std::move(m3)));
+        }
+
+        out.push_back(kv("fillCalls", static_cast<float>(khd_snap.fill_calls)));
+        out.push_back(kv("fillLastN", static_cast<float>(khd_snap.fill_last_n)));
+        out.push_back(kv("fillMinN", khd_snap.fill_min_n == 0xFFFFFFFFu
+                                   ? -1.0f : static_cast<float>(khd_snap.fill_min_n)));
+        out.push_back(kv("fillMaxN", static_cast<float>(khd_snap.fill_max_n)));
+        out.push_back(kv("spotFlips", static_cast<float>(khd_snap.pool_spot_flips)));
+        out.push_back(kv("winAux", static_cast<float>(khd_snap.win_aux)));
+        out.push_back(kv("auxAdds", static_cast<float>(khd_snap.aux_adds)));
+        out.push_back(kv("auxRefreshes", static_cast<float>(khd_snap.aux_refreshes)));
+        out.push_back(kv("vsCopies", static_cast<float>(khd_snap.vs_copies)));
+        out.push_back(kv("vsScans", static_cast<float>(khd_snap.vs_scans)));
+        out.push_back(kv("vsHintHits", static_cast<float>(khd_snap.vs_hint_hits)));
+        out.push_back(kv("vsOrthoPass", static_cast<float>(khd_snap.vs_ortho_pass)));
+        out.push_back(kv("vsRotRejects", static_cast<float>(khd_snap.vs_rot_rejects)));
+        out.push_back(kv("vsYRejects", static_cast<float>(khd_snap.vs_y_rejects)));
+        out.push_back(kv("vsGridRejects", static_cast<float>(khd_snap.vs_grid_rejects)));
+        out.push_back(kv("vsNoRef", static_cast<float>(khd_snap.vs_noref)));
+        out.push_back(kv("vsValid", static_cast<float>(khd_snap.vs_valid)));
+        out.push_back(kv("vsHintSlot", static_cast<float>(khd_snap.vs_hint_slot)));
+        out.push_back(kv("vsHintWSlot", static_cast<float>(khd_snap.vs_hint_wslot)));
+        out.push_back(kv("vsHintForm", static_cast<float>(khd_snap.vs_hint_form)));
+        out.push_back(kv("vsHintWForm", static_cast<float>(khd_snap.vs_hint_wform)));
+        out.push_back(kv("vsHintKind", static_cast<float>(khd_snap.vs_hint_kind)));
+        out.push_back(kv("vsTripleValid", static_cast<float>(khd_snap.vs_triple_valid)));
+        out.push_back(kv("vsZeroOrigins", static_cast<float>(khd_snap.vs_zero_origins)));
+        out.push_back(kv("vsNonzeroOrigins", static_cast<float>(khd_snap.vs_nonzero_origins)));
+        out.push_back(kv("originRangeRejects", static_cast<float>(khd_snap.origin_range_rejects)));
+        out.push_back(kv("originPoolVotes", static_cast<float>(khd_snap.origin_pool_votes)));
+        out.push_back(kv("originVoteAmbiguous", static_cast<float>(khd_snap.origin_vote_ambiguous)));
+        out.push_back(kv("vsRangePrunes", static_cast<float>(khd_snap.vs_range_prunes)));
+
+        {
+            uint32_t khd_dn = 0;
+
+            for (uint32_t i = 0; i < khd_snap.pool_n; ++i) {
+                if (khd_snap.pool[i].derived) khd_dn++;
+            }
+
+            out.push_back(kv("poolDerivedN", static_cast<float>(khd_dn)));
+        }
+
+        out.push_back(kv("anchorTableN", static_cast<float>(khd_snap.anchor_n)));
+        out.push_back(kv("anchorAdmits", static_cast<float>(khd_snap.anchor_admits)));
+        out.push_back(kv("anchorResRejects", static_cast<float>(khd_snap.anchor_res_rejects)));
+
+        {   // the anchor table verbatim: [x, y, z, ageS] - pollution is
+            // visible at a glance (more anchors than real lights, or
+            // positions off the known lamp set)
+            auto_array<game_value> an;
+
+            for (uint32_t a = 0; a < khd_snap.anchor_n && a < RenderIntegration::KH_DL_ANCHOR_N; ++a) {
+                auto_array<game_value> e;
+                e.push_back(game_value(khd_snap.anchor_pos[a][0]));
+                e.push_back(game_value(khd_snap.anchor_pos[a][1]));
+                e.push_back(game_value(khd_snap.anchor_pos[a][2]));
+                e.push_back(game_value(khd_snap.anchor_stamp[a] != 0
+                          ? static_cast<float>(khd_now - khd_snap.anchor_stamp[a]) / 1000.0f : -1.0f));
+                an.push_back(game_value(std::move(e)));
+            }
+
+            out.push_back(kva("anchors", std::move(an)));
+        }
+
+        {   // derivation-candidate recon ring, oldest-first:
+            // [ageS, bufLo, kind, slot, off, ox, oz, res, ydelta]
+            auto_array<game_value> cr;
+
+            for (uint32_t k = 0; k < 256u; ++k) {
+                const auto& c = khd_snap.cand_ring[(khd_snap.cand_head + k) % 256u];
+                if (c.t_ms == 0) continue;
+                auto_array<game_value> e;
+                e.push_back(game_value(static_cast<float>(khd_now - c.t_ms) / 1000.0f));
+                e.push_back(game_value(static_cast<float>(c.buf_lo)));
+                e.push_back(game_value(static_cast<float>(c.kind)));
+                e.push_back(game_value(static_cast<float>(c.slot)));
+                e.push_back(game_value(static_cast<float>(c.off)));
+                e.push_back(game_value(c.ox));
+                e.push_back(game_value(c.oz));
+                e.push_back(game_value(c.res));
+                e.push_back(game_value(c.ydelta));
+                cr.push_back(game_value(std::move(e)));
+            }
+
+            out.push_back(kva("candRing", std::move(cr)));
+        }
+        out.push_back(kv("mainRefValid", static_cast<float>(khd_snap.main_ref_valid)));
+        out.push_back(kv("mainRefScale", khd_snap.main_scale));
+        out.push_back(kv("refHolds", static_cast<float>(khd_snap.ref_holds)));
+        out.push_back(kv("refJumpAdopts", static_cast<float>(khd_snap.ref_jump_adopts)));
+        out.push_back(kv("refPendAgeS", khd_snap.ref_pend_ms != 0
+            ? static_cast<float>(RenderIntegration::steady_now_ms() - khd_snap.ref_pend_ms) / 1000.0f
+            : -1.0f));
+
+        {
+            auto_array<game_value> mg;
+            mg.push_back(game_value(khd_snap.main_gdiff[0]));
+            mg.push_back(game_value(khd_snap.main_gdiff[1]));
+            mg.push_back(game_value(khd_snap.main_gdiff[2]));
+            out.push_back(kva("mainRefGdiff", std::move(mg)));
+        }
+        out.push_back(kv("vsPairTries", static_cast<float>(khd_snap.vs_pair_tries)));
+        out.push_back(kv("vsPairValid", static_cast<float>(khd_snap.vs_pair_valid)));
+        out.push_back(kv("vsPairYRejects", static_cast<float>(khd_snap.vs_pair_y_rejects)));
+        out.push_back(kv("vsPairGridRejects", static_cast<float>(khd_snap.vs_pair_grid_rejects)));
+        out.push_back(kv("vsLastYDelta", khd_snap.vs_last_ydelta));
+        out.push_back(kv("poolN", static_cast<float>(khd_snap.pool_n)));
+        out.push_back(kv("winCaptured", static_cast<float>(khd_snap.win_captured)));
+        out.push_back(kv("winTableFull", static_cast<float>(khd_snap.win_table_full)));
+        out.push_back(kv("listsAnchored", static_cast<float>(khd_snap.lists_anchored)));
+        out.push_back(kv("listsUnanchored", static_cast<float>(khd_snap.lists_unanchored)));
+        out.push_back(kv("poolAdded", static_cast<float>(khd_snap.pool_added)));
+        out.push_back(kv("poolUpdated", static_cast<float>(khd_snap.pool_updated)));
+        out.push_back(kv("poolExpired", static_cast<float>(khd_snap.pool_expired)));
+
+        return game_value(std::move(out));
+    } catch (...) {
+        report_error("dumpDynamicLights: unknown exception");
+        return game_value(auto_array<game_value>());
+    }
+}
+
+// addLocalPostFX [[x,y,zASL], radius, falloff, effect, params?, color?]
+// Same effect table and parameters as addPostFX, but the effect is confined
+// to a world-space sphere: full strength within 'radius' meters of the
+// position, smoothly fading to nothing over the next 'falloff' meters.
+// The mask is computed per pixel from the depth buffer, so it hugs geometry:
+// a localized colorgrade desaturates the buildings inside the sphere and
+// nothing behind them. Shares the handle space with addRender3D/addPostFX;
+// manage via updatePostFX ("position" moves the center, "radius",
+// "falloff", "effect", "params", "color", "visible") and removeRenderHandler.
+// Localized passes always sample the depth buffer (read-only DSV phase rules
+// apply).
+static game_value add_local_postfx_sqf(game_value_parameter args) {
+    try {
+        auto& arr = args.to_array();
+        if (arr.size() < 4) return game_value("usage: addLocalPostFX [[x,y,zASL], radius, falloff, effect, params?, [r,g,b,a]?, shape?, blend?, duration?]");
+        RenderIntegration::RenderObject obj;
+        obj.fullscreen = true;
+        obj.localized = true;
+        obj.mode = RenderIntegration::DepthMode::Off;
+        if (arr[0].type_enum() != game_data_type::ARRAY) return game_value("position must be [x, y, zASL]");
+        auto& pos = arr[0].to_array();
+        if (pos.size() < 3 ||
+            pos[0].type_enum() != game_data_type::SCALAR ||
+            pos[1].type_enum() != game_data_type::SCALAR ||
+            pos[2].type_enum() != game_data_type::SCALAR) return game_value("position must be [x, y, zASL]");
+        obj.pos[0] = static_cast<float>(pos[0]);
+        obj.pos[1] = static_cast<float>(pos[1]);
+        obj.pos[2] = static_cast<float>(pos[2]);
+
+        if (!RenderIntegration::read_vec3_or_uniform(arr[1], obj.local_radius)) {
+            return game_value("radius must be a number or [x, y, z]");
+        }
+        
+        if (arr[2].type_enum() != game_data_type::SCALAR) return game_value("falloff must be a number");
+        obj.local_falloff = static_cast<float>(arr[2]);
+        const int e = RenderIntegration::effect_id_from_gv(arr[3]);
+        if (e <= 0) return game_value("unknown or non-fullscreen effect");
+        obj.effect = e;
+        const auto_array<game_value>* fx_params = nullptr;
+
+        if (arr.size() > 4 && !arr[4].is_nil()) {
+            if (arr[4].type_enum() != game_data_type::ARRAY) return game_value("params must be an array of numbers");
+            fx_params = &arr[4].to_array();
+        }
+        
+        if (!RenderIntegration::set_effect_params(obj, fx_params)) return game_value("params entries must be numbers");
+
+        if (arr.size() > 5 && !arr[5].is_nil()) {
+            if (arr[5].type_enum() != game_data_type::ARRAY) return game_value("color must be [r, g, b, a] numbers");
+            auto& col = arr[5].to_array();
+            if ((col.size() > 0 && col[0].type_enum() != game_data_type::SCALAR) ||
+                (col.size() > 1 && col[1].type_enum() != game_data_type::SCALAR) ||
+                (col.size() > 2 && col[2].type_enum() != game_data_type::SCALAR) ||
+                (col.size() > 3 && col[3].type_enum() != game_data_type::SCALAR)) return game_value("color must be [r, g, b, a] numbers");
+            for (size_t i = 0; i < 4 && i < col.size(); ++i) obj.color[i] = static_cast<float>(col[i]);
+            RenderIntegration::kh_sanitize_color(obj.color);
+        }
+
+        if (arr.size() > 6) {
+            const int sh = RenderIntegration::shape_id_from_gv(arr[6]);
+            if (sh < 0) return game_value("unknown shape (sphere | cube)");
+            obj.local_shape = sh;
+        }
+
+        if (arr.size() > 7 &&
+            !(arr[7].type_enum() == game_data_type::STRING && static_cast<std::string>(arr[7]).empty())) {
+            // empty string = slot skipped (the positional-placeholder
+            // convention, matching the effect slot): blend stays default
+            const int bm = RenderIntegration::blend_id_from_gv(arr[7]);
+            if (bm < 0) return game_value("unknown blend mode");
+            obj.blend_mode = bm;
+        }
+
+        if (arr.size() > 8) {
+            if (!RenderIntegration::parse_duration_gv(arr[8], obj)) {
+                return game_value("duration must be seconds or [fadeIn, hold, fadeOut]");
+            }
+        }
+
+        return game_value(RenderIntegration::add_render_object(obj));
+    } catch (const std::exception& e) {
+        report_error(std::string("addLocalPostFX: ") + e.what());
+        return game_value(std::string("EXCEPTION: ") + e.what());
+    } catch (...) {
+        report_error("addLocalPostFX: unknown exception");
+        return game_value("EXCEPTION: unknown");
+    }
+}
+
+// flushUIRender
+// Renders all UI-affecting passes (addPostFX with affectUI = true) into the
+// frame being composed. Driven automatically by the internal overlay control
+// created by ensure_ui_driver(); also callable from a Draw EH on a custom
+// display. Cheap no-op when no UI-affecting passes exist. Returns BOOL: true
+// if passes were queued this call.
+static game_value flush_ui_render_sqf() {
+    try {
+        RenderIntegration::ensure_ui_driver();   // explicit UI-render demand is an enabling command
+        return game_value(RenderIntegration::flush_ui_frame());
+    } catch (const std::exception& e) {
+        report_error(std::string("flushUIRender: ") + e.what());
+        return game_value(false);
+    } catch (...) {
+        report_error("flushUIRender: unknown exception");
+        return game_value(false);
+    }
+}
+
 static void initialize_sqf_integration() {
     _sqf_execute_lua_any_string = intercept::client::host::register_sqf_command(
         "luaExecute",
@@ -6985,7 +9100,7 @@ static void initialize_sqf_integration() {
 
     _sqf_gpu_visibility_array = intercept::client::host::register_sqf_command(
         "gpuVisibility",
-        "Test world points [[x,y,zASL], ...]. Returns [[status, pointDistM, sceneDistM], ...]; on failure [[\"error\", reason]]",
+        "Synchronously test world points [[x,y,zASL], ...] (stalls the GPU; prefer queueVisibility for per-frame use). Returns [[status, pointDistM, sceneDistM], ...]; on failure [[\"error\", reason]]",
         userFunctionWrapper<gpu_visibility_sqf>,
         game_data_type::ARRAY,
         game_data_type::ARRAY
@@ -6993,7 +9108,7 @@ static void initialize_sqf_integration() {
 
     _sqf_remove_render_handler_string = intercept::client::host::register_sqf_command(
         "removeRenderHandler",
-        "Remove a render pass",
+        "Remove a retained render object (mesh or post-processing pass) by its khr_ handle; '' or 'all' removes every object",
         userFunctionWrapper<remove_render_handler_sqf>,
         game_data_type::BOOL,
         game_data_type::STRING
@@ -7009,7 +9124,7 @@ static void initialize_sqf_integration() {
 
     _sqf_get_visibility_results = intercept::client::host::register_sqf_command(
         "getVisibilityResults",
-        "Fetch the latest completed async visibility batch",
+        "Fetch the latest completed async visibility batch. Returns [ageInFrames, [[status, pointDistM, sceneDistM], ...]]",
         userFunctionWrapper<get_visibility_results_sqf>,
         game_data_type::ARRAY
     );
@@ -7024,7 +9139,7 @@ static void initialize_sqf_integration() {
 
     _sqf_update_render3d_array = intercept::client::host::register_sqf_command(
         "updateRender3D",
-        "Update a persistent 3D mesh object",
+        "[handle, property, value]. Update a persistent 3D mesh object",
         userFunctionWrapper<update_render3d_sqf>,
         game_data_type::BOOL,
         game_data_type::ARRAY
@@ -7032,7 +9147,7 @@ static void initialize_sqf_integration() {
 
     _sqf_update_post_fx_array = intercept::client::host::register_sqf_command(
         "updatePostFX",
-        "Update a fullscreen post-processing pass",
+        "[handle, property, value]. Update a fullscreen post-processing pass",
         userFunctionWrapper<update_post_fx_sqf>,
         game_data_type::BOOL,
         game_data_type::ARRAY
@@ -7063,7 +9178,7 @@ static void initialize_sqf_integration() {
 
     _sqf_set_render_debug = intercept::client::host::register_sqf_command(
         "setRenderDebug",
-        "Mesh debug visuals",
+        "Debug switches: 0 off, 1-17 shader visuals, 20 cast kill switch, 21 readiness latch + slab retirement off, 24 terrain snap off, 25 cast live-grid viewport A/B, 26 lock-settle hold off",
         userFunctionWrapper<set_render_debug_sqf>,
         game_data_type::BOOL,
         game_data_type::SCALAR
@@ -7085,7 +9200,7 @@ static void initialize_sqf_integration() {
 
     _sqf_dump_dynamic_lights = intercept::client::host::register_sqf_command(
         "dumpDynamicLights",
-        "Dynamic light recon",
+        "Dynamic-light recon dump. First call arms the census and returns [[\"status\",\"armed\"]]",
         userFunctionWrapper<dump_dynamic_lights_sqf>,
         intercept::types::game_data_type::ARRAY
     );

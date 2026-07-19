@@ -7753,7 +7753,7 @@ static uint64_t g_far_keep_ms = 0;
 static uint64_t g_farkeep_mesh_draws = 0;   // per-mesh far-keep routings (both paths)
 // BUILD TAG (doctrine: bump on EVERY delivered build; stats-visible so a
 // field log names the binary it came from).
-static constexpr int KH_BUILD_TAG = 26034;
+static constexpr int KH_BUILD_TAG = 26037;
 // NEAR-GAP RAMP (build 26001; the RenderDoc conviction). ROOT, proven by
 // pixel history + depth-window plateaus: the world partition's viewport
 // floor (0.011 in the convicting capture) collapses EVERY fragment nearer
@@ -13421,8 +13421,14 @@ inline void shadow_register_upload(ID3D11Resource* res, const void* data, uint32
     }
 }
 
-// WORLD-CYCLE FINGERPRINT for the block mirror (lognew4, 26033 - the
-// distance darkening's root): the standard-mode (lane 15 == 1) block is
+// WORLD-CYCLE FINGERPRINT for the block mirror (lognew4, 26033 -
+// PRE-FILTER ONLY since 26034: lognew5 caught the dim writer uploading
+// INSIDE the world cycle itself, on dInjections-1 frames, so this
+// timing gate is necessary-but-insufficient; the deciding arbitration
+// is kh_probe_std_refresh's exclusive-persistence content test. This
+// gate stays as the cheap first wall against the cleanly-separable
+// far/atmo cycles). The original conviction stands as history: the
+// standard-mode (lane 15 == 1) block is
 // uploaded by MORE THAN ONE pass, with DIFFERENT content - at range the
 // last standard writer each frame flips to the far/atmospheric sub-pass
 // family (the same partition whose [1,1] viewport rejects the
@@ -13565,8 +13571,8 @@ inline void locator_note_upload(ID3D11Resource* res, const void* data, uint32_t 
             if (mode_i < nf) g_light_probe.last_mode = f[mode_i];
 
             if (mode_i < nf && f[mode_i] == 1.0f && kh_probe_world_cycle()) {
-                // WORLD-cycle gate (26033) + exclusive-persistence regime
-                // arbitration (26034; ledger at kh_probe_std_refresh).
+                // 26033 world-cycle PRE-FILTER + the DECIDING 26034
+                // exclusive-persistence arbitration (kh_probe_std_refresh).
                 kh_probe_std_refresh(g_light_probe, f, nf, effect_time_seconds());
             }
         } else {
@@ -15151,8 +15157,59 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                 const float lim = KH_SUN_FIT_RADIUS + hd;
 
                 if (dx * dx + dy * dy + dz * dz > lim * lim) {
-                    g_sun_map_no_local = true;   // provisional: cleared below if any caster lands in radius
-                    continue;
+                    // SHADOW-REACH EXTENSION (26036; operator field report:
+                    // a tall caster's LONG shadow vanished the moment the
+                    // camera passed a few hundred metres from the caster's
+                    // CENTER - while standing INSIDE the shadow. The
+                    // camera-to-center rule ignores that a caster of
+                    // height H shadows ground H / tan(elevation) down-sun
+                    // - kilometres at low sun. The MAP has no such limit
+                    // (in sun space the shadowed ground shares the
+                    // caster's footprint), so eligibility extends to the
+                    // caster's SHADOW SEGMENT: from the center, opposite
+                    // the horizontal sun component, for the caster's own
+                    // TRUE shadow length - the elevation tangent verbatim,
+                    // uncapped (26037, operator directive: no artificial
+                    // limits; a dawn shadow is as long as geometry says.
+                    // The sole guard is the sy > 1e-4 horizon test below,
+                    // which is a validity floor, not a length cap - at
+                    // sy 1e-4 the reach is ~2e4 x height, well inside
+                    // fp32, and the reach feeds ONLY this eligibility
+                    // test, never the map fit) - tested at the same lim
+                    // with the vertical extent as slack.
+                    // Including such a caster does NOT grow the map fit
+                    // toward the camera - the fit wraps CASTERS - so
+                    // texel density is untouched; the rule now only
+                    // excludes casters whose shadow cannot reach the
+                    // viewer. Sun invalid: the old center rule stands.
+                    bool khsr_in = false;
+
+                    if (g_sun_valid) {
+                        const float khsr_sx = g_sun_dir_engine[0];
+                        const float khsr_sy = g_sun_dir_engine[1];
+                        const float khsr_sz = g_sun_dir_engine[2];
+                        const float khsr_hl = sqrtf(khsr_sx * khsr_sx + khsr_sz * khsr_sz);
+
+                        if (khsr_hl > 1.0e-4f && khsr_sy > 1.0e-4f) {
+                            const float khsr_tan = khsr_sy / khsr_hl;
+                            const float khsr_len = (2.0f * he0[1]) / khsr_tan + hd;
+                            const float khsr_ux = -khsr_sx / khsr_hl;   // shadow runs OPPOSITE
+                            const float khsr_uz = -khsr_sz / khsr_hl;   // the horizontal sun
+                            float khsr_t = (-dx) * khsr_ux + (-dz) * khsr_uz;
+                            khsr_t = khsr_t < 0.0f ? 0.0f : (khsr_t > khsr_len ? khsr_len : khsr_t);
+                            const float khsr_rx = -dx - khsr_t * khsr_ux;
+                            const float khsr_rz = -dz - khsr_t * khsr_uz;
+                            float khsr_ry = fabsf(dy) - he0[1];   // vertical slack: the shadow
+                            if (khsr_ry < 0.0f) khsr_ry = 0.0f;   // lies at the caster's base
+                            khsr_in = khsr_rx * khsr_rx + khsr_ry * khsr_ry + khsr_rz * khsr_rz
+                                      <= lim * lim;
+                        }
+                    }
+
+                    if (!khsr_in) {
+                        g_sun_map_no_local = true;   // provisional: cleared below if any caster lands in radius
+                        continue;
+                    }
                 }
             }
             SunCaster c;
@@ -19733,7 +19790,20 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     // the frame) - meshes carried by the flush would pop one frame
     // ahead. The flush uses the same truth the injection does: the cycle
     // latch for the camera, the slot pair for the depth encode.
-    if (g_ro.cycle_pv_valid) {
+    // On near-draw-free frames
+    // (high altitude, sky only - opqFinal <= 2 all trace) the cycle
+    // latch refreshes rarely and the fallback drew with a stale camera:
+    // the frequent tracking-and-snap. The latch's charter (avoid the
+    // one-frame-ahead pop) only matters when REPAINTING an injected
+    // image; with no landing this frame the flush draw is the only
+    // image and freshness wins. Live fetch on sparse miss frames; the
+    // latch stands everywhere else, byte-identically.
+    const bool khf_sparse_live = !injected_since_last_flush &&
+        g_ro.opaque_draws < KH_REORDER_MIN_OPAQUE_DRAWS / 8;
+
+    if (khf_sparse_live && RVExtBridge::get_projection_view_transform(pv)) {
+        if (ffr_armed()) ffr_head().pv_src = 1;
+    } else if (g_ro.cycle_pv_valid) {
         pv = g_ro.cycle_pv;
         g_flush_latch_pvs++;
         if (ffr_armed()) ffr_head().pv_src = 0;

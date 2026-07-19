@@ -5916,7 +5916,20 @@ static game_value gpu_visibility_sqf(game_value_parameter args) {
 //   effect:    STRING or SCALAR - screen-space effect applied inside the
 //              mesh's footprint: "solid" 0, "invert" 1, "colorgrade" 2,
 //              "vignette" 3, "chromatic" 4, "grain" 5, "sharpen" 6,
-//              "blur" 7, "bloom" 8, "distortion" 9, "outline" 10, "pulse" 11
+//              "blur" 7, "bloom" 8, "distortion" 9, "outline" 10,
+//              "pulse" 11, "halation" 12, "fog" 13, "lensflare" 14,
+//              "anamorphic" 15, "sunflare" 16, "glitch" 17 - or a PATH
+//              ENDING ".hlsl" (case-insensitive suffix, the mesh slot's
+//              ".fbx" rule; same Documents-then-mods "rendering"
+//              resolution): a CUSTOM pixel shader compiled against the
+//              framework's shared cbuffer header, entry
+//              float4 PSEffect(VSOut i) : SV_Target. The shader declares
+//              its own sceneColor t0 / depth t1; fx0/fx1 carry this
+//              slot's 8 params verbatim and fxMeta = (id, time, w, h),
+//              so custom parameters flow through the existing params
+//              argument and "params" update property - no new command
+//              arguments. A failed compile is reported once and the
+//              effect simply does not draw
 //   params:    ARRAY of up to 8 numbers, effect-specific (see set_effect_params
 //              for meanings and defaults; omitted entries take defaults)
 //   band:      [minDist, maxDist, falloff?] - additionally confines the mesh's
@@ -5993,9 +6006,11 @@ static game_value add_render3d_sqf(game_value_parameter args) {
         if (arr.size() > 5 &&
             !(arr[5].type_enum() == game_data_type::STRING && static_cast<std::string>(arr[5]).empty())) {
             // empty string = slot skipped (placeholder to reach later args)
-            const int e = RenderIntegration::effect_id_from_gv(arr[5]);
-            if (e < 0) return game_value("unknown effect");
+            std::string khfx_path, khfx_err;
+            const int e = RenderIntegration::kh_effect_from_gv(arr[5], khfx_path, khfx_err);
+            if (e < 0) return game_value(khfx_err.empty() ? std::string("unknown effect") : khfx_err);
             obj.effect = e;
+            obj.fx_shader = khfx_path;
         }
         if (arr.size() > 6 && !arr[6].is_nil()) {
             if (arr[6].type_enum() != game_data_type::ARRAY) return game_value("fxParams must be an array of numbers");
@@ -6195,7 +6210,14 @@ static int kh_apply_shared_prop(RenderIntegration::RenderObject& obj,
 // string/scalar (builtin name, registry index, or a ".fbx" path - same
 // resolution as addRender3D) | "material" array - per-submesh shader +
 // texture assignments:
-//   [ [selector, "pbr", textures?, params?], ... ]
+//   [ [selector, shader, textures?, params?], ... ]
+//   shader:   "pbr", or a PATH ENDING ".hlsl" (same resolution as .fbx):
+//             a CUSTOM surface shader defining
+//             float3 KhUserShade(KhMatSurf m, float3 wpos, float3 n, float smf)
+//             called in place of the builtin PBR on every textured
+//             pipeline variant (KhApplyPBR remains callable as a base);
+//             builtin PBR is the fallback for a failed compile
+//             (reported once)
 //   selector: FBX material / submesh name (case-insensitive; builtins
 //             have one submesh, "default") | submesh index | -1 or "*"
 //             for all
@@ -6209,7 +6231,7 @@ static int kh_apply_shared_prop(RenderIntegration::RenderObject& obj,
 //             "metalness" | "emissiveIntensity" | "normalStrength" |
 //             "cutoff" | "alphaMode" ("opaque"|"cutout")
 // | "color" [r,g,b,a] | "mode" 0..2 | "visible" bool | "sceneread" bool |
-// "effect" string/scalar | "params" array (resets omitted entries to the
+// "effect" string/scalar/".hlsl" path | "params" array (resets omitted entries to the
 // effect's defaults) | "blend" string | "band" [minDist, maxDist,
 // falloff?] ([] clears) | "lit" bool or [ambient, diffuse] ("lighting"
 // accepted as an alias) | "duration" number or [fadeIn, hold, fadeOut].
@@ -6299,9 +6321,11 @@ static game_value update_render3d_sqf(game_value_parameter args) {
             obj.effect = static_cast<bool>(arr[2]) ? 2 : 0;
             RenderIntegration::set_effect_params(obj, nullptr);
         } else if (prop == "effect") {
-            const int e = RenderIntegration::effect_id_from_gv(arr[2]);
+            std::string khfx_path, khfx_err;
+            const int e = RenderIntegration::kh_effect_from_gv(arr[2], khfx_path, khfx_err);
             if (e < 0) return game_value(false);
             obj.effect = e;
+            obj.fx_shader = khfx_path;
             RenderIntegration::set_effect_params(obj, nullptr);
         } else if (prop == "lit" || prop == "lighting") {
             // BOOL toggles, ARRAY [ambient, diffuse] configures.
@@ -6347,7 +6371,8 @@ static game_value update_render3d_sqf(game_value_parameter args) {
 // updatePostFX [handle, property, value] -> BOOL
 // Fullscreen post-processing passes ONLY (addPostFX / addLocalPostFX
 // handles); 3D mesh objects belong to updateRender3D. Properties:
-// "effect" string/scalar (fullscreen effects only, id > 0) | "params"
+// "effect" string/scalar/".hlsl" path (fullscreen effects only, id > 0;
+// custom .hlsl passes draw with the user's PSEffect) | "params"
 // array | "color" [r,g,b,a] | "blend" string | "band" [minDist, maxDist,
 // falloff?] ([] clears) | "visible" bool | "ui" bool (post-tonemap phase)
 // | "duration" number or [fadeIn, hold, fadeOut] | "position" [x,y,zASL]
@@ -6385,9 +6410,11 @@ static game_value update_post_fx_sqf(game_value_parameter args) {
             obj.pos[1] = static_cast<float>(pos[1]);
             obj.pos[2] = static_cast<float>(pos[2]);
         } else if (prop == "effect") {
-            const int e = RenderIntegration::effect_id_from_gv(arr[2]);
+            std::string khfx_path, khfx_err;
+            const int e = RenderIntegration::kh_effect_from_gv(arr[2], khfx_path, khfx_err);
             if (e <= 0) return game_value(false);   // a fullscreen pass without an effect is meaningless
             obj.effect = e;
+            obj.fx_shader = khfx_path;
             RenderIntegration::set_effect_params(obj, nullptr);
         } else if (prop == "ui") {
             if (arr[2].type_enum() != game_data_type::BOOL) return game_value(false);
@@ -6526,9 +6553,11 @@ static game_value add_postfx_sqf(game_value_parameter args) {
         RenderIntegration::RenderObject obj;
         obj.fullscreen = true;
         obj.mode = RenderIntegration::DepthMode::Off;
-        const int e = RenderIntegration::effect_id_from_gv(arr[0]);
-        if (e <= 0) return game_value("unknown or non-fullscreen effect");
+        std::string khfx_path, khfx_err;
+        const int e = RenderIntegration::kh_effect_from_gv(arr[0], khfx_path, khfx_err);
+        if (e <= 0) return game_value(khfx_err.empty() ? std::string("unknown or non-fullscreen effect") : khfx_err);
         obj.effect = e;
+        obj.fx_shader = khfx_path;
         const auto_array<game_value>* fx_params = nullptr;
 
         if (arr.size() > 1 && !arr[1].is_nil()) {
@@ -6684,6 +6713,9 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("texturedDraws", RenderIntegration::g_stats.textured_draws));
         out.push_back(kv("texLoads", RenderIntegration::g_stats.tex_loads));
         out.push_back(kv("fbxImports", RenderIntegration::g_stats.fbx_imports));
+        out.push_back(kv("fbxCacheHits", RenderIntegration::g_stats.fbx_cache_hits));
+        out.push_back(kv("fbxCacheWrites", RenderIntegration::g_stats.fbx_cache_writes));
+        out.push_back(kv("fbxCacheEvicts", RenderIntegration::g_stats.fbx_cache_evicts));
         out.push_back(kv("registeredMeshes", static_cast<uint64_t>(RenderIntegration::mesh_count())));
         out.push_back(kv("compositeKeepEncodes", RenderIntegration::g_stats.composite_keep_encodes));
         out.push_back(kv("compositeAnomalySkips", RenderIntegration::g_stats.composite_anomaly_skips));
@@ -6837,6 +6869,8 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("lightLocNbBase", RenderIntegration::g_light_probe.nb_base));
         out.push_back(kvf("lightLocErr", RenderIntegration::g_light_probe.last_err));
         out.push_back(kv("blockHolds", RenderIntegration::g_blk_holds));
+        out.push_back(kv("blockRegimeRejects", RenderIntegration::g_light_probe.regime_rejects));
+        out.push_back(kv("blockRegimeAdopts", RenderIntegration::g_light_probe.regime_adopts));
         out.push_back(kv("blockModeRejects", RenderIntegration::g_blk_mode_rejects));
         out.push_back(kv("blockErrRejects", RenderIntegration::g_blk_err_rejects));
         out.push_back(kv("blockJumpAdopts", RenderIntegration::g_blk_jump_adopts));
@@ -7840,9 +7874,11 @@ static game_value add_local_postfx_sqf(game_value_parameter args) {
         
         if (arr[2].type_enum() != game_data_type::SCALAR) return game_value("falloff must be a number");
         obj.local_falloff = static_cast<float>(arr[2]);
-        const int e = RenderIntegration::effect_id_from_gv(arr[3]);
-        if (e <= 0) return game_value("unknown or non-fullscreen effect");
+        std::string khfx_path, khfx_err;
+        const int e = RenderIntegration::kh_effect_from_gv(arr[3], khfx_path, khfx_err);
+        if (e <= 0) return game_value(khfx_err.empty() ? std::string("unknown or non-fullscreen effect") : khfx_err);
         obj.effect = e;
+        obj.fx_shader = khfx_path;
         const auto_array<game_value>* fx_params = nullptr;
 
         if (arr.size() > 4 && !arr[4].is_nil()) {

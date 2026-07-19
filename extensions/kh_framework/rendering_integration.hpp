@@ -567,8 +567,11 @@ inline int mesh_id_clamp(int id) {
 
 // ===========================================================================
 // FBX MATERIALS (updateRender3D "material"): per-submesh material slots.
-// One shader for now ("pbr" - compact GGX; see KhApplyPBR in the shader
-// header). Materials receive the sun/moon AND the engine's dynamic
+// Shaders: "pbr" (compact GGX; see KhApplyPBR in the shader header), or
+// a user ".hlsl" path (the mesh slot's ".fbx" suffix rule, resolved
+// through the same "rendering" search) defining the KhUserShade surface
+// function - see the USER HLSL SHADER CACHE ledger by the texture
+// loaders. Materials receive the sun/moon AND the engine's dynamic
 // lights (flashlights, headlights, fires): Lambert diffuse at the
 // untextured path's energy plus per-light GGX specular glints
 // (KhDynLightsPBR), metal- and spec/gloss-workflow correct, unshadowed
@@ -597,7 +600,8 @@ struct KhMaterialMap {
 
 struct KhMaterial {
     bool used = false;         // slot carries an assignment
-    int shader = 0;            // 0 = "pbr" (the only shader for now)
+    int shader = 0;            // 0 = "pbr"; 1 = custom user .hlsl (user_shader)
+    std::string user_shader;   // RESOLVED .hlsl path when shader == 1 ("" otherwise)
     KhMaterialMap maps[5];     // diffuse, normal, orm, emissive, specular
     float base_color[3] = { 1.0f, 1.0f, 1.0f };
     float roughness = 0.8f;
@@ -889,12 +893,14 @@ inline bool reorder_on_render_thread();
 // fails mid-teardown - leaking device objects across a reset is the
 // worse failure, and matches the hook's previous (bare) behavior.
 inline void kh_tex_cache_release();   // material-texture cache (defined with the loader)
+inline void kh_user_shader_cache_release();   // user .hlsl PS cache (defined with the loader)
 
 static void __stdcall on_engine_reset() {
     if (reorder_on_render_thread()) {
         g_res.release();
         release_shadow_device_state();
         kh_tex_cache_release();
+        kh_user_shader_cache_release();
         return;
     }
 
@@ -902,11 +908,15 @@ static void __stdcall on_engine_reset() {
     g_res.release();
     release_shadow_device_state();
     kh_tex_cache_release();
+    kh_user_shader_cache_release();
 }
 
 struct RenderObject {
     int   effect = 0;           // 0 = solid color; >0 = screen-space effect (see EffectId)
     float fx[8] = {};           // effect parameters (effect-specific, see set_effect_params)
+    std::string fx_shader;      // custom effect: RESOLVED user .hlsl path
+                                // ("" = builtin; consumed only when
+                                // effect == KH_EFFECT_CUSTOM)
     bool  fullscreen = false;   // true = fullscreen triangle (post-processing pass), size unused
     bool  affect_ui = false;    // fullscreen passes: true = render post-tonemap over the composited frame (UI included) instead of the 3D scene phase
     bool  localized = false;    // fullscreen pass masked to a world-space sphere around pos
@@ -1111,6 +1121,12 @@ enum class EffectId : int {
 };
 
 static constexpr int KH_MAX_EFFECT = 17;
+// USER EFFECT SENTINEL: RenderObject.effect for a custom ".hlsl" pass
+// (fx_shader carries the resolved path). Deliberately outside the
+// builtin id range: set_effect_params zero-defaults its 8 params (they
+// are the user shader's to define, delivered verbatim in fx0/fx1) and
+// the Pulse/SunFlare axis swap never applies.
+static constexpr int KH_EFFECT_CUSTOM = 100;
 static std::unordered_map<std::string, RenderObject> g_draw_list;
 static std::mutex g_draw_list_mutex;
 
@@ -1169,7 +1185,12 @@ struct RenderStats {
     uint64_t composite_meshes = 0;      // meshes drawn through the composited path
     uint64_t textured_draws = 0;        // per-submesh textured draws issued (KH_TEXTURED)
     uint64_t tex_loads = 0;             // material textures loaded from disk (cache misses)
-    uint64_t fbx_imports = 0;           // .fbx files parsed + registered (cache misses)
+    uint64_t fbx_imports = 0;           // .fbx files ufbx-parsed + registered (misses
+                                        // of BOTH the id map and the binary mesh cache)
+    uint64_t fbx_cache_hits = 0;        // binary-cache-served loads (no ufbx parse,
+                                        // no triangulation, no mikktspace, no bake)
+    uint64_t fbx_cache_writes = 0;      // compiled meshes persisted to the cache
+    uint64_t fbx_cache_evicts = 0;      // oldest-first removals at the 1 GiB cap
     uint64_t composite_skips = 0;      // injections aborted (resources/PV unavailable)
     uint64_t composite_ambiguous = 0;  // frames where the sim republished matrices mid-cycle
                                        // (diagnostic only - the clear-time latch is retained)
@@ -2789,7 +2810,11 @@ float4 PSMain(VSOut i) : SV_Target
     }
 #if KH_TEXTURED
     khtxS.albedo *= color.rgb;   // the object color tints the albedo lane only
+#if KH_USER_MAT
+    float3 lc = KhUserShade(khtxS, i.wpos, khtxN, smf);
+#else
     float3 lc = KhApplyPBR(khtxS, i.wpos, khtxN, smf);
+#endif
 #else
     float3 lc = ApplyLighting(color.rgb, i.wpos, i.nrm, smf);
 #endif
@@ -3232,7 +3257,11 @@ float4 PSComposite(VSOutC i) : SV_Target
     }
 #if KH_TEXTURED
     khtxS.albedo *= color.rgb;   // the object color tints the albedo lane only
+#if KH_USER_MAT
+    float3 lc = KhUserShade(khtxS, i.wpos, khtxN, smf);
+#else
     float3 lc = KhApplyPBR(khtxS, i.wpos, khtxN, smf);
+#endif
 #else
     float3 lc = ApplyLighting(color.rgb, i.wpos, i.nrm, smf);
 #endif
@@ -4505,6 +4534,176 @@ inline ID3D11ShaderResourceView* kh_tex_resolve(ID3D11Device* dev, ID3D11DeviceC
 // SYNCHRONOUS BY DESIGN (v1): a large file hitches the calling script's
 // frame once; the path cache makes every later spawn free.
 // ===========================================================================
+// ===========================================================================
+// USER HLSL SHADER CACHE (operator feature: custom shaders). Two
+// families, one cache, both resolved through the same "rendering"
+// search as .fbx (the ".hlsl" suffix is the designator, exactly the
+// mesh slot's ".fbx" rule):
+//  - POST-PROCESSING (effect slot / addPostFX / addLocalPostFX): source
+//    = shared cbuffer header + user file; entry
+//      float4 PSEffect(VSOut i) : SV_Target
+//    ps_5_0, MSAA_DEPTH keyed to the live depth exactly like the
+//    builtin uber shader. The user declares sceneColor t0 / depth t1
+//    themselves (register twins of UNUSED shared-header resources are
+//    legal - the builtin effect unit ships that exact pattern; calling
+//    the shared t1/t4/t5 band helpers from a user effect is the one
+//    collision). fx0/fx1 carry the slot's 8 params verbatim, fxMeta =
+//    (id, time, w, h), and every shared cbuffer field is available -
+//    which is why updates need no new parameters: the existing
+//    params argument/property IS the user shader's parameter block.
+//    Chain passes composite IN-SHADER (opaque ping-pong): the user
+//    samples t0 and returns the fully composited pixel; localized/
+//    band masking is theirs to implement from local0/localRadii/band0
+//    if wanted.
+//  - MATERIALS (material entry shader field): the user file defines
+//      float3 KhUserShade(KhMatSurf m, float3 wpos, float3 n, float smf)
+//    and is compiled into all three textured pipeline variants (flush /
+//    composite / composite-arb, KH_USER_MAT=1, per MSAA where the base
+//    is) which call it in place of KhApplyPBR - which remains callable
+//    as a base. Per-submesh binding lives in kh_draw_textured; builtin
+//    PBR is the fallback for an absent or failed compile.
+// THREADING: same contract as the texture cache - lookups and compiles
+// happen only inside serialized graphics windows (lock-held flush /
+// injection window), so the map needs no lock. Entries hold device
+// objects: released at engine reset and at the mission-end full destroy
+// (recompiles come from disk - the texture cache's doctrine verbatim).
+// Failures LATCH (reported once through kh_report_error) so a broken
+// file costs one compile attempt, not one per draw.
+// ===========================================================================
+struct KhUserShaderEntry {
+    ID3D11PixelShader* ps = nullptr;
+    bool failed = false;
+};
+
+static std::unordered_map<std::string, KhUserShaderEntry> g_user_ps_cache;
+
+inline void kh_user_shader_cache_release() {
+    for (auto& khus_kv : g_user_ps_cache) KH_SAFE_RELEASE(khus_kv.second.ps);
+    g_user_ps_cache.clear();
+}
+
+inline bool kh_user_shader_source(const std::string& path, std::string& out, std::string& err) {
+    std::ifstream khus_f(path, std::ios::binary);
+    if (!khus_f) { err = "cannot open '" + path + "'"; return false; }
+    out.assign((std::istreambuf_iterator<char>(khus_f)), std::istreambuf_iterator<char>());
+    if (out.empty()) { err = "'" + path + "' is empty"; return false; }
+    return true;
+}
+
+// Custom POST-PROCESSING PS for a resolved user path (nullptr = absent
+// or latched failure; the caller skips the pass). Keyed per live depth
+// MSAA count - the same recompile trigger the builtin effect shader
+// obeys; stale-sample entries idle in the map until the release.
+inline ID3D11PixelShader* kh_user_fx_ps(ID3D11Device* dev, const std::string& path) {
+    if (!dev || path.empty()) return nullptr;
+    std::string khus_key = "fx|" + std::to_string(g_res.depth_sample_count) + "|" + path;
+    std::transform(khus_key.begin(), khus_key.end(), khus_key.begin(), ::tolower);
+    auto khus_it = g_user_ps_cache.find(khus_key);
+    if (khus_it != g_user_ps_cache.end()) return khus_it->second.ps;
+    KhUserShaderEntry khus_e;
+    std::string khus_src, khus_err;
+
+    if (kh_user_shader_source(path, khus_src, khus_err)) {
+        const D3D_SHADER_MACRO khus_defines[] = {
+            { "MSAA_DEPTH", g_res.depth_sample_count > 1 ? "1" : "0" },
+            { nullptr, nullptr },
+        };
+        const std::string khus_full = std::string(g_cb_hlsl) + khus_src;
+        ID3DBlob* khus_blob = nullptr;
+        khus_err = compile_shader(khus_full.c_str(), "PSEffect", "ps_5_0", khus_defines, &khus_blob);
+
+        if (khus_err.empty()) {
+            const HRESULT khus_hr = dev->CreatePixelShader(khus_blob->GetBufferPointer(),
+                                                           khus_blob->GetBufferSize(), nullptr, &khus_e.ps);
+            if (FAILED(khus_hr)) { khus_e.ps = nullptr; khus_err = "CreatePixelShader " + hr_str(khus_hr); }
+        }
+
+        if (khus_blob) khus_blob->Release();
+    }
+
+    if (!khus_e.ps) {
+        khus_e.failed = true;
+        kh_report_error("KH user effect '" + path + "': " + khus_err);
+    }
+
+    g_user_ps_cache.emplace(std::move(khus_key), khus_e);
+    return khus_e.ps;
+}
+
+// Custom MATERIAL PS for a resolved user path and pipeline variant
+// (khum_ctx: 0 flush/static twin, 1 composite guard twin, 2 composite
+// arb twin - the exact define sets of the builtin textured twins plus
+// KH_USER_MAT). nullptr = absent/failed: the caller keeps builtin PBR.
+inline ID3D11PixelShader* kh_user_mat_ps(ID3D11Device* dev, const std::string& path, int khum_ctx) {
+    if (!dev || path.empty()) return nullptr;
+    const UINT khum_samp = khum_ctx > 0 ? g_res.comp_depth_samples : 0;
+    std::string khum_key = "m" + std::to_string(khum_ctx) + "|" +
+                           std::to_string(khum_samp) + "|" + path;
+    std::transform(khum_key.begin(), khum_key.end(), khum_key.begin(), ::tolower);
+    auto khum_it = g_user_ps_cache.find(khum_key);
+    if (khum_it != g_user_ps_cache.end()) return khum_it->second.ps;
+    KhUserShaderEntry khum_e;
+    std::string khum_src, khum_err;
+
+    if (kh_user_shader_source(path, khum_src, khum_err)) {
+        const std::string khum_sc = std::to_string(g_res.comp_depth_samples);
+        const D3D_SHADER_MACRO khum_def_flush[] = {
+            { "KH_RECEIVE_TEX", "1" },
+            { "KH_TEXTURED", "1" },
+            { "KH_USER_MAT", "1" },
+            { nullptr, nullptr },
+        };
+        const D3D_SHADER_MACRO khum_def_comp[] = {
+            { "MSAA_DEPTH", g_res.comp_depth_samples > 1 ? "1" : "0" },
+            { "SAMPLE_COUNT", khum_sc.c_str() },
+            { "KH_RECEIVE_TEX", "1" },
+            { "KH_TEXTURED", "1" },
+            { "KH_USER_MAT", "1" },
+            { nullptr, nullptr },
+        };
+        const D3D_SHADER_MACRO khum_def_arb[] = {
+            { "MSAA_DEPTH", g_res.comp_depth_samples > 1 ? "1" : "0" },
+            { "SAMPLE_COUNT", khum_sc.c_str() },
+            { "KH_ARB_DEPTH", "1" },
+            { "KH_RECEIVE_TEX", "1" },
+            { "KH_TEXTURED", "1" },
+            { "KH_USER_MAT", "1" },
+            { nullptr, nullptr },
+        };
+        std::string khum_full = std::string(g_cb_hlsl) + khum_src;
+        const char* khum_entry = "PSMain";
+        const D3D_SHADER_MACRO* khum_defs = khum_def_flush;
+
+        if (khum_ctx == 0) {
+            khum_full += g_hlsl_static;
+        } else {
+            khum_full += g_hlsl_composite;
+            khum_full += g_hlsl_composite2;
+            khum_entry = "PSComposite";
+            khum_defs = khum_ctx == 2 ? khum_def_arb : khum_def_comp;
+        }
+
+        ID3DBlob* khum_blob = nullptr;
+        khum_err = compile_shader(khum_full.c_str(), khum_entry, "ps_5_0", khum_defs, &khum_blob);
+
+        if (khum_err.empty()) {
+            const HRESULT khum_hr = dev->CreatePixelShader(khum_blob->GetBufferPointer(),
+                                                           khum_blob->GetBufferSize(), nullptr, &khum_e.ps);
+            if (FAILED(khum_hr)) { khum_e.ps = nullptr; khum_err = "CreatePixelShader " + hr_str(khum_hr); }
+        }
+
+        if (khum_blob) khum_blob->Release();
+    }
+
+    if (!khum_e.ps) {
+        khum_e.failed = true;
+        kh_report_error("KH user material shader '" + path + "': " + khum_err);
+    }
+
+    g_user_ps_cache.emplace(std::move(khum_key), khum_e);
+    return khum_e.ps;
+}
+
 static std::unordered_map<std::string, int> g_fbx_cache;   // lower(resolved path) -> mesh id
 static std::mutex g_fbx_cache_mutex;                       // game/worker threads
 
@@ -4551,7 +4750,247 @@ inline void kh_gen_tangents(std::vector<MeshVertex>& v) {
 // cannot honor.
 static constexpr size_t KH_FBX_VERT_CEIL = 0xFFFFFFFFull / sizeof(MeshVertex);
 
+// ===========================================================================
+// FBX BINARY MESH CACHE (operator directive: the first import of a model
+// in a game instance stalls noticeably - ufbx parse + triangulation +
+// mikktspace + bake). The COMPILED MeshDef (post-tangent, post-bake,
+// post-normalization vertices + submesh table + native size) persists in
+// Documents\Arma 3\kh_framework\cache - DOCUMENTS ONLY by directive
+// (never mod folders: the cache is machine-local derived data), created
+// on first use. Keyed by an FNV-1a64 over the FBX FILE CONTENT, so an
+// edited model re-imports and an identical file hits across sessions
+// regardless of its path. Cap KH_MESH_CACHE_MAX_BYTES with oldest-first
+// eviction; a HIT touches the file's write time, so 'oldest' is
+// least-recently-USED, not least-recently-written. Every load fully
+// validates the file (magic/version/stored hash/bounded counts/ranged
+// submeshes) - a corrupt or truncated file reads as a miss and the
+// import path simply rebuilds and rewrites it. All IO is best-effort on
+// the game thread inside kh_fbx_import (the same thread that paid the
+// full parse before); failures never fail the import.
+// ===========================================================================
+static constexpr uint64_t KH_MESH_CACHE_MAX_BYTES = 1024ull * 1024ull * 1024ull;   // 1 GiB
+static constexpr uint32_t KH_MESH_CACHE_MAGIC = 0x434D484Bu;   // "KHMC" little-endian
+static constexpr uint32_t KH_MESH_CACHE_VERSION = 1;
+
+inline uint64_t kh_fnv1a64(const uint8_t* khmc_p, size_t khmc_n) {
+    uint64_t khmc_h = 1469598103934665603ull;
+
+    for (size_t khmc_i = 0; khmc_i < khmc_n; ++khmc_i) {
+        khmc_h ^= khmc_p[khmc_i];
+        khmc_h *= 1099511628211ull;
+    }
+
+    return khmc_h;
+}
+
+// Resolved once; "" = documents unavailable or creation failed - the
+// cache silently disables and every load is a plain import.
+inline const std::filesystem::path& kh_mesh_cache_dir() {
+    static const std::filesystem::path khmc_dir = []() {
+        std::filesystem::path khmc_p;
+
+        try {
+            char khmc_docs[MAX_PATH];
+
+            if (SHGetFolderPathA(NULL, CSIDL_MYDOCUMENTS, NULL, SHGFP_TYPE_CURRENT, khmc_docs) == S_OK) {
+                khmc_p = std::filesystem::path(khmc_docs) / "Arma 3" / "kh_framework" / "cache";
+                std::filesystem::create_directories(khmc_p);
+            }
+        } catch (...) { khmc_p.clear(); }
+
+        return khmc_p;
+    }();
+    return khmc_dir;
+}
+
+inline std::filesystem::path kh_mesh_cache_file(uint64_t khmc_hash) {
+    std::ostringstream khmc_ss;
+    khmc_ss << "khm_" << std::hex << std::setfill('0') << std::setw(16) << khmc_hash << ".khmc";
+    return kh_mesh_cache_dir() / khmc_ss.str();
+}
+
+// Full-validation load; true = khmc_d carries the compiled mesh and the
+// file's write time was touched (the LRU term). Any structural doubt is
+// a miss.
+inline bool kh_mesh_cache_load(uint64_t khmc_hash, MeshDef& khmc_d) {
+    if (kh_mesh_cache_dir().empty()) return false;
+
+    try {
+        const std::filesystem::path khmc_p = kh_mesh_cache_file(khmc_hash);
+        std::ifstream khmc_f(khmc_p, std::ios::binary);
+        if (!khmc_f) return false;
+        std::vector<uint8_t> khmc_b((std::istreambuf_iterator<char>(khmc_f)),
+                                    std::istreambuf_iterator<char>());
+        khmc_f.close();
+        size_t khmc_o = 0;
+        auto khmc_rd = [&](void* khmc_dst, size_t khmc_n) -> bool {
+            if (khmc_o + khmc_n > khmc_b.size()) return false;
+            memcpy(khmc_dst, khmc_b.data() + khmc_o, khmc_n);
+            khmc_o += khmc_n;
+            return true;
+        };
+        uint32_t khmc_mag = 0, khmc_ver = 0, khmc_nv = 0, khmc_ns = 0;
+        uint64_t khmc_src = 0;
+        if (!khmc_rd(&khmc_mag, 4) || khmc_mag != KH_MESH_CACHE_MAGIC) return false;
+        if (!khmc_rd(&khmc_ver, 4) || khmc_ver != KH_MESH_CACHE_VERSION) return false;
+        if (!khmc_rd(&khmc_src, 8) || khmc_src != khmc_hash) return false;
+        if (!khmc_rd(khmc_d.native_size, 12)) return false;
+        if (!khmc_rd(&khmc_nv, 4) || !khmc_rd(&khmc_ns, 4)) return false;
+        if (khmc_nv == 0 || khmc_nv > KH_FBX_VERT_CEIL) return false;
+        if (khmc_ns == 0 || khmc_ns > 100000u) return false;
+        if ((khmc_b.size() - khmc_o) < static_cast<uint64_t>(khmc_nv) * sizeof(MeshVertex)) return false;
+        khmc_d.verts.resize(khmc_nv);
+        if (!khmc_rd(khmc_d.verts.data(), static_cast<size_t>(khmc_nv) * sizeof(MeshVertex))) return false;
+        khmc_d.submeshes.resize(khmc_ns);
+
+        for (uint32_t khmc_i = 0; khmc_i < khmc_ns; ++khmc_i) {
+            uint32_t khmc_nl = 0;
+            if (!khmc_rd(&khmc_nl, 4) || khmc_nl > 1024u) return false;
+            khmc_d.submeshes[khmc_i].name.resize(khmc_nl);
+            if (khmc_nl && !khmc_rd(&khmc_d.submeshes[khmc_i].name[0], khmc_nl)) return false;
+            if (!khmc_rd(&khmc_d.submeshes[khmc_i].vertex_start, 4) ||
+                !khmc_rd(&khmc_d.submeshes[khmc_i].vertex_count, 4)) return false;
+            const uint64_t khmc_end = static_cast<uint64_t>(khmc_d.submeshes[khmc_i].vertex_start) +
+                                      khmc_d.submeshes[khmc_i].vertex_count;
+            if (khmc_end > khmc_nv) return false;
+        }
+
+        try {
+            std::filesystem::last_write_time(khmc_p, std::filesystem::file_time_type::clock::now());
+        } catch (...) {}
+
+        return true;
+    } catch (...) { return false; }
+}
+
+inline void kh_mesh_cache_store(uint64_t khmc_hash, const MeshDef& khmc_d) {
+    if (kh_mesh_cache_dir().empty()) return;
+    if (khmc_d.verts.empty() || khmc_d.submeshes.empty()) return;
+
+    try {
+        std::ofstream khmc_f(kh_mesh_cache_file(khmc_hash), std::ios::binary | std::ios::trunc);
+        if (!khmc_f) return;
+        auto khmc_wr = [&](const void* khmc_src, size_t khmc_n) {
+            khmc_f.write(static_cast<const char*>(khmc_src), static_cast<std::streamsize>(khmc_n));
+        };
+        const uint32_t khmc_nv = static_cast<uint32_t>(khmc_d.verts.size());
+        const uint32_t khmc_ns = static_cast<uint32_t>(khmc_d.submeshes.size());
+        khmc_wr(&KH_MESH_CACHE_MAGIC, 4);
+        khmc_wr(&KH_MESH_CACHE_VERSION, 4);
+        khmc_wr(&khmc_hash, 8);
+        khmc_wr(khmc_d.native_size, 12);
+        khmc_wr(&khmc_nv, 4);
+        khmc_wr(&khmc_ns, 4);
+        khmc_wr(khmc_d.verts.data(), static_cast<size_t>(khmc_nv) * sizeof(MeshVertex));
+
+        for (uint32_t khmc_i = 0; khmc_i < khmc_ns; ++khmc_i) {
+            const MeshSubmesh& khmc_sm = khmc_d.submeshes[khmc_i];
+            const uint32_t khmc_nl = khmc_sm.name.size() > 1024u
+                                   ? 1024u : static_cast<uint32_t>(khmc_sm.name.size());
+            khmc_wr(&khmc_nl, 4);
+            if (khmc_nl) khmc_wr(khmc_sm.name.data(), khmc_nl);
+            khmc_wr(&khmc_sm.vertex_start, 4);
+            khmc_wr(&khmc_sm.vertex_count, 4);
+        }
+
+        khmc_f.flush();
+        if (khmc_f) g_stats.fbx_cache_writes++;
+    } catch (...) {}
+}
+
+// Oldest-first (least-recently-used, via the hit-touch above) eviction
+// down to the cap. Runs after every store; a fresh write carries the
+// newest time and is naturally spared.
+inline void kh_mesh_cache_trim() {
+    try {
+        const std::filesystem::path& khmc_dir = kh_mesh_cache_dir();
+        if (khmc_dir.empty()) return;
+
+        struct KhmcEnt {
+            std::filesystem::path p;
+            uint64_t sz;
+            std::filesystem::file_time_type t;
+        };
+
+        std::vector<KhmcEnt> khmc_ents;
+        uint64_t khmc_total = 0;
+
+        for (const auto& khmc_e : std::filesystem::directory_iterator(khmc_dir)) {
+            if (!khmc_e.is_regular_file()) continue;
+            if (khmc_e.path().extension() != ".khmc") continue;
+            KhmcEnt khmc_k{ khmc_e.path(),
+                            static_cast<uint64_t>(khmc_e.file_size()),
+                            khmc_e.last_write_time() };
+            khmc_total += khmc_k.sz;
+            khmc_ents.push_back(std::move(khmc_k));
+        }
+
+        if (khmc_total <= KH_MESH_CACHE_MAX_BYTES) return;
+        std::sort(khmc_ents.begin(), khmc_ents.end(),
+                  [](const KhmcEnt& a, const KhmcEnt& b) { return a.t < b.t; });
+
+        for (const auto& khmc_k : khmc_ents) {
+            if (khmc_total <= KH_MESH_CACHE_MAX_BYTES) break;
+            std::error_code khmc_ec;
+
+            if (std::filesystem::remove(khmc_k.p, khmc_ec)) {
+                khmc_total -= khmc_k.sz;
+                g_stats.fbx_cache_evicts++;
+            }
+        }
+    } catch (...) {}
+}
+
+// Registration tail shared by the ufbx import and the binary cache hit:
+// name the def, append, publish + GPU top-up under the park.
+inline bool kh_fbx_register(MeshDef&& d, const std::string& path, int& out_id, std::string& err) {
+    d.name = path;
+    std::transform(d.name.begin(), d.name.end(), d.name.begin(), ::tolower);
+    d.alias = "";
+
+    // Section-2 publication: append (invisible) unlocked, then publish +
+    // GPU top-up with the render thread PARKED - the contract's required
+    // safe point, so no draw can race the count/buffer pair.
+    const int id = kh_mesh_append(std::move(d));
+    if (id < 0) { err = "mesh registry full"; return false; }
+    {
+        RVExtBridge::ScopedGraphicsLock khfb_lock;
+        kh_mesh_publish();
+        ID3D11Device* dev = RVExtBridge::get_d3d_device();
+
+        if (dev) {
+            const std::string ve = ensure_mesh_vbs(dev);
+            // Failure is non-fatal here: the id is published and every
+            // draw path re-runs ensure_mesh_vbs (and skips the frame on
+            // error) - report and let the retry own it.
+            if (!ve.empty()) kh_report_error("KH fbx '" + path + "': " + ve);
+        }
+    }
+    out_id = id;
+    return true;
+}
+
 inline bool kh_fbx_import(const std::string& path, int& out_id, std::string& err) {
+    // ONE READ, THREE CONSUMERS (cache round): the file bytes feed the
+    // content hash, the binary-cache probe, and - on a miss - ufbx
+    // itself (ufbx_load_memory), so hashing costs no second disk pass.
+    std::vector<uint8_t> khmc_bytes;
+    {
+        std::ifstream khmc_in(path, std::ios::binary);
+        if (!khmc_in) { err = "cannot open file"; return false; }
+        khmc_bytes.assign((std::istreambuf_iterator<char>(khmc_in)),
+                          std::istreambuf_iterator<char>());
+    }
+    if (khmc_bytes.empty()) { err = "empty file"; return false; }
+    const uint64_t khmc_hash = kh_fnv1a64(khmc_bytes.data(), khmc_bytes.size());
+    {
+        MeshDef khmc_d;
+
+        if (kh_mesh_cache_load(khmc_hash, khmc_d)) {
+            g_stats.fbx_cache_hits++;
+            return kh_fbx_register(std::move(khmc_d), path, out_id, err);
+        }
+    }
     ufbx_load_opts opts = {};
     opts.target_axes = ufbx_axes_right_handed_z_up;    // = ARMA authoring axes
     opts.target_unit_meters = 1.0f;
@@ -4559,7 +4998,7 @@ inline bool kh_fbx_import(const std::string& path, int& out_id, std::string& err
     opts.generate_missing_normals = true;
     opts.load_external_files = false;                  // geometry only; textures are SQF-side
     ufbx_error uerr;
-    ufbx_scene* scene = ufbx_load_file(path.c_str(), &opts, &uerr);
+    ufbx_scene* scene = ufbx_load_memory(khmc_bytes.data(), khmc_bytes.size(), &opts, &uerr);
 
     if (!scene) {
         char buf[512];
@@ -4696,31 +5135,13 @@ inline bool kh_fbx_import(const std::string& path, int& out_id, std::string& err
 
     if (has_uv) kh_gen_tangents(d.verts);   // ARMA space; bake flips handedness
     meshgen::bake(d.verts);
-    d.name = path;
-    std::transform(d.name.begin(), d.name.end(), d.name.begin(), ::tolower);
-    d.alias = "";
-
-    // Section-2 publication: append (invisible) unlocked, then publish +
-    // GPU top-up with the render thread PARKED - the contract's required
-    // safe point, so no draw can race the count/buffer pair.
-    const int id = kh_mesh_append(std::move(d));
-    if (id < 0) { err = "mesh registry full"; return false; }
-    {
-        RVExtBridge::ScopedGraphicsLock khfb_lock;
-        kh_mesh_publish();
-        ID3D11Device* dev = RVExtBridge::get_d3d_device();
-
-        if (dev) {
-            const std::string ve = ensure_mesh_vbs(dev);
-            // Failure is non-fatal here: the id is published and every
-            // draw path re-runs ensure_mesh_vbs (and skips the frame on
-            // error) - report and let the retry own it.
-            if (!ve.empty()) kh_report_error("KH fbx '" + path + "': " + ve);
-        }
-    }
+    // Persist the COMPILED result (post-tangent, post-bake: a cache hit
+    // skips ufbx, triangulation, mikktspace AND the bake), then keep the
+    // cache under its cap. Both best-effort.
+    kh_mesh_cache_store(khmc_hash, d);
+    kh_mesh_cache_trim();
     g_stats.fbx_imports++;
-    out_id = id;
-    return true;
+    return kh_fbx_register(std::move(d), path, out_id, err);
 }
 
 // The mesh-slot front door for ".fbx" strings: resolve via the rendering
@@ -4824,16 +5245,34 @@ inline void kh_bind_material(ID3D11DeviceContext* ctx, ID3D11Device* dev,
 inline uint32_t kh_draw_textured(ID3D11DeviceContext* ctx, ID3D11Device* dev,
                                  ConstantData& cbd, ID3D11Buffer* obj_cb,
                                  const KhMaterialSet& ms, int mid, bool ts_ordered,
-                                 ID3D11RasterizerState*& bound_rs) {
+                                 ID3D11RasterizerState*& bound_rs,
+                                 int khum_ctx, ID3D11PixelShader* khum_builtin_ps) {
     static const KhMaterial khtx_default;   // unset slots draw with defaults
     const MeshDef& md = mesh_def(mid);
     uint32_t draws = 0;
+    ID3D11PixelShader* khum_bound = khum_builtin_ps;
 
     for (size_t si = 0; si < md.submeshes.size(); ++si) {
         const MeshSubmesh& sm = md.submeshes[si];
         if (sm.vertex_count == 0) continue;
         const KhMaterial& mat = (si < ms.slots.size() && ms.slots[si].used)
                               ? ms.slots[si] : khtx_default;
+        // USER MATERIAL SHADER: per-submesh PS selection. khum_ctx names
+        // the caller's pipeline variant so the user twin matches its
+        // builtin (flush / composite / composite-arb); an absent or
+        // failed compile keeps builtin PBR - the mesh never blanks.
+        ID3D11PixelShader* khum_want = khum_builtin_ps;
+
+        if (mat.shader == 1 && !mat.user_shader.empty()) {
+            ID3D11PixelShader* khum_ps = kh_user_mat_ps(dev, mat.user_shader, khum_ctx);
+            if (khum_ps) khum_want = khum_ps;
+        }
+
+        if (khum_want != khum_bound) {
+            ctx->PSSetShader(khum_want, nullptr, 0);
+            khum_bound = khum_want;
+        }
+
         kh_bind_material(ctx, dev, cbd, mat);
         if (!kh_upload_obj_cb(ctx, obj_cb, cbd)) break;
 
@@ -4854,12 +5293,16 @@ inline uint32_t kh_draw_textured(ID3D11DeviceContext* ctx, ID3D11Device* dev,
         }
     }
 
+    // Leave the caller's builtin bound: its PS trackers assume it.
+    if (khum_bound != khum_builtin_ps) ctx->PSSetShader(khum_builtin_ps, nullptr, 0);
     return draws;
 }
 
 // ===========================================================================
 // updateRender3D "material" parser. Value shape (arrays of arrays):
-//   [ [selector, "pbr", textures?, params?], ... ]
+//   [ [selector, shader, textures?, params?], ... ]
+//     shader:   "pbr", or a PATH ENDING ".hlsl" (custom surface shader;
+//               KhUserShade contract - see the user shader cache ledger)
 //     selector: submesh name (STRING, case-insensitive - FBX material
 //               name, builtins "default") | submesh index (SCALAR) |
 //               -1 or "*" = every submesh
@@ -4947,17 +5390,29 @@ inline bool kh_apply_material_update(RenderObject& obj, const game_value& val, s
             }
         } else { err = "selector must be a submesh name, index, or -1/\"*\""; return false; }
 
-        // --- shader ---
-        if (ent[1].type_enum() != game_data_type::STRING) { err = "shader must be a string (\"pbr\")"; return false; }
-        if (lower(static_cast<std::string>(ent[1])) != "pbr") {
-            err = "unknown shader '" + static_cast<std::string>(ent[1]) + "' (only \"pbr\" exists for now)";
+        // --- shader: "pbr", or a user ".hlsl" path (the mesh slot's
+        //     ".fbx" suffix rule; same Documents-then-mods resolution) ---
+        if (ent[1].type_enum() != game_data_type::STRING) { err = "shader must be a string (\"pbr\" or a \".hlsl\" path)"; return false; }
+        const std::string khum_sh_raw = static_cast<std::string>(ent[1]);
+        std::string khum_sh_path;
+
+        if (kh_ends_with_ci(khum_sh_raw, ".hlsl")) {
+            khum_sh_path = RenderAssetDiscovery::find_asset_file(khum_sh_raw);
+
+            if (khum_sh_path.empty()) {
+                err = "shader '" + khum_sh_raw + "' not found (searched Documents\\Arma 3\\kh_framework\\rendering, then every mod's 'rendering' folder)";
+                return false;
+            }
+        } else if (lower(khum_sh_raw) != "pbr") {
+            err = "unknown shader '" + khum_sh_raw + "' (\"pbr\" or a \".hlsl\" path)";
             return false;
         }
 
         // --- build the material once, assign to every target ---
         KhMaterial mat;
         mat.used = true;
-        mat.shader = 0;
+        mat.shader = khum_sh_path.empty() ? 0 : 1;
+        mat.user_shader = khum_sh_path;
 
         if (ent.size() > 2 && !ent[2].is_nil()) {
             if (ent[2].type_enum() != game_data_type::ARRAY) { err = "textures must be an array of [path, slot, routing?] entries"; return false; }
@@ -6513,6 +6968,37 @@ inline int effect_id_from_gv(const game_value& gv) {
     return -1;
 }
 
+// Effect designator front door: a builtin name/id, or a user ".hlsl"
+// path (the mesh slot's ".fbx" suffix rule). Resolves through the same
+// Documents-then-mods "rendering" search; on success the caller stores
+// the RESOLVED path in RenderObject::fx_shader with effect id
+// KH_EFFECT_CUSTOM. Compilation is deferred to the draw side (the
+// serialized windows own the device); failures latch + report once and
+// the pass simply skips. Returns the effect id, or -1 with err set for
+// an unresolvable path (err empty = plain unknown-effect).
+inline int kh_effect_from_gv(const game_value& gv, std::string& out_hlsl, std::string& err) {
+    out_hlsl.clear();
+    err.clear();
+
+    if (gv.type_enum() == game_data_type::STRING) {
+        const std::string khfx_s = static_cast<std::string>(gv);
+
+        if (kh_ends_with_ci(khfx_s, ".hlsl")) {
+            const std::string khfx_resolved = RenderAssetDiscovery::find_asset_file(khfx_s);
+
+            if (khfx_resolved.empty()) {
+                err = "'" + khfx_s + "' not found (searched Documents\\Arma 3\\kh_framework\\rendering, then every mod's 'rendering' folder)";
+                return -1;
+            }
+
+            out_hlsl = khfx_resolved;
+            return KH_EFFECT_CUSTOM;
+        }
+    }
+
+    return effect_id_from_gv(gv);
+}
+
 // Writes effect parameters into obj.fx with per-effect defaults for omitted
 // values. Pulse positions arrive as SQF [x, y, zASL] and are converted to
 // engine space here. Returns false if a provided entry is a non-number
@@ -7267,7 +7753,7 @@ static uint64_t g_far_keep_ms = 0;
 static uint64_t g_farkeep_mesh_draws = 0;   // per-mesh far-keep routings (both paths)
 // BUILD TAG (doctrine: bump on EVERY delivered build; stats-visible so a
 // field log names the binary it came from).
-static constexpr int KH_BUILD_TAG = 26030;
+static constexpr int KH_BUILD_TAG = 26034;
 // NEAR-GAP RAMP (build 26001; the RenderDoc conviction). ROOT, proven by
 // pixel history + depth-window plateaus: the world partition's viewport
 // floor (0.011 in the convicting capture) collapses EVERY fragment nearer
@@ -7924,7 +8410,25 @@ static float g_pub_block_fog[3] = {};
 // a look-up transient can never confirm). Held frames keep the last
 // good values - the box lights correctly straight through the episode.
 // Same debounce shape as the latch and dl-reference gates.
-static constexpr float    KH_BLK_ERR_MAX = 0.02f;      // healthy ~0.0006; poisoned 0.137
+static constexpr float    KH_BLK_ERR_MAX = 0.02f;      // healthy AT REST ~0.0006; poisoned 0.137.
+                                                       // The residual is the ALTITUDE lane's
+                                                       // agreement with our recorded camera
+                                                       // altitude, so it scales with camera
+                                                       // motion (sub-frame sampling skew):
+                                                       // lognew3 read 0.047-0.106 at 12-36
+                                                       // m/frame - honest blocks rejected for
+                                                       // the whole run (blockErrRejects 1376),
+                                                       // publish frozen stale, lit faces
+                                                       // mis-shaded 10-20% at exactly the
+                                                       // above/below-at-range geometries. The
+                                                       // adoption gate therefore widens the
+                                                       // bar by 2% of the frame's camera step
+                                                       // (26032): observed need ~0.3% of step;
+                                                       // the at-rest poison class (0.137 with
+                                                       // step ~0) stays rejected, and a water
+                                                       // -mirror pass's negated altitude sits
+                                                       // 2x altitude away - far outside even
+                                                       // the widened bar in flight.
 static constexpr uint64_t KH_BLK_CONFIRM_MS = 500;
 static float    g_blk_pend_amb_l = -1.0f;   // pending out-of-band candidate
 static float    g_blk_pend_sun_l = -1.0f;
@@ -8772,6 +9276,16 @@ struct CbColorProbe {
     float    last_std_time = -1.0f;  // stamp of the last mode-1 CAPTURE (the
                                      // mirror's own refresh; renderstats17
                                      // ledger at the adoption's mode gate)
+    // EXCLUSIVE-PERSISTENCE regime arbitration (26034; ledger at
+    // kh_probe_std_refresh): standing amb/sun luminance of the mirrored
+    // flavor, and the pending out-of-band candidate with its start time.
+    float    std_amb_l = -1.0f;      // standing flavor luminances (-1 = none yet)
+    float    std_sun_l = -1.0f;
+    float    pend_amb_l = -1.0f;     // pending out-of-band flavor
+    float    pend_sun_l = -1.0f;
+    float    pend_t = -1.0f;         // pending start (-1 = no pending)
+    uint64_t regime_rejects = 0;     // standard uploads refused as a foreign flavor
+    uint64_t regime_adopts = 0;      // out-of-band flavors adopted after exclusivity
     ID3D11Resource* buf = nullptr;   // locked upload location (weak identity)
     uint32_t off = 0;                // float index of the DECAY anchor lane
     uint32_t floats = 0;             // CB size (floats) at lock time
@@ -12907,6 +13421,97 @@ inline void shadow_register_upload(ID3D11Resource* res, const void* data, uint32
     }
 }
 
+// WORLD-CYCLE FINGERPRINT for the block mirror (lognew4, 26033 - the
+// distance darkening's root): the standard-mode (lane 15 == 1) block is
+// uploaded by MORE THAN ONE pass, with DIFFERENT content - at range the
+// last standard writer each frame flips to the far/atmospheric sub-pass
+// family (the same partition whose [1,1] viewport rejects the
+// injection's trigger) and its dimmer regime (ambLum 0.8216 / sunLum
+// 9.60 vs the world's 1.174 / 13.72, a ~30% luminance drop) walked into
+// the mirror, the published block, AND the raw-nb fog terms: the mesh
+// shaded 10-20% darker from 'a great enough distance' and stayed dark
+// until approach flipped the last writer back. Same-camera anchor
+// (decay + altitude) cannot discriminate these writers - the sub-pass
+// shares the frame camera. The world pass's proven fingerprint can:
+// only refresh the mirror while the current reorder cycle's captured
+// viewport range spans the broad middle (the span gate's own bar).
+// Fail-open when no cycle range is captured yet (cold / hook-dark
+// sessions keep the pre-26033 behavior); a skipped refresh leaves the
+// last WORLD-pass lanes standing - the mode-freshness gate's 2 s
+// window and the standing-values hold already own that direction.
+inline bool kh_probe_world_cycle() {
+    return !g_ro.cycle_vp_valid ||
+           (g_ro.cycle_vp_min <= 0.3f && g_ro.cycle_vp_max >= 0.7f);
+}
+
+// 15% luminance band - tight enough to SEPARATE the two observed
+// standard-flavor regimes (0.822 vs 1.174 amb-lum: 30% apart) that the
+// adoption side's 50% band deliberately merges.
+inline bool kh_probe_lum_band(float a, float b) {
+    const float khp_m = a > b ? a : b;
+    const float khp_eps = 0.15f * khp_m > 0.02f ? 0.15f * khp_m : 0.02f;
+    return fabsf(a - b) <= khp_eps;
+}
+
+// EXCLUSIVE-PERSISTENCE MIRROR REFRESH (lognew5, 26034 - the residual
+// distance/height darkening + flicker): the dim standard-flavor writer
+// (ambLum 0.822 / sunLum 9.60 against the world's 1.174 / 13.72)
+// uploads INSIDE the world cycle - lognew5 caught the published flip on
+// frames with dInjections 1 - so the 26033 viewport fingerprint cannot
+// exclude it and last-writer-wins let the mirror flicker between
+// regimes with camera geometry. Content arbitration, capture-side
+// (where EVERY upload is seen, not just the frame's last): an upload
+// in-band with the STANDING flavor refreshes immediately and kills any
+// pending; an out-of-band flavor refreshes only after it has been the
+// EXCLUSIVE standard flavor for 500 ms - any standing-band upload in
+// between resets it. The interleaved foreign writer can therefore
+// never land (the world writer keeps re-arming the standing flavor
+// every frame), while a REAL lighting change (skipTime, overcast roll)
+// moves every writer to the new level, the standing flavor goes
+// silent, and the new level adopts in 500 ms. If the world writer ever
+// goes truly silent (pure-sky regimes), the only flavor present adopts
+// - the defensible verdict. First-ever capture applies unconditionally
+// (cold path unchanged).
+inline void kh_probe_std_refresh(CbColorProbe& khp, const float* f, uint32_t nf, float khp_now) {
+    bool khp_apply = true;
+
+    if (khp.off >= 40 && khp.off - 40 + 18 < nf && khp.std_amb_l >= 0.0f) {
+        const float* khp_b = f + (khp.off - 40);
+        const float khp_al = khp_b[8] + khp_b[9] + khp_b[10];
+        const float khp_sl = khp_b[16] + khp_b[17] + khp_b[18];
+
+        if (kh_probe_lum_band(khp_al, khp.std_amb_l) &&
+            kh_probe_lum_band(khp_sl, khp.std_sun_l)) {
+            khp.pend_t = -1.0f;   // standing flavor still live: pending dies
+        } else {
+            const bool khp_agree = khp.pend_t >= 0.0f &&
+                kh_probe_lum_band(khp_al, khp.pend_amb_l) &&
+                kh_probe_lum_band(khp_sl, khp.pend_sun_l);
+
+            if (!khp_agree) {
+                khp.pend_amb_l = khp_al;
+                khp.pend_sun_l = khp_sl;
+                khp.pend_t = khp_now;
+                khp_apply = false;
+                khp.regime_rejects++;
+            } else if (khp_now - khp.pend_t < 0.5f) {
+                khp_apply = false;
+                khp.regime_rejects++;
+            } else {
+                khp.regime_adopts++;   // exclusive for 500 ms: a real level change
+            }
+        }
+    }
+
+    if (!khp_apply) return;
+    locator_capture(khp, f, nf, 56);
+    khp.meta = static_cast<int>(khp.off - khp.nb_base);
+    khp.last_std_time = khp_now;
+    khp.std_amb_l = khp.nb[8] + khp.nb[9] + khp.nb[10];
+    khp.std_sun_l = khp.nb[16] + khp.nb[17] + khp.nb[18];
+    khp.pend_t = -1.0f;
+}
+
 inline void locator_note_upload(ID3D11Resource* res, const void* data, uint32_t bytes) {
     if (!res || !data || bytes < 64) return;   // the block is 56+ floats
     // never self-learn: our own CBs carry the staged fog and camera too
@@ -12959,10 +13564,10 @@ inline void locator_note_upload(ID3D11Resource* res, const void* data, uint32_t 
 
             if (mode_i < nf) g_light_probe.last_mode = f[mode_i];
 
-            if (mode_i < nf && f[mode_i] == 1.0f) {
-                locator_capture(g_light_probe, f, nf, 56);
-                g_light_probe.meta = static_cast<int>(g_light_probe.off - g_light_probe.nb_base);
-                g_light_probe.last_std_time = effect_time_seconds();
+            if (mode_i < nf && f[mode_i] == 1.0f && kh_probe_world_cycle()) {
+                // WORLD-cycle gate (26033) + exclusive-persistence regime
+                // arbitration (26034; ledger at kh_probe_std_refresh).
+                kh_probe_std_refresh(g_light_probe, f, nf, effect_time_seconds());
             }
         } else {
             g_light_probe.misses++;   // shared/ring CBs make misses normal
@@ -13050,10 +13655,10 @@ inline void locator_note_upload(ID3D11Resource* res, const void* data, uint32_t 
 
             if (mode_i2 < nf) g_light_probe.last_mode = f[mode_i2];
 
-            if (mode_i2 < nf && f[mode_i2] == 1.0f) {
-                locator_capture(g_light_probe, f, nf, 56);
-                g_light_probe.meta = static_cast<int>(g_light_probe.off - g_light_probe.nb_base);
-                g_light_probe.last_std_time = now;
+            if (mode_i2 < nf && f[mode_i2] == 1.0f && kh_probe_world_cycle()) {
+                // 26033 world gate + 26034 regime arbitration (see
+                // kh_probe_std_refresh).
+                kh_probe_std_refresh(g_light_probe, f, nf, now);
             }
             break;
         }
@@ -17676,7 +18281,8 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             // Per-submesh textured draws: matParams filled + t14-t18
             // rebound + the object slice re-uploaded per material range.
             const uint32_t khr_txd = kh_draw_textured(ctx, dev, cbd, g_res.composite_cb,
-                                                      *khr_txm, mid, khr_ts_ordered, khr_bound_rs);
+                                                      *khr_txm, mid, khr_ts_ordered, khr_bound_rs,
+                                                      khr_tx_arb ? 2 : (guard ? 1 : 0), khr_bound_ps);
             g_stats.composite_meshes += khr_txd;
             g_stats.textured_draws += khr_txd;
         } else {
@@ -18772,8 +19378,23 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                                   g_light_probe.last_mode < 1.5f) ||
                                  (g_light_probe.last_std_time >= 0.0f &&
                                   effect_time_seconds() - g_light_probe.last_std_time < 2.0f);
+        // MOTION-SCALED RESIDUAL BAR (26032; full ledger at
+        // KH_BLK_ERR_MAX): the altitude residual grows with camera
+        // speed, not with poison - widen by 2% of the frame's step so
+        // the block keeps tracking under movement (the lit-face
+        // darkening fix); at rest the bar is exactly the old one.
+        // + ALTITUDE-RELATIVE TERM (lognew4, 26033): the residual is an
+        // fp32 comparison of the block's altitude lane against ours, so
+        // it scales with |altitude| too - 0.197 AT REST up high against
+        // the 0.02 absolute bar starved every adoption at exactly the
+        // distant-viewing geometry. 1e-3 x |alt| passes that class with
+        // margin while a water-mirror pass's NEGATED altitude (residual
+        // 2|alt|, the round-9 poison family) stays 2000x outside it.
+        const float khb_err_bar = KH_BLK_ERR_MAX +
+                                  0.02f * fmaxf(g_cam_step_m, 0.0f) +
+                                  1.0e-3f * fabsf(g_ls.cam[1]);
         const bool khb_err_ok = g_light_probe.last_err >= 0.0f &&
-                                g_light_probe.last_err <= KH_BLK_ERR_MAX;
+                                g_light_probe.last_err <= khb_err_bar;
 
         if (khb_geom_ok && !khb_mode_ok) g_blk_mode_rejects++;
         if (khb_geom_ok && khb_mode_ok && !khb_err_ok) g_blk_err_rejects++;
@@ -19136,10 +19757,21 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     // SAME-FRAME VIEW, flush edition (FLUSH FIDELITY + the adoption
     // ledger): repaint with the EXACT view the injection painted this
     // frame, so the repaint lands on its own depth pixel-registered.
-    // Window ~one frame; carried (miss) frames beyond it keep the
-    // latch's own freshness and take the injection's adoption verdict
-    // for themselves.
-    if (g_inj_view_ms != 0 && steady_now_ms() - g_inj_view_ms < 100) {
+    // MISS-RUN GLUE FIX (lognew3, 26032 - the far-range 'box moves with
+    // the camera ~0.25 s then snaps back'): the 100 ms window was only a
+    // PROXY for 'the injection painted this frame', and the first ~100 ms
+    // of every MISS run satisfied it too - there the fallback draw is the
+    // mesh's ONLY image, and it was transformed with the DEAD landing's
+    // view while the camera kept moving (trace conviction: camLsDelta
+    // pinned at 0 across frames 2526-2530 and 2672-2677 - the flush
+    // camera WAS the stale landing camera - then jumping to 133-146 m
+    // the frame the window expired: the visible glue-then-snap, sized
+    // by camera speed). Registration repaint is meaningful ONLY when an
+    // injected image exists this frame: require the landing itself; the
+    // window stays as the staleness bound on the landing's stamp. Miss
+    // frames now adopt the frame view immediately - no glue, no snap.
+    if (injected_since_last_flush &&
+        g_inj_view_ms != 0 && steady_now_ms() - g_inj_view_ms < 100) {
         memcpy(&pv.view[0][0], g_inj_view, sizeof(g_inj_view));
     } else {
         kh_adopt_frame_view(pv);
@@ -19455,7 +20087,8 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                o.effect == static_cast<int>(EffectId::Outline) ||
                o.effect == static_cast<int>(EffectId::Pulse) ||
                o.effect == static_cast<int>(EffectId::Fog) ||
-               o.effect == static_cast<int>(EffectId::SunFlare);
+               o.effect == static_cast<int>(EffectId::SunFlare) ||
+               o.effect == KH_EFFECT_CUSTOM;   // user shaders may sample depth
     };
 
     bool any_effect = !fullscreen.empty();
@@ -20207,6 +20840,17 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                 khf_srv_cat = -1;   // t0/t1 pair may have been rebound; force re-swap below
             }
         }
+        // CUSTOM EFFECT (user .hlsl): resolve the compiled PS first - a
+        // failed or missing compile skips the draw outright (reported
+        // once) rather than feeding the sentinel id into the builtin
+        // switch, which knows nothing of it.
+        ID3D11PixelShader* khf_ufx = nullptr;
+
+        if (o.effect == KH_EFFECT_CUSTOM) {
+            khf_ufx = kh_user_fx_ps(dev, o.fx_shader);
+            if (!khf_ufx) continue;
+        }
+
         if (!upload_cb(o, false)) { if (ov) g_mask.ov_skipped++; continue; }
         if (ov) g_mask.ov_drawn++;       // Draw() will be issued below
         if (khf_o_perc) khf_perc_seen = true;
@@ -20221,7 +20865,12 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             g_res.ps_tex && g_res.vs_tex && g_res.layout_tex && g_res.mat_sampler;
         const int khf_ps_want = o.effect > 0 ? 1 : (khf_farkeep_draw ? 2 : (khf_tx_on ? 3 : 0));
 
-        if (khf_ps_want != khf_ps_cat) {
+        if (khf_ufx) {
+            // Custom PS per object: bind unconditionally and poison the
+            // category so the next builtin object rebinds its own.
+            ctx->PSSetShader(khf_ufx, nullptr, 0);
+            khf_ps_cat = -1;
+        } else if (khf_ps_want != khf_ps_cat) {
             ctx->PSSetShader(khf_ps_want == 1 ? g_res.ps_effect
                            : khf_ps_want == 2 ? g_res.ps_composite_arb
                            : khf_ps_want == 3 ? g_res.ps_tex
@@ -20345,7 +20994,8 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
         if (khf_tx_on) {
             const uint32_t khf_txd = kh_draw_textured(ctx, dev, khf_obj_cbd, g_res.constant_buffer,
-                                                      *khf_txm, mid, khf_ts_ordered, khr_bound_rs);
+                                                      *khf_txm, mid, khf_ts_ordered, khr_bound_rs,
+                                                      0, g_res.ps_tex);
             g_stats.textured_draws += khf_txd;
         } else {
             ctx->Draw(mesh_vertex_count(mid), 0);
@@ -20395,7 +21045,17 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
             for (const auto& f : fullscreen) {
                 if (f.second.effect <= 0) continue;
+                // CUSTOM EFFECT: the pass draws with the user PS; absent
+                // or failed compiles skip the pass (reported once).
+                ID3D11PixelShader* khc_ufx = nullptr;
+
+                if (f.second.effect == KH_EFFECT_CUSTOM) {
+                    khc_ufx = kh_user_fx_ps(dev, f.second.fx_shader);
+                    if (!khc_ufx) continue;
+                }
+
                 if (!upload_cb(f.second, true)) continue;
+                ctx->PSSetShader(khc_ufx ? khc_ufx : g_res.ps_effect, nullptr, 0);
 
                 // Unbind the source slot before binding it as RTV next round
                 ID3D11ShaderResourceView* null_srv = nullptr;
@@ -20412,6 +21072,8 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             if (src_srv != g_res.scene_srv) {
                 RenderObject blit;
                 blit.effect = 0;
+                // The chain loop may have left a custom PS bound.
+                ctx->PSSetShader(g_res.ps_effect, nullptr, 0);
 
                 if (upload_cb(blit, true)) {
                     ID3D11ShaderResourceView* null_srv = nullptr;
@@ -20710,12 +21372,20 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     for (const auto& f : passes) {
         const RenderObject& o = f.second;
         if (o.effect <= 0) continue;
+        // CUSTOM EFFECT (UI phase): same contract as the scene chain.
+        ID3D11PixelShader* khu_ufx = nullptr;
+
+        if (o.effect == KH_EFFECT_CUSTOM) {
+            khu_ufx = kh_user_fx_ps(dev, o.fx_shader);
+            if (!khu_ufx) continue;
+        }
 
         const bool wants_depth = o.localized || o.banded ||
             o.effect == static_cast<int>(EffectId::Outline) ||
             o.effect == static_cast<int>(EffectId::Pulse) ||
             o.effect == static_cast<int>(EffectId::Fog) ||
-            o.effect == static_cast<int>(EffectId::SunFlare);
+            o.effect == static_cast<int>(EffectId::SunFlare) ||
+            o.effect == KH_EFFECT_CUSTOM;   // user shaders may sample depth
 
         if (wants_depth && !depth_ok) continue;
         if ((o.localized || o.effect == static_cast<int>(EffectId::Pulse)) && !has_inverse) continue;
@@ -20770,6 +21440,7 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         // CB SPLIT: both slices per UI pass
         if (!kh_upload_obj_cb(ctx, g_res.constant_buffer, cbd) ||
             !kh_upload_frame_cb(ctx, g_res.frame_cb, cbd)) continue;
+        ctx->PSSetShader(khu_ufx ? khu_ufx : g_res.ps_effect, nullptr, 0);
         ctx->OMSetBlendState(g_res.blend_modes[o.blend_mode], bf, 0xFFFFFFFF);
         ctx->Draw(3, 0);
     }
@@ -21184,6 +21855,8 @@ inline void on_mission_end() {
         kh_tex_cache_release();   // material-texture SRVs are device objects too:
                                   // the next mission re-resolves through the same
                                   // cold first-bind path a fresh process would
+        kh_user_shader_cache_release();   // user .hlsl shaders follow the same
+                                          // doctrine: recompiles come from disk
         reset_session_state();
         break;
     }

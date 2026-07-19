@@ -1323,6 +1323,12 @@ isNil {
 							[],
 							{
 								if (isNil "KH_var_serverAddress") exitWith {};
+								private _networkingEnabled = [missionNamespace, "KH_var_networking", "SERVER"] call KH_fnc_getRemoteVariable;
+								if (isNil "_networkingEnabled") exitWith {};
+
+								if !_networkingEnabled exitWith {
+									[_handlerId] call KH_fnc_removeHandler;
+								};
 
 								private _networking = [
 									missionNamespace,

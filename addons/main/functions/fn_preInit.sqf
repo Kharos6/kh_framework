@@ -836,6 +836,8 @@ if isServer then {
 	execute [
 		[],
 		{
+			if !KH_var_networking exitWith {};
+
 			KH_var_networkingSettings = [
 				KH_var_networkingPort,
 				KH_var_networkingMaximumMessageSize,
@@ -860,6 +862,7 @@ if isServer then {
 		true,
 		{
 			(
+				!(isNil "KH_var_networking") &&
 				!(isNil "KH_var_networkingPort") &&
 				!(isNil "KH_var_networkingMaximumMessageSize") &&
 				!(isNil "KH_var_networkingReceiveBufferSize") &&

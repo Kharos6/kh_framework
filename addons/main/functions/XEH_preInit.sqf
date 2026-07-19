@@ -1812,6 +1812,20 @@
 ] call CBA_fnc_addSetting;
 
 [
+	"KH_var_networking",
+	"CHECKBOX",   
+	[
+		"Enable", 
+		"True enables KH networking."
+	], 
+    "KH Networking"
+	false,
+	1,
+	{},
+	true
+] call CBA_fnc_addSetting;
+
+[
 	"KH_var_networkingPort",
 	"SLIDER",   
 	[

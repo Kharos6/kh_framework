@@ -221,7 +221,7 @@ private:
         DWORD wait_result = WaitForSingleObject(mutex_handle, 1000);
         
         if (wait_result != WAIT_OBJECT_0 && wait_result != WAIT_ABANDONED) {
-            report_error("KH - TeamSpeak: Mutex wait timeout in reset_effects_internal");
+            sqf::diag_log("KH - TeamSpeak: Mutex wait timeout in reset_effects_internal");
             return;
         }
 
@@ -263,7 +263,7 @@ private:
                         lost_reported = true;             // report once, not every second
 
                         MainThreadScheduler::instance().schedule([]() {
-                            report_error("KH - TeamSpeak: Plugin connection lost");
+                            sqf::diag_log("KH - TeamSpeak: Plugin connection lost");
                         });
                     }
                 }

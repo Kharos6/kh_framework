@@ -9584,7 +9584,7 @@ static void initialize_sqf_integration() {
     g_compiled_tts_finished_event = sqf::compile(R"(["KH_eve_ttsFinished", _khargs] call CBA_fnc_localEvent;)");
     g_compiled_stt_transcription_event = sqf::compile(R"(["KH_eve_sttTranscription", _khargs] call CBA_fnc_localEvent;)");
     g_compiled_html_js_event = sqf::compile(R"(["KH_eve_htmlJsEvent", _khargs] call CBA_fnc_localEvent;)");
-    g_compiled_kh_empty_code = sqf::compile(R"()");
+    g_compiled_kh_empty_code = sqf::compile(R"(nil;)");
     g_compiled_kh_subfunction_basic = sqf::compile(R"((_this select 0) callSerializedFunction (_this select [1]);)");
     g_compiled_kh_subfunction_process = sqf::compile(R"(processExecution _this;)");
     g_compiled_kh_monitor_set = sqf::compile(R"(KH_var_temporalExecutionStackMonitor set getCallArguments;)");

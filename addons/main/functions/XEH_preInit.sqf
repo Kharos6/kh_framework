@@ -1818,7 +1818,7 @@
 		"Enable", 
 		"True enables KH networking."
 	], 
-    "KH Networking"
+    "KH Networking",
 	false,
 	1,
 	{},

@@ -886,7 +886,7 @@ public:
             }
             
             if (!stream.eof() && stream.peek() != EOF) {
-                report_error("Warning - extra data in file: " + filename);
+                sqf::diag_log("Warning - extra data in file: " + filename);
                 // File may be corrupt but we loaded what we could
             }
 
@@ -1279,7 +1279,7 @@ public:
             report_error("Attempting to save dirty file before deletion: " + filename);
 
             if (!save_file(it->second.get())) {
-                report_error("Warning - failed to save dirty file before deletion: " + filename);
+                sqf::diag_log("Warning - failed to save dirty file before deletion: " + filename);
                 // Continue with deletion anyway
             }
         }

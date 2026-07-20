@@ -123,8 +123,8 @@ class CfgFunctions
 			class parseSpecialExecution {headerType = -1;};
 			class persistentExecutionSetup {headerType = -1;};
 			class playRecordedMission {headerType = -1;};
-			class postInit {postInit = 1;};
-			class preInit {preInit = 1;};
+			class postInit {headerType = -1;};
+			class preInit {headerType = -1;};
 			class preStart {preStart = 1;};
 			class processExecution {headerType = -1;};
 			class processRemoteSerializedFunction {headerType = -1;};

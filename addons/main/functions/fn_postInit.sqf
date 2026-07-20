@@ -1,6 +1,4 @@
 isNil {
-	if KH_var_isMenu exitWith {};
-
 	execute [
 		[],
 		{

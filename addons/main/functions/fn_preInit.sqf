@@ -1,7 +1,5 @@
 KH_var_khDataNamespace = ["kh_namespace_", profileName] joinString "";
 uiNamespace setVariable ["KH_var_khDataNamespace", KH_var_khDataNamespace];
-KH_var_isMenu = allDisplays isEqualTo [findDisplay 0];
-if KH_var_isMenu exitWith {};
 KH_var_gameSessionId = uiNamespace getVariable "KH_var_gameSessionId";
 KH_var_missionSessionId = generateUid;
 uiNamespace setVariable ["KH_var_missionSessionId", KH_var_missionSessionId];
@@ -23,19 +21,9 @@ uiNamespace setVariable ["KH_var_quickFunctionsSqf", KH_var_quickFunctionsSqf];
 KH_var_quickFunctionsLua = createHashMap;
 uiNamespace setVariable ["KH_var_quickFunctionsLua", KH_var_quickFunctionsLua];
 KH_var_inGameUiEventHandlerStackDeletions = [];
-
-if (isNil "KH_var_temporalExecutionStack") then {
-	KH_var_temporalExecutionStack = [];
-};
-
-if (isNil "KH_var_temporalExecutionStackAdditions") then {
-	KH_var_temporalExecutionStackAdditions = [];
-};
-
-if (isNil "KH_var_temporalExecutionStackDeletions") then {
-	KH_var_temporalExecutionStackDeletions = [];
-};
-
+KH_var_temporalExecutionStack = [];
+KH_var_temporalExecutionStackAdditions = [];
+KH_var_temporalExecutionStackDeletions = [];
 KH_var_uiContextExecutionStack = [];
 KH_var_drawUi2dExecutionStack = [];
 KH_var_drawUi3dExecutionStack = [];

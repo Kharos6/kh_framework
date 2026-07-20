@@ -82,30 +82,6 @@ void intercept::pre_start() {
 }
 
 void intercept::pre_init() {
-    game_value temporal_stack = sqf::get_variable(sqf::mission_namespace(), "kh_var_temporalexecutionstack");
-
-    if (temporal_stack.is_nil() || temporal_stack.type_enum() != game_data_type::ARRAY) {
-        temporal_stack = game_value(auto_array<game_value>());
-        sqf::set_variable(sqf::mission_namespace(), "kh_var_temporalexecutionstack", temporal_stack);
-    }
-
-    g_kh_cached_temporal_stack = temporal_stack;
-    game_value temporal_additions = sqf::get_variable(sqf::mission_namespace(), "kh_var_temporalexecutionstackadditions");
-
-    if (temporal_additions.is_nil() || temporal_additions.type_enum() != game_data_type::ARRAY) {
-        temporal_additions = game_value(auto_array<game_value>());
-        sqf::set_variable(sqf::mission_namespace(), "kh_var_temporalexecutionstackadditions", temporal_additions);
-    }
-
-    g_kh_cached_temporal_additions = temporal_additions;
-    game_value temporal_deletions = sqf::get_variable(sqf::mission_namespace(), "kh_var_temporalexecutionstackdeletions");
-
-    if (temporal_deletions.is_nil() || temporal_deletions.type_enum() != game_data_type::ARRAY) {
-        temporal_deletions = game_value(auto_array<game_value>());
-        sqf::set_variable(sqf::mission_namespace(), "kh_var_temporalexecutionstackdeletions", temporal_deletions);
-    }
-
-    g_kh_cached_temporal_deletions = temporal_deletions;
     auto displays = sqf::all_displays();
     g_is_menu = (displays.size() == 1 && displays[0] == sqf::find_display(0));
 
@@ -198,6 +174,10 @@ void intercept::pre_init() {
             }
         }
 
+        raw_call_sqf_native_no_return(sqf::get_variable(sqf::mission_namespace(), "kh_fnc_preinit"));
+        g_kh_cached_temporal_stack = sqf::get_variable(sqf::mission_namespace(), "kh_var_temporalexecutionstack");
+        g_kh_cached_temporal_additions = sqf::get_variable(sqf::mission_namespace(), "kh_var_temporalexecutionstackadditions");
+        g_kh_cached_temporal_deletions = sqf::get_variable(sqf::mission_namespace(), "kh_var_temporalexecutionstackdeletions");
         sqf::diag_log("KH Framework Extension - Pre-init");
     }
 }
@@ -210,6 +190,7 @@ void intercept::post_init() {
             game["postInit"] = true;
         }
         
+        raw_call_sqf_native_no_return(sqf::get_variable(sqf::mission_namespace(), "kh_fnc_postinit"));
         sqf::diag_log("KH Framework Extension - Post-init");
     }
 }

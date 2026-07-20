@@ -82,7 +82,11 @@ isNil {
                                             KH_var_suspensionDisplay = ["RscText", _suspensionText, [0, false, 0], [0, 0, 0, 1], [0, 0, 100, 100], false, [0, 0, 0]] call KH_fnc_draw2d;
                                         };
                                     };
+
+                                    nil;
                                 };
+
+                                nil;
                             },
                             KH_var_allPlayerMachines - [KH_var_adminMachine, _caller],
                             true,
@@ -104,8 +108,11 @@ isNil {
                                     if !(isNil "KH_var_suspensionDisplay") then {
                                         ctrlDelete KH_var_suspensionDisplay;
                                         KH_var_suspensionDisplay = nil;
+                                        nil;
                                     };
                                 };
+
+                                nil;
                             },
                             "PLAYERS",
                             true,

@@ -244,6 +244,8 @@ isNil {
 													KH_var_suspensionDisplay = ["RscText", "PLAYERS LOADING...", [0, false, 0], [0, 0, 0, 1], [0, 0, 100, 100], false, [0, 0, 0]] call KH_fnc_draw2d;
 												};
 											};
+
+											nil;
 										};
 
 										execute [
@@ -253,8 +255,11 @@ isNil {
 													with uiNamespace do {
 														if (isNull KH_var_suspensionDisplay) then {
 															KH_var_suspensionDisplay = ["RscText", "PLAYERS LOADING...", [0, false, 0], [0, 0, 0, 1], [0, 0, 100, 100], false, [0, 0, 0]] call KH_fnc_draw2d;
+															nil;
 														};
 													};
+
+													nil;
 												}
 												else {
 													[_handlerId] call KH_fnc_removeHandler;
@@ -288,8 +293,11 @@ isNil {
 													if !(isNil "KH_var_suspensionDisplay") then {
 														ctrlDelete KH_var_suspensionDisplay;
 														KH_var_suspensionDisplay = nil;
+														nil;
 													};
 												};
+
+												nil;
 											},
 											"PLAYERS",
 											true,
@@ -1271,7 +1279,10 @@ isNil {
 					{
 						with uiNamespace do {
 							KH_var_loadingDisplay = ["RscText", "LOADING...", [0, false, 0], [0, 0, 0, 1], [0, 0, 100, 100], false, [0, 0, 0]] call KH_fnc_draw2d;
+							nil;
 						};
+						
+						nil;
 					},
 					true,
 					{CBA_missionTime > 0;},
@@ -1285,8 +1296,11 @@ isNil {
 							with uiNamespace do {
 								if (isNull KH_var_loadingDisplay) then {
 									KH_var_loadingDisplay = ["RscText", "LOADING...", [0, false, 0], [0, 0, 0, 1], [0, 0, 100, 100], false, [0, 0, 0]] call KH_fnc_draw2d;
+									nil;
 								};
 							};
+
+							nil;
 						}
 						else {
 							[_handlerId] call KH_fnc_removeHandler;
@@ -1310,7 +1324,10 @@ isNil {
 								with uiNamespace do {
 									ctrlDelete KH_var_loadingDisplay;
 									KH_var_loadingDisplay = nil;
+									nil;
 								};
+
+								nil;
 							},
 							true,
 							{!(uiNamespace isNil "KH_var_loadingDisplay");},

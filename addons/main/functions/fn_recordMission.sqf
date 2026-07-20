@@ -102,6 +102,7 @@ if _scenario then {
         [],
         {
             KH_var_recordedScenarioData = (call KH_fnc_collectScenarioData) select 0;
+            nil;
         },
         true,
         "-2",

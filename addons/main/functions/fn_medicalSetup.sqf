@@ -426,6 +426,7 @@ if KH_var_medical then {
                                                 if !(isNil "KH_var_incapacitationFade") then {
                                                     ppEffectDestroy KH_var_incapacitationFade;
                                                     KH_var_incapacitationFade = nil;
+                                                    nil;
                                                 };														
                                             },
                                             true,
@@ -996,6 +997,7 @@ if KH_var_medical then {
                     if !(isNil "KH_var_incapacitationFade") then {
                         ppEffectDestroy KH_var_incapacitationFade;
                         KH_var_incapacitationFade = nil;
+                        nil;
                     };	
                 }
             ] call KH_fnc_addEventHandler;

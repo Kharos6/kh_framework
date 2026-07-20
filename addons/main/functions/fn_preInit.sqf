@@ -1982,6 +1982,8 @@ if hasInterface then {
 					triggerCbaEvent ["KH_eve_playerKilled", [clientOwner, getPlayerUID _unit, getPlayerID _unit, _unit, _killer, _instigator], "GLOBAL", false];
 				}
 			] call KH_fnc_addEventHandler;
+			
+			nil;
 		}
 	] call KH_fnc_addEventHandler;
 

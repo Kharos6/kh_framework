@@ -7335,6 +7335,16 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("fkVetoFills", RenderIntegration::g_fk_veto_fills));
         out.push_back(kv("fkVetoLastN", static_cast<uint64_t>(RenderIntegration::g_fk_veto_last_n)));
         out.push_back(kv("blkCollapseHolds", RenderIntegration::g_blk_collapse_holds));
+        out.push_back(kv("blkBlankSkips", RenderIntegration::g_blk_blank_skips));   // 26053 blank-guard census
+        out.push_back(kv("blkStarvedAdopts", RenderIntegration::g_blk_starved_adopts));   // 26054 starvation census
+        // 26054: the capture-side pending slot itself (the publish twin's
+        // blkPendAgeS already exists) - the next stuck log shows WHICH
+        // flavor is pending and whether it is maturing or thrashing.
+        out.push_back(kvf("stdPendAgeS", RenderIntegration::g_light_probe.pend_t >= 0.0f
+            ? RenderIntegration::effect_time_seconds() - RenderIntegration::g_light_probe.pend_t
+            : -1.0f));
+        out.push_back(kvf("stdPendAmbLum", RenderIntegration::g_light_probe.pend_amb_l));
+        out.push_back(kvf("stdPendSunLum", RenderIntegration::g_light_probe.pend_sun_l));
         out.push_back(kv("blkRegimeAdopts", RenderIntegration::g_light_probe.regime_adopts));
         out.push_back(kv("blkRegimeRejects", RenderIntegration::g_light_probe.regime_rejects));
         out.push_back(kv("blkJumpAdopts", RenderIntegration::g_blk_jump_adopts));

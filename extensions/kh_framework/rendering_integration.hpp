@@ -8008,7 +8008,7 @@ static uint32_t g_fk_veto_cand_n = 0;       // candidates staged at the last pas
                                             // is live in this scene)
 // BUILD TAG (doctrine: bump on EVERY delivered build; stats-visible so a
 // field log names the binary it came from).
-static constexpr int KH_BUILD_TAG = 26052;
+static constexpr int KH_BUILD_TAG = 26054;
 // NEAR-GAP RAMP (build 26001; the RenderDoc conviction). ROOT, proven by
 // pixel history + depth-window plateaus: the world partition's viewport
 // floor (0.011 in the convicting capture) collapses EVERY fragment nearer
@@ -8772,6 +8772,12 @@ static uint64_t g_blk_err_rejects = 0;      // residual refusals
 // values indefinitely - boxes stay lit, exactly the wanted outcome.
 static uint64_t g_blk_collapse_holds = 0;  // collapse-class jumps held (no sun-jump witness)
 static uint64_t g_blk_jump_adopts = 0;      // confirmed persistent jumps
+static uint64_t g_blk_blank_skips = 0;      // BLANK-CLASS uploads ignored by the capture
+                                            // arbitration (26053; ledger at the guard in
+                                            // kh_probe_std_refresh)
+static uint64_t g_blk_starved_adopts = 0;   // regime adoptions that ran under STANDING
+                                            // STARVATION (26054; ledger at the sticky-
+                                            // pending block in kh_probe_std_refresh)
 
 // Luminance-band agreement with an absolute epsilon so night-small values
 // cannot ratio-flap: |a - b| <= max(half the larger, 0.02).
@@ -9638,6 +9644,10 @@ struct CbColorProbe {
     float    pend_amb_l = -1.0f;     // pending out-of-band flavor
     float    pend_sun_l = -1.0f;
     float    pend_t = -1.0f;         // pending start (-1 = no pending)
+    float    pend_seen = -1.0f;      // last sighting AGREEING with the pending
+                                     // (26054: the sticky-pending liveness stamp;
+                                     // ledger at the starvation block in
+                                     // kh_probe_std_refresh)
     uint64_t regime_rejects = 0;     // standard uploads refused as a foreign flavor
     uint64_t regime_adopts = 0;      // out-of-band flavors adopted after exclusivity
     ID3D11Resource* buf = nullptr;   // locked upload location (weak identity)
@@ -13915,6 +13925,43 @@ inline bool kh_probe_lum_band(float a, float b) {
 // - the defensible verdict. First-ever capture applies unconditionally
 // (cold path unchanged).
 inline void kh_probe_std_refresh(CbColorProbe& khp, const float* f, uint32_t nf, float khp_now) {
+    // BLANK-BLOCK GUARD (26053; stats3 conviction, the skipTime
+    // stale-lighting campaign round 1). During a skipTime transition the
+    // engine interleaves a block-ANCHORED, mode-1.0 upload whose ambient,
+    // sun AND fog lanes are ALL zero - dead/cleared content, not a world
+    // lighting state (the darkest legitimate night on record carried
+    // amb-lum 0.019 and a nonzero sky-tracking fog color; the blank
+    // carries literal zeros in all three families). The arbitration below
+    // judges only PERSISTENCE, never content, so when the real block
+    // pauses during the transition window the blank wins exclusivity and
+    // HIJACKS the standing regime - after which recovery is impossible by
+    // design: every real-flavor pending dies at the next blank sighting
+    // ('standing flavor still live'), the mirror goes blank, and
+    // downstream shows one of two faces of the same root: publish ADOPTS
+    // the blank when the sun-jump witness is fresh (black boxes; stats3:
+    // std/mirror/staged all zero with lightLocStdAgeS 11 ms in daylight),
+    // or collapse-HOLDS the previous day values against it when the
+    // witness is stale (the dimmed-noon-at-night boxes). Fix: blank-class
+    // content is INERT here - it neither refreshes the standing stamp,
+    // kills or seeds a pending, nor ever adopts (first-capture included) -
+    // so it cannot hijack, and an already-hijacked standing heals as soon
+    // as any real flavor runs exclusive-of-nonblank for the 500 ms bar.
+    // Bounds fail open (unclassifiable content takes the old path); a
+    // hypothetically genuine all-zero world would hold the last standing
+    // values - visually identical to adopting zero. The census counter is
+    // the field round's confirm/falsify lane.
+    if (khp.off >= 40 && khp.off - 40 + 38 < nf) {
+        const float* khpz_b = f + (khp.off - 40);
+        const float khpz_al = khpz_b[8] + khpz_b[9] + khpz_b[10];
+        const float khpz_sl = khpz_b[16] + khpz_b[17] + khpz_b[18];
+        const float khpz_fl = khpz_b[36] + khpz_b[37] + khpz_b[38];
+
+        if (khpz_al < 1.0e-6f && khpz_sl < 1.0e-6f && khpz_fl < 1.0e-6f) {
+            g_blk_blank_skips++;
+            return;
+        }
+    }
+
     bool khp_apply = true;
 
     if (khp.off >= 40 && khp.off - 40 + 18 < nf && khp.std_amb_l >= 0.0f) {
@@ -13925,17 +13972,54 @@ inline void kh_probe_std_refresh(CbColorProbe& khp, const float* f, uint32_t nf,
         if (kh_probe_lum_band(khp_al, khp.std_amb_l) &&
             kh_probe_lum_band(khp_sl, khp.std_sun_l)) {
             khp.pend_t = -1.0f;   // standing flavor still live: pending dies
+            khp.pend_seen = -1.0f;
         } else {
             const bool khp_agree = khp.pend_t >= 0.0f &&
                 kh_probe_lum_band(khp_al, khp.pend_amb_l) &&
                 kh_probe_lum_band(khp_sl, khp.pend_sun_l);
 
+            if (khp_agree) khp.pend_seen = khp_now;
+            // STANDING STARVATION (26054; statsnew conviction - round 2 of
+            // the skipTime stale-lighting campaign). The locked buffer is a
+            // MULTIPLEX: many block-shaped uploads per frame, several
+            // flavors interleaved (regime rejects run at thousands/sec in
+            // HEALTHY sessions). The single pending slot re-seeded on every
+            // disagreeing sighting, so after a skipTime the new world
+            // flavor could never survive the 500 ms bar - every interleaved
+            // third flavor reset it - and the DEAD standing ruled forever
+            // (the convicting log: standing unseen 13.78 s in full daylight
+            // with day content flowing at 15k rejects/s and zero adoptions;
+            // the 26053 blank guard had already removed the hijack layer -
+            // blkBlankSkips 3430 - exposing this one). The world block
+            // uploads every frame, so a standing flavor unseen for 2 s
+            // while mode-1 content still reaches this arbitration is BY
+            // DEFINITION no longer the world's lighting. Under that
+            // starvation - and ONLY under it - the pending turns STICKY:
+            // a disagreeing flavor re-seeds the slot only if the pending
+            // itself has gone unsighted for 0.35 s. Standing alive =
+            // bit-identical to 26034 exclusivity (the standing-match branch
+            // above still kills the pending on every sighting); the
+            // pure-sky-altitude hold is untouched (no sightings = no
+            // starvation logic = standing holds); the collapse guard below
+            // stays the hard line in the adoption chain, witness and all.
+            const bool khp_starved = khp.last_std_time >= 0.0f &&
+                khp_now - khp.last_std_time > 2.0f;
+
             if (!khp_agree) {
-                khp.pend_amb_l = khp_al;
-                khp.pend_sun_l = khp_sl;
-                khp.pend_t = khp_now;
-                khp_apply = false;
-                khp.regime_rejects++;
+                if (khp_starved && khp.pend_t >= 0.0f && khp.pend_seen >= 0.0f &&
+                    khp_now - khp.pend_seen < 0.35f) {
+                    // sticky pending: the interleaved third flavor is
+                    // ignored instead of re-seeding the slot
+                    khp_apply = false;
+                    khp.regime_rejects++;
+                } else {
+                    khp.pend_amb_l = khp_al;
+                    khp.pend_sun_l = khp_sl;
+                    khp.pend_t = khp_now;
+                    khp.pend_seen = khp_now;
+                    khp_apply = false;
+                    khp.regime_rejects++;
+                }
             } else if (khp_now - khp.pend_t < 0.5f) {
                 khp_apply = false;
                 khp.regime_rejects++;
@@ -13951,6 +14035,7 @@ inline void kh_probe_std_refresh(CbColorProbe& khp, const float* f, uint32_t nf,
                 g_blk_collapse_holds++;
             } else {
                 khp.regime_adopts++;   // exclusive for 500 ms: a real level change
+                if (khp_starved) g_blk_starved_adopts++;   // 26054 census
             }
         }
     }
@@ -13962,6 +14047,7 @@ inline void kh_probe_std_refresh(CbColorProbe& khp, const float* f, uint32_t nf,
     khp.std_amb_l = khp.nb[8] + khp.nb[9] + khp.nb[10];
     khp.std_sun_l = khp.nb[16] + khp.nb[17] + khp.nb[18];
     khp.pend_t = -1.0f;
+    khp.pend_seen = -1.0f;
 }
 
 inline void locator_note_upload(ID3D11Resource* res, const void* data, uint32_t bytes) {
@@ -22411,6 +22497,8 @@ inline void reset_stat_counters() {
     g_lit_grace_saves = 0;
     g_blk_jump_adopts = 0;
     g_blk_collapse_holds = 0;   // 26052: the 26050 counter joins its siblings here
+    g_blk_blank_skips = 0;      // 26053: blank-guard census
+    g_blk_starved_adopts = 0;   // 26054: starvation-path census
     g_fk_veto_fills = 0; g_fk_veto_last_n = 0; g_fk_veto_cand_n = 0;   // 26052: veto census
     g_sun_jump_refused = 0;
     g_sun_jump_stream_refused = 0;

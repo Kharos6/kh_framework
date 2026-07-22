@@ -163,6 +163,236 @@ static registered_sqf_function _sqf_flush_ui_render;
 static registered_sqf_function _sqf_dump_render_trace;
 static registered_sqf_function _sqf_dump_dynamic_lights;
 
+struct kh_command_variant {
+    std::string source;
+    code compiled;
+    bool exists = false;
+    bool compiled_ready = false;
+};
+
+struct kh_command_entry {
+    std::string canonical_name;      // as reported by supportInfo, for error text
+    kh_command_variant call_variant[3];
+    kh_command_variant spawn_variant[3];
+};
+
+static std::unordered_map<std::string, kh_command_entry> g_sqf_command_map;
+static bool g_sqf_command_map_initialized = false;
+static const std::unordered_set<std::string> g_sqf_command_map_skip = {};
+
+static std::string kh_lower_copy(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+    return value;
+}
+
+// Only plain identifiers are callable by name; this filters out the symbolic
+// operators supportInfo also reports (+, -, ==, #, !, &&, ...), which would
+// otherwise produce compile errors in the RPT for entries nobody can call.
+static bool kh_command_name_is_callable(const std::string& name) {
+    if (name.empty() || name.size() > 64) {
+        return false;
+    }
+
+    const unsigned char first = static_cast<unsigned char>(name[0]);
+
+    if (!std::isalpha(first) && first != '_') {
+        return false;
+    }
+
+    for (const char raw : name) {
+        const unsigned char c = static_cast<unsigned char>(raw);
+
+        if (!std::isalnum(c) && c != '_') {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static void kh_register_command_variant(const std::string& name, int arity) {
+    if (arity < 0 || arity > 2 || !kh_command_name_is_callable(name)) {
+        return;
+    }
+
+    const std::string key = kh_lower_copy(name);
+
+    if (g_sqf_command_map_skip.find(key) != g_sqf_command_map_skip.end()) {
+        return;
+    }
+
+    kh_command_entry& entry = g_sqf_command_map[key];
+
+    if (entry.canonical_name.empty()) {
+        entry.canonical_name = name;
+    }
+
+    if (entry.call_variant[arity].exists) {
+        return;  // supportInfo repeats each command once per type combination
+    }
+
+    std::string invocation;
+    std::string spawn_invocation;
+
+    switch (arity) {
+        case 0:
+            invocation = name;
+            spawn_invocation = name;
+            break;
+        case 1:
+            invocation = name + " _khRightArgument";
+            spawn_invocation = name + " (_this select 0)";
+            break;
+        default:
+            invocation = "_khLeftArgument " + name + " _khRightArgument";
+            spawn_invocation = "(_this select 0) " + name + " (_this select 1)";
+            break;
+    }
+
+    entry.call_variant[arity].exists = true;
+    entry.call_variant[arity].source = "setReturnValue (" + invocation + ");";
+    entry.spawn_variant[arity].exists = true;
+    entry.spawn_variant[arity].source = spawn_invocation + ";";
+}
+
+// supportInfo entries look like:
+//   "n:time", "u:count ARRAY", "b:ARRAY select SCALAR", "t:OBJECT"
+static void kh_parse_support_info_entry(const std::string& raw) {
+    if (raw.size() < 3 || raw[1] != ':') {
+        return;
+    }
+
+    const char kind = static_cast<char>(std::tolower(static_cast<unsigned char>(raw[0])));
+
+    if (kind != 'n' && kind != 'u' && kind != 'b') {
+        return;  // 't:' type entries and anything unexpected
+    }
+
+    std::vector<std::string> tokens;
+    std::string current;
+
+    for (size_t i = 2; i < raw.size(); ++i) {
+        if (raw[i] == ' ' || raw[i] == '\t') {
+            if (!current.empty()) {
+                tokens.push_back(current);
+                current.clear();
+            }
+        } else {
+            current.push_back(raw[i]);
+        }
+    }
+
+    if (!current.empty()) {
+        tokens.push_back(current);
+    }
+
+    switch (kind) {
+        case 'n':
+            if (tokens.size() == 1) {
+                kh_register_command_variant(tokens[0], 0);
+            }
+
+            break;
+        case 'u':
+            if (tokens.size() == 2) {
+                kh_register_command_variant(tokens[0], 1);
+            }
+
+            break;
+        default:
+            if (tokens.size() == 3) {
+                kh_register_command_variant(tokens[1], 2);
+            }
+            
+            break;
+    }
+}
+
+static bool kh_ensure_variant_compiled(kh_command_variant& variant) {
+    if (!variant.exists) {
+        return false;
+    }
+
+    if (!variant.compiled_ready) {
+        variant.compiled = sqf::compile(variant.source.c_str());
+        variant.compiled_ready = true;
+    }
+
+    return true;
+}
+
+// Idempotent: the engine's command set never changes, so the table survives
+// mission restarts and is only ever built once.
+static void populate_sqf_command_map() {
+    if (g_sqf_command_map_initialized) {
+        return;
+    }
+
+    g_sqf_command_map_initialized = true;
+
+    try {
+        const auto entries = sqf::support_info("");
+
+        if (entries.empty()) {
+            sqf::diag_log("KH Framework Extension - supportInfo returned no command list");
+            return;
+        }
+
+        g_sqf_command_map.reserve(entries.size() / 2 + 16);
+
+        for (const auto& entry : entries) {
+            kh_parse_support_info_entry(std::string(entry.c_str()));
+        }
+
+        size_t compiled = 0;
+
+        for (auto& pair : g_sqf_command_map) {
+            for (int arity = 0; arity < 3; ++arity) {
+                if (kh_ensure_variant_compiled(pair.second.call_variant[arity])) {
+                    ++compiled;
+                }
+            }
+        }
+
+        sqf::diag_log("KH Framework Extension - Command table: "
+                      + std::to_string(g_sqf_command_map.size()) + " commands, "
+                      + std::to_string(compiled) + " variants");
+    } catch (const std::exception& e) {
+        sqf::diag_log("KH Framework Extension - Failed to build command table: " + std::string(e.what()));
+    } catch (...) {
+        sqf::diag_log("KH Framework Extension - Failed to build command table");
+    }
+}
+
+static kh_command_entry* kh_find_command(const std::string& name) {
+    if (g_sqf_command_map.empty()) {
+        return nullptr;
+    }
+
+    const auto it = g_sqf_command_map.find(kh_lower_copy(name));
+    return it == g_sqf_command_map.end() ? nullptr : &it->second;
+}
+
+static std::string kh_command_arity_description(const kh_command_entry& entry) {
+    std::string out;
+
+    for (int arity = 0; arity < 3; ++arity) {
+        if (!entry.call_variant[arity].exists) {
+            continue;
+        }
+
+        if (!out.empty()) {
+            out += ", ";
+        }
+
+        out += std::to_string(arity);
+    }
+
+    return out.empty() ? std::string("none") : out;
+}
+
 static game_value execute_lua_sqf(game_value_parameter args, game_value_parameter code_or_function) {    
     try {
         LuaStackGuard guard(*g_lua_state);
@@ -3648,6 +3878,14 @@ static game_value serialize_function_impl(const game_value& function, bool is_pu
 
         if (is_string) {
             func_str = static_cast<std::string>(function);
+
+            // A native SQF command name is directly callable through
+            // callSerializedFunction, so hand it straight back instead of
+            // compiling it into a stored hash entry.
+            if (kh_find_command(func_str) != nullptr) {
+                return function;
+            }
+
             has_space = (func_str.find(' ') != std::string::npos);
             is_sqf_path = (func_str.find(".sqf") != std::string::npos);
 
@@ -3736,8 +3974,71 @@ static game_value call_serialized_function_sqf(game_value_parameter arguments, g
 
         // Case 2: _function is a string name -> resolve from missionNamespace
         if (!function.is_nil() && function.type_enum() == game_data_type::STRING) {
-            rv_namespace ns = sqf::mission_namespace();
             std::string fname = static_cast<std::string>(function);
+
+            // Case 2a: native SQF command. Case-insensitive, O(1).
+            kh_command_entry* entry = kh_find_command(fname);
+
+            if (entry != nullptr) {
+                static const r_string kh_n_left_argument("_khleftargument");
+                static const r_string kh_n_right_argument("_khrightargument");
+                int argument_count = 0;
+                const auto_array<game_value>* argument_array = nullptr;
+
+                if (!args_nil) {
+                    if (arguments.type_enum() != game_data_type::ARRAY) {
+                        report_error("KH Framework Extension - Command '" + entry->canonical_name
+                                     + "' expects its arguments as an array");
+
+                        return game_value();
+                    }
+
+                    argument_array = &arguments.to_array();
+                    argument_count = static_cast<int>(argument_array->size());
+                }
+
+                if (argument_count > 2) {
+                    report_error("KH Framework Extension - Command '" + entry->canonical_name
+                                 + "' was given " + std::to_string(argument_count)
+                                 + " arguments; SQF commands accept at most 2");
+
+                    return game_value();
+                }
+
+                kh_command_variant& variant = unscheduled
+                    ? entry->call_variant[argument_count]
+                    : entry->spawn_variant[argument_count];
+
+                if (!variant.exists) {
+                    report_error("KH Framework Extension - Command '" + entry->canonical_name
+                                 + "' has no variant taking " + std::to_string(argument_count)
+                                 + " argument(s); supported argument counts: "
+                                 + kh_command_arity_description(*entry));
+
+                    return game_value();
+                }
+
+                kh_ensure_variant_compiled(variant);
+
+                if (!unscheduled) {
+                    return sqf::spawn(args_nil ? game_value(auto_array<game_value>()) : arguments,
+                                      variant.compiled);
+                }
+
+                if (argument_count > 0) {
+                    const auto_array<game_value>& args_ref = *argument_array;
+                    game_state->set_local_variable(kh_n_right_argument, args_ref[argument_count - 1]);
+
+                    if (argument_count == 2) {
+                        game_state->set_local_variable(kh_n_left_argument, args_ref[0]);
+                    }
+                }
+
+                return raw_call_sqf_native(variant.compiled);
+            }
+
+            // Case 2b: not a command -> resolve from missionNamespace (unchanged)
+            rv_namespace ns = sqf::mission_namespace();
             game_value stored = sqf::get_variable(ns, fname);
 
             if (!stored.is_nil() && stored.type_enum() == game_data_type::CODE) {

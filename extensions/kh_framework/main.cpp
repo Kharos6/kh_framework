@@ -82,6 +82,7 @@ void intercept::pre_start() {
 }
 
 void intercept::pre_init() {
+    populate_sqf_command_map();
     auto displays = sqf::all_displays();
     g_is_menu = (displays.size() == 1 && displays[0] == sqf::find_display(0));
 

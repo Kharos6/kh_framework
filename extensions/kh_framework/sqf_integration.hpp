@@ -6675,13 +6675,45 @@ static game_value update_render3d_sqf(game_value_parameter args) {
 // "effect" string/scalar/".hlsl" path (fullscreen effects only, id > 0;
 // custom .hlsl passes draw with the user's PSEffect) | "params"
 // array | "color" [r,g,b,a] | "blend" string | "band" [minDist, maxDist,
-// falloff?] ([] clears) | "visible" bool | "ui" bool (post-tonemap phase)
-// | "duration" number or [fadeIn, hold, fadeOut] | "position" [x,y,zASL]
-// (the localized volume's center) | "radius" number|[x,y,z] | "falloff"
-// scalar | "shape" "sphere"|"cube" | "localsphere" [radius, falloff?]
-// (enables the world-space volume mask; [] clears it). Returns false for
-// unknown handles, 3D-object handles, unknown properties, or invalid
-// values.
+// falloff?] ([] clears) | "visible" bool | "ui" "SCENE"/"UI"/"BOTH" or bool
+// (phase enum: SCENE = the pre-tonemap 3D scene chain; UI = coverage-
+// masked to the engine UI, gather-effect glow spills past UI edges; BOTH
+// (26061) = the scene chain PLUS a coverage-masked UI application - each
+// half in its correct domain; booleans stay accepted as the legacy pair
+// false=SCENE, true=BOTH) | "uispill" bool (26062: custom-shader lane
+// declaration - true = additive/black-preserving, the system feeds the
+// coverage-premultiplied capture and the effect's glow spills past UI
+// edges; builtins are auto-classified and ignore this)
+// | "duration" number or [fadeIn, hold, fadeOut] | "position"
+// [x,y,zASL] (the localized volume's center) | "radius" number|[x,y,z] |
+// "falloff" scalar | "shape" "sphere"|"cube" | "localsphere" [radius,
+// falloff?] (enables the world-space volume mask; [] clears it). Returns
+// false for unknown handles, 3D-object handles, unknown properties, or
+// invalid values.
+
+// 26055: the affectUI slot's dual acceptance, shared by addPostFX and
+// updatePostFX "ui". STRING "SCENE"/"UI"/"BOTH" (case-insensitive; empty =
+// slot skipped, leaves the fields untouched) or the legacy BOOL pair.
+// Returns false for anything else.
+static bool kh_ui_phase_from_gv(const game_value& gv, bool& affect_ui, bool& ui_only) {
+    if (gv.type_enum() == game_data_type::BOOL) {
+        affect_ui = static_cast<bool>(gv);
+        ui_only = false;
+        return true;
+    }
+
+    if (gv.type_enum() != game_data_type::STRING) return false;
+    std::string khup_s = static_cast<std::string>(gv);
+    if (khup_s.empty()) return true;   // positional placeholder: skip
+    std::transform(khup_s.begin(), khup_s.end(), khup_s.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+
+    if (khup_s == "SCENE") { affect_ui = false; ui_only = false; return true; }
+    if (khup_s == "BOTH")  { affect_ui = true;  ui_only = false; return true; }
+    if (khup_s == "UI")    { affect_ui = true;  ui_only = true;  return true; }
+    return false;
+}
+
 static game_value update_post_fx_sqf(game_value_parameter args) {
     try {
         auto& arr = args.to_array();
@@ -6696,6 +6728,7 @@ static game_value update_post_fx_sqf(game_value_parameter args) {
         if (it == RenderIntegration::g_draw_list.end()) return game_value(false);
         auto& obj = it->second;
         if (!obj.fullscreen) return game_value(false);   // that handle belongs to updateRender3D
+        if (obj.affect_ui) RenderIntegration::kh_ui_driver_rehoist();   // 26063: back on top
 
         const int shared = kh_apply_shared_prop(obj, prop, arr[2]);
         if (shared >= 0) return game_value(shared == 1);
@@ -6718,9 +6751,17 @@ static game_value update_post_fx_sqf(game_value_parameter args) {
             obj.fx_shader = khfx_path;
             RenderIntegration::set_effect_params(obj, nullptr);
         } else if (prop == "ui") {
+            // 26055: "SCENE"/"UI"/"BOTH" or the legacy boolean pair
+            if (!kh_ui_phase_from_gv(arr[2], obj.affect_ui, obj.ui_only)) return game_value(false);
+            if (obj.affect_ui) RenderIntegration::kh_ui_driver_rehoist();   // UI phase demanded
+        } else if (prop == "uispill") {
+            // 26062: the custom-shader lane declaration - true = the
+            // effect is additive/black-preserving, so the system feeds it
+            // the coverage-premultiplied capture and its glow spills past
+            // UI edges. Builtin gather effects are auto-classified; this
+            // bit exists so a custom .hlsl never needs coverage code.
             if (arr[2].type_enum() != game_data_type::BOOL) return game_value(false);
-            obj.affect_ui = static_cast<bool>(arr[2]);
-            if (obj.affect_ui) RenderIntegration::ensure_ui_driver();   // UI phase demanded
+            obj.ui_spill = static_cast<bool>(arr[2]);
         } else if (prop == "radius") {
             if (!RenderIntegration::read_vec3_or_uniform(arr[2], obj.local_radius)) return game_value(false);
         } else if (prop == "falloff") {
@@ -6847,6 +6888,15 @@ static game_value get_visibility_results_sqf() {
 // Notes: runs pre-tonemap, so the engine's eye adaptation applies on top.
 // Outline and Pulse sample the engine depth buffer per pixel; on frames where
 // they are active, mode-1 meshes do not write depth (read-only DSV phase).
+// affectUI is a phase enum - "SCENE" (default; the pre-tonemap 3D scene
+// chain), "UI" (masked per pixel to the engine-UI coverage; gather effects
+// - Bloom/Halation/LensFlare/Anamorphic, plus customs declared via the
+// "uispill" property - source their glow from UI pixels and spill past
+// hard UI edges, systemically, with no shader cooperation; appears one
+// frame after creation, the mask learn latency), or "BOTH" (26061: the
+// scene chain PLUS a coverage-masked
+// UI application - each half in its correct tonemap domain). Legacy
+// booleans stay accepted: false = SCENE, true = BOTH.
 static game_value add_postfx_sqf(game_value_parameter args) {
     try {
         auto& arr = args.to_array();
@@ -6904,13 +6954,16 @@ static game_value add_postfx_sqf(game_value_parameter args) {
         }
 
         if (arr.size() > 5 && !arr[5].is_nil()) {
-            if (arr[5].type_enum() != game_data_type::BOOL) return game_value("affectUI must be a boolean");
-            obj.affect_ui = static_cast<bool>(arr[5]);
+            // 26055: "SCENE"/"UI"/"BOTH" (empty = slot skipped) or the
+            // legacy boolean pair false=SCENE / true=BOTH
+            if (!kh_ui_phase_from_gv(arr[5], obj.affect_ui, obj.ui_only)) {
+                return game_value("affectUI must be \"SCENE\", \"UI\", \"BOTH\", or a boolean");
+            }
         }
 
         // UI phase demanded: start the overlay control driver (state stays
         // dead otherwise - the operator's no-passive-activation rule)
-        if (obj.affect_ui) RenderIntegration::ensure_ui_driver();
+        if (obj.affect_ui) RenderIntegration::kh_ui_driver_rehoist();
 
         if (arr.size() > 6) {
             if (!RenderIntegration::parse_duration_gv(arr[6], obj)) {
@@ -7002,6 +7055,43 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("uiFlushes", RenderIntegration::g_stats.ui_flushes));
         out.push_back(kv("uiGatePassed", RenderIntegration::g_stats.ui_gate_passed));
         out.push_back(kv("uiGateSkips", RenderIntegration::g_stats.ui_gate_skips));
+        // UI-mask census (ledger at KhUiMask): clears ~ one per frame while
+        // any UI-phase pass is visible; skips ~ one at spawn (the learn
+        // latency) and whenever the mask machinery could not fire;
+        // uiOnlyDraws counts ALL write-window pass draws (26061).
+        out.push_back(kv("uiMaskClears", RenderIntegration::g_ui_mask_clears));
+        out.push_back(kv("uiMaskSkips", RenderIntegration::g_ui_mask_skips));
+        out.push_back(kv("uiOnlyDraws", RenderIntegration::g_ui_only_draws));
+        // 26059: arming-path census - arms = UI-phase-thread compose
+        // detections (~1/frame while a UI-mode pass is visible); aborts
+        // expected 0 (pending clear killed by a foreign target).
+        out.push_back(kv("uiMaskArms", RenderIntegration::g_ui_mask_arms));
+        out.push_back(kv("uiMaskAborts", RenderIntegration::g_ui_mask_aborts));
+        // 26057: draw-time probe census + identity eyeball keys. probes >
+        // 0 with misses ~ probes and arms 0 = identity mismatch (compare
+        // ProbeLastLo against LearnLo0); probes > 0 with a matching Lo and
+        // arms > 0 = machine armed. Lo keys are the low 24 bits of the
+        // weak identities (SQF scalars are 32-bit floats; full pointers
+        // do not survive the trip).
+        out.push_back(kv("uiMaskProbes", RenderIntegration::g_ui_mask_probes));
+        out.push_back(kv("uiMaskProbeMisses", RenderIntegration::g_ui_mask_probe_misses));
+        out.push_back(kv("uiMaskProbeLastLo",
+            static_cast<uint64_t>(reinterpret_cast<uintptr_t>(RenderIntegration::g_ui_mask.last_probe_id) & 0xFFFFFFu)));
+        out.push_back(kv("uiMaskLearnLo0",
+            static_cast<uint64_t>(reinterpret_cast<uintptr_t>(RenderIntegration::g_ui_mask.bb_id[0]) & 0xFFFFFFu)));
+        out.push_back(kv("uiMaskLearnN", static_cast<uint64_t>(RenderIntegration::g_ui_mask.bb_n)));
+        // AlphaMin/Max (26058, retained as the live health check): 255/255
+        // = the coverage channel is pinned (no clear landed this frame);
+        // a low pair = the injected mask is alive. 999 = never sampled.
+        out.push_back(kv("uiMaskAlphaMin", static_cast<uint64_t>(
+            RenderIntegration::g_ui_mask.alpha_min < 0 ? 999 : RenderIntegration::g_ui_mask.alpha_min)));
+        out.push_back(kv("uiMaskAlphaMax", static_cast<uint64_t>(
+            RenderIntegration::g_ui_mask.alpha_max < 0 ? 999 : RenderIntegration::g_ui_mask.alpha_max)));
+        // 26060: the apply-once gate census - ~0 in normal play, ~frame
+        // count while a pause menu / map / editor holds the frame still
+        // (each of those frames would otherwise have compounded the
+        // UI-phase effects onto their own previous output).
+        out.push_back(kv("uiStaleSkips", RenderIntegration::g_ui_stale_skips));
         out.push_back(kv("compositeInjections", RenderIntegration::g_stats.composite_injections));
         out.push_back(kv("compositeMeshes", RenderIntegration::g_stats.composite_meshes));
         out.push_back(kv("compositeSkips", RenderIntegration::g_stats.composite_skips));
@@ -7603,12 +7693,16 @@ static game_value get_render_stats_sqf() {
                      khdl_ui = 0, khdl_overlay = 0, khdl_write = 0, khdl_lit = 0,
                      khdl_farvis = 0, khdl_rot = 0, khdl_cull = 0, khdl_tex = 0,
                      khdl_ushdr = 0, khdl_blend = 0, khdl_band = 0, khdl_loc = 0,
-                     khdl_timed = 0, khdl_mesh = 0;
+                     khdl_timed = 0, khdl_mesh = 0, khdl_uiOnly = 0;
 
             for (const auto& khdl_kv : RenderIntegration::g_draw_list) {
                 const RenderIntegration::RenderObject& khdl_o = khdl_kv.second;
                 if (khdl_o.visible) khdl_vis++;
-                if (khdl_o.fullscreen) { khdl_fs++; if (khdl_o.affect_ui) khdl_ui++; }
+                if (khdl_o.fullscreen) {
+                    khdl_fs++;
+                    if (khdl_o.affect_ui) khdl_ui++;
+                    if (khdl_o.affect_ui && khdl_o.ui_only) khdl_uiOnly++;   // 26055
+                }
                 else if (khdl_o.effect != 0) khdl_fx++;
                 else khdl_solid++;
                 if (khdl_o.mode == RenderIntegration::DepthMode::Off) khdl_overlay++;
@@ -7632,6 +7726,7 @@ static game_value get_render_stats_sqf() {
             out.push_back(kv("objEffect", khdl_fx));
             out.push_back(kv("objFullscreen", khdl_fs));
             out.push_back(kv("objAffectUi", khdl_ui));
+            out.push_back(kv("objUiOnly", khdl_uiOnly));   // 26055: UI-mode passes
             out.push_back(kv("objOverlay", khdl_overlay));
             out.push_back(kv("objDepthWrite", khdl_write));
             out.push_back(kv("objLit", khdl_lit));
@@ -8504,7 +8599,7 @@ static game_value add_local_postfx_sqf(game_value_parameter args) {
 }
 
 // flushUIRender
-// Renders all UI-affecting passes (addPostFX with affectUI = true) into the
+// Renders all UI-affecting passes (addPostFX with affectUI "BOTH"/"UI") into the
 // frame being composed. Driven automatically by the internal overlay control
 // created by ensure_ui_driver(); also callable from a Draw EH on a custom
 // display. Cheap no-op when no UI-affecting passes exist. Returns BOOL: true
@@ -9770,7 +9865,7 @@ static void initialize_sqf_integration() {
 
     _sqf_add_postfx_array = intercept::client::host::register_sqf_command(
         "addPostFX",
-        "Create a persistent fullscreen post-processing pass. Returns the khr_ handle, or a plain error sentence",
+        "Create a persistent fullscreen post-processing pass",
         userFunctionWrapper<add_postfx_sqf>,
         game_data_type::STRING,
         game_data_type::ARRAY
@@ -9786,7 +9881,7 @@ static void initialize_sqf_integration() {
 
     _sqf_get_render_stats = intercept::client::host::register_sqf_command(
         "getRenderStats",
-        "Render health counters. First call arms + zeroes the diagnostics (and the flight recorder) and returns [[\"status\",\"armed\"]]",
+        "Render health counters. First call arms + zeroes the diagnostics (and the flight recorder) and returns [['status', 'armed']]",
         userFunctionWrapper<get_render_stats_sqf>,
         game_data_type::ARRAY
     );
@@ -9815,7 +9910,7 @@ static void initialize_sqf_integration() {
 
     _sqf_dump_dynamic_lights = intercept::client::host::register_sqf_command(
         "dumpDynamicLights",
-        "Dynamic-light recon dump. First call arms the census and returns [[\"status\",\"armed\"]]",
+        "Dynamic-light recon dump. First call arms the census and returns [['status', 'armed']]",
         userFunctionWrapper<dump_dynamic_lights_sqf>,
         intercept::types::game_data_type::ARRAY
     );
@@ -10033,7 +10128,7 @@ static void initialize_sqf_integration() {
 
         private _old = uiNamespace getVariable ["kh_uiDriverControl", controlNull];
 
-        if (!isNull _old) then { 
+        if !(isNull _old) then { 
             ctrlDelete _old;
         };
 

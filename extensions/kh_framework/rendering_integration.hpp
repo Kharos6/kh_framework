@@ -704,6 +704,28 @@ struct Resources {
     ID3D11DepthStencilState* dss_test_write = nullptr;   // LESS_EQUAL, write
     ID3D11DepthStencilState* dss_off = nullptr;          // depth disabled
     ID3D11BlendState*        blend_modes[6] = {};       // normal, additive, multiply, screen, lighten, darken
+    // --- 26055/26061 UI-phase postFX (ledger at KhUiMask) ---
+    ID3D11BlendState*        blend_ui_replace = nullptr;// blend OFF, RGB-only write: builtin UI-phase
+                                                        // passes composite AND coverage-mask entirely
+                                                        // in-shader (centerSize.w = 2) and write the
+                                                        // finished frame; the mask channel survives
+    ID3D11BlendState*        blend_ui_masked = nullptr; // DEST_ALPHA / INV_DEST_ALPHA, RGB-only:
+                                                        // CUSTOM user FX only (their shaders cannot
+                                                        // be assumed coverage-aware) - hardware-lerps
+                                                        // the chain-composited output by coverage;
+                                                        // no glow spill for custom, by contract
+    ID3D11BlendState*        blend_ui_spill = nullptr;  // ONE / INV_DEST_ALPHA, RGB-only: the
+                                                        // 26062 SPILL lane composite - out =
+                                                        // F(frame*cov) + frame*(1-cov), exact for
+                                                        // additive (black-preserving) effects fed
+                                                        // the premultiplied capture
+    ID3D11BlendState*        blend_alpha_zero = nullptr;// blend off, ALPHA-only write mask (the
+                                                        // coverage reset injected after the engine's
+                                                        // compose draw)
+    ID3D11PixelShader*       ps_alpha_zero = nullptr;   // returns float4(0,0,0,0)
+    ID3D11PixelShader*       ps_premult_copy = nullptr; // 26062: capture-with-premultiply - samples
+                                                        // the LIVE backbuffer, writes rgb*a (and a)
+                                                        // into the capture; the spill lane's input
     ID3D11RasterizerState*   rasterizer = nullptr;       // CullNone, MSAA, depth bias. The -32/-1
                                                          // near-pull bias applies to the INJECTED
                                                          // path too: it suppresses the marginal-tie
@@ -730,8 +752,13 @@ struct Resources {
     // --- Post-tonemap backbuffer capture (UI-affecting passes) ---
     ID3D11Texture2D*          bb_tex = nullptr;
     ID3D11ShaderResourceView* bb_srv = nullptr;
+    ID3D11RenderTargetView*   bb_rtv = nullptr;   // 26062: the spill lane's premultiplying
+                                                  // capture draws INTO the capture texture
     UINT                      bb_w = 0, bb_h = 0;
     DXGI_FORMAT               bb_fmt = DXGI_FORMAT_UNKNOWN;
+    ID3D11Texture2D*          ui_alpha_stage = nullptr;   // 26058: 64x64 staging window for the
+                                                          // write-window alpha-regime forensic
+                                                          // (ledger at KhUiMask)
 
     // --- Fullscreen-chain ping-pong targets (single-sample, scene format).
     //     The chain runs on these instead of re-resolving the MSAA scene per
@@ -767,6 +794,8 @@ struct Resources {
     void release_bb_capture() {
         if (bb_tex) { bb_tex->Release(); bb_tex = nullptr; }
         if (bb_srv) { bb_srv->Release(); bb_srv = nullptr; }
+        if (bb_rtv) { bb_rtv->Release(); bb_rtv = nullptr; }   // 26062
+        if (ui_alpha_stage) { ui_alpha_stage->Release(); ui_alpha_stage = nullptr; }   // 26058
         bb_w = 0; bb_h = 0; bb_fmt = DXGI_FORMAT_UNKNOWN;
     }
 
@@ -846,6 +875,12 @@ struct Resources {
         KH_SAFE_RELEASE(dss_test_write);
         KH_SAFE_RELEASE(dss_off);
         for (int i = 0; i < 6; ++i) KH_SAFE_RELEASE(blend_modes[i]);
+        KH_SAFE_RELEASE(blend_ui_replace);   // 26061 UI-mask set
+        KH_SAFE_RELEASE(blend_ui_masked);
+        KH_SAFE_RELEASE(blend_ui_spill);   // 26062
+        KH_SAFE_RELEASE(blend_alpha_zero);
+        KH_SAFE_RELEASE(ps_alpha_zero);
+        KH_SAFE_RELEASE(ps_premult_copy);  // 26062
         KH_SAFE_RELEASE(rasterizer);
         KH_SAFE_RELEASE(rasterizer_cull);
         KH_SAFE_RELEASE(rasterizer_front);
@@ -869,6 +904,203 @@ struct Resources {
 
 static Resources g_res;
 static bool g_reset_hook_installed = false;
+
+// ===========================================================================
+// 26055: "UI"-ONLY POSTFX - the engine-UI coverage mask (RenderDoc-convicted).
+// The addPostFX affectUI parameter grew into a three-way phase enum: SCENE
+// (the scene chain, formerly false), UI (this machinery - the pass affects
+// only pixels the engine's own UI touched, with gather-effect glow spilling
+// past UI edges by design), and BOTH (26061 semantics: the pass runs in the
+// SCENE chain - pre-tonemap, the correct domain for scene work like bloom -
+// AND as a coverage-masked write-window pass for the UI half; the original
+// "post-tonemap over everything" reading double-exposed effects that are
+// domain-sensitive, an overblown mess for bloom).
+//
+// GROUND TRUTH (single-frame RenderDoc capture, all facts convicted there):
+// the frame reaches the swapchain backbuffer (R8G8B8A8_UNORM, single-sample)
+// through exactly one blend-DISABLED fullscreen compose draw (a one-
+// instruction copy PS whose source alpha is 1.0), followed by the engine's
+// UI draws - ALL of them one shader family with SrcBlend ONE /
+// DestBlend INV_SRC_ALPHA on BOTH the color and alpha lanes and a full
+// write mask: textbook premultiplied-over. dst.a therefore evolves as
+// dst.a = src.a + dst.a * (1 - src.a) - the exact coverage accumulator
+// 1 - prod(1 - a_i) - except the compose re-seeds dst.a to 1.0 every frame,
+// which pins it there. The backbuffer is used ONLY as a color target the
+// whole frame (never sampled, never copied), so the alpha channel is
+// engine-dead: we may repurpose it freely.
+//
+// MECHANISM (26059 form): when any visible UI-mode pass exists
+// (g_ui_mask_wanted; dormant otherwise - the no-passive-activation rule),
+// the UI-PHASE-THREAD machine (ledger at kh_ui_mask_thread_draw; four
+// field rounds convicted the compose+UI as running on a second submission
+// thread invisible to every render-thread-gated hook path) detects the
+// frame's first draw onto a learned backbuffer (the compose), lets it
+// run, and injects a fullscreen ALPHA-ONLY write of 0 before the next
+// draw (the first UI draw) - from there the engine's own blending
+// deposits per-pixel UI coverage into dst.a for free. At the write-window
+// flush, EVERY pass (26061: BOTH's UI half included) runs the PROVEN
+// chain-composite shader path (centerSize.w = 1: every blend mode computed
+// exactly in-shader against the per-pass backbuffer capture) under the
+// DEST_ALPHA / INV_DEST_ALPHA blend state: the hardware lerps the composited
+// result against the live backbuffer by the accumulated coverage. Semi-
+// transparent UI over the scene weights the effect by its coverage - the
+// accepted contract. No HLSL changes anywhere; custom user FX follow the
+// same chain contract they already had.
+//
+// BACKBUFFER IDENTITY: learned, not guessed - at each UI-phase flush the
+// bound RTV's resource IS the backbuffer (that gate's own empirical ledger),
+// so its pointer + dims join a small ring here (flip-model swapchains rotate
+// buffers; the ring holds the full rotation). Written by the game thread
+// under the park, read by the render thread's hooks - the standard park
+// invariant. One frame of learn latency at spawn: until the clear has fired
+// for the current backbuffer phase, UI-mode passes SKIP (counted), because
+// an unmasked "UI" pass flashing fullscreen is strictly worse than one
+// absent frame.
+//
+// PHASE MACHINE (UI-phase-thread only, 26059): 0 idle -> 2 compose
+// executed (clear pending) -> 3 cleared (mask live; mask_valid readable
+// by the game thread under the park, which freezes the owning thread
+// too). Frame boundaries come from a thread-local QPC delta (compose->UI
+// spans are sub-millisecond; frames are not), foreign targets while
+// pending abort (never clear an unarmed target), and NO other thread
+// writes any phase field.
+//
+// THE ONE-BIT RULE (26062, the systemic gather/spill design): every
+// effect that runs in this phase carries exactly ONE bit of irreducible
+// classification - is it ADDITIVE / BLACK-PRESERVING (F(0) = 0: bloom,
+// halation, streaks, any glow), or a POINT TRANSFORM that paints on
+// black (invert returns white, vignette draws its color regardless)?
+// Spill-class effects are fed the coverage-PREMULTIPLIED capture and
+// composited with ONE/INV_DEST_ALPHA - out = F(frame*cov) + frame*(1-cov)
+// = frame + G(uiContent) - so an UNMODIFIED gather sources UI only and
+// its glow crosses hard UI edges; masked-class effects get the
+// destination coverage lerp instead. The bit CANNOT be inferred from
+// arbitrary shader code (feeding black to a non-black-preserving effect
+// paints the whole frame), so the system carries it for builtins
+// (Bloom/Halation/LensFlare/Anamorphic = spill) and custom authors
+// declare it once via updatePostFX "uispill" - never in shader code.
+// 26060: the machine runs for ALL UI-phase
+// passes (BOTH included) because its compose serial feeds the flush's
+// APPLY-ONCE gate - the fix for effect compounding on re-presented
+// frames (pause/map/editor); the clear itself is scheduled only when a
+// UI-mode pass exists (phase goes straight to 3, mask invalid, for
+// BOTH-only sessions). KNOWN LIMIT, flagged not changed: a
+// hypothetical second full-screen pre-UI pass into the backbuffer (none in
+// the capture) would be classed as the first UI draw and its full-coverage
+// write would re-saturate the mask - "UI" then degrades to BOTH, visibly
+// diagnosable via uiMaskClears against the on-screen result.
+// ===========================================================================
+struct KhUiMask {
+    // learned swapchain buffers (game thread writes under the park)
+    void*    bb_id[4] = {};
+    UINT     bb_w[4] = {}, bb_h[4] = {};
+    uint32_t bb_n = 0;
+    // phase machine (render thread only)
+    int      phase = 0;          // 0 idle, 1 armed, 2 compose ran, 3 cleared
+    void*    phase_bb = nullptr; // the learned entry the current phase locked
+    UINT     phase_w = 0, phase_h = 0;
+    bool     mask_valid = false; // phase == 3; read by the game thread under the park
+    // 26057 draw-time probe (render thread only; ledger below at the
+    // pre-draw block): OMGet budget per frame, refreshed at every hooked
+    // DSV bind - the scene phase demonstrably reaches the hooks, so the
+    // refresh cadence is per-frame even when the UI-phase binds do not.
+    uint32_t probes_used = 0;
+    void*    last_probe_id = nullptr;   // last no-DSV rt0 identity a probe resolved
+    // 26059: the UI-phase-THREAD machine's frame token - QPC at the last
+    // compose detection. A learned-surface draw at phase 3 is the NEXT
+    // frame's compose when more than ~1 ms has passed, and a same-frame
+    // UI draw otherwise (the compose->UI span is sub-millisecond; frames
+    // are multi-millisecond). Thread-local to the UI-phase thread.
+    long long phase_tick = 0;
+    // 26060: apply-once-per-composed-frame serials (the BOTH compounding
+    // fix - full ledger at the flush's stale gate). compose_serial is
+    // incremented by the UI-phase thread at every compose detection;
+    // applied_serial is written by the game thread under the park (which
+    // freezes the owner) when the flush paints. Equal serials = the
+    // backbuffer was NOT recomposed since our last application (paused
+    // menu, map, editor - the engine re-presents without recomposing) and
+    // painting again would compound the effect onto its own output.
+    uint64_t compose_serial = 0;
+    uint64_t applied_serial = 0;
+    bool        alpha_copy_pending = false;   // staging copy awaiting map
+    int         alpha_min = -1, alpha_max = -1;   // write-window surface alpha
+                                                  // over a 64x64 scene-region
+                                                  // window: 255/255 = pinned
+                                                  // (capture regime), a low min
+                                                  // = live coverage already there
+};
+static KhUiMask g_ui_mask;
+static std::atomic<bool> g_ui_mask_wanted{false};   // any visible UI-mode pass exists
+                                                    // (game thread writes, hooks read)
+// (26061: the 26060 wanted/clear_wanted split is gone - EVERY write-window
+// pass is coverage-masked now, so any visible UI-phase pass demands both
+// the compose tracking and the clear. The 26058 worker-record census
+// remains retired.)
+
+// 26059: our OWN game-thread draws traverse the hooks' non-render-thread
+// path, where the UI-phase-thread machine now lives - this flag excludes
+// them. Set/cleared strictly INSIDE the graphics-lock scope, so every
+// other submission thread is parked whenever it is true: no race exists.
+static bool g_kh_flush_active = false;
+// 26059: recursion guard for the UI-phase-thread injection (the clear's
+// own Draw re-enters the hooks on that thread). Deliberately separate
+// from g_ro.in_injection, which belongs to the render thread.
+static bool g_ui_mask_injecting = false;
+static uint64_t g_ui_mask_clears = 0;   // alpha-zero injections fired (render thread;
+                                        // steady state: one per frame while wanted)
+static uint64_t g_ui_mask_skips = 0;    // UI-mode passes skipped for want of a live mask
+static uint64_t g_ui_only_draws = 0;    // UI-mode passes drawn
+static uint64_t g_ui_mask_arms = 0;     // 26059: T-machine compose detections (expect
+                                        // ~1/frame while wanted)
+static uint64_t g_ui_mask_aborts = 0;   // 26059: pending clears killed by a foreign or
+                                        // DSV-bearing draw (expect 0)
+static uint64_t g_ui_mask_probes = 0;       // 26059: T-machine OMGets (~UI draws/frame)
+static uint64_t g_ui_mask_probe_misses = 0; // 26059: T-machine resolutions of an
+                                            // unlearned surface (cursor/overlay draws
+                                            // on other targets land here - benign)
+static uint64_t g_ui_stale_skips = 0;       // 26060: flushes that declined to paint
+                                            // because the backbuffer was not recomposed
+                                            // since the last application (expected ~0 in
+                                            // play; ~frame count while a pause menu or
+                                            // map holds the frame still)
+// (all seven are pure diagnostics: reset_stat_counters members at birth)
+
+inline void kh_ui_mask_reset() {   // device reset / session destroy: forget everything
+    g_ui_mask = KhUiMask{};
+    g_ui_mask_wanted.store(false, std::memory_order_relaxed);
+    g_ui_mask_injecting = false;   // 26059 (g_kh_flush_active is lock-scoped, never reset here)
+}
+
+inline bool kh_ui_mask_known_bb(void* id, UINT* w = nullptr, UINT* h = nullptr) {
+    for (uint32_t i = 0; i < g_ui_mask.bb_n; ++i) {
+        if (g_ui_mask.bb_id[i] == id) {
+            if (w) *w = g_ui_mask.bb_w[i];
+            if (h) *h = g_ui_mask.bb_h[i];
+            return true;
+        }
+    }
+    return false;
+}
+
+// Game thread, under the park (flush_ui_locked): admit a backbuffer identity.
+// 26058: the ring is also read LOCK-FREE by worker threads (the deferred-
+// record census) - slot fields are filled BEFORE bb_n publishes them, and
+// aligned pointer reads are atomic on x64, so a racing reader sees either
+// the old count or a fully-written entry. Census-grade, by design.
+inline void kh_ui_mask_learn(void* id, UINT w, UINT h) {
+    for (uint32_t i = 0; i < g_ui_mask.bb_n; ++i) {
+        if (g_ui_mask.bb_id[i] == id) {
+            g_ui_mask.bb_w[i] = w;   // resize: same buffer object, new dims
+            g_ui_mask.bb_h[i] = h;
+            return;
+        }
+    }
+    const uint32_t slot = g_ui_mask.bb_n < 4 ? g_ui_mask.bb_n : 3;   // ring tail overwrite
+    g_ui_mask.bb_id[slot] = id;
+    g_ui_mask.bb_w[slot] = w;
+    g_ui_mask.bb_h[slot] = h;
+    if (g_ui_mask.bb_n < 4) g_ui_mask.bb_n++;
+}
 
 // Releases every shadow/mask/fire device object living OUTSIDE Resources
 // (that state is declared much later in this header, so only the prototype
@@ -899,6 +1131,7 @@ static void __stdcall on_engine_reset() {
     if (reorder_on_render_thread()) {
         g_res.release();
         release_shadow_device_state();
+        kh_ui_mask_reset();   // 26055: learned backbuffer identities die with the device
         kh_tex_cache_release();
         kh_user_shader_cache_release();
         return;
@@ -907,6 +1140,7 @@ static void __stdcall on_engine_reset() {
     RVExtBridge::ScopedGraphicsLock khr_reset_lock;
     g_res.release();
     release_shadow_device_state();
+    kh_ui_mask_reset();   // 26055: learned backbuffer identities die with the device
     kh_tex_cache_release();
     kh_user_shader_cache_release();
 }
@@ -919,6 +1153,16 @@ struct RenderObject {
                                 // effect == KH_EFFECT_CUSTOM)
     bool  fullscreen = false;   // true = fullscreen triangle (post-processing pass), size unused
     bool  affect_ui = false;    // fullscreen passes: true = render post-tonemap over the composited frame (UI included) instead of the 3D scene phase
+    bool  ui_only = false;      // 26055 ("UI" phase enum): with affect_ui, mask the pass by the
+                                // engine-UI coverage accumulated in the backbuffer's alpha channel
+                                // (ledger at KhUiMask). SCENE = !affect_ui, BOTH = affect_ui alone,
+                                // UI = affect_ui + ui_only. Meaningless without affect_ui.
+    bool  ui_spill = false;     // 26062: write-window lane class for CUSTOM shaders - true
+                                // declares the effect additive/black-preserving, routing it
+                                // through the SPILL lane (premultiplied capture + ONE/
+                                // INV_DEST_ALPHA; glow crosses UI edges). Builtin gather
+                                // effects are auto-classified; this flag is the custom
+                                // author's one-bit declaration (updatePostFX "uispill").
     bool  localized = false;    // fullscreen pass masked to a world-space sphere around pos
     float local_radius[3] = { 25.0f, 25.0f, 25.0f }; // full-strength radii per SQF axis [x, y, z] (m)
     int   local_shape = 0;      // 0 = sphere/ellipsoid, 1 = cube/mesh mask
@@ -3540,6 +3784,15 @@ float3 SampleScene(int2 px)
     return sceneColor.Load(int3(px, 0)).rgb;
 }
 
+// 26061 UI-phase coverage (write-window flush only, centerSize.w = 2): the
+// capture's ALPHA carries the engine-UI coverage the injected clear freed.
+// Meaningless in the scene phase - callers gate on the flag.
+float KhUiCov(int2 px)
+{
+    px = clamp(px, int2(0, 0), int2((int)fxMeta.z - 1, (int)fxMeta.w - 1));
+    return sceneColor.Load(int3(px, 0)).a;
+}
+
 float Luma(float3 c) { return dot(c, float3(0.299f, 0.587f, 0.114f)); }
 
 float LinDepth(float raw)
@@ -3928,6 +4181,13 @@ float4 PSEffect(VSOut i) : SV_Target
             mask *= 1.0f - smoothstep(bandParams.y, bandParams.y + fall, d);
         outc = lerp(scene, outc, mask);
     }
+
+    // 26062 UI-coverage destination mask (write-window MASKED lane,
+    // centerSize.w = 2): the effect vanishes smoothly off the UI. The
+    // SPILL lane never sets w = 2 - gather effects run on the coverage-
+    // premultiplied capture at w = 1 and spill through the ONE /
+    // INV_DEST_ALPHA composite instead (ledger at the flush pass loop).
+    if (centerSize.w > 1.5f) outc = lerp(scene, outc, KhUiCov(px));
 
     // Chained-fullscreen composite packing: for chain passes (centerSize.w =
     // 1) the destination IS the scene texture we already sampled, so every
@@ -6054,6 +6314,83 @@ inline std::string ensure_resources(ID3D11Device* dev) {
             hr = dev->CreateBlendState(&bd, &g_res.blend_modes[i]);
             if (FAILED(hr)) { g_res.release(); return "Create blend " + hr_str(hr); }
         }
+
+        {   // 26061 builtin UI-phase state: blend OFF, RGB-only write - the
+            // shader composites AND coverage-masks in-shader (with the
+            // gather family source-masked for spill) and returns the
+            // finished frame. The mask channel survives for chaining.
+            D3D11_BLEND_DESC brp = {};
+            brp.RenderTarget[0].BlendEnable = FALSE;
+            brp.RenderTarget[0].RenderTargetWriteMask =
+                D3D11_COLOR_WRITE_ENABLE_RED | D3D11_COLOR_WRITE_ENABLE_GREEN |
+                D3D11_COLOR_WRITE_ENABLE_BLUE;
+            hr = dev->CreateBlendState(&brp, &g_res.blend_ui_replace);
+            if (FAILED(hr)) { g_res.release(); return "Create blend(uiReplace) " + hr_str(hr); }
+
+            // 26055/26061: CUSTOM user FX keep the hardware DEST_ALPHA
+            // lerp (their shaders cannot be assumed coverage-aware).
+            D3D11_BLEND_DESC bd = {};
+            bd.RenderTarget[0].BlendEnable = TRUE;
+            bd.RenderTarget[0].SrcBlend = D3D11_BLEND_DEST_ALPHA;
+            bd.RenderTarget[0].DestBlend = D3D11_BLEND_INV_DEST_ALPHA;
+            bd.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+            bd.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ZERO;
+            bd.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ONE;
+            bd.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+            bd.RenderTarget[0].RenderTargetWriteMask =
+                D3D11_COLOR_WRITE_ENABLE_RED | D3D11_COLOR_WRITE_ENABLE_GREEN |
+                D3D11_COLOR_WRITE_ENABLE_BLUE;
+            hr = dev->CreateBlendState(&bd, &g_res.blend_ui_masked);
+            if (FAILED(hr)) { g_res.release(); return "Create blend(uiMask) " + hr_str(hr); }
+
+            // The coverage reset: blend OFF, ALPHA-only write mask - the
+            // injected post-compose clear touches nothing but dst.a.
+            D3D11_BLEND_DESC bz = {};
+            bz.RenderTarget[0].BlendEnable = FALSE;
+            bz.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALPHA;
+            hr = dev->CreateBlendState(&bz, &g_res.blend_alpha_zero);
+            if (FAILED(hr)) { g_res.release(); return "Create blend(alphaZero) " + hr_str(hr); }
+
+            ID3DBlob* khz_blob = nullptr;
+            const std::string khz_err = compile_shader(
+                "float4 main() : SV_Target { return float4(0.0f, 0.0f, 0.0f, 0.0f); }",
+                "main", "ps_5_0", nullptr, &khz_blob);
+            if (!khz_err.empty()) { g_res.release(); return "Compile PS(alphaZero): " + khz_err; }
+            hr = dev->CreatePixelShader(khz_blob->GetBufferPointer(), khz_blob->GetBufferSize(),
+                                        nullptr, &g_res.ps_alpha_zero);
+            khz_blob->Release();
+            if (FAILED(hr)) { g_res.release(); return "Create PS(alphaZero) " + hr_str(hr); }
+
+            // 26062 spill lane: the premultiplying capture PS and the
+            // ONE / INV_DEST_ALPHA composite (ledger at
+            // kh_capture_bb_premult).
+            ID3DBlob* khpm_blob = nullptr;
+            const std::string khpm_err = compile_shader(
+                "Texture2D khSrc : register(t0);"
+                "float4 main(float4 pos : SV_Position) : SV_Target"
+                "{ float4 c = khSrc.Load(int3(int2(pos.xy), 0));"
+                "  return float4(c.rgb * c.a, c.a); }",
+                "main", "ps_5_0", nullptr, &khpm_blob);
+            if (!khpm_err.empty()) { g_res.release(); return "Compile PS(premult): " + khpm_err; }
+            hr = dev->CreatePixelShader(khpm_blob->GetBufferPointer(), khpm_blob->GetBufferSize(),
+                                        nullptr, &g_res.ps_premult_copy);
+            khpm_blob->Release();
+            if (FAILED(hr)) { g_res.release(); return "Create PS(premult) " + hr_str(hr); }
+
+            D3D11_BLEND_DESC bsp = {};
+            bsp.RenderTarget[0].BlendEnable = TRUE;
+            bsp.RenderTarget[0].SrcBlend = D3D11_BLEND_ONE;
+            bsp.RenderTarget[0].DestBlend = D3D11_BLEND_INV_DEST_ALPHA;
+            bsp.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+            bsp.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ZERO;
+            bsp.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ONE;
+            bsp.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+            bsp.RenderTarget[0].RenderTargetWriteMask =
+                D3D11_COLOR_WRITE_ENABLE_RED | D3D11_COLOR_WRITE_ENABLE_GREEN |
+                D3D11_COLOR_WRITE_ENABLE_BLUE;
+            hr = dev->CreateBlendState(&bsp, &g_res.blend_ui_spill);
+            if (FAILED(hr)) { g_res.release(); return "Create blend(uiSpill) " + hr_str(hr); }
+        }
     }
 
     {
@@ -8008,7 +8345,7 @@ static uint32_t g_fk_veto_cand_n = 0;       // candidates staged at the last pas
                                             // is live in this scene)
 // BUILD TAG (doctrine: bump on EVERY delivered build; stats-visible so a
 // field log names the binary it came from).
-static constexpr int KH_BUILD_TAG = 26054;
+static constexpr int KH_BUILD_TAG = 26062;
 // NEAR-GAP RAMP (build 26001; the RenderDoc conviction). ROOT, proven by
 // pixel history + depth-window plateaus: the world partition's viewport
 // floor (0.011 in the convicting capture) collapses EVERY fragment nearer
@@ -19215,6 +19552,191 @@ inline void topo_note_draw() {
 }
 
 
+// 26055 UI-mask coverage reset (ledger at KhUiMask), 26059: runs on the
+// UI-PHASE THREAD from kh_ui_mask_thread_draw, between the engine's
+// compose draw and its first UI draw. The backbuffer RTV is ALREADY BOUND
+// (we sit between two engine draws of the same sequence, inside that
+// thread's legitimate ownership window of the immediate context), so no
+// OM target call is made - one fullscreen triangle through the ALPHA-only
+// write mask zeroes dst.a and nothing else. Full state backup/restore
+// around it, g_ui_mask_injecting raised so the clear's own calls bypass
+// the thread machine (the recursion guard). Resources may lag one frame
+// at spawn (ensure_resources is game-thread); a missing resource leaves
+// the phase at 2, mask_valid false, and the UI-phase flush skips - the
+// designed fail-safe, never a wrong clear.
+inline void kh_ui_mask_clear_alpha(ID3D11DeviceContext* ctx) {
+    if (!g_res.ps_alpha_zero || !g_res.blend_alpha_zero ||
+        !g_res.vs_fullscreen || !g_res.dss_off || !g_res.rasterizer) return;
+
+    // 26057: verify the LIVE binding before injecting - arming may have
+    // come from the draw-time probe (no bind visibility at all), and the
+    // clear must never touch a target other than the armed backbuffer.
+    // A mismatch WAITS (stays phase 2, retries at the next draw) while
+    // probe budget lasts - interleaved foreign draws between the compose
+    // and the UI are then stepped over - and aborts only at exhaustion.
+    {
+        ID3D11RenderTargetView* khz_rtv = nullptr;
+        ID3D11DepthStencilView* khz_dsv = nullptr;
+        ctx->OMGetRenderTargets(1, &khz_rtv, &khz_dsv);
+        void* khz_id = nullptr;
+
+        if (khz_rtv) {
+            ID3D11Resource* khz_r = nullptr;
+            khz_rtv->GetResource(&khz_r);
+            khz_rtv->Release();
+            if (khz_r) { khz_id = static_cast<void*>(khz_r); khz_r->Release(); }
+        }
+
+        const bool khz_bad = (khz_dsv != nullptr) || khz_id != g_ui_mask.phase_bb;
+        if (khz_dsv) khz_dsv->Release();
+
+        if (khz_bad) {
+            if (g_ui_mask.probes_used < 256u) { g_ui_mask.probes_used++; return; }
+            g_ui_mask.phase = 0;
+            g_ui_mask.mask_valid = false;
+            g_ui_mask_aborts++;
+            return;
+        }
+    }
+
+    g_ui_mask_injecting = true;   // 26059: T-side recursion guard (not g_ro.in_injection -
+                                  // that flag belongs to the render thread's machinery)
+    StateBackup khz_backup;
+    khz_backup.capture(ctx);
+
+    UINT khz_nvp = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+    D3D11_VIEWPORT khz_saved_vp[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
+    ctx->RSGetViewports(&khz_nvp, khz_saved_vp);
+
+    D3D11_VIEWPORT khz_full = {};
+    khz_full.Width = static_cast<FLOAT>(g_ui_mask.phase_w);
+    khz_full.Height = static_cast<FLOAT>(g_ui_mask.phase_h);
+    khz_full.MinDepth = 0.0f;
+    khz_full.MaxDepth = 1.0f;
+    ctx->RSSetViewports(1, &khz_full);
+    ctx->IASetInputLayout(nullptr);
+    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ctx->VSSetShader(g_res.vs_fullscreen, nullptr, 0);
+    ctx->PSSetShader(g_res.ps_alpha_zero, nullptr, 0);
+    ctx->GSSetShader(nullptr, nullptr, 0);
+    ctx->HSSetShader(nullptr, nullptr, 0);
+    ctx->DSSetShader(nullptr, nullptr, 0);
+    ctx->OMSetDepthStencilState(g_res.dss_off, 0);
+    ctx->RSSetState(g_res.rasterizer);
+    const FLOAT khz_bf[4] = { 0, 0, 0, 0 };
+    ctx->OMSetBlendState(g_res.blend_alpha_zero, khz_bf, 0xFFFFFFFF);
+    ctx->Draw(3, 0);
+
+    if (khz_nvp > 0) ctx->RSSetViewports(khz_nvp, khz_saved_vp);
+    khz_backup.restore(ctx);
+    g_ui_mask_injecting = false;
+
+    g_ui_mask.phase = 3;
+    g_ui_mask.mask_valid = true;
+    g_ui_mask_clears++;
+}
+
+// 26059 THE UI-PHASE-THREAD MACHINE (ledger at KhUiMask; supersedes the
+// 26057 render-thread probe). Field round 4 completed the elimination:
+// write-window alpha PINNED at 255 (the capture regime - injection
+// required), the probed render-thread tail was quarter-res R8 post work
+// (the topo "unclassified tail" was never the UI; single-channel formats
+// are excluded from the color census by design), and the worker-record
+// census sat at ZERO across 1114 frames. The compose + UI draws execute
+// on the immediate context from a SECOND SUBMISSION THREAD - neither the
+// identified render thread nor the game thread - which every hook body
+// systematically excluded via the render-thread gate. This machine lives
+// in that gate's bail path: for each draw on the target context from a
+// non-render thread (while a UI-mode pass is wanted, our own flush
+// excluded by g_kh_flush_active), one OMGet resolves the live target:
+//   - learned surface, phase idle or standing (0/3), > 1 ms since the
+//     last compose: THIS draw is the new frame's compose -> phase 2,
+//     the old mask dies, arms++;
+//   - learned surface, phase 2: the first UI draw -> inject the alpha
+//     clear NOW (before it), phase 3, mask_valid, clears++;
+//   - learned surface, phase 3, sub-millisecond: a same-frame UI draw -
+//     nothing to do;
+//   - foreign surface while phase 2: abort (never clear an unarmed
+//     target), aborts++.
+// The frame token is a QPC delta, entirely local to this thread: the
+// compose->UI span is sub-millisecond while frames are multi-millisecond,
+// so no cross-thread counter is consulted and no field is shared with the
+// render thread's machinery. probes/misses count this machine's OMGets
+// and unknown-surface resolutions.
+inline void kh_ui_mask_thread_draw(ID3D11DeviceContext* ctx) {
+    g_ui_mask_probes++;
+    ID3D11RenderTargetView* kht_rtv = nullptr;
+    ID3D11DepthStencilView* kht_dsv = nullptr;
+    ctx->OMGetRenderTargets(1, &kht_rtv, &kht_dsv);
+
+    if (kht_dsv) {
+        kht_dsv->Release();
+        if (kht_rtv) kht_rtv->Release();
+        if (g_ui_mask.phase == 2) { g_ui_mask.phase = 0; g_ui_mask_aborts++; }
+        return;
+    }
+
+    if (!kht_rtv) return;
+    ID3D11Resource* kht_res = nullptr;
+    kht_rtv->GetResource(&kht_res);
+    kht_rtv->Release();
+    if (!kht_res) return;
+    void* kht_id = static_cast<void*>(kht_res);
+    kht_res->Release();
+    g_ui_mask.last_probe_id = kht_id;
+    UINT kht_w = 0, kht_h = 0;
+
+    if (!kh_ui_mask_known_bb(kht_id, &kht_w, &kht_h)) {
+        g_ui_mask_probe_misses++;
+
+        if (g_ui_mask.phase == 2) {   // foreign target before the clear: abort
+            g_ui_mask.phase = 0;
+            g_ui_mask.mask_valid = false;
+            g_ui_mask_aborts++;
+        }
+
+        return;
+    }
+
+    LARGE_INTEGER kht_now = {};
+    QueryPerformanceCounter(&kht_now);
+    static LONGLONG kht_qpf = 0;
+
+    if (kht_qpf == 0) {
+        LARGE_INTEGER kht_f = {};
+        QueryPerformanceFrequency(&kht_f);
+        kht_qpf = kht_f.QuadPart ? kht_f.QuadPart : 1;
+    }
+
+    const bool kht_new_frame =
+        (kht_now.QuadPart - g_ui_mask.phase_tick) > kht_qpf / 1000;   // > 1 ms
+
+    if (g_ui_mask.phase == 2 && !kht_new_frame) {
+        // the first UI draw of the armed frame: zero the coverage channel
+        // before it (kh_ui_mask_clear_alpha verifies the live binding
+        // again on its own - belt and braces - and sets phase 3)
+        kh_ui_mask_clear_alpha(ctx);
+        return;
+    }
+
+    if (g_ui_mask.phase == 0 || kht_new_frame) {
+        // the new frame's first learned-surface draw: the compose (phase 3
+        // with a sub-millisecond delta falls through instead: a same-frame
+        // UI draw over a standing mask - nothing to do). The compose
+        // serial feeds the flush's apply-once gate; 26061: the clear is
+        // always scheduled - every write-window pass is coverage-masked.
+        g_ui_mask.phase_bb = kht_id;
+        g_ui_mask.phase_w = kht_w;
+        g_ui_mask.phase_h = kht_h;
+        g_ui_mask.phase_tick = kht_now.QuadPart;
+        g_ui_mask.probes_used = 0;   // per-frame verify budget refresh
+        g_ui_mask.mask_valid = false;
+        g_ui_mask.compose_serial++;
+        g_ui_mask.phase = 2;
+        g_ui_mask_arms++;
+    }
+}
+
 inline void reorder_pre_draw(ID3D11DeviceContext* self) {
     // Vtable hooks intercept EVERY context: Arma's worker threads record
     // draws through deferred contexts at enormous rates, and anything
@@ -19235,6 +19757,23 @@ inline void reorder_pre_draw(ID3D11DeviceContext* self) {
         // (a handful per frame); the render thread's thousands dominate
         // whenever this gate is the actual blocker.
         if (g_mask.cold_first_trigger < 0.0f && g_mask.cold_t0 >= 0.0) g_mask.cold_g_tid++;
+
+        // 26059 UI-phase-thread machine (ledger at kh_ui_mask_thread_draw):
+        // the compose + UI draws arrive HERE - target context, non-render
+        // thread. Our own flush draws are excluded by g_kh_flush_active
+        // (lock-scoped, so never racing), the clear's own draw by the
+        // injecting guard, and the whole path by the render-thread
+        // identity EXISTING - during the cold window every render-thread
+        // draw lands in this bail, and probing thousands of them per
+        // frame would be a self-inflicted stall of the 172 ms class.
+        // Dormant cost: two plain compares and one relaxed load on this
+        // already-cold path.
+        if (!g_kh_flush_active && !g_ui_mask_injecting &&
+            g_reorder_render_tid.load(std::memory_order_relaxed) != 0 &&
+            g_ui_mask_wanted.load(std::memory_order_relaxed)) {
+            kh_ui_mask_thread_draw(self);
+        }
+
         return;
     }
 
@@ -19786,6 +20325,10 @@ static void STDMETHODCALLTYPE hooked_omset_depthstencil(ID3D11DeviceContext* sel
 
 
 static void STDMETHODCALLTYPE hooked_omset_rendertargets(ID3D11DeviceContext* self, UINT n, ID3D11RenderTargetView* const* rtvs, ID3D11DepthStencilView* dsv) {
+    // (26060: the 26058 foreign-context record census is RETIRED - it
+    // answered its question with a flat zero, and its per-bind resolve
+    // would otherwise now fire for every worker bind whenever any
+    // UI-phase pass exists. Foreign contexts fall straight through.)
     if (self == g_reorder_target_ctx.load(std::memory_order_relaxed) && !g_ro.in_injection &&
         reorder_on_render_thread()) {
         g_ro.dsv_main = dsv && g_main_depth_identity &&
@@ -19803,6 +20346,11 @@ static void STDMETHODCALLTYPE hooked_omset_rendertargets(ID3D11DeviceContext* se
 
         g_topo_has_dsv = dsv != nullptr;
         mask_classify_rt(n, rtvs);
+
+        // 26059: the render-thread UI-mask tracking that lived here is
+        // GONE - the phase machine is owned by the UI-phase thread now
+        // (ledger at kh_ui_mask_thread_draw) and no render-thread write
+        // may touch it.
     }
 
     g_orig_omset_rendertargets(self, n, rtvs, dsv);
@@ -19821,6 +20369,10 @@ static void STDMETHODCALLTYPE hooked_omset_rts_and_uavs(ID3D11DeviceContext* sel
         g_topo_has_dsv = dsv != nullptr;
         g_topo_rt0_valid = false;
         g_topo_rt0_scene = false;
+
+        // 26059: no UI-mask writes on this path either - the phase
+        // machine is UI-phase-thread-owned (ledger at
+        // kh_ui_mask_thread_draw).
     }
 
     g_orig_omset_rts_and_uavs(self, n, rtvs, dsv, uav_start, n_uavs, uavs, counts);
@@ -20570,7 +21122,11 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                 if (o.lit && !o.fullscreen) khf_any_lit = true;   // sun-map carry gate
 
                 if (o.fullscreen) {
-                    if (!o.affect_ui) fullscreen.emplace_back(o.seq, o);
+                    // 26061 BOTH semantics: SCENE and BOTH run here (the
+                    // pre-tonemap chain - the correct domain for the scene
+                    // half); only UI-mode passes are excluded. BOTH's UI
+                    // half runs coverage-masked in the write-window phase.
+                    if (!o.ui_only) fullscreen.emplace_back(o.seq, o);
                 } else if (!(comp_healthy && is_composite_eligible(o))) {
                     // Composited meshes are drawn pre-translucent by the
                     // reorder hook; the flush stands down for them while
@@ -22099,6 +22655,24 @@ inline void flush_frame() {
     {
         std::lock_guard<std::mutex> g(g_draw_list_mutex);
         has_work = !g_draw_list.empty();
+
+        // 26055 UI-mask demand (ledger at KhUiMask): the hooks' arming is
+        // gated on a visible UI-mode pass existing RIGHT NOW - recomputed
+        // every frame here so deletion/hiding drops the machinery back to
+        // one idle compare per draw. An empty list clears it for free.
+        bool khum_wanted = false;   // any visible UI-phase pass (26061: BOTH and
+                                    // UI alike - every write-window pass is
+                                    // coverage-masked and needs the machinery)
+
+        for (const auto& khum_kv : g_draw_list) {
+            if (khum_kv.second.visible && khum_kv.second.fullscreen &&
+                khum_kv.second.affect_ui) {
+                khum_wanted = true;
+                break;
+            }
+        }
+
+        g_ui_mask_wanted.store(khum_wanted, std::memory_order_relaxed);
     }
 
     has_work = has_work || g_query_pending ||
@@ -22140,7 +22714,9 @@ inline void flush_frame() {
             continue;
         }
 
+        g_kh_flush_active = true;    // 26059: our draws traverse the T-path otherwise
         flush_locked(dev, ctx);
+        g_kh_flush_active = false;
         return;
     }
 
@@ -22160,10 +22736,16 @@ inline void flush_frame() {
 // with affect_ui render here over the composited frame, UI included; depth
 // remains readable (no DSV bound = no hazard), with UI pixels carrying the
 // depth of the scene behind them.
+// 26055: this phase now carries TWO pass classes - BOTH (the original
+// whole-frame behavior, now through the RGB-only blend twins so the mask
+// channel survives) and UI (masked to the engine-UI coverage the
+// backbuffer's alpha accumulates; full ledger at KhUiMask). The flush also
+// FEEDS the mask machinery: it is where backbuffer identities are learned.
 // ===========================================================================
 
 inline std::string ensure_backbuffer_capture(ID3D11Device* dev, ID3D11DeviceContext* ctx,
-                                             ID3D11Texture2D* src_tex, const D3D11_TEXTURE2D_DESC& td) {
+                                             ID3D11Texture2D* src_tex, const D3D11_TEXTURE2D_DESC& td,
+                                             bool khbc_copy = true) {
     if (!g_res.bb_tex || g_res.bb_w != td.Width || g_res.bb_h != td.Height || g_res.bb_fmt != td.Format) {
         g_res.release_bb_capture();
         D3D11_TEXTURE2D_DESC bd = {};
@@ -22174,17 +22756,66 @@ inline std::string ensure_backbuffer_capture(ID3D11Device* dev, ID3D11DeviceCont
         bd.Format = td.Format;
         bd.SampleDesc.Count = 1;
         bd.Usage = D3D11_USAGE_DEFAULT;
-        bd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        // 26062: RENDER_TARGET joined SHADER_RESOURCE - the spill lane's
+        // premultiplying capture DRAWS into this texture.
+        bd.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
         HRESULT hr = dev->CreateTexture2D(&bd, nullptr, &g_res.bb_tex);
         if (FAILED(hr)) return "Create bb tex " + hr_str(hr);
         hr = dev->CreateShaderResourceView(g_res.bb_tex, nullptr, &g_res.bb_srv);
         if (FAILED(hr)) { g_res.release_bb_capture(); return "Create bb SRV " + hr_str(hr); }
+        hr = dev->CreateRenderTargetView(g_res.bb_tex, nullptr, &g_res.bb_rtv);
+        if (FAILED(hr)) { g_res.release_bb_capture(); return "Create bb RTV " + hr_str(hr); }
         g_res.bb_w = td.Width;
         g_res.bb_h = td.Height;
         g_res.bb_fmt = td.Format;
     }
 
-    ctx->CopyResource(g_res.bb_tex, src_tex);
+    if (khbc_copy) ctx->CopyResource(g_res.bb_tex, src_tex);
+    return "";
+}
+
+// 26062 SPILL-LANE CAPTURE: the systemic replacement for per-shader gather
+// treatment. Instead of copying the live backbuffer verbatim, a fullscreen
+// draw writes rgb*a into the capture - the frame PREMULTIPLIED BY THE
+// ENGINE-UI COVERAGE the injected clear freed. Any unmodified effect that
+// gathers from this capture then sources UI content only (black contributes
+// nothing to a gather), and the ONE / INV_DEST_ALPHA composite reconstructs
+// out = F(frame*cov) + frame*(1-cov) - for additive (black-preserving)
+// effects F(x) = x + G(x) this is EXACTLY frame + G(uiContent): base
+// intact, glow spilling past hard UI edges. The shader's job moved into
+// the system; what remains per effect is a one-BIT class declaration
+// (spill vs masked), because no system can infer from arbitrary shader
+// code whether feeding it black is safe (invert/vignette paint on black).
+// Runs on the game thread under the park, inside the flush's own state
+// scope; the caller re-binds the live target afterwards.
+inline std::string kh_capture_bb_premult(ID3D11Device* dev, ID3D11DeviceContext* ctx,
+                                         ID3D11Texture2D* src_tex, const D3D11_TEXTURE2D_DESC& td) {
+    const std::string khpc_err = ensure_backbuffer_capture(dev, ctx, src_tex, td, false);
+    if (!khpc_err.empty()) return khpc_err;   // creation only - the draw below fills every texel
+    if (!g_res.ps_premult_copy || !g_res.bb_rtv || !g_res.vs_fullscreen) return "premult capture resources missing";
+
+    ID3D11ShaderResourceView* khpc_live = nullptr;
+    HRESULT hr = dev->CreateShaderResourceView(src_tex, nullptr, &khpc_live);
+    if (FAILED(hr) || !khpc_live) return "Create live bb SRV " + hr_str(hr);
+
+    // The flush already owns IA/VS/DSS/RS state (fullscreen configuration);
+    // only the target, PS, SRV and blend differ for this one draw.
+    ID3D11RenderTargetView* khpc_prev_rtv = nullptr;
+    ID3D11DepthStencilView* khpc_prev_dsv = nullptr;
+    ctx->OMGetRenderTargets(1, &khpc_prev_rtv, &khpc_prev_dsv);
+    ID3D11RenderTargetView* khpc_tgt = g_res.bb_rtv;
+    ctx->OMSetRenderTargets(1, &khpc_tgt, nullptr);
+    ctx->PSSetShader(g_res.ps_premult_copy, nullptr, 0);
+    ctx->PSSetShaderResources(0, 1, &khpc_live);
+    const FLOAT khpc_bf[4] = { 0, 0, 0, 0 };
+    ctx->OMSetBlendState(nullptr, khpc_bf, 0xFFFFFFFF);   // full replace, alpha included
+    ctx->Draw(3, 0);
+    ID3D11ShaderResourceView* khpc_null = nullptr;
+    ctx->PSSetShaderResources(0, 1, &khpc_null);
+    ctx->OMSetRenderTargets(1, &khpc_prev_rtv, khpc_prev_dsv);
+    if (khpc_prev_rtv) khpc_prev_rtv->Release();
+    if (khpc_prev_dsv) khpc_prev_dsv->Release();
+    khpc_live->Release();
     return "";
 }
 
@@ -22228,6 +22859,10 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     rtv->GetResource(&res);
     rtv->Release();
     if (!res) { g_stats.ui_gate_skips++; return; }
+    // 26055: the backbuffer identity the mask machinery learns is the
+    // GetResource pointer - the same token the OMSet hook's classify
+    // resolves (weak identity, the codebase-wide convention).
+    void* khum_bb_id = static_cast<void*>(res);
     ID3D11Texture2D* bb = nullptr;
     HRESULT hr = res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&bb));
     res->Release();
@@ -22257,6 +22892,105 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     if (!ensure_resources(dev).empty()) { bb->Release(); return; }
     if (!ensure_effect_shader(dev).empty()) { bb->Release(); return; }
     g_stats.ui_gate_passed++;
+
+    // 26055 UI-mask (ledger at KhUiMask): the RTV bound at the control-Draw
+    // moment IS the backbuffer (this gate's own empirical ledger) - admit
+    // its identity so the render thread's hooks can arm on it next frame
+    // (flip-model rotation: the ring holds the full set). The mask is LIVE
+    // when the render thread's clear fired for this very buffer this
+    // frame; UI-mode passes skip otherwise (one-frame learn latency at
+    // spawn - the designed fail-safe).
+    kh_ui_mask_learn(khum_bb_id, td.Width, td.Height);
+    const bool khum_mask_live = g_ui_mask.mask_valid &&
+                                g_ui_mask.phase_bb == khum_bb_id;
+
+    // 26058 alpha-regime forensic (ledger at KhUiMask): map LAST flush's
+    // 64x64 staging window of the LIVE write-window surface, then queue
+    // this flush's copy - one tiny copy per frame, mapped a frame late,
+    // never stalling. min/max alpha over a scene-region window decide the
+    // regime: 255/255 = the capture regime (the compose pins the channel;
+    // only an injected clear can free it), a low min = coverage ALREADY
+    // lives in this surface's alpha and no injection is needed at all.
+    if (td.Width >= 512 && td.Height >= 512) {
+        if (!g_res.ui_alpha_stage) {
+            D3D11_TEXTURE2D_DESC khas_td = {};
+            khas_td.Width = 64;
+            khas_td.Height = 64;
+            khas_td.MipLevels = 1;
+            khas_td.ArraySize = 1;
+            khas_td.Format = td.Format;
+            khas_td.SampleDesc.Count = 1;
+            khas_td.Usage = D3D11_USAGE_STAGING;
+            khas_td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            dev->CreateTexture2D(&khas_td, nullptr, &g_res.ui_alpha_stage);
+            g_ui_mask.alpha_copy_pending = false;
+        }
+
+        if (g_res.ui_alpha_stage) {
+            if (g_ui_mask.alpha_copy_pending) {
+                D3D11_MAPPED_SUBRESOURCE khas_map = {};
+                const HRESULT khas_hr = ctx->Map(g_res.ui_alpha_stage, 0, D3D11_MAP_READ,
+                                                 D3D11_MAP_FLAG_DO_NOT_WAIT, &khas_map);
+
+                if (SUCCEEDED(khas_hr)) {
+                    int khas_min = 255, khas_max = 0;
+
+                    for (UINT khas_y = 0; khas_y < 64; ++khas_y) {
+                        const uint8_t* khas_row =
+                            static_cast<const uint8_t*>(khas_map.pData) + khas_y * khas_map.RowPitch;
+
+                        for (UINT khas_x = 0; khas_x < 64; ++khas_x) {
+                            const int khas_a = khas_row[khas_x * 4 + 3];   // A is byte 3 in RGBA8 and BGRA8
+                            if (khas_a < khas_min) khas_min = khas_a;
+                            if (khas_a > khas_max) khas_max = khas_a;
+                        }
+                    }
+
+                    ctx->Unmap(g_res.ui_alpha_stage, 0);
+                    g_ui_mask.alpha_min = khas_min;
+                    g_ui_mask.alpha_max = khas_max;
+                    g_ui_mask.alpha_copy_pending = false;
+                } else if (khas_hr != DXGI_ERROR_WAS_STILL_DRAWING) {
+                    g_ui_mask.alpha_copy_pending = false;   // hard failure: re-queue
+                }
+            }
+
+            if (!g_ui_mask.alpha_copy_pending) {
+                D3D11_BOX khas_box = {};
+                khas_box.left = td.Width * 5 / 8;
+                khas_box.right = khas_box.left + 64;
+                khas_box.top = td.Height * 5 / 8;
+                khas_box.bottom = khas_box.top + 64;
+                khas_box.front = 0;
+                khas_box.back = 1;
+                ctx->CopySubresourceRegion(g_res.ui_alpha_stage, 0, 0, 0, 0, bb, 0, &khas_box);
+                g_ui_mask.alpha_copy_pending = true;
+            }
+        }
+    }
+    // 26060 APPLY-ONCE-PER-COMPOSED-FRAME GATE (the BOTH compounding fix).
+    // Field-convicted single application per flush (uiFlushes tracked
+    // flushes 1:1 outside the stream windows), yet the effect compounds
+    // whenever the engine RE-PRESENTS WITHOUT RECOMPOSING - pause menu,
+    // map, editor - because each flush then paints onto its own previous
+    // output (fx(fx(...)) converges toward a doubled-and-more look). The
+    // T-machine's compose serial is the ground truth: equal serials mean
+    // no new compose reached this surface since our last paint, so the
+    // flush stands down. serial 0 = the machine has not yet detected a
+    // compose this session (spawn, or an engine variant it cannot see):
+    // FAIL OPEN to the legacy paint-every-flush behavior rather than
+    // going dark. Serials are read under the park, which freezes the
+    // owning thread - no torn reads.
+    const uint64_t khum_serial = g_ui_mask.compose_serial;
+
+    if (khum_serial != 0 && khum_serial == g_ui_mask.applied_serial) {
+        g_ui_stale_skips++;
+        bb->Release();
+        return;
+    }
+
+    g_ui_mask.applied_serial = khum_serial;
+
     RVExtBridge::ProjectionViewTransform pv = {};
     if (!RVExtBridge::get_projection_view_transform(pv)) { bb->Release(); return; }
     float view_proj[4][4];
@@ -22310,6 +23044,13 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     for (const auto& f : passes) {
         const RenderObject& o = f.second;
         if (o.effect <= 0) continue;
+
+        // 26061: EVERY write-window pass is coverage-masked now (BOTH's UI
+        // half included) - without a live mask it must not run, or it
+        // would flash fullscreen post-tonemap. Skip and count; the mask
+        // goes live one frame after the machinery spawns.
+        if (!khum_mask_live) { g_ui_mask_skips++; continue; }
+
         // CUSTOM EFFECT (UI phase): same contract as the scene chain.
         ID3D11PixelShader* khu_ufx = nullptr;
 
@@ -22328,8 +23069,29 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         if (wants_depth && !depth_ok) continue;
         if ((o.localized || o.effect == static_cast<int>(EffectId::Pulse)) && !has_inverse) continue;
 
-        // Per-pass re-capture so UI-phase passes chain (LDR copy - cheap)
-        if (!ensure_backbuffer_capture(dev, ctx, bb, td).empty()) { g_stats.effect_setup_fails++; break; }
+        // 26062 LANE CLASSIFICATION (the systemic gather treatment): SPILL
+        // lane = additive/black-preserving effects - the builtin gather
+        // family auto-classified, custom shaders by their declared
+        // ui_spill bit. Spill passes receive the COVERAGE-PREMULTIPLIED
+        // capture (any unmodified gather then sources UI content only)
+        // and composite through ONE / INV_DEST_ALPHA: out = F(frame*cov)
+        // + frame*(1-cov) = frame + glow, spilling past hard UI edges
+        // with zero shader cooperation. Everything else takes the MASKED
+        // lane (in-shader destination lerp for builtins at w = 2, the
+        // hardware DEST_ALPHA lerp for customs at w = 1).
+        const bool khu_spill =
+            o.effect == static_cast<int>(EffectId::Bloom) ||
+            o.effect == static_cast<int>(EffectId::Halation) ||
+            o.effect == static_cast<int>(EffectId::LensFlare) ||
+            o.effect == static_cast<int>(EffectId::Anamorphic) ||
+            (o.effect == KH_EFFECT_CUSTOM && o.ui_spill);
+
+        // Per-pass re-capture so UI-phase passes chain (LDR copy - cheap;
+        // the spill lane's capture premultiplies by coverage instead)
+        const std::string khu_cap_err = khu_spill
+            ? kh_capture_bb_premult(dev, ctx, bb, td)
+            : ensure_backbuffer_capture(dev, ctx, bb, td);
+        if (!khu_cap_err.empty()) { g_stats.effect_setup_fails++; break; }
         ID3D11ShaderResourceView* srvs[2] = { g_res.bb_srv, depth_ok ? g_res.depth_srv : nullptr };
         ctx->PSSetShaderResources(0, 2, srvs);
         ConstantData cbd = {};
@@ -22338,8 +23100,19 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         cbd.center_size[0] = o.pos[0];
         cbd.center_size[1] = o.pos[2];
         cbd.center_size[2] = o.pos[1];
-        cbd.center_size[3] = 0.0f;   // hardware blending against the live backbuffer
-        cbd.size_axes[3] = static_cast<float>(o.blend_mode);
+        // 26062 lane flags: SPILL passes take the plain chain path
+        // (w = 1) against the premultiplied capture and return the
+        // composited result raw - the hardware composite does the rest.
+        // MASKED builtins take w = 2 (in-shader destination lerp);
+        // masked customs w = 1 under the DEST_ALPHA lerp.
+        cbd.center_size[3] =
+            (khu_spill || o.effect == KH_EFFECT_CUSTOM) ? 1.0f : 2.0f;
+        // 26062: the spill lane is defined under NORMAL blend semantics
+        // (its algebra composes the raw result against the premultiplied
+        // capture; other modes would re-mix UI content into itself) - the
+        // pass's blend mode is deliberately ignored there and the pass
+        // opacity scales the contribution through the normal-mode lerp.
+        cbd.size_axes[3] = khu_spill ? 0.0f : static_cast<float>(o.blend_mode);
         memcpy(cbd.color, o.color, sizeof(cbd.color));
         memcpy(cbd.fx0, o.fx, sizeof(cbd.fx0));
         memcpy(cbd.fx1, o.fx + 4, sizeof(cbd.fx1));
@@ -22379,8 +23152,17 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         if (!kh_upload_obj_cb(ctx, g_res.constant_buffer, cbd) ||
             !kh_upload_frame_cb(ctx, g_res.frame_cb, cbd)) continue;
         ctx->PSSetShader(khu_ufx ? khu_ufx : g_res.ps_effect, nullptr, 0);
-        ctx->OMSetBlendState(g_res.blend_modes[o.blend_mode], bf, 0xFFFFFFFF);
+        // 26062 lane composite: spill = ONE/INV_DEST_ALPHA reconstruction;
+        // masked builtins write the finished, in-shader-masked frame
+        // (replace, RGB-only); masked customs hardware-lerp by coverage.
+        // The backbuffer's ALPHA is the engine-UI coverage mask and no
+        // draw here may disturb it (ledger at KhUiMask).
+        ctx->OMSetBlendState(khu_spill ? g_res.blend_ui_spill
+                             : khu_ufx ? g_res.blend_ui_masked
+                                       : g_res.blend_ui_replace,
+                             bf, 0xFFFFFFFF);
         ctx->Draw(3, 0);
+        g_ui_only_draws++;   // all write-window pass draws (26061)
     }
 
     if (n_saved_vp > 0) ctx->RSSetViewports(n_saved_vp, saved_vp);
@@ -22413,7 +23195,9 @@ inline bool flush_ui_frame() {
             continue;
         }
 
+        g_kh_flush_active = true;    // 26059: our draws traverse the T-path otherwise
         flush_ui_locked(dev, ctx);
+        g_kh_flush_active = false;
         return true;
     }
 
@@ -22453,6 +23237,26 @@ inline void ensure_ui_driver() {
             // display transitioning or call context unavailable - retry next frame
         }
     });
+}
+
+// 26063 DRIVER RE-HOIST: Arma draws a display's controls in creation
+// order, so UI built AFTER the driver control sits above the write
+// window's coverage. Re-running the init script re-creates the control
+// NEWEST - back on top of display 46 - and the script deletes the old
+// control and creates the new one in the SAME run, so there is no
+// coverage gap. Throttled: missions animate via per-frame updatePostFX,
+// and a ctrlDelete/ctrlCreate/EH-add every frame is real UI churn for
+// zero benefit - "on top within half a second of the call" is the
+// contract. Displays drawn after 46 (dialogs) remain uncovered - the
+// write-window limitation, unchanged.
+static float g_ui_rehoist_last_s = -1.0e9f;
+
+inline void kh_ui_driver_rehoist() {
+    ensure_ui_driver();
+    const float khrh_now = effect_time_seconds();
+    if (khrh_now - g_ui_rehoist_last_s < 0.5f) return;   // churn guard
+    g_ui_rehoist_last_s = khrh_now;
+    g_ui_ctrl_created = false;   // the EachFrame poll re-runs the init next frame
 }
 
 // ===========================================================================
@@ -22499,6 +23303,14 @@ inline void reset_stat_counters() {
     g_blk_collapse_holds = 0;   // 26052: the 26050 counter joins its siblings here
     g_blk_blank_skips = 0;      // 26053: blank-guard census
     g_blk_starved_adopts = 0;   // 26054: starvation-path census
+    g_ui_mask_clears = 0;       // 26055: UI-mask census (ledger at KhUiMask)
+    g_ui_mask_skips = 0;
+    g_ui_only_draws = 0;
+    g_ui_mask_arms = 0;         // 26056: arming-path census
+    g_ui_mask_aborts = 0;
+    g_ui_mask_probes = 0;       // 26059: T-machine census
+    g_ui_mask_probe_misses = 0;
+    g_ui_stale_skips = 0;       // 26060: apply-once gate census
     g_fk_veto_fills = 0; g_fk_veto_last_n = 0; g_fk_veto_cand_n = 0;   // 26052: veto census
     g_sun_jump_refused = 0;
     g_sun_jump_stream_refused = 0;
@@ -22601,6 +23413,7 @@ inline void reset_stat_counters() {
 // state.
 inline void reset_session_state() {
     reset_stat_counters();
+    kh_ui_mask_reset();   // 26055: learned backbuffers, phase machine, demand flag
     g_sun_pub_prev_valid = false;   // the settle tracker restarts with the session
     g_sun_unstable_ms = 0;
     g_sun_valid_ms = 0;

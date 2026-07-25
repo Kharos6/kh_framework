@@ -7004,7 +7004,8 @@ static game_value set_render_debug_sqf(game_value_parameter arg) {
                             khd_m == 21 ||                    // cast readiness latch + slab retirement OFF (pristine A/B)
                             khd_m == 24 ||                    // terrain snap off (diagnostic)
                             khd_m == 25 ||                    // cast viewport A/B: live grid (pristine) instead of frozen
-                            khd_m == 26;                      // lock-settle cast hold off (diagnostic)
+                            khd_m == 26 ||                    // lock-settle cast hold off (diagnostic)
+                            khd_m == 27;                      // 26069: UI coverage debug view (write window)
         if (!khd_ok) return game_value(false);
         RenderIntegration::g_dbg_mode.store(khd_m, std::memory_order_relaxed);
         return game_value(true);
@@ -7061,6 +7062,7 @@ static game_value get_render_stats_sqf() {
         // uiOnlyDraws counts ALL write-window pass draws (26061).
         out.push_back(kv("uiMaskClears", RenderIntegration::g_ui_mask_clears));
         out.push_back(kv("uiMaskSkips", RenderIntegration::g_ui_mask_skips));
+        out.push_back(kv("uiCovVetoes", RenderIntegration::g_ui_cov_vetoes));
         out.push_back(kv("uiOnlyDraws", RenderIntegration::g_ui_only_draws));
         // 26059: arming-path census - arms = UI-phase-thread compose
         // detections (~1/frame while a UI-mode pass is visible); aborts

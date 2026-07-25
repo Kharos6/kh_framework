@@ -723,6 +723,17 @@ struct Resources {
                                                         // coverage reset injected after the engine's
                                                         // compose draw)
     ID3D11PixelShader*       ps_alpha_zero = nullptr;   // returns float4(0,0,0,0)
+    ID3D11Texture2D*          cov_hist_tex = nullptr;   // 26075: last-SANE coverage history (full
+    ID3D11ShaderResourceView* cov_hist_srv = nullptr;    // backbuffer copy taken POST-correction, so
+    UINT                      cov_hist_w = 0;            // by induction its alpha is always sane -
+    UINT                      cov_hist_h = 0;            // the substitute mask for poison frames)
+    uint32_t                  cov_hist_fmt = 0;
+    ID3D11PixelShader*       ps_cov_fix = nullptr;       // 26075: alpha-repair pass - per pixel,
+                                                        // passthrough alpha on sane frames, history
+                                                        // alpha on poison frames (probe-decided)
+    ID3D11PixelShader*       ps_dbg_cov = nullptr;      // 26069: coverage debug view - renders the
+                                                        // captured backbuffer ALPHA as grayscale
+                                                        // (setRenderDebug 27; write-window only)
     ID3D11PixelShader*       ps_premult_copy = nullptr; // 26062: capture-with-premultiply - samples
                                                         // the LIVE backbuffer, writes rgb*a (and a)
                                                         // into the capture; the spill lane's input
@@ -881,6 +892,11 @@ struct Resources {
         KH_SAFE_RELEASE(blend_alpha_zero);
         KH_SAFE_RELEASE(ps_alpha_zero);
         KH_SAFE_RELEASE(ps_premult_copy);  // 26062
+        KH_SAFE_RELEASE(ps_dbg_cov);       // 26069
+        KH_SAFE_RELEASE(ps_cov_fix);       // 26075
+        KH_SAFE_RELEASE(cov_hist_srv);     // 26075
+        KH_SAFE_RELEASE(cov_hist_tex);
+        cov_hist_w = 0; cov_hist_h = 0; cov_hist_fmt = 0;
         KH_SAFE_RELEASE(rasterizer);
         KH_SAFE_RELEASE(rasterizer_cull);
         KH_SAFE_RELEASE(rasterizer_front);
@@ -1012,6 +1028,8 @@ struct KhUiMask {
     // UI draw otherwise (the compose->UI span is sub-millisecond; frames
     // are multi-millisecond). Thread-local to the UI-phase thread.
     long long phase_tick = 0;
+    long long phase_arm_tick = 0;   // 26066: the CURRENT arm's stamp (the
+                                    // re-arm floor; ledger at the T-machine)
     // 26060: apply-once-per-composed-frame serials (the BOTH compounding
     // fix - full ledger at the flush's stale gate). compose_serial is
     // incremented by the UI-phase thread at every compose detection;
@@ -1060,6 +1078,21 @@ static std::atomic<bool> g_kh_track_wanted{false};
 static uint64_t g_ui_mask_clears = 0;   // alpha-zero injections fired (render thread;
                                         // steady state: one per frame while wanted)
 static uint64_t g_ui_mask_skips = 0;    // UI-mode passes skipped for want of a live mask
+// 26070 COVERAGE-REGIME LATCH (the comp_healthy doctrine, write-window
+// edition; DIAGNOSTIC-ONLY since 26075): the scene-region forensic
+// window's min coverage sits at 6-7/255 in every field dump - a
+// min >= 128 means more-than-half coverage over EVERY sampled scene
+// texel, which no legitimate UI regime produces (the poison signature:
+// an engine-side fullscreen alpha event, placeholder-texture frames on
+// fullscreen HUD overlays being the convicted class). Sticky until a
+// sane reading (min < 32). HISTORY: as a blocking veto it converted
+// every poison event into fx-off blinks at event rate (field-ruled
+// unacceptable); the 26075 coverage-REPAIR pass now sanitizes dst.a
+// before any consumer, so the latch no longer blocks anything -
+// uiCovVetoes is the standing poison-event LOG (ticking vetoes with
+// zero visible artifacts = the repair working as designed).
+static bool     g_ui_cov_suspect = false;   // game thread only
+static uint64_t g_ui_cov_vetoes = 0;
 static uint64_t g_ui_only_draws = 0;    // UI-mode passes drawn
 static uint64_t g_ui_mask_arms = 0;     // 26059: T-machine compose detections (expect
                                         // ~1/frame while wanted)
@@ -3848,6 +3881,42 @@ float4 PSEffect(VSOut i) : SV_Target
     float3 scene = SampleScene(px);
     float3 outc = scene;
 
+    // 26073 UI-PHASE POISON GUARD (write-window lanes only, w = 2 masked
+    // / w = 3 spill; scene chain w = 1 and meshes w = 0 excluded). The
+    // engine occasionally emits a frame whose coverage channel is
+    // saturated SCREEN-WIDE (placeholder-texture fullscreen elements;
+    // mode-27 verified: the frame reads uniformly full-white), and a
+    // CPU verdict cannot see it same-frame (the 26071 finding: the
+    // readback-visible stream state precedes the clear, and a blocking
+    // drain perturbs the write window's position). The truth lives at
+    // EXECUTION, where this shader already runs: probe eight fixed
+    // SCENE-REGION texels of the capture (the CPU veto's own window
+    // semantics - legitimate floor there is 6-7/255 in every field
+    // dump) - every pixel loads the same eight texels, a pure cache
+    // broadcast. All probes saturated = the poison signature: discard,
+    // which is identity in BOTH lanes (masked keeps the engine frame;
+    // the spill composite reduces to the untouched frame). 26075/26076
+    // ROLE: DEFENSE-IN-DEPTH ONLY. The coverage-REPAIR pass (ledger at
+    // the flush's correction draw) sanitizes dst.a before any capture,
+    // so this guard probes corrected data and stays dormant in normal
+    // operation - it fires only if the repair pass is unavailable
+    // (resource failure), where suppression beats a scene flash. The
+    // user-shader phase discriminator (w = 1.25) and opt-in replica
+    // live at the USER HLSL SHADER CACHE ledger.
+    if (centerSize.w > 1.5f) {
+        int2 khpB = int2((int)(fxMeta.z * 0.625f), (int)(fxMeta.w * 0.625f));
+        float khpMin = 1.0f;
+        khpMin = min(khpMin, KhUiCov(khpB + int2(0, 0)));
+        khpMin = min(khpMin, KhUiCov(khpB + int2(64, 16)));
+        khpMin = min(khpMin, KhUiCov(khpB + int2(16, 96)));
+        khpMin = min(khpMin, KhUiCov(khpB + int2(112, 64)));
+        khpMin = min(khpMin, KhUiCov(khpB + int2(48, 160)));
+        khpMin = min(khpMin, KhUiCov(khpB + int2(160, 32)));
+        khpMin = min(khpMin, KhUiCov(khpB + int2(96, 128)));
+        khpMin = min(khpMin, KhUiCov(khpB + int2(176, 176)));
+        if (khpMin >= 0.75f) discard;
+    }
+
     // FAR-FRAME ANALYTIC ARBITRATION (flush/effect edition; the sec 2.4
     // mirror). An effect mesh previously had NO shader occlusion at
     // all (fxParams are its effect parameters) and its hardware test
@@ -4198,7 +4267,8 @@ float4 PSEffect(VSOut i) : SV_Target
     // SPILL lane never sets w = 2 - gather effects run on the coverage-
     // premultiplied capture at w = 1 and spill through the ONE /
     // INV_DEST_ALPHA composite instead (ledger at the flush pass loop).
-    if (centerSize.w > 1.5f) outc = lerp(scene, outc, KhUiCov(px));
+    if (centerSize.w > 1.5f && centerSize.w < 2.5f)
+        outc = lerp(scene, outc, KhUiCov(px));   // 26073: spill = w 3, excluded
 
     // Chained-fullscreen composite packing: for chain passes (centerSize.w =
     // 1) the destination IS the scene texture we already sampled, so every
@@ -5049,6 +5119,59 @@ inline ID3D11ShaderResourceView* kh_tex_resolve(ID3D11Device* dev, ID3D11DeviceC
 //    samples t0 and returns the fully composited pixel; localized/
 //    band masking is theirs to implement from local0/localRadii/band0
 //    if wanted.
+//    UI PHASE (addPostFX "UI"/"BOTH" - the write window; 26062/26074
+//    user contract):
+//      * PHASE DISCRIMINATOR: centerSize.w > 1.1 means THIS invocation
+//        is a write-window pass (UI customs receive w = 1.25; the scene
+//        chain sends exactly 1.0). Every threshold the chain semantics
+//        use (> 0.5) still passes - existing shaders run unchanged.
+//      * THE ONE-BIT "uispill" DECLARATION (updatePostFX property,
+//        bool): TRUE declares the effect ADDITIVE / BLACK-PRESERVING
+//        (F(0) = 0 - gathers: bloom-like glows). The system then feeds
+//        t0 as the COVERAGE-PREMULTIPLIED capture (rgb * uiCoverage,
+//        alpha = coverage) and composites through ONE/INV_DEST_ALPHA:
+//        out = F(frame*cov) + frame*(1-cov) - base frame intact, glow
+//        spilling past hard UI edges, with ZERO shader cooperation.
+//        FALSE (default, the MASKED lane) feeds t0 as the VERBATIM
+//        frame and confines the output to UI pixels via the hardware
+//        DEST_ALPHA lerp. Declare TRUE only if feeding your effect
+//        black is safe (invert/vignette-class effects paint ON black:
+//        those must stay masked). No system can infer this from
+//        arbitrary shader code - the bit is the whole contract.
+//      * COVERAGE ACCESS: in the UI phase t0's ALPHA carries the
+//        engine-UI coverage in BOTH lanes (the verbatim copy carries
+//        dst.a as-is; the premultiplying capture writes alpha =
+//        coverage). sceneColor.Load(px).a is per-pixel coverage.
+//      * POISON HANDLING (26073/26075): the engine occasionally emits
+//        frames whose coverage channel is saturated SCREEN-WIDE
+//        (placeholder-texture fullscreen elements). Since 26075 the
+//        COVERAGE-REPAIR pass sanitizes dst.a at flush start for ALL
+//        lanes - customs included - by substituting the last sane
+//        frame's alpha per pixel on poison frames, so custom shaders
+//        need NO cooperation to be protected: coverage they read from
+//        t0 (and the hardware DEST_ALPHA they composite against) is
+//        sane by construction. Builtins additionally carry an
+//        in-shader probe-discard as defense-in-depth (dormant against
+//        repaired coverage; active only if the repair resources fail).
+//        Replicating that guard in a custom unit is therefore OPTIONAL
+//        hardening for the repair-unavailable case, not a requirement:
+//          if (centerSize.w > 1.1f && centerSize.w < 1.5f) {
+//              int2 b = int2((int)(fxMeta.z * 0.625f),
+//                            (int)(fxMeta.w * 0.625f));
+//              float m = 1.0f;
+//              m = min(m, sceneColor.Load(int3(b + int2(  0,   0), 0)).a);
+//              m = min(m, sceneColor.Load(int3(b + int2( 64,  16), 0)).a);
+//              m = min(m, sceneColor.Load(int3(b + int2( 16,  96), 0)).a);
+//              m = min(m, sceneColor.Load(int3(b + int2(112,  64), 0)).a);
+//              m = min(m, sceneColor.Load(int3(b + int2( 48, 160), 0)).a);
+//              m = min(m, sceneColor.Load(int3(b + int2(160,  32), 0)).a);
+//              m = min(m, sceneColor.Load(int3(b + int2( 96, 128), 0)).a);
+//              m = min(m, sceneColor.Load(int3(b + int2(176, 176), 0)).a);
+//              if (m >= 0.75f) discard;   // poison frame: render nothing
+//          }
+//        (clamp the probe coords to (fxMeta.z-1, fxMeta.w-1) if your
+//        shader may run below ~2600 px width; discard is identity -
+//        the frame passes through untouched.)
 //  - MATERIALS (material entry shader field): the user file defines
 //      float3 KhUserShade(KhMatSurf m, float3 wpos, float3 n, float smf)
 //    and is compiled into all three textured pipeline variants (flush /
@@ -6387,6 +6510,53 @@ inline std::string ensure_resources(ID3D11Device* dev) {
                                         nullptr, &g_res.ps_premult_copy);
             khpm_blob->Release();
             if (FAILED(hr)) { g_res.release(); return "Create PS(premult) " + hr_str(hr); }
+
+            // 26069 coverage debug view (setRenderDebug 27): dst.a as
+            // grayscale, sampled from the verbatim capture - the one
+            // glance that names WHAT is writing scene-region coverage.
+            ID3DBlob* khdc_blob = nullptr;
+            const std::string khdc_err = compile_shader(
+                "Texture2D khSrc : register(t0);"
+                "float4 main(float4 pos : SV_Position) : SV_Target"
+                "{ float a = khSrc.Load(int3(int2(pos.xy), 0)).a;"
+                "  return float4(a, a, a, 1.0f); }",
+                "main", "ps_5_0", nullptr, &khdc_blob);
+            if (!khdc_err.empty()) { g_res.release(); return "Compile PS(dbgCov): " + khdc_err; }
+            hr = dev->CreatePixelShader(khdc_blob->GetBufferPointer(), khdc_blob->GetBufferSize(),
+                                        nullptr, &g_res.ps_dbg_cov);
+            khdc_blob->Release();
+            if (FAILED(hr)) { g_res.release(); return "Create PS(dbgCov) " + hr_str(hr); }
+
+            // 26075 coverage repair (ledger at the flush's correction
+            // pass): probe the capture's scene window; poisoned frames
+            // take the HISTORY's alpha, sane frames pass their own
+            // through. GetDimensions makes it CB-free (it runs before
+            // the flush binds the common constant buffers).
+            ID3DBlob* khcf_blob = nullptr;
+            const std::string khcf_err = compile_shader(
+                "Texture2D khCap : register(t0);"
+                "Texture2D khHist : register(t1);"
+                "float4 main(float4 pos : SV_Position) : SV_Target"
+                "{ uint khW, khH; khCap.GetDimensions(khW, khH);"
+                "  int2 khB = int2(int(khW * 5u / 8u), int(khH * 5u / 8u));"
+                "  float khM = 1.0f;"
+                "  khM = min(khM, khCap.Load(int3(khB + int2(  0,   0), 0)).a);"
+                "  khM = min(khM, khCap.Load(int3(khB + int2( 64,  16), 0)).a);"
+                "  khM = min(khM, khCap.Load(int3(khB + int2( 16,  96), 0)).a);"
+                "  khM = min(khM, khCap.Load(int3(khB + int2(112,  64), 0)).a);"
+                "  khM = min(khM, khCap.Load(int3(khB + int2( 48, 160), 0)).a);"
+                "  khM = min(khM, khCap.Load(int3(khB + int2(160,  32), 0)).a);"
+                "  khM = min(khM, khCap.Load(int3(khB + int2( 96, 128), 0)).a);"
+                "  khM = min(khM, khCap.Load(int3(khB + int2(176, 176), 0)).a);"
+                "  int3 khP = int3(int2(pos.xy), 0);"
+                "  float khA = (khM >= 0.75f) ? khHist.Load(khP).a : khCap.Load(khP).a;"
+                "  return float4(0.0f, 0.0f, 0.0f, khA); }",
+                "main", "ps_5_0", nullptr, &khcf_blob);
+            if (!khcf_err.empty()) { g_res.release(); return "Compile PS(covFix): " + khcf_err; }
+            hr = dev->CreatePixelShader(khcf_blob->GetBufferPointer(), khcf_blob->GetBufferSize(),
+                                        nullptr, &g_res.ps_cov_fix);
+            khcf_blob->Release();
+            if (FAILED(hr)) { g_res.release(); return "Create PS(covFix) " + hr_str(hr); }
 
             D3D11_BLEND_DESC bsp = {};
             bsp.RenderTarget[0].BlendEnable = TRUE;
@@ -8356,7 +8526,7 @@ static uint32_t g_fk_veto_cand_n = 0;       // candidates staged at the last pas
                                             // is live in this scene)
 // BUILD TAG (doctrine: bump on EVERY delivered build; stats-visible so a
 // field log names the binary it came from).
-static constexpr int KH_BUILD_TAG = 26064;
+static constexpr int KH_BUILD_TAG = 26076;
 // NEAR-GAP RAMP (build 26001; the RenderDoc conviction). ROOT, proven by
 // pixel history + depth-window plateaus: the world partition's viewport
 // floor (0.011 in the convicting capture) collapses EVERY fragment nearer
@@ -19824,16 +19994,58 @@ inline void kh_ui_mask_thread_draw(ID3D11DeviceContext* ctx) {
 
     const bool kht_new_frame =
         (kht_now.QuadPart - g_ui_mask.phase_tick) > kht_qpf / 1000;   // > 1 ms
+    // 26066 ARM FLOOR (the foreign-interleave fix): the 26065 token
+    // refresh stamps LEARNED-surface draws only, but a quarter of this
+    // thread's draws hit foreign surfaces (field dump: 48,642 of
+    // 195,395 probes - render-to-texture HUD elements), and a foreign
+    // interleave longer than 1 ms between two backbuffer draws aged the
+    // token without refreshing it: ~115 false re-arms per 1,141 frames,
+    // each a mid-frame coverage wipe (the residual occasional flicker).
+    // A re-arm now ALSO requires the CURRENT arm to be > 5 ms old - no
+    // mid-frame gap of any kind can fake a frame boundary while the
+    // frame is younger than a 200 fps period, while a genuine next
+    // frame (>= 8 ms at any realistic rate) always clears the floor.
+    const bool kht_frame_aged =
+        (kht_now.QuadPart - g_ui_mask.phase_arm_tick) > (kht_qpf * 5) / 1000;
+    // 26067 CONSUMPTION GATE (the long-frame residual): the 26066 floor
+    // halved the false re-arms but any fixed floor loses to occasional
+    // long frames (field dump: 24 extra arms in 493 flushes with the UI
+    // updating identically every frame - streaming/sim spikes stretch
+    // the UI phase past 5 ms and a > 1 ms gap after that still faked a
+    // boundary). The semantic truth the timing was approximating:
+    // the HARMFUL wipe is exactly a re-arm BEFORE the write window
+    // consumed this compose's mask. applied_serial catches
+    // compose_serial when the flush paints (park-written; reading it
+    // here follows the same cross-thread discipline as the learned-
+    // surface table this machine already consumes) - while they DIFFER,
+    // the mask is still owed to a flush and no gap of any length may
+    // destroy it; once consumed, the next boundary detection is
+    // legitimate, and empirically all false gaps live pre-flush (the
+    // driver hoist leaves nearly nothing after the write window). The
+    // 50 ms failsafe keeps arming alive through pathological no-UI
+    // frames (map/menu: armed, never cleared, flush skips, serials
+    // never converge) - degraded 20 Hz arming instead of a deadlock.
+    const bool kht_consumed =
+        g_ui_mask.applied_serial == g_ui_mask.compose_serial;
+    const bool kht_frame_stale =
+        (kht_now.QuadPart - g_ui_mask.phase_arm_tick) > (kht_qpf * 50) / 1000;
+    const bool kht_arm_ok =
+        kht_new_frame && kht_frame_aged && (kht_consumed || kht_frame_stale);
 
-    if (g_ui_mask.phase == 2 && !kht_new_frame) {
+    if (g_ui_mask.phase == 2 && !kht_arm_ok) {
         // the first UI draw of the armed frame: zero the coverage channel
         // before it (kh_ui_mask_clear_alpha verifies the live binding
-        // again on its own - belt and braces - and sets phase 3)
+        // again on its own - belt and braces - and sets phase 3). A
+        // late first draw - behind a > 1 ms foreign interleave - takes
+        // this path too now: the floor says the frame is still young,
+        // so it cannot be a new compose.
         kh_ui_mask_clear_alpha(ctx);
+        g_ui_mask.phase_tick = kht_now.QuadPart;   // 26065: token refresh
+                                                   // (ledger at the else-branch below)
         return;
     }
 
-    if (g_ui_mask.phase == 0 || kht_new_frame) {
+    if (g_ui_mask.phase == 0 || kht_arm_ok) {
         // the new frame's first learned-surface draw: the compose (phase 3
         // with a sub-millisecond delta falls through instead: a same-frame
         // UI draw over a standing mask - nothing to do). The compose
@@ -19843,11 +20055,29 @@ inline void kh_ui_mask_thread_draw(ID3D11DeviceContext* ctx) {
         g_ui_mask.phase_w = kht_w;
         g_ui_mask.phase_h = kht_h;
         g_ui_mask.phase_tick = kht_now.QuadPart;
+        g_ui_mask.phase_arm_tick = kht_now.QuadPart;   // 26066: the floor's anchor
         g_ui_mask.probes_used = 0;   // per-frame verify budget refresh
         g_ui_mask.mask_valid = false;
         g_ui_mask.compose_serial++;
         g_ui_mask.phase = 2;
         g_ui_mask_arms++;
+    } else if (g_ui_mask.phase == 3) {
+        // 26065 TOKEN REFRESH (the intense-UI flicker fix): phase_tick
+        // was stamped ONLY at arming, so the "new frame" token measured
+        // elapsed-since-COMPOSE - and a UI phase longer than 1 ms (an
+        // intense, frequently-updating UI) re-armed on every draw past
+        // that point: a fresh alpha clear wiped the frame's accumulated
+        // coverage every millisecond (field dump: 3.25 arms/frame, the
+        // 64x64 forensic pinned near zero coverage, 37 skipped passes -
+        // 610 flushes vs 573 uiOnlyDraws). Refreshing the stamp on every
+        // same-frame learned-surface draw turns the token into the
+        // INTER-DRAW gap the machine's ledger always described:
+        // back-to-back UI draws never re-arm no matter how long the
+        // phase runs, while real frames stay separated by the
+        // multi-millisecond present/scene gap. The clear branch above
+        // refreshes too, so a probe-budget WAIT (interleaved foreign
+        // draws) can no longer age past the token mid-wait.
+        g_ui_mask.phase_tick = kht_now.QuadPart;
     }
 }
 
@@ -22780,6 +23010,9 @@ inline void stage_world_lighting() {
 // the graphics lock with bounded retries - a transiently contended lock is a
 // dropped (effect-less, visibly flickering) frame, so one immediate retry is
 // cheap insurance. Persistent failure is counted, not fought.
+inline void kh_ui_driver_rehoist();   // defined with the driver lifecycle
+                                      // below (26065: the auto-hoist site)
+
 inline void flush_frame() {
     bool has_work;
     
@@ -22827,6 +23060,28 @@ inline void flush_frame() {
     g_kh_track_wanted.store(has_work, std::memory_order_relaxed);
 
     if (!has_work) return;
+
+    // 26065 AUTO RE-HOIST (the intense-UI campaign): a mission that
+    // builds UI continuously overtakes the driver control between
+    // add/update calls - the on-call rehoist's contract ("on top within
+    // half a second of the call") never covered call-silent sessions,
+    // and a buried driver composites BEFORE the newer controls draw: fx
+    // under the newest UI, the capture blind to it (field dump:
+    // uiDriverPolls stuck at 1 across a 166 s session). While any
+    // write-window pass exists, re-run the hoist once per second from
+    // here (game thread - the same thread the SQF init runs on);
+    // kh_ui_driver_rehoist's own 0.5 s churn guard stays as the floor,
+    // and the EachFrame poll performs the actual recreate next frame
+    // exactly as the on-call path does.
+    if (g_ui_mask_wanted.load(std::memory_order_relaxed)) {
+        static float khrh_auto_last_s = -1.0e9f;   // game thread only
+        const float khrh_now_s = effect_time_seconds();
+
+        if (khrh_now_s - khrh_auto_last_s >= 1.0f) {
+            khrh_auto_last_s = khrh_now_s;
+            kh_ui_driver_rehoist();
+        }
+    }
     if (!RVExtBridge::is_initialized()) return;
     // cold_t0: first flush whose draw list holds a SHADOW-CAPABLE mesh.
     // (Was is_composite_eligible - which, since the ownership fix,
@@ -23052,16 +23307,54 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     // frame; UI-mode passes skip otherwise (one-frame learn latency at
     // spawn - the designed fail-safe).
     kh_ui_mask_learn(khum_bb_id, td.Width, td.Height);
+    // 26068 MISSED-FRAME RESYNC (the inverse-flicker fix): the 26067
+    // consumption gate suppresses re-arming while a compose's mask is
+    // unconsumed - correct for mid-frame gaps, but a DRIVER-DARK frame
+    // (the rehoist's delete/create swap can cost one control-Draw) left
+    // the mask unconsumed across a real boundary: the next frame's
+    // genuine compose was then suppressed, NO clear ran, the compose's
+    // own full-screen alpha stayed in the coverage channel, and the
+    // orphaned mask_valid let this flush paint the effect over the
+    // whole scene (the sporadic scene-wide bloom flashes, one per
+    // missed driver frame). applied_serial already catches up on every
+    // driver flush that runs - so a lag here PLUS a gap in the scene
+    // ordinal is the missed-frame signature exactly. Stand the mask
+    // down for this one frame (the passes below take their normal
+    // mask-skip path); the unconditional applied write at the stale
+    // gate then closes the handshake and the next compose arms and
+    // clears normally. Damage: one benign fx-less frame per missed
+    // driver frame, instead of a scene flash.
+    {
+        static uint64_t khum_prev_scene_frame = 0;   // game thread only
+        const uint64_t khum_scene_frame = g_flush_frame;
+        const bool khum_driver_dark =
+            khum_prev_scene_frame != 0 &&
+            khum_scene_frame > khum_prev_scene_frame + 1;
+        khum_prev_scene_frame = khum_scene_frame;
+
+        if (khum_driver_dark && g_ui_mask.compose_serial != 0 &&
+            g_ui_mask.compose_serial != g_ui_mask.applied_serial) {
+            g_ui_mask.mask_valid = false;   // suspect coverage: skip, resync
+        }
+    }
+
     const bool khum_mask_live = g_ui_mask.mask_valid &&
                                 g_ui_mask.phase_bb == khum_bb_id;
 
-    // 26058 alpha-regime forensic (ledger at KhUiMask): map LAST flush's
-    // 64x64 staging window of the LIVE write-window surface, then queue
-    // this flush's copy - one tiny copy per frame, mapped a frame late,
-    // never stalling. min/max alpha over a scene-region window decide the
-    // regime: 255/255 = the capture regime (the compose pins the channel;
-    // only an injected clear can free it), a low min = coverage ALREADY
-    // lives in this surface's alpha and no injection is needed at all.
+    // 26058 alpha-regime forensic + 26070 lagged coverage verdict
+    // (RESTORED 26072; the 26071 same-frame blocking readback is
+    // RETIRED WITH A FINDING): a blocking Map at this callsite read the
+    // scene window at 255/255 on EVERY frame - the surface's
+    // COMPOSE-PINNED, PRE-CLEAR state - while the passes' blending
+    // demonstrably consumes post-clear coverage, and the frame-late map
+    // of the same-position copy reads the sane 6-7 floor. The CPU-
+    // observable stream state at the control-Draw moment PRECEDES the
+    // clear+UI the blend consumes at execution: the engine records
+    // across threads, and the one-frame lag of the 26058 design was
+    // load-bearing CORRECTNESS, not merely the no-stall rule. A same-
+    // frame CPU verdict is therefore unobtainable here; the lagged
+    // verdict (event's first frame visible, everything after vetoed,
+    // sticky until provably sane) is the veto's floor.
     if (td.Width >= 512 && td.Height >= 512) {
         if (!g_res.ui_alpha_stage) {
             D3D11_TEXTURE2D_DESC khas_td = {};
@@ -23101,6 +23394,10 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                     g_ui_mask.alpha_min = khas_min;
                     g_ui_mask.alpha_max = khas_max;
                     g_ui_mask.alpha_copy_pending = false;
+                    // 26070: coverage-regime verdict (ledger at
+                    // g_ui_cov_suspect) - sticky until provably sane.
+                    if (khas_min >= 128) g_ui_cov_suspect = true;
+                    else if (khas_min < 32) g_ui_cov_suspect = false;
                 } else if (khas_hr != DXGI_ERROR_WAS_STILL_DRAWING) {
                     g_ui_mask.alpha_copy_pending = false;   // hard failure: re-queue
                 }
@@ -23192,7 +23489,103 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         ctx->RSSetViewports(1, &full);
     }
 
+    // 26069 COVERAGE DEBUG VIEW (setRenderDebug 27): replace the write
+    // window's passes with a grayscale render of the accumulated UI
+    // coverage (dst.a via the verbatim capture - white = coverage, black
+    // = none). RGB-only replace blend so the mask channel itself
+    // survives the view. The shape during a flash names the culprit:
+    // uniform full-screen = an engine fullscreen pass or fade writing
+    // alpha after our clear; vignette-shaped = a damage/screen tint;
+    // rectangular = a specific element.
+    const bool khum_dbg_cov = g_dbg_mode.load(std::memory_order_relaxed) == 27;
+
+    if (khum_dbg_cov) {
+        const std::string khdc_cap = ensure_backbuffer_capture(dev, ctx, bb, td);
+
+        if (khdc_cap.empty() && g_res.ps_dbg_cov && g_res.blend_ui_replace) {
+            ctx->PSSetShaderResources(0, 1, &g_res.bb_srv);
+            ctx->PSSetShader(g_res.ps_dbg_cov, nullptr, 0);
+            ctx->OMSetBlendState(g_res.blend_ui_replace, bf, 0xFFFFFFFF);
+            ctx->Draw(3, 0);
+        }
+    }
+
+    // 26075 COVERAGE REPAIR (the endgame of the poison campaign): the
+    // engine's saturated-alpha frames proved FREQUENT (field: 14 CPU
+    // vetoes + shader discards in 2,617 frames), so suppression - the
+    // 26070/26073 answer - reads as the fx blinking OFF at event rate.
+    // Applying and suppressing are both wrong on a poison frame; the
+    // third option is applying with SUBSTITUTED coverage: the last
+    // provably-sane frame's own alpha. Rather than teach every lane to
+    // fall back, repair dst.a ITSELF: one alpha-only fullscreen draw -
+    // per pixel, passthrough on sane frames (identity rewrite),
+    // history alpha on poison frames (the PS's own scene-window probe
+    // decides, same 8-texel signature as everything else). Every
+    // downstream consumer - masked lerp, spill premultiply, hardware
+    // DEST_ALPHA customs, the forensic, the histories - then reads
+    // sane coverage unconditionally. The history copies the POST-
+    // correction surface, so by induction it always holds sane
+    // coverage and survives arbitrary poison streaks; cold start
+    // (empty history = zero coverage) renders poison frames fx-less
+    // until the first sane frame seeds it - the benign direction.
+    // Skipped under the mode-27 debug view (which exists to show RAW
+    // coverage) and when the mask is dead (nothing would consume).
+    if (!khum_dbg_cov && khum_mask_live && g_res.ps_cov_fix &&
+        g_res.blend_alpha_zero) {
+        // (1) capture the pre-correction surface (alpha = live dst.a)
+        const std::string khcr_cap = ensure_backbuffer_capture(dev, ctx, bb, td);
+
+        // (2) ensure the history matches the surface
+        if (khcr_cap.empty() &&
+            (!g_res.cov_hist_tex || g_res.cov_hist_w != td.Width ||
+             g_res.cov_hist_h != td.Height ||
+             g_res.cov_hist_fmt != static_cast<uint32_t>(td.Format))) {
+            KH_SAFE_RELEASE(g_res.cov_hist_srv);
+            KH_SAFE_RELEASE(g_res.cov_hist_tex);
+            D3D11_TEXTURE2D_DESC khcr_td = {};
+            khcr_td.Width = td.Width;
+            khcr_td.Height = td.Height;
+            khcr_td.MipLevels = 1;
+            khcr_td.ArraySize = 1;
+            khcr_td.Format = td.Format;
+            khcr_td.SampleDesc.Count = 1;
+            khcr_td.Usage = D3D11_USAGE_DEFAULT;
+            khcr_td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+
+            if (SUCCEEDED(dev->CreateTexture2D(&khcr_td, nullptr, &g_res.cov_hist_tex))) {
+                if (FAILED(dev->CreateShaderResourceView(g_res.cov_hist_tex, nullptr,
+                                                         &g_res.cov_hist_srv))) {
+                    KH_SAFE_RELEASE(g_res.cov_hist_tex);
+                }
+            }
+
+            if (g_res.cov_hist_tex) {
+                g_res.cov_hist_w = td.Width;
+                g_res.cov_hist_h = td.Height;
+                g_res.cov_hist_fmt = static_cast<uint32_t>(td.Format);
+                // seed: a fresh history starts as THIS surface (sane or
+                // not, it self-heals at the first sane frame; seeding
+                // avoids an undefined-content read on the first poison)
+                ctx->CopyResource(g_res.cov_hist_tex, bb);
+            }
+        }
+
+        // (3) the repair draw: alpha-only write, probe-decided source
+        if (khcr_cap.empty() && g_res.cov_hist_srv) {
+            ID3D11ShaderResourceView* khcr_srvs[2] = { g_res.bb_srv, g_res.cov_hist_srv };
+            ctx->PSSetShaderResources(0, 2, khcr_srvs);
+            ctx->PSSetShader(g_res.ps_cov_fix, nullptr, 0);
+            ctx->OMSetBlendState(g_res.blend_alpha_zero, bf, 0xFFFFFFFF);
+            ctx->Draw(3, 0);
+
+            // (4) history update from the POST-correction surface: alpha
+            // is sane by construction from here on (the induction step)
+            ctx->CopyResource(g_res.cov_hist_tex, bb);
+        }
+    }
+
     for (const auto& f : passes) {
+        if (khum_dbg_cov) break;   // the debug view replaces the passes
         const RenderObject& o = f.second;
         if (o.effect <= 0) continue;
 
@@ -23201,6 +23594,12 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         // would flash fullscreen post-tonemap. Skip and count; the mask
         // goes live one frame after the machinery spawns.
         if (!khum_mask_live) { g_ui_mask_skips++; continue; }
+        if (g_ui_cov_suspect) g_ui_cov_vetoes++;   // 26075: DIAGNOSTIC only -
+                                                   // the correction pass sanitizes
+                                                   // dst.a before any consumer, so
+                                                   // suspect frames render with the
+                                                   // substituted history mask
+                                                   // instead of standing down
 
         // CUSTOM EFFECT (UI phase): same contract as the scene chain.
         ID3D11PixelShader* khu_ufx = nullptr;
@@ -23256,8 +23655,18 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         // composited result raw - the hardware composite does the rest.
         // MASKED builtins take w = 2 (in-shader destination lerp);
         // masked customs w = 1 under the DEST_ALPHA lerp.
+        // 26073: spill BUILTINS carry w = 3 - chain-packing semantics
+        // (> 0.5) plus the UI-phase poison guard (> 1.5), excluded from
+        // the masked destination lerp (< 2.5). 26074: UI-phase CUSTOMS
+        // carry w = 1.25 - threshold-identical to the scene chain's 1.0
+        // for every shipped test (> 0.5, < 1.5, < 2.5) so existing user
+        // shaders behave unchanged, while giving user code a documented
+        // phase discriminator (w > 1.1 = write-window invocation) so it
+        // CAN implement the poison-guard probe itself - the full user
+        // contract lives at the USER HLSL SHADER CACHE ledger. Customs
+        // are otherwise floored by the lagged CPU veto.
         cbd.center_size[3] =
-            (khu_spill || o.effect == KH_EFFECT_CUSTOM) ? 1.0f : 2.0f;
+            o.effect == KH_EFFECT_CUSTOM ? 1.25f : (khu_spill ? 3.0f : 2.0f);
         // 26062: the spill lane is defined under NORMAL blend semantics
         // (its algebra composes the raw result against the premultiplied
         // capture; other modes would re-mix UI content into itself) - the
@@ -23456,6 +23865,8 @@ inline void reset_stat_counters() {
     g_blk_starved_adopts = 0;   // 26054: starvation-path census
     g_ui_mask_clears = 0;       // 26055: UI-mask census (ledger at KhUiMask)
     g_ui_mask_skips = 0;
+    g_ui_cov_vetoes = 0;        // 26070 (the suspect latch itself is NOT
+                                // reset here: it is state, not census)
     g_ui_only_draws = 0;
     g_ui_mask_arms = 0;         // 26056: arming-path census
     g_ui_mask_aborts = 0;

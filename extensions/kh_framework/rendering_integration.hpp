@@ -1046,6 +1046,17 @@ static bool g_kh_flush_active = false;
 // own Draw re-enters the hooks on that thread). Deliberately separate
 // from g_ro.in_injection, which belongs to the render thread.
 static bool g_ui_mask_injecting = false;
+// 26064 MASTER TRACK DEMAND (the idle-overhead campaign): any extension
+// work exists RIGHT NOW - draw list non-empty, a visibility batch
+// pending, or async results in flight (the flush's own has_work).
+// Recomputed every flush_frame (which runs on every Draw3D regardless of
+// work) and stored true directly at add_render_object so the frame of a
+// spawn is covered; consumers are the reorder per-draw tracking suite
+// and the upload-scan funnel, which fall to their entry compares when
+// nothing can consume what they feed. Relaxed everywhere - a one-frame
+// lag on a toggle only delays warm data by a frame, exactly the spawn
+// path's existing latency.
+static std::atomic<bool> g_kh_track_wanted{false};
 static uint64_t g_ui_mask_clears = 0;   // alpha-zero injections fired (render thread;
                                         // steady state: one per frame while wanted)
 static uint64_t g_ui_mask_skips = 0;    // UI-mode passes skipped for want of a live mask
@@ -8345,7 +8356,7 @@ static uint32_t g_fk_veto_cand_n = 0;       // candidates staged at the last pas
                                             // is live in this scene)
 // BUILD TAG (doctrine: bump on EVERY delivered build; stats-visible so a
 // field log names the binary it came from).
-static constexpr int KH_BUILD_TAG = 26062;
+static constexpr int KH_BUILD_TAG = 26064;
 // NEAR-GAP RAMP (build 26001; the RenderDoc conviction). ROOT, proven by
 // pixel history + depth-window plateaus: the world partition's viewport
 // floor (0.011 in the convicting capture) collapses EVERY fragment nearer
@@ -10586,6 +10597,63 @@ inline void ffr_frame_boundary() {
     if (g_ffr_serial == 1) ffr_read_counters(g_ffr_snap);   // first boundary seeds the baseline
 }
 
+// ---------------------------------------------------------------------------
+// 26064 CONTEXT1 CACHE: dynlights sampling/acquire, the skybind harvest
+// and the cascade-binding harvest each ran a QueryInterface for
+// ID3D11DeviceContext1 on EVERY invocation (~150-250/frame lit) against
+// the SAME immediate context. One cached interface per context pointer
+// instead; the cache holds the QI reference and releases it at device
+// teardown (release_shadow_device_state - render thread parked or self,
+// the same quiescence every other device-object release rides).
+// Render-thread use only; a context change (device-reset refresh) re-QIs
+// on the next call via the pointer mismatch.
+// ---------------------------------------------------------------------------
+static ID3D11DeviceContext1* g_kh_ctx1 = nullptr;
+static void*                 g_kh_ctx1_for = nullptr;
+
+inline ID3D11DeviceContext1* kh_ctx1(ID3D11DeviceContext* ctx) {
+    if (g_kh_ctx1 && g_kh_ctx1_for == static_cast<void*>(ctx)) return g_kh_ctx1;
+
+    if (g_kh_ctx1) {
+        g_kh_ctx1->Release();
+        g_kh_ctx1 = nullptr;
+    }
+
+    ctx->QueryInterface(__uuidof(ID3D11DeviceContext1), reinterpret_cast<void**>(&g_kh_ctx1));
+    g_kh_ctx1_for = g_kh_ctx1 ? static_cast<void*>(ctx) : nullptr;
+    return g_kh_ctx1;
+}
+
+inline void kh_ctx1_release() {
+    if (g_kh_ctx1) {
+        g_kh_ctx1->Release();
+        g_kh_ctx1 = nullptr;
+    }
+
+    g_kh_ctx1_for = nullptr;
+}
+
+// 26064 RT0 DESC CACHE: every OMSetRenderTargets on the render thread
+// paid GetResource + QueryInterface + GetDesc for RT0, against the same
+// few dozen render targets per frame. The per-bind GetResource STAYS in
+// mask_classify_rt (it is the liveness/identity anchor - the
+// codebase-wide weak-identity convention); the QI + GetDesc verdict is
+// cached per RESOURCE pointer here. fmt == 0 caches the "not a
+// Texture2D" verdict (the historical early-return path; no real
+// Texture2D carries DXGI_FORMAT_UNKNOWN). Evicted wholesale at device
+// teardown with the other weak identities (release_shadow_device_state);
+// a recycled resource pointer re-resolving to a different texture is the
+// accepted weak-identity caveat, bounded by the reset eviction like
+// every other identity cache in this file.
+struct KhRt0DescEntry {
+    void*    res = nullptr;
+    uint32_t fmt = 0;       // DXGI_FORMAT bits; 0 = non-Texture2D verdict
+    UINT     w = 0;
+};
+static KhRt0DescEntry g_rt0_desc[32] = {};
+static uint32_t g_rt0_desc_n = 0;
+static uint32_t g_rt0_desc_next = 0;
+
 inline void skybind_release() {
     for (int i = 0; i < 16; ++i) {
         KH_SAFE_RELEASE(g_skybind.staging[i]);
@@ -10593,6 +10661,9 @@ inline void skybind_release() {
     }
     g_skybind.pending = 0;
 }
+
+inline bool shadow_live_wanted();   // defined with the live-shadow state
+                                    // below (26064: the view-stage gate)
 
 inline void skybind_step(ID3D11DeviceContext* ctx) {
     // Phase one: harvest last frame's copies.
@@ -10634,7 +10705,10 @@ inline void skybind_step(ID3D11DeviceContext* ctx) {
     // when both are satisfied.
     const bool want_sky_stage = !(g_sky_probe.valid &&
         effect_time_seconds() - g_sky_probe.last_confirm < 5.0f);
-    const bool want_view_stage = !g_ls.view_src_valid;
+    // 26064: the view lock's only consumer is the lit shadow cast -
+    // demand-gate the stage so unlit sessions stop staging VS copies
+    // every 8th opaque draw forever.
+    const bool want_view_stage = !g_ls.view_src_valid && shadow_live_wanted();
     if (!want_sky_stage && !want_view_stage) return;
 
     // BOTH shader stages (the 416-byte lesson: at 8x sampling density no
@@ -10646,8 +10720,7 @@ inline void skybind_step(ID3D11DeviceContext* ctx) {
     ID3D11Buffer* bufs[16] = {};
     UINT first16[16] = {};   // in 16-byte constants
     UINT num16[16] = {};
-    ID3D11DeviceContext1* ctx1 = nullptr;
-    ctx->QueryInterface(__uuidof(ID3D11DeviceContext1), reinterpret_cast<void**>(&ctx1));
+    ID3D11DeviceContext1* ctx1 = kh_ctx1(ctx);   // 26064: cached QI (no release)
 
     if (ctx1) {
         ctx1->PSGetConstantBuffers1(0, 8, bufs, first16, num16);
@@ -10733,7 +10806,6 @@ inline void skybind_step(ID3D11DeviceContext* ctx) {
     }
 
     if (dev) dev->Release();
-    if (ctx1) ctx1->Release();
 }
 
 static uint64_t g_loc_scan_uploads = 0;    // uploads examined inside attempt windows
@@ -11682,8 +11754,7 @@ inline bool dl_finite(float v) { return v == v && v < 1.0e30f && v > -1.0e30f; }
 // own metadata (not the census table), so the census fold at the clear
 // and the arena flip at the injection stay independent.
 inline void dynlights_sample_draw(ID3D11DeviceContext* ctx) {
-    ID3D11DeviceContext1* khd_c1 = nullptr;
-    ctx->QueryInterface(__uuidof(ID3D11DeviceContext1), reinterpret_cast<void**>(&khd_c1));
+    ID3D11DeviceContext1* khd_c1 = kh_ctx1(ctx);   // 26064: cached QI (no release)
     if (!khd_c1) return;
     ID3D11Buffer* khd_b11 = nullptr;
     UINT khd_f11 = 0, khd_n11 = 0;
@@ -11692,7 +11763,6 @@ inline void dynlights_sample_draw(ID3D11DeviceContext* ctx) {
 
     if (!khd_b11) {
         g_dl_cd_null++;
-        khd_c1->Release();
         return;
     }
 
@@ -11727,14 +11797,12 @@ inline void dynlights_sample_draw(ID3D11DeviceContext* ctx) {
 
     if (khd_have) {
         khd_b11->Release();
-        khd_c1->Release();
         return;
     }
 
     if (g_dl.win_count[khd_w] >= KH_DL_WIN_MAX) {
         g_dl.win_table_full++;
         khd_b11->Release();
-        khd_c1->Release();
         return;
     }
 
@@ -11763,7 +11831,6 @@ inline void dynlights_sample_draw(ID3D11DeviceContext* ctx) {
     ID3D11Buffer* khd_vsb[KH_DL_VS_SLOTS] = {};
     UINT khd_vsf[KH_DL_VS_SLOTS] = {}, khd_vsn[KH_DL_VS_SLOTS] = {};
     khd_c1->VSGetConstantBuffers1(0, KH_DL_VS_SLOTS, khd_vsb, khd_vsf, khd_vsn);
-    khd_c1->Release();
 
     if (g_dl.arena[khd_w] && khd_b10) {
         D3D11_BUFFER_DESC khd_d10 = {}, khd_d11 = {};
@@ -13032,8 +13099,10 @@ inline void dynlights_publish(const uint8_t* khd_p, int khd_s) {
 // free staging slot. Copies touch no pipeline state; the hooks ignore our
 // own calls (in_injection).
 inline void dynlights_acquire(ID3D11DeviceContext* ctx, const float view[4][4]) {
-    if (g_dl_mode.load(std::memory_order_relaxed) <= 0 &&
+    if ((g_dl_mode.load(std::memory_order_relaxed) <= 0 ||
+         !g_ls.wanted.load(std::memory_order_relaxed)) &&
         !g_dl_recon.load(std::memory_order_relaxed)) return;   // fully dormant
+                                   // (26064: mode requires a lit consumer)
     g_dl.acquires++;
 
     // (0) arena lifecycle: harvest the previous frame's per-draw window
@@ -13054,8 +13123,7 @@ inline void dynlights_acquire(ID3D11DeviceContext* ctx, const float view[4][4]) 
     }
 
     // (2) live slot census + this frame's copy
-    ID3D11DeviceContext1* khd_c1 = nullptr;
-    ctx->QueryInterface(__uuidof(ID3D11DeviceContext1), reinterpret_cast<void**>(&khd_c1));
+    ID3D11DeviceContext1* khd_c1 = kh_ctx1(ctx);   // 26064: cached QI (no release)
     if (!khd_c1) { g_dl.no_ctx1++; return; }
     ID3D11Buffer* khd_b10 = nullptr;
     UINT khd_f10 = 0, khd_n10 = 0;
@@ -13063,7 +13131,6 @@ inline void dynlights_acquire(ID3D11DeviceContext* ctx, const float view[4][4]) 
     UINT khd_f11 = 0, khd_n11 = 0;
     khd_c1->PSGetConstantBuffers1(10, 1, &khd_b10, &khd_f10, &khd_n10);
     khd_c1->PSGetConstantBuffers1(11, 1, &khd_b11, &khd_f11, &khd_n11);
-    khd_c1->Release();
 
     g_dl.slot10_buf = static_cast<void*>(khd_b10);
     g_dl.slot11_buf = static_cast<void*>(khd_b11);
@@ -14783,8 +14850,7 @@ inline void cascbind_step(ID3D11DeviceContext* ctx) {
     ID3D11Buffer* bufs[4] = {};
     UINT first16[4] = {};
     UINT num16[4] = {};
-    ID3D11DeviceContext1* ctx1 = nullptr;
-    ctx->QueryInterface(__uuidof(ID3D11DeviceContext1), reinterpret_cast<void**>(&ctx1));
+    ID3D11DeviceContext1* ctx1 = kh_ctx1(ctx);   // 26064: cached QI (no release)
 
     if (ctx1) {
         ctx1->VSGetConstantBuffers1(0, 4, bufs, first16, num16);
@@ -14847,7 +14913,6 @@ inline void cascbind_step(ID3D11DeviceContext* ctx) {
     }
 
     if (dev) dev->Release();
-    if (ctx1) ctx1->Release();
 }
 
 inline bool shadow_probe_target(ID3D11DepthStencilView* dsv) {
@@ -15072,6 +15137,11 @@ inline void ffr_fold_late_deltas() {
 // identities could silently false-match recycled allocations.
 // ===========================================================================
 inline void release_shadow_device_state() {
+    kh_ctx1_release();   // 26064: cached context1 interface dies with the device
+    g_rt0_desc_n = 0;    // 26064: RT0 desc cache = weak identities; wholesale evict
+    g_rt0_desc_next = 0;
+    memset(g_rt0_desc, 0, sizeof(g_rt0_desc));
+
     // --- dynamic-lights mirror machinery (device objects + weak
     //     identities; the POD censuses survive until the session reset) ---
     for (int khd_s = 0; khd_s < 2; ++khd_s) {
@@ -15891,8 +15961,6 @@ inline void mask_classify_rt(UINT n, ID3D11RenderTargetView* const* rtvs) {
     ID3D11Resource* res = nullptr;
     rtvs[0]->GetResource(&res);
     if (!res) return;
-    ID3D11Texture2D* tex = nullptr;
-    res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&tex));
     g_topo_rt0_scene = (static_cast<void*>(res) == g_topo_scene_rt_id);
     g_topo_rt0_id = static_cast<void*>(res);   // census v2: identity churn
 
@@ -15916,19 +15984,56 @@ inline void mask_classify_rt(UINT n, ID3D11RenderTargetView* const* rtvs) {
         g_mask_last_bind_d = static_cast<float>(g_topo.draws);
     }
 
+    // 26064: desc-cache lookup (ledger at KhRt0DescEntry) - the QI +
+    // GetDesc pair runs once per resource identity, not once per bind;
+    // the GetResource above stays as the liveness/identity anchor.
+    uint32_t khcr_fmt = 0;
+    UINT khcr_w = 0;
+    bool khcr_known = false;
+
+    for (uint32_t khcr_i = 0; khcr_i < g_rt0_desc_n; ++khcr_i) {
+        if (g_rt0_desc[khcr_i].res == static_cast<void*>(res)) {
+            khcr_fmt = g_rt0_desc[khcr_i].fmt;
+            khcr_w = g_rt0_desc[khcr_i].w;
+            khcr_known = true;
+            break;
+        }
+    }
+
+    if (!khcr_known) {
+        ID3D11Texture2D* tex = nullptr;
+        res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&tex));
+
+        if (tex) {
+            D3D11_TEXTURE2D_DESC td = {};
+            tex->GetDesc(&td);
+            khcr_fmt = static_cast<uint32_t>(td.Format);
+            khcr_w = td.Width;
+            tex->Release();
+        }
+
+        const uint32_t khcr_slot = g_rt0_desc_n < 32
+            ? g_rt0_desc_n : (g_rt0_desc_next & 31u);
+        g_rt0_desc[khcr_slot].res = static_cast<void*>(res);
+        g_rt0_desc[khcr_slot].fmt = khcr_fmt;
+        g_rt0_desc[khcr_slot].w = khcr_w;
+
+        if (g_rt0_desc_n < 32) g_rt0_desc_n++;
+        else g_rt0_desc_next++;
+    }
+
     res->Release();
-    if (!tex) return;
-    D3D11_TEXTURE2D_DESC td = {};
-    tex->GetDesc(&td);
+    if (khcr_fmt == 0) return;   // non-Texture2D verdict (the historical early return)
     g_mask.rt_fmt_ok =
-        (td.Format == DXGI_FORMAT_R8_UNORM || td.Format == DXGI_FORMAT_R8_TYPELESS ||
-         td.Format == DXGI_FORMAT_R16_UNORM || td.Format == DXGI_FORMAT_R16_TYPELESS ||
-         td.Format == DXGI_FORMAT_R16_FLOAT);
-    g_mask.rt_w = td.Width;
-    g_mask.rt_is_resolve = td.Width >= 1280 && g_mask.rt_fmt_ok;
-    g_topo_rt0_fmt = static_cast<uint32_t>(td.Format);
+        (khcr_fmt == static_cast<uint32_t>(DXGI_FORMAT_R8_UNORM) ||
+         khcr_fmt == static_cast<uint32_t>(DXGI_FORMAT_R8_TYPELESS) ||
+         khcr_fmt == static_cast<uint32_t>(DXGI_FORMAT_R16_UNORM) ||
+         khcr_fmt == static_cast<uint32_t>(DXGI_FORMAT_R16_TYPELESS) ||
+         khcr_fmt == static_cast<uint32_t>(DXGI_FORMAT_R16_FLOAT));
+    g_mask.rt_w = khcr_w;
+    g_mask.rt_is_resolve = khcr_w >= 1280 && g_mask.rt_fmt_ok;
+    g_topo_rt0_fmt = khcr_fmt;
     g_topo_rt0_valid = true;
-    tex->Release();
 }
 
 // The hybrid: analytic ray-vs-AABB written into the ENGINE'S mask at the
@@ -17643,6 +17748,7 @@ static HRESULT STDMETHODCALLTYPE hooked_map(ID3D11DeviceContext* self, ID3D11Res
         (type == D3D11_MAP_WRITE_DISCARD || type == D3D11_MAP_WRITE_NO_OVERWRITE) &&
         self == g_reorder_target_ctx.load(std::memory_order_relaxed) &&
         reorder_on_render_thread() && !g_ro.in_injection &&
+        g_kh_track_wanted.load(std::memory_order_relaxed) &&   // 26064 master demand
         ((!g_ro.engine_proj_valid && g_ro.cycle_pv_valid) || shadow_live_wanted() ||
          (g_proj_locator.valid && res == g_proj_locator.buf))) {
         const uint32_t bytes = proj_upload_byte_width(res);
@@ -17684,7 +17790,14 @@ static void STDMETHODCALLTYPE hooked_unmap(ID3D11DeviceContext* self, ID3D11Reso
                 proj_scan_upload(res, p.data, p.bytes);
                 shadow_live_upload(p.data, p.bytes);
                 locator_note_upload(res, p.data, p.bytes);   // fog/sun color locators (read-only)
-                if (!g_ro.in_injection) {   // our own CBs carry view columns
+                // 26064: the register ring and the view scan feed the
+                // LIT-ONLY shadow machinery (band/seal pairing, the view
+                // lock the cast consumes) - gate both on that demand.
+                // The register's per-upload memcpy (up to 2 KB, at the
+                // ledgered ~1,600 uploads/frame) was the largest
+                // unlit-workload cost in the whole funnel. The locators
+                // above stay full-rate: unlit meshes consume fog/sky.
+                if (!g_ro.in_injection && shadow_live_wanted()) {   // our own CBs carry view columns
                     shadow_register_upload(res, p.data, p.bytes);   // and window rows:
                     shadow_view_scan(res, p.data, p.bytes);         // never self-learn
                 }
@@ -17701,6 +17814,7 @@ static void STDMETHODCALLTYPE hooked_updatesubresource(ID3D11DeviceContext* self
     if (sub == 0 && !dst_box && data &&
         self == g_reorder_target_ctx.load(std::memory_order_relaxed) &&
         reorder_on_render_thread() && !g_ro.in_injection &&
+        g_kh_track_wanted.load(std::memory_order_relaxed) &&   // 26064 master demand
         ((!g_ro.engine_proj_valid && g_ro.cycle_pv_valid) || shadow_live_wanted() ||
          (g_proj_locator.valid && res == g_proj_locator.buf))) {
         const uint32_t bytes = proj_upload_byte_width(res);
@@ -17709,9 +17823,9 @@ static void STDMETHODCALLTYPE hooked_updatesubresource(ID3D11DeviceContext* self
             proj_scan_upload(res, data, bytes);
             shadow_live_upload(data, bytes);
             locator_note_upload(res, data, bytes);   // fog/sun color locators (read-only)
-            if (!g_ro.in_injection) {
-                shadow_register_upload(res, data, bytes);
-                shadow_view_scan(res, data, bytes);
+            if (!g_ro.in_injection && shadow_live_wanted()) {   // 26064: lit-only
+                shadow_register_upload(res, data, bytes);       // consumers (ledger
+                shadow_view_scan(res, data, bytes);             // at the unmap twin)
             }
         }
     }
@@ -19777,6 +19891,17 @@ inline void reorder_pre_draw(ID3D11DeviceContext* self) {
         return;
     }
 
+    // 26064 MASTER DEMAND GATE (the idle-overhead campaign): with no
+    // extension work at all - list empty, no queries in flight - nothing
+    // below has a consumer: no injection can stage, and the flush that
+    // would read every latch/census output early-outs before its own
+    // gate. One relaxed load on the active hot path; the whole per-draw
+    // suite falls to the entry compares when idle. The clear-hook
+    // boundary machinery is deliberately NOT gated (once per frame, and
+    // it keeps the render tid + PV latch warm so a re-spawn behaves
+    // exactly like today instead of re-opening a cold window).
+    if (!g_kh_track_wanted.load(std::memory_order_relaxed)) return;
+
     if (!g_ro.in_injection) {
         shadow_note_draw(self);
         mask_note_draw(self);
@@ -19789,9 +19914,14 @@ inline void reorder_pre_draw(ID3D11DeviceContext* self) {
         // the slot-11 window identity - the distinct-window census, and,
         // for the mode-3 merge, a copy of each NEW distinct window into
         // the frame's arena side. Relaxed loads + a mask when idle.
+        // 26064: mode-3 sampling is demand-gated on a lit consumer
+        // existing (fill_dynlights_cb shades lit meshes only); the
+        // operator-armed census/recon lanes keep running regardless, so
+        // dumpDynamicLights stays usable without spawning anything.
         if ((g_dl_census_on.load(std::memory_order_relaxed) ||
              g_dl_recon.load(std::memory_order_relaxed) ||
-             g_dl_mode.load(std::memory_order_relaxed) > 0) &&
+             (g_dl_mode.load(std::memory_order_relaxed) > 0 &&
+              g_ls.wanted.load(std::memory_order_relaxed))) &&
             ((++g_dl_cd_ctr & 15u) == 0)) {
             dynlights_sample_draw(self);
         }
@@ -19872,7 +20002,8 @@ inline void reorder_pre_draw(ID3D11DeviceContext* self) {
             // self-proof: skyBindMaxBw must reach the sky CB's 512 the
             // moment a terrain draw is actually sampled.
             if ((g_ro.opaque_draws & 7) == 0 &&
-                ((g_fog_valid && g_fog[0] > 1e-4f) || !g_ls.view_src_valid)) {
+                ((g_fog_valid && g_fog[0] > 1e-4f) ||
+                 (!g_ls.view_src_valid && shadow_live_wanted()))) {   // 26064
                 skybind_step(self);
             }
 
@@ -21088,9 +21219,14 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     }
     uint32_t khf_ffr_eligible = 0;
     bool khf_any_lit = false;   // sun-map carry: a lit mesh exists this frame
+    bool khf_any_mesh = false;  // 26064: any non-fullscreen consumer for the
+                                // occlusion snapshot exists this frame
 
-    std::vector<RenderObject> meshes;
-    std::vector<std::pair<uint64_t, RenderObject>> fullscreen;   // key = creation seq
+    // 26064: game-thread-only scratch (the injection's static pattern).
+    static std::vector<RenderObject> meshes;
+    static std::vector<std::pair<uint64_t, RenderObject>> fullscreen;   // key = creation seq
+    meshes.clear();
+    fullscreen.clear();
 
     {
         std::lock_guard<std::mutex> g(g_draw_list_mutex);
@@ -21119,6 +21255,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                     kh_fk_veto_collect(g_khf_veto_cands, o);
                 }
                 if (is_composite_eligible(o)) ++khf_ffr_eligible;   // flight recorder census
+                if (!o.fullscreen) khf_any_mesh = true;   // 26064 snapshot demand
                 if (o.lit && !o.fullscreen) khf_any_lit = true;   // sun-map carry gate
 
                 if (o.fullscreen) {
@@ -21415,7 +21552,14 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     // single-sample R32. The NEXT frame's injection consumes it (one
     // frame old, age-gated + logged); THIS flush's own PSMain guard
     // consumes it same-frame. ---
-    {
+    // 26064 SNAPSHOT DEMAND: every consumer is mesh-side (the injection
+    // guard, the flush PSMain guard/arb, the t2 effect-mesh arbitration
+    // - all freshness-gated and fail-safe to the stock path); the
+    // fullscreen chain reads the LIVE depth SRV, never this. A
+    // postFX-only frame therefore skips the fullscreen depth resolve
+    // entirely; the first frame after a mesh spawn is the existing cold
+    // path the freshness gates already own.
+    if (khf_any_mesh) {
         std::string khs_err = snapshot_composite_depth(dev, ctx);
 
         if (!khs_err.empty()) {
@@ -22603,24 +22747,11 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 // ===========================================================================
 
 inline void stage_world_lighting() {
-    bool lit_exists = false;
-
-    {
-        std::lock_guard<std::mutex> g(g_draw_list_mutex);
-
-        for (const auto& kv : g_draw_list) {
-            const RenderObject& o = kv.second;
-
-            if (o.lit && o.visible && !o.fullscreen) {
-                lit_exists = true;
-                break;
-            }
-        }
-    }
-
-    // Live shadow-map capture follows lit objects; the recon keeps the sun
-    // published even without any.
-    g_ls.wanted.store(lit_exists, std::memory_order_relaxed);
+    // (26064: the lit-exists recompute moved to flush_frame's demand
+    // block - BEFORE the has_work early-out - fixing the sticky-demand
+    // bug where deleting the last object froze g_ls.wanted forever.
+    // This function stages fog only now; the recon still keeps the sun
+    // published without lit objects, exactly as before.)
 
     // FOG IS NOT LIGHTING (settings-independence): staging used to bail
     // without a lit object, so an UNLIT mesh stood unfogged in a fogged
@@ -22663,20 +22794,37 @@ inline void flush_frame() {
         bool khum_wanted = false;   // any visible UI-phase pass (26061: BOTH and
                                     // UI alike - every write-window pass is
                                     // coverage-masked and needs the machinery)
+        // 26064 STICKY-DEMAND FIX: the lit recompute lived in
+        // stage_world_lighting, AFTER the has_work early-out below - so
+        // deleting the last object froze g_ls.wanted at its final value,
+        // and a stale TRUE kept the whole shadow-live ecosystem (atlas
+        // tracking, resolve/band captures, the upload view scans) running
+        // forever with zero consumers. Both demand flags now recompute
+        // HERE, before any early-out, in the one loop.
+        bool khum_lit = false;      // any visible lit mesh (shadow-live demand)
 
         for (const auto& khum_kv : g_draw_list) {
-            if (khum_kv.second.visible && khum_kv.second.fullscreen &&
-                khum_kv.second.affect_ui) {
-                khum_wanted = true;
-                break;
+            if (!khum_kv.second.visible) continue;
+
+            if (khum_kv.second.fullscreen) {
+                if (khum_kv.second.affect_ui) khum_wanted = true;
+            } else if (khum_kv.second.lit) {
+                khum_lit = true;
             }
+
+            if (khum_wanted && khum_lit) break;
         }
 
         g_ui_mask_wanted.store(khum_wanted, std::memory_order_relaxed);
+        g_ls.wanted.store(khum_lit, std::memory_order_relaxed);
     }
 
     has_work = has_work || g_query_pending ||
                g_async_inflight_count[0] > 0 || g_async_inflight_count[1] > 0;
+    // 26064: master track demand (ledger at g_kh_track_wanted) - stored
+    // every frame, before the early-out, so an emptied list stands the
+    // per-draw tracking suite and the upload funnel down next frame.
+    g_kh_track_wanted.store(has_work, std::memory_order_relaxed);
 
     if (!has_work) return;
     if (!RVExtBridge::is_initialized()) return;
@@ -22821,7 +22969,10 @@ inline std::string kh_capture_bb_premult(ID3D11Device* dev, ID3D11DeviceContext*
 
 inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     const float snapshot_now = effect_time_seconds();
-    std::vector<std::pair<uint64_t, RenderObject>> passes;   // key = creation seq
+    // 26064: game-thread-only scratch (the injection's static pattern) -
+    // reuse the allocation across frames instead of churning it.
+    static std::vector<std::pair<uint64_t, RenderObject>> passes;   // key = creation seq
+    passes.clear();
 
     {
         std::lock_guard<std::mutex> g(g_draw_list_mutex);
@@ -23414,6 +23565,8 @@ inline void reset_stat_counters() {
 inline void reset_session_state() {
     reset_stat_counters();
     kh_ui_mask_reset();   // 26055: learned backbuffers, phase machine, demand flag
+    g_kh_track_wanted.store(false, std::memory_order_relaxed);   // 26064: recomputes
+                                                                 // at the next flush
     g_sun_pub_prev_valid = false;   // the settle tracker restarts with the session
     g_sun_unstable_ms = 0;
     g_sun_valid_ms = 0;
@@ -23640,6 +23793,9 @@ inline void on_mission_end() {
 
 inline std::string add_render_object(const RenderObject& obj) {
     ensure_draw_eh();
+    // 26064: cover the spawn frame - the per-frame recompute in
+    // flush_frame arms next flush; this store arms the hooks NOW.
+    g_kh_track_wanted.store(true, std::memory_order_relaxed);
     // Flight recorder: a just-added eligible mesh must count for the dark
     // tripwire even if the next flush skips before its snapshot runs.
     if (is_composite_eligible(obj)) g_ffr_any_eligible.store(true, std::memory_order_relaxed);

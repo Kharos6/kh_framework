@@ -777,6 +777,32 @@ struct Resources {
     ID3D11Texture2D*          chain_tex[2] = {};
     ID3D11RenderTargetView*   chain_rtv[2] = {};
     ID3D11ShaderResourceView* chain_srv[2] = {};
+    // 26080 PYRAMID GATHERS (ledger at the chain loop): quarter-res
+    // ping-pong for the gather family's chain acceleration - bright
+    // extract + separable blur for bloom/halation, bright-only for
+    // anamorphic (its pow-falloff loop reads the small texture, shape-
+    // preserved). Sized/formatted from the chain targets; recreated on
+    // mismatch; released with the chain.
+    ID3D11Texture2D*          pyr_tex[2] = {};
+    ID3D11RenderTargetView*   pyr_rtv[2] = {};
+    ID3D11ShaderResourceView* pyr_srv[2] = {};
+    UINT                      pyr_w = 0, pyr_h = 0;
+    ID3D11PixelShader*        ps_pyr_bright = nullptr;   // 26080: threshold extract + 5-tap box
+    ID3D11PixelShader*        ps_pyr_blur = nullptr;     // 26080: 9-tap separable gaussian
+    ID3D11SamplerState*       fx_sampler_linear = nullptr;   // 26080: s0 linear clamp for
+                                                             // chain draws (StateBackup's
+                                                             // ps_samps restores the engine's)
+    // 26080 GPU TIMESTAMPS (scene chain instrumentation; the perf
+    // campaign's field authority): a 3-deep ring of disjoint + stamp
+    // queries - [0] chain begin, [1] chain end, [2+2k]/[3+2k] pass k
+    // (16-pass cap). Read back DONOTFLUSH 2+ frames later; a slot
+    // still in flight is skipped, never reused hot.
+    ID3D11Query*              ts_disjoint[3] = {};
+    ID3D11Query*              ts_stamp[3][34] = {};
+    int                       ts_pass_fx[3][16] = {};
+    int                       ts_pass_n[3] = {};
+    int                       ts_cursor = 0;
+    bool                      ts_inflight[3] = {};
     ID3D11Texture2D*          scene_tex = nullptr;
     ID3D11ShaderResourceView* scene_srv = nullptr;
     UINT                      scene_w = 0, scene_h = 0;
@@ -811,6 +837,13 @@ struct Resources {
     }
 
     void release_fx_chain() {
+        for (int i = 0; i < 2; ++i) {
+            KH_SAFE_RELEASE(pyr_tex[i]);
+            KH_SAFE_RELEASE(pyr_rtv[i]);
+            KH_SAFE_RELEASE(pyr_srv[i]);
+        }
+
+        pyr_w = pyr_h = 0;
         for (int i = 0; i < 2; ++i) {
             KH_SAFE_RELEASE(chain_tex[i]);
             KH_SAFE_RELEASE(chain_rtv[i]);
@@ -894,6 +927,20 @@ struct Resources {
         KH_SAFE_RELEASE(ps_premult_copy);  // 26062
         KH_SAFE_RELEASE(ps_dbg_cov);       // 26069
         KH_SAFE_RELEASE(ps_cov_fix);       // 26075
+        KH_SAFE_RELEASE(ps_pyr_bright);    // 26080
+        KH_SAFE_RELEASE(ps_pyr_blur);      // 26080
+        KH_SAFE_RELEASE(fx_sampler_linear); // 26080
+
+        for (int khtsq_i = 0; khtsq_i < 3; ++khtsq_i) {   // 26080 timestamps
+            KH_SAFE_RELEASE(ts_disjoint[khtsq_i]);
+
+            for (int khtsq_j = 0; khtsq_j < 34; ++khtsq_j) {
+                KH_SAFE_RELEASE(ts_stamp[khtsq_i][khtsq_j]);
+            }
+
+            ts_inflight[khtsq_i] = false;
+            ts_pass_n[khtsq_i] = 0;
+        }
         KH_SAFE_RELEASE(cov_hist_srv);     // 26075
         KH_SAFE_RELEASE(cov_hist_tex);
         cov_hist_w = 0; cov_hist_h = 0; cov_hist_fmt = 0;
@@ -1030,6 +1077,8 @@ struct KhUiMask {
     long long phase_tick = 0;
     long long phase_arm_tick = 0;   // 26066: the CURRENT arm's stamp (the
                                     // re-arm floor; ledger at the T-machine)
+    uint64_t phase_arm_ordinal = 0; // 26083: scene-flush ordinal at the arm
+                                    // (the ordinal re-arm gate's anchor)
     // 26060: apply-once-per-composed-frame serials (the BOTH compounding
     // fix - full ledger at the flush's stale gate). compose_serial is
     // incremented by the UI-phase thread at every compose detection;
@@ -1079,10 +1128,12 @@ static uint64_t g_ui_mask_clears = 0;   // alpha-zero injections fired (render t
                                         // steady state: one per frame while wanted)
 static uint64_t g_ui_mask_skips = 0;    // UI-mode passes skipped for want of a live mask
 // 26070 COVERAGE-REGIME LATCH (the comp_healthy doctrine, write-window
-// edition; DIAGNOSTIC-ONLY since 26075): the scene-region forensic
-// window's min coverage sits at 6-7/255 in every field dump - a
-// min >= 128 means more-than-half coverage over EVERY sampled scene
-// texel, which no legitimate UI regime produces (the poison signature:
+// edition; DIAGNOSTIC-ONLY since 26075; 26083: the forensic window is
+// now EIGHT SCATTERED STRIPS - one HUD panel can no longer pin it):
+// the forensic strips' min coverage sits at 6-7/255 in every field
+// dump - a min >= 128 means more-than-half coverage over EVERY sampled
+// texel in EVERY quadrant, which no legitimate UI regime produces (the
+// poison signature:
 // an engine-side fullscreen alpha event, placeholder-texture frames on
 // fullscreen HUD overlays being the convicted class). Sticky until a
 // sane reading (min < 32). HISTORY: as a blocking veto it converted
@@ -1411,9 +1462,28 @@ enum class EffectId : int {
     Grain = 5, Sharpen = 6, Blur = 7, Bloom = 8, Distortion = 9,
     Outline = 10, Pulse = 11, Halation = 12, Fog = 13,
     LensFlare = 14, Anamorphic = 15, SunFlare = 16, Glitch = 17,
+    // 26079 quality package. RainLens' fxParams1 is SYSTEM-OWNED (the
+    // smoothed view-space camera velocity + integrated rain clock -
+    // ledger at the rain motion tracker), so its user params are
+    // fx[0..3] only.
+    // SSAO RETIREMENT LEDGER (26082; id compaction 26083): id 18 was
+    // Ssao. Post-process AO reconstructs through the live depth encode,
+    // and the engine's encode churn on ambiguous frames (the same class
+    // the solid guard and far-keep machinery fight) made it flicker
+    // structurally - the measured-pair latch (26081) reduced but could
+    // not eliminate it, because the engine's OWN SSAO runs inside the
+    // pipeline where the encode is never ambiguous. Superseded by it;
+    // do NOT resurrect post-process SSAO without an in-pipeline depth
+    // authority. 26083 (operator call): the tombstone gap is COMPACTED
+    // out - clarity/deband/rainlens moved down one wire value each
+    // (19/20/21 -> 18/19/20). BREAKING for any script addressing these
+    // three by bare NUMERIC id; the string designators are unchanged
+    // and remain the stable interface. The "ssao" name and the old
+    // 21 slot now simply resolve to unknown-effect (-1).
+    Clarity = 18, Deband = 19, RainLens = 20,
 };
 
-static constexpr int KH_MAX_EFFECT = 17;
+static constexpr int KH_MAX_EFFECT = 20;
 // USER EFFECT SENTINEL: RenderObject.effect for a custom ".hlsl" pass
 // (fx_shader carries the resolved path). Deliberately outside the
 // builtin id range: set_effect_params zero-defaults its 8 params (they
@@ -1429,6 +1499,33 @@ static constexpr int KH_EFFECT_CUSTOM = 100;
 // builtin uber shader applies it - no user PS is involved, so the
 // KH_EFFECT_CUSTOM resolve sites never see this id.
 static constexpr int KH_EFFECT_LUT = 101;
+
+// RAIN MOTION TRACKER (26079; consumed by EffectId::RainLens): the
+// smoothed CAMERA velocity in VIEW-SPACE components (right, up,
+// forward; m/s), recomputed once per scene flush from the extracted
+// camera position (view-matrix columns are the camera basis in world -
+// the extract_camera_pos convention transposed). Written only inside
+// the lock-held flush, read only at CB fill sites inside serialized
+// windows - no atomics needed. EMA ~0.15 s kills frame jitter; a
+// > 100 m step (teleport / mission load) resets instead of spiking.
+// Delivered to the shader through fxParams1, which is SYSTEM-OWNED
+// for the rain effect (its user params are fx[0..3] only).
+static float    g_rain_vel[3] = {};      // smoothed view-space m/s
+// 26081 RAIN PHASE (the time-dilation fix): the shader's motion-scaled
+// clock was tt = t * factor(motion) - a MULTIPLIED dilation, so any
+// factor fluctuation (walking gait bob) scrubbed phase by t * delta,
+// growing with session time: invisible at t = 20 s, violent at
+// t = 300 s (the field report's "nice at first, jitters after moving a
+// while"). Speed must be INTEGRATED, never multiplied: this phase
+// accumulates dt * factor from the SMOOTHED velocity each flush and
+// rides fxParams1.w; the shader multiplies it only by the user's speed
+// param (a deliberate, user-caused jump). Bounded integrand - no
+// teleport spike; float32 keeps sub-ms granularity for hours.
+static float    g_rain_phase = 0.0f;
+static float    g_rain_prev_cam[3] = {};
+static bool     g_rain_prev_valid = false;
+static uint64_t g_rain_prev_us = 0;
+
 static std::unordered_map<std::string, RenderObject> g_draw_list;
 static std::mutex g_draw_list_mutex;
 
@@ -1463,6 +1560,11 @@ static std::vector<float> g_vis_results_cpu;       // float4 per point
 static UINT     g_vis_result_count = 0;
 static uint64_t g_vis_result_frame = 0;
 static uint64_t g_flush_frame = 0;
+// 26083: lock-free mirror of g_flush_frame for the UI-phase-thread
+// machine's re-arm gate (written at the flush's increment under the
+// lock; read relaxed on the T-thread - the same census-grade
+// cross-thread discipline as the learned-surface ring).
+static std::atomic<uint64_t> g_flush_frame_pub{0};
 
 
 // ===========================================================================
@@ -1479,6 +1581,11 @@ struct RenderStats {
     uint64_t skip_no_dsv = 0;        // no depth target bound (not a scene moment)
     uint64_t skip_wrong_pass = 0;    // a DSV was bound, but not the main scene's (PiP/mirror/UAV)
     uint64_t effect_setup_fails = 0; // capture/shader setup failed; effects demoted that frame
+    // 26080 chain GPU timing (timestamp ring readback; last completed
+    // measurement - see the chain loop's instrumentation ledger):
+    uint32_t fx_chain_gpu_us = 0;    // whole scene chain, microseconds
+    uint32_t fx_top_fx_id = 0;       // most expensive pass's effect id
+    uint32_t fx_top_fx_us = 0;       // ... and its cost in microseconds
     uint64_t perceptual_captures = 0; // pre-mesh scene captures for translucent compositing
     uint64_t ui_flushes = 0;         // UI-phase flush attempts with work queued
     uint64_t ui_gate_passed = 0;     // UI-phase flushes that reached the draw path
@@ -1689,9 +1796,12 @@ cbuffer CBObj : register(b0)
                           // sites that never rotate stay correct untouched.
     float4 dbgCtl;        // x = debug visual mode (setRenderDebug): 0 off
                           // (uniform branch, free), 1 coverage, 2 scene-
-                          // vs-mesh depth, 3 blend layers; yzw padding.
-                          // Mesh fill sites only - everywhere else the
-                          // zeroed default keeps the branch cold.
+                          // vs-mesh depth, 3 blend layers. y (26080) =
+                          // pyramid arm: 1 only on chain gather passes
+                          // whose t20 prep succeeded (bloom/halation/
+                          // anamorphic take the accelerated path); zw
+                          // padding. x: mesh fill sites only - everywhere
+                          // else the zeroed default keeps branches cold.
     float4 blendCtl;      // x = 1: normal-blend translucent mesh with the
                           // scene capture bound this inject - the packing
                           // composites in Reinhard space against t3 and
@@ -2120,7 +2230,7 @@ void ClipEdgeSliver(float3 wpos, float3 nrm)
     float khes_ulp = max(max(abs(wpos.x), abs(wpos.y)), abs(wpos.z)) * 1.2e-7f;
     float khes_q2 = khes_ulp * khes_ulp * 16.0f;
     if (dot(khes_dx, khes_dx) < khes_q2 || dot(khes_dy, khes_dy) < khes_q2) return;
-    // CLOSE-RANGE STAND-DOWN (renderstats18 + the corner discriminator:
+)HLSL" R"HLSL(    // CLOSE-RANGE STAND-DOWN (renderstats18 + the corner discriminator:
     // 'looking up clips at a corner edge, not at a side' - face-on nv~1
     // never clips, but standing near a face's own PLANE, the natural
     // corner posture, puts a LARGE REAL face at true grazing incidence,
@@ -3846,6 +3956,17 @@ Texture2D<float> khArbSnap : register(t2);
 Texture3D<float4> khLut : register(t19);
 float3 KhLutV(int3 p) { return khLut.Load(int4(p, 0)).rgb; }
 
+// 26080 PYRAMID GATHER RESULT (chain acceleration; ledger at the C++
+// chain loop): t20 carries the quarter-res bright/blurred texture and
+// s0 a linear clamp sampler, both bound ONLY for armed chain passes
+// (dbgCtl.y = 1 - the CPU arms it exclusively there). t20/s0 are
+// RESERVED codebase-wide for this unit (StateBackup's widened ranges
+// restore the engine's binds). Every armed branch keeps its legacy
+// in-shader gather as the dbgCtl.y = 0 path: effect meshes, the UI
+// phase, and any prep failure run the original arithmetic unchanged.
+Texture2D<float4> khPyr : register(t20);
+SamplerState khLinS : register(s0);
+
 float3 SampleScene(int2 px)
 {
     px = clamp(px, int2(0, 0), int2((int)fxMeta.z - 1, (int)fxMeta.w - 1));
@@ -3878,6 +3999,58 @@ float LinDepth(float raw)
 
 float Hash(float2 p) { return frac(sin(dot(p, float2(12.9898f, 78.233f))) * 43758.5453f); }
 
+// 26079 quality-package helpers ---------------------------------------------
+float2 Hash2(float2 p)
+{
+    return float2(Hash(p), Hash(p + float2(41.13f, 7.77f)));
+}
+
+// RAIN LAYER (EffectId::RainLens): one grid of gravity-driven lens
+// droplets in wind-sheared space. q = aspect-corrected uv, tt = layer
+// time, grid = cells (x across, y down; y < x = tall cells = fall
+// tracks), amount = per-cell existence gate, wind = lateral shear
+// (motion + airflow), stretch = forward-speed elongation 0..1.
+// Returns: xy = refraction gradient (drop-local, unit-ish), z = drop
+// mask, w = trail wetness (the wiped path above the drop).
+float4 KhRainLayer(float2 q, float tt, float2 grid, float seedOfs,
+                   float amount, float wind, float stretch)
+{
+    float2 sq = float2(q.x - q.y * wind, q.y);
+    float2 cellUv = sq * grid + float2(seedOfs, seedOfs * 0.37f);
+    float2 id = floor(cellUv);
+    float3 n = float3(Hash(id), Hash(id + 17.17f), Hash(id + 43.7f));
+    if (n.x > amount) return float4(0, 0, 0, 0);
+    float2 f = frac(cellUv);
+    // Drop x: wobbles inside the cell; the wobble dies with speed
+    // (airflow pins the drop to its track).
+    float x = (n.y - 0.5f) * 0.55f;
+    x += (0.42f - abs(x)) * sin(tt * 0.7f + n.z * 6.2832f)
+         * 0.4f * (1.0f - saturate(stretch * 1.4f));
+    // Drop y: a descending cycle with a linger-then-fall ease (drops
+    // hold, then slip - the real-glass cadence).
+    float cyc = frac(tt * (0.10f + n.z * 0.07f) + n.x * 7.31f);
+    float py = pow(cyc, 0.65f);
+    float aniso = grid.x / grid.y;   // cell tallness in q-space
+    float2 du = float2(f.x - 0.5f - x, (f.y - py) * aniso);
+    du.y *= 1.0f / (1.0f + stretch * 0.9f);   // elongate along the fall (26081: halved)
+    float r0 = 0.085f + n.y * 0.06f;
+    float len = length(du);
+    float drop = smoothstep(r0, r0 * 0.55f, len);
+    // Trail: the wet wipe above the drop, fading with distance behind,
+    // with small satellite beads left on the track.
+    float trackX = smoothstep(0.14f, 0.02f, abs(du.x));
+    float behind = (py - f.y);
+    float trail = trackX * step(0.0f, behind) * saturate(1.0f - behind * 1.15f)
+                  * smoothstep(0.05f, 0.25f, py);
+    float beads = trail * smoothstep(0.32f, 0.0f,
+        abs(frac(f.y * (9.0f + n.z * 5.0f) + n.y * 4.0f) - 0.5f))
+        * smoothstep(0.6f, 0.95f, Hash(id + floor(f.y * 9.0f)));
+    float2 g = (len > 1e-4f) ? du / max(len, 1e-4f) : float2(0, 0);
+    float curve = saturate(1.0f - len / max(r0, 1e-4f));
+    float2 nrm = g * curve * drop + g * beads * 0.35f;
+    return float4(nrm, saturate(drop + beads * 0.6f), saturate(trail + beads));
+}
+
 // Per-pixel world position from the depth buffer + inverse view-projection
 float3 WorldPos(int2 px, float2 uv)
 {
@@ -3888,7 +4061,7 @@ float3 WorldPos(int2 px, float2 uv)
     return wp.xyz / wp.w;
 }
 
-float4 PSEffect(VSOut i) : SV_Target
+)HLSL" R"HLSL(float4 PSEffect(VSOut i) : SV_Target
 {
     // FAR CONTRACT (depth-clip-off edition; see PSMain's twin + the
     // rasterizer ledger): effect MESHES rasterize through the same
@@ -3914,10 +4087,11 @@ float4 PSEffect(VSOut i) : SV_Target
     // readback-visible stream state precedes the clear, and a blocking
     // drain perturbs the write window's position). The truth lives at
     // EXECUTION, where this shader already runs: probe eight fixed
-    // SCENE-REGION texels of the capture (the CPU veto's own window
-    // semantics - legitimate floor there is 6-7/255 in every field
-    // dump) - every pixel loads the same eight texels, a pure cache
-    // broadcast. All probes saturated = the poison signature: discard,
+    // texels of the capture SCATTERED ACROSS ALL FOUR QUADRANTS
+    // (26083; the CPU forensic's strips share the anchors - legitimate
+    // floor is 6-7/255 in every field dump) - every pixel loads the
+    // same eight texels, a pure cache broadcast. All eight quadrant
+    // probes saturated = the poison signature: discard,
     // which is identity in BOTH lanes (masked keeps the engine frame;
     // the spill composite reduces to the untouched frame). 26075/26076
     // ROLE: DEFENSE-IN-DEPTH ONLY. The coverage-REPAIR pass (ledger at
@@ -3928,16 +4102,17 @@ float4 PSEffect(VSOut i) : SV_Target
     // user-shader phase discriminator (w = 1.25) and opt-in replica
     // live at the USER HLSL SHADER CACHE ledger.
     if (centerSize.w > 1.5f) {
-        int2 khpB = int2((int)(fxMeta.z * 0.625f), (int)(fxMeta.w * 0.625f));
+        // 26083: SCATTERED anchors (contract twins: the repair PS +
+        // the CPU forensic strips; ledger at the repair PS).
         float khpMin = 1.0f;
-        khpMin = min(khpMin, KhUiCov(khpB + int2(0, 0)));
-        khpMin = min(khpMin, KhUiCov(khpB + int2(64, 16)));
-        khpMin = min(khpMin, KhUiCov(khpB + int2(16, 96)));
-        khpMin = min(khpMin, KhUiCov(khpB + int2(112, 64)));
-        khpMin = min(khpMin, KhUiCov(khpB + int2(48, 160)));
-        khpMin = min(khpMin, KhUiCov(khpB + int2(160, 32)));
-        khpMin = min(khpMin, KhUiCov(khpB + int2(96, 128)));
-        khpMin = min(khpMin, KhUiCov(khpB + int2(176, 176)));
+        khpMin = min(khpMin, KhUiCov(int2(fxMeta.z * 0.18f, fxMeta.w * 0.21f)));
+        khpMin = min(khpMin, KhUiCov(int2(fxMeta.z * 0.47f, fxMeta.w * 0.16f)));
+        khpMin = min(khpMin, KhUiCov(int2(fxMeta.z * 0.79f, fxMeta.w * 0.24f)));
+        khpMin = min(khpMin, KhUiCov(int2(fxMeta.z * 0.23f, fxMeta.w * 0.52f)));
+        khpMin = min(khpMin, KhUiCov(int2(fxMeta.z * 0.68f, fxMeta.w * 0.47f)));
+        khpMin = min(khpMin, KhUiCov(int2(fxMeta.z * 0.31f, fxMeta.w * 0.77f)));
+        khpMin = min(khpMin, KhUiCov(int2(fxMeta.z * 0.58f, fxMeta.w * 0.84f)));
+        khpMin = min(khpMin, KhUiCov(int2(fxMeta.z * 0.86f, fxMeta.w * 0.69f)));
         if (khpMin >= 0.75f) discard;
     }
 
@@ -4058,12 +4233,19 @@ float4 PSEffect(VSOut i) : SV_Target
     }
     else if (effect == 8)     // Bloom: [threshold, intensity, radiusPx]
     {
-        int r = max((int)fxParams0.z, 1);
-        float3 acc = 0.0f;
-        [unroll] for (int oy = -2; oy <= 2; ++oy)
-        [unroll] for (int ox = -2; ox <= 2; ++ox)
-            acc += max(SampleScene(px + int2(ox, oy) * r) - fxParams0.x, 0.0f);
-        outc = scene + acc / 25.0f * fxParams0.y;
+        if (dbgCtl.y > 0.5f)   // 26080 pyramid path (chain; prep ledger in C++)
+        {
+            outc = scene + khPyr.SampleLevel(khLinS, uv, 0).rgb * fxParams0.y;
+        }
+        else
+        {
+            int r = max((int)fxParams0.z, 1);
+            float3 acc = 0.0f;
+            [unroll] for (int oy = -2; oy <= 2; ++oy)
+            [unroll] for (int ox = -2; ox <= 2; ++ox)
+                acc += max(SampleScene(px + int2(ox, oy) * r) - fxParams0.x, 0.0f);
+            outc = scene + acc / 25.0f * fxParams0.y;
+        }
     }
     else if (effect == 9)     // Distortion: [amplitudePx, frequency, speed]
     {
@@ -4094,6 +4276,12 @@ float4 PSEffect(VSOut i) : SV_Target
     }
     else if (effect == 12)    // Halation: [threshold, intensity, radiusPx], color = glow tint (warm)
     {
+        if (dbgCtl.y > 0.5f)   // 26080 pyramid path (chain; prep ledger in C++)
+        {
+            outc = scene + khPyr.SampleLevel(khLinS, uv, 0).rgb * color.rgb * fxParams0.y;
+        }
+        else
+        {
         int r = max((int)fxParams0.z, 1);
         const int2 dirs[8] = { int2(1,0), int2(-1,0), int2(0,1), int2(0,-1),
                                int2(1,1), int2(-1,1), int2(1,-1), int2(-1,-1) };
@@ -4103,6 +4291,7 @@ float4 PSEffect(VSOut i) : SV_Target
         [unroll] for (int k2 = 0; k2 < 8; ++k2)
             acc += max(SampleScene(px + dirs[k2] * r * 2) - fxParams0.x, 0.0f) * 0.035f;
         outc = scene + acc * color.rgb * fxParams0.y;
+        }
     }
     else if (effect == 13)    // Distance fog: [startDist m, endDist m, skyAmount 0..1], color = fog color
     {
@@ -4145,16 +4334,35 @@ float4 PSEffect(VSOut i) : SV_Target
     {
         float3 acc = 0.0f;
         float total = 0.0f;
-        [unroll] for (int k = 1; k <= 16; ++k)
-        {
-            float t = (float)k / 16.0f;
-            float w = pow(1.0f - t, max(fxParams0.w, 0.1f));
-            int off = (int)(t * fxParams0.z);
-            int2 d = (fxParams1.x > 0.5f) ? int2(0, off) : int2(off, 0);
-            acc += (max(SampleScene(px + d) - fxParams0.x, 0.0f)
-                  + max(SampleScene(px - d) - fxParams0.x, 0.0f)) * w;
-            total += 2.0f * w;
+
+        if (dbgCtl.y > 0.5f)   // 26080: exact pow falloff over the pre-
+        {                      // thresholded quarter-res bright (t20)
+            [unroll] for (int kp = 1; kp <= 16; ++kp)
+            {
+                float tp = (float)kp / 16.0f;
+                float wp = pow(1.0f - tp, max(fxParams0.w, 0.1f));
+                float2 dp = (fxParams1.x > 0.5f) ? float2(0.0f, tp * fxParams0.z)
+                                                 : float2(tp * fxParams0.z, 0.0f);
+                float2 duv = dp / float2(fxMeta.z, fxMeta.w);
+                acc += (khPyr.SampleLevel(khLinS, uv + duv, 0).rgb
+                      + khPyr.SampleLevel(khLinS, uv - duv, 0).rgb) * wp;
+                total += 2.0f * wp;
+            }
         }
+        else
+        {
+            [unroll] for (int k = 1; k <= 16; ++k)
+            {
+                float t = (float)k / 16.0f;
+                float w = pow(1.0f - t, max(fxParams0.w, 0.1f));
+                int off = (int)(t * fxParams0.z);
+                int2 d = (fxParams1.x > 0.5f) ? int2(0, off) : int2(off, 0);
+                acc += (max(SampleScene(px + d) - fxParams0.x, 0.0f)
+                      + max(SampleScene(px - d) - fxParams0.x, 0.0f)) * w;
+                total += 2.0f * w;
+            }
+        }
+
         acc /= max(total, 1.0f);
         outc = scene + acc * color.rgb * fxParams0.y;
     }
@@ -4257,7 +4465,138 @@ float4 PSEffect(VSOut i) : SV_Target
 
         outc = max(col, 0.0f);
     }
-    else if (effect == 101)   // 3D LUT grade (.cube, effect KH_EFFECT_LUT): [strength]
+)HLSL" R"HLSL(    else if (effect == 18)   // clarity: [strength, radiusPx]
+    {
+        // Wide-radius local contrast on LUMA ONLY (chroma-preserving by
+        // construction: the scene is rescaled by L'/L, so saturation
+        // never moves). Two-ring 12-tap base estimate; the detail term
+        // is soft-limited so strong edges do not halo.
+        float rad = max(fxParams0.y, 4.0f);
+        float lC = Luma(scene);
+        float lB = 0.0f;
+
+        [loop] for (int k = 0; k < 8; ++k)
+        {
+            float ang = float(k) * 0.7854f + 0.3927f;
+            lB += Luma(SampleScene(px + int2(cos(ang) * rad, sin(ang) * rad))) * 0.0833f;
+        }
+
+        [loop] for (int k2 = 0; k2 < 4; ++k2)
+        {
+            float ang2 = float(k2) * 1.5708f;
+            lB += Luma(SampleScene(px + int2(cos(ang2) * rad * 0.5f, sin(ang2) * rad * 0.5f))) * 0.0833f;
+        }
+
+        float detail = lC - lB;
+        detail = detail / (1.0f + 2.5f * abs(detail));   // soft limiter (anti-halo)
+        float scale = (lC + fxParams0.x * detail * 2.2f) / max(lC, 1e-3f);
+        outc = scene * clamp(scale, 0.3f, 3.0f);
+    }
+    else if (effect == 19)   // deband: [threshold(1/255), rangePx, grain(1/255)]
+    {
+        // Gradient debanding (the mpv/flyguy family): average four taps
+        // on a hash-rotated cross within range; adopt the average only
+        // where it stays inside the threshold (real edges never do).
+        // Triangular-PDF grain breaks residual quantization. STATIC
+        // noise (temporally inert; no TAA exists to launder animation).
+        float2 h = Hash2(i.pos.xy);
+        float ang = h.x * 6.2832f;
+        float rad = (0.3f + 0.7f * h.y) * max(fxParams0.y, 2.0f);
+        float2 dir = float2(cos(ang), sin(ang)) * rad;
+        float3 avg = (SampleScene(px + int2(dir))
+                    + SampleScene(px - int2(dir))
+                    + SampleScene(px + int2(-dir.y, dir.x))
+                    + SampleScene(px - int2(-dir.y, dir.x))) * 0.25f;
+        float3 diff = avg - scene;
+        float th = max(fxParams0.x, 0.1f) / 255.0f;
+        float within = step(max(abs(diff.r), max(abs(diff.g), abs(diff.b))), th);
+        outc = lerp(scene, avg, within);
+        float tri = (Hash(i.pos.xy + 0.17f) + Hash(i.pos.xy + 0.53f) - 1.0f);
+        outc += tri * (fxParams0.z / 255.0f);
+        outc = max(outc, 0.0f);
+    }
+    else if (effect == 20)   // rainlens: [intensity, speed, condensation, refract]; fx1 = SYSTEM camera velocity
+    {
+        // LENS RAIN (the 26079 flagship; three procedural layers + a
+        // condensation film, all motion-reactive through the rain
+        // motion tracker's smoothed view-space camera velocity in
+        // fxParams1):
+        //  - lateral velocity shears the fall tracks (apparent gravity
+        //    tilts against the pan), with a per-pixel radial term at
+        //    forward speed (windshield airflow: drops blow outward and
+        //    pin to their tracks),
+        //  - forward speed elongates drops and accelerates the slide,
+        //  - two dynamic droplet grids at different scales slide and
+        //    leave wet trails with satellite beads; trails WIPE the
+        //    condensation film (the sharp-streak-through-fog read),
+        //  - a fine static droplet field twinkles in slowly with
+        //    condensation and refracts subtly,
+        //  - drops refract the scene (inverted-wide offset) with a
+        //    small chromatic split and a top-light specular bead.
+        float aspect = fxMeta.z / max(fxMeta.w, 1.0f);
+        float2 q = float2(uv.x * aspect, uv.y);
+        float inten = saturate(fxParams0.x);
+        float fwdK = saturate(max(fxParams1.z, 0.0f) / 20.0f);
+        // 26081: the clock is the CPU-INTEGRATED phase (fxParams1.w;
+        // ledger at g_rain_phase) - motion accelerates it by
+        // integration, so factor fluctuation can never scrub position.
+        // The old t * factor dilation is the convicted jitter mechanism.
+        float tt = fxParams1.w * max(fxParams0.y, 0.0f);
+        // Lateral shear gain UP (0.035 -> 0.055: the field never SAW
+        // the lean), radial blow-out gain DOWN (windshield term was
+        // half the "all over the place" once phase scrubbing joined).
+        float windBase = clamp(-fxParams1.x * 0.055f, -0.5f, 0.5f);
+        float wind = windBase + (q.x / aspect - 0.5f) * fwdK * 0.6f;
+        // 26081 small-splatter retune: finer grids, smaller drops,
+        // slower cadence, gentler refraction (constants in KhRainLayer
+        // and below) - the requested "small splatters, slight motion".
+        float4 L1 = KhRainLayer(q, tt,          float2(6.0f, 1.4f), 0.0f,
+                                0.45f + inten * 0.4f, wind, fwdK);
+        float4 L2 = KhRainLayer(q, tt * 1.27f,  float2(10.0f, 2.4f), 3.7f,
+                                0.3f + inten * 0.45f, wind * 1.15f, fwdK);
+        float drop  = max(L1.z, L2.z * 0.85f);
+        float trail = max(L1.w, L2.w * 0.8f);
+        float2 nrm  = L1.xy + L2.xy * 0.7f;
+        // Condensation film: blurred, faintly lifted scene; wiped by
+        // trails and punched through by the drops themselves.
+        float fogAmt = saturate(fxParams0.z) * saturate(0.25f + inten);
+        float3 fogC = 0.0f;
+
+        [loop] for (int k = 0; k < 8; ++k)
+        {
+            float ang = float(k) * 0.7854f;
+            fogC += SampleScene(px + int2(cos(ang) * 7.0f, sin(ang) * 7.0f)) * 0.125f;
+        }
+
+        fogC = lerp(fogC, Luma(fogC).xxx, 0.12f) * 1.02f;
+        // Fine static condensation droplets (twinkle in with the film,
+        // cleared where trails wiped).
+        float2 sid = floor(q * 34.0f);
+        float sn = Hash(sid);
+        float2 sf = frac(q * 34.0f) - 0.5f;
+        float slife = saturate(sin(t * 0.35f + sn * 6.2832f) * 0.5f + 0.5f);
+        float sdrop = smoothstep(0.12f + sn * 0.1f, 0.05f, length(sf))
+                    * step(sn, fogAmt * 0.8f) * slife * (1.0f - saturate(trail * 1.6f));
+        nrm += (sf / 0.2f) * sdrop * 0.18f;
+        drop = max(drop, sdrop * 0.5f);
+        float wiped = saturate(trail * 1.5f + drop);
+        float3 base = lerp(scene, fogC, fogAmt * (1.0f - wiped) * 0.85f);
+        // Refraction through the drops: inverted-wide sample + chroma split.
+        float refr = max(fxParams0.w, 0.0f);
+        float2 offPx = -nrm * refr * (20.0f + fwdK * 8.0f);
+        int2 rp = px + int2(offPx);
+        float3 through;
+        through.g = SampleScene(rp).g;
+        through.r = SampleScene(px + int2(offPx * 1.07f)).r;
+        through.b = SampleScene(px + int2(offPx * 0.93f)).b;
+        float3 col = lerp(base, through, saturate(drop * 1.4f));
+        // Specular bead: light from the upper hemisphere of the drop.
+        col += drop * pow(saturate(-nrm.y + 0.15f), 6.0f) * 0.25f;
+        // Trails read slightly darker-sharp (wet glass transmits more).
+        col = lerp(col, scene * 0.985f, saturate(trail * (1.0f - drop) * 0.55f) * fogAmt);
+        outc = col;
+    }
+)HLSL" R"HLSL(    else if (effect == 101)   // 3D LUT grade (.cube, effect KH_EFFECT_LUT): [strength]
     {
         // TETRAHEDRAL interpolation over the verbatim lattice (quality
         // doctrine at the user LUT cache ledger): exact on lattice
@@ -5218,6 +5557,9 @@ inline ID3D11ShaderResourceView* kh_tex_resolve(ID3D11Device* dev, ID3D11DeviceC
 //    (id, time, w, h), and every shared cbuffer field is available -
 //    which is why updates need no new parameters: the existing
 //    params argument/property IS the user shader's parameter block.
+//    26083: invViewProj is GUARANTEED VALID whenever any custom pass
+//    exists (customs joined every need_inverse predicate) - world-
+//    position reconstruction from depth is safe in user code.
 //    Chain passes composite IN-SHADER (opaque ping-pong): the user
 //    samples t0 and returns the fully composited pixel; localized/
 //    band masking is theirs to implement from local0/localRadii/band0
@@ -5259,22 +5601,23 @@ inline ID3D11ShaderResourceView* kh_tex_resolve(ID3D11Device* dev, ID3D11DeviceC
 //        Replicating that guard in a custom unit is therefore OPTIONAL
 //        hardening for the repair-unavailable case, not a requirement:
 //          if (centerSize.w > 1.1f && centerSize.w < 1.5f) {
-//              int2 b = int2((int)(fxMeta.z * 0.625f),
-//                            (int)(fxMeta.w * 0.625f));
-//              float m = 1.0f;
-//              m = min(m, sceneColor.Load(int3(b + int2(  0,   0), 0)).a);
-//              m = min(m, sceneColor.Load(int3(b + int2( 64,  16), 0)).a);
-//              m = min(m, sceneColor.Load(int3(b + int2( 16,  96), 0)).a);
-//              m = min(m, sceneColor.Load(int3(b + int2(112,  64), 0)).a);
-//              m = min(m, sceneColor.Load(int3(b + int2( 48, 160), 0)).a);
-//              m = min(m, sceneColor.Load(int3(b + int2(160,  32), 0)).a);
-//              m = min(m, sceneColor.Load(int3(b + int2( 96, 128), 0)).a);
-//              m = min(m, sceneColor.Load(int3(b + int2(176, 176), 0)).a);
+//              float m = 1.0f;   // 26083: scattered anchors (the fixed
+//                                // 5/8-patch probe false-fired on HUD
+//                                // panels; these span all quadrants and
+//                                // match the builtin guard verbatim)
+//              m = min(m, sceneColor.Load(int3(int2(fxMeta.z * 0.18f, fxMeta.w * 0.21f), 0)).a);
+//              m = min(m, sceneColor.Load(int3(int2(fxMeta.z * 0.47f, fxMeta.w * 0.16f), 0)).a);
+//              m = min(m, sceneColor.Load(int3(int2(fxMeta.z * 0.79f, fxMeta.w * 0.24f), 0)).a);
+//              m = min(m, sceneColor.Load(int3(int2(fxMeta.z * 0.23f, fxMeta.w * 0.52f), 0)).a);
+//              m = min(m, sceneColor.Load(int3(int2(fxMeta.z * 0.68f, fxMeta.w * 0.47f), 0)).a);
+//              m = min(m, sceneColor.Load(int3(int2(fxMeta.z * 0.31f, fxMeta.w * 0.77f), 0)).a);
+//              m = min(m, sceneColor.Load(int3(int2(fxMeta.z * 0.58f, fxMeta.w * 0.84f), 0)).a);
+//              m = min(m, sceneColor.Load(int3(int2(fxMeta.z * 0.86f, fxMeta.w * 0.69f), 0)).a);
 //              if (m >= 0.75f) discard;   // poison frame: render nothing
 //          }
-//        (clamp the probe coords to (fxMeta.z-1, fxMeta.w-1) if your
-//        shader may run below ~2600 px width; discard is identity -
-//        the frame passes through untouched.)
+//        (all anchors are interior fractions, so no clamping is needed
+//        at any resolution; discard is identity - the frame passes
+//        through untouched.)
 //  - MATERIALS (material entry shader field): the user file defines
 //      float3 KhUserShade(KhMatSurf m, float3 wpos, float3 n, float smf)
 //    and is compiled into all three textured pipeline variants (flush /
@@ -6914,18 +7257,31 @@ inline std::string ensure_resources(ID3D11Device* dev) {
             const std::string khcf_err = compile_shader(
                 "Texture2D khCap : register(t0);"
                 "Texture2D khHist : register(t1);"
+                // 26083 SCATTERED PROBE (the false-positive fix; full
+                // ledger at the effect shader's guard twin): the old 8
+                // points all sat inside one ~192px patch at (5/8 W,
+                // 5/8 H) - a single legitimate HUD panel covering that
+                // patch read as "screen-wide" poison every frame it was
+                // up, and the repair then substituted ONE-FRAME-STALE
+                // history coverage under a LIVE, animating HUD: the
+                // localized ghost/double/white flicker of the field
+                // report (813 vetoes in 3615 flushes). The 8 points now
+                // span all four screen quadrants; only genuinely
+                // fullscreen saturation - the actual convicted poison
+                // class - can trip all of them. FRACTIONS ARE A
+                // CONTRACT: the effect shader's guard and the CPU
+                // forensic strips sample the SAME 8 anchors.
                 "float4 main(float4 pos : SV_Position) : SV_Target"
                 "{ uint khW, khH; khCap.GetDimensions(khW, khH);"
-                "  int2 khB = int2(int(khW * 5u / 8u), int(khH * 5u / 8u));"
                 "  float khM = 1.0f;"
-                "  khM = min(khM, khCap.Load(int3(khB + int2(  0,   0), 0)).a);"
-                "  khM = min(khM, khCap.Load(int3(khB + int2( 64,  16), 0)).a);"
-                "  khM = min(khM, khCap.Load(int3(khB + int2( 16,  96), 0)).a);"
-                "  khM = min(khM, khCap.Load(int3(khB + int2(112,  64), 0)).a);"
-                "  khM = min(khM, khCap.Load(int3(khB + int2( 48, 160), 0)).a);"
-                "  khM = min(khM, khCap.Load(int3(khB + int2(160,  32), 0)).a);"
-                "  khM = min(khM, khCap.Load(int3(khB + int2( 96, 128), 0)).a);"
-                "  khM = min(khM, khCap.Load(int3(khB + int2(176, 176), 0)).a);"
+                "  khM = min(khM, khCap.Load(int3(int(khW * 0.18f), int(khH * 0.21f), 0)).a);"
+                "  khM = min(khM, khCap.Load(int3(int(khW * 0.47f), int(khH * 0.16f), 0)).a);"
+                "  khM = min(khM, khCap.Load(int3(int(khW * 0.79f), int(khH * 0.24f), 0)).a);"
+                "  khM = min(khM, khCap.Load(int3(int(khW * 0.23f), int(khH * 0.52f), 0)).a);"
+                "  khM = min(khM, khCap.Load(int3(int(khW * 0.68f), int(khH * 0.47f), 0)).a);"
+                "  khM = min(khM, khCap.Load(int3(int(khW * 0.31f), int(khH * 0.77f), 0)).a);"
+                "  khM = min(khM, khCap.Load(int3(int(khW * 0.58f), int(khH * 0.84f), 0)).a);"
+                "  khM = min(khM, khCap.Load(int3(int(khW * 0.86f), int(khH * 0.69f), 0)).a);"
                 "  int3 khP = int3(int2(pos.xy), 0);"
                 "  float khA = (khM >= 0.75f) ? khHist.Load(khP).a : khCap.Load(khP).a;"
                 "  return float4(0.0f, 0.0f, 0.0f, khA); }",
@@ -6935,6 +7291,83 @@ inline std::string ensure_resources(ID3D11Device* dev) {
                                         nullptr, &g_res.ps_cov_fix);
             khcf_blob->Release();
             if (FAILED(hr)) { g_res.release(); return "Create PS(covFix) " + hr_str(hr); }
+
+            // 26080 PYRAMID GATHER pre-passes (ledger at the chain loop;
+            // inline strings by convention - the raw-HLSL block count is
+            // doctrine-stable). Both borrow the b0 slot with a tiny
+            // 32-byte layout (cbuffer reads are memory interpretation;
+            // upload_cb re-uploads the full ConstantData right after):
+            // khPp0 = (texelW, texelH, threshold, 0),
+            // khPp1 = (dirX, dirY, strideTexels, 0).
+            ID3DBlob* khpy_blob = nullptr;
+            const std::string khpy_err = compile_shader(
+                "cbuffer PyrCB : register(b0) { float4 khPp0; float4 khPp1; };"
+                "Texture2D srcT : register(t0); SamplerState linS : register(s0);"
+                "float4 main(float4 pos : SV_Position) : SV_Target"
+                "{ float2 uv = pos.xy * khPp0.xy;"
+                "  float2 o = khPp0.xy * 0.75f;"
+                "  float3 c = srcT.SampleLevel(linS, uv, 0).rgb"
+                "           + srcT.SampleLevel(linS, uv + o, 0).rgb"
+                "           + srcT.SampleLevel(linS, uv - o, 0).rgb"
+                "           + srcT.SampleLevel(linS, uv + float2(o.x, -o.y), 0).rgb"
+                "           + srcT.SampleLevel(linS, uv + float2(-o.x, o.y), 0).rgb;"
+                "  return float4(max(c * 0.2f - khPp0.z, 0.0f), 1.0f); }",
+                "main", "ps_5_0", nullptr, &khpy_blob);
+            if (!khpy_err.empty()) { g_res.release(); return "Compile PS(pyrBright): " + khpy_err; }
+            hr = dev->CreatePixelShader(khpy_blob->GetBufferPointer(), khpy_blob->GetBufferSize(),
+                                        nullptr, &g_res.ps_pyr_bright);
+            khpy_blob->Release();
+            if (FAILED(hr)) { g_res.release(); return "Create PS(pyrBright) " + hr_str(hr); }
+
+            ID3DBlob* khpb_blob = nullptr;
+            const std::string khpb_err = compile_shader(
+                "cbuffer PyrCB : register(b0) { float4 khPp0; float4 khPp1; };"
+                "Texture2D srcT : register(t0); SamplerState linS : register(s0);"
+                "float4 main(float4 pos : SV_Position) : SV_Target"
+                "{ float2 uv = pos.xy * khPp0.xy;"
+                "  float2 st = khPp1.xy * khPp0.xy * khPp1.z;"
+                "  float3 a = srcT.SampleLevel(linS, uv, 0).rgb * 0.2270f;"
+                "  a += (srcT.SampleLevel(linS, uv + st, 0).rgb"
+                "      + srcT.SampleLevel(linS, uv - st, 0).rgb) * 0.1946f;"
+                "  a += (srcT.SampleLevel(linS, uv + st * 2.0f, 0).rgb"
+                "      + srcT.SampleLevel(linS, uv - st * 2.0f, 0).rgb) * 0.1216f;"
+                "  a += (srcT.SampleLevel(linS, uv + st * 3.0f, 0).rgb"
+                "      + srcT.SampleLevel(linS, uv - st * 3.0f, 0).rgb) * 0.0540f;"
+                "  a += (srcT.SampleLevel(linS, uv + st * 4.0f, 0).rgb"
+                "      + srcT.SampleLevel(linS, uv - st * 4.0f, 0).rgb) * 0.0162f;"
+                "  return float4(a, 1.0f); }",
+                "main", "ps_5_0", nullptr, &khpb_blob);
+            if (!khpb_err.empty()) { g_res.release(); return "Compile PS(pyrBlur): " + khpb_err; }
+            hr = dev->CreatePixelShader(khpb_blob->GetBufferPointer(), khpb_blob->GetBufferSize(),
+                                        nullptr, &g_res.ps_pyr_blur);
+            khpb_blob->Release();
+            if (FAILED(hr)) { g_res.release(); return "Create PS(pyrBlur) " + hr_str(hr); }
+
+            // Linear-clamp sampler for the chain (mini passes + the main
+            // pass's pyramid taps; bound at s0 during the chain only -
+            // StateBackup's ps_samps restores the engine's own bind).
+            D3D11_SAMPLER_DESC khls_sd = {};
+            khls_sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+            khls_sd.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
+            khls_sd.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+            khls_sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+            khls_sd.MaxLOD = D3D11_FLOAT32_MAX;
+            hr = dev->CreateSamplerState(&khls_sd, &g_res.fx_sampler_linear);
+            if (FAILED(hr)) { g_res.release(); return "Create fx sampler " + hr_str(hr); }
+
+            // 26080 timestamp ring (ledger at the g_res declarations).
+            for (int khtq_i = 0; khtq_i < 3; ++khtq_i) {
+                D3D11_QUERY_DESC khtq_qd = {};
+                khtq_qd.Query = D3D11_QUERY_TIMESTAMP_DISJOINT;
+                hr = dev->CreateQuery(&khtq_qd, &g_res.ts_disjoint[khtq_i]);
+                if (FAILED(hr)) { g_res.release(); return "Create ts disjoint " + hr_str(hr); }
+                khtq_qd.Query = D3D11_QUERY_TIMESTAMP;
+
+                for (int khtq_j = 0; khtq_j < 34; ++khtq_j) {
+                    hr = dev->CreateQuery(&khtq_qd, &g_res.ts_stamp[khtq_i][khtq_j]);
+                    if (FAILED(hr)) { g_res.release(); return "Create ts stamp " + hr_str(hr); }
+                }
+            }
 
             D3D11_BLEND_DESC bsp = {};
             bsp.RenderTarget[0].BlendEnable = TRUE;
@@ -7075,6 +7508,48 @@ inline std::string ensure_fx_chain(ID3D11Device* dev) {
         if (FAILED(hr)) { g_res.release_fx_chain(); return "Create chain SRV " + hr_str(hr); }
     }
 
+    return "";
+}
+
+// 26080: quarter-res pyramid pair for the gather family's chain
+// acceleration. Sized from the scene capture (the chain's own source);
+// recreated on any mismatch; released with the chain (release_fx_chain).
+inline std::string ensure_fx_pyramid(ID3D11Device* dev) {
+    if (!g_res.scene_tex) return "no scene capture";
+
+    D3D11_TEXTURE2D_DESC sd = {};
+    g_res.scene_tex->GetDesc(&sd);
+    const UINT khpw = sd.Width  >= 4 ? sd.Width  / 4 : 1;
+    const UINT khph = sd.Height >= 4 ? sd.Height / 4 : 1;
+
+    if (g_res.pyr_tex[0]) {
+        if (g_res.pyr_w == khpw && g_res.pyr_h == khph) return "";
+
+        for (int i = 0; i < 2; ++i) {
+            KH_SAFE_RELEASE(g_res.pyr_tex[i]);
+            KH_SAFE_RELEASE(g_res.pyr_rtv[i]);
+            KH_SAFE_RELEASE(g_res.pyr_srv[i]);
+        }
+    }
+
+    for (int i = 0; i < 2; ++i) {
+        D3D11_TEXTURE2D_DESC td = sd;
+        td.Width = khpw;
+        td.Height = khph;
+        td.MipLevels = 1;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+        td.SampleDesc.Count = 1;
+        td.SampleDesc.Quality = 0;
+        HRESULT hr = dev->CreateTexture2D(&td, nullptr, &g_res.pyr_tex[i]);
+        if (FAILED(hr)) return "Create pyr tex " + hr_str(hr);
+        hr = dev->CreateRenderTargetView(g_res.pyr_tex[i], nullptr, &g_res.pyr_rtv[i]);
+        if (FAILED(hr)) return "Create pyr RTV " + hr_str(hr);
+        hr = dev->CreateShaderResourceView(g_res.pyr_tex[i], nullptr, &g_res.pyr_srv[i]);
+        if (FAILED(hr)) return "Create pyr SRV " + hr_str(hr);
+    }
+
+    g_res.pyr_w = khpw;
+    g_res.pyr_h = khph;
     return "";
 }
 
@@ -7566,11 +8041,12 @@ struct StateBackup {
     // CB split: our passes bind b0 AND b1, so both slots save/restore
     ID3D11Buffer*            vs_cbs[2] = { nullptr, nullptr };
     ID3D11Buffer*            ps_cbs[2] = { nullptr, nullptr };
-    // t0-t19: bands t4-t9 + t12-t13, the material maps t14-t18, and the
-    // user-LUT lattice t19 (the texture round exercised the widening
-    // contract: this array size IS the save range - get/set/release all
-    // take _countof; the LUT round widened it again).
-    ID3D11ShaderResourceView* ps_srvs[20] = {};
+    // t0-t20: bands t4-t9 + t12-t13, the material maps t14-t18, the
+    // user-LUT lattice t19, and the pyramid result t20 (the texture
+    // round exercised the widening contract: this array size IS the
+    // save range - get/set/release all take _countof; the LUT and
+    // pyramid rounds widened it again).
+    ID3D11ShaderResourceView* ps_srvs[21] = {};
     ID3D11SamplerState*      ps_samps[1] = {};   // s0: the material sampler bind
     ID3D11DepthStencilState* dss = nullptr;
     UINT                     stencil_ref = 0;
@@ -8061,7 +8537,7 @@ inline bool read_vec3_or_uniform(const game_value& gv, float out[3]) {
 inline int effect_id_from_gv(const game_value& gv) {
     if (gv.type_enum() == game_data_type::SCALAR) {
         int id = static_cast<int>(static_cast<float>(gv));
-        return (id >= 0 && id <= KH_MAX_EFFECT) ? id : -1;
+        return (id >= 0 && id <= KH_MAX_EFFECT) ? id : -1;   // 26083: 18..20 = clarity/deband/rainlens (compacted)
     }
 
     if (gv.type_enum() != game_data_type::STRING) return -1;
@@ -8085,6 +8561,9 @@ inline int effect_id_from_gv(const game_value& gv) {
     if (s == "anamorphic") return 15;
     if (s == "sunflare")   return 16;
     if (s == "glitch")     return 17;
+    if (s == "clarity")    return 18;
+    if (s == "deband")     return 19;
+    if (s == "rainlens" || s == "rain") return 20;
     return -1;
 }
 
@@ -8147,6 +8626,9 @@ inline bool set_effect_params(RenderObject& obj, const auto_array<game_value>* p
         { 1.2f, 1.2f, 220.0f, 2.0f, 0.0f },              // 15 anamorphic: threshold, intensity, lengthPx, falloffPow, vertical
         { 0.0f, 0.5f, 0.8f, 0.15f, 4.0f, 0.6f, 1.2f },   // 16 sunflare: dirX, dirY, dirZ (SQF axes), size, ghostDots, ringIntensity, starburst
         { 1.0f, 8.0f, 24.0f, 12.0f, 6.0f, 0.5f, 0.35f, 0.7f },  // 17 glitch: intensity, speed, sliceAmountPx, sliceBands, colorSplitPx, blockAmount, noiseAmount, burstiness
+        { 0.35f, 22.0f },                            // 18 clarity: strength, radiusPx
+        { 1.6f, 16.0f, 0.6f },                       // 19 deband: threshold(1/255), rangePx, grain(1/255)
+        { 0.6f, 1.0f, 0.35f, 1.0f },                 // 20 rainlens: intensity, speed, condensation, refract (fx[4..7] SYSTEM: camera velocity)
     };
 
     // LUT default row (the sentinel sits outside the table): strength =
@@ -8916,7 +9398,7 @@ static uint32_t g_fk_veto_cand_n = 0;       // candidates staged at the last pas
                                             // is live in this scene)
 // BUILD TAG (doctrine: bump on EVERY delivered build; stats-visible so a
 // field log names the binary it came from).
-static constexpr int KH_BUILD_TAG = 26078;
+static constexpr int KH_BUILD_TAG = 26082;
 // NEAR-GAP RAMP (build 26001; the RenderDoc conviction). ROOT, proven by
 // pixel history + depth-window plateaus: the world partition's viewport
 // floor (0.011 in the convicting capture) collapses EVERY fragment nearer
@@ -20419,8 +20901,30 @@ inline void kh_ui_mask_thread_draw(ID3D11DeviceContext* ctx) {
         g_ui_mask.applied_serial == g_ui_mask.compose_serial;
     const bool kht_frame_stale =
         (kht_now.QuadPart - g_ui_mask.phase_arm_tick) > (kht_qpf * 50) / 1000;
+    // 26083 ORDINAL RE-ARM GATE (the residual false-re-arm fix): the
+    // consumption gate's protection ENDS the moment the game-thread
+    // flush catches the compose serial - and the game thread runs
+    // AHEAD of this submission stream, so "consumed" opens mid-way
+    // through the frame's UI tail. Any later > 1 ms foreign interleave
+    // (render-to-texture HUD elements; the convicting field dump ran
+    // 18% probe misses) then faked a boundary: a mid-frame coverage
+    // wipe PLUS a serial desync, whose real damage lands NEXT frame -
+    // the genuine compose arrives unconsumed, arming is suppressed, NO
+    // clear runs, the compose's saturated alpha stands, and the repair
+    // pass papers over it with one-frame-stale history coverage: the
+    // localized ghost/double/white flicker on animated HUD elements.
+    // The scene-flush ordinal cannot tick twice without a real frame
+    // boundary between: a re-arm now also requires the ordinal to have
+    // ADVANCED since the current arm, closing the post-consumption
+    // window up to the game thread's own run-ahead. The 50 ms failsafe
+    // overrides exactly as it does for the consumption gate (menus
+    // where Draw3D stalls: degraded 20 Hz arming, never a deadlock).
+    const uint64_t kht_ord = g_flush_frame_pub.load(std::memory_order_relaxed);
+    const bool kht_ord_advanced = kht_ord != g_ui_mask.phase_arm_ordinal;
     const bool kht_arm_ok =
-        kht_new_frame && kht_frame_aged && (kht_consumed || kht_frame_stale);
+        kht_new_frame && kht_frame_aged &&
+        (kht_consumed || kht_frame_stale) &&
+        (kht_ord_advanced || kht_frame_stale);
 
     if (g_ui_mask.phase == 2 && !kht_arm_ok) {
         // the first UI draw of the armed frame: zero the coverage channel
@@ -20446,6 +20950,7 @@ inline void kh_ui_mask_thread_draw(ID3D11DeviceContext* ctx) {
         g_ui_mask.phase_h = kht_h;
         g_ui_mask.phase_tick = kht_now.QuadPart;
         g_ui_mask.phase_arm_tick = kht_now.QuadPart;   // 26066: the floor's anchor
+        g_ui_mask.phase_arm_ordinal = kht_ord;         // 26083: the ordinal gate's anchor
         g_ui_mask.probes_used = 0;   // per-frame verify budget refresh
         g_ui_mask.mask_valid = false;
         g_ui_mask.compose_serial++;
@@ -21733,6 +22238,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
     if (!ensure_resources(dev).empty()) { ffr_flush_stage(4); return; }
     g_flush_frame++;
+    g_flush_frame_pub.store(g_flush_frame, std::memory_order_relaxed);   // 26083: T-machine re-arm gate
     g_stats.gate_passed++;
 
     // --- (1) Async result pump: harvest an earlier frame's query, no stall ---
@@ -22237,13 +22743,24 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
     bool need_inverse = false;
 
+    // 26083: KH_EFFECT_CUSTOM joined the predicate (the latent-26079
+    // class, user-shader edition): the USER HLSL contract advertises
+    // EVERY shared cbuffer field - invViewProj included - but the
+    // matrix was only computed when a localized/Pulse pass happened to
+    // exist, so a custom reconstructing world positions read a ZEROED
+    // matrix (wp.w = 0 -> NaN) mission-dependently. One 4x4 inverse
+    // per flush while a custom exists; the lesson's ledger lives at
+    // the 26080 build entry ("any new consumer of invViewProj must
+    // join every need_inverse predicate").
     for (const auto& o : meshes) {
-        if (o.localized || o.effect == static_cast<int>(EffectId::Pulse)) { need_inverse = true; break; }
+        if (o.localized || o.effect == static_cast<int>(EffectId::Pulse) ||
+            o.effect == KH_EFFECT_CUSTOM) { need_inverse = true; break; }
     }
 
     if (!need_inverse) {
         for (const auto& f : fullscreen) {
-            if (f.second.localized || f.second.effect == static_cast<int>(EffectId::Pulse)) { need_inverse = true; break; }
+            if (f.second.localized || f.second.effect == static_cast<int>(EffectId::Pulse) ||
+                f.second.effect == KH_EFFECT_CUSTOM) { need_inverse = true; break; }
         }
     }
 
@@ -22253,6 +22770,50 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     // inverse when nothing does is behavior-identical.
     float cam[3];
     extract_camera_pos(pv.view, cam);
+
+    // RAIN MOTION TRACKER update (ledger at the globals): view-space
+    // velocity components = dot(worldVel, view COLUMN k) - the columns
+    // of the row-vector view 3x3 are the camera basis in world.
+    {
+        const uint64_t khrm_now = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+
+        if (g_rain_prev_valid) {
+            const float khrm_dt = static_cast<float>(khrm_now - g_rain_prev_us) * 1e-6f;
+
+            if (khrm_dt > 0.0005f && khrm_dt < 0.5f) {
+                const float khrm_dx = cam[0] - g_rain_prev_cam[0];
+                const float khrm_dy = cam[1] - g_rain_prev_cam[1];
+                const float khrm_dz = cam[2] - g_rain_prev_cam[2];
+                const float khrm_step2 = khrm_dx * khrm_dx + khrm_dy * khrm_dy + khrm_dz * khrm_dz;
+
+                if (khrm_step2 < 100.0f * 100.0f) {
+                    const float khrm_a = 1.0f - expf(-khrm_dt / 0.15f);
+
+                    for (int khrm_k = 0; khrm_k < 3; ++khrm_k) {
+                        const float khrm_v = (khrm_dx * pv.view[0][khrm_k] +
+                                              khrm_dy * pv.view[1][khrm_k] +
+                                              khrm_dz * pv.view[2][khrm_k]) / khrm_dt;
+                        g_rain_vel[khrm_k] += (khrm_v - g_rain_vel[khrm_k]) * khrm_a;
+                    }
+                } else {
+                    g_rain_vel[0] = g_rain_vel[1] = g_rain_vel[2] = 0.0f;   // teleport
+                }
+
+                // 26081: integrate the rain clock (ledger at g_rain_phase).
+                const float khrm_fk = fminf(fmaxf(g_rain_vel[2], 0.0f) / 20.0f, 1.0f);
+                const float khrm_ud = fminf(fmaxf(-g_rain_vel[1] * 0.06f, 0.0f), 1.0f);
+                g_rain_phase += khrm_dt * (1.0f + khrm_fk * 2.2f + khrm_ud);
+            }
+        }
+
+        g_rain_prev_cam[0] = cam[0];
+        g_rain_prev_cam[1] = cam[1];
+        g_rain_prev_cam[2] = cam[2];
+        g_rain_prev_us = khrm_now;
+        g_rain_prev_valid = true;
+    }
 
     // Screen dimensions + viewport depth range for the effect shader
     float screen_w = 0, screen_h = 0, vp_min_d = 0.0f, vp_max_d = 1.0f;
@@ -22705,6 +23266,10 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     // matParams lanes and re-uploads AFTER upload_cb returns, so the
     // object slice must outlive the lambda.
     ConstantData khf_obj_cbd = {};
+    // 26080: pyramid arm for the CURRENT chain pass (set by the chain
+    // loop's prep, consumed by upload_cb into dbgCtl.y; every other
+    // caller leaves it 0 = the shader's legacy gather path).
+    float khf_chain_pyr = 0.0f;
 
     auto upload_cb = [&](const RenderObject& o, bool chain_pass) -> bool {
         khf_farkeep_draw = false;   // per-call default; solid section may set it
@@ -22730,12 +23295,22 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             const int khdc_m = g_dbg_mode.load(std::memory_order_relaxed);
             cbd.dbg_ctl[0] = khdc_m <= 17 ? static_cast<float>(khdc_m) : 0.0f;
         }
+        cbd.dbg_ctl[1] = khf_chain_pyr;   // 26080 pyramid arm (chain gathers only)
         cbd.blend_ctl[0] = (khf_perceptual && !o.fullscreen && o.blend_mode == 0 && o.color[3] < 0.999f) ? 1.0f : 0.0f;
         if (cbd.blend_ctl[0] >= 0.5f) g_pack_on_last = 1;   // film strip
         cbd.blend_ctl[1] = 150.0f;   // background-trust range (m); see the shader note
         memcpy(cbd.color, o.color, sizeof(cbd.color));
         memcpy(cbd.fx0, o.fx, sizeof(cbd.fx0));
         memcpy(cbd.fx1, o.fx + 4, sizeof(cbd.fx1));
+
+        // RAIN: fxParams1 is SYSTEM-OWNED (smoothed view-space camera
+        // velocity; ledger at the rain motion tracker).
+        if (o.effect == static_cast<int>(EffectId::RainLens)) {
+            cbd.fx1[0] = g_rain_vel[0];
+            cbd.fx1[1] = g_rain_vel[1];
+            cbd.fx1[2] = g_rain_vel[2];
+            cbd.fx1[3] = g_rain_phase;   // 26081: the integrated rain clock
+        }
 
         // Solid meshes repurpose fx0.xyz (unused effect params at effect 0)
         // for the camera, which SolidMask's band term measures against.
@@ -23295,6 +23870,50 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     // the sampled scene are the same image. A final opaque blit paints the
     // chain result onto the engine's MSAA target. Bandwidth: one resolve +
     // F single-sample draws + one blit, instead of F resolves + F MSAA draws.
+    // 26080 CHAIN GPU TIMESTAMPS - harvest completed ring slots
+    // (DONOTFLUSH; a slot not ready simply stays in flight). Runs every
+    // flush so results land even when no chain runs this frame.
+    // 26083: walk the ring in ARM order (cursor = oldest armed) so
+    // when several slots complete in one flush (post-hitch), the
+    // NEWEST completed frame's numbers are the ones that stand.
+    for (int khts_k = 0; khts_k < 3; ++khts_k) {
+        const int khts_i = (g_res.ts_cursor + khts_k) % 3;
+        if (!g_res.ts_inflight[khts_i] || !g_res.ts_disjoint[khts_i]) continue;
+        D3D11_QUERY_DATA_TIMESTAMP_DISJOINT khts_dj = {};
+
+        if (ctx->GetData(g_res.ts_disjoint[khts_i], &khts_dj, sizeof(khts_dj),
+                         D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK) continue;
+
+        g_res.ts_inflight[khts_i] = false;
+        if (khts_dj.Disjoint || khts_dj.Frequency == 0) continue;
+        uint64_t khts_b = 0, khts_e = 0;
+
+        if (ctx->GetData(g_res.ts_stamp[khts_i][0], &khts_b, sizeof(khts_b), 0) != S_OK ||
+            ctx->GetData(g_res.ts_stamp[khts_i][1], &khts_e, sizeof(khts_e), 0) != S_OK) continue;
+
+        const double khts_to_us = 1e6 / static_cast<double>(khts_dj.Frequency);
+        g_stats.fx_chain_gpu_us = static_cast<uint32_t>(static_cast<double>(khts_e - khts_b) * khts_to_us);
+        uint32_t khts_top_us = 0, khts_top_id = 0;
+
+        for (int khts_p = 0; khts_p < g_res.ts_pass_n[khts_i]; ++khts_p) {
+            uint64_t khts_pb = 0, khts_pe = 0;
+
+            if (ctx->GetData(g_res.ts_stamp[khts_i][2 + khts_p * 2], &khts_pb, sizeof(khts_pb), 0) != S_OK ||
+                ctx->GetData(g_res.ts_stamp[khts_i][3 + khts_p * 2], &khts_pe, sizeof(khts_pe), 0) != S_OK)
+                continue;
+
+            const uint32_t khts_us = static_cast<uint32_t>(static_cast<double>(khts_pe - khts_pb) * khts_to_us);
+
+            if (khts_us > khts_top_us) {
+                khts_top_us = khts_us;
+                khts_top_id = static_cast<uint32_t>(g_res.ts_pass_fx[khts_i][khts_p]);
+            }
+        }
+
+        g_stats.fx_top_fx_us = khts_top_us;
+        g_stats.fx_top_fx_id = khts_top_id;
+    }
+
     if (!fullscreen.empty() && effects_ready) {
         std::string chain_err = meshes.empty() ? "" : ensure_scene_capture(dev, ctx);
         if (chain_err.empty()) chain_err = ensure_fx_chain(dev);
@@ -23310,11 +23929,118 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             ctx->PSSetShader(g_res.ps_effect, nullptr, 0);
             ctx->OMSetDepthStencilState(g_res.dss_off, 0);
             ctx->OMSetBlendState(nullptr, bf, 0xFFFFFFFF);   // opaque: compositing is in-shader
+            // 26080: linear-clamp at s0 for the pyramid taps (mini
+            // passes + the armed main branches); StateBackup restores
+            // the engine's own s0 with everything else.
+            if (g_res.fx_sampler_linear) ctx->PSSetSamplers(0, 1, &g_res.fx_sampler_linear);
+            // 26080 timestamps: arm this flush's ring slot if free.
+            const int khts_slot = g_res.ts_cursor;
+            const bool khts_arm = g_res.ts_disjoint[khts_slot] && !g_res.ts_inflight[khts_slot];
+            int khts_pass_n = 0;
+
+            if (khts_arm) {
+                ctx->Begin(g_res.ts_disjoint[khts_slot]);
+                ctx->End(g_res.ts_stamp[khts_slot][0]);
+            }
+
             ID3D11ShaderResourceView* src_srv = g_res.scene_srv;
             int write_idx = 0;
 
             for (const auto& f : fullscreen) {
                 if (f.second.effect <= 0) continue;
+                // 26080 NO-OP SKIP: color.a = 0 is an exact identity
+                // under the chain packing for EVERY blend mode (comp
+                // folds to scene), so a zero-opacity pass costs nothing.
+                if (f.second.color[3] <= 0.001f) continue;
+                if (khts_arm && khts_pass_n < 16) ctx->End(g_res.ts_stamp[khts_slot][2 + khts_pass_n * 2]);
+                // 26080 PYRAMID GATHER PREP (bloom/halation/anamorphic,
+                // chain only): bright-extract the pass's SOURCE at
+                // quarter res, separable-blur it for bloom/halation
+                // (anamorphic keeps its exact pow-falloff loop and just
+                // reads the small thresholded texture), bind the result
+                // at t20, and arm dbgCtl.y so the main branch takes the
+                // accelerated path. ANY failure leaves the arm at 0 and
+                // the legacy in-shader gather runs - never a dark pass.
+                khf_chain_pyr = 0.0f;
+                const bool khc_gather =
+                    f.second.effect == static_cast<int>(EffectId::Bloom) ||
+                    f.second.effect == static_cast<int>(EffectId::Halation) ||
+                    f.second.effect == static_cast<int>(EffectId::Anamorphic);
+
+                if (khc_gather && g_res.ps_pyr_bright && g_res.ps_pyr_blur &&
+                    g_res.fx_sampler_linear && ensure_fx_pyramid(dev).empty()) {
+                    UINT khc_nvp = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+                    D3D11_VIEWPORT khc_vps[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
+                    ctx->RSGetViewports(&khc_nvp, khc_vps);
+                    ID3D11ShaderResourceView* khc_null = nullptr;
+                    ctx->PSSetShaderResources(20, 1, &khc_null);   // t20 free before its RTV turn
+                    const float khc_tx = 1.0f / static_cast<float>(g_res.pyr_w);
+                    const float khc_ty = 1.0f / static_cast<float>(g_res.pyr_h);
+
+                    auto khc_pp = [&](float th, float dx, float dy, float stq) -> bool {
+                        const float khc_p[8] = { khc_tx, khc_ty, th, 0.0f, dx, dy, stq, 0.0f };
+                        D3D11_MAPPED_SUBRESOURCE khc_m = {};
+
+                        if (FAILED(ctx->Map(g_res.constant_buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &khc_m)))
+                            return false;
+
+                        memcpy(khc_m.pData, khc_p, sizeof(khc_p));
+                        ctx->Unmap(g_res.constant_buffer, 0);
+                        return true;
+                    };
+
+                    auto khc_hop = [&](ID3D11PixelShader* khc_ps, ID3D11ShaderResourceView* khc_in,
+                                       ID3D11RenderTargetView* khc_out) {
+                        ctx->PSSetShaderResources(0, 1, &khc_null);
+                        ctx->OMSetRenderTargets(1, &khc_out, nullptr);
+                        ctx->PSSetShader(khc_ps, nullptr, 0);
+                        ctx->PSSetShaderResources(0, 1, &khc_in);
+                        ctx->Draw(3, 0);
+                    };
+
+                    D3D11_VIEWPORT khc_pvp = { 0.0f, 0.0f, static_cast<float>(g_res.pyr_w),
+                                               static_cast<float>(g_res.pyr_h), 0.0f, 1.0f };
+                    ctx->RSSetViewports(1, &khc_pvp);
+                    // Radius mapping (visual parity): the legacy 5x5 box
+                    // at stride r reaches ~2r at full res; the quarter-
+                    // res gaussian reaches ~4*stride quarter-pixels =
+                    // 16*stride full pixels, so stride = radiusPx / 8.
+                    const float khc_stride = fmaxf(f.second.fx[2] / 8.0f, 0.5f);
+                    bool khc_ok = khc_pp(f.second.fx[0], 0.0f, 0.0f, 0.0f);
+
+                    if (khc_ok) {
+                        khc_hop(g_res.ps_pyr_bright, src_srv, g_res.pyr_rtv[0]);
+
+                        if (f.second.effect != static_cast<int>(EffectId::Anamorphic)) {
+                            khc_ok = khc_pp(0.0f, 1.0f, 0.0f, khc_stride);
+                            if (khc_ok) khc_hop(g_res.ps_pyr_blur, g_res.pyr_srv[0], g_res.pyr_rtv[1]);
+                            if (khc_ok) khc_ok = khc_pp(0.0f, 0.0f, 1.0f, khc_stride);
+                            if (khc_ok) khc_hop(g_res.ps_pyr_blur, g_res.pyr_srv[1], g_res.pyr_rtv[0]);
+                        }
+                    }
+
+                    if (khc_nvp > 0) {
+                        ctx->RSSetViewports(khc_nvp, khc_vps);
+                    } else {
+                        D3D11_VIEWPORT khc_fvp = { 0.0f, 0.0f, screen_w, screen_h, 0.0f, 1.0f };
+                        ctx->RSSetViewports(1, &khc_fvp);
+                    }
+
+                    if (khc_ok) {
+                        // RTV-vs-SRV HAZARD (review catch): the last hop
+                        // left pyr_rtv[0] bound on OUTPUT - binding its
+                        // SRV now would be runtime-NULLED, and the armed
+                        // branch would read zeros (bloom/halation/
+                        // anamorphic silently vanish while dbgCtl.y
+                        // claims pyramid). Unbind output FIRST; the main
+                        // pass sets its chain RTV right below anyway.
+                        ID3D11RenderTargetView* khc_no_rtv = nullptr;
+                        ctx->OMSetRenderTargets(1, &khc_no_rtv, nullptr);
+                        ctx->PSSetShaderResources(20, 1, &g_res.pyr_srv[0]);
+                        khf_chain_pyr = 1.0f;
+                    }
+                }
+
                 // CUSTOM EFFECT: the pass draws with the user PS; absent
                 // or failed compiles skip the pass (reported once).
                 ID3D11PixelShader* khc_ufx = nullptr;
@@ -23341,6 +24067,13 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                 ctx->OMSetRenderTargets(1, &g_res.chain_rtv[write_idx], nullptr);
                 ctx->PSSetShaderResources(0, 1, &src_srv);
                 ctx->Draw(3, 0);
+
+                if (khts_arm && khts_pass_n < 16) {
+                    ctx->End(g_res.ts_stamp[khts_slot][3 + khts_pass_n * 2]);
+                    g_res.ts_pass_fx[khts_slot][khts_pass_n] = f.second.effect;
+                    khts_pass_n++;
+                }
+
                 src_srv = g_res.chain_srv[write_idx];
                 write_idx ^= 1;
             }
@@ -23350,6 +24083,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             if (src_srv != g_res.scene_srv) {
                 RenderObject blit;
                 blit.effect = 0;
+                khf_chain_pyr = 0.0f;   // 26080: no stale arm on the blit's CB
                 // The chain loop may have left a custom PS bound.
                 ctx->PSSetShader(g_res.ps_effect, nullptr, 0);
 
@@ -23362,6 +24096,14 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                 }
             } else {
                 ctx->OMSetRenderTargets(1, &saved_chain_rtv, saved_chain_dsv);
+            }
+
+            if (khts_arm) {
+                ctx->End(g_res.ts_stamp[khts_slot][1]);
+                ctx->End(g_res.ts_disjoint[khts_slot]);
+                g_res.ts_pass_n[khts_slot] = khts_pass_n;
+                g_res.ts_inflight[khts_slot] = true;
+                g_res.ts_cursor = (khts_slot + 1) % 3;
             }
 
             if (saved_chain_rtv) saved_chain_rtv->Release();
@@ -23814,14 +24556,31 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             }
 
             if (!g_ui_mask.alpha_copy_pending) {
-                D3D11_BOX khas_box = {};
-                khas_box.left = td.Width * 5 / 8;
-                khas_box.right = khas_box.left + 64;
-                khas_box.top = td.Height * 5 / 8;
-                khas_box.bottom = khas_box.top + 64;
-                khas_box.front = 0;
-                khas_box.back = 1;
-                ctx->CopySubresourceRegion(g_res.ui_alpha_stage, 0, 0, 0, 0, bb, 0, &khas_box);
+                // 26083: the single 64x64 window at (5/8 W, 5/8 H) is
+                // now EIGHT 64x8 strips at the scattered probe anchors
+                // (contract twins: the repair PS + the effect shader's
+                // guard), packed into the same 64x64 staging - the
+                // lagged min/max verdict and the suspect latch keep
+                // their exact semantics, but a single HUD panel can no
+                // longer pin the whole forensic window (the false-
+                // positive class the 26083 flicker fix convicted).
+                static const float khas_fx[8] = { 0.18f, 0.47f, 0.79f, 0.23f,
+                                                  0.68f, 0.31f, 0.58f, 0.86f };
+                static const float khas_fy[8] = { 0.21f, 0.16f, 0.24f, 0.52f,
+                                                  0.47f, 0.77f, 0.84f, 0.69f };
+
+                for (UINT khas_s = 0; khas_s < 8; ++khas_s) {
+                    D3D11_BOX khas_box = {};
+                    khas_box.left = static_cast<UINT>(td.Width * khas_fx[khas_s]);
+                    khas_box.right = khas_box.left + 64;
+                    khas_box.top = static_cast<UINT>(td.Height * khas_fy[khas_s]);
+                    khas_box.bottom = khas_box.top + 8;
+                    khas_box.front = 0;
+                    khas_box.back = 1;
+                    ctx->CopySubresourceRegion(g_res.ui_alpha_stage, 0,
+                                               0, khas_s * 8, 0, bb, 0, &khas_box);
+                }
+
                 g_ui_mask.alpha_copy_pending = true;
             }
         }
@@ -23857,7 +24616,10 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     bool need_inverse = false;
 
     for (const auto& f : passes) {
-        if (f.second.localized || f.second.effect == static_cast<int>(EffectId::Pulse)) { need_inverse = true; break; }
+        // 26083: customs joined (invViewProj contract; ledger at the
+        // scene flush's twin predicate).
+        if (f.second.localized || f.second.effect == static_cast<int>(EffectId::Pulse) ||
+            f.second.effect == KH_EFFECT_CUSTOM) { need_inverse = true; break; }
     }
 
     const bool has_inverse = need_inverse && inverse_4x4(view_proj, inv_view_proj);
@@ -23998,6 +24760,12 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         if (khum_dbg_cov) break;   // the debug view replaces the passes
         const RenderObject& o = f.second;
         if (o.effect <= 0) continue;
+        // 26080 NO-OP SKIP (write-window twin): color.a = 0 is an exact
+        // identity for the masked lane (chain packing folds to scene)
+        // AND the spill lane (src collapses to the premultiplied frame,
+        // whose ONE/INV_DEST_ALPHA composite reconstructs the frame) -
+        // and skipping BEFORE the capture saves the pass's copy too.
+        if (o.color[3] <= 0.001f) continue;
 
         // 26061: EVERY write-window pass is coverage-masked now (BOTH's UI
         // half included) - without a live mask it must not run, or it
@@ -24098,6 +24866,15 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         memcpy(cbd.fx0, o.fx, sizeof(cbd.fx0));
         memcpy(cbd.fx1, o.fx + 4, sizeof(cbd.fx1));
 
+        // RAIN: fxParams1 is SYSTEM-OWNED (the scene flush's smoothed
+        // view-space camera velocity; ledger at the rain motion tracker).
+        if (o.effect == static_cast<int>(EffectId::RainLens)) {
+            cbd.fx1[0] = g_rain_vel[0];
+            cbd.fx1[1] = g_rain_vel[1];
+            cbd.fx1[2] = g_rain_vel[2];
+            cbd.fx1[3] = g_rain_phase;   // 26081: the integrated rain clock
+        }
+
         // Overlay solid meshes need the camera for SolidMask's band term.
         if (o.effect == 0) {
             float ui_cam[3];
@@ -24115,6 +24892,7 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         cbd.depth_params[1] = pv.projection[3][2];
         cbd.depth_params[2] = g_scene_vp_min_d;   // depth was written through the SCENE viewport
         cbd.depth_params[3] = g_scene_vp_max_d;
+
         cbd.local0[0] = o.pos[0];
         cbd.local0[1] = o.pos[2];
         cbd.local0[2] = o.pos[1];

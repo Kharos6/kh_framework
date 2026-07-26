@@ -6219,7 +6219,21 @@ static game_value gpu_visibility_sqf(game_value_parameter args) {
 //              "vignette" 3, "chromatic" 4, "grain" 5, "sharpen" 6,
 //              "blur" 7, "bloom" 8, "distortion" 9, "outline" 10,
 //              "pulse" 11, "halation" 12, "fog" 13, "lensflare" 14,
-//              "anamorphic" 15, "sunflare" 16, "glitch" 17 - or a PATH
+//              "anamorphic" 15, "sunflare" 16, "glitch" 17
+//              (26080: bloom/halation/anamorphic auto-accelerate on the
+//              scene chain via a quarter-res pyramid - identical params,
+//              same look, ~10x cheaper; effect meshes and UI passes keep
+//              the original path),
+//              "clarity" 18 [strength, radiusPx]
+//              (luma-only local contrast; chroma-preserving),
+//              "deband" 19 [threshold 1/255, rangePx, grain 1/255]
+//              (gradient debanding + triangular dither),
+//              "rainlens"/"rain" 20 [intensity, speed, condensation,
+//              refract] (procedural motion-reactive lens rain; params
+//              [4..7] are SYSTEM-owned - the camera velocity; 26083: ids
+//              compacted after the ssao retirement - scripts using the
+//              old NUMERIC 19/20/21 must move to 18/19/20 or, better,
+//              the stable string names) - or a PATH
 //              ENDING ".hlsl" (case-insensitive suffix, the mesh slot's
 //              ".fbx" rule; same Documents-then-mods "rendering"
 //              resolution) - or a PATH ENDING ".cube" (same resolution):
@@ -7075,6 +7089,10 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("uiMaskClears", RenderIntegration::g_ui_mask_clears));
         out.push_back(kv("uiMaskSkips", RenderIntegration::g_ui_mask_skips));
         out.push_back(kv("uiCovVetoes", RenderIntegration::g_ui_cov_vetoes));
+        // 26080 chain GPU timing (timestamp ring; last completed frame):
+        out.push_back(kv("fxChainGpuUs", RenderIntegration::g_stats.fx_chain_gpu_us));
+        out.push_back(kv("fxTopFxId", RenderIntegration::g_stats.fx_top_fx_id));
+        out.push_back(kv("fxTopFxUs", RenderIntegration::g_stats.fx_top_fx_us));
         out.push_back(kv("uiOnlyDraws", RenderIntegration::g_ui_only_draws));
         // 26059: arming-path census - arms = UI-phase-thread compose
         // detections (~1/frame while a UI-mode pass is visible); aborts

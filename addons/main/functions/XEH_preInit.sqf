@@ -1795,11 +1795,11 @@
 ] call CBA_fnc_addSetting;
 
 [
-	"KH_var_allowHitPointMaximumDamage",
+	"KH_var_allowPlayerHitPointMaximumDamage",
 	"CHECKBOX",   
 	[
-		"Allow Hit Point Maximum Damage", 
-		"True allows maximum damage to hit points, which is otherwise capped to 0.99 if false. This means that maximum damage to critical hit points, such as the head, can kill a unit regardless of their total health."
+		"Allow Player Hit Point Maximum Damage", 
+		"True allows maximum damage to player hit points, which is otherwise capped to 0.99 if false. This means that maximum damage to critical hit points, such as the head, can kill a unit regardless of their total health."
 	], 
 	[
         "KH Medical",

@@ -2,7 +2,7 @@ params [["_object", objNull, [objNull]], ["_variableName", "", [""]], "_value", 
 private _currentVariableHandler = _object getVariable "KH_var_respawnVariableHandler";
 
 if (isNil "_currentVariableHandler") then {
-    _object setVariable ["KH_var_respawnVariableHandler", createHashMap, true];
+    _currentVariableHandler = createHashMap;
 
     [
         ["ENTITY", _object, "PERSISTENT"],
@@ -24,6 +24,8 @@ if (isNil "_currentVariableHandler") then {
             ];
         }
     ] call KH_fnc_addEventHandler;
+
+    _object setVariable ["KH_var_respawnVariableHandler", _currentVariableHandler];
 };
 
 if _set then {
@@ -33,4 +35,4 @@ else {
     _currentVariableHandler deleteAt _variableName;
 };
 
-_object setVariable ["KH_var_respawnVariableHandler", _currentVariableHandler, true];
+nil;

@@ -49,11 +49,7 @@ if KH_var_medical then {
                     if !(_unit getVariable ["KH_var_medicalHandling", true]) exitWith {};
                     _hitPoint = toLowerANSI _hitPoint;
 
-                    if (_context isEqualTo 3) exitWith {
-                        _damage min 0.99;
-                    };
-
-                    if ((_context isEqualTo 0) && (_projectile isEqualTo "") && (isNull _source) && (isNull _instigator)) exitWith {
+                    if (((_context isEqualTo 0) && (_projectile isEqualTo "") && (isNull _source) && (isNull _instigator)) || (_context isEqualTo 3)) exitWith {
                         _damage;
                     };
 
@@ -853,10 +849,7 @@ if KH_var_medical then {
                                     if KH_var_incapacitationDamageSpillover then {
                                         (
                                             KH_var_incapacitationThreshold + 
-                                            (
-                                                ((_currentDamage + (_processedDamage * KH_var_absoluteTotalDamageMultiplier)) - KH_var_incapacitationThreshold) * 
-                                                KH_var_absoluteIncapacitatedDamageMultiplier
-                                            )
+                                            (((_currentDamage + (_processedDamage * KH_var_absoluteTotalDamageMultiplier * KH_var_absoluteIncapacitatedDamageMultiplier)) - KH_var_incapacitationThreshold) max KH_var_incapacitationThreshold)
                                         ) min ([1, 0.99] select (_unit getVariable ["KH_var_plotArmor", false]));
                                     }
                                     else {
@@ -870,7 +863,7 @@ if KH_var_medical then {
                         };
                     }
                     else {
-                        (_currentDamage + _processedDamage) min ([[0.99, 1] select KH_var_allowHitPointMaximumDamage, 0.99] select (_unit getVariable ["KH_var_plotArmor", false]));
+                        (_currentDamage + _processedDamage) min ([[0.99, 1] select (KH_var_allowPlayerHitPointMaximumDamage && _isPlayer), 0.99] select (_unit getVariable ["KH_var_plotArmor", false]));
                     };
                 }
             ] call KH_fnc_addEventHandler;

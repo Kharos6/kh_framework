@@ -6222,7 +6222,12 @@ static game_value gpu_visibility_sqf(game_value_parameter args) {
 //              "anamorphic" 15, "sunflare" 16, "glitch" 17 - or a PATH
 //              ENDING ".hlsl" (case-insensitive suffix, the mesh slot's
 //              ".fbx" rule; same Documents-then-mods "rendering"
-//              resolution): a CUSTOM pixel shader compiled against the
+//              resolution) - or a PATH ENDING ".cube" (same resolution):
+//              a 3D color LUT applied inside the footprint, params =
+//              [strength 0..1 (default 1), domain 0 auto/1 raw/2
+//              display (default 0)], tetrahedral interpolation
+//              (26077/26078). A ".hlsl" path is a CUSTOM pixel shader
+//              compiled against the
 //              framework's shared cbuffer header, entry
 //              float4 PSEffect(VSOut i) : SV_Target. The shader declares
 //              its own sceneColor t0 / depth t1; fx0/fx1 carry this
@@ -6532,7 +6537,7 @@ static int kh_apply_shared_prop(RenderIntegration::RenderObject& obj,
 //             "metalness" | "emissiveIntensity" | "normalStrength" |
 //             "cutoff" | "alphaMode" ("opaque"|"cutout")
 // | "color" [r,g,b,a] | "mode" 0..2 | "visible" bool | "sceneread" bool |
-// "effect" string/scalar/".hlsl" path | "params" array (resets omitted entries to the
+// "effect" string/scalar/".hlsl"/".cube" path | "params" array (resets omitted entries to the
 // effect's defaults) | "blend" string | "band" [minDist, maxDist,
 // falloff?] ([] clears) | "lit" bool or [ambient, diffuse] ("lighting"
 // accepted as an alias) | "duration" number or [fadeIn, hold, fadeOut].
@@ -6672,8 +6677,10 @@ static game_value update_render3d_sqf(game_value_parameter args) {
 // updatePostFX [handle, property, value] -> BOOL
 // Fullscreen post-processing passes ONLY (addPostFX / addLocalPostFX
 // handles); 3D mesh objects belong to updateRender3D. Properties:
-// "effect" string/scalar/".hlsl" path (fullscreen effects only, id > 0;
-// custom .hlsl passes draw with the user's PSEffect) | "params"
+// "effect" string/scalar/".hlsl"/".cube" path (fullscreen effects only,
+// id > 0; custom .hlsl passes draw with the user's PSEffect, .cube is a
+// 3D-LUT color grade at [strength 0..1, domain 0 auto/1 raw/2
+// display], 26077/26078) | "params"
 // array | "color" [r,g,b,a] | "blend" string | "band" [minDist, maxDist,
 // falloff?] ([] clears) | "visible" bool | "ui" "SCENE"/"UI"/"BOTH" or bool
 // (phase enum: SCENE = the pre-tonemap 3D scene chain; UI = coverage-
@@ -6885,6 +6892,11 @@ static game_value get_visibility_results_sqf() {
 }
 
 // addPostFX [effect, params?, color?, band?, blend?, affectUI?, duration?]
+// The effect slot also accepts a ".cube" 3D-LUT path (26077/26078): a
+// color grade with tetrahedral interpolation, params = [strength 0..1
+// (default 1), domain 0 auto/1 raw/2 display (default 0 - scene lanes
+// grade through display space so display-referred .cube looks land as
+// authored)], color.rgb = post-grade tint, color.a = pass opacity.
 // Notes: runs pre-tonemap, so the engine's eye adaptation applies on top.
 // Outline and Pulse sample the engine depth buffer per pixel; on frames where
 // they are active, mode-1 meshes do not write depth (read-only DSV phase).

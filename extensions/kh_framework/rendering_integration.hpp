@@ -1170,6 +1170,7 @@ inline bool reorder_on_render_thread();
 // worse failure, and matches the hook's previous (bare) behavior.
 inline void kh_tex_cache_release();   // material-texture cache (defined with the loader)
 inline void kh_user_shader_cache_release();   // user .hlsl PS cache (defined with the loader)
+inline void kh_user_lut_cache_release();   // user .cube LUT cache (defined with the loader)
 
 static void __stdcall on_engine_reset() {
     if (reorder_on_render_thread()) {
@@ -1178,6 +1179,7 @@ static void __stdcall on_engine_reset() {
         kh_ui_mask_reset();   // 26055: learned backbuffer identities die with the device
         kh_tex_cache_release();
         kh_user_shader_cache_release();
+        kh_user_lut_cache_release();
         return;
     }
 
@@ -1187,6 +1189,7 @@ static void __stdcall on_engine_reset() {
     kh_ui_mask_reset();   // 26055: learned backbuffer identities die with the device
     kh_tex_cache_release();
     kh_user_shader_cache_release();
+    kh_user_lut_cache_release();
 }
 
 struct RenderObject {
@@ -1194,7 +1197,9 @@ struct RenderObject {
     float fx[8] = {};           // effect parameters (effect-specific, see set_effect_params)
     std::string fx_shader;      // custom effect: RESOLVED user .hlsl path
                                 // ("" = builtin; consumed only when
-                                // effect == KH_EFFECT_CUSTOM)
+                                // effect == KH_EFFECT_CUSTOM) - or the
+                                // RESOLVED .cube path when effect ==
+                                // KH_EFFECT_LUT (same slot, same rule)
     bool  fullscreen = false;   // true = fullscreen triangle (post-processing pass), size unused
     bool  affect_ui = false;    // fullscreen passes: true = render post-tonemap over the composited frame (UI included) instead of the 3D scene phase
     bool  ui_only = false;      // 26055 ("UI" phase enum): with affect_ui, mask the pass by the
@@ -1415,6 +1420,15 @@ static constexpr int KH_MAX_EFFECT = 17;
 // are the user shader's to define, delivered verbatim in fx0/fx1) and
 // the Pulse/SunFlare axis swap never applies.
 static constexpr int KH_EFFECT_CUSTOM = 100;
+// USER LUT SENTINEL: RenderObject.effect for a ".cube" 3D-LUT grade
+// (fx_shader carries the resolved path - the .hlsl slot's exact rule).
+// Outside the builtin range for the same reasons; set_effect_params
+// substitutes the LUT default row (strength = 1) instead of the
+// zero-defaults, because a zeroed strength would be a silent no-op.
+// The lattice binds at t19 (the effect unit's khLut slot) and the
+// builtin uber shader applies it - no user PS is involved, so the
+// KH_EFFECT_CUSTOM resolve sites never see this id.
+static constexpr int KH_EFFECT_LUT = 101;
 static std::unordered_map<std::string, RenderObject> g_draw_list;
 static std::mutex g_draw_list_mutex;
 
@@ -3822,6 +3836,16 @@ float LoadDepthPS(int2 px) { return depthTex.Load(int3(px, 0)); }
 // LinDepth / WorldPos.
 Texture2D<float> khArbSnap : register(t2);
 
+// USER 3D LUT (effect 101, .cube designator; ledger at the user LUT
+// cache): the verbatim FP32 lattice, x = r fastest. Bound at t19 only
+// for LUT passes - t19 is RESERVED for this unit codebase-wide (it is
+// inside StateBackup's widened save range, so the engine's own bind
+// is restored after every flush). Sampled with integer Loads only
+// (tetrahedral interpolation in the effect branch - no sampler, no
+// half-texel bias to manage).
+Texture3D<float4> khLut : register(t19);
+float3 KhLutV(int3 p) { return khLut.Load(int4(p, 0)).rgb; }
+
 float3 SampleScene(int2 px)
 {
     px = clamp(px, int2(0, 0), int2((int)fxMeta.z - 1, (int)fxMeta.w - 1));
@@ -4232,6 +4256,82 @@ float4 PSEffect(VSOut i) : SV_Target
         }
 
         outc = max(col, 0.0f);
+    }
+    else if (effect == 101)   // 3D LUT grade (.cube, effect KH_EFFECT_LUT): [strength]
+    {
+        // TETRAHEDRAL interpolation over the verbatim lattice (quality
+        // doctrine at the user LUT cache ledger): exact on lattice
+        // points, C0 across the cell diagonal, and visibly cleaner than
+        // trilinear on strong grades. Input is clamped to the LUT's
+        // [0,1] domain (display-referred .cube semantics; the loader
+        // resamples non-identity domains onto [0,1], so no domain math
+        // lives here). GetDimensions keeps the branch CB-free.
+        uint khlW, khlH, khlD;
+        khLut.GetDimensions(khlW, khlH, khlD);
+
+        if (khlW >= 2)
+        {
+            // DISPLAY-SPACE SANDWICH (26078, the field oversaturation
+            // fix): display-referred .cube grades are authored on
+            // gamma-encoded pixels, but the SCENE chain samples
+            // PRE-tonemap HDR linear - a raw lookup lands the image in
+            // the lattice's shadow region and the engine tonemap + eye
+            // adaptation then re-expand the grade's own contrast on
+            // top (double S-curve = the field's oversaturation).
+            // Encode -> LUT -> decode puts the lookup where the artist
+            // designed it and hands the tonemap a linear result. The
+            // WRITE WINDOW consumes post-tonemap LDR already - direct
+            // lookup is correct there - so the sandwich keys on the
+            // phase discriminator (scene lanes w <= 1.0; the LUT never
+            // rides the custom 1.25 or spill 3 lanes). fxParams0.y
+            // overrides: 0 = auto (phase-keyed), 1 = raw everywhere,
+            // 2 = sandwich everywhere. Gamma 2.2 approximates the sRGB
+            // EOTF; exact engine-tonemap inversion is unknowable from
+            // here, and this lands display-authored grades close.
+            bool khlSand = fxParams0.y < 0.5f ? (centerSize.w < 1.5f)
+                                              : (fxParams0.y >= 1.5f);
+            float3 khlIn = saturate(scene);
+            if (khlSand) khlIn = pow(khlIn, 1.0f / 2.2f);
+            float3 khlC = khlIn * (float)(khlW - 1);
+            int khlHi = (int)khlW - 2;
+            int3 khlI0 = clamp(int3(khlC), int3(0, 0, 0), int3(khlHi, khlHi, khlHi));
+            float3 khlF = khlC - (float3)khlI0;
+            float khlR = khlF.x, khlG = khlF.y, khlB = khlF.z;
+            float3 khlV000 = KhLutV(khlI0);
+            float3 khlV111 = KhLutV(khlI0 + int3(1, 1, 1));
+            float3 khlOut;
+
+            if (khlR >= khlG && khlG >= khlB)
+                khlOut = (1.0f - khlR) * khlV000 + (khlR - khlG) * KhLutV(khlI0 + int3(1, 0, 0))
+                       + (khlG - khlB) * KhLutV(khlI0 + int3(1, 1, 0)) + khlB * khlV111;
+            else if (khlR >= khlB && khlB >= khlG)
+                khlOut = (1.0f - khlR) * khlV000 + (khlR - khlB) * KhLutV(khlI0 + int3(1, 0, 0))
+                       + (khlB - khlG) * KhLutV(khlI0 + int3(1, 0, 1)) + khlG * khlV111;
+            else if (khlB >= khlR && khlR >= khlG)
+                khlOut = (1.0f - khlB) * khlV000 + (khlB - khlR) * KhLutV(khlI0 + int3(0, 0, 1))
+                       + (khlR - khlG) * KhLutV(khlI0 + int3(1, 0, 1)) + khlG * khlV111;
+            else if (khlG >= khlR && khlR >= khlB)
+                khlOut = (1.0f - khlG) * khlV000 + (khlG - khlR) * KhLutV(khlI0 + int3(0, 1, 0))
+                       + (khlR - khlB) * KhLutV(khlI0 + int3(1, 1, 0)) + khlB * khlV111;
+            else if (khlG >= khlB && khlB >= khlR)
+                khlOut = (1.0f - khlG) * khlV000 + (khlG - khlB) * KhLutV(khlI0 + int3(0, 1, 0))
+                       + (khlB - khlR) * KhLutV(khlI0 + int3(0, 1, 1)) + khlR * khlV111;
+            else
+                khlOut = (1.0f - khlB) * khlV000 + (khlB - khlG) * KhLutV(khlI0 + int3(0, 0, 1))
+                       + (khlG - khlR) * KhLutV(khlI0 + int3(0, 1, 1)) + khlR * khlV111;
+
+            // Decode the graded result back to linear when sandwiched
+            // (negative lattice values - legal in .cube - clamp before
+            // the pow; the strength lerp below then mixes in the
+            // scene's own space either way).
+            if (khlSand) khlOut = pow(max(khlOut, 0.0f), 2.2f);
+
+            // color.rgb tints AFTER the grade (parity with the builtin
+            // family's tint role); strength lerps against the untouched
+            // scene BEFORE the localization/band masks, which then
+            // multiply in as everywhere else.
+            outc = lerp(scene, khlOut * color.rgb, saturate(fxParams0.x));
+        }
     }
 
     // World-space localization mask: full strength within radius, fading to
@@ -5111,7 +5211,10 @@ inline ID3D11ShaderResourceView* kh_tex_resolve(ID3D11Device* dev, ID3D11DeviceC
 //    themselves (register twins of UNUSED shared-header resources are
 //    legal - the builtin effect unit ships that exact pattern; calling
 //    the shared t1/t4/t5 band helpers from a user effect is the one
-//    collision). fx0/fx1 carry the slot's 8 params verbatim, fxMeta =
+//    collision). t19 is RESERVED for the builtin LUT lattice (the
+//    .cube effect binds it ad hoc and nothing nulls it afterwards):
+//    a user shader declaring t19 would read a stale LUT - use any
+//    other free slot. fx0/fx1 carry the slot's 8 params verbatim, fxMeta =
 //    (id, time, w, h), and every shared cbuffer field is available -
 //    which is why updates need no new parameters: the existing
 //    params argument/property IS the user shader's parameter block.
@@ -5319,6 +5422,281 @@ inline ID3D11PixelShader* kh_user_mat_ps(ID3D11Device* dev, const std::string& p
 
     g_user_ps_cache.emplace(std::move(khum_key), khum_e);
     return khum_e.ps;
+}
+
+// ===========================================================================
+// USER 3D-LUT CACHE (operator feature: .cube color grades). The ".cube"
+// suffix is an effect DESIGNATOR exactly like the .hlsl rule above -
+// resolved through the same "rendering" search, stored in
+// RenderObject::fx_shader with effect id KH_EFFECT_LUT, and the builtin
+// uber shader applies it (no user PS is involved). Format: the Adobe /
+// Resolve .cube text standard - LUT_3D_SIZE N (2..128), optional
+// DOMAIN_MIN / DOMAIN_MAX, then N^3 "r g b" rows with RED FASTEST
+// (r + N*g + N*N*b - the standard's own ordering, which maps 1:1 onto
+// a Texture3D with x = r, y = g, z = b). 1D LUTs are rejected with a
+// clear error (export a 3D LUT - every grading tool offers it).
+// QUALITY DOCTRINE:
+//  - The lattice is stored VERBATIM in an immutable
+//    R32G32B32A32_FLOAT Texture3D - no quantization anywhere between
+//    the file and the shader (a 65^3 grade is ~4.4 MB; trivial).
+//  - Interpolation is TETRAHEDRAL in-shader (the effect unit's
+//    KhLutV/effect-101 branch) via integer Loads - no sampler, no
+//    half-texel bias to manage, exact on lattice points, and visibly
+//    cleaner than trilinear on strong grades across smooth gradients
+//    (it is what Resolve itself uses).
+//  - Non-identity domains (DOMAIN_MIN/MAX != 0/1 - rare for
+//    display-referred grades) are RESAMPLED ONTO [0,1] at load
+//    (CPU trilinear over the source lattice), so the shader stays
+//    domain-free and CB-free. Identity domains take the verbatim path.
+// THREADING / LIFECYCLE: the texture-cache contract verbatim - lookups
+// and loads happen only inside serialized graphics windows (lock-held
+// flush), so the map needs no lock; entries hold device objects and are
+// released at engine reset and the mission-end full destroy (reloads
+// come from disk). Failures LATCH (reported once) so a broken file
+// costs one parse attempt, not one per draw.
+// ===========================================================================
+struct KhUserLutEntry {
+    ID3D11Texture3D*          tex = nullptr;
+    ID3D11ShaderResourceView* srv = nullptr;
+    bool failed = false;
+};
+
+static std::unordered_map<std::string, KhUserLutEntry> g_user_lut_cache;
+
+inline void kh_user_lut_cache_release() {
+    for (auto& khlc_kv : g_user_lut_cache) {
+        KH_SAFE_RELEASE(khlc_kv.second.srv);
+        KH_SAFE_RELEASE(khlc_kv.second.tex);
+    }
+
+    g_user_lut_cache.clear();
+}
+
+// .cube text -> RGBA32F lattice (a = 1), red-fastest, domain-normalized.
+inline bool kh_parse_cube_lut(const std::string& text, std::vector<float>& out_rgba,
+                              int& out_n, std::string& err) {
+    out_rgba.clear();
+    out_n = 0;
+    int khcl_n = 0;
+    float khcl_dmin[3] = { 0.0f, 0.0f, 0.0f };
+    float khcl_dmax[3] = { 1.0f, 1.0f, 1.0f };
+    std::vector<float> khcl_rgb;   // parsed triples, file order
+    size_t khcl_pos = 0;
+    const size_t khcl_len = text.size();
+    int khcl_line = 0;
+
+    while (khcl_pos < khcl_len) {
+        size_t khcl_eol = text.find('\n', khcl_pos);
+        if (khcl_eol == std::string::npos) khcl_eol = khcl_len;
+        size_t khcl_b = khcl_pos;
+        size_t khcl_e = khcl_eol;
+        khcl_pos = khcl_eol + 1;
+        khcl_line++;
+        while (khcl_b < khcl_e && (text[khcl_b] == ' ' || text[khcl_b] == '\t')) khcl_b++;
+        while (khcl_e > khcl_b && (text[khcl_e - 1] == '\r' || text[khcl_e - 1] == ' ' ||
+                                   text[khcl_e - 1] == '\t')) khcl_e--;
+        if (khcl_b >= khcl_e) continue;                       // blank
+        if (text[khcl_b] == '#') continue;                    // comment
+        const char* khcl_s = text.c_str() + khcl_b;
+        const size_t khcl_sl = khcl_e - khcl_b;
+
+        auto khcl_kw = [&](const char* kw) -> bool {
+            const size_t kl = strlen(kw);
+            return khcl_sl >= kl && _strnicmp(khcl_s, kw, kl) == 0 &&
+                   (khcl_sl == kl || khcl_s[kl] == ' ' || khcl_s[kl] == '\t');
+        };
+
+        if (khcl_kw("TITLE")) continue;
+
+        if (khcl_kw("LUT_1D_SIZE")) {
+            err = "1D LUTs are not supported - export a 3D LUT (.cube with LUT_3D_SIZE)";
+            return false;
+        }
+
+        if (khcl_kw("LUT_3D_SIZE")) {
+            khcl_n = static_cast<int>(strtol(khcl_s + 11, nullptr, 10));
+
+            if (khcl_n < 2 || khcl_n > 128) {
+                err = "LUT_3D_SIZE " + std::to_string(khcl_n) + " out of range (2..128)";
+                return false;
+            }
+
+            khcl_rgb.reserve(static_cast<size_t>(khcl_n) * khcl_n * khcl_n * 3);
+            continue;
+        }
+
+        if (khcl_kw("DOMAIN_MIN") || khcl_kw("DOMAIN_MAX")) {
+            float* khcl_d = khcl_kw("DOMAIN_MIN") ? khcl_dmin : khcl_dmax;
+            char* khcl_p = const_cast<char*>(khcl_s + 10);
+
+            for (int khcl_c = 0; khcl_c < 3; ++khcl_c) {
+                khcl_d[khcl_c] = strtof(khcl_p, &khcl_p);
+            }
+
+            continue;
+        }
+
+        // Anything else must be a data row: three floats. Unknown
+        // keywords land here and fail the strtof progression check -
+        // the error names the line.
+        char* khcl_p = const_cast<char*>(khcl_s);
+
+        for (int khcl_c = 0; khcl_c < 3; ++khcl_c) {
+            char* khcl_next = nullptr;
+            const float khcl_v = strtof(khcl_p, &khcl_next);
+
+            if (khcl_next == khcl_p) {
+                err = "line " + std::to_string(khcl_line) + ": expected 'r g b' floats";
+                return false;
+            }
+
+            khcl_rgb.push_back(khcl_v);
+            khcl_p = khcl_next;
+        }
+    }
+
+    if (khcl_n == 0) { err = "no LUT_3D_SIZE keyword"; return false; }
+    const size_t khcl_want = static_cast<size_t>(khcl_n) * khcl_n * khcl_n;
+
+    if (khcl_rgb.size() != khcl_want * 3) {
+        err = "data row count " + std::to_string(khcl_rgb.size() / 3) + " != LUT_3D_SIZE^3 (" +
+              std::to_string(khcl_want) + ")";
+        return false;
+    }
+
+    // Non-identity domain: resample the lattice onto [0,1] (CPU
+    // trilinear; identity domains skip this entirely - the common case
+    // stays bit-verbatim). The remap is per input CHANNEL, matching the
+    // spec's per-channel DOMAIN semantics.
+    const bool khcl_identity =
+        fabsf(khcl_dmin[0]) < 1e-6f && fabsf(khcl_dmin[1]) < 1e-6f && fabsf(khcl_dmin[2]) < 1e-6f &&
+        fabsf(khcl_dmax[0] - 1.0f) < 1e-6f && fabsf(khcl_dmax[1] - 1.0f) < 1e-6f &&
+        fabsf(khcl_dmax[2] - 1.0f) < 1e-6f;
+
+    if (!khcl_identity) {
+        for (int khcl_c = 0; khcl_c < 3; ++khcl_c) {
+            if (khcl_dmax[khcl_c] - khcl_dmin[khcl_c] < 1e-6f) {
+                err = "degenerate DOMAIN (max <= min)";
+                return false;
+            }
+        }
+
+        const int khcl_hn = khcl_n;
+        std::vector<float> khcl_src(std::move(khcl_rgb));
+        khcl_rgb.assign(khcl_want * 3, 0.0f);
+
+        auto khcl_at = [&](int r, int g, int b, int c) -> float {
+            return khcl_src[(static_cast<size_t>(b) * khcl_hn * khcl_hn +
+                             static_cast<size_t>(g) * khcl_hn + r) * 3 + c];
+        };
+
+        for (int khcl_b = 0; khcl_b < khcl_hn; ++khcl_b)
+        for (int khcl_g = 0; khcl_g < khcl_hn; ++khcl_g)
+        for (int khcl_r = 0; khcl_r < khcl_hn; ++khcl_r) {
+            const int khcl_i3[3] = { khcl_r, khcl_g, khcl_b };
+            float khcl_u[3];
+            int   khcl_i0[3];
+            float khcl_f[3];
+
+            for (int khcl_c = 0; khcl_c < 3; ++khcl_c) {
+                const float khcl_x = static_cast<float>(khcl_i3[khcl_c]) /
+                                     static_cast<float>(khcl_hn - 1);
+                float khcl_v = (khcl_x - khcl_dmin[khcl_c]) /
+                               (khcl_dmax[khcl_c] - khcl_dmin[khcl_c]);
+                khcl_v = khcl_v < 0.0f ? 0.0f : (khcl_v > 1.0f ? 1.0f : khcl_v);
+                khcl_u[khcl_c] = khcl_v * static_cast<float>(khcl_hn - 1);
+                khcl_i0[khcl_c] = static_cast<int>(khcl_u[khcl_c]);
+                if (khcl_i0[khcl_c] > khcl_hn - 2) khcl_i0[khcl_c] = khcl_hn - 2;
+                khcl_f[khcl_c] = khcl_u[khcl_c] - static_cast<float>(khcl_i0[khcl_c]);
+            }
+
+            const size_t khcl_o = (static_cast<size_t>(khcl_b) * khcl_hn * khcl_hn +
+                                   static_cast<size_t>(khcl_g) * khcl_hn + khcl_r) * 3;
+
+            for (int khcl_c = 0; khcl_c < 3; ++khcl_c) {
+                float khcl_acc = 0.0f;
+
+                for (int khcl_k = 0; khcl_k < 8; ++khcl_k) {
+                    const int khcl_dr = khcl_k & 1, khcl_dg = (khcl_k >> 1) & 1, khcl_db = (khcl_k >> 2) & 1;
+                    const float khcl_w =
+                        (khcl_dr ? khcl_f[0] : 1.0f - khcl_f[0]) *
+                        (khcl_dg ? khcl_f[1] : 1.0f - khcl_f[1]) *
+                        (khcl_db ? khcl_f[2] : 1.0f - khcl_f[2]);
+                    khcl_acc += khcl_w * khcl_at(khcl_i0[0] + khcl_dr, khcl_i0[1] + khcl_dg,
+                                                 khcl_i0[2] + khcl_db, khcl_c);
+                }
+
+                khcl_rgb[khcl_o + khcl_c] = khcl_acc;
+            }
+        }
+    }
+
+    // Expand to RGBA (a = 1) in texture layout: x = r fastest (matches
+    // the file order exactly - SysMemPitch walks r, SlicePitch walks g).
+    out_rgba.resize(khcl_want * 4);
+
+    for (size_t khcl_i = 0; khcl_i < khcl_want; ++khcl_i) {
+        out_rgba[khcl_i * 4 + 0] = khcl_rgb[khcl_i * 3 + 0];
+        out_rgba[khcl_i * 4 + 1] = khcl_rgb[khcl_i * 3 + 1];
+        out_rgba[khcl_i * 4 + 2] = khcl_rgb[khcl_i * 3 + 2];
+        out_rgba[khcl_i * 4 + 3] = 1.0f;
+    }
+
+    out_n = khcl_n;
+    return true;
+}
+
+// Cached LUT SRV for a resolved user .cube path (nullptr = absent or
+// latched failure; the caller skips the pass - the custom-shader rule).
+inline ID3D11ShaderResourceView* kh_user_lut_srv(ID3D11Device* dev, const std::string& path) {
+    if (!dev || path.empty()) return nullptr;
+    std::string khlu_key = "lut|" + path;
+    std::transform(khlu_key.begin(), khlu_key.end(), khlu_key.begin(), ::tolower);
+    auto khlu_it = g_user_lut_cache.find(khlu_key);
+    if (khlu_it != g_user_lut_cache.end()) return khlu_it->second.srv;
+    KhUserLutEntry khlu_e;
+    std::string khlu_src, khlu_err;
+
+    if (kh_user_shader_source(path, khlu_src, khlu_err)) {   // same disk read (text bytes)
+        std::vector<float> khlu_rgba;
+        int khlu_n = 0;
+
+        if (kh_parse_cube_lut(khlu_src, khlu_rgba, khlu_n, khlu_err)) {
+            D3D11_TEXTURE3D_DESC khlu_td = {};
+            khlu_td.Width = static_cast<UINT>(khlu_n);
+            khlu_td.Height = static_cast<UINT>(khlu_n);
+            khlu_td.Depth = static_cast<UINT>(khlu_n);
+            khlu_td.MipLevels = 1;
+            khlu_td.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+            khlu_td.Usage = D3D11_USAGE_IMMUTABLE;
+            khlu_td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            D3D11_SUBRESOURCE_DATA khlu_init = {};
+            khlu_init.pSysMem = khlu_rgba.data();
+            khlu_init.SysMemPitch = static_cast<UINT>(khlu_n) * 16;
+            khlu_init.SysMemSlicePitch = static_cast<UINT>(khlu_n) * khlu_n * 16;
+            HRESULT khlu_hr = dev->CreateTexture3D(&khlu_td, &khlu_init, &khlu_e.tex);
+
+            if (SUCCEEDED(khlu_hr)) {
+                khlu_hr = dev->CreateShaderResourceView(khlu_e.tex, nullptr, &khlu_e.srv);
+
+                if (FAILED(khlu_hr)) {
+                    KH_SAFE_RELEASE(khlu_e.tex);
+                    khlu_err = "CreateShaderResourceView " + hr_str(khlu_hr);
+                }
+            } else {
+                khlu_e.tex = nullptr;
+                khlu_err = "CreateTexture3D " + hr_str(khlu_hr);
+            }
+        }
+    }
+
+    if (!khlu_e.srv) {
+        khlu_e.failed = true;
+        kh_report_error("KH user LUT '" + path + "': " + khlu_err);
+    }
+
+    g_user_lut_cache.emplace(std::move(khlu_key), khlu_e);
+    return khlu_e.srv;
 }
 
 static std::unordered_map<std::string, int> g_fbx_cache;   // lower(resolved path) -> mesh id
@@ -7188,10 +7566,11 @@ struct StateBackup {
     // CB split: our passes bind b0 AND b1, so both slots save/restore
     ID3D11Buffer*            vs_cbs[2] = { nullptr, nullptr };
     ID3D11Buffer*            ps_cbs[2] = { nullptr, nullptr };
-    // t0-t18: bands t4-t9 + t12-t13 AND the material maps t14-t18 (the
-    // texture round exercised the widening contract: this array size IS
-    // the save range - get/set/release all take _countof).
-    ID3D11ShaderResourceView* ps_srvs[19] = {};
+    // t0-t19: bands t4-t9 + t12-t13, the material maps t14-t18, and the
+    // user-LUT lattice t19 (the texture round exercised the widening
+    // contract: this array size IS the save range - get/set/release all
+    // take _countof; the LUT round widened it again).
+    ID3D11ShaderResourceView* ps_srvs[20] = {};
     ID3D11SamplerState*      ps_samps[1] = {};   // s0: the material sampler bind
     ID3D11DepthStencilState* dss = nullptr;
     UINT                     stencil_ref = 0;
@@ -7709,22 +8088,26 @@ inline int effect_id_from_gv(const game_value& gv) {
     return -1;
 }
 
-// Effect designator front door: a builtin name/id, or a user ".hlsl"
-// path (the mesh slot's ".fbx" suffix rule). Resolves through the same
-// Documents-then-mods "rendering" search; on success the caller stores
-// the RESOLVED path in RenderObject::fx_shader with effect id
-// KH_EFFECT_CUSTOM. Compilation is deferred to the draw side (the
-// serialized windows own the device); failures latch + report once and
-// the pass simply skips. Returns the effect id, or -1 with err set for
-// an unresolvable path (err empty = plain unknown-effect).
+// Effect designator front door: a builtin name/id, a user ".hlsl"
+// path, or a user ".cube" 3D-LUT path (both the mesh slot's ".fbx"
+// suffix rule). Resolves through the same Documents-then-mods
+// "rendering" search; on success the caller stores the RESOLVED path
+// in RenderObject::fx_shader with effect id KH_EFFECT_CUSTOM (.hlsl)
+// or KH_EFFECT_LUT (.cube). Compilation/parsing is deferred to the
+// draw side (the serialized windows own the device); failures latch +
+// report once and the pass simply skips. Returns the effect id, or -1
+// with err set for an unresolvable path (err empty = plain
+// unknown-effect).
 inline int kh_effect_from_gv(const game_value& gv, std::string& out_hlsl, std::string& err) {
     out_hlsl.clear();
     err.clear();
 
     if (gv.type_enum() == game_data_type::STRING) {
         const std::string khfx_s = static_cast<std::string>(gv);
+        const bool khfx_is_hlsl = kh_ends_with_ci(khfx_s, ".hlsl");
+        const bool khfx_is_cube = !khfx_is_hlsl && kh_ends_with_ci(khfx_s, ".cube");
 
-        if (kh_ends_with_ci(khfx_s, ".hlsl")) {
+        if (khfx_is_hlsl || khfx_is_cube) {
             const std::string khfx_resolved = RenderAssetDiscovery::find_asset_file(khfx_s);
 
             if (khfx_resolved.empty()) {
@@ -7733,7 +8116,7 @@ inline int kh_effect_from_gv(const game_value& gv, std::string& out_hlsl, std::s
             }
 
             out_hlsl = khfx_resolved;
-            return KH_EFFECT_CUSTOM;
+            return khfx_is_cube ? KH_EFFECT_LUT : KH_EFFECT_CUSTOM;
         }
     }
 
@@ -7766,8 +8149,15 @@ inline bool set_effect_params(RenderObject& obj, const auto_array<game_value>* p
         { 1.0f, 8.0f, 24.0f, 12.0f, 6.0f, 0.5f, 0.35f, 0.7f },  // 17 glitch: intensity, speed, sliceAmountPx, sliceBands, colorSplitPx, blockAmount, noiseAmount, burstiness
     };
 
+    // LUT default row (the sentinel sits outside the table): strength =
+    // 1 - the zero-default the CUSTOM sentinel takes would be a silent
+    // no-op here (the shader lerps by fx[0]). fx[1] = domain mode,
+    // default 0 = auto (scene lanes sandwich through display space,
+    // the write window looks up raw; 1 = raw everywhere, 2 = sandwich
+    // everywhere - ledger at the effect-101 branch).
+    static const float khlut_defaults[8] = { 1.0f };
     const int e = (obj.effect >= 0 && obj.effect <= KH_MAX_EFFECT) ? obj.effect : 0;
-    memcpy(obj.fx, defaults[e], sizeof(obj.fx));
+    memcpy(obj.fx, obj.effect == KH_EFFECT_LUT ? khlut_defaults : defaults[e], sizeof(obj.fx));
 
     if (params) {
         for (size_t i = 0; i < 8 && i < params->size(); ++i) {
@@ -8526,7 +8916,7 @@ static uint32_t g_fk_veto_cand_n = 0;       // candidates staged at the last pas
                                             // is live in this scene)
 // BUILD TAG (doctrine: bump on EVERY delivered build; stats-visible so a
 // field log names the binary it came from).
-static constexpr int KH_BUILD_TAG = 26076;
+static constexpr int KH_BUILD_TAG = 26078;
 // NEAR-GAP RAMP (build 26001; the RenderDoc conviction). ROOT, proven by
 // pixel history + depth-window plateaus: the world partition's viewport
 // floor (0.011 in the convicting capture) collapses EVERY fragment nearer
@@ -22719,6 +23109,18 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             if (!khf_ufx) continue;
         }
 
+        // LUT EFFECT (user .cube): resolve the cached lattice first -
+        // absent or failed loads skip the draw outright (reported once,
+        // the custom-shader rule). A hit binds t19 for the builtin
+        // uber shader's effect-101 branch; t19 is reserved for the LUT
+        // codebase-wide and sits inside StateBackup's save range, so
+        // the engine's own bind is restored with everything else.
+        if (o.effect == KH_EFFECT_LUT) {
+            ID3D11ShaderResourceView* khf_lut = kh_user_lut_srv(dev, o.fx_shader);
+            if (!khf_lut) continue;
+            ctx->PSSetShaderResources(19, 1, &khf_lut);
+        }
+
         if (!upload_cb(o, false)) { if (ov) g_mask.ov_skipped++; continue; }
         if (ov) g_mask.ov_drawn++;       // Draw() will be issued below
         if (khf_o_perc) khf_perc_seen = true;
@@ -22920,6 +23322,14 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                 if (f.second.effect == KH_EFFECT_CUSTOM) {
                     khc_ufx = kh_user_fx_ps(dev, f.second.fx_shader);
                     if (!khc_ufx) continue;
+                }
+
+                // LUT pass: bind the cached lattice at t19 (ledger at
+                // the mesh loop's twin); a missing/failed .cube skips.
+                if (f.second.effect == KH_EFFECT_LUT) {
+                    ID3D11ShaderResourceView* khc_lut = kh_user_lut_srv(dev, f.second.fx_shader);
+                    if (!khc_lut) continue;
+                    ctx->PSSetShaderResources(19, 1, &khc_lut);
                 }
 
                 if (!upload_cb(f.second, true)) continue;
@@ -23609,6 +24019,17 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             if (!khu_ufx) continue;
         }
 
+        // LUT pass (write window): bind the cached lattice at t19
+        // (ledger at the flush mesh loop's twin). A LUT is NOT
+        // black-preserving (lifted blacks are the whole point of many
+        // grades), so it takes the MASKED builtin lane below - w = 2,
+        // in-shader coverage lerp - never spill.
+        if (o.effect == KH_EFFECT_LUT) {
+            ID3D11ShaderResourceView* khu_lut = kh_user_lut_srv(dev, o.fx_shader);
+            if (!khu_lut) continue;
+            ctx->PSSetShaderResources(19, 1, &khu_lut);
+        }
+
         const bool wants_depth = o.localized || o.banded ||
             o.effect == static_cast<int>(EffectId::Outline) ||
             o.effect == static_cast<int>(EffectId::Pulse) ||
@@ -24185,6 +24606,8 @@ inline void on_mission_end() {
                                   // cold first-bind path a fresh process would
         kh_user_shader_cache_release();   // user .hlsl shaders follow the same
                                           // doctrine: recompiles come from disk
+        kh_user_lut_cache_release();      // user .cube LUTs: same doctrine
+                                          // (reloads come from disk)
         reset_session_state();
         break;
     }

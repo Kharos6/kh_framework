@@ -7038,7 +7038,13 @@ static game_value set_render_debug_sqf(game_value_parameter arg) {
                             khd_m == 24 ||                    // terrain snap off (diagnostic)
                             khd_m == 25 ||                    // cast viewport A/B: live grid (pristine) instead of frozen
                             khd_m == 26 ||                    // lock-settle cast hold off (diagnostic)
-                            khd_m == 27;                      // 26069: UI coverage debug view (write window)
+                            khd_m == 27 ||                    // 26069: UI coverage debug view (write window)
+                            khd_m == 28 ||                    // 26092-26093 adaptive-floor opt-in - RETIRED
+                                                              // to an accepted no-op at 26094 (adaptive is
+                                                              // the default now; kept for script compat)
+                            khd_m == 29;                      // 26094: LEGACY ARM FLOOR escape hatch (forces
+                                                              // the 26066 5 ms constant; one-build retention
+                                                              // per §6 - ledger at the T-machine's floor)
         if (!khd_ok) return game_value(false);
         RenderIntegration::g_dbg_mode.store(khd_m, std::memory_order_relaxed);
         return game_value(true);
@@ -7106,12 +7112,31 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("fxUiTopFxUs", RenderIntegration::g_stats.fx_ui_top_fx_us));
         // 26085 scene-capture GPU cost (per-flush aggregate):
         out.push_back(kv("fxSceneCapUs", RenderIntegration::g_stats.fx_scene_cap_us));
+        // 26090 CPU-side flush attribution (Campaign-18 Step-1; QPC wall
+        // time, last completed measurement - the two-dump experiment's
+        // keys: CPU stats stay FLAT across 4K vs 1080p, GPU rings scale):
+        out.push_back(kv("fxCpuParkUs", RenderIntegration::g_stats.fx_cpu_park_us));
+        out.push_back(kv("fxCpuFlushUs", RenderIntegration::g_stats.fx_cpu_flush_us));
+        out.push_back(kv("fxCpuUiParkUs", RenderIntegration::g_stats.fx_cpu_ui_park_us));
+        out.push_back(kv("fxCpuUiFlushUs", RenderIntegration::g_stats.fx_cpu_ui_flush_us));
+        out.push_back(kv("fxCpuMaskUs", RenderIntegration::g_stats.fx_cpu_mask_us));
+        out.push_back(kv("fxCpuSnapUs", RenderIntegration::g_stats.fx_cpu_snap_us));
+        out.push_back(kv("fxCpuUiSnapUs", RenderIntegration::g_stats.fx_cpu_ui_snap_us));
         out.push_back(kv("uiOnlyDraws", RenderIntegration::g_ui_only_draws));
         // 26059: arming-path census - arms = UI-phase-thread compose
         // detections (~1/frame while a UI-mode pass is visible); aborts
         // expected 0 (pending clear killed by a foreign target).
         out.push_back(kv("uiMaskArms", RenderIntegration::g_ui_mask_arms));
         out.push_back(kv("uiMaskAborts", RenderIntegration::g_ui_mask_aborts));
+        // 26094 arm-floor keys (ledger at the T-machine's adaptive
+        // floor, the DEFAULT since 26094): floorHolds = genuine
+        // boundaries the ACTIVE floor suppressed - expect ~0 in play;
+        // sustained ticking means set 29 (the legacy escape hatch)
+        // and report. bndEmaMs = live boundary cadence in ms (~the
+        // frame period; the adaptive floor's basis).
+        out.push_back(kv("uiMaskFloorHolds", RenderIntegration::g_ui_mask_floor_holds));
+        out.push_back(kvf("uiMaskBndEmaMs",
+            RenderIntegration::kh_qpc_ticks_to_us(RenderIntegration::g_ui_mask.bnd_ema_ticks) / 1000.0f));
         // 26057: draw-time probe census + identity eyeball keys. probes >
         // 0 with misses ~ probes and arms 0 = identity mismatch (compare
         // ProbeLastLo against LearnLo0); probes > 0 with a matching Lo and

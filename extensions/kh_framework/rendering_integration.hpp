@@ -1104,6 +1104,18 @@ struct KhUiMask {
                                     // re-arm floor; ledger at the T-machine)
     uint64_t phase_arm_ordinal = 0; // 26083: scene-flush ordinal at the arm
                                     // (the ordinal re-arm gate's anchor)
+    long long bnd_ema_ticks = 0;    // 26093: BOUNDARY cadence EMA (QPC ticks;
+                                    // UI-phase thread only, like every phase_*
+                                    // field - the adaptive arm floor's basis;
+                                    // ledger at the floor). SUPERSEDES the
+                                    // 26092 inter-ARM EMA, which measured its
+                                    // own output: suppressed boundaries doubled
+                                    // the sampled gaps, biasing the floor high
+                                    // (field: 903 residual holds in 11,060
+                                    // frames with EMA reading 5.43 ms).
+    long long bnd_tick = 0;         // 26093: last learned-surface BOUNDARY
+                                    // event (armed OR floor-suppressed) - the
+                                    // EMA's unbiased sampling anchor
     // 26060: apply-once-per-composed-frame serials (the BOTH compounding
     // fix - full ledger at the flush's stale gate). compose_serial is
     // incremented by the UI-phase thread at every compose detection;
@@ -1184,6 +1196,43 @@ static uint64_t g_ui_stale_skips = 0;       // 26060: flushes that declined to p
                                             // play; ~frame count while a pause menu or
                                             // map holds the frame still)
 // (all seven are pure diagnostics: reset_stat_counters members at birth)
+// 26090 fxCpuMaskUs accumulator (Campaign-18 Step-1): QPC ticks spent in
+// kh_ui_mask_thread_draw, accumulated on the UI-phase thread at its ONE
+// call site in reorder_pre_draw - stamps live INSIDE the fully-gated
+// branch, so the bail path ahead of them stays two compares + relaxed
+// loads exactly as the 172 ms cache-line-storm ledger requires - and
+// harvested by the game thread's flush_frame via exchange(0): each
+// harvest reads ~one frame's aggregate. MEASUREMENT ONLY - the probe
+// path itself is untouched. Continuously drained, so it is NOT census
+// and NOT part of the reset set above.
+static std::atomic<uint64_t> g_ui_mask_cpu_ticks{0};
+
+// 26090 shared QPC -> microseconds conversion for the fxCpu* stats
+// (frequency latched once, thread-safe function-local init; the
+// T-machine keeps its own local latch by design - conversion happens
+// only on the game thread's stamp/harvest sites, the hook thread adds
+// raw ticks).
+inline uint32_t kh_qpc_ticks_to_us(long long khqp_ticks) {
+    static LONGLONG khqp_qpf = 0;
+
+    if (khqp_qpf == 0) {
+        LARGE_INTEGER khqp_f = {};
+        QueryPerformanceFrequency(&khqp_f);
+        khqp_qpf = khqp_f.QuadPart ? khqp_f.QuadPart : 1;
+    }
+
+    if (khqp_ticks < 0) khqp_ticks = 0;
+    return static_cast<uint32_t>((khqp_ticks * 1000000LL) / khqp_qpf);
+}
+
+// 26092 floor-suppression census (ledger at the adaptive arm floor in
+// kh_ui_mask_thread_draw): genuine frame boundaries the 26066 arm floor
+// suppressed - each one is an undetected compose and therefore one
+// stale-skipped, effect-less frame downstream. UI-phase thread writes,
+// census-grade cross-thread reads (the probe counters' exact
+// discipline, deliberately NOT the timing stats' atomic rule - torn
+// reads of a census counter are harmless); reset at the stats arm.
+static uint64_t g_ui_mask_floor_holds = 0;
 
 inline void kh_ui_mask_reset() {   // device reset / session destroy: forget everything
     g_ui_mask = KhUiMask{};
@@ -1625,6 +1674,21 @@ struct RenderStats {
     uint32_t fx_ui_top_fx_us = 0;    // ... and its cost in microseconds
     uint32_t fx_scene_cap_us = 0;    // 26085: scene capture resolve/copy GPU cost
                                      // (per-flush aggregate across capture sites)
+    // 26090 CPU-side flush attribution (Campaign-18 Step-1; QPC wall
+    // time, last completed measurement - the GPU rings' convention).
+    // MEASUREMENT ONLY: no gate, attempt count, or lock scope moved
+    // anywhere these are stamped.
+    uint32_t fx_cpu_park_us = 0;     // scene: first ScopedGraphicsLock attempt ->
+                                     // acquisition (failed attempts' waits included;
+                                     // a lock-failed frame records the whole loop)
+    uint32_t fx_cpu_flush_us = 0;    // flush_locked, end to end
+    uint32_t fx_cpu_ui_park_us = 0;  // write-window twins of the pair above
+    uint32_t fx_cpu_ui_flush_us = 0; // flush_ui_locked, end to end
+    uint32_t fx_cpu_mask_us = 0;     // T-machine hook aggregate since the last
+                                     // harvest (~one frame; ledger at
+                                     // g_ui_mask_cpu_ticks)
+    uint32_t fx_cpu_snap_us = 0;     // scene flush's locked draw-list snapshot copy
+    uint32_t fx_cpu_ui_snap_us = 0;  // write-window pass snapshot copy
     uint64_t perceptual_captures = 0; // pre-mesh scene captures for translucent compositing
     uint64_t ui_flushes = 0;         // UI-phase flush attempts with work queued
     uint64_t ui_gate_passed = 0;     // UI-phase flushes that reached the draw path
@@ -5236,9 +5300,10 @@ inline bool kh_upload_obj_cb(ID3D11DeviceContext* ctx, ID3D11Buffer* buf, const 
     return true;
 }
 
-// Per-frame slice (b1): the tail region - once per mesh pass, and per
-// call at the auxiliary single-draw sites (sun-depth, mask cast, UI
-// driver), which keep filling one flat cbd and upload both slices.
+// Per-frame slice (b1): the tail region - once per mesh pass, once per
+// write-window flush (26090 hoist; ledger at flush_ui_locked's CB
+// bind), and per call at the auxiliary single-draw sites (sun-depth,
+// mask cast), which keep filling one flat cbd and upload both slices.
 inline bool kh_upload_frame_cb(ID3D11DeviceContext* ctx, ID3D11Buffer* buf, const ConstantData& cbd) {
     D3D11_MAPPED_SUBRESOURCE mapped = {};
     if (FAILED(ctx->Map(buf, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return false;
@@ -5955,7 +6020,23 @@ inline bool kh_user_shader_source(const std::string& path, std::string& out, std
 // obeys; stale-sample entries idle in the map until the release.
 inline ID3D11PixelShader* kh_user_fx_ps(ID3D11Device* dev, const std::string& path) {
     if (!dev || path.empty()) return nullptr;
-    std::string khus_key = "fx|" + std::to_string(g_res.depth_sample_count) + "|" + path;
+    // 26090 HOT-PATH ALLOCATION SWEEP: this lookup runs per custom
+    // pass per frame; the key buffer is a reused static now (capacity
+    // survives calls - zero heap traffic after warmup; std::to_string
+    // of a sample count is SSO). THREADING: the exact serialized-
+    // window contract the cache map itself stands on (the LUT cache's
+    // ledger) - lookups happen only inside lock-serialized graphics
+    // windows, so the static needs no lock for the same reason the
+    // map needs none. The cold miss path std::moves the buffer into
+    // the map; the next call's assign re-grows once. DECLINED for
+    // now: precomputed per-object hashes / heterogeneous lookup -
+    // that removes the per-call hash too, but it is a wider-contact
+    // change and waits on an fxCpuFlushUs conviction (Step 3).
+    static std::string khus_key;
+    khus_key.assign("fx|");
+    khus_key += std::to_string(g_res.depth_sample_count);
+    khus_key += '|';
+    khus_key += path;
     std::transform(khus_key.begin(), khus_key.end(), khus_key.begin(), ::tolower);
     auto khus_it = g_user_ps_cache.find(khus_key);
     if (khus_it != g_user_ps_cache.end()) return khus_it->second.ps;
@@ -5996,8 +6077,15 @@ inline ID3D11PixelShader* kh_user_fx_ps(ID3D11Device* dev, const std::string& pa
 inline ID3D11PixelShader* kh_user_mat_ps(ID3D11Device* dev, const std::string& path, int khum_ctx) {
     if (!dev || path.empty()) return nullptr;
     const UINT khum_samp = khum_ctx > 0 ? g_res.comp_depth_samples : 0;
-    std::string khum_key = "m" + std::to_string(khum_ctx) + "|" +
-                           std::to_string(khum_samp) + "|" + path;
+    // 26090 allocation sweep (full ledger at kh_user_fx_ps: same
+    // reused-static pattern, same serialized-window contract).
+    static std::string khum_key;
+    khum_key.assign("m");
+    khum_key += std::to_string(khum_ctx);
+    khum_key += '|';
+    khum_key += std::to_string(khum_samp);
+    khum_key += '|';
+    khum_key += path;
     std::transform(khum_key.begin(), khum_key.end(), khum_key.begin(), ::tolower);
     auto khum_it = g_user_ps_cache.find(khum_key);
     if (khum_it != g_user_ps_cache.end()) return khum_it->second.ps;
@@ -6289,7 +6377,11 @@ inline bool kh_parse_cube_lut(const std::string& text, std::vector<float>& out_r
 // latched failure; the caller skips the pass - the custom-shader rule).
 inline ID3D11ShaderResourceView* kh_user_lut_srv(ID3D11Device* dev, const std::string& path) {
     if (!dev || path.empty()) return nullptr;
-    std::string khlu_key = "lut|" + path;
+    // 26090 allocation sweep (full ledger at kh_user_fx_ps: same
+    // reused-static pattern, same serialized-window contract).
+    static std::string khlu_key;
+    khlu_key.assign("lut|");
+    khlu_key += path;
     std::transform(khlu_key.begin(), khlu_key.end(), khlu_key.begin(), ::tolower);
     auto khlu_it = g_user_lut_cache.find(khlu_key);
     if (khlu_it != g_user_lut_cache.end()) return khlu_it->second.srv;
@@ -9635,7 +9727,7 @@ static uint32_t g_fk_veto_cand_n = 0;       // candidates staged at the last pas
                                             // is live in this scene)
 // BUILD TAG (doctrine: bump on EVERY delivered build; stats-visible so a
 // field log names the binary it came from).
-static constexpr int KH_BUILD_TAG = 26089;
+static constexpr int KH_BUILD_TAG = 26094;
 // NEAR-GAP RAMP (build 26001; the RenderDoc conviction). ROOT, proven by
 // pixel history + depth-window plateaus: the world partition's viewport
 // floor (0.011 in the convicting capture) collapses EVERY fragment nearer
@@ -21114,8 +21206,69 @@ inline void kh_ui_mask_thread_draw(ID3D11DeviceContext* ctx) {
     // mid-frame gap of any kind can fake a frame boundary while the
     // frame is younger than a 200 fps period, while a genuine next
     // frame (>= 8 ms at any realistic rate) always clears the floor.
+    // 26092 ADAPTIVE ARM FLOOR (the >200 fps stale-skip fix; field
+    // conviction: 1080p in-play dump on 26091 - ~237 fps, 4.21 ms
+    // frames, and the 26066 constant below suppressed 47 of 299
+    // GENUINE frame boundaries; every suppressed arm is an undetected
+    // compose -> the serial never ticks -> the flush's apply-once gate
+    // stands down -> one full-frame effect-off blink; uiStaleSkips
+    // matched the arm deficit EXACTLY, and the suppressed frames'
+    // uncleared coverage is what pinned the forensic at 255/255 and
+    // ticked uiCovVetoes - one root, both symptoms. The 26066 ledger's
+    // own premise ("a genuine next frame (>= 8 ms at any realistic
+    // rate) always clears the floor") is false on current rigs at
+    // 1080p. Fix: scale the floor to THIS thread's observed arm
+    // cadence - 3/5 of the inter-arm EMA, clamped to [1.2 ms, the
+    // legacy 5 ms] - sub-frame foreign interleaves stay blocked in
+    // proportion to the live frame period, genuine boundaries always
+    // clear it, and the consumption gate (26067) + ordinal gate
+    // (26083) carry the semantic protection unchanged.
+    // 26093 BASIS REVISION (v2; the 26092 field A/B's finding): v1
+    // fed the floor an inter-ARM EMA - but inter-arm gaps INCLUDE the
+    // doubled gaps suppression itself creates, so the estimator
+    // measured its own output: under fps swings it lagged high and
+    // kept clipping genuine boundaries (field, mode 28 at 1080p: 903
+    // floorHolds == 903 staleSkips residual in 11,060 frames, EMA
+    // 5.43 ms against a ~4-5 ms true period, alphaMin restored to 6
+    // and the flicker subjectively gone - improved, not clean). v2
+    // samples BOUNDARY events instead - every learned-surface
+    // new-frame crossing, armed OR suppressed, stamps bnd_tick and
+    // feeds the gap to the EMA - so the basis is unbiased by the
+    // floor's own verdicts. FAIL DIRECTION INVERTED BY CONSTRUCTION:
+    // boundary gaps are <= the true frame period (foreign-interleave
+    // splits only ever SHORTEN samples, floored at 1.5 ms), so the
+    // adaptive floor sits at <= 3/5 of the true period and can never
+    // again suppress a genuine boundary; the cost is a narrower
+    // interleave-blocking window, which the consumption gate (26067)
+    // and ordinal gate (26083) carry - trading a convicted, visible
+    // failure for a twice-gated theoretical one.
+    // 26094 DEFAULT FLIP (§6 adoption): the v2 field pass came back
+    // exactly clean - 1,550 frames at 1080p under mode 28: floorHolds
+    // 0, staleSkips 0, vetoes 12 (spawn-attributable), alphaMin 6,
+    // bndEma 5.28 ms, and 1,550 x 4 - 4 = 6,196 uiOnlyDraws EXACT -
+    // so the ADAPTIVE floor is now the DEFAULT. setRenderDebug 29 is
+    // the escape hatch (forces the legacy 5 ms constant; retained one
+    // build per §6, then retire). Mode 28 is retired to an accepted
+    // no-op (script compat; it now matches the default). CARRIED
+    // CAVEAT (operator-adopted; ledgered in the handoff): the clean
+    // pass was short and menu-free - if a menu/map/inventory soak
+    // ever shows an arms explosion or scene-wide flashes, set 29 and
+    // report. EMA-cold spawn frames fall back to the legacy constant
+    // below until two boundaries seed the basis.
+    long long khaf_floor = (kht_qpf * 5) / 1000;   // legacy 26066 constant:
+                                                   // the mode-29 escape hatch
+                                                   // and the EMA-cold fallback
+
+    if (g_dbg_mode.load(std::memory_order_relaxed) != 29 &&
+        g_ui_mask.bnd_ema_ticks > 0) {
+        long long khaf_ad = (g_ui_mask.bnd_ema_ticks * 3) / 5;
+        const long long khaf_min = (kht_qpf * 6) / 5000;   // 1.2 ms
+        if (khaf_ad < khaf_min) khaf_ad = khaf_min;
+        if (khaf_ad < khaf_floor) khaf_floor = khaf_ad;
+    }
+
     const bool kht_frame_aged =
-        (kht_now.QuadPart - g_ui_mask.phase_arm_tick) > (kht_qpf * 5) / 1000;
+        (kht_now.QuadPart - g_ui_mask.phase_arm_tick) > khaf_floor;
     // 26067 CONSUMPTION GATE (the long-frame residual): the 26066 floor
     // halved the false re-arms but any fixed floor loses to occasional
     // long frames (field dump: 24 extra arms in 493 flushes with the UI
@@ -21163,6 +21316,42 @@ inline void kh_ui_mask_thread_draw(ID3D11DeviceContext* ctx) {
         (kht_consumed || kht_frame_stale) &&
         (kht_ord_advanced || kht_frame_stale);
 
+    // 26092 floor-suppression census (MEASUREMENT ONLY; ledger at the
+    // adaptive floor above): a standing-phase draw that every gate
+    // EXCEPT the floor would have armed. Phase 3 only - phase 0 arms
+    // unconditionally and phase 2's non-arm path is the designed
+    // clear, not suppression.
+    if (g_ui_mask.phase == 3 && kht_new_frame && !kht_frame_aged &&
+        (kht_consumed || kht_frame_stale) &&
+        (kht_ord_advanced || kht_frame_stale)) {
+        g_ui_mask_floor_holds++;
+    }
+
+    // 26093 boundary-cadence sampling (ledger at the adaptive floor):
+    // every learned-surface draw that crosses the 1 ms token is a
+    // boundary EVENT regardless of the arm verdict - stamped and
+    // sampled HERE, before the branch dispatch, so suppressed
+    // boundaries feed the EMA identically to armed ones (the v1
+    // self-bias fix). Samples under 1.5 ms are foreign-interleave
+    // splits, over 25 ms are gaps (menus, the failsafe) - both
+    // excluded; a split that passes the 1.5 ms bar only SHORTENS the
+    // sample, the safe direction (floor ledger).
+    if (kht_new_frame && (g_ui_mask.phase == 3 || g_ui_mask.phase == 0 ||
+                          kht_arm_ok)) {
+        if (g_ui_mask.bnd_tick != 0) {
+            const long long khaf_gap = kht_now.QuadPart - g_ui_mask.bnd_tick;
+
+            if (khaf_gap > (kht_qpf * 3) / 2000 &&
+                khaf_gap < (kht_qpf * 25) / 1000) {
+                g_ui_mask.bnd_ema_ticks = g_ui_mask.bnd_ema_ticks > 0
+                    ? (g_ui_mask.bnd_ema_ticks * 7 + khaf_gap) / 8
+                    : khaf_gap;
+            }
+        }
+
+        g_ui_mask.bnd_tick = kht_now.QuadPart;
+    }
+
     if (g_ui_mask.phase == 2 && !kht_arm_ok) {
         // the first UI draw of the armed frame: zero the coverage channel
         // before it (kh_ui_mask_clear_alpha verifies the live binding
@@ -21185,6 +21374,9 @@ inline void kh_ui_mask_thread_draw(ID3D11DeviceContext* ctx) {
         g_ui_mask.phase_bb = kht_id;
         g_ui_mask.phase_w = kht_w;
         g_ui_mask.phase_h = kht_h;
+        // (26093: the 26092 inter-arm EMA that sampled here is RETIRED
+        // - boundary sampling now happens pre-dispatch; ledger at the
+        // adaptive floor.)
         g_ui_mask.phase_tick = kht_now.QuadPart;
         g_ui_mask.phase_arm_tick = kht_now.QuadPart;   // 26066: the floor's anchor
         g_ui_mask.phase_arm_ordinal = kht_ord;         // 26083: the ordinal gate's anchor
@@ -21247,7 +21439,17 @@ inline void reorder_pre_draw(ID3D11DeviceContext* self) {
         if (!g_kh_flush_active && !g_ui_mask_injecting &&
             g_reorder_render_tid.load(std::memory_order_relaxed) != 0 &&
             g_ui_mask_wanted.load(std::memory_order_relaxed)) {
+            // 26090 fxCpuMaskUs (ledger at g_ui_mask_cpu_ticks): the QPC
+            // pair rides INSIDE the gated branch only - ~2 x 20 ns on
+            // ~224 probes/frame is sub-10 us of observer cost, carried
+            // by the measurement itself and visible in its own number.
+            LARGE_INTEGER khtm_b = {}, khtm_e = {};
+            QueryPerformanceCounter(&khtm_b);
             kh_ui_mask_thread_draw(self);
+            QueryPerformanceCounter(&khtm_e);
+            g_ui_mask_cpu_ticks.fetch_add(
+                static_cast<uint64_t>(khtm_e.QuadPart - khtm_b.QuadPart),
+                std::memory_order_relaxed);
         }
 
         return;
@@ -22591,6 +22793,11 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     meshes.clear();
     fullscreen.clear();
 
+    // 26090 fxCpuSnapUs (Step-1): bracket the locked snapshot copy -
+    // the mutex block below is verbatim 26089 inside the stamps.
+    LARGE_INTEGER khsn_t0 = {}, khsn_t1 = {};
+    QueryPerformanceCounter(&khsn_t0);
+
     {
         std::lock_guard<std::mutex> g(g_draw_list_mutex);
         meshes.reserve(g_draw_list.size());
@@ -22654,6 +22861,9 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             ++it;
         }
     }
+
+    QueryPerformanceCounter(&khsn_t1);
+    g_stats.fx_cpu_snap_us = kh_qpc_ticks_to_us(khsn_t1.QuadPart - khsn_t0.QuadPart);
 
     if (ffr_armed()) {   // flight recorder: snapshot census + the dark tripwire's eligibility latch
         FfrRecord& khf_r = ffr_head();
@@ -24488,6 +24698,19 @@ inline void flush_frame() {
     ID3D11DeviceContext* ctx = RVExtBridge::get_d3d_device_context();
     if (!dev || !ctx) return;
     g_stats.flushes++;
+    // 26090 fxCpuMaskUs harvest (ledger at g_ui_mask_cpu_ticks): one
+    // relaxed exchange per flush attempt reads ~one frame's aggregate;
+    // frames the flush skips leave ticks pooling to the next harvest
+    // (the machine is dormant on workless frames anyway - wanted false).
+    g_stats.fx_cpu_mask_us = kh_qpc_ticks_to_us(static_cast<long long>(
+        g_ui_mask_cpu_ticks.exchange(0, std::memory_order_relaxed)));
+    // 26090 fxCpuParkUs / fxCpuFlushUs (Step-1): wall time from the
+    // FIRST lock attempt to acquisition (the engine's half of the park
+    // included - lock_retries counts failures, this counts the WAIT),
+    // then the locked body end to end. The loop, its attempt count and
+    // the lock scope are byte-identical to 26089.
+    LARGE_INTEGER khfc_t0 = {}, khfc_t1 = {}, khfc_t2 = {};
+    QueryPerformanceCounter(&khfc_t0);
 
     for (int attempt = 0; attempt < 3; ++attempt) {
         RVExtBridge::ScopedGraphicsLock lock;
@@ -24497,12 +24720,18 @@ inline void flush_frame() {
             continue;
         }
 
+        QueryPerformanceCounter(&khfc_t1);
+        g_stats.fx_cpu_park_us = kh_qpc_ticks_to_us(khfc_t1.QuadPart - khfc_t0.QuadPart);
         g_kh_flush_active = true;    // 26059: our draws traverse the T-path otherwise
         flush_locked(dev, ctx);
         g_kh_flush_active = false;
+        QueryPerformanceCounter(&khfc_t2);
+        g_stats.fx_cpu_flush_us = kh_qpc_ticks_to_us(khfc_t2.QuadPart - khfc_t1.QuadPart);
         return;
     }
 
+    QueryPerformanceCounter(&khfc_t1);   // lock-failed frame: the whole loop's wait
+    g_stats.fx_cpu_park_us = kh_qpc_ticks_to_us(khfc_t1.QuadPart - khfc_t0.QuadPart);
     g_stats.lock_failed_frames++;
     g_ffr_lockfails.fetch_add(1, std::memory_order_relaxed);   // flight recorder: folded at the next boundary
 }
@@ -24645,6 +24874,11 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     static std::vector<std::pair<uint64_t, RenderObject>> passes;   // key = creation seq
     passes.clear();
 
+    // 26090 fxCpuUiSnapUs (Step-1): the scene bracket's twin - the
+    // mutex block below is verbatim 26089 inside the stamps.
+    LARGE_INTEGER khusn_t0 = {}, khusn_t1 = {};
+    QueryPerformanceCounter(&khusn_t0);
+
     {
         std::lock_guard<std::mutex> g(g_draw_list_mutex);
 
@@ -24658,6 +24892,9 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             passes.emplace_back(o.seq, o);
         }
     }
+
+    QueryPerformanceCounter(&khusn_t1);
+    g_stats.fx_cpu_ui_snap_us = kh_qpc_ticks_to_us(khusn_t1.QuadPart - khusn_t0.QuadPart);
 
     if (passes.empty()) return;
 
@@ -24939,12 +25176,29 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     ctx->GSSetShader(nullptr, nullptr, 0);
     ctx->HSSetShader(nullptr, nullptr, 0);
     ctx->DSSetShader(nullptr, nullptr, 0);
-    // CB SPLIT: b0 = per-object, b1 = per-frame; UI passes fill one
-    // flat cbd per pass and upload both slices (few passes, all
-    // fullscreen - the per-pass frame upload is noise here).
+    // CB SPLIT: b0 = per-object, b1 = per-frame. 26090 FRAME-SLICE
+    // HOIST (the scene chain's "frame slice went up once" doctrine,
+    // write-window edition): every pass's frame slice is IDENTICAL
+    // across a flush - viewProj + invViewProj plus zeros; every
+    // per-pass lane (fxMeta, depthParams, fx0/1/2, locals, bands...)
+    // lives in the OBJECT block - so it goes up ONCE here instead of
+    // per draw. FAIL-DARK (khf_frame_ok's exact pattern): a failed
+    // frame upload stands EVERY draw down through the khuf_frame_ok
+    // latch - builtins at the pending flush, customs at their own
+    // upload - never a draw against a stale b1. The repair/clear/
+    // debug draws above and around this point are CB-free (their PS
+    // ledgers), so the upload position is unconstrained.
     ID3D11Buffer* khui_cbs[2] = { g_res.constant_buffer, g_res.frame_cb };
     ctx->VSSetConstantBuffers(0, 2, khui_cbs);
     ctx->PSSetConstantBuffers(0, 2, khui_cbs);
+    bool khuf_frame_ok = false;
+
+    {
+        ConstantData khuf_cbf = {};
+        memcpy(khuf_cbf.view_proj, view_proj, sizeof(view_proj));
+        memcpy(khuf_cbf.inv_view_proj, inv_view_proj, sizeof(inv_view_proj));
+        khuf_frame_ok = kh_upload_frame_cb(ctx, g_res.frame_cb, khuf_cbf);
+    }
     ctx->OMSetDepthStencilState(g_res.dss_off, 0);
     ctx->RSSetState(g_res.rasterizer);
     const FLOAT bf[4] = { 0, 0, 0, 0 };
@@ -25043,8 +25297,11 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         ctx->PSSetShaderResources(0, 2, khuf_srvs);
         if (khuf_lut) ctx->PSSetShaderResources(19, 1, &khuf_lut);
 
-        if (!kh_upload_obj_cb(ctx, g_res.constant_buffer, khuf_cbd) ||
-            !kh_upload_frame_cb(ctx, g_res.frame_cb, khuf_cbd)) return;
+        // 26090: frame slice hoisted (one upload per flush; ledger at
+        // the CB bind) - the latch stands this draw down on a failed
+        // hoist, the fail-dark rule.
+        if (!khuf_frame_ok ||
+            !kh_upload_obj_cb(ctx, g_res.constant_buffer, khuf_cbd)) return;
 
         ctx->PSSetShader(g_res.ps_effect, nullptr, 0);
         ctx->OMSetBlendState(khuf_final ? g_res.blend_ui_replace : nullptr,
@@ -25325,14 +25582,16 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             cbd.fx1[3] = g_rain_phase;   // 26081: the integrated rain clock
         }
 
-        // Overlay solid meshes need the camera for SolidMask's band term.
-        if (o.effect == 0) {
-            float ui_cam[3];
-            extract_camera_pos(pv.view, ui_cam);
-            cbd.fx0[0] = ui_cam[0];
-            cbd.fx0[1] = ui_cam[1];
-            cbd.fx0[2] = ui_cam[2];
-        }
+        // TOMBSTONE (26091): an effect-0 "SolidMask band term" camera
+        // fill stood here - DEAD since the write window became
+        // effects-only: the pass snapshot admits FULLSCREEN passes
+        // exclusively and this loop's "o.effect <= 0" skip excludes
+        // effect 0 unconditionally, so the branch could never execute
+        // (field twin: both Campaign-18 dumps ran 0 solids in this
+        // phase). If effect-0 content ever returns to the write
+        // window, restore the fill: extract_camera_pos(pv.view) into
+        // cbd.fx0[0..2] - the scene flush's mesh path still carries
+        // the live pattern.
 
         cbd.fx_meta[0] = static_cast<float>(o.effect);
         cbd.fx_meta[1] = now;
@@ -25368,9 +25627,11 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         // stage-0 id, and any LUT ride to the next flush, whose target
         // (intermediate or backbuffer-direct) is decided there.
         if (khu_ufx) {
-            // CB SPLIT: both slices per UI pass
-            if (!kh_upload_obj_cb(ctx, g_res.constant_buffer, cbd) ||
-                !kh_upload_frame_cb(ctx, g_res.frame_cb, cbd)) continue;
+            // CB SPLIT: object slice per pass; the frame slice went up
+            // once at the flush head (26090 hoist - the latch gates
+            // this draw too).
+            if (!khuf_frame_ok ||
+                !kh_upload_obj_cb(ctx, g_res.constant_buffer, cbd)) continue;
             ctx->PSSetShader(khu_ufx, nullptr, 0);
             ctx->OMSetBlendState(khu_spill ? g_res.blend_ui_spill
                                            : g_res.blend_ui_masked,
@@ -25429,6 +25690,10 @@ inline bool flush_ui_frame() {
     ID3D11DeviceContext* ctx = RVExtBridge::get_d3d_device_context();
     if (!dev || !ctx) return false;
     g_stats.ui_flushes++;
+    // 26090 fxCpuUiParkUs / fxCpuUiFlushUs: the scene twins' exact
+    // pattern (ledger at flush_frame); loop and lock scope untouched.
+    LARGE_INTEGER khufc_t0 = {}, khufc_t1 = {}, khufc_t2 = {};
+    QueryPerformanceCounter(&khufc_t0);
 
     for (int attempt = 0; attempt < 3; ++attempt) {
         RVExtBridge::ScopedGraphicsLock lock;
@@ -25438,12 +25703,18 @@ inline bool flush_ui_frame() {
             continue;
         }
 
+        QueryPerformanceCounter(&khufc_t1);
+        g_stats.fx_cpu_ui_park_us = kh_qpc_ticks_to_us(khufc_t1.QuadPart - khufc_t0.QuadPart);
         g_kh_flush_active = true;    // 26059: our draws traverse the T-path otherwise
         flush_ui_locked(dev, ctx);
         g_kh_flush_active = false;
+        QueryPerformanceCounter(&khufc_t2);
+        g_stats.fx_cpu_ui_flush_us = kh_qpc_ticks_to_us(khufc_t2.QuadPart - khufc_t1.QuadPart);
         return true;
     }
 
+    QueryPerformanceCounter(&khufc_t1);   // lock-failed frame: the whole loop's wait
+    g_stats.fx_cpu_ui_park_us = kh_qpc_ticks_to_us(khufc_t1.QuadPart - khufc_t0.QuadPart);
     g_stats.lock_failed_frames++;
     return false;
 }
@@ -25555,6 +25826,7 @@ inline void reset_stat_counters() {
     g_ui_mask_aborts = 0;
     g_ui_mask_probes = 0;       // 26059: T-machine census
     g_ui_mask_probe_misses = 0;
+    g_ui_mask_floor_holds = 0;  // 26092: arm-floor suppression census
     g_ui_stale_skips = 0;       // 26060: apply-once gate census
     g_fk_veto_fills = 0; g_fk_veto_last_n = 0; g_fk_veto_cand_n = 0;   // 26052: veto census
     g_sun_jump_refused = 0;

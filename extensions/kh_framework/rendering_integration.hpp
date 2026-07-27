@@ -1506,9 +1506,15 @@ enum class EffectId : int {
     // and remain the stable interface. The "ssao" name and the old
     // 21 slot now simply resolve to unknown-effect (-1).
     Clarity = 18, Deband = 19, RainLens = 20,
+    // 26088: CRT tube simulation. GATHER CLASS (the curved-glass
+    // refraction samples off-pixel taps), so it is deliberately
+    // OUTSIDE the point-op fusion set (kh_fuse_appendable), the UI
+    // spill set (scanlines darken - not black-preserving; masked
+    // lane), and the depth-consumer / inverse predicates.
+    Crt = 21,
 };
 
-static constexpr int KH_MAX_EFFECT = 20;
+static constexpr int KH_MAX_EFFECT = 21;
 // USER EFFECT SENTINEL: RenderObject.effect for a custom ".hlsl" pass
 // (fx_shader carries the resolved path). Deliberately outside the
 // builtin id range: set_effect_params zero-defaults its 8 params (they
@@ -4699,6 +4705,86 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         // Trails read slightly darker-sharp (wet glass transmits more).
         col = lerp(col, scene * 0.985f, saturate(trail * (1.0f - drop) * 0.55f) * fogAmt);
         outc = col;
+    }
+    else if (effect == 21)   // crt: [curvature, scanlines, lineCount, maskStrength] + [aberrationPx, flicker, rollingBand, cornerRadius]; color = phosphor tint
+    {
+        // 26088 CRT GLASS. Composition order mirrors a real tube's
+        // light path: the frame is refracted through curved glass
+        // (barrel distortion + off-axis chromatic fringing), rebuilt
+        // as a scanned beam (LUMA-WIDENED scanlines - bright pixels
+        // bloom the beam wider, the classic CRT overexposure read),
+        // filtered by the aperture grille (screen-fixed RGB triad,
+        // brightness-compensated), then the tube artifacts ride on
+        // top: a rolling sync band and mains flicker, and the face
+        // ends at a rounded black bezel. MASKED lane by class
+        // (scanlines darken - not black-preserving); the pass opacity
+        // and the write-window coverage lerp composite as usual. The
+        // grille rides SCREEN pixels (i.pos - it lives on the panel),
+        // everything else rides the DISTORTED coordinate (it lives in
+        // the picture).
+        float khc_curv = max(fxParams0.x, 0.0f);
+        float2 khc_cc = uv - 0.5f;
+        float khc_r2 = dot(khc_cc, khc_cc);
+        float2 khc_duv = 0.5f + khc_cc * (1.0f + khc_curv * khc_r2 * (1.0f + 0.8f * khc_r2));
+
+        // Curved-glass refraction with off-axis prism split: the
+        // fringe grows with the square of the field angle, along the
+        // radial direction - zero on-axis, ~aberrationPx at the edge.
+        float2 khc_dpx = khc_duv * float2(fxMeta.z, fxMeta.w);
+        float2 khc_fpx = khc_cc * khc_r2 * 4.0f * fxParams1.x;
+        float3 khc_col;
+        khc_col.r = SampleScene(int2(khc_dpx + khc_fpx)).r;
+        khc_col.g = SampleScene(int2(khc_dpx)).g;
+        khc_col.b = SampleScene(int2(khc_dpx - khc_fpx)).b;
+
+        // Beam scanlines over the distorted picture: the beam profile
+        // is a shaped sine whose exponent NARROWS in the shadows and
+        // WIDENS toward the highlights (phosphor blooming), and the
+        // 1.32 gain recovers the average level the dark gaps remove.
+        float khc_lines = max(fxParams0.z, 16.0f);
+        float khc_lum = saturate(Luma(khc_col));
+        float khc_beam = pow(abs(sin(khc_duv.y * khc_lines * 3.14159265f)),
+                             lerp(2.2f, 0.65f, khc_lum));
+        khc_col *= lerp(1.0f, khc_beam * 1.32f, saturate(fxParams0.y));
+
+        // Aperture grille: RGB triad fixed to SCREEN columns, with a
+        // matching gain so full mask strength keeps the average level.
+        float khc_mk = saturate(fxParams0.w);
+        int khc_m = (int)fmod(i.pos.x, 3.0f);
+        float3 khc_tri = khc_m == 0 ? float3(1.0f, 0.45f, 0.45f)
+                       : khc_m == 1 ? float3(0.45f, 1.0f, 0.45f)
+                                    : float3(0.45f, 0.45f, 1.0f);
+        khc_col *= lerp(float3(1.0f, 1.0f, 1.0f), khc_tri * 1.35f, khc_mk);
+
+        // Rolling sync band: a soft dark bar drifting down the frame
+        // and wrapping (the vertical-hold-slipping read).
+        float khc_bpos = frac(t * 0.11f);
+        float khc_bd = abs(khc_duv.y - khc_bpos);
+        khc_bd = min(khc_bd, 1.0f - khc_bd);
+        float khc_band = 1.0f - smoothstep(0.0f, 0.16f, khc_bd);
+        khc_col *= 1.0f - khc_band * khc_band * 0.22f * saturate(fxParams1.z);
+
+        // Mains flicker: a fast beat (aliases against any real frame
+        // rate - authentically so) plus a per-refresh random sparkle
+        // quantized to 60 Hz through the grain family's Hash.
+        float khc_fl = saturate(fxParams1.y);
+        float khc_hum = sin(t * 100.0f * 3.14159265f) * 0.5f + 0.5f;
+        float khc_spark = Hash(float2(floor(t * 60.0f), 3.7f)) - 0.5f;
+        khc_col *= 1.0f + khc_fl * (khc_hum * 0.04f + khc_spark * 0.05f);
+
+        // Phosphor tint, then the tube face: rounded-rectangle mask in
+        // the DISTORTED space (out-of-range refraction lands outside
+        // it by construction - the bezel is black), with a ~2 px
+        // feathered edge and a soft glass falloff into the corners.
+        khc_col *= color.rgb;
+        float khc_cr = clamp(fxParams1.w, 0.003f, 0.5f);
+        float2 khc_q = abs(khc_duv - 0.5f);
+        float2 khc_ex = max(khc_q - (0.5f - khc_cr), 0.0f);
+        float khc_cd = length(khc_ex);
+        float khc_feather = 2.0f / fxMeta.w;
+        float khc_tube = 1.0f - smoothstep(khc_cr - khc_feather, khc_cr, khc_cd);
+        khc_tube *= 1.0f - smoothstep(0.0f, khc_cr, khc_cd) * 0.35f;
+        outc = khc_col * khc_tube;
     }
 )HLSL" R"HLSL(    else if (effect == 101)   // 3D LUT grade (.cube, effect KH_EFFECT_LUT): [strength]
     {
@@ -8654,7 +8740,7 @@ inline bool read_vec3_or_uniform(const game_value& gv, float out[3]) {
 inline int effect_id_from_gv(const game_value& gv) {
     if (gv.type_enum() == game_data_type::SCALAR) {
         int id = static_cast<int>(static_cast<float>(gv));
-        return (id >= 0 && id <= KH_MAX_EFFECT) ? id : -1;   // 26083: 18..20 = clarity/deband/rainlens (compacted)
+        return (id >= 0 && id <= KH_MAX_EFFECT) ? id : -1;   // 26083: 18..20 = clarity/deband/rainlens (compacted); 26088: 21 = crt
     }
 
     if (gv.type_enum() != game_data_type::STRING) return -1;
@@ -8681,6 +8767,7 @@ inline int effect_id_from_gv(const game_value& gv) {
     if (s == "clarity")    return 18;
     if (s == "deband")     return 19;
     if (s == "rainlens" || s == "rain") return 20;
+    if (s == "crt")        return 21;   // 26088
     return -1;
 }
 
@@ -8746,6 +8833,7 @@ inline bool set_effect_params(RenderObject& obj, const auto_array<game_value>* p
         { 0.35f, 22.0f },                            // 18 clarity: strength, radiusPx
         { 1.6f, 16.0f, 0.6f },                       // 19 deband: threshold(1/255), rangePx, grain(1/255)
         { 0.6f, 1.0f, 0.35f, 1.0f },                 // 20 rainlens: intensity, speed, condensation, refract (fx[4..7] SYSTEM: camera velocity)
+        { 0.12f, 0.45f, 540.0f, 0.35f, 1.5f, 0.25f, 0.3f, 0.06f },   // 21 crt: curvature, scanlines, lineCount, maskStrength + aberrationPx, flicker, rollingBand, cornerRadius
     };
 
     // LUT default row (the sentinel sits outside the table): strength =
@@ -9515,7 +9603,7 @@ static uint32_t g_fk_veto_cand_n = 0;       // candidates staged at the last pas
                                             // is live in this scene)
 // BUILD TAG (doctrine: bump on EVERY delivered build; stats-visible so a
 // field log names the binary it came from).
-static constexpr int KH_BUILD_TAG = 26087;
+static constexpr int KH_BUILD_TAG = 26088;
 // NEAR-GAP RAMP (build 26001; the RenderDoc conviction). ROOT, proven by
 // pixel history + depth-window plateaus: the world partition's viewport
 // floor (0.011 in the convicting capture) collapses EVERY fragment nearer

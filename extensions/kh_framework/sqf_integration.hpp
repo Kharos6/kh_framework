@@ -6229,7 +6229,14 @@ static game_value gpu_visibility_sqf(game_value_parameter args) {
 //              [4..7] are SYSTEM-owned - the camera velocity; 26083: ids
 //              compacted after the ssao retirement - scripts using the
 //              old NUMERIC 19/20/21 must move to 18/19/20 or, better,
-//              the stable string names) - or a PATH
+//              the stable string names),
+//              "crt" 21 [curvature, scanlines, lineCount, maskStrength,
+//              aberrationPx, flicker, rollingBand, cornerRadius]
+//              (26088: curved-glass CRT tube - barrel distortion with
+//              rounded black bezel, off-axis chromatic fringing,
+//              luma-widened beam scanlines, RGB aperture grille,
+//              rolling sync band, mains flicker; color.rgb = phosphor
+//              tint, color.a = opacity) - or a PATH
 //              ENDING ".hlsl" (case-insensitive suffix, the mesh slot's
 //              ".fbx" rule; same Documents-then-mods "rendering"
 //              resolution) - or a PATH ENDING ".cube" (same resolution):

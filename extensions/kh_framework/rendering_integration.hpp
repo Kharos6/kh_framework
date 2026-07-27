@@ -942,6 +942,12 @@ struct Resources {
         KH_SAFE_RELEASE(ps_premult_copy);  // 26062
         KH_SAFE_RELEASE(ps_dbg_cov);       // 26069
         KH_SAFE_RELEASE(ps_cov_fix);       // 26075
+        KH_SAFE_RELEASE(ps_maskcast);      // 26087: was created in init but
+                                           // never released - one PS object
+                                           // (and its old-device ref) leaked
+                                           // per engine reset, and the re-init
+                                           // CreatePixelShader overwrote the
+                                           // stale pointer without releasing it
 
         for (int khtsq_i = 0; khtsq_i < 3; ++khtsq_i) {   // 26080 timestamps
             KH_SAFE_RELEASE(ts_disjoint[khtsq_i]);
@@ -1848,6 +1854,13 @@ cbuffer CBObj : register(b0)
                           // not listed) for the veto's self-exclusion.
                           // Zeroed on every unrouted fill site. Ledger at
                           // the C++ routing.
+    // 26087 POINT-OP PASS FUSION (C++ twin: ConstantData::fuse_meta /
+    // fuse_stage - the mirror contract, per block). x = extra fused
+    // stage count; per stage s: [4s] = id/blend/0/0, [4s+1] = fx0,
+    // [4s+2] = fx1, [4s+3] = color rgb + opacity(w). Consumed only by
+    // KhFuseTail in the effect unit; zeroed (cold) everywhere else.
+    float4 fuseMeta;
+    float4 fuseStage[12];
     // Dynamic lights mirror: engine cb10/cb11 packing VERBATIM (night-
     // capture disassembly; see the DYNLIGHTS ledger in the C++ section).
     // PER OBJECT: mode 3 culls the pool to this mesh's nearest set.
@@ -4081,6 +4094,92 @@ float3 WorldPos(int2 px, float2 uv)
     return wp.xyz / wp.w;
 }
 
+
+// 26087 POINT-OP PASS FUSION. CPU twin: the chain loops' pending
+// append (kh_fuse_append; the fusible set {1 invert, 2 colorgrade,
+// 3 vignette, 5 grain}, never localized / banded / spill / LUT /
+// custom, is enforced THERE, so this path carries no masks). MATH
+// TWINS: the four effect branches in PSEffect, duplicated VERBATIM
+// over the running value - editing one copy without the other breaks
+// the exactness contract (fused output must equal the retired
+// pass-per-effect output to the last ulp, intermediate quantization
+// aside).
+float3 KhFusePoint(int id, float3 c, float2 uv, float2 pos, float t,
+                   float4 p0, float4 p1, float4 col)
+{
+    if (id == 1) return (1.0f - saturate(c)) * col.rgb;
+    if (id == 2)
+    {
+        float3 g = c * col.rgb * p0.z;
+        float l = Luma(g);
+        g = lerp(l.xxx, g, p0.x);
+        g = (g - 0.5f) * p0.y + 0.5f;
+        return pow(max(g, 0.0f), p0.w);
+    }
+    if (id == 3)
+    {
+        float d = distance(uv, float2(0.5f, 0.5f)) * 1.4142f;
+        float v = smoothstep(p0.x, p0.x + max(p0.y, 1e-3f), d);
+        return lerp(c, col.rgb, v);
+    }
+    if (id == 5)
+    {
+        float fps = max(p0.y, 1.0f);
+        float seed = floor(t * fps) * 61.7f;
+        float2 gp = pos / max(p0.z, 1.0f);
+        float2 ip = floor(gp);
+        float2 fp = frac(gp);
+        fp = fp * fp * (3.0f - 2.0f * fp);
+        float n00 = Hash(ip + seed);
+        float n10 = Hash(ip + float2(1, 0) + seed);
+        float n01 = Hash(ip + float2(0, 1) + seed);
+        float n11 = Hash(ip + float2(1, 1) + seed);
+        float nv = lerp(lerp(n00, n10, fp.x), lerp(n01, n11, fp.x), fp.y);
+        float nf = Hash(gp * 2.13f + seed + 17.0f);
+        float g = (nv + nf) * 0.5f - 0.5f;
+        float3 gc = g.xxx;
+        if (p1.x > 0.001f)
+        {
+            float gr = (lerp(Hash(ip + seed + 31.0f), Hash(ip + float2(1, 1) + seed + 31.0f), fp.x) + Hash(gp * 1.71f + seed + 47.0f)) * 0.5f - 0.5f;
+            float gb = (lerp(Hash(ip + seed + 73.0f), Hash(ip + float2(1, 1) + seed + 73.0f), fp.x) + Hash(gp * 2.71f + seed + 89.0f)) * 0.5f - 0.5f;
+            gc = lerp(gc, float3(gr, g, gb), p1.x);
+        }
+        float luma = saturate(Luma(c));
+        float resp = lerp(1.0f, 4.0f * luma * (1.0f - luma) * 0.9f + 0.1f, p0.w);
+        return c + gc * p0.x * resp;
+    }
+    return c;
+}
+
+// Fused-stage composite: the packing tail's blend algebra VERBATIM
+// over the running value, plus - write-window lanes only - the
+// coverage destination lerp in its exact pre-composite position (the
+// masked lane's order; spill stage-0 completes its own algebra BEFORE
+// this runs, and appended stages are never spill-classified). Runs
+// AFTER the stage-0 pass's full tail composite: v arrives as the
+// value the retired follower pass would have sampled as its scene.
+float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float t)
+{
+    int n = (int)fuseMeta.x;
+    [loop] for (int s = 0; s < n; ++s)
+    {
+        float4 fm = fuseStage[s * 4];
+        float4 fcol = fuseStage[s * 4 + 3];
+        float3 c = KhFusePoint((int)fm.x, v, uv, pos, t,
+                               fuseStage[s * 4 + 1], fuseStage[s * 4 + 2], fcol);
+        if (uiLane) c = lerp(v, c, cov);
+        float a = fcol.w;
+        int bm = (int)fm.y;
+        float3 mixed = lerp(v, c, a);
+        if (bm == 1)      v = v + c * a;
+        else if (bm == 2) v = v * lerp(float3(1.0f, 1.0f, 1.0f), c, a);
+        else if (bm == 3) v = v + c * a - v * c * a;
+        else if (bm == 4) v = max(v, mixed);
+        else if (bm == 5) v = min(v, mixed);
+        else              v = mixed;
+    }
+    return v;
+}
 )HLSL" R"HLSL(float4 PSEffect(VSOut i) : SV_Target
 {
     // FAR CONTRACT (depth-clip-off edition; see PSMain's twin + the
@@ -4749,9 +4848,15 @@ float3 WorldPos(int2 px, float2 uv)
                 int2((int)fxMeta.z - 1, (int)fxMeta.w - 1)), 0));
             if (centerSize.w > 2.5f)
                 comp += khuRaw.rgb * (1.0f - khuRaw.a);
+            // 26087: fused point-op stages ride the SAME draw - applied
+            // here, after the stage-0 composite (and the spill term)
+            // completed, exactly where the follower passes used to
+            // sample. Coverage rides through unchanged.
+            comp = KhFuseTail(comp, khuRaw.a, true, uv, i.pos.xy, t);
             return float4(comp, khuRaw.a);   // coverage passthrough
         }
 
+        comp = KhFuseTail(comp, 1.0f, false, uv, i.pos.xy, t);   // 26087 (scene chain lane)
         return float4(comp, 1.0f);
     }
 
@@ -4910,6 +5015,15 @@ struct alignas(16) ConstantData {
                                // listed) for the veto's self-exclusion;
                                // zeroed everywhere else. HLSL twin:
                                // khFarSplit (same relative slot).
+    // 26087 POINT-OP PASS FUSION (per-object; ledger at the HLSL twin
+    // and KhFusePoint). x of fuse_meta = extra fused stage count
+    // (0..KH_FUSE_MAX); per stage s: [4s] = [effect id, blend mode, 0,
+    // 0], [4s+1] = fx[0..3], [4s+2] = fx[4..7], [4s+3] = color rgb +
+    // opacity in w. Zeroed on every fill site except the chain loops'
+    // pending append - the shader loop is cold (n = 0) everywhere
+    // else, meshes included.
+    float fuse_meta[4];
+    float fuse_stage[12][4];
     float dl_ctl[4];           // x = mode (0 off / 1 camera-relative world /
                                // 2 view space / 3 absolute pool), y = point
                                // count, z = spot count, w = distance scale
@@ -5015,6 +5129,44 @@ inline bool kh_upload_frame_cb(ID3D11DeviceContext* ctx, ID3D11Buffer* buf, cons
     if (FAILED(ctx->Map(buf, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return false;
     memcpy(mapped.pData, reinterpret_cast<const uint8_t*>(&cbd) + KH_CBOBJ_BYTES, KH_CBFRAME_BYTES);
     ctx->Unmap(buf, 0);
+    return true;
+}
+
+// 26087 POINT-OP PASS FUSION, CPU side (HLSL twins: fuseMeta /
+// fuseStage + KhFusePoint / KhFuseTail in the effect unit - the mirror
+// contract). A pending chain draw absorbs up to KH_FUSE_MAX immediately-
+// following point-op passes as fused stages riding the same fullscreen
+// draw; the shader applies them after the stage-0 composite, exactly
+// where the retired follower passes used to sample. APPEND RULES (the
+// exactness contract): followers must be builtin point ops from the
+// fixed set {1 invert, 2 colorgrade, 3 vignette, 5 grain} and never
+// localized or banded; those four are point ops (each output pixel
+// depends only on its own running-value pixel plus uniforms), never
+// spill-classified, never depth consumers, and never t19 binders - so
+// fusing them is byte-equal to the pass-per-effect chain up to the
+// retired intermediate quantization. Stage 0 may be ANY deferred
+// builtin (gathers, spill, LUT included; customs never pend on the UI
+// path and block appends on the scene path - a user PS does not run
+// KhFuseTail).
+static constexpr int KH_FUSE_MAX = 3;   // extra stages riding one draw
+
+inline bool kh_fuse_appendable(const RenderObject& o) {
+    return (o.effect == 1 || o.effect == 2 || o.effect == 3 ||
+            o.effect == 5) && !o.localized && !o.banded;
+}
+
+inline bool kh_fuse_append(ConstantData& cbd, const RenderObject& o) {
+    const int khfu_n = static_cast<int>(cbd.fuse_meta[0] + 0.5f);
+    if (khfu_n >= KH_FUSE_MAX) return false;
+    float* khfu_st = cbd.fuse_stage[khfu_n * 4];
+    khfu_st[0] = static_cast<float>(o.effect);
+    khfu_st[1] = static_cast<float>(o.blend_mode);
+    khfu_st[2] = 0.0f;
+    khfu_st[3] = 0.0f;
+    memcpy(cbd.fuse_stage[khfu_n * 4 + 1], o.fx,     4 * sizeof(float));
+    memcpy(cbd.fuse_stage[khfu_n * 4 + 2], o.fx + 4, 4 * sizeof(float));
+    memcpy(cbd.fuse_stage[khfu_n * 4 + 3], o.color,  4 * sizeof(float));
+    cbd.fuse_meta[0] = static_cast<float>(khfu_n + 1);
     return true;
 }
 
@@ -9363,7 +9515,7 @@ static uint32_t g_fk_veto_cand_n = 0;       // candidates staged at the last pas
                                             // is live in this scene)
 // BUILD TAG (doctrine: bump on EVERY delivered build; stats-visible so a
 // field log names the binary it came from).
-static constexpr int KH_BUILD_TAG = 26086;
+static constexpr int KH_BUILD_TAG = 26087;
 // NEAR-GAP RAMP (build 26001; the RenderDoc conviction). ROOT, proven by
 // pixel history + depth-window plateaus: the world partition's viewport
 // floor (0.011 in the convicting capture) collapses EVERY fragment nearer
@@ -23231,9 +23383,13 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     // matParams lanes and re-uploads AFTER upload_cb returns, so the
     // object slice must outlive the lambda.
     ConstantData khf_obj_cbd = {};
-    auto upload_cb = [&](const RenderObject& o, bool chain_pass) -> bool {
+    // 26087: khf_defer non-null = BUILD ONLY (deferred chain draw) -
+    // the caller uploads the returned slice at flush time; the frame
+    // slice already went up at the pass build either way.
+    auto upload_cb = [&](const RenderObject& o, bool chain_pass,
+                         ConstantData* khf_defer = nullptr) -> bool {
         khf_farkeep_draw = false;   // per-call default; solid section may set it
-        ConstantData& cbd = khf_obj_cbd;
+        ConstantData& cbd = khf_defer ? *khf_defer : khf_obj_cbd;
         cbd = khf_cbf;   // CB SPLIT: frame template (matrices ride for the echoes)
         cbd.center_size[0] = o.pos[0];
         cbd.center_size[1] = o.pos[2];   // SQF [x,y,zASL] -> engine [x,zASL,y]
@@ -23501,7 +23657,9 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         // CB SPLIT: object slice only - the frame slice went up once at
         // the pass build, and the chain rides the same slice (see the
         // build's ledger). A failed frame upload stands every draw down:
-        // fail dark, never stale-frame draws.
+        // fail dark, never stale-frame draws. 26087: deferred builds
+        // skip the upload - the flush uploads the held slice.
+        if (khf_defer) return khf_frame_ok;
         return khf_frame_ok && kh_upload_obj_cb(ctx, g_res.constant_buffer, cbd);
     };
 
@@ -23931,13 +24089,64 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             ID3D11ShaderResourceView* src_srv = g_res.scene_srv;
             int write_idx = 0;
 
+            // ==== 26087 DEFERRED CHAIN FINALIZATION + POINT-OP FUSION ====
+            // Every chain draw is deferred by one step: a pass builds its
+            // CB slice into the PENDING slot and the NEXT pass's arrival
+            // flushes it onto the ping-pong intermediate - so when the
+            // loop ends, the LAST pass is still pending and flushes
+            // DIRECTLY onto the engine target instead, absorbing the
+            // standalone effect-0 blit (one fullscreen draw + one
+            // intermediate round-trip per frame, every frame; the final
+            // draw's comp is byte-identical to what the blit painted -
+            // minus the retired intermediate quantization). While a
+            // BUILTIN pass is pending, immediately-following point-op
+            // passes append as fused stages instead of flushing it
+            // (ledger at kh_fuse_append; the shader applies them after
+            // the stage-0 composite, exactly where the retired follower
+            // passes used to sample). Timestamp brackets: begin stamps
+            // at defer time, end stamps at the flush draw - stamps stay
+            // strictly alternating because a begin only follows the
+            // previous pending's flush; a fused GROUP is one bracket
+            // carrying the stage-0 effect id (fxTopFxId reports stage 0
+            // at the group's total cost).
+            bool                      khfp_live = false;
+            ConstantData              khfp_cbd;
+            int                       khfp_effect = 0;
+            ID3D11PixelShader*        khfp_ps = nullptr;
+            ID3D11ShaderResourceView* khfp_lut = nullptr;
+
+            auto khfp_flush = [&](bool khfp_final) {
+                if (!khfp_live) return;
+                khfp_live = false;
+                if (!kh_upload_obj_cb(ctx, g_res.constant_buffer, khfp_cbd)) return;
+                if (khfp_lut) ctx->PSSetShaderResources(19, 1, &khfp_lut);
+                ctx->PSSetShader(khfp_ps ? khfp_ps : g_res.ps_effect, nullptr, 0);
+                // Unbind the source slot before binding it as RTV next round
+                ID3D11ShaderResourceView* khfp_null = nullptr;
+                ctx->PSSetShaderResources(0, 1, &khfp_null);
+                if (khfp_final) ctx->OMSetRenderTargets(1, &saved_chain_rtv, saved_chain_dsv);
+                else            ctx->OMSetRenderTargets(1, &g_res.chain_rtv[write_idx], nullptr);
+                ctx->PSSetShaderResources(0, 1, &src_srv);
+                ctx->Draw(3, 0);
+
+                if (khts_arm && khts_pass_n < 16) {
+                    ctx->End(g_res.ts_stamp[khts_slot][3 + khts_pass_n * 2]);
+                    g_res.ts_pass_fx[khts_slot][khts_pass_n] = khfp_effect;
+                    khts_pass_n++;
+                }
+
+                if (!khfp_final) {
+                    src_srv = g_res.chain_srv[write_idx];
+                    write_idx ^= 1;
+                }
+            };
+
             for (const auto& f : fullscreen) {
                 if (f.second.effect <= 0) continue;
                 // 26080 NO-OP SKIP: color.a = 0 is an exact identity
                 // under the chain packing for EVERY blend mode (comp
                 // folds to scene), so a zero-opacity pass costs nothing.
                 if (f.second.color[3] <= 0.001f) continue;
-                if (khts_arm && khts_pass_n < 16) ctx->End(g_res.ts_stamp[khts_slot][2 + khts_pass_n * 2]);
                 // QUARTER-RES PYRAMID: RETIRED TOMBSTONE (26086). The
                 // 26080/26085 family (scene + UI pyramids, bloom/
                 // halation blur, anamorphic streak) accelerated the
@@ -23951,6 +24160,9 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
                 // CUSTOM EFFECT: the pass draws with the user PS; absent
                 // or failed compiles skip the pass (reported once).
+                // (26087: resolution moved ABOVE the bracket begin - CPU
+                // work only, the GPU bracket is unchanged - so a skip
+                // can no longer leave a dangling begin stamp.)
                 ID3D11PixelShader* khc_ufx = nullptr;
 
                 if (f.second.effect == KH_EFFECT_CUSTOM) {
@@ -23958,49 +24170,37 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                     if (!khc_ufx) continue;
                 }
 
-                // LUT pass: bind the cached lattice at t19 (ledger at
-                // the mesh loop's twin); a missing/failed .cube skips.
+                // LUT pass: resolve the cached lattice (bound at t19 by
+                // the pending flush; ledger at the mesh loop's twin); a
+                // missing/failed .cube skips.
+                ID3D11ShaderResourceView* khc_lut = nullptr;
+
                 if (f.second.effect == KH_EFFECT_LUT) {
-                    ID3D11ShaderResourceView* khc_lut = kh_user_lut_srv(dev, f.second.fx_shader);
+                    khc_lut = kh_user_lut_srv(dev, f.second.fx_shader);
                     if (!khc_lut) continue;
-                    ctx->PSSetShaderResources(19, 1, &khc_lut);
                 }
 
-                if (!upload_cb(f.second, true)) continue;
-                ctx->PSSetShader(khc_ufx ? khc_ufx : g_res.ps_effect, nullptr, 0);
+                // 26087 FUSION APPEND: a pending BUILTIN (a user PS does
+                // not run KhFuseTail) absorbs a follower point op as a
+                // fused stage - no flush, no bracket, no draw.
+                if (khfp_live && !khfp_ps && kh_fuse_appendable(f.second) &&
+                    kh_fuse_append(khfp_cbd, f.second)) continue;
 
-                // Unbind the source slot before binding it as RTV next round
-                ID3D11ShaderResourceView* null_srv = nullptr;
-                ctx->PSSetShaderResources(0, 1, &null_srv);
-                ctx->OMSetRenderTargets(1, &g_res.chain_rtv[write_idx], nullptr);
-                ctx->PSSetShaderResources(0, 1, &src_srv);
-                ctx->Draw(3, 0);
-
-                if (khts_arm && khts_pass_n < 16) {
-                    ctx->End(g_res.ts_stamp[khts_slot][3 + khts_pass_n * 2]);
-                    g_res.ts_pass_fx[khts_slot][khts_pass_n] = f.second.effect;
-                    khts_pass_n++;
-                }
-
-                src_srv = g_res.chain_srv[write_idx];
-                write_idx ^= 1;
+                khfp_flush(false);
+                if (khts_arm && khts_pass_n < 16) ctx->End(g_res.ts_stamp[khts_slot][2 + khts_pass_n * 2]);
+                if (!upload_cb(f.second, true, &khfp_cbd)) continue;
+                khfp_effect = f.second.effect;
+                khfp_ps = khc_ufx;
+                khfp_lut = khc_lut;
+                khfp_live = true;
             }
 
-            // Blit the chain result onto the engine target: effect 0 passes
-            // the sampled scene through; chain packing returns it opaquely.
-            if (src_srv != g_res.scene_srv) {
-                RenderObject blit;
-                blit.effect = 0;
-                // The chain loop may have left a custom PS bound.
-                ctx->PSSetShader(g_res.ps_effect, nullptr, 0);
-
-                if (upload_cb(blit, true)) {
-                    ID3D11ShaderResourceView* null_srv = nullptr;
-                    ctx->PSSetShaderResources(0, 1, &null_srv);
-                    ctx->OMSetRenderTargets(1, &saved_chain_rtv, saved_chain_dsv);
-                    ctx->PSSetShaderResources(0, 1, &src_srv);
-                    ctx->Draw(3, 0);
-                }
+            // 26087: the last pass flushes DIRECTLY onto the engine
+            // target (the blit's exact composition, one draw earlier);
+            // with nothing pending - no pass ran - just restore the
+            // target, as the retired blit's else-branch always did.
+            if (khfp_live) {
+                khfp_flush(true);
             } else {
                 ctx->OMSetRenderTargets(1, &saved_chain_rtv, saved_chain_dsv);
             }
@@ -24688,26 +24888,56 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     ID3D11DepthStencilView* khup_bb_dsv = nullptr;   // nullptr by the gate; carried for symmetry
     ctx->OMGetRenderTargets(1, &khup_bb_rtv, &khup_bb_dsv);
 
-    // Chain-result -> backbuffer blit: effect-0 passthrough at w = 1
-    // (the scene chain's own blit doctrine - PSEffect returns the
-    // sampled source opaquely), RGB-only replace so the coverage
-    // channel survives for the engine.
-    auto khup_blit = [&](ID3D11ShaderResourceView* khup_s) {
-        ConstantData khup_cbd = {};
-        khup_cbd.center_size[3] = 1.0f;
-        khup_cbd.fx_meta[2] = static_cast<float>(td.Width);
-        khup_cbd.fx_meta[3] = static_cast<float>(td.Height);
+    // ==== 26087 DEFERRED CHAIN FINALIZATION + POINT-OP FUSION (the
+    // scene chain's twin; full ledger there). Builtin draws are
+    // deferred by one step: the LAST pending builtin flushes DIRECTLY
+    // onto the backbuffer through the RGB-only replace blend - the
+    // retired chain-result blit's exact composition (PSEffect's comp
+    // is what the blit painted; coverage passthrough alpha is masked
+    // off by the blend, so the engine-UI coverage survives untouched,
+    // KhUiMask's contract). The standalone blit is gone: a custom's
+    // chain break flushes the pending builtin final-direct the same
+    // way, and a chain-so-far with NOTHING pending is by construction
+    // the untouched capture - repainting it was an identity the blit
+    // performed and this path simply skips. While a builtin pends,
+    // follower point ops append as fused stages (kh_fuse_append)
+    // instead of flushing - one draw, one bracket, stage-0's id in
+    // fxUiTopFxId.
+    bool                      khuf_live = false;
+    ConstantData              khuf_cbd;
+    int                       khuf_effect = 0;
+    ID3D11ShaderResourceView* khuf_lut = nullptr;
 
-        if (!kh_upload_obj_cb(ctx, g_res.constant_buffer, khup_cbd) ||
-            !kh_upload_frame_cb(ctx, g_res.frame_cb, khup_cbd)) return;
+    auto khuf_flush = [&](bool khuf_final) {
+        if (!khuf_live) return;
+        khuf_live = false;
+        // Unbind the source slot before the destination's RTV turn
+        // (the scene chain's exact hazard pattern).
+        ID3D11ShaderResourceView* khuf_null = nullptr;
+        ctx->PSSetShaderResources(0, 1, &khuf_null);
+        if (khuf_final) ctx->OMSetRenderTargets(1, &khup_bb_rtv, khup_bb_dsv);
+        else            ctx->OMSetRenderTargets(1, &khup_rtvs[khup_src ^ 1], nullptr);
+        ID3D11ShaderResourceView* khuf_srvs[2] = { khup_srvs[khup_src],
+                                                   depth_ok ? g_res.depth_srv : nullptr };
+        ctx->PSSetShaderResources(0, 2, khuf_srvs);
+        if (khuf_lut) ctx->PSSetShaderResources(19, 1, &khuf_lut);
 
-        ID3D11ShaderResourceView* khup_null = nullptr;
-        ctx->PSSetShaderResources(0, 1, &khup_null);
-        ctx->OMSetRenderTargets(1, &khup_bb_rtv, khup_bb_dsv);
+        if (!kh_upload_obj_cb(ctx, g_res.constant_buffer, khuf_cbd) ||
+            !kh_upload_frame_cb(ctx, g_res.frame_cb, khuf_cbd)) return;
+
         ctx->PSSetShader(g_res.ps_effect, nullptr, 0);
-        ctx->PSSetShaderResources(0, 1, &khup_s);
-        ctx->OMSetBlendState(g_res.blend_ui_replace, bf, 0xFFFFFFFF);
+        ctx->OMSetBlendState(khuf_final ? g_res.blend_ui_replace : nullptr,
+                             bf, 0xFFFFFFFF);
         ctx->Draw(3, 0);
+        if (!khuf_final) khup_src ^= 1;
+
+        if (khut_arm && khut_pass_n < 8) {
+            ctx->End(g_res.ts_ui_stamp[khut_slot][3 + khut_pass_n * 2]);
+            g_res.ts_ui_pass_fx[khut_slot][khut_pass_n] = khuf_effect;
+            khut_pass_n++;
+        }
+
+        g_ui_only_draws++;   // all write-window pass draws (26061)
     };
 
     // 26069 COVERAGE DEBUG VIEW (setRenderDebug 27): replace the write
@@ -24841,10 +25071,13 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         // black-preserving (lifted blacks are the whole point of many
         // grades), so it takes the MASKED builtin lane below - w = 2,
         // in-shader coverage lerp - never spill.
+        // (26087: resolved here, BOUND at the pending flush - a later
+        // pass in the deferral window must not steal t19 first.)
+        ID3D11ShaderResourceView* khu_lut = nullptr;
+
         if (o.effect == KH_EFFECT_LUT) {
-            ID3D11ShaderResourceView* khu_lut = kh_user_lut_srv(dev, o.fx_shader);
+            khu_lut = kh_user_lut_srv(dev, o.fx_shader);
             if (!khu_lut) continue;
-            ctx->PSSetShaderResources(19, 1, &khu_lut);
         }
 
         const bool wants_depth = o.localized || o.banded ||
@@ -24874,18 +25107,35 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             o.effect == static_cast<int>(EffectId::Anamorphic) ||
             (o.effect == KH_EFFECT_CUSTOM && o.ui_spill);
 
+        // 26087 FUSION APPEND: a pending builtin absorbs a follower
+        // point op as a fused stage - no flush, no bracket, no draw
+        // (draw-count semantics: g_ui_only_draws and the pass brackets
+        // count DRAWS now; a fused group is one of each). UI pendings
+        // are never custom, so no khfp_ps-style gate is needed here.
+        if (!khu_ufx && khuf_live && kh_fuse_appendable(o) &&
+            kh_fuse_append(khuf_cbd, o)) continue;
+
+        // 26087: flush the pending builtin FIRST - a custom's arrival
+        // lands it final-direct (the retired break-blit, one draw
+        // earlier); a builtin's arrival lands it on the ping-pong.
+        // Then the bracket begins: end stamps are issued inside the
+        // flush, so begin/end stay strictly alternating.
+        if (khu_ufx) { khuf_flush(true); khup_chain = false; }
+        else          khuf_flush(false);
+
         // 26084 pass bracket: the stamp precedes the pass's own capture
         // work, so the first builtin carries the chain's single capture
-        // and customs carry their legacy captures - causal attribution.
+        // and customs carry their legacy captures - causal attribution
+        // (26087: a deferred builtin's bracket closes at its flush
+        // draw; nothing else stamps in between).
         if (khut_arm && khut_pass_n < 8) ctx->End(g_res.ts_ui_stamp[khut_slot][2 + khut_pass_n * 2]);
 
         // 26084 SOURCE / TARGET ROUTING (ledger at the chain header
         // above): builtins ride the ping-pong; customs break the chain
         // and take the legacy per-pass path against the live target.
-        ID3D11ShaderResourceView* khup_pass_src = nullptr;
-
+        // 26087: builtin source/target binds moved INTO the pending
+        // flush - only the chain-open capture happens at defer time.
         if (khu_ufx) {
-            if (khup_chain) { khup_blit(khup_srvs[khup_src]); khup_chain = false; }
             // Legacy capture, byte-for-byte: verbatim copy for masked,
             // coverage-premultiplied draw for spill.
             const std::string khu_cap_err = khu_spill
@@ -24893,32 +25143,22 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                 : ensure_backbuffer_capture(dev, ctx, bb, td);
             if (!khu_cap_err.empty()) { g_stats.effect_setup_fails++; break; }
             ctx->OMSetRenderTargets(1, &khup_bb_rtv, khup_bb_dsv);   // the live target
-            khup_pass_src = g_res.bb_srv;
-        } else {
-            if (!khup_chain) {
-                // THE single capture: the post-repair backbuffer
-                // (rgb + sane coverage in alpha), into bb_tex = chain 0.
-                std::string khup_cap = ensure_backbuffer_capture(dev, ctx, bb, td);
-                if (khup_cap.empty()) khup_cap = ensure_ui_chain(dev, td);
-                if (!khup_cap.empty()) { g_stats.effect_setup_fails++; break; }
-                khup_srvs[0] = g_res.bb_srv;
-                khup_rtvs[0] = g_res.bb_rtv;
-                khup_srvs[1] = g_res.ui_chain_srv;
-                khup_rtvs[1] = g_res.ui_chain_rtv;
-                khup_src = 0;
-                khup_chain = true;
-            }
-
-            // Unbind the source slot before the destination's RTV turn
-            // (the scene chain's exact hazard pattern).
-            ID3D11ShaderResourceView* khup_null = nullptr;
-            ctx->PSSetShaderResources(0, 1, &khup_null);
-            ctx->OMSetRenderTargets(1, &khup_rtvs[khup_src ^ 1], nullptr);
-            khup_pass_src = khup_srvs[khup_src];
+            ID3D11ShaderResourceView* srvs[2] = { g_res.bb_srv, depth_ok ? g_res.depth_srv : nullptr };
+            ctx->PSSetShaderResources(0, 2, srvs);
+        } else if (!khup_chain) {
+            // THE single capture: the post-repair backbuffer
+            // (rgb + sane coverage in alpha), into bb_tex = chain 0.
+            std::string khup_cap = ensure_backbuffer_capture(dev, ctx, bb, td);
+            if (khup_cap.empty()) khup_cap = ensure_ui_chain(dev, td);
+            if (!khup_cap.empty()) { g_stats.effect_setup_fails++; break; }
+            khup_srvs[0] = g_res.bb_srv;
+            khup_rtvs[0] = g_res.bb_rtv;
+            khup_srvs[1] = g_res.ui_chain_srv;
+            khup_rtvs[1] = g_res.ui_chain_rtv;
+            khup_src = 0;
+            khup_chain = true;
         }
 
-        ID3D11ShaderResourceView* srvs[2] = { khup_pass_src, depth_ok ? g_res.depth_srv : nullptr };
-        ctx->PSSetShaderResources(0, 2, srvs);
         ConstantData cbd = {};
         memcpy(cbd.view_proj, view_proj, sizeof(view_proj));
         memcpy(cbd.inv_view_proj, inv_view_proj, sizeof(inv_view_proj));
@@ -24995,39 +25235,46 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         cbd.band0[1] = o.band_max;
         cbd.band0[2] = o.band_falloff;
         cbd.band0[3] = o.banded ? 1.0f : 0.0f;
-        // CB SPLIT: both slices per UI pass
-        if (!kh_upload_obj_cb(ctx, g_res.constant_buffer, cbd) ||
-            !kh_upload_frame_cb(ctx, g_res.frame_cb, cbd)) continue;
-        ctx->PSSetShader(khu_ufx ? khu_ufx : g_res.ps_effect, nullptr, 0);
         // 26084 composite: BUILTINS write OPAQUELY onto the ping-pong
         // intermediate (the spill algebra, the masked coverage lerp,
         // and the coverage passthrough are all completed in PSEffect -
         // ledger at the 26084 shader blocks). CUSTOMS keep their 26062
         // hardware lanes against the live backbuffer, whose ALPHA is
         // the engine-UI coverage mask and must survive (KhUiMask).
+        // 26087: customs draw NOW (their captures and hardware blends
+        // are position-dependent); builtins PEND - the built slice,
+        // stage-0 id, and any LUT ride to the next flush, whose target
+        // (intermediate or backbuffer-direct) is decided there.
         if (khu_ufx) {
+            // CB SPLIT: both slices per UI pass
+            if (!kh_upload_obj_cb(ctx, g_res.constant_buffer, cbd) ||
+                !kh_upload_frame_cb(ctx, g_res.frame_cb, cbd)) continue;
+            ctx->PSSetShader(khu_ufx, nullptr, 0);
             ctx->OMSetBlendState(khu_spill ? g_res.blend_ui_spill
                                            : g_res.blend_ui_masked,
                                  bf, 0xFFFFFFFF);
+            ctx->Draw(3, 0);
+
+            if (khut_arm && khut_pass_n < 8) {
+                ctx->End(g_res.ts_ui_stamp[khut_slot][3 + khut_pass_n * 2]);
+                g_res.ts_ui_pass_fx[khut_slot][khut_pass_n] = o.effect;
+                khut_pass_n++;
+            }
+
+            g_ui_only_draws++;   // all write-window pass draws (26061)
         } else {
-            ctx->OMSetBlendState(nullptr, bf, 0xFFFFFFFF);
+            khuf_cbd = cbd;
+            khuf_effect = o.effect;
+            khuf_lut = khu_lut;
+            khuf_live = true;
         }
-
-        ctx->Draw(3, 0);
-        if (!khu_ufx) khup_src ^= 1;
-
-        if (khut_arm && khut_pass_n < 8) {
-            ctx->End(g_res.ts_ui_stamp[khut_slot][3 + khut_pass_n * 2]);
-            g_res.ts_ui_pass_fx[khut_slot][khut_pass_n] = o.effect;
-            khut_pass_n++;
-        }
-
-        g_ui_only_draws++;   // all write-window pass draws (26061)
     }
 
-    // 26084: paint the chained result home (RGB-only replace; a break
-    // mid-loop still lands the passes that completed).
-    if (khup_chain) khup_blit(khup_srvs[khup_src]);
+    // 26087: the last pending builtin paints the chained result home
+    // DIRECTLY (RGB-only replace - the retired blit's composition, one
+    // draw and one intermediate round-trip earlier; a break mid-loop
+    // still lands the passes that completed, the pending one included).
+    khuf_flush(true);
 
     if (khut_arm) {
         ctx->End(g_res.ts_ui_stamp[khut_slot][1]);

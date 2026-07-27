@@ -6220,10 +6220,6 @@ static game_value gpu_visibility_sqf(game_value_parameter args) {
 //              "blur" 7, "bloom" 8, "distortion" 9, "outline" 10,
 //              "pulse" 11, "halation" 12, "fog" 13, "lensflare" 14,
 //              "anamorphic" 15, "sunflare" 16, "glitch" 17
-//              (26080: bloom/halation/anamorphic auto-accelerate on the
-//              scene chain via a quarter-res pyramid - identical params,
-//              same look, ~10x cheaper; effect meshes and UI passes keep
-//              the original path),
 //              "clarity" 18 [strength, radiusPx]
 //              (luma-only local contrast; chroma-preserving),
 //              "deband" 19 [threshold 1/255, rangePx, grain 1/255]
@@ -7093,6 +7089,12 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("fxChainGpuUs", RenderIntegration::g_stats.fx_chain_gpu_us));
         out.push_back(kv("fxTopFxId", RenderIntegration::g_stats.fx_top_fx_id));
         out.push_back(kv("fxTopFxUs", RenderIntegration::g_stats.fx_top_fx_us));
+        // 26084 write-window GPU timing (the UI ring; last completed frame):
+        out.push_back(kv("fxUiGpuUs", RenderIntegration::g_stats.fx_ui_gpu_us));
+        out.push_back(kv("fxUiTopFxId", RenderIntegration::g_stats.fx_ui_top_fx_id));
+        out.push_back(kv("fxUiTopFxUs", RenderIntegration::g_stats.fx_ui_top_fx_us));
+        // 26085 scene-capture GPU cost (per-flush aggregate):
+        out.push_back(kv("fxSceneCapUs", RenderIntegration::g_stats.fx_scene_cap_us));
         out.push_back(kv("uiOnlyDraws", RenderIntegration::g_ui_only_draws));
         // 26059: arming-path census - arms = UI-phase-thread compose
         // detections (~1/frame while a UI-mode pass is visible); aborts

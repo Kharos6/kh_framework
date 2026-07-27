@@ -7039,12 +7039,12 @@ static game_value set_render_debug_sqf(game_value_parameter arg) {
                             khd_m == 25 ||                    // cast viewport A/B: live grid (pristine) instead of frozen
                             khd_m == 26 ||                    // lock-settle cast hold off (diagnostic)
                             khd_m == 27 ||                    // 26069: UI coverage debug view (write window)
-                            khd_m == 28 ||                    // 26092-26093 adaptive-floor opt-in - RETIRED
+                            khd_m == 28;                      // 26092-26093 adaptive-floor opt-in - RETIRED
                                                               // to an accepted no-op at 26094 (adaptive is
-                                                              // the default now; kept for script compat)
-                            khd_m == 29;                      // 26094: LEGACY ARM FLOOR escape hatch (forces
-                                                              // the 26066 5 ms constant; one-build retention
-                                                              // per §6 - ledger at the T-machine's floor)
+                                                              // the default now; kept for script compat).
+                                                              // 26095: mode 29 (the legacy arm-floor escape
+                                                              // hatch) is REMOVED with its floor branch per
+                                                              // §9 - 29 now rejects; ledger at the T-machine
         if (!khd_ok) return game_value(false);
         RenderIntegration::g_dbg_mode.store(khd_m, std::memory_order_relaxed);
         return game_value(true);
@@ -7131,8 +7131,9 @@ static game_value get_render_stats_sqf() {
         // 26094 arm-floor keys (ledger at the T-machine's adaptive
         // floor, the DEFAULT since 26094): floorHolds = genuine
         // boundaries the ACTIVE floor suppressed - expect ~0 in play;
-        // sustained ticking means set 29 (the legacy escape hatch)
-        // and report. bndEmaMs = live boundary cadence in ms (~the
+        // sustained ticking means dump and report (mode 29 is
+        // RETIRED at 26095; rollback is a build revert). bndEmaMs =
+        // live boundary cadence in ms (~the
         // frame period; the adaptive floor's basis).
         out.push_back(kv("uiMaskFloorHolds", RenderIntegration::g_ui_mask_floor_holds));
         out.push_back(kvf("uiMaskBndEmaMs",
@@ -9958,7 +9959,7 @@ static void initialize_sqf_integration() {
 
     _sqf_set_render_debug = intercept::client::host::register_sqf_command(
         "setRenderDebug",
-        "Debug switches: 0 off, 1-17 shader visuals, 20 cast kill switch, 21 readiness latch + slab retirement off, 24 terrain snap off, 25 cast live-grid viewport A/B, 26 lock-settle hold off",
+        "Debug switches: 0 off, 1-17 shader visuals, 20 cast kill switch, 21 readiness latch + slab retirement off, 24 terrain snap off, 25 cast live-grid viewport A/B, 26 lock-settle hold off, 27 UI coverage debug view, 28 accepted no-op (retired adaptive-floor opt-in)",
         userFunctionWrapper<set_render_debug_sqf>,
         game_data_type::BOOL,
         game_data_type::SCALAR

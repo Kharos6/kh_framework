@@ -9727,7 +9727,7 @@ static uint32_t g_fk_veto_cand_n = 0;       // candidates staged at the last pas
                                             // is live in this scene)
 // BUILD TAG (doctrine: bump on EVERY delivered build; stats-visible so a
 // field log names the binary it came from).
-static constexpr int KH_BUILD_TAG = 26094;
+static constexpr int KH_BUILD_TAG = 26095;
 // NEAR-GAP RAMP (build 26001; the RenderDoc conviction). ROOT, proven by
 // pixel history + depth-window plateaus: the world partition's viewport
 // floor (0.011 in the convicting capture) collapses EVERY fragment nearer
@@ -21246,21 +21246,29 @@ inline void kh_ui_mask_thread_draw(ID3D11DeviceContext* ctx) {
     // exactly clean - 1,550 frames at 1080p under mode 28: floorHolds
     // 0, staleSkips 0, vetoes 12 (spawn-attributable), alphaMin 6,
     // bndEma 5.28 ms, and 1,550 x 4 - 4 = 6,196 uiOnlyDraws EXACT -
-    // so the ADAPTIVE floor is now the DEFAULT. setRenderDebug 29 is
-    // the escape hatch (forces the legacy 5 ms constant; retained one
-    // build per §6, then retire). Mode 28 is retired to an accepted
-    // no-op (script compat; it now matches the default). CARRIED
-    // CAVEAT (operator-adopted; ledgered in the handoff): the clean
-    // pass was short and menu-free - if a menu/map/inventory soak
-    // ever shows an arms explosion or scene-wide flashes, set 29 and
-    // report. EMA-cold spawn frames fall back to the legacy constant
-    // below until two boundaries seed the basis.
+    // so the ADAPTIVE floor is now the DEFAULT. setRenderDebug 29 was
+    // the escape hatch (forced the legacy 5 ms constant; retained one
+    // build per §6). Mode 28 is retired to an accepted no-op
+    // (script compat; it now matches the default).
+    // 26095 ESCAPE-HATCH RETIREMENT (§9 closure; one build past
+    // adoption per §6): the 26094 default field-ran with no flicker
+    // (operator verdict), so mode 29 and its legacy branch are
+    // REMOVED - the SQF whitelist line with them (29 now rejects);
+    // rollback is a build revert. CARRIED CAVEAT (operator-adopted;
+    // ledgered in the handoff, still open): the formal menu/map/
+    // inventory/loading soak and a v2-specific 4K pass remain
+    // unrun - if one ever shows an arms explosion, scene-wide
+    // flashes, or sustained uiMaskFloorHolds, dump and report (the
+    // census still watches the ACTIVE floor). EMA-cold spawn
+    // frames fall back to the legacy constant below until two
+    // boundaries seed the basis.
     long long khaf_floor = (kht_qpf * 5) / 1000;   // legacy 26066 constant:
-                                                   // the mode-29 escape hatch
-                                                   // and the EMA-cold fallback
+                                                   // the EMA-cold spawn
+                                                   // fallback (mode-29
+                                                   // escape hatch RETIRED
+                                                   // at 26095)
 
-    if (g_dbg_mode.load(std::memory_order_relaxed) != 29 &&
-        g_ui_mask.bnd_ema_ticks > 0) {
+    if (g_ui_mask.bnd_ema_ticks > 0) {
         long long khaf_ad = (g_ui_mask.bnd_ema_ticks * 3) / 5;
         const long long khaf_min = (kht_qpf * 6) / 5000;   // 1.2 ms
         if (khaf_ad < khaf_min) khaf_ad = khaf_min;

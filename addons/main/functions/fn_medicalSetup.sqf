@@ -848,8 +848,8 @@ if KH_var_medical then {
 
                                     if KH_var_incapacitationDamageSpillover then {
                                         (
-                                            KH_var_incapacitationThreshold + 
-                                            (((_currentDamage + (_processedDamage * KH_var_absoluteTotalDamageMultiplier * KH_var_absoluteIncapacitatedDamageMultiplier)) - KH_var_incapacitationThreshold) max KH_var_incapacitationThreshold)
+                                            (_currentDamage + (_processedDamage * KH_var_absoluteTotalDamageMultiplier * KH_var_absoluteIncapacitatedDamageMultiplier)) max 
+                                            KH_var_incapacitationThreshold
                                         ) min ([1, 0.99] select (_unit getVariable ["KH_var_plotArmor", false]));
                                     }
                                     else {

@@ -1270,7 +1270,10 @@ static void __stdcall on_engine_reset() {
 
 struct RenderObject {
     int   effect = 0;           // 0 = solid color; >0 = screen-space effect (see EffectId)
-    float fx[8] = {};           // effect parameters (effect-specific, see set_effect_params)
+    float fx[12] = {};          // effect parameters (effect-specific, see
+                                // set_effect_params). 26089: widened 8 -> 12
+                                // (fxParams2); wire-compatible - shorter
+                                // script arrays keep zero/default tails.
     std::string fx_shader;      // custom effect: RESOLVED user .hlsl path
                                 // ("" = builtin; consumed only when
                                 // effect == KH_EFFECT_CUSTOM) - or the
@@ -1867,6 +1870,9 @@ cbuffer CBObj : register(b0)
     // KhFuseTail in the effect unit; zeroed (cold) everywhere else.
     float4 fuseMeta;
     float4 fuseStage[12];
+    float4 fxParams2;     // 26089: effect parameters [8..11] (C++ twin
+                          // fx2 - the mirror contract; declared here in
+                          // the append region, not beside fxParams0/1).
     // Dynamic lights mirror: engine cb10/cb11 packing VERBATIM (night-
     // capture disassembly; see the DYNLIGHTS ledger in the C++ section).
     // PER OBJECT: mode 3 culls the pool to this mesh's nearest set.
@@ -4706,7 +4712,7 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         col = lerp(col, scene * 0.985f, saturate(trail * (1.0f - drop) * 0.55f) * fogAmt);
         outc = col;
     }
-    else if (effect == 21)   // crt: [curvature, scanlines, lineCount, maskStrength] + [aberrationPx, flicker, rollingBand, cornerRadius]; color = phosphor tint
+    else if (effect == 21)   // crt: [curvature, scanlines, lineCount, maskStrength] + [aberrationPx, flicker, rollingBand, cornerRadius] + [scanSpeed lines/s signed, scanWobblePx] (fxParams2); color = phosphor tint
     {
         // 26088 CRT GLASS. Composition order mirrors a real tube's
         // light path: the frame is refracted through curved glass
@@ -4727,10 +4733,28 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         float khc_r2 = dot(khc_cc, khc_cc);
         float2 khc_duv = 0.5f + khc_cc * (1.0f + khc_curv * khc_r2 * (1.0f + 0.8f * khc_r2));
 
+        // 26089 RASTER PHASE: one shared phase drives the beam AND the
+        // per-line wobble, so lines CARRY their jitter as they scroll
+        // (scanSpeed, fxParams2.x, in lines per second - signed, so a
+        // negative value scrolls the other way; 0 = the classic static
+        // raster, byte-identical to the 26088 look with wobble 0 too).
+        float khc_lines = max(fxParams0.z, 16.0f);
+        float khc_phase = khc_duv.y * khc_lines + t * fxParams2.x;
+        float khc_line = floor(khc_phase);
+
+        // 26089 TRACKING WOBBLE (fxParams2.y, px): each scanline row
+        // shifts horizontally by a per-line random jitter requantized
+        // at 24 Hz (the loose-sync read) plus a slow per-line sway.
+        // ONLY the picture wobbles: the tube mask and the grille live
+        // on the glass and stay put by construction.
+        float khc_wob = ((Hash(float2(khc_line * 0.173f, floor(t * 24.0f) * 0.71f)) - 0.5f)
+                       + 0.35f * sin(t * 2.3f + khc_line * 0.61f)) * fxParams2.y;
+
         // Curved-glass refraction with off-axis prism split: the
         // fringe grows with the square of the field angle, along the
         // radial direction - zero on-axis, ~aberrationPx at the edge.
         float2 khc_dpx = khc_duv * float2(fxMeta.z, fxMeta.w);
+        khc_dpx.x += khc_wob;
         float2 khc_fpx = khc_cc * khc_r2 * 4.0f * fxParams1.x;
         float3 khc_col;
         khc_col.r = SampleScene(int2(khc_dpx + khc_fpx)).r;
@@ -4741,9 +4765,9 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         // is a shaped sine whose exponent NARROWS in the shadows and
         // WIDENS toward the highlights (phosphor blooming), and the
         // 1.32 gain recovers the average level the dark gaps remove.
-        float khc_lines = max(fxParams0.z, 16.0f);
+        // 26089: the profile rides the shared raster phase.
         float khc_lum = saturate(Luma(khc_col));
-        float khc_beam = pow(abs(sin(khc_duv.y * khc_lines * 3.14159265f)),
+        float khc_beam = pow(abs(sin(khc_phase * 3.14159265f)),
                              lerp(2.2f, 0.65f, khc_lum));
         khc_col *= lerp(1.0f, khc_beam * 1.32f, saturate(fxParams0.y));
 
@@ -5110,6 +5134,11 @@ struct alignas(16) ConstantData {
     // else, meshes included.
     float fuse_meta[4];
     float fuse_stage[12][4];
+    // 26089: the effect-parameter interface widened 8 -> 12. fx2 sits
+    // HERE (the append region) rather than beside fx0/fx1 to honor the
+    // append-only block discipline; HLSL twin fxParams2, same relative
+    // slot. Zeroed on every fill site except the two chain-pass fills.
+    float fx2[4];
     float dl_ctl[4];           // x = mode (0 off / 1 camera-relative world /
                                // 2 view space / 3 absolute pool), y = point
                                // count, z = spot count, w = distance scale
@@ -5250,6 +5279,9 @@ inline bool kh_fuse_append(ConstantData& cbd, const RenderObject& o) {
     khfu_st[2] = 0.0f;
     khfu_st[3] = 0.0f;
     memcpy(cbd.fuse_stage[khfu_n * 4 + 1], o.fx,     4 * sizeof(float));
+    // (26089: fuse stages carry fx0/fx1 ONLY - the fusible set
+    // {1, 2, 3, 5} reads no fxParams2; a future point op that does must
+    // not join the set without widening the stage record.)
     memcpy(cbd.fuse_stage[khfu_n * 4 + 2], o.fx + 4, 4 * sizeof(float));
     memcpy(cbd.fuse_stage[khfu_n * 4 + 3], o.color,  4 * sizeof(float));
     cbd.fuse_meta[0] = static_cast<float>(khfu_n + 1);
@@ -8811,7 +8843,7 @@ inline int kh_effect_from_gv(const game_value& gv, std::string& out_hlsl, std::s
 // engine space here. Returns false if a provided entry is a non-number
 // (nil entries keep the default, the params-convention skip).
 inline bool set_effect_params(RenderObject& obj, const auto_array<game_value>* params) {
-    static const float defaults[KH_MAX_EFFECT + 1][8] = {
+    static const float defaults[KH_MAX_EFFECT + 1][12] = {   // 26089: [8] -> [12] (fxParams2); short rows zero-fill
         {},                                          // 0 solid
         {},                                          // 1 invert
         { 1.0f, 1.0f, 1.0f, 1.0f },                  // 2 colorgrade: sat, contrast, brightness, gamma
@@ -8833,7 +8865,7 @@ inline bool set_effect_params(RenderObject& obj, const auto_array<game_value>* p
         { 0.35f, 22.0f },                            // 18 clarity: strength, radiusPx
         { 1.6f, 16.0f, 0.6f },                       // 19 deband: threshold(1/255), rangePx, grain(1/255)
         { 0.6f, 1.0f, 0.35f, 1.0f },                 // 20 rainlens: intensity, speed, condensation, refract (fx[4..7] SYSTEM: camera velocity)
-        { 0.12f, 0.45f, 540.0f, 0.35f, 1.5f, 0.25f, 0.3f, 0.06f },   // 21 crt: curvature, scanlines, lineCount, maskStrength + aberrationPx, flicker, rollingBand, cornerRadius
+        { 0.12f, 0.45f, 540.0f, 0.35f, 1.5f, 0.25f, 0.3f, 0.06f, 4.0f, 1.5f },   // 21 crt: curvature, scanlines, lineCount, maskStrength + aberrationPx, flicker, rollingBand, cornerRadius + scanSpeed (lines/s, signed), scanWobblePx
     };
 
     // LUT default row (the sentinel sits outside the table): strength =
@@ -8842,12 +8874,12 @@ inline bool set_effect_params(RenderObject& obj, const auto_array<game_value>* p
     // default 0 = auto (scene lanes sandwich through display space,
     // the write window looks up raw; 1 = raw everywhere, 2 = sandwich
     // everywhere - ledger at the effect-101 branch).
-    static const float khlut_defaults[8] = { 1.0f };
+    static const float khlut_defaults[12] = { 1.0f };   // 26089: width tracks obj.fx
     const int e = (obj.effect >= 0 && obj.effect <= KH_MAX_EFFECT) ? obj.effect : 0;
     memcpy(obj.fx, obj.effect == KH_EFFECT_LUT ? khlut_defaults : defaults[e], sizeof(obj.fx));
 
     if (params) {
-        for (size_t i = 0; i < 8 && i < params->size(); ++i) {
+        for (size_t i = 0; i < 12 && i < params->size(); ++i) {
             if ((*params)[i].is_nil()) continue;         // nil keeps the default
             if ((*params)[i].type_enum() != game_data_type::SCALAR) return false;   // wrong type: hard error
             obj.fx[i] = static_cast<float>((*params)[i]);
@@ -9603,7 +9635,7 @@ static uint32_t g_fk_veto_cand_n = 0;       // candidates staged at the last pas
                                             // is live in this scene)
 // BUILD TAG (doctrine: bump on EVERY delivered build; stats-visible so a
 // field log names the binary it came from).
-static constexpr int KH_BUILD_TAG = 26088;
+static constexpr int KH_BUILD_TAG = 26089;
 // NEAR-GAP RAMP (build 26001; the RenderDoc conviction). ROOT, proven by
 // pixel history + depth-window plateaus: the world partition's viewport
 // floor (0.011 in the convicting capture) collapses EVERY fragment nearer
@@ -23505,6 +23537,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         memcpy(cbd.color, o.color, sizeof(cbd.color));
         memcpy(cbd.fx0, o.fx, sizeof(cbd.fx0));
         memcpy(cbd.fx1, o.fx + 4, sizeof(cbd.fx1));
+        memcpy(cbd.fx2, o.fx + 8, sizeof(cbd.fx2));   // 26089
 
         // RAIN: fxParams1 is SYSTEM-OWNED (smoothed view-space camera
         // velocity; ledger at the rain motion tracker).
@@ -25281,6 +25314,7 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         memcpy(cbd.color, o.color, sizeof(cbd.color));
         memcpy(cbd.fx0, o.fx, sizeof(cbd.fx0));
         memcpy(cbd.fx1, o.fx + 4, sizeof(cbd.fx1));
+        memcpy(cbd.fx2, o.fx + 8, sizeof(cbd.fx2));   // 26089
 
         // RAIN: fxParams1 is SYSTEM-OWNED (the scene flush's smoothed
         // view-space camera velocity; ledger at the rain motion tracker).

@@ -6231,7 +6231,11 @@ static game_value gpu_visibility_sqf(game_value_parameter args) {
 //              old NUMERIC 19/20/21 must move to 18/19/20 or, better,
 //              the stable string names),
 //              "crt" 21 [curvature, scanlines, lineCount, maskStrength,
-//              aberrationPx, flicker, rollingBand, cornerRadius]
+//              aberrationPx, flicker, rollingBand, cornerRadius,
+//              scanSpeed, scanWobblePx] (26089: params [8..9] - raster
+//              scroll in lines/s, signed for direction, and per-line
+//              horizontal tracking wobble in px; 0/0 = static raster;
+//              effect params widened to 12 slots pipeline-wide)
 //              (26088: curved-glass CRT tube - barrel distortion with
 //              rounded black bezel, off-axis chromatic fringing,
 //              luma-widened beam scanlines, RGB aperture grille,

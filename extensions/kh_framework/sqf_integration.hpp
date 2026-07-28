@@ -159,6 +159,7 @@ static registered_sqf_function _sqf_add_postfx_array;
 static registered_sqf_function _sqf_add_local_postfx_array;
 static registered_sqf_function _sqf_get_render_stats;
 static registered_sqf_function _sqf_set_render_debug;
+static registered_sqf_function _sqf_set_ssgi_scale;   // 26115
 static registered_sqf_function _sqf_flush_ui_render;
 static registered_sqf_function _sqf_dump_render_trace;
 static registered_sqf_function _sqf_dump_dynamic_lights;
@@ -6240,7 +6241,89 @@ static game_value gpu_visibility_sqf(game_value_parameter args) {
 //              rounded black bezel, off-axis chromatic fringing,
 //              luma-widened beam scanlines, RGB aperture grille,
 //              rolling sync band, mains flicker; color.rgb = phosphor
-//              tint, color.a = opacity) - or a PATH
+//              tint, color.a = opacity),
+//              "ssgi" 22 [intensity, radiusM, samples, normalBias,
+//              falloffPow, saturation, maxDistM, lumClamp, albedoMod,
+//              giOnly, planeBias] (26096: single-bounce screen-space global
+//              illumination - gathers nearby scene radiance through
+//              depth-reconstructed positions and normals; radius in
+//              METERS, samples 4..32 is the quality knob (cost is
+//              linear in it), normalBias raises the cosine-lobe floor
+//              against acne/leaks, maxDistM fades GI out by camera
+//              distance (26098: default 300 m - reconstruction
+//              precision degrades toward the standard-z far; 0 = no
+//              fade), lumClamp caps HDR fireflies,
+//              albedoMod 0..1 tints the bounce by the receiving
+//              surface, giOnly 1 renders the bounce term alone for
+//              tuning, planeBias scales the depth-proportional
+//              tangent-plane admission floor that excludes depth-
+//              quantization self-lighting (26097; 0 = auto, raise if
+//              shimmer, lower if near-field bounce looks starved);
+//              color.rgb = bounce tint, color.a = opacity;
+//              scene-phase effect - needs live depth, stands down
+//              for the frame without it; 26099: halo suppression via
+//              a depth-gap sample-facing term is built in; 26101: the
+//              pass now draws as a GATHER + depth-aware RESOLVE pair -
+//              the bounce is bilaterally smoothed before compositing
+//              (fx2.w = resolve spread px, 0 = auto 3.0, clamp 1..8) -
+//              and is scene-phase only, rejected in the write window;
+//              26102: the gather runs HALF-RES on an fp16 side buffer
+//              (banding-free) and the resolve upsamples it depth-
+//              guided at full res; 26111: a half-res a-trous
+//              pre-smooth between gather and resolve widens the
+//              noise support (sparse small emitters smooth out), the
+//              composite is output-dithered against 8-bit banding,
+//              and every tap is segment-occlusion tested against the
+//              depth buffer - blockers attenuate bounce smoothly;
+//              26112: radiance taps sample a scene MIP chain and the
+//              projected-radius cap rose 384 -> 2048 px (the close-
+//              range/zoom bounce-contraction fix), the dither is
+//              TPDF, and the a-trous runs two iterations; 26115:
+//              the emitter-cosine slack scales with sample depth
+//              (distant-bounce regression fix), taps carry +-1
+//              source-LSB TPDF (intense-source banding), and
+//              setSsgiScale <0.25..2> picks the gather resolution
+//              globally - 0.5 default; 26116: taps read a dedicated
+//              fp16 radiance pyramid, retiring the intense-source
+//              banding/grain the 8-bit mips re-quantized in; 26117:
+//              emitter cosines use TRUE reconstructed sample normals
+//              (view-independent - closes the oblique-view leak of a
+//              proud screen onto its adjacent wall), proxy fallback
+//              at silhouettes; 26119: per-stratum radius jitter
+//              retires the concentric estimator rings around compact
+//              hot emitters, and the AUTO resolve spread scales with
+//              the gather grid so coarse setSsgiScale values smooth
+//              proportionally; 26120: tap mip footprints floor at
+//              the stratum gap (contiguous radial coverage - the
+//              residual expectation rings), the mip rebase honors
+//              setSsgiScale, and the a-trous runs a third iteration;
+//              26121: pyramid taps sample a quincunx TENT over the
+//              box mips; 26122: the pyramid LEVELS build manually
+//              with a wide-tent decimation kernel (GenerateMips'
+//              box aliased at every level - the ring family and the
+//              camera-motion/rotation phasing were its aliasing
+//              sliding across the screen-fixed decimation grid). KNOWN SCREEN-SPACE LIMIT: a blocker
+//              at the SAME view depth as the emitter (a hood or
+//              cowl over a screen) cannot be seen by the segment
+//              occlusion test - penetration reads zero inside the
+//              margin - so some spill past same-depth covers
+//              remains; the lit inner face of such a cover is a
+//              genuine emitter besides. Localized masks or per-pass
+//              intensity/maxDist are the practical dampers),
+//              "fogscatter" 23 [intensity, maxRadiusPx (0 = auto:
+//              screenHeight / 90), samples (4..24)] (26104: fog light
+//              scattering - everything seen through fog blurs, body
+//              and silhouette alike, in proportion to the fog along
+//              the sight line. The GAME's fog (mission fogParams
+//              through the located engine terms) and this framework's
+//              own "fog" passes BOTH feed the density - they stack as
+//              independent media. params [4..11] are SYSTEM lanes:
+//              the flush packs the two strongest active GLOBAL "fog"
+//              passes there; localized/banded "fog" passes keep their
+//              look but shed no scatter. Scene-phase only (write-
+//              window rejected). Create it AFTER the "fog" passes it
+//              should scatter, so it blurs the fogged image; color.a
+//              = opacity) - or a PATH
 //              ENDING ".hlsl" (case-insensitive suffix, the mesh slot's
 //              ".fbx" rule; same Documents-then-mods "rendering"
 //              resolution) - or a PATH ENDING ".cube" (same resolution):
@@ -6257,7 +6340,7 @@ static game_value gpu_visibility_sqf(game_value_parameter args) {
 //              argument and "params" update property - no new command
 //              arguments. A failed compile is reported once and the
 //              effect simply does not draw
-//   params:    ARRAY of up to 8 numbers, effect-specific (see set_effect_params
+//   params:    ARRAY of up to 12 numbers (26089 widening), effect-specific (see set_effect_params
 //              for meanings and defaults; omitted entries take defaults)
 //   band:      [minDist, maxDist, falloff?] - additionally confines the mesh's
 //              effect to a camera-distance band (maxDist <= 0 = unbounded)
@@ -6919,7 +7002,7 @@ static game_value get_visibility_results_sqf() {
 // grade through display space so display-referred .cube looks land as
 // authored)], color.rgb = post-grade tint, color.a = pass opacity.
 // Notes: runs pre-tonemap, so the engine's eye adaptation applies on top.
-// Outline and Pulse sample the engine depth buffer per pixel; on frames where
+// Outline, Pulse, Ssgi and Fogscatter sample the engine depth buffer per pixel; on frames where
 // they are active, mode-1 meshes do not write depth (read-only DSV phase).
 // affectUI is a phase enum - "SCENE" (default; the pre-tonemap 3D scene
 // chain), "UI" (masked per pixel to the engine-UI coverage; gather effects
@@ -7028,6 +7111,27 @@ static game_value add_postfx_sqf(game_value_parameter args) {
 // Debug visual selector for the solid-mesh pixel shaders (see g_dbg_mode
 // for the mode catalog). Diagnostic-only, defaults off, survives nothing
 // past session destroy.
+// 26115 SSGI RESOLUTION SCALE (operator request; the resource-side
+// ledger at RenderIntegration::g_khsg_scale explains why this is
+// GLOBAL: the gather side buffers are singletons). Multiplier on
+// the gather grid - 1 = full res, 0.5 = half (the default), 2 =
+// supersampled; clamped to [0.25, 2]. Takes effect on the next
+// flush (the buffers recreate). Config, not census: survives
+// getRenderStats arming, like setRenderDebug.
+static game_value set_ssgi_scale_sqf(game_value_parameter arg) {
+    try {
+        if (arg.type_enum() != game_data_type::SCALAR) return game_value(false);
+        float khss = static_cast<float>(arg);
+        if (!(khss == khss)) return game_value(false);   // NaN
+        if (khss < 0.25f) khss = 0.25f;
+        if (khss > 2.0f)  khss = 2.0f;
+        RenderIntegration::g_khsg_scale = khss;
+        return game_value(true);
+    } catch (...) {
+        return game_value(false);
+    }
+}
+
 static game_value set_render_debug_sqf(game_value_parameter arg) {
     try {
         if (arg.type_enum() != game_data_type::SCALAR) return game_value(false);
@@ -7297,6 +7401,25 @@ static game_value get_render_stats_sqf() {
         out.push_back(kvf("fogStagedValue", RenderIntegration::g_fog_valid ? RenderIntegration::g_fog[0] : -1.0f));
         out.push_back(kvf("fogStagedDecay", RenderIntegration::g_fog_valid ? RenderIntegration::g_fog[1] : -1.0f));
         out.push_back(kvf("fogStagedBase", RenderIntegration::g_fog_valid ? RenderIntegration::g_fog[2] : -1.0f));
+        // 26106..26108 fx depth-pair churn latch (ledger at
+        // kh_fx_depth_pair_guard; 26108: guards EVERY depth-consuming
+        // chain draw - the needs_depth set - with a per-flush verdict):
+        // holds = guarded DRAWS served the held pair (several per held
+        // flush when multiple depth effects run), jumpAdopts =
+        // confirmed genuine cuts/teleports adopted one flush late.
+        // (26106's fogScatterPair* names retired with the widening.)
+        // 26109: bridgeAdopts = >1.6x jumps corroborated by the live
+        // bridge projection and adopted the SAME flush (zero error
+        // frames - the genuine zoom/teleport class); jumpAdopts now
+        // counts only the UNCORROBORATED jumps that still needed the
+        // hold + second sighting. All three reset with the stat arm.
+        out.push_back(kv("fxDepthPairHolds", RenderIntegration::g_khfx_pair_holds));
+        out.push_back(kv("fxDepthPairJumpAdopts", RenderIntegration::g_khfx_pair_jump_adopts));
+        out.push_back(kv("fxDepthPairBridgeAdopts", RenderIntegration::g_khfx_bridge_adopts));
+        // 26113: confirmVetoes = second sightings REFUSED because the
+        // live bridge contradicted the candidate (multi-flush foreign
+        // latch runs held to zero error frames).
+        out.push_back(kv("fxDepthPairConfirmVetoes", RenderIntegration::g_khfx_confirm_vetoes));
         out.push_back(kv("sunDirDerivedValid", RenderIntegration::g_sun_dir_derived_valid ? 1u : 0u));
         out.push_back(kvf("sunDirDerivedX", RenderIntegration::g_sun_dir_derived[0]));
         out.push_back(kvf("sunDirDerivedY", RenderIntegration::g_sun_dir_derived[1]));
@@ -9961,6 +10084,14 @@ static void initialize_sqf_integration() {
         "setRenderDebug",
         "Debug switches: 0 off, 1-17 shader visuals, 20 cast kill switch, 21 readiness latch + slab retirement off, 24 terrain snap off, 25 cast live-grid viewport A/B, 26 lock-settle hold off, 27 UI coverage debug view, 28 accepted no-op (retired adaptive-floor opt-in)",
         userFunctionWrapper<set_render_debug_sqf>,
+        game_data_type::BOOL,
+        game_data_type::SCALAR
+    );
+
+    _sqf_set_ssgi_scale = intercept::client::host::register_sqf_command(
+        "setSsgiScale",
+        "SSGI gather resolution multiplier: 1 full res, 0.5 half (default), 2 supersampled; clamped 0.25-2. Global (the gather buffers are singletons); applies next flush. Returns true on accept",
+        userFunctionWrapper<set_ssgi_scale_sqf>,
         game_data_type::BOOL,
         game_data_type::SCALAR
     );

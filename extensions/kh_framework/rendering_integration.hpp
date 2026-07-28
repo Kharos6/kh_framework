@@ -783,9 +783,24 @@ struct Resources {
     // --- Fullscreen-chain ping-pong targets (single-sample, scene format).
     //     The chain runs on these instead of re-resolving the MSAA scene per
     //     pass: one resolve per frame regardless of pass count. ---
-    ID3D11Texture2D*          chain_tex[2] = {};
-    ID3D11RenderTargetView*   chain_rtv[2] = {};
-    ID3D11ShaderResourceView* chain_srv[2] = {};
+    // (26101: widened 2 -> 3. Index 2 is the SSGI GATHER buffer - the
+    // resolve pair's side target, never in the ping-pong rotation;
+    // ledger at the scene flush's khsg_pair block.)
+    ID3D11Texture2D*          chain_tex[5] = {};   // 26111: [3] = a-trous sibling of [2]; 26116: [4] = fp16 radiance pyramid
+    ID3D11RenderTargetView*   chain_rtv[5] = {};
+    ID3D11ShaderResourceView* chain_srv[5] = {};
+    // 26122 MANUAL PYRAMID VIEWS (ledger at ensure_fx_chain): one
+    // single-mip SRV + RTV pair per pyramid level - the disjoint-
+    // subresource pattern that lets level m-1 feed level m's draw
+    // legally (D3D11 hazard tracking is per SUBRESOURCE across
+    // views with disjoint mip ranges). 13 covers 4K and beyond.
+    ID3D11RenderTargetView*   khsg_mip_rtv[13] = {};
+    ID3D11ShaderResourceView* khsg_mip_srv[13] = {};
+    int                       khsg_pyr_levels = 0;
+    // 26103: linear-CLAMP sampler for the resolve's bilinear upsample
+    // of the half-res gather (s1, bound only for that draw with the
+    // prior binding saved/restored - StateBackup covers s0 only).
+    ID3D11SamplerState*       khsg_sampler = nullptr;
     // 26080 GPU TIMESTAMPS (scene chain instrumentation; the perf
     // campaign's field authority): a 3-deep ring of disjoint + stamp
     // queries - [0] chain begin, [1] chain end, [2+2k]/[3+2k] pass k
@@ -859,11 +874,17 @@ struct Resources {
     }
 
     void release_fx_chain() {
-        for (int i = 0; i < 2; ++i) {
+        for (int i = 0; i < 5; ++i) {   // 26101: + gather; 26111: + pre-smooth; 26116: + radiance pyramid
             KH_SAFE_RELEASE(chain_tex[i]);
             KH_SAFE_RELEASE(chain_rtv[i]);
             KH_SAFE_RELEASE(chain_srv[i]);
         }
+        for (int i = 0; i < 13; ++i) {   // 26122: pyramid level views
+            KH_SAFE_RELEASE(khsg_mip_rtv[i]);
+            KH_SAFE_RELEASE(khsg_mip_srv[i]);
+        }
+        khsg_pyr_levels = 0;
+        KH_SAFE_RELEASE(khsg_sampler);   // 26103
     }
 
     void release_scene_capture() {
@@ -1564,9 +1585,49 @@ enum class EffectId : int {
     // spill set (scanlines darken - not black-preserving; masked
     // lane), and the depth-consumer / inverse predicates.
     Crt = 21,
+    // 26096: single-bounce screen-space GI (operator mandate). GATHER
+    // CLASS - outside the fusion and UI-spill sets (scene-domain
+    // radiance gather; masked lane in the write window, where it is
+    // defined-but-meaningless) - and a consumer of the depth
+    // predicates. (26099: it LEFT the need_inverse predicates - the
+    // reconstruction moved to VIEW space after the world-absolute
+    // fp32 cancellation conviction; ledgers at KhgVpos and the
+    // branch.) ADMISSIBILITY vs the SSAO retirement
+    // ledger above: that effect's SIGNAL was geometry - binary
+    // occlusion verdicts through the live depth encode, which encode
+    // churn flipped frame-to-frame (the structural flicker). SSGI's
+    // signal is gathered scene RADIANCE; depth only weights it, every
+    // geometric term is smooth (no verdicts to flip), the pair it
+    // reads is the flush's ARBITRATED pv (cycle latch + degenerate
+    // repair - post-retirement machinery, not the raw encode the
+    // retired effect consumed; 26107: the chain draw's pair
+    // additionally rides the fx depth-pair churn latch - ledger at
+    // kh_fx_depth_pair_guard, the dump4 conviction), and its tap set
+    // is temporally SEEDLESS, so a static frame renders bit-identical.
+    // Full ledger at the effect-22 branch in PSEffect.
+    Ssgi = 22,
+    // 26104: fog light scattering (operator premise: fog blurs what it
+    // veils - the body AND the silhouette - by the fog along the sight
+    // line; the engine's fog and the framework's OWN "fog" passes both
+    // count). GATHER CLASS - outside the fusion and UI-spill sets - a
+    // depth consumer (joins needs_depth and the ssgi stand-down), a
+    // need_inverse JOINER (the 26080/26083 lesson: WorldPos supplies
+    // the fog integral's HEIGHT term - world-absolute by design and
+    // sanctioned: it feeds exp() terms at meter tolerance and is never
+    // differenced, so the fp32 cancellation class has nothing to
+    // amplify), and SCENE-PHASE ONLY (write-window reject beside
+    // ssgi's - its SYSTEM lanes are packed by the scene chain alone).
+    // Density authority + effect-13 math twin at KhFsFog; scatter
+    // estimator ledger at the effect-23 branch.
+    Fogscatter = 23,
 };
 
-static constexpr int KH_MAX_EFFECT = 21;
+// (26104: 23 = fogscatter took the last public slot below the ssgi
+// resolve. Ids 24 (the resolve), 25 (the 26111 a-trous pre-smooth),
+// 26 (the 26116 radiance-pyramid seed) and 27 (the 26122 pyramid
+// downsample) stay RESERVED-INTERNAL
+// and unreachable: registration validates <= this constant.)
+static constexpr int KH_MAX_EFFECT = 23;
 // USER EFFECT SENTINEL: RenderObject.effect for a custom ".hlsl" pass
 // (fx_shader carries the resolved path). Deliberately outside the
 // builtin id range: set_effect_params zero-defaults its 8 params (they
@@ -4041,6 +4102,10 @@ float4 PSComposite(VSOutC i) : SV_Target
 static const char* g_hlsl_effect =
     R"HLSL(
 Texture2D<float4> sceneColor : register(t0);
+// 26101: the SSGI resolve pair's raw-gather input (chain buffer 2;
+// bound only for the synthesized effect-24 draw, unbound after).
+Texture2D<float4> khsgTex : register(t3);
+SamplerState khsgSamp : register(s1);   // 26103: linear CLAMP, bound only for the resolve draw
 
 #if MSAA_DEPTH
 Texture2DMS<float> depthTex : register(t1);
@@ -4168,6 +4233,179 @@ float3 WorldPos(int2 px, float2 uv)
     float4 ndc = float4(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f, ndcZ, 1.0f);
     float4 wp = mul(ndc, invViewProj);
     return wp.xyz / wp.w;
+}
+
+// 26110 FAR-FENCE HELPERS (verdict-continuity doctrine closure). The
+// raw WorldPos above MIRRORS beyond the far sentinel (denominator
+// sign flip: behind-camera positions with inverted elevation - the
+// 26105 finding), so every consumer that can see SKY pixels must go
+// through the FENCED twin below: distance min-clamped to the encode
+// pair's own far-plane fence, the position rebuilt at the clamped
+// distance's ANALYTIC ndcZ. Sky then resolves to a point ON the view
+// ray AT the fence - genuinely distant, and CONTINUOUS across the
+// sky/geometry verdict the encode churn teeters. KhEncFence is
+// KhFsFog's 26105 engine-branch fence VERBATIM (that convicted code
+// keeps its inline copy byte-untouched; pointer comments both ways).
+// The shared feather idiom at every 26110 site:
+//   saturate((min(d, F) - F * 0.98) / max(F * 0.019, 1))
+// = 0 inside 98% of the fence, 1 at/beyond it, fractional between -
+// the teeter has no cliff to feed on, and behavior away from the
+// fence is unchanged.
+float KhEncFence()
+{
+    float khef_den = 1.0f - depthParams.x;
+    float khef_far = khef_den < -1.0e-7f ? depthParams.y / khef_den : 20000.0f;
+    return clamp(khef_far, 500.0f, 100000.0f);
+}
+
+float3 KhWorldPosFenced(int2 px, float2 uv, out float khwf_d)
+{
+    float khwf_raw = LinDepth(LoadDepthPS(px));
+    khwf_d = min(khwf_raw, KhEncFence() * 0.999f);
+    float4 khwf_nd = float4(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f,
+                            depthParams.x + depthParams.y / max(khwf_d, 1.0f), 1.0f);
+    float4 khwf_wp = mul(khwf_nd, invViewProj);
+    return khwf_wp.xyz / khwf_wp.w;
+}
+
+// 26099 SSGI view-space reconstruction (full conviction ledger at the
+// effect-22 branch): position from pixel + LINEAR depth through the
+// recovered projection diagonal - CAMERA-RELATIVE by construction, so
+// the world-absolute fp32 cancellation class (the jitter-rebase
+// campaign's conviction, which WorldPos above inherits at map-scale
+// coordinates) cannot reach it. Pure function of its arguments; reads
+// no CB.
+float3 KhgVpos(float2 vp_px, float vp_d, float2 vp_res, float vp_m00, float vp_m11)
+{
+    float2 vp_uv = (vp_px + 0.5f) / vp_res;
+    return float3((vp_uv.x * 2.0f - 1.0f) * vp_d / vp_m00,
+                  (1.0f - vp_uv.y * 2.0f) * vp_d / vp_m11,
+                  vp_d);
+}
+
+)HLSL"
+// (26105: C2026 split - the fence-continuity ledger grew the host
+// literal past the single-literal cap; adjacent literals concatenate,
+// so the chain grows by one and the census by one.)
+R"HLSL(
+// 26104/26105 FOG SCATTERING density authority (effect 23; estimator
+// ledger at the branch). Total scatter fraction S in [0, 1] for one
+// pixel: the ENGINE/MISSION fog opacity - the mesh shaders' fog-
+// occlusion math duplicated as a MATH TWIN (PSMain/PSComposite fog
+// blocks: the same transmittance terms verbatim; the color target
+// stays theirs - this consumer wants opacity only) - combined with
+// the flush-packed KH fog passes (the effect-13 distance-fog twin
+// below) as independent media: S = 1 - prod(1 - S_i). fxParams1 /
+// fxParams2 are SYSTEM lanes for effect 23: the chain loop packs up
+// to two aggregated fog-pass records [startDist, endDist, skyAmount,
+// opacity] (kh_fogscatter_pack - the CPU mirror; zeroed lanes = no
+// pass, and every other fill site leaves them zeroed, so the loop is
+// cold there). The heights here are world-ABSOLUTE by design and
+// SANCTIONED: they feed exp() terms at meter tolerance and are never
+// differenced - the fp32 cancellation class needs a difference to
+// amplify (the jitter-rebase ledger; the KhgVpos distance stays
+// camera-relative regardless). The 26104 sky gate (zero engine term
+// on sky) is RETIRED - the 26105 conviction inside the function.
+
+float KhFsFog(float2 fs_px, float fs_d, float2 fs_res, float fs_m00, float fs_m11)
+{
+    float fs_s = 0.0f;
+
+    // 26105 FLICKER CONVICTION (operator field report + dump3: pvNear
+    // churning 0.866 <-> 1.351 frame to frame with 20-35 keep-stamp
+    // rejects per frame - the ENCODE-CHURN class the ssao retirement
+    // and the far-keep machinery document). 26104 shipped a VERDICT
+    // CLIFF here: sky pixels took ZERO engine fog, so any pixel whose
+    // sky/geometry classification teetered with the churn snapped
+    // between full scatter and none (the reported flicker), and sky
+    // taps fed NOTHING to adjacent silhouette pixels (the reported
+    // "does not apply fully against the sky" - half the gather disc
+    // was dead). The mesh fog system's own failsafe doctrine applies
+    // (thm ledger: "temporally stable - the flicker has no input to
+    // feed on"): S must be CONTINUOUS across the verdict, so the
+    // verdict stops mattering. Sky and every beyond-sentinel teeter
+    // now evaluate THE SAME TWIN at the FAR FENCE - the encode pair's
+    // own far-plane distance (viewZ = m32 / (1 - m22), the LinDepth
+    // inversion at ndcZ = 1) - with the height reconstructed AT that
+    // fence, so a far mountain top and the sky one pixel above it
+    // carry near-identical S in every fog regime, and a churn flip
+    // between the two verdicts moves S by ~nothing. Horizon sky
+    // saturates (level rays exhaust any medium - the engine's own
+    // horizon haze), zenith sky decays via the height term (light fog
+    // leaves high sky sharp): both fall out of the twin itself, no
+    // new formula family. The prior WorldPos call is retired: beyond
+    // the far sentinel the raw-depth reconstruction MIRRORS (denom
+    // sign flip - behind-camera positions with inverted elevation),
+    // so the height is rebuilt inline at the clamped distance instead
+    // - one code path, no verdicts anywhere in the engine term.
+    if (fogParams.w >= 0.5f && depthParams.y < -1.0e-3f)
+    {
+        // the encode pair's far fence (m32 gate above guarantees the
+        // standard-z shape: 1 - m22 < 0, m32 < 0 -> positive fence)
+        float fs_fden = 1.0f - depthParams.x;
+        float fs_far = fs_fden < -1.0e-7f ? depthParams.y / fs_fden : 20000.0f;
+        float fs_de = min(fs_d, clamp(fs_far, 500.0f, 100000.0f) * 0.999f);
+        float fs_distM = length(KhgVpos(fs_px, fs_de, fs_res, fs_m00, fs_m11));
+        // height at the clamped distance (WorldPos's own ndc form,
+        // fed the ANALYTIC ndcZ of fs_de - immune to the beyond-far
+        // mirror and to raw-depth teeter by construction)
+        float2 fs_uv = (fs_px + 0.5f) / fs_res;
+        float4 fs_nd = float4(fs_uv.x * 2.0f - 1.0f, 1.0f - fs_uv.y * 2.0f,
+                              depthParams.x + depthParams.y / max(fs_de, 1.0f), 1.0f);
+        float4 fs_wp = mul(fs_nd, invViewProj);
+        float fs_hgt = fs_wp.y / fs_wp.w;
+        float fs_camY = fogColor.w;
+        float fs_tr;
+
+        if (fogEngine.w >= 0.5f)
+        {
+            float fs_ramp = saturate((fogEngine.y - fs_distM) * fogEngine.z);
+            float fs_dh = abs(fs_hgt - fs_camY);
+            float fs_k = fogParams.y * fs_dh / max(fs_distM, 1.0e-4f);
+            float fs_integ = fs_k < 1.0e-6f ? fs_distM : (1.0f - exp(-fs_distM * fs_k)) / fs_k;
+            float fs_minY = min(fs_hgt, fs_camY);
+            fs_tr = fs_ramp * exp(-fs_integ * fogEngine.x * exp(-fogParams.y * max(fs_minY, 0.0f)));
+        }
+        else
+        {
+            // block not locked (settings-independence: a mesh-less
+            // session never anchors the probe - dump3's whole run):
+            // the legacy exponential, the mesh twin's own fallback,
+            // verbatim
+            float fs_dens = fogParams.x * exp(-fogParams.y * max(fs_hgt - fogParams.z, 0.0f));
+            fs_tr = exp(-fs_distM * fs_dens * 0.0153f);
+        }
+
+        fs_s = 1.0f - saturate(fs_tr);
+    }
+
+    // KH fog passes (effect-13 MATH TWIN - the same LINEAR-depth ramp
+    // and the same skyAmount rule; edit both or neither), opacity-
+    // scaled, combined as independent media. 26110: the sky term
+    // FEATHERS across the far fence now - the effect-13 twin edit
+    // (its ledger there). The hard verdict was this function's LAST
+    // cliff (the 26105 conviction fixed the ENGINE term only), and a
+    // skyAmount != 1 pass fed the scatter density a silhouette flip.
+    // KhEncFence duplicates the engine branch's inline 26105 fence -
+    // that convicted code stays byte-untouched (pointer comments at
+    // the helper).
+    float fs_fence = KhEncFence();
+
+    [unroll] for (int fs_i = 0; fs_i < 2; ++fs_i)
+    {
+        float4 fs_e = fs_i == 0 ? fxParams1 : fxParams2;
+        if (fs_e.w > 0.001f)
+        {
+            float fs_f = saturate((fs_d - fs_e.x) / max(fs_e.y - fs_e.x, 1.0f));
+            float fs_w = saturate((min(fs_d, fs_fence) - fs_fence * 0.98f)
+                                  / max(fs_fence * 0.019f, 1.0f));
+            fs_f = lerp(fs_f, saturate(fs_e.z), fs_w);
+            if (fs_d > 1e8f) fs_f = saturate(fs_e.z);   // belt (the feather already lands here)
+            fs_s = 1.0f - (1.0f - fs_s) * (1.0f - fs_f * fs_e.w);
+        }
+    }
+
+    return saturate(fs_s);
 }
 
 
@@ -4470,10 +4708,21 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
     }
     else if (effect == 11)    // Pulse: p0.xyz = center (engine space), p0.w = radius; p1 = [bandWidth, intensity]
     {
-        float dist = distance(WorldPos(px, uv), fxParams0.xyz);
+        // 26110: raw WorldPos MIRRORS on sky pixels (ledger at the
+        // fenced twin) - a ring center near the camera could see
+        // mirrored sky positions land INSIDE the band, painting the
+        // sky and flickering with the verdict teeter. Fenced
+        // reconstruction + the fence feather keep the ring
+        // CONTINUOUS: sky (clamped TO the fence) lands at feather
+        // zero, and a ring band never reaches fence distances in
+        // normal use, so visible output is unchanged.
+        float khpl_d;
+        float dist = distance(KhWorldPosFenced(px, uv, khpl_d), fxParams0.xyz);
         float band = max(fxParams1.x, 0.01f);
         float ring = 1.0f - saturate(abs(dist - fxParams0.w) / band);
         ring *= ring;
+        float khpl_f = KhEncFence();
+        ring *= 1.0f - saturate((khpl_d - khpl_f * 0.98f) / max(khpl_f * 0.019f, 1.0f));
         outc = scene + color.rgb * ring * fxParams1.y;
     }
     else if (effect == 12)    // Halation: [threshold, intensity, radiusPx], color = glow tint (warm)
@@ -4491,9 +4740,25 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
     }
     else if (effect == 13)    // Distance fog: [startDist m, endDist m, skyAmount 0..1], color = fog color
     {
+        // (26104: MATH TWIN - KhFsFog's fog-pass lanes duplicate this
+        // ramp and the sky term VERBATIM for the fogscatter density;
+        // edit both or neither.)
+        // 26110 VERDICT-CONTINUITY: the sky term was a hard verdict
+        // cliff - a silhouette pixel teetering at the far sentinel
+        // flipped between saturate(ramp) and skyAmount whenever
+        // skyAmount != 1 (the 26105 class, effect-13 edition). The
+        // ramp now FEATHERS into the skyAmount term across the last
+        // 2% before the encode fence (shared idiom; ledger at
+        // KhEncFence), so a far mountain top and the sky one pixel
+        // above it carry near-identical fog. skyAmount = 1 with
+        // endDist inside the fence - every practical config - is
+        // output-identical. TWIN EDIT at KhFsFog's fog-pass loop.
         float d = LinDepth(LoadDepthPS(px));
         float f = saturate((d - fxParams0.x) / max(fxParams0.y - fxParams0.x, 1.0f));
-        if (d > 1e8f) f = saturate(fxParams0.z);   // sky/far-plane pixels
+        float khfg_f = KhEncFence();
+        float khfg_w = saturate((min(d, khfg_f) - khfg_f * 0.98f) / max(khfg_f * 0.019f, 1.0f));
+        f = lerp(f, saturate(fxParams0.z), khfg_w);
+        if (d > 1e8f) f = saturate(fxParams0.z);   // sky/far-plane pixels (belt; the feather already lands here)
         outc = lerp(scene, color.rgb, f);
     }
     else if (effect == 14)    // Lens flare, image-based: [threshold, intensity, ghostCount, ghostSpacing] + [haloRadius, haloIntensity, chromaPx]
@@ -4560,9 +4825,22 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
                 float2 spos = float2(sndc.x * 0.5f + 0.5f, 0.5f - sndc.y * 0.5f);
                 int2 sp = int2(saturate(spos) * float2(fxMeta.z, fxMeta.w));
                 float vis = 0.0f;
+                // 26110 VERDICT-CONTINUITY (the doctrine WATCH item,
+                // closed): each tap's sky verdict was a hard > 1e8
+                // cut - horizon terrain teetering at the far
+                // sentinel flipped taps in 1/25 steps, several
+                // together under the churn. Each tap now scores its
+                // fence proximity SMOOTHLY (the shared feather idiom;
+                // ledger at KhEncFence): sky = 1, geometry inside
+                // 98% of the fence = 0, fractional between.
+                float khsf_f = KhEncFence();
                 [unroll] for (int oy = -2; oy <= 2; ++oy)
                 [unroll] for (int ox = -2; ox <= 2; ++ox)
-                    vis += (LinDepth(LoadDepthPS(sp + int2(ox, oy) * 3)) > 1e8f) ? 1.0f : 0.0f;
+                {
+                    float khsf_d = LinDepth(LoadDepthPS(sp + int2(ox, oy) * 3));
+                    vis += saturate((min(khsf_d, khsf_f) - khsf_f * 0.98f)
+                                    / max(khsf_f * 0.019f, 1.0f));
+                }
                 vis /= 25.0f;
                 if (vis > 0.001f)
                 {
@@ -4874,6 +5152,881 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         khc_tube *= 1.0f - smoothstep(0.0f, khc_cr, khc_cd) * 0.35f;
         outc = khc_col * khc_tube;
     }
+)HLSL";
+
+// 26098 CHAIN SPLIT (C1091 relief): the effect unit's concatenated
+// literal chain reached ~63 KB against the 65,535 C1091 ceiling, so
+// the unit now spans TWO constants joined at ensure_effect_shader's
+// std::string build (no compiler limit there). Same translation
+// unit, same compiled source, byte-identical shader. Census rule:
+// each constant's own literal chain now carries its budget alone.
+static const char* g_hlsl_effect2 = R"HLSL(    else if (effect == 22)   // ssgi: [intensity, radiusM, samples 4..32, normalBias] + [falloffPow, saturation, maxDistM (0 = off), lumClamp] + [albedoMod, giOnly, planeBias (0 = auto)] (fxParams2); color.rgb = bounce tint
+    {
+        // 26096 SSGI - single-bounce diffuse gather (screen-space GI).
+        // ADMISSIBILITY (vs the SSAO retirement ledger at the enum):
+        // the retired effect's SIGNAL was geometry - binary occlusion
+        // verdicts through the live depth encode, so encode noise
+        // FLIPPED verdicts and the image popped. Here the signal is
+        // gathered scene RADIANCE: depth only WEIGHTS it, and every
+        // geometric term below is smooth (cosine lobe, pow falloff,
+        // smoothstep range fade - no step, no comparison verdict
+        // anywhere), so encode noise SHADES rather than pops. The
+        // pair consumed is the flush's ARBITRATED pv (cycle latch +
+        // degenerate repair), not the raw injection-time encode.
+        // ANTI-FLICKER DOCTRINE (the operator mandate; the traps the
+        // retired SSAO never fixed):
+        //  - the tap set is TEMPORALLY SEEDLESS: golden-angle spiral
+        //    rotated by a POSITION-ONLY Hash. Grain-style time seeds
+        //    are FORBIDDEN in this branch - a static frame renders
+        //    bit-identical, so all shimmer sources reduce to real
+        //    scene/camera change;
+        //  - the z-fight / acne class (self-sampling through
+        //    quantized depth) is excluded twice: a 2 px minimum tap
+        //    offset, and the normalBias floor on the cosine lobe;
+        //  - normals come from the smaller-delta side per axis (the
+        //    silhouette-safe reconstruction - a naive derivative
+        //    cross paints edge pixels with cross-object normals);
+        //  - HDR fireflies (bright speculars entering/leaving the tap
+        //    set under camera motion) are capped by lumClamp;
+        //  - normalization is by TAP COUNT, never by surviving
+        //    weight: a sparse valid set DIMS instead of amplifying
+        //    lone taps (weight-sum division turns one surviving
+        //    bright tap into a full-strength sparkling pixel).
+        // FAIL DARK: sky, a degenerate encode (the m32 gate), an
+        // unbound t1 (Load = 0 reads as far), a degenerate normal, or
+        // an all-rejected tap set all collapse to identity.
+        float3 khg_b = float3(0.0f, 0.0f, 0.0f);
+        // 26102 HALF-RES GATHER (operator-directed; the doctrine
+        // amendment is ledgered at the 26086 tombstone): this draw runs
+        // on the half-res side viewport, so i.pos spans the HALF grid -
+        // khg_fpx maps every coordinate into FULL-res space, where all
+        // depth/scene loads, radii and bounds live. The resolve
+        // upsamples the result depth-guided at full res.
+        // 26115: the scaled-grid -> full-grid factor rides local0.y
+        // (2.0 = the historical half-res default; the flush ledger).
+        float khg_inv = localParams0.y >= 0.25f ? localParams0.y : 2.0f;
+        int khg_st = max((int)(khg_inv + 0.5f), 1);
+        int2 khg_fpx = int2(float2(px) * khg_inv);
+        float khg_cd = LinDepth(LoadDepthPS(khg_fpx));
+        float khg_rng = 1.0f;
+        if (fxParams1.z > 1.0f)
+            khg_rng = 1.0f - smoothstep(fxParams1.z * 0.7f, fxParams1.z, khg_cd);
+        if (khg_cd < 1e8f && khg_rng > 0.001f && depthParams.y < -1.0e-3f)
+        {
+            float2 khg_res = float2(fxMeta.z, fxMeta.w);
+            // 26099 VIEW-SPACE RECONSTRUCTION (field conviction: two
+            // clean-input passes - admission fixed at 26097, pattern
+            // fixed at 26098 - and the shimmer/noise UNMOVED, so the
+            // remaining suspect was the position math itself. Root:
+            // WorldPos reconstructs ABSOLUTE world coordinates at map
+            // magnitudes and this branch then DIFFERENCES them - at
+            // 1 px separation for normals, at tap range for v. That
+            // is the world-absolute fp32 cancellation class the
+            // jitter-rebase campaign convicted on the mesh transform
+            // path, AMPLIFIED by the differencing: centimeter-scale
+            // coordinate noise against millimeter-scale true deltas =
+            // quantization-garbage normals at range and crawling
+            // shimmer under camera motion, independent of every
+            // admission knob - the exact three-pass field signature.
+            // Fix: reconstruct in VIEW space (KhgVpos: pixel + linear
+            // depth through the recovered projection diagonal), which
+            // is camera-relative by construction - magnitudes never
+            // exceed the far plane, so the cancellation cannot occur.
+            // Every term this branch computes is rotation/translation
+            // invariant, so view space is exact; invViewProj leaves
+            // the effect's input set entirely (predicates reverted -
+            // ledger at the enum).
+            float khg_m00 = max(length(float3(viewProj[0].x, viewProj[1].x, viewProj[2].x)), 1e-6f);
+            float khg_m11 = max(length(float3(viewProj[0].y, viewProj[1].y, viewProj[2].y)), 1e-6f);
+            float3 khg_P = KhgVpos(float2(khg_fpx), khg_cd, khg_res, khg_m00, khg_m11);   // 26102: full-res space
+            // smaller-delta side per axis; clamped edge neighbors
+            // degenerate to a zero tangent and bail identity (a 1 px
+            // no-GI border - the safe direction)
+            // 26102: +-1 gather-grid step in FULL px (26115: the step
+            // is the scale factor now - 2 at the half-res default)
+            int2 khg_pl = int2(max(khg_fpx.x - khg_st, 0), khg_fpx.y);
+            int2 khg_pr = int2(min(khg_fpx.x + khg_st, (int)fxMeta.z - 1), khg_fpx.y);
+            int2 khg_pu = int2(khg_fpx.x, max(khg_fpx.y - khg_st, 0));
+            int2 khg_pd = int2(khg_fpx.x, min(khg_fpx.y + khg_st, (int)fxMeta.w - 1));
+            float khg_dl = LinDepth(LoadDepthPS(khg_pl));
+            float khg_dr = LinDepth(LoadDepthPS(khg_pr));
+            float khg_du = LinDepth(LoadDepthPS(khg_pu));
+            float khg_dd = LinDepth(LoadDepthPS(khg_pd));
+            bool khg_lx = abs(khg_dl - khg_cd) < abs(khg_dr - khg_cd);
+            bool khg_ly = abs(khg_du - khg_cd) < abs(khg_dd - khg_cd);
+            float3 khg_vx = KhgVpos(float2(khg_lx ? khg_pl : khg_pr),
+                                    khg_lx ? khg_dl : khg_dr,
+                                    khg_res, khg_m00, khg_m11) - khg_P;
+            float3 khg_vy = KhgVpos(float2(khg_ly ? khg_pu : khg_pd),
+                                    khg_ly ? khg_du : khg_dd,
+                                    khg_res, khg_m00, khg_m11) - khg_P;
+            float3 khg_N = cross(khg_vy, khg_vx);
+            float khg_nl = length(khg_N);
+
+            if (khg_nl > 1e-9f)
+            {
+                khg_N /= khg_nl;
+                // 26102 PER-PIXEL RAY (field conviction: bounce died
+                // as receivers moved toward the TOP or BOTTOM of the
+                // screen while horizontal position barely mattered -
+                // the signature of a GLOBAL-z cosine proxy on near-
+                // horizontal receivers. A ground plane's view-space
+                // N.z is sin(pitch): tiny at shallow pitch, invariant
+                // under yaw and horizontal screen position - so every
+                // z-axis stand-in for "toward the camera" fails
+                // vertically and ONLY vertically. The honest vector
+                // is the ray through THIS pixel, normalize(P): equal
+                // to the z axis at screen center, tilted at the top
+                // and bottom to meet each surface at its true
+                // incidence.
+                float3 khg_rd = khg_P / max(length(khg_P), 1e-4f);
+                if (dot(khg_N, khg_rd) > 0.0f) khg_N = -khg_N;
+                // 26097 grazing confidence, per-pixel-ray form.
+                // 26102: window lowered (0.02..0.10 -> 0.008..0.05) -
+                // the bilateral resolve now eats the reconstruction
+                // noise this fade guarded against, so true-grazing
+                // distant ground keeps more of its bounce.
+                float khg_conf = smoothstep(0.008f, 0.05f, abs(dot(khg_N, khg_rd)));
+                float khg_rad = max(fxParams0.y, 0.1f);
+                // 26112 CAP RAISE 384 -> 2048 (operator conviction:
+                // bounce CONTRACTS - reads as clipping - when the
+                // camera moves close to the emitter OR zooms in;
+                // both raise px-per-meter, and at 0.5 m the old cap
+                // collapsed the gather's WORLD support to ~9 cm at
+                // 4K: the glow died in a fixed screen-space circle
+                // around the source. The cap existed for variance;
+                // variance is now owned by the MIP TAPS below (each
+                // tap samples the mip matching its annulus footprint
+                // = pre-filtered radiance, flat variance at any
+                // spread) plus the doubled a-trous + resolve. 2048
+                // is a sanity ceiling, not a design point.
+                float khg_spx = clamp(khg_rad * khg_m11 * 0.5f * fxMeta.w / khg_cd, 3.0f, 2048.0f);
+                int khg_n = clamp((int)fxParams0.z, 4, 32);
+                // 26098 SAMPLING REVISION (field conviction, the
+                // 26097 dump + the operator A/B: planeBias swept to 30
+                // with the bounce nearly extinguished and the striping
+                // / flicker / noise UNMOVED - acquitting tap ADMISSION
+                // entirely, convicting the tap PATTERN). Two
+                // structured sources, both fixed here:
+                //  (a) frac(sin(dot)) at RAW pixel coordinates
+                //      degrades into correlated diagonal structure at
+                //      4K argument magnitudes (the classic large-
+                //      argument breakdown of that hash) - the
+                //      per-pixel rotations were BANDED, not random;
+                //  (b) every pixel shared ONE fixed radius ladder
+                //      sqrt((k+.5)/n), so tap sets formed coherent
+                //      RINGS. A 12-tap estimator over high-contrast
+                //      bounce renders both as crawling stripes (the
+                //      z-fight read) and, sliding under content
+                //      motion, as shimmer and apparent frame flicker.
+                // Fix: Interleaved Gradient Noise - the standard
+                // spiral-gather dither, exact at any coordinate
+                // magnitude - rotates the spiral AND jitters each
+                // pixel's radius ladder (stratum-preserving: k + ign
+                // keeps one tap per annulus). STILL position-only:
+                // the temporal-seedless doctrine stands and a static
+                // frame remains bit-identical.
+                float khg_ig = frac(52.9829189f * frac(0.06711056f * i.pos.x
+                                                     + 0.00583715f * i.pos.y));
+                float khg_ig2 = frac(52.9829189f * frac(0.06711056f * (i.pos.x + 5.588238f)
+                                                      + 0.00583715f * (i.pos.y + 5.588238f)));
+                float khg_rot = khg_ig * 6.2831853f;
+                float khg_bias = clamp(fxParams0.w, 0.0f, 0.9f);
+                float khg_fp = max(fxParams1.x, 0.25f);
+                // 26097 TANGENT-PLANE HEIGHT FLOOR (field conviction:
+                // first SSGI field pass, 26096 dump, operator report -
+                // z-fight-style shimmer INSIDE brightened areas). Root:
+                // the cosine weight is ndl = h / d - RELATIVE - so at
+                // the 2-3 px taps a centimeter of depth-quantization
+                // scatter in the reconstructed point reads as full-
+                // strength lighting; and at range the projected radius
+                // rides its 3 px clamp floor, so EVERY tap lands in
+                // that zone on the receiver's own surface - the whole
+                // gather degenerates to crawling self-lit stripes (the
+                // z-fight read). Fix: a tap's ABSOLUTE height above
+                // the receiver's tangent plane must clear a depth-
+                // SCALED floor before it may weigh - quantization
+                // noise sits under it at every range by construction,
+                // while genuine off-plane geometry (walls, foliage,
+                // relief) clears it trivially. fxParams2.z scales the
+                // floor; 0 = auto (1.0). The 26096 relative bias
+                // stays - it shapes the lobe, this gates admission.
+                float khg_acne = fxParams2.z > 0.001f ? fxParams2.z : 1.0f;
+                float khg_pfl = (0.01f + khg_cd * 0.0035f) * khg_acne;
+                float3 khg_acc = float3(0.0f, 0.0f, 0.0f);
+                float khg_ib = 0.0f;   // 26102: on-screen tap count
+
+)HLSL"
+// (26100: single-literal split - C2026 16,380-byte cap; adjacent
+// literals concatenate, so the chain and census are unchanged.)
+R"HLSL(
+                // 26100 GAP CONVICTION (field: screen-anchored black
+                // gaps, "low res / pixelated", camera-following): the
+                // jittered ladder let stratum-0 radii dip inside the
+                // 2 px self-sample floor whenever a pixel's ig2 rolled
+                // small, so each pixel randomly lost its DOMINANT
+                // nearby taps - per-pixel admission variance, exactly
+                // the gap texture. Fix 1: clamp the ladder to just
+                // outside the floor - innermost taps snap to 2.05 px
+                // deterministically instead of dying stochastically.
+                // Fix 2: ANTIPODAL PAIRS over half-strata (kp = k/2,
+                // odd taps at +pi) - the classic seedless variance
+                // halving for cosine gathers; one-sided disk clumping
+                // can no longer darken a pixel alone. The render trace
+                // ABSOLVED the frame machinery (dump at 26099:
+                // pvValid every frame, zero ambiguity/repairs/darks;
+                // the serial 2180-2247 slice churn is the ENGINE's
+                // dynamic near plane during a zoom burst, latched
+                // same-frame per FLUSH FIDELITY), so the residual
+                // motion flicker is this same estimator variance
+                // re-rolling as content slides under the screen-fixed
+                // pattern - reduced by the same levers, plus the
+                // smooth admission below.
+                float khg_hn = (float)((khg_n + 1) >> 1);
+                [loop] for (int khg_k = 0; khg_k < khg_n; ++khg_k)
+                {
+                    int khg_kp = khg_k >> 1;
+                    float khg_an = khg_kp * 2.3999632f + khg_rot + (khg_k & 1) * 3.14159265f;
+                    // 26119 STRATUM-DECORRELATED RADIUS (screenshot
+                    // MEASUREMENT round: the radial profile through
+                    // the hotspot shows ~2.7-LSB SMOOTH oscillations
+                    // at 27-90 px periods with values OFF the 8-bit
+                    // plateaus - NOT quantization. The dither class
+                    // is closed; these are ESTIMATOR rings: ONE
+                    // shared ig2 shifts the whole radius ladder
+                    // coherently, so a compact hot emitter at radius
+                    // R from the receiver is covered by its stratum
+                    // in a pattern oscillating with R - and
+                    // neighboring pixels SHARE R, so the a-trous +
+                    // resolve pool CORRELATED outcomes and the
+                    // residual reads as static concentric rings:
+                    // scale-independent (strata are fractions of
+                    // spx), sample-count-resistant, dither-immune -
+                    // the field signature exactly. A golden-ratio
+                    // offset PER STRATUM decorrelates the bands:
+                    // still position-only (seedless doctrine), still
+                    // one tap per annulus; the rings collapse into
+                    // isotropic variance the smoothing chain already
+                    // eats.
+                    float khg_igk = frac(khg_ig2 + khg_kp * 0.61803399f);
+                    float khg_sr = max(sqrt((khg_kp + khg_igk) / khg_hn) * khg_spx, 2.05f);   // 26098 jitter; 26100 floor clamp; 26119 per-stratum
+                    float2 khg_off = float2(cos(khg_an), sin(khg_an)) * khg_sr;
+                    // self-sample floor (the acne class; unreachable
+                    // since the 26100 radius clamp - kept as belt)
+                    if (dot(khg_off, khg_off) < 4.0f) continue;
+                    int2 khg_sp = int2(float2(khg_fpx) + 0.5f + khg_off);   // 26102: full-res space
+                    // off-screen taps REJECT (clamping would smear the
+                    // border pixels' radiance into the frame edge)
+                    if (khg_sp.x < 0 || khg_sp.y < 0 ||
+                        khg_sp.x >= (int)fxMeta.z || khg_sp.y >= (int)fxMeta.w) continue;
+                    khg_ib += 1.0f;   // 26102: counts INFORMATION, not admission
+                    float khg_sd = LinDepth(LoadDepthPS(khg_sp));
+                    if (khg_sd >= 1e8f) continue;   // sky carries no bounce
+                    float3 khg_S = KhgVpos(float2(khg_sp), khg_sd, khg_res, khg_m00, khg_m11);   // 26099
+                    float3 khg_v = khg_S - khg_P;
+                    float khg_d = length(khg_v);
+                    // full 3D distance falloff: silhouette neighbors
+                    // reconstruct FAR in world and die here smoothly -
+                    // the halo class needs no depth-compare verdict
+                    if (khg_d < 1e-4f || khg_d > khg_rad) continue;
+                    // 26097: absolute plane-height admission FIRST
+                    // (ledger at khg_pfl), then the relative lobe
+                    float khg_ph = dot(khg_N, khg_v);
+                    // 26100: smooth fade over [pfl, 2 pfl] instead of
+                    // a hard cut - admission cliffs re-roll under 1 px
+                    // content motion (a flicker term); the ramp is the
+                    // same guard with a stable derivative.
+                    float khg_pw = smoothstep(khg_pfl, khg_pfl * 2.0f, khg_ph);
+                    if (khg_pw <= 0.0f) continue;
+                    float khg_ndl = khg_ph / khg_d;
+                    khg_ndl = saturate((khg_ndl - khg_bias) / max(1.0f - khg_bias, 1e-3f));
+                    if (khg_ndl <= 0.0f) continue;
+)HLSL"
+// (26111: C2026 split - the segment-occlusion ledger grew the host
+// literal past the 16,380-byte single-literal cap; adjacent literals
+// concatenate, so the chain grows by one and the census by one.)
+R"HLSL(
+                    // 26111 SEGMENT OCCLUSION (operator conviction:
+                    // bounce landing where the depth buffer plainly
+                    // shows a blocker - the estimator WEIGHED taps but
+                    // never TESTED visibility). Two probes along the
+                    // receiver->sample segment compare the probed
+                    // surface against the segment's own view depth; a
+                    // surface standing in FRONT attenuates the tap
+                    // SMOOTHLY over a depth-scaled margin. The SSAO-
+                    // retirement admissibility holds: no verdict
+                    // anywhere - penetration SHADES through a
+                    // smoothstep whose floor sits above the
+                    // quantization scale, the pair is churn-guarded,
+                    // and probe positions are position-only
+                    // (seedless). A silhouette crossing the segment
+                    // kills transport behind it - screen-space
+                    // reality, the intended direction. Sky probes
+                    // read 1e9 = never in front. Cost: 2 depth loads
+                    // per ADMITTED tap on the half-res draw.
+                    float khg_occ = 1.0f;
+
+                    [unroll] for (int khg_o = 1; khg_o <= 2; ++khg_o)
+                    {
+                        float khg_ot = khg_o * 0.333f;
+                        float2 khg_op = lerp(float2(khg_fpx), float2(khg_sp), khg_ot);
+                        float khg_oz = LinDepth(LoadDepthPS(int2(khg_op)));
+                        float khg_ez = khg_cd + khg_ot * (khg_sd - khg_cd);
+                        float khg_pen = khg_ez - khg_oz;   // blocker in FRONT of the segment
+                        float khg_om = 0.05f + khg_ez * 0.006f;
+                        khg_occ *= 1.0f - smoothstep(khg_om, khg_om * 3.0f, khg_pen);
+                    }
+
+                    if (khg_occ <= 0.001f) continue;
+                    // 26099 SAMPLE-FACING FORM FACTOR (field
+                    // conviction: operator report - color halos
+                    // ringing foreground bodies (soldiers)). Root:
+                    // taps weighed by the RECEIVER's cosine only, so
+                    // a foreground body's camera-facing radiance
+                    // splatted onto the background BEHIND it - light
+                    // it OCCLUDES, not light it emits backwards. The
+                    // depth buffer answers this: every visible sample
+                    // faces the camera, so its emission toward the
+                    // receiver tracks the view-depth gap - deeper-
+                    // than-receiver samples (ground ahead, facing
+                    // walls) emit toward it, shallower ones (bodies
+                    // in front) face away. cos_s = saturate(v.z / d +
+                    // 0.2) is that cosine under the camera-facing
+                    // normal proxy: the SSDO-style two-sided form
+                    // factor at zero extra loads; the 0.2 tolerance
+                    // keeps near-coplanar lateral geometry alive.
+                    // 26102: the camera-facing proxy is now the
+                    // SAMPLE's own pixel ray, not the global z (the
+                    // per-pixel-ray ledger above) - the same form
+                    // factor, correct at every screen position.
+                    // 26111 SLACK RETUNE (operator conviction: a wall
+                    // immediately behind/above a lit screen received
+                    // bounce - the emitter faces the CAMERA, its
+                    // emission toward the wall above is ~zero, and the
+                    // camera-ray proxy computes exactly that... then
+                    // the additive 0.2 slack resurrected it. The leak
+                    // class is SHALLOWER-than-receiver samples at
+                    // near-perpendicular emission (dot slightly
+                    // negative, living off the slack floor); genuine
+                    // lateral transport from DEEPER samples carries a
+                    // positive dot and never needed it. 0.08 kills
+                    // proud-emitter backsplash beyond ~0.08 rad of
+                    // perpendicular while keeping near-coplanar
+                    // continuity alive; field-tunable at this one
+                    // constant (raise toward 0.2 if lateral spread
+                    // from shallow emitters reads starved).
+                    // 26117 TRUE SAMPLE NORMAL (operator round
+                    // three: the vending-machine screen still lit the
+                    // wall BESIDE it, and the operator's own diagnosis
+                    // - 'same depth level from our point of view' - is
+                    // the conviction. The camera-RAY emitter proxy
+                    // (26099) measures emission against the VIEW
+                    // direction, so at oblique viewing the screen's
+                    // proudness contributes ~nothing to view depth,
+                    // the proxy dot sits near zero, and the slack
+                    // resurrects the tap - a VIEW-DEPENDENT hole no
+                    // proxy tuning closes. The honest emitter cosine
+                    // needs the sample's ACTUAL surface: forward-
+                    // difference normal at the tap (2 depth loads,
+                    // gather-grid spacing), camera-faced like the
+                    // receiver's, tested against the TRUE direction
+                    // to the receiver - a screen's normal is
+                    // perpendicular to the wall beside it at EVERY
+                    // view angle, so the leak dies view-independently
+                    // while walls/ground genuinely facing the
+                    // receiver keep their positive cosine. Cross-
+                    // object diffs (silhouette taps) and degenerate
+                    // crosses FALL BACK to the 26099 proxy verbatim.
+                    // The 26115 depth-adaptive slack rides BOTH paths
+                    // (differentiated quantization noise grows with
+                    // range the same way): 0.08 near - where the leak
+                    // class lives and normals are clean - opening
+                    // toward ~0.3 at range where noise dominates and
+                    // the leak cannot resolve.
+                    float khg_sl = 0.08f + min(khg_sd * 0.0005f, 0.24f);
+                    float khg_ce = dot(khg_S, khg_v) / (max(length(khg_S), 1e-4f) * khg_d);   // 26099 proxy (fallback)
+
+                    {
+                        int2 khg_nr = int2(min(khg_sp.x + khg_st, (int)fxMeta.z - 1), khg_sp.y);
+                        int2 khg_nd = int2(khg_sp.x, min(khg_sp.y + khg_st, (int)fxMeta.w - 1));
+                        float khg_dr2 = LinDepth(LoadDepthPS(khg_nr));
+                        float khg_dd2 = LinDepth(LoadDepthPS(khg_nd));
+                        float khg_xob = 0.15f * khg_sd + 0.5f;   // cross-object bound
+
+                        if (khg_dr2 < 1e8f && khg_dd2 < 1e8f &&
+                            abs(khg_dr2 - khg_sd) < khg_xob &&
+                            abs(khg_dd2 - khg_sd) < khg_xob)
+                        {
+                            float3 khg_sx = KhgVpos(float2(khg_nr), khg_dr2, khg_res, khg_m00, khg_m11) - khg_S;
+                            float3 khg_sy = KhgVpos(float2(khg_nd), khg_dd2, khg_res, khg_m00, khg_m11) - khg_S;
+                            float3 khg_sn = cross(khg_sy, khg_sx);
+                            float khg_snl = length(khg_sn);
+
+                            if (khg_snl > 1e-9f)
+                            {
+                                khg_sn /= khg_snl;
+                                if (dot(khg_sn, khg_S) > 0.0f) khg_sn = -khg_sn;   // face the camera (the receiver rule)
+                                khg_ce = dot(khg_sn, -khg_v) / khg_d;   // true emission toward the receiver
+                            }
+                        }
+                    }
+
+                    float khg_cs = saturate(khg_ce + khg_sl);
+                    float khg_w = khg_ndl * khg_cs * khg_pw * khg_occ * pow(saturate(1.0f - khg_d / khg_rad), khg_fp);   // 26100: + khg_pw; 26111: + khg_occ
+                    // 26112 MIP TAP (ledger at the cap raise): the
+                    // tap's footprint tracks its radius - 1/8 sr,
+                    // mip 0 inside 8 px (near-field detail exact),
+                    // coarser out to mip 7. Pre-filtered radiance
+                    // also smooths the 8-bit source's own gradient
+                    // steps (a banding contributor dither alone
+                    // cannot reach) and turns wide-annulus shot
+                    // noise into averages. Depth admission stays
+                    // full-res mip 0 - geometry truth is not
+                    // filtered.
+                    // 26116: taps read the fp16 RADIANCE PYRAMID at
+                    // t3 (ledger at ensure_fx_chain's [4]) - its mip 0
+                    // sits at the GATHER grid, one level below the
+                    // full frame, hence the -1 rebase; normalized uv
+                    // addresses it exactly (the 26103 rule). The 8-bit
+                    // staircase now decays through CONTINUOUS fp16
+                    // averages instead of re-quantizing per level -
+                    // the intense-source banding root.
+                    // 26120 CONTIGUOUS RADIAL COVERAGE (measurement
+                    // round two: ring amplitude fell ~2.7 -> ~1.4-2.0
+                    // LSB after the 26119 decorrelation but the
+                    // PERIOD family held - the survivor is ripple in
+                    // the EXPECTATION. Arithmetic conviction: the
+                    // tap footprint sr/8 against the stratum radial
+                    // gap spx/(2 sqrt(k hn)) gives a ratio ~k/2, so
+                    // the INNER strata read footprints SMALLER than
+                    // their own gaps - radial coverage holes around
+                    // a compact emitter = rings in the mean that no
+                    // jitter can remove. Three fixes in one line
+                    // set: (1) the footprint FLOORS at the stratum
+                    // gap - coverage is contiguous by construction;
+                    // (2) the -1 rebase hardcoded the half-res
+                    // default (pyramid texel = inv full px, so the
+                    // honest rebase is log2(inv) - identical at 0.5,
+                    // correct at every other setSsgiScale); (3) a
+                    // +-0.5 mip jitter off the per-stratum hash
+                    // (position-only) feathers footprint
+                    // transitions.
+                    float khg_gap = khg_spx / (2.0f * sqrt(max((float)khg_kp, 0.5f) * khg_hn));
+                    float khg_ftp = max(khg_sr * 0.125f, khg_gap);
+                    float khg_mip = clamp(log2(max(khg_ftp / khg_inv, 1.0f))
+                                        + (khg_igk - 0.5f) * 0.5f, 0.0f, 6.0f);
+                    // 26121 TENT-ON-BOX (measurement round three +
+                    // the operator's MOVEMENT clue: rings WORSENED
+                    // after 26120 pushed inner taps up the pyramid,
+                    // and the bounce PHASES in/out per ~0.5 m of
+                    // camera travel - one high-mip texel of screen
+                    // motion at room scale. Both are ONE root:
+                    // GenerateMips BOX-DECIMATES on a fixed screen
+                    // grid, so the pyramid is not shift-invariant -
+                    // a compact emitter's smeared energy jumps
+                    // between big fixed texels as content slides
+                    // (the movement phasing) and its iso-contours
+                    // carry the box grid (the static ring family at
+                    // mip-4..6 texel scales, 27-90 px - the measured
+                    // periods exactly). The standard cure at zero
+                    // new resources: QUINCUNX TENT sampling on top
+                    // of the box mips - four SampleLevels at
+                    // +-half-texel of the SAMPLED level average to
+                    // an effective tent filter, largely shift-
+                    // invariant in both space and motion. Cost: 3
+                    // extra pyramid fetches per admitted tap,
+                    // cache-local at small mips; setSsgiScale
+                    // remains the perf lever. (26122 field verdict:
+                    // this is the RECONSTRUCTION half only - the
+                    // ring root was aliasing baked in at DECIMATION,
+                    // closed by the manual pyramid build; both
+                    // halves stand together.)
+                    float2 khg_uv2 = (float2(khg_sp) + 0.5f) / khg_res;
+                    float2 khg_tx = (khg_inv * exp2(khg_mip) * 0.5f) / float2(fxMeta.z, fxMeta.w);
+                    float3 khg_c = 0.25f * (khsgTex.SampleLevel(khsgSamp, khg_uv2 + khg_tx, khg_mip).rgb
+                                 + khsgTex.SampleLevel(khsgSamp, khg_uv2 - khg_tx, khg_mip).rgb
+                                 + khsgTex.SampleLevel(khsgSamp, khg_uv2 + float2( khg_tx.x, -khg_tx.y), khg_mip).rgb
+                                 + khsgTex.SampleLevel(khsgSamp, khg_uv2 + float2(-khg_tx.x,  khg_tx.y), khg_mip).rgb);
+)HLSL"
+// (26115: C2026 split - the source-dither ledger grew the host
+// literal past the 16,380-byte single-literal cap; adjacent literals
+// concatenate, so the chain grows by one and the census by one.)
+R"HLSL(
+                    // 26115 SOURCE-SIDE TPDF (operator round two:
+                    // banding still standing on VERY INTENSE
+                    // sources - the amplified-INPUT class. The 8-bit
+                    // source's own 1/255 gradient steps ride through
+                    // intensity multiplied into multi-LSB output
+                    // stairs the +-1 LSB output dither cannot cover;
+                    // amplifying the output dither instead would be
+                    // visible noise. The honest place is BEFORE the
+                    // gain: +-1 source LSB TPDF per TAP (position-
+                    // only at the TAP's own pixel - seedless), which
+                    // decorrelates the input quantizer and then
+                    // rides the same gain as the signal; the
+                    // a-trous + resolve averaging beats the added
+                    // variance back down.
+                    float khg_tg = frac(52.9829189f * frac(0.06711056f * (float)khg_sp.x
+                                                         + 0.00583715f * (float)khg_sp.y));
+                    float khg_tg2 = frac(52.9829189f * frac(0.06711056f * ((float)khg_sp.x + 5.588238f)
+                                                          + 0.00583715f * ((float)khg_sp.y + 5.588238f)));
+                    // 26116: amplitude retires with the staircase -
+                    // full at pyramid mips 0-1 (still 8-bit-derived
+                    // steps), zero from mip 2 up where fp16
+                    // averaging has dissolved them; the wide-tap
+                    // grain the operator's screenshot showed was
+                    // THIS dither amplified by intensity.
+                    khg_c += (khg_tg - khg_tg2) * (1.0f / 255.0f)
+                           * saturate(1.0f - khg_mip * 0.5f);
+                    float khg_l = Luma(khg_c);
+                    if (fxParams1.w > 0.01f && khg_l > fxParams1.w)
+                        khg_c *= fxParams1.w / khg_l;   // firefly clamp
+                    khg_acc += khg_c * khg_w;
+                }
+
+                // 26102 EDGE NORMALIZATION (field conviction: bounce
+                // faded in wide top/bottom bands - the off-screen
+                // reject can claim up to the 384 px radius clamp, 18%
+                // of screen HEIGHT at 4K vs 10% of width, matching
+                // "vertical matters, horizontal less"). Off-screen
+                // taps are ABSENT INFORMATION, not absent geometry,
+                // yet the fixed 1/n normalization dimmed edge
+                // receivers by exactly the lost fraction. Normalize
+                // by the on-screen count instead, floored at n/2 so
+                // the anti-sparkle direction survives (geometric
+                // rejection still dims); an edge receiver recovers at
+                // most 2x.
+                float3 khg_gi = khg_acc * (2.0f / max(khg_ib, khg_n * 0.5f));
+                float khg_gl = Luma(khg_gi);
+                khg_gi = max(lerp(float3(khg_gl, khg_gl, khg_gl), khg_gi,
+                                  max(fxParams1.y, 0.0f)), 0.0f);
+                // receiver-albedo proxy: bounce lands tinted by the
+                // surface it lights (scene chroma over a luma floor)
+                // 26102: reload at FULL res - the head's 'scene'
+                // sampled the half grid's coordinates (the top-
+                // left quadrant), a wrong-texel tint on every
+                // receiver.
+                float3 khg_scn = SampleScene(khg_fpx);
+                float3 khg_alb = khg_scn / (Luma(khg_scn) + 0.3f);
+                khg_b = khg_gi * lerp(float3(1.0f, 1.0f, 1.0f), khg_alb, saturate(fxParams2.x))
+                      * color.rgb * max(fxParams0.x, 0.0f) * khg_rng * khg_conf;   // 26097
+            }
+        }
+
+        // 26101 GATHER HALF of the resolve pair (ledger at effect 24
+        // below + the flush's khsg_pair block): this pass renders the
+        // RAW bounce into the dedicated chain buffer and returns
+        // EARLY - the tail (opacity, localized weighting, fused
+        // stages) belongs to the resolve draw, which composites onto
+        // the true source. Bail paths return zero bounce: the GI
+        // buffer must hold GI, never scene.
+        return float4(khg_b, 1.0f);
+    }
+    else if (effect == 24)
+    {
+        // 26101 SSGI RESOLVE (internal id: setPostFX validates
+        // <= KH_MAX_EFFECT = 23 since 26104, so 24 is unreachable from SQF; the
+        // scene flush synthesizes it as the second draw of every
+        // ssgi pass). Field conviction: the gaps/shimmer are
+        // estimator variance and samples=24 did not buy stability -
+        // the honest fix is the one the operator asked for, a
+        // SMOOTHING pass. The composite cannot be blurred (that
+        // smears the scene), so the gather half writes raw bounce to
+        // the side buffer and THIS draw runs a 5x5 depth-aware
+        // bilateral over it: the depth sigma tracks receiver depth,
+        // so geometry edges hard-stop the kernel while noise inside
+        // surfaces averages away - and the per-frame re-roll
+        // amplitude (the residual flicker) collapses with it.
+        // Spread = fxParams2.w px (0 = auto 3.0 - the 26102 banding
+        // widening; clamp 1..8). Sky
+        // receivers and empty kernels resolve to ZERO bounce - fail
+        // dark. The tail below then applies opacity/localized/fused
+        // stages onto scene + resolved bounce, exactly where the
+        // single-draw composite used to live (giOnly now shows the
+        // RESOLVED field - the more useful debug anyway).
+        float3 khr_gi = float3(0.0f, 0.0f, 0.0f);
+        float khr_cd = LinDepth(LoadDepthPS(px));
+        if (khr_cd < 1e8f)
+        {
+            float khr_f = KhEncFence();   // 26110: continuity belt below
+            float khr_sp = fxParams2.w > 0.5f ? clamp(fxParams2.w, 1.0f, 8.0f) : 3.0f;   // 26102: auto widened (banding report)
+            float khr_ws = 0.0f;
+            [unroll] for (int khr_j = -2; khr_j <= 2; ++khr_j)
+            [unroll] for (int khr_i = -2; khr_i <= 2; ++khr_i)
+            {
+                int2 khr_p = int2(i.pos.xy + float2(khr_i, khr_j) * khr_sp);
+                if (khr_p.x < 0 || khr_p.y < 0 ||
+                    khr_p.x >= (int)fxMeta.z || khr_p.y >= (int)fxMeta.w) continue;
+                float khr_d = LinDepth(LoadDepthPS(khr_p));
+                if (khr_d >= 1e8f) continue;
+                float khr_dz = abs(khr_d - khr_cd) / (khr_cd * 0.06f + 0.05f);
+                float khr_w = exp(-0.125f * (khr_i * khr_i + khr_j * khr_j))
+                            * exp(-khr_dz * khr_dz);
+                // 26102: gather is half-res - full-res depth
+                // guiding half-res radiance = joint bilateral
+                // UPSAMPLE. 26103: point-fetch -> BILINEAR (field:
+                // thin bounce areas aliased - the >> 1 map handed
+                // every 2x2 full-res quad the same gather texel, so
+                // GI edges rebuilt the half grid as 2 px stairs;
+                // hardware bilinear through the dedicated clamp
+                // sampler interpolates between gather texels and the
+                // stairs dissolve. Normalized coords are resolution-
+                // independent, so the full-res uv addresses the
+                // half-res texture exactly).
+                khr_gi += khsgTex.SampleLevel(khsgSamp,
+                              (float2(khr_p) + 0.5f) / float2(fxMeta.z, fxMeta.w), 0.0f).rgb * khr_w;
+                khr_ws += khr_w;
+            }
+            khr_gi = khr_ws > 1e-4f ? khr_gi / khr_ws : float3(0.0f, 0.0f, 0.0f);
+            // 26110 continuity belt: bounce sheds across the last 2%
+            // before the encode fence (shared idiom; ledger at
+            // KhEncFence). With maxDistM live (default 300) it is
+            // already zero out here; with maxDistM = 0 the silhouette
+            // on/off cliff - resolved bounce vs the sky branch's hard
+            // zero - had the verdict teeter to feed on.
+            khr_gi *= 1.0f - saturate((khr_cd - khr_f * 0.98f)
+                                      / max(khr_f * 0.019f, 1.0f));
+            // 26111 OUTPUT DITHER (operator conviction: visible
+            // stripes in smooth bounce gradients, sample-count-
+            // INDEPENDENT - the 26102 finding's second half. fp16
+            // fixed the INTERMEDIATE quantization; the composite
+            // still lands on the scene format's 8-bit lanes, and a
+            // dim smooth GI gradient quantizes back into contour
+            // bands there - strong or textured bounces mask it, dim
+            // large-area ones show it, and no estimator lever can
+            // touch an OUTPUT quantizer. The honest fix is sub-LSB
+            // dither: IGN, POSITION-ONLY (the seedless doctrine - a
+            // static frame stays bit-identical), SCALAR (chroma
+            // dither would tint). 26112: UNIFORM +-0.75 LSB was
+            // undersized - "slightly better, not resolved", the
+            // classic reading - so the dither is TPDF now: the
+            // difference of two decorrelated IGNs gives the
+            // triangular +-1 LSB distribution that fully
+            // linearizes a quantizer (the audio/graphics standard).
+            // Sky stays an exact zero (this block is geometry-
+            // gated).
+            float khr_ig = frac(52.9829189f * frac(0.06711056f * i.pos.x
+                                                 + 0.00583715f * i.pos.y));
+            float khr_ig2 = frac(52.9829189f * frac(0.06711056f * (i.pos.x + 5.588238f)
+                                                  + 0.00583715f * (i.pos.y + 5.588238f)));
+            // 26113 MAGNITUDE GATE (operator conviction: colored
+            // single-pixel sparkle in DARK areas, screen-fixed
+            // when still, crawling under motion - dither's exact
+            // motion signature. Dithering a ZERO signal is pure
+            // noise injection: where bounce is absent there is no
+            // quantizer to linearize, yet the 8-bit target rounds
+            // each CHANNEL independently, so the scalar dither
+            // lands as +-1 LSB chroma sparkle - most visible on
+            // dark content. The gate ramps the amplitude in over
+            // the first 1.5 LSB of bounce luma: exact zero where
+            // bounce is zero, partial on the glow's outer 0<->1 LSB
+            // contour (banding's worst case keeps its cure), full
+            // inside.
+            khr_gi += (khr_ig - khr_ig2) * (1.0f / 255.0f)
+                    * smoothstep(0.0f, 1.5f / 255.0f, Luma(khr_gi));
+        }
+        outc = fxParams2.y > 0.5f ? khr_gi : scene + khr_gi;
+    }
+)HLSL"
+// (26111: the a-trous pre-smooth rides its own literal - the C2026
+// single-literal discipline; adjacent literals concatenate, so the
+// chain grows by one and the census by one.)
+R"HLSL(    else if (effect == 25)
+    {
+        // 26111 SSGI A-TROUS PRE-SMOOTH (internal id, the resolve's
+        // sibling: setPostFX validates <= KH_MAX_EFFECT = 23, so
+        // 24/25 stay unreachable from SQF; the scene flush
+        // synthesizes this as the MIDDLE draw of the ssgi triple).
+        // Operator conviction: SPARSE small emitters (a terminal's
+        // cluster of little lights) render as heavy blotch noise
+        // that crawls under camera motion - per-tap hit variance at
+        // scales the 5x5 resolve cannot reach, and MORE SAMPLES
+        // cannot buy down (a tiny emitter is hit or missed per pixel
+        // regardless of strata). The classic lever is a WIDER
+        // smoothing support: one depth-aware a-trous iteration at
+        // HALF res, spread 2 half-px (= 4 full px), between the
+        // gather and the resolve - stacked with the resolve's own
+        // 5x5 the effective support roughly triples at ~1/4 the cost
+        // of widening the full-res resolve. The depth sigma is the
+        // resolve's VERBATIM (edit both or neither), so geometry
+        // edges hard-stop identically; the pass is position-only
+        // (seedless doctrine) and fail-dark (missing buffer = the
+        // flush skips this draw and the resolve reads the raw
+        // gather, exactly the 26110-and-earlier path).
+        // 26112: the iteration spread rides localParams0.x (the
+        // flush saves/restores that lane around this internal id -
+        // its ledger at the pair block). Spread 1 then 2 = the
+        // proper a-trous doubling.
+        int khat_sp = (int)clamp(localParams0.x >= 0.5f ? localParams0.x : 2.0f, 1.0f, 4.0f);
+        // 26115: the scaled-grid -> full-grid factor (local0.y; the
+        // gather's twin lane).
+        float khat_inv = localParams0.y >= 0.25f ? localParams0.y : 2.0f;
+        float3 khat_c = khsgTex.Load(int3(px, 0)).rgb;
+        int2 khat_fp = int2(float2(px) * khat_inv);
+        float khat_cd = LinDepth(LoadDepthPS(khat_fp));
+
+        if (khat_cd < 1e8f)
+        {
+            float3 khat_acc = khat_c;
+            float khat_ws = 1.0f;
+            int2 khat_hb = int2((int)(fxMeta.z / khat_inv), (int)(fxMeta.w / khat_inv));   // 26115
+
+            [unroll] for (int khat_j = -2; khat_j <= 2; ++khat_j)
+            [unroll] for (int khat_i = -2; khat_i <= 2; ++khat_i)
+            {
+                if (khat_i == 0 && khat_j == 0) continue;
+                int2 khat_p = px + int2(khat_i, khat_j) * khat_sp;
+                if (khat_p.x < 0 || khat_p.y < 0 ||
+                    khat_p.x >= khat_hb.x || khat_p.y >= khat_hb.y) continue;
+                float khat_d = LinDepth(LoadDepthPS(int2(float2(khat_p) * khat_inv)));   // 26115
+                if (khat_d >= 1e8f) continue;
+                float khat_dz = abs(khat_d - khat_cd) / (khat_cd * 0.06f + 0.05f);
+                float khat_w = exp(-0.125f * (khat_i * khat_i + khat_j * khat_j))
+                             * exp(-khat_dz * khat_dz);
+                khat_acc += khsgTex.Load(int3(khat_p, 0)).rgb * khat_w;
+                khat_ws += khat_w;
+            }
+
+            khat_c = khat_acc / khat_ws;
+        }
+
+        return float4(khat_c, 1.0f);   // side-buffer draw: no tail (the resolve owns it)
+    }
+    else if (effect == 26)
+    {
+        // 26116 RADIANCE PYRAMID SEED (internal id, the group's first
+        // draw: setPostFX validates <= KH_MAX_EFFECT = 23, so
+        // 24/25/26 stay unreachable from SQF; the flush synthesizes
+        // this ahead of the gather). One bilinear downsample of the
+        // true source into the fp16 pyramid's mip 0 at the GATHER
+        // grid; fp16 autogen then builds the continuous averages the
+        // gather's taps read (full ledger at ensure_fx_chain's [4]).
+        // i.pos spans the SCALED grid, so the full-frame uv rebuilds
+        // through the local0.y factor (the gather's twin lane).
+        float khrs_inv = localParams0.y >= 0.25f ? localParams0.y : 2.0f;
+        float2 khrs_uv = i.pos.xy * khrs_inv / float2(fxMeta.z, fxMeta.w);
+        return float4(sceneColor.SampleLevel(khsgSamp, khrs_uv, 0.0f).rgb, 1.0f);
+    }
+    else if (effect == 27)
+    {
+        // 26122 PYRAMID DOWNSAMPLE (internal id, reserved with
+        // 24/25/26; full conviction at ensure_fx_chain's pyramid-
+        // view ledger). One level per draw: t3 is a SINGLE-MIP view
+        // of the source level (its own mip 0 by construction), the
+        // RT is the destination level, and the kernel is the
+        // standard 4-bilinear wide tent at +-0.75 SOURCE texels
+        // around the destination texel's source-space center -
+        // ~[1 3 3 1]/8 per axis, a decimation filter that actually
+        // respects Nyquist, unlike the retired 2x2 box. Source dims
+        // ride local0.zw (the flush's save/restore bracket).
+        float2 khpd_sd = float2(max(localParams0.z, 1.0f), max(localParams0.w, 1.0f));
+        float2 khpd_uv = i.pos.xy * 2.0f / khpd_sd;   // dest px -> source-space uv
+        float2 khpd_tx = 0.75f / khpd_sd;
+        float3 khpd_c = 0.25f * (khsgTex.SampleLevel(khsgSamp, khpd_uv + khpd_tx, 0.0f).rgb
+                      + khsgTex.SampleLevel(khsgSamp, khpd_uv - khpd_tx, 0.0f).rgb
+                      + khsgTex.SampleLevel(khsgSamp, khpd_uv + float2( khpd_tx.x, -khpd_tx.y), 0.0f).rgb
+                      + khsgTex.SampleLevel(khsgSamp, khpd_uv + float2(-khpd_tx.x,  khpd_tx.y), 0.0f).rgb);
+        return float4(khpd_c, 1.0f);
+    }
+)HLSL";
+
+// 26121 CHAIN SPLIT (C1091 relief - the flagged pressure point paid):
+// the effect unit's SECOND constant reached ~61.7 KB against the
+// 65,535 C1091 ceiling, so the unit now spans THREE constants joined
+// at ensure_effect_shader's std::string build (no compiler limit
+// there). Same translation unit, same compiled source, byte-identical
+// shader. Census rule: each constant's own literal chain carries its
+// budget alone. The cut sits at the fogscatter branch boundary (the
+// 26104 own-literal comment absorbed here).
+static const char* g_hlsl_effect3 = R"HLSL(    else if (effect == 23)   // fogscatter: [intensity, maxRadiusPx (0 = auto), samples 4..24]; fxParams1/fxParams2 = SYSTEM lanes (flush-packed fog passes); color.a = opacity
+    {
+        // 26104 FOG SCATTERING (operator premise: in-scattering blurs
+        // everything seen through fog - the body AND the silhouette -
+        // in proportion to the fog along the sight line; the game's
+        // fog and the framework's own "fog" passes both count -
+        // density authority at KhFsFog). Screen-space radius is the
+        // honest unit: scattering spreads DIRECTION, so the apparent
+        // blur subtends a roughly constant angle - which IS pixels.
+        // ESTIMATOR: SCATTER-AS-GATHER. Every SOURCE pixel sheds
+        // fraction S of its light over a disc whose radius is ITS OWN
+        // reach R = Rmax * S; the receiver keeps (1 - S) of its direct
+        // light plus its own r = 0 scattered term, and collects
+        // whatever neighbor discs REACH it, each tap weighted by the
+        // energy-true cone kernel S * (3 Rmax^2 / n) * (1 - r/R) / R^2
+        // (equal-area strata make each tap stand for pi Rmax^2 / n of
+        // disc; the cone integrates to 1 over its own disc), so a
+        // uniform medium conserves energy up to stratification error -
+        // and the closing sum-normalization retires that too.
+        // DEFLECTION GATE (the silhouette contract, both directions):
+        // a tap DEEPER than the receiver can only reach it by
+        // deflecting off medium IN FRONT of the receiver, so its
+        // effective S is min(S_tap, S_receiver) - far fog never halos
+        // a clear foreground body (S_receiver ~ 0 kills the reach) -
+        // while a SHALLOWER tap spreads by its own S over anything
+        // behind it, which is exactly the blurred silhouette, sky
+        // included - and sky itself carries the twin's FAR-FENCE
+        // opacity (26105; ledger at KhFsFog), so the veil bleeds back
+        // across silhouettes at the receiver's own S, both directions
+        // alive.
+        // ANTI-FLICKER DOCTRINE: the tap set is TEMPORALLY SEEDLESS -
+        // IGN rotation + jittered equal-area ladder + antipodal pairs,
+        // all position-only (the ssgi pattern verbatim; a static frame
+        // renders bit-identical) - and S is SMOOTH in depth and
+        // position AND CONTINUOUS across the sky/far verdict (the
+        // 26105 fence; the encode churn that flips that verdict frame
+        // to frame has no input to feed on - the mesh fog system's
+        // own failsafe doctrine, inherited).
+        // FAIL DARK: no fog anywhere = every weight but the direct
+        // one is zero = exact identity; degenerate/absent depth
+        // stands the pass down on the CPU (the ssgi stand-down,
+        // joined) and the m32 gate inside KhFsFog is the belt.
+        float2 khfs_res = float2(fxMeta.z, fxMeta.w);
+        float khfs_m00 = max(length(float3(viewProj[0].x, viewProj[1].x, viewProj[2].x)), 1e-6f);
+        float khfs_m11 = max(length(float3(viewProj[0].y, viewProj[1].y, viewProj[2].y)), 1e-6f);
+        float khfs_in = max(fxParams0.x, 0.0f);
+        float khfs_rm = fxParams0.y > 0.5f ? clamp(fxParams0.y, 2.0f, 96.0f)
+                                           : clamp(fxMeta.w / 90.0f, 4.0f, 64.0f);
+        int khfs_n = clamp((int)fxParams0.z, 4, 24);
+        float khfs_cd = LinDepth(LoadDepthPS(px));
+        float khfs_sc = saturate(KhFsFog(float2(px), khfs_cd, khfs_res, khfs_m00, khfs_m11) * khfs_in);
+        float khfs_c1 = 3.0f * khfs_rm * khfs_rm / (float)khfs_n;
+        float khfs_rc = max(khfs_rm * khfs_sc, 1.0f);
+        // direct light + the receiver's own r = 0 scattered self-term
+        // (spread thin over its own disc - 1/R^2 - so a heavy medium
+        // hands the field to the gathered neighbors, as it should)
+        float khfs_ws = (1.0f - khfs_sc) + khfs_sc * khfs_c1 / (khfs_rc * khfs_rc);
+        float3 khfs_acc = scene * khfs_ws;
+        float khfs_ig = frac(52.9829189f * frac(0.06711056f * i.pos.x
+                                              + 0.00583715f * i.pos.y));
+        float khfs_ig2 = frac(52.9829189f * frac(0.06711056f * (i.pos.x + 5.588238f)
+                                               + 0.00583715f * (i.pos.y + 5.588238f)));
+        float khfs_rot = khfs_ig * 6.2831853f;
+        float khfs_hn = (float)((khfs_n + 1) >> 1);
+
+        [loop] for (int khfs_k = 0; khfs_k < khfs_n; ++khfs_k)
+        {
+            int khfs_kp = khfs_k >> 1;
+            float khfs_an = khfs_kp * 2.3999632f + khfs_rot + (khfs_k & 1) * 3.14159265f;
+            float khfs_sr = max(sqrt((khfs_kp + khfs_ig2) / khfs_hn) * khfs_rm, 1.0f);
+            int2 khfs_sp = int2(float2(px) + 0.5f + float2(cos(khfs_an), sin(khfs_an)) * khfs_sr);
+            // off-screen taps are absent INFORMATION (the ssgi
+            // normalization finding): skipping them leaves the closing
+            // sum-normalization to renormalize, so edge receivers lean
+            // on their surviving weights instead of dimming.
+            if (khfs_sp.x < 0 || khfs_sp.y < 0 ||
+                khfs_sp.x >= (int)fxMeta.z || khfs_sp.y >= (int)fxMeta.w) continue;
+            float khfs_sd = LinDepth(LoadDepthPS(khfs_sp));
+            float khfs_ss = saturate(KhFsFog(float2(khfs_sp), khfs_sd, khfs_res, khfs_m00, khfs_m11) * khfs_in);
+            if (khfs_sd > khfs_cd) khfs_ss = min(khfs_ss, khfs_sc);   // deflection gate
+            float khfs_rk = khfs_rm * khfs_ss;
+            if (khfs_sr >= khfs_rk) continue;   // this source's disc does not reach
+            float khfs_w = khfs_ss * khfs_c1 * (1.0f - khfs_sr / khfs_rk) / max(khfs_rk * khfs_rk, 1.0f);
+            khfs_acc += SampleScene(khfs_sp) * khfs_w;
+            khfs_ws += khfs_w;
+        }
+
+        outc = khfs_acc / max(khfs_ws, 1e-4f);
+    }
 )HLSL" R"HLSL(    else if (effect == 101)   // 3D LUT grade (.cube, effect KH_EFFECT_LUT): [strength]
     {
         // TETRAHEDRAL interpolation over the verbatim lattice (quality
@@ -4951,12 +6104,21 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         }
     }
 
-    // World-space localization mask: full strength within radius, fading to
-    // zero over the falloff band. Sky/far pixels resolve to distant world
-    // positions and mask out naturally.
+    // World-space localization mask: full strength within radius, fading
+    // to zero over the falloff band. 26110: reconstruction goes through
+    // the FENCED twin - the raw form MIRRORS beyond the far sentinel
+    // (behind-camera positions, inverted elevation), so a mask volume
+    // near the camera - the COMMON localized placement - could see
+    // mirrored SKY pixels land INSIDE it, painting the sky with the
+    // localized effect and flickering with the verdict teeter. Fenced,
+    // sky resolves to a point on the view ray AT the fence - genuinely
+    // distant, masked out CONTINUOUSLY (what the old comment claimed;
+    // now true). Applies to EVERY localized effect through this one
+    // mask site.
     if (localParams1.y > 0.5f)
     {
-        float3 nd3 = abs(WorldPos(px, uv) - localParams0.xyz) / max(localRadii.xyz, 0.01f);
+        float khlm_d;
+        float3 nd3 = abs(KhWorldPosFenced(px, uv, khlm_d) - localParams0.xyz) / max(localRadii.xyz, 0.01f);
         // normalized distance: 1.0 = the mask surface (ellipsoid or mesh)
         float nd = (localParams0.w > 0.5f)
                  ? max(nd3.x, max(nd3.y, nd3.z))   // cube (Chebyshev)
@@ -5351,6 +6513,50 @@ inline bool kh_fuse_append(ConstantData& cbd, const RenderObject& o) {
     memcpy(cbd.fuse_stage[khfu_n * 4 + 3], o.color,  4 * sizeof(float));
     cbd.fuse_meta[0] = static_cast<float>(khfu_n + 1);
     return true;
+}
+
+// 26104 FOG SCATTERING pack, CPU side (HLSL twin: KhFsFog's fog-pass
+// lanes - the mirror contract). The fogscatter branch treats
+// fxParams1/fxParams2 as SYSTEM lanes carrying up to TWO aggregated
+// KH fog passes as [startDist, endDist, skyAmount, opacity]; this
+// fill runs at the chain loop's defer site AFTER upload_cb copied the
+// user's fx[4..11] in - overwriting them is the documented row-23
+// reservation (set_effect_params). Eligible: visible scene-list
+// fullscreen effect-13 passes, GLOBAL only - localized/banded fog is
+// a masked medium the flat per-pixel twin cannot honor, so those
+// passes keep their look but shed no scatter (SQF doc ledger). More
+// than two: the two strongest opacities win (independent-media
+// combination makes the weakest contribution the honest one to drop).
+// Mesh-borne fogscatter never routes here: its lanes stay the zeroed
+// defaults, so a mesh footprint scatters by the ENGINE fog alone.
+inline void kh_fogscatter_pack(ConstantData& cbd,
+                               const std::vector<std::pair<uint64_t, RenderObject>>& khfs_list) {
+    memset(cbd.fx1, 0, sizeof(cbd.fx1));
+    memset(cbd.fx2, 0, sizeof(cbd.fx2));
+    const RenderObject* khfs_top[2] = { nullptr, nullptr };
+
+    for (const auto& khfs_f : khfs_list) {
+        const RenderObject& khfs_o = khfs_f.second;
+        if (khfs_o.effect != static_cast<int>(EffectId::Fog)) continue;
+        if (khfs_o.localized || khfs_o.banded) continue;
+        if (khfs_o.color[3] <= 0.001f) continue;   // the chain's own no-op skip, mirrored
+
+        if (!khfs_top[0] || khfs_o.color[3] > khfs_top[0]->color[3]) {
+            khfs_top[1] = khfs_top[0];
+            khfs_top[0] = &khfs_o;
+        } else if (!khfs_top[1] || khfs_o.color[3] > khfs_top[1]->color[3]) {
+            khfs_top[1] = &khfs_o;
+        }
+    }
+
+    for (int khfs_i = 0; khfs_i < 2; ++khfs_i) {
+        if (!khfs_top[khfs_i]) break;
+        float* khfs_dst = khfs_i == 0 ? cbd.fx1 : cbd.fx2;
+        khfs_dst[0] = khfs_top[khfs_i]->fx[0];       // startDist (m)
+        khfs_dst[1] = khfs_top[khfs_i]->fx[1];       // endDist (m)
+        khfs_dst[2] = khfs_top[khfs_i]->fx[2];       // skyAmount
+        khfs_dst[3] = khfs_top[khfs_i]->color[3];    // opacity (envelope-faded)
+    }
 }
 
 // --- FP32 JITTER REBASE (the Part-4 designed fix, built with the CB
@@ -7819,6 +9025,19 @@ inline std::string ensure_resources(ID3D11Device* dev) {
 // common, hoist to one capture per frame.
 // ---------------------------------------------------------------------------
 
+// 26115 SSGI RESOLUTION SCALE (operator request): multiplier on the
+// gather grid - 0.5 = half res (the 26102 default), 1 = full res,
+// up to 2 = supersampled, floor 0.25. GLOBAL by design: the gather/
+// a-trous side buffers are singletons, so a per-pass value would
+// fight over one allocation; the setSsgiScale SQF command owns it
+// (config, not census - survives stat resets like debugMode). The
+// buffers recreate on the next flush after a change; the shader
+// receives the inverse (scaled px -> full px) through the local0.y
+// lane the pair block saves/restores around its internal draws.
+static float g_khsg_scale = 0.5f;
+static int   g_khsg_w = 0;   // exact scaled dims (viewport + bounds truth)
+static int   g_khsg_h = 0;
+
 // Creates (or recreates on size/format change) the two single-sample chain
 // targets. Called after ensure_scene_capture, which establishes dimensions.
 inline std::string ensure_fx_chain(ID3D11Device* dev) {
@@ -7827,24 +9046,125 @@ inline std::string ensure_fx_chain(ID3D11Device* dev) {
     D3D11_TEXTURE2D_DESC sd = {};
     g_res.scene_tex->GetDesc(&sd);
 
-    if (g_res.chain_tex[0]) {
+    // 26115: scaled gather dims (ledger at g_khsg_scale)
+    const float khsg_s = g_khsg_scale < 0.25f ? 0.25f
+                       : (g_khsg_scale > 2.0f ? 2.0f : g_khsg_scale);
+    const UINT khsg_sw = (UINT)(sd.Width  * khsg_s + 0.5f) > 0 ? (UINT)(sd.Width  * khsg_s + 0.5f) : 1;
+    const UINT khsg_sh = (UINT)(sd.Height * khsg_s + 0.5f) > 0 ? (UINT)(sd.Height * khsg_s + 0.5f) : 1;
+
+    if (g_res.chain_tex[0] && g_res.chain_tex[2] && g_res.chain_tex[3] && g_res.chain_tex[4]) {   // 26101/26111/26116 group
         D3D11_TEXTURE2D_DESC cd = {};
+        D3D11_TEXTURE2D_DESC gd = {};
         g_res.chain_tex[0]->GetDesc(&cd);
-        if (cd.Width == sd.Width && cd.Height == sd.Height && cd.Format == sd.Format) return "";
+        g_res.chain_tex[2]->GetDesc(&gd);   // 26115: scale change recreates the group
+        if (cd.Width == sd.Width && cd.Height == sd.Height && cd.Format == sd.Format &&
+            gd.Width == khsg_sw && gd.Height == khsg_sh) return "";
         g_res.release_fx_chain();
     }
 
-    for (int i = 0; i < 2; ++i) {
+    // 26118 REGRESSION FIX (operator report: applying ssgi did
+    // NOTHING - total silent drop). The 26116 patch widened the
+    // arrays, the release loop, the existence check and the pair
+    // block's drop-whole gate to the pyramid at [4] - and left THIS
+    // loop at i < 4, so the i == 4 branch below was dead code,
+    // chain_tex[4] stayed null forever, the gate returned on every
+    // flush (the pass dropped whole, by its own fail direction),
+    // and the [4]-requiring existence check above forced a full
+    // group release + recreate EVERY flush on top. One character:
+    // the bound is 5.
+    for (int i = 0; i < 5; ++i) {   // 26101: + gather; 26111: + pre-smooth; 26116: + radiance pyramid
         D3D11_TEXTURE2D_DESC td = sd;
         td.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
         td.SampleDesc.Count = 1;
         td.SampleDesc.Quality = 0;
+        // (26112's ping-pong mip chains: superseded at 26116 with the
+        // capture's - the radiance pyramid ledger below.)
+        // 26102: the gather buffer is HALF-RES fp16. Half res is the
+        // operator-directed perf trade (depth-guided upsample in the
+        // resolve; doctrine amendment at the 26086 tombstone). fp16
+        // kills the BANDING the scene format's 8-bit lanes put into
+        // small GI values - quantized bounce reads as smoothed bands
+        // no blur can honestly remove.
+        // (26111: [3], the a-trous pre-smooth target, is [2]'s exact
+        // sibling - same half grid, same fp16 rationale.)
+        if (i >= 2) {
+            td.Width  = khsg_sw;   // 26115: operator-scaled grid
+            td.Height = khsg_sh;
+            td.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        }
+        // 26116 RADIANCE PYRAMID [4] (operator conviction, screenshot
+        // round: BANDING + amplified noise survived on VERY INTENSE
+        // sources. Root: the 26112 taps sampled 8-BIT mips - autogen
+        // re-quantizes every averaged level to 1/255 steps, so wide
+        // taps of a hot source's smooth falloff read a staircase
+        // that intensity amplifies into multi-LSB iso-line contours
+        // no +-1 LSB dither covers, while the per-tap dither itself
+        // amplified into visible grain. This buffer is the fix: an
+        // fp16 pyramid at the GATHER grid, seeded from the source by
+        // one internal draw (effect 26) and mip-generated in fp16 -
+        // averages stay CONTINUOUS, so the staircase decays with
+        // every level instead of re-quantizing. The gather's taps
+        // read ONLY this pyramid.
+        if (i == 4) {
+            td.MipLevels = 0;
+            td.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
+        }
         HRESULT hr = dev->CreateTexture2D(&td, nullptr, &g_res.chain_tex[i]);
         if (FAILED(hr)) { g_res.release_fx_chain(); return "Create chain tex " + hr_str(hr); }
         hr = dev->CreateRenderTargetView(g_res.chain_tex[i], nullptr, &g_res.chain_rtv[i]);
         if (FAILED(hr)) { g_res.release_fx_chain(); return "Create chain RTV " + hr_str(hr); }
         hr = dev->CreateShaderResourceView(g_res.chain_tex[i], nullptr, &g_res.chain_srv[i]);
         if (FAILED(hr)) { g_res.release_fx_chain(); return "Create chain SRV " + hr_str(hr); }
+    }
+
+    // 26122 PYRAMID LEVEL VIEWS (operator falsification round: the
+    // 26121 tent SAMPLING did not move the rings or the motion
+    // phasing, and the ROTATION clue closed the case - the aliasing
+    // is baked into the pyramid DATA, not the reconstruction:
+    // GenerateMips decimates 2x per level with a 2x2 BOX, violating
+    // Nyquist at every level, so energy aliases INTO the mips at
+    // build time and slides across the screen-fixed decimation grid
+    // under ANY camera motion, rotation included. The fix builds
+    // the levels manually (internal effect 27, a wide-tent 4-tap
+    // downsample) through these disjoint per-mip views; the 26121
+    // tent SAMPLING stays as the reconstruction half.
+    if (g_res.chain_tex[4]) {
+        D3D11_TEXTURE2D_DESC khpd = {};
+        g_res.chain_tex[4]->GetDesc(&khpd);
+        int khpl = (int)khpd.MipLevels;
+        if (khpl > 13) khpl = 13;
+
+        for (int m = 0; m < khpl; ++m) {
+            D3D11_RENDER_TARGET_VIEW_DESC khrd = {};
+            khrd.Format = khpd.Format;
+            khrd.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+            khrd.Texture2D.MipSlice = (UINT)m;
+            HRESULT khhr = dev->CreateRenderTargetView(g_res.chain_tex[4], &khrd, &g_res.khsg_mip_rtv[m]);
+            if (FAILED(khhr)) { g_res.release_fx_chain(); return "Create pyramid RTV " + hr_str(khhr); }
+            D3D11_SHADER_RESOURCE_VIEW_DESC khsd = {};
+            khsd.Format = khpd.Format;
+            khsd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+            khsd.Texture2D.MostDetailedMip = (UINT)m;
+            khsd.Texture2D.MipLevels = 1;
+            khhr = dev->CreateShaderResourceView(g_res.chain_tex[4], &khsd, &g_res.khsg_mip_srv[m]);
+            if (FAILED(khhr)) { g_res.release_fx_chain(); return "Create pyramid SRV " + hr_str(khhr); }
+        }
+
+        g_res.khsg_pyr_levels = khpl;
+    }
+
+    g_khsg_w = (int)khsg_sw;   // 26115: viewport/bounds truth
+    g_khsg_h = (int)khsg_sh;
+
+    if (!g_res.khsg_sampler) {   // 26103: the resolve's bilinear sampler
+        D3D11_SAMPLER_DESC khsm = {};
+        khsm.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+        khsm.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
+        khsm.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+        khsm.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+        khsm.MaxLOD = D3D11_FLOAT32_MAX;
+        HRESULT khsm_hr = dev->CreateSamplerState(&khsm, &g_res.khsg_sampler);
+        if (FAILED(khsm_hr)) { g_res.release_fx_chain(); return "Create ssgi sampler " + hr_str(khsm_hr); }
     }
 
     return "";
@@ -7880,6 +9200,12 @@ inline std::string ensure_scene_capture_from(ID3D11Device* dev, ID3D11DeviceCont
         D3D11_TEXTURE2D_DESC td = {};
         td.Width = src_desc.Width;
         td.Height = src_desc.Height;
+        // (26112's 8-bit mip chain here is SUPERSEDED by 26116: the
+        // gather taps read the dedicated fp16 radiance PYRAMID now -
+        // its ledger at ensure_fx_chain - because 8-bit mip autogen
+        // RE-QUANTIZED every averaged level to 1/255 steps, and an
+        // intense source's amplified staircase was the operator's
+        // surviving banding. The capture returns to single-mip.)
         td.MipLevels = 1;
         td.ArraySize = 1;
         td.Format = capture_fmt;
@@ -7898,6 +9224,9 @@ inline std::string ensure_scene_capture_from(ID3D11Device* dev, ID3D11DeviceCont
     if (src_desc.SampleDesc.Count > 1) {
         ctx->ResolveSubresource(g_res.scene_tex, 0, src_tex, 0, capture_fmt);
     } else {
+        // 26123: back to the plain copy - the capture returned to
+        // single-mip at 26116 (tombstone above), so the 26112
+        // per-subresource workaround's reason is gone.
         ctx->CopyResource(g_res.scene_tex, src_tex);
     }
 
@@ -8056,7 +9385,7 @@ inline std::string ensure_effect_shader(ID3D11Device* dev) {
         { nullptr, nullptr }
     };
 
-    const std::string fx_src = std::string(g_cb_hlsl) + g_hlsl_effect;
+    const std::string fx_src = std::string(g_cb_hlsl) + g_hlsl_effect + g_hlsl_effect2 + g_hlsl_effect3;   // 26098 split; 26121 second split
     ID3DBlob* blob = nullptr;
     std::string err = compile_shader(fx_src.c_str(), "PSEffect", "ps_5_0", defines, &blob);
     if (!err.empty()) return err;
@@ -8864,7 +10193,7 @@ inline bool read_vec3_or_uniform(const game_value& gv, float out[3]) {
 inline int effect_id_from_gv(const game_value& gv) {
     if (gv.type_enum() == game_data_type::SCALAR) {
         int id = static_cast<int>(static_cast<float>(gv));
-        return (id >= 0 && id <= KH_MAX_EFFECT) ? id : -1;   // 26083: 18..20 = clarity/deband/rainlens (compacted); 26088: 21 = crt
+        return (id >= 0 && id <= KH_MAX_EFFECT) ? id : -1;   // 26083: 18..20 = clarity/deband/rainlens (compacted); 26088: 21 = crt; 26096: 22 = ssgi; 26104: 23 = fogscatter
     }
 
     if (gv.type_enum() != game_data_type::STRING) return -1;
@@ -8892,6 +10221,8 @@ inline int effect_id_from_gv(const game_value& gv) {
     if (s == "deband")     return 19;
     if (s == "rainlens" || s == "rain") return 20;
     if (s == "crt")        return 21;   // 26088
+    if (s == "ssgi")       return 22;   // 26096
+    if (s == "fogscatter") return 23;   // 26104
     return -1;
 }
 
@@ -8958,6 +10289,8 @@ inline bool set_effect_params(RenderObject& obj, const auto_array<game_value>* p
         { 1.6f, 16.0f, 0.6f },                       // 19 deband: threshold(1/255), rangePx, grain(1/255)
         { 0.6f, 1.0f, 0.35f, 1.0f },                 // 20 rainlens: intensity, speed, condensation, refract (fx[4..7] SYSTEM: camera velocity)
         { 0.12f, 0.45f, 540.0f, 0.35f, 1.5f, 0.25f, 0.3f, 0.06f, 4.0f, 1.5f },   // 21 crt: curvature, scanlines, lineCount, maskStrength + aberrationPx, flicker, rollingBand, cornerRadius + scanSpeed (lines/s, signed), scanWobblePx
+        { 0.7f, 4.0f, 12.0f, 0.15f, 2.0f, 1.0f, 300.0f, 3.0f, 0.65f },           // 22 ssgi: intensity, radiusM, samples (4..32), normalBias + falloffPow, saturation, maxDistM (26098: default 300 - depth-reconstruction precision degrades toward the standard-z far; 0 = off), lumClamp + albedoMod, giOnly, planeBias 0 = auto (fxParams2; 26097)
+        { 1.0f, 0.0f, 12.0f },                       // 23 fogscatter: intensity, maxRadiusPx (0 = auto: screenH / 90, clamp 4..64), samples (4..24). fx[4..11] = SYSTEM lanes: the chain loop packs the active global fog passes there (kh_fogscatter_pack) - user values in those slots are overwritten by contract
     };
 
     // LUT default row (the sentinel sits outside the table): strength =
@@ -9109,6 +10442,225 @@ static bool g_proj_locator_ever = false;
 inline uint64_t steady_now_ms() {
     return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+// 26106/26107 FX DEPTH-PAIR CHURN GUARD (cycle-latch family; dump2 +
+// dump4 convictions). The flush's latched pv occasionally carries a
+// FOREIGN projection pair for a frame or a short run - field-measured:
+// pvNear 4.40 -> 10 -> 4.40 for one frame, 4.55 -> 0.2503 for ten
+// (dump2), 0.07 -> 10 -> 0.07 for one (dump4) - while the depth
+// buffer's content was written under the scene pair. Mesh consumers
+// shrug (they fog and shade from their own geometry), but the
+// ABSOLUTE-depth chain gathers do not: fogscatter's density through a
+// near-10 pair inflates every distance and the scatter visibly
+// thickens for that frame (the dump2 "fog doubles" flicker), and
+// ssgi's view-space reconstruction scales every position, radius and
+// falloff by the same error - dump4 caught EXACTLY that: a 0.07 -> 10
+// frame (143x!) at ageS 4.25 where fogscatter HELD (this latch,
+// 26106) while the unguarded ssgi draw flickered, the operator's
+// "flicker of indeterminate nature". 26107 widens the guard to EVERY
+// absolute-depth chain draw (ssgi + fogscatter; the synthesized
+// effect-24 resolve reuses the guarded deferred slice and is covered
+// by construction). Fix at the CONSUMER, blast radius those draws
+// alone: their depthParams ride a hysteresis latch keyed on the
+// pair's derived near (n = -m32 / m22, the standard-z identity the
+// m32 gates already guarantee). CONTINUOUS track (ratio <= 1.6x per
+// flush) adopts immediately - the fastest GENUINE transition in the
+// field logs is a 1.41x zoom step, so real camera motion never holds
+// - while a larger jump holds the adopted pair for that draw and arms
+// a candidate: a second consecutive sighting within 1.25x adopts it
+// (a real cut/teleport lands one flush late, bounded), while a
+// one-frame foreign latch is discarded with ZERO error frames. A
+// stale latch (> 500 ms - flush stream interrupted) adopts
+// unconditionally. The residual on a held frame - the b1 viewProj /
+// invViewProj still embed the foreign z-mapping - is a bounded
+// second-order term for both consumers (meter-tolerance exp() inputs
+// for the fog; smooth radiance weights for the gi - no verdicts),
+// accepted; the first-order LinDepth scale error is what the eye
+// caught both times. ONE shared latch: the state tracks THE SCENE
+// ENCODE, not any effect. 26108: WIDENED to EVERY depth-consuming
+// chain draw (the needs_depth predicate is the one truth: Outline,
+// Pulse, Fog, SunFlare, Ssgi, Fogscatter, CUSTOM, localized/banded) -
+// the remaining consumers carry the same class at lower visibility
+// (Pulse's world ring and Fog's ramp are absolute distance; SunFlare's
+// sky probe is a binary verdict; Outline differential; customs
+// advertise depthParams), and one latch serves them all. 26108 ALSO
+// FIXES A LATENT 26107 DEFECT (caught in review, never fielded): the
+// two-sighting confirmation counted CALLS, so with two guarded draws
+// per flush the SECOND draw of the SAME foreign flush confirmed the
+// candidate and adopted the foreign pair. The verdict is per-FLUSH
+// now: the first call of a flush (g_cc_flush_serial identity) runs
+// the full logic and stores the verdict; later calls that flush
+// REPLAY it (held draws re-copy the latched pair; the holds counter
+// therefore counts DRAWS served, several per held flush). Consumed
+// only at the chain loop's defer site (after kh_fogscatter_pack for
+// fogscatter); mesh-borne effect draws keep the live pair - their
+// depth reads are footprint-local and the stand-down machinery owns
+// that lane.
+// 26109 GENUINE-JUMP BRIDGE WITNESS (dump5 conviction: 31 jump
+// adopts in a 41 s optics session - the trace shows CONTINUOUS-camera
+// near jumps of 1.75x..17x per flush at scope toggles/teleports
+// (0.07 <-> 1.20 in ONE flush; a 4.15 -> 2.37 zoom-out step), so the
+// 26106 field bound 'fastest genuine step 1.41x' is FALSIFIED for
+// optics play, and every such genuine jump paid the designed cost:
+// one flush drawn through the OUTGOING pair before the two-sighting
+// confirm - visibly, ssgi's bounce intensifying/vanishing for that
+// frame (LinDepth scales every distance by the near ratio), fog or
+// no fog. The discriminator the confirm lacked exists at the flush:
+// the LIVE BRIDGE projection is the engine's own main-camera encode,
+// which tracks a GENUINE zoom/teleport the same flush and never
+// carries the foreign aux-pass pairs (dump2/dump4: one-frame near-10
+// flips with the bridge camera continuous). So a >1.6x candidate
+// that the bridge CORROBORATES (derived nears within the 1.25x
+// confirmation band) adopts IMMEDIATELY - zero error frames on
+// genuine transitions - while an uncorroborated jump holds + confirms
+// exactly as before (the foreign class is untouched; a failed or
+// degenerate bridge read falls through to the 26106 path whole).
+// Witness fetch runs ONLY on the jump branch - the continuous track
+// stays fetch-free.
+// 26113 BRIDGE VETO ON THE CONFIRM (dump6 conviction: the foreign
+// near-10 aux pass latched TWO CONSECUTIVE flushes twice in a 10 s
+// window - trace serials 19426-19427 and 19432-19433 - and the
+// two-sighting confirm ADOPTED it on the second sighting: one
+// 143x-scaled error frame per event, the operator's two observed
+// bounce flickers; the totals' lone fxDepthPairJumpAdopts was the
+// same class). The witness already answers this at the confirm
+// moment: a VALID bridge read that fell through the corroboration
+// band CONTRADICTS the candidate by construction, so persistence
+// proves nothing - the confirm is VETOED and the hold continues
+// (holds tick; a foreign run of ANY length now draws zero error
+// frames). A bridge-dead/degenerate read keeps the 26106 confirm
+// whole - the genuine-cut fallback for bridge-less sessions.
+// 26114 DOCTRINE (audit verdict, no code change): the generalized
+// principle is PERSISTENCE PROVES REPETITION, NOT GENUINENESS - a
+// two-sighting/agreement confirm may never outrank an AVAILABLE
+// live witness. Audited siblings: the injection view latch is
+// structurally immune (its candidate IS the bridge pv and its
+// teleport confirm compares against a ring of previously ACCEPTED
+// bridge samples - the foreign source cannot masquerade as the
+// witness); the block-regime confirm is witness-gated in the
+// collapse direction and feeds STAGED smoothed values (a wrong
+// adopt fades, never flickers); the sun machinery is witness-rich
+// (arbiter + rate/stream refusal + bridge samples); mesh-borne
+// effect draws keep the live pair by the stand-down ledger's
+// standing decision, whose transient-error acceptance now covers
+// a two-flush foreign run as it covered one. Any FUTURE latch
+// with a persistence confirm must either consume a live witness
+// or ledger why none exists.
+static float    g_khfx_pair[4] = {};        // adopted m22 / m32 / minD / maxD
+static float    g_khfx_pair_near = -1.0f;   // derived near of the adopted pair (-1 = cold)
+static float    g_khfx_cand_near = -1.0f;   // pending outlier candidate (-1 = none)
+static uint64_t g_khfx_pair_ms = 0;
+static uint32_t g_khfx_pair_holds = 0;      // stats: draws that read through the held pair
+static uint32_t g_khfx_pair_jump_adopts = 0;// stats: confirmed >1.6x adoptions (cuts/teleports)
+static uint32_t g_khfx_bridge_adopts = 0;   // 26109: >1.6x adoptions corroborated by the live bridge (zero-error genuine jumps)
+static uint32_t g_khfx_confirm_vetoes = 0;  // 26113: second-sighting confirms REFUSED because the live bridge contradicted the candidate
+
+static uint64_t g_khfx_verdict_serial = ~0ull;  // 26108: flush the verdict ran for
+static bool     g_khfx_verdict_held = false;    // 26108: that flush's verdict
+
+inline void kh_fx_depth_pair_guard(ConstantData& cbd, uint64_t khfx_serial) {
+    const float khfx_m22 = cbd.depth_params[0];
+    const float khfx_m32 = cbd.depth_params[1];
+    // Degenerate pairs stand the effect down elsewhere (the stand-down
+    // + the shader's m32 gate); never latch or hold against them.
+    if (!(khfx_m32 < -1.0e-3f) || khfx_m22 <= 0.0f) return;
+    const float khfx_n = -khfx_m32 / khfx_m22;
+    if (khfx_n <= 0.0f) return;
+    // 26108: same flush = REPLAY the stored verdict (never re-run the
+    // confirmation - the 26107 same-flush adoption defect's fix).
+    if (khfx_serial == g_khfx_verdict_serial) {
+        if (g_khfx_verdict_held) {
+            memcpy(cbd.depth_params, g_khfx_pair, sizeof(g_khfx_pair));
+            g_khfx_pair_holds++;
+        }
+        return;
+    }
+    g_khfx_verdict_serial = khfx_serial;
+    g_khfx_verdict_held = false;
+    const uint64_t khfx_now = steady_now_ms();
+    const bool khfx_stale = g_khfx_pair_near <= 0.0f ||
+                            (khfx_now - g_khfx_pair_ms) > 500;
+    const float khfx_r = khfx_stale ? 1.0f
+        : (khfx_n > g_khfx_pair_near ? khfx_n / g_khfx_pair_near
+                                     : g_khfx_pair_near / khfx_n);
+
+    if (khfx_stale || khfx_r <= 1.6f) {   // continuous track: adopt
+        memcpy(g_khfx_pair, cbd.depth_params, sizeof(g_khfx_pair));
+        g_khfx_pair_near = khfx_n;
+        g_khfx_cand_near = -1.0f;
+        g_khfx_pair_ms = khfx_now;
+        return;
+    }
+
+    // 26109 BRIDGE WITNESS (ledger above): a genuine jump is
+    // corroborated by the engine's own live main-camera projection
+    // the same flush; adopt with ZERO error frames. Gates mirror the
+    // guard's own (standard-z shape, positive near); any failure
+    // falls through to the hold + two-sighting confirm unchanged.
+    // 26113: the witness verdict is CARRIED into the confirm below -
+    // a valid bridge read that fails the corroboration band is an
+    // active CONTRADICTION of this flush's near (ledger above).
+    bool khfx_bok = false;
+
+    {
+        RVExtBridge::ProjectionViewTransform khfx_bpv = {};
+
+        if (RVExtBridge::get_projection_view_transform(khfx_bpv)) {
+            const float khfx_bm22 = khfx_bpv.projection[2][2];
+            const float khfx_bm32 = khfx_bpv.projection[3][2];
+
+            if (khfx_bm32 < -1.0e-3f && khfx_bm22 > 0.0f) {
+                const float khfx_bn = -khfx_bm32 / khfx_bm22;
+                const float khfx_br = khfx_bn > khfx_n ? khfx_bn / khfx_n
+                                                       : khfx_n / khfx_bn;
+
+                if (khfx_bn > 0.0f) {
+                    khfx_bok = true;
+
+                    if (khfx_br <= 1.25f) {
+                        memcpy(g_khfx_pair, cbd.depth_params, sizeof(g_khfx_pair));
+                        g_khfx_pair_near = khfx_n;
+                        g_khfx_cand_near = -1.0f;
+                        g_khfx_pair_ms = khfx_now;
+                        g_khfx_bridge_adopts++;
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    if (g_khfx_cand_near > 0.0f) {
+        const float khfx_cr = khfx_n > g_khfx_cand_near
+                            ? khfx_n / g_khfx_cand_near
+                            : g_khfx_cand_near / khfx_n;
+        if (khfx_cr <= 1.25f) {   // second consecutive sighting
+            // 26113: reaching here with a VALID bridge read means the
+            // bridge fell through the band above = it CONTRADICTS the
+            // candidate - persistence proves foreignness can repeat,
+            // not genuineness. Veto: keep holding (the hold path
+            // below runs; cand refreshes; holds tick). Bridge-dead
+            // reads keep the 26106 confirm - the genuine-cut
+            // fallback.
+            if (khfx_bok) {
+                g_khfx_confirm_vetoes++;
+            } else {
+                memcpy(g_khfx_pair, cbd.depth_params, sizeof(g_khfx_pair));
+                g_khfx_pair_near = khfx_n;
+                g_khfx_cand_near = -1.0f;
+                g_khfx_pair_ms = khfx_now;
+                g_khfx_pair_jump_adopts++;
+                return;
+            }
+        }
+    }
+
+    g_khfx_cand_near = khfx_n;
+    g_khfx_pair_ms = khfx_now;   // the latch stays fresh while holding
+    g_khfx_verdict_held = true;  // 26108: replayed by this flush's later draws
+    memcpy(cbd.depth_params, g_khfx_pair, sizeof(g_khfx_pair));
+    g_khfx_pair_holds++;
 }
 
 // The composited path counts as healthy while injections are actually
@@ -9727,7 +11279,7 @@ static uint32_t g_fk_veto_cand_n = 0;       // candidates staged at the last pas
                                             // is live in this scene)
 // BUILD TAG (doctrine: bump on EVERY delivered build; stats-visible so a
 // field log names the binary it came from).
-static constexpr int KH_BUILD_TAG = 26095;
+static constexpr int KH_BUILD_TAG = 26123;
 // NEAR-GAP RAMP (build 26001; the RenderDoc conviction). ROOT, proven by
 // pixel history + depth-window plateaus: the world partition's viewport
 // floor (0.011 in the convicting capture) collapses EVERY fragment nearer
@@ -20574,7 +22126,14 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             g_fog_eng_dbg[2] = khr_cbf.fog_engine[2];   // inverse range (nb 49)
             g_fog_eng_dbg[3] = khr_cbf.fog_engine[3];   // engine-branch armed
 
-            khr_cbf.fog_color[3] = g_ls.cam[1];   // camera altitude (engine Y-up)
+            // 26105 CAMERA-ALTITUDE FAILSAFE - injection twin (full
+            // ledger at the flush fill): the pass camera stands in
+            // while the injection-recorded camera is cold.
+            khr_cbf.fog_color[3] =
+                (g_ls.cam[0] * g_ls.cam[0] + g_ls.cam[1] * g_ls.cam[1] +
+                 g_ls.cam[2] * g_ls.cam[2] >= 1.0f) ? g_ls.cam[1]
+              : (cam[0] * cam[0] + cam[1] * cam[1] + cam[2] * cam[2] >= 1.0f)
+                 ? cam[1] : 0.0f;   // camera altitude (engine Y-up)
         }
     }
     // Heightfield lanes, BOTH arms - the terrain lane never depends on
@@ -23207,14 +24766,20 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     // per flush while a custom exists; the lesson's ledger lives at
     // the 26080 build entry ("any new consumer of invViewProj must
     // join every need_inverse predicate").
+    // (26099: Ssgi LEFT these predicates - its reconstruction moved to
+    // view space and it consumes no invViewProj; ledger at the enum.)
+    // (26104: Fogscatter JOINED - WorldPos supplies the fog integral's
+    // height term; ledger at the enum.)
     for (const auto& o : meshes) {
         if (o.localized || o.effect == static_cast<int>(EffectId::Pulse) ||
+            o.effect == static_cast<int>(EffectId::Fogscatter) ||
             o.effect == KH_EFFECT_CUSTOM) { need_inverse = true; break; }
     }
 
     if (!need_inverse) {
         for (const auto& f : fullscreen) {
             if (f.second.localized || f.second.effect == static_cast<int>(EffectId::Pulse) ||
+                f.second.effect == static_cast<int>(EffectId::Fogscatter) ||
                 f.second.effect == KH_EFFECT_CUSTOM) { need_inverse = true; break; }
         }
     }
@@ -23341,6 +24906,8 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                o.effect == static_cast<int>(EffectId::Pulse) ||
                o.effect == static_cast<int>(EffectId::Fog) ||
                o.effect == static_cast<int>(EffectId::SunFlare) ||
+               o.effect == static_cast<int>(EffectId::Ssgi) ||   // 26096; 26103: gather + resolve read live depth
+               o.effect == static_cast<int>(EffectId::Fogscatter) ||   // 26104: live depth is the scatter's distance authority
                o.effect == KH_EFFECT_CUSTOM;   // user shaders may sample depth
     };
 
@@ -23382,12 +24949,35 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         depth_fx_ready = effects_ready && any_depth_fx &&
                          g_res.depth_srv && g_res.depth_dsv_ro;
 
-        // Pulse needs the inverse matrix as well
+        // Pulse needs the inverse matrix as well; 26104: Fogscatter
+        // joined (WorldPos height in the fog integral - the need_inverse
+        // ledger at the enum). Same demotion, same fail direction.
         if (!has_inverse) {
             for (auto& o : meshes)
-                if (o.effect == static_cast<int>(EffectId::Pulse)) o.effect = 0;
+                if (o.effect == static_cast<int>(EffectId::Pulse) ||
+                    o.effect == static_cast<int>(EffectId::Fogscatter)) o.effect = 0;
             for (auto& f : fullscreen)
-                if (f.second.effect == static_cast<int>(EffectId::Pulse)) f.second.effect = 0;
+                if (f.second.effect == static_cast<int>(EffectId::Pulse) ||
+                    f.second.effect == static_cast<int>(EffectId::Fogscatter)) f.second.effect = 0;
+        }
+
+        // 26096 SSGI stand-down (Pulse's exact demotion pattern);
+        // 26099: the inverse condition LEFT with the view-space
+        // reconstruction - live depth (t1 via the read-only DSV swap)
+        // is the branch's only resource now. Without it, demote for
+        // the frame - a mesh becomes a solid, a fullscreen pass is
+        // dropped by the chain's effect <= 0 skip - rather than
+        // gather through an unbound t1. Fail direction: one fx-less
+        // frame.
+        // (26104: Fogscatter joined the stand-down - live depth is its
+        // distance authority; same demotion, same fail direction.)
+        if (!depth_fx_ready) {
+            for (auto& o : meshes)
+                if (o.effect == static_cast<int>(EffectId::Ssgi) ||
+                    o.effect == static_cast<int>(EffectId::Fogscatter)) o.effect = 0;
+            for (auto& f : fullscreen)
+                if (f.second.effect == static_cast<int>(EffectId::Ssgi) ||
+                    f.second.effect == static_cast<int>(EffectId::Fogscatter)) f.second.effect = 0;
         }
 
         if (!effects_ready) {
@@ -23698,7 +25288,19 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             g_fog_dbg[2] = khf_cbf.fog_color[2];
             g_fog_dbg[3] = khf_cbf.fog_params[3];
 
-            khf_cbf.fog_color[3] = g_ls.cam[1];   // camera altitude (engine Y-up)
+            // 26105 CAMERA-ALTITUDE FAILSAFE (dump3 conviction:
+            // camAltM read 0 for the whole session - the injection-
+            // recorded camera fills only after the first composite
+            // injection, and a MESH-LESS session never injects). The
+            // pass's own extracted camera is live every flush; the
+            // ClipEdgeSliver rule (a near-zero camera cannot be a
+            // real world camera on RV terrain) picks between them.
+            // Twin at the injection fill.
+            khf_cbf.fog_color[3] =
+                (g_ls.cam[0] * g_ls.cam[0] + g_ls.cam[1] * g_ls.cam[1] +
+                 g_ls.cam[2] * g_ls.cam[2] >= 1.0f) ? g_ls.cam[1]
+              : (cam[0] * cam[0] + cam[1] * cam[1] + cam[2] * cam[2] >= 1.0f)
+                 ? cam[1] : 0.0f;   // camera altitude (engine Y-up)
         }
     }
     // Heightfield lanes, BOTH arms - pass-level now: solids always
@@ -23764,6 +25366,20 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             cbd.fx1[1] = g_rain_vel[1];
             cbd.fx1[2] = g_rain_vel[2];
             cbd.fx1[3] = g_rain_phase;   // 26081: the integrated rain clock
+        }
+
+        // 26109: FOGSCATTER's fx[4..11] are SYSTEM lanes by contract -
+        // chain passes get them REPACKED right after this fill
+        // (kh_fogscatter_pack at the defer site), but a MESH-BORNE or
+        // localized-mesh fogscatter used to ship the user's params
+        // [4..11] verbatim, where KhFsFog's fog-pass loop would read
+        // them as PHANTOM fog records (fs_e.w = params[7] arms one).
+        // Zero them for every fogscatter fill: the mesh footprint
+        // scatters by the ENGINE fog alone, honoring the ledger at
+        // kh_fogscatter_pack.
+        if (o.effect == static_cast<int>(EffectId::Fogscatter)) {
+            memset(cbd.fx1, 0, sizeof(cbd.fx1));
+            memset(cbd.fx2, 0, sizeof(cbd.fx2));
         }
 
         // Solid meshes repurpose fx0.xyz (unused effect params at effect 0)
@@ -24457,7 +26073,231 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             auto khfp_flush = [&](bool khfp_final) {
                 if (!khfp_live) return;
                 khfp_live = false;
-                if (!kh_upload_obj_cb(ctx, g_res.constant_buffer, khfp_cbd)) return;
+                // 26101 SSGI RESOLVE PAIR (ledger at the effect-24
+                // branch): an ssgi pass flushes as TWO draws. The
+                // gather renders RAW bounce into chain buffer 2, then
+                // the normal body below draws the internal RESOLVE
+                // (fx_meta.x rewritten to 24) exactly like any pass -
+                // same t0 source, same ping-pong-or-final target, tail
+                // and fusion intact - with the (pre-smoothed) gather
+                // at t3. One timestamp bracket spans the whole group
+                // (fxTopFxId reports 22 at its total cost). A missing
+                // gather buffer drops the pass whole: fail direction
+                // is one fx-less frame, never a raw-GI frame on
+                // screen. 26111: an a-trous pre-smooth rides between
+                // gather and resolve (ledger at the effect-25
+                // branch); ITS buffer missing merely skips that draw.
+                bool khsg_pair = false;
+                // 26112: the resolve reads whichever half-res buffer
+                // holds the FINAL smoothed field (two a-trous
+                // iterations ping-pong [2]->[3]->[2]; a failed
+                // iteration leaves the pointer at the last good
+                // stage - raw gather included).
+                ID3D11ShaderResourceView* khsg_fin = nullptr;
+                ID3D11SamplerState* khsg_s1old = nullptr;
+                if (khfp_effect == static_cast<int>(EffectId::Ssgi) && !khfp_ps) {
+                    if (!g_res.chain_srv[2] || !g_res.chain_srv[4] ||
+                        !g_res.chain_rtv[4] || !g_res.khsg_sampler) return;   // 26116: pyramid joins the drop-whole gate
+                    ctx->PSGetSamplers(1, 1, &khsg_s1old);   // 26103: restored after the resolve
+                    // 26115: the gather + a-trous draws receive the
+                    // scaled-grid -> full-grid factor through the
+                    // local0.y lane (its ledger at g_khsg_scale);
+                    // BOTH internal lanes are saved here and restored
+                    // before the resolve upload - a localized ssgi's
+                    // mask center lives in local0 and the resolve's
+                    // tail reads it.
+                    const float khsg_l0sv = khfp_cbd.local0[0];
+                    const float khsg_l1sv = khfp_cbd.local0[1];
+                    // 26122: [2]/[3] join the save - the pyramid
+                    // level loop rides them (source dims for the
+                    // downsample); a localized ssgi's mask center z
+                    // and shape live there and the resolve's tail
+                    // reads them.
+                    const float khsg_l2sv = khfp_cbd.local0[2];
+                    const float khsg_l3sv = khfp_cbd.local0[3];
+                    khfp_cbd.local0[1] = (float)g_res.scene_w / (float)(g_khsg_w > 0 ? g_khsg_w : 1);
+                    // 26112: the linear sampler now serves the WHOLE
+                    // group - the gather's mip taps need it too, not
+                    // just the resolve's upsample. Same save/restore
+                    // bracket.
+                    ctx->PSSetSamplers(1, 1, &g_res.khsg_sampler);
+                    // 26104: PSGetSamplers AddRef'd the prior s1 - the
+                    // failure exits below used to LEAK that reference
+                    // (Map failure = device-removed territory in
+                    // practice, but the save/restore doctrine is exact
+                    // or it is nothing). Both exits release; s1 itself
+                    // is untouched at either point, so no restore is
+                    // owed. Twin at the body upload.
+                    if (!kh_upload_obj_cb(ctx, g_res.constant_buffer, khfp_cbd)) {
+                        if (khsg_s1old) khsg_s1old->Release();
+                        return;
+                    }
+                    ctx->PSSetShader(g_res.ps_effect, nullptr, 0);
+                    ID3D11ShaderResourceView* khsg_null = nullptr;
+                    ctx->PSSetShaderResources(0, 1, &khsg_null);
+                    ctx->OMSetRenderTargets(1, &g_res.chain_rtv[2], nullptr);
+                    // 26102: the gather draws on the HALF viewport; the
+                    // saved one is restored before the resolve body.
+                    D3D11_VIEWPORT khsg_vps; UINT khsg_vpn = 1;
+                    ctx->RSGetViewports(&khsg_vpn, &khsg_vps);
+                    D3D11_VIEWPORT khsg_vph = {};
+                    khsg_vph.Width    = (float)(g_khsg_w > 0 ? g_khsg_w : 1);   // 26115: scaled grid
+                    khsg_vph.Height   = (float)(g_khsg_h > 0 ? g_khsg_h : 1);
+                    khsg_vph.MaxDepth = 1.0f;
+                    ctx->RSSetViewports(1, &khsg_vph);
+                    // 26116 RADIANCE PYRAMID SEED + MIPS (ledger at
+                    // ensure_fx_chain's [4]): one scaled-grid draw
+                    // (internal effect 26) downsamples the true
+                    // source into pyramid mip 0, then fp16 autogen
+                    // builds the continuous averages the gather's
+                    // taps read. Order: seed on [4], RT moves OFF
+                    // [4] before its SRV feeds GenerateMips, then
+                    // the gather binds the pyramid at t3 (free
+                    // until the a-trous rebinds it). fx_meta is
+                    // rewritten 26 -> 22 across the two uploads.
+                    khfp_cbd.fx_meta[0] = 26.0f;
+                    if (!kh_upload_obj_cb(ctx, g_res.constant_buffer, khfp_cbd)) {
+                        if (khsg_s1old) khsg_s1old->Release();
+                        return;
+                    }
+                    ctx->OMSetRenderTargets(1, &g_res.chain_rtv[4], nullptr);
+                    ctx->PSSetShaderResources(0, 1, &src_srv);
+                    ctx->Draw(3, 0);
+                    // 26122 MANUAL PYRAMID (ledger at ensure_fx_chain:
+                    // GenerateMips' box decimation RETIRED - it
+                    // aliased at every level, the ring family and the
+                    // motion/rotation phasing both). Each level draws
+                    // through the disjoint per-mip views with the
+                    // wide-tent kernel (effect 27); source dims ride
+                    // local0.zw. A missing view set falls back to the
+                    // old autogen - one aliased-pyramid frame class,
+                    // never a lost pass.
+                    if (g_res.khsg_pyr_levels > 1) {
+                        khfp_cbd.fx_meta[0] = 27.0f;
+                        int khsg_lw = g_khsg_w > 0 ? g_khsg_w : 1;
+                        int khsg_lh = g_khsg_h > 0 ? g_khsg_h : 1;
+
+                        for (int khsg_m = 1; khsg_m < g_res.khsg_pyr_levels; ++khsg_m) {
+                            khfp_cbd.local0[2] = (float)khsg_lw;   // SOURCE level dims
+                            khfp_cbd.local0[3] = (float)khsg_lh;
+                            if (!kh_upload_obj_cb(ctx, g_res.constant_buffer, khfp_cbd)) break;
+                            khsg_lw = khsg_lw > 1 ? khsg_lw / 2 : 1;
+                            khsg_lh = khsg_lh > 1 ? khsg_lh / 2 : 1;
+                            D3D11_VIEWPORT khsg_vpm = {};
+                            khsg_vpm.Width    = (float)khsg_lw;
+                            khsg_vpm.Height   = (float)khsg_lh;
+                            khsg_vpm.MaxDepth = 1.0f;
+                            ctx->OMSetRenderTargets(1, &g_res.khsg_mip_rtv[khsg_m], nullptr);
+                            ctx->RSSetViewports(1, &khsg_vpm);
+                            ctx->PSSetShaderResources(3, 1, &g_res.khsg_mip_srv[khsg_m - 1]);
+                            ctx->Draw(3, 0);
+                        }
+
+                        ID3D11ShaderResourceView* khsg_pn = nullptr;
+                        ctx->PSSetShaderResources(3, 1, &khsg_pn);
+                        ctx->RSSetViewports(1, &khsg_vph);   // back to the gather grid
+                    } else {
+                        ctx->GenerateMips(g_res.chain_srv[4]);
+                    }
+                    ctx->OMSetRenderTargets(1, &g_res.chain_rtv[2], nullptr);
+                    khfp_cbd.fx_meta[0] = 22.0f;
+                    if (!kh_upload_obj_cb(ctx, g_res.constant_buffer, khfp_cbd)) {
+                        if (khsg_s1old) khsg_s1old->Release();
+                        return;
+                    }
+                    ctx->PSSetShaderResources(3, 1, &g_res.chain_srv[4]);
+                    ctx->Draw(3, 0);   // the gather (t0 = source for albedo, t3 = pyramid taps)
+                    khsg_fin = g_res.chain_srv[2];   // raw gather until smoothing lands
+                    // 26111 A-TROUS PRE-SMOOTH (middle draw; ledger at
+                    // the effect-25 branch): still on the HALF
+                    // viewport, chain[2] -> chain[3]; the resolve then
+                    // upsamples the SMOOTHED field. The RT moves to
+                    // [3] BEFORE [2] binds at t3 (the read-write
+                    // hazard rule, the 26101 comment's twin). Missing
+                    // buffer or a failed upload skips the draw whole -
+                    // the resolve reads the raw gather as before (one
+                    // noisier frame class, never a lost pass).
+                    // 26112: TWO iterations now (spread 1 then 2 - the
+                    // proper a-trous sequence; operator round two: one
+                    // iteration left sparse-emitter noise standing).
+                    // The spread rides local0.x for id 25 only (the
+                    // tail never runs there); the lane is SAVED and
+                    // RESTORED because the RESOLVE's re-upload reads
+                    // this same struct and a localized ssgi's mask
+                    // center lives in it.
+                    if (g_res.chain_rtv[3] && g_res.chain_srv[3]) {
+                        khfp_cbd.fx_meta[0] = 25.0f;
+                        khfp_cbd.local0[0] = 1.0f;   // iteration A: spread 1
+
+                        if (kh_upload_obj_cb(ctx, g_res.constant_buffer, khfp_cbd)) {
+                            ctx->OMSetRenderTargets(1, &g_res.chain_rtv[3], nullptr);
+                            ctx->PSSetShaderResources(3, 1, &g_res.chain_srv[2]);
+                            ctx->Draw(3, 0);
+                            ID3D11ShaderResourceView* khsg_n3 = nullptr;
+                            ctx->PSSetShaderResources(3, 1, &khsg_n3);
+                            khsg_fin = g_res.chain_srv[3];
+
+                            khfp_cbd.local0[0] = 2.0f;   // iteration B: spread 2, back into [2]
+                            if (kh_upload_obj_cb(ctx, g_res.constant_buffer, khfp_cbd)) {
+                                ctx->OMSetRenderTargets(1, &g_res.chain_rtv[2], nullptr);
+                                ctx->PSSetShaderResources(3, 1, &g_res.chain_srv[3]);
+                                ctx->Draw(3, 0);
+                                ctx->PSSetShaderResources(3, 1, &khsg_n3);
+                                khsg_fin = g_res.chain_srv[2];
+
+                                // 26120: iteration C, spread 4 (the
+                                // proper doubling's third rung;
+                                // measurement: ~1.2 LSB fine noise
+                                // still on the lit band). Same
+                                // ping-pong contract: a failed upload
+                                // leaves the pointer at B's output.
+                                khfp_cbd.local0[0] = 4.0f;
+                                if (kh_upload_obj_cb(ctx, g_res.constant_buffer, khfp_cbd)) {
+                                    ctx->OMSetRenderTargets(1, &g_res.chain_rtv[3], nullptr);
+                                    ctx->PSSetShaderResources(3, 1, &g_res.chain_srv[2]);
+                                    ctx->Draw(3, 0);
+                                    ctx->PSSetShaderResources(3, 1, &khsg_n3);
+                                    khsg_fin = g_res.chain_srv[3];
+                                }
+                            }
+                        }
+
+                    }
+                    // 26115: both internal lanes back before the
+                    // resolve upload (the save's ledger above).
+                    khfp_cbd.local0[0] = khsg_l0sv;
+                    khfp_cbd.local0[1] = khsg_l1sv;
+                    khfp_cbd.local0[2] = khsg_l2sv;   // 26122
+                    khfp_cbd.local0[3] = khsg_l3sv;
+                    if (khsg_vpn) {
+                        ctx->RSSetViewports(1, &khsg_vps);
+                    } else {
+                        khsg_vph.Width  = (float)g_res.scene_w;
+                        khsg_vph.Height = (float)g_res.scene_h;
+                        ctx->RSSetViewports(1, &khsg_vph);
+                    }
+                    // 26119 SCALE-AWARE AUTO SPREAD (operator
+                    // observation: the gather-grid mesh noise eases
+                    // at larger setSsgiScale - the resolve's FIXED
+                    // full-px spread stops averaging ACROSS gather
+                    // texels once they outgrow it at coarse scales.
+                    // When the spread param is AUTO (< 0.5) the
+                    // flush writes the scale-matched value 1.5 x
+                    // inv: identical 3.0 at the 0.5 default, wider
+                    // at coarser grids, tighter (sharper) at full
+                    // res. Explicit user values pass through
+                    // untouched; the shader's own auto stays as the
+                    // belt. No restore owed: khfp_cbd is per-pass.
+                    if (khfp_cbd.fx2[3] < 0.5f)
+                        khfp_cbd.fx2[3] = 1.5f * ((float)g_res.scene_w
+                                        / (float)(g_khsg_w > 0 ? g_khsg_w : 1));
+                    khfp_cbd.fx_meta[0] = 24.0f;   // the body now draws the resolve
+                    khsg_pair = true;
+                }
+                if (!kh_upload_obj_cb(ctx, g_res.constant_buffer, khfp_cbd)) {
+                    if (khsg_s1old) khsg_s1old->Release();   // 26104: pair-path ref (leak-fix twin above; null on every non-pair path)
+                    return;
+                }
                 if (khfp_lut) ctx->PSSetShaderResources(19, 1, &khfp_lut);
                 ctx->PSSetShader(khfp_ps ? khfp_ps : g_res.ps_effect, nullptr, 0);
                 // Unbind the source slot before binding it as RTV next round
@@ -24466,7 +26306,24 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                 if (khfp_final) ctx->OMSetRenderTargets(1, &saved_chain_rtv, saved_chain_dsv);
                 else            ctx->OMSetRenderTargets(1, &g_res.chain_rtv[write_idx], nullptr);
                 ctx->PSSetShaderResources(0, 1, &src_srv);
+                // 26101: gather at t3 for the resolve draw (bound AFTER
+                // the OM above moved the RTV off buffer 2 - binding it
+                // earlier would be a read-write hazard the runtime
+                // resolves by silently nulling the SRV); unbound right
+                // after the draw so no other pass ever sees it.
+                if (khsg_pair) {
+                    // 26112: the resolve reads the FINAL smoothed field
+                    // (the iteration bookkeeping above); s1 has been
+                    // linear since the group opened.
+                    ctx->PSSetShaderResources(3, 1, &khsg_fin);
+                }
                 ctx->Draw(3, 0);
+                if (khsg_pair) {
+                    ID3D11ShaderResourceView* khsg_n2 = nullptr;
+                    ctx->PSSetShaderResources(3, 1, &khsg_n2);
+                    ctx->PSSetSamplers(1, 1, &khsg_s1old);   // 26103: exact prior binding back
+                    if (khsg_s1old) { khsg_s1old->Release(); khsg_s1old = nullptr; }
+                }
 
                 if (khts_arm && khts_pass_n < 16) {
                     ctx->End(g_res.ts_stamp[khts_slot][3 + khts_pass_n * 2]);
@@ -24496,6 +26353,12 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                 // the legacy full-res gathers are the only path again
                 // (dbgCtl.y is permanently 0 and t20/s0 reservations
                 // are historical).
+                // (26102 AMENDMENT: the operator DIRECTED a half-res
+                // SSGI gather for performance - with the depth-guided
+                // bilateral resolve as exactly the field-approved
+                // upsampling treatment this tombstone demanded. Scope:
+                // SSGI's side buffer ONLY; the legacy gather effects
+                // remain full-res.)
 
                 // CUSTOM EFFECT: the pass draws with the user PS; absent
                 // or failed compiles skip the pass (reported once).
@@ -24528,6 +26391,20 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                 khfp_flush(false);
                 if (khts_arm && khts_pass_n < 16) ctx->End(g_res.ts_stamp[khts_slot][2 + khts_pass_n * 2]);
                 if (!upload_cb(f.second, true, &khfp_cbd)) continue;
+                // 26104: fogscatter's SYSTEM lanes (ledger at
+                // kh_fogscatter_pack) - packed after the user copy,
+                // by contract.
+                if (f.second.effect == static_cast<int>(EffectId::Fogscatter))
+                    kh_fogscatter_pack(khfp_cbd, fullscreen);
+                // 26106/26107/26108: every depth-consuming chain draw
+                // reads the scene through the churn-latched pair - the
+                // needs_depth predicate is the one truth (ledger at
+                // kh_fx_depth_pair_guard; the ssgi resolve reuses this
+                // slice and is covered by construction; the serial keys
+                // the per-flush verdict replay).
+                if (needs_depth(f.second))
+                    kh_fx_depth_pair_guard(khfp_cbd,
+                        g_cc_flush_serial.load(std::memory_order_relaxed));
                 khfp_effect = f.second.effect;
                 khfp_ps = khc_ufx;
                 khfp_lut = khc_lut;
@@ -25167,7 +27044,8 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
     for (const auto& f : passes) {
         // 26083: customs joined (invViewProj contract; ledger at the
-        // scene flush's twin predicate).
+        // scene flush's twin predicate). 26096: Ssgi joined; 26099:
+        // Ssgi left (view-space reconstruction).
         if (f.second.localized || f.second.effect == static_cast<int>(EffectId::Pulse) ||
             f.second.effect == KH_EFFECT_CUSTOM) { need_inverse = true; break; }
     }
@@ -25471,10 +27349,25 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             o.effect == static_cast<int>(EffectId::Pulse) ||
             o.effect == static_cast<int>(EffectId::Fog) ||
             o.effect == static_cast<int>(EffectId::SunFlare) ||
+            // (26103 cleanup: the Ssgi term left this predicate - the
+            // scene-phase-only reject below makes it unreachable.)
             o.effect == KH_EFFECT_CUSTOM;   // user shaders may sample depth
 
         if (wants_depth && !depth_ok) continue;
-        if ((o.localized || o.effect == static_cast<int>(EffectId::Pulse)) && !has_inverse) continue;
+        if ((o.localized || o.effect == static_cast<int>(EffectId::Pulse)) && !has_inverse) continue;   // (26099: Ssgi left - view space)
+        // 26101: SSGI is SCENE-PHASE ONLY. The resolve pair (gather ->
+        // bilateral; ledger at the scene flush's khsg_pair block) is
+        // synthesized by the scene chain - a write-window ssgi would
+        // draw the raw gather half with no resolve. Reject here.
+        if (o.effect == static_cast<int>(EffectId::Ssgi)) continue;
+        // 26104: Fogscatter is SCENE-PHASE ONLY too - the scatter
+        // density reads the scene fog CB terms and the SYSTEM lanes
+        // only the SCENE chain packs (kh_fogscatter_pack); a write-
+        // window draw would read unpacked lanes over a post-tonemap
+        // frame. Reject here; its wants_depth / need_inverse terms
+        // stay out of the window's predicates (unreachable - the
+        // ssgi 26103 pattern).
+        if (o.effect == static_cast<int>(EffectId::Fogscatter)) continue;
 
         // 26062 LANE CLASSIFICATION (the systemic gather treatment): SPILL
         // lane = additive/black-preserving effects - the builtin gather
@@ -25914,6 +27807,11 @@ inline void reset_stat_counters() {
     g_far_keep_m22 = 0.0f; g_far_keep_m32 = 0.0f; g_far_keep_far = -1.0f; g_far_keep_ms = 0;
     g_inj_slot_band_rejects = 0; g_inj_slot_rej_near = -1.0f;
     g_latch_holds = 0; g_latch_hold_dist = -1.0f; g_latch_jump_adopts = 0;
+    // 26109: the fx depth-pair guard's CENSUS joins its cycle-latch
+    // siblings here (the pair latch itself is NOT reset: state, not
+    // census - the ui_cov_suspect rule).
+    g_khfx_pair_holds = 0; g_khfx_pair_jump_adopts = 0; g_khfx_bridge_adopts = 0;
+    g_khfx_confirm_vetoes = 0;   // 26113
     g_ls.latches = 0; g_ls.resolve_hits = 0; g_ls.resolve_draws = 0;
     g_ls.resolve_cb_found = 0; g_ls.resolve_gated = 0;
     g_ls.band_captures = 0; g_ls.band_bail_pv = 0; g_ls.band_bail_off = 0;
@@ -26053,6 +27951,12 @@ inline void reset_session_state() {
     g_far_keep_m22 = 0.0f; g_far_keep_m32 = 0.0f; g_far_keep_far = -1.0f; g_far_keep_ms = 0;
     g_inj_slot_band_rejects = 0; g_inj_slot_rej_near = -1.0f;
     g_latch_holds = 0; g_latch_hold_dist = -1.0f; g_latch_jump_adopts = 0;
+    // 26109: fx depth-pair guard - census AND pair latch both fall at
+    // session teardown (the g_far_keep / g_inj_enc pattern above).
+    g_khfx_pair_holds = 0; g_khfx_pair_jump_adopts = 0; g_khfx_bridge_adopts = 0;
+    g_khfx_confirm_vetoes = 0;   // 26113
+    g_khfx_pair_near = -1.0f; g_khfx_cand_near = -1.0f; g_khfx_pair_ms = 0;
+    g_khfx_verdict_serial = ~0ull; g_khfx_verdict_held = false;
     g_boundary_pv_valid = false;   // session teardown: no stale cross-mission sample
     g_boundary_t = -1.0f;
     g_live_near_ref = -1.0f; g_live_ref_m22 = 0.0f; g_live_ref_m32 = 0.0f;

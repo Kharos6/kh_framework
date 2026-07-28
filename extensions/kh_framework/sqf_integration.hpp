@@ -7143,6 +7143,8 @@ static game_value set_render_debug_sqf(game_value_parameter arg) {
                             khd_m == 25 ||                    // cast viewport A/B: live grid (pristine) instead of frozen
                             khd_m == 26 ||                    // lock-settle cast hold off (diagnostic)
                             khd_m == 27 ||                    // 26069: UI coverage debug view (write window)
+                            khd_m == 30 ||                    // 26125: matrix-defect repair bypass (pristine A/B;
+                                                              // moved off 27 - the 26124 collision)
                             khd_m == 28;                      // 26092-26093 adaptive-floor opt-in - RETIRED
                                                               // to an accepted no-op at 26094 (adaptive is
                                                               // the default now; kept for script compat).
@@ -7659,6 +7661,29 @@ static game_value get_render_stats_sqf() {
         out.push_back(kvf("sunChurnMaxDeg", RenderIntegration::g_sun_churn_max_deg));
         out.push_back(kvf("camStepMaxM", RenderIntegration::g_cam_step_max));
         out.push_back(kvf("fireCamDeltaMaxM", RenderIntegration::g_fire_cam_delta_max));
+        out.push_back(kvf("fireOrthoDefect", RenderIntegration::g_fire_ortho_defect));
+        out.push_back(kvf("fireOrthoDefectMax", RenderIntegration::g_fire_ortho_defect_max));
+        out.push_back(kvf("fireCamSkewM", RenderIntegration::g_fire_cam_skew_m));
+        out.push_back(kvf("fireCamSkewMaxM", RenderIntegration::g_fire_cam_skew_max));
+        out.push_back(kv("sunTravelWitnessVetoes", RenderIntegration::g_sun_travel_witness_vetoes));
+        out.push_back(kv("sunPursuitWitnessHolds", RenderIntegration::g_sun_pursuit_witness_holds));
+        out.push_back(kv("skySunRefValid", static_cast<uint64_t>(RenderIntegration::g_skysun_ref_valid ? 1 : 0)));
+        {
+            float khss_deg = -1.0f;
+
+            if (RenderIntegration::g_skysun_ref_valid) {
+                float khss_d = RenderIntegration::g_skysun_ref[0] * RenderIntegration::g_sun_dir_engine[0] +
+                               RenderIntegration::g_skysun_ref[1] * RenderIntegration::g_sun_dir_engine[1] +
+                               RenderIntegration::g_skysun_ref[2] * RenderIntegration::g_sun_dir_engine[2];
+                khss_d = khss_d > 1.0f ? 1.0f : (khss_d < -1.0f ? -1.0f : khss_d);
+                khss_deg = acosf(khss_d) * 57.29578f;
+            }
+
+            out.push_back(kvf("skySunVsPubDeg", khss_deg));
+        }
+        out.push_back(kvf("skySunMotDeg", RenderIntegration::g_skysun_mot_deg));
+        out.push_back(kv("sunMapCalmRolls", RenderIntegration::g_sun_mat_calm_rolls));
+        out.push_back(kv("relockRecvWipes", RenderIntegration::g_relock_recv_wipes));
         // GRID-COHERENCE CENSUS (campaign 5): the S4 conviction numbers.
         out.push_back(kv("fireDimsIncoherent", RenderIntegration::g_fire_dims_incoh_total));
         out.push_back(kvf("fireDimsDivMaxPx", RenderIntegration::g_fire_dims_div_max));

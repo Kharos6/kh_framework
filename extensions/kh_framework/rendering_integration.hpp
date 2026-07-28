@@ -3223,6 +3223,17 @@ StructuredBuffer<float4> khrLocalityExt : register(t2);
         bool near_ok = false;
         float stretch = 2.0f + 3.0f / max(abs(castView[2].y), 0.15f);
 
+        // MASSIVE-CASTER LOCALITY (26132; dump115): the reach was a
+        // center-distance sphere capped at 600 m, and a caster BIGGER
+        // than the cap exits its own reach - the field session had the
+        // camera inside a ~1290 m box, 617 m from its center (map fitted
+        // and fresh, halfDiag 1118, casts firing): zero darkening in the
+        // whole neighborhood, and the smaller box lost its corners. The
+        // test is now distance to the caster's AABB SURFACE (zero inside
+        // the volume): interior and corners are in reach at ANY size,
+        // while the margin keeps the same capped formula measured from
+        // the surface - the far-plane-garbage damage bound the cap was
+        // built for (the overcast lesson) is preserved.
         if (localityMeta.y >= 0.5f) {
             // EXTENDED list (t2, uncapped): same tube-tight test, the
             // caster count is no longer bounded by the CB layout.
@@ -3232,7 +3243,7 @@ StructuredBuffer<float4> khrLocalityExt : register(t2);
                 float3 lce = khrLocalityExt[li * 2].xyz;
                 float3 lhe = khrLocalityExt[li * 2 + 1].xyz;
                 float lr = min(length(lhe) * stretch, 600.0f);
-                float3 ld = lce - pw;
+                float3 ld = max(abs(pw - lce) - lhe, 0.0f);
                 if (dot(ld, ld) < lr * lr) near_ok = true;
             }
         } else if (localityMeta.x >= 0.5f && localityMeta.x <= 16.5f) {
@@ -3242,14 +3253,14 @@ StructuredBuffer<float4> khrLocalityExt : register(t2);
                 float3 lce = locality[li * 2].xyz;
                 float3 lhe = locality[li * 2 + 1].xyz;
                 float lr = min(length(lhe) * stretch, 600.0f);
-                float3 ld = lce - pw;
+                float3 ld = max(abs(pw - lce) - lhe, 0.0f);
                 if (dot(ld, ld) < lr * lr) near_ok = true;
             }
         } else {
             float castR = length(sizeAxes.xyz) * 0.5f;
             float reach = min(castR * stretch, 600.0f);
-            float3 toCast = centerSize.xyz - pw;
-            near_ok = dot(toCast, toCast) < reach * reach;
+            float3 toCast = max(abs(pw - centerSize.xyz) - sizeAxes.xyz * 0.5f, 0.0f);
+            near_ok = dot(toCast, toCast) < reach * reach;   // 26132: AABB-surface (ledger above)
         }
 
         // zl floor 1.2 m: if the captured depth texture transiently holds
@@ -11279,7 +11290,7 @@ static uint32_t g_fk_veto_cand_n = 0;       // candidates staged at the last pas
                                             // is live in this scene)
 // BUILD TAG (doctrine: bump on EVERY delivered build; stats-visible so a
 // field log names the binary it came from).
-static constexpr int KH_BUILD_TAG = 26123;
+static constexpr int KH_BUILD_TAG = 26132;
 // NEAR-GAP RAMP (build 26001; the RenderDoc conviction). ROOT, proven by
 // pixel history + depth-window plateaus: the world partition's viewport
 // floor (0.011 in the convicting capture) collapses EVERY fragment nearer
@@ -11931,6 +11942,28 @@ static bool g_sun_jump_pending = false;
 // these early globals exist because the detector precedes the probe).
 static float g_skysun_ref[3] = { 0, 0, 0 };
 static bool  g_skysun_ref_valid = false;
+static uint64_t g_skysun_ref_ms = 0;   // 26129: last refresh (freshness gate for
+                                       // every witness consumer)
+// 26130 SKY-MOTION GAUGE (dump113 re-key): the published sun holds a
+// STANDING ~2.9 deg offset from the sky lanes - the derivation tracks the
+// engine's CLAMPED shadow light while the sky CB carries the visual sun -
+// so any pub-vs-sky agreement band is structurally inert (both 26128/26129
+// witness belts read 0 engagements while working exactly as written). The
+// witness question is not "does the publish match the sky" but "DID THE
+// SKY ITSELF MOVE": a static sky sun means the real sun is static and any
+// published/derived travel is estimator wobble. Sampled ~1 Hz at the
+// refresh, like the churn gauge.
+static float    g_skysun_mot_ref[3] = {};   // sky dir at the window open
+static uint64_t g_skysun_mot_ref_ms = 0;
+static float    g_skysun_mot_deg = -1.0f;   // last ~1 s sky motion (-1 = no window yet)
+
+// Sky-static predicate for the witness consumers: fresh mirror, an
+// established motion window, and sub-0.3 deg sky movement across it.
+inline bool kh_sky_static() {
+    return g_skysun_ref_valid &&
+           steady_now_ms() - g_skysun_ref_ms < 1000 &&
+           g_skysun_mot_deg >= 0.0f && g_skysun_mot_deg < 0.3f;
+}
 static uint64_t g_sun_jump_refused = 0;   // candidate jumps refused by the engine-sun arbiter
 static uint64_t g_sun_jump_stream_refused = 0;   // flap candidates refused: dying cascade
                                                  // stream (round 10, the unlit episodes)
@@ -12184,6 +12217,13 @@ static constexpr float    KH_SUN_PUB_TRAVEL_DEG = 0.3f;
 static float    g_sun_pub_travel_ref[3] = {};   // published dir at the window open
 static uint64_t g_sun_pub_travel_ref_ms = 0;    // window-open stamp (0 = no window yet)
 static uint64_t g_sun_pub_travel_ms = 0;        // last tripping window (the latch's sun quiet term)
+static uint64_t g_sun_travel_witness_vetoes = 0;   // 26128: travel stamps refused by
+                                                   // the agreeing sky witness (the
+                                                   // look-down blackout's tripwire)
+static uint64_t g_sun_pursuit_witness_holds = 0;   // 26129: glide pursuits held while
+                                                   // the sky witness says the sun is
+                                                   // static and only the derivation
+                                                   // moved (the view-walk class)
 static uint64_t g_sun_derived_view_skips = 0;   // derivation samples refused on a
                                                 // stale or unhealthy pairing view
                                                 // (round 3; the wrong-angle root)
@@ -12297,6 +12337,45 @@ inline void publish_world_lighting() {
                 // step. dp is the glide-path guarantee (>= 0.99863,
                 // <= 3 deg), keeping acosf well-conditioned here.
                 float khs_frac = 0.25f;
+                // SUN PURSUIT WITNESS HOLD (26129; dump112: a 283-frame
+                // cast blackout with publishes exact, map fresh, camera
+                // near-still - the derivation's VIEW-DEPENDENT equilibrium
+                // walked under a close look-down cascade re-fit, the
+                // publish pursued it (43 map re-renders on the float-exact
+                // sun hash inside the window, glide clamps ticking), the
+                // travel detector stamped, and the readiness latch paid
+                // glide + quiet + dwell. The sky CB's own sun is the live
+                // witness (resurrected this build): while it is FRESH, the
+                // PUBLISHED direction agrees with it (< 2 deg - so the
+                // no-clamp regime; a low-sun clamped era never engages
+                // because pub already sits off the sky sun), and the
+                // DERIVED direction has left it (> 2 deg), the pursuit is
+                // HELD - the derivation is measuring cascade layout, not
+                // the sun, and a persistence-shaped estimator may not
+                // outrank an available live witness (the bridge-veto
+                // doctrine). Real moves (skipTime, sun/moon swap) walk the
+                // sky witness too and pursue exactly as before; a stale
+                // witness fails open to today's behavior.
+                // 26130 RE-KEY (dump113: pub-vs-sky reads a STANDING
+                // 2.87 deg - the clamp offset - so the 2 deg agreement
+                // band never engaged; ledger at the sky-motion gauge).
+                // Hold whenever the SKY ITSELF is static and the pursuit
+                // target has left the published direction past the map's
+                // own maturity threshold territory: chasing wobble while
+                // the real sun stands still is exactly what the far-cut
+                // and the blackout were made of. Sub-bar pursuit still
+                // runs, keeping the publish glued to the wobble's mean.
+                if (kh_sky_static()) {
+                    float khsw_pd = g_pub_dir[0] * g_sun_dir_derived[0] +
+                                    g_pub_dir[1] * g_sun_dir_derived[1] +
+                                    g_pub_dir[2] * g_sun_dir_derived[2];
+                    khsw_pd = khsw_pd > 1.0f ? 1.0f : (khsw_pd < -1.0f ? -1.0f : khsw_pd);
+
+                    if (khsw_pd < 0.99998134f) {   // cos(0.35 deg)
+                        khs_frac = 0.0f;   // hold: += 0, clamp census untouched
+                        g_sun_pursuit_witness_holds++;
+                    }
+                }
                 const float khs_dp_cl = dp > 1.0f ? 1.0f : dp;
                 const float khs_full_deg = acosf(khs_dp_cl) * 57.29578f;
 
@@ -12359,14 +12438,29 @@ inline void publish_world_lighting() {
                         g_cand_hold = 0;
                         g_sun_jump_rate_refused++;
                     } else {
+                        // 26131 RE-KEY (dump113/26130 conviction: TWO
+                        // ~3 s blackouts entering with mapOk 0 / sunOk
+                        // 3->1 / mapAgeS -1 - jump WIPES). The 26129
+                        // witness resurrection brought this confirmation
+                        // live for the first time, and its cos(3 deg)
+                        // pub-agreement band sits a hair from the
+                        // STANDING 2.87-2.93 deg clamp offset (the sky
+                        // lanes carry the visual sun; the publish tracks
+                        // the engine's clamped shadow light): the check
+                        // FLICKERED at the boundary, and each confirm-
+                        // side flicker adopted a matured warmup view-
+                        // walk candidate as a real sun move - wiping the
+                        // map and restarting the cold hold. Same cure as
+                        // every other witness consumer this campaign:
+                        // the question is whether the SKY MOVED. A
+                        // static sky refuses adoption outright (the
+                        // candidate is estimator wobble by witness); a
+                        // real move (skipTime, setDate, sun/moon swap)
+                        // walks the sky inside the same 1 s window and
+                        // adopts as before; a dark witness fails open to
+                        // the pre-26129 behavior.
                         bool engine_confirms = true;
-
-                        if (g_skysun_ref_valid) {
-                            const float de = g_skysun_ref[0] * g_pub_dir[0] +
-                                             g_skysun_ref[1] * g_pub_dir[1] +
-                                             g_skysun_ref[2] * g_pub_dir[2];
-                            if (de >= 0.99863f) engine_confirms = false;
-                        }
+                        if (kh_sky_static()) engine_confirms = false;
 
                         // STREAM GATE (round 10, the residual unlit
                         // episodes): the engine confirmation fails open
@@ -12448,7 +12542,38 @@ inline void publish_world_lighting() {
                 kht_dp = kht_dp > 1.0f ? 1.0f : (kht_dp < -1.0f ? -1.0f : kht_dp);
 
                 if (acosf(kht_dp) * 57.29578f > KH_SUN_PUB_TRAVEL_DEG) {
-                    g_sun_pub_travel_ms = kht_now;
+                    // ENGINE-WITNESS VETO (26128; the look-down blackout,
+                    // dump12 conviction): a close look-down re-fits the
+                    // cascades, the view-dependent derivation glides, the
+                    // publish pursues it, and this detector stamped -
+                    // dropping the readiness latch and blacking the cast
+                    // out for glide + quiet + dwell (a measured 241-frame
+                    // zero-cast stretch with the sun map re-rendering
+                    // EVERY frame on the float-exact sun hash while sunOk
+                    // held and publishes stayed exact-class). The sun
+                    // never moved: the engine's own sky-CB sun is the
+                    // live witness, and per the bridge-veto doctrine a
+                    // persistence-shaped detector may not outrank it.
+                    // (26130 superseded the original 2-deg agreement
+                    // band recorded here: the publish holds a STANDING,
+                    // elevation-dependent clamp offset from the sky
+                    // lanes - measured 2.9 deg at 23 deg elevation and
+                    // 0.18 deg in a later session - so agreement bands
+                    // are structurally unreliable. The refusal below is
+                    // keyed on kh_sky_static: the sky's own motion.)
+                    bool khtw_stamp = true;
+
+                    // 26130 RE-KEY (ledger at the sky-motion gauge): the
+                    // pub-vs-sky band was inert against the standing
+                    // clamp offset; the stamp is refused while the SKY
+                    // sun itself is static - a real move walks the sky
+                    // within the same window and stamps as before.
+                    if (kh_sky_static()) {
+                        khtw_stamp = false;
+                        g_sun_travel_witness_vetoes++;
+                    }
+
+                    if (khtw_stamp) g_sun_pub_travel_ms = kht_now;
                 }
 
                 g_sun_pub_travel_ref[0] = g_pub_dir[0];
@@ -12681,6 +12806,16 @@ struct LiveShadowState {
     bool view_src_relative = false;           // engine view is camera-relative (t ~ 0)
     bool view_src_valid = false;
     uint32_t pub_rej_streak = 0;     // consecutive bridge-truth publish rejections
+    bool pub_ok_since_lock = false;  // 26128: this lock has passed at least one
+                                     // bridge-truth publish. A NEVER-CONFIRMED
+                                     // lock is kicked at a short streak (8, ~130
+                                     // ms) - a correct lock accepts within a
+                                     // frame or two (the exactness doctrine), so
+                                     // eight straight rejects from birth IS the
+                                     // wrong-lock cold (coldPubRejects 40 in
+                                     // every bad session was the old full bar
+                                     // being paid before the kick); a confirmed
+                                     // lock keeps the motion-tolerant 40.
     uint32_t view_src_miss = 0;
     uint64_t view_locks = 0;
     uint64_t view_relocks = 0;   // source-memory relocks (dropped lock re-validated exact)
@@ -13033,6 +13168,7 @@ static uint32_t g_stage_rej_vis = 0;      // rejected: invisible / not composite
 static uint64_t g_recv_term_skips = 0;    // lit meshes drawn WITHOUT the received-shadow term
 static uint64_t g_recv_wipes = 0;         // sun-jump boundary wipes of the live table
 static uint64_t g_view_relock_forced = 0; // locks dropped by the publish-reject streak
+static uint64_t g_relock_recv_wipes = 0;  // 26128: receive tables/seals wiped with a kicked lock
 static uint64_t g_lock_wipes = 0;         // live-table wipes at view-lock adoption
 static uint32_t g_stage_rej_exp = 0;      // rejected: lifetime expired
 static float    g_pub_first = -1.0f;       // cold publish-window epoch (hoisted static; session-reset)
@@ -13766,15 +13902,42 @@ inline void locator_capture(CbColorProbe& pr, const float* f, uint32_t nf, uint3
 
     // Sky-probe refreshes also update the engine-sun reference (floats
     // 8-10 of the sky block) for the jump arbiter defined above.
-    if (&pr == &g_sky_probe && pr.nb_base == 0 && n >= 11) {
-        const float sl = sqrtf(pr.nb[8] * pr.nb[8] + pr.nb[9] * pr.nb[9] +
-                               pr.nb[10] * pr.nb[10]);
+    // 26129 RESURRECTION (dump112 conviction: sunTravelWitnessVetoes 0
+    // with a stamp landing mid-blackout): the refresh read the WINDOWED
+    // mirror nb[8..10] gated on nb_base == 0, and the sky probe's anchor
+    // offset puts nb_base past zero - the witness has been structurally
+    // dark in every session, which is the same fact the jump arbiter's
+    // ledger recorded as "the engine confirmation has ALWAYS failed
+    // open". The lanes are ABSOLUTE floats 8-10 of the sky CB; read them
+    // from the full upload, stamp freshness, and both dormant consumers
+    // (the jump confirmation and the 26128/26129 witness gates) go live.
+    if (&pr == &g_sky_probe && nf >= 11) {
+        const float sl = sqrtf(f[8] * f[8] + f[9] * f[9] + f[10] * f[10]);
 
         if (sl > 0.5f && sl < 2.0f) {
-            g_skysun_ref[0] = pr.nb[8] / sl;
-            g_skysun_ref[1] = pr.nb[9] / sl;
-            g_skysun_ref[2] = pr.nb[10] / sl;
+            g_skysun_ref[0] = f[8] / sl;
+            g_skysun_ref[1] = f[9] / sl;
+            g_skysun_ref[2] = f[10] / sl;
             g_skysun_ref_valid = true;
+            g_skysun_ref_ms = steady_now_ms();
+
+            // 26130: ~1 Hz sky-motion window (ledger at the gauge statics)
+            if (g_skysun_mot_ref_ms == 0) {
+                g_skysun_mot_ref[0] = g_skysun_ref[0];
+                g_skysun_mot_ref[1] = g_skysun_ref[1];
+                g_skysun_mot_ref[2] = g_skysun_ref[2];
+                g_skysun_mot_ref_ms = g_skysun_ref_ms;
+            } else if (g_skysun_ref_ms - g_skysun_mot_ref_ms >= 1000) {
+                float khsm_d = g_skysun_ref[0] * g_skysun_mot_ref[0] +
+                               g_skysun_ref[1] * g_skysun_mot_ref[1] +
+                               g_skysun_ref[2] * g_skysun_mot_ref[2];
+                khsm_d = khsm_d > 1.0f ? 1.0f : (khsm_d < -1.0f ? -1.0f : khsm_d);
+                g_skysun_mot_deg = acosf(khsm_d) * 57.29578f;
+                g_skysun_mot_ref[0] = g_skysun_ref[0];
+                g_skysun_mot_ref[1] = g_skysun_ref[1];
+                g_skysun_mot_ref[2] = g_skysun_ref[2];
+                g_skysun_mot_ref_ms = g_skysun_ref_ms;
+            }
         }
     }
 }
@@ -13964,6 +14127,8 @@ static float g_sun_map_render_time = -1.0f;    // last SIGNIFICANT-INPUT render 
                                                // reset it, so the far-plane presence test
                                                // no longer drops out for ~1 s per glance.
 static uint64_t g_sun_mat_chash = 0;           // caster hash at the last maturity reset
+static uint64_t g_sun_mat_calm_rolls = 0;      // 26130: witness-calm reference rolls
+                                               // (maturity held; the far-cut tripwire)
 static float    g_sun_mat_sun[3] = {};         // derived sun at the last maturity reset
 static float g_sun_map_time = -1.0f;           // when it was produced (the fire
                                                // consumes LAST frame's map; 0.25 s
@@ -14058,6 +14223,64 @@ static float    g_fire_last_d = -1.0f;
 // cross-frame texture lock cold-latches the wrong partition: falsified).
 
 static float    g_fov_max_delta = 0.0f;    // max |live - frozen| fovX at freezes
+// SPECTATOR MATRIX-DEFECT REPAIR (26124; capture pair frame7898/frame8523 -
+// the permanent Zeus offset's conviction). The engine's spectator-camera
+// view matrix accumulates ORTHONORMALITY DEFECT under sustained rotation
+// (frame7898: row norms 0.99996, cross-dots 5.6e-5; a rebuilt-fresh matrix
+// reads 1e-8 - a camera switch resets it, which is exactly the operator's
+// "switching views resets the offset"). The engine consumes its matrix
+// CAMERA-RELATIVELY and never feels the defect; the mesh transform uses the
+// self-consistent (R, t) pair FORWARD and is exact; the FIRE is the one
+// world-absolute INVERSE consumer - PSMaskCast reconstructs pw = q . R^T
+// (row-dot), and R^T of a defective R misplaces the camera by |t| x defect
+// with |t| at map kilometers. frame7898 measured 0.657 m against a true
+// camera that matched the healthy capture to 0.2 mm - the visible offset,
+// meter for meter; the 0.447 m lightLocErr storm reading and the dbg-24
+// far cutoff were the same error's altitude component (the terrain snap
+// was bandaging it). THE REPAIR: the freeze computes the TRUE 3x3 inverse
+// of the frozen rotation in double (adjugate/det) and the fill uploads it
+// so the shader's row-dot consumes R^{-1} exactly - byte-consistent with
+// the engine's own (defective) forward transform, no approximation, no
+// shader change. Orthonormal input reproduces the raw rows (adj/det ==
+// R^T), so person view and fresh spectator cameras are numerically
+// pristine. |det - 1| > 0.1 falls back to raw rows (today's behavior).
+// setRenderDebug 30 bypasses the repair for a live A/B (offset returns
+// under 30 on a defective matrix, dies at 0; 26125 moved the switch off
+// 27, which the UI coverage debug view already owned). Gauges are the
+// tripwires: defect = max(|row norm - 1|, |cross dot|) of the frozen
+// rotation; skewM = |cam(true inverse) - cam(transpose)| at the freeze -
+// the frame7898 conviction number, live every freeze.
+static float    g_fire_cast_inv[9] = {};       // R^{-1} laid out for castMat row-dots
+static bool     g_fire_cast_inv_valid = false; // freeze produced a sane inverse
+static float    g_fire_ortho_defect = -1.0f;   // last freeze (-1 = no freeze yet)
+static float    g_fire_ortho_defect_max = 0.0f;
+static float    g_fire_cam_skew_m = -1.0f;     // last freeze (-1 = no freeze yet)
+static float    g_fire_cam_skew_max = 0.0f;
+// ===========================================================================
+// CAST EPOCH CAMPAIGN - RETIRED INSTRUMENT, KEPT LEARNINGS (26125-26128).
+// The transient motion offset was dissected with a live epoch dial
+// (setCastEpochBias, removed at 26128 by operator directive). MEASURED:
+// (1) the fire's DEPTH carries a camera one full frame AHEAD of the frozen
+// view for VERTICAL translation - f = +1 zeroed the upward elongation
+// exactly, and the 1/tan(sun elevation) amplification (~2.34x at 23 deg)
+// is why vertical motion dominated the symptom; (2) DESCENT is clean at
+// f = 0 through a union cancellation and dirty at f = +1; (3) LATERAL
+// translation is position-correct at f = 0 and WORSENED by extrapolation -
+// falsifying a shared position epoch; (4) ROTATION is epoch-exact at
+// f = 0 (the anchored-copy observation) and every nonzero bias could only
+// corrupt it, which is why the dial was split position-only at 26127;
+// (5) the remaining artifact under motion is a SINGLE engine-manufactured
+// copy of the paint on scene color, displaced by ~one frame of camera
+// motion, surviving motion-blur-off and every post-setting A/B, absent
+// from any single captured frame (the RenderDoc hitch kills it) - the
+// standing engine-side limitation, now with measured parameters. No
+// epoch choice of the paint removes it: direction-dependent optima
+// contradict each other (up wants +1, down wants 0, lateral wants 0),
+// so a static or sign-keyed bias trades artifacts rather than removing
+// them - the field round on the sign-keyed auto policy confirmed the
+// trade and the operator retired the instrument. Do not re-litigate
+// with paint-epoch experiments; the residue is downstream of the mask.
+// ===========================================================================
 // TRACE ROUND 2 (the retry-vs-freeze contradiction): latchRetryOk and
 // fireLatchStale BOTH tick per frame, yet a draw-1499 freeze after a
 // draw-0 retry success should read clean. The serial stamps below
@@ -16907,6 +17130,7 @@ inline void shadow_view_scan(ID3D11Resource* res, const void* data, uint32_t byt
                     g_ls.view_src_valid = true;
                     g_ls.view_src_miss = 0;
                     g_ls.pub_rej_streak = 0;
+                    g_ls.pub_ok_since_lock = false;   // 26128: re-confirm
                     g_ls.view_relocks++;
                     g_ls.count = 0;
                     g_ls.newest = -1;
@@ -17077,19 +17301,42 @@ inline void shadow_view_scan(ID3D11Resource* res, const void* data, uint32_t byt
                             // consecutive rejects (~0.7 s) drops the
                             // lock and the ring re-acquires from the
                             // live harvest within a few frames.
-                            if (++g_ls.pub_rej_streak >= 40 && g_ls.view_src_valid) {
+                            // 26128: NEVER-CONFIRMED locks kick at 8
+                            // (~130 ms) - the wrong-lock cold paid the
+                            // full 40 (~0.7 s) before every kick, and the
+                            // era's garbage band seals then danced with
+                            // the camera until organic reseal. Confirmed
+                            // locks keep the motion-tolerant 40.
+                            const uint32_t khpk_bar = g_ls.pub_ok_since_lock ? 40u : 8u;
+
+                            if (++g_ls.pub_rej_streak >= khpk_bar && g_ls.view_src_valid) {
                                 g_ls.view_src_valid = false;
                                 g_ls.vc_n = 0;
                                 g_ls.pub_rej_streak = 0;
                                 g_view_relock_forced++;
                                 g_lock_churn_ms_v = steady_now_ms();   // lock-settle: the dropped lock's
                                                                        // publishes were the wrong era
+                                // 26128 WRONG-ERA RECEIVE WIPE: seals and
+                                // live entries paired under the dropped
+                                // lock's publishes are the dancing-receive
+                                // symptom; boundary-wipe semantics (the
+                                // table and seals rebuild within a second).
+                                g_ls.count = 0;
+                                g_ls.newest = -1;
+
+                                for (int khpk_b = 0; khpk_b < 8; ++khpk_b) {
+                                    g_ls.band[khpk_b].valid = false;
+                                    g_ls.band[khpk_b].pending_view = false;
+                                }
+
+                                g_relock_recv_wipes++;
                             }
 
                             return;   // full no-op: no publish state was touched
                         }
 
                         g_ls.pub_rej_streak = 0;
+                        g_ls.pub_ok_since_lock = true;   // 26128: confirmed
                     }
                 }
             }
@@ -19463,14 +19710,36 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                                sun[1] * g_sun_mat_sun[1] +
                                sun[2] * g_sun_mat_sun[2];
 
-        if (g_sun_map_render_time < 0.0f ||
-            khsm_caster_hash != g_sun_mat_chash ||
-            khsm_dot < 0.99996192f) {   // cos(0.5 deg)
-            g_sun_map_render_time = g_sun_map_time;
-            g_sun_mat_chash = khsm_caster_hash;
-            g_sun_mat_sun[0] = sun[0];
-            g_sun_mat_sun[1] = sun[1];
-            g_sun_mat_sun[2] = sun[2];
+        // 26130 CALM ROLL (dump113: a 35-flush sub-2-deg wobble walk
+        // crossed this 0.5 deg reference, de-matured the map, and the
+        // far-plane presence test disarmed - the operator's 'cut in
+        // half'). De-maturing exists for the COLD churn class (wrong-sun
+        // eras rendering visible wrongness beyond the far plane); a
+        // drift that arrives while the SKY witness is static is proven
+        // wobble - the map re-rendered correctly at every step - so the
+        // reference ROLLS without de-maturing and the long shadow keeps
+        // its far extension. Big steps (> 3 deg), caster changes, and
+        // any drift while the sky is moving or the witness is dark
+        // de-mature exactly as before.
+        {
+            const bool khsm_new = g_sun_map_render_time < 0.0f;
+            const bool khsm_cchg = khsm_caster_hash != g_sun_mat_chash;
+            const bool khsm_big = khsm_dot < 0.99862953f;    // cos(3 deg)
+            const bool khsm_drift = khsm_dot < 0.99996192f;  // cos(0.5 deg)
+            const bool khsm_calm = khsm_drift && !khsm_big && kh_sky_static();
+
+            if (khsm_new || khsm_cchg || khsm_big || (khsm_drift && !khsm_calm)) {
+                g_sun_map_render_time = g_sun_map_time;
+                g_sun_mat_chash = khsm_caster_hash;
+                g_sun_mat_sun[0] = sun[0];
+                g_sun_mat_sun[1] = sun[1];
+                g_sun_mat_sun[2] = sun[2];
+            } else if (khsm_calm) {
+                g_sun_mat_sun[0] = sun[0];   // roll: maturity holds
+                g_sun_mat_sun[1] = sun[1];
+                g_sun_mat_sun[2] = sun[2];
+                g_sun_mat_calm_rolls++;
+            }
         }
     }
 
@@ -20268,6 +20537,80 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
         // only marker texels written into the mask and read back a frame
         // later. Verdict: the engine erases the mask EVERY frame; the
         // ghost was never stale paint. Removed with the campaign.)
+        // SPECTATOR MATRIX-DEFECT REPAIR (26124; ledger at the statics):
+        // true 3x3 inverse of the frozen rotation, double adjugate, plus
+        // the defect and skew gauges. Once per freeze; re-fires replay it.
+        {
+            const double khoi_r[3][3] = {
+                { g_fire_view2[0], g_fire_view2[1], g_fire_view2[2] },
+                { g_fire_view2[4], g_fire_view2[5], g_fire_view2[6] },
+                { g_fire_view2[8], g_fire_view2[9], g_fire_view2[10] }
+            };
+            double khoi_def = 0.0;
+
+            for (int khoi_i = 0; khoi_i < 3; ++khoi_i) {
+                const double khoi_n = sqrt(khoi_r[khoi_i][0] * khoi_r[khoi_i][0] +
+                                           khoi_r[khoi_i][1] * khoi_r[khoi_i][1] +
+                                           khoi_r[khoi_i][2] * khoi_r[khoi_i][2]);
+                if (fabs(khoi_n - 1.0) > khoi_def) khoi_def = fabs(khoi_n - 1.0);
+
+                for (int khoi_j = khoi_i + 1; khoi_j < 3; ++khoi_j) {
+                    const double khoi_d = fabs(khoi_r[khoi_i][0] * khoi_r[khoi_j][0] +
+                                               khoi_r[khoi_i][1] * khoi_r[khoi_j][1] +
+                                               khoi_r[khoi_i][2] * khoi_r[khoi_j][2]);
+                    if (khoi_d > khoi_def) khoi_def = khoi_d;
+                }
+            }
+
+            // Cofactors: inv[c][j] = khoi_c[j][c] / det; the fill's row-dot
+            // wants castMat[j][c] = inv[c][j], i.e. khoi_c[j][c] / det.
+            const double khoi_c[3][3] = {
+                { khoi_r[1][1] * khoi_r[2][2] - khoi_r[1][2] * khoi_r[2][1],
+                  khoi_r[1][2] * khoi_r[2][0] - khoi_r[1][0] * khoi_r[2][2],
+                  khoi_r[1][0] * khoi_r[2][1] - khoi_r[1][1] * khoi_r[2][0] },
+                { khoi_r[0][2] * khoi_r[2][1] - khoi_r[0][1] * khoi_r[2][2],
+                  khoi_r[0][0] * khoi_r[2][2] - khoi_r[0][2] * khoi_r[2][0],
+                  khoi_r[0][1] * khoi_r[2][0] - khoi_r[0][0] * khoi_r[2][1] },
+                { khoi_r[0][1] * khoi_r[1][2] - khoi_r[0][2] * khoi_r[1][1],
+                  khoi_r[0][2] * khoi_r[1][0] - khoi_r[0][0] * khoi_r[1][2],
+                  khoi_r[0][0] * khoi_r[1][1] - khoi_r[0][1] * khoi_r[1][0] } };
+            const double khoi_det = khoi_r[0][0] * khoi_c[0][0] +
+                                    khoi_r[0][1] * khoi_c[0][1] +
+                                    khoi_r[0][2] * khoi_c[0][2];
+            g_fire_cast_inv_valid = false;
+            g_fire_ortho_defect = static_cast<float>(khoi_def);
+            if (g_fire_ortho_defect > g_fire_ortho_defect_max) g_fire_ortho_defect_max = g_fire_ortho_defect;
+            g_fire_cam_skew_m = -1.0f;
+
+            if (fabs(khoi_det - 1.0) < 0.1) {
+                for (int khoi_j = 0; khoi_j < 3; ++khoi_j) {
+                    for (int khoi_k = 0; khoi_k < 3; ++khoi_k) {
+                        g_fire_cast_inv[khoi_j * 3 + khoi_k] =
+                            static_cast<float>(khoi_c[khoi_j][khoi_k] / khoi_det);
+                    }
+                }
+
+                g_fire_cast_inv_valid = true;
+                // Skew gauge: cam through the true inverse vs cam through
+                // the transpose, both from the frozen t - the conviction
+                // number, live. Double throughout.
+                const double khoi_t[3] = { g_fire_view2[12], g_fire_view2[13], g_fire_view2[14] };
+                double khoi_sk2 = 0.0;
+
+                for (int khoi_j = 0; khoi_j < 3; ++khoi_j) {
+                    const double khoi_ct = -(khoi_t[0] * (khoi_c[khoi_j][0] / khoi_det) +
+                                             khoi_t[1] * (khoi_c[khoi_j][1] / khoi_det) +
+                                             khoi_t[2] * (khoi_c[khoi_j][2] / khoi_det));
+                    const double khoi_cT = -(khoi_t[0] * khoi_r[khoi_j][0] +
+                                             khoi_t[1] * khoi_r[khoi_j][1] +
+                                             khoi_t[2] * khoi_r[khoi_j][2]);
+                    khoi_sk2 += (khoi_ct - khoi_cT) * (khoi_ct - khoi_cT);
+                }
+
+                g_fire_cam_skew_m = static_cast<float>(sqrt(khoi_sk2));
+                if (g_fire_cam_skew_m > g_fire_cam_skew_max) g_fire_cam_skew_max = g_fire_cam_skew_m;
+            }
+        }
         g_fire_lock_valid = true;
 
     }
@@ -20345,6 +20688,24 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
     auto fill_frame = [&](ConstantData& cbd) {
         for (int r = 0; r < 3; ++r) {
             memcpy(cbd.cast_mat[r], g_fire_view2 + r * 4, 16);   // frozen view
+        }
+
+        // SPECTATOR MATRIX-DEFECT REPAIR (26124; ledger at the statics):
+        // the shader inverts castMat by row-dot - an R^T assumption - so
+        // feed it the TRUE inverse the freeze computed. Orthonormal input
+        // reproduces the raw rows (adj/det == R^T): person view and fresh
+        // spectator cameras are numerically pristine; only a defective
+        // matrix changes, by exactly its defect. The .w lanes ride from
+        // the raw memcpy above untouched. setRenderDebug 30 = pristine
+        // raw rows for a live A/B (26125: moved off 27, which the UI
+        // coverage debug view already owned - a 26124 mode collision).
+        if (g_fire_cast_inv_valid &&
+            g_dbg_mode.load(std::memory_order_relaxed) != 30) {
+            for (int r = 0; r < 3; ++r) {
+                cbd.cast_mat[r][0] = g_fire_cast_inv[r * 3 + 0];
+                cbd.cast_mat[r][1] = g_fire_cast_inv[r * 3 + 1];
+                cbd.cast_mat[r][2] = g_fire_cast_inv[r * 3 + 2];
+            }
         }
 
         memcpy(cbd.cast_view[0], g_fire_view2 + 12, 16);
@@ -20839,6 +21200,7 @@ inline void shadow_view_prewarm() {
     g_ls.view_src_relative = true;
     g_ls.view_src_valid = true;
     g_ls.view_src_miss = 0;
+    g_ls.pub_ok_since_lock = false;   // 26128: probationary until confirmed
     g_ls.view_locks++;
     g_lock_churn_ms_v = steady_now_ms();   // lock-settle: fresh lock, hold the cast a beat
 
@@ -21644,6 +22006,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
                     g_ls.view_src_valid = true;
 
                     g_ls.view_src_miss = 0;
+                    g_ls.pub_ok_since_lock = false;   // 26128: probationary until confirmed
                     g_ls.view_locks++;
                     g_lock_churn_ms_v = steady_now_ms();   // lock-settle: fresh lock, hold the cast a beat
 
@@ -27735,8 +28098,12 @@ inline void reset_stat_counters() {
     g_cast_frozen_fires = 0;
     g_fire_mask_srv_fires = 0; g_fire_mask_srv_last = 0;
     g_sun_churn_max_deg = 0.0f; g_sun_churn_prev_ms = 0;
+    g_sun_travel_witness_vetoes = 0; g_sun_pursuit_witness_holds = 0;
+    g_sun_mat_calm_rolls = 0;
     g_cam_step_max = 0.0f; g_cam_step_m = -1.0f;
     g_fire_cam_delta_max = 0.0f; g_fire_cam_delta_m = -1.0f;
+    g_fire_ortho_defect = -1.0f; g_fire_ortho_defect_max = 0.0f;
+    g_fire_cam_skew_m = -1.0f; g_fire_cam_skew_max = 0.0f;
     g_latch_live_delta_max = 0.0f; g_latch_age_max_ms = 0.0f;
     g_inj_view_live_adopts = 0; g_inj_view_live_last_m = -1.0f;
     g_inj_view_clear_adopts = 0; g_inj_rot_delta_max = 0.0f;
@@ -27892,6 +28259,8 @@ inline void reset_session_state() {
     g_sun_jump_pending = false;
     g_skysun_ref_valid = false;
     g_skysun_ref[0] = g_skysun_ref[1] = g_skysun_ref[2] = 0.0f;
+    g_skysun_ref_ms = 0;
+    g_skysun_mot_ref_ms = 0; g_skysun_mot_deg = -1.0f;
     g_pub_valid = false; g_cand_hold = 0;
     g_fog_staged_valid = false; g_fog_valid = false;
 

@@ -159,6 +159,7 @@ static registered_sqf_function _sqf_add_postfx_array;
 static registered_sqf_function _sqf_add_local_postfx_array;
 static registered_sqf_function _sqf_get_render_stats;
 static registered_sqf_function _sqf_set_render_debug;
+static registered_sqf_function _sqf_reset_render_stats;   // 26180
 static registered_sqf_function _sqf_set_ssgi_scale;   // 26115
 static registered_sqf_function _sqf_flush_ui_render;
 static registered_sqf_function _sqf_dump_render_trace;
@@ -6573,6 +6574,17 @@ static int kh_apply_shared_prop(RenderIntegration::RenderObject& obj,
         return 1;
     }
 
+    // 26279 SHADOW CASTER PROXY. Pair it with visible false: the object then
+    // casts into our private sun map and is drawn by nothing. This is the whole
+    // unit-shadow feature - a proxy box per unit, refreshed from SQF, sampled by
+    // SunShadowFactorSelf, which both mesh shaders already multiply into smf.
+    // Nothing here touches the engine stencil-volume transport.
+    if (prop == "casterOnly") {
+        if (val.type_enum() != game_data_type::BOOL) return 0;
+        obj.caster_only = static_cast<bool>(val);
+        return 1;
+    }
+
     if (prop == "params") {
         if (val.type_enum() != game_data_type::ARRAY) return 0;
         return set_effect_params(obj, &val.to_array()) ? 1 : 0;
@@ -7136,7 +7148,72 @@ static game_value set_render_debug_sqf(game_value_parameter arg) {
     try {
         if (arg.type_enum() != game_data_type::SCALAR) return game_value(false);
         const int khd_m = static_cast<int>(static_cast<float>(arg));
-        const bool khd_ok = (khd_m >= 0 && khd_m <= 17) ||   // shader visuals (10-14 retired: normal shading)
+        // 26281 THE WHITELIST IS WHY 129-133 RETURNED FALSE, AND IT SILENTLY
+        // VOIDED THREE FIELD RESULTS. setRenderDebug refuses any mode not named
+        // here. 129/130/131/132 were added to the catalog at 26277 and to this
+        // list NEVER, so every "I tried 129 and 131 and nothing changed" was a
+        // session that ran mode 0 - including the one that retired the signed-
+        // count hypothesis. The command returns false on refusal and the return
+        // value was not being read, so the failure was invisible from the game.
+        //
+        // svVolCode IS THE LANE THAT WOULD HAVE CAUGHT IT and it was already in
+        // the dump: it reports the arm the SHADER ran, so a requested 131 that
+        // reads back as code 1 is a refused mode, in writing. That is exactly
+        // what it was built for at 26277 and nobody read it against the request.
+        // ADDING A MODE MEANS TWO EDITS - the catalog and this list - and there
+        // is no compiler check that they agree.
+        const bool khd_ok = (khd_m >= 129 && khd_m <= 191) ||   // 26348: 191 = scene-range stamp revert (190 cast warp, 189 phase, 188 mask)
+                                                             // 26340: 187 = registered mask read
+                                                             // (injection reads the mask through
+                                                             // the PREVIOUS frame's pair = the
+                                                             // view its content was drawn under)
+                                                             // 26337: 186 = raw-stamp revert (the
+                                                             // committed-pair restamp OFF; prbWitD
+                                                             // must blow back up under it)
+                                                             // 26334: 184 = fx1.zw fill-with-
+                                                             // heightfield (the 26331/26333 wide
+                                                             // scope) ALONE - the slice's pure
+                                                             // fill-scope A/B; 185 = strict sun-
+                                                             // fit distance rule (26333 form) -
+                                                             // the 250 m vanish must return
+                                                             // 26326: 172 = drift-comp revert (inert
+                                                             // outside 175 since 26327);
+                                                             // 173/174 = far-phase pin false/true
+                                                             // (26329: pins OVERRIDE the debounce)
+                                                             // 26327: 175 = legacy raster-witness form
+                                                             // 26328: 176 = thm march-geometry trial -
+                                                             // 26329: ALIAS of the default (geometry
+                                                             // shipped; kept so 26328 scripts validate)
+                                                             // 26329: 177 = LEGACY thm march revert
+                                                             // (25 m skips + 1000 m gate + uncapped
+                                                             // slack, one switch); 178 = far-phase
+                                                             // debounce OFF (raw phase)
+                                                             // 26333: defaults are the 26329 forms;
+                                                             // these are OPT-IN TRIALS now: 179 =
+                                                             // membership centre fast path OFF;
+                                                             // 180 = membership gradient clamp ON;
+                                                             // 181 = need-bounded late-competitor
+                                                             // shield ON; 183 = thm contact routing
+                                                             // ON (arb PS every frame). 182 stays a
+                                                             // REVERT: camera-extraction true-inverse
+                                                             // repair OFF (raw transpose - the
+                                                             // Zeus-offset A/B; the one 26331-family
+                                                             // default kept)
+                            khd_m == 110 || khd_m == 111 ||   // 26320: the 26249-era volume paints were NEVER whitelisted -
+                            khd_m == 113 || khd_m == 115 ||   // "mode 110 was never run" because it never could run
+                            khd_m == 118 ||                   // 26320: vol-depth + count composite paint (was inert)
+                            // 129-166: 26277-26320 arms (143/144/150/152 default aliases, 145/146/149/153-162 reverts,
+                            // 147/151 retired, 135/136 arms; 158-162 = the 26309-26312 reverts; 163 = 26315 content-probe
+                            // KILL switch (probes default ON); 164/165 = the 26314 reverts: collapse-override witness
+                            // veto / world-latch measured-witness escape; 166 = 26320 receive-kill A/B)
+                            (khd_m >= 0 && khd_m <= 17) ||   // shader visuals (10-13 are the LADDERS: see the
+                                                             // g_dbg_mode catalog. The 'retired' note here was
+                                                             // stale from 26189 - corrected 26202; 14 is free)
+                            khd_m == 18 ||                    // 26159: dark re-seed refusal OFF (the black-box
+                                                              // A/B - restores the 26137 behaviour)
+                            khd_m == 19 ||                    // 26159: last-fire clamp with a FRESH epoch on
+                                                              // the late fire (= 40 without the epoch
+                                                              // restore). The motion-drift experiment.
                             khd_m == 20 ||                    // cast ownership kill switch
                             khd_m == 21 ||                    // cast readiness latch + slab retirement OFF (pristine A/B)
                             khd_m == 24 ||                    // terrain snap off (diagnostic)
@@ -7145,7 +7222,810 @@ static game_value set_render_debug_sqf(game_value_parameter arg) {
                             khd_m == 27 ||                    // 26069: UI coverage debug view (write window)
                             khd_m == 30 ||                    // 26125: matrix-defect repair bypass (pristine A/B;
                                                               // moved off 27 - the 26124 collision)
-                            khd_m == 28;                      // 26092-26093 adaptive-floor opt-in - RETIRED
+                            khd_m == 31 ||                    // 26133: ghost tint - per-CYCLE parity (odd cycles lighter)
+                            khd_m == 32 ||                    // 26133: ghost tint - per-FIRE index (re-fires lighter)
+                            khd_m == 33 ||                    // 26133: depth-snapshot freeze OFF (pointer-freeze A/B)
+                            khd_m == 34 ||                    // 26149: FLOOD - every paint pixel forced fully dark
+                                                              // (does our paint reach the screen at all?)
+                            khd_m == 37 ||                    // 26141: pristine 26140 sun-axis replay (boot
+                                                              // reference, cold bar and no-view refusal all off)
+                            khd_m == 39 ||                    // 26142: freeze from the ENGINE render view -
+                                                              // skips the bridge adoption (person-view pitch ghost)
+                            khd_m == 40 ||                    // 26147: clamp to the LAST fire (26146 behaviour;
+                                                              // the default is now the FIRST fire)
+                            khd_m == 22 ||                    // 26144: LAST-fire clamp OFF - every fire paints
+                                                              // (the pre-26144 ghosting behaviour, for the A/B)
+                            khd_m == 35 ||                    // 26152: moved-epoch MUTE restored (0.35 strength;
+                                                              // retired by default - the clamp replaces it)
+                            khd_m == 36 ||                    // 26152: FIRST-fire clamp (the 26147 default;
+                                                              // default is now the SRV-bound fire)
+                            khd_m == 38 ||                    // 26166 REUSED: relock RECOVERY BAR OFF
+                                                              // (revert to the 1e-3-only relock probe). The
+                                                              // default also reclaims the remembered view
+                                                              // source at the bar its own drop was measured
+                                                              // against, forced-drop path only, camera-
+                                                              // relative only, two consecutive cycles.
+                                                              // viewRelocks has read 0 in every dump back
+                                                              // to dump50 because 1e-3 is twenty times
+                                                              // tighter than the bar that does the dropping.
+                                                              // (Was the 26158 CATCH-UP FIRE - field-
+                                                              //  falsified, the shadow vanished outright -
+                                                              //  RETIRED at 26166; fireCatchup* stay at 0.)
+                            khd_m == 44 ||                    // 26178: ENABLES the falsified 26177
+                                                              // 26176 form (0.05 s freshness, always left
+                                                              // pending for a later publish to complete).
+                                                              // Default frame-anchors the view and seals
+                                                              // vcol in the epoch sm came from.
+                            khd_m == 43 ||                    // 26172: BRIDGE ARM off - revert to the
+                                                              // publish-gated arm (26171 behaviour). The
+                                                              // default arms the cast on the bridge view the
+                                                              // freeze actually paints with, so a late
+                                                              // publish no longer holds the fire past its
+                                                              // own read window. This is the flicker fix.
+                            khd_m == 42 ||                    // 26170: MOTION-GATED CARRY ON (opt-in). The
+                                                              // default is 26165 single paint, verbatim.
+                                                              // FALSIFIED at 26170: every 1->2 transition on
+                                                              // record carries at camStepM 0.046-0.071, i.e.
+                                                              // 27-42 px of double, so the 1 px gate refuses
+                                                              // every frame that needs it and opens only on
+                                                              // static blocks that never transition. Kept as
+                                                              // an opt-in so the effect can be seen.
+                            khd_m == 41 ||                    // 26168: ring RUNNING ARGMIN OFF (revert to the
+                                                              // bare 16-slot ring). The ring is wiped at the
+                                                              // injection and the injection lands BEFORE the
+                                                              // view upload on every late cycle on record, so
+                                                              // the hunt samples the last sixteen uploads
+                                                              // before draw ~74 out of ~2518 a cycle. Default
+                                                              // scores every candidate as it arrives.
+                            khd_m == 23 ||                    // 26166 REUSED: view-lock DROP HYSTERESIS OFF
+                                                              // (revert to the bare bar: a reject streak
+                                                              // drops the lock on ANY overshoot, however
+                                                              // small). dump99 dropped on 0.0217 against a
+                                                              // 0.02 bar and paid 6.387 s dead with the
+                                                              // dropped source scoring 0.0174. Default is
+                                                              // the 1.5x hysteresis; this restores 26165.
+                                                              // (Was the 26165 PRIME PAINT, and before it
+                                                              //  the 26155 SRV-KEYED ARM. Both field-
+                                                              //  falsified in campaign 27 and both RETIRED
+                                                              //  at 26166; firePrimePaints and the SRV-arm
+                                                              //  lanes stay published at 0.)
+                            khd_m == 59 ||                    // 26193 DL DENSE GATE back to 4 sightings AND
+                                                              // a 40 ms absolute gap bar. That bar is tied
+                                                              // to frame rate, not to evidence quality, and
+                                                              // our own harvest cadence is 47-189 ms - so it
+                                                              // threw entries with 6-11 sightings onto a flat
+                                                              // 250 ms floor 2.5x their own worst gap.
+                                                              // Default gates on sightings alone (>= 6).
+                            khd_m == 58 ||                    // 26192 OCCLUDER-IDENTITY TOLERANCE back to
+                                                              // 0.25 cell / 2 m floor = 3.125 m on a 12.5 m
+                                                              // grid, which calls every kerb, wall, rock and
+                                                              // fence 'terrain' and drives the contact band
+                                                              // through them. Default is 0.08 cell / 1 m.
+                                                              // Too tight fails CLOSED - the terrain bite
+                                                              // returns at the ground line and mode 10
+                                                              // paints it cyan where the gate suppressed.
+                            khd_m == 56 ||                    // 26191 CONTACT BAND back to 25 m. At 25 the
+                                                              // clearance ramp is full-strength below 17.5 m
+                                                              // of ground clearance, so the 'thin strip at
+                                                              // the ground line' the design describes is in
+                                                              // fact the WHOLE mesh - which is why mode 11
+                                                              // was never black. Default is 6 m: full pull
+                                                              // below 4.2 m, zero above 6.0 m.
+                            khd_m == 57 ||                    // 26191 DL TTL MULTIPLIER back to 6x the worst
+                                                              // observed re-sight gap. 6x a MAXIMUM is not a
+                                                              // confidence interval, it tolerates six
+                                                              // consecutive worst-case misses: the census
+                                                              // read tailMean 558 ms against lifeMean 368,
+                                                              // max 908. Default is 2x.
+                            khd_m == 55 ||                    // 26188 FAR-ARB NEAR FLOOR OFF - arm the
+                                                              // analytic depth clamp on every injection.
+                                                              // FIELD-FALSIFIED at 26189 and kept opt-in
+                                                              // as a dead end: dump555 arbNearDenied 936
+                                                              // of 1024 and the operator called it an
+                                                              // objective regression. The floor is not
+                                                              // only a far-frame classifier - it keeps a
+                                                              // metres-scale depth lie (0.06*d = 3.0 m at
+                                                              // 50 m) away from close geometry, against an
+                                                              // identity-gate tolerance of 3.125 m that
+                                                              // cannot discriminate at that scale.
+                            khd_m == 53 ||                    // 26187: DL CADENCE-MARK DECAY off - restore
+                                                              // the LIFETIME gap high-water mark. That
+                                                              // mark never decayed, so one unlucky
+                                                              // sampling gap priced an entry's tail at
+                                                              // 6x that gap forever and permanently
+                                                              // barred it from the dense fast lane - the
+                                                              // 0.25-1 s muzzle-flash/lightning tails.
+                            khd_m == 54 ||                    // 26187: BLOCK MIRROR/STANDING COHERENCE
+                                                              // off - publish whatever the mirror holds
+                                                              // at flush time, certified or not. That is
+                                                              // the slight camera-rotation dimming: the
+                                                              // mirror is overwritten inside the frame
+                                                              // by a pass flavor the arbitration never
+                                                              // granted standing, and the publish ships
+                                                              // it. Watch blkIncohHolds.
+                            khd_m == 52 ||                    // 26186: NEED-BASED PULL off - restore the
+                                                              // 26183 form, where the terrain-LOD clamp
+                                                              // spends a flat 6% of view distance (capped
+                                                              // at 15 m) whether or not anything needs
+                                                              // overtaking. That fixed size sweeping past
+                                                              // whatever sits near the box surface is the
+                                                              // distance-tracking banding. The default
+                                                              // spends only the measured gap to the
+                                                              // competing depth plus 0.25 m, which also
+                                                              // puts most of the mesh on the exact
+                                                              // rasterizer depth instead of a recomputed
+                                                              // one. (The 26184 smoothing ramp is gone
+                                                              // outright - it turned one step into a swept
+                                                              // range and multiplied the crossings.)
+                            khd_m == 51 ||                    // 26183: EXACT DEPTH PASS-THROUGH off - go
+                                                              // back to recomputing the fragment's NDC
+                                                              // from the sniffed pair on every pixel.
+                                                              // That recomputation lands within a few ulp
+                                                              // of 1.0 where fp32 quantises at 5.96e-8,
+                                                              // one ulp is 8.6 mm of scene distance, and
+                                                              // the 1e-4 anti-shimmer duty is itself only
+                                                              // ~1 ulp - so it rounds rather than biases
+                                                              // and the box crosses in front of and behind
+                                                              // world geometry in a smooth wave as the
+                                                              // camera backs away. The default writes the
+                                                              // rasterizer's own i.pos.z whenever nothing
+                                                              // deliberately moves the depth. Far-keep
+                                                              // split and near-gap ramp fragments keep the
+                                                              // computed path either way.
+                            khd_m == 50 ||                    // 26181: DEFERRED CAPTURE off - revert to the
+                                                              // 26180 immediate capture, where a sweep
+                                                              // overwrites the slot's sm/border/texture a
+                                                              // whole cycle before the view that pairs
+                                                              // with them arrives, and the half-built
+                                                              // window is refused (the DROPOUT). The
+                                                              // default stages the new sm/border instead
+                                                              // and commits the whole triple at once when
+                                                              // the pairing view lands, so the slot always
+                                                              // holds a complete, coherent seal and there
+                                                              // is nothing to either offset or refuse.
+                            khd_m == 48 ||                    // 26180: HALF-BUILT SEAL REFUSAL off - revert
+                                                              // to refusing only the BRIDGE-provisional
+                                                              // case (26179 behaviour). The default also
+                                                              // refuses a band whose seal has been
+                                                              // re-captured but not yet re-completed: its
+                                                              // vcol belongs to the epoch before the sm
+                                                              // beside it. Absent beats offset. Watch
+                                                              // bandPendRefused (expect ~= the old
+                                                              // bandPendConsumed) and bandPickNone
+                                                              // (expect UNCHANGED - a climb there means
+                                                              // the offset was traded for a dropout).
+                                                              // 26181: this also disables the deferred
+                                                              // capture, so 48 is the full revert to the
+                                                              // original OFFSET behaviour and 50 is the
+                                                              // intermediate dropout behaviour.
+                            khd_m == 49 ||                    // 26180: OCCLUDER IDENTITY GATE off - the
+                                                              // analytic depth clamp pulls every
+                                                              // contact-band fragment forward again,
+                                                              // whatever is standing in front of it.
+                                                              // That pull is 6% of view distance capped
+                                                              // at 15 m, so it punched our meshes through
+                                                              // buildings and trees at range while
+                                                              // looking correct up close. The default
+                                                              // spends it only where the competing depth
+                                                              // IS the terrain. Pair with setRenderDebug
+                                                              // 10 to see it: magenta = pull applied,
+                                                              // cyan = pull suppressed.
+                            khd_m == 45 ||                    // 26179: RECEIVE SEAL COMPLETE-AT-CAPTURE
+                                                              // (opt-in A/B). 26177 minus the bridge seal -
+                                                              // the half that was never tested alone. When a
+                                                              // same-frame ENGINE view exists the seal is
+                                                              // complete at capture, so no later publish can
+                                                              // overwrite a coherent frame-N sm + frame-N
+                                                              // vcol pair with a frame-N+1 view. With no
+                                                              // same-frame view the band stays bridge-
+                                                              // provisional and the existing consumption
+                                                              // guard refuses it: 26176 behaviour verbatim.
+                                                              // The BRIDGE is never sealed complete, so the
+                                                              // 26177 failure cannot return through this.
+                                                              // FIELD-FALSIFIED AT 26180, same report as
+                                                              // 26177: drift at any angle under motion,
+                                                              // snaps right at rest. bandCompleteSame 0
+                                                              // against bandCompleteCross 2957 says EVERY
+                                                              // completion crosses the boundary, i.e. our
+                                                              // cycle boundary sits mid-engine-frame and
+                                                              // the deferred completion IS the pairing.
+                                                              // Kept as a documented dead end.
+                                                              // Watch bandProvSkips / bandPickNone: a dropout
+                                                              // traded for the offset falsifies it too.
+                            khd_m == 46 ||                    // 26179: sun-map CASTER CALM ROLL off - restore
+                                                              // the unconditional de-mature on a caster-set
+                                                              // change. The default holds maturity when the
+                                                              // caster set changes under a static sun and a
+                                                              // static sky witness, which keeps the far-plane
+                                                              // presence test armed and stops the ~0.5 s
+                                                              // half-length cut on spawn. New maps, > 3 deg
+                                                              // sun steps and drift under a moving sky still
+                                                              // de-mature exactly as before.
+                            khd_m == 47 ||                    // 26179: COLD RECEIVE HEALTH GATE off - the
+                                                              // receive un-gates on the 2 s warm-up alone
+                                                              // (26178 behaviour). The default also requires
+                                                              // a locked view source, a fresh publish stream
+                                                              // and a converged derived sun, held for 500 ms,
+                                                              // and drops every cold-era seal at the rise.
+                                                              // For the foreign-receive cold start.
+                            khd_m == 87 ||                    // 26233 THE FEATURE REVERT, AND THE ONLY THING
+                                                              // IT IS FOR IS THE A/B. Restores the 26231
+                                                              // whitelists exactly: the injection, the
+                                                              // snapshot demand gate and the multiply all go
+                                                              // back to being mode-driven, so 0 vs 87 is
+                                                              // "unconditional" against "off" with one
+                                                              // variable. It is NOT a product safety net and
+                                                              // must not be reasoned about as one - the
+                                                              // shipped fallback is kh_svs_sten_ready(),
+                                                              // gauged by svStenRejCold and svStenRejDims.
+                                                              // Removal date: the scaffolding strip.
+                            khd_m == 109 ||                   // 26249 THE VOLUME TRANSPORT. Reads the stencil
+                                                              // COUNT out of the engine's volume buffer through
+                                                              // our own copy (t23/t24) instead of inferring it
+                                                              // from post/pre on the engine's screen-space mask,
+                                                              // AND disables the priming pass - which is the
+                                                              // cascade cut's directly-observed cause, not a
+                                                              // suspect. The footprint witness becomes exact: the
+                                                              // copy's DEPTH plane against the window z the
+                                                              // injection would have written, so the 254/255
+                                                              // sentinel and the pre <= 0.02 guard have nothing
+                                                              // left to do. 0 vs 109 is one variable in one
+                                                              // session: the cascade cut must be GONE under 109
+                                                              // and the unit shadow must be visually identical.
+                                                              // If the shadow differs at all, the stencil read is
+                                                              // wrong and the default stays where it is.
+                                                              // Read svStenSrc / svVolSamples / svVolCopyFails
+                                                              // before believing anything you see.
+                            khd_m == 110 ||                   // 26249 PAINT THE STENCIL COUNT - THE WRAP
+                                                              // INSTRUMENT, and the one thing that must be looked
+                                                              // at before 26250 flips the default. Counting is
+                                                              // IncWrap on front faces and DecWrap on back faces,
+                                                              // so a back face reached without a front-face
+                                                              // increment wraps 0 -> 255 and `count != 0` calls a
+                                                              // LIT pixel shadowed. Black = 0 (lit), blue->cyan =
+                                                              // 1..8, MAGENTA = 128 or above. ANY MAGENTA MEANS
+                                                              // != 0 IS THE WRONG TEST and the count needs a
+                                                              // signed reading before this transport ships. The
+                                                              // 26231 pixel history saw counts of 0, 4 and 5 at
+                                                              // three pixels; three pixels is not a survey.
+                            khd_m == 111 ||                   // 26249 PAINT THE FOOTPRINT RESIDUAL as a ladder,
+                                                              // same legend shape as the mode-13 transmittance
+                                                              // ladder: gray = nothing reprojected, black <=1e-6,
+                                                              // navy 1e-5, blue 1e-4, cyan 1e-3, green 1e-2,
+                                                              // yellow 1e-1, red above. The shipped tolerance is
+                                                              // 1e-4 - the BLUE rung. Our surface painting green
+                                                              // or warmer means the tolerance is too tight and
+                                                              // coverage is being thrown away; off-surface
+                                                              // background painting blue means it is too loose
+                                                              // and the witness is not witnessing. A scalar is
+                                                              // the wrong shape for a perspective-dependent
+                                                              // residual, so this is chosen from a screenshot the
+                                                              // way mode 78 settled the ratio arithmetic.
+                            khd_m == 128 ||                   // 26276 THE PROJECTION HALF. 127 shared the
+                                                              // VIEW and proved it, and svReprojPxMean
+                                                              // did not move - so the residual offset is
+                                                              // the PROJECTION, which is also where
+                                                              // injNear's 0.07<->0.77 oscillation lives.
+                                                              // 128 shares the boundary pair too, still
+                                                              // subject to the near-class gate.
+                            khd_m == 127 ||                   // 26275 ONE PUBLICATION FOR BOTH PASSES.
+                                                              // The injection and the composite read
+                                                              // publications ~289 apart out of ~534 per
+                                                              // frame (svPubOrdMean), which is the whole
+                                                              // remaining defect: raster pays it as the
+                                                              // edge slice, reprojection as the lag, 107
+                                                              // as a lagging box. 127 makes both take the
+                                                              // frame's clear-time sample, so they are
+                                                              // byte-identical by construction.
+                                                              // Acceptance: svPubOrdMean -> 0.
+                            khd_m == 126 ||                   // 26273 RESTORE REPROJECTION.
+                                                              // The raster lookup is the DEFAULT now -
+                                                              // mode 104's behaviour, which closed the
+                                                              // lag completely in the field after ten
+                                                              // builds of injection-side work changed
+                                                              // nothing. 126 puts the reprojected read
+                                                              // back so 26244's truth table can be
+                                                              // re-run under the VOLUME transport it was
+                                                              // never measured against.
+                            khd_m == 125 ||                   // 26270 PROVABLY CORRECT OR ABSENT.
+                                                              // Arms the engine view like 116 AND
+                                                              // suppresses the injection entirely on
+                                                              // frames where no candidate basis
+                                                              // validates - zero-area triangles, no
+                                                              // depth written. Depth we never wrote
+                                                              // cannot be tested wrongly, so the
+                                                              // stencil artifact stops being reduced
+                                                              // and starts being impossible. Cost:
+                                                              // no stencil shadow on those frames.
+                                                              // Third person at 26269 armed 825/825,
+                                                              // so it suppresses NOTHING there.
+                            khd_m == 124 ||                   // 26268 DISABLE THE AGREEMENT BOUND.
+                                                              // The engine-view path keeps its
+                                                              // structural gates but stops refusing a
+                                                              // basis that disagrees with the historic
+                                                              // transform by more than a quarter screen.
+                                                              // This is the A/B for the first-person
+                                                              // weapon-fire artifact: if 124 brings it
+                                                              // back and 118 does not have it, the bound
+                                                              // is what fixed it.
+                            khd_m == 121 || khd_m == 122 || khd_m == 123 ||
+                                                              // 26267 FORCE THE COPY TO READ WIDE-
+                                                              // ENUMERATION CANDIDATE 1/2/3 instead of
+                                                              // the latched offset. Byte 0 is a SHARED
+                                                              // pool offset (engBindRejects 0 with
+                                                              // engVerifyFail 44 proves the binding
+                                                              // cannot separate its two writers); if a
+                                                              // family-private copy of the view block
+                                                              // exists further into the 64 KB pool,
+                                                              // engVerifyFail collapses on the right
+                                                              // candidate. Read engWideOffK / engWidePassK
+                                                              // FIRST - a candidate that is not in the
+                                                              // table makes these no-ops.
+                            khd_m == 120 ||                   // 26265 STATEBACKUP CONSTANT-BUFFER OFFSET REVERT.
+                                                              // Restores VS CBs through the plain
+                                                              // (non-1.1) setter, which drops the
+                                                              // engine's per-slot firstConstant -
+                                                              // the pre-26265 behaviour. Kept as
+                                                              // its own A/B because it is a
+                                                              // SYSTEMIC change riding a build whose
+                                                              // headline is the engine-view locator,
+                                                              // and two variables in one field
+                                                              // session is the campaign-35 mistake.
+                            khd_m == 119 ||                   // 26264 REVERT TO THE PRE-26264 MASK TRANSPORT.
+                                                              // The volume buffer is now the DEFAULT (mode 0 is
+                                                              // what 109 was): the stencil count comes from our
+                                                              // own CopyResource of the engine's volume buffer,
+                                                              // and the priming pass is gone - svPrimeDraws 0 -
+                                                              // which IS the cascade-cut fix. 119 puts the mask
+                                                              // transport and priming back, cascade cut
+                                                              // included, as a one-key A/B. The mask path is
+                                                              // deliberately NOT deleted: svVolArmMax 2-3 means
+                                                              // the mask identity compare is still load-bearing
+                                                              // as the BRACKET'S CLOCK even though the mask is
+                                                              // no longer the transport.
+                            khd_m == 116 ||                   // 26262 INJECTION ON THE ENGINE'S OWN VIEW.
+                                                              // The injection stops adopting frame_view - a
+                                                              // stream written 589x/frame that alternates
+                                                              // between this frame's camera and the next - and
+                                                              // rasterizes through the rotation copied GPU-side
+                                                              // out of the engine's own view constant buffer,
+                                                              // same frame. THE PREDICTION: svReprojPxMean
+                                                              // collapses from ~95 px toward 0 and the stencil
+                                                              // shadow stops trailing the camera. Selects the
+                                                              // volume transport too, so the only variable on
+                                                              // screen is the view source.
+                            khd_m == 117 ||                   // 26262 VISIBLE MESH ON THE ENGINE'S OWN VIEW,
+                                                              // injection unchanged. Capture 6 showed our
+                                                              // COMPOSITE 16 deg out in pitch from the engine
+                                                              // during a fast vertical flick while that frame's
+                                                              // engine volume and colour passes were
+                                                              // byte-identical - so the composite is a second
+                                                              // patient, not a yardstick. NOTE mode 107 was
+                                                              // never this test: 107 draws the mesh with the
+                                                              // INJECTION's stale matrix, the worst available
+                                                              // value. Judge whether the box sits BETTER on the
+                                                              // ground under 117 than under 0.
+                            khd_m == 118 ||                   // 26262 BOTH. If 116 and 117 each hold, this is
+                                                              // the shipping candidate: both passes on the
+                                                              // engine's view means they agree with each other
+                                                              // and with the volumes by construction, and
+                                                              // reprojection becomes unnecessary rather than
+                                                              // merely better - which retires the epoch ring,
+                                                              // the footprint witness, the sentinel, the
+                                                              // tolerance, modes 111-115 and the interlacing.
+                            khd_m == 115 ||                   // 26253 VERDICT DISAGREEMENT PAINT - the one view
+                                                              // that localises the interlacing instead of
+                                                              // inferring it. Reads the stencil at BOTH candidate
+                                                              // positions (reprojected and raster) and paints
+                                                              // their RELATIONSHIP: black both lit, white both
+                                                              // shadowed - those pixels cannot interlace whatever
+                                                              // the guard decides. Dark red / dark blue = the two
+                                                              // disagree but the guard did not fire. ORANGE = they
+                                                              // disagree AND the guard fired, losing shadow;
+                                                              // CYAN = disagree, guard fired, adding shadow.
+                                                              // Orange+cyan IS the artifact's support set. A
+                                                              // coherent band ~svReprojPxMean wide means the
+                                                              // displaced-edge mechanism and a spatial fallback
+                                                              // has neighbours to work from; salt-and-pepper means
+                                                              // no spatial fallback can help; sparse-but-still-
+                                                              // visible means the guard is not the cause and the
+                                                              // view lag is. Diagnostic only.
+                            khd_m == 114 ||                   // 26252 FOOTPRINT TOLERANCE BACK TO 1e-4 (was the
+                                                              // 26249 value). The default is 3.16e-4, chosen from
+                                                              // mode 111's ladder: our surface reads <= 1e-4
+                                                              // (blue), the halo reads >= 1e-3 (green/yellow), and
+                                                              // the 1e-4..1e-3 rung is EMPTY - so 26249 had the
+                                                              // threshold hard against the top edge of the
+                                                              // on-footprint population instead of in the gap
+                                                              // between the two. Body pixels straddled it,
+                                                              // neighbouring pixels chose different lookups, and
+                                                              // because the two lookups give different verdicts
+                                                              // that paints as an INTERLACED shadow edge. This
+                                                              // mode restores the straddle so "the interlacing
+                                                              // went away" and "the threshold moved" stay
+                                                              // separable. Does NOT address the underlying view
+                                                              // lag (svReprojPxMean 21-43 px).
+                            khd_m == 113 ||                   // 26251 RAW UNGUARDED COUNT PAINT - 110's A/B
+                                                              // partner. Reads the stencil at the reprojected
+                                                              // texel with NO footprint test, which is what 110
+                                                              // did at 26249/26250 by mistake. 110 vs 113 shows
+                                                              // exactly what the witness removes: under 113 the
+                                                              // caster is OUTLINED against our surface on
+                                                              // rotation (the disocclusion band carrying the
+                                                              // caster's verdict at full contrast); under 110
+                                                              // those pixels paint orange/brown as guard-fired.
+                                                              // The band's absence from 109's shading is then an
+                                                              // observation, not an inference.
+                            khd_m == 112 ||                   // 26249 FOOTPRINT TEST OFF under the volume
+                                                              // transport (tolerance zeroed): accept every
+                                                              // reprojected sample. Separates the witness's cost
+                                                              // in coverage from its benefit in correctness with
+                                                              // one variable. Expect the 26248 halo's analogue to
+                                                              // return; if it does NOT, the witness is not the
+                                                              // thing holding it back and the reprojection band
+                                                              // is smaller than svReprojPxMean suggests.
+                            khd_m == 108 ||                   // 26248 PRIME WITH 1.0 + DISOCCLUSION GUARD OFF -
+                                                              // the 26247 pair, restored together. The default
+                                                              // primes with 254/255 so a primed texel is
+                                                              // distinguishable from lit background (both were
+                                                              // 1.0 before, which is why the 26245 guard could
+                                                              // not work), and the guard refuses a reprojected
+                                                              // sample that is not on the footprint. Brings the
+                                                              // halo back. Note pre reads 254/255 on our
+                                                              // footprint now, so modes 74 and 78 paint it one
+                                                              // step below white.
+                            khd_m == 107 ||                   // 26247 VISIBLE MESH IN ENGINE SPACE. Draws the
+                                                              // composite mesh with the transform the INJECTION
+                                                              // uses - which the RenderDoc capture proves is the
+                                                              // engine's own camera basis and projection to six
+                                                              // decimals. svReprojPxMean 41 px says the visible
+                                                              // draw is that far from it, and one band explains
+                                                              // the strip, the cascade cut and the halo. PAIR
+                                                              // WITH MODE 104 conceptually - under 107 the
+                                                              // reprojection is correcting a band that no
+                                                              // longer exists - but 107 alone is the first look.
+                                                              // If the mesh visibly lags the camera instead, the
+                                                              // band is real and the fix belongs on the priming
+                                                              // side. Read svEngVpTakes.
+                            khd_m == 106 ||                   // 26246 DISOCCLUSION GUARD ON (opt-in). Defaulted
+                                                              // OFF because it did not move the halo: the
+                                                              // reprojected lookup is landing INSIDE our
+                                                              // footprint and the value there is still wrong,
+                                                              // so the footprint is not the fault. Costs one
+                                                              // extra Load per mesh pixel, so it does not ride
+                                                              // on the default path unproven.
+                            khd_m == 105 ||                   // 26246 RETIRED TO A NO-OP (the guard is off by
+                                                              // default now - see mode 106). Was: guard OFF
+                                                              // exactly: reprojection with no validity test on
+                                                              // the reprojected texel. Brings back the
+                                                              // scattered halo around the caster, which is the
+                                                              // A/B for the guard. 0 vs 105 vs 104 is the full
+                                                              // ladder: guarded reprojection, raw reprojection,
+                                                              // no reprojection.
+                            khd_m == 104 ||                   // 26244 REPROJECTION OFF (raster lookup). The
+                                                              // default reprojects again: the 26242/26243
+                                                              // truth table shows the on-box stencil cut clears
+                                                              // ONLY with adoption AND reprojection both on
+                                                              // (mode 100 at 26242), and the halo that came
+                                                              // with it is now attributed to feeding the shader
+                                                              // a REBASED matrix, which forced a per-pixel fp32
+                                                              // camera subtraction at world magnitudes. The ring
+                                                              // stores the ABSOLUTE transform now and the
+                                                              // subtraction is gone. If the halo survives that,
+                                                              // the aliasing is inherent and 104 is the answer.
+                            khd_m == 103 ||                   // 26244 RETIRED TO A NO-OP (reprojection is the
+                                                              // default now - see mode 104). Was: opt-in.
+                                                              // the default: under mode 101 the scattered halo
+                                                              // around the caster disappeared, so reprojection
+                                                              // causes it. Enabled three times now (26234,
+                                                              // 26236, 26242), a caster ghost every time, the
+                                                              // strip never once moved.
+                            khd_m == 102 ||                   // 26243 INJECTION VIEW-ADOPTION OFF (opt-in).
+                                                              // Backed out of the default: under mode 100 the
+                                                              // on-box stencil cut disappeared, so the
+                                                              // injection DOES need the visible draw's view and
+                                                              // 26224 was right. Pair with svSwingPxMean, which
+                                                              // reads a tautological 0 whenever adoption is off.
+                            khd_m == 101 ||                   // 26242 RETIRED TO A NO-OP (its revert is the
+                                                              // default now - see mode 103). Was: HALF B OFF -
+                                                              // the mesh reads the mask at
+                                                              // its own raster position instead of reprojecting
+                                                              // through the injection's transform. Restores the
+                                                              // on-box stencil strip. Pair with svReprojPxMean.
+                            khd_m == 100 ||                   // 26243 RETIRED TO A NO-OP (its revert is the
+                                                              // default now - see mode 102). IT IS ALSO THE
+                                                              // MODE THAT BACKED 26242 OUT: under 100 the
+                                                              // on-box stencil cut vanished in a
+                                                              // single-session, single-variable A/B.
+                                                              // Was: HALF A OFF - restores the 26224 fresh-view
+                                                              // adoption in the injection, which puts our
+                                                              // footprint one sim-frame ahead of the volume
+                                                              // buffer again and brings back the CASCADE CUT
+                                                              // (the box ghost eating world shadow). Pair with
+                                                              // svSwingPxMean and svInjViewAdopts.
+                                                              // 0 vs 100 vs 101 is a three-way A/B, one
+                                                              // variable each. Neither half works alone: 83
+                                                              // (= half A) fixed the cascade cut and left the
+                                                              // stencil strip; reprojection alone (26234/26236)
+                                                              // only added a ghost, because it was aligning the
+                                                              // lookup to a footprint that was itself misplaced.
+                            khd_m == 98 ||                    // 26239 INJECTION DEPTH-CLIP REVERT. Restores
+                                                              // rast_sun (DepthClipEnable TRUE) for the
+                                                              // injection instead of the new rast_inject
+                                                              // (FALSE, matching the visible draw). THE PIXEL
+                                                              // HISTORY CONVICTED THIS: at a strip pixel our
+                                                              // injection draw does not appear in the volume
+                                                              // depth history at all, while it passes at a
+                                                              // correct pixel and a lit one. Clipped fragments
+                                                              // vanish from the injection and are CLAMPED into
+                                                              // the visible draw, so the box is there and its
+                                                              // depth is not. Read svInjRsClamp / svInjRsClip
+                                                              // and compare svPrimePixels: it must FALL under
+                                                              // 98 if the clip was eating coverage.
+                            khd_m == 97 ||                    // 26238 MASK CLAMP BOUND FORCED to the mask's
+                                                              // own dimensions. fxMeta.zw is filled TWICE per
+                                                              // object and the second fill uses the occlusion
+                                                              // guard snapshot's size, not the mask's - 26221
+                                                              // added the unconditional fill and never removed
+                                                              // the conditional one. Pair with fxDimMismatch:
+                                                              // if that reads 0 this mode is a no-op and the
+                                                              // double fill is only untidy.
+                            khd_m == 96 ||                    // 26238 SPLIT ARM B: injection OFF, snapshots
+                                                              // and multiply ON. The mesh multiplies by a mask
+                                                              // our depth never reached. If the missing-shadow
+                                                              // sliver survives, the mask content is wrong for
+                                                              // reasons unrelated to our injection.
+                            khd_m == 95 ||                    // 26238 SPLIT ARM A: injection and snapshots ON,
+                                                              // MULTIPLY OFF. If the box-edge sliver survives,
+                                                              // it comes from our depth entering the volume
+                                                              // buffer and NOT from the shading term - i.e.
+                                                              // the two slivers are two faults. Neither 95 nor
+                                                              // 96 paints, so the geometry stays legible.
+                            khd_m == 94 ||                    // 26237 STENCIL REPROJECTION ON (OPT-IN, and it
+                                                              // does NOT fix the silhouette strip - it is kept
+                                                              // only because the machinery is what measured
+                                                              // the strip's cause OUT). svReprojPx reads 0.139
+                                                              // px between the two views on a settled frame,
+                                                              // so there is no misregistration to correct;
+                                                              // enabling this adds a ghost around the caster
+                                                              // and changes the strip not at all. Modes 90, 91
+                                                              // and 92 are all retired no-ops now: the default
+                                                              // IS the raster lookup.
+                            khd_m == 93 ||                    // 26236 DARK-STANDING HARD ESCAPE OFF. Restores
+                                                              // the pre-26236 behaviour where a sun-zero
+                                                              // lighting standing under a live static sun can
+                                                              // hold indefinitely - i.e. it restores the
+                                                              // black-box-on-cold-start fault. Pair with
+                                                              // blkDarkForceAdopts (stops climbing) and
+                                                              // blkStickyRejects (resumes climbing without
+                                                              // bound). Diagnostic only.
+                            khd_m == 92 ||                    // 26236 STENCIL REPROJECTION OFF. The default is
+                                                              // now EPOCH-MATCHED reprojection: svPostAgeMax
+                                                              // measured 1, so the mask the mesh reads is one
+                                                              // frame older than the mesh, and the lookup uses
+                                                              // the transform stamped with the SNAPSHOT's
+                                                              // epoch. 92 falls back to the raster position,
+                                                              // which restores the silhouette strip. That is
+                                                              // the A/B for this build. Read
+                                                              // svReprojEpochHits / svReprojEpochMiss.
+                            khd_m == 91 ||                    // 26235 STENCIL REPROJECTION ON - RETIRED (the
+                                                              // opt-in it enabled is the default now). No-op.
+                                                              // Was: 26235 opt-in. The
+                                                              // default no longer reprojects: 0 and 90 carried
+                                                              // the same strip, so the lookup position was not
+                                                              // the cause, and 0 additionally ghosted around
+                                                              // the caster - reprojecting against THIS frame's
+                                                              // injection matrix adds error if the snapshot
+                                                              // being read is older than that matrix. Read
+                                                              // svPostAgeMax before trusting this mode.
+                            khd_m == 90 ||                    // 26234 STENCIL REPROJECTION REVERT - RETIRED
+                                                              // as a revert (the default it reverted is gone)
+                                                              // and kept only so old scripts still validate.
+                                                              // Behaves identically to 0.
+                                                              // Was: loads the
+                                                              // mask at the mesh's OWN raster position again
+                                                              // instead of the pixel it occupied under the
+                                                              // injection's view. Restores the ~50 px
+                                                              // misregistered strip at every silhouette edge
+                                                              // under camera rotation, which is the whole
+                                                              // A/B. Pair with svReprojPxMax: under 90 the
+                                                              // gauge still measures the delta, so the
+                                                              // number and the artifact can be read in one
+                                                              // session.
+                            khd_m == 89 ||                    // 26232 INJECTION TESSELLATION REVERT. Leaves
+                                                              // HS/DS inherited from the engine's volume-pass
+                                                              // bind instead of nulling them, which is what
+                                                              // the injector did for its whole life while
+                                                              // every one of its nine sibling passes nulled
+                                                              // them. Expect NO visual difference; this is
+                                                              // parity, like 80-83, and all four of those
+                                                              // held as parity and caused nothing visible.
+                                                              // Read svInjTessNulls / svInjTessInherit.
+                            khd_m == 80 ||                    // 26221 INJECTION VIEWPORT REVERT. Restores
+                                                              // MinDepth 0 / MaxDepth 1 in
+                                                              // kh_volume_seam_inject instead of the
+                                                              // engine's own 0.011 / 0.999. Paints the
+                                                              // isolated stencil term exactly as 73, so
+                                                              // 73 vs 80 is one variable with one visual.
+                                                              // Read svInjVpLo/Hi and svInjVpReverts.
+                            khd_m == 86 ||                    // 26230 MASK-PRIMING REVERT. Stops writing lit
+                                                              // into the engine mask over our footprint, so
+                                                              // pre carries the BACKGROUND's cascade verdict
+                                                              // again and KhStenRatio's pre <= 0.02 guard
+                                                              // discards the stencil term wherever the
+                                                              // terrain behind our mesh is fully shadowed -
+                                                              // the blue band. Paints as 73. A/B 73 vs 86 in
+                                                              // mode 78: the band is present under 86 only.
+                            khd_m == 83 ||                    // 26242 RETIRED TO A NO-OP: this revert IS the
+                                                              // default now (see mode 100). It is what proved
+                                                              // half A in the field - under 83 the cascade cut
+                                                              // disappeared while the on-box stencil strip
+                                                              // remained, which is what split the two faults.
+                                                              // Kept whitelisted so old scripts validate.
+                                                              // Was: 26224 INJECTION VIEW-ADOPTION REVERT. Keeps
+                                                              // g_ro.cycle_pv instead of the same-frame
+                                                              // adopted view, so the injected box and the
+                                                              // visible box are transformed by different
+                                                              // view matrices again - the pre-26224 path,
+                                                              // and the one that manufactures the duplicate
+                                                              // opposite-side silhouette. Paints as 73.
+                            khd_m == 82 ||                    // 26222 INJECTION RASTERIZER REVERT. Inherits
+                                                              // the engine's volume-pass rasterizer instead
+                                                              // of rast_sun, so depth is clamped not clipped,
+                                                              // carries whatever bias the engine had, and is
+                                                              // culled however the engine culls. The
+                                                              // pre-26222 path. Paints as 73. Read
+                                                              // svInjRsInherit.
+                            khd_m == 81 ||                    // 26221 INJECTION REBASE REVERT. Keeps the
+                                                              // absolute (un-rebased) viewProj and leaves
+                                                              // center_rel unarmed - the pre-26221 path.
+                                                              // Also paints as 73. Read svInjAbs: under 81
+                                                              // it takes over from svInjRebases one for one.
+                            khd_m == 79 ||                    // 26217 SUBTRACTIVE STENCIL FORM. Paints
+                                                              // 1 - saturate(pre - post) instead of the
+                                                              // guarded division. Continuous, so no step
+                                                              // at the edge of a cascade shadow, but it
+                                                              // under-darkens a full stencil shadow to
+                                                              // 1 - pre rather than 0. A/B against 73:
+                                                              // the fringe decides.
+                            khd_m == 78 ||                    // 26216 RATIO INPUTS PER CHANNEL. R = post
+                                                              // (live mask), G = pre (snapshot), B = the
+                                                              // sten ratio. THE instrument for 26215's
+                                                              // falsified premise: at a building-shadow
+                                                              // pixel over the mesh, R == G means the
+                                                              // cascade term is identical in both and the
+                                                              // ratio must cancel (arithmetic fault);
+                                                              // R != G means the copy lands at the wrong
+                                                              // point relative to the engine's cascade
+                                                              // writes (premise fault). Yellow = correct
+                                                              // cancellation; red/green fringes on
+                                                              // building edges are the residual.
+                            khd_m == 77 ||                    // 26215 MASK-ADOPTION / WITH-RTV COUPLING
+                                                              // RESTORED - re-enact the 26214 fault on
+                                                              // every mask adoption (the old release path
+                                                              // did both jobs). Pair with svRtvSetWipes,
+                                                              // which must read 0 under the default.
+                            khd_m == 76 ||                    // 26218 REPURPOSED: LIVE-POST A/B. Reads post
+                                                              // from the live mask instead of the bracketed
+                                                              // snapshot - i.e. the 26217 configuration,
+                                                              // kept because it is the A/B that documents
+                                                              // the fault. Under 76 our own mask_cast_engine
+                                                              // paint lands between the resolve and our
+                                                              // draw, so the box's OWN cast shadow comes
+                                                              // back as a counterfeit stencil term; under
+                                                              // every other selector it cannot.
+                                                              // (Was the 26215 in-hook copy option, retired
+                                                              // with the bracket - the post half must fire
+                                                              // AFTER the resolve draw and cannot be issued
+                                                              // from the OM hook at all.)
+                            khd_m == 75 ||                    // 26215 THE FEATURE. Multiply the isolated
+                                                              // stencil term into the shading path. Band
+                                                              // receive (cascades) is untouched, so
+                                                              // terrain and building shadows must look
+                                                              // exactly as they do at mode 0 while unit
+                                                              // shadows now land on the mesh.
+                            khd_m == 74 ||                    // 26215 PAINT THE PRE SNAPSHOT ALONE. The
+                                                              // copy's own liveness: black everywhere
+                                                              // means the CopyResource never landed and
+                                                              // sten is pinned to 1, which mode 73 alone
+                                                              // could not tell apart from a wrong ratio.
+                            khd_m == 73 ||                    // 26215 PAINT THE ISOLATED STENCIL TERM
+                                                              // (post/pre). ACCEPTANCE TEST: it must show
+                                                              // the soldier's shadow and NOTHING else -
+                                                              // no power lines, no building edges, no
+                                                              // terrain. Those belong to the cascade half
+                                                              // of the mask, which this discards.
+                            khd_m == 72 ||                    // 26214 PER-FRAME WITH-RTV SET RESTORED -
+                                                              // 26213 behaviour, which measured
+                                                              // svOrdRtvFirst 0 against svOrdOnlyFirst
+                                                              // 1863: the set was wiped between the
+                                                              // prepass and the volume pass every
+                                                              // frame, so no seam could ever fire.
+                            khd_m == 71 ||                    // 26212 ENGINE SHADOW-MASK PAINT. Arms the
+                                                              // seam depth injection AND paints the
+                                                              // engine's screen-space shadow mask onto
+                                                              // the mesh instead of shading it. If the
+                                                              // box shows the SOLDIER's shadow, sharp
+                                                              // and tracking him, the injected depth
+                                                              // reached the stencil volume test. If it
+                                                              // shows shadowing belonging to the ground
+                                                              // BEHIND the box, it did not. Pair with
+                                                              // svMaskAdopts + svMaskBinds.
+                            khd_m == 70 ||                    // 26211 IN-HOOK SEAM INJECTION RESTORED -
+                                                              // 26210 behaviour: draw from inside the
+                                                              // OM hook instead of deferring to the
+                                                              // next draw. Runs in-game either way;
+                                                              // the difference is whether a RenderDoc
+                                                              // capture contains the draw.
+                            khd_m == 69 ||                    // 26209 SEAM ADJACENCY RULE RESTORED -
+                                                              // back to 26208's "immediately previous
+                                                              // bind" test, which measured a 47% miss
+                                                              // rate against a boundary present every
+                                                              // frame. Pair with svSeamAdj.
+                            khd_m == 68 ||                    // 26204 SHADOW-VOLUME SEAM DEPTH INJECTION
+                                                              // ON (opt-in; default is census only).
+                                                              // Renders our meshes DEPTH-ONLY into the
+                                                              // engine's scene depth buffer at the
+                                                              // prepass -> stencil-volume seam, so the
+                                                              // volume counting sees our surface. Pair
+                                                              // with svInjects + svInjectDraws: both
+                                                              // must climb. Nothing reads the shadow
+                                                              // mask yet - this build only puts our
+                                                              // depth where the test can see it.
+                            khd_m == 67 ||                    // 26202 PROJECTION-CENSUS RETENTION OFF -
+                                                              // restore 26201's zeroing of the census at
+                                                              // the stats arm. The census IS the near-class
+                                                              // gate's reference, so under 67 both the
+                                                              // 26199 rung gate and the 26201 substitution
+                                                              // stand down for a frame or two after every
+                                                              // arm. Pair with encNearRefM reading -1 in a
+                                                              // freshly armed dump.
+                            khd_m == 66 ||                    // 26202 NEAR-CLASS CORRECTIONS OFF - restore
+                                                              // the 26201 forms: compare raw -m32 instead
+                                                              // of the true near -m32/m22, and qualify a
+                                                              // substitute with the fail-OPEN refusal test
+                                                              // instead of the fail-closed endorsement.
+                                                              // Pair with encEndorseRejects: under 66 it
+                                                              // stops climbing because nothing can be
+                                                              // refused an endorsement any more.
+                                                              // NOT restored under 66: 26201's probe also
+                                                              // SPENT encNearClassRejects on every look.
+                                                              // Reinstating that would make the one lane
+                                                              // this A/B needs to read unreadable during
+                                                              // the A/B, so the probe stays side-effect
+                                                              // free in both arms and only the two
+                                                              // behavioural forms revert.
+                            khd_m == 65 ||                    // 26199 ENCODE NEAR-CLASS AGREEMENT OFF -
+                                                              // restore the absolute near band alone.
+                                                              // Underwater this brings the punch-through
+                                                              // back. Pair with encNearClassRejects.
+                            khd_m == 64 ||                    // 26197 BELOW-LAYER ATMOSPHERIC STAND-DOWN
+                                                              // OFF - run the above-layer fog/haze model
+                                                              // with the camera underwater. Pair with
+                                                              // fogBelowStands + fogBelowCamY.
+                            khd_m == 61 ||                    // 26198 FOG FAR-FADE RAMP OFF ENTIRELY -
+                                                              // restore the unconditional far-fade ramp.
+                                                              // Pair with fogRampStands + fogEngEnd.
+                            khd_m == 62 ||                    // 26196 ENGINE DECAY LANE OFF - revert to
+                                                              // the SQF-staged fogParams decay. At staged
+                                                              // decay 0 this restores the flat fog fill.
+                                                              // Pair with fogDecayShipped + fogDecaySubs.
+                            khd_m == 63 ||                    // 26196 RELATIVE DARK RE-SEED BAR OFF -
+                                                              // back to the absolute 1.0 of 26159.
+                                                              // Pair with blkDarkSeedBlocks.
+                            khd_m == 60 ||                    // 26195 ENGINE DISTANCE HAZE OFF. Zeroes
+                                                              // hazePars.w, so KhHazeT returns 1.0 and
+                                                              // the atmospheric block falls back to its
+                                                              // 26194 fog-only arming - the mesh goes
+                                                              // crisp against hazed terrain again, which
+                                                              // IS the fault. Pair with hazeArms: the
+                                                              // counter stops climbing under 60.
+                            khd_m == 29 ||                    // 26148: shader reject bypass - locality clamp and
+                                                              // near floor forced to pass (look-down diagnostic)
+                            khd_m == 28;                      // 26160 REUSED: last-fire clamp with the camera
+                                                              // EXTRAPOLATED one frame forward, because the
+                                                              // late paint is consumed by the next frame.
+                                                              // (was 26092-26093 adaptive-floor opt-in - RETIRED
                                                               // to an accepted no-op at 26094 (adaptive is
                                                               // the default now; kept for script compat).
                                                               // 26095: mode 29 (the legacy arm-floor escape
@@ -7159,6 +8039,23 @@ static game_value set_render_debug_sqf(game_value_parameter arg) {
     }
 }
 
+
+// 26180 A/B WINDOWING. getRenderStats arms ONCE per session
+// (g_stats_armed.exchange), so before this existed every mode A/B carried
+// its own pre-toggle window with it - dump99 and dump54 overlapped by 2270
+// cycles for exactly that reason, and nine lanes read byte-identical across
+// two supposedly different field rounds. This re-zeroes the same block the
+// arming call zeroes, so a mode can be measured in a clean window without
+// restarting the session. Cold-timeline stamps are session state and are
+// deliberately NOT touched.
+static game_value reset_render_stats_sqf() {
+    try {
+        RenderIntegration::reset_stat_counters();
+        return game_value(true);
+    } catch (...) {
+        return game_value(false);
+    }
+}
 
 static game_value get_render_stats_sqf() {
     try {
@@ -7283,6 +8180,18 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("compositeFarInjects", RenderIntegration::g_stats.composite_far_injects));
         out.push_back(kv("compositeFarArbs", RenderIntegration::g_stats.composite_far_arbs));
         out.push_back(kv("compositeFarArbDenied", RenderIntegration::g_stats.composite_far_arb_denied));
+        // 26189: injections the near floor would leave on the STOCK path but
+        // that armed anyway. 0 by construction under the restored floor;
+        // under setRenderDebug 55 it prices the falsified 26188 exposure
+        // (936 of 1024 in dump555).
+        out.push_back(kv("arbNearDenied", RenderIntegration::g_arb_near_denied));
+        // 26189: verdict changes of the near classification - every flip is a
+        // discontinuity in the mesh's depth against nearby world geometry.
+        // dump555 read 4 across a whole 1025-flush session, which is TOO FEW
+        // to be the operator's continuous per-distance banding: the toggle is
+        // real but is not the dominant term. Any next model must explain an
+        // effect that persists with this lane flat.
+        out.push_back(kv("arbNearFlips", RenderIntegration::g_arb_near_flips));
         out.push_back(kv("flushFxArbs", RenderIntegration::g_stats.flush_fx_arbs));
         out.push_back(kv("compositeTranslDefers", RenderIntegration::g_stats.composite_transl_defers));
         out.push_back(kv("texturedDraws", RenderIntegration::g_stats.textured_draws));
@@ -7298,6 +8207,9 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("sunDepthCasters", RenderIntegration::g_stats.sun_depth_casters));
         out.push_back(kv("sunJumpFlushes", RenderIntegration::g_stats.sun_jump_flushes));
         out.push_back(kv("castArmsLost", RenderIntegration::g_mask.cast_arms_lost));
+        out.push_back(kv("sunFitRescues", RenderIntegration::g_sun_fit_rescues));   // 26334
+        out.push_back(kv("svsRestamps", RenderIntegration::g_svs_restamps));   // 26337
+        out.push_back(kv("svsRestampMiss", RenderIntegration::g_svs_restamp_miss));
 
         {
             uint32_t bsv = 0;
@@ -7326,6 +8238,21 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("liveRejIso", RenderIntegration::g_stats.live_rej_iso));
         out.push_back(kv("liveRejRatio", RenderIntegration::g_stats.live_rej_ratio));
         out.push_back(kv("liveRejTrans", RenderIntegration::g_stats.live_rej_trans));
+        // 26232 DO NOT USE liveAccepts AS AN ACCEPTANCE GATE. It increments in
+        // shadow_live_test_window when a sampling transform is classified, and
+        // reset_stat_counters assigns g_stats = RenderStats{} - the WHOLE
+        // struct - at every arming. The live table latches once, seconds into a
+        // session (coldFirstLiveLatchS names the moment, and that lane is a
+        // sticky cold marker that arming does NOT clear), and the table itself
+        // is live state that correctly survives the reset. So in any dump armed
+        // after the first few seconds this reads 0 BY CONSTRUCTION while the
+        // band receive is perfectly healthy. The campaign-34 handoff made
+        // "liveAccepts > 0" a hard blocker on shipping the stencil term; it is
+        // unsatisfiable in a properly windowed A/B dump, and the campaign's own
+        // rule applies - if a gauge reads impossibly, suspect the gauge.
+        // THE GAUGE THAT ACTUALLY ANSWERS IT is recvTermSkips 0 (no lit mesh
+        // drawn without the received-shadow term) plus recvStreamSkips 0,
+        // bandSlotsValid 8 and liveValidEntries 8. Those are what to require.
         out.push_back(kv("liveAccepts", RenderIntegration::g_stats.live_accepts));
         out.push_back(kv("shadowAtlasSize", RenderIntegration::g_ls.atlas_size));
         out.push_back(kv("resolveHits", RenderIntegration::g_ls.resolve_hits));
@@ -7396,6 +8323,64 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("coldGTid", RenderIntegration::g_mask.cold_g_tid));
         out.push_back(kv("coldCastMiss", RenderIntegration::g_mask.cold_cast_miss));
         out.push_back(kv("coldPubRejects", RenderIntegration::g_ls.cold_pub_rejects));
+        // 26133 motion-ghost campaign gauges (ledger at the fire statics).
+        out.push_back(kv("fireSnapCopies", RenderIntegration::g_fire_snap_copies));
+        out.push_back(kv("fireSnapFails", RenderIntegration::g_fire_snap_fails));
+        out.push_back(kv("fireSnapLive", RenderIntegration::g_fire_snap_live ? 1 : 0));
+        out.push_back(kvf("fireLiveViewDeltaM", RenderIntegration::g_fire_live_view_delta_m));
+        out.push_back(kvf("fireLiveViewDeltaMax", RenderIntegration::g_fire_live_view_delta_max));
+        out.push_back(kv("fireLiveViewMoved", RenderIntegration::g_fire_live_view_moved));
+        out.push_back(kv("castRearmAtlasBlocks", RenderIntegration::g_cast_rearm_atlas_blocks));
+        out.push_back(kv("castRearmStrandedClears", RenderIntegration::g_cast_rearm_stranded_clears));
+        // 26135 moved-epoch skip gauges (ledger at the skip in mask_cast_engine).
+        out.push_back(kv("fireEpochSkips", RenderIntegration::g_fire_epoch_skips));
+        out.push_back(kv("fireEpochSkipsBridge", RenderIntegration::g_fire_epoch_skips_bridge));
+        out.push_back(kvf("fireEpochLastM", RenderIntegration::g_fire_epoch_last_m));
+        out.push_back(kvf("fireEpochLastRot", RenderIntegration::g_fire_epoch_last_rot));
+        out.push_back(kv("blkDarkContraSticky", RenderIntegration::g_blk_dark_contra_sticky));
+        // 26236 THE BLACK-BOX LANES THAT SEE THE PATH THAT ACTUALLY RUNS.
+        // A cold start caught in the act read blkDarkContraSticky 1.01e+06 with
+        // blkDarkReseeds 0, blkDarkSeedBlocks 0, blkDarkReadopts 0 and
+        // blockRegimeAdopts 0 - so every contradicted upload took the STICKY
+        // branch, which had no census. The 26195 ratio lanes that exist to
+        // decide this fix live in the other branch and read zero because
+        // control never reaches them. Three campaigns have measured the wrong
+        // path.
+        //   blkStickyRejects   - refusals on the path that actually runs.
+        //   blkStickyPendAgeMax - THE decisive lane. The sticky guard refuses to
+        //     re-seed and deliberately does not touch pend_t, so a genuinely
+        //     ageing pending must eventually clear the 500 ms exclusivity bar
+        //     and adopt. It did not, a million times. If this reads > 0.5 the
+        //     pending IS ageing and the adoption chain is never entered
+        //     (khp_agree never true); if it stays pinned near 0 something
+        //     upstream is refreshing pend_t. Those are different faults with
+        //     different fixes and no previous build could tell them apart.
+        //   blkStickyInSl / blkStickyPendSl / blkStickyStdSl - the three sun
+        //     lanes at the last refusal: what arrived, what is waiting, what is
+        //     ruling.
+        //   blkDarkForceAdopts / blkDarkForceHeldS - the 26236 escape. Expect 0
+        //     in a healthy session. Non-zero means the fault occurred AND was
+        //     broken; HeldS says how long the world was wrong before it broke.
+        //     This is a SYMPTOM fix - the root cause is still unmeasured, which
+        //     is what the lanes above are for.
+        out.push_back(kv("blkStickyRejects", RenderIntegration::g_blk_sticky_rejects));
+        out.push_back(kvf("blkStickyPendAge", RenderIntegration::g_blk_sticky_pend_age));
+        out.push_back(kvf("blkStickyPendAgeMax", RenderIntegration::g_blk_sticky_pend_age_max));
+        out.push_back(kvf("blkStickyInSl", RenderIntegration::g_blk_sticky_in_sl));
+        out.push_back(kvf("blkStickyPendSl", RenderIntegration::g_blk_sticky_pend_sl));
+        out.push_back(kvf("blkStickyStdSl", RenderIntegration::g_blk_sticky_std_sl));
+        out.push_back(kv("blkDarkForceAdopts", RenderIntegration::g_blk_dark_force_adopts));
+        out.push_back(kvf("blkDarkForceHeldS", RenderIntegration::g_blk_dark_force_held_s));
+        // 26159 (ledger at g_blk_dark_seed_blocks): re-seeds refused so the
+        // bright pending can actually age past its 500 ms exclusivity bar.
+        out.push_back(kv("blkDarkSeedBlocks", RenderIntegration::g_blk_dark_seed_blocks));
+        out.push_back(kv("fireExtrapUsed", RenderIntegration::g_fire_extrap_used));   // 26160
+        out.push_back(kv("fireExtrapFails", RenderIntegration::g_fire_extrap_fails));
+        out.push_back(kv("blkDarkReadopts", RenderIntegration::g_blk_dark_readopts));
+        // 26133 sky-sun cold bootstrap gauges (ledger at publish_world_lighting).
+        out.push_back(kv("sunBootPublishes", RenderIntegration::g_sun_boot_publishes));
+        out.push_back(kv("sunBootActive", RenderIntegration::g_pub_boot ? 1 : 0));
+        out.push_back(kvf("sunBootHandoverDeg", RenderIntegration::g_sun_boot_handover_deg));
         out.push_back(kvf("lastInjectNear", RenderIntegration::g_mask.last_inject_near));
         out.push_back(kv("ovListed", RenderIntegration::g_mask.ov_listed));
         out.push_back(kv("ovSkipped", RenderIntegration::g_mask.ov_skipped));
@@ -7539,6 +8524,1710 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("skyLocHits", RenderIntegration::g_sky_probe.hits));
         out.push_back(kv("skyLocMisses", RenderIntegration::g_sky_probe.misses));
         out.push_back(kvf("skyLocAge", RenderIntegration::effect_time_seconds() - RenderIntegration::g_sky_probe.last_confirm));
+        // ===================================================================
+        // 26195 ATMOSPHERIC ROW CENSUS (pure reads; no state, no behaviour).
+        //
+        // CLAIM UNDER TEST, stated so the dump can kill it:
+        //   (A) g_sky_probe's buffer IS the engine's PSCB_NonFrequent, bound
+        //       at PS b0 - the buffer whose row 14 the terrain and object
+        //       shaders read as PSC_HazePars, the DISTANCE HAZE that tints
+        //       world geometry blue and that our meshes do not receive.
+        //   (B) g_light_probe's buffer IS the engine's PS b5 - the buffer
+        //       whose row 10 / 12 hold the fog decay, density, end, inverse
+        //       range, LAYER ALTITUDE and below-layer extinction. Three of
+        //       those six are already consumed (fogEngine.xyz = nb 41/48/49);
+        //       the other three have never been read.
+        //
+        // The census is ANCHOR-RELATIVE by construction, so it survives a
+        // non-zero nb_base instead of silently lying about it: the sky
+        // anchor already pins row 17 to the literal gradient triple
+        // (0.25, 0.75, 3.5), so atmSkyR17x/y/z is the RULER. If those three
+        // read the triple, the row indexing below is confirmed and
+        // atmSkyR14* IS PSC_HazePars. If they do not, count rows from
+        // wherever the triple actually lands and every other row follows.
+        //
+        // Row semantics (PSCB_NonFrequent, from the engine's own shader
+        // reflection): 0 TerrainSatNormDist, 1 FogColor, 7 WaterFogColor,
+        // 13 ClearColor, 14 HazePars, 15/16 extinction triples, 17 the
+        // gradient control points. nb[i] is ABSOLUTE float (nb_base + i) -
+        // read atmSkyNbBase / lightLocNbBase / lightLocOff alongside these.
+        // ===================================================================
+        out.push_back(kv("atmSkyNbBase", RenderIntegration::g_sky_probe.nb_base));
+        // 26195 HAZE ARM CENSUS: what kh_fill_haze actually decided, and
+        // the exact operands the shader integrated - publish them and any
+        // hazeT is reproducible offline for any distance, which is why no
+        // visual slot was burned on a ladder.
+        // 26200 THREE-SOURCE NEAR CENSUS. dump993 (1.46 m above water, the thin
+        // band where the mesh clips the horizon) shipped near 10.005 while the
+        // census-dominant pair read 1.793 with 2031 hits - so the near-class
+        // gate correctly refused the SLOT and the fault came in through the
+        // fallback instead. These three side by side say which of the three
+        // sources is the odd one out, in one dump, without guessing.
+        out.push_back(kvf("encNearSlot", RenderIntegration::g_ro.slot_near_live));
+        // 26202: the TRUE near (-m32/m22), which is what the gate now
+        // compares. 26201 published raw -m32 here; the two differ by the
+        // factor m22, ~1.0005 on every pair measured, so no comparison an
+        // operator has made against this lane changes - but the lane and
+        // the gate now agree exactly instead of nearly.
+        out.push_back(kvf("encNearMeasured", RenderIntegration::g_ro.engine_proj_valid
+            ? RenderIntegration::kh_enc_pair_near(RenderIntegration::g_ro.engine_m22,
+                                                  RenderIntegration::g_ro.engine_m32) : -1.0f));
+        out.push_back(kvf("encFarMeasured", RenderIntegration::g_ro.engine_proj_valid
+            ? RenderIntegration::kh_enc_far(RenderIntegration::g_ro.engine_m22,
+                                            RenderIntegration::g_ro.engine_m32) : -1.0f));
+        out.push_back(kvf("encFarSlot", RenderIntegration::kh_enc_far(
+            RenderIntegration::g_ro.slot_m22, RenderIntegration::g_ro.slot_m32)));
+        out.push_back(kv("encNearClassRejects", RenderIntegration::g_enc_near_class_rejects));
+        out.push_back(kv("encBridgeSwaps", RenderIntegration::g_enc_bridge_swaps));
+        out.push_back(kvf("encNearRefM", RenderIntegration::g_enc_near_ref_m));
+        out.push_back(kvf("encNearRejM", RenderIntegration::g_enc_near_rej_m));
+        // 26202 SUBSTITUTION FORENSICS. encBridgeSwaps says a swap happened;
+        // these say WHOSE pair it displaced and by how much. encSwapSrc is
+        // the encode author of the displaced pair - 0 bridge, 1 measured,
+        // 2 slot, 3 keep, 4 live-ref, 5 world, 4294967295 = no swap yet -
+        // and encSwapSrcBits is the accumulated set (bit N = author N).
+        // THE QUESTION THIS SETTLES: 26201 named its fix for the BRIDGE,
+        // but dump5933 had the sniffer live and reading 4.35528, which
+        // means the measured overwrite had already replaced the bridge's
+        // flat 10 before any rung ran - so the shipped 10.005 should not
+        // have been able to come from the bridge at all. If encSwapSrc
+        // reads 3 or 4, the fault was the injection KEEP or LIVE-REF rung,
+        // neither of which carries a near-class gate, and the 26201 swap
+        // has been working as a backstop for an ungated rung rather than
+        // as the bridge guard its ledger describes. Do not re-gate those
+        // rungs on this reasoning: read the lane first.
+        out.push_back(kv("encSwapSrc", static_cast<uint64_t>(RenderIntegration::g_enc_swap_src)));
+        out.push_back(kv("encSwapSrcBits", static_cast<uint64_t>(RenderIntegration::g_enc_swap_src_bits)));
+        out.push_back(kvf("encSwapFromM", RenderIntegration::g_enc_swap_from_m));
+        out.push_back(kvf("encSwapToM", RenderIntegration::g_enc_swap_to_m));
+        out.push_back(kv("encEndorseRejects", RenderIntegration::g_enc_endorse_rejects));
+        // 26202 BAR MARGIN (full ledger at g_enc_near_ratio_last). The ratio
+        // between the shipped near and the census reference, every frame, and
+        // the session peak. KH_ENC_NEAR_CLASS refuses above 10. The bridge's
+        // near is a flat 10 while the camera's tracks altitude, so the bridge
+        // is out of class below a reference of 1.0 near (~2 m altitude) and
+        // IN class above it - the 26201 substitution therefore covers the
+        // bottom of the 1-2 m band and not the top. encNearRatioMax near 10
+        // means the gate was close to the fault; stuck at 2-3 means it never
+        // came near firing and a remaining clip is not something this gate
+        // can see. Do not move the bar on one dump.
+        out.push_back(kvf("encNearRatio", RenderIntegration::g_enc_near_ratio_last));
+        out.push_back(kvf("encNearRatioMax", RenderIntegration::g_enc_near_ratio_max));
+        out.push_back(kv("fogRampStands", RenderIntegration::g_fog_ramp_stands));
+        out.push_back(kv("fogRampHolds", RenderIntegration::g_fog_ramp_holds));
+        out.push_back(kvf("fogRampEndMin", RenderIntegration::g_fog_ramp_end_min));
+        out.push_back(kvf("fogRampEndMax", RenderIntegration::g_fog_ramp_end_max));
+        out.push_back(kv("fogBelowStands", RenderIntegration::g_fog_below_stands));
+        out.push_back(kvf("fogBelowCamY", RenderIntegration::g_fog_below_cam_y));
+        out.push_back(kv("fogDecaySubs", RenderIntegration::g_fog_decay_subs));
+        out.push_back(kvf("fogDecayShipped", RenderIntegration::g_fog_decay_pub));
+        out.push_back(kvf("fogDecayEngine", RenderIntegration::g_light_probe.nb[40]));
+        out.push_back(kv("hazeArms", RenderIntegration::g_haze_arms));
+        out.push_back(kv("hazeModeStands", RenderIntegration::g_haze_mode_stands));
+        out.push_back(kv("hazeSaneRejects", RenderIntegration::g_haze_sane_rejects));
+        out.push_back(kvf("hazeRefAltM", RenderIntegration::g_haze_ref_pub));
+        out.push_back(kvf("hazeDensity", RenderIntegration::g_haze_den_pub));
+        out.push_back(kvf("hazeFalloff", RenderIntegration::g_haze_fal_pub));
+        out.push_back(kvf("hazeLayerY", RenderIntegration::g_haze_layer_pub));
+        {   // the engine fog-mode selector as the shader switch reads it:
+            // raw BITS, not a float. Measured 1 (layered fog + haze).
+            uint32_t khz_m = 0;
+            memcpy(&khz_m, &RenderIntegration::g_light_probe.nb[44], sizeof(khz_m));
+            out.push_back(kv("hazeFogModeBits", static_cast<uint64_t>(khz_m)));
+        }
+        // ===================================================================
+        // 26202 SHADOW DEPTH-TARGET CENSUS (full ledger at KhShadowTexObs in
+        // rendering_integration.hpp). The instrument for the character-shadow
+        // task: every depth texture that reaches shadow_live_consider_atlas,
+        // its shape, and the clause that refused it.
+        //
+        // READ IT IN THIS ORDER.
+        //  1. shadowTexConsiders. ZERO means the instrument never ran and
+        //     every other lane here is meaningless - the probe only fires on
+        //     depth-only binds whose target CHANGED, while shadow_live_wanted.
+        //     A zero is an instrument fault, not a finding.
+        //  2. shadowTexArrayRejects. NON-ZERO is the lead confirmed: an
+        //     array-shaped depth target is being offered and refused. Read
+        //     shadowTexArrayMaxW and shadowTexArrayMaxSlices beside it for
+        //     the shape, and find its row below for the format and the count.
+        //     ZERO against a healthy considers count is the lead KILLED -
+        //     characters are not in an array target on this path, and the
+        //     next question is coverage (does the probe see the character
+        //     cascade pass at all), not the ArraySize clause.
+        //  3. shadowTexAdopts / shadowTexKept / shadowTexSame. A candidate
+        //     that passes every clause can still lose to the held atlas.
+        //     Kept climbing with adopts at 1 is the normal steady state;
+        //     kept climbing against a DIFFERENT shape means there are two
+        //     single-slice candidates and we hold the larger one.
+        //  4. shadowTexNRows / shadowTexEvicts. Evicts non-zero means more
+        //     than twelve distinct shapes and the table is not the whole
+        //     picture.
+        //
+        // clause: 0 = passed every clause (candidate), 1 = no SHADER_RESOURCE
+        // bind, 2 = not square or under 1024, 3 = multisampled,
+        // 4 = ArraySize != 1, 5 = format not depth-typeless. fmt is the raw
+        // DXGI_FORMAT (R32_TYPELESS 39, R24G8_TYPELESS 44, R16_TYPELESS 53,
+        // R32G8X24_TYPELESS 19). ids counts identity CHANGES at that shape,
+        // not a distinct set: 1 = one stable texture for the whole session,
+        // anything higher = recreated (a quality change) or two coexisting
+        // targets alternating. Either way >1 says the shape is not served by
+        // a single stable resource, which is the thing worth knowing.
+        // ===================================================================
+        out.push_back(kv("shadowTexConsiders", RenderIntegration::g_shadow_tex_considers));
+        out.push_back(kv("shadowTexArrayRejects", RenderIntegration::g_shadow_tex_array_rejects));
+        out.push_back(kv("shadowTexArrayMaxW",
+            static_cast<uint64_t>(RenderIntegration::g_shadow_tex_array_max_w)));
+        out.push_back(kv("shadowTexArrayMaxSlices",
+            static_cast<uint64_t>(RenderIntegration::g_shadow_tex_array_max_slices)));
+        out.push_back(kv("shadowTexAdopts", RenderIntegration::g_shadow_tex_adopts));
+        out.push_back(kv("shadowTexKept", RenderIntegration::g_shadow_tex_kept));
+        out.push_back(kv("shadowTexSame", RenderIntegration::g_shadow_tex_same));
+        out.push_back(kv("shadowTexNRows",
+            static_cast<uint64_t>(RenderIntegration::g_shadow_tex_census_n)));
+        out.push_back(kv("shadowTexEvicts",
+            static_cast<uint64_t>(RenderIntegration::g_shadow_tex_census_evicts)));
+        {
+            // Literal name table, same reason as the projection census: the
+            // lane names are a dump contract and <cstdio> is not guaranteed
+            // in scope here.
+            static const char* const khsx_names[12][8] = {
+                { "shadowTex0W", "shadowTex0H", "shadowTex0Arr", "shadowTex0Fmt", "shadowTex0Samp", "shadowTex0Clause", "shadowTex0Ids", "shadowTex0Hits" },
+                { "shadowTex1W", "shadowTex1H", "shadowTex1Arr", "shadowTex1Fmt", "shadowTex1Samp", "shadowTex1Clause", "shadowTex1Ids", "shadowTex1Hits" },
+                { "shadowTex2W", "shadowTex2H", "shadowTex2Arr", "shadowTex2Fmt", "shadowTex2Samp", "shadowTex2Clause", "shadowTex2Ids", "shadowTex2Hits" },
+                { "shadowTex3W", "shadowTex3H", "shadowTex3Arr", "shadowTex3Fmt", "shadowTex3Samp", "shadowTex3Clause", "shadowTex3Ids", "shadowTex3Hits" },
+                { "shadowTex4W", "shadowTex4H", "shadowTex4Arr", "shadowTex4Fmt", "shadowTex4Samp", "shadowTex4Clause", "shadowTex4Ids", "shadowTex4Hits" },
+                { "shadowTex5W", "shadowTex5H", "shadowTex5Arr", "shadowTex5Fmt", "shadowTex5Samp", "shadowTex5Clause", "shadowTex5Ids", "shadowTex5Hits" },
+                { "shadowTex6W", "shadowTex6H", "shadowTex6Arr", "shadowTex6Fmt", "shadowTex6Samp", "shadowTex6Clause", "shadowTex6Ids", "shadowTex6Hits" },
+                { "shadowTex7W", "shadowTex7H", "shadowTex7Arr", "shadowTex7Fmt", "shadowTex7Samp", "shadowTex7Clause", "shadowTex7Ids", "shadowTex7Hits" },
+                { "shadowTex8W", "shadowTex8H", "shadowTex8Arr", "shadowTex8Fmt", "shadowTex8Samp", "shadowTex8Clause", "shadowTex8Ids", "shadowTex8Hits" },
+                { "shadowTex9W", "shadowTex9H", "shadowTex9Arr", "shadowTex9Fmt", "shadowTex9Samp", "shadowTex9Clause", "shadowTex9Ids", "shadowTex9Hits" },
+                { "shadowTex10W", "shadowTex10H", "shadowTex10Arr", "shadowTex10Fmt", "shadowTex10Samp", "shadowTex10Clause", "shadowTex10Ids", "shadowTex10Hits" },
+                { "shadowTex11W", "shadowTex11H", "shadowTex11Arr", "shadowTex11Fmt", "shadowTex11Samp", "shadowTex11Clause", "shadowTex11Ids", "shadowTex11Hits" },
+            };
+
+            for (int khsx_i = 0;
+                 khsx_i < RenderIntegration::KH_SHADOW_TEX_CENSUS_N && khsx_i < 12;
+                 ++khsx_i) {
+                const RenderIntegration::KhShadowTexObs& khsx_e =
+                    RenderIntegration::g_shadow_tex_census[khsx_i];
+                if (khsx_e.sightings == 0) continue;   // unfilled rows stay out of the dump
+                out.push_back(kv(khsx_names[khsx_i][0], static_cast<uint64_t>(khsx_e.width)));
+                out.push_back(kv(khsx_names[khsx_i][1], static_cast<uint64_t>(khsx_e.height)));
+                out.push_back(kv(khsx_names[khsx_i][2], static_cast<uint64_t>(khsx_e.array_size)));
+                out.push_back(kv(khsx_names[khsx_i][3], static_cast<uint64_t>(khsx_e.format)));
+                out.push_back(kv(khsx_names[khsx_i][4], static_cast<uint64_t>(khsx_e.samples)));
+                out.push_back(kv(khsx_names[khsx_i][5], static_cast<uint64_t>(khsx_e.clause)));
+                out.push_back(kv(khsx_names[khsx_i][6], static_cast<uint64_t>(khsx_e.identities)));
+                out.push_back(kv(khsx_names[khsx_i][7], khsx_e.sightings));
+            }
+        }
+        // ===================================================================
+        // 26203 PIXEL-STAGE ARRAY-SRV CENSUS (full ledger at KhSrvArrObs).
+        // The separator for the two surviving character-shadow hypotheses.
+        // The 26202 DSV census proved the ArraySize clause never fires and
+        // the 4096 R32_TYPELESS atlas is the only depth-only candidate; the
+        // field control proved the soldier DOES cast onto terrain beside the
+        // box. So either the character is in our atlas and the receive misses
+        // it (H1), or the engine resolves dynamic casters out of the array
+        // that PS 142-155 sample and we only ever see half the shadow world
+        // (H2). An array is invisible to a DSV census if it is never bound
+        // depth-only, so this one is keyed on how a resource is READ.
+        //
+        // READ IT IN THIS ORDER.
+        //  1. srvArrScans. ZERO means the instrument never ran - it is behind
+        //     the stats arm and the render-thread test - and nothing else
+        //     here means anything.
+        //  2. srvArrDepthHits. NON-ZERO settles it for H2: a depth-shaped
+        //     texture2darray at 1024 or wider is being bound to the pixel
+        //     stage. Read srvArrDepthMaxW / srvArrDepthMaxSlices for the
+        //     shape and find its row for the slot mask - the slot is the
+        //     strongest hint about which shader family consumes it.
+        //     ZERO across a session with healthy scans is H2 KILLED by
+        //     elimination: the atlas we already hold is the only shadow
+        //     resource in play, the character is in it, and the fault is in
+        //     the receive - bands, bias, or coverage - not in the resource.
+        //  3. srvArrHits vs srvArrDepthHits. Arrays that are NOT depth-shaped
+        //     (cloud, particle, decal atlases) are expected and land in the
+        //     table too; the gap between these two lanes is that traffic.
+        //  4. srvArrBudgetStops. Non-zero means frames hit the 64-inspection
+        //     cap and the census is a SAMPLE of those frames, not a complete
+        //     account. A zero here makes the zero in lane 2 much stronger.
+        //     srvArrEvicts non-zero means more than eight distinct shapes.
+        //
+        // fmt is the VIEW format (what the shader reads: R32_FLOAT 41,
+        // R24_UNORM_X8_TYPELESS 46, R16_UNORM 56); resFmt is the resource's,
+        // typeless for depth. dim: 5 = TEXTURE2DARRAY, 8 = TEXTURE2DMSARRAY.
+        // slots is a BITMASK of the pixel-stage slots the view was bound to,
+        // so 32768 = slot 15, the shadow slot the sample_c receivers use.
+        // ===================================================================
+        out.push_back(kv("srvArrScans", RenderIntegration::g_srv_arr_scans));
+        out.push_back(kv("srvArrHits", RenderIntegration::g_srv_arr_hits));
+        out.push_back(kv("srvArrDepthHits", RenderIntegration::g_srv_arr_depth_hits));
+        out.push_back(kv("srvArrDepthMaxW",
+            static_cast<uint64_t>(RenderIntegration::g_srv_arr_depth_max_w)));
+        out.push_back(kv("srvArrDepthMaxSlices",
+            static_cast<uint64_t>(RenderIntegration::g_srv_arr_depth_max_slices)));
+        out.push_back(kv("srvArrNRows",
+            static_cast<uint64_t>(RenderIntegration::g_srv_arr_census_n)));
+        out.push_back(kv("srvArrEvicts",
+            static_cast<uint64_t>(RenderIntegration::g_srv_arr_evicts)));
+        out.push_back(kv("srvArrBudgetStops", RenderIntegration::g_srv_arr_budget_stops));
+        {
+            static const char* const khsa_names[8][8] = {
+                { "srvArr0W", "srvArr0H", "srvArr0Arr", "srvArr0Fmt", "srvArr0ResFmt", "srvArr0Dim", "srvArr0Slots", "srvArr0Hits" },
+                { "srvArr1W", "srvArr1H", "srvArr1Arr", "srvArr1Fmt", "srvArr1ResFmt", "srvArr1Dim", "srvArr1Slots", "srvArr1Hits" },
+                { "srvArr2W", "srvArr2H", "srvArr2Arr", "srvArr2Fmt", "srvArr2ResFmt", "srvArr2Dim", "srvArr2Slots", "srvArr2Hits" },
+                { "srvArr3W", "srvArr3H", "srvArr3Arr", "srvArr3Fmt", "srvArr3ResFmt", "srvArr3Dim", "srvArr3Slots", "srvArr3Hits" },
+                { "srvArr4W", "srvArr4H", "srvArr4Arr", "srvArr4Fmt", "srvArr4ResFmt", "srvArr4Dim", "srvArr4Slots", "srvArr4Hits" },
+                { "srvArr5W", "srvArr5H", "srvArr5Arr", "srvArr5Fmt", "srvArr5ResFmt", "srvArr5Dim", "srvArr5Slots", "srvArr5Hits" },
+                { "srvArr6W", "srvArr6H", "srvArr6Arr", "srvArr6Fmt", "srvArr6ResFmt", "srvArr6Dim", "srvArr6Slots", "srvArr6Hits" },
+                { "srvArr7W", "srvArr7H", "srvArr7Arr", "srvArr7Fmt", "srvArr7ResFmt", "srvArr7Dim", "srvArr7Slots", "srvArr7Hits" },
+            };
+
+            for (int khsa_i = 0;
+                 khsa_i < RenderIntegration::KH_SRV_ARR_CENSUS_N && khsa_i < 8;
+                 ++khsa_i) {
+                const RenderIntegration::KhSrvArrObs& khsa_e =
+                    RenderIntegration::g_srv_arr_census[khsa_i];
+                if (khsa_e.sightings == 0) continue;
+                out.push_back(kv(khsa_names[khsa_i][0], static_cast<uint64_t>(khsa_e.width)));
+                out.push_back(kv(khsa_names[khsa_i][1], static_cast<uint64_t>(khsa_e.height)));
+                out.push_back(kv(khsa_names[khsa_i][2], static_cast<uint64_t>(khsa_e.array_size)));
+                out.push_back(kv(khsa_names[khsa_i][3], static_cast<uint64_t>(khsa_e.format)));
+                out.push_back(kv(khsa_names[khsa_i][4], static_cast<uint64_t>(khsa_e.res_format)));
+                out.push_back(kv(khsa_names[khsa_i][5], static_cast<uint64_t>(khsa_e.view_dim)));
+                out.push_back(kv(khsa_names[khsa_i][6], static_cast<uint64_t>(khsa_e.slots)));
+                out.push_back(kv(khsa_names[khsa_i][7], khsa_e.sightings));
+            }
+        }
+        // ===================================================================
+        // 26204 SHADOW-VOLUME SEAM (full ledger at g_svs_prev_dsv).
+        // READ svSeams FIRST: zero means the prepass -> volume transition was
+        // never detected and every other lane here is meaningless. Non-zero
+        // with svSeamW/H at scene resolution means the seam is the scene
+        // depth prepass, which is the one we want.
+        // svSeamSquare counts cascade transitions correctly refused;
+        // svSeamMain counts refusals because the target was our own main
+        // depth identity - if THAT is climbing while svInjects stays zero,
+        // our main-depth classification is what is blocking, not the seam.
+        // With setRenderDebug 68 armed, svInjects and svInjectDraws must both
+        // climb; svArmSkips is how often the seam fired while disarmed.
+        // ===================================================================
+        out.push_back(kv("svSeams", RenderIntegration::g_svs_seams));
+        out.push_back(kv("svSeamW", static_cast<uint64_t>(RenderIntegration::g_svs_seam_w)));
+        out.push_back(kv("svSeamH", static_cast<uint64_t>(RenderIntegration::g_svs_seam_h)));
+        out.push_back(kv("svSeamFmt", static_cast<uint64_t>(RenderIntegration::g_svs_seam_fmt)));
+        out.push_back(kv("svSeamSquare", RenderIntegration::g_svs_seam_square));
+        out.push_back(kv("svSeamMain", RenderIntegration::g_svs_seam_main));
+        out.push_back(kv("svArmSkips", RenderIntegration::g_svs_arm_skips));
+        out.push_back(kv("svInjects", RenderIntegration::g_svs_injects));
+        out.push_back(kv("svInjectDraws", RenderIntegration::g_svs_inject_draws));
+        out.push_back(kv("svFrameDupes", RenderIntegration::g_svs_frame_dupes));
+        out.push_back(kv("svSkipProj", RenderIntegration::g_svs_skip_proj));
+        out.push_back(kv("svSkipEmpty", RenderIntegration::g_svs_skip_empty));
+        out.push_back(kv("svSkipRes", RenderIntegration::g_svs_skip_res));
+        // 26205: svSeamMain is now a CENSUS, not a refusal - the main-depth
+        // latch adopts the first DSV seen, which is the prepass/volume buffer
+        // itself, so refusing on it refused the target. svMainW/H/Fmt is the
+        // shape it classified as main; compare with svSeamW/H/Fmt to see
+        // whether they are the same buffer (they should be). svSkipDims is the
+        // replacement guard: seam target not at scene resolution.
+        out.push_back(kv("svMainW", static_cast<uint64_t>(RenderIntegration::g_svs_main_w)));
+        out.push_back(kv("svMainH", static_cast<uint64_t>(RenderIntegration::g_svs_main_h)));
+        out.push_back(kv("svMainFmt", static_cast<uint64_t>(RenderIntegration::g_svs_main_fmt)));
+        out.push_back(kv("svSkipDims", RenderIntegration::g_svs_skip_dims));
+        out.push_back(kv("svSeamOrd", static_cast<uint64_t>(RenderIntegration::g_svs_seam_ord)));
+        // ===================================================================
+        // 26272 THE ORDINAL. A capture finally asked where our injection sits
+        // among the engine's counting draws, and the answer was: 13123, in a run
+        // of 760 spanning EID 47..13809. Roughly seven hundred shadow volumes
+        // are counted BEFORE our depth exists in that buffer, so their verdict
+        // at our pixels is computed against the floor behind us. That is not a
+        // matrix error and ten builds of matrix work could never have touched
+        // it.
+        //   svInjCountOrd / svCountFrame  - the ordinal and its denominator.
+        //     Near 0 -> we are first, this reading is WRONG, say so.
+        //     Large  -> confirmed; arm on an earlier seam.
+        //   svSeamFirstOrd - the ordinal at the frame's FIRST seam, i.e. the
+        //     earliest point we could inject. If that is ALSO large, moving the
+        //     seam buys nothing and the injection needs a different home
+        //     entirely - worth knowing before building it.
+        // svCountFrame stable frame to frame means one stencil pass; swinging
+        // with the scene means the classifier folds several together and the
+        // ordinal must be split per pass before it means anything.
+        // ===================================================================
+        out.push_back(kv("svCountFrame", static_cast<uint64_t>(RenderIntegration::g_svs_count_frame)));
+        out.push_back(kv("svCountFrameMax", static_cast<uint64_t>(RenderIntegration::g_svs_count_frame_max)));
+        out.push_back(kv("svInjCountOrd", static_cast<uint64_t>(RenderIntegration::g_svs_inj_count_ord)));
+        out.push_back(kv("svInjCountOrdMax", static_cast<uint64_t>(RenderIntegration::g_svs_inj_count_ord_max)));
+        out.push_back(kv("svSeamFirstOrd", static_cast<uint64_t>(RenderIntegration::g_svs_seam_first_ord)));
+        // ===================================================================
+        // 26274 WHICH PUBLICATION EACH PASS READ. Three field arms - raster
+        // (lag gone, edges sliced), reprojection (slice gone, lag back), 107
+        // (slice gone, BOX lags) - are one quantity seen three ways: the
+        // injection and the composite are transformed by different camera
+        // samples ~svReprojPxMean apart, and each arm only chooses who eats it.
+        //   svPubOrdMean/Max LARGE -> the two passes catch different alternates
+        //     of one frame (kh_adopt_frame_view's ledger: the sim republishes
+        //     mid-cycle). Fix is SELECTION, and g_boundary_pv already identifies
+        //     the right alternate.
+        //   SMALL (0-2) -> same publication, so the 20 px is a real intra-frame
+        //     camera change. Selection cannot help; the fix is one FROZEN sample
+        //     per frame for both passes, with the box eating a sub-frame offset
+        //     that campaign 37 sec 3.6 already judged invisible.
+        // svPubOrdPairs should track flushes; well below means the two stamps
+        // are not landing in the same frame and the deltas mean nothing.
+        // ===================================================================
+        // 26275 MODE 127: both passes take the frame's BOUNDARY publication -
+        // fetched at the clear, before the seam and before the colour pass, so
+        // it is determined before either pass runs and they get byte-identical
+        // views. Acceptance is svPubOrdMean collapsing to 0; if it does not,
+        // they still are not sharing and nothing needs judging by eye.
+        //   svBpvInjTakes / svBpvCompTakes should both track flushes.
+        //   svBpvMisses  - cycles with no clear-time sample, where BOTH passes
+        //     stay on the historic path together. Large means the boundary
+        //     fetch is unreliable and this approach cannot be the default.
+        out.push_back(kv("svBpvInjTakes", RenderIntegration::g_svs_bpv_inj_takes));
+        out.push_back(kv("svBpvCompTakes", RenderIntegration::g_svs_bpv_comp_takes));
+        out.push_back(kv("svBpvMisses", RenderIntegration::g_svs_bpv_misses));
+        // 26276 MODE 128: the boundary PROJECTION as well as the view. 127 proved
+        // the view is shared (svBpvInjTakes == svBpvCompTakes == flushes,
+        // svBpvMisses 0) and svReprojPxMean did not move - so the residual is the
+        // projection, which is also where injNear's 0.07<->0.77 oscillation lives.
+        //   svBpvProjTakes    should track flushes under 128.
+        //   svBpvProjRejects  boundary pairs refused by the near-class gate, which
+        //     still rules: a forced out-of-class pair trades a POSITION error for
+        //     a DEPTH error (box punching through geometry), which is worse and
+        //     harder to attribute. Small -> the shared projection is safe to ship.
+        //     Large -> force is the wrong answer and both passes need the same
+        //     GUARDED pair instead of the same raw one.
+        out.push_back(kv("svBpvProjTakes", RenderIntegration::g_svs_bpv_proj_takes));
+        out.push_back(kv("svBpvProjRejects", RenderIntegration::g_svs_bpv_proj_rejects));
+        out.push_back(kvf("svBpvProjRejNear", RenderIntegration::g_svs_bpv_proj_rej_near));
+        out.push_back(kv("svInjPubOrd", RenderIntegration::g_svs_inj_pub_ord));
+        out.push_back(kv("svCompPubOrd", RenderIntegration::g_svs_comp_pub_ord));
+        out.push_back(kv("svPubOrdDelta", RenderIntegration::g_svs_pub_ord_delta));
+        out.push_back(kv("svPubOrdMax", RenderIntegration::g_svs_pub_ord_max));
+        out.push_back(kv("svPubOrdPairs", RenderIntegration::g_svs_pub_ord_pairs));
+        out.push_back(kvf("svPubOrdMean", RenderIntegration::g_svs_pub_ord_pairs
+            ? static_cast<float>(RenderIntegration::g_svs_pub_ord_sum /
+                static_cast<double>(RenderIntegration::g_svs_pub_ord_pairs)) : -1.0f));
+        out.push_back(kv("svSeamsFrameMax", static_cast<uint64_t>(RenderIntegration::g_svs_seams_frame_max)));
+        // 26206: the shape of the buffer we ACTUALLY wrote into. svSeamW/H/Fmt
+        // is the LAST seam of the frame and is a different buffer; these are
+        // stamped at the write itself. svInjFmt 45 (D24_UNORM_S8_UINT) is the
+        // stencil-volume buffer - the target. 44 (R24G8_TYPELESS) would be the
+        // colour pass's depth, i.e. the wrong one.
+        out.push_back(kv("svInjW", static_cast<uint64_t>(RenderIntegration::g_svs_inj_w)));
+        out.push_back(kv("svInjH", static_cast<uint64_t>(RenderIntegration::g_svs_inj_h)));
+        out.push_back(kv("svInjFmt", static_cast<uint64_t>(RenderIntegration::g_svs_inj_fmt)));
+        // 26207: bind flags of the written target, and the count of seams
+        // refused for being SRV-readable. The stencil-volume buffer is the
+        // only scene-resolution depth target created WITHOUT a shader-resource
+        // bind, so svInjBind 64 (DEPTH_STENCIL alone) is the target and 72
+        // (DEPTH_STENCIL|SHADER_RESOURCE) would be the colour pass's depth.
+        // svSkipSrv climbing is the guard working, not a fault.
+        out.push_back(kv("svInjBind", static_cast<uint64_t>(RenderIntegration::g_svs_inj_bind)));
+        out.push_back(kv("svSkipSrv", RenderIntegration::g_svs_skip_srv));
+        // 26208 SELECTED vs WRITTEN. svSel* is the target CHOSEN at the seam;
+        // svInj* is now stamped only after a draw actually landed. If svSelFmt
+        // reads 45 while svInjFmt reads 0, selection is right and the injector
+        // is bailing - svEnters says whether it was even called, and
+        // svFailFrameCb / svFailObjCb name the bail. Both were silent before.
+        out.push_back(kv("svSelW", static_cast<uint64_t>(RenderIntegration::g_svs_sel_w)));
+        out.push_back(kv("svSelH", static_cast<uint64_t>(RenderIntegration::g_svs_sel_h)));
+        out.push_back(kv("svSelFmt", static_cast<uint64_t>(RenderIntegration::g_svs_sel_fmt)));
+        out.push_back(kv("svSelBind", static_cast<uint64_t>(RenderIntegration::g_svs_sel_bind)));
+        out.push_back(kv("svEnters", RenderIntegration::g_svs_enters));
+        out.push_back(kv("svFailFrameCb", RenderIntegration::g_svs_fail_framecb));
+        out.push_back(kv("svFailObjCb", RenderIntegration::g_svs_fail_objcb));
+        // 26209: svSeamAdj is how many seams ALSO satisfied the retired
+        // adjacency rule. svSeams minus svSeamAdj is what the order-free
+        // detector recovered; if they are equal, adjacency was never the
+        // problem and the miss is elsewhere.
+        out.push_back(kv("svSeamAdj", RenderIntegration::g_svs_seam_adj));
+        // 26210 DEPTH-BIND CENSUS - what the OM hook actually SEES, before any
+        // rule runs. "vol" = depth target with NO shader-resource bind, i.e.
+        // the stencil-volume buffer class; "srv" = the readable ones.
+        // THE NUMBER THAT MATTERS IS svBindVolRtv. The seam needs the volume
+        // buffer bound WITH a render target (the prepass) and later depth-only
+        // (the volumes). If svBindVolOnly climbs while svBindVolRtv stays at
+        // or near zero, the prepass half never reaches our hook - deferred
+        // context or another thread - and no seam rule can recover it. That
+        // would mean this approach needs a different hook, not a fourth rule.
+        out.push_back(kv("svBindVolRtv", RenderIntegration::g_svs_bind_vol_rtv));
+        out.push_back(kv("svBindVolOnly", RenderIntegration::g_svs_bind_vol_only));
+        out.push_back(kv("svBindSrvRtv", RenderIntegration::g_svs_bind_srv_rtv));
+        out.push_back(kv("svBindSrvOnly", RenderIntegration::g_svs_bind_srv_only));
+        out.push_back(kv("svRtvSetMax", static_cast<uint64_t>(RenderIntegration::g_svs_rtv_set_max)));
+        // 26211 DEFERRED INJECTION. svPendArms is how often the seam armed one;
+        // svPendFires how often a later draw performed it. They should track
+        // each other closely. svPendDropped counts arms still outstanding at
+        // the frame boundary - i.e. no draw followed the seam, which would
+        // mean the deferral point is wrong.
+        out.push_back(kv("svPendArms", RenderIntegration::g_svs_pend_arms));
+        out.push_back(kv("svPendFires", RenderIntegration::g_svs_pend_fires));
+        out.push_back(kv("svPendDropped", RenderIntegration::g_svs_pend_dropped));
+        // 26212 ENGINE SHADOW MASK. svMaskHits = resolve binds recognised;
+        // svMaskAdopts = SRVs created over a new identity (1 in a steady
+        // session); svMaskW/H/Fmt = its shape; svMaskBinds = times bound to
+        // our mesh shaders, which only happens under setRenderDebug 71.
+        // svMaskAdopts 0 means the resolve was never recognised and the paint
+        // will show nothing; svMaskFails means SRV creation was refused.
+        out.push_back(kv("svMaskHits", RenderIntegration::g_svs_mask_hits));
+        out.push_back(kv("svMaskAdopts", RenderIntegration::g_svs_mask_adopts));
+        out.push_back(kv("svMaskFails", RenderIntegration::g_svs_mask_fails));
+        out.push_back(kv("svMaskBinds", RenderIntegration::g_svs_mask_binds));
+        out.push_back(kv("svMaskW", static_cast<uint64_t>(RenderIntegration::g_svs_mask_w)));
+        out.push_back(kv("svMaskH", static_cast<uint64_t>(RenderIntegration::g_svs_mask_h)));
+        out.push_back(kv("svMaskFmt", static_cast<uint64_t>(RenderIntegration::g_svs_mask_fmt)));
+        // 26213 SEAM ORDERING. Per frame, which came first for the volume-class
+        // depth target: a bind WITH a render target (the prepass) or a
+        // depth-only bind (the volume pass). The seam needs the former first.
+        // If svOrdOnlyFirst dominates, our frame boundary is falling between
+        // the prepass and the volume pass, the with-RTV set is empty when the
+        // volume binds arrive, and no seam can fire - which would explain a
+        // 1.6% eligible rate against a volume pass that runs every frame.
+        out.push_back(kv("svOrdRtvFirst", RenderIntegration::g_svs_ord_rtv_first));
+        out.push_back(kv("svOrdOnlyFirst", RenderIntegration::g_svs_ord_only_first));
+        // ===============================================================
+        // 26215 PRE-RESOLVE SNAPSHOT. Read in this order.
+        //
+        // svCopyFrameMax IS THE CENSUS THIS BUILD EXISTS TO SETTLE. It is
+        // the peak number of pre-resolve copies in a single frame. The
+        // design wants exactly 1: the trigger is "volume-class depth
+        // target AND the render target IS the adopted mask", which should
+        // name the stencil resolve and nothing else. At 1, pre is
+        // cascade-only and the ratio is the intended snapshot. Above 1 the
+        // last copy of the frame still wins and the feature still works,
+        // but each one is a full-screen copy (8.3 MB at 3840x2160) and the
+        // discriminator wants narrowing - which is then a measurement in
+        // hand rather than an argument. At 0 nothing ever fired: check
+        // svMaskAdopts first, because the trigger needs an adopted mask
+        // identity to compare against and cannot fire before one exists.
+        //
+        // svCopyArms / svCopyMade / svCopyDrops are the 26211 triple in
+        // its second use: armed at the bind, performed at the next draw,
+        // and still outstanding at the frame boundary. Arms and made must
+        // track; drops climbing means no draw followed the resolve bind
+        // and the deferral point is wrong (mode 76 is the in-hook A/B).
+        //
+        // svCopySkips and svCopyFails are the two bail paths, split
+        // because they mean different things: skips = the trigger fired
+        // with no usable destination (no mask SRV, no device, the source
+        // resource refused), fails = the destination texture or its SRV
+        // was refused outright. Every silent bail gets a counter - 26208.
+        //
+        // svPreW/H/Fmt is the destination's shape and MUST equal
+        // svMaskW/H/Fmt; a mismatch means the clone missed a rebuild.
+        // svPreBinds is the shader-side liveness - if it stays 0 while
+        // svCopyMade climbs, the snapshot is being taken and never read,
+        // and the paint will show nothing.
+        //
+        // svRtvSetWipes counts clears of the persistent with-RTV set that
+        // did NOT come from a device reset. Under the shipped default it
+        // must be 0. Non-zero with no debug mode set means something is
+        // re-enacting the 26214 fault.
+        // ===============================================================
+        out.push_back(kv("svCopyFrameMax", static_cast<uint64_t>(RenderIntegration::g_svs_copy_frame_max)));
+        out.push_back(kv("svCopyArms", RenderIntegration::g_svs_copy_arms));
+        out.push_back(kv("svCopyMade", RenderIntegration::g_svs_copy_made));
+        out.push_back(kv("svCopyDrops", RenderIntegration::g_svs_copy_drops));
+        out.push_back(kv("svCopySkips", RenderIntegration::g_svs_copy_skips));
+        out.push_back(kv("svCopyFails", RenderIntegration::g_svs_copy_fails));
+        out.push_back(kv("svPreW", static_cast<uint64_t>(RenderIntegration::g_svs_pre_w)));
+        out.push_back(kv("svPreH", static_cast<uint64_t>(RenderIntegration::g_svs_pre_h)));
+        out.push_back(kv("svPreFmt", static_cast<uint64_t>(RenderIntegration::g_svs_pre_fmt)));
+        out.push_back(kv("svPreBinds", RenderIntegration::g_svs_pre_binds));
+        out.push_back(kv("svRtvSetWipes", RenderIntegration::g_svs_rtv_set_wipes));
+        // 26218 THE BRACKET. svPostMade must track svCopyMade one for one:
+        // the pre half fires at the resolve draw, the post half at the draw
+        // after it, so a shortfall means no draw followed the resolve and the
+        // second half never landed. svCopyDrops counts brackets left
+        // incomplete at the frame boundary and is the same lane for the same
+        // question. svPostBinds is the shader-side liveness for t22.
+        //
+        // WHY THE BRACKET EXISTS: reading post from the LIVE mask made the
+        // ratio depend on every writer between the resolve and our draw, and
+        // the one that mattered was OURS - mask_cast_engine paints our
+        // meshes' shadows into that same mask so the world receives them,
+        // late in the frame. The ratio reported our box's own cast shadow as
+        // a unit shadow, and it survived walking the soldier out of range,
+        // which is what proved it was never a stencil term. Mode 76 restores
+        // the live-post read for the A/B.
+        out.push_back(kv("svPostMade", RenderIntegration::g_svs_post_made));
+        out.push_back(kv("svPostSkips", RenderIntegration::g_svs_post_skips));
+        out.push_back(kv("svPostBinds", RenderIntegration::g_svs_post_binds));
+        // 26220 DEMAND GATE. svSnapGated counts frames where the trigger armed
+        // and no mode wanted the snapshots, so no copy was issued. On the
+        // default path it should equal svCopyArms and svCopyMade should be 0 -
+        // i.e. the bracket costs nothing until something reads it. Under any
+        // of modes 73/74/75/76/78/79 it stops climbing and svCopyMade takes
+        // over one for one.
+        // 26233 svSnapGated IS RETIRED AS AN INSTRUMENT. It counts frames where
+        // the bracket armed and nothing consumed the snapshots. The demand gate
+        // is now permanently open, so it reads 0 forever and its 26221
+        // confirmation (svCopyArms == svCopyMade + svSnapGated, 4591 = 3884 +
+        // 707) can never be re-measured except under mode 87. svCopyArms stays
+        // UNGATED, so the trigger census itself survives. Noted here rather
+        // than discovered later in a dump that looks healthy for the wrong
+        // reason.
+        out.push_back(kv("svSnapGated", RenderIntegration::g_svs_snap_gated));
+        // 26221 THE INJECTED BOX'S RASTERIZATION. svInjVpLo/Hi are the depth
+        // range the injection actually wrote with and are THE number this
+        // build exists to change: they must read 0.011 / 0.999, matching
+        // injDpVpMin/Max and trigAccMin/Max, and NOT 0 / 1. If they read
+        // 0 / 1 with no debug mode set, the sibling's source is not reaching
+        // the injector. svInjVpRejects must be 0 - a non-zero reading means
+        // trig_vp is being poisoned and the fallback is carrying the build.
+        // svInjVpReverts climbs only under mode 80.
+        //
+        // svInjRebases + svInjAbs == svInjects, always. svInjAbs must be 0 on
+        // the shipped path: it counts injections that rasterized in absolute
+        // world space, which is either mode 81 or kh_rebase_vp refusing a
+        // sub-metre camera, and the second one is a wrong-space draw.
+        // 26222 GAUGE FIX. 26221 published these through kv, which takes
+        // uint64_t - so 0.011 and 0.999 BOTH truncated to 0 and the lane that
+        // existed to prove the depth range read 0/0, a value no code path can
+        // produce. The instrument was wrong, not the fix (73 vs 80 differed in
+        // the field, which is the range doing exactly what it should). kvf is
+        // the float lambda and is what every other float lane in here uses.
+        out.push_back(kvf("svInjVpLo", RenderIntegration::g_svs_inj_vp_lo));
+        out.push_back(kvf("svInjVpHi", RenderIntegration::g_svs_inj_vp_hi));
+        out.push_back(kv("svInjVpRejects", RenderIntegration::g_svs_inj_vp_rejects));
+        out.push_back(kv("svInjVpReverts", RenderIntegration::g_svs_inj_vp_reverts));
+        out.push_back(kv("svInjRebases", RenderIntegration::g_svs_inj_rebases));
+        out.push_back(kv("svInjAbs", RenderIntegration::g_svs_inj_abs));
+        // 26222 RASTERIZER STATE. svInjRsSets + svInjRsInherit == svInjects.
+        // svInjRsInherit must be 0 on the shipped path: non-zero with no debug
+        // mode means rast_sun is null, i.e. the injection is still rasterizing
+        // with the engine's volume-pass state and its depth is clamped rather
+        // than clipped. Climbs only under mode 82.
+        out.push_back(kv("svInjRsSets", RenderIntegration::g_svs_inj_rs_sets));
+        out.push_back(kv("svInjRsInherit", RenderIntegration::g_svs_inj_rs_inherit));
+        // 26223: split out of svInjRsInherit, which reported two different
+        // failures through one lane. svInjRsSets + svInjRsInherit + svInjRsNull
+        // == svInjects. svInjRsNull must be 0 in every dump, mode or no mode.
+        out.push_back(kv("svInjRsNull", RenderIntegration::g_svs_inj_rs_null));
+        // 26230 MASK PRIMING - THE MASKING FIX. svPrimeDraws must equal
+        // svCopyMade: every frame that takes a pre snapshot must have primed
+        // first, or that frame still has the old guard behaviour and its blue
+        // band. The three refusal lanes are deliberately separate because they
+        // mean different things and one merged lane would hide which:
+        //   svPrimeNoRtv     - the engine mask RTV was not captured yet. Expect
+        //     a small count from session start (it is captured at the engine's
+        //     own resolve bind, which is LATER in the frame than the priming
+        //     pass); if it keeps climbing, mask_cast_engine is not capturing.
+        //   svPrimeMismatch  - the captured RTV is not the resource we snapshot.
+        //     MUST be 0. Non-zero means we would have primed a buffer nobody
+        //     reads while leaving the real mask unprimed, silently.
+        //   svPrimeNoState   - the blend or depth-stencil state was refused by
+        //     the device. MUST be 0; non-zero degrades to 26229 behaviour.
+        //   svPrimeNoShader  - 26232, SPLIT OUT of svPrimeNoState: PSMaskPrime
+        //     did not compile, or the input layout / VS is absent. A different
+        //     failure with a different fix, and it was sharing a lane.
+        //   svPrimeFailFrameCb - 26232, ALSO split out of svPrimeNoState: the
+        //     frame CB upload was refused, so nothing was drawn. This one was
+        //     not even in svPrimeNoState's documented meaning.
+        //   svPrimeNoList    - 26232, split out of svPrimeNoView: the transform
+        //     WAS cached and the caster list was empty, which is a different
+        //     frame from "the injection never ran".
+        //   svPrimeFailObjCb - 26232: object CB refused mid-loop. Was a silent
+        //     break, so a partly primed footprint read as a whole one.
+        //   svPrimeNoVb      - 26232: a caster's mesh VB slot was absent.
+        // svPrimeReverts climbs only under mode 86, and it is stamped by the
+        // PUMP now - kh_svs_prime_wanted owns the revert decision, and
+        // kh_svs_prime_mask no longer keeps a second copy of it.
+        //
+        // svPrimeDraws + svPrimeReverts == svCopyMade is the exact invariant.
+        // 26230 documented it as svPrimeDraws == svCopyMade, which is only true
+        // with no mode set.
+        // svPrimeDrawMeshes is the svInjectDraws analogue and must track
+        // svInjectDraws one for one: the two passes walk the same caster list.
+        //
+        // 26232 THE LANDING GAUGE, AND IT IS THE POINT OF THIS BUILD.
+        // svPrimeDraws proves the priming pass was ISSUED. It says nothing
+        // about whether one pixel survived LESS_EQUAL against our injected
+        // depth - and 26230 was exactly that: every refusal lane flat zero, the
+        // pass demonstrably running, the artifact untouched, because the pass
+        // was in the wrong place. An occlusion query now wraps the priming
+        // draws:
+        //   svPrimePixels    - samples that passed, most recent read
+        //   svPrimePixelsMin - low-water mark across the window
+        //   svPrimeZero      - reads that came back EMPTY. MUST BE 0. Non-zero
+        //     means the prime is rasterizing where the depth test rejects it,
+        //     pre is carrying the background verdict again, and the blue band
+        //     is back with nothing else in the dump to say so.
+        //   svPrimeOcclReads / svPrimeOcclSkips - ring liveness. Skips are
+        //     slots still in flight, never reused hot; a climbing skip count
+        //     means the ring is too shallow, not that the prime failed.
+        // This replaces a screenshot with a number, which matters because after
+        // the scaffolding strip there is no mode 78 left to look at.
+        //
+        // THE ACCEPTANCE TEST IS VISUAL AND IS MODE 78: the blue band (post 0,
+        // pre 0 - the guard firing) must be GONE, because pre is now 1.0 at our
+        // pixels by construction. Mode 71 is the reach gauge - it paints the
+        // live mask, so any bleed beyond our footprint shows there.
+        out.push_back(kv("svPrimeDraws", RenderIntegration::g_svs_prime_draws));
+        out.push_back(kv("svPrimeNoRtv", RenderIntegration::g_svs_prime_no_rtv));
+        out.push_back(kv("svPrimeMismatch", RenderIntegration::g_svs_prime_mismatch));
+        out.push_back(kv("svPrimeNoState", RenderIntegration::g_svs_prime_no_state));
+        out.push_back(kv("svPrimeReverts", RenderIntegration::g_svs_prime_reverts));
+        // 26231: svPrimeNoView counts the priming pass finding no cached
+        // transform or an empty caster list - i.e. the bracket armed on a
+        // frame the injection never ran. MUST be 0 whenever svCopyMade is
+        // climbing; non-zero means the two are firing on different frames.
+        out.push_back(kv("svPrimeNoView", RenderIntegration::g_svs_prime_no_view));
+        out.push_back(kv("svPrimeNoShader", RenderIntegration::g_svs_prime_no_shader));
+        out.push_back(kv("svPrimeNoList", RenderIntegration::g_svs_prime_no_list));
+        out.push_back(kv("svPrimeFailFrameCb", RenderIntegration::g_svs_prime_fail_framecb));
+        out.push_back(kv("svPrimeFailObjCb", RenderIntegration::g_svs_prime_fail_objcb));
+        out.push_back(kv("svPrimeDrawMeshes", RenderIntegration::g_svs_prime_draw_meshes));
+        out.push_back(kv("svPrimeNoVb", RenderIntegration::g_svs_prime_no_vb));
+        out.push_back(kv("svPrimePixels", RenderIntegration::g_svs_prime_px));
+        out.push_back(kv("svPrimePixelsMin",
+            RenderIntegration::g_svs_prime_px_min == ~0ull
+                ? 0ull : RenderIntegration::g_svs_prime_px_min));
+        out.push_back(kv("svPrimeZero", RenderIntegration::g_svs_prime_zero));
+        out.push_back(kv("svPrimeOcclReads", RenderIntegration::g_svs_prime_occl_reads));
+        out.push_back(kv("svPrimeOcclSkips", RenderIntegration::g_svs_prime_occl_skips));
+        // 26232 THE SHIPPED FALLBACK'S OWN GAUGES. kh_svs_sten_ready is the
+        // only path by which the multiply can be skipped once the modes are
+        // gone, so its two new refusals are published rather than inferred.
+        //   svStenRejCold - readiness refused because no post snapshot had
+        //     landed yet. Expect a handful at session start; it is the window
+        //     in which the clones exist and hold uninitialised memory, which
+        //     26218 left open for a whole build.
+        // BOTH LANES ARE CALL-SCOPED, NOT FRAME-SCOPED: kh_svs_sten_ready is a
+        // predicate with a side effect now, and the CB fill asks it twice per
+        // pass (once for maskMeta.z, once for maskMeta.w) on each of the
+        // injection and flush editions. Expect a small integer multiple of the
+        // frame count, the way svMaskHits reads 2x svInjects. The 26201 trap -
+        // a probe that SPENT the one lane its own A/B needed to read - does not
+        // apply here because nothing reads these during an A/B; they exist to
+        // explain a mesh that lost its shadows after the modes are gone.
+        //   svStenRejDims - the mask's shape disagrees with fxMeta.zw, the
+        //     clamp bound every mask Load goes through. MUST be 0. Non-zero
+        //     means a resolution change moved the CB and left the clones
+        //     behind, and every Load is landing on the wrong texel.
+        out.push_back(kv("svStenRejCold", RenderIntegration::g_svs_sten_rej_cold));
+        out.push_back(kv("svStenRejDims", RenderIntegration::g_svs_sten_rej_dims));
+        // 26232 injector tessellation parity. svInjTessNulls == svInjects on
+        // the shipped path; svInjTessInherit climbs only under mode 89.
+        // 26234 THE REGISTRATION GAUGE, and it is the number that closes the
+        // silhouette-strip question. svReprojPx is the screen-space distance,
+        // in pixels, between where the object centre lands under the LIVE pass
+        // view and where it landed under the view the INJECTION adopted. The
+        // mask, the snapshots and our injected depth are all registered to the
+        // latter; the mesh is drawn with the former.
+        //   svReprojPx    - last frame's delta
+        //   svReprojPxMax - worst in the window. THIS is the one to read. If it
+        //     tracks the observed strip width under rotation and falls to ~0
+        //     when still, the diagnosis is arithmetic rather than argument.
+        //     A large value with mode 90 set and a clean edge with it unset is
+        //     the complete proof.
+        //   svReprojBehind - centre behind one of the two eyes, so no delta was
+        //     computable. Expect 0 unless the camera is inside the mesh.
+        // NOTE the delta is NOT the same thing as the error after the fix: with
+        // reprojection on, this lane keeps reporting how far apart the two views
+        // were, which is exactly what we want to keep watching. It is a measure
+        // of the HAZARD, not of a remaining defect.
+        out.push_back(kvf("svReprojPx", RenderIntegration::g_svs_reproj_px));
+        out.push_back(kvf("svReprojPxMax", RenderIntegration::g_svs_reproj_px_max));
+        out.push_back(kv("svReprojBehind", RenderIntegration::g_svs_reproj_behind));
+        // 26235 THE SNAPSHOT EPOCH, and it is the number this build exists for.
+        // svPostAgeFrames / svPostAgeMax count seam frame boundaries between the
+        // post snapshot being written and the mesh consuming it.
+        //   0 - same frame. Everything since 26215 has assumed this.
+        //   1 - the mesh shades against the PREVIOUS frame's mask. That is a
+        //       full frame of camera motion of screen-space misregistration:
+        //       constant in pixels under rotation, scaling with speed, absent
+        //       when still - the observed strip, exactly. It would also explain
+        //       why reprojecting against the CURRENT injection matrix made
+        //       things worse rather than better.
+        //   >1 - the bracket is landing on some frames only; cross-check
+        //       svCopyDrops and svFrameDupes.
+        // svReprojPx also reports for the first time in this build: at 26234 it
+        // gated on a FRAME-SCOPED flag that the seam boundary clears before the
+        // mesh draws, so it early-returned every frame and published its -1
+        // sentinel. That was a gauge bug, not a zero measurement.
+        out.push_back(kv("svPostAgeFrames", RenderIntegration::g_svs_post_age_last));
+        out.push_back(kv("svPostAgeMax", RenderIntegration::g_svs_post_age_max));
+        // 26236 EPOCH-MATCHED REPROJECTION. svPostAgeMax measured 1 at 26235:
+        // the mesh reads a mask one seam-frame older than itself, so the lookup
+        // now uses the transform stamped with the SNAPSHOT's epoch rather than
+        // the newest one.
+        //   svReprojEpochHits - the snapshot's epoch was found in the ring.
+        //     Should track svPostMade. This is the lane that says the fix is
+        //     actually engaged.
+        //   svReprojEpochMiss - not found: cold start, a dropped bracket, or an
+        //     age beyond the 4-deep ring. Falls back to the raster position, so
+        //     a miss is a strip, never a wrong answer. A CLIMBING miss count
+        //     means the ring is too shallow or svPostAgeMax has moved.
+        //   svReprojWild - a computed delta wider than the screen diagonal,
+        //     rejected. At 26235 the max lane published 1.27e+06 px, which was
+        //     a near-zero w as the camera crossed the mesh, not a measurement.
+        //     The gauge now guards at w > 0.05 against a 0.07 near plane.
+        out.push_back(kv("svReprojEpochHits", RenderIntegration::g_svs_reproj_epoch_hits));
+        out.push_back(kv("maskRpArms", RenderIntegration::g_svs_mask_rp_arms));   // 26346: registered-read engagement
+        out.push_back(kv("castWarpFires", RenderIntegration::g_cast_warp_fires));   // 26347
+        out.push_back(kv("castWarpLast", RenderIntegration::g_cast_warp_last));     // 26347
+        out.push_back(kv("railStamps", RenderIntegration::g_svs_rail_stamps));      // 26348
+        out.push_back(kv("svReprojEpochMiss", RenderIntegration::g_svs_reproj_epoch_miss));
+        out.push_back(kv("svReprojWild", RenderIntegration::g_svs_reproj_wild));
+        // 26247 svEngVpTakes - composite draws that borrowed the injection's
+        // (= the engine's) transform under mode 107. 0 on the default path.
+        // 26264: renamed from svEngVpTakes. The matrix is the INJECTION's, not
+        // the engine's - see the ledger at g_svs_inj_vp_abs. Mode 107 draws the
+        // visible mesh with it as a forensic A/B for how far the injection sits
+        // from the engine; it is NOT a candidate fix.
+        out.push_back(kv("svInjVpTakes", RenderIntegration::g_svs_inj_vp_takes));
+        // 26240 THE DELTA CENSUS. svReprojPxMax is a session maximum and one
+        // relock transient owns it forever - at 26237 I called the registration
+        // hypothesis dead on svReprojPx 0.139 (the last frame, settled) while
+        // the max lane read 1077 in the same dump. Neither answers the only
+        // question that matters: do the injection view and the visible-draw view
+        // diverge on a TYPICAL MOVING frame?
+        //   svReprojFrames - frames the delta was computable
+        //   svReprojOver4 / svReprojOver32 - of those, how many exceeded 4 px
+        //     and 32 px. A handful out of several hundred means the max is a
+        //     transient and registration is genuinely fine. A count that tracks
+        //     the frames spent moving means it is not.
+        //   svReprojPxMean - the average, which no single-sample lane can give.
+        out.push_back(kv("svReprojFrames", RenderIntegration::g_svs_reproj_frames));
+        out.push_back(kv("svReprojOver4", RenderIntegration::g_svs_reproj_over4));
+        out.push_back(kv("svReprojOver32", RenderIntegration::g_svs_reproj_over32));
+        // 26241 THE VIEW SWING - screen-space distance between our caster's
+        // centre under the view the injection ADOPTS and under g_ro.cycle_pv,
+        // the pre-26224 view that mode 83 restores. Measured at the injection,
+        // both matrices absolute, one projection per injection.
+        //   svSwingPxMean / svSwingOver4 / svSwingOver32 / svSwingPxMax
+        // If the mean is the size of the observed strip, 26224's adoption is the
+        // variable and mode 83 will move the strip. If it is ~0, adoption is
+        // exonerated and the coverage mismatch comes from somewhere else - which
+        // is worth knowing before another build rather than after one.
+        //
+        // WHY THIS EXISTS: svReprojPxMean 25.17 with Over4 520 of 980 says the
+        // injection view and the visible-draw view diverge by tens of pixels on
+        // a typical moving frame. I closed that hypothesis at 26237 on the
+        // last-frame value of 0.139 px and was wrong. Reprojection still did not
+        // fix the strip because it aligns the LOOKUP while the mask's CONTENT is
+        // produced in the ENGINE's volume-pass space - a coverage disagreement no
+        // lookup transform can reach. The rasterizer ledger states the sim-thread
+        // PV matrix runs one frame ahead of the depth buffer; this lane measures
+        // how much of that reaches our footprint.
+        out.push_back(kvf("svSwingPx", RenderIntegration::g_svs_swing_px));
+        out.push_back(kvf("svSwingPxMax", RenderIntegration::g_svs_swing_px_max));
+        out.push_back(kvf("svSwingPxMean",
+            RenderIntegration::g_svs_swing_frames > 0
+                ? static_cast<float>(RenderIntegration::g_svs_swing_px_sum /
+                    static_cast<double>(RenderIntegration::g_svs_swing_frames))
+                : -1.0f));
+        out.push_back(kv("svSwingFrames", RenderIntegration::g_svs_swing_frames));
+        out.push_back(kv("svSwingOver4", RenderIntegration::g_svs_swing_over4));
+        out.push_back(kv("svSwingOver32", RenderIntegration::g_svs_swing_over32));
+        out.push_back(kvf("svReprojPxMean",
+            RenderIntegration::g_svs_reproj_frames > 0
+                ? static_cast<float>(RenderIntegration::g_svs_reproj_px_sum /
+                    static_cast<double>(RenderIntegration::g_svs_reproj_frames))
+                : -1.0f));
+        // 26238 THE MASK CLAMP BOUND, never published before this build. Every
+        // mask read goes through KhMaskPx, which clamps to fxMeta.zw. That field
+        // is written TWICE per object in BOTH CB editions and the second write
+        // uses g_res.comp_depth_w/h - the occlusion-guard snapshot's size -
+        // rather than the mask's. 26221 added the first write and left the
+        // second in place, so its own ledger entry is only half true.
+        //   fxDimW / fxDimH - what ACTUALLY reached the GPU on the last fill.
+        //     THESE MUST EQUAL svMaskW / svMaskH. If they do not, every mask,
+        //     pre and post Load is clamped to the wrong bound and a band of
+        //     pixels reads one repeated texel, which looks exactly like a strip.
+        //   compDepthW / compDepthH - the guard snapshot's own size.
+        //   fxDimMismatch - object fills where the two disagreed. 0 means this
+        //     is only untidy; non-zero means mode 97 is the fix and the strip
+        //     has a cause that is neither registration nor snapshot epoch.
+        //   fxDimForced - climbs only under mode 97.
+        out.push_back(kv("fxDimW", static_cast<uint64_t>(RenderIntegration::g_fx_dim_w)));
+        out.push_back(kv("fxDimH", static_cast<uint64_t>(RenderIntegration::g_fx_dim_h)));
+        out.push_back(kv("compDepthW", static_cast<uint64_t>(RenderIntegration::g_res.comp_depth_w)));
+        out.push_back(kv("compDepthH", static_cast<uint64_t>(RenderIntegration::g_res.comp_depth_h)));
+        out.push_back(kv("fxDimMismatch", RenderIntegration::g_fx_dim_mismatch));
+        out.push_back(kv("fxDimForced", RenderIntegration::g_fx_dim_forced));
+        // 26239 DEFECT 6 - THE INJECTION WAS CLIPPING WHERE THE VISIBLE DRAW
+        // CLAMPS. Convicted by pixel history, not inferred: at a strip pixel the
+        // injection draw is absent from the volume depth history entirely, while
+        // it passes at a correct pixel and at a lit one. rast_sun carries
+        // DepthClipEnable TRUE - justified in its own ledger by the private sun
+        // map's fitted ortho volume, which does not apply to the engine's
+        // perspective volume buffer - and the three mesh rasterizers the visible
+        // draw uses run FALSE deliberately. So a near-plane-crossing fragment
+        // survives the visible draw and vanishes from the injection.
+        //   svInjRsClamp - injections through rast_inject (the fix). Should
+        //     equal svInjects on the shipped path.
+        //   svInjRsClip  - through rast_sun: mode 98, or rast_inject failed to
+        //     create. MUST be 0 with no mode set.
+        // svPrimePixels is the confirmation lane - the priming pass covers the
+        // injected footprint, so it must RISE with the fix and fall under 98.
+        out.push_back(kv("svInjRsClamp", RenderIntegration::g_svs_inj_rs_clamp));
+        out.push_back(kv("svInjRsClip", RenderIntegration::g_svs_inj_rs_clip));
+        out.push_back(kv("svInjTessNulls", RenderIntegration::g_svs_inj_tess_nulls));
+        out.push_back(kv("svInjTessInherit", RenderIntegration::g_svs_inj_tess_inherit));
+        // 26224 SAME-FRAME VIEW ADOPTION. svInjViewAdopts + svInjViewRefused +
+        // svInjViewReverts == svInjects. svInjViewAdopts should track the
+        // composite's own viewAdopts; svInjViewRefused counts injections that
+        // still ran on the cycle view because no fresh frame view existed, and
+        // those are the frames where the duplicate can still appear. If it is
+        // large while viewAdopts is healthy, the injector is being called
+        // outside the window the adoption is valid in and the ARM point moves,
+        // not the call. svInjViewReverts climbs only under mode 83.
+        out.push_back(kv("svInjViewAdopts", RenderIntegration::g_svs_inj_view_adopts));
+        out.push_back(kv("svInjViewRefused", RenderIntegration::g_svs_inj_view_refused));
+        out.push_back(kv("svInjViewReverts", RenderIntegration::g_svs_inj_view_reverts));
+        // ===================================================================
+        // 26249 THE VOLUME TRANSPORT. Read the stencil where the engine left it
+        // instead of laundering it through the engine's screen-space mask.
+        // Ledger at kh_svs_vol_ensure; mode 109 selects it, 110/111 paint it,
+        // 112 reverts the footprint test. Default is unchanged at this build.
+        //
+        // THE ACCEPTANCE SET, and what each failure means:
+        //   svStenSrc      - WHICH TRANSPORT IS LIVE. 0 = the mask ratio,
+        //     1 = the volume stencil. Read this FIRST: every other lane below
+        //     is meaningless if the transport never armed, and a 0 under mode
+        //     109 means readiness refused, not that the read is wrong.
+        //   svVolFmt       - the SOURCE volume buffer's format. MUST read 45
+        //     (D24_UNORM_S8_UINT). 44 is R24G8_TYPELESS and also fine; anything
+        //     else and svVolRejFmt will be non-zero.
+        //   svVolSamples   - the SOURCE's sample count. MUST read 1. THIS IS
+        //     THE LANE THE 26248 HANDOFF DID NOT HAVE: it cited shadowTex3Samp,
+        //     which belongs to the 26202 SHADOW DEPTH-TARGET census and is a
+        //     claim about a different resource. This one reads the latched
+        //     volume texture's own desc. MSAA makes the copy illegal outright
+        //     and svVolRejMs counts the refusal rather than issuing it.
+        //   svVolW / svVolH - the COPY's dimensions. Must equal svInjW/svInjH
+        //     and the main depth, because the raster fallback hands this
+        //     transport a position in composite screen space. svVolRejDims is
+        //     the refusal if they ever disagree - the transport declines rather
+        //     than reading a scaled texel, which is the fxMeta.zw clamp fault
+        //     this feature already paid for once.
+        //   svVolCopyMade  - copies landed. Should track svCopyArms under mode
+        //     109 and be 0 on the default path (the copy is demand-gated on the
+        //     mode; 33 MB a frame is not spent without a consumer).
+        //   svVolCopyFails - the copy was wanted and the destination could not
+        //     be made. MUST be 0.
+        //   svVolCopySkips - armed with no source latched or no consumer. Large
+        //     on the default path BY DESIGN; that is the demand gate working.
+        //   svVolCreateFails / svVolRejMs / svVolRejShape / svVolRejFmt - the
+        //     four ways the destination is refused, split per cause. "MSAA" and
+        //     "CreateTexture2D failed" are different failures and a single lane
+        //     covering both is how three campaigns measured a path control
+        //     never took.
+        //   svVolRejCold   - readiness refused because no copy had landed into
+        //     the resources that exist NOW. Expect a small non-zero at session
+        //     start and after every device reset; a climbing value means the
+        //     bracket is not reaching the copy.
+        //   svVolStenBinds - t23/t24 bind pairs. Must be non-zero whenever
+        //     svStenSrc is 1, and it is the lane that separates "the shader had
+        //     no textures" from "the shader read the wrong thing".
+        //   svVolLatches / svVolLatchDrops - the AddRef'd source. Latches should
+        //     be small (one per device, one per identity change); Drops
+        //     climbing means the engine is rotating volume buffers and the
+        //     copy's shape is being rebuilt behind it.
+        //
+        // TWO LANES THAT EXIST FOR THE NEXT BUILD, NOT THIS ONE:
+        //   svOmRtvMax - the peak count of SIMULTANEOUS render targets bound at
+        //     the bracket. kh_volume_seam_inject and kh_svs_prime_mask both
+        //     save and restore only FOUR, and OMSetRenderTargets NULLS every
+        //     slot it does not name - so if this reads above 4, both of those
+        //     passes have been silently dropping an engine bind since 26221 and
+        //     that is a real defect with a one-line fix in three places.
+        //     g_svs_rtv_set_max sounds like this lane and is NOT: it counts
+        //     distinct DSV identities seen with a render target. The volume copy
+        //     already saves all eight.
+        //   svVolArmMax - per-frame peak of class-0-depth-plus-render-target
+        //     binds. THE BRACKET STILL ARMS ON A COMPARE AGAINST THE ADOPTED
+        //     MASK, so the new transport cannot fire until mask discovery has
+        //     succeeded - which contradicts its own premise and must go before
+        //     26251 deletes the mask apparatus. If this reads 1, the identity
+        //     compare is redundant and the arm can drop it safely. If it reads
+        //     9 (eight cascades plus the resolve), it cannot, and the arm needs
+        //     a different property. Measure first, then move the trigger.
+        // ===================================================================
+        out.push_back(kv("svStenSrc", static_cast<uint64_t>(RenderIntegration::g_svs_sten_src)));
+        out.push_back(kv("svVolFmt", static_cast<uint64_t>(RenderIntegration::g_svs_vol_fmt)));
+        out.push_back(kv("svVolSamples", static_cast<uint64_t>(RenderIntegration::g_svs_vol_samples)));
+        out.push_back(kv("svVolW", static_cast<uint64_t>(RenderIntegration::g_svs_vol_w)));
+        out.push_back(kv("svVolH", static_cast<uint64_t>(RenderIntegration::g_svs_vol_h)));
+        out.push_back(kv("svVolCopyMade", RenderIntegration::g_svs_vol_copy_made));
+        out.push_back(kv("svVolCopyFails", RenderIntegration::g_svs_vol_copy_fails));
+        out.push_back(kv("svVolCopySkips", RenderIntegration::g_svs_vol_copy_skips));
+        out.push_back(kv("svVolCreateFails", RenderIntegration::g_svs_vol_create_fails));
+        out.push_back(kv("svVolRejMs", RenderIntegration::g_svs_vol_rej_ms));
+        out.push_back(kv("svVolRejShape", RenderIntegration::g_svs_vol_rej_shape));
+        out.push_back(kv("svVolRejFmt", RenderIntegration::g_svs_vol_rej_fmt));
+        out.push_back(kv("svVolRejDims", RenderIntegration::g_svs_vol_rej_dims));
+        out.push_back(kv("svVolRejCold", RenderIntegration::g_svs_vol_rej_cold));
+        out.push_back(kv("svVolStenBinds", RenderIntegration::g_svs_vol_sten_binds));
+        out.push_back(kv("svVolLatches", RenderIntegration::g_svs_vol_latches));
+        // 26277 THE WALK'S OWN LANES.
+        //   svVolCode - the arm the SHADER ran, read off the value actually
+        //     written into stenReprojCam.w: 0 reprojection (126), 1 raster only
+        //     (129, the 26273 revert), 2 walk + signed count (the default),
+        //     3 walk with the historic unsigned count (130), 4 signed count
+        //     with no walk (131). This is deliberately NOT the debugMode: when
+        //     the epoch ring misses there is no far endpoint for the walk and
+        //     the fill demotes 2 -> 4 on its own. A mode-named counter that
+        //     cannot report a demotion is what made the 108 dump unreadable.
+        //   svVolWitFrames / svVolWitAbsent - frames published with and without
+        //     a footprint witness. Acceptance for the walk is WitFrames ==
+        //     flushes with WitAbsent 0; any climb in WitAbsent means the ring
+        //     is missing and the slice will be back on those frames, so read
+        //     this BEFORE concluding anything from the screen.
+        out.push_back(kv("svVolCode", RenderIntegration::g_svs_vol_code));
+        out.push_back(kv("svVolWitFrames", RenderIntegration::g_svs_vol_wit_frames));
+        out.push_back(kv("svVolWitAbsent", RenderIntegration::g_svs_vol_wit_absent));
+        // 26278 THE SHARED-VIEW ARM (mode 133).
+        //   svShareTakes - seam frames that adopted the colour injection's own
+        //     view. Should equal svInjects under 133 and be 0 otherwise. If it
+        //     reads 0 under 133 the pass ordering assumption is wrong and
+        //     svShareStale says so; nothing silently half-applies.
+        //   svSharePubs / svShareStale / svShareAbsent - published, wrong frame,
+        //     never published. Stale climbing means the seam runs BEFORE the
+        //     colour injection and the arm has to be inverted, which is a
+        //     reading and not a guess.
+        //   DO NOT USE svReprojPxMean AS THE BAR. The 127 dump falsified it: the
+        //     slice went away while that lane went UP, 18.96 to 39.72. It is
+        //     computed in the colour injection against g_svs_prime_vp, which the
+        //     SEAM writes later in the frame, so it reports a whole frame of
+        //     camera motion and not the gap it has been read as since 26273.
+        //     svShareTakes vs svShareStale settles that ordering in one dump.
+        out.push_back(kv("svSharePubs", RenderIntegration::g_svs_share_pubs));
+        out.push_back(kv("svShareTakes", RenderIntegration::g_svs_share_takes));
+        out.push_back(kv("svShareStale", RenderIntegration::g_svs_share_stale));
+        out.push_back(kv("svShareAbsent", RenderIntegration::g_svs_share_absent));
+        // 26283 THE INVERTED SHARE (mode 134). Acceptance is svSeamViewTakes ==
+        // compositeInjections with Stale 0. A capture measured the footprints
+        // directly: colour translated RIGHT of seam by 18-34 px, slice 33078 px
+        // at background depth with stencil 0 - a genuine hole. If this arm works
+        // that offset goes to zero and the hole with it.
+        out.push_back(kv("svSeamViewPubs", RenderIntegration::g_svs_seam_view_pubs));
+        out.push_back(kv("svSeamViewTakes", RenderIntegration::g_svs_seam_view_takes));
+        out.push_back(kv("svSeamViewStale", RenderIntegration::g_svs_seam_view_stale));
+        out.push_back(kv("svSeamViewAbsent", RenderIntegration::g_svs_seam_view_absent));
+        //   svSeamViewAge / Max - frames between the seam's publication and the
+        //     colour pass reading it. MUST be 1: the frame-seq boundary fires at
+        //     the resolve, which sits between the two passes. 26283 tested for 0
+        //     and refused 712 of 712. If this ever reads above 1 the passes have
+        //     drifted apart and the adoption is carrying stale geometry.
+        out.push_back(kv("svSeamViewAge", RenderIntegration::g_svs_seam_view_age_last));
+        out.push_back(kv("svSeamViewAgeMax", RenderIntegration::g_svs_seam_view_age_max));
+        //   svSeamRotTakes - 26296: the DEFAULT path now (135 is an alias);
+        //     engagement bar is ~svInjects. Frames where the seam BASIS was
+        //     adopted and the translation row rebuilt from this pass's own
+        //     camera. Should equal svSeamViewTakes under 135 and be 0 under 134.
+        //   svSeamRotCamDx - metres between the camera 134 would have inherited
+        //     and the one 135 keeps. THIS IS THE DRIFT 134 SHOWED, in metres;
+        //     at camStepMaxM 2.6 expect roughly that under motion. Non-zero here
+        //     with a stable box is the whole point of 135.
+        out.push_back(kv("svSeamRotTakes", RenderIntegration::g_svs_seam_rot_takes));
+        //     26291: now filled EVERY mode by the unconditional gauge in the
+        //     colour pass (it was 135/136-gated, so mode 0 - where the slice
+        //     lives - never produced it; method note 32, gauge placement).
+        out.push_back(kv("svSeamRotCamDx", RenderIntegration::g_svs_seam_rot_cam_dx));
+        //   svSeamRotCamDxMax - THE lane 135 needed and did not have. Last-value
+        //     only read 0 on a settled final frame, which is how 135 shipped on
+        //     the belief that translation did not matter. It does: 134 matched
+        //     both terms and svReprojPxMean went to 0; 135 matched rotation only
+        //     and it returned to 26.1.
+        //   svSeamTrnTakes - mode 136: translation shared, rotation kept.
+        out.push_back(kv("svSeamRotCamDxMax", RenderIntegration::g_svs_seam_rot_cam_dx_max));
+        out.push_back(kv("svSeamTrnTakes", RenderIntegration::g_svs_seam_trn_takes));
+        //   svNoAdoptFrames - mode 137: BOTH passes stood the view adoption
+        //     down and read the shared cycle_pv latch instead. Mode 102 only
+        //     ever disabled it in the SEAM, so every 102 reading is a
+        //     half-applied revert. Expect == compositeInjections under 137.
+        out.push_back(kv("svNoAdoptFrames", RenderIntegration::g_svs_noadopt_frames));
+        //   svSeamNoAdopt - 26291: SEAM-side stand-downs (102/137/142). The
+        //     colour-only counter above is how 102's half-application hid for
+        //     ten builds; under 137/142 BOTH must track their pass counts or
+        //     a half did not engage - that is a reading now, not a trust.
+        out.push_back(kv("svSeamNoAdopt", RenderIntegration::g_svs_seam_noadopt));
+        //   svPvLatchSerial - 26291: total cycle_pv writes this session (the
+        //     stamp the per-frame seamPvStamp/compPvStamp lanes record). Read
+        //     against flushes: meaningfully above one per frame means the
+        //     latch is rewritten mid-frame, which is the surviving suspect
+        //     from mode 137's failure to register. NOT zeroed at the arm - it
+        //     is an identity, and zeroing it would alias trace stamps across
+        //     an arm boundary.
+        out.push_back(kv("svPvLatchSerial",
+                         static_cast<uint64_t>(RenderIntegration::g_pv_latch_serial)));
+        //   26292 MODE 143 (seam live translation; ledger at the arm).
+        //     svLiveTrnTakes == svInjects with Miss/Guard ~0 is engagement;
+        //     svLiveTrnDx/Max is the correction applied (expect ~camStepM);
+        //     the residual is svSeamRotCamDx / per-frame seamCamDxM.
+        out.push_back(kv("svLiveTrnTakes", RenderIntegration::g_svs_live_trn_takes));
+        out.push_back(kv("svLiveTrnMiss", RenderIntegration::g_svs_live_trn_miss));
+        out.push_back(kv("svLiveTrnGuard", RenderIntegration::g_svs_live_trn_guard));
+        out.push_back(kv("svLiveTrnDx", RenderIntegration::g_svs_live_trn_dx));
+        out.push_back(kv("svLiveTrnDxMax", RenderIntegration::g_svs_live_trn_dx_max));
+        //   26293 MODE 144 (live depth pair at the seam; ledger at the arm).
+        //     svLivePrjTakes == svInjects with Ref ~0 is engagement; the
+        //     verdict lane is per-frame seamNear vs injNear through a ramp.
+        out.push_back(kv("svLivePrjTakes", RenderIntegration::g_svs_live_prj_takes));
+        out.push_back(kv("svLivePrjRef", RenderIntegration::g_svs_live_prj_ref));
+        out.push_back(kv("svSeamNear", RenderIntegration::g_svs_seam_near));
+        //   svTrnExtrap - 26294 mode 147, RETIRED 26295 (deceleration false
+        //     positives regressed the slice). Kept so old scripts validate.
+        out.push_back(kv("svTrnExtrap", RenderIntegration::g_svs_trn_extrap));
+        //   26295 SEAM PAIR AUTHORITY (ledger at the arm): Comm = committed-
+        //     pair encodes, Live = live pair on 40% agreement, Fall = cold.
+        //     Comm+Live == svInjects after warmup is engagement; the verdict
+        //     lane stays per-frame seamNear vs injNear. Bound = translation
+        //     takes refused by the trajectory bound (foreign publications).
+        out.push_back(kv("svPairComm", RenderIntegration::g_svs_pair_comm));
+        out.push_back(kv("svPairLive", RenderIntegration::g_svs_pair_live));
+        out.push_back(kv("svPairFall", RenderIntegration::g_svs_pair_fall));
+        out.push_back(kv("svLiveTrnBound", RenderIntegration::g_svs_live_trn_bound));
+        //   26297 LIVE BASIS (ledger at the arm): RotLive ~ svInjects is
+        //     engagement, RotRef counts row-norm refusals (fv basis stood).
+        out.push_back(kv("svLiveRotTakes", RenderIntegration::g_svs_live_rot_takes));
+        out.push_back(kv("svLiveRotRef", RenderIntegration::g_svs_live_rot_ref));
+        //   svPairWide - 26298: coherent wide-band pair accepts (the per-shot
+        //     near steps the 40% band lagged by a frame; ledger at the arm).
+        out.push_back(kv("svPairWide", RenderIntegration::g_svs_pair_wide));
+        //   svPairHold - 26300 mode 151: frames the debounced encode held
+        //     against a 1-frame committed step (ledger at the arm).
+        out.push_back(kv("svPairHold", RenderIntegration::g_svs_pair_hold));
+        //   svPairSniff - 26301: sniff-pair encodes (fallback since 26302).
+        out.push_back(kv("svPairSniff", RenderIntegration::g_svs_pair_sniff));
+        //   26303: predicted fallback + the live-refusal reasons, split.
+        out.push_back(kv("svPairPred", RenderIntegration::g_svs_pair_pred));
+        out.push_back(kv("svPairSaneRef", RenderIntegration::g_svs_pair_sane_ref));
+        out.push_back(kv("svPairCorrRef", RenderIntegration::g_svs_pair_corr_ref));
+        //   26304: base = return-to-baseline live accepts; rebase = predictor
+        //   re-bases off two agreeing out-of-band commits; refGuard =
+        //   corridor referee substitutions (polluted committed reference);
+        //   noRef = live refused solely for want of a fresh committed
+        //   reference (previously invisible). svCbc* = the bound-CB pointer
+        //   census (handoff 3.1): records/evicts on the upload side,
+        //   matches/misses at the seam lookup, encodes under mode 152.
+        out.push_back(kv("svPairBase", RenderIntegration::g_svs_pair_base));
+        out.push_back(kv("svPairRebase", RenderIntegration::g_svs_pair_rebase));
+        out.push_back(kv("svPairRefGuard", RenderIntegration::g_svs_pair_ref_guard));
+        out.push_back(kv("svPairNoRef", RenderIntegration::g_svs_pair_noref));
+        out.push_back(kv("svCbcRecords", RenderIntegration::g_cbc_records));
+        out.push_back(kv("svCbcEvicts", RenderIntegration::g_cbc_evicts));
+        out.push_back(kv("svCbcMatches", RenderIntegration::g_cbc_matches));
+        out.push_back(kv("svCbcMisses", RenderIntegration::g_cbc_misses));
+        out.push_back(kv("svCbcEncodes", RenderIntegration::g_cbc_encodes));
+        //   26306: camRecs/camHits = the census view probe (instrument);
+        //   trnRebase = refused-relocation confirmations taken; trnWide =
+        //   takes the 26305 trajectory bound would have refused.
+        out.push_back(kv("svCbcCamRecs", RenderIntegration::g_cbc_cam_recs));
+        out.push_back(kv("svCbcCamHits", RenderIntegration::g_cbc_cam_hits));
+        out.push_back(kv("svLiveTrnRebase", RenderIntegration::g_svs_live_trn_rebase));
+        out.push_back(kv("svLiveTrnWide", RenderIntegration::g_svs_live_trn_wide));
+        //   svLiveTrnAnchOff/Max - 26309: |raw live camera - anchored
+        //   candidate| in metres = the second-flavor anchor offset the
+        //   delta take removed (expected ~0 healthy; 0.18-0.28 on the
+        //   capture12 scenario). svLiveTrnLpMiss - cold/post-miss runs
+        //   that fell back to the absolute form for one frame.
+        out.push_back(kv("svLiveTrnAnchOff", RenderIntegration::g_svs_trn_anch_off));
+        //   svSeamAnchDx/Max - 26310: |seam adopted-view camera - cycle
+        //   latch camera| in metres, the multiplex-flavor gauge (0.258
+        //   constant in capture13's Zeus session; ~0 healthy).
+        out.push_back(kv("svSeamAnchDx", RenderIntegration::g_svs_seam_anch_dx));
+        out.push_back(kv("svSeamAnchDxMax", RenderIntegration::g_svs_seam_anch_dx_max));
+        //   svLiveFovTakes/Ref - 26311: seam FOV terms from the live fetch
+        //   (the zoom axis); svCbcClassRef/Near - census encodes refused by
+        //   the two-witness class referee, and the last refused near.
+        out.push_back(kv("svLiveFovTakes", RenderIntegration::g_svs_live_fov_takes));
+        out.push_back(kv("svLiveFovRef", RenderIntegration::g_svs_live_fov_ref));
+        out.push_back(kv("svCbcClassRef", RenderIntegration::g_cbc_class_ref));
+        out.push_back(kv("svCbcClassRefNear", RenderIntegration::g_cbc_class_ref_near));
+        //   svCbcBandSkips - 26312: recorder notes skipped by the shared
+        //   camera-class band (out-of-band content no longer overwrites a
+        //   tracked buffer's world-class pair).
+        out.push_back(kv("svCbcBandSkips", RenderIntegration::g_cbc_band_skips));
+        //   svLiveFovRatio/Max - 26313: per-frame live/latch FOV ratio (the
+        //   flicker gauge; legit zoom tops ~1.13, the bar is 1.30).
+        out.push_back(kv("svLiveFovRatio", RenderIntegration::g_svs_live_fov_ratio));
+        out.push_back(kv("svLiveFovRatioMax", RenderIntegration::g_svs_live_fov_ratio_max));
+        out.push_back(kv("svLiveTrnAnchOffMax", RenderIntegration::g_svs_trn_anch_off_max));
+        out.push_back(kv("svLiveTrnLpMiss", RenderIntegration::g_svs_trn_lp_miss));
+        //   svGrowDraws / svGrowLast - 26288: seam draws issued with an ENLARGED
+        //     footprint, and the factor. Expect == svInjectDraws under 138-140.
+        //     This arm does not try to align the two rasterisations at all - it
+        //     makes the depth-only footprint bigger than the visible box so a
+        //     18-34 px displacement cannot expose a hole. The visible draw is
+        //     untouched: no drift, no lag. Cost is a thin band of wrong GROUND
+        //     shadow hugging the box, scaling with the factor - take the
+        //     SMALLEST of 138/139/140 that closes the slice.
+        out.push_back(kv("svGrowDraws", RenderIntegration::g_svs_grow_draws));
+        out.push_back(kv("svGrowLast", RenderIntegration::g_svs_grow_last));
+        //   26289 MODE 141 is the soft filter: svVolCode reads 5 and
+        //     svVolWitFrames must equal flushes. It weights a 7x7 by how well
+        //     each texel s depth matches our own surface and AVERAGES their
+        //     verdicts instead of choosing one - so it cannot interlace the way
+        //     the walk did, and it survives registration error from any cause.
+        // 26279: proxy casters that entered the private sun map this session.
+        // Should track (proxies registered) x (sun-depth passes). 0 with proxies
+        // registered means they are not reaching render_sun_depth - check that
+        // casterOnly is set and mode is not DepthMode::Off.
+        out.push_back(kv("sunProxyCasters", RenderIntegration::g_sun_proxy_casters));
+        // 26280 THE PREMISE TEST, and it is the one lane on this list that can
+        // invalidate the rest of them.
+        //   svVolIsColour  - frames where the buffer the COLOUR injection writes
+        //     depth into is THE SAME RESOURCE the volume copy reads. If this is
+        //     non-zero the seam injection is redundant: our depth is already in
+        //     the counted buffer, at the visible box position, registered by
+        //     construction - and every pixel of slice is self-inflicted by a
+        //     second differently-transformed write. Delete the seam injection.
+        //   svVolNotColour - the two are different resources, which is what the
+        //     26205 ledger claims from a capture. Expect this to carry the count;
+        //     it is published because an inherited premise this much machinery
+        //     rests on should be a reading, not a citation.
+        //   svColourDsvNone - no DSV bound at the injection. Should be 0.
+        //   svSeamDimChanges / svSeamWMin - the seam target flipped between
+        //     1920x1080 and 3840x2160 across sessions on one build. Non-zero
+        //     changes, or a WMin below scene width, means the injection is going
+        //     into a half-res buffer on some frames and NOTHING measured that
+        //     until now. Read this before trusting any A/B in this campaign.
+        out.push_back(kv("svVolIsColour", RenderIntegration::g_svs_vol_is_colour));
+        out.push_back(kv("svVolNotColour", RenderIntegration::g_svs_vol_not_colour));
+        out.push_back(kv("svColourDsvNone", RenderIntegration::g_svs_colour_dsv_none));
+        out.push_back(kv("svSeamDimChanges", RenderIntegration::g_svs_seam_dim_changes));
+        out.push_back(kv("svSeamWMin", RenderIntegration::g_svs_seam_w_min));
+        out.push_back(kv("svSeamHMin", RenderIntegration::g_svs_seam_h_min));
+        out.push_back(kv("svVolLatchDrops", RenderIntegration::g_svs_vol_latch_drops));
+        // 26250 THE TRANSPORT'S OWN EPOCH KEY. svReprojEpochHits/Miss now report
+        //   the ring lookup for WHICHEVER transport is live - keyed on the volume
+        //   copy under 109+, on the post snapshot otherwise. Under the volume
+        //   transport svReprojEpochHits must track svVolCopyMade; a Miss count
+        //   equal to the flush count means NO REPROJECTION IS HAPPENING and the
+        //   mesh is reading at its raster position, which is the 26243 strip.
+        //   That is what 26249 shipped, and mode 111 painting flat grey is the
+        //   one-screenshot version of the same statement.
+        //   svVolAgeLast / svVolAgeMax - frames between the keyed pass and the
+        //   mesh draw. Expect 0 or 1 (the epoch bumps at the seam boundary,
+        //   which falls between the copy and the colour pass - the same clock
+        //   artifact svPostAgeMax documents, NOT staleness). A large value means
+        //   the key stopped advancing and the ring is missing on age.
+        // 26254 THE INJECTION'S REGISTRATION, and the discriminator for the
+        // last artifact. RenderDoc measured our INJECTION 21.5 deg (721 px) off
+        // the engine's view in a frame where our COMPOSITE matched it to 0.0 px
+        // and the engine used ONE view. That misplacement - not the reprojection
+        // band, not the guard - is the shadow lag: the stencil verdict is
+        // computed for a world point our misplaced footprint corresponds to.
+        //   injAdoptSrc     - what the injection's view actually came from.
+        //     1 = frame_view adopted (the intended path), 2 = cycle_pv (a frame
+        //     AHEAD by its own ledger), 3 = a raw bridge fetch, 0 = none.
+        //   injAdoptRotDeg / injAdoptRotMax - angle between the rotation the
+        //     injection ended up with and the rotation g_ls.frame_view held at
+        //     that instant. READ IT WITH svReprojPxMean:
+        //       near 0 + svReprojPxMean large -> the injection DID adopt and
+        //         frame_view ITSELF moved between the seam and the flush.
+        //       large -> the injection is not on frame_view at all and
+        //         injAdoptSrc names the fallback that took it.
+        //     These are different faults with different fixes, which is why
+        //     they get separate lanes instead of one.
+        //   injAdoptFvCold  - frame_view absent at the injection.
+        // 1 px = 0.0298 deg at fireFovY 0.5625, so multiply by 33.5 to compare
+        // against svReprojPxMean.
+        out.push_back(kv("injAdoptSrc", static_cast<uint64_t>(RenderIntegration::g_inj_adopt_src)));
+        out.push_back(kvf("injAdoptRotDeg", RenderIntegration::g_inj_adopt_rot_deg));
+        out.push_back(kvf("injAdoptRotMax", RenderIntegration::g_inj_adopt_rot_max));
+        out.push_back(kv("injAdoptFvCold", RenderIntegration::g_inj_adopt_fv_cold));
+        // 26255 WHICH CHANNEL SHOULD THE INJECTION BE ON. 26254 proved it adopts
+        // frame_view faithfully (injAdoptRotMax 0.0198 deg over a rotating
+        // window), so the 37 px gap to the composite is frame_view MOVING during
+        // the frame - 589 writes per frame, alternating between this frame's and
+        // the next frame's camera by kh_adopt_frame_view's own ledger. Only two
+        // sources exist at seam time. These lanes say which is closer to the
+        // engine, which the composite is measured equal to.
+        //   injCycleErrPx / Max / Mean - |cycle_pv - the composite's view|, in
+        //     pixels, built from cycle_pv's VIEW against the SAME projection so
+        //     only the view source differs. COMPARE DIRECTLY WITH
+        //     svReprojPxMean, which is |frame_view(early) - composite|:
+        //       injCycleErrMean MUCH LOWER -> the bridge is the better channel
+        //         and MODE 102's existing revert IS the fix. One line.
+        //       injCycleErrMean >= svReprojPxMean -> both channels are wrong at
+        //         seam time and the injection needs the ENGINE's own view
+        //         sniffed from its bound CB at the seam (precedent in-file:
+        //         shadow_view_scan from the bind path, viewBindScans).
+        //     Read the MEANS, not the maxes - a session max is not a reading,
+        //     and one relock transient owns a max forever (campaign 35).
+        out.push_back(kvf("injCycleErrPx", RenderIntegration::g_inj_cycle_err_px));
+        out.push_back(kvf("injCycleErrMax", RenderIntegration::g_inj_cycle_err_max));
+        out.push_back(kvf("injCycleErrMean",
+            RenderIntegration::g_inj_cycle_frames > 0
+                ? static_cast<float>(RenderIntegration::g_inj_cycle_err_sum /
+                                     static_cast<double>(RenderIntegration::g_inj_cycle_frames))
+                : -1.0f));
+        out.push_back(kv("injCycleFrames", RenderIntegration::g_inj_cycle_frames));
+        //   injCycleIncoherent - MUST BE 0. The three arms are the sides of one
+        //     triangle: injCycleErrPx must lie within svSwingPx +- svReprojPx on
+        //     the same frame. 26255 shipped this gauge feeding a CAMERA-RELATIVE
+        //     centre to an ABSOLUTE matrix and published 2871 px against a
+        //     hand-computed bound of 10-64; the bound was in a chat message, not
+        //     in the code, so nothing but a human caught it. Now the instrument
+        //     reports its own incoherence. Non-zero means one of the three lanes
+        //     is not measuring what its name says and NO conclusion may be drawn
+        //     from any of them.
+        //   injCycleFrames should also track svReprojFrames closely - both arms
+        //     skip the same behind-eye and wild frames. 156 against 1304 was the
+        //     second symptom of the same defect.
+        //   injCycleUnchecked - frames where the coherence test was SKIPPED
+        //     because the swing arm had no fresh sample (the injection ran
+        //     without producing one). 26257 read injCycleIncoherent 2 purely
+        //     from comparing this frame's arms against last frame's swing;
+        //     an unchecked frame and a coherent one must not share a lane.
+        out.push_back(kv("injCycleIncoherent", RenderIntegration::g_inj_cycle_incoherent));
+        out.push_back(kv("injCycleUnchecked", RenderIntegration::g_inj_cycle_unchecked));
+        // ===================================================================
+        // 26264 THE ENGINE-VIEW LOCATOR, trimmed to what is true. The 26257-26262
+        // lanes (injEngLocOff/Slot/Hits/Miss/NoRef/Best/Relocs, injEngErr*) are
+        // GONE: they measured a candidate block against OUR COMPOSITE's basis on
+        // the belief the composite equals the engine's view, and capture 6
+        // disproved that - our composite sat 16 deg out in PITCH while that same
+        // frame's engine volume and colour passes were byte-identical. A moving
+        // yardstick validates nothing, so the lanes built on it are worse than
+        // absent.
+        //
+        // What remains is the SELF-CONTAINED fingerprint, which needs no
+        // reference: identity 3x3 with a camera in its .w column, orthonormal
+        // 3x3 sixteen floats later, (0,0,0,1) after that.
+        //
+        // 26265 IT DID NOT FIRE FOR TWO REASONS, AND ONLY ONE OF THEM WAS THE
+        // ONE BEING CHASED.
+        //
+        // 26263 read engFpFail 1 - no staged range begins with an identity 3x3 -
+        // and concluded the stage point must be on the wrong draw, because the
+        // capture's b2 does begin with one. Both halves of that are true and the
+        // conclusion still does not follow: the identity 3x3 is the DRAW'S WORLD
+        // MATRIX (the ledger in rendering_integration.hpp says so in as many
+        // words - "[world | view]", "rows 0-3 are an IDENTITY WORLD MATRIX"), so
+        // gate one could only ever pass on a caster sitting at the world origin
+        // unrotated. A corrected stage point would have read engFpFail 1 too,
+        // and the session that proved it would have proved nothing.
+        //
+        // So: gate one is gone (the identity block is measured, not gating -
+        // engIdentSeen), the gates that remain are properties of the VIEW block
+        // alone, and the locator no longer sits on one draw at all - it samples
+        // the draw stream (engSweeps), which removes the dependency on which
+        // draw carries the view instead of answering it.
+        //
+        // READING ORDER FOR THE NEXT SESSION:
+        //   engFpHits > 0 and engBlkAbs settled -> the address is found. Then
+        //     mode 116 and svReprojPxMean is the verdict (predicted: collapses
+        //     from 26-95 px toward 0).
+        //   engFpHits 0 -> engFpFail names the furthest gate any candidate
+        //     reached and engFpLen/Orth/Wcol/Row7/Det/Trace are that
+        //     candidate's residuals against the bars printed beside them. A
+        //     stage of 2 with engSweeps large means no sampled draw binds an
+        //     orthonormal 3x3 anywhere, which is a real finding and not a
+        //     tolerance argument.
+        //   engFpDrifts > 0 -> the address MOVES between families. Four builds
+        //     have assumed it cannot; this is the lane that says so.
+        //   engOffDisagree > 0 -> window-relative and absolute reconstructions
+        //     of the address differ, i.e. the engine re-binds that resource at
+        //     different offsets per family. Absolute is the one in use.
+        // ===================================================================
+        out.push_back(kv("engFpHits", RenderIntegration::g_svs_eng_fp_hits));
+        out.push_back(kv("engFpMiss", RenderIntegration::g_svs_eng_fp_miss));
+        out.push_back(kv("engBlkOff", static_cast<uint64_t>(
+            RenderIntegration::g_svs_eng_blk_off < 0 ? 0xFFFFFFFFull
+                : static_cast<uint64_t>(RenderIntegration::g_svs_eng_blk_off))));
+        // 26265: the ABSOLUTE address in the resource - the one the copy uses.
+        // engBlkOff is kept as the window-relative value it always was, purely
+        // so engOffDisagree has two things to compare.
+        out.push_back(kv("engBlkAbs", static_cast<uint64_t>(
+            RenderIntegration::g_svs_eng_blk_abs < 0 ? 0xFFFFFFFFull
+                : static_cast<uint64_t>(RenderIntegration::g_svs_eng_blk_abs))));
+        out.push_back(kv("engOffDisagree", RenderIntegration::g_svs_eng_off_disagree));
+        out.push_back(kv("engCopies", RenderIntegration::g_svs_eng_copies));
+        out.push_back(kv("engCopySkips", RenderIntegration::g_svs_eng_copy_skips));
+        out.push_back(kv("engCopyFails", RenderIntegration::g_svs_eng_copy_fails));
+        out.push_back(kv("engBinds", RenderIntegration::g_svs_eng_binds));
+        out.push_back(kv("engArmInj", static_cast<uint64_t>(RenderIntegration::g_svs_eng_arm_inj)));
+        out.push_back(kv("engArmComp", static_cast<uint64_t>(RenderIntegration::g_svs_eng_arm_comp)));
+        // 26265 THE COMPOSITE'S ARM NOW ASKS ABOUT FRESHNESS, NOT EXISTENCE.
+        // engArmCompStale counts arms REFUSED because the copy was more than one
+        // epoch old. Non-zero is not a fault by itself - the late flush path runs
+        // after the seam boundary bumps the epoch - but engArmCompStale tracking
+        // flushes means the visible mesh is taking the historic path every frame
+        // and mode 117/118 is measuring nothing.
+        out.push_back(kv("engCopyAgeLast", RenderIntegration::g_svs_eng_copy_age_last));
+        out.push_back(kv("engCopyAgeMax", RenderIntegration::g_svs_eng_copy_age_max));
+        out.push_back(kv("engArmCompStale", RenderIntegration::g_svs_eng_arm_comp_stale));
+        // 26265 THE SWEEP. engSweeps is scan+stage attempts; engSweepFrameMax is
+        // the per-frame peak against its own cap (32 unlocated, 2 located), so a
+        // max pinned at the cap says the budget is the limit and not the draw
+        // stream. engFpReconfirms climbing with engFpDrifts 0 is a stable
+        // address; engFpDrifts non-zero retires the assumption that it is.
+        out.push_back(kv("engSweeps", RenderIntegration::g_svs_eng_sweeps));
+        out.push_back(kv("engSweepFrameMax",
+            static_cast<uint64_t>(RenderIntegration::g_svs_eng_sweep_frame_max)));
+        out.push_back(kv("engFpReconfirms", RenderIntegration::g_svs_eng_fp_reconfirms));
+        out.push_back(kv("engFpDrifts", RenderIntegration::g_svs_eng_fp_drifts));
+        out.push_back(kv("engStageBusy", RenderIntegration::g_svs_eng_stage_busy));
+        // ===================================================================
+        // 26266 THE ADDRESS WAS RIGHT AND THE CONTENTS WERE NOT.
+        //
+        // 26265 located the block: engFpHits 519, engBlkAbs 0, engFpDrifts 0,
+        // engOffDisagree 0, engFpSlot 4. Slot FOUR - the capture's b2 - which is
+        // why the four-slot scan through 26262 could never have found it, and
+        // why the 240-byte decoy at slot 0 (F0 1.0, F16 0) made 26263 read the
+        // miss as a wrong-draw problem. Both defects had to go together.
+        //
+        // Then the same lane, same slot, same offset, across four sessions:
+        //   116     stage 8   wcol 0       row7 0       trace 2.554
+        //   mode 0  stage 4   wcol 40.45   row7 46.98   trace 0.306
+        //   117     stage 4   wcol  2.35   row7  2.13   trace 2.987
+        // Orthonormal to 1e-7 and det exactly 1 in all three - so sometimes a
+        // ROTATION-ONLY block and sometimes a FULL RIGID TRANSFORM, at one
+        // address. The locator refused the translated variant; the COPY did not,
+        // because it fired unconditionally on a cached address. engRot then
+        // carried a translation, mul(engRot, float4(rel,1)) applied the camera
+        // offset TWICE, and the field saw the box leave the frustum under 117 and
+        // the shadow resolve onto the floor through the box under 116. It SNAPPED
+        // with what was on screen rather than degrading with heading, which is
+        // what separates this from a transpose error.
+        //
+        // THREE LAYERS NOW, and the lanes say which one is carrying the load:
+        //   engBindRejects  - refused same-frame because the BINDING moved
+        //                     (firstConstant / numConstants against the values
+        //                     the gates passed through). Free, fails closed.
+        //                     Non-zero: binding metadata discriminates the two
+        //                     variants and this is the cheap fix.
+        //                     ZERO with engVerifyFail non-zero: it does NOT, the
+        //                     shader gate is the only defence, and the next build
+        //                     must move the copy rather than tighten this.
+        //   engVerifyPass / engVerifyFail - the 64 bytes the SHADER ACTUALLY READ,
+        //                     staged back and gated one frame later. Every lane
+        //                     before this one measured the source; none measured
+        //                     the destination, which is the only quantity the
+        //                     artifact is a function of. engCopies tracked
+        //                     svInjects perfectly while the copy was landing a
+        //                     translated matrix.
+        //   KhEngRotUsable  - the live decision, in the vertex shader, on those
+        //                     same bytes with no latency. Cannot be counted from
+        //                     the CPU; engVerifyFail is its proxy.
+        //
+        // engVerifyFail / (engVerifyPass + engVerifyFail) is the fraction of
+        // frames the engine-view path must refuse at the current copy site. Small
+        // -> ship it and accept the historic path at those angles. Large -> the
+        // copy site is wrong and engBindRejects says whether the binding can pick
+        // the right frames.
+        // ===================================================================
+        out.push_back(kv("engBindRejects", RenderIntegration::g_svs_eng_bind_rejects));
+        out.push_back(kv("engSrcSlot", static_cast<uint64_t>(RenderIntegration::g_svs_eng_src_slot)));
+        out.push_back(kv("engSrcFirst", static_cast<uint64_t>(RenderIntegration::g_svs_eng_src_first)));
+        out.push_back(kv("engSrcNum", static_cast<uint64_t>(RenderIntegration::g_svs_eng_src_num)));
+        out.push_back(kv("engBindRejSlot", static_cast<uint64_t>(RenderIntegration::g_svs_eng_bind_rej_slot)));
+        out.push_back(kv("engBindRejFirst", static_cast<uint64_t>(RenderIntegration::g_svs_eng_bind_rej_first)));
+        out.push_back(kv("engBindRejNum", static_cast<uint64_t>(RenderIntegration::g_svs_eng_bind_rej_num)));
+        out.push_back(kv("engVerifyPass", RenderIntegration::g_svs_eng_ver_pass));
+        out.push_back(kv("engVerifyFail", RenderIntegration::g_svs_eng_ver_fail));
+        out.push_back(kv("engVerifyBusy", RenderIntegration::g_svs_eng_ver_busy));
+        out.push_back(kvf("engVerLen", RenderIntegration::g_svs_eng_ver_len));
+        out.push_back(kvf("engVerWcol", RenderIntegration::g_svs_eng_ver_wcol));
+        out.push_back(kvf("engVerRow3", RenderIntegration::g_svs_eng_ver_row3));
+        out.push_back(kvf("engVerWcolMax", RenderIntegration::g_svs_eng_ver_wcol_max));
+        out.push_back(kvf("engVerRow3Max", RenderIntegration::g_svs_eng_ver_row3_max));
+        // ===================================================================
+        // 26267 THE WIDE ENUMERATION, and the reading that forced it.
+        //
+        // 26266 WORKED: both artifacts went - the box stopped disappearing under
+        // 117, the shadow stopped resolving through it under 116 - because the
+        // shader refuses a translated engRot and takes the historic path. The
+        // cost is engVerifyFail 44/692 (6.4%) and 32/475 (6.7%): that many frames
+        // per session run on the LAG instead. A limitation, not a defect.
+        //
+        // THE FORK RESOLVED THE WAY THAT SAYS "MOVE THE COPY". engBindRejects 0
+        // against engVerifyFail 44 means the two variants share an IDENTICAL
+        // binding - slot 4, firstConstant 0, numConstants 4096 - so binding
+        // metadata cannot separate them and tightening that fingerprint is dead
+        // ground.
+        //
+        // AND engSrcNum 4096 IS THE LEAD: 4096 constants is 65536 bytes, so the
+        // engine binds the WHOLE pool and the staging window is min(range, 1024).
+        // Every scan this campaign has run has read the first 1.6% of the bound
+        // range. Byte 0 is a SHARED pool offset that more than one family writes,
+        // which is precisely what "one address, two matrices, snaps with what is
+        // on screen" describes. A family-private copy further into that 64 KB
+        // would not be shared.
+        //
+        // HOW TO READ IT:
+        //   engWideScans      - completed 64 KB readbacks (one per 32 injections).
+        //   engWideN          - gate-8 offsets in the LAST scan. engWideNMax the
+        //                       most ever. 1 means byte 0 is the only copy of the
+        //                       view block in the pool and this line of attack is
+        //                       closed - go back to moving the copy POINT.
+        //   engWideOffK       - candidate K's byte offset (0 is the incumbent).
+        //   engWidePassK / engWideSeenK - how often K still passed, over how many
+        //                       scans since it first appeared. A RATE: every
+        //                       known offset ages each scan whether it reappears
+        //                       or not, so an offset that stops showing up decays
+        //                       instead of keeping a flattering total.
+        //
+        // THE TEST: any K>0 with PassK == SeenK while candidate 0 sits below it is
+        // an UNSHARED copy. Confirm it with mode 121/122/123, which force the copy
+        // to read candidate 1/2/3 - engVerifyFail should collapse and the fallback
+        // frames go with it. NOTHING ADOPTS AUTOMATICALLY: a mechanism that
+        // relocated the address on its own measurement would be the fourth moving
+        // yardstick this campaign has had to retire.
+        // ===================================================================
+        // ===================================================================
+        // 26268 THE ANGLE, and it is the number that decides the whole question.
+        //
+        // 26267's mode-0 control closed the offset line for good: engWideBytes 240
+        // says the engine's constant buffer is a DEDICATED 240-byte resource, not
+        // a 64 KB pool - engSrcNum 4096 was D3D11's "whole buffer" sentinel and I
+        // read it as a real range. So engWideNMax 1 is EXHAUSTIVE: there is one
+        // view block in that resource, at byte 0, and nowhere to move to.
+        //
+        // WHICH LEAVES THE HOLE EVERY GATE SO FAR IS BLIND TO. All of them - the
+        // locator's eight and the shader's three - test that the block is a rigid
+        // rotation. A worldView matrix whose world part is a pure rotation about a
+        // pivot near the camera IS a rigid rotation, and it is the wrong one.
+        // First-person weapon fire is exactly that geometry: arms and weapon
+        // rotating hard about a pivot centimetres from the eye, near-zero
+        // translation. Our depth then lands at arbitrary screen positions in the
+        // ENGINE'S volume buffer, its stencil volumes test against those texels,
+        // and the soldier's shadow resolves onto them - random pieces of shadow
+        // over random parts of the view, only while firing.
+        //
+        //   engVerRotMaxDeg < ~5   -> every copied basis really is a view
+        //                             rotation. The hypothesis is DEAD and the
+        //                             first-person artifact is something else -
+        //                             say so and look elsewhere.
+        //   engVerRotMaxDeg > ~20  -> CONFIRMED, and engVerRotOver20 says on how
+        //                             many frames of engVerRotSamples. Those are
+        //                             the frames mode 0's agreement bound now
+        //                             refuses; 124 disables it for the A/B.
+        //
+        // The reference is the CPU's own view rotation, stashed AT THE COPY, so it
+        // is one frame off the bytes it judges - a few degrees on a fast flick
+        // against tens for recoil. It is a COARSE reference and that is legitimate
+        // precisely where a fine one is not: campaign 37 retired the composite as
+        // a yardstick for PRECISION, and over-generalised that into never
+        // comparing at all. The historic path cannot certify the engine view. It
+        // can refuse a basis that is not a view.
+        // ===================================================================
+        out.push_back(kvf("engVerRotDeg", RenderIntegration::g_svs_eng_ver_rot_deg));
+        out.push_back(kvf("engVerRotMaxDeg", RenderIntegration::g_svs_eng_ver_rot_max_deg));
+        out.push_back(kv("engVerRotOver20", RenderIntegration::g_svs_eng_ver_rot_over20));
+        out.push_back(kv("engVerRotSamples", RenderIntegration::g_svs_eng_ver_rot_samples));
+        // 26271 THE MEAN AND THE UNDER-ONE-DEGREE COUNT. engVerRotMaxDeg is a
+        // worst-of and says nothing about the typical sample. If engVerRotUnder1
+        // is most of engVerRotSamples, the engine's buffer at the seam carries
+        // the rotation the CPU ALREADY HAD - the GPU copy is a no-op, and 95%
+        // armed with no visible change is explained. The camera half of 26271 is
+        // then where the error actually lives.
+        out.push_back(kvf("engVerRotMeanDeg", RenderIntegration::g_svs_eng_ver_rot_samples
+            ? static_cast<float>(RenderIntegration::g_svs_eng_ver_rot_sum /
+                                 static_cast<double>(RenderIntegration::g_svs_eng_ver_rot_samples))
+            : -1.0f));
+        out.push_back(kv("engVerRotUnder1", RenderIntegration::g_svs_eng_ver_rot_under1));
+        out.push_back(kv("engArmInjFrames", RenderIntegration::g_svs_eng_arm_inj_frames));
+        // ===================================================================
+        // 26269 THREE CANDIDATES. engCandCopiesK is how often slot K was filled;
+        // slot 0 is the SEAM copy and owns engVerify*/engCopyAge*/engWide*, slots
+        // 1..2 are opportunistic sweep samples at other draws in the same frame.
+        //
+        // The verdict is still engVerifyFail, which measures SLOT 0 only - so
+        // under this build engVerifyFail staying near 100% in first person is
+        // EXPECTED and no longer fatal: it says the seam's sample is bad, not
+        // that the feature refused. What says the feature worked is the artifact
+        // going away while mode 87 remains the only thing that removed it before.
+        //
+        // If it does NOT go away, the next question is sharp rather than open:
+        // no draw the sweep lands on carries a plain view either, and the capture
+        // to take is "which draw writes byte 64 of that 240-byte resource in
+        // first person" - a targeted search, not a hunt.
+        // ===================================================================
+        for (int khc_i = 0; khc_i < RenderIntegration::KH_SVS_ENG_CAND; ++khc_i) {
+            char khc_nm[24];
+            sprintf_s(khc_nm, "engCandCopies%d", khc_i);
+            out.push_back(kv(khc_nm, RenderIntegration::g_svs_eng_cand_copies[khc_i]));
+        }
+        out.push_back(kvf("engAgreeNdcBar", RenderIntegration::KH_SVS_ENG_AGREE_NDC));
+        out.push_back(kv("engWideScans", RenderIntegration::g_svs_eng_wide_scans));
+        out.push_back(kv("engWideBusy", RenderIntegration::g_svs_eng_wide_busy));
+        out.push_back(kv("engWideBytes", static_cast<uint64_t>(RenderIntegration::g_svs_eng_wide_bytes)));
+        out.push_back(kv("engWideN", static_cast<uint64_t>(RenderIntegration::g_svs_eng_wide_n)));
+        out.push_back(kv("engWideNMax", static_cast<uint64_t>(RenderIntegration::g_svs_eng_wide_n_max)));
+        out.push_back(kv("engWidePick", static_cast<uint64_t>(RenderIntegration::kh_svs_eng_cand_pick())));
+        for (int khw_i = 0; khw_i < RenderIntegration::KH_SVS_ENG_WIDE_CAND; ++khw_i) {
+            char khw_nm[24];
+            sprintf_s(khw_nm, "engWideOff%d", khw_i);
+            out.push_back(kv(khw_nm, static_cast<uint64_t>(
+                RenderIntegration::g_svs_eng_wide_off[khw_i] < 0 ? 0xFFFFFFFFull
+                    : static_cast<uint64_t>(RenderIntegration::g_svs_eng_wide_off[khw_i]))));
+            sprintf_s(khw_nm, "engWidePass%d", khw_i);
+            out.push_back(kv(khw_nm, RenderIntegration::g_svs_eng_wide_pass[khw_i]));
+            sprintf_s(khw_nm, "engWideSeen%d", khw_i);
+            out.push_back(kv(khw_nm, RenderIntegration::g_svs_eng_wide_seen[khw_i]));
+        }
+        // 26265 STATEBACKUP'S CONSTANT-BUFFER OFFSETS (ledger above the struct).
+        // 26266 SETTLED, AND THE ANSWER IS THAT IT NEVER MATTERED. engSbCbOffMax
+        // read 0 across four field sessions - including three running the 1.1
+        // path with engSbCbOffRestores 2556 / 2444 / 1580 - so the engine never
+        // binds a VS constant buffer at a non-zero firstConstant anywhere we
+        // capture, and the pre-26265 plain restore was never corrupting engine
+        // state. The 1.1 path is kept because it is correct rather than merely
+        // harmless, and mode 120 can be deleted in the next build that touches
+        // this struct. Recorded here rather than quietly dropped: a concern
+        // raised and then measured to zero is a result.
+        out.push_back(kv("engSbCbOffRestores", RenderIntegration::g_sb_cb_off_restores));
+        out.push_back(kv("engSbCbPlainRestores", RenderIntegration::g_sb_cb_plain_restores));
+        out.push_back(kv("engSbCbOffMax",
+            static_cast<uint64_t>(RenderIntegration::g_sb_cb_off_max)));
+        // 26263 WHAT ACTUALLY ARRIVED IN THE STAGING BUFFERS. The fingerprint was
+        // transcribed literally and run offline against capture 5's b2: it
+        // matches at byte 0 and rejects every other offset for the right reason.
+        // So engFpHits 0 says the BYTES are not that buffer's, and no further
+        // reasoning can separate "wrong buffer" from "right buffer, wrong bytes".
+        //   engSlNBytes - the staged size of VS slot N (26265: six slots; b2 and
+        //     b3 were an assumption and 26259's defect 2 was the last time one
+        //     of those cost a session).
+        //   engSlNF0 / engSlNF16 - the first float of row 0 and of row 4 of the
+        //     staged WINDOW. Retained as raw evidence about which buffer is
+        //     there; note they describe window offset 0 only, while the
+        //     fingerprint scans every float4 offset, so a zero here does NOT
+        //     mean the block is absent.
+        for (int khe_i = 0; khe_i < RenderIntegration::KH_SVS_ENG_SLOTS; ++khe_i) {
+            char khe_nm[24];
+            sprintf_s(khe_nm, "engSl%dBytes", khe_i);
+            out.push_back(kv(khe_nm, static_cast<uint64_t>(RenderIntegration::g_svs_eng_sl_bytes[khe_i])));
+            sprintf_s(khe_nm, "engSl%dF0", khe_i);
+            out.push_back(kvf(khe_nm, RenderIntegration::g_svs_eng_sl_f0[khe_i]));
+            sprintf_s(khe_nm, "engSl%dF16", khe_i);
+            out.push_back(kvf(khe_nm, RenderIntegration::g_svs_eng_sl_f16[khe_i]));
+        }
+        // ===================================================================
+        // 26265 engFpFail NAMES THE GATE, AND EACH GATE PUBLISHES ITS RESIDUAL
+        // NEXT TO ITS OWN BAR.
+        //
+        // The 26263 lane could only ever read 1 or 2 while its ledger in
+        // rendering_integration.hpp promised four stages - so a miss could not
+        // say WHICH test refused, which is the whole reason the lane existed.
+        // Method note 2: an instrument that cannot be false is not an
+        // instrument, and a bound that lives only in a chat message is not a
+        // bound. The bars are constants in the code and printed here.
+        //
+        //   1 nothing examined      2 row length      3 orthogonality
+        //   4 .w column non-zero    5 row 7           6 rotation is IDENTITY
+        //   7 determinant not +1    8 every gate passed
+        //
+        // Stage 6 deserves a note: an identity 4x4 satisfies every other gate
+        // trivially, and that is exactly what the 26262 offline _find_basis
+        // latched onto before publishing a 166 deg verdict. A run that parks at
+        // 6 is finding identity world matrices, not view blocks.
+        // ===================================================================
+        out.push_back(kv("engFpFail", static_cast<uint64_t>(RenderIntegration::g_svs_eng_fp_fail)));
+        out.push_back(kv("engFpSlot", static_cast<uint64_t>(
+            RenderIntegration::g_svs_eng_fp_slot < 0 ? 0xFFFFFFFFull
+                : static_cast<uint64_t>(RenderIntegration::g_svs_eng_fp_slot))));
+        out.push_back(kvf("engFpLen", RenderIntegration::g_svs_eng_fp_len));      // bar 0.01
+        out.push_back(kvf("engFpLenBar", 0.01f));
+        out.push_back(kvf("engFpOrth", RenderIntegration::g_svs_eng_fp_orth));    // bar 0.02
+        out.push_back(kvf("engFpOrthBar", 0.02f));
+        out.push_back(kvf("engFpWcol", RenderIntegration::g_svs_eng_fp_wcol));    // bar 1e-4
+        out.push_back(kvf("engFpWcolBar", 1.0e-4f));
+        out.push_back(kvf("engFpRow7", RenderIntegration::g_svs_eng_fp_row7));    // bar 1e-4
+        out.push_back(kvf("engFpRow7Bar", 1.0e-4f));
+        out.push_back(kvf("engFpDet", RenderIntegration::g_svs_eng_fp_det));      // want +1
+        out.push_back(kvf("engFpTrace", RenderIntegration::g_svs_eng_fp_trace));  // 3 = identity
+        out.push_back(kv("engIdentSeen", RenderIntegration::g_svs_eng_ident_seen));
+        out.push_back(kv("svVolAgeLast", RenderIntegration::g_svs_vol_age_last));
+        out.push_back(kv("svVolAgeMax", RenderIntegration::g_svs_vol_age_max));
+        out.push_back(kv("svOmRtvMax", static_cast<uint64_t>(RenderIntegration::g_svs_om_rtv_max)));
+        out.push_back(kv("svVolArmMax", static_cast<uint64_t>(RenderIntegration::g_svs_vol_arm_max)));
+        // 26195 DARK-WINDOW RE-SEED CENSUS (black-mesh cold start).
+        // blkDarkReseedRatioMin/Max is THE number: it says whether the
+        // 26159 refusal bar should be absolute (as now) or relative to
+        // the pending it protects.
+        out.push_back(kv("blkDarkReseeds", RenderIntegration::g_blk_dark_reseeds));
+        out.push_back(kvf("blkDarkReseedSl", RenderIntegration::g_blk_dark_reseed_sl));
+        out.push_back(kvf("blkDarkReseedSlMin", RenderIntegration::g_blk_dark_reseed_sl_min));
+        out.push_back(kvf("blkDarkReseedSlMax", RenderIntegration::g_blk_dark_reseed_sl_max));
+        out.push_back(kvf("blkDarkReseedSlMean",
+            RenderIntegration::g_blk_dark_reseeds > 0
+                ? static_cast<float>(RenderIntegration::g_blk_dark_reseed_sl_sum /
+                                     static_cast<double>(RenderIntegration::g_blk_dark_reseeds))
+                : -1.0f));
+        out.push_back(kvf("blkDarkReseedPendSl", RenderIntegration::g_blk_dark_reseed_pend_sl));
+        out.push_back(kvf("blkDarkStdSl", RenderIntegration::g_blk_dark_std_sl));
+        out.push_back(kvf("blkDarkReseedRatioMin", RenderIntegration::g_blk_dark_reseed_ratio_min));
+        out.push_back(kvf("blkDarkReseedRatioMax", RenderIntegration::g_blk_dark_reseed_ratio_max));
+        out.push_back(kvf("blkDarkFirstS", RenderIntegration::g_blk_dark_first_s));
+        out.push_back(kvf("blkDarkLastS", RenderIntegration::g_blk_dark_last_s));
+        out.push_back(kvf("blkDarkSpanS",
+            RenderIntegration::g_blk_dark_first_s >= 0.0f
+                ? RenderIntegration::g_blk_dark_last_s - RenderIntegration::g_blk_dark_first_s
+                : -1.0f));
+        {
+            const float* sk = RenderIntegration::g_sky_probe.nb;
+            // row 17: THE RULER (expect 0.25 / 0.75 / 3.5)
+            out.push_back(kvf("atmSkyR17x", sk[68]));
+            out.push_back(kvf("atmSkyR17y", sk[69]));
+            out.push_back(kvf("atmSkyR17z", sk[70]));
+            out.push_back(kvf("atmSkyR17w", sk[71]));
+            // row 14: THE TARGET - expected (refAlt m, density, heightDecay, ?)
+            out.push_back(kvf("atmSkyR14x", sk[56]));
+            out.push_back(kvf("atmSkyR14y", sk[57]));
+            out.push_back(kvf("atmSkyR14z", sk[58]));
+            out.push_back(kvf("atmSkyR14w", sk[59]));
+            // rows 15/16: the extinction triples named in the sky anchor -
+            // they bracket row 14 and make a mis-based window obvious
+            out.push_back(kvf("atmSkyR15x", sk[60]));
+            out.push_back(kvf("atmSkyR15y", sk[61]));
+            out.push_back(kvf("atmSkyR15z", sk[62]));
+            out.push_back(kvf("atmSkyR16x", sk[64]));
+            out.push_back(kvf("atmSkyR16y", sk[65]));
+            out.push_back(kvf("atmSkyR16z", sk[66]));
+            // row 13 ClearColor, row 7 the SECOND fog color the engine
+            // composites through the row-17 gradient (fogTgtR/G/B already
+            // publish row 1 = FogColor.rgb; .w joins them here)
+            out.push_back(kvf("atmSkyR13x", sk[52]));
+            out.push_back(kvf("atmSkyR13y", sk[53]));
+            out.push_back(kvf("atmSkyR13z", sk[54]));
+            out.push_back(kvf("atmSkyR13w", sk[55]));
+            out.push_back(kvf("atmSkyR7x", sk[28]));
+            out.push_back(kvf("atmSkyR7y", sk[29]));
+            out.push_back(kvf("atmSkyR7z", sk[30]));
+            out.push_back(kvf("atmSkyR7w", sk[31]));
+            out.push_back(kvf("atmSkyR1w", sk[7]));
+            out.push_back(kvf("atmSkyR0x", sk[0]));
+            out.push_back(kvf("atmSkyR0y", sk[1]));
+            out.push_back(kvf("atmSkyR0z", sk[2]));
+        }
+        {
+            const float* bl = RenderIntegration::g_light_probe.nb;
+            // row 10: x = height decay (the DECAY ANCHOR the locator locks
+            // on, hence lightLocMeta 40), y = density (already fogEngine.x)
+            out.push_back(kvf("atmBlkR10x", bl[40]));
+            out.push_back(kvf("atmBlkR10y", bl[41]));
+            // row 11: x is the engine's FOG MODE selector in the shader
+            // switch (1/3 = layered model, 2 = the variant, else no fog)
+            out.push_back(kvf("atmBlkR11x", bl[44]));
+            out.push_back(kvf("atmBlkR11y", bl[45]));
+            out.push_back(kvf("atmBlkR11z", bl[46]));
+            out.push_back(kvf("atmBlkR11w", bl[47]));
+            // row 12: x = fog end (fogEngine.y), y = inverse range
+            // (fogEngine.z), z = LAYER ALTITUDE, w = below-layer extinction.
+            // z and w have never been read.
+            out.push_back(kvf("atmBlkR12x", bl[48]));
+            out.push_back(kvf("atmBlkR12y", bl[49]));
+            out.push_back(kvf("atmBlkR12z", bl[50]));
+            out.push_back(kvf("atmBlkR12w", bl[51]));
+            // row 13: y is the layer-altitude OFFSET the shader adds to
+            // row 12 z before the branch (layerY = R12z + R13y)
+            out.push_back(kvf("atmBlkR13x", bl[52]));
+            out.push_back(kvf("atmBlkR13y", bl[53]));
+            out.push_back(kvf("atmBlkR13z", bl[54]));
+            out.push_back(kvf("atmBlkR13w", bl[55]));
+        }
         out.push_back(kv("skyBindReads", RenderIntegration::g_skybind_reads));
         out.push_back(kv("skyBindHits", RenderIntegration::g_skybind_hits));
         out.push_back(kv("skyBindMinBw", static_cast<uint64_t>(RenderIntegration::g_skybind_minbw)));
@@ -7555,6 +10244,211 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("sunJumpRefused", RenderIntegration::g_sun_jump_refused));
         out.push_back(kv("sunJumpStreamRefused", RenderIntegration::g_sun_jump_stream_refused));
         out.push_back(kv("viewRelockForced", RenderIntegration::g_view_relock_forced));
+        // 26155 LOCK-DEATH FORENSICS (ledger at g_view_drop_forced). Two paths
+        // can clear view_src_valid and only one of them was ever counted, so a
+        // lock that died on the health path was indistinguishable in a dump from
+        // a lock that was never taken. viewRelockErMin is the discriminator for
+        // 2A: it scores the REMEMBERED source against the bridge for as long as
+        // the lock stays dead. Settling back under the guard bar means the drop
+        // ate a correct lock; staying high means the drop was right and the
+        // defect is upstream. These are STATE, not census - they survive the
+        // getRenderStats arming call on purpose, because a cold-fault dump is
+        // always armed after the death.
+        out.push_back(kv("viewDropForced", RenderIntegration::g_view_drop_forced));
+        out.push_back(kv("viewDropHealth", RenderIntegration::g_view_drop_health));
+        out.push_back(kv("viewDropPath", static_cast<uint64_t>(RenderIntegration::g_view_drop_path)));
+        // (age_s is declared further down this function; the drop stamp is
+        //  aged inline rather than moving a lane out of its family.)
+        out.push_back(kvf("viewDropAgeS",
+            RenderIntegration::g_view_drop_ms == 0 ? -1.0f :
+                static_cast<float>(RenderIntegration::steady_now_ms() -
+                                   RenderIntegration::g_view_drop_ms) * 0.001f));
+        out.push_back(kvf("viewDropRd", RenderIntegration::g_view_drop_rd));
+        out.push_back(kvf("viewDropMd", RenderIntegration::g_view_drop_md));
+        out.push_back(kvf("viewDropBar", RenderIntegration::g_view_drop_bar));
+        out.push_back(kvf("viewRelockErMin", RenderIntegration::g_view_relock_er_min));
+        out.push_back(kvf("viewRelockTmagMin", RenderIntegration::g_view_relock_tmag_min));
+        out.push_back(kv("viewRelockProbes", RenderIntegration::g_view_relock_probes));
+        // 26156 (ledger at g_view_lock_res_pre). viewLockSameSlot is the whole
+        // question: 1 = the ring came back to the identity the guard dropped,
+        // so the guard ate a correct lock; 2 = it came back somewhere else, so
+        // the guard was right and the defect is purely how long re-acquisition
+        // takes. viewLockDeadS is that latency - dump8 implies ~42 s.
+        out.push_back(kv("viewLockSameSlot", static_cast<uint64_t>(RenderIntegration::g_view_lock_same_slot)));
+        out.push_back(kv("viewLockAcqPath", static_cast<uint64_t>(RenderIntegration::g_view_lock_acq_path)));
+        out.push_back(kvf("viewLockDeadS", RenderIntegration::g_view_lock_dead_s));
+        out.push_back(kvf("viewLockDeadMaxS", RenderIntegration::g_view_lock_dead_max_s));
+        // 26157 (ledger at g_view_ring_best_min). 2A is now scoped to how long
+        // re-acquisition takes. ringBestMin says whether the correct candidate
+        // was even available during the dead window; ringConfirmHolds and
+        // ringConfirmChurn say whether the two-boundary confirm gate is what
+        // held it out, and churn is the one that can hold it out without bound.
+        out.push_back(kvf("viewRingBestMin", RenderIntegration::g_view_ring_best_min));
+        out.push_back(kv("viewRingConfirmHolds", RenderIntegration::g_view_ring_confirm_holds));
+        out.push_back(kv("viewRingConfirmChurn", RenderIntegration::g_view_ring_confirm_churn));
+        out.push_back(kv("viewRingTmagRejects", RenderIntegration::g_view_ring_tmag_rejects));
+        out.push_back(kvf("viewRingBestTmag", RenderIntegration::g_view_ring_best_tmag));   // 26161
+        // 26166 COLD-START REPAIRS (ledger at g_view_drop_hyst_holds). Read
+        // these three together on any session that used to fault:
+        //   dropHystHolds  > 0 and viewDropForced 0  -> the hair-trigger
+        //       drop that dump99 measured (0.0217 against a 0.02 bar) is
+        //       being refused and the cold fault should not appear at all
+        //   relockWideTakes > 0                      -> a drop still
+        //       happened and the remembered source was reclaimed at the bar
+        //       its own drop was measured against; viewLockDeadS says how
+        //       fast (dump99 baseline: 6.387 s via the ring, path 3)
+        //   dropHystForced > 0                       -> the streak safety
+        //       valve fired: a small disagreement that would not clear the
+        //       hysteresis stood for 4x the streak length and dropped anyway
+        // setRenderDebug 23 reverts the hysteresis, 38 the recovery bar.
+        out.push_back(kv("dropHystHolds", RenderIntegration::g_view_drop_hyst_holds));
+        out.push_back(kv("dropHystForced", RenderIntegration::g_view_drop_hyst_forced));
+        out.push_back(kvf("dropHystRd", RenderIntegration::g_view_drop_hyst_rd));
+        out.push_back(kvf("dropHystBar", RenderIntegration::g_view_drop_hyst_bar));
+        out.push_back(kvf("dropHystMaxMs", RenderIntegration::g_view_drop_hyst_max_ms));
+        out.push_back(kv("relockWideArms", RenderIntegration::g_view_relock_wide_arms));
+        out.push_back(kv("relockWideTakes", RenderIntegration::g_view_relock_wide_takes));
+        out.push_back(kvf("relockWideEr", RenderIntegration::g_view_relock_wide_er));
+        // 26166 PUBLISH CENSUS (ledger at g_pub_slot_hits_f). THE FLICKER
+        // QUESTION, and the only pair that answers it. A "late" cycle is one
+        // whose first accepted publish landed past draw 60 - the empty band
+        // in fireFirstD's bimodal split (dump99: 1-18 or 107-160, nothing
+        // between, on 512 of 512 frames).
+        //   pubLateDry >> pubLateRejected  -> the engine does not upload the
+        //       view CB until then. The arm CANNOT be moved, the flicker is
+        //       structural, single-paint stays, and the campaign stops.
+        //   pubLateRejected >> pubLateDry  -> uploads were arriving and the
+        //       publish path refused them. pubRejTmag / pubRejFamily /
+        //       pubRejCold name which filter; pubRejFirstD says how early the
+        //       refused traffic starts. The fix is then in shadow_view_scan
+        //       and it is small.
+        // Both are per-CYCLE counts over the same window as flushes/topo*.
+        // Nothing in this build reads any of them.
+        out.push_back(kv("pubLateFrames", static_cast<uint64_t>(RenderIntegration::g_pub_late_frames)));
+        out.push_back(kv("pubLateDry", static_cast<uint64_t>(RenderIntegration::g_pub_late_dry)));
+        out.push_back(kv("pubLateRejected", static_cast<uint64_t>(RenderIntegration::g_pub_late_rejected)));
+        out.push_back(kv("pubEarlyFrames", static_cast<uint64_t>(RenderIntegration::g_pub_early_frames)));
+        out.push_back(kv("pubAccepts", RenderIntegration::g_pub_accepts));
+        out.push_back(kv("pubRejTmag", RenderIntegration::g_pub_rej_tmag));
+        out.push_back(kv("pubRejFamily", RenderIntegration::g_pub_rej_family));
+        out.push_back(kv("pubRejCold", RenderIntegration::g_pub_rej_cold));
+        out.push_back(kv("pubBindAccepts", RenderIntegration::g_pub_bind_accepts));
+        out.push_back(kvf("pubFirstD", RenderIntegration::g_pub_first_d_pub));
+        out.push_back(kvf("pubRejFirstD", RenderIntegration::g_pub_rej_first_d_pub));
+        out.push_back(kv("pubSlotHits", static_cast<uint64_t>(RenderIntegration::g_pub_slot_hits_pub)));
+        out.push_back(kv("pubPreAccept", static_cast<uint64_t>(RenderIntegration::g_pub_hits_pre_accept_pub)));
+        // 26167 ALT-OFFSET CENSUS (ledger at g_pub_alt_first_d). THE remaining
+        // question, and the last one task 1 has. Read pubAltLateEarly against
+        // pubLateFrames:
+        //   pubAltLateEarly ~= pubLateFrames -> on the late cycles a view was
+        //       already present at ANOTHER offset inside the read window. The
+        //       arm can move; widen the publish key to that offset and the
+        //       flicker goes with it. pubAltOff names the offset.
+        //   pubAltLateEarly 0                -> no view exists anywhere in the
+        //       buffer by then. The arm cannot be moved, single paint is the
+        //       floor, and task 1 is CLOSED - stop attacking the flicker.
+        // pubAltLateAny is the weaker form (alt merely beat the accept).
+        out.push_back(kv("pubAltLateEarly", static_cast<uint64_t>(RenderIntegration::g_pub_alt_late_early)));
+        out.push_back(kv("pubAltLateAny", static_cast<uint64_t>(RenderIntegration::g_pub_alt_late_any)));
+        out.push_back(kv("pubAltFrames", static_cast<uint64_t>(RenderIntegration::g_pub_alt_frames)));
+        out.push_back(kv("pubAltHits", RenderIntegration::g_pub_alt_hits));
+        out.push_back(kvf("pubAltFirstD", RenderIntegration::g_pub_alt_first_d_pub));
+        out.push_back(kv("pubAltOff", static_cast<uint64_t>(RenderIntegration::g_pub_alt_off_pub)));
+        out.push_back(kvf("pubAltEr", RenderIntegration::g_pub_alt_er));
+        // 26168 HARVEST CENSUS + RUNNING ARGMIN (ledger at g_ring_best_valid).
+        // Task 2 at last, and it is the harvest the campaign-27 handoff named.
+        //   ringAdmits / ringHunts -> candidates admitted per hunt. dump101
+        //       implies ~2518 shaped a cycle against SIXTEEN ring slots, and
+        //       the ring is wiped at the injection, which lands BEFORE the
+        //       view upload on every late cycle of every session on record.
+        //   ringBestTakes  -> hunts where the running-argmin slot beat the
+        //       ring. Large means the 16-slot window was missing the view,
+        //       which is the whole claim.
+        //   ringBestLocks  -> locks actually taken through the slot. Read
+        //       against viewLockDeadS: if this is nonzero and deadS collapses
+        //       from 6-31 s to under a second, the cold start is fixed.
+        //   ringDryHunts   -> hunts that found an EMPTY ring.
+        // FALSIFIED IF ringBestTakes stays 0 while viewLockDeadS stays high.
+        // setRenderDebug 41 reverts to ring-only for the A/B.
+        // 26169 MOTION-GATED CARRY (ledger at KH_CARRY_MAX_PX). The flicker,
+        // last quadrant. Task 1 closed the ARM, not the paint count.
+        //   fireCarryPaints > 0 and the operator stops seeing the blink ->
+        //       fixed; the 26163 cure is back with its defect gated out.
+        //   fireCarryPaints > 0 and the blink SURVIVES -> the carry never
+        //       reaches the reader and the whole carry family is dead.
+        //   fireCarryPxMax should sit at or under 1.0. If the operator sees a
+        //       shadow thicken when they stop moving, lower KH_CARRY_MAX_PX.
+        //   carrySkipsMotion / fireCarryPxSkip say how often and by how much
+        //       the gate stood the carry down. Large is expected under motion.
+        // setRenderDebug 42 = carry OFF (26165 single paint, verbatim).
+        // 26171: count what you saw against what the model predicts. If these
+        // agree, the flicker is structural at this rate and the campaign is
+        // done with it. If you see many more blinks than flickerTransitions,
+        // there is a second mechanism and every closed lever reopens.
+        // 26172 BRIDGE ARM: castBridgeFirst is the number of cycles that fired
+        // WITHOUT waiting for a publish - i.e. the late frames, made early.
+        // flickerTransitions should read 0.
+        // 26173 RECEIVE BAND CENSUS (ledger at g_band_pick). Run the fault:
+        // Zeus camera above the box, steep look-down, MOVE. Then read
+        //   bandPickChanges / bandPickCycles -> winner instability. Large and
+        //       motion-correlated = the walk is flipping slots. That is it.
+        //   bandPickNone   -> cycles the box left every sealed extent.
+        //   bandPickAgeMaxMs -> worst seal age actually consumed. If changes
+        //       are ~0 and this is large, the fault is staleness inside ONE
+        //       slot, not selection.
+        out.push_back(kv("bandPickChanges", RenderIntegration::g_band_pick_changes));
+        out.push_back(kv("bandPickNone", RenderIntegration::g_band_pick_none));
+        out.push_back(kv("bandPickNoneRuns", RenderIntegration::g_band_pick_none_runs));
+        // 26176: the winner had a PROVISIONAL vcol (sm from this resolve, view
+        // from a publish up to 50 ms old). bandPendRuns against your flicker
+        // count is the field match; bandPendAgeMaxMs is how stale it got.
+        // 26177: how each seal got its vcol. bandSealPending should be ~0;
+        // anything there is a seal still open to a cross-frame completion.
+        out.push_back(kv("bandSealSame", RenderIntegration::g_band_seal_same));
+        out.push_back(kv("bandSealBridge", RenderIntegration::g_band_seal_bridge));
+        out.push_back(kv("bandSealPending", RenderIntegration::g_band_seal_pending));
+        out.push_back(kv("bandPendConsumed", RenderIntegration::g_band_pend_consumed));
+        out.push_back(kv("bandPendRuns", RenderIntegration::g_band_pend_runs));
+        out.push_back(kv("bandPendMax", static_cast<uint64_t>(RenderIntegration::g_band_pend_max)));
+        out.push_back(kvf("bandPendAgeMs", RenderIntegration::g_band_pend_age_ms));
+        out.push_back(kvf("bandPendAgeMaxMs", RenderIntegration::g_band_pend_age_max_ms));
+        // 26179: the seal COMPLETION census. bandPendConsumed flags the band at
+        // consumption, which is BEFORE the overwrite it is blamed for; these
+        // lanes measure the overwrite itself. bandCompleteCross is a completion
+        // of a seal captured before this cycle's boundary - frame-N sm paired
+        // with a frame-N+1 view, the offset. PREDICTION: bandCompleteCross
+        // tracks bandPendConsumed one for one. If it reads ~0 the model is
+        // wrong and setRenderDebug 45 must not be promoted.
+        out.push_back(kv("bandCompleteCross", RenderIntegration::g_band_complete_cross));
+        out.push_back(kv("bandCompleteSame", RenderIntegration::g_band_complete_same));
+        out.push_back(kvf("bandCompleteSkewDeg", RenderIntegration::g_band_complete_skew_deg));
+        out.push_back(kvf("bandCompleteSkewMaxDeg", RenderIntegration::g_band_complete_skew_max));
+        out.push_back(kvf("bandCompleteSkewM", RenderIntegration::g_band_complete_skew_m));
+        out.push_back(kvf("bandCompleteSkewMaxM", RenderIntegration::g_band_complete_skew_max_m));
+        out.push_back(kv("bandPickNoneMax", static_cast<uint64_t>(RenderIntegration::g_band_pick_none_max)));
+        out.push_back(kv("bandPickCycles", RenderIntegration::g_band_pick_cycles));
+        out.push_back(kv("bandPickEvals", RenderIntegration::g_band_pick_evals));
+        out.push_back(kv("bandPick", static_cast<uint64_t>(RenderIntegration::g_band_pick_prev)));
+        out.push_back(kvf("bandPickAgeMs", RenderIntegration::g_band_pick_age_ms));
+        out.push_back(kvf("bandPickAgeMaxMs", RenderIntegration::g_band_pick_age_max_ms));
+        out.push_back(kvf("bandPickVz", RenderIntegration::g_band_pick_vz));
+        out.push_back(kv("castBridgeArms", RenderIntegration::g_cast_bridge_arms));
+        out.push_back(kv("castBridgeFirst", RenderIntegration::g_cast_bridge_first));
+        out.push_back(kv("flickerTransitions", RenderIntegration::g_fire_flicker_transitions));
+        out.push_back(kv("paintPath2Runs", RenderIntegration::g_fire_path2_runs));
+        out.push_back(kv("carrySkipsMotion", RenderIntegration::g_fire_carry_skips_motion));
+        out.push_back(kv("carrySkipsGauge", RenderIntegration::g_fire_carry_skips_gauge));
+        out.push_back(kvf("fireCarryPx", RenderIntegration::g_fire_carry_px));
+        out.push_back(kvf("fireCarryPxMax", RenderIntegration::g_fire_carry_px_max));
+        out.push_back(kvf("fireCarryPxSkip", RenderIntegration::g_fire_carry_px_skip));
+        out.push_back(kv("ringAdmits", RenderIntegration::g_ring_admits));
+        out.push_back(kv("ringHunts", RenderIntegration::g_ring_hunts));
+        out.push_back(kv("ringDryHunts", RenderIntegration::g_ring_dry_hunts));
+        out.push_back(kv("ringHuntNMax", static_cast<uint64_t>(RenderIntegration::g_ring_hunt_n_max)));
+        out.push_back(kv("ringBestTakes", RenderIntegration::g_ring_best_takes));
+        out.push_back(kv("ringBestLocks", RenderIntegration::g_ring_best_locks));
+        out.push_back(kvf("ringBestTakeEr", RenderIntegration::g_ring_best_take_er));
+        out.push_back(kv("viewBindInjSkips", RenderIntegration::g_viewbind_inj_skips));
         out.push_back(kv("lockWipes", RenderIntegration::g_lock_wipes));
         out.push_back(kv("stageRejExp", static_cast<uint64_t>(RenderIntegration::g_stage_rej_exp)));
         out.push_back(kv("cascBindScans", RenderIntegration::g_cascbind_scans));
@@ -7568,6 +10462,13 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("castRtHalfAccepts", RenderIntegration::g_rt_half_accepts));
         out.push_back(kv("sweepGapResets", RenderIntegration::g_sweep_gap_resets));
         out.push_back(kv("injGuardOff", RenderIntegration::g_inj_guard_off));
+        // 26221 TWIN-PARITY GAUGE. injFxDimBaseline counts injection-edition
+        // mesh draws that took fxMeta.zw from the unconditional fill alone -
+        // i.e. exactly the draws that before 26221 shipped a zero clamp bound
+        // and silently neutralised every mask read. It is a census, not a
+        // fault: any value is fine now, and it should track injGuardOff on a
+        // session with no far-arb / farkeep / nearz traffic.
+        out.push_back(kv("injFxDimBaseline", RenderIntegration::g_inj_fx_dim_baseline));
         {   // OCCLUSION-GUARD OVERHAUL diagnostics + config echo
             out.push_back(kv("snapSerial", RenderIntegration::g_snap_serial));
             out.push_back(kv("snapFails", RenderIntegration::g_snap_fails));
@@ -7638,6 +10539,41 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("nearzGapDraws", RenderIntegration::g_nearz_gap_draws));
         out.push_back(kvf("nearzNearEst", RenderIntegration::g_nearz_last_near));
         out.push_back(kvf("nearzGapFloor", RenderIntegration::g_nearz_last_floor));
+        // 26185 PROJECTION-PAIR CENSUS (full ledger at g_proj_census). One
+        // cycle's DISTINCT encode spaces, most-seen first. Compare each
+        // projPairNFar against injDpM22/injDpM32 in the same dump: the pair
+        // our injection encodes with is the one whose near/far match those,
+        // and any other pair in the table is content being written into the
+        // same depth buffer through a different mapping. With a shared near
+        // of 0.07 a far of 195734 writes a SMALLER value than a far of 2531
+        // at the same distance, so which content wins stops being a
+        // function of distance at all. projPairEvicts > 0 means there were
+        // more than four and the table is not the whole picture.
+        {
+            // Literal name table rather than snprintf: <cstdio> is not
+            // guaranteed in scope here and the lane names are a dump
+            // contract, so they are spelled out.
+            static const char* const khpc_names[8][5] = {
+                { "projPair0Near", "projPair0Far", "projPair0M22", "projPair0M32", "projPair0Hits" },
+                { "projPair1Near", "projPair1Far", "projPair1M22", "projPair1M32", "projPair1Hits" },
+                { "projPair2Near", "projPair2Far", "projPair2M22", "projPair2M32", "projPair2Hits" },
+                { "projPair3Near", "projPair3Far", "projPair3M22", "projPair3M32", "projPair3Hits" },
+                { "projPair4Near", "projPair4Far", "projPair4M22", "projPair4M32", "projPair4Hits" },
+                { "projPair5Near", "projPair5Far", "projPair5M22", "projPair5M32", "projPair5Hits" },
+                { "projPair6Near", "projPair6Far", "projPair6M22", "projPair6M32", "projPair6Hits" },
+                { "projPair7Near", "projPair7Far", "projPair7M22", "projPair7M32", "projPair7Hits" },
+            };
+
+            for (int khpc_i = 0; khpc_i < RenderIntegration::KH_PROJ_CENSUS_N && khpc_i < 8; ++khpc_i) {
+                const auto& khpc_p = RenderIntegration::g_proj_census_pub[khpc_i];
+                out.push_back(kvf(khpc_names[khpc_i][0], khpc_p.nearp));
+                out.push_back(kvf(khpc_names[khpc_i][1], khpc_p.farp));
+                out.push_back(kvf(khpc_names[khpc_i][2], khpc_p.m22));
+                out.push_back(kvf(khpc_names[khpc_i][3], khpc_p.m32));
+                out.push_back(kv(khpc_names[khpc_i][4], static_cast<uint64_t>(khpc_p.hits)));
+            }
+        }
+        out.push_back(kv("projPairEvicts", static_cast<uint64_t>(RenderIntegration::g_proj_census_evicts)));
         out.push_back(kvf("sliceSeenNear", RenderIntegration::g_slice_seen_near));
         out.push_back(kvf("sliceSeenFar", RenderIntegration::g_slice_seen_far));
         out.push_back(kvf("sliceSeenFarMin", RenderIntegration::g_slice_seen_far_min));
@@ -7661,6 +10597,140 @@ static game_value get_render_stats_sqf() {
         out.push_back(kvf("sunChurnMaxDeg", RenderIntegration::g_sun_churn_max_deg));
         out.push_back(kvf("camStepMaxM", RenderIntegration::g_cam_step_max));
         out.push_back(kvf("fireCamDeltaMaxM", RenderIntegration::g_fire_cam_delta_max));
+        // 26141 campaign-25 issues 1+2: the freeze epoch decomposed. The lane
+        // above is a POSITION magnitude and reads ~0 through any pure pitch
+        // rotation, which is why every previous 'the freeze is clean' verdict
+        // could not see the vertical axis. Read FreezePitchMaxDeg against
+        // FreezeYawMaxDeg: pitch alone means the latch is behind on the
+        // vertical axis specifically; both together mean the latch is simply
+        // late. fireRefreezes / fireRefreezeFails report dbg 36 uptake.
+        out.push_back(kvf("fireFreezeDyMaxM", RenderIntegration::g_fire_freeze_dy_max_m));
+        out.push_back(kvf("fireFreezePitchMaxDeg", RenderIntegration::g_fire_freeze_pitch_max_deg));
+        out.push_back(kvf("fireFreezeYawMaxDeg", RenderIntegration::g_fire_freeze_yaw_max_deg));
+        out.push_back(kvf("fireFreezeDyM", RenderIntegration::g_fire_freeze_dy_m));
+        out.push_back(kvf("fireFreezePitchDeg", RenderIntegration::g_fire_freeze_pitch_deg));
+        out.push_back(kvf("fireFreezeYawDeg", RenderIntegration::g_fire_freeze_yaw_deg));
+        out.push_back(kv("fireFreezeSamples", RenderIntegration::g_fire_freeze_samples));
+        out.push_back(kv("fireRefreezes", RenderIntegration::g_fire_refreezes));
+        out.push_back(kv("fireRefreezeFails", RenderIntegration::g_fire_refreeze_fails));
+        // 26142: the engine-render-view vs boundary-latch pair. The lanes
+        // above compare two SIM-side sources and read 0 with the ghost on
+        // screen; these compare the epoch actually consumed against the
+        // camera the frame was actually drawn with. Read EngPitchMaxDeg
+        // against EngYawMaxDeg and EngPosMaxM: pitch alone, with position
+        // and yaw near zero, is the first-person neck-pivot signature and
+        // convicts the bridge adoption.
+        out.push_back(kvf("fireEngDyM", RenderIntegration::g_fire_eng_dy_m));
+        out.push_back(kvf("fireEngDyMaxM", RenderIntegration::g_fire_eng_dy_max_m));
+        out.push_back(kvf("fireEngPitchDeg", RenderIntegration::g_fire_eng_pitch_deg));
+        out.push_back(kvf("fireEngPitchMaxDeg", RenderIntegration::g_fire_eng_pitch_max_deg));
+        out.push_back(kvf("fireEngYawDeg", RenderIntegration::g_fire_eng_yaw_deg));
+        out.push_back(kvf("fireEngYawMaxDeg", RenderIntegration::g_fire_eng_yaw_max_deg));
+        out.push_back(kvf("fireEngPosM", RenderIntegration::g_fire_eng_pos_m));
+        out.push_back(kvf("fireEngPosMaxM", RenderIntegration::g_fire_eng_pos_max_m));
+        out.push_back(kv("fireEngSamples", RenderIntegration::g_fire_eng_samples));
+        out.push_back(kv("fireEngFreezes", RenderIntegration::g_fire_eng_freezes));
+        out.push_back(kv("fireSingleSuppressed", RenderIntegration::g_fire_single_suppressed));   // 26143 dbg 40
+        // 26144 last-fire clamp. fireClampTarget is the learned index of the
+        // frame's last fire; fireClampPaints should track topoCycles almost
+        // exactly (one paint per frame) and fireClampRelearns should stay
+        // near zero - a large relearn count means the fire count is unstable
+        // frame to frame and the clamp is chasing it.
+        out.push_back(kv("fireClampTarget", static_cast<uint64_t>(RenderIntegration::g_fire_clamp_target)));
+        out.push_back(kv("fireClampPaints", RenderIntegration::g_fire_clamp_paints));
+        out.push_back(kv("fireClampRelearns", RenderIntegration::g_fire_clamp_relearns));
+        // 26145: backstop paints - frames that reached the learned last fire
+        // without the sweep ever verifying. Should be a small fraction of
+        // fireClampPaints; if it is most of them, the sweep gate is the
+        // problem and not the clamp.
+        out.push_back(kv("fireClampUnverified", RenderIntegration::g_fire_clamp_unverified));
+        // 26146: fireClampPaints should now track topoCycles closely. If it
+        // still falls well short, the fire count is unstable frame to frame
+        // (watch fireClampRelearns) and the clamp is chasing it.
+        out.push_back(kv("fireDepthRefreshes", RenderIntegration::g_fire_depth_refreshes));
+        out.push_back(kv("bandRejStaleView", RenderIntegration::g_band_rej_stale_view));
+        // 26150 pitch census. Read the bucket whose range covers look-down
+        // (castPitchMinDeg / castPitchMaxDeg name the sign convention):
+        //   Holds >> 0        -> the fire is being HELD on look-down frames,
+        //                        and castPitch*Miss names the gate doing it.
+        //   Holds ~0, Paints
+        //   ~= Frames         -> we paint on those frames and the engine is
+        //                        not consuming the mask; the defect is
+        //                        downstream of everything this file controls.
+        out.push_back(kvf("castPitchDeg", RenderIntegration::g_cast_pitch_deg));
+        out.push_back(kvf("castPitchMinDeg", RenderIntegration::g_cast_pitch_min_deg));
+        out.push_back(kvf("castPitchMaxDeg", RenderIntegration::g_cast_pitch_max_deg));
+        out.push_back(kv("castPitchNegFrames", RenderIntegration::g_cast_pitch_neg_frames));
+        out.push_back(kv("castPitchNegPaints", RenderIntegration::g_cast_pitch_neg_paints));
+        out.push_back(kv("castPitchNegHolds", RenderIntegration::g_cast_pitch_neg_holds));
+        out.push_back(kv("castPitchNegMiss", static_cast<uint64_t>(RenderIntegration::g_cast_pitch_neg_miss)));
+        out.push_back(kv("castPitchPosFrames", RenderIntegration::g_cast_pitch_pos_frames));
+        out.push_back(kv("castPitchPosPaints", RenderIntegration::g_cast_pitch_pos_paints));
+        out.push_back(kv("castPitchPosHolds", RenderIntegration::g_cast_pitch_pos_holds));
+        out.push_back(kv("castPitchPosMiss", static_cast<uint64_t>(RenderIntegration::g_cast_pitch_pos_miss)));
+        // 26151: per-bucket, how many frames had ANY fire land while the
+        // engine held the mask SRV-bound. Compare against the bucket's
+        // Frames count - that ratio, not the paint count, is what the
+        // shadow follows.
+        out.push_back(kv("castPitchNegSrv", RenderIntegration::g_cast_pitch_neg_srv));
+        out.push_back(kv("castPitchPosSrv", RenderIntegration::g_cast_pitch_pos_srv));
+        out.push_back(kv("fireSrvClampPaints", RenderIntegration::g_fire_srv_clamp_paints));
+        out.push_back(kv("fireSrvClampFallbacks", RenderIntegration::g_fire_srv_clamp_fallbacks));
+        // 26163: second paints added on fire-1 frames so the NEXT frame has
+        // something to read. Should track fireSrvClampPaints closely.
+        out.push_back(kv("fireCarryPaints", RenderIntegration::g_fire_carry_paints));   // 26163 retired
+        // 26164: extra early paints on frames that follow an early-paint
+        // frame. Should be a handful a session, not hundreds - if it tracks
+        // fireSrvClampPaints the targeting is wrong again.
+        out.push_back(kv("firePrimePaints", RenderIntegration::g_fire_prime_paints));
+        // 26153: fireSrvIndex is the learned fire index of the engine's apply
+        // window. fireSrvIndexMoves should settle to a small number - a value
+        // that keeps moving means the window wanders per frame and a single
+        // learned index cannot track it. Of the backstop paints,
+        // fireSrvBackstopAtIndex are the aimed ones and fireSrvBackstopAtLast
+        // are the remaining blind shots at the end of the frame; the second
+        // number is what the residual flicker comes out of.
+        out.push_back(kv("fireSrvIndex", static_cast<uint64_t>(RenderIntegration::g_fire_srv_index)));
+        out.push_back(kv("fireSrvIndexMoves", RenderIntegration::g_fire_srv_index_moves));
+        // 26154: retired - the learned index no longer steers the backstop
+        // (it was degenerate at 1). Kept at 0 so the lane order is stable.
+        out.push_back(kv("fireSrvBackstopAtIndex", RenderIntegration::g_fire_srv_backstop_at_index));
+        // 26155 MASK-SRV BIND CENSUS (ledger at g_mask_srv_bind_hits). The
+        // go/no-go for re-keying the arm is maskSrvBindFrames against
+        // flushes: at parity the engine announces its apply window on every
+        // frame and the fire can be hung off it; well below parity the
+        // re-key would starve the fire and the idea is dead. maskSrvDryFrames
+        // counts, directly, the frames it would have starved.
+        out.push_back(kv("maskSrvBindHits", RenderIntegration::g_mask_srv_bind_hits));
+        out.push_back(kv("maskSrvBindFrames", RenderIntegration::g_mask_srv_bind_frames));
+        out.push_back(kv("maskSrvDryFrames", RenderIntegration::g_mask_srv_dry_frames));
+        out.push_back(kv("maskSrvBindsMax", static_cast<uint64_t>(RenderIntegration::g_mask_srv_binds_max)));
+        out.push_back(kvf("maskSrvFirstD", RenderIntegration::g_mask_srv_first_d_pub));
+        out.push_back(kvf("maskSrvLastD", RenderIntegration::g_mask_srv_last_d_pub));
+        // The fire indices off the SAME frame - this is the whole picture of
+        // the ordering the campaign has been guessing at.
+        out.push_back(kvf("fireFirstDPub", RenderIntegration::g_fire_first_d_pub));
+        out.push_back(kvf("fireLastDPub", RenderIntegration::g_fire_last_d_pub));
+        // 26156: the mask as a RENDER TARGET - when a paint stops existing.
+        // Tracked per frame since 26133, never emitted outside the flight
+        // recorder. With maskSrvFirstD/LastD, topoFirstSweep/LastSweep and
+        // fireFirstDPub/LastDPub this is the complete frame on one draw axis,
+        // which is what the 26151 census was standing in for and getting wrong.
+        out.push_back(kv("maskRtBindsPub", static_cast<uint64_t>(RenderIntegration::g_mask_rt_binds_pub)));
+        out.push_back(kvf("maskLastBindDPub", RenderIntegration::g_mask_last_bind_d_pub));
+        out.push_back(kvf("maskFirstBindDPub", RenderIntegration::g_mask_first_bind_d_pub));   // 26162
+        out.push_back(kv("firePaintIxPub", static_cast<uint64_t>(RenderIntegration::g_fire_paint_ix_pub)));
+        out.push_back(kv("firePaintPathPub", static_cast<uint64_t>(RenderIntegration::g_fire_paint_path_pub)));
+        // 26158 (ledger at g_mask_srv_first_d_pub). fireSrvGapMax is the
+        // margin the flicker turns on: draws between the engine's last
+        // mask read and our first fire.
+        out.push_back(kvf("fireSrvGapD", RenderIntegration::g_fire_srv_gap_d_pub));
+        out.push_back(kvf("fireSrvGapMax", RenderIntegration::g_fire_srv_gap_max));
+        out.push_back(kv("fireCatchupArms", RenderIntegration::g_fire_catchup_arms));
+        out.push_back(kv("fireCatchupPaints", RenderIntegration::g_fire_catchup_paints));
+        out.push_back(kv("maskSrvArmFires", RenderIntegration::g_mask_srv_arm_fires));
+        out.push_back(kv("maskSrvArmLate", RenderIntegration::g_mask_srv_arm_late));
+        out.push_back(kv("fireSrvBackstopAtLast", RenderIntegration::g_fire_srv_backstop_at_last));
         out.push_back(kvf("fireOrthoDefect", RenderIntegration::g_fire_ortho_defect));
         out.push_back(kvf("fireOrthoDefectMax", RenderIntegration::g_fire_ortho_defect_max));
         out.push_back(kvf("fireCamSkewM", RenderIntegration::g_fire_cam_skew_m));
@@ -7683,6 +10753,18 @@ static game_value get_render_stats_sqf() {
         }
         out.push_back(kvf("skySunMotDeg", RenderIntegration::g_skysun_mot_deg));
         out.push_back(kv("sunMapCalmRolls", RenderIntegration::g_sun_mat_calm_rolls));
+        // 26179: sun-map maturity. sunMapMature is localityMeta.z as the SHADER
+        // received it - 0 means the far-plane presence test is DISARMED and the
+        // longest shadow is being cut at c.z = 1. PREDICTION: spawning a second
+        // caster increments sunMatDemCchg once and drops sunMapMature to 0 for
+        // ~0.5 s. sunMapCasterRolls counts the caster changes the 26179 roll
+        // held mature instead.
+        out.push_back(kvf("sunMapMature", RenderIntegration::g_sun_map_mature_pub));
+        out.push_back(kv("sunMatDemNew", RenderIntegration::g_sun_mat_dem_new));
+        out.push_back(kv("sunMatDemCchg", RenderIntegration::g_sun_mat_dem_cchg));
+        out.push_back(kv("sunMatDemBig", RenderIntegration::g_sun_mat_dem_big));
+        out.push_back(kv("sunMatDemDrift", RenderIntegration::g_sun_mat_dem_drift));
+        out.push_back(kv("sunMapCasterRolls", RenderIntegration::g_sun_mat_caster_rolls));
         out.push_back(kv("relockRecvWipes", RenderIntegration::g_relock_recv_wipes));
         // GRID-COHERENCE CENSUS (campaign 5): the S4 conviction numbers.
         out.push_back(kv("fireDimsIncoherent", RenderIntegration::g_fire_dims_incoh_total));
@@ -7709,11 +10791,44 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("castReadyHolds", RenderIntegration::g_cast_ready_holds));
         out.push_back(kv("castMapHolds", RenderIntegration::g_cast_map_holds));
         out.push_back(kv("castReadyDrops", RenderIntegration::g_cast_ready_drops));
+        // 26155 DWELL TERM CENSUS (ledger at g_cast_dwell_churn). castReadyHolds
+        // counts the unstable branch and the still-elapsing branch together and
+        // so can never name the flapping term. castDwellResets is the number that
+        // matters for a 64 s cold: a dwell that never elapses is being restarted,
+        // and exactly one of the three terms below is doing it.
+        out.push_back(kv("castDwellChurn", RenderIntegration::g_cast_dwell_churn));
+        // 26162: WHICH site stamps the churn the dwell keys on, and how many
+        // land inside the 1.5 s window that makes them compound.
+        out.push_back(kv("churnStampRelock", RenderIntegration::g_lock_churn_stamp_relock));
+        out.push_back(kv("churnStampDrop", RenderIntegration::g_lock_churn_stamp_drop));
+        out.push_back(kv("churnStampPrewarm", RenderIntegration::g_lock_churn_stamp_prewarm));
+        out.push_back(kv("churnStampRing", RenderIntegration::g_lock_churn_stamp_ring));
+        out.push_back(kv("churnStampsClose", RenderIntegration::g_lock_churn_stamps_close));
+        out.push_back(kv("castDwellTravel", RenderIntegration::g_cast_dwell_travel));
+        out.push_back(kv("castDwellJump", RenderIntegration::g_cast_dwell_jump));
+        out.push_back(kv("castDwellResets", RenderIntegration::g_cast_dwell_resets));
+        out.push_back(kv("castDwellTicks", RenderIntegration::g_cast_dwell_ticks));
+        // 26155: frames the fire was never ARMED on (miss 2). Without this,
+        // castMisses on an unarmed frame is stale residue from the last armed
+        // one - dump59 read 53 while the true state was "no view, never armed".
+        out.push_back(kv("castUnarmedFrames", RenderIntegration::g_cast_unarmed_frames));
         // SUN-AXIS PROVENANCE + SNAP CONFIRMATION (campaign 5 round 2).
         out.push_back(kv("liveRejSunAxis", RenderIntegration::g_live_rej_sun_axis));
         out.push_back(kvf("liveRejSunAxisLastDeg", RenderIntegration::g_live_rej_sun_axis_deg));
         out.push_back(kv("bandRejSunAxis", RenderIntegration::g_band_rej_sun_axis));
         out.push_back(kvf("bandRejSunAxisLastDeg", RenderIntegration::g_band_rej_sun_axis_deg));
+        // 26141 campaign-25 issue 3: the ingress census. bandRejNoView /
+        // liveRejNoView count commits refused because no view existed to
+        // rotate the cascade axis with - the path dump116 showed sealing
+        // unverified. sunAxisBootRefs counts tests answered against the
+        // bootstrap sun, sunAxisColdRejects those that needed the tightened
+        // cold bar, and sunAxisLastRefDeg is the last angle measured at all
+        // (accepted or refused), so a near-miss is visible before it seals.
+        out.push_back(kv("bandRejNoView", RenderIntegration::g_band_rej_no_view));
+        out.push_back(kv("liveRejNoView", RenderIntegration::g_live_rej_no_view));
+        out.push_back(kv("sunAxisBootRefs", RenderIntegration::g_sun_axis_boot_refs));
+        out.push_back(kv("sunAxisColdRejects", RenderIntegration::g_sun_axis_cold_rejects));
+        out.push_back(kvf("sunAxisLastRefDeg", RenderIntegration::g_sun_axis_last_ref_deg));
         out.push_back(kv("sunDerivedSnaps", RenderIntegration::g_sun_snap_adopts));
         out.push_back(kv("sunDerivedSnapNeutral", RenderIntegration::g_sun_snap_neutral));
         out.push_back(kv("sunDerivedSnapHolds", RenderIntegration::g_sun_snap_refusals));
@@ -7731,15 +10846,70 @@ static game_value get_render_stats_sqf() {
                     ? khc_t - static_cast<float>(RenderIntegration::g_mask.cold_t0)
                     : -1.0f;
             };
+            out.push_back(kvf("coldSunBootS", khcold(RenderIntegration::g_first_sun_boot_t)));   // 26133
             out.push_back(kvf("coldSunValidS", khcold(RenderIntegration::g_first_sun_valid_t)));
             out.push_back(kvf("coldSunSettledS", khcold(RenderIntegration::g_first_sun_settled_t)));
             out.push_back(kvf("coldDerived120S", khcold(RenderIntegration::g_first_derived120_t)));
             out.push_back(kvf("coldFirstBandCapS", khcold(RenderIntegration::g_first_bandcap_t)));
             out.push_back(kvf("coldFirstLiveLatchS", khcold(RenderIntegration::g_first_livelatch_t)));
+            out.push_back(kvf("coldRecvHealthS", khcold(RenderIntegration::g_recv_health_t)));
         }
         out.push_back(kv("atlasSrvEvicts", RenderIntegration::g_atlas_srv_evicts));
         out.push_back(kv("bandInsaneSkips", RenderIntegration::g_band_insane_skips));
         out.push_back(kv("bandWarmupSkips", RenderIntegration::g_band_warmup_skips));
+        // 26179 COLD RECEIVE HEALTH (setRenderDebug 47 reverts). bandSealUnlocked
+        // counts seals taken with no view lock - the 26149 cold escape hatch, and
+        // the prime suspect for a receive band showing a foreign part of the
+        // world. bandColdHolds is the receive standing down for it; recvColdWipes
+        // is the cold-era seals dropped when the latch rose. coldRecvHealthS is
+        // when that happened, on the same cold timeline as coldFirstBandCapS -
+        // compare the two: the gap is the window that used to be consumable.
+        out.push_back(kv("bandSealUnlocked", RenderIntegration::g_band_seal_unlocked));
+        out.push_back(kv("bandColdHolds", RenderIntegration::g_band_cold_holds));
+        // 26180: half-built seals withheld from the receive (setRenderDebug 48
+        // reverts). EXPECT this to land near the old bandPendConsumed with
+        // bandPickNone unchanged; bandPickNone climbing by about the same
+        // amount means the offset was traded for a one-cycle dropout.
+        out.push_back(kv("bandPendRefused", RenderIntegration::g_band_pend_refused));
+        // 26181 DEFERRED CAPTURE (setRenderDebug 50 reverts to the 26180
+        // dropout, 48 all the way to the 26179 offset). EXPECT commits ~=
+        // takes, bandPendRefused ~0 and bandPickNone back to its 26179
+        // value. bandStageDropAge large against takes = the pairing view is
+        // not arriving inside the window, and the double buffer has to be
+        // paid for after all. bandStageAtlasMoved is measured, not acted on:
+        // it counts commits whose cascade re-rendered between the resolve
+        // that paired them and the copy, against a receive that is already
+        // 50-250 ms stale between reseals by design.
+        out.push_back(kv("bandStageTakes", RenderIntegration::g_band_stage_takes));
+        out.push_back(kv("bandStageCommits", RenderIntegration::g_band_stage_commits));
+        out.push_back(kv("bandStageDropAge", RenderIntegration::g_band_stage_drop_age));
+        out.push_back(kv("bandStageDropDead", RenderIntegration::g_band_stage_drop_dead));
+        // 26182: RETIRED and published at 0 (lane order is a dump contract).
+        // It read 5633 of 6278 commits at 26181 and convicted the deferred
+        // copy: the copy is back at the resolve that pairs sm with content,
+        // so matrix/content drift is structurally impossible now.
+        out.push_back(kv("bandStageAtlasMoved", RenderIntegration::g_band_stage_atlas_moved));
+        // 26182: reseals skipped because no staging back buffer was free.
+        // A miss is benign - the slot keeps its previous COMPLETE seal - so
+        // this is freshness, not correctness.
+        // 26187: READ THIS AS A DWELL-WEIGHTED SPIN COUNT, NOT A FAILURE
+        // RATE. last_time is not advanced on a miss, so a blocked reseal
+        // re-attempts every frame it stays blocked and each attempt adds one
+        // to BOTH sides of poolMiss / (poolMiss + takes). At ~2-3 spins per
+        // blocked reseal, dump558's 40.2% is nearer 15-20% of reseals truly
+        // deferred. Do not size KH_BAND_STAGE_POOL off this ratio; a lane
+        // counting a miss ONCE per slot per blocked era is the number that
+        // would justify the +67 MB.
+        out.push_back(kv("bandStagePoolMiss", RenderIntegration::g_band_stage_pool_miss));
+        // 26187: increments once per STAGED SLOT PER ENGINE DRAW while a
+        // commit waits on the exact-class publish bar - kh_band_stage_commit
+        // runs from reorder_pre_draw. It is a dwell measure in slot-draws;
+        // any ratio against takes or commits is meaningless.
+        out.push_back(kv("bandStageHoldQuality", RenderIntegration::g_band_stage_hold_quality));
+        out.push_back(kvf("bandStageWaitMs", RenderIntegration::g_band_stage_wait_ms));
+        out.push_back(kvf("bandStageWaitMaxMs", RenderIntegration::g_band_stage_wait_max_ms));
+        out.push_back(kv("recvColdWipes", RenderIntegration::g_recv_cold_wipes));
+        out.push_back(kv("recvHealthOk", static_cast<uint64_t>(RenderIntegration::g_recv_health_ok ? 1 : 0)));
         out.push_back(kv("bandOverlapPairs", RenderIntegration::g_band_overlap_pairs));
         out.push_back(kv("meshDarkFrames", RenderIntegration::g_ffr_dark_frames));
         out.push_back(kv("carryErasedFrames", RenderIntegration::g_ffr_erased_frames));
@@ -7765,6 +10935,50 @@ static game_value get_render_stats_sqf() {
         out.push_back(kvf("injRotDeltaMaxDeg", RenderIntegration::g_inj_rot_delta_max));
         out.push_back(kv("viewAdoptPreframe", RenderIntegration::g_view_adopt_preframe));
         out.push_back(kv("injEncLiveOverrides", RenderIntegration::g_inj_enc_live_overrides));
+        //   encOvrVetoes/encOvrVetoNear - 26314: encSrc-4 collapse overrides
+        //   stood down by the measured witness (baseline fallback), and the
+        //   last vetoed (= shipped) candidate near. Expect vetoes counting on
+        //   FP stance collapses and Zeus glide flips; overrides ~0.
+        out.push_back(kv("encOvrVetoes", RenderIntegration::g_inj_enc_ovr_vetoes));
+        out.push_back(kvf("encOvrVetoNear", RenderIntegration::g_inj_enc_ovr_veto_near));
+        //   worldLatchWits - 26314: class-refused world-latch captures accepted
+        //   on the engine's own measured-pair agreement (the glide-flip escape).
+        out.push_back(kv("worldLatchWits", RenderIntegration::g_world_latch_wits));
+        //   prb* - 26315 content-probe health (ledger at KH_BUILD_TAG). copies
+        //   ~ flushes when the box is on screen; maps ~ copies (readbacks
+        //   landing); busy = in-flight skips; skips = off-screen/cold/refused.
+        //   svVolCopyHeld - 26324: later-bracket vol copies held by the
+        //   first-bracket latch. 26325 FIELD: reads 0 on the default path -
+        //   capture13/stats110 measured ONE counting bracket per frame
+        //   (svCopyArms == svVolCopyMade == frames), so the latch is
+        //   trivially inert on this rig and 170 A/Bs nothing here.
+        out.push_back(kv("svVolCopyHeld", RenderIntegration::g_svs_vol_copy_held));
+        out.push_back(kv("prbCopies", RenderIntegration::g_prb_copies));
+        out.push_back(kv("prbMaps", RenderIntegration::g_prb_maps));
+        out.push_back(kv("prbBusy", RenderIntegration::g_prb_busy));
+        out.push_back(kv("prbSkips", RenderIntegration::g_prb_skips));
+        out.push_back(kv("prbCtrOff", RenderIntegration::g_prb_ctr_off));   // 26345
+        //   26325 probe rebuild counters (ledger at KH_BUILD_TAG): pre = the
+        //   injection-side depth scratch (copies made / MSAA-array rejected /
+        //   no-DSV-or-unviewable rejected); read = the flush-time GPU read
+        //   pass (draws issued / ensure-compile-create failures).
+        out.push_back(kv("prbPreCopies", RenderIntegration::g_prb_pre_copies));
+        out.push_back(kv("prbPreMsaa", RenderIntegration::g_prb_pre_msaa));
+        out.push_back(kv("prbPreNoDsv", RenderIntegration::g_prb_pre_nodsv));
+        out.push_back(kv("prbReadDraws", RenderIntegration::g_prb_read_draws));
+        out.push_back(kv("prbReadFails", RenderIntegration::g_prb_read_fails));
+        //   26326: prbPreMsaa now counts ARRAY DSVs only (the MSAA arm ships;
+        //   this rig measured MSAA every frame at 26325). witDriftLast = the
+        //   last published witness drift (stenDrift.x, injection path).
+        //   26327: the drift is an INSTRUMENT now - the default self-witness
+        //   form reads neither drift lane (mode 175 = the form that does).
+        out.push_back(kvf("witDriftLast", RenderIntegration::g_wit_drift));
+        // 26331: the 26124-class conviction gauge, live at every camera
+        // extraction - |cam(true inverse) - cam(transpose)|. Meters-scale
+        // in Zeus after sustained rotation = the stencil offset's size;
+        // ~0 in person view (fresh matrices). Mode 182 is the A/B.
+        out.push_back(kvf("camExtSkewM", RenderIntegration::g_cam_ext_skew_last));
+        out.push_back(kvf("camExtSkewMax", RenderIntegration::g_cam_ext_skew_max));
         out.push_back(kv("liveNearRefAdopts", RenderIntegration::g_live_ref_adopts));
         out.push_back(kv("worldPairEncodes", RenderIntegration::g_world_pair_encodes));
         out.push_back(kvf("farKeepFar", RenderIntegration::g_far_keep_far));
@@ -7794,6 +11008,11 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("dlListsAnchored", RenderIntegration::g_dl.lists_anchored));
         out.push_back(kv("dlListsUnanchored", RenderIntegration::g_dl.lists_unanchored));
         out.push_back(kv("dlPoolExpired", RenderIntegration::g_dl.pool_expired));
+        // 26187: sightings whose cadence mark decayed below its previous
+        // value - the count of transient tails being repriced downward.
+        // Zero with lights present means the decay never engages and the
+        // tails are NOT the high-water mark.
+        out.push_back(kv("dlGapDecays", RenderIntegration::g_dl_gap_decays));
         out.push_back(kv("dlFillLastN", static_cast<uint64_t>(RenderIntegration::g_dl.fill_last_n)));
         out.push_back(kv("dlSpotFlips", RenderIntegration::g_dl.pool_spot_flips));
         out.push_back(kv("dlWinAux", RenderIntegration::g_dl.win_aux));
@@ -7881,6 +11100,13 @@ static game_value get_render_stats_sqf() {
         // pending jump's age in both layers' terms, and the witness
         // recency the guard tests against (15 s bar).
         out.push_back(kv("fkVetoCandLast", static_cast<uint64_t>(RenderIntegration::g_fk_veto_cand_n)));
+        // 26187: flushes where the mirror was NOT the arbitration's certified
+        // standing, so the published block held instead of shipping
+        // uncertified pass content (the slight camera-rotation dimming).
+        // FALSIFIED IF this reads ~0 while the operator still sees the dim:
+        // then the std/blk divergence is an artefact of the two ring sample
+        // sites, not an intra-frame mirror overwrite, and the model is wrong.
+        out.push_back(kv("blkIncohHolds", RenderIntegration::g_blk_incoh_holds));
         out.push_back(kvf("stdAmbLum", RenderIntegration::g_light_probe.std_amb_l));
         out.push_back(kvf("stdSunLum", RenderIntegration::g_light_probe.std_sun_l));
         out.push_back(kvf("blkPendAgeS", age_s(RenderIntegration::g_blk_pend_ms)));
@@ -8134,12 +11360,28 @@ static game_value dump_render_trace_sqf() {
         names.push_back(game_value("maskLastBindD"));
         names.push_back(game_value("fireFirstD"));
         names.push_back(game_value("fireLastD"));
+        names.push_back(game_value("firePaintIx"));     // 26157
+        names.push_back(game_value("firePaintPath"));   // 1 SRV-bound, 2 backstop
+        names.push_back(game_value("maskSrvFirstD"));   // 26158
+        names.push_back(game_value("maskSrvLastD"));
+        names.push_back(game_value("fireSrvGapD"));
+        names.push_back(game_value("maskFirstBindD"));   // 26162
+        names.push_back(game_value("pubFirstD"));        // 26166 publish census
+        names.push_back(game_value("pubRejFirstD"));
+        names.push_back(game_value("pubSlotHits"));
+        names.push_back(game_value("pubPreAccept"));     // 0 = slot was SILENT
+        names.push_back(game_value("pubRejTmag"));
+        names.push_back(game_value("pubRejFamily"));
+        names.push_back(game_value("pubRejCold"));
+        names.push_back(game_value("pubAltFirstD"));   // 26167
+        names.push_back(game_value("pubAltOff"));
         names.push_back(game_value("latchLiveDeltaM"));
         names.push_back(game_value("latchAgeMs"));
         names.push_back(game_value("injViewSrc"));
         names.push_back(game_value("fvAdopt"));
         names.push_back(game_value("fvAgeMs"));
         names.push_back(game_value("injRotDeltaDeg"));
+
         names.push_back(game_value("injFovY"));
         names.push_back(game_value("liveNearInj"));
         names.push_back(game_value("injFar"));
@@ -8160,6 +11402,123 @@ static game_value dump_render_trace_sqf() {
         names.push_back(game_value("stdAmbLum"));
         names.push_back(game_value("stdSunLum"));
         names.push_back(game_value("blkPendAgeS"));
+
+        // 26291 append-only tail: registration + first-person forensics.
+        // reprojPx/swingPx have been recorded per frame since 26290 and never
+        // dumped; the rest are this build's lanes. Keep 1:1 with the pushes
+        // below - fieldsN/frameN now verify that in-band on every dump.
+        names.push_back(game_value("reprojPx"));      // |footprint - visible box| this frame, px
+        names.push_back(game_value("swingPx"));       // what view adoption moved the footprint, px
+        names.push_back(game_value("seamPvStamp"));   // latch write serial at the seam's read (0 = seam idle)
+        names.push_back(game_value("compPvStamp"));   // latch write serial at the colour read (0 = no injection)
+        names.push_back(game_value("seamCamDxM"));    // seam-published vs colour camera, m (-1 = no publication)
+        names.push_back(game_value("seamViewAge"));   // seam-view age at the colour pass, frames (-1 = absent)
+        names.push_back(game_value("seamSrc"));       // 0 none 1 adopted 2 cycle 3 live 4 boundary 5 share
+        names.push_back(game_value("compSrc"));       // 0 latch 1 live 2 boundary 3 adopted 4 seam-copy 5 bpv-override
+        names.push_back(game_value("volCode"));       // shader arm this frame
+        names.push_back(game_value("volWit"));        // footprint witness present this frame
+        names.push_back(game_value("volAge"));        // volume-copy age, frames (-1 = none)
+        names.push_back(game_value("seamLiveDxM"));   // 26292: live translation correction applied, m (-1 = stood down)
+        names.push_back(game_value("seamNear"));      // 26293: the seam's committed near - injNear's twin
+        names.push_back(game_value("seamProjSrc"));   // 26293: 0 latch pair 1 engine sniff 2 live pair
+        names.push_back(game_value("sniffNear"));     // 26300: the engine's sniffed pair at the seam (-1 = invalid)
+        names.push_back(game_value("primeCamDxM"));   // 26294: |colour rebase cam - seam prime cam|, m
+        names.push_back(game_value("seamRuns"));      // 26294: seam executions folded into this row
+        // 26304 append-only tail: pair-arbitration forensics + bound-CB census.
+        names.push_back(game_value("seamLiveNear"));   // raw live-bridge near at the seam fetch (-1 = none)
+        names.push_back(game_value("seamPairWhy"));    // 0 live-corr 1 live-base 2 insane 3 corridor 4 no-ref 5 no sample
+        names.push_back(game_value("boundPairNear"));  // bound-CB census pair at the seam (-1 = no match)
+        names.push_back(game_value("boundPairAgeMs")); // age of that buffer's last recorded upload
+        names.push_back(game_value("censusMatch"));    // bit0-3 VS b0-b3, bit4-7 PS b0-b3 with a census hit
+        // 26306 append-only tail: census camera + trajectory-bound forensics.
+        names.push_back(game_value("boundCamDxM"));    // |census camera - seam draw camera| (m; -1 = none)
+        names.push_back(game_value("boundCamLiveDxM"));// |census camera - live fetch camera| (m; -1 = none)
+        names.push_back(game_value("boundCamOk"));     // census camera validated this frame
+        names.push_back(game_value("seamTrnEvent"));   // 0 none 1 bound-refused 2 wide-take 3 escape-take
+        // 26310 append-only tail: the flavor gauge (ledger at the seam's
+        // translation anchor). |adopted-view camera - cycle latch camera|,
+        // metres; -1 = no latch reference that run.
+        names.push_back(game_value("seamAnchDxM"));
+        // 26315 content-probe tail (one frame latent; ledger at KH_BUILD_TAG)
+        names.push_back(game_value("prbCtrZ"));
+        names.push_back(game_value("prbCtrDM"));
+        names.push_back(game_value("prbCtrDzM"));
+        names.push_back(game_value("prbGndZ"));
+        names.push_back(game_value("prbGndDM"));
+        names.push_back(game_value("prbBotZ"));
+        names.push_back(game_value("prbBotDM"));
+        names.push_back(game_value("prbVolZ"));
+        names.push_back(game_value("prbVolGndZ"));
+        names.push_back(game_value("prbCnt"));
+        names.push_back(game_value("seamFovLatR"));
+        names.push_back(game_value("cycN"));
+        names.push_back(game_value("cycWorldN"));
+        names.push_back(game_value("injCycIdx"));
+        names.push_back(game_value("prbPreBotZ"));
+        names.push_back(game_value("prbPreBotDM"));
+        // 26325 tail (173-177; ledger at KH_BUILD_TAG): the Issue-B flicker
+        // correlators + the CPU-side clip-family decider.
+        names.push_back(game_value("bandValidN"));
+        names.push_back(game_value("atlasLive"));
+        names.push_back(game_value("farPhase"));
+        names.push_back(game_value("castLostAbs"));
+        names.push_back(game_value("prbCtrClipZ"));
+        names.push_back(game_value("witDrift"));   // 26326 (lane 178)
+        names.push_back(game_value("thmBotClear"));   // 26328 (lane 179)
+        names.push_back(game_value("selfWitDz"));     // 26331 (lane 180): the pairing decider
+        names.push_back(game_value("consumedSlotAge"));   // 26334 (lane 181): 1 healthy / 0 = off-by-one
+        names.push_back(game_value("prbWitDCtr"));   // 26336 (182-191): the witness census
+        names.push_back(game_value("prbWitWCtr"));
+        names.push_back(game_value("prbStenCtr"));
+        names.push_back(game_value("prbCntRp"));
+        names.push_back(game_value("prbWitDBot"));
+        names.push_back(game_value("prbWitWBot"));
+        names.push_back(game_value("prbStenBot"));
+        names.push_back(game_value("prbCntBot"));
+        names.push_back(game_value("prbRpDx"));
+        names.push_back(game_value("prbRpDy"));
+        names.push_back(game_value("maskPostCtr"));   // 26340 (192-199): the mask census
+        names.push_back(game_value("maskPreCtr"));
+        names.push_back(game_value("maskLiveCtr"));
+        names.push_back(game_value("maskRatioCtr"));
+        names.push_back(game_value("maskPostBot"));
+        names.push_back(game_value("maskPreBot"));
+        names.push_back(game_value("maskLiveBot"));
+        names.push_back(game_value("maskRatioBot"));
+        names.push_back(game_value("sunOccCtr"));   // 26341 (200-203): sun/self census
+        names.push_back(game_value("sunZCtr"));
+        names.push_back(game_value("sunOccBot"));
+        names.push_back(game_value("sunZBot"));
+        names.push_back(game_value("shadOccIn"));   // 26342 (204-207): shadow probes
+        names.push_back(game_value("shadZIn"));
+        names.push_back(game_value("shadOccEdge"));
+        names.push_back(game_value("shadZEdge"));
+        names.push_back(game_value("mskPostShIn"));   // 26344 (208-221): the wide net
+        names.push_back(game_value("mskPreShIn"));
+        names.push_back(game_value("mskLiveShIn"));
+        names.push_back(game_value("mskRatioShIn"));
+        names.push_back(game_value("mskRatioShEd"));
+        names.push_back(game_value("mskPostShEd"));
+        names.push_back(game_value("bandOccShIn"));
+        names.push_back(game_value("bandZdShIn"));
+        names.push_back(game_value("selfOccShIn"));
+        names.push_back(game_value("selfMgShIn"));
+        names.push_back(game_value("injRan"));
+        names.push_back(game_value("sunMapAge"));
+        names.push_back(game_value("castFired"));
+        names.push_back(game_value("bandPickShad"));
+        names.push_back(game_value("mskRatRpShIn"));   // 26345 slot 21
+        names.push_back(game_value("mskRpDxShIn"));    // 26345 slot 21
+        names.push_back(game_value("shPxSrc"));        // 26345 targeting source
+
+        // 26291 THE COUNT IS VERIFIED IN-BAND. trace_field_audit hand-counted
+        // push CALL SITES against non-delta names and read the delta loop as
+        // one push - 96 vs 97 was a counting artifact, not a skew (the dump
+        // was verified aligned column-by-column at 26291). fieldsN/frameN are
+        // the machine's own numbers riding every dump, so alignment can never
+        // again be a hand-count debate.
+        const uint32_t khtr_nfields = static_cast<uint32_t>(names.size());
+        uint32_t khtr_nrow = 0;
 
         const uint64_t khtr_now = RenderIntegration::steady_now_ms();
         auto_array<game_value> frames;
@@ -8232,6 +11591,21 @@ static game_value dump_render_trace_sqf() {
             f.push_back(game_value(r.mask_last_bind_d));
             f.push_back(game_value(r.fire_first_d));
             f.push_back(game_value(r.fire_last_d));
+            f.push_back(game_value(static_cast<float>(r.fire_paint_ix)));     // 26157
+            f.push_back(game_value(static_cast<float>(r.fire_paint_path)));
+            f.push_back(game_value(r.mask_srv_first_d));   // 26158
+            f.push_back(game_value(r.mask_srv_last_d));
+            f.push_back(game_value(r.fire_srv_gap_d));
+            f.push_back(game_value(r.mask_first_bind_d));   // 26162
+            f.push_back(game_value(r.pub_first_d));        // 26166 publish census
+            f.push_back(game_value(r.pub_rej_first_d));
+            f.push_back(game_value(static_cast<float>(r.pub_slot_hits)));
+            f.push_back(game_value(static_cast<float>(r.pub_pre_accept)));
+            f.push_back(game_value(static_cast<float>(r.pub_rej_tmag)));
+            f.push_back(game_value(static_cast<float>(r.pub_rej_family)));
+            f.push_back(game_value(static_cast<float>(r.pub_rej_cold)));
+            f.push_back(game_value(r.pub_alt_first_d));   // 26167
+            f.push_back(game_value(static_cast<float>(r.pub_alt_off)));
             f.push_back(game_value(r.latch_live_delta_m));
             f.push_back(game_value(r.latch_age_ms));
             f.push_back(game_value(static_cast<float>(r.inj_view_src)));
@@ -8258,6 +11632,104 @@ static game_value dump_render_trace_sqf() {
             f.push_back(game_value(r.std_amb_lum));
             f.push_back(game_value(r.std_sun_lum));
             f.push_back(game_value(r.blk_pend_age_s));
+            // 26291 tail - 1:1 with the names above.
+            f.push_back(game_value(r.reproj_px));
+            f.push_back(game_value(r.swing_px));
+            f.push_back(game_value(static_cast<float>(r.seam_pv_stamp)));
+            f.push_back(game_value(static_cast<float>(r.comp_pv_stamp)));
+            f.push_back(game_value(r.seam_cam_dx_m));
+            f.push_back(game_value(r.seam_view_age));
+            f.push_back(game_value(static_cast<float>(r.seam_src)));
+            f.push_back(game_value(static_cast<float>(r.comp_src)));
+            f.push_back(game_value(static_cast<float>(r.vol_code)));
+            f.push_back(game_value(static_cast<float>(r.vol_wit)));
+            f.push_back(game_value(r.vol_age == 0xFFFFu
+                                   ? -1.0f : static_cast<float>(r.vol_age)));
+            f.push_back(game_value(r.seam_live_dx_m));   // 26292
+            f.push_back(game_value(r.seam_near));                          // 26293
+            f.push_back(game_value(static_cast<float>(r.seam_proj_src)));  // 26293
+            f.push_back(game_value(r.sniff_near));                         // 26300
+            f.push_back(game_value(r.prime_cam_dx_m));                     // 26294
+            f.push_back(game_value(static_cast<float>(r.seam_runs)));      // 26294
+            f.push_back(game_value(r.seam_live_near));                     // 26304 tail
+            f.push_back(game_value(static_cast<float>(r.seam_pair_why)));
+            f.push_back(game_value(r.bound_pair_near));
+            f.push_back(game_value(r.bound_pair_age_ms));
+            f.push_back(game_value(static_cast<float>(r.census_match)));
+            f.push_back(game_value(r.bound_cam_dx_m));                     // 26306 tail
+            f.push_back(game_value(r.bound_cam_live_dx_m));
+            f.push_back(game_value(static_cast<float>(r.bound_cam_ok)));
+            f.push_back(game_value(static_cast<float>(r.seam_trn_event)));
+            f.push_back(game_value(r.seam_anch_dx_m));                     // 26310 tail
+            f.push_back(game_value(r.prb_ctr_z));                          // 26315 tail
+            f.push_back(game_value(r.prb_ctr_dm));
+            f.push_back(game_value(r.prb_ctr_dz_m));
+            f.push_back(game_value(r.prb_gnd_z));
+            f.push_back(game_value(r.prb_gnd_dm));
+            f.push_back(game_value(r.prb_bot_z));
+            f.push_back(game_value(r.prb_bot_dm));
+            f.push_back(game_value(r.prb_vol_z));
+            f.push_back(game_value(r.prb_vol_gnd_z));
+            f.push_back(game_value(r.prb_cnt));
+            f.push_back(game_value(r.seam_fov_lat_r));
+            f.push_back(game_value(static_cast<float>(r.cyc_n)));
+            f.push_back(game_value(static_cast<float>(r.cyc_world_n)));
+            f.push_back(game_value(static_cast<float>(r.inj_cyc_idx)));
+            f.push_back(game_value(r.prb_pre_bot_z));
+            f.push_back(game_value(r.prb_pre_bot_dm));
+            f.push_back(game_value(static_cast<float>(r.band_valid_n)));
+            f.push_back(game_value(static_cast<float>(r.atlas_live)));
+            f.push_back(game_value(static_cast<float>(r.far_phase)));
+            f.push_back(game_value(r.cast_lost_abs));
+            f.push_back(game_value(r.prb_ctr_clip_z));
+            f.push_back(game_value(r.wit_drift));
+            f.push_back(game_value(r.thm_bot_clear));
+            f.push_back(game_value(r.self_wit_dz));   // 26331 (lane 180)
+            f.push_back(game_value(r.consumed_slot_age));   // 26334 (lane 181)
+            f.push_back(game_value(r.prb_wit_d_ctr));   // 26336 (182-191)
+            f.push_back(game_value(r.prb_wit_w_ctr));
+            f.push_back(game_value(r.prb_sten_ctr));
+            f.push_back(game_value(r.prb_cnt_rp));
+            f.push_back(game_value(r.prb_wit_d_bot));
+            f.push_back(game_value(r.prb_wit_w_bot));
+            f.push_back(game_value(r.prb_sten_bot));
+            f.push_back(game_value(r.prb_cnt_bot));
+            f.push_back(game_value(r.prb_rp_dx));
+            f.push_back(game_value(r.prb_rp_dy));
+            f.push_back(game_value(r.mask_post_ctr));   // 26340 (192-199)
+            f.push_back(game_value(r.mask_pre_ctr));
+            f.push_back(game_value(r.mask_live_ctr));
+            f.push_back(game_value(r.mask_ratio_ctr));
+            f.push_back(game_value(r.mask_post_bot));
+            f.push_back(game_value(r.mask_pre_bot));
+            f.push_back(game_value(r.mask_live_bot));
+            f.push_back(game_value(r.mask_ratio_bot));
+            f.push_back(game_value(r.sun_occ_ctr));   // 26341 (200-203)
+            f.push_back(game_value(r.sun_z_ctr));
+            f.push_back(game_value(r.sun_occ_bot));
+            f.push_back(game_value(r.sun_z_bot));
+            f.push_back(game_value(r.shad_occ_in));   // 26342 (204-207)
+            f.push_back(game_value(r.shad_z_in));
+            f.push_back(game_value(r.shad_occ_edge));
+            f.push_back(game_value(r.shad_z_edge));
+            f.push_back(game_value(r.msk_post_shin));   // 26344 (208-221)
+            f.push_back(game_value(r.msk_pre_shin));
+            f.push_back(game_value(r.msk_live_shin));
+            f.push_back(game_value(r.msk_ratio_shin));
+            f.push_back(game_value(r.msk_ratio_shed));
+            f.push_back(game_value(r.msk_post_shed));
+            f.push_back(game_value(r.band_occ_shin));
+            f.push_back(game_value(r.band_zd_shin));
+            f.push_back(game_value(r.self_occ_shin));
+            f.push_back(game_value(r.self_mg_shin));
+            f.push_back(game_value(r.inj_ran));
+            f.push_back(game_value(r.sun_map_age));
+            f.push_back(game_value(r.cast_fired));
+            f.push_back(game_value(r.band_pick_shad));
+            f.push_back(game_value(r.msk_rat_rp_shin));   // 26345
+            f.push_back(game_value(r.msk_rp_dx_shin));    // 26345
+            f.push_back(game_value(r.sh_px_src));         // 26345
+            if (khtr_nrow == 0) khtr_nrow = static_cast<uint32_t>(f.size());   // 26291
             frames.push_back(game_value(std::move(f)));
         }
 
@@ -8286,6 +11758,27 @@ static game_value dump_render_trace_sqf() {
             auto_array<game_value> pair;
             pair.push_back(game_value("frames"));
             pair.push_back(game_value(std::move(frames)));
+            out.push_back(game_value(std::move(pair)));
+        }
+
+        {   // 26291: in-band field/row count - the permanent audit.
+            auto_array<game_value> pair;
+            pair.push_back(game_value("fieldsN"));
+            pair.push_back(game_value(static_cast<float>(khtr_nfields)));
+            out.push_back(game_value(std::move(pair)));
+        }
+
+        {
+            auto_array<game_value> pair;
+            pair.push_back(game_value("frameN"));
+            pair.push_back(game_value(static_cast<float>(khtr_nrow)));
+            out.push_back(game_value(std::move(pair)));
+        }
+
+        if (khtr_nrow != 0 && khtr_nrow != khtr_nfields) {
+            auto_array<game_value> pair;
+            pair.push_back(game_value("alignment"));
+            pair.push_back(game_value("MISALIGNED"));
             out.push_back(game_value(std::move(pair)));
         }
 
@@ -8718,6 +12211,53 @@ static game_value dump_dynamic_lights_sqf() {
         out.push_back(kv("poolAdded", static_cast<float>(khd_snap.pool_added)));
         out.push_back(kv("poolUpdated", static_cast<float>(khd_snap.pool_updated)));
         out.push_back(kv("poolExpired", static_cast<float>(khd_snap.pool_expired)));
+        // 26190 EXPIRY CENSUS - the lane the transient tail has never had.
+        // dlExpTail* is how long each entry was KEPT PAST ITS LAST SIGHTING:
+        // that IS the over-persistence the operator sees, in ms, measured
+        // rather than modelled. dlExpLifeMean is how long the entry was
+        // actually alive, so tail/life prices the fault directly.
+        // dlExpFloorHits counts expiries whose TTL came from a FLOOR rather
+        // than from 6 x the cadence mark - if that dominates, the 250 ms
+        // KH_DL_TTL_FLOOR_MS is the fault and the 26187 mark decay could never
+        // have reached it. dlExpDenseHits counts entries that reached the 80 ms
+        // fast lane; near-zero means the sighting stream is too sparse for the
+        // dense test (zeroLists is the corroborating lane) and the fast lane is
+        // structurally unreachable for exactly the lights that need it.
+        out.push_back(kv("dlExpN", static_cast<float>(RenderIntegration::g_dl_exp_n)));
+        out.push_back(kv("dlExpFloorHits", static_cast<float>(RenderIntegration::g_dl_exp_floor_hits)));
+        out.push_back(kv("dlExpDenseHits", static_cast<float>(RenderIntegration::g_dl_exp_dense_hits)));
+        out.push_back(kv("dlExpTailMinMs", static_cast<float>(
+            RenderIntegration::g_dl_exp_tail_min == 0xFFFFFFFFu
+                ? 0u : RenderIntegration::g_dl_exp_tail_min)));
+        out.push_back(kv("dlExpTailMaxMs", static_cast<float>(RenderIntegration::g_dl_exp_tail_max)));
+        out.push_back(kv("dlExpTailMeanMs", RenderIntegration::g_dl_exp_n
+            ? static_cast<float>(RenderIntegration::g_dl_exp_tail_sum) /
+              static_cast<float>(RenderIntegration::g_dl_exp_n) : -1.0f));
+        out.push_back(kv("dlExpLifeMeanMs", RenderIntegration::g_dl_exp_n
+            ? static_cast<float>(RenderIntegration::g_dl_exp_life_sum) /
+              static_cast<float>(RenderIntegration::g_dl_exp_n) : -1.0f));
+
+        {   // per-expiry ring: [lifeMs, tailMs, ttlMs, gapMaxMs, sightings, dense, floored]
+            auto_array<game_value> khx_rows;
+
+            for (uint32_t khx_i = 0; khx_i < RenderIntegration::KH_DL_EXP_RING; ++khx_i) {
+                const uint32_t khx_k =
+                    (RenderIntegration::g_dl_exp_head + khx_i) % RenderIntegration::KH_DL_EXP_RING;
+                const RenderIntegration::DlExpiry& khx_e = RenderIntegration::g_dl_exp[khx_k];
+                if (khx_e.ttl_ms == 0) continue;   // unfilled slot
+                auto_array<game_value> khx_r;
+                khx_r.push_back(game_value(static_cast<float>(khx_e.life_ms)));
+                khx_r.push_back(game_value(static_cast<float>(khx_e.tail_ms)));
+                khx_r.push_back(game_value(static_cast<float>(khx_e.ttl_ms)));
+                khx_r.push_back(game_value(static_cast<float>(khx_e.gap_max_ms)));
+                khx_r.push_back(game_value(static_cast<float>(khx_e.sightings)));
+                khx_r.push_back(game_value(static_cast<float>(khx_e.dense)));
+                khx_r.push_back(game_value(static_cast<float>(khx_e.floored)));
+                khx_rows.push_back(game_value(std::move(khx_r)));
+            }
+
+            out.push_back(kva("expiryRing", std::move(khx_rows)));
+        }
 
         return game_value(std::move(out));
     } catch (...) {
@@ -10105,9 +13645,23 @@ static void initialize_sqf_integration() {
         game_data_type::ARRAY
     );
 
+    _sqf_reset_render_stats = intercept::client::host::register_sqf_command(
+        "resetRenderStats",
+        "Re-zero the render diagnostic counters without restarting the session, so a setRenderDebug A/B can be measured in its own window. Cold-timeline stamps are left alone. Returns true",
+        userFunctionWrapper<reset_render_stats_sqf>,
+        game_data_type::BOOL
+    );
+
     _sqf_set_render_debug = intercept::client::host::register_sqf_command(
         "setRenderDebug",
-        "Debug switches: 0 off, 1-17 shader visuals, 20 cast kill switch, 21 readiness latch + slab retirement off, 24 terrain snap off, 25 cast live-grid viewport A/B, 26 lock-settle hold off, 27 UI coverage debug view, 28 accepted no-op (retired adaptive-floor opt-in)",
+        // 26314: the SQF-visible description is deliberately NARROW. The full
+        // mode catalog (the operator's reference prose) grew past what
+        // register_sqf_command's argument shape tolerates in practice and now
+        // lives as the g_dbg_mode CATALOG COMMENT in rendering_integration.hpp
+        // (search: "26314 THE MODE CATALOG"). ADDING A MODE STILL MEANS TWO
+        // EDITS - that catalog comment and the whitelist above - and there is
+        // no compiler check that they agree.
+        "Sets the render debug mode",
         userFunctionWrapper<set_render_debug_sqf>,
         game_data_type::BOOL,
         game_data_type::SCALAR

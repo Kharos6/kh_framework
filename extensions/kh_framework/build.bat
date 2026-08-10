@@ -1,6 +1,15 @@
 @echo off
 echo Starting...
 
+REM Work from this script's own folder (extensions\kh_framework), so the
+REM relative compile paths work no matter where the script is invoked from.
+cd /d "%~dp0"
+
+REM Project root = two levels up from this script (...\kh_framework\).
+REM Derived from the script location, so it works on any drive/user folder.
+for %%I in ("%~dp0..\..") do set "KH_ROOT=%%~fI"
+set "KH_DEPLOY=%KH_ROOT%\.hemttout\dev\intercept"
+
 REM Try different VS2022 installation paths and editions
 set "VS2022_FOUND="
 
@@ -127,6 +136,21 @@ if exist output_x64\kh_framework_x64.dll (
     echo.
     echo File size:
     for %%I in (output_x64\kh_framework_x64.dll) do echo %%~zI bytes
+    echo.
+    echo Deploying to intercept folder...
+    if not exist "%KH_DEPLOY%" mkdir "%KH_DEPLOY%"
+    REM Brief settle delay before the copy (linker/AV file-handle release).
+    timeout /t 1 /nobreak >nul
+    copy /Y "output_x64\kh_framework_x64.dll" "%KH_DEPLOY%\kh_framework_x64.dll" >nul
+    if errorlevel 1 (
+        echo DEPLOY FAILED to "%KH_DEPLOY%" - is the game running with the DLL loaded?
+        echo.
+        pause
+        exit
+    )
+    echo Deployed to: %KH_DEPLOY%\kh_framework_x64.dll
+    REM Fully successful build + deploy: close the window automatically.
+    exit
 ) else (
     echo ================================
     echo BUILD FAILED!

@@ -1,6 +1,6 @@
 class CfgIRLaserSettings
 {
-    laserMaxRange = 15000;
+    laserMaxRange = 40000;
     maxNumberOfRays = 1024;
-    maxViewDistance = 15000;
+    maxViewDistance = 40000;
 };

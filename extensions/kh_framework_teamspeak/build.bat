@@ -2,6 +2,15 @@
 setlocal
 echo Building KH Framework TeamSpeak Plugin...
 
+REM Work from this script's own folder (extensions\kh_framework_teamspeak),
+REM so relative paths work no matter where the script is invoked from.
+cd /d "%~dp0"
+
+REM Project root = two levels up from this script (...\kh_framework\).
+REM Derived from the script location, so it works on any drive/user folder.
+for %%I in ("%~dp0..\..") do set "KH_ROOT=%%~fI"
+set "KH_DEPLOY=%KH_ROOT%\.hemttout\dev"
+
 REM Try different VS2022 installation paths and editions
 set "VS2022_FOUND="
 
@@ -152,7 +161,29 @@ echo   1. Double-click kh_framework_teamspeak.ts3_plugin to install
 echo   2. Or copy to your mod folder for automatic installation via Arma 3
 echo   3. Restart TeamSpeak 3 after installation
 echo.
-goto :done
+echo Deploying to %KH_DEPLOY% ...
+if not exist "%KH_DEPLOY%" mkdir "%KH_DEPLOY%"
+REM Brief settle delay before the copies (linker/AV file-handle release).
+timeout /t 1 /nobreak >nul
+copy /Y "output\kh_framework_teamspeak.ts3_plugin" "%KH_DEPLOY%\kh_framework_teamspeak.ts3_plugin" >nul
+if errorlevel 1 (
+    echo DEPLOY FAILED for the .ts3_plugin package - is a file lock held on "%KH_DEPLOY%"?
+    echo.
+    pause
+    exit
+)
+copy /Y "output\plugins\kh_framework_teamspeak_win64.dll" "%KH_DEPLOY%\kh_framework_teamspeak_win64.dll" >nul
+if errorlevel 1 (
+    echo DEPLOY FAILED for the DLL - is TeamSpeak running with the plugin loaded?
+    echo.
+    pause
+    exit
+)
+echo Deployed:
+echo   - %KH_DEPLOY%\kh_framework_teamspeak.ts3_plugin
+echo   - %KH_DEPLOY%\kh_framework_teamspeak_win64.dll
+REM Fully successful build + package + deploy: close the window automatically.
+exit
 
 :package_failed
 echo ================================

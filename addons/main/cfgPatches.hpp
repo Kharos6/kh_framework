@@ -38,5 +38,8 @@ class CfgPatches
 		};
 		requiredVersion = 2.22;
 		requiredAddons[] = {"cba_main", "Intercept_Core"};
+		version = 2.0;
+		versionAr[] = {2, 0};
+		versionStr = "2.0";
 	};
 };

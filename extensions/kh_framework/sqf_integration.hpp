@@ -6212,6 +6212,19 @@ static game_value gpu_visibility_sqf(game_value_parameter args) {
 //              rotation?, twoSided?]
 // Adds a persistent mesh drawn every frame by the internal Draw3D EH until
 // removed. Callable from ANY context (scheduled, unscheduled, callbacks).
+//   size:      NUMBER (uniform) or ARRAY [x, y, z] - a MULTIPLIER of the
+//              mesh's OWN native dimensions, per axis. 1 = true scale,
+//              2 = twice as big, 0.5 = half; 0 reads as 1. Aspect ratio
+//              is always preserved - there is no box fit, so a model is
+//              never squashed to a cube. Negative values are accepted
+//              and mean |value|, identical to positive (the pre-26422
+//              spelling, kept working). The array's axes are the
+//              OBJECT'S OWN [x, y, z] in Arma sense (east/north/up at
+//              zero rotation) and are applied BEFORE 'rotation', so
+//              [1, 1, 3] makes an object three times taller along its
+//              own up axis at any heading. Builtin meshes author at
+//              native 1, so for "box"/"sphere"/... the multiplier is
+//              still exactly metres and nothing about them changes.
 //   mode:      0 = depth test (default), 1 = test + depth write, 2 = overlay
 //   sceneRead: BOOL, shorthand for a tinted scene-read surface
 //              (effect "colorgrade" at neutral defaults: scene through the
@@ -6360,10 +6373,9 @@ static game_value gpu_visibility_sqf(game_value_parameter args) {
 //              Documents\Arma 3\kh_framework\rendering first, then
 //              every active mod's "rendering" folder (subfolders
 //              searched; relative paths honored), imported once and
-//              cached. Local space is normalized to [-0.5, 0.5]^3 and
-//              scaled per axis by 'size'; any size component <= 0
-//              substitutes the mesh's NATIVE dimension (0 = native,
-//              -2 = twice native, ...). Textures/shaders attach via
+//              cached. The model is drawn at its NATIVE dimensions
+//              times 'size' per axis (see 'size' above), so aspect
+//              ratio is always preserved. Textures/shaders attach via
 //              updateRender3D "material".
 // Solid, non-overlay meshes are ALWAYS composited: injected into the frame
 // BEFORE the engine draws its translucents, with depth written, so the
@@ -6386,8 +6398,11 @@ static game_value add_render3d_sqf(game_value_parameter args) {
         obj.pos[1] = static_cast<float>(pos[1]);
         obj.pos[2] = static_cast<float>(pos[2]);
         
-        if (!RenderIntegration::read_vec3_or_uniform(arr[1], obj.size)) {
-            return game_value("size must be a number or [x, y, z]");
+        // 26422: script sets the MULTIPLIER (ledger at
+        // KH_SCALE_IS_A_MULTIPLIER); kh_apply_native_size resolves it to
+        // metres below, once the mesh slot has been read.
+        if (!RenderIntegration::read_vec3_or_uniform(arr[1], obj.size_mul)) {
+            return game_value("size must be a number or [x, y, z] multipliers of the mesh's own size");
         }
 
         if (arr.size() > 2 && !arr[2].is_nil()) {
@@ -6628,7 +6643,10 @@ static int kh_apply_shared_prop(RenderIntegration::RenderObject& obj,
 // updateRender3D [handle, property, value] -> BOOL
 // 3D mesh objects ONLY (addRender3D handles); fullscreen passes belong to
 // updatePostFX. Properties: "position" [x,y,zASL] | "size" number|[x,y,z]
-// (components <= 0 read the mesh's native dimensions) | "mesh"
+// (a MULTIPLIER of the mesh's own native dimensions per OBJECT-LOCAL axis,
+// applied before "rotation"; 1 = true scale, 0 reads as 1, negatives mean
+// |value| - full rule at KH_SCALE_IS_A_MULTIPLIER. Changing "mesh" re-
+// resolves the stored multiplier against the NEW mesh's dimensions) | "mesh"
 // string/scalar (builtin name, registry index, or a ".fbx" path - same
 // resolution as addRender3D) | "material" array - per-submesh shader +
 // texture assignments:
@@ -6688,8 +6706,8 @@ static game_value update_render3d_sqf(game_value_parameter args) {
             obj.pos[1] = static_cast<float>(pos[1]);
             obj.pos[2] = static_cast<float>(pos[2]);
         } else if (prop == "size" || prop == "scale") {
-            if (!RenderIntegration::read_vec3_or_uniform(arr[2], obj.size)) return game_value(false);
-            RenderIntegration::kh_apply_native_size(obj);   // <= 0 components read native dims
+            if (!RenderIntegration::read_vec3_or_uniform(arr[2], obj.size_mul)) return game_value(false);
+            RenderIntegration::kh_apply_native_size(obj);   // multiplier -> metres (26422)
         } else if (prop == "rotation") {
             float khr_p = 0.0f, khr_y = 0.0f, khr_r = 0.0f;
 
@@ -7162,50 +7180,585 @@ static game_value set_render_debug_sqf(game_value_parameter arg) {
         // what it was built for at 26277 and nobody read it against the request.
         // ADDING A MODE MEANS TWO EDITS - the catalog and this list - and there
         // is no compiler check that they agree.
-        const bool khd_ok = (khd_m >= 129 && khd_m <= 191) ||   // 26348: 191 = scene-range stamp revert (190 cast warp, 189 phase, 188 mask)
-                                                             // 26340: 187 = registered mask read
-                                                             // (injection reads the mask through
-                                                             // the PREVIOUS frame's pair = the
-                                                             // view its content was drawn under)
-                                                             // 26337: 186 = raw-stamp revert (the
-                                                             // committed-pair restamp OFF; prbWitD
-                                                             // must blow back up under it)
-                                                             // 26334: 184 = fx1.zw fill-with-
-                                                             // heightfield (the 26331/26333 wide
-                                                             // scope) ALONE - the slice's pure
-                                                             // fill-scope A/B; 185 = strict sun-
-                                                             // fit distance rule (26333 form) -
-                                                             // the 250 m vanish must return
-                                                             // 26326: 172 = drift-comp revert (inert
-                                                             // outside 175 since 26327);
-                                                             // 173/174 = far-phase pin false/true
-                                                             // (26329: pins OVERRIDE the debounce)
-                                                             // 26327: 175 = legacy raster-witness form
-                                                             // 26328: 176 = thm march-geometry trial -
-                                                             // 26329: ALIAS of the default (geometry
-                                                             // shipped; kept so 26328 scripts validate)
-                                                             // 26329: 177 = LEGACY thm march revert
-                                                             // (25 m skips + 1000 m gate + uncapped
-                                                             // slack, one switch); 178 = far-phase
-                                                             // debounce OFF (raw phase)
-                                                             // 26333: defaults are the 26329 forms;
-                                                             // these are OPT-IN TRIALS now: 179 =
-                                                             // membership centre fast path OFF;
-                                                             // 180 = membership gradient clamp ON;
-                                                             // 181 = need-bounded late-competitor
-                                                             // shield ON; 183 = thm contact routing
-                                                             // ON (arb PS every frame). 182 stays a
-                                                             // REVERT: camera-extraction true-inverse
-                                                             // repair OFF (raw transpose - the
-                                                             // Zeus-offset A/B; the one 26331-family
-                                                             // default kept)
+        // 26334: 178 = witness farthest-plane revert (the slice returns),
+        // 179 = depth-bias clamp revert (the render-through returns).
+        // 26342: 184 = revert the exact-camera inverse / snap / carried
+        // pass camera (restores 26341 and its stationary offset).
+        // 26342: 185 = disarm the composite's near-gap reroute (the
+        // close-range symmetry A/B; NOT a fix - see the ledger at the arm).
+        // 26343: 186 = revert the exact extractor across the registration
+        // chain (26342's composite take stays). Bisects the two halves.
+        // 26344: 188 = revert the near-gap ramp repair (restores the
+        // inverted 1/w comparison); 189 = revert the dark-publish gate.
+        // 26346: 190/191 = per-site reverts of the 26343 exact-camera
+        // extractor (adopt rebuild / seam anchor), for the third-person
+        // fast-move tracking regression.
+        // 26348: 192 = disarm PSInjDepth (the footprint's own near-gap
+        // encode) = 26347 verbatim; 193 = shader on, viewport floor NOT
+        // widened, which bisects the re-encode from the sub-floor band.
+        // 26349: 194/195 = the 26348 injection encode (PS + band / PS alone),
+        // OPT-IN after the 26348 field regression; 192/193 alias them.
+        // 196 = revert the seam trajectory-bound ratio to 4x.
+        // 26353: MODE 98 HAS NEVER BEEN REACHABLE. It is catalogued as
+        // "injection depth-CLIP instead of clamp", the code for it is live in
+        // kh_volume_seam_inject (khv_dbg_vp == 98 selects rast_sun over
+        // rast_inject, two states that differ in DepthClipEnable and nothing
+        // else), and it has never once been in this list - so every attempt to
+        // set it returned false and the arm has never run. Exactly the 26320
+        // discovery for 110/111/113/115, in the one slot the sub-1 m axis now
+        // needs. Whitelisted here for the first time.
+        // 26421: 222 ARMS the exact-order rebase (kh_rebase_vp_exact: the
+        // camera folded into the VIEW row before the projection multiply
+        // instead of into the finished fp32 product). MODE 0 IS THE BASELINE
+        // FOLD - this is opt-in because it was FALSIFIED as the close-range
+        // mesh jitter it was built for, twice, in the field. The arithmetic
+        // is correct and the number it removes grows with |camera|; it just
+        // is not the artifact. Full ledger at KH_ENGINE_VIEW_PRECISION in
+        // rendering_integration.hpp, positive control jitRebaseMm /
+        // jitRebaseMaxMm. First number spent out of the free range, so 223 is
+        // next - and the census still has to be re-run before it is spent,
+        // NOW ALSO CHECKING THAT THE MACHINERY A MODE ARMS IS REACHABLE:
+        // 116/117/118/125 pass the reader test and arm a chain with no call
+        // site (KhEngTry and kh_svs_eng_sweep have no callers), so they
+        // return true and do nothing. Adding a mode is STILL two edits with
+        // no compiler check between them: this list and the g_dbg_mode
+        // catalog.
+        // 26422: 224 REVERTS THE THIN-CREVICE SELF-SHADOW BIAS FIX, all three
+        // parts as one switch (full ledger at KH_SELF_BIAS_CREVICE in
+        // rendering_integration.hpp): the unanchored 10 mm compare-bias floor,
+        // the depth guard band inside the LATERAL ortho extent, and the slope
+        // scale on the lateral half of selfOfs. Mode 0 carries the fix - it is
+        // the answer to a reported artifact, not a speculative change - and
+        // 224 restores 26421 exactly. Expect under 224: narrow slots, strap
+        // channels and recessed seams in complex meshes reading SUNLIT again
+        // where their own lip must occlude them, worst on small objects.
+        // Fail direction of the fix itself is self-acne stipple on sun-facing
+        // faces; if that ever appears it is the TEXEL term that wants raising,
+        // never the floor. Spends the first number of the free range opened at
+        // 26421 (223 reserved), so 226 is next.
+        // 26423: 225 REVERTS THE GRAZING ESCAPE (KH_SELF_GRAZING_ESCAPE) - a
+        // SEPARATE axis from 224 and deliberately its own number. The self
+        // term's grazing cut and fade (26400, absent-beats-wrong at harsh
+        // incidence) were applied to the whole occlusion unconditionally, so a
+        // face at ndl ~0.15 lost its shadow even when the occluder was other
+        // geometry 20 cm away rather than its own texel ramp. The escape reads
+        // the receiver's own unbiased texel and skips cut and fade only where
+        // the stored depth proves the occluder is not this surface. Expect
+        // under 225: grazing faces of complex meshes reading sunlit again
+        // through geometry that plainly occludes them. Fail direction of the
+        // fix is a ~1 texel sliver at silhouettes shading fully instead of
+        // fading - the correct verdict, and accepted.
+        // 26424 NUMBERING NOTE: 223 IS FREE. A throwaway investigative branch
+        // ran a frozen-camera jitter experiment on that number; the branch is
+        // gone, nothing from it is in this build, and 223 was therefore never
+        // spent in this lineage - the next campaign may take it with no
+        // caveat. Its RESULT is kept at KH_FROZEN_CAMERA_TEST in
+        // rendering_integration.hpp because it is the evidence behind the
+        // outstanding developer request, quoted with the mode label stripped
+        // so no future 223 can be misread against it. 224/225/226 were spent
+        // while that was still being settled, which cost nothing.
+        // 26425: 216, 225 AND 226 ARE DELISTED, and 224 keeps only half its
+        // meaning. All three armed knobs inside the old offset/fade/escape
+        // self-shadow term, and KH_SELF_RPDB replaced that term outright, so
+        // they would now return TRUE and do NOTHING - the 26281 class, and
+        // the one this file has paid for most often. They were spent and
+        // retired inside a single session, so no script can be relying on
+        // them. 224 STAYS because its CPU half is still live (the compare-
+        // bias floor and the lateral/depth extent split of 26422); it simply
+        // no longer changes anything in the shader. MODE 183 is the A/B for
+        // the new term - it kills the sun-map self-shadow outright, which is
+        // the only honest one-switch control now that the knobs it used to
+        // sit beside are gone.
+        // 26426: 227 = THE SUN-DEPTH MAP RENDERS BACK FACES (CullFront)
+        // instead of CullNone. Full ledger at KH_SUN_BACKFACE in
+        // rendering_integration.hpp. The map has always stored the NEAREST
+        // surface, which for any lit receiver is that receiver - so every
+        // version of the self term has been asking a surface not to shadow
+        // itself, and the bias interval that would clear its own ramp at
+        // grazing without walking out of thin geometry is EMPTY. Storing the
+        // far side removes the self-compare entirely.
+        // IT IS AN ARM AND NOT A DEFAULT for one honest reason: a
+        // single-sided panel has no back face and CASTS NOTHING under 227.
+        // Whether that matters depends on how the models are built, which is
+        // a field question. THE READ: both the grazing z-fighting and the
+        // leak gone with casts intact = fold it; fixed but parts stop
+        // casting = the models are open and the fix is a two-pass map;
+        // neither changes = the artifact is not the self-compare and the
+        // axis is wrong.
+        // 26427: 228 = DEBUG VISUAL 19, the sun-map probe (full ledger at
+        // KH_SUN_MAP_PROBE). PURE GAUGE, mode 0 byte-identical. It paints,
+        // at the fragment's own texel: GRAY no map, MAGENTA outside the map,
+        // RED the texel was never written, BLUE nothing in front of this
+        // fragment, ORANGE a real occluder THE BIAS IS EATING, GREEN a real
+        // occluder the bias does not eat. Five builds have changed the
+        // self-shadow COMPARE without anything ever reporting what the map
+        // CONTAINS; read this before another one is written. ORANGE on the
+        // leak = bias-side and bounded; BLUE or RED = the occluder is not in
+        // the map and the whole compare-side line of work was aimed at the
+        // wrong half of the pipeline; MAGENTA = coverage/ortho fit; GREEN =
+        // the term says shadowed while the screen says lit, so the loss is
+        // downstream and this function is exonerated. It rides 228 rather
+        // than a 0-17 slot because all eighteen are spent and 84 already
+        // took visual 18; the mesh fill maps 228 -> dbgCtl.x 19.
+        // 26428: 229 = RESTORE THE 26425 RECEIVER-PLANE GRADIENT, which
+        // visual 19 falsified (full ledger at KH_SELF_RPDB_FALSIFIED). The
+        // gradient is built from the interpolated SHADING normal while the
+        // sun map holds RASTERIZED FACETS, and its 1/ndl scaling multiplies
+        // that mismatch without bound - so at grazing the nine taps disagreed
+        // and diluted an occlusion the centre tap called solid. Expect under
+        // 229: the light bleed AND the grazing flicker back together, which
+        // is the single-toggle proof they share an author.
+        // 26429: 230 = RESTORE THE GEOMETRIC N.L GATE on the receive block
+        // (full ledger at KH_SHADING_NORMAL_GATE). The block was gated on
+        // i.nrm while the textured path lights through the NORMAL-MAPPED
+        // khtxN, so a fragment whose geometry grazed the sun skipped cascade
+        // receive, self-shadow and stencil multiply entirely, kept smf 1.0,
+        // and was then lit anyway. Expect under 230: the grazing light bleed
+        // AND the grazing flicker back TOGETHER - the single-toggle proof
+        // they are one mechanism, and the reason every compare-side build
+        // from 26422 to 26428 changed a function these fragments never
+        // reached.
+        // 26430: 231 = RESTORE THE GEOMETRIC N.L VETO inside the self term
+        // (full ledger at KH_GEOMETRIC_NL_VETO). SunShadowOcclusionSelf used
+        // to return 0 occlusion outright when the GEOMETRIC normal faced away
+        // from the sun, while the textured path lights through the MAPPED
+        // normal - so a facet the normal map turns sun-facing was lit with no
+        // shadow lookup at all. Visual 7 measured it directly: the leaking
+        // patch reads WHITE (smf 1) while visual 19 reads GREEN (occluder
+        // present) on the same fragment. Expect under 231: the white hole and
+        // the light bleed back together.
+        // 26431: 232 = RESTORE THE SLOPE CEILING OF 8 on the self-shadow bias
+        // (full ledger at KH_SLOPE_CEILING). The 3x3 kernel's worst tap sits
+        // 2.12 texels away, so the receiver's own plane climbs 2.12*tan*texel
+        // across it - and a bias capped at 8 is arithmetically short of that
+        // below ndl ~0.10, which MAKES the grazing z-fighting rather than
+        // merely failing to stop it. The cap was 26400's KH_SELF_SLOPE_MAX,
+        // built for an offset that MOVED the sample; that offset is gone and a
+        // pure depth bias has the opposite cost curve (surface-space leak is
+        // bias/tan = 3 texels, CONSTANT at any incidence). Expect under 232:
+        // the grazing flicker back, everything else unchanged.
+        // 26432: 233 = TAKE THE BIAS SLOPE FROM THE VERTEX NORMAL AGAIN
+        // (full ledger at KH_FACET_BIAS_NORMAL). The self-shadow bias scales
+        // with tan(theta), and theta was measured on the INTERPOLATED normal
+        // while the sun map holds RASTERIZED FACETS - degrees apart on a
+        // smoothed FBX, and tan is brutally sensitive near grazing. Default
+        // now uses whichever normal grazes HARDER, which can only raise the
+        // bias. Expect under 233: the last of the grazing shimmer back.
+        // NOTE THE FLOOR before spending another build here: one map texel
+        // spans 0.49/ndl mm ACROSS the surface - 24 mm at ndl 0.02 - so the
+        // grazing shadow boundary is quantised at centimetre scale by the
+        // map's RESOLUTION, which no bias can move.
+        // 26436: 234 = PUT THE SLOPE BIAS BACK IN THE SHADER and zero the
+        // rasterizer's (full ledger at KH_RASTER_SLOPE_BIAS). The sun-depth
+        // map was rendered with NO bias and all slope compensation ran in the
+        // per-fragment compare, where it is derived from a NORMAL and scaled
+        // by tan - so it varied between neighbouring fragments wherever the
+        // normal does, which is what tight geometry means, and a binary
+        // compare against a varying threshold is speckle. Hardware
+        // SlopeScaledDepthBias is PER TRIANGLE and therefore has no
+        // fragment-to-fragment variance at any magnitude - which is why the
+        // standard technique does not noise. Expect under 234: the tight-
+        // geometry speckle back.
+        const bool khd_ok = khd_m == 222 || khd_m == 224 || khd_m == 227 ||
+                            khd_m == 228 || khd_m == 229 || khd_m == 230 ||
+        // 26438: 235 = RESTORE THE D32 DEPTH-QUANTISATION FLOOR on the
+        // self-shadow constant bias (full ledger at KH_WORLD_ULP_FLOOR). The
+        // floor must clear fp32 WORLD precision, not depth-buffer precision:
+        // i.wpos is quantised at ulp(|wpos|) - 0.488 mm at 7 km - while the
+        // caster's stored depth arrives through a different interpolation
+        // path, so a bias under one ulp compares noise and lands arbitrarily
+        // per triangle. Expect under 235: isolated dark triangles on faces
+        // that are almost DIRECTLY lit (not grazing).
+                            khd_m == 231 || khd_m == 232 || khd_m == 233 ||
+                            khd_m == 234 || khd_m == 235 ||
+        // 26440: 236 = KH_ENGCAM_LOCATOR, the engine's OWN camera consumed
+        // instead of the one recovered from the RV projection-view matrix
+        // (full ledger before the seam inject in rendering_integration.hpp).
+        // 26441: THE FIELD A/B PASSED (dump1: Takes 777 engaged, Dx exactly
+        // one ulp, Ambig 0, wrong-row never) AND THIS IS NOW THE DEFAULT -
+        // mode 0 carries it, and 236 is a KEPT ALIAS selecting what mode 0
+        // already does, so 26440-era test scripts keep working and meaning
+        // it (the 143/144-family convention).
+                            khd_m == 236 ||
+        // 26441: 237 = REVERT KH_ENGCAM_LOCATOR to the recovered-camera
+        // fold, i.e. 26440 mode-0 behaviour, with the locator's gauge lanes
+        // still live for the A/B. The standing check runs in the REVERT
+        // direction now: under 237 the close-range jitter must RETURN at
+        // high |C| (rotation and translation), or something other than the
+        // camera is carrying it and the fold verdict needs re-opening.
+        // Camera-path diagnostics (184/186/192/222) stand the default down
+        // by themselves - ledger at kh_engcam_armed. Under mode 0 do NOT
+        // read jitCamHolds / jitCamStepMm as engine truth: the gauge samples
+        // the taken camera (the frozen-camera ledger's side-effect (b));
+        // engCamDxMm is the honest lane, captured before the overwrite.
+                            khd_m == 237 ||
+        // 26443: 223 = REVERT the abrupt-motion stencil finalization
+        // (recent-velocity ring + floor-refusal witness gate together;
+        // full ledger at the trajectory bound in
+        // rendering_integration.hpp). One axis, one number.
+                            khd_m == 223 ||
+        // 26443b: 238 = REVERT the density-adaptive self-kernel ring
+        // (flat 3x3 restored; rides lighting0.y 20; full ledger at
+        // KH_SUN_UNION_DENSITY beside the sun-map fit).
+                            khd_m == 238 ||
+        // 26444: 239 = REVERT the hero sun map (union-only, 26443
+        // behaviour verbatim incl. the hash; full ledger at
+        // KH_SUN_HERO_MAP).
+                            khd_m == 239 ||
+        // 26447: 240 = REVERT the engcam absolute agreement bound
+        // (per-component 4-ulp form restored; ledger in
+        // kh_engcam_agree4).
+                            khd_m == 240 ||
+        // 26453: 241 = ARM the camera-anchored union window at
+        // g_sun_range (default was the caster-anchored fit).
+        // 26454: MEANING FLIPPED WITH THE DEFAULT - the cascade ladder
+        // exists (KH_SUN_CASCADE in rendering_integration.hpp), the
+        // camera-anchored window IS the default union fit now, and 241
+        // REVERTS to the caster-anchored fit (26453 mode-0 behaviour
+        // verbatim, incl. the camera-free hash and the 250 m
+        // eligibility radius). The 143/144-family convention does NOT
+        // apply (241 was an arm, not an alias): scripts setting 241
+        // now get the OLD behaviour, which is what a revert number
+        // means everywhere else in this list.
+                            khd_m == 241 ||
+        // 26454: 242 = stand the MID cascade band down (8 m @ 4 mm,
+        // t26). CPU-side: the band is not rendered, its meta stays
+        // zeroed, and the self + cast chains fall through to the next
+        // tier. Expect under 242: self shadows and casts between 2 m
+        // and 8 m degrade to outer-band texels (16 mm).
+                            khd_m == 242 ||
+        // 26454: 243 = revert the CAST TIER CHAIN to the union-only
+        // compare (lighting0.y 21, written only by the fire's cast CB
+        // fill). Self shadows keep the full ladder; expect under 243:
+        // near casts blur back to range-priced texels - the 26452
+        // report reproduced on demand.
+                            khd_m == 243 ||
+        // 26454: 244 = stand the OUTER cascade band down (32 m @
+        // 16 mm, t27). Same CPU-side shape as 242; expect under 244:
+        // 8-32 m falls to the union's range-priced texels.
+                            khd_m == 244 ||
+        // 26455: 245 = REVERT the cascade filtering (lighting0.y 22,
+        // carried by both the mesh and fire CB fills): the cast
+        // compare drops back to the hard single bilinear at every
+        // tier AND the band self kernels re-collapse to the 26443b
+        // single tap. One filtering axis, one number. Expect under
+        // 245: the 26454 screenshot reproduced - blocky staircase
+        // self shadow on mesh flanks past ~8 m and hard cast edges.
+                            khd_m == 245 ||
+        // 26456: 246 = REVERT the self range fade (lighting0.y 23,
+        // mesh CB): the union self tier drops its edge fade and the
+        // hard uv-window cutoff returns. Expect under 246: a mesh
+        // walked toward shadowVisibility keeps full-strength self
+        // shadow to the window edge, then it vanishes in one step.
+                            khd_m == 246 ||
+        // 26458: 247 = REVERT the whole stencil mirror counting pass
+        // (KH_VOL_MIRROR; CPU-side, byte-identical 26457): no prepass,
+        // no b2 patch, no re-issue, mirMeta 0. Expect under 247: the
+        // engine stencil shadow on our meshes washes back out inside
+        // the sub-near fade window (the last ~metre) exactly as every
+        // build before 26458.
+                            khd_m == 247 ||
+        // 26458: 248 = mirror mask PRODUCED, consumption OFF
+        // (lighting0.y 24, mesh fill). The pre-registered A/B split:
+        // vmirDraws / vmirMaskFrames keep counting while the composite
+        // fade returns to its constant 1.0. Expect under 248: visuals
+        // identical to 247 with the production lanes still live.
+                            khd_m == 248 ||
+        // 26458: 249 = REVERT the sun anchor (KH_SUN_ANCHOR): every
+        // sun matrix world-absolute again, sunOrigin (0,0,0), shader
+        // subtraction bit-exact no-op. Expect under 249: the grazing
+        // motion shimmer on lit faces inside ~10 m returns.
+                            khd_m == 249 ||
+        // 26458: 250 = REVERT the band stage pool to 2 (the 26416
+        // count; creation is take-site-lazy either way, so the change
+        // is live mid-session). Expect under 250 at speed:
+        // bandStagePoolMiss climbing back toward the 59% class and the
+        // shadow-view-distance entry offset returning.
+                            khd_m == 250 ||
+        // 26458: 251 = DISABLE the layout-change escape. Expect under
+        // 251: bandLayoutEscapes pinned 0 and casts landing offset for
+        // up to the 4 Hz interval after a cascade re-author (the
+        // shadow-view-distance entry).
+                            khd_m == 251 ||
+        // 26459: 252 = DEBUG VISUAL 20, the mirror-mask probe (dbgCtl.x
+        // 20; translated at the mesh fill like 84 -> 18). MAGENTA = mask
+        // invalid (production), BLUE = mask shadowed, GREEN = mask lit.
+        // Pure gauge; mode 0 byte-identical.
+                            khd_m == 252 ||
+        // 26459: 253 = REVERT the gradient slack (KH_SUN_GRAD_SLACK,
+        // lighting0.y 25): every self tier drops the fwidth depth slack.
+        // Expect under 253: the grazing motion z-fight returns in full.
+                            khd_m == 253 ||
+        // 26461: 254 = REVERT the re-issue's depth clamp (the mirror
+        // draws with the engine's own DepthClipEnable). Expect under
+        // 254: the uniform sub-near dark returns (the 26460 field
+        // capture reproduced) - the near-clip imbalance made visible.
+                            khd_m == 254 ||
+        // 26464: 255 = REVERT the shadow-view-distance range fade
+        // (KH_SUN_RANGE_FADE, CPU sentinel: mirMeta.w stays 0). Expect
+        // under 255: casts onto terrain and self shadows POP in/out at
+        // the shadow view distance instead of thinning over the last
+        // ~15% of it.
+                            khd_m == 255 ||
+        // 26465: 256 = REVERT the double-precision band snap (fp32 form
+        // restored). Expect under 256: the grazing motion shimmer on lit
+        // faces returns, hero-worst, with the 239-visible edge line.
+                            khd_m == 256 ||
+        // 26465: 257 = REVERT the cascade tier blend (lighting0.y 26,
+        // BOTH fills): band boundaries return to hard 1/4/16 mm steps.
+        // Expect under 257: a visible sharpness line sweeping with the
+        // camera at ~2 m and ~8 m and ~32 m from the shadow.
+                            khd_m == 257 ||
+        // 26467: 259 = REVERT normal-offset sampling (lighting0.y 27,
+        // self chain; the front-face-standard primary anti-acne, grazing-
+        // scaled 1-3 texels). Expect under 259: the grazing motion
+        // shimmer and the 239-class edge line return - THE single
+        // diagnostic revert for the offset axis. 258 was freed unspent
+        // (the 26466 back-face default was withdrawn pre-field on the
+        // operator's 227 bleed data; ledger at the union RSSetState).
+                            khd_m == 259 ||
+        // 26470: 260 = REVERT footprint tap spread (lighting0.y 28,
+        // self chain; fixed +-1 ring restored). Expect under 260: the
+        // camera-grazing salt-and-pepper and the crevice noise return.
+                            khd_m == 260 ||
+        // 26471: 261 = RESTORE the historic 16/3.0 sun raster bias (the
+        // low 8/1.0 state is the default). Expect under 261: the
+        // separation-dependent contact/crevice dapple returns.
+                            khd_m == 261 ||
+        // 26472/26474: 262 = contact shortcut OFF - since 26474 an
+        // accepted ALIAS OF THE DEFAULT (expect: identical to mode 0).
+                            khd_m == 262 ||
+        // 26474: 263 = ARM the contact blocker shortcut (lighting0.y 30,
+        // opt-in experimental; the 26473 slope-thresholded form). Expect
+        // under 263: crevices quieter, grazing misfire dapple returns on
+        // sun-sloped faces - the banked margin>2.5 experiment's baseline.
+                            khd_m == 263 ||
+        // 26476: 258 = REVERT the lighting-block anchor gate (the lum
+        // band returns to the instantaneous standing; CPU-only, ledger
+        // at kh_probe_std_refresh). Expect under 258: the camera-
+        // dependent ~5% mesh brightness flip RETURNS (blkSunLum walking
+        // 17<->13.5-class pairs in the trace); at mode 0 one cluster
+        // holds with blkAnchorRejects climbing under camera motion.
+                            khd_m == 258 ||
+        // 26476: 264 = REVERT self-tier bilinear PCF (KH_SELF_PCF,
+        // lighting0.y 31, mesh fill; hard single-texel taps restored on
+        // all four self tiers). Expect under 264: the lit/shadow
+        // terminator dither returns, worst at close caster-receiver
+        // contact.
+                            khd_m == 264 ||
+        // 26476: 265 = REVERT the MinHook install retry ladder (single-
+        // attempt historic behavior: the first failed install round
+        // latches the session off and reports immediately; ledger at
+        // kh_reorder_hook_fail_round).
+                            khd_m == 265 ||
+        // 26477: 266 = ARM the tid-relax experiment (opt-in; ledger in
+        // reorder_pre_draw): track target-context draws from non-clear
+        // threads, own draws excluded by flags. Expect under 266 with
+        // FSAA off: IF the standdown is a submission-thread change,
+        // injections revive (compositeInjections counting, meshes lit,
+        // bottom cut gone); if the foreign census instead convicts a
+        // deferred context (hookFctxType reading 1), 266 stays inert.
+                            // 266: DELISTED 26497 - the tid-relax experiment stripped with the FSAA-off campaign (number never reused)
+        // 26477/26478: 267 = the GRADIENT-OFF isolator (lighting0.y 32;
+        // the capped 2/2 offset is the 26478 default, so 267 now selects
+        // default-offset WITHOUT the clamped RPDB gradient). Expect
+        // under 267: the 26477-reported grazing terminator strip returns
+        // (that strip is the gradient's whole contribution).
+                            khd_m == 267 ||
+        // 26478: 268 = FULL revert of the noise axis (lighting0.y 33):
+        // offset 6/8 restored, gradient off - the 26477 mode-0 behavior
+        // verbatim. Expect under 268: the close-contact noise returns,
+        // the grazing strip gone.
+                            khd_m == 268 ||
+        // 26479: 269 = DEBUG VISUAL 21, the self-tier probe (dbgCtl.x
+        // 21; pure gauge, ledger at KhSelfTierProbe). Expect: tier hues
+        // (red-orange hero / yellow mid / cyan outer / blue union /
+        // magenta none), darker where the self term reads occluded.
+                            khd_m == 269 ||
+        // 26480: 270 = REVERT the publish rate gate (instant adoption
+        // of any in-band coherent step). Expect under 270: the ~6.7%
+        // camera-flip returns at ~1/s while panning; mode 0 must hold
+        // steady with blkRateHolds ticking at each provoked flip.
+                            khd_m == 270 ||
+        // 26480: 271 = REVERT the scoped off-thread trigger (tid-gated
+        // historic behavior). Expect under 271 with FSAA off: injections
+        // return to 0 and the meshes fall back to the mis-encoded
+        // fallback (bottom cut); mode 0 with FSAA off must read
+        // offthreadTrigs and (if tid was the whole story)
+        // compositeInjections climbing together.
+                            // 271: DELISTED 26497 - the off-thread trigger + opaque floor mirror stripped with the FSAA-off campaign (number never reused)
+        // 26480: 272 = gradient curvature damper OFF (lighting0.y 34;
+        // the 26478 undamped gradient). Expect under 272: the curved-
+        // contact speckle (the 26479 screenshot) returns to mode-0-of-
+        // 26478 level while flat-wall z-fight coverage is unchanged.
+                            khd_m == 272 ||
+        // 26481: 273 = REVERT the injection-instant block snapshot (the
+        // publish returns to the park-time live mirror, 26479 behavior).
+        // Expect under 273: the camera flip class returns while panning;
+        // mode 0 must hold with blkSnapAdopts ~ flushes.
+                            khd_m == 273 ||
+        // 26481/26482: 274 = REVERT the whole off-thread funnel (tid-
+        // gated historic behavior on blend/DSS/RTS AND map/unmap/
+        // updatesubresource). Expect under 274 with FSAA off:
+        // offthreadTrigs stops, lightLocValid drops, injections die;
+        // MSAA-on must be unchanged under BOTH 0 and 274.
+                            // 274: DELISTED 26497 - the off-thread funnel/state/SRV admissions stripped with the FSAA-off campaign (number never reused)
+        // 26481: 275 = shader disk cache OFF (every launch recompiles;
+        // ledger at compile_shader). Expect under 275: the long spawn
+        // returns; mode 0 second-launch spawn must be fast.
+                            khd_m == 275 ||
+        // 26483: 276 = REVERT the snapshot-anchor consistency gate (any
+        // injection-instant snapshot adopts regardless of cluster).
+        // Expect under 276: rare wrong-cluster snapshot flips return;
+        // mode 0 must read blkSnapRejects > 0 while panning with the
+        // picture steady.
+                            khd_m == 276 ||
+        // 26484: 277 = ADMIT lane-15 == 2 blocks into the arbitration
+        // (opt-in experiment; ledger at the locked-confirm gate). Expect
+        // under 277 with FSAA off: EITHER the meshes light up (sane
+        // FSAA-off block wearing the variant flag - convicted) OR
+        // nothing changes and blkModeV/N census names hostile lanes.
+                            khd_m == 277 ||
+        // 26486: 278 = REVERT snapshot-outright adoption (snapshot
+        // publishes return through the 50% band + 500 ms pending).
+        // Expect under 278: real weather swings render as freeze-then-
+        // snap again (mesh pops ~500 ms after the world); mode 0 must
+        // track swings frame-accurately with blkJumpAdopts ~ 0.
+                            khd_m == 278 ||
+        // 26487: 279 = REVERT continuity selection (the snapshot takes
+        // the last upload before the injection again). Expect under
+        // 279: the small-gap camera flip class returns; mode 0 must
+        // hold zero flips with blkRingPicks climbing.
+                            khd_m == 279 ||
+        // 26488: 280 = REVERT the measured bias defaults (lighting0.y
+        // 35: slope back to 0.35, floor x1, curvature damper back on -
+        // the 26487 form verbatim). Expect under 280: the steep-face
+        // terminator noise returns at the 26487 level (measured 0.267%
+        // vs the new default's 0.093% on the operator's own map).
+                            khd_m == 280 ||
+        // 26489: 281 = REVERT the off-thread atlas consumption (the
+        // SRV-keyed sweep returns to render-thread draws only). Expect
+        // under 281 with FSAA off: litGate falls back to 0, receive
+        // dies again; MSAA-on unchanged.
+                            // 281: DELISTED 26497 - the off-thread atlas-consumption call stripped with the FSAA-off campaign (number never reused)
+        // 26489: 282 = 3x3 ring restored on the band tiers
+        // (lighting0.y 36; the diamond is the default - measured
+        // 0.075% vs 0.093% on the operator's map). Expect under 282:
+        // marginally more penumbra body, marginally more steep-face
+        // noise, ~2x the tap cost.
+                            khd_m == 282 ||
+        // 26490: 283 = RESTORE the anchor gate over ring picks (the
+        // 26483-26489 behavior). Expect under 283: blkSnapRejects
+        // climbs again and the few-percent flip variant returns.
+                            khd_m == 283 ||
+        // 26491: 284 = tier-proportional floor OFF (lighting0.y 37;
+        // the 26490 arm, now reachable). Expect: distance noise returns.
+                            khd_m == 284 ||
+        // 26491: 285 = diamond ring opt-in (lighting0.y 38). Expect:
+        // fewer taps, more penumbra banding - the retired 26489 default.
+                            khd_m == 285 ||
+        // 26491: 286 = matrix-offset scan OFF (fixed [180] only, the
+        // pre-26491 behavior). Expect at 1x: receive dies again.
+                            khd_m == 286 ||
+        // 26492: 287 = FSAA-toggle wipe OFF (held receive state survives
+        // an FSAA change - the pre-26492 behavior). Expect under 287:
+        // toggling FSAA mid-session can poison lighting until restart.
+                            khd_m == 287 ||
+        // 26494: 288 = the 26488 crop-measured bias opt-in (lighting0.y
+        // 39: slope 0.8, floor x1.25, damper off). The default is now
+        // mode 280's form by operator ranking; 280/35 are aliases.
+                            khd_m == 288 ||
+        // 26495: 289 = mission-teardown ordering revert, the 26494
+        // behavior wholesale: destroy-before-disarm on the success path,
+        // and on lock exhaustion the destroy is SKIPPED outright (the
+        // deferral never arms; missionResetFails still counts under both
+        // arms). Expect under 289 after a lock-exhausted mission end:
+        // the next mission inherits the old session's lighting
+        // arbitration/atlas/locators armed - old-mission flavors can
+        // bias its first ~1 s and worse.
+                            khd_m == 289 ||
+        // 26496: 290 = FSAA-requirement stand-down OFF - world meshes and
+        // the shadow machinery attempt to run at 1x again (the 26495
+        // behavior: meshes render, lit ones full-bright albedo,
+        // shadowLiveLatches 0, the whole retired campaign's symptom set).
+        // The A/B for anything suspected of the stand-down, and the
+        // escape hatch if a mesh must exist at 1x regardless of lighting.
+                            khd_m == 290 ||
+                            khd_m == 98 ||
+                            // 26407: 84 = DEBUG VISUAL 18, the sealed-tile
+                            // content probe (ledger at KH_BAND_CONTENT_PROBE).
+                            // It is a free number carrying a visual because all
+                            // eighteen 0-17 slots are spent; the mesh fill maps
+                            // it to dbgCtl.x 18. Caught by the census as a
+                            // reader with no whitelist entry - the 26353 class
+                            // (mode 98 unreachable for its whole life), which is
+                            // exactly what that census is for.
+                            khd_m == 84 ||
+                            // 26415: 88 reverts the overlap-anchored reseal
+                            // budget to the border[0] < 10 classification.
+                            khd_m == 88 ||
+                            // 26418: 99 reverts the zero-sun publish refusal.
+                            khd_m == 99 ||
+                            // 26358: 199 = the receiver-depth compensation on
+                            // the stencil tap (rides dbgCtl.w as 5.0).
+                            // 26382: 202 / 203 are the near-gap seam reverts.
+                            // 26383: 204 / 205 are the footprint SV_Depth encode
+                            // arms, moved off the recycled 192/193/194/195.
+                            // Catalog entry at the g_dbg_mode CATALOG COMMENT.
+                            // 26411: the cascade coverage fallback is OUT of mode
+                            // 0 - falsified with a positive control (visual 18
+                            // paints YELLOW on the artifact: the fallback
+                            // recovers a tile and that tile is empty). 220 ARMS
+                            // it, 217 is an accepted ALIAS of the default. Both
+                            // stay whitelisted deliberately: this pair has
+                            // flipped twice on field evidence and delisting one
+                            // each time is churn that rule 1.18 would then have
+                            // to police. Ledger at KH_BAND_COVER_FALLBACK.
+                            // 26402: the seam trajectory-bound backstop at 100x is
+                            // FOLDED TO DEFAULT, so 219 is now the revert (20x =
+                            // 26350 verbatim) and 218 is an accepted ALIAS of the
+                            // default - it selected what mode 0 now does, so it is
+                            // deliberately NOT delisted below. Adding a mode is
+                            // still TWO edits with no compiler check between
+                            // them - this list and the g_dbg_mode catalog.
+                            // 26405: 221 restores the 0.02 m "still" line at the
+                            // seam trajectory bound (ledger at the bound).
+                            // 26425: 216 CARVED OUT OF THE RANGE. It armed the fixed
+                            // self-shadow offset inside the term KH_SELF_RPDB replaced,
+                            // so it now has no reader anywhere and would return TRUE
+                            // and do NOTHING. This block range is how 216 stayed
+                            // whitelisted without an entry of its own, which is also
+                            // why a range is a worse instrument than a list: the 26383
+                            // census reads equality comparisons and a range hides
+                            // exactly this. Do not recycle 216 (rule 1.18).
+                            (khd_m >= 129 && khd_m <= 221 && khd_m != 216) ||   // 26361: 201; 26382-26405: 203..221
                             khd_m == 110 || khd_m == 111 ||   // 26320: the 26249-era volume paints were NEVER whitelisted -
                             khd_m == 113 || khd_m == 115 ||   // "mode 110 was never run" because it never could run
                             khd_m == 118 ||                   // 26320: vol-depth + count composite paint (was inert)
                             // 129-166: 26277-26320 arms (143/144/150/152 default aliases, 145/146/149/153-162 reverts,
                             // 147/151 retired, 135/136 arms; 158-162 = the 26309-26312 reverts; 163 = 26315 content-probe
                             // KILL switch (probes default ON); 164/165 = the 26314 reverts: collapse-override witness
-                            // veto / world-latch measured-witness escape; 166 = 26320 receive-kill A/B)
+                            // veto / world-latch measured-witness escape; 166 = 26320 receive-kill A/B;
+                            // 167/168 = the 26321 cascade-kill / stencil-kill split, 169 = armed alias, 170 = the
+                            // 26324 first-bracket copy-latch revert; 171 = the 26325 revert: the COLOUR pass's FOV
+                            // take stood down, so the visible box goes back to the cycle latch's scale terms and
+                            // rasterises one frame behind its own footprint through a zoom;
+                            // 172 = RETIRED to an accepted no-op at 26327 (the referee it reverted is
+                            // now opt-in, so there is nothing left to revert); 173 = 26327: ARM the
+                            // engine-sniff referee over the seam's depth encode - A/B ONLY, it
+                            // regressed the field at 26326 by forcing the k phase on shooting ramps;
+                            // 174 = 26330 THE FIX UNDER TEST: the injected footprint is transformed by
+                            // the ENGINE'S OWN matrix out of the bound b2 instead of by any pair we
+                            // arbitrate - measured identical to what the counting draws consume on
+                            // 278/278 samples. Opt-in; mode 0 unchanged. 175 = 26331: the SAME
+                            // transform over a CAMERA-RELATIVE position instead of absolute world -
+                            // 174 resolved the flicker but landed the footprint at the ground's
+                            // depth, which is what a wrong-space position does; 176 = 26332 THE FIX:
+                            // our own transform for x/y/w with only the ENGINE'S DEPTH PAIR remapping
+                            // z - space-agnostic, since b2's position space proved to be neither
+                            // absolute nor camera-relative while its depth pair is exact 370/370.
+                            // 26333: 176 IS NOW THE DEFAULT and stays as an accepted alias;
+                            // 177 = the REVERT to the arbitrated encode)
                             (khd_m >= 0 && khd_m <= 17) ||   // shader visuals (10-13 are the LADDERS: see the
                                                              // g_dbg_mode catalog. The 'retired' note here was
                                                              // stale from 26189 - corrected 26202; 14 is free)
@@ -8031,7 +8584,53 @@ static game_value set_render_debug_sqf(game_value_parameter arg) {
                                                               // 26095: mode 29 (the legacy arm-floor escape
                                                               // hatch) is REMOVED with its floor branch per
                                                               // §9 - 29 now rejects; ledger at the T-machine
-        if (!khd_ok) return game_value(false);
+        // 26383 RETIRED NUMBERS FAIL LOUDLY NOW. Each of these was
+        // whitelisted with no reader anywhere in rendering_integration.hpp,
+        // so setRenderDebug returned TRUE and did nothing - the worst
+        // failure mode a switch has, because a script cannot tell it from a
+        // working arm. Verified at this build by expanding this whitelist
+        // and matching it against every equality reader plus every raw
+        // occurrence in the source. 143/144/150 are NOT here: they are
+        // documented aliases FOR the default, where returning true and
+        // changing nothing is the correct answer.
+        // 26401 THE 26383 CENSUS WAS INCOMPLETE, AND ITS OWN LEDGER NAMES
+        // THREE OF THE MISSES. Re-run with a TRANSITIVE alias closure from
+        // g_dbg_mode (97 aliases; 26383's single-pass scan could not see
+        // second-hop locals such as khv_nz_m = khv_dbg_vp, which is the only
+        // reader of 204/205) followed by an exhaustive `== N` / `!= N` sweep
+        // over the comment- and string-stripped source. SEVEN MORE NUMBERS
+        // HAVE NO COMPARISON ANYWHERE: 90, 91, 92, 100, 101, 104, 120. The
+        // 26244 ledger in kh_fill_reproj already says so in writing - "Retired
+        // to no-ops by this build: 83 (its revert is the default now), 90, 91,
+        // 92 and 94" - and only 94 was delisted from that sentence. They are
+        // added here.
+        // 207 IS NOT ADDED and this is the note that stops the next census
+        // delisting it. 26386 folded the upward identity-gate ramp into mode 0
+        // and mapped 207 to dbg_ctl[2] = 0 deliberately, so it is a default
+        // alias exactly like 143/144/150/190 - no reader, correct behaviour.
+        // The kept-alias list is 143 / 144 / 150 / 190 / 207 / 218 (26402
+        // folded 218's 100x backstop into mode 0, so setting it is correct
+        // and changes nothing; 219 is its revert).
+        const bool khd_dead = khd_m == 90  || khd_m == 91  || khd_m == 92  ||
+                              khd_m == 94  || khd_m == 100 || khd_m == 101 ||
+                              khd_m == 103 || khd_m == 104 || khd_m == 105 ||
+                              khd_m == 106 || khd_m == 109 || khd_m == 120 ||
+                              khd_m == 135 ||
+                              khd_m == 147 || khd_m == 151 || khd_m == 169 ||
+                              khd_m == 172 ||
+                              // 26416: 213 was INERT since it was minted - slots are
+                              // only created inside the atlas-ensure block, so raising
+                              // the count mid-session finds nulls. The question it
+                              // asked is moot now that 26396 serves every pool miss
+                              // immediately (PoolFall == PoolMiss, DropAge/DropDead 0),
+                              // so it is delisted rather than repaired.
+                              khd_m == 213 ||
+                              // 26420: 85 was the live-atlas fallback. Its fault (the
+                              // drift gap) was closed at the source by 26415/26416 and
+                              // it was field-tested against the teleport transient and
+                              // did not fix that either. Removed, not recycled.
+                              khd_m == 85;
+        if (!khd_ok || khd_dead) return game_value(false);
         RenderIntegration::g_dbg_mode.store(khd_m, std::memory_order_relaxed);
         return game_value(true);
     } catch (...) {
@@ -8169,6 +8768,99 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("compositeInjections", RenderIntegration::g_stats.composite_injections));
         out.push_back(kv("compositeMeshes", RenderIntegration::g_stats.composite_meshes));
         out.push_back(kv("compositeSkips", RenderIntegration::g_stats.composite_skips));
+        // 26439 the hook-latch instrument (campaign-53 handoff, standing
+        // finding 2). attempts counts installs actually tried; a nonzero
+        // failPhase with its MH status is the transient-failure conviction
+        // the ledger asked for; vtDrift counting while hookActive reads 1 is
+        // the recreated-context blind spot, previously invisible. SESSION
+        // STATE like the latches themselves - reset_render_stats leaves
+        // these alone (cold-timeline rule). The active bit already rides the
+        // long-standing reorderHook lane below and is NOT duplicated here.
+        // The three signed lanes ride kvf: MhStatus is -1 for the init phase
+        // and FailSlot is -1 at rest, and the uint64 lambda would wrap both
+        // (the 26406 lesson, signedness flavour).
+        out.push_back(kv("reorderHookAttempts", RenderIntegration::g_reorder_hook_attempts));
+        out.push_back(kvf("reorderHookMhStatus", static_cast<float>(RenderIntegration::g_reorder_hook_mh_status)));
+        out.push_back(kvf("reorderHookFailPhase", static_cast<float>(RenderIntegration::g_reorder_hook_fail_phase)));
+        out.push_back(kvf("reorderHookFailSlot", static_cast<float>(RenderIntegration::g_reorder_hook_fail_slot)));
+        out.push_back(kv("reorderHookVtDrift", RenderIntegration::g_reorder_hook_vt_drift));
+        // 26476: the retry ladder + the no-MSAA trigger census (catalog
+        // entry; the first census lane reading 0 in a no-FSAA dump names
+        // the broken trigger link).
+        out.push_back(kvf("reorderHookFailRounds", static_cast<float>(RenderIntegration::g_reorder_hook_fail_count)));
+        out.push_back(kv("roCycBlend", RenderIntegration::g_ro_cyc_blend));
+        out.push_back(kv("roCycNoWrite", RenderIntegration::g_ro_cyc_nowrite));
+        out.push_back(kv("roCycMainDsv", RenderIntegration::g_ro_cyc_maindsv));
+        out.push_back(kv("roCycTrig", RenderIntegration::g_ro_cyc_trig));
+        out.push_back(kv("msaaDepthSamples", static_cast<uint64_t>(RenderIntegration::g_res.depth_sample_count)));
+        out.push_back(kv("locRefState", static_cast<uint64_t>(
+            (RenderIntegration::g_fog_valid ? 1u : 0u) |
+            (RenderIntegration::g_fog[1] > 1.0e-4f ? 2u : 0u) |
+            (RenderIntegration::g_ls.cam[1] != 0.0f ? 4u : 0u))));
+        // 26477 funnel-split lanes (ledger at g_hook_draw_foreign).
+        out.push_back(kv("hookDrawPass", RenderIntegration::g_hook_draw_pass.load(std::memory_order_relaxed)));
+        out.push_back(kv("hookDrawTidBail", RenderIntegration::g_hook_draw_tidbail.load(std::memory_order_relaxed)));
+        out.push_back(kv("hookDrawForeign", RenderIntegration::g_hook_draw_foreign.load(std::memory_order_relaxed)));
+        out.push_back(kv("hookMapTidBail", RenderIntegration::g_hook_map_tidbail.load(std::memory_order_relaxed)));
+        out.push_back(kv("hookMapForeign", RenderIntegration::g_hook_map_foreign.load(std::memory_order_relaxed)));
+        out.push_back(kvf("hookFctxType0", static_cast<float>(RenderIntegration::g_hook_fctx_type[0])));
+        out.push_back(kvf("hookFctxType1", static_cast<float>(RenderIntegration::g_hook_fctx_type[1])));
+        out.push_back(kvf("hookFctxType2", static_cast<float>(RenderIntegration::g_hook_fctx_type[2])));
+        out.push_back(kvf("hookFctxType3", static_cast<float>(RenderIntegration::g_hook_fctx_type[3])));
+        // 26478 trig-miss DSV census (ledger at g_trigmiss_cycles).
+        out.push_back(kv("trigMissCycles", RenderIntegration::g_trigmiss_cycles));
+        out.push_back(kv("trigMissDsvNull", RenderIntegration::g_trigmiss_null));
+        out.push_back(kv("trigMissMainTex", RenderIntegration::g_trigmiss_mainmatch));
+        out.push_back(kv("trigMissW", static_cast<uint64_t>(RenderIntegration::g_trigmiss_w)));
+        out.push_back(kv("trigMissH", static_cast<uint64_t>(RenderIntegration::g_trigmiss_h)));
+        out.push_back(kv("trigMissFmt", static_cast<uint64_t>(RenderIntegration::g_trigmiss_fmt)));
+        out.push_back(kv("trigMissSamp", static_cast<uint64_t>(RenderIntegration::g_trigmiss_samp)));
+        // 26479 trig-miss extras + the DSV-bind census + block pipeline.
+        out.push_back(kv("trigMissDraws", RenderIntegration::g_trigmiss_draws));
+        out.push_back(kv("trigMissAfterMain", RenderIntegration::g_trigmiss_after_main));
+        out.push_back(kv("trigMissOpq", static_cast<uint64_t>(RenderIntegration::g_trigmiss_opq)));
+        out.push_back(kvf("trigMissVpMin", RenderIntegration::g_trigmiss_vpmin));
+        out.push_back(kvf("trigMissVpMax", RenderIntegration::g_trigmiss_vpmax));
+        out.push_back(kvf("dsvCenN", static_cast<float>(RenderIntegration::g_dsvcen_n)));
+        for (int khdl_i = 0; khdl_i < 6; ++khdl_i) {
+            const std::string khdl_p = "dsvCen" + std::to_string(khdl_i);
+            out.push_back(kv((khdl_p + "W").c_str(), static_cast<uint64_t>(RenderIntegration::g_dsvcen_w[khdl_i])));
+            out.push_back(kv((khdl_p + "H").c_str(), static_cast<uint64_t>(RenderIntegration::g_dsvcen_h[khdl_i])));
+            out.push_back(kv((khdl_p + "Fmt").c_str(), static_cast<uint64_t>(RenderIntegration::g_dsvcen_fmt[khdl_i])));
+            out.push_back(kv((khdl_p + "Samp").c_str(), static_cast<uint64_t>(RenderIntegration::g_dsvcen_samp[khdl_i])));
+            out.push_back(kv((khdl_p + "Binds").c_str(), RenderIntegration::g_dsvcen_binds[khdl_i]));
+        }
+        out.push_back(kv("blkApplies", RenderIntegration::g_blk_applies));
+        out.push_back(kv("blkHolds", RenderIntegration::g_blk_holds));
+        out.push_back(kv("blkRateHolds", RenderIntegration::g_blk_rate_holds));   // 26480 (retired 26481; reads 0)
+        out.push_back(kv("blkSnapAdopts", RenderIntegration::g_blk_snap_adopts));   // 26481
+        out.push_back(kv("blkSnapRejects", RenderIntegration::g_blk_snap_rejects));   // 26483
+        out.push_back(kv("blkRingPicks", RenderIntegration::g_blk_ring_picks));   // 26487
+        // 26490: the 1x sweep's inner verdict.
+        out.push_back(kv("rtResolveTrue", RenderIntegration::g_rt_resolve_true));
+        out.push_back(kv("rtResolveFalse", RenderIntegration::g_rt_resolve_false));
+        out.push_back(kv("rtLastRejW", RenderIntegration::g_rt_last_rej_w));
+        out.push_back(kv("mtxScanHits", RenderIntegration::g_mtx_scan_hits));   // 26491
+        out.push_back(kv("mtxScanOff", RenderIntegration::g_mtx_scan_off));   // 26491
+        out.push_back(kv("msaaToggleWipes", RenderIntegration::g_msaa_toggle_wipes));   // 26492
+        out.push_back(kv("missionResetFails", RenderIntegration::g_mission_reset_fails));   // 26495: mission-end lock exhaustions (destroy deferred, never skipped)
+        out.push_back(kv("fsaaStandDownFrames", RenderIntegration::g_fsaa_standdown_frames));   // 26496: injection triggers refused by the FSAA requirement
+        out.push_back(kv("fsaaDepthSamples", RenderIntegration::g_scene_depth_samples));   // 26496/26497: the learned scene-depth sample count (1 = standing down, 0 = not yet learned; learned at the flush adoption since 26497)
+        // 26484: mode-lane census + cache telemetry.
+        out.push_back(kvf("blkModeLast", RenderIntegration::g_light_probe.last_mode));
+        out.push_back(kvf("blkModeV0", RenderIntegration::g_blk_mode_census_v[0]));
+        out.push_back(kv("blkModeN0", RenderIntegration::g_blk_mode_census_n[0]));
+        out.push_back(kvf("blkModeV1", RenderIntegration::g_blk_mode_census_v[1]));
+        out.push_back(kv("blkModeN1", RenderIntegration::g_blk_mode_census_n[1]));
+        out.push_back(kvf("blkModeV2", RenderIntegration::g_blk_mode_census_v[2]));
+        out.push_back(kv("blkModeN2", RenderIntegration::g_blk_mode_census_n[2]));
+        out.push_back(kvf("blkModeV3", RenderIntegration::g_blk_mode_census_v[3]));
+        out.push_back(kv("blkModeN3", RenderIntegration::g_blk_mode_census_n[3]));
+        out.push_back(kv("shaderCacheHits", RenderIntegration::g_shader_cache_hits));
+        out.push_back(kv("shaderCacheMisses", RenderIntegration::g_shader_cache_misses));
+        out.push_back(kv("shaderCompileMs", RenderIntegration::g_shader_compile_ms));
+        out.push_back(kv("offthreadTrigs", RenderIntegration::g_offthread_trigs.load(std::memory_order_relaxed)));
+        out.push_back(kvf("hookInstallAtS", RenderIntegration::g_hook_install_at_s));
         out.push_back(kv("compositeAmbiguous", RenderIntegration::g_stats.composite_ambiguous));
         out.push_back(kv("compositeProjLock", RenderIntegration::g_stats.composite_proj_lock));
         out.push_back(kv("compositeRearms", RenderIntegration::g_stats.composite_rearms));
@@ -8207,9 +8899,6 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("sunDepthCasters", RenderIntegration::g_stats.sun_depth_casters));
         out.push_back(kv("sunJumpFlushes", RenderIntegration::g_stats.sun_jump_flushes));
         out.push_back(kv("castArmsLost", RenderIntegration::g_mask.cast_arms_lost));
-        out.push_back(kv("sunFitRescues", RenderIntegration::g_sun_fit_rescues));   // 26334
-        out.push_back(kv("svsRestamps", RenderIntegration::g_svs_restamps));   // 26337
-        out.push_back(kv("svsRestampMiss", RenderIntegration::g_svs_restamp_miss));
 
         {
             uint32_t bsv = 0;
@@ -9269,10 +9958,6 @@ static game_value get_render_stats_sqf() {
         //     a near-zero w as the camera crossed the mesh, not a measurement.
         //     The gauge now guards at w > 0.05 against a 0.07 near plane.
         out.push_back(kv("svReprojEpochHits", RenderIntegration::g_svs_reproj_epoch_hits));
-        out.push_back(kv("maskRpArms", RenderIntegration::g_svs_mask_rp_arms));   // 26346: registered-read engagement
-        out.push_back(kv("castWarpFires", RenderIntegration::g_cast_warp_fires));   // 26347
-        out.push_back(kv("castWarpLast", RenderIntegration::g_cast_warp_last));     // 26347
-        out.push_back(kv("railStamps", RenderIntegration::g_svs_rail_stamps));      // 26348
         out.push_back(kv("svReprojEpochMiss", RenderIntegration::g_svs_reproj_epoch_miss));
         out.push_back(kv("svReprojWild", RenderIntegration::g_svs_reproj_wild));
         // 26247 svEngVpTakes - composite draws that borrowed the injection's
@@ -9531,14 +10216,149 @@ static game_value get_render_stats_sqf() {
         //     26291: now filled EVERY mode by the unconditional gauge in the
         //     colour pass (it was 135/136-gated, so mode 0 - where the slice
         //     lives - never produced it; method note 32, gauge placement).
-        out.push_back(kv("svSeamRotCamDx", RenderIntegration::g_svs_seam_rot_cam_dx));
+        out.push_back(kvf("svSeamRotCamDx", RenderIntegration::g_svs_seam_rot_cam_dx));
         //   svSeamRotCamDxMax - THE lane 135 needed and did not have. Last-value
         //     only read 0 on a settled final frame, which is how 135 shipped on
         //     the belief that translation did not matter. It does: 134 matched
         //     both terms and svReprojPxMean went to 0; 135 matched rotation only
         //     and it returned to 26.1.
         //   svSeamTrnTakes - mode 136: translation shared, rotation kept.
-        out.push_back(kv("svSeamRotCamDxMax", RenderIntegration::g_svs_seam_rot_cam_dx_max));
+        out.push_back(kvf("svSeamRotCamDxMax", RenderIntegration::g_svs_seam_rot_cam_dx_max));
+        //   26342 THE ROUND-TRIP GAUGES (ledger at kh_view_camera_exact).
+        //   Snap = takes whose adopted basis was bit-identical to ours, so the
+        //   translation row was left alone - at rest this should track
+        //   svInjects, and it is the arm that removes the stationary offset.
+        //   Exact = takes rebuilt through the honest 3x3 inverse. Refused =
+        //   degenerate basis, our own view kept. CamRtMax = the worst
+        //   |transpose camera - exact camera| the session saw, in metres: the
+        //   size of the error 26341 was injecting every frame it rebuilt.
+        //   26344: the near-gap ramp's CPU half and the dark-publish gate.
+        //   nearzRampFills should track nearzGapDraws; blkDarkPubRefusals
+        //   counting outside a cold start means the bar is too tight.
+        out.push_back(kv("nearzRampFills", RenderIntegration::g_nearz_ramp_fills));
+        out.push_back(kv("blkDarkPubRefusals", RenderIntegration::g_blk_dark_pub_refusals));
+        // 26379: the deepest single-publish collapse ever ACCEPTED, and how
+        // many publishes that is over. Sizes the gate's bar.
+        // 26406 THESE TWO WERE TRUNCATED TO INTEGER FROM THE DAY THEY WERE
+        // ADDED, AND THAT IS WHY HANDOFF 50 SECTION 3.4 IS STILL BLOCKED.
+        // kv() above takes uint64_t; kvf() takes float. Both of these are
+        // float RATIOS in roughly [0, 3], so kv() published (uint64_t)0.87
+        // == 0 on every dump since 26379 - and the -1.0f sentinel through an
+        // unsigned conversion is undefined behaviour on top. Section 3.4
+        // says "get that number, then set the bar between it and 2.79. Do
+        // not move the bar before it exists." It has existed since 26379.
+        // It has been reading 0 because of a lambda choice, not because the
+        // deepest accepted collapse is zero, and blkAcceptRatioN 1885 in the
+        // same dump proves the accumulator itself was running the whole
+        // time. 28 other metric lanes had the same defect - full list and
+        // the reason they were never caught at KH_STATS_KVF_AUDIT.
+        // 26417 THE SHADE LATCH (ledger at KH_BLK_SHADE_LATCH). What the SHADER
+        // WAS HANDED, latched at the session's darkest frame - not what was
+        // published, refused or believed. 26416 proved the black box is not on
+        // the publish path, so these are the lanes to read on the next event and
+        // the blkDark* family is not.
+        // 26418 ENGAGEMENT LANE for the zero-sun refusal. 0 means the gate never
+        // fired and any null result on the black box is void.
+        out.push_back(kv("blkZeroSunRefusals", RenderIntegration::g_blk_zero_sun_refusals));
+        out.push_back(kvf("blkShadeNow", RenderIntegration::g_blk_shade_now));
+        out.push_back(kvf("blkShadeMin", RenderIntegration::g_blk_shade_min));
+        out.push_back(kvf("blkShadeMax", RenderIntegration::g_blk_shade_max));
+        out.push_back(kv("blkShadeN", RenderIntegration::g_blk_shade_n));
+        out.push_back(kv("blkShadeDarkFrames", RenderIntegration::g_blk_shade_dark));
+        out.push_back(kvf("blkShadeAmbR", RenderIntegration::g_blk_shade_amb[0]));
+        out.push_back(kvf("blkShadeAmbG", RenderIntegration::g_blk_shade_amb[1]));
+        out.push_back(kvf("blkShadeAmbB", RenderIntegration::g_blk_shade_amb[2]));
+        out.push_back(kvf("blkShadeSunR", RenderIntegration::g_blk_shade_sun[0]));
+        out.push_back(kvf("blkShadeSunG", RenderIntegration::g_blk_shade_sun[1]));
+        out.push_back(kvf("blkShadeSunB", RenderIntegration::g_blk_shade_sun[2]));
+        out.push_back(kvf("blkShadeValid", RenderIntegration::g_blk_shade_valid));
+        out.push_back(kvf("blkShadeLitGate", RenderIntegration::g_blk_shade_litgate));
+        out.push_back(kvf("blkShadeStrength", RenderIntegration::g_blk_shade_strength));
+        out.push_back(kvf("blkShadeStdAmb", RenderIntegration::g_blk_shade_std_amb));
+        out.push_back(kvf("blkShadeStdSun", RenderIntegration::g_blk_shade_std_sun));
+        out.push_back(kvf("blkShadeProbeAgeS", RenderIntegration::g_blk_shade_probe_age));
+        out.push_back(kvf("blkShadeT", RenderIntegration::g_blk_shade_t));
+        out.push_back(kvf("blkAcceptRatioMin", RenderIntegration::g_blk_accept_ratio_min));
+        out.push_back(kvf("blkAcceptRatioAmb", RenderIntegration::g_blk_accept_ratio_amb));
+        out.push_back(kv("blkAcceptRatioN", RenderIntegration::g_blk_accept_ratio_n));
+        // 26380: the colour pass taking the seam's own publication.
+        // compShareStale must stay near 0 - if it climbs, the seq-adjacency
+        // assumption is wrong and this fold is unsafe.
+        out.push_back(kv("compShareTakes", RenderIntegration::g_comp_share_takes));
+        out.push_back(kv("compShareStale", RenderIntegration::g_comp_share_stale));
+        out.push_back(kvf("blkDarkPubSl", RenderIntegration::g_blk_dark_pub_sl));
+        out.push_back(kvf("blkDarkPubRefSl", RenderIntegration::g_blk_dark_pub_ref_sl));
+        out.push_back(kv("svSeamRotSnap", RenderIntegration::g_svs_seam_rot_snap));
+        out.push_back(kv("svSeamRotExact", RenderIntegration::g_svs_seam_rot_exact));
+        out.push_back(kv("svSeamRotRefused", RenderIntegration::g_svs_seam_rot_refused));
+        out.push_back(kvf("svCamRtMax", RenderIntegration::g_svs_cam_rt_max));
+        // KH_JITTER_FLOOR (26421; full ledger in rendering_integration.hpp,
+        // beside kh_rebase_vp_exact). READ jitRebaseMm FIRST - it is the
+        // POSITIVE CONTROL for the close-range jitter fix, and a null on the
+        // artifact is void while it reads 0 (rule 1.21). Then read
+        // jitCamUlpMm beside it: that is the part of the jitter the fix does
+        // NOT close, and if it dwarfs the gain the fix cannot have been the
+        // whole artifact. jitCamHolds is only meaningful while jitBasisWit is
+        // non-zero - a pure-translation session leaves it NOT MEASURED, not
+        // falsified. EVERY lane here is derived from pv.view, so none of them
+        // can say whether the ENGINE's camera steps too; that needs the b2
+        // block and it is the named next instrument.
+        // kvf, not kv - these are sub-millimetre quantities and 1.24 is the
+        // reason this note exists.
+        out.push_back(kvf("jitRebaseMm", RenderIntegration::g_jit_rebase_mm));
+        out.push_back(kvf("jitRebaseMaxMm", RenderIntegration::g_jit_rebase_max_mm));
+        out.push_back(kvf("jitCamUlpMm", RenderIntegration::g_jit_cam_ulp_mm));
+        out.push_back(kvf("jitCamAbsM", RenderIntegration::g_jit_cam_abs_m));
+        out.push_back(kvf("jitCamStepMm", RenderIntegration::g_jit_cam_step_mm));
+        out.push_back(kvf("jitCamStepMaxMm", RenderIntegration::g_jit_cam_step_max_mm));
+        out.push_back(kvf("jitBasisStep", RenderIntegration::g_jit_basis_step));
+        out.push_back(kv("jitFrames", RenderIntegration::g_jit_frames));
+        out.push_back(kv("jitBasisWit", RenderIntegration::g_jit_basis_wit));
+        out.push_back(kv("jitCamHolds", RenderIntegration::g_jit_cam_holds));
+        out.push_back(kv("jitCamHoldRun", RenderIntegration::g_jit_hold_run_max));
+        // The worst-frame latch (rule 1.26): the whole set AT the largest
+        // jitRebaseMm, not at the last frame. jitLatchT is effect time, so a
+        // latch older than the trace ring is still readable here - which is
+        // the entire point of latching rather than sampling.
+        out.push_back(kvf("jitLatchMm", RenderIntegration::g_jit_latch_mm));
+        out.push_back(kvf("jitLatchUlpMm", RenderIntegration::g_jit_latch_ulp_mm));
+        out.push_back(kvf("jitLatchCamAbsM", RenderIntegration::g_jit_latch_cam_abs));
+        out.push_back(kvf("jitLatchStepMm", RenderIntegration::g_jit_latch_step_mm));
+        out.push_back(kvf("jitLatchBasis", RenderIntegration::g_jit_latch_basis));
+        out.push_back(kvf("jitLatchT", RenderIntegration::g_jit_latch_t));
+        // KH_ENGCAM_LOCATOR (26440; full ledger before the seam inject).
+        // READ ORDER: engCamDxMaxMm FIRST - millimetres (0 to ~0.5) is a
+        // correct lock, METRES is a wrong row and every other lane is then
+        // about the wrong value. Then engCamTakes, the arm's positive
+        // control: 0 under mode 236 means the fix never engaged and any
+        // screen verdict is VOID (the mode-118 lesson). engCamFresh counts
+        // frames a confirmed this-frame value existed and reads at mode 0
+        // with stats armed - validate the lock BEFORE spending the A/B.
+        // Stale = lock present, no upload that frame (fell back, correct);
+        // LockDrops = confirm failures - after the 26441 distinct-set
+        // retention these should be ~0 outside genuine relocations (dump1's
+        // Locks 105 / Drops 104 churn is the before-figure); Ambig = frames
+        // two distinct values both matched, no pick taken; ValOver =
+        // distinct sightings at the locked offset beyond the 4-deep set.
+        // engCamLockOff rides kvf: -1 at rest is a sentinel and kv would
+        // wrap it (the 26406 lesson). PhaseStand = 26442 latch refusals
+        // (the seam's upcoming-camera phase under motion - ledger at the
+        // frame latch in kh_engcam_consume); it should track MOVING frames
+        // in a Zeus session and read ~0 at rest. The failure counters are
+        // per-attempt since 26442, not per-frame.
+        out.push_back(kv("engCamLocks", RenderIntegration::g_engcam_locks));
+        out.push_back(kv("engCamLockDrops", RenderIntegration::g_engcam_lock_drops));
+        out.push_back(kvf("engCamLockOff", static_cast<float>(RenderIntegration::g_engcam_off)));
+        out.push_back(kv("engCamFresh", RenderIntegration::g_engcam_fresh));
+        out.push_back(kv("engCamStale", RenderIntegration::g_engcam_stale));
+        out.push_back(kv("engCamTakes", RenderIntegration::g_engcam_takes));
+        out.push_back(kv("engCamCands", RenderIntegration::g_engcam_cand_total));
+        out.push_back(kv("engCamCandOver", RenderIntegration::g_engcam_cand_over));
+        out.push_back(kv("engCamValOver", RenderIntegration::g_engcam_val_over));
+        out.push_back(kv("engCamPhaseStand", RenderIntegration::g_engcam_phase_stands));
+        out.push_back(kv("engCamAmbig", RenderIntegration::g_engcam_ambig));
+        out.push_back(kvf("engCamDxMm", RenderIntegration::g_engcam_dx_mm));
+        out.push_back(kvf("engCamDxMaxMm", RenderIntegration::g_engcam_dx_max_mm));
         out.push_back(kv("svSeamTrnTakes", RenderIntegration::g_svs_seam_trn_takes));
         //   svNoAdoptFrames - mode 137: BOTH passes stood the view adoption
         //     down and read the shared cycle_pv latch instead. Mode 102 only
@@ -9566,14 +10386,14 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("svLiveTrnTakes", RenderIntegration::g_svs_live_trn_takes));
         out.push_back(kv("svLiveTrnMiss", RenderIntegration::g_svs_live_trn_miss));
         out.push_back(kv("svLiveTrnGuard", RenderIntegration::g_svs_live_trn_guard));
-        out.push_back(kv("svLiveTrnDx", RenderIntegration::g_svs_live_trn_dx));
-        out.push_back(kv("svLiveTrnDxMax", RenderIntegration::g_svs_live_trn_dx_max));
+        out.push_back(kvf("svLiveTrnDx", RenderIntegration::g_svs_live_trn_dx));
+        out.push_back(kvf("svLiveTrnDxMax", RenderIntegration::g_svs_live_trn_dx_max));
         //   26293 MODE 144 (live depth pair at the seam; ledger at the arm).
         //     svLivePrjTakes == svInjects with Ref ~0 is engagement; the
         //     verdict lane is per-frame seamNear vs injNear through a ramp.
         out.push_back(kv("svLivePrjTakes", RenderIntegration::g_svs_live_prj_takes));
         out.push_back(kv("svLivePrjRef", RenderIntegration::g_svs_live_prj_ref));
-        out.push_back(kv("svSeamNear", RenderIntegration::g_svs_seam_near));
+        out.push_back(kvf("svSeamNear", RenderIntegration::g_svs_seam_near));
         //   svTrnExtrap - 26294 mode 147, RETIRED 26295 (deceleration false
         //     positives regressed the slice). Kept so old scripts validate.
         out.push_back(kv("svTrnExtrap", RenderIntegration::g_svs_trn_extrap));
@@ -9624,34 +10444,181 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("svCbcCamRecs", RenderIntegration::g_cbc_cam_recs));
         out.push_back(kv("svCbcCamHits", RenderIntegration::g_cbc_cam_hits));
         out.push_back(kv("svLiveTrnRebase", RenderIntegration::g_svs_live_trn_rebase));
+        out.push_back(kv("svLiveTrnWit", RenderIntegration::g_svs_live_trn_wit));   // 26443
         out.push_back(kv("svLiveTrnWide", RenderIntegration::g_svs_live_trn_wide));
         //   svLiveTrnAnchOff/Max - 26309: |raw live camera - anchored
         //   candidate| in metres = the second-flavor anchor offset the
         //   delta take removed (expected ~0 healthy; 0.18-0.28 on the
         //   capture12 scenario). svLiveTrnLpMiss - cold/post-miss runs
         //   that fell back to the absolute form for one frame.
-        out.push_back(kv("svLiveTrnAnchOff", RenderIntegration::g_svs_trn_anch_off));
+        out.push_back(kvf("svLiveTrnAnchOff", RenderIntegration::g_svs_trn_anch_off));
         //   svSeamAnchDx/Max - 26310: |seam adopted-view camera - cycle
         //   latch camera| in metres, the multiplex-flavor gauge (0.258
         //   constant in capture13's Zeus session; ~0 healthy).
-        out.push_back(kv("svSeamAnchDx", RenderIntegration::g_svs_seam_anch_dx));
-        out.push_back(kv("svSeamAnchDxMax", RenderIntegration::g_svs_seam_anch_dx_max));
+        out.push_back(kvf("svSeamAnchDx", RenderIntegration::g_svs_seam_anch_dx));
+        out.push_back(kvf("svSeamAnchDxMax", RenderIntegration::g_svs_seam_anch_dx_max));
         //   svLiveFovTakes/Ref - 26311: seam FOV terms from the live fetch
         //   (the zoom axis); svCbcClassRef/Near - census encodes refused by
         //   the two-witness class referee, and the last refused near.
         out.push_back(kv("svLiveFovTakes", RenderIntegration::g_svs_live_fov_takes));
         out.push_back(kv("svLiveFovRef", RenderIntegration::g_svs_live_fov_ref));
         out.push_back(kv("svCbcClassRef", RenderIntegration::g_cbc_class_ref));
-        out.push_back(kv("svCbcClassRefNear", RenderIntegration::g_cbc_class_ref_near));
+        out.push_back(kvf("svCbcClassRefNear", RenderIntegration::g_cbc_class_ref_near));
         //   svCbcBandSkips - 26312: recorder notes skipped by the shared
         //   camera-class band (out-of-band content no longer overwrites a
         //   tracked buffer's world-class pair).
         out.push_back(kv("svCbcBandSkips", RenderIntegration::g_cbc_band_skips));
         //   svLiveFovRatio/Max - 26313: per-frame live/latch FOV ratio (the
         //   flicker gauge; legit zoom tops ~1.13, the bar is 1.30).
-        out.push_back(kv("svLiveFovRatio", RenderIntegration::g_svs_live_fov_ratio));
-        out.push_back(kv("svLiveFovRatioMax", RenderIntegration::g_svs_live_fov_ratio_max));
-        out.push_back(kv("svLiveTrnAnchOffMax", RenderIntegration::g_svs_trn_anch_off_max));
+        out.push_back(kvf("svLiveFovRatio", RenderIntegration::g_svs_live_fov_ratio));
+        out.push_back(kvf("svLiveFovRatioMax", RenderIntegration::g_svs_live_fov_ratio_max));
+        //   svCompFovTakes/Ref + svCompFovRatioMax - 26325: the COLOUR pass's
+        //   FOV take (171 reverts). The seam has ridden the live fetch's
+        //   scale terms since 26311 and the visible box never did, so through
+        //   a zoom the box rasterised one frame behind its own footprint and
+        //   the engine's cascade + stencil verdicts leaked across its
+        //   silhouette. Takes ~ compositeInjections with Ref ~0 is
+        //   engagement; RatioMax is the peak deviation from 1.0 that was
+        //   actually APPLIED, so it should land near seamFovLatR's peak.
+        //   NOTE svLiveFovRatio/Max above are the SEAM's bar and are known
+        //   inert (they read exactly 1.0 with Ref 0 through a session where
+        //   seamFovLatR reached 1.1775) - do not read them as agreement.
+        //   svSniffOvr/Ratio/Near - 26326: seam encodes replaced by the
+        //   engine's own sniffed pair (172 reverts). The capture measured our
+        //   injection encoding near 0.81643 where every engine draw, both
+        //   scene cycles and the shadow volumes included, used 0.2236; the
+        //   trace then named the source, with sniffNear == injNear on 511/511
+        //   and the chain diverging >3x on 11. Expect Ovr on ~2 pct of
+        //   injects with Ratio in the 2-6x band. Ovr climbing toward
+        //   svInjects means the chain has broken wholesale; Ovr 0 with the
+        //   artifact still present means the sniff went cold and the
+        //   fallback is what shipped - read seamProjSrc.
+        //   26327: the referee is DISARMED (opt-in under 173), so on mode 0
+        //   these now report what it WOULD have displaced, displacing
+        //   nothing. Read svSniffOvr against svInjects to size any future
+        //   bar honestly BEFORE shipping it - at 26326 a 2 pct threshold
+        //   fired on 22.5 pct of injects, which is what regressed the field.
+        //   volPass* - 26328: the pair the ENGINE'S OWN shadow-volume pass
+        //   had bound at VS b2 at the injection instant, copied GPU-side and
+        //   decoded from its view-projection. This is the number every fix in
+        //   this campaign has been guessing at. volPassReads should track
+        //   flushes; volPassWCol must sit near 1.0 (it is the check that b2
+        //   really held a view-projection - if it drifts, the slot moved and
+        //   nothing downstream should be trusted). PURE GAUGE: nothing
+        //   encodes with it yet.
+        out.push_back(kv("volPassReads", RenderIntegration::g_vpx_reads));
+        out.push_back(kv("volPassBusy", RenderIntegration::g_vpx_busy));
+        out.push_back(kv("volPassSkips", RenderIntegration::g_vpx_skips));
+        out.push_back(kvf("volPassWCol", RenderIntegration::g_vpx_wcol));
+        out.push_back(kvf("volPassNearLast", RenderIntegration::g_vpx_near));
+        //   volDraw* - 26329: the same measurement taken at the engine's
+        //   FIRST COUNTING DRAW instead of at our injection. That is the b2
+        //   the shadow volumes actually consume, so volDrawNear vs seamNear
+        //   (aligned by volDrawAge) is the comparison that decides whether
+        //   our encode is right. volDrawReads should track flushes.
+        //   svEngVpArms - 26330: injections transformed by the engine's own
+        //   b2 (mode 174). Should track svInjects when 174 is set and read 0
+        //   otherwise. This is the arm that removes the encode from the
+        //   problem entirely rather than trying to get it right.
+        out.push_back(kv("svEngVpArms", RenderIntegration::g_svs_engvp_arms));
+        out.push_back(kv("volDrawReads", RenderIntegration::g_vpx_draw_reads));
+        out.push_back(kvf("volDrawNearLast", RenderIntegration::g_vpx_draw_near));
+        // 26365 the duplicate-publication detector (ledger at g_svs_fetch_dup_m)
+        out.push_back(kv("seamFetchDups", RenderIntegration::g_svs_fetch_dups));
+        out.push_back(kv("seamFetchMoves", RenderIntegration::g_svs_fetch_moves));
+        out.push_back(kvf("seamFetchDupM", RenderIntegration::g_svs_fetch_dup_m));
+        out.push_back(kvf("bandPickCamDxMax", RenderIntegration::g_band_pick_cam_dx_max));
+        // 26412 THE WHOLE COMMITTED BAND TABLE (ledger at KH_BAND_TABLE_CENSUS).
+        // Four lanes per slot in the shader's consumption order, finest first;
+        // -1 on all four means the slot did not commit. bandGapMaxM is the worst
+        // hole between consecutive slots once each one's own camera drift is
+        // applied - positive IS a hole, in metres - and bandGapFrames counts the
+        // frames carrying one. Seven builds argued about the tiling from the
+        // near pair alone; this ends that.
+        {
+            static const char* const KHBT_N[8] = { "bandNear0", "bandNear1", "bandNear2", "bandNear3",
+                                                   "bandNear4", "bandNear5", "bandNear6", "bandNear7" };
+            static const char* const KHBT_F[8] = { "bandFar0", "bandFar1", "bandFar2", "bandFar3",
+                                                   "bandFar4", "bandFar5", "bandFar6", "bandFar7" };
+            static const char* const KHBT_A[8] = { "bandAgeMs0", "bandAgeMs1", "bandAgeMs2", "bandAgeMs3",
+                                                   "bandAgeMs4", "bandAgeMs5", "bandAgeMs6", "bandAgeMs7" };
+            static const char* const KHBT_D[8] = { "bandCamDx0", "bandCamDx1", "bandCamDx2", "bandCamDx3",
+                                                   "bandCamDx4", "bandCamDx5", "bandCamDx6", "bandCamDx7" };
+            for (int khbt_i = 0; khbt_i < 8; ++khbt_i) {
+                out.push_back(kvf(KHBT_N[khbt_i], RenderIntegration::g_band_tab_near[khbt_i]));
+                out.push_back(kvf(KHBT_F[khbt_i], RenderIntegration::g_band_tab_far[khbt_i]));
+                out.push_back(kvf(KHBT_A[khbt_i], RenderIntegration::g_band_tab_age[khbt_i]));
+                out.push_back(kvf(KHBT_D[khbt_i], RenderIntegration::g_band_tab_cdx[khbt_i]));
+            }
+            out.push_back(kvf("bandGapLastM", RenderIntegration::g_band_gap_last_m));
+            out.push_back(kvf("bandGapMaxM", RenderIntegration::g_band_gap_max_m));
+            out.push_back(kv("bandGapFrames", RenderIntegration::g_band_gap_frames));
+            out.push_back(kvf("bandGapPair", RenderIntegration::g_band_gap_pair));
+            out.push_back(kvf("bandGapCamStep", RenderIntegration::g_band_gap_camstep));
+            // 26414 THE TABLE AS IT STOOD ON THE WORST-GAP FRAME. The lanes above
+            // are the LAST committed frame, which for a few-frame artifact is
+            // almost never the interesting one; these are latched at the event.
+            static const char* const KHGL_N[8] = { "gapNear0", "gapNear1", "gapNear2", "gapNear3",
+                                                   "gapNear4", "gapNear5", "gapNear6", "gapNear7" };
+            static const char* const KHGL_F[8] = { "gapFar0", "gapFar1", "gapFar2", "gapFar3",
+                                                   "gapFar4", "gapFar5", "gapFar6", "gapFar7" };
+            static const char* const KHGL_A[8] = { "gapAgeMs0", "gapAgeMs1", "gapAgeMs2", "gapAgeMs3",
+                                                   "gapAgeMs4", "gapAgeMs5", "gapAgeMs6", "gapAgeMs7" };
+            static const char* const KHGL_D[8] = { "gapCamDx0", "gapCamDx1", "gapCamDx2", "gapCamDx3",
+                                                   "gapCamDx4", "gapCamDx5", "gapCamDx6", "gapCamDx7" };
+            for (int khgl_i = 0; khgl_i < 8; ++khgl_i) {
+                out.push_back(kvf(KHGL_N[khgl_i], RenderIntegration::g_band_gap_near[khgl_i]));
+                out.push_back(kvf(KHGL_F[khgl_i], RenderIntegration::g_band_gap_far[khgl_i]));
+                out.push_back(kvf(KHGL_A[khgl_i], RenderIntegration::g_band_gap_age[khgl_i]));
+                out.push_back(kvf(KHGL_D[khgl_i], RenderIntegration::g_band_gap_cdx[khgl_i]));
+            }
+        }
+        out.push_back(kv("bandPickCamBad", RenderIntegration::g_band_pick_cam_bad));
+        out.push_back(kv("bandTrnEscapes", RenderIntegration::g_ls.band_trn_escapes));
+        // 26386: mode 209. Read it exactly as bandTrnEscapes is read for 195 -
+        // 0 means the arm never fired and the field verdict is void.
+        out.push_back(kv("bandRotEscapes", RenderIntegration::g_ls.band_rot_escapes));
+        // 26415: bands promoted to the 20 Hz tier because their camera drift
+        // passed 0.15 x their own width - the overlap-anchored budget. This is
+        // the engagement lane: 0 means the fold never fired and any null is void.
+        out.push_back(kv("bandBudgetEscapes", RenderIntegration::g_ls.band_budget_escapes));
+        // 26458: the layout-change escape (ledger beside the throttle).
+        out.push_back(kv("bandLayoutEscapes", RenderIntegration::g_ls.band_layout_escapes));
+        // 26370 the scope trigger. trigFrozen 1 = the ring is held around
+        // trigSerial; every row in the dump is real and none has been
+        // overwritten since. reason 1 = no-pick, 2 = stale pick.
+        // 26371 the seam retry. retryOk/retry is the hit rate; if retry
+        // climbs while retryOk stays flat the bridge is re-serving the same
+        // publication and the answer is upstream of the take.
+        out.push_back(kv("seamRetry", RenderIntegration::g_svs_live_trn_retry));
+        out.push_back(kv("seamRetryOk", RenderIntegration::g_svs_live_trn_retry_ok));
+        out.push_back(kv("trigFrozen", RenderIntegration::g_ffr_freeze ? 1 : 0));
+        // 26421: g_ffr_trig_post is int with -1 = "not fired", and kv takes
+        // uint64_t - so the sentinel went through float and then OUT OF RANGE
+        // for the destination type (UB; 0 or 2^64-1 in practice). The lane
+        // could never report the state it holds in most sessions. kvf, and
+        // the two above it drop a static_cast<float> that only ever detoured.
+        out.push_back(kv("trigSerial", RenderIntegration::g_ffr_trig_serial));
+        out.push_back(kv("trigReason", RenderIntegration::g_ffr_trig_reason));
+        out.push_back(kvf("trigPostLeft", static_cast<float>(RenderIntegration::g_ffr_trig_post)));
+        // 26362 THE ENGINE-VS-SEAM SWING (ledger at kh_vpx_ref_publish).
+        // Read vpxRefMiss FIRST: nonzero means the serial ring lost rows and
+        // the per-row lanes on those rows are -1 rather than wrong.
+        out.push_back(kv("vpxRefPubs", RenderIntegration::g_vpxr_pubs));
+        out.push_back(kv("vpxRefHits", RenderIntegration::g_vpxr_hits));
+        out.push_back(kv("vpxRefMiss", RenderIntegration::g_vpxr_miss));
+        out.push_back(kvf("volDrawSwingPx", RenderIntegration::g_vpx_draw_swing_px));
+        out.push_back(kvf("volDrawSwingMax", RenderIntegration::g_vpx_draw_swing_max));
+        out.push_back(kvf("volPassSwingPx", RenderIntegration::g_vpx_pass_swing_px));
+        out.push_back(kvf("volPassSwingMax", RenderIntegration::g_vpx_pass_swing_max));
+        out.push_back(kv("svSniffOvr", RenderIntegration::g_svs_sniff_ovr));
+        out.push_back(kvf("svSniffOvrRatio", RenderIntegration::g_svs_sniff_ovr_ratio));
+        out.push_back(kvf("svSniffOvrNear", RenderIntegration::g_svs_sniff_ovr_near));
+        out.push_back(kv("svCompFovTakes", RenderIntegration::g_comp_fov_takes));
+        out.push_back(kv("svCompFovRef", RenderIntegration::g_comp_fov_ref));
+        out.push_back(kvf("svCompFovRatio", RenderIntegration::g_comp_fov_ratio));
+        out.push_back(kvf("svCompFovRatioMax", RenderIntegration::g_comp_fov_ratio_max));
+        out.push_back(kvf("svLiveTrnAnchOffMax", RenderIntegration::g_svs_trn_anch_off_max));
         out.push_back(kv("svLiveTrnLpMiss", RenderIntegration::g_svs_trn_lp_miss));
         //   svGrowDraws / svGrowLast - 26288: seam draws issued with an ENLARGED
         //     footprint, and the factor. Expect == svInjectDraws under 138-140.
@@ -9662,7 +10629,7 @@ static game_value get_render_stats_sqf() {
         //     shadow hugging the box, scaling with the factor - take the
         //     SMALLEST of 138/139/140 that closes the slice.
         out.push_back(kv("svGrowDraws", RenderIntegration::g_svs_grow_draws));
-        out.push_back(kv("svGrowLast", RenderIntegration::g_svs_grow_last));
+        out.push_back(kvf("svGrowLast", RenderIntegration::g_svs_grow_last));
         //   26289 MODE 141 is the soft filter: svVolCode reads 5 and
         //     svVolWitFrames must equal flushes. It weights a 7x7 by how well
         //     each texel s depth matches our own surface and AVERAGES their
@@ -10523,6 +11490,12 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("fkVetoLastN", static_cast<uint64_t>(RenderIntegration::g_fk_veto_last_n)));
         out.push_back(kv("blkCollapseHolds", RenderIntegration::g_blk_collapse_holds));
         out.push_back(kv("blkBlankSkips", RenderIntegration::g_blk_blank_skips));   // 26053 blank-guard census
+        // 26476 anchor-gate lanes (ledger at kh_probe_std_refresh).
+        out.push_back(kv("blkAnchorRejects", RenderIntegration::g_blk_anchor_rejects));
+        out.push_back(kv("blkAnchorSnaps", RenderIntegration::g_blk_anchor_snaps));
+        out.push_back(kv("blkSmallNfSkips", RenderIntegration::g_blk_smallnf_skips));
+        out.push_back(kvf("blkAnchorSunL", RenderIntegration::g_light_probe.anch_sun_l));
+        out.push_back(kvf("blkAnchorAmbL", RenderIntegration::g_light_probe.anch_amb_l));
         out.push_back(kv("blkStarvedAdopts", RenderIntegration::g_blk_starved_adopts));   // 26054 starvation census
         // 26054: the capture-side pending slot itself (the publish twin's
         // blkPendAgeS already exists) - the next stuck log shows WHICH
@@ -10537,6 +11510,26 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("blkJumpAdopts", RenderIntegration::g_blk_jump_adopts));
         out.push_back(kv("khBuildTag", static_cast<uint64_t>(RenderIntegration::KH_BUILD_TAG)));
         out.push_back(kv("nearzGapDraws", RenderIntegration::g_nearz_gap_draws));
+        // 26348 THE FOOTPRINT'S OWN ENCODE. injNzDraws = injections that bound
+        // PSInjDepth (engagement: it should track compositeInjections).
+        // injNzFloor = the widened gap floor last programmed on the injection
+        // viewport; 0 means not widened, i.e. mode 193 or disarmed.
+        // 26355 THE NEAR-CLASS CENSUS (pure gauge). The near population is
+        // several coexisting constants, not one value that moves - read all
+        // four classes together, never nearCls0 alone.
+        {
+            uint64_t khnc_v = 0;
+            for (int khnc_i = 0; khnc_i < 4; ++khnc_i) {
+                const float khnc_n = RenderIntegration::kh_near_class(khnc_i, &khnc_v);
+                out.push_back(kvf(("nearCls" + std::to_string(khnc_i)).c_str(), khnc_n));
+                out.push_back(kv(("nearClsN" + std::to_string(khnc_i)).c_str(), khnc_v));
+            }
+        }
+        out.push_back(kv("injNzDraws", RenderIntegration::g_inj_nz_draws));
+        // 26349: kvf, NOT kv - kv takes uint64_t and truncated this float to
+        // 0 in both 26348 dumps, a dead gauge shipped in the same build that
+        // was warned about dead gauges.
+        out.push_back(kvf("injNzFloor", RenderIntegration::g_inj_nz_floor));
         out.push_back(kvf("nearzNearEst", RenderIntegration::g_nearz_last_near));
         out.push_back(kvf("nearzGapFloor", RenderIntegration::g_nearz_last_floor));
         // 26185 PROJECTION-PAIR CENSUS (full ledger at g_proj_census). One
@@ -10591,6 +11584,60 @@ static game_value get_render_stats_sqf() {
             RenderIntegration::g_sun_map_bounds[3] * RenderIntegration::g_sun_map_bounds[3] +
             RenderIntegration::g_sun_map_bounds[4] * RenderIntegration::g_sun_map_bounds[4] +
             RenderIntegration::g_sun_map_bounds[5] * RenderIntegration::g_sun_map_bounds[5])));
+        out.push_back(kv("sunHeroValid", RenderIntegration::g_sun2_map_valid ? 1ull : 0ull));   // 26444
+        out.push_back(kv("sunHeroCasters", RenderIntegration::g_sun2_casters));
+        out.push_back(kv("sunHeroRenders", RenderIntegration::g_sun2_renders));
+        out.push_back(kvf("sunHeroHalfDiag", RenderIntegration::g_sun2_half_diag));
+        // 26454 cascade bands (KH_SUN_CASCADE): halfDiag lanes are the
+        // acceptance instrument - pinned at 8 / 32 by construction, any
+        // other value is a defect. FLOATS THROUGH kvf (the 26406 trap).
+        out.push_back(kv("sunMidValid", RenderIntegration::g_sun3_map_valid ? 1ull : 0ull));
+        out.push_back(kv("sunMidCasters", RenderIntegration::g_sun3_casters));
+        out.push_back(kv("sunMidRenders", RenderIntegration::g_sun3_renders));
+        out.push_back(kvf("sunMidHalfDiag", RenderIntegration::g_sun3_half_diag));
+        out.push_back(kv("sunOutValid", RenderIntegration::g_sun4_map_valid ? 1ull : 0ull));
+        out.push_back(kv("sunOutCasters", RenderIntegration::g_sun4_casters));
+        out.push_back(kv("sunOutRenders", RenderIntegration::g_sun4_renders));
+        out.push_back(kvf("sunOutHalfDiag", RenderIntegration::g_sun4_half_diag));
+        // 26457 KH_VOL_MIRROR_SURVEY lanes (uints via kv, floats via
+        // kvf - the 26349 injNzFloor truncation lesson).
+        out.push_back(kv("vmirDssFront", RenderIntegration::g_vmir_dss_front));
+        out.push_back(kv("vmirDssBack", RenderIntegration::g_vmir_dss_back));
+        // 26458 (section 4.2): vmirDssDepth is REPLACED by the split pair -
+        // the packed field put StencilWriteMask past float precision and
+        // dump1 published it truncated (rule 1.7: name + value together).
+        out.push_back(kv("vmirDssFunc", RenderIntegration::g_vmir_dss_func));
+        out.push_back(kv("vmirDssMasks", RenderIntegration::g_vmir_dss_masks));
+        out.push_back(kv("vmirDssRef", RenderIntegration::g_vmir_dss_ref));
+        out.push_back(kv("vmirCull", RenderIntegration::g_vmir_cull));
+        out.push_back(kv("vmirTopoLast", RenderIntegration::g_vmir_topo_last));
+        out.push_back(kv("vmirTopoOdd", RenderIntegration::g_vmir_topo_odd));
+        out.push_back(kv("vmirCbChanges", RenderIntegration::g_vmir_cb_changes));
+        out.push_back(kv("vmirVsChanges", RenderIntegration::g_vmir_vs_changes));
+        out.push_back(kv("vmirPsNull", RenderIntegration::g_vmir_ps_null));
+        out.push_back(kv("vmirRtvN", RenderIntegration::g_vmir_rtv_n));
+        out.push_back(kvf("vmirVpMinD", RenderIntegration::g_vmir_vp_mind));
+        out.push_back(kvf("vmirVpMaxD", RenderIntegration::g_vmir_vp_maxd));
+        out.push_back(kv("vmirFrames", RenderIntegration::g_vmir_frames));
+        // 26458 KH_VOL_MIRROR (ledger at KH_VMIR_NEAR in rendering):
+        out.push_back(kv("vmirDraws", RenderIntegration::g_vmir_draws));
+        out.push_back(kv("vmirPrepassDraws", RenderIntegration::g_vmir_prepass_draws));
+        out.push_back(kv("vmirMaskFrames", RenderIntegration::g_vmir_mask_frames));
+        out.push_back(kv("vmirCsRuns", RenderIntegration::g_vmir_cs_runs));
+        out.push_back(kv("vmirB2Off", RenderIntegration::g_vmir_b2_off));
+        out.push_back(kv("vmirUavN", RenderIntegration::g_vmir_uav_n));
+        out.push_back(kv("vmirUavSkips", RenderIntegration::g_vmir_uav_skips));
+        out.push_back(kv("vmirEnsureFails", RenderIntegration::g_vmir_ensure_fails));
+        out.push_back(kv("vmirClampStates", RenderIntegration::g_vmir_clamp_states));   // 26461
+        // 26462: the live half of the clamp gauge pair + the session gate census.
+        out.push_back(kv("vmirClampSwaps", RenderIntegration::g_vmir_clamp_swaps));
+        out.push_back(kv("vmirSessionSkips", RenderIntegration::g_vmir_session_skips));
+        // 26459: proves the sun anchor ACTIVE in the same capture that
+        // tests the shimmer (0.0 here on a valid-camera session = inert).
+        out.push_back(kvf("sunAnchorMag", std::sqrt(
+            RenderIntegration::g_sun_anchor_now[0] * RenderIntegration::g_sun_anchor_now[0] +
+            RenderIntegration::g_sun_anchor_now[1] * RenderIntegration::g_sun_anchor_now[1] +
+            RenderIntegration::g_sun_anchor_now[2] * RenderIntegration::g_sun_anchor_now[2])));
         out.push_back(kv("fireMaskSrvFires", RenderIntegration::g_fire_mask_srv_fires));
         out.push_back(kv("fireMaskSrvLast", static_cast<uint64_t>(RenderIntegration::g_fire_mask_srv_last)));
         out.push_back(kvf("fireFovMaxDelta", RenderIntegration::g_fov_max_delta));
@@ -10901,6 +11948,9 @@ static game_value get_render_stats_sqf() {
         // counting a miss ONCE per slot per blocked era is the number that
         // would justify the +67 MB.
         out.push_back(kv("bandStagePoolMiss", RenderIntegration::g_band_stage_pool_miss));
+        // 26396: misses served by the immediate capture rather than dropped.
+        // Should track bandStagePoolMiss; a gap means 214 is set.
+        out.push_back(kv("bandStagePoolFall", RenderIntegration::g_band_stage_pool_fall));
         // 26187: increments once per STAGED SLOT PER ENGINE DRAW while a
         // commit waits on the exact-class publish bar - kh_band_stage_commit
         // runs from reorder_pre_draw. It is a dwell measure in slot-draws;
@@ -10948,37 +11998,26 @@ static game_value get_render_stats_sqf() {
         //   ~ flushes when the box is on screen; maps ~ copies (readbacks
         //   landing); busy = in-flight skips; skips = off-screen/cold/refused.
         //   svVolCopyHeld - 26324: later-bracket vol copies held by the
-        //   first-bracket latch. 26325 FIELD: reads 0 on the default path -
-        //   capture13/stats110 measured ONE counting bracket per frame
-        //   (svCopyArms == svVolCopyMade == frames), so the latch is
-        //   trivially inert on this rig and 170 A/Bs nothing here.
+        //   first-bracket latch (expect ~brackets-1 per frame; 0 under 170).
         out.push_back(kv("svVolCopyHeld", RenderIntegration::g_svs_vol_copy_held));
         out.push_back(kv("prbCopies", RenderIntegration::g_prb_copies));
         out.push_back(kv("prbMaps", RenderIntegration::g_prb_maps));
         out.push_back(kv("prbBusy", RenderIntegration::g_prb_busy));
         out.push_back(kv("prbSkips", RenderIntegration::g_prb_skips));
-        out.push_back(kv("prbCtrOff", RenderIntegration::g_prb_ctr_off));   // 26345
-        //   26325 probe rebuild counters (ledger at KH_BUILD_TAG): pre = the
-        //   injection-side depth scratch (copies made / MSAA-array rejected /
-        //   no-DSV-or-unviewable rejected); read = the flush-time GPU read
-        //   pass (draws issued / ensure-compile-create failures).
-        out.push_back(kv("prbPreCopies", RenderIntegration::g_prb_pre_copies));
-        out.push_back(kv("prbPreMsaa", RenderIntegration::g_prb_pre_msaa));
-        out.push_back(kv("prbPreNoDsv", RenderIntegration::g_prb_pre_nodsv));
-        out.push_back(kv("prbReadDraws", RenderIntegration::g_prb_read_draws));
-        out.push_back(kv("prbReadFails", RenderIntegration::g_prb_read_fails));
-        //   26326: prbPreMsaa now counts ARRAY DSVs only (the MSAA arm ships;
-        //   this rig measured MSAA every frame at 26325). witDriftLast = the
-        //   last published witness drift (stenDrift.x, injection path).
-        //   26327: the drift is an INSTRUMENT now - the default self-witness
-        //   form reads neither drift lane (mode 175 = the form that does).
-        out.push_back(kvf("witDriftLast", RenderIntegration::g_wit_drift));
-        // 26331: the 26124-class conviction gauge, live at every camera
-        // extraction - |cam(true inverse) - cam(transpose)|. Meters-scale
-        // in Zeus after sustained rotation = the stencil offset's size;
-        // ~0 in person view (fresh matrices). Mode 182 is the A/B.
-        out.push_back(kvf("camExtSkewM", RenderIntegration::g_cam_ext_skew_last));
-        out.push_back(kvf("camExtSkewMax", RenderIntegration::g_cam_ext_skew_max));
+        //   prbPre* - 26325: why the 26324 pre-injection clip decider is
+        //   silent. prbPreBotZ/DM read -1 on every row of dump1, including
+        //   rows where the flush probes landed, so the lane was never a
+        //   verdict. prbPreSamples > 1 or prbPreArray > 1 = the single-sample
+        //   gate refused (main depth is MSAA); prbPreIssued counting with the
+        //   lane still -1 = the 1x1 copy itself, which D3D11 does not permit
+        //   out of a depth-stencil resource (whole subresource only).
+        //   prbPreFmt is the DSV resource's DXGI format. Read these BEFORE
+        //   reading any preBot verdict.
+        out.push_back(kv("prbPreFmt", RenderIntegration::g_prb_pre_fmt));
+        out.push_back(kv("prbPreSamples", RenderIntegration::g_prb_pre_samples));
+        out.push_back(kv("prbPreArray", RenderIntegration::g_prb_pre_array));
+        out.push_back(kv("prbPreIssued", RenderIntegration::g_prb_pre_issued));
+        out.push_back(kv("prbPreSkips", RenderIntegration::g_prb_pre_skips));
         out.push_back(kv("liveNearRefAdopts", RenderIntegration::g_live_ref_adopts));
         out.push_back(kv("worldPairEncodes", RenderIntegration::g_world_pair_encodes));
         out.push_back(kvf("farKeepFar", RenderIntegration::g_far_keep_far));
@@ -11434,7 +12473,8 @@ static game_value dump_render_trace_sqf() {
         names.push_back(game_value("boundCamDxM"));    // |census camera - seam draw camera| (m; -1 = none)
         names.push_back(game_value("boundCamLiveDxM"));// |census camera - live fetch camera| (m; -1 = none)
         names.push_back(game_value("boundCamOk"));     // census camera validated this frame
-        names.push_back(game_value("seamTrnEvent"));   // 0 none 1 bound-refused 2 wide-take 3 escape-take
+        names.push_back(game_value("seamTrnEvent"));   // 0 none 1 bound-refused 2 wide-take 3 escape-take, 5 witness-take (26443)
+        names.push_back(game_value("seamTrnWit"));     // 26443: floor-refusal witness verdict (-1 none, 0 fail/abstain, 1 pass)
         // 26310 append-only tail: the flavor gauge (ledger at the seam's
         // translation anchor). |adopted-view camera - cycle latch camera|,
         // metres; -1 = no latch reference that run.
@@ -11456,60 +12496,85 @@ static game_value dump_render_trace_sqf() {
         names.push_back(game_value("injCycIdx"));
         names.push_back(game_value("prbPreBotZ"));
         names.push_back(game_value("prbPreBotDM"));
-        // 26325 tail (173-177; ledger at KH_BUILD_TAG): the Issue-B flicker
-        // correlators + the CPU-side clip-family decider.
-        names.push_back(game_value("bandValidN"));
-        names.push_back(game_value("atlasLive"));
-        names.push_back(game_value("farPhase"));
-        names.push_back(game_value("castLostAbs"));
-        names.push_back(game_value("prbCtrClipZ"));
-        names.push_back(game_value("witDrift"));   // 26326 (lane 178)
-        names.push_back(game_value("thmBotClear"));   // 26328 (lane 179)
-        names.push_back(game_value("selfWitDz"));     // 26331 (lane 180): the pairing decider
-        names.push_back(game_value("consumedSlotAge"));   // 26334 (lane 181): 1 healthy / 0 = off-by-one
-        names.push_back(game_value("prbWitDCtr"));   // 26336 (182-191): the witness census
-        names.push_back(game_value("prbWitWCtr"));
-        names.push_back(game_value("prbStenCtr"));
-        names.push_back(game_value("prbCntRp"));
-        names.push_back(game_value("prbWitDBot"));
-        names.push_back(game_value("prbWitWBot"));
-        names.push_back(game_value("prbStenBot"));
-        names.push_back(game_value("prbCntBot"));
-        names.push_back(game_value("prbRpDx"));
-        names.push_back(game_value("prbRpDy"));
-        names.push_back(game_value("maskPostCtr"));   // 26340 (192-199): the mask census
-        names.push_back(game_value("maskPreCtr"));
-        names.push_back(game_value("maskLiveCtr"));
-        names.push_back(game_value("maskRatioCtr"));
-        names.push_back(game_value("maskPostBot"));
-        names.push_back(game_value("maskPreBot"));
-        names.push_back(game_value("maskLiveBot"));
-        names.push_back(game_value("maskRatioBot"));
-        names.push_back(game_value("sunOccCtr"));   // 26341 (200-203): sun/self census
-        names.push_back(game_value("sunZCtr"));
-        names.push_back(game_value("sunOccBot"));
-        names.push_back(game_value("sunZBot"));
-        names.push_back(game_value("shadOccIn"));   // 26342 (204-207): shadow probes
-        names.push_back(game_value("shadZIn"));
-        names.push_back(game_value("shadOccEdge"));
-        names.push_back(game_value("shadZEdge"));
-        names.push_back(game_value("mskPostShIn"));   // 26344 (208-221): the wide net
-        names.push_back(game_value("mskPreShIn"));
-        names.push_back(game_value("mskLiveShIn"));
-        names.push_back(game_value("mskRatioShIn"));
-        names.push_back(game_value("mskRatioShEd"));
-        names.push_back(game_value("mskPostShEd"));
-        names.push_back(game_value("bandOccShIn"));
-        names.push_back(game_value("bandZdShIn"));
-        names.push_back(game_value("selfOccShIn"));
-        names.push_back(game_value("selfMgShIn"));
-        names.push_back(game_value("injRan"));
-        names.push_back(game_value("sunMapAge"));
-        names.push_back(game_value("castFired"));
-        names.push_back(game_value("bandPickShad"));
-        names.push_back(game_value("mskRatRpShIn"));   // 26345 slot 21
-        names.push_back(game_value("mskRpDxShIn"));    // 26345 slot 21
-        names.push_back(game_value("shPxSrc"));        // 26345 targeting source
+        // 26325 append-only tail: the colour pass's applied FOV ratio.
+        // seamFovLatR says how far apart frame k and k+1 are in scale;
+        // compFovR says whether the VISIBLE box closed that gap this frame
+        // (-1 = refused or absent, i.e. it rasterised at the old scale).
+        names.push_back(game_value("compFovR"));
+        // 26326 append-only tail: the near the seam's arbitration chain would
+        // have encoded on frames the sniff referee replaced it (-1 = none).
+        // seamNear now always reports what actually shipped.
+        names.push_back(game_value("seamSnifOvr"));
+        // 26328 append-only tail: the ENGINE's own volume-pass pair, measured
+        // at the injection instant (one frame latent, -1 = no sample). Read
+        // volPassNear against seamNear on the SAME row - that comparison is
+        // the whole question this campaign has been unable to answer.
+        names.push_back(game_value("volPassNear"));
+        names.push_back(game_value("volPassM22"));
+        // 26329: the readback age in TRACE ROWS - the sample belongs to row
+        // (serial - age). Without it the alternating near classes let two
+        // different alignments fit the same data, which is what left 26328
+        // unreadable. volDrawNear is the same measurement at the engine's
+        // first COUNTING draw, which is where the value is consumed.
+        names.push_back(game_value("volPassAge"));
+        names.push_back(game_value("volDrawNear"));
+        names.push_back(game_value("volDrawAge"));
+        // 26331: the box centre's clip.w through the ENGINE's own matrix,
+        // taken both ways, against its known distance. Whichever of Abs/Rel
+        // equals True names the space the engine's matrix expects - and so
+        // which of mode 174 / 175 transforms our footprint correctly.
+        names.push_back(game_value("engVpWAbs"));
+        names.push_back(game_value("engVpWRel"));
+        names.push_back(game_value("engVpWTrue"));
+        // 26342 THE ROUND-TRIP LANES (ledger at kh_view_camera_exact).
+        // compCamRtM / seamCamRtM = |transpose camera - exact camera| for the
+        // composite's and the seam's own view, in metres: the error the
+        // 26341 translation rebuild was injecting, per frame. camAbsM is the
+        // amplifier it multiplies (the absolute map magnitude of the camera).
+        // compTakeSrc: 0 no take, 1 snapped (bit-identical basis, translation
+        // untouched), 2 rebuilt through the exact camera, 3 refused.
+        names.push_back(game_value("compCamRtM"));
+        names.push_back(game_value("seamCamRtM"));
+        names.push_back(game_value("camAbsM"));
+        names.push_back(game_value("compTakeSrc"));
+        // 26342: the depth-encode route the VISIBLE box took this frame
+        // (0 ordinary, 1 near-gap SV_Depth, 2 far-keep). The seam has no such
+        // routing, so a non-zero here is a frame where the box and its own
+        // footprint were in different encodes - the standing suspect for the
+        // sub-1 m zoom/fire size pop if 26342 does not close it.
+        names.push_back(game_value("compNearZ"));
+        // 26362 APPEND-ONLY TAIL: the caster centre through the ENGINE'S own
+        // view-projection versus through the SEAM'S, in pixels. Compare
+        // volDrawSwingPx against swingPx ROW BY ROW - that pair is the whole
+        // question. -1 = no sample this row.
+        names.push_back(game_value("seamFetchDupM"));   // 26365 (mis-scoped)
+        names.push_back(game_value("compCamStepM"));    // 26373
+        names.push_back(game_value("seamTrnDxM"));      // 26366
+        names.push_back(game_value("seamTrnBndM"));
+        names.push_back(game_value("seamFetchN"));       // 26367 seam
+        names.push_back(game_value("seamBoundN"));
+        names.push_back(game_value("bandPickAgeMs"));    // 26367 cascades
+        names.push_back(game_value("bandPickCamDxM"));  // 26369
+        names.push_back(game_value("bandAltCamDxM"));   // 26375
+        names.push_back(game_value("bandAltBetter"));
+        names.push_back(game_value("bandPickNoneN"));
+        names.push_back(game_value("bandPoolMissN"));
+        names.push_back(game_value("bandStageWaitMs"));
+        names.push_back(game_value("stenTol"));          // 26367 blur
+        names.push_back(game_value("volPassSwingPx"));
+        names.push_back(game_value("volDrawSwingPx"));
+        // 26387 append-only tail: receive coverage. Keep 1:1 with the
+        // pushes below - fieldsN/frameN verify it in-band on every dump.
+        names.push_back(game_value("recvBandsN"));      // bands committed this frame
+        names.push_back(game_value("recvBandNear"));    // finest committed band near (m)
+        names.push_back(game_value("recvDropWhy"));     // bitmask of the gates that dropped one
+        names.push_back(game_value("recvBandAgeMs"));   // 26388: seal age of the finest band
+        names.push_back(game_value("recvBandCamDxM"));  // 26389: its baked camera vs the pass camera
+        names.push_back(game_value("vmirDraws"));       // 26458: re-issued counting draws
+        names.push_back(game_value("blkMirSunLum"));    // 26479: mirror at the row latch
+        names.push_back(game_value("blkAnchSunLum"));   // 26479: anchor at the row latch
+        names.push_back(game_value("dBlkApplies"));     // 26479: applies this frame
+        names.push_back(game_value("dBlkAnchorRej"));   // 26479: anchor rejects this frame
 
         // 26291 THE COUNT IS VERIFIED IN-BAND. trace_field_audit hand-counted
         // push CALL SITES against non-delta names and read the delta loop as
@@ -11660,6 +12725,7 @@ static game_value dump_render_trace_sqf() {
             f.push_back(game_value(r.bound_cam_live_dx_m));
             f.push_back(game_value(static_cast<float>(r.bound_cam_ok)));
             f.push_back(game_value(static_cast<float>(r.seam_trn_event)));
+            f.push_back(game_value(r.seam_trn_wit));   // 26443
             f.push_back(game_value(r.seam_anch_dx_m));                     // 26310 tail
             f.push_back(game_value(r.prb_ctr_z));                          // 26315 tail
             f.push_back(game_value(r.prb_ctr_dm));
@@ -11677,58 +12743,47 @@ static game_value dump_render_trace_sqf() {
             f.push_back(game_value(static_cast<float>(r.inj_cyc_idx)));
             f.push_back(game_value(r.prb_pre_bot_z));
             f.push_back(game_value(r.prb_pre_bot_dm));
-            f.push_back(game_value(static_cast<float>(r.band_valid_n)));
-            f.push_back(game_value(static_cast<float>(r.atlas_live)));
-            f.push_back(game_value(static_cast<float>(r.far_phase)));
-            f.push_back(game_value(r.cast_lost_abs));
-            f.push_back(game_value(r.prb_ctr_clip_z));
-            f.push_back(game_value(r.wit_drift));
-            f.push_back(game_value(r.thm_bot_clear));
-            f.push_back(game_value(r.self_wit_dz));   // 26331 (lane 180)
-            f.push_back(game_value(r.consumed_slot_age));   // 26334 (lane 181)
-            f.push_back(game_value(r.prb_wit_d_ctr));   // 26336 (182-191)
-            f.push_back(game_value(r.prb_wit_w_ctr));
-            f.push_back(game_value(r.prb_sten_ctr));
-            f.push_back(game_value(r.prb_cnt_rp));
-            f.push_back(game_value(r.prb_wit_d_bot));
-            f.push_back(game_value(r.prb_wit_w_bot));
-            f.push_back(game_value(r.prb_sten_bot));
-            f.push_back(game_value(r.prb_cnt_bot));
-            f.push_back(game_value(r.prb_rp_dx));
-            f.push_back(game_value(r.prb_rp_dy));
-            f.push_back(game_value(r.mask_post_ctr));   // 26340 (192-199)
-            f.push_back(game_value(r.mask_pre_ctr));
-            f.push_back(game_value(r.mask_live_ctr));
-            f.push_back(game_value(r.mask_ratio_ctr));
-            f.push_back(game_value(r.mask_post_bot));
-            f.push_back(game_value(r.mask_pre_bot));
-            f.push_back(game_value(r.mask_live_bot));
-            f.push_back(game_value(r.mask_ratio_bot));
-            f.push_back(game_value(r.sun_occ_ctr));   // 26341 (200-203)
-            f.push_back(game_value(r.sun_z_ctr));
-            f.push_back(game_value(r.sun_occ_bot));
-            f.push_back(game_value(r.sun_z_bot));
-            f.push_back(game_value(r.shad_occ_in));   // 26342 (204-207)
-            f.push_back(game_value(r.shad_z_in));
-            f.push_back(game_value(r.shad_occ_edge));
-            f.push_back(game_value(r.shad_z_edge));
-            f.push_back(game_value(r.msk_post_shin));   // 26344 (208-221)
-            f.push_back(game_value(r.msk_pre_shin));
-            f.push_back(game_value(r.msk_live_shin));
-            f.push_back(game_value(r.msk_ratio_shin));
-            f.push_back(game_value(r.msk_ratio_shed));
-            f.push_back(game_value(r.msk_post_shed));
-            f.push_back(game_value(r.band_occ_shin));
-            f.push_back(game_value(r.band_zd_shin));
-            f.push_back(game_value(r.self_occ_shin));
-            f.push_back(game_value(r.self_mg_shin));
-            f.push_back(game_value(r.inj_ran));
-            f.push_back(game_value(r.sun_map_age));
-            f.push_back(game_value(r.cast_fired));
-            f.push_back(game_value(r.band_pick_shad));
-            f.push_back(game_value(r.msk_rat_rp_shin));   // 26345
-            f.push_back(game_value(r.msk_rp_dx_shin));    // 26345
-            f.push_back(game_value(r.sh_px_src));         // 26345
+            f.push_back(game_value(r.comp_fov_r));                        // 26325 tail
+            f.push_back(game_value(r.seam_sniff_ovr));                    // 26326 tail
+            f.push_back(game_value(r.vol_pass_near));                     // 26328 tail
+            f.push_back(game_value(r.vol_pass_m22));
+            f.push_back(game_value(r.vol_pass_age));                      // 26329 tail
+            f.push_back(game_value(r.vol_draw_near));
+            f.push_back(game_value(r.vol_draw_age));
+            f.push_back(game_value(r.eng_vp_w_abs));                      // 26331 tail
+            f.push_back(game_value(r.eng_vp_w_rel));
+            f.push_back(game_value(r.eng_vp_w_true));
+            f.push_back(game_value(r.comp_cam_rt_m));                     // 26342 tail
+            f.push_back(game_value(r.seam_cam_rt_m));
+            f.push_back(game_value(r.cam_abs_m));
+            f.push_back(game_value(static_cast<float>(r.comp_take_src)));
+            f.push_back(game_value(static_cast<float>(r.comp_near_z)));
+            f.push_back(game_value(r.seam_fetch_dup_m));                   // 26365
+            f.push_back(game_value(r.comp_cam_step_m));                    // 26373
+            f.push_back(game_value(r.seam_trn_dx_m));                      // 26366
+            f.push_back(game_value(r.seam_trn_bnd_m));
+            f.push_back(game_value(static_cast<float>(r.seam_fetch_n)));     // 26367
+            f.push_back(game_value(static_cast<float>(r.seam_bound_n)));
+            f.push_back(game_value(r.band_pick_age_ms));
+            f.push_back(game_value(r.band_pick_cam_dx_m));                 // 26369
+            f.push_back(game_value(r.band_alt_cam_dx_m));                  // 26375
+            f.push_back(game_value(static_cast<float>(r.band_alt_better)));
+            f.push_back(game_value(static_cast<float>(r.band_pick_none_n)));
+            f.push_back(game_value(static_cast<float>(r.band_pool_miss_n)));
+            f.push_back(game_value(r.band_stage_wait_ms));
+            f.push_back(game_value(r.sten_tol));
+            f.push_back(game_value(r.vol_pass_swing_px));                  // 26362 tail
+            f.push_back(game_value(r.vol_draw_swing_px));
+            f.push_back(game_value(static_cast<float>(r.recv_bands_n)));    // 26387
+            f.push_back(game_value(r.recv_band_near));
+            f.push_back(game_value(static_cast<float>(r.recv_drop_why)));
+            f.push_back(game_value(r.recv_band_age_ms));   // 26388
+            f.push_back(game_value(r.recv_band_cam_dx_m));   // 26389
+            f.push_back(game_value(static_cast<float>(r.vmir_draws)));   // 26458
+            f.push_back(game_value(r.blk_mir_lum));                      // 26479
+            f.push_back(game_value(r.blk_anch_lum));
+            f.push_back(game_value(static_cast<float>(r.d_blk_applies)));
+            f.push_back(game_value(static_cast<float>(r.d_blk_anch_rej)));
             if (khtr_nrow == 0) khtr_nrow = static_cast<uint32_t>(f.size());   // 26291
             frames.push_back(game_value(std::move(f)));
         }
@@ -12364,6 +13419,48 @@ static game_value add_local_postfx_sqf(game_value_parameter args) {
 // display. Cheap no-op when no UI-affecting passes exist. Returns BOOL: true
 // if passes were queued this call.
 static game_value flush_ui_render_sqf() {
+    // 26450: the union sun-map range follows the game's shadow view
+    // distance, read directly HERE every flush (operator call: a per-
+    // frame read beats command plumbing; the cost - one getVideoOptions
+    // hashmap build per frame - is accepted). The wrapper's keyed
+    // lookup returns a SCALAR, so nothing here is positioned to
+    // version-drift. Failures leave the previous value standing (default
+    // 200 = the game's stock setting). 26451: direct
+    // sqf::get_video_options() wrapper, no compiled snippet.
+    try {
+        // 26452: rv_hashmap read per the intercept types header - the map
+        // is game_data_hashmap_pair<game_value> entries with .key/.value,
+        // so ITERATION with a case-folded key compare is the access the
+        // header guarantees, independent of internal_hashmap's lookup
+        // signatures. RV string keys are compared case-insensitively.
+        rv_hashmap khsr_map = sqf::get_video_options();
+
+        for (auto& khsr_e : khsr_map) {
+            if (khsr_e.key.type_enum() != game_data_type::STRING) continue;
+            const std::string khsr_k = static_cast<std::string>(khsr_e.key);
+            if (khsr_k.size() != 16) continue;   // "shadowVisibility"
+            static const char khsr_w[17] = "shadowvisibility";
+            bool khsr_m = true;
+
+            for (size_t khsr_i = 0; khsr_i < 16; ++khsr_i) {
+                char khsr_c = khsr_k[khsr_i];
+                if (khsr_c >= 'A' && khsr_c <= 'Z') khsr_c = static_cast<char>(khsr_c + 32);
+                if (khsr_c != khsr_w[khsr_i]) { khsr_m = false; break; }
+            }
+
+            if (!khsr_m) continue;
+
+            if (khsr_e.value.type_enum() == game_data_type::SCALAR) {
+                const float khsr_f = static_cast<float>(khsr_e.value);
+                if (khsr_f == khsr_f && khsr_f > 0.0f) {
+                    RenderIntegration::g_sun_range.store(khsr_f, std::memory_order_relaxed);
+                }
+            }
+
+            break;
+        }
+    } catch (...) {}
+
     try {
         RenderIntegration::ensure_ui_driver();   // explicit UI-render demand is an enabling command
         return game_value(RenderIntegration::flush_ui_frame());

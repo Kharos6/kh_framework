@@ -7651,6 +7651,39 @@ static game_value set_render_debug_sqf(game_value_parameter arg) {
         // 26483-26489 behavior). Expect under 283: blkSnapRejects
         // climbs again and the few-percent flip variant returns.
                             khd_m == 283 ||
+                            // 26501: 291 = ring pick anchor-band filter OFF
+                            // (plain 26490 nearest-to-previous). Expect the
+                            // far-range 0.70x both-channel dimming step to
+                            // return under 291 during fast orbits.
+                            khd_m == 291 ||
+                            // 26502: 292 = starvation hold OFF (26501 raw
+                            // nearest on no-band). Expect the range-banded
+                            // 0.75x dimming at ~7000 m to return under 292.
+                            khd_m == 292 ||
+                            // 26503: 293 = publish slew OFF (instant commit).
+                            // Expect referee snap steps (~7% one-frame) to
+                            // return under 293 during cloud transitions.
+                            khd_m == 293 ||
+                            // 26505: 294 = caster-union window growth OFF
+                            // (the pure 26454/26504 camera window). Expect
+                            // the giant-caster shadow truncation at ~the
+                            // shadowVisibility range to return under 294
+                            // (edge crawling with the camera; interior of
+                            // an enclosing caster sunlit).
+                            khd_m == 294 ||
+                            // 26506: 295 = band lit-return restored (the
+                            // 26454 cast tier chain verbatim; lighting0.y
+                            // 40, fire cast fill only). Expect the ~50 m
+                            // lit bubble around the camera to return under
+                            // 295 inside/on a giant caster's shadow.
+                            khd_m == 295 ||
+                            // 26507: 296 = SELF band lit-return restored
+                            // (the 26506 twin; lighting0.y 41, mesh fill
+                            // only). Expect the camera-tracking SQUARE lit
+                            // patch to return under 296 on OUR meshes
+                            // receiving a giant caster's shadow; terrain
+                            // stays clean (295 owns that chain).
+                            khd_m == 296 ||
         // 26491: 284 = tier-proportional floor OFF (lighting0.y 37;
         // the 26490 arm, now reachable). Expect: distance noise returns.
                             khd_m == 284 ||
@@ -8836,6 +8869,15 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("blkSnapAdopts", RenderIntegration::g_blk_snap_adopts));   // 26481
         out.push_back(kv("blkSnapRejects", RenderIntegration::g_blk_snap_rejects));   // 26483
         out.push_back(kv("blkRingPicks", RenderIntegration::g_blk_ring_picks));   // 26487
+        out.push_back(kv("blkRingBandFiltered", RenderIntegration::g_blk_ring_band_filtered));   // 26501
+        out.push_back(kv("blkRingNoBand", RenderIntegration::g_blk_ring_no_band));   // 26501
+        out.push_back(kv("blkRingStarveHolds", RenderIntegration::g_blk_ring_starve_holds));   // 26502
+        out.push_back(kv("blkPubSlews", RenderIntegration::g_blk_pub_slews));   // 26503
+        out.push_back(kv("sunVpSpanXM", RenderIntegration::g_kh_sunvp_span[0]));   // 26504
+        out.push_back(kv("sunVpSpanYM", RenderIntegration::g_kh_sunvp_span[1]));   // 26504
+        out.push_back(kv("sunVpSpanZM", RenderIntegration::g_kh_sunvp_span[2]));   // 26504
+        out.push_back(kv("sunVpLatches", RenderIntegration::g_kh_sunvp_latches));   // 26504
+        out.push_back(kv("sunVpFitGrows", RenderIntegration::g_kh_sunvp_fit_grows));   // 26505
         // 26490: the 1x sweep's inner verdict.
         out.push_back(kv("rtResolveTrue", RenderIntegration::g_rt_resolve_true));
         out.push_back(kv("rtResolveFalse", RenderIntegration::g_rt_resolve_false));

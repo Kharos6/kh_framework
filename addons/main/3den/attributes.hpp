@@ -233,7 +233,6 @@ class Attributes
 			};
 		};
 	};
-	#include "\x\kh\addons\main\3den\at_cameraSequence.hpp"
 	#include "\x\kh\addons\main\3den\at_conditionalPresence.hpp"
 	#include "\x\kh\addons\main\3den\at_convertToAgent.hpp"
 	#include "\x\kh\addons\main\3den\at_curators.hpp"

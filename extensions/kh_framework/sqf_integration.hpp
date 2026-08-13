@@ -7684,6 +7684,12 @@ static game_value set_render_debug_sqf(game_value_parameter arg) {
                             // receiving a giant caster's shadow; terrain
                             // stays clean (295 owns that chain).
                             khd_m == 296 ||
+                            // 26508: 297 = strict 26083 ordinal gate
+                            // restored (liveness stand-down OFF). Expect
+                            // the map-screen 20 Hz FX flicker to return
+                            // under 297 (arms at the 50 ms failsafe,
+                            // staleSkips ~= flushes - arms).
+                            khd_m == 297 ||
         // 26491: 284 = tier-proportional floor OFF (lighting0.y 37;
         // the 26490 arm, now reachable). Expect: distance noise returns.
                             khd_m == 284 ||
@@ -8798,6 +8804,7 @@ static game_value get_render_stats_sqf() {
         // (each of those frames would otherwise have compounded the
         // UI-phase effects onto their own previous output).
         out.push_back(kv("uiStaleSkips", RenderIntegration::g_ui_stale_skips));
+        out.push_back(kv("uiMaskStallArms", RenderIntegration::g_ui_mask_stall_arms));   // 26508
         out.push_back(kv("compositeInjections", RenderIntegration::g_stats.composite_injections));
         out.push_back(kv("compositeMeshes", RenderIntegration::g_stats.composite_meshes));
         out.push_back(kv("compositeSkips", RenderIntegration::g_stats.composite_skips));

@@ -7587,10 +7587,14 @@ static game_value set_render_debug_sqf(game_value_parameter arg) {
         // offthreadTrigs and (if tid was the whole story)
         // compositeInjections climbing together.
                             // 271: DELISTED 26497 - the off-thread trigger + opaque floor mirror stripped with the FSAA-off campaign (number never reused)
-        // 26480: 272 = gradient curvature damper OFF (lighting0.y 34;
-        // the 26478 undamped gradient). Expect under 272: the curved-
-        // contact speckle (the 26479 screenshot) returns to mode-0-of-
-        // 26478 level while flat-wall z-fight coverage is unchanged.
+        // 26480: 272 = gradient curvature damper OFF (lighting0.y 34).
+        // 26509 AUDIT - THIS ARM IS INERT. Code 34 has had no shader
+        // guard site since 26494 re-armed the damper by default and
+        // moved its kill onto code 39 (mode 288), bundled with slope
+        // 0.8 + floor x1.25. There is no damper-alone isolator any
+        // more; 272 is a silent alias of the default and a 272 A/B
+        // reads NULL. Do not spend it on the noise axis - a null here
+        // is the plumbing, not a verdict about the damper.
                             khd_m == 272 ||
         // 26481: 273 = REVERT the injection-instant block snapshot (the
         // publish returns to the park-time live mirror, 26479 behavior).
@@ -7630,11 +7634,13 @@ static game_value set_render_debug_sqf(game_value_parameter arg) {
         // 279: the small-gap camera flip class returns; mode 0 must
         // hold zero flips with blkRingPicks climbing.
                             khd_m == 279 ||
-        // 26488: 280 = REVERT the measured bias defaults (lighting0.y
-        // 35: slope back to 0.35, floor x1, curvature damper back on -
-        // the 26487 form verbatim). Expect under 280: the steep-face
-        // terminator noise returns at the 26487 level (measured 0.267%
-        // vs the new default's 0.093% on the operator's own map).
+        // 26488: 280 = the measured-bias revert. 26509 AUDIT - THIS ARM
+        // IS INERT and this entry contradicted the 288 entry below it
+        // for four builds. 26494 promoted 280's own form to the DEFAULT
+        // by operator ranking, which the shader states at khsr_slope
+        // ("35/280 are aliases of the default now"); code 35 has no
+        // guard site. A 280 A/B reads NULL. The live arm on this axis
+        // is 288 / code 39 (slope 0.8, floor x1.25, damper off).
                             khd_m == 280 ||
         // 26489: 281 = REVERT the off-thread atlas consumption (the
         // SRV-keyed sweep returns to render-thread draws only). Expect
@@ -7676,6 +7682,13 @@ static game_value set_render_debug_sqf(game_value_parameter arg) {
                             // 40, fire cast fill only). Expect the ~50 m
                             // lit bubble around the camera to return under
                             // 295 inside/on a giant caster's shadow.
+                            // 26538: 295 IS NOW AN ACCEPTED ALIAS OF THE
+                            // DEFAULT - the retirement made lit-return the
+                            // default behaviour, so code 40 and code 0 are
+                            // the same chain. Kept whitelisted (the mode-64
+                            // precedent at 26534) so a field flip to it is a
+                            // measured no-op rather than a silent rejection.
+                            // 328 is the arm that actually restores 26506.
                             khd_m == 295 ||
                             // 26507: 296 = SELF band lit-return restored
                             // (the 26506 twin; lighting0.y 41, mesh fill
@@ -7690,6 +7703,238 @@ static game_value set_render_debug_sqf(game_value_parameter arg) {
                             // under 297 (arms at the 50 ms failsafe,
                             // staleSkips ~= flushes - arms).
                             khd_m == 297 ||
+                            // 26509: 298 = pre-26509 fog arming (engine
+                            // terms published only when setFog > 0, so the
+                            // far ramp is fog-gated again). Expect under
+                            // 298 at setFog 0: the view-distance boundary
+                            // fade vanishes from our meshes while engine
+                            // terrain at the same range keeps it.
+                            khd_m == 298 ||
+                            // 26509: 299 = zero-decay anchor hold OFF (the
+                            // 26508 probe). Expect under 299 with setFog
+                            // decay 0: fogZeroHolds pins at 0, the block
+                            // mirror freezes, and fogEngX / fogEngEnd /
+                            // fogDecayEngine stop tracking a weather change
+                            // - the over-fog returns.
+                            khd_m == 299 ||
+                            // 26510: 300 = ramp coherence guard OFF (the
+                            // 26197 verbatim pair, incoherent or not).
+                            // Expect under 300 with thick low fog: the mesh
+                            // goes solid fog colour past ~80 m again with no
+                            // gradient while engine geometry keeps its ramp,
+                            // and fogRampIncoh stops counting.
+                            khd_m == 300 ||
+                            // 26511: 301 = VISUAL 22, the fog convergence
+                            // colour painted raw (full-fog endpoint). Put the
+                            // mesh in thick fog at range and screenshot it:
+                            // invisible against the surrounding fog means our
+                            // target is the engine's and the author is the
+                            // transmittance; a visible patch means fog_target
+                            // IS the reported edge - note brighter vs darker.
+                            khd_m == 301 ||
+                            // 26512: 302 = scale the fog TARGET by the engine's
+                            // shading floor cb5[0].w (the probe, not the fix).
+                            // In thick fog at range: box MERGES into the fog =
+                            // the target scale is the answer; box goes too DARK
+                            // = the scalar sits above its floor and the fix
+                            // needs a per-fragment light term. Either way it
+                            // picks the arm for the next build.
+                            khd_m == 302 ||
+                            // 26513: 303 = FAR-DISCARD ISOLATOR (forces the
+                            // shaders' existing farVis skip on every mesh).
+                            // Run it on the exact scene with the straight-edged
+                            // cut: cut GONE = the per-fragment far discard is
+                            // the author and the fix is the pair it tests
+                            // against; cut SURVIVES = the discard is exonerated.
+                            // Trade while set: truly beyond-far fragments clamp
+                            // instead of clipping. A/B only, never a default.
+                            khd_m == 303 ||
+                            // 26514: 304 = far-keep routing back to far_vis
+                            // ONLY (the pre-26514 condition). Expect under 304
+                            // with thick fog: the see-through cut across the
+                            // mesh returns on a straight edge with sky behind
+                            // it, and farKeepInsideRoutes drops to 0.
+                            khd_m == 304 ||
+                            // 26515: 305 = VISUAL 23, flat opaque magenta
+                            // returned BEFORE the atmospheric block. Run it on
+                            // the exact scene that shows the see-through cut.
+                            // SOLID and occluding = our atmospherics and depth
+                            // are both clean, look at the shading input.
+                            // MAGENTA BUT SEE-THROUGH = nothing this shader
+                            // outputs can be the author; the axis is injection
+                            // ordering / depth ownership. ABSENT past the edge
+                            // = a clip after all. One screenshot, three answers.
+                            khd_m == 305 ||
+                            // 26516: 306 = VISUAL 24, the encoded depth ladder
+                            // (ndc = m22 + m32/w). WHITE = at/past the far
+                            // plane, where the fragment clamps to MaxDepth and
+                            // a LESS_EQUAL cloud/sky pass ties and wins. White
+                            // region matching the cut = the encode is the
+                            // author. Cut inside the coloured range = the
+                            // encode is sane and the loss is draw ORDER.
+                            khd_m == 306 ||
+                            // 26517: 307 = VISUAL 25, view depth in METRES.
+                            // blue <500, green 500-1000, yellow 1000-1400,
+                            // orange 1400-1531 (fog ramp end), RED 1531-1547
+                            // (engine far plane), purple 1547-2500, white
+                            // >2500. Report which band the cut sits ON - a
+                            // named boundary convicts that number; a cut in
+                            // mid-band eliminates both candidates at once.
+                            khd_m == 307 ||
+                            // 26518: 308 = OUR atmospherics fully disarmed
+                            // (fog + haze + engine terms), leaving the engine's
+                            // own pass as the only authority over our pixels.
+                            // Compare the mesh against engine geometry at the
+                            // SAME range: matching fog density = we were double-
+                            // fogging and that is the fix; mesh now UNDER-fogged
+                            // = the engine does not own our pixels and our half
+                            // is still needed. The cut may persist either way -
+                            // if it does, it is the engine's own replacement and
+                            // engine objects at that optical depth do it too.
+                            khd_m == 308 ||
+                            // 26519: 309 = force the mesh onto the POST-SCENE
+                            // FLUSH path (declared ineligible for the reorder
+                            // injection). Run it on the cut scene: CUT GONE =
+                            // draw order is the author, proven in one flip.
+                            // CUT PRESENT = a fullscreen depth-driven pass owns
+                            // those pixels and ordering cannot help. Trade while
+                            // set: no native translucent compositing (smoke and
+                            // glass paint over the mesh again). A/B only.
+                            khd_m == 309 ||
+                            // 26520: 310 / 311 / 312 = delay the reorder injection
+                            // past the first 1 / 2 / 3 qualifying translucent
+                            // triggers - keeping the injection and its translucent
+                            // compositing instead of falling back to the flush.
+                            // Report the SMALLEST that clears the cut while mesh-
+                            // to-mesh ordering stays intact; that names the pass.
+                            // Read trigQualMax first: if it is 1, none can help.
+                            khd_m == 310 ||
+                            khd_m == 311 ||
+                            khd_m == 312 ||
+                            // 26523: 313 = VISUAL 26, ndc in the ENGINE frame
+                            // pair (khFarSplit.xy) rather than our own. WHITE =
+                            // at/past the far plane the rest of the scene shares.
+                            // If the white region matches the cut, the far plane
+                            // authored it all along and both earlier ladders were
+                            // painting the wrong encoding. GREY = not far-keep
+                            // routed (expected with fog off).
+                            khd_m == 313 ||
+                            // 26524: 314 = beyond-far fragments encode in the
+                            // FRAME pair clamped at the far plane instead of
+                            // keeping the far-keep pair. Run it on the cut:
+                            // TRANSPARENCY GONE = the far-keep split's
+                            // beyond-far half is the author. Trade while set:
+                            // beyond-far content pins to the far plane and
+                            // sorts wrong against distant engine geometry and
+                            // clouds - the 26046 conviction in reverse.
+                            // Diagnostic only, never a default.
+                            khd_m == 314 ||
+                            // 26527: 315 = VISUAL 27, the depth we actually
+                            // WRITE (SV_Position.z), banded tightly at the top
+                            // of the shared 0.011-0.999 range. A step DOWN going
+                            // outward across the cut is the defect. ALSO the
+                            // plumbing check on 314: run 315 on 0 and on 314 -
+                            // if the bands do not change, 314 never reached this
+                            // shader and its null was an artefact, not a verdict.
+                            khd_m == 315 ||
+                            // 26528: 316 = REVERT the far tie-break (saturated
+                            // beyond-far fragments go back to sitting ON the
+                            // viewport maximum). Expect the see-through cut to
+                            // return under 316 and only under 316.
+                            khd_m == 316 ||
+                            // 26528: 317 = VISUAL 28, paints MAGENTA exactly
+                            // where the tie-break moved a fragment and green
+                            // elsewhere - the magenta region must coincide with
+                            // what used to be the cut.
+                            khd_m == 317 ||
+                            // 26533: 318 = REVERT the seam-basis staleness
+                            // refusal - the colour pass adopts the seam's
+                            // published basis unconditionally again (26341).
+                            // Expect the high-altitude camera glue to return
+                            // and svSeamRotUnfresh to stop mattering.
+                            khd_m == 318 ||
+                            // 26533: 319 = REVERT the flush's fast-camera
+                            // escape. The flush goes back to drawing miss
+                            // frames on the held latch. Expect glue on frames
+                            // where no injection landed and the scene is not
+                            // draw-sparse (a high camera looking DOWN).
+                            khd_m == 319 ||
+                            // 26533: 320 = REVERT the latch trajectory
+                            // confirmation - the continuity gate goes back to
+                            // escaping only via the 1000 ms lost-adopt.
+                            // Expect latchHolds/latchJumpAdopts to return to
+                            // ~18:1 and latchAgeMaxMs to pin near 1000.
+                            khd_m == 320 ||
+                            // 26533: 321 = REVERT the fog-lane refresh. Fog
+                            // terms ride the luminance arbitration again.
+                            // Expect blkFogRefreshes 0 and the multi-second
+                            // fog latency on weather or camera changes.
+                            khd_m == 321 ||
+                            // 26533: 322 = REVERT the farVis view-distance
+                            // stand-down. farVis meshes take the engine's
+                            // boundary fade again (height fog and haze are
+                            // unaffected either way).
+                            khd_m == 322 ||
+                            // 26534: 323 = RESTORE the 26197 below-layer
+                            // stand-down. Underwater (camera below the fog
+                            // layer) our meshes take NO atmosphere at all -
+                            // no height fog, no view-distance ramp, no haze -
+                            // while engine content around them stays fogged.
+                            // That is the artifact; 323 brings it back.
+                            khd_m == 323 ||
+                            // 26535: 324 = fall back to 26534's LAYER CLAMP -
+                            // the above-layer arm evaluated at the boundary
+                            // instead of the engine's decoded camera-below
+                            // arm. Middle rung of the ladder: 323 = no
+                            // atmosphere below the layer at all, 324 = the
+                            // clamp, default = the decoded branch.
+                            khd_m == 324 ||
+                            // 26536: 325 = REVERT the below-layer convergence
+                            // COLOUR. Underwater our meshes go back to
+                            // converging on PSC_FogColor (the above-layer
+                            // target) instead of the engine's sky colour.
+                            // Expect the white/washed box against teal water
+                            // to return, with the transmittance unchanged.
+                            khd_m == 325 ||
+                            // 26537: 326 = KH_BAND_SUN_REACH OFF (the 26454
+                            // isotropic sphere + symmetric window, verbatim).
+                            // Expect under 326: a shadow far from its caster
+                            // goes BLURRY again and steps coarser the farther
+                            // the caster is, while a shadow near its caster is
+                            // unchanged; sunHeroReach/sunMidReach/sunOutReach
+                            // pin exactly at 12 / 48 / 192 and
+                            // sunBandReachTakes stops counting.
+                            khd_m == 326 ||
+                            // 26537: 327 = KH_UNION_TEXEL_SNAP OFF (the union
+                            // centre back on the bare 26448 two-metre camera
+                            // cell, no grid phase). Expect under 327: the
+                            // edge of a UNION-answered shadow resumes snapping
+                            // once every ~2 m of camera travel, static in
+                            // between; sunUnionSnaps stops counting and
+                            // sunUnionSnapM pins at -1. Nothing else moves -
+                            // this arm cannot change sharpness, only phase.
+                            khd_m == 327 ||
+                            // 26538: 328 = KH_LIT_AUTHORITATIVE OFF, i.e. the
+                            // 26506 lit-fallthrough RE-ARMED (lighting0.y 42,
+                            // fire cast fill only). Expect under 328: the
+                            // detached blurry ghost band outside the sharp
+                            // shadow edge returns, with the lit strip between
+                            // them, and its outer edge steps as the camera
+                            // walks past the 2 / 8 / 32 m band radii - worst
+                            // on long shadows at low sun. castChainCode 42.
+                            khd_m == 328 ||
+                            // 26539: 329 = KH_UNION_R_LATCH OFF (the union
+                            // radius back to the raw per-fit enclosing radius,
+                            // so its texel is a function of camera position
+                            // again). Expect under 329, when far enough away
+                            // that the union is the tier answering: the shadow
+                            // edge resumes stepping about two thirds of a
+                            // union texel per 2 m of camera travel, static in
+                            // between. sunUnionRHolds stops counting and
+                            // sunUnionRadHeld pins at -1. Sharpness is NOT
+                            // affected either way - 329 can only change the
+                            // texel by the latch's 10% headroom.
+                            khd_m == 329 ||
         // 26491: 284 = tier-proportional floor OFF (lighting0.y 37;
         // the 26490 arm, now reachable). Expect: distance noise returns.
                             khd_m == 284 ||
@@ -9355,8 +9600,72 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("fogRampHolds", RenderIntegration::g_fog_ramp_holds));
         out.push_back(kvf("fogRampEndMin", RenderIntegration::g_fog_ramp_end_min));
         out.push_back(kvf("fogRampEndMax", RenderIntegration::g_fog_ramp_end_max));
+        // 26510 THE RAMP PAIR AT THE SESSION MINIMUM. Read these four as ONE
+        // row against fogRampEndMin: fogRampMinProd < 1 means the pair cannot
+        // be a fade (it would cap transmittance below 1 at zero distance) and
+        // KH_RAMP_COHERENT dropped it; >= 1 means the pair is a legitimate
+        // short fade and the clip has a different author. fogRampMinCamY says
+        // whether the minimum was read low (real ground fog) or high (a stale
+        // mirror), and fogRampMinMode names a variant-block contamination.
+        out.push_back(kvf("fogRampMinInv", RenderIntegration::g_fog_ramp_min_inv));   // 26510
+        out.push_back(kvf("fogRampMinProd", RenderIntegration::g_fog_ramp_min_prod)); // 26510
+        out.push_back(kvf("fogRampMinCamY", RenderIntegration::g_fog_ramp_min_camy)); // 26510
+        out.push_back(kvf("fogRampMinMode", RenderIntegration::g_fog_ramp_min_mode)); // 26510
+        out.push_back(kv("fogRampIncoh", RenderIntegration::g_fog_ramp_incoh));       // 26510
+        // 26512: cb5[0].w, the engine's floor on the per-pixel shading scalar it
+        // multiplies its fog TARGET by. Our target is unscaled, which is why our
+        // mesh settles brighter than the fog around it. fogLightScales counts the
+        // mode-302 probe applying the floor.
+        out.push_back(kvf("fogLightFloor", RenderIntegration::g_fog_light_floor));    // 26512
+        out.push_back(kv("fogLightScales", RenderIntegration::g_fog_light_scales));   // 26512
+        out.push_back(kv("atmosStandDowns", RenderIntegration::g_atmos_stand_downs)); // 26518
+        // 26520: trigQualMax is the ceiling on the delay ladder - if it reads 1,
+        // there is only ever ONE qualifying translucent trigger per frame, no
+        // delay is reachable, and that is itself the answer.
+        // 26521: main-depth copies/resolves split by whether our injection had
+        // already run. dcopyPre > 0 with dcopyPost ~ 0 means the engine snapshots
+        // the depth BEFORE we draw, our mesh is absent from that snapshot, and no
+        // reordering inside the translucent stream can ever reach the pass that
+        // consumes it. dcopyDrawAt / dcopyInjectAt give the two ordinals.
+        out.push_back(kv("dcopyPre", RenderIntegration::g_dcopy_pre_inject));       // 26521
+        out.push_back(kv("dcopyPost", RenderIntegration::g_dcopy_post_inject));     // 26521
+        out.push_back(kv("dcopyDrawAt", RenderIntegration::g_dcopy_draw_at));       // 26521
+        out.push_back(kv("dcopyInjectAt", RenderIntegration::g_dcopy_inject_at));   // 26521
+        out.push_back(kv("trigDelaySkips", RenderIntegration::g_trig_delay_skips));  // 26520
+        out.push_back(kv("trigQualMax", RenderIntegration::g_trig_qual_max));        // 26520
+        // 26510: the shipped end's stickiness - the operator's "a few seconds"
+        // axis. A multi-second fogEndHoldMaxS across a climb is OUR mirror
+        // freezing; sub-second holds mean the engine is transitioning and we
+        // are tracking it faithfully.
+        out.push_back(kvf("fogEndHoldMaxS", RenderIntegration::g_fog_end_hold_max));  // 26510
+        // 26533 KH_FOG_LANE_REFRESH: fog lanes patched into the mirror past
+        // a LUMINANCE reject. blkFogRefreshes is the arming lane - it should
+        // track blkRegimeRejects, and a 0 there with rejects counting means
+        // the refresh never ran and fogEndHoldMaxS says nothing this round.
+        // blkFogModeStands counts uploads whose fog-model selector was not
+        // 1 or 3, i.e. a variant block correctly refused.
+        out.push_back(kv("blkFogRefreshes", RenderIntegration::g_blk_fog_refreshes));
+        out.push_back(kv("blkFogModeStands", RenderIntegration::g_blk_fog_mode_stands));
         out.push_back(kv("fogBelowStands", RenderIntegration::g_fog_below_stands));
         out.push_back(kvf("fogBelowCamY", RenderIntegration::g_fog_below_cam_y));
+        // 26534 KH_FOG_BELOW_CLAMP: the altitude actually SHIPPED while below
+        // the layer. fogBelowClampY == hazeLayerY on every below frame is the
+        // arming proof; if it still equals fogBelowCamY the clamp never ran.
+        out.push_back(kvf("fogBelowClampY", RenderIntegration::g_fog_below_clamp_y));
+        // 26535 KH_FOG_BELOW_BRANCH: the engine below-layer extinction the
+        // branch actually shipped (block nb[51]). ARMING LANE - if this reads
+        // -1 while fogBelowStands counts, the branch never got its constant
+        // and any verdict on underwater fog is unread. Expect ~0.07.
+        out.push_back(kvf("fogBelowExt", RenderIntegration::g_fog_below_ext));
+        // 26536 KH_FOG_UW_TARGET: the below-layer convergence colour actually
+        // shipped (cb0[7]). ARMING LANE - all -1 means the block never filled
+        // and the white box was not tested. Compare against fogTgt*, which is
+        // the ABOVE-layer target: they must DIFFER, and by a lot.
+        out.push_back(kvf("fogUwColR", RenderIntegration::g_fog_uw_col[0]));
+        out.push_back(kvf("fogUwColG", RenderIntegration::g_fog_uw_col[1]));
+        out.push_back(kvf("fogUwColB", RenderIntegration::g_fog_uw_col[2]));
+        out.push_back(kvf("atmBlkR12w2", RenderIntegration::g_light_probe.nb[51]));
+        out.push_back(kv("fogZeroHolds", RenderIntegration::g_fog_zero_holds));   // 26509
         out.push_back(kv("fogDecaySubs", RenderIntegration::g_fog_decay_subs));
         out.push_back(kvf("fogDecayShipped", RenderIntegration::g_fog_decay_pub));
         out.push_back(kvf("fogDecayEngine", RenderIntegration::g_light_probe.nb[40]));
@@ -10340,6 +10649,10 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("svSeamRotSnap", RenderIntegration::g_svs_seam_rot_snap));
         out.push_back(kv("svSeamRotExact", RenderIntegration::g_svs_seam_rot_exact));
         out.push_back(kv("svSeamRotRefused", RenderIntegration::g_svs_seam_rot_refused));
+        // 26533: basis takes the colour pass DECLINED because the seam
+        // flagged its published basis unfreshened. Reads ~svLiveTrnGuard on
+        // a fast-camera session and 0 in ordinary play.
+        out.push_back(kv("svSeamRotUnfresh", RenderIntegration::g_svs_seam_rot_unfresh));
         out.push_back(kvf("svCamRtMax", RenderIntegration::g_svs_cam_rt_max));
         // KH_JITTER_FLOOR (26421; full ledger in rendering_integration.hpp,
         // beside kh_rebase_vp_exact). READ jitRebaseMm FIRST - it is the
@@ -11637,6 +11950,52 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("sunHeroCasters", RenderIntegration::g_sun2_casters));
         out.push_back(kv("sunHeroRenders", RenderIntegration::g_sun2_renders));
         out.push_back(kvf("sunHeroHalfDiag", RenderIntegration::g_sun2_half_diag));
+        // 26537 KH_BAND_SUN_REACH - THE ARMING LANES. Each band's sun-ward
+        // reach in metres, floored at its own KH_SUN_*_DEPTH (12 / 48 / 192).
+        // EQUAL to the floor = no caster sat farther up-sun than the historic
+        // window and that band's fit is bit-identical to 26536. ABOVE it =
+        // the arm fired and the band captured a caster the 26454 isotropic
+        // sphere would have culled. -1 = the band never fitted at all, in
+        // which case NOTHING about this axis was tested whatever the screen
+        // shows. sunBandReachTakes counts fits where any band went past its
+        // floor; 0 with a far shadow on screen means read the halfDiag and
+        // valid lanes before touching anything else.
+        out.push_back(kvf("sunHeroReach", RenderIntegration::g_sun_band_reach[0]));
+        out.push_back(kvf("sunMidReach", RenderIntegration::g_sun_band_reach[1]));
+        out.push_back(kvf("sunOutReach", RenderIntegration::g_sun_band_reach[2]));
+        out.push_back(kv("sunBandReachTakes", RenderIntegration::g_sun_band_reach_takes));
+        // 26537 KH_UNION_TEXEL_SNAP - the sawtooth's own quantum, measured.
+        // sunUnionTexelM is the union window's texel in world metres (~0.0996
+        // at shadowVisibility 200) and is the MAXIMUM edge displacement a
+        // phase re-roll could produce - i.e. the size of one sawtooth step.
+        // sunUnionSnapM is the displacement the snap actually applied on the
+        // last union re-fit and is bounded by one texel by construction;
+        // both -1 with sunUnionSnaps 0 means the snap never ran (mode 327,
+        // or no union re-fit this session) and the sawtooth was not tested.
+        out.push_back(kvf("sunUnionSnapM", RenderIntegration::g_sun_union_snap_m));
+        out.push_back(kvf("sunUnionTexelM", RenderIntegration::g_sun_union_texel_m));
+        out.push_back(kv("sunUnionSnaps", RenderIntegration::g_sun_union_snaps));
+        // 26538 KH_LIT_AUTHORITATIVE arming lane: the lighting0.y code the
+        // FIRE's cast fill shipped to SunShadowOcclusion. 0 = the default,
+        // lit verdicts authoritative, the 26506 fallthrough retired. 42 =
+        // the fallthrough re-armed (mode 328, or mode 326 carrying it as a
+        // dependant of the KH_BAND_SUN_REACH revert). 21/26/22/40 = the
+        // older cast-chain arms. -1 = the cast fill never ran this session,
+        // in which case NOTHING on this axis was tested.
+        out.push_back(kvf("castChainCode", RenderIntegration::g_cast_chain_code));
+        // 26539 KH_UNION_R_LATCH - THE ARMING LANES, and the ratio is the
+        // whole verdict. sunUnionRHolds must DOMINATE sunUnionRelatches while
+        // the camera moves and the caster stands still: a hold is a frame
+        // whose union texel is bitwise identical to the last one, which is a
+        // frame whose grid cannot have re-rolled. Relatches ~= union re-fits
+        // means the latch is thrashing and NOTHING was stabilised whatever
+        // the screen shows - read sunUnionRadHeld against sunMapHalfDiag then,
+        // because a held radius that keeps falling outside [need, need*1.25]
+        // is a scene the 10%/25% band is mis-sized for, not a broken latch.
+        // sunUnionRadHeld -1 = the latch never took.
+        out.push_back(kvf("sunUnionRadHeld", RenderIntegration::g_sun_union_rad_held));
+        out.push_back(kv("sunUnionRHolds", RenderIntegration::g_sun_union_rad_holds));
+        out.push_back(kv("sunUnionRelatches", RenderIntegration::g_sun_union_rad_relatches));
         // 26454 cascade bands (KH_SUN_CASCADE): halfDiag lanes are the
         // acceptance instrument - pinned at 8 / 32 by construction, any
         // other value is a defect. FLOATS THROUGH kvf (the 26406 trap).
@@ -12070,6 +12429,88 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("liveNearRefAdopts", RenderIntegration::g_live_ref_adopts));
         out.push_back(kv("worldPairEncodes", RenderIntegration::g_world_pair_encodes));
         out.push_back(kvf("farKeepFar", RenderIntegration::g_far_keep_far));
+        // 26513: a mesh reaching the accepted far plane that did NOT route to
+        // the far-keep pair keeps the near-scene pair, and the per-fragment far
+        // discard slices it on a plane of constant view depth. Either counter
+        // nonzero convicts that; which one names the cause (far_vis off on the
+        // object vs the far-keep pair not fresh). farClipAccFar is where the
+        // cut sits in metres - compare it against encFarMeasured and against
+        // the range at which the operator sees the edge.
+        // 26514: far-keep routings admitted because the mesh lies wholly inside
+        // the engine's far pass while far_vis is OFF. This should track
+        // farClipNoFarVis closely with fog on and read 0 with fog off.
+        // 26525: the six numbers the beyond-far re-encode needs. partVpLo/Hi are
+        // the viewport sub-range the routed draw remaps through - if they match
+        // an unrouted draw's range the two encodings share one space and the
+        // keep pair can be made to CONTINUE the frame pair; if they are disjoint
+        // the partition is the whole mechanism and the fix is the remap, not the
+        // pair. partKeep/partFrame are the two pairs actually shipped.
+        // ==================================================================
+        // 26526 PARTITION CENSUS, COMPLETE SET. Everything needed to design the
+        // beyond-far re-encode without another round trip, including the
+        // derived numbers so the discontinuity is read rather than computed:
+        //  partBoundaryM      - world distance where the frame pair reaches ndc 1
+        //  partKeepNdcAtBnd   - the keep-pair ndc our beyond-far fragments jump TO
+        //  partKeepApparentM  - that ndc decoded back through the FRAME pair, i.e.
+        //                       how far away a fragment just past the boundary
+        //                       LOOKS to everything else sharing the buffer. The
+        //                       gap between this and partBoundaryM IS the defect,
+        //                       in metres.
+        //  partRejLoMax / partSkySpans - the floor of the engine's far/sky
+        //                       viewport sub-range and how often it is used. A
+        //                       high floor (~0.995) with spans counting means the
+        //                       engine partitions by sub-range and our beyond-far
+        //                       half belongs in it - which PRESERVES 26046 (the
+        //                       keep pair keeps its ordering) instead of
+        //                       reversing it.
+        // ==================================================================
+        {
+            const float khpc_km22 = RenderIntegration::g_part_keep_m22;
+            const float khpc_km32 = RenderIntegration::g_part_keep_m32;
+            const float khpc_fm22 = RenderIntegration::g_part_frame_m22;
+            const float khpc_fm32 = RenderIntegration::g_part_frame_m32;
+            const float khpc_bnd = (khpc_fm22 > 1.0e-6f)
+                ? khpc_fm32 / (1.0f - khpc_fm22) : -1.0f;
+            const float khpc_ndc = (khpc_bnd > 0.0f)
+                ? khpc_km22 + khpc_km32 / khpc_bnd : -1.0f;
+            const float khpc_den = khpc_fm22 - khpc_ndc;
+            const float khpc_app = (khpc_ndc > 0.0f && khpc_den > 1.0e-9f)
+                ? khpc_fm32 / khpc_den : -1.0f;
+            out.push_back(kvf("partBoundaryM", khpc_bnd));          // 26526
+            out.push_back(kvf("partKeepNdcAtBnd", khpc_ndc));       // 26526
+            out.push_back(kvf("partKeepApparentM", khpc_app));      // 26526
+            out.push_back(kvf("partKeepFar",
+                RenderIntegration::kh_enc_far(khpc_km22, khpc_km32)));   // 26526
+            out.push_back(kvf("partFrameFar",
+                RenderIntegration::kh_enc_far(khpc_fm22, khpc_fm32)));   // 26526
+            out.push_back(kvf("partKeepNear",
+                RenderIntegration::kh_enc_pair_near(khpc_km22, khpc_km32)));  // 26526
+            out.push_back(kvf("partFrameNear",
+                RenderIntegration::kh_enc_pair_near(khpc_fm22, khpc_fm32)));  // 26526
+        }
+        out.push_back(kvf("partSceneVpLo", RenderIntegration::g_scene_vp_min_d));  // 26526
+        out.push_back(kvf("partSceneVpHi", RenderIntegration::g_scene_vp_max_d));  // 26526
+        out.push_back(kvf("partTrigAccLo", RenderIntegration::g_trig_acc_vp[0]));  // 26526
+        out.push_back(kvf("partTrigAccHi", RenderIntegration::g_trig_acc_vp[1]));  // 26526
+        out.push_back(kvf("partTrigRejLo", RenderIntegration::g_trig_rej_vp[0]));  // 26526
+        out.push_back(kvf("partTrigRejHi", RenderIntegration::g_trig_rej_vp[1]));  // 26526
+        out.push_back(kvf("partRejLoMin", RenderIntegration::g_part_rej_lo_min));  // 26526
+        out.push_back(kvf("partRejLoMax", RenderIntegration::g_part_rej_lo_max));  // 26526
+        out.push_back(kvf("partRejHiMax", RenderIntegration::g_part_rej_hi_max));  // 26526
+        out.push_back(kv("partSkySpans", RenderIntegration::g_part_sky_spans));    // 26526
+        out.push_back(kvf("partMeshNearM", RenderIntegration::g_part_mesh_near_m));// 26526
+        out.push_back(kvf("partMeshFarM", RenderIntegration::g_part_mesh_far_m));  // 26526
+        out.push_back(kvf("partFkAgeMs", RenderIntegration::g_part_fk_age_ms));    // 26526
+        out.push_back(kvf("partVpLo", RenderIntegration::g_part_vp_lo));         // 26525
+        out.push_back(kvf("partVpHi", RenderIntegration::g_part_vp_hi));         // 26525
+        out.push_back(kvf("partKeepM22", RenderIntegration::g_part_keep_m22));   // 26525
+        out.push_back(kvf("partKeepM32", RenderIntegration::g_part_keep_m32));   // 26525
+        out.push_back(kvf("partFrameM22", RenderIntegration::g_part_frame_m22)); // 26525
+        out.push_back(kvf("partFrameM32", RenderIntegration::g_part_frame_m32)); // 26525
+        out.push_back(kv("farKeepInsideRoutes", RenderIntegration::g_far_keep_inside_routes));   // 26514
+        out.push_back(kv("farClipNoFarVis", RenderIntegration::g_far_clip_no_farvis));   // 26513
+        out.push_back(kv("farClipStale", RenderIntegration::g_far_clip_stale));         // 26513
+        out.push_back(kvf("farClipAccFar", RenderIntegration::g_far_clip_acc_far));     // 26513
         out.push_back(kvf("liveNearRef", RenderIntegration::g_live_near_ref));
         out.push_back(kvf("fogEngX", RenderIntegration::g_fog_eng_dbg[0]));
         out.push_back(kvf("fogEngEnd", RenderIntegration::g_fog_eng_dbg[1]));
@@ -12077,6 +12518,14 @@ static game_value get_render_stats_sqf() {
         out.push_back(kvf("fogEngOn", RenderIntegration::g_fog_eng_dbg[3]));
         out.push_back(kvf("latchHoldLastDist", RenderIntegration::g_latch_hold_dist));
         out.push_back(kv("latchJumpAdopts", RenderIntegration::g_latch_jump_adopts));
+        // 26533 KH_LATCH_TRAJECTORY: escapes won by PROGRESSION rather than
+        // by the 1000 ms lost-adopt. latchTrajAdopts is the arming lane -
+        // if it reads 0 while latchHolds counts, the new path never fired
+        // and any verdict on the glue is unread (the arm-never-armed rule).
+        // latchHeldCycle is the gate's live verdict at dump time.
+        out.push_back(kv("latchTrajAdopts", RenderIntegration::g_latch_traj_adopts));
+        out.push_back(kv("latchHeldNow", RenderIntegration::g_latch_held_cycle ? 1ull : 0ull));
+        out.push_back(kv("flushBoundaryAdopts", RenderIntegration::g_flush_boundary_adopts));
         out.push_back(kv("dlMode", static_cast<uint64_t>(RenderIntegration::g_dl_mode.load(std::memory_order_relaxed))));
         out.push_back(kv("dlAcquires", RenderIntegration::g_dl.acquires));
         out.push_back(kv("dlCopies", RenderIntegration::g_dl.copies));
